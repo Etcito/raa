@@ -1,0 +1,13 @@
+target/
+node_modules/
+dist/
+pkg/
+*.log
+# assets never go to git: they live in the asset store (see README)
+*.glb
+*.gltf
+*.png
+*.jpg
+*.avif
+*.ktx2
+*.bin
