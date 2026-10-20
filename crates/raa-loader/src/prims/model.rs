@@ -9,6 +9,9 @@ pub struct PrimsAsset {
     pub id: String,
     pub name: String,
     pub triangle_budget: Option<u32>,
+    /// Tessellation a published document declares (`budget.segments`, 16 when absent). None
+    /// for an S3 document, which is built at the caller's quality.
+    pub segments: Option<u32>,
     pub nodes: Vec<PrimNode>,
     pub materials: Vec<(String, PrimMaterial)>,
     pub anchors: Vec<(String, TransformDoc)>,
@@ -103,6 +106,7 @@ pub(crate) const KIND_TABLE: [(&str, ParamList); 8] = [
         &[
             ("radius", ParamType::Scalar),
             ("halfHeight", ParamType::Scalar),
+            ("radiusTop", ParamType::Scalar),
         ],
     ),
     (
@@ -154,6 +158,60 @@ pub(crate) const COLLIDER_TABLE: [(&str, ParamList); 6] = [
 #[allow(dead_code)] // used by parse
 pub(crate) fn kind_params(kind: &str) -> Option<ParamList> {
     KIND_TABLE.iter().find(|(k, _)| *k == kind).map(|(_, p)| *p)
+}
+
+/// The published raa.prims v0 params of the kinds whose names differ from S3 (their
+/// semantics are mapped to S3 by `parse`): box, roundBox, capsule, cylinder and cone. The
+/// other kinds have the same names in both. Each entry is in published key order.
+pub(crate) const PUBLISHED_KIND_TABLE: [(&str, ParamList); 5] = [
+    ("box", &[("size", ParamType::Vec3)]),
+    (
+        "roundBox",
+        &[("size", ParamType::Vec3), ("radius", ParamType::Scalar)],
+    ),
+    (
+        "capsule",
+        &[("height", ParamType::Scalar), ("radius", ParamType::Scalar)],
+    ),
+    (
+        "cylinder",
+        &[("height", ParamType::Scalar), ("radius", ParamType::Scalar)],
+    ),
+    (
+        "cone",
+        &[
+            ("height", ParamType::Scalar),
+            ("radiusBottom", ParamType::Scalar),
+            ("radiusTop", ParamType::Scalar),
+        ],
+    ),
+];
+
+/// Published params of a kind whose names differ from S3, `None` otherwise.
+pub(crate) fn published_kind_params(kind: &str) -> Option<ParamList> {
+    PUBLISHED_KIND_TABLE
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, p)| *p)
+}
+
+/// The optional S3 params of `kind`: absent means 0 (cone `radiusTop`, the pointed top).
+pub(crate) fn optional_params(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "cone" => &["radiusTop"],
+        _ => &[],
+    }
+}
+
+/// The S3 collider shape of a published or S3 shape name. Published names are Rapier's
+/// without the Y axis suffix (`capsule`, `cylinder`, `cone`, the axis is Y).
+pub(crate) fn internal_shape(shape: &str) -> &str {
+    match shape {
+        "capsule" => "capsuleY",
+        "cylinder" => "cylinderY",
+        "cone" => "coneY",
+        other => other,
+    }
 }
 
 /// Params of a collider shape, `None` for an unknown shape.

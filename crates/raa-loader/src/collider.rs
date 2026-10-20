@@ -131,6 +131,8 @@ fn analytic_shape(
                 radius,
             })
         }),
+        // A frustum (radiusTop > 0) has no analytic cone here: its convex hull is used.
+        "cone" if scalar_of(params, "radiusTop").is_some_and(|top| top > 0.0) => return None,
         "cone" => s("radius").and_then(|radius| {
             s("halfHeight").map(|half_height| ColliderShape::ConeY {
                 half_height,

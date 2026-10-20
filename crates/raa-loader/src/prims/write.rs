@@ -1,7 +1,7 @@
 //! S4 canonical text of a prims document.
 
 use super::model::{ColliderDoc, NodeOp, PrimMaterial, PrimNode, PrimsAsset, TransformDoc};
-use super::{FORMAT, VERSION};
+use super::{DEFAULT_TRIANGLE_BUDGET, FORMAT, VERSION};
 use crate::json::{JsonValue, write_pretty};
 
 /// Canonical text (S4): `JSON.stringify(value, null, 2)` in canonical key order plus one LF.
@@ -12,8 +12,19 @@ pub fn to_canonical_json(a: &PrimsAsset) -> String {
         key("id", JsonValue::String(a.id.clone())),
         key("name", JsonValue::String(a.name.clone())),
     ];
-    if let Some(b) = a.triangle_budget {
-        top.push(key("triangleBudget", JsonValue::Number(f64::from(b))));
+    match (a.segments, a.triangle_budget) {
+        (Some(segments), triangles) => top.push(key(
+            "budget",
+            JsonValue::Object(vec![
+                key(
+                    "triangles",
+                    JsonValue::Number(f64::from(triangles.unwrap_or(DEFAULT_TRIANGLE_BUDGET))),
+                ),
+                key("segments", JsonValue::Number(f64::from(segments))),
+            ]),
+        )),
+        (None, Some(b)) => top.push(key("triangleBudget", JsonValue::Number(f64::from(b)))),
+        (None, None) => {}
     }
     top.push(key(
         "nodes",
@@ -158,6 +169,7 @@ mod tests {
             id: "a".to_string(),
             name: "A".to_string(),
             triangle_budget: None,
+            segments: None,
             nodes: vec![leaf(
                 "n",
                 "sphere",
@@ -196,6 +208,7 @@ mod tests {
             id: "thing".to_string(),
             name: "Thing \"1\"".to_string(),
             triangle_budget: Some(800),
+            segments: None,
             nodes: vec![root],
             materials: vec![(
                 "red".to_string(),

@@ -6,9 +6,9 @@
 
 use super::model::{
     ColliderDoc, NodeOp, ParamType, PrimMaterial, PrimNode, PrimsAsset, TransformDoc,
-    collider_params, kind_params,
+    collider_params, internal_shape, kind_params, optional_params, published_kind_params,
 };
-use super::{FORMAT, MAX_LEVEL, MAX_NODES, VERSION};
+use super::{DEFAULT_SEGMENTS, FORMAT, MAX_LEVEL, MAX_NODES, VERSION};
 use crate::DEFAULT_MATERIAL;
 use crate::error::LoadError;
 use crate::json::{self, JsonValue};
@@ -190,22 +190,55 @@ fn raw_params(v: &JsonValue, path: &str) -> Result<Vec<(String, JsonValue)>, Loa
     Ok(out)
 }
 
+/// The published `budget` object: `triangles` (1..=100000) and `segments` (4..=128, a
+/// multiple of 4). `triangles` is the triangle budget; `segments` is the tessellation of
+/// the document (16 when absent, as in raa-assets-tools).
+fn budget(v: &JsonValue, path: &str, a: &mut PrimsAsset) -> Result<(), LoadError> {
+    let o = object(v, path)?;
+    let mut segments = None;
+    fields(o, path, &["triangles", "segments"], &[], |k, v, p| {
+        let x = number(v, p)?;
+        let integral = x.fract() == 0.0;
+        if k == "triangles" {
+            if !integral || !(1.0..=100_000.0).contains(&x) {
+                return Err(range(
+                    p,
+                    format!("budget triangles {x} is not an integer in 1..100000"),
+                ));
+            }
+            a.triangle_budget = Some(x as u32);
+        } else if !integral || !(4.0..=128.0).contains(&x) || x % 4.0 != 0.0 {
+            return Err(range(
+                p,
+                format!("budget segments {x} is not a multiple of 4 in 4..128"),
+            ));
+        } else {
+            segments = Some(x as u32);
+        }
+        Ok(())
+    })?;
+    a.segments = Some(segments.unwrap_or(DEFAULT_SEGMENTS));
+    Ok(())
+}
+
 fn document(root: &JsonValue, w: &mut Walk) -> Result<PrimsAsset, LoadError> {
     let o = object(root, "")?;
     let mut a = PrimsAsset {
         id: String::new(),
         name: String::new(),
         triangle_budget: None,
+        segments: None,
         nodes: Vec::new(),
         materials: Vec::new(),
         anchors: Vec::new(),
         collision: None,
     };
-    const ALLOWED: [&str; 9] = [
+    const ALLOWED: [&str; 10] = [
         "format",
         "version",
         "id",
         "name",
+        "budget",
         "triangleBudget",
         "nodes",
         "materials",
@@ -245,7 +278,24 @@ fn document(root: &JsonValue, w: &mut Walk) -> Result<PrimsAsset, LoadError> {
             }
             "id" => a.id = string(v, p)?,
             "name" => a.name = string(v, p)?,
+            "budget" => {
+                if o.iter().any(|(k, _)| k == "triangleBudget") {
+                    return Err(LoadError::new(
+                        "schema.unknown_field",
+                        p,
+                        "give either `budget` or `triangleBudget`, not both",
+                    ));
+                }
+                budget(v, p, &mut a)?;
+            }
             "triangleBudget" => {
+                if o.iter().any(|(k, _)| k == "budget") {
+                    return Err(LoadError::new(
+                        "schema.unknown_field",
+                        p,
+                        "give either `budget` or `triangleBudget`, not both",
+                    ));
+                }
                 let x = number(v, p)?;
                 if x < 1.0 || x.fract() != 0.0 || x > f64::from(u32::MAX) {
                     return Err(range(
@@ -276,10 +326,18 @@ fn document(root: &JsonValue, w: &mut Walk) -> Result<PrimsAsset, LoadError> {
             }
             "anchors" => {
                 for (name, t) in object(v, p)? {
-                    a.anchors.push((name.clone(), transform(t, &ptr(p, name))?));
+                    a.anchors.push((name.clone(), anchor(t, &ptr(p, name))?));
                 }
             }
-            _ => a.collision = Some(collision(v, p)?),
+            _ => {
+                // A published `collision` has a `mode`: the document is published v0.
+                if let JsonValue::Object(m) = v
+                    && m.iter().any(|(k, _)| k == "mode")
+                {
+                    a.segments.get_or_insert(DEFAULT_SEGMENTS);
+                }
+                a.collision = Some(collision(v, p)?);
+            }
         }
         Ok(())
     })?;
@@ -349,6 +407,66 @@ fn node(v: &JsonValue, path: &str, level: usize, w: &mut Walk) -> Result<PrimNod
     Ok(n)
 }
 
+/// The S3 params of a node. A published raa.prims v0 node of box, roundBox, capsule,
+/// cylinder or cone (recognised by `size`, `height` or `radiusBottom`) is converted to S3:
+/// box and roundBox `size` is the full size (halfExtents = size / 2); a capsule `height` is
+/// the total height with the caps (halfHeight = height / 2 - radius, the body half-length);
+/// a cylinder `height` is the full height (halfHeight = height / 2); a cone is the frustum
+/// with `radiusBottom` at y = -height / 2 and `radiusTop` at y = +height / 2 (S3 `radius`
+/// is the base, `radiusTop` is omitted when 0). Other documents are returned unchanged.
+fn to_s3_params(
+    kind: &str,
+    params: &[(String, JsonValue)],
+    pp: &str,
+) -> Result<Vec<(String, JsonValue)>, LoadError> {
+    let published = params
+        .iter()
+        .any(|(k, _)| matches!(k.as_str(), "size" | "height" | "radiusBottom"));
+    let Some(list) = published_kind_params(kind).filter(|_| published) else {
+        return Ok(params.to_vec());
+    };
+    let vals = typed_params(params, list, &[], pp, "kind.params", kind)?;
+    let num = JsonValue::Number;
+    let vec3_json = |a: [f64; 3]| JsonValue::Array(a.iter().map(|&x| num(x)).collect());
+    let half = |a: [f64; 3]| [a[0] / 2.0, a[1] / 2.0, a[2] / 2.0];
+    let out: Vec<(&str, JsonValue)> = match kind {
+        "box" => vec![("halfExtents", vec3_json(half(vec3(&vals, "size"))))],
+        "roundBox" => vec![
+            ("halfExtents", vec3_json(half(vec3(&vals, "size")))),
+            ("radius", num(scalar(&vals, "radius"))),
+        ],
+        "capsule" => {
+            let (h, r) = (scalar(&vals, "height"), scalar(&vals, "radius"));
+            if h < 2.0 * r {
+                return Err(range(
+                    &ptr(pp, "height"),
+                    format!(
+                        "capsule height must be at least twice its radius, found height {h} and radius {r}"
+                    ),
+                ));
+            }
+            vec![("radius", num(r)), ("halfHeight", num(h / 2.0 - r))]
+        }
+        "cylinder" => vec![
+            ("radius", num(scalar(&vals, "radius"))),
+            ("halfHeight", num(scalar(&vals, "height") / 2.0)),
+        ],
+        "cone" => {
+            let rt = scalar(&vals, "radiusTop");
+            let mut out = vec![
+                ("radius", num(scalar(&vals, "radiusBottom"))),
+                ("halfHeight", num(scalar(&vals, "height") / 2.0)),
+            ];
+            if rt > 0.0 {
+                out.push(("radiusTop", num(rt)));
+            }
+            out
+        }
+        _ => return Ok(params.to_vec()),
+    };
+    Ok(out.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
 /// Id, op, kind and params checks of one node (its keys are already scanned).
 fn node_semantics(
     n: &mut PrimNode,
@@ -385,12 +503,14 @@ fn node_semantics(
     let pp = ptr(path, "params");
     match kind_params(&n.kind) {
         Some(list) => {
-            let vals = typed_params(&n.params, list, &pp, "kind.params", &n.kind)?;
+            let raw = to_s3_params(&n.kind, &n.params, &pp)?;
+            let optional = optional_params(&n.kind);
+            let vals = typed_params(&raw, list, optional, &pp, "kind.params", &n.kind)?;
             kind_rules(&n.kind, &vals, &pp)?;
-            // Re-ordered to S3 order (every key is present, checked above).
+            // Re-ordered to S3 order (every required key is present, checked above).
             n.params = list
                 .iter()
-                .filter_map(|(k, _)| n.params.iter().find(|(d, _)| d == k).cloned())
+                .filter_map(|(k, _)| raw.iter().find(|(d, _)| d == k).cloned())
                 .collect();
         }
         None if w.strict => {
@@ -427,6 +547,21 @@ fn transform(v: &JsonValue, path: &str) -> Result<TransformDoc, LoadError> {
                     return Err(range(&at(p, i), "scale components must be > 0"));
                 }
             }
+        }
+        Ok(())
+    })?;
+    Ok(t)
+}
+
+/// An anchor: `t` and `r` (published v0); an S3 `s` is accepted too.
+fn anchor(v: &JsonValue, path: &str) -> Result<TransformDoc, LoadError> {
+    let o = object(v, path)?;
+    let mut t = TransformDoc::identity();
+    fields(o, path, &["t", "r", "s"], &["t", "r"], |k, v, p| {
+        match k {
+            "t" => t.t = numbers(v, p)?,
+            "r" => t.r = numbers(v, p)?,
+            _ => t.s = numbers(v, p)?,
         }
         Ok(())
     })?;
@@ -474,15 +609,33 @@ fn material(v: &JsonValue, path: &str) -> Result<PrimMaterial, LoadError> {
 fn collision(v: &JsonValue, path: &str) -> Result<Vec<ColliderDoc>, LoadError> {
     let o = object(v, path)?;
     let mut out = Vec::new();
-    fields(o, path, &["colliders"], &["colliders"], |_, v, p| {
-        for (i, c) in array(v, p)?.iter().enumerate() {
-            out.push(collider(c, &at(p, i))?);
-        }
-        Ok(())
-    })?;
+    fields(
+        o,
+        path,
+        &["mode", "colliders"],
+        &["colliders"],
+        |k, v, p| {
+            if k == "mode" {
+                let m = string(v, p)?;
+                if m != "derived" && m != "override" {
+                    return Err(range(
+                        p,
+                        format!("collision mode `{m}` is not derived or override"),
+                    ));
+                }
+                return Ok(());
+            }
+            for (i, c) in array(v, p)?.iter().enumerate() {
+                out.push(collider(c, &at(p, i))?);
+            }
+            Ok(())
+        },
+    )?;
     Ok(out)
 }
 
+/// A collider: `node` (a node id, or null in override mode), `shape`, `params`, then either
+/// the published `t` and `r` (asset frame, no scale) or an S3 `transform` object.
 fn collider(v: &JsonValue, path: &str) -> Result<ColliderDoc, LoadError> {
     let o = object(v, path)?;
     let mut c = ColliderDoc {
@@ -491,16 +644,39 @@ fn collider(v: &JsonValue, path: &str) -> Result<ColliderDoc, LoadError> {
         params: Vec::new(),
         transform: TransformDoc::identity(),
     };
-    const ALLOWED: [&str; 4] = ["node", "shape", "params", "transform"];
-    fields(o, path, &ALLOWED, &ALLOWED[1..], |k, v, p| {
+    let (mut t, mut r, mut whole) = (None, None, None);
+    const ALLOWED: [&str; 6] = ["node", "shape", "params", "transform", "t", "r"];
+    fields(o, path, &ALLOWED, &["shape", "params"], |k, v, p| {
         match k {
-            "node" => c.node = Some(string(v, p)?),
+            "node" => {
+                c.node = match v {
+                    JsonValue::Null => None,
+                    _ => Some(string(v, p)?),
+                }
+            }
             "shape" => c.shape = string(v, p)?,
             "params" => c.params = raw_params(v, p)?,
-            _ => c.transform = transform(v, p)?,
+            "transform" => whole = Some(transform(v, p)?),
+            "t" => t = Some(numbers::<3>(v, p)?),
+            _ => r = Some(numbers::<4>(v, p)?),
         }
         Ok(())
     })?;
+    c.transform = match (whole, t, r) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+            return Err(LoadError::new(
+                "schema.unknown_field",
+                path,
+                "give either `transform` or `t` and `r`, not both",
+            ));
+        }
+        (Some(tr), _, _) => tr,
+        (None, t, r) => TransformDoc {
+            t: t.unwrap_or([0.0; 3]),
+            r: r.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+            s: [1.0; 3],
+        },
+    };
     Ok(c)
 }
 
@@ -512,10 +688,12 @@ enum Param {
 }
 
 /// Checks a params object against a table entry: no extra key (document order), no
-/// missing key, each value of the table's type. Returns the values in table order.
+/// missing key (except the `optional` ones), each value of the table's type. Returns the
+/// values in table order.
 fn typed_params<'a>(
     params: &[(String, JsonValue)],
     list: &[(&'a str, ParamType)],
+    optional: &[&str],
     pp: &str,
     code: &'static str,
     what: &str,
@@ -534,6 +712,9 @@ fn typed_params<'a>(
     for &(name, ty) in list {
         let p = ptr(pp, name);
         let Some((_, v)) = params.iter().find(|(k, _)| k == name) else {
+            if optional.contains(&name) {
+                continue;
+            }
             return Err(LoadError::new(
                 code,
                 p,
@@ -618,8 +799,9 @@ fn kind_rules(kind: &str, vals: &[(&str, Param)], pp: &str) -> Result<(), LoadEr
         "roundBox" => {
             let he = vec3(vals, "halfExtents");
             positive3(he, &p("halfExtents"), &what("halfExtents"))?;
+            // 0 is a plain box (published roundBox: radius in [0, min(size)/2]).
             let r = scalar(vals, "radius");
-            positive(r, &p("radius"), &what("radius"), false)?;
+            positive(r, &p("radius"), &what("radius"), true)?;
             let min = he[0].min(he[1]).min(he[2]);
             if r <= min {
                 Ok(())
@@ -629,6 +811,28 @@ fn kind_rules(kind: &str, vals: &[(&str, Param)], pp: &str) -> Result<(), LoadEr
                     format!("roundBox radius must be <= min(halfExtents) = {min}, found {r}"),
                 ))
             }
+        }
+        "cone" => {
+            // A frustum: each radius >= 0 and not both 0 (radiusTop is optional, 0 when absent).
+            let radius = scalar(vals, "radius");
+            let top = vals
+                .iter()
+                .find(|(n, _)| *n == "radiusTop")
+                .map_or(0.0, |(_, v)| match v {
+                    Param::Scalar(x) => *x,
+                    Param::Vec3(_) => f64::NAN,
+                });
+            positive(radius, &p("radius"), &what("radius"), true)?;
+            positive(top, &p("radiusTop"), &what("radiusTop"), true)?;
+            if radius.max(top) <= 0.0 {
+                return Err(range(&p("radius"), "a cone needs one radius > 0"));
+            }
+            positive(
+                scalar(vals, "halfHeight"),
+                &p("halfHeight"),
+                &what("halfHeight"),
+                false,
+            )
         }
         "torus" => {
             let major = scalar(vals, "majorRadius");
@@ -671,6 +875,7 @@ fn references(a: &mut PrimsAsset, w: &Walk) -> Result<(), LoadError> {
     }
     for (i, c) in a.collision.iter_mut().flatten().enumerate() {
         let cp = at("/collision/colliders", i);
+        c.shape = internal_shape(&c.shape).to_string();
         let Some(list) = collider_params(&c.shape) else {
             return Err(LoadError::new(
                 "collision.shape",
@@ -679,14 +884,26 @@ fn references(a: &mut PrimsAsset, w: &Walk) -> Result<(), LoadError> {
             ));
         };
         let pp = ptr(&cp, "params");
-        let vals = typed_params(&c.params, list, &pp, "collision.shape", &c.shape)?;
-        // A collider's own param values that are not > 0 are collision.shape (like the
-        // key and type problems above), not value.range.
+        let vals = typed_params(&c.params, list, &[], &pp, "collision.shape", &c.shape)?;
+        // A collider's own param values that are negative are collision.shape (like the
+        // key and type problems above), not value.range. Zero is allowed: the published
+        // derivation clamps halfHeight and halfExtents - borderRadius at 0.
         for (name, v) in &vals {
             let what = format!("{} {name}", c.shape);
+            let bad = |x: f64| x.is_nan() || x < 0.0;
             match v {
-                Param::Scalar(x) => positive(*x, &ptr(&pp, name), &what, false),
-                Param::Vec3(xs) => positive3(*xs, &ptr(&pp, name), &what),
+                Param::Scalar(x) if bad(*x) => Err(range(
+                    &ptr(&pp, name),
+                    format!("{what} must be >= 0, found {x}"),
+                )),
+                Param::Vec3(xs) if xs.iter().any(|&x| bad(x)) => {
+                    let i = xs.iter().position(|&x| bad(x)).unwrap_or(0);
+                    Err(range(
+                        &at(&ptr(&pp, name), i),
+                        format!("{what} must be >= 0"),
+                    ))
+                }
+                _ => Ok(()),
             }
             .map_err(|e| LoadError::new("collision.shape", e.path.as_str(), e.message))?;
         }
@@ -1116,11 +1333,6 @@ mod tests {
                 "/nodes/0/params/radius",
             ),
             (
-                "roundBox",
-                r#"{"halfExtents":[1,1,1],"radius":0}"#,
-                "/nodes/0/params/radius",
-            ),
-            (
                 "capsule",
                 r#"{"radius":1,"halfHeight":-0.1}"#,
                 "/nodes/0/params/halfHeight",
@@ -1264,17 +1476,230 @@ mod tests {
         );
         refused(
             &with_collider(&format!(
-                r#"{{"shape":"cuboid","params":{{"halfExtents":[1,0,1]}},{ID}}}"#
+                r#"{{"shape":"cuboid","params":{{"halfExtents":[1,-1,1]}},{ID}}}"#
             )),
             "collision.shape",
             &format!("{p}/halfExtents/1"),
         );
         refused(
             &with_collider(&format!(
-                r#"{{"shape":"capsuleY","params":{{"halfHeight":0,"radius":1}},{ID}}}"#
+                r#"{{"shape":"capsuleY","params":{{"halfHeight":-1,"radius":1}},{ID}}}"#
             )),
             "collision.shape",
             &format!("{p}/halfHeight"),
         );
+    }
+
+    /// Parsed node `n` of a one-node document: the S3 value of param `name`.
+    fn s3_num(a: &PrimsAsset, name: &str) -> f64 {
+        match a.nodes[0].params.iter().find(|(k, _)| k == name) {
+            Some((_, JsonValue::Number(x))) => *x,
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+
+    fn s3_vec(a: &PrimsAsset, name: &str) -> Vec<f64> {
+        match a.nodes[0].params.iter().find(|(k, _)| k == name) {
+            Some((_, JsonValue::Array(v))) => v
+                .iter()
+                .map(|x| match x {
+                    JsonValue::Number(x) => *x,
+                    other => panic!("{other:?}"),
+                })
+                .collect(),
+            other => panic!("{name}: {other:?}"),
+        }
+    }
+
+    fn has_param(a: &PrimsAsset, name: &str) -> bool {
+        a.nodes[0].params.iter().any(|(k, _)| k == name)
+    }
+
+    #[test]
+    fn published_box_and_round_box_sizes_become_half_extents() {
+        let a = parse_with(&one("box", r#"{"size":[2,4,6]}"#), true).unwrap();
+        assert_eq!(a.nodes[0].kind, "box");
+        assert_eq!(s3_vec(&a, "halfExtents"), [1.0, 2.0, 3.0]);
+        let rb = parse_with(&one("roundBox", r#"{"size":[2,2,2],"radius":0.5}"#), true).unwrap();
+        assert_eq!(s3_vec(&rb, "halfExtents"), [1.0, 1.0, 1.0]);
+        assert_eq!(s3_num(&rb, "radius"), 0.5);
+        // Radius 0 is a plain box; radius above min(size)/2 is refused.
+        let plain = parse_with(&one("roundBox", r#"{"size":[2,2,2],"radius":0}"#), true).unwrap();
+        assert_eq!(s3_num(&plain, "radius"), 0.0);
+        refused(
+            &one("roundBox", r#"{"size":[2,2,2],"radius":1.5}"#),
+            "value.range",
+            "/nodes/0/params/radius",
+        );
+    }
+
+    #[test]
+    fn published_capsule_height_is_total_with_caps() {
+        // height 1.2, radius 0.4: body half-length 0.6 - 0.4 = 0.2.
+        let a = parse_with(&one("capsule", r#"{"height":1.2,"radius":0.4}"#), true).unwrap();
+        assert_eq!(s3_num(&a, "radius"), 0.4);
+        assert!((s3_num(&a, "halfHeight") - 0.2).abs() < 1e-12);
+        assert!(!has_param(&a, "height"));
+        // height = 2 * radius is a sphere: halfHeight 0, accepted.
+        let sphere = parse_with(&one("capsule", r#"{"height":0.8,"radius":0.4}"#), true).unwrap();
+        assert_eq!(s3_num(&sphere, "halfHeight"), 0.0);
+        refused(
+            &one("capsule", r#"{"height":0.7,"radius":0.4}"#),
+            "value.range",
+            "/nodes/0/params/height",
+        );
+    }
+
+    #[test]
+    fn published_cylinder_height_is_full_height() {
+        let a = parse_with(&one("cylinder", r#"{"height":0.9,"radius":0.3}"#), true).unwrap();
+        assert_eq!(
+            (s3_num(&a, "radius"), s3_num(&a, "halfHeight")),
+            (0.3, 0.45)
+        );
+    }
+
+    #[test]
+    fn published_cone_maps_base_and_top_radii() {
+        let flat_top = parse_with(
+            &one("cone", r#"{"height":1,"radiusBottom":0.4,"radiusTop":0}"#),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            (s3_num(&flat_top, "radius"), s3_num(&flat_top, "halfHeight")),
+            (0.4, 0.5)
+        );
+        assert!(
+            !has_param(&flat_top, "radiusTop"),
+            "a 0 top is the S3 pointed cone"
+        );
+        let flat_bottom = parse_with(
+            &one("cone", r#"{"height":0.8,"radiusBottom":0,"radiusTop":0.3}"#),
+            true,
+        )
+        .unwrap();
+        assert_eq!(s3_num(&flat_bottom, "radius"), 0.0);
+        assert_eq!(s3_num(&flat_bottom, "radiusTop"), 0.3);
+        let frustum = parse_with(
+            &one(
+                "cone",
+                r#"{"height":0.6,"radiusBottom":0.35,"radiusTop":0.2}"#,
+            ),
+            true,
+        )
+        .unwrap();
+        assert_eq!(s3_num(&frustum, "radiusTop"), 0.2);
+        refused(
+            &one("cone", r#"{"height":1,"radiusBottom":0,"radiusTop":0}"#),
+            "value.range",
+            "/nodes/0/params/radius",
+        );
+        // radiusTop is required by the published form.
+        refused(
+            &one("cone", r#"{"height":1,"radiusBottom":0.4}"#),
+            "kind.params",
+            "/nodes/0/params/radiusTop",
+        );
+    }
+
+    #[test]
+    fn s3_cone_accepts_an_optional_top_radius() {
+        let a = parse_with(&one("cone", r#"{"radius":0.3,"halfHeight":0.5}"#), true).unwrap();
+        assert!(!has_param(&a, "radiusTop"));
+        let b = parse_with(
+            &one("cone", r#"{"radius":0.3,"halfHeight":0.5,"radiusTop":0.1}"#),
+            true,
+        )
+        .unwrap();
+        assert_eq!(s3_num(&b, "radiusTop"), 0.1);
+        refused(
+            &one("cone", r#"{"radius":0,"halfHeight":0.5}"#),
+            "value.range",
+            "/nodes/0/params/radius",
+        );
+    }
+
+    #[test]
+    fn published_names_do_not_mix_with_s3_names_and_unknown_params_are_refused() {
+        refused(
+            &one("capsule", r#"{"height":1,"radius":0.4,"halfHeight":0.1}"#),
+            "kind.params",
+            "/nodes/0/params/halfHeight",
+        );
+        refused(
+            &one("box", r#"{"size":[1,1,1],"depth":2}"#),
+            "kind.params",
+            "/nodes/0/params/depth",
+        );
+        refused(
+            &one("cylinder", r#"{"height":1,"radius":0.4,"halfHeight":0.5}"#),
+            "kind.params",
+            "/nodes/0/params/halfHeight",
+        );
+        refused(
+            &one("cone", r#"{"radius":1,"halfHeight":1,"radiusBottom":1}"#),
+            "kind.params",
+            "/nodes/0/params/radius",
+        );
+        refused(
+            &one("sphere", r#"{"radius":1,"size":[1,1,1]}"#),
+            "kind.params",
+            "/nodes/0/params/size",
+        );
+    }
+
+    #[test]
+    fn published_budget_object_and_its_range() {
+        let text = doc_with(
+            r#""budget":{"triangles":4000,"segments":32},"#,
+            &format!("[{}]", leaf("a", "sphere", r#"{"radius":1}"#, "")),
+            &format!(r#"{{"m":{MAT}}}"#),
+        );
+        assert_eq!(parse_with(&text, true).unwrap().triangle_budget, Some(4000));
+        let bad = doc_with(
+            r#""budget":{"triangles":4000,"segments":30},"#,
+            &format!("[{}]", leaf("a", "sphere", r#"{"radius":1}"#, "")),
+            &format!(r#"{{"m":{MAT}}}"#),
+        );
+        refused(&bad, "value.range", "/budget/segments");
+        let both = doc_with(
+            r#""budget":{"triangles":4000},"triangleBudget":4000,"#,
+            &format!("[{}]", leaf("a", "sphere", r#"{"radius":1}"#, "")),
+            &format!(r#"{{"m":{MAT}}}"#),
+        );
+        refused(&both, "schema.unknown_field", "/budget");
+    }
+
+    #[test]
+    fn published_collision_mode_anchors_and_colliders() {
+        let text = format!(
+            r#"{{"format":"raa.prims","version":0,"id":"t","name":"t","nodes":[{node}],"materials":{{"m":{MAT}}},"anchors":{{"spawn":{{"t":[0,1,0],"r":[0,0,0,1]}}}},"collision":{{"mode":"override","colliders":[{{"node":null,"shape":"capsule","params":{{"height":1,"radius":0.2}},"t":[0,0,0],"r":[0,0,0,1]}}]}}}}"#,
+            node = leaf("a", "sphere", r#"{"radius":1}"#, ""),
+        );
+        // Published capsule collider params are halfHeight and radius (no height): refused
+        // as a collision.shape with the unexpected key.
+        refused(
+            &text,
+            "collision.shape",
+            "/collision/colliders/0/params/height",
+        );
+        let ok = text.replace(
+            r#""params":{"height":1,"radius":0.2}"#,
+            r#""params":{"halfHeight":0.8,"radius":0.2}"#,
+        );
+        let a = parse_with(&ok, true).unwrap();
+        let c = &a.collision.as_ref().unwrap()[0];
+        assert_eq!((c.node.as_deref(), c.shape.as_str()), (None, "capsuleY"));
+        assert_eq!(c.transform.t, [0.0, 0.0, 0.0]);
+        assert_eq!(a.anchors[0].1.t, [0.0, 1.0, 0.0]);
+        assert_eq!(a.anchors[0].1.s, [1.0, 1.0, 1.0]);
+        let bad_mode = ok.replace(r#""mode":"override""#, r#""mode":"auto""#);
+        refused(&bad_mode, "value.range", "/collision/mode");
+        let both = ok.replace(
+            r#""t":[0,0,0],"r":[0,0,0,1]}"#,
+            r#""t":[0,0,0],"r":[0,0,0,1],"transform":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}}"#,
+        );
+        refused(&both, "schema.unknown_field", "/collision/colliders/0");
     }
 }

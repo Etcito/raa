@@ -187,7 +187,18 @@ fn estimate_plan(plan: &Plan<'_>, ctx: &LoadContext<'_>) -> Result<u32, LoadErro
 /// Triangles of the meshes the asset produces at `ctx.quality` (roots and union children;
 /// boolean tools excluded), before booleans, from the providers' `triangle_count`.
 pub fn estimate_triangles(a: &PrimsAsset, ctx: &LoadContext<'_>) -> Result<u32, LoadError> {
-    estimate_plan(&plan(a), ctx)
+    estimate_plan(&plan(a), &at_document_quality(a, ctx))
+}
+
+/// The context of a document: a published one is tessellated at its `segments`, an S3 one
+/// at the caller's quality.
+fn at_document_quality<'c>(a: &PrimsAsset, ctx: &LoadContext<'c>) -> LoadContext<'c> {
+    LoadContext {
+        geometry: ctx.geometry,
+        booleans: ctx.booleans,
+        quality: a.segments.map_or(ctx.quality, Quality::new),
+        strict_kinds: ctx.strict_kinds,
+    }
 }
 
 fn budget_error(path: &str, n: u32, budget: u32) -> LoadError {
@@ -198,16 +209,60 @@ fn budget_error(path: &str, n: u32, budget: u32) -> LoadError {
     )
 }
 
+/// The published S2 triangle count of a document at `segments` (raa-assets-tools
+/// `primitiveTriangles` and `assetTriangles`): each node once, a subtract or intersect node
+/// twice (its cut allowance). Params are the S3 values the parser produced.
+fn published_triangles(nodes: &[PrimNode], segments: u32) -> u64 {
+    let s = u64::from(segments);
+    let k = s / 4;
+    nodes
+        .iter()
+        .map(|n| {
+            let num = |name: &str| {
+                n.params
+                    .iter()
+                    .find_map(|(k, v)| match (k.as_str(), v) {
+                        (k, JsonValue::Number(x)) if k == name => Some(*x),
+                        _ => None,
+                    })
+                    .unwrap_or(0.0)
+            };
+            let own = match n.kind.as_str() {
+                "box" => 12,
+                "roundBox" if num("radius") == 0.0 => 12,
+                "roundBox" => 12 + 24 * k + 8 * k * (2 * k - 1),
+                "sphere" | "ellipsoid" => s * (s - 2),
+                "capsule" => s * (s - 2) + 2 * s,
+                "cylinder" => 4 * s - 4,
+                // Both radii > 0 is a frustum; an S3 cone without radiusTop has 0 there.
+                "cone" if num("radius") > 0.0 && num("radiusTop") > 0.0 => 4 * s - 4,
+                "cone" => 2 * s - 2,
+                "torus" => s * s,
+                _ => 0,
+            };
+            let cut = if n.op == NodeOp::Union { 1 } else { 2 };
+            let children: u64 = published_triangles(&n.children, segments);
+            own * cut + children
+        })
+        .sum()
+}
+
 /// Builds the meshes, materials, anchors and colliders of a parsed asset at `ctx.quality`.
-pub fn build(a: &PrimsAsset, ctx: &LoadContext<'_>) -> Result<LoadedAsset, LoadError> {
+pub fn build(a: &PrimsAsset, caller: &LoadContext<'_>) -> Result<LoadedAsset, LoadError> {
+    let ctx = &at_document_quality(a, caller);
     let budget = a.triangle_budget.unwrap_or(DEFAULT_TRIANGLE_BUDGET);
-    let budget_path = if a.triangle_budget.is_some() {
-        "/triangleBudget"
-    } else {
-        ""
+    let budget_path = match (a.triangle_budget, a.segments) {
+        (None, _) => "",
+        (Some(_), Some(_)) => "/budget/triangles",
+        (Some(_), None) => "/triangleBudget",
     };
     let plan = plan(a);
-    let estimate = estimate_plan(&plan, ctx)?;
+    // A published document is budgeted by the published S2 count (raa-assets-tools
+    // `assetTriangles`), the count its own validator checks; an S3 one by the providers.
+    let estimate = match a.segments {
+        Some(segments) => saturate(published_triangles(&a.nodes, segments)),
+        None => estimate_plan(&plan, ctx)?,
+    };
     if estimate > budget {
         return Err(budget_error(budget_path, estimate, budget));
     }
@@ -275,8 +330,10 @@ pub fn build(a: &PrimsAsset, ctx: &LoadContext<'_>) -> Result<LoadedAsset, LoadE
             material: item.material.clone(),
         });
     }
+    // The generated count is checked for S3 documents only: a published document's budget
+    // is its S2 count above (the count its validator checks), not the tessellation's.
     let triangles = saturate(total);
-    if triangles > budget {
+    if a.segments.is_none() && triangles > budget {
         return Err(budget_error(budget_path, triangles, budget));
     }
 

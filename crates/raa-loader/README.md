@@ -27,6 +27,31 @@ Depends on raa-math, raa-geom and raa-material (dev: raa-prims).
   `PrimMaterial`, `ColliderDoc`); `parse`, `to_canonical_json`, `estimate_triangles`,
   `build`, `PrimsLoader`; `prims::samples` (`sample_assets`, `invalid_cases`).
 
+## Published v0 names
+
+The loader reads the published raa.prims v0 format of raa-assets-tools (`schema/`,
+`src/format/`) and the S3 spelling the prims API uses. A node's params are either all
+published names or all S3 names; the parsed document keeps the S3 form (so the canonical
+writer and the JS API are unchanged). Mapping of the kinds whose names differ:
+
+| kind | published v0 | S3 (loader, raa-prims) | conversion |
+|---|---|---|---|
+| box | `size` [x, y, z], the full size | `halfExtents` | `size / 2` |
+| roundBox | `size`, `radius` in [0, min(size)/2] | `halfExtents`, `radius` | `size / 2` |
+| capsule | `height` (total, caps included), `radius` | `radius`, `halfHeight` | `halfHeight = height / 2 - radius` (refused if height < 2 radius) |
+| cylinder | `height`, `radius` | `radius`, `halfHeight` | `halfHeight = height / 2` |
+| cone | `height`, `radiusBottom`, `radiusTop` | `radius`, `halfHeight`, `radiusTop` (optional, 0 = point) | `radius = radiusBottom`, `halfHeight = height / 2` |
+
+Unchanged names: sphere `radius`; torus `majorRadius`, `minorRadius`; ellipsoid `radii`.
+Colliders: shapes `capsule`, `cylinder`, `cone` are the S3 `capsuleY`, `cylinderY`, `coneY`
+(same `halfHeight`, `radius`); the published flat `t` and `r` are the S3 `transform`
+(scale 1), and `node` may be null in override mode.
+Document: `budget` `{ triangles, segments }` is `triangleBudget` plus the tessellation
+(`segments`, 16 when absent). A published document is tessellated at its `segments`, not at
+the caller's quality, and its triangle budget is checked against the published S2 count
+(raa-assets-tools `assetTriangles`). The generated mesh count is not checked for it.
+`collision.mode` (`derived` or `override`) is accepted.
+
 ## S5 codes and their semantics
 
 | code | when |

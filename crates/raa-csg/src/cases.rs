@@ -168,6 +168,7 @@ fn build(index: usize, id: &str, host: Shape, tools: Vec<Tool>) -> String {
         id: id.to_string(),
         name: id.to_string(),
         triangle_budget: Some(BUDGET),
+        segments: None,
         nodes: vec![root],
         materials: vec![
             (

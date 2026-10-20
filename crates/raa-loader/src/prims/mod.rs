@@ -23,6 +23,8 @@ pub const FORMAT: &str = "raa.prims";
 pub const VERSION: u32 = 0;
 /// Triangle budget when the document gives none (TRIANGLE_BUDGET_DEFAULT).
 pub const DEFAULT_TRIANGLE_BUDGET: u32 = 1500;
+/// Tessellation of a published document without `budget.segments` (DEFAULT_SEGMENTS).
+pub const DEFAULT_SEGMENTS: u32 = 16;
 /// Maximum node count (ASSET_CAPS).
 pub const MAX_NODES: usize = 64;
 /// Maximum nesting level, roots are level 0 (ASSET_CAPS).

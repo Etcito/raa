@@ -124,6 +124,7 @@ fn lamp() -> PrimsAsset {
         // Fixed LOD0 counts: cylinders 160 x2, sphere 1520, cone 80, torus 1920 = 3840 > 1500,
         // so the smallest explicit budget is 3840.
         triangle_budget: Some(3840),
+        segments: None,
         nodes: vec![base],
         materials: vec![
             ("brass".into(), material([0.80, 0.60, 0.20], 0.35, 0.9)),
@@ -181,6 +182,7 @@ fn critter() -> PrimsAsset {
         // Fixed LOD0 counts: ellipsoid 1520, 2 spheres 1520 each, 4 capsules 1280 each = 9680
         // > 1500, so the smallest explicit budget is 9680.
         triangle_budget: Some(9680),
+        segments: None,
         nodes: vec![body],
         materials: vec![
             ("fur".into(), material([0.55, 0.35, 0.20], 0.9, 0.0)),
@@ -238,6 +240,7 @@ fn crate_asset() -> PrimsAsset {
         id: "crate".into(),
         name: "Wooden crate".into(),
         triangle_budget: None,
+        segments: None,
         nodes: vec![body],
         materials: vec![
             ("plank".into(), material([0.45, 0.30, 0.15], 0.85, 0.0)),
