@@ -3,7 +3,7 @@
 // with the count rules of mapping v1 (tools/sdf-ref/README.md §4). Never imported by the engine; never writes inside
 // the reference checkout; never writes a partial fixture.
 //
-//   /root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out <fixture>
+//   node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out <fixture>
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
@@ -11,7 +11,7 @@ import { registerHooks } from 'node:module'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const REGENERATE = '/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json'
+const REGENERATE = 'node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json'
 const USAGE = 'gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out <fixture path>'
 const GENERATED_BY = 'tools/sdf-ref/gen-leaf-fixtures.mjs'
 const README = fileURLToPath(new URL('./README.md', import.meta.url))

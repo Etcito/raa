@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { browserResultCheck, check, gzipSize, readJson, VALUES } from './lib/proof.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const NODE = process.env.NODE || '/root/nmc/engines/bin/node';
+const NODE = process.env.NODE || 'node';
 
 await check('browser-run', () => {
   const result = browserResultCheck('m1-boot', {});

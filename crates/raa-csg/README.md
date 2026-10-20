@@ -82,4 +82,4 @@ cargo run --release -p raa-csg --example csg-cases -- [--only <regex>] [--json <
 The example loads every case through `PrimsLoader` + `CsgResolver` at LOD0. It prints one line
 per case and exits 1 when a case differs from its expectation, when an ok case is not watertight
 or misses the volume identity, or when a refusal has an empty message. It runs up to `NMC_CPUS`
-threads. The milestone proof is `/root/nmc/engines/bin/node proofs/m5-booleans.mjs`.
+threads. The milestone proof is `node proofs/m5-booleans.mjs`.

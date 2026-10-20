@@ -1,7 +1,7 @@
 {
   "generatedBy": "tools/sdf-ref/gen-leaf-fixtures.mjs",
-  "command": "/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json",
-  "regenerate": "/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json",
+  "command": "node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json",
+  "regenerate": "node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json",
   "sdfModelerRevision": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
   "leafMeshSha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083",
   "axisMap": [

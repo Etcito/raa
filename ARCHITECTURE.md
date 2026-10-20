@@ -22,7 +22,7 @@ RAA is an extensible rendering engine library: small Rust crates compiled to Web
 - Every workspace crate compiles for the host and for `wasm32-unknown-unknown`. Native-only code sits behind `#[cfg(not(target_arch = "wasm32"))]` and web-only code behind `#[cfg(target_arch = "wasm32")]`.
 - Profiles: `[profile.wasm-release]` inherits `release` with `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true` and `debug = false`. The native `release` profile keeps its defaults.
 - Tools:
-  - node is `/root/nmc/engines/bin/node`. Scripts use `${NODE:-/root/nmc/engines/bin/node}`. npm is in the same directory.
+  - node is `node`. Scripts use `${NODE:-node}`. npm is in the same directory.
   - The `wasm-bindgen` CLI 0.2.129 is on PATH.
   - wasm-opt is not used by default. If a binaryen binary is fetched, it lives outside the repository, and the size table reports sizes with and without it.
 
@@ -99,7 +99,7 @@ RAA is an extensible rendering engine library: small Rust crates compiled to Web
 
 ### Proofs
 - There is one proof script per milestone: `proofs/mN-<name>.mjs`, built on `proofs/lib/proof.mjs`.
-  - Run it with `/root/nmc/engines/bin/node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]`.
+  - Run it with `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]`.
   - The default is `--quick`, the cheap subset that still guards the milestone.
   - A proof has at most 5 checks, covering core behaviour only.
 - Each check prints one line: `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`.
@@ -110,7 +110,7 @@ RAA is an extensible rendering engine library: small Rust crates compiled to Web
 - Timing thresholds exist only for FIRST_FRAME_MAX_MS and CPU_MS_MEDIAN_MAX. They read the committed BrowserResult and are evaluated first and alone.
 - Look and visual quality are review items. Proofs only check `nonEmpty` and that the capture record exists. The owner reviews `proofs/captures/<name>.png` against the Quality bar.
 - A milestone closeout runs the build, the boot, its own proof and the project smoke test. Earlier proofs are runnable on demand.
-- Dogfood: friction caused by nomorechat (GPU client, sandbox, tooling) goes in `docs/dogfood/mN.md`: what broke, what was done by hand and what nomorechat must do instead. The lead transfers it to `bench/kart/HANDOVER.md`, which is in another repository and never edited by tasks.
+- Dogfood: friction caused by nomorechat (GPU client, sandbox, tooling) goes in `docs/dogfood/mN.md`: what broke, what was done by hand and what nomorechat must do instead. The lead transfers it to the consumer-side handover notes, which live in another repository.
 
 ### Commits and scope
 - One commit per task, never pushed. No binaries or asset files (`scripts/check-no-assets.sh`).
@@ -805,7 +805,7 @@ Files: `tools/sdf-ref/gen-leaf-fixtures.mjs`, `tools/sdf-ref/README.md`. Owner: 
 
 A one-off node script, never imported by the engine.
 
-**Command:** `/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json`
+**Command:** `node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json`
 
 **Reference access.**
 - The reference is read only, through the cross-repository alias `sdfm`: `src/core/hybrid/leaf-mesh.ts` and its imports.
@@ -1154,9 +1154,9 @@ Checks:
 The committed `proofs/results/m6-sizes.json` is the size table written by the task.
 
 ## Milestone proofs
-- M1 Boot: workspace, checks and a WebGPU triangle from WASM in a real browser: `/root/nmc/engines/bin/node proofs/m1-boot.mjs`
-- M2 Scene basics: 1000 lit, depth-tested instances with zero allocations in the frame loop: `/root/nmc/engines/bin/node proofs/m2-scene.mjs`
-- M3 Primitives to polygons: 8 SDF kinds as closed meshes matching SDF Modeler: `/root/nmc/engines/bin/node proofs/m3-prims.mjs`
-- M4 Primitive asset loader: prims v0 parsed, validated, round-tripped and built into meshes: `/root/nmc/engines/bin/node proofs/m4-loader.mjs`
-- M5 Simple booleans: exact convex cutting or a typed refusal: `/root/nmc/engines/bin/node proofs/m5-booleans.mjs`
-- M6 Extensibility proven and public API v0 frozen: @etcito/raa package, docs and example page: `/root/nmc/engines/bin/node proofs/m6-api.mjs`
+- M1 Boot: workspace, checks and a WebGPU triangle from WASM in a real browser: `node proofs/m1-boot.mjs`
+- M2 Scene basics: 1000 lit, depth-tested instances with zero allocations in the frame loop: `node proofs/m2-scene.mjs`
+- M3 Primitives to polygons: 8 SDF kinds as closed meshes matching SDF Modeler: `node proofs/m3-prims.mjs`
+- M4 Primitive asset loader: prims v0 parsed, validated, round-tripped and built into meshes: `node proofs/m4-loader.mjs`
+- M5 Simple booleans: exact convex cutting or a typed refusal: `node proofs/m5-booleans.mjs`
+- M6 Extensibility proven and public API v0 frozen: @etcito/raa package, docs and example page: `node proofs/m6-api.mjs`

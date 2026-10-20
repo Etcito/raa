@@ -3,7 +3,7 @@
 # Output in dist/<basename of crate-dir>/ (pkg/, page files, common/, sizes.json).
 set -euo pipefail
 
-NODE="${NODE:-/root/nmc/engines/bin/node}"
+NODE="${NODE:-node}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 usage() {

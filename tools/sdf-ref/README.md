@@ -15,9 +15,9 @@ inside it is ever written.
 
 ## 1. Access path and commit
 
-- Alias `sdfm` (read-only). Card 3295 saw it at `/root/nmc/sdfm` (git objects
+- Alias `sdfm` (read-only). Card 3295 saw it at `<sdfm checkout>` (git objects
   only); card 3296 sees a materialised checkout at
-  `/root/nmc/worktrees/65/3296-ro-sdfm` (all tracked files, clean, no
+  `<sdfm checkout>` (all tracked files, clean, no
   `node_modules`). The path differs per card, which is why the tool takes `--ref`.
 - Read: `src/core/hybrid/leaf-mesh.ts` (781 lines, 38841 bytes) and the imports it
   pulls in: `../doc/types.js`, `../math/vec.js`, `../sdf/profile.js`, `../registry.js`,
@@ -31,15 +31,15 @@ inside it is ever written.
   that is the exact text the `literal` path would copy and the hash the fixture
   records. Throughout this file `@50b45d5` shortens this commit.
 - Card 3295 found the alias worktree empty (only `.git`), so its reads went
-  through the git object store (`git -C /root/nmc/sdfm show 50b45d58...:<path>`)
+  through the git object store (`git -C <sdfm checkout> show 50b45d58...:<path>`)
   and its measurements through `git archive HEAD` extracted into
-  `/tmp/opencode/sdfm` (outside both repositories). Card 3296 read the materialised
+  `<scratch>/sdfm` (outside both repositories). Card 3296 read the materialised
   checkout directly and re-measured every §3 number with the tool. Nothing inside
   `sdfm` was ever written.
 
 ### 1.1 Loading `leaf-mesh.ts` (node built-in type stripping)
 
-`/root/nmc/engines/bin/node` is v24.21.0 (type stripping on by default). A direct
+`node` is v24.21.0 (type stripping on by default). A direct
 `import` of the `.ts` file fails for two independent reasons, both observed:
 
 1. The source writes `.js` specifiers for `.ts` siblings: `ERR_MODULE_NOT_FOUND:
@@ -539,14 +539,14 @@ Exact command, run from the `raa` repository root (this string is also the
 fixture's `command` and `regenerate`):
 
 ```
-/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json
+node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json
 ```
 
 `--ref` is the root of the read-only `sdfm` checkout (card 3296:
-`/root/nmc/worktrees/65/3296-ro-sdfm`); its HEAD must be
+`<sdfm checkout>`); its HEAD must be
 `mapping.reference.commit` and `src/` must have no local change, otherwise the
 tool refuses. Determinism check: run it twice (the second time with
-`--out /tmp/sdf-leaf-reference.json`) and `cmp` the two files; they must be
+`--out <scratch>/sdf-leaf-reference.json`) and `cmp` the two files; they must be
 byte-identical.
 
 What the tool does, in order (it refuses with `sdf-ref: <message>` and exit code 1
@@ -594,7 +594,7 @@ only capsule `height` has it), `mapping` (§4 verbatim),
 `leafGeometry` arguments), `counts` (`{name: value}`, `{}` for box),
 `uniquePositions`, `triangles`, `bboxMin`, `bboxMax`, `area`, `volume`, `closed`.
 
-Current result (2026-10-18, card 3296, `--ref /root/nmc/worktrees/65/3296-ro-sdfm`):
+Current result (2026-10-18, card 3296, `--ref <sdfm checkout>`):
 exit 0 in about 1 s, 48 cases written, fixture sha256
 `bb4296bcb535147f10111e357c21764e2742f6794c55941d475bae1708d84b6a`; a second run
 gave byte-identical bytes. Every kind used path `call`, every LOD0 mesh equalled

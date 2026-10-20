@@ -131,4 +131,4 @@ triangles, vertices, uniquePositions, closed, volume, normal deviation and hash
 (generated twice). With `--compare` it also prints the deltas against the fixture next
 to SDF_REF_TOL. It exits 1 when any case fails `analysis::passes`, determinism or the
 reference comparison. The milestone proof is
-`/root/nmc/engines/bin/node proofs/m3-prims.mjs`.
+`node proofs/m3-prims.mjs`.
