@@ -1,0 +1,71 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "wall-with-hole",
+  "name": "Wall with hole",
+  "budget": {
+    "triangles": 1500,
+    "segments": 16
+  },
+  "nodes": [
+    {
+      "id": "wall",
+      "kind": "box",
+      "params": {
+        "size": [4, 3, 0.5]
+      },
+      "transform": {
+        "t": [0, 0, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "brick",
+      "op": "union",
+      "children": [
+        {
+          "id": "hole",
+          "kind": "cylinder",
+          "params": {
+            "height": 0.7,
+            "radius": 0.6
+          },
+          "transform": {
+            "t": [0, -0.3, 0],
+            "r": [0.707107, 0, 0, 0.707107],
+            "s": [1, 1, 1]
+          },
+          "material": "brick",
+          "op": "subtract"
+        }
+      ]
+    }
+  ],
+  "materials": {
+    "brick": {
+      "color": [0.8, 0.3, 0.2],
+      "roughness": 0.6,
+      "metallic": 0,
+      "emissive": [0, 0, 0]
+    }
+  },
+  "anchors": {
+    "passage": {
+      "t": [0, -0.3, 0],
+      "r": [0, 0, 0, 1]
+    }
+  },
+  "collision": {
+    "mode": "derived",
+    "colliders": [
+      {
+        "node": "wall",
+        "shape": "cuboid",
+        "params": {
+          "halfExtents": [2, 1.5, 0.25]
+        },
+        "t": [0, 0, 0],
+        "r": [0, 0, 0, 1]
+      }
+    ]
+  }
+}

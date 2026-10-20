@@ -1,0 +1,65 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "intersect-dome",
+  "name": "Intersect dome",
+  "budget": {
+    "triangles": 1500,
+    "segments": 16
+  },
+  "nodes": [
+    {
+      "id": "dome",
+      "kind": "sphere",
+      "params": {
+        "radius": 1
+      },
+      "transform": {
+        "t": [0, 0, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "shell",
+      "op": "union",
+      "children": [
+        {
+          "id": "upper",
+          "kind": "box",
+          "params": {
+            "size": [2.2, 1.1, 2.2]
+          },
+          "transform": {
+            "t": [0, 0.55, 0],
+            "r": [0, 0, 0, 1],
+            "s": [1, 1, 1]
+          },
+          "material": "shell",
+          "op": "intersect"
+        }
+      ]
+    }
+  ],
+  "materials": {
+    "shell": {
+      "color": [0.2, 0.5, 0.9],
+      "roughness": 0.6,
+      "metallic": 0,
+      "emissive": [0, 0, 0]
+    }
+  },
+  "anchors": {},
+  "collision": {
+    "mode": "derived",
+    "colliders": [
+      {
+        "node": "dome",
+        "shape": "ball",
+        "params": {
+          "radius": 1
+        },
+        "t": [0, 0, 0],
+        "r": [0, 0, 0, 1]
+      }
+    ]
+  }
+}

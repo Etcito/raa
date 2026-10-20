@@ -1,0 +1,87 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "capsule-cylinder",
+  "name": "Capsule And Cylinder",
+  "budget": {
+    "triangles": 1500,
+    "segments": 16
+  },
+  "nodes": [
+    {
+      "id": "pill",
+      "kind": "capsule",
+      "params": {
+        "height": 1.2,
+        "radius": 0.4
+      },
+      "transform": {
+        "t": [0, 0.6, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "pill_pink",
+      "op": "union"
+    },
+    {
+      "id": "drum",
+      "kind": "cylinder",
+      "params": {
+        "height": 0.9,
+        "radius": 0.3
+      },
+      "transform": {
+        "t": [1.5, 0.45, 0],
+        "r": [0, 0, 0.258819, 0.965926],
+        "s": [1.5, 1, 1.5]
+      },
+      "material": "drum_yellow",
+      "op": "union"
+    }
+  ],
+  "materials": {
+    "drum_yellow": {
+      "color": [1, 0.85, 0.12],
+      "roughness": 0.3,
+      "metallic": 0.2,
+      "emissive": [0, 0, 0]
+    },
+    "pill_pink": {
+      "color": [1, 0.25, 0.55],
+      "roughness": 0.45,
+      "metallic": 0,
+      "emissive": [0.1, 0, 0.08]
+    }
+  },
+  "anchors": {
+    "spawn": {
+      "t": [0, 0, 0],
+      "r": [0, 0, 0, 1]
+    }
+  },
+  "collision": {
+    "mode": "derived",
+    "colliders": [
+      {
+        "node": "pill",
+        "shape": "capsule",
+        "params": {
+          "halfHeight": 0.2,
+          "radius": 0.4
+        },
+        "t": [0, 0.6, 0],
+        "r": [0, 0, 0, 1]
+      },
+      {
+        "node": "drum",
+        "shape": "cylinder",
+        "params": {
+          "halfHeight": 0.45,
+          "radius": 0.45
+        },
+        "t": [1.5, 0.45, 0],
+        "r": [0, 0, 0.258819, 0.965926]
+      }
+    ]
+  }
+}

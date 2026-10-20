@@ -1,0 +1,74 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "segments-32",
+  "name": "Non-default segments and budget",
+  "budget": {
+    "triangles": 4000,
+    "segments": 32
+  },
+  "nodes": [
+    {
+      "id": "ball",
+      "kind": "sphere",
+      "params": {
+        "radius": 0.5
+      },
+      "transform": {
+        "t": [0, 1.5, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "blue",
+      "op": "union"
+    },
+    {
+      "id": "pillar",
+      "kind": "cylinder",
+      "params": {
+        "height": 1,
+        "radius": 0.3
+      },
+      "transform": {
+        "t": [0, 0.5, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "blue",
+      "op": "union"
+    }
+  ],
+  "materials": {
+    "blue": {
+      "color": [0.1, 0.3, 0.9],
+      "roughness": 0.5,
+      "metallic": 0,
+      "emissive": [0, 0, 0]
+    }
+  },
+  "anchors": {},
+  "collision": {
+    "mode": "derived",
+    "colliders": [
+      {
+        "node": "ball",
+        "shape": "ball",
+        "params": {
+          "radius": 0.5
+        },
+        "t": [0, 1.5, 0],
+        "r": [0, 0, 0, 1]
+      },
+      {
+        "node": "pillar",
+        "shape": "cylinder",
+        "params": {
+          "halfHeight": 0.5,
+          "radius": 0.3
+        },
+        "t": [0, 0.5, 0],
+        "r": [0, 0, 0, 1]
+      }
+    ]
+  }
+}

@@ -1,0 +1,152 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "bean",
+  "name": "bean",
+  "budget": 1500,
+  "nodes": [
+    {
+      "id": "body",
+      "kind": "capsule",
+      "params": {
+        "radius": 0.4,
+        "height": 0.9
+      },
+      "transform": {
+        "t": [
+          0,
+          0,
+          0
+        ]
+      },
+      "material": "body",
+      "op": "union"
+    },
+    {
+      "id": "eye-l",
+      "kind": "sphere",
+      "params": {
+        "radius": 0.11
+      },
+      "transform": {
+        "t": [
+          -0.15,
+          0.25,
+          0.3
+        ]
+      },
+      "material": "eye",
+      "op": "union"
+    },
+    {
+      "id": "eye-r",
+      "kind": "sphere",
+      "params": {
+        "radius": 0.11
+      },
+      "transform": {
+        "t": [
+          0.15,
+          0.25,
+          0.3
+        ]
+      },
+      "material": "eye",
+      "op": "union"
+    },
+    {
+      "id": "pupil-l",
+      "kind": "sphere",
+      "params": {
+        "radius": 0.055
+      },
+      "transform": {
+        "t": [
+          -0.15,
+          0.25,
+          0.4
+        ]
+      },
+      "material": "pupil",
+      "op": "union"
+    },
+    {
+      "id": "pupil-r",
+      "kind": "sphere",
+      "params": {
+        "radius": 0.055
+      },
+      "transform": {
+        "t": [
+          0.15,
+          0.25,
+          0.4
+        ]
+      },
+      "material": "pupil",
+      "op": "union"
+    },
+    {
+      "id": "mouth",
+      "kind": "ellipsoid",
+      "params": {
+        "radii": [
+          0.12,
+          0.035,
+          0.04
+        ]
+      },
+      "transform": {
+        "t": [
+          0,
+          0,
+          0.385
+        ]
+      },
+      "material": "pupil",
+      "op": "union"
+    }
+  ],
+  "materials": {
+    "body": {
+      "color": [
+        0.95,
+        0.95,
+        0.95
+      ],
+      "roughness": 0.35,
+      "metallic": 0,
+      "emissive": 0
+    },
+    "eye": {
+      "color": [
+        1,
+        1,
+        1
+      ],
+      "roughness": 0.3,
+      "metallic": 0,
+      "emissive": 0
+    },
+    "pupil": {
+      "color": [
+        0.08,
+        0.06,
+        0.1
+      ],
+      "roughness": 0.4,
+      "metallic": 0,
+      "emissive": 0
+    }
+  },
+  "anchors": {},
+  "collision": {
+    "colliders": [
+      {
+        "shape": "capsule",
+        "halfHeight": 0.45,
+        "radius": 0.4
+      }
+    ]
+  }
+}

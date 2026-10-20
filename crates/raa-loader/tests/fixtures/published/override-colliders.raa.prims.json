@@ -1,0 +1,105 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "override-colliders",
+  "name": "Hand-written colliders and anchors",
+  "budget": {
+    "triangles": 1500,
+    "segments": 16
+  },
+  "nodes": [
+    {
+      "id": "base",
+      "kind": "box",
+      "params": {
+        "size": [2, 0.2, 2]
+      },
+      "transform": {
+        "t": [0, 0.1, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "wood",
+      "op": "union"
+    },
+    {
+      "id": "post",
+      "kind": "cylinder",
+      "params": {
+        "height": 1.5,
+        "radius": 0.1
+      },
+      "transform": {
+        "t": [0, 0.95, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "metal",
+      "op": "union",
+      "children": [
+        {
+          "id": "cap",
+          "kind": "sphere",
+          "params": {
+            "radius": 0.15
+          },
+          "transform": {
+            "t": [0, 0.75, 0],
+            "r": [0, 0, 0, 1],
+            "s": [1, 1, 1]
+          },
+          "material": "metal",
+          "op": "union"
+        }
+      ]
+    }
+  ],
+  "materials": {
+    "metal": {
+      "color": [0.7, 0.7, 0.75],
+      "roughness": 0.3,
+      "metallic": 1,
+      "emissive": [0, 0, 0]
+    },
+    "wood": {
+      "color": [0.55, 0.35, 0.2],
+      "roughness": 0.8,
+      "metallic": 0,
+      "emissive": [0, 0, 0]
+    }
+  },
+  "anchors": {
+    "hinge": {
+      "t": [1, 0.2, 0],
+      "r": [0, 0, 0.382683, 0.92388]
+    },
+    "pivot": {
+      "t": [0, 1.7, 0],
+      "r": [0, 0, 0, 1]
+    }
+  },
+  "collision": {
+    "mode": "override",
+    "colliders": [
+      {
+        "node": null,
+        "shape": "cylinder",
+        "params": {
+          "halfHeight": 0.85,
+          "radius": 0.15
+        },
+        "t": [0, 0.85, 0],
+        "r": [0, 0, 0, 1]
+      },
+      {
+        "node": "base",
+        "shape": "cuboid",
+        "params": {
+          "halfExtents": [1, 0.1, 1]
+        },
+        "t": [0, 0.1, 0],
+        "r": [0, 0, 0, 1]
+      }
+    ]
+  }
+}

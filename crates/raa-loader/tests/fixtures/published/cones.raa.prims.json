@@ -1,0 +1,104 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "cones",
+  "name": "Three cones",
+  "budget": {
+    "triangles": 1500,
+    "segments": 16
+  },
+  "nodes": [
+    {
+      "id": "cone_flat_top",
+      "kind": "cone",
+      "params": {
+        "height": 1,
+        "radiusBottom": 0.4,
+        "radiusTop": 0
+      },
+      "transform": {
+        "t": [-1.2, 0.5, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "ember",
+      "op": "union"
+    },
+    {
+      "id": "cone_flat_bottom",
+      "kind": "cone",
+      "params": {
+        "height": 0.8,
+        "radiusBottom": 0,
+        "radiusTop": 0.3
+      },
+      "transform": {
+        "t": [0, 0.4, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "ember",
+      "op": "union"
+    },
+    {
+      "id": "cone_frustum",
+      "kind": "cone",
+      "params": {
+        "height": 0.6,
+        "radiusBottom": 0.35,
+        "radiusTop": 0.2
+      },
+      "transform": {
+        "t": [1.2, 0.3, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "ember",
+      "op": "union"
+    }
+  ],
+  "materials": {
+    "ember": {
+      "color": [0.85, 0.35, 0.12],
+      "roughness": 0.6,
+      "metallic": 0,
+      "emissive": [0, 0, 0]
+    }
+  },
+  "anchors": {},
+  "collision": {
+    "mode": "derived",
+    "colliders": [
+      {
+        "node": "cone_flat_top",
+        "shape": "cone",
+        "params": {
+          "halfHeight": 0.5,
+          "radius": 0.4
+        },
+        "t": [-1.2, 0.5, 0],
+        "r": [0, 0, 0, 1]
+      },
+      {
+        "node": "cone_flat_bottom",
+        "shape": "cone",
+        "params": {
+          "halfHeight": 0.4,
+          "radius": 0.3
+        },
+        "t": [0, 0.4, 0],
+        "r": [1, 0, 0, 0]
+      },
+      {
+        "node": "cone_frustum",
+        "shape": "cylinder",
+        "params": {
+          "halfHeight": 0.3,
+          "radius": 0.35
+        },
+        "t": [1.2, 0.3, 0],
+        "r": [0, 0, 0, 1]
+      }
+    ]
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "format": "raa.prims",
+  "version": 0,
+  "id": "sphere-spawn",
+  "name": "Sphere Spawn",
+  "budget": {
+    "triangles": 1500,
+    "segments": 16
+  },
+  "nodes": [
+    {
+      "id": "ball",
+      "kind": "sphere",
+      "params": {
+        "radius": 0.5
+      },
+      "transform": {
+        "t": [0, 0.5, 0],
+        "r": [0, 0, 0, 1],
+        "s": [1, 1, 1]
+      },
+      "material": "spawn_blue",
+      "op": "union"
+    }
+  ],
+  "materials": {
+    "spawn_blue": {
+      "color": [0.1, 0.45, 1],
+      "roughness": 0.35,
+      "metallic": 0,
+      "emissive": [0, 0.15, 0.4]
+    }
+  },
+  "anchors": {
+    "spawn": {
+      "t": [0, 0, 0],
+      "r": [0, 0, 0, 1]
+    }
+  },
+  "collision": {
+    "mode": "derived",
+    "colliders": [
+      {
+        "node": "ball",
+        "shape": "ball",
+        "params": {
+          "radius": 0.5
+        },
+        "t": [0, 0.5, 0],
+        "r": [0, 0, 0, 1]
+      }
+    ]
+  }
+}
