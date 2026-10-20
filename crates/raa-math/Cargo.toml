@@ -1,0 +1,9 @@
+[package]
+name = "raa-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Small math types (vectors, matrices, quaternions) with no heavy dependency."
+
+[dependencies]

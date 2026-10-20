@@ -1,0 +1,10 @@
+[package]
+name = "raa-material"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Simple materials."
+
+[dependencies]
+raa-core = { workspace = true }

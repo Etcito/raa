@@ -1,0 +1,45 @@
+{
+  "name": "m4-asset",
+  "milestone": "m4",
+  "capturedAt": "2026-10-18T02:19:27.682Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 3090), OpenGL ES 3.1 Mesa 26.0.3-1ubuntu1)",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "firstFrameMs": 469.3999999985099,
+  "warmup": 60,
+  "frames": 300,
+  "cpuMsMedian": 0.30000000447034836,
+  "cpuMsP95": 0.5,
+  "instances": 49,
+  "drawCalls": 17,
+  "triangles": 44280,
+  "allocsPerFrameTotal": null,
+  "resize": {
+    "to": [
+      960,
+      540
+    ],
+    "back": [
+      1280,
+      720
+    ],
+    "ok": true
+  },
+  "wasm": {
+    "raw": 394387,
+    "gzip": 161013,
+    "sha256": "b8ff2da4dbdf20e0918bb36a0c715d5a4be508c977a99f4b0ff1095c0a17d165"
+  },
+  "capture": "proofs/captures/m4-asset.png",
+  "captureSha256": "9d0d2cb62b80df6e7bdb09236dd0d8fb21a88df4072a458edd82c8fd6e548cf8"
+}

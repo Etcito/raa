@@ -1,0 +1,4 @@
+{
+  "_comment": "Render input for nomorechat's GPU client (scripts/gpu-capture.mjs passes it to `render --page-ref REF`). Args follow BROWSER_RUN (warmup 60, frames 300) and CAPTURE (1280x720, devicePixelRatio 1, with the resize cycle).",
+  "args": { "width": 1280, "height": 720, "warmup": 60, "frames": 300, "resize": true }
+}

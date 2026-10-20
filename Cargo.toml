@@ -1,3 +1,39 @@
 [workspace]
 resolver = "2"
-members = []
+# Final members list: tests/* is enabled now that tests/raa-ext-test exists.
+members = ["crates/*", "demos/*", "tests/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.96.0"
+
+[workspace.dependencies]
+wgpu = { version = "30.0.1", default-features = false, features = ["wgsl"] }
+wasm-bindgen = "=0.2.129"
+wasm-bindgen-futures = "=0.4.79"
+js-sys = "=0.3.106"
+web-sys = "=0.3.106"
+pollster = "1.0.1"
+
+raa-core = { path = "crates/raa-core" }
+raa-web = { path = "crates/raa-web" }
+raa-math = { path = "crates/raa-math" }
+raa-geom = { path = "crates/raa-geom" }
+raa-material = { path = "crates/raa-material" }
+raa-scene = { path = "crates/raa-scene" }
+raa-render = { path = "crates/raa-render" }
+raa-alloc-count = { path = "crates/raa-alloc-count" }
+raa-prims = { path = "crates/raa-prims" }
+raa-loader = { path = "crates/raa-loader" }
+raa-csg = { path = "crates/raa-csg" }
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+debug = false

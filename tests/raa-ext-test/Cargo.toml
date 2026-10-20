@@ -1,0 +1,18 @@
+[package]
+name = "raa-ext-test"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Extends RAA from outside: a new geometry provider and render pass, using only raa-* crates."
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-geom = { workspace = true }
+raa-render = { workspace = true }
+raa-scene = { workspace = true }
+raa-material = { workspace = true }
+raa-loader = { workspace = true }
+raa-prims = { workspace = true }

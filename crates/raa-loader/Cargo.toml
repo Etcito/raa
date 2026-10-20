@@ -1,0 +1,15 @@
+[package]
+name = "raa-loader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Asset loading trait and the primitive-asset loader."
+
+[dependencies]
+raa-math = { workspace = true }
+raa-geom = { workspace = true }
+raa-material = { workspace = true }
+
+[dev-dependencies]
+raa-prims = { workspace = true }

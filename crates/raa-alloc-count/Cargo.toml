@@ -1,0 +1,9 @@
+[package]
+name = "raa-alloc-count"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Allocation-counting global allocator for benchmarks and feature-gated demos."
+
+[dependencies]

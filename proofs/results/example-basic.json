@@ -1,0 +1,45 @@
+{
+  "name": "example-basic",
+  "milestone": "m6",
+  "capturedAt": "2026-10-18T05:04:30.173Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 3090), OpenGL ES 3.1 Mesa 26.0.3-1ubuntu1)",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "firstFrameMs": 235.19999999552965,
+  "warmup": 60,
+  "frames": 300,
+  "cpuMsMedian": 0.3999999985098839,
+  "cpuMsP95": 0.6000000014901161,
+  "instances": 220,
+  "drawCalls": 13,
+  "triangles": 207068,
+  "allocsPerFrameTotal": null,
+  "resize": {
+    "to": [
+      960,
+      540
+    ],
+    "back": [
+      1280,
+      720
+    ],
+    "ok": true
+  },
+  "wasm": {
+    "raw": 465568,
+    "gzip": 185085,
+    "sha256": "468ada00ed6dc67884bbdb45ef06b13e8630323c316df74dfd1a9473245eba08"
+  },
+  "capture": "proofs/captures/example-basic.png",
+  "captureSha256": "3548732b51e2497d522f09af0c39186ebe4742fe7b586cccb333982e05040bd0"
+}

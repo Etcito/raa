@@ -1,0 +1,30 @@
+[package]
+name = "raa-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Frozen wasm-bindgen API v0 of RAA (native-testable conversion helpers plus the web Engine)."
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+raa-core = { workspace = true }
+raa-web = { workspace = true }
+raa-math = { workspace = true }
+raa-geom = { workspace = true }
+raa-material = { workspace = true }
+raa-scene = { workspace = true }
+raa-render = { workspace = true }
+raa-prims = { workspace = true }
+raa-loader = { workspace = true }
+raa-csg = { workspace = true }
+wgpu = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }

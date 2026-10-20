@@ -1,0 +1,15 @@
+[package]
+name = "raa-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Forward renderer as a frame-graph pass."
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-geom = { workspace = true }
+raa-material = { workspace = true }
+raa-scene = { workspace = true }
+wgpu = { workspace = true }

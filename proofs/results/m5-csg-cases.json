@@ -1,0 +1,1131 @@
+[
+  {
+    "id": "box-sub-sphere-dent",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.4
+        },
+        "transform": {
+          "t": [
+            0.013,
+            0.613,
+            0.007
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 978,
+    "watertight": true,
+    "volume": 1.553822057228026,
+    "volumeIdentityRelErr": 9.357593852219255e-14,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "box-sub-cylinder-through",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "cylinder",
+        "params": {
+          "radius": 0.6,
+          "halfHeight": 0.7
+        },
+        "transform": {
+          "t": [
+            0.113,
+            0,
+            0.043
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            0.4,
+            1,
+            0.4
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 504,
+    "watertight": true,
+    "volume": 1.463744998060294,
+    "volumeIdentityRelErr": 3.0099731547019836e-11,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "sphere-sub-box-corner",
+    "op": "subtract",
+    "host": {
+      "kind": "sphere",
+      "params": {
+        "radius": 0.8
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "box",
+        "params": {
+          "halfExtents": [
+            0.7,
+            0.6,
+            0.5
+          ]
+        },
+        "transform": {
+          "t": [
+            0.613,
+            0.507,
+            0.391
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 1472,
+    "watertight": true,
+    "volume": 1.690990960506746,
+    "volumeIdentityRelErr": 1.773868016547896e-10,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "cylinder-sub-capsule-slot",
+    "op": "subtract",
+    "host": {
+      "kind": "cylinder",
+      "params": {
+        "radius": 0.6,
+        "halfHeight": 0.7
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "capsule",
+        "params": {
+          "radius": 0.4,
+          "halfHeight": 0.5
+        },
+        "transform": {
+          "t": [
+            0.011,
+            0.613,
+            0.007
+          ],
+          "r": [
+            0,
+            0,
+            0.7071067811865476,
+            0.7071067811865476
+          ],
+          "s": [
+            0.6,
+            1,
+            0.6
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 654,
+    "watertight": true,
+    "volume": 1.4242276977580728,
+    "volumeIdentityRelErr": 2.1314350658928832e-10,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "box-sub-ellipsoid-scoop",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.9,
+            0.6,
+            0.5
+          ]
+        },
+        "transform": {
+          "t": [
+            0.713,
+            0.011,
+            0.007
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 1106,
+    "watertight": true,
+    "volume": 1.6130838215140009,
+    "volumeIdentityRelErr": 1.0302605095769646e-11,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "box-int-sphere",
+    "op": "intersect",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        },
+        "transform": {
+          "t": [
+            0.013,
+            -0.011,
+            0.017
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 1064,
+    "watertight": true,
+    "volume": 1.5089593014125002,
+    "volumeIdentityRelErr": 1.8984522517320606e-10,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "sphere-int-cylinder",
+    "op": "intersect",
+    "host": {
+      "kind": "sphere",
+      "params": {
+        "radius": 0.8
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "cylinder",
+        "params": {
+          "radius": 0.6,
+          "halfHeight": 0.7
+        },
+        "transform": {
+          "t": [
+            0.013,
+            0.011,
+            -0.017
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 1440,
+    "watertight": true,
+    "volume": 1.4654546952524516,
+    "volumeIdentityRelErr": 1.0056989293929103e-10,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "cone-int-box",
+    "op": "intersect",
+    "host": {
+      "kind": "cone",
+      "params": {
+        "radius": 0.7,
+        "halfHeight": 0.8
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "box",
+        "params": {
+          "halfExtents": [
+            0.7,
+            0.6,
+            0.5
+          ]
+        },
+        "transform": {
+          "t": [
+            0.013,
+            0.021,
+            0.017
+          ],
+          "r": [
+            0,
+            0.25881904510252074,
+            0,
+            0.9659258262890683
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 172,
+    "watertight": true,
+    "volume": 0.5131390680161465,
+    "volumeIdentityRelErr": 1.0727873573034008e-8,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "box-sub-two-spheres",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.3
+        },
+        "transform": {
+          "t": [
+            -0.311,
+            0.413,
+            0.011
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      },
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.3
+        },
+        "transform": {
+          "t": [
+            0.329,
+            0.371,
+            -0.017
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 2836,
+    "watertight": true,
+    "volume": 1.4707443866702496,
+    "volumeIdentityRelErr": 5.791266805405241e-12,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "box-int-sphere-sub-cylinder",
+    "op": "intersect+subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        },
+        "transform": {
+          "t": [
+            0.013,
+            -0.011,
+            0.017
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      },
+      {
+        "op": "subtract",
+        "kind": "cylinder",
+        "params": {
+          "radius": 0.6,
+          "halfHeight": 0.7
+        },
+        "transform": {
+          "t": [
+            0.113,
+            0,
+            0.043
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            0.4,
+            1,
+            0.4
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 1656,
+    "watertight": true,
+    "volume": 1.2927042614829964,
+    "volumeIdentityRelErr": 3.235890318142638e-11,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "box-sub-sphere-outside",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        },
+        "transform": {
+          "t": [
+            3,
+            0,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "ok",
+    "triangles": 12,
+    "watertight": true,
+    "volume": 1.6800000381469717,
+    "volumeIdentityRelErr": 0,
+    "code": null,
+    "message": null,
+    "expected": "ok"
+  },
+  {
+    "id": "torus-host-sub-sphere",
+    "op": "subtract",
+    "host": {
+      "kind": "torus",
+      "params": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.3
+        },
+        "transform": {
+          "t": [
+            0.613,
+            0,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.host_not_convex",
+    "message": "host 'torus' is not convex (host node 'host')",
+    "expected": "boolean.csg.host_not_convex"
+  },
+  {
+    "id": "box-sub-torus",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "torus",
+        "params": {
+          "majorRadius": 0.6,
+          "minorRadius": 0.22
+        },
+        "transform": {
+          "t": [
+            0.013,
+            0.011,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.tool_not_convex",
+    "message": "tool 'torus' is not convex (tool node 'ring' on host node 'host')",
+    "expected": "boolean.csg.tool_not_convex"
+  },
+  {
+    "id": "box-int-torus",
+    "op": "intersect",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "torus",
+        "params": {
+          "majorRadius": 0.6,
+          "minorRadius": 0.22
+        },
+        "transform": {
+          "t": [
+            0.013,
+            0.011,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.tool_not_convex",
+    "message": "tool 'torus' is not convex (tool node 'ring' on host node 'host')",
+    "expected": "boolean.csg.tool_not_convex"
+  },
+  {
+    "id": "box-sub-box-coplanar",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "box",
+        "params": {
+          "halfExtents": [
+            0.3,
+            0.3,
+            0.3
+          ]
+        },
+        "transform": {
+          "t": [
+            0,
+            0.3,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.coplanar",
+    "message": "coplanar faces: tool plane n=(0.000000, 1.000000, 0.000000) d=0.600000 coincides with host plane n=(0.000000, 1.000000, 0.000000) d=0.600000 and their faces overlap (eps 2.0976177077064636e-6) (host node 'host', tool node(s) 'flush')",
+    "expected": "boolean.csg.coplanar"
+  },
+  {
+    "id": "box-int-sphere-disjoint",
+    "op": "intersect",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        },
+        "transform": {
+          "t": [
+            3,
+            0,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.empty_result",
+    "message": "the boolean result is empty (host node 'host', tool node(s) 'far')",
+    "expected": "boolean.csg.empty_result"
+  },
+  {
+    "id": "sphere-sub-box-containing",
+    "op": "subtract",
+    "host": {
+      "kind": "sphere",
+      "params": {
+        "radius": 0.8
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "box",
+        "params": {
+          "halfExtents": [
+            0.7,
+            0.6,
+            0.5
+          ]
+        },
+        "transform": {
+          "t": [
+            0,
+            0,
+            0
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            2,
+            2,
+            2
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.empty_result",
+    "message": "the boolean result is empty (host node 'host', tool node(s) 'huge')",
+    "expected": "boolean.csg.empty_result"
+  },
+  {
+    "id": "box-sub-overlapping-spheres",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.3
+        },
+        "transform": {
+          "t": [
+            -0.113,
+            0.413,
+            0.011
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      },
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.3
+        },
+        "transform": {
+          "t": [
+            0.113,
+            0.371,
+            -0.017
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.overlapping_tools",
+    "message": "subtract tools 'tool#0' and 'tool#1' overlap (host node 'host', tool node(s) 'dent-a', 'dent-b')",
+    "expected": "boolean.csg.overlapping_tools"
+  },
+  {
+    "id": "box-sub-tool-with-children",
+    "op": "subtract",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "subtract",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.3
+        },
+        "transform": {
+          "t": [
+            0.013,
+            0.413,
+            0.011
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": true
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.tool_has_children",
+    "message": "tool 'parent' has children, a boolean tool must be a leaf (on host node 'host')",
+    "expected": "boolean.csg.tool_has_children"
+  },
+  {
+    "id": "box-two-intersects",
+    "op": "intersect",
+    "host": {
+      "kind": "box",
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "transform": null
+    },
+    "tools": [
+      {
+        "op": "intersect",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        },
+        "transform": {
+          "t": [
+            0.013,
+            -0.011,
+            0.017
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      },
+      {
+        "op": "intersect",
+        "kind": "sphere",
+        "params": {
+          "radius": 0.75
+        },
+        "transform": {
+          "t": [
+            -0.021,
+            0.017,
+            0.009
+          ],
+          "r": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "s": [
+            1,
+            1,
+            1
+          ]
+        },
+        "hasChildren": false
+      }
+    ],
+    "status": "refused",
+    "triangles": 0,
+    "watertight": false,
+    "volume": 0,
+    "volumeIdentityRelErr": null,
+    "code": "boolean.csg.multiple_intersect",
+    "message": "more than one intersect tool on the same host (intersect nodes 'ball-a' and 'ball-b' on host node 'host')",
+    "expected": "boolean.csg.multiple_intersect"
+  }
+]

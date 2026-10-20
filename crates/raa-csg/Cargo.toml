@@ -1,0 +1,16 @@
+[package]
+name = "raa-csg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Simple booleans of primitives against a convex host: exact face cutting or a typed refusal."
+publish = false
+
+[dependencies]
+raa-math = { workspace = true }
+raa-geom = { workspace = true }
+raa-loader = { workspace = true }
+
+[dev-dependencies]
+raa-prims = { workspace = true }

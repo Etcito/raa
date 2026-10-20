@@ -1,0 +1,2524 @@
+{
+  "generatedBy": "tools/sdf-ref/gen-leaf-fixtures.mjs",
+  "command": "/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json",
+  "regenerate": "/root/nmc/engines/bin/node tools/sdf-ref/gen-leaf-fixtures.mjs --ref <sdfm checkout root> --out crates/raa-prims/tests/fixtures/sdf-leaf-reference.json",
+  "sdfModelerRevision": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+  "leafMeshSha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083",
+  "axisMap": [
+    {
+      "axis": "x",
+      "sign": 1
+    },
+    {
+      "axis": "y",
+      "sign": 1
+    },
+    {
+      "axis": "z",
+      "sign": 1
+    }
+  ],
+  "paramMap": {
+    "sphere": [
+      {
+        "ref": "radius",
+        "refIndex": null,
+        "raa": "radius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      }
+    ],
+    "box": [
+      {
+        "ref": "size",
+        "refIndex": 0,
+        "raa": "halfExtents",
+        "index": 0,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "size",
+        "refIndex": 1,
+        "raa": "halfExtents",
+        "index": 1,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "size",
+        "refIndex": 2,
+        "raa": "halfExtents",
+        "index": 2,
+        "scale": 2,
+        "value": null
+      }
+    ],
+    "roundBox": [
+      {
+        "ref": "size",
+        "refIndex": 0,
+        "raa": "halfExtents",
+        "index": 0,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "size",
+        "refIndex": 1,
+        "raa": "halfExtents",
+        "index": 1,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "size",
+        "refIndex": 2,
+        "raa": "halfExtents",
+        "index": 2,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "radius",
+        "refIndex": null,
+        "raa": "radius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      }
+    ],
+    "capsule": [
+      {
+        "ref": "height",
+        "refIndex": null,
+        "raa": "halfHeight",
+        "index": null,
+        "scale": 2,
+        "value": null,
+        "add": {
+          "raa": "radius",
+          "index": null,
+          "scale": 2
+        }
+      },
+      {
+        "ref": "radius",
+        "refIndex": null,
+        "raa": "radius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      }
+    ],
+    "cylinder": [
+      {
+        "ref": "height",
+        "refIndex": null,
+        "raa": "halfHeight",
+        "index": null,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "radius",
+        "refIndex": null,
+        "raa": "radius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      }
+    ],
+    "cone": [
+      {
+        "ref": "height",
+        "refIndex": null,
+        "raa": "halfHeight",
+        "index": null,
+        "scale": 2,
+        "value": null
+      },
+      {
+        "ref": "radiusBottom",
+        "refIndex": null,
+        "raa": "radius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      },
+      {
+        "ref": "radiusTop",
+        "refIndex": null,
+        "raa": null,
+        "index": null,
+        "scale": 1,
+        "value": 0
+      }
+    ],
+    "torus": [
+      {
+        "ref": "majorRadius",
+        "refIndex": null,
+        "raa": "majorRadius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      },
+      {
+        "ref": "minorRadius",
+        "refIndex": null,
+        "raa": "minorRadius",
+        "index": null,
+        "scale": 1,
+        "value": null
+      }
+    ],
+    "ellipsoid": [
+      {
+        "ref": "radii",
+        "refIndex": 0,
+        "raa": "radii",
+        "index": 0,
+        "scale": 1,
+        "value": null
+      },
+      {
+        "ref": "radii",
+        "refIndex": 1,
+        "raa": "radii",
+        "index": 1,
+        "scale": 1,
+        "value": null
+      },
+      {
+        "ref": "radii",
+        "refIndex": 2,
+        "raa": "radii",
+        "index": 2,
+        "scale": 1,
+        "value": null
+      }
+    ]
+  },
+  "mapping": {
+    "version": 1,
+    "reference": {
+      "repo": "sdfm",
+      "path": "src/core/hybrid/leaf-mesh.ts",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6"
+    },
+    "axisMap": {
+      "x": "+x",
+      "y": "+y",
+      "z": "+z",
+      "det": 1
+    },
+    "paramMap": {
+      "sphere": {
+        "sdfKind": "sphere",
+        "params": {
+          "radius": {
+            "from": "radius",
+            "component": null,
+            "scale": 1
+          }
+        },
+        "constants": {},
+        "segments": [
+          {
+            "count": "nu",
+            "ref": 40,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:103"
+          },
+          {
+            "count": "nv",
+            "ref": 20,
+            "min": 2,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:103"
+          }
+        ]
+      },
+      "box": {
+        "sdfKind": "box",
+        "params": {
+          "size.x": {
+            "from": "halfExtents",
+            "component": "x",
+            "scale": 2
+          },
+          "size.y": {
+            "from": "halfExtents",
+            "component": "y",
+            "scale": 2
+          },
+          "size.z": {
+            "from": "halfExtents",
+            "component": "z",
+            "scale": 2
+          }
+        },
+        "constants": {},
+        "segments": []
+      },
+      "roundBox": {
+        "sdfKind": "roundBox",
+        "params": {
+          "size.x": {
+            "from": "halfExtents",
+            "component": "x",
+            "scale": 2
+          },
+          "size.y": {
+            "from": "halfExtents",
+            "component": "y",
+            "scale": 2
+          },
+          "size.z": {
+            "from": "halfExtents",
+            "component": "z",
+            "scale": 2
+          },
+          "radius": {
+            "from": "radius",
+            "component": null,
+            "scale": 1
+          }
+        },
+        "constants": {},
+        "segments": [
+          {
+            "count": "cells",
+            "ref": 10,
+            "min": 1,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:149"
+          }
+        ]
+      },
+      "capsule": {
+        "sdfKind": "capsule",
+        "params": {
+          "height": {
+            "from": "halfHeight",
+            "component": null,
+            "scale": 2,
+            "add": {
+              "from": "radius",
+              "component": null,
+              "scale": 2
+            }
+          },
+          "radius": {
+            "from": "radius",
+            "component": null,
+            "scale": 1
+          }
+        },
+        "constants": {},
+        "segments": [
+          {
+            "count": "nu",
+            "ref": 32,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:177"
+          },
+          {
+            "count": "nCap",
+            "ref": 10,
+            "min": 1,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:177"
+          }
+        ]
+      },
+      "cylinder": {
+        "sdfKind": "cylinder",
+        "params": {
+          "height": {
+            "from": "halfHeight",
+            "component": null,
+            "scale": 2
+          },
+          "radius": {
+            "from": "radius",
+            "component": null,
+            "scale": 1
+          }
+        },
+        "constants": {},
+        "segments": [
+          {
+            "count": "nu",
+            "ref": 40,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:197"
+          }
+        ]
+      },
+      "cone": {
+        "sdfKind": "cone",
+        "params": {
+          "height": {
+            "from": "halfHeight",
+            "component": null,
+            "scale": 2
+          },
+          "radiusBottom": {
+            "from": "radius",
+            "component": null,
+            "scale": 1
+          }
+        },
+        "constants": {
+          "radiusTop": 0
+        },
+        "segments": [
+          {
+            "count": "nu",
+            "ref": 40,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:197"
+          }
+        ]
+      },
+      "torus": {
+        "sdfKind": "torus",
+        "params": {
+          "majorRadius": {
+            "from": "majorRadius",
+            "component": null,
+            "scale": 1
+          },
+          "minorRadius": {
+            "from": "minorRadius",
+            "component": null,
+            "scale": 1
+          }
+        },
+        "constants": {},
+        "segments": [
+          {
+            "count": "nu",
+            "ref": 48,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:222"
+          },
+          {
+            "count": "nv",
+            "ref": 20,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:222"
+          }
+        ]
+      },
+      "ellipsoid": {
+        "sdfKind": "ellipsoid",
+        "params": {
+          "radii.x": {
+            "from": "radii",
+            "component": "x",
+            "scale": 1
+          },
+          "radii.y": {
+            "from": "radii",
+            "component": "y",
+            "scale": 1
+          },
+          "radii.z": {
+            "from": "radii",
+            "component": "z",
+            "scale": 1
+          }
+        },
+        "constants": {},
+        "segments": [
+          {
+            "count": "nu",
+            "ref": 40,
+            "min": 3,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:103"
+          },
+          {
+            "count": "nv",
+            "ref": 20,
+            "min": 2,
+            "multiple": 1,
+            "source": "src/core/hybrid/leaf-mesh.ts:103"
+          }
+        ]
+      }
+    }
+  },
+  "kinds": {
+    "sphere": {
+      "sdfKind": "sphere",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "box": {
+      "sdfKind": "box",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "roundBox": {
+      "sdfKind": "roundBox",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "capsule": {
+      "sdfKind": "capsule",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "cylinder": {
+      "sdfKind": "cylinder",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "cone": {
+      "sdfKind": "cone",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "torus": {
+      "sdfKind": "torus",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    },
+    "ellipsoid": {
+      "sdfKind": "ellipsoid",
+      "path": "call",
+      "commit": "50b45d5862be55ba85492d6bb0e457ed3b244dd6",
+      "sha256": "048318c72eb806201535cbfa83acd5d96056de1da0f866e8a56f94068cd63083"
+    }
+  },
+  "cases": [
+    {
+      "kind": "sphere",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "radius": 0.8
+      },
+      "refParams": {
+        "radius": 0.8
+      },
+      "sdfInput": {
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        }
+      },
+      "counts": {
+        "nu": 13,
+        "nv": 7
+      },
+      "uniquePositions": 80,
+      "triangles": 156,
+      "bboxMin": [
+        -0.7572786211967468,
+        -0.800000011920929,
+        -0.7742556929588318
+      ],
+      "bboxMax": [
+        0.7799423336982727,
+        0.800000011920929,
+        0.7742556929588318
+      ],
+      "area": 7.688639429602088,
+      "volume": 1.9600240166551905,
+      "closed": true
+    },
+    {
+      "kind": "sphere",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "radius": 0.8
+      },
+      "refParams": {
+        "radius": 0.8
+      },
+      "sdfInput": {
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        }
+      },
+      "counts": {
+        "nu": 40,
+        "nv": 20
+      },
+      "uniquePositions": 762,
+      "triangles": 1520,
+      "bboxMin": [
+        -0.800000011920929,
+        -0.800000011920929,
+        -0.800000011920929
+      ],
+      "bboxMax": [
+        0.800000011920929,
+        0.800000011920929,
+        0.800000011920929
+      ],
+      "area": 8.0012024889734,
+      "volume": 2.1227039473551046,
+      "closed": true
+    },
+    {
+      "kind": "sphere",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "radius": 0.8
+      },
+      "refParams": {
+        "radius": 0.8
+      },
+      "sdfInput": {
+        "kind": "sphere",
+        "params": {
+          "radius": 0.8
+        }
+      },
+      "counts": {
+        "nu": 107,
+        "nv": 53
+      },
+      "uniquePositions": 5566,
+      "triangles": 11128,
+      "bboxMin": [
+        -0.7993040084838867,
+        -0.800000011920929,
+        -0.7995625138282776
+      ],
+      "bboxMax": [
+        0.799648642539978,
+        0.800000011920929,
+        0.7995625138282776
+      ],
+      "area": 8.03663533525343,
+      "volume": 2.141546057802777,
+      "closed": true
+    },
+    {
+      "kind": "sphere",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "radius": 1.7
+      },
+      "refParams": {
+        "radius": 1.7
+      },
+      "sdfInput": {
+        "kind": "sphere",
+        "params": {
+          "radius": 1.7
+        }
+      },
+      "counts": {
+        "nu": 13,
+        "nv": 7
+      },
+      "uniquePositions": 80,
+      "triangles": 156,
+      "bboxMin": [
+        -1.6092170476913452,
+        -1.7000000476837158,
+        -1.6452933549880981
+      ],
+      "bboxMax": [
+        1.6573774814605713,
+        1.7000000476837158,
+        1.6452933549880981
+      ],
+      "area": 34.71901339882975,
+      "volume": 18.80780935769166,
+      "closed": true
+    },
+    {
+      "kind": "sphere",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "radius": 1.7
+      },
+      "refParams": {
+        "radius": 1.7
+      },
+      "sdfInput": {
+        "kind": "sphere",
+        "params": {
+          "radius": 1.7
+        }
+      },
+      "counts": {
+        "nu": 40,
+        "nv": 20
+      },
+      "uniquePositions": 762,
+      "triangles": 1520,
+      "bboxMin": [
+        -1.7000000476837158,
+        -1.7000000476837158,
+        -1.7000000476837158
+      ],
+      "bboxMax": [
+        1.7000000476837158,
+        1.7000000476837158,
+        1.7000000476837158
+      ],
+      "area": 36.130430741072054,
+      "volume": 20.368837535754764,
+      "closed": true
+    },
+    {
+      "kind": "sphere",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "radius": 1.7
+      },
+      "refParams": {
+        "radius": 1.7
+      },
+      "sdfInput": {
+        "kind": "sphere",
+        "params": {
+          "radius": 1.7
+        }
+      },
+      "counts": {
+        "nu": 107,
+        "nv": 53
+      },
+      "uniquePositions": 5566,
+      "triangles": 11128,
+      "bboxMin": [
+        -1.6985210180282593,
+        -1.7000000476837158,
+        -1.6990703344345093
+      ],
+      "bboxMax": [
+        1.6992534399032593,
+        1.7000000476837158,
+        1.6990703344345093
+      ],
+      "area": 36.290431203771064,
+      "volume": 20.549640002395712,
+      "closed": true
+    },
+    {
+      "kind": "box",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "refParams": {
+        "size": [
+          1.4,
+          1.2,
+          1
+        ]
+      },
+      "sdfInput": {
+        "kind": "box",
+        "params": {
+          "size": [
+            1.4,
+            1.2,
+            1
+          ]
+        }
+      },
+      "counts": {},
+      "uniquePositions": 8,
+      "triangles": 12,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 8.560000123977659,
+      "volume": 1.6800000381469717,
+      "closed": true
+    },
+    {
+      "kind": "box",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "refParams": {
+        "size": [
+          1.4,
+          1.2,
+          1
+        ]
+      },
+      "sdfInput": {
+        "kind": "box",
+        "params": {
+          "size": [
+            1.4,
+            1.2,
+            1
+          ]
+        }
+      },
+      "counts": {},
+      "uniquePositions": 8,
+      "triangles": 12,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 8.560000123977659,
+      "volume": 1.6800000381469717,
+      "closed": true
+    },
+    {
+      "kind": "box",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ]
+      },
+      "refParams": {
+        "size": [
+          1.4,
+          1.2,
+          1
+        ]
+      },
+      "sdfInput": {
+        "kind": "box",
+        "params": {
+          "size": [
+            1.4,
+            1.2,
+            1
+          ]
+        }
+      },
+      "counts": {},
+      "uniquePositions": 8,
+      "triangles": 12,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 8.560000123977659,
+      "volume": 1.6800000381469717,
+      "closed": true
+    },
+    {
+      "kind": "box",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "halfExtents": [
+          1.2,
+          0.3,
+          2
+        ]
+      },
+      "refParams": {
+        "size": [
+          2.4,
+          0.6,
+          4
+        ]
+      },
+      "sdfInput": {
+        "kind": "box",
+        "params": {
+          "size": [
+            2.4,
+            0.6,
+            4
+          ]
+        }
+      },
+      "counts": {},
+      "uniquePositions": 8,
+      "triangles": 12,
+      "bboxMin": [
+        -1.2000000476837158,
+        -0.30000001192092896,
+        -2
+      ],
+      "bboxMax": [
+        1.2000000476837158,
+        0.30000001192092896,
+        2
+      ],
+      "area": 26.880001182556157,
+      "volume": 5.76000045776368,
+      "closed": true
+    },
+    {
+      "kind": "box",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "halfExtents": [
+          1.2,
+          0.3,
+          2
+        ]
+      },
+      "refParams": {
+        "size": [
+          2.4,
+          0.6,
+          4
+        ]
+      },
+      "sdfInput": {
+        "kind": "box",
+        "params": {
+          "size": [
+            2.4,
+            0.6,
+            4
+          ]
+        }
+      },
+      "counts": {},
+      "uniquePositions": 8,
+      "triangles": 12,
+      "bboxMin": [
+        -1.2000000476837158,
+        -0.30000001192092896,
+        -2
+      ],
+      "bboxMax": [
+        1.2000000476837158,
+        0.30000001192092896,
+        2
+      ],
+      "area": 26.880001182556157,
+      "volume": 5.76000045776368,
+      "closed": true
+    },
+    {
+      "kind": "box",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "halfExtents": [
+          1.2,
+          0.3,
+          2
+        ]
+      },
+      "refParams": {
+        "size": [
+          2.4,
+          0.6,
+          4
+        ]
+      },
+      "sdfInput": {
+        "kind": "box",
+        "params": {
+          "size": [
+            2.4,
+            0.6,
+            4
+          ]
+        }
+      },
+      "counts": {},
+      "uniquePositions": 8,
+      "triangles": 12,
+      "bboxMin": [
+        -1.2000000476837158,
+        -0.30000001192092896,
+        -2
+      ],
+      "bboxMax": [
+        1.2000000476837158,
+        0.30000001192092896,
+        2
+      ],
+      "area": 26.880001182556157,
+      "volume": 5.76000045776368,
+      "closed": true
+    },
+    {
+      "kind": "roundBox",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ],
+        "radius": 0.15
+      },
+      "refParams": {
+        "size": [
+          1.4,
+          1.2,
+          1
+        ],
+        "radius": 0.15
+      },
+      "sdfInput": {
+        "kind": "roundBox",
+        "params": {
+          "size": [
+            1.4,
+            1.2,
+            1
+          ],
+          "radius": 0.15
+        }
+      },
+      "counts": {
+        "cells": 3
+      },
+      "uniquePositions": 56,
+      "triangles": 108,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 7.23049114014023,
+      "volume": 1.4643141299745637,
+      "closed": true
+    },
+    {
+      "kind": "roundBox",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ],
+        "radius": 0.15
+      },
+      "refParams": {
+        "size": [
+          1.4,
+          1.2,
+          1
+        ],
+        "radius": 0.15
+      },
+      "sdfInput": {
+        "kind": "roundBox",
+        "params": {
+          "size": [
+            1.4,
+            1.2,
+            1
+          ],
+          "radius": 0.15
+        }
+      },
+      "counts": {
+        "cells": 10
+      },
+      "uniquePositions": 602,
+      "triangles": 1200,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 7.551893900397589,
+      "volume": 1.601020900257534,
+      "closed": true
+    },
+    {
+      "kind": "roundBox",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "halfExtents": [
+          0.7,
+          0.6,
+          0.5
+        ],
+        "radius": 0.15
+      },
+      "refParams": {
+        "size": [
+          1.4,
+          1.2,
+          1
+        ],
+        "radius": 0.15
+      },
+      "sdfInput": {
+        "kind": "roundBox",
+        "params": {
+          "size": [
+            1.4,
+            1.2,
+            1
+          ],
+          "radius": 0.15
+        }
+      },
+      "counts": {
+        "cells": 27
+      },
+      "uniquePositions": 4376,
+      "triangles": 8748,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 7.597585697944888,
+      "volume": 1.6126972985568722,
+      "closed": true
+    },
+    {
+      "kind": "roundBox",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "halfExtents": [
+          1,
+          1,
+          0.4
+        ],
+        "radius": 0.35
+      },
+      "refParams": {
+        "size": [
+          2,
+          2,
+          0.8
+        ],
+        "radius": 0.35
+      },
+      "sdfInput": {
+        "kind": "roundBox",
+        "params": {
+          "size": [
+            2,
+            2,
+            0.8
+          ],
+          "radius": 0.35
+        }
+      },
+      "counts": {
+        "cells": 3
+      },
+      "uniquePositions": 56,
+      "triangles": 108,
+      "bboxMin": [
+        -0.9904821515083313,
+        -0.9904821515083313,
+        -0.4000000059604645
+      ],
+      "bboxMax": [
+        0.9904821515083313,
+        0.9904821515083313,
+        0.4000000059604645
+      ],
+      "area": 10.626307141983865,
+      "volume": 2.3634861051445277,
+      "closed": true
+    },
+    {
+      "kind": "roundBox",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "halfExtents": [
+          1,
+          1,
+          0.4
+        ],
+        "radius": 0.35
+      },
+      "refParams": {
+        "size": [
+          2,
+          2,
+          0.8
+        ],
+        "radius": 0.35
+      },
+      "sdfInput": {
+        "kind": "roundBox",
+        "params": {
+          "size": [
+            2,
+            2,
+            0.8
+          ],
+          "radius": 0.35
+        }
+      },
+      "counts": {
+        "cells": 10
+      },
+      "uniquePositions": 602,
+      "triangles": 1200,
+      "bboxMin": [
+        -1,
+        -1,
+        -0.4000000059604645
+      ],
+      "bboxMax": [
+        1,
+        1,
+        0.4000000059604645
+      ],
+      "area": 11.288617879364205,
+      "volume": 2.7143398768856986,
+      "closed": true
+    },
+    {
+      "kind": "roundBox",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "halfExtents": [
+          1,
+          1,
+          0.4
+        ],
+        "radius": 0.35
+      },
+      "refParams": {
+        "size": [
+          2,
+          2,
+          0.8
+        ],
+        "radius": 0.35
+      },
+      "sdfInput": {
+        "kind": "roundBox",
+        "params": {
+          "size": [
+            2,
+            2,
+            0.8
+          ],
+          "radius": 0.35
+        }
+      },
+      "counts": {
+        "cells": 27
+      },
+      "uniquePositions": 4376,
+      "triangles": 8748,
+      "bboxMin": [
+        -1,
+        -1,
+        -0.4000000059604645
+      ],
+      "bboxMax": [
+        1,
+        1,
+        0.4000000059604645
+      ],
+      "area": 11.364893192184233,
+      "volume": 2.7475512564706,
+      "closed": true
+    },
+    {
+      "kind": "capsule",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "radius": 0.4,
+        "halfHeight": 0.5
+      },
+      "refParams": {
+        "height": 1.8,
+        "radius": 0.4
+      },
+      "sdfInput": {
+        "kind": "capsule",
+        "params": {
+          "height": 1.8,
+          "radius": 0.4
+        }
+      },
+      "counts": {
+        "nu": 11,
+        "nCap": 3
+      },
+      "uniquePositions": 68,
+      "triangles": 132,
+      "bboxMin": [
+        -0.38379719853401184,
+        -0.8999999761581421,
+        -0.39592859148979187
+      ],
+      "bboxMax": [
+        0.4000000059604645,
+        0.8999999761581421,
+        0.39592859148979187
+      ],
+      "area": 4.368768545051618,
+      "volume": 0.7125072740415255,
+      "closed": true
+    },
+    {
+      "kind": "capsule",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "radius": 0.4,
+        "halfHeight": 0.5
+      },
+      "refParams": {
+        "height": 1.8,
+        "radius": 0.4
+      },
+      "sdfInput": {
+        "kind": "capsule",
+        "params": {
+          "height": 1.8,
+          "radius": 0.4
+        }
+      },
+      "counts": {
+        "nu": 32,
+        "nCap": 10
+      },
+      "uniquePositions": 642,
+      "triangles": 1280,
+      "bboxMin": [
+        -0.4000000059604645,
+        -0.8999999761581421,
+        -0.4000000059604645
+      ],
+      "bboxMax": [
+        0.4000000059604645,
+        0.8999999761581421,
+        0.4000000059604645
+      ],
+      "area": 4.507226027089585,
+      "volume": 0.7641548513869661,
+      "closed": true
+    },
+    {
+      "kind": "capsule",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "radius": 0.4,
+        "halfHeight": 0.5
+      },
+      "refParams": {
+        "height": 1.8,
+        "radius": 0.4
+      },
+      "sdfInput": {
+        "kind": "capsule",
+        "params": {
+          "height": 1.8,
+          "radius": 0.4
+        }
+      },
+      "counts": {
+        "nu": 85,
+        "nCap": 27
+      },
+      "uniquePositions": 4592,
+      "triangles": 9180,
+      "bboxMin": [
+        -0.39972683787345886,
+        -0.8999999761581421,
+        -0.3999316990375519
+      ],
+      "bboxMax": [
+        0.4000000059604645,
+        0.8999999761581421,
+        0.3999316990375519
+      ],
+      "area": 4.521555631994217,
+      "volume": 0.7698091125356039,
+      "closed": true
+    },
+    {
+      "kind": "capsule",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "radius": 0.25,
+        "halfHeight": 1.2
+      },
+      "refParams": {
+        "height": 2.9,
+        "radius": 0.25
+      },
+      "sdfInput": {
+        "kind": "capsule",
+        "params": {
+          "height": 2.9,
+          "radius": 0.25
+        }
+      },
+      "counts": {
+        "nu": 11,
+        "nCap": 3
+      },
+      "uniquePositions": 68,
+      "triangles": 132,
+      "bboxMin": [
+        -0.2398732453584671,
+        -1.4500000476837158,
+        -0.24745535850524902
+      ],
+      "bboxMax": [
+        0.25,
+        1.4500000476837158,
+        0.24745535850524902
+      ],
+      "area": 4.456964449418643,
+      "volume": 0.5038273598570578,
+      "closed": true
+    },
+    {
+      "kind": "capsule",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "radius": 0.25,
+        "halfHeight": 1.2
+      },
+      "refParams": {
+        "height": 2.9,
+        "radius": 0.25
+      },
+      "sdfInput": {
+        "kind": "capsule",
+        "params": {
+          "height": 2.9,
+          "radius": 0.25
+        }
+      },
+      "counts": {
+        "nu": 32,
+        "nCap": 10
+      },
+      "uniquePositions": 642,
+      "triangles": 1280,
+      "bboxMin": [
+        -0.25,
+        -1.4500000476837158,
+        -0.25
+      ],
+      "bboxMax": [
+        0.25,
+        1.4500000476837158,
+        0.25
+      ],
+      "area": 4.544321926396639,
+      "volume": 0.5328465531762903,
+      "closed": true
+    },
+    {
+      "kind": "capsule",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "radius": 0.25,
+        "halfHeight": 1.2
+      },
+      "refParams": {
+        "height": 2.9,
+        "radius": 0.25
+      },
+      "sdfInput": {
+        "kind": "capsule",
+        "params": {
+          "height": 2.9,
+          "radius": 0.25
+        }
+      },
+      "counts": {
+        "nu": 85,
+        "nCap": 27
+      },
+      "uniquePositions": 4592,
+      "triangles": 9180,
+      "bboxMin": [
+        -0.2498292624950409,
+        -1.4500000476837158,
+        -0.24995730817317963
+      ],
+      "bboxMax": [
+        0.25,
+        1.4500000476837158,
+        0.24995730817317963
+      ],
+      "area": 4.553761447725387,
+      "volume": 0.5361448115970942,
+      "closed": true
+    },
+    {
+      "kind": "cylinder",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "radius": 0.6,
+        "halfHeight": 0.7
+      },
+      "refParams": {
+        "height": 1.4,
+        "radius": 0.6
+      },
+      "sdfInput": {
+        "kind": "cylinder",
+        "params": {
+          "height": 1.4,
+          "radius": 0.6
+        }
+      },
+      "counts": {
+        "nu": 13
+      },
+      "uniquePositions": 28,
+      "triangles": 52,
+      "bboxMin": [
+        -0.5825650691986084,
+        -0.699999988079071,
+        -0.5956253409385681
+      ],
+      "bboxMax": [
+        0.6000000238418579,
+        0.699999988079071,
+        0.5956253409385681
+      ],
+      "area": 7.401558501224991,
+      "volume": 1.522433097462074,
+      "closed": true
+    },
+    {
+      "kind": "cylinder",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "radius": 0.6,
+        "halfHeight": 0.7
+      },
+      "refParams": {
+        "height": 1.4,
+        "radius": 0.6
+      },
+      "sdfInput": {
+        "kind": "cylinder",
+        "params": {
+          "height": 1.4,
+          "radius": 0.6
+        }
+      },
+      "counts": {
+        "nu": 40
+      },
+      "uniquePositions": 82,
+      "triangles": 160,
+      "bboxMin": [
+        -0.6000000238418579,
+        -0.699999988079071,
+        -0.6000000238418579
+      ],
+      "bboxMax": [
+        0.6000000238418579,
+        0.699999988079071,
+        0.6000000238418579
+      ],
+      "area": 7.525107250067654,
+      "volume": 1.5768593195873406,
+      "closed": true
+    },
+    {
+      "kind": "cylinder",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "radius": 0.6,
+        "halfHeight": 0.7
+      },
+      "refParams": {
+        "height": 1.4,
+        "radius": 0.6
+      },
+      "sdfInput": {
+        "kind": "cylinder",
+        "params": {
+          "height": 1.4,
+          "radius": 0.6
+        }
+      },
+      "counts": {
+        "nu": 107
+      },
+      "uniquePositions": 216,
+      "triangles": 428,
+      "bboxMin": [
+        -0.5997413992881775,
+        -0.699999988079071,
+        -0.5999353528022766
+      ],
+      "bboxMax": [
+        0.6000000238418579,
+        0.699999988079071,
+        0.5999353528022766
+      ],
+      "area": 7.537764267159296,
+      "volume": 1.582452859633406,
+      "closed": true
+    },
+    {
+      "kind": "cylinder",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "radius": 1.5,
+        "halfHeight": 0.2
+      },
+      "refParams": {
+        "height": 0.4,
+        "radius": 1.5
+      },
+      "sdfInput": {
+        "kind": "cylinder",
+        "params": {
+          "height": 0.4,
+          "radius": 1.5
+        }
+      },
+      "counts": {
+        "nu": 13
+      },
+      "uniquePositions": 28,
+      "triangles": 52,
+      "bboxMin": [
+        -1.456412672996521,
+        -0.20000000298023224,
+        -1.4890632629394531
+      ],
+      "bboxMax": [
+        1.5,
+        0.20000000298023224,
+        1.4890632629394531
+      ],
+      "area": 17.326476912116,
+      "volume": 2.7186305462018283,
+      "closed": true
+    },
+    {
+      "kind": "cylinder",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "radius": 1.5,
+        "halfHeight": 0.2
+      },
+      "refParams": {
+        "height": 0.4,
+        "radius": 1.5
+      },
+      "sdfInput": {
+        "kind": "cylinder",
+        "params": {
+          "height": 0.4,
+          "radius": 1.5
+        }
+      },
+      "counts": {
+        "nu": 40
+      },
+      "uniquePositions": 82,
+      "triangles": 160,
+      "bboxMin": [
+        -1.5,
+        -0.20000000298023224,
+        -1.5
+      ],
+      "bboxMax": [
+        1.5,
+        0.20000000298023224,
+        1.5
+      ],
+      "area": 17.84513817740706,
+      "volume": 2.815820354950851,
+      "closed": true
+    },
+    {
+      "kind": "cylinder",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "radius": 1.5,
+        "halfHeight": 0.2
+      },
+      "refParams": {
+        "height": 0.4,
+        "radius": 1.5
+      },
+      "sdfInput": {
+        "kind": "cylinder",
+        "params": {
+          "height": 0.4,
+          "radius": 1.5
+        }
+      },
+      "counts": {
+        "nu": 107
+      },
+      "uniquePositions": 216,
+      "triangles": 428,
+      "bboxMin": [
+        -1.4993535280227661,
+        -0.20000000298023224,
+        -1.4998383522033691
+      ],
+      "bboxMax": [
+        1.5,
+        0.20000000298023224,
+        1.4998383522033691
+      ],
+      "area": 17.898413277022758,
+      "volume": 2.8258087745408624,
+      "closed": true
+    },
+    {
+      "kind": "cone",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "radius": 0.7,
+        "halfHeight": 0.8
+      },
+      "refParams": {
+        "height": 1.6,
+        "radiusBottom": 0.7,
+        "radiusTop": 0
+      },
+      "sdfInput": {
+        "kind": "cone",
+        "params": {
+          "height": 1.6,
+          "radiusBottom": 0.7,
+          "radiusTop": 0
+        }
+      },
+      "counts": {
+        "nu": 13
+      },
+      "uniquePositions": 15,
+      "triangles": 26,
+      "bboxMin": [
+        -0.6796592473983765,
+        -0.800000011920929,
+        -0.6948962211608887
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.800000011920929,
+        0.6948962211608887
+      ],
+      "area": 5.265921928888777,
+      "volume": 0.7894097877281626,
+      "closed": true
+    },
+    {
+      "kind": "cone",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "radius": 0.7,
+        "halfHeight": 0.8
+      },
+      "refParams": {
+        "height": 1.6,
+        "radiusBottom": 0.7,
+        "radiusTop": 0
+      },
+      "sdfInput": {
+        "kind": "cone",
+        "params": {
+          "height": 1.6,
+          "radiusBottom": 0.7,
+          "radiusTop": 0
+        }
+      },
+      "counts": {
+        "nu": 40
+      },
+      "uniquePositions": 42,
+      "triangles": 80,
+      "bboxMin": [
+        -0.699999988079071,
+        -0.800000011920929,
+        -0.699999988079071
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.800000011920929,
+        0.699999988079071
+      ],
+      "area": 5.367801751297553,
+      "volume": 0.8176307763172344,
+      "closed": true
+    },
+    {
+      "kind": "cone",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "radius": 0.7,
+        "halfHeight": 0.8
+      },
+      "refParams": {
+        "height": 1.6,
+        "radiusBottom": 0.7,
+        "radiusTop": 0
+      },
+      "sdfInput": {
+        "kind": "cone",
+        "params": {
+          "height": 1.6,
+          "radiusBottom": 0.7,
+          "radiusTop": 0
+        }
+      },
+      "counts": {
+        "nu": 107
+      },
+      "uniquePositions": 109,
+      "triangles": 214,
+      "bboxMin": [
+        -0.6996983289718628,
+        -0.800000011920929,
+        -0.6999245882034302
+      ],
+      "bboxMax": [
+        0.699999988079071,
+        0.800000011920929,
+        0.6999245882034302
+      ],
+      "area": 5.378267313147017,
+      "volume": 0.8205311480360845,
+      "closed": true
+    },
+    {
+      "kind": "cone",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "radius": 0.3,
+        "halfHeight": 1.5
+      },
+      "refParams": {
+        "height": 3,
+        "radiusBottom": 0.3,
+        "radiusTop": 0
+      },
+      "sdfInput": {
+        "kind": "cone",
+        "params": {
+          "height": 3,
+          "radiusBottom": 0.3,
+          "radiusTop": 0
+        }
+      },
+      "counts": {
+        "nu": 13
+      },
+      "uniquePositions": 15,
+      "triangles": 26,
+      "bboxMin": [
+        -0.2912825345993042,
+        -1.5,
+        -0.29781267046928406
+      ],
+      "bboxMax": [
+        0.30000001192092896,
+        1.5,
+        0.29781267046928406
+      ],
+      "area": 3.0850235414324705,
+      "volume": 0.2718630577480279,
+      "closed": true
+    },
+    {
+      "kind": "cone",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "radius": 0.3,
+        "halfHeight": 1.5
+      },
+      "refParams": {
+        "height": 3,
+        "radiusBottom": 0.3,
+        "radiusTop": 0
+      },
+      "sdfInput": {
+        "kind": "cone",
+        "params": {
+          "height": 3,
+          "radiusBottom": 0.3,
+          "radiusTop": 0
+        }
+      },
+      "counts": {
+        "nu": 40
+      },
+      "uniquePositions": 42,
+      "triangles": 80,
+      "bboxMin": [
+        -0.30000001192092896,
+        -1.5,
+        -0.30000001192092896
+      ],
+      "bboxMax": [
+        0.30000001192092896,
+        1.5,
+        0.30000001192092896
+      ],
+      "area": 3.1201104164163627,
+      "volume": 0.281582026150196,
+      "closed": true
+    },
+    {
+      "kind": "cone",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "radius": 0.3,
+        "halfHeight": 1.5
+      },
+      "refParams": {
+        "height": 3,
+        "radiusBottom": 0.3,
+        "radiusTop": 0
+      },
+      "sdfInput": {
+        "kind": "cone",
+        "params": {
+          "height": 3,
+          "radiusBottom": 0.3,
+          "radiusTop": 0
+        }
+      },
+      "counts": {
+        "nu": 107
+      },
+      "uniquePositions": 109,
+      "triangles": 214,
+      "bboxMin": [
+        -0.29987069964408875,
+        -1.5,
+        -0.2999676764011383
+      ],
+      "bboxMax": [
+        0.30000001192092896,
+        1.5,
+        0.2999676764011383
+      ],
+      "area": 3.123695890663284,
+      "volume": 0.28258087260400305,
+      "closed": true
+    },
+    {
+      "kind": "torus",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "refParams": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "sdfInput": {
+        "kind": "torus",
+        "params": {
+          "majorRadius": 0.6,
+          "minorRadius": 0.22
+        }
+      },
+      "counts": {
+        "nu": 16,
+        "nv": 7
+      },
+      "uniquePositions": 112,
+      "triangles": 224,
+      "bboxMin": [
+        -0.8199999928474426,
+        -0.21448414027690887,
+        -0.8199999928474426
+      ],
+      "bboxMax": [
+        0.8199999928474426,
+        0.21448414027690887,
+        0.8199999928474426
+      ],
+      "area": 4.957681910435982,
+      "volume": 0.4865611792380419,
+      "closed": true
+    },
+    {
+      "kind": "torus",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "refParams": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "sdfInput": {
+        "kind": "torus",
+        "params": {
+          "majorRadius": 0.6,
+          "minorRadius": 0.22
+        }
+      },
+      "counts": {
+        "nu": 48,
+        "nv": 20
+      },
+      "uniquePositions": 960,
+      "triangles": 1920,
+      "bboxMin": [
+        -0.8199999928474426,
+        -0.2199999988079071,
+        -0.8199999928474426
+      ],
+      "bboxMax": [
+        0.8199999928474426,
+        0.2199999988079071,
+        0.8199999928474426
+      ],
+      "area": 5.180492735869334,
+      "volume": 0.5622350008978741,
+      "closed": true
+    },
+    {
+      "kind": "torus",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "refParams": {
+        "majorRadius": 0.6,
+        "minorRadius": 0.22
+      },
+      "sdfInput": {
+        "kind": "torus",
+        "params": {
+          "majorRadius": 0.6,
+          "minorRadius": 0.22
+        }
+      },
+      "counts": {
+        "nu": 128,
+        "nv": 53
+      },
+      "uniquePositions": 6784,
+      "triangles": 13568,
+      "bboxMin": [
+        -0.8199999928474426,
+        -0.2199033796787262,
+        -0.8199999928474426
+      ],
+      "bboxMax": [
+        0.8199999928474426,
+        0.2199033796787262,
+        0.8199999928474426
+      ],
+      "area": 5.206793012556789,
+      "volume": 0.5716552203397749,
+      "closed": true
+    },
+    {
+      "kind": "torus",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "majorRadius": 1.5,
+        "minorRadius": 0.1
+      },
+      "refParams": {
+        "majorRadius": 1.5,
+        "minorRadius": 0.1
+      },
+      "sdfInput": {
+        "kind": "torus",
+        "params": {
+          "majorRadius": 1.5,
+          "minorRadius": 0.1
+        }
+      },
+      "counts": {
+        "nu": 16,
+        "nv": 7
+      },
+      "uniquePositions": 112,
+      "triangles": 224,
+      "bboxMin": [
+        -1.600000023841858,
+        -0.09749279171228409,
+        -1.600000023841858
+      ],
+      "bboxMax": [
+        1.600000023841858,
+        0.09749279171228409,
+        1.600000023841858
+      ],
+      "area": 5.633729295644172,
+      "volume": 0.2513229032670633,
+      "closed": true
+    },
+    {
+      "kind": "torus",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "majorRadius": 1.5,
+        "minorRadius": 0.1
+      },
+      "refParams": {
+        "majorRadius": 1.5,
+        "minorRadius": 0.1
+      },
+      "sdfInput": {
+        "kind": "torus",
+        "params": {
+          "majorRadius": 1.5,
+          "minorRadius": 0.1
+        }
+      },
+      "counts": {
+        "nu": 48,
+        "nv": 20
+      },
+      "uniquePositions": 960,
+      "triangles": 1920,
+      "bboxMin": [
+        -1.600000023841858,
+        -0.10000000149011612,
+        -1.600000023841858
+      ],
+      "bboxMax": [
+        1.600000023841858,
+        0.10000000149011612,
+        1.600000023841858
+      ],
+      "area": 5.886923448490026,
+      "volume": 0.2904106274656914,
+      "closed": true
+    },
+    {
+      "kind": "torus",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "majorRadius": 1.5,
+        "minorRadius": 0.1
+      },
+      "refParams": {
+        "majorRadius": 1.5,
+        "minorRadius": 0.1
+      },
+      "sdfInput": {
+        "kind": "torus",
+        "params": {
+          "majorRadius": 1.5,
+          "minorRadius": 0.1
+        }
+      },
+      "counts": {
+        "nu": 128,
+        "nv": 53
+      },
+      "uniquePositions": 6784,
+      "triangles": 13568,
+      "bboxMin": [
+        -1.600000023841858,
+        -0.09995608031749725,
+        -1.600000023841858
+      ],
+      "bboxMax": [
+        1.600000023841858,
+        0.09995608031749725,
+        1.600000023841858
+      ],
+      "area": 5.916810190718926,
+      "volume": 0.29527645174196243,
+      "closed": true
+    },
+    {
+      "kind": "ellipsoid",
+      "set": "A",
+      "quality": 8,
+      "params": {
+        "radii": [
+          0.9,
+          0.6,
+          0.5
+        ]
+      },
+      "refParams": {
+        "radii": [
+          0.9,
+          0.6,
+          0.5
+        ]
+      },
+      "sdfInput": {
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.9,
+            0.6,
+            0.5
+          ]
+        }
+      },
+      "counts": {
+        "nu": 13,
+        "nv": 7
+      },
+      "uniquePositions": 80,
+      "triangles": 156,
+      "bboxMin": [
+        -0.8519384264945984,
+        -0.6000000238418579,
+        -0.4839097857475281
+      ],
+      "bboxMax": [
+        0.8774351477622986,
+        0.6000000238418579,
+        0.4839097857475281
+      ],
+      "area": 5.248382017667475,
+      "volume": 1.0336064391466833,
+      "closed": true
+    },
+    {
+      "kind": "ellipsoid",
+      "set": "A",
+      "quality": 24,
+      "params": {
+        "radii": [
+          0.9,
+          0.6,
+          0.5
+        ]
+      },
+      "refParams": {
+        "radii": [
+          0.9,
+          0.6,
+          0.5
+        ]
+      },
+      "sdfInput": {
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.9,
+            0.6,
+            0.5
+          ]
+        }
+      },
+      "counts": {
+        "nu": 40,
+        "nv": 20
+      },
+      "uniquePositions": 762,
+      "triangles": 1520,
+      "bboxMin": [
+        -0.8999999761581421,
+        -0.6000000238418579,
+        -0.5
+      ],
+      "bboxMax": [
+        0.8999999761581421,
+        0.6000000238418579,
+        0.5
+      ],
+      "area": 5.463136649165079,
+      "volume": 1.1193946497501652,
+      "closed": true
+    },
+    {
+      "kind": "ellipsoid",
+      "set": "A",
+      "quality": 64,
+      "params": {
+        "radii": [
+          0.9,
+          0.6,
+          0.5
+        ]
+      },
+      "refParams": {
+        "radii": [
+          0.9,
+          0.6,
+          0.5
+        ]
+      },
+      "sdfInput": {
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.9,
+            0.6,
+            0.5
+          ]
+        }
+      },
+      "counts": {
+        "nu": 107,
+        "nv": 53
+      },
+      "uniquePositions": 5566,
+      "triangles": 11128,
+      "bboxMin": [
+        -0.8992170095443726,
+        -0.6000000238418579,
+        -0.4997265636920929
+      ],
+      "bboxMax": [
+        0.8996047377586365,
+        0.6000000238418579,
+        0.4997265636920929
+      ],
+      "area": 5.48745250988746,
+      "volume": 1.1293309254688408,
+      "closed": true
+    },
+    {
+      "kind": "ellipsoid",
+      "set": "B",
+      "quality": 8,
+      "params": {
+        "radii": [
+          0.3,
+          1.4,
+          0.8
+        ]
+      },
+      "refParams": {
+        "radii": [
+          0.3,
+          1.4,
+          0.8
+        ]
+      },
+      "sdfInput": {
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.3,
+            1.4,
+            0.8
+          ]
+        }
+      },
+      "counts": {
+        "nu": 13,
+        "nv": 7
+      },
+      "uniquePositions": 80,
+      "triangles": 156,
+      "bboxMin": [
+        -0.28397947549819946,
+        -1.399999976158142,
+        -0.7742556929588318
+      ],
+      "bboxMax": [
+        0.29247838258743286,
+        1.399999976158142,
+        0.7742556929588318
+      ],
+      "area": 7.94710429968086,
+      "volume": 1.2862657796113846,
+      "closed": true
+    },
+    {
+      "kind": "ellipsoid",
+      "set": "B",
+      "quality": 24,
+      "params": {
+        "radii": [
+          0.3,
+          1.4,
+          0.8
+        ]
+      },
+      "refParams": {
+        "radii": [
+          0.3,
+          1.4,
+          0.8
+        ]
+      },
+      "sdfInput": {
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.3,
+            1.4,
+            0.8
+          ]
+        }
+      },
+      "counts": {
+        "nu": 40,
+        "nv": 20
+      },
+      "uniquePositions": 762,
+      "triangles": 1520,
+      "bboxMin": [
+        -0.30000001192092896,
+        -1.399999976158142,
+        -0.800000011920929
+      ],
+      "bboxMax": [
+        0.30000001192092896,
+        1.399999976158142,
+        0.800000011920929
+      ],
+      "area": 8.256164148468367,
+      "volume": 1.3930244305973938,
+      "closed": true
+    },
+    {
+      "kind": "ellipsoid",
+      "set": "B",
+      "quality": 64,
+      "params": {
+        "radii": [
+          0.3,
+          1.4,
+          0.8
+        ]
+      },
+      "refParams": {
+        "radii": [
+          0.3,
+          1.4,
+          0.8
+        ]
+      },
+      "sdfInput": {
+        "kind": "ellipsoid",
+        "params": {
+          "radii": [
+            0.3,
+            1.4,
+            0.8
+          ]
+        }
+      },
+      "counts": {
+        "nu": 107,
+        "nv": 53
+      },
+      "uniquePositions": 5566,
+      "triangles": 11128,
+      "bboxMin": [
+        -0.2997390031814575,
+        -1.399999976158142,
+        -0.7995625138282776
+      ],
+      "bboxMax": [
+        0.29986825585365295,
+        1.399999976158142,
+        0.7995625138282776
+      ],
+      "area": 8.29153207284662,
+      "volume": 1.4053895919501773,
+      "closed": true
+    }
+  ]
+}

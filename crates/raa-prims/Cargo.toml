@@ -1,0 +1,11 @@
+[package]
+name = "raa-prims"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SDF primitives turned into polygons from their parameters; implements the raa-geom provider trait."
+
+[dependencies]
+raa-math = { workspace = true }
+raa-geom = { workspace = true }

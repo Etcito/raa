@@ -1,0 +1,35 @@
+{
+  "name": "m3-prims",
+  "milestone": "m3",
+  "capturedAt": "2026-10-18T00:44:50.374Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 3090), OpenGL ES 3.1 Mesa 26.0.3-1ubuntu1)",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "firstFrameMs": 196,
+  "warmup": 60,
+  "frames": 300,
+  "cpuMsMedian": 0.30000000447034836,
+  "cpuMsP95": 0.5,
+  "instances": 24,
+  "drawCalls": 24,
+  "triangles": 62964,
+  "allocsPerFrameTotal": null,
+  "resize": null,
+  "wasm": {
+    "raw": 265428,
+    "gzip": 105867,
+    "sha256": "859eab6508f1395c63152a7c28320b3a0c8a8030ab22a6645e43a1826d447528"
+  },
+  "capture": "proofs/captures/m3-prims.png",
+  "captureSha256": "a24bf67139c60f5a1560b2c4837ff85687646172579217da7d47fc6eb7009a8f"
+}

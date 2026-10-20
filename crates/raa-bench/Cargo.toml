@@ -1,0 +1,19 @@
+[package]
+name = "raa-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Frame loop benchmarks."
+publish = false
+
+[[bin]]
+name = "frame-allocs"
+path = "src/main.rs"
+
+[dependencies]
+raa-alloc-count = { workspace = true }
+raa-scene = { workspace = true }
+raa-render = { workspace = true }
+raa-math = { workspace = true }
+raa-core = { workspace = true }

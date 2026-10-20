@@ -1,0 +1,11 @@
+[package]
+name = "raa-scene"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Transforms, instances, camera and lights."
+
+[dependencies]
+raa-math = { workspace = true }
+raa-core = { workspace = true }

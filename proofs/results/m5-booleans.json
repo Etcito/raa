@@ -1,0 +1,45 @@
+{
+  "name": "m5-booleans",
+  "milestone": "m5",
+  "capturedAt": "2026-10-18T03:57:50.024Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 3090), OpenGL ES 3.1 Mesa 26.0.3-1ubuntu1)",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "firstFrameMs": 176.19999999552965,
+  "warmup": 60,
+  "frames": 300,
+  "cpuMsMedian": 0.30000000447034836,
+  "cpuMsP95": 0.5,
+  "instances": 11,
+  "drawCalls": 11,
+  "triangles": 11894,
+  "allocsPerFrameTotal": null,
+  "resize": {
+    "to": [
+      960,
+      540
+    ],
+    "back": [
+      1280,
+      720
+    ],
+    "ok": true
+  },
+  "wasm": {
+    "raw": 458519,
+    "gzip": 182582,
+    "sha256": "2063c36728ee81e7442ae6c8dd60d198afe5b9fb95d10f24fa50e160589282ed"
+  },
+  "capture": "proofs/captures/m5-booleans.png",
+  "captureSha256": "fd4a4600cca51adb7760bd5751f7e4091212b11f08671f88ef4299ac20d4c69e"
+}

@@ -1,0 +1,45 @@
+{
+  "name": "m1-boot",
+  "milestone": "m1",
+  "capturedAt": "2026-10-17T18:37:02.201Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "SwiftShader Device (Subzero)",
+    "description": "",
+    "isFallbackAdapter": true
+  },
+  "hardware": false,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "firstFrameMs": 105,
+  "warmup": 60,
+  "frames": 300,
+  "cpuMsMedian": 0.20000000298023224,
+  "cpuMsP95": 0.30000000074505806,
+  "instances": 1,
+  "drawCalls": 1,
+  "triangles": 1,
+  "allocsPerFrameTotal": null,
+  "resize": {
+    "to": [
+      960,
+      540
+    ],
+    "back": [
+      1280,
+      720
+    ],
+    "ok": true
+  },
+  "wasm": {
+    "raw": 167847,
+    "gzip": 68097,
+    "sha256": "f1745c750e5b3b012f4b7f12cd222b4abfa15315d6af7e1dafbb9170f8fbfc27"
+  },
+  "capture": "proofs/captures/m1-boot.png",
+  "captureSha256": "3ec111c457101663817a7ed67346829c8b4f883697763386334242abe1607c92"
+}

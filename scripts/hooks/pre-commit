@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pre-commit hook: refuses commits that stage asset/binary files or files > 1 MB.
+# Install once per clone: git config core.hooksPath scripts/hooks
+set -euo pipefail
+root="$(git rev-parse --show-toplevel)"
+exec "$root/scripts/check-no-assets.sh" --staged

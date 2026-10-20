@@ -1,0 +1,45 @@
+{
+  "name": "m2-scene",
+  "milestone": "m2",
+  "capturedAt": "2026-10-17T20:59:47.301Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 3090), OpenGL ES 3.1 Mesa 26.0.3-1ubuntu1)",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "firstFrameMs": 107.89999999850988,
+  "warmup": 60,
+  "frames": 300,
+  "cpuMsMedian": 0.6999999992549419,
+  "cpuMsP95": 0.9000000022351742,
+  "instances": 1000,
+  "drawCalls": 1,
+  "triangles": 12012,
+  "allocsPerFrameTotal": 5,
+  "resize": {
+    "to": [
+      960,
+      540
+    ],
+    "back": [
+      1280,
+      720
+    ],
+    "ok": true
+  },
+  "wasm": {
+    "raw": 241764,
+    "gzip": 96416,
+    "sha256": "d43772b599fe1af509726c334646a4d363fcbb4235deffe8589acba2bf8683f5"
+  },
+  "capture": "proofs/captures/m2-scene.png",
+  "captureSha256": "2d4e99510ae460197d112bb1a33a11a21233e195389bd6e92fb876ba335d46f7"
+}
