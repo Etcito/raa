@@ -2,7 +2,7 @@
 // crate in ./pkg/ (built by scripts/build-package.sh). Types live in index.d.ts.
 import init, { Engine } from './pkg/raa_js.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 
 /**
  * Initialises the wasm module and returns a RaaModule.
