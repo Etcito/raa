@@ -1,8 +1,8 @@
 //! Conformance with the published raa.prims v0 format (raa-assets-tools, `schema/` and
 //! `src/format/`): every valid published fixture parses and builds, each primitive
 //! tessellates to the exact box that raa-assets-tools gives (`bounds.ts`, `localBounds`),
-//! the published param names map to the same meshes as the S3 names, and the bean asset of
-//! royal-fiesta, which is not valid v0, is refused at its budget.
+//! the published param names map to the same meshes as the S3 names, and a consumer
+//! project's bean asset, which is not valid v0, is refused at its budget.
 //! The fixtures are copies, see `tests/fixtures/README.md`.
 
 use std::collections::HashMap;
@@ -361,9 +361,9 @@ fn unknown_params_stay_refused_after_the_mapping() {
 }
 
 #[test]
-fn royal_fiesta_bean_is_refused_at_its_budget_not_at_height() {
+fn consumer_bean_asset_is_refused_at_its_budget_not_at_height() {
     // The bean predates raa.prims v0 and is not valid under it; its first break is the
     // numeric `budget` (v0: an object). Its capsule `height` is not what is refused.
-    let e = parse(&read("royal-fiesta/bean.prims.json")).expect_err("bean is not v0");
+    let e = parse(&read("consumer/bean.prims.json")).expect_err("bean is not v0");
     assert_eq!((e.code, e.path.as_str()), ("schema.type", "/budget"));
 }
