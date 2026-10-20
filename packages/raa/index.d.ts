@@ -16,10 +16,14 @@ export type Quat = [number, number, number, number];
  * Parameters (metres) per kind:
  * - `sphere`: `{ radius }`, radius > 0
  * - `box`: `{ halfExtents: Vec3 }`, each > 0
- * - `roundBox`: `{ halfExtents: Vec3, radius }`, 0 < radius <= min(halfExtents)
+ * - `roundBox`: `{ halfExtents: Vec3, radius }`, 0 <= radius <= min(halfExtents)
  * - `capsule`: `{ radius, halfHeight }`, radius > 0, halfHeight >= 0
  * - `cylinder`: `{ radius, halfHeight }`, both > 0
- * - `cone`: `{ radius, halfHeight }`, both > 0; base at y = -halfHeight, apex at +halfHeight
+ * - `cone`: `{ radius, halfHeight, radiusTop? }`, radius and radiusTop >= 0 and not both 0,
+ *   halfHeight > 0; base radius at y = -halfHeight, top radius (default 0, a point) at +halfHeight
+ *
+ * A raa.prims asset may also give the published v0 names (box `size`, capsule and cylinder
+ * `height`, cone `radiusBottom` and `radiusTop`); the loader maps them to these.
  * - `torus`: `{ majorRadius, minorRadius }`, 0 < minorRadius < majorRadius; ring in XZ
  * - `ellipsoid`: `{ radii: Vec3 }`, each > 0
  */
