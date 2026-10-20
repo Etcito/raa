@@ -157,10 +157,10 @@ fn analytic_shape(
         // A frustum has a cone collider only at a pointed end: a pointed top is the cone of
         // the base radius, a pointed bottom the cone of the top radius turned to apex -Y.
         // Both ends round is the cylinder of the larger radius.
-        "cone" => s("halfHeight").and_then(|half_height| {
+        "cone" => s("halfHeight").map(|half_height| {
             let base = scalar_of(params, "radius").unwrap_or(0.0);
             let top = scalar_of(params, "radiusTop").unwrap_or(0.0);
-            Ok(if top == 0.0 {
+            if top == 0.0 {
                 plain(ColliderShape::ConeY {
                     half_height,
                     radius: base,
@@ -178,7 +178,7 @@ fn analytic_shape(
                     half_height,
                     radius: base.max(top),
                 })
-            })
+            }
         }),
         _ => return None,
     };
