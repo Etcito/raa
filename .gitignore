@@ -1,6 +1,9 @@
 target/
 node_modules/
 dist/
+release/
+out/
+.nmc/
 pkg/
 *.log
 # assets never go to git: they live in the asset store (see README)

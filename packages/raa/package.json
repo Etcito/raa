@@ -4,17 +4,24 @@
   "description": "RAA: a small extensible WebGPU rendering engine compiled to WebAssembly (primitives, prims assets, CSG, instancing).",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Etcito/raa",
+    "directory": "packages/raa"
+  },
   "exports": {
     ".": {
       "types": "./index.d.ts",
       "default": "./index.js"
-    }
+    },
+    "./pkg/raa_js_bg.wasm": "./pkg/raa_js_bg.wasm"
   },
   "types": "./index.d.ts",
   "files": [
     "index.js",
     "index.d.ts",
     "README.md",
+    "LICENSE",
     "pkg/"
   ],
   "sideEffects": false,
