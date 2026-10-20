@@ -51,9 +51,18 @@ impl PrimKind {
             PrimKind::Sphere => &["radius"],
             PrimKind::Box => &["halfExtents"],
             PrimKind::RoundBox => &["halfExtents", "radius"],
-            PrimKind::Capsule | PrimKind::Cylinder | PrimKind::Cone => &["radius", "halfHeight"],
+            PrimKind::Capsule | PrimKind::Cylinder => &["radius", "halfHeight"],
+            PrimKind::Cone => &["radius", "halfHeight", "radiusTop"],
             PrimKind::Torus => &["majorRadius", "minorRadius"],
             PrimKind::Ellipsoid => &["radii"],
+        }
+    }
+
+    /// The keys every document must give: `param_names` minus the optional `radiusTop`.
+    pub fn required_param_names(&self) -> &'static [&'static str] {
+        match self {
+            PrimKind::Cone => &["radius", "halfHeight"],
+            _ => self.param_names(),
         }
     }
 }

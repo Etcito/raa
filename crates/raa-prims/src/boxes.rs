@@ -279,6 +279,21 @@ mod tests {
     }
 
     #[test]
+    fn round_box_radius_zero_is_a_closed_plain_box() {
+        for s in [3, 8, 24] {
+            let mut out = MeshData::new();
+            round_box_generate([0.7, 0.6, 0.5], 0.0, s, &mut out).unwrap();
+            let b = out.bounds();
+            assert_eq!(
+                (b.min.x, b.max.x, b.min.y, b.max.y),
+                (-0.7, 0.7, -0.6, 0.6),
+                "s {s}"
+            );
+            assert_eq!(analysis::passes(&analysis::analyze(&out)), Ok(()), "s {s}");
+        }
+    }
+
+    #[test]
     fn round_box_lod0_matches_reference_counts() {
         let mut out = MeshData::new();
         round_box_generate([0.7, 0.6, 0.5], 0.15, 24, &mut out).unwrap();

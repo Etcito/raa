@@ -974,7 +974,7 @@ fn validate_kind(
     }
 
     // Each S3 key (per component for vectors) is consumed exactly once by a main term.
-    for &name in kind.param_names() {
+    for &name in kind.required_param_names() {
         let comps: &[Option<usize>] = if s3_is_vector(kind, name) == Some(true) {
             &[Some(0), Some(1), Some(2)]
         } else {

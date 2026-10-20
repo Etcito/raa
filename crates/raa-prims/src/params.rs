@@ -25,9 +25,12 @@ pub enum PrimParams {
         radius: f32,
         half_height: f32,
     },
+    /// Frustum along Y: `radius` is the base radius at y = -halfHeight, `radius_top` the top
+    /// radius at y = +halfHeight (0 for the S3 cone, which is pointed at the top).
     Cone {
         radius: f32,
         half_height: f32,
+        radius_top: f32,
     },
     Torus {
         major_radius: f32,
@@ -101,6 +104,11 @@ impl PrimParams {
             PrimKind::Cone => PrimParams::Cone {
                 radius: s("radius")?,
                 half_height: s("halfHeight")?,
+                radius_top: if p.get("radiusTop").is_some() {
+                    s("radiusTop")?
+                } else {
+                    0.0
+                },
             },
             PrimKind::Torus => PrimParams::Torus {
                 major_radius: s("majorRadius")?,
@@ -134,13 +142,24 @@ impl PrimParams {
             | PrimParams::Cylinder {
                 radius,
                 half_height,
-            }
-            | PrimParams::Cone {
-                radius,
-                half_height,
             } => Params::new()
                 .with("radius", Scalar(radius))
                 .with("halfHeight", Scalar(half_height)),
+            PrimParams::Cone {
+                radius,
+                half_height,
+                radius_top,
+            } => {
+                // radiusTop is written only when it is not the S3 pointed top.
+                let p = Params::new()
+                    .with("radius", Scalar(radius))
+                    .with("halfHeight", Scalar(half_height));
+                if radius_top > 0.0 {
+                    p.with("radiusTop", Scalar(radius_top))
+                } else {
+                    p
+                }
+            }
             PrimParams::Torus {
                 major_radius,
                 minor_radius,
@@ -162,7 +181,13 @@ impl PrimParams {
                 radius,
             } => {
                 positive3(kind, "halfExtents", half_extents)?;
-                positive(kind, "radius", radius)?;
+                // 0 is a plain box (published roundBox: radius in [0, min(size)/2]).
+                if !radius.is_finite() {
+                    return Err(invalid(kind, "radius", "must be finite"));
+                }
+                if radius < 0.0 {
+                    return Err(invalid(kind, "radius", "must be >= 0"));
+                }
                 let min = half_extents[0].min(half_extents[1]).min(half_extents[2]);
                 if radius > min {
                     return Err(invalid(kind, "radius", "must be <= min(halfExtents)"));
@@ -185,12 +210,27 @@ impl PrimParams {
             PrimParams::Cylinder {
                 radius,
                 half_height,
-            }
-            | PrimParams::Cone {
-                radius,
-                half_height,
             } => {
                 positive(kind, "radius", radius)?;
+                positive(kind, "halfHeight", half_height)
+            }
+            PrimParams::Cone {
+                radius,
+                half_height,
+                radius_top,
+            } => {
+                // Frustum: each radius >= 0 and not both 0 (a pointed end is a radius of 0).
+                for (name, r) in [("radius", radius), ("radiusTop", radius_top)] {
+                    if !r.is_finite() {
+                        return Err(invalid(kind, name, "must be finite"));
+                    }
+                    if r < 0.0 {
+                        return Err(invalid(kind, name, "must be >= 0"));
+                    }
+                }
+                if radius.max(radius_top) <= 0.0 {
+                    return Err(invalid(kind, "radius", "a cone needs one radius > 0"));
+                }
                 positive(kind, "halfHeight", half_height)
             }
             PrimParams::Torus {
@@ -222,11 +262,15 @@ impl PrimParams {
             PrimParams::Cylinder {
                 radius,
                 half_height,
-            }
-            | PrimParams::Cone {
+            } => [radius, half_height, radius],
+            PrimParams::Cone {
                 radius,
                 half_height,
-            } => [radius, half_height, radius],
+                radius_top,
+            } => {
+                let r = radius.max(radius_top);
+                [r, half_height, r]
+            }
             PrimParams::Torus {
                 major_radius,
                 minor_radius,
@@ -268,6 +312,7 @@ impl PrimParams {
             PrimKind::Cone => PrimParams::Cone {
                 radius: pick(b, 0.7, 0.3),
                 half_height: pick(b, 0.8, 1.5),
+                radius_top: 0.0,
             },
             PrimKind::Torus => PrimParams::Torus {
                 major_radius: pick(b, 0.6, 1.5),
@@ -296,7 +341,7 @@ mod tests {
                 assert_eq!(p.kind(), k);
                 assert_eq!(PrimParams::from_params(k, &p.to_params()).unwrap(), p);
                 let params = p.to_params();
-                assert!(params.names().eq(k.param_names().iter().copied()));
+                assert!(params.names().eq(k.required_param_names().iter().copied()));
             }
         }
     }
@@ -335,10 +380,6 @@ mod tests {
                 half_extents: [1.0, 0.5, 1.0],
                 radius: 0.6,
             },
-            PrimParams::RoundBox {
-                half_extents: [1.0, 0.5, 1.0],
-                radius: 0.0,
-            },
             PrimParams::Capsule {
                 radius: 0.0,
                 half_height: 1.0,
@@ -354,10 +395,22 @@ mod tests {
             PrimParams::Cone {
                 radius: -1.0,
                 half_height: 1.0,
+                radius_top: 0.0,
             },
             PrimParams::Cone {
                 radius: 1.0,
                 half_height: 0.0,
+                radius_top: 0.0,
+            },
+            PrimParams::Cone {
+                radius: 0.0,
+                half_height: 1.0,
+                radius_top: 0.0,
+            },
+            PrimParams::Cone {
+                radius: 1.0,
+                half_height: 1.0,
+                radius_top: -0.5,
             },
             PrimParams::Torus {
                 major_radius: 1.0,

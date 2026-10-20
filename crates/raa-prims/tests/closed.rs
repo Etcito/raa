@@ -38,10 +38,10 @@ fn bad_cases() -> Vec<(&'static str, PrimParams)> {
             },
         ),
         (
-            "roundBox radius 0",
+            "roundBox radius negative",
             PrimParams::RoundBox {
                 half_extents: [1.0; 3],
-                radius: 0.0,
+                radius: -0.1,
             },
         ),
         (
@@ -70,6 +70,7 @@ fn bad_cases() -> Vec<(&'static str, PrimParams)> {
             PrimParams::Cone {
                 radius: 0.0,
                 half_height: 1.0,
+                radius_top: 0.0,
             },
         ),
         (

@@ -69,7 +69,8 @@ Parameter mapping to the reference (mapping v1, axisMap identity, det 1): sphere
 roundBox `halfExtents × 2` → `size`, roundBox `radius` unchanged (S3 guarantees the
 reference's own clamp is inactive); cylinder `halfHeight × 2` → `height`, `radius` →
 `frustum(height, r, r)`; cone `halfHeight × 2` → `height`, `radius` → `radiusBottom`,
-`radiusTop = 0`; torus `majorRadius`, `minorRadius` unchanged. Capsule `radius` maps
+`radiusTop` is the optional top radius (absent = 0, the pointed S3 cone); a frustum
+  with `radius` and `radiusTop` both > 0 is `frustum(height, rb, rt)`; torus `majorRadius`, `minorRadius` unchanged. Capsule `radius` maps
 unchanged; its `height` is the open finding of `tools/sdf-ref/README.md` §5 (the
 reference's total height is `2 × halfHeight + 2 × radius`, an affine relation that
 mapping v1 cannot express yet).

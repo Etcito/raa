@@ -47,7 +47,8 @@ pub fn generate(p: &PrimParams, q: Quality, out: &mut MeshData) -> Result<(), Ge
         PrimParams::Cone {
             radius,
             half_height,
-        } => cone::generate(radius, half_height, s, out),
+            radius_top,
+        } => cone::generate(radius, radius_top, half_height, s, out),
         PrimParams::Torus {
             major_radius,
             minor_radius,
@@ -78,7 +79,8 @@ pub fn triangle_count(p: &PrimParams, q: Quality) -> u32 {
         PrimParams::Cone {
             radius,
             half_height,
-        } => cone::triangle_count(radius, half_height, s),
+            radius_top,
+        } => cone::triangle_count(radius, radius_top, half_height, s),
         PrimParams::Torus {
             major_radius,
             minor_radius,
@@ -113,6 +115,7 @@ mod tests {
             PrimParams::Cone {
                 radius: 0.5,
                 half_height: 0.0,
+                radius_top: 0.0,
             },
             PrimParams::Torus {
                 major_radius: 0.5,
