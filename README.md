@@ -49,8 +49,24 @@ node scripts/gpu-capture.mjs example-basic --input examples/basic/gpu-input.json
 Run a milestone proof with the bundled Node runtime:
 
 ```sh
-/root/nmc/engines/bin/node proofs/mN-*.mjs
+node proofs/mN-*.mjs
 ```
+
+## Releases
+
+Each release attaches a built npm tarball, with the wasm included, to its GitHub Release. Consumers install it by URL and need no Rust toolchain:
+
+```sh
+npm install https://github.com/Etcito/raa/releases/download/v0.1.0/etcito-raa-0.1.0.tgz
+```
+
+The asset URL pattern is `https://github.com/Etcito/raa/releases/download/v<version>/etcito-raa-<version>.tgz`. The same release carries `SHA256SUMS`; check the tarball with `sha256sum -c SHA256SUMS`.
+
+To cut a release (maintainers):
+
+1. Bump the version in `packages/raa/package.json`, `VERSION` in `packages/raa/index.js` and `[workspace.package] version` in `Cargo.toml`, then commit.
+2. Optionally dry-run the build locally: `bash scripts/build-package.sh --tag v<version>`. It needs `wasm-bindgen` at the version pinned in `Cargo.lock`, and it refuses a tag that differs from the package version. The output is `release/etcito-raa-<version>.tgz` and `release/SHA256SUMS`.
+3. Tag and push: `git tag v<version> && git push origin v<version>`. The workflow in `.github/workflows/release.yml` runs the checks, builds the package and creates the GitHub Release with both files.
 
 ## Git hook
 
