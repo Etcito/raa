@@ -138,7 +138,8 @@ fn expected_shape(kind: &str) -> &'static str {
         "capsule" => "capsuleY",
         "cylinder" => "cylinderY",
         "cone" => "coneY",
-        "ellipsoid" => "convexHull",
+        // Unequal radii (the critter's): the published cuboid, not a hull.
+        "ellipsoid" => "cuboid",
         other => panic!("no derived collider for {other}"),
     }
 }

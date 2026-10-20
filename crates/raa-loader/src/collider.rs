@@ -5,7 +5,7 @@ use crate::LoadError;
 use crate::json::JsonValue;
 use crate::prims::ColliderDoc;
 use raa_geom::MeshData;
-use raa_math::{Mat4, Vec3};
+use raa_math::{Mat4, Quat, Vec3};
 
 /// A collision shape. Uniform scale is folded into the dimensions.
 #[derive(Debug, Clone, PartialEq)]
@@ -102,41 +102,82 @@ fn vec3_of(params: &[(String, JsonValue)], name: &str) -> Option<[f32; 3]> {
     }
 }
 
-/// Analytic shape of an S3 kind in node-local units, `None` for kinds that need a hull.
-/// `Some(Err(name))` names the first bad param.
+/// A 180 degree turn about X: maps a cone's apex from +Y to -Y (S4 cone flip).
+const FLIP_X: Quat = Quat::from_xyzw(1.0, 0.0, 0.0, 0.0);
+
+/// Analytic shape of an S3 kind in node-local units, `None` for kinds that need a hull, and
+/// the extra rotation of the shape frame when there is one. Follows the S4 derivation of
+/// raa-assets-tools (`colliders.ts`) at unit scale. `Some(Err(name))` names the first bad
+/// param.
 fn analytic_shape(
     kind: &str,
     params: &[(String, JsonValue)],
-) -> Option<Result<ColliderShape, &'static str>> {
+) -> Option<Result<(ColliderShape, Option<Quat>), &'static str>> {
     let s = |n: &'static str| scalar_of(params, n).ok_or(n);
     let v = |n: &'static str| vec3_of(params, n).ok_or(n);
+    let plain = |shape: ColliderShape| (shape, None);
     let shape = match kind {
-        "sphere" => s("radius").map(|radius| ColliderShape::Ball { radius }),
-        "box" => v("halfExtents").map(|half_extents| ColliderShape::Cuboid { half_extents }),
-        "roundBox" => v("halfExtents").and_then(|half_extents| {
-            s("radius").map(|border_radius| ColliderShape::RoundCuboid {
-                half_extents,
-                border_radius,
+        "sphere" => s("radius").map(|radius| plain(ColliderShape::Ball { radius })),
+        "ellipsoid" => v("radii").map(|radii| {
+            // Equal radii are a ball; otherwise the published derivation is the cuboid.
+            plain(if radii[0] == radii[1] && radii[1] == radii[2] {
+                ColliderShape::Ball { radius: radii[0] }
+            } else {
+                ColliderShape::Cuboid {
+                    half_extents: radii,
+                }
+            })
+        }),
+        "box" => v("halfExtents").map(|half_extents| plain(ColliderShape::Cuboid { half_extents })),
+        "roundBox" => v("halfExtents").and_then(|size_half| {
+            s("radius").map(|border_radius| {
+                // The core box is the half extents less the border (its size is kept).
+                plain(ColliderShape::RoundCuboid {
+                    half_extents: size_half.map(|h| (h - border_radius).max(0.0)),
+                    border_radius,
+                })
             })
         }),
         "capsule" => s("radius").and_then(|radius| {
-            s("halfHeight").map(|half_height| ColliderShape::CapsuleY {
-                half_height,
-                radius,
+            s("halfHeight").map(|half_height| {
+                plain(ColliderShape::CapsuleY {
+                    half_height,
+                    radius,
+                })
             })
         }),
         "cylinder" => s("radius").and_then(|radius| {
-            s("halfHeight").map(|half_height| ColliderShape::CylinderY {
-                half_height,
-                radius,
+            s("halfHeight").map(|half_height| {
+                plain(ColliderShape::CylinderY {
+                    half_height,
+                    radius,
+                })
             })
         }),
-        // A frustum (radiusTop > 0) has no analytic cone here: its convex hull is used.
-        "cone" if scalar_of(params, "radiusTop").is_some_and(|top| top > 0.0) => return None,
-        "cone" => s("radius").and_then(|radius| {
-            s("halfHeight").map(|half_height| ColliderShape::ConeY {
-                half_height,
-                radius,
+        // A frustum has a cone collider only at a pointed end: a pointed top is the cone of
+        // the base radius, a pointed bottom the cone of the top radius turned to apex -Y.
+        // Both ends round is the cylinder of the larger radius.
+        "cone" => s("halfHeight").and_then(|half_height| {
+            let base = scalar_of(params, "radius").unwrap_or(0.0);
+            let top = scalar_of(params, "radiusTop").unwrap_or(0.0);
+            Ok(if top == 0.0 {
+                plain(ColliderShape::ConeY {
+                    half_height,
+                    radius: base,
+                })
+            } else if base == 0.0 {
+                (
+                    ColliderShape::ConeY {
+                        half_height,
+                        radius: top,
+                    },
+                    Some(FLIP_X),
+                )
+            } else {
+                plain(ColliderShape::CylinderY {
+                    half_height,
+                    radius: base.max(top),
+                })
             })
         }),
         _ => return None,
@@ -225,7 +266,7 @@ pub(crate) fn derive_collider(
         ));
     }
     if let (Some(scale), Some(shape)) = (uniform_scale(world), analytic_shape(kind, params)) {
-        let shape = shape.map_err(|name| {
+        let (shape, flip) = shape.map_err(|name| {
             LoadError::new(
                 "kind.params",
                 format!("{pointer}/params/{name}"),
@@ -233,10 +274,14 @@ pub(crate) fn derive_collider(
             )
         })?;
         let unscale = Mat4::from_scale(Vec3::splat(1.0 / scale));
+        let mut transform = world.mul(&unscale);
+        if let Some(q) = flip {
+            transform = transform.mul(&Mat4::from_quat(q));
+        }
         return Ok(Collider {
             node_id: Some(node_id.to_string()),
             shape: scale_shape(shape, scale),
-            transform: world.mul(&unscale),
+            transform,
         });
     }
     let mesh = low_mesh()?;
@@ -454,23 +499,110 @@ mod tests {
         assert_eq!(sorted, points);
     }
 
-    #[test]
-    fn ellipsoid_gives_hull() {
-        let params = vec![("radii".to_string(), vec([0.9, 0.6, 0.5]))];
+    fn derive(kind: &str, params: Vec<(&str, JsonValue)>) -> Collider {
+        let params: Vec<(String, JsonValue)> = params
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
         let p = PrimParams::Ellipsoid {
-            radii: [0.9, 0.6, 0.5],
+            radii: [1.0, 1.0, 1.0],
         };
-        let c = derive_collider(
-            "e",
-            "ellipsoid",
-            &params,
-            &Mat4::IDENTITY,
-            "/nodes/1",
-            low(p),
-        )
-        .unwrap();
-        assert!(matches!(c.shape, ColliderShape::ConvexHull { .. }));
-        assert_eq!(c.transform, Mat4::IDENTITY);
+        // The hull fallback is never reached for an analytic kind; `low` is a stand-in.
+        derive_collider("n", kind, &params, &Mat4::IDENTITY, "/nodes/1", low(p)).unwrap()
+    }
+
+    #[test]
+    fn ellipsoid_is_a_ball_when_round_and_a_cuboid_otherwise() {
+        let round = derive("ellipsoid", vec![("radii", vec([0.5, 0.5, 0.5]))]);
+        assert_eq!(round.shape, ColliderShape::Ball { radius: 0.5 });
+        let flat = derive("ellipsoid", vec![("radii", vec([0.9, 0.6, 0.5]))]);
+        assert_eq!(
+            flat.shape,
+            ColliderShape::Cuboid {
+                half_extents: [0.9, 0.6, 0.5]
+            }
+        );
+        assert_eq!(flat.transform, Mat4::IDENTITY);
+    }
+
+    #[test]
+    fn round_box_core_is_the_half_extents_less_the_border() {
+        // Published: roundCuboid(max(size/2 - b, 0), b); the outer box is size/2 again.
+        let c = derive(
+            "roundBox",
+            vec![
+                ("halfExtents", vec([1.0, 0.5, 0.25])),
+                ("radius", JsonValue::Number(0.2)),
+            ],
+        );
+        match c.shape {
+            ColliderShape::RoundCuboid {
+                half_extents,
+                border_radius,
+            } => {
+                assert_eq!(border_radius, 0.2);
+                assert!((half_extents[0] - 0.8).abs() < 1e-6);
+                assert!((half_extents[1] - 0.3).abs() < 1e-6);
+                assert!((half_extents[2] - 0.05).abs() < 1e-6);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn cone_frustum_collider_follows_the_published_cases() {
+        // Pointed top: cone of the base radius, apex +Y, no extra rotation.
+        let top = derive(
+            "cone",
+            vec![
+                ("radius", JsonValue::Number(0.4)),
+                ("halfHeight", JsonValue::Number(0.5)),
+            ],
+        );
+        assert_eq!(
+            top.shape,
+            ColliderShape::ConeY {
+                half_height: 0.5,
+                radius: 0.4
+            }
+        );
+        assert_eq!(top.transform, Mat4::IDENTITY);
+        // Pointed bottom: cone of the top radius, apex -Y (a 180 degree turn about X).
+        let bottom = derive(
+            "cone",
+            vec![
+                ("radius", JsonValue::Number(0.0)),
+                ("halfHeight", JsonValue::Number(0.4)),
+                ("radiusTop", JsonValue::Number(0.3)),
+            ],
+        );
+        assert_eq!(
+            bottom.shape,
+            ColliderShape::ConeY {
+                half_height: 0.4,
+                radius: 0.3
+            }
+        );
+        assert_eq!(
+            bottom.transform,
+            Mat4::from_quat(Quat::from_xyzw(1.0, 0.0, 0.0, 0.0))
+        );
+        // Both ends round: cylinder of the larger radius.
+        let frustum = derive(
+            "cone",
+            vec![
+                ("radius", JsonValue::Number(0.35)),
+                ("halfHeight", JsonValue::Number(0.3)),
+                ("radiusTop", JsonValue::Number(0.2)),
+            ],
+        );
+        assert_eq!(
+            frustum.shape,
+            ColliderShape::CylinderY {
+                half_height: 0.3,
+                radius: 0.35
+            }
+        );
     }
 
     #[test]
