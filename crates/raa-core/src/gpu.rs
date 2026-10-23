@@ -1,4 +1,5 @@
-//! Adapter, device and queue: [`GpuContext`], [`AdapterSummary`] and [`GpuOptions`].
+//! Adapter, device and queue: [`GpuContext`], [`AdapterSummary`], [`GpuOptions`] and
+//! [`DeviceRequest`].
 
 use crate::RaaError;
 
@@ -84,6 +85,16 @@ impl Default for GpuOptions {
     }
 }
 
+/// What to ask of the device beyond the core WebGPU defaults.
+///
+/// `optional_features` are enabled only where the adapter has them (never required);
+/// `adapter_limits` requests the adapter's own limits instead of the default limits.
+#[derive(Clone, Debug, Default)]
+pub struct DeviceRequest {
+    pub optional_features: wgpu::Features,
+    pub adapter_limits: bool,
+}
+
 /// The adapter, device and queue used by every other RAA object.
 #[derive(Debug)]
 pub struct GpuContext {
@@ -110,11 +121,30 @@ impl GpuContext {
         &self.summary
     }
 
-    async fn from_adapter(adapter: wgpu::Adapter) -> Result<GpuContext, RaaError> {
+    /// The device's enabled features.
+    pub fn features(&self) -> wgpu::Features {
+        self.device.features()
+    }
+
+    /// The device's limits.
+    pub fn limits(&self) -> wgpu::Limits {
+        self.device.limits()
+    }
+
+    async fn from_adapter(
+        adapter: wgpu::Adapter,
+        req: &DeviceRequest,
+    ) -> Result<GpuContext, RaaError> {
         let summary = AdapterSummary::from_info(&adapter.get_info());
+        let required_limits = if req.adapter_limits {
+            adapter.limits()
+        } else {
+            wgpu::Limits::default()
+        };
         let desc = wgpu::DeviceDescriptor {
             label: Some("raa-device"),
-            required_limits: wgpu::Limits::default(),
+            required_features: req.optional_features & adapter.features(),
+            required_limits,
             ..Default::default()
         };
         let (device, queue) = adapter
@@ -129,11 +159,23 @@ impl GpuContext {
         })
     }
 
-    /// WebGPU context and surface for a canvas (WebGPU backend only).
+    /// WebGPU context and surface for a canvas (WebGPU backend only), default device request.
     #[cfg(target_arch = "wasm32")]
     pub async fn for_canvas(
         canvas: web_sys::HtmlCanvasElement,
         opts: &GpuOptions,
+    ) -> Result<(GpuContext, crate::CanvasSurface), RaaError> {
+        GpuContext::for_canvas_with(canvas, opts, &DeviceRequest::default()).await
+    }
+
+    /// WebGPU context and surface for a canvas: a core adapter (never the compatibility
+    /// feature level), then a device with `req.optional_features & adapter.features()` and,
+    /// when `req.adapter_limits`, the adapter's limits.
+    #[cfg(target_arch = "wasm32")]
+    pub async fn for_canvas_with(
+        canvas: web_sys::HtmlCanvasElement,
+        opts: &GpuOptions,
+        req: &DeviceRequest,
     ) -> Result<(GpuContext, crate::CanvasSurface), RaaError> {
         if !navigator_gpu_present() {
             return Err(RaaError::NoAdapter(
@@ -157,7 +199,7 @@ impl GpuContext {
             })
             .await
             .map_err(|e| RaaError::NoAdapter(e.to_string()))?;
-        let gpu = GpuContext::from_adapter(adapter).await?;
+        let gpu = GpuContext::from_adapter(adapter, req).await?;
         if !opts.allow_software && !gpu.summary.is_hardware() {
             return Err(RaaError::NoAdapter(format!(
                 "only a software adapter is available ({}) and allow_software is false",
@@ -172,6 +214,16 @@ impl GpuContext {
     /// `allow_software` is set, retries with `force_fallback_adapter = true`.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn headless(opts: &GpuOptions) -> Result<GpuContext, RaaError> {
+        GpuContext::headless_with(opts, &DeviceRequest::default()).await
+    }
+
+    /// Headless context like [`GpuContext::headless`], with the device built from `req`
+    /// (same rules as `for_canvas_with`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn headless_with(
+        opts: &GpuOptions,
+        req: &DeviceRequest,
+    ) -> Result<GpuContext, RaaError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -192,7 +244,7 @@ impl GpuContext {
                 })?,
             Err(e) => return Err(RaaError::NoAdapter(e.to_string())),
         };
-        let gpu = GpuContext::from_adapter(adapter).await?;
+        let gpu = GpuContext::from_adapter(adapter, req).await?;
         if !opts.allow_software && !gpu.summary.is_hardware() {
             return Err(RaaError::NoAdapter(format!(
                 "only a software adapter is available ({}) and allow_software is false",
@@ -267,6 +319,13 @@ mod tests {
     fn nvidia_adapter_is_hardware() {
         let s = summary("0x10de", "NVIDIA GeForce RTX 3090", "NVIDIA 560.94", false);
         assert!(s.is_hardware());
+    }
+
+    #[test]
+    fn default_device_request_asks_for_nothing_extra() {
+        let r = DeviceRequest::default();
+        assert_eq!(r.optional_features, wgpu::Features::empty());
+        assert!(!r.adapter_limits);
     }
 
     #[test]

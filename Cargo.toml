@@ -16,6 +16,7 @@ wasm-bindgen-futures = "=0.4.79"
 js-sys = "=0.3.106"
 web-sys = "=0.3.106"
 pollster = "1.0.1"
+naga = { version = "30.0.1", default-features = false, features = ["wgsl-in"] }
 
 raa-core = { path = "crates/raa-core" }
 raa-web = { path = "crates/raa-web" }

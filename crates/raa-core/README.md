@@ -13,8 +13,15 @@ items are native-only.
   and `message()`.
 - `AdapterSummary` (vendor, architecture, device, description, backend, is_fallback) with
   `is_hardware()`; `GpuOptions` (default: HighPerformance, allow_software true).
-- `GpuContext`: `device()`, `queue()`, `adapter()`, `summary()`; native
-  `GpuContext::headless(&opts)`; wasm32 `GpuContext::for_canvas(canvas, &opts)`.
+- `DeviceRequest { optional_features: wgpu::Features, adapter_limits: bool }` (default:
+  no optional features, default limits): the device asks for
+  `optional_features & adapter.features()` (requested when present, never required) and,
+  when `adapter_limits`, `adapter.limits()` as required limits.
+- `GpuContext`: `device()`, `queue()`, `adapter()`, `summary()`, `features()` (the device's
+  enabled features), `limits()` (the device's limits); native `GpuContext::headless(&opts)`
+  and `GpuContext::headless_with(&opts, &req)`; wasm32 `GpuContext::for_canvas(canvas, &opts)`
+  and `GpuContext::for_canvas_with(canvas, &opts, &req)` (always a core adapter, never the
+  compatibility feature level). `headless`/`for_canvas` use `DeviceRequest::default()`.
 - wasm32 only: `CanvasSurface` (`format`, `is_srgb`, `size`, `resize`, `acquire`) and
   `SurfaceFrame` (`view`, `texture()`, `present()`).
 - `Handle<T>` and `Pool<T>`: generational handles; stale handles return `None`.
@@ -50,7 +57,11 @@ adapter is available it does not fail; it prints
 SKIP clear_pass_into_offscreen_target_reads_back_clear_color: no software adapter (<reason>)
 ```
 
-to stderr and returns. Use `--nocapture` to see that line (and the adapter used):
+to stderr and returns. `tests/device_request.rs`
+(`device_request_intersects_adapter_features`) asks `headless_with` for FLOAT32_FILTERABLE |
+RG11B10UFLOAT_RENDERABLE with adapter limits and checks that the enabled features are the
+requested ones the adapter has and that `limits()` equals the adapter limits; it skips the
+same way without an adapter. Use `--nocapture` to see that line (and the adapter used):
 
 ```sh
 cargo test -p raa-core --test gpu_readback -- --nocapture

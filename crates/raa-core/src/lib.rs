@@ -13,7 +13,7 @@ pub mod testing;
 
 pub use clear::ClearPass;
 pub use error::RaaError;
-pub use gpu::{AdapterSummary, GpuContext, GpuOptions};
+pub use gpu::{AdapterSummary, DeviceRequest, GpuContext, GpuOptions};
 pub use graph::{
     BACKBUFFER, FrameGraph, PassBuilder, PassId, PrepareContext, RecordContext, RenderPass,
     ResourceId, TargetDesc, TargetSize,
