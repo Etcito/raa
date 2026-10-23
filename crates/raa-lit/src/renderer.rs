@@ -25,6 +25,7 @@ use crate::handle::{LitHandle, LitShared};
 use crate::library::SurfaceLibrary;
 use crate::material::{DrawClass, SurfaceMaterial};
 use crate::meshes::{LitMeshId, LitMeshInfo};
+use crate::passes::install_passes;
 use crate::prep::{MaterialClass, PrepInput};
 
 /// Limits and sample count of a [`LitRenderer`]; the frame buffers are sized from them.
@@ -75,7 +76,6 @@ pub struct FrameCounts {
 
 /// One forward contributor with its pipeline entry flag (the forward pass records it only
 /// while `enabled` is set) and its order.
-#[allow(dead_code, reason = "read by the forward pass")]
 pub(crate) struct ContributorSlot {
     pub(crate) order: u32,
     pub(crate) enabled: Rc<Cell<bool>>,
@@ -96,7 +96,7 @@ fn refusal(code: &'static str, message: String) -> RaaError {
     RaaError::FrameGraph { code, message }
 }
 
-fn pipeline_busy() -> RaaError {
+pub(crate) fn pipeline_busy() -> RaaError {
     refusal(
         "pipeline.busy",
         "the pipeline is borrowed (called while a frame executes)".to_string(),
@@ -127,7 +127,9 @@ pub struct LitRenderer {
 impl LitRenderer {
     /// A renderer drawing through `pipeline`: validates `opts` (`render.invalid_msaa`),
     /// creates the group-0 buffers sized from it, installs the default slot providers
-    /// (priority 0) and adds the default material id 0 (grey standard).
+    /// (priority 0), adds the default material id 0 (grey standard) and registers the
+    /// required feature passes `prepass` (order 30) and `forward` (order 60) in `pipeline`
+    /// (`pipeline.duplicate_pass` when it already has them, `pipeline.busy`).
     pub fn new(
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
@@ -157,8 +159,7 @@ impl LitRenderer {
             frame_index: 0,
             pending_background: None,
         };
-        // The feature passes `prepare` and `forward` are registered here by
-        // `passes::install_passes(pipeline, renderer.handle())` (crate-internal).
+        install_passes(pipeline, renderer.handle(), renderer.contributors())?;
         Ok(renderer)
     }
 
@@ -168,7 +169,6 @@ impl LitRenderer {
     }
 
     /// The forward contributors in recording order (for the forward pass).
-    #[allow(dead_code, reason = "read by the forward pass")]
     pub(crate) fn contributors(&self) -> Contributors {
         Rc::clone(&self.contributors)
     }

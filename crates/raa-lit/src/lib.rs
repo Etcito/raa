@@ -7,7 +7,11 @@
 //! ([`DrawPrep`], [`LitDraw`]), and what passes and contributors share: the
 //! [`LitHandle`] with its pipeline cache per shader variant and [`PipelineSpec`], and the
 //! [`ForwardContributor`] extension point of the forward pass. [`LitRenderer`] owns all of
-//! it and prepares each frame ([`LitOptions`], [`FrameCounts`]).
+//! it, prepares each frame ([`LitOptions`], [`FrameCounts`]) and registers the two required
+//! feature passes of the lit pipeline (S12): `prepass` (order 30: Opaque and Fur draws,
+//! single sample, into the `depth`, `normal` and `material` targets) and `forward` (order
+//! 60: the same draws into MSAA HDR colour and depth, then the enabled contributors,
+//! resolved into `hdr.dst()`).
 
 mod contributor;
 mod extras;
@@ -16,6 +20,7 @@ mod handle;
 mod library;
 mod material;
 mod meshes;
+mod passes;
 mod prep;
 mod renderer;
 mod slots;
