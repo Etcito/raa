@@ -1,0 +1,14 @@
+//! The HDR lit renderer (S10, S11, S12). This part holds the surface materials: the
+//! [`SurfaceMaterial`] record with its 256-byte `SurfaceMaterialGpu` layout, the
+//! [`DrawClass`] a material is drawn in and the [`SurfaceLibrary`] of dense material ids.
+
+mod library;
+mod material;
+
+pub use library::SurfaceLibrary;
+pub use material::{
+    DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
+    FLAG_UNLIT, FLAG_VERTEX_FN, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial, SurfaceModel,
+};
+pub use raa_core::MaterialId;
+pub use raa_shader::MaterialFnId;

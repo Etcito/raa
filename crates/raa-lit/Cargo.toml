@@ -1,0 +1,14 @@
+[package]
+name = "raa-lit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "HDR lit renderer: surface materials, draw classes and the material library of the lit pipeline."
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-material = { workspace = true }
+wgpu = { workspace = true }
+raa-shader = { path = "../raa-shader" }
