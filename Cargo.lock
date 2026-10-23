@@ -755,8 +755,10 @@ name = "raa-lit"
 version = "0.1.0"
 dependencies = [
  "raa-core",
+ "raa-geom",
  "raa-material",
  "raa-math",
+ "raa-mesh",
  "raa-shader",
  "wgpu",
 ]

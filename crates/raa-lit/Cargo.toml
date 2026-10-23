@@ -10,5 +10,7 @@ description = "HDR lit renderer: surface materials, draw classes and the materia
 raa-core = { workspace = true }
 raa-math = { workspace = true }
 raa-material = { workspace = true }
+raa-geom = { workspace = true }
 wgpu = { workspace = true }
 raa-shader = { path = "../raa-shader" }
+raa-mesh = { path = "../raa-mesh" }
