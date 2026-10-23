@@ -1,0 +1,15 @@
+[package]
+name = "raa-contact"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Screen-space contact shadows"
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+wgpu = { workspace = true }
+raa-shader = { path = "../raa-shader" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-lit = { path = "../raa-lit" }
