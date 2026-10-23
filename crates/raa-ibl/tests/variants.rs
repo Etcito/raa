@@ -1,5 +1,7 @@
 //! Q11: the `ibl` Ambient provider over raa-lit's default providers composes and passes naga
-//! validation with the standard material function for every pass kind, MSAA and flag set.
+//! validation with the standard material function for every pass kind, MSAA and flag set; the
+//! filter compute modules (downsample, GGX prefilter, SH9 reduction) validate on their own and
+//! the SH reduction uses the constants of the CPU reference src/sh.rs.
 
 // Both providers are crate-private; the test compiles their source files (raa-lit is only
 // read).
@@ -135,4 +137,114 @@ fn flagged_variants_validate() {
             }
         }
     }
+}
+
+const DOWNSAMPLE_WGSL: &str = include_str!("../src/wgsl/downsample.wgsl");
+const PREFILTER_WGSL: &str = include_str!("../src/wgsl/prefilter.wgsl");
+const SH_PROJECT_WGSL: &str = include_str!("../src/wgsl/sh_project.wgsl");
+const SH_RS: &str = include_str!("../src/sh.rs");
+
+#[test]
+fn filter_shaders_validate() {
+    for (name, wgsl, entries) in [
+        ("downsample", DOWNSAMPLE_WGSL, &["downsample"][..]),
+        ("prefilter", PREFILTER_WGSL, &["prefilter"][..]),
+        (
+            "sh_project",
+            SH_PROJECT_WGSL,
+            &["sh_partial", "sh_final"][..],
+        ),
+    ] {
+        if let Err(e) = Composer::validate(wgsl) {
+            panic!("{name}: {e}");
+        }
+        // Standalone compute modules: no PRELUDE, own bindings in group 0 only.
+        assert!(!wgsl.contains("raa_frame"), "{name}");
+        assert_eq!(
+            wgsl.matches("@group(").count(),
+            wgsl.matches("@group(0)").count(),
+            "{name}"
+        );
+        let fns = defined_fns(wgsl);
+        for entry in entries {
+            assert!(fns.contains(entry), "{name}: entry point {entry}: {fns:?}");
+        }
+        assert_eq!(wgsl.matches("@compute").count(), entries.len(), "{name}");
+    }
+}
+
+/// Decimal literals with exactly six fractional digits, in source order.
+fn six_digit_literals(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() || (i > 0 && bytes[i - 1].is_ascii_digit()) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            let frac = i + 1;
+            i = frac;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - frac == 6 {
+                out.push(&text[start..i]);
+            }
+        }
+    }
+    out
+}
+
+/// Comma-separated items (whitespace-trimmed, empty dropped) between `open` after `marker`
+/// and the next `close`.
+fn list_after<'a>(text: &'a str, marker: &str, open: &str, close: &str) -> Vec<&'a str> {
+    let rest = &text[text.find(marker).unwrap_or_else(|| panic!("{marker}"))..];
+    let rest = &rest[rest.find(open).unwrap_or_else(|| panic!("{open}")) + open.len()..];
+    let body = &rest[..rest.find(close).unwrap_or_else(|| panic!("{close}"))];
+    body.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+#[test]
+fn sh_constants_match_cpu() {
+    // The five basis constants, used in the same order by both.
+    let cpu = six_digit_literals(SH_RS);
+    let gpu = six_digit_literals(SH_PROJECT_WGSL);
+    for c in ["0.282095", "0.488603", "1.092548", "0.315392", "0.546274"] {
+        assert!(cpu.contains(&c), "src/sh.rs lacks {c}");
+        assert!(gpu.contains(&c), "sh_project.wgsl lacks {c}");
+    }
+    assert_eq!(cpu.len(), 9, "{cpu:?}");
+    assert_eq!(cpu, gpu);
+    // The basis polynomials are textually the same.
+    let cpu_basis = list_after(SH_RS, "fn sh_basis", "= d;\n    [", "\n    ]");
+    let gpu_basis = list_after(SH_PROJECT_WGSL, "fn sh_basis", "array<f32, 9>(", "\n    )");
+    assert_eq!(cpu_basis.len(), 9, "{cpu_basis:?}");
+    assert_eq!(cpu_basis, gpu_basis);
+    // The A_l / pi factors.
+    let cpu_cosine = list_after(SH_RS, "const COSINE", "= [", "];");
+    let gpu_cosine = list_after(SH_PROJECT_WGSL, "const SH_COSINE", "array<f32, 9>(", ");");
+    assert_eq!(
+        cpu_cosine,
+        [
+            "1.0",
+            "2.0 / 3.0",
+            "2.0 / 3.0",
+            "2.0 / 3.0",
+            "0.25",
+            "0.25",
+            "0.25",
+            "0.25",
+            "0.25"
+        ]
+    );
+    assert_eq!(cpu_cosine, gpu_cosine);
 }
