@@ -28,6 +28,8 @@ raa-shader = { path = "../raa-shader" }
 raa-pipeline = { path = "../raa-pipeline" }
 raa-lit = { path = "../raa-lit" }
 raa-tonemap = { path = "../raa-tonemap" }
+raa-sky = { path = "../raa-sky" }
+raa-ibl = { path = "../raa-ibl" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
