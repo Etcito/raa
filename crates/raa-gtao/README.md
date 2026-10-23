@@ -8,8 +8,11 @@ Ground-truth ambient occlusion (GTAO) for the lit renderer (S12 `ao.gtao`).
 provider `gtao`. The pass follows Jimenez 2016:
 
 - 4 slice directions rotated by a 4x4 noise, 8 horizon steps per side over the projected
-  radius, and a cosine-weighted visibility integral with a thickness heuristic, reading the
-  prepass `depth` and `normal` targets.
+  radius (at least one pixel apart, read at pixel centres), each sample faded toward the
+  tangent-plane horizon as its distance reaches the radius (thickness heuristic), and the
+  analytic cosine-weighted visibility between the two horizons, normalised by the unoccluded
+  integral of the slice so an open flat surface is exactly 1; it reads the prepass `depth`
+  and `normal` targets.
 - It writes `1 - intensity * (1 - vis^power)` into an R32Float texture, then runs 2 separable
   7-tap depth-aware bilateral passes (horizontal into R32Float, vertical into the final
   texture) with the weight `exp(-|dz| / (0.02 z))`.

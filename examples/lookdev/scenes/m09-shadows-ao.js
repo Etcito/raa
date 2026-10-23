@@ -252,7 +252,8 @@ export default {
     engine.setLight({ ...SUN, direction: sunDirection(elevation) });
     engine.setAmbient(AMBIENT);
     engine.setSky({ preset: 'day', ...DAY_SKY });
-    engine.setEnvironmentLighting({ diffuse: 0.75, specular: 1 });
+    // Full sky diffuse: the shadowed floor keeps the blue sky tint of ref-1.
+    engine.setEnvironmentLighting({ diffuse: 1, specular: 1 });
     engine.setToneMapping({ look: 'punchy' });
     engine.setShadows({ ...SHADOWS, ...settings.shadows });
     engine.setAo({ ...AO, ...settings.ao });

@@ -4,7 +4,9 @@ Screen-space contact shadows of the lit renderer (S12 `shadow.contact`, order 45
 values: 24 steps, max distance 0.35 m, thickness 0.05 m). A compute pass reconstructs each
 pixel's view position from the prepass depth, marches toward the sun with a per-pixel
 interleaved-gradient-noise jitter, and marks the pixel occluded when the depth buffer lies in
-front of the ray by less than the thickness. The occlusion fades over the last 25% of the
+front of the ray by more than the receiver's own depth change over one pixel and by less than
+the thickness (samples are read at pixel centres and never in the receiver's own pixel, so a
+surface seen at a grazing angle does not shadow itself). The occlusion fades over the last 25% of the
 distance and within 5% of the screen edges. The result is written to an Rgba16Float texture
 (value in .r, 1 = lit) that the lighting reads at S10 group 1 binding 8. Depends on raa-core,
 raa-math, raa-pipeline, raa-lit and raa-shader.

@@ -5,11 +5,16 @@
 // Per pixel: the view position is reconstructed from depth through `inv_proj`; four slice
 // directions are rotated by a per-pixel interleaved gradient noise and the step distance is
 // offset by a second noise value; the projected radius in pixels is
-// `radius_m * proj[1][1] * 0.5 * h / view_depth`; each side marches 8 horizon steps with
-// `textureLoad` depths, falling back to the previous horizon when a sample lies more than
-// the radius behind (thickness heuristic); the normal is projected onto the slice plane and
-// the cosine-weighted visibility of the visible arc is integrated analytically per slice;
-// the slices are averaged and `out = clamp(1 - intensity * (1 - vis^power), 0, 1)`.
+// `radius_m * proj[1][1] * 0.5 * h / view_depth`. In each slice (the plane through the eye
+// spanned by the view vector v and the slice direction) angles are measured from v; the
+// projected normal sits at angle gamma and bounds the hemisphere to
+// [gamma - pi/2, gamma + pi/2]. Each side marches 8 horizon steps (at least one pixel apart,
+// samples at pixel centres), keeping the largest cosine to v, every sample faded toward the
+// tangent-plane bound as its distance reaches the radius (XeGTAO falloff, thickness
+// heuristic). The cosine-weighted visibility between the two horizons is integrated
+// analytically (Jimenez 2016) and normalised by the same integral over the unoccluded
+// hemisphere, so an open flat surface is exactly 1; then
+// `out = clamp(1 - intensity * (1 - vis^power), 0, 1)`.
 
 struct GtaoParams {
     proj: mat4x4<f32>,     // @0
@@ -40,63 +45,51 @@ fn raa_gtao_view_pos(uv: vec2<f32>, d: f32) -> vec3<f32> {
     return v.xyz / v.w;
 }
 
-// Antiderivative of the cosine-weighted visibility of one slice (Jimenez 2016), evaluated
-// between two signed slice angles `a` and `b`; `gamma` is the projected normal angle and
-// `r` the out-of-plane length of the normal. Returns 0 for an empty interval.
-fn raa_gtao_arc(a: f32, b: f32, gamma: f32, r: f32) -> f32 {
-    if (b <= a) {
-        return 0.0;
-    }
-    return r * 0.25
-        * (-cos(2.0 * b - gamma) + cos(2.0 * a - gamma) + 2.0 * (b - a) * sin(gamma));
+// Cosine-weighted visibility of one side of a slice (Jimenez 2016), from the view vector
+// (angle 0) to the signed horizon angle `h`; `gamma` is the projected normal angle.
+fn raa_gtao_arc(h: f32, gamma: f32) -> f32 {
+    return 0.25 * (-cos(2.0 * h - gamma) + cos(gamma) + 2.0 * h * sin(gamma));
 }
 
-// Signed horizon of the occluders within `radius`: the maximum elevation on the `side`
-// (+1) of the view direction or the minimum on the other (-1), both measured with the same
-// slice direction `dir`.
-fn raa_gtao_horizon(
+// Horizon cosine of one side (`side` +1 along `screen_dir`, -1 against it): the largest
+// cosine to `v` of the samples, each faded toward `low` (the tangent-plane bound) as its
+// distance from `p` reaches `radius`. Sky samples carry no occluder.
+fn raa_gtao_horizon_cos(
     p: vec3<f32>,
     v: vec3<f32>,
-    dir: vec3<f32>,
     screen_dir: vec2<f32>,
-    coord: vec2<i32>,
+    pixel: vec2<f32>,
     max_px: vec2<i32>,
-    step_px: f32,
+    radius_px: f32,
     jitter: f32,
     radius: f32,
     side: f32,
+    low: f32,
 ) -> f32 {
-    var h = 0.0;
-    var prev = 0.0;
+    var hc = low;
     for (var i = 0u; i < STEPS; i = i + 1u) {
-        let dist = (f32(i) + jitter + 1.0) * step_px;
+        let s = (f32(i) + jitter) / f32(STEPS);
+        // Quadratic spacing (denser near the pixel), at least one pixel per step.
+        let dist = max(s * s * radius_px, f32(i) + 1.0);
         let sp = clamp(
-            vec2<f32>(coord) + side * dist * screen_dir,
-            vec2<f32>(0.0),
-            vec2<f32>(max_px),
+            vec2<i32>(floor(pixel + side * dist * screen_dir)),
+            vec2<i32>(0),
+            max_px,
         );
-        let sd = textureLoad(depth_tex, vec2<i32>(sp), 0);
+        let sd = textureLoad(depth_tex, sp, 0);
         if (sd >= 1.0) {
-            break;
+            continue;
         }
-        let delta = raa_gtao_view_pos(sp * gtao_params.viewport.zw, sd) - p;
-        // Thickness heuristic: a sample far behind the point is background, not an
-        // occluder; fall off to the previous horizon.
-        if (-dot(delta, v) > radius) {
-            h = prev;
-            break;
+        let q = raa_gtao_view_pos((vec2<f32>(sp) + vec2<f32>(0.5)) * gtao_params.viewport.zw, sd);
+        let delta = q - p;
+        let len = length(delta);
+        if (len < 1e-5) {
+            continue;
         }
-        let elev = clamp(
-            atan2(dot(delta, dir), dot(delta, v)),
-            -PI * 0.5,
-            PI * 0.5,
-        );
-        if ((side > 0.0 && elev > h) || (side < 0.0 && elev < h)) {
-            prev = h;
-            h = elev;
-        }
+        let falloff = clamp((radius - len) / (0.6 * radius), 0.0, 1.0);
+        hc = max(hc, mix(low, dot(delta, v) / len, falloff));
     }
-    return h;
+    return hc;
 }
 
 @compute @workgroup_size(8, 8)
@@ -120,44 +113,49 @@ fn gtao(@builtin(global_invocation_id) gid: vec3<u32>) {
     let v = normalize(-p);
     var n = normalize(textureLoad(normal_tex, coord, 0).xyz);
     // Only the front hemisphere carries occlusion; flip a back-facing normal toward the
-    // viewer so the slice bounds below stay well defined.
+    // viewer so gamma below stays in [-pi/2, pi/2].
     if (dot(n, v) < 0.0) {
         n = -n;
     }
     let view_depth = max(-p.z, 1e-4);
     let radius_px = radius * gtao_params.proj[1][1] * 0.5 * gtao_params.viewport.y / view_depth;
-    let step_px = radius_px / f32(STEPS);
     let max_px = vec2<i32>(size) - vec2<i32>(1);
     let noise = raa_gtao_ign(pixel, frame);
     let jitter = raa_gtao_ign(pixel + vec2<f32>(17.0, 23.0), frame);
 
     var visible = 0.0;
+    var unoccluded = 0.0;
     for (var s = 0u; s < SLICES; s = s + 1u) {
-        let phi = (f32(s) + noise) * (PI * 0.25);
+        let phi = (f32(s) + noise) * (PI / f32(SLICES));
         let c = cos(phi);
         let sn = sin(phi);
         // Screen y grows downwards; the view-space slice direction is orthonormalised
-        // against the view vector so the projection below is exact.
+        // against the view vector, so (v, omega) spans the slice plane exactly.
         let base3 = vec3<f32>(c, -sn, 0.0);
         let omega = normalize(base3 - dot(base3, v) * v);
-        let slice_normal = cross(v, omega);
-        let r = sqrt(max(1.0 - dot(n, slice_normal) * dot(n, slice_normal), 0.0));
-        let gamma = atan2(dot(n, omega), dot(n, v));
-        let lo = max(0.0, gamma - PI * 0.5);
-        let hi = min(PI, gamma + PI * 0.5);
-        let h_pos = raa_gtao_horizon(
-            p, v, omega, vec2<f32>(c, sn), coord, max_px, step_px, jitter, radius, 1.0,
+        let nv = dot(n, v);
+        let no = dot(n, omega);
+        // Length of the normal projected onto the slice plane and its angle from v.
+        let r = sqrt(nv * nv + no * no);
+        if (r < 1e-4) {
+            continue;
+        }
+        let gamma = atan2(no, nv);
+        let c_pos = raa_gtao_horizon_cos(
+            p, v, vec2<f32>(c, sn), pixel, max_px, radius_px, jitter, radius, 1.0,
+            cos(gamma + PI * 0.5),
         );
-        let h_neg = raa_gtao_horizon(
-            p, v, omega, vec2<f32>(c, sn), coord, max_px, step_px, jitter, radius, -1.0,
+        let c_neg = raa_gtao_horizon_cos(
+            p, v, vec2<f32>(c, sn), pixel, max_px, radius_px, jitter, radius, -1.0,
+            cos(gamma - PI * 0.5),
         );
-        let a = min(h_neg, h_pos);
-        let b = max(h_neg, h_pos);
-        // The wedge [a, b] is occluded; integrate the visible arcs on both sides.
-        visible += raa_gtao_arc(lo, min(hi, a), gamma, r);
-        visible += raa_gtao_arc(max(lo, b), hi, gamma, r);
+        let h_pos = min(acos(clamp(c_pos, -1.0, 1.0)), gamma + PI * 0.5);
+        let h_neg = max(-acos(clamp(c_neg, -1.0, 1.0)), gamma - PI * 0.5);
+        visible += r * (raa_gtao_arc(h_neg, gamma) + raa_gtao_arc(h_pos, gamma));
+        unoccluded += r
+            * (raa_gtao_arc(gamma - PI * 0.5, gamma) + raa_gtao_arc(gamma + PI * 0.5, gamma));
     }
-    let vis = clamp((2.0 / f32(SLICES)) * visible, 0.0, 1.0);
+    let vis = clamp(visible / max(unoccluded, 1e-6), 0.0, 1.0);
     let ao = clamp(1.0 - intensity * (1.0 - pow(vis, power)), 0.0, 1.0);
     textureStore(out_ao, coord, vec4<f32>(ao));
 }

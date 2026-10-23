@@ -1,5 +1,9 @@
 // shadow.contact: screen-space contact shadows (CONTACT: 24 steps toward the sun).
 // Standalone compute module, group 0 only. Output .r = sun visibility (1 = lit).
+// Samples are read at pixel centres and never in the receiver's own pixel; a sample counts
+// as an occluder only when it is in front of the ray by more than the receiver's own depth
+// change over one pixel (so a plane seen at a grazing angle never shadows itself) and by
+// less than the thickness.
 
 struct ContactParams {
     proj: mat4x4<f32>,
@@ -31,6 +35,27 @@ fn view_pos(uv: vec2<f32>, d: f32) -> vec3<f32> {
     return v.xyz / v.w;
 }
 
+// Positive view depth of pixel `coord` (clamped to the screen).
+fn view_depth_at(coord: vec2<i32>, max_px: vec2<i32>) -> f32 {
+    let c = clamp(coord, vec2<i32>(0), max_px);
+    let uv = (vec2<f32>(c) + vec2<f32>(0.5)) * cp.viewport.zw;
+    return -view_pos(uv, textureLoad(depth_tex, c, 0)).z;
+}
+
+// Depth change of the receiver over one pixel: on each axis the smaller one-sided
+// difference (so a depth edge next to the pixel does not count), then the larger axis.
+fn depth_slope(coord: vec2<i32>, z: f32, max_px: vec2<i32>) -> f32 {
+    let dx = min(
+        abs(view_depth_at(coord + vec2<i32>(1, 0), max_px) - z),
+        abs(view_depth_at(coord - vec2<i32>(1, 0), max_px) - z),
+    );
+    let dy = min(
+        abs(view_depth_at(coord + vec2<i32>(0, 1), max_px) - z),
+        abs(view_depth_at(coord - vec2<i32>(0, 1), max_px) - z),
+    );
+    return max(dx, dy);
+}
+
 @compute @workgroup_size(8, 8)
 fn contact(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(cp.viewport.xy);
@@ -52,6 +77,7 @@ fn contact(@builtin(global_invocation_id) gid: vec3<u32>) {
     let step_len = distance / f32(STEPS);
     let jitter = ign(vec2<f32>(gid.xy), cp.params.w);
     let max_px = vec2<i32>(size) - vec2<i32>(1);
+    let bias = depth_slope(coord, -origin.z, max_px);
 
     var occlusion = 0.0;
     for (var i = 0u; i < STEPS; i = i + 1u) {
@@ -67,11 +93,14 @@ fn contact(@builtin(global_invocation_id) gid: vec3<u32>) {
             break;
         }
         let sp = clamp(vec2<i32>(uv * cp.viewport.xy), vec2<i32>(0), max_px);
+        if (all(sp == coord)) {
+            continue;
+        }
         let sd = textureLoad(depth_tex, sp, 0);
-        let scene = view_pos(uv, sd);
+        let scene = view_pos((vec2<f32>(sp) + vec2<f32>(0.5)) * cp.viewport.zw, sd);
         // Positive when the scene surface is in front of (closer than) the ray point.
         let delta = scene.z - p.z;
-        if (delta > 0.0 && delta < thickness) {
+        if (delta > bias && delta < thickness) {
             let fade_end = clamp((distance - t) / (0.25 * distance), 0.0, 1.0);
             let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
             let fade_edge = clamp(edge / 0.05, 0.0, 1.0);
