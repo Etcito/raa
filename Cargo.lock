@@ -817,6 +817,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-tonemap"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-web"
 version = "0.1.0"
 dependencies = [

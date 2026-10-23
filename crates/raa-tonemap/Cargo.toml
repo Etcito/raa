@@ -1,0 +1,11 @@
+[package]
+name = "raa-tonemap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Display transform of the lit renderer: exposure, AgX/ACES/linear tone mapping, sRGB OETF and dither."
+
+[dependencies]
+raa-core = { workspace = true }
+wgpu = { workspace = true }
