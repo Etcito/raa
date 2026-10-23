@@ -758,8 +758,11 @@ dependencies = [
 name = "raa-fur"
 version = "0.1.0"
 dependencies = [
+ "raa-brdf",
  "raa-core",
+ "raa-ibl",
  "raa-lit",
+ "raa-matfn",
  "raa-pipeline",
  "raa-shader",
  "wgpu",
