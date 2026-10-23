@@ -17,14 +17,15 @@ const MOON = { direction: [-0.505, -0.303, 0.808], color: [0.6, 0.7, 1], intensi
 const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 
 // Overrides of the `day` preset: a saturated blue zenith (AgX desaturates bright blues), a
-// pale warm horizon and ground, a stylised sun disc (16 mrad, about 20 px across instead
+// pale warm horizon and ground, a fast gradient (softness 5: blue down to about 10 deg,
+// then a narrow pale band at the horizon), a stylised sun disc (16 mrad, about 20 px across instead
 // of the 6 px of the real sun) and larger, denser cumulus.
 const DAY_SKY = {
   zenith: [0.03, 0.17, 0.95],
   horizon: [0.7, 0.8, 0.92],
   ground: [0.5, 0.45, 0.4],
   intensity: 1.6,
-  horizonSoftness: 3,
+  horizonSoftness: 5,
   sunDiscSize: 0.016,
   sunDiscIntensity: 20,
   clouds: { coverage: 0.5, density: 1.2 },
@@ -33,8 +34,10 @@ const DAY_SKY = {
 // Orbit cameras: [target, distance m, yaw rad, pitch rad] (yaw 0 looks down -Z; a positive
 // pitch puts the eye above the target, looking slightly down). The eye stays about 1 m up,
 // so the horizon sits just above mid-frame: sky in the upper part, tiles in the lower part.
+// The close eye (0.85 m) looks at the slime at about 15 deg, where its Fresnel reflection
+// of the sky and clouds is clearly visible without washing out the green.
 const WIDE = [[0, 0.5, 0], 3.4, 0, 0.12];
-const CLOSE = [[0.1, 0.5, 0], 2.9, 0.12, 0.02];
+const CLOSE = [[0.1, 0.7, 0], 3.0, 0.12, 0.05];
 
 const yawQuat = (rad) => [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)];
 
@@ -72,7 +75,7 @@ function place(engine, mesh, where) {
 
 const R8 = 'R8: simple untextured procedural stand-in shapes (no fur, bloom or transparency '
   + 'yet): an upright striped inflatable toy hammer on the left, a pink sphere standing for a '
-  + 'plush, a thin pink S-shaped neon tube, a pale blue rounded ice block, a round purple basin '
+  + 'plush, a thin pink S-shaped neon tube, a blue rounded ice block, a round purple basin '
   + 'holding a green slime surface, on a large floor of pastel tiles reaching the horizon';
 const SKY = 'a bright blue gradient sky, deep blue at the top fading to a pale warm horizon, a '
   + 'small bright sun disc in the upper right and soft white puffy procedural clouds';
@@ -104,10 +107,12 @@ export default {
     },
     {
       id: 'ibl-on',
-      description: `Closer view of ${R8.slice(4)}, with ${SKY} visible behind them; the `
-        + 'objects are lit by soft sky ambient light (blue tint on upward faces, gentle soft '
-        + 'shading all around, no black shadows) and glossy surfaces (hammer, ice, slime) show '
-        + `soft reflections of the blue sky and the bright horizon. ${MOOD}`,
+      description: `Closer view of ${R8.slice(4)}, with ${SKY} filling the upper half of the `
+        + 'frame behind them; the objects are lit by soft sky ambient light (blue tint on '
+        + 'upward faces, gentle soft shading all around, no black shadows, pastel tile '
+        + 'colours); the glossy green slime surface reflects the pale sky and clouds as a soft '
+        + 'sheen, the blue ice block has bright sky-lit top edges and the hammer head glossy '
+        + `highlights. ${MOOD}`,
       references: ['ref-1'],
       judge: true,
       settings: { camera: 'close' },
@@ -170,15 +175,19 @@ export default {
 
     const { objects, geometry, pbr, flat } = lib;
     // Vertex colours carry the hammer stripes and tile colours, so their bases are white.
+    // Ice and slime have deeper bases and near-minimum roughness, so their sky reflections
+    // (a few percent at normal incidence) stand out instead of vanishing on a pale base.
     const tiles = pbr(engine, [1, 1, 1], { roughness: 0.55 });
-    const hammer = pbr(engine, [1, 1, 1], { roughness: 0.12 });
-    const ice = pbr(engine, [0.78, 0.9, 0.97], { roughness: 0.08 });
+    const hammer = pbr(engine, [1, 1, 1], { roughness: 0.08 });
+    const ice = pbr(engine, [0.35, 0.6, 0.85], { roughness: 0.03 });
     const plush = pbr(engine, [1, 0.45, 0.5], { roughness: 1 });
     const neon = flat(engine, [0.02, 0.01, 0.02], { emissive: [7, 1.1, 3.6] });
     const basin = pbr(engine, [0.55, 0.36, 0.78], { roughness: 0.4 });
-    const slime = pbr(engine, [0.5, 0.95, 0.22], { roughness: 0.1 });
+    const slime = pbr(engine, [0.12, 0.6, 0.05], { roughness: 0.04 });
 
-    place(engine, upload(engine, objects.floorTiles(24), [tiles]), { t: [0, 0, 0] });
+    // 64 x 64 tiles (32 m): the floor reaches the horizon haze instead of ending in a band
+    // of the sky's ground colour.
+    place(engine, upload(engine, objects.floorTiles(64), [tiles]), { t: [0, 0, 0] });
     place(engine, upload(engine, objects.inflatableHammer(), [hammer, hammer]), PLACES.hammer);
     place(engine, upload(engine, objects.neonTube(), [neon]), PLACES.neon);
     place(engine, upload(engine, objects.iceBlock(), [ice]), PLACES.ice);
