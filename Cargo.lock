@@ -742,6 +742,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-gtao"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-lit",
+ "raa-math",
+ "raa-pipeline",
+ "raa-shader",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-ibl"
 version = "0.1.0"
 dependencies = [
