@@ -14,10 +14,18 @@
 //! [`ggx_dfg_fit`] and [`sheen_albedo_fit`] are the analytic albedo fits the model uses, the
 //! same in WGSL; both over-estimate the albedo they approximate, which is what keeps the
 //! layered albedo at or below 1 (see `tests/energy.rs`).
+//!
+//! [`providers`] are the `layered` slot providers at priority 20 (above raa-ibl's `ibl` at
+//! 10): `Direct` is [`BRDF_WGSL`], the WGSL mirror of [`eval_direct`]; `Ambient` is raa-ibl's
+//! image-based base terms plus the clearcoat reflection and the sheen indirect, attenuated by
+//! the clearcoat as in `Direct`. [`install`] adds both to a [`raa_lit::LitRenderer`]. The S11
+//! slots receive no geometric normal, so in WGSL the clearcoat uses the shading normal.
 
 mod cpu;
+mod shaders;
 
 pub use cpu::{
     CLEARCOAT_F0, DirectTerms, MIN_N_DOT_V, MIN_ROUGHNESS, MIN_SHEEN_ROUGHNESS, eval_base,
     eval_direct, eval_under_coat, f0_from_ior, ggx_dfg_fit, sheen_albedo_fit,
 };
+pub use shaders::{BRDF_WGSL, install, providers};

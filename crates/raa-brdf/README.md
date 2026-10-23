@@ -5,9 +5,11 @@ reference.
 
 ## Purpose
 
-`raa-brdf` holds the layered `Direct` model. This crate has the CPU reference that the
-tests use; the WGSL provider (`providers()`, `install`, `BRDF_WGSL`) comes in a later task
-and mirrors `src/cpu.rs` line by line: the same operations, guards and fit coefficients.
+`raa-brdf` holds the layered `Direct` model: the CPU reference that the tests use
+(`src/cpu.rs`) and the `layered` slot providers (`src/shaders.rs`). The WGSL `Direct`
+provider (`src/wgsl/direct.wgsl`) mirrors `src/cpu.rs` line by line: the same operations,
+guards and fit coefficients. The `Ambient` provider (`src/wgsl/ambient.wgsl`, after
+`raa_ibl::IBL_LIB_WGSL`) adds the image-based terms of the same layers.
 
 The model, for a unit normal `n`, view `v` and light `l` (`mu = max(n.v, 1e-4)`, as in the
 shading context):
@@ -21,12 +23,27 @@ shading context):
   clamped to [0.07, 1]. The base is scaled by `1 - max(sheen_color) min(E_sheen, 1)`.
   Neubelt over-reflects at grazing view (`E_sheen` reaches about 5.7). Where `E_sheen > 1`
   the sheen lobe is divided by `E_sheen`, so a white sheen reflects at most what it receives.
-- **Clearcoat**: GGX with F0 0.04 and Kelemen visibility `1 / (4 (l.h)^2)` on the geometric
-  normal. Base and sheen are attenuated by `1 - clearcoat Fc(n.v)`. The reference takes one
-  normal; in WGSL the coat uses the geometric normal and the other layers the shading normal.
+- **Clearcoat**: GGX with F0 0.04 and Kelemen visibility `1 / (4 (l.h)^2)`. Base and sheen
+  are attenuated by `1 - clearcoat Fc(n.v)`. The reference takes one normal. The S11 slots
+  receive no geometric normal, so in WGSL the coat uses the shading normal too. That is the
+  interpolated geometric normal for a material that keeps `raa_default_output`'s normal.
 
 With clearcoat 0 the result is exactly the under-coat result. With sheen 0 too, it is exactly
 the base result.
+
+### Ambient
+
+Without an environment (`raa_env_sh.info.w < 0.5`), `Ambient` is the S1 PbrLite ambient
+term, as in raa-ibl. Otherwise it is the sum of:
+
+- raa-ibl's base terms: SH diffuse with multi-bounce AO, and prefiltered specular with the
+  split-sum DFG, multiscatter compensation and specular occlusion. They are scaled by the
+  sheen albedo left to the base, as in `Direct`.
+- The sheen indirect: SH irradiance x sheen color x `min(E_sheen(n.v), 1)`.
+- The clearcoat reflection: prefiltered at the clearcoat roughness along its dominant
+  direction, with the split-sum DFG at F0 0.04 and specular occlusion.
+
+The base and sheen terms are attenuated by `1 - clearcoat Fc(n.v)`, as in `Direct`.
 
 ### Fits
 
@@ -64,6 +81,11 @@ the crate has its own fit.
 - `eval_base`: the base layer alone.
 - `ggx_dfg_fit(n_dot_v, roughness) -> [A, B]` and `sheen_albedo_fit(n_dot_v, sheen_roughness)`:
   the albedo fits.
+- `providers() -> [SlotProvider; 2]`: `Direct` then `Ambient`, provider `layered`, priority
+  20 (above raa-ibl's `ibl` at 10 and the raa-lit defaults at 0).
+- `install(&mut LitRenderer)`: adds both providers with `add_slot`. It checks both on a copy
+  of the renderer's composer first, so a refusal (`shader.slot_conflict`) adds neither.
+- `BRDF_WGSL`: the `Direct` provider source.
 - Constants:
   - `MIN_ROUGHNESS` (0.03)
   - `MIN_SHEEN_ROUGHNESS` (0.07)
@@ -96,3 +118,10 @@ Run `cargo test -p raa-brdf`:
   - the fits stay above reference values of their integrals, within the stated bounds;
   - `f0_from_ior` matches the pass;
   - degenerate directions give finite, non-negative values.
+- `src/shaders.rs`:
+  - the providers' slots, name and priority;
+  - each source defines only its slot function plus `raa_layered_` helpers (and the
+    `raa-ibl` library functions in `Ambient`), and the two sources share no name;
+  - the WGSL constants and fit tables are the `src/cpu.rs` ones;
+  - `raa.standard`, Forward, MSAA 4 with the S11 default slots and both providers: the
+    `layered` sources win, and the composed module passes naga validation.

@@ -700,6 +700,7 @@ dependencies = [
 name = "raa-brdf"
 version = "0.1.0"
 dependencies = [
+ "raa-core",
  "raa-ibl",
  "raa-lit",
  "raa-shader",

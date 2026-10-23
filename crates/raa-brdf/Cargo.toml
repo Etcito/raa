@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Layered BRDF (base, sheen, clearcoat) slot providers of the lit renderer and their CPU reference."
 
 [dependencies]
+raa-core = { workspace = true }
 raa-shader = { path = "../raa-shader" }
 raa-lit = { path = "../raa-lit" }
 raa-ibl = { path = "../raa-ibl" }
