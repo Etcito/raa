@@ -2,8 +2,10 @@
 # Build the @etcito/raa package: scripts/build-package.sh [--tag vX.Y.Z]
 #
 # raa-js wasm -> packages/raa/pkg/, dist/raa-sizes.json, dist/example-basic/,
-# packages/raa/LICENSE, then npm pack -> release/etcito-raa-<version>.tgz and
-# release/SHA256SUMS (the release asset set; release/ is gitignored).
+# packages/raa/LICENSE, then the staged package (target/package-stage/raa, whose
+# index.d.ts is packages/raa/index.d.ts followed by every packages/raa/types/*.d.ts)
+# -> release/etcito-raa-<version>.tgz, release/SHA256SUMS, dist/package/raa/ and
+# dist/etcito-raa-<version>.tgz (the release asset set; release/ is gitignored).
 #
 # Tools come from PATH: node, npm, cargo, rustc (rustup, with the wasm32-unknown-unknown
 # target) and wasm-bindgen, which must be the version pinned in Cargo.lock. Override the
@@ -103,6 +105,34 @@ rm -f "$PKG_DIR/pkg/.gitignore"
 echo "== LICENSE copy into packages/raa"
 cp "$ROOT/LICENSE" "$PKG_DIR/LICENSE"
 
+# Stage the shipped package so index.d.ts can be assembled: the v0 API followed by every
+# P2 types file in file-name order (TypeScript merges the repeated declarations). The
+# sources packages/raa/index.d.ts and packages/raa/index.js stay unchanged.
+echo "== stage the package in target/package-stage/raa"
+STAGE_ROOT="$TARGET_DIR/package-stage"
+STAGE="$STAGE_ROOT/raa"
+rm -rf "$STAGE_ROOT"
+mkdir -p "$STAGE"
+cp "$PKG_DIR/package.json" "$PKG_DIR/index.js" "$PKG_DIR/README.md" "$PKG_DIR/LICENSE" "$STAGE/"
+cp -R "$PKG_DIR/pkg" "$STAGE/pkg"
+
+DTS="$STAGE/index.d.ts"
+: > "$DTS"
+# append_dts terminates each source with a newline when it lacks one, so the next
+# declaration does not join the previous file's last line.
+append_dts() {
+  cat "$1" >> "$DTS"
+  if [ -n "$(tail -c 1 "$1")" ]; then
+    printf '\n' >> "$DTS"
+  fi
+}
+append_dts "$PKG_DIR/index.d.ts"
+if [ -d "$PKG_DIR/types" ]; then
+  while IFS= read -r f; do
+    append_dts "$f"
+  done < <(find "$PKG_DIR/types" -maxdepth 1 -type f -name '*.d.ts' | LC_ALL=C sort)
+fi
+
 echo "== sizes dist/raa-sizes.json"
 mkdir -p "$DIST"
 write_sizes "$PKG_DIR/pkg/raa_js_bg.wasm" "pkg/raa_js_bg.wasm" "$DIST/raa-sizes.json"
@@ -120,11 +150,17 @@ write_sizes "$EX/raa/pkg/raa_js_bg.wasm" "raa/pkg/raa_js_bg.wasm" "$EX/sizes.jso
 echo "== npm pack -> release/$TGZ_NAME"
 rm -rf "$RELEASE"
 mkdir -p "$RELEASE"
-(cd "$PKG_DIR" && "$NPM" pack --pack-destination ../../release --offline)
+(cd "$STAGE" && "$NPM" pack --pack-destination "$RELEASE" --offline)
 if [ ! -f "$RELEASE/$TGZ_NAME" ]; then
   echo "build-package.sh: npm pack did not produce release/$TGZ_NAME" >&2
   exit 1
 fi
+
+echo "== dist/package/raa and dist/etcito-raa-$VERSION.tgz"
+rm -rf "$DIST/package/raa"
+mkdir -p "$DIST/package"
+cp -R "$STAGE" "$DIST/package/raa"
+cp "$RELEASE/$TGZ_NAME" "$DIST/etcito-raa-$VERSION.tgz"
 
 echo "== tar -tzf release/$TGZ_NAME"
 LIST="$(tar -tzf "$RELEASE/$TGZ_NAME")"
