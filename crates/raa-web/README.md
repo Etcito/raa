@@ -29,6 +29,10 @@ wasm32 only:
   1280x720, `stats_window` 300 and `alloc_probe` `None`.
 - `WebRuntime::new(canvas, app, opts)` — sizes the canvas, creates the GPU context and the
   surface, calls `WebApp::init` and compiles the frame graph.
+- `WebRuntime::new_with(canvas, app, opts, &DeviceRequest)` — `new` with the context created
+  through `GpuContext::for_canvas_with` (core adapter, `optional_features` intersected with
+  the adapter's, adapter limits when `adapter_limits`); `new` calls it with
+  `DeviceRequest::default()`.
 - `WebRuntime::frame(now_ms)` — update, acquire, execute, submit, present; records the
   `performance.now()` delta in the ring and registers the frame-0
   `on_submitted_work_done` callback that captures `first_frame_ms`.

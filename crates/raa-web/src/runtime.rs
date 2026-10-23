@@ -5,7 +5,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use raa_core::{AdapterSummary, CanvasSurface, FrameGraph, GpuContext, GpuOptions, RaaError};
+use raa_core::{
+    AdapterSummary, CanvasSurface, DeviceRequest, FrameGraph, GpuContext, GpuOptions, RaaError,
+};
 use wasm_bindgen::JsValue;
 
 use crate::stats::CpuRing;
@@ -66,10 +68,23 @@ pub struct WebRuntime {
 impl WebRuntime {
     /// Sizes the canvas to `opts.width` x `opts.height`, creates the GPU context, the surface
     /// and the frame graph, lets the app add its passes, and compiles the graph.
+    /// Uses the default [`DeviceRequest`] (no optional features, default limits).
     pub async fn new(
+        canvas: web_sys::HtmlCanvasElement,
+        app: Box<dyn WebApp>,
+        opts: RuntimeOptions,
+    ) -> Result<WebRuntime, RaaError> {
+        Self::new_with(canvas, app, opts, &DeviceRequest::default()).await
+    }
+
+    /// [`WebRuntime::new`] with the device created through
+    /// [`GpuContext::for_canvas_with`]: a core adapter, `req.optional_features` intersected
+    /// with the adapter's features and, when `req.adapter_limits`, the adapter's limits.
+    pub async fn new_with(
         canvas: web_sys::HtmlCanvasElement,
         mut app: Box<dyn WebApp>,
         opts: RuntimeOptions,
+        req: &DeviceRequest,
     ) -> Result<WebRuntime, RaaError> {
         let performance = web_sys::window()
             .and_then(|window| window.performance())
@@ -78,7 +93,7 @@ impl WebRuntime {
             })?;
         canvas.set_width(opts.width.max(1));
         canvas.set_height(opts.height.max(1));
-        let (gpu, surface) = GpuContext::for_canvas(canvas, &opts.gpu).await?;
+        let (gpu, surface) = GpuContext::for_canvas_with(canvas, &opts.gpu, req).await?;
         let mut graph = FrameGraph::new(surface.format());
         app.init(
             &gpu,
