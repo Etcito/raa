@@ -1,0 +1,12 @@
+[package]
+name = "raa-brdf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Layered BRDF (base, sheen, clearcoat) slot providers of the lit renderer and their CPU reference."
+
+[dependencies]
+raa-shader = { path = "../raa-shader" }
+raa-lit = { path = "../raa-lit" }
+raa-ibl = { path = "../raa-ibl" }

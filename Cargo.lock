@@ -697,6 +697,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-brdf"
+version = "0.1.0"
+dependencies = [
+ "raa-ibl",
+ "raa-lit",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-contact"
 version = "0.1.0"
 dependencies = [
