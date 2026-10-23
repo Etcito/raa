@@ -769,9 +769,11 @@ name = "raa-js"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "raa-contact",
  "raa-core",
  "raa-csg",
  "raa-geom",
+ "raa-gtao",
  "raa-ibl",
  "raa-lit",
  "raa-loader",
@@ -783,6 +785,7 @@ dependencies = [
  "raa-render",
  "raa-scene",
  "raa-shader",
+ "raa-shadow",
  "raa-sky",
  "raa-tonemap",
  "raa-web",
