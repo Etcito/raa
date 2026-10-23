@@ -759,6 +759,7 @@ dependencies = [
  "raa-material",
  "raa-math",
  "raa-mesh",
+ "raa-scene",
  "raa-shader",
  "wgpu",
 ]

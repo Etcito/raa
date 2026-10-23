@@ -14,3 +14,4 @@ raa-geom = { workspace = true }
 wgpu = { workspace = true }
 raa-shader = { path = "../raa-shader" }
 raa-mesh = { path = "../raa-mesh" }
+raa-scene = { workspace = true }
