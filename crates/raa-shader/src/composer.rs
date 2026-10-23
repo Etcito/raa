@@ -1,19 +1,172 @@
 //! Shader composition (S11) and naga validation of composed WGSL.
 
+use std::borrow::Cow;
+
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 use crate::error::ShaderError;
+use crate::ids::{PassKind, SlotId, VariantKey};
+use crate::registry::MaterialFnRegistry;
+use crate::{
+    LIB_WGSL, PASS_FORWARD_WGSL, PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL, PASS_SHADOW_WGSL,
+    PASS_TRANSPARENT_WGSL, PRELUDE_WGSL,
+};
+
+/// Inserted after the material function when it defines no `material_vertex`.
+const PASSTHROUGH_MATERIAL_VERTEX: &str =
+    "fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput {
+    return VertexMaterialOutput(in.local_position, in.normal);
+}
+";
+
+/// FNV-1a 64-bit offset basis and prime.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Implementation of one slot function (S11). `wgsl` defines exactly
+/// [`SlotId::fn_name`] plus private helpers prefixed `raa_<provider>_`.
+#[derive(Clone, Debug)]
+pub struct SlotProvider {
+    pub slot: SlotId,
+    /// The highest priority on a slot wins; the default providers use 0.
+    pub priority: i32,
+    pub provider: &'static str,
+    pub wgsl: Cow<'static, str>,
+}
 
 /// Builds the WGSL module of a shader variant from the registry and the slot providers.
 #[derive(Clone, Debug, Default)]
 pub struct Composer {
-    _private: (),
+    providers: Vec<SlotProvider>,
 }
 
 impl Composer {
     /// A composer without slot providers.
     pub fn new() -> Composer {
         Composer::default()
+    }
+
+    /// Installs a provider. Refuses `shader.slot_conflict` when the slot already has a
+    /// provider with the same priority (the composer is then unchanged).
+    pub fn add_slot(&mut self, p: SlotProvider) -> Result<(), ShaderError> {
+        if let Some(other) = self
+            .providers
+            .iter()
+            .find(|q| q.slot == p.slot && q.priority == p.priority)
+        {
+            return Err(ShaderError::new(
+                ShaderError::SLOT_CONFLICT,
+                format!(
+                    "slot {:?} (`{}`): providers {:?} and {:?} both have priority {}",
+                    p.slot,
+                    p.slot.fn_name(),
+                    other.provider,
+                    p.provider,
+                    p.priority
+                ),
+            ));
+        }
+        self.providers.push(p);
+        Ok(())
+    }
+
+    /// The provider of `slot` with the highest priority.
+    pub fn winner(&self, slot: SlotId) -> Option<&SlotProvider> {
+        // Priorities on one slot are distinct (add_slot), so the maximum is unique.
+        self.providers
+            .iter()
+            .filter(|p| p.slot == slot)
+            .max_by_key(|p| p.priority)
+    }
+
+    /// FNV-1a (64-bit) over the winner of every slot in [`SlotId::ALL`] order: provider
+    /// name, priority and source, each length-prefixed; a slot without provider hashes a
+    /// marker byte. Providers that do not win do not change it.
+    pub fn slots_hash(&self) -> u64 {
+        let mut h = FNV_OFFSET;
+        for slot in SlotId::ALL {
+            match self.winner(slot) {
+                Some(p) => {
+                    h = fnv1a(h, &[1]);
+                    h = fnv1a(h, &(p.provider.len() as u64).to_le_bytes());
+                    h = fnv1a(h, p.provider.as_bytes());
+                    h = fnv1a(h, &p.priority.to_le_bytes());
+                    h = fnv1a(h, &(p.wgsl.len() as u64).to_le_bytes());
+                    h = fnv1a(h, p.wgsl.as_bytes());
+                }
+                None => h = fnv1a(h, &[0]),
+            }
+        }
+        h
+    }
+
+    /// The WGSL module of `key`, in the S11 order: PRELUDE, LIB, the material function, a
+    /// passthrough `material_vertex` when the function defines none, the winner of each
+    /// slot in [`SlotId::ALL`] order, then the pass entry points preceded by the variant
+    /// constants `RAA_MSAA` and `RAA_VARIANT_FLAGS`. Refuses `shader.unknown_fn` when the
+    /// registry has no function `key.material_fn` and `shader.slot_missing` when a slot has
+    /// no provider. The result is not validated (see [`Composer::validate`]).
+    pub fn compose(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+    ) -> Result<String, ShaderError> {
+        let entry = reg.get(key.material_fn).ok_or_else(|| {
+            ShaderError::new(
+                ShaderError::UNKNOWN_FN,
+                format!(
+                    "material function id {} is not registered ({} registered)",
+                    key.material_fn.0,
+                    reg.len()
+                ),
+            )
+        })?;
+        let mut winners = Vec::with_capacity(SlotId::ALL.len());
+        for slot in SlotId::ALL {
+            let p = self.winner(slot).ok_or_else(|| {
+                ShaderError::new(
+                    ShaderError::SLOT_MISSING,
+                    format!("slot {slot:?} (`{}`) has no provider", slot.fn_name()),
+                )
+            })?;
+            winners.push(p);
+        }
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "// raa variant: material {:?} (id {}), pass {:?}, msaa {}, flags {:#x}, slots {:016x}\n",
+            entry.name,
+            key.material_fn.0,
+            key.pass,
+            key.msaa,
+            key.flags,
+            self.slots_hash()
+        ));
+        section(&mut out, "prelude", PRELUDE_WGSL);
+        section(&mut out, "lib", LIB_WGSL);
+        section(&mut out, &format!("material {:?}", entry.name), &entry.wgsl);
+        if !entry.has_vertex {
+            section(
+                &mut out,
+                "material_vertex passthrough",
+                PASSTHROUGH_MATERIAL_VERTEX,
+            );
+        }
+        for p in winners {
+            let title = format!(
+                "slot {:?}, provider {:?}, priority {}",
+                p.slot, p.provider, p.priority
+            );
+            section(&mut out, &title, &p.wgsl);
+        }
+        let pass = format!(
+            "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
+            key.msaa,
+            key.flags,
+            pass_wgsl(key.pass)
+        );
+        section(&mut out, &format!("pass {:?}", key.pass), &pass);
+        Ok(out)
     }
 
     /// Parses `wgsl` with the naga WGSL front-end and validates the module with the
@@ -60,6 +213,36 @@ impl Composer {
         })?;
         Ok(())
     }
+}
+
+/// Entry points of `pass`.
+fn pass_wgsl(pass: PassKind) -> &'static str {
+    match pass {
+        PassKind::Prepass => PASS_PREPASS_WGSL,
+        PassKind::Forward => PASS_FORWARD_WGSL,
+        PassKind::Shadow => PASS_SHADOW_WGSL,
+        PassKind::Transparent => PASS_TRANSPARENT_WGSL,
+        PassKind::FurShell => PASS_FURSHELL_WGSL,
+    }
+}
+
+/// Appends a `// raa section: <title>` comment line, then `body` ending with a newline.
+fn section(out: &mut String, title: &str, body: &str) {
+    out.push_str("\n// raa section: ");
+    out.push_str(title);
+    out.push('\n');
+    out.push_str(body);
+    if !body.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+fn fnv1a(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
 }
 
 /// Shader capabilities of a core WebGPU device without optional features: what wgpu
@@ -139,6 +322,17 @@ fn fs_main() -> @location(0) vec4<f32> {
         let f64_src = "fn f() -> f64 {\n    return 1.0lf;\n}\n";
         let e = Composer::validate(f64_src).unwrap_err();
         assert_eq!(e.code(), "shader.validate", "{e}");
+    }
+
+    #[test]
+    fn fnv1a_matches_reference_vectors() {
+        assert_eq!(fnv1a(FNV_OFFSET, b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a(FNV_OFFSET, b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a(FNV_OFFSET, b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(
+            fnv1a(fnv1a(FNV_OFFSET, b"foo"), b"bar"),
+            0x8594_4171_f739_67e8
+        );
     }
 
     #[test]

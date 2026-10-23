@@ -1,15 +1,16 @@
 //! WGSL composition and validation of the lit renderer (S11). A composed module is the
 //! prelude, the helper library, one material function, the winning provider of each slot
 //! and the entry points of one pass kind. [`MaterialFnRegistry`] holds the material
-//! functions; [`Composer::validate`] runs the naga WGSL front-end and validator so a broken
-//! shader fails a CPU test without a GPU.
+//! functions, [`Composer`] the slot providers ([`SlotProvider`]); [`Composer::compose`] builds
+//! the module of a [`VariantKey`] and [`Composer::validate`] runs the naga WGSL front-end and
+//! validator so a broken shader fails a CPU test without a GPU.
 
 mod composer;
 mod error;
 mod ids;
 mod registry;
 
-pub use composer::Composer;
+pub use composer::{Composer, SlotProvider};
 pub use error::ShaderError;
 pub use ids::{MaterialFnId, PassKind, SlotId, VariantKey};
 pub use registry::{MaterialFnEntry, MaterialFnRegistry};
@@ -20,6 +21,23 @@ pub const PRELUDE_WGSL: &str = include_str!("wgsl/prelude.wgsl");
 /// S11 helper library (`raa_hash3`, `raa_noise3`, `raa_fbm3`, `raa_voronoi3`,
 /// `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`).
 pub const LIB_WGSL: &str = include_str!("wgsl/lib.wgsl");
+
+/// Prepass entry points: `vs_main` and `fs_main` writing the S12 `normal` (location 0:
+/// view-space normal xyz, roughness) and `material` (location 1: F0 rgb sRGB-encoded,
+/// metallic) targets.
+pub const PASS_PREPASS_WGSL: &str = include_str!("wgsl/pass_prepass.wgsl");
+/// Forward entry points: `vs_main` and `fs_main` writing the S11 final colour to the HDR
+/// target (location 0).
+pub const PASS_FORWARD_WGSL: &str = include_str!("wgsl/pass_forward.wgsl");
+/// Shadow caster entry point `vs_main` (no fragment stage); the light view-projection is a
+/// group-2 uniform.
+pub const PASS_SHADOW_WGSL: &str = include_str!("wgsl/pass_shadow.wgsl");
+/// Transparent entry points: `vs_main` and `fs_main` appending the shaded fragment to the
+/// group-2 per-pixel linked list (OIT).
+pub const PASS_TRANSPARENT_WGSL: &str = include_str!("wgsl/pass_transparent.wgsl");
+/// Fur shell entry points: `vs_main` extruding the shell named by the group-2 uniform and
+/// `fs_main` writing colour and strand coverage as alpha (alpha-to-coverage).
+pub const PASS_FURSHELL_WGSL: &str = include_str!("wgsl/pass_furshell.wgsl");
 
 #[cfg(test)]
 mod tests {
