@@ -14,9 +14,13 @@
 //! The values are fixed by the architecture: radius 0.8 m, 4 slices x 8 steps per side, 2
 //! separable 7-tap depth-aware denoise passes.
 //!
-//! The shaders, `GtaoFeature` and `GtaoHandle` are added by the follow-up task; this crate
-//! currently provides the description and its validation.
+//! [`GtaoFeature::install`] adds the provider and the pass; the returned [`GtaoHandle`]
+//! sets the description and the frame's camera. Until a camera is set, or while the pass is
+//! disabled, the lighting keeps the dummy AO (1).
 
 mod desc;
+mod feature;
+mod shaders;
 
 pub use desc::AoDesc;
+pub use feature::{GtaoFeature, GtaoHandle};
