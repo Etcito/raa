@@ -772,6 +772,15 @@ name = "raa-math"
 version = "0.1.0"
 
 [[package]]
+name = "raa-mesh"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-geom",
+ "raa-math",
+]
+
+[[package]]
 name = "raa-prims"
 version = "0.1.0"
 dependencies = [

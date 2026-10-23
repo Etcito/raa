@@ -1,0 +1,12 @@
+[package]
+name = "raa-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Attributed meshes for the lit renderer: validation, JS array intake and vertex streams."
+
+[dependencies]
+raa-math = { workspace = true }
+raa-geom = { workspace = true }
+raa-core = { workspace = true }
