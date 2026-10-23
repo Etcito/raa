@@ -7,6 +7,8 @@
 //! texel-snapped cascade view-projection matrices.
 
 mod cascades;
+#[allow(dead_code)] // used by feature.rs (next task)
+mod caster;
 mod desc;
 
 pub use cascades::{cascade_matrix, cascade_splits};
