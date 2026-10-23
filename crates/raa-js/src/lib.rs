@@ -9,6 +9,10 @@ pub mod convert;
 #[allow(dead_code)]
 pub(crate) mod feature_map;
 
+// The engine state (host and wasm32); the engine and the api files consume it.
+#[allow(dead_code)]
+pub(crate) mod state;
+
 #[cfg(target_arch = "wasm32")]
 mod engine;
 #[cfg(target_arch = "wasm32")]

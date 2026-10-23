@@ -6,6 +6,7 @@ use raa_loader::LoadError;
 use raa_material::{Material, MaterialError, ShadingModel, srgb_to_linear};
 use raa_math::{Quat, Vec3};
 use raa_scene::{SceneError, Transform};
+use raa_tonemap::ToneMapper;
 
 pub const LENGTH_MISMATCH: &str = "api.length_mismatch";
 pub const UNKNOWN_HANDLE: &str = "api.unknown_handle";
@@ -39,14 +40,14 @@ pub fn material_error(e: &MaterialError) -> RaaError {
     api_error(e.code, e.to_string())
 }
 
-/// Monotonic, never-reused u32 handles (from 1) mapped to internal ids.
-pub struct HandleMap<T: Copy> {
+/// Monotonic, never-reused u32 handles (from 1) mapped to internal values.
+pub struct HandleMap<T> {
     kind: &'static str,
     slots: Vec<Option<T>>,
     live: usize,
 }
 
-impl<T: Copy> HandleMap<T> {
+impl<T> HandleMap<T> {
     pub fn new(kind: &'static str) -> Self {
         Self {
             kind,
@@ -61,23 +62,56 @@ impl<T: Copy> HandleMap<T> {
         self.slots.len() as u32
     }
 
-    fn unknown(&self, h: u32) -> RaaError {
-        api_error(UNKNOWN_HANDLE, format!("unknown {} handle {h}", self.kind))
+    /// The handle the next `insert` returns.
+    pub fn next_handle(&self) -> u32 {
+        self.slots.len() as u32 + 1
     }
 
-    pub fn get(&self, h: u32) -> Result<T, RaaError> {
+    fn unknown(kind: &str, h: u32) -> RaaError {
+        api_error(UNKNOWN_HANDLE, format!("unknown {kind} handle {h}"))
+    }
+
+    pub fn get_ref(&self, h: u32) -> Result<&T, RaaError> {
         (h as usize)
             .checked_sub(1)
             .and_then(|i| self.slots.get(i))
-            .and_then(|s| *s)
-            .ok_or_else(|| self.unknown(h))
+            .and_then(|s| s.as_ref())
+            .ok_or_else(|| Self::unknown(self.kind, h))
+    }
+
+    pub fn get_mut(&mut self, h: u32) -> Result<&mut T, RaaError> {
+        let kind = self.kind;
+        (h as usize)
+            .checked_sub(1)
+            .and_then(|i| self.slots.get_mut(i))
+            .and_then(|s| s.as_mut())
+            .ok_or_else(|| Self::unknown(kind, h))
     }
 
     pub fn remove(&mut self, h: u32) -> Result<T, RaaError> {
-        let v = self.get(h)?;
-        self.slots[h as usize - 1] = None;
+        let v = (h as usize)
+            .checked_sub(1)
+            .and_then(|i| self.slots.get_mut(i))
+            .and_then(Option::take)
+            .ok_or_else(|| Self::unknown(self.kind, h))?;
         self.live -= 1;
         Ok(v)
+    }
+
+    /// Live (handle, value) pairs in handle order.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &T)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|v| (i as u32 + 1, v)))
+    }
+
+    /// Live (handle, value) pairs in handle order, mutable.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (u32, &mut T)> {
+        self.slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_mut().map(|v| (i as u32 + 1, v)))
     }
 
     pub fn len(&self) -> usize {
@@ -86,6 +120,12 @@ impl<T: Copy> HandleMap<T> {
 
     pub fn is_empty(&self) -> bool {
         self.live == 0
+    }
+}
+
+impl<T: Copy> HandleMap<T> {
+    pub fn get(&self, h: u32) -> Result<T, RaaError> {
+        self.get_ref(h).copied()
     }
 }
 
@@ -203,6 +243,120 @@ pub fn quality(segments: Option<f64>) -> Result<Quality, RaaError> {
     }
 }
 
+/// Engine options as read from JS, before validation: numbers raw (possibly non-finite),
+/// strings as given; `None` = absent, undefined or null.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EngineOptionsInput {
+    pub max_instances: Option<f64>,
+    pub max_materials: Option<f64>,
+    pub power_preference: Option<String>,
+    pub msaa: Option<f64>,
+    pub tone_mapper: Option<String>,
+    pub exposure_ev: Option<f64>,
+}
+
+/// Validated engine options (`createEngine(canvas, options)`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EngineOptions {
+    pub max_instances: u32,
+    pub max_materials: u32,
+    pub power_preference: wgpu::PowerPreference,
+    /// MSAA samples of the forward pass: 1 or 4.
+    pub msaa: u32,
+    pub tone_mapper: ToneMapper,
+    pub exposure_ev: f32,
+}
+
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            max_instances: 16384,
+            max_materials: 256,
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            msaa: 4,
+            tone_mapper: ToneMapper::Agx,
+            exposure_ev: 0.0,
+        }
+    }
+}
+
+/// A positive integer that fits in u32, or `default` when absent.
+fn count(key: &str, v: Option<f64>, default: u32) -> Result<u32, RaaError> {
+    match v {
+        None => Ok(default),
+        Some(x) if x >= 1.0 && x <= f64::from(u32::MAX) && x.fract() == 0.0 => Ok(x as u32),
+        Some(x) => Err(api_error(
+            INVALID_ARGUMENT,
+            format!("'{key}' must be a positive integer, got {x}"),
+        )),
+    }
+}
+
+/// Validates engine options; every refusal is `api.invalid_argument` naming the key.
+pub fn engine_options(input: &EngineOptionsInput) -> Result<EngineOptions, RaaError> {
+    let d = EngineOptions::default();
+    let power_preference = match input.power_preference.as_deref() {
+        None | Some("high-performance") => wgpu::PowerPreference::HighPerformance,
+        Some("low-power") => wgpu::PowerPreference::LowPower,
+        Some(other) => {
+            return Err(api_error(
+                INVALID_ARGUMENT,
+                format!(
+                    "'powerPreference' must be 'high-performance' or 'low-power', got '{other}'"
+                ),
+            ));
+        }
+    };
+    let msaa = match input.msaa {
+        None => d.msaa,
+        Some(1.0) => 1,
+        Some(4.0) => 4,
+        Some(x) => {
+            return Err(api_error(
+                INVALID_ARGUMENT,
+                format!("'msaa' must be 1 or 4, got {x}"),
+            ));
+        }
+    };
+    let tone_mapper = match input.tone_mapper.as_deref() {
+        None => d.tone_mapper,
+        Some(name) => tone_mapper(name).ok_or_else(|| {
+            api_error(
+                INVALID_ARGUMENT,
+                format!("'toneMapper' must be 'agx', 'aces' or 'linear', got '{name}'"),
+            )
+        })?,
+    };
+    let exposure_ev = match input.exposure_ev {
+        None => d.exposure_ev,
+        Some(x) if x.is_finite() && (x as f32).is_finite() => x as f32,
+        Some(x) => {
+            return Err(api_error(
+                INVALID_ARGUMENT,
+                format!("'exposureEv' must be finite, got {x}"),
+            ));
+        }
+    };
+    Ok(EngineOptions {
+        max_instances: count("maxInstances", input.max_instances, d.max_instances)?,
+        max_materials: count("maxMaterials", input.max_materials, d.max_materials)?,
+        power_preference,
+        msaa,
+        tone_mapper,
+        exposure_ev,
+    })
+}
+
+/// The JS name of a tone mapper: 'agx', 'aces' or 'linear'.
+pub fn tone_mapper(name: &str) -> Option<ToneMapper> {
+    match name {
+        "agx" => Some(ToneMapper::Agx),
+        "aces" => Some(ToneMapper::Aces),
+        "linear" => Some(ToneMapper::Linear),
+        _ => None,
+    }
+}
+
 /// JS value readers (wasm32 only), built on `js_sys::Reflect`; no serde.
 /// Every reader names the key in its message and never panics on user data.
 #[cfg(target_arch = "wasm32")]
@@ -210,7 +364,8 @@ pub fn quality(segments: Option<f64>) -> Result<Quality, RaaError> {
 #[allow(dead_code)]
 pub(crate) mod js {
     use super::{
-        CameraDesc, INVALID_ARGUMENT, MaterialDesc, ModelName, UNKNOWN_PARAM, api_error, geom_error,
+        CameraDesc, EngineOptions, EngineOptionsInput, INVALID_ARGUMENT, MaterialDesc, ModelName,
+        UNKNOWN_PARAM, api_error, geom_error,
     };
     use js_sys::{Array, Float32Array, Object, Reflect};
     use raa_core::RaaError;
@@ -349,45 +504,29 @@ pub(crate) mod js {
         require(key, optional_bool(obj, key)?)
     }
 
-    /// A positive integer that fits in u32, or `default` when absent.
-    fn count(obj: &JsValue, key: &str, default: u32) -> Result<u32, RaaError> {
-        match optional_f64(obj, key)? {
-            None => Ok(default),
-            Some(x) if x >= 1.0 && x <= f64::from(u32::MAX) && x.fract() == 0.0 => Ok(x as u32),
-            Some(x) => Err(invalid(format!(
-                "'{key}' must be a positive integer, got {x}"
-            ))),
+    /// A number at `key` without the finiteness check (the validator decides).
+    fn optional_number(obj: &JsValue, key: &str) -> Result<Option<f64>, RaaError> {
+        match get(obj, key)? {
+            None => Ok(None),
+            Some(v) => v
+                .as_f64()
+                .map(Some)
+                .ok_or_else(|| invalid(format!("'{key}' must be a number"))),
         }
-    }
-
-    pub struct EngineOptions {
-        pub max_instances: u32,
-        pub max_materials: u32,
-        pub power_preference: wgpu::PowerPreference,
     }
 
     /// Engine options; undefined or null gives every default.
     pub fn engine_options(v: &JsValue) -> Result<EngineOptions, RaaError> {
         if v.is_undefined() || v.is_null() {
-            return Ok(EngineOptions {
-                max_instances: 16384,
-                max_materials: 256,
-                power_preference: wgpu::PowerPreference::HighPerformance,
-            });
+            return Ok(EngineOptions::default());
         }
-        let power_preference = match optional_string(v, "powerPreference")?.as_deref() {
-            None | Some("high-performance") => wgpu::PowerPreference::HighPerformance,
-            Some("low-power") => wgpu::PowerPreference::LowPower,
-            Some(other) => {
-                return Err(invalid(format!(
-                    "'powerPreference' must be 'high-performance' or 'low-power', got '{other}'"
-                )));
-            }
-        };
-        Ok(EngineOptions {
-            max_instances: count(v, "maxInstances", 16384)?,
-            max_materials: count(v, "maxMaterials", 256)?,
-            power_preference,
+        super::engine_options(&EngineOptionsInput {
+            max_instances: optional_number(v, "maxInstances")?,
+            max_materials: optional_number(v, "maxMaterials")?,
+            power_preference: optional_string(v, "powerPreference")?,
+            msaa: optional_number(v, "msaa")?,
+            tone_mapper: optional_string(v, "toneMapper")?,
+            exposure_ev: optional_number(v, "exposureEv")?,
         })
     }
 
