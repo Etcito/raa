@@ -2,7 +2,7 @@
   "scene": "m07-base",
   "variant": "vertex-colors",
   "milestone": "m07",
-  "capturedAt": "2026-10-23T15:29:14.575Z",
+  "capturedAt": "2026-10-23T19:00:25.971Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -17,19 +17,21 @@
   ],
   "nonEmpty": true,
   "passes": [
+    "sky.env",
     "prepass",
     "forward",
+    "sky.background",
     "tonemap"
   ],
   "instances": 8,
   "triangles": 37564,
-  "firstFrameMs": 5781.60000000149,
+  "firstFrameMs": 1556.7000000029802,
   "wasm": {
-    "raw": 1413612,
-    "gzip": 508245,
-    "sha256": "294aa14fd6c6eada11d309c1b98782851573a6fc2232c801655607b06e3a6efe"
+    "raw": 1492971,
+    "gzip": 534694,
+    "sha256": "d4e92172319293b319248d9419d37623b75e878f2663718a00193261140d783a"
   },
   "capture": "proofs/captures/lookdev/m07-base--vertex-colors.png",
-  "captureSha256": "eb996a9a6a64e34a0e336fd48addf8708a2b97a17e09295279226524443d1898",
+  "captureSha256": "250537b6e9e07f0f5159e18cde570daa79c0f11936f4a0498444b92f523ee7ee",
   "judge": null
 }

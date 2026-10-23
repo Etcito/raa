@@ -1,0 +1,47 @@
+{
+  "scene": "m08-sky-ibl",
+  "variant": "ibl-on",
+  "milestone": "m08",
+  "capturedAt": "2026-10-23T19:00:32.428Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "prepass",
+    "forward",
+    "sky.background",
+    "tonemap"
+  ],
+  "instances": 8,
+  "triangles": 473020,
+  "firstFrameMs": 7960.29999999702,
+  "wasm": {
+    "raw": 1492971,
+    "gzip": 534694,
+    "sha256": "d4e92172319293b319248d9419d37623b75e878f2663718a00193261140d783a"
+  },
+  "capture": "proofs/captures/lookdev/m08-sky-ibl--ibl-on.png",
+  "captureSha256": "f90aca9d2d5336e55ac45065cfb87904ed7a91d10c078ec05b5472694070e2b2",
+  "judge": {
+    "description": "Engine lookdev capture of the sky-and-sky-lighting milestone. Score two things: that the capture shows what this description lists, and that its sky and daylight mood (blue sky with white clouds, bright, clear, cheerful daytime light) match the reference. The reference is a finished illustration and is NOT the target for the objects: their plain modelling, the absence of characters, textures, fur, bloom, transparency, cast shadows and post effects are expected at this milestone and must not lower the score; nor must the overall plainer look (simple shading without shadows or ambient occlusion, few objects, sparse detail, no lens glare or sun rays), which belongs to later milestones. Shows: a closer view of simple untextured procedural stand-in shapes (no fur, bloom or transparency yet): an upright striped inflatable toy hammer on the left, a pink sphere standing for a plush, a thin pink S-shaped neon tube, a blue rounded ice block, a round purple basin holding a green slime surface, on a large floor of bright candy-coloured tiles (pink, blue, yellow, green) reaching the horizon, with a bright blue gradient sky, deep blue at the top fading to a light, almost white horizon, a small round white sun disc in the upper right and soft white puffy procedural clouds filling the upper half of the frame behind them; the objects are lit by soft sky ambient light (blue tint on upward faces, gentle soft shading all around, no black shadows, vivid tile colours); the lime-green slime surface and the blue ice block show a pale sheen of the sky, and the hammer head has soft glossy highlights.",
+    "references": [
+      "ref-1"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": null,
+    "output": "JUDGE PASS: 7.0/10 (minimum 6.0) on proofs/captures/lookdev/m08-sky-ibl--ibl-on.png by claude-haiku-5-5\nexpected: Engine lookdev capture of the sky-and-sky-lighting milestone. Score two things: that the capture shows what this description lists, and that its sky and daylight mood (blue sky with white clouds, bright, clear, cheerful daytime light) match the reference. The reference is a finished illustration and is NOT the target for the objects: their plain modelling, the absence of characters, textures, fur, bloom, transparency, cast shadows and post effects are expected at this milestone and must not lower the score; nor must the overall plainer look (simple shading without shadows or ambient occlusion, few objects, sparse detail, no lens glare or sun rays), which belongs to later milestones. Shows: a closer view of simple untextured procedural stand-in shapes (no fur, bloom or transparency yet): an upright striped inflatable toy hammer on the left, a pink sphere standing for a plush, a thin pink S-shaped neon tube, a blue rounded ice block, a round purple basin holding a green slime surface, on a large floor of bright candy-coloured tiles (pink, blue, yellow, green) reaching the horizon, with a bright blue gradient sky, deep blue at the top fading to a light, almost white horizon, a small round white sun disc in the upper right and soft white puffy procedural clouds filling the upper half of the frame behind them; the objects are lit by soft sky ambient light (blue tint on upward faces, gentle soft shading all around, no black shadows, vivid tile colours); the lime-green slime surface and the blue ice block show a pale sheen of the sky, and the hammer head has soft glossy highlights.\nseen: All described elements are present: striped hammer on the left, pink sphere, pink S-tube, blue ice block, purple basin with green slime and a glossy sheen, candy-coloured tiles to the horizon, a blue-to-pale sky with a white sun disc upper right, and white puffy clouds. The bright, cheerful daytime mood matches the reference, though the lighting is flatter and the overall finish is far plainer than the reference illustration, which is expected at this milestone.",
+    "at": "2026-10-23T19:00:39.677Z"
+  }
+}

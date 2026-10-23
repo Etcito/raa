@@ -1,0 +1,36 @@
+{
+  "scene": "m08-sky-ibl",
+  "variant": "ibl-off",
+  "milestone": "m08",
+  "capturedAt": "2026-10-23T19:00:35.815Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "prepass",
+    "forward",
+    "sky.background",
+    "tonemap"
+  ],
+  "instances": 8,
+  "triangles": 473020,
+  "firstFrameMs": 11457.5,
+  "wasm": {
+    "raw": 1492971,
+    "gzip": 534694,
+    "sha256": "d4e92172319293b319248d9419d37623b75e878f2663718a00193261140d783a"
+  },
+  "capture": "proofs/captures/lookdev/m08-sky-ibl--ibl-off.png",
+  "captureSha256": "b0aa155b1218d712c25f06f849284d8cd9c1c412e5ba92841da62a7d753c0ed6",
+  "judge": null
+}

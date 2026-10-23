@@ -1,0 +1,37 @@
+{
+  "scene": "m08-sky-ibl",
+  "variant": "preset-snow",
+  "milestone": "m08",
+  "capturedAt": "2026-10-23T19:00:38.053Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "prepass",
+    "forward",
+    "sky.background",
+    "tonemap"
+  ],
+  "instances": 8,
+  "triangles": 473020,
+  "firstFrameMs": 13674.70000000298,
+  "wasm": {
+    "raw": 1492971,
+    "gzip": 534694,
+    "sha256": "d4e92172319293b319248d9419d37623b75e878f2663718a00193261140d783a"
+  },
+  "capture": "proofs/captures/lookdev/m08-sky-ibl--preset-snow.png",
+  "captureSha256": "6c2f1bcb683811b97ed8e675d5e51f28f1f8030a4b0e4f607b580fce3a7cc831",
+  "judge": null
+}
