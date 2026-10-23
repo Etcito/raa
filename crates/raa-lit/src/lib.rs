@@ -4,18 +4,24 @@
 //! per-instance [`InstanceExtra`], the GPU mesh store ([`LitMeshId`], with one internal
 //! [`MeshId`] per sub-mesh), the default slot providers (S11) the renderer installs, the
 //! 512-byte S10 `FrameGpu` writer ([`write_frame_gpu`]) and the CPU draw-list builder
-//! ([`DrawPrep`], [`LitDraw`]).
+//! ([`DrawPrep`], [`LitDraw`]), and what passes and contributors share: the
+//! [`LitHandle`] with its pipeline cache per shader variant and [`PipelineSpec`], and the
+//! [`ForwardContributor`] extension point of the forward pass.
 
+mod contributor;
 mod extras;
 mod frame;
+mod handle;
 mod library;
 mod material;
 mod meshes;
 mod prep;
 mod slots;
 
+pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_frame_gpu};
+pub use handle::{LitHandle, PipelineSpec};
 pub use library::SurfaceLibrary;
 pub use material::{
     DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
