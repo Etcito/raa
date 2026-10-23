@@ -4,6 +4,8 @@
 //! `material_main`, the [`ParamSpec`] table that maps JS parameters into the material
 //! record's `p` array, the material flags it implies and its [`DrawClass`].
 //! [`register_builtins`] registers every row into a [`MaterialFnRegistry`].
+//! [`SurfaceDesc`] (with [`Blend`] and [`StandardOverrides`]) is the JS surface material
+//! description; [`to_surface_material`] maps it into a validated `SurfaceMaterial`.
 //!
 //! Rules every [`ParamSpec`] follows:
 //! - `default` is in the unit JS sends: [`ParamKind::Color`] defaults are sRGB in [0, 1];
@@ -17,8 +19,13 @@
 //!   never `raa_` (that prefix belongs to the engine library).
 
 mod builtins;
+mod desc;
 
 pub use builtins::{BUILTINS, register_builtins};
+pub use desc::{
+    Blend, FUR_DENSITY_DEFAULT, FUR_SHELLS_DEFAULT, FUR_SHELLS_MAX, StandardOverrides, SurfaceDesc,
+    map_desc, to_surface_material,
+};
 pub use raa_lit::DrawClass;
 pub use raa_shader::{MaterialFnRegistry, ShaderError};
 
