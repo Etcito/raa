@@ -1,7 +1,9 @@
 // Lookdev scene m10-materials (chain milestone 4, R10): glossy clear-coated inflatables (the
 // inflatable hammer, balls and bumper rings in raa.inflatable and raa.candy) under the m08
-// `day` sky, and neon tubes in raa.neon at night with physically based bloom. On/off pairs
-// for the clear coat (material override, settings-driven) and the `bloom` pass (Q15).
+// `day` sky, and neon tubes in raa.neon at night with physically based bloom; a plush ball
+// and a plush penguin blob in raa.plush with fur shells; a user WGSL function (animated
+// checker) and the mud, snow and tiles functions. On/off pairs for the clear coat
+// (material override, settings-driven), the `bloom` pass and the `fur.shells` pass (Q15).
 // Variants are grouped in sets (settings.set), one builder per set in SETS.
 // Pure module (S14): no top-level side effects, node reads id/milestone/variants.
 
@@ -31,6 +33,11 @@ const CAMERAS = {
   inflatables: [[0, 0.5, 0], 4.2, 0, 0.3],
   clearcoat: [[0, 0.6, 0], 2.2, 0.35, 0.2],
   neon: [[0, 0.55, 0], 3.6, 0, 0.12],
+  plush: [[-0.1, 0.36, 0], 2.1, 0.1, 0.15],
+  // Close three-quarter view of the penguin: its fuzzy outline against the sky.
+  fur: [[0.35, 0.42, 0.1], 1.4, 0.55, 0.06],
+  'user-fn': [[0, 0.38, 0], 2.4, 0, 0.3],
+  'mud-snow-tiles': [[0, 0.1, 0], 2.9, 0, 0.55],
 };
 
 // Inflatable palette (sRGB): ref-1's pink, yellow, blue and white plastic.
@@ -60,6 +67,64 @@ const NEON_CYAN = [0.15, 0.85, 1];
 const NEON_YELLOW = [1, 0.8, 0.2];
 const NEON_PURPLE = [0.6, 0.3, 1];
 const TUBE_R = 0.025;
+
+// Plush palette (sRGB): ref-1/ref-2's deep blue penguin fur, white belly, orange beak and
+// feet; the plush ball is pastel pink. Fur: length m, strands per cm2, droop.
+const PLUSH_BLUE = [0.08, 0.17, 0.75];
+const PLUSH_WHITE = [0.97, 0.96, 0.94];
+const PLUSH_ORANGE = [1, 0.55, 0.08];
+const PLUSH_PINK = [0.98, 0.62, 0.78];
+const FUR = { length: 0.016, short: 0.005, density: 1200, droop: 0.15 };
+// Penguin parts (ellipsoids): radii m, centre m (standing on y 0, facing +Z), roll rad
+// about Z, colour, fur length; the eyes are glossy black spheres.
+const PENGUIN = [
+  { radii: [0.33, 0.34, 0.3], t: [0, 0.34, 0], color: PLUSH_BLUE, fur: FUR.length },
+  { radii: [0.24, 0.24, 0.14], t: [0, 0.28, 0.19], color: PLUSH_WHITE, fur: FUR.length },
+  { radii: [0.2, 0.19, 0.19], t: [0, 0.68, 0.02], color: PLUSH_BLUE, fur: FUR.length },
+  { radii: [0.06, 0.035, 0.075], t: [0, 0.64, 0.21], color: PLUSH_ORANGE, fur: FUR.short },
+  { radii: [0.05, 0.17, 0.1], t: [-0.33, 0.37, 0], roll: -0.45, color: PLUSH_BLUE, fur: FUR.length },
+  { radii: [0.05, 0.17, 0.1], t: [0.33, 0.37, 0], roll: 0.45, color: PLUSH_BLUE, fur: FUR.length },
+  { radii: [0.08, 0.035, 0.11], t: [-0.12, 0.03, 0.14], color: PLUSH_ORANGE, fur: FUR.short },
+  { radii: [0.08, 0.035, 0.11], t: [0.12, 0.03, 0.14], color: PLUSH_ORANGE, fur: FUR.short },
+];
+const EYES = [[-0.075, 0.71, 0.19], [0.075, 0.71, 0.19]];
+const EYE_R = 0.026;
+const PLUSH_SPHERE_T = [-0.6, 0, -0.15];
+const PENGUIN_T = { t: [0.35, 0, 0.1], yaw: -0.25 };
+
+// User material function (S11): an animated checker scrolling along u with time.
+// p0 rgb colour A, p1 rgb colour B (linear: user params are written raw), p2 = (cells
+// around u, cells along v, scroll speed in cells per second, 0).
+const CHECKER_WGSL = `
+fn material_main(in: MaterialInput) -> MaterialOutput {
+  var o = raa_default_output(in);
+  let cells = max(in.record.p[2].xy, vec2<f32>(1.0));
+  let q = in.uv * cells + vec2<f32>(in.time * in.record.p[2].z, 0.0);
+  let c = floor(q);
+  let odd = abs(fract((c.x + c.y) * 0.5)) * 2.0;
+  // Soft edge one twentieth of a cell wide, so the squares do not alias.
+  let e = min(fract(q), vec2<f32>(1.0) - fract(q));
+  let edge = smoothstep(0.0, 0.05, min(e.x, e.y));
+  let t = mix(0.5, odd, edge);
+  o.base_color = mix(in.record.p[0].rgb, in.record.p[1].rgb, t) * in.color.rgb;
+  o.roughness = mix(0.25, 0.55, t);
+  return o;
+}
+`;
+const CHECKERS = {
+  sphere: { r: 0.38, t: [-0.5, 0.38, 0], p0: [0.9, 0.04, 0.2], p1: [0.95, 0.9, 0.82], p2: [16, 8, 0.5] },
+  box: { half: 0.32, t: [0.55, 0.32, 0], p0: [0.02, 0.18, 0.85], p1: [1, 0.62, 0.02], p2: [4, 4, 0.5] },
+};
+
+// Ground materials: a tiled floor (6 m, 0.25 m tiles), a mud pool disc sunk in it and a
+// half-buried snow mound (ellipsoid radii, centre on the floor).
+// Tile size and grout width are in uv units of the 6 m grid: 1/24 = 0.25 m, 0.004 = 24 mm.
+const TILES = {
+  size: 6,
+  params: { color: [0.93, 0.9, 0.84], groutColor: [0.45, 0.43, 0.4], tileSize: 1 / 24, groutWidth: 0.004, gloss: 0.75 },
+};
+const MUD = { radii: [0.7, 0.03, 0.55], t: [-0.75, 0, 0.25], params: { wetness: 0.55, scale: 2.5 } };
+const SNOW = { radii: [0.55, 0.38, 0.5], t: [0.75, 0, -0.2], params: { sparkle: 4, scale: 40 } };
 
 const yawQuat = (rad) => [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)];
 
@@ -166,8 +231,97 @@ function buildNeon(engine, lib) {
   place(engine, upload(engine, bar, [neon(NEON_PURPLE)]), [0, 1.15, -0.6]);
 }
 
+// Ellipsoid of `radii` from a lib uvSphere: positions scaled, normals by the inverse
+// scale, rolled `roll` rad about Z, moved to `t`; tangents regenerated.
+function ellipsoid(geometry, radii, t, roll = 0) {
+  const { tangents: _unit, ...s } = geometry.uvSphere(1, 48, 24);
+  const [c, sn] = [Math.cos(roll), Math.sin(roll)];
+  const p = s.positions.slice();
+  const n = s.normals.slice();
+  for (let k = 0; k < p.length; k += 3) {
+    const [x, y, z] = [p[k] * radii[0], p[k + 1] * radii[1], p[k + 2] * radii[2]];
+    p.set([c * x - sn * y + t[0], sn * x + c * y + t[1], z + t[2]], k);
+    const [a, b, d] = [n[k] / radii[0], n[k + 1] / radii[1], n[k + 2] / radii[2]];
+    const m = [c * a - sn * b, sn * a + c * b, d];
+    const len = Math.hypot(m[0], m[1], m[2]);
+    n.set(m.map((v) => v / len), k);
+  }
+  return geometry.withTangents({ ...s, positions: p, normals: n });
+}
+
+const lighten = (c, k) => c.map((x) => x + (1 - x) * k);
+
+// raa.plush with fur. The desc fur fields fill the record the shell pass reads; the
+// function's furLength/furDensity params are its own copy (both set, see dogfood m10).
+function plush(engine, color, length) {
+  return engine.addSurfaceMaterial({
+    function: 'raa.plush',
+    params: {
+      color,
+      tipColor: lighten(color, 0.3),
+      sheenColor: lighten(color, 0.6),
+      furLength: length,
+      furDensity: FUR.density,
+    },
+    furLength: length,
+    furDensity: FUR.density,
+    furDroop: FUR.droop,
+  });
+}
+
+// Penguin-like plush blob: body, belly patch, head, beak, flippers and feet (one
+// sub-mesh each, merged), plus two glossy black eyes.
+function penguin(engine, geometry) {
+  const parts = PENGUIN.map((q) => ellipsoid(geometry, q.radii, q.t, q.roll));
+  const fur = PENGUIN.map((q) => plush(engine, q.color, q.fur));
+  const eye = engine.addSurfaceMaterial({ color: [0.02, 0.02, 0.03], roughness: 0.15, clearcoat: 1 });
+  const eyes = EYES.map((t) => ellipsoid(geometry, [EYE_R, EYE_R, EYE_R], t));
+  return upload(engine, geometry.merge([...parts, ...eyes]), [...fur, eye]);
+}
+
+// The plush ball and the plush penguin on the glossy blue floor under the day sky.
+function buildPlush(engine, lib) {
+  const { geometry, objects } = lib;
+  daylight(engine);
+  floor(engine, geometry, FLOOR.day, 0.3);
+  place(engine, upload(engine, objects.plushSphere(), [plush(engine, PLUSH_PINK, FUR.length)]), PLUSH_SPHERE_T);
+  place(engine, penguin(engine, geometry), PENGUIN_T.t, yawQuat(PENGUIN_T.yaw));
+}
+
+// A user WGSL function registered from JS, on a sphere and a rounded box.
+function buildUserFn(engine, lib) {
+  const { geometry } = lib;
+  daylight(engine);
+  floor(engine, geometry, FLOOR.day, 0.3);
+  engine.addMaterialFunction('demo.checker', CHECKER_WGSL);
+  const checker = ({ p0, p1, p2 }) => engine.addSurfaceMaterial({ function: 'demo.checker', params: { p0, p1, p2 } });
+  const { sphere, box } = CHECKERS;
+  place(engine, upload(engine, geometry.uvSphere(sphere.r, 64, 32), [checker(sphere)]), sphere.t);
+  const cube = geometry.roundedBox([box.half, box.half, box.half], 0.08, 8);
+  place(engine, upload(engine, cube, [checker(box)]), box.t, yawQuat(-0.5));
+}
+
+// Tiled floor (raa.tiles) with a mud pool disc (raa.mud) and a snow mound (raa.snow).
+function buildGround(engine, lib) {
+  const { geometry } = lib;
+  daylight(engine);
+  const tiles = engine.addSurfaceMaterial({ function: 'raa.tiles', params: TILES.params });
+  place(engine, upload(engine, geometry.grid(TILES.size, TILES.size, 12, 12), [tiles]), [0, 0, 0]);
+  const mud = engine.addSurfaceMaterial({ function: 'raa.mud', params: MUD.params });
+  place(engine, upload(engine, ellipsoid(geometry, MUD.radii, [0, 0, 0]), [mud]), MUD.t);
+  const snow = engine.addSurfaceMaterial({ function: 'raa.snow', params: SNOW.params });
+  place(engine, upload(engine, ellipsoid(geometry, SNOW.radii, [0, 0, 0]), [snow]), SNOW.t);
+}
+
 // Set name (variant.settings.set) to builder.
-const SETS = { inflatables: buildInflatables, clearcoat: buildInflatables, neon: buildNeon };
+const SETS = {
+  inflatables: buildInflatables,
+  clearcoat: buildInflatables,
+  neon: buildNeon,
+  plush: buildPlush,
+  'user-fn': buildUserFn,
+  'mud-snow-tiles': buildGround,
+};
 
 const INFLATABLES = 'an upright striped inflatable toy hammer, shiny inflatable balls (pink, '
   + 'white with pink candy stripes, yellow with blue stripes) and two inflated bumper rings '
@@ -179,6 +333,12 @@ const NEON = 'several glowing neon tubes at night (a pink script letter S, a cya
   + 'sky';
 const GLOW = 'neon tubes glow with soft physically based bloom, white-hot cores, no halo '
   + 'banding';
+const PLUSH = 'a pastel pink plush ball and a plush penguin-like toy (deep blue furry body '
+  + 'and head, white furry belly patch, small orange beak and feet, blue flippers, two black '
+  + 'eyes) standing on a glossy blue floor under a bright blue sky with white clouds';
+const SOFT = 'soft fur with sheen and a fuzzy silhouette like the plush penguins of the '
+  + 'references: short dense strands, a soft velvety sheen toward the edges and a fuzzy, '
+  + 'not hard, outline (R10)';
 // R10 judges the materials against the references; the set is a sparse procedural lookdev
 // arrangement, so the judge is told what to score and what belongs to later milestones.
 const BASIS = 'Engine lookdev capture of the materials milestone. Score two things: that the '
@@ -238,6 +398,51 @@ const VARIANTS = [
     judge: false,
     settings: { set: 'neon' },
     passes: { disable: ['bloom'] },
+  },
+  {
+    id: 'plush',
+    description: `${BASIS}${PLUSH}; ${SOFT}.`,
+    references: ['ref-1', 'ref-2'],
+    judge: true,
+    settings: { set: 'plush' },
+  },
+  {
+    id: 'fur-on',
+    description: 'Q15/R10: a close three-quarter view of the blue plush penguin with its '
+      + 'white belly and the pink plush ball; fur shells are on: short soft strands give a '
+      + 'fuzzy outline against the sky and a velvety sheen.',
+    references: [],
+    judge: false,
+    settings: { set: 'plush', camera: 'fur' },
+  },
+  {
+    id: 'fur-off',
+    description: 'Q15/R10: the same close view as fur-on, but the fur.shells pass is off: '
+      + 'only the base surfaces remain, smooth hard-edged ellipsoids with no strands and a '
+      + 'clean outline.',
+    references: [],
+    judge: false,
+    settings: { set: 'plush', camera: 'fur' },
+    passes: { disable: ['fur.shells'] },
+  },
+  {
+    id: 'user-fn',
+    description: 'A WGSL material function added from JS (demo.checker, an animated '
+      + 'checker scrolling with time along u): a sphere with small pink and cream squares '
+      + 'and a rounded cube with large blue and yellow squares on a glossy blue floor in '
+      + 'daylight.',
+    references: [],
+    judge: false,
+    settings: { set: 'user-fn' },
+  },
+  {
+    id: 'mud-snow-tiles',
+    description: 'Ground materials in daylight: a cream tiled floor with grey grout lines '
+      + '(raa.tiles), a brown mud pool disc with darker glossy wet patches (raa.mud) and a '
+      + 'white snow mound with sparkling glints (raa.snow).',
+    references: [],
+    judge: false,
+    settings: { set: 'mud-snow-tiles' },
   },
 ];
 
