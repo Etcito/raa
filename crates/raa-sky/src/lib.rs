@@ -7,6 +7,7 @@
 
 mod background;
 mod desc;
+mod env_pass;
 mod shaders;
 mod state;
 

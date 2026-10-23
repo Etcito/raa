@@ -860,8 +860,10 @@ name = "raa-sky"
 version = "0.1.0"
 dependencies = [
  "raa-core",
+ "raa-ibl",
  "raa-lit",
  "raa-pipeline",
+ "raa-scene",
  "raa-shader",
  "wgpu",
 ]
