@@ -1,0 +1,40 @@
+{
+  "scene": "m09-shadows-ao",
+  "variant": "contact-on",
+  "milestone": "m09",
+  "capturedAt": "2026-10-23T21:15:58.271Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "sky.background",
+    "tonemap"
+  ],
+  "instances": 415,
+  "triangles": 72740,
+  "firstFrameMs": 30206.10000000894,
+  "wasm": {
+    "raw": 1542028,
+    "gzip": 551872,
+    "sha256": "768d4ca5fa665138bdd8122c6fcacaaf92b67f1e27219c0b546f0a54ccbd5212"
+  },
+  "capture": "proofs/captures/lookdev/m09-shadows-ao--contact-on.png",
+  "captureSha256": "49fa09157354b341d2cbe4e01cd634ed13d30f29953a6614ad552ef4af5efc54",
+  "judge": null
+}

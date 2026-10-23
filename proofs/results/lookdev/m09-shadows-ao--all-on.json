@@ -1,0 +1,50 @@
+{
+  "scene": "m09-shadows-ao",
+  "variant": "all-on",
+  "milestone": "m09",
+  "capturedAt": "2026-10-23T21:15:30.725Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "sky.background",
+    "tonemap"
+  ],
+  "instances": 415,
+  "triangles": 72740,
+  "firstFrameMs": 2533.4000000059605,
+  "wasm": {
+    "raw": 1542028,
+    "gzip": 551872,
+    "sha256": "768d4ca5fa665138bdd8122c6fcacaaf92b67f1e27219c0b546f0a54ccbd5212"
+  },
+  "capture": "proofs/captures/lookdev/m09-shadows-ao--all-on.png",
+  "captureSha256": "40396628627b08ba637263c725e2a1cbe55dd74af68a58939964e399bf2a063b",
+  "judge": {
+    "description": "Engine lookdev capture of the shadows-and-ambient-occlusion milestone. Score two things: that the capture shows what this description lists, and that its light and shadow mood (bright sunny daylight, soft coloured shadows on the floor, grounded objects, cheerful clear lighting) matches the reference. The reference is a finished illustration and is NOT the target for the objects: their plain placeholder modelling, the absence of characters, textures, fur, bloom, transparency, reflections and post effects are expected at this milestone and must not lower the score; nor must the sparser, plainer set (few simple shapes, no lens glare or sun rays), which belongs to later milestones. Shows: simple untextured glossy procedural stand-in shapes on a large floor of bright candy-coloured square panels (pink, blue, yellow, green) under a blue sky with white clouds: an upright striped inflatable toy hammer on the left, a wide blue rounded block with a yellow cube stacked on it and a pink block against its right side, three coloured spheres resting on the floor in front, a row of tiny spheres and cubes (5-10 cm) in front of them and a tall pale grey pillar standing in the right foreground, lit by a warm sun from the upper right, slightly behind the objects; soft sun shadows fall to the left and a little toward the camera: sharp where an object touches the floor and widening into a soft penumbra with distance; the pillar casts a long dark shadow stripe from its base to the left across the foreground floor panels, with no stripes, acne, gaps under objects or seams; ambient occlusion darkens the creases between the stacked blocks, their inner corners and the floor around their bases and under the spheres; the tiny objects sit on the floor with small dark shadows at their base. Shaded sides stay readable in the bluish sky light.",
+    "references": [
+      "ref-1"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": null,
+    "output": "JUDGE PASS: 7.0/10 (minimum 6.0) on proofs/captures/lookdev/m09-shadows-ao--all-on.png by claude-haiku-5-5\nexpected: Engine lookdev capture of the shadows-and-ambient-occlusion milestone. Score two things: that the capture shows what this description lists, and that its light and shadow mood (bright sunny daylight, soft coloured shadows on the floor, grounded objects, cheerful clear lighting) matches the reference. The reference is a finished illustration and is NOT the target for the objects: their plain placeholder modelling, the absence of characters, textures, fur, bloom, transparency, reflections and post effects are expected at this milestone and must not lower the score; nor must the sparser, plainer set (few simple shapes, no lens glare or sun rays), which belongs to later milestones. Shows: simple untextured glossy procedural stand-in shapes on a large floor of bright candy-coloured square panels (pink, blue, yellow, green) under a blue sky with white clouds: an upright striped inflatable toy hammer on the left, a wide blue rounded block with a yellow cube stacked on it and a pink block against its right side, three coloured spheres resting on the floor in front, a row of tiny spheres and cubes (5-10 cm) in front of them and a tall pale grey pillar standing in the right foreground, lit by a warm sun from the upper right, slightly behind the objects; soft sun shadows fall to the left and a little toward the camera: sharp where an object touches the floor and widening into a soft penumbra with distance; the pillar casts a long dark shadow stripe from its base to the left across the foreground floor panels, with no stripes, acne, gaps under objects or seams; ambient occlusion darkens the creases between the stacked blocks, their inner corners and the floor around their bases and under the spheres; the tiny objects sit on the floor with small dark shadows at their base. Shaded sides stay readable in the bluish sky light.\nseen: All listed elements are present: striped hammer on the left, blue block with yellow cube and pink side block, three spheres in front, tiny spheres and cubes, and a tall grey pillar in the right foreground. Coloured soft shadows, bright blue sky and cheerful candy-panel floor match the reference mood, though contact occlusion between the stacked blocks is weak and the flat brown horizon band looks crude.",
+    "at": "2026-10-23T21:15:45.130Z"
+  }
+}

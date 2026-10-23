@@ -1,0 +1,40 @@
+{
+  "scene": "m09-shadows-ao",
+  "variant": "ao-on",
+  "milestone": "m09",
+  "capturedAt": "2026-10-23T21:15:53.882Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "sky.background",
+    "tonemap"
+  ],
+  "instances": 415,
+  "triangles": 72740,
+  "firstFrameMs": 25859.90000000596,
+  "wasm": {
+    "raw": 1542028,
+    "gzip": 551872,
+    "sha256": "768d4ca5fa665138bdd8122c6fcacaaf92b67f1e27219c0b546f0a54ccbd5212"
+  },
+  "capture": "proofs/captures/lookdev/m09-shadows-ao--ao-on.png",
+  "captureSha256": "d3a5a28a66dd0cba61d9655368e0c2abcaac7de2288467cc63f4bfa9d223f2cf",
+  "judge": null
+}
