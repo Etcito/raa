@@ -1,0 +1,12 @@
+[package]
+name = "raa-bloom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Physically based bloom: descriptor, validation and mip chain rule."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }

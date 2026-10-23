@@ -688,6 +688,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-bloom"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-contact"
 version = "0.1.0"
 dependencies = [
