@@ -1,0 +1,35 @@
+{
+  "scene": "m07-base",
+  "variant": "agx",
+  "milestone": "m07",
+  "capturedAt": "2026-10-23T15:29:09.094Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "prepass",
+    "forward",
+    "tonemap"
+  ],
+  "instances": 8,
+  "triangles": 37564,
+  "firstFrameMs": 626.8999999985099,
+  "wasm": {
+    "raw": 1413612,
+    "gzip": 508245,
+    "sha256": "294aa14fd6c6eada11d309c1b98782851573a6fc2232c801655607b06e3a6efe"
+  },
+  "capture": "proofs/captures/lookdev/m07-base--agx.png",
+  "captureSha256": "6ca94f40806ad929e6e95bb138494e662dda6e73ee3f083fc5f35971d500c1d8",
+  "judge": null
+}
