@@ -842,6 +842,8 @@ name = "raa-tonemap"
 version = "0.1.0"
 dependencies = [
  "raa-core",
+ "raa-pipeline",
+ "raa-shader",
  "wgpu",
 ]
 

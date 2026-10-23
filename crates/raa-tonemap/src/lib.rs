@@ -8,6 +8,9 @@ use std::rc::Rc;
 use raa_core::RaaError;
 
 pub mod curves;
+mod pass;
+
+pub use pass::{TONEMAP_NAME, TONEMAP_ORDER, TONEMAP_WGSL, TonemapPass};
 
 /// Refusal code of invalid tone mapping settings.
 pub const POST_INVALID: &str = "post.invalid";

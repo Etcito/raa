@@ -8,4 +8,6 @@ description = "Display transform of the lit renderer: exposure, AgX/ACES/linear 
 
 [dependencies]
 raa-core = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
 wgpu = { workspace = true }
