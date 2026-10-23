@@ -2,7 +2,7 @@
   "scene": "m09-shadows-ao",
   "variant": "softness-wide",
   "milestone": "m09",
-  "capturedAt": "2026-10-23T21:16:02.950Z",
+  "capturedAt": "2026-10-23T21:47:21.664Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -28,13 +28,13 @@
   ],
   "instances": 415,
   "triangles": 72740,
-  "firstFrameMs": 34925.5,
+  "firstFrameMs": 36075.79999999702,
   "wasm": {
     "raw": 1542028,
     "gzip": 551872,
     "sha256": "768d4ca5fa665138bdd8122c6fcacaaf92b67f1e27219c0b546f0a54ccbd5212"
   },
   "capture": "proofs/captures/lookdev/m09-shadows-ao--softness-wide.png",
-  "captureSha256": "75868ef3b89defa687c4d0ab668987074fa8a95ca1028ba0c1f5772833dbc312",
+  "captureSha256": "6f98f0ac2a4ea4bdf95616814c46544ea93a72d495a2577c864408bde43287c0",
   "judge": null
 }

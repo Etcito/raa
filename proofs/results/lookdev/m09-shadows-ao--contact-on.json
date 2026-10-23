@@ -2,7 +2,7 @@
   "scene": "m09-shadows-ao",
   "variant": "contact-on",
   "milestone": "m09",
-  "capturedAt": "2026-10-23T21:15:58.271Z",
+  "capturedAt": "2026-10-23T21:47:14.253Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -28,13 +28,13 @@
   ],
   "instances": 415,
   "triangles": 72740,
-  "firstFrameMs": 30206.10000000894,
+  "firstFrameMs": 28680.39999999106,
   "wasm": {
     "raw": 1542028,
     "gzip": 551872,
     "sha256": "768d4ca5fa665138bdd8122c6fcacaaf92b67f1e27219c0b546f0a54ccbd5212"
   },
   "capture": "proofs/captures/lookdev/m09-shadows-ao--contact-on.png",
-  "captureSha256": "49fa09157354b341d2cbe4e01cd634ed13d30f29953a6614ad552ef4af5efc54",
+  "captureSha256": "fcbc05b496bd28d298a1171ddd7cdea62a1dffb4c4447d94525d6036cd773254",
   "judge": null
 }
