@@ -781,6 +781,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-pipeline"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-prims"
 version = "0.1.0"
 dependencies = [

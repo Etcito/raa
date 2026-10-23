@@ -1,0 +1,11 @@
+[package]
+name = "raa-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Configurable pass pipeline of the lit renderer: surface-sized targets and the HDR ping-pong chain."
+
+[dependencies]
+raa-core = { workspace = true }
+wgpu = { workspace = true }
