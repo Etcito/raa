@@ -226,6 +226,7 @@ impl WebApp for EngineApp {
             materials: HandleMap::new("material"),
             nodes: HandleMap::new("node"),
             instances: HandleMap::new("instance"),
+            dirty_meshes: Vec::new(),
             asset_handles: HandleMap::new("asset"),
             assets: Vec::new(),
             scratch_nodes: Vec::new(),
@@ -234,7 +235,8 @@ impl WebApp for EngineApp {
         Ok(())
     }
 
-    /// Sets the pipeline time, runs the api files' `frame`, then prepares the lit frame.
+    /// Sets the pipeline time, runs the api files' `frame`, rebuilds the instance groups
+    /// of meshes replaced since the last frame, then prepares the lit frame.
     fn update(&mut self, gpu: &GpuContext, input: &FrameInput) -> Result<FrameCounters, RaaError> {
         let mut guard = self.state.borrow_mut();
         let s = guard
@@ -245,6 +247,7 @@ impl WebApp for EngineApp {
             .map_err(|_| pipeline_busy())?
             .set_time(input.now_ms);
         api::frame_all(s, gpu, input)?;
+        s.rebuild_dirty_groups()?;
         let c = s.lit.prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags)?;
         Ok(FrameCounters {
             instances: c.instances,
@@ -467,11 +470,7 @@ impl Engine {
     /// handle is never reused.
     #[wasm_bindgen(js_name = removeMesh)]
     pub fn remove_mesh(&mut self, id: u32) -> Result<(), JsValue> {
-        self.with_state(|_, s| {
-            let mesh = s.meshes.remove(id)?;
-            s.lit.remove(mesh.lit);
-            Ok(())
-        })
+        self.with_state(|_, s| s.remove_mesh(id))
     }
 
     /// Sets the camera: `eye`, `target`, `up` (+Y), `fovYDeg` (60), `near` (0.1),
@@ -644,13 +643,13 @@ impl Engine {
     }
 
     /// Removes `node`, its subtree and their instances. The handles of removed
-    /// descendants and instances stay mapped to stale ids: using them throws
-    /// `scene.stale_node` or `scene.stale_instance`.
+    /// descendants and instances stay mapped to stale ids (instance groups are marked
+    /// stale): using them throws `scene.stale_node` or `scene.stale_instance`.
     #[wasm_bindgen(js_name = removeNode)]
     pub fn remove_node(&mut self, node: u32) -> Result<(), JsValue> {
         self.with_state(|_, st| {
             let id = st.nodes.remove(node)?;
-            st.scene.remove_node(id).map_err(|e| scene_error(&e))
+            st.remove_node(id)
         })
     }
 

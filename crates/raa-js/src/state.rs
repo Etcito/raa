@@ -15,6 +15,8 @@ use raa_pipeline::Pipeline;
 use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene};
 use raa_tonemap::TonemapControl;
 
+use raa_scene::SceneError;
+
 use crate::convert::{HandleMap, scene_error};
 use crate::feature_map::FeatureMap;
 
@@ -49,6 +51,9 @@ pub(crate) struct InstanceGroup {
     pub tag: u32,
     /// v0 `addInstance(node, mesh, material)`: every sub-mesh draws this material.
     pub material: Option<MaterialId>,
+    /// The node was removed (`removeNode`): the group is never rebuilt and using it
+    /// throws `scene.stale_instance`, as a v0 instance of a removed node did.
+    pub stale: bool,
 }
 
 impl InstanceGroup {
@@ -65,6 +70,7 @@ impl InstanceGroup {
             visible: true,
             tag,
             material,
+            stale: false,
         }
     }
 
@@ -72,7 +78,8 @@ impl InstanceGroup {
     /// material)` part, keeping node, visibility and tag. The override material wins,
     /// then the sub-mesh material, then [`DEFAULT_MATERIAL`]. Previous instances that are
     /// already stale (their node was removed) are skipped. A stale node refuses with
-    /// `scene.stale_node`; the group then lists only the instances that exist.
+    /// `scene.stale_node` and marks the group stale; the group then lists only the
+    /// instances that exist.
     pub(crate) fn rebuild(
         &mut self,
         scene: &mut Scene,
@@ -84,9 +91,13 @@ impl InstanceGroup {
         }
         for (mesh, sub_material) in parts {
             let material = self.material.or(sub_material).unwrap_or(DEFAULT_MATERIAL);
-            let id = scene
-                .add_instance(self.node, mesh, material)
-                .map_err(|e| scene_error(&e))?;
+            let id = match scene.add_instance(self.node, mesh, material) {
+                Ok(id) => id,
+                Err(e) => {
+                    self.stale |= e == SceneError::StaleNode;
+                    return Err(scene_error(&e));
+                }
+            };
             self.instances.push(id);
             scene
                 .set_instance_tag(id, self.tag)
@@ -103,7 +114,7 @@ impl InstanceGroup {
     /// Removes every scene instance of the group. All are tried; the first error
     /// (`scene.stale_instance` when the node was removed, as in v0) is returned.
     pub(crate) fn remove_from(&mut self, scene: &mut Scene) -> Result<(), RaaError> {
-        let mut first = Ok(());
+        let mut first = self.check_live();
         for id in self.instances.drain(..) {
             if let Err(e) = scene.remove_instance(id)
                 && first.is_ok()
@@ -116,6 +127,7 @@ impl InstanceGroup {
 
     /// Shows or hides every scene instance of the group (kept across rebuilds).
     pub(crate) fn set_visible(&mut self, scene: &mut Scene, visible: bool) -> Result<(), RaaError> {
+        self.check_live()?;
         self.visible = visible;
         for &id in &self.instances {
             scene
@@ -124,6 +136,49 @@ impl InstanceGroup {
         }
         Ok(())
     }
+
+    /// `scene.stale_instance` when the group's node was removed.
+    fn check_live(&self) -> Result<(), RaaError> {
+        if self.stale {
+            Err(scene_error(&SceneError::StaleInstance))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Marks stale every live group whose node no longer exists in `scene`.
+fn mark_stale_groups(scene: &Scene, groups: &mut HandleMap<InstanceGroup>) {
+    for (_, group) in groups.iter_mut() {
+        if !group.stale && scene.local(group.node).is_err() {
+            group.stale = true;
+        }
+    }
+}
+
+/// Runs `rebuild` on every live (not stale) group whose mesh is in `dirty`, then clears
+/// `dirty` (capacity kept). Every group is tried; the first error is returned.
+fn rebuild_dirty(
+    dirty: &mut Vec<LitMeshId>,
+    groups: &mut HandleMap<InstanceGroup>,
+    mut rebuild: impl FnMut(&mut InstanceGroup) -> Result<(), RaaError>,
+) -> Result<(), RaaError> {
+    if dirty.is_empty() {
+        return Ok(());
+    }
+    let mut first = Ok(());
+    for (_, group) in groups.iter_mut() {
+        if group.stale || !dirty.contains(&group.mesh) {
+            continue;
+        }
+        if let Err(e) = rebuild(group)
+            && first.is_ok()
+        {
+            first = Err(e);
+        }
+    }
+    dirty.clear();
+    first
 }
 
 /// A loaded asset: one (mesh handle, material handle) per LoadedMesh, in mesh order.
@@ -153,6 +208,10 @@ pub(crate) struct EngineState {
     pub materials: HandleMap<MaterialId>,
     pub nodes: HandleMap<NodeId>,
     pub instances: HandleMap<InstanceGroup>,
+    /// Lit meshes whose geometry was replaced since the last frame: their instance groups
+    /// are rebuilt by [`EngineState::rebuild_dirty_groups`] in `update`, before
+    /// `lit.prepare`.
+    pub dirty_meshes: Vec<LitMeshId>,
     /// Asset handle to an index into `assets`.
     pub asset_handles: HandleMap<u32>,
     pub assets: Vec<AssetEntry>,
@@ -208,11 +267,55 @@ impl EngineState {
     }
 
     /// Removes the group of JS handle `h` (its handle is never reused) and its scene
-    /// instances; the instance extras of its tag are cleared.
+    /// instances; the instance extras of its tag are cleared. A stale group (its node was
+    /// removed) is unmapped too and throws `scene.stale_instance`, as in v0.
     pub(crate) fn remove_instance_group(&mut self, h: u32) -> Result<(), RaaError> {
         let mut group = self.instances.remove(h)?;
         self.lit.clear_instance_extra(group.tag);
         group.remove_from(&mut self.scene)
+    }
+
+    /// Removes `node`, its subtree and their scene instances, and marks stale the groups
+    /// whose node went away (later use throws `scene.stale_instance`). Their instance
+    /// extras are cleared; their handles stay mapped, as in v0.
+    pub(crate) fn remove_node(&mut self, node: NodeId) -> Result<(), RaaError> {
+        self.scene.remove_node(node).map_err(|e| scene_error(&e))?;
+        mark_stale_groups(&self.scene, &mut self.instances);
+        for (_, group) in self.instances.iter() {
+            if group.stale {
+                self.lit.clear_instance_extra(group.tag);
+            }
+        }
+        Ok(())
+    }
+
+    /// Records that the geometry of `mesh` was replaced: its instance groups are rebuilt
+    /// at the next frame, keeping node, visibility and tag.
+    pub(crate) fn mark_mesh_dirty(&mut self, mesh: LitMeshId) {
+        if !self.dirty_meshes.contains(&mesh) {
+            self.dirty_meshes.push(mesh);
+        }
+    }
+
+    /// Frees the mesh of JS handle `h` (any origin) and drops it from the dirty list.
+    pub(crate) fn remove_mesh(&mut self, h: u32) -> Result<(), RaaError> {
+        let mesh = self.meshes.remove(h)?;
+        self.dirty_meshes.retain(|&m| m != mesh.lit);
+        self.lit.remove(mesh.lit);
+        Ok(())
+    }
+
+    /// Rebuilds the groups of the meshes marked dirty since the last frame (called by
+    /// `update` before `lit.prepare`). Stale groups and groups whose mesh was removed
+    /// since are skipped. Nothing is done, and nothing allocated, when the list is empty.
+    pub(crate) fn rebuild_dirty_groups(&mut self) -> Result<(), RaaError> {
+        let (scene, lit) = (&mut self.scene, &self.lit);
+        rebuild_dirty(&mut self.dirty_meshes, &mut self.instances, |group| {
+            if lit.submesh_ids(group.mesh).is_none() {
+                return Ok(());
+            }
+            rebuild_group(scene, lit, group)
+        })
     }
 }
 
@@ -311,6 +414,89 @@ mod tests {
         assert!(g.instances.is_empty());
         let e = g.rebuild(&mut scene, parts()).unwrap_err();
         assert_eq!(e.code(), "scene.stale_node");
+    }
+
+    #[test]
+    fn removed_node_marks_groups_stale_and_use_throws_stale_instance() {
+        let (mut scene, node) = scene_with_node();
+        let other = scene.add_node(None, Transform::IDENTITY).unwrap();
+        let mut groups: HandleMap<InstanceGroup> = HandleMap::new("instance");
+        for n in [node, other] {
+            let mut g = InstanceGroup::new(n, LitMeshId(0), groups.next_handle(), None);
+            g.rebuild(&mut scene, parts()).unwrap();
+            groups.insert(g);
+        }
+        scene.remove_node(node).unwrap();
+        mark_stale_groups(&scene, &mut groups);
+        assert!(groups.get_ref(1).unwrap().stale);
+        assert!(!groups.get_ref(2).unwrap().stale);
+
+        let g = groups.get_mut(1).unwrap();
+        let e = g.set_visible(&mut scene, false).unwrap_err();
+        assert_eq!(e.code(), "scene.stale_instance");
+        let e = g.remove_from(&mut scene).unwrap_err();
+        assert_eq!(e.code(), "scene.stale_instance");
+        // Still stale with no instance left (e.g. after a failed rebuild).
+        let e = g.remove_from(&mut scene).unwrap_err();
+        assert_eq!(e.code(), "scene.stale_instance");
+        assert_eq!(scene.instance_count(), 2);
+    }
+
+    #[test]
+    fn dirty_meshes_rebuild_live_groups_keeping_node_visibility_and_tag() {
+        let (mut scene, node) = scene_with_node();
+        let gone = scene.add_node(None, Transform::IDENTITY).unwrap();
+        let mut groups: HandleMap<InstanceGroup> = HandleMap::new("instance");
+        for (n, mesh) in [(node, 0), (node, 1), (gone, 0)] {
+            let mut g = InstanceGroup::new(n, LitMeshId(mesh), groups.next_handle(), None);
+            g.rebuild(&mut scene, parts()).unwrap();
+            groups.insert(g);
+        }
+        groups
+            .get_mut(1)
+            .unwrap()
+            .set_visible(&mut scene, false)
+            .unwrap();
+        scene.remove_node(gone).unwrap();
+        mark_stale_groups(&scene, &mut groups);
+
+        let mut dirty = vec![LitMeshId(0)];
+        let replaced = [(MeshId(8), None)];
+        let mut rebuilt = Vec::new();
+        rebuild_dirty(&mut dirty, &mut groups, |g| {
+            rebuilt.push(g.tag);
+            g.rebuild(&mut scene, replaced)
+        })
+        .unwrap();
+        assert_eq!(rebuilt, [1]);
+        assert!(dirty.is_empty());
+        let g = groups.get_ref(1).unwrap();
+        assert_eq!((g.node, g.tag, g.visible), (node, 1, false));
+        assert_eq!(g.instances.len(), 1);
+        assert_eq!(scene.instance_tag(g.instances[0]).unwrap(), 1);
+        assert_eq!(groups.get_ref(2).unwrap().instances.len(), 2);
+        assert_eq!(scene.instance_count(), 3);
+
+        // An empty list does nothing; a failing rebuild is reported after all are tried.
+        rebuild_dirty(&mut dirty, &mut groups, |_| unreachable!()).unwrap();
+        let mut dirty = vec![LitMeshId(0), LitMeshId(1)];
+        let mut tried = 0;
+        let e = rebuild_dirty(&mut dirty, &mut groups, |_| {
+            tried += 1;
+            Err(scene_error(&SceneError::StaleNode))
+        })
+        .unwrap_err();
+        assert_eq!((e.code(), tried), ("scene.stale_node", 2));
+        assert!(dirty.is_empty());
+    }
+
+    #[test]
+    fn rebuild_on_a_removed_node_marks_the_group_stale() {
+        let (mut scene, node) = scene_with_node();
+        let mut g = InstanceGroup::new(node, LitMeshId(0), 1, None);
+        scene.remove_node(node).unwrap();
+        assert!(g.rebuild(&mut scene, parts()).is_err());
+        assert!(g.stale);
     }
 
     #[test]
