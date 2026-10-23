@@ -1,0 +1,11 @@
+[package]
+name = "raa-shader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "WGSL composition and validation of the lit renderer: material function registry, slot providers and naga validation."
+
+[dependencies]
+raa-core = { workspace = true }
+naga = { workspace = true }

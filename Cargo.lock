@@ -817,6 +817,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-shader"
+version = "0.1.0"
+dependencies = [
+ "naga",
+ "raa-core",
+]
+
+[[package]]
 name = "raa-tonemap"
 version = "0.1.0"
 dependencies = [
