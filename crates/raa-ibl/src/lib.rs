@@ -2,6 +2,7 @@
 //! `ibl` provider of the `Ambient` slot; GPU filtering and the BRDF LUT are added by later
 //! tasks.
 
+mod filter;
 mod lut;
 mod provider;
 mod sh;
