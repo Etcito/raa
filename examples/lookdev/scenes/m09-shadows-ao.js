@@ -1,26 +1,30 @@
 // Lookdev scene m09-shadows-ao (chain milestone 3, R9): an obstacle-like arrangement (the
 // inflatable hammer, stacked rounded blocks forming creases and inner corners, spheres
-// resting on the floor, small 5-10 cm objects and a tall pillar) on the candy tile floor
-// under the m08 `day` sky, lit by a side sun about 35 deg high behind the scene, so the
-// shadows fall diagonally toward the camera. On/off pairs for the cascaded sun shadows
-// (`shadow.csm`), GTAO (`ao.gtao`) and contact shadows (`shadow.contact`) (Q15), all three
-// together, a wide penumbra and a low sun with a long pillar shadow.
+// resting on the floor, small 5-10 cm objects and a tall pillar in the right foreground) on
+// the candy tile floor under the m08 `day` sky, lit by a side sun about 35 deg high from the
+// right and slightly behind, so the shadows fall diagonally to the left and toward the
+// camera. On/off pairs for the cascaded sun shadows (`shadow.csm`), GTAO (`ao.gtao`) and
+// contact shadows (`shadow.contact`) (Q15), all three together, a wide penumbra and a low sun
+// with a long pillar shadow.
 // Pure module (S14): no top-level side effects, node reads id/milestone/variants.
 
 // Display-referred linear background (S12), unused while the sky is on.
 const BACKGROUND = [0.3, 0.34, 0.4];
 
-// Sun travel direction at elevation `deg`, coming from behind the scene and 50 deg to the
-// right of -Z (as in ref-1, upper right): the shadows fall toward the camera and to the left.
+// Sun travel direction at elevation `deg`, coming from 65 deg to the right of -Z (as in
+// ref-1, upper right, slightly behind): the shadows fall to the left and toward the camera,
+// long enough on screen to read (at 50 deg they ran behind the set, foreshortened).
 function sunDirection(deg) {
   const e = (deg * Math.PI) / 180;
-  const a = (50 * Math.PI) / 180;
+  const a = (65 * Math.PI) / 180;
   return [-Math.cos(e) * Math.sin(a), -Math.sin(e), Math.cos(e) * Math.cos(a)];
 }
 const SUN_HIGH_DEG = 35;
 // About 8 deg: the 3 m pillar casts a shadow of about 21 m, across the whole frame.
 const SUN_LOW_DEG = 8;
-const SUN = { color: [1, 0.93, 0.82], intensity: 5.5 };
+// Sun strong against the sky fill (IBL diffuse 0.6 in build): with 5.5 and full sky diffuse
+// the shadowed floor was barely darker than the lit floor and the judge saw no shadows.
+const SUN = { color: [1, 0.93, 0.82], intensity: 8 };
 // Flat ambient: replaced by the sky's SH ambient while the env is on.
 const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 
@@ -102,8 +106,13 @@ const SMALL = [
   { kind: 'box', s: 0.05, x: 0.3, z: 1.0, color: [0.3, 0.9, 0.35] },
   { kind: 'sphere', s: 0.05, x: 0.45, z: 1.15, color: [0.95, 0.95, 0.95] },
 ];
-// Tall pillar (0.3 x 3 x 0.3 m) at the back right, its shadow running toward the front left.
-const PILLAR = { half: [0.15, 1.5, 0.15], t: [1.7, 1.5, -1.9], color: [0.95, 0.9, 0.85] };
+// Tall pillar (0.3 x 3 x 0.3 m) in the right foreground: its 4.3 m shadow stripe runs to the
+// lower left over open floor in front of the small objects (at the back right it ran behind
+// the blocks and was hidden).
+const PILLAR = { half: [0.15, 1.5, 0.15], t: [2.6, 1.5, 0.5], color: [0.95, 0.9, 0.85] };
+// Grout slab under the tiles (top at y -0.04, inside the 6 cm tiles): fills the 2 cm gaps,
+// through which the sky showed as bright seams.
+const GROUT = { half: [16.2, 0.05, 16.2], t: [0, -0.09, 0], color: [0.3, 0.3, 0.34] };
 const HAMMER = { t: [-1.3, 0, -0.6], r: yawQuat(0.4) };
 
 // Sets each sub-mesh material of `desc` (in order) and returns the mesh handle.
@@ -125,14 +134,14 @@ const R9 = 'R9: simple untextured procedural stand-in shapes on a large floor of
   + 'upright striped inflatable toy hammer on the left, a wide blue rounded block with a yellow '
   + 'cube stacked on it and a pink block against its right side, three coloured spheres '
   + 'resting on the floor in front, a row of tiny spheres and cubes (5-10 cm) in the '
-  + 'foreground and a tall pale pillar at the back right';
-const SHADOWS_TEXT = 'soft sun shadows fall diagonally toward the camera and to the left: '
+  + 'foreground and a tall pale pillar on the right edge of the frame';
+const SHADOWS_TEXT = 'soft sun shadows fall diagonally to the left and toward the camera: '
   + 'sharp where an object touches the floor and widening into a soft penumbra with '
-  + 'distance; the pillar casts a long shadow stripe across the floor';
+  + 'distance; the pillar casts a long shadow stripe across the foreground floor toward the '
+  + 'lower left';
 const AO_TEXT = 'ambient occlusion darkens the creases between the stacked blocks, their inner '
   + 'corners and the floor around their bases and under the spheres';
-const CONTACT_TEXT = 'the tiny objects are grounded by thin dark contact shadows where they '
-  + 'touch the floor';
+const CONTACT_TEXT = 'the tiny objects sit on the floor with small dark shadows at their base';
 // R9 judges the light and shadow mood against ref-1; the objects are placeholders until the
 // material and transparency milestones, so the judge is told not to score them.
 const BASIS = 'Engine lookdev capture of the shadows-and-ambient-occlusion milestone. Score two '
@@ -154,8 +163,8 @@ export default {
   variants: [
     {
       id: 'all-on',
-      description: `${BASIS}${R9.slice(4)}, lit by a warm sun from the upper right behind the `
-        + `objects; ${SHADOWS_TEXT}, with no stripes, acne, gaps under objects or seams; `
+      description: `${BASIS}${R9.slice(4)}, lit by a warm sun from the upper right, slightly `
+        + `behind the objects; ${SHADOWS_TEXT}, with no stripes, acne, gaps under objects or seams; `
         + `${AO_TEXT}; ${CONTACT_TEXT}. Shaded sides stay readable in the bluish sky light.`,
       references: ['ref-1'],
       judge: true,
@@ -236,8 +245,8 @@ export default {
     },
     {
       id: 'long-shadow',
-      description: `${R9}, lit by a low warm sun about 8 deg above the horizon at the back `
-        + 'right: very long soft shadows stretch toward the front left; the pillar shadow is a '
+      description: `${R9}, lit by a low warm sun about 8 deg above the horizon on the right: `
+        + 'very long soft shadows stretch toward the front left; the pillar shadow is a '
         + 'long stripe crossing the whole floor of the frame; the scene is darker and warmer.',
       references: [],
       judge: false,
@@ -252,8 +261,9 @@ export default {
     engine.setLight({ ...SUN, direction: sunDirection(elevation) });
     engine.setAmbient(AMBIENT);
     engine.setSky({ preset: 'day', ...DAY_SKY });
-    // Full sky diffuse: the shadowed floor keeps the blue sky tint of ref-1.
-    engine.setEnvironmentLighting({ diffuse: 1, specular: 1 });
+    // Sky diffuse 0.6: the shadowed floor keeps the blue sky tint of ref-1 and stays clearly
+    // darker than the sunlit floor.
+    engine.setEnvironmentLighting({ diffuse: 0.6, specular: 1 });
     engine.setToneMapping({ look: 'punchy' });
     engine.setShadows({ ...SHADOWS, ...settings.shadows });
     engine.setAo({ ...AO, ...settings.ao });
@@ -265,6 +275,8 @@ export default {
     const tiles = pbr(engine, [1, 1, 1], { roughness: 0.55 });
     const hammer = pbr(engine, [1, 1, 1], { roughness: 0.08 });
     place(engine, upload(engine, candyFloor(objects, 64), [tiles]), [0, 0, 0]);
+    const grout = geometry.roundedBox(GROUT.half, 0.01, 2);
+    place(engine, upload(engine, grout, [pbr(engine, GROUT.color, { roughness: 0.9 })]), GROUT.t);
     place(engine, upload(engine, objects.inflatableHammer(), [hammer, hammer]), HAMMER.t, HAMMER.r);
 
     const pillar = geometry.roundedBox(PILLAR.half, 0.04, 4);
