@@ -1,0 +1,42 @@
+{
+  "scene": "m10-materials",
+  "variant": "bloom-on",
+  "milestone": "m10",
+  "capturedAt": "2026-10-23T23:39:52.029Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 5,
+  "triangles": 10764,
+  "firstFrameMs": 17698.10000000894,
+  "wasm": {
+    "raw": 1653974,
+    "gzip": 589743,
+    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+  },
+  "capture": "proofs/captures/lookdev/m10-materials--bloom-on.png",
+  "captureSha256": "a758c95ce31b3ce5721652c651643da974688b41d5799eacc59d4f51757cff67",
+  "judge": null
+}

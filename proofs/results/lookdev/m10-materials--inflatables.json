@@ -1,0 +1,42 @@
+{
+  "scene": "m10-materials",
+  "variant": "inflatables",
+  "milestone": "m10",
+  "capturedAt": "2026-10-23T23:39:38.481Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 9,
+  "triangles": 34972,
+  "firstFrameMs": 3976.5,
+  "wasm": {
+    "raw": 1653974,
+    "gzip": 589743,
+    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+  },
+  "capture": "proofs/captures/lookdev/m10-materials--inflatables.png",
+  "captureSha256": "6b66f13cabf7078df2cbc3345781a8de36a841fbcce702a4b5e8ec2e96737e15",
+  "judge": null
+}

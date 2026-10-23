@@ -1,0 +1,42 @@
+{
+  "scene": "m10-materials",
+  "variant": "user-fn",
+  "milestone": "m10",
+  "capturedAt": "2026-10-23T23:40:11.075Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 3,
+  "triangles": 5048,
+  "firstFrameMs": 36508.20000000298,
+  "wasm": {
+    "raw": 1653974,
+    "gzip": 589743,
+    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+  },
+  "capture": "proofs/captures/lookdev/m10-materials--user-fn.png",
+  "captureSha256": "958dd4b1c8e715535b818e0aee2e583042aedd90a15a841372b9a86acd7177b9",
+  "judge": null
+}

@@ -1,0 +1,42 @@
+{
+  "scene": "m10-materials",
+  "variant": "fur-on",
+  "milestone": "m10",
+  "capturedAt": "2026-10-23T23:40:04.024Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 12,
+  "triangles": 26156,
+  "firstFrameMs": 28775.40000000596,
+  "wasm": {
+    "raw": 1653974,
+    "gzip": 589743,
+    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+  },
+  "capture": "proofs/captures/lookdev/m10-materials--fur-on.png",
+  "captureSha256": "b0876f70d6912f3eeba1275ed7fd9a4e93b3734976837db6684a946bfc55067c",
+  "judge": null
+}
