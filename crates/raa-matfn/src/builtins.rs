@@ -75,6 +75,70 @@ pub const BUILTINS: &[BuiltinFn] = &[
         flags: 0,
         class: DrawClass::Opaque,
     },
+    BuiltinFn {
+        name: "raa.plush",
+        wgsl: include_str!("wgsl/plush.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "color",
+                kind: ParamKind::Color,
+                default: [0.92, 0.9, 0.86, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "tipColor",
+                kind: ParamKind::Color,
+                default: [1.0, 0.99, 0.97, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "sheenColor",
+                kind: ParamKind::Color,
+                default: [0.95, 0.93, 0.9, 0.0],
+                slot: (2, 0),
+            },
+            ParamSpec {
+                name: "furLength",
+                kind: ParamKind::Float,
+                default: [0.02, 0.0, 0.0, 0.0],
+                slot: (3, 0),
+            },
+            ParamSpec {
+                name: "furDensity",
+                kind: ParamKind::Float,
+                default: [600.0, 0.0, 0.0, 0.0],
+                slot: (3, 1),
+            },
+        ],
+        flags: raa_lit::FLAG_FUR,
+        class: DrawClass::Fur,
+    },
+    BuiltinFn {
+        name: "raa.neon",
+        wgsl: include_str!("wgsl/neon.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "color",
+                kind: ParamKind::Color,
+                default: [1.0, 0.25, 0.6, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "strength",
+                kind: ParamKind::Float,
+                default: [12.0, 0.0, 0.0, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "coreWhiteness",
+                kind: ParamKind::Float,
+                default: [0.8, 0.0, 0.0, 0.0],
+                slot: (1, 1),
+            },
+        ],
+        flags: raa_lit::FLAG_UNLIT,
+        class: DrawClass::Opaque,
+    },
 ];
 
 /// Registers every row of [`BUILTINS`] into `reg`, in table order. When any built-in name
@@ -104,6 +168,17 @@ mod tests {
         assert_eq!(reg.len(), 1 + BUILTINS.len());
         assert_eq!(reg.id_of("raa.inflatable"), Some(MaterialFnId(1)));
         assert_eq!(reg.id_of("raa.candy"), Some(MaterialFnId(2)));
+        assert_eq!(reg.id_of("raa.plush"), Some(MaterialFnId(3)));
+        assert_eq!(reg.id_of("raa.neon"), Some(MaterialFnId(4)));
+        assert_eq!(BUILTINS.len(), 4);
+        assert_eq!(
+            (BUILTINS[2].flags, BUILTINS[2].class),
+            (raa_lit::FLAG_FUR, DrawClass::Fur)
+        );
+        assert_eq!(
+            (BUILTINS[3].flags, BUILTINS[3].class),
+            (raa_lit::FLAG_UNLIT, DrawClass::Opaque)
+        );
         for b in BUILTINS {
             let mut used = [0u32; 8];
             for p in b.params {
