@@ -31,7 +31,7 @@ const SHADOWS = { softness: 1, distance: 30 };
 // Orbit cameras: [target, distance m, yaw rad, pitch rad] (as m09).
 const CAMERAS = {
   // Low and close, so the plastic fills the frame over a strip of glossy floor (tuning).
-  inflatables: [[-0.15, 0.55, 0.05], 2.75, 0.08, 0.12],
+  inflatables: [[-0.15, 0.6, 0.05], 2.4, 0.08, 0.14],
   // Close on the pink ball with the hammer head behind it, where the coat glint shows.
   clearcoat: [[-0.3, 0.62, 0.1], 1.75, 0.3, 0.1],
   neon: [[0, 0.55, 0], 3.6, 0, 0.12],
@@ -52,15 +52,15 @@ const WHITE = [0.98, 0.96, 0.92];
 const COAT = { clearcoat: 1, clearcoatRoughness: 0.14 };
 // Balls: radius m, x, z, function, params (a tight cluster in front of the hammer).
 const BALLS = [
-  { r: 0.32, x: -0.4, z: 0.45, fn: 'raa.inflatable', params: { color: PINK, stripeColor: WHITE } },
+  { r: 0.32, x: -0.4, z: 0.45, fn: 'raa.inflatable', params: { color: PINK, stripeColor: WHITE, seamDepth: 0.24 } },
   { r: 0.24, x: 0.3, z: 0.65, fn: 'raa.candy', params: { color: WHITE, stripeColor: PINK } },
-  { r: 0.28, x: 0.85, z: 0.1, fn: 'raa.inflatable', params: { color: YELLOW, stripeColor: BLUE } },
+  { r: 0.28, x: 0.85, z: 0.1, fn: 'raa.inflatable', params: { color: YELLOW, stripeColor: BLUE, seamDepth: 0.24 } },
   { r: 0.2, x: -1.05, z: 0.8, fn: 'raa.candy', params: { color: YELLOW, stripeColor: BLUE, stripeCount: 4 } },
 ];
 // Bumper rings lying on the floor: major radius m, tube radius m, x, z, params.
 const BUMPERS = [
-  { R: 0.45, r: 0.16, x: 0.45, z: -0.65, params: { color: BLUE, stripeColor: YELLOW, seamCount: 12 } },
-  { R: 0.35, r: 0.13, x: -1.25, z: -0.05, params: { color: YELLOW, stripeColor: PINK, seamCount: 10 } },
+  { R: 0.45, r: 0.16, x: 0.45, z: -0.65, params: { color: BLUE, stripeColor: YELLOW, seamCount: 12, seamDepth: 0.24 } },
+  { R: 0.35, r: 0.13, x: -1.25, z: -0.05, params: { color: YELLOW, stripeColor: PINK, seamCount: 10, seamDepth: 0.24 } },
 ];
 // The hammer stands behind the balls, scaled up to read as the set's centrepiece.
 const HAMMER = { t: [-0.35, 0, -0.55], yaw: 0.3, scale: 1.25 };
@@ -211,8 +211,9 @@ function buildInflatables(engine, lib, settings) {
   const cc = settings.clearcoat;
   daylight(engine);
   engine.setToneMapping({ exposureEv: INFLATABLE_EXPOSURE_EV });
+  engine.setBloom({ strength: 0.1, radius: 0.85 });
   floor(engine, geometry, INFLATABLE_FLOOR.color, INFLATABLE_FLOOR.roughness);
-  const hammer = surface(engine, 'raa.inflatable', { color: [1, 1, 1], stripeWidth: 0, seamDepth: 0.12 }, cc);
+  const hammer = surface(engine, 'raa.inflatable', { color: [1, 1, 1], stripeWidth: 0, seamDepth: 0.24 }, cc);
   const hammerMesh = upload(engine, objects.inflatableHammer(), [hammer]);
   place(engine, hammerMesh, HAMMER.t, yawQuat(HAMMER.yaw), HAMMER.scale);
   const balls = settings.set === 'clearcoat' ? BALLS.slice(0, 1) : BALLS;
