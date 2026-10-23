@@ -6,7 +6,8 @@
 //! 512-byte S10 `FrameGpu` writer ([`write_frame_gpu`]) and the CPU draw-list builder
 //! ([`DrawPrep`], [`LitDraw`]), and what passes and contributors share: the
 //! [`LitHandle`] with its pipeline cache per shader variant and [`PipelineSpec`], and the
-//! [`ForwardContributor`] extension point of the forward pass.
+//! [`ForwardContributor`] extension point of the forward pass. [`LitRenderer`] owns all of
+//! it and prepares each frame ([`LitOptions`], [`FrameCounts`]).
 
 mod contributor;
 mod extras;
@@ -16,6 +17,7 @@ mod library;
 mod material;
 mod meshes;
 mod prep;
+mod renderer;
 mod slots;
 
 pub use contributor::ForwardContributor;
@@ -32,3 +34,4 @@ pub use prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw, MaterialClass, PrepCapacity
 pub use raa_core::{MaterialId, MeshId};
 pub use raa_mesh::{AttributedMesh, SubMesh};
 pub use raa_shader::MaterialFnId;
+pub use renderer::{FrameCounts, LitOptions, LitRenderer};
