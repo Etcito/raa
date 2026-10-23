@@ -1,6 +1,6 @@
 //! Composition rules (S11): section order, the passthrough `material_vertex`, slot
 //! priorities and conflicts, `slots_hash`, and the `shader.slot_missing` and
-//! `shader.unknown_fn` refusals.
+//! `shader.unknown_fn` refusals; the standard function applies the vertex colour.
 
 use std::borrow::Cow;
 
@@ -323,4 +323,18 @@ fn broken_provider_fails_validation() {
         .expect("compose");
     let e = Composer::validate(&wgsl).expect_err("type error");
     assert_eq!(e.code(), "shader.validate", "{e}");
+}
+
+#[test]
+fn standard_function_multiplies_by_vertex_colour() {
+    let reg = MaterialFnRegistry::new();
+    let composer = stub_composer();
+    for pass in PassKind::ALL {
+        let wgsl = composer.compose(&reg, &key(pass)).expect("compose");
+        position(&wgsl, "o.base_color = r.base.rgb * in.color.rgb;");
+        position(&wgsl, "o.opacity = r.base.a * in.color.a;");
+        if let Err(e) = Composer::validate(&wgsl) {
+            panic!("{pass:?}: {e}");
+        }
+    }
 }

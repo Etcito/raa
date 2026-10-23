@@ -19,7 +19,9 @@ const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 // Orbit cameras: [target, distance m, yaw rad, pitch rad] (yaw 0 looks down -Z; a negative
 // pitch puts the eye below the target, looking slightly up).
 const WIDE = [[0, 0.9, 0], 4.6, 0, -0.08];
-const CLOSE = [[0, 0.4, 0], 3, 0.15, 0.12];
+// The close view looks level (60 deg vertical fov): the sun disc (about 25 deg up) and the
+// deep blue upper sky stay inside the top of the frame.
+const CLOSE = [[0, 0.45, 0], 3, 0.15, 0];
 
 const yawQuat = (rad) => [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)];
 

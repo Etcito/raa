@@ -182,13 +182,13 @@ struct ShadeCtx {
 fn raa_default_output(in: MaterialInput) -> MaterialOutput {
     let r = in.record;
     var o: MaterialOutput;
-    o.base_color = r.base.rgb;
+    o.base_color = r.base.rgb * in.color.rgb;
     o.metallic = r.surface.y;
     o.roughness = r.surface.x;
     o.emissive = r.emissive.rgb;
     o.normal = in.normal;
     o.ao = 1.0;
-    o.opacity = r.base.a;
+    o.opacity = r.base.a * in.color.a;
     o.clearcoat = r.surface.z;
     o.clearcoat_roughness = r.surface.w;
     o.sheen_color = r.sheen.rgb;
