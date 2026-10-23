@@ -4,14 +4,24 @@
 //! layer ([`CloudDesc`]) in scene-referred linear HDR. [`SkyDesc::preset`] gives the built-in
 //! moods (`day`, `snow`, `jungle`, `night`) and [`SkyDesc::validate`] refuses invalid
 //! descriptions with `sky.invalid`.
+//!
+//! [`SkyFeature::install`] adds the FeaturePass `sky.env` (order 10: renders the SKY_ENV cube
+//! from [`SKY_WGSL`]'s `raa_sky_radiance` and filters it through raa-ibl, when the sky changed
+//! or every frame per [`EnvUpdate`]) and the forward contributor `sky.background` (order 900:
+//! the per-pixel sky at depth 1). The returned [`SkyHandle`] sets and reads the description and
+//! marks the env dirty when the sun moves. Background mode: `sky.env` writes the constant mode
+//! each frame and `sky.background` switches it to sky while enabled, so disabling the
+//! contributor brings back the flat background colour.
 
 mod background;
 mod desc;
 mod env_pass;
+mod feature;
 mod shaders;
 mod state;
 
 pub use desc::{CloudDesc, EnvUpdate, SkyDesc};
+pub use feature::{SkyFeature, SkyHandle};
 
 /// WGSL of the procedural sky: defines
 /// `fn raa_sky_radiance(dir: vec3<f32>, env: EnvGpu, sun_dir: vec3<f32>, sun_color: vec3<f32>, time: f32) -> vec3<f32>`
