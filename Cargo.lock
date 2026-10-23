@@ -703,6 +703,7 @@ dependencies = [
  "raa-core",
  "raa-ibl",
  "raa-lit",
+ "raa-matfn",
  "raa-shader",
 ]
 

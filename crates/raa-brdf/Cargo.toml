@@ -11,3 +11,6 @@ raa-core = { workspace = true }
 raa-shader = { path = "../raa-shader" }
 raa-lit = { path = "../raa-lit" }
 raa-ibl = { path = "../raa-ibl" }
+
+[dev-dependencies]
+raa-matfn = { path = "../raa-matfn" }
