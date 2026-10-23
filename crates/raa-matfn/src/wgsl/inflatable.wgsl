@@ -1,6 +1,8 @@
 // raa.inflatable: glossy inflated plastic. Gores between `seamCount` meridian seams along
 // uv.x bulge like pillows (the shading normal bends towards each seam by `seamDepth`);
 // every other gore carries a stripeColor band `stripeWidth` wide (fraction of the gore).
+// The clear coat is the record's (desc `clearcoat`, `clearcoatRoughness`, default 0), so a
+// desc with clearcoat 0 really has no top layer; the base under it is a satin plastic.
 // p[0].rgb color, p[1].rgb stripeColor, p[2] = (stripeWidth, seamDepth, seamCount, 0).
 
 // Position across the gore holding `u`: -1 at its left seam, 0 at its centre, +1 at its
@@ -44,9 +46,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let s2 = gore.x * gore.x;
     o.ao = 1.0 - clamp(depth * 3.0, 0.0, 0.5) * s2 * s2 * s2 * s2;
 
+    // Base roughness 0.24: a broad soft highlight the coat's crisp one sits on (the coat
+    // weight and roughness stay raa_default_output's, from the record).
     o.metallic = 0.0;
-    o.roughness = 0.45;
-    o.clearcoat = 1.0;
-    o.clearcoat_roughness = 0.04;
+    o.roughness = 0.24;
     return o;
 }
