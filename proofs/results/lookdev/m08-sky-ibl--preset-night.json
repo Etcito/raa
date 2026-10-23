@@ -2,7 +2,7 @@
   "scene": "m08-sky-ibl",
   "variant": "preset-night",
   "milestone": "m08",
-  "capturedAt": "2026-10-23T19:00:40.270Z",
+  "capturedAt": "2026-10-23T19:08:28.508Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -25,7 +25,7 @@
   ],
   "instances": 8,
   "triangles": 473020,
-  "firstFrameMs": 15891.29999999702,
+  "firstFrameMs": 35281.20000000298,
   "wasm": {
     "raw": 1492971,
     "gzip": 534694,

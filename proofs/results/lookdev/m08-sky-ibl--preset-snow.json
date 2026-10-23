@@ -2,7 +2,7 @@
   "scene": "m08-sky-ibl",
   "variant": "preset-snow",
   "milestone": "m08",
-  "capturedAt": "2026-10-23T19:00:38.053Z",
+  "capturedAt": "2026-10-23T19:08:26.315Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -25,7 +25,7 @@
   ],
   "instances": 8,
   "triangles": 473020,
-  "firstFrameMs": 13674.70000000298,
+  "firstFrameMs": 33058,
   "wasm": {
     "raw": 1492971,
     "gzip": 534694,
