@@ -1,7 +1,9 @@
 //! Registry of material functions (S11): built-in reference functions and user WGSL.
 
+use crate::composer::Composer;
 use crate::error::ShaderError;
-use crate::ids::MaterialFnId;
+use crate::ids::{MaterialFnId, PassKind, VariantKey};
+use crate::{LIB_WGSL, PRELUDE_WGSL};
 
 /// Name of the built-in function every registry holds as [`MaterialFnId::STANDARD`].
 const STANDARD_NAME: &str = "raa.standard";
@@ -59,6 +61,45 @@ impl MaterialFnRegistry {
         self.push(name, wgsl, true)
     }
 
+    /// Registers a user function (WGSL from JS) under the next id after checking the S11
+    /// user rules, each refused with `material.fn_invalid` and a reason naming the rule:
+    /// the source is at most 65536 bytes; it uses none of `@group`, `@binding`,
+    /// `@vertex`, `@fragment`, `@compute`, `var<storage`, `var<uniform`, `var<workgroup`,
+    /// `enable`, `override` (token scan, comments ignored); it parses; it defines no
+    /// module-scope identifier starting `raa_`; it defines `material_main` with the exact
+    /// signature `fn material_main(in: MaterialInput) -> MaterialOutput`; and the Forward
+    /// variant (MSAA 4) composed with `composer` validates (naga message and line:col
+    /// kept). A registered name is refused with `material.fn_duplicate`; a slot without
+    /// provider in `composer` with `shader.slot_missing`. A refused function leaves the
+    /// registry unchanged.
+    pub fn register_user(
+        &mut self,
+        name: &str,
+        wgsl: &str,
+        composer: &Composer,
+    ) -> Result<MaterialFnId, ShaderError> {
+        if self.id_of(name).is_some() {
+            return Err(duplicate(name));
+        }
+        check_user_source(wgsl).map_err(|reason| invalid(name, reason))?;
+        let id = self.push(name, wgsl, false)?;
+        let key = VariantKey {
+            material_fn: id,
+            pass: PassKind::Forward,
+            msaa: 4,
+            flags: 0,
+        };
+        let checked = composer.compose(self, &key).and_then(|module| {
+            Composer::validate(&module)
+                .map_err(|e| invalid(name, composed_reason(&module, name, wgsl, &e)))
+        });
+        if let Err(e) = checked {
+            self.entries.pop();
+            return Err(e);
+        }
+        Ok(id)
+    }
+
     pub(crate) fn push(
         &mut self,
         name: &str,
@@ -66,10 +107,7 @@ impl MaterialFnRegistry {
         builtin: bool,
     ) -> Result<MaterialFnId, ShaderError> {
         if self.id_of(name).is_some() {
-            return Err(ShaderError::new(
-                ShaderError::FN_DUPLICATE,
-                format!("material function `{name}` is already registered"),
-            ));
+            return Err(duplicate(name));
         }
         let id = u32::try_from(self.entries.len()).map_err(|_| {
             ShaderError::new(
@@ -113,6 +151,223 @@ impl MaterialFnRegistry {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+/// Largest user material function source, in bytes (S11).
+const USER_FN_MAX_BYTES: usize = 65536;
+
+/// Attributes a user function may not use (no bindings, no entry points).
+const FORBIDDEN_ATTRIBUTES: [&str; 5] = ["group", "binding", "vertex", "fragment", "compute"];
+/// Address spaces a user function may not declare variables in.
+const FORBIDDEN_ADDRESS_SPACES: [&str; 3] = ["storage", "uniform", "workgroup"];
+/// Directives and declarations a user function may not use.
+const FORBIDDEN_KEYWORDS: [&str; 2] = ["enable", "override"];
+
+/// The one signature `material_main` must have.
+const MATERIAL_MAIN_SIGNATURE: &str = "fn material_main(in: MaterialInput) -> MaterialOutput";
+
+fn duplicate(name: &str) -> ShaderError {
+    ShaderError::new(
+        ShaderError::FN_DUPLICATE,
+        format!("material function `{name}` is already registered"),
+    )
+}
+
+fn invalid(name: &str, reason: String) -> ShaderError {
+    ShaderError::new(
+        ShaderError::FN_INVALID,
+        format!("material function `{name}` refused: {reason}"),
+    )
+}
+
+/// The S11 source rules a user function must pass before composition, in order: size,
+/// forbidden attributes and keywords, parse, `raa_` prefix, `material_main` signature.
+/// `Err` holds the reason, starting with the rule name.
+fn check_user_source(src: &str) -> Result<(), String> {
+    if src.len() > USER_FN_MAX_BYTES {
+        return Err(format!(
+            "size limit: the source is {} bytes, more than {USER_FN_MAX_BYTES}",
+            src.len()
+        ));
+    }
+    check_tokens(src)?;
+
+    // naga has no AST API and a user function refers to the prelude structs and LIB
+    // helpers, so the user source is parsed after PRELUDE and LIB (no slots, no pass) and
+    // only the items whose span falls inside the user source are its definitions.
+    let context = format!("{PRELUDE_WGSL}\n{LIB_WGSL}\n");
+    let offset = context.len();
+    let full = context + src;
+    let module = match naga::front::wgsl::parse_str(&full) {
+        Ok(module) => module,
+        Err(e) => return Err(parse_reason(src, offset, &full, &e)),
+    };
+    let user_span = |span: naga::Span| {
+        span.to_range()
+            .filter(|r| r.start >= offset)
+            .map(|r| r.start - offset)
+    };
+
+    let mut defined: Vec<(usize, &str, &str)> = Vec::new();
+    for (h, f) in module.functions.iter() {
+        if let (Some(at), Some(name)) = (user_span(module.functions.get_span(h)), &f.name) {
+            defined.push((at, "fn", name));
+        }
+    }
+    for (h, t) in module.types.iter() {
+        if let (Some(at), Some(name)) = (user_span(module.types.get_span(h)), &t.name) {
+            defined.push((at, "struct", name));
+        }
+    }
+    for (h, c) in module.constants.iter() {
+        if let (Some(at), Some(name)) = (user_span(module.constants.get_span(h)), &c.name) {
+            defined.push((at, "const", name));
+        }
+    }
+    for (h, v) in module.global_variables.iter() {
+        if let (Some(at), Some(name)) = (user_span(module.global_variables.get_span(h)), &v.name) {
+            defined.push((at, "var", name));
+        }
+    }
+    defined.sort();
+    if let Some((at, kind, ident)) = defined.iter().find(|(_, _, n)| n.starts_with("raa_")) {
+        let (line, col) = line_col(src, *at);
+        return Err(format!(
+            "reserved prefix: {kind} `{ident}` at {line}:{col} starts with `raa_` (reserved for the engine)"
+        ));
+    }
+
+    let main = module.functions.iter().find(|(h, f)| {
+        f.name.as_deref() == Some("material_main")
+            && user_span(module.functions.get_span(*h)).is_some()
+    });
+    let Some((_, main)) = main else {
+        return Err(format!(
+            "material_main signature: the source does not define `{MATERIAL_MAIN_SIGNATURE}`"
+        ));
+    };
+    let type_is = |ty: naga::Handle<naga::Type>, name: &str| {
+        module
+            .types
+            .get_handle(ty)
+            .ok()
+            .and_then(|t| t.name.as_deref())
+            == Some(name)
+    };
+    let exact = match (main.arguments.as_slice(), &main.result) {
+        ([arg], Some(result)) => {
+            arg.binding.is_none()
+                && type_is(arg.ty, "MaterialInput")
+                && result.binding.is_none()
+                && type_is(result.ty, "MaterialOutput")
+        }
+        _ => false,
+    };
+    if !exact {
+        return Err(format!(
+            "material_main signature: `material_main` must be `{MATERIAL_MAIN_SIGNATURE}`"
+        ));
+    }
+    Ok(())
+}
+
+/// Token scan for the forbidden attributes, address spaces and keywords (comments do not
+/// count). The reason gives the first offending token's line:col.
+fn check_tokens(src: &str) -> Result<(), String> {
+    let tokens = tokens(src);
+    let at = |t: &str| line_col(src, t.as_ptr() as usize - src.as_ptr() as usize);
+    for (i, &t) in tokens.iter().enumerate() {
+        let next = tokens.get(i + 1).copied();
+        if t == "@" {
+            if let Some(attr) = next.filter(|n| FORBIDDEN_ATTRIBUTES.contains(n)) {
+                let (line, col) = at(t);
+                return Err(format!(
+                    "forbidden attribute: `@{attr}` at {line}:{col} (user functions declare no bindings or entry points)"
+                ));
+            }
+        } else if t == "var" && next == Some("<") {
+            if let Some(space) = tokens
+                .get(i + 2)
+                .copied()
+                .filter(|s| FORBIDDEN_ADDRESS_SPACES.contains(s))
+            {
+                let (line, col) = at(t);
+                return Err(format!(
+                    "forbidden address space: `var<{space}` at {line}:{col} (only function and private variables)"
+                ));
+            }
+        } else if FORBIDDEN_KEYWORDS.contains(&t) {
+            let (line, col) = at(t);
+            return Err(format!("forbidden keyword: `{t}` at {line}:{col}"));
+        }
+    }
+    Ok(())
+}
+
+/// Reason of a parse failure of `src` placed at `offset` in `full`. A redefinition of a
+/// `raa_` name (a LIB helper or prelude global) is the reserved-prefix rule; any other
+/// error keeps naga's message, located in the user source when its span lies there.
+fn parse_reason(src: &str, offset: usize, full: &str, e: &naga::front::wgsl::ParseError) -> String {
+    let span = e.labels().next().and_then(|(span, _)| span.to_range());
+    let user_at = span.as_ref().and_then(|r| r.start.checked_sub(offset));
+    if let (Some(r), Some(at)) = (&span, user_at) {
+        let ident = full.get(r.clone()).unwrap_or("");
+        if e.message().starts_with("redefinition") && ident.starts_with("raa_") {
+            let (line, col) = line_col(src, at);
+            return format!(
+                "reserved prefix: `{ident}` at {line}:{col} starts with `raa_` (redefines an engine item)"
+            );
+        }
+    }
+    let mut message = e.message().to_string();
+    for (_, label) in e.labels() {
+        if !label.is_empty() && label != message {
+            message.push_str(&format!("; {label}"));
+        }
+    }
+    for note in e.notes() {
+        message.push_str(&format!("; {note}"));
+    }
+    match user_at {
+        Some(at) => {
+            let (line, col) = line_col(src, at);
+            format!("parse: the source does not parse: {line}:{col}: {message}")
+        }
+        None => format!("parse: the source does not parse: {message}"),
+    }
+}
+
+/// Reason of a validation failure of the composed Forward variant: the composer's message
+/// (line:col in the composed module) followed by the line:col in the user source when the
+/// error lies in the material function's section.
+fn composed_reason(module: &str, name: &str, src: &str, e: &ShaderError) -> String {
+    let mut reason = format!(
+        "composed Forward variant (msaa 4) does not validate: {}: {}",
+        e.code, e.message
+    );
+    let header = format!("\n// raa section: material {name:?}\n");
+    let first_line = module
+        .find(&header)
+        .map(|i| module[..i + header.len()].matches('\n').count() + 1);
+    let located = e.message.split_once(": ").and_then(|(loc, _)| {
+        let (line, col) = loc.split_once(':')?;
+        Some((line.parse::<usize>().ok()?, col.parse::<usize>().ok()?))
+    });
+    if let (Some(first), Some((line, col))) = (first_line, located) {
+        let user_lines = src.lines().count().max(1);
+        if line >= first && line < first + user_lines {
+            reason.push_str(&format!(" (user source {}:{col})", line - first + 1));
+        }
+    }
+    reason
+}
+
+/// 1-based line and column (in characters) of byte `at` of `src`.
+fn line_col(src: &str, at: usize) -> (usize, usize) {
+    let prefix = src.get(..at).unwrap_or(src);
+    let line = prefix.matches('\n').count() + 1;
+    let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
+    (line, prefix[line_start..].chars().count() + 1)
 }
 
 /// True when `src` declares a function `name` (`fn` followed by the identifier), ignoring
