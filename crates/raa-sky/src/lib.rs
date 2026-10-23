@@ -5,8 +5,10 @@
 //! moods (`day`, `snow`, `jungle`, `night`) and [`SkyDesc::validate`] refuses invalid
 //! descriptions with `sky.invalid`.
 
+mod background;
 mod desc;
 mod shaders;
+mod state;
 
 pub use desc::{CloudDesc, EnvUpdate, SkyDesc};
 
