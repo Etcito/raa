@@ -33,6 +33,10 @@ raa-ibl = { path = "../raa-ibl" }
 raa-shadow = { path = "../raa-shadow" }
 raa-gtao = { path = "../raa-gtao" }
 raa-contact = { path = "../raa-contact" }
+raa-matfn = { path = "../raa-matfn" }
+raa-brdf = { path = "../raa-brdf" }
+raa-fur = { path = "../raa-fur" }
+raa-bloom = { path = "../raa-bloom" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
