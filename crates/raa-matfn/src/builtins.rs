@@ -139,6 +139,102 @@ pub const BUILTINS: &[BuiltinFn] = &[
         flags: raa_lit::FLAG_UNLIT,
         class: DrawClass::Opaque,
     },
+    BuiltinFn {
+        name: "raa.mud",
+        wgsl: include_str!("wgsl/mud.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "color",
+                kind: ParamKind::Color,
+                default: [0.36, 0.25, 0.16, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "wetColor",
+                kind: ParamKind::Color,
+                default: [0.2, 0.14, 0.09, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "wetness",
+                kind: ParamKind::Float,
+                default: [0.4, 0.0, 0.0, 0.0],
+                slot: (2, 0),
+            },
+            ParamSpec {
+                name: "scale",
+                kind: ParamKind::Float,
+                default: [2.0, 0.0, 0.0, 0.0],
+                slot: (2, 1),
+            },
+        ],
+        flags: 0,
+        class: DrawClass::Opaque,
+    },
+    BuiltinFn {
+        name: "raa.snow",
+        wgsl: include_str!("wgsl/snow.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "color",
+                kind: ParamKind::Color,
+                default: [0.95, 0.97, 1.0, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "sparkle",
+                kind: ParamKind::Float,
+                default: [4.0, 0.0, 0.0, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "scale",
+                kind: ParamKind::Float,
+                default: [40.0, 0.0, 0.0, 0.0],
+                slot: (1, 1),
+            },
+        ],
+        flags: 0,
+        class: DrawClass::Opaque,
+    },
+    BuiltinFn {
+        name: "raa.tiles",
+        wgsl: include_str!("wgsl/tiles.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "color",
+                kind: ParamKind::Color,
+                default: [0.9, 0.9, 0.88, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "groutColor",
+                kind: ParamKind::Color,
+                default: [0.55, 0.53, 0.5, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "tileSize",
+                kind: ParamKind::Float,
+                default: [0.25, 0.0, 0.0, 0.0],
+                slot: (2, 0),
+            },
+            ParamSpec {
+                name: "groutWidth",
+                kind: ParamKind::Float,
+                default: [0.02, 0.0, 0.0, 0.0],
+                slot: (2, 1),
+            },
+            ParamSpec {
+                name: "gloss",
+                kind: ParamKind::Float,
+                default: [0.7, 0.0, 0.0, 0.0],
+                slot: (2, 2),
+            },
+        ],
+        flags: 0,
+        class: DrawClass::Opaque,
+    },
 ];
 
 /// Registers every row of [`BUILTINS`] into `reg`, in table order. When any built-in name
@@ -170,7 +266,10 @@ mod tests {
         assert_eq!(reg.id_of("raa.candy"), Some(MaterialFnId(2)));
         assert_eq!(reg.id_of("raa.plush"), Some(MaterialFnId(3)));
         assert_eq!(reg.id_of("raa.neon"), Some(MaterialFnId(4)));
-        assert_eq!(BUILTINS.len(), 4);
+        assert_eq!(reg.id_of("raa.mud"), Some(MaterialFnId(5)));
+        assert_eq!(reg.id_of("raa.snow"), Some(MaterialFnId(6)));
+        assert_eq!(reg.id_of("raa.tiles"), Some(MaterialFnId(7)));
+        assert_eq!(BUILTINS.len(), 7);
         assert_eq!(
             (BUILTINS[2].flags, BUILTINS[2].class),
             (raa_lit::FLAG_FUR, DrawClass::Fur)

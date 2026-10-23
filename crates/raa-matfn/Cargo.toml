@@ -10,3 +10,6 @@ description = "Built-in WGSL material functions and their parameter tables."
 raa-core = { path = "../raa-core" }
 raa-shader = { path = "../raa-shader" }
 raa-lit = { path = "../raa-lit" }
+
+[dev-dependencies]
+raa-ibl = { path = "../raa-ibl" }
