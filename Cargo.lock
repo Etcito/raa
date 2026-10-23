@@ -730,6 +730,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-ibl"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-lit",
+ "raa-pipeline",
+ "raa-shader",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-js"
 version = "0.1.0"
 dependencies = [
