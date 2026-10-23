@@ -43,6 +43,8 @@ struct Instance {
     mesh: MeshId,
     material: MaterialId,
     visible: bool,
+    /// Caller-defined tag reported by `build_render_list_tagged`; 0 on creation.
+    tag: u32,
 }
 
 /// A slot of the instance arena. `generation` moves on when the occupant is removed.
@@ -257,7 +259,8 @@ impl Scene {
         }
     }
 
-    /// Attaches an instance of `mesh` drawn with `material` to `node`. It is visible.
+    /// Attaches an instance of `mesh` drawn with `material` to `node`. It is visible
+    /// and its tag is 0.
     ///
     /// A stale node gives [`SceneError::StaleNode`].
     pub fn add_instance(
@@ -272,6 +275,7 @@ impl Scene {
             mesh,
             material,
             visible: true,
+            tag: 0,
         };
         let id = match self.free_instances.pop() {
             Some(index) => {
@@ -336,6 +340,19 @@ impl Scene {
         Ok(())
     }
 
+    /// Sets the tag of an instance, reported by [`Scene::build_render_list_tagged`].
+    /// A stale id gives [`SceneError::StaleInstance`].
+    pub fn set_instance_tag(&mut self, id: InstanceId, tag: u32) -> Result<(), SceneError> {
+        self.instance_mut(id)?.tag = tag;
+        Ok(())
+    }
+
+    /// The tag of an instance (0 unless set). A stale id gives
+    /// [`SceneError::StaleInstance`].
+    pub fn instance_tag(&self, id: InstanceId) -> Result<u32, SceneError> {
+        Ok(self.instance(id)?.tag)
+    }
+
     /// Number of live instances, visible or not.
     pub fn instance_count(&self) -> usize {
         self.instance_count
@@ -352,7 +369,23 @@ impl Scene {
     /// and nothing is allocated when both `out.items` and `out.batches` have room for
     /// the visible instances (for example `RenderList::with_capacity(instance_count)`).
     pub fn build_render_list(&self, out: &mut RenderList) {
+        self.fill_render_list(out, None);
+    }
+
+    /// Same as [`Scene::build_render_list`] (identical items, batches and order), and
+    /// also fills `tags` so that `tags[i]` is the tag of `out.items[i]`. `tags` is
+    /// cleared first; nothing is allocated when it has room for the visible instances.
+    pub fn build_render_list_tagged(&self, out: &mut RenderList, tags: &mut Vec<u32>) {
+        self.fill_render_list(out, Some(tags));
+    }
+
+    /// The shared body of `build_render_list` and `build_render_list_tagged`, so the
+    /// two cannot diverge.
+    fn fill_render_list(&self, out: &mut RenderList, mut tags: Option<&mut Vec<u32>>) {
         out.clear();
+        if let Some(tags) = tags.as_deref_mut() {
+            tags.clear();
+        }
         for &slot in &self.draw_order {
             let Some(inst) = self.instance_at(slot) else {
                 continue;
@@ -370,6 +403,9 @@ impl Scene {
                 material: inst.material,
                 world: node.world,
             });
+            if let Some(tags) = tags.as_deref_mut() {
+                tags.push(inst.tag);
+            }
             match out.batches.last_mut() {
                 Some(batch) if batch.mesh == inst.mesh => batch.count += 1,
                 _ => out.batches.push(Batch {
