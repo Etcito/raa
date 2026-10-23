@@ -1,6 +1,12 @@
-//! Attributed meshes for the lit renderer: S13 validation and JS array intake (S10, S13).
+//! Attributed meshes for the lit renderer: S13 validation, JS array intake, tangent
+//! generation and the S1/S10 vertex streams.
 
 use std::fmt;
+
+mod streams;
+mod tangents;
+
+pub use tangents::{default_tangent, generate_tangents};
 
 use raa_core::MaterialId;
 use raa_geom::MeshData;
@@ -93,6 +99,25 @@ impl AttributedMesh {
 
     pub fn bounds(&self) -> Aabb {
         self.base.bounds()
+    }
+
+    /// Generates tangents with [`generate_tangents`] when uvs are present and tangents
+    /// absent; otherwise leaves the mesh unchanged.
+    pub fn ensure_tangents(&mut self) {
+        if self.tangents.is_some() {
+            return;
+        }
+        if let Some(uvs) = &self.uvs {
+            let mut tangents = Vec::new();
+            generate_tangents(
+                &self.base.positions,
+                &self.base.normals,
+                uvs,
+                &self.base.indices,
+                &mut tangents,
+            );
+            self.tangents = Some(tangents);
+        }
     }
 
     /// Checks the S13 rules in a fixed order (empty, lengths, finiteness, index range,
