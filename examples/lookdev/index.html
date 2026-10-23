@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>@etcito/raa lookdev</title>
+  <style>
+    html, body { margin: 0; background: #0b0d12; color: #e6e6e6; font: 13px sans-serif; }
+    canvas { display: block; }
+    #bar { padding: 6px 8px; display: flex; gap: 8px; align-items: center; }
+    #status { opacity: 0.7; }
+    #error { margin: 0; padding: 1em; color: #ff8a80; white-space: pre-wrap; }
+    #error:empty { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="1280" height="720"></canvas>
+  <div id="bar">
+    <label for="picker">scene / variant</label>
+    <select id="picker"></select>
+    <span id="status"></span>
+  </div>
+  <pre id="error"></pre>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
