@@ -1,0 +1,14 @@
+[package]
+name = "raa-sky"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Procedural sky of the lit renderer: gradient sky, sun disc and cloud layer descriptions, presets and validation."
+
+[dependencies]
+raa-core = { workspace = true }
+wgpu = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-lit = { path = "../raa-lit" }
+raa-shader = { path = "../raa-shader" }

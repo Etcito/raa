@@ -845,6 +845,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-sky"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-lit",
+ "raa-pipeline",
+ "raa-shader",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-tonemap"
 version = "0.1.0"
 dependencies = [
