@@ -2,9 +2,11 @@
 //! [`SurfaceMaterial`] record with its 256-byte `SurfaceMaterialGpu` layout, the
 //! [`DrawClass`] a material is drawn in and the [`SurfaceLibrary`] of dense material ids.
 
+mod extras;
 mod library;
 mod material;
 
+pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 pub use library::SurfaceLibrary;
 pub use material::{
     DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
