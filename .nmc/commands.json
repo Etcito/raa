@@ -1,5 +1,5 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-m08", "command": "node scripts/lookdev-capture.mjs --milestone m08 --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
-  {"name": "proof-m8", "command": "node proofs/m8-sky-ibl.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m08"]}
+  {"name": "capture-m09", "command": "node scripts/lookdev-capture.mjs --milestone m09 --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
+  {"name": "proof-m9", "command": "node proofs/m9-shadows-ao.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m09"]}
 ]
