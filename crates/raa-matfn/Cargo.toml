@@ -1,0 +1,12 @@
+[package]
+name = "raa-matfn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Built-in WGSL material functions and their parameter tables."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-shader = { path = "../raa-shader" }
+raa-lit = { path = "../raa-lit" }

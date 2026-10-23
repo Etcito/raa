@@ -837,6 +837,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-matfn"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-lit",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-math"
 version = "0.1.0"
 
