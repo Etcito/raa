@@ -1,26 +1,27 @@
 // Lookdev scene m09-shadows-ao (chain milestone 3, R9): an obstacle-like arrangement (the
 // inflatable hammer, stacked rounded blocks forming creases and inner corners, spheres
 // resting on the floor, small 5-10 cm objects and a tall pillar in the right foreground) on
-// the candy tile floor under the m08 `day` sky, lit by a side sun about 35 deg high from the
-// right and slightly behind, so the shadows fall diagonally to the left and toward the
-// camera. On/off pairs for the cascaded sun shadows (`shadow.csm`), GTAO (`ao.gtao`) and
-// contact shadows (`shadow.contact`) (Q15), all three together, a wide penumbra and a low sun
-// with a long pillar shadow.
+// large glossy candy floor panels under the m08 `day` sky, lit by a side sun about 35 deg
+// high from the right and slightly behind, so the shadows fall to the left and a little
+// toward the camera. On/off pairs for the cascaded sun shadows (`shadow.csm`), GTAO
+// (`ao.gtao`) and contact shadows (`shadow.contact`) (Q15), all three together, a wide
+// penumbra and a low sun with a long pillar shadow.
 // Pure module (S14): no top-level side effects, node reads id/milestone/variants.
 
 // Display-referred linear background (S12), unused while the sky is on.
 const BACKGROUND = [0.3, 0.34, 0.4];
 
-// Sun travel direction at elevation `deg`, coming from 65 deg to the right of -Z (as in
-// ref-1, upper right, slightly behind): the shadows fall to the left and toward the camera,
-// long enough on screen to read (at 50 deg they ran behind the set, foreshortened).
+// Sun travel direction at elevation `deg`, coming from 80 deg to the right of -Z (as in
+// ref-1, upper right, slightly behind): the shadows fall to the left and a little toward the
+// camera, so they run across the screen at full length (at 65 deg the pillar stripe pointed
+// at the camera, foreshortened, and the judge did not see it).
 function sunDirection(deg) {
   const e = (deg * Math.PI) / 180;
-  const a = (65 * Math.PI) / 180;
+  const a = (80 * Math.PI) / 180;
   return [-Math.cos(e) * Math.sin(a), -Math.sin(e), Math.cos(e) * Math.cos(a)];
 }
 const SUN_HIGH_DEG = 35;
-// About 8 deg: the 3 m pillar casts a shadow of about 21 m, across the whole frame.
+// About 8 deg: the 2.2 m pillar casts a shadow of about 16 m, across the whole frame.
 const SUN_LOW_DEG = 8;
 // Sun strong against the sky fill (IBL diffuse 0.6 in build): with 5.5 and full sky diffuse
 // the shadowed floor was barely darker than the lit floor and the judge saw no shadows.
@@ -40,13 +41,19 @@ const DAY_SKY = {
   clouds: { coverage: 0.5, density: 2.5, scale: 1800 },
 };
 
-// Candy tile palette (linear), as m08: pink, blue, yellow, mint.
+// Candy panel palette (linear vertex colours): pink, sky blue, yellow, mint, a little lighter
+// than the m08 tiles so the sky-tinted shadows read on them (ref-1's floor panels).
 const TILE_PALETTE = [
-  [1, 0.12, 0.28],
-  [0.06, 0.32, 0.95],
-  [1, 0.78, 0.03],
-  [0.2, 0.9, 0.25],
+  [1, 0.16, 0.4],
+  [0.1, 0.42, 1],
+  [1, 0.72, 0.1],
+  [0.24, 0.85, 0.3],
 ];
+// Floor panels: PANELS x PANELS panels of PANEL_PITCH m (1.5 m, as ref-1's large panels; the
+// 0.5 m tiles' grout lines broke every shadow into small pieces).
+const PANELS = 20;
+const PANEL_PITCH = 1.5;
+const PANEL_HALF = [0.73, 0.03, 0.73];
 
 // Base feature settings of every variant; a variant's settings.shadows / ao / contact merge
 // over them. A 30 m shadow distance (default 60) keeps the cascades dense on this small set.
@@ -58,29 +65,26 @@ const CONTACT = { distance: 0.35, thickness: 0.05, intensity: 1 };
 // pitch puts the eye above the target). WIDE sees the whole set and the floor in front of it,
 // where the shadows land; CREASES looks at the stacked blocks; SMALL at the small objects.
 const CAMERAS = {
-  wide: [[0, 0.5, -0.2], 4.4, 0, 0.3],
+  wide: [[0.3, 0.45, 0.2], 4.4, 0, 0.4],
   creases: [[0.25, 0.45, -0.7], 1.7, 0.25, 0.32],
   small: [[0.05, 0.05, 1.0], 0.9, 0.1, 0.5],
 };
 
 const yawQuat = (rad) => [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)];
 
-// objects.floorTiles(n) recoloured with TILE_PALETTE (m08-sky-ibl.js candyFloor).
-function candyFloor(objects, n) {
-  const desc = objects.floorTiles(n);
-  const perTile = desc.colors.length / (4 * n * n);
-  for (let j = 0; j < n; j++) {
-    for (let i = 0; i < n; i++) {
+// The candy floor: one rounded panel mesh per palette colour, instanced on a PANELS grid
+// (top face at y 0) with a deterministic hashed colour per panel.
+function candyFloor(engine, geometry, material) {
+  const meshes = TILE_PALETTE.map((color) => upload(engine,
+    geometry.roundedBox(PANEL_HALF, 0.02, 2, { color: [...color, 1] }), [material]));
+  for (let j = 0; j < PANELS; j++) {
+    for (let i = 0; i < PANELS; i++) {
       const h = Math.imul(i * 73856093 ^ j * 19349663, 0x9e3779b1) >>> 0;
-      const base = TILE_PALETTE[(h >>> 7) % TILE_PALETTE.length];
-      const k = 0.9 + 0.1 * (((h >>> 17) & 255) / 255);
-      const first = (j * n + i) * perTile;
-      for (let v = first; v < first + perTile; v++) {
-        desc.colors.set([base[0] * k, base[1] * k, base[2] * k, 1], 4 * v);
-      }
+      const x = (i - (PANELS - 1) / 2) * PANEL_PITCH;
+      const z = (j - (PANELS - 1) / 2) * PANEL_PITCH;
+      place(engine, meshes[(h >>> 7) % meshes.length], [x, -PANEL_HALF[1], z]);
     }
   }
-  return desc;
 }
 
 // Rounded blocks (half extents m, centre, linear colour): a wide base block, a cube stacked
@@ -106,13 +110,13 @@ const SMALL = [
   { kind: 'box', s: 0.05, x: 0.3, z: 1.0, color: [0.3, 0.9, 0.35] },
   { kind: 'sphere', s: 0.05, x: 0.45, z: 1.15, color: [0.95, 0.95, 0.95] },
 ];
-// Tall pillar (0.3 x 3 x 0.3 m) in the right foreground: its 4.3 m shadow stripe runs to the
-// lower left over open floor in front of the small objects (at the back right it ran behind
-// the blocks and was hidden).
-const PILLAR = { half: [0.15, 1.5, 0.15], t: [2.6, 1.5, 0.5], color: [0.95, 0.9, 0.85] };
-// Grout slab under the tiles (top at y -0.04, inside the 6 cm tiles): fills the 2 cm gaps,
-// through which the sky showed as bright seams.
-const GROUT = { half: [16.2, 0.05, 16.2], t: [0, -0.09, 0], color: [0.3, 0.3, 0.34] };
+// Tall pillar (0.3 x 2.2 x 0.3 m) in the right foreground, fully in frame: its 3.1 m shadow
+// stripe runs to the left across the open floor in front of the small objects (at the back
+// right it ran behind the blocks, at z 0.5 with the 65 deg sun it pointed at the camera).
+const PILLAR = { half: [0.15, 1.1, 0.15], t: [1.9, 1.1, 1.6], color: [0.95, 0.9, 0.85] };
+// Grout slab under the panels (top at y -0.04, inside the 6 cm panels): fills the 4 cm gaps,
+// through which the sky showed as bright seams; pale like ref-1's panel seams.
+const GROUT = { half: [15.2, 0.05, 15.2], t: [0, -0.09, 0], color: [0.75, 0.75, 0.8] };
 const HAMMER = { t: [-1.3, 0, -0.6], r: yawQuat(0.4) };
 
 // Sets each sub-mesh material of `desc` (in order) and returns the mesh handle.
@@ -129,16 +133,16 @@ function place(engine, mesh, t, r = yawQuat(0)) {
   return engine.addMeshInstance(node, mesh);
 }
 
-const R9 = 'R9: simple untextured procedural stand-in shapes on a large floor of bright '
-  + 'candy-coloured tiles (pink, blue, yellow, green) under a blue sky with white clouds: an '
-  + 'upright striped inflatable toy hammer on the left, a wide blue rounded block with a yellow '
-  + 'cube stacked on it and a pink block against its right side, three coloured spheres '
-  + 'resting on the floor in front, a row of tiny spheres and cubes (5-10 cm) in the '
-  + 'foreground and a tall pale pillar on the right edge of the frame';
-const SHADOWS_TEXT = 'soft sun shadows fall diagonally to the left and toward the camera: '
+const R9 = 'R9: simple untextured glossy procedural stand-in shapes on a large floor of '
+  + 'bright candy-coloured square panels (pink, blue, yellow, green) under a blue sky with '
+  + 'white clouds: an upright striped inflatable toy hammer on the left, a wide blue rounded '
+  + 'block with a yellow cube stacked on it and a pink block against its right side, three '
+  + 'coloured spheres resting on the floor in front, a row of tiny spheres and cubes (5-10 '
+  + 'cm) in front of them and a tall pale grey pillar standing in the right foreground';
+const SHADOWS_TEXT = 'soft sun shadows fall to the left and a little toward the camera: '
   + 'sharp where an object touches the floor and widening into a soft penumbra with '
-  + 'distance; the pillar casts a long shadow stripe across the foreground floor toward the '
-  + 'lower left';
+  + 'distance; the pillar casts a long dark shadow stripe from its base to the left across '
+  + 'the foreground floor panels';
 const AO_TEXT = 'ambient occlusion darkens the creases between the stacked blocks, their inner '
   + 'corners and the floor around their bases and under the spheres';
 const CONTACT_TEXT = 'the tiny objects sit on the floor with small dark shadows at their base';
@@ -182,7 +186,7 @@ export default {
     {
       id: 'shadows-on',
       description: `${R9}; ${SHADOWS_TEXT}; every object, the hammer included, casts its own `
-        + 'soft shadow toward the front left.',
+        + 'soft shadow to the left.',
       references: [],
       judge: false,
     },
@@ -198,7 +202,7 @@ export default {
     {
       id: 'ao-on',
       description: `${R9.slice(0, 4)} a close view of the stacked rounded blocks (blue base, `
-        + 'yellow cube on top, pink block against its side) on the candy tile floor; '
+        + 'yellow cube on top, pink block against its side) on the candy floor panels; '
         + `${AO_TEXT}, a soft gradual darkening into the corners on top of the sun shadows.`,
       references: [],
       judge: false,
@@ -217,9 +221,9 @@ export default {
     {
       id: 'contact-on',
       description: `${R9.slice(0, 4)} a close view from above of tiny spheres and cubes (5-10 `
-        + 'cm, yellow, blue, pink, green, white) on the candy tile floor; each has a soft sun '
-        + 'shadow toward the camera and a thin dark contact shadow right where it touches the '
-        + 'floor, so it sits firmly on the tiles.',
+        + 'cm, yellow, blue, pink, green, white) on the candy floor panels; each has a soft sun '
+        + 'shadow to the left and a thin dark contact shadow right where it touches the '
+        + 'floor, so it sits firmly on the floor.',
       references: [],
       judge: false,
       settings: { camera: 'small' },
@@ -246,7 +250,7 @@ export default {
     {
       id: 'long-shadow',
       description: `${R9}, lit by a low warm sun about 8 deg above the horizon on the right: `
-        + 'very long soft shadows stretch toward the front left; the pillar shadow is a '
+        + 'very long soft shadows stretch to the left; the pillar shadow is a '
         + 'long stripe crossing the whole floor of the frame; the scene is darker and warmer.',
       references: [],
       judge: false,
@@ -272,28 +276,29 @@ export default {
     engine.setOrbit(target, distance, yaw, pitch);
 
     const { objects, geometry, pbr } = lib;
-    const tiles = pbr(engine, [1, 1, 1], { roughness: 0.55 });
+    // Glossy surfaces (ref-1's inflatables and shiny floor): the sky reflects in them.
+    const tiles = pbr(engine, [1, 1, 1], { roughness: 0.3 });
     const hammer = pbr(engine, [1, 1, 1], { roughness: 0.08 });
-    place(engine, upload(engine, candyFloor(objects, 64), [tiles]), [0, 0, 0]);
+    candyFloor(engine, geometry, tiles);
     const grout = geometry.roundedBox(GROUT.half, 0.01, 2);
     place(engine, upload(engine, grout, [pbr(engine, GROUT.color, { roughness: 0.9 })]), GROUT.t);
     place(engine, upload(engine, objects.inflatableHammer(), [hammer, hammer]), HAMMER.t, HAMMER.r);
 
     const pillar = geometry.roundedBox(PILLAR.half, 0.04, 4);
-    place(engine, upload(engine, pillar, [pbr(engine, PILLAR.color, { roughness: 0.5 })]), PILLAR.t);
+    place(engine, upload(engine, pillar, [pbr(engine, PILLAR.color, { roughness: 0.3 })]), PILLAR.t);
     for (const b of BLOCKS) {
       const desc = geometry.roundedBox(b.half, BLOCK_RADIUS, 4);
-      place(engine, upload(engine, desc, [pbr(engine, b.color, { roughness: 0.35 })]), b.t);
+      place(engine, upload(engine, desc, [pbr(engine, b.color, { roughness: 0.15 })]), b.t);
     }
     for (const s of SPHERES) {
       const desc = geometry.uvSphere(s.r, 64, 32);
-      place(engine, upload(engine, desc, [pbr(engine, s.color, { roughness: 0.25 })]), [s.x, s.r, s.z]);
+      place(engine, upload(engine, desc, [pbr(engine, s.color, { roughness: 0.12 })]), [s.x, s.r, s.z]);
     }
     for (const o of SMALL) {
       const desc = o.kind === 'sphere'
         ? geometry.uvSphere(o.s, 32, 16)
         : geometry.roundedBox([o.s, o.s, o.s], 0.008, 3);
-      place(engine, upload(engine, desc, [pbr(engine, o.color, { roughness: 0.4 })]), [o.x, o.s, o.z]);
+      place(engine, upload(engine, desc, [pbr(engine, o.color, { roughness: 0.2 })]), [o.x, o.s, o.z]);
     }
   },
 };
