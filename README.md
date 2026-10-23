@@ -13,10 +13,20 @@ Status: M6 — public API v0 frozen. Part of the Etcito open-source game stack (
 - `raa-geom`: mesh data, geometry providers, registry, and analysis.
 - `raa-js`: frozen wasm-bindgen `Engine` API.
 - `raa-loader`: prims v0 parser, loader registry, asset construction, and Boolean delegation.
+- `raa-lit`: lit renderer (prep, buffers, prepass and forward passes).
 - `raa-material`: material descriptions and shared shading code.
 - `raa-math`: engine vector, quaternion, and matrix types.
+- `raa-mesh`: attributed meshes (uv, tangent, colour) validated from JS data.
+- `raa-pipeline`: configurable pass pipeline, targets and the HDR chain.
 - `raa-prims`: the eight built-in primitive geometry providers.
 - `raa-render`: forward renderer and CPU frame preparation.
+- `raa-shader`: WGSL composer, material functions and slot providers.
+- `raa-tonemap`: exposure, AgX/ACES tone mapping and the final canvas pass.
+
+## Lookdev
+
+- `scripts/build-lookdev.sh` builds the lookdev page from the packed `@etcito/raa` package.
+- `node scripts/lookdev-capture.mjs --milestone m07` captures every scene variant of a milestone on the GPU client.
 - `raa-scene`: scene graph, camera, lights, instances, and render list.
 - `raa-web`: browser runtime, frame statistics, and JavaScript error conversion.
 - `raa-ext-test` (`tests/raa-ext-test`): integration coverage for geometry and render-pass extensions.

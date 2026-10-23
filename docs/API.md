@@ -349,3 +349,13 @@ Implement `AssetLoader` (`format`, `sniff`, `load`). `LoaderRegistry::load` asks
 let with_csg = LoadContext { geometry: &geometry, booleans: &CsgResolver, quality: Quality::LOD0, strict_kinds: true };
 let without = LoadContext { booleans: &NoBooleans, ..with_csg }; // subtract nodes now fail with boolean.unsupported
 ```
+
+## Additions after v0
+
+Everything above is API v0 and stays valid. Later additions never change it: they are documented in `docs/api/`, one file per milestone, additions only. The first file is `docs/api/m07-meshes-hdr.md` (meshes, the configurable pass pipeline, HDR tone mapping, multisampling). Matching TypeScript declarations live in `packages/raa/types/` and merge into the v0 `Engine` and `EngineOptions` interfaces.
+
+Rust extension points added after v0:
+
+- `FeaturePass` (raa-pipeline): a pass registered in the `raa.pipeline` pass list with a name, order and enable switch.
+- `ForwardContributor` (raa-lit): draws extra content inside the forward render pass, after the opaque draws.
+- Slot providers (raa-shader `SlotProvider`): supply the WGSL function for a named shader slot; the highest priority wins.

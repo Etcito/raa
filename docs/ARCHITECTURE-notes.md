@@ -30,3 +30,9 @@ Public operations return typed errors rather than silently producing invalid out
 ## JavaScript state and handles
 
 `raa-js` shares engine state between the JS-owned `Engine` and the runtime-owned app using `Rc<RefCell<Option<State>>>`. This lets both sides access the same renderer, scene, registries, and reusable frame buffers without global state. JavaScript receives monotonically increasing `u32` handles mapped to internal IDs. Removed handles are not reused, so a stale numeric handle cannot accidentally refer to a later object.
+
+## Lit data flow
+
+A JS mesh (`addMesh`) is validated by `raa-mesh` into an `AttributedMesh` (positions and normals plus a second stream with uv, tangent, colour). `LitRenderer` (raa-lit) prepares instances and materials each frame and fills its GPU buffers. The single `raa.pipeline` render pass then runs the enabled `raa.pipeline` passes in order: `prepass` (depth, normal, material targets), `forward` (4x MSAA, resolved into the HDR chain), then `tonemap` (exposure, AgX or ACES, sRGB encode when needed, dither) which writes the canvas.
+
+Background rule: with no sky contributor enabled, `tonemap` writes the display-referred background colour unchanged where depth is 1, so an empty scene equals the clear colour.
