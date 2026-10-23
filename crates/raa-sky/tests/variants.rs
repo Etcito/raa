@@ -1,5 +1,6 @@
 //! Q11: SKY_WGSL composes after the S11 prelude and helper library and passes naga validation,
-//! and every function it defines is the contract function or a `raa_sky_` helper.
+//! every function it defines is the contract function or a `raa_sky_` helper, the `sky.env` and
+//! `sky.background` modules validate, and the env cube faces follow the raa-ibl convention.
 
 use raa_shader::{Composer, LIB_WGSL, PRELUDE_WGSL};
 use raa_sky::SKY_WGSL;
@@ -46,5 +47,66 @@ fn sky_helpers_are_prefixed() {
             name == "raa_sky_radiance" || name.starts_with("raa_sky_"),
             "helper {name} is not prefixed raa_sky_"
         );
+    }
+}
+
+#[path = "../src/shaders.rs"]
+mod shaders;
+
+#[test]
+fn env_and_background_modules_validate() {
+    for (name, wgsl) in [
+        ("sky.env", shaders::env_module_wgsl()),
+        ("sky.background", shaders::background_module_wgsl()),
+    ] {
+        assert!(wgsl.contains(SKY_WGSL), "{name} does not embed SKY_WGSL");
+        assert!(
+            wgsl.starts_with(PRELUDE_WGSL),
+            "{name} does not start with the prelude"
+        );
+        if let Err(e) = Composer::validate(&wgsl) {
+            panic!("{name} shader refused: {e}");
+        }
+    }
+}
+
+#[test]
+fn env_face_directions_match_ibl_convention() {
+    let centres = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    for (face, want) in centres.iter().enumerate() {
+        let got = shaders::cube_face_direction(face as u32, 0.0, 0.0);
+        for c in 0..3 {
+            assert!(
+                (got[c] - want[c]).abs() < 1e-6,
+                "face {face} centre {got:?}, expected {want:?}"
+            );
+        }
+    }
+    // Off-centre orientation of the wgpu cube convention (raa-ibl sh.rs): on +X, u grows
+    // toward -Z and v (rows, downwards) toward -Y; on +Y, v grows toward +Z.
+    let d = shaders::cube_face_direction(0, 1.0, 1.0);
+    let s = 1.0 / 3.0f32.sqrt();
+    for (c, want) in [s, -s, -s].iter().enumerate() {
+        assert!((d[c] - want).abs() < 1e-6, "+X corner {d:?}");
+    }
+    let d = shaders::cube_face_direction(2, 0.0, 1.0);
+    assert!(d[2] > 0.7 && d[1] > 0.7, "+Y bottom edge {d:?}");
+    // Unit length everywhere on every face.
+    for face in 0..6 {
+        for (u, v) in [(-1.0, -1.0), (0.3, -0.7), (1.0, 0.5)] {
+            let d = shaders::cube_face_direction(face, u, v);
+            let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            assert!(
+                (len - 1.0).abs() < 1e-6,
+                "face {face} ({u}, {v}) length {len}"
+            );
+        }
     }
 }

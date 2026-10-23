@@ -6,6 +6,7 @@
 //! descriptions with `sky.invalid`.
 
 mod desc;
+mod shaders;
 
 pub use desc::{CloudDesc, EnvUpdate, SkyDesc};
 
