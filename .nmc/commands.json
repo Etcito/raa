@@ -1,0 +1,4 @@
+[
+  {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
+  {"name": "capture-m07", "command": "node scripts/lookdev-capture.mjs --milestone m07", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
+]
