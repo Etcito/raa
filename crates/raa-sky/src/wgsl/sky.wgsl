@@ -6,6 +6,8 @@
 // Output: scene-referred linear HDR radiance along the unit direction `dir`.
 
 const raa_sky_pi: f32 = 3.14159265;
+// Horizon bend of the cloud layer (see raa_sky_clouds).
+const raa_sky_cloud_curve: f32 = 0.4;
 
 // Henyey-Greenstein phase function (per steradian) for the cosine between view and light.
 fn raa_sky_hg(cos_theta: f32, g: f32) -> f32 {
@@ -68,10 +70,14 @@ fn raa_sky_clouds(dir: vec3<f32>, env: EnvGpu, l: vec3<f32>, sun_color: vec3<f32
     if (dir.y <= 0.01 || env.clouds.x <= 0.0 || env.clouds.y <= 0.0) {
         return vec4<f32>(0.0);
     }
-    // Ray from the origin hits the plane y = altitude.
+    // Stylised dome: the ray from the origin hits the layer at xz = dir.xz * altitude *
+    // (1 + c) / (dir.y + c), c = raa_sky_cloud_curve: the plane y = altitude at the zenith,
+    // bent down towards the horizon. A flat plane squashes features to a height/width ratio
+    // of sin(elevation) (0.17 at 10 degrees: thin streaks); the dome keeps about 0.55 there,
+    // so low clouds stay puffy.
     let altitude = max(env.clouds.z, 1.0);
     let scale = max(env.clouds.w, 1.0);
-    let hit = dir.xz * (altitude / dir.y);
+    let hit = dir.xz * (altitude * (1.0 + raa_sky_cloud_curve) / (dir.y + raa_sky_cloud_curve));
     // Wind (m/s) moves the field; the field is sampled at (xz + wind x time) / scale.
     let q = (hit + env.clouds2.xy * time) / scale;
     let rho = raa_sky_cloud_density(q, env);

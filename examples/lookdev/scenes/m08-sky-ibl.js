@@ -8,30 +8,44 @@
 // Display-referred linear background (S12), seen only when the sky passes are disabled.
 const BACKGROUND = [0.3, 0.34, 0.4];
 
-// Warm daytime sun high in the upper right of the default framing (the sky draws its disc
-// opposite the travel direction), so the disc is in frame and the objects are side-lit.
-const SUN = { direction: [-0.58, -0.43, 0.69], color: [1, 0.93, 0.82], intensity: 4 };
+// Warm daytime sun about 18 deg up in the upper right of both framings (the sky draws its
+// disc opposite the travel direction), so the disc is in frame and the objects are side-lit.
+const SUN = { direction: [-0.505, -0.303, 0.808], color: [1, 0.93, 0.82], intensity: 5 };
 // Cool dim moonlight for the night preset, same direction as the sun.
-const MOON = { direction: [-0.58, -0.43, 0.69], color: [0.6, 0.7, 1], intensity: 0.4 };
+const MOON = { direction: [-0.505, -0.303, 0.808], color: [0.6, 0.7, 1], intensity: 0.4 };
 // Flat ambient: replaced by the sky's SH ambient while the env is on, shown only when off.
 const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 
-// Orbit cameras: [target, distance m, yaw rad, pitch rad] (yaw 0 looks down -Z; a negative
-// pitch puts the eye below the target, looking slightly up).
-const WIDE = [[0, 0.9, 0], 4.6, 0, -0.08];
-// The close view looks level (60 deg vertical fov): the sun disc (about 25 deg up) and the
-// deep blue upper sky stay inside the top of the frame.
-const CLOSE = [[0, 0.45, 0], 3, 0.15, 0];
+// Overrides of the `day` preset: a saturated blue zenith (AgX desaturates bright blues), a
+// pale warm horizon and ground, a stylised sun disc (16 mrad, about 20 px across instead
+// of the 6 px of the real sun) and larger, denser cumulus.
+const DAY_SKY = {
+  zenith: [0.03, 0.17, 0.95],
+  horizon: [0.7, 0.8, 0.92],
+  ground: [0.5, 0.45, 0.4],
+  intensity: 1.6,
+  horizonSoftness: 3,
+  sunDiscSize: 0.016,
+  sunDiscIntensity: 20,
+  clouds: { coverage: 0.5, density: 1.2 },
+};
+
+// Orbit cameras: [target, distance m, yaw rad, pitch rad] (yaw 0 looks down -Z; a positive
+// pitch puts the eye above the target, looking slightly down). The eye stays about 1 m up,
+// so the horizon sits just above mid-frame: sky in the upper part, tiles in the lower part.
+const WIDE = [[0, 0.5, 0], 3.4, 0, 0.12];
+const CLOSE = [[0.1, 0.5, 0], 2.9, 0.12, 0.02];
 
 const yawQuat = (rad) => [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)];
 
-// Same placements as m07-base: back row hammer, neon, ice; front row plush, slime.
+// Back row hammer (far left, clear of the plush in both framings), neon, ice; front row
+// plush, slime.
 const PLACES = {
-  hammer: { t: [-1.15, 0, -0.45], r: yawQuat(0.35) },
-  neon: { t: [0, 0, -0.9], r: yawQuat(0) },
-  ice: { t: [1.15, 0, -0.45], r: yawQuat(-0.3) },
-  plush: { t: [-0.75, 0, 0.75], r: yawQuat(0) },
-  slime: { t: [0.75, 0, 0.75], r: yawQuat(0) },
+  hammer: { t: [-1.6, 0, -0.35], r: yawQuat(0.5) },
+  neon: { t: [0.1, 0, -0.85], r: yawQuat(0) },
+  ice: { t: [1.2, 0, -0.45], r: yawQuat(-0.4) },
+  plush: { t: [-0.4, 0, 0.55], r: yawQuat(0) },
+  slime: { t: [0.8, 0, 0.55], r: yawQuat(0) },
 };
 
 // Glossy spheres of the `glossy` variant, in front of the objects (radius 0.28 m).
@@ -56,22 +70,26 @@ function place(engine, mesh, where) {
   return engine.addMeshInstance(node, mesh);
 }
 
-const R8 = 'R8: an inflatable striped hammer, an ice block, a pink plush sphere, a glowing neon '
-  + 'tube, a green slime pool and colourful floor tiles';
+const R8 = 'R8: simple untextured procedural stand-in shapes (no fur, bloom or transparency '
+  + 'yet): an upright striped inflatable toy hammer on the left, a pink sphere standing for a '
+  + 'plush, a thin pink S-shaped neon tube, a pale blue rounded ice block, a round purple basin '
+  + 'holding a green slime surface, on a large floor of pastel tiles reaching the horizon';
 const SKY = 'a bright blue gradient sky, deep blue at the top fading to a pale warm horizon, a '
-  + 'small bright sun disc in the upper right and soft white procedural clouds';
+  + 'small bright sun disc in the upper right and soft white puffy procedural clouds';
+const MOOD = 'The reference is the target for the sky and the light mood only (bright, clear, '
+  + 'cheerful daytime), not for the modelling detail.';
 
 export default {
   id: 'm08-sky-ibl',
   milestone: 'm08',
   title: 'Procedural sky with clouds and image-based lighting from it',
-  engine: { msaa: 4, toneMapper: 'agx', exposureEv: 0 },
+  engine: { msaa: 4, toneMapper: 'agx', exposureEv: 0.3 },
   variants: [
     {
       id: 'sky-on',
-      description: `${R8} under ${SKY} filling the upper half of the frame; the objects pick up `
-        + 'soft sky-coloured ambient light (bluish from above, warm sunlit sides) and the glossy '
-        + 'hammer and ice show sky reflections; bright, cheerful daytime mood like the reference.',
+      description: `${R8}, under ${SKY} filling the upper part of the frame; the objects pick `
+        + 'up soft sky-coloured ambient light (bluish from above, warm sunlit right sides) and '
+        + `the glossy hammer and ice show soft sky highlights. ${MOOD}`,
       references: ['ref-1'],
       judge: true,
     },
@@ -86,10 +104,10 @@ export default {
     },
     {
       id: 'ibl-on',
-      description: `Closer view of ${R8.slice(4)} with ${SKY} visible behind them; the objects `
-        + 'are lit by soft sky ambient light (blue tint on upward faces, gentle soft shading '
-        + 'all around) and glossy surfaces (hammer, ice, slime) reflect the blue sky and the '
-        + 'bright horizon; bright daytime mood like the reference.',
+      description: `Closer view of ${R8.slice(4)}, with ${SKY} visible behind them; the `
+        + 'objects are lit by soft sky ambient light (blue tint on upward faces, gentle soft '
+        + 'shading all around, no black shadows) and glossy surfaces (hammer, ice, slime) show '
+        + `soft reflections of the blue sky and the bright horizon. ${MOOD}`,
       references: ['ref-1'],
       judge: true,
       settings: { camera: 'close' },
@@ -141,8 +159,12 @@ export default {
     engine.setBackground(BACKGROUND);
     engine.setLight(preset === 'night' ? MOON : SUN);
     engine.setAmbient(AMBIENT);
-    engine.setSky({ preset });
-    engine.setEnvironmentLighting({ diffuse: 1, specular: 1 });
+    engine.setSky(preset === 'day' ? { preset, ...DAY_SKY } : { preset });
+    // A softer sky irradiance keeps the object colours (the blue zenith otherwise turns the
+    // pink plush magenta); reflections stay at full strength.
+    engine.setEnvironmentLighting({ diffuse: 0.75, specular: 1 });
+    // AgX `punchy` and +0.3 EV: brighter, more saturated daylight, closer to ref-1's mood.
+    engine.setToneMapping({ look: 'punchy' });
     const [target, distance, yaw, pitch] = settings.camera === 'close' ? CLOSE : WIDE;
     engine.setOrbit(target, distance, yaw, pitch);
 
@@ -151,12 +173,12 @@ export default {
     const tiles = pbr(engine, [1, 1, 1], { roughness: 0.55 });
     const hammer = pbr(engine, [1, 1, 1], { roughness: 0.12 });
     const ice = pbr(engine, [0.78, 0.9, 0.97], { roughness: 0.08 });
-    const plush = pbr(engine, [0.86, 0.46, 0.56], { roughness: 1 });
+    const plush = pbr(engine, [1, 0.45, 0.5], { roughness: 1 });
     const neon = flat(engine, [0.02, 0.01, 0.02], { emissive: [7, 1.1, 3.6] });
     const basin = pbr(engine, [0.55, 0.36, 0.78], { roughness: 0.4 });
     const slime = pbr(engine, [0.5, 0.95, 0.22], { roughness: 0.1 });
 
-    place(engine, upload(engine, objects.floorTiles(8), [tiles]), { t: [0, 0, 0] });
+    place(engine, upload(engine, objects.floorTiles(24), [tiles]), { t: [0, 0, 0] });
     place(engine, upload(engine, objects.inflatableHammer(), [hammer, hammer]), PLACES.hammer);
     place(engine, upload(engine, objects.neonTube(), [neon]), PLACES.neon);
     place(engine, upload(engine, objects.iceBlock(), [ice]), PLACES.ice);

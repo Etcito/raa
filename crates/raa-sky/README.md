@@ -29,8 +29,9 @@ raa-ibl.
   horizon_softness > 0; sun disc radius in [0, 0.2] rad; sun disc intensity >= 0; coverage in
   [0, 1]; density >= 0; altitude > 0; scale > 0; silver lining in [0, 1].
 - `SKY_WGSL`: defines `raa_sky_radiance(dir, env, sun_dir, sun_color, time)` (gradient,
-  Henyey-Greenstein sun glow, limb-darkened sun disc, ray-plane cloud layer with domain-warped
-  fbm, 4-step Beer-powder light march, silver lining, horizon fade), shared by both passes.
+  Henyey-Greenstein sun glow, limb-darkened sun disc, cloud layer (a plane at the zenith
+  bent down towards the horizon, so low clouds stay puffy) with domain-warped fbm, 4-step
+  Beer-powder light march, silver lining, horizon fade), shared by both passes.
 
 ## Passes and contributors
 
