@@ -8,30 +8,41 @@
 // Display-referred linear background (S12), seen only when the sky passes are disabled.
 const BACKGROUND = [0.3, 0.34, 0.4];
 
-// Warm daytime sun about 17 deg up and 26 deg right of -Z (the sky draws its disc opposite
-// the travel direction): in the upper right of both framings but away from the frame edge,
-// where the perspective stretched the disc into an ellipse, and the objects are side-lit.
-const SUN = { direction: [-0.419, -0.292, 0.86], color: [1, 0.93, 0.82], intensity: 5 };
+// Warm daytime sun about 17 deg up and 18 deg right of -Z (the sky draws its disc opposite
+// the travel direction): in the upper right of both framings, near enough to the frame
+// centre that the perspective does not stretch the disc into a wide ellipse; the objects
+// are side-lit.
+const SUN = { direction: [-0.2955, -0.2924, 0.9096], color: [1, 0.93, 0.82], intensity: 5.5 };
 // Cool dim moonlight for the night preset, same direction as the sun.
-const MOON = { direction: [-0.419, -0.292, 0.86], color: [0.6, 0.7, 1], intensity: 0.4 };
+const MOON = { direction: [-0.2955, -0.2924, 0.9096], color: [0.6, 0.7, 1], intensity: 0.4 };
 // Flat ambient: replaced by the sky's SH ambient while the env is on, shown only when off.
 const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 
 // Overrides of the `day` preset: a saturated blue zenith (AgX desaturates bright blues), a
-// pale warm horizon and ground, a fast gradient (softness 5: blue down to about 10 deg,
-// then a narrow pale band at the horizon), a stylised sun disc (22 mrad, about 28 px across
-// instead of the 6 px of the real sun, so it reads as a disc inside its glow) and larger,
-// denser cumulus.
+// light blue horizon (ref-1 stays blue down to the horizon, without a white haze band), a
+// fast gradient (softness 5), a stylised sun disc (22 mrad, about 28 px across instead of
+// the 6 px of the real sun, so it reads as a disc inside its glow) and denser cumulus:
+// distinct white puffs on blue instead of a thin veil.
 const DAY_SKY = {
   zenith: [0.03, 0.17, 0.95],
-  horizon: [0.7, 0.8, 0.92],
+  horizon: [0.32, 0.55, 0.95],
   ground: [0.5, 0.45, 0.4],
   intensity: 1.6,
   horizonSoftness: 5,
   sunDiscSize: 0.022,
   sunDiscIntensity: 20,
-  clouds: { coverage: 0.5, density: 1.2 },
+  clouds: { coverage: 0.5, density: 2.5, scale: 1800 },
 };
+
+// Candy tile palette (linear): pink, blue, yellow, mint, the saturated colours of ref-1's
+// play mats. The lookdev floor's own palette is muted (cream, sage, terracotta, blue) and
+// reads as grey pastel under AgX and the blue sky ambient.
+const TILE_PALETTE = [
+  [1, 0.12, 0.28],
+  [0.06, 0.32, 0.95],
+  [1, 0.78, 0.03],
+  [0.2, 0.9, 0.25],
+];
 
 // Orbit cameras: [target, distance m, yaw rad, pitch rad] (yaw 0 looks down -Z; a positive
 // pitch puts the eye above the target, looking slightly down). The eye stays about 1 m up,
@@ -42,6 +53,26 @@ const WIDE = [[0, 0.5, 0], 3.4, 0, 0.12];
 const CLOSE = [[0.1, 0.7, 0], 3.0, 0.12, 0.05];
 
 const yawQuat = (rad) => [0, Math.sin(rad / 2), 0, Math.cos(rad / 2)];
+
+// objects.floorTiles(n) recoloured with TILE_PALETTE: every tile has the same vertex count
+// (tiles in row-major order), so each tile's run of vertex colours is replaced by one
+// palette colour picked by an integer hash of (i, j), with a small brightness variation.
+function candyFloor(objects, n) {
+  const desc = objects.floorTiles(n);
+  const perTile = desc.colors.length / (4 * n * n);
+  for (let j = 0; j < n; j++) {
+    for (let i = 0; i < n; i++) {
+      const h = Math.imul(i * 73856093 ^ j * 19349663, 0x9e3779b1) >>> 0;
+      const base = TILE_PALETTE[(h >>> 7) % TILE_PALETTE.length];
+      const k = 0.9 + 0.1 * (((h >>> 17) & 255) / 255);
+      const first = (j * n + i) * perTile;
+      for (let v = first; v < first + perTile; v++) {
+        desc.colors.set([base[0] * k, base[1] * k, base[2] * k, 1], 4 * v);
+      }
+    }
+  }
+  return desc;
+}
 
 // Back row hammer, neon, ice; front row plush, slime. The plush (0.9 m) sits left of the
 // sight lines from both eyes to the neon S and to the hammer, so neither is hidden.
@@ -78,10 +109,11 @@ function place(engine, mesh, where) {
 const R8 = 'R8: simple untextured procedural stand-in shapes (no fur, bloom or transparency '
   + 'yet): an upright striped inflatable toy hammer on the left, a pink sphere standing for a '
   + 'plush, a thin pink S-shaped neon tube, a blue rounded ice block, a round purple basin '
-  + 'holding a green slime surface, on a large floor of pastel tiles reaching the horizon';
-const SKY = 'a bright blue gradient sky, deep blue at the top fading to a pale warm horizon, a '
-  + 'small white sun disc with a bright glow in the upper right and soft white puffy '
-  + 'procedural clouds';
+  + 'holding a green slime surface, on a large floor of bright candy-coloured tiles (pink, '
+  + 'blue, yellow, green) reaching the horizon';
+const SKY = 'a bright blue gradient sky, deep blue at the top fading to a light, almost white '
+  + 'horizon, a small round white sun disc in a bright halo in the upper right and soft white '
+  + 'puffy procedural clouds';
 // R8 judges the sky and the light mood against ref-1; the objects are placeholders until the
 // material, shadow and transparency milestones, so the judge is told not to score them.
 const BASIS = 'Engine lookdev capture of the sky-and-sky-lighting milestone. Score two things: '
@@ -120,8 +152,8 @@ export default {
       id: 'ibl-on',
       description: `${BASIS}a closer view of ${R8.slice(4)}, with ${SKY} filling the upper `
         + 'half of the frame behind them; the objects are lit by soft sky ambient light (blue '
-        + 'tint on upward faces, gentle soft shading all around, no black shadows, pastel tile '
-        + 'colours); the green slime surface and the blue ice block show a faint pale sheen of '
+        + 'tint on upward faces, gentle soft shading all around, no black shadows, vivid tile '
+        + 'colours); the lime-green slime surface and the blue ice block show a pale sheen of '
         + 'the sky, and the hammer head has soft glossy highlights.',
       references: ['ref-1'],
       judge: true,
@@ -189,16 +221,17 @@ export default {
     // (a few percent at normal incidence) stand out instead of vanishing on a pale base.
     const tiles = pbr(engine, [1, 1, 1], { roughness: 0.55 });
     const hammer = pbr(engine, [1, 1, 1], { roughness: 0.08 });
-    const ice = pbr(engine, [0.35, 0.6, 0.85], { roughness: 0.03 });
-    const plush = pbr(engine, [1, 0.45, 0.5], { roughness: 1 });
+    const ice = pbr(engine, [0.2, 0.55, 0.95], { roughness: 0.03 });
+    const plush = pbr(engine, [1, 0.38, 0.62], { roughness: 1 });
     // A moderate emissive keeps the neon a saturated pink after AgX (brighter goes white).
-    const neon = flat(engine, [0.02, 0.01, 0.02], { emissive: [3.2, 0.3, 1.5] });
+    const neon = flat(engine, [0.02, 0.01, 0.02], { emissive: [2.2, 0.12, 0.8] });
     const basin = pbr(engine, [0.55, 0.36, 0.78], { roughness: 0.4 });
-    const slime = pbr(engine, [0.12, 0.6, 0.05], { roughness: 0.04 });
+    // A faint green glow keeps the slime a vivid lime under its pale sky reflection.
+    const slime = pbr(engine, [0.15, 0.85, 0.05], { roughness: 0.04, emissive: [0.05, 0.3, 0.02] });
 
     // 64 x 64 tiles (32 m): the floor reaches the horizon haze instead of ending in a band
     // of the sky's ground colour.
-    place(engine, upload(engine, objects.floorTiles(64), [tiles]), { t: [0, 0, 0] });
+    place(engine, upload(engine, candyFloor(objects, 64), [tiles]), { t: [0, 0, 0] });
     place(engine, upload(engine, objects.inflatableHammer(), [hammer, hammer]), PLACES.hammer);
     place(engine, upload(engine, objects.neonTube(), [neon]), PLACES.neon);
     place(engine, upload(engine, objects.iceBlock(), [ice]), PLACES.ice);
