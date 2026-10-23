@@ -21,10 +21,13 @@ pub use engine::Engine;
 /// The api files `src/api/*.rs`, discovered by build.rs: `install_all` and `frame_all`
 /// call each file's `install` and `frame` in file-name order. The generated code names
 /// `InstallCtx`, `EngineState`, `GpuContext`, `FrameInput` and `RaaError` unqualified;
-/// the engine task imports them here and drops the `raa_js_engine` gate once
-/// `InstallCtx` and `EngineState` exist.
-#[cfg(all(target_arch = "wasm32", raa_js_engine))]
-#[allow(dead_code)]
+/// they are imported here.
+#[cfg(target_arch = "wasm32")]
 pub(crate) mod api {
+    use crate::engine::InstallCtx;
+    use crate::state::EngineState;
+    use raa_core::{GpuContext, RaaError};
+    use raa_web::FrameInput;
+
     include!(concat!(env!("OUT_DIR"), "/api_registry.rs"));
 }

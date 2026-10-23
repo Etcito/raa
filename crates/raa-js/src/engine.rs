@@ -1,72 +1,74 @@
 //! The `Engine` exported to JS (wasm32 only): a [`WebApp`] inside a [`WebRuntime`].
 //!
-//! The engine state lives in an `Rc<RefCell<Option<State>>>` shared by [`EngineApp`] (owned
-//! by the runtime) and [`Engine`] (owned by JS). `WebRuntime::app_mut` returns
-//! `&mut dyn WebApp` with no downcast, so the JS methods reach the state through this
-//! shared cell instead. Everything is single-threaded and there is no global state.
+//! The engine state ([`EngineState`]) lives in an `Rc<RefCell<Option<EngineState>>>` shared
+//! by [`EngineApp`] (owned by the runtime) and [`Engine`] (owned by JS).
+//! `WebRuntime::app_mut` returns `&mut dyn WebApp` with no downcast, so the JS methods reach
+//! the state through this shared cell instead ([`Engine::with_state`]). Everything is
+//! single-threaded and there is no global state.
+//!
+//! Rendering goes through the lit pipeline: [`EngineApp::init`] builds the [`Pipeline`],
+//! the [`LitRenderer`] (prepass and MSAA forward) and the [`TonemapPass`], runs the api
+//! files' `install` ([`InstallCtx`]) and adds `raa.pipeline` to the frame graph. v0
+//! materials become surface materials ([`SurfaceMaterial::from_v0`]), v0 meshes attributed
+//! meshes with the S10 default attributes, and v0 instances instance groups (one scene
+//! instance per sub-mesh, tagged with the JS instance handle).
 //!
 //! Borrow rule: JS calls into the engine never re-enter (wasm-bindgen methods run to
 //! completion, and nothing here calls back into JS user code), so a `RefCell` borrow taken
 //! by a method never overlaps with the borrow `EngineApp::update` takes inside
-//! `runtime.frame`: methods drop their borrow before calling into the runtime.
+//! `runtime.frame`: methods drop their borrow before calling into the runtime. The
+//! pipeline is borrowed by `raa.pipeline` only while the frame graph executes.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint32Array};
-use raa_core::{FrameGraph, GpuContext, GpuOptions, MaterialId, MeshId, RaaError};
+use raa_core::{DeviceRequest, FrameGraph, GpuContext, GpuOptions, RaaError};
 use raa_csg::CsgResolver;
 use raa_geom::{GeometryRegistry, MeshData};
+use raa_lit::{LitOptions, LitRenderer, SurfaceMaterial};
 use raa_loader::prims::PrimsLoader;
 use raa_loader::{LoadContext, LoaderRegistry};
 use raa_material::Material;
 use raa_math::{Quat, Vec3};
-use raa_render::{Renderer, RendererOptions};
-use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene, Transform};
+use raa_mesh::AttributedMesh;
+use raa_pipeline::Pipeline;
+use raa_scene::{NodeId, OrbitController, RenderList, Scene, Transform};
+use raa_tonemap::{ToneMapping, TonemapPass};
 use raa_web::{
     FrameCounters, FrameInput, RuntimeOptions, WebApp, WebRuntime, error_to_js, stats_to_js,
 };
 use wasm_bindgen::prelude::*;
 
+use crate::api;
 use crate::convert::{
-    DISPOSED, HandleMap, INVALID_ARGUMENT, UNKNOWN_HANDLE, api_error, check_trs_len, decode_trs,
-    geom_error, js, load_error, material_error, quality, scene_error,
+    DISPOSED, EngineOptions, HandleMap, INVALID_ARGUMENT, UNKNOWN_HANDLE, api_error, check_trs_len,
+    decode_trs, geom_error, js, load_error, quality, scene_error,
 };
+use crate::feature_map::FeatureMap;
+use crate::state::{AssetEntry, EngineState, MeshEntry, MeshOrigin};
 
-/// Everything the engine owns once the GPU is up.
-struct State {
-    renderer: Renderer,
-    scene: Scene,
-    list: RenderList,
-    orbit: OrbitController,
-    /// The 8 S3 kinds; assets load with strict kinds.
-    geometry: GeometryRegistry,
-    loaders: LoaderRegistry,
-    booleans: CsgResolver,
-    /// Reused generation buffer for primitiveMesh.
-    scratch: MeshData,
-    max_materials: u32,
-    meshes: HandleMap<MeshId>,
-    materials: HandleMap<MaterialId>,
-    nodes: HandleMap<NodeId>,
-    instances: HandleMap<InstanceId>,
-    /// Asset handle to an index into `assets`.
-    asset_handles: HandleMap<u32>,
-    assets: Vec<AssetEntry>,
-    /// setTransforms copies the typed arrays here; grown only for a larger input.
-    scratch_nodes: Vec<u32>,
-    scratch_trs: Vec<f32>,
+/// WEBGPU_OPTIONAL: device features requested when the adapter has them, never required.
+const WEBGPU_OPTIONAL: wgpu::Features =
+    wgpu::Features::FLOAT32_FILTERABLE.union(wgpu::Features::RG11B10UFLOAT_RENDERABLE);
+
+/// What an api file's `install` receives at init, once the M1 passes (`prepass`,
+/// `forward`, `tonemap`) are in the pipeline and before `raa.pipeline` joins the graph.
+// The fields are read by the api files (src/api/*.rs), not by the engine itself.
+#[allow(dead_code)]
+pub(crate) struct InstallCtx<'a> {
+    pub gpu: &'a GpuContext,
+    pub surface_format: wgpu::TextureFormat,
+    pub pipeline: &'a Rc<RefCell<Pipeline>>,
+    pub lit: &'a mut LitRenderer,
+    pub features: &'a mut FeatureMap,
 }
 
-/// A loaded asset: one (mesh handle, material handle) per LoadedMesh, in mesh order.
-struct AssetEntry {
-    parts: Vec<(u32, u32)>,
-}
-
-impl State {
+/// The v0 helpers of the engine methods.
+impl EngineState {
     /// Refuses with `render.too_many_materials` when `extra` more would exceed maxMaterials.
     fn check_material_room(&self, extra: usize) -> Result<(), RaaError> {
-        let len = self.renderer.materials().len();
+        let len = self.lit.materials().len();
         if len + extra > self.max_materials as usize {
             return Err(api_error(
                 "render.too_many_materials",
@@ -79,18 +81,15 @@ impl State {
         Ok(())
     }
 
-    fn add_material(&mut self, m: Material) -> Result<u32, RaaError> {
-        let id = self
-            .renderer
-            .materials_mut()
-            .add(m)
-            .map_err(|e| material_error(&e))?;
+    /// Adds `m` as its surface material ([`SurfaceMaterial::from_v0`]).
+    fn add_material(&mut self, m: &Material) -> Result<u32, RaaError> {
+        let id = self.lit.materials_mut().add(SurfaceMaterial::from_v0(m))?;
         Ok(self.materials.insert(id))
     }
 
     /// The node behind `parent`, or None for a root.
     fn parent(&self, parent: Option<u32>) -> Result<Option<NodeId>, RaaError> {
-        parent.map(|h| self.nodes.get(h)).transpose()
+        parent.map(|h| self.node(h)).transpose()
     }
 
     fn add_node(&mut self, parent: Option<NodeId>, t: Transform) -> Result<u32, RaaError> {
@@ -101,17 +100,28 @@ impl State {
         Ok(self.nodes.insert(id))
     }
 
+    /// Uploads `scratch` as an attributed mesh (one sub-mesh, S10 default attributes) and
+    /// returns its new v0 mesh handle. The scratch buffer keeps its capacity.
+    fn upload_scratch(&mut self, gpu: &GpuContext) -> Result<u32, RaaError> {
+        let mesh = AttributedMesh::from_mesh(std::mem::take(&mut self.scratch));
+        let uploaded = self.lit.upload(gpu, &mesh);
+        self.scratch = mesh.base;
+        let lit = uploaded?;
+        Ok(self.meshes.insert(MeshEntry {
+            lit,
+            origin: MeshOrigin::V0,
+        }))
+    }
+
+    /// v0 `addInstance`: an instance group drawing every sub-mesh of `mesh` with
+    /// `material`.
     fn add_instance(&mut self, node: NodeId, mesh: u32, material: u32) -> Result<u32, RaaError> {
-        let (mesh, material) = (self.meshes.get(mesh)?, self.materials.get(material)?);
-        let id = self
-            .scene
-            .add_instance(node, mesh, material)
-            .map_err(|e| scene_error(&e))?;
-        Ok(self.instances.insert(id))
+        let (mesh, material) = (self.mesh(mesh)?, self.material(material)?);
+        self.add_instance_group(node, mesh.lit, Some(material))
     }
 }
 
-type Shared = Rc<RefCell<Option<State>>>;
+type Shared = Rc<RefCell<Option<EngineState>>>;
 
 fn js_err(e: &RaaError) -> JsValue {
     error_to_js(e)
@@ -125,13 +135,23 @@ fn invalid(message: String) -> RaaError {
     api_error(INVALID_ARGUMENT, message)
 }
 
+fn pipeline_busy() -> RaaError {
+    api_error(
+        "pipeline.busy",
+        "the pipeline is borrowed (called while a frame executes)",
+    )
+}
+
 /// The runtime's application: fills the shared state at init, prepares each frame.
 struct EngineApp {
     state: Shared,
-    opts: RendererOptions,
+    opts: EngineOptions,
 }
 
 impl WebApp for EngineApp {
+    /// Builds the pipeline with the lit renderer's passes and the tonemap pass (initial
+    /// tone mapping from the options), runs the api files' `install`, then installs
+    /// `raa.pipeline` in `graph`.
     fn init(
         &mut self,
         gpu: &GpuContext,
@@ -140,9 +160,45 @@ impl WebApp for EngineApp {
         surface_format: wgpu::TextureFormat,
         surface_is_srgb: bool,
     ) -> Result<(), RaaError> {
-        let renderer = Renderer::new(gpu, surface_format, surface_is_srgb, self.opts)?;
-        renderer.install(graph);
-        let max = self.opts.max_instances as usize;
+        let o = self.opts;
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            gpu,
+            surface_format,
+            surface_is_srgb,
+        )));
+        let mut lit = LitRenderer::new(
+            gpu,
+            &pipeline,
+            LitOptions {
+                max_instances: o.max_instances,
+                max_materials: o.max_materials,
+                msaa: o.msaa,
+            },
+        )?;
+        let (pass, tonemap) = {
+            let p = pipeline.try_borrow().map_err(|_| pipeline_busy())?;
+            TonemapPass::new(gpu, &p)
+        };
+        tonemap.set(ToneMapping {
+            mapper: o.tone_mapper,
+            exposure_ev: o.exposure_ev,
+            ..ToneMapping::default()
+        })?;
+        pipeline
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?
+            .add(Box::new(pass))?;
+        let mut features = FeatureMap::new();
+        api::install_all(&mut InstallCtx {
+            gpu,
+            surface_format,
+            pipeline: &pipeline,
+            lit: &mut lit,
+            features: &mut features,
+        })?;
+        Pipeline::install(&pipeline, graph);
+
+        let max = o.max_instances as usize;
         let mut scene = Scene::with_capacity(max, max);
         scene.camera.set_viewport(size.0, size.1);
         let orbit = OrbitController::new(Vec3::ZERO, 6.0);
@@ -152,16 +208,20 @@ impl WebApp for EngineApp {
         loaders
             .register(Box::new(PrimsLoader))
             .map_err(|e| load_error(&e))?;
-        *self.state.borrow_mut() = Some(State {
-            renderer,
+        *self.state.borrow_mut() = Some(EngineState {
             scene,
             list: RenderList::with_capacity(max),
+            tags: Vec::with_capacity(max),
             orbit,
             geometry,
             loaders,
             booleans: CsgResolver,
             scratch: MeshData::new(),
-            max_materials: self.opts.max_materials,
+            lit,
+            pipeline,
+            tonemap,
+            features,
+            max_materials: o.max_materials,
             meshes: HandleMap::new("mesh"),
             materials: HandleMap::new("material"),
             nodes: HandleMap::new("node"),
@@ -174,12 +234,18 @@ impl WebApp for EngineApp {
         Ok(())
     }
 
-    fn update(&mut self, gpu: &GpuContext, _input: &FrameInput) -> Result<FrameCounters, RaaError> {
+    /// Sets the pipeline time, runs the api files' `frame`, then prepares the lit frame.
+    fn update(&mut self, gpu: &GpuContext, input: &FrameInput) -> Result<FrameCounters, RaaError> {
         let mut guard = self.state.borrow_mut();
         let s = guard
             .as_mut()
             .ok_or_else(|| api_error(DISPOSED, "the engine was disposed"))?;
-        let c = s.renderer.prepare(gpu, &mut s.scene, &mut s.list)?;
+        s.pipeline
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?
+            .set_time(input.now_ms);
+        api::frame_all(s, gpu, input)?;
+        let c = s.lit.prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags)?;
         Ok(FrameCounters {
             instances: c.instances,
             draw_calls: c.draw_calls,
@@ -194,7 +260,7 @@ impl WebApp for EngineApp {
     }
 }
 
-/// The RAA engine: one canvas, one scene, a forward renderer.
+/// The RAA engine: one canvas, one scene, the HDR lit pipeline.
 #[wasm_bindgen(js_name = Engine)]
 pub struct Engine {
     runtime: Option<WebRuntime>,
@@ -207,9 +273,10 @@ impl Engine {
     }
 
     /// Runs `f` on the state, with the GPU context. The borrow ends before returning.
-    fn with<R>(
+    /// Used by the engine methods and the api files.
+    pub(crate) fn with_state<R>(
         &self,
-        f: impl FnOnce(&GpuContext, &mut State) -> Result<R, RaaError>,
+        f: impl FnOnce(&GpuContext, &mut EngineState) -> Result<R, RaaError>,
     ) -> Result<R, JsValue> {
         let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
         let mut guard = self.state.borrow_mut();
@@ -286,7 +353,10 @@ fn number_array(values: &[u32]) -> Array {
 impl Engine {
     /// Creates the engine on `canvas` at its current width and height. `options`:
     /// `maxInstances` (16384), `maxMaterials` (256), `powerPreference`
-    /// ('high-performance' or 'low-power').
+    /// ('high-performance' or 'low-power'), `msaa` (1 or 4, default 4), `toneMapper`
+    /// ('agx', 'aces' or 'linear', default 'agx'), `exposureEv` (finite, default 0).
+    /// The device is requested on a core adapter with the WEBGPU_OPTIONAL features the
+    /// adapter has and the adapter's limits.
     pub async fn create(
         canvas: web_sys::HtmlCanvasElement,
         options: JsValue,
@@ -295,10 +365,7 @@ impl Engine {
         let state: Shared = Rc::new(RefCell::new(None));
         let app = EngineApp {
             state: Rc::clone(&state),
-            opts: RendererOptions {
-                max_instances: o.max_instances,
-                max_materials: o.max_materials,
-            },
+            opts: o,
         };
         let opts = RuntimeOptions {
             width: canvas.width(),
@@ -309,7 +376,11 @@ impl Engine {
             },
             ..RuntimeOptions::default()
         };
-        let runtime = WebRuntime::new(canvas, Box::new(app), opts)
+        let req = DeviceRequest {
+            optional_features: WEBGPU_OPTIONAL,
+            adapter_limits: true,
+        };
+        let runtime = WebRuntime::new_with(canvas, Box::new(app), opts, &req)
             .await
             .map_err(|e| js_err(&e))?;
         Ok(Engine {
@@ -354,23 +425,22 @@ impl Engine {
     /// `model` 'flat' or 'pbr') and returns its handle.
     #[wasm_bindgen(js_name = addMaterial)]
     pub fn add_material(&mut self, desc: JsValue) -> Result<u32, JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             let m = js::material_desc(&desc)?.to_material()?;
             s.check_material_room(1)?;
-            s.add_material(m)
+            s.add_material(&m)
         })
     }
 
     /// Replaces the material behind `id`.
     #[wasm_bindgen(js_name = setMaterial)]
     pub fn set_material(&mut self, id: u32, desc: JsValue) -> Result<(), JsValue> {
-        self.with(|_, s| {
-            let target = s.materials.get(id)?;
+        self.with_state(|_, s| {
+            let target = s.material(id)?;
             let m = js::material_desc(&desc)?.to_material()?;
-            s.renderer
+            s.lit
                 .materials_mut()
-                .set(target, m)
-                .map_err(|e| material_error(&e))
+                .set(target, SurfaceMaterial::from_v0(&m))
         })
     }
 
@@ -383,23 +453,23 @@ impl Engine {
         params: JsValue,
         segments: Option<f64>,
     ) -> Result<u32, JsValue> {
-        self.with(|gpu, s| {
+        self.with_state(|gpu, s| {
             let p = js::prim_params(&kind, &params)?;
             let q = quality(segments)?;
             s.geometry
                 .generate(&kind, &p, q, &mut s.scratch)
                 .map_err(|e| geom_error(&e))?;
-            let id = s.renderer.upload_mesh(gpu, &s.scratch)?;
-            Ok(s.meshes.insert(id))
+            s.upload_scratch(gpu)
         })
     }
 
-    /// Frees a mesh; its handle is never reused.
+    /// Frees a mesh (any mesh handle: primitiveMesh, loadPrimsAsset or addMesh); its
+    /// handle is never reused.
     #[wasm_bindgen(js_name = removeMesh)]
     pub fn remove_mesh(&mut self, id: u32) -> Result<(), JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             let mesh = s.meshes.remove(id)?;
-            s.renderer.remove_mesh(mesh);
+            s.lit.remove(mesh.lit);
             Ok(())
         })
     }
@@ -408,7 +478,7 @@ impl Engine {
     /// `far` (200). The aspect follows the canvas.
     #[wasm_bindgen(js_name = setCamera)]
     pub fn set_camera(&mut self, desc: JsValue) -> Result<(), JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             let d = js::camera_desc(&desc)?;
             if !(d.fov_y_deg > 0.0 && d.fov_y_deg < 180.0) {
                 return Err(invalid(format!(
@@ -445,7 +515,7 @@ impl Engine {
         d_pitch_rad: f64,
         zoom_factor: f64,
     ) -> Result<(), JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             let d_yaw = finite("dYawRad", d_yaw_rad)?;
             let d_pitch = finite("dPitchRad", d_pitch_rad)?;
             let zoom = finite("zoomFactor", zoom_factor)?;
@@ -469,7 +539,7 @@ impl Engine {
         yaw_rad: f64,
         pitch_rad: f64,
     ) -> Result<(), JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             let target = vec3_arg("target", target)?;
             let distance = finite("distance", distance)?;
             if distance <= 0.0 {
@@ -487,7 +557,7 @@ impl Engine {
     /// Sets the directional light: `direction`, linear `color`, `intensity`.
     #[wasm_bindgen(js_name = setLight)]
     pub fn set_light(&mut self, desc: JsValue) -> Result<(), JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             s.scene.light = js::light_desc(&desc)?;
             Ok(())
         })
@@ -496,7 +566,7 @@ impl Engine {
     /// Sets the ambient term: linear `color`, `intensity`.
     #[wasm_bindgen(js_name = setAmbient)]
     pub fn set_ambient(&mut self, desc: JsValue) -> Result<(), JsValue> {
-        self.with(|_, s| {
+        self.with_state(|_, s| {
             s.scene.ambient = js::ambient_desc(&desc)?;
             Ok(())
         })
@@ -512,7 +582,7 @@ impl Engine {
         r: Option<Vec<f32>>,
         s: Option<Vec<f32>>,
     ) -> Result<u32, JsValue> {
-        self.with(|_, st| {
+        self.with_state(|_, st| {
             let parent = st.parent(parent)?;
             let local = trs_arg(t.as_deref(), r.as_deref(), s.as_deref())?;
             st.add_node(parent, local)
@@ -528,7 +598,7 @@ impl Engine {
         r: &[f32],
         s: &[f32],
     ) -> Result<(), JsValue> {
-        self.with(|_, st| {
+        self.with_state(|_, st| {
             let id = st.nodes.get(node)?;
             let local = trs_arg(Some(t), Some(r), Some(s))?;
             st.scene.set_local(id, local).map_err(|e| scene_error(&e))
@@ -544,7 +614,7 @@ impl Engine {
         nodes: &Uint32Array,
         trs: &Float32Array,
     ) -> Result<(), JsValue> {
-        self.with(|_, st| {
+        self.with_state(|_, st| {
             let (n, f) = (nodes.length() as usize, trs.length() as usize);
             check_trs_len(n, f)?;
             // Scratch buffers grow only for a larger input, so steady-state calls do not
@@ -578,38 +648,34 @@ impl Engine {
     /// `scene.stale_node` or `scene.stale_instance`.
     #[wasm_bindgen(js_name = removeNode)]
     pub fn remove_node(&mut self, node: u32) -> Result<(), JsValue> {
-        self.with(|_, st| {
+        self.with_state(|_, st| {
             let id = st.nodes.remove(node)?;
             st.scene.remove_node(id).map_err(|e| scene_error(&e))
         })
     }
 
-    /// Draws `mesh` with `material` at `node` and returns the instance handle.
+    /// Draws `mesh` with `material` at `node` and returns the instance handle (an
+    /// instance group: every sub-mesh of `mesh` drawn with `material`).
     #[wasm_bindgen(js_name = addInstance)]
     pub fn add_instance(&mut self, node: u32, mesh: u32, material: u32) -> Result<u32, JsValue> {
-        self.with(|_, st| {
-            let node = st.nodes.get(node)?;
+        self.with_state(|_, st| {
+            let node = st.node(node)?;
             st.add_instance(node, mesh, material)
         })
     }
 
-    /// Removes an instance; its handle is never reused.
+    /// Removes an instance (its whole group); its handle is never reused.
     #[wasm_bindgen(js_name = removeInstance)]
     pub fn remove_instance(&mut self, id: u32) -> Result<(), JsValue> {
-        self.with(|_, st| {
-            let inst = st.instances.remove(id)?;
-            st.scene.remove_instance(inst).map_err(|e| scene_error(&e))
-        })
+        self.with_state(|_, st| st.remove_instance_group(id))
     }
 
-    /// Shows or hides an instance.
+    /// Shows or hides an instance (its whole group).
     #[wasm_bindgen(js_name = setVisible)]
     pub fn set_visible(&mut self, id: u32, visible: bool) -> Result<(), JsValue> {
-        self.with(|_, st| {
-            let inst = st.instances.get(id)?;
-            st.scene
-                .set_instance_visible(inst, visible)
-                .map_err(|e| scene_error(&e))
+        self.with_state(|_, st| {
+            let group = st.instances.get_mut(id)?;
+            group.set_visible(&mut st.scene, visible)
         })
     }
 
@@ -624,7 +690,7 @@ impl Engine {
         json: String,
         segments: Option<f64>,
     ) -> Result<JsValue, JsValue> {
-        self.with(|gpu, st| {
+        self.with_state(|gpu, st| {
             let ctx = LoadContext {
                 geometry: &st.geometry,
                 booleans: &st.booleans,
@@ -638,7 +704,7 @@ impl Engine {
             st.check_material_room(asset.materials.len())?;
             let mut materials = Vec::with_capacity(asset.materials.len());
             for (_, m) in &asset.materials {
-                materials.push(st.add_material(*m)?);
+                materials.push(st.add_material(m)?);
             }
             let mut parts = Vec::with_capacity(asset.meshes.len());
             for loaded in &asset.meshes {
@@ -658,9 +724,9 @@ impl Engine {
                 st.scratch.clear();
                 st.scratch
                     .append_transformed(&loaded.mesh, &loaded.transform);
-                let mesh = st.renderer.upload_mesh(gpu, &st.scratch)?;
+                let mesh = st.upload_scratch(gpu)?;
                 // Invariant: `index` comes from `asset.materials`, which `materials` mirrors.
-                parts.push((st.meshes.insert(mesh), materials[index]));
+                parts.push((mesh, materials[index]));
             }
             let mesh_handles: Vec<u32> = parts.iter().map(|&(m, _)| m).collect();
             let index = st.assets.len() as u32;
@@ -688,7 +754,7 @@ impl Engine {
     /// material. Returns `{root, nodes, instances}` (all new handles).
     #[wasm_bindgen(js_name = spawnAsset)]
     pub fn spawn_asset(&mut self, asset: u32, parent: Option<u32>) -> Result<JsValue, JsValue> {
-        self.with(|_, st| {
+        self.with_state(|_, st| {
             let index = st.asset_handles.get(asset)? as usize;
             let parent = st.parent(parent)?;
             let parts = match st.assets.get(index) {
