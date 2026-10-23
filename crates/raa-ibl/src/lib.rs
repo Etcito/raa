@@ -1,11 +1,20 @@
-//! Image-based lighting from the sky cube: CPU SH9 reference, the IBL WGSL library and the
-//! `ibl` provider of the `Ambient` slot; GPU filtering and the BRDF LUT are added by later
-//! tasks.
+//! Image-based lighting derived from the sky cube (S10 group 1 bindings 3-5).
+//!
+//! [`IblFeature::install`] builds the BRDF LUT once and sets it on the pipeline's lighting,
+//! creates the filter and adds the `ibl` provider of the `Ambient` slot (priority 10) to the
+//! lit renderer. The returned [`IblHandle`] is driven by `sky.env`: `filter` records the
+//! downsample, GGX prefilter and SH9 reduction of the sky cube into the frame's encoder;
+//! `apply_pending` (every prepare) maps the coefficient readbacks of earlier frames and sets
+//! the env once they land, so the SH reaches the lighting asynchronously, at least one frame
+//! after the filter. Until then the provider falls back to the flat S1 ambient.
 
+mod feature;
 mod filter;
 mod lut;
 mod provider;
 mod sh;
+
+pub use feature::{IblFeature, IblHandle};
 
 /// IBL contract functions over the S10 group-1 environment, reused by other providers:
 /// `raa_ibl_irradiance(n) -> vec3` (SH9, cosine-convolved / pi, so a constant environment
