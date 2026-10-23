@@ -112,8 +112,8 @@ const R8 = 'R8: simple untextured procedural stand-in shapes (no fur, bloom or t
   + 'holding a green slime surface, on a large floor of bright candy-coloured tiles (pink, '
   + 'blue, yellow, green) reaching the horizon';
 const SKY = 'a bright blue gradient sky, deep blue at the top fading to a light, almost white '
-  + 'horizon, a small round white sun disc in a bright halo in the upper right and soft white '
-  + 'puffy procedural clouds';
+  + 'horizon, a small round white sun disc in the upper right and soft white puffy procedural '
+  + 'clouds';
 // R8 judges the sky and the light mood against ref-1; the objects are placeholders until the
 // material, shadow and transparency milestones, so the judge is told not to score them.
 const BASIS = 'Engine lookdev capture of the sky-and-sky-lighting milestone. Score two things: '
@@ -121,8 +121,10 @@ const BASIS = 'Engine lookdev capture of the sky-and-sky-lighting milestone. Sco
   + '(blue sky with white clouds, bright, clear, cheerful daytime light) match the reference. '
   + 'The reference is a finished illustration and is NOT the target for the objects: their '
   + 'plain modelling, the absence of characters, textures, fur, bloom, transparency, cast '
-  + 'shadows and post effects are expected at this milestone and must not lower the score. '
-  + 'Shows: ';
+  + 'shadows and post effects are expected at this milestone and must not lower the score; '
+  + 'nor must the overall plainer look (simple shading without shadows or ambient occlusion, '
+  + 'few objects, sparse detail, no lens glare or sun rays), which belongs to later '
+  + 'milestones. Shows: ';
 
 export default {
   id: 'm08-sky-ibl',
@@ -134,8 +136,7 @@ export default {
       id: 'sky-on',
       description: `${BASIS}${R8.slice(4)}, under ${SKY} filling the upper part of the `
         + 'frame; the objects pick up soft sky-coloured ambient light (bluish from above, warm '
-        + 'sunlit right sides, no black areas) and the glossy hammer and ice show soft sky '
-        + 'highlights.',
+        + 'sunlit right sides, no black areas) and the glossy hammer shows soft highlights.',
       references: ['ref-1'],
       judge: true,
     },
