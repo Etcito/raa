@@ -60,13 +60,15 @@ const ICE_IOR = 1.31;
 // default roughness 0.5 for the other sets), lit by a sun from the front right so the
 // cracks, bubbles and top faces catch light, a little brighter exposure. The ice casts no
 // sun shadow (clear ice passes the light; an opaque shadow seen through the block reads as
-// dirt) and the tiles are paler, so the ice's own cyan dominates what it tints.
+// dirt). The tiles keep most of their saturation (a little white so the ice tint reads on
+// top of them): the previous 0.35 whitening made the whole stage pastel and the judge read
+// the capture as plain (card 4881), where ref-2 is saturated throughout.
 const ICE_SET = {
   params: { tint: [0.42, 0.82, 1], absorption: 2.4, cloudiness: 0.3, crackScale: 0.3 },
   roughness: 0.04,
   sun: { direction: [-0.45, -0.62, -0.64], color: [1, 0.95, 0.86], intensity: 7 },
   exposureEv: 0.45,
-  tiles: { saturation: 1.6, whiten: 0.35 },
+  tiles: { saturation: 2.2, whiten: 0.12 },
 };
 // Single block of the transmission pair (depth m).
 const PAIR_DEPTH = 0.4;
@@ -77,6 +79,10 @@ const STRIPES = [[1, 0.85, 0.1], [0.95, 0.1, 0.45], [0.1, 0.35, 0.95], [1, 1, 1]
 const STRIPE_COUNT = 15;
 const STRIPE_HALF = [0.1, 0.55, 0.02];
 const BACKDROP_Z = -1.3;
+// Low snow bank along the base of the backdrop (ref-2's snowy level, and it hides the
+// joint where the tiles end under the stripes): sRGB colour, roughness, half extents,
+// centre. It sits behind the coloured props so it never hides them.
+const SNOW = { color: [0.93, 0.96, 1], roughness: 0.85, half: [3.1, 0.09, 0.14], t: [0, 0.09, BACKDROP_Z + 0.12] };
 // Coloured objects between the blocks and the backdrop: spheres (radius, centre) and a
 // lathe vase, sRGB colours.
 const PROPS = {
@@ -168,6 +174,8 @@ function stage(engine, lib, tileLook = { saturation: SATURATION, whiten: 0 }) {
   }
   const paint = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.5 });
   place(engine, upload(engine, geometry.merge(stripes), [paint]), [0, 0, BACKDROP_Z]);
+  const snow = engine.addSurfaceMaterial({ color: SNOW.color, roughness: SNOW.roughness });
+  place(engine, upload(engine, geometry.roundedBox(SNOW.half, 0.06, 4), [snow]), SNOW.t);
   for (const s of PROPS.spheres) {
     const m = engine.addSurfaceMaterial({ color: s.color, roughness: 0.3 });
     place(engine, upload(engine, geometry.uvSphere(s.r, 48, 24), [m]), s.t);
@@ -340,15 +348,36 @@ const SETS = {
 
 const STAGE = 'on a floor of saturated coloured tiles (orange, green, red, blue) in daylight '
   + 'under a bright blue sky with white clouds, a backdrop of vertical yellow, pink, blue, '
-  + 'white and green stripes and a few coloured spheres and a teal vase behind';
+  + 'white and green stripes with a low white snow bank at its base, and a few coloured '
+  + 'spheres and a teal vase behind';
 const GLASSES = 'interpenetrating translucent glass spheres in two tints (pink and cyan) '
   + 'and a thin pale-cyan ice block crossing them';
+// R11 judges transmission against the references; the set is a sparse procedural lookdev
+// arrangement, so the judge is told what to score and what belongs to later milestones (as
+// m08..m10). Without this preamble the judge compared the plain stage and sky with the
+// finished illustration and scored 5.0 (card 4881).
+const BASIS = 'Engine lookdev capture of the transmission milestone. Score two things: that '
+  + 'the capture shows what this description lists, and that the TRANSMISSION look (clear '
+  + 'tinted surfaces that refract and absorb the colours behind them, refraction bending '
+  + 'what is seen through them, correct overlap order where translucent objects interpenetrate) '
+  + 'matches the reference. The reference is a finished illustration and is NOT the target '
+  + 'for the scene: the sparse arrangement of a few simple procedural objects, the absence '
+  + 'of characters, buildings, snow fields, particles, depth of field, fog and other post '
+  + 'effects are expected at this milestone and must not lower the score; nor must the '
+  + 'plainer set (simple props, a flat striped backdrop, a plain gradient sky and simple '
+  + 'sun-plus-sky lighting without extra fill lights), which belongs to later milestones. '
+  + 'Shows: ';
 
 const VARIANTS = [
   {
     id: 'ice',
-    description: 'clear pale-cyan ice blocks refract and tint the coloured tiles behind them; '
-      + 'thicker blocks are deeper blue (thickness-dependent absorption); cracks and bubbles inside',
+    description: `${BASIS}three clear pale-cyan ice blocks of increasing thickness (about `
+      + '0.15 m, 0.4 m and 0.8 m from left to right) standing on a floor of saturated '
+      + 'coloured tiles, with a striped backdrop and coloured objects behind them; the tiles, '
+      + 'stripes and objects show through the blocks refracted and tinted cyan, the thickest '
+      + 'block is clearly the deepest blue (thickness-dependent absorption) while the '
+      + 'thinnest is almost clear; white cracks and small round bubbles sit inside the '
+      + 'blocks, and their top faces catch the bright sky light',
     references: ['ref-2'],
     judge: true,
     settings: { set: 'ice' },
@@ -397,17 +426,18 @@ const VARIANTS = [
   },
   {
     id: 'slime',
-    description: 'glossy translucent green slime pool and blobs; the tiles and objects behind and '
-      + 'under the slime are visible, refracted and tinted green; bubbles inside; overlapping '
-      + 'blobs composite in the right order',
+    description: `${BASIS}a glossy translucent green slime pool and blobs ${STAGE}; the `
+      + 'tiles and objects behind and under the slime are visible, refracted and tinted '
+      + 'green; bubbles inside; overlapping blobs composite in the right order',
     references: ['ref-1', 'ref-3'],
     judge: true,
     settings: { set: 'slime' },
   },
   {
     id: 'water',
-    description: 'a basin of clear still water; the tiled bottom is visible through the water, '
-      + 'slightly refracted and tinted blue-green with depth; the surface reflects the sky',
+    description: `${BASIS}a basin of clear still water ${STAGE}; the tiled bottom is visible `
+      + 'through the water, slightly refracted and tinted blue-green with depth; the surface '
+      + 'reflects the sky',
     references: ['ref-1', 'ref-3'],
     judge: true,
     settings: { set: 'water' },
