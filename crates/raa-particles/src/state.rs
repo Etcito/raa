@@ -598,6 +598,42 @@ mod tests {
         assert_eq!(t.sim_time_s(), time);
     }
 
+    /// The m13 mud set's splash crown emitter (opaque chocolate blobs, see
+    /// examples/lookdev/scenes/m13-liquids-particles.js): it spawns particles by the capture
+    /// time and carries its body opacity into the GPU record.
+    #[test]
+    fn m13_mud_crown_emitter_spawns_opaque_droplets() {
+        let mut d = EmitterDesc::for_kind(ParticleKind::Splash);
+        d.position = [-1.45 + 0.68, 0.04, -0.55];
+        d.direction = [0.45, 1.0, 0.0];
+        d.spread_rad = 0.3;
+        d.rate_per_s = 45.0;
+        d.lifetime_s = [0.25, 0.5];
+        d.speed = [1.0, 2.1];
+        d.size = [0.07, 0.13];
+        d.drag = 0.4;
+        d.colors = vec![[0.147, 0.04, 0.008]];
+        d.opacity = 1.0;
+        d.volume_half = [0.03, 0.01, 0.03];
+        d.max_particles = 64;
+        let mut t = EmitterTable::new();
+        let id = t.add(d.clone()).unwrap();
+        assert_eq!(t.advance(1.0), 60);
+        let spawned: u32 = (0..60)
+            .map(|step| t.spawn_commands()[step * MAX_EMITTERS + id as usize][1])
+            .sum();
+        assert!(spawned > 0, "the crown emitter spawned nothing");
+        assert_eq!(spawned, 45);
+        assert!(t.count() > 0);
+        assert_eq!(t.emitter_records()[id as usize].body[0], 1.0);
+        // Every droplet leaves upward and is at least 7 cm across.
+        for serial in 0..spawned {
+            let s = crate::spawn::spawn_sample(&d, serial);
+            assert!(s.velocity[1] > 0.0, "serial {serial}");
+            assert!(s.size >= 0.07, "serial {serial}");
+        }
+    }
+
     #[test]
     fn rate_of_120_over_one_second_spawns_120() {
         let mut t = EmitterTable::new();

@@ -42,6 +42,10 @@ pub struct EmitterDesc {
     pub colors: Vec<[f32; 3]>,
     /// Emissive strength added to the palette colour, `>= 0`.
     pub emissive: f32,
+    /// Body opacity of a splash droplet in `[0, 1]`: 0 is a clear water droplet (fresnel
+    /// reflection, alpha 0.65), 1 an opaque lit droplet of the palette colour (mud, paint).
+    /// Other kinds ignore it.
+    pub opacity: f32,
     /// Half extents of the spawn volume in metres, non-negative.
     pub volume_half: [f32; 3],
     /// Bounce plane height in metres; `None` disables the ground bounce.
@@ -69,6 +73,7 @@ impl EmitterDesc {
                 drag: 0.2,
                 colors: vec![[0.8, 0.9, 1.0]],
                 emissive: 0.0,
+                opacity: 0.0,
                 volume_half: [0.0; 3],
                 ground_y: None,
                 max_particles: 2048,
@@ -87,6 +92,7 @@ impl EmitterDesc {
                 drag: 2.0,
                 colors: vec![[0.95, 0.97, 1.0]],
                 emissive: 0.0,
+                opacity: 0.0,
                 volume_half: [4.0, 2.0, 4.0],
                 ground_y: None,
                 max_particles: 8192,
@@ -112,6 +118,7 @@ impl EmitterDesc {
                     [0.8, 0.0, 1.0],
                 ],
                 emissive: 0.0,
+                opacity: 0.0,
                 volume_half: [0.0; 3],
                 ground_y: None,
                 max_particles: 4096,
@@ -130,6 +137,7 @@ impl EmitterDesc {
                 drag: 0.5,
                 colors: vec![[1.0, 0.85, 0.3], [1.0, 1.0, 1.0]],
                 emissive: 8.0,
+                opacity: 0.0,
                 volume_half: [0.5, 0.5, 0.5],
                 ground_y: None,
                 max_particles: 1024,
@@ -141,8 +149,8 @@ impl EmitterDesc {
     /// Refuses with `particles.invalid`, naming the offending field. Every number must
     /// be finite; direction non-zero; spread in `[0, pi]`; rate `>= 0`; lifetime
     /// `0 < min <= max`; speed `0 <= min <= max`; size `0 < min <= max`; drag `>= 0`;
-    /// 1 to 8 colours with non-negative components; emissive `>= 0`; volume half
-    /// extents `>= 0`; `1 <= max_particles <= 65536`.
+    /// 1 to 8 colours with non-negative components; emissive `>= 0`; opacity in `[0, 1]`;
+    /// volume half extents `>= 0`; `1 <= max_particles <= 65536`.
     pub fn validate(&self) -> Result<(), RaaError> {
         for (i, v) in self.position.iter().enumerate() {
             finite(&format!("position[{i}]"), *v)?;
@@ -209,6 +217,13 @@ impl EmitterDesc {
             return Err(invalid(format!(
                 "emissive must be >= 0 (got {})",
                 self.emissive
+            )));
+        }
+        finite("opacity", self.opacity)?;
+        if !(0.0..=1.0).contains(&self.opacity) {
+            return Err(invalid(format!(
+                "opacity must be in [0, 1] (got {})",
+                self.opacity
             )));
         }
         for (i, v) in self.volume_half.iter().enumerate() {

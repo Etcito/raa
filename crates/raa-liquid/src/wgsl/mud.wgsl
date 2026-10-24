@@ -5,8 +5,9 @@
 // `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, foamWidth m)` and
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
-// The body is a rough-ish dielectric (roughness 0.35, F0 0.04) under a thin wet coat
-// (0.35 x wetness): the sky is a faint reflection on the brown, the sun a tight highlight.
+// The body is a wet dielectric (roughness 0.2, F0 0.04) under a wet coat (0.6 x wetness,
+// coat roughness 0.05): the sky is a visible reflection on the brown, the sun a tight wet
+// highlight. Card 5037 judged the rougher body (0.35, coat 0.35 x wetness) matte.
 // A mirror coat over the dark body let the blue sky radiance outweigh the brown diffuse
 // (measured on the card 4940 capture: pit HDR about (0.22, 0.12, 0.14), blue above green,
 // which AgX shows as mauve). Two noise scales mottle the brown. Slow voronoi bubbles on the
@@ -148,17 +149,17 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     o.metallic = 0.0;
     o.opacity = 1.0;
-    o.roughness = 0.35;
+    o.roughness = 0.2;
     // Wet mud is darker than dry ground but still reads brown under the clear coat; two
     // noise scales give it the mottled, grainy body of mud instead of a flat coloured
     // plane (card 5018 read the old smooth surface as a pink liquid).
     let grain = raa_fbm3(in.position * 2.4 + vec3<f32>(0.0, 0.0, 0.2 * in.time), 3);
     let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
     o.base_color = color * (1.0 - 0.15 * wetness) * (0.88 + 0.12 * grain + 0.08 * patches);
-    // A thin wet coat: its sun lobe gives the glossy highlight; its sky reflection stays a
-    // faint sheen over the brown instead of a blue wash (see the header).
-    o.clearcoat = clamp(0.35 * wetness, 0.0, 1.0);
-    o.clearcoat_roughness = 0.12;
+    // A wet coat: its sun lobe gives the glossy highlights and the sky shows as a sheen
+    // over the brown; MUD_LIGHT's low env specular keeps it from a blue wash (see header).
+    o.clearcoat = clamp(0.6 * wetness, 0.0, 1.0);
+    o.clearcoat_roughness = 0.05;
 
     o.normal = liquid_detail_normal(
         o.normal,
@@ -184,11 +185,13 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     let foam = mud_foam(in.color.a, crest, in.position, in.time, foam_width, foam_amount);
-    // Churned foam: a pale cream of the mud colour, so it reads as frothy mud at the shore
-    // and not as white paint on the surface.
-    let pale = mix(color * 2.2, vec3<f32>(0.75, 0.64, 0.5), 0.55);
-    o.base_color = mix(o.base_color, pale, foam);
-    o.roughness = mix(o.roughness, 0.85, foam);
-    o.clearcoat = o.clearcoat * (1.0 - foam);
+    // Churned mud: streaks of lighter and darker saturated brown, still wet and glossy. A
+    // pale cream foam read as a tan band around the pit and the pads (card 5037), not as
+    // churned mud; the colour stays a multiple of the mud colour so the hue never drifts.
+    let churn = raa_fbm3(in.position * vec3<f32>(9.0, 3.0, 9.0) + vec3<f32>(0.0, 0.5 * in.time, 0.0), 3);
+    let churned = color * mix(0.65, 1.45, smoothstep(-0.35, 0.35, churn));
+    o.base_color = mix(o.base_color, churned, foam);
+    o.roughness = mix(o.roughness, 0.3, foam);
+    o.clearcoat = o.clearcoat * (1.0 - 0.4 * foam);
     return o;
 }

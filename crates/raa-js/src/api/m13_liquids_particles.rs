@@ -195,6 +195,7 @@ fn emitter_desc(v: &JsValue) -> Result<EmitterDesc, RaaError> {
         d.colors = colors;
     }
     read_f32(v, "emissive", &mut d.emissive)?;
+    read_f32(v, "opacity", &mut d.opacity)?;
     read_array(v, "volume", &mut d.volume_half)?;
     if let Some(g) = get(v, "groundY")? {
         d.ground_y = Some(number("groundY", &g)?);

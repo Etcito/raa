@@ -134,7 +134,7 @@ const MUD_LIGHT = {
 function mudGround(x, z) {
   return -0.3 + 0.55 * Math.min(1, Math.max(0, (Math.hypot(x, z * 1.1) - 2.1) / 1.2));
 }
-// Lime-green inflatable pads with pink tops standing in the mud (ref-3's stepping pads):
+// Glossy lime-green inflatable pads standing in the mud (ref-3's stepping pads):
 // [x, z, radius, height above the bed]. Their tops sit 0.12..0.18 m above the mud.
 const MUD_PADS = [
   [-1.45, -0.55, 0.62, 0.46],
@@ -142,19 +142,37 @@ const MUD_PADS = [
   [1.45, 0.75, 0.56, 0.48],
   [-0.55, 1.35, 0.46, 0.44],
 ];
-const MUD_PAD_COLOR = [0.55, 0.88, 0.16];
-const MUD_PAD_TOP = [1, 0.42, 0.66];
-// Mud splash crowns at the pad bases: slow, short-lived brown droplets.
-const MUD_SPLASH = {
+const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 };
+// Mud splash crowns around each pad wall: MUD_CROWN_POINTS emitters on a ring just outside
+// the pad, each throwing opaque glossy chocolate blobs (opacity 1) up and outward. The
+// earlier single emitter spawned 3..6 cm clear water droplets inside the pad volume (the
+// splash kind's water shading ignores the palette), so no splash ever showed (card 5037).
+const MUD_CROWN_POINTS = 6;
+const MUD_CROWN = {
   kind: 'splash',
-  direction: [0, 1, 0],
-  spread: 0.7,
-  rate: 90,
-  lifetime: [0.35, 0.7],
-  speed: [0.8, 1.6],
-  size: [0.03, 0.06],
-  colors: [[0.4, 0.22, 0.1], [0.48, 0.3, 0.16]],
-  maxParticles: 512,
+  spread: 0.3,
+  rate: 45,
+  lifetime: [0.25, 0.5],
+  speed: [1.0, 2.1],
+  size: [0.07, 0.13],
+  drag: 0.4,
+  colors: [[0.42, 0.22, 0.09], [0.5, 0.28, 0.12], [0.36, 0.18, 0.07]],
+  opacity: 1,
+  volume: [0.03, 0.01, 0.03],
+  maxParticles: 64,
+};
+// A little clear white water spray between the crowns (ref-3's white splash spray).
+const MUD_SPRAY_POINTS = 2;
+const MUD_SPRAY = {
+  kind: 'splash',
+  spread: 0.4,
+  rate: 70,
+  lifetime: [0.3, 0.6],
+  speed: [1.4, 2.6],
+  size: [0.025, 0.05],
+  colors: [[0.92, 0.97, 1]],
+  volume: [0.03, 0.01, 0.03],
+  maxParticles: 64,
 };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
@@ -317,15 +335,34 @@ function buildMud(engine, lib) {
     return [0, 1, 2].map((i) => stain[i] + (grass[i] - stain[i]) * g).concat(1);
   });
   place(engine, upload(engine, rim, ground), [0, 0, 0]);
-  const padMat = engine.addSurfaceMaterial({ color: MUD_PAD_COLOR, roughness: 0.3, clearcoat: 1 });
-  const topMat = engine.addSurfaceMaterial({ color: MUD_PAD_TOP, roughness: 0.3, clearcoat: 1 });
-  MUD_PADS.forEach(([x, z, r, h], i) => {
-    const pad = geometry.lathe([[0, 0], [r, 0], [r, h * 0.8], [r * 0.88, h], [0, h]], 48);
-    place(engine, upload(engine, pad, padMat), [x, -0.3, z]);
-    const top = geometry.lathe([[r * 0.62, h + 0.004], [0, h + 0.004]], 48);
-    place(engine, upload(engine, top, topMat), [x, -0.3, z]);
-    engine.addEmitter({ ...MUD_SPLASH, position: [x, 0.02, z], volume: [r, 0, r], seed: 61 + i });
-  });
+  const padMat = engine.addSurfaceMaterial(MUD_PAD);
+  let seed = 61;
+  for (const [x, z, r, h] of MUD_PADS) {
+    // A rounded inflatable disc: straight wall, quarter-round shoulder, slightly domed top.
+    const shoulder = 0.35 * (h - 0.3);
+    const profile = [[0, 0], [r, 0], [r, h - shoulder - 0.02]];
+    for (let k = 1; k <= 6; k++) {
+      const a = (k / 6) * (Math.PI / 2);
+      profile.push([r - shoulder + shoulder * Math.cos(a), h - shoulder - 0.02 + shoulder * Math.sin(a)]);
+    }
+    profile.push([0.5 * r, h], [0, h + 0.01]);
+    place(engine, upload(engine, geometry.lathe(profile, 64), padMat), [x, -0.3, z]);
+    const ring = (count, phase, desc) => {
+      for (let k = 0; k < count; k++) {
+        const a = phase + (k / count) * Math.PI * 2;
+        const c = Math.cos(a);
+        const s = Math.sin(a);
+        engine.addEmitter({
+          ...desc,
+          position: [x + (r + 0.06) * c, 0.04, z + (r + 0.06) * s],
+          direction: [0.45 * c, 1, 0.45 * s],
+          seed: seed++,
+        });
+      }
+    };
+    ring(MUD_CROWN_POINTS, 0.3, MUD_CROWN);
+    ring(MUD_SPRAY_POINTS, 0.3 + Math.PI / MUD_CROWN_POINTS, MUD_SPRAY);
+  }
   const mud = engine.addSurfaceMaterial({ function: 'raa.liquid.mud', params: MUD });
   const mesh = upload(engine, mudMesh(geometry), mud);
   place(engine, mesh, [0, 0, 0]);
@@ -569,9 +606,10 @@ const VARIANTS = [
     id: 'mud',
     description: `${BASIS}an opaque chocolate-brown wet mud pit with a slow swell, a wet `
       + 'glossy sheen with sun highlights and a faint reflection of the sky, small popping '
-      + 'bubbles, pale churned foam along its shore and small brown mud splashes; round '
-      + 'lime-green inflatable pads with pink tops stand in the mud, and a grassy lime-green '
-      + 'bank surrounds the pit',
+      + 'bubbles, churned frothy brown mud along its shore and around the pads, and crowns '
+      + 'of rounded glossy chocolate mud splashes with a little white spray thrown up around '
+      + 'every pad; round glossy lime-green inflatable pads stand in the mud, and a grassy '
+      + 'lime-green bank surrounds the pit',
     references: ['ref-3'],
     judge: true,
     settings: { set: 'mud' },

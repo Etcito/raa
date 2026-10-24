@@ -46,6 +46,7 @@ allowed.
 | `drag` | velocity damping per second, >= 0 |
 | `colors` | 1 to 8 sRGB colours, each component in [0, 1]; converted to linear on use |
 | `emissive` | emissive strength added to the palette colour, >= 0 |
+| `opacity` | splash droplet body opacity in [0, 1]: 0 a clear water droplet, 1 an opaque lit droplet of the palette colour (mud); other kinds ignore it |
 | `volume` | half extents of the spawn volume around `position`, metres, each >= 0 |
 | `groundY` | ground plane height in metres; omitted disables the bounce (restitution 0.3) |
 | `maxParticles` | hard cap on live particles of this emitter, integer 1..65536 |
@@ -65,6 +66,7 @@ allowed.
 | `drag` | 0.2 | 2.0 | 1.5 | 0.5 |
 | `colors` | (0.8, 0.9, 1.0) | (0.95, 0.97, 1.0) | 6 saturated colours | (1, 0.85, 0.3), (1, 1, 1) |
 | `emissive` | 0 | 0 | 0 | 8 |
+| `opacity` | 0 | 0 | 0 | 0 |
 | `volume` | [0, 0, 0] | [4, 2, 4] | [0, 0, 0] | [0.5, 0.5, 0.5] |
 | `groundY` | none | none | none | none |
 | `maxParticles` | 2048 | 8192 | 4096 | 1024 |
@@ -190,7 +192,8 @@ to the normal.
 - `particles.opaque` (order 600, contributor of the forward pass): confetti and snow as lit,
   camera-facing or oriented quads with alpha-to-coverage, shaded with the installed Shadow, Ao,
   Ambient and Direct slots.
-- `particles.blend` (order 85): splash with an environment Fresnel term (premultiplied) and
+- `particles.blend` (order 85): splash with an environment Fresnel term (premultiplied; the
+  emitter `opacity` turns the clear droplet into an opaque lit droplet of its colour) and
   sparkles as additive emissive points with twinkle; it copies the HDR colour, applies a soft
   depth fade and records nothing when no splash or sparkles emitter exists.
 
@@ -201,7 +204,7 @@ Both draw passes are listed by `passes()` and toggled with `setPassEnabled`; nei
 | code | when |
 |---|---|
 | `api.invalid_argument` | malformed JS: a desc is not an object, `kind` is not one of the four names, a required field is missing, a typed array has the wrong length, `maxParticles`/`seed` is not a non-negative integer, or an impact is missing a field / has a non-finite value / there are more than 4 impacts |
-| `particles.invalid` | `EmitterDesc` range rule (finite numbers, direction non-zero, spread, rate, lifetime, speed, size, drag, palette, emissive, volume, `maxParticles`); the message names the field |
+| `particles.invalid` | `EmitterDesc` range rule (finite numbers, direction non-zero, spread, rate, lifetime, speed, size, drag, palette, emissive, opacity, volume, `maxParticles`); the message names the field |
 | `particles.capacity` | more than 64 emitters, more than 262144 particles in total, or no contiguous slot range |
 | `particles.unknown_emitter` | `setEmitter`, `removeEmitter` or `burst` with an id that does not exist |
 | `api.feature_missing` | the particle feature is not installed in this engine (never in the packaged `@etcito/raa`) |

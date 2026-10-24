@@ -402,3 +402,26 @@ fn every_number_must_be_finite() {
         );
     }
 }
+
+#[test]
+fn opacity_must_be_in_zero_to_one() {
+    let base = EmitterDesc::for_kind(ParticleKind::Splash);
+    assert_eq!(base.opacity, 0.0);
+    for opacity in [-0.01, 1.01, f32::NAN] {
+        assert_invalid(
+            &EmitterDesc {
+                opacity,
+                ..base.clone()
+            },
+            "opacity",
+        );
+    }
+    for opacity in [0.0, 0.5, 1.0] {
+        EmitterDesc {
+            opacity,
+            ..base.clone()
+        }
+        .validate()
+        .expect("opacity accepted");
+    }
+}

@@ -38,6 +38,11 @@ export interface EmitterDesc {
   colors?: Vec3[];
   /** Emissive strength added to the palette colour, >= 0. */
   emissive?: number;
+  /**
+   * Splash droplet body opacity in [0, 1]: 0 a clear water droplet, 1 an opaque lit
+   * droplet of the palette colour (mud). Other kinds ignore it.
+   */
+  opacity?: number;
   /** Half extents of the spawn volume around `position`, metres, each >= 0. */
   volume?: Vec3;
   /** Ground plane height in metres; omitted disables the bounce. */

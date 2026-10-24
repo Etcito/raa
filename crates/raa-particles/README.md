@@ -9,14 +9,14 @@ variants test.
 
 - `ParticleKind`: `Splash`, `Snow`, `Confetti`, `Sparkles`.
 - `EmitterDesc`: kind, position, direction, spread, rate, lifetime, speed, size, gravity,
-  drag, colours, emissive strength, spawn volume, ground plane, particle cap and seed.
+  drag, colours, emissive strength, splash body opacity, spawn volume, ground plane, particle cap and seed.
   - `EmitterDesc::for_kind(kind)`: per-kind defaults (gravity 9.81 except snow 1.0 and
     sparkles 0; splash default rate 0, snow/confetti/sparkles emit continuously).
   - `EmitterDesc::validate()`: refuses with `particles.invalid`, naming the offending
     field. Every number is finite; direction non-zero; spread in `[0, pi]`; rate `>= 0`;
     lifetime `0 < min <= max`; speed `0 <= min <= max`; size `0 < min <= max`; drag
-    `>= 0`; 1 to 8 colours with components `>= 0`; emissive `>= 0`; volume half extents
-    `>= 0`; `1 <= max_particles <= 65536`.
+    `>= 0`; 1 to 8 colours with components `>= 0`; emissive `>= 0`; opacity in `[0, 1]`; volume
+    half extents `>= 0`; `1 <= max_particles <= 65536`.
 - `pcg_hash(v)`, `spawn_sample(&desc, serial)` and `SpawnSample`: the seeded CPU twin of
   the simulation. A sample is a pure function of `(seed, serial)`; the spawn module
   documents the exact draw order and the WGSL mirrors it in `f32` with the same operation
@@ -64,7 +64,8 @@ A dead slot has `age >= life`. Size is in metres; rotation is a roll angle in ra
 - `particles.opaque` (contributor, order 600): confetti and snow as camera-facing or
   oriented quads with alpha-to-coverage, shaded through the installed Shadow, Ao, Ambient
   and Direct slots (the winners are snapshotted at install).
-- `particles.blend` (pass, order 85): splash with env fresnel, premultiplied, and sparkles
+- `particles.blend` (pass, order 85): splash with env fresnel, premultiplied (blended
+  from a clear water droplet to an opaque lit droplet by the emitter opacity), and sparkles
   additive emissive with a twinkle. It copies `hdr.src` to `hdr.dst`, applies a soft depth
   fade against `depth`, then swaps; without such emitters it records nothing.
 

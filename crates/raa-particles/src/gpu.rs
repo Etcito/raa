@@ -18,6 +18,7 @@
 //! | 64  | `volume_half.xyz`, `ground_y` (0 without a ground plane) |
 //! | 80  | `kind` (u32), `seed`, `has_ground` (0|1), `color_count` |
 //! | 96  | `slot_base`, `max_particles`, 0, 0 |
+//! | 112 | `opacity` (splash droplet body), 0, 0, 0 |
 //! | 128 | 8 x `vec4` linear colours (rgb, w = 1; unused entries zero) |
 //!
 //! # `StepGpu` (16 B)
@@ -60,6 +61,7 @@ pub(crate) const EMITTER_OFF_SIZE: usize = 48;
 pub(crate) const EMITTER_OFF_VOLUME: usize = 64;
 pub(crate) const EMITTER_OFF_HEADER: usize = 80;
 pub(crate) const EMITTER_OFF_ALLOC: usize = 96;
+pub(crate) const EMITTER_OFF_BODY: usize = 112;
 pub(crate) const EMITTER_OFF_COLORS: usize = 128;
 
 /// The simulation's u32 for a kind (`EmitterGpu.header.x`).
@@ -89,6 +91,8 @@ pub(crate) struct EmitterGpu {
     pub header: [u32; 4],
     /// `slot_base`, `max_particles`, 0, 0.
     pub alloc: [u32; 4],
+    /// `opacity`, 0, 0, 0.
+    pub body: [f32; 4],
     /// 8 linear colours; unused entries are zero.
     pub colors: [[f32; 4]; 8],
 }
@@ -130,6 +134,7 @@ impl EmitterGpu {
                 desc.colors.len().min(8) as u32,
             ],
             alloc: [slot_base, desc.max_particles, 0, 0],
+            body: [desc.opacity, 0.0, 0.0, 0.0],
             colors,
         }
     }
@@ -144,6 +149,7 @@ impl EmitterGpu {
         write_f32x4(&mut out[EMITTER_OFF_VOLUME..], self.volume_ground);
         write_u32x4(&mut out[EMITTER_OFF_HEADER..], self.header);
         write_u32x4(&mut out[EMITTER_OFF_ALLOC..], self.alloc);
+        write_f32x4(&mut out[EMITTER_OFF_BODY..], self.body);
         for (i, c) in self.colors.iter().enumerate() {
             write_f32x4(&mut out[EMITTER_OFF_COLORS + i * 16..], *c);
         }
@@ -282,6 +288,7 @@ mod tests {
         d.position = [1.0, 2.0, 3.0];
         d.direction = [0.0, 2.0, 0.0];
         d.emissive = 2.5;
+        d.opacity = 0.75;
         d.colors = vec![[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]];
         d.ground_y = Some(-1.5);
         d.seed = 7;
@@ -310,6 +317,8 @@ mod tests {
         assert_eq!(u32_at(&b, EMITTER_OFF_ALLOC), 12);
         assert_eq!(u32_at(&b, EMITTER_OFF_ALLOC + 4), d.max_particles);
         assert_eq!(u32_at(&b, EMITTER_OFF_ALLOC + 8), 0);
+        assert_eq!(f32_at(&b, EMITTER_OFF_BODY), 0.75);
+        assert_eq!(f32_at(&b, EMITTER_OFF_BODY + 4), 0.0);
         assert_eq!(f32_at(&b, EMITTER_OFF_COLORS), 0.1);
         assert_eq!(f32_at(&b, EMITTER_OFF_COLORS + 4), 0.2);
         assert_eq!(f32_at(&b, EMITTER_OFF_COLORS + 12), 1.0);

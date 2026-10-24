@@ -26,7 +26,8 @@ struct ParticleEmitterGpu {
     header: vec4<u32>,
     // slot base, max particles, 0, 0
     alloc: vec4<u32>,
-    reserved: vec4<u32>,
+    // opacity (splash droplet body), 0, 0, 0
+    body: vec4<f32>,
     colors: array<vec4<f32>, 8>,
 }
 
@@ -55,6 +56,8 @@ struct ParticlesBlendVaryings {
     @location(6) @interpolate(flat, either) emissive: f32,
     // Per-slot hash in [0, 1).
     @location(7) @interpolate(flat, either) hash: f32,
+    // Splash droplet body opacity in [0, 1] (EmitterDesc.opacity).
+    @location(8) @interpolate(flat, either) opacity: f32,
 }
 
 // PCG-RXS-M-XS, the hash of the simulation (sim.wgsl `pcg_hash`).
@@ -120,6 +123,7 @@ fn particles_blend_vertex(vertex: u32, slot: u32, stretch: bool) -> ParticlesBle
     out.color = particles_emitters[eid].colors[min(p.color_index, count - 1u) & 7u].rgb;
     out.emissive = particles_emitters[eid].direction_emissive.w;
     out.hash = particles_unit(particles_hash(slot));
+    out.opacity = clamp(particles_emitters[eid].body.x, 0.0, 1.0);
     return out;
 }
 
@@ -169,8 +173,11 @@ fn particles_env(dir: vec3<f32>) -> vec3<f32> {
     return select(raa_frame.ambient.rgb, env, raa_env_sh.info.w > 0.5);
 }
 
-// Water droplet: Schlick fresnel x env reflection + sun glint + a small tinted diffuse,
-// premultiplied by alpha = 0.65 x fade x disc mask, through the fog slot.
+// Splash droplet, blended by the emitter's body opacity `o`: o = 0 is a clear water droplet
+// (Schlick fresnel x env reflection + sun glint + a small tinted diffuse, alpha 0.65); o = 1
+// an opaque wet blob of the palette colour (Lambert sun + ambient + a sky-tinted diffuse,
+// under the same fresnel reflection and glint, alpha 1). Premultiplied by alpha x fade x
+// disc mask, through the fog slot.
 @fragment
 fn fs_splash(v: ParticlesBlendVaryings) -> @location(0) vec4<f32> {
     let fade = particles_soft_fade(v.clip);
@@ -188,8 +195,14 @@ fn fs_splash(v: ParticlesBlendVaryings) -> @location(0) vec4<f32> {
     let l = -raa_frame.sun_dir.xyz;
     let sun = raa_frame.sun_color.rgb;
     let glint = sun * pow(max(dot(r, l), 0.0), 256.0) * 4.0 * fresnel;
-    let diffuse = 0.08 * v.color * (raa_frame.ambient.rgb + sun * max(dot(n, l), 0.0) / 3.14159265);
-    let shaded = fresnel * particles_env(r) + glint + diffuse;
+    let lit = raa_frame.ambient.rgb + sun * max(dot(n, l), 0.0) / 3.14159265;
+    let water = fresnel * particles_env(r) + glint + 0.08 * v.color * lit;
+    // The opaque body keeps a wet skin: the env reflection at fresnel strength and a
+    // broader sun highlight on top of the lit palette colour.
+    let sky = 0.25 * particles_env(n);
+    let sheen = sun * pow(max(dot(r, l), 0.0), 48.0) * 0.6;
+    let body = v.color * (lit + sky) + fresnel * particles_env(r) + glint + sheen;
+    let shaded = mix(water, body, v.opacity);
 
     var c: ShadeCtx;
     c.position = v.world_position;
@@ -200,7 +213,7 @@ fn fs_splash(v: ParticlesBlendVaryings) -> @location(0) vec4<f32> {
     c.shadow = 1.0;
     c.f0 = vec3<f32>(PARTICLES_SPLASH_F0);
     let fogged = raa_slot_fog(shaded, v.world_position, c);
-    let alpha = PARTICLES_SPLASH_ALPHA * fade * disc;
+    let alpha = mix(PARTICLES_SPLASH_ALPHA, 1.0, v.opacity) * fade * disc;
     if (fade <= 0.0) {
         discard;
     }
