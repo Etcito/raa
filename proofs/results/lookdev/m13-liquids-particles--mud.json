@@ -1,0 +1,57 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "mud",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T20:46:11.947Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 22,
+  "triangles": 190096,
+  "firstFrameMs": 30213.59999999404,
+  "wasm": {
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--mud.png",
+  "captureSha256": "b8de398fa05ec98640ad3ca5ea32463e82e7ee4eb4b1ae5b71af5a1e44145f2f",
+  "judge": {
+    "description": "Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: an opaque chocolate-brown wet mud pit with a slow swell, a wet glossy sheen with sun highlights and a faint reflection of the sky, a few small popping bubbles, a band of white froth along its shore and around the pads, and crowns of tall glossy chocolate mud splash sheets with thin white spray droplets arcing from their tips around every pad; low, wide, round glossy lime-green inflatable disc pads with a raised rounded rim float in the mud, and a grassy lime-green bank rises around the pit. Mud is opaque, so it shows no refraction of what lies below; its swell reads as light crests and darker troughs",
+    "references": [
+      "ref-3"
+    ],
+    "minScore": 6,
+    "exit": 1,
+    "score": 4,
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--mud.png by claude-haiku-5-5 (median of [4.0, 4.0, 5.0])\nexpected: Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: an opaque chocolate-brown wet mud pit with a slow swell, a wet glossy sheen with sun highlights and a faint reflection of the sky, a few small popping bubbles, a band of white froth along its shore and around the pads, and crowns of tall glossy chocolate mud splash sheets with thin white spray droplets arcing from their tips around every pad; low, wide, round glossy lime-green inflatable disc pads with a raised rounded rim float in the mud, and a grassy lime-green bank rises around the pit. Mud is opaque, so it shows no refraction of what lies below; its swell reads as light crests and darker troughs\nseen: The capture has the mud pit, lime-green glossy disc pads with raised rims, a grey-white foam band at the shore, white spray droplets and a grassy bank. The liquid is much cruder than the reference: the mud is a flat noise-marbled texture with little visible swell or sky reflection, and the 'splash crowns' are solid stubby brown columns that read as placeholder shapes rather than glossy sheets.",
+    "at": "2026-10-24T20:46:23.317Z"
+  }
+}

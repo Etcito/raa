@@ -1,0 +1,18 @@
+[package]
+name = "raa-liquid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Animated liquid surfaces of the lit renderer: Gerstner vertex stages and the water, slime and mud material functions."
+
+[dependencies]
+raa-core = { workspace = true }
+wgpu = { workspace = true }
+raa-shader = { path = "../raa-shader" }
+raa-lit = { path = "../raa-lit" }
+raa-matfn = { path = "../raa-matfn" }
+
+[dev-dependencies]
+raa-brdf = { path = "../raa-brdf" }
+raa-transmission = { path = "../raa-transmission" }

@@ -818,6 +818,7 @@ dependencies = [
  "raa-geom",
  "raa-gtao",
  "raa-ibl",
+ "raa-liquid",
  "raa-lit",
  "raa-loader",
  "raa-material",
@@ -825,6 +826,7 @@ dependencies = [
  "raa-math",
  "raa-mesh",
  "raa-oit",
+ "raa-particles",
  "raa-pipeline",
  "raa-prims",
  "raa-render",
@@ -838,6 +840,19 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "wgpu",
+]
+
+[[package]]
+name = "raa-liquid"
+version = "0.1.0"
+dependencies = [
+ "raa-brdf",
+ "raa-core",
+ "raa-lit",
+ "raa-matfn",
+ "raa-shader",
+ "raa-transmission",
  "wgpu",
 ]
 
@@ -908,6 +923,20 @@ dependencies = [
  "raa-pipeline",
  "raa-scene",
  "raa-shader",
+ "wgpu",
+]
+
+[[package]]
+name = "raa-particles"
+version = "0.1.0"
+dependencies = [
+ "raa-brdf",
+ "raa-core",
+ "raa-lit",
+ "raa-math",
+ "raa-pipeline",
+ "raa-shader",
+ "raa-transmission",
  "wgpu",
 ]
 

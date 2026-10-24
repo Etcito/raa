@@ -1,0 +1,47 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "splash",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T20:46:28.104Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 9,
+  "triangles": 82468,
+  "firstFrameMs": 46601.09999999404,
+  "wasm": {
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--splash.png",
+  "captureSha256": "350479171233efb896e6d3c2e21cacaee991cde5d012fd63bb9df21fd98e66c4",
+  "judge": null
+}

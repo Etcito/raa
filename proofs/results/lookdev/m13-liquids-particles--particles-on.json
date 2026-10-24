@@ -1,0 +1,47 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "particles-on",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T20:47:16.675Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 1,
+  "triangles": 6912,
+  "firstFrameMs": 95082.20000001788,
+  "wasm": {
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--particles-on.png",
+  "captureSha256": "c1e9b417b85c39ee1b7d1593b51478c20786c3f5591cfe1406d76bdcadee90a6",
+  "judge": null
+}

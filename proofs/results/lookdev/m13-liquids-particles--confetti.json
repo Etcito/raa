@@ -1,0 +1,57 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "confetti",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T20:46:45.123Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 5,
+  "triangles": 16832,
+  "firstFrameMs": 63455.90000000596,
+  "wasm": {
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--confetti.png",
+  "captureSha256": "677cb8657c17c898e9f233b788e4aeba48bb86ab7677fdd5ab33b034b8d2b14a",
+  "judge": {
+    "description": "Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: two glossy pink party cannons with yellow rims standing on a floor of coloured tiles in sunny daylight under a blue sky, shooting streams of colourful paper confetti (pink, yellow, blue, green, orange, purple) up into the air; the small flakes tumble and flutter as they fall, and some lie scattered on the tiles",
+    "references": [
+      "ref-1"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": 6,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--confetti.png by claude-haiku-5-5 (median of [6.0, 6.0, 6.0])\nexpected: Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: two glossy pink party cannons with yellow rims standing on a floor of coloured tiles in sunny daylight under a blue sky, shooting streams of colourful paper confetti (pink, yellow, blue, green, orange, purple) up into the air; the small flakes tumble and flutter as they fall, and some lie scattered on the tiles\nseen: Two glossy pink cannons with yellow rims stand on a multicoloured tiled floor under a blue sky with clouds, and confetti streams rise from them in the described palette, so the core staging is present. The confetti reads as paper pieces at varied orientations, but the pieces are small and uniform, and only a few lie on the tiles, so the scattered-on-floor and tumbling/fluttering quality is weak.",
+    "at": "2026-10-24T20:46:56.622Z"
+  }
+}

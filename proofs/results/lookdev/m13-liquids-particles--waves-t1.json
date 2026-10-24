@@ -1,0 +1,47 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "waves-t1",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T15:09:24.249Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 9,
+  "triangles": 82468,
+  "firstFrameMs": 67620.69999998808,
+  "wasm": {
+    "raw": 1910071,
+    "gzip": 653470,
+    "sha256": "dac1c6c15e546175c095bf49df5b17e7f19fd1b8994b65ffb638078144213bae"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--waves-t1.png",
+  "captureSha256": "6959989aaa8cc459ab0faff625e52041e47a41593abf38d7e52c785c12d09dd2",
+  "judge": null
+}
