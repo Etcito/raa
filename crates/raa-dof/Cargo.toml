@@ -1,0 +1,13 @@
+[package]
+name = "raa-dof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Depth of field: descriptor, validation and the thin-lens circle of confusion."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
+raa-math = { path = "../raa-math" }
