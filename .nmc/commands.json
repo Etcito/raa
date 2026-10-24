@@ -1,4 +1,6 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-neon", "command": "node scripts/lookdev-capture.mjs --only '^m10-materials--(neon|bloom-on|bloom-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
+  {"name": "capture-m10", "command": "node scripts/lookdev-capture.mjs --milestone m10 --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
+  {"name": "proof-m10", "command": "node proofs/m10-materials.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m10"]},
+  {"name": "smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m10"]}
 ]
