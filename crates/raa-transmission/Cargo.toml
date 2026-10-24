@@ -1,0 +1,16 @@
+[package]
+name = "raa-transmission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Transmission and refraction of the lit renderer: Beer-Lambert absorption, the screen transmission slot and the opaque.copy pass."
+
+[dependencies]
+raa-core = { workspace = true }
+wgpu = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-lit = { path = "../raa-lit" }
+raa-shader = { path = "../raa-shader" }
+raa-ibl = { path = "../raa-ibl" }
+raa-matfn = { path = "../raa-matfn" }

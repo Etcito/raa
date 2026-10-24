@@ -968,6 +968,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-transmission"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-ibl",
+ "raa-lit",
+ "raa-matfn",
+ "raa-pipeline",
+ "raa-shader",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-web"
 version = "0.1.0"
 dependencies = [
