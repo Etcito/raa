@@ -241,7 +241,13 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     // Off-white froth speckled from white to cream, with a fine bubble-scale normal: a soft
     // mat that feathers into the mud, not a flat painted stripe.
     let speckle = 0.5 + 0.5 * raa_noise3(in.position * 17.0);
-    let froth = mix(vec3<f32>(0.78, 0.76, 0.7), vec3<f32>(0.9, 0.88, 0.84), speckle);
+    // Churned froth: cream foam cells (about 7 cm) separated by soft seams of light brown
+    // mud, so the shore reads as frothy brown mud rather than a painted white stripe.
+    let fc = in.position.xz * 14.0;
+    let cells = raa_voronoi3(vec3<f32>(fc.x, 0.25 * in.time, fc.y));
+    let seam = smoothstep(0.0, 0.3, cells.y - cells.x);
+    let cream = mix(vec3<f32>(0.8, 0.74, 0.64), vec3<f32>(0.93, 0.89, 0.82), speckle);
+    let froth = mix(mix(color * 2.4, cream, 0.35), cream, seam);
     o.base_color = mix(o.base_color, froth, foam);
     let fh0 = raa_noise3(vec3<f32>(in.position.x * 42.0, 1.3, in.position.z * 42.0));
     let fhx = raa_noise3(vec3<f32>((in.position.x + 0.008) * 42.0, 1.3, in.position.z * 42.0));

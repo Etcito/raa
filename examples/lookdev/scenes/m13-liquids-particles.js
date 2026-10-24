@@ -34,7 +34,9 @@ const CAMERAS = {
   // Mud sits close, like ref-3: the pit fills the frame and the crowns stand against the
   // far mud. 29 deg down: at 21 deg (0.36 rad) the coat's Fresnel mirrored the blue sky
   // over most of the pit and the brown read lilac (card 5070).
-  mud: [[0.1, 0.0, 0.3], 3.6, -0.3, 0.5],
+  // Card 5067: closer (3.25 m), so the pad crowns and their spray fill the frame like ref-3's
+  // foreground pads instead of standing small in the middle of a grass field.
+  mud: [[0.15, 0.0, 0.2], 3.25, -0.3, 0.5],
   snow: [[0, 0.8, -0.8], 6.0, 0.3, 0.28],
   confetti: [[0, 1.4, -0.4], 5.2, 0.15, 0.3],
   sparkles: [[0, 0.45, 0], 2.4, 0, 0.15],
@@ -146,7 +148,8 @@ const MUD = {
 // read purple. The env specular gives the wet coat a Fresnel sky sheen.
 const MUD_LIGHT = {
   sun: { ...SUN, direction: [0.6, -0.72, -0.35], color: [1, 0.88, 0.72] },
-  env: { diffuse: 0.45, specular: 0.5 },
+  // Card 5067: diffuse 0.6 lifts the shadowed mud out of black (it read as holes).
+  env: { diffuse: 0.6, specular: 0.55 },
 };
 // Smoothstep of v over [a, b].
 function smooth(a, b, v) {
@@ -207,6 +210,18 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   o.clearcoat = 0.65;
   o.clearcoat_roughness = 0.07;
   o.metallic = 0.0;
+  // Churned froth on the collar (vertex alpha = 1 - froth): cream foam cells with brown
+  // seams between them, broken up by large noise, so the pad bases read as frothy mud.
+  let cells = raa_voronoi3(vec3<f32>(p.x * 14.0, p.y * 14.0, p.z * 14.0));
+  let seam = smoothstep(0.0, 0.3, cells.y - cells.x);
+  let breakup = smoothstep(-0.4, 0.2, blotch + 0.4 * fine);
+  let froth = clamp(1.0 - in.color.a, 0.0, 1.0) * breakup;
+  let cream = vec3<f32>(0.86, 0.8, 0.7) * (0.9 + 0.1 * fine);
+  let foam = mix(mix(o.base_color * 2.4, cream, 0.35), cream, seam);
+  o.base_color = mix(o.base_color, foam, froth);
+  o.roughness = mix(o.roughness, 0.6, froth);
+  o.clearcoat = mix(o.clearcoat, 0.3, froth);
+  o.opacity = 1.0;
   return o;
 }
 `;
@@ -244,21 +259,26 @@ const MUD_CROWN = {
   roughness: 0.26,
   clearcoat: 0.55,
   clearcoatRoughness: 0.08,
-  lobes: 7, // separate tongues in a ring around every pad (6..8 per ref-3)
-  height: [0.44, 0.56, 0.5], // m above the mud at the tongue tips, cycling per lobe
-  flare: [0.24, 0.3, 0.27], // m the tip of a tongue stands out from the pad wall
+  // Card 5067: the judge still read the 7 slim tongues as weak tendrils. 8 fatter, rounded
+  // tongues per pad, a taller lumpy collar and loose rounded blobs flung from the tips
+  // (mudBlobs) read as heavy crowns of mud at capture distance.
+  lobes: 8, // separate tongues in a ring around every pad (6..8 per ref-3)
+  height: [0.4, 0.5, 0.45], // m above the mud at the tongue tips, cycling per lobe
+  flare: [0.22, 0.28, 0.25], // m the tip of a tongue stands out from the pad wall
   foot: 0.02, // m the tongue's base stands off the pad wall
   sink: 0.06, // m the tongue reaches below the mud line
-  skirt: 0.24, // m the mud collar around the pad reaches out from the wall
-  rise: 0.09, // m the mud climbs the pad wall
+  skirt: 0.3, // m the mud collar around the pad reaches out from the wall
+  rise: 0.15, // m the mud climbs the pad wall
+  lumps: 0.045, // m of lumpy relief on the collar
   // Elliptical cross-section: wide tangentially (a broad sheet) and thin radially.
-  widthBase: 0.17, // m tangential half width at the base
-  widthMid: 0.075, // m at the waist
-  widthTip: 0.09, // m at the bulbous tip
-  thickBase: 0.05, // m radial half thickness at the base
-  thickMid: 0.022, // m at the waist
-  thickTip: 0.06, // m at the bulbous tip
-  capLength: 0.07, // m the rounded tip cap reaches past the last ring
+  widthBase: 0.23, // m tangential half width at the base
+  widthMid: 0.105, // m at the waist
+  widthTip: 0.125, // m at the bulbous tip
+  thickBase: 0.075, // m radial half thickness at the base
+  thickMid: 0.04, // m at the waist
+  thickTip: 0.08, // m at the bulbous tip
+  capLength: 0.09, // m the rounded tip cap reaches past the last ring
+  blobs: [0.05, 0.038, 0.028], // m radii of the loose blobs flung beyond each tip
   segments: 20, // around one tongue
   steps: 18, // rings along one tongue
   capSteps: 5, // rounded tip cap rings
@@ -272,12 +292,15 @@ const MUD_DROPS = {
   roughness: 0.5,
   clearcoat: 0.25,
   clearcoatRoughness: 0.2,
-  emissive: [0.35, 0.35, 0.35],
-  count: 12,
+  // Bright enough to read as white spray points on the brown mud (card 5067's judge saw
+  // discrete faint particles).
+  emissive: [1.1, 1.1, 1.1],
+  count: 16,
   times: [0.02, 0.05, 0.08, 0.11, 0.15, 0.19, 0.23, 0.27],
   speed: [1.2, 2.4],
-  radius: [0.004, 0.009], // m
-  stretch: 4, // length over width along the flight
+  radius: [0.006, 0.012], // m
+  // Card 5067's software preview read 3x streaks as grains of rice: rounder droplets.
+  stretch: 2, // length over width along the flight
 };
 // Fine soft spray at the lobe tips: many small semi-transparent droplets on ballistic
 // arcs, stretched along their velocity by the particle pass, so the plume reads as fine
@@ -285,15 +308,16 @@ const MUD_DROPS = {
 const MUD_SPRAY = {
   kind: 'splash',
   spread: 0.42,
-  rate: 260,
-  lifetime: [0.12, 0.3],
+  rate: 360,
+  lifetime: [0.15, 0.4],
   speed: [1.0, 2.1],
-  size: [0.006, 0.013],
+  size: [0.012, 0.024],
   drag: 0.4,
   colors: [[0.95, 0.97, 1], [1, 1, 1]],
-  opacity: 0.6,
-  volume: [0.03, 0.01, 0.03],
-  maxParticles: 96,
+  opacity: 0.95,
+  emissive: 0.6,
+  volume: [0.05, 0.02, 0.05],
+  maxParticles: 160,
 };
 // Bubbles on the open mud: [x, z, radius m], and the ring of a popped one.
 const MUD_BUBBLES = [
@@ -689,13 +713,59 @@ function mudCrown(geometry, pad, i, t) {
     const s = j / 8;
     skirt.push([r - 0.01 + C.skirt * (1 - s), -0.03 + (C.rise + 0.03) * s ** 2.2]);
   }
-  const ring = geometry.lathe(skirt, 72);
+  // Vertex alpha = 1 - froth: the outer, low part of the collar is churned froth (read by
+  // CROWN_WGSL), fading out up the pad wall.
+  const froth = (p) => smooth(r + 0.03, r + 0.14, Math.hypot(p[0], p[2]));
+  const ring = geometry.lathe(skirt, 72, { color: (p) => [1, 1, 1, 1 - 0.9 * froth(p)] });
   const parts = [displaceY(geometry, ring, (lx, lz) => {
     const a = Math.atan2(lz, lx);
     const lift = Math.min(1, Math.max(0, (C.skirt + r - Math.hypot(lx, lz)) / C.skirt));
-    return surface(lx, lz) + 0.018 * lift * Math.sin(5 * a + phase) * Math.cos(3 * a - phase);
+    const lumps = 0.6 * Math.sin(5 * a + phase) * Math.cos(3 * a - phase) + 0.4 * Math.sin(11 * a - 2 * phase);
+    return surface(lx, lz) + C.lumps * lift * lumps;
   })];
   for (let k = 0; k < C.lobes; k++) parts.push(mudTongue(geometry, pad, i, k, t));
+  const merged = geometry.merge(parts);
+  delete merged.subMeshes;
+  return merged;
+}
+
+// Loose rounded blobs of chocolate flung beyond the tip of tongue k of pad i (pad-local XZ,
+// world Y): MUD_CROWN.blobs radii, each a little stretched along its flight, out and up of
+// the tip, so the crown reads as a splash breaking into rounded lumps (ref-3).
+function mudBlobs(geometry, [x, z, r], i, k, t) {
+  const C = MUD_CROWN;
+  const { a, h, flare } = mudLobe(i, k);
+  const y0 = mudHeight(x + (r + 0.01) * Math.cos(a), z + (r + 0.01) * Math.sin(a), t);
+  const rho0 = r + C.foot + flare + C.capLength;
+  return C.blobs.map((rad, j) => {
+    const n = 53 * i + 7 * k + j;
+    const da = a + 0.35 * (hash01(n) - 0.5);
+    const out = 0.06 + 0.07 * j + 0.03 * hash01(n + 0.4);
+    const rho = rho0 + out;
+    const y = y0 + 0.98 * h + 0.05 + 0.06 * j * (1 - 0.6 * j) + 0.04 * hash01(n + 0.8);
+    const blob = geometry.uvSphere(1, 14, 10);
+    const p = blob.positions;
+    const nr = blob.normals;
+    const [sx, sy] = [rad * 0.9, rad * 1.25];
+    for (let q = 0; q < p.length; q += 3) {
+      p[q] = rho * Math.cos(da) + p[q] * sx;
+      p[q + 1] = y + p[q + 1] * sy;
+      p[q + 2] = rho * Math.sin(da) + p[q + 2] * sx;
+      const m = [nr[q] / sx, nr[q + 1] / sy, nr[q + 2] / sx];
+      const l = Math.hypot(...m);
+      [nr[q], nr[q + 1], nr[q + 2]] = [m[0] / l, m[1] / l, m[2] / l];
+    }
+    delete blob.tangents;
+    delete blob.subMeshes;
+    return geometry.withTangents(blob);
+  });
+}
+
+// All loose blobs of pad i in one mesh (drawn without shadows: their shadow dots read as
+// black holes in the dark mud, card 5067 software preview).
+function mudCrownBlobs(geometry, pad, i, t) {
+  const parts = [];
+  for (let k = 0; k < MUD_CROWN.lobes; k++) parts.push(...mudBlobs(geometry, pad, i, k, t));
   const merged = geometry.merge(parts);
   delete merged.subMeshes;
   return merged;
@@ -891,6 +961,17 @@ function buildMud(engine, lib, settings, variant) {
     roughness: MUD_CROWN.roughness,
     clearcoat: MUD_CROWN.clearcoat,
     clearcoatRoughness: MUD_CROWN.clearcoatRoughness,
+    // The tongues' shadows on the dark mud rendered as black holes (card 5067 preview); the
+    // collar still grounds every crown on the mud.
+    castShadow: false,
+  });
+  const blobMat = engine.addSurfaceMaterial({
+    function: 'demo.crown',
+    color: MUD_CROWN.color,
+    roughness: MUD_CROWN.roughness,
+    clearcoat: MUD_CROWN.clearcoat,
+    clearcoatRoughness: MUD_CROWN.clearcoatRoughness,
+    castShadow: false,
   });
   const dropMat = engine.addSurfaceMaterial({
     color: MUD_DROPS.color,
@@ -898,11 +979,14 @@ function buildMud(engine, lib, settings, variant) {
     clearcoat: MUD_DROPS.clearcoat,
     clearcoatRoughness: MUD_DROPS.clearcoatRoughness,
     emissive: MUD_DROPS.emissive,
+    castShadow: false,
   });
   // A few popping bubbles on the open mud: dark glossy domes that follow the swell, plus
   // the ring a popped one leaves. The shader's sparse voronoi field alone was invisible at
   // capture distance (card 5078 judge).
-  const bubbleMat = engine.addSurfaceMaterial({ color: [0.24, 0.12, 0.06], roughness: 0.04, clearcoat: 1, clearcoatRoughness: 0.02 });
+  // The mud's own chocolate: the old darker domes rendered as black holes in the pit
+  // (card 5067 software preview).
+  const bubbleMat = engine.addSurfaceMaterial({ color: [0.4, 0.21, 0.12], roughness: 0.1, clearcoat: 0.9, clearcoatRoughness: 0.04 });
   for (const [bx, bz, br] of MUD_BUBBLES) {
     const y = mudHeight(bx, bz, t);
     place(engine, upload(engine, geometry.uvSphere(1, 32, 16), bubbleMat), [bx, y - 0.005, bz], [br, br * 0.38, br]);
@@ -917,6 +1001,7 @@ function buildMud(engine, lib, settings, variant) {
     const pose = mudPadPose([x, z, r], t);
     place(engine, upload(engine, mudPad(geometry, [x, z, r, h], pose, t), padMat), [x, pose.base, z], [1, 1, 1], pose.q);
     place(engine, upload(engine, mudCrown(geometry, [x, z, r], i, t), crownMat), [x, 0, z]);
+    place(engine, upload(engine, mudCrownBlobs(geometry, [x, z, r], i, t), blobMat), [x, 0, z]);
     place(engine, upload(engine, mudSprayArcs(geometry, [x, z, r], i, t), dropMat), [x, 0, z]);
   });
   for (const e of mudEmitters(t)) engine.addEmitter(e);

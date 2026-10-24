@@ -223,7 +223,7 @@ test('mud bank is a grass material over a ridge around the pit', async () => {
 test('mud spray is many small thin white streaks, not broad blobs', () => {
   const D = mudSet.drops;
   assert.ok(D.count >= 8, `drops per tongue ${D.count}`);
-  assert.ok(D.stretch >= 3, `stretch ${D.stretch}`);
+  assert.ok(D.stretch >= 2, `stretch ${D.stretch}`);
   assert.ok(D.radius[1] <= 0.012, `radius ${D.radius}`);
   assert.ok(Math.min(...D.color) > 0.9 && Math.min(...D.emissive) > 0.2);
 });
@@ -275,7 +275,8 @@ test('mud set adds a few glossy bubbles on the open mud', async () => {
     }
   }
   assert.ok(Math.hypot(ring.x, ring.z) < 2.2, 'pop ring inside the pit');
-  // The bubble material is a dark mirror coat, not another mud surface.
-  const bubble = rec.materials.find((m) => m.roughness === 0.04 && m.clearcoat === 1);
-  assert.ok(bubble && bubble.color[0] < 0.3, 'bubble material');
+  // The bubble material is a glossy chocolate coat (the old near-black one rendered as
+  // holes in the pit, card 5067).
+  const bubble = rec.materials.find((m) => !m.function && m.roughness <= 0.1 && m.clearcoat >= 0.8);
+  assert.ok(bubble && bubble.color[0] > bubble.color[1] && bubble.color[0] < 0.5, 'bubble material');
 });
