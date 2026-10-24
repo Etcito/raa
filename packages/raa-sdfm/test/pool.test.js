@@ -26,7 +26,7 @@ function doc(name, extra = {}) {
 
 /**
  * In-process Worker: runs worker.js's handler with the fake MAMA. A document whose `crash` key is
- * set makes the worker fire an `error` event (an uncaught exception) instead of answering.
+ * set makes the worker fire an `error` event (an uncaught exception) at once instead of answering.
  */
 class FakeWorker extends EventTarget {
   constructor(url, { delayMs = 0 } = {}) {
@@ -50,6 +50,7 @@ class FakeWorker extends EventTarget {
   postMessage(message) {
     const data = structuredClone(message);
     this.received.push(data);
+    // A crash fires at once, so requests already queued with a delay are still pending then.
     setTimeout(() => {
       if (this.terminated) return;
       if (data.type === 'mesh' && data.document.crash) {
@@ -59,7 +60,7 @@ class FakeWorker extends EventTarget {
         return;
       }
       this.handle(data);
-    }, data.type === 'mesh' ? this.delayMs : 0);
+    }, data.type === 'mesh' && !data.document.crash ? this.delayMs : 0);
   }
 
   terminate() {
