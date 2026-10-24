@@ -510,6 +510,20 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let STREAK_GAIN = 0.35;
   // Fresnel rim: the lacquer turns mirror-like at grazing angles towards the horizon.
   let RIM_GAIN = 2.5;
+  // Card 4822 (judge: "weak floor reflections, no real specular detail or chroma depth"; the
+  // deck away from the tubes was a flat navy, sRGB about 20..35, 1, 120..135): a wide coloured
+  // sheen of every tube (a 1 rad lobe, blurred with the distance as deck_specular) spreads the
+  // tube colours over the whole wet deck, weighted by a wet-lacquer reflectance (WET_F0 at
+  // normal incidence instead of the dry coat's 4 %), and the panel lips catch it as sharp
+  // coloured glints along the seams. A 0.5 rad lobe only brightened the deck under the tubes
+  // (CPU estimate: 1/40 of the centre on the sides); at 1 rad the sides get about 1/5 of it,
+  // so the gains add ~0.06 linear of tube colour on the sides and ~0.2 at the centre.
+  var refl_sheen = vec3<f32>(0.0);
+  let SHEEN_SIGMA = 1.0;
+  let SHEEN_STRETCH = 1.5;
+  let SHEEN_GAIN = 0.17;
+  let WET_F0 = 0.25;
+  let SEAM_GLINT_GAIN = 0.2;
 DECK_LIGHTS
   let ndv = clamp(dot(n, v), 0.0, 1.0);
   let fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
@@ -518,8 +532,10 @@ DECK_LIGHTS
   let sky = sky_night(rd, 0.0) * in.record.p[3].x * o.clearcoat * (1.0 + RIM_GAIN * rim_f);
   let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w + refl_streak * STREAK_GAIN) * in.record.p[3].y + sky) * fres * polish
     + refl_streak * STREAK_GAIN * 0.25 * o.clearcoat * (1.0 - ndv) * polish;
-  let glint = pool * gain * in.record.p[4].x * rim;
-  o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam) * groove) * top + glint;
+  let wet = WET_F0 + (1.0 - WET_F0) * pow(1.0 - ndv, 5.0);
+  let sheen = refl_sheen * SHEEN_GAIN * wet * o.clearcoat * polish;
+  let glint = (pool * gain * in.record.p[4].x + refl_sheen * SEAM_GLINT_GAIN) * rim;
+  o.emissive = o.emissive + (pool * gain * o.base_color + (refl + sheen) * (1.0 - seam) * groove) * top + glint;
   return o;
 }
 `;
@@ -660,29 +676,54 @@ function thicken(desc, dr) {
 }
 
 const srgbToLinear = (c) => c.map((x) => (x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
-const wgslVec = (v) => `vec3<f32>(${v.map((x) => x.toFixed(4)).join(', ')})`;
 
-// demo.neon-deck source with one diffuse and two reflection lines per tube segment. A tube
-// is { points (world centreline), color (sRGB) }; its radiance is the raa.neon emissive
-// averaged over the tube's profile.
+// demo.neon-deck source: the tube segments and colours as private arrays, walked by one loop
+// (DECK_LIGHTS) with a diffuse and four reflection terms per segment. A tube is { points
+// (world centreline), color (sRGB) }; its radiance is the raa.neon emissive averaged over the
+// tube's profile. One baked line per term and segment made the source 65 KB, at the 64 KiB
+// limit of a user material function (card 4822): no further deck term would register.
 function deckWgsl(tubes) {
-  const lines = [];
-  for (const { points, color } of tubes) {
+  const f = (x) => (Math.abs(x) < 5e-5 ? '0' : x.toFixed(4).replace(/0+$/, '').replace(/\.$/, ''));
+  const v3 = (v) => `vec3f(${v.map(f).join(', ')})`;
+  const a = [];
+  const b = [];
+  const radiance = [];
+  const body = [];
+  const core = [];
+  tubes.forEach(({ points, color }, k) => {
     const lin = srgbToLinear(color);
-    const radiance = wgslVec(lin.map((x) => x * NEON_TUBE.strength * NEON_PROFILE_MEAN));
+    radiance.push(v3(lin.map((x) => x * NEON_TUBE.strength * NEON_PROFILE_MEAN)));
     // raa.neon's gas body and hot core (mix(color, 1, 0.35) x 4 x coreWhiteness) radiance.
-    const body = wgslVec(lin.map((x) => x * NEON_TUBE.strength));
-    const core = wgslVec(lin.map((x) => (x * 0.65 + 0.35) * 4 * NEON_TUBE.coreWhiteness * NEON_TUBE.strength));
+    body.push(v3(lin.map((x) => x * NEON_TUBE.strength)));
+    core.push(v3(lin.map((x) => (x * 0.65 + 0.35) * 4 * NEON_TUBE.coreWhiteness * NEON_TUBE.strength)));
     for (let i = 0; i + 1 < points.length; i++) {
-      const ab = `${wgslVec(points[i])}, ${wgslVec(points[i + 1])}, ${TUBE_R}`;
-      lines.push(`  pool += ${radiance} * deck_diffuse(p, n, ${ab});`);
-      lines.push(`  m = deck_mirror(p, rm, ${ab}, mirror_aa);`);
-      lines.push(`  refl_sharp += ${body} * m.x + ${core} * m.y;`);
-      lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad, stretch);`);
-      lines.push(`  refl_streak += ${body} * deck_specular(p, rd, ${ab}, STREAK_SIGMA, STREAK_STRETCH);`);
+      a.push(`vec4f(${points[i].map(f).join(', ')}, ${k})`);
+      b.push(v3(points[i + 1]));
     }
-  }
-  return SKY_WGSL + DECK_WGSL.replace('DECK_LIGHTS', lines.join('\n'));
+  });
+  const arr = (name, type, items) => `var<private> ${name}: array<${type}, ${items.length}> = array<${type}, ${items.length}>(\n  ${items.join(',\n  ')});`;
+  const data = [
+    `const DECK_TUBE_R: f32 = ${TUBE_R};`,
+    `const DECK_SEGMENTS: u32 = ${a.length}u;`,
+    '// Segment starts (xyz, w = tube index) and ends, world metres; per-tube radiances.',
+    arr('deck_a', 'vec4f', a),
+    arr('deck_b', 'vec3f', b),
+    arr('deck_radiance', 'vec3f', radiance),
+    arr('deck_body', 'vec3f', body),
+    arr('deck_core', 'vec3f', core),
+  ].join('\n');
+  const loop = `  for (var i = 0u; i < DECK_SEGMENTS; i++) {
+    let a = deck_a[i].xyz;
+    let b = deck_b[i];
+    let k = u32(deck_a[i].w);
+    pool += deck_radiance[k] * deck_diffuse(p, n, a, b, DECK_TUBE_R);
+    m = deck_mirror(p, rm, a, b, DECK_TUBE_R, mirror_aa);
+    refl_sharp += deck_body[k] * m.x + deck_core[k] * m.y;
+    refl_broad += deck_radiance[k] * deck_specular(p, rd, a, b, DECK_TUBE_R, broad, stretch);
+    refl_streak += deck_body[k] * deck_specular(p, rd, a, b, DECK_TUBE_R, STREAK_SIGMA, STREAK_STRETCH);
+    refl_sheen += deck_radiance[k] * deck_specular(p, rd, a, b, DECK_TUBE_R, SHEEN_SIGMA, SHEEN_STRETCH);
+  }`;
+  return `${SKY_WGSL}\n${data}\n${DECK_WGSL.replace('DECK_LIGHTS', loop)}`;
 }
 
 // Neon tubes of four colours at night: the letter S, an upright ring, a zigzag and a bar,
