@@ -15,16 +15,16 @@
 // cells, so the small gain below keeps the world-space slope of a dome low.
 fn slime_bubble_height(p: vec3<f32>) -> f32 {
     let d = raa_voronoi3(p).x;
-    let present = step(0.55, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
+    let present = step(0.4, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
     return (1.0 - smoothstep(0.06, 0.27, d)) * present;
 }
 
-// Core and rim masks (0..1) of the nearest bubble. A dome on almost half of the cells with
-// a wide bright rim is what makes the bubbles readable at capture distance (card 5018:
+// Core and rim masks (0..1) of the nearest bubble. A dome on 60% of the cells with a wide
+// bright rim is what makes the bubbles readable at capture distance (cards 5018 and 5030:
 // they were too few and too faint).
 fn slime_bubble_masks(p: vec3<f32>) -> vec2<f32> {
     let d = raa_voronoi3(p).x;
-    let present = step(0.55, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
+    let present = step(0.4, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
     let radius = 0.26;
     let core = 1.0 - smoothstep(radius - 0.08, radius, d);
     let rim = 1.0 - smoothstep(0.0, 0.07, abs(d - radius));
@@ -61,6 +61,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.attenuation_color = color * (1.0 - 0.42 * bubbles.x);
     o.attenuation_distance = 1.0 / absorption;
     o.base_color = color * (1.0 - o.transmission) * (1.0 - 0.55 * bubbles.x);
+    // The bubble skin is a light, opaque ring of slime: it reads as a bubble outline over
+    // the floor seen through the body.
+    o.base_color = mix(o.base_color, min(color * 1.25, vec3<f32>(1.0)), 0.7 * bubbles.y);
+    o.transmission = o.transmission * (1.0 - 0.6 * bubbles.y);
 
     // A domed bubble wall: a finite-difference tilt plus a glossy clear coat ring.
     let e = 0.012;
@@ -68,7 +72,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
         - slime_bubble_height(p - vec3<f32>(e, 0.0, 0.0));
     let hz = slime_bubble_height(p + vec3<f32>(0.0, 0.0, e))
         - slime_bubble_height(p - vec3<f32>(0.0, 0.0, e));
-    let slope = vec2<f32>(-hx, -hz) * (0.08 / (2.0 * e));
+    let slope = vec2<f32>(-hx, -hz) * (0.2 / (2.0 * e));
     let m = length(slope);
     let limited = slope * select(1.0, 0.6 / max(m, 1e-6), m > 0.6);
     o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(limited, 1.0)));

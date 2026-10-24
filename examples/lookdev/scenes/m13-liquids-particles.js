@@ -27,7 +27,7 @@ const ENV = { diffuse: 0.7, specular: 1 };
 // Orbit cameras: [target, distance m, yaw rad, pitch rad].
 const CAMERAS = {
   water: [[0, -0.1, -0.3], 5.0, 0.35, 0.45],
-  slime: [[0, 0, 0], 4.5, 0.2, 0.52],
+  slime: [[0, 0, 0], 4.5, 0.2, 0.46],
   mud: [[0, -0.05, 0], 4.9, -0.3, 0.48],
   snow: [[0, 0.8, -0.8], 6.0, 0.3, 0.28],
   confetti: [[0, 1.4, -0.4], 5.2, 0.15, 0.3],
@@ -70,15 +70,17 @@ const SLIME = {
   wave3: [0.0084, 0.6, 2.4, 0.4],
   speeds: [0.541, 0.407, 0.312, 0.242],
   color: [0.42, 1, 0.12],
-  absorption: 6,
+  // Denser absorption and many small bubbles: card 5030 judged the slime a flat green
+  // sheet with the tile grid showing through and no visible bubbles.
+  absorption: 9,
   glossiness: 0.98,
-  bubbleScale: 0.4,
+  bubbleScale: 0.2,
   // Thin foam and finer, stronger detail normals: card 5027 judged the slime foam blotchy
   // and its sky reflection and gloss weak (a broad wobble catches few highlights).
   foamWidth: 0.1,
   foamAmount: 0.5,
-  detailStrength: 0.18,
-  detailScale: 1.4,
+  detailStrength: 0.32,
+  detailScale: 2.4,
 };
 const SLIME_IOR = 1.38;
 const SLIME_THICKNESS = 0.3;
@@ -99,13 +101,14 @@ const MUD = {
   wave2: [0.012, 1.0, -0.7, 0.5],
   wave3: [0.0056, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  // Linear dark brown (sRGB about 0.36, 0.25, 0.15): the old 0.52/0.26/0.07 read as a
-  // salmon-pink liquid once the sky sheen was added (card 5027).
-  color: [0.105, 0.052, 0.02],
+  // Linear chocolate brown (sRGB about 0.58, 0.35, 0.2, ref-3's mud). The old 0.52/0.26/0.07
+  // read as salmon-pink (card 5027); the darker 0.105/0.052/0.02 was so dim that the blue
+  // sky sheen dominated and the pit read blue-violet (card 5030).
+  color: [0.3, 0.1, 0.035],
   wetness: 0.9,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
-  foamAmount: 0.12,
+  foamAmount: 0.3,
   detailStrength: 0.1,
   detailScale: 0.6,
 };
@@ -254,7 +257,7 @@ function buildMud(engine, lib) {
   // The mud body is a brown diffuse; a mirror-bright blue sky wash turns it mauve at
   // capture distance (card 5018). A dimmer sky specular keeps the wet sheen and the sun's
   // clear-coat highlight without recolouring the mud.
-  engine.setEnvironmentLighting({ ...ENV, specular: 0.8 });
+  engine.setEnvironmentLighting({ ...ENV, specular: 0.55 });
   // The pit bed sits 0.3 m below the mud: a bed just under the surface broke through every
   // wave trough as cut-out holes (card 5027). The rim rises through the surface about
   // r = 2.7 m (inside the 6 m grid, so the grid border stays buried) and is a lighter,
@@ -267,7 +270,8 @@ function buildMud(engine, lib) {
     return [dry[0] * damp, dry[1] * damp, dry[2] * damp, 1];
   });
   place(engine, upload(engine, rim, ground), [0, 0, 0]);
-  for (const r of MUD_ROCKS) rock(engine, geometry, r, [0.36, 0.32, 0.27]);
+  // Warm stones: a neutral grey picked up the sky ambient and read blue (card 5030).
+  for (const r of MUD_ROCKS) rock(engine, geometry, r, [0.42, 0.31, 0.21]);
   liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
     function: 'raa.liquid.mud',
     params: MUD,
@@ -510,7 +514,7 @@ const VARIANTS = [
   },
   {
     id: 'mud',
-    description: `${BASIS}an opaque dark brown wet mud pit with a slow swell, a glossy `
+    description: `${BASIS}an opaque chocolate-brown wet mud pit with a slow swell, a glossy `
       + 'clearcoat sheen that reflects the sky and small popping bubbles, surrounded by '
       + 'rocks and a rim of lighter brown ground',
     references: ['ref-3'],
