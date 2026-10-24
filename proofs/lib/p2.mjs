@@ -215,6 +215,45 @@ export async function lookdevCheck(tag, { page = 'lookdev' } = {}) {
   return { measured: parts.join(', '), threshold, ok: total > 0 && problems.length === 0 };
 }
 
+// Every `judge: true` variant has a record holding a judge verdict (Q14): judge.exit 0 (pass)
+// or 1 (fail) at min score 6, a numeric score on the same side of 6 as the exit, and the
+// client's `JUDGE PASS|FAIL` line in the output. A crash or timeout is not a verdict. The
+// verdict itself is not required to pass: judgeCheck does that.
+export async function judgeRecordCheck(tag, { page = 'lookdev' } = {}) {
+  const threshold = 'every judge:true variant: a judge verdict recorded (exit 0|1, score, min score 6)';
+  const scenes = await loadScenes(tag, { page });
+  const results = [];
+  for (const { scene } of scenes) {
+    for (const v of scene.variants.filter((x) => x.judge === true)) {
+      const key = `${scene.id}--${v.id}`;
+      let r = null;
+      let problem = null;
+      try {
+        r = readRecord(scene.id, v.id);
+      } catch (e) {
+        problem = `invalid record (${e.message})`;
+      }
+      const j = r && r.judge && typeof r.judge === 'object' ? r.judge : null;
+      if (problem) {
+        // invalid JSON, reported as is
+      } else if (!r) problem = 'no record';
+      else if (!j) problem = 'not judged';
+      else if (j.minScore !== 6) problem = `minScore ${j.minScore}`;
+      else if (j.exit !== 0 && j.exit !== 1) problem = `judge exit ${j.exit} (no verdict)`;
+      else if (typeof j.score !== 'number' || !Number.isFinite(j.score)) problem = 'score unknown';
+      else if ((j.exit === 0) !== (j.score >= 6)) problem = `exit ${j.exit} disagrees with score ${j.score}`;
+      else if (!/\bJUDGE (PASS|FAIL):/.test(String(j.output))) problem = 'no JUDGE PASS|FAIL line';
+      results.push({ key, ok: problem === null, text: `${key}=${problem ?? `${j.score} ${j.exit === 0 ? 'pass' : 'fail'}`}` });
+    }
+  }
+  const good = results.filter((x) => x.ok).length;
+  return {
+    measured: `${good}/${results.length} judged variants have a verdict (${results.map((x) => x.text).join(', ')})`,
+    threshold,
+    ok: results.length > 0 && good === results.length,
+  };
+}
+
 // Every `judge: true` variant has a committed record whose judge.exit == 0.
 export async function judgeCheck(tag, { page = 'lookdev' } = {}) {
   const threshold = 'every judge:true variant: judge.exit == 0 (min score 6)';

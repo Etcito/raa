@@ -2,7 +2,7 @@
 // Lookdev captures through nomorechat's GPU client (Conventions "Browser captures", S14).
 //
 //   node scripts/lookdev-capture.mjs [--page lookdev|sdfm-compare] [--milestone mNN]
-//     [--only <regex on scene--variant>] [--judge] [--ref-prefix <p>]
+//     [--only <regex on scene--variant>] [--judge [--judge-record-only]] [--ref-prefix <p>]
 //
 // 1. requires NMC_GPU_CLIENT (unset: exit 2 at once; a path that does not exist yet is
 //    waited for up to NMC_GPU_WAIT_S seconds, default 60), dist/<page>/scenes.json (S14),
@@ -19,6 +19,11 @@
 // <pair> is `<scene>--<variant>`. No record is written that the client did not produce;
 // env values are never printed. A failing pair does not stop the others; the failures
 // are listed at the end (exit 1). CPU output is never substituted for a GPU capture.
+// --judge-record-only: a judge verdict below the minimum (the client's `JUDGE FAIL: N/10`,
+// exit 1) is recorded and reported but is not a failure; a judge that gives no verdict
+// (crash, timeout, unparsable score) still is. For first-capture cards whose judge failures
+// feed tuning tasks; the recapture cards and the milestone proof's judge check still
+// require judge.exit == 0.
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -29,7 +34,7 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const USAGE = 'usage: node scripts/lookdev-capture.mjs [--page lookdev|sdfm-compare] '
-  + '[--milestone mNN] [--only <regex on scene--variant>] [--judge] [--ref-prefix <p>]';
+  + '[--milestone mNN] [--only <regex on scene--variant>] [--judge [--judge-record-only]] [--ref-prefix <p>]';
 const PAGES = { lookdev: 'scripts/build-lookdev.sh', 'sdfm-compare': 'scripts/build-sdfm-compare.sh' };
 const WIDTH = 1280; // LOOKDEV_CAPTURE
 const HEIGHT = 720;
@@ -71,7 +76,7 @@ function fail(message, code = 1) {
 }
 
 function parseArgs(argv) {
-  const args = { page: 'lookdev', milestone: null, only: null, judge: false, refPrefix: null };
+  const args = { page: 'lookdev', milestone: null, only: null, judge: false, judgeRecordOnly: false, refPrefix: null };
   const value = (i, flag) => {
     const v = argv[i];
     if (v === undefined || v === '') fail(`${flag} needs a value\n${USAGE}`, 2);
@@ -84,9 +89,11 @@ function parseArgs(argv) {
     else if (a === '--only') args.only = value(++i, a);
     else if (a === '--ref-prefix') args.refPrefix = value(++i, a);
     else if (a === '--judge') args.judge = true;
+    else if (a === '--judge-record-only') args.judgeRecordOnly = true;
     else if (a === '-h' || a === '--help') { process.stdout.write(`${USAGE}\n`); process.exit(0); }
     else fail(`unexpected argument ${redact(a)}\n${USAGE}`, 2);
   }
+  if (args.judgeRecordOnly && !args.judge) fail(`--judge-record-only needs --judge\n${USAGE}`, 2);
   if (!Object.hasOwn(PAGES, args.page)) fail(`--page must be one of ${Object.keys(PAGES).join(', ')}\n${USAGE}`, 2);
   if (args.milestone !== null && !/^m\d{2}$/.test(args.milestone)) {
     fail(`--milestone must look like m07 (two digits)\n${USAGE}`, 2);
@@ -383,7 +390,8 @@ function pngSize(path) {
   return [b.readUInt32BE(16), b.readUInt32BE(20)];
 }
 
-// The judge's score: a JSON `score`, else the last `score: N` in its output.
+// The judge's score: a JSON `score`, else the last `JUDGE PASS|FAIL: N/10` verdict line of
+// the Conventions judge client, else the last `score: N` in its output.
 function parseScore(text) {
   for (const chunk of [text.trim(), ...text.split(/\r?\n/).reverse()]) {
     if (!chunk.trim().startsWith('{')) continue;
@@ -392,6 +400,8 @@ function parseScore(text) {
       if (typeof s === 'number' && Number.isFinite(s)) return s;
     } catch { /* not JSON */ }
   }
+  const verdicts = [...text.matchAll(/\bJUDGE (?:PASS|FAIL): (\d+(?:\.\d+)?)\/10\b/g)];
+  if (verdicts.length) return Number(verdicts[verdicts.length - 1][1]);
   const all = [...text.matchAll(/(?<![-\w])score\W{0,4}(\d+(?:\.\d+)?)/gi)];
   return all.length ? Number(all[all.length - 1][1]) : null;
 }
@@ -447,8 +457,13 @@ async function capturePair(pair, ctx) {
   writeFileSync(input, JSON.stringify({
     args: { scene: pair.scene, variant: pair.variant.id, width: WIDTH, height: HEIGHT },
   }, null, 2) + '\n');
-  // An empty output dir, so a stale file can never become the result.
+  // An empty output dir and no earlier record or capture of the pair, so a stale file can
+  // never become the result.
   rmSync(outDir, { recursive: true, force: true });
+  const recordPath = join('proofs', 'results', 'lookdev', `${name}.json`);
+  const capture = `proofs/captures/lookdev/${name}.png`;
+  rmSync(recordPath, { force: true });
+  rmSync(capture, { force: true });
   mkdirSync(outDir, { recursive: true });
 
   log(`${name}: render ${input} -> ${outDir}/`);
@@ -484,7 +499,6 @@ async function capturePair(pair, ctx) {
   }
 
   const capturedAt = new Date().toISOString();
-  const capture = `proofs/captures/lookdev/${name}.png`;
   copyFileSync(png, capture);
   let judge = null;
   if (ctx.judge && pair.variant.judge) {
@@ -509,7 +523,7 @@ async function capturePair(pair, ctx) {
     captureSha256: sha256(capture),
     judge,
   };
-  writeJsonAtomic(join('proofs', 'results', 'lookdev', `${name}.json`), record);
+  writeJsonAtomic(recordPath, record);
 
   const judged = judge === null ? ''
     : `, judge exit ${judge.exit} score ${judge.score ?? 'unknown'} (min ${JUDGE_MIN_SCORE})`;
@@ -517,8 +531,14 @@ async function capturePair(pair, ctx) {
     + `${hardware ? 'hardware' : 'software'}, nonEmpty ${op.nonEmpty}, passes ${redact(record.passes.join(' > '))}${judged}`);
   if (judge !== null && judge.exit !== 0) {
     const out = tail(judge.output, 20);
-    warn(`${name}: judge failed (exit ${judge.exit})${out ? `\n${out}` : ''}`);
-    problems.push(`judge exit ${judge.exit}, score ${judge.score ?? 'unknown'}`);
+    const verdict = judge.exit === 1 && typeof judge.score === 'number' && judge.score < JUDGE_MIN_SCORE
+      && /\bJUDGE FAIL:/.test(judge.output);
+    if (ctx.judgeRecordOnly && verdict) {
+      log(`${name}: judge verdict ${judge.score} below ${JUDGE_MIN_SCORE} recorded (--judge-record-only)${out ? `\n${out}` : ''}`);
+    } else {
+      warn(`${name}: judge failed (exit ${judge.exit})${out ? `\n${out}` : ''}`);
+      problems.push(`judge exit ${judge.exit}, score ${judge.score ?? 'unknown'}`);
+    }
   }
   if (!hardware) problems.push('captured on a software adapter');
   if (!op.nonEmpty) problems.push('capture is empty (nonEmpty false)');
@@ -583,7 +603,7 @@ async function main() {
   log(`page_ref ${redact(pageRef)}`);
 
   for (const d of ['target/lookdev', 'proofs/results/lookdev', 'proofs/captures/lookdev']) mkdirSync(d, { recursive: true });
-  const ctx = { client, pageRef, wasm, judge: args.judge, refPrefix: args.refPrefix ?? '' };
+  const ctx = { client, pageRef, wasm, judge: args.judge, judgeRecordOnly: args.judgeRecordOnly, refPrefix: args.refPrefix ?? '' };
   const outcomes = await pool(pairs, async (pair) => {
     try {
       return await capturePair(pair, ctx);
