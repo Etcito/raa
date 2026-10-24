@@ -1,0 +1,44 @@
+{
+  "scene": "m11-transmission",
+  "variant": "slime",
+  "milestone": "m11",
+  "capturedAt": "2026-10-24T05:40:39.981Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 25,
+  "triangles": 40596,
+  "firstFrameMs": 25369.39999999106,
+  "wasm": {
+    "raw": 1715091,
+    "gzip": 610607,
+    "sha256": "dc59eab401aa20c58bcd70da40e40b57ce8c9492b443c4df23fc8d1eaae1b169"
+  },
+  "capture": "proofs/captures/lookdev/m11-transmission--slime.png",
+  "captureSha256": "438464785d9bc5d4e5240ecfa98d107a4487d5ac49a81fa20ff8d0f78e20c5ef",
+  "judge": null
+}

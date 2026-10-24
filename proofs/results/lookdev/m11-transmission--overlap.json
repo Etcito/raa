@@ -1,0 +1,44 @@
+{
+  "scene": "m11-transmission",
+  "variant": "overlap",
+  "milestone": "m11",
+  "capturedAt": "2026-10-24T05:40:36.470Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 25,
+  "triangles": 40640,
+  "firstFrameMs": 22052.89999999106,
+  "wasm": {
+    "raw": 1715091,
+    "gzip": 610607,
+    "sha256": "dc59eab401aa20c58bcd70da40e40b57ce8c9492b443c4df23fc8d1eaae1b169"
+  },
+  "capture": "proofs/captures/lookdev/m11-transmission--overlap.png",
+  "captureSha256": "ec386fdf90022c9acfab2ce689ea376f5db6b5af5da155f31bb31a46ab2f70b4",
+  "judge": null
+}

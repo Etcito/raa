@@ -1,0 +1,44 @@
+{
+  "scene": "m11-transmission",
+  "variant": "ice",
+  "milestone": "m11",
+  "capturedAt": "2026-10-24T05:40:17.586Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "forward",
+    "fur.shells",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 23,
+  "triangles": 28824,
+  "firstFrameMs": 2843,
+  "wasm": {
+    "raw": 1715091,
+    "gzip": 610607,
+    "sha256": "dc59eab401aa20c58bcd70da40e40b57ce8c9492b443c4df23fc8d1eaae1b169"
+  },
+  "capture": "proofs/captures/lookdev/m11-transmission--ice.png",
+  "captureSha256": "56d90b98452329a6acf919f7f5db956a8e4717d7bfa93da81f50d668830268c2",
+  "judge": null
+}
