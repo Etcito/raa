@@ -35,7 +35,9 @@ const CAMERAS = {
   oit: [[0, 0.42, 0], 2.2, 0.2, 0.18],
   overlap: [[0, 0.42, 0], 2.1, -0.25, 0.2],
   slime: [[-0.1, 0.1, 0.35], 2.3, 0.18, 0.38],
-  water: [[0, 0.1, 0], 3.2, 0.3, 0.55],
+  // Low enough (20 deg) that the top of the frame shows the clouded sky and the water
+  // surface reflects it at a grazing angle (pitch 0.55 showed only horizon haze, card 4885).
+  water: [[0, 0.12, 0.35], 2.7, 0.25, 0.36],
 };
 
 // Floor of lib's coloured tiles (n x n on a 0.5 m pitch), their vertex colours pushed away
@@ -306,10 +308,13 @@ const SLIME_BLOBS = [
 const SLIME_BLOB_THICKNESS = 0.22;
 // Back light: the sun low behind the stage, slightly from the right.
 const SLIME_SUN = { direction: [-0.55, -0.7, 0.45], color: [1, 0.95, 0.86], intensity: 7 };
-// Water basin: inner half size (x, z) m, wall thickness and height m, water level m.
-const BASIN = { half: [1.1, 0.8], wall: 0.12, height: 0.4, radius: 0.04 };
-const WATER_LEVEL = 0.25;
-const WATER = { deepColor: [0.0, 0.5, 0.75], shallowColor: [0.35, 0.95, 0.85], clarity: 0.6 };
+// Water basin: inner half size (x, z) m, wall thickness and height m, centre z, wall sRGB
+// colour, water level m. The basin stands in front of the props and low enough that the
+// snow bank shows above its back wall; its walls are pink inflatable plastic (ref-1) so
+// they never read as the white snow bank.
+const BASIN = { half: [1.1, 0.7], wall: 0.12, height: 0.3, radius: 0.04, z: 0.5, color: [1, 0.42, 0.62] };
+const WATER_LEVEL = 0.22;
+const WATER = { deepColor: [0.0, 0.5, 0.75], shallowColor: [0.35, 0.95, 0.85], clarity: 0.45 };
 
 function slime(engine, thickness) {
   return engine.addSurfaceMaterial({
@@ -382,8 +387,8 @@ function buildWater(engine, lib) {
     translate(geometry.roundedBox([wall / 2, hy, hz], radius, 4), [-hx - wall / 2, hy, 0]),
     translate(geometry.roundedBox([wall / 2, hy, hz], radius, 4), [hx + wall / 2, hy, 0]),
   ];
-  const stone = engine.addSurfaceMaterial({ color: [0.85, 0.82, 0.76], roughness: 0.6 });
-  place(engine, upload(engine, geometry.merge(walls), [stone]), [0, 0, 0]);
+  const rim = engine.addSurfaceMaterial({ color: BASIN.color, roughness: 0.3, clearcoat: 1 });
+  place(engine, upload(engine, geometry.merge(walls), [rim]), [0, 0, BASIN.z]);
   const water = engine.addSurfaceMaterial({
     function: 'raa.water',
     params: WATER,
@@ -393,7 +398,7 @@ function buildWater(engine, lib) {
     thickness: WATER_LEVEL,
   });
   const slab = geometry.roundedBox([hx, WATER_LEVEL / 2, hz], 0.005, 2);
-  place(engine, upload(engine, slab, [water]), [0, WATER_LEVEL / 2, 0]);
+  place(engine, upload(engine, slab, [water]), [0, WATER_LEVEL / 2, BASIN.z]);
 }
 
 const SETS = {
@@ -499,9 +504,10 @@ const VARIANTS = [
   },
   {
     id: 'water',
-    description: `${BASIS}a basin of clear still water ${STAGE}; the tiled bottom is visible `
-      + 'through the water, slightly refracted and tinted blue-green with depth; the surface '
-      + 'reflects the sky',
+    description: `${BASIS}a basin of clear water with gentle ripples, in a pink inflatable `
+      + `rim, ${STAGE}; the tiled bottom is visible through the water, refracted (the grout `
+      + 'lines waver under the ripples) and tinted blue-green, deeper towards the back where '
+      + 'the view crosses more water; the rippled surface reflects the blue sky',
     references: ['ref-1', 'ref-3'],
     judge: true,
     settings: { set: 'water' },

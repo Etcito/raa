@@ -5,13 +5,14 @@
 // ior (1.33 for water is set by the desc), thickness and transmission come from the record.
 // p[0].rgb deepColor, p[1].rgb shallowColor, p[2] = (clarity 0..1, 0, 0, 0).
 
-// Tangent-space ripple normal from two decorrelated fbm fields.
+// Tangent-space ripple normal from two decorrelated fbm fields, strong enough that the
+// refracted grout lines visibly waver and the surface reflects a broken sky.
 fn water_ripple(p: vec3<f32>, t: f32) -> vec3<f32> {
     let q = vec3<f32>(p.x, p.z, p.y) * 3.0;
     let flow = vec3<f32>(0.21, -0.17, 0.0) * t;
     let dx = raa_fbm3(q + flow, 3);
     let dy = raa_fbm3(q.yxz + vec3<f32>(11.3, 5.1, 2.7) - flow, 3);
-    return normalize(vec3<f32>(0.06 * dx, 0.06 * dy, 1.0));
+    return normalize(vec3<f32>(0.14 * dx, 0.14 * dy, 1.0));
 }
 
 fn material_main(in: MaterialInput) -> MaterialOutput {
