@@ -104,23 +104,20 @@ const SLIME_PADS = [
   { r: 0.38, h: 0.68, x: 1.65, z: 0.35, color: [0.25, 0.5, 1] },
 ];
 
-// Mud: a long, slow swell (wavelengths 1.5x the water layout, amplitudes about 1.2x, at
-// about 0.1x speed): card 5051's judge read the 3 m / 0.094 m swell as flat and rubbery.
+// Mud: a slow swell whose shorter waves are tall enough to see in the silhouette of the
+// sun streaks (card 5056's judge saw no wave motion on the 0.032 / 0.015 m short waves).
 // The shader adds small moving ripples in the normal so the sun streaks break up. `color` is
-// sRGB, converted to linear by the material table: a deep chocolate (card 5039). The
-// colour was never the cause of the mauve pit: on the card 4940 capture the pit centre
-// (106, 66, 73) inverts through AgX punchy to HDR (0.22, 0.12, 0.14), so a blue sky term
-// outweighed the brown. That term was the blue sky irradiance plus the sky mirrored by a
-// strong clear coat; the shader now keeps the coat thin and MUD_LIGHT warms the key light
-// and dims the sky terms, for a predicted pit HDR near (0.28, 0.13, 0.075), sRGB about
-// (127, 70, 36) after AgX punchy.
+// sRGB, converted to linear by the material table. The old (0.55, 0.32, 0.1) is almost pure
+// red-orange in linear (blue 4% of red) and AgX punchy pushed it to orange-rust (card 5056
+// capture: pit median sRGB (175, 87, 32)); ref-3's milk-chocolate mud measures about
+// (120..165, 70..100, 45..75), so the albedo keeps its blue at about a sixth of its red.
 const MUD = {
-  wave0: [0.13, 4.5, 0.3, 0.7],
-  wave1: [0.07, 2.6, 1.4, 0.6],
-  wave2: [0.032, 1.5, -0.7, 0.5],
-  wave3: [0.015, 0.9, 2.4, 0.4],
+  wave0: [0.09, 4.5, 0.3, 0.7],
+  wave1: [0.08, 2.6, 1.4, 0.7],
+  wave2: [0.055, 1.5, -0.7, 0.6],
+  wave3: [0.035, 0.9, 2.4, 0.5],
   speeds: [0.265, 0.2, 0.153, 0.118],
-  color: [0.55, 0.32, 0.1],
+  color: [0.4, 0.24, 0.16],
   wetness: 1,
   bubbleScale: 0.35,
   bubbleRate: 0.4,
@@ -166,44 +163,43 @@ const MUD_PAD_WET = { tint: [0.42, 0.36, 0.24], height: 0.09 };
 // Mud splash crowns around each pad wall are sculpted meshes, not particles: the splash
 // emitter's droplets are camera-facing discs, which read as loose clusters of brown beads
 // at capture distance (card 5039, attempt 9) instead of ref-3's rounded tongues of mud.
-// Per pad: a churned lip ring of mud hugging the wall and MUD_CROWN.tongues short lobes
-// rising off it, each a chain of overlapping spheres that thins from a thick base to a
-// rounded head, with a detached droplet above every other lobe. Tall tubes with a ball on
-// top read as stalks (card 4942 judge); the crown is the mud's own colour, not darker.
+// Per pad: a concave skirt of mud climbing the pad wall and MUD_CROWN.tongues smooth lathe
+// tongues (wide sunk skirt, narrow neck, rounded head) leaning out of it, with a detached
+// droplet above every other tongue. Chains of spheres read as lumpy blobs and tall tubes
+// with a ball on top as stalks (cards 4942, 5056 judge).
 const MUD_CROWN = {
-  color: [0.58, 0.32, 0.15],
-  roughness: 0.18,
-  clearcoat: 0.8,
-  clearcoatRoughness: 0.03,
-  tongues: 9,
-  height: [0.17, 0.25], // m above the mud, alternating per tongue
-  lean: 0.14, // m outward travel of the head
-  base: 0.1, // lobe radius m at the mud
-  head: 0.065, // lobe radius m at the head
-  lip: 0.08, // lip ring tube radius m
+  // Milk chocolate like the pit (MUD.color) and a little darker; sRGB.
+  color: [0.36, 0.22, 0.15],
+  roughness: 0.16,
+  clearcoat: 0.7,
+  clearcoatRoughness: 0.04,
+  tongues: 7,
+  height: [0.2, 0.27, 0.23], // m above the mud, cycling per tongue
+  lean: 0.5, // rad the tongue tips outward
+  base: 0.16, // skirt radius m where the tongue leaves the mud
+  head: 0.065, // rounded head radius m
+  sink: 0.05, // m the skirt reaches below the mud line
+  skirt: 0.2, // m the mud ring around the pad reaches out from the wall
+  rise: 0.07, // m the mud climbs the pad wall
 };
 // White spray (ref-3's splash spray): opaque near-white lit droplets (opacity 0.85; a clear
-// droplet at opacity 0 reads as dark grey flecks on the mud) thrown up at every pad edge
-// and along the mud shoreline.
-const MUD_SPRAY_POINTS = 6;
+// droplet at opacity 0 reads as dark grey flecks on the mud) thrown off the head of every
+// crown tongue: short-lived, slow and of widely varied size, so they cluster at the crown
+// edges as fine spray (one uniform size scattered from the pad edge read as grains, card
+// 5056).
 const MUD_SPRAY = {
   kind: 'splash',
-  spread: 0.5,
-  // Fewer, larger drops: small ones read as white grains (card 4942).
-  rate: 55,
-  lifetime: [0.25, 0.5],
-  speed: [1.0, 1.8],
-  size: [0.03, 0.055],
+  spread: 0.7,
+  rate: 70,
+  lifetime: [0.12, 0.3],
+  speed: [0.5, 1.2],
+  size: [0.008, 0.032],
   drag: 0.3,
   colors: [[0.95, 0.97, 1], [1, 1, 1]],
   opacity: 0.85,
   volume: [0.05, 0.01, 0.05],
   maxParticles: 64,
 };
-// Few shoreline points: ten clusters of droplets read as scattered white grains (card 4941).
-const MUD_SHORE_SPRAY_POINTS = 4;
-const MUD_SHORE_RADIUS = 2.62; // m, x radius of the shoreline ellipse (z is / 1.1)
-const MUD_SHORE_SPRAY = { ...MUD_SPRAY, rate: 45, speed: [0.6, 1.4], spread: 0.6, volume: [0.15, 0.01, 0.15] };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
   [-1.2, -0.9, 0.5, 0.7, -0.05],
@@ -401,49 +397,118 @@ function mudHeight(x, z, t) {
   return y;
 }
 
-// The mud crown of one pad (x, z, radius r) at time t, in pad-local XZ (the pad axis at
-// the origin) and world Y: a churned lip ring hugging the wall plus MUD_CROWN.tongues
-// short lobes of mud rising off the swell, thinning from a thick base to a rounded head,
-// with a detached droplet above every other lobe.
-function mudCrown(geometry, [x, z, r], phase, t) {
+// Displaces a mesh by y += f(x, z) and transforms its normals with the inverse transpose
+// of that map, (n.x - fx n.y, n.y, n.z - fz n.y), so a ring laid flat follows the swell.
+function displaceY(geometry, desc, f) {
+  const p = desc.positions;
+  const n = desc.normals;
+  const e = 0.005;
+  for (let i = 0; i < p.length; i += 3) {
+    const [x, z] = [p[i], p[i + 2]];
+    const fx = (f(x + e, z) - f(x - e, z)) / (2 * e);
+    const fz = (f(x, z + e) - f(x, z - e)) / (2 * e);
+    p[i + 1] += f(x, z);
+    const m = [n[i] - fx * n[i + 1], n[i + 1], n[i + 2] - fz * n[i + 1]];
+    const l = Math.hypot(...m);
+    [n[i], n[i + 1], n[i + 2]] = [m[0] / l, m[1] / l, m[2] / l];
+  }
+  delete desc.tangents;
+  return geometry.withTangents(desc);
+}
+
+// One smooth mud tongue (ref-3's splash crowns): a lathe about its own axis, a wide skirt
+// sunk in the mud tapering into a narrow neck that swells into a rounded head of radius
+// `head` at height `h`. One continuous surface, so it reads as a glossy rounded splash and
+// not as a chain of beads (card 5056 judge: "lumpy blobs").
+function mudTongue(geometry, h, head, base) {
   const C = MUD_CROWN;
+  // The head is a drop 1.35x taller than wide; the neck stays thick (0.8 of the head) so
+  // the tongue reads as a fluid lobe, not a stalk with a pin head.
+  const tall = 1.35 * head;
+  const neckY = h - tall - 0.6 * tall;
+  const neckR = 0.8 * head;
+  const profile = [];
+  for (let i = 0; i <= 10; i++) {
+    const s = i / 10;
+    profile.push([neckR + (base - neckR) * (1 - s) ** 2.2, -C.sink + s * (neckY + C.sink)]);
+  }
+  for (let k = 1; k <= 9; k++) {
+    const a = -0.64 + (k / 9) * (Math.PI / 2 + 0.64);
+    profile.push([k === 9 ? 0 : head * Math.cos(a), h - tall + tall * Math.sin(a)]);
+  }
+  return geometry.lathe(profile, 20);
+}
+
+// Rotates a mesh about the horizontal axis perpendicular to the outward direction (c, s) by
+// `lean` rad (the top tips outward), then translates it by `t`.
+function leanOut(geometry, desc, c, s, lean, t) {
+  const [cl, sl] = [Math.cos(lean), Math.sin(lean)];
+  const rot = (a, i) => {
+    const u = a[i] * c + a[i + 2] * s;
+    const w = -a[i] * s + a[i + 2] * c;
+    const v = a[i + 1];
+    const u2 = u * cl + v * sl;
+    const v2 = -u * sl + v * cl;
+    [a[i], a[i + 1], a[i + 2]] = [u2 * c - w * s, v2, u2 * s + w * c];
+  };
+  for (let i = 0; i < desc.positions.length; i += 3) {
+    rot(desc.positions, i);
+    rot(desc.normals, i);
+    desc.positions[i] += t[0];
+    desc.positions[i + 1] += t[1];
+    desc.positions[i + 2] += t[2];
+  }
+  delete desc.tangents;
+  return geometry.withTangents(desc);
+}
+
+// The mud crown of one pad (x, z, radius r) at time t, in pad-local XZ (the pad axis at
+// the origin) and world Y: a concave skirt of mud climbing the pad wall all around it
+// (following the swell) plus MUD_CROWN.tongues smooth tongues leaning out of it, with a
+// small detached droplet above every other tongue.
+// Where tongue k of pad i (MUD_PADS index) stands, in pad-local XZ and world Y.
+function mudTongueFrame([x, z, r], i, k, t) {
+  const C = MUD_CROWN;
+  const phase = 0.7 + 1.9 * i;
+  const a = phase + (k / C.tongues) * Math.PI * 2 + 0.35 * Math.sin(3 * k + phase);
+  const [c, sn] = [Math.cos(a), Math.sin(a)];
+  const d = r + 0.03;
+  return {
+    c,
+    sn,
+    d,
+    y0: mudHeight(x + d * c, z + d * sn, t),
+    h: C.height[k % C.height.length],
+    head: C.head * (0.85 + 0.15 * (k % 3)),
+    lean: C.lean * (0.7 + 0.3 * Math.sin(5 * k + phase)),
+  };
+}
+
+function mudCrown(geometry, pad, i, t) {
+  const C = MUD_CROWN;
+  const [x, z, r] = pad;
+  const phase = 0.7 + 1.9 * i;
   const surface = (lx, lz) => mudHeight(x + lx, z + lz, t);
   const parts = [];
-  const lip = [];
-  for (let k = 0; k < 48; k++) {
-    const a = (k / 48) * Math.PI * 2;
-    const rr = r + 0.035 + 0.015 * Math.sin(5 * a + phase);
-    const [lx, lz] = [rr * Math.cos(a), rr * Math.sin(a)];
-    lip.push([lx, surface(lx, lz) + 0.012 + 0.022 * Math.sin(7 * a + 2 * phase), lz]);
+  // Skirt: from C.skirt metres out (under the mud) up to C.rise on the wall, concave.
+  const skirt = [];
+  for (let i = 0; i <= 8; i++) {
+    const s = i / 8;
+    skirt.push([r - 0.01 + C.skirt * (1 - s), -0.03 + (C.rise + 0.03) * s ** 2.2]);
   }
-  parts.push(geometry.sweepTube(lip, C.lip, 12, { closed: true }));
+  const ring = geometry.lathe(skirt, 72);
+  parts.push(displaceY(geometry, ring, (lx, lz) => {
+    const a = Math.atan2(lz, lx);
+    const lift = Math.min(1, Math.max(0, (C.skirt + r - Math.hypot(lx, lz)) / C.skirt));
+    return surface(lx, lz) + 0.018 * lift * Math.sin(5 * a + phase) * Math.cos(3 * a - phase);
+  }));
   for (let k = 0; k < C.tongues; k++) {
-    const a = phase + (k / C.tongues) * Math.PI * 2 + 0.4 * Math.sin(3 * k + phase);
-    const [c, sn] = [Math.cos(a), Math.sin(a)];
-    const h = C.height[k % 2];
-    const y0 = surface((r + 0.05) * c, (r + 0.05) * sn);
-    const at = (u) => {
-      const d = r + 0.05 + C.lean * u ** 1.6;
-      return [d * c, y0 - 0.04 + (h + 0.04) * Math.sin((u * Math.PI) / 2), d * sn];
-    };
-    const sphereAt = (radius, c3, rings) => {
-      const ball = geometry.uvSphere(radius, 2 * rings, rings);
-      for (let i = 0; i < ball.positions.length; i += 3) {
-        ball.positions[i] += c3[0];
-        ball.positions[i + 1] += c3[1];
-        ball.positions[i + 2] += c3[2];
-      }
-      return ball;
-    };
-    // Overlapping spheres every ~0.4 radius along the arc: a smooth, lumpy lobe of mud.
-    const steps = 7;
-    for (let i = 0; i <= steps; i++) {
-      const u = i / steps;
-      parts.push(sphereAt(C.base + (C.head - C.base) * u, at(u), 10));
-    }
+    const { c, sn, d, y0, h, head, lean } = mudTongueFrame(pad, i, k, t);
+    parts.push(leanOut(geometry, mudTongue(geometry, h, head, C.base), c, sn, lean, [d * c, y0, d * sn]));
     if (k % 2 === 0) {
-      const tip = at(1);
-      parts.push(sphereAt(0.55 * C.head, [tip[0] + 0.04 * c, tip[1] + 0.09 + 0.02 * k, tip[2] + 0.04 * sn], 8));
+      const drop = geometry.uvSphere(0.45 * C.head, 14, 8);
+      const top = h + 0.06 + 0.015 * (k % 3);
+      parts.push(leanOut(geometry, drop, c, sn, 0, [(d + top * Math.sin(lean) + 0.03) * c, y0 + top * Math.cos(lean), (d + top * Math.sin(lean) + 0.03) * sn]));
     }
   }
   const merged = geometry.merge(parts);
@@ -451,27 +516,23 @@ function mudCrown(geometry, [x, z, r], phase, t) {
   return merged;
 }
 
-// Mud set emitters at time t s: white spray at every pad edge and along the shoreline
-// ellipse, each just above the swell.
+// Mud set emitters at time t s: white spray off the head of every crown tongue.
 function mudEmitters(t) {
   const out = [];
   let seed = 61;
-  const at = (x, z, a, desc) => {
-    const [c, s] = [Math.cos(a), Math.sin(a)];
-    out.push({ ...desc, position: [x, Math.max(0, mudHeight(x, z, t)) + 0.03, z], direction: [0.5 * c, 1, 0.5 * s], seed: seed++ });
-  };
-  for (const [x, z, r] of MUD_PADS) {
-    for (let k = 0; k < MUD_SPRAY_POINTS; k++) {
-      const a = 0.9 + (k / MUD_SPRAY_POINTS) * Math.PI * 2;
-      at(x + (r + 0.08) * Math.cos(a), z + (r + 0.08) * Math.sin(a), a, MUD_SPRAY);
+  MUD_PADS.forEach((pad, i) => {
+    for (let k = 0; k < MUD_CROWN.tongues; k++) {
+      const f = mudTongueFrame(pad, i, k, t);
+      const top = f.h - f.head;
+      const u = f.d + top * Math.sin(f.lean);
+      out.push({
+        ...MUD_SPRAY,
+        position: [u * f.c, f.y0 + top * Math.cos(f.lean), u * f.sn].map((v, j) => v + [pad[0], 0, pad[1]][j]),
+        direction: [0.6 * f.c, 1, 0.6 * f.sn],
+        seed: seed++,
+      });
     }
-  }
-  for (let k = 0; k < MUD_SHORE_SPRAY_POINTS; k++) {
-    const a = 0.2 + (k / MUD_SHORE_SPRAY_POINTS) * Math.PI * 2;
-    const x = MUD_SHORE_RADIUS * Math.cos(a);
-    const z = (MUD_SHORE_RADIUS / 1.1) * Math.sin(a);
-    at(x, z, a + Math.PI, MUD_SHORE_SPRAY);
-  }
+  });
   return out;
 }
 
@@ -529,7 +590,7 @@ function buildMud(engine, lib, settings, variant) {
       return [0, 1, 2].map((i) => 1 + (MUD_PAD_WET.tint[i] - 1) * k).concat(1);
     };
     place(engine, upload(engine, geometry.lathe(profile, 64, { color: wet }), padMat), [x, -0.3, z]);
-    place(engine, upload(engine, mudCrown(geometry, [x, z, r], 0.7 + 1.9 * i, t), crownMat), [x, 0, z]);
+    place(engine, upload(engine, mudCrown(geometry, [x, z, r], i, t), crownMat), [x, 0, z]);
   });
   for (const e of mudEmitters(t)) engine.addEmitter(e);
   const mud = engine.addSurfaceMaterial({ function: 'raa.liquid.mud', params: MUD });

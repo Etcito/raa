@@ -24,7 +24,7 @@ function fakeEngine() {
 
 const mud = scene.variants.find((v) => v.id === 'mud');
 
-test('mud set spawns white spray at every pad and along the shore', async () => {
+test('mud set spawns white spray at every pad', async () => {
   const { engine, rec } = fakeEngine();
   await scene.build(engine, { geometry, objects }, mud);
   const spray = rec.emitters.filter((e) => e.kind === 'splash');

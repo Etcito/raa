@@ -6,7 +6,7 @@
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
 // The body is a soft wet dielectric (roughness 0.22 thin .. 0.38 deep) under a near-mirror
-// wet coat (wetness, coat roughness 0.02..0.035): only the coat reflects sharply, so the
+// wet coat (0.55 x wetness, coat roughness 0.02..0.035): only the coat reflects sharply, so the
 // sky is a Fresnel sheen at grazing angles and the sun tight streaks along the swell, and
 // three slow directional ripples in the normal break those streaks up. A glossy body under
 // the coat doubled the blue sky reflection over the brown, which AgX shows as mauve (card
@@ -21,7 +21,7 @@
 // alpha 1 means deep, no shore), which the mesh author computes from the ground under the
 // surface. The crest term adds froth on the steepest crests; no noise mask scatters foam
 // inside the pit. The foam is froth: soft round voronoi bubbles (nearest-feature domes of
-// two lattices, no cell edges) in tan to cream.
+// two lattices, no cell edges) in light to mid mud brown.
 
 // Radial bubble contribution: the XZ gradient of its height field (a slope, dimensionless,
 // because both the height and the cell coordinate scale with bubbleScale) and the glossy
@@ -139,9 +139,9 @@ fn mud_ripples(world_pos: vec3<f32>, t: f32) -> vec2<f32> {
     let m0 = 0.5 + 0.5 * raa_noise3(vec3<f32>(xz * 0.9, 0.05 * t));
     let m1 = 0.5 + 0.5 * raa_noise3(vec3<f32>(xz * 1.3 + vec2<f32>(7.1, 3.3), 0.07 * t));
     let m2 = 0.5 + 0.5 * raa_noise3(vec3<f32>(xz * 1.7 + vec2<f32>(2.9, 9.4), 0.09 * t));
-    let s0 = 0.07 * m0 * cos(k0 * (dot(d0, xz) - 0.12 * t));
-    let s1 = 0.05 * m1 * cos(k1 * (dot(d1, xz) - 0.09 * t));
-    let s2 = 0.035 * m2 * cos(k2 * (dot(d2, xz) - 0.07 * t));
+    let s0 = 0.12 * m0 * cos(k0 * (dot(d0, xz) - 0.12 * t));
+    let s1 = 0.09 * m1 * cos(k1 * (dot(d1, xz) - 0.09 * t));
+    let s2 = 0.06 * m2 * cos(k2 * (dot(d2, xz) - 0.07 * t));
     return d0 * s0 + d1 * s1 + d2 * s2;
 }
 
@@ -210,8 +210,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     // Depth cues: deep mud is darker and more saturated, the thin mud at the shore and at
     // the pads lighter and duller; one broad, faint patch layer keeps it from a flat plane.
     let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
-    let deep_color = mud_saturate(color * 0.8, 1.3);
-    let thin_color = mud_saturate(color * 1.4, 1.1);
+    // No saturation boost: AgX punchy already saturates, and a boosted deep colour read as
+    // orange-rust instead of chocolate (card 5056).
+    let deep_color = color * 0.78;
+    let thin_color = mud_saturate(color * 1.3, 0.9);
     o.base_color = mix(thin_color, deep_color, deep) * (0.94 + 0.08 * patches);
     // A soft wet body under a near-mirror wet coat: only the coat reflects sharply, so its
     // Fresnel gives the sky sheen at grazing angles and tight sun streaks along the swell
@@ -219,7 +221,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     // reflection and turned the pit mauve). The thin wet edge is the glossiest (a meniscus
     // line against the bank and the pads).
     o.roughness = mix(0.22, 0.38, deep);
-    o.clearcoat = clamp(wetness, 0.0, 1.0);
+    // The coat at 0.55 of the wetness: a full-strength coat mirrored the sky over half the
+    // pit at the grazing capture angle (a pale pink sheet, card 5056); the sun streaks stay.
+    o.clearcoat = 0.55 * clamp(wetness, 0.0, 1.0);
     o.clearcoat_roughness = mix(0.02, 0.035, deep);
 
     o.normal = liquid_detail_normal(
@@ -239,7 +243,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     // A bubble skin is smoother and a little lighter than the pit around it, so the domes
     // and pop rings read as glossy bubbles; the colour follows the mud.
     o.roughness = mix(o.roughness, 0.15, gloss);
-    o.clearcoat = mix(o.clearcoat, 1.0, gloss);
+    o.clearcoat = mix(o.clearcoat, 0.8, gloss);
     o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.015, gloss);
     o.base_color = mix(o.base_color, color * 1.6, 0.55 * gloss);
 
@@ -251,9 +255,12 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let mask = mud_foam(depth, crest, in.position, in.time, foam_width, foam_amount);
     let froth = mud_froth(in.position, in.time);
     let foam = smoothstep(0.0, 0.45, froth.z + 0.25 - (1.0 - mask)) * smoothstep(0.0, 0.3, mask);
-    let froth_tan = mix(color * 2.0, vec3<f32>(raa_luma(color) * 2.0), 0.2);
-    let cream = vec3<f32>(0.80, 0.62, 0.40);
-    let froth_color = mix(froth_tan, cream, smoothstep(0.3, 1.0, mask)) * mix(0.9, 1.04, froth.z);
+    // Churned brown froth: the mud's own hue, a little lighter and duller towards the
+    // shore line, each bubble lighter at its crown and darker in the gaps between bubbles
+    // (cream froth read as pale foam, not churned mud: card 5056).
+    let froth_brown = mud_saturate(color * 1.35, 0.85);
+    let froth_light = mud_saturate(color * 1.75, 0.75);
+    let froth_color = mix(froth_brown, froth_light, smoothstep(0.4, 1.0, mask)) * mix(0.7, 1.08, froth.z);
     o.base_color = mix(o.base_color, froth_color, foam);
     o.normal = raa_perturb_normal(
         o.normal,
@@ -262,8 +269,8 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     );
     // Froth is wet but broken up: a softer coat, so it never mirrors the blue sky (a strong
     // coat on the froth read as grey gravel).
-    o.roughness = mix(o.roughness, 0.45, foam);
-    o.clearcoat = mix(o.clearcoat, 0.3, foam);
-    o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.1, foam);
+    o.roughness = mix(o.roughness, 0.4, foam);
+    o.clearcoat = mix(o.clearcoat, 0.45, foam);
+    o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.06, foam);
     return o;
 }
