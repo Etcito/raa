@@ -58,7 +58,8 @@ export async function importMama(base, options = {}) {
  * The browser meshing pool: MAMA's `setupBrowserHost`. In node the caller builds its own pool.
  *
  * @param {{ setupBrowserHost?: Function }} mama the object of {@link importMama}
- * @param {{ workerUrl: string | URL, manifoldWasmUrl: string, size?: number }} options
+ * @param {{ workerUrl: string | URL, manifoldWasmUrl: string, size?: number, workerMode?: 'module' | 'blob' }} options
+ *   workerMode 'blob' (classic blob: workers that import the worker) for a page with an opaque origin
  * @returns {object} MAMA's ComputePool
  * @throws SdfmError `sdfm.worker` when MAMA has no browser host or refuses to set it up
  */
@@ -66,9 +67,14 @@ export function createBrowserPool(mama, options) {
   if (typeof mama.setupBrowserHost !== 'function') {
     throw new SdfmError('sdfm.worker', 'MAMA browser host (setupBrowserHost of mama/browser) is not loaded');
   }
-  const { workerUrl, manifoldWasmUrl, size } = options;
+  const { workerUrl, manifoldWasmUrl, size, workerMode } = options;
   try {
-    return mama.setupBrowserHost({ workerUrl, manifoldWasmUrl, ...(size !== undefined ? { size } : {}) });
+    return mama.setupBrowserHost({
+      workerUrl,
+      manifoldWasmUrl,
+      ...(size !== undefined ? { size } : {}),
+      ...(workerMode !== undefined ? { workerMode } : {}),
+    });
   } catch (e) {
     throw new SdfmError('sdfm.worker', `MAMA setupBrowserHost failed: ${messageOf(e)}`);
   }

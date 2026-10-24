@@ -1,20 +1,23 @@
-// Side-by-side compare page: MAMA's browser viewport (left) and RAA through
-// @etcito/raa-sdfm (right) show the same sdfm.game-asset fixture with the same camera.
+// Side-by-side compare page: the MAMA reference viewport (left: the meshes and base colours
+// MAMA 864ebc3 produces, drawn with plain WebGPU, because MAMA has no viewport host) and RAA
+// through @etcito/raa-sdfm (right) show the same sdfm.game-asset fixture with the same camera.
 // The engine comes ONLY from the staged package (./raa/index.js); ./common/nmc-gpu.js
-// registers the ops of nomorechat's GPU client. The page requests a core adapter through
-// the package and never substitutes a compatibility adapter (the MAMA side uses the same
-// browser WebGPU device API as MAMA's viewport does).
+// registers the ops of nomorechat's GPU client. Both panes request a core adapter and never
+// substitute a compatibility adapter.
 import { loadRaa } from './raa/index.js';
 import { registerNmcGpu } from './common/nmc-gpu.js';
 import { runCompare, renderCapture } from './lib/runner.js';
+import { PANE_LABEL as MAMA_LABEL } from './lib/mama-view.js';
+
+const RAA_LABEL = 'RAA (@etcito/raa-sdfm)';
 
 const mamaCanvas = document.getElementById('mama');
 const raaCanvas = document.getElementById('raa');
 const picker = document.getElementById('picker');
 const statusLine = document.getElementById('status');
 const errorBox = document.getElementById('error');
-const mamaUnavailable = document.getElementById('mama-unavailable');
-const mamaUnavailableReason = document.getElementById('mama-unavailable-reason');
+document.getElementById('mama-label').textContent = MAMA_LABEL;
+document.getElementById('raa-label').textContent = RAA_LABEL;
 
 // Uncaptured WebGPU errors of the current run (validation errors do not throw from
 // render()). A non-empty list rejects the op instead of accepting a wrong capture.
@@ -50,11 +53,6 @@ function showError(error) {
   // RaaError and SdfmError messages already start with "<code>: ".
   if (message.startsWith(`${code}: `)) message = message.slice(code.length + 2);
   errorBox.textContent = `${code}: ${message}`;
-  // lib/mama-view.js refuses while MAMA has no viewport host: label the left pane.
-  if (code === 'MAMA_HOST_UNAVAILABLE') {
-    mamaUnavailableReason.textContent = message;
-    mamaUnavailable.hidden = false;
-  }
 }
 
 // scenes.json (S14): [{ id, milestone, file }], file relative to the page ('scenes/x.js').
@@ -123,7 +121,7 @@ async function run(args) {
   }
 }
 
-// One 1280x720 image of both panes: MAMA left, RAA right.
+// One 1280x720 image of both panes, each labelled: MAMA reference viewport left, RAA right.
 function composeCapture(width, height) {
   const shot = document.createElement('canvas');
   shot.width = width;
@@ -133,6 +131,15 @@ function composeCapture(width, height) {
   ctx.fillRect(0, 0, width, height);
   ctx.drawImage(mamaCanvas, 0, 0, width / 2, height);
   ctx.drawImage(raaCanvas, width / 2, 0, width / 2, height);
+  ctx.font = '16px sans-serif';
+  ctx.textBaseline = 'top';
+  for (const [label, x] of [[MAMA_LABEL, 0], [RAA_LABEL, width / 2]]) {
+    const w = ctx.measureText(label).width + 16;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(x + 8, 8, w, 26);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(label, x + 16, 13);
+  }
   return shot;
 }
 
@@ -153,7 +160,6 @@ registerNmcGpu({
 async function runPicked() {
   const [scene, variant] = picker.value.split('--');
   errorBox.textContent = '';
-  mamaUnavailable.hidden = true;
   statusLine.textContent = `running ${picker.value}`;
   try {
     const r = await run({ scene, variant, width: 1280, height: 720 });

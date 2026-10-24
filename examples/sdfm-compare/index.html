@@ -8,30 +8,25 @@
     canvas { display: block; }
     #views { display: flex; align-items: flex-start; }
     #bar { padding: 6px 8px; display: flex; gap: 8px; align-items: center; }
-    #bar .pane { opacity: 0.7; }
     #status { opacity: 0.7; }
     #error { margin: 0; padding: 1em; color: #ff8a80; white-space: pre-wrap; }
     #error:empty { display: none; }
-    #mama-pane { position: relative; }
-    #mama-unavailable { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center;
-      padding: 2em; background: #1a1d24; color: #ffcc80; text-align: center; }
-    #mama-unavailable[hidden] { display: none; }
-    #mama-unavailable p { margin: 0.5em 0; color: #e6e6e6; opacity: 0.8; }
+    .pane-box { position: relative; }
+    .pane-label { position: absolute; left: 8px; top: 8px; padding: 4px 8px; background: rgba(0, 0, 0, 0.55); }
   </style>
 </head>
 <body>
   <div id="views">
-    <div id="mama-pane">
+    <div class="pane-box">
       <canvas id="mama" width="640" height="720"></canvas>
-      <div id="mama-unavailable" hidden>
-        <strong>SDF Modeler viewport unavailable</strong>
-        <p id="mama-unavailable-reason"></p>
-      </div>
+      <span class="pane-label" id="mama-label"></span>
     </div>
-    <canvas id="raa" width="640" height="720"></canvas>
+    <div class="pane-box">
+      <canvas id="raa" width="640" height="720"></canvas>
+      <span class="pane-label" id="raa-label"></span>
+    </div>
   </div>
   <div id="bar">
-    <span class="pane">MAMA</span>
     <label for="picker">fixture / variant</label>
     <select id="picker"></select>
     <span id="status"></span>

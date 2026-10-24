@@ -1,4 +1,4 @@
-// Compare scene m12-fixtures (M7, R12): the three fixture assets shown by MAMA's viewport
+// Compare scene m12-fixtures (M7, R12): the three fixture assets shown by the MAMA reference viewport
 // (left) and by RAA through @etcito/raa-sdfm (right), with the same camera. Not judged: the
 // owner reviews each saved capture against R12.
 // Camera positions frame each fixture's bounds (target at the bounds centre, eye 1.1 bounding

@@ -1,5 +1,6 @@
 // Runs one side-by-side comparison (S14 page op): the same sdfm.game-asset fixture is shown
-// by MAMA's browser viewport on the left canvas and by RAA on the right, with the same camera.
+// by the MAMA reference viewport on the left canvas (MAMA's own meshes and base colours, plain
+// WebGPU: MAMA 864ebc3 has no viewport host) and by RAA on the right, with the same camera and size.
 //
 // Every run creates a fresh RAA engine, loads and spawns the fixture through
 // @etcito/raa-sdfm, sets the camera from the variant settings (`settings.camera`) on both
@@ -169,7 +170,7 @@ export async function runCompare(raa, canvases, scene, variant, args = {}) {
     loader.dispose();
     loader = null;
 
-    mamaView = await createMamaView(canvases.mama, { mamaUrl });
+    mamaView = await createMamaView(canvases.mama, { mamaUrl, background: BACKGROUND });
     await mamaView.load(fixture);
 
     const camera = cameraFromSettings(settings, scene, asset);

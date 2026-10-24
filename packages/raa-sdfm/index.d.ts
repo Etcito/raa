@@ -171,7 +171,7 @@ export interface SdfmMamaModule {
   /** MAMA's always-emitted material WGSL (constants and scalar helpers such as `mat_clamp01`). */
   BASE_WGSL: string;
   /** MAMA's browser meshing pool factory (`mama/browser`); unused in node. */
-  setupBrowserHost?(options: { workerUrl: string | URL; manifoldWasmUrl: string; size?: number }): unknown;
+  setupBrowserHost?(options: { workerUrl: string | URL; manifoldWasmUrl: string; size?: number; workerMode?: 'module' | 'blob' }): unknown;
   /** A MAMA `ComputePool` used for in-process meshing. */
   pool?: unknown;
 }

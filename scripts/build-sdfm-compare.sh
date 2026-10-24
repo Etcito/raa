@@ -42,9 +42,11 @@ done
 NODE="${NODE:-node}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MAMA_BUILD_CMD="npm run build"
-# Entry points under MAMA's dist/ (importMama in packages/raa-sdfm/src/mama-bridge.js, plus the
-# compute worker setupBrowserHost loads).
-MAMA_ENTRIES=(index.js core/game/mesh-assets.js core/material-graph/helpers.js browser/index.js browser/compute-worker.js)
+# Entry points under MAMA's dist/ (importMama in packages/raa-sdfm/src/mama-bridge.js, the
+# compute worker setupBrowserHost loads, and the CPU material evaluator the MAMA reference
+# viewport of examples/sdfm-compare/lib/mama-view.js reads base colours from).
+MAMA_ENTRIES=(index.js core/game/mesh-assets.js core/material-graph/helpers.js browser/index.js browser/compute-worker.js
+  core/material-graph/cpu-eval.js)
 
 if [ ! -d "$MAMA_ARG" ]; then
   echo "build-sdfm-compare.sh: --mama $MAMA_ARG is not a directory" >&2
@@ -107,16 +109,22 @@ for e in "${MAMA_ENTRIES[@]}"; do
 done
 mkdir -p "$OUT/common"
 cp -R web/common/. "$OUT/common/"
-# lib/mama-view.js imports SdfmError from the repository package (so node tests run it in
-# place); the staged page has that file at raa-sdfm/src/errors.js. The import is rewritten
-# to the staged copy because the GPU client serves the page under a sub-path, where the
-# repository-relative URL points outside the page.
-REPO_ERRORS="'../../../packages/raa-sdfm/src/errors.js'"
-grep -qF "$REPO_ERRORS" "$OUT/lib/mama-view.js" || {
-  echo "build-sdfm-compare.sh: lib/mama-view.js no longer imports $REPO_ERRORS" >&2
+# lib/mama-view.js imports the bridge and SdfmError from the repository package (so node tests
+# run it in place); the staged page has those files under raa-sdfm/src/. The imports are
+# rewritten to the staged copies because the GPU client serves the page under a sub-path, where
+# the repository-relative URL points outside the page.
+REPO_SDFM="'../../../packages/raa-sdfm/"
+for f in src/mama-bridge.js src/errors.js; do
+  grep -qF "$REPO_SDFM$f'" "$OUT/lib/mama-view.js" || {
+    echo "build-sdfm-compare.sh: lib/mama-view.js no longer imports $REPO_SDFM$f'" >&2
+    exit 1
+  }
+done
+sed -i "s#$REPO_SDFM#'../raa-sdfm/#g" "$OUT/lib/mama-view.js"
+if grep -qF "$REPO_SDFM" "$OUT/lib/mama-view.js"; then
+  echo "build-sdfm-compare.sh: lib/mama-view.js still imports $REPO_SDFM after the rewrite" >&2
   exit 1
-}
-sed -i "s#$REPO_ERRORS#'../raa-sdfm/src/errors.js'#" "$OUT/lib/mama-view.js"
+fi
 
 echo "== dist/sdfm-compare/scenes.json"
 N="$("$NODE" --input-type=module -e '

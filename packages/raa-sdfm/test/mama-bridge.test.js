@@ -160,6 +160,12 @@ test('the browser pool comes from setupBrowserHost', () => {
   assert.throws(() => createBrowserPool({}, { workerUrl: 'w.js', manifoldWasmUrl: 'm.wasm' }), rejectsWith('sdfm.worker'));
 });
 
+test('the browser pool forwards workerMode blob (opaque-origin pages)', () => {
+  createBrowserPool(fakeMama, { workerUrl: 'w.js', manifoldWasmUrl: 'manifold.wasm', workerMode: 'blob' });
+  const call = fakeMama.calls.findLast((c) => c.fn === 'setupBrowserHost');
+  assert.deepEqual(call.options, { workerUrl: 'w.js', manifoldWasmUrl: 'manifold.wasm', workerMode: 'blob' });
+});
+
 test('MAMA BASE_WGSL is the first helper, so a body calling mat_clamp01 maps to WGSL defining it', async () => {
   const out = await meshDocument(fakeMama, doc(), { pool: fakeMama.fakePool() });
   for (const m of out.materials) {
