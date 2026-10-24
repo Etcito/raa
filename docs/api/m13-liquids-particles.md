@@ -103,44 +103,44 @@ transmissive (built-in flag `FLAG_TRANSMISSIVE`): use `blend: 'transmissive'` wi
 
 | param | kind | default |
 |---|---|---|
-| `wave0`..`wave3` | vec4 | (0.035, 1.6, 0.3, 0.6), (0.02, 0.9, 1.4, 0.5), (0.012, 0.55, -0.7, 0.4), (0.006, 0.31, 2.4, 0.35) |
-| `speeds` | vec4 | (1.5805, 1.1854, 0.9267, 0.6957) |
-| `deepColor` | color (sRGB) | (0.05, 0.45, 0.55) |
-| `shallowColor` | color (sRGB) | (0.55, 0.92, 0.88) |
-| `clarity` | scalar | 0.7 |
-| `foamWidth` | scalar (m) | 0.12 |
-| `foamAmount` | scalar | 0.6 |
-| `detailStrength` | scalar | 0.15 |
-| `detailScale` | scalar | 3.0 |
+| `wave0`..`wave3` | vec4 | (0.05, 2.2, 0.3, 0.6), (0.03, 1.2, 1.4, 0.5), (0.016, 0.7, -0.7, 0.4), (0.008, 0.42, 2.4, 0.35) |
+| `speeds` | vec4 | (1.8533, 1.3688, 1.0454, 0.8098) |
+| `deepColor` | color (sRGB) | (0.0, 0.42, 0.62) |
+| `shallowColor` | color (sRGB) | (0.3, 0.9, 0.82) |
+| `clarity` | scalar | 0.6 |
+| `foamWidth` | scalar (m) | 0.3 |
+| `foamAmount` | scalar | 0.9 |
+| `detailStrength` | scalar | 0.03 |
+| `detailScale` | scalar | 1.4 |
 
 ### `raa.liquid.slime` params
 
 | param | kind | default |
 |---|---|---|
-| `wave0`..`wave3` | vec4 | (0.014, 1.6, 0.3, 0.6), (0.008, 0.9, 1.4, 0.5), (0.0048, 0.55, -0.7, 0.4), (0.0024, 0.31, 2.4, 0.35) |
-| `speeds` | vec4 | (0.39513, 0.29635, 0.23167, 0.17393) |
+| `wave0`..`wave3` | vec4 | (0.03, 2.2, 0.3, 0.6), (0.018, 1.2, 1.4, 0.5), (0.0096, 0.7, -0.7, 0.4), (0.0048, 0.42, 2.4, 0.35) |
+| `speeds` | vec4 | (0.46334, 0.34220, 0.26136, 0.20245) |
 | `color` | color (sRGB) | (0.42, 1.0, 0.12) |
 | `absorption` | scalar (1/m) | 5.0 |
 | `glossiness` | scalar | 0.9 |
-| `bubbleScale` | scalar (m) | 0.05 |
-| `foamWidth` | scalar (m) | 0.06 |
-| `foamAmount` | scalar | 0.25 |
-| `detailStrength` | scalar | 0.08 |
-| `detailScale` | scalar | 2.0 |
+| `bubbleScale` | scalar (m) | 0.2 |
+| `foamWidth` | scalar (m) | 0.14 |
+| `foamAmount` | scalar | 0.45 |
+| `detailStrength` | scalar | 0.02 |
+| `detailScale` | scalar | 1.4 |
 
 ### `raa.liquid.mud` params
 
 | param | kind | default |
 |---|---|---|
-| `wave0`..`wave3` | vec4 | (0.00875, 1.6, 0.3, 0.6), (0.005, 0.9, 1.4, 0.5), (0.003, 0.55, -0.7, 0.4), (0.0015, 0.31, 2.4, 0.35) |
-| `speeds` | vec4 | (0.12644, 0.094832, 0.074136, 0.055656) |
-| `color` | color (sRGB) | (0.32, 0.22, 0.14) |
-| `wetness` | scalar | 0.8 |
-| `bubbleScale` | scalar (m) | 0.18 |
-| `bubbleRate` | scalar (1/s) | 0.6 |
-| `foamAmount` | scalar | 0.15 |
-| `detailStrength` | scalar | 0.25 |
-| `detailScale` | scalar | 4.0 |
+| `wave0`..`wave3` | vec4 | (0.02, 2.2, 0.3, 0.6), (0.012, 1.2, 1.4, 0.5), (0.0064, 0.7, -0.7, 0.4), (0.0032, 0.42, 2.4, 0.35) |
+| `speeds` | vec4 | (0.14827, 0.10950, 0.08363, 0.06478) |
+| `color` | color (sRGB) | (0.48, 0.32, 0.18) |
+| `wetness` | scalar | 0.7 |
+| `bubbleScale` | scalar (m) | 0.55 |
+| `bubbleRate` | scalar (1/s) | 0.18 |
+| `foamAmount` | scalar | 0.2 |
+| `detailStrength` | scalar | 0.02 |
+| `detailScale` | scalar | 1.8 |
 
 ## Wave parameter packing
 
@@ -157,7 +157,7 @@ With `k = 2 pi / L` and `D = (cos theta, sin theta)`, the phase is
 horizontal Gerstner displacement and derives the analytic normal from the slope. A wave with
 `L <= 0`, `A == 0` or a non-finite field contributes nothing, so a degenerate parameter can
 never produce NaN. The water speeds are the deep-water dispersion `sqrt(9.81 L / 2 pi)`; slime
-scales the amplitudes by 0.4 and the speeds by 0.25; mud scales them by 0.25 and 0.08 (a slow
+scales the amplitudes by 0.6 and the speeds by 0.25; mud scales them by 0.4 and 0.08 (a slow
 viscous swell).
 
 ## Ripple impacts

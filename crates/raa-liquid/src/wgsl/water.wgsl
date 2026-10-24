@@ -5,9 +5,10 @@
 // and `p[7] = (foamAmount, detailStrength, detailScale, 0)`. The attenuation colour runs
 // from the deep colour to the shallow colour with clarity, and so does the attenuation
 // distance (0.15 m murky to 1.5 m clear). The diffuse base only carries the non-transmitted
-// part, because the Transmission slot adds the refracted, absorbed picture. Foam comes from
-// the shore (the opaque surface within foamWidth of the water) and from the wave crests,
-// broken up by noise; it is white, rough and opaque and drops the transmission.
+// part, because the Transmission slot adds the refracted, absorbed picture. A clear coat
+// puts the sky reflection over the wave normals. Foam comes from the shore (the opaque
+// surface within foamWidth of the water, the mesh border and the wave crests), broken up by
+// noise; it is white, rough and opaque and drops the transmission.
 //
 // ior, thickness and transmission come from the record (desc overrides).
 
@@ -23,7 +24,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     o.transmission = clamp(o.transmission, 0.0, 1.0);
     o.metallic = 0.0;
-    o.clearcoat = 0.0;
+    // A thin clear coat doubles the dielectric sky reflection and stretches it over the
+    // wave normals; the base colour stays empty because transmission carries the body.
+    o.clearcoat = 1.0;
+    o.clearcoat_roughness = 0.04;
     o.roughness = 0.02;
     o.normal = liquid_detail_normal(
         o.normal,
@@ -39,7 +43,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.base_color = shallow * (1.0 - o.transmission);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
-    let shore = liquid_shore(in.frag_coord, foam_width);
+    // The basin walls sit outside the water grid, so the depth-based shore term only marks
+    // the beach and the rocks; the mesh border adds the contact line along the walls.
+    let shore = max(liquid_shore(in.frag_coord, foam_width), liquid_mesh_edge(in.uv, 0.03));
     let foam = liquid_foam(shore, crest, in.position, in.time, foam_amount);
     return liquid_apply_foam(o, foam);
 }

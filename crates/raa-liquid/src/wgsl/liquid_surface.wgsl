@@ -85,13 +85,15 @@ fn liquid_mesh_edge(uv: vec2<f32>, width: f32) -> f32 {
 
 // Foam amount in [0, 1] from the shore term plus `amount` times the crest term. A two
 // octave noise mask broken into lace keeps the foam thin and stringy (a smooth mask turned
-// every whitecap into a milky blob, card 4940).
+// every whitecap into a milky blob, card 4940). The crest band starts low: only the very
+// steepest phase reached the old 0.1..0.45 band, so captures showed no whitecaps at all
+// (card 5018).
 fn liquid_foam(shore: f32, crest: f32, world_pos: vec3<f32>, t: f32, amount: f32) -> f32 {
     let drift = vec3<f32>(0.0, 0.4 * t, 0.23 * t);
     let n = 0.62 * raa_noise3(world_pos * 6.5 + drift) + 0.38 * raa_noise3(world_pos * 15.0 - drift * 1.6);
-    let breakup = smoothstep(0.3, 0.78, clamp(0.5 + 0.5 * n, 0.0, 1.0));
+    let breakup = smoothstep(0.16, 0.7, clamp(0.5 + 0.5 * n, 0.0, 1.0));
     // Whitecaps only at the sharp crests, so the foam reads as lines rather than a haze.
-    let caps = smoothstep(0.1, 0.45, crest) * clamp(amount, 0.0, 1.0);
+    let caps = smoothstep(0.05, 0.26, crest) * clamp(amount, 0.0, 1.0);
     return clamp(max(shore, caps) * breakup, 0.0, 1.0);
 }
 

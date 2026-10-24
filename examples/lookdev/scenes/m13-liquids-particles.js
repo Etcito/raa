@@ -40,29 +40,43 @@ const LIQUID_SEGMENTS = 160;
 const FLOOR_Y = -0.5;
 const TILES_N = 12;
 
+// Waves are the crate's Gerstner layout (A, L, theta, Q); deep-water dispersion speeds.
+// The amplitudes are raised above the built-in defaults so the swell and its crest foam
+// read at capture distance (card 5018: a nearly flat surface).
 const WATER = {
-  deepColor: [0.0, 0.36, 0.66],
-  shallowColor: [0.22, 0.85, 0.95],
-  clarity: 0.65,
-  foamWidth: 0.18,
+  wave0: [0.11, 3.0, 0.3, 0.65],
+  wave1: [0.06, 1.7, 1.4, 0.55],
+  wave2: [0.03, 1.0, -0.7, 0.5],
+  wave3: [0.014, 0.6, 2.4, 0.4],
+  speeds: [2.164, 1.629, 1.249, 0.968],
+  deepColor: [0.0, 0.34, 0.64],
+  shallowColor: [0.2, 0.84, 0.94],
+  clarity: 0.68,
+  foamWidth: 0.34,
   foamAmount: 1.0,
-  detailStrength: 0.03,
-  detailScale: 1.5,
+  detailStrength: 0.09,
+  detailScale: 2.0,
 };
 // Pink inflatable rim of the water basin (three sides; the sand beach closes the back).
 const BASIN_WALL = { half: 0.4, thickness: 0.15, color: [1, 0.42, 0.62] };
 const WATER_IOR = 1.33;
 const WATER_THICKNESS = 0.5;
 
+// Slime: the water wave layout at 0.6x amplitude and 0.25x speed (the crate's contract).
 const SLIME = {
+  wave0: [0.066, 3.0, 0.3, 0.65],
+  wave1: [0.036, 1.7, 1.4, 0.55],
+  wave2: [0.018, 1.0, -0.7, 0.5],
+  wave3: [0.0084, 0.6, 2.4, 0.4],
+  speeds: [0.541, 0.407, 0.312, 0.242],
   color: [0.42, 1, 0.12],
   absorption: 6,
-  glossiness: 0.96,
-  bubbleScale: 0.28,
-  foamWidth: 0.12,
-  foamAmount: 0.7,
-  detailStrength: 0.08,
-  detailScale: 0.5,
+  glossiness: 0.98,
+  bubbleScale: 0.4,
+  foamWidth: 0.2,
+  foamAmount: 1.0,
+  detailStrength: 0.12,
+  detailScale: 0.7,
 };
 const SLIME_IOR = 1.38;
 const SLIME_THICKNESS = 0.3;
@@ -74,14 +88,22 @@ const SLIME_PADS = [
   { r: 0.38, h: 0.68, x: 1.65, z: 0.35, color: [0.25, 0.5, 1] },
 ];
 
+// Mud: the water wave layout at 0.4x amplitude and 0.08x speed (a slow viscous swell).
+// The colour is a warm wet brown; the body stays opaque and the light comes from the
+// clear coat and the raised bubbles, never from a blue sky mirror over the whole surface.
 const MUD = {
-  color: [0.4, 0.27, 0.15],
-  wetness: 0.8,
-  bubbleScale: 0.55,
-  bubbleRate: 0.18,
-  foamAmount: 0.08,
-  detailStrength: 0.12,
-  detailScale: 0.35,
+  wave0: [0.044, 3.0, 0.3, 0.65],
+  wave1: [0.024, 1.7, 1.4, 0.55],
+  wave2: [0.012, 1.0, -0.7, 0.5],
+  wave3: [0.0056, 0.6, 2.4, 0.4],
+  speeds: [0.173, 0.130, 0.100, 0.0774],
+  color: [0.52, 0.26, 0.07],
+  wetness: 0.9,
+  bubbleScale: 0.4,
+  bubbleRate: 0.32,
+  foamAmount: 0.12,
+  detailStrength: 0.16,
+  detailScale: 0.6,
 };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
@@ -225,7 +247,11 @@ function buildSlime(engine, lib) {
 function buildMud(engine, lib) {
   const { geometry } = lib;
   daylight(engine);
-  const ground = engine.addSurfaceMaterial({ color: [0.5, 0.42, 0.32], roughness: 0.95 });
+  // The mud body is a brown diffuse; a mirror-bright blue sky wash turns it mauve at
+  // capture distance (card 5018). A dimmer sky specular keeps the wet sheen and the sun's
+  // clear-coat highlight without recolouring the mud.
+  engine.setEnvironmentLighting({ ...ENV, specular: 0.55 });
+  const ground = engine.addSurfaceMaterial({ color: [0.56, 0.4, 0.22], roughness: 1 });
   const rim = heightfield(geometry, 8, 8, 64,
     (x, z) => -0.05 + 0.25 * Math.max(0, (Math.hypot(x, z * 1.1) - 2.8) / 1.2),
     () => [1, 1, 1, 1]);

@@ -51,16 +51,16 @@ Every row packs its parameters in the material record's `p: array<vec4<f32>, 8>`
 
 | slot | water | slime | mud |
 |---|---|---|---|
-| (0..3, 0) | `wave0`..`wave3` (A, L, theta, Q) | same layout, 0.4x amplitude | same layout, 0.25x amplitude |
+| (0..3, 0) | `wave0`..`wave3` (A, L, theta, Q) | same layout, 0.6x amplitude | same layout, 0.4x amplitude |
 | (4, 0) | `speeds` (deep-water dispersion) | `speeds` x0.25 | `speeds` x0.08 |
-| (5, 0) | `deepColor` [0.05, 0.45, 0.55] | `color` [0.42, 1.0, 0.12] | `color` [0.32, 0.22, 0.14] |
-| (5, 3) | `clarity` 0.7 | `absorption` 5.0 | `wetness` 0.8 |
-| (6, 0) | `shallowColor` [0.55, 0.92, 0.88] | `glossiness` 0.9 | `bubbleScale` 0.18 m |
-| (6, 1) | (in `shallowColor`) | `bubbleScale` 0.05 | `bubbleRate` 0.6 pops/s per cell |
-| (6, 3) | `foamWidth` 0.12 m | `foamWidth` 0.06 m | - |
-| (7, 0) | `foamAmount` 0.6 | `foamAmount` 0.25 | `foamAmount` 0.15 |
-| (7, 1) | `detailStrength` 0.15 | `detailStrength` 0.08 | `detailStrength` 0.25 |
-| (7, 2) | `detailScale` 3.0 | `detailScale` 2.0 | `detailScale` 4.0 |
+| (5, 0) | `deepColor` [0.0, 0.42, 0.62] | `color` [0.42, 1.0, 0.12] | `color` [0.48, 0.32, 0.18] |
+| (5, 3) | `clarity` 0.6 | `absorption` 5.0 | `wetness` 0.7 |
+| (6, 0) | `shallowColor` [0.3, 0.9, 0.82] | `glossiness` 0.9 | `bubbleScale` 0.55 m |
+| (6, 1) | (in `shallowColor`) | `bubbleScale` 0.2 | `bubbleRate` 0.18 pops/s per cell |
+| (6, 3) | `foamWidth` 0.3 m | `foamWidth` 0.14 m | - |
+| (7, 0) | `foamAmount` 0.9 | `foamAmount` 0.45 | `foamAmount` 0.2 |
+| (7, 1) | `detailStrength` 0.03 | `detailStrength` 0.02 | `detailStrength` 0.02 |
+| (7, 2) | `detailScale` 1.4 | `detailScale` 1.4 | `detailScale` 1.8 |
 
 Ripple rings read up to 4 impacts from the instance params (`x, z, start time s,
 strength`).

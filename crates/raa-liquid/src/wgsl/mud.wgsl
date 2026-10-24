@@ -5,9 +5,10 @@
 // `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, 0)` and
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
-// Wetness darkens the base colour and adds a sharp clear coat (roughness 0.05) over a
-// still rough body (0.62). Slow voronoi bubbles on the XZ plane grow a dome (a normal bump
-// plus a glossy highlight) and pop into an expanding ring. Foam is the crest term and
+// Wetness darkens the base colour and adds a wet sheen (0.55 x wetness, roughness 0.1)
+// over a rough body (0.55); two noise scales mottle the brown so it reads as mud, not as a
+// coloured liquid. Slow voronoi bubbles on the XZ plane grow a dome (a normal bump plus a
+// glossy highlight) and pop into an expanding ring. Foam is the crest term and
 // noise only: an opaque draw runs before the opaque copy of its frame, so the opaque depth
 // that `liquid_shore` samples is not written yet; the mud foam marks the moving crests and
 // never reads that copy.
@@ -108,8 +109,9 @@ fn mud_bubbles(world_xz: vec2<f32>, t: f32, scale: f32, rate: f32) -> MudBubble 
 fn mud_bump_normal(n: vec3<f32>, tangent: vec4<f32>, gradient: vec2<f32>) -> vec3<f32> {
     let nn = normalize(n);
     // A bubble is a low dome, not a lens: a gentle slope keeps the clear coat a coherent
-    // sky reflection and never turns the normal on its side.
-    let g = clamp(gradient * 0.45, vec2<f32>(-0.9, -0.9), vec2<f32>(0.9, 0.9));
+    // sky reflection and never turns the normal on its side. The gain is high enough that
+    // the dome catches its own highlight at capture distance.
+    let g = clamp(gradient * 0.6, vec2<f32>(-0.9, -0.9), vec2<f32>(0.9, 0.9));
     return raa_perturb_normal(nn, tangent, vec3<f32>(-g.x, -g.y, 1.0));
 }
 
@@ -133,13 +135,17 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let detail_scale = max(in.record.p[7].z, 1e-3);
 
     o.metallic = 0.0;
-    o.roughness = 0.62;
-    // Wet mud is darker than dry ground but still reads brown under the clear coat; a
-    // low-frequency tint keeps it from looking like a flat brown plane.
-    let tint = 0.9 + 0.1 * raa_noise3(in.position * 0.8 + vec3<f32>(0.0, 0.0, 0.4 * in.time));
-    o.base_color = color * (1.0 - 0.2 * wetness) * tint;
-    o.clearcoat = clamp(0.95 * wetness, 0.0, 1.0);
-    o.clearcoat_roughness = 0.05;
+    o.roughness = 0.55;
+    // Wet mud is darker than dry ground but still reads brown under the clear coat; two
+    // noise scales give it the mottled, grainy body of mud instead of a flat coloured
+    // plane (card 5018 read the old smooth surface as a pink liquid).
+    let grain = raa_fbm3(in.position * 2.4 + vec3<f32>(0.0, 0.0, 0.2 * in.time), 3);
+    let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
+    o.base_color = color * (1.0 - 0.15 * wetness) * (0.88 + 0.12 * grain + 0.08 * patches);
+    // A wet sheen, not a mirror: a broad coat keeps the mud brown and still catches the
+    // sky and the sun where the slow swell tilts the surface.
+    o.clearcoat = clamp(0.55 * wetness, 0.0, 1.0);
+    o.clearcoat_roughness = 0.1;
 
     o.normal = liquid_detail_normal(
         o.normal,
@@ -155,10 +161,12 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.normal = mud_bump_normal(o.normal, in.tangent, bubbles.gradient);
     // The bubble skin is smoother than the body: a tight clear coat highlight on the dome
     // sells the wet bubble, while the body stays a little darker underneath.
-    o.roughness = mix(o.roughness, 0.14, gloss);
-    o.clearcoat = mix(o.clearcoat, 1.0, 0.8 * gloss);
+    o.roughness = mix(o.roughness, 0.1, gloss);
+    o.clearcoat = mix(o.clearcoat, 0.95, 0.8 * gloss);
     o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.02, gloss);
-    o.base_color = o.base_color * (1.0 - 0.16 * gloss);
+    // A raised bubble is wetter and slightly lighter than the pit around it; the warm tone
+    // is kept so the surface never drifts to the sky's blue.
+    o.base_color = mix(o.base_color, vec3<f32>(0.24, 0.14, 0.065), 0.5 * gloss);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     let foam = mud_foam(crest, in.position, in.time, foam_amount);

@@ -15,17 +15,19 @@
 // cells, so the small gain below keeps the world-space slope of a dome low.
 fn slime_bubble_height(p: vec3<f32>) -> f32 {
     let d = raa_voronoi3(p).x;
-    let present = step(0.65, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
+    let present = step(0.55, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
     return (1.0 - smoothstep(0.06, 0.27, d)) * present;
 }
 
-// Core and rim masks (0..1) of the nearest bubble.
+// Core and rim masks (0..1) of the nearest bubble. A dome on almost half of the cells with
+// a wide bright rim is what makes the bubbles readable at capture distance (card 5018:
+// they were too few and too faint).
 fn slime_bubble_masks(p: vec3<f32>) -> vec2<f32> {
     let d = raa_voronoi3(p).x;
-    let present = step(0.65, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
-    let radius = 0.24;
-    let core = 1.0 - smoothstep(radius - 0.07, radius, d);
-    let rim = 1.0 - smoothstep(0.0, 0.05, abs(d - radius));
+    let present = step(0.55, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
+    let radius = 0.26;
+    let core = 1.0 - smoothstep(radius - 0.08, radius, d);
+    let rim = 1.0 - smoothstep(0.0, 0.07, abs(d - radius));
     return vec2<f32>(core, rim) * present;
 }
 
@@ -54,9 +56,11 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     let p = in.local_position / bubble_scale;
     let bubbles = slime_bubble_masks(p);
-    o.attenuation_color = color * (1.0 - 0.3 * bubbles.x);
+    // A bubble is a lens of thicker slime over a darker pocket: the body and the absorbed
+    // floor darken inside the core, while its rim catches a thin bright skin.
+    o.attenuation_color = color * (1.0 - 0.42 * bubbles.x);
     o.attenuation_distance = 1.0 / absorption;
-    o.base_color = color * (1.0 - o.transmission) * (1.0 - 0.4 * bubbles.x);
+    o.base_color = color * (1.0 - o.transmission) * (1.0 - 0.55 * bubbles.x);
 
     // A domed bubble wall: a finite-difference tilt plus a glossy clear coat ring.
     let e = 0.012;
@@ -64,13 +68,13 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
         - slime_bubble_height(p - vec3<f32>(e, 0.0, 0.0));
     let hz = slime_bubble_height(p + vec3<f32>(0.0, 0.0, e))
         - slime_bubble_height(p - vec3<f32>(0.0, 0.0, e));
-    let slope = vec2<f32>(-hx, -hz) * (0.05 / (2.0 * e));
+    let slope = vec2<f32>(-hx, -hz) * (0.08 / (2.0 * e));
     let m = length(slope);
-    let limited = slope * select(1.0, 0.45 / max(m, 1e-6), m > 0.45);
+    let limited = slope * select(1.0, 0.6 / max(m, 1e-6), m > 0.6);
     o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(limited, 1.0)));
-    o.roughness = mix(o.roughness, 0.03, bubbles.y);
-    o.clearcoat = mix(0.6, 1.0, bubbles.y);
-    o.clearcoat_roughness = 0.05;
+    o.roughness = mix(o.roughness, 0.02, bubbles.y);
+    o.clearcoat = 1.0;
+    o.clearcoat_roughness = mix(0.04, 0.015, bubbles.y);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     let shore = max(liquid_shore(in.frag_coord, foam_width), liquid_mesh_edge(in.uv, 0.045));
