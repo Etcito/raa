@@ -842,6 +842,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-liquid"
+version = "0.1.0"
+dependencies = [
+ "raa-brdf",
+ "raa-core",
+ "raa-lit",
+ "raa-matfn",
+ "raa-shader",
+ "raa-transmission",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-lit"
 version = "0.1.0"
 dependencies = [
