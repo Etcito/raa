@@ -109,22 +109,29 @@ const NIGHT_SKY = {
 // glossy violet floor matched the sky's violet ground, so the judge saw "no visible floor
 // plane, reflections or highlights" (card 4809); the lighter (0.3, 0.13, 0.52) at roughness
 // 0.3 read as matte with weak gloss (card 4813): a deep violet lacquer like ref-4's decks.
+// (0.2, 0.07, 0.4) rendered a near-black navy (sRGB about 20, 0, 98; ref-4's decks are about
+// 60..120, 50, 150..240): lighter and redder (preview about 60, 2, 145 near the camera),
+// the gloss still carried by the mirror terms.
 // sRGB colour, roughness, coat.
-const NEON_FLOOR = { color: [0.2, 0.07, 0.4], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
+const NEON_FLOOR = { color: [0.36, 0.14, 0.6], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
 // Deck parameters (linear, raw user params): p0 seam colour; p1 = (light pool gain, sharp
 // coat lobe rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
-// bevel width m, panel tone variation).
-// p3 = (sky mirror gain, tube reflection gain): the lacquer mirrors the night sky dome and
+// groove shadow width m, panel tone variation).
+// p3 = (sky mirror gain, tube reflection gain, polish variation): the lacquer mirrors the night sky dome and
 // the tubes more strongly than a 4 % coat, as ref-4's wet-looking decks; at 1 the judge read
 // the deck as "a fairly matte grid with weak specular highlights" (card 4811). At a 0.02 rad
 // coat lobe, a 0.2 rad base lobe weighted 0.35 and pool gain 2 the reflections were blurred
 // and the glow around each tube faint (judge, card 4813): a near-mirror coat (8 mrad, the
 // tube's own angular size dominates), a tighter base lobe and stronger pools.
+// The judge then saw "a grid of bright, thin lines rather than large dark-seamed panels"
+// (card 4814): the tilted bevels mirrored the horizon glow. Now 0.8 m panels, 2 cm seams
+// darkened by a 3 cm groove shadow (no tilt), a stronger sky mirror (1.2 -> 2.2: a wet
+// lavender sheen toward the horizon) and a +-20 % broad polish variation of the mirror.
 const NEON_DECK = {
-  p0: [0.012, 0.004, 0.03],
+  p0: [0.006, 0.002, 0.016],
   p1: [3, 0.008, 0.12, 0.25],
-  p2: [0.6, 0.012, 0.02, 0.12],
-  p3: [1.2, 2, 0, 0],
+  p2: [0.8, 0.02, 0.03, 0.1],
+  p3: [2.2, 2, 0.2, 0],
 };
 // Night sky dome of the neon sets (demo.night-sky): radius m, a sphere around the set drawn
 // from inside. The procedural `night` sky is a flat gradient (judge, card 4811); the dome
@@ -289,7 +296,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 `;
 
 // User material function of the neon deck (S11): lacquered violet panels on a world XZ
-// grid with dark seams and bevelled edges, lit by the neon tubes as line lights. The tubes
+// grid with dark seams and shadowed grooves, lit by the neon tubes as line lights. The tubes
 // are emissive geometry, not engine lights, so their light on the floor is evaluated here
 // from their segments (baked into the source by deckWgsl): a Lambert pool under each tube
 // (projected tube area x cosine / distance^2) and its glossy reflection (the closest point of
@@ -338,11 +345,12 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let broad_w = in.record.p[1].w;
   let size = max(in.record.p[2].x, 1e-3);
   let seam_w = in.record.p[2].y;
-  let bevel_w = max(in.record.p[2].z, 1e-4);
+  let groove_w = max(in.record.p[2].z, 1e-4);
   let tone = in.record.p[2].w;
+  let polish_amp = in.record.p[3].z;
   let top = smoothstep(0.5, 0.9, in.normal.y);
 
-  // Panels: distance to the nearest seam centre (m), per-panel tone, bevel tilt.
+  // Panels: distance to the nearest seam centre (m), per-panel tone.
   let q = in.position.xz / size;
   let cell = floor(q);
   let f = q - cell;
@@ -355,12 +363,12 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let fade = 1.0 - smoothstep(3.0, 7.0, cam_dist);
   let seam = (1.0 - smoothstep(0.5 * seam_w - aa, 0.5 * seam_w + aa, d)) * top * fade;
   let shade = 1.0 + tone * (raa_hash3(vec3<f32>(cell, 7.0)).x * 2.0 - 1.0);
-  // Bevel: the panel surface rolls down toward its nearest seam.
-  let to_edge = select(vec2<f32>(0.0, sign(f.y - 0.5)), vec2<f32>(sign(f.x - 0.5), 0.0), e.x < e.y);
-  let bevel = (1.0 - smoothstep(0.5 * seam_w, 0.5 * seam_w + bevel_w, d)) * (1.0 - seam) * top * fade;
-  let tilt = vec3<f32>(to_edge.x, 0.0, to_edge.y) * (0.6 * bevel);
-  o.normal = normalize(in.normal + tilt);
-  o.base_color = mix(o.base_color * shade, seam_color, seam);
+  // Groove shadow: the panel darkens toward its seam (no normal tilt: a tilted bevel
+  // mirrored the bright horizon and drew the seams as bright lines, judge card 4814).
+  let groove = 1.0 - 0.6 * (1.0 - smoothstep(0.5 * seam_w, 0.5 * seam_w + groove_w, d)) * (1.0 - seam) * top * fade;
+  // Uneven polish: broad patches where the lacquer mirrors a little more or less.
+  let polish = 1.0 + polish_amp * clamp(raa_fbm3(vec3<f32>(in.position.xz * 0.7, 3.1), 3), -1.0, 1.0);
+  o.base_color = mix(o.base_color * shade * groove, seam_color, seam);
   o.roughness = mix(o.roughness, 0.8, seam);
   o.clearcoat = o.clearcoat * (1.0 - seam);
 
@@ -374,10 +382,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   var refl_broad = vec3<f32>(0.0);
 DECK_LIGHTS
   let fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
-  // Lacquer mirror of the night sky (no stars: they would alias on the bevels).
+  // Lacquer mirror of the night sky (no stars: they would alias on the panels).
   let sky = sky_night(rd, 0.0) * in.record.p[3].x * o.clearcoat;
-  let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w) * in.record.p[3].y + sky) * fres;
-  o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam)) * top;
+  let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w) * in.record.p[3].y + sky) * fres * polish;
+  o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam) * groove) * top;
   return o;
 }
 `;
