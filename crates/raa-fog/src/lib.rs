@@ -7,12 +7,15 @@
 //! naming the field, and [`FogDesc::write_env`] packs the S10 `EnvGpu` fog fields.
 //!
 //! [`integral`] holds the analytic height-fog optical depth, its Simpson reference and the
-//! transmittance. The `fog` FeaturePass (order 68) and the `height` Fog slot provider with
-//! `FogFeature`/`FogHandle` land with the pass task; this crate currently exports the
-//! description and the CPU integral.
+//! transmittance. [`FogFeature::install`] adds the `height` Fog slot provider (priority 10)
+//! to the lit renderer and the `fog` FeaturePass (order 68), which writes the `EnvGpu` fog
+//! fields and applies the fog to the HDR chain; [`FogHandle`] sets and reads the description.
 
 mod desc;
+mod feature;
+mod shaders;
 
 pub mod integral;
 
 pub use desc::FogDesc;
+pub use feature::{FogFeature, FogHandle};
