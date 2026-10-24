@@ -1,0 +1,32 @@
+{
+  "name": "candy_red",
+  "key": "fe0569637ca30309e1d13415fc0516b917fc0a24e5e5a4a8af4afc1c8b108e62",
+  "body": "  // 0: out (material.output)\n  return MaterialFull(vec3f(bitcast<f32>(extra_words[b + 3u]), bitcast<f32>(extra_words[b + 4u]), bitcast<f32>(extra_words[b + 5u])), mat_clamp01(bitcast<f32>(extra_words[b + 6u])), mat_clamp01(bitcast<f32>(extra_words[b + 7u])), vec3f(bitcast<f32>(extra_words[b + 8u]), bitcast<f32>(extra_words[b + 9u]), bitcast<f32>(extra_words[b + 10u])), bitcast<f32>(extra_words[b + 11u]));\n",
+  "helpers": [
+    {
+      "id": "base",
+      "wgsl": "\nconst MAT_TAU: f32 = 6.283185307179586;\nconst MAT_PI: f32 = 3.141592653589793;\nconst MAT_INV_2_24: f32 = 5.960464477539063e-8;\n\nvar<private> mat_mesh_uv: vec3f = vec3f(0.0, 0.0, 0.0);\nvar<private> mat_mesh_color: vec4f = vec4f(1.0, 1.0, 1.0, 1.0);\n\nfn mat_set_mesh_attrs(uv: vec2f, has_uv: bool, color: vec4f) {\n  mat_mesh_uv = vec3f(uv, select(0.0, 1.0, has_uv));\n  mat_mesh_color = color;\n}\n\nfn mat_clamp01(x: f32) -> f32 {\n  if (x < 0.0) { return 0.0; }\n  if (x > 1.0) { return 1.0; }\n  return x;\n}\n\nfn mat_smoothstep(e0: f32, e1: f32, x: f32) -> f32 {\n  let t = mat_clamp01((x - e0) / (e1 - e0));\n  return t * t * (3.0 - 2.0 * t);\n}\n\nfn mat_sin01(x: f32) -> f32 {\n  return 0.5 + 0.5 * sin(MAT_TAU * x);\n}\n\nfn mat_unit(h: u32) -> f32 {\n  return f32(h >> 8u) * MAT_INV_2_24;\n}\n\nfn mat_finite(x: f32) -> bool {\n  return abs(x) <= 3.4028234e38;\n}\n\n// fbm3 octave count of the TS fbm3: floor, 0 -> 1, clamped to 1..6.\nfn mat_octaves(o: f32) -> u32 {\n  return u32(clamp(floor(o), 1.0, 6.0));\n}\n"
+    }
+  ],
+  "constants": [
+    0,
+    1065353216,
+    1008981770,
+    1061721583,
+    1016104412,
+    1026761601,
+    0,
+    1056964608,
+    0,
+    0,
+    0,
+    0
+  ],
+  "fields": [
+    "base_color",
+    "metallic",
+    "roughness",
+    "emissive",
+    "height"
+  ]
+}

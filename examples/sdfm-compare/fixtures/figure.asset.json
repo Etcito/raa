@@ -1,0 +1,488 @@
+{
+  "format": "sdfm.game-asset",
+  "version": 1,
+  "game": "raa-test",
+  "id": "raatest.figure",
+  "name": "Figure",
+  "category": "character",
+  "world": "common",
+  "mesher": {
+    "output": "dc",
+    "params": {
+      "detail": 0.02
+    }
+  },
+  "document": {
+    "format": "sdfm",
+    "version": 2,
+    "name": "Figure",
+    "root": [
+      "figure"
+    ],
+    "nodes": {
+      "figure": {
+        "id": "figure",
+        "name": "Figure",
+        "kind": "group",
+        "children": [
+          "torso",
+          "anchor_head"
+        ],
+        "asset": {
+          "game": "raa-test",
+          "id": "raatest.figure",
+          "category": "character",
+          "world": "common"
+        },
+        "mesher": {
+          "output": "dc",
+          "params": {
+            "detail": 0.02
+          }
+        }
+      },
+      "torso": {
+        "id": "torso",
+        "name": "Torso",
+        "kind": "group",
+        "children": [
+          "body_egg",
+          "body_cut",
+          "boot_l",
+          "boot_r",
+          "head",
+          "arm_l",
+          "arm_r"
+        ]
+      },
+      "body_egg": {
+        "id": "body_egg",
+        "name": "Body egg",
+        "kind": "ellipsoid",
+        "transform": {
+          "position": [
+            0,
+            0.75,
+            0
+          ]
+        },
+        "material": "shirt",
+        "params": {
+          "radii": [
+            0.34,
+            0.62,
+            0.3
+          ]
+        }
+      },
+      "body_cut": {
+        "id": "body_cut",
+        "name": "Body cut",
+        "kind": "box",
+        "transform": {
+          "position": [
+            0,
+            1.2,
+            0
+          ]
+        },
+        "op": "subtract",
+        "material": "shirt",
+        "params": {
+          "size": [
+            1,
+            0.4,
+            1
+          ]
+        }
+      },
+      "boot_l": {
+        "id": "boot_l",
+        "name": "Boot left",
+        "kind": "ellipsoid",
+        "transform": {
+          "position": [
+            0.17,
+            0.07,
+            0.06
+          ]
+        },
+        "material": "boot",
+        "params": {
+          "radii": [
+            0.12,
+            0.08,
+            0.18
+          ]
+        }
+      },
+      "boot_r": {
+        "id": "boot_r",
+        "name": "Boot right",
+        "kind": "ellipsoid",
+        "transform": {
+          "position": [
+            -0.17,
+            0.07,
+            0.06
+          ]
+        },
+        "material": "boot",
+        "params": {
+          "radii": [
+            0.12,
+            0.08,
+            0.18
+          ]
+        }
+      },
+      "head": {
+        "id": "head",
+        "name": "Head",
+        "kind": "group",
+        "pivot": [
+          0,
+          1,
+          0
+        ],
+        "rigid": true,
+        "children": [
+          "head_egg",
+          "head_keep",
+          "eye_l",
+          "eye_r"
+        ]
+      },
+      "head_egg": {
+        "id": "head_egg",
+        "name": "Head egg",
+        "kind": "ellipsoid",
+        "transform": {
+          "position": [
+            0,
+            0.75,
+            0
+          ]
+        },
+        "material": "skin",
+        "params": {
+          "radii": [
+            0.34,
+            0.62,
+            0.3
+          ]
+        }
+      },
+      "head_keep": {
+        "id": "head_keep",
+        "name": "Head keep",
+        "kind": "box",
+        "transform": {
+          "position": [
+            0,
+            1.2,
+            0
+          ]
+        },
+        "op": "intersect",
+        "material": "skin",
+        "params": {
+          "size": [
+            1,
+            0.4,
+            1
+          ]
+        }
+      },
+      "eye_l": {
+        "id": "eye_l",
+        "name": "Eye left",
+        "kind": "sphere",
+        "transform": {
+          "position": [
+            0.12,
+            1.15,
+            0.19
+          ]
+        },
+        "material": "eye",
+        "params": {
+          "radius": 0.04
+        }
+      },
+      "eye_r": {
+        "id": "eye_r",
+        "name": "Eye right",
+        "kind": "sphere",
+        "transform": {
+          "position": [
+            -0.12,
+            1.15,
+            0.19
+          ]
+        },
+        "material": "eye",
+        "params": {
+          "radius": 0.04
+        }
+      },
+      "arm_l": {
+        "id": "arm_l",
+        "name": "Arm l",
+        "kind": "group",
+        "pivot": [
+          0.36,
+          1,
+          0
+        ],
+        "rigid": true,
+        "children": [
+          "sleeve_l",
+          "hand_l"
+        ]
+      },
+      "sleeve_l": {
+        "id": "sleeve_l",
+        "name": "Sleeve l",
+        "kind": "capsule",
+        "transform": {
+          "position": [
+            0.452,
+            0.796,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            14
+          ]
+        },
+        "material": "sleeve",
+        "params": {
+          "height": 0.5,
+          "radius": 0.09
+        }
+      },
+      "hand_l": {
+        "id": "hand_l",
+        "name": "Hand l",
+        "kind": "group",
+        "pivot": [
+          0.532,
+          0.55,
+          0
+        ],
+        "rigid": true,
+        "children": [
+          "palm_l"
+        ]
+      },
+      "palm_l": {
+        "id": "palm_l",
+        "name": "Palm l",
+        "kind": "sphere",
+        "transform": {
+          "position": [
+            0.532,
+            0.476,
+            0
+          ]
+        },
+        "material": "skin",
+        "params": {
+          "radius": 0.1
+        }
+      },
+      "arm_r": {
+        "id": "arm_r",
+        "name": "Arm r",
+        "kind": "group",
+        "pivot": [
+          -0.36,
+          1,
+          0
+        ],
+        "rigid": true,
+        "children": [
+          "sleeve_r",
+          "hand_r"
+        ]
+      },
+      "sleeve_r": {
+        "id": "sleeve_r",
+        "name": "Sleeve r",
+        "kind": "capsule",
+        "transform": {
+          "position": [
+            -0.452,
+            0.796,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            -14
+          ]
+        },
+        "material": "sleeve",
+        "params": {
+          "height": 0.5,
+          "radius": 0.09
+        }
+      },
+      "hand_r": {
+        "id": "hand_r",
+        "name": "Hand r",
+        "kind": "group",
+        "pivot": [
+          -0.532,
+          0.55,
+          0
+        ],
+        "rigid": true,
+        "children": [
+          "palm_r"
+        ]
+      },
+      "palm_r": {
+        "id": "palm_r",
+        "name": "Palm r",
+        "kind": "sphere",
+        "transform": {
+          "position": [
+            -0.532,
+            0.476,
+            0
+          ]
+        },
+        "material": "skin",
+        "params": {
+          "radius": 0.1
+        }
+      },
+      "anchor_head": {
+        "id": "anchor_head",
+        "name": "head",
+        "kind": "anchor",
+        "transform": {
+          "position": [
+            0,
+            1.4,
+            0
+          ]
+        }
+      }
+    },
+    "materials": {
+      "shirt": {
+        "name": "Shirt",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#3a6fd8",
+                "in.roughness": 0.7
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "skin": {
+        "name": "Skin",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#f0b48c",
+                "in.roughness": 0.6
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "sleeve": {
+        "name": "Sleeve",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#d8433a",
+                "in.roughness": 0.7
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "boot": {
+        "name": "Boot",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#5a3a22",
+                "in.roughness": 0.8
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "eye": {
+        "name": "Eye",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#1a1a22",
+                "in.roughness": 0.3
+              }
+            }
+          ],
+          "links": []
+        }
+      }
+    }
+  },
+  "collision": [],
+  "anchors": {
+    "head": {
+      "t": [
+        0,
+        1.4,
+        0
+      ],
+      "r": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "bounds": {
+    "min": [
+      -0.632,
+      -0.01,
+      -0.5
+    ],
+    "max": [
+      0.632,
+      1.4,
+      0.5
+    ]
+  },
+  "hash": "b6b455dd8469624ce6645d3fbab50bb678e783ec050dfa19e6575275646ce7bd"
+}

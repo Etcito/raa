@@ -1,7 +1,8 @@
 [
-  {"name": "test-scene", "command": "node --test examples/lookdev/test/m13-mud.test.mjs", "timeout_s": 300, "cwd": "."},
-  {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-m13", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(slime|mud|splash|snow|confetti|sparkles|particles-on|particles-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
-  {"name": "proof-m13", "command": "node proofs/m13-liquids-particles.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m13"]},
-  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m13"]}
+  {"name": "test-sdfm", "command": "node --test 'packages/raa-sdfm/test/*.test.js'", "timeout_s": 300, "cwd": "."},
+  {"name": "test-sdfm-compare", "command": "node --test 'examples/sdfm-compare/test/*.test.js'", "timeout_s": 300, "cwd": "."},
+  {"name": "build-sdfm-compare", "command": "bash scripts/build-sdfm-compare.sh --mama ../MAMA", "timeout_s": 3600, "cwd": ".", "after": ["test-sdfm", "test-sdfm-compare"]},
+  {"name": "capture-m12", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --page sdfm-compare --milestone m12", "timeout_s": 3600, "cwd": ".", "after": ["build-sdfm-compare"]},
+  {"name": "proof-m12", "command": "node proofs/m12-sdfm.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m12"]},
+  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m12"]}
 ]

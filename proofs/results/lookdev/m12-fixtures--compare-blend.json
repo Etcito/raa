@@ -1,0 +1,47 @@
+{
+  "scene": "m12-fixtures",
+  "variant": "compare-blend",
+  "milestone": "m12",
+  "capturedAt": "2026-10-24T22:54:14.178Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 2,
+  "triangles": 23538,
+  "firstFrameMs": 10455.800000011921,
+  "wasm": {
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+  },
+  "capture": "proofs/captures/lookdev/m12-fixtures--compare-blend.png",
+  "captureSha256": "cf1ad6435321a39ad6a4a14f0f82b1e90f03450abd447ae1106c7ab548e72c84",
+  "judge": null
+}

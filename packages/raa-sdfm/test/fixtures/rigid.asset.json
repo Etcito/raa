@@ -1,0 +1,146 @@
+{
+  "format": "sdfm.game-asset",
+  "version": 1,
+  "game": "raa-test",
+  "id": "raatest.cart",
+  "name": "Cart",
+  "category": "prop",
+  "world": "test",
+  "mesher": {
+    "resolution": 32
+  },
+  "document": {
+    "nodes": {
+      "cart": {
+        "kind": "group",
+        "name": "Cart",
+        "asset": {},
+        "fake": {
+          "parts": [
+            {
+              "partId": "body",
+              "name": "Body",
+              "frame": [
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0.5,
+                0,
+                1
+              ],
+              "subMeshes": [
+                {
+                  "material": "paint",
+                  "vertices": 6,
+                  "uvs": true
+                },
+                {
+                  "material": "metal",
+                  "vertices": 3
+                },
+                {
+                  "material": "paint",
+                  "vertices": 3
+                }
+              ]
+            },
+            {
+              "partId": "wheel",
+              "name": "Wheel",
+              "frame": [
+                0,
+                0,
+                -1,
+                0,
+                0,
+                1,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0.4,
+                -0.2,
+                0.3,
+                1
+              ],
+              "subMeshes": [
+                {
+                  "material": "metal",
+                  "vertices": 3
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "materials": {
+      "paint": {
+        "name": "Paint",
+        "fake": {
+          "wgslBody": "  return MaterialFull(vec3f(0.8, 0.1, 0.1), 0.0, 0.4, vec3f(0.0), 0.0);\n",
+          "helpers": [],
+          "constants": []
+        }
+      },
+      "metal": {
+        "name": "Metal",
+        "fake": {
+          "wgslBody": "  return MaterialFull(vec3f(0.8), 1.0, 0.3, vec3f(0.0), 0.0);\n",
+          "helpers": [],
+          "constants": []
+        }
+      }
+    }
+  },
+  "collision": [
+    {
+      "shape": "cuboid",
+      "halfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ]
+    }
+  ],
+  "anchors": {
+    "hitch": {
+      "t": [
+        0,
+        0.5,
+        -0.6
+      ],
+      "r": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "bounds": {
+    "min": [
+      -0.6,
+      -0.4,
+      -0.6
+    ],
+    "max": [
+      0.6,
+      1,
+      0.6
+    ]
+  },
+  "hash": "37fd307ea0daa1171b57ddfd228921a9d401ed2aca2d2b773d31160649557c60"
+}

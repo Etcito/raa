@@ -1,0 +1,156 @@
+{
+  "format": "sdfm.game-asset",
+  "version": 1,
+  "game": "raa-test",
+  "id": "raatest.blend",
+  "name": "Blend",
+  "category": "prop",
+  "world": "common",
+  "mesher": {
+    "output": "dc",
+    "params": {
+      "detail": 0.02
+    }
+  },
+  "document": {
+    "format": "sdfm",
+    "version": 2,
+    "name": "Blend",
+    "root": [
+      "blend"
+    ],
+    "nodes": {
+      "blend": {
+        "id": "blend",
+        "name": "Blend",
+        "kind": "group",
+        "children": [
+          "base",
+          "ball",
+          "post"
+        ],
+        "asset": {
+          "game": "raa-test",
+          "id": "raatest.blend",
+          "category": "prop",
+          "world": "common"
+        },
+        "mesher": {
+          "output": "dc",
+          "params": {
+            "detail": 0.02
+          }
+        }
+      },
+      "base": {
+        "id": "base",
+        "name": "Base",
+        "kind": "box",
+        "transform": {
+          "position": [
+            0,
+            0.3,
+            0
+          ]
+        },
+        "material": "clay",
+        "params": {
+          "size": [
+            1.2,
+            0.6,
+            0.8
+          ]
+        }
+      },
+      "ball": {
+        "id": "ball",
+        "name": "Ball",
+        "kind": "sphere",
+        "transform": {
+          "position": [
+            0.25,
+            0.85,
+            0
+          ]
+        },
+        "smooth": 0.25,
+        "material": "teal",
+        "params": {
+          "radius": 0.4
+        }
+      },
+      "post": {
+        "id": "post",
+        "name": "Post",
+        "kind": "capsule",
+        "transform": {
+          "position": [
+            -0.35,
+            0.95,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            20
+          ]
+        },
+        "smooth": 0.2,
+        "material": "clay",
+        "params": {
+          "height": 1,
+          "radius": 0.18
+        }
+      }
+    },
+    "materials": {
+      "clay": {
+        "name": "Clay",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#e0803a",
+                "in.roughness": 0.7
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "teal": {
+        "name": "Teal",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#2fa6a0",
+                "in.roughness": 0.4
+              }
+            }
+          ],
+          "links": []
+        }
+      }
+    }
+  },
+  "collision": [],
+  "anchors": {},
+  "bounds": {
+    "min": [
+      -0.890155,
+      0,
+      -0.65
+    ],
+    "max": [
+      0.9,
+      1.68141,
+      0.65
+    ]
+  },
+  "hash": "09207ceb13505c36ef50104b8a8071015bcb1ae0fecb54901de0b9f3b901b001"
+}

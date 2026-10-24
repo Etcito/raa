@@ -1,0 +1,5 @@
+{
+  "_comment": "Page manifest for nomorechat's GPU client. `page` is the entry and `ops` lists the operation names the client may call; scripts/lookdev-capture.mjs --page sdfm-compare calls `render` (see common/nmc-gpu.js), which wraps window.nmcGpu.ops.run (S14) and returns { json, files } with the side-by-side 1280x720 PNG (MAMA left, RAA right).",
+  "page": "index.html",
+  "ops": ["render"]
+}

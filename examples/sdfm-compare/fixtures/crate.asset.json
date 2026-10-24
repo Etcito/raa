@@ -1,0 +1,246 @@
+{
+  "format": "sdfm.game-asset",
+  "version": 1,
+  "game": "raa-test",
+  "id": "raatest.crate",
+  "name": "Crate",
+  "category": "prop",
+  "world": "common",
+  "mesher": {
+    "output": "dc",
+    "params": {
+      "detail": 0.025
+    }
+  },
+  "document": {
+    "format": "sdfm",
+    "version": 2,
+    "name": "Crate",
+    "root": [
+      "crate"
+    ],
+    "nodes": {
+      "crate": {
+        "id": "crate",
+        "name": "Crate",
+        "kind": "group",
+        "children": [
+          "body",
+          "band_top",
+          "band_bottom",
+          "panel",
+          "anchor_top"
+        ],
+        "asset": {
+          "game": "raa-test",
+          "id": "raatest.crate",
+          "category": "prop",
+          "world": "common"
+        },
+        "mesher": {
+          "output": "dc",
+          "params": {
+            "detail": 0.025
+          }
+        }
+      },
+      "body": {
+        "id": "body",
+        "name": "Body",
+        "kind": "roundBox",
+        "transform": {
+          "position": [
+            0,
+            0.5,
+            0
+          ]
+        },
+        "material": "wood",
+        "params": {
+          "radius": 0.08,
+          "size": [
+            1,
+            1,
+            1
+          ]
+        },
+        "gameCollision": true
+      },
+      "band_top": {
+        "id": "band_top",
+        "name": "Band top",
+        "kind": "roundBox",
+        "transform": {
+          "position": [
+            0,
+            0.82,
+            0
+          ]
+        },
+        "material": "metal",
+        "params": {
+          "radius": 0.04,
+          "size": [
+            1.06,
+            0.14,
+            1.06
+          ]
+        }
+      },
+      "band_bottom": {
+        "id": "band_bottom",
+        "name": "Band bottom",
+        "kind": "roundBox",
+        "transform": {
+          "position": [
+            0,
+            0.18,
+            0
+          ]
+        },
+        "material": "metal",
+        "params": {
+          "radius": 0.04,
+          "size": [
+            1.06,
+            0.14,
+            1.06
+          ]
+        }
+      },
+      "panel": {
+        "id": "panel",
+        "name": "Panel",
+        "kind": "roundBox",
+        "transform": {
+          "position": [
+            0,
+            0.5,
+            0.505
+          ]
+        },
+        "material": "paint",
+        "params": {
+          "radius": 0.015,
+          "size": [
+            0.5,
+            0.34,
+            0.04
+          ]
+        }
+      },
+      "anchor_top": {
+        "id": "anchor_top",
+        "name": "top",
+        "kind": "anchor",
+        "transform": {
+          "position": [
+            0,
+            1,
+            0
+          ]
+        }
+      }
+    },
+    "materials": {
+      "wood": {
+        "name": "Wood",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#a8743c",
+                "in.roughness": 0.8
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "metal": {
+        "name": "Metal",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#8a9099",
+                "in.metallic": 1,
+                "in.roughness": 0.35
+              }
+            }
+          ],
+          "links": []
+        }
+      },
+      "paint": {
+        "name": "Paint",
+        "graph": {
+          "nodes": [
+            {
+              "id": "out",
+              "type": "material.output",
+              "params": {
+                "in.base_color": "#d8322c"
+              }
+            }
+          ],
+          "links": []
+        }
+      }
+    }
+  },
+  "collision": [
+    {
+      "shape": "roundCuboid",
+      "t": [
+        0,
+        0.5,
+        0
+      ],
+      "r": [
+        0,
+        0,
+        0,
+        1
+      ],
+      "halfExtents": [
+        0.42,
+        0.42,
+        0.42
+      ],
+      "borderRadius": 0.08
+    }
+  ],
+  "anchors": {
+    "top": {
+      "t": [
+        0,
+        1,
+        0
+      ],
+      "r": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "bounds": {
+    "min": [
+      -0.53,
+      0,
+      -0.53
+    ],
+    "max": [
+      0.53,
+      1,
+      0.53
+    ]
+  },
+  "hash": "918776713dc8e069f0402375755a388977d02c878647ff032dc4e18e64e2035b"
+}
