@@ -1,0 +1,47 @@
+{
+  "scene": "m12-fixtures",
+  "variant": "compare-crate",
+  "milestone": "m12",
+  "capturedAt": "2026-10-24T22:54:08.908Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 3,
+  "triangles": 12076,
+  "firstFrameMs": 5375.200000017881,
+  "wasm": {
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+  },
+  "capture": "proofs/captures/lookdev/m12-fixtures--compare-crate.png",
+  "captureSha256": "dc02e391ffef500367ad433d9d7c944b54173c08e785967ff0af59f33d171fec",
+  "judge": null
+}
