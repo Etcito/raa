@@ -98,7 +98,7 @@ const SLIME_PADS = [
 
 // Mud: the water wave layout at about 0.85x amplitude and 0.08x speed (a slow viscous
 // swell), raised from 0.6x so the swell reads at capture distance (card 5034). `color` is
-// sRGB, converted to linear by the material table (linear about 0.16/0.066/0.017). The
+// sRGB, converted to linear by the material table: a deep chocolate (card 5039). The
 // colour was never the cause of the mauve pit: on the card 4940 capture the pit centre
 // (106, 66, 73) inverts through AgX punchy to HDR (0.22, 0.12, 0.14), so a blue sky term
 // outweighed the brown. That term was the blue sky irradiance plus the sky mirrored by a
@@ -111,7 +111,7 @@ const MUD = {
   wave2: [0.026, 1.0, -0.7, 0.5],
   wave3: [0.012, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  color: [0.44, 0.29, 0.14],
+  color: [0.38, 0.23, 0.1],
   wetness: 0.85,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
@@ -143,37 +143,43 @@ const MUD_PADS = [
   [-0.55, 1.35, 0.46, 0.44],
 ];
 const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 };
-// Mud splash crowns around each pad wall: MUD_CROWN_POINTS emitters on a ring just outside
-// the pad, each throwing opaque glossy chocolate blobs (opacity 1) up and outward. The
-// earlier single emitter spawned 3..6 cm clear water droplets inside the pad volume (the
-// splash kind's water shading ignores the palette), so no splash ever showed (card 5037).
-const MUD_CROWN_POINTS = 6;
+// Mud splash crowns around each pad wall are sculpted meshes, not particles: the splash
+// emitter's droplets are camera-facing discs, which read as loose clusters of brown beads
+// at capture distance (card 5039, attempt 9) instead of ref-3's rounded tongues of mud.
+// Per pad: a churned lip ring of mud hugging the wall and MUD_CROWN.tongues curved tongues
+// rising off it, each with a bulbous rounded head and a detached droplet above it.
 const MUD_CROWN = {
-  kind: 'splash',
-  spread: 0.3,
-  rate: 45,
-  lifetime: [0.25, 0.5],
-  speed: [1.0, 2.1],
-  size: [0.07, 0.13],
-  drag: 0.4,
-  colors: [[0.42, 0.22, 0.09], [0.5, 0.28, 0.12], [0.36, 0.18, 0.07]],
-  opacity: 1,
-  volume: [0.03, 0.01, 0.03],
-  maxParticles: 64,
+  color: [0.36, 0.19, 0.075],
+  roughness: 0.12,
+  clearcoat: 1,
+  clearcoatRoughness: 0.04,
+  tongues: 3,
+  height: [0.16, 0.24], // m above the mud, alternating per tongue
+  lean: 0.12, // m outward travel of the head
+  radius: 0.038, // tongue tube radius m
+  head: 0.062, // head sphere radius m
+  lip: 0.05, // lip ring tube radius m
 };
-// A little clear white water spray between the crowns (ref-3's white splash spray).
-const MUD_SPRAY_POINTS = 2;
+// White spray (ref-3's splash spray): opaque near-white lit droplets (opacity 0.85; a clear
+// droplet at opacity 0 reads as dark grey flecks on the mud) thrown up at every pad edge
+// and along the mud shoreline.
+const MUD_SPRAY_POINTS = 3;
 const MUD_SPRAY = {
   kind: 'splash',
-  spread: 0.4,
-  rate: 70,
+  spread: 0.5,
+  rate: 90,
   lifetime: [0.3, 0.6],
-  speed: [1.4, 2.6],
-  size: [0.025, 0.05],
-  colors: [[0.92, 0.97, 1]],
-  volume: [0.03, 0.01, 0.03],
+  speed: [1.2, 2.2],
+  size: [0.03, 0.06],
+  drag: 0.3,
+  colors: [[0.95, 0.97, 1], [1, 1, 1]],
+  opacity: 0.85,
+  volume: [0.05, 0.01, 0.05],
   maxParticles: 64,
 };
+const MUD_SHORE_SPRAY_POINTS = 10;
+const MUD_SHORE_RADIUS = 2.62; // m, x radius of the shoreline ellipse (z is / 1.1)
+const MUD_SHORE_SPRAY = { ...MUD_SPRAY, rate: 70, speed: [0.6, 1.4], spread: 0.6, volume: [0.15, 0.01, 0.15] };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
   [-1.2, -0.9, 0.5, 0.7, -0.05],
@@ -209,17 +215,20 @@ function daylight(engine) {
 
 // Heightfield over the lib grid: y = height(x, z), vertex colour = colour(x, z, y), normals
 // from central differences.
-function heightfield(geometry, w, d, n, height, colour) {
+// `warp` (optional) remaps each grid coordinate before the height is evaluated.
+function heightfield(geometry, w, d, n, height, colour, warp = (v) => v) {
   const desc = geometry.grid(w, d, n, n);
   const p = new Float32Array(desc.positions);
   const nrm = new Float32Array(desc.normals);
   const col = new Float32Array((p.length / 3) * 4);
   const e = 0.01;
   for (let i = 0; i < p.length / 3; i++) {
-    const x = p[3 * i];
-    const z = p[3 * i + 2];
+    const x = warp(p[3 * i]);
+    const z = warp(p[3 * i + 2]);
     const y = height(x, z);
+    p[3 * i] = x;
     p[3 * i + 1] = y;
+    p[3 * i + 2] = z;
     const nx = height(x - e, z) - height(x + e, z);
     const nz = height(x, z - e) - height(x, z + e);
     const l = Math.hypot(nx, 2 * e, nz);
@@ -231,9 +240,45 @@ function heightfield(geometry, w, d, n, height, colour) {
   return { ...desc, positions: p, normals: nrm, colors: col };
 }
 
-function rock(engine, geometry, [x, z, r, squash, y], color = [0.42, 0.42, 0.43]) {
-  const m = engine.addSurfaceMaterial({ color, roughness: 0.8 });
-  place(engine, upload(engine, geometry.uvSphere(r, 32, 16), m), [x, y, z], [1, squash, 1]);
+// A lumpy boulder: a sphere displaced along its normal by a few low-frequency lobes, with
+// normals rebuilt from the faces (accumulated per welded position, so the seam is smooth).
+function boulder(geometry, r, seed) {
+  const desc = geometry.uvSphere(r, 48, 24);
+  const p = new Float32Array(desc.positions);
+  const lobe = (a, b, c) => 0.12 * Math.sin(a * 3.1 + seed) * Math.cos(b * 2.3 + 1.7 * seed)
+    + 0.07 * Math.sin(b * 5.3 + c * 4.1 + seed) + 0.04 * Math.cos(a * 7.7 - c * 6.1);
+  for (let i = 0; i < p.length; i += 3) {
+    const [a, b, c] = [p[i] / r, p[i + 1] / r, p[i + 2] / r];
+    const k = 1 + lobe(a, b, c);
+    p[i] *= k;
+    p[i + 1] *= k * (b < -0.4 ? 0.85 : 1);
+    p[i + 2] *= k;
+  }
+  const key = (i) => `${Math.round(p[3 * i] * 1e4)},${Math.round(p[3 * i + 1] * 1e4)},${Math.round(p[3 * i + 2] * 1e4)}`;
+  const acc = new Map();
+  const idx = desc.indices;
+  for (let t = 0; t < idx.length; t += 3) {
+    const [i0, i1, i2] = [idx[t], idx[t + 1], idx[t + 2]];
+    const e1 = [0, 1, 2].map((k) => p[3 * i1 + k] - p[3 * i0 + k]);
+    const e2 = [0, 1, 2].map((k) => p[3 * i2 + k] - p[3 * i0 + k]);
+    const fn = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+    for (const i of [i0, i1, i2]) {
+      const a = acc.get(key(i)) ?? [0, 0, 0];
+      acc.set(key(i), [a[0] + fn[0], a[1] + fn[1], a[2] + fn[2]]);
+    }
+  }
+  const nrm = new Float32Array(desc.normals);
+  for (let i = 0; i < p.length / 3; i++) {
+    const a = acc.get(key(i));
+    const l = a ? Math.hypot(...a) : 0;
+    if (l > 0) nrm.set([a[0] / l, a[1] / l, a[2] / l], 3 * i);
+  }
+  return geometry.withTangents({ positions: p, normals: nrm, uvs: desc.uvs, indices: desc.indices });
+}
+
+function rock(engine, geometry, [x, z, r, squash, y], color = [0.5, 0.47, 0.42]) {
+  const m = engine.addSurfaceMaterial({ color, roughness: 0.75 });
+  place(engine, upload(engine, boulder(geometry, r, x * 3 + z), m), [x, y, z], [1, squash, 1]);
 }
 
 // A liquid grid uploaded with its function material.
@@ -321,8 +366,101 @@ function mudMesh(geometry) {
   });
 }
 
-function buildMud(engine, lib) {
+// Rest height of the mud waves at (x, z) and time t s: the CPU twin of raa-liquid's
+// wave_height (src/waves.rs) over MUD's packing, so the crowns sit on the swell.
+function mudHeight(x, z, t) {
+  let y = 0;
+  [MUD.wave0, MUD.wave1, MUD.wave2, MUD.wave3].forEach(([a, l, theta], i) => {
+    const k = (2 * Math.PI) / l;
+    y += a * Math.sin(k * (Math.cos(theta) * x + Math.sin(theta) * z - MUD.speeds[i] * t));
+  });
+  return y;
+}
+
+// The mud crown of one pad (x, z, radius r) at time t, in pad-local XZ (the pad axis at
+// the origin) and world Y: a churned lip ring hugging the wall plus MUD_CROWN.tongues
+// curved tongues of mud rising off the swell, each ending in a bulbous rounded head with
+// a detached droplet above.
+function mudCrown(geometry, [x, z, r], phase, t) {
+  const C = MUD_CROWN;
+  const surface = (lx, lz) => mudHeight(x + lx, z + lz, t);
+  const parts = [];
+  const lip = [];
+  for (let k = 0; k < 48; k++) {
+    const a = (k / 48) * Math.PI * 2;
+    const rr = r + 0.035 + 0.015 * Math.sin(5 * a + phase);
+    const [lx, lz] = [rr * Math.cos(a), rr * Math.sin(a)];
+    lip.push([lx, surface(lx, lz) + 0.012 + 0.022 * Math.sin(7 * a + 2 * phase), lz]);
+  }
+  parts.push(geometry.sweepTube(lip, C.lip, 12, { closed: true }));
+  for (let k = 0; k < C.tongues; k++) {
+    const a = phase + (k / C.tongues) * Math.PI * 2 + 0.4 * Math.sin(3 * k + phase);
+    const [c, sn] = [Math.cos(a), Math.sin(a)];
+    const h = C.height[k % 2];
+    const y0 = surface((r + 0.05) * c, (r + 0.05) * sn);
+    const at = (u) => {
+      const d = r + 0.05 + C.lean * u ** 1.6;
+      return [d * c, y0 - 0.04 + (h + 0.04) * Math.sin((u * Math.PI) / 2), d * sn];
+    };
+    const path = [];
+    for (let i = 0; i <= 12; i++) path.push(at(i / 12));
+    parts.push(geometry.sweepTube(path, C.radius, 12));
+    const tip = at(1);
+    const head = geometry.uvSphere(C.head, 20, 12);
+    for (let i = 0; i < head.positions.length; i += 3) {
+      head.positions[i] += tip[0];
+      head.positions[i + 1] += tip[1];
+      head.positions[i + 2] += tip[2];
+    }
+    parts.push(head);
+    const drop = geometry.uvSphere(0.6 * C.head, 16, 10);
+    const above = [tip[0] + 0.04 * c, tip[1] + 0.1 + 0.03 * k, tip[2] + 0.04 * sn];
+    for (let i = 0; i < drop.positions.length; i += 3) {
+      drop.positions[i] += above[0];
+      drop.positions[i + 1] += above[1];
+      drop.positions[i + 2] += above[2];
+    }
+    parts.push(drop);
+  }
+  const merged = geometry.merge(parts);
+  delete merged.subMeshes;
+  return merged;
+}
+
+// Mud set emitters at time t s: white spray at every pad edge and along the shoreline
+// ellipse, each just above the swell.
+function mudEmitters(t) {
+  const out = [];
+  let seed = 61;
+  const at = (x, z, a, desc) => {
+    const [c, s] = [Math.cos(a), Math.sin(a)];
+    out.push({ ...desc, position: [x, Math.max(0, mudHeight(x, z, t)) + 0.03, z], direction: [0.5 * c, 1, 0.5 * s], seed: seed++ });
+  };
+  for (const [x, z, r] of MUD_PADS) {
+    for (let k = 0; k < MUD_SPRAY_POINTS; k++) {
+      const a = 0.9 + (k / MUD_SPRAY_POINTS) * Math.PI * 2;
+      at(x + (r + 0.08) * Math.cos(a), z + (r + 0.08) * Math.sin(a), a, MUD_SPRAY);
+    }
+  }
+  for (let k = 0; k < MUD_SHORE_SPRAY_POINTS; k++) {
+    const a = 0.2 + (k / MUD_SHORE_SPRAY_POINTS) * Math.PI * 2;
+    const x = MUD_SHORE_RADIUS * Math.cos(a);
+    const z = (MUD_SHORE_RADIUS / 1.1) * Math.sin(a);
+    at(x, z, a + Math.PI, MUD_SHORE_SPRAY);
+  }
+  return out;
+}
+
+// The bank grid spans 8 m; its outermost cells (beyond 3.5 m, where the bank is flat) are
+// stretched out to 40 m, so the grass runs to the horizon instead of ending in a square.
+function bankWarp(v) {
+  const a = Math.abs(v);
+  return a <= 3.5 ? v : Math.sign(v) * (3.5 + (a - 3.5) * 73);
+}
+
+function buildMud(engine, lib, settings, variant) {
   const { geometry } = lib;
+  const t = (variant?.timeMs ?? 1000) / 1000;
   daylight(engine);
   engine.setLight(MUD_LIGHT.sun);
   engine.setEnvironmentLighting(MUD_LIGHT.env);
@@ -333,11 +471,16 @@ function buildMud(engine, lib) {
   const rim = heightfield(geometry, 8, 8, 96, mudGround, (x, z, y) => {
     const g = Math.min(1, Math.max(0, (y - 0.02) / 0.12));
     return [0, 1, 2].map((i) => stain[i] + (grass[i] - stain[i]) * g).concat(1);
-  });
+  }, bankWarp);
   place(engine, upload(engine, rim, ground), [0, 0, 0]);
   const padMat = engine.addSurfaceMaterial(MUD_PAD);
-  let seed = 61;
-  for (const [x, z, r, h] of MUD_PADS) {
+  const crownMat = engine.addSurfaceMaterial({
+    color: MUD_CROWN.color,
+    roughness: MUD_CROWN.roughness,
+    clearcoat: MUD_CROWN.clearcoat,
+    clearcoatRoughness: MUD_CROWN.clearcoatRoughness,
+  });
+  MUD_PADS.forEach(([x, z, r, h], i) => {
     // A rounded inflatable disc: straight wall, quarter-round shoulder, slightly domed top.
     const shoulder = 0.35 * (h - 0.3);
     const profile = [[0, 0], [r, 0], [r, h - shoulder - 0.02]];
@@ -347,22 +490,9 @@ function buildMud(engine, lib) {
     }
     profile.push([0.5 * r, h], [0, h + 0.01]);
     place(engine, upload(engine, geometry.lathe(profile, 64), padMat), [x, -0.3, z]);
-    const ring = (count, phase, desc) => {
-      for (let k = 0; k < count; k++) {
-        const a = phase + (k / count) * Math.PI * 2;
-        const c = Math.cos(a);
-        const s = Math.sin(a);
-        engine.addEmitter({
-          ...desc,
-          position: [x + (r + 0.06) * c, 0.04, z + (r + 0.06) * s],
-          direction: [0.45 * c, 1, 0.45 * s],
-          seed: seed++,
-        });
-      }
-    };
-    ring(MUD_CROWN_POINTS, 0.3, MUD_CROWN);
-    ring(MUD_SPRAY_POINTS, 0.3 + Math.PI / MUD_CROWN_POINTS, MUD_SPRAY);
-  }
+    place(engine, upload(engine, mudCrown(geometry, [x, z, r], 0.7 + 1.9 * i, t), crownMat), [x, 0, z]);
+  });
+  for (const e of mudEmitters(t)) engine.addEmitter(e);
   const mud = engine.addSurfaceMaterial({ function: 'raa.liquid.mud', params: MUD });
   const mesh = upload(engine, mudMesh(geometry), mud);
   place(engine, mesh, [0, 0, 0]);
@@ -558,6 +688,9 @@ function buildParticlesToggle(engine, lib) {
   engine.addEmitter({ ...SNOW_EMITTER, position: [0, 1.5, 0], volume: [2, 1.5, 2], rate: 600, seed: 52 });
   engine.addEmitter({ ...SPARKLE_EMITTERS[0], position: [0.9, 0.6, 0], volume: [0.4, 0.4, 0.4], seed: 53 });
 }
+
+// Exposed for tests (examples/lookdev/test/): the mud set's emitters and crown mesh.
+export const mudSet = { emitters: mudEmitters, crown: mudCrown, height: mudHeight, crownStyle: MUD_CROWN, pads: MUD_PADS };
 
 const SETS = {
   water: buildWater,
