@@ -6,13 +6,16 @@
 //! opaque-colour mip and Schlick Fresnel. The `screen` provider of the `Transmission`
 //! slot ([`SCREEN_PROVIDER`], priority 10) evaluates them in WGSL on the opaque colour and
 //! depth copies, which the crate-private `opaque.copy` pass (order 70) fills while a
-//! Transparent draw exists. [`TRANSMISSIVE_BUILTINS`] holds the `raa.ice` and `raa.glass`
-//! material functions.
+//! Transparent draw exists. [`TRANSMISSIVE_BUILTINS`] holds the `raa.ice`, `raa.glass`,
+//! `raa.slime` and `raa.water` material functions. [`TransmissionFeature::install`]
+//! registers the built-ins, the `screen` provider and the `opaque.copy` pass.
 
 pub mod absorption;
 mod builtins;
 mod copy;
+mod feature;
 mod slot;
 
 pub use builtins::TRANSMISSIVE_BUILTINS;
+pub use feature::TransmissionFeature;
 pub use slot::SCREEN_PROVIDER;

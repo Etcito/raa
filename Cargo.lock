@@ -992,6 +992,7 @@ dependencies = [
 name = "raa-transmission"
 version = "0.1.0"
 dependencies = [
+ "raa-brdf",
  "raa-core",
  "raa-ibl",
  "raa-lit",
