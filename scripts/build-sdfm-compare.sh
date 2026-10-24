@@ -86,6 +86,16 @@ cp -R "$SDFM/index.js" "$SDFM/index.d.ts" "$SDFM/worker.js" "$SDFM/src" "$SDFM/p
 cp -R "$MAMA_BUILD" "$OUT/mama"
 mkdir -p "$OUT/common"
 cp -R web/common/. "$OUT/common/"
+# lib/mama-view.js imports SdfmError from the repository package (so node tests run it in
+# place); the staged page has that file at raa-sdfm/src/errors.js. The import is rewritten
+# to the staged copy because the GPU client serves the page under a sub-path, where the
+# repository-relative URL points outside the page.
+REPO_ERRORS="'../../../packages/raa-sdfm/src/errors.js'"
+grep -qF "$REPO_ERRORS" "$OUT/lib/mama-view.js" || {
+  echo "build-sdfm-compare.sh: lib/mama-view.js no longer imports $REPO_ERRORS" >&2
+  exit 1
+}
+sed -i "s#$REPO_ERRORS#'../raa-sdfm/src/errors.js'#" "$OUT/lib/mama-view.js"
 
 echo "== dist/sdfm-compare/scenes.json"
 N="$("$NODE" --input-type=module -e '

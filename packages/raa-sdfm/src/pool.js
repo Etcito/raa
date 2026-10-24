@@ -7,8 +7,28 @@ export function defaultPoolSize() {
   return Math.min(4, globalThis.navigator?.hardwareConcurrency || 2);
 }
 
+// A classic blob: worker that import()s the module worker: pages with an opaque origin (the GPU
+// client's sandboxed iframe) refuse both a worker from a URL and a blob: module worker. Messages
+// that arrive before the module is loaded are queued and dispatched again once its listener is
+// installed; an import failure is rethrown so the Worker's error event fires.
+function blobWorkerSource(href) {
+  return `let loaded = false;
+const queue = [];
+self.addEventListener('message', (ev) => { if (!loaded) queue.push(ev.data); });
+import(${JSON.stringify(href)}).then(() => {
+  loaded = true;
+  for (const data of queue.splice(0)) self.dispatchEvent(new MessageEvent('message', { data }));
+}, (e) => {
+  setTimeout(() => { throw new Error('worker ' + ${JSON.stringify(href)} + ' failed to load: ' + (e && e.message ? e.message : e)); });
+});
+`;
+}
+
 function defaultCreateWorker(url) {
-  return new Worker(url, { type: 'module' });
+  const href = new URL(String(url), globalThis.location?.href).href;
+  const blob = new Blob([blobWorkerSource(href)], { type: 'text/javascript' });
+  // Not revoked: the worker fetches its script after the constructor returns.
+  return new Worker(URL.createObjectURL(blob));
 }
 
 /**

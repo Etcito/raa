@@ -3,16 +3,6 @@
 <head>
   <meta charset="utf-8">
   <title>@etcito/raa-sdfm side-by-side compare</title>
-  <!-- lib/mama-view.js imports its SdfmError from the repository package
-       (../../../packages/raa-sdfm/src/errors.js, which works under node); the staged page has
-       the same file at raa-sdfm/src/errors.js. The import map points that URL at the staged copy. -->
-  <script type="importmap">
-    {
-      "imports": {
-        "/packages/raa-sdfm/src/errors.js": "./raa-sdfm/src/errors.js"
-      }
-    }
-  </script>
   <style>
     html, body { margin: 0; background: #0b0d12; color: #e6e6e6; font: 13px sans-serif; }
     canvas { display: block; }
@@ -22,11 +12,22 @@
     #status { opacity: 0.7; }
     #error { margin: 0; padding: 1em; color: #ff8a80; white-space: pre-wrap; }
     #error:empty { display: none; }
+    #mama-pane { position: relative; }
+    #mama-unavailable { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center;
+      padding: 2em; background: #1a1d24; color: #ffcc80; text-align: center; }
+    #mama-unavailable[hidden] { display: none; }
+    #mama-unavailable p { margin: 0.5em 0; color: #e6e6e6; opacity: 0.8; }
   </style>
 </head>
 <body>
   <div id="views">
-    <canvas id="mama" width="640" height="720"></canvas>
+    <div id="mama-pane">
+      <canvas id="mama" width="640" height="720"></canvas>
+      <div id="mama-unavailable" hidden>
+        <strong>SDF Modeler viewport unavailable</strong>
+        <p id="mama-unavailable-reason"></p>
+      </div>
+    </div>
     <canvas id="raa" width="640" height="720"></canvas>
   </div>
   <div id="bar">

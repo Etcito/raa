@@ -13,6 +13,8 @@ const raaCanvas = document.getElementById('raa');
 const picker = document.getElementById('picker');
 const statusLine = document.getElementById('status');
 const errorBox = document.getElementById('error');
+const mamaUnavailable = document.getElementById('mama-unavailable');
+const mamaUnavailableReason = document.getElementById('mama-unavailable-reason');
 
 // Uncaptured WebGPU errors of the current run (validation errors do not throw from
 // render()). A non-empty list rejects the op instead of accepting a wrong capture.
@@ -48,6 +50,11 @@ function showError(error) {
   // RaaError and SdfmError messages already start with "<code>: ".
   if (message.startsWith(`${code}: `)) message = message.slice(code.length + 2);
   errorBox.textContent = `${code}: ${message}`;
+  // lib/mama-view.js refuses while MAMA has no viewport host: label the left pane.
+  if (code === 'MAMA_HOST_UNAVAILABLE') {
+    mamaUnavailableReason.textContent = message;
+    mamaUnavailable.hidden = false;
+  }
 }
 
 // scenes.json (S14): [{ id, milestone, file }], file relative to the page ('scenes/x.js').
@@ -146,6 +153,7 @@ registerNmcGpu({
 async function runPicked() {
   const [scene, variant] = picker.value.split('--');
   errorBox.textContent = '';
+  mamaUnavailable.hidden = true;
   statusLine.textContent = `running ${picker.value}`;
   try {
     const r = await run({ scene, variant, width: 1280, height: 720 });
