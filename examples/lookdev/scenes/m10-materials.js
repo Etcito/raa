@@ -118,7 +118,8 @@ const NIGHT_SKY = {
 // (preview about 30, 0, 125 near the camera), so the reflections and pools carry the contrast.
 // That read as "a flat grid ... little lacquer gloss" (card 4818; ref-4's near decks are about
 // 86..146, 68..89, 159..213): (0.24, 0.08, 0.48) -> (0.3, 0.1, 0.5), with a wider soft sheen.
-const NEON_FLOOR = { color: [0.3, 0.1, 0.5], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
+// Card 4821: a touch deeper (0.26, 0.09, 0.5) under the brighter pools and the wear (p4).
+const NEON_FLOOR = { color: [0.26, 0.09, 0.5], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
 // Deck parameters (linear, raw user params): p0 = (seam colour, mirror ripple rad); p1 = (light
 // pool gain, extra mirror edge softness rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
 // groove shadow width m, panel tone variation).
@@ -142,11 +143,18 @@ const NEON_FLOOR = { color: [0.3, 0.1, 0.5], roughness: 0.2, clearcoat: 1, clear
 // hot core (deck_mirror, edges antialiased over a pixel + 2 mrad), wobbled by a 4 mrad
 // ripple; tube gain 3.5 -> 2.5 (the core is brighter than the old mean), and a wider, softer
 // sheen under the crisp image (broad lobe 0.12 -> 0.25 rad, weight 0.12 -> 0.2, stretch 2).
+// The judge then saw "a simple grid of thin lines with weak gloss" (card 4820; the capture's
+// high-pass detail was about 1/4 of ref-4's). p4 = (bevel glint gain, bevel width m, smudge
+// wear amp, fine mark wear amp): each panel gets a rounded lip next to the seam that catches
+// the tube pools as a coloured glint (pool-only: a sky term drew bright double seams, as in
+// card 4814), and the lacquer wears in smudges and fine wipe marks that modulate the mirror;
+// pool gain 1.8 -> 2.2, sky mirror 2.2 -> 1.7 (the pale lavender band washed out the deck).
 const NEON_DECK = {
   p0: [0.006, 0.002, 0.016, 0.004],
-  p1: [1.8, 0.002, 0.25, 0.2],
+  p1: [2.2, 0.002, 0.25, 0.2],
   p2: [0.8, 0.02, 0.03, 0.1],
-  p3: [2.2, 2.5, 0.35, 2.0],
+  p3: [1.7, 2.5, 0.35, 2.0],
+  p4: [0.5, 0.025, 0.7, 0.4],
 };
 // Night sky dome of the neon sets (demo.night-sky): radius m, a sphere around the set drawn
 // from inside. The procedural `night` sky is a flat gradient (judge, card 4811); the dome
@@ -163,7 +171,10 @@ const DECK_SEGMENT = 0.1;
 // below (card 4813) the halo is brighter at 0.1 / 0.9; 0.13 / 1 hazed the whole frame.
 // With the thicker tubes (TUBE_R) the halo carries ~1.8x the energy; 0.12 / 0.95 for the
 // "rich bloom" of ref-4 (judge, card 4816).
-const NEON_BLOOM = { strength: 0.12, radius: 0.95 };
+// That read as "softer and less physically rich" (card 4820): bloom is a mix without threshold,
+// so a strong one pales the whole frame (0.18..0.3 in the preview: a lavender haze; the
+// bloom-off frame was closer to ref-4). 0.1 / 0.85 keeps tight coloured halos on a crisp frame.
+const NEON_BLOOM = { strength: 0.1, radius: 0.85 };
 // +0.3 EV brings the night set towards ref-4's bright purple key (mean sRGB 134, 104, 177).
 const NEON_EXPOSURE_EV = 0.3;
 // raa.neon strength (emissive scale of the coloured gas) and core whiteness of every tube.
@@ -171,16 +182,21 @@ const NEON_EXPOSURE_EV = 0.3;
 // white while the body keeps its colour; at the old uniform glow, 12 read as "dim cores"
 // (judge, card 4813). Mean radiance over the tube's width, as a multiple of strength (body
 // 0.86 + core 4 x 0.8 x 0.41), for the deck lights: NEON_PROFILE_MEAN.
-const NEON_TUBE = { strength: 8, coreWhiteness: 0.8 };
+// Card 4821: AgX bleached the tubes and halos to pastel (bright-pixel saturation 0.29 against
+// ref-4's 0.51); strength 8 -> 5 keeps the body in AgX's coloured range, with a full-white
+// core (0.8 -> 1). ACES whitened them further. NEON_PROFILE_MEAN keeps the 0.8 value (the
+// pools are tuned with p1.x on top of it).
+const NEON_TUBE = { strength: 5, coreWhiteness: 1 };
 const NEON_PROFILE_MEAN = 2.16;
 // Neon colours (sRGB) and the shared tube radius (m). 2.5 cm tubes were ~7 px wide in the
 // capture: the judge saw thin tubes and thin reflections lacking ref-4's fat glowing bars
 // and rich bloom (card 4816); lib's neonTube letter (2.5 cm) is thickened to TUBE_R.
 // The S stands on the floor: it is lifted by the added radius.
-const NEON_PINK = [1, 0.25, 0.7];
-const NEON_CYAN = [0.15, 0.85, 1];
-const NEON_YELLOW = [1, 0.8, 0.2];
-const NEON_PURPLE = [0.6, 0.3, 1];
+// Card 4821: purer hues (less white in each) so the bodies and halos stay saturated.
+const NEON_PINK = [1, 0.12, 0.62];
+const NEON_CYAN = [0.05, 0.8, 1];
+const NEON_YELLOW = [1, 0.72, 0.05];
+const NEON_PURPLE = [0.72, 0.18, 1];
 const TUBE_R = 0.045;
 const LETTER_R = 0.025;
 
@@ -287,12 +303,14 @@ fn sky_cloud_field(dir: vec3<f32>) -> vec2<f32> {
   let w = vec2<f32>(raa_fbm3(vec3<f32>(c * 0.7, 3.3), 3), raa_fbm3(vec3<f32>(c * 0.7, 8.9), 3)) * 0.5;
   let big = 1.0 - raa_voronoi3(vec3<f32>(c + w, 0.5)).x * 1.25;
   let small = 1.0 - raa_voronoi3(vec3<f32>((c + w) * 2.6, 2.5)).x * 1.25;
+  // Third, finest puff octave: the cauliflower edges of cumulus (card 4820: "flat sprites").
+  let tiny = 1.0 - raa_voronoi3(vec3<f32>((c + w) * 7.0, 4.5)).x * 1.25;
   let heap = raa_fbm3(vec3<f32>(az * 1.6, 0.3, 5.1), 3) * 0.5 + 0.5;
   let top = 0.05 + 0.22 * smoothstep(0.32, 0.66, heap);
   let h = clamp(up / top, 0.0, 1.5);
-  let field = 0.7 * big + 0.3 * small + 0.75 * (1.0 - h) - 0.4;
-  let rho = smoothstep(0.33, 0.52, field) * smoothstep(-0.01, 0.01, up) * (1.0 - smoothstep(0.9, 1.3, h));
-  return vec2<f32>(rho, clamp(small, 0.0, 1.0));
+  let field = 0.6 * big + 0.28 * small + 0.12 * tiny + 0.75 * (1.0 - h) - 0.4;
+  let rho = smoothstep(0.34, 0.5, field) * smoothstep(-0.01, 0.01, up) * (1.0 - smoothstep(0.9, 1.3, h));
+  return vec2<f32>(rho, clamp(0.7 * small + 0.3 * tiny, 0.0, 1.0));
 }
 
 fn sky_cloud_density(dir: vec3<f32>) -> f32 {
@@ -306,11 +324,12 @@ fn sky_cloud(dir: vec3<f32>, cf: vec2<f32>) -> vec3<f32> {
   let toward = sky_cloud_density(normalize(dir + vec3<f32>(0.015, 0.045, 0.0)));
   let lit = exp(-3.0 * max(toward - rho * 0.3, 0.0));
   let up = max(dir.y, 0.0);
-  let shadow = vec3<f32>(0.06, 0.03, 0.15);
-  let light = vec3<f32>(0.55, 0.42, 0.82);
-  let under = vec3<f32>(0.2, 0.05, 0.2) * exp(-up * 30.0);
-  let relief = 0.55 + 0.45 * smoothstep(0.0, 0.7, cf.y);
-  return mix(shadow, light, lit * relief) * (0.6 + 0.4 * rho) + under;
+  // Deep violet cores and bases, pink-lavender lit tops.
+  let shadow = vec3<f32>(0.035, 0.015, 0.11);
+  let light = vec3<f32>(0.52, 0.24, 0.86);
+  let under = vec3<f32>(0.22, 0.04, 0.2) * exp(-up * 30.0);
+  let relief = 0.4 + 0.6 * smoothstep(0.1, 0.8, cf.y);
+  return mix(shadow, light, lit * relief) * (0.55 + 0.45 * rho) + under;
 }
 
 fn sky_night(dir: vec3<f32>, stars: f32) -> vec3<f32> {
@@ -448,8 +467,21 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   // mirrored the bright horizon and drew the seams as bright lines, judge card 4814).
   let groove = 1.0 - 0.6 * (1.0 - smoothstep(0.5 * seam_w, 0.5 * seam_w + groove_w, d)) * (1.0 - seam) * top * fade;
   // Uneven polish: wipe-like streaks (long along X) where the lacquer mirrors more or less.
-  let polish = 1.0 + polish_amp * clamp(raa_fbm3(vec3<f32>(in.position.x * 0.8, in.position.z * 2.5, 3.1), 4) * 1.5, -1.0, 1.0);
-  o.base_color = mix(o.base_color * shade * groove, seam_color, seam);
+  var polish = 1.0 + polish_amp * clamp(raa_fbm3(vec3<f32>(in.position.x * 0.8, in.position.z * 2.5, 3.1), 4) * 1.5, -1.0, 1.0);
+  // Lacquer wear (p4.zw): smudges and fine wipe marks, long along X, fading with distance
+  // before they alias; they modulate the mirror and darken the base slightly, so the deck
+  // reads as a used, wet lacquer instead of a flat gradient (ref-4's decks, judge card 4820).
+  let near = 1.0 - smoothstep(2.0, 6.0, cam_dist);
+  let smudge = raa_fbm3(vec3<f32>(in.position.x * 3.0, in.position.z * 9.0, 1.7), 4);
+  let marks = raa_fbm3(vec3<f32>(in.position.x * 6.0, in.position.z * 40.0, 5.3), 3);
+  let wear = (in.record.p[4].z * smudge * 1.4 + in.record.p[4].w * marks * near) * fade;
+  polish = max(polish * (1.0 + wear), 0.15);
+  // Bevelled panel edge (p4.y wide, next to the seam): a rounded lip that catches the tube
+  // light as a coloured glint (p4.x), so the panels read as thick lacquered slabs.
+  let bevel_w = max(in.record.p[4].y, 1e-4);
+  let lip = (d - 0.5 * seam_w) / bevel_w;
+  let rim = exp(-8.0 * (lip - 0.4) * (lip - 0.4)) * smoothstep(-0.2, 0.15, lip) * (1.0 - seam) * top * fade;
+  o.base_color = mix(o.base_color * shade * groove * (1.0 - 0.4 * clamp(wear, -1.0, 1.0)), seam_color, seam);
   o.roughness = mix(o.roughness, 0.8, seam);
   o.clearcoat = o.clearcoat * (1.0 - seam);
 
@@ -473,7 +505,8 @@ DECK_LIGHTS
   // Lacquer mirror of the night sky (no stars: they would alias on the panels).
   let sky = sky_night(rd, 0.0) * in.record.p[3].x * o.clearcoat;
   let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w) * in.record.p[3].y + sky) * fres * polish;
-  o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam) * groove) * top;
+  let glint = pool * gain * in.record.p[4].x * rim;
+  o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam) * groove) * top + glint;
   return o;
 }
 `;
