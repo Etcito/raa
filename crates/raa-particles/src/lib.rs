@@ -14,6 +14,7 @@
 mod desc;
 mod gpu;
 mod shaders;
+mod sim;
 mod spawn;
 mod state;
 
