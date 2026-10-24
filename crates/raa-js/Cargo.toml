@@ -37,6 +37,8 @@ raa-matfn = { path = "../raa-matfn" }
 raa-brdf = { path = "../raa-brdf" }
 raa-fur = { path = "../raa-fur" }
 raa-bloom = { path = "../raa-bloom" }
+raa-transmission = { path = "../raa-transmission" }
+raa-oit = { path = "../raa-oit" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
