@@ -53,7 +53,12 @@ fn liquid_detail_normal(
     let h0 = liquid_detail_height(world_pos, t, scale);
     let du = (liquid_detail_height(world_pos + tangent0 * e, t, scale) - h0) / e;
     let dv = (liquid_detail_height(world_pos + bitangent0 * e, t, scale) - h0) / e;
-    let ts_normal = normalize(vec3<f32>(-du * strength, -dv * strength, 1.0));
+    // Cap the tilt so a large fbm gradient can never turn the shading normal on its side
+    // (the sky then reads as a mottled blue skin instead of a glossy surface).
+    let tilt = vec2<f32>(-du, -dv) * clamp(strength, 0.0, 1.0);
+    let m = length(tilt);
+    let limited = tilt * select(1.0, 1.2 / max(m, 1e-6), m > 1.2);
+    let ts_normal = normalize(vec3<f32>(limited.x, limited.y, 1.0));
     return raa_perturb_normal(nn, tangent, ts_normal);
 }
 
@@ -70,12 +75,24 @@ fn liquid_shore(frag: vec4<f32>, foam_width: f32) -> f32 {
     return 1.0 - smoothstep(0.0, max(foam_width, 1e-4), opaque_dist - surface_dist);
 }
 
-// Foam amount in [0, 1] from the shore term plus `amount` times the crest term, broken up
-// by an animated noise mask.
+// 1 at the border of the liquid mesh (uv 0/1) falling to 0 `width` (uv fraction) inside.
+// A river ends at the channel wall where the opaque depth copy shows only the deep bed,
+// so the depth-based shore term is 0 there; this term draws the contact foam line.
+fn liquid_mesh_edge(uv: vec2<f32>, width: f32) -> f32 {
+    let d = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    return 1.0 - smoothstep(0.0, max(width, 1e-4), d);
+}
+
+// Foam amount in [0, 1] from the shore term plus `amount` times the crest term. A two
+// octave noise mask broken into lace keeps the foam thin and stringy (a smooth mask turned
+// every whitecap into a milky blob, card 4940).
 fn liquid_foam(shore: f32, crest: f32, world_pos: vec3<f32>, t: f32, amount: f32) -> f32 {
     let drift = vec3<f32>(0.0, 0.4 * t, 0.23 * t);
-    let breakup = clamp(0.5 + 0.5 * raa_noise3(world_pos * 2.3 + drift), 0.0, 1.0);
-    return clamp((shore + crest * amount) * breakup, 0.0, 1.0);
+    let n = 0.62 * raa_noise3(world_pos * 6.5 + drift) + 0.38 * raa_noise3(world_pos * 15.0 - drift * 1.6);
+    let breakup = smoothstep(0.3, 0.78, clamp(0.5 + 0.5 * n, 0.0, 1.0));
+    // Whitecaps only at the sharp crests, so the foam reads as lines rather than a haze.
+    let caps = smoothstep(0.1, 0.45, crest) * clamp(amount, 0.0, 1.0);
+    return clamp(max(shore, caps) * breakup, 0.0, 1.0);
 }
 
 // White, rough and opaque where the foam covers the surface; the transmitted part falls

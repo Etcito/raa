@@ -26,11 +26,11 @@ const ENV = { diffuse: 0.7, specular: 1 };
 
 // Orbit cameras: [target, distance m, yaw rad, pitch rad].
 const CAMERAS = {
-  water: [[0, -0.1, -0.3], 5.2, 0.35, 0.42],
-  slime: [[0, 0, 0], 4.6, 0.2, 0.5],
-  mud: [[0, -0.1, 0], 5.0, -0.3, 0.5],
+  water: [[0, -0.1, -0.3], 5.0, 0.35, 0.45],
+  slime: [[0, 0, 0], 4.5, 0.2, 0.52],
+  mud: [[0, -0.05, 0], 4.9, -0.3, 0.48],
   snow: [[0, 0.8, -0.8], 6.0, 0.3, 0.28],
-  confetti: [[0, 1.4, -0.4], 6.2, 0.15, 0.25],
+  confetti: [[0, 1.4, -0.4], 5.2, 0.15, 0.3],
   sparkles: [[0, 0.45, 0], 2.4, 0, 0.15],
   particles: [[0, 0.6, 0], 4.2, 0.25, 0.35],
 };
@@ -41,25 +41,48 @@ const FLOOR_Y = -0.5;
 const TILES_N = 12;
 
 const WATER = {
-  deepColor: [0.0, 0.5, 0.75],
-  shallowColor: [0.35, 0.95, 0.85],
-  clarity: 0.5,
-  foamWidth: 0.2,
-  foamAmount: 0.9,
+  deepColor: [0.0, 0.36, 0.66],
+  shallowColor: [0.22, 0.85, 0.95],
+  clarity: 0.65,
+  foamWidth: 0.18,
+  foamAmount: 1.0,
+  detailStrength: 0.03,
+  detailScale: 1.5,
 };
+// Pink inflatable rim of the water basin (three sides; the sand beach closes the back).
+const BASIN_WALL = { half: 0.4, thickness: 0.15, color: [1, 0.42, 0.62] };
 const WATER_IOR = 1.33;
 const WATER_THICKNESS = 0.5;
 
-const SLIME = { color: [0.42, 1, 0.12], absorption: 5, glossiness: 0.92, bubbleScale: 0.05, foamAmount: 0.3 };
+const SLIME = {
+  color: [0.42, 1, 0.12],
+  absorption: 6,
+  glossiness: 0.96,
+  bubbleScale: 0.28,
+  foamWidth: 0.12,
+  foamAmount: 0.7,
+  detailStrength: 0.08,
+  detailScale: 0.5,
+};
 const SLIME_IOR = 1.38;
 const SLIME_THICKNESS = 0.3;
+// Pads stand in the channel and rise above the slime surface (base at FLOOR_Y): the
+// pink, orange and blue tops sit 0.22, 0.2 and 0.18 m above it.
 const SLIME_PADS = [
-  { r: 0.4, h: 0.45, x: -1.2, z: 0.2, color: [1, 0.3, 0.55] },
-  { r: 0.3, h: 0.4, x: 0.7, z: -0.4, color: [1, 0.55, 0.1] },
-  { r: 0.35, h: 0.42, x: 1.7, z: 0.5, color: [0.25, 0.5, 1] },
+  { r: 0.42, h: 0.72, x: -1.7, z: 0.15, color: [1, 0.3, 0.55] },
+  { r: 0.34, h: 0.7, x: 0.0, z: -0.1, color: [1, 0.55, 0.1] },
+  { r: 0.38, h: 0.68, x: 1.65, z: 0.35, color: [0.25, 0.5, 1] },
 ];
 
-const MUD = { color: [0.32, 0.22, 0.14], wetness: 0.9, bubbleScale: 0.2, bubbleRate: 0.8, foamAmount: 0.15 };
+const MUD = {
+  color: [0.4, 0.27, 0.15],
+  wetness: 0.8,
+  bubbleScale: 0.55,
+  bubbleRate: 0.18,
+  foamAmount: 0.08,
+  detailStrength: 0.12,
+  detailScale: 0.35,
+};
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
   [-1.2, -0.9, 0.5, 0.7, -0.05],
@@ -125,8 +148,8 @@ function heightfield(geometry, w, d, n, height, colour) {
   return { ...desc, positions: p, normals: nrm, colors: col };
 }
 
-function rock(engine, geometry, [x, z, r, squash, y], color = [0.45, 0.42, 0.4]) {
-  const m = engine.addSurfaceMaterial({ color, roughness: 0.85 });
+function rock(engine, geometry, [x, z, r, squash, y], color = [0.42, 0.42, 0.43]) {
+  const m = engine.addSurfaceMaterial({ color, roughness: 0.8 });
   place(engine, upload(engine, geometry.uvSphere(r, 32, 16), m), [x, y, z], [1, squash, 1]);
 }
 
@@ -149,6 +172,17 @@ function buildWater(engine, lib) {
   const sandMat = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.95 });
   place(engine, upload(engine, beach, sandMat), [0, 0, -2.0]);
   for (const r of ROCKS) rock(engine, geometry, r);
+  // The pink inflatable rim of the basin, so the water reads as contained; the beach at
+  // the back is its fourth shore.
+  const wallMat = engine.addSurfaceMaterial({ color: BASIN_WALL.color, roughness: 0.3, clearcoat: 1 });
+  const reach = LIQUID_SIZE / 2 + BASIN_WALL.thickness;
+  const wallY = FLOOR_Y + BASIN_WALL.half;
+  for (const sx of [-1, 1]) {
+    const wall = geometry.roundedBox([BASIN_WALL.thickness, BASIN_WALL.half, reach], 0.06, 4);
+    place(engine, upload(engine, wall, wallMat), [sx * (LIQUID_SIZE / 2 + BASIN_WALL.thickness), wallY, 0]);
+  }
+  const front = geometry.roundedBox([reach, BASIN_WALL.half, BASIN_WALL.thickness], 0.06, 4);
+  place(engine, upload(engine, front, wallMat), [0, wallY, LIQUID_SIZE / 2 + BASIN_WALL.thickness]);
   return liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
     function: 'raa.liquid.water',
     params: WATER,
@@ -170,6 +204,8 @@ function buildSlime(engine, lib) {
   for (const s of [-1, 1]) {
     const wall = geometry.roundedBox([W / 2 + 0.1, 0.4, 0.15], 0.05, 4);
     place(engine, upload(engine, wall, wallMat), [0, FLOOR_Y + 0.4, s * (D / 2 + 0.15)]);
+    const cap = geometry.roundedBox([0.15, 0.4, D / 2 + 0.3], 0.05, 4);
+    place(engine, upload(engine, cap, wallMat), [s * (W / 2 + 0.15), FLOOR_Y + 0.4, 0]);
   }
   for (const p of SLIME_PADS) {
     const m = engine.addSurfaceMaterial({ color: p.color, roughness: 0.25, clearcoat: 1 });
@@ -194,12 +230,10 @@ function buildMud(engine, lib) {
     (x, z) => -0.05 + 0.25 * Math.max(0, (Math.hypot(x, z * 1.1) - 2.8) / 1.2),
     () => [1, 1, 1, 1]);
   place(engine, upload(engine, rim, ground), [0, 0, 0]);
-  for (const r of MUD_ROCKS) rock(engine, geometry, r);
+  for (const r of MUD_ROCKS) rock(engine, geometry, r, [0.36, 0.32, 0.27]);
   liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
     function: 'raa.liquid.mud',
     params: MUD,
-    clearcoat: 1,
-    clearcoatRoughness: 0.08,
   }, [0, 0, 0]);
 }
 
@@ -313,10 +347,10 @@ const CANNON_LENGTH = 0.8;
 const CONFETTI_EMITTER = {
   kind: 'confetti',
   spread: 0.3,
-  rate: 320,
-  lifetime: [3, 5],
-  speed: [5, 8],
-  size: [0.03, 0.05],
+  rate: 420,
+  lifetime: [2.5, 4.5],
+  speed: [4.5, 7.5],
+  size: [0.045, 0.08],
   drag: 1.5,
   groundY: 0,
   colors: CONFETTI_COLORS,

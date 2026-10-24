@@ -14,8 +14,8 @@
 //! The wave packing is the one of `src/waves.rs`: `p[0..4]` is wave `i` as
 //! `(amplitude m, wavelength m, direction angle rad, steepness)`, `p[4]` the four speeds in
 //! m/s. The water speeds are the deep-water dispersion `sqrt(9.81 L / 2 pi)`; the slime
-//! scales the amplitudes by 0.4 and the speeds by 0.25 of the water defaults; the mud keeps
-//! the water layout at 0.25x amplitude and 0.08x speed (a slow viscous swell).
+//! scales the amplitudes by 0.6 and the speeds by 0.25 of the water defaults; the mud keeps
+//! the water layout at 0.4x amplitude and 0.08x speed (a slow viscous swell).
 
 use raa_lit::{FLAG_TRANSMISSIVE, FLAG_VERTEX_FN};
 use raa_matfn::{BuiltinFn, DrawClass, ParamKind, ParamSpec};
@@ -74,62 +74,62 @@ pub const LIQUID_BUILTINS: &[BuiltinFn] = &[
 
 /// Water parameters: four Gerstner waves, their speeds and the water look.
 static WATER_PARAMS: [ParamSpec; 12] = [
-    wave("wave0", [0.035, 1.6, 0.3, 0.6], 0),
-    wave("wave1", [0.02, 0.9, 1.4, 0.5], 1),
-    wave("wave2", [0.012, 0.55, -0.7, 0.4], 2),
-    wave("wave3", [0.006, 0.31, 2.4, 0.35], 3),
-    speed(4, [1.5805, 1.1854, 0.9267, 0.6957]),
+    wave("wave0", [0.05, 2.2, 0.3, 0.6], 0),
+    wave("wave1", [0.03, 1.2, 1.4, 0.5], 1),
+    wave("wave2", [0.016, 0.7, -0.7, 0.4], 2),
+    wave("wave3", [0.008, 0.42, 2.4, 0.35], 3),
+    speed(4, [1.8533, 1.3688, 1.0454, 0.8098]),
     ParamSpec {
         name: "deepColor",
         kind: ParamKind::Color,
-        default: [0.05, 0.45, 0.55, 0.0],
+        default: [0.0, 0.42, 0.62, 0.0],
         slot: (5, 0),
     },
     ParamSpec {
         name: "clarity",
         kind: ParamKind::Float,
-        default: [0.7, 0.0, 0.0, 0.0],
+        default: [0.6, 0.0, 0.0, 0.0],
         slot: (5, 3),
     },
     ParamSpec {
         name: "shallowColor",
         kind: ParamKind::Color,
-        default: [0.55, 0.92, 0.88, 0.0],
+        default: [0.3, 0.9, 0.82, 0.0],
         slot: (6, 0),
     },
     ParamSpec {
         name: "foamWidth",
         kind: ParamKind::Float,
-        default: [0.12, 0.0, 0.0, 0.0],
+        default: [0.3, 0.0, 0.0, 0.0],
         slot: (6, 3),
     },
     ParamSpec {
         name: "foamAmount",
         kind: ParamKind::Float,
-        default: [0.6, 0.0, 0.0, 0.0],
+        default: [0.9, 0.0, 0.0, 0.0],
         slot: (7, 0),
     },
     ParamSpec {
         name: "detailStrength",
         kind: ParamKind::Float,
-        default: [0.15, 0.0, 0.0, 0.0],
+        default: [0.03, 0.0, 0.0, 0.0],
         slot: (7, 1),
     },
     ParamSpec {
         name: "detailScale",
         kind: ParamKind::Float,
-        default: [3.0, 0.0, 0.0, 0.0],
+        default: [1.4, 0.0, 0.0, 0.0],
         slot: (7, 2),
     },
 ];
 
 /// Slime parameters: the same waves at 0.4 amplitude and 0.25 speed, and the slime look.
 static SLIME_PARAMS: [ParamSpec; 13] = [
-    wave("wave0", [0.014, 1.6, 0.3, 0.6], 0),
-    wave("wave1", [0.008, 0.9, 1.4, 0.5], 1),
-    wave("wave2", [0.0048, 0.55, -0.7, 0.4], 2),
-    wave("wave3", [0.0024, 0.31, 2.4, 0.35], 3),
-    speed(4, [0.39513, 0.29635, 0.23167, 0.17393]),
+    wave("wave0", [0.03, 2.2, 0.3, 0.6], 0),
+    wave("wave1", [0.018, 1.2, 1.4, 0.5], 1),
+    wave("wave2", [0.0096, 0.7, -0.7, 0.4], 2),
+    wave("wave3", [0.0048, 0.42, 2.4, 0.35], 3),
+    speed(4, [0.46334, 0.34220, 0.26136, 0.20245]),
     ParamSpec {
         name: "color",
         kind: ParamKind::Color,
@@ -151,83 +151,83 @@ static SLIME_PARAMS: [ParamSpec; 13] = [
     ParamSpec {
         name: "bubbleScale",
         kind: ParamKind::Float,
-        default: [0.05, 0.0, 0.0, 0.0],
+        default: [0.2, 0.0, 0.0, 0.0],
         slot: (6, 1),
     },
     ParamSpec {
         name: "foamWidth",
         kind: ParamKind::Float,
-        default: [0.06, 0.0, 0.0, 0.0],
+        default: [0.14, 0.0, 0.0, 0.0],
         slot: (6, 3),
     },
     ParamSpec {
         name: "foamAmount",
         kind: ParamKind::Float,
-        default: [0.25, 0.0, 0.0, 0.0],
+        default: [0.45, 0.0, 0.0, 0.0],
         slot: (7, 0),
     },
     ParamSpec {
         name: "detailStrength",
         kind: ParamKind::Float,
-        default: [0.08, 0.0, 0.0, 0.0],
+        default: [0.02, 0.0, 0.0, 0.0],
         slot: (7, 1),
     },
     ParamSpec {
         name: "detailScale",
         kind: ParamKind::Float,
-        default: [2.0, 0.0, 0.0, 0.0],
+        default: [1.4, 0.0, 0.0, 0.0],
         slot: (7, 2),
     },
 ];
 
-/// Mud parameters: the water wave layout at 0.25x amplitude and 0.08x speed, and the wet
+/// Mud parameters: the water wave layout at 0.4x amplitude and 0.08x speed, and the wet
 /// mud look with its slow bubble field.
 static MUD_PARAMS: [ParamSpec; 12] = [
-    wave("wave0", [0.00875, 1.6, 0.3, 0.6], 0),
-    wave("wave1", [0.005, 0.9, 1.4, 0.5], 1),
-    wave("wave2", [0.003, 0.55, -0.7, 0.4], 2),
-    wave("wave3", [0.0015, 0.31, 2.4, 0.35], 3),
-    speed(4, [0.12644, 0.094832, 0.074136, 0.055656]),
+    wave("wave0", [0.02, 2.2, 0.3, 0.6], 0),
+    wave("wave1", [0.012, 1.2, 1.4, 0.5], 1),
+    wave("wave2", [0.0064, 0.7, -0.7, 0.4], 2),
+    wave("wave3", [0.0032, 0.42, 2.4, 0.35], 3),
+    speed(4, [0.14827, 0.10950, 0.08363, 0.06478]),
     ParamSpec {
         name: "color",
         kind: ParamKind::Color,
-        default: [0.32, 0.22, 0.14, 0.0],
+        default: [0.48, 0.32, 0.18, 0.0],
         slot: (5, 0),
     },
     ParamSpec {
         name: "wetness",
         kind: ParamKind::Float,
-        default: [0.8, 0.0, 0.0, 0.0],
+        default: [0.7, 0.0, 0.0, 0.0],
         slot: (5, 3),
     },
     ParamSpec {
         name: "bubbleScale",
         kind: ParamKind::Float,
-        default: [0.18, 0.0, 0.0, 0.0],
+        default: [0.55, 0.0, 0.0, 0.0],
         slot: (6, 0),
     },
     ParamSpec {
         name: "bubbleRate",
         kind: ParamKind::Float,
-        default: [0.6, 0.0, 0.0, 0.0],
+        default: [0.18, 0.0, 0.0, 0.0],
         slot: (6, 1),
     },
     ParamSpec {
         name: "foamAmount",
         kind: ParamKind::Float,
-        default: [0.15, 0.0, 0.0, 0.0],
+        default: [0.2, 0.0, 0.0, 0.0],
         slot: (7, 0),
     },
     ParamSpec {
         name: "detailStrength",
         kind: ParamKind::Float,
-        default: [0.25, 0.0, 0.0, 0.0],
+        default: [0.02, 0.0, 0.0, 0.0],
         slot: (7, 1),
     },
     ParamSpec {
         name: "detailScale",
         kind: ParamKind::Float,
-        default: [4.0, 0.0, 0.0, 0.0],
+        default: [1.8, 0.0, 0.0, 0.0],
         slot: (7, 2),
     },
 ];
