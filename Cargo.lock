@@ -997,6 +997,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-shafts"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-math",
+ "raa-pipeline",
+ "raa-shader",
+ "raa-shadow",
+]
+
+[[package]]
 name = "raa-sky"
 version = "0.1.0"
 dependencies = [
