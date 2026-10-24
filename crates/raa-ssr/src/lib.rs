@@ -3,5 +3,7 @@
 
 mod desc;
 pub mod hiz;
+mod resources;
+mod shaders;
 
 pub use desc::SsrDesc;
