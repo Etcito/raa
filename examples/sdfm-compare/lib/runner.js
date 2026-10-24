@@ -29,7 +29,7 @@ const BACKGROUND = [0.3, 0.34, 0.4];
 
 // The page root: lib/runner.js lives one level below dist/sdfm-compare/.
 const PAGE_ROOT = new URL('../', import.meta.url);
-// MAMA's browser build entry (README, "Browser build": dist/browser/index.js).
+// MAMA's staged browser bundle, same paths as MAMA's dist/ (README, "Browser build").
 const MAMA_ENTRY = 'mama/index.js';
 // The worker of the staged raa-sdfm package (build-sdfm-compare.sh copies it next to lib/).
 const WORKER_URL = new URL('raa-sdfm/worker.js', PAGE_ROOT);

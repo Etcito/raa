@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Build the SDF Modeler comparison page: scripts/build-sdfm-compare.sh --mama <dir>
 #
-# <dir> is the MAMA checkout (e.g. ../MAMA) or directly its browser build directory
-# (MAMA's dist/browser/, produced by `npm run build` in MAMA; see the `## MAMA calls`
-# section of packages/raa-sdfm/README.md). Nothing is built or written inside MAMA.
+# <dir> is the MAMA checkout (e.g. ../MAMA) with its build (dist/, produced by `npm run build`
+# in MAMA) and its node_modules. Nothing is built or written inside MAMA.
+#
+# MAMA's dist/ is tsc output: its modules import npm packages by bare specifier
+# (@paramesh/*, three, ...), which a browser worker cannot resolve (no import map in
+# workers). The page therefore gets a browser ESM bundle of the MAMA entry points the
+# bridge imports (see the `## MAMA calls` section of packages/raa-sdfm/README.md), made with
+# MAMA's own esbuild into dist/sdfm-compare/mama/ at the same paths as under MAMA's dist/,
+# plus manifold.wasm next to the chunks (manifold-3d resolves it from import.meta.url).
 #
 # Runs scripts/build-package.sh, then rebuilds dist/sdfm-compare/ from
 # examples/sdfm-compare/**, dist/package/raa/ (as raa/), the raa-sdfm sources (as
@@ -35,24 +41,32 @@ done
 
 NODE="${NODE:-node}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MAMA_BUILD_REL="dist/browser"
 MAMA_BUILD_CMD="npm run build"
-MAMA_MARKER="compute-worker.js"
+# Entry points under MAMA's dist/ (importMama in packages/raa-sdfm/src/mama-bridge.js, plus the
+# compute worker setupBrowserHost loads).
+MAMA_ENTRIES=(index.js core/game/mesh-assets.js core/material-graph/helpers.js browser/index.js browser/compute-worker.js)
 
 if [ ! -d "$MAMA_ARG" ]; then
   echo "build-sdfm-compare.sh: --mama $MAMA_ARG is not a directory" >&2
   exit 1
 fi
 MAMA_ABS="$(cd "$MAMA_ARG" && pwd)"
-if [ -f "$MAMA_ABS/$MAMA_MARKER" ]; then
-  MAMA_BUILD="$MAMA_ABS"
-elif [ -f "$MAMA_ABS/$MAMA_BUILD_REL/$MAMA_MARKER" ]; then
-  MAMA_BUILD="$MAMA_ABS/$MAMA_BUILD_REL"
-else
-  echo "build-sdfm-compare.sh: MAMA browser build not found ($MAMA_BUILD_REL/$MAMA_MARKER under $MAMA_ABS);" \
-    "build it in the MAMA checkout with \`$MAMA_BUILD_CMD\` (this script never builds MAMA)" >&2
-  exit 1
-fi
+MAMA_DIST="$MAMA_ABS/dist"
+for e in "${MAMA_ENTRIES[@]}"; do
+  if [ ! -f "$MAMA_DIST/$e" ]; then
+    echo "build-sdfm-compare.sh: MAMA build not found (dist/$e under $MAMA_ABS);" \
+      "build it in the MAMA checkout with \`$MAMA_BUILD_CMD\` (this script never builds MAMA)" >&2
+    exit 1
+  fi
+done
+MAMA_ESBUILD="$MAMA_ABS/node_modules/.bin/esbuild"
+MAMA_MANIFOLD_WASM="$MAMA_ABS/node_modules/manifold-3d/manifold.wasm"
+for f in "$MAMA_ESBUILD" "$MAMA_MANIFOLD_WASM"; do
+  if [ ! -e "$f" ]; then
+    echo "build-sdfm-compare.sh: $f missing; install MAMA's dependencies in the MAMA checkout" >&2
+    exit 1
+  fi
+done
 
 cd "$ROOT"
 bash "$ROOT/scripts/build-package.sh"
@@ -83,7 +97,14 @@ rm -rf "$OUT/raa" "$OUT/raa-sdfm" "$OUT/mama" "$OUT/common"
 cp -R "$PKG" "$OUT/raa"
 mkdir -p "$OUT/raa-sdfm"
 cp -R "$SDFM/index.js" "$SDFM/index.d.ts" "$SDFM/worker.js" "$SDFM/src" "$SDFM/package.json" "$OUT/raa-sdfm/"
-cp -R "$MAMA_BUILD" "$OUT/mama"
+mkdir -p "$OUT/mama"
+# node: imports are dynamic, node-only branches of MAMA; they stay external and never run in the page.
+(cd "$MAMA_DIST" && "$MAMA_ESBUILD" "${MAMA_ENTRIES[@]}" --bundle --splitting --format=esm \
+  --platform=browser --external:'node:*' --outbase=. --outdir="$OUT/mama" --log-level=error)
+cp "$MAMA_MANIFOLD_WASM" "$OUT/mama/manifold.wasm"
+for e in "${MAMA_ENTRIES[@]}"; do
+  [ -f "$OUT/mama/$e" ] || { echo "build-sdfm-compare.sh: MAMA bundle lacks mama/$e" >&2; exit 1; }
+done
 mkdir -p "$OUT/common"
 cp -R web/common/. "$OUT/common/"
 # lib/mama-view.js imports SdfmError from the repository package (so node tests run it in
