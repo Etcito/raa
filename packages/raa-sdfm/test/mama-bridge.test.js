@@ -122,8 +122,9 @@ test('the material key is the sha256 of its canonical record and is stable', asy
   const paint = a.materials.find((m) => m.name === 'paint');
   assert.deepEqual(Object.keys(paint), ['name', 'key', 'body', 'helpers', 'constants', 'fields']);
   assert.equal(paint.body, PAINT_BODY);
-  assert.deepEqual(paint.helpers.map((h) => h.id), ['axes', 'tri', 'pat_stripes']);
-  assert.equal(paint.helpers[2].wgsl, fakeMama.HELPERS.pat_stripes.code);
+  assert.deepEqual(paint.helpers.map((h) => h.id), ['base', 'axes', 'tri', 'pat_stripes']);
+  assert.equal(paint.helpers[0].wgsl, fakeMama.BASE_WGSL);
+  assert.equal(paint.helpers[3].wgsl, fakeMama.HELPERS.pat_stripes.code);
   assert.deepEqual(paint.constants, [1061997773, 1048576000, 1040187392, 1, 1090519040]);
   assert.deepEqual(paint.fields, [...MATERIAL_FULL_FIELDS]);
   assert.deepEqual(paint.fields, ['base_color', 'metallic', 'roughness', 'emissive', 'height']);
@@ -157,4 +158,16 @@ test('the browser pool comes from setupBrowserHost', () => {
   const call = fakeMama.calls.findLast((c) => c.fn === 'setupBrowserHost');
   assert.deepEqual(call.options, { workerUrl: 'w.js', manifoldWasmUrl: 'manifold.wasm', size: 2 });
   assert.throws(() => createBrowserPool({}, { workerUrl: 'w.js', manifoldWasmUrl: 'm.wasm' }), rejectsWith('sdfm.worker'));
+});
+
+test('MAMA BASE_WGSL is the first helper, so a body calling mat_clamp01 maps to WGSL defining it', async () => {
+  const out = await meshDocument(fakeMama, doc(), { pool: fakeMama.fakePool() });
+  for (const m of out.materials) {
+    assert.equal(m.helpers[0].id, 'base');
+    assert.equal(m.helpers[0].wgsl, fakeMama.BASE_WGSL);
+  }
+  const { BASE_WGSL, ...noBase } = fakeMama;
+  assert.ok(BASE_WGSL.includes('fn mat_clamp01('));
+  await assert.rejects(meshDocument(noBase, doc(), { pool: fakeMama.fakePool() }),
+    (e) => rejectsWith('sdfm.material_unmappable')(e) && /BASE_WGSL/.test(e.message));
 });

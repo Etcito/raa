@@ -168,6 +168,8 @@ export interface SdfmMamaModule {
   meshAssets(document: unknown, options: { pool: unknown; groups?: string[] }): Promise<unknown[]>;
   /** MAMA's helper table: helper id -> WGSL source and dependencies. */
   HELPERS: Record<string, { code: string; deps?: string[] }>;
+  /** MAMA's always-emitted material WGSL (constants and scalar helpers such as `mat_clamp01`). */
+  BASE_WGSL: string;
   /** MAMA's browser meshing pool factory (`mama/browser`); unused in node. */
   setupBrowserHost?(options: { workerUrl: string | URL; manifoldWasmUrl: string; size?: number }): unknown;
   /** A MAMA `ComputePool` used for in-process meshing. */

@@ -25,7 +25,8 @@ const SPECIFIERS = Object.freeze({
  *
  * @param {string | URL} [base]
  * @param {{ browser?: boolean }} [options] browser false skips `mama/browser` (node)
- * @returns {Promise<{ readSdfm: Function, meshAssets: Function, HELPERS: object, setupBrowserHost?: Function }>}
+ * @returns {Promise<{ readSdfm: Function, meshAssets: Function, HELPERS: object, BASE_WGSL: string,
+ *   setupBrowserHost?: Function }>}
  * @throws SdfmError `sdfm.worker` when a module cannot be imported
  */
 export async function importMama(base, options = {}) {
@@ -48,6 +49,7 @@ export async function importMama(base, options = {}) {
     readSdfm: root.readSdfm,
     meshAssets: mesh.meshAssets,
     HELPERS: helpers.HELPERS,
+    BASE_WGSL: helpers.BASE_WGSL,
     ...(host ? { setupBrowserHost: host.setupBrowserHost } : {}),
   };
 }
@@ -143,21 +145,26 @@ export async function meshDocument(mama, document, options) {
 
 /**
  * Turns one MAMA BuiltMaterial (`buildMaterial`, which runs `compileMaterialGraph`) into a
- * MamaMaterial. Helpers are resolved through MAMA's `HELPERS` with their dependencies first.
+ * MamaMaterial. MAMA's `BASE_WGSL` (constants and scalar helpers such as `mat_clamp01`, which MAMA
+ * emits in front of every material module, slots.ts) comes first as helper `base`; the graph's
+ * helpers follow, resolved through MAMA's `HELPERS` with their dependencies first.
  *
- * @param {{ HELPERS: object }} mama
+ * @param {{ HELPERS: object, BASE_WGSL: string }} mama
  * @param {{ id: string, graph: { wgslBody: string, helpers: string[], constants: Uint32Array } | null,
  *   error: { code: string, message: string, fix: string } | null }} built
  * @returns {Promise<MamaMaterial>}
- * @throws SdfmError `sdfm.material_unmappable` (build error, or a helper without WGSL source)
+ * @throws SdfmError `sdfm.material_unmappable` (build error, no BASE_WGSL, or a helper without WGSL source)
  */
 export async function toMamaMaterial(mama, built) {
   if (!built.graph) {
     const reason = built.error ? `${built.error.code}: ${built.error.message}` : 'no compiled graph';
     throw new SdfmError('sdfm.material_unmappable', `material '${built.id}' was not built by MAMA (${reason})`);
   }
+  if (typeof mama.BASE_WGSL !== 'string') {
+    throw new SdfmError('sdfm.material_unmappable', `material '${built.id}': MAMA BASE_WGSL has no WGSL source`);
+  }
   const body = built.graph.wgslBody;
-  const helpers = resolveHelpers(mama.HELPERS, built.graph.helpers, built.id);
+  const helpers = [{ id: 'base', wgsl: mama.BASE_WGSL }, ...resolveHelpers(mama.HELPERS, built.graph.helpers, built.id)];
   const constants = Array.from(built.graph.constants);
   const fields = [...MATERIAL_FULL_FIELDS];
   const key = await sha256Hex(canonicalJson({ body, helpers, constants, fields }));

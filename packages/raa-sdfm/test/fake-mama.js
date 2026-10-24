@@ -14,6 +14,10 @@ export const calls = [];
 export const MATERIAL_FULL_WGSL =
   'struct MaterialFull { base_color: vec3f, metallic: f32, roughness: f32, emissive: vec3f, height: f32 }';
 
+/** Always-emitted constants and scalar helpers (src/core/material-graph/helpers.ts BASE_WGSL, shortened). */
+export const BASE_WGSL =
+  '\nconst MAT_PI: f32 = 3.141592653589793;\n\nfn mat_clamp01(x: f32) -> f32 {\n  if (x < 0.0) { return 0.0; }\n  if (x > 1.0) { return 1.0; }\n  return x;\n}\n';
+
 /** Helper id -> { deps?, code } (src/core/material-graph/helpers.ts). */
 export const HELPERS = {
   axes: { code: '\nfn mat_axis(a: u32, p: vec3f) -> f32 {\n  return p[min(a, 2u)];\n}\n' },
