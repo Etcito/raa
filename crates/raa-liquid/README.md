@@ -20,8 +20,9 @@ fragment helpers (detail normals, foam) and each function's `material_main`.
   | `raa.liquid.slime` | `FLAG_VERTEX_FN \| FLAG_TRANSMISSIVE` | Transparent |
   | `raa.liquid.mud` | `FLAG_VERTEX_FN` | Opaque (wet clearcoat, voronoi bubble pops) |
 
-  Mud is drawn with the opaque draws, before the frame's opaque copy, so it has crest and
-  noise foam but no shore term.
+  Mud is drawn with the opaque draws, before the frame's opaque copy, so its shore foam
+  reads the mud depth above the ground from the vertex colour alpha (metres; alpha 1 = deep)
+  instead of the opaque depth copy.
 - `install(lit: &mut LitRenderer) -> Result<(), RaaError>`: registers every row with
   `lit.fns_mut().register_builtin`. Atomic: every row is first registered on a clone of the
   registry, so a refusal registers nothing. Refusal: the registry's `ShaderError` as
@@ -57,7 +58,7 @@ Every row packs its parameters in the material record's `p: array<vec4<f32>, 8>`
 | (5, 3) | `clarity` 0.6 | `absorption` 5.0 | `wetness` 0.7 |
 | (6, 0) | `shallowColor` [0.3, 0.9, 0.82] | `glossiness` 0.9 | `bubbleScale` 0.55 m |
 | (6, 1) | (in `shallowColor`) | `bubbleScale` 0.2 | `bubbleRate` 0.18 pops/s per cell |
-| (6, 3) | `foamWidth` 0.3 m | `foamWidth` 0.14 m | - |
+| (6, 3) | `foamWidth` 0.3 m | `foamWidth` 0.14 m | `foamWidth` 0.12 m |
 | (7, 0) | `foamAmount` 0.9 | `foamAmount` 0.45 | `foamAmount` 0.2 |
 | (7, 1) | `detailStrength` 0.03 | `detailStrength` 0.02 | `detailStrength` 0.02 |
 | (7, 2) | `detailScale` 1.4 | `detailScale` 1.4 | `detailScale` 1.8 |

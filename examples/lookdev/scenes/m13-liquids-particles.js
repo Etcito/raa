@@ -97,39 +97,70 @@ const SLIME_PADS = [
 ];
 
 // Mud: the water wave layout at about 0.85x amplitude and 0.08x speed (a slow viscous
-// swell), raised from 0.6x so the swell reads at capture distance (card 5034). `color` is sRGB: it is
-// converted to linear by the material table. Card 5031's mauve pit came from an sRGB
-// 0.3/0.1/0.035 (linear 0.07/0.01/0.003, almost black), whose only visible light was the
-// blue sky sheen; sRGB 0.6/0.37/0.2 read orange-terracotta under the warm sun (card
-// 5034); this is a chocolate brown (linear about 0.15/0.05/0.015) under a glossy coat.
+// swell), raised from 0.6x so the swell reads at capture distance (card 5034). `color` is
+// sRGB, converted to linear by the material table (linear about 0.16/0.066/0.017). The
+// colour was never the cause of the mauve pit: on the card 4940 capture the pit centre
+// (106, 66, 73) inverts through AgX punchy to HDR (0.22, 0.12, 0.14), so a blue sky term
+// outweighed the brown. That term was the blue sky irradiance plus the sky mirrored by a
+// strong clear coat; the shader now keeps the coat thin and MUD_LIGHT warms the key light
+// and dims the sky terms, for a predicted pit HDR near (0.28, 0.13, 0.075), sRGB about
+// (127, 70, 36) after AgX punchy.
 const MUD = {
   wave0: [0.094, 3.0, 0.3, 0.65],
   wave1: [0.051, 1.7, 1.4, 0.55],
   wave2: [0.026, 1.0, -0.7, 0.5],
   wave3: [0.012, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  color: [0.42, 0.24, 0.13],
+  color: [0.44, 0.29, 0.14],
   wetness: 0.85,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
-  // Milky streaks on the sharpest crests only (card 5034: wide cream blotches).
-  foamAmount: 0.6,
+  // Shore foam where the mud is shallower than foamWidth (the depth rides in the vertex
+  // colour alpha, see mudMesh); faint churned streaks on the steepest crests.
+  foamWidth: 0.12,
+  foamAmount: 0.35,
   detailStrength: 0.1,
   detailScale: 0.6,
+};
+// Mud set lighting: a warmer sun and dimmer sky terms than daylight(). The sky irradiance
+// of DAY_SKY carried about as much light as the sun on the pit, all of it blue (measured
+// on the rim: light about (2.2, 2.4, 3.8)).
+const MUD_LIGHT = {
+  sun: { ...SUN, color: [1, 0.88, 0.72] },
+  env: { diffuse: 0.45, specular: 0.3 },
+};
+// Ground height of the mud pit (the mud surface is y = 0): the bed 0.3 m down, rising
+// through the surface about r = 2.7 m into a grassy bank.
+function mudGround(x, z) {
+  return -0.3 + 0.55 * Math.min(1, Math.max(0, (Math.hypot(x, z * 1.1) - 2.1) / 1.2));
+}
+// Lime-green inflatable pads with pink tops standing in the mud (ref-3's stepping pads):
+// [x, z, radius, height above the bed]. Their tops sit 0.12..0.18 m above the mud.
+const MUD_PADS = [
+  [-1.45, -0.55, 0.62, 0.46],
+  [0.75, -1.35, 0.5, 0.42],
+  [1.45, 0.75, 0.56, 0.48],
+  [-0.55, 1.35, 0.46, 0.44],
+];
+const MUD_PAD_COLOR = [0.55, 0.88, 0.16];
+const MUD_PAD_TOP = [1, 0.42, 0.66];
+// Mud splash crowns at the pad bases: slow, short-lived brown droplets.
+const MUD_SPLASH = {
+  kind: 'splash',
+  direction: [0, 1, 0],
+  spread: 0.7,
+  rate: 90,
+  lifetime: [0.35, 0.7],
+  speed: [0.8, 1.6],
+  size: [0.03, 0.06],
+  colors: [[0.4, 0.22, 0.1], [0.48, 0.3, 0.16]],
+  maxParticles: 512,
 };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
   [-1.2, -0.9, 0.5, 0.7, -0.05],
   [1.5, -1.6, 0.6, 0.8, 0.0],
   [0.4, 0.9, 0.3, 0.7, -0.05],
-];
-const MUD_ROCKS = [
-  [-2.2, -0.6, 0.7, 0.8, 0.1],
-  [-1.0, -2.2, 0.55, 0.7, 0.05],
-  [1.9, -1.2, 0.65, 0.8, 0.1],
-  [2.3, 1.2, 0.5, 0.7, 0.05],
-  [-1.6, 2.0, 0.6, 0.75, 0.1],
-  [0.8, 2.3, 0.45, 0.7, 0.05],
 ];
 
 const identityQuat = [0, 0, 0, 1];
@@ -258,31 +289,46 @@ function buildSlime(engine, lib) {
   }, [0, -0.1, 0]);
 }
 
+// The mud grid; its vertex colour alpha is the mud depth above mudGround (metres, clamped
+// to [0, 1]), which raa.liquid.mud reads for its shore foam. Around each pad the depth
+// falls towards its wall, so the foam also rings the pads.
+function mudMesh(geometry) {
+  const depth = (p) => {
+    let d = -mudGround(p[0], p[2]);
+    for (const [x, z, r] of MUD_PADS) d = Math.min(d, 0.6 * (Math.hypot(p[0] - x, p[2] - z) - r));
+    return Math.min(1, Math.max(0, d));
+  };
+  return geometry.grid(LIQUID_SIZE, LIQUID_SIZE, LIQUID_SEGMENTS, LIQUID_SEGMENTS, {
+    color: (p) => [1, 1, 1, depth(p)],
+  });
+}
+
 function buildMud(engine, lib) {
   const { geometry } = lib;
   daylight(engine);
-  // The mud body is a brown diffuse; a mirror-bright blue sky wash turns it mauve at
-  // capture distance (card 5018). A dim sky specular keeps the wet sheen and the sun's
-  // clear-coat highlight without recolouring the mud.
-  engine.setEnvironmentLighting({ ...ENV, specular: 0.55 });
-  // The pit bed sits 0.3 m below the mud: a bed just under the surface broke through every
-  // wave trough as cut-out holes (card 5027). The rim rises through the surface about
-  // r = 2.7 m (inside the 6 m grid, so the grid border stays buried) and is a lighter,
-  // drier brown than the mud, damp and darker near the shore.
-  const ground = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 1 });
-  const dry = [0.34, 0.23, 0.12];
-  const rimHeight = (x, z) => -0.3 + 0.55 * Math.min(1, Math.max(0, (Math.hypot(x, z * 1.1) - 2.1) / 1.2));
-  const rim = heightfield(geometry, 8, 8, 96, rimHeight, (x, z, y) => {
-    const damp = 0.65 + 0.35 * Math.min(1, Math.max(0, y / 0.2));
-    return [dry[0] * damp, dry[1] * damp, dry[2] * damp, 1];
+  engine.setLight(MUD_LIGHT.sun);
+  engine.setEnvironmentLighting(MUD_LIGHT.env);
+  // The bank: lime grass above the mud line, a dark mud-stained band at the shore.
+  const ground = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.9 });
+  const grass = [0.2, 0.46, 0.035];
+  const stain = [0.1, 0.05, 0.02];
+  const rim = heightfield(geometry, 8, 8, 96, mudGround, (x, z, y) => {
+    const g = Math.min(1, Math.max(0, (y - 0.02) / 0.12));
+    return [0, 1, 2].map((i) => stain[i] + (grass[i] - stain[i]) * g).concat(1);
   });
   place(engine, upload(engine, rim, ground), [0, 0, 0]);
-  // Warm stones: a neutral grey picked up the sky ambient and read blue (card 5030).
-  for (const r of MUD_ROCKS) rock(engine, geometry, r, [0.42, 0.31, 0.21]);
-  liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
-    function: 'raa.liquid.mud',
-    params: MUD,
-  }, [0, 0, 0]);
+  const padMat = engine.addSurfaceMaterial({ color: MUD_PAD_COLOR, roughness: 0.3, clearcoat: 1 });
+  const topMat = engine.addSurfaceMaterial({ color: MUD_PAD_TOP, roughness: 0.3, clearcoat: 1 });
+  MUD_PADS.forEach(([x, z, r, h], i) => {
+    const pad = geometry.lathe([[0, 0], [r, 0], [r, h * 0.8], [r * 0.88, h], [0, h]], 48);
+    place(engine, upload(engine, pad, padMat), [x, -0.3, z]);
+    const top = geometry.lathe([[r * 0.62, h + 0.004], [0, h + 0.004]], 48);
+    place(engine, upload(engine, top, topMat), [x, -0.3, z]);
+    engine.addEmitter({ ...MUD_SPLASH, position: [x, 0.02, z], volume: [r, 0, r], seed: 61 + i });
+  });
+  const mud = engine.addSurfaceMaterial({ function: 'raa.liquid.mud', params: MUD });
+  const mesh = upload(engine, mudMesh(geometry), mud);
+  place(engine, mesh, [0, 0, 0]);
 }
 
 // ---- Particle sets (raa-particles). Captures render at the variant's fixed timeMs; the
@@ -521,9 +567,11 @@ const VARIANTS = [
   },
   {
     id: 'mud',
-    description: `${BASIS}an opaque chocolate-brown wet mud pit with a slow swell, a glossy `
-      + 'clearcoat sheen that reflects the sky and small popping bubbles, surrounded by '
-      + 'rocks and a rim of lighter brown ground',
+    description: `${BASIS}an opaque chocolate-brown wet mud pit with a slow swell, a wet `
+      + 'glossy sheen with sun highlights and a faint reflection of the sky, small popping '
+      + 'bubbles, pale churned foam along its shore and small brown mud splashes; round '
+      + 'lime-green inflatable pads with pink tops stand in the mud, and a grassy lime-green '
+      + 'bank surrounds the pit',
     references: ['ref-3'],
     judge: true,
     settings: { set: 'mud' },

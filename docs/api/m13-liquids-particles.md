@@ -91,7 +91,10 @@ the local Y with the wave height plus the ripple rings and distorts XZ by the Ge
 displacement. Place the surface with the instance transform. `water` and `slime` are
 transmissive (built-in flag `FLAG_TRANSMISSIVE`): use `blend: 'transmissive'` with
 `transmission` > 0 and `thickness` in metres so they refract and absorb the opaque copy.
-`mud` is opaque: a wet clear coat over a rough body with slow popping bubbles.
+`mud` is opaque: a thin wet clear coat over a rough body with slow popping bubbles. Being
+opaque it cannot read the opaque depth copy, so its shore foam reads the mud depth above the
+ground from the mesh's vertex colour alpha (metres, clamped to [0, 1]; the default alpha 1
+means deep, no shore foam): foam covers the band shallower than `foamWidth`.
 
 | name | class | look |
 |---|---|---|
@@ -138,6 +141,7 @@ transmissive (built-in flag `FLAG_TRANSMISSIVE`): use `blend: 'transmissive'` wi
 | `wetness` | scalar | 0.7 |
 | `bubbleScale` | scalar (m) | 0.55 |
 | `bubbleRate` | scalar (1/s) | 0.18 |
+| `foamWidth` | scalar (m) | 0.12 |
 | `foamAmount` | scalar | 0.2 |
 | `detailStrength` | scalar | 0.02 |
 | `detailScale` | scalar | 1.8 |

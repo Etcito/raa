@@ -2,16 +2,22 @@
 //
 // The record packs the waves and speeds in `p[0..5]` (the water layout at 0.4x amplitude
 // and 0.08x speed, src/waves.rs), then `p[5] = (color linear rgb, wetness)`,
-// `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, 0)` and
+// `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, foamWidth m)` and
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
-// Wetness darkens the base colour and adds a wet sheen (0.8 x wetness, roughness 0.07)
-// over a rough body (0.55); two noise scales mottle the brown so it reads as mud, not as a
-// coloured liquid. Slow voronoi bubbles on the XZ plane grow a dome (a normal bump plus a
-// glossy highlight) and pop into an expanding ring. Foam is the crest term and
-// noise only: an opaque draw runs before the opaque copy of its frame, so the opaque depth
-// that `liquid_shore` samples is not written yet; the mud foam marks the moving crests and
-// never reads that copy.
+// The body is a rough-ish dielectric (roughness 0.35, F0 0.04) under a thin wet coat
+// (0.35 x wetness): the sky is a faint reflection on the brown, the sun a tight highlight.
+// A mirror coat over the dark body let the blue sky radiance outweigh the brown diffuse
+// (measured on the card 4940 capture: pit HDR about (0.22, 0.12, 0.14), blue above green,
+// which AgX shows as mauve). Two noise scales mottle the brown. Slow voronoi bubbles on the
+// XZ plane grow a dome (a normal bump plus a glossy coat) and pop into an expanding ring.
+//
+// Foam: an opaque draw runs before the opaque copy of its frame, so the opaque depth that
+// `liquid_shore` samples is not written yet. The shore term instead reads the mud depth
+// above the ground from the vertex colour alpha (metres, clamped to [0, 1]; the default
+// alpha 1 means deep, no shore), which the mesh author computes from the ground under the
+// surface. The crest term adds churned streaks on the steepest crests; no noise mask
+// scatters foam inside the pit.
 
 // Radial bubble contribution: the XZ gradient of its height field (a slope, dimensionless,
 // because both the height and the cell coordinate scale with bubbleScale) and the glossy
@@ -115,16 +121,18 @@ fn mud_bump_normal(n: vec3<f32>, tangent: vec4<f32>, gradient: vec2<f32>) -> vec
     return raa_perturb_normal(nn, tangent, vec3<f32>(-g.x, -g.y, 1.0));
 }
 
-// Crest foam without the shore term. `liquid_shore` samples the opaque depth copy, but an
-// opaque draw runs before the opaque copy of its frame is written, so the copy is still
-// the dummy there; mud foam is the moving crest term broken up by noise only.
-fn mud_foam(crest: f32, world_pos: vec3<f32>, t: f32, amount: f32) -> f32 {
-    let drift = vec3<f32>(0.0, 0.35 * t, 0.21 * t);
-    // Thin streaks on the sharpest crests only: a low crest band under a coarse noise
-    // covered the pit in flat cream blotches that read as texture, not foam (card 5034).
-    let n = 0.6 * raa_noise3(world_pos * 6.0 + drift) + 0.4 * raa_noise3(world_pos * 14.0 - drift);
-    let breakup = smoothstep(0.5, 0.8, clamp(0.5 + 0.5 * n, 0.0, 1.0));
-    return smoothstep(0.14, 0.3, crest) * clamp(amount, 0.0, 1.0) * breakup;
+// Foam in [0, 1]: the shore band where the mud is shallower than `width` metres (from the
+// vertex colour alpha), frayed by a coarse noise along the band only, plus `amount` times
+// the steep-crest term.
+fn mud_foam(depth: f32, crest: f32, world_pos: vec3<f32>, t: f32, width: f32, amount: f32) -> f32 {
+    let shore = 1.0 - smoothstep(0.0, max(width, 1e-4), max(depth, 0.0));
+    let drift = vec3<f32>(0.0, 0.2 * t, 0.12 * t);
+    let n = raa_noise3(world_pos * 5.0 + drift);
+    // The fray thins the outer edge of the band; it never removes the contact line.
+    let fray = mix(0.55, 1.0, smoothstep(-0.3, 0.4, n));
+    let band = smoothstep(0.0, 1.0, shore * 1.3) * fray;
+    let caps = smoothstep(0.18, 0.34, crest) * clamp(amount, 0.0, 1.0);
+    return clamp(max(band, caps), 0.0, 1.0);
 }
 
 fn material_main(in: MaterialInput) -> MaterialOutput {
@@ -133,23 +141,24 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let wetness = clamp(in.record.p[5].w, 0.0, 1.0);
     let bubble_scale = max(in.record.p[6].x, 1e-3);
     let bubble_rate = max(in.record.p[6].y, 0.0);
+    let foam_width = max(in.record.p[6].w, 0.0);
     let foam_amount = clamp(in.record.p[7].x, 0.0, 1.0);
     let detail_strength = clamp(in.record.p[7].y, 0.0, 1.0);
     let detail_scale = max(in.record.p[7].z, 1e-3);
 
     o.metallic = 0.0;
-    o.roughness = 0.55;
+    o.opacity = 1.0;
+    o.roughness = 0.35;
     // Wet mud is darker than dry ground but still reads brown under the clear coat; two
     // noise scales give it the mottled, grainy body of mud instead of a flat coloured
     // plane (card 5018 read the old smooth surface as a pink liquid).
     let grain = raa_fbm3(in.position * 2.4 + vec3<f32>(0.0, 0.0, 0.2 * in.time), 3);
     let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
     o.base_color = color * (1.0 - 0.15 * wetness) * (0.88 + 0.12 * grain + 0.08 * patches);
-    // A glossy wet coat: ref-3's mud is a shiny chocolate whose swell carries sky and sun
-    // highlights. The body colour is dark enough that the coat reads as sheen; the dimmed
-    // scene sky specular keeps it from going mauve (card 5031), a rough coat lost it (5034).
-    o.clearcoat = clamp(0.8 * wetness, 0.0, 1.0);
-    o.clearcoat_roughness = 0.07;
+    // A thin wet coat: its sun lobe gives the glossy highlight; its sky reflection stays a
+    // faint sheen over the brown instead of a blue wash (see the header).
+    o.clearcoat = clamp(0.35 * wetness, 0.0, 1.0);
+    o.clearcoat_roughness = 0.12;
 
     o.normal = liquid_detail_normal(
         o.normal,
@@ -166,7 +175,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     // The bubble skin is smoother than the body: a tight clear coat highlight on the dome
     // sells the wet bubble, while the body stays a little darker underneath.
     o.roughness = mix(o.roughness, 0.1, gloss);
-    o.clearcoat = mix(o.clearcoat, 0.95, 0.8 * gloss);
+    o.clearcoat = mix(o.clearcoat, 0.9, 0.8 * gloss);
     o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.02, gloss);
     // A raised bubble is wetter and slightly lighter than the pit around it; it follows the
     // mud colour (a fixed light brown read as pale spots on a dark pit, card 5027) so the
@@ -174,12 +183,12 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.base_color = mix(o.base_color, color * 1.5, 0.5 * gloss);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
-    let foam = mud_foam(crest, in.position, in.time, foam_amount);
-    // Milky foam streaks over the crests: a lighter tan of the mud colour, so they read as
-    // churned mud and not as white paint on the surface.
-    let pale = mix(color * 2.2, vec3<f32>(0.6, 0.5, 0.4), 0.35);
+    let foam = mud_foam(in.color.a, crest, in.position, in.time, foam_width, foam_amount);
+    // Churned foam: a pale cream of the mud colour, so it reads as frothy mud at the shore
+    // and not as white paint on the surface.
+    let pale = mix(color * 2.2, vec3<f32>(0.75, 0.64, 0.5), 0.55);
     o.base_color = mix(o.base_color, pale, foam);
-    o.roughness = mix(o.roughness, 0.9, foam);
+    o.roughness = mix(o.roughness, 0.85, foam);
     o.clearcoat = o.clearcoat * (1.0 - foam);
     return o;
 }

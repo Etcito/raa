@@ -6,7 +6,8 @@
 //! fragment stage refracts and absorbs through the `Transmission` slot, and a desc with blend
 //! 'transmissive' draws them through OIT (the scene contract's Transmissive class). Mud
 //! carries `FLAG_VERTEX_FN` and class [`DrawClass::Opaque`]: it is an opaque wet surface with
-//! a clear coat and slow popping bubbles, drawn before the frame's opaque copy.
+//! a clear coat and slow popping bubbles, drawn before the frame's opaque copy (its shore foam
+//! reads the mud depth from the vertex colour alpha).
 //!
 //! Every row's WGSL is the shared vertex stage, the shared fragment helpers and its own
 //! `material_main`, concatenated in that order.
@@ -182,7 +183,7 @@ static SLIME_PARAMS: [ParamSpec; 13] = [
 
 /// Mud parameters: the water wave layout at 0.4x amplitude and 0.08x speed, and the wet
 /// mud look with its slow bubble field.
-static MUD_PARAMS: [ParamSpec; 12] = [
+static MUD_PARAMS: [ParamSpec; 13] = [
     wave("wave0", [0.02, 2.2, 0.3, 0.6], 0),
     wave("wave1", [0.012, 1.2, 1.4, 0.5], 1),
     wave("wave2", [0.0064, 0.7, -0.7, 0.4], 2),
@@ -211,6 +212,12 @@ static MUD_PARAMS: [ParamSpec; 12] = [
         kind: ParamKind::Float,
         default: [0.18, 0.0, 0.0, 0.0],
         slot: (6, 1),
+    },
+    ParamSpec {
+        name: "foamWidth",
+        kind: ParamKind::Float,
+        default: [0.12, 0.0, 0.0, 0.0],
+        slot: (6, 3),
     },
     ParamSpec {
         name: "foamAmount",
