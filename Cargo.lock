@@ -802,6 +802,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-grading"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-gtao"
 version = "0.1.0"
 dependencies = [
