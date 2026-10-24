@@ -12,3 +12,9 @@ wgpu = { workspace = true }
 raa-shader = { path = "../raa-shader" }
 raa-lit = { path = "../raa-lit" }
 raa-pipeline = { path = "../raa-pipeline" }
+
+[dev-dependencies]
+raa-scene = { workspace = true }
+raa-math = { workspace = true }
+raa-mesh = { path = "../raa-mesh" }
+pollster = { workspace = true }
