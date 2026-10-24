@@ -2,7 +2,7 @@
   "scene": "m11-transmission",
   "variant": "water",
   "milestone": "m11",
-  "capturedAt": "2026-10-24T05:40:43.498Z",
+  "capturedAt": "2026-10-24T07:11:20.365Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,15 +30,26 @@
     "bloom",
     "tonemap"
   ],
-  "instances": 25,
-  "triangles": 24048,
-  "firstFrameMs": 28498.79999999702,
+  "instances": 26,
+  "triangles": 24348,
+  "firstFrameMs": 2520.7999999970198,
   "wasm": {
-    "raw": 1715091,
-    "gzip": 610607,
-    "sha256": "dc59eab401aa20c58bcd70da40e40b57ce8c9492b443c4df23fc8d1eaae1b169"
+    "raw": 1721875,
+    "gzip": 613029,
+    "sha256": "eae4cf0834c4aac7b0d9a0e38f7230f978fc4de6ce215870201560b34338d443"
   },
   "capture": "proofs/captures/lookdev/m11-transmission--water.png",
-  "captureSha256": "e1e8e2300a5d344f5e2c52f09595069f78010026f40482024b09677f92d9278b",
-  "judge": null
+  "captureSha256": "7c3d351e93bf3c0e04a53d92c512a773f0de6e7d98a0486a6b1390ec1c62bf6b",
+  "judge": {
+    "description": "Engine lookdev capture of the transmission milestone. Score two things: that the capture shows what this description lists, and that the TRANSMISSION look (clear tinted surfaces that refract and absorb the colours behind them, refraction bending what is seen through them, correct overlap order where translucent objects interpenetrate) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, snow fields, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score; nor must the plainer set (simple props, a flat striped backdrop, a plain gradient sky and simple sun-plus-sky lighting without extra fill lights), which belongs to later milestones. Shows: a basin of clear water with gentle ripples, in a pink inflatable rim, on a floor of saturated coloured tiles (orange, green, red, blue) in daylight under a bright blue sky with white clouds, a backdrop of vertical yellow, pink, blue, white and green stripes with a low white snow bank at its base, and a few coloured spheres and a teal vase behind; the tiled bottom is visible through the water, refracted (the grout lines waver under the ripples) and tinted blue-green, deeper towards the back where the view crosses more water; the rippled surface reflects the blue sky",
+    "references": [
+      "ref-1",
+      "ref-3"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": null,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m11-transmission--water.png by claude-haiku-5-5 (median of [5.0, 6.0, 6.0])\nexpected: Engine lookdev capture of the transmission milestone. Score two things: that the capture shows what this description lists, and that the TRANSMISSION look (clear tinted surfaces that refract and absorb the colours behind them, refraction bending what is seen through them, correct overlap order where translucent objects interpenetrate) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, snow fields, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score; nor must the plainer set (simple props, a flat striped backdrop, a plain gradient sky and simple sun-plus-sky lighting without extra fill lights), which belongs to later milestones. Shows: a basin of clear water with gentle ripples, in a pink inflatable rim, on a floor of saturated coloured tiles (orange, green, red, blue) in daylight under a bright blue sky with white clouds, a backdrop of vertical yellow, pink, blue, white and green stripes with a low white snow bank at its base, and a few coloured spheres and a teal vase behind; the tiled bottom is visible through the water, refracted (the grout lines waver under the ripples) and tinted blue-green, deeper towards the back where the view crosses more water; the rippled surface reflects the blue sky\nseen: The capture shows the pink inflatable basin, saturated tiled floor, blue sky with clouds, striped backdrop, and spheres and teal vase behind. The tiles seen through the water are tinted blue-green and partly displaced, but the grout waver and ripple refraction are weak, and the water surface reads more as a flat overlay than a reflecting, rippled surface. The white snow bank is a thin grey tube rather than a low bank at the stripes' base.",
+    "at": "2026-10-24T07:11:33.553Z"
+  }
 }
