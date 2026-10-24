@@ -28,8 +28,9 @@ const ENV = { diffuse: 0.7, specular: 1 };
 
 // Orbit cameras: [target, distance m, yaw rad, pitch rad] (as m10).
 const CAMERAS = {
-  // The three blocks side by side, low enough to see the backdrop through them.
-  ice: [[0, 0.38, -0.2], 3.3, 0, 0.16],
+  // The three blocks filling the frame from slightly above and to the right: top faces
+  // catch the sky, the tiles and the backdrop show through the front faces.
+  ice: [[0.05, 0.3, -0.05], 2.15, 0.12, 0.4],
   transmission: [[0, 0.36, -0.2], 2.2, 0.15, 0.16],
   oit: [[0, 0.42, 0], 2.2, 0.2, 0.18],
   overlap: [[0, 0.42, 0], 2.1, -0.25, 0.2],
@@ -55,6 +56,18 @@ const ICE_BLOCKS = [
 // over 1 / absorption metres, so the 0.8 m block is a deeper blue than the 0.15 m one.
 const ICE = { tint: [0.55, 0.85, 0.97], absorption: 1.8, cloudiness: 0.2, crackScale: 0.22 };
 const ICE_IOR = 1.31;
+// The judged `ice` set (ref-2): glossy, clear cyan ice (the shared ICE desc keeps the
+// default roughness 0.5 for the other sets), lit by a sun from the front right so the
+// cracks, bubbles and top faces catch light, a little brighter exposure. The ice casts no
+// sun shadow (clear ice passes the light; an opaque shadow seen through the block reads as
+// dirt) and the tiles are paler, so the ice's own cyan dominates what it tints.
+const ICE_SET = {
+  params: { tint: [0.42, 0.82, 1], absorption: 2.4, cloudiness: 0.3, crackScale: 0.3 },
+  roughness: 0.04,
+  sun: { direction: [-0.45, -0.62, -0.64], color: [1, 0.95, 0.86], intensity: 7 },
+  exposureEv: 0.45,
+  tiles: { saturation: 1.6, whiten: 0.35 },
+};
 // Single block of the transmission pair (depth m).
 const PAIR_DEPTH = 0.4;
 
@@ -124,23 +137,28 @@ function daylight(engine) {
   engine.setShadows(SHADOWS);
 }
 
-// lib's floor tiles with their linear vertex colours saturated (in place, on a fresh desc).
-function saturatedTiles(objects) {
+// lib's floor tiles with their linear vertex colours saturated by `saturation`, then mixed
+// towards white by `whiten` (in place, on a fresh desc).
+function saturatedTiles(objects, { saturation, whiten }) {
   const desc = objects.floorTiles(TILES_N);
   const c = desc.colors;
   for (let i = 0; i < c.length; i += 4) {
     const luma = 0.2126 * c[i] + 0.7152 * c[i + 1] + 0.0722 * c[i + 2];
-    for (let k = 0; k < 3; k++) c[i + k] = Math.min(1, Math.max(0, luma + (c[i + k] - luma) * SATURATION));
+    for (let k = 0; k < 3; k++) {
+      const v = Math.min(1, Math.max(0, luma + (c[i + k] - luma) * saturation));
+      c[i + k] = v + (1 - v) * whiten;
+    }
   }
   return desc;
 }
 
 // Coloured tiles, the striped backdrop and the props behind the transmissive objects.
-function stage(engine, lib) {
+// `tileLook` = { saturation, whiten } of the tile colours (default: saturated, no white).
+function stage(engine, lib, tileLook = { saturation: SATURATION, whiten: 0 }) {
   const { geometry, objects } = lib;
   daylight(engine);
   const tiles = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: TILE_ROUGHNESS });
-  place(engine, upload(engine, saturatedTiles(objects), [tiles]), [0, 0, 0]);
+  place(engine, upload(engine, saturatedTiles(objects, tileLook), [tiles]), [0, 0, 0]);
   const stripes = [];
   for (let i = 0; i < STRIPE_COUNT; i++) {
     const color = STRIPES[i % STRIPES.length];
@@ -177,7 +195,8 @@ function translate(desc, t) {
 
 // raa.ice material of a block `depth` m thick; `blend` 'transmissive' or 'opaque'. The opaque
 // block keeps transmission 0: a transmission > 0 needs blend transmissive (material.invalid).
-function ice(engine, depth, blend = 'transmissive') {
+// `look` overrides fields of the desc (the ice set's params and roughness).
+function ice(engine, depth, blend = 'transmissive', look = {}) {
   return engine.addSurfaceMaterial({
     function: 'raa.ice',
     params: ICE,
@@ -185,6 +204,7 @@ function ice(engine, depth, blend = 'transmissive') {
     transmission: blend === 'transmissive' ? 1 : 0,
     ior: ICE_IOR,
     thickness: depth,
+    ...look,
   });
 }
 
@@ -210,8 +230,13 @@ function glassSphere(engine, geometry, s) {
 
 // Three blocks of increasing thickness over the tiles, the backdrop behind them.
 function buildIce(engine, lib) {
-  stage(engine, lib);
-  for (const b of ICE_BLOCKS) iceBlock(engine, lib, b.depth, b.x, 0, b.seed, ice(engine, b.depth));
+  stage(engine, lib, ICE_SET.tiles);
+  engine.setLight({ ...SUN, ...ICE_SET.sun });
+  engine.setToneMapping({ exposureEv: ICE_SET.exposureEv });
+  const look = { params: ICE_SET.params, roughness: ICE_SET.roughness, castShadow: false };
+  for (const b of ICE_BLOCKS) {
+    iceBlock(engine, lib, b.depth, b.x, 0, b.seed, ice(engine, b.depth, 'transmissive', look));
+  }
 }
 
 // One block, transmissive (settings.blend 'transmissive') or opaque ('opaque').
