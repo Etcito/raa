@@ -13,6 +13,7 @@
 
 mod blend;
 mod desc;
+mod feature;
 mod gpu;
 mod opaque;
 mod shaders;
@@ -21,6 +22,7 @@ mod spawn;
 mod state;
 
 pub use desc::*;
+pub use feature::{ParticleFeature, ParticleHandle};
 pub use spawn::*;
 
 #[doc(hidden)]

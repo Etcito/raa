@@ -331,12 +331,12 @@ impl ForwardContributor for OpaqueContributor {
 
 // raa-lit's default slot providers are crate-private (used by `LitRenderer::new`); the
 // test compiles their source file (raa-lit is only read).
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../../raa-lit/src/slots.rs"]
 mod lit_slots;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
