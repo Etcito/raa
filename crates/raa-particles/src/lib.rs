@@ -13,8 +13,12 @@
 
 mod desc;
 mod gpu;
+mod shaders;
 mod spawn;
 mod state;
 
 pub use desc::*;
 pub use spawn::*;
+
+#[doc(hidden)]
+pub use shaders::sim_module_wgsl;
