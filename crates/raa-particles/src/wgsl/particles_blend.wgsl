@@ -42,6 +42,9 @@ const PARTICLES_SOFT_DISTANCE: f32 = 0.1;
 // Water F0 of the splash fresnel.
 const PARTICLES_SPLASH_F0: f32 = 0.02;
 const PARTICLES_SPLASH_ALPHA: f32 = 0.65;
+// A sparkle quad is this many times larger than the particle size, so the star spikes
+// reach out of the bright core (the core keeps the particle size).
+const PARTICLES_SPARKLE_SCALE: f32 = 3.5;
 
 struct ParticlesBlendVaryings {
     @builtin(position) clip: vec4<f32>,
@@ -108,6 +111,8 @@ fn particles_blend_vertex(vertex: u32, slot: u32, stretch: bool) -> ParticlesBle
             facing = to_cam;
         }
         extent = vec2<f32>(0.5 * p.size, 0.5 * (p.size + speed * PARTICLES_STRETCH_PER_SPEED));
+    } else {
+        extent = extent * PARTICLES_SPARKLE_SCALE;
     }
 
     let world = center + side * (corner.x * extent.x) + axis * (corner.y * extent.y);
@@ -220,16 +225,29 @@ fn fs_splash(v: ParticlesBlendVaryings) -> @location(0) vec4<f32> {
     return vec4<f32>(fogged * alpha, alpha);
 }
 
-// Additive emissive spark: colour x emissive x twinkle x gaussian disc, softly faded.
+// Additive emissive spark: a four-point star (hot core + two thin crossed spikes, turned
+// per particle) x colour x emissive x twinkle, softly faded. The twinkle breathes the spike
+// length as well as the brightness, so the stars read as glints, not round orbs.
 @fragment
 fn fs_sparkles(v: ParticlesBlendVaryings) -> @location(0) vec4<f32> {
     let fade = particles_soft_fade(v.clip);
     let time = raa_frame.camera_pos.w;
-    let wave = 0.5 + 0.5 * sin(time * (9.0 + 6.0 * v.hash) + v.hash * 6.28);
-    let twinkle = 0.35 + 0.65 * pow(wave, 4.0);
-    let gauss = exp(-5.0 * dot(v.corner, v.corner));
+    let wave = 0.5 + 0.5 * sin(time * (7.0 + 7.0 * v.hash) + v.hash * 6.28);
+    let twinkle = 0.12 + 0.88 * pow(wave, 5.0);
+    let q = v.corner * PARTICLES_SPARKLE_SCALE;
+    let turn = v.hash * 1.5708;
+    let cs = cos(turn);
+    let sn = sin(turn);
+    let r = vec2<f32>(cs * q.x - sn * q.y, sn * q.x + cs * q.y);
+    let core = exp(-6.0 * dot(q, q));
+    let reach = 0.35 + 0.65 * twinkle;
+    let spike_x = exp(-26.0 * r.y * r.y) * exp(-1.1 * abs(r.x) / reach);
+    let spike_y = exp(-26.0 * r.x * r.x) * exp(-1.1 * abs(r.y) / reach);
+    let edge = 1.0 - smoothstep(0.7, 1.0, max(abs(v.corner.x), abs(v.corner.y)));
+    let shape = (1.6 * core + 0.9 * (spike_x + spike_y)) * edge;
     if (fade <= 0.0) {
         discard;
     }
-    return vec4<f32>(max(v.color, vec3<f32>(0.0)) * max(v.emissive, 0.0) * twinkle * gauss * fade, 0.0);
+    let glow = max(v.color, vec3<f32>(0.0)) * max(v.emissive, 0.0) * twinkle * shape * fade;
+    return vec4<f32>(glow, 0.0);
 }

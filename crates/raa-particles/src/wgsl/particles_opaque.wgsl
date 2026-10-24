@@ -132,7 +132,11 @@ fn vs_main(
     out.clip = select(vec4<f32>(0.0, 0.0, 0.0, 1.0), raa_frame.view_proj * vec4<f32>(world, 1.0), alive);
     out.world_position = world;
     out.normal = normal;
-    out.corner = corner;
+    // A snow flake's six-arm mask is turned per particle (rotation of the state record).
+    let turn = select(0.0, p.rotation, p.kind == PARTICLES_KIND_SNOW);
+    let cs = cos(turn);
+    let sn = sin(turn);
+    out.corner = vec2<f32>(cs * corner.x - sn * corner.y, sn * corner.x + cs * corner.y);
     let count = max(particles_emitters[eid].header.w, 1u);
     out.color = particles_emitters[eid].colors[min(p.color_index, count - 1u) & 7u].rgb;
     out.emissive = particles_emitters[eid].direction_emissive.w;
@@ -140,9 +144,14 @@ fn vs_main(
     return out;
 }
 
-// Soft round mask of a snowflake over the quad corner coordinates.
+// Snowflake mask over the quad corner coordinates: a soft round core with six short arms,
+// so a flake reads as a crystal rather than a plain dot.
 fn particles_snow_alpha(corner: vec2<f32>) -> f32 {
-    return 1.0 - smoothstep(0.55, 1.0, length(corner));
+    let r = length(corner);
+    let core = 1.0 - smoothstep(0.3, 0.5, r);
+    let arms = pow(abs(cos(3.0 * atan2(corner.y, corner.x))), 8.0);
+    let reach = arms * (1.0 - smoothstep(0.55, 1.0, r));
+    return max(core, reach);
 }
 
 fn particles_material(v: ParticlesVaryings, view_dir: vec3<f32>) -> MaterialOutput {

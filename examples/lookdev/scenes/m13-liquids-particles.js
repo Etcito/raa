@@ -1046,8 +1046,8 @@ function buildSplash(engine, lib, settings, variant) {
 // Snow: a cool overcast day over snowy ground with white rounded blocks, pink and blue
 // blocks with snow caps and snowballs (ref-2's palette), under a falling snow volume.
 const OVERCAST = {
-  sun: { direction: [-0.45, -0.7, -0.55], color: [0.85, 0.9, 1], intensity: 3 },
-  ambient: { color: [0.75, 0.82, 0.95], intensity: 0.6 },
+  sun: { direction: [-0.45, -0.7, -0.55], color: [0.88, 0.93, 1], intensity: 4.5 },
+  ambient: { color: [0.6, 0.76, 1], intensity: 0.65 },
   sky: { preset: 'snow', clouds: { coverage: 0.75 } },
   env: { diffuse: 0.9, specular: 1 },
 };
@@ -1070,7 +1070,8 @@ const SNOW_EMITTER = {
   groundY: 0,
   rate: 2400,
   lifetime: [6, 10],
-  size: [0.02, 0.045],
+  size: [0.035, 0.075],
+  emissive: 0.15,
   colors: [[0.97, 0.98, 1]],
   maxParticles: 8192,
   seed: 21,
@@ -1123,7 +1124,8 @@ const CONFETTI_EMITTER = {
   rate: 420,
   lifetime: [2.5, 4.5],
   speed: [4.5, 7.5],
-  size: [0.045, 0.08],
+  size: [0.06, 0.1],
+  emissive: 0.2,
   drag: 1.5,
   groundY: 0,
   colors: CONFETTI_COLORS,
@@ -1152,24 +1154,24 @@ function buildConfetti(engine, lib) {
 
 // Sparkles: a night set (sky passes off, dark violet background, low ambient, bloom) with
 // lib's neon letter in raa.neon and gold and white sparkles twinkling around it.
-const NIGHT_BACKGROUND = [0.02, 0.012, 0.06];
+const NIGHT_BACKGROUND = [0.035, 0.018, 0.11];
 const NIGHT = {
-  moon: { direction: [-0.3, -0.85, -0.43], color: [0.8, 0.7, 1], intensity: 0.3 },
-  ambient: { color: [0.5, 0.4, 0.9], intensity: 0.08 },
-  env: { diffuse: 0.3, specular: 0.5 },
-  bloom: { strength: 0.1, radius: 0.85 },
+  moon: { direction: [-0.3, -0.85, -0.43], color: [0.75, 0.6, 1], intensity: 1.2 },
+  ambient: { color: [0.55, 0.4, 1], intensity: 0.22 },
+  env: { diffuse: 0.4, specular: 0.7 },
+  bloom: { strength: 0.18, radius: 0.85 },
 };
 const SPARKLE_NEON = { color: [1, 0.12, 0.62], strength: 5, coreWhiteness: 1 };
 const SPARKLE_EMITTERS = [
-  { colors: [[1, 0.8, 0.3], [1, 0.65, 0.15]], rate: 160, seed: 41 },
-  { colors: [[1, 1, 1], [0.85, 0.9, 1]], rate: 110, seed: 42 },
+  { colors: [[1, 0.8, 0.3], [1, 0.65, 0.15]], rate: 200, seed: 41 },
+  { colors: [[1, 1, 1], [0.85, 0.9, 1]], rate: 150, seed: 42 },
 ].map((e) => ({
   kind: 'sparkles',
-  position: [0, 0.45, 0.05],
-  volume: [0.7, 0.6, 0.35],
-  lifetime: [0.6, 1.6],
-  size: [0.015, 0.04],
-  emissive: 8,
+  position: [0, 0.55, 0.05],
+  volume: [1.5, 0.8, 0.8],
+  lifetime: [0.8, 2],
+  size: [0.03, 0.075],
+  emissive: 7,
   maxParticles: 1024,
   ...e,
 }));
@@ -1182,10 +1184,15 @@ function buildSparkles(engine, lib) {
   engine.setEnvironmentLighting(NIGHT.env);
   engine.setToneMapping({ look: 'punchy' });
   engine.setBloom(NIGHT.bloom);
-  const deck = engine.addSurfaceMaterial({ color: [0.12, 0.06, 0.3], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.05 });
+  const deck = engine.addSurfaceMaterial({ color: [0.2, 0.08, 0.5], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.05 });
   place(engine, upload(engine, geometry.roundedBox([2, 0.05, 1.5], 0.02, 2), deck), [0, -0.05, 0]);
   const neon = engine.addSurfaceMaterial({ function: 'raa.neon', params: SPARKLE_NEON, castShadow: false });
   place(engine, upload(engine, objects.neonTube(), neon), [0, 0, 0]);
+  const strips = [[1.3, [0.1, 0.8, 1]], [-1.3, [1, 0.7, 0.1]]];
+  for (const [z, color] of strips) {
+    const strip = engine.addSurfaceMaterial({ function: 'raa.neon', params: { color, strength: 4, coreWhiteness: 0.6 }, castShadow: false });
+    place(engine, upload(engine, geometry.roundedBox([1.7, 0.012, 0.025], 0.01, 2), strip), [0, 0.014, z]);
+  }
   for (const e of SPARKLE_EMITTERS) engine.addEmitter(e);
 }
 
@@ -1331,8 +1338,9 @@ const PARTICLE_VARIANTS = [
   {
     id: 'sparkles',
     description: `${PARTICLE_BASIS}a night scene on a dark violet background: a glowing pink `
-      + 'neon tube shaped like a script letter S stands on a dark glossy violet deck, with a '
-      + 'soft bloom halo, and many tiny gold and white sparkles twinkle and glow around it',
+      + 'neon tube shaped like a script letter S stands on a dark glossy violet deck edged by '
+      + 'thin cyan and gold neon strips, with a soft bloom halo, and many gold and white '
+      + 'four-point star sparkles twinkle and glow around it and above it',
     references: ['ref-4'],
     judge: true,
     timeMs: 2000,
