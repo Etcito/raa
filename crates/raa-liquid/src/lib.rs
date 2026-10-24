@@ -8,7 +8,9 @@
 //! crate.
 
 mod builtins;
+mod feature;
 mod shaders;
 mod waves;
 pub use builtins::LIQUID_BUILTINS;
+pub use feature::install;
 pub use waves::*;
