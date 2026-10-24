@@ -6,10 +6,13 @@
 //! `clear` (density 0, so fog is off). [`FogDesc::validate`] refuses with `post.invalid`,
 //! naming the field, and [`FogDesc::write_env`] packs the S10 `EnvGpu` fog fields.
 //!
-//! The `fog` FeaturePass (order 68) and the `height` Fog slot provider with
+//! [`integral`] holds the analytic height-fog optical depth, its Simpson reference and the
+//! transmittance. The `fog` FeaturePass (order 68) and the `height` Fog slot provider with
 //! `FogFeature`/`FogHandle` land with the pass task; this crate currently exports the
-//! description.
+//! description and the CPU integral.
 
 mod desc;
+
+pub mod integral;
 
 pub use desc::FogDesc;
