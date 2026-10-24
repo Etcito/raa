@@ -309,7 +309,7 @@ const SLIME_SUN = { direction: [-0.55, -0.7, 0.45], color: [1, 0.95, 0.86], inte
 // Water basin: inner half size (x, z) m, wall thickness and height m, water level m.
 const BASIN = { half: [1.1, 0.8], wall: 0.12, height: 0.4, radius: 0.04 };
 const WATER_LEVEL = 0.25;
-const WATER = { deepColor: [0.05, 0.45, 0.55], shallowColor: [0.55, 0.92, 0.88], clarity: 0.7 };
+const WATER = { deepColor: [0.0, 0.5, 0.75], shallowColor: [0.35, 0.95, 0.85], clarity: 0.6 };
 
 function slime(engine, thickness) {
   return engine.addSurfaceMaterial({

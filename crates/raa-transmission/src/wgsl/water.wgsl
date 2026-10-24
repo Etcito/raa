@@ -25,7 +25,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     o.transmission = clamp(o.transmission, 0.0, 1.0);
     o.attenuation_color = mix(deep, shallow, clarity);
-    o.attenuation_distance = mix(0.3, 4.0, clarity);
+    o.attenuation_distance = mix(0.15, 1.2, clarity);
     o.base_color = shallow * in.color.rgb * (1.0 - o.transmission);
     o.metallic = 0.0;
     o.clearcoat = 0.0;
