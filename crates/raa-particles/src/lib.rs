@@ -12,7 +12,9 @@
 //! record.
 
 mod desc;
+mod gpu;
 mod spawn;
+mod state;
 
 pub use desc::*;
 pub use spawn::*;
