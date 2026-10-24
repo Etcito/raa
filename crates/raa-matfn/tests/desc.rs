@@ -5,8 +5,8 @@ use raa_lit::{
     FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSPARENT, SurfaceMaterial, SurfaceModel,
 };
 use raa_matfn::{
-    BUILTINS, Blend, DrawClass, MaterialFnRegistry, StandardOverrides, SurfaceDesc, map_desc,
-    register_builtins,
+    BUILTINS, Blend, BuiltinFn, DrawClass, ExtraBuiltins, MaterialFnRegistry, ParamKind, ParamSpec,
+    StandardOverrides, SurfaceDesc, map_desc, map_desc_with, register_builtins,
 };
 use raa_shader::{Composer, SlotId, SlotProvider};
 
@@ -382,4 +382,127 @@ fn transparent_blend_is_refused_when_unhandled() {
     });
     let r = map_desc(&fur, &reg, |c| c == DrawClass::Opaque);
     assert_refused(r, "material.blend_unavailable", "Fur");
+}
+
+const EXTRA_WGSL: &str = "fn material_main(in: MaterialInput) -> MaterialOutput {\n    var o = raa_default_output(in);\n    o.base_color = in.record.p[2].rgb * in.record.p[2].w;\n    return o;\n}\n";
+
+/// A table as another crate would register it.
+static EXTRA_TABLE: [BuiltinFn; 1] = [BuiltinFn {
+    name: "test.extra",
+    wgsl: EXTRA_WGSL,
+    params: &[
+        ParamSpec {
+            name: "tint",
+            kind: ParamKind::Color,
+            default: [0.5, 0.5, 0.5, 0.0],
+            slot: (2, 0),
+        },
+        ParamSpec {
+            name: "gain",
+            kind: ParamKind::Float,
+            default: [1.0, 0.0, 0.0, 0.0],
+            slot: (2, 3),
+        },
+    ],
+    flags: FLAG_DOUBLE_SIDED,
+    class: DrawClass::Opaque,
+}];
+
+fn extra_registry() -> MaterialFnRegistry {
+    let mut reg = registry();
+    reg.register_builtin("test.extra", EXTRA_WGSL)
+        .expect("extra builtin");
+    reg
+}
+
+fn extras() -> ExtraBuiltins {
+    let mut x = ExtraBuiltins::default();
+    x.push(&EXTRA_TABLE);
+    x
+}
+
+fn extra_desc(params: Vec<(String, Vec<f32>)>) -> SurfaceDesc {
+    SurfaceDesc {
+        function: "test.extra".to_string(),
+        params,
+        ..SurfaceDesc::default()
+    }
+}
+
+#[test]
+fn extra_builtins_find_rows_by_name() {
+    let x = extras();
+    assert_eq!(x.find("test.extra").map(|b| b.name), Some("test.extra"));
+    assert!(x.find("raa.inflatable").is_none());
+    assert!(ExtraBuiltins::default().find("test.extra").is_none());
+}
+
+#[test]
+fn extra_table_row_maps_params_and_flags() {
+    let reg = extra_registry();
+    let desc = extra_desc(vec![param("tint", &[1.0, 0.5, 0.0]), param("gain", &[2.5])]);
+    let m = map_desc_with(&desc, &reg, &extras(), |_| true).expect("extra row");
+    assert_eq!(m.flags & FLAG_DOUBLE_SIDED, FLAG_DOUBLE_SIDED);
+    let p = m.params[2];
+    assert!(close(p[0], 1.0));
+    assert!(close(p[1], srgb_to_linear(0.5)));
+    assert!(close(p[2], 0.0));
+    assert!(close(p[3], 2.5));
+    let defaults =
+        map_desc_with(&extra_desc(Vec::new()), &reg, &extras(), |_| true).expect("extra defaults");
+    assert!(close(defaults.params[2][0], srgb_to_linear(0.5)));
+    assert!(close(defaults.params[2][3], 1.0));
+}
+
+#[test]
+fn unknown_param_of_an_extra_row_is_refused() {
+    let reg = extra_registry();
+    let desc = extra_desc(vec![param("nope", &[1.0])]);
+    let r = map_desc_with(&desc, &reg, &extras(), |_| true);
+    assert_refused(r, "material.unknown_param", "nope");
+}
+
+#[test]
+fn transmissive_opacity_becomes_the_oit_alpha() {
+    let desc = SurfaceDesc {
+        blend: Blend::Transmissive,
+        overrides: StandardOverrides {
+            opacity: Some(0.5),
+            transmission: Some(0.6),
+            ..StandardOverrides::default()
+        },
+        ..SurfaceDesc::default()
+    };
+    let m = map(&desc).expect("transmissive");
+    assert!(close(m.opacity, 0.8), "opacity {}", m.opacity);
+    assert!(close(m.transmission, 0.6));
+    let m = map_desc_with(&desc, &registry(), &extras(), |_| true).expect("with extras");
+    assert!(close(m.opacity, 0.8), "opacity {}", m.opacity);
+}
+
+#[test]
+fn without_extras_results_are_unchanged() {
+    let reg = extra_registry();
+    let empty = ExtraBuiltins::default();
+    let desc = SurfaceDesc {
+        params: vec![param("stripeColor", &[0.2, 0.4, 0.6])],
+        ..inflatable()
+    };
+    let a = map_desc(&desc, &reg, |_| true);
+    let b = map_desc_with(&desc, &reg, &empty, |_| true);
+    assert_eq!(a.as_ref().ok(), b.as_ref().ok());
+    // A built-in without a row in any table still refuses every param.
+    let extra = extra_desc(vec![param("tint", &[1.0, 1.0, 1.0])]);
+    assert_refused(
+        map_desc(&extra, &reg, |_| true),
+        "material.unknown_param",
+        "tint",
+    );
+    assert_refused(
+        map_desc_with(&extra, &reg, &empty, |_| true),
+        "material.unknown_param",
+        "tint",
+    );
+    let plain = map_desc(&extra_desc(Vec::new()), &reg, |_| true).expect("no params");
+    assert_eq!(plain.flags & FLAG_DOUBLE_SIDED, 0);
 }

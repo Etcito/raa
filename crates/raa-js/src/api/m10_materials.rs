@@ -8,13 +8,16 @@
 //! `setPassEnabled('bloom' | 'fur.shells', on)`. Refusals (`material.fn_invalid` with the
 //! naga message, `material.fn_duplicate`, `bloom.invalid`) are thrown with their own code;
 //! malformed JS arguments throw `api.invalid_argument`. Surface material descs map through
-//! `raa_matfn::to_surface_material` and its codes are thrown unchanged.
+//! `raa_matfn::to_surface_material_with` (with the `ExtraBuiltins` tables of the feature map,
+//! empty when absent) and its codes are thrown unchanged.
 
 use js_sys::{Array, Object, Reflect};
 use raa_bloom::{BloomFeature, BloomHandle};
 use raa_core::{GpuContext, RaaError};
 use raa_fur::FurContributor;
-use raa_matfn::{BUILTINS, Blend, ParamKind, ParamSpec, StandardOverrides, SurfaceDesc};
+use raa_matfn::{
+    BUILTINS, Blend, ExtraBuiltins, ParamKind, ParamSpec, StandardOverrides, SurfaceDesc,
+};
 use raa_shader::MaterialFnId;
 use raa_web::FrameInput;
 use wasm_bindgen::prelude::*;
@@ -251,6 +254,13 @@ fn surface_desc(desc: &JsValue) -> Result<SurfaceDesc, RaaError> {
     })
 }
 
+/// Maps `d` with the built-in tables other crates registered in the feature map.
+fn map_surface(d: &SurfaceDesc, st: &EngineState) -> Result<raa_lit::SurfaceMaterial, RaaError> {
+    let empty = ExtraBuiltins::default();
+    let extras = st.features.get::<ExtraBuiltins>().unwrap_or(&empty);
+    raa_matfn::to_surface_material_with(d, &st.lit, extras)
+}
+
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
     /// Adds a surface material from a `SurfaceMaterialDesc` and returns its material handle
@@ -261,7 +271,7 @@ impl Engine {
     pub fn add_surface_material(&mut self, desc: JsValue) -> Result<u32, JsValue> {
         self.with_state(|_, st| {
             let d = surface_desc(&desc)?;
-            let m = raa_matfn::to_surface_material(&d, &st.lit)?;
+            let m = map_surface(&d, st)?;
             let len = st.lit.materials().len();
             if len >= st.max_materials as usize {
                 return Err(api_error(
@@ -284,7 +294,7 @@ impl Engine {
         self.with_state(|_, st| {
             let target = st.material(id)?;
             let d = surface_desc(&desc)?;
-            let m = raa_matfn::to_surface_material(&d, &st.lit)?;
+            let m = map_surface(&d, st)?;
             st.lit.materials_mut().set(target, m)
         })
     }
@@ -312,12 +322,14 @@ impl Engine {
     }
 
     /// Every registered material function in id order: `{name, builtin, params}`. Built-ins
-    /// of the raa-matfn table list `{name, kind: 'scalar' | 'vec3' | 'color', default}`;
+    /// of the raa-matfn table, then of the `ExtraBuiltins` tables, list `{name, kind: 'scalar' | 'vec3' | 'color', default}`;
     /// `raa.standard` and user functions list no params.
     #[wasm_bindgen(js_name = materialFunctions)]
     pub fn material_functions(&self) -> Result<Array, JsValue> {
         self.with_state(|_, st| {
             let fns = st.lit.fns();
+            let empty = ExtraBuiltins::default();
+            let extras = st.features.get::<ExtraBuiltins>().unwrap_or(&empty);
             let out = Array::new();
             for i in 0..fns.len() {
                 let Some(e) = u32::try_from(i).ok().and_then(|i| fns.get(MaterialFnId(i))) else {
@@ -325,7 +337,9 @@ impl Engine {
                 };
                 let params: Array = BUILTINS
                     .iter()
-                    .find(|b| e.builtin && b.name == e.name)
+                    .find(|b| b.name == e.name)
+                    .or_else(|| extras.find(&e.name))
+                    .filter(|_| e.builtin)
                     .map(|b| b.params.iter().map(param_to_js).collect())
                     .unwrap_or_default();
                 let o = Object::new();

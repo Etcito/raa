@@ -23,8 +23,9 @@ mod desc;
 
 pub use builtins::{BUILTINS, register_builtins};
 pub use desc::{
-    Blend, FUR_DENSITY_DEFAULT, FUR_SHELLS_DEFAULT, FUR_SHELLS_MAX, StandardOverrides, SurfaceDesc,
-    map_desc, to_surface_material,
+    Blend, ExtraBuiltins, FUR_DENSITY_DEFAULT, FUR_SHELLS_DEFAULT, FUR_SHELLS_MAX,
+    StandardOverrides, SurfaceDesc, map_desc, map_desc_with, to_surface_material,
+    to_surface_material_with,
 };
 pub use raa_lit::DrawClass;
 pub use raa_shader::{MaterialFnRegistry, ShaderError};

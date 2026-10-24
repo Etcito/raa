@@ -92,6 +92,32 @@ impl Default for SurfaceDesc {
     }
 }
 
+/// Built-in function tables registered by other crates (looked up after [`BUILTINS`]).
+#[derive(Clone, Debug, Default)]
+pub struct ExtraBuiltins {
+    tables: Vec<&'static [BuiltinFn]>,
+}
+
+impl ExtraBuiltins {
+    /// Appends one table; earlier tables win on a duplicate name.
+    pub fn push(&mut self, table: &'static [BuiltinFn]) {
+        self.tables.push(table);
+    }
+
+    /// The first row named `name` in the extra tables.
+    pub fn find(&self, name: &str) -> Option<&'static BuiltinFn> {
+        self.tables
+            .iter()
+            .flat_map(|t| t.iter())
+            .find(|b| b.name == name)
+    }
+
+    /// The registered tables, in push order.
+    pub fn tables(&self) -> &[&'static [BuiltinFn]] {
+        &self.tables
+    }
+}
+
 fn refuse(code: &'static str, message: String) -> RaaError {
     RaaError::FrameGraph { code, message }
 }
@@ -294,6 +320,19 @@ pub fn map_desc(
     reg: &MaterialFnRegistry,
     class_handled: impl Fn(DrawClass) -> bool,
 ) -> Result<SurfaceMaterial, RaaError> {
+    map_desc_with(desc, reg, &ExtraBuiltins::default(), class_handled)
+}
+
+/// [`map_desc`] where a built-in's row (params, flags) is looked up in [`BUILTINS`], then in
+/// `extras`. For `Blend::Transmissive` the stored opacity is the OIT alpha
+/// `opacity * (1 - transmission) + transmission`, computed after validation.
+#[doc(hidden)]
+pub fn map_desc_with(
+    desc: &SurfaceDesc,
+    reg: &MaterialFnRegistry,
+    extras: &ExtraBuiltins,
+    class_handled: impl Fn(DrawClass) -> bool,
+) -> Result<SurfaceMaterial, RaaError> {
     let Some(id) = reg.id_of(&desc.function) else {
         return Err(refuse(
             "material.unknown_fn",
@@ -310,7 +349,11 @@ pub fn map_desc(
     } else {
         m.model = SurfaceModel::Function(id);
     }
-    match BUILTINS.iter().find(|b| b.name == desc.function) {
+    let row = BUILTINS
+        .iter()
+        .find(|b| b.name == desc.function)
+        .or_else(|| extras.find(&desc.function));
+    match row {
         Some(row) => {
             m.flags = row.flags;
             apply_builtin_params(&mut m, row, &desc.params)?;
@@ -353,6 +396,9 @@ pub fn map_desc(
         ));
     }
     m.validate()?;
+    if desc.blend == Blend::Transmissive {
+        m.opacity = m.opacity * (1.0 - m.transmission) + m.transmission;
+    }
     let class = m.class();
     if !class_handled(class) {
         return Err(refuse(
@@ -371,6 +417,15 @@ pub fn to_surface_material(
     desc: &SurfaceDesc,
     lit: &LitRenderer,
 ) -> Result<SurfaceMaterial, RaaError> {
+    to_surface_material_with(desc, lit, &ExtraBuiltins::default())
+}
+
+/// [`to_surface_material`] that also looks built-in rows up in `extras` (see [`map_desc_with`]).
+pub fn to_surface_material_with(
+    desc: &SurfaceDesc,
+    lit: &LitRenderer,
+    extras: &ExtraBuiltins,
+) -> Result<SurfaceMaterial, RaaError> {
     let reg = lit.fns();
-    map_desc(desc, &reg, |c| lit.class_handled(c))
+    map_desc_with(desc, &reg, extras, |c| lit.class_handled(c))
 }
