@@ -1,0 +1,62 @@
+{
+  "name": "speckled",
+  "key": "914aaa9f632122e9b844f68c61ea8a0f49209969b26d7facf4cda4a95d67b92c",
+  "body": "  // 0: noise (pattern.noise)\n  var n0_value = 0.0;\n  {\n    var sc = bitcast<f32>(extra_words[b + 3u]);\n    if (!mat_finite(sc)) { sc = 1.0; }\n    let q = pn * sc;\n    let tri = extra_words[b + 6u] == 1u;\n    var wt = vec3f(1.0, 0.0, 0.0);\n    var cnt = 1u;\n    if (tri) { wt = mat_tri_weights(n); cnt = 3u; }\n    let P = array<f32, 6>(bitcast<f32>(extra_words[b + 0u]), bitcast<f32>(extra_words[b + 1u]), bitcast<f32>(extra_words[b + 2u]), 0.0, 0.0, 0.0);\n    for (var j = 0u; j < cnt; j = j + 1u) {\n      var qj = q;\n      if (tri) { qj[j] = 0.0; }\n      n0_value = n0_value + wt[j] * mat_pat_noise(qj, P, extra_words[b + 5u], extra_words[b + 4u]);\n    }\n    if (!mat_finite(n0_value)) { n0_value = 0.0; }\n    n0_value = mat_clamp01(n0_value);\n  }\n  // 1: mix (math.mix_color)\n  let n1_value = vec3f(bitcast<f32>(extra_words[b + 8u]), bitcast<f32>(extra_words[b + 9u]), bitcast<f32>(extra_words[b + 10u])) + (mat_blend(extra_words[b + 7u], vec3f(bitcast<f32>(extra_words[b + 8u]), bitcast<f32>(extra_words[b + 9u]), bitcast<f32>(extra_words[b + 10u])), vec3f(bitcast<f32>(extra_words[b + 11u]), bitcast<f32>(extra_words[b + 12u]), bitcast<f32>(extra_words[b + 13u]))) - vec3f(bitcast<f32>(extra_words[b + 8u]), bitcast<f32>(extra_words[b + 9u]), bitcast<f32>(extra_words[b + 10u]))) * n0_value;\n  // 2: out (material.output)\n  return MaterialFull(n1_value, mat_clamp01(bitcast<f32>(extra_words[b + 17u])), mat_clamp01(n0_value), vec3f(bitcast<f32>(extra_words[b + 18u]), bitcast<f32>(extra_words[b + 19u]), bitcast<f32>(extra_words[b + 20u])), bitcast<f32>(extra_words[b + 21u]));\n",
+  "helpers": [
+    {
+      "id": "base",
+      "wgsl": "\nconst MAT_TAU: f32 = 6.283185307179586;\nconst MAT_PI: f32 = 3.141592653589793;\nconst MAT_INV_2_24: f32 = 5.960464477539063e-8;\n\nvar<private> mat_mesh_uv: vec3f = vec3f(0.0, 0.0, 0.0);\nvar<private> mat_mesh_color: vec4f = vec4f(1.0, 1.0, 1.0, 1.0);\n\nfn mat_set_mesh_attrs(uv: vec2f, has_uv: bool, color: vec4f) {\n  mat_mesh_uv = vec3f(uv, select(0.0, 1.0, has_uv));\n  mat_mesh_color = color;\n}\n\nfn mat_clamp01(x: f32) -> f32 {\n  if (x < 0.0) { return 0.0; }\n  if (x > 1.0) { return 1.0; }\n  return x;\n}\n\nfn mat_smoothstep(e0: f32, e1: f32, x: f32) -> f32 {\n  let t = mat_clamp01((x - e0) / (e1 - e0));\n  return t * t * (3.0 - 2.0 * t);\n}\n\nfn mat_sin01(x: f32) -> f32 {\n  return 0.5 + 0.5 * sin(MAT_TAU * x);\n}\n\nfn mat_unit(h: u32) -> f32 {\n  return f32(h >> 8u) * MAT_INV_2_24;\n}\n\nfn mat_finite(x: f32) -> bool {\n  return abs(x) <= 3.4028234e38;\n}\n\n// fbm3 octave count of the TS fbm3: floor, 0 -> 1, clamped to 1..6.\nfn mat_octaves(o: f32) -> u32 {\n  return u32(clamp(floor(o), 1.0, 6.0));\n}\n"
+    },
+    {
+      "id": "common.hash",
+      "wgsl": "\nfn pcg_hash(x: u32) -> u32 {\n  let state = x * 747796405u + 2891336453u;\n  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;\n  return (word >> 22u) ^ word;\n}\n\n// f32 -> u32 like the TS 'x >>> 0' for non-negative integral values (wraps at 2^32 instead of saturating).\nfn f32_to_u32_wrap(x: f32) -> u32 {\n  if (x >= 4294967296.0) { return u32(x - 4294967296.0); }\n  if (x <= 0.0) { return 0u; }\n  return u32(x);\n}\n"
+    },
+    {
+      "id": "common.noise",
+      "wgsl": "\nfn noise_lattice(c: vec3i, seed: u32) -> f32 {\n  let u = bitcast<vec3u>(c);\n  let h = pcg_hash(u.x + pcg_hash(u.y + pcg_hash(u.z + pcg_hash(seed))));\n  return f32(h >> 8u) * (1.0 / 16777216.0) * 2.0 - 1.0;\n}\n\nfn value_noise3(p: vec3f, seed: u32) -> f32 {\n  let fl = floor(p);\n  let i = vec3i(fl);\n  let f = p - fl;\n  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n  let a = noise_lattice(i, seed);\n  let b = noise_lattice(i + vec3i(1, 0, 0), seed);\n  let c = noise_lattice(i + vec3i(0, 1, 0), seed);\n  let d = noise_lattice(i + vec3i(1, 1, 0), seed);\n  let e = noise_lattice(i + vec3i(0, 0, 1), seed);\n  let g = noise_lattice(i + vec3i(1, 0, 1), seed);\n  let h = noise_lattice(i + vec3i(0, 1, 1), seed);\n  let k = noise_lattice(i + vec3i(1, 1, 1), seed);\n  let x00 = a + (b - a) * u.x;\n  let x10 = c + (d - c) * u.x;\n  let x01 = e + (g - e) * u.x;\n  let x11 = h + (k - h) * u.x;\n  let y0 = x00 + (x10 - x00) * u.y;\n  let y1 = x01 + (x11 - x01) * u.y;\n  return y0 + (y1 - y0) * u.z;\n}\n\nfn fbm3(p: vec3f, octaves: u32, seed: u32) -> f32 {\n  let n = clamp(octaves, 1u, 6u);\n  var sum = 0.0;\n  var norm = 0.0;\n  var gain = 1.0;\n  var q = p;\n  for (var k = 0u; k < n; k = k + 1u) {\n    sum = sum + gain * value_noise3(q, seed + k);\n    norm = norm + gain;\n    gain = gain * 0.5;\n    q = q * 2.0;\n  }\n  return sum / norm;\n}\n"
+    },
+    {
+      "id": "blend",
+      "wgsl": "\n// Blend modes of math.mix_color (order of BLEND_MODES in blend.ts; CPU twin: blendChannel).\nfn mat_blend1(m: u32, a: f32, b: f32) -> f32 {\n  if (m == 1u) { return a + b; }\n  if (m == 2u) { return a - b; }\n  if (m == 3u) { return a * b; }\n  if (m == 4u) { return 1.0 - (1.0 - a) * (1.0 - b); }\n  if (m == 5u) {\n    if (a < 0.5) { return 2.0 * a * b; }\n    return 1.0 - 2.0 * (1.0 - a) * (1.0 - b);\n  }\n  if (m == 6u) { return min(a, b); }\n  if (m == 7u) { return max(a, b); }\n  if (m == 8u) { return abs(a - b); }\n  if (m == 9u) {\n    if (b != 0.0) { return a / b; }\n    return a;\n  }\n  if (m == 10u) {\n    if (a == 0.0) { return 0.0; }\n    let d = 1.0 - b;\n    if (d <= 0.0) { return 1.0; }\n    return min(1.0, a / d);\n  }\n  if (m == 11u) {\n    if (b <= 0.0) { return 0.0; }\n    return clamp(1.0 - (1.0 - a) / b, 0.0, 1.0);\n  }\n  if (m == 12u) { return (1.0 - a) * b * a + a * (1.0 - (1.0 - b) * (1.0 - a)); }\n  if (m == 13u) {\n    if (b > 0.5) { return a + 2.0 * (b - 0.5); }\n    return a + 2.0 * b - 1.0;\n  }\n  return b;\n}\n\nfn mat_blend(m: u32, a: vec3f, b: vec3f) -> vec3f {\n  return vec3f(mat_blend1(m, a.x, b.x), mat_blend1(m, a.y, b.y), mat_blend1(m, a.z, b.z));\n}\n"
+    },
+    {
+      "id": "tri",
+      "wgsl": "\n// Triplanar weights |n|^4 / sum (equal thirds when n = 0).\nfn mat_tri_weights(n: vec3f) -> vec3f {\n  let n2 = n * n;\n  let w = n2 * n2;\n  let sum = w.x + w.y + w.z;\n  if (sum > 1e-12) { return w / sum; }\n  return vec3f(1.0 / 3.0);\n}\n"
+    },
+    {
+      "id": "pat_noise",
+      "wgsl": "\nfn mat_pat_noise(q: vec3f, P: array<f32, 6>, ax: u32, seed: u32) -> f32 {\n  return 0.5 + 0.5 * P[1] * fbm3(q, mat_octaves(P[0]), seed) + P[2];\n}\n"
+    }
+  ],
+  "constants": [
+    1082130432,
+    1065353216,
+    0,
+    1086324736,
+    0,
+    1,
+    0,
+    0,
+    1012956852,
+    1033904314,
+    1057316855,
+    1063472878,
+    1063472878,
+    1063472878,
+    0,
+    1065353216,
+    1008981770,
+    1036831949,
+    0,
+    0,
+    0,
+    0
+  ],
+  "fields": [
+    "base_color",
+    "metallic",
+    "roughness",
+    "emissive",
+    "height"
+  ]
+}
