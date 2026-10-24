@@ -35,7 +35,8 @@ const CAMERAS = {
   inflatables: [[-0.15, 0.6, 0.05], 2.4, 0.08, 0.14],
   // Close on the pink ball with the hammer head behind it, where the coat glint shows.
   clearcoat: [[-0.3, 0.62, 0.1], 1.75, 0.3, 0.1],
-  neon: [[0, 0.5, -0.15], 2.8, 0, 0.1],
+  // Pitched down so the deck and the tubes' reflections fill the lower half (card 4809).
+  neon: [[0, 0.45, -0.15], 2.8, 0, 0.18],
   // Closer than the first capture, so the fur fills more pixels (card 4750).
   plush: [[-0.05, 0.38, 0], 1.75, 0.1, 0.13],
   // Close three-quarter view of the penguin: its fuzzy outline against the sky.
@@ -100,10 +101,17 @@ const NIGHT_SKY = {
   sunDiscIntensity: 0,
   clouds: { coverage: 0.35, density: 0.8, color: [0.7, 0.55, 1], silverLining: 0.2 },
 };
-// Violet floor, glossy and clear-coated like ref-4's lacquered decks: it mirrors the violet
-// horizon and the bloom of the tubes tints it (sRGB, roughness, coat). The old dark violet
-// (0.08, 0.07, 0.16) rendered the lower half of the frame black (card 4752).
-const NEON_FLOOR = { color: [0.42, 0.18, 0.62], roughness: 0.25, clearcoat: 1, clearcoatRoughness: 0.06 };
+// Violet deck floor of the neon sets (demo.neon-deck below): lacquered panels like ref-4's
+// decks, clear-coated, with dark seams that draw the floor plane in perspective. The plain
+// glossy violet floor matched the sky's violet ground, so the judge saw "no visible floor
+// plane, reflections or highlights" (card 4809). sRGB colour, roughness, coat.
+const NEON_FLOOR = { color: [0.3, 0.13, 0.52], roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.06 };
+// Deck parameters (linear, raw user params): p0 seam colour; p1 = (light pool gain, sharp
+// coat lobe rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
+// bevel width m, panel tone variation).
+const NEON_DECK = { p0: [0.012, 0.004, 0.03], p1: [2, 0.03, 0.22, 0.35], p2: [0.6, 0.012, 0.02, 0.12] };
+// Tube lights of the deck: each tube's centreline is cut into segments about this long (m).
+const DECK_SEGMENT = 0.1;
 // Bloom of the neon sets: twice the BLOOM defaults (0.04, 0.85) and a full-texel tent give
 // ref-4's wide soft glow; at the defaults the halo hugged the 5 cm tubes (card 4752).
 const NEON_BLOOM = { strength: 0.08, radius: 1 };
@@ -187,6 +195,92 @@ const CHECKERS = {
   sphere: { r: 0.38, t: [-0.5, 0.38, 0], p0: [0.9, 0.04, 0.2], p1: [0.95, 0.9, 0.82], p2: [16, 8, 0.5] },
   box: { half: 0.32, t: [0.55, 0.32, 0], p0: [0.02, 0.18, 0.85], p1: [1, 0.62, 0.02], p2: [4, 4, 0.5] },
 };
+
+// User material function of the neon deck (S11): lacquered violet panels on a world XZ
+// grid with dark seams and bevelled edges, lit by the neon tubes as line lights. The tubes
+// are emissive geometry, not engine lights, so their light on the floor is evaluated here
+// from their segments (baked into the source by deckWgsl): a Lambert pool under each tube
+// (projected tube area x cosine / distance^2) and its glossy reflection (the closest point of
+// each segment to the reflected view ray, Karis's representative point, spread by the coat
+// and base lobes and weighted by Schlick Fresnel). Record colour, roughness and coat are the
+// desc's; params as NEON_DECK. DECK_LIGHTS is replaced by one line per segment.
+const DECK_WGSL = `
+// Lambert factor of a tube segment a..b of radius r at floor point p (normal n).
+fn deck_diffuse(p: vec3<f32>, n: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32) -> f32 {
+  let len = length(b - a);
+  let d = (a + b) * 0.5 - p;
+  let dist2 = max(dot(d, d), 0.25 * len * len + r * r);
+  let cos_t = max(dot(n, d), 0.0) * inverseSqrt(dist2);
+  return 2.0 * r * len * cos_t / (3.14159265 * dist2);
+}
+
+// Reflected radiance fraction of a tube segment seen along the reflection ray rd from p:
+// a lobe of angular width sigma around the closest point, widened by the tube's own
+// angular radius.
+fn deck_specular(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32, sigma: f32) -> f32 {
+  let l0 = a - p;
+  let ld = b - a;
+  let rl = dot(rd, ld);
+  let t = clamp((dot(rd, l0) * rl - dot(l0, ld)) / max(dot(ld, ld) - rl * rl, 1e-6), 0.0, 1.0);
+  let c = l0 + t * ld;
+  let dist = max(length(c), 1e-3);
+  let cos_t = clamp(dot(c / dist, rd), -1.0, 1.0);
+  let theta2 = 2.0 * (1.0 - cos_t);
+  let beta = r / dist;
+  let spread2 = beta * beta + sigma * sigma;
+  return beta * inverseSqrt(spread2) * exp(-0.5 * theta2 / spread2);
+}
+
+fn material_main(in: MaterialInput) -> MaterialOutput {
+  var o = raa_default_output(in);
+  let seam_color = in.record.p[0].rgb;
+  let gain = in.record.p[1].x;
+  let sharp = max(in.record.p[1].y, 1e-3);
+  let broad = max(in.record.p[1].z, 1e-3);
+  let broad_w = in.record.p[1].w;
+  let size = max(in.record.p[2].x, 1e-3);
+  let seam_w = in.record.p[2].y;
+  let bevel_w = max(in.record.p[2].z, 1e-4);
+  let tone = in.record.p[2].w;
+  let top = smoothstep(0.5, 0.9, in.normal.y);
+
+  // Panels: distance to the nearest seam centre (m), per-panel tone, bevel tilt.
+  let q = in.position.xz / size;
+  let cell = floor(q);
+  let f = q - cell;
+  let e = min(f, vec2<f32>(1.0) - f) * size;
+  let d = min(e.x, e.y);
+  // Seam edge softened with the camera distance and faded out far away, so the far seams
+  // do not alias into dotted lines near the horizon.
+  let cam_dist = length(raa_frame.camera_pos.xyz - in.position);
+  let aa = 0.002 + 0.003 * cam_dist;
+  let fade = 1.0 - smoothstep(3.0, 7.0, cam_dist);
+  let seam = (1.0 - smoothstep(0.5 * seam_w - aa, 0.5 * seam_w + aa, d)) * top * fade;
+  let shade = 1.0 + tone * (raa_hash3(vec3<f32>(cell, 7.0)).x * 2.0 - 1.0);
+  // Bevel: the panel surface rolls down toward its nearest seam.
+  let to_edge = select(vec2<f32>(0.0, sign(f.y - 0.5)), vec2<f32>(sign(f.x - 0.5), 0.0), e.x < e.y);
+  let bevel = (1.0 - smoothstep(0.5 * seam_w, 0.5 * seam_w + bevel_w, d)) * (1.0 - seam) * top * fade;
+  let tilt = vec3<f32>(to_edge.x, 0.0, to_edge.y) * (0.6 * bevel);
+  o.normal = normalize(in.normal + tilt);
+  o.base_color = mix(o.base_color * shade, seam_color, seam);
+  o.roughness = mix(o.roughness, 0.8, seam);
+  o.clearcoat = o.clearcoat * (1.0 - seam);
+
+  // Tube light on the deck: diffuse pools and glossy reflections.
+  let p = in.position;
+  let n = o.normal;
+  let v = normalize(in.view_dir);
+  let rd = reflect(-v, n);
+  var pool = vec3<f32>(0.0);
+  var refl_sharp = vec3<f32>(0.0);
+  var refl_broad = vec3<f32>(0.0);
+DECK_LIGHTS
+  let fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+  let refl = (refl_sharp * o.clearcoat + refl_broad * broad_w) * fres;
+  o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam)) * top;
+  return o;
+}
+`;
 
 // Ground materials: a tiled floor (6 m, 0.25 m tiles), a mud pool disc sunk in it and a
 // half-buried snow mound (ellipsoid radii, centre on the floor).
@@ -297,23 +391,70 @@ function buildInflatables(engine, lib, settings) {
   }
 }
 
+// Centreline of a lib sweepTube mesh (v runs along the tube, so the vertices sharing a v
+// form one ring): ring centres in v order, thinned to points about `step` m apart.
+function centreline(desc, step) {
+  const rings = new Map();
+  for (let i = 0; i < desc.positions.length / 3; i++) {
+    const v = desc.uvs[2 * i + 1];
+    const key = v.toFixed(5);
+    const ring = rings.get(key) ?? { v, sum: [0, 0, 0], n: 0 };
+    for (let k = 0; k < 3; k++) ring.sum[k] += desc.positions[3 * i + k];
+    ring.n += 1;
+    rings.set(key, ring);
+  }
+  const pts = [...rings.values()].sort((a, b) => a.v - b.v).map((r) => r.sum.map((x) => x / r.n));
+  const out = [pts[0]];
+  const far = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) >= step;
+  for (const q of pts.slice(1, -1)) if (far(q, out[out.length - 1])) out.push(q);
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+const srgbToLinear = (c) => c.map((x) => (x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+const wgslVec = (v) => `vec3<f32>(${v.map((x) => x.toFixed(4)).join(', ')})`;
+
+// demo.neon-deck source with one diffuse and two reflection lines per tube segment. A tube
+// is { points (world centreline), color (sRGB) }; its radiance is the raa.neon emissive.
+function deckWgsl(tubes) {
+  const lines = [];
+  for (const { points, color } of tubes) {
+    const radiance = wgslVec(srgbToLinear(color).map((x) => x * NEON_TUBE.strength));
+    for (let i = 0; i + 1 < points.length; i++) {
+      const ab = `${wgslVec(points[i])}, ${wgslVec(points[i + 1])}, ${TUBE_R}`;
+      lines.push(`  pool += ${radiance} * deck_diffuse(p, n, ${ab});`);
+      lines.push(`  refl_sharp += ${radiance} * deck_specular(p, rd, ${ab}, sharp);`);
+      lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad);`);
+    }
+  }
+  return DECK_WGSL.replace('DECK_LIGHTS', lines.join('\n'));
+}
+
 // Neon tubes of four colours at night: the letter S, an upright ring, a zigzag and a bar,
-// standing on a dark glossy floor that reflects their glow.
+// above a violet lacquered deck (demo.neon-deck) lit and mirrored by their glow.
 function buildNeon(engine, lib) {
   const { geometry, objects } = lib;
   night(engine);
+  const zig = polyline([[-0.4, 0, 0], [-0.2, 0.25, 0], [0, 0, 0], [0.2, 0.25, 0], [0.4, 0, 0]], 12);
+  const tubes = [
+    { mesh: objects.neonTube(), color: NEON_PINK, t: [-0.2, 0, 0], yaw: 0 },
+    { mesh: geometry.sweepTube(circle(0.35, 64, true), TUBE_R, 16, { closed: true }), color: NEON_CYAN, t: [0.85, 0.45, -0.2], yaw: -0.3 },
+    { mesh: geometry.sweepTube(zig, TUBE_R, 16), color: NEON_YELLOW, t: [-1.15, 0.2, -0.3], yaw: 0.35 },
+    { mesh: geometry.sweepTube(polyline([[-1.2, 0, 0], [1.2, 0, 0]], 24), TUBE_R, 16), color: NEON_PURPLE, t: [0, 1.15, -0.6], yaw: 0 },
+  ];
+  // World centreline of each tube (yaw about +Y, then the translation), for the deck lights.
+  const world = ({ mesh, t, yaw }) => centreline(mesh, DECK_SEGMENT).map(([x, y, z]) => [
+    t[0] + Math.cos(yaw) * x + Math.sin(yaw) * z,
+    t[1] + y,
+    t[2] - Math.sin(yaw) * x + Math.cos(yaw) * z,
+  ]);
+  engine.addMaterialFunction('demo.neon-deck', deckWgsl(tubes.map((tb) => ({ points: world(tb), color: tb.color }))));
   const { color, roughness, ...coat } = NEON_FLOOR;
-  floor(engine, geometry, color, roughness, coat);
+  const deck = engine.addSurfaceMaterial({ function: 'demo.neon-deck', params: NEON_DECK, color, roughness, ...coat });
+  place(engine, upload(engine, geometry.roundedBox(FLOOR.half, 0.02, 2), [deck]), FLOOR.t);
   // The tubes are light sources: no moon shadow (the ring cast a black ellipse, card 4752).
   const neon = (c) => engine.addSurfaceMaterial({ function: 'raa.neon', params: { color: c, ...NEON_TUBE }, castShadow: false });
-  place(engine, upload(engine, objects.neonTube(), [neon(NEON_PINK)]), [-0.2, 0, 0]);
-  const ring = geometry.sweepTube(circle(0.35, 64, true), TUBE_R, 16, { closed: true });
-  place(engine, upload(engine, ring, [neon(NEON_CYAN)]), [0.85, 0.45, -0.2], yawQuat(-0.3));
-  const zig = polyline([[-0.4, 0, 0], [-0.2, 0.25, 0], [0, 0, 0], [0.2, 0.25, 0], [0.4, 0, 0]], 12);
-  const zigzag = geometry.sweepTube(zig, TUBE_R, 16);
-  place(engine, upload(engine, zigzag, [neon(NEON_YELLOW)]), [-1.15, 0.2, -0.3], yawQuat(0.35));
-  const bar = geometry.sweepTube(polyline([[-1.2, 0, 0], [1.2, 0, 0]], 24), TUBE_R, 16);
-  place(engine, upload(engine, bar, [neon(NEON_PURPLE)]), [0, 1.15, -0.6]);
+  for (const tb of tubes) place(engine, upload(engine, tb.mesh, [neon(tb.color)]), tb.t, yawQuat(tb.yaw));
 }
 
 // Ellipsoid of `radii` from a lib uvSphere: positions scaled, normals by the inverse
@@ -421,8 +562,9 @@ const INFLATABLES = 'an upright inflatable toy hammer (red and yellow pillowed p
 const PLASTIC = 'glossy inflatable plastic with a crisp clear-coat highlight over a coloured '
   + 'base, inflated seams (soft pillowed bulges between the seams)';
 const NEON = 'several glowing neon tubes at night (a pink script letter S, a cyan ring, a '
-  + 'yellow zigzag and a purple bar) above a glossy violet floor under a navy night sky '
-  + 'fading to a violet horizon glow';
+  + 'yellow zigzag and a purple bar) above a glossy violet deck floor of large lacquered '
+  + 'panels with thin dark seams, which mirrors the tubes in blurred coloured reflections, '
+  + 'under a navy night sky fading to a violet horizon glow';
 const GLOW = 'neon tubes glow with soft physically based bloom, white-hot cores with '
   + 'saturated coloured rims, no halo banding';
 const PLUSH = 'a pastel pink plush ball and a plush penguin-like toy (deep blue furry body '
