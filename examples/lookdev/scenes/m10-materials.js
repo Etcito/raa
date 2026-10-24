@@ -44,7 +44,8 @@ const CAMERAS = {
 
 // Inflatable palette (sRGB): ref-1's pink, yellow, blue and white plastic.
 const PINK = [0.95, 0.2, 0.55];
-const YELLOW = [1, 0.84, 0.12];
+// Yellow leans orange: the blue sky fill turns a greener yellow olive (judge, card 4786).
+const YELLOW = [1, 0.74, 0.04];
 const BLUE = [0.12, 0.45, 0.95];
 const WHITE = [0.98, 0.96, 0.92];
 // Clear coat of every inflatable and candy material (the functions take it from the desc):
@@ -64,11 +65,19 @@ const BUMPERS = [
 ];
 // The hammer stands behind the balls, scaled up to read as the set's centrepiece.
 const HAMMER = { t: [-0.35, 0, -0.55], yaw: 0.3, scale: 1.25 };
-// Under the inflatables the floor is a lighter cyan blue and glossier than the shared one,
-// so it mirrors the sky like ref-1's mats (sRGB, roughness).
-const INFLATABLE_FLOOR = { color: [0.3, 0.65, 1], roughness: 0.18 };
+// Under the inflatables the floor is a saturated azure, glossier than the shared one and
+// clear-coated, so it mirrors the sky like ref-1's vinyl mats (sRGB, roughness, coat).
+const INFLATABLE_FLOOR = { color: [0.12, 0.52, 1], roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.05 };
 // Brighter exposure for the inflatable sets: ref-1's high-key plastic toys (EV).
-const INFLATABLE_EXPOSURE_EV = 0.35;
+const INFLATABLE_EXPOSURE_EV = 0.55;
+// Inflatable sets: a little more sun and less blue sky fill, so the plastic keeps its own
+// saturated colour instead of a blue cast (judge, card 4786).
+const INFLATABLE_SUN = { ...SUN, intensity: 8 };
+const INFLATABLE_ENV = { diffuse: 0.5, specular: 1 };
+// Bloom sums its mips (about 7 levels at 720p), so the composite adds ~7 x strength of a
+// blurred frame: 0.1 washed the set in blue sky haze. 0.015 keeps a soft glow on the
+// highlights only (card 4786).
+const INFLATABLE_BLOOM = { strength: 0.015, radius: 0.85 };
 // Floor slab (top at y 0): glossy blue by day, dark violet at night (sRGB).
 const FLOOR = { half: [8, 0.05, 8], t: [0, -0.05, 0], day: [0.2, 0.5, 0.95], night: [0.08, 0.07, 0.16] };
 
@@ -199,8 +208,8 @@ function surface(engine, fn, params, clearcoat) {
   return engine.addSurfaceMaterial({ function: fn, params, ...COAT, clearcoat: clearcoat ?? COAT.clearcoat });
 }
 
-function floor(engine, geometry, color, roughness) {
-  const m = engine.addSurfaceMaterial({ color, roughness });
+function floor(engine, geometry, color, roughness, coat = {}) {
+  const m = engine.addSurfaceMaterial({ color, roughness, ...coat });
   place(engine, upload(engine, geometry.roundedBox(FLOOR.half, 0.02, 2), [m]), FLOOR.t);
 }
 
@@ -210,9 +219,12 @@ function buildInflatables(engine, lib, settings) {
   const { geometry, objects } = lib;
   const cc = settings.clearcoat;
   daylight(engine);
+  engine.setLight(INFLATABLE_SUN);
+  engine.setEnvironmentLighting(INFLATABLE_ENV);
   engine.setToneMapping({ exposureEv: INFLATABLE_EXPOSURE_EV });
-  engine.setBloom({ strength: 0.1, radius: 0.85 });
-  floor(engine, geometry, INFLATABLE_FLOOR.color, INFLATABLE_FLOOR.roughness);
+  engine.setBloom(INFLATABLE_BLOOM);
+  const { color, roughness, ...coat } = INFLATABLE_FLOOR;
+  floor(engine, geometry, color, roughness, coat);
   const hammer = surface(engine, 'raa.inflatable', { color: [1, 1, 1], stripeWidth: 0, seamDepth: 0.24 }, cc);
   const hammerMesh = upload(engine, objects.inflatableHammer(), [hammer]);
   place(engine, hammerMesh, HAMMER.t, yawQuat(HAMMER.yaw), HAMMER.scale);
@@ -340,8 +352,8 @@ const SETS = {
 const INFLATABLES = 'an upright inflatable toy hammer (red and yellow pillowed panels, blue '
   + 'end caps, striped handle), shiny inflatable balls (pink with white gores, white with pink '
   + 'candy stripes, yellow with blue gores, a small yellow and blue candy-striped ball) and two '
-  + 'inflated bumper rings (blue, yellow) lying on a glossy light blue floor under a bright '
-  + 'blue sky with white clouds';
+  + 'inflated bumper rings (one blue with yellow panels, one yellow with pink panels) lying '
+  + 'on a glossy azure blue floor under a bright blue sky with white clouds';
 const PLASTIC = 'glossy inflatable plastic with a crisp clear-coat highlight over a coloured '
   + 'base, inflated seams (soft pillowed bulges between the seams)';
 const NEON = 'several glowing neon tubes at night (a pink script letter S, a cyan ring, a '
