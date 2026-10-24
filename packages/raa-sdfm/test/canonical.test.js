@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { canonicalJson, documentHash, sha256Hex } from '../src/canonical.js';
+import { canonicalJson, documentHash, sha256Bytes, sha256Hex } from '../src/canonical.js';
 import { SdfmError } from '../src/errors.js';
 
 const nodeSha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
@@ -13,6 +13,26 @@ test('sha256Hex matches the known digest of "abc" and node:crypto', async () => 
   );
   const text = 'sdfm.game-asset canonical text ✓';
   assert.equal(await sha256Hex(text), nodeSha256(text));
+});
+
+test('sha256Bytes (no crypto.subtle) matches node:crypto across block boundaries', () => {
+  const hex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  for (const length of [0, 1, 55, 56, 63, 64, 65, 119, 1000]) {
+    const text = 'é'.repeat(length >> 1) + 'x'.repeat(length & 1);
+    assert.equal(hex(sha256Bytes(new TextEncoder().encode(text))), nodeSha256(text), `length ${length}`);
+  }
+});
+
+test('sha256Hex falls back to JS where crypto.subtle is missing (opaque-origin worker)', async () => {
+  const subtle = Object.getOwnPropertyDescriptor(globalThis.crypto, 'subtle')
+    ?? Object.getOwnPropertyDescriptor(Object.getPrototypeOf(globalThis.crypto), 'subtle');
+  Object.defineProperty(globalThis.crypto, 'subtle', { value: undefined, configurable: true });
+  try {
+    assert.equal(await sha256Hex('abc'), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+  } finally {
+    delete globalThis.crypto.subtle;
+    if (!('subtle' in globalThis.crypto)) Object.defineProperty(globalThis.crypto, 'subtle', subtle);
+  }
 });
 
 test('canonicalJson uses two-space indent, LF and a trailing newline', () => {
