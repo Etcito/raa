@@ -7,6 +7,8 @@
 //! [`wave_height`] is the binding parameter-packing and displacement/normal contract of the
 //! crate.
 
+mod builtins;
 mod shaders;
 mod waves;
+pub use builtins::LIQUID_BUILTINS;
 pub use waves::*;
