@@ -1,0 +1,38 @@
+{
+  "name": "@etcito/raa-sdfm",
+  "version": "0.1.0",
+  "description": "Adapter that loads sdfm.game-asset v1 files as RAA meshes and materials, meshed by MAMA.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Etcito/raa",
+    "directory": "packages/raa-sdfm"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./worker.js": "./worker.js"
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "worker.js",
+    "src/",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@etcito/raa": "^0.1.0",
+    "mama": "^0.1.0"
+  },
+  "sideEffects": false,
+  "keywords": [
+    "webgpu",
+    "sdf",
+    "sdfm",
+    "mesh"
+  ]
+}
