@@ -1,4 +1,4 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-plush", "command": "node scripts/lookdev-capture.mjs --only '^m10-materials--(plush|fur-on|fur-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
+  {"name": "capture-neon", "command": "node scripts/lookdev-capture.mjs --only '^m10-materials--(neon|bloom-on|bloom-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
 ]

@@ -10,8 +10,11 @@
 const BACKGROUND = [0.3, 0.34, 0.4]; // display-referred (S12), hidden by the sky
 // Sun from the upper right, slightly behind (as m09, 35 deg high).
 const SUN = { direction: [-0.8067, -0.5736, 0.1422], color: [1, 0.93, 0.82], intensity: 7 };
-// Cool dim moonlight for the night sets: the neon tubes are the main light.
-const MOON = { direction: [-0.2955, -0.2924, 0.9096], color: [0.6, 0.7, 1], intensity: 0.3 };
+// Dim lavender moonlight for the night sets: the neon tubes are the main light, the moon
+// only lifts the violet floor out of black. It comes from behind the camera's right, high,
+// so its glint on the glossy floor falls out of view (from the front it painted a hard-edged
+// white streak and the ring's black shadow towards the camera, card 4752).
+const MOON = { direction: [-0.3, -0.85, -0.43], color: [0.8, 0.7, 1], intensity: 0.6 };
 const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 // The m08 `day` sky overrides, with m09's pale blue haze ground.
 const DAY_SKY = {
@@ -24,8 +27,6 @@ const DAY_SKY = {
   sunDiscIntensity: 20,
   clouds: { coverage: 0.5, density: 2.5, scale: 1800 },
 };
-// BLOOM defaults, set explicitly so the capture documents them.
-const BLOOM = { strength: 0.04, radius: 0.85 };
 const SHADOWS = { softness: 1, distance: 30 };
 
 // Orbit cameras: [target, distance m, yaw rad, pitch rad] (as m09).
@@ -34,7 +35,7 @@ const CAMERAS = {
   inflatables: [[-0.15, 0.6, 0.05], 2.4, 0.08, 0.14],
   // Close on the pink ball with the hammer head behind it, where the coat glint shows.
   clearcoat: [[-0.3, 0.62, 0.1], 1.75, 0.3, 0.1],
-  neon: [[0, 0.55, 0], 3.6, 0, 0.12],
+  neon: [[0, 0.5, -0.15], 2.8, 0, 0.1],
   // Closer than the first capture, so the fur fills more pixels (card 4750).
   plush: [[-0.05, 0.38, 0], 1.75, 0.1, 0.13],
   // Close three-quarter view of the penguin: its fuzzy outline against the sky.
@@ -84,9 +85,32 @@ const INFLATABLE_ENV = { diffuse: 0.5, specular: 1 };
 // highlights only (card 4786); 0.025 lets the hot coat glints of the front sun glow (the
 // judge saw no glow at 0.015, card 4790).
 const INFLATABLE_BLOOM = { strength: 0.025, radius: 0.85 };
-// Floor slab (top at y 0): glossy blue by day, dark violet at night (sRGB).
-const FLOOR = { half: [8, 0.05, 8], t: [0, -0.05, 0], day: [0.2, 0.5, 0.95], night: [0.08, 0.07, 0.16] };
+// Floor slab (top at y 0) and its glossy blue daylight colour (sRGB).
+const FLOOR = { half: [8, 0.05, 8], t: [0, -0.05, 0], day: [0.2, 0.5, 0.95] };
 
+// Night sky of the neon sets, over the `night` preset: ref-4's deep navy zenith fading to a
+// violet horizon glow with a few lavender clouds (the preset is almost black, and its moon
+// disc lit a grey haze in the upper right, card 4752). Linear HDR.
+const NIGHT_SKY = {
+  zenith: [0.02, 0.03, 0.2],
+  horizon: [0.3, 0.12, 0.65],
+  ground: [0.2, 0.08, 0.45],
+  intensity: 0.25,
+  horizonSoftness: 3,
+  sunDiscIntensity: 0,
+  clouds: { coverage: 0.35, density: 0.8, color: [0.7, 0.55, 1], silverLining: 0.2 },
+};
+// Violet floor, glossy and clear-coated like ref-4's lacquered decks: it mirrors the violet
+// horizon and the bloom of the tubes tints it (sRGB, roughness, coat). The old dark violet
+// (0.08, 0.07, 0.16) rendered the lower half of the frame black (card 4752).
+const NEON_FLOOR = { color: [0.42, 0.18, 0.62], roughness: 0.25, clearcoat: 1, clearcoatRoughness: 0.06 };
+// Bloom of the neon sets: twice the BLOOM defaults (0.04, 0.85) and a full-texel tent give
+// ref-4's wide soft glow; at the defaults the halo hugged the 5 cm tubes (card 4752).
+const NEON_BLOOM = { strength: 0.08, radius: 1 };
+// +0.3 EV brings the night set towards ref-4's bright purple key (mean sRGB 134, 104, 177).
+const NEON_EXPOSURE_EV = 0.3;
+// raa.neon strength (emissive scale) and core whiteness of every tube.
+const NEON_TUBE = { strength: 12, coreWhiteness: 0.8 };
 // Neon colours (sRGB) and the shared tube radius (m).
 const NEON_PINK = [1, 0.25, 0.7];
 const NEON_CYAN = [0.15, 0.85, 1];
@@ -225,9 +249,14 @@ function night(engine) {
   engine.setBackground(BACKGROUND);
   engine.setLight(MOON);
   engine.setAmbient(AMBIENT);
-  engine.setSky({ preset: 'night' });
+  engine.setSky({ preset: 'night', ...NIGHT_SKY });
   engine.setEnvironmentLighting({ diffuse: 0.6, specular: 1 });
-  engine.setBloom(BLOOM);
+  engine.setToneMapping({ look: 'punchy', exposureEv: NEON_EXPOSURE_EV });
+  engine.setBloom(NEON_BLOOM);
+  // Under a glowing tube nothing is occluded: GTAO drew dark dashes on the floor below
+  // the tubes, and the moon's contact shadows add nothing but a dark rim (card 4752).
+  engine.setAo({ intensity: 0 });
+  engine.setContactShadows({ intensity: 0 });
 }
 
 // Surface material of function `fn` with the COAT clear coat; `clearcoat` overrides its
@@ -273,8 +302,10 @@ function buildInflatables(engine, lib, settings) {
 function buildNeon(engine, lib) {
   const { geometry, objects } = lib;
   night(engine);
-  floor(engine, geometry, FLOOR.night, 0.25);
-  const neon = (color) => engine.addSurfaceMaterial({ function: 'raa.neon', params: { color } });
+  const { color, roughness, ...coat } = NEON_FLOOR;
+  floor(engine, geometry, color, roughness, coat);
+  // The tubes are light sources: no moon shadow (the ring cast a black ellipse, card 4752).
+  const neon = (c) => engine.addSurfaceMaterial({ function: 'raa.neon', params: { color: c, ...NEON_TUBE }, castShadow: false });
   place(engine, upload(engine, objects.neonTube(), [neon(NEON_PINK)]), [-0.2, 0, 0]);
   const ring = geometry.sweepTube(circle(0.35, 64, true), TUBE_R, 16, { closed: true });
   place(engine, upload(engine, ring, [neon(NEON_CYAN)]), [0.85, 0.45, -0.2], yawQuat(-0.3));
@@ -390,10 +421,10 @@ const INFLATABLES = 'an upright inflatable toy hammer (red and yellow pillowed p
 const PLASTIC = 'glossy inflatable plastic with a crisp clear-coat highlight over a coloured '
   + 'base, inflated seams (soft pillowed bulges between the seams)';
 const NEON = 'several glowing neon tubes at night (a pink script letter S, a cyan ring, a '
-  + 'yellow zigzag and a purple bar) standing on a dark glossy floor under a dark navy night '
-  + 'sky';
-const GLOW = 'neon tubes glow with soft physically based bloom, white-hot cores, no halo '
-  + 'banding';
+  + 'yellow zigzag and a purple bar) above a glossy violet floor under a navy night sky '
+  + 'fading to a violet horizon glow';
+const GLOW = 'neon tubes glow with soft physically based bloom, white-hot cores with '
+  + 'saturated coloured rims, no halo banding';
 const PLUSH = 'a pastel pink plush ball and a plush penguin-like toy (deep blue furry body '
   + 'and head, white furry belly patch, small orange beak and feet, blue flippers, two black '
   + 'eyes) standing on a glossy blue floor under a bright blue sky with white clouds';
@@ -446,7 +477,7 @@ const VARIANTS = [
   },
   {
     id: 'bloom-on',
-    description: `R10: ${NEON}; bloom is on: ${GLOW}, a smooth glow fading into the dark sky.`,
+    description: `R10: ${NEON}; bloom is on: ${GLOW}, a smooth glow fading into the night sky.`,
     references: [],
     judge: false,
     settings: { set: 'neon' },
