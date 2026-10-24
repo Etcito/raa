@@ -27,8 +27,8 @@ const ENV = { diffuse: 0.7, specular: 1 };
 // Orbit cameras: [target, distance m, yaw rad, pitch rad].
 const CAMERAS = {
   water: [[0, -0.1, -0.3], 5.0, 0.35, 0.45],
-  slime: [[0, 0, 0], 4.5, 0.2, 0.46],
-  mud: [[0, -0.05, 0], 4.9, -0.3, 0.48],
+  slime: [[0, 0, 0], 4.0, 0.2, 0.44],
+  mud: [[0, -0.05, 0], 4.3, -0.3, 0.5],
   snow: [[0, 0.8, -0.8], 6.0, 0.3, 0.28],
   confetti: [[0, 1.4, -0.4], 5.2, 0.15, 0.3],
   sparkles: [[0, 0.45, 0], 2.4, 0, 0.15],
@@ -62,53 +62,57 @@ const BASIN_WALL = { half: 0.4, thickness: 0.15, color: [1, 0.42, 0.62] };
 const WATER_IOR = 1.33;
 const WATER_THICKNESS = 0.5;
 
-// Slime: the water wave layout at 0.6x amplitude and 0.25x speed (the crate's contract).
+// Slime: the water wave layout at about 0.75x amplitude and 0.25x speed, a visible slow
+// swell at capture distance. `color` is sRGB (function colours are converted to linear):
+// a neon green that keeps its saturation through the AgX tonemap. The absorption is low
+// enough that the coloured tiles still read through the body as a strong green-tinted
+// refraction (card 5031 saw only a faint tile tint at absorption 9).
 const SLIME = {
-  wave0: [0.066, 3.0, 0.3, 0.65],
-  wave1: [0.036, 1.7, 1.4, 0.55],
-  wave2: [0.018, 1.0, -0.7, 0.5],
-  wave3: [0.0084, 0.6, 2.4, 0.4],
+  wave0: [0.083, 3.0, 0.3, 0.65],
+  wave1: [0.045, 1.7, 1.4, 0.55],
+  wave2: [0.0225, 1.0, -0.7, 0.5],
+  wave3: [0.0105, 0.6, 2.4, 0.4],
   speeds: [0.541, 0.407, 0.312, 0.242],
-  color: [0.42, 1, 0.12],
-  // Denser absorption and many small bubbles: card 5030 judged the slime a flat green
-  // sheet with the tile grid showing through and no visible bubbles.
-  absorption: 9,
-  glossiness: 0.98,
-  bubbleScale: 0.2,
-  // Thin foam and finer, stronger detail normals: card 5027 judged the slime foam blotchy
-  // and its sky reflection and gloss weak (a broad wobble catches few highlights).
-  foamWidth: 0.1,
-  foamAmount: 0.5,
-  detailStrength: 0.32,
-  detailScale: 2.4,
+  color: [0.36, 0.92, 0.1],
+  absorption: 3,
+  glossiness: 0.96,
+  bubbleScale: 0.26,
+  // Wide, bright foam: card 5031 saw no clear shoreline foam and no bubbles, so the lace
+  // band at the channel walls is wider and the crest foam stronger.
+  foamWidth: 0.14,
+  foamAmount: 0.9,
+  // A gentle detail normal: the old 0.32 mottled the sky reflection into a grey skin
+  // (card 5031) instead of the glossy green surface the reference shows.
+  detailStrength: 0.14,
+  detailScale: 1.8,
 };
 const SLIME_IOR = 1.38;
-const SLIME_THICKNESS = 0.3;
+const SLIME_THICKNESS = 0.24;
 // Pads stand in the channel and rise above the slime surface (base at FLOOR_Y): the
-// pink, orange and blue tops sit 0.22, 0.2 and 0.18 m above it.
+// pink, orange and blue tops sit 0.32, 0.3 and 0.28 m above the slime at y = -0.1.
 const SLIME_PADS = [
   { r: 0.42, h: 0.72, x: -1.7, z: 0.15, color: [1, 0.3, 0.55] },
   { r: 0.34, h: 0.7, x: 0.0, z: -0.1, color: [1, 0.55, 0.1] },
   { r: 0.38, h: 0.68, x: 1.65, z: 0.35, color: [0.25, 0.5, 1] },
 ];
 
-// Mud: the water wave layout at 0.4x amplitude and 0.08x speed (a slow viscous swell).
-// The colour is a warm wet brown; the body stays opaque and the light comes from the
-// clear coat and the raised bubbles, never from a blue sky mirror over the whole surface.
+// Mud: the water wave layout at about 0.6x amplitude and 0.08x speed (a slow viscous
+// swell), raised from 0.4x so the swell reads at capture distance. `color` is sRGB: it is
+// converted to linear by the material table. Card 5031's mauve pit came from an sRGB
+// 0.3/0.1/0.035 (linear 0.07/0.01/0.003, almost black), whose only visible light was the
+// blue sky sheen; this is a proper chocolate brown (linear about 0.3/0.11/0.034).
 const MUD = {
-  wave0: [0.044, 3.0, 0.3, 0.65],
-  wave1: [0.024, 1.7, 1.4, 0.55],
-  wave2: [0.012, 1.0, -0.7, 0.5],
-  wave3: [0.0056, 0.6, 2.4, 0.4],
+  wave0: [0.066, 3.0, 0.3, 0.65],
+  wave1: [0.036, 1.7, 1.4, 0.55],
+  wave2: [0.018, 1.0, -0.7, 0.5],
+  wave3: [0.0084, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  // Linear chocolate brown (sRGB about 0.58, 0.35, 0.2, ref-3's mud). The old 0.52/0.26/0.07
-  // read as salmon-pink (card 5027); the darker 0.105/0.052/0.02 was so dim that the blue
-  // sky sheen dominated and the pit read blue-violet (card 5030).
-  color: [0.3, 0.1, 0.035],
-  wetness: 0.9,
+  color: [0.6, 0.37, 0.2],
+  wetness: 0.85,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
-  foamAmount: 0.3,
+  // Cream foam over the crests, as on ref-3's mud: card 5031 saw no foam at all.
+  foamAmount: 0.5,
   detailStrength: 0.1,
   detailScale: 0.6,
 };
@@ -230,11 +234,13 @@ function buildSlime(engine, lib) {
   const W = 6;
   const D = 2.4;
   const wallMat = engine.addSurfaceMaterial({ color: [1, 0.42, 0.62], roughness: 0.3, clearcoat: 1 });
+  // Low rims (top 0.28 m above the slime): a taller wall hides the foam band along the
+  // mesh border from the capture camera (the surface is 0.4 m below a 0.8 m wall's top).
   for (const s of [-1, 1]) {
-    const wall = geometry.roundedBox([W / 2 + 0.1, 0.4, 0.15], 0.05, 4);
-    place(engine, upload(engine, wall, wallMat), [0, FLOOR_Y + 0.4, s * (D / 2 + 0.15)]);
-    const cap = geometry.roundedBox([0.15, 0.4, D / 2 + 0.3], 0.05, 4);
-    place(engine, upload(engine, cap, wallMat), [s * (W / 2 + 0.15), FLOOR_Y + 0.4, 0]);
+    const wall = geometry.roundedBox([W / 2 + 0.1, 0.34, 0.15], 0.05, 4);
+    place(engine, upload(engine, wall, wallMat), [0, FLOOR_Y + 0.34, s * (D / 2 + 0.15)]);
+    const cap = geometry.roundedBox([0.15, 0.34, D / 2 + 0.3], 0.05, 4);
+    place(engine, upload(engine, cap, wallMat), [s * (W / 2 + 0.15), FLOOR_Y + 0.34, 0]);
   }
   for (const p of SLIME_PADS) {
     const m = engine.addSurfaceMaterial({ color: p.color, roughness: 0.25, clearcoat: 1 });
@@ -245,7 +251,7 @@ function buildSlime(engine, lib) {
     function: 'raa.liquid.slime',
     params: SLIME,
     blend: 'transmissive',
-    transmission: 0.6,
+    transmission: 0.72,
     ior: SLIME_IOR,
     thickness: SLIME_THICKNESS,
   }, [0, -0.1, 0]);
@@ -255,9 +261,9 @@ function buildMud(engine, lib) {
   const { geometry } = lib;
   daylight(engine);
   // The mud body is a brown diffuse; a mirror-bright blue sky wash turns it mauve at
-  // capture distance (card 5018). A dimmer sky specular keeps the wet sheen and the sun's
+  // capture distance (card 5018). A dim sky specular keeps the wet sheen and the sun's
   // clear-coat highlight without recolouring the mud.
-  engine.setEnvironmentLighting({ ...ENV, specular: 0.55 });
+  engine.setEnvironmentLighting({ ...ENV, specular: 0.35 });
   // The pit bed sits 0.3 m below the mud: a bed just under the surface broke through every
   // wave trough as cut-out holes (card 5027). The rim rises through the surface about
   // r = 2.7 m (inside the 6 m grid, so the grid border stays buried) and is a lighter,

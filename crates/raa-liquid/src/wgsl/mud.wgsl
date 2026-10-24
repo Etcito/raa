@@ -5,7 +5,7 @@
 // `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, 0)` and
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
-// Wetness darkens the base colour and adds a wet sheen (0.55 x wetness, roughness 0.1)
+// Wetness darkens the base colour and adds a wet sheen (0.4 x wetness, roughness 0.18)
 // over a rough body (0.55); two noise scales mottle the brown so it reads as mud, not as a
 // coloured liquid. Slow voronoi bubbles on the XZ plane grow a dome (a normal bump plus a
 // glossy highlight) and pop into an expanding ring. Foam is the crest term and
@@ -120,7 +120,10 @@ fn mud_bump_normal(n: vec3<f32>, tangent: vec4<f32>, gradient: vec2<f32>) -> vec
 // the dummy there; mud foam is the moving crest term broken up by noise only.
 fn mud_foam(crest: f32, world_pos: vec3<f32>, t: f32, amount: f32) -> f32 {
     let drift = vec3<f32>(0.0, 0.35 * t, 0.21 * t);
-    let breakup = clamp(0.65 + 0.35 * raa_noise3(world_pos * 2.7 + drift), 0.0, 1.0);
+    // Patchy cream swirls, not a wash over the whole pit: the mask keeps the brown body
+    // dominant (card 5031 saw no foam; a continuous mask would trade that for pale mud).
+    let noise = clamp(0.5 + 0.5 * raa_noise3(world_pos * 2.7 + drift), 0.0, 1.0);
+    let breakup = smoothstep(0.3, 0.75, noise);
     return smoothstep(0.02, 0.1, crest) * clamp(amount, 0.0, 1.0) * breakup;
 }
 
@@ -142,10 +145,11 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let grain = raa_fbm3(in.position * 2.4 + vec3<f32>(0.0, 0.0, 0.2 * in.time), 3);
     let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
     o.base_color = color * (1.0 - 0.15 * wetness) * (0.88 + 0.12 * grain + 0.08 * patches);
-    // A wet sheen, not a mirror: a broad coat keeps the mud brown and still catches the
-    // sky and the sun where the slow swell tilts the surface.
-    o.clearcoat = clamp(0.55 * wetness, 0.0, 1.0);
-    o.clearcoat_roughness = 0.1;
+    // A wet sheen, not a mirror: a broad, rougher coat keeps the mud brown and still
+    // catches the sky and the sun where the slow swell tilts the surface (card 5031: a
+    // tighter, stronger coat reflected enough blue sky to read mauve).
+    o.clearcoat = clamp(0.4 * wetness, 0.0, 1.0);
+    o.clearcoat_roughness = 0.18;
 
     o.normal = liquid_detail_normal(
         o.normal,
@@ -171,8 +175,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     let foam = mud_foam(crest, in.position, in.time, foam_amount);
-    let pale = vec3<f32>(0.5, 0.42, 0.32);
+    // Dry cream foam (ref-3's mud has pale tan swirls over the brown), rough and matte.
+    let pale = vec3<f32>(0.62, 0.52, 0.38);
     o.base_color = mix(o.base_color, pale, foam);
     o.roughness = mix(o.roughness, 0.9, foam);
+    o.clearcoat = o.clearcoat * (1.0 - foam);
     return o;
 }
