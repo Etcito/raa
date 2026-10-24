@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "fur-on",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:40:04.024Z",
+  "capturedAt": "2026-10-24T01:02:59.982Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,13 +30,13 @@
   ],
   "instances": 12,
   "triangles": 26156,
-  "firstFrameMs": 28775.40000000596,
+  "firstFrameMs": 21089.59999999404,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1661526,
+    "gzip": 592508,
+    "sha256": "824d42a3143836f4e8fd78e37547cb10efdb3a53a00675a7f88ffd8704546177"
   },
   "capture": "proofs/captures/lookdev/m10-materials--fur-on.png",
-  "captureSha256": "b0876f70d6912f3eeba1275ed7fd9a4e93b3734976837db6684a946bfc55067c",
+  "captureSha256": "835e095965c8e59bbb211c7221445650ce35ba6fdd3acfe57c98c63e6fadacc9",
   "judge": null
 }
