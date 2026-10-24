@@ -104,8 +104,9 @@ const SLIME_PADS = [
   { r: 0.38, h: 0.68, x: 1.65, z: 0.35, color: [0.25, 0.5, 1] },
 ];
 
-// Mud: the water wave layout at about 0.85x amplitude and 0.08x speed (a slow viscous
-// swell), raised from 0.6x so the swell reads at capture distance (card 5034). `color` is
+// Mud: a long, slow swell (wavelengths 1.5x the water layout, amplitudes about 1.2x, at
+// about 0.1x speed): card 5051's judge read the 3 m / 0.094 m swell as flat and rubbery.
+// The shader adds small moving ripples in the normal so the sun streaks break up. `color` is
 // sRGB, converted to linear by the material table: a deep chocolate (card 5039). The
 // colour was never the cause of the mauve pit: on the card 4940 capture the pit centre
 // (106, 66, 73) inverts through AgX punchy to HDR (0.22, 0.12, 0.14), so a blue sky term
@@ -114,30 +115,36 @@ const SLIME_PADS = [
 // and dims the sky terms, for a predicted pit HDR near (0.28, 0.13, 0.075), sRGB about
 // (127, 70, 36) after AgX punchy.
 const MUD = {
-  wave0: [0.094, 3.0, 0.3, 0.65],
-  wave1: [0.051, 1.7, 1.4, 0.55],
-  wave2: [0.026, 1.0, -0.7, 0.5],
-  wave3: [0.012, 0.6, 2.4, 0.4],
-  speeds: [0.173, 0.130, 0.100, 0.0774],
-  color: [0.4, 0.25, 0.12],
-  wetness: 0.85,
-  bubbleScale: 0.4,
-  bubbleRate: 0.32,
+  wave0: [0.13, 4.5, 0.3, 0.7],
+  wave1: [0.07, 2.6, 1.4, 0.6],
+  wave2: [0.032, 1.5, -0.7, 0.5],
+  wave3: [0.015, 0.9, 2.4, 0.4],
+  speeds: [0.265, 0.2, 0.153, 0.118],
+  color: [0.55, 0.32, 0.1],
+  wetness: 1,
+  bubbleScale: 0.35,
+  bubbleRate: 0.4,
   // Shore froth where the mud is shallower than foamWidth (the depth rides in the vertex
   // colour alpha, see mudMesh); a little froth on the steepest crests. A narrower band
   // than card 4941's 0.22 keeps the pit body clean, glossy chocolate between the pads.
-  foamWidth: 0.15,
-  foamAmount: 0.25,
-  // A slow, broad swell normal: 0.1 at scale 0.6 crinkled the sun glints (card 4942).
+  // The froth is soft round bubbles (raa.liquid.mud), so a wider band reads as foam, not
+  // as the crackle of card 5051; crests of the larger swell carry some froth too.
+  foamWidth: 0.14,
+  foamAmount: 0.4,
+  // A slow, broad swell normal: 0.1 at scale 0.6 crinkled the sun glints (card 4942); the
+  // fine break-up of the highlights now comes from the shader's ripples.
   detailStrength: 0.05,
   detailScale: 0.35,
 };
-// Mud set lighting: a warmer sun and dimmer sky terms than daylight(). The sky irradiance
-// of DAY_SKY carried about as much light as the sun on the pit, all of it blue (measured
-// on the rim: light about (2.2, 2.4, 3.8)).
+// Mud set lighting: a warmer sun and dimmer sky irradiance than daylight(). The sky
+// irradiance of DAY_SKY carried about as much light as the sun on the pit, all of it blue
+// (measured on the rim: light about (2.2, 2.4, 3.8)). The sun stands in front and to the
+// right of the camera, 38 deg up, so its streaks run across the swell in view (lower, the
+// long pad shadows showed the blue sky sheen as purple mud); the env
+// specular is kept high enough for a Fresnel sky sheen on the wet coat.
 const MUD_LIGHT = {
-  sun: { ...SUN, color: [1, 0.88, 0.72] },
-  env: { diffuse: 0.45, specular: 0.3 },
+  sun: { ...SUN, direction: [-0.592, -0.616, 0.52], color: [1, 0.88, 0.72] },
+  env: { diffuse: 0.45, specular: 0.32 },
 };
 // Ground height of the mud pit (the mud surface is y = 0): the bed 0.3 m down, rising
 // through the surface about r = 2.7 m into a grassy bank.
@@ -145,14 +152,17 @@ function mudGround(x, z) {
   return -0.3 + 0.55 * Math.min(1, Math.max(0, (Math.hypot(x, z * 1.1) - 2.1) / 1.2));
 }
 // Glossy lime-green inflatable pads standing in the mud (ref-3's stepping pads):
-// [x, z, radius, height above the bed]. Their tops sit 0.12..0.18 m above the mud.
+// [x, z, radius, height above the bed]. Their tops sit 0.26..0.32 m above the mud, clear
+// of the swell crests.
 const MUD_PADS = [
-  [-1.45, -0.55, 0.62, 0.46],
-  [0.75, -1.35, 0.5, 0.42],
-  [1.45, 0.75, 0.56, 0.48],
-  [-0.55, 1.35, 0.46, 0.44],
+  [-1.45, -0.55, 0.62, 0.6],
+  [0.75, -1.35, 0.5, 0.56],
+  [1.45, 0.75, 0.56, 0.62],
+  [-0.55, 1.35, 0.46, 0.58],
 ];
 const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 };
+// Wet band at the pads' bases: vertex colour multiplier at the mud line and its height m.
+const MUD_PAD_WET = { tint: [0.42, 0.36, 0.24], height: 0.09 };
 // Mud splash crowns around each pad wall are sculpted meshes, not particles: the splash
 // emitter's droplets are camera-facing discs, which read as loose clusters of brown beads
 // at capture distance (card 5039, attempt 9) instead of ref-3's rounded tongues of mud.
@@ -161,26 +171,26 @@ const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clea
 // rounded head, with a detached droplet above every other lobe. Tall tubes with a ball on
 // top read as stalks (card 4942 judge); the crown is the mud's own colour, not darker.
 const MUD_CROWN = {
-  color: [0.42, 0.26, 0.13],
-  roughness: 0.15,
-  clearcoat: 1,
-  clearcoatRoughness: 0.04,
-  tongues: 7,
-  height: [0.12, 0.17], // m above the mud, alternating per tongue
-  lean: 0.1, // m outward travel of the head
-  base: 0.085, // lobe radius m at the mud
-  head: 0.055, // lobe radius m at the head
-  lip: 0.07, // lip ring tube radius m
+  color: [0.58, 0.32, 0.15],
+  roughness: 0.18,
+  clearcoat: 0.8,
+  clearcoatRoughness: 0.03,
+  tongues: 9,
+  height: [0.17, 0.25], // m above the mud, alternating per tongue
+  lean: 0.14, // m outward travel of the head
+  base: 0.1, // lobe radius m at the mud
+  head: 0.065, // lobe radius m at the head
+  lip: 0.08, // lip ring tube radius m
 };
 // White spray (ref-3's splash spray): opaque near-white lit droplets (opacity 0.85; a clear
 // droplet at opacity 0 reads as dark grey flecks on the mud) thrown up at every pad edge
 // and along the mud shoreline.
-const MUD_SPRAY_POINTS = 3;
+const MUD_SPRAY_POINTS = 6;
 const MUD_SPRAY = {
   kind: 'splash',
   spread: 0.5,
   // Fewer, larger drops: small ones read as white grains (card 4942).
-  rate: 40,
+  rate: 55,
   lifetime: [0.25, 0.5],
   speed: [1.0, 1.8],
   size: [0.03, 0.055],
@@ -499,13 +509,26 @@ function buildMud(engine, lib, settings, variant) {
   MUD_PADS.forEach(([x, z, r, h], i) => {
     // A rounded inflatable disc: straight wall, quarter-round shoulder, slightly domed top.
     const shoulder = 0.35 * (h - 0.3);
-    const profile = [[0, 0], [r, 0], [r, h - shoulder - 0.02]];
+    // The wall is split every 2 cm so the wet band follows the swell.
+    const wallTop = h - shoulder - 0.02;
+    const profile = [[0, 0]];
+    for (let y = 0; y < wallTop; y += 0.02) profile.push([r, y]);
+    profile.push([r, wallTop]);
     for (let k = 1; k <= 6; k++) {
       const a = (k / 6) * (Math.PI / 2);
-      profile.push([r - shoulder + shoulder * Math.cos(a), h - shoulder - 0.02 + shoulder * Math.sin(a)]);
+      profile.push([r - shoulder + shoulder * Math.cos(a), wallTop + shoulder * Math.sin(a)]);
     }
     profile.push([0.5 * r, h], [0, h + 0.01]);
-    place(engine, upload(engine, geometry.lathe(profile, 64), padMat), [x, -0.3, z]);
+    // A wet band on the pad base: darker, mud-stained green up to MUD_PAD_WET.height
+    // above the local swell, fading softly into the dry pad (vertex colour times the
+    // glossy pad colour).
+    const wet = (p) => {
+      const above = p[1] - 0.3 - mudHeight(x + p[0], z + p[2], t);
+      const f = 1 - Math.min(1, Math.max(0, (above - 0.015) / (MUD_PAD_WET.height - 0.015)));
+      const k = f * f * (3 - 2 * f);
+      return [0, 1, 2].map((i) => 1 + (MUD_PAD_WET.tint[i] - 1) * k).concat(1);
+    };
+    place(engine, upload(engine, geometry.lathe(profile, 64, { color: wet }), padMat), [x, -0.3, z]);
     place(engine, upload(engine, mudCrown(geometry, [x, z, r], 0.7 + 1.9 * i, t), crownMat), [x, 0, z]);
   });
   for (const e of mudEmitters(t)) engine.addEmitter(e);

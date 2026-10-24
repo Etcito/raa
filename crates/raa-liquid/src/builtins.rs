@@ -16,7 +16,8 @@
 //! `(amplitude m, wavelength m, direction angle rad, steepness)`, `p[4]` the four speeds in
 //! m/s. The water speeds are the deep-water dispersion `sqrt(9.81 L / 2 pi)`; the slime
 //! scales the amplitudes by 0.6 and the speeds by 0.25 of the water defaults; the mud keeps
-//! the water layout at 0.4x amplitude and 0.08x speed (a slow viscous swell).
+//! a long slow swell: the water wavelengths x1.5 at 0.8x amplitude, and 0.08x the
+//! dispersion speed of those wavelengths (a slow viscous swell).
 
 use raa_lit::{FLAG_TRANSMISSIVE, FLAG_VERTEX_FN};
 use raa_matfn::{BuiltinFn, DrawClass, ParamKind, ParamSpec};
@@ -181,14 +182,14 @@ static SLIME_PARAMS: [ParamSpec; 13] = [
     },
 ];
 
-/// Mud parameters: the water wave layout at 0.4x amplitude and 0.08x speed, and the wet
-/// mud look with its slow bubble field.
+/// Mud parameters: a long slow swell (water wavelengths x1.5, 0.8x amplitude, 0.08x
+/// speed), and the wet mud look with its slow bubble field.
 static MUD_PARAMS: [ParamSpec; 13] = [
-    wave("wave0", [0.02, 2.2, 0.3, 0.6], 0),
-    wave("wave1", [0.012, 1.2, 1.4, 0.5], 1),
-    wave("wave2", [0.0064, 0.7, -0.7, 0.4], 2),
-    wave("wave3", [0.0032, 0.42, 2.4, 0.35], 3),
-    speed(4, [0.14827, 0.10950, 0.08363, 0.06478]),
+    wave("wave0", [0.04, 3.3, 0.3, 0.6], 0),
+    wave("wave1", [0.024, 1.8, 1.4, 0.5], 1),
+    wave("wave2", [0.0128, 1.05, -0.7, 0.4], 2),
+    wave("wave3", [0.0064, 0.63, 2.4, 0.35], 3),
+    speed(4, [0.18159, 0.13411, 0.10243, 0.07934]),
     ParamSpec {
         name: "color",
         kind: ParamKind::Color,

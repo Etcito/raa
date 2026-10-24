@@ -1,4 +1,5 @@
 [
+  {"name": "test-raa-liquid", "command": "cargo test -p raa-liquid", "timeout_s": 1800, "cwd": "."},
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-liquids", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(water|slime|mud|splash|waves-t0|waves-t1)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
+  {"name": "capture-liquids", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(mud|water|slime)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
 ]
