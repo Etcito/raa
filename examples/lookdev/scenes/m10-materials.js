@@ -14,7 +14,10 @@ const SUN = { direction: [-0.8067, -0.5736, 0.1422], color: [1, 0.93, 0.82], int
 // only lifts the violet floor out of black. It comes from behind the camera's right, high,
 // so its glint on the glossy floor falls out of view (from the front it painted a hard-edged
 // white streak and the ring's black shadow towards the camera, card 4752).
-const MOON = { direction: [-0.3, -0.85, -0.43], color: [0.8, 0.7, 1], intensity: 0.6 };
+// 0.6 -> 0.4 with IBL diffuse 0.6 -> 0.4: the lit deck read as a pale matte lavender
+// (judge, card 4813); a darker lacquer lets the tube reflections and pools carry the gloss.
+const MOON = { direction: [-0.3, -0.85, -0.43], color: [0.8, 0.7, 1], intensity: 0.4 };
+const NIGHT_ENV = { diffuse: 0.4, specular: 1 };
 const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.35 };
 // The m08 `day` sky overrides, with m09's pale blue haze ground.
 const DAY_SKY = {
@@ -104,19 +107,24 @@ const NIGHT_SKY = {
 // Violet deck floor of the neon sets (demo.neon-deck below): lacquered panels like ref-4's
 // decks, clear-coated, with dark seams that draw the floor plane in perspective. The plain
 // glossy violet floor matched the sky's violet ground, so the judge saw "no visible floor
-// plane, reflections or highlights" (card 4809). sRGB colour, roughness, coat.
-const NEON_FLOOR = { color: [0.3, 0.13, 0.52], roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.06 };
+// plane, reflections or highlights" (card 4809); the lighter (0.3, 0.13, 0.52) at roughness
+// 0.3 read as matte with weak gloss (card 4813): a deep violet lacquer like ref-4's decks.
+// sRGB colour, roughness, coat.
+const NEON_FLOOR = { color: [0.2, 0.07, 0.4], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
 // Deck parameters (linear, raw user params): p0 seam colour; p1 = (light pool gain, sharp
 // coat lobe rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
 // bevel width m, panel tone variation).
 // p3 = (sky mirror gain, tube reflection gain): the lacquer mirrors the night sky dome and
 // the tubes more strongly than a 4 % coat, as ref-4's wet-looking decks; at 1 the judge read
-// the deck as "a fairly matte grid with weak specular highlights" (card 4811).
+// the deck as "a fairly matte grid with weak specular highlights" (card 4811). At a 0.02 rad
+// coat lobe, a 0.2 rad base lobe weighted 0.35 and pool gain 2 the reflections were blurred
+// and the glow around each tube faint (judge, card 4813): a near-mirror coat (8 mrad, the
+// tube's own angular size dominates), a tighter base lobe and stronger pools.
 const NEON_DECK = {
   p0: [0.012, 0.004, 0.03],
-  p1: [2, 0.02, 0.2, 0.35],
+  p1: [3, 0.008, 0.12, 0.25],
   p2: [0.6, 0.012, 0.02, 0.12],
-  p3: [1.2, 1.8, 0, 0],
+  p3: [1.2, 2, 0, 0],
 };
 // Night sky dome of the neon sets (demo.night-sky): radius m, a sphere around the set drawn
 // from inside. The procedural `night` sky is a flat gradient (judge, card 4811); the dome
@@ -129,12 +137,18 @@ const DECK_HALF = [40, 0.05, 40];
 const DECK_SEGMENT = 0.1;
 // Bloom of the neon sets: about 3x the BLOOM defaults (0.04, 0.85) and a full-texel tent give
 // ref-4's wide soft glow; at the defaults the halo hugged the 5 cm tubes (card 4752). 0.08
-// lost the halo against the brighter starry sky dome (card 4811).
-const NEON_BLOOM = { strength: 0.11, radius: 1 };
+// lost the halo against the brighter starry sky dome (card 4811). With the hot-core tubes
+// below (card 4813) the halo is brighter at 0.1 / 0.9; 0.13 / 1 hazed the whole frame.
+const NEON_BLOOM = { strength: 0.1, radius: 0.9 };
 // +0.3 EV brings the night set towards ref-4's bright purple key (mean sRGB 134, 104, 177).
 const NEON_EXPOSURE_EV = 0.3;
-// raa.neon strength (emissive scale) and core whiteness of every tube.
-const NEON_TUBE = { strength: 12, coreWhiteness: 0.8 };
+// raa.neon strength (emissive scale of the coloured gas) and core whiteness of every tube.
+// raa.neon adds a hot core of 4 x coreWhiteness x strength along the axis, so the centre burns
+// white while the body keeps its colour; at the old uniform glow, 12 read as "dim cores"
+// (judge, card 4813). Mean radiance over the tube's width, as a multiple of strength (body
+// 0.86 + core 4 x 0.8 x 0.41), for the deck lights: NEON_PROFILE_MEAN.
+const NEON_TUBE = { strength: 8, coreWhiteness: 0.8 };
+const NEON_PROFILE_MEAN = 2.16;
 // Neon colours (sRGB) and the shared tube radius (m).
 const NEON_PINK = [1, 0.25, 0.7];
 const NEON_CYAN = [0.15, 0.85, 1];
@@ -294,20 +308,25 @@ fn deck_diffuse(p: vec3<f32>, n: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32) 
 }
 
 // Reflected radiance fraction of a tube segment seen along the reflection ray rd from p:
-// a lobe of angular width sigma around the closest point, widened by the tube's own
-// angular radius.
+// a lobe of angular width sigma around the line's closest point, widened by the tube's own
+// angular radius, and windowed along the segment by linear ramps of the lobe's length at
+// each end. The ramps of two segments sharing an end sum to 1 (clamping the closest point
+// to the segment counted both segments in full at the joint: beaded reflections, card 4813).
 fn deck_specular(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32, sigma: f32) -> f32 {
   let l0 = a - p;
   let ld = b - a;
+  let len2 = max(dot(ld, ld), 1e-8);
   let rl = dot(rd, ld);
-  let t = clamp((dot(rd, l0) * rl - dot(l0, ld)) / max(dot(ld, ld) - rl * rl, 1e-6), 0.0, 1.0);
+  let t = clamp((dot(rd, l0) * rl - dot(l0, ld)) / max(len2 - rl * rl, 1e-6), -1.0, 2.0);
   let c = l0 + t * ld;
   let dist = max(length(c), 1e-3);
   let cos_t = clamp(dot(c / dist, rd), -1.0, 1.0);
   let theta2 = 2.0 * (1.0 - cos_t);
   let beta = r / dist;
   let spread2 = beta * beta + sigma * sigma;
-  return beta * inverseSqrt(spread2) * exp(-0.5 * theta2 / spread2);
+  let ramp = sqrt(len2) / max(2.0 * dist * sqrt(spread2), 1e-4);
+  let window = clamp(0.5 + t * ramp, 0.0, 1.0) * clamp(0.5 + (1.0 - t) * ramp, 0.0, 1.0);
+  return beta * inverseSqrt(spread2) * exp(-0.5 * theta2 / spread2) * window;
 }
 
 fn material_main(in: MaterialInput) -> MaterialOutput {
@@ -425,7 +444,7 @@ function night(engine) {
   engine.setLight(MOON);
   engine.setAmbient(AMBIENT);
   engine.setSky({ preset: 'night', ...NIGHT_SKY });
-  engine.setEnvironmentLighting({ diffuse: 0.6, specular: 1 });
+  engine.setEnvironmentLighting(NIGHT_ENV);
   engine.setToneMapping({ look: 'punchy', exposureEv: NEON_EXPOSURE_EV });
   engine.setBloom(NEON_BLOOM);
   // Under a glowing tube nothing is occluded: GTAO drew dark dashes on the floor below
@@ -496,11 +515,12 @@ const srgbToLinear = (c) => c.map((x) => (x <= 0.04045 ? x / 12.92 : ((x + 0.055
 const wgslVec = (v) => `vec3<f32>(${v.map((x) => x.toFixed(4)).join(', ')})`;
 
 // demo.neon-deck source with one diffuse and two reflection lines per tube segment. A tube
-// is { points (world centreline), color (sRGB) }; its radiance is the raa.neon emissive.
+// is { points (world centreline), color (sRGB) }; its radiance is the raa.neon emissive
+// averaged over the tube's profile.
 function deckWgsl(tubes) {
   const lines = [];
   for (const { points, color } of tubes) {
-    const radiance = wgslVec(srgbToLinear(color).map((x) => x * NEON_TUBE.strength));
+    const radiance = wgslVec(srgbToLinear(color).map((x) => x * NEON_TUBE.strength * NEON_PROFILE_MEAN));
     for (let i = 0; i + 1 < points.length; i++) {
       const ab = `${wgslVec(points[i])}, ${wgslVec(points[i + 1])}, ${TUBE_R}`;
       lines.push(`  pool += ${radiance} * deck_diffuse(p, n, ${ab});`);
