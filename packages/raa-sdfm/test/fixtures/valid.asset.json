@@ -1,0 +1,53 @@
+{
+  "format": "sdfm.game-asset",
+  "version": 1,
+  "game": "raa-test",
+  "id": "raatest.crate",
+  "name": "Crate",
+  "category": "prop",
+  "world": "test",
+  "mesher": {
+    "resolution": 32
+  },
+  "document": {
+    "version": 1,
+    "root": {
+      "kind": "box",
+      "halfExtents": [
+        0.5,
+        0.5,
+        0.5
+      ],
+      "material": "wood"
+    }
+  },
+  "collision": [],
+  "anchors": {
+    "top": {
+      "t": [
+        0,
+        0.5,
+        0
+      ],
+      "r": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  },
+  "bounds": {
+    "min": [
+      -0.5,
+      -0.5,
+      -0.5
+    ],
+    "max": [
+      0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "hash": "0b3237c28d161ea9c9e485c624826a937780345412b17d4ccc90258ab1906179"
+}
