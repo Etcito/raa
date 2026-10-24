@@ -889,6 +889,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-oit"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-lit",
+ "raa-pipeline",
+ "raa-shader",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-pipeline"
 version = "0.1.0"
 dependencies = [
