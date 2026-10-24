@@ -11,6 +11,7 @@
 //! module documents the exact recipe and the 48 B [`PARTICLE_STRIDE`] state
 //! record.
 
+mod blend;
 mod desc;
 mod gpu;
 mod opaque;
@@ -22,6 +23,8 @@ mod state;
 pub use desc::*;
 pub use spawn::*;
 
+#[doc(hidden)]
+pub use blend::blend_module_wgsl;
 #[doc(hidden)]
 pub use opaque::opaque_module_wgsl;
 #[doc(hidden)]
