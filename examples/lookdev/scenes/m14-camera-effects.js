@@ -99,12 +99,12 @@ const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a
 const unit = (a) => a.map((x) => x / Math.hypot(...a));
 
 // Screen [u, v] (0..1, v down) of world point p seen by CAMERA: the DOF autofocus point.
-function screenUv(p) {
-  const fwd = unit(sub(CAMERA.target, CAMERA.eye));
+function screenUv(p, cam = CAMERA) {
+  const fwd = unit(sub(cam.target, cam.eye));
   const right = unit(cross(fwd, [0, 1, 0]));
   const up = cross(right, fwd);
-  const d = sub(p, CAMERA.eye);
-  const t = Math.tan((CAMERA.fovYDeg * Math.PI) / 360);
+  const d = sub(p, cam.eye);
+  const t = Math.tan((cam.fovYDeg * Math.PI) / 360);
   const z = dot(d, fwd);
   return [0.5 + dot(d, right) / z / (t * ASPECT) / 2, 0.5 - dot(d, up) / z / t / 2];
 }
@@ -255,6 +255,37 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
   settings: { world },
 }));
 
+// On/off pairs (Q15): all in the candy world; each pair shares its settings and the -off
+// variant only disables the feature's pass. `settings` overrides are applied after the
+// world: camera, sun, dof, fog (merged over the world's fog preset), sunShafts.
+const PLUSH_FOCUS = [PLUSH[0], PLUSH[1] + 0.35, PLUSH[2]];
+const PAIRS = {
+  // Camera low over the glossy floor, so the run mirrors the obstacles.
+  ssr: { pass: 'ssr', text: 'screen-space reflections of the obstacles in the glossy floor',
+    settings: { camera: { ...CAMERA, eye: [0, 0.3, 3.2], target: [0, 0.6, -20] } } },
+  // f/1.4 focused on the near plush ball: hammer foreground and far run blur, round bokeh.
+  dof: { pass: 'dof', text: 'shallow depth of field focused on the near plush ball with round bokeh',
+    settings: { dof: { fStop: 1.4, focus: PLUSH_FOCUS } } },
+  fog: { pass: 'fog', text: 'height fog and strong aerial perspective fading the distance',
+    settings: { fog: { preset: 'haze', aerialStrength: 2 } } },
+  // Candy's low sun sits behind the pillar gate; denser fog makes the shafts read.
+  sunshafts: { pass: 'sunshafts', text: 'sun shafts through the gaps of the pillar gate',
+    settings: { sun: WORLDS.candy.sun, fog: { preset: 'haze', density: 0.04 }, sunShafts: { intensity: 1 } } },
+  grading: { pass: 'grading', text: 'candy colour grading', settings: {} },
+};
+for (const [feature, pair] of Object.entries(PAIRS)) {
+  for (const on of [true, false]) {
+    VARIANTS.push({
+      id: `${feature}-${on ? 'on' : 'off'}`,
+      description: `${VISTA_TEXT} Pair ${feature}: ${on ? 'with' : 'without'} ${pair.text}.`,
+      references: ['ref-1'],
+      judge: false,
+      ...(on ? {} : { passes: { disable: [pair.pass] } }),
+      settings: { world: 'candy', ...pair.settings },
+    });
+  }
+}
+
 export default {
   id: 'm14-camera-effects',
   milestone: 'm14',
@@ -277,7 +308,13 @@ export default {
     buildStrip(engine, lib, w);
     buildBackdrop(engine, lib, w);
     engine.addEmitter({ maxParticles: 8192, seed: 61, ...w.particles });
-    engine.setCamera(CAMERA);
-    engine.setDof({ fStop: F_STOP, autofocus: screenUv(HERO.focus) });
+    const o = variant.settings;
+    if (o.sun) engine.applyEnvironment({ sun: o.sun });
+    if (o.fog) engine.setFog(o.fog);
+    if (o.sunShafts) engine.setSunShafts(o.sunShafts);
+    const camera = o.camera ?? CAMERA;
+    engine.setCamera(camera);
+    const dof = o.dof ?? { fStop: F_STOP, focus: HERO.focus };
+    engine.setDof({ fStop: dof.fStop, autofocus: screenUv(dof.focus, camera) });
   },
 };
