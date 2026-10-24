@@ -119,7 +119,9 @@ const NIGHT_SKY = {
 // That read as "a flat grid ... little lacquer gloss" (card 4818; ref-4's near decks are about
 // 86..146, 68..89, 159..213): (0.24, 0.08, 0.48) -> (0.3, 0.1, 0.5), with a wider soft sheen.
 // Card 4821: a touch deeper (0.26, 0.09, 0.5) under the brighter pools and the wear (p4).
-const NEON_FLOOR = { color: [0.26, 0.09, 0.5], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
+// Card 4822 (judge: "weak specular highlights, flat panels"): a more saturated violet, a lower
+// base roughness and a 0.03 coat, plus the stretched tube streaks and Fresnel rim in the deck.
+const NEON_FLOOR = { color: [0.24, 0.05, 0.52], roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 };
 // Deck parameters (linear, raw user params): p0 = (seam colour, mirror ripple rad); p1 = (light
 // pool gain, extra mirror edge softness rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
 // groove shadow width m, panel tone variation).
@@ -500,11 +502,22 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   var pool = vec3<f32>(0.0);
   var refl_sharp = vec3<f32>(0.0);
   var refl_broad = vec3<f32>(0.0);
+  var refl_streak = vec3<f32>(0.0);
+  // Wide coloured streak of each tube on the wet lacquer: blurred and stretched towards the
+  // viewer, fading with the distance to the tube (the 1 / dist falloff of deck_specular).
+  let STREAK_SIGMA = 0.14;
+  let STREAK_STRETCH = 7.0;
+  let STREAK_GAIN = 0.35;
+  // Fresnel rim: the lacquer turns mirror-like at grazing angles towards the horizon.
+  let RIM_GAIN = 2.5;
 DECK_LIGHTS
-  let fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
+  let ndv = clamp(dot(n, v), 0.0, 1.0);
+  let fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
+  let rim_f = pow(1.0 - ndv, 3.0);
   // Lacquer mirror of the night sky (no stars: they would alias on the panels).
-  let sky = sky_night(rd, 0.0) * in.record.p[3].x * o.clearcoat;
-  let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w) * in.record.p[3].y + sky) * fres * polish;
+  let sky = sky_night(rd, 0.0) * in.record.p[3].x * o.clearcoat * (1.0 + RIM_GAIN * rim_f);
+  let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w + refl_streak * STREAK_GAIN) * in.record.p[3].y + sky) * fres * polish
+    + refl_streak * STREAK_GAIN * 0.25 * o.clearcoat * (1.0 - ndv) * polish;
   let glint = pool * gain * in.record.p[4].x * rim;
   o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam) * groove) * top + glint;
   return o;
@@ -666,6 +679,7 @@ function deckWgsl(tubes) {
       lines.push(`  m = deck_mirror(p, rm, ${ab}, mirror_aa);`);
       lines.push(`  refl_sharp += ${body} * m.x + ${core} * m.y;`);
       lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad, stretch);`);
+      lines.push(`  refl_streak += ${body} * deck_specular(p, rd, ${ab}, STREAK_SIGMA, STREAK_STRETCH);`);
     }
   }
   return SKY_WGSL + DECK_WGSL.replace('DECK_LIGHTS', lines.join('\n'));
