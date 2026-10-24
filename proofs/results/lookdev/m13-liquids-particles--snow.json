@@ -1,0 +1,57 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "snow",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T15:09:32.325Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 13,
+  "triangles": 27756,
+  "firstFrameMs": 76038.30000001192,
+  "wasm": {
+    "raw": 1910071,
+    "gzip": 653470,
+    "sha256": "dac1c6c15e546175c095bf49df5b17e7f19fd1b8994b65ffb638078144213bae"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--snow.png",
+  "captureSha256": "82e7340e788f548d7a2a1a102feaf1295c11e6cf254971ed7aebaf852486008b",
+  "judge": {
+    "description": "Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: snow falling over a snowy landscape on a cool, bright overcast day: many small white snow flakes drift down through the whole frame, in front of white rounded snow blocks, pink and blue blocks with snow caps and big snowballs standing on white snowy ground, with flakes settling on the ground",
+    "references": [
+      "ref-2"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": 6,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--snow.png by claude-haiku-5-5 (median of [6.0, 6.0, 7.0])\nexpected: Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: snow falling over a snowy landscape on a cool, bright overcast day: many small white snow flakes drift down through the whole frame, in front of white rounded snow blocks, pink and blue blocks with snow caps and big snowballs standing on white snowy ground, with flakes settling on the ground\nseen: The frame shows the required elements: many small white snow flakes across the whole frame, white rounded snow blocks, pink and blue capped blocks, snowballs and snowy ground with settled flakes, under a cool overcast light. The flakes read as snow, but they are mostly soft dots with little shape or motion cue, and the image is flatter and more washed out than the saturated, polished reference.",
+    "at": "2026-10-24T15:09:43.538Z"
+  }
+}

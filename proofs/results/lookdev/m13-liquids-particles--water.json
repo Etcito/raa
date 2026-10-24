@@ -1,0 +1,58 @@
+{
+  "scene": "m13-liquids-particles",
+  "variant": "water",
+  "milestone": "m13",
+  "capturedAt": "2026-10-24T15:08:23.017Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "bloom",
+    "tonemap"
+  ],
+  "instances": 9,
+  "triangles": 82468,
+  "firstFrameMs": 6341.5,
+  "wasm": {
+    "raw": 1910071,
+    "gzip": 653470,
+    "sha256": "dac1c6c15e546175c095bf49df5b17e7f19fd1b8994b65ffb638078144213bae"
+  },
+  "capture": "proofs/captures/lookdev/m13-liquids-particles--water.png",
+  "captureSha256": "6959989aaa8cc459ab0faff625e52041e47a41593abf38d7e52c785c12d09dd2",
+  "judge": {
+    "description": "Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a square basin of water seen from above and in front, with Gerstner waves of several sizes and white foam on the wave crests; the water refracts and tints the coloured tile floor below it blue-green, reflects the blue sky with white clouds, and white foam lines the shore where it meets a sloped sand beach at the back and the grey rocks that break the surface",
+    "references": [
+      "ref-1",
+      "ref-3"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": 6,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--water.png by claude-haiku-5-5 (median of [5.0, 6.0, 6.0])\nexpected: Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a square basin of water seen from above and in front, with Gerstner waves of several sizes and white foam on the wave crests; the water refracts and tints the coloured tile floor below it blue-green, reflects the blue sky with white clouds, and white foam lines the shore where it meets a sloped sand beach at the back and the grey rocks that break the surface\nseen: The capture shows the pink-walled square basin, tile floor tinted blue-green through the water, three grey rocks with foam rings, and a sand beach at the back with some foam at the shore. Wave motion and crest foam are present but sparse, and the sky reflection on the water is faint, not the clear blue-and-cloud reflection described. The water looks cruder than the reference illustrations.",
+    "at": "2026-10-24T15:08:35.704Z"
+  }
+}
