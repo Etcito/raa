@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "clearcoat-on",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:39:41.881Z",
+  "capturedAt": "2026-10-24T00:21:48.387Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,13 +30,13 @@
   ],
   "instances": 4,
   "triangles": 16924,
-  "firstFrameMs": 6987.4000000059605,
+  "firstFrameMs": 13501.39999999106,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1658582,
+    "gzip": 591396,
+    "sha256": "1c67a4de9f028e6eaa0df0a626f094c00768de4c466b3d2c0a19953659e0d667"
   },
   "capture": "proofs/captures/lookdev/m10-materials--clearcoat-on.png",
-  "captureSha256": "01b3fb4e435153428186a6a5981dae5940ed943e5d5d3619a17a5f87e83c6d29",
+  "captureSha256": "1f77220f485e19b46285f22a3adfaf5756061d9423d9c8aefb4ead4afc0b8dd9",
   "judge": null
 }

@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "inflatables",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:39:38.481Z",
+  "capturedAt": "2026-10-24T00:21:37.416Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,13 +30,23 @@
   ],
   "instances": 9,
   "triangles": 34972,
-  "firstFrameMs": 3976.5,
+  "firstFrameMs": 2664.5,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1658582,
+    "gzip": 591396,
+    "sha256": "1c67a4de9f028e6eaa0df0a626f094c00768de4c466b3d2c0a19953659e0d667"
   },
   "capture": "proofs/captures/lookdev/m10-materials--inflatables.png",
-  "captureSha256": "6b66f13cabf7078df2cbc3345781a8de36a841fbcce702a4b5e8ec2e96737e15",
-  "judge": null
+  "captureSha256": "0c7a1276695201d78ea7eaa775261d3fdc32fa5cb45cc122fca5f09f74fd0c2f",
+  "judge": {
+    "description": "Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: an upright inflatable toy hammer (red and yellow pillowed panels, blue end caps, striped handle), shiny inflatable balls (pink with white gores, white with pink candy stripes, yellow with blue gores, a small yellow and blue candy-striped ball) and two inflated bumper rings (one blue with yellow panels, one yellow with pink panels) lying on a glossy azure blue floor under a bright blue sky with white clouds; glossy inflatable plastic with a crisp clear-coat highlight over a coloured base, inflated seams (soft pillowed bulges between the seams); sky reflections on the curved plastic.",
+    "references": [
+      "ref-1"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": null,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m10-materials--inflatables.png by claude-haiku-5-5\nexpected: Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: an upright inflatable toy hammer (red and yellow pillowed panels, blue end caps, striped handle), shiny inflatable balls (pink with white gores, white with pink candy stripes, yellow with blue gores, a small yellow and blue candy-striped ball) and two inflated bumper rings (one blue with yellow panels, one yellow with pink panels) lying on a glossy azure blue floor under a bright blue sky with white clouds; glossy inflatable plastic with a crisp clear-coat highlight over a coloured base, inflated seams (soft pillowed bulges between the seams); sky reflections on the curved plastic.\nseen: All described objects are present and readable: the upright hammer, the pink, white, yellow and small candy-striped balls, and both bumper rings on a glossy azure floor under a blue sky with clouds. The glossy clear-coat highlights and contact shadows are convincing, but the look is flatter and less polished than the reference, with weak sky reflections on the curved plastic and no bloom or soft lighting.",
+    "at": "2026-10-24T00:21:45.692Z"
+  }
 }
