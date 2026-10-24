@@ -1,0 +1,6 @@
+# Line endings: LF in the repository and in every checkout, whatever core.autocrlf says (Git for Windows
+# ships core.autocrlf=true: every Windows checkout and tool saw CRLF, and CRLF leaked back into commits).
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
