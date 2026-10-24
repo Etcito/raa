@@ -77,7 +77,8 @@ const SLIME = {
   wave2: [0.0225, 1.0, -0.7, 0.5],
   wave3: [0.0105, 0.6, 2.4, 0.4],
   speeds: [0.541, 0.407, 0.312, 0.242],
-  color: [0.4, 0.95, 0.08],
+  // A more saturated lime (card 4942's judge saw a flat, greyish film).
+  color: [0.34, 0.95, 0.03],
   // Denser body (with transmission 0.6 below) so the river reads as neon-green slime with
   // the tiles shimmering through it, not as clear water over green tiles.
   absorption: 4.5,
@@ -88,8 +89,9 @@ const SLIME = {
   foamWidth: 0.1,
   foamAmount: 0.3,
   // A gentle detail normal: the old 0.32 mottled the sky reflection into a grey skin
-  // (card 5031) instead of the glossy green surface the reference shows.
-  detailStrength: 0.08,
+  // (card 5031) instead of the glossy green surface the reference shows; 0.08 still read
+  // as a mottled surface (card 4942).
+  detailStrength: 0.05,
   detailScale: 1.2,
 };
 const SLIME_IOR = 1.38;
@@ -121,12 +123,14 @@ const MUD = {
   wetness: 0.85,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
-  // Shore foam where the mud is shallower than foamWidth (the depth rides in the vertex
-  // colour alpha, see mudMesh); faint churned streaks on the steepest crests.
-  foamWidth: 0.22,
-  foamAmount: 0.5,
-  detailStrength: 0.1,
-  detailScale: 0.6,
+  // Shore froth where the mud is shallower than foamWidth (the depth rides in the vertex
+  // colour alpha, see mudMesh); a little froth on the steepest crests. A narrower band
+  // than card 4941's 0.22 keeps the pit body clean, glossy chocolate between the pads.
+  foamWidth: 0.15,
+  foamAmount: 0.25,
+  // A slow, broad swell normal: 0.1 at scale 0.6 crinkled the sun glints (card 4942).
+  detailStrength: 0.05,
+  detailScale: 0.35,
 };
 // Mud set lighting: a warmer sun and dimmer sky terms than daylight(). The sky irradiance
 // of DAY_SKY carried about as much light as the sun on the pit, all of it blue (measured
@@ -152,21 +156,21 @@ const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clea
 // Mud splash crowns around each pad wall are sculpted meshes, not particles: the splash
 // emitter's droplets are camera-facing discs, which read as loose clusters of brown beads
 // at capture distance (card 5039, attempt 9) instead of ref-3's rounded tongues of mud.
-// Per pad: a churned lip ring of mud hugging the wall and MUD_CROWN.tongues curved tongues
-// rising off it, each with a bulbous rounded head and a detached droplet above it.
+// Per pad: a churned lip ring of mud hugging the wall and MUD_CROWN.tongues short lobes
+// rising off it, each a chain of overlapping spheres that thins from a thick base to a
+// rounded head, with a detached droplet above every other lobe. Tall tubes with a ball on
+// top read as stalks (card 4942 judge); the crown is the mud's own colour, not darker.
 const MUD_CROWN = {
-  color: [0.34, 0.2, 0.09],
-  roughness: 0.12,
+  color: [0.42, 0.26, 0.13],
+  roughness: 0.15,
   clearcoat: 1,
   clearcoatRoughness: 0.04,
-  tongues: 5,
-  // Thick, stubby tongues with a head barely wider than the tube: thin tubes under big
-  // balls read as lollipops in the card 4941 preview, not as rounded splashes of mud.
-  height: [0.17, 0.27], // m above the mud, alternating per tongue
-  lean: 0.15, // m outward travel of the head
-  radius: 0.06, // tongue tube radius m
-  head: 0.074, // head sphere radius m
-  lip: 0.065, // lip ring tube radius m
+  tongues: 7,
+  height: [0.12, 0.17], // m above the mud, alternating per tongue
+  lean: 0.1, // m outward travel of the head
+  base: 0.085, // lobe radius m at the mud
+  head: 0.055, // lobe radius m at the head
+  lip: 0.07, // lip ring tube radius m
 };
 // White spray (ref-3's splash spray): opaque near-white lit droplets (opacity 0.85; a clear
 // droplet at opacity 0 reads as dark grey flecks on the mud) thrown up at every pad edge
@@ -175,10 +179,11 @@ const MUD_SPRAY_POINTS = 3;
 const MUD_SPRAY = {
   kind: 'splash',
   spread: 0.5,
-  rate: 60,
+  // Fewer, larger drops: small ones read as white grains (card 4942).
+  rate: 40,
   lifetime: [0.25, 0.5],
   speed: [1.0, 1.8],
-  size: [0.015, 0.032],
+  size: [0.03, 0.055],
   drag: 0.3,
   colors: [[0.95, 0.97, 1], [1, 1, 1]],
   opacity: 0.85,
@@ -188,7 +193,7 @@ const MUD_SPRAY = {
 // Few shoreline points: ten clusters of droplets read as scattered white grains (card 4941).
 const MUD_SHORE_SPRAY_POINTS = 4;
 const MUD_SHORE_RADIUS = 2.62; // m, x radius of the shoreline ellipse (z is / 1.1)
-const MUD_SHORE_SPRAY = { ...MUD_SPRAY, rate: 70, speed: [0.6, 1.4], spread: 0.6, volume: [0.15, 0.01, 0.15] };
+const MUD_SHORE_SPRAY = { ...MUD_SPRAY, rate: 45, speed: [0.6, 1.4], spread: 0.6, volume: [0.15, 0.01, 0.15] };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
   [-1.2, -0.9, 0.5, 0.7, -0.05],
@@ -388,8 +393,8 @@ function mudHeight(x, z, t) {
 
 // The mud crown of one pad (x, z, radius r) at time t, in pad-local XZ (the pad axis at
 // the origin) and world Y: a churned lip ring hugging the wall plus MUD_CROWN.tongues
-// curved tongues of mud rising off the swell, each ending in a bulbous rounded head with
-// a detached droplet above.
+// short lobes of mud rising off the swell, thinning from a thick base to a rounded head,
+// with a detached droplet above every other lobe.
 function mudCrown(geometry, [x, z, r], phase, t) {
   const C = MUD_CROWN;
   const surface = (lx, lz) => mudHeight(x + lx, z + lz, t);
@@ -411,25 +416,25 @@ function mudCrown(geometry, [x, z, r], phase, t) {
       const d = r + 0.05 + C.lean * u ** 1.6;
       return [d * c, y0 - 0.04 + (h + 0.04) * Math.sin((u * Math.PI) / 2), d * sn];
     };
-    const path = [];
-    for (let i = 0; i <= 12; i++) path.push(at(i / 12));
-    parts.push(geometry.sweepTube(path, C.radius, 12));
-    const tip = at(1);
-    const head = geometry.uvSphere(C.head, 20, 12);
-    for (let i = 0; i < head.positions.length; i += 3) {
-      head.positions[i] += tip[0];
-      head.positions[i + 1] += tip[1];
-      head.positions[i + 2] += tip[2];
+    const sphereAt = (radius, c3, rings) => {
+      const ball = geometry.uvSphere(radius, 2 * rings, rings);
+      for (let i = 0; i < ball.positions.length; i += 3) {
+        ball.positions[i] += c3[0];
+        ball.positions[i + 1] += c3[1];
+        ball.positions[i + 2] += c3[2];
+      }
+      return ball;
+    };
+    // Overlapping spheres every ~0.4 radius along the arc: a smooth, lumpy lobe of mud.
+    const steps = 7;
+    for (let i = 0; i <= steps; i++) {
+      const u = i / steps;
+      parts.push(sphereAt(C.base + (C.head - C.base) * u, at(u), 10));
     }
-    parts.push(head);
-    const drop = geometry.uvSphere(0.6 * C.head, 16, 10);
-    const above = [tip[0] + 0.04 * c, tip[1] + 0.1 + 0.03 * k, tip[2] + 0.04 * sn];
-    for (let i = 0; i < drop.positions.length; i += 3) {
-      drop.positions[i] += above[0];
-      drop.positions[i + 1] += above[1];
-      drop.positions[i + 2] += above[2];
+    if (k % 2 === 0) {
+      const tip = at(1);
+      parts.push(sphereAt(0.55 * C.head, [tip[0] + 0.04 * c, tip[1] + 0.09 + 0.02 * k, tip[2] + 0.04 * sn], 8));
     }
-    parts.push(drop);
   }
   const merged = geometry.merge(parts);
   delete merged.subMeshes;
@@ -476,9 +481,11 @@ function buildMud(engine, lib, settings, variant) {
   // The bank: lime grass above the mud line, a dark mud-stained band at the shore.
   const ground = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.9 });
   const grass = [0.2, 0.46, 0.035];
-  const stain = [0.1, 0.05, 0.02];
+  // A wet-mud brown stain in a narrow band: the old near-black stain over 0.12 m of rise
+  // read as a dirty dark halo around the pit (card 4942).
+  const stain = [0.16, 0.08, 0.03];
   const rim = heightfield(geometry, 8, 8, 96, mudGround, (x, z, y) => {
-    const g = Math.min(1, Math.max(0, (y - 0.02) / 0.12));
+    const g = Math.min(1, Math.max(0, (y - 0.01) / 0.06));
     return [0, 1, 2].map((i) => stain[i] + (grass[i] - stain[i]) * g).concat(1);
   }, bankWarp);
   place(engine, upload(engine, rim, ground), [0, 0, 0]);

@@ -5,20 +5,21 @@
 // `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, foamWidth m)` and
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
-// The body is a wet dielectric (roughness 0.2, F0 0.04) under a wet coat (0.6 x wetness,
-// coat roughness 0.05): the sky is a visible reflection on the brown, the sun a tight wet
-// highlight. Card 5037 judged the rougher body (0.35, coat 0.35 x wetness) matte.
+// The body is a wet dielectric (roughness 0.3, F0 0.04: a broad highlight) under a wet
+// coat (0.6 x wetness, coat roughness 0.06): the sky is a visible reflection on the brown,
+// the sun a tight wet glint. Card 5037 judged a rough body under a thin rough coat (0.35,
+// coat 0.35 x wetness) matte; card 4942 judged a 0.2 body with fine grain crinkled dirt.
 // A mirror coat over the dark body let the blue sky radiance outweigh the brown diffuse
 // (measured on the card 4940 capture: pit HDR about (0.22, 0.12, 0.14), blue above green,
-// which AgX shows as mauve). Two noise scales mottle the brown. Slow voronoi bubbles on the
+// which AgX shows as mauve). One broad, faint noise varies the brown. Slow voronoi bubbles on the
 // XZ plane grow a dome (a normal bump plus a glossy coat) and pop into an expanding ring.
 //
 // Foam: an opaque draw runs before the opaque copy of its frame, so the opaque depth that
 // `liquid_shore` samples is not written yet. The shore term instead reads the mud depth
 // above the ground from the vertex colour alpha (metres, clamped to [0, 1]; the default
 // alpha 1 means deep, no shore), which the mesh author computes from the ground under the
-// surface. The crest term adds churned streaks on the steepest crests; no noise mask
-// scatters foam inside the pit.
+// surface. The crest term adds froth on the steepest crests; no noise mask scatters foam
+// inside the pit. The foam is froth: small domed voronoi bubbles in a lighter brown.
 
 // Radial bubble contribution: the XZ gradient of its height field (a slope, dimensionless,
 // because both the height and the cell coordinate scale with bubbleScale) and the glossy
@@ -136,6 +137,29 @@ fn mud_foam(depth: f32, crest: f32, world_pos: vec3<f32>, t: f32, width: f32, am
     return clamp(max(band, caps), 0.0, 1.0);
 }
 
+// Froth bubbles of about FROTH_CELL metres on the mud: (tilt x, tilt z, body) where the
+// tilt is the tangent-space slope of a dome per voronoi cell (finite differences, capped
+// at 0.45 so each bubble catches a glint without turning on its side) and the body is 1
+// inside a bubble and 0 on the thin dark seams between bubbles.
+const FROTH_CELL: f32 = 0.035;
+
+fn mud_froth_height(p: vec3<f32>) -> f32 {
+    let v = raa_voronoi3(p);
+    return smoothstep(0.0, 0.35, v.y - v.x);
+}
+
+fn mud_froth(world_pos: vec3<f32>, t: f32) -> vec3<f32> {
+    let p = vec3<f32>(world_pos.x, 0.0, world_pos.z) / FROTH_CELL + vec3<f32>(0.0, 0.08 * t, 0.0);
+    let h = mud_froth_height(p);
+    let e = 0.08;
+    let hx = mud_froth_height(p + vec3<f32>(e, 0.0, 0.0)) - h;
+    let hz = mud_froth_height(p + vec3<f32>(0.0, 0.0, e)) - h;
+    let slope = vec2<f32>(hx, hz) / e * 0.12;
+    let m = length(slope);
+    let limited = slope * select(1.0, 0.45 / max(m, 1e-6), m > 0.45);
+    return vec3<f32>(limited, h);
+}
+
 fn material_main(in: MaterialInput) -> MaterialOutput {
     var o = raa_default_output(in);
     let color = max(in.record.p[5].rgb, vec3<f32>(0.0));
@@ -149,17 +173,17 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     o.metallic = 0.0;
     o.opacity = 1.0;
-    o.roughness = 0.2;
-    // Wet mud is darker than dry ground but still reads brown under the clear coat; two
-    // noise scales give it the mottled, grainy body of mud instead of a flat coloured
-    // plane (card 5018 read the old smooth surface as a pink liquid).
-    let grain = raa_fbm3(in.position * 2.4 + vec3<f32>(0.0, 0.0, 0.2 * in.time), 3);
+    // A broad wet highlight (roughness 0.3) under a tight coat glint: the 0.2 body with a
+    // fine grain read as dull, crinkled dirt (card 4942 judge); thick chocolate is smooth.
+    o.roughness = 0.3;
+    // Wet mud is darker than dry ground but still reads brown under the clear coat; one
+    // broad, faint patch layer keeps it from a flat plane without a fine mottle.
     let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
-    o.base_color = color * (1.0 - 0.15 * wetness) * (0.88 + 0.12 * grain + 0.08 * patches);
+    o.base_color = color * (1.0 - 0.15 * wetness) * (0.95 + 0.06 * patches);
     // A wet coat: its sun lobe gives the glossy highlights and the sky shows as a sheen
     // over the brown; MUD_LIGHT's low env specular keeps it from a blue wash (see header).
     o.clearcoat = clamp(0.6 * wetness, 0.0, 1.0);
-    o.clearcoat_roughness = 0.05;
+    o.clearcoat_roughness = 0.06;
 
     o.normal = liquid_detail_normal(
         o.normal,
@@ -185,22 +209,20 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     let foam = mud_foam(in.color.a, crest, in.position, in.time, foam_width, foam_amount);
-    // Churned mud: streaks of lighter and darker saturated brown, still wet and glossy. A
-    // pale cream foam read as a tan band around the pit and the pads (card 5037), not as
-    // churned mud; the colour stays a multiple of the mud colour so the hue never drifts.
-    let churn = raa_fbm3(in.position * vec3<f32>(9.0, 3.0, 9.0) + vec3<f32>(0.0, 0.5 * in.time, 0.0), 3);
-    let churned = color * mix(0.6, 1.6, smoothstep(-0.35, 0.35, churn));
-    o.base_color = mix(o.base_color, churned, foam);
-    // Churned lumps: the churn field also tilts the shading normal inside the band, so the
-    // shore reads as rolled, glossy mud rather than a flat stain (card 4941 judge saw no
-    // churned mud at the shore).
-    let ce = 0.03;
-    let cp = in.position * vec3<f32>(9.0, 3.0, 9.0) + vec3<f32>(0.0, 0.5 * in.time, 0.0);
-    let cx = raa_fbm3(cp + vec3<f32>(9.0 * ce, 0.0, 0.0), 3) - churn;
-    let cz = raa_fbm3(cp + vec3<f32>(0.0, 0.0, 9.0 * ce), 3) - churn;
-    let lump = clamp(vec2<f32>(cx, cz) / ce * 0.05 * foam, vec2<f32>(-0.8), vec2<f32>(0.8));
-    o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(-lump.x, -lump.y, 1.0)));
-    o.roughness = mix(o.roughness, 0.3, foam);
-    o.clearcoat = o.clearcoat * (1.0 - 0.4 * foam);
+    // Froth: a crust of small domed bubbles in a lighter milk-chocolate brown, each with
+    // its own glint. The churned streaks with a fine lump normal it replaces (card 4941)
+    // read as mottled, crinkled dirt with no froth (card 4942 judge). The froth colour stays
+    // a multiple of the mud colour, lifted a little towards its grey, so the hue never
+    // drifts to the sky's blue or to a pale cream band (card 5037).
+    let froth = mud_froth(in.position, in.time);
+    let froth_color = mix(color * 2.1, vec3<f32>(raa_luma(color) * 2.3), 0.2) * mix(0.55, 1.0, froth.z);
+    o.base_color = mix(o.base_color, froth_color, foam);
+    o.normal = raa_perturb_normal(
+        o.normal,
+        in.tangent,
+        normalize(vec3<f32>(-froth.x * foam, -froth.y * foam, 1.0)),
+    );
+    o.roughness = mix(o.roughness, 0.22, foam);
+    o.clearcoat = mix(o.clearcoat, 0.5, foam);
     return o;
 }
