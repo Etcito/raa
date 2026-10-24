@@ -74,17 +74,17 @@ const SLIME = {
   wave3: [0.0105, 0.6, 2.4, 0.4],
   speeds: [0.541, 0.407, 0.312, 0.242],
   color: [0.36, 0.92, 0.1],
-  absorption: 3,
+  absorption: 1.6,
   glossiness: 0.96,
-  bubbleScale: 0.26,
-  // Wide, bright foam: card 5031 saw no clear shoreline foam and no bubbles, so the lace
-  // band at the channel walls is wider and the crest foam stronger.
+  bubbleScale: 0.32,
+  // Shore lace at the channel walls; little crest foam, which covered the river in a
+  // noise-texture lace and hid the bubbles and the refracted tiles (card 5034).
   foamWidth: 0.14,
-  foamAmount: 0.9,
+  foamAmount: 0.4,
   // A gentle detail normal: the old 0.32 mottled the sky reflection into a grey skin
   // (card 5031) instead of the glossy green surface the reference shows.
-  detailStrength: 0.14,
-  detailScale: 1.8,
+  detailStrength: 0.08,
+  detailScale: 1.2,
 };
 const SLIME_IOR = 1.38;
 const SLIME_THICKNESS = 0.24;
@@ -96,23 +96,24 @@ const SLIME_PADS = [
   { r: 0.38, h: 0.68, x: 1.65, z: 0.35, color: [0.25, 0.5, 1] },
 ];
 
-// Mud: the water wave layout at about 0.6x amplitude and 0.08x speed (a slow viscous
-// swell), raised from 0.4x so the swell reads at capture distance. `color` is sRGB: it is
+// Mud: the water wave layout at about 0.85x amplitude and 0.08x speed (a slow viscous
+// swell), raised from 0.6x so the swell reads at capture distance (card 5034). `color` is sRGB: it is
 // converted to linear by the material table. Card 5031's mauve pit came from an sRGB
 // 0.3/0.1/0.035 (linear 0.07/0.01/0.003, almost black), whose only visible light was the
-// blue sky sheen; this is a proper chocolate brown (linear about 0.3/0.11/0.034).
+// blue sky sheen; sRGB 0.6/0.37/0.2 read orange-terracotta under the warm sun (card
+// 5034); this is a chocolate brown (linear about 0.15/0.05/0.015) under a glossy coat.
 const MUD = {
-  wave0: [0.066, 3.0, 0.3, 0.65],
-  wave1: [0.036, 1.7, 1.4, 0.55],
-  wave2: [0.018, 1.0, -0.7, 0.5],
-  wave3: [0.0084, 0.6, 2.4, 0.4],
+  wave0: [0.094, 3.0, 0.3, 0.65],
+  wave1: [0.051, 1.7, 1.4, 0.55],
+  wave2: [0.026, 1.0, -0.7, 0.5],
+  wave3: [0.012, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  color: [0.6, 0.37, 0.2],
+  color: [0.42, 0.24, 0.13],
   wetness: 0.85,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
-  // Cream foam over the crests, as on ref-3's mud: card 5031 saw no foam at all.
-  foamAmount: 0.5,
+  // Milky streaks on the sharpest crests only (card 5034: wide cream blotches).
+  foamAmount: 0.6,
   detailStrength: 0.1,
   detailScale: 0.6,
 };
@@ -251,7 +252,7 @@ function buildSlime(engine, lib) {
     function: 'raa.liquid.slime',
     params: SLIME,
     blend: 'transmissive',
-    transmission: 0.72,
+    transmission: 0.85,
     ior: SLIME_IOR,
     thickness: SLIME_THICKNESS,
   }, [0, -0.1, 0]);
@@ -263,7 +264,7 @@ function buildMud(engine, lib) {
   // The mud body is a brown diffuse; a mirror-bright blue sky wash turns it mauve at
   // capture distance (card 5018). A dim sky specular keeps the wet sheen and the sun's
   // clear-coat highlight without recolouring the mud.
-  engine.setEnvironmentLighting({ ...ENV, specular: 0.35 });
+  engine.setEnvironmentLighting({ ...ENV, specular: 0.55 });
   // The pit bed sits 0.3 m below the mud: a bed just under the surface broke through every
   // wave trough as cut-out holes (card 5027). The rim rises through the surface about
   // r = 2.7 m (inside the 6 m grid, so the grid border stays buried) and is a lighter,
