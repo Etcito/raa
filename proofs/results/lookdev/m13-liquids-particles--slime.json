@@ -2,7 +2,7 @@
   "scene": "m13-liquids-particles",
   "variant": "slime",
   "milestone": "m13",
-  "capturedAt": "2026-10-24T15:08:40.207Z",
+  "capturedAt": "2026-10-24T20:45:46.609Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -35,23 +35,23 @@
   ],
   "instances": 9,
   "triangles": 38096,
-  "firstFrameMs": 23790.59999999404,
+  "firstFrameMs": 5179.200000017881,
   "wasm": {
-    "raw": 1910071,
-    "gzip": 653470,
-    "sha256": "dac1c6c15e546175c095bf49df5b17e7f19fd1b8994b65ffb638078144213bae"
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
   },
   "capture": "proofs/captures/lookdev/m13-liquids-particles--slime.png",
-  "captureSha256": "4cee87fee6a11b3037ca9fb4c4ed36315b1385f5aecbfeb4e6d47d73edc630bb",
+  "captureSha256": "87b66551bee028534a1b66304023678a6ece59703565433c4d4c54a62a1dbc76",
   "judge": {
     "description": "Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a neon-green translucent glossy slime river in a channel with pink inflatable walls, slow waves on its surface and small bubbles; three round glossy inflatable pads (pink, orange, blue) stand in it, and the slime refracts and tints the coloured tile floor of the channel",
     "references": [
       "ref-1"
     ],
     "minScore": 6,
-    "exit": 1,
-    "score": 5,
-    "output": "JUDGE FAIL: 5.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--slime.png by claude-haiku-5-5 (median of [5.0, 5.0, 6.0])\nexpected: Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a neon-green translucent glossy slime river in a channel with pink inflatable walls, slow waves on its surface and small bubbles; three round glossy inflatable pads (pink, orange, blue) stand in it, and the slime refracts and tints the coloured tile floor of the channel\nseen: The capture shows the required elements: a green slime river inside pink inflatable walls, three glossy pads (pink, orange, blue), and the tiled floor visibly tinted and refracted through the slime. The liquid is much cruder than the reference, though: the surface is a blotchy grey-blue noise pattern with circular foam-like marks, it is only weakly glossy or translucent, and the sky reflection is barely visible.",
-    "at": "2026-10-24T15:08:52.994Z"
+    "exit": 0,
+    "score": 6,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--slime.png by claude-haiku-5-5 (median of [6.0, 6.0, 6.0])\nexpected: Engine lookdev capture of the liquids milestone. Score two things: that the capture shows what this description lists, and that the LIQUID look (moving waves, foam at shores and wave crests, refraction of what lies below, reflection of the sky) matches the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple rocks, a plain tiled floor, simple pads), the absence of characters, buildings, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a neon-green translucent glossy slime river in a channel with pink inflatable walls, slow waves on its surface and small bubbles; three round glossy inflatable pads (pink, orange, blue) stand in it, and the slime refracts and tints the coloured tile floor of the channel\nseen: The capture shows the pink channel walls, three glossy pink, orange and blue pads, and a translucent slime surface that refracts and tints the tile floor, with some surface ripples. It falls short of the reference: the slime reads grey-teal rather than neon green, and foam at the shores and crests and visible bubbles are weak or absent.",
+    "at": "2026-10-24T20:46:00.282Z"
   }
 }

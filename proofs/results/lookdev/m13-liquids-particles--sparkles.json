@@ -2,7 +2,7 @@
   "scene": "m13-liquids-particles",
   "variant": "sparkles",
   "milestone": "m13",
-  "capturedAt": "2026-10-24T15:09:59.031Z",
+  "capturedAt": "2026-10-24T20:46:59.315Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -31,25 +31,25 @@
     "bloom",
     "tonemap"
   ],
-  "instances": 2,
-  "triangles": 5964,
-  "firstFrameMs": 102750,
+  "instances": 4,
+  "triangles": 6180,
+  "firstFrameMs": 77923.09999999404,
   "wasm": {
-    "raw": 1910071,
-    "gzip": 653470,
-    "sha256": "dac1c6c15e546175c095bf49df5b17e7f19fd1b8994b65ffb638078144213bae"
+    "raw": 1926199,
+    "gzip": 658380,
+    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
   },
   "capture": "proofs/captures/lookdev/m13-liquids-particles--sparkles.png",
-  "captureSha256": "1b7d690e26afdca079a8d3c0cc3bdbd1e4e982260e61fd5afaa14b938f712a96",
+  "captureSha256": "8fd5bc5f5b260f4fdbf25dc24d3c6743aee3484247b7e5c693c1772170b704c6",
   "judge": {
-    "description": "Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a night scene on a dark violet background: a glowing pink neon tube shaped like a script letter S stands on a dark glossy violet deck, with a soft bloom halo, and many tiny gold and white sparkles twinkle and glow around it",
+    "description": "Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a night scene on a dark violet background: a glowing pink neon tube shaped like a script letter S stands on a dark glossy violet deck edged by thin cyan and gold neon strips, with a soft bloom halo, and many gold and white four-point star sparkles twinkle and glow around it and above it",
     "references": [
       "ref-4"
     ],
     "minScore": 6,
-    "exit": 1,
-    "score": 5,
-    "output": "JUDGE FAIL: 5.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--sparkles.png by claude-haiku-5-5 (median of [5.0, 5.0, 6.0])\nexpected: Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a night scene on a dark violet background: a glowing pink neon tube shaped like a script letter S stands on a dark glossy violet deck, with a soft bloom halo, and many tiny gold and white sparkles twinkle and glow around it\nseen: The capture shows a pink neon S tube with a soft bloom halo on a dark violet background, and gold and white glowing dots that loosely match the requested sparkles. The dots are uniform round orbs, though, not clearly twinkling sparkles, snow or confetti, and they sit in a cluster rather than falling. The scene is very dark and flat compared with the saturated neon light and mood of the reference.",
-    "at": "2026-10-24T15:10:11.415Z"
+    "exit": 0,
+    "score": 6,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m13-liquids-particles--sparkles.png by claude-haiku-5-5 (median of [5.0, 6.0, 7.0])\nexpected: Engine lookdev capture of the particles milestone. Score two things: that the capture shows what this description lists, and that the PARTICLES read as what they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with the light and mood of the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse procedural staging (a few simple blocks, a plain tiled floor, simple props), the absence of characters, buildings, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a night scene on a dark violet background: a glowing pink neon tube shaped like a script letter S stands on a dark glossy violet deck edged by thin cyan and gold neon strips, with a soft bloom halo, and many gold and white four-point star sparkles twinkle and glow around it and above it\nseen: The capture shows a dark background, a pink neon S tube with a soft glow, a trapezoid deck with cyan and gold edge strips, and many glowing gold and white four-point sparkles, matching the description. The deck reads more blue than violet and lacks the glossy finish, and the neon and bloom look thinner and flatter than the reference's light and mood.",
+    "at": "2026-10-24T20:47:13.463Z"
   }
 }
