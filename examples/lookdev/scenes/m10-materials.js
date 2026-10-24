@@ -116,9 +116,11 @@ const NIGHT_SKY = {
 // (0.36, 0.14, 0.6) rendered an even mid violet (sRGB about 56..60, 0..30, 142..202) that the
 // judge still read as "fairly matte with weak lacquer gloss" (card 4816): a deeper lacquer
 // (preview about 30, 0, 125 near the camera), so the reflections and pools carry the contrast.
-const NEON_FLOOR = { color: [0.24, 0.08, 0.48], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
-// Deck parameters (linear, raw user params): p0 seam colour; p1 = (light pool gain, sharp
-// coat lobe rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
+// That read as "a flat grid ... little lacquer gloss" (card 4818; ref-4's near decks are about
+// 86..146, 68..89, 159..213): (0.24, 0.08, 0.48) -> (0.3, 0.1, 0.5), with a wider soft sheen.
+const NEON_FLOOR = { color: [0.3, 0.1, 0.5], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
+// Deck parameters (linear, raw user params): p0 = (seam colour, mirror ripple rad); p1 = (light
+// pool gain, extra mirror edge softness rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
 // groove shadow width m, panel tone variation).
 // p3 = (sky mirror gain, tube reflection gain, polish variation, vertical lobe stretch): the lacquer mirrors the night sky dome and
 // the tubes more strongly than a 4 % coat, as ref-4's wet-looking decks; at 1 the judge read
@@ -135,11 +137,16 @@ const NEON_FLOOR = { color: [0.24, 0.08, 0.48], roughness: 0.2, clearcoat: 1, cl
 // into blobs, so pool gain 3 -> 1.8 and broad weight 0.25 -> 0.12, the crisp tube reflections
 // 2 -> 3.5; the broad lobe is stretched 1.6x in elevation (the streaks of a wet floor under
 // a light) and the polish varies +-35 % in wipe-like streaks (ref-4's smudged lacquer).
+// The judge then saw "weak, blurry reflections" (card 4818): the sharp lobe was a gaussian as
+// wide as the tube. Now each tube is mirrored as a hard-edged image with raa.neon's body and
+// hot core (deck_mirror, edges antialiased over a pixel + 2 mrad), wobbled by a 4 mrad
+// ripple; tube gain 3.5 -> 2.5 (the core is brighter than the old mean), and a wider, softer
+// sheen under the crisp image (broad lobe 0.12 -> 0.25 rad, weight 0.12 -> 0.2, stretch 2).
 const NEON_DECK = {
-  p0: [0.006, 0.002, 0.016],
-  p1: [1.8, 0.008, 0.12, 0.12],
+  p0: [0.006, 0.002, 0.016, 0.004],
+  p1: [1.8, 0.002, 0.25, 0.2],
   p2: [0.8, 0.02, 0.03, 0.1],
-  p3: [2.2, 3.5, 0.35, 1.6],
+  p3: [2.2, 2.5, 0.35, 2.0],
 };
 // Night sky dome of the neon sets (demo.night-sky): radius m, a sphere around the set drawn
 // from inside. The procedural `night` sky is a flat gradient (judge, card 4811); the dome
@@ -249,7 +256,7 @@ const CHECKERS = {
 
 // Night sky radiance shared by the sky dome and the deck's mirror (linear HDR): a navy
 // zenith over a violet horizon with a pink-violet glow on the horizon line, a band of
-// lavender clouds lit from below (brighter dense cores, dark violet thin edges) and stars
+// lavender cumulus banks (round puffs lit by the moon from above, a pink underglow) and stars
 // (one jittered point per cell of a 3D grid on the direction, about 4 % of the cells lit,
 // 1 to 2 px wide, a few bright ones that bloom), weighted by `stars`.
 const SKY_WGSL = `
@@ -267,12 +274,43 @@ fn sky_star_field(dir: vec3<f32>) -> vec3<f32> {
   return tint * (lit * b * exp(-0.5 * d * d / (size * size)));
 }
 
+// Cumulus banks on the horizon in (azimuth, elevation) coordinates: round Voronoi puffs at
+// two scales on a fbm-warped base whose tops vary along the horizon, so heaps rise from the
+// horizon instead of the flat streaks a cloud plane gives at grazing angles (the judge saw
+// "clouds like flat sprites", card 4818).
+// x = density, y = puff relief (1 at the centre of each small puff, 0 at its rim).
+fn sky_cloud_field(dir: vec3<f32>) -> vec2<f32> {
+  let up = dir.y;
+  let az = atan2(dir.x, -dir.z);
+  // Round puffs (cells of a 2D Voronoi on the angles) piled on a fbm-warped base.
+  let c = vec2<f32>(az, up) * 4.5;
+  let w = vec2<f32>(raa_fbm3(vec3<f32>(c * 0.7, 3.3), 3), raa_fbm3(vec3<f32>(c * 0.7, 8.9), 3)) * 0.5;
+  let big = 1.0 - raa_voronoi3(vec3<f32>(c + w, 0.5)).x * 1.25;
+  let small = 1.0 - raa_voronoi3(vec3<f32>((c + w) * 2.6, 2.5)).x * 1.25;
+  let heap = raa_fbm3(vec3<f32>(az * 1.6, 0.3, 5.1), 3) * 0.5 + 0.5;
+  let top = 0.05 + 0.22 * smoothstep(0.32, 0.66, heap);
+  let h = clamp(up / top, 0.0, 1.5);
+  let field = 0.7 * big + 0.3 * small + 0.75 * (1.0 - h) - 0.4;
+  let rho = smoothstep(0.33, 0.52, field) * smoothstep(-0.01, 0.01, up) * (1.0 - smoothstep(0.9, 1.3, h));
+  return vec2<f32>(rho, clamp(small, 0.0, 1.0));
+}
+
 fn sky_cloud_density(dir: vec3<f32>) -> f32 {
+  return sky_cloud_field(dir).x;
+}
+
+// Cloud radiance: lit by the moon from above (a density sample towards it shadows the
+// cores and bottoms, so the tops and edges read lit), with a pink-violet underglow.
+fn sky_cloud(dir: vec3<f32>, cf: vec2<f32>) -> vec3<f32> {
+  let rho = cf.x;
+  let toward = sky_cloud_density(normalize(dir + vec3<f32>(0.015, 0.045, 0.0)));
+  let lit = exp(-3.0 * max(toward - rho * 0.3, 0.0));
   let up = max(dir.y, 0.0);
-  let q = dir.xz / (up + 0.1) * 0.45;
-  let n = raa_fbm3(vec3<f32>(q.x, q.y * 1.6, 2.7), 5) * 0.5 + 0.5;
-  let band = smoothstep(0.0, 0.02, up) * (1.0 - smoothstep(0.08, 0.24, up));
-  return smoothstep(0.48, 0.74, n) * band;
+  let shadow = vec3<f32>(0.06, 0.03, 0.15);
+  let light = vec3<f32>(0.55, 0.42, 0.82);
+  let under = vec3<f32>(0.2, 0.05, 0.2) * exp(-up * 30.0);
+  let relief = 0.55 + 0.45 * smoothstep(0.0, 0.7, cf.y);
+  return mix(shadow, light, lit * relief) * (0.6 + 0.4 * rho) + under;
 }
 
 fn sky_night(dir: vec3<f32>, stars: f32) -> vec3<f32> {
@@ -285,10 +323,10 @@ fn sky_night(dir: vec3<f32>, stars: f32) -> vec3<f32> {
   c = c + vec3<f32>(0.12, 0.03, 0.14) * exp(-up * 22.0);
   // Below the horizon: the glow fades into a deep violet haze.
   c = select(mix(vec3<f32>(0.2, 0.06, 0.34), vec3<f32>(0.08, 0.03, 0.18), smoothstep(0.0, 0.1, -dir.y)), c, dir.y >= 0.0);
-  let rho = sky_cloud_density(dir);
-  let cloud = mix(vec3<f32>(0.06, 0.03, 0.15), vec3<f32>(0.3, 0.2, 0.52), smoothstep(0.1, 0.9, rho))
-    * (1.0 + 0.8 * exp(-up * 12.0));
-  let a = smoothstep(0.0, 0.35, rho);
+  let cf = sky_cloud_field(dir);
+  let rho = cf.x;
+  let cloud = sky_cloud(dir, cf);
+  let a = smoothstep(0.0, 0.3, rho);
   let fade = smoothstep(0.04, 0.2, dir.y) * stars;
   return mix(c + sky_star_field(dir) * fade, cloud, a);
 }
@@ -353,6 +391,31 @@ fn deck_specular(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32
   return beta * inverseSqrt(spread2) * exp(-0.5 * theta2 / spread2) * window;
 }
 
+// Mirror image of a tube segment seen along rd from p: the hard-edged tube (its angular
+// radius r / distance around the line's closest point, edges antialiased over \`aa\` rad),
+// with raa.neon's profile across it: x = coloured gas body, y = hot core weight. Windowed
+// along the segment as deck_specular (ramps over the tube radius).
+fn deck_mirror(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32, aa: f32) -> vec2<f32> {
+  let l0 = a - p;
+  let ld = b - a;
+  let len2 = max(dot(ld, ld), 1e-8);
+  let rl = dot(rd, ld);
+  let t = clamp((dot(rd, l0) * rl - dot(l0, ld)) / max(len2 - rl * rl, 1e-6), -1.0, 2.0);
+  let c = l0 + t * ld;
+  let dist = max(length(c), 1e-3);
+  let theta = length(c / dist - rd);
+  let beta = r / dist;
+  let inside = clamp((beta - theta) / aa + 0.5, 0.0, 1.0);
+  let x = clamp(theta / beta, 0.0, 1.0);
+  let nv = sqrt(max(1.0 - x * x, 0.0));
+  let c2 = nv * nv;
+  let c4 = c2 * c2;
+  let ramp = sqrt(len2) / max(2.0 * r, 1e-4);
+  let window = clamp(0.5 + t * ramp, 0.0, 1.0) * clamp(0.5 + (1.0 - t) * ramp, 0.0, 1.0);
+  let w = inside * window;
+  return vec2<f32>(mix(0.35, 1.0, nv), c4 * c4) * w;
+}
+
 fn material_main(in: MaterialInput) -> MaterialOutput {
   var o = raa_default_output(in);
   let seam_color = in.record.p[0].rgb;
@@ -395,6 +458,13 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let n = o.normal;
   let v = normalize(in.view_dir);
   let rd = reflect(-v, n);
+  // Wet lacquer: the mirror ray wobbles by up to p0.w rad over a few decimetres, so the tube
+  // images ripple slightly like reflections on a wet floor; edges antialiased over a pixel.
+  let ripple = in.record.p[0].w;
+  let wob = vec2<f32>(raa_noise3(vec3<f32>(p.xz * 3.0, 0.7)), raa_noise3(vec3<f32>(p.xz * 3.0, 4.2)));
+  let rm = normalize(rd + vec3<f32>(wob.x, 0.0, wob.y) * ripple);
+  let mirror_aa = max(length(fwidth(rd)), 1e-4) + sharp;
+  var m = vec2<f32>(0.0);
   var pool = vec3<f32>(0.0);
   var refl_sharp = vec3<f32>(0.0);
   var refl_broad = vec3<f32>(0.0);
@@ -552,11 +622,16 @@ const wgslVec = (v) => `vec3<f32>(${v.map((x) => x.toFixed(4)).join(', ')})`;
 function deckWgsl(tubes) {
   const lines = [];
   for (const { points, color } of tubes) {
-    const radiance = wgslVec(srgbToLinear(color).map((x) => x * NEON_TUBE.strength * NEON_PROFILE_MEAN));
+    const lin = srgbToLinear(color);
+    const radiance = wgslVec(lin.map((x) => x * NEON_TUBE.strength * NEON_PROFILE_MEAN));
+    // raa.neon's gas body and hot core (mix(color, 1, 0.35) x 4 x coreWhiteness) radiance.
+    const body = wgslVec(lin.map((x) => x * NEON_TUBE.strength));
+    const core = wgslVec(lin.map((x) => (x * 0.65 + 0.35) * 4 * NEON_TUBE.coreWhiteness * NEON_TUBE.strength));
     for (let i = 0; i + 1 < points.length; i++) {
       const ab = `${wgslVec(points[i])}, ${wgslVec(points[i + 1])}, ${TUBE_R}`;
       lines.push(`  pool += ${radiance} * deck_diffuse(p, n, ${ab});`);
-      lines.push(`  refl_sharp += ${radiance} * deck_specular(p, rd, ${ab}, sharp, 1.0);`);
+      lines.push(`  m = deck_mirror(p, rm, ${ab}, mirror_aa);`);
+      lines.push(`  refl_sharp += ${body} * m.x + ${core} * m.y;`);
       lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad, stretch);`);
     }
   }
