@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "bloom-on",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:39:52.029Z",
+  "capturedAt": "2026-10-24T04:22:25.635Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -28,15 +28,15 @@
     "bloom",
     "tonemap"
   ],
-  "instances": 5,
-  "triangles": 10764,
-  "firstFrameMs": 17698.10000000894,
+  "instances": 6,
+  "triangles": 19788,
+  "firstFrameMs": 30476.90000000596,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--bloom-on.png",
-  "captureSha256": "a758c95ce31b3ce5721652c651643da974688b41d5799eacc59d4f51757cff67",
+  "captureSha256": "66195b122a38951cac0bdec9d1da987bf9f5e5ecd92bc6b136f812e84f475dea",
   "judge": null
 }

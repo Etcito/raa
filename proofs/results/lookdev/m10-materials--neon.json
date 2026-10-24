@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "neon",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:39:48.792Z",
+  "capturedAt": "2026-10-24T04:22:03.513Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -28,15 +28,25 @@
     "bloom",
     "tonemap"
   ],
-  "instances": 5,
-  "triangles": 10764,
-  "firstFrameMs": 14234.800000011921,
+  "instances": 6,
+  "triangles": 19788,
+  "firstFrameMs": 8575.70000000298,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--neon.png",
-  "captureSha256": "a758c95ce31b3ce5721652c651643da974688b41d5799eacc59d4f51757cff67",
-  "judge": null
+  "captureSha256": "66195b122a38951cac0bdec9d1da987bf9f5e5ecd92bc6b136f812e84f475dea",
+  "judge": {
+    "description": "Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: several glowing neon tubes at night (a pink script letter S, a cyan ring, a yellow zigzag and a purple bar) above a glossy violet deck floor of large lacquered panels with thin dark seams, a wet-looking lacquer that mirrors the tubes in blurred coloured reflections and the sky towards the horizon, under a starry navy night sky with soft lavender clouds over a violet horizon glow; neon tubes glow with soft physically based bloom, white-hot cores with saturated coloured rims, no halo banding; the glow tints the floor around each tube.",
+    "references": [
+      "ref-4"
+    ],
+    "minScore": 6,
+    "exit": 0,
+    "score": null,
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m10-materials--neon.png by claude-haiku-5-5 (median of [5.0, 6.0, 6.0])\nexpected: Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: several glowing neon tubes at night (a pink script letter S, a cyan ring, a yellow zigzag and a purple bar) above a glossy violet deck floor of large lacquered panels with thin dark seams, a wet-looking lacquer that mirrors the tubes in blurred coloured reflections and the sky towards the horizon, under a starry navy night sky with soft lavender clouds over a violet horizon glow; neon tubes glow with soft physically based bloom, white-hot cores with saturated coloured rims, no halo banding; the glow tints the floor around each tube.\nseen: The capture shows the requested neon zigzag, pink S, cyan ring and violet bar over a violet panelled floor, with blurred tube and cloud reflections and a starry navy sky with lavender clouds. The tube cores are fairly uniform rather than white-hot, the floor reads flatter and less lacquered than the reference, and the seams look lit rather than dark.",
+    "at": "2026-10-24T04:22:16.261Z"
+  }
 }
