@@ -4,7 +4,7 @@
 // absorption); several interpenetrating translucent objects (raa.glass, blend transparent,
 // plus an ice block) whose order the linked-list OIT resolves. On/off pairs for transmission
 // (blend transmissive vs opaque) and for the `transparent.oit` pass (Q15). The slime and
-// water sets are added by the next task (see SETS).
+// water sets: a slime pool with blobs (raa.slime) and a still water basin (raa.water).
 // Variants are grouped in sets (settings.set), one builder per set in SETS.
 // Pure module (S14): no top-level side effects, node reads id/milestone/variants.
 
@@ -33,6 +33,8 @@ const CAMERAS = {
   transmission: [[0, 0.36, -0.2], 2.2, 0.15, 0.16],
   oit: [[0, 0.42, 0], 2.2, 0.2, 0.18],
   overlap: [[0, 0.42, 0], 2.1, -0.25, 0.2],
+  slime: [[0, 0.15, 0.1], 2.6, 0.2, 0.42],
+  water: [[0, 0.1, 0], 3.2, 0.3, 0.55],
 };
 
 // Floor of lib's coloured tiles (n x n on a 0.5 m pitch), their vertex colours pushed away
@@ -236,14 +238,78 @@ function buildOverlap(engine, lib) {
   place(engine, mesh, OVERLAP_ICE.t, yawQuat(OVERLAP_ICE.yaw), OVERLAP_ICE.scale);
 }
 
+// Slime (raa.slime, blend transmissive): lib's pool scaled up, and squashed sphere blobs
+// (radius, centre, squash in y) on the tiles, two of them in front of the pool and one
+// pair overlapping.
+const SLIME = { color: [0.45, 0.95, 0.15], absorption: 3, glossiness: 0.85, bubbleScale: 0.06 };
+const SLIME_POOL_SCALE = 1.4;
+const SLIME_BLOBS = [
+  { r: 0.18, t: [-0.35, 0.09, 0.95], squash: 0.5 },
+  { r: 0.14, t: [-0.15, 0.07, 1.05], squash: 0.5 },
+  { r: 0.2, t: [0.55, 0.1, 0.9], squash: 0.45 },
+];
+// Water basin: inner half size (x, z) m, wall thickness and height m, water level m.
+const BASIN = { half: [1.1, 0.8], wall: 0.12, height: 0.4, radius: 0.04 };
+const WATER_LEVEL = 0.25;
+const WATER = { deepColor: [0.05, 0.45, 0.55], shallowColor: [0.55, 0.92, 0.88], clarity: 0.7 };
+
+function slime(engine) {
+  return engine.addSurfaceMaterial({
+    function: 'raa.slime',
+    params: SLIME,
+    blend: 'transmissive',
+    transmission: 0.9,
+    ior: 1.4,
+    thickness: 0.3,
+  });
+}
+
+// lib's slime pool (basin, slime surface) and three squashed slime blobs.
+function buildSlime(engine, lib) {
+  const { geometry, objects } = lib;
+  stage(engine, lib);
+  const basin = engine.addSurfaceMaterial({ color: [0.92, 0.9, 0.86], roughness: 0.4 });
+  const material = slime(engine);
+  const s = SLIME_POOL_SCALE;
+  place(engine, upload(engine, objects.slimePool(), [basin, material]), [0, 0, 0], yawQuat(0), [s, s, s]);
+  const blob = upload(engine, geometry.uvSphere(1, 64, 32), [material]);
+  for (const b of SLIME_BLOBS) place(engine, blob, b.t, yawQuat(0), [b.r, b.r * b.squash, b.r]);
+}
+
+// Rounded-box basin walls around the tiles and a closed water slab filling it.
+function buildWater(engine, lib) {
+  const { geometry } = lib;
+  stage(engine, lib);
+  const [hx, hz] = BASIN.half;
+  const { wall, height, radius } = BASIN;
+  const hy = height / 2;
+  const walls = [
+    translate(geometry.roundedBox([hx + 2 * wall, hy, wall / 2], radius, 4), [0, hy, -hz - wall / 2]),
+    translate(geometry.roundedBox([hx + 2 * wall, hy, wall / 2], radius, 4), [0, hy, hz + wall / 2]),
+    translate(geometry.roundedBox([wall / 2, hy, hz], radius, 4), [-hx - wall / 2, hy, 0]),
+    translate(geometry.roundedBox([wall / 2, hy, hz], radius, 4), [hx + wall / 2, hy, 0]),
+  ];
+  const stone = engine.addSurfaceMaterial({ color: [0.85, 0.82, 0.76], roughness: 0.6 });
+  place(engine, upload(engine, geometry.merge(walls), [stone]), [0, 0, 0]);
+  const water = engine.addSurfaceMaterial({
+    function: 'raa.water',
+    params: WATER,
+    blend: 'transmissive',
+    transmission: 1,
+    ior: 1.33,
+    thickness: WATER_LEVEL,
+  });
+  const slab = geometry.roundedBox([hx, WATER_LEVEL / 2, hz], 0.005, 2);
+  place(engine, upload(engine, slab, [water]), [0, WATER_LEVEL / 2, 0]);
+}
+
 const SETS = {
   ice: buildIce,
   transmission: buildTransmission,
   oit: buildOit,
   overlap: buildOverlap,
-  // --- slime and water sets: added by the next task (buildSlime, buildWater) ---
-  // slime: buildSlime,
-  // water: buildWater,
+  slime: buildSlime,
+  water: buildWater,
 };
 
 const STAGE = 'on a floor of saturated coloured tiles (orange, green, red, blue) in daylight '
@@ -303,7 +369,23 @@ const VARIANTS = [
     judge: false,
     settings: { set: 'overlap' },
   },
-  // --- slime and water variants: added by the next task (judged vs ref-1 and ref-3) ---
+  {
+    id: 'slime',
+    description: 'glossy translucent green slime pool and blobs; the tiles and objects behind and '
+      + 'under the slime are visible, refracted and tinted green; bubbles inside; overlapping '
+      + 'blobs composite in the right order',
+    references: ['ref-1', 'ref-3'],
+    judge: true,
+    settings: { set: 'slime' },
+  },
+  {
+    id: 'water',
+    description: 'a basin of clear still water; the tiled bottom is visible through the water, '
+      + 'slightly refracted and tinted blue-green with depth; the surface reflects the sky',
+    references: ['ref-1', 'ref-3'],
+    judge: true,
+    settings: { set: 'water' },
+  },
 ];
 
 export default {

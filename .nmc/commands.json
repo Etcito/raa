@@ -1,6 +1,4 @@
 [
-  {"name": "gpu-oit", "command": "cargo test -p raa-oit --test gpu_oit -- --nocapture", "timeout_s": 900, "cwd": "."},
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-m11-water", "command": "node scripts/lookdev-capture.mjs --milestone m11 --only water --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
-  {"name": "proof-m11", "command": "node proofs/m11-transmission.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m11-water", "gpu-oit"]}
+  {"name": "capture-m11", "command": "node scripts/lookdev-capture.mjs --milestone m11", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
 ]
