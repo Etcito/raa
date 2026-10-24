@@ -58,17 +58,20 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     let p = in.local_position / bubble_scale;
     let bubbles = slime_bubble_masks(p);
-    // A bubble is a lens of thicker slime over a darker pocket: the body and the absorbed
-    // floor darken inside the core, while its rim catches a thin bright skin. The rim goes
+    // A bubble is a lens of slightly thicker slime: the body and the absorbed floor darken a
+    // little inside the core (a strong darkening read as dark holes, card 4941 preview),
+    // while its rim catches a thin bright skin. The rim goes
     // to a pale green-white, not the body's own green, or it vanishes against the slime
     // (card 5031: no visible bubbles on a green sheet).
-    o.attenuation_color = color * (1.0 - 0.55 * bubbles.x);
+    o.attenuation_color = color * (1.0 - 0.2 * bubbles.x);
     o.attenuation_distance = 1.0 / absorption;
-    o.base_color = color * (1.0 - o.transmission) * (1.0 - 0.7 * bubbles.x);
+    o.base_color = color * (1.0 - o.transmission) * (1.0 - 0.2 * bubbles.x);
     // The bubble skin is a light, opaque ring of slime: it reads as a bubble outline over
     // the floor seen through the body.
-    o.base_color = mix(o.base_color, vec3<f32>(0.75, 1.0, 0.62), 0.85 * bubbles.y);
-    o.transmission = o.transmission * (1.0 - 0.8 * bubbles.y);
+    // A saturated light green skin: the old pale green-white ring at 0.85 read as grey
+    // circular foam marks on the river (card 4941 judge).
+    o.base_color = mix(o.base_color, vec3<f32>(0.5, 1.0, 0.22), 0.6 * bubbles.y);
+    o.transmission = o.transmission * (1.0 - 0.5 * bubbles.y);
 
     // A domed bubble wall: a finite-difference tilt plus a glossy clear coat ring.
     let e = 0.012;
@@ -83,7 +86,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.roughness = mix(o.roughness, 0.02, bubbles.y);
     // A strong but not mirror-wide coat: the glossy green body stays readable under the
     // sky reflection instead of turning into a grey-blue skin.
-    o.clearcoat = 0.8;
+    o.clearcoat = 0.55;
     o.clearcoat_roughness = mix(0.05, 0.02, bubbles.y);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);

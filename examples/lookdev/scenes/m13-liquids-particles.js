@@ -27,8 +27,12 @@ const ENV = { diffuse: 0.7, specular: 1 };
 // Orbit cameras: [target, distance m, yaw rad, pitch rad].
 const CAMERAS = {
   water: [[0, -0.1, -0.3], 5.0, 0.35, 0.45],
-  slime: [[0, 0, 0], 4.0, 0.2, 0.44],
-  mud: [[0, -0.05, 0], 4.3, -0.3, 0.5],
+  // Slime looks down onto the river: at the old 0.44 rad pitch the Fresnel sky term turned
+  // the whole surface into a grey film (card 4941 software preview).
+  slime: [[0, -0.15, 0.1], 3.8, 0.2, 0.72],
+  // Mud sits low and close, like ref-3: the pit fills the frame, the crowns stand against
+  // the far mud and the glossy swell catches the sky at a grazing angle.
+  mud: [[0.1, 0.05, 0.4], 3.3, -0.3, 0.36],
   snow: [[0, 0.8, -0.8], 6.0, 0.3, 0.28],
   confetti: [[0, 1.4, -0.4], 5.2, 0.15, 0.3],
   sparkles: [[0, 0.45, 0], 2.4, 0, 0.15],
@@ -73,14 +77,16 @@ const SLIME = {
   wave2: [0.0225, 1.0, -0.7, 0.5],
   wave3: [0.0105, 0.6, 2.4, 0.4],
   speeds: [0.541, 0.407, 0.312, 0.242],
-  color: [0.36, 0.92, 0.1],
-  absorption: 1.6,
+  color: [0.4, 0.95, 0.08],
+  // Denser body (with transmission 0.6 below) so the river reads as neon-green slime with
+  // the tiles shimmering through it, not as clear water over green tiles.
+  absorption: 4.5,
   glossiness: 0.96,
   bubbleScale: 0.32,
   // Shore lace at the channel walls; little crest foam, which covered the river in a
   // noise-texture lace and hid the bubbles and the refracted tiles (card 5034).
-  foamWidth: 0.14,
-  foamAmount: 0.4,
+  foamWidth: 0.1,
+  foamAmount: 0.3,
   // A gentle detail normal: the old 0.32 mottled the sky reflection into a grey skin
   // (card 5031) instead of the glossy green surface the reference shows.
   detailStrength: 0.08,
@@ -111,14 +117,14 @@ const MUD = {
   wave2: [0.026, 1.0, -0.7, 0.5],
   wave3: [0.012, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  color: [0.38, 0.23, 0.1],
+  color: [0.4, 0.25, 0.12],
   wetness: 0.85,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
   // Shore foam where the mud is shallower than foamWidth (the depth rides in the vertex
   // colour alpha, see mudMesh); faint churned streaks on the steepest crests.
-  foamWidth: 0.12,
-  foamAmount: 0.35,
+  foamWidth: 0.22,
+  foamAmount: 0.5,
   detailStrength: 0.1,
   detailScale: 0.6,
 };
@@ -149,16 +155,18 @@ const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clea
 // Per pad: a churned lip ring of mud hugging the wall and MUD_CROWN.tongues curved tongues
 // rising off it, each with a bulbous rounded head and a detached droplet above it.
 const MUD_CROWN = {
-  color: [0.36, 0.19, 0.075],
+  color: [0.34, 0.2, 0.09],
   roughness: 0.12,
   clearcoat: 1,
   clearcoatRoughness: 0.04,
-  tongues: 3,
-  height: [0.16, 0.24], // m above the mud, alternating per tongue
-  lean: 0.12, // m outward travel of the head
-  radius: 0.038, // tongue tube radius m
-  head: 0.062, // head sphere radius m
-  lip: 0.05, // lip ring tube radius m
+  tongues: 5,
+  // Thick, stubby tongues with a head barely wider than the tube: thin tubes under big
+  // balls read as lollipops in the card 4941 preview, not as rounded splashes of mud.
+  height: [0.17, 0.27], // m above the mud, alternating per tongue
+  lean: 0.15, // m outward travel of the head
+  radius: 0.06, // tongue tube radius m
+  head: 0.074, // head sphere radius m
+  lip: 0.065, // lip ring tube radius m
 };
 // White spray (ref-3's splash spray): opaque near-white lit droplets (opacity 0.85; a clear
 // droplet at opacity 0 reads as dark grey flecks on the mud) thrown up at every pad edge
@@ -167,17 +175,18 @@ const MUD_SPRAY_POINTS = 3;
 const MUD_SPRAY = {
   kind: 'splash',
   spread: 0.5,
-  rate: 90,
-  lifetime: [0.3, 0.6],
-  speed: [1.2, 2.2],
-  size: [0.03, 0.06],
+  rate: 60,
+  lifetime: [0.25, 0.5],
+  speed: [1.0, 1.8],
+  size: [0.015, 0.032],
   drag: 0.3,
   colors: [[0.95, 0.97, 1], [1, 1, 1]],
   opacity: 0.85,
   volume: [0.05, 0.01, 0.05],
   maxParticles: 64,
 };
-const MUD_SHORE_SPRAY_POINTS = 10;
+// Few shoreline points: ten clusters of droplets read as scattered white grains (card 4941).
+const MUD_SHORE_SPRAY_POINTS = 4;
 const MUD_SHORE_RADIUS = 2.62; // m, x radius of the shoreline ellipse (z is / 1.1)
 const MUD_SHORE_SPRAY = { ...MUD_SPRAY, rate: 70, speed: [0.6, 1.4], spread: 0.6, volume: [0.15, 0.01, 0.15] };
 // Rocks: [x, z, radius, squash in y, y centre]
@@ -346,7 +355,7 @@ function buildSlime(engine, lib) {
     function: 'raa.liquid.slime',
     params: SLIME,
     blend: 'transmissive',
-    transmission: 0.85,
+    transmission: 0.6,
     ior: SLIME_IOR,
     thickness: SLIME_THICKNESS,
   }, [0, -0.1, 0]);

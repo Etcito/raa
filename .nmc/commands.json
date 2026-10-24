@@ -1,9 +1,4 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "scene-test", "command": "node --test examples/lookdev/test/m13-mud.test.mjs", "timeout_s": 300, "cwd": "."},
-  {"name": "capture-liquids", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(water|slime|mud|waves-t0|waves-t1)$' --judge --judge-record-only --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
-  {"name": "capture-particles", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(splash|snow|confetti|sparkles|particles-on|particles-off)$' --judge --judge-record-only --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["capture-liquids"]},
-  {"name": "proof-m13", "command": "node proofs/m13-liquids-particles.mjs --only '^(unit|wasm-check|api-doc|captures)$'", "timeout_s": 1800, "cwd": ".", "after": ["capture-particles"]},
-  {"name": "judge-records", "command": "node proofs/m13-first-captures.mjs", "timeout_s": 300, "cwd": ".", "after": ["capture-particles"]},
-  {"name": "smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-particles"]}
+  {"name": "capture-liquids", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(water|slime|mud|splash|waves-t0|waves-t1)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
 ]

@@ -45,7 +45,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     // The basin walls sit outside the water grid, so the depth-based shore term only marks
     // the beach and the rocks; the mesh border adds the contact line along the walls.
-    let shore = max(liquid_shore(in.frag_coord, foam_width), liquid_mesh_edge(in.uv, 0.03));
-    let foam = liquid_foam(shore, crest, in.position, in.time, foam_amount);
+    let shore = max(liquid_shore(in.frag_coord, foam_width), liquid_mesh_edge(in.uv, 0.04));
+    // The crest term is boosted so whitecaps form on more than the very steepest phase:
+    // the first capture showed sparse crest foam (card 4941 judge).
+    let foam = liquid_foam(shore, min(crest * 1.5, 1.0), in.position, in.time, foam_amount);
     return liquid_apply_foam(o, foam);
 }

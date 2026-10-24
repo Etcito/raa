@@ -189,8 +189,17 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     // pale cream foam read as a tan band around the pit and the pads (card 5037), not as
     // churned mud; the colour stays a multiple of the mud colour so the hue never drifts.
     let churn = raa_fbm3(in.position * vec3<f32>(9.0, 3.0, 9.0) + vec3<f32>(0.0, 0.5 * in.time, 0.0), 3);
-    let churned = color * mix(0.65, 1.45, smoothstep(-0.35, 0.35, churn));
+    let churned = color * mix(0.6, 1.6, smoothstep(-0.35, 0.35, churn));
     o.base_color = mix(o.base_color, churned, foam);
+    // Churned lumps: the churn field also tilts the shading normal inside the band, so the
+    // shore reads as rolled, glossy mud rather than a flat stain (card 4941 judge saw no
+    // churned mud at the shore).
+    let ce = 0.03;
+    let cp = in.position * vec3<f32>(9.0, 3.0, 9.0) + vec3<f32>(0.0, 0.5 * in.time, 0.0);
+    let cx = raa_fbm3(cp + vec3<f32>(9.0 * ce, 0.0, 0.0), 3) - churn;
+    let cz = raa_fbm3(cp + vec3<f32>(0.0, 0.0, 9.0 * ce), 3) - churn;
+    let lump = clamp(vec2<f32>(cx, cz) / ce * 0.05 * foam, vec2<f32>(-0.8), vec2<f32>(0.8));
+    o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(-lump.x, -lump.y, 1.0)));
     o.roughness = mix(o.roughness, 0.3, foam);
     o.clearcoat = o.clearcoat * (1.0 - 0.4 * foam);
     return o;
