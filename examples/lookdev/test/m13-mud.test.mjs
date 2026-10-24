@@ -8,7 +8,7 @@ import * as objects from '../lib/objects.js';
 import scene, { mudSet } from '../scenes/m13-liquids-particles.js';
 
 function fakeEngine() {
-  const rec = { emitters: [], materials: [], meshes: [], instances: [] };
+  const rec = { emitters: [], materials: [], meshes: [], instances: [], lights: [], orbit: null };
   const engine = new Proxy({}, {
     get(_, name) {
       if (name === 'addEmitter') return (e) => rec.emitters.push(e) - 1;
@@ -16,6 +16,8 @@ function fakeEngine() {
       if (name === 'addMesh') return (m) => rec.meshes.push(m) - 1;
       if (name === 'addMeshInstance') return (node, mesh) => rec.instances.push(mesh) - 1;
       if (name === 'addNode') return () => 0;
+      if (name === 'setLight') return (l) => rec.lights.push(l);
+      if (name === 'setOrbit') return (...a) => { rec.orbit = a; };
       return () => {};
     },
   });
@@ -69,4 +71,19 @@ test('water and slime sets still build', async () => {
     await scene.build(engine, { geometry, objects }, scene.variants.find((v) => v.id === id));
     assert.ok(rec.meshes.length > 0);
   }
+});
+
+test('mud sun lights the camera-facing side of the crowns', async () => {
+  const { engine, rec } = fakeEngine();
+  await scene.build(engine, { geometry, objects }, mud);
+  // The last light set wins; the eye sits at target + (cos p sin y, sin p, cos p cos y).
+  const d = rec.lights.at(-1).direction;
+  const [, , yaw, pitch] = rec.orbit;
+  const eye = [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+  // Light travels along d, so a crown side facing the eye is lit when dot(eye, -d) > 0
+  // (a backlit crown rendered grey-black, card 5064).
+  const toSun = d.map((v) => -v);
+  const facing = eye[0] * toSun[0] + eye[2] * toSun[2];
+  assert.ok(facing > 0.2, `sun lights the camera side: ${facing}`);
+  assert.ok(toSun[1] > 0.5, `sun elevation: ${toSun[1]}`);
 });

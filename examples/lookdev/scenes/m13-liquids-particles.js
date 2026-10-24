@@ -135,13 +135,16 @@ const MUD = {
 };
 // Mud set lighting: a warmer sun and dimmer sky irradiance than daylight(). The sky
 // irradiance of DAY_SKY carried about as much light as the sun on the pit, all of it blue
-// (measured on the rim: light about (2.2, 2.4, 3.8)). The sun stands in front and to the
-// right of the camera, 38 deg up, so its streaks run across the swell in view (lower, the
-// long pad shadows showed the blue sky sheen as purple mud); the env
-// specular is kept high enough for a Fresnel sky sheen on the wet coat.
+// (measured on the rim: light about (2.2, 2.4, 3.8)). The sun shines from behind the
+// camera's left shoulder, 46 deg up (the camera sits at +z): the camera-facing sides of
+// the crowns, drops and pads are lit and the pad shadows fall behind the pads. The old
+// sun in front of the camera (travel +z) backlit every crown and threw the pad shadows
+// over them, so the chocolate crowns rendered grey-black (card 5064 capture: crown pixels
+// about (14..35, 13..35, 27..32), only the coat's sky reflection) and the shadowed pit
+// read purple. The env specular gives the wet coat a Fresnel sky sheen.
 const MUD_LIGHT = {
-  sun: { ...SUN, direction: [-0.592, -0.616, 0.52], color: [1, 0.88, 0.72] },
-  env: { diffuse: 0.45, specular: 0.32 },
+  sun: { ...SUN, direction: [0.6, -0.72, -0.35], color: [1, 0.88, 0.72] },
+  env: { diffuse: 0.45, specular: 0.5 },
 };
 // Ground height of the mud pit (the mud surface is y = 0): the bed 0.3 m down, rising
 // through the surface about r = 2.7 m into a grassy bank.
