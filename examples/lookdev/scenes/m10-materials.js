@@ -176,7 +176,12 @@ const DECK_SEGMENT = 0.1;
 // That read as "softer and less physically rich" (card 4820): bloom is a mix without threshold,
 // so a strong one pales the whole frame (0.18..0.3 in the preview: a lavender haze; the
 // bloom-off frame was closer to ref-4). 0.1 / 0.85 keeps tight coloured halos on a crisp frame.
-const NEON_BLOOM = { strength: 0.1, radius: 0.85 };
+// Card 4822: still "much hazier and flatter than the reference, with washed-out glow". The
+// composite adds strength x (levels - 1) of the blurred frame (about +60 % at 0.1, the median
+// luminance rose 0.37 -> 0.53 over bloom-off) and BloomDesc has no threshold, so the tubes
+// feed it less instead (NEON_TUBE 5 -> 2.5) and the mix drops to 0.05 with a tighter tent:
+// about a quarter of the old tube halo, tinted and close to each tube, on a deep frame.
+const NEON_BLOOM = { strength: 0.05, radius: 0.6 };
 // +0.3 EV brings the night set towards ref-4's bright purple key (mean sRGB 134, 104, 177).
 const NEON_EXPOSURE_EV = 0.3;
 // raa.neon strength (emissive scale of the coloured gas) and core whiteness of every tube.
@@ -188,7 +193,13 @@ const NEON_EXPOSURE_EV = 0.3;
 // ref-4's 0.51); strength 8 -> 5 keeps the body in AgX's coloured range, with a full-white
 // core (0.8 -> 1). ACES whitened them further. NEON_PROFILE_MEAN keeps the 0.8 value (the
 // pools are tuned with p1.x on top of it).
-const NEON_TUBE = { strength: 5, coreWhiteness: 1 };
+// Card 4822 ("washed-out glow cores ... less saturated rims"): at 5 (+0.3 EV) the punchy AgX
+// bodies were pastel (pink rim sRGB about 255, 82, 208); at 2.5 the rims stay saturated
+// (247, 42, 174) and the 4x core still burns near white (255, 234, 246). The deck's light
+// (pools, broad lobe, sheen) keeps its tuned energy (DECK_LIGHT_STRENGTH); its mirror image
+// of the tubes follows the tubes.
+const NEON_TUBE = { strength: 2.5, coreWhiteness: 1 };
+const DECK_LIGHT_STRENGTH = 5;
 const NEON_PROFILE_MEAN = 2.16;
 // Neon colours (sRGB) and the shared tube radius (m). 2.5 cm tubes were ~7 px wide in the
 // capture: the judge saw thin tubes and thin reflections lacking ref-4's fat glowing bars
@@ -692,7 +703,7 @@ function deckWgsl(tubes) {
   const core = [];
   tubes.forEach(({ points, color }, k) => {
     const lin = srgbToLinear(color);
-    radiance.push(v3(lin.map((x) => x * NEON_TUBE.strength * NEON_PROFILE_MEAN)));
+    radiance.push(v3(lin.map((x) => x * DECK_LIGHT_STRENGTH * NEON_PROFILE_MEAN)));
     // raa.neon's gas body and hot core (mix(color, 1, 0.35) x 4 x coreWhiteness) radiance.
     body.push(v3(lin.map((x) => x * NEON_TUBE.strength)));
     core.push(v3(lin.map((x) => (x * 0.65 + 0.35) * 4 * NEON_TUBE.coreWhiteness * NEON_TUBE.strength)));
