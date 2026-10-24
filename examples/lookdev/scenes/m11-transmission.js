@@ -34,7 +34,7 @@ const CAMERAS = {
   transmission: [[0, 0.36, -0.2], 2.2, 0.15, 0.16],
   oit: [[0, 0.42, 0], 2.2, 0.2, 0.18],
   overlap: [[0, 0.42, 0], 2.1, -0.25, 0.2],
-  slime: [[0, 0.15, 0.1], 2.6, 0.2, 0.42],
+  slime: [[-0.1, 0.1, 0.35], 2.3, 0.18, 0.38],
   water: [[0, 0.1, 0], 3.2, 0.3, 0.55],
 };
 
@@ -272,42 +272,101 @@ function buildOverlap(engine, lib) {
   place(engine, mesh, OVERLAP_ICE.t, yawQuat(OVERLAP_ICE.yaw), OVERLAP_ICE.scale);
 }
 
-// Slime (raa.slime, blend transmissive): lib's pool scaled up, and squashed sphere blobs
-// (radius, centre, squash in y) on the tiles, two of them in front of the pool and one
-// pair overlapping.
-const SLIME = { color: [0.45, 0.95, 0.15], absorption: 3, glossiness: 0.85, bubbleScale: 0.06 };
-const SLIME_POOL_SCALE = 1.4;
-const SLIME_BLOBS = [
-  { r: 0.18, t: [-0.35, 0.09, 0.95], squash: 0.5 },
-  { r: 0.14, t: [-0.15, 0.07, 1.05], squash: 0.5 },
-  { r: 0.2, t: [0.55, 0.1, 0.9], squash: 0.45 },
+// Slime (raa.slime, blend transmissive), after ref-1's neon slime river: a slime river
+// (a closed rounded slab on the tiles, across the front of the frame) with two round
+// inflatable pads standing in it, lib's slime pool (scaled, a white basin) with two balls
+// sunk half into its slime, and slime blobs on the tiles, one pair overlapping and one
+// blob in front of the pool's rim. The tiles, pads and balls show refracted and tinted
+// under the slime. The sun comes from behind the stage (as ref-1) so the bubbly glossy
+// surface catches glints. Meshes are built at world size (bubbleScale in metres).
+// raa.slime params: sRGB colour, absorption per metre, glossiness, bubble size m.
+const SLIME = { color: [0.42, 1, 0.12], absorption: 6, glossiness: 0.92, bubbleScale: 0.045 };
+const SLIME_IOR = 1.38;
+const SLIME_TRANSMISSION = 0.75;
+// River: half extents (x, y, z), corner radius, centre; its slime thickness is its depth.
+const SLIME_RIVER = { half: [2.6, 0.055, 0.48], radius: 0.05, t: [0, 0.055, 1.1] };
+// Pads in the river: radius, height, centre (x, z), sRGB colour.
+const SLIME_PADS = [
+  { r: 0.24, h: 0.17, x: 0.5, z: 1.05, color: [1, 0.3, 0.55] },
+  { r: 0.17, h: 0.15, x: -0.95, z: 0.92, color: [1, 0.55, 0.1] },
 ];
+// Pool: scale, centre, basin sRGB colour; the slime surface is 0.1 x scale high and the
+// basin floor 0.06 x scale below it. Balls sunk in it: radius, centre (local x, z).
+const SLIME_POOL = { scale: 1.3, t: [-0.45, 0, -0.3], basin: [0.97, 0.97, 0.94], thickness: 0.1 };
+const SLIME_BALLS = [
+  { r: 0.08, x: -0.18, z: 0.1, color: [1, 0.2, 0.5] },
+  { r: 0.065, x: 0.2, z: -0.12, color: [0.2, 0.45, 1] },
+];
+// Blobs: radius, centre, squash in y (radius r x squash), slime thickness.
+const SLIME_BLOBS = [
+  { r: 0.2, t: [0.75, 0, -0.1], squash: 0.55 },
+  { r: 0.15, t: [0.98, 0, 0.05], squash: 0.6 },
+  { r: 0.17, t: [-0.05, 0, 0.42], squash: 0.5 },
+];
+const SLIME_BLOB_THICKNESS = 0.22;
+// Back light: the sun low behind the stage, slightly from the right.
+const SLIME_SUN = { direction: [-0.55, -0.7, 0.45], color: [1, 0.95, 0.86], intensity: 7 };
 // Water basin: inner half size (x, z) m, wall thickness and height m, water level m.
 const BASIN = { half: [1.1, 0.8], wall: 0.12, height: 0.4, radius: 0.04 };
 const WATER_LEVEL = 0.25;
 const WATER = { deepColor: [0.05, 0.45, 0.55], shallowColor: [0.55, 0.92, 0.88], clarity: 0.7 };
 
-function slime(engine) {
+function slime(engine, thickness) {
   return engine.addSurfaceMaterial({
     function: 'raa.slime',
     params: SLIME,
     blend: 'transmissive',
-    transmission: 0.9,
-    ior: 1.4,
-    thickness: 0.3,
+    transmission: SLIME_TRANSMISSION,
+    ior: SLIME_IOR,
+    thickness,
   });
 }
 
-// lib's slime pool (basin, slime surface) and three squashed slime blobs.
+// A round inflatable pad (closed lathe, rounded top edge) of radius r and height h.
+function pad(geometry, r, h) {
+  const e = 0.04;
+  const edge = Array.from({ length: 7 }, (_, i) => {
+    const a = (i / 6) * (Math.PI / 2);
+    return [r - e + e * Math.cos(a), h - e + e * Math.sin(a)];
+  });
+  return geometry.lathe([[0, 0], [r, 0], [r, 0], ...edge, [0, h]], 64);
+}
+
+// The slime river with its pads, lib's slime pool with balls sunk in it, and slime blobs.
 function buildSlime(engine, lib) {
   const { geometry, objects } = lib;
   stage(engine, lib);
-  const basin = engine.addSurfaceMaterial({ color: [0.92, 0.9, 0.86], roughness: 0.4 });
-  const material = slime(engine);
-  const s = SLIME_POOL_SCALE;
-  place(engine, upload(engine, objects.slimePool(), [basin, material]), [0, 0, 0], yawQuat(0), [s, s, s]);
-  const blob = upload(engine, geometry.uvSphere(1, 64, 32), [material]);
-  for (const b of SLIME_BLOBS) place(engine, blob, b.t, yawQuat(0), [b.r, b.r * b.squash, b.r]);
+  engine.setLight({ ...SUN, ...SLIME_SUN });
+  const river = SLIME_RIVER;
+  const riverMesh = geometry.roundedBox(river.half, river.radius, 6);
+  place(engine, upload(engine, riverMesh, [slime(engine, 2 * river.half[1])]), river.t);
+  for (const p of SLIME_PADS) {
+    const m = engine.addSurfaceMaterial({ color: p.color, roughness: 0.25, clearcoat: 1 });
+    place(engine, upload(engine, pad(geometry, p.r, p.h), [m]), [p.x, 0, p.z]);
+  }
+  const pool = SLIME_POOL;
+  const s = pool.scale;
+  const basin = engine.addSurfaceMaterial({ color: pool.basin, roughness: 0.3, clearcoat: 1 });
+  const surface = engine.addSurfaceMaterial({
+    function: 'raa.slime',
+    // The pool mesh is scaled by s: its local bubbles are s times larger.
+    params: { ...SLIME, bubbleScale: SLIME.bubbleScale / s },
+    blend: 'transmissive',
+    transmission: SLIME_TRANSMISSION,
+    ior: SLIME_IOR,
+    thickness: pool.thickness,
+  });
+  place(engine, upload(engine, objects.slimePool(), [basin, surface]), pool.t, yawQuat(0), [s, s, s]);
+  for (const b of SLIME_BALLS) {
+    const m = engine.addSurfaceMaterial({ color: b.color, roughness: 0.2, clearcoat: 1 });
+    const t = [pool.t[0] + b.x * s, 0.1 * s - 0.2 * b.r, pool.t[2] + b.z * s];
+    place(engine, upload(engine, geometry.uvSphere(b.r, 48, 24), [m]), t);
+  }
+  const blobs = slime(engine, SLIME_BLOB_THICKNESS);
+  for (const b of SLIME_BLOBS) {
+    const mesh = upload(engine, geometry.uvSphere(b.r, 64, 32), [blobs]);
+    place(engine, mesh, [b.t[0], b.r * b.squash * 0.9, b.t[2]], yawQuat(0), [1, b.squash, 1]);
+  }
 }
 
 // Rounded-box basin walls around the tiles and a closed water slab filling it.
@@ -426,9 +485,14 @@ const VARIANTS = [
   },
   {
     id: 'slime',
-    description: `${BASIS}a glossy translucent green slime pool and blobs ${STAGE}; the `
-      + 'tiles and objects behind and under the slime are visible, refracted and tinted '
-      + 'green; bubbles inside; overlapping blobs composite in the right order',
+    description: `${BASIS}glossy, saturated translucent neon-green slime ${STAGE}: a `
+      + 'slime river across the front of the tiles with a pink and an orange round pad '
+      + 'standing in it, a white slime pool with two balls sunk half into its slime, and '
+      + 'slime blobs on the tiles (two overlapping on the right, one in front of the pool); '
+      + 'the tiles, pads and balls under and behind the slime are visible through it, '
+      + 'refracted (grout lines bend) and tinted green; small round bubbles inside the '
+      + 'slime; overlapping blobs and the pool seen through a blob composite in the right '
+      + 'order',
     references: ['ref-1', 'ref-3'],
     judge: true,
     settings: { set: 'slime' },

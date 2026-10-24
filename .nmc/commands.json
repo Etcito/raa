@@ -1,4 +1,4 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-ice", "command": "node scripts/lookdev-capture.mjs --milestone m11 --only 'm11-transmission--ice$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
+  {"name": "capture-slime", "command": "node scripts/lookdev-capture.mjs --milestone m11 --only 'm11-transmission--slime$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
 ]
