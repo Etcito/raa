@@ -175,13 +175,14 @@ function translate(desc, t) {
   return { ...desc, positions };
 }
 
-// raa.ice material of a block `depth` m thick; `blend` 'transmissive' or 'opaque'.
+// raa.ice material of a block `depth` m thick; `blend` 'transmissive' or 'opaque'. The opaque
+// block keeps transmission 0: a transmission > 0 needs blend transmissive (material.invalid).
 function ice(engine, depth, blend = 'transmissive') {
   return engine.addSurfaceMaterial({
     function: 'raa.ice',
     params: ICE,
     blend,
-    transmission: 1,
+    transmission: blend === 'transmissive' ? 1 : 0,
     ior: ICE_IOR,
     thickness: depth,
   });
