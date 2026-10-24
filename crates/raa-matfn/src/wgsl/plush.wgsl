@@ -3,7 +3,9 @@
 // added to `emissive` here: a Kajiya-Kay primary highlight and a secondary highlight
 // shifted toward the root and tinted by sheenColor, lit by the sun of FrameGpu and
 // shadowed by `raa_slot_shadow`. The strand direction is the geometric normal (shell fur
-// grows along it).
+// grows along it). A share of the fibre's lit colour is moved into emissive as strand
+// scattering (see material_main), so the instance tint (applied to base_color after
+// material_main) reaches only the remaining share.
 // `tipColor` should blend in with the shell height, which a material function cannot
 // see (the shell pass keeps it private and MaterialInput has no distance to the base
 // surface); it is approximated by the facing ratio (1 - n.v): grazing views look across
@@ -65,6 +67,26 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     let radiance = raa_frame.sun_color.rgb * shadow * wrap;
     let highlight = 0.1 * primary * vec3<f32>(1.0) + 0.1 * secondary * sheen_color;
-    o.emissive = o.emissive + highlight * radiance;
+
+    // Strand scattering: light scattered through the translucent fibres reaches the roots,
+    // so a fibre darkens much less toward its root than the shell pass's opaque-strand
+    // self-shadowing (x0.35 at the root) alone gives. `scatter` of the fibre's lit colour
+    // (direct + ambient through the installed slots) is carried in emissive, which the
+    // shell pass does not darken, and the base colour keeps the rest. Without it, strands
+    // about a pixel wide seen at different shell heights next to undarkened gaps read as
+    // per-pixel grain instead of a soft, velvety pile (judge, card 4801).
+    let scatter = 0.6;
+    var c: ShadeCtx;
+    c.position = in.position;
+    c.view_dir = v;
+    c.frag = in.frag_coord;
+    c.n_dot_v = max(dot(o.normal, v), 1e-4);
+    c.ao = raa_slot_ao(in.frag_coord);
+    c.shadow = shadow;
+    c.f0 = vec3<f32>(0.04);
+    let lit = raa_slot_direct(o, c, l, raa_frame.sun_color.rgb * shadow)
+        + raa_slot_ambient(o, c) * min(o.ao, c.ao);
+    o.emissive = o.emissive + highlight * radiance + scatter * lit;
+    o.base_color = o.base_color * (1.0 - scatter);
     return o;
 }

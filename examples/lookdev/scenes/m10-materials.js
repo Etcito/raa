@@ -131,8 +131,14 @@ const PENGUIN_T = { t: [0.35, 0, 0.1], yaw: -0.25 };
 // ref-1/ref-2's high-key look and the inflatables' low bloom (0.04 washes the set in blue
 // sky haze, card 4786) (card 4750).
 const PLUSH_SUN = { ...SUN, direction: [0.35, -0.7, -0.62], intensity: 7.5 };
-const PLUSH_EXPOSURE_EV = 0.2;
+// 0.2 -> 0.1: the strand scattering of raa.plush counts the sheen 1.6x and lifted the set
+// ~6 % in the preview (card 4801).
+const PLUSH_EXPOSURE_EV = 0.1;
 const PLUSH_BLOOM = { strength: 0.02, radius: 0.85 };
+// The plush sets stand on the inflatables' glossy clear-coated floor: the shared matte
+// floor (roughness 0.3, no coat) read as matte with no reflections or sheen, against the
+// description's glossy blue floor (judge, card 4801).
+const PLUSH_FLOOR = { color: FLOOR.day, roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.05 };
 
 // User material function (S11): an animated checker scrolling along u with time.
 // p0 rgb colour A, p1 rgb colour B (linear: user params are written raw), p2 = (cells
@@ -335,7 +341,8 @@ function buildPlush(engine, lib) {
   engine.setLight(PLUSH_SUN);
   engine.setToneMapping({ exposureEv: PLUSH_EXPOSURE_EV });
   engine.setBloom(PLUSH_BLOOM);
-  floor(engine, geometry, FLOOR.day, 0.3);
+  const { color, roughness, ...coat } = PLUSH_FLOOR;
+  floor(engine, geometry, color, roughness, coat);
   place(engine, upload(engine, objects.plushSphere(), [plush(engine, PLUSH_PINK, FUR.length)]), PLUSH_SPHERE_T);
   place(engine, penguin(engine, geometry), PENGUIN_T.t, yawQuat(PENGUIN_T.yaw));
 }
