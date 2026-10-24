@@ -87,3 +87,23 @@ test('mud sun lights the camera-facing side of the crowns', async () => {
   assert.ok(facing > 0.2, `sun lights the camera side: ${facing}`);
   assert.ok(toSun[1] > 0.5, `sun elevation: ${toSun[1]}`);
 });
+
+test('mud crowns are flared sheets, not spheres', async () => {
+  // Card 5070's judge read lathe tongues with droplet spheres as "blobby spheres": the crown
+  // is one sheet whose lobes flare outward from the pad wall as they rise.
+  for (const [i, pad] of mudSet.pads.entries()) {
+    const m = mudSet.crown(geometry, pad, i, 1);
+    const [, , r] = pad;
+    let flared = 0;
+    let top = -Infinity;
+    for (let k = 0; k < m.positions.length; k += 3) {
+      const y = m.positions[k + 1];
+      top = Math.max(top, y);
+      if (y > 0.18 && Math.hypot(m.positions[k], m.positions[k + 2]) > r + 0.1) flared++;
+    }
+    assert.ok(top > 0.25, `crown top ${top}`);
+    assert.ok(flared > 50, `flared lobe vertices: ${flared}`);
+    const lobes = Array.from({ length: mudSet.crownStyle.lobes }, (_, k) => mudSet.lobe(i, k));
+    assert.ok(lobes.length >= 7 && lobes.every((l) => l.h > 0.2));
+  }
+});

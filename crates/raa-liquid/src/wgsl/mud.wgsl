@@ -5,13 +5,13 @@
 // `p[6] = (bubbleScale m, bubbleRate pops/s per cell, 0, foamWidth m)` and
 // `p[7] = (foamAmount, detailStrength, detailScale, 0)`.
 //
-// The body is a soft wet dielectric (roughness 0.22 thin .. 0.38 deep) under a near-mirror
-// wet coat (0.55 x wetness, coat roughness 0.02..0.035): only the coat reflects sharply, so the
-// sky is a Fresnel sheen at grazing angles and the sun tight streaks along the swell, and
-// three slow directional ripples in the normal break those streaks up. A glossy body under
-// the coat doubled the blue sky reflection over the brown, which AgX shows as mauve (card
-// 4940: pit HDR about (0.22, 0.12, 0.14)); a rough body under a thin rough coat read matte
-// (card 5037) and a flat 3 m swell rubbery (card 5051). Depth cues: the deep mud is darker
+// The body is an opaque matte dielectric (roughness 0.5 thin .. 0.62 deep) under a thin
+// near-mirror wet coat (0.42 x wetness, coat roughness 0.03..0.05): only the coat reflects
+// sharply, so the sky is a Fresnel sheen at grazing angles and the sun tight streaks along
+// the swell, and three slow directional ripples in the normal break those streaks up. A
+// glossy body under the coat doubled the blue sky reflection over the brown, which AgX
+// shows as mauve or lilac (card 4940: pit HDR about (0.22, 0.12, 0.14); card 5070); a rough
+// coat read matte (card 5037) and a flat 3 m swell rubbery (card 5051). Depth cues: the deep mud is darker
 // and more saturated, the thin mud at the shore and the pads lighter. Slow voronoi bubbles on
 // the XZ plane grow a dome (a normal bump plus a glossy coat) and pop into an expanding ring.
 //
@@ -96,8 +96,8 @@ fn mud_bubble(xz: vec2<f32>, cell: vec3<f32>, d: f32, life: f32) -> MudBubble {
 }
 
 // Bubbles of the mud at `world_xz` (metres), `scale` metres per cell and `rate` pops per
-// second per cell. Only about a third of the cells carry a bubble: a dome on every cell
-// covered the whole surface in a lumpy carpet instead of scattered bubbles (card 4940).
+// second per cell. About half of the cells carry a bubble: a dome on every cell covered
+// the whole surface in a lumpy carpet (card 4940), a third read as too sparse (card 5070).
 fn mud_bubbles(world_xz: vec2<f32>, t: f32, scale: f32, rate: f32) -> MudBubble {
     var b: MudBubble;
     b.gradient = vec2<f32>(0.0);
@@ -105,7 +105,7 @@ fn mud_bubbles(world_xz: vec2<f32>, t: f32, scale: f32, rate: f32) -> MudBubble 
     let xz = world_xz / max(scale, 1e-3);
     let p = vec3<f32>(xz.x, 0.0, xz.y);
     let cell = mud_voronoi_cell(p);
-    let present = step(0.68, raa_hash3(cell + vec3<f32>(5.0, 41.0, 23.0)).x);
+    let present = step(0.5, raa_hash3(cell + vec3<f32>(5.0, 41.0, 23.0)).x);
     if (present < 0.5) {
         return b;
     }
@@ -215,16 +215,15 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let deep_color = color * 0.78;
     let thin_color = mud_saturate(color * 1.3, 0.9);
     o.base_color = mix(thin_color, deep_color, deep) * (0.94 + 0.08 * patches);
-    // A soft wet body under a near-mirror wet coat: only the coat reflects sharply, so its
-    // Fresnel gives the sky sheen at grazing angles and tight sun streaks along the swell
-    // while the brown stays brown face-on (a glossy body under the coat doubled the sky
-    // reflection and turned the pit mauve). The thin wet edge is the glossiest (a meniscus
-    // line against the bank and the pads).
-    o.roughness = mix(0.22, 0.38, deep);
-    // The coat at 0.55 of the wetness: a full-strength coat mirrored the sky over half the
-    // pit at the grazing capture angle (a pale pink sheet, card 5056); the sun streaks stay.
-    o.clearcoat = 0.55 * clamp(wetness, 0.0, 1.0);
-    o.clearcoat_roughness = mix(0.02, 0.035, deep);
+    // An opaque matte body under a thin wet coat: the body itself is rough (its own
+    // dielectric reflection is a dull blur), so the only sharp reflection is the coat's,
+    // whose Fresnel keeps the sky to a faint sheen at grazing angles and the sun to tight
+    // streaks along the swell. A glossy body (roughness 0.22..0.38) under a 0.55 coat
+    // mirrored the blue sky over the whole pit at the capture angle and the brown read
+    // lilac (card 5070 capture: pit sRGB about (127, 66, 62), blue as high as green).
+    o.roughness = mix(0.5, 0.62, deep);
+    o.clearcoat = 0.42 * clamp(wetness, 0.0, 1.0);
+    o.clearcoat_roughness = mix(0.03, 0.05, deep);
 
     o.normal = liquid_detail_normal(
         o.normal,
