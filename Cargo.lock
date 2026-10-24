@@ -912,6 +912,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-particles"
+version = "0.1.0"
+dependencies = [
+ "raa-brdf",
+ "raa-core",
+ "raa-lit",
+ "raa-math",
+ "raa-pipeline",
+ "raa-shader",
+ "raa-transmission",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-pipeline"
 version = "0.1.0"
 dependencies = [

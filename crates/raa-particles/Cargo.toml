@@ -1,0 +1,19 @@
+[package]
+name = "raa-particles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "GPU particles: emitter descriptions and per-kind defaults for the lit renderer."
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+wgpu = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-lit = { path = "../raa-lit" }
+raa-shader = { path = "../raa-shader" }
+
+[dev-dependencies]
+raa-brdf = { path = "../raa-brdf" }
+raa-transmission = { path = "../raa-transmission" }
