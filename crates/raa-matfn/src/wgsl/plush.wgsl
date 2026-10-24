@@ -51,17 +51,20 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.sheen_roughness = sheen_roughness;
 
     // Strand highlights: the primary is white (light colour), the secondary, broader and
-    // shifted toward the root, carries the fibre colour through sheenColor.
+    // shifted toward the root, carries the fibre colour through sheenColor. The secondary
+    // was tinted by sheenColor x base colour, which left nothing visible on dark fur (blue
+    // base ~0.2 linear); sheenColor alone gives the light-coloured sheen on the lit flanks
+    // of the plush references.
     let l = -normalize(raa_frame.sun_dir.xyz);
     let h = normalize(l + v);
     let exponent = plush_exponent(sheen_roughness);
     let primary = plush_strand_highlight(t, h, 0.08, exponent);
-    let secondary = plush_strand_highlight(t, h, -0.12, exponent * 0.5);
+    let secondary = plush_strand_highlight(t, h, -0.12, exponent * 0.35);
     // Strands on the unlit side stay dark; a little wrap keeps the terminator soft.
     let wrap = clamp((dot(t, l) + 0.25) / 1.25, 0.0, 1.0);
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     let radiance = raa_frame.sun_color.rgb * shadow * wrap;
-    let highlight = 0.12 * primary * vec3<f32>(1.0) + 0.2 * secondary * sheen_color * o.base_color;
+    let highlight = 0.1 * primary * vec3<f32>(1.0) + 0.1 * secondary * sheen_color;
     o.emissive = o.emissive + highlight * radiance;
     return o;
 }

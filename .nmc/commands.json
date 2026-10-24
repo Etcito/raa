@@ -1,4 +1,4 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-inflatables", "command": "node scripts/lookdev-capture.mjs --only '^m10-materials--(inflatables|clearcoat-on|clearcoat-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
+  {"name": "capture-plush", "command": "node scripts/lookdev-capture.mjs --only '^m10-materials--(plush|fur-on|fur-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]}
 ]

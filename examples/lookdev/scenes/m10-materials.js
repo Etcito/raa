@@ -35,7 +35,8 @@ const CAMERAS = {
   // Close on the pink ball with the hammer head behind it, where the coat glint shows.
   clearcoat: [[-0.3, 0.62, 0.1], 1.75, 0.3, 0.1],
   neon: [[0, 0.55, 0], 3.6, 0, 0.12],
-  plush: [[-0.1, 0.36, 0], 2.1, 0.1, 0.15],
+  // Closer than the first capture, so the fur fills more pixels (card 4750).
+  plush: [[-0.05, 0.38, 0], 1.75, 0.1, 0.13],
   // Close three-quarter view of the penguin: its fuzzy outline against the sky.
   fur: [[0.35, 0.42, 0.1], 1.4, 0.55, 0.06],
   'user-fn': [[0, 0.38, 0], 2.4, 0, 0.3],
@@ -95,11 +96,19 @@ const TUBE_R = 0.025;
 
 // Plush palette (sRGB): ref-1/ref-2's deep blue penguin fur, white belly, orange beak and
 // feet; the plush ball is pastel pink. Fur: length m, strands per cm2, droop.
-const PLUSH_BLUE = [0.08, 0.17, 0.75];
+// Blue sampled from ref-1's penguin back (sRGB about 0.04..0.12, 0.24..0.29, 0.58..0.67):
+// a royal blue with some green. [0.08, 0.17, 0.75] read violet under the sky, and the sky
+// fill lifts the colour by ~1.4x, so the base is darker than the sampled one (card 4750).
+const PLUSH_BLUE = [0, 0.14, 0.5];
 const PLUSH_WHITE = [0.97, 0.96, 0.94];
 const PLUSH_ORANGE = [1, 0.55, 0.08];
 const PLUSH_PINK = [0.98, 0.62, 0.78];
-const FUR = { length: 0.016, short: 0.005, density: 1200, droop: 0.15 };
+// Density sets the strand cell (1 / sqrt(density)): at 1200 per cm2 a cell was 0.3 mm,
+// about 0.1 px at the capture cameras (a pixel is ~3 mm at 2 m with the 60 deg lens), so
+// every shell had the same ~0.5 coverage and the fur read as grey grain with a hard
+// offset outline. At 12 per cm2 a cell is ~2.9 mm (about a pixel): the strands taper
+// through the shells and the outline breaks into single tips (card 4750).
+const FUR = { length: 0.022, short: 0.006, density: 12, droop: 0.2 };
 // Penguin parts (ellipsoids): radii m, centre m (standing on y 0, facing +Z), roll rad
 // about Z, colour, fur length; the eyes are glossy black spheres.
 const PENGUIN = [
@@ -116,6 +125,14 @@ const EYES = [[-0.075, 0.71, 0.19], [0.075, 0.71, 0.19]];
 const EYE_R = 0.026;
 const PLUSH_SPHERE_T = [-0.6, 0, -0.15];
 const PENGUIN_T = { t: [0.35, 0, 0.1], yaw: -0.25 };
+// Plush sets: the sun to the camera's front left, 45 deg high, so the visible fur is lit
+// with a soft terminator and the strand highlights sit on the lit flanks (the shared sun
+// stood behind the set and left the fronts in sky fill); a little brighter exposure for
+// ref-1/ref-2's high-key look and the inflatables' low bloom (0.04 washes the set in blue
+// sky haze, card 4786) (card 4750).
+const PLUSH_SUN = { ...SUN, direction: [0.35, -0.7, -0.62], intensity: 7.5 };
+const PLUSH_EXPOSURE_EV = 0.2;
+const PLUSH_BLOOM = { strength: 0.02, radius: 0.85 };
 
 // User material function (S11): an animated checker scrolling along u with time.
 // p0 rgb colour A, p1 rgb colour B (linear: user params are written raw), p2 = (cells
@@ -289,8 +306,9 @@ function plush(engine, color, length) {
     function: 'raa.plush',
     params: {
       color,
-      tipColor: lighten(color, 0.3),
-      sheenColor: lighten(color, 0.6),
+      // Light tips and sheen desaturated the blue to lavender at 0.3 / 0.6 (card 4750).
+      tipColor: lighten(color, 0.1),
+      sheenColor: lighten(color, 0.35),
       furLength: length,
       furDensity: FUR.density,
     },
@@ -314,6 +332,9 @@ function penguin(engine, geometry) {
 function buildPlush(engine, lib) {
   const { geometry, objects } = lib;
   daylight(engine);
+  engine.setLight(PLUSH_SUN);
+  engine.setToneMapping({ exposureEv: PLUSH_EXPOSURE_EV });
+  engine.setBloom(PLUSH_BLOOM);
   floor(engine, geometry, FLOOR.day, 0.3);
   place(engine, upload(engine, objects.plushSphere(), [plush(engine, PLUSH_PINK, FUR.length)]), PLUSH_SPHERE_T);
   place(engine, penguin(engine, geometry), PENGUIN_T.t, yawQuat(PENGUIN_T.yaw));
