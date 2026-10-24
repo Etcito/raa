@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "mud-snow-tiles",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:40:15.866Z",
+  "capturedAt": "2026-10-24T04:32:45.839Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,11 +30,11 @@
   ],
   "instances": 3,
   "triangles": 4704,
-  "firstFrameMs": 41048.40000000596,
+  "firstFrameMs": 91566.09999999404,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--mud-snow-tiles.png",
   "captureSha256": "a26d2db8443358fd59d1b45f62b52ce3feabf0c59f9918e49d4c58b34b587ab0",

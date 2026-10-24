@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "fur-off",
   "milestone": "m10",
-  "capturedAt": "2026-10-24T01:03:03.457Z",
+  "capturedAt": "2026-10-24T04:32:38.291Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -29,11 +29,11 @@
   ],
   "instances": 12,
   "triangles": 26156,
-  "firstFrameMs": 24749.59999999404,
+  "firstFrameMs": 84254.29999999702,
   "wasm": {
-    "raw": 1661526,
-    "gzip": 592508,
-    "sha256": "824d42a3143836f4e8fd78e37547cb10efdb3a53a00675a7f88ffd8704546177"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--fur-off.png",
   "captureSha256": "ebd69bd17c5c1e0d219854ac27ddafad72515cf7c5c4065c4bfc028cd5cf775f",

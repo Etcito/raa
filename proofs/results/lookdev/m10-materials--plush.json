@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "plush",
   "milestone": "m10",
-  "capturedAt": "2026-10-24T01:02:43.631Z",
+  "capturedAt": "2026-10-24T04:32:16.325Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,11 +30,11 @@
   ],
   "instances": 12,
   "triangles": 26156,
-  "firstFrameMs": 4685.899999991059,
+  "firstFrameMs": 61910.39999999106,
   "wasm": {
-    "raw": 1661526,
-    "gzip": 592508,
-    "sha256": "824d42a3143836f4e8fd78e37547cb10efdb3a53a00675a7f88ffd8704546177"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--plush.png",
   "captureSha256": "3a4656096b69be0bf1b33c525faef3280e992515d945136a222186e96f963af4",
@@ -47,7 +47,7 @@
     "minScore": 6,
     "exit": 0,
     "score": null,
-    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m10-materials--plush.png by claude-haiku-5-5\nexpected: Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a pastel pink plush ball and a plush penguin-like toy (deep blue furry body and head, white furry belly patch, small orange beak and feet, blue flippers, two black eyes) standing on a glossy blue floor under a bright blue sky with white clouds; soft fur with sheen and a fuzzy silhouette like the plush penguins of the references: short dense strands, a soft velvety sheen toward the edges and a fuzzy, not hard, outline (R10).\nseen: The capture shows all listed elements: a pink plush ball and a blue plush penguin with white belly, orange beak and feet, blue flippers and two eyes on a blue floor under a blue sky with clouds, and the fur has a fuzzy edge. It falls short of the references in finish: the fur sheen and glossy highlights are weaker, the floor reads as mostly matte rather than glossy, and the overall polish is well below the reference illustrations.",
-    "at": "2026-10-24T01:02:55.166Z"
+    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m10-materials--plush.png by claude-haiku-5-5 (median of [5.0, 6.0, 7.0])\nexpected: Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: a pastel pink plush ball and a plush penguin-like toy (deep blue furry body and head, white furry belly patch, small orange beak and feet, blue flippers, two black eyes) standing on a glossy blue floor under a bright blue sky with white clouds; soft fur with sheen and a fuzzy silhouette like the plush penguins of the references: short dense strands, a soft velvety sheen toward the edges and a fuzzy, not hard, outline (R10).\nseen: The capture shows the pink plush ball, the blue penguin with white belly patch, orange beak and feet, blue flippers, two black eyes, a glossy blue floor and a blue sky with white clouds. The fur has a fuzzy silhouette and a soft sheen, but the shading is flatter and less saturated than the references, and the floor gloss and fur subsurface look much cruder.",
+    "at": "2026-10-24T04:32:30.340Z"
   }
 }

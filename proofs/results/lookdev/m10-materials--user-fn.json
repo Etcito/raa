@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "user-fn",
   "milestone": "m10",
-  "capturedAt": "2026-10-23T23:40:11.075Z",
+  "capturedAt": "2026-10-24T04:32:41.649Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,11 +30,11 @@
   ],
   "instances": 3,
   "triangles": 5048,
-  "firstFrameMs": 36508.20000000298,
+  "firstFrameMs": 87233.5,
   "wasm": {
-    "raw": 1653974,
-    "gzip": 589743,
-    "sha256": "cf76760bbba7128061c327f005ccc1e80a8f1ff1caa8bf58a577d426a48df272"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--user-fn.png",
   "captureSha256": "958dd4b1c8e715535b818e0aee2e583042aedd90a15a841372b9a86acd7177b9",

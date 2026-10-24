@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "bloom-off",
   "milestone": "m10",
-  "capturedAt": "2026-10-24T04:22:33.564Z",
+  "capturedAt": "2026-10-24T04:32:11.915Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -29,7 +29,7 @@
   ],
   "instances": 6,
   "triangles": 19788,
-  "firstFrameMs": 38138.80000001192,
+  "firstFrameMs": 57619.79999999702,
   "wasm": {
     "raw": 1663318,
     "gzip": 593121,

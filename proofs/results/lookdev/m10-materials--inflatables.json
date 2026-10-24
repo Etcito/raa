@@ -2,7 +2,7 @@
   "scene": "m10-materials",
   "variant": "inflatables",
   "milestone": "m10",
-  "capturedAt": "2026-10-24T00:21:37.416Z",
+  "capturedAt": "2026-10-24T04:31:17.267Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -30,11 +30,11 @@
   ],
   "instances": 9,
   "triangles": 34972,
-  "firstFrameMs": 2664.5,
+  "firstFrameMs": 2895.8999999910593,
   "wasm": {
-    "raw": 1658582,
-    "gzip": 591396,
-    "sha256": "1c67a4de9f028e6eaa0df0a626f094c00768de4c466b3d2c0a19953659e0d667"
+    "raw": 1663318,
+    "gzip": 593121,
+    "sha256": "3ebde79958530ae04c86b432a0751f61187ee5815625a8d3839c90a61fd0d62b"
   },
   "capture": "proofs/captures/lookdev/m10-materials--inflatables.png",
   "captureSha256": "0c7a1276695201d78ea7eaa775261d3fdc32fa5cb45cc122fca5f09f74fd0c2f",
@@ -46,7 +46,7 @@
     "minScore": 6,
     "exit": 0,
     "score": null,
-    "output": "JUDGE PASS: 6.0/10 (minimum 6.0) on proofs/captures/lookdev/m10-materials--inflatables.png by claude-haiku-5-5\nexpected: Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: an upright inflatable toy hammer (red and yellow pillowed panels, blue end caps, striped handle), shiny inflatable balls (pink with white gores, white with pink candy stripes, yellow with blue gores, a small yellow and blue candy-striped ball) and two inflated bumper rings (one blue with yellow panels, one yellow with pink panels) lying on a glossy azure blue floor under a bright blue sky with white clouds; glossy inflatable plastic with a crisp clear-coat highlight over a coloured base, inflated seams (soft pillowed bulges between the seams); sky reflections on the curved plastic.\nseen: All described objects are present and readable: the upright hammer, the pink, white, yellow and small candy-striped balls, and both bumper rings on a glossy azure floor under a blue sky with clouds. The glossy clear-coat highlights and contact shadows are convincing, but the look is flatter and less polished than the reference, with weak sky reflections on the curved plastic and no bloom or soft lighting.",
-    "at": "2026-10-24T00:21:45.692Z"
+    "output": "JUDGE PASS: 7.0/10 (minimum 6.0) on proofs/captures/lookdev/m10-materials--inflatables.png by claude-haiku-5-5 (median of [6.0, 7.0, 7.0])\nexpected: Engine lookdev capture of the materials milestone. Score two things: that the capture shows what this description lists, and that the MATERIALS (surface look, gloss, highlights, glow) match the reference. The reference is a finished illustration and is NOT the target for the scene: the sparse arrangement of a few simple procedural objects, the absence of characters, buildings, transparency, liquids, particles, depth of field, fog and other post effects are expected at this milestone and must not lower the score. Shows: an upright inflatable toy hammer (red and yellow pillowed panels, blue end caps, striped handle), shiny inflatable balls (pink with white gores, white with pink candy stripes, yellow with blue gores, a small yellow and blue candy-striped ball) and two inflated bumper rings (one blue with yellow panels, one yellow with pink panels) lying on a glossy azure blue floor under a bright blue sky with white clouds; glossy inflatable plastic with a crisp clear-coat highlight over a coloured base, inflated seams (soft pillowed bulges between the seams); sky reflections on the curved plastic.\nseen: All listed elements are present and readable: upright striped-handle hammer, four glossy balls with the described colourways, and both bumper rings on a glossy azure floor under a blue sky with white clouds. The plastic shows crisp clear-coat highlights, sky reflections on the floor and curved surfaces, and pillowed gores, though the look is simpler than the reference (less subsurface softness and glow).",
+    "at": "2026-10-24T04:31:29.749Z"
   }
 }
