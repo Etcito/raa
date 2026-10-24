@@ -108,17 +108,20 @@ const SLIME_PADS = [
 // Mud: one slow, long, low swell. The shorter waves are only a faint ripple: card 5072's
 // 0.055 / 0.032 m waves at 1.1 / 0.65 m (steepness 0.65 / 0.55), with the brown froth and
 // dense bubbles over them, read as "a bumpy lumpy surface" with no swell. `color` is sRGB,
-// converted to linear by the material table: a dark milk chocolate, darker and less red
-// than card 5072's (0.44, 0.26, 0.16), which the judge saw as light red-brown clay; the
-// blue stays at about a third of the red so AgX punchy does not push it to orange-rust
-// (card 5056).
+// converted to linear by the material table: a warm milk chocolate as bright as ref-3's
+// mud (its lit mud samples about sRGB (185, 92, 44) .. (110, 71, 40)). The dark (0.36,
+// 0.2, 0.12) of cards 5072..5077 rendered maroon (95, 35, 32) and, where the wet coat
+// mirrors the sky, purple (100, 71, 100): its diffuse was so dim that the blue sky
+// reflection carried most of the blue channel. A brighter body with almost no blue keeps
+// the same reflection a sheen over brown. The shader shades the swell by height (light
+// crests, dark troughs) so the slow waves read as bands at capture distance.
 const MUD = {
-  wave0: [0.08, 3.4, 0.3, 0.5],
-  wave1: [0.05, 2.2, 1.4, 0.45],
+  wave0: [0.1, 3.4, 0.3, 0.55],
+  wave1: [0.06, 2.2, 1.4, 0.5],
   wave2: [0.015, 1.3, -0.7, 0.3],
   wave3: [0.006, 0.8, 2.4, 0.2],
   speeds: [0.23, 0.185, 0.142, 0.112],
-  color: [0.36, 0.2, 0.12],
+  color: [0.55, 0.32, 0.15],
   wetness: 1,
   bubbleScale: 0.3,
   bubbleRate: 0.4,
@@ -146,12 +149,14 @@ const MUD_LIGHT = {
   env: { diffuse: 0.45, specular: 0.5 },
 };
 // Ground height of the mud pit (the mud surface is y = 0): the bed 0.3 m down, rising
-// through the surface about r = 2.7 m into a grassy bank whose rounded ridge (about 0.4 m
-// above the mud at r = 3.3 m) rings the pit before the meadow settles at 0.25 m. Card
-// 5072's judge saw the flat surround as "a flat plain plane rather than a grassy bank".
+// through the surface about r = 2.6 m into a grassy bank whose rounded ridge (0.7 m above
+// the mud at r = 3.6 m) rings the pit before the meadow settles at 0.25 m. Card 5072's
+// judge saw the flat surround as "a flat plain plane rather than a grassy bank".
+// The 0.14 m ridge of card 5072 read as "a flat field rather than a bank" (card 5077
+// judge): the bank now rises 0.45 m above the meadow in a broad rounded mound at 3.6 m.
 function mudGround(x, z) {
   const r = Math.hypot(x, z * 1.1);
-  const ridge = 0.14 * Math.exp(-(((r - 3.3) / 0.45) ** 2));
+  const ridge = 0.45 * Math.exp(-(((r - 3.6) / 0.55) ** 2));
   return -0.3 + 0.55 * Math.min(1, Math.max(0, (r - 2.1) / 1.2)) + ridge;
 }
 // Grass of the bank (user material function, the bank's vertex colour is its colour):
@@ -191,6 +196,7 @@ const MUD_PADS = [
 ];
 const PAD_SINK = 0.06; // m below the local mud line
 const PAD_RIM = 0.07; // m radius of the rounded rim
+const PAD_RECESS = 0.03; // m the top sits below the crown of the rim tube
 const PAD_KEEL = 0.12; // m the pad's underside reaches below its base
 const MUD_PAD = { color: [0.55, 0.88, 0.16], roughness: 0.12, clearcoat: 1, clearcoatRoughness: 0.03 };
 // Wet band at the pads' bases: vertex colour multiplier at the mud line and its height m.
@@ -204,7 +210,7 @@ const MUD_PAD_WET = { tint: [0.42, 0.36, 0.24], height: 0.09 };
 // spheres as blobby spheres (cards 4942, 5056, 5070 judge).
 const MUD_CROWN = {
   // Milk chocolate like the pit (MUD.color) and a little darker; sRGB.
-  color: [0.38, 0.22, 0.13],
+  color: [0.52, 0.3, 0.14],
   roughness: 0.18,
   clearcoat: 0.6,
   clearcoatRoughness: 0.04,
@@ -232,16 +238,20 @@ const MUD_CROWN = {
 // flight, arcing out of the tip of every crown lobe (mudSprayArcs, a mesh: the particle
 // discs alone read as scattered white grains, card 5072). Per lobe `count` drops on
 // ballistic arcs at `times` s after leaving the lip, launched at `speed` m/s.
+// Card 5077's judge saw 9..16 mm drops stretched 3.2x as "sparse blue shards": a mirror
+// coat on such thin needles shows mostly the blue sky. The drops are now larger, rounder
+// beads with a soft white glow (linear emissive), so their shaded side stays white.
 const MUD_DROPS = {
-  color: [0.95, 0.96, 1],
-  roughness: 0.1,
-  clearcoat: 1,
-  clearcoatRoughness: 0.02,
-  count: 5,
-  times: [0.05, 0.11, 0.17, 0.24, 0.31],
+  color: [1, 1, 1],
+  roughness: 0.35,
+  clearcoat: 0.4,
+  clearcoatRoughness: 0.1,
+  emissive: [0.55, 0.55, 0.55],
+  count: 6,
+  times: [0.04, 0.09, 0.14, 0.2, 0.26, 0.33],
   speed: [1.3, 2.0],
-  radius: [0.009, 0.016], // m
-  stretch: 3.2, // length over width along the flight
+  radius: [0.016, 0.03], // m
+  stretch: 2, // length over width along the flight
 };
 // A faint mist of fine particle spray at the lobe tips over the droplet arcs: opaque
 // near-white lit droplets (a clear droplet at opacity 0 reads as dark grey flecks).
@@ -251,12 +261,12 @@ const MUD_SPRAY = {
   rate: 50,
   lifetime: [0.1, 0.22],
   speed: [0.6, 1.2],
-  size: [0.005, 0.012],
+  size: [0.012, 0.024],
   drag: 0.3,
   colors: [[0.95, 0.97, 1], [1, 1, 1]],
-  opacity: 0.85,
+  opacity: 0.95,
   volume: [0.03, 0.01, 0.03],
-  maxParticles: 24,
+  maxParticles: 30,
 };
 // Rocks: [x, z, radius, squash in y, y centre]
 const ROCKS = [
@@ -722,7 +732,10 @@ function bankWarp(v) {
 }
 
 // Lathe profile of a pad: a low inflatable disc (height h above its base, radius r) with
-// a slightly bulging wall, a rounded PAD_RIM shoulder and a gently domed top.
+// a slightly bulging wall and a raised inflatable tube rim (ref-3's pads): the rounded
+// PAD_RIM shoulder runs over the top of the tube and down its inner side into a top
+// PAD_RECESS lower, so the rim catches its own highlight ring. A disc with only a rounded
+// shoulder read as a flat lime disc with no bevel (card 5077).
 function mudPadProfile(r, h) {
   const rr = Math.min(PAD_RIM, 0.45 * h);
   const wallTop = h - rr;
@@ -731,11 +744,18 @@ function mudPadProfile(r, h) {
   // The wall is split every 2 cm so the wet band follows the swell.
   for (let y = 0; y < wallTop; y += 0.02) profile.push([r + 0.015 * Math.sin((Math.PI * y) / wallTop), y]);
   profile.push([r, wallTop]);
+  // Outer quarter of the tube up to its crown at h, then its inner side down to the top.
   for (let k = 1; k <= 8; k++) {
     const a = (k / 8) * (Math.PI / 2);
     profile.push([r - rr + rr * Math.cos(a), wallTop + rr * Math.sin(a)]);
   }
-  profile.push([0.5 * (r - rr), h + 0.008], [0, h + 0.012]);
+  const inner = 0.6 * rr;
+  for (let k = 1; k <= 6; k++) {
+    const a = Math.PI / 2 + (k / 6) * (Math.PI / 2);
+    profile.push([r - rr + inner * Math.cos(a), h - PAD_RECESS + PAD_RECESS * Math.sin(a)]);
+  }
+  const rin = r - rr - inner;
+  profile.push([0.5 * rin, h - PAD_RECESS + 0.006], [0, h - PAD_RECESS + 0.008]);
   return profile;
 }
 
@@ -797,7 +817,7 @@ function buildMud(engine, lib, settings, variant) {
   const grass = [0.2, 0.46, 0.035];
   // A wet-mud brown stain in a narrow band: the old near-black stain over 0.12 m of rise
   // read as a dirty dark halo around the pit (card 4942).
-  const stain = [0.16, 0.08, 0.03];
+  const stain = [0.22, 0.11, 0.04];
   const rim = heightfield(geometry, 8, 8, 96, mudGround, (x, z, y) => {
     const g = Math.min(1, Math.max(0, (y - 0.01) / 0.06));
     return [0, 1, 2].map((i) => stain[i] + (grass[i] - stain[i]) * g).concat(1);
@@ -815,6 +835,7 @@ function buildMud(engine, lib, settings, variant) {
     roughness: MUD_DROPS.roughness,
     clearcoat: MUD_DROPS.clearcoat,
     clearcoatRoughness: MUD_DROPS.clearcoatRoughness,
+    emissive: MUD_DROPS.emissive,
   });
   MUD_PADS.forEach(([x, z, r, h], i) => {
     const pose = mudPadPose([x, z, r], t);
@@ -1075,8 +1096,9 @@ const VARIANTS = [
       + 'popping bubbles, a band of white froth along its shore and around the pads, and '
       + 'crowns of tall glossy chocolate mud splash sheets with thin white spray droplets '
       + 'arcing from their tips around every pad; low, wide, round glossy lime-green '
-      + 'inflatable disc pads float in the mud, and a grassy lime-green bank rises around '
-      + 'the pit',
+      + 'inflatable disc pads with a raised rounded rim float in the mud, and a grassy '
+      + 'lime-green bank rises around the pit. Mud is opaque, so it shows no refraction of '
+      + 'what lies below; its swell reads as light crests and darker troughs',
     references: ['ref-3'],
     judge: true,
     settings: { set: 'mud' },

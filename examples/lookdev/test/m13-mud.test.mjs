@@ -151,8 +151,10 @@ test('mud surface is one low swell with a narrow white froth band', () => {
   }
   assert.ok(M.foamWidth <= 0.12 && M.foamAmount <= 0.3, 'froth band narrow');
   assert.ok(M.detailStrength <= 0.03);
-  // Dark chocolate (sRGB): darker than 0.4 red, blue at least a quarter of red.
-  assert.ok(M.color[0] < 0.4 && M.color[2] / M.color[0] > 0.25 && M.color[1] < M.color[0]);
+  // Warm milk chocolate (sRGB) as bright as ref-3's mud: the dark (0.36, 0.2, 0.12)
+  // rendered maroon and purple under the sky reflection (card 5077).
+  assert.ok(M.color[0] >= 0.45 && M.color[0] <= 0.65, `red ${M.color[0]}`);
+  assert.ok(M.color[1] / M.color[0] >= 0.5 && M.color[2] / M.color[0] <= 0.35, `hue ${M.color}`);
 });
 
 test('mud crowns are large and spray is thin droplets arcing from the lobe tips', () => {
@@ -192,4 +194,29 @@ test('mud bank is a grass material over a ridge around the pit', async () => {
   assert.ok(rec.materials.some((m) => m.function === 'demo.grass'));
   const ridge = mudSet.ground(3.3, 0);
   assert.ok(ridge > mudSet.ground(6, 0) + 0.08 && ridge > 0.3, `ridge ${ridge}`);
+});
+
+test('mud spray drops are white glowing beads, not thin needles', () => {
+  const D = mudSet.drops;
+  assert.ok(D.stretch <= 2.5, `stretch ${D.stretch}`);
+  assert.ok(D.radius[0] >= 0.015, `radius ${D.radius}`);
+  assert.ok(Math.min(...D.color) > 0.9 && Math.min(...D.emissive) > 0.3);
+});
+
+test('mud bank rises in a rounded mound well above the meadow', () => {
+  assert.ok(mudSet.ground(3.6, 0) - mudSet.ground(8, 0) > 0.35, 'mound height');
+  for (const [x, z, r] of mudSet.pads) {
+    // The pads and their crowns stay inside the pit, clear of the bank.
+    const a = Math.atan2(z, x);
+    assert.ok(mudSet.ground(x + r * Math.cos(a), z + r * Math.sin(a)) < -0.05, `pad ${x}, ${z} on the bank`);
+  }
+});
+
+test('mud pads have a raised rim tube around a recessed top', () => {
+  for (const [, , r, h] of mudSet.pads) {
+    const prof = mudSet.padProfile(r, h);
+    const centre = prof.at(-1)[1];
+    const crown = Math.max(...prof.map(([, y]) => y));
+    assert.ok(crown - centre > 0.015, `rim stands ${crown - centre} m above the top`);
+  }
 });

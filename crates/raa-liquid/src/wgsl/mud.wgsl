@@ -134,7 +134,7 @@ fn mud_ripples(world_pos: vec3<f32>, t: f32) -> vec2<f32> {
     let d0 = vec2<f32>(0.94, 0.34);
     let k0 = LIQUID_TAU / 1.4;
     let m0 = 0.5 + 0.5 * raa_noise3(vec3<f32>(xz * 0.5, 0.05 * t));
-    let s0 = 0.05 * m0 * cos(k0 * (dot(d0, xz) - 0.12 * t));
+    let s0 = 0.09 * m0 * cos(k0 * (dot(d0, xz) - 0.12 * t));
     return d0 * s0;
 }
 
@@ -205,9 +205,14 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let patches = raa_noise3(in.position * 0.7 + vec3<f32>(0.0, 0.0, 0.15 * in.time));
     // No saturation boost: AgX punchy already saturates, and a boosted deep colour read as
     // orange-rust instead of chocolate (card 5056).
-    let deep_color = color * 0.7;
-    let thin_color = mud_saturate(color * 1.3, 0.9);
-    o.base_color = mix(thin_color, deep_color, deep) * (0.94 + 0.08 * patches);
+    let deep_color = color * 0.8;
+    let thin_color = mud_saturate(color * 1.2, 0.9);
+    // Swell shading: the crests of the slow swell are lighter and the troughs darker (the
+    // displaced local height, about +-0.15 m), so the swell reads as broad bands. Lit by
+    // the sun alone, a gentle swell under an opaque body showed no relief (card 5077 judge:
+    // "nearly flat with no visible swell").
+    let swell = smoothstep(-0.15, 0.15, in.local_position.y);
+    o.base_color = mix(thin_color, deep_color, deep) * (0.94 + 0.08 * patches) * mix(0.68, 1.22, swell);
     // An opaque body under a mirror-sharp wet coat. The body is semi-glossy (0.3..0.36):
     // its dielectric lobe adds a soft sheen, while the coat gives the crisp sky reflection
     // and sun streaks along the swell. A rough body (0.5..0.62) under a 0.42 coat read as
@@ -236,7 +241,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.roughness = mix(o.roughness, 0.15, gloss);
     o.clearcoat = mix(o.clearcoat, 0.8, gloss);
     o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.015, gloss);
-    o.base_color = mix(o.base_color, color * 1.6, 0.55 * gloss);
+    o.base_color = mix(o.base_color, color * 1.25, 0.55 * gloss);
 
     // Froth: a narrow band of white foam along the shore line and in a ring around each pad
     // (where the mud is shallower than foamWidth), plus a little on the steepest crests.
@@ -249,7 +254,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let foam = smoothstep(0.0, 0.35, froth.z + 0.35 - (1.0 - mask)) * smoothstep(0.0, 0.25, mask);
     // White to cream bubbles, a faint mud tint in the gaps between them.
     let froth_white = vec3<f32>(0.86, 0.84, 0.8);
-    let froth_gap = mix(froth_white, color * 1.6, 0.45);
+    let froth_gap = mix(froth_white, color * 1.2, 0.45);
     let froth_color = mix(froth_gap, froth_white, smoothstep(0.2, 0.8, froth.z));
     o.base_color = mix(o.base_color, froth_color, foam);
     o.normal = raa_perturb_normal(
