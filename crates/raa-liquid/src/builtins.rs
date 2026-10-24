@@ -1,9 +1,12 @@
-//! The liquid built-in material functions: `raa.liquid.water` and `raa.liquid.slime`.
+//! The liquid built-in material functions: `raa.liquid.water`, `raa.liquid.slime` and
+//! `raa.liquid.mud`.
 //!
-//! Both rows carry `FLAG_VERTEX_FN | FLAG_TRANSMISSIVE` and class [`DrawClass::Transparent`]:
-//! the Gerstner `material_vertex` displaces the flat XZ grid, the fragment stage refracts and
-//! absorbs through the `Transmission` slot, and a desc with blend 'transmissive' draws them
-//! through OIT (the scene contract's Transmissive class).
+//! Water and slime carry `FLAG_VERTEX_FN | FLAG_TRANSMISSIVE` and class
+//! [`DrawClass::Transparent`]: the Gerstner `material_vertex` displaces the flat XZ grid, the
+//! fragment stage refracts and absorbs through the `Transmission` slot, and a desc with blend
+//! 'transmissive' draws them through OIT (the scene contract's Transmissive class). Mud
+//! carries `FLAG_VERTEX_FN` and class [`DrawClass::Opaque`]: it is an opaque wet surface with
+//! a clear coat and slow popping bubbles, drawn before the frame's opaque copy.
 //!
 //! Every row's WGSL is the shared vertex stage, the shared fragment helpers and its own
 //! `material_main`, concatenated in that order.
@@ -11,7 +14,8 @@
 //! The wave packing is the one of `src/waves.rs`: `p[0..4]` is wave `i` as
 //! `(amplitude m, wavelength m, direction angle rad, steepness)`, `p[4]` the four speeds in
 //! m/s. The water speeds are the deep-water dispersion `sqrt(9.81 L / 2 pi)`; the slime
-//! scales the amplitudes by 0.4 and the speeds by 0.25 of the water defaults.
+//! scales the amplitudes by 0.4 and the speeds by 0.25 of the water defaults; the mud keeps
+//! the water layout at 0.25x amplitude and 0.08x speed (a slow viscous swell).
 
 use raa_lit::{FLAG_TRANSMISSIVE, FLAG_VERTEX_FN};
 use raa_matfn::{BuiltinFn, DrawClass, ParamKind, ParamSpec};
@@ -34,6 +38,15 @@ const SLIME_WGSL: &str = concat!(
     include_str!("wgsl/slime.wgsl"),
 );
 
+/// `material_main` of `raa.liquid.mud` over the shared vertex and surface WGSL.
+const MUD_WGSL: &str = concat!(
+    include_str!("wgsl/liquid_vertex.wgsl"),
+    "\n",
+    include_str!("wgsl/liquid_surface.wgsl"),
+    "\n",
+    include_str!("wgsl/mud.wgsl"),
+);
+
 /// The built-in liquid material functions, installed by the liquid feature.
 pub const LIQUID_BUILTINS: &[BuiltinFn] = &[
     BuiltinFn {
@@ -49,6 +62,13 @@ pub const LIQUID_BUILTINS: &[BuiltinFn] = &[
         params: &SLIME_PARAMS,
         flags: FLAG_VERTEX_FN | FLAG_TRANSMISSIVE,
         class: DrawClass::Transparent,
+    },
+    BuiltinFn {
+        name: "raa.liquid.mud",
+        wgsl: MUD_WGSL,
+        params: &MUD_PARAMS,
+        flags: FLAG_VERTEX_FN,
+        class: DrawClass::Opaque,
     },
 ];
 
@@ -160,6 +180,58 @@ static SLIME_PARAMS: [ParamSpec; 13] = [
     },
 ];
 
+/// Mud parameters: the water wave layout at 0.25x amplitude and 0.08x speed, and the wet
+/// mud look with its slow bubble field.
+static MUD_PARAMS: [ParamSpec; 12] = [
+    wave("wave0", [0.00875, 1.6, 0.3, 0.6], 0),
+    wave("wave1", [0.005, 0.9, 1.4, 0.5], 1),
+    wave("wave2", [0.003, 0.55, -0.7, 0.4], 2),
+    wave("wave3", [0.0015, 0.31, 2.4, 0.35], 3),
+    speed(4, [0.12644, 0.094832, 0.074136, 0.055656]),
+    ParamSpec {
+        name: "color",
+        kind: ParamKind::Color,
+        default: [0.32, 0.22, 0.14, 0.0],
+        slot: (5, 0),
+    },
+    ParamSpec {
+        name: "wetness",
+        kind: ParamKind::Float,
+        default: [0.8, 0.0, 0.0, 0.0],
+        slot: (5, 3),
+    },
+    ParamSpec {
+        name: "bubbleScale",
+        kind: ParamKind::Float,
+        default: [0.18, 0.0, 0.0, 0.0],
+        slot: (6, 0),
+    },
+    ParamSpec {
+        name: "bubbleRate",
+        kind: ParamKind::Float,
+        default: [0.6, 0.0, 0.0, 0.0],
+        slot: (6, 1),
+    },
+    ParamSpec {
+        name: "foamAmount",
+        kind: ParamKind::Float,
+        default: [0.15, 0.0, 0.0, 0.0],
+        slot: (7, 0),
+    },
+    ParamSpec {
+        name: "detailStrength",
+        kind: ParamKind::Float,
+        default: [0.25, 0.0, 0.0, 0.0],
+        slot: (7, 1),
+    },
+    ParamSpec {
+        name: "detailScale",
+        kind: ParamKind::Float,
+        default: [4.0, 0.0, 0.0, 0.0],
+        slot: (7, 2),
+    },
+];
+
 /// One wave parameter row at `p[slot]`.
 const fn wave(name: &'static str, default: [f32; 4], slot: usize) -> ParamSpec {
     ParamSpec {
@@ -248,17 +320,34 @@ mod tests {
 
     #[test]
     fn rows_are_well_formed() {
-        assert_eq!(LIQUID_BUILTINS.len(), 2);
+        assert_eq!(LIQUID_BUILTINS.len(), 3);
+        let names: Vec<&str> = LIQUID_BUILTINS.iter().map(|b| b.name).collect();
+        assert_eq!(
+            names,
+            ["raa.liquid.water", "raa.liquid.slime", "raa.liquid.mud"]
+        );
         for b in LIQUID_BUILTINS {
             assert!(b.name.starts_with("raa.liquid."), "{}: name", b.name);
-            assert_eq!(
-                b.flags & (FLAG_VERTEX_FN | FLAG_TRANSMISSIVE),
-                FLAG_VERTEX_FN | FLAG_TRANSMISSIVE,
-                "{}: flags",
-                b.name
-            );
             assert_eq!(b.flags & FLAG_TRANSPARENT, 0, "{}: flags", b.name);
-            assert_eq!(b.class, DrawClass::Transparent, "{}: class", b.name);
+            if b.name == "raa.liquid.mud" {
+                assert_eq!(b.flags, FLAG_VERTEX_FN, "{}: flags", b.name);
+                assert_eq!(b.class, DrawClass::Opaque, "{}: class", b.name);
+                // Opaque draw: the bubble field is voronoi and the foam has no shore term.
+                assert!(b.wgsl.contains("raa_voronoi3("), "{}: bubbles", b.name);
+                assert!(
+                    !b.wgsl.contains("liquid_shore(in.frag_coord"),
+                    "{}: opaque draws run before the opaque copy",
+                    b.name
+                );
+            } else {
+                assert_eq!(
+                    b.flags & (FLAG_VERTEX_FN | FLAG_TRANSMISSIVE),
+                    FLAG_VERTEX_FN | FLAG_TRANSMISSIVE,
+                    "{}: flags",
+                    b.name
+                );
+                assert_eq!(b.class, DrawClass::Transparent, "{}: class", b.name);
+            }
 
             let helper_prefix = format!("{}_", stem(b.name));
             for f in defined_fns(b.wgsl) {
@@ -293,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn water_and_slime_compose_and_validate_in_every_pass() {
+    fn liquid_builtins_compose_and_validate_in_every_pass() {
         let composer = composer();
         let reg = registry();
         let mut count = 0;
@@ -310,7 +399,8 @@ mod tests {
                     let wgsl = composer
                         .compose(&reg, &key)
                         .unwrap_or_else(|e| panic!("{} {key:?}: {e}", b.name));
-                    if pass == PassKind::Transparent {
+                    // Only the transmissive liquids reach the screen refraction provider.
+                    if pass == PassKind::Transparent && b.class == DrawClass::Transparent {
                         assert!(wgsl.contains("fn raa_screen_refract("), "{key:?}");
                     }
                     if let Err(e) = Composer::validate(&wgsl) {
