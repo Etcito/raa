@@ -55,4 +55,75 @@ MAMA's browser build is `dist/browser/` in the MAMA checkout (`compute-worker.js
 
 ## API
 
-Filled by a later task.
+MAMA is reached only through `src/mama-bridge.js`: no other module of this package imports it, and the compare page makes no MAMA call of its own. Every failure of the adapter is an `SdfmError` with one of the S15 codes below; refusals of the engine propagate unchanged as `RaaError`.
+
+Every exported name of `index.d.ts`:
+
+| name | description |
+|---|---|
+| `createSdfmLoader` | Creates a loader bound to one engine; `mama` is resolved once and the hash cache is per loader. |
+| `SdfmLoaderOptions` | `{ engine, mama, workerUrl?, workers? }`; `mama` resolves to MAMA's `dist/` URL (workers) or to MAMA's exports (in-process). |
+| `SdfmLoader` | `validate`, `load` (validate, hash check, cache, mesh, upload), `spawn` (root plus one node and instance per part), `dispose`. |
+| `SdfmAsset` | A loaded asset: the v1 fields `id`, `hash`, `name`, `category`, `world`, `anchors`, `bounds`, `collision` passed through, plus `parts`. |
+| `SdfmPart` | One rigid part: `name`, `groupId`, `rigid` (always true), `parent` (always null), `t`, `r`, `mesh`, `materials`. |
+| `SdfmSpawned` | `{ root, parts }`: the spawn root node and, per part name, its `node` and `instance` handles. |
+| `SdfmProgress` | One `onProgress` record: `stage` (`validate`, `mesh`, `upload`), `done`, `total`. |
+| `SdfmValidationResult` | The `validate` result: `{ ok, errors }`; validation is synchronous and needs no MAMA. |
+| `SdfmValidationError` | One validation entry: an S15 `code`, a JSON pointer `path` and a human `message`. |
+| `SdfmMamaModule` | The MAMA exports used for in-process meshing: `readSdfm`, `meshAssets`, `HELPERS`, `setupBrowserHost?`, `pool?`. |
+| `SdfmCompiledMaterial` | A MAMA compiled material as the bridge normalises it: `name`, `key` (sha256 hex), `body`, `helpers`, `constants`, `fields`. |
+| `SdfmMappedMaterial` | The `mapMaterial` result: `functionName`, `wgsl` (an S11 `material_main`), `desc` (always `blend: 'opaque'`), `dropped`. |
+| `mapMaterial` | Wraps a `SdfmCompiledMaterial` into an S11 user material function and a surface-material description. |
+| `SdfmError` | The adapter's refusal: `code` (an S15 code) and an optional JSON pointer `path`; message prefixed `<code>: `. |
+| `SdfmErrorCode` | Union of the eleven S15 codes listed in the table below. |
+| `Vec3` | `[x, y, z]`, metres for positions; same shape as `@etcito/raa`'s `Vec3`. |
+| `Quat` | `[x, y, z, w]`, a rotation quaternion; same shape as `@etcito/raa`'s `Quat`. |
+| `Engine` | Re-exported from `@etcito/raa`: the engine the loader uploads meshes and materials to. |
+| `SurfaceBlend` | Re-exported from `@etcito/raa`: the surface blend mode; mapped materials are always `'opaque'`. |
+
+### S15 codes
+
+| code | when |
+|---|---|
+| `sdfm.format` | `format` is not `sdfm.game-asset` (path `/format`). |
+| `sdfm.version` | `version` is not 1 (path `/version`). |
+| `sdfm.schema` | Root is not an object, or a key is missing, unknown, out of canonical order, has the wrong type, or an anchor/bounds entry is malformed (JSON pointer). |
+| `sdfm.not_finite` | A number anywhere in the asset is not finite (JSON pointer). |
+| `sdfm.id` | `id` does not match `^[a-z][a-z0-9]*(\.[a-z0-9-]+)+$` (path `/id`). |
+| `sdfm.cap_document` | The canonical document text exceeds 2 MiB (path `/document`). |
+| `sdfm.hash_mismatch` | The recomputed sha256 of the canonical document differs from `hash` (path `/hash`). |
+| `sdfm.mesher_refused` | MAMA refused a group with a value error (`MESHER_GROUP_UNSUPPORTED`); the first refused group in result order wins, the message names the group and its fix (path `/document`). |
+| `sdfm.material_unmappable` | MAMA could not build a material or resolve a helper, or the mapped WGSL is not an S11 function (unknown field, forbidden token, `raa_` identifier, more than 65536 bytes); the message names the material and the token. |
+| `sdfm.worker` | MAMA could not be imported or threw, a worker crashed or broke the protocol, or `options.mama()` failed. |
+| `sdfm.disposed` | `load`/`spawn` after `dispose` (or a worker pool request after termination). |
+
+### Usage
+
+```js
+import { createSdfmLoader } from '@etcito/raa-sdfm';
+
+const loader = createSdfmLoader({
+  engine,
+  // Browser: MAMA's dist/ URL, so meshing runs in worker.js workers.
+  mama: () => new URL('../../MAMA/dist/', import.meta.url),
+  // Node alternative: MAMA's exports, so meshing runs in-process through the bridge.
+  // mama: async () => ({ ...(await import('mama')), pool: myMamaPool }),
+});
+
+const asset = await loader.load(assetText, {
+  onProgress: ({ stage, done, total }) => console.log(stage, done, total),
+});
+const spawned = loader.spawn(asset); // { root, parts: { [name]: { node, instance } } }
+loader.dispose();
+```
+
+### Worker protocol
+
+`workerUrl` defaults to `new URL('../worker.js', import.meta.url)`; the pool creates module workers with `new Worker(workerUrl, { type: 'module' })` and dispatches requests round-robin, keyed by `id`.
+
+| direction | message | meaning |
+|---|---|---|
+| loader -> worker | `{ type: 'init', mamaUrl }` | load MAMA once; `mamaUrl` is MAMA's `dist/` base URL, or absent for bare specifiers. |
+| loader -> worker | `{ type: 'mesh', id, document, mesher }` | mesh the asset document; `id` correlates the reply. |
+| worker -> loader | `{ type: 'meshed', id, groups, materials }` | the `meshDocument` bridge output; its typed arrays are transferred. |
+| worker -> loader | `{ type: 'error', id, code, message, path? }` | an `SdfmError`; any other worker exception becomes `sdfm.worker`. |
