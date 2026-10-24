@@ -5,9 +5,11 @@
 //! length, refraction with total internal reflection, the roughness-driven
 //! opaque-colour mip and Schlick Fresnel. The `screen` provider of the `Transmission`
 //! slot ([`SCREEN_PROVIDER`], priority 10) evaluates them in WGSL on the opaque colour and
-//! depth copies.
+//! depth copies, which the crate-private `opaque.copy` pass (order 70) fills while a
+//! Transparent draw exists.
 
 pub mod absorption;
+mod copy;
 mod slot;
 
 pub use slot::SCREEN_PROVIDER;
