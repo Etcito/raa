@@ -39,6 +39,8 @@ raa-fur = { path = "../raa-fur" }
 raa-bloom = { path = "../raa-bloom" }
 raa-transmission = { path = "../raa-transmission" }
 raa-oit = { path = "../raa-oit" }
+raa-liquid = { path = "../raa-liquid" }
+raa-particles = { path = "../raa-particles" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
