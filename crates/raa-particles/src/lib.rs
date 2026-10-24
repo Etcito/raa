@@ -5,7 +5,14 @@
 //! [`EmitterDesc::for_kind`] gives the per-kind defaults and
 //! [`EmitterDesc::validate`] refuses every malformed field with
 //! `particles.invalid`, naming it in the message.
+//!
+//! [`pcg_hash`] and [`spawn_sample`] are the seeded CPU twin of the
+//! `particles.sim` WGSL: a sample is deterministic in `(seed, serial)` and the
+//! module documents the exact recipe and the 48 B [`PARTICLE_STRIDE`] state
+//! record.
 
 mod desc;
+mod spawn;
 
 pub use desc::*;
+pub use spawn::*;
