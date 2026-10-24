@@ -21,17 +21,18 @@ fn slime_bubble_height(p: vec3<f32>) -> f32 {
 
 // Share of the bubble lattice cells left empty. A dome on 58% of the cells packed the
 // river with rings on a lattice, which card 4942's judge read as a mottled, grid-like
-// surface; a third of the cells keeps scattered, readable bubbles.
-const SLIME_BUBBLE_SKIP: f32 = 0.66;
+// surface (and card 5083's judge as circular foam-like marks); only a fifth of the cells
+// now carries a small bubble.
+const SLIME_BUBBLE_SKIP: f32 = 0.8;
 
 // Core and rim masks (0..1) of the nearest bubble, with a soft rim falloff (cards 5018
 // and 5030 needed a wide rim to see the bubbles at all; a hard ring read as foam marks).
 fn slime_bubble_masks(p: vec3<f32>) -> vec2<f32> {
     let d = raa_voronoi3(p).x;
     let present = step(SLIME_BUBBLE_SKIP, raa_hash3(floor(p) + vec3<f32>(19.0, 7.0, 31.0)).x);
-    // Larger cells with a wider, brighter rim so the bubbles read at capture distance
-    // (card 5031 saw none of the old 5 cm domes).
-    let radius = 0.3;
+    // A small bubble with a thin rim: card 5083's judge read the old wide bright rims as
+    // circular foam marks on the river.
+    let radius = 0.22;
     let core = 1.0 - smoothstep(radius - 0.1, radius, d);
     let rim = 1.0 - smoothstep(0.0, 0.15, abs(d - radius));
     return vec2<f32>(core, rim) * present;
@@ -50,9 +51,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 
     o.transmission = clamp(o.transmission, 0.0, 1.0);
     o.metallic = 0.0;
-    // The body carries a broader sun lobe (about 0.09 at glossiness 0.96) for a wet sheen
-    // across the river; the clear coat below keeps the sharp sky reflection.
-    o.roughness = mix(0.35, 0.08, glossiness);
+    // A tight body lobe (0.04 at glossiness 1) for the sun glints; the clear coat
+    // below carries the sky reflection.
+    o.roughness = mix(0.3, 0.04, glossiness);
     o.normal = liquid_detail_normal(
         o.normal,
         in.tangent,
@@ -66,18 +67,19 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let bubbles = slime_bubble_masks(p);
     // A bubble is a lens of slightly thicker slime: the body and the absorbed floor darken a
     // little inside the core (a strong darkening read as dark holes, card 4941 preview),
-    // while its rim catches a thin bright skin. The rim goes
-    // to a pale green-white, not the body's own green, or it vanishes against the slime
-    // (card 5031: no visible bubbles on a green sheet).
-    o.attenuation_color = color * (1.0 - 0.2 * bubbles.x);
+    // while its rim catches a thin bright skin. A light green attenuation keeps the coloured
+    // tiles readable through the body (cards 5031/5083 saw a flat green sheet when the
+    // saturated lime absorbed every other channel).
+    o.attenuation_color = mix(color, vec3<f32>(0.45, 1.0, 0.5), 0.45) * (1.0 - 0.2 * bubbles.x);
     o.attenuation_distance = 1.0 / absorption;
     o.base_color = color * (1.0 - o.transmission) * (1.0 - 0.2 * bubbles.x);
-    // The bubble skin is a light, opaque ring of slime: it reads as a bubble outline over
-    // the floor seen through the body.
-    // A saturated light green skin: the old pale green-white ring at 0.85 read as grey
-    // circular foam marks on the river (card 4941 judge).
-    o.base_color = mix(o.base_color, vec3<f32>(0.5, 1.0, 0.22), 0.4 * bubbles.y);
-    o.transmission = o.transmission * (1.0 - 0.35 * bubbles.y);
+    // A faint self-glow keeps the body neon over the muted tile floor; the reference's
+    // slime is a bright toy green, and the AgX tonemap otherwise darkens the transmission.
+    o.emissive = o.emissive + color * 0.06;
+    // The bubble skin is a light ring of slime, kept close to the body colour so it reads as
+    // a bubble outline instead of the grey circular foam marks of card 4941.
+    o.base_color = mix(o.base_color, vec3<f32>(0.42, 1.0, 0.25), 0.18 * bubbles.y);
+    o.transmission = o.transmission * (1.0 - 0.18 * bubbles.y);
 
     // A domed bubble wall: a finite-difference tilt plus a glossy clear coat ring.
     let e = 0.012;
@@ -90,14 +92,22 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     let limited = slope * select(1.0, 0.6 / max(m, 1e-6), m > 0.6);
     o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(limited, 1.0)));
     o.roughness = mix(o.roughness, 0.02, bubbles.y);
-    // A strong coat for the sky reflection: card 4942's judge saw it weak at 0.55. The
-    // camera looks down onto the river (pitch 0.72), so the Fresnel term no longer turns
-    // the surface into the grey-blue skin a mirror coat gave at a grazing view.
-    o.clearcoat = 0.75;
-    o.clearcoat_roughness = mix(0.05, 0.02, bubbles.y);
+    // A full, tight coat for the sky reflection: card 5083's judge could barely see it at
+    // 0.75 / 0.05. The camera is not at the old grazing 0.44 rad pitch, so the reflection
+    // reads as a bright sky sheen instead of the grey-blue film of card 4941.
+    o.clearcoat = 1.0;
+    o.clearcoat_roughness = mix(0.035, 0.015, bubbles.y);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
-    let shore = max(liquid_shore(in.frag_coord, foam_width), liquid_mesh_edge(in.uv, 0.14));
+    // A narrower mesh border than the water's: the slime river is long, so a uv-fraction
+    // band would be very wide at its ends.
+    let shore = max(liquid_shore(in.frag_coord, foam_width), liquid_mesh_edge(in.uv, 0.06));
     let foam = liquid_foam(shore, crest, in.position, in.time, foam_amount);
-    return liquid_apply_foam(o, foam);
+    // The reference shows a clear white foam line at every shore and around the pads; the
+    // lace mask alone left only sparse flecks (card 5083 preview), so the shore band keeps
+    // most of its white. The body's green self-glow is removed from the opaque foam.
+    let f = clamp(max(foam, shore * 0.8), 0.0, 1.0);
+    var out = liquid_apply_foam(o, f);
+    out.emissive = out.emissive * (1.0 - f);
+    return out;
 }

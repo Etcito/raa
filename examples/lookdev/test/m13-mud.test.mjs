@@ -88,41 +88,39 @@ test('mud sun lights the camera-facing side of the crowns', async () => {
   assert.ok(toSun[1] > 0.5, `sun elevation: ${toSun[1]}`);
 });
 
-test('mud crowns are thick tongues with wide bases and bulbous tips', () => {
-  // Card 5078's judge read the old thin continuous sheet as "thin, tapered horn spikes":
-  // each tongue is a wide-based sheet that ends in a rounded club, not a cone.
+test('mud crowns are broad tapered splash sheets, not tubes', () => {
+  // Card 5083's judge read the old rounded tubes as "stiff tube-like stalks": each tongue
+  // is a broad, thin sheet (wide tangentially, thin radially) that tapers to a point.
   const C = mudSet.crownStyle;
   assert.ok(C.lobes >= 6 && C.lobes <= 8, `lobes per pad ${C.lobes}`);
-  assert.ok(C.widthBase > 2 * C.widthMid, 'wide base');
-  assert.ok(C.thickTip > 1.5 * C.thickMid, 'bulbous tip');
+  assert.ok(C.widthBase > 4 * C.thickBase, 'sheet-like cross-section');
+  assert.ok(C.widthTip < 0.25 * C.widthBase, 'the tip tapers to a point');
+  assert.ok(C.thickTip < 0.25 * C.thickBase, 'the tip is thin');
+  assert.ok(Math.max(...C.height) >= 0.5, 'tall splash sheets');
   for (const [i, pad] of mudSet.pads.entries()) {
     for (let k = 0; k < C.lobes; k++) {
       const m = mudSet.tongue(geometry, pad, i, k, 1);
       const p = m.positions;
-      let top = -Infinity;
-      for (let v = 1; v < p.length; v += 3) top = Math.max(top, p[v]);
-      // The tip club is nearly as wide as the base: a rounded end, not a needle.
-      let tipSpan = 0;
-      let baseSpan = 0;
-      let maxRho = 0;
       let minY = Infinity;
+      let maxY = -Infinity;
+      let maxRho = 0;
       for (let v = 0; v < p.length; v += 3) {
-        maxRho = Math.max(maxRho, Math.hypot(p[v], p[v + 2]));
         minY = Math.min(minY, p[v + 1]);
+        maxY = Math.max(maxY, p[v + 1]);
+        maxRho = Math.max(maxRho, Math.hypot(p[v], p[v + 2]));
       }
-      for (let v = 0; v < p.length; v += 3) {
-        for (let w = v + 3; w < p.length; w += 3) {
-          if (Math.hypot(p[v], p[v + 2]) > maxRho - 0.07 && Math.hypot(p[w], p[w + 2]) > maxRho - 0.07) {
-            tipSpan = Math.max(tipSpan, Math.hypot(p[v] - p[w], p[v + 2] - p[w + 2]));
-          }
-          if (p[v + 1] < minY + 0.06 && p[w + 1] < minY + 0.06) {
-            baseSpan = Math.max(baseSpan, Math.hypot(p[v] - p[w], p[v + 2] - p[w + 2]));
-          }
-        }
-      }
-      assert.ok(top > 0.25, `tongue ${k} top ${top}`);
-      assert.ok(baseSpan > 0.3, `tongue ${k} base span ${baseSpan}`);
-      assert.ok(tipSpan > 0.1, `tongue ${k} tip span ${tipSpan}`);
+      const mid = (minY + maxY) / 2;
+      const span = (accept) => {
+        let best = 0;
+        const pts = [];
+        for (let v = 0; v < p.length; v += 3) if (accept(v)) pts.push([p[v], p[v + 2]]);
+        for (const a of pts) for (const b of pts) best = Math.max(best, Math.hypot(a[0] - b[0], a[1] - b[1]));
+        return best;
+      };
+      assert.ok(maxY > 0.3, `tongue ${k} top ${maxY}`);
+      assert.ok(span((v) => p[v + 1] < minY + 0.06) > 0.3, `tongue ${k} wide base`);
+      assert.ok(span((v) => Math.abs(p[v + 1] - mid) < 0.05) > 0.2, `tongue ${k} broad waist`);
+      assert.ok(span((v) => Math.hypot(p[v], p[v + 2]) > maxRho - 0.03) < 0.08, `tongue ${k} pointed tip`);
     }
   }
 });
@@ -168,8 +166,9 @@ test('mud is deep chocolate with a visible swell and a soft froth band', () => {
     assert.ok(a / l < 0.03, `short wave slope ${a / l}`);
     assert.ok(q <= 0.4, `short wave steepness ${q}`);
   }
-  assert.ok(M.foamWidth >= 0.12 && M.foamWidth <= 0.25, 'soft froth band');
-  assert.ok(M.foamAmount >= 0.2 && M.foamAmount <= 0.6);
+  assert.ok(M.foamWidth >= 0.1 && M.foamWidth <= 0.25, 'soft froth band');
+  // Shore and pad froth only: crest foam covered the pit in pale blobs (card 5083 preview).
+  assert.ok(M.foamAmount >= 0.1 && M.foamAmount <= 0.4);
   // The shader needs a low-frequency slope to break the sun highlight (card 5078: a flat
   // orange-rust plane).
   assert.ok(M.detailStrength >= 0.1 && M.detailScale <= 1.0, 'swell normal noise');
@@ -185,7 +184,7 @@ test('mud crowns are large and spray is thin droplets arcing from the lobe tips'
   for (const [i, pad] of mudSet.pads.entries()) {
     const lobes = Array.from({ length: mudSet.crownStyle.lobes }, (_, k) => mudSet.lobe(i, k));
     assert.ok(Math.max(...lobes.map((l) => l.h)) >= 0.45, 'tallest lobe');
-    assert.ok(lobes.every((l) => l.flare >= 0.2), 'lobes flare out');
+    assert.ok(lobes.every((l) => l.flare >= 0.1), 'lobes flare out');
     const m = mudSet.spray(geometry, pad, i, 1);
     const verts = m.positions.length / 3;
     const perDrop = verts / (lobes.length * mudSet.drops.count);
@@ -223,7 +222,8 @@ test('mud bank is a grass material over a ridge around the pit', async () => {
 test('mud spray is many small thin white streaks, not broad blobs', () => {
   const D = mudSet.drops;
   assert.ok(D.count >= 8, `drops per tongue ${D.count}`);
-  assert.ok(D.stretch >= 2, `stretch ${D.stretch}`);
+  // Long thin streaks: 1.5x is enough at capture distance without reading as rice grains.
+  assert.ok(D.stretch >= 1.5, `stretch ${D.stretch}`);
   assert.ok(D.radius[1] <= 0.012, `radius ${D.radius}`);
   assert.ok(Math.min(...D.color) > 0.9 && Math.min(...D.emissive) > 0.2);
 });

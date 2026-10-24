@@ -28,9 +28,11 @@ const ENV = { diffuse: 0.7, specular: 1 };
 // Orbit cameras: [target, distance m, yaw rad, pitch rad].
 const CAMERAS = {
   water: [[0, -0.1, -0.3], 5.0, 0.35, 0.45],
-  // Slime looks down onto the river: at the old 0.44 rad pitch the Fresnel sky term turned
-  // the whole surface into a grey film (card 4941 software preview).
-  slime: [[0, -0.15, 0.1], 3.8, 0.2, 0.72],
+  // Slime looks down onto the river, but less steeply than 0.72 rad: at 41 deg down the
+  // coat's Fresnel term was too weak for the sky reflection to read (card 5083 judge), and
+  // at 0.44 rad the old mirror coat turned the whole surface into a grey film (card 4941).
+  // 0.56 rad keeps the green river readable while the far half reflects the sky.
+  slime: [[0, -0.15, 0.1], 3.8, 0.2, 0.56],
   // Mud sits close, like ref-3: the pit fills the frame and the crowns stand against the
   // far mud. 29 deg down: at 21 deg (0.36 rad) the coat's Fresnel mirrored the blue sky
   // over most of the pit and the brown read lilac (card 5070).
@@ -70,36 +72,39 @@ const BASIN_WALL = { half: 0.4, thickness: 0.15, color: [1, 0.42, 0.62] };
 const WATER_IOR = 1.33;
 const WATER_THICKNESS = 0.5;
 
-// Slime: the water wave layout at about 0.75x amplitude and 0.25x speed, a visible slow
-// swell at capture distance. `color` is sRGB (function colours are converted to linear):
-// a neon green that keeps its saturation through the AgX tonemap. The absorption is low
-// enough that the coloured tiles still read through the body as a strong green-tinted
-// refraction (card 5031 saw only a faint tile tint at absorption 9).
+// Slime: the water wave amplitudes at 0.25x speed, a visible slow swell at capture
+// distance. `color` is sRGB (function colours are converted to linear): a neon green that
+// keeps its saturation through the AgX tonemap. The absorption is low enough that the
+// coloured tiles still read through the body as a green-tinted refraction (card 5031 saw
+// only a faint tile tint at absorption 9; the translucent body was still too opaque at
+// card 5083).
 const SLIME = {
-  wave0: [0.083, 3.0, 0.3, 0.65],
-  wave1: [0.045, 1.7, 1.4, 0.55],
-  wave2: [0.0225, 1.0, -0.7, 0.5],
-  wave3: [0.0105, 0.6, 2.4, 0.4],
+  wave0: [0.11, 3.0, 0.3, 0.65],
+  wave1: [0.06, 1.7, 1.4, 0.55],
+  wave2: [0.03, 1.0, -0.7, 0.5],
+  wave3: [0.014, 0.6, 2.4, 0.4],
   speeds: [0.541, 0.407, 0.312, 0.242],
   // A more saturated lime (card 4942's judge saw a flat, greyish film).
   color: [0.34, 0.95, 0.03],
-  // Denser body (with transmission 0.6 below) so the river reads as neon-green slime with
-  // the tiles shimmering through it, not as clear water over green tiles.
-  absorption: 4.5,
-  glossiness: 0.96,
-  bubbleScale: 0.32,
-  // Shore lace at the channel walls; little crest foam, which covered the river in a
-  // noise-texture lace and hid the bubbles and the refracted tiles (card 5034).
+  // A wet, strongly translucent body (transmission 0.95 below, absorption 2.0): the
+  // coloured tiles show through with a strong green tint, so the surface reads as slime
+  // over a floor rather than a painted green sheet (card 5083's judge saw it as only
+  // weakly translucent, with no tile refraction at all).
+  absorption: 2.0,
+  glossiness: 1,
+  bubbleScale: 0.24,
+  // Narrow shoreline lace at the channel walls and rings around the pads. Almost no crest
+  // foam: the slime's small steepness turned the crest mask into sparse white scribbles
+  // (card 5083 preview) rather than the wide whitecaps of the water set.
   foamWidth: 0.1,
-  foamAmount: 0.3,
-  // A gentle detail normal: the old 0.32 mottled the sky reflection into a grey skin
-  // (card 5031) instead of the glossy green surface the reference shows; 0.08 still read
-  // as a mottled surface (card 4942).
+  foamAmount: 0.05,
+  // A little detail breaks the sky reflection into glints; the old 0.32 mottled it into a
+  // grey skin (cards 5031/4942), so this stays low.
   detailStrength: 0.05,
   detailScale: 1.2,
 };
 const SLIME_IOR = 1.38;
-const SLIME_THICKNESS = 0.24;
+const SLIME_THICKNESS = 0.35;
 // Pads stand in the channel and rise above the slime surface (base at FLOOR_Y): the
 // pink, orange and blue tops sit 0.32, 0.3 and 0.28 m above the slime at y = -0.1.
 const SLIME_PADS = [
@@ -116,10 +121,12 @@ const SLIME_PADS = [
 // troughs darker and adds a low-frequency fbm slope, so the swell breaks the sun highlight
 // into bands at capture distance.
 const MUD = {
-  wave0: [0.12, 3.2, 0.3, 0.55],
-  wave1: [0.07, 2.0, 1.4, 0.5],
-  wave2: [0.02, 1.2, -0.7, 0.35],
-  wave3: [0.008, 0.75, 2.4, 0.25],
+  // Higher and longer than card 5078's nearly flat pit: the judge of card 5083 saw no
+  // readable swell. About 0.5 m of crest-to-trough relief over the 3 m of visible pit.
+  wave0: [0.14, 3.2, 0.3, 0.55],
+  wave1: [0.08, 2.0, 1.4, 0.5],
+  wave2: [0.028, 1.2, -0.7, 0.35],
+  wave3: [0.011, 0.75, 2.4, 0.25],
   speeds: [0.24, 0.19, 0.145, 0.115],
   color: [0.34, 0.17, 0.1],
   wetness: 1,
@@ -128,14 +135,17 @@ const MUD = {
   bubbleScale: 0.52,
   bubbleRate: 0.35,
   // White shore froth where the mud is shallower than foamWidth (the depth rides in the
-  // vertex colour alpha, see mudMesh): a soft irregular band along the shore and rings
-  // around the pads, a little on the swell crests.
-  foamWidth: 0.16,
-  foamAmount: 0.35,
-  // Low-frequency fbm slope (detailScale = 0.55 m^-1) plus a fine detail layer: the sun
-  // highlight breaks into crests and troughs instead of a flat sheen.
-  detailStrength: 0.2,
-  detailScale: 0.55,
+  // vertex colour alpha, see mudMesh): a white band along the shore and rings around the
+  // pads, almost nothing on the crests. Card 5083's judge read the old 0.16 m band as
+  // beige patches; a wider band plus crest foam covered the pit in pale blobs (preview),
+  // so the band stays narrow and the whiter shader colour carries the read.
+  foamWidth: 0.14,
+  foamAmount: 0.15,
+  // Low-frequency fbm slope (detailScale = 0.5 m^-1) plus a fine detail layer: the sun
+  // highlight breaks into crests and troughs instead of a flat sheen. 0.26 reflected so
+  // much sky that the pit read grey in the preview.
+  detailStrength: 0.19,
+  detailScale: 0.5,
 };
 // Mud set lighting: a warmer sun and dimmer sky irradiance than daylight(). The sky
 // irradiance of DAY_SKY carried about as much light as the sun on the pit, all of it blue
@@ -148,8 +158,10 @@ const MUD = {
 // read purple. The env specular gives the wet coat a Fresnel sky sheen.
 const MUD_LIGHT = {
   sun: { ...SUN, direction: [0.6, -0.72, -0.35], color: [1, 0.88, 0.72] },
-  // Card 5067: diffuse 0.6 lifts the shadowed mud out of black (it read as holes).
-  env: { diffuse: 0.6, specular: 0.55 },
+  // Card 5067: diffuse 0.6 lifts the shadowed mud out of black (it read as holes). The
+  // specular is raised over 0.55: the wet coat's sky reflection is what tells a mud pit
+  // from a brown plane, and card 5083's judge could barely see it.
+  env: { diffuse: 0.6, specular: 0.58 },
 };
 // Smoothstep of v over [a, b].
 function smooth(a, b, v) {
@@ -202,25 +214,30 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let p = in.position;
   let blotch = raa_fbm3(vec3<f32>(p.x * 3.1, p.y * 4.0, p.z * 3.1), 3);
   let fine = raa_noise3(vec3<f32>(p.x * 24.0, p.y * 30.0, p.z * 24.0));
+  // Streaks stretched along the sheet's flow (long in y, fine across xz): the chocolate
+  // reads as liquid running up and curling over, not a smooth clay sculpture.
+  let flow = raa_noise3(vec3<f32>(p.x * 30.0, p.y * 3.5, p.z * 30.0));
   let bx = raa_noise3(vec3<f32>(p.x * 19.0, 3.1, p.z * 19.0));
   let bz = raa_noise3(vec3<f32>(p.x * 19.0, 7.7, p.z * 19.0));
-  o.base_color = o.base_color * (0.82 + 0.22 * blotch) * (0.92 + 0.12 * fine);
-  o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(0.2 * bx, 0.2 * bz, 1.0)));
-  o.roughness = clamp(o.roughness + 0.1 * blotch, 0.18, 0.45);
-  o.clearcoat = 0.65;
-  o.clearcoat_roughness = 0.07;
+  o.base_color = o.base_color * (0.8 + 0.24 * blotch) * (0.9 + 0.16 * flow) * (0.94 + 0.1 * fine);
+  o.normal = raa_perturb_normal(o.normal, in.tangent, normalize(vec3<f32>(0.14 * bx, 0.14 * bz, 1.0)));
+  // A wet skin: the sun and the sky reflect off the sheets as sharp highlights (card 5083's
+  // judge read the old dull tongues as stiff stalks rather than glossy sheets).
+  o.roughness = clamp(o.roughness + 0.08 * blotch, 0.14, 0.32);
+  o.clearcoat = 0.9;
+  o.clearcoat_roughness = 0.035;
   o.metallic = 0.0;
-  // Churned froth on the collar (vertex alpha = 1 - froth): cream foam cells with brown
-  // seams between them, broken up by large noise, so the pad bases read as frothy mud.
+  // Churned froth on the collar (vertex alpha = 1 - froth): white foam cells with soft
+  // cream seams between them, broken up by large noise, so the pad bases read as frothy mud.
   let cells = raa_voronoi3(vec3<f32>(p.x * 14.0, p.y * 14.0, p.z * 14.0));
   let seam = smoothstep(0.0, 0.3, cells.y - cells.x);
   let breakup = smoothstep(-0.4, 0.2, blotch + 0.4 * fine);
   let froth = clamp(1.0 - in.color.a, 0.0, 1.0) * breakup;
-  let cream = vec3<f32>(0.86, 0.8, 0.7) * (0.9 + 0.1 * fine);
-  let foam = mix(mix(o.base_color * 2.4, cream, 0.35), cream, seam);
+  let cream = mix(vec3<f32>(0.93, 0.92, 0.88), vec3<f32>(1.0, 0.99, 0.96), 0.5 + 0.5 * fine);
+  let foam = mix(mix(o.base_color * 2.2, cream, 0.65), cream, seam);
   o.base_color = mix(o.base_color, foam, froth);
-  o.roughness = mix(o.roughness, 0.6, froth);
-  o.clearcoat = mix(o.clearcoat, 0.3, froth);
+  o.roughness = mix(o.roughness, 0.55, froth);
+  o.clearcoat = mix(o.clearcoat, 0.25, froth);
   o.opacity = 1.0;
   return o;
 }
@@ -243,45 +260,48 @@ const PAD_RIM = 0.16;
 const PAD_KEEL = 0.12; // m the pad's underside reaches below its base
 // A satin lime plastic: the old mirror clearcoat (roughness 0.12, clearcoat 1) mirrored the
 // blue sky over the tops, which read as concave sky-blue cups (card 5078).
-const MUD_PAD = { color: [0.58, 0.9, 0.16], roughness: 0.26, clearcoat: 0.6, clearcoatRoughness: 0.12 };
+const MUD_PAD = { color: [0.58, 0.9, 0.16], roughness: 0.2, clearcoat: 0.85, clearcoatRoughness: 0.07 };
 // Wet band at the pads' bases: vertex colour multiplier at the mud line and its height m.
 const MUD_PAD_WET = { tint: [0.42, 0.36, 0.24], height: 0.05 };
 // Mud splash crowns around each pad wall are sculpted meshes, not particles: the splash
 // emitter's droplets are camera-facing discs, which read as loose clusters of brown beads
 // at capture distance (card 5039, attempt 9) instead of ref-3's crowns of mud. Per pad: a
-// low collar of mud climbing the pad wall plus `lobes` separate splash tongues. Card 5078's
-// judge read the old thin continuous sheet as "thin, tapered horn spikes": each tongue is
-// now a thick sheet with a wide base and a bulbous, rounded tip bent outward (an elliptical
-// swept tube, not a cone), so it reads as a heavy tongue of wet chocolate.
+// low collar of mud climbing the pad wall plus `lobes` separate splash tongues. Card 5083's
+// judge read the old tongues as "stiff tube-like stalks": each tongue is now a broad, thin,
+// strongly tapered sheet that leans outward and narrows to a point (a curved elliptical
+// ribbon, not a swept tube), with small droplets breaking off its tip (ref-3's splash
+// sheets).
 const MUD_CROWN = {
   // Deep chocolate like the pit and a little warmer; sRGB.
-  color: [0.38, 0.2, 0.11],
-  roughness: 0.26,
-  clearcoat: 0.55,
-  clearcoatRoughness: 0.08,
-  // Card 5067: the judge still read the 7 slim tongues as weak tendrils. 8 fatter, rounded
-  // tongues per pad, a taller lumpy collar and loose rounded blobs flung from the tips
-  // (mudBlobs) read as heavy crowns of mud at capture distance.
+  color: [0.4, 0.21, 0.115],
+  roughness: 0.16,
+  clearcoat: 0.9,
+  clearcoatRoughness: 0.04,
+  // 8 broad tongues per pad form a ring of splash sheets with separate pointed tips
+  // instead of eight stalks; the low collar joins them at the mud line.
   lobes: 8, // separate tongues in a ring around every pad (6..8 per ref-3)
-  height: [0.4, 0.5, 0.45], // m above the mud at the tongue tips, cycling per lobe
-  flare: [0.22, 0.28, 0.25], // m the tip of a tongue stands out from the pad wall
-  foot: 0.02, // m the tongue's base stands off the pad wall
+  height: [0.55, 0.68, 0.6], // m above the mud at the tongue tips, cycling per lobe
+  flare: [0.12, 0.18, 0.15], // m the tip of a tongue stands out from the pad wall
+  foot: 0.015, // m the tongue's base stands off the pad wall
   sink: 0.06, // m the tongue reaches below the mud line
-  skirt: 0.3, // m the mud collar around the pad reaches out from the wall
+  skirt: 0.26, // m the mud collar around the pad reaches out from the wall
   rise: 0.15, // m the mud climbs the pad wall
-  lumps: 0.045, // m of lumpy relief on the collar
-  // Elliptical cross-section: wide tangentially (a broad sheet) and thin radially.
-  widthBase: 0.23, // m tangential half width at the base
-  widthMid: 0.105, // m at the waist
-  widthTip: 0.125, // m at the bulbous tip
-  thickBase: 0.075, // m radial half thickness at the base
-  thickMid: 0.04, // m at the waist
-  thickTip: 0.08, // m at the bulbous tip
-  capLength: 0.09, // m the rounded tip cap reaches past the last ring
-  blobs: [0.05, 0.038, 0.028], // m radii of the loose blobs flung beyond each tip
+  lumps: 0.04, // m of lumpy relief on the collar
+  // Elliptical cross-section: wide tangentially (a broad sheet) and thin radially, then
+  // pinched to a point at the tip so the silhouette ends in a splash, not a club. The
+  // first pass at 0.32 m half width and 0.38 m flare read as chocolate petals lying
+  // outward (preview); narrower, taller and more vertical reads as splash sheets.
+  widthBase: 0.2, // m tangential half width at the base
+  widthMid: 0.12, // m at the waist
+  widthTip: 0.02, // m at the pointed tip
+  thickBase: 0.035, // m radial half thickness at the base
+  thickMid: 0.02, // m at the waist
+  thickTip: 0.005, // m at the pointed tip
+  capLength: 0.02, // m the rounded tip cap reaches past the last ring
+  blobs: [0.03, 0.022, 0.016], // m radii of the loose droplets flung beyond each tip
   segments: 20, // around one tongue
-  steps: 18, // rings along one tongue
-  capSteps: 5, // rounded tip cap rings
+  steps: 20, // rings along one tongue
+  capSteps: 4, // rounded tip cap rings
 };
 // White spray (ref-3's splash spray): many small thin streaks, elongated along their
 // flight, arcing out of the tip of every crown tongue (mudSprayArcs). Card 5078's judge saw
@@ -294,13 +314,13 @@ const MUD_DROPS = {
   clearcoatRoughness: 0.2,
   // Bright enough to read as white spray points on the brown mud (card 5067's judge saw
   // discrete faint particles).
-  emissive: [1.1, 1.1, 1.1],
-  count: 16,
-  times: [0.02, 0.05, 0.08, 0.11, 0.15, 0.19, 0.23, 0.27],
+  emissive: [0.9, 0.9, 0.9],
+  count: 8,
+  times: [0.02, 0.06, 0.1, 0.15, 0.2, 0.26],
   speed: [1.2, 2.4],
-  radius: [0.006, 0.012], // m
+  radius: [0.004, 0.009], // m
   // Card 5067's software preview read 3x streaks as grains of rice: rounder droplets.
-  stretch: 2, // length over width along the flight
+  stretch: 1.7, // length over width along the flight
 };
 // Fine soft spray at the lobe tips: many small semi-transparent droplets on ballistic
 // arcs, stretched along their velocity by the particle pass, so the plume reads as fine
@@ -308,16 +328,16 @@ const MUD_DROPS = {
 const MUD_SPRAY = {
   kind: 'splash',
   spread: 0.42,
-  rate: 360,
-  lifetime: [0.15, 0.4],
-  speed: [1.0, 2.1],
-  size: [0.012, 0.024],
+  rate: 180,
+  lifetime: [0.16, 0.42],
+  speed: [1.0, 2.2],
+  size: [0.008, 0.017],
   drag: 0.4,
   colors: [[0.95, 0.97, 1], [1, 1, 1]],
-  opacity: 0.95,
-  emissive: 0.6,
-  volume: [0.05, 0.02, 0.05],
-  maxParticles: 160,
+  opacity: 0.85,
+  emissive: 0.5,
+  volume: [0.04, 0.02, 0.04],
+  maxParticles: 140,
 };
 // Bubbles on the open mud: [x, z, radius m], and the ring of a popped one.
 const MUD_BUBBLES = [
@@ -492,7 +512,7 @@ function buildSlime(engine, lib) {
     function: 'raa.liquid.slime',
     params: SLIME,
     blend: 'transmissive',
-    transmission: 0.6,
+    transmission: 0.95,
     ior: SLIME_IOR,
     thickness: SLIME_THICKNESS,
   }, [0, -0.1, 0]);
@@ -588,12 +608,15 @@ function mudTongue(geometry, [x, z, r], i, k, t) {
     // Outward normal of the centreline in the radial plane: the tangent turned clockwise.
     return { c, t: [d[0] / l, d[1] / l], n: [d[1] / l, -d[0] / l] };
   };
+  // A per-tongue width scale keeps the eight sheets of one crown from looking stamped
+  // (0.85..1.15 of the nominal section).
+  const vary = 0.85 + 0.3 * hash01(41 * i + 7 * k);
   const section = (u) => {
     const taper = smooth(0, 0.55, u);
     const bulb = smooth(0.68, 0.92, u);
     return {
-      w: (C.widthBase + (C.widthMid - C.widthBase) * taper) * (1 - bulb) + C.widthTip * bulb,
-      d: (C.thickBase + (C.thickMid - C.thickBase) * taper) * (1 - bulb) + C.thickTip * bulb,
+      w: ((C.widthBase + (C.widthMid - C.widthBase) * taper) * (1 - bulb) + C.widthTip * bulb) * vary,
+      d: ((C.thickBase + (C.thickMid - C.thickBase) * taper) * (1 - bulb) + C.thickTip * bulb) * vary,
     };
   };
   const segs = C.segments;
@@ -989,7 +1012,9 @@ function buildMud(engine, lib, settings, variant) {
   const bubbleMat = engine.addSurfaceMaterial({ color: [0.4, 0.21, 0.12], roughness: 0.1, clearcoat: 0.9, clearcoatRoughness: 0.04 });
   for (const [bx, bz, br] of MUD_BUBBLES) {
     const y = mudHeight(bx, bz, t);
-    place(engine, upload(engine, geometry.uvSphere(1, 32, 16), bubbleMat), [bx, y - 0.005, bz], [br, br * 0.38, br]);
+    // Low domes, not balls (card 5083's judge read the old spheres as solid bubbles): the
+    // top half of a squashed sphere sits just above the swell, with the pop ring beside it.
+    place(engine, upload(engine, geometry.uvSphere(1, 32, 16), bubbleMat), [bx, y - 0.02, bz], [br, br * 0.22, br]);
   }
   const ringPath = Array.from({ length: 32 }, (_, j) => {
     const a = (j / 32) * Math.PI * 2;
