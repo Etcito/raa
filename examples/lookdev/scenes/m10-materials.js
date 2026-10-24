@@ -109,12 +109,28 @@ const NEON_FLOOR = { color: [0.3, 0.13, 0.52], roughness: 0.3, clearcoat: 1, cle
 // Deck parameters (linear, raw user params): p0 seam colour; p1 = (light pool gain, sharp
 // coat lobe rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
 // bevel width m, panel tone variation).
-const NEON_DECK = { p0: [0.012, 0.004, 0.03], p1: [2, 0.03, 0.22, 0.35], p2: [0.6, 0.012, 0.02, 0.12] };
+// p3 = (sky mirror gain, tube reflection gain): the lacquer mirrors the night sky dome and
+// the tubes more strongly than a 4 % coat, as ref-4's wet-looking decks; at 1 the judge read
+// the deck as "a fairly matte grid with weak specular highlights" (card 4811).
+const NEON_DECK = {
+  p0: [0.012, 0.004, 0.03],
+  p1: [2, 0.02, 0.2, 0.35],
+  p2: [0.6, 0.012, 0.02, 0.12],
+  p3: [1.2, 1.8, 0, 0],
+};
+// Night sky dome of the neon sets (demo.night-sky): radius m, a sphere around the set drawn
+// from inside. The procedural `night` sky is a flat gradient (judge, card 4811); the dome
+// adds ref-4's stars and lavender clouds over the horizon glow.
+const SKY_DOME_R = 60;
+// The deck reaches far towards the horizon under the dome: the 8 m slab ended in a bright
+// strip of the dome's horizon glow below the true horizon.
+const DECK_HALF = [40, 0.05, 40];
 // Tube lights of the deck: each tube's centreline is cut into segments about this long (m).
 const DECK_SEGMENT = 0.1;
-// Bloom of the neon sets: twice the BLOOM defaults (0.04, 0.85) and a full-texel tent give
-// ref-4's wide soft glow; at the defaults the halo hugged the 5 cm tubes (card 4752).
-const NEON_BLOOM = { strength: 0.08, radius: 1 };
+// Bloom of the neon sets: about 3x the BLOOM defaults (0.04, 0.85) and a full-texel tent give
+// ref-4's wide soft glow; at the defaults the halo hugged the 5 cm tubes (card 4752). 0.08
+// lost the halo against the brighter starry sky dome (card 4811).
+const NEON_BLOOM = { strength: 0.11, radius: 1 };
 // +0.3 EV brings the night set towards ref-4's bright purple key (mean sRGB 134, 104, 177).
 const NEON_EXPOSURE_EV = 0.3;
 // raa.neon strength (emissive scale) and core whiteness of every tube.
@@ -196,14 +212,77 @@ const CHECKERS = {
   box: { half: 0.32, t: [0.55, 0.32, 0], p0: [0.02, 0.18, 0.85], p1: [1, 0.62, 0.02], p2: [4, 4, 0.5] },
 };
 
+// Night sky radiance shared by the sky dome and the deck's mirror (linear HDR): a navy
+// zenith over a violet horizon with a pink-violet glow on the horizon line, a band of
+// lavender clouds lit from below (brighter dense cores, dark violet thin edges) and stars
+// (one jittered point per cell of a 3D grid on the direction, about 4 % of the cells lit,
+// 1 to 2 px wide, a few bright ones that bloom), weighted by `stars`.
+const SKY_WGSL = `
+fn sky_star_field(dir: vec3<f32>) -> vec3<f32> {
+  let k = 90.0;
+  let cell = floor(dir * k);
+  let h = raa_hash3(cell);
+  let g = raa_hash3(cell + vec3<f32>(19.0, 7.0, 3.0));
+  let centre = normalize(cell + 0.5 + (h - 0.5) * 0.3);
+  let d = length(dir - centre);
+  let size = 0.0008 + 0.0011 * g.y * g.y;
+  let lit = step(g.x, 0.04);
+  let b = 0.6 + 6.0 * pow(g.z, 8.0);
+  let tint = mix(vec3<f32>(0.75, 0.8, 1.0), vec3<f32>(1.0, 0.85, 1.0), h.z);
+  return tint * (lit * b * exp(-0.5 * d * d / (size * size)));
+}
+
+fn sky_cloud_density(dir: vec3<f32>) -> f32 {
+  let up = max(dir.y, 0.0);
+  let q = dir.xz / (up + 0.1) * 0.45;
+  let n = raa_fbm3(vec3<f32>(q.x, q.y * 1.6, 2.7), 5) * 0.5 + 0.5;
+  let band = smoothstep(0.0, 0.02, up) * (1.0 - smoothstep(0.08, 0.24, up));
+  return smoothstep(0.48, 0.74, n) * band;
+}
+
+fn sky_night(dir: vec3<f32>, stars: f32) -> vec3<f32> {
+  let up = max(dir.y, 0.0);
+  let zenith = vec3<f32>(0.004, 0.006, 0.05);
+  let mid = vec3<f32>(0.022, 0.01, 0.085);
+  let horizon = vec3<f32>(0.09, 0.03, 0.2);
+  var c = mix(horizon, mid, smoothstep(0.0, 0.18, up));
+  c = mix(c, zenith, smoothstep(0.12, 0.45, up));
+  c = c + vec3<f32>(0.12, 0.03, 0.14) * exp(-up * 22.0);
+  // Below the horizon: the glow fades into a deep violet haze.
+  c = select(mix(vec3<f32>(0.2, 0.06, 0.34), vec3<f32>(0.08, 0.03, 0.18), smoothstep(0.0, 0.1, -dir.y)), c, dir.y >= 0.0);
+  let rho = sky_cloud_density(dir);
+  let cloud = mix(vec3<f32>(0.06, 0.03, 0.15), vec3<f32>(0.3, 0.2, 0.52), smoothstep(0.1, 0.9, rho))
+    * (1.0 + 0.8 * exp(-up * 12.0));
+  let a = smoothstep(0.0, 0.35, rho);
+  let fade = smoothstep(0.04, 0.2, dir.y) * stars;
+  return mix(c + sky_star_field(dir) * fade, cloud, a);
+}
+`;
+
+// User material function of the sky dome: emissive only (black base, rough), the sky seen
+// from the camera along the fragment's direction, so the dome's own centre does not matter.
+const NIGHT_SKY_WGSL = `${SKY_WGSL}
+fn material_main(in: MaterialInput) -> MaterialOutput {
+  var o = raa_default_output(in);
+  let dir = normalize(in.position - raa_frame.camera_pos.xyz);
+  o.base_color = vec3<f32>(0.0);
+  o.metallic = 0.0;
+  o.roughness = 1.0;
+  o.clearcoat = 0.0;
+  o.emissive = sky_night(dir, 1.0);
+  return o;
+}
+`;
+
 // User material function of the neon deck (S11): lacquered violet panels on a world XZ
 // grid with dark seams and bevelled edges, lit by the neon tubes as line lights. The tubes
 // are emissive geometry, not engine lights, so their light on the floor is evaluated here
 // from their segments (baked into the source by deckWgsl): a Lambert pool under each tube
 // (projected tube area x cosine / distance^2) and its glossy reflection (the closest point of
 // each segment to the reflected view ray, Karis's representative point, spread by the coat
-// and base lobes and weighted by Schlick Fresnel). Record colour, roughness and coat are the
-// desc's; params as NEON_DECK. DECK_LIGHTS is replaced by one line per segment.
+// and base lobes and weighted by Schlick Fresnel), plus the coat's mirror of the night sky
+// (SKY_WGSL, prepended by deckWgsl). Record colour, roughness and coat are the desc's;
+// params as NEON_DECK. DECK_LIGHTS is replaced by one line per segment.
 const DECK_WGSL = `
 // Lambert factor of a tube segment a..b of radius r at floor point p (normal n).
 fn deck_diffuse(p: vec3<f32>, n: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32) -> f32 {
@@ -276,7 +355,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   var refl_broad = vec3<f32>(0.0);
 DECK_LIGHTS
   let fres = 0.04 + 0.96 * pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 5.0);
-  let refl = (refl_sharp * o.clearcoat + refl_broad * broad_w) * fres;
+  // Lacquer mirror of the night sky (no stars: they would alias on the bevels).
+  let sky = sky_night(rd, 0.0) * in.record.p[3].x * o.clearcoat;
+  let refl = ((refl_sharp * o.clearcoat + refl_broad * broad_w) * in.record.p[3].y + sky) * fres;
   o.emissive = o.emissive + (pool * gain * o.base_color + refl * (1.0 - seam)) * top;
   return o;
 }
@@ -427,7 +508,7 @@ function deckWgsl(tubes) {
       lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad);`);
     }
   }
-  return DECK_WGSL.replace('DECK_LIGHTS', lines.join('\n'));
+  return SKY_WGSL + DECK_WGSL.replace('DECK_LIGHTS', lines.join('\n'));
 }
 
 // Neon tubes of four colours at night: the letter S, an upright ring, a zigzag and a bar,
@@ -451,7 +532,11 @@ function buildNeon(engine, lib) {
   engine.addMaterialFunction('demo.neon-deck', deckWgsl(tubes.map((tb) => ({ points: world(tb), color: tb.color }))));
   const { color, roughness, ...coat } = NEON_FLOOR;
   const deck = engine.addSurfaceMaterial({ function: 'demo.neon-deck', params: NEON_DECK, color, roughness, ...coat });
-  place(engine, upload(engine, geometry.roundedBox(FLOOR.half, 0.02, 2), [deck]), FLOOR.t);
+  place(engine, upload(engine, geometry.roundedBox(DECK_HALF, 0.02, 2), [deck]), FLOOR.t);
+  // Starry sky dome, seen from inside; it casts no moon shadow.
+  engine.addMaterialFunction('demo.night-sky', NIGHT_SKY_WGSL);
+  const sky = engine.addSurfaceMaterial({ function: 'demo.night-sky', color: [0, 0, 0], roughness: 1, doubleSided: true, castShadow: false });
+  place(engine, upload(engine, geometry.uvSphere(SKY_DOME_R, 96, 48), [sky]), [0, 0, 0]);
   // The tubes are light sources: no moon shadow (the ring cast a black ellipse, card 4752).
   const neon = (c) => engine.addSurfaceMaterial({ function: 'raa.neon', params: { color: c, ...NEON_TUBE }, castShadow: false });
   for (const tb of tubes) place(engine, upload(engine, tb.mesh, [neon(tb.color)]), tb.t, yawQuat(tb.yaw));
@@ -563,8 +648,9 @@ const PLASTIC = 'glossy inflatable plastic with a crisp clear-coat highlight ove
   + 'base, inflated seams (soft pillowed bulges between the seams)';
 const NEON = 'several glowing neon tubes at night (a pink script letter S, a cyan ring, a '
   + 'yellow zigzag and a purple bar) above a glossy violet deck floor of large lacquered '
-  + 'panels with thin dark seams, which mirrors the tubes in blurred coloured reflections, '
-  + 'under a navy night sky fading to a violet horizon glow';
+  + 'panels with thin dark seams, a wet-looking lacquer that mirrors the tubes in blurred '
+  + 'coloured reflections and the sky towards the horizon, under a starry navy night sky '
+  + 'with soft lavender clouds over a violet horizon glow';
 const GLOW = 'neon tubes glow with soft physically based bloom, white-hot cores with '
   + 'saturated coloured rims, no halo banding';
 const PLUSH = 'a pastel pink plush ball and a plush penguin-like toy (deep blue furry body '
