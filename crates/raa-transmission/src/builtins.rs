@@ -1,4 +1,5 @@
-//! The transmissive built-in material functions (`raa.ice`, `raa.glass`).
+//! The transmissive built-in material functions (`raa.ice`, `raa.glass`, `raa.slime`,
+//! `raa.water`).
 //!
 //! Every row has flags 0 and class Opaque: a desc with blend 'opaque' draws the function
 //! opaque (the transmission-off variant), blend 'transmissive' makes it Transparent.
@@ -54,6 +55,64 @@ pub const TRANSMISSIVE_BUILTINS: &[BuiltinFn] = &[
                 kind: ParamKind::Float,
                 default: [0.03, 0.0, 0.0, 0.0],
                 slot: (1, 0),
+            },
+        ],
+        flags: 0,
+        class: DrawClass::Opaque,
+    },
+    BuiltinFn {
+        name: "raa.slime",
+        wgsl: include_str!("wgsl/slime.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "color",
+                kind: ParamKind::Color,
+                default: [0.45, 0.95, 0.15, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "absorption",
+                kind: ParamKind::Float,
+                default: [3.0, 0.0, 0.0, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "glossiness",
+                kind: ParamKind::Float,
+                default: [0.85, 0.0, 0.0, 0.0],
+                slot: (1, 1),
+            },
+            ParamSpec {
+                name: "bubbleScale",
+                kind: ParamKind::Float,
+                default: [0.06, 0.0, 0.0, 0.0],
+                slot: (1, 2),
+            },
+        ],
+        flags: 0,
+        class: DrawClass::Opaque,
+    },
+    BuiltinFn {
+        name: "raa.water",
+        wgsl: include_str!("wgsl/water.wgsl"),
+        params: &[
+            ParamSpec {
+                name: "deepColor",
+                kind: ParamKind::Color,
+                default: [0.05, 0.45, 0.55, 0.0],
+                slot: (0, 0),
+            },
+            ParamSpec {
+                name: "shallowColor",
+                kind: ParamKind::Color,
+                default: [0.55, 0.92, 0.88, 0.0],
+                slot: (1, 0),
+            },
+            ParamSpec {
+                name: "clarity",
+                kind: ParamKind::Float,
+                default: [0.7, 0.0, 0.0, 0.0],
+                slot: (2, 0),
             },
         ],
         flags: 0,
@@ -120,6 +179,7 @@ mod tests {
                 }
             }
         }
+        assert_eq!(TRANSMISSIVE_BUILTINS.len(), 4);
         assert_eq!(count, TRANSMISSIVE_BUILTINS.len() * 4);
     }
 
