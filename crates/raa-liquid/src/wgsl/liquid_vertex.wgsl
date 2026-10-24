@@ -141,14 +141,18 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput {
     let ripple_height = r0.height + r1.height + r2.height + r3.height;
     let ripple_gradient = r0.gradient + r1.gradient + r2.gradient + r3.gradient;
     let slope = waves.slope + ripple_gradient;
+    // The red vertex colour is the swell fade (the mud mesh writes 0 at the bank and 1 in
+    // the pit; other liquids default to 1). Fading the displacement to 0 at the shore keeps
+    // a wave crest from poking through the bank and calms the waterline.
+    let shore = clamp(in.color.r, 0.0, 1.0);
     var out: VertexMaterialOutput;
     out.local_position = vec3<f32>(
-        in.local_position.x + waves.displacement.x,
-        waves.height + ripple_height,
-        in.local_position.z + waves.displacement.y,
+        in.local_position.x + waves.displacement.x * shore,
+        (waves.height + ripple_height) * shore,
+        in.local_position.z + waves.displacement.y * shore,
     );
     // GPU Gems 1 ch. 1 normal plus the ripple gradient; both height fields tilt the +Y
     // rest normal the same way.
-    out.normal = normalize(vec3<f32>(-slope.x, 1.0 - waves.steepness, -slope.y));
+    out.normal = normalize(vec3<f32>(-slope.x * shore, 1.0 - waves.steepness * shore, -slope.y * shore));
     return out;
 }

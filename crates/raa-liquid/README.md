@@ -3,7 +3,9 @@
 Animated liquid surfaces of the RAA lit renderer. The crate owns the material functions
 `raa.liquid.water` and `raa.liquid.slime` (Transmissive) and `raa.liquid.mud` (Opaque,
 wet clearcoat), with Gerstner vertex stages, ripple rings from instance impacts, scrolling
-detail normals, shore and crest foam, and refraction through the `Transmission` slot.
+detail normals, shore and crest foam, and refraction through the `Transmission` slot. The
+mud adds a low-frequency fbm slope and long band to its swell normal, and its foam is a
+noise-frayed off-white band rather than a field of froth domes.
 Depends on raa-core, raa-shader, raa-lit and raa-matfn; raa-transmission and raa-brdf are
 dev-dependencies for the variants test of the built-in functions.
 
@@ -81,8 +83,11 @@ periods are periodic, and that the height is bounded by the sum of the amplitude
 (Prepass, Forward, Shadow, Transparent, FurShell) at MSAA 1 and 4 with the row flags (plus
 `FLAG_TRANSPARENT | FLAG_TRANSMISSIVE` for Transparent) over raa-lit's default slot
 providers, `raa_brdf::providers()` and the `screen` Transmission provider, validates each
-with `Composer::validate` and asserts the count (30 variants). The unit tests in
-`src/builtins.rs` check the rows, and those in `src/feature.rs` check without a GPU that a
+with `Composer::validate` and asserts the count (30 variants). `tests/scene_fns.rs` composes
+and validates the user material functions the m13 lookdev scene registers (`demo.grass`,
+`demo.crown`) against the default slots, so a reserved WGSL keyword in the scene fails
+`cargo test` instead of the GPU capture. The unit tests in `src/builtins.rs` check the rows,
+and those in `src/feature.rs` check without a GPU that a
 second registration refuses `material.fn_duplicate` and leaves the registry count unchanged
 (`LitRenderer::new` needs a GPU and a pipeline, so the tests drive the registry part of
 `install` directly).

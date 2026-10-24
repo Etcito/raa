@@ -47,7 +47,7 @@ test('mud set builds a glossy chocolate crown mesh at every pad', async () => {
   await scene.build(engine, { geometry, objects }, mud);
   const crown = rec.materials.findIndex((m) => m.color === mudSet.crownStyle.color);
   assert.ok(crown >= 0, 'no crown material');
-  assert.ok(rec.materials[crown].roughness < 0.2);
+  assert.ok(rec.materials[crown].roughness < 0.35);
   const crowns = rec.meshes.filter((m) => m.subMeshes[0].material === crown);
   assert.equal(crowns.length, mudSet.pads.length);
   for (const m of crowns) {
@@ -88,23 +88,42 @@ test('mud sun lights the camera-facing side of the crowns', async () => {
   assert.ok(toSun[1] > 0.5, `sun elevation: ${toSun[1]}`);
 });
 
-test('mud crowns are flared sheets, not spheres', async () => {
-  // Card 5070's judge read lathe tongues with droplet spheres as "blobby spheres": the crown
-  // is one sheet whose lobes flare outward from the pad wall as they rise.
+test('mud crowns are thick tongues with wide bases and bulbous tips', () => {
+  // Card 5078's judge read the old thin continuous sheet as "thin, tapered horn spikes":
+  // each tongue is a wide-based sheet that ends in a rounded club, not a cone.
+  const C = mudSet.crownStyle;
+  assert.ok(C.lobes >= 6 && C.lobes <= 8, `lobes per pad ${C.lobes}`);
+  assert.ok(C.widthBase > 2 * C.widthMid, 'wide base');
+  assert.ok(C.thickTip > 1.5 * C.thickMid, 'bulbous tip');
   for (const [i, pad] of mudSet.pads.entries()) {
-    const m = mudSet.crown(geometry, pad, i, 1);
-    const [, , r] = pad;
-    let flared = 0;
-    let top = -Infinity;
-    for (let k = 0; k < m.positions.length; k += 3) {
-      const y = m.positions[k + 1];
-      top = Math.max(top, y);
-      if (y > 0.18 && Math.hypot(m.positions[k], m.positions[k + 2]) > r + 0.1) flared++;
+    for (let k = 0; k < C.lobes; k++) {
+      const m = mudSet.tongue(geometry, pad, i, k, 1);
+      const p = m.positions;
+      let top = -Infinity;
+      for (let v = 1; v < p.length; v += 3) top = Math.max(top, p[v]);
+      // The tip club is nearly as wide as the base: a rounded end, not a needle.
+      let tipSpan = 0;
+      let baseSpan = 0;
+      let maxRho = 0;
+      let minY = Infinity;
+      for (let v = 0; v < p.length; v += 3) {
+        maxRho = Math.max(maxRho, Math.hypot(p[v], p[v + 2]));
+        minY = Math.min(minY, p[v + 1]);
+      }
+      for (let v = 0; v < p.length; v += 3) {
+        for (let w = v + 3; w < p.length; w += 3) {
+          if (Math.hypot(p[v], p[v + 2]) > maxRho - 0.07 && Math.hypot(p[w], p[w + 2]) > maxRho - 0.07) {
+            tipSpan = Math.max(tipSpan, Math.hypot(p[v] - p[w], p[v + 2] - p[w + 2]));
+          }
+          if (p[v + 1] < minY + 0.06 && p[w + 1] < minY + 0.06) {
+            baseSpan = Math.max(baseSpan, Math.hypot(p[v] - p[w], p[v + 2] - p[w + 2]));
+          }
+        }
+      }
+      assert.ok(top > 0.25, `tongue ${k} top ${top}`);
+      assert.ok(baseSpan > 0.3, `tongue ${k} base span ${baseSpan}`);
+      assert.ok(tipSpan > 0.1, `tongue ${k} tip span ${tipSpan}`);
     }
-    assert.ok(top > 0.25, `crown top ${top}`);
-    assert.ok(flared > 50, `flared lobe vertices: ${flared}`);
-    const lobes = Array.from({ length: mudSet.crownStyle.lobes }, (_, k) => mudSet.lobe(i, k));
-    assert.ok(lobes.length >= 7 && lobes.every((l) => l.h > 0.2));
   }
 });
 
@@ -140,21 +159,26 @@ test('mud pads float tilted on the swell, top clear and underside in the mud', (
   }
 });
 
-test('mud surface is one low swell with a narrow white froth band', () => {
+test('mud is deep chocolate with a visible swell and a soft froth band', () => {
   const M = mudSet.material;
   const waves = [M.wave0, M.wave1, M.wave2, M.wave3];
   // The longest wave carries the swell; the short ones are faint ripples, not bumps.
-  assert.ok(waves[0][1] >= 3 && waves[0][0] <= 0.1);
+  assert.ok(waves[0][1] >= 3 && waves[0][0] >= 0.1, 'long swell');
   for (const [a, l, , q] of waves.slice(2)) {
-    assert.ok(a / l < 0.015, `short wave slope ${a / l}`);
-    assert.ok(q <= 0.3, `short wave steepness ${q}`);
+    assert.ok(a / l < 0.03, `short wave slope ${a / l}`);
+    assert.ok(q <= 0.4, `short wave steepness ${q}`);
   }
-  assert.ok(M.foamWidth <= 0.12 && M.foamAmount <= 0.3, 'froth band narrow');
-  assert.ok(M.detailStrength <= 0.03);
-  // Warm milk chocolate (sRGB) as bright as ref-3's mud: the dark (0.36, 0.2, 0.12)
-  // rendered maroon and purple under the sky reflection (card 5077).
-  assert.ok(M.color[0] >= 0.45 && M.color[0] <= 0.65, `red ${M.color[0]}`);
-  assert.ok(M.color[1] / M.color[0] >= 0.5 && M.color[2] / M.color[0] <= 0.35, `hue ${M.color}`);
+  assert.ok(M.foamWidth >= 0.12 && M.foamWidth <= 0.25, 'soft froth band');
+  assert.ok(M.foamAmount >= 0.2 && M.foamAmount <= 0.6);
+  // The shader needs a low-frequency slope to break the sun highlight (card 5078: a flat
+  // orange-rust plane).
+  assert.ok(M.detailStrength >= 0.1 && M.detailScale <= 1.0, 'swell normal noise');
+  // Deep chocolate (sRGB) inside ref-3's #4a2414..#5c2f1b, measured as linear luminance.
+  const lin = M.color.map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  const luma = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+  assert.ok(luma >= 0.026 && luma <= 0.045, `mud albedo luma ${luma}`);
+  assert.ok(M.color[0] > M.color[1] && M.color[1] > M.color[2], `hue ${M.color}`);
+  assert.ok(M.color[2] <= 0.4 * M.color[0], `blue ${M.color[2]}`);
 });
 
 test('mud crowns are large and spray is thin droplets arcing from the lobe tips', () => {
@@ -196,15 +220,17 @@ test('mud bank is a grass material over a ridge around the pit', async () => {
   assert.ok(ridge > mudSet.ground(6, 0) + 0.08 && ridge > 0.3, `ridge ${ridge}`);
 });
 
-test('mud spray drops are white glowing beads, not thin needles', () => {
+test('mud spray is many small thin white streaks, not broad blobs', () => {
   const D = mudSet.drops;
-  assert.ok(D.stretch <= 2.5, `stretch ${D.stretch}`);
-  assert.ok(D.radius[0] >= 0.015, `radius ${D.radius}`);
-  assert.ok(Math.min(...D.color) > 0.9 && Math.min(...D.emissive) > 0.3);
+  assert.ok(D.count >= 8, `drops per tongue ${D.count}`);
+  assert.ok(D.stretch >= 3, `stretch ${D.stretch}`);
+  assert.ok(D.radius[1] <= 0.012, `radius ${D.radius}`);
+  assert.ok(Math.min(...D.color) > 0.9 && Math.min(...D.emissive) > 0.2);
 });
 
-test('mud bank rises in a rounded mound well above the meadow', () => {
-  assert.ok(mudSet.ground(3.6, 0) - mudSet.ground(8, 0) > 0.35, 'mound height');
+test('mud bank rises out of the pit well above the mud', () => {
+  assert.ok(mudSet.ground(3.45, 0) - mudSet.ground(8, 0) > 0.2, 'rounded ridge');
+  assert.ok(mudSet.ground(3.45, 0) > 0.55, `bank height ${mudSet.ground(3.45, 0)}`);
   for (const [x, z, r] of mudSet.pads) {
     // The pads and their crowns stay inside the pit, clear of the bank.
     const a = Math.atan2(z, x);
@@ -212,11 +238,44 @@ test('mud bank rises in a rounded mound well above the meadow', () => {
   }
 });
 
-test('mud pads have a raised rim tube around a recessed top', () => {
-  for (const [, , r, h] of mudSet.pads) {
+test('mud pads have a raised rim tube around a flat +Y top', () => {
+  for (const [x, z, r, h] of mudSet.pads) {
     const prof = mudSet.padProfile(r, h);
     const centre = prof.at(-1)[1];
     const crown = Math.max(...prof.map(([, y]) => y));
+    const rin = prof.at(-5)[0];
+    const rr = 0.5 * (r - rin);
+    // The rim stands 15..20% of the pad radius above the flat top (card 5078's pads were
+    // dished cups with a sky-blue reflection inside).
+    assert.ok(rr / r >= 0.14 && rr / r <= 0.2, `rim ${rr / r} r above the top`);
     assert.ok(crown - centre > 0.015, `rim stands ${crown - centre} m above the top`);
+    // Both the profile and the built mesh have +Y normals across the flat interior.
+    const topY = centre - 0.003;
+    const pad = mudSet.pad(geometry, [x, z, r, h], mudSet.padPose([x, z, r], 1), 1);
+    let interior = 0;
+    for (let v = 0; v < pad.positions.length; v += 3) {
+      if (Math.hypot(pad.positions[v], pad.positions[v + 2]) < rin - 0.01 && pad.positions[v + 1] > topY - 0.005) {
+        interior++;
+        assert.ok(pad.normals[v + 1] > 0.999, `top normal ${pad.normals[v + 1]} at ${pad.positions[v]}`);
+      }
+    }
+    assert.ok(interior > 20, `interior top vertices ${interior}`);
   }
+});
+
+test('mud set adds a few glossy bubbles on the open mud', async () => {
+  const { engine, rec } = fakeEngine();
+  await scene.build(engine, { geometry, objects }, mud);
+  assert.ok(mudSet.bubbles.length >= 2 && mudSet.bubbles.length <= 4, `bubbles ${mudSet.bubbles.length}`);
+  const ring = mudSet.bubbleRing;
+  for (const [x, z, r] of mudSet.bubbles) {
+    assert.ok(mudSet.height(x, z, 1) < 0.1, `bubble at ${x}, ${z} above the mud`);
+    for (const [px, pz, pr] of mudSet.pads) {
+      assert.ok(Math.hypot(x - px, z - pz) > pr + r + 0.05, `bubble ${x}, ${z} overlaps a pad`);
+    }
+  }
+  assert.ok(Math.hypot(ring.x, ring.z) < 2.2, 'pop ring inside the pit');
+  // The bubble material is a dark mirror coat, not another mud surface.
+  const bubble = rec.materials.find((m) => m.roughness === 0.04 && m.clearcoat === 1);
+  assert.ok(bubble && bubble.color[0] < 0.3, 'bubble material');
 });
