@@ -164,9 +164,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.roughness = mix(o.roughness, 0.1, gloss);
     o.clearcoat = mix(o.clearcoat, 0.95, 0.8 * gloss);
     o.clearcoat_roughness = mix(o.clearcoat_roughness, 0.02, gloss);
-    // A raised bubble is wetter and slightly lighter than the pit around it; the warm tone
-    // is kept so the surface never drifts to the sky's blue.
-    o.base_color = mix(o.base_color, vec3<f32>(0.24, 0.14, 0.065), 0.5 * gloss);
+    // A raised bubble is wetter and slightly lighter than the pit around it; it follows the
+    // mud colour (a fixed light brown read as pale spots on a dark pit, card 5027) so the
+    // surface never drifts to the sky's blue.
+    o.base_color = mix(o.base_color, color * 1.5, 0.5 * gloss);
 
     let crest = liquid_waves_at(in.record.p, in.local_position.xz, in.time);
     let foam = mud_foam(crest, in.position, in.time, foam_amount);

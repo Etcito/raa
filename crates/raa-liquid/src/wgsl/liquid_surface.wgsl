@@ -91,7 +91,9 @@ fn liquid_mesh_edge(uv: vec2<f32>, width: f32) -> f32 {
 fn liquid_foam(shore: f32, crest: f32, world_pos: vec3<f32>, t: f32, amount: f32) -> f32 {
     let drift = vec3<f32>(0.0, 0.4 * t, 0.23 * t);
     let n = 0.62 * raa_noise3(world_pos * 6.5 + drift) + 0.38 * raa_noise3(world_pos * 15.0 - drift * 1.6);
-    let breakup = smoothstep(0.16, 0.7, clamp(0.5 + 0.5 * n, 0.0, 1.0));
+    // The mask starts above the noise median: a lower start covered half the surface in
+    // white blotches at capture distance (card 5027).
+    let breakup = smoothstep(0.42, 0.78, clamp(0.5 + 0.5 * n, 0.0, 1.0));
     // Whitecaps only at the sharp crests, so the foam reads as lines rather than a haze.
     let caps = smoothstep(0.05, 0.26, crest) * clamp(amount, 0.0, 1.0);
     return clamp(max(shore, caps) * breakup, 0.0, 1.0);

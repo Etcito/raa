@@ -73,10 +73,12 @@ const SLIME = {
   absorption: 6,
   glossiness: 0.98,
   bubbleScale: 0.4,
-  foamWidth: 0.2,
-  foamAmount: 1.0,
-  detailStrength: 0.12,
-  detailScale: 0.7,
+  // Thin foam and finer, stronger detail normals: card 5027 judged the slime foam blotchy
+  // and its sky reflection and gloss weak (a broad wobble catches few highlights).
+  foamWidth: 0.1,
+  foamAmount: 0.5,
+  detailStrength: 0.18,
+  detailScale: 1.4,
 };
 const SLIME_IOR = 1.38;
 const SLIME_THICKNESS = 0.3;
@@ -97,12 +99,14 @@ const MUD = {
   wave2: [0.012, 1.0, -0.7, 0.5],
   wave3: [0.0056, 0.6, 2.4, 0.4],
   speeds: [0.173, 0.130, 0.100, 0.0774],
-  color: [0.52, 0.26, 0.07],
+  // Linear dark brown (sRGB about 0.36, 0.25, 0.15): the old 0.52/0.26/0.07 read as a
+  // salmon-pink liquid once the sky sheen was added (card 5027).
+  color: [0.105, 0.052, 0.02],
   wetness: 0.9,
   bubbleScale: 0.4,
   bubbleRate: 0.32,
   foamAmount: 0.12,
-  detailStrength: 0.16,
+  detailStrength: 0.1,
   detailScale: 0.6,
 };
 // Rocks: [x, z, radius, squash in y, y centre]
@@ -238,7 +242,7 @@ function buildSlime(engine, lib) {
     function: 'raa.liquid.slime',
     params: SLIME,
     blend: 'transmissive',
-    transmission: 0.75,
+    transmission: 0.6,
     ior: SLIME_IOR,
     thickness: SLIME_THICKNESS,
   }, [0, -0.1, 0]);
@@ -250,11 +254,18 @@ function buildMud(engine, lib) {
   // The mud body is a brown diffuse; a mirror-bright blue sky wash turns it mauve at
   // capture distance (card 5018). A dimmer sky specular keeps the wet sheen and the sun's
   // clear-coat highlight without recolouring the mud.
-  engine.setEnvironmentLighting({ ...ENV, specular: 0.55 });
-  const ground = engine.addSurfaceMaterial({ color: [0.56, 0.4, 0.22], roughness: 1 });
-  const rim = heightfield(geometry, 8, 8, 64,
-    (x, z) => -0.05 + 0.25 * Math.max(0, (Math.hypot(x, z * 1.1) - 2.8) / 1.2),
-    () => [1, 1, 1, 1]);
+  engine.setEnvironmentLighting({ ...ENV, specular: 0.8 });
+  // The pit bed sits 0.3 m below the mud: a bed just under the surface broke through every
+  // wave trough as cut-out holes (card 5027). The rim rises through the surface about
+  // r = 2.7 m (inside the 6 m grid, so the grid border stays buried) and is a lighter,
+  // drier brown than the mud, damp and darker near the shore.
+  const ground = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 1 });
+  const dry = [0.34, 0.23, 0.12];
+  const rimHeight = (x, z) => -0.3 + 0.55 * Math.min(1, Math.max(0, (Math.hypot(x, z * 1.1) - 2.1) / 1.2));
+  const rim = heightfield(geometry, 8, 8, 96, rimHeight, (x, z, y) => {
+    const damp = 0.65 + 0.35 * Math.min(1, Math.max(0, y / 0.2));
+    return [dry[0] * damp, dry[1] * damp, dry[2] * damp, 1];
+  });
   place(engine, upload(engine, rim, ground), [0, 0, 0]);
   for (const r of MUD_ROCKS) rock(engine, geometry, r, [0.36, 0.32, 0.27]);
   liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
