@@ -113,11 +113,14 @@ const NIGHT_SKY = {
 // 60..120, 50, 150..240): lighter and redder (preview about 60, 2, 145 near the camera),
 // the gloss still carried by the mirror terms.
 // sRGB colour, roughness, coat.
-const NEON_FLOOR = { color: [0.36, 0.14, 0.6], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
+// (0.36, 0.14, 0.6) rendered an even mid violet (sRGB about 56..60, 0..30, 142..202) that the
+// judge still read as "fairly matte with weak lacquer gloss" (card 4816): a deeper lacquer
+// (preview about 30, 0, 125 near the camera), so the reflections and pools carry the contrast.
+const NEON_FLOOR = { color: [0.24, 0.08, 0.48], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.04 };
 // Deck parameters (linear, raw user params): p0 seam colour; p1 = (light pool gain, sharp
 // coat lobe rad, broad base lobe rad, broad lobe weight); p2 = (panel size m, seam width m,
 // groove shadow width m, panel tone variation).
-// p3 = (sky mirror gain, tube reflection gain, polish variation): the lacquer mirrors the night sky dome and
+// p3 = (sky mirror gain, tube reflection gain, polish variation, vertical lobe stretch): the lacquer mirrors the night sky dome and
 // the tubes more strongly than a 4 % coat, as ref-4's wet-looking decks; at 1 the judge read
 // the deck as "a fairly matte grid with weak specular highlights" (card 4811). At a 0.02 rad
 // coat lobe, a 0.2 rad base lobe weighted 0.35 and pool gain 2 the reflections were blurred
@@ -127,11 +130,16 @@ const NEON_FLOOR = { color: [0.36, 0.14, 0.6], roughness: 0.2, clearcoat: 1, cle
 // (card 4814): the tilted bevels mirrored the horizon glow. Now 0.8 m panels, 2 cm seams
 // darkened by a 3 cm groove shadow (no tilt), a stronger sky mirror (1.2 -> 2.2: a wet
 // lavender sheen toward the horizon) and a +-20 % broad polish variation of the mirror.
+// The judge still saw "thin reflections" and "weak lacquer gloss" (card 4816): with the
+// thicker tubes the pools and the broad lobe (both grow with TUBE_R) blurred the reflections
+// into blobs, so pool gain 3 -> 1.8 and broad weight 0.25 -> 0.12, the crisp tube reflections
+// 2 -> 3.5; the broad lobe is stretched 1.6x in elevation (the streaks of a wet floor under
+// a light) and the polish varies +-35 % in wipe-like streaks (ref-4's smudged lacquer).
 const NEON_DECK = {
   p0: [0.006, 0.002, 0.016],
-  p1: [3, 0.008, 0.12, 0.25],
+  p1: [1.8, 0.008, 0.12, 0.12],
   p2: [0.8, 0.02, 0.03, 0.1],
-  p3: [2.2, 2, 0.2, 0],
+  p3: [2.2, 3.5, 0.35, 1.6],
 };
 // Night sky dome of the neon sets (demo.night-sky): radius m, a sphere around the set drawn
 // from inside. The procedural `night` sky is a flat gradient (judge, card 4811); the dome
@@ -146,7 +154,9 @@ const DECK_SEGMENT = 0.1;
 // ref-4's wide soft glow; at the defaults the halo hugged the 5 cm tubes (card 4752). 0.08
 // lost the halo against the brighter starry sky dome (card 4811). With the hot-core tubes
 // below (card 4813) the halo is brighter at 0.1 / 0.9; 0.13 / 1 hazed the whole frame.
-const NEON_BLOOM = { strength: 0.1, radius: 0.9 };
+// With the thicker tubes (TUBE_R) the halo carries ~1.8x the energy; 0.12 / 0.95 for the
+// "rich bloom" of ref-4 (judge, card 4816).
+const NEON_BLOOM = { strength: 0.12, radius: 0.95 };
 // +0.3 EV brings the night set towards ref-4's bright purple key (mean sRGB 134, 104, 177).
 const NEON_EXPOSURE_EV = 0.3;
 // raa.neon strength (emissive scale of the coloured gas) and core whiteness of every tube.
@@ -156,12 +166,16 @@ const NEON_EXPOSURE_EV = 0.3;
 // 0.86 + core 4 x 0.8 x 0.41), for the deck lights: NEON_PROFILE_MEAN.
 const NEON_TUBE = { strength: 8, coreWhiteness: 0.8 };
 const NEON_PROFILE_MEAN = 2.16;
-// Neon colours (sRGB) and the shared tube radius (m).
+// Neon colours (sRGB) and the shared tube radius (m). 2.5 cm tubes were ~7 px wide in the
+// capture: the judge saw thin tubes and thin reflections lacking ref-4's fat glowing bars
+// and rich bloom (card 4816); lib's neonTube letter (2.5 cm) is thickened to TUBE_R.
+// The S stands on the floor: it is lifted by the added radius.
 const NEON_PINK = [1, 0.25, 0.7];
 const NEON_CYAN = [0.15, 0.85, 1];
 const NEON_YELLOW = [1, 0.8, 0.2];
 const NEON_PURPLE = [0.6, 0.3, 1];
-const TUBE_R = 0.025;
+const TUBE_R = 0.045;
+const LETTER_R = 0.025;
 
 // Plush palette (sRGB): ref-1/ref-2's deep blue penguin fur, white belly, orange beak and
 // feet; the plush ball is pastel pink. Fur: length m, strands per cm2, droop.
@@ -319,7 +333,9 @@ fn deck_diffuse(p: vec3<f32>, n: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32) 
 // angular radius, and windowed along the segment by linear ramps of the lobe's length at
 // each end. The ramps of two segments sharing an end sum to 1 (clamping the closest point
 // to the segment counted both segments in full at the joint: beaded reflections, card 4813).
-fn deck_specular(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32, sigma: f32) -> f32 {
+// The lobe is \`stretch\` times longer in elevation than in azimuth: a wet floor draws a
+// light's reflection as a streak towards the viewer.
+fn deck_specular(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32, sigma: f32, stretch: f32) -> f32 {
   let l0 = a - p;
   let ld = b - a;
   let len2 = max(dot(ld, ld), 1e-8);
@@ -327,8 +343,9 @@ fn deck_specular(p: vec3<f32>, rd: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32
   let t = clamp((dot(rd, l0) * rl - dot(l0, ld)) / max(len2 - rl * rl, 1e-6), -1.0, 2.0);
   let c = l0 + t * ld;
   let dist = max(length(c), 1e-3);
-  let cos_t = clamp(dot(c / dist, rd), -1.0, 1.0);
-  let theta2 = 2.0 * (1.0 - cos_t);
+  let dev = c / dist - rd;
+  let dy2 = dev.y * dev.y;
+  let theta2 = max(dot(dev, dev) - dy2, 0.0) + dy2 / (stretch * stretch);
   let beta = r / dist;
   let spread2 = beta * beta + sigma * sigma;
   let ramp = sqrt(len2) / max(2.0 * dist * sqrt(spread2), 1e-4);
@@ -348,6 +365,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let groove_w = max(in.record.p[2].z, 1e-4);
   let tone = in.record.p[2].w;
   let polish_amp = in.record.p[3].z;
+  let stretch = max(in.record.p[3].w, 1.0);
   let top = smoothstep(0.5, 0.9, in.normal.y);
 
   // Panels: distance to the nearest seam centre (m), per-panel tone.
@@ -366,8 +384,8 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   // Groove shadow: the panel darkens toward its seam (no normal tilt: a tilted bevel
   // mirrored the bright horizon and drew the seams as bright lines, judge card 4814).
   let groove = 1.0 - 0.6 * (1.0 - smoothstep(0.5 * seam_w, 0.5 * seam_w + groove_w, d)) * (1.0 - seam) * top * fade;
-  // Uneven polish: broad patches where the lacquer mirrors a little more or less.
-  let polish = 1.0 + polish_amp * clamp(raa_fbm3(vec3<f32>(in.position.xz * 0.7, 3.1), 3), -1.0, 1.0);
+  // Uneven polish: wipe-like streaks (long along X) where the lacquer mirrors more or less.
+  let polish = 1.0 + polish_amp * clamp(raa_fbm3(vec3<f32>(in.position.x * 0.8, in.position.z * 2.5, 3.1), 4) * 1.5, -1.0, 1.0);
   o.base_color = mix(o.base_color * shade * groove, seam_color, seam);
   o.roughness = mix(o.roughness, 0.8, seam);
   o.clearcoat = o.clearcoat * (1.0 - seam);
@@ -519,6 +537,12 @@ function centreline(desc, step) {
   return out;
 }
 
+// A lib tube mesh grown by \`dr\` m: positions pushed along their (radial) normals.
+function thicken(desc, dr) {
+  const positions = desc.positions.map((x, i) => x + desc.normals[i] * dr);
+  return { ...desc, positions };
+}
+
 const srgbToLinear = (c) => c.map((x) => (x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
 const wgslVec = (v) => `vec3<f32>(${v.map((x) => x.toFixed(4)).join(', ')})`;
 
@@ -532,8 +556,8 @@ function deckWgsl(tubes) {
     for (let i = 0; i + 1 < points.length; i++) {
       const ab = `${wgslVec(points[i])}, ${wgslVec(points[i + 1])}, ${TUBE_R}`;
       lines.push(`  pool += ${radiance} * deck_diffuse(p, n, ${ab});`);
-      lines.push(`  refl_sharp += ${radiance} * deck_specular(p, rd, ${ab}, sharp);`);
-      lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad);`);
+      lines.push(`  refl_sharp += ${radiance} * deck_specular(p, rd, ${ab}, sharp, 1.0);`);
+      lines.push(`  refl_broad += ${radiance} * deck_specular(p, rd, ${ab}, broad, stretch);`);
     }
   }
   return SKY_WGSL + DECK_WGSL.replace('DECK_LIGHTS', lines.join('\n'));
@@ -546,7 +570,7 @@ function buildNeon(engine, lib) {
   night(engine);
   const zig = polyline([[-0.4, 0, 0], [-0.2, 0.25, 0], [0, 0, 0], [0.2, 0.25, 0], [0.4, 0, 0]], 12);
   const tubes = [
-    { mesh: objects.neonTube(), color: NEON_PINK, t: [-0.2, 0, 0], yaw: 0 },
+    { mesh: thicken(objects.neonTube(), TUBE_R - LETTER_R), color: NEON_PINK, t: [-0.2, TUBE_R - LETTER_R, 0], yaw: 0 },
     { mesh: geometry.sweepTube(circle(0.35, 64, true), TUBE_R, 16, { closed: true }), color: NEON_CYAN, t: [0.85, 0.45, -0.2], yaw: -0.3 },
     { mesh: geometry.sweepTube(zig, TUBE_R, 16), color: NEON_YELLOW, t: [-1.15, 0.2, -0.3], yaw: 0.35 },
     { mesh: geometry.sweepTube(polyline([[-1.2, 0, 0], [1.2, 0, 0]], 24), TUBE_R, 16), color: NEON_PURPLE, t: [0, 1.15, -0.6], yaw: 0 },
