@@ -37,7 +37,7 @@ test('mud set spawns white spray at every pad', async () => {
     for (const c of e.colors) assert.ok(Math.min(...c) > 0.85, `spray colour ${c}`);
   }
   for (const [x, z, r] of mudSet.pads) {
-    const near = spray.filter((e) => Math.hypot(e.position[0] - x, e.position[2] - z) < r + 0.2);
+    const near = spray.filter((e) => Math.hypot(e.position[0] - x, e.position[2] - z) < r + 0.45);
     assert.ok(near.length > 0, `no spray at pad ${x}, ${z}`);
   }
 });
@@ -106,4 +106,90 @@ test('mud crowns are flared sheets, not spheres', async () => {
     const lobes = Array.from({ length: mudSet.crownStyle.lobes }, (_, k) => mudSet.lobe(i, k));
     assert.ok(lobes.length >= 7 && lobes.every((l) => l.h > 0.2));
   }
+});
+
+test('mud pads are low wide discs with a rounded rim', () => {
+  for (const pad of mudSet.pads) {
+    const [, , r, h] = pad;
+    assert.ok(h < 0.25 * 2 * r, `pad height ${h} vs diameter ${2 * r}`);
+    const prof = mudSet.padProfile(r, h);
+    const top = Math.max(...prof.map(([, y]) => y));
+    assert.ok(top < 0.5 * r, `pad top ${top}`);
+    // The rim is rounded: several profile points between the wall top and the top face.
+    const shoulder = prof.filter(([rho, y]) => y > 0.6 * h && y < h && rho > 0.7 * r);
+    assert.ok(shoulder.length >= 4, `rim points ${shoulder.length}`);
+    const m = mudSet.pad(geometry, pad, mudSet.padPose(pad, 1), 1);
+    assert.ok(m.positions.every(Number.isFinite) && m.normals.every(Number.isFinite));
+  }
+});
+
+test('mud pads float tilted on the swell, top clear and underside in the mud', () => {
+  for (const [x, z, r, h] of mudSet.pads) {
+    const pose = mudSet.padPose([x, z, r], 1);
+    assert.ok(Math.abs(Math.hypot(...pose.q) - 1) < 1e-9);
+    for (let a = 0; a < 6.28; a += 0.25) {
+      const rim = (y) => {
+        const w = mudSet.rotate(pose.q, [r * Math.cos(a), y, r * Math.sin(a)]);
+        return { y: pose.base + w[1], mud: mudSet.height(x + w[0], z + w[2], 1) };
+      };
+      const top = rim(h);
+      const keel = rim(-0.12);
+      assert.ok(top.y - top.mud > 0.08, `pad top clears the mud at ${x}, ${z}: ${top.y - top.mud}`);
+      assert.ok(keel.mud - keel.y > 0.05, `pad underside in the mud at ${x}, ${z}`);
+    }
+  }
+});
+
+test('mud surface is one low swell with a narrow white froth band', () => {
+  const M = mudSet.material;
+  const waves = [M.wave0, M.wave1, M.wave2, M.wave3];
+  // The longest wave carries the swell; the short ones are faint ripples, not bumps.
+  assert.ok(waves[0][1] >= 3 && waves[0][0] <= 0.1);
+  for (const [a, l, , q] of waves.slice(2)) {
+    assert.ok(a / l < 0.015, `short wave slope ${a / l}`);
+    assert.ok(q <= 0.3, `short wave steepness ${q}`);
+  }
+  assert.ok(M.foamWidth <= 0.12 && M.foamAmount <= 0.3, 'froth band narrow');
+  assert.ok(M.detailStrength <= 0.03);
+  // Dark chocolate (sRGB): darker than 0.4 red, blue at least a quarter of red.
+  assert.ok(M.color[0] < 0.4 && M.color[2] / M.color[0] > 0.25 && M.color[1] < M.color[0]);
+});
+
+test('mud crowns are large and spray is thin droplets arcing from the lobe tips', () => {
+  for (const [i, pad] of mudSet.pads.entries()) {
+    const lobes = Array.from({ length: mudSet.crownStyle.lobes }, (_, k) => mudSet.lobe(i, k));
+    assert.ok(Math.max(...lobes.map((l) => l.h)) >= 0.45, 'tallest lobe');
+    assert.ok(lobes.every((l) => l.flare >= 0.2), 'lobes flare out');
+    const m = mudSet.spray(geometry, pad, i, 1);
+    const verts = m.positions.length / 3;
+    const perDrop = verts / (lobes.length * mudSet.drops.count);
+    assert.ok(Number.isInteger(perDrop) && perDrop > 0);
+    assert.ok(m.positions.every(Number.isFinite) && m.normals.every(Number.isFinite));
+    // Each drop is stretched: its extent along its longest axis is about stretch x width.
+    for (let d = 0; d < 3; d++) {
+      const pts = [];
+      for (let v = d * perDrop; v < (d + 1) * perDrop; v++) pts.push([0, 1, 2].map((c) => m.positions[3 * v + c]));
+      let far = 0;
+      for (const p of pts) for (const q of pts) far = Math.max(far, Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]));
+      assert.ok(far > 2 * 2 * mudSet.drops.radius[0], `drop length ${far}`);
+    }
+  }
+});
+
+test('mud bank is a grass material over a ridge around the pit', async () => {
+  const { engine, rec } = fakeEngine();
+  const fns = [];
+  const eng = new Proxy(engine, {
+    get(target, name) {
+      if (name === 'addMaterialFunction') return (n, w) => fns.push([n, w]);
+      return target[name];
+    },
+  });
+  await scene.build(eng, { geometry, objects }, mud);
+  const grass = fns.find(([n]) => n === 'demo.grass');
+  assert.ok(grass && /fn material_main\(in: MaterialInput\) -> MaterialOutput/.test(grass[1]));
+  assert.ok(!/@group|@binding|fn raa_/.test(grass[1]));
+  assert.ok(rec.materials.some((m) => m.function === 'demo.grass'));
+  const ridge = mudSet.ground(3.3, 0);
+  assert.ok(ridge > mudSet.ground(6, 0) + 0.08 && ridge > 0.3, `ridge ${ridge}`);
 });
