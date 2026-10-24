@@ -24,6 +24,31 @@ pub(crate) const COC_WORKGROUP: u32 = 8;
 /// Tile edge in pixels (`cs_tiles` workgroup edge).
 pub(crate) const TILE_SIZE: u32 = 16;
 
+/// Render module (no PRELUDE), group 0 only: 0 `DofParams` uniform (the same struct as
+/// [`DOF_COC_WGSL`]), 1 hdr.src() (full res), 2 CoC (full res, from [`CS_COC`]), 3 dilated
+/// tiles (from [`CS_DILATE`]), 4 depth (`texture_depth_2d`), 5 near layer (half res),
+/// 6 far layer (half res). All textureLoad, no sampler. Every fragment entry is drawn with
+/// the fullscreen triangle of [`VS_MAIN`] (3 vertices) into `HDR_FORMAT` targets; each binds
+/// only the bindings its doc lists.
+pub(crate) const DOF_GATHER_WGSL: &str = include_str!("wgsl/dof_gather.wgsl");
+
+/// Fullscreen triangle vertex entry, varying `uv` (target coordinates, (0, 0) top-left).
+pub(crate) const VS_MAIN: &str = "vs_main";
+/// Half res, MRT 2 targets (0 near, 1 far, premultiplied, a = coverage): 4-tap CoC-weighted
+/// average of the full-res hdr. Bindings 1, 2.
+pub(crate) const FS_PREFILTER: &str = "fs_prefilter";
+/// Half res: 48-tap spiral gather of the prefiltered near layer (binding 5); a = coverage.
+/// Bindings 2, 3, 5.
+pub(crate) const FS_GATHER_NEAR: &str = "fs_gather_near";
+/// Half res: depth-ordered 48-tap spiral gather of the prefiltered far layer (binding 6).
+/// Bindings 2, 3, 6.
+pub(crate) const FS_GATHER_FAR: &str = "fs_gather_far";
+/// Full res into hdr.dst(): bilateral upsample of the gathered layers over the sharp hdr.
+/// Bindings 0, 1, 2, 4, 5, 6.
+pub(crate) const FS_COMPOSITE: &str = "fs_composite";
+/// Taps of the golden-angle spiral of each gather.
+pub(crate) const GATHER_TAPS: u32 = 48;
+
 /// Byte size of `DofParams`: inv_proj @0 (mat4x4); lens @64 (focus s m, aperture term
 /// `K = A * f / (s - f)` in px at viewport_h, max CoC px at viewport_h, camera near m =
 /// lower bound of the autofocus distance); lens2 @80 (focal length f m, 0, 0, 0); viewport

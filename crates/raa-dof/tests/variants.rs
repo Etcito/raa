@@ -2,6 +2,8 @@
 //! named by `shaders.rs` with their workgroup sizes, binds only group 0 (no PRELUDE) with
 //! core write-only storage formats, and `DofParams` has the field order, size (128) and
 //! `lens2` offset of `shaders.rs`. The CPU twin of the autofocus CoC matches `coc_px`.
+//! The gather render module validates, defines the fullscreen vertex entry and the four
+//! fragment entries of `shaders.rs`, and its `DofParams` is a verbatim copy.
 
 // The shader module is crate-private; the test compiles its file.
 #[path = "../src/shaders.rs"]
@@ -183,4 +185,72 @@ fn autofocus_twin_clamps_and_rejects_bad_depth() {
     for z in [0.0, -1.0, f32::NAN, f32::INFINITY] {
         assert_eq!(shaders::coc_px_at_focus(z, &d, 720.0, 10.0), 0.0);
     }
+}
+
+/// The `struct DofParams { ... }` block of `wgsl`, verbatim (comments included).
+fn params_block(wgsl: &str) -> String {
+    let start = wgsl.find("struct DofParams {").expect("struct DofParams");
+    let end = start + wgsl[start..].find("\n}").expect("end of DofParams") + 2;
+    wgsl[start..end].to_string()
+}
+
+#[test]
+fn gather_module_validates() {
+    if let Err(e) = Composer::validate(shaders::DOF_GATHER_WGSL) {
+        panic!("dof_gather: {e}");
+    }
+}
+
+#[test]
+fn gather_vertex_and_four_fragment_entries() {
+    let entries = entry_points(shaders::DOF_GATHER_WGSL);
+    let expected = [
+        ("@vertex", shaders::VS_MAIN),
+        ("@fragment", shaders::FS_PREFILTER),
+        ("@fragment", shaders::FS_GATHER_NEAR),
+        ("@fragment", shaders::FS_GATHER_FAR),
+        ("@fragment", shaders::FS_COMPOSITE),
+    ];
+    for e in expected {
+        assert!(entries.contains(&e), "missing {e:?} in {entries:?}");
+    }
+    assert_eq!(entries.len(), expected.len(), "{entries:?}");
+    let wgsl = shaders::DOF_GATHER_WGSL;
+    assert_eq!(wgsl.matches("@vertex").count(), 1);
+    assert_eq!(wgsl.matches("@fragment").count(), 4);
+    assert_eq!(wgsl.matches("@compute").count(), 0);
+    // fs_prefilter writes the near and far layers (MRT 2 targets)
+    assert!(wgsl.contains("@location(0) near: vec4<f32>,"));
+    assert!(wgsl.contains("@location(1) far: vec4<f32>,"));
+    let taps = shaders::GATHER_TAPS;
+    assert!(wgsl.contains(&format!("const TAPS: u32 = {taps}u;")));
+}
+
+#[test]
+fn gather_binds_only_group_zero_without_prelude() {
+    let mut bindings = Vec::new();
+    for l in code_lines(shaders::DOF_GATHER_WGSL) {
+        assert!(!l.contains("raa_"), "PRELUDE identifier: {l}");
+        assert!(!l.contains("texture_storage_2d"), "{l}");
+        for (i, _) in l.match_indices("@group(") {
+            let rest = &l[i..];
+            assert!(rest.starts_with("@group(0) @binding("), "{l}");
+            let binding = rest["@group(0) @binding(".len()..]
+                .split(')')
+                .next()
+                .and_then(|b| b.parse::<u32>().ok())
+                .unwrap_or_else(|| panic!("binding index: {l}"));
+            bindings.push(binding);
+        }
+    }
+    assert_eq!(bindings, [0, 1, 2, 3, 4, 5, 6]);
+    assert!(shaders::DOF_GATHER_WGSL.contains("var depth_tex: texture_depth_2d;"));
+}
+
+#[test]
+fn dof_params_copies_are_identical() {
+    let coc = params_block(shaders::DOF_COC_WGSL);
+    let gather = params_block(shaders::DOF_GATHER_WGSL);
+    assert!(coc.contains("lens2: vec4<f32>,"), "{coc}");
+    assert_eq!(coc, gather);
 }
