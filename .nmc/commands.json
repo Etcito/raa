@@ -1,6 +1,7 @@
 [
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "capture-water", "command": "node scripts/lookdev-capture.mjs --milestone m11 --only 'm11-transmission--water$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
-  {"name": "proof-m11", "command": "node proofs/m11-transmission.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-water"]},
-  {"name": "smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-water"]}
+  {"name": "capture-liquids", "command": "node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(water|slime|mud|waves-t0|waves-t1)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
+  {"name": "capture-particles", "command": "node scripts/lookdev-capture.mjs --milestone m13 --only 'm13-liquids-particles--(splash|snow|confetti|sparkles|particles-on|particles-off)$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["capture-liquids"]},
+  {"name": "proof-m13", "command": "node proofs/m13-liquids-particles.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-particles"]},
+  {"name": "smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-particles"]}
 ]

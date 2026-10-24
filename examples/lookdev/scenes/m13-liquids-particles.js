@@ -3,6 +3,8 @@
 // the surface (shore foam), Gerstner waves with crest foam. Slime (raa.liquid.slime): a
 // neon-green river in a channel with inflatable pads. Mud (raa.liquid.mud): an opaque wet pit
 // with bubbles between rocks. waves-t0 / waves-t1 show the water set at two times.
+// Particles (raa-particles): splash (ripple impacts + splash emitters on the water set),
+// snow, confetti, sparkles (night, neon) and the particles-on / particles-off pair.
 // Variants are grouped in sets (settings.set), one builder per set in SETS.
 // Pure module (S14): no top-level side effects, node reads id/milestone/variants.
 
@@ -27,6 +29,10 @@ const CAMERAS = {
   water: [[0, -0.1, -0.3], 5.2, 0.35, 0.42],
   slime: [[0, 0, 0], 4.6, 0.2, 0.5],
   mud: [[0, -0.1, 0], 5.0, -0.3, 0.5],
+  snow: [[0, 0.8, -0.8], 6.0, 0.3, 0.28],
+  confetti: [[0, 1.4, -0.4], 6.2, 0.15, 0.25],
+  sparkles: [[0, 0.45, 0], 2.4, 0, 0.15],
+  particles: [[0, 0.6, 0], 4.2, 0.25, 0.35],
 };
 
 const LIQUID_SIZE = 6; // m
@@ -75,8 +81,8 @@ function srgbToLinear(c) {
   return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
 }
 
-function place(engine, mesh, t, scale = [1, 1, 1]) {
-  const node = engine.addNode(null, t, identityQuat, scale);
+function place(engine, mesh, t, scale = [1, 1, 1], rotation = identityQuat) {
+  const node = engine.addNode(null, t, rotation, scale);
   return engine.addMeshInstance(node, mesh);
 }
 
@@ -143,7 +149,7 @@ function buildWater(engine, lib) {
   const sandMat = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.95 });
   place(engine, upload(engine, beach, sandMat), [0, 0, -2.0]);
   for (const r of ROCKS) rock(engine, geometry, r);
-  liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
+  return liquid(engine, geometry, LIQUID_SIZE, LIQUID_SIZE, {
     function: 'raa.liquid.water',
     params: WATER,
     blend: 'transmissive',
@@ -197,7 +203,207 @@ function buildMud(engine, lib) {
   }, [0, 0, 0]);
 }
 
-const SETS = { water: buildWater, slime: buildSlime, mud: buildMud };
+// ---- Particle sets (raa-particles). Captures render at the variant's fixed timeMs; the
+// simulation catches up from max(0, t - 4 s) in 1/60 s steps, so every set relies on
+// rate-driven emitters (steady streams) rather than bursts.
+
+// Splash: three ripple impacts on the water set at 0.3..0.8 s before the capture time
+// (x, z in the water mesh's local space = world, the grid sits at the origin), each with a
+// splash emitter throwing droplets up from the impact point.
+const SPLASH_IMPACTS = [
+  { x: -0.9, z: 0.7, ago: 0.3, strength: 1 },
+  { x: 0.9, z: 0.2, ago: 0.55, strength: 0.9 },
+  { x: 0.0, z: 1.6, ago: 0.8, strength: 0.8 },
+];
+const SPLASH_EMITTER = {
+  kind: 'splash',
+  direction: [0, 1, 0],
+  spread: 0.45,
+  rate: 250,
+  lifetime: [0.5, 1.0],
+  speed: [1.5, 3.2],
+  size: [0.02, 0.045],
+  colors: [[0.92, 0.97, 1]],
+  maxParticles: 2048,
+};
+
+function buildSplash(engine, lib, settings, variant) {
+  const water = buildWater(engine, lib);
+  const t = (variant.timeMs ?? 1000) / 1000;
+  engine.setLiquidImpacts(water, SPLASH_IMPACTS.map(({ x, z, ago, strength }) => ({ x, z, time: t - ago, strength })));
+  SPLASH_IMPACTS.forEach(({ x, z }, i) => {
+    engine.addEmitter({ ...SPLASH_EMITTER, position: [x, 0.02, z], seed: 11 + i });
+  });
+}
+
+// Snow: a cool overcast day over snowy ground with white rounded blocks, pink and blue
+// blocks with snow caps and snowballs (ref-2's palette), under a falling snow volume.
+const OVERCAST = {
+  sun: { direction: [-0.45, -0.7, -0.55], color: [0.85, 0.9, 1], intensity: 3 },
+  ambient: { color: [0.75, 0.82, 0.95], intensity: 0.6 },
+  sky: { preset: 'snow', clouds: { coverage: 0.75 } },
+  env: { diffuse: 0.9, specular: 1 },
+};
+const SNOW_WHITE = [0.93, 0.95, 1];
+// Blocks: [x, z, half extents, colour (null = snow white)]
+const SNOW_BLOCKS = [
+  [-1.8, -1.2, [0.5, 0.45, 0.5], null],
+  [1.6, -1.8, [0.7, 0.6, 0.45], null],
+  [0.3, -2.6, [0.45, 0.8, 0.45], [1, 0.35, 0.65]],
+  [-0.6, 0.6, [0.3, 0.25, 0.3], null],
+  [2.2, 0.4, [0.4, 0.35, 0.4], [0.25, 0.6, 1]],
+  [-2.6, 1.0, [0.35, 0.3, 0.35], [0.25, 0.6, 1]],
+];
+// Snowballs: [x, z, radius]
+const SNOWBALLS = [[0.9, -0.3, 0.45], [-1.2, -2.6, 0.7], [1.0, 1.4, 0.22]];
+const SNOW_EMITTER = {
+  kind: 'snow',
+  position: [0, 2.5, -0.5],
+  volume: [5, 2.5, 5],
+  groundY: 0,
+  rate: 2400,
+  lifetime: [6, 10],
+  size: [0.02, 0.045],
+  colors: [[0.97, 0.98, 1]],
+  maxParticles: 8192,
+  seed: 21,
+};
+
+function overcast(engine) {
+  engine.setBackground(BACKGROUND);
+  engine.setLight(OVERCAST.sun);
+  engine.setAmbient(OVERCAST.ambient);
+  engine.setSky(OVERCAST.sky);
+  engine.setEnvironmentLighting(OVERCAST.env);
+  engine.setToneMapping({ look: 'punchy' });
+  engine.setShadows(SHADOWS);
+}
+
+function buildSnow(engine, lib) {
+  const { geometry } = lib;
+  overcast(engine);
+  const ground = heightfield(geometry, 16, 16, 96,
+    (x, z) => 0.06 * Math.sin(x * 1.3 + 0.4) * Math.cos(z * 1.1) + 0.03 * Math.sin(x * 3.1 + z * 2.3),
+    () => [1, 1, 1, 1]);
+  place(engine, upload(engine, ground, engine.addSurfaceMaterial({ color: SNOW_WHITE, roughness: 0.9 })), [0, 0, 0]);
+  const white = engine.addSurfaceMaterial({ color: SNOW_WHITE, roughness: 0.85 });
+  for (const [x, z, half, color] of SNOW_BLOCKS) {
+    const box = geometry.roundedBox(half, Math.min(...half) * 0.35, 4);
+    const m = color ? engine.addSurfaceMaterial({ color, roughness: 0.3, clearcoat: 1 }) : white;
+    place(engine, upload(engine, box, m), [x, half[1], z]);
+    if (color) {
+      const cap = geometry.roundedBox([half[0] + 0.03, 0.08, half[2] + 0.03], 0.07, 4);
+      place(engine, upload(engine, cap, white), [x, 2 * half[1] + 0.03, z]);
+    }
+  }
+  for (const [x, z, r] of SNOWBALLS) {
+    place(engine, upload(engine, geometry.uvSphere(r, 48, 24), white), [x, r * 0.9, z]);
+  }
+  engine.addEmitter(SNOW_EMITTER);
+}
+
+// Confetti: two cannons on the coloured tiles in daylight shooting confetti upward and
+// inward; the flakes tumble down and settle on the tiles (groundY 0, the tiles' top).
+const CONFETTI_COLORS = [
+  [1, 0.15, 0.45], [1, 0.8, 0.1], [0.2, 0.55, 1], [0.3, 0.9, 0.3], [1, 0.45, 0.1], [0.7, 0.3, 1],
+];
+// Cannons: [x, z, tilt about z rad (positive leans to -x)]
+const CANNONS = [[-1.6, -0.6, -0.35], [1.6, -0.6, 0.35]];
+const CANNON_LENGTH = 0.8;
+const CONFETTI_EMITTER = {
+  kind: 'confetti',
+  spread: 0.3,
+  rate: 320,
+  lifetime: [3, 5],
+  speed: [5, 8],
+  size: [0.03, 0.05],
+  drag: 1.5,
+  groundY: 0,
+  colors: CONFETTI_COLORS,
+  maxParticles: 4096,
+};
+
+function buildConfetti(engine, lib) {
+  const { geometry, objects } = lib;
+  daylight(engine);
+  const tiles = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.35 });
+  place(engine, upload(engine, objects.floorTiles(TILES_N), tiles), [0, 0, 0]);
+  const barrel = engine.addSurfaceMaterial({ color: [1, 0.3, 0.6], roughness: 0.25, clearcoat: 1 });
+  const ring = engine.addSurfaceMaterial({ color: [1, 0.8, 0.15], roughness: 0.25, clearcoat: 1 });
+  CANNONS.forEach(([x, z, tilt], i) => {
+    const q = [0, 0, Math.sin(tilt / 2), Math.cos(tilt / 2)];
+    const dir = [-Math.sin(tilt), Math.cos(tilt), 0];
+    const tube = geometry.lathe([[0, 0], [0.2, 0], [0.2, 0.06], [0.16, 0.12], [0.14, CANNON_LENGTH], [0.11, CANNON_LENGTH], [0, CANNON_LENGTH - 0.05]], 40);
+    place(engine, upload(engine, tube, barrel), [x, 0, z], [1, 1, 1], q);
+    const lip = geometry.lathe([[0.1, 0], [0.18, 0], [0.18, 0.08], [0.1, 0.08]], 40);
+    const top = dir.map((d) => d * (CANNON_LENGTH - 0.06));
+    place(engine, upload(engine, lip, ring), [x + top[0], top[1], z + top[2]], [1, 1, 1], q);
+    const mouth = dir.map((d) => d * (CANNON_LENGTH + 0.05));
+    engine.addEmitter({ ...CONFETTI_EMITTER, position: [x + mouth[0], mouth[1], z + mouth[2]], direction: dir, seed: 31 + i });
+  });
+}
+
+// Sparkles: a night set (sky passes off, dark violet background, low ambient, bloom) with
+// lib's neon letter in raa.neon and gold and white sparkles twinkling around it.
+const NIGHT_BACKGROUND = [0.02, 0.012, 0.06];
+const NIGHT = {
+  moon: { direction: [-0.3, -0.85, -0.43], color: [0.8, 0.7, 1], intensity: 0.3 },
+  ambient: { color: [0.5, 0.4, 0.9], intensity: 0.08 },
+  env: { diffuse: 0.3, specular: 0.5 },
+  bloom: { strength: 0.1, radius: 0.85 },
+};
+const SPARKLE_NEON = { color: [1, 0.12, 0.62], strength: 5, coreWhiteness: 1 };
+const SPARKLE_EMITTERS = [
+  { colors: [[1, 0.8, 0.3], [1, 0.65, 0.15]], rate: 160, seed: 41 },
+  { colors: [[1, 1, 1], [0.85, 0.9, 1]], rate: 110, seed: 42 },
+].map((e) => ({
+  kind: 'sparkles',
+  position: [0, 0.45, 0.05],
+  volume: [0.7, 0.6, 0.35],
+  lifetime: [0.6, 1.6],
+  size: [0.015, 0.04],
+  emissive: 8,
+  maxParticles: 1024,
+  ...e,
+}));
+
+function buildSparkles(engine, lib) {
+  const { geometry, objects } = lib;
+  engine.setBackground(NIGHT_BACKGROUND);
+  engine.setLight(NIGHT.moon);
+  engine.setAmbient(NIGHT.ambient);
+  engine.setEnvironmentLighting(NIGHT.env);
+  engine.setToneMapping({ look: 'punchy' });
+  engine.setBloom(NIGHT.bloom);
+  const deck = engine.addSurfaceMaterial({ color: [0.12, 0.06, 0.3], roughness: 0.2, clearcoat: 1, clearcoatRoughness: 0.05 });
+  place(engine, upload(engine, geometry.roundedBox([2, 0.05, 1.5], 0.02, 2), deck), [0, -0.05, 0]);
+  const neon = engine.addSurfaceMaterial({ function: 'raa.neon', params: SPARKLE_NEON, castShadow: false });
+  place(engine, upload(engine, objects.neonTube(), neon), [0, 0, 0]);
+  for (const e of SPARKLE_EMITTERS) engine.addEmitter(e);
+}
+
+// Particles on/off (Q15): one small daylight set with a confetti, a snow and a sparkle
+// emitter; the off variant disables particles.sim, particles.opaque and particles.blend.
+function buildParticlesToggle(engine, lib) {
+  const { objects } = lib;
+  daylight(engine);
+  const tiles = engine.addSurfaceMaterial({ color: [1, 1, 1], roughness: 0.35 });
+  place(engine, upload(engine, objects.floorTiles(8), tiles), [0, 0, 0]);
+  engine.addEmitter({ ...CONFETTI_EMITTER, position: [-0.8, 0.05, 0], direction: [0.2, 1, 0], rate: 200, seed: 51 });
+  engine.addEmitter({ ...SNOW_EMITTER, position: [0, 1.5, 0], volume: [2, 1.5, 2], rate: 600, seed: 52 });
+  engine.addEmitter({ ...SPARKLE_EMITTERS[0], position: [0.9, 0.6, 0], volume: [0.4, 0.4, 0.4], seed: 53 });
+}
+
+const SETS = {
+  water: buildWater,
+  slime: buildSlime,
+  mud: buildMud,
+  splash: buildSplash,
+  snow: buildSnow,
+  confetti: buildConfetti,
+  sparkles: buildSparkles,
+  particles: buildParticlesToggle,
+};
 
 const BASIS = 'Engine lookdev capture of the liquids milestone. Score two things: that the '
   + 'capture shows what this description lists, and that the LIQUID look (moving waves, foam '
@@ -259,19 +465,94 @@ const VARIANTS = [
   },
 ];
 
+const PARTICLE_BASIS = 'Engine lookdev capture of the particles milestone. Score two things: '
+  + 'that the capture shows what this description lists, and that the PARTICLES read as what '
+  + 'they are (falling snow flakes, tumbling paper confetti, glowing twinkling sparkles) with '
+  + 'the light and mood of the reference. The reference is a finished illustration and is NOT '
+  + 'the target for the scene: the sparse procedural staging (a few simple blocks, a plain '
+  + 'tiled floor, simple props), the absence of characters, buildings, depth of field, fog '
+  + 'and other post effects are expected at this milestone and must not lower the score. '
+  + 'Shows: ';
+
+const PARTICLE_OFF = ['particles.sim', 'particles.opaque', 'particles.blend'];
+
+const PARTICLE_VARIANTS = [
+  {
+    id: 'splash',
+    description: `Splash check: ${WATER_DESC}; three ripple rings spread from impact points on `
+      + 'the water and fountains of small white droplets spray up from them and fall back.',
+    references: [],
+    judge: false,
+    timeMs: 1500,
+    settings: { set: 'splash', camera: 'water' },
+  },
+  {
+    id: 'snow',
+    description: `${PARTICLE_BASIS}snow falling over a snowy landscape on a cool, bright `
+      + 'overcast day: many small white snow flakes drift down through the whole frame, in '
+      + 'front of white rounded snow blocks, pink and blue blocks with snow caps and big '
+      + 'snowballs standing on white snowy ground, with flakes settling on the ground',
+    references: ['ref-2'],
+    judge: true,
+    timeMs: 3000,
+    settings: { set: 'snow' },
+  },
+  {
+    id: 'confetti',
+    description: `${PARTICLE_BASIS}two glossy pink party cannons with yellow rims standing on `
+      + 'a floor of coloured tiles in sunny daylight under a blue sky, shooting streams of '
+      + 'colourful paper confetti (pink, yellow, blue, green, orange, purple) up into the air; '
+      + 'the small flakes tumble and flutter as they fall, and some lie scattered on the tiles',
+    references: ['ref-1'],
+    judge: true,
+    timeMs: 2500,
+    settings: { set: 'confetti' },
+  },
+  {
+    id: 'sparkles',
+    description: `${PARTICLE_BASIS}a night scene on a dark violet background: a glowing pink `
+      + 'neon tube shaped like a script letter S stands on a dark glossy violet deck, with a '
+      + 'soft bloom halo, and many tiny gold and white sparkles twinkle and glow around it',
+    references: ['ref-4'],
+    judge: true,
+    timeMs: 2000,
+    settings: { set: 'sparkles' },
+    passes: { disable: ['sky.env', 'sky.background'] },
+  },
+  {
+    id: 'particles-on',
+    description: 'Particles on: coloured tiles in daylight with a confetti stream on the left, '
+      + 'falling snow flakes over the set and gold sparkles on the right.',
+    references: [],
+    judge: false,
+    timeMs: 2000,
+    settings: { set: 'particles' },
+  },
+  {
+    id: 'particles-off',
+    description: 'Particles off: the same view as particles-on with the particle passes '
+      + 'disabled (no confetti, snow or sparkles).',
+    references: [],
+    judge: false,
+    timeMs: 2000,
+    settings: { set: 'particles' },
+    passes: { disable: PARTICLE_OFF },
+  },
+];
+
 export default {
   id: 'm13-liquids-particles',
   milestone: 'm13',
   title: 'Animated liquid surfaces and GPU particles',
   engine: { msaa: 4, toneMapper: 'agx' },
-  variants: VARIANTS,
+  variants: [...VARIANTS, ...PARTICLE_VARIANTS],
 
   async build(engine, lib, variant) {
     const settings = variant.settings ?? {};
     const set = settings.set ?? variant.id;
     const builder = SETS[set];
     if (!builder) throw new Error(`m13-liquids-particles: no builder for variant '${variant.id}'`);
-    builder(engine, lib, settings);
+    builder(engine, lib, settings, variant);
     const [target, distance, yaw, pitch] = CAMERAS[settings.camera ?? set];
     engine.setOrbit(target, distance, yaw, pitch);
   },
