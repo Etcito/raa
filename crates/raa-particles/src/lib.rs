@@ -13,6 +13,7 @@
 
 mod desc;
 mod gpu;
+mod opaque;
 mod shaders;
 mod sim;
 mod spawn;
@@ -21,5 +22,7 @@ mod state;
 pub use desc::*;
 pub use spawn::*;
 
+#[doc(hidden)]
+pub use opaque::opaque_module_wgsl;
 #[doc(hidden)]
 pub use shaders::sim_module_wgsl;
