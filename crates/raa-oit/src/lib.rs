@@ -1,6 +1,7 @@
 //! Sorted transparency (linked-list OIT): node layout, pool sizing and the
 //! CPU reference of the resolve. The WGSL resolve follows `resolve_cpu`.
 
+mod buffers;
 pub mod node;
 pub mod resolve_cpu;
 mod shaders;
