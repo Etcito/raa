@@ -1021,6 +1021,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-ssr"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-ibl",
+ "raa-lit",
+ "raa-math",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-tonemap"
 version = "0.1.0"
 dependencies = [
