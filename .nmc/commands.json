@@ -10,13 +10,17 @@
     "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-ice$' --judge --ref-prefix /refs/",
     "timeout_s": 3600,
     "cwd": ".",
-    "after": ["build-lookdev"]
+    "after": [
+      "build-lookdev"
+    ]
   },
   {
     "name": "p2-smoke",
     "command": "node proofs/lib/p2-smoke.mjs",
     "timeout_s": 600,
     "cwd": ".",
-    "after": ["judge-ice"]
+    "after": [
+      "judge-ice"
+    ]
   }
 ]

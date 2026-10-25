@@ -59,6 +59,7 @@ const WORLDS = {
   },
   ice: {
     // Clear winter light rather than the snow sky's flat overcast illumination.
+    icy: true,
     polished: true,
     sky: { preset: 'snow', zenith: [0.045, 0.3, 0.9], horizon: [0.38, 0.68, 1],
       ground: [0.65, 0.78, 0.95], intensity: 1.05, horizonSoftness: 10,
@@ -70,12 +71,14 @@ const WORLDS = {
     tiles: [[0.08, 0.55, 0.95], [0.22, 0.72, 1], [0.12, 0.46, 0.9], [0.5, 0.85, 1]],
     plinth: [0.28, 0.68, 0.95], ground: [0.94, 0.97, 1], vista: [0.72, 0.83, 0.98],
     inflatable: [[0.025, 0.45, 0.98], [0.95, 0.06, 0.48], [0.8, 0.94, 1]], stripe: [1, 1, 1],
-    neon: [0.16, 0.65, 1], plush: [0.025, 0.12, 0.65], gate: [0.55, 0.78, 1],
-    ice: { tint: [0.12, 0.65, 1], absorption: 3.2, cloudiness: 0.12, crackScale: 0.22 },
+    neon: [0.16, 0.65, 1], plush: [0.025, 0.12, 0.65], gate: [0.16, 0.45, 0.78],
+    ice: { tint: [0.32, 0.8, 1], absorption: 0.65, cloudiness: 0.025, crackScale: 0.4 },
     liquid: { function: 'raa.liquid.water', params: {}, transmissive: true },
-    particles: { kind: 'snow', position: [0, 2.8, -6], volume: [4.5, 2.5, 9],
-      groundY: 0, rate: 2400, size: [0.025, 0.06], speed: [0.35, 0.8],
-      colors: [[0.97, 0.99, 1]] },
+    // Camera-facing white flakes across the hammer's focus plane, not just the sky.
+    particles: { kind: 'snow', position: [0, 2.0, -2.6], volume: [3, 1.5, 3],
+      direction: [0.08, -1, 0], spread: 0.25, gravity: 0.35, drag: 0.5,
+      rate: 1800, lifetime: [6, 10], size: [0.055, 0.11], speed: [0.45, 0.85],
+      emissive: 0.7, colors: [[1, 1, 1]] },
   },
   jungle: {
     sky: 'jungle', fog: 'jungle', post: 'jungle',
@@ -232,7 +235,8 @@ function buildRun(engine, lib, w) {
   place(engine, upload(engine, geometry.roundedBox([260, 0.5, 260], 0.2, 1), [ground]), [0, GROUND_Y - 0.5, -120]);
   const plinth = plain(engine, w.plinth, 0.3, COAT);
   place(engine, upload(engine, geometry.roundedBox(RUN.plinth, 0.1, 2), [plinth]), [0, -0.33, RUN.plinthZ]);
-  const floor = plain(engine, [1, 1, 1], FLOOR_ROUGHNESS);
+  const floor = plain(engine, [1, 1, 1], w.icy ? 0.03 : FLOOR_ROUGHNESS,
+    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.12 } : {});
   const run = upload(engine, tiles(objects, RUN.tiles, w.tiles), [floor]);
   for (const z of RUN.sections) place(engine, run, [0, 0, z]);
 }
@@ -258,15 +262,19 @@ function buildObstacles(engine, lib, w) {
   const neonArch = geometry.sweepTube(archPath(2.1, 1.1), 0.05, 12, { caps: 'round' });
   NEON_ARCHES.forEach((z, i) => place(engine, upload(engine, neonArch, [tubes[i % 2]]), [0, 0, z]));
   const ice = engine.addSurfaceMaterial({
-    function: 'raa.ice', params: w.ice, blend: 'transmissive', transmission: 1, ior: 1.31, thickness: 0.8, roughness: 0.04, castShadow: false,
+    function: 'raa.ice', params: w.ice, blend: 'transmissive', transmission: 1, ior: 1.31, thickness: w.icy ? 1.4 : 0.8, roughness: w.icy ? 0.03 : 0.04, castShadow: false,
   });
-  for (const [x, z, seed] of ICE_BLOCKS) place(engine, upload(engine, objects.iceBlock({ seed }), [ice]), [x, 0, z], yawQuat(seed * 0.3));
+  const blocks = w.icy ? [[-2.0, -2.8, 3], [-2.25, -5.3, 7], [2.1, -5.5, 11]] : ICE_BLOCKS;
+  for (const [x, z, seed] of blocks) place(engine, upload(engine, objects.iceBlock({ seed }), [ice]),
+    [x, 0, z], yawQuat(seed * 0.3), w.icy ? [1.8, 2.1, 1.8] : [1, 1, 1]);
   const plush = engine.addSurfaceMaterial({
     function: 'raa.plush',
-    params: { color: w.plush, furLength: 0.022, furDensity: 12 },
-    furLength: 0.022, furDensity: 12, furDroop: 0.2,
+    params: { color: w.plush, furLength: w.icy ? 0.09 : 0.022, furDensity: w.icy ? 180 : 12,
+      ...(w.icy ? { tipColor: [0.08, 0.32, 0.85], sheenColor: [0.35, 0.65, 1] } : {}) },
+    furLength: w.icy ? 0.09 : 0.022, furDensity: w.icy ? 180 : 12, furDroop: 0.2,
+    ...(w.icy ? { furShells: 64 } : {}),
   });
-  place(engine, upload(engine, objects.plushSphere(), [plush]), PLUSH);
+  place(engine, upload(engine, objects.plushSphere(), [plush]), w.icy ? [-0.9, 0, -2.6] : PLUSH);
 }
 
 // The liquid strip in its basin beside the run.
@@ -289,10 +297,13 @@ function buildStrip(engine, lib, w) {
 function buildBackdrop(engine, lib, w) {
   const { geometry } = lib;
   const gate = plain(engine, w.gate, 0.35, COAT);
-  const pillar = upload(engine, geometry.roundedBox(GATE.half, 0.08, 3), [gate]);
-  for (let x = GATE.x0; x <= GATE.x1 + 1e-6; x += GATE.pitch) place(engine, pillar, [x, GATE.half[1] - 0.05, GATE.z]);
+  // Seven separated, substantial columns silhouette against the low winter sun.
+  const gateShape = w.icy ? { ...GATE, x0: -5.1, x1: 5.1, pitch: 1.7,
+    half: [0.32, 3.8, 0.45], z: -21 } : GATE;
+  const pillar = upload(engine, geometry.roundedBox(gateShape.half, 0.08, 3), [gate]);
+  for (let x = gateShape.x0; x <= gateShape.x1 + 1e-6; x += gateShape.pitch) place(engine, pillar, [x, gateShape.half[1] - 0.05, gateShape.z]);
   const lintel = geometry.roundedBox([(GATE.x1 - GATE.x0) / 2 + 0.6, 0.45, 0.45], 0.12, 3);
-  place(engine, upload(engine, lintel, [gate]), [0, GATE.lintelY, GATE.z]);
+  if (!w.icy) place(engine, upload(engine, lintel, [gate]), [0, GATE.lintelY, GATE.z]);
   const far = plain(engine, w.vista, 0.8);
   const shapes = {
     peak: (s) => geometry.lathe([[0, 0], [s, 0], [s * 0.12, s * 1.3], [0, s * 1.35]], 48),
@@ -342,9 +353,11 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
   } : world === 'ice' ? {
     // See the ice faces and snowy surround; retain sharp foreground plush and hammer.
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
-    dof: { fStop: 5.6, focus: HERO.focus },
-    fog: { preset: 'snow', density: 0.006, aerialStrength: 0.55, aerialDistance: 180 },
-    sunShafts: { intensity: 0.65, density: 0.6 },
+    dof: { fStop: 4, focus: HERO.focus },
+    fog: { preset: 'snow', density: 0.004, start: 12, heightFalloff: 0.12,
+      color: [0.94, 0.98, 1], aerialStrength: 0.65, aerialDistance: 150 },
+    sunShafts: { intensity: 2.4, density: 0.75, maxDistance: 65 },
+    ssr: { intensity: 1.85, maxRoughness: 0.65, thickness: 0.3 },
   } : {}) },
 }));
 
@@ -401,11 +414,14 @@ export default {
     buildStrip(engine, lib, w);
     buildBackdrop(engine, lib, w);
     engine.addEmitter({ maxParticles: 8192, seed: 61, ...w.particles });
+    if (w.icy) engine.addEmitter({ ...w.particles, seed: 97, maxParticles: 8192,
+      position: [0, 3.2, -12], volume: [5, 2.6, 6], rate: 1400, size: [0.09, 0.15] });
     const o = variant.settings;
     if (o.grading) engine.setGrading(o.grading);
     if (o.sun) engine.applyEnvironment({ sun: o.sun });
     if (o.fog) engine.setFog(o.fog);
     if (o.sunShafts) engine.setSunShafts(o.sunShafts);
+    if (o.ssr) engine.setSsr(o.ssr);
     const camera = o.camera ?? CAMERA;
     engine.setCamera(camera);
     const dof = o.dof ?? { fStop: F_STOP, focus: HERO.focus };
