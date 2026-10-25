@@ -60,13 +60,13 @@ impl GradingDesc {
         let neutral = GradingDesc::default();
         match name {
             "neutral" => Some(neutral),
-            // Warm candy: pink-lifted shadows, lively colour, light vignette.
+            // Sunny candy: clean shadows and vivid colour, with room for glossy highlights.
             "candy" => Some(GradingDesc {
-                temperature_k: 7200.0,
-                saturation: 1.15,
-                vibrance: 0.2,
-                lift: [0.03, 0.01, 0.03],
-                vignette: 0.15,
+                temperature_k: 6700.0,
+                contrast: 1.06,
+                saturation: 1.3,
+                vibrance: 0.3,
+                vignette: 0.03,
                 ..neutral
             }),
             // Cool ice: blue shadows over slightly lifted blacks, a little less colour.

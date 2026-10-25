@@ -40,16 +40,21 @@ const VISTA = [
 // One entry per world. Colours sRGB; `sun.dir` is the travel direction.
 const WORLDS = {
   candy: {
-    sky: 'day', fog: 'haze', post: 'candy',
+    // Keep blue visible near the low camera's horizon; warm light comes from the sun.
+    sky: { preset: 'day', zenith: [0.055, 0.28, 0.85], horizon: [0.4, 0.65, 0.95],
+      ground: [0.32, 0.35, 0.4], intensity: 1.15, horizonSoftness: 12,
+      sunDiscSize: 0.012, sunDiscIntensity: 18,
+      clouds: { coverage: 0.28, density: 0.8 } },
+    fog: 'haze', post: 'candy',
     // Low, behind the gate: the sun travels towards the camera, 12 deg up, so from the
     // camera it sits behind the pillars (about 7.3 m up at the gate), below the lintel.
-    sun: { dir: [0.12, -0.21, 0.97], color: [1, 0.92, 0.8], intensity: 7 },
-    tiles: [[1, 0.45, 0.72], [0.35, 0.7, 1], [1, 0.86, 0.3], [0.62, 0.5, 1]],
-    plinth: [0.98, 0.55, 0.78], ground: [0.55, 0.85, 0.55], vista: [0.72, 0.62, 0.95],
-    inflatable: [[1, 0.25, 0.6], [1, 0.82, 0.15], [0.25, 0.55, 1]], stripe: [1, 1, 1],
+    sun: { dir: [0.12, -0.21, 0.97], color: [1, 0.95, 0.86], intensity: 4.5 },
+    tiles: [[1, 0.08, 0.55], [0.04, 0.55, 1], [1, 0.77, 0.06], [0.1, 0.65, 1]],
+    plinth: [1, 0.16, 0.58], ground: [0.25, 0.72, 0.3], vista: [0.72, 0.62, 0.95],
+    inflatable: [[1, 0.035, 0.48], [1, 0.75, 0.025], [0.04, 0.38, 1]], stripe: [1, 1, 1],
     neon: [1, 0.3, 0.75], plush: [0.2, 0.3, 0.95], gate: [1, 0.85, 0.3],
     ice: { tint: [0.6, 0.9, 1], absorption: 1.8, cloudiness: 0.2, crackScale: 0.25 },
-    liquid: { function: 'raa.liquid.slime', params: { color: [0.34, 0.95, 0.03] }, transmissive: true },
+    liquid: { function: 'raa.liquid.slime', params: { color: [0.12, 1, 0.025] }, transmissive: false },
     particles: { kind: 'confetti', position: [0, 3.5, -7], volume: [2.5, 0.5, 4], direction: [0, 1, 0], spread: 0.6, rate: 300, speed: [1.5, 3], groundY: 0, colors: [[1, 0.15, 0.45], [1, 0.8, 0.1], [0.2, 0.55, 1], [0.3, 0.9, 0.3]] },
   },
   ice: {
@@ -252,7 +257,15 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
   description: `${VISTA_TEXT} ${WORLD_TEXT[world]}`,
   references: [`ref-${i + 1}`],
   judge: true,
-  settings: { world },
+  settings: { world, ...(world === 'candy' ? {
+    // See over the basin rim and bring the hammer forward without losing the blue sky.
+    camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
+    dof: { fStop: 8, focus: HERO.focus },
+    // Preserve foreground colour and gloss; fade the distant vista into cool haze.
+    fog: { preset: 'haze', density: 0.004, heightFalloff: 0.16, start: 14,
+      color: [0.72, 0.82, 1], inscatter: 0.12, aerialStrength: 0.65, aerialDistance: 180 },
+    sunShafts: { intensity: 0.12 },
+  } : {}) },
 }));
 
 // On/off pairs (Q15): all in the candy world; each pair shares its settings and the -off
