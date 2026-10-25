@@ -352,7 +352,8 @@ export default {
     engine.setFog({ preset: 'clear', density: 0.001, start: 25,
       color: [0.4, 0.75, 1], aerialStrength: 0 });
     engine.setGrading({ preset: 'neutral', saturation: 1.15, contrast: 1.06 });
-    engine.setDof({ maxCoc: 0 });
+    // Disable blur through the pass API; maxCoc must be strictly positive.
+    engine.setPassEnabled('dof', false);
     engine.setShadows({ softness: 2, distance: 60, resolution: 2048 });
     engine.setLight({ direction: [0.55, -0.8, 0.55], color: [1, 0.96, 0.90], intensity: 4.0 });
     engine.setAmbient({ color: [0.72, 0.84, 1], intensity: 0.32 });
