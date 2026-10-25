@@ -2,7 +2,7 @@
   "scene": "m15-waddle",
   "variant": "f06",
   "milestone": "m15",
-  "capturedAt": "2026-10-25T08:18:46.989Z",
+  "capturedAt": "2026-10-25T08:22:09.450Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -36,11 +36,11 @@
   ],
   "instances": 316,
   "triangles": 947484,
-  "firstFrameMs": 29444.70000001788,
+  "firstFrameMs": 26784.399999976158,
   "wasm": {
     "raw": 2087170,
     "gzip": 710578,
-    "sha256": "eed235fd75338805cfd87e07ef9b3be5f2e1ee9d752184e77c75b2a6bd3b2864"
+    "sha256": "8cce1c53178320169a3aac9718b37a830c3f2533be37703d5c5d18f70d329e34"
   },
   "capture": "proofs/captures/lookdev/m15-waddle--f06.png",
   "captureSha256": "302a4fd1d47124f2215b6f65a8de90b699b901d48b0caa452265f3114d384779",
@@ -53,7 +53,7 @@
     "minScore": 6,
     "exit": 1,
     "score": 4,
-    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m15-waddle--f06.png by claude-haiku-5-5 (median of [4.0, 4.0, 4.0])\nexpected: costumed plush penguin character look, waddle frame 6\nseen: The capture shows several costumed penguins (propeller cap, scarf, pineapple and viking costumes) on a blue tiled platform, but the rendering is far cruder than both references: smooth blobby bodies, flat lighting, a plain sky and little visible plush fur or material detail. The feet are barely readable and the frame does not clearly show a waddle pose.",
-    "at": "2026-10-25T08:18:58.816Z"
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m15-waddle--f06.png by claude-haiku-5-5 (median of [4.0, 4.0, 4.0])\nexpected: costumed plush penguin character look, waddle frame 6\nseen: The capture shows costumed penguins (propeller cap, scarf, pineapple and bow costumes) on a blue tiled platform, so the subject is recognizable. It is much cruder than the references: the penguins are smooth, flatly shaded, with little fur texture and no visible shoes on the foreground penguin, and the scene lacks the glossy materials and rich detail of the reference images.",
+    "at": "2026-10-25T08:22:24.461Z"
   }
 }
