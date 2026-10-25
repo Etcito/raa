@@ -43,7 +43,7 @@
   },
   {
     "name": "judge-f06",
-    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f06$' --judge --ref-prefix /refs/",
+    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f06$' --judge --judge-record-only --ref-prefix /refs/",
     "timeout_s": 900,
     "cwd": ".",
     "after": [
