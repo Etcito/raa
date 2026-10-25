@@ -7,15 +7,27 @@
   },
   {
     "name": "cargo-check",
-    "command": "cargo check",
+    "command": "env CARGO_BUILD_JOBS=1 cargo check",
     "timeout_s": 600,
     "cwd": "."
+  },
+  {
+    "name": "dof-tests",
+    "command": "env CARGO_BUILD_JOBS=1 cargo test -p raa-dof --test coc --test variants",
+    "timeout_s": 600,
+    "cwd": ".",
+    "after": [
+      "cargo-check"
+    ]
   },
   {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 3600,
-    "cwd": "."
+    "cwd": ".",
+    "after": [
+      "dof-tests"
+    ]
   },
   {
     "name": "judge-ice",

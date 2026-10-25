@@ -313,7 +313,10 @@ impl Engine {
             let mut d = dof.get();
             read_f32(&settings, "focusDistance", &mut d.focus_distance_m)?;
             read_f32(&settings, "fStop", &mut d.f_stop)?;
-            read_f32(&settings, "focalLength", &mut d.focal_length_mm)?;
+            if let Some(metres) = optional_f64(&settings, "focalLength")? {
+                // The public API uses metres; DofDesc stores the lens in millimetres.
+                d.focal_length_mm = (metres * 1000.0) as f32;
+            }
             read_f32(&settings, "maxCoc", &mut d.max_coc_px)?;
             let af = Reflect::get(&settings, &JsValue::from_str("autofocus"))
                 .map_err(|_| invalid("cannot read 'autofocus'".to_string()))?;
