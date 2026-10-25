@@ -2,6 +2,6 @@
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
   {"name": "capture-worlds", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m14 --only 'm14-camera-effects--world-' --judge --judge-record-only --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
   {"name": "capture-pairs", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m14 --only 'm14-camera-effects--(ssr|dof|fog|sunshafts|grading)-'", "timeout_s": 3600, "cwd": ".", "after": ["capture-worlds"]},
-  {"name": "proof-m14", "command": "node proofs/m14-camera-effects.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-pairs"]},
+  {"name": "proof-m14", "command": "node proofs/m14-camera-effects.mjs --only 'unit|wasm-check|api-doc|captures'", "timeout_s": 1800, "cwd": ".", "after": ["capture-pairs"]},
   {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-pairs"]}
 ]

@@ -52,7 +52,8 @@ fn cs_hiz_reduce(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let fx = hiz_footprint(id.x, hiz.size.z, hiz.size.x);
     let fy = hiz_footprint(id.y, hiz.size.w, hiz.size.y);
-    var m = 3.4028235e38;
+    // f32 max, written exactly (3.4028235e38 is above it, which Tint refuses).
+    var m = 0x1.fffffep+127f;
     for (var y = fy.x; y <= fy.y; y = y + 1u) {
         for (var x = fx.x; x <= fx.y; x = x + 1u) {
             m = min(m, textureLoad(hiz_src, vec2<i32>(i32(x), i32(y)), 0).r);
