@@ -99,14 +99,21 @@ const WORLDS = {
 const CANDY_LOOK = {
   ...WORLDS.candy,
   polished: true,
-  sky: { ...WORLDS.candy.sky, zenith: [0.08, 0.38, 1], horizon: [0.48, 0.72, 1],
-    ground: [0.48, 0.42, 0.34], intensity: 1.25,
+  sky: { ...WORLDS.candy.sky, zenith: [0.055, 0.32, 0.9], horizon: [0.36, 0.65, 0.94],
+    ground: [0.4, 0.38, 0.3], intensity: 1.05,
+    sunDiscSize: 0.016, sunDiscIntensity: 24,
     clouds: { coverage: 0.22, density: 0.65 } },
-  sun: { dir: [0.12, -0.21, 0.97], color: [1, 0.79, 0.5], intensity: 5 },
-  inflatable: [[1, 0.12, 0.58], [1, 0.83, 0.08], [0.08, 0.55, 1]],
+  sun: { dir: [0.12, -0.21, 0.97], color: [1, 0.92, 0.76], intensity: 5.5 },
+  vista: [0.93, 0.8, 0.65], ground: [0.32, 0.72, 0.35],
+  plinth: [1, 0.08, 0.45], gate: [1, 0.76, 0.12],
+  tiles: [[1, 0.045, 0.48], [0.025, 0.48, 1], [1, 0.72, 0.04], [0.04, 0.65, 1]],
+  inflatable: [[1, 0.045, 0.48], [1, 0.76, 0.035], [0.025, 0.46, 1]],
   liquid: { function: 'raa.liquid.slime',
-    params: { color: [0.16, 1, 0.025], glossiness: 1, absorption: 1.2,
-      foamAmount: 0.12, detailStrength: 0.12 }, transmissive: true },
+    params: { color: [0.12, 1, 0.025], glossiness: 1, absorption: 0.8,
+      foamAmount: 0.08, detailStrength: 0.055 }, transmissive: true },
+  particles: { ...WORLDS.candy.particles, position: [0, 2.8, -5],
+    volume: [2.8, 0.6, 5], rate: 450, size: [0.045, 0.09],
+    colors: [[1, 0.08, 0.48], [1, 0.78, 0.04], [0.05, 0.55, 1], [0.3, 1, 0.1]] },
 };
 const CANDY_COAT = { clearcoat: 1, clearcoatRoughness: 0.035 };
 
@@ -235,9 +242,9 @@ function buildObstacles(engine, lib, w) {
     ? engine.addSurfaceMaterial({ function: 'raa.inflatable',
       params: { color: c, stripeWidth: 0, seamDepth: 0.015 }, ...coat })
     : inflatable(engine, c, w.stripe));
-  const pad = geometry.roundedBox([0.55, 0.18, 0.55], 0.14, w.polished ? 24 : 6);
+  const pad = geometry.roundedBox(w.polished ? [0.7, 0.24, 0.7] : [0.55, 0.18, 0.55], w.polished ? 0.23 : 0.14, w.polished ? 24 : 6);
   PADS.forEach(([x, z], i) => place(engine, upload(engine, pad, [pads[i % pads.length]]), [x, 0.18, z]));
-  const arch = geometry.sweepTube(archPath(2.4, 0.4, w.polished ? 96 : 48), 0.3, w.polished ? 48 : 24, { caps: 'round' });
+  const arch = geometry.sweepTube(archPath(2.4, 0.4, w.polished ? 96 : 48), w.polished ? 0.42 : 0.3, w.polished ? 48 : 24, { caps: 'round' });
   place(engine, upload(engine, arch, [pads[1]]), [0, 0, INFLATABLE_ARCH_Z]);
   const tubes = [neon(engine, w.neon), neon(engine, w.neon2 ?? w.neon)];
   const neonArch = geometry.sweepTube(archPath(2.1, 1.1), 0.05, 12, { caps: 'round' });
@@ -260,11 +267,12 @@ function buildStrip(engine, lib, w) {
   const wall = w.polished ? plain(engine, w.inflatable[0], 0.18, CANDY_COAT)
     : inflatable(engine, w.inflatable[0], w.stripe);
   for (const sx of [-1, 1]) {
-    const side = geometry.roundedBox([0.15, 0.42, STRIP.d / 2 + 0.3], 0.06, w.polished ? 16 : 4);
+    // Lower the candy rim to expose the green surface from the low camera.
+    const side = geometry.roundedBox([0.15, w.polished ? 0.28 : 0.42, STRIP.d / 2 + 0.3], w.polished ? 0.14 : 0.06, w.polished ? 16 : 4);
     place(engine, upload(engine, side, [wall]), [STRIP.x + sx * (STRIP.w / 2 + 0.15), GROUND_Y + 0.42, STRIP.z]);
   }
   const { function: fn, params, transmissive } = w.liquid;
-  const blend = transmissive ? { blend: 'transmissive', transmission: w.polished ? 0.55 : 0.95, ior: 1.34, thickness: 0.4 } : {};
+  const blend = transmissive ? { blend: 'transmissive', transmission: w.polished ? 0.3 : 0.95, ior: 1.34, thickness: 0.4 } : {};
   const m = engine.addSurfaceMaterial({ function: fn, params, ...blend });
   place(engine, upload(engine, geometry.grid(STRIP.w, STRIP.d, STRIP.nx, STRIP.nz), [m]), [STRIP.x, STRIP.y, STRIP.z]);
 }
@@ -316,11 +324,13 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
   settings: { world, ...(world === 'candy' ? {
     // See over the basin rim and bring the hammer forward without losing the blue sky.
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
-    dof: { fStop: 8, focus: HERO.focus },
-    // Preserve foreground colour and gloss; fade the distant vista into cool haze.
-    fog: { preset: 'haze', density: 0.002, heightFalloff: 0.16, start: 18,
-      color: [0.92, 0.94, 1], inscatter: 0.1, aerialStrength: 0.3, aerialDistance: 220 },
-    sunShafts: { intensity: 0.12 },
+    dof: { fStop: 4, focus: HERO.focus },
+    // Keep the near obstacles saturated; a cream haze separates the distant vista.
+    fog: { preset: 'haze', density: 0.004, heightFalloff: 0.12, start: 18,
+      color: [1, 0.94, 0.83], inscatter: 0.18, aerialStrength: 0.45, aerialDistance: 180 },
+    sunShafts: { intensity: 0.85, density: 0.7 },
+    grading: { preset: 'neutral', contrast: 1.08,
+      saturation: 1.18, vibrance: 0.12 },
   } : {}) },
 }));
 
@@ -378,6 +388,7 @@ export default {
     buildBackdrop(engine, lib, w);
     engine.addEmitter({ maxParticles: 8192, seed: 61, ...w.particles });
     const o = variant.settings;
+    if (o.grading) engine.setGrading(o.grading);
     if (o.sun) engine.applyEnvironment({ sun: o.sun });
     if (o.fog) engine.setFog(o.fog);
     if (o.sunShafts) engine.setSunShafts(o.sunShafts);

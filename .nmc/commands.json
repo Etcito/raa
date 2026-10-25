@@ -1,9 +1,18 @@
 [
   {
+    "name": "workspace-check",
+    "command": "bash scripts/check.sh",
+    "timeout_s": 3600,
+    "cwd": "."
+  },
+  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 3600,
-    "cwd": "."
+    "cwd": ".",
+    "after": [
+      "workspace-check"
+    ]
   },
   {
     "name": "judge-candy",
@@ -21,6 +30,15 @@
     "cwd": ".",
     "after": [
       "judge-candy"
+    ]
+  },
+  {
+    "name": "cargo-check",
+    "command": "cargo check",
+    "timeout_s": 600,
+    "cwd": ".",
+    "after": [
+      "p2-smoke"
     ]
   }
 ]
