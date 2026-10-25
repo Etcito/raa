@@ -1,5 +1,11 @@
 [
   {
+    "name": "scene-check",
+    "command": "node --test examples/lookdev/test/m14-jungle.test.mjs",
+    "timeout_s": 60,
+    "cwd": "."
+  },
+  {
     "name": "cargo-check",
     "command": "cargo check",
     "timeout_s": 600,

@@ -83,17 +83,19 @@ const WORLDS = {
   },
   jungle: {
     jungle: true,
+    polished: true,
     sky: { preset: 'day', zenith: [0.025, 0.35, 0.9], horizon: [0.1, 0.6, 0.9],
-      ground: [0.2, 0.3, 0.16], intensity: 0.9, horizonSoftness: 10,
+      ground: [0.2, 0.3, 0.16], intensity: 0.75, horizonSoftness: 10,
       sunDiscSize: 0.012, sunDiscIntensity: 8,
       clouds: { coverage: 0.18, density: 0.55, color: [0.9, 0.96, 1] } },
     fog: 'jungle',
     // Preserve the blue sky, brown mud and pink accents instead of a yellow wash.
     post: { grading: { preset: 'neutral', contrast: 1.08, saturation: 1.15,
-      vibrance: 0.12 }, bloom: { strength: 0.008, radius: 0.45 } },
+      vibrance: 0.12 }, bloom: { strength: 0.004, radius: 0.45 },
+      toneMapping: { exposureEv: -0.35 } },
     // Low, warm, behind the gate like candy, a little from the left.
-    sun: { dir: [-0.15, -0.22, 0.96], color: [1, 0.94, 0.82], intensity: 4.2 },
-    tiles: [[0.4, 0.95, 0.08], [0.6, 1, 0.2], [1, 0.55, 0.7], [0.2, 0.6, 0.22]],
+    sun: { dir: [-0.15, -0.22, 0.96], color: [1, 0.78, 0.43], intensity: 3.2 },
+    tiles: [[0.45, 0.95, 0.015], [1, 0.82, 0.015]],
     plinth: [0.42, 0.26, 0.14], ground: [0.3, 0.2, 0.1], vista: [0.12, 0.38, 0.16],
     inflatable: [[0.6, 0.95, 0.08], [1, 0.85, 0.08], [0.95, 0.3, 0.15]], stripe: [1, 0.95, 0.3],
     neon: [1, 0.7, 0.2], plush: [0.2, 0.3, 0.9], gate: [0.12, 0.46, 0.25],
@@ -139,7 +141,7 @@ const CANDY_COAT = { clearcoat: 1, clearcoatRoughness: 0.035 };
 
 // A dense rounded cylinder with analytic profile normals, without pinched panel seams.
 // Keep the shared hammer's dimensions, axis and placement (the capture contract).
-function candyHammer(geometry, palette) {
+function candyHammer(geometry, palette, headScale = 1) {
   const profile = (radius, half, rounding) => {
     const points = [[0, -half]];
     for (let i = 0; i <= 24; i++) {
@@ -158,7 +160,7 @@ function candyHammer(geometry, palette) {
   const handle = geometry.lathe(profile(0.065, 0.4875, 0.06), 64,
     { color: () => color(palette[2]) });
   for (let i = 1; i < handle.positions.length; i += 3) handle.positions[i] += 0.4875;
-  const head = geometry.lathe(profile(0.19, 0.36, 0.075), 128, { color: (p) =>
+  const head = geometry.lathe(profile(0.19 * headScale, 0.36, 0.075 * headScale), 128, { color: (p) =>
     color(Math.abs(p[1]) > 0.285 ? palette[1]
       : Math.cos(6 * Math.atan2(-p[2], p[0])) > 0.5 ? [1, 1, 1] : palette[0]) });
   // Rotate the head Y -> X, including its normal and tangent frame.
@@ -212,13 +214,13 @@ const neon = (engine, color) =>
   engine.addSurfaceMaterial({ function: 'raa.neon', params: { color, strength: 5, coreWhiteness: 1 }, castShadow: false });
 
 // lib's floor tiles recoloured with the world palette (one linear colour per tile, +-10%).
-function tiles(objects, n, palette) {
+function tiles(objects, n, palette, alternate = false) {
   const desc = objects.floorTiles(n);
   const perTile = desc.positions.length / 3 / (n * n);
   const colors = new Float32Array(desc.positions.length / 3 * 4);
   for (let t = 0; t < n * n; t++) {
     const h = (Math.imul(t + 1, 2654435761) >>> 0) / 4294967296;
-    const base = palette[Math.floor(h * palette.length)];
+    const base = palette[alternate ? (t + Math.floor(t / n)) % palette.length : Math.floor(h * palette.length)];
     const k = 0.9 + 0.2 * ((Math.imul(t + 7, 40503) >>> 0) % 1000) / 1000;
     for (let v = t * perTile; v < (t + 1) * perTile; v++) {
       for (let c = 0; c < 3; c++) colors[4 * v + c] = srgbToLinear(base[c]) * k;
@@ -246,7 +248,7 @@ function buildRun(engine, lib, w) {
   place(engine, upload(engine, geometry.roundedBox(RUN.plinth, 0.1, 2), [plinth]), [0, -0.33, RUN.plinthZ]);
   const floor = plain(engine, [1, 1, 1], w.icy ? 0.03 : FLOOR_ROUGHNESS,
     w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.25 } : {});
-  const run = upload(engine, tiles(objects, RUN.tiles, w.tiles), [floor]);
+  const run = upload(engine, tiles(objects, RUN.tiles, w.tiles, w.jungle), [floor]);
   for (const z of RUN.sections) place(engine, run, [0, 0, z]);
 }
 
@@ -258,8 +260,8 @@ function buildObstacles(engine, lib, w) {
       seamDepth: w.polished ? 0.015 : 0.2 }, ...coat,
   });
   const s = HERO.scale;
-  place(engine, upload(engine, (w.polished ? candyHammer(geometry, w.inflatable) : objects.inflatableHammer()), [hammer]), HERO.t, yawQuat(HERO.yaw), [s, s, s]);
-  const pads = (w.jungle ? [w.inflatable[0], w.inflatable[1], [1, 0.08, 0.42], [1, 0.35, 0.06]] : w.inflatable).map((c) => (w.polished || w.jungle)
+  place(engine, upload(engine, (w.polished ? candyHammer(geometry, w.inflatable, w.jungle ? 2 : 1) : objects.inflatableHammer()), [hammer]), HERO.t, yawQuat(HERO.yaw), [s, s, s]);
+  const pads = (w.jungle ? w.inflatable.slice(0, 2) : w.inflatable).map((c) => (w.polished || w.jungle)
     ? engine.addSurfaceMaterial({ function: 'raa.inflatable',
       params: { color: c, stripeWidth: 0, seamDepth: 0.015 }, ...coat })
     : inflatable(engine, c, w.stripe));
@@ -295,28 +297,25 @@ function buildStrip(engine, lib, w) {
     : inflatable(engine, w.inflatable[0], w.stripe);
   for (const sx of [-1, 1]) {
     // Lower the candy rim to expose the green surface from the low camera.
-    const side = geometry.roundedBox([0.15, w.jungle ? 0.12 : w.polished ? 0.28 : 0.42, STRIP.d / 2 + 0.3], w.polished ? 0.14 : 0.06, w.polished ? 16 : 4);
+    const side = geometry.roundedBox([0.15, w.jungle ? 0.12 : w.polished ? 0.28 : 0.42, STRIP.d / 2 + 0.3], w.jungle ? 0.1 : w.polished ? 0.14 : 0.06, w.polished ? 16 : 4);
     place(engine, upload(engine, side, [wall]), [STRIP.x + sx * (STRIP.w / 2 + 0.15), GROUND_Y + 0.42, STRIP.z]);
   }
   const { function: fn, params, transmissive } = w.liquid;
   const blend = transmissive ? { blend: 'transmissive', transmission: w.polished ? 0.3 : 0.95, ior: 1.34, thickness: 0.4 } : {};
-  const m = w.jungle ? plain(engine, [0.42, 0.227, 0.118], 0.9)
+  const m = w.jungle ? plain(engine, [0.48, 0.25, 0.12], 0.72, { transmission: 0 })
     : engine.addSurfaceMaterial({ function: fn, params, ...blend });
   const surfaceY = w.jungle ? 0.04 : STRIP.y;
   place(engine, upload(engine, geometry.grid(STRIP.w, STRIP.d, STRIP.nx, STRIP.nz), [m]), [STRIP.x, surfaceY, STRIP.z]);
   if (w.jungle) {
     // Visible even at the fixed capture time, alongside the simulated splash particles.
-    const foam = plain(engine, [0.88, 0.8, 0.65], 0.9);
-    const blob = geometry.uvSphere(1, 16, 12);
-    const mudBlob = upload(engine, blob, [m]);
-    const foamBlob = upload(engine, blob, [foam]);
-    for (let i = 0; i < 36; i++) {
-      const x = STRIP.x + Math.sin(i * 2.4) * 1.15;
-      const z = -0.6 - i * 0.46;
-      const h = 0.12 + (i % 4) * 0.09;
-      place(engine, mudBlob, [x, surfaceY + h, z], yawQuat(i), [0.09, h, 0.07]);
-      place(engine, foamBlob, [x + 0.12, surfaceY + 0.025, z + 0.09],
-        identityQuat, [0.13, 0.025, 0.09]);
+    const mudBlob = upload(engine, geometry.uvSphere(1, 24, 16), [m]);
+    for (let i = 0; i < 6; i++) {
+      const x = STRIP.x + (i % 2 ? 1.15 : -1.15);
+      const z = -0.8 - i * 2.2;
+      const h = 0.28 + (i % 3) * 0.12;
+      place(engine, mudBlob, [x, surfaceY + h * 0.6, z], yawQuat(i), [0.28, h, 0.22]);
+      place(engine, mudBlob, [x - 0.12, surfaceY + h * 1.8, z + 0.1],
+        identityQuat, [0.12, 0.16, 0.12]);
     }
   }
 }
@@ -328,11 +327,11 @@ function buildBackdrop(engine, lib, w) {
   // Seven separated, substantial columns silhouette against the low winter sun.
   const gateShape = w.icy ? { ...GATE, x0: -5.1, x1: 5.1, pitch: 1.7,
     half: [0.32, 5.4, 0.45], z: -21 } : w.jungle
-      ? { ...GATE, half: [0.3, 5.4, 0.4], pitch: 1.5 } : GATE;
+      ? { ...GATE, x0: -5, x1: 5, half: [0.6, 4.2, 0.65], pitch: 2, z: -22 } : GATE;
   const pillar = upload(engine, geometry.roundedBox(gateShape.half, 0.08, 3), [gate]);
   for (let x = gateShape.x0; x <= gateShape.x1 + 1e-6; x += gateShape.pitch) place(engine, pillar, [x, gateShape.half[1] - 0.05, gateShape.z]);
   const lintel = geometry.roundedBox([(GATE.x1 - GATE.x0) / 2 + 0.6, 0.45, 0.45], 0.12, 3);
-  if (!w.icy) place(engine, upload(engine, lintel, [gate]), [0, w.jungle ? 10.8 : GATE.lintelY, GATE.z]);
+  if (!w.icy) place(engine, upload(engine, lintel, [gate]), [0, GATE.lintelY, gateShape.z]);
   const far = plain(engine, w.vista, 0.8);
   const shapes = {
     peak: (s) => geometry.lathe([[0, 0], [s, 0], [s * 0.12, s * 1.3], [0, s * 1.35]], 48),
@@ -342,6 +341,21 @@ function buildBackdrop(engine, lib, w) {
   for (const [x, z, kind, size] of VISTA) {
     const y = kind === 'tower' ? GROUND_Y + size * 1.6 : GROUND_Y - (kind === 'dome' ? size * 0.35 : 0);
     place(engine, upload(engine, shapes[kind](size), [far]), [x, y, z]);
+  }
+  if (w.jungle) {
+    // Simple palm silhouettes frame the run without introducing characters.
+    const trunk = upload(engine, geometry.roundedBox([0.22, 2.5, 0.22], 0.18, 8),
+      [plain(engine, [0.42, 0.28, 0.12], 0.85)]);
+    const leaf = upload(engine, geometry.uvSphere(1, 24, 12),
+      [plain(engine, [0.25, 0.65, 0.025], 0.55)]);
+    for (const [x, z] of [[-5, -7], [8, -10], [-7, -17], [9, -23], [-9, -30], [12, -36]]) {
+      place(engine, trunk, [x, 1.9, z]);
+      for (let i = 0; i < 6; i++) {
+        const a = i * Math.PI / 3;
+        place(engine, leaf, [x + Math.cos(a) * 1.1, 4.5, z + Math.sin(a) * 1.1],
+          yawQuat(-a), [1.8, 0.16, 0.48]);
+      }
+    }
   }
 }
 
@@ -393,10 +407,12 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
     dof: { fStop: 4, focus: HERO.focus },
     // Blue-green humid aerial haze stays distant; height falloff preserves blue overhead.
-    fog: { preset: 'jungle', density: 0.003, start: 16, heightFalloff: 0.3,
-      color: [0.18, 0.48, 0.57], inscatter: 0.06,
-      aerialStrength: 0.5, aerialDistance: 180 },
-    sunShafts: { intensity: 1.2, density: 0.7, maxDistance: 65 },
+    fog: { preset: 'jungle', density: 0.002, start: 20, heightFalloff: 0.3,
+      color: [0.12, 0.42, 0.28], inscatter: 0.03,
+      aerialStrength: 0.25, aerialDistance: 180 },
+    // Shafts integrate density per metre without extinction, independently of fog.
+    // The old 0.7 added tens of HDR units and washed out even the near objects.
+    sunShafts: { intensity: 0.6, density: 0.008, maxDistance: 45 },
   } : {}) },
 }));
 
