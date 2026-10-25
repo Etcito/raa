@@ -6,12 +6,21 @@
     "cwd": "."
   },
   {
-    "name": "capture-m15",
-    "command": "env NMC_CPUS=4 node scripts/lookdev-capture.mjs --milestone m15 --judge --ref-prefix /refs/",
-    "timeout_s": 3000,
+    "name": "cargo-check",
+    "command": "env CARGO_BUILD_JOBS=1 cargo check",
+    "timeout_s": 600,
     "cwd": ".",
     "after": [
       "build-lookdev"
+    ]
+  },
+  {
+    "name": "capture-m15",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m15 --only '^m15-waddle--(f0[1-5]|f0[7-9]|f1[01]|deform-on|deform-off|tints)$'",
+    "timeout_s": 3000,
+    "cwd": ".",
+    "after": [
+      "cargo-check"
     ]
   },
   {

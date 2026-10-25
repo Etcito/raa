@@ -9,5 +9,18 @@
   "proofs/captures/lookdev/m15-waddle--f06.png",
   "proofs/captures/lookdev/m15-waddle--f06-comparison.png",
   ".nmc/m15-f06-compare.py",
-  ".nmc/m15-scene-check.mjs"
+  ".nmc/m15-scene-check.mjs",
+  "proofs/captures/lookdev/m15-waddle--f01.png",
+  "proofs/captures/lookdev/m15-waddle--f02.png",
+  "proofs/captures/lookdev/m15-waddle--f03.png",
+  "proofs/captures/lookdev/m15-waddle--f04.png",
+  "proofs/captures/lookdev/m15-waddle--f05.png",
+  "proofs/captures/lookdev/m15-waddle--f07.png",
+  "proofs/captures/lookdev/m15-waddle--f08.png",
+  "proofs/captures/lookdev/m15-waddle--f09.png",
+  "proofs/captures/lookdev/m15-waddle--f10.png",
+  "proofs/captures/lookdev/m15-waddle--f11.png",
+  "proofs/captures/lookdev/m15-waddle--deform-on.png",
+  "proofs/captures/lookdev/m15-waddle--deform-off.png",
+  "proofs/captures/lookdev/m15-waddle--tints.png"
 ]
