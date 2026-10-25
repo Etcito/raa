@@ -24,8 +24,8 @@ distance scale, 0, 0). Depends on raa-core, raa-pipeline, raa-lit and raa-shader
 
 - `FogDesc::validate()`: refuses with code `post.invalid` and a message naming the field.
   Rules: every number finite; `density` in [0, 1]; `height_falloff` in (0, 10]; `start_m` >= 0;
-  every `color` component >= 0; `inscatter` in [0, 4]; `aerial_strength` in [0, 2];
-  `aerial_distance_m` > 0.
+  every `color` component >= 0; `inscatter` in [0, 4]; `aerial_strength` in [0, 2]
+  (0 = off; above 1 the aerial fade saturates closer); `aerial_distance_m` > 0.
 - `FogDesc::write_env(&mut raa_pipeline::EnvGpu)`: writes exactly the three S10 fog fields
   above (padding 0) and leaves every other `EnvGpu` field untouched.
 
