@@ -1,42 +1,17 @@
 [
   {
-    "name": "reference-preflight",
-    "command": "node -e \"const fs=require('node:fs'); const p='/refs/ref-2.png'; const b=fs.readFileSync(p); if(b.subarray(0,8).toString('hex')!=='89504e470d0a1a0a') throw Error('ref-2 is not a PNG'); console.log('ref-2 PNG readable: '+b.length+' bytes');\"",
-    "timeout_s": 60,
-    "cwd": "."
-  },
-  {
-    "name": "cargo-check",
-    "command": "env CARGO_BUILD_JOBS=1 cargo check",
-    "timeout_s": 600,
-    "cwd": "."
-  },
-  {
-    "name": "dof-tests",
-    "command": "env CARGO_BUILD_JOBS=1 cargo test -p raa-dof --test coc --test variants",
-    "timeout_s": 600,
-    "cwd": ".",
-    "after": [
-      "cargo-check"
-    ]
-  },
-  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 3600,
-    "cwd": ".",
-    "after": [
-      "dof-tests"
-    ]
+    "cwd": "."
   },
   {
-    "name": "judge-ice",
-    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-ice$' --judge --ref-prefix /refs/",
+    "name": "judge-jungle",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-jungle$' --judge --ref-prefix /refs/",
     "timeout_s": 3600,
     "cwd": ".",
     "after": [
-      "build-lookdev",
-      "reference-preflight"
+      "build-lookdev"
     ]
   },
   {
@@ -45,7 +20,7 @@
     "timeout_s": 600,
     "cwd": ".",
     "after": [
-      "judge-ice"
+      "judge-jungle"
     ]
   }
 ]

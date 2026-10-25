@@ -75,12 +75,12 @@ impl FogDesc {
             "jungle" => Some(FogDesc {
                 density: 0.03,
                 height_falloff: 0.3,
-                base_height_m: 2.0,
+                base_height_m: 1.5,
                 start_m: 0.0,
-                color: [0.42, 0.50, 0.38],
-                inscatter: 0.35,
-                aerial_strength: 0.4,
-                aerial_distance_m: 300.0,
+                color: [0.2, 0.42, 0.22],
+                inscatter: 0.12,
+                aerial_strength: 0.75,
+                aerial_distance_m: 180.0,
             }),
             // Moonlit night: thin deep blue-violet haze with little inscatter.
             "night" => Some(FogDesc {

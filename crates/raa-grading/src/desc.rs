@@ -81,10 +81,12 @@ impl GradingDesc {
             }),
             // Green-yellow jungle: green tint, punchier contrast, warm highlights.
             "jungle" => Some(GradingDesc {
-                tint: -0.1,
-                contrast: 1.1,
-                saturation: 1.1,
-                highlights_tint: [0.6, 0.53, 0.44],
+                tint: -0.2,
+                contrast: 1.12,
+                saturation: 1.3,
+                vibrance: 0.25,
+                shadows_tint: [0.42, 0.56, 0.4],
+                highlights_tint: [0.7, 0.62, 0.42],
                 ..neutral
             }),
             // Neon: hard contrast, magenta shadows against cyan highlights.

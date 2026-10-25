@@ -84,10 +84,10 @@ const WORLDS = {
   jungle: {
     sky: 'jungle', fog: 'jungle', post: 'jungle',
     // Low, warm, behind the gate like candy, a little from the left.
-    sun: { dir: [-0.15, -0.22, 0.96], color: [1, 0.85, 0.62], intensity: 6.5 },
-    tiles: [[0.45, 0.85, 0.2], [0.75, 0.95, 0.3], [1, 0.45, 0.65], [0.3, 0.7, 0.35]],
-    plinth: [0.62, 0.48, 0.32], ground: [0.25, 0.5, 0.18], vista: [0.2, 0.42, 0.22],
-    inflatable: [[0.55, 0.9, 0.15], [1, 0.75, 0.1], [0.95, 0.3, 0.2]], stripe: [1, 0.95, 0.4],
+    sun: { dir: [-0.15, -0.22, 0.96], color: [1, 0.9, 0.68], intensity: 7.5 },
+    tiles: [[0.4, 0.95, 0.08], [0.6, 1, 0.2], [1, 0.55, 0.7], [0.2, 0.6, 0.22]],
+    plinth: [0.42, 0.26, 0.14], ground: [0.3, 0.2, 0.1], vista: [0.12, 0.38, 0.16],
+    inflatable: [[0.6, 0.95, 0.08], [1, 0.85, 0.08], [0.95, 0.3, 0.15]], stripe: [1, 0.95, 0.3],
     neon: [1, 0.7, 0.2], plush: [0.2, 0.3, 0.9], gate: [0.7, 0.55, 0.38],
     ice: { tint: [0.6, 0.95, 0.85], absorption: 1.5, cloudiness: 0.35, crackScale: 0.25 },
     liquid: { function: 'raa.liquid.mud', params: { color: [0.34, 0.17, 0.1] }, transmissive: false },
