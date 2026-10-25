@@ -62,19 +62,24 @@ const WORLDS = {
     // Clear winter light rather than the snow sky's flat overcast illumination.
     icy: true,
     polished: true,
-    sky: { preset: 'day', zenith: [0.015, 0.22, 0.8], horizon: [0.08, 0.48, 0.95],
-      ground: [0.35, 0.65, 0.85], intensity: 0.85, horizonSoftness: 10,
+    // Saturated winter blue at the top (#2f7fe0) fading to the pale cyan-white horizon
+    // of ref-2 (#bfe4ff); a white zenith or horizon reads as a washed-out sheet.
+    sky: { preset: 'day', zenith: [0.028, 0.212, 0.745], horizon: [0.52, 0.78, 1],
+      ground: [0.5, 0.7, 0.92], intensity: 0.95, horizonSoftness: 8,
       sunDiscSize: 0.012, sunDiscIntensity: 22,
-      clouds: { coverage: 0.12, density: 0.45, color: [0.95, 0.98, 1] } },
-    fog: 'snow', post: { grading: { preset: 'neutral', contrast: 1.08,
-      saturation: 1.25, vibrance: 0.15 }, bloom: { strength: 0.012, radius: 0.55 } },
+      clouds: { coverage: 0.14, density: 0.5, color: [0.95, 0.98, 1] } },
+    // Cold blue daylight grade: push saturation and keep only snow and the tube edges
+    // above AgX's white shoulder. The old custom neutral grade left the frame pale.
+    fog: 'snow', post: { grading: { preset: 'ice', contrast: 1.1,
+      saturation: 1.32, vibrance: 0.22 }, bloom: { strength: 0.03, radius: 0.62 },
+      toneMapping: { exposureEv: -0.1 } },
     // Low backlight through the gate catches the ice edges and falling snow.
-    sun: { dir: [0.12, -0.21, 0.97], color: [0.94, 0.97, 1], intensity: 5.0 },
-    tiles: [[0.025, 0.65, 1], [0.08, 0.8, 1], [0.03, 0.56, 0.95], [0.28, 0.85, 1]],
-    plinth: [0.28, 0.68, 0.95], ground: [0.94, 0.97, 1], vista: [0.72, 0.83, 0.98],
+    sun: { dir: [0.12, -0.21, 0.97], color: [0.94, 0.97, 1], intensity: 4.5 },
+    tiles: [[0.02, 0.55, 1], [0.06, 0.75, 1], [0.02, 0.42, 0.95], [0.2, 0.82, 1]],
+    plinth: [0.2, 0.62, 0.95], ground: [0.94, 0.97, 1], vista: [0.72, 0.83, 0.98],
     inflatable: [[0.025, 0.45, 0.98], [0.95, 0.06, 0.48], [0.8, 0.94, 1]], stripe: [1, 1, 1],
-    neon: [0.16, 0.65, 1], plush: [0.025, 0.12, 0.65], gate: [0.16, 0.45, 0.78],
-    ice: { tint: [0.32, 0.8, 1], absorption: 0.65, cloudiness: 0.025, crackScale: 0.4 },
+    neon: [0.1, 0.6, 1], plush: [0.06, 0.22, 0.85], gate: [0.16, 0.52, 0.92],
+    ice: { tint: [0.1, 0.62, 1], absorption: 1.0, cloudiness: 0.02, crackScale: 0.4 },
     liquid: { function: 'raa.liquid.water', params: {}, transmissive: true },
     // Camera-facing white flakes across the hammer's focus plane, not just the sky.
     particles: { kind: 'snow', position: [0, 2.0, -2.6], volume: [3, 1.5, 3],
@@ -432,8 +437,10 @@ function buildRun(engine, lib, w) {
   place(engine, upload(engine, geometry.roundedBox(RUN.plinth, 0.1, 2), [plinth]), [0, -0.33, RUN.plinthZ]);
   // Candy's wet-look tiles: ior 2.0 lifts the dielectric F0 from 0.04 to 0.11, so SSR's
   // obstacle reflections clear the faint 4 % Fresnel instead of washing out.
-  const floor = plain(engine, [1, 1, 1], w.icy ? 0.03 : w.night ? 0.12 : FLOOR_ROUGHNESS,
-    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.25 }
+  // Ice's tile run is a wet mirror: a fairly metallic, low-roughness base under a sharp
+  // clearcoat, so SSR carries the hammer, plush and tube reflections into the blue tiles.
+  const floor = plain(engine, [1, 1, 1], w.icy ? 0.18 : w.night ? 0.12 : FLOOR_ROUGHNESS,
+    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.04, metallic: 0.55 }
       : w.night ? { ...COAT, metallic: 0.5 } : w.candy ? { ior: 2.0 } : {});
   const run = upload(engine, tiles(objects, RUN.tiles, w.tiles, w.jungle), [floor]);
   for (const z of RUN.sections) place(engine, run, [0, 0, z]);
@@ -472,6 +479,9 @@ function buildObstacles(engine, lib, w) {
   const tubes = [w.neon, w.neon2 ?? w.neon].map(c => w.night
     ? engine.addSurfaceMaterial({ function: 'raa.neon',
       params: { color: c, strength: 6, coreWhiteness: 0.15 }, castShadow: false })
+    // Ice keeps a saturated cyan gas core (the white-core variant bleached the arch).
+    : w.icy ? engine.addSurfaceMaterial({ function: 'raa.neon',
+      params: { color: c, strength: 4, coreWhiteness: 0.15 }, castShadow: false })
     : neon(engine, c));
   const neonArch = geometry.sweepTube(archPath(2.1, 1.1), 0.05, 12, { caps: 'round' });
   NEON_ARCHES.forEach((z, i) => place(engine, upload(engine, neonArch, [tubes[i % 2]]), [0, 0, w.night ? z - 3 : z]));
@@ -487,12 +497,12 @@ function buildObstacles(engine, lib, w) {
     // Candy gets the tufted shells too: the judged capture needs a furry silhouette and
     // sheen, not the short pile that read as a smooth blue ball.
     params: { color: w.plush,
-      furLength: w.candy ? 0.08 : (w.icy || w.jungle || w.night) ? 0.09 : 0.022,
-      furDensity: w.candy ? 8 : (w.icy || w.jungle || w.night) ? 6 : 12,
-      ...(w.icy ? { tipColor: [0.08, 0.32, 0.85], sheenColor: [0.35, 0.65, 1] }
+      furLength: w.candy ? 0.08 : w.icy ? 0.12 : (w.jungle || w.night) ? 0.09 : 0.022,
+      furDensity: w.candy ? 8 : w.icy ? 10 : (w.jungle || w.night) ? 6 : 12,
+      ...(w.icy ? { tipColor: [0.16, 0.45, 1], sheenColor: [0.5, 0.75, 1] }
         : w.candy ? { tipColor: [0.58, 0.74, 1], sheenColor: [0.82, 0.9, 1] } : {}) },
-    furLength: w.candy ? 0.08 : (w.icy || w.jungle || w.night) ? 0.09 : 0.022,
-    furDensity: w.candy ? 8 : (w.icy || w.jungle || w.night) ? 6 : 12, furDroop: 0.2,
+    furLength: w.candy ? 0.08 : w.icy ? 0.12 : (w.jungle || w.night) ? 0.09 : 0.022,
+    furDensity: w.candy ? 8 : w.icy ? 10 : (w.jungle || w.night) ? 6 : 12, furDroop: 0.2,
     ...(w.icy || w.candy ? { furShells: 64 } : {}),
     ...(w.jungle || w.night ? { furShells: 64, roughness: 0.95 } : {}),
   });
@@ -572,6 +582,16 @@ function buildBackdrop(engine, lib, w) {
     const y = kind === 'tower' ? GROUND_Y + size * 1.6 : GROUND_Y - (kind === 'dome' ? size * 0.35 : 0);
     place(engine, upload(engine, shapes[kind](size), [far]), [x, y, z]);
   }
+  if (w.icy) {
+    // Ref-2's rolling giant snowballs: white glossy spheres off the run, fading into the
+    // snowy aerial haze behind the pillar gate.
+    const snow = plain(engine, [0.93, 0.97, 1], 0.5, { clearcoat: 1, clearcoatRoughness: 0.22 });
+    const ball = (r) => upload(engine, geometry.uvSphere(r, 48, 24), [snow]);
+    for (const [x, y, z, r] of [[-9, 4.2, -20, 2.6], [-17, 3.6, -38, 4.2],
+      [15, 2.8, -44, 3.4], [-27, 8, -62, 7], [28, 10, -78, 9], [-12, 2.2, -30, 1.8]]) {
+      place(engine, ball(r), [x, y, z]);
+    }
+  }
   if (w.jungle) {
     // Simple palm silhouettes frame the run without introducing characters.
     const trunk = upload(engine, geometry.roundedBox([0.22, 2.5, 0.22], 0.18, 8),
@@ -644,12 +664,13 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     // See the ice faces and snowy surround; retain sharp foreground plush and hammer.
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
     dof: { fStop: 2, focalLength: 0.085, focus: HERO.focus },
-    // Sky rays integrate to 20 km: keep their fog blue and suppress white sun scatter.
-    fog: { preset: 'snow', density: 0.001, start: 18, heightFalloff: 0.3,
-      color: [0.08, 0.42, 0.85], inscatter: 0.04,
-      aerialStrength: 0.4, aerialDistance: 180 },
-    sunShafts: { intensity: 2.4, density: 0.75, maxDistance: 65 },
-    ssr: { intensity: 1.85, maxRoughness: 0.65, thickness: 0.3 },
+    // Snowy haze stays in the far half (start 24 m) so the near run keeps its saturated
+    // blue; the sun scatter is kept at the candy budget so the sky never turns white.
+    fog: { preset: 'snow', density: 0.0009, start: 24, heightFalloff: 0.25,
+      color: [0.14, 0.46, 0.9], inscatter: 0.05,
+      aerialStrength: 0.5, aerialDistance: 200 },
+    sunShafts: { intensity: 0.45, density: 0.02, maxDistance: 55 },
+    ssr: { intensity: 2.2, maxRoughness: 0.55, thickness: 0.3 },
   } : world === 'jungle' ? {
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
     dof: { fStop: 4, focus: HERO.focus },

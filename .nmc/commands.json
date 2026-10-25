@@ -6,8 +6,8 @@
     "cwd": "."
   },
   {
-    "name": "judge-candy",
-    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-candy$' --judge --ref-prefix /refs/",
+    "name": "judge-ice",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-ice$' --judge --ref-prefix /refs/",
     "timeout_s": 900,
     "cwd": ".",
     "after": [
@@ -20,7 +20,7 @@
     "timeout_s": 120,
     "cwd": ".",
     "after": [
-      "judge-candy"
+      "judge-ice"
     ]
   }
 ]
