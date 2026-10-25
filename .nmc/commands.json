@@ -6,12 +6,21 @@
     "cwd": "."
   },
   {
+    "name": "scene-check",
+    "command": "node .nmc/m15-scene-check.mjs",
+    "timeout_s": 60,
+    "cwd": ".",
+    "after": [
+      "cargo-check"
+    ]
+  },
+  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 1800,
     "cwd": ".",
     "after": [
-      "cargo-check"
+      "scene-check"
     ]
   },
   {

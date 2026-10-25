@@ -107,9 +107,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 }
 
 function characterMeshes(engine, rearView) {
-  const blue = rearView ? plush(engine, [0.045, 0.16, 0.72], 0.065, 24) : plush(engine, BLUE);
+  const blue = rearView ? plush(engine, [0.075, 0.28, 0.95], 0.018, 48) : plush(engine, BLUE);
   const neutral = plush(engine, [0.92, 0.92, 0.92]);
-  const cream = plush(engine, CREAM, 0.025);
+  const cream = plush(engine, rearView ? [1, 1, 1] : CREAM, rearView ? 0.012 : 0.025);
   const bellyTint = plush(engine, [0.025, 0.15, 0.40], 0.04);
   const orange = inflatable(engine, [1, 0.49, 0.025]);
   const pink = inflatable(engine, [1, 0.025, 0.38]);
@@ -131,16 +131,28 @@ function characterMeshes(engine, rearView) {
   const underside = p => p[1] < 0.60 + 0.10 * Math.cos(p[0] * 7);
   const body = merge([select(lower, p => !underside(p)), select(lower, underside), belly]);
   const flipper = egg([0.22, 0.57, 0.19], [0, -0.43, 0]);
-  const foot = merge([egg([0.24, 0.13, 0.37], [0, -0.02, 0.16]),
+  let foot = merge([egg([0.24, 0.13, 0.37], [0, -0.02, 0.16]),
     egg([0.255, 0.065, 0.385], [0, -0.105, 0.16])]);
-  // Independent six-colour panels have crisp seams rather than vertex interpolation.
+  if (rearView) {
+    // Taller sneaker uppers, white toe caps, blue heel collars and visible laces.
+    const laces = Array.from({ length: 3 }, (_, i) => sweepTube([
+      [-0.14, 0.14, 0.19 + i * 0.07], [0, 0.18, 0.20 + i * 0.07],
+      [0.14, 0.14, 0.19 + i * 0.07],
+    ], 0.018, 8));
+    foot = merge([egg([0.25, 0.19, 0.38], [0, 0.02, 0.16]),
+      egg([0.265, 0.065, 0.395], [0, -0.105, 0.16]),
+      egg([0.24, 0.11, 0.18], [0, 0.015, 0.40]),
+      egg([0.22, 0.08, 0.17], [0, 0.16, -0.03]), ...laces]);
+  }
+  // Independent cap panels have crisp seams rather than vertex interpolation.
   const palette = [[0.03, 0.72, 0.69], [1, 0.80, 0.025], [1, 0.035, 0.38]];
   const cap = select(uvSphere(1, 96, 32), p => p[1] >= 0);
-  const panels = Array.from({ length: 6 }, (_, i) => reshape(select(cap, p =>
-    Math.min(5, Math.floor((Math.atan2(p[2], p[0]) + Math.PI) * 3 / Math.PI)) === i),
+  const panelCount = rearView ? 4 : 6;
+  const panels = Array.from({ length: panelCount }, (_, i) => reshape(select(cap, p =>
+    Math.min(panelCount - 1, Math.floor((Math.atan2(p[2], p[0]) + Math.PI) * panelCount / (2 * Math.PI))) === i),
   [0.72, 0.49, 0.64], [0, 0.57, 0]));
-  const seams = Array.from({ length: 6 }, (_, i) => {
-    const a = -Math.PI + i * Math.PI / 3;
+  const seams = Array.from({ length: panelCount }, (_, i) => {
+    const a = -Math.PI + i * 2 * Math.PI / panelCount;
     return sweepTube(Array.from({ length: 20 }, (_, j) => {
       const v = j / 19 * Math.PI / 2;
       return [0.725 * Math.cos(v) * Math.cos(a), 0.57 + 0.495 * Math.sin(v),
@@ -172,27 +184,31 @@ function characterMeshes(engine, rearView) {
     const a = i / 96 * 2 * Math.PI;
     return [0.80 * Math.cos(a), 0.02 + 0.045 * Math.sin(a), 0.65 * Math.sin(a)];
   });
+  const scarfSide = rearView ? -1 : 1;
   const scarf = merge([sweepTube(scarfPath, 0.145, 20, { closed: true }),
     reshape(roundedBox([0.17, 0.40, 0.045], 0.04, 16),
-      ONE, [0.48, -0.34, 0.67]),
+      ONE, [0.48, -0.34, scarfSide * 0.67]),
     reshape(roundedBox([0.13, 0.30, 0.04], 0.035, 12),
-      ONE, [0.70, -0.23, 0.56])]);
+      ONE, [0.70, -0.23, scarfSide * 0.56])]);
   const fringe = merge(Array.from({ length: 12 }, (_, i) => {
     const second = i >= 7, k = second ? i - 7 : i;
     const x = second ? 0.60 + k * 0.05 : 0.33 + k * 0.05;
-    const y = second ? -0.53 : -0.74, z = second ? 0.56 : 0.67;
-    return sweepTube([[x, y, z], [x - 0.02, y - 0.13, z + 0.025]], 0.013, 6);
+    const y = second ? -0.53 : -0.74, z = scarfSide * (second ? 0.56 : 0.67);
+    return sweepTube([[x, y, z], [x - 0.02, y - 0.13, z + scarfSide * 0.025]], 0.013, 6);
   }));
   const scarfMat = engine.addSurfaceMaterial({ function: 'm15.fish',
     sheenColor: [0.7, 0.95, 1], sheenRoughness: 0.6 });
   return {
-    body: [upload(engine, body, [blue, cream, bellyTint]), upload(engine, body, [neutral, cream, bellyTint])],
+    body: [upload(engine, body, [blue, cream, rearView ? cream : bellyTint]), upload(engine, body, [neutral, cream, rearView ? cream : bellyTint])],
     head: [upload(engine, upper, [blue]), upload(engine, upper, [neutral])],
     flipper: [upload(engine, flipper, [blue]), upload(engine, flipper, [neutral])],
-    foot: upload(engine, foot, [pink, sole]),
+    foot: upload(engine, foot, rearView ? [pink, sole, sole, blue, sole, sole, sole] : [pink, sole]),
     beak: upload(engine, egg([0.20, 0.105, 0.25], [0, 0, 0.12]), [orange]),
     eye: upload(engine, egg([0.065, 0.085, 0.055]), [eye]),
-    hat: upload(engine, hat, [...Array.from({ length: 6 }, (_, i) => plush(engine, palette[i % 3], 0.003)),
+    hat: upload(engine, hat, [...Array.from({ length: panelCount }, (_, i) => rearView
+      ? engine.addSurfaceMaterial({ color: [...palette, [0.06, 0.25, 1]][i],
+        roughness: 0.65, sheenColor: [0.15, 0.15, 0.15], sheenRoughness: 0.6 })
+      : plush(engine, palette[i % 3], 0.003)),
       ...seams.map(() => orange), orange]),
     propeller: upload(engine, propeller, [orange]),
     blush: upload(engine, egg([0.115, 0.06, 0.025]), [plush(engine, [1, 0.20, 0.36], 0.006)]),
@@ -490,8 +506,11 @@ export default {
     if (rearView) {
       // Bloom currently blurs all HDR pixels (no threshold in the public API).
       // Remove the full-frame veil and keep the plush silhouette in focus.
-      for (const pass of ['bloom', 'sunshafts', 'dof']) engine.setPassEnabled(pass, false);
-      engine.setFog({ preset: 'clear', density: 0.0002, start: 35, aerialStrength: 0 });
+      for (const pass of ['bloom', 'sunshafts', 'dof', 'fog']) engine.setPassEnabled(pass, false);
+      // Even 0.0002 integrates to substantial haze over the sky's 20 km ray.
+      // Zero the slot too: fur shells apply fog during forward shading.
+      engine.setFog({ preset: 'clear', density: 0, start: 0, aerialStrength: 0 });
+      engine.setPassEnabled('fog', false);
       engine.setGrading({ preset: 'neutral', lift: [0, 0, 0],
         saturation: 1.25, contrast: 1.22, vibrance: 0.12 });
       engine.setAmbient({ color: [0.72, 0.84, 1], intensity: 0.06 });
