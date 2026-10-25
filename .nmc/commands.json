@@ -1,14 +1,23 @@
 [
   {
+    "name": "scene-check",
+    "command": "node --test --test-concurrency=1 'examples/lookdev/test/m14-*.test.mjs'",
+    "timeout_s": 60,
+    "cwd": "."
+  },
+  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
-    "timeout_s": 3600,
-    "cwd": "."
+    "timeout_s": 1200,
+    "cwd": ".",
+    "after": [
+      "scene-check"
+    ]
   },
   {
     "name": "judge-neon",
     "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-neon$' --judge --ref-prefix /refs/",
-    "timeout_s": 3600,
+    "timeout_s": 480,
     "cwd": ".",
     "after": [
       "build-lookdev"
@@ -26,19 +35,28 @@
   {
     "name": "proof-m14",
     "command": "node proofs/m14-camera-effects.mjs",
-    "timeout_s": 1800,
+    "timeout_s": 1200,
     "cwd": ".",
     "after": [
-      "judge-neon"
+      "neon-image-check"
+    ]
+  },
+  {
+    "name": "cargo-check",
+    "command": "cargo check",
+    "timeout_s": 480,
+    "cwd": ".",
+    "after": [
+      "proof-m14"
     ]
   },
   {
     "name": "p2-smoke",
     "command": "node proofs/lib/p2-smoke.mjs",
-    "timeout_s": 600,
+    "timeout_s": 60,
     "cwd": ".",
     "after": [
-      "judge-neon"
+      "cargo-check"
     ]
   }
 ]

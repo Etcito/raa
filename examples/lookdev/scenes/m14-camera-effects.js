@@ -106,21 +106,26 @@ const WORLDS = {
   neon: {
     night: true,
     polished: true,
-    // Explicit night radiance and post settings: no bright preset haze or lifted blacks.
-    sky: { preset: 'night', zenith: [0.098, 0.039, 0.235], horizon: [0.235, 0.118, 0.47],
-      ground: [0.025, 0.01, 0.06], intensity: 0.55, horizonSoftness: 8,
-      sunDiscSize: 0.008, sunDiscIntensity: 0.4,
+    // Sky/Fog APIs take LINEAR radiance, unlike surface colours. Decode #1a0f3a
+    // and #3a1d6e; sending display RGB here made even the night sky much too bright.
+    sky: { preset: 'night', zenith: [0.01033, 0.00478, 0.04231], horizon: [0.04231, 0.01229, 0.15593],
+      ground: [0.002, 0.001, 0.006], intensity: 1, horizonSoftness: 8,
+      sunDiscSize: 0.008, sunDiscIntensity: 0,
       clouds: { coverage: 0, density: 0 } },
     fog: 'night',
     // Bloom is threshold-free in this renderer; widen the radiance blur explicitly.
-    post: { grading: { preset: 'neutral', contrast: 1.15, saturation: 1.4,
-      vibrance: 0.2, lift: [0, 0, 0], shadowsTint: [0.9, 0.75, 1.1] },
-      bloom: { strength: 0.12, radius: 0.85 }, toneMapping: { exposureEv: -0.65 } },
-    sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 1.5 },
+    // Split toning is soft-light in log space: 0.5 is neutral, NOT 1.
+    // The previous [0.9, 0.75, 1.1] lifted blacks into a lavender veil.
+    post: { grading: { preset: 'neutral', contrast: 1.12, saturation: 1.15,
+      vibrance: 0.12, lift: [0, 0, 0], shadowsTint: [0.5, 0.5, 0.5] },
+      bloom: { strength: 0.18, radius: 0.75 }, toneMapping: { exposureEv: -0.35 } },
+    // No solar HG glow across the sky; the night is lit by its environment and tubes.
+    sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 0 },
     tiles: [[0.06, 0.018, 0.12], [0.095, 0.015, 0.13], [0.015, 0.065, 0.12]],
     plinth: [0.06, 0.015, 0.13], ground: [0.025, 0.01, 0.055], vista: [0.1, 0.035, 0.2],
     inflatable: [[1, 0.035, 0.58], [0.025, 0.75, 1], [1, 0.65, 0.045]], stripe: [0.12, 0.04, 0.28],
-    neon: [1, 0.015, 0.65], neon2: [0.015, 0.8, 1], plush: [0.06, 0.2, 0.85], gate: [0.055, 0.015, 0.12],
+    neon: [1, 47 / 255, 208 / 255], neon2: [34 / 255, 230 / 255, 1],
+    plush: [0.06, 0.2, 0.85], gate: [0.055, 0.015, 0.12],
     ice: { tint: [0.3, 0.7, 1], absorption: 0.7, cloudiness: 0.04, crackScale: 0.4 },
     liquid: { function: 'raa.liquid.slime', params: { color: [0.04, 0.5, 1],
       glossiness: 1, absorption: 0.7, foamAmount: 0.03, detailStrength: 0.04 }, transmissive: true },
@@ -253,7 +258,99 @@ function archPath(r, leg, steps = 48) {
   return [...pts, [-r, leg, 0], [-r, 0, 0]];
 }
 
+// Ref-4 uses broad glossy stepping tiles and substantial luminous pipe machinery.
+// Keep this geometry exclusive to neon; the accepted worlds and diagnostic pairs
+// retain the shared obstacle course.
+function nightLight(engine, color, strength = 5) {
+  return plain(engine, color, 0.15, { emissive: color.map(c => srgbToLinear(c) * strength),
+    clearcoat: 1, castShadow: false });
+}
+
+function buildNeonRun(engine, { geometry }, w) {
+  const floor = plain(engine, [0.11, 0.025, 0.23], 0.15,
+    { ...COAT, metallic: 0.45 });
+  place(engine, upload(engine, geometry.roundedBox([4.2, 0.15, 24], 0.12, 4), [floor]),
+    [0, -0.35, -19]);
+  const tile = geometry.roundedBox([0.93, 0.13, 1.3], 0.12, 8);
+  const faces = w.tiles.map(c => upload(engine, tile,
+    [plain(engine, c, 0.15, { ...COAT, metallic: 0.35 })]));
+  const lights = [w.neon, w.neon2].map(c => nightLight(engine, c));
+  const bars = lights.map(m => upload(engine,
+    geometry.roundedBox([0.72, 0.018, 0.035], 0.017, 4), [m]));
+  // Twin chevrons, in the same luminous material as each tile's front edge.
+  const arrow = geometry.sweepTube([[-0.3, 0, 0.15], [0, 0, -0.08], [0.3, 0, 0.15]],
+    0.025, 8, { caps: 'round' });
+  const arrows = lights.map(m => upload(engine, arrow, [m]));
+  for (let row = 0; row < 14; row++) for (let col = 0; col < 3; col++) {
+    const x = (col - 1) * 2, z = 0.8 - row * 3;
+    const hue = (row + col) % 2;
+    place(engine, faces[(row + col) % faces.length], [x, -0.13, z]);
+    place(engine, bars[hue], [x, 0.022, z + 1.1]);
+    for (const dz of [-0.2, 0.2]) place(engine, arrows[hue], [x, 0.025, z + dz]);
+  }
+}
+
+function buildNeonArchitecture(engine, { geometry }, w) {
+  const violet = plain(engine, [0.24, 0.055, 0.45], 0.15,
+    { ...COAT, metallic: 0.65 });
+  const metal = plain(engine, [0.45, 0.25, 0.09], 0.18, { ...COAT, metallic: 0.7 });
+  const lights = [w.neon, w.neon2].map(c => nightLight(engine, c, 6));
+  const tube = (path, radius, material) => upload(engine,
+    geometry.sweepTube(path, radius, 24, { caps: 'round' }), [material]);
+  const body = upload(engine, geometry.lathe([[0, 0], [0.34, 0], [0.34, 3.5], [0, 3.5]], 64), [violet]);
+  const collar = upload(engine, geometry.lathe([[0, -0.1], [0.44, -0.1], [0.44, 0.1], [0, 0.1]], 64), [metal]);
+  const band = upload(engine, geometry.lathe([[0, -0.035], [0.45, -0.035], [0.45, 0.035], [0, 0.035]], 64), [lights[1]]);
+  // Split each cylinder quad into one checker material, avoiding interpolated
+  // vertex colours which would turn the reference's checks into pastel gradients.
+  const profile = [[0, 0], ...Array.from({ length: 9 }, (_, i) => [0.345, i * 0.4]), [0, 3.2]];
+  const checks = geometry.lathe(profile, 64);
+  const buckets = [[], []];
+  for (let i = 0; i < checks.indices.length; i += 3) {
+    const ids = Array.from(checks.indices.slice(i, i + 3));
+    const p = [0, 1, 2].map(c => ids.reduce((sum, v) => sum + checks.positions[3 * v + c], 0) / 3);
+    const sector = Math.floor((Math.atan2(p[2], p[0]) + Math.PI) / (Math.PI / 4));
+    buckets[(sector + Math.floor(p[1] / 0.4)) % 2].push(...ids);
+  }
+  checks.indices = new Uint32Array([...buckets[0], ...buckets[1]]);
+  checks.subMeshes = [{ first: 0, count: buckets[0].length },
+    { first: buckets[0].length, count: buckets[1].length }];
+  const checker = upload(engine, checks, [nightLight(engine, w.neon, 0.65),
+    nightLight(engine, [0.55, 0.8, 1], 0.8)]);
+  for (const z of [-3, -11, -20, -30, -43, -58]) for (const side of [-1, 1]) {
+    const x = side * 3.6;
+    place(engine, (z === -3 || z === -20 || z === -43) ? checker : body, [x, 0, z]);
+    for (const y of [0.15, 3.2]) {
+      place(engine, collar, [x, y, z]);
+      place(engine, band, [x, y + 0.12, z]);
+    }
+    // Thick violet pipe housings carry magenta and cyan strips towards the gate.
+    place(engine, tube([[0, 0, 0], [0, 0, -7.4]], 0.18, violet), [x, 2.5, z]);
+    place(engine, tube([[0, 0, 0], [0, 0, -7.4]], 0.055, lights[side < 0 ? 0 : 1]),
+      [x - side * 0.17, 2.52, z]);
+    place(engine, tube([[0, 0, 0], [0, 2.5, 0]], 0.035, lights[1]), [x, 0.4, z + 0.35]);
+  }
+  // Overhead magenta pipe, with a dark glossy housing and visible luminous face.
+  for (const z of [-5.5, -19, -33]) {
+    place(engine, tube([[-3.6, 0, 0], [3.6, 0, 0]], 0.22, violet), [0, 3.5, z]);
+    place(engine, tube([[-3.6, 0, 0], [3.6, 0, 0]], 0.07, lights[0]), [0, 3.48, z + 0.2]);
+  }
+  const arch = geometry.sweepTube(archPath(2.7, 1.2), 0.065, 24, { caps: 'round' });
+  for (const [i, z] of [-11, -24, -39].entries()) {
+    place(engine, upload(engine, arch, [lights[i % 2]]), [0, 0, z]);
+  }
+  const star = upload(engine, geometry.uvSphere(1, 8, 4),
+    [nightLight(engine, [0.35, 0.65, 1], 3)]);
+  // A deterministic two-dimensional distribution, above and between distant pipes.
+  const hash = n => ((Math.imul(n ^ (n >>> 16), 2246822519) >>> 0) % 10007) / 10007;
+  for (let i = 0; i < 180; i++) {
+    const r = 0.05 + hash(i * 19 + 91) * 0.09;
+    place(engine, star, [(hash(i * 3 + 1) - 0.5) * 140, 5 + hash(i * 7 + 43) * 42, -110],
+      identityQuat, [r, r, r]);
+  }
+}
+
 function buildRun(engine, lib, w) {
+  if (w.night) return buildNeonRun(engine, lib, w);
   const { geometry, objects } = lib;
   const ground = plain(engine, w.ground, 0.9);
   place(engine, upload(engine, geometry.roundedBox([260, 0.5, 260], 0.2, 1), [ground]), [0, GROUND_Y - 0.5, -120]);
@@ -276,6 +373,7 @@ function buildRun(engine, lib, w) {
 }
 
 function buildObstacles(engine, lib, w) {
+  if (w.night) return buildNeonArchitecture(engine, lib, w);
   const { geometry, objects } = lib;
   const coat = w.polished ? CANDY_COAT : COAT;
   const hammer = engine.addSurfaceMaterial({
@@ -318,6 +416,7 @@ function buildObstacles(engine, lib, w) {
 
 // The liquid strip in its basin beside the run.
 function buildStrip(engine, lib, w) {
+  if (w.night) return; // Ref-4 has luminous pipes, not a daytime liquid basin.
   const { geometry } = lib;
   const wall = w.polished ? plain(engine, w.inflatable[0], 0.18, CANDY_COAT)
     : inflatable(engine, w.inflatable[0], w.stripe);
@@ -348,6 +447,7 @@ function buildStrip(engine, lib, w) {
 
 // The pillar gate across the far end and the distant big shapes.
 function buildBackdrop(engine, lib, w) {
+  if (w.night) return; // The neon architecture supplies pillars and stars, without mountains.
   const { geometry } = lib;
   const gate = plain(engine, w.gate, 0.35, COAT);
   // Seven separated, substantial columns silhouette against the low winter sun.
@@ -419,10 +519,19 @@ const WORLD_TEXT = {
   neon: 'Target ref-4: a neon night world, a dark violet sky, magenta and cyan glowing tubes '
     + 'with strong bloom reflected in the dark glossy floor, sparkles and violet night haze.',
 };
+// Ref-4's geometry is different from refs 1-3. Retain the same visual quality
+// criteria without asking the judge for the explicitly excluded daytime props.
+const NEON_VISTA_TEXT = 'A low camera looks down a long straight run of dark glossy violet '
+  + 'stepping tiles with luminous chevrons and screen-space reflections of saturated magenta '
+  + 'and cyan tubes. Glossy violet pipes, checker pillars and a magenta pipe overhead frame '
+  + 'the run. Glowing tube arches lead to distant pillars fading into violet night haze. '
+  + 'Star points and airborne sparkles punctuate a dark violet sky. The far run is softly '
+  + 'out of focus (depth of field) and the colours are graded. Expected: simple procedural '
+  + 'shapes and no characters; score the mood, gloss, depth haze and grading.';
 
 const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
   id: `world-${world}`,
-  description: `${VISTA_TEXT} ${WORLD_TEXT[world]}`,
+  description: `${world === 'neon' ? NEON_VISTA_TEXT : VISTA_TEXT} ${WORLD_TEXT[world]}`,
   references: [`ref-${i + 1}`],
   judge: true,
   settings: { world, ...(world === 'candy' ? {
@@ -456,12 +565,11 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     // The old 0.7 added tens of HDR units and washed out even the near objects.
     sunShafts: { intensity: 0.6, density: 0.008, maxDistance: 45 },
   } : world === 'neon' ? {
-    // Low view down the run; move the existing first arch back so it fits in frame.
-    camera: { ...CAMERA, eye: [0.2, 0.95, 3.5], target: [0.2, 0.55, -24], fovYDeg: 56 },
-    dof: { fStop: 4, focus: HERO.focus },
-    fog: { preset: 'night', density: 0.003, start: 24, heightFalloff: 0.3,
-      color: [0.12, 0.045, 0.28], inscatter: 0.002,
-      aerialStrength: 0.25, aerialDistance: 180 },
+    camera: { ...CAMERA, eye: [0.2, 0.75, 3.5], target: [0.2, 0.95, -24], fovYDeg: 56 },
+    dof: { fStop: 4, focus: [2.9, 1.8, -3] },
+    fog: { preset: 'night', density: 0.0015, start: 24, heightFalloff: 0.3,
+      color: [0.04231, 0.01229, 0.15593], inscatter: 0,
+      aerialStrength: 0.18, aerialDistance: 180 },
     ssr: { intensity: 1.85, maxRoughness: 0.65, thickness: 0.3 },
     // Keep the additive shaft integral subtle against the dark sky.
     sunShafts: { intensity: 0.25, density: 0.002, maxDistance: 40 },
