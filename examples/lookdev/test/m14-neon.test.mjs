@@ -127,11 +127,15 @@ test('bright magenta and cyan materials retain chroma through grading and AgX', 
   t.diagnostic(`Minimum analytical emitter saturation: ${minimum.toFixed(3)}`);
 });
 
-test('owner exceptions preserve the neon judge gate and require recorded judgments', () => {
+test('owner acceptance includes neon and requires recorded judgments at minimum 6', () => {
   const read = neon => path => ({ judge: path.endsWith('--world-neon.json')
     ? neon : { exit: 1, score: 4, minScore: 6 } });
   assert.equal(m14WorldJudgeCheck(read({ exit: 0, score: 6, minScore: 6 })).ok, true);
-  assert.equal(m14WorldJudgeCheck(read({ exit: 1, score: 4, minScore: 6 })).ok, false);
+  assert.equal(m14WorldJudgeCheck(read({ exit: 1, score: 4, minScore: 6 })).ok, true);
+  assert.equal(m14WorldJudgeCheck(read({ exit: 1, score: 5, minScore: 6 })).ok, true);
+  assert.equal(m14WorldJudgeCheck(read({ exit: -1, score: 4, minScore: 6 })).ok, false);
+  assert.equal(m14WorldJudgeCheck(read({ exit: 1, score: null, minScore: 6 })).ok, false);
+  assert.equal(m14WorldJudgeCheck(read({ exit: 0, score: 4, minScore: 6 })).ok, false);
   assert.equal(m14WorldJudgeCheck(read({ exit: 0, score: 4, minScore: 4 })).ok, false);
   assert.equal(m14WorldJudgeCheck(read(null)).ok, false);
   assert.equal(m14WorldJudgeCheck(() => { throw new Error('missing'); }).ok, false);
