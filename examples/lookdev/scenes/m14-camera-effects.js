@@ -106,28 +106,31 @@ const WORLDS = {
   neon: {
     night: true,
     polished: true,
-    // Sky/Fog APIs take LINEAR radiance, unlike surface colours. Decode #1a0f3a
-    // and #3a1d6e; sending display RGB here made even the night sky much too bright.
-    sky: { preset: 'night', zenith: [0.01033, 0.00478, 0.04231], horizon: [0.04231, 0.01229, 0.15593],
-      ground: [0.002, 0.001, 0.006], intensity: 1, horizonSoftness: 8,
+    // Sky/Fog take LINEAR radiance. These sit about four times below the old #1a0f3a /
+    // #3a1d6e decode: AgX lifts a linear 0.16 horizon into a pale lavender sheet, so a
+    // dark violet night needs a low linear horizon. build() boosts only the IBL, which
+    // keeps the near surfaces readable without brightening the background.
+    sky: { preset: 'night', zenith: [0.018, 0.006, 0.028], horizon: [0.05, 0.012, 0.078],
+      ground: [0.004, 0.0015, 0.006], intensity: 1, horizonSoftness: 5,
       sunDiscSize: 0.008, sunDiscIntensity: 0,
       clouds: { coverage: 0, density: 0 } },
     fog: 'night',
-    // Bloom is threshold-free in this renderer; widen the radiance blur explicitly.
-    // Split toning is soft-light in log space: 0.5 is neutral, NOT 1.
-    // The previous [0.9, 0.75, 1.1] lifted blacks into a lavender veil.
-    post: { grading: { preset: 'neutral', contrast: 1.12, saturation: 1.15,
-      vibrance: 0.12, lift: [0, 0, 0], shadowsTint: [0.5, 0.5, 0.5] },
-      bloom: { strength: 0.18, radius: 0.75 },
+    // Saturated magenta/cyan night grade: lower exposure and a darker floor keep the tube
+    // chroma inside AgX instead of bleaching it to white. Bloom is threshold-free here, so
+    // its strength is the only threshold lever there is.
+    post: { grading: { preset: 'neutral', contrast: 1.18, saturation: 1.32,
+      vibrance: 0.2, lift: [0, 0, 0], shadowsTint: [0.5, 0.5, 0.5], vignette: 0.18 },
+      bloom: { strength: 0.32, radius: 0.78 },
       // AgX's punchy look retains chroma in the luminous strips and their bloom.
-      toneMapping: { exposureEv: -0.35, look: 'punchy' } },
-    // No solar HG glow across the sky; the night is lit by its environment and tubes.
-    sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 0 },
-    tiles: [[0.06, 0.018, 0.12], [0.095, 0.015, 0.13], [0.015, 0.065, 0.12]],
-    plinth: [0.06, 0.015, 0.13], ground: [0.025, 0.01, 0.055], vista: [0.1, 0.035, 0.2],
+      toneMapping: { exposureEv: -0.55, look: 'punchy' } },
+    // A dim cool moon behind the gate: a violet rim on the pillars and the plush, and just
+    // enough sun for faint violet shafts. The tubes are the actual light source.
+    sun: { dir: [0.12, -0.21, 0.97], color: [0.45, 0.5, 1], intensity: 0.7 },
+    tiles: [[0.055, 0.012, 0.13], [0.085, 0.014, 0.16], [0.012, 0.05, 0.13]],
+    plinth: [0.045, 0.012, 0.10], ground: [0.02, 0.008, 0.045], vista: [0.07, 0.02, 0.16],
     inflatable: [[1, 0.035, 0.58], [0.025, 0.75, 1], [1, 0.65, 0.045]], stripe: [0.12, 0.04, 0.28],
-    neon: [1, 47 / 255, 208 / 255], neon2: [34 / 255, 230 / 255, 1],
-    plush: [0.06, 0.2, 0.85], gate: [0.055, 0.015, 0.12],
+    neon: [1, 0.08, 0.66], neon2: [0.04, 0.78, 1],
+    plush: [0.2, 0.38, 1], gate: [0.055, 0.015, 0.12],
     ice: { tint: [0.3, 0.7, 1], absorption: 0.7, cloudiness: 0.04, crackScale: 0.4 },
     liquid: { function: 'raa.liquid.slime', params: { color: [0.04, 0.5, 1],
       glossiness: 1, absorption: 0.7, foamAmount: 0.03, detailStrength: 0.04 }, transmissive: true },
@@ -271,19 +274,20 @@ function nightLight(engine, color, strength = 2) {
 }
 
 function buildNeonRun(engine, { geometry }, w) {
-  const floor = plain(engine, [0.11, 0.025, 0.23], 0.15,
-    { ...COAT, metallic: 0.45 });
+  // Darker than the tubes so the reflection reads, and glossy enough for a sharp SSR hit.
+  const floor = plain(engine, [0.055, 0.010, 0.13], 0.045,
+    { ...COAT, clearcoatRoughness: 0.02, metallic: 0.2 });
   place(engine, upload(engine, geometry.roundedBox([4.2, 0.15, 24], 0.12, 4), [floor]),
     [0, -0.35, -19]);
   const tile = geometry.roundedBox([0.93, 0.13, 1.3], 0.12, 8);
   const faces = w.tiles.map(c => upload(engine, tile,
-    [plain(engine, c, 0.15, { ...COAT, metallic: 0.35 })]));
+    [plain(engine, c, 0.04, { ...COAT, clearcoatRoughness: 0.02, metallic: 0.15 })]));
   const lights = [w.neon, w.neon2].map(c => nightLight(engine, c));
   const bars = lights.map(m => upload(engine,
-    geometry.roundedBox([0.72, 0.018, 0.035], 0.017, 4), [m]));
+    geometry.roundedBox([0.72, 0.026, 0.05], 0.024, 4), [m]));
   // Twin chevrons, in the same luminous material as each tile's front edge.
   const arrow = geometry.sweepTube([[-0.3, 0, 0.15], [0, 0, -0.08], [0.3, 0, 0.15]],
-    0.025, 8, { caps: 'round' });
+    0.03, 8, { caps: 'round' });
   const arrows = lights.map(m => upload(engine, arrow, [m]));
   for (let row = 0; row < 14; row++) for (let col = 0; col < 3; col++) {
     const x = (col - 1) * 2, z = 0.8 - row * 3;
@@ -294,12 +298,28 @@ function buildNeonRun(engine, { geometry }, w) {
   }
 }
 
-function buildNeonArchitecture(engine, { geometry }, w) {
-  const violet = plain(engine, [0.24, 0.055, 0.45], 0.15,
-    { ...COAT, metallic: 0.65 });
+function ringPath(radius, steps = 72) {
+  const pts = [];
+  for (let i = 0; i <= steps; i++) {
+    const a = (Math.PI * 2 * i) / steps;
+    pts.push([radius * Math.cos(a), radius * Math.sin(a), 0]);
+  }
+  return pts;
+}
+
+function buildNeonArchitecture(engine, lib, w) {
+  const { geometry } = lib;
+  const violet = plain(engine, [0.24, 0.055, 0.45], 0.12,
+    { ...COAT, metallic: 0.6 });
   const metal = plain(engine, [0.45, 0.25, 0.09], 0.18, { ...COAT, metallic: 0.7 });
   const lights = [w.neon, w.neon2].map(c => nightLight(engine, c));
-  const tube = (path, radius, material) => upload(engine,
+  // Gas tubes carry a hot core and a far halo; the flat light strips above stay below
+  // AgX's bleaching shoulder on purpose, so the tubes are the parts that really blow out.
+  const gas = [w.neon, w.neon2].map(c => engine.addSurfaceMaterial({
+    function: 'raa.neon', params: { color: c, strength: 4, coreWhiteness: 0.14 },
+    castShadow: false,
+  }));
+  const tubeMesh = (path, radius, material) => upload(engine,
     geometry.sweepTube(path, radius, 24, { caps: 'round' }), [material]);
   const body = upload(engine, geometry.lathe([[0, 0], [0.34, 0], [0.34, 3.5], [0, 3.5]], 64), [violet]);
   const collar = upload(engine, geometry.lathe([[0, -0.1], [0.44, -0.1], [0.44, 0.1], [0, 0.1]], 64), [metal]);
@@ -320,6 +340,13 @@ function buildNeonArchitecture(engine, { geometry }, w) {
     { first: buckets[0].length, count: buckets[1].length }];
   const checker = upload(engine, checks, [nightLight(engine, w.neon, 0.65),
     nightLight(engine, [0.55, 0.8, 1], 0.8)]);
+  // Vertical gas strips edge every pillar so it is not a flat silhouette.
+  const rimPath = [[0, 0, 0], [0, 3.4, 0]];
+  const rims = gas.map(m => upload(engine, geometry.sweepTube(rimPath, 0.028, 12, { caps: 'round' }), [m]));
+  const pipeHousing = tubeMesh([[0, 0, 0], [0, 0, -7.4]], 0.18, violet);
+  const pipeMagenta = tubeMesh([[0, 0, 0], [0, 0, -7.4]], 0.055, gas[0]);
+  const pipeCyan = tubeMesh([[0, 0, 0], [0, 0, -7.4]], 0.055, gas[1]);
+  const riser = tubeMesh([[0, 0, 0], [0, 2.5, 0]], 0.035, gas[1]);
   for (const z of [-3, -11, -20, -30, -43, -58]) for (const side of [-1, 1]) {
     const x = side * 3.6;
     place(engine, (z === -3 || z === -20 || z === -43) ? checker : body, [x, 0, z]);
@@ -327,21 +354,55 @@ function buildNeonArchitecture(engine, { geometry }, w) {
       place(engine, collar, [x, y, z]);
       place(engine, band, [x, y + 0.12, z]);
     }
+    for (const dx of [-0.31, 0.31]) {
+      place(engine, rims[(dx < 0) === (side < 0) ? 0 : 1], [x + dx, 0.18, z + 0.39]);
+    }
     // Thick violet pipe housings carry magenta and cyan strips towards the gate.
-    place(engine, tube([[0, 0, 0], [0, 0, -7.4]], 0.18, violet), [x, 2.5, z]);
-    place(engine, tube([[0, 0, 0], [0, 0, -7.4]], 0.055, lights[side < 0 ? 0 : 1]),
-      [x - side * 0.17, 2.52, z]);
-    place(engine, tube([[0, 0, 0], [0, 2.5, 0]], 0.035, lights[1]), [x, 0.4, z + 0.35]);
+    place(engine, pipeHousing, [x, 2.5, z]);
+    place(engine, side < 0 ? pipeMagenta : pipeCyan, [x - side * 0.17, 2.52, z]);
+    place(engine, riser, [x, 0.4, z + 0.35]);
   }
   // Overhead magenta pipe, with a dark glossy housing and visible luminous face.
+  const overheadHousing = tubeMesh([[-3.6, 0, 0], [3.6, 0, 0]], 0.22, violet);
+  const overheadStrip = tubeMesh([[-3.6, 0, 0], [3.6, 0, 0]], 0.07, gas[0]);
   for (const z of [-5.5, -19, -33]) {
-    place(engine, tube([[-3.6, 0, 0], [3.6, 0, 0]], 0.22, violet), [0, 3.5, z]);
-    place(engine, tube([[-3.6, 0, 0], [3.6, 0, 0]], 0.07, lights[0]), [0, 3.48, z + 0.2]);
+    place(engine, overheadHousing, [0, 3.5, z]);
+    place(engine, overheadStrip, [0, 3.48, z + 0.2]);
   }
-  const arch = geometry.sweepTube(archPath(2.7, 1.2), 0.065, 24, { caps: 'round' });
-  for (const [i, z] of [-11, -24, -39].entries()) {
-    place(engine, upload(engine, arch, [lights[i % 2]]), [0, 0, z]);
+  const archPathMesh = geometry.sweepTube(archPath(2.7, 1.2), 0.09, 24, { caps: 'round' });
+  const arches = gas.map(m => upload(engine, archPathMesh, [m]));
+  for (const [i, z] of [-11, -24, -39].entries()) place(engine, arches[i % 2], [0, 0, z]);
+  // A far double portal closes the run and gives the distant haze a luminous anchor.
+  place(engine, upload(engine, geometry.sweepTube(ringPath(6.4), 0.1, 16, { caps: 'round' }), [gas[1]]),
+    [0, 7.2, -50]);
+  place(engine, upload(engine, geometry.sweepTube(ringPath(4.8), 0.08, 16, { caps: 'round' }), [gas[0]]),
+    [0, 7.2, -50.4]);
+  // Dark far towers with a vertical gas edge: readable depth instead of flat silhouettes.
+  const tower = upload(engine, geometry.roundedBox([1, 1, 1], 0.08, 3), [violet]);
+  const towerStrips = gas.map(m => upload(engine,
+    geometry.roundedBox([0.05, 1, 0.05], 0.018, 2), [m]));
+  const SKYLINE = [[-34, -96, 4, 13], [30, -104, 5, 10], [-18, -122, 6, 17],
+    [18, -92, 3, 8], [46, -132, 7, 19], [-54, -118, 5, 12]];
+  for (const [i, [x, z, half, tall]] of SKYLINE.entries()) {
+    place(engine, tower, [x, tall - 0.4, z], identityQuat, [half, tall, half]);
+    place(engine, towerStrips[i % 2], [x, tall - 0.4, z + half + 0.02],
+      identityQuat, [1, tall, 1]);
   }
+  const plush = engine.addSurfaceMaterial({
+    function: 'raa.plush',
+    params: { color: w.plush, tipColor: [0.55, 0.8, 1], sheenColor: [0.6, 0.85, 1],
+      furLength: 0.12, furDensity: 8 },
+    furLength: 0.12, furDensity: 8, furDroop: 0.3, furShells: 64, roughness: 0.95,
+  });
+  // Same 0.45 m sphere as objects.plushSphere, resting on the tile tops at y = 0.
+  place(engine, upload(engine, geometry.uvSphere(0.45, 64, 32), [plush]), [PLUSH[0], 0.45, PLUSH[2]]);
+  // A gas ring on the floor underlines the furry silhouette and lights the tufts.
+  const plushRing = Array.from({ length: 49 }, (_, i) => {
+    const a = (Math.PI * 2 * i) / 48;
+    return [0.56 * Math.cos(a), 0, 0.56 * Math.sin(a)];
+  });
+  place(engine, upload(engine, geometry.sweepTube(plushRing, 0.018, 8, { caps: 'round' }), [gas[0]]),
+    [PLUSH[0], 0.03, PLUSH[2]]);
   const star = upload(engine, geometry.uvSphere(1, 8, 4),
     [nightLight(engine, [0.35, 0.65, 1], 3)]);
   // A deterministic two-dimensional distribution, above and between distant pipes.
@@ -570,13 +631,15 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     sunShafts: { intensity: 0.6, density: 0.008, maxDistance: 45 },
   } : world === 'neon' ? {
     camera: { ...CAMERA, eye: [0.2, 0.75, 3.5], target: [0.2, 0.95, -24], fovYDeg: 56 },
-    dof: { fStop: 4, focus: [2.9, 1.8, -3] },
-    fog: { preset: 'night', density: 0.0015, start: 24, heightFalloff: 0.3,
-      color: [0.04231, 0.01229, 0.15593], inscatter: 0,
-      aerialStrength: 0.18, aerialDistance: 180 },
-    ssr: { intensity: 1.85, maxRoughness: 0.65, thickness: 0.3 },
-    // Keep the additive shaft integral subtle against the dark sky.
-    sunShafts: { intensity: 0.25, density: 0.002, maxDistance: 40 },
+    // Focus on the furry plush so its silhouette and tufts stay sharp; the far run softens.
+    dof: { fStop: 4, focus: [PLUSH[0], 0.5, PLUSH[2]] },
+    // Far shapes only: no height fog before 28 m, a weak violet fade toward the horizon.
+    fog: { preset: 'night', density: 0.0006, heightFalloff: 0.25, start: 28,
+      color: [0.6, 0.25, 1], inscatter: 0,
+      aerialStrength: 0.1, aerialDistance: 240 },
+    ssr: { intensity: 2, maxRoughness: 0.45, thickness: 0.25 },
+    // Keep the additive shaft integral subtle and violet against the dark sky.
+    sunShafts: { intensity: 0.15, density: 0.002, maxDistance: 48 },
   } : {}) },
 }));
 
@@ -628,6 +691,9 @@ export default {
       fog: w.fog,
       post: w.post,
     });
+    // The night sky stays dark in the background; raise only the IBL so the surfaces keep
+    // a dim cool fill. This does not brighten the sky image.
+    if (w.night) engine.setEnvironmentLighting({ diffuse: 3.5, specular: 3 });
     buildRun(engine, lib, w);
     buildObstacles(engine, lib, w);
     buildStrip(engine, lib, w);
