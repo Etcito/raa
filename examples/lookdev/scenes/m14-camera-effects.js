@@ -670,7 +670,7 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
       color: [0.14, 0.46, 0.9], inscatter: 0.05,
       aerialStrength: 0.5, aerialDistance: 200 },
     sunShafts: { intensity: 0.45, density: 0.02, maxDistance: 55 },
-    ssr: { intensity: 2.2, maxRoughness: 0.55, thickness: 0.3 },
+    ssr: { intensity: 2, maxRoughness: 0.55, thickness: 0.3 },
   } : world === 'jungle' ? {
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
     dof: { fStop: 4, focus: HERO.focus },
