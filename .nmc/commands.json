@@ -7,7 +7,7 @@
   },
   {
     "name": "judge-f00",
-    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm15-waddle--f00$' --judge --ref-prefix /refs/",
+    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f00$' --judge --ref-prefix /refs/",
     "timeout_s": 900,
     "cwd": ".",
     "after": [
@@ -18,6 +18,15 @@
     "name": "p2-smoke",
     "command": "node proofs/lib/p2-smoke.mjs",
     "timeout_s": 120,
+    "cwd": ".",
+    "after": [
+      "judge-f00"
+    ]
+  },
+  {
+    "name": "compare-f00",
+    "command": "python3 .nmc/m15-compare.py",
+    "timeout_s": 60,
     "cwd": ".",
     "after": [
       "judge-f00"

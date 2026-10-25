@@ -2,5 +2,8 @@
   ".nmc/artifacts.json",
   "proofs/captures/lookdev/m14-camera-effects--world-candy.png",
   "proofs/captures/lookdev/m14-camera-effects--world-ice.png",
-  "proofs/captures/lookdev/m14-camera-effects--world-neon.png"
+  "proofs/captures/lookdev/m14-camera-effects--world-neon.png",
+  "proofs/captures/lookdev/m15-waddle--f00.png",
+  "proofs/captures/lookdev/m15-waddle--f00-comparison.png",
+  ".nmc/m15-compare.py"
 ]
