@@ -104,19 +104,23 @@ const WORLDS = {
     particles: { kind: 'splash', position: [4.7, -0.15, -5], volume: [1, 0, 4], direction: [0, 1, 0], rate: 160, colors: [[0.4, 0.22, 0.12]], opacity: 1 },
   },
   neon: {
+    night: true,
     polished: true,
-    // Navy overhead, violet horizon fill: glossy obstacles must read between the tubes.
-    sky: { preset: 'night', zenith: [0.012, 0.018, 0.075], horizon: [0.16, 0.075, 0.3],
-      ground: [0.08, 0.035, 0.16], intensity: 0.85, horizonSoftness: 8,
-      sunDiscSize: 0.008, sunDiscIntensity: 6,
-      clouds: { coverage: 0.25, density: 0.5, color: [0.28, 0.15, 0.5] } },
-    fog: 'night', post: 'neon',
-    // Cool low backlight picks out the gate; magenta/cyan emission remains dominant.
-    sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 2.0 },
-    tiles: [[0.18, 0.07, 0.4], [0.48, 0.025, 0.5], [0.02, 0.48, 0.7], [0.95, 0.58, 0.04]],
-    plinth: [0.14, 0.055, 0.3], ground: [0.08, 0.045, 0.18], vista: [0.24, 0.12, 0.42],
+    // Explicit night radiance and post settings: no bright preset haze or lifted blacks.
+    sky: { preset: 'night', zenith: [0.098, 0.039, 0.235], horizon: [0.235, 0.118, 0.47],
+      ground: [0.025, 0.01, 0.06], intensity: 0.55, horizonSoftness: 8,
+      sunDiscSize: 0.008, sunDiscIntensity: 0.4,
+      clouds: { coverage: 0, density: 0 } },
+    fog: 'night',
+    // Bloom is threshold-free in this renderer; widen the radiance blur explicitly.
+    post: { grading: { preset: 'neutral', contrast: 1.15, saturation: 1.4,
+      vibrance: 0.2, lift: [0, 0, 0], shadowsTint: [0.9, 0.75, 1.1] },
+      bloom: { strength: 0.12, radius: 0.85 }, toneMapping: { exposureEv: -0.65 } },
+    sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 1.5 },
+    tiles: [[0.06, 0.018, 0.12], [0.095, 0.015, 0.13], [0.015, 0.065, 0.12]],
+    plinth: [0.06, 0.015, 0.13], ground: [0.025, 0.01, 0.055], vista: [0.1, 0.035, 0.2],
     inflatable: [[1, 0.035, 0.58], [0.025, 0.75, 1], [1, 0.65, 0.045]], stripe: [0.12, 0.04, 0.28],
-    neon: [1, 0.015, 0.65], neon2: [0.015, 0.8, 1], plush: [0.06, 0.2, 0.85], gate: [0.3, 0.12, 0.6],
+    neon: [1, 0.015, 0.65], neon2: [0.015, 0.8, 1], plush: [0.06, 0.2, 0.85], gate: [0.055, 0.015, 0.12],
     ice: { tint: [0.3, 0.7, 1], absorption: 0.7, cloudiness: 0.04, crackScale: 0.4 },
     liquid: { function: 'raa.liquid.slime', params: { color: [0.04, 0.5, 1],
       glossiness: 1, absorption: 0.7, foamAmount: 0.03, detailStrength: 0.04 }, transmissive: true },
@@ -255,10 +259,20 @@ function buildRun(engine, lib, w) {
   place(engine, upload(engine, geometry.roundedBox([260, 0.5, 260], 0.2, 1), [ground]), [0, GROUND_Y - 0.5, -120]);
   const plinth = plain(engine, w.plinth, 0.3, COAT);
   place(engine, upload(engine, geometry.roundedBox(RUN.plinth, 0.1, 2), [plinth]), [0, -0.33, RUN.plinthZ]);
-  const floor = plain(engine, [1, 1, 1], w.icy ? 0.03 : FLOOR_ROUGHNESS,
-    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.25 } : {});
+  const floor = plain(engine, [1, 1, 1], w.icy ? 0.03 : w.night ? 0.12 : FLOOR_ROUGHNESS,
+    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.25 } : w.night ? { ...COAT, metallic: 0.5 } : {});
   const run = upload(engine, tiles(objects, RUN.tiles, w.tiles, w.jungle), [floor]);
   for (const z of RUN.sections) place(engine, run, [0, 0, z]);
+  if (w.night) {
+    // Thin luminous inlays on the tile tops feed real SSR, not painted reflections.
+    const edges = [w.neon, w.neon2].map(c => upload(engine,
+      geometry.roundedBox([0.19, 0.006, 0.012], 0.005, 2),
+      [plain(engine, c, 0.15, { emissive: c.map(v => srgbToLinear(v) * 5), castShadow: false })]));
+    for (const z of RUN.sections) for (let row = 0; row < 12; row += 2) {
+      for (let col = 0; col < 12; col += 2) place(engine, edges[(row / 2 + col / 2) % 2],
+        [(col - 5.5) * 0.5, 0.008, z + (row - 5.5) * 0.5 + 0.21]);
+    }
+  }
 }
 
 function buildObstacles(engine, lib, w) {
@@ -278,9 +292,12 @@ function buildObstacles(engine, lib, w) {
   PADS.forEach(([x, z], i) => place(engine, upload(engine, pad, [pads[i % pads.length]]), [x, 0.18, z]));
   const arch = geometry.sweepTube(archPath(2.4, 0.4, w.polished ? 96 : 48), w.polished ? 0.42 : 0.3, w.polished ? 48 : 24, { caps: 'round' });
   place(engine, upload(engine, arch, [pads[1]]), [0, 0, INFLATABLE_ARCH_Z]);
-  const tubes = [neon(engine, w.neon), neon(engine, w.neon2 ?? w.neon)];
+  const tubes = [w.neon, w.neon2 ?? w.neon].map(c => w.night
+    ? engine.addSurfaceMaterial({ function: 'raa.neon',
+      params: { color: c, strength: 6, coreWhiteness: 0.15 }, castShadow: false })
+    : neon(engine, c));
   const neonArch = geometry.sweepTube(archPath(2.1, 1.1), 0.05, 12, { caps: 'round' });
-  NEON_ARCHES.forEach((z, i) => place(engine, upload(engine, neonArch, [tubes[i % 2]]), [0, 0, z]));
+  NEON_ARCHES.forEach((z, i) => place(engine, upload(engine, neonArch, [tubes[i % 2]]), [0, 0, w.night ? z - 3 : z]));
   const ice = engine.addSurfaceMaterial({
     function: 'raa.ice', params: w.ice, blend: 'transmissive', transmission: 1, ior: 1.31, thickness: w.icy ? 1.4 : 0.8, roughness: w.icy ? 0.03 : 0.04, castShadow: false,
   });
@@ -290,11 +307,11 @@ function buildObstacles(engine, lib, w) {
   const plush = engine.addSurfaceMaterial({
     function: 'raa.plush',
     // Sparse long tufts resolve at capture size; dense subpixel strands look smooth.
-    params: { color: w.plush, furLength: (w.icy || w.jungle) ? 0.09 : 0.022, furDensity: (w.icy || w.jungle) ? 6 : 12,
+    params: { color: w.plush, furLength: (w.icy || w.jungle || w.night) ? 0.09 : 0.022, furDensity: (w.icy || w.jungle || w.night) ? 6 : 12,
       ...(w.icy ? { tipColor: [0.08, 0.32, 0.85], sheenColor: [0.35, 0.65, 1] } : {}) },
-    furLength: (w.icy || w.jungle) ? 0.09 : 0.022, furDensity: (w.icy || w.jungle) ? 6 : 12, furDroop: 0.2,
+    furLength: (w.icy || w.jungle || w.night) ? 0.09 : 0.022, furDensity: (w.icy || w.jungle || w.night) ? 6 : 12, furDroop: 0.2,
     ...(w.icy ? { furShells: 64 } : {}),
-    ...(w.jungle ? { furShells: 64, roughness: 0.95 } : {}),
+    ...(w.jungle || w.night ? { furShells: 64, roughness: 0.95 } : {}),
   });
   place(engine, upload(engine, objects.plushSphere(), [plush]), w.icy ? [-0.9, 0, -2.6] : PLUSH);
 }
@@ -341,6 +358,22 @@ function buildBackdrop(engine, lib, w) {
   for (let x = gateShape.x0; x <= gateShape.x1 + 1e-6; x += gateShape.pitch) place(engine, pillar, [x, gateShape.half[1] - 0.05, gateShape.z]);
   const lintel = geometry.roundedBox([(GATE.x1 - GATE.x0) / 2 + 0.6, 0.45, 0.45], 0.12, 3);
   if (!w.icy) place(engine, upload(engine, lintel, [gate]), [0, GATE.lintelY, gateShape.z]);
+  if (w.night) {
+    const stripes = [w.neon, w.neon2].map(c => upload(engine,
+      geometry.roundedBox([0.035, 3.9, 0.025], 0.02, 3),
+      [plain(engine, c, 0.15, { emissive: c.map(v => srgbToLinear(v) * 6), castShadow: false })]));
+    for (let i = 0; i < 12; i++) place(engine, stripes[i % 2],
+      [GATE.x0 + i * GATE.pitch, 4.15, GATE.z + 0.32]);
+    // Sparse fixed stars above the vista, separate from the existing airborne sparkles.
+    const star = upload(engine, geometry.uvSphere(1, 8, 4),
+      [plain(engine, [0.4, 0.55, 1], 1, { emissive: [0.5, 0.8, 2], castShadow: false })]);
+    for (let i = 0; i < 48; i++) {
+      const hash = n => ((Math.imul(n, 2654435761) >>> 0) % 10000) / 10000;
+      const r = 0.035 + hash(i + 99) * 0.05;
+      place(engine, star, [(hash(i + 1) - 0.5) * 170, 22 + hash(i + 41) * 55, -140],
+        identityQuat, [r, r, r]);
+    }
+  }
   const far = plain(engine, w.vista, 0.8);
   const shapes = {
     peak: (s) => geometry.lathe([[0, 0], [s, 0], [s * 0.12, s * 1.3], [0, s * 1.35]], 48),
@@ -423,14 +456,15 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     // The old 0.7 added tens of HDR units and washed out even the near objects.
     sunShafts: { intensity: 0.6, density: 0.008, maxDistance: 45 },
   } : world === 'neon' ? {
-    // Reveal the pad tops, ice and liquid instead of looking along the floor edge.
-    camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
+    // Low view down the run; move the existing first arch back so it fits in frame.
+    camera: { ...CAMERA, eye: [0.2, 0.95, 3.5], target: [0.2, 0.55, -24], fovYDeg: 56 },
     dof: { fStop: 4, focus: HERO.focus },
-    // The low backlight needs less scattering to preserve the violet horizon.
-    fog: { preset: 'night', density: 0.006, inscatter: 0.04 },
+    fog: { preset: 'night', density: 0.003, start: 24, heightFalloff: 0.3,
+      color: [0.12, 0.045, 0.28], inscatter: 0.002,
+      aerialStrength: 0.25, aerialDistance: 180 },
     ssr: { intensity: 1.85, maxRoughness: 0.65, thickness: 0.3 },
     // Keep the additive shaft integral subtle against the dark sky.
-    sunShafts: { intensity: 0.4, density: 0.006, maxDistance: 40 },
+    sunShafts: { intensity: 0.25, density: 0.002, maxDistance: 40 },
   } : {}) },
 }));
 

@@ -15,6 +15,15 @@
     ]
   },
   {
+    "name": "neon-image-check",
+    "command": "python3 scripts/check-neon-capture.py",
+    "timeout_s": 60,
+    "cwd": ".",
+    "after": [
+      "judge-neon"
+    ]
+  },
+  {
     "name": "proof-m14",
     "command": "node proofs/m14-camera-effects.mjs",
     "timeout_s": 1800,
