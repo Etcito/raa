@@ -15,17 +15,39 @@
     ]
   },
   {
-    "name": "judge-f00-f06",
-    "command": "env NMC_CPUS=2 node scripts/lookdev-capture.mjs --only 'm15-waddle--f0[06]$' --judge --ref-prefix /refs/",
-    "timeout_s": 1200,
+    "name": "judge-f00",
+    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f00$' --judge --judge-record-only --ref-prefix /refs/",
+    "timeout_s": 900,
     "cwd": ".",
-    "after": ["build-lookdev"]
+    "after": [
+      "build-lookdev"
+    ]
+  },
+  {
+    "name": "compare-f00",
+    "command": "python3 .nmc/m15-compare.py",
+    "timeout_s": 60,
+    "cwd": ".",
+    "after": [
+      "judge-f00"
+    ]
+  },
+  {
+    "name": "judge-f06",
+    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f06$' --judge --ref-prefix /refs/",
+    "timeout_s": 900,
+    "cwd": ".",
+    "after": [
+      "judge-f00"
+    ]
   },
   {
     "name": "p2-smoke",
     "command": "node proofs/lib/p2-smoke.mjs",
     "timeout_s": 120,
     "cwd": ".",
-    "after": ["judge-f00-f06"]
+    "after": [
+      "judge-f06"
+    ]
   }
 ]
