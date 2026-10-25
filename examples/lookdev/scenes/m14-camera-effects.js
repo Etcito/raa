@@ -118,7 +118,9 @@ const WORLDS = {
     // The previous [0.9, 0.75, 1.1] lifted blacks into a lavender veil.
     post: { grading: { preset: 'neutral', contrast: 1.12, saturation: 1.15,
       vibrance: 0.12, lift: [0, 0, 0], shadowsTint: [0.5, 0.5, 0.5] },
-      bloom: { strength: 0.18, radius: 0.75 }, toneMapping: { exposureEv: -0.35 } },
+      bloom: { strength: 0.18, radius: 0.75 },
+      // AgX's punchy look retains chroma in the luminous strips and their bloom.
+      toneMapping: { exposureEv: -0.35, look: 'punchy' } },
     // No solar HG glow across the sky; the night is lit by its environment and tubes.
     sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 0 },
     tiles: [[0.06, 0.018, 0.12], [0.095, 0.015, 0.13], [0.015, 0.065, 0.12]],
@@ -261,7 +263,9 @@ function archPath(r, leg, steps = 48) {
 // Ref-4 uses broad glossy stepping tiles and substantial luminous pipe machinery.
 // Keep this geometry exclusive to neon; the accepted worlds and diagnostic pairs
 // retain the shared obstacle course.
-function nightLight(engine, color, strength = 5) {
+// Keep coloured emitters below AgX's whitening shoulder. Bloom has no threshold,
+// so these still glow; raising emission to 5–6 only bleaches their display colour.
+function nightLight(engine, color, strength = 2) {
   return plain(engine, color, 0.15, { emissive: color.map(c => srgbToLinear(c) * strength),
     clearcoat: 1, castShadow: false });
 }
@@ -294,7 +298,7 @@ function buildNeonArchitecture(engine, { geometry }, w) {
   const violet = plain(engine, [0.24, 0.055, 0.45], 0.15,
     { ...COAT, metallic: 0.65 });
   const metal = plain(engine, [0.45, 0.25, 0.09], 0.18, { ...COAT, metallic: 0.7 });
-  const lights = [w.neon, w.neon2].map(c => nightLight(engine, c, 6));
+  const lights = [w.neon, w.neon2].map(c => nightLight(engine, c));
   const tube = (path, radius, material) => upload(engine,
     geometry.sweepTube(path, radius, 24, { caps: 'round' }), [material]);
   const body = upload(engine, geometry.lathe([[0, 0], [0.34, 0], [0.34, 3.5], [0, 3.5]], 64), [violet]);

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import scene from '../scenes/m14-camera-effects.js';
 import * as geometry from '../lib/geometry.js';
 import { m14WorldJudgeCheck } from '../../../proofs/m14-world-judge.mjs';
@@ -69,6 +70,61 @@ test('night architecture has valid checker submeshes and reflective luminous til
     assert.ok(meshes[instance.mesh]);
     assert.ok(nodes[instance.node]);
   }
+});
+
+// Analytical colour probes, not capture evidence. Read the production AgX
+// matrices and apply its curve/OETF after the scene's neutral grading settings.
+// The GPU image check remains responsible for the whole frame and reference.
+const tonemap = readFileSync(new URL('../../../crates/raa-tonemap/src/tonemap.wgsl', import.meta.url), 'utf8');
+const matrix = name => {
+  const body = tonemap.match(new RegExp(`const ${name} = mat3x3<f32>\\(([\\s\\S]*?)\\n\\);`))[1];
+  const columns = [...body.matchAll(/vec3<f32>\(([^)]+)\)/g)]
+    .map(m => m[1].split(',').map(Number));
+  return [0, 1, 2].map(i => columns.map(c => c[i]));
+};
+const inset = matrix('AGX_INSET'), outset = matrix('AGX_OUTSET');
+const mul = (m, c) => m.map(row => row.reduce((s, v, i) => s + v * c[i], 0));
+const luma = c => c.reduce((s, v, i) => s + v * [0.2126, 0.7152, 0.0722][i], 0);
+const clamp = x => Math.max(0, Math.min(1, x));
+function displayProbe(rgb, post) {
+  const grade = post.grading;
+  let c = rgb.map(x => 0.18 * (Math.max(x, 1e-9) / 0.18) ** grade.contrast);
+  const y = luma(c);
+  c = c.map(x => y + (x - y) * grade.saturation);
+  const sat = clamp((Math.max(...c) - Math.min(...c)) / Math.max(...c));
+  const y2 = luma(c);
+  c = c.map(x => Math.max(0, y2 + (x - y2) * (1 + grade.vibrance * (1 - sat)))
+    * 2 ** post.toneMapping.exposureEv);
+  let encoded = mul(inset, c).map(v => {
+    const x = clamp((Math.log2(Math.max(v, 1e-10)) + 12.47393) / 16.499999);
+    return clamp(15.5 * x ** 6 - 40.14 * x ** 5 + 31.96 * x ** 4
+      - 6.868 * x ** 3 + 0.4298 * x ** 2 + 0.1191 * x - 0.00232);
+  });
+  if (post.toneMapping.look === 'punchy') {
+    const y = luma(encoded);
+    encoded = encoded.map(x => y + 1.4 * (x ** 1.35 - y));
+  }
+  return mul(outset, encoded).map(x => {
+    const linear = clamp(x) ** 2.2;
+    return linear <= 0.0031308 ? linear * 12.92 : 1.055 * linear ** (1 / 2.4) - 0.055;
+  });
+}
+
+test('bright magenta and cyan materials retain chroma through grading and AgX', async t => {
+  const { materials, env } = await build();
+  const emitters = materials.filter(m => Math.max(...(m.emissive ?? [0])) > 1
+    && Math.min(...m.color) < 0.2);
+  assert.ok(emitters.length >= 4, 'tile and architecture emitters of both hues');
+  let minimum = 1;
+  for (const m of emitters) for (const radiance of [1, 1 + env.post.bloom.strength, 1.85]) {
+    // Include neutral reflected light to avoid testing only ideal pure emission.
+    const rgb = displayProbe(m.emissive.map(x => x * radiance + 0.1), env.post);
+    const value = Math.max(...rgb), saturation = 1 - Math.min(...rgb) / value;
+    assert.ok(value > 0.6, `emitter must remain luminous: ${rgb}`);
+    assert.ok(saturation >= 0.558 * 0.9, `emitter bleached after tonemap: ${rgb}`);
+    minimum = Math.min(minimum, saturation);
+  }
+  t.diagnostic(`Minimum analytical emitter saturation: ${minimum.toFixed(3)}`);
 });
 
 test('owner exceptions preserve the neon judge gate and require recorded judgments', () => {
