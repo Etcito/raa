@@ -1,53 +1,26 @@
 [
   {
-    "name": "cargo-check",
-    "command": "env CARGO_BUILD_JOBS=1 cargo check",
-    "timeout_s": 600,
-    "cwd": "."
-  },
-  {
-    "name": "scene-check",
-    "command": "node .nmc/m15-scene-check.mjs",
-    "timeout_s": 60,
-    "cwd": ".",
-    "after": [
-      "cargo-check"
-    ]
-  },
-  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 1800,
-    "cwd": ".",
-    "after": [
-      "scene-check"
-    ]
+    "cwd": "."
   },
   {
-    "name": "judge-f00",
-    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f00$' --judge --judge-record-only --ref-prefix /refs/",
-    "timeout_s": 900,
+    "name": "capture-m15",
+    "command": "env NMC_CPUS=4 node scripts/lookdev-capture.mjs --milestone m15 --judge --ref-prefix /refs/",
+    "timeout_s": 3000,
     "cwd": ".",
     "after": [
       "build-lookdev"
     ]
   },
   {
-    "name": "compare-f00",
-    "command": "python3 .nmc/m15-compare.py",
-    "timeout_s": 60,
+    "name": "proof-m15",
+    "command": "node proofs/m15-animation.mjs",
+    "timeout_s": 1800,
     "cwd": ".",
     "after": [
-      "judge-f00"
-    ]
-  },
-  {
-    "name": "judge-f06",
-    "command": "env NMC_CPUS=1 NMC_GPU_WAIT_S=300 node scripts/lookdev-capture.mjs --only 'm15-waddle--f06$' --judge --judge-record-only --ref-prefix /refs/",
-    "timeout_s": 900,
-    "cwd": ".",
-    "after": [
-      "judge-f00"
+      "capture-m15"
     ]
   },
   {
@@ -56,16 +29,7 @@
     "timeout_s": 120,
     "cwd": ".",
     "after": [
-      "judge-f06"
-    ]
-  },
-  {
-    "name": "compare-f06",
-    "command": "python3 .nmc/m15-f06-compare.py",
-    "timeout_s": 60,
-    "cwd": ".",
-    "after": [
-      "judge-f06"
+      "proof-m15"
     ]
   }
 ]
