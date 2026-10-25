@@ -46,8 +46,6 @@ pub(crate) const FS_GATHER_FAR: &str = "fs_gather_far";
 /// Full res into hdr.dst(): bilateral upsample of the gathered layers over the sharp hdr.
 /// Bindings 0, 1, 2, 4, 5, 6.
 pub(crate) const FS_COMPOSITE: &str = "fs_composite";
-/// Taps of the golden-angle spiral of each gather.
-pub(crate) const GATHER_TAPS: u32 = 48;
 
 /// Byte size of `DofParams`: inv_proj @0 (mat4x4); lens @64 (focus s m, aperture term
 /// `K = A * f / (s - f)` in px at viewport_h, max CoC px at viewport_h, camera near m =
@@ -63,21 +61,4 @@ pub(crate) fn aperture_term_px(d: &super::DofDesc, viewport_h: f32) -> f32 {
     let f = d.focal_length_mm / 1000.0;
     let a = f / d.f_stop;
     a * f / (d.focus_distance_m - f) * 1000.0 / 36.0 * viewport_h
-}
-
-/// CPU twin of `cs_coc` with autofocus: the signed CoC px of depth `z` when the GPU focus
-/// distance is `s_prime`. Like the shader, `s_prime` is kept beyond the focal point
-/// (`max(s', f + 0.001)`), the aperture term becomes `K * (s - f) / (s' - f)` and the result
-/// is clamped to `max_coc_px * viewport_h / 720`; it matches `coc_px` with
-/// `focus_distance_m = s_prime`. A non-finite or non-positive `z` returns 0.
-pub(crate) fn coc_px_at_focus(z: f32, d: &super::DofDesc, viewport_h: f32, s_prime: f32) -> f32 {
-    if !(z > 0.0 && z < 3.0e38) {
-        return 0.0;
-    }
-    let f = d.focal_length_mm / 1000.0;
-    let s = d.focus_distance_m;
-    let sp = s_prime.max(f + 0.001);
-    let k = aperture_term_px(d, viewport_h) * (s - f) / (sp - f);
-    let limit = d.max_coc_px * viewport_h / 720.0;
-    (k * (z - sp) / z).clamp(-limit, limit)
 }

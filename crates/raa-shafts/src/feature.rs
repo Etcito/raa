@@ -550,11 +550,13 @@ mod tests {
 
     #[test]
     fn pack_params_places_density_max_distance_and_intensity() {
-        let mut st = ShaftsState::default();
-        st.desc = ShaftsDesc {
-            intensity: 2.0,
-            density: 0.05,
-            max_distance_m: 40.0,
+        let st = ShaftsState {
+            desc: ShaftsDesc {
+                intensity: 2.0,
+                density: 0.05,
+                max_distance_m: 40.0,
+            },
+            ..ShaftsState::default()
         };
         let mut out = [0u8; PARAMS_LEN];
         pack_params(&mut out, &st, (101, 50), half_size((101, 50)), 67);

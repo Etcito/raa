@@ -520,6 +520,6 @@ mod tests {
 
     #[test]
     fn hiz_params_fit_their_slot() {
-        assert!(HIZ_PARAMS_SIZE <= SLOT_STRIDE);
+        const { assert!(HIZ_PARAMS_SIZE <= SLOT_STRIDE) };
     }
 }

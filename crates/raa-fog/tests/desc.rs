@@ -105,19 +105,20 @@ fn range_limits_are_accepted() {
 #[test]
 fn write_env_places_the_s10_fields_and_keeps_the_rest() {
     let fog = FogDesc::preset("haze").expect("haze");
-    let mut env = EnvGpu::default();
-    env.sun_disc = [1.0, 2.0, 3.0, 4.0];
-    env.zenith = [1.1, 2.1, 3.1, 4.1];
-    env.horizon = [1.2, 2.2, 3.2, 4.2];
-    env.ground = [1.3, 2.3, 3.3, 4.3];
-    env.sky_params = [1.4, 2.4, 3.4, 4.4];
-    env.background = [1.5, 2.5, 3.5, 4.5];
-    env.clouds = [1.6, 2.6, 3.6, 4.6];
-    env.clouds2 = [1.7, 2.7, 3.7, 4.7];
-    env.cloud_color = [1.8, 2.8, 3.8, 4.8];
-    env.fog = [9.0; 4];
-    env.fog_color = [9.0; 4];
-    env.aerial = [9.0; 4];
+    let mut env = EnvGpu {
+        sun_disc: [1.0, 2.0, 3.0, 4.0],
+        zenith: [1.1, 2.1, 3.1, 4.1],
+        horizon: [1.2, 2.2, 3.2, 4.2],
+        ground: [1.3, 2.3, 3.3, 4.3],
+        sky_params: [1.4, 2.4, 3.4, 4.4],
+        background: [1.5, 2.5, 3.5, 4.5],
+        clouds: [1.6, 2.6, 3.6, 4.6],
+        clouds2: [1.7, 2.7, 3.7, 4.7],
+        cloud_color: [1.8, 2.8, 3.8, 4.8],
+        fog: [9.0; 4],
+        fog_color: [9.0; 4],
+        aerial: [9.0; 4],
+    };
     let before = env.clone();
 
     fog.write_env(&mut env);

@@ -1,8 +1,8 @@
 [
   {"name": "format-check", "command": "cargo fmt --all --check", "timeout_s": 60, "cwd": "."},
   {"name": "fog-boundary", "command": "cargo test -p raa-fog --test desc range_limits_are_accepted -- --exact", "timeout_s": 600, "cwd": ".", "after": ["format-check"]},
-  {"name": "fog-tests", "command": "cargo test -p raa-fog", "timeout_s": 600, "cwd": ".", "after": ["fog-boundary"]},
-  {"name": "workspace-check", "command": "bash scripts/check.sh", "timeout_s": 1800, "cwd": ".", "after": ["fog-tests"]},
+  {"name": "effects-tests", "command": "cargo test -p raa-fog -p raa-dof -p raa-grading -p raa-shafts -p raa-ssr", "timeout_s": 600, "cwd": ".", "after": ["fog-boundary"]},
+  {"name": "workspace-check", "command": "bash scripts/check.sh", "timeout_s": 1800, "cwd": ".", "after": ["effects-tests"]},
   {"name": "cargo-check", "command": "cargo check", "timeout_s": 600, "cwd": ".", "after": ["workspace-check"]},
   {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": ".", "after": ["cargo-check"]},
   {"name": "capture-worlds", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m14 --only 'm14-camera-effects--world-' --judge --judge-record-only --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},

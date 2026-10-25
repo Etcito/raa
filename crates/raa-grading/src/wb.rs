@@ -119,9 +119,9 @@ fn inverse(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
     };
     let det = m[0][0] * c(0, 0) + m[0][1] * c(0, 1) + m[0][2] * c(0, 2);
     let mut inv = [[0.0; 3]; 3];
-    for i in 0..3 {
-        for j in 0..3 {
-            inv[i][j] = c(j, i) / det;
+    for (i, row) in inv.iter_mut().enumerate() {
+        for (j, value) in row.iter_mut().enumerate() {
+            *value = c(j, i) / det;
         }
     }
     inv

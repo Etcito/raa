@@ -130,6 +130,23 @@ fn dof_params_field_order_matches_size() {
     assert!(wgsl.contains("k * (s - f) / (sp - f)"));
 }
 
+/// CPU twin of `cs_coc` with autofocus: the signed CoC px of depth `z` when the GPU focus
+/// distance is `s_prime`. Like the shader, `s_prime` is kept beyond the focal point
+/// (`max(s', f + 0.001)`), the aperture term becomes `K * (s - f) / (s' - f)` and the result
+/// is clamped to `max_coc_px * viewport_h / 720`; it matches `coc_px` with
+/// `focus_distance_m = s_prime`. A non-finite or non-positive `z` returns 0.
+fn coc_px_at_focus(z: f32, d: &DofDesc, viewport_h: f32, s_prime: f32) -> f32 {
+    if !(z > 0.0 && z < 3.0e38) {
+        return 0.0;
+    }
+    let f = d.focal_length_mm / 1000.0;
+    let s = d.focus_distance_m;
+    let sp = s_prime.max(f + 0.001);
+    let k = shaders::aperture_term_px(d, viewport_h) * (s - f) / (sp - f);
+    let limit = d.max_coc_px * viewport_h / 720.0;
+    (k * (z - sp) / z).clamp(-limit, limit)
+}
+
 fn assert_twin(focal_length_mm: f32, s: f32, s_prime: f32, f_stop: f32, viewport_h: f32) {
     let d = DofDesc {
         focus_distance_m: s,
@@ -148,7 +165,7 @@ fn assert_twin(focal_length_mm: f32, s: f32, s_prime: f32, f_stop: f32, viewport
     ] {
         let z = z * s_prime;
         let want = coc_px(z, &at, viewport_h);
-        let got = shaders::coc_px_at_focus(z, &d, viewport_h, s_prime);
+        let got = coc_px_at_focus(z, &d, viewport_h, s_prime);
         let tol = 1e-3 * want.abs().max(1e-3);
         assert!(
             (got - want).abs() <= tol,
@@ -170,20 +187,20 @@ fn autofocus_twin_matches_coc_px() {
     // without autofocus s' = s and the term is the host's lens.y
     let d = DofDesc::default();
     let k = shaders::aperture_term_px(&d, 720.0);
-    assert_eq!(shaders::coc_px_at_focus(20.0, &d, 720.0, 10.0), k * 0.5);
+    assert_eq!(coc_px_at_focus(20.0, &d, 720.0, 10.0), k * 0.5);
 }
 
 #[test]
 fn autofocus_twin_clamps_and_rejects_bad_depth() {
     let d = DofDesc::default();
     let limit = d.max_coc_px * 1440.0 / 720.0;
-    assert_eq!(shaders::coc_px_at_focus(0.06, &d, 1440.0, 10.0), -limit);
+    assert_eq!(coc_px_at_focus(0.06, &d, 1440.0, 10.0), -limit);
     // an autofocus distance at or inside the focal point is kept beyond it
-    let inside = shaders::coc_px_at_focus(5.0, &d, 720.0, 0.01);
-    assert_eq!(inside, shaders::coc_px_at_focus(5.0, &d, 720.0, 0.051));
+    let inside = coc_px_at_focus(5.0, &d, 720.0, 0.01);
+    assert_eq!(inside, coc_px_at_focus(5.0, &d, 720.0, 0.051));
     assert!(inside.is_finite() && inside > 0.0);
     for z in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-        assert_eq!(shaders::coc_px_at_focus(z, &d, 720.0, 10.0), 0.0);
+        assert_eq!(coc_px_at_focus(z, &d, 720.0, 10.0), 0.0);
     }
 }
 
@@ -222,8 +239,7 @@ fn gather_vertex_and_four_fragment_entries() {
     // fs_prefilter writes the near and far layers (MRT 2 targets)
     assert!(wgsl.contains("@location(0) near: vec4<f32>,"));
     assert!(wgsl.contains("@location(1) far: vec4<f32>,"));
-    let taps = shaders::GATHER_TAPS;
-    assert!(wgsl.contains(&format!("const TAPS: u32 = {taps}u;")));
+    assert!(wgsl.contains("const TAPS: u32 = 48u;"));
 }
 
 #[test]
