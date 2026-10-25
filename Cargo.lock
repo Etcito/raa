@@ -853,6 +853,7 @@ dependencies = [
  "raa-contact",
  "raa-core",
  "raa-csg",
+ "raa-deform",
  "raa-dof",
  "raa-fog",
  "raa-fur",

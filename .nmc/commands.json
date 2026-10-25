@@ -10,13 +10,17 @@
     "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm15-waddle--f00$' --judge --ref-prefix /refs/",
     "timeout_s": 900,
     "cwd": ".",
-    "after": ["build-lookdev"]
+    "after": [
+      "build-lookdev"
+    ]
   },
   {
     "name": "p2-smoke",
     "command": "node proofs/lib/p2-smoke.mjs",
     "timeout_s": 120,
     "cwd": ".",
-    "after": ["judge-f00"]
+    "after": [
+      "judge-f00"
+    ]
   }
 ]
