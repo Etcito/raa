@@ -7,8 +7,9 @@
 // shafts through the gaps) and big shapes 80-200 m away (aerial perspective).
 // Four worlds, each through engine.applyEnvironment (sky, fog, post presets) with its own
 // sun, palette, liquid and particles: one WORLDS entry per world, so tuning edits one entry.
-// Shadows, AO, contact shadows, SSR and sun shafts stay at their defaults; DOF autofocuses
-// on the hero hammer at f/4.
+// Shadows, AO and contact shadows stay at their defaults; DOF autofocuses on the hero
+// hammer at f/2.8 through a 75 mm lens. The judged candy world raises SSR and the IBL
+// specular so its clear-coated inflatables and tiles mirror the sky and the neon arches.
 // Pure module (S14): no top-level side effects, node reads id/milestone/variants.
 
 const COAT = { clearcoat: 1, clearcoatRoughness: 0.08 };
@@ -144,13 +145,18 @@ const WORLDS = {
 const CANDY_LOOK = {
   ...WORLDS.candy,
   polished: true,
+  candy: true,
   sky: { ...WORLDS.candy.sky, zenith: [0.055, 0.32, 0.9], horizon: [0.36, 0.65, 0.94],
-    ground: [0.4, 0.38, 0.3], intensity: 1.05,
-    sunDiscSize: 0.016, sunDiscIntensity: 24,
-    clouds: { coverage: 0.22, density: 0.65 } },
-  sun: { dir: [0.12, -0.21, 0.97], color: [1, 0.92, 0.76], intensity: 5.5 },
-  vista: [0.93, 0.8, 0.65], ground: [0.32, 0.72, 0.35],
-  plinth: [1, 0.08, 0.45], gate: [1, 0.76, 0.12],
+    ground: [0.4, 0.38, 0.3], intensity: 1.1,
+    sunDiscSize: 0.012, sunDiscIntensity: 20,
+    clouds: { coverage: 0.32, density: 0.7 } },
+  // The low sun sits in a gap of the gate (dir.x 0.077 puts it at x -2 m at the gate),
+  // warm and bright enough to light the glossy inflatables and glow through the haze.
+  sun: { dir: [0.077, -0.21, 0.97], color: [1, 0.9, 0.72], intensity: 6.5 },
+  // Saturated pastel shapes: the vista reads mauve-pink in the pale blue aerial haze,
+  // instead of the beige placeholders a warm grey turned into.
+  vista: [0.8, 0.6, 0.96], ground: [0.32, 0.72, 0.35],
+  plinth: [1, 0.08, 0.45], gate: [1, 0.72, 0.08],
   tiles: [[1, 0.045, 0.48], [0.025, 0.48, 1], [1, 0.72, 0.04], [0.04, 0.65, 1]],
   inflatable: [[1, 0.045, 0.48], [1, 0.76, 0.035], [0.025, 0.46, 1]],
   liquid: { function: 'raa.liquid.slime',
@@ -161,6 +167,9 @@ const CANDY_LOOK = {
     colors: [[1, 0.08, 0.48], [1, 0.78, 0.04], [0.05, 0.55, 1], [0.3, 1, 0.1]] },
 };
 const CANDY_COAT = { clearcoat: 1, clearcoatRoughness: 0.035 };
+// The judged candy world's sharper coat: the reference's inflatables carry crisp white
+// sky streaks. Keep CANDY_COAT for the already-accepted icy/jungle worlds.
+const CANDY_GLOSS = { clearcoat: 1, clearcoatRoughness: 0.05 };
 
 // A dense rounded cylinder with analytic profile normals, without pinched panel seams.
 // Keep the shared hammer's dimensions, axis and placement (the capture contract).
@@ -419,10 +428,13 @@ function buildRun(engine, lib, w) {
   const { geometry, objects } = lib;
   const ground = plain(engine, w.ground, 0.9);
   place(engine, upload(engine, geometry.roundedBox([260, 0.5, 260], 0.2, 1), [ground]), [0, GROUND_Y - 0.5, -120]);
-  const plinth = plain(engine, w.plinth, 0.3, COAT);
+  const plinth = plain(engine, w.plinth, w.candy ? 0.18 : 0.3, w.candy ? CANDY_GLOSS : COAT);
   place(engine, upload(engine, geometry.roundedBox(RUN.plinth, 0.1, 2), [plinth]), [0, -0.33, RUN.plinthZ]);
+  // Candy's wet-look tiles: ior 2.0 lifts the dielectric F0 from 0.04 to 0.11, so SSR's
+  // obstacle reflections clear the faint 4 % Fresnel instead of washing out.
   const floor = plain(engine, [1, 1, 1], w.icy ? 0.03 : w.night ? 0.12 : FLOOR_ROUGHNESS,
-    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.25 } : w.night ? { ...COAT, metallic: 0.5 } : {});
+    w.icy ? { clearcoat: 1, clearcoatRoughness: 0.03, metallic: 0.25 }
+      : w.night ? { ...COAT, metallic: 0.5 } : w.candy ? { ior: 2.0 } : {});
   const run = upload(engine, tiles(objects, RUN.tiles, w.tiles, w.jungle), [floor]);
   for (const z of RUN.sections) place(engine, run, [0, 0, z]);
   if (w.night) {
@@ -440,7 +452,7 @@ function buildRun(engine, lib, w) {
 function buildObstacles(engine, lib, w) {
   if (w.night) return buildNeonArchitecture(engine, lib, w);
   const { geometry, objects } = lib;
-  const coat = w.polished ? CANDY_COAT : COAT;
+  const coat = w.candy ? { ...CANDY_GLOSS, ior: 1.8 } : w.polished ? CANDY_COAT : COAT;
   const hammer = engine.addSurfaceMaterial({
     function: 'raa.inflatable', params: { color: [1, 1, 1], stripeWidth: 0,
       seamDepth: w.polished ? 0.015 : 0.2 }, ...coat,
@@ -451,7 +463,9 @@ function buildObstacles(engine, lib, w) {
     ? engine.addSurfaceMaterial({ function: 'raa.inflatable',
       params: { color: c, stripeWidth: 0, seamDepth: 0.015 }, ...coat })
     : inflatable(engine, c, w.stripe));
-  const pad = geometry.roundedBox(w.polished ? [0.7, 0.24, 0.7] : [0.55, 0.18, 0.55], w.polished ? 0.23 : 0.14, w.polished ? 24 : 6);
+  // Candy pads are a little larger and rounder, so the clear-coat sky streak reads.
+  const pad = geometry.roundedBox(w.candy ? [0.85, 0.26, 0.85] : w.polished ? [0.7, 0.24, 0.7] : [0.55, 0.18, 0.55],
+    w.candy ? 0.24 : w.polished ? 0.23 : 0.14, w.candy ? 32 : w.polished ? 24 : 6);
   PADS.forEach(([x, z], i) => place(engine, upload(engine, pad, [pads[i % pads.length]]), [x, 0.18, z]));
   const arch = geometry.sweepTube(archPath(2.4, 0.4, w.polished ? 96 : 48), w.polished ? 0.42 : 0.3, w.polished ? 48 : 24, { caps: 'round' });
   place(engine, upload(engine, arch, [pads[1]]), [0, 0, INFLATABLE_ARCH_Z]);
@@ -470,10 +484,16 @@ function buildObstacles(engine, lib, w) {
   const plush = engine.addSurfaceMaterial({
     function: 'raa.plush',
     // Sparse long tufts resolve at capture size; dense subpixel strands look smooth.
-    params: { color: w.plush, furLength: (w.icy || w.jungle || w.night) ? 0.09 : 0.022, furDensity: (w.icy || w.jungle || w.night) ? 6 : 12,
-      ...(w.icy ? { tipColor: [0.08, 0.32, 0.85], sheenColor: [0.35, 0.65, 1] } : {}) },
-    furLength: (w.icy || w.jungle || w.night) ? 0.09 : 0.022, furDensity: (w.icy || w.jungle || w.night) ? 6 : 12, furDroop: 0.2,
-    ...(w.icy ? { furShells: 64 } : {}),
+    // Candy gets the tufted shells too: the judged capture needs a furry silhouette and
+    // sheen, not the short pile that read as a smooth blue ball.
+    params: { color: w.plush,
+      furLength: w.candy ? 0.08 : (w.icy || w.jungle || w.night) ? 0.09 : 0.022,
+      furDensity: w.candy ? 8 : (w.icy || w.jungle || w.night) ? 6 : 12,
+      ...(w.icy ? { tipColor: [0.08, 0.32, 0.85], sheenColor: [0.35, 0.65, 1] }
+        : w.candy ? { tipColor: [0.58, 0.74, 1], sheenColor: [0.82, 0.9, 1] } : {}) },
+    furLength: w.candy ? 0.08 : (w.icy || w.jungle || w.night) ? 0.09 : 0.022,
+    furDensity: w.candy ? 8 : (w.icy || w.jungle || w.night) ? 6 : 12, furDroop: 0.2,
+    ...(w.icy || w.candy ? { furShells: 64 } : {}),
     ...(w.jungle || w.night ? { furShells: 64, roughness: 0.95 } : {}),
   });
   place(engine, upload(engine, objects.plushSphere(), [plush]), w.icy ? [-0.9, 0, -2.6] : PLUSH);
@@ -483,7 +503,8 @@ function buildObstacles(engine, lib, w) {
 function buildStrip(engine, lib, w) {
   if (w.night) return; // Ref-4 has luminous pipes, not a daytime liquid basin.
   const { geometry } = lib;
-  const wall = w.polished ? plain(engine, w.inflatable[0], 0.18, CANDY_COAT)
+  const wall = w.polished ? plain(engine, w.inflatable[0], 0.18,
+    w.candy ? { ...CANDY_GLOSS, ior: 1.8 } : CANDY_COAT)
     : inflatable(engine, w.inflatable[0], w.stripe);
   for (const sx of [-1, 1]) {
     // Lower the candy rim to expose the green surface from the low camera.
@@ -493,7 +514,8 @@ function buildStrip(engine, lib, w) {
   const { function: fn, params, transmissive } = w.liquid;
   const blend = transmissive ? { blend: 'transmissive', transmission: w.polished ? 0.3 : 0.95, ior: 1.34, thickness: 0.4 } : {};
   const m = w.jungle ? plain(engine, [0.48, 0.25, 0.12], 0.72, { transmission: 0 })
-    : engine.addSurfaceMaterial({ function: fn, params, ...blend });
+    : engine.addSurfaceMaterial({ function: fn, params, ...blend,
+      ...(w.candy ? CANDY_GLOSS : {}) });
   const surfaceY = w.jungle ? 0.04 : STRIP.y;
   place(engine, upload(engine, geometry.grid(STRIP.w, STRIP.d, STRIP.nx, STRIP.nz), [m]), [STRIP.x, surfaceY, STRIP.z]);
   if (w.jungle) {
@@ -514,7 +536,8 @@ function buildStrip(engine, lib, w) {
 function buildBackdrop(engine, lib, w) {
   if (w.night) return; // The neon architecture supplies pillars and stars, without mountains.
   const { geometry } = lib;
-  const gate = plain(engine, w.gate, 0.35, COAT);
+  const gate = plain(engine, w.gate, w.candy ? 0.22 : 0.35,
+    w.candy ? { ...CANDY_GLOSS, ior: 1.9 } : COAT);
   // Seven separated, substantial columns silhouette against the low winter sun.
   const gateShape = w.icy ? { ...GATE, x0: -5.1, x1: 5.1, pitch: 1.7,
     half: [0.32, 5.4, 0.45], z: -21 } : w.jungle
@@ -602,11 +625,19 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
   settings: { world, ...(world === 'candy' ? {
     // See over the basin rim and bring the hammer forward without losing the blue sky.
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
-    dof: { fStop: 4, focus: HERO.focus },
-    // Keep the near obstacles saturated; a cream haze separates the distant vista.
-    fog: { preset: 'haze', density: 0.004, heightFalloff: 0.12, start: 18,
-      color: [1, 0.94, 0.83], inscatter: 0.18, aerialStrength: 0.45, aerialDistance: 180 },
-    sunShafts: { intensity: 0.85, density: 0.7 },
+    // A longer, faster lens: the hammer stays sharp while the far run visibly softens.
+    dof: { fStop: 2.8, focalLength: 0.075, focus: HERO.focus },
+    // Pastel blue-white aerial haze: keep the blue sky and the near run's colour, fade
+    // the distant vista ~60 % toward the sky (the old cream colour washed the frame out).
+    // Warm sun inscatter keeps the low sun behind the gate glowing through the haze.
+    fog: { preset: 'haze', density: 0.003, heightFalloff: 0.1, start: 20,
+      color: [0.78, 0.86, 0.98], inscatter: 0.2, aerialStrength: 0.7, aerialDistance: 180 },
+    // The sun now sits in a gap between the gate pillars, so the wedges read. The additive
+    // integral has no extinction: keep it near the 5193 budget (0.12 x 0.02 with a 5.5 sun)
+    // instead of the 30x value that washed the last capture white.
+    sunShafts: { intensity: 0.25, density: 0.02, maxDistance: 60 },
+    // Glossy floor: full-strength SSR over the 0.08-roughness tiles.
+    ssr: { intensity: 1.8, maxRoughness: 0.5, thickness: 0.3 },
     grading: { preset: 'neutral', contrast: 1.08,
       saturation: 1.18, vibrance: 0.12 },
   } : world === 'ice' ? {
@@ -691,6 +722,10 @@ export default {
       fog: w.fog,
       post: w.post,
     });
+    // Candy's clear-coat sheen: a brighter IBL specular so the glossy inflatables, pads and
+    // slime mirror the bright blue sky (the old capture read matte). The judged world only,
+    // so the on/off pairs and the accepted worlds keep their lighting.
+    if (w.candy) engine.setEnvironmentLighting({ diffuse: 1.1, specular: 2.6 });
     // The night sky stays dark in the background; raise only the IBL so the surfaces keep
     // a dim cool fill. This does not brighten the sky image.
     if (w.night) engine.setEnvironmentLighting({ diffuse: 3.5, specular: 3 });

@@ -1,17 +1,17 @@
 [
   {
-    "name": "neon-tests",
-    "command": "node --test --test-name-pattern 'owner acceptance' examples/lookdev/test/m14-neon.test.mjs",
-    "timeout_s": 60,
+    "name": "build-lookdev",
+    "command": "bash scripts/build-lookdev.sh",
+    "timeout_s": 1800,
     "cwd": "."
   },
   {
-    "name": "proof-m14",
-    "command": "node proofs/m14-camera-effects.mjs",
-    "timeout_s": 1800,
+    "name": "judge-candy",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-candy$' --judge --ref-prefix /refs/",
+    "timeout_s": 900,
     "cwd": ".",
     "after": [
-      "neon-tests"
+      "build-lookdev"
     ]
   },
   {
@@ -20,16 +20,7 @@
     "timeout_s": 120,
     "cwd": ".",
     "after": [
-      "proof-m14"
-    ]
-  },
-  {
-    "name": "cargo-check",
-    "command": "cargo check",
-    "timeout_s": 1800,
-    "cwd": ".",
-    "after": [
-      "p2-smoke"
+      "judge-candy"
     ]
   }
 ]
