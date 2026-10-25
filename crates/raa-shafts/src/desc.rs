@@ -56,7 +56,10 @@ mod tests {
     #[test]
     fn defaults_validate() {
         let d = ShaftsDesc::default();
-        assert_eq!((d.intensity, d.density, d.max_distance_m), (1.0, 0.02, 60.0));
+        assert_eq!(
+            (d.intensity, d.density, d.max_distance_m),
+            (1.0, 0.02, 60.0)
+        );
         d.validate().unwrap();
     }
 
@@ -64,19 +67,35 @@ mod tests {
     fn invalid_fields_are_refused_by_name() {
         let base = ShaftsDesc::default();
         for v in [-0.1, 8.5, f32::NAN, f32::INFINITY] {
-            refused(ShaftsDesc { intensity: v, ..base }, "intensity");
+            refused(
+                ShaftsDesc {
+                    intensity: v,
+                    ..base
+                },
+                "intensity",
+            );
         }
         for v in [-0.1, 1.5, f32::NAN] {
             refused(ShaftsDesc { density: v, ..base }, "density");
         }
         for v in [0.0, -1.0, 1000.5, f32::NAN, f32::INFINITY] {
-            refused(ShaftsDesc { max_distance_m: v, ..base }, "max_distance_m");
+            refused(
+                ShaftsDesc {
+                    max_distance_m: v,
+                    ..base
+                },
+                "max_distance_m",
+            );
         }
     }
 
     #[test]
     fn bounds_are_accepted() {
-        let d = ShaftsDesc { intensity: 8.0, density: 0.0, max_distance_m: 1000.0 };
+        let d = ShaftsDesc {
+            intensity: 8.0,
+            density: 0.0,
+            max_distance_m: 1000.0,
+        };
         d.validate().unwrap();
     }
 }

@@ -1,5 +1,6 @@
 [
-  {"name": "fog-boundary", "command": "cargo test -p raa-fog --test desc range_limits_are_accepted -- --exact", "timeout_s": 600, "cwd": "."},
+  {"name": "format-check", "command": "cargo fmt --all --check", "timeout_s": 60, "cwd": "."},
+  {"name": "fog-boundary", "command": "cargo test -p raa-fog --test desc range_limits_are_accepted -- --exact", "timeout_s": 600, "cwd": ".", "after": ["format-check"]},
   {"name": "fog-tests", "command": "cargo test -p raa-fog", "timeout_s": 600, "cwd": ".", "after": ["fog-boundary"]},
   {"name": "workspace-check", "command": "bash scripts/check.sh", "timeout_s": 1800, "cwd": ".", "after": ["fog-tests"]},
   {"name": "cargo-check", "command": "cargo check", "timeout_s": 600, "cwd": ".", "after": ["workspace-check"]},
