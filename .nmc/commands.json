@@ -1,5 +1,11 @@
 [
   {
+    "name": "cargo-check",
+    "command": "cargo check",
+    "timeout_s": 600,
+    "cwd": "."
+  },
+  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 3600,
