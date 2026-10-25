@@ -40,12 +40,12 @@ function upload(engine, mesh, materials) {
   return engine.addMesh({ ...mesh, subMeshes });
 }
 
-function plush(engine, color, length = 0.055) {
+function plush(engine, color, length = 0.055, density = 12) {
   return engine.addSurfaceMaterial({ function: 'raa.plush',
     params: { color, tipColor: color.map(c => c + (1 - c) * 0.12),
-      sheenColor: color.map(c => c + (1 - c) * 0.45), furLength: length, furDensity: 12 },
+      sheenColor: color.map(c => c + (1 - c) * 0.45), furLength: length, furDensity: density },
     sheenColor: [0.55, 0.72, 1], sheenRoughness: 0.35,
-    furLength: length, furDensity: 12, furDroop: 0.18, furShells: 64 });
+    furLength: length, furDensity: density, furDroop: 0.18, furShells: 64 });
 }
 function inflatable(engine, color) {
   return engine.addSurfaceMaterial({ function: 'raa.inflatable',
@@ -106,8 +106,9 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 }`);
 }
 
-function characterMeshes(engine) {
-  const blue = plush(engine, BLUE), neutral = plush(engine, [0.92, 0.92, 0.92]);
+function characterMeshes(engine, rearView) {
+  const blue = rearView ? plush(engine, [0.045, 0.16, 0.72], 0.065, 24) : plush(engine, BLUE);
+  const neutral = plush(engine, [0.92, 0.92, 0.92]);
   const cream = plush(engine, CREAM, 0.025);
   const bellyTint = plush(engine, [0.025, 0.15, 0.40], 0.04);
   const orange = inflatable(engine, [1, 0.49, 0.025]);
@@ -382,7 +383,7 @@ function buildCourse(engine) {
 function animate(engine, timeMs, variant) {
   const state = rigsByEngine.get(engine);
   if (!state) throw new Error('m15-waddle: build must precede frame');
-  const { rigs, tints } = state;
+  const { rigs, tints, rearView } = state;
   const time = variant?.id === 'tints' ? 1000 : timeMs;
   const deform = variant?.id !== 'deform-off';
   const nodes = [], transforms = [];
@@ -423,8 +424,11 @@ function animate(engine, timeMs, variant) {
     });
     rig.feet.forEach((part, sideIndex) => {
       const side = sideIndex === 0 ? -1 : 1;
-      // Left plants at 0 ms; right at 600 ms. The opposite foot lifts 6 cm.
-      trs[offset(part.node) + 1] += 0.03 * (1 + side * Math.cos(phase));
+      // Alternate the planted foot every half cycle. The rear view exposes the
+      // raised sole and forward swing even in a fixed-time capture.
+      const lift = (1 + side * Math.cos(phase)) / 2;
+      trs[offset(part.node) + 1] += (rearView ? 0.30 : 0.06) * lift;
+      if (rearView) trs[offset(part.node) + 2] -= 0.24 * lift;
       rotate(part.node, yaw(side * 0.13 + 0.12 * Math.sin(phase + sideIndex * Math.PI)));
     });
     nodes.push(...rig.nodes);
@@ -459,6 +463,8 @@ export default {
       description: 'Blue hero and pink, blue and yellow costume tints, all four in view.' },
   ],
   async build(engine, lib, variant) {
+    // f00 is owner-accepted; retain its exact appearance and the tints overview.
+    const rearView = variant.id !== 'f00' && variant.id !== 'tints';
     costumePrints(engine);
     engine.setSky({ preset: 'day', zenith: [0.025, 0.32, 1],
       horizon: [0.12, 0.55, 1], ground: [0.12, 0.55, 1], intensity: 1.35,
@@ -481,8 +487,19 @@ export default {
     engine.setEnvironmentLighting({ diffuse: 1.1, specular: 1.5 });
     engine.setToneMapping({ mapper: 'aces', exposureEv: 0.35, look: 'none' });
     engine.setBloom({ strength: 0.10, radius: 0.65 });
+    if (rearView) {
+      // Bloom currently blurs all HDR pixels (no threshold in the public API).
+      // Remove the full-frame veil and keep the plush silhouette in focus.
+      for (const pass of ['bloom', 'sunshafts', 'dof']) engine.setPassEnabled(pass, false);
+      engine.setFog({ preset: 'clear', density: 0.0002, start: 35, aerialStrength: 0 });
+      engine.setGrading({ preset: 'neutral', lift: [0, 0, 0],
+        saturation: 1.25, contrast: 1.22, vibrance: 0.12 });
+      engine.setAmbient({ color: [0.72, 0.84, 1], intensity: 0.06 });
+      engine.setEnvironmentLighting({ diffuse: 0.40, specular: 0.8 });
+      engine.setToneMapping({ mapper: 'aces', exposureEv: 0, look: 'none' });
+    }
     buildCourse(engine);
-    const meshes = characterMeshes(engine);
+    const meshes = characterMeshes(engine, rearView);
     const outfits = costumeMeshes(engine);
     const all = variant.id === 'tints';
     const placements = all
@@ -490,11 +507,13 @@ export default {
       : [[0, 0, 0], [-3.1, 0, 5.7], [2.6, 0, 3.6], [-3.0, 0, 1.9]];
     const tints = [null, [1, 0.20, 0.50, 1], [0.18, 0.57, 1, 1], [1, 0.80, 0.13, 1]];
     const rigs = placements.map((p, i) => buildPenguin(engine, meshes, p, tints[i],
-      all ? -0.12 : [2.65, 0.18, -0.1, -0.22][i], 1, i ? outfits[i - 1] : null));
+      all ? -0.12 : [rearView ? 0.28 : 2.65, 0.18, -0.1, -0.22][i], 1, i ? outfits[i - 1] : null));
     engine.setCamera(all
       ? { eye: [0, 3.5, 12.8], target: [0, 1.35, 0], fovYDeg: 43, near: 0.1, far: 100 }
       : { eye: [1.1, 3.0, -7.8], target: [0, 1.65, 0.8], fovYDeg: 43, near: 0.1, far: 100 });
-    rigsByEngine.set(engine, { rigs, tints });
+    if (rearView) engine.setCamera({ eye: [0.7, 2.6, -8.2],
+      target: [0, 2.0, 0.8], fovYDeg: 43, near: 0.1, far: 100 });
+    rigsByEngine.set(engine, { rigs, tints, rearView });
     return { rigs };
   },
   frame: animate,

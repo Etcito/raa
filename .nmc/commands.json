@@ -49,5 +49,14 @@
     "after": [
       "judge-f06"
     ]
+  },
+  {
+    "name": "compare-f06",
+    "command": "python3 .nmc/m15-f06-compare.py",
+    "timeout_s": 60,
+    "cwd": ".",
+    "after": [
+      "judge-f06"
+    ]
   }
 ]

@@ -5,5 +5,8 @@
   "proofs/captures/lookdev/m14-camera-effects--world-neon.png",
   "proofs/captures/lookdev/m15-waddle--f00.png",
   "proofs/captures/lookdev/m15-waddle--f00-comparison.png",
-  ".nmc/m15-compare.py"
+  ".nmc/m15-compare.py",
+  "proofs/captures/lookdev/m15-waddle--f06.png",
+  "proofs/captures/lookdev/m15-waddle--f06-comparison.png",
+  ".nmc/m15-f06-compare.py"
 ]
