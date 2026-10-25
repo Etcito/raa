@@ -1,18 +1,9 @@
 [
   {
-    "name": "build-lookdev",
-    "command": "bash scripts/build-lookdev.sh",
-    "timeout_s": 1800,
+    "name": "m15-milestone",
+    "command": "node proofs/m15-animation.mjs",
+    "timeout_s": 3600,
     "cwd": "."
-  },
-  {
-    "name": "judge-ice",
-    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-ice$' --judge --judge-record-only --ref-prefix /refs/",
-    "timeout_s": 900,
-    "cwd": ".",
-    "after": [
-      "build-lookdev"
-    ]
   },
   {
     "name": "p2-smoke",
@@ -20,7 +11,7 @@
     "timeout_s": 120,
     "cwd": ".",
     "after": [
-      "judge-ice"
+      "m15-milestone"
     ]
   }
 ]
