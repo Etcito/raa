@@ -2,7 +2,7 @@
   "scene": "m14-camera-effects",
   "variant": "world-candy",
   "milestone": "m14",
-  "capturedAt": "2026-10-25T00:35:45.059Z",
+  "capturedAt": "2026-10-25T01:08:19.083Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -39,15 +39,15 @@
     "tonemap"
   ],
   "instances": 43,
-  "triangles": 147664,
-  "firstFrameMs": 11173,
+  "triangles": 196688,
+  "firstFrameMs": 6485.9000000059605,
   "wasm": {
-    "raw": 2056920,
-    "gzip": 699834,
-    "sha256": "6129a86309263dc0336304a744b84a384500ccbf8d5bd8b89c804958ed7ab7c1"
+    "raw": 2056915,
+    "gzip": 699833,
+    "sha256": "4edb6fce5c164e1153929987a58cce53afdd7b43fe173b487fefa07c89826b7e"
   },
   "capture": "proofs/captures/lookdev/m14-camera-effects--world-candy.png",
-  "captureSha256": "229b028b6dce0950fbf2a09612d291a5972944c5811d70f65df82f9e64c34e23",
+  "captureSha256": "cb4cc7ff2d0c859eeb92d3c925c535e691c53cbe6e2caccbf7f1fb3a9ec02dc7",
   "judge": {
     "description": "A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-1: a sunny pastel candy world, a blue sky with soft haze, a low warm sun behind the gate, glossy pink, yellow and blue inflatables and bright green slime.",
     "references": [
@@ -56,7 +56,7 @@
     "minScore": 6,
     "exit": 1,
     "score": 4,
-    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m14-camera-effects--world-candy.png by claude-haiku-5-5 (median of [3.0, 4.0, 4.0])\nexpected: A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-1: a sunny pastel candy world, a blue sky with soft haze, a low warm sun behind the gate, glossy pink, yellow and blue inflatables and bright green slime.\nseen: The capture shows glossy pastel tiles with reflections, a pink neon arch, a striped hammer, a lavender furry-looking ball, a cyan ice block and faded pillars in haze, but the palette is washed out and near-monochrome pastel rather than saturated candy. Missing: the blue sky and low warm sun, the bright green liquid strip and slime, the clear-coated inflatable pads and arch, and particles. The hammer is small and soft, and the overall finish is far cruder than reference-1.",
-    "at": "2026-10-25T00:35:58.816Z"
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m14-camera-effects--world-candy.png by claude-haiku-5-5 (median of [3.0, 4.0, 4.0])\nexpected: A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-1: a sunny pastel candy world, a blue sky with soft haze, a low warm sun behind the gate, glossy pink, yellow and blue inflatables and bright green slime.\nseen: The capture has the requested pieces in crude form: checkered glossy tiles, a striped hammer, a blue plush-like ball, pink neon arches, an ice block, a green liquid strip and confetti particles. It falls short of the reference, though: the frame is washed out by a white haze with no blue sky or warm sun, the inflatables and pads are plain primitives rather than glossy candy-coloured inflatables, and the pillars and far shapes are flat grey-beige placeholders.",
+    "at": "2026-10-25T01:08:31.153Z"
   }
 }
