@@ -1,29 +1,26 @@
 [
   {
-    "name": "scene-check",
-    "command": "node --test examples/lookdev/test/m14-jungle.test.mjs",
-    "timeout_s": 60,
-    "cwd": "."
-  },
-  {
-    "name": "cargo-check",
-    "command": "cargo check",
-    "timeout_s": 600,
-    "cwd": "."
-  },
-  {
     "name": "build-lookdev",
     "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 3600,
     "cwd": "."
   },
   {
-    "name": "judge-jungle",
-    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-jungle$' --judge --ref-prefix /refs/",
+    "name": "judge-neon",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-neon$' --judge --ref-prefix /refs/",
     "timeout_s": 3600,
     "cwd": ".",
     "after": [
       "build-lookdev"
+    ]
+  },
+  {
+    "name": "proof-m14",
+    "command": "node proofs/m14-camera-effects.mjs",
+    "timeout_s": 1800,
+    "cwd": ".",
+    "after": [
+      "judge-neon"
     ]
   },
   {
@@ -32,7 +29,7 @@
     "timeout_s": 600,
     "cwd": ".",
     "after": [
-      "judge-jungle"
+      "judge-neon"
     ]
   }
 ]

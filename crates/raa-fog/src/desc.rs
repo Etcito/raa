@@ -82,16 +82,16 @@ impl FogDesc {
                 aerial_strength: 0.75,
                 aerial_distance_m: 180.0,
             }),
-            // Moonlit night: thin deep blue-violet haze with little inscatter.
+            // Violet night haze beyond the near obstacles, with a clear upper sky.
             "night" => Some(FogDesc {
                 density: 0.015,
-                height_falloff: 0.1,
+                height_falloff: 0.25,
                 base_height_m: 0.0,
-                start_m: 0.0,
-                color: [0.08, 0.07, 0.20],
+                start_m: 12.0,
+                color: [0.38, 0.24, 0.65],
                 inscatter: 0.2,
-                aerial_strength: 0.3,
-                aerial_distance_m: 500.0,
+                aerial_strength: 0.6,
+                aerial_distance_m: 140.0,
             }),
             _ => None,
         }

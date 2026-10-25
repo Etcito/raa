@@ -89,13 +89,15 @@ impl GradingDesc {
                 highlights_tint: [0.7, 0.62, 0.42],
                 ..neutral
             }),
-            // Neon: hard contrast, magenta shadows against cyan highlights.
+            // Neon: open violet shadows, saturated tubes and cool glossy highlights.
             "neon" => Some(GradingDesc {
-                contrast: 1.2,
-                vibrance: 0.3,
-                vignette: 0.35,
-                shadows_tint: [0.6, 0.45, 0.6],
-                highlights_tint: [0.45, 0.6, 0.6],
+                exposure_ev: 0.15,
+                contrast: 1.08,
+                saturation: 1.2,
+                vibrance: 0.24,
+                vignette: 0.12,
+                shadows_tint: [0.52, 0.46, 0.6],
+                highlights_tint: [0.48, 0.55, 0.57],
                 ..neutral
             }),
             _ => None,

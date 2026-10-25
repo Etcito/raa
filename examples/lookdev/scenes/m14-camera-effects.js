@@ -104,16 +104,25 @@ const WORLDS = {
     particles: { kind: 'splash', position: [4.7, -0.15, -5], volume: [1, 0, 4], direction: [0, 1, 0], rate: 160, colors: [[0.4, 0.22, 0.12]], opacity: 1 },
   },
   neon: {
-    sky: 'night', fog: 'night', post: 'neon',
-    // Dim violet moon from high behind the camera; the tubes are the main light.
-    sun: { dir: [-0.3, -0.85, -0.43], color: [0.75, 0.6, 1], intensity: 0.8 },
-    tiles: [[0.25, 0.12, 0.55], [0.12, 0.08, 0.3], [0.8, 0.2, 0.7], [0.15, 0.55, 0.85]],
-    plinth: [0.2, 0.1, 0.4], ground: [0.08, 0.05, 0.16], vista: [0.18, 0.1, 0.35],
-    inflatable: [[1, 0.2, 0.7], [0.2, 0.8, 1], [1, 0.8, 0.15]], stripe: [0.2, 0.1, 0.4],
-    neon: [1, 0.15, 0.7], neon2: [0.1, 0.85, 1], plush: [0.2, 0.3, 0.95], gate: [0.3, 0.15, 0.6],
-    ice: { tint: [0.55, 0.6, 1], absorption: 2, cloudiness: 0.25, crackScale: 0.3 },
-    liquid: { function: 'raa.liquid.slime', params: { color: [0.2, 1, 0.6] }, transmissive: true },
-    particles: { kind: 'sparkles', position: [0, 1.6, -6], volume: [3, 1.2, 6], rate: 300, size: [0.03, 0.07], emissive: 7, colors: [[1, 0.8, 0.3], [0.8, 0.9, 1]] },
+    polished: true,
+    // Navy overhead, violet horizon fill: glossy obstacles must read between the tubes.
+    sky: { preset: 'night', zenith: [0.012, 0.018, 0.075], horizon: [0.16, 0.075, 0.3],
+      ground: [0.08, 0.035, 0.16], intensity: 0.85, horizonSoftness: 8,
+      sunDiscSize: 0.008, sunDiscIntensity: 6,
+      clouds: { coverage: 0.25, density: 0.5, color: [0.28, 0.15, 0.5] } },
+    fog: 'night', post: 'neon',
+    // Cool low backlight picks out the gate; magenta/cyan emission remains dominant.
+    sun: { dir: [0.12, -0.21, 0.97], color: [0.55, 0.7, 1], intensity: 2.0 },
+    tiles: [[0.18, 0.07, 0.4], [0.48, 0.025, 0.5], [0.02, 0.48, 0.7], [0.95, 0.58, 0.04]],
+    plinth: [0.14, 0.055, 0.3], ground: [0.08, 0.045, 0.18], vista: [0.24, 0.12, 0.42],
+    inflatable: [[1, 0.035, 0.58], [0.025, 0.75, 1], [1, 0.65, 0.045]], stripe: [0.12, 0.04, 0.28],
+    neon: [1, 0.015, 0.65], neon2: [0.015, 0.8, 1], plush: [0.06, 0.2, 0.85], gate: [0.3, 0.12, 0.6],
+    ice: { tint: [0.3, 0.7, 1], absorption: 0.7, cloudiness: 0.04, crackScale: 0.4 },
+    liquid: { function: 'raa.liquid.slime', params: { color: [0.04, 0.5, 1],
+      glossiness: 1, absorption: 0.7, foamAmount: 0.03, detailStrength: 0.04 }, transmissive: true },
+    particles: { kind: 'sparkles', position: [0, 2.6, -8], volume: [4, 2.2, 9],
+      rate: 450, size: [0.03, 0.07], emissive: 7,
+      colors: [[1, 0.04, 0.55], [0.04, 0.8, 1], [1, 0.65, 0.12]] },
   },
 };
 
@@ -413,6 +422,15 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     // Shafts integrate density per metre without extinction, independently of fog.
     // The old 0.7 added tens of HDR units and washed out even the near objects.
     sunShafts: { intensity: 0.6, density: 0.008, maxDistance: 45 },
+  } : world === 'neon' ? {
+    // Reveal the pad tops, ice and liquid instead of looking along the floor edge.
+    camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
+    dof: { fStop: 4, focus: HERO.focus },
+    // The low backlight needs less scattering to preserve the violet horizon.
+    fog: { preset: 'night', density: 0.006, inscatter: 0.04 },
+    ssr: { intensity: 1.85, maxRoughness: 0.65, thickness: 0.3 },
+    // Keep the additive shaft integral subtle against the dark sky.
+    sunShafts: { intensity: 0.4, density: 0.006, maxDistance: 40 },
   } : {}) },
 }));
 
