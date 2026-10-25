@@ -19,7 +19,7 @@ pub struct FogDesc {
     pub color: [f32; 3],
     /// Sun inscatter strength in `[0, 4]`.
     pub inscatter: f32,
-    /// Aerial perspective strength in `[0, 1]` (0 = off).
+    /// Aerial perspective strength in `[0, 2]` (0 = off; above 1 the aerial fade saturates closer).
     pub aerial_strength: f32,
     /// Aerial perspective distance scale in metres (> 0).
     pub aerial_distance_m: f32,
@@ -99,7 +99,7 @@ impl FogDesc {
 
     /// Refuses with `post.invalid` and a message naming the first offending field:
     /// every number finite, `density` in [0, 1], `height_falloff` in (0, 10], `start_m` >= 0,
-    /// every `color` component >= 0, `inscatter` in [0, 4], `aerial_strength` in [0, 1],
+    /// every `color` component >= 0, `inscatter` in [0, 4], `aerial_strength` in [0, 2],
     /// `aerial_distance_m` > 0.
     pub fn validate(&self) -> Result<(), RaaError> {
         within("density", self.density, 0.0, 1.0)?;
@@ -110,7 +110,7 @@ impl FogDesc {
             at_least(&format!("color[{i}]"), value, 0.0)?;
         }
         within("inscatter", self.inscatter, 0.0, 4.0)?;
-        within("aerial_strength", self.aerial_strength, 0.0, 1.0)?;
+        within("aerial_strength", self.aerial_strength, 0.0, 2.0)?;
         positive("aerial_distance_m", self.aerial_distance_m)
     }
 

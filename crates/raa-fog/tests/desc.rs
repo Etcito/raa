@@ -70,7 +70,7 @@ fn every_refusal_has_code_and_names_the_field() {
         ("inscatter", |f| f.inscatter = -0.1),
         ("inscatter", |f| f.inscatter = 4.01),
         ("aerial_strength", |f| f.aerial_strength = -0.1),
-        ("aerial_strength", |f| f.aerial_strength = 1.01),
+        ("aerial_strength", |f| f.aerial_strength = 2.01),
         ("aerial_distance_m", |f| f.aerial_distance_m = 0.0),
         ("aerial_distance_m", |f| f.aerial_distance_m = -5.0),
         ("aerial_distance_m", |f| f.aerial_distance_m = f32::NAN),
@@ -93,7 +93,7 @@ fn range_limits_are_accepted() {
         start_m: 0.0,
         color: [0.0, 0.0, 0.0],
         inscatter: 4.0,
-        aerial_strength: 1.0,
+        aerial_strength: 2.0,
         aerial_distance_m: 0.001,
     };
     d.validate().expect("upper limits");
