@@ -2,7 +2,7 @@
   "scene": "m14-camera-effects",
   "variant": "world-ice",
   "milestone": "m14",
-  "capturedAt": "2026-10-25T00:36:06.974Z",
+  "capturedAt": "2026-10-25T02:02:12.318Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -38,16 +38,16 @@
     "grading",
     "tonemap"
   ],
-  "instances": 43,
-  "triangles": 147664,
-  "firstFrameMs": 32870.90000000596,
+  "instances": 37,
+  "triangles": 194888,
+  "firstFrameMs": 8246.600000023842,
   "wasm": {
-    "raw": 2056920,
-    "gzip": 699834,
-    "sha256": "6129a86309263dc0336304a744b84a384500ccbf8d5bd8b89c804958ed7ab7c1"
+    "raw": 2057028,
+    "gzip": 699780,
+    "sha256": "9e4017798e6f653717ae1c9993ca7092975fda7167f0295a292edd9de8e83337"
   },
   "capture": "proofs/captures/lookdev/m14-camera-effects--world-ice.png",
-  "captureSha256": "3e482e59a36d5362f8f3380dbd3ba0d5758505c6f7ae1bab887ea66d6008812b",
+  "captureSha256": "4f57513a78cf3f0000c9522e2146d9c729968376a2fd2ad294fb0c84e576155a",
   "judge": {
     "description": "A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-2: an icy snowy blue-white world, crisp cold light, falling snow, clear blue ice blocks, a blue plush ball, white snowy haze over the distance.",
     "references": [
@@ -55,8 +55,8 @@
     ],
     "minScore": 6,
     "exit": 1,
-    "score": 3,
-    "output": "JUDGE FAIL: 3.0/10 (minimum 6.0) on proofs/captures/lookdev/m14-camera-effects--world-ice.png by claude-haiku-5-5 (median of [3.0, 3.0, 4.0])\nexpected: A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-2: an icy snowy blue-white world, crisp cold light, falling snow, clear blue ice blocks, a blue plush ball, white snowy haze over the distance.\nseen: The capture shows a washed-out pastel pink and blue checkered floor with glossy reflections, a neon arch, a striped inflatable hammer, a pale plush-like sphere and faint pillars in haze. It lacks the saturated icy blue-white world of the reference: no falling snow, no clear blue ice blocks beyond one faint block, no light shafts, and the overall finish is far cruder than the reference.",
-    "at": "2026-10-25T00:36:20.442Z"
+    "score": 4,
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m14-camera-effects--world-ice.png by claude-haiku-5-5 (median of [3.0, 4.0, 4.0])\nexpected: A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-2: an icy snowy blue-white world, crisp cold light, falling snow, clear blue ice blocks, a blue plush ball, white snowy haze over the distance.\nseen: The frame shows a blue tile run, a smooth blue ball (not furry), a small striped hammer, a glowing tube arch, snowflake particles and a pale distant haze, so the basic layout is there. It is washed out and low-contrast, with weak gloss and reflections, no visible inflatable arch or clear-coated pads, and the far pillars and light shafts are faint, so it looks far cruder than reference-1.",
+    "at": "2026-10-25T02:02:25.635Z"
   }
 }
