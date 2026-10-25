@@ -747,6 +747,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-deform"
+version = "0.1.0"
+dependencies = [
+ "raa-core",
+ "raa-lit",
+ "raa-math",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-dof"
 version = "0.1.0"
 dependencies = [
