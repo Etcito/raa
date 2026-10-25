@@ -16,11 +16,14 @@
 //! multiplied by `amount`, and clamped to half of `height_m`. The state is stored per tag in a
 //! tag-sorted vector, so a given input sequence always gives bit-identical outputs.
 //!
-//! The `Deform` provider and the `install` function that registers it with the lit renderer come
-//! in the next task of this module.
+//! The [`provider`] is the `squash-jiggle` `Deform` slot (S11, priority 10): its WGSL applies
+//! the same squash, the same jiggle weight and the inverse-transpose normal tilt in the vertex
+//! stage; [`install`] registers it with the lit renderer.
 
 mod jiggle;
+mod provider;
 mod squash;
 
 pub use jiggle::{JiggleConfig, JiggleSprings};
+pub use provider::{install, provider};
 pub use squash::{jiggle_offset_weight, squash_normal, squash_point};
