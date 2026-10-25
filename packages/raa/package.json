@@ -1,6 +1,6 @@
 {
   "name": "@etcito/raa",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "RAA: a small extensible WebGPU rendering engine compiled to WebAssembly (primitives, prims assets, CSG, instancing).",
   "type": "module",
   "license": "MIT",
