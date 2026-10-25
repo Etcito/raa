@@ -1,9 +1,11 @@
-// S14: pure metadata and procedural builders; animation is added on the next card.
+// S14: pure metadata, procedural builders and deterministic fixed-time animation.
 import { uvSphere, lathe, sweepTube, roundedBox, merge, withTangents } from '../lib/geometry.js';
 
 const Q = [0, 0, 0, 1];
 const ONE = [1, 1, 1];
 const HEAD_Y = 1.8;
+const BODY_HEIGHT = HEAD_Y;
+const rigsByEngine = new WeakMap();
 // Material colour parameters are sRGB, not linear radiance.
 const BLUE = [0.08, 0.34, 0.82];
 const CREAM = [1, 0.96, 0.87];
@@ -375,6 +377,69 @@ function buildCourse(engine) {
   }
 }
 
+// Rebuild from rest on every call, including when seeking backwards or capturing
+// repeatedly with dt=0. Springs cannot advance in that capture path.
+function animate(engine, timeMs, variant) {
+  const state = rigsByEngine.get(engine);
+  if (!state) throw new Error('m15-waddle: build must precede frame');
+  const { rigs, tints } = state;
+  const time = variant?.id === 'tints' ? 1000 : timeMs;
+  const deform = variant?.id !== 'deform-off';
+  const nodes = [], transforms = [];
+  const bodies = new Uint32Array(rigs.length);
+  const extras = new Float32Array(rigs.length * 32);
+  rigs.forEach((rig, i) => {
+    const cycle = ((time + i * 150) % 1200 + 1200) % 1200;
+    const phase = cycle / 1200 * Math.PI * 2;
+    const plantAge = (cycle % 600) / 1000;
+    const plantSide = cycle < 600 ? 1 : -1;
+    const angle = Math.cos(phase) * 8 * Math.PI / 180;
+    // Smooth recovery: -12% at a plant, +5% halfway to the next plant.
+    const squash = deform ? -0.035 - 0.085 * Math.cos(phase * 2) : 0;
+    const vertical = 1 + squash;
+    const lateral = 1 / Math.sqrt(vertical);
+    const jiggle = deform
+      ? -plantSide * 0.025 * Math.cos(2 * Math.PI * 5 * plantAge) * Math.exp(-plantAge / 0.15)
+      : 0;
+    const trs = rig.transforms.slice();
+    const offset = node => rig.nodes.indexOf(node) * 10;
+    const rotate = (node, q) => trs.splice(offset(node) + 3, 4, ...q);
+    const attach = node => {
+      const j = offset(node);
+      trs[j] *= lateral;
+      trs[j + 1] *= vertical;
+      trs[j + 2] *= lateral;
+      // Match the shader's post-squash height weight at each rigid attachment.
+      const y = Math.max(0, Math.min(1, trs[j + 1] / BODY_HEIGHT));
+      const weight = y * y * (3 - 2 * y);
+      trs[j] += jiggle * weight * weight;
+    };
+    rotate(rig.body.node, roll(angle));
+    for (const part of [rig.head, ...rig.flippers, ...rig.feet]) attach(part.node);
+    trs[offset(rig.head.node) + 1] += 0.012 * Math.sin(phase * 2);
+    rig.flippers.forEach((part, sideIndex) => {
+      const side = sideIndex === 0 ? -1 : 1;
+      rotate(part.node, roll(side * 0.95 + 0.16 * Math.sin(phase)));
+    });
+    rig.feet.forEach((part, sideIndex) => {
+      const side = sideIndex === 0 ? -1 : 1;
+      // Left plants at 0 ms; right at 600 ms. The opposite foot lifts 6 cm.
+      trs[offset(part.node) + 1] += 0.03 * (1 + side * Math.cos(phase));
+      rotate(part.node, yaw(side * 0.13 + 0.12 * Math.sin(phase + sideIndex * Math.PI)));
+    });
+    nodes.push(...rig.nodes);
+    transforms.push(...trs);
+    bodies[i] = rig.body.instance;
+    const base = i * 32;
+    extras.set(tints[i] ?? [1, 1, 1, 1], base);
+    extras.set([0, 1, 0, squash], base + 4);
+    extras.set([jiggle, 0, 0, deform ? BODY_HEIGHT : 0], base + 8);
+    // params (16 floats) and reserved (4 floats) remain zero.
+  });
+  engine.setTransforms(new Uint32Array(nodes), new Float32Array(transforms));
+  engine.setInstanceExtras(bodies, extras);
+}
+
 export default {
   id: 'm15-waddle',
   milestone: 'm15',
@@ -387,9 +452,9 @@ export default {
       references: ['ref-1', 'ref-2'], judge: n === 0 || n === 6,
     })),
     { id: 'deform-on', timeMs: 300, judge: false, references: [],
-      description: 'Penguin deformation enabled; rest pose until the animation task.' },
+      description: 'Penguin deformation enabled at the shared waddle pose.' },
     { id: 'deform-off', timeMs: 300, judge: false, references: [],
-      description: 'Penguin deformation disabled; rest pose until the animation task.' },
+      description: 'Penguin deformation disabled at the shared waddle pose.' },
     { id: 'tints', timeMs: 0, judge: false, references: [],
       description: 'Blue hero and pink, blue and yellow costume tints, all four in view.' },
   ],
@@ -429,6 +494,8 @@ export default {
     engine.setCamera(all
       ? { eye: [0, 3.5, 12.8], target: [0, 1.35, 0], fovYDeg: 43, near: 0.1, far: 100 }
       : { eye: [1.1, 3.0, -7.8], target: [0, 1.65, 0.8], fovYDeg: 43, near: 0.1, far: 100 });
+    rigsByEngine.set(engine, { rigs, tints });
     return { rigs };
   },
+  frame: animate,
 };
