@@ -1,9 +1,18 @@
 [
   {
+    "name": "cargo-check",
+    "command": "env CARGO_BUILD_JOBS=1 cargo check",
+    "timeout_s": 600,
+    "cwd": "."
+  },
+  {
     "name": "build-lookdev",
     "command": "env NMC_CPUS=1 bash scripts/build-lookdev.sh",
     "timeout_s": 1800,
-    "cwd": "."
+    "cwd": ".",
+    "after": [
+      "cargo-check"
+    ]
   },
   {
     "name": "judge-f00",

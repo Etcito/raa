@@ -401,7 +401,8 @@ export default {
       clouds: { coverage: 0.62, density: 1.4, scale: 480, color: [1, 1, 1] } });
     engine.setFog({ preset: 'clear', density: 0.001, start: 25,
       color: [0.4, 0.75, 1], aerialStrength: 0 });
-    engine.setGrading({ preset: 'neutral', saturation: 1.18, contrast: 1.08, vibrance: 0.18, temperature: 0.04 });
+    // Keep neutral's 6500 K white balance; the runtime temperature is in Kelvin.
+    engine.setGrading({ preset: 'neutral', saturation: 1.18, contrast: 1.08, vibrance: 0.18 });
     // Explicitly enable the shell contributor and grounding passes for captures.
     for (const pass of ['fur.shells', 'shadow.csm', 'ao.gtao', 'shadow.contact',
       'sky.env', 'sky.background', 'grading', 'dof']) engine.setPassEnabled(pass, true);
