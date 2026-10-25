@@ -4,7 +4,8 @@ import { uvSphere, lathe, sweepTube, roundedBox, merge, withTangents } from '../
 const Q = [0, 0, 0, 1];
 const ONE = [1, 1, 1];
 const HEAD_Y = 1.8;
-const BLUE = [0.018, 0.09, 0.48];
+// Material colour parameters are sRGB, not linear radiance.
+const BLUE = [0.08, 0.34, 0.82];
 const CREAM = [1, 0.96, 0.87];
 const yaw = a => [0, Math.sin(a / 2), 0, Math.cos(a / 2)];
 const roll = a => [0, 0, Math.sin(a / 2), Math.cos(a / 2)];
@@ -50,6 +51,51 @@ function inflatable(engine, color) {
     clearcoat: 1, clearcoatRoughness: 0.12 });
 }
 
+// Evaluate print coverage per fragment: vertex colours undersample these small motifs.
+// Procedural textures use local coordinates, so they stay attached during rigid animation
+// and need no external image binding or asset-loader fallback.
+function costumePrints(engine) {
+  engine.addMaterialFunction('m15.fish', `
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var o = raa_default_output(in);
+    let p = in.local_position;
+    let grid = vec2<f32>(p.x * 5.5 + p.z * 2.0, p.y * 7.0);
+    let cell = floor(grid);
+    let q = fract(grid) - vec2<f32>(0.5);
+    let body = length(q / vec2<f32>(0.29, 0.20)) - 1.0;
+    let tail = max(abs(q.y) - (q.x - 0.16) * 0.9, max(0.18 - q.x, q.x - 0.43));
+    let d = min(body * 0.2, tail);
+    let aa = max(fwidth(d), 0.008);
+    let mask = 1.0 - smoothstep(-aa, aa, d);
+    let hue = fract((cell.x + cell.y * 3.0) / 4.0);
+    var ink = vec3<f32>(1.0, 0.12, 0.32);
+    if (hue > 0.24) { ink = vec3<f32>(1.0, 0.45, 0.025); }
+    if (hue > 0.49) { ink = vec3<f32>(0.44, 0.78, 0.12); }
+    if (hue > 0.74) { ink = vec3<f32>(0.55, 0.22, 0.85); }
+    o.base_color = mix(vec3<f32>(0.38, 0.83, 0.82), ink, mask);
+    let eye = 1.0 - smoothstep(0.018, 0.035, length(q - vec2<f32>(-0.16, 0.045)));
+    o.base_color = mix(o.base_color, vec3<f32>(0.025), eye * mask);
+    o.roughness = 0.65;
+    return o;
+}`);
+  engine.addMaterialFunction('m15.pineapple', `
+fn material_main(in: MaterialInput) -> MaterialOutput {
+    var o = raa_default_output(in);
+    let p = in.local_position;
+    let a = atan2(p.z / 0.63, p.x / 0.73) * 1.909859;
+    let h = (p.y + 0.12) * 4.0;
+    let grid = fract(vec2<f32>(a + h, a - h));
+    let edge = min(min(grid.x, 1.0 - grid.x), min(grid.y, 1.0 - grid.y));
+    let aa = max(fwidth(edge), 0.006);
+    let seam = 1.0 - smoothstep(0.045 - aa, 0.045 + aa, edge);
+    o.base_color = mix(vec3<f32>(1.0, 0.68, 0.015), vec3<f32>(0.66, 0.22, 0.002), seam);
+    o.roughness = 0.3;
+    o.clearcoat = 1.0;
+    o.clearcoat_roughness = 0.12;
+    return o;
+}`);
+}
+
 function characterMeshes(engine) {
   const blue = plush(engine, BLUE), neutral = plush(engine, [0.92, 0.92, 0.92]);
   const cream = plush(engine, CREAM, 0.012);
@@ -83,25 +129,18 @@ function characterMeshes(engine) {
   } }), p => p[1] >= 0);
   const hat = merge([reshape(cap, [0.69, 0.48, 0.60], [0, 0.57, 0]),
     egg([0.065, 0.11, 0.065], [0, 1.10, 0]),
-    egg([0.66, 0.025, 0.085], [0, 1.20, 0])]);
+    reshape(egg([0.66, 0.045, 0.13]), ONE, [0, 1.24, 0.08])]);
   const scarfPath = Array.from({ length: 96 }, (_, i) => {
     const a = i / 96 * 2 * Math.PI;
     return [0.80 * Math.cos(a), 0.02 + 0.045 * Math.sin(a), 0.65 * Math.sin(a)];
   });
-  const scarfPrint = p => {
-    const x = p[0] * 13 + p[1] * 7, y = p[2] * 17 + p[1] * 11;
-    const dx = x - Math.floor(x) - 0.5, dy = y - Math.floor(y) - 0.5;
-    const fish = dx * dx / 0.14 + dy * dy / 0.045 < 1
-      || (dx > 0.25 && Math.abs(dy) < (dx - 0.20) * 0.7);
-    return [...(fish ? palette[Math.abs(Math.floor(x) + Math.floor(y)) % 3]
-      : [0.63, 0.92, 0.91]).map(linear), 1];
-  };
-  const scarf = merge([sweepTube(scarfPath, 0.145, 20, { closed: true, color: scarfPrint }),
-    reshape(roundedBox([0.17, 0.40, 0.045], 0.04, 16, { color: scarfPrint }),
-      ONE, [-0.48, -0.34, -0.64]),
-    reshape(roundedBox([0.13, 0.30, 0.04], 0.035, 12, { color: scarfPrint }),
-      ONE, [-0.70, -0.23, -0.53])]);
-  const scarfMat = plush(engine, [1, 1, 1], 0.003);
+  const scarf = merge([sweepTube(scarfPath, 0.145, 20, { closed: true }),
+    reshape(roundedBox([0.17, 0.40, 0.045], 0.04, 16),
+      ONE, [0.48, -0.34, -0.64]),
+    reshape(roundedBox([0.13, 0.30, 0.04], 0.035, 12),
+      ONE, [0.70, -0.23, -0.53])]);
+  const scarfMat = engine.addSurfaceMaterial({ function: 'm15.fish',
+    sheenColor: [0.7, 0.95, 1], sheenRoughness: 0.6 });
   return {
     body: [upload(engine, body, [blue, cream, cream]), upload(engine, body, [neutral, cream, cream])],
     head: [upload(engine, upper, [blue]), upload(engine, upper, [neutral])],
@@ -131,11 +170,22 @@ function costumeMeshes(engine) {
   const bow = merge([egg([0.28, 0.23, 0.12], [-0.24, 0.71, -0.35]),
     egg([0.28, 0.23, 0.12], [0.24, 0.71, -0.35]),
     egg([0.12, 0.13, 0.14], [0, 0.71, -0.39])]);
-  const skirt = lathe([[0.70, 0.63], [1.02, 0.78], [0.87, 0.97], [0.72, 1.04]], 96);
+  const skirt = lathe([[1.08, 0.96], [1.0, 1.10], [0.76, 1.31]], 144);
+  for (let i = 0; i < skirt.positions.length; i += 3) {
+    const a = Math.atan2(skirt.positions[i + 2], skirt.positions[i]);
+    const pleat = 1 + 0.07 * Math.cos(a * 18);
+    skirt.positions[i] *= pleat;
+    skirt.positions[i + 2] *= pleat;
+    const radial = Math.hypot(skirt.normals[i], skirt.normals[i + 2]);
+    const slope = -1.26 * Math.sin(a * 18) / pleat;
+    const n = [radial * (Math.cos(a) + slope * Math.sin(a)),
+      skirt.normals[i + 1], radial * (Math.sin(a) - slope * Math.cos(a))];
+    skirt.normals.set(n.map(v => v / Math.hypot(...n)), i);
+  }
   // Scalloped plush hem makes the skirt read as fabric, not another body sphere.
   const hem = Array.from({ length: 18 }, (_, i) => {
     const a = i * Math.PI / 9;
-    return egg([0.15, 0.11, 0.15], [0.94 * Math.cos(a), 0.80, 0.78 * Math.sin(a)]);
+    return egg([0.15, 0.11, 0.15], [1.04 * Math.cos(a), 0.98, 0.86 * Math.sin(a)]);
   });
   const helmet = reshape(select(uvSphere(1, 64, 32), p => p[1] >= 0),
     [0.68, 0.49, 0.60], [0, 0.52, 0]);
@@ -151,22 +201,18 @@ function costumeMeshes(engine) {
     const a = i * Math.PI * 2 / 7;
     return egg([0.09, 0.32, 0.08], [0.24 * Math.cos(a), 1.00 + (i % 2) * 0.12, 0.22 * Math.sin(a)]);
   });
-  const pineapple = reshape(select(uvSphere(1, 64, 40, { color: p => {
-    const a = Math.atan2(p[2], p[0]) * 5;
-    const seam = Math.abs(Math.sin(a + p[1] * 16)) < 0.16
-      || Math.abs(Math.sin(a - p[1] * 16)) < 0.16;
-    return seam ? [0.65, 0.25, 0.005, 1] : [1, 0.80, 0.08, 1];
-  } }), p => p[1] > -0.38), [0.73, 0.97, 0.63], [0, 0.01, 0]);
+  const pineapple = reshape(select(uvSphere(1, 96, 64), p => p[1] > -0.65),
+    [0.80, 1.12, 0.70], [0, -0.12, 0]);
   return [
     { head: upload(engine, bow, [pink]), body: upload(engine,
-      merge([reshape(skirt, [1, 1, 0.83], [0, 0, 0]), ...hem]), [pink]) },
+      merge([reshape(withTangents(skirt), [1, 1, 0.83], [0, 0, 0]), ...hem]), [pink]) },
     { head: upload(engine, merge([helmet, ...horns, ring(0.68, 0.60, 0.52, 0.045)]),
       [steel, white, white, steel]), body: upload(engine,
       merge([...collar, ring(0.83, 0.67, 1.14, 0.085),
         reshape(roundedBox([0.13, 0.11, 0.04], 0.025, 4), ONE, [0, 1.14, -0.76])]),
       [...collar.map(() => white), leather, gold]) },
     { head: upload(engine, merge([pineapple, ...crown]),
-      [cloth([1, 1, 1]), ...crown.map(() => green)]) },
+      [engine.addSurfaceMaterial({ function: 'm15.pineapple' }), ...crown.map(() => green)]) },
   ];
 }
 
@@ -217,7 +263,10 @@ function buildCourse(engine) {
   const place = (mesh, t, r = Q, s = ONE) =>
     engine.addMeshInstance(engine.addNode(null, t, r, s), mesh);
   const box = (half, radius, mat) => upload(engine, roundedBox(half, radius, 6), [mat]);
-  const tile = box([2.05, 0.18, 1.48], 0.17, blue);
+  // Flat tile tops must not inherit inflatable UV gores (which distort reflections).
+  const tileCoat = engine.addSurfaceMaterial({ color: [0.025, 0.62, 1],
+    roughness: 0.28, clearcoat: 1, clearcoatRoughness: 0.08 });
+  const tile = box([2.05, 0.18, 1.48], 0.17, tileCoat);
   const pad = box([2.05, 0.22, 1.48], 0.20, pink);
   const sea = box([13, 0.20, 19], 0.18, mint);
   place(sea, [0, -0.66, 10]);
@@ -258,9 +307,16 @@ function buildCourse(engine) {
     return [5.5 * Math.cos(a), 2.2 + 5.5 * Math.sin(a), 25];
   });
   place(upload(engine, sweepTube(archPath, 0.36, 24), [yellow]), [0, 0, 0]);
-  const crownBase = box([1.15, 0.16, 0.25], 0.12, yellow);
+  const glow = engine.addSurfaceMaterial({ color: [1, 0.75, 0.04],
+    emissive: [4, 2.3, 0.12], roughness: 0.25 });
+  const bulb = upload(engine, egg([0.12, 0.12, 0.12]), [glow]);
+  for (let i = 1; i < archPath.length; i += 3) {
+    const p = archPath[i];
+    place(bulb, [p[0], p[1], p[2] - 0.36]);
+  }
+  const crownBase = box([1.15, 0.16, 0.25], 0.12, glow);
   place(crownBase, [0, 8.0, 25]);
-  const point = upload(engine, lathe([[0, 0], [0.43, 0], [0.06, 1.1], [0, 1.16]], 24), [yellow]);
+  const point = upload(engine, lathe([[0, 0], [0.43, 0], [0.06, 1.1], [0, 1.16]], 24), [glow]);
   for (const x of [-0.8, 0, 0.8]) place(point, [x, 8.1, 25], Q, [1, x === 0 ? 1.35 : 1, 1]);
   const banner = box([0.55, 1.3, 0.08], 0.06, pink);
   for (const side of [-1, 1]) {
@@ -288,14 +344,21 @@ export default {
       description: 'Blue hero and pink, blue and yellow costume tints, all four in view.' },
   ],
   async build(engine, lib, variant) {
-    engine.setSky({ preset: 'day', zenith: [0.10, 0.42, 0.95],
-      horizon: [0.56, 0.77, 1], ground: [0.25, 0.34, 0.49], intensity: 0.85,
-      clouds: { coverage: 0.36, density: 0.65 } });
-    engine.setLight({ direction: [-0.45, -0.8, 0.35], color: [1, 0.96, 0.90], intensity: 2.7 });
+    costumePrints(engine);
+    engine.setSky({ preset: 'day', zenith: [0.025, 0.32, 1],
+      horizon: [0.12, 0.55, 1], ground: [0.12, 0.55, 1], intensity: 1,
+      horizonSoftness: 0.7,
+      clouds: { coverage: 0.62, density: 1.4, scale: 480, color: [1, 1, 1] } });
+    engine.setFog({ preset: 'clear', density: 0.001, start: 25,
+      color: [0.4, 0.75, 1], aerialStrength: 0 });
+    engine.setGrading({ preset: 'neutral', saturation: 1.15, contrast: 1.06 });
+    engine.setDof({ maxCoc: 0 });
+    engine.setShadows({ softness: 2, distance: 60, resolution: 2048 });
+    engine.setLight({ direction: [0.55, -0.8, 0.55], color: [1, 0.96, 0.90], intensity: 4.0 });
     engine.setAmbient({ color: [0.72, 0.84, 1], intensity: 0.32 });
-    engine.setEnvironmentLighting({ diffuse: 0.55, specular: 0.85 });
-    engine.setToneMapping({ exposureEv: 0.10, look: 'punchy' });
-    engine.setBloom({ strength: 0.065, radius: 0.65 });
+    engine.setEnvironmentLighting({ diffuse: 0.9, specular: 1.2 });
+    engine.setToneMapping({ mapper: 'aces', exposureEv: 0.25, look: 'none' });
+    engine.setBloom({ strength: 0.10, radius: 0.65 });
     buildCourse(engine);
     const meshes = characterMeshes(engine);
     const outfits = costumeMeshes(engine);
@@ -308,7 +371,7 @@ export default {
       all ? -0.12 : [-0.12, 0.18, -0.1, -0.22][i], 1, i ? outfits[i - 1] : null));
     engine.setCamera(all
       ? { eye: [0, 3.5, 12.8], target: [0, 1.35, 0], fovYDeg: 43, near: 0.1, far: 100 }
-      : { eye: [1.2, 3.6, -7.4], target: [0, 2.0, 3.2], fovYDeg: 43, near: 0.1, far: 100 });
+      : { eye: [1.5, 2.7, -6.0], target: [0, 2.0, 4.5], fovYDeg: 43, near: 0.1, far: 100 });
     return { rigs };
   },
 };

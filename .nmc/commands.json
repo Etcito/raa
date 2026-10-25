@@ -1,7 +1,7 @@
 [
   {
     "name": "build-lookdev",
-    "command": "bash scripts/build-lookdev.sh",
+    "command": "env NMC_CPUS=1 bash scripts/build-lookdev.sh",
     "timeout_s": 1800,
     "cwd": "."
   },
