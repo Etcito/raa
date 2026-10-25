@@ -62,10 +62,11 @@ impl GradingDesc {
             "neutral" => Some(neutral),
             // Sunny candy: clean shadows and vivid colour, with room for glossy highlights.
             "candy" => Some(GradingDesc {
-                temperature_k: 6700.0,
+                temperature_k: 7600.0,
+                exposure_ev: 0.15,
                 contrast: 1.06,
-                saturation: 1.3,
-                vibrance: 0.3,
+                saturation: 1.45,
+                vibrance: 0.45,
                 vignette: 0.03,
                 ..neutral
             }),

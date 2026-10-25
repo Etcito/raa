@@ -95,6 +95,56 @@ const WORLDS = {
   },
 };
 
+// Only the judged candy world uses this finish; diagnostic pairs keep their geometry.
+const CANDY_LOOK = {
+  ...WORLDS.candy,
+  polished: true,
+  sky: { ...WORLDS.candy.sky, zenith: [0.08, 0.38, 1], horizon: [0.48, 0.72, 1],
+    ground: [0.48, 0.42, 0.34], intensity: 1.25,
+    clouds: { coverage: 0.22, density: 0.65 } },
+  sun: { dir: [0.12, -0.21, 0.97], color: [1, 0.79, 0.5], intensity: 5 },
+  inflatable: [[1, 0.12, 0.58], [1, 0.83, 0.08], [0.08, 0.55, 1]],
+  liquid: { function: 'raa.liquid.slime',
+    params: { color: [0.16, 1, 0.025], glossiness: 1, absorption: 1.2,
+      foamAmount: 0.12, detailStrength: 0.12 }, transmissive: true },
+};
+const CANDY_COAT = { clearcoat: 1, clearcoatRoughness: 0.035 };
+
+// A dense rounded cylinder with analytic profile normals, without pinched panel seams.
+// Keep the shared hammer's dimensions, axis and placement (the capture contract).
+function candyHammer(geometry, palette) {
+  const profile = (radius, half, rounding) => {
+    const points = [[0, -half]];
+    for (let i = 0; i <= 24; i++) {
+      const a = -Math.PI / 2 + Math.PI / 2 * i / 24;
+      points.push([radius - rounding + rounding * Math.cos(a),
+        -half + rounding + rounding * Math.sin(a)]);
+    }
+    for (let i = 0; i <= 24; i++) {
+      const a = Math.PI / 2 * i / 24;
+      points.push([radius - rounding + rounding * Math.cos(a),
+        half - rounding + rounding * Math.sin(a)]);
+    }
+    return [...points, [0, half]];
+  };
+  const color = (c) => [...c.map(srgbToLinear), 1];
+  const handle = geometry.lathe(profile(0.065, 0.4875, 0.06), 64,
+    { color: () => color(palette[2]) });
+  for (let i = 1; i < handle.positions.length; i += 3) handle.positions[i] += 0.4875;
+  const head = geometry.lathe(profile(0.19, 0.36, 0.075), 128, { color: (p) =>
+    color(Math.abs(p[1]) > 0.285 ? palette[1]
+      : Math.cos(6 * Math.atan2(-p[2], p[0])) > 0.5 ? [1, 1, 1] : palette[0]) });
+  // Rotate the head Y -> X, including its normal and tangent frame.
+  for (const [key, stride] of [['positions', 3], ['normals', 3], ['tangents', 4]]) {
+    for (let i = 0; i < head[key].length; i += stride) {
+      const x = head[key][i], y = head[key][i + 1];
+      head[key][i] = y;
+      head[key][i + 1] = -x + (key === 'positions' ? 1.08 : 0);
+    }
+  }
+  return geometry.merge([handle, head]);
+}
+
 const identityQuat = [0, 0, 0, 1];
 const yawQuat = (a) => [0, Math.sin(a / 2), 0, Math.cos(a / 2)];
 const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -174,15 +224,20 @@ function buildRun(engine, lib, w) {
 
 function buildObstacles(engine, lib, w) {
   const { geometry, objects } = lib;
+  const coat = w.polished ? CANDY_COAT : COAT;
   const hammer = engine.addSurfaceMaterial({
-    function: 'raa.inflatable', params: { color: [1, 1, 1], stripeWidth: 0, seamDepth: 0.2 }, ...COAT,
+    function: 'raa.inflatable', params: { color: [1, 1, 1], stripeWidth: 0,
+      seamDepth: w.polished ? 0.015 : 0.2 }, ...coat,
   });
   const s = HERO.scale;
-  place(engine, upload(engine, objects.inflatableHammer(), [hammer]), HERO.t, yawQuat(HERO.yaw), [s, s, s]);
-  const pads = w.inflatable.map((c) => inflatable(engine, c, w.stripe));
-  const pad = geometry.roundedBox([0.55, 0.18, 0.55], 0.14, 6);
+  place(engine, upload(engine, (w.polished ? candyHammer(geometry, w.inflatable) : objects.inflatableHammer()), [hammer]), HERO.t, yawQuat(HERO.yaw), [s, s, s]);
+  const pads = w.inflatable.map((c) => w.polished
+    ? engine.addSurfaceMaterial({ function: 'raa.inflatable',
+      params: { color: c, stripeWidth: 0, seamDepth: 0.015 }, ...coat })
+    : inflatable(engine, c, w.stripe));
+  const pad = geometry.roundedBox([0.55, 0.18, 0.55], 0.14, w.polished ? 24 : 6);
   PADS.forEach(([x, z], i) => place(engine, upload(engine, pad, [pads[i % pads.length]]), [x, 0.18, z]));
-  const arch = geometry.sweepTube(archPath(2.4, 0.4), 0.3, 24, { caps: 'round' });
+  const arch = geometry.sweepTube(archPath(2.4, 0.4, w.polished ? 96 : 48), 0.3, w.polished ? 48 : 24, { caps: 'round' });
   place(engine, upload(engine, arch, [pads[1]]), [0, 0, INFLATABLE_ARCH_Z]);
   const tubes = [neon(engine, w.neon), neon(engine, w.neon2 ?? w.neon)];
   const neonArch = geometry.sweepTube(archPath(2.1, 1.1), 0.05, 12, { caps: 'round' });
@@ -202,13 +257,14 @@ function buildObstacles(engine, lib, w) {
 // The liquid strip in its basin beside the run.
 function buildStrip(engine, lib, w) {
   const { geometry } = lib;
-  const wall = inflatable(engine, w.inflatable[0], w.stripe);
+  const wall = w.polished ? plain(engine, w.inflatable[0], 0.18, CANDY_COAT)
+    : inflatable(engine, w.inflatable[0], w.stripe);
   for (const sx of [-1, 1]) {
-    const side = geometry.roundedBox([0.15, 0.42, STRIP.d / 2 + 0.3], 0.06, 4);
+    const side = geometry.roundedBox([0.15, 0.42, STRIP.d / 2 + 0.3], 0.06, w.polished ? 16 : 4);
     place(engine, upload(engine, side, [wall]), [STRIP.x + sx * (STRIP.w / 2 + 0.15), GROUND_Y + 0.42, STRIP.z]);
   }
   const { function: fn, params, transmissive } = w.liquid;
-  const blend = transmissive ? { blend: 'transmissive', transmission: 0.95, ior: 1.34, thickness: 0.4 } : {};
+  const blend = transmissive ? { blend: 'transmissive', transmission: w.polished ? 0.55 : 0.95, ior: 1.34, thickness: 0.4 } : {};
   const m = engine.addSurfaceMaterial({ function: fn, params, ...blend });
   place(engine, upload(engine, geometry.grid(STRIP.w, STRIP.d, STRIP.nx, STRIP.nz), [m]), [STRIP.x, STRIP.y, STRIP.z]);
 }
@@ -262,8 +318,8 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
     dof: { fStop: 8, focus: HERO.focus },
     // Preserve foreground colour and gloss; fade the distant vista into cool haze.
-    fog: { preset: 'haze', density: 0.004, heightFalloff: 0.16, start: 14,
-      color: [0.72, 0.82, 1], inscatter: 0.12, aerialStrength: 0.65, aerialDistance: 180 },
+    fog: { preset: 'haze', density: 0.002, heightFalloff: 0.16, start: 18,
+      color: [0.92, 0.94, 1], inscatter: 0.1, aerialStrength: 0.3, aerialDistance: 220 },
     sunShafts: { intensity: 0.12 },
   } : {}) },
 }));
@@ -308,7 +364,7 @@ export default {
 
   async build(engine, lib, variant) {
     const name = variant.settings?.world;
-    const w = WORLDS[name];
+    const w = variant.id === 'world-candy' ? CANDY_LOOK : WORLDS[name];
     if (!w) throw new Error(`m14-camera-effects: no world for variant '${variant.id}'`);
     engine.applyEnvironment({
       sky: w.sky,

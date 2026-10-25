@@ -1,5 +1,26 @@
 [
-  {"name": "build-lookdev", "command": "bash scripts/build-lookdev.sh", "timeout_s": 3600, "cwd": "."},
-  {"name": "judge-candy", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-candy$' --judge --ref-prefix /refs/", "timeout_s": 3600, "cwd": ".", "after": ["build-lookdev"]},
-  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["judge-candy"]}
+  {
+    "name": "build-lookdev",
+    "command": "bash scripts/build-lookdev.sh",
+    "timeout_s": 3600,
+    "cwd": "."
+  },
+  {
+    "name": "judge-candy",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-candy$' --judge --ref-prefix /refs/",
+    "timeout_s": 3600,
+    "cwd": ".",
+    "after": [
+      "build-lookdev"
+    ]
+  },
+  {
+    "name": "p2-smoke",
+    "command": "node proofs/lib/p2-smoke.mjs",
+    "timeout_s": 600,
+    "cwd": ".",
+    "after": [
+      "judge-candy"
+    ]
+  }
 ]
