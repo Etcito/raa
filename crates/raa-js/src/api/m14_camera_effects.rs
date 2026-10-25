@@ -247,7 +247,7 @@ fn apply_grading(st: &mut EngineState, settings: &JsValue) -> Result<(), RaaErro
 const POST_LOOKS: [(&str, &str, f32, f32, &str, f32, &str); 5] = [
     ("neutral", "neutral", 0.04, 0.85, "agx", 0.0, "none"),
     ("candy", "candy", 0.025, 0.65, "agx", -0.35, "punchy"),
-    ("ice", "ice", 0.04, 0.85, "agx", -0.2, "none"),
+    ("ice", "ice", 0.018, 0.65, "agx", -0.35, "none"),
     ("jungle", "jungle", 0.03, 0.85, "agx", 0.0, "golden"),
     ("neon", "neon", 0.12, 0.9, "agx", 0.0, "punchy"),
 ];

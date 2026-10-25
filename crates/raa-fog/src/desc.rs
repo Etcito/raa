@@ -60,14 +60,14 @@ impl FogDesc {
                 aerial_strength: 0.5,
                 aerial_distance_m: 400.0,
             }),
-            // Cold blue-white snow haze, nearly uniform with height, aerial over 250 m.
+            // Clear foreground ice with blue-white snow haze over the distant vista.
             "snow" => Some(FogDesc {
                 density: 0.02,
                 height_falloff: 0.08,
                 base_height_m: 0.0,
-                start_m: 0.0,
-                color: [0.78, 0.84, 0.92],
-                inscatter: 0.4,
+                start_m: 16.0,
+                color: [0.85, 0.93, 1.0],
+                inscatter: 0.18,
                 aerial_strength: 0.6,
                 aerial_distance_m: 250.0,
             }),

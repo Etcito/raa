@@ -58,16 +58,24 @@ const WORLDS = {
     particles: { kind: 'confetti', position: [0, 3.5, -7], volume: [2.5, 0.5, 4], direction: [0, 1, 0], spread: 0.6, rate: 300, speed: [1.5, 3], groundY: 0, colors: [[1, 0.15, 0.45], [1, 0.8, 0.1], [0.2, 0.55, 1], [0.3, 0.9, 0.3]] },
   },
   ice: {
-    sky: 'snow', fog: 'snow', post: 'ice',
-    // Higher sun from behind the camera's left: the ice faces and snow catch light.
-    sun: { dir: [0.35, -0.55, -0.76], color: [1, 0.96, 0.9], intensity: 6.5 },
-    tiles: [[0.55, 0.82, 1], [0.85, 0.95, 1], [0.35, 0.62, 0.95], [1, 0.45, 0.75]],
-    plinth: [0.75, 0.9, 1], ground: [0.94, 0.97, 1], vista: [0.88, 0.93, 1],
-    inflatable: [[0.3, 0.6, 1], [1, 0.35, 0.65], [1, 1, 1]], stripe: [1, 1, 1],
-    neon: [0.35, 0.85, 1], plush: [0.15, 0.25, 0.9], gate: [0.95, 0.4, 0.7],
-    ice: { tint: [0.42, 0.82, 1], absorption: 2.4, cloudiness: 0.3, crackScale: 0.3 },
+    // Clear winter light rather than the snow sky's flat overcast illumination.
+    polished: true,
+    sky: { preset: 'snow', zenith: [0.045, 0.3, 0.9], horizon: [0.38, 0.68, 1],
+      ground: [0.65, 0.78, 0.95], intensity: 1.05, horizonSoftness: 10,
+      sunDiscSize: 0.012, sunDiscIntensity: 22,
+      clouds: { coverage: 0.25, density: 0.65, color: [0.95, 0.98, 1] } },
+    fog: 'snow', post: 'ice',
+    // Low backlight through the gate catches the ice edges and falling snow.
+    sun: { dir: [0.12, -0.21, 0.97], color: [0.94, 0.97, 1], intensity: 5.0 },
+    tiles: [[0.08, 0.55, 0.95], [0.22, 0.72, 1], [0.12, 0.46, 0.9], [0.5, 0.85, 1]],
+    plinth: [0.28, 0.68, 0.95], ground: [0.94, 0.97, 1], vista: [0.72, 0.83, 0.98],
+    inflatable: [[0.025, 0.45, 0.98], [0.95, 0.06, 0.48], [0.8, 0.94, 1]], stripe: [1, 1, 1],
+    neon: [0.16, 0.65, 1], plush: [0.025, 0.12, 0.65], gate: [0.55, 0.78, 1],
+    ice: { tint: [0.12, 0.65, 1], absorption: 3.2, cloudiness: 0.12, crackScale: 0.22 },
     liquid: { function: 'raa.liquid.water', params: {}, transmissive: true },
-    particles: { kind: 'snow', position: [0, 4, -9], volume: [8, 3.5, 12], groundY: 0, rate: 2400, colors: [[0.97, 0.98, 1]] },
+    particles: { kind: 'snow', position: [0, 2.8, -6], volume: [4.5, 2.5, 9],
+      groundY: 0, rate: 2400, size: [0.025, 0.06], speed: [0.35, 0.8],
+      colors: [[0.97, 0.99, 1]] },
   },
   jungle: {
     sky: 'jungle', fog: 'jungle', post: 'jungle',
@@ -331,6 +339,12 @@ const VARIANTS = Object.keys(WORLDS).map((world, i) => ({
     sunShafts: { intensity: 0.85, density: 0.7 },
     grading: { preset: 'neutral', contrast: 1.08,
       saturation: 1.18, vibrance: 0.12 },
+  } : world === 'ice' ? {
+    // See the ice faces and snowy surround; retain sharp foreground plush and hammer.
+    camera: { ...CAMERA, eye: [0.35, 1.45, 2.5], target: [0.35, 1.7, -24], fovYDeg: 56 },
+    dof: { fStop: 5.6, focus: HERO.focus },
+    fog: { preset: 'snow', density: 0.006, aerialStrength: 0.55, aerialDistance: 180 },
+    sunShafts: { intensity: 0.65, density: 0.6 },
   } : {}) },
 }));
 

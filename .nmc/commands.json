@@ -1,44 +1,22 @@
 [
   {
-    "name": "workspace-check",
-    "command": "bash scripts/check.sh",
+    "name": "build-lookdev",
+    "command": "bash scripts/build-lookdev.sh",
     "timeout_s": 3600,
     "cwd": "."
   },
   {
-    "name": "build-lookdev",
-    "command": "bash scripts/build-lookdev.sh",
+    "name": "judge-ice",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-ice$' --judge --ref-prefix /refs/",
     "timeout_s": 3600,
     "cwd": ".",
-    "after": [
-      "workspace-check"
-    ]
-  },
-  {
-    "name": "judge-candy",
-    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --only 'm14-camera-effects--world-candy$' --judge --ref-prefix /refs/",
-    "timeout_s": 3600,
-    "cwd": ".",
-    "after": [
-      "build-lookdev"
-    ]
+    "after": ["build-lookdev"]
   },
   {
     "name": "p2-smoke",
     "command": "node proofs/lib/p2-smoke.mjs",
     "timeout_s": 600,
     "cwd": ".",
-    "after": [
-      "judge-candy"
-    ]
-  },
-  {
-    "name": "cargo-check",
-    "command": "cargo check",
-    "timeout_s": 600,
-    "cwd": ".",
-    "after": [
-      "p2-smoke"
-    ]
+    "after": ["judge-ice"]
   }
 ]

@@ -70,12 +70,13 @@ impl GradingDesc {
                 vignette: 0.03,
                 ..neutral
             }),
-            // Cool ice: blue shadows over slightly lifted blacks, a little less colour.
+            // Clear winter light: blue shadows, vivid ice and neutral snowy highlights.
             "ice" => Some(GradingDesc {
-                temperature_k: 5600.0,
-                saturation: 0.9,
-                lift: [0.01; 3],
-                shadows_tint: [0.45, 0.5, 0.6],
+                temperature_k: 6100.0,
+                contrast: 1.08,
+                saturation: 1.22,
+                vibrance: 0.18,
+                shadows_tint: [0.46, 0.5, 0.56],
                 ..neutral
             }),
             // Green-yellow jungle: green tint, punchier contrast, warm highlights.
