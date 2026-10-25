@@ -221,7 +221,7 @@ const LETTER_R = 0.025;
 // Plush palette (sRGB): ref-1/ref-2's deep blue penguin fur, white belly, orange beak and
 // feet; the plush ball is pastel pink. Fur: length m, strands per cm2, droop.
 // Blue sampled from ref-1's penguin back (sRGB about 0.04..0.12, 0.24..0.29, 0.58..0.67):
-// a royal blue with some green. [0.08, 0.17, 0.75] read violet under the sky, and the sky
+// a deep blue with some green. [0.08, 0.17, 0.75] read violet under the sky, and the sky
 // fill lifts the colour by ~1.4x, so the base is darker than the sampled one (card 4750).
 const PLUSH_BLUE = [0, 0.14, 0.5];
 const PLUSH_WHITE = [0.97, 0.96, 0.94];
