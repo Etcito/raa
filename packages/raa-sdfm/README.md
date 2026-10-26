@@ -129,3 +129,7 @@ loader.dispose();
 | loader -> worker | `{ type: 'mesh', id, document, mesher }` | mesh the asset document; `id` correlates the reply. |
 | worker -> loader | `{ type: 'meshed', id, groups, materials }` | the `meshDocument` bridge output; its typed arrays are transferred. |
 | worker -> loader | `{ type: 'error', id, code, message, path? }` | an `SdfmError`; any other worker exception becomes `sdfm.worker`. |
+
+## Packaging
+
+`scripts/build-package.sh` packs this JavaScript adapter alongside RAA at the same version. The published manifest declares no peer dependencies: the consuming app provides RAA and MAMA, which are distributed outside the npm registry. This preserves the packaging policy introduced in 0.1.1.

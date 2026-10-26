@@ -116,7 +116,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "demo-m4-asset"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-alloc-count",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "demo-m5-booleans"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-alloc-count",
@@ -409,7 +409,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "m1-boot"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-core",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "m2-scene"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-alloc-count",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "m3-prims"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-alloc-count",
@@ -680,11 +680,11 @@ dependencies = [
 
 [[package]]
 name = "raa-alloc-count"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "raa-bench"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-alloc-count",
  "raa-core",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "raa-bloom"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-pipeline",
@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "raa-brdf"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-ibl",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "raa-contact"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-lit",
@@ -727,7 +727,7 @@ dependencies = [
 
 [[package]]
 name = "raa-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "raa-csg"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-geom",
  "raa-loader",
@@ -748,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "raa-deform"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-lit",
@@ -758,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "raa-dof"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-math",
@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "raa-ext-test"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-geom",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "raa-fog"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-lit",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "raa-fur"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-brdf",
  "raa-core",
@@ -806,14 +806,14 @@ dependencies = [
 
 [[package]]
 name = "raa-geom"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-math",
 ]
 
 [[package]]
 name = "raa-grading"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-pipeline",
@@ -822,7 +822,7 @@ dependencies = [
 
 [[package]]
 name = "raa-gtao"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-lit",
@@ -834,7 +834,7 @@ dependencies = [
 
 [[package]]
 name = "raa-ibl"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-lit",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "raa-js"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-bloom",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "raa-liquid"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-brdf",
  "raa-core",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "raa-lit"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-geom",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "raa-loader"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-geom",
  "raa-material",
@@ -928,14 +928,14 @@ dependencies = [
 
 [[package]]
 name = "raa-material"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
 ]
 
 [[package]]
 name = "raa-matfn"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-ibl",
@@ -945,11 +945,11 @@ dependencies = [
 
 [[package]]
 name = "raa-math"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "raa-mesh"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-geom",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "raa-oit"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "pollster",
  "raa-core",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "raa-particles"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-brdf",
  "raa-core",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "raa-pipeline"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "wgpu",
@@ -995,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "raa-prims"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-geom",
  "raa-math",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "raa-render"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-geom",
@@ -1015,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "raa-scene"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-math",
@@ -1023,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "raa-shader"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "naga",
  "raa-core",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "raa-shadow"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-lit",
@@ -1043,7 +1043,7 @@ dependencies = [
 
 [[package]]
 name = "raa-shafts"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-math",
@@ -1054,7 +1054,7 @@ dependencies = [
 
 [[package]]
 name = "raa-sky"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-ibl",
@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "raa-ssr"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-ibl",
@@ -1079,7 +1079,7 @@ dependencies = [
 
 [[package]]
 name = "raa-tonemap"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-core",
  "raa-pipeline",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "raa-transmission"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raa-brdf",
  "raa-core",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "raa-web"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "js-sys",
  "raa-core",

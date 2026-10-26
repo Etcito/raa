@@ -4,7 +4,8 @@
 # raa-js wasm -> packages/raa/pkg/, dist/raa-sizes.json, dist/example-basic/,
 # packages/raa/LICENSE, then the staged package (target/package-stage/raa, whose
 # index.d.ts is packages/raa/index.d.ts followed by every packages/raa/types/*.d.ts)
-# -> release/etcito-raa-<version>.tgz, release/SHA256SUMS, dist/package/raa/ and
+# -> release/etcito-raa-<version>.tgz, release/etcito-raa-sdfm-<version>.tgz,
+# release/SHA256SUMS, dist/package/raa/ and
 # dist/etcito-raa-<version>.tgz (the release asset set; release/ is gitignored).
 #
 # Tools come from PATH: node, npm, cargo, rustc (rustup, with the wasm32-unknown-unknown
@@ -175,6 +176,11 @@ for f in package/package.json package/index.js package/index.d.ts package/README
 done
 [ "$MISSING" -eq 0 ] || exit 1
 
+echo "== npm pack @etcito/raa-sdfm"
+SDFM_VERSION="$("$NODE" -p "require('./packages/raa-sdfm/package.json').version")"
+[ "$SDFM_VERSION" = "$VERSION" ] || { echo "raa-sdfm version must match raa" >&2; exit 1; }
+(cd "$ROOT/packages/raa-sdfm" && "$NPM" pack --pack-destination "$RELEASE" --offline)
+
 echo "== SHA256SUMS"
-(cd "$RELEASE" && sha256sum "$TGZ_NAME" > SHA256SUMS && sha256sum -c SHA256SUMS)
+(cd "$RELEASE" && sha256sum "$TGZ_NAME" "etcito-raa-sdfm-$VERSION.tgz" > SHA256SUMS && sha256sum -c SHA256SUMS)
 echo "build-package.sh: ok ($TGZ_NAME, version v$VERSION)"

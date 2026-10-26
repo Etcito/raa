@@ -3,7 +3,7 @@ name: release
 # A release is a version tag v<version> pushed to this repository. The workflow runs the
 # checks that need no GPU (scripts/check.sh), builds the @etcito/raa package with its wasm
 # (scripts/build-package.sh --tag, which refuses a tag that differs from the package version),
-# and attaches release/etcito-raa-<version>.tgz and release/SHA256SUMS to the GitHub Release.
+# and attaches both RAA and raa-sdfm tarballs with release/SHA256SUMS to the GitHub Release.
 # Consumers install the built tarball by URL and need no Rust toolchain.
 
 on:
@@ -66,7 +66,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release/etcito-raa-*.tgz release/SHA256SUMS --clobber
+            gh release upload "$TAG" release/etcito-raa-*.tgz release/etcito-raa-sdfm-*.tgz release/SHA256SUMS --clobber
           else
-            gh release create "$TAG" release/etcito-raa-*.tgz release/SHA256SUMS --verify-tag --title "$TAG" --generate-notes
+            gh release create "$TAG" release/etcito-raa-*.tgz release/etcito-raa-sdfm-*.tgz release/SHA256SUMS --verify-tag --title "$TAG" --generate-notes
           fi

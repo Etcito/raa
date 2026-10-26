@@ -108,14 +108,11 @@ mod web {
         }
         st.scene.update_world();
         let mut i = 0;
-        loop {
-            let Some(&(handle, tag)) = st
-                .features
-                .get::<JiggleTags>()
-                .and_then(|tags| tags.0.get(i))
-            else {
-                break;
-            };
+        while let Some(&(handle, tag)) = st
+            .features
+            .get::<JiggleTags>()
+            .and_then(|tags| tags.0.get(i))
+        {
             let world = st
                 .instance_group(handle)
                 .ok()
@@ -261,10 +258,12 @@ mod web {
                 let config = if settings.is_null() {
                     None
                 } else {
-                    let mut c = JiggleConfig::default();
-                    c.height_m = optional_f64(&settings, "height")?
-                        .ok_or_else(|| invalid("jiggle height is required".into()))?
-                        as f32;
+                    let mut c = JiggleConfig {
+                        height_m: optional_f64(&settings, "height")?
+                            .ok_or_else(|| invalid("jiggle height is required".into()))?
+                            as f32,
+                        ..JiggleConfig::default()
+                    };
                     for (key, slot) in [
                         ("stiffness", &mut c.stiffness),
                         ("damping", &mut c.damping),

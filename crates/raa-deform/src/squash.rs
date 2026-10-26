@@ -53,7 +53,7 @@ pub fn squash_normal(n: [f32; 3], axis: [f32; 3], s: f32) -> [f32; 3] {
 
 /// Jiggle weight `smoothstep(0, 1, clamp(y / h, 0, 1))^2`; zero when `h <= 0` (or NaN).
 pub fn jiggle_offset_weight(y: f32, h: f32) -> f32 {
-    if !(h > 0.0) {
+    if h <= 0.0 || h.is_nan() {
         return 0.0;
     }
     let t = (y / h).clamp(0.0, 1.0);
