@@ -1,0 +1,48 @@
+{
+  "scene": "m15-waddle",
+  "variant": "f08",
+  "milestone": "m15",
+  "capturedAt": "2026-10-25T11:52:03.866Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 316,
+  "triangles": 947484,
+  "firstFrameMs": 55027.59999999404,
+  "wasm": {
+    "raw": 2087170,
+    "gzip": 710578,
+    "sha256": "e9fcfda3ee99b32bd1ac85d6db9060958b8db616a4d32f74806cc7978c1994ea"
+  },
+  "capture": "proofs/captures/lookdev/m15-waddle--f08.png",
+  "captureSha256": "ef2334980b58415b5a3f71262977f159022d2ecffa863b870c1deb50c1384975",
+  "judge": null
+}

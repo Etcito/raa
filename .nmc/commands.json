@@ -1,8 +1,44 @@
 [
-  {"name": "test-sdfm", "command": "node --test 'packages/raa-sdfm/test/*.test.js'", "timeout_s": 300, "cwd": "."},
-  {"name": "test-sdfm-compare", "command": "node --test 'examples/sdfm-compare/test/*.test.js'", "timeout_s": 300, "cwd": "."},
-  {"name": "build-sdfm-compare", "command": "bash scripts/build-sdfm-compare.sh --mama ../MAMA", "timeout_s": 3600, "cwd": ".", "after": ["test-sdfm", "test-sdfm-compare"]},
-  {"name": "capture-m12", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --page sdfm-compare --milestone m12", "timeout_s": 3600, "cwd": ".", "after": ["build-sdfm-compare"]},
-  {"name": "proof-m12", "command": "node proofs/m12-sdfm.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m12"]},
-  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m12"]}
+  {
+    "name": "build-lookdev",
+    "command": "bash scripts/build-lookdev.sh",
+    "timeout_s": 1800,
+    "cwd": "."
+  },
+  {
+    "name": "cargo-check",
+    "command": "env CARGO_BUILD_JOBS=1 cargo check",
+    "timeout_s": 600,
+    "cwd": ".",
+    "after": [
+      "build-lookdev"
+    ]
+  },
+  {
+    "name": "capture-m15",
+    "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --milestone m15 --only '^m15-waddle--(f0[1-5]|f0[7-9]|f1[01]|deform-on|deform-off|tints)$'",
+    "timeout_s": 3000,
+    "cwd": ".",
+    "after": [
+      "cargo-check"
+    ]
+  },
+  {
+    "name": "proof-m15",
+    "command": "node proofs/m15-animation.mjs",
+    "timeout_s": 1800,
+    "cwd": ".",
+    "after": [
+      "capture-m15"
+    ]
+  },
+  {
+    "name": "p2-smoke",
+    "command": "node proofs/lib/p2-smoke.mjs",
+    "timeout_s": 120,
+    "cwd": ".",
+    "after": [
+      "proof-m15"
+    ]
+  }
 ]

@@ -1,0 +1,52 @@
+{
+  "scene": "m15-waddle",
+  "variant": "tints",
+  "milestone": "m15",
+  "capturedAt": "2026-10-25T11:52:53.170Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "fog",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 280,
+  "triangles": 866220,
+  "firstFrameMs": 105237,
+  "wasm": {
+    "raw": 2087170,
+    "gzip": 710578,
+    "sha256": "e9fcfda3ee99b32bd1ac85d6db9060958b8db616a4d32f74806cc7978c1994ea"
+  },
+  "capture": "proofs/captures/lookdev/m15-waddle--tints.png",
+  "captureSha256": "f44577561587890abc0625364f222ed8a846fa792d68faa192d7e4f4d04eb906",
+  "judge": null
+}

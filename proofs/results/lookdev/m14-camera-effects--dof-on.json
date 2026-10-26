@@ -1,0 +1,52 @@
+{
+  "scene": "m14-camera-effects",
+  "variant": "dof-on",
+  "milestone": "m14",
+  "capturedAt": "2026-10-25T00:37:43.858Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "fog",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 43,
+  "triangles": 147664,
+  "firstFrameMs": 129741.19999998808,
+  "wasm": {
+    "raw": 2056920,
+    "gzip": 699834,
+    "sha256": "6129a86309263dc0336304a744b84a384500ccbf8d5bd8b89c804958ed7ab7c1"
+  },
+  "capture": "proofs/captures/lookdev/m14-camera-effects--dof-on.png",
+  "captureSha256": "e1e3c23f9c9059fa7dd68104c742b7f473c1cf1a04193c92f7935cf578138baa",
+  "judge": null
+}

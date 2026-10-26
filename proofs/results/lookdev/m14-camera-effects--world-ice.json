@@ -1,0 +1,62 @@
+{
+  "scene": "m14-camera-effects",
+  "variant": "world-ice",
+  "milestone": "m14",
+  "capturedAt": "2026-10-25T06:41:36.317Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "fog",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 43,
+  "triangles": 208136,
+  "firstFrameMs": 6456.4000000059605,
+  "wasm": {
+    "raw": 2057004,
+    "gzip": 699804,
+    "sha256": "3532dd7d69dd86930afb9167976ddedf8abbefc24ecb4d8119f0c5b8457ffd52"
+  },
+  "capture": "proofs/captures/lookdev/m14-camera-effects--world-ice.png",
+  "captureSha256": "b6438a5496468b03c8ee5d681912c3d16d8bf4c1fb9418e304be572db0eb60c7",
+  "judge": {
+    "description": "A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-2: an icy snowy blue-white world, crisp cold light, falling snow, clear blue ice blocks, a blue plush ball, white snowy haze over the distance.",
+    "references": [
+      "ref-2"
+    ],
+    "minScore": 6,
+    "exit": 1,
+    "score": 4,
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m14-camera-effects--world-ice.png by claude-haiku-5-5 (median of [3.0, 4.0, 4.0])\nexpected: A low camera looks down a long straight obstacle run of glossy coloured tiles that mirror the obstacles (screen-space reflections), past a striped inflatable hammer in sharp focus on the right, clear-coated pads and an inflatable arch, ice blocks, a furry plush ball, glowing neon tube arches, a liquid strip beside the run and particles in the air, to a row of tall pillars with light shafts between them and big distant shapes fading into haze. The far run is softly out of focus (depth of field) and the colours are graded. Expected: simple procedural shapes and no characters; score the mood, gloss, depth haze and grading. Target ref-2: an icy snowy blue-white world, crisp cold light, falling snow, clear blue ice blocks, a blue plush ball, white snowy haze over the distance.\nseen: The frame has the icy blue-white haze, falling snow particles, a striped hammer, neon-style arch, pillars in the distance, and a blue ball, but the ball is a smooth sphere rather than furry plush and the ice blocks are blurred blobs. The tile run is flat and sparse with no visible pads, inflatable arch, or clear obstacle sequence, and the render looks far cruder than the glossy, saturated reference.",
+    "at": "2026-10-25T06:41:52.243Z"
+  }
+}

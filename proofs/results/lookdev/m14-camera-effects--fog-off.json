@@ -1,0 +1,51 @@
+{
+  "scene": "m14-camera-effects",
+  "variant": "fog-off",
+  "milestone": "m14",
+  "capturedAt": "2026-10-25T00:38:16.040Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 43,
+  "triangles": 147664,
+  "firstFrameMs": 162263,
+  "wasm": {
+    "raw": 2056920,
+    "gzip": 699834,
+    "sha256": "6129a86309263dc0336304a744b84a384500ccbf8d5bd8b89c804958ed7ab7c1"
+  },
+  "capture": "proofs/captures/lookdev/m14-camera-effects--fog-off.png",
+  "captureSha256": "1d4b427ce7c62b4f54dc1c16534209b5239abbb1904b937317649d81d0994a5a",
+  "judge": null
+}

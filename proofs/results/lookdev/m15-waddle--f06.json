@@ -1,0 +1,59 @@
+{
+  "scene": "m15-waddle",
+  "variant": "f06",
+  "milestone": "m15",
+  "capturedAt": "2026-10-25T08:22:09.450Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 316,
+  "triangles": 947484,
+  "firstFrameMs": 26784.399999976158,
+  "wasm": {
+    "raw": 2087170,
+    "gzip": 710578,
+    "sha256": "8cce1c53178320169a3aac9718b37a830c3f2533be37703d5c5d18f70d329e34"
+  },
+  "capture": "proofs/captures/lookdev/m15-waddle--f06.png",
+  "captureSha256": "302a4fd1d47124f2215b6f65a8de90b699b901d48b0caa452265f3114d384779",
+  "judge": {
+    "description": "costumed plush penguin character look, waddle frame 6",
+    "references": [
+      "ref-1",
+      "ref-2"
+    ],
+    "minScore": 6,
+    "exit": 1,
+    "score": 4,
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m15-waddle--f06.png by claude-haiku-5-5 (median of [4.0, 4.0, 4.0])\nexpected: costumed plush penguin character look, waddle frame 6\nseen: The capture shows costumed penguins (propeller cap, scarf, pineapple and bow costumes) on a blue tiled platform, so the subject is recognizable. It is much cruder than the references: the penguins are smooth, flatly shaded, with little fur texture and no visible shoes on the foreground penguin, and the scene lacks the glossy materials and rich detail of the reference images.",
+    "at": "2026-10-25T08:22:24.461Z"
+  }
+}

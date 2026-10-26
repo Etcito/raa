@@ -1,0 +1,63 @@
+{
+  "scene": "m15-waddle",
+  "variant": "f00",
+  "milestone": "m15",
+  "capturedAt": "2026-10-25T08:21:48.111Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "shadow.contact",
+    "particles.sim",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "ssr",
+    "fog",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap"
+  ],
+  "instances": 280,
+  "triangles": 866220,
+  "firstFrameMs": 4801.899999976158,
+  "wasm": {
+    "raw": 2087170,
+    "gzip": 710578,
+    "sha256": "8cce1c53178320169a3aac9718b37a830c3f2533be37703d5c5d18f70d329e34"
+  },
+  "capture": "proofs/captures/lookdev/m15-waddle--f00.png",
+  "captureSha256": "2f0668187015c50ffca48b1bd5e0a5547f18735fee229d415f25e6ad0de58a3b",
+  "judge": {
+    "description": "costumed plush penguin character look, waddle frame 0",
+    "references": [
+      "ref-1",
+      "ref-2"
+    ],
+    "minScore": 6,
+    "exit": 1,
+    "score": 4,
+    "output": "JUDGE FAIL: 4.0/10 (minimum 6.0) on proofs/captures/lookdev/m15-waddle--f00.png by claude-haiku-5-5 (median of [4.0, 4.0, 4.0])\nexpected: costumed plush penguin character look, waddle frame [REDACTED]\nseen: The capture shows the blue plush penguin with the propeller cap and striped scarf, so the character and costume are recognizable. It is far cruder than the references: the whole frame is washed out by a heavy white haze, the fur and material detail is nearly absent, and the scene is blurry.",
+    "at": "2026-10-25T08:21:59.296Z"
+  }
+}

@@ -1,0 +1,14 @@
+[package]
+name = "raa-shafts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Volumetric sun shafts: descriptor and validation."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
+raa-shadow = { path = "../raa-shadow" }
+raa-math = { path = "../raa-math" }

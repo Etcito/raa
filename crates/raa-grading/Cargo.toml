@@ -1,0 +1,12 @@
+[package]
+name = "raa-grading"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "HDR colour grading before tonemap: grading descriptor, presets and validation."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
