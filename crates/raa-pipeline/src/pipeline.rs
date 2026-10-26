@@ -25,7 +25,7 @@ fn refusal(code: &'static str, message: String) -> RaaError {
 }
 
 /// Refuses a sequence where `prepass`, `forward` and `tonemap` (those present) are out of
-/// order or a pass runs after `tonemap` (`pipeline.required_order`).
+/// order or an HDR pass runs after `tonemap` (`pipeline.required_order`).
 fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
     let mut previous: Option<(&str, usize)> = None;
     for required in REQUIRED_ORDER {
@@ -56,6 +56,26 @@ fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
                 "`{last}` must run last, but {} would run after it",
                 after.join(", ")
             ),
+        ));
+    }
+    Ok(())
+}
+
+/// Tone mapping ends the HDR sequence; display overlays follow that sequence.
+fn check_overlay_order(names: &[&str], overlays: &[&str]) -> Result<(), RaaError> {
+    let regular: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|n| !overlays.contains(n))
+        .collect();
+    check_required_order(&regular)?;
+    let first_overlay = names.iter().position(|n| overlays.contains(n));
+    if let Some(at) = first_overlay
+        && names[at..].iter().any(|n| !overlays.contains(n))
+    {
+        return Err(refusal(
+            "pipeline.required_order",
+            "display overlays must follow all HDR passes and tonemap".into(),
         ));
     }
     Ok(())
@@ -150,7 +170,7 @@ impl PipelineConfig {
     /// Adds an enabled pass before the first pass of greater order in the current execution
     /// order (after equal orders). Refuses a name already used by a pass or a contributor
     /// (`pipeline.duplicate_pass`) and a position breaking prepass < forward < tonemap with
-    /// tonemap last (`pipeline.required_order`).
+    /// tonemap last among HDR passes (`pipeline.required_order`); output overlays follow it.
     pub fn add(&mut self, pass: Box<dyn FeaturePass>) -> Result<(), RaaError> {
         let name = pass.name().to_owned();
         if self.contains(&name) {
@@ -164,7 +184,16 @@ impl PipelineConfig {
             .unwrap_or(self.passes.len());
         let mut names: Vec<&str> = self.passes.iter().map(|p| p.name.as_str()).collect();
         names.insert(at, &name);
-        check_required_order(&names)?;
+        let mut overlays: Vec<&str> = self
+            .passes
+            .iter()
+            .filter(|p| p.pass.output_overlay())
+            .map(|p| p.name.as_str())
+            .collect();
+        if pass.output_overlay() {
+            overlays.push(&name);
+        }
+        check_overlay_order(&names, &overlays)?;
         let required = pass.required();
         self.passes.insert(
             at,
@@ -262,7 +291,7 @@ impl PipelineConfig {
     /// contributors, which keep their order inside their host) exactly once. Refusals, in
     /// order: an unknown or contributor name (`pipeline.unknown_pass`), a name listed twice
     /// (`pipeline.duplicate_pass`), a missing pass (`pipeline.order_incomplete`), prepass,
-    /// forward and tonemap out of order or tonemap not last (`pipeline.required_order`).
+    /// forward and tonemap out of order, or an HDR pass after tonemap (`pipeline.required_order`).
     /// A refused order leaves the current one unchanged.
     pub fn set_order(&mut self, names: &[&str]) -> Result<(), RaaError> {
         for (i, name) in names.iter().enumerate() {
@@ -304,7 +333,13 @@ impl PipelineConfig {
                 ),
             ));
         }
-        check_required_order(names)?;
+        let overlays: Vec<&str> = self
+            .passes
+            .iter()
+            .filter(|p| p.pass.output_overlay())
+            .map(|p| p.name.as_str())
+            .collect();
+        check_overlay_order(names, &overlays)?;
         // every pass name is in `names` exactly once (checked above)
         self.passes
             .sort_unstable_by_key(|p| names.iter().position(|n| *n == p.name));
@@ -600,5 +635,24 @@ mod tests {
             assert_eq!(err.code(), "pipeline.required_order", "{names:?}");
             assert!(!err.message().is_empty());
         }
+    }
+    #[test]
+    fn display_overlays_follow_tonemap_but_hdr_passes_cannot() {
+        assert!(
+            check_overlay_order(
+                &["prepass", "forward", "tonemap", "selection"],
+                &["selection"]
+            )
+            .is_ok()
+        );
+        assert!(
+            check_overlay_order(
+                &["prepass", "forward", "selection", "tonemap"],
+                &["selection"]
+            )
+            .is_err()
+        );
+        assert!(check_overlay_order(&["prepass", "forward", "tonemap", "bloom"], &[]).is_err());
+        assert!(check_overlay_order(&["forward", "selection", "bloom"], &["selection"]).is_err());
     }
 }

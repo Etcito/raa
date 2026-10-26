@@ -107,9 +107,9 @@ The engine runs one ordered list of passes each frame. Passes run by ascending o
 |---|---|---|---|---|
 | 30 | `prepass` | pass | yes | Depth (Depth32Float, single-sample), view-space normal + roughness and material (F0, metallic) targets. |
 | 60 | `forward` | pass | yes | Lit shading into the HDR target (`rgba16float`) with MSAA (`msaa` samples), resolved into the HDR chain. |
-| 200 | `tonemap` | pass | yes | Display transform: exposure, mapper, look, sRGB encoding when the canvas is not sRGB, dither; writes the canvas. Always last. |
+| 200 | `tonemap` | pass | yes | Display transform: exposure, mapper, look, sRGB encoding when the canvas is not sRGB, dither; writes the canvas. Last HDR pass; display overlays follow it. |
 
-Required passes cannot be disabled; `prepass` runs before `forward`, which runs before `tonemap`, and `tonemap` is last.
+Required passes cannot be disabled; `prepass` runs before `forward`, which runs before `tonemap`, and `tonemap` is last among HDR passes. Display overlays such as `editor` follow it.
 
 **Background rule.** With no sky, the background colour is display-referred linear RGB and reaches the canvas unchanged: `tonemap` writes it as is (no exposure, no curve; only the sRGB encoding of a non-sRGB canvas) wherever the depth is 1 (nothing drawn). An empty scene therefore shows exactly the background, which defaults to CLEAR_COLOR (0.05, 0.06, 0.08), and `probeNonEmpty` keeps its v0 meaning.
 
@@ -135,7 +135,7 @@ Enables or disables a pass or contributor (all are enabled by default). A disabl
 
 `engine.setPassOrder(names: string[]): void`
 
-Replaces the execution order of the passes. `names` lists every pass-role name exactly once (contributors are not listed; they keep their position inside `forward`). Codes, in the order they are checked: `pipeline.unknown_pass` (unknown name or a contributor), `pipeline.duplicate_pass` (a name listed twice), `pipeline.order_incomplete` (a pass missing), `pipeline.required_order` (`prepass`, `forward`, `tonemap` out of order or `tonemap` not last). A refused order leaves the current one unchanged.
+Replaces the execution order of the passes. `names` lists every pass-role name exactly once (contributors are not listed; they keep their position inside `forward`). Codes, in the order they are checked: `pipeline.unknown_pass` (unknown name or a contributor), `pipeline.duplicate_pass` (a name listed twice), `pipeline.order_incomplete` (a pass missing), `pipeline.required_order` (`prepass`, `forward`, `tonemap` out of order or an HDR pass after `tonemap`, or a display overlay before an HDR pass). A refused order leaves the current one unchanged.
 
 ## Tone mapping
 

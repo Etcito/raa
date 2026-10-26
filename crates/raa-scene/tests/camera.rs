@@ -108,3 +108,33 @@ fn pan_moves_target_and_keeps_distance() {
     orbit.apply(&mut cam);
     assert!(approx_eq((cam.eye - cam.target).length(), 3.0, EPS));
 }
+
+#[test]
+fn orthographic_span_depth_and_resize_are_exact() {
+    let mut cam = Camera {
+        eye: Vec3::new(0.0, 0.0, 5.0),
+        target: Vec3::ZERO,
+        ortho_height: Some(4.0),
+        near: 1.0,
+        far: 11.0,
+        ..Camera::default()
+    };
+    cam.set_viewport(800, 400);
+    let vp = cam.view_proj();
+    let right = vp.transform_point(Vec3::new(4.0, 0.0, 0.0));
+    let top = vp.transform_point(Vec3::new(0.0, 2.0, 0.0));
+    assert!((right.x - 1.0).abs() < 1e-6);
+    assert!((top.y - 1.0).abs() < 1e-6);
+    assert!((vp.transform_point(Vec3::new(0.0, 0.0, 4.0)).z).abs() < 1e-6);
+    assert!((vp.transform_point(Vec3::new(0.0, 0.0, -6.0)).z - 1.0).abs() < 1e-6);
+    cam.near = 0.0;
+    assert!(
+        cam.view_proj()
+            .transform_point(Vec3::new(0.0, 0.0, 5.0))
+            .z
+            .abs()
+            < 1e-6
+    );
+    cam.set_viewport(400, 400);
+    assert!((cam.view_proj().transform_point(Vec3::new(2.0, 0.0, 0.0)).x - 1.0).abs() < 1e-6);
+}

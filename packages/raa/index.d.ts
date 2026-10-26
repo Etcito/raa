@@ -63,15 +63,20 @@ export interface MaterialDesc {
 
 /** A camera description for {@link Engine.setCamera}. The aspect follows the canvas. */
 export interface CameraDesc {
-  /** Camera position (metres). Required. */
-  eye: Vec3;
+  /** Camera position (metres). Required unless position is supplied. */
+  eye?: Vec3;
+  /** Alias for eye. Takes precedence when both are supplied. */
+  position?: Vec3;
+  projection?: 'perspective' | 'orthographic';
+  /** Vertical orthographic span in metres; default 10. */
+  orthoHeight?: number;
   /** Point looked at (metres); must differ from `eye`. Required. */
   target: Vec3;
   /** Up direction. Default [0, 1, 0]. */
   up?: Vec3;
   /** Vertical field of view in degrees, in (0, 180). Default 60. */
   fovYDeg?: number;
-  /** Near plane distance (metres), > 0. Default 0.1. */
+  /** Near plane distance (metres), > 0; orthographic also accepts 0. Default 0.1. */
   near?: number;
   /** Far plane distance (metres), > near. Default 200. */
   far?: number;
@@ -389,3 +394,16 @@ export interface RaaModule {
  *   to index.js.
  */
 export function loadRaa(options?: { wasmUrl?: string | URL }): Promise<RaaModule>;
+
+/** Editor display mode. Overrides are independent of selection. */
+export type WireframeMode = 'off' | 'overlay' | 'only';
+export interface MeshDesc {
+  /** Optional polygon edge pairs; absent uses unique triangle-index edges. */
+  edges?: Uint32Array;
+}
+export interface Engine {
+  /** Global default, or an instance override; inherit restores the global default. */
+  setWireframe(mode: WireframeMode | 'inherit', instance?: number): void;
+  /** Enables selection with an sRGB colour; null disables it. Multiple selections allowed. */
+  setSelectionOutline(instance: number, desc: { color?: Vec3 } | null): void;
+}

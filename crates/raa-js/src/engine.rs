@@ -268,6 +268,7 @@ impl WebApp for EngineApp {
 pub struct Engine {
     runtime: Option<WebRuntime>,
     state: Shared,
+    viewport: (u32, u32),
 }
 
 impl Engine {
@@ -383,12 +384,14 @@ impl Engine {
             optional_features: WEBGPU_OPTIONAL,
             adapter_limits: true,
         };
+        let viewport = (opts.width.max(1), opts.height.max(1));
         let runtime = WebRuntime::new_with(canvas, Box::new(app), opts, &req)
             .await
             .map_err(|e| js_err(&e))?;
         Ok(Engine {
             runtime: Some(runtime),
             state,
+            viewport,
         })
     }
 
@@ -399,7 +402,15 @@ impl Engine {
 
     /// Resizes the canvas backing store (zero sizes clamp to 1); the camera aspect follows.
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
-        self.runtime()?.resize(width, height);
+        let size = (width.max(1), height.max(1));
+        // Reconfiguring an unchanged canvas clears its drawable in the browser.
+        // Editor layout observers may report the same size on successive frames.
+        if self.viewport != size {
+            self.runtime()?.resize(size.0, size.1);
+            self.viewport = size;
+        } else {
+            self.runtime()?;
+        }
         Ok(())
     }
 
@@ -474,7 +485,8 @@ impl Engine {
     }
 
     /// Sets the camera: `eye`, `target`, `up` (+Y), `fovYDeg` (60), `near` (0.1),
-    /// `far` (200). The aspect follows the canvas.
+    /// `far` (200), `projection` (perspective/orthographic), `orthoHeight` (10 metres).
+    /// `position` aliases `eye`. The aspect follows the canvas.
     #[wasm_bindgen(js_name = setCamera)]
     pub fn set_camera(&mut self, desc: JsValue) -> Result<(), JsValue> {
         self.with_state(|_, s| {
@@ -485,9 +497,10 @@ impl Engine {
                     d.fov_y_deg
                 )));
             }
-            if !(d.near > 0.0 && d.far > d.near) {
+            let valid_near = if d.ortho_height.is_some() { d.near >= 0.0 } else { d.near > 0.0 };
+            if !(valid_near && d.far > d.near) {
                 return Err(invalid(format!(
-                    "'near' must be > 0 and 'far' > 'near', got near {} far {}",
+                    "'near' must be > 0 (>= 0 for orthographic) and 'far' > 'near', got near {} far {}",
                     d.near, d.far
                 )));
             }
@@ -495,11 +508,24 @@ impl Engine {
             if (target - eye).length_squared() <= 1e-12 {
                 return Err(invalid("'eye' and 'target' must differ".to_string()));
             }
+            let up = Vec3::from_array(d.up);
+            if up.length_squared() <= 1e-12
+                || (target - eye)
+                    .normalize_or_zero()
+                    .cross(up.normalize_or_zero())
+                    .length_squared()
+                    <= 1e-12
+            {
+                return Err(invalid(
+                    "'up' must be non-zero and not parallel to the viewing direction".into(),
+                ));
+            }
             let cam = &mut s.scene.camera;
             cam.eye = eye;
             cam.target = target;
             cam.up = Vec3::from_array(d.up);
             cam.fov_y_rad = d.fov_y_deg.to_radians();
+            cam.ortho_height = d.ortho_height;
             cam.near = d.near;
             cam.far = d.far;
             Ok(())

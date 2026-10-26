@@ -219,7 +219,11 @@ impl Engine {
     pub fn add_mesh(&mut self, desc: JsValue) -> Result<u32, JsValue> {
         self.with_state(|gpu, st| {
             let mesh = mesh_desc(st, &desc)?;
+            let edges = mesh_edges(&desc, &mesh)?;
             let lit = st.lit.upload(gpu, &mesh)?;
+            if let Some(edges) = edges {
+                st.lit.handle().set_mesh_edges(lit, &mesh, &edges);
+            }
             Ok(st.meshes.insert(MeshEntry {
                 lit,
                 origin: MeshOrigin::M07,
@@ -235,7 +239,11 @@ impl Engine {
         self.with_state(|gpu, st| {
             let entry = st.mesh(id)?;
             let mesh = mesh_desc(st, &desc)?;
+            let edges = mesh_edges(&desc, &mesh)?;
             st.lit.update(gpu, entry.lit, &mesh)?;
+            if let Some(edges) = edges {
+                st.lit.handle().set_mesh_edges(entry.lit, &mesh, &edges);
+            }
             st.mark_mesh_dirty(entry.lit);
             Ok(())
         })
@@ -289,4 +297,21 @@ impl Engine {
             st.add_instance_group(node, mesh.lit, None)
         })
     }
+}
+
+/// Validate edge pairs before mutating any uploaded geometry.
+fn mesh_edges(desc: &JsValue, mesh: &AttributedMesh) -> Result<Option<Vec<u32>>, RaaError> {
+    let Some(value) = field(desc, "edges")? else {
+        return Ok(None);
+    };
+    let edges = value
+        .dyn_ref::<Uint32Array>()
+        .ok_or_else(|| invalid("'edges' must be a Uint32Array".into()))?
+        .to_vec();
+    if edges.len() % 2 != 0 || edges.iter().any(|&i| i as usize >= mesh.vertex_count()) {
+        return Err(invalid(
+            "'edges' must contain pairs of valid vertex indices".into(),
+        ));
+    }
+    Ok(Some(edges))
 }

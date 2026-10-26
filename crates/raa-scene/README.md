@@ -86,3 +86,6 @@ Unit tests live next to the code; integration tests are in `tests/`:
 `camera.rs` (camera and orbit controller), `render_list.rs` (1000 instances,
 batches, ordering, capacity reuse, hidden instances) and `tags.rs` (tags follow the
 sorted item order, set/get round-trip, stale refusal, removal, capacity reuse). All tests are CPU only.
+
+`Camera::ortho_height: Option<f32>` selects an orthographic vertical span in metres.
+None retains perspective. Both projections use viewport aspect and [0, 1] depth.

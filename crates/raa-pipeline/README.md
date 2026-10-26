@@ -86,3 +86,7 @@ and passes added after one, and every refusal code with its message. Its GPU tes
 time, the backbuffer view and format, resets the HDR chain every frame, recreates the targets
 on a new size and follows an order override. `tests/resources.rs` covers the lighting
 resources, `tests/targets.rs` the targets.
+
+Display-space passes can return true from `FeaturePass::output_overlay()`. They
+follow every HDR pass and tonemap; the ordering validator refuses an HDR pass
+after an overlay. Existing passes retain the default false behaviour.

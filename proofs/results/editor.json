@@ -1,0 +1,279 @@
+{
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "SwiftShader Device (Subzero)",
+    "description": "",
+    "isFallbackAdapter": true
+  },
+  "hardware": false,
+  "captures": [
+    {
+      "variant": "overlay-perspective",
+      "file": "proofs/captures/editor-overlay-perspective.png",
+      "nonEmpty": true,
+      "passes": [
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay"
+      ],
+      "replaced": 3,
+      "meshId": 1,
+      "second": 2,
+      "quadInstance": 3,
+      "phase": 0,
+      "errors": []
+    },
+    {
+      "variant": "only-perspective",
+      "file": "proofs/captures/editor-only-perspective.png",
+      "nonEmpty": true,
+      "passes": [
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay"
+      ],
+      "replaced": 4,
+      "meshId": 1,
+      "second": 2,
+      "quadInstance": 3,
+      "phase": 0,
+      "errors": []
+    },
+    {
+      "variant": "off-perspective",
+      "file": "proofs/captures/editor-off-perspective.png",
+      "nonEmpty": true,
+      "passes": [
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay"
+      ],
+      "replaced": 5,
+      "meshId": 1,
+      "second": 2,
+      "quadInstance": 3,
+      "phase": 0,
+      "errors": []
+    },
+    {
+      "variant": "overlay-orthographic",
+      "file": "proofs/captures/editor-overlay-orthographic.png",
+      "nonEmpty": true,
+      "passes": [
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay"
+      ],
+      "replaced": 6,
+      "meshId": 1,
+      "second": 2,
+      "quadInstance": 3,
+      "phase": 0,
+      "errors": []
+    },
+    {
+      "variant": "disabled-perspective",
+      "file": "proofs/captures/editor-disabled-perspective.png",
+      "nonEmpty": true,
+      "passes": [
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap"
+      ],
+      "replaced": 7,
+      "meshId": 1,
+      "second": 2,
+      "quadInstance": 3,
+      "phase": 0,
+      "errors": []
+    },
+    {
+      "variant": "overlay-perspective-replaced",
+      "file": "proofs/captures/editor-overlay-perspective-replaced.png",
+      "nonEmpty": true,
+      "passes": [
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay",
+        "raa.lit.prepass",
+        "raa.lit.forward",
+        "raa.tonemap",
+        "raa.editor.mask",
+        "raa.editor.overlay"
+      ],
+      "replaced": 8,
+      "meshId": 1,
+      "second": 2,
+      "quadInstance": 3,
+      "phase": 1,
+      "errors": []
+    }
+  ],
+  "resizeCycle": [
+    {
+      "projection": "perspective",
+      "width": 960,
+      "height": 540
+    },
+    {
+      "projection": "perspective",
+      "width": 1280,
+      "height": 600
+    },
+    {
+      "projection": "orthographic",
+      "width": 960,
+      "height": 540
+    },
+    {
+      "projection": "orthographic",
+      "width": 1280,
+      "height": 600
+    }
+  ],
+  "state": {
+    "replaced": 8,
+    "meshId": 1,
+    "center": [
+      0,
+      0.7900000205636024,
+      0
+    ],
+    "span": 7.879997253417969,
+    "parts": [
+      {
+        "t": [
+          0,
+          0,
+          0
+        ],
+        "r": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "info": {
+          "vertices": 7613,
+          "triangles": 5834,
+          "subMeshes": [
+            {
+              "first": 0,
+              "count": 654,
+              "material": 1
+            },
+            {
+              "first": 654,
+              "count": 3387,
+              "material": 4
+            },
+            {
+              "first": 4041,
+              "count": 8067,
+              "material": 2
+            },
+            {
+              "first": 12108,
+              "count": 5394,
+              "material": 3
+            }
+          ],
+          "bounds": {
+            "min": [
+              -4.4127984046936035,
+              -1.7881393032936899e-9,
+              -0.8399999737739563
+            ],
+            "max": [
+              4.4127984046936035,
+              1.5800000429153442,
+              0.8399999737739563
+            ]
+          }
+        }
+      }
+    ],
+    "instances": 3,
+    "errors": [],
+    "stats": {
+      "adapter": {
+        "vendor": "",
+        "architecture": "",
+        "device": "SwiftShader Device (Subzero)",
+        "description": "",
+        "isFallbackAdapter": true
+      },
+      "hardware": false,
+      "firstFrameMs": 9837.69999999553,
+      "frames": 18,
+      "cpuMsMedian": 1.550000000745058,
+      "cpuMsP95": 626.7000000029802,
+      "instances": 9,
+      "drawCalls": 5,
+      "triangles": 11670,
+      "allocsPerFrameTotal": null
+    }
+  }
+}

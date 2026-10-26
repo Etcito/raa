@@ -268,6 +268,7 @@ fn lit_renderer_registers_prepass_and_forward_once() {
         [
             ("prepass".to_string(), PassRole::Pass, 30, true, true),
             ("forward".to_string(), PassRole::Pass, 60, true, true),
+            ("editor".to_string(), PassRole::Pass, 210, false, true),
         ]
     );
     let again = LitRenderer::new(&gpu, &pipeline, LitOptions::default());
@@ -275,7 +276,7 @@ fn lit_renderer_registers_prepass_and_forward_once() {
         again.err().map(|e| e.code()),
         Some("pipeline.duplicate_pass")
     );
-    assert_eq!(pipeline.borrow().passes().len(), 2, "nothing half-added");
+    assert_eq!(pipeline.borrow().passes().len(), 3, "nothing half-added");
     let off = pipeline.borrow_mut().set_enabled("forward", false);
     assert_eq!(off.err().map(|e| e.code()), Some("pipeline.required_pass"));
 }
@@ -312,10 +313,77 @@ fn forward_records_enabled_contributors_by_order() {
         .into_iter()
         .map(|p| p.name)
         .collect();
-    assert_eq!(names, ["prepass", "forward", "early", "off", "late"]);
+    assert_eq!(
+        names,
+        ["prepass", "forward", "early", "off", "late", "editor"]
+    );
     rig.frame(&gpu);
     assert_eq!(*log.borrow(), ["early", "late"]);
     assert_eq!(prepared.get(), 2, "only enabled contributors are prepared");
     let texels = rig.hdr_src(&gpu);
     assert!(texels.iter().any(|t| !is_background(t)));
+}
+
+#[test]
+fn editor_overlays_render_and_turn_off_without_changing_baseline() {
+    let Some(gpu) = software_gpu() else {
+        skip("editor_overlays", "software_gpu returned None");
+        return;
+    };
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut rig = Rig::new(&gpu, 4);
+    // This rig omits tonemap; clear its display target before each overlay frame.
+    let clear = |rig: &Rig| {
+        let mut e = gpu.device().create_command_encoder(&Default::default());
+        {
+            let _p = e.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: rig.backbuffer.view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        gpu.queue().submit([e.finish()]);
+    };
+    clear(&rig);
+    rig.frame(&gpu);
+    let baseline = rig.backbuffer.read_rgba8(&gpu).unwrap();
+    let hdr_baseline = rig.hdr_src(&gpu);
+    let handle = rig.lit.handle();
+    handle.set_wireframe(raa_lit::WireframeMode::Overlay, None);
+    handle.set_outline(0, Some([1.0, 0.5, 0.0]));
+    clear(&rig);
+    rig.frame(&gpu);
+    let overlay = rig.backbuffer.read_rgba8(&gpu).unwrap();
+    assert_ne!(overlay, baseline, "editor adds visible lines");
+    handle.set_wireframe(raa_lit::WireframeMode::Only, None);
+    clear(&rig);
+    rig.frame(&gpu);
+    assert_ne!(
+        rig.hdr_src(&gpu),
+        hdr_baseline,
+        "edges only suppresses shaded surfaces"
+    );
+    handle.set_wireframe(raa_lit::WireframeMode::Off, None);
+    handle.set_outline(0, None);
+    clear(&rig);
+    rig.frame(&gpu);
+    assert_eq!(rig.backbuffer.read_rgba8(&gpu).unwrap(), baseline);
+    assert_eq!(
+        rig.hdr_src(&gpu),
+        hdr_baseline,
+        "off restores original rendering exactly"
+    );
+    let error = raa_core::testing::block_on(errors.pop());
+    assert!(error.is_none(), "GPU validation error: {error:?}");
 }

@@ -20,6 +20,12 @@ pub trait FeaturePass {
         false
     }
 
+    /// True for a display-space overlay that paints the backbuffer after tone mapping.
+    /// Such passes may follow tonemap; they must not modify the HDR chain.
+    fn output_overlay(&self) -> bool {
+        false
+    }
+
     /// Called before the pass's first prepare and after the targets were recreated for a new
     /// size. Default: nothing.
     fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {}

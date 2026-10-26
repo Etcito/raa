@@ -192,6 +192,8 @@ pub(crate) struct GpuLitMesh {
     /// u32 triangle-list indices.
     pub(crate) index: wgpu::Buffer,
     info: LitMeshInfo,
+    pub(crate) edge_bytes: Vec<u8>,
+    pub(crate) edges: Option<wgpu::Buffer>,
 }
 
 /// The lit renderer's meshes, behind `LitRenderer::{upload, update, remove, submesh_ids,
@@ -301,6 +303,26 @@ impl MeshStore {
             })
     }
 
+    pub(crate) fn set_edges(&mut self, id: LitMeshId, bytes: Vec<u8>) {
+        if let Some(Some(m)) = self.meshes.get_mut(id.0 as usize) {
+            m.edge_bytes = bytes;
+            m.edges = None;
+        }
+    }
+
+    pub(crate) fn prepare_edges(&mut self, gpu: &GpuContext) {
+        for mesh in self.meshes.iter_mut().flatten() {
+            if mesh.edges.is_none() && !mesh.edge_bytes.is_empty() {
+                mesh.edges = Some(buffer_with(
+                    gpu,
+                    "raa.editor.edges",
+                    wgpu::BufferUsages::VERTEX,
+                    &mesh.edge_bytes,
+                ));
+            }
+        }
+    }
+
     /// Sets streams 0 and 1 ([`STREAM0_SLOT`], [`STREAM1_SLOT`]) and the index buffer of sub-mesh `mesh`; returns its `(first_index, index_count)`.
     pub(crate) fn bind(
         &self,
@@ -314,7 +336,7 @@ impl MeshStore {
         Ok((first, count))
     }
 
-    fn lit_mesh(&self, id: LitMeshId) -> Option<&GpuLitMesh> {
+    pub(crate) fn lit_mesh(&self, id: LitMeshId) -> Option<&GpuLitMesh> {
         self.meshes.get(id.0 as usize).and_then(Option::as_ref)
     }
 }
@@ -363,6 +385,8 @@ fn build(gpu: &GpuContext, m: &AttributedMesh) -> Result<(GpuLitMesh, Vec<SubMes
         stream1,
         index,
         info,
+        edge_bytes: triangle_edge_bytes(m),
+        edges: None,
     };
     Ok((gpu_mesh, subs))
 }
@@ -527,5 +551,53 @@ mod tests {
         let err = check(&AttributedMesh::default()).expect_err("empty mesh");
         assert_eq!(err.code(), "render.invalid_mesh");
         assert!(err.message().starts_with("mesh.empty"), "{err}");
+    }
+}
+
+/// Each edge is one instanced segment, expanded to a pixel-width quad in the shader.
+pub(crate) fn edge_bytes(m: &AttributedMesh, edges: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(edges.len() * 12);
+    for &i in edges {
+        if let Some(p) = m.base.positions.get(i as usize) {
+            for x in *p {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+    }
+    bytes
+}
+
+fn triangle_edge_bytes(m: &AttributedMesh) -> Vec<u8> {
+    let mut edges = std::collections::BTreeSet::new();
+    for t in m.base.indices.chunks_exact(3) {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            edges.insert((a.min(b), a.max(b)));
+        }
+    }
+    edge_bytes(
+        m,
+        &edges
+            .into_iter()
+            .flat_map(|(a, b)| [a, b])
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::*;
+    #[test]
+    fn polygon_quad_omits_triangle_diagonal() {
+        let mut m = AttributedMesh::default();
+        m.base.positions = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        m.base.indices = vec![0, 1, 2, 0, 2, 3];
+        assert_eq!(triangle_edge_bytes(&m).len(), 5 * 24);
+        assert_eq!(edge_bytes(&m, &[0, 1, 1, 2, 2, 3, 3, 0]).len(), 4 * 24);
+        assert!(edge_bytes(&m, &[]).is_empty());
     }
 }

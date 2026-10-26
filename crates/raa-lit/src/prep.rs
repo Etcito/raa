@@ -330,8 +330,9 @@ impl DrawPrep {
         };
         let mut record = [0u8; INSTANCE_GPU_SIZE];
         write_instance(&mut record, &item.world, item.material.0);
-        self.instances.extend_from_slice(&record);
         let tag = input.tags.get(i).copied().unwrap_or(0);
+        record[116..120].copy_from_slice(&tag.to_le_bytes());
+        self.instances.extend_from_slice(&record);
         input
             .extras
             .get(&tag)

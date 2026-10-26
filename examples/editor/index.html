@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>RAA editor features</title>
+<style>
+body{margin:0;background:#141a24;color:#edf2fa;font:15px system-ui}header{padding:16px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}canvas{display:block;width:100%;height:calc(100vh - 120px)}label{display:flex;gap:6px;align-items:center}select,button{font:inherit}#status{padding:8px 16px;color:#adc2db}
+</style>
+<header><b>RAA editor features</b><label>Wireframe <select id="wire"><option>off</option><option selected>overlay</option><option>only</option></select></label>
+<label>Projection <select id="projection"><option>perspective</option><option>orthographic</option></select></label>
+<label>Selection <select id="selection"><option value="">none</option></select></label>
+<label><input type="checkbox" id="replace" checked>Replace mesh every second</label>
+<button id="resize">Resize canvas</button></header>
+<canvas id="canvas"></canvas><div id="status">Loading mesh and materials…</div>
+<script type="importmap">{"imports":{"@etcito/raa":"./raa/index.js","@etcito/raa-sdfm":"./raa-sdfm/index.js"}}</script>
+<script type="module" src="./main.js"></script></html>

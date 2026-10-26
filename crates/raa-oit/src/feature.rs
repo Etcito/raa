@@ -350,7 +350,7 @@ impl OitPass {
             let pipeline = lit.pipeline_for(gpu, key, self.sized.pipelines.spec(flags))?;
             pass.set_pipeline(&pipeline);
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
-            pass.draw_indexed(0..count, 0, instances);
+            lit.draw_surface_instances(pass, 0..count, instances);
         }
         Ok(())
     }

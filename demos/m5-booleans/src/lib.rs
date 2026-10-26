@@ -159,6 +159,7 @@ mod app {
             near: 0.1,
             far: dist * 2.0 + pitch,
             aspect,
+            ortho_height: None,
         }
     }
 

@@ -14,6 +14,8 @@
 //! resolved into `hdr.dst()`).
 
 mod contributor;
+mod editor;
+pub use editor::WireframeMode;
 mod extras;
 mod frame;
 mod handle;

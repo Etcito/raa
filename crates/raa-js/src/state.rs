@@ -138,7 +138,7 @@ impl InstanceGroup {
     }
 
     /// `scene.stale_instance` when the group's node was removed.
-    fn check_live(&self) -> Result<(), RaaError> {
+    pub(crate) fn check_live(&self) -> Result<(), RaaError> {
         if self.stale {
             Err(scene_error(&SceneError::StaleInstance))
         } else {
@@ -272,6 +272,8 @@ impl EngineState {
     pub(crate) fn remove_instance_group(&mut self, h: u32) -> Result<(), RaaError> {
         let mut group = self.instances.remove(h)?;
         self.lit.clear_instance_extra(group.tag);
+        self.lit.handle().set_outline(group.tag, None);
+        self.lit.handle().clear_wireframe(group.tag);
         group.remove_from(&mut self.scene)
     }
 
@@ -284,6 +286,8 @@ impl EngineState {
         for (_, group) in self.instances.iter() {
             if group.stale {
                 self.lit.clear_instance_extra(group.tag);
+                self.lit.handle().set_outline(group.tag, None);
+                self.lit.handle().clear_wireframe(group.tag);
             }
         }
         Ok(())

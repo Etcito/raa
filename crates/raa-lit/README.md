@@ -103,3 +103,10 @@ The pass is named `prepass`, as ARCHITECTURE S12 and `raa_pipeline::REQUIRED_ORD
     validation error occurs.
   - It also checks the pass registration and its duplicate refusal, and that enabled
     contributors are recorded by order.
+
+## Editor display
+
+The optional `editor` output overlay (order 210) records no GPU commands while off.
+`WireframeMode` and `LitHandle::{set_wireframe, clear_wireframe, set_outline,
+set_mesh_edges}` control it. Surface contributors use `draw_surface_instances`
+to respect edges-only overrides. See [editor features](../../docs/editor-features.md).

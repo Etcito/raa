@@ -17,12 +17,14 @@ pub struct Camera {
     pub up: Vec3,
     /// Vertical field of view in radians.
     pub fov_y_rad: f32,
-    /// Near clip distance (> 0).
+    /// Near clip distance (> 0 in perspective; >= 0 in orthographic).
     pub near: f32,
     /// Far clip distance (> near).
     pub far: f32,
     /// Viewport width divided by height.
     pub aspect: f32,
+    /// Vertical orthographic span in metres; None selects perspective.
+    pub ortho_height: Option<f32>,
 }
 
 impl Default for Camera {
@@ -35,6 +37,7 @@ impl Default for Camera {
             near: 0.1,
             far: 200.0,
             aspect: 16.0 / 9.0,
+            ortho_height: None,
         }
     }
 }
@@ -47,7 +50,19 @@ impl Camera {
 
     /// View-to-clip matrix with clip depth [0, 1] (`Mat4::perspective_rh_zo`).
     pub fn projection(&self) -> Mat4 {
-        Mat4::perspective_rh_zo(self.fov_y_rad, self.aspect, self.near, self.far)
+        if let Some(height) = self.ortho_height {
+            let width = height * self.aspect;
+            Mat4 {
+                cols: [
+                    [2.0 / width, 0.0, 0.0, 0.0],
+                    [0.0, 2.0 / height, 0.0, 0.0],
+                    [0.0, 0.0, 1.0 / (self.near - self.far), 0.0],
+                    [0.0, 0.0, self.near / (self.near - self.far), 1.0],
+                ],
+            }
+        } else {
+            Mat4::perspective_rh_zo(self.fov_y_rad, self.aspect, self.near, self.far)
+        }
     }
 
     /// `projection * view`.

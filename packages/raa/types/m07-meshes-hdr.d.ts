@@ -162,7 +162,7 @@ export interface Engine {
 
   /**
    * Sets the execution order: every pass-role name exactly once, prepass before forward
-   * before tonemap, tonemap last. A refused order changes nothing.
+   * before tonemap; display overlays follow tonemap. A refused order changes nothing.
    * @throws RaaError `pipeline.unknown_pass`, `pipeline.duplicate_pass`,
    *   `pipeline.order_incomplete`, `pipeline.required_order`.
    */

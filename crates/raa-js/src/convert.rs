@@ -190,6 +190,7 @@ pub struct CameraDesc {
     pub target: [f32; 3],
     pub up: [f32; 3],
     pub fov_y_deg: f32,
+    pub ortho_height: Option<f32>,
     pub near: f32,
     pub far: f32,
 }
@@ -201,6 +202,7 @@ impl CameraDesc {
             target,
             up,
             fov_y_deg: 60.0,
+            ortho_height: None,
             near: 0.1,
             far: 200.0,
         }
@@ -463,7 +465,7 @@ pub(crate) mod js {
         )))
     }
 
-    fn optional_vec3(obj: &JsValue, key: &str) -> Result<Option<[f32; 3]>, RaaError> {
+    pub(crate) fn optional_vec3(obj: &JsValue, key: &str) -> Result<Option<[f32; 3]>, RaaError> {
         get(obj, key)?.map(|v| floats::<3>(key, &v)).transpose()
     }
 
@@ -551,7 +553,28 @@ pub(crate) mod js {
     /// Camera description: `eye` and `target` required; `up` defaults to +Y.
     pub fn camera_desc(v: &JsValue) -> Result<CameraDesc, RaaError> {
         let up = optional_vec3(v, "up")?.unwrap_or([0.0, 1.0, 0.0]);
-        let mut d = CameraDesc::new(vec3(v, "eye")?, vec3(v, "target")?, up);
+        let eye = optional_vec3(v, "position")?
+            .or(optional_vec3(v, "eye")?)
+            .ok_or_else(|| invalid("'eye' or 'position' is required".into()))?;
+        let mut d = CameraDesc::new(eye, vec3(v, "target")?, up);
+        match optional_string(v, "projection")?
+            .as_deref()
+            .unwrap_or("perspective")
+        {
+            "perspective" => {}
+            "orthographic" => {
+                let height = optional_f32(v, "orthoHeight")?.unwrap_or(10.0);
+                if height <= 0.0 {
+                    return Err(invalid("'orthoHeight' must be positive".into()));
+                }
+                d.ortho_height = Some(height);
+            }
+            _ => {
+                return Err(invalid(
+                    "'projection' must be perspective or orthographic".into(),
+                ));
+            }
+        }
         if let Some(f) = optional_f32(v, "fovYDeg")? {
             d.fov_y_deg = f;
         }

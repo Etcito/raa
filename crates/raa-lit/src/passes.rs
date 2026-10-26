@@ -60,11 +60,9 @@ pub(crate) fn install_passes(
     contributors: Contributors,
 ) -> Result<(), RaaError> {
     let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-    if let Some(taken) = p
-        .passes()
-        .into_iter()
-        .find(|info| info.name == PREPASS_NAME || info.name == FORWARD_NAME)
-    {
+    if let Some(taken) = p.passes().into_iter().find(|info| {
+        info.name == PREPASS_NAME || info.name == FORWARD_NAME || info.name == "editor"
+    }) {
         return Err(RaaError::FrameGraph {
             code: "pipeline.duplicate_pass",
             message: format!(
@@ -75,7 +73,8 @@ pub(crate) fn install_passes(
     }
     let msaa = lit.msaa();
     p.add(Box::new(Prepass::new(lit.clone())))?;
-    p.add(Box::new(ForwardPass::new(lit, contributors, msaa)))?;
+    p.add(Box::new(ForwardPass::new(lit.clone(), contributors, msaa)))?;
+    p.add(Box::new(crate::editor::EditorPass::new(lit)))?;
     Ok(())
 }
 
@@ -166,7 +165,11 @@ fn draw_lit(
             let pipeline = lit.pipeline_for(gpu, key, specs.get(flags))?;
             pass.set_pipeline(&pipeline);
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
-            pass.draw_indexed(0..count, 0, instances);
+            if kind == PassKind::Forward {
+                lit.draw_surface_instances(pass, 0..count, instances);
+            } else {
+                pass.draw_indexed(0..count, 0, instances);
+            }
         }
     }
     Ok(())

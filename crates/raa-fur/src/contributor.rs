@@ -238,7 +238,7 @@ impl ForwardContributor for FurContributor {
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
             for i in 0..plan.shells {
                 pass.set_bind_group(2, &self.bind_group, &[i.saturating_mul(self.stride)]);
-                pass.draw_indexed(0..count, 0, instances.clone());
+                lit.draw_surface_instances(pass, 0..count, instances.clone());
             }
         }
         Ok(())

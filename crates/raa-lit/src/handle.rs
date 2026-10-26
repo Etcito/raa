@@ -211,6 +211,7 @@ impl<T: Clone> PipelineCache<T> {
 pub(crate) struct LitShared {
     msaa: u32,
     pub(crate) meshes: MeshStore,
+    pub(crate) editor: crate::editor::EditorState,
     /// The draw lists and the instance/extras bytes in draw order.
     pub(crate) prep: DrawPrep,
     pub(crate) materials: SurfaceLibrary,
@@ -219,7 +220,7 @@ pub(crate) struct LitShared {
     /// `composer.slots_hash()`, updated by [`LitShared::add_slot`].
     slots_hash: u64,
     /// S1 instance stream, `max_instances` x 128 B.
-    instance_buffer: wgpu::Buffer,
+    pub(crate) instance_buffer: wgpu::Buffer,
     /// `FrameGpu`, 512 B.
     frame_buffer: wgpu::Buffer,
     /// `SurfaceMaterialGpu` array, `max_materials` x 256 B.
@@ -305,6 +306,7 @@ impl LitShared {
         Ok(LitShared {
             msaa,
             meshes: MeshStore::new(),
+            editor: crate::editor::EditorState::default(),
             prep: DrawPrep::new(max_instances, max_materials),
             materials: SurfaceLibrary::new(),
             fns: MaterialFnRegistry::new(),
@@ -493,7 +495,7 @@ fn write_prefix(queue: &wgpu::Queue, buffer: &wgpu::Buffer, bytes: &[u8]) {
 /// state; clones share it). Every method borrows the state immutably.
 #[derive(Clone)]
 pub struct LitHandle {
-    shared: Rc<RefCell<LitShared>>,
+    pub(crate) shared: Rc<RefCell<LitShared>>,
 }
 
 impl LitHandle {

@@ -435,7 +435,7 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 - `FurShell`: vs extruding shells + fs with alpha-to-coverage.
 
 ## S12. Pipeline passes and targets (raa-pipeline)
-- One raa-core RenderPass, `raa.pipeline` (writes BACKBUFFER), runs the enabled feature passes by `order`. The order is overridable from JS. Required passes cannot be disabled, and `prepass` < `forward` < `tonemap` with `tonemap` last (`pipeline.required_order`).
+- One raa-core RenderPass, `raa.pipeline` (writes BACKBUFFER), runs the enabled feature passes by `order`. The order is overridable from JS. Required passes cannot be disabled, and `prepass` < `forward` < `tonemap` with `tonemap` last among HDR passes (`pipeline.required_order`). Display passes declaring `FeaturePass::output_overlay() == true` follow the HDR sequence and tone mapping.
 
 | order | name | role | crate |
 |---|---|---|---|
@@ -1460,6 +1460,7 @@ Configurable pass pipeline (S12) and group-1 lighting resources (S10). Depends o
 - `pub trait FeaturePass`:
   - `name`, `order`;
   - `required` (default false);
+  - `output_overlay` (default false): display overlays follow all HDR passes and tonemap;
   - `resize(gpu, &Targets)`;
   - `set_enabled(enabled, &mut LightingResources)`;
   - `prepare(&mut PrepareCtx)` (default Ok);
@@ -2287,3 +2288,8 @@ Each milestone's proof, run from the repository root at its final commit.
 - M7 SDF loader @etcito/raa-sdfm: sdfm.game-asset to RAA meshes and materials, side by side with SDF Modeler: `node proofs/m12-sdfm.mjs` — timeout_s 3600
 - M8 Effects II: SSR on glossy floors, depth of field, height fog and aerial perspective, sun shafts, colour grading, environ: `node proofs/m14-camera-effects.mjs` — timeout_s 3600
 - M9 Animation hooks: rigid part hierarchies from JS, squash-and-stretch and jiggle in the vertex stage, per-instance tint an: `node proofs/m15-animation.mjs` — timeout_s 3600
+
+## Editor display API
+
+See [docs/editor-features.md](docs/editor-features.md) for the mesh edge list,
+wireframe modes, selection masks, orthographic camera, disabled cost and proof.

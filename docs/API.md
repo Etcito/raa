@@ -359,3 +359,9 @@ Rust extension points added after v0:
 - `FeaturePass` (raa-pipeline): a pass registered in the `raa.pipeline` pass list with a name, order and enable switch.
 - `ForwardContributor` (raa-lit): draws extra content inside the forward render pass, after the opaque draws.
 - Slot providers (raa-shader `SlotProvider`): supply the WGSL function for a named shader slot; the highest priority wins.
+
+## Editor display additions
+
+See [Editor features](editor-features.md) for MeshDesc.edges, setWireframe,
+setSelectionOutline, updateMesh replacement semantics, and the orthographic
+setCamera additions (position, projection and orthoHeight).
