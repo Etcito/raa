@@ -54,6 +54,7 @@ test('functionName is stable and depends only on the key', () => {
   assert.equal(a.wgsl, b.wgsl);
   assert.equal(a.functionName, 'sdfm.914aaa9f632122e9');
   assert.equal(mapMaterial({ ...m, name: 'renamed' }).functionName, a.functionName);
+  assert.equal(mapMaterial({ ...m, name: 'renamed' }).wgsl, a.wgsl);
   assert.notEqual(mapMaterial(fixture('compiled-basic')).functionName, a.functionName);
 });
 

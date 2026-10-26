@@ -233,6 +233,8 @@ pub(crate) struct LitShared {
     /// The group-1 layout of `raa_pipeline::LightingResources`.
     lighting_layout: wgpu::BindGroupLayout,
     pipelines: RefCell<PipelineCache<wgpu::RenderPipeline>>,
+    modules: RefCell<HashMap<String, wgpu::ShaderModule>>,
+    content_pipelines: RefCell<HashMap<(String, PipelineSpec), wgpu::RenderPipeline>>,
 }
 
 #[allow(dead_code, reason = "built and driven by LitRenderer")]
@@ -317,6 +319,8 @@ impl LitShared {
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
             pipelines: RefCell::new(PipelineCache::new()),
+            modules: RefCell::new(HashMap::new()),
+            content_pipelines: RefCell::new(HashMap::new()),
         })
     }
 
@@ -336,6 +340,8 @@ impl LitShared {
         self.composer.add_slot(p).map_err(shader_error)?;
         self.slots_hash = self.composer.slots_hash();
         self.pipelines.get_mut().clear();
+        self.modules.get_mut().clear();
+        self.content_pipelines.get_mut().clear();
         Ok(())
     }
 
@@ -394,12 +400,25 @@ impl LitShared {
             .composer
             .compose(&self.fns, key)
             .map_err(shader_error)?;
-        Composer::validate(&wgsl).map_err(shader_error)?;
+        // Full source equality guards the hash lookup. Registration ids are not shader state.
+        let content_key = (wgsl.clone(), spec.clone());
+        if let Some(pipeline) = self.content_pipelines.borrow().get(&content_key) {
+            return Ok(pipeline.clone());
+        }
         let device = gpu.device();
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raa.lit.variant"),
-            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-        });
+        let mut modules = self.modules.borrow_mut();
+        let module = if let Some(module) = modules.get(&wgsl) {
+            module.clone()
+        } else {
+            Composer::validate(&wgsl).map_err(shader_error)?;
+            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("raa.lit.variant"),
+                source: wgpu::ShaderSource::Wgsl(wgsl.clone().into()),
+            });
+            modules.insert(wgsl, module.clone());
+            module
+        };
+        drop(modules);
         let shadow = key.pass == PassKind::Shadow;
         let mut groups = vec![
             Some(&self.frame_layout),
@@ -445,6 +464,9 @@ impl LitShared {
             multiview_mask: None,
             cache: None,
         });
+        self.content_pipelines
+            .borrow_mut()
+            .insert(content_key, pipeline.clone());
         Ok(pipeline)
     }
 }
@@ -704,6 +726,36 @@ mod tests {
             spec_hash(&forward_spec()),
             spec_hash(&PipelineSpec::default())
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn identical_sources_share_modules_and_pipelines_but_state_does_not() {
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip("content_cache", "no adapter");
+            return;
+        };
+        let lighting = raa_pipeline::LightingResources::new(&gpu);
+        let mut shared = LitShared::new(&gpu, lighting.layout(), 1, 1, 4).unwrap();
+        let source = shared.fns.get(MaterialFnId::STANDARD).unwrap().wgsl.clone();
+        let a = shared.register_user_fn("first", &source).unwrap();
+        let b = shared.register_user_fn("second", &source).unwrap();
+        let spec = forward_spec();
+        let variant = |material_fn| VariantKey {
+            material_fn,
+            ..key(PassKind::Forward, 4)
+        };
+        let first = shared.pipeline_for(&gpu, variant(a), &spec).unwrap();
+        let second = shared.pipeline_for(&gpu, variant(b), &spec).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(shared.modules.borrow().len(), 1);
+        assert_eq!(shared.content_pipelines.borrow().len(), 1);
+        let other = shared
+            .pipeline_for(&gpu, variant(b), &PipelineSpec { cull: None, ..spec })
+            .unwrap();
+        assert_ne!(first, other);
+        assert_eq!(shared.modules.borrow().len(), 1);
+        assert_eq!(shared.content_pipelines.borrow().len(), 2);
     }
 
     /// Expected stride, step mode and (location, offset) of one vertex buffer.

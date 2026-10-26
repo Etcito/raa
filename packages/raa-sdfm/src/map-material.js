@@ -97,7 +97,7 @@ export function mapMaterial(m) {
   const words = m.constants.map((w) => `${w}u`).join(', ');
 
   const wgsl = [
-    `// sdfm material '${name.replace(/[\r\n]/g, ' ')}' (MAMA graph ${m.key})`,
+    `// sdfm graph ${m.key}`,
     `struct ${FULL_STRUCT} { ${fields} }`,
     MASKS_DECL,
     ...(n > 0 ? [`const SDFM_K = array<u32, ${n}>(${words});`] : []),

@@ -134,9 +134,7 @@ impl Composer {
 
         let mut out = String::new();
         out.push_str(&format!(
-            "// raa variant: material {:?} (id {}), pass {:?}, msaa {}, flags {:#x}, slots {:016x}\n",
-            entry.name,
-            key.material_fn.0,
+            "// raa variant: pass {:?}, msaa {}, flags {:#x}, slots {:016x}\n",
             key.pass,
             key.msaa,
             key.flags,
@@ -144,7 +142,7 @@ impl Composer {
         ));
         section(&mut out, "prelude", PRELUDE_WGSL);
         section(&mut out, "lib", LIB_WGSL);
-        section(&mut out, &format!("material {:?}", entry.name), &entry.wgsl);
+        section(&mut out, "material", &entry.wgsl);
         if !entry.has_vertex {
             section(
                 &mut out,

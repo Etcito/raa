@@ -75,8 +75,8 @@ The asset URL pattern is `https://github.com/Etcito/raa/releases/download/v<vers
 To cut a release (maintainers):
 
 1. Bump the versions in `packages/raa/package.json` and `packages/raa-sdfm/package.json`, `VERSION` in `packages/raa/index.js` and `[workspace.package] version` in `Cargo.toml`, then commit.
-2. Optionally dry-run the build locally: `bash scripts/build-package.sh --tag v<version>`. It needs `wasm-bindgen` at the version pinned in `Cargo.lock`, and it refuses a tag that differs from the package version. The outputs are `release/etcito-raa-<version>.tgz`, `release/etcito-raa-sdfm-<version>.tgz` and `release/SHA256SUMS`. Both package versions must match.
-3. Tag and push: `git tag v<version> && git push origin v<version>`. The workflow in `.github/workflows/release.yml` runs the checks, builds the package and creates the GitHub Release with both files.
+2. Build locally (releases are compiled on our machines; GitHub runs no workflow): `bash scripts/check.sh`, then `bash scripts/build-package.sh --tag v<version>`. It needs `wasm-bindgen` at the version pinned in `Cargo.lock`, and it refuses a tag that differs from the package version. The outputs are `release/etcito-raa-<version>.tgz`, `release/etcito-raa-sdfm-<version>.tgz` and `release/SHA256SUMS`. Both package versions must match.
+3. Tag and push the tag (`git tag -a v<version> && git push origin v<version>`), then create the GitHub Release with the three built files: `gh release create v<version> release/etcito-raa-<version>.tgz release/etcito-raa-sdfm-<version>.tgz release/SHA256SUMS --verify-tag --title v<version> --generate-notes`. Check the tarballs for local paths and secrets before publishing.
 
 ## Git hook
 

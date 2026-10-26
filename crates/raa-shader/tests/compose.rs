@@ -86,7 +86,7 @@ fn sections_follow_contract_order() {
         "struct FrameGpu {",
         "// raa section: lib",
         "fn raa_hash3(",
-        "// raa section: material \"raa.standard\"",
+        "// raa section: material\n",
         "fn material_main(",
         "// raa section: material_vertex passthrough",
         "fn material_vertex(",
@@ -336,5 +336,39 @@ fn standard_function_multiplies_by_vertex_colour() {
         if let Err(e) = Composer::validate(&wgsl) {
             panic!("{pass:?}: {e}");
         }
+    }
+}
+
+#[test]
+fn material_registration_order_and_names_do_not_change_shader_bytes() {
+    let composer = stub_composer();
+    let mut first = MaterialFnRegistry::new();
+    let mut second = MaterialFnRegistry::new();
+    let source = first.get(MaterialFnId::STANDARD).unwrap().wgsl.clone();
+    let a = first.register_builtin("asset.a", &source).unwrap();
+    second.register_builtin("unrelated", &source).unwrap();
+    let b = second.register_builtin("renamed.asset", &source).unwrap();
+    assert_ne!(a, b);
+    for pass in [PassKind::Forward, PassKind::Prepass, PassKind::Shadow] {
+        let a = composer
+            .compose(
+                &first,
+                &VariantKey {
+                    material_fn: a,
+                    ..key(pass)
+                },
+            )
+            .unwrap();
+        let b = composer
+            .compose(
+                &second,
+                &VariantKey {
+                    material_fn: b,
+                    ..key(pass)
+                },
+            )
+            .unwrap();
+        assert_eq!(a, b);
+        Composer::validate(&a).unwrap();
     }
 }

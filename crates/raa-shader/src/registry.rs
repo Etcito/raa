@@ -91,7 +91,7 @@ impl MaterialFnRegistry {
         };
         let checked = composer.compose(self, &key).and_then(|module| {
             Composer::validate(&module)
-                .map_err(|e| invalid(name, composed_reason(&module, name, wgsl, &e)))
+                .map_err(|e| invalid(name, composed_reason(&module, wgsl, &e)))
         });
         if let Err(e) = checked {
             self.entries.pop();
@@ -340,14 +340,14 @@ fn parse_reason(src: &str, offset: usize, full: &str, e: &naga::front::wgsl::Par
 /// Reason of a validation failure of the composed Forward variant: the composer's message
 /// (line:col in the composed module) followed by the line:col in the user source when the
 /// error lies in the material function's section.
-fn composed_reason(module: &str, name: &str, src: &str, e: &ShaderError) -> String {
+fn composed_reason(module: &str, src: &str, e: &ShaderError) -> String {
     let mut reason = format!(
         "composed Forward variant (msaa 4) does not validate: {}: {}",
         e.code, e.message
     );
-    let header = format!("\n// raa section: material {name:?}\n");
+    let header = "\n// raa section: material\n";
     let first_line = module
-        .find(&header)
+        .find(header)
         .map(|i| module[..i + header.len()].matches('\n').count() + 1);
     let located = e.message.split_once(": ").and_then(|(loc, _)| {
         let (line, col) = loc.split_once(':')?;
