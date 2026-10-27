@@ -37,3 +37,8 @@ pub use rig::{Bone, MAX_BONES, RestTransform, Rig};
 
 pub mod pose;
 pub use pose::{LocalPose, Mat4, Pose};
+
+pub mod clip;
+pub use clip::{
+    CLIP_CAPS, Channel, Clip, ClipCaps, ClipEvent, ClipKey, ClipTrack, Interp, RootMotion,
+};
