@@ -683,6 +683,15 @@ name = "raa-alloc-count"
 version = "0.4.1"
 
 [[package]]
+name = "raa-anim-js"
+version = "0.4.1"
+dependencies = [
+ "js-sys",
+ "raa-det",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "raa-bench"
 version = "0.4.1"
 dependencies = [
