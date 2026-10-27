@@ -694,6 +694,7 @@ name = "raa-anim-js"
 version = "0.4.1"
 dependencies = [
  "js-sys",
+ "raa-anim",
  "raa-det",
  "wasm-bindgen",
 ]
