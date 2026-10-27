@@ -1,0 +1,35 @@
+{
+  "name": "@etcito/raa-anim",
+  "version": "0.5.0",
+  "description": "RAA animation brick: deterministic simulation selftest and versioned brick metadata as WebAssembly.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Etcito/raa",
+    "directory": "packages/raa-anim"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./pkg/raa_anim_js_bg.wasm": "./pkg/raa_anim_js_bg.wasm"
+  },
+  "types": "./index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md",
+    "LICENSE",
+    "types/",
+    "pkg/"
+  ],
+  "sideEffects": false,
+  "keywords": [
+    "raa",
+    "animation",
+    "wasm",
+    "determinism"
+  ]
+}
