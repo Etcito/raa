@@ -188,6 +188,125 @@ impl Rig {
     }
 }
 
+impl Rig {
+    /// Canonical S16 JSON value: schema field order, sorted roles and attachments.
+    /// Numbers come from the accepted f64 document values, never from a pose.
+    pub fn to_json(&self) -> JsonValue {
+        let bone_name = |index: usize| JsonValue::String(self.bones[index].name.clone());
+        let mut roles: Vec<(String, JsonValue)> = self
+            .roles
+            .iter()
+            .map(|(role, &bone)| (role.clone(), bone_name(bone)))
+            .collect();
+        crate::canon::sort_keys(&mut roles);
+        let mut attach: Vec<(String, JsonValue)> = self
+            .attach
+            .iter()
+            .map(|(name, point)| {
+                (
+                    name.clone(),
+                    JsonValue::Object(vec![
+                        key("bone", bone_name(point.bone)),
+                        key("t", numbers(&point.t)),
+                        key("r", numbers(&point.r)),
+                    ]),
+                )
+            })
+            .collect();
+        crate::canon::sort_keys(&mut attach);
+        let ik_chains = self
+            .ik_chains
+            .iter()
+            .map(|chain| {
+                JsonValue::Object(vec![
+                    key("name", JsonValue::String(chain.name.clone())),
+                    key(
+                        "solver",
+                        JsonValue::String(solver_name(chain.solver).into()),
+                    ),
+                    key(
+                        "bones",
+                        JsonValue::Array(chain.bones.iter().map(|&b| bone_name(b)).collect()),
+                    ),
+                    key(
+                        "pole",
+                        chain.pole.map_or(JsonValue::Null, |pole| numbers(&pole)),
+                    ),
+                    key("iterations", JsonValue::Number(chain.iterations as f64)),
+                ])
+            })
+            .collect();
+        let limits = self
+            .limits
+            .iter()
+            .map(|limit| {
+                JsonValue::Object(vec![
+                    key("bone", bone_name(limit.bone)),
+                    key("min", numbers(&limit.min)),
+                    key("max", numbers(&limit.max)),
+                ])
+            })
+            .collect();
+        JsonValue::Object(vec![
+            key("format", JsonValue::String("raa.rig".into())),
+            key("version", JsonValue::Number(1.0)),
+            key("name", JsonValue::String(self.name.clone())),
+            key(
+                "bones",
+                JsonValue::Array(
+                    self.bones
+                        .iter()
+                        .map(|bone| {
+                            JsonValue::Object(vec![
+                                key("name", JsonValue::String(bone.name.clone())),
+                                key("parent", bone.parent.map_or(JsonValue::Null, bone_name)),
+                                key(
+                                    "rest",
+                                    JsonValue::Object(vec![
+                                        key("t", numbers(&bone.rest.t)),
+                                        key("r", numbers(&bone.rest.r)),
+                                        key("s", numbers(&bone.rest.s)),
+                                    ]),
+                                ),
+                            ])
+                        })
+                        .collect(),
+                ),
+            ),
+            key("roles", JsonValue::Object(roles)),
+            key("ikChains", JsonValue::Array(ik_chains)),
+            key("limits", JsonValue::Array(limits)),
+            key("attach", JsonValue::Object(attach)),
+        ])
+    }
+
+    /// S4 canonical text of this rig, including the final LF.
+    pub fn to_canonical_json(&self) -> String {
+        crate::canon::to_canonical_json(&self.to_json())
+    }
+}
+
+fn solver_name(solver: ChainSolver) -> &'static str {
+    match solver {
+        ChainSolver::TwoBone => "twoBone",
+        ChainSolver::Ccd => "ccd",
+        ChainSolver::Fabrik => "fabrik",
+    }
+}
+
+fn key(name: &str, value: JsonValue) -> (String, JsonValue) {
+    (name.to_owned(), value)
+}
+
+fn numbers<const N: usize>(values: &[f64; N]) -> JsonValue {
+    JsonValue::Array(
+        values
+            .iter()
+            .map(|&value| JsonValue::Number(value))
+            .collect(),
+    )
+}
+
 type Metadata = (
     BTreeMap<String, usize>,
     Vec<IkChain>,

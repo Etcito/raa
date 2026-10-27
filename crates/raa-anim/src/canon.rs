@@ -18,6 +18,11 @@ pub fn write_pretty(value: &JsonValue, out: &mut String) {
     write_value(value, 0, out);
 }
 
+/// Sort object members bytewise by key, the S4 rule for canonical maps.
+pub fn sort_keys(members: &mut [(String, JsonValue)]) {
+    members.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+}
+
 fn newline(depth: usize, out: &mut String) {
     out.push('\n');
     for _ in 0..depth {

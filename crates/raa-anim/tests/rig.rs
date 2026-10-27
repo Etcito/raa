@@ -1,4 +1,4 @@
-use raa_anim::{MAX_BONES, Rig, rig::ChainSolver};
+use raa_anim::{JsonValue, MAX_BONES, Rig, canon::write_pretty, parse, rig::ChainSolver};
 
 const BASIC: &str = include_str!("fixtures/rig-basic.json");
 const REST: &str = r#""rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}"#;
@@ -255,4 +255,100 @@ fn rig_metadata() {
         let error = Rig::load(fixture).unwrap_err();
         assert_eq!(error.code, code, "{error}");
     }
+}
+
+fn canonical(text: &str) -> String {
+    Rig::load(text)
+        .unwrap_or_else(|error| panic!("{error}\n{text}"))
+        .to_canonical_json()
+}
+
+fn pretty(value: &JsonValue) -> String {
+    let mut out = String::new();
+    write_pretty(value, &mut out);
+    out
+}
+
+fn reverse_keys(value: &mut JsonValue) {
+    match value {
+        JsonValue::Array(items) => items.iter_mut().for_each(reverse_keys),
+        JsonValue::Object(fields) => {
+            fields.reverse();
+            fields.iter_mut().for_each(|(_, value)| reverse_keys(value));
+        }
+        _ => {}
+    }
+}
+
+fn compact(text: &str) -> String {
+    let mut out = String::new();
+    let (mut string, mut escape) = (false, false);
+    for c in text.chars() {
+        if string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                string = false;
+            }
+        } else if c == '"' {
+            string = true;
+            out.push(c);
+        } else if !c.is_whitespace() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn variants(text: &str) -> Vec<(&'static str, String)> {
+    let mut value = parse(text).unwrap();
+    reverse_keys(&mut value);
+    let spelled = text
+        .replace("\"version\": 1,", "\"version\": 1E0,")
+        .replace("\n          1,\n", "\n          1.0,\n")
+        .replace("\n          0,\n", "\n          -0,\n");
+    vec![
+        ("reordered-keys", pretty(&value)),
+        ("compact-single-line", compact(text)),
+        ("numbers-spellings", spelled),
+    ]
+}
+
+#[test]
+fn rig_canonical() {
+    let base = canonical(BASIC);
+    assert_eq!(base, BASIC, "rig-basic.json must be canonical");
+    assert_eq!(canonical(&base), base);
+    for (label, variant) in variants(BASIC) {
+        assert_ne!(variant, base, "{label} must differ");
+        let once = canonical(&variant);
+        assert_eq!(once, base, "{label}");
+        assert_eq!(canonical(&once), once, "{label} idempotent");
+    }
+
+    let edge = r#"{"format":"raa.rig","version":1,"name":"edge","bones":[{"name":"root","parent":null,"rest":{"t":[-0,1e-7,1e-6],"r":[0,0,0,1],"s":[1e21,1e20,1]}},{"name":"child","parent":"root","rest":{"t":[0.30000000000000004,1.0000000000000002,0],"r":[0,0,0,-1.0005],"s":[1e-7,1,1]}}]}"#;
+    let text = canonical(edge);
+    for spelling in [
+        "1e-7",
+        "0.000001",
+        "1e+21",
+        "100000000000000000000",
+        "0.30000000000000004",
+        "1.0000000000000002",
+        "-1.0005",
+    ] {
+        assert!(text.contains(spelling), "{spelling} missing\n{text}");
+    }
+    assert!(text.contains("\n          0,\n"), "-0 must write 0\n{text}");
+    assert_eq!(canonical(&text), text);
+
+    let sorted = canonical(
+        r#"{"format":"raa.rig","version":1,"name":"sort","bones":[{"name":"a","parent":null,"rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}},{"name":"b","parent":"a","rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}}],"roles":{"root":"a","head":"b"},"attach":{"z":{"bone":"a","t":[0,0,0],"r":[0,0,0,1]},"a":{"bone":"b","t":[0,0,0],"r":[0,0,0,1]}}}"#,
+    );
+    assert!(sorted.find("\"head\"").unwrap() < sorted.find("\"root\"").unwrap());
+    let attach = sorted.split("\"attach\"").nth(1).unwrap();
+    assert!(attach.find("\"a\"").unwrap() < attach.find("\"z\"").unwrap());
 }
