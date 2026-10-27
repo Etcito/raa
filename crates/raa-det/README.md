@@ -2,7 +2,7 @@
 
 The determinism brick for RAA: the contracted simulation tick and the
 deterministic `f32` hash that pose hashes and selftests are built on. All
-operations are total (no error paths, no refusals), allocation-free, no
+tick and hash operations are total; all helpers are allocation-free, with no
 unsafe code, no third-party crates.
 
 ## Public items
@@ -40,8 +40,7 @@ canonical text is `hex8`: `format!("{:08x}", hash)`, 8 lowercase digits.
 
 ## Errors
 
-Nothing here can fail. Where a later raa-det submodule must refuse an
-input (the sim-path `f32` helpers, the selftest), it uses the workspace
+Tick and hash operations cannot fail. Math helpers use the workspace
 error convention: `Display` + `Error` with a stable `code()`, codes
 prefixed `det.`.
 
@@ -51,3 +50,22 @@ prefixed `det.`.
 the FNV-1a vectors — the IETF draft test-suite byte vectors plus `f32`
 vectors cross-checked with an independent implementation of the byte
 sequence.
+
+## Source-ordered math (Q16)
+
+`fmath` (also re-exported at the root) provides `lerp`, `bezier`, generic
+array `normalize`, quaternion `sign_align`, `nlerp`, `quat_mul`,
+`quat_rotate`, and `trs_compose`. Each returns `Result<_, MathError>`.
+Quaternions are xyzw; multiplication applies the right operand first.
+TRS returns 16 column-major floats, translation at indices 12–14.
+Rotation and TRS require squared quaternion length within 1e-3 of one;
+TRS permits zero and negative scale. Interpolation permits extrapolation.
+
+Arithmetic uses source-ordered f32 products, sums, subtraction and division,
+with sqrt for normalization; no trig, fused operations or fast-math.
+Normalization accumulates squares in component order, then multiplies by
+the reciprocal square root. Zero/underflowed lengths give `det.zero_length`;
+non-finite inputs/results give `det.not_finite`; invalid rotation lengths
+give `det.not_unit`. There is no identity fallback. Sign alignment negates
+only on a negative dot product; nlerp aligns before component interpolation.
+Tests cover antipodes, normalization, composition, TRS layout and refusals.

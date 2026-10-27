@@ -111,3 +111,69 @@ fn ticks_wrap() {
     assert_eq!(wrapping_advance(MAX_TICK, 1), 0);
     assert_eq!(wrapping_advance(2, MAX_TICK), 1);
 }
+
+use raa_det::{
+    MathError, bezier, lerp, nlerp, normalize, quat_mul, quat_rotate, sign_align, trs_compose,
+};
+
+#[test]
+fn q16_scalar_order_and_normalization() {
+    // A fused evaluation would retain the small negative product residual.
+    assert_eq!(
+        lerp(-1.0, f32::EPSILON, 1.0 - f32::EPSILON)
+            .unwrap()
+            .to_bits(),
+        0
+    );
+    assert_eq!(bezier(0.0, 2.0, 4.0, 6.0, 0.25).unwrap(), 1.5);
+    assert_eq!(
+        normalize([0.0, 3.0, 0.0, 4.0]).unwrap(),
+        [0.0, 0.6, 0.0, 0.8]
+    );
+    assert_eq!(normalize([0.0; 4]), Err(MathError::ZeroLength));
+    assert_eq!(normalize([f32::from_bits(1)]), Err(MathError::ZeroLength));
+    assert_eq!(normalize([f32::MAX]), Err(MathError::NotFinite));
+    assert_eq!(lerp(0.0, 1.0, f32::NAN), Err(MathError::NotFinite));
+    assert_eq!(MathError::ZeroLength.code(), "det.zero_length");
+}
+
+#[test]
+fn q16_antipodes_and_sign_tie() {
+    let q = [0.0, 0.0, 0.0, 1.0];
+    for u in [0.0, 0.25, 0.5, 1.0] {
+        assert_eq!(nlerp(q, q.map(|x| -x), u).unwrap(), q);
+    }
+    let b = [1.0, -0.0, 0.0, 0.0];
+    assert_eq!(
+        sign_align(q, b).unwrap().map(f32::to_bits),
+        b.map(f32::to_bits)
+    );
+    let mid = nlerp(q, b, 0.5).unwrap();
+    assert!((mid[0] - core::f32::consts::FRAC_1_SQRT_2).abs() < 1e-7);
+    assert_eq!(nlerp(q, [0.0; 4], 0.0), Err(MathError::ZeroLength));
+}
+
+#[test]
+fn q16_composition_and_column_major_trs() {
+    let a = [0.5; 4]; // Cyclic permutation: X -> Y -> Z -> X.
+    let b = [1.0, 0.0, 0.0, 0.0];
+    let v = [2.0, 3.0, 5.0];
+    assert_eq!(quat_mul(a, b).unwrap(), [0.5, 0.5, -0.5, -0.5]);
+    assert_eq!(
+        quat_rotate(quat_mul(a, b).unwrap(), v).unwrap(),
+        quat_rotate(a, quat_rotate(b, v).unwrap()).unwrap()
+    );
+    assert_ne!(quat_mul(a, b).unwrap(), quat_mul(b, a).unwrap());
+    assert_eq!(
+        trs_compose([7.0, 8.0, 9.0], a, [2.0, 3.0, 4.0]).unwrap(),
+        [
+            0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 4.0, 0.0, 0.0, 0.0, 7.0, 8.0, 9.0, 1.0
+        ]
+    );
+    assert_eq!(quat_rotate([0.0; 4], v), Err(MathError::NotUnit));
+    assert_eq!(
+        trs_compose([f32::INFINITY; 3], a, v),
+        Err(MathError::NotFinite)
+    );
+    assert_eq!(quat_mul([f32::MAX; 4], [2.0; 4]), Err(MathError::NotFinite));
+}
