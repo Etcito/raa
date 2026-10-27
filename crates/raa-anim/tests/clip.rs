@@ -1,6 +1,105 @@
 use raa_anim::{CLIP_CAPS, Channel, Clip, Interp, JsonValue, Rig, RootMotion, parse};
 use std::fs;
 
+fn field<'a>(value: &'a JsonValue, name: &str) -> &'a JsonValue {
+    let JsonValue::Object(fields) = value else {
+        panic!("expected object")
+    };
+    &fields.iter().find(|(key, _)| key == name).unwrap().1
+}
+
+fn array(value: &JsonValue) -> &[JsonValue] {
+    let JsonValue::Array(values) = value else {
+        panic!("expected array")
+    };
+    values
+}
+
+fn string(value: &JsonValue) -> &str {
+    let JsonValue::String(value) = value else {
+        panic!("expected string")
+    };
+    value
+}
+
+#[test]
+fn sample_reference() {
+    let reference = parse(include_str!("fixtures/samples.json")).unwrap();
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let load =
+        |record: &JsonValue| fs::read_to_string(base.join(string(field(record, "file")))).unwrap();
+    let rig = Rig::load(&load(field(&reference, "rig"))).unwrap();
+    let mut maximum = 0.0;
+    let mut count = 0;
+    let mut compare = |actual: &[f32], expected: &JsonValue| {
+        let expected = array(expected);
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, expected) in actual.iter().zip(expected) {
+            // Widen native values into document-number precision, never round
+            // the independent reference down to runtime precision.
+            let JsonValue::Number(actual) = JsonValue::Number(actual.into()) else {
+                unreachable!()
+            };
+            let JsonValue::Number(expected) = expected else {
+                panic!("expected number")
+            };
+            let difference = (actual - expected).abs();
+            assert!(difference.is_finite());
+            if difference > maximum {
+                maximum = difference;
+            }
+            count += 1;
+        }
+    };
+    let clips = array(field(&reference, "clips"));
+    assert_eq!(clips.len(), 3);
+    for record in clips {
+        let clip = Clip::load(&load(record), &rig).unwrap();
+        let ticks = array(field(record, "ticks"));
+        let poses = array(field(record, "poses"));
+        assert!(!ticks.is_empty());
+        assert_eq!(ticks.len(), poses.len());
+        for (index, (tick, expected)) in ticks.iter().zip(poses).enumerate() {
+            assert_eq!(tick, field(expected, "tick"));
+            let JsonValue::Number(tick) = tick else {
+                panic!("expected tick")
+            };
+            let tick = *tick as u32;
+            let pose = clip.pose_at(&rig, tick).unwrap();
+            compare(
+                &clip.root_delta_at(&rig, tick).unwrap(),
+                field(expected, "rootDelta"),
+            );
+            let locals = array(field(expected, "local"));
+            assert_eq!(pose.local.len(), locals.len());
+            for (local, expected) in pose.local.iter().zip(locals) {
+                compare(&local.t, field(expected, "t"));
+                compare(&local.r, field(expected, "r"));
+                compare(&local.s, field(expected, "s"));
+            }
+            for (name, matrices) in [("model", &pose.model), ("skin", &pose.skin)] {
+                let expected = array(field(expected, name));
+                assert_eq!(matrices.len(), expected.len());
+                for (matrix, expected) in matrices.iter().zip(expected) {
+                    compare(matrix, expected);
+                }
+            }
+            let tracks = array(field(record, "tracks"));
+            assert_eq!(clip.tracks.len(), tracks.len());
+            for (track, expected) in tracks.iter().enumerate() {
+                let values = array(field(expected, "values"));
+                assert_eq!(ticks.len(), values.len());
+                compare(&clip.sample_track(track, tick).unwrap(), &values[index]);
+            }
+        }
+    }
+    println!("sample_reference: maximum absolute difference = {maximum:.12e} ({count} components)");
+    assert!(
+        maximum <= 1e-6,
+        "maximum absolute difference {maximum} exceeds 1e-6"
+    );
+}
+
 const RIG: &str = include_str!("fixtures/rig-basic.json");
 const VALID: &str = r#"{"format":"raa.clip","version":2,"name":"waddle","rig":"rig-basic","lengthTicks":48,"loop":true,"rootMotion":"none","tracks":[{"bone":"child","channel":"rotation","keys":[{"tick":0,"v":[0,0,0,1],"interp":"BEZIER","hl":[-4,0,0,0,0],"hr":[4,0,0.02,0,0]},{"tick":24,"v":[0,0,0,-1],"interp":"LINEAR"}]},{"bone":"root","channel":"translation","keys":[{"tick":0,"v":[0,0,0],"interp":"CONSTANT"}]},{"bone":"root","channel":"scale","keys":[{"tick":0,"v":[1,1,1],"interp":"LINEAR"}]}],"events":[{"tick":12,"name":"step.l"},{"tick":24,"name":"step.r"}]}"#;
 
@@ -537,5 +636,79 @@ fn sample_curves() {
         let v = flip.sample_track(0, tick).unwrap();
         let squared = ((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]) + v[3] * v[3];
         assert!((squared - 1.0).abs() < 1e-6, "tick {tick}: {v:?}");
+    }
+}
+
+#[test]
+fn root_motion_adjacent_ticks() {
+    let rig = Rig::load(RIG).unwrap();
+    let rest = rig.local_rest_pose().unwrap();
+    // Different first/last slopes distinguish endpoint seams from wrapped resets
+    // and from an assumed constant velocity. Root rest is [1, 2, 3].
+    let source = r#"{"format":"raa.clip","version":2,"name":"motion","rig":"rig-basic","lengthTicks":4,"loop":true,"rootMotion":"xz","tracks":[{"bone":"root","channel":"translation","keys":[{"tick":0,"v":[10,20,30],"interp":"LINEAR"},{"tick":2,"v":[12,24,36],"interp":"LINEAR"},{"tick":4,"v":[18,32,46],"interp":"LINEAR"}]}],"events":[]}"#;
+    let mut clip = Clip::load(source, &rig).unwrap();
+    for (tick, delta, y) in [
+        (0, [0.0, 0.0, 0.0], 20.0),
+        (1, [1.0, 0.0, 3.0], 22.0),
+        (2, [1.0, 0.0, 3.0], 24.0),
+        (3, [3.0, 0.0, 5.0], 28.0),
+        (4, [3.0, 0.0, 5.0], 20.0),
+        (5, [1.0, 0.0, 3.0], 22.0),
+        (8, [3.0, 0.0, 5.0], 20.0),
+        (9, [1.0, 0.0, 3.0], 22.0),
+        (4_000_000_000, [3.0, 0.0, 5.0], 20.0),
+        (u32::MAX, [3.0, 0.0, 5.0], 28.0),
+    ] {
+        assert_eq!(clip.root_delta_at(&rig, tick).unwrap(), delta, "{tick}");
+        let pose = clip.pose_at(&rig, tick).unwrap();
+        assert_eq!(pose.local[0].t, [1.0, y, 3.0]);
+        assert_eq!(pose.local[0].r, rest[0].r);
+        assert_eq!(pose.local[0].s, rest[0].s);
+        assert_eq!(pose.local[1], rest[1]);
+    }
+    assert_eq!(clip.sample_track(0, 4).unwrap(), [10.0, 20.0, 30.0]);
+    for tick in [9, 0, 4, 1, 8, 5, 4, 0] {
+        let fresh = Clip::load(source, &rig).unwrap();
+        assert_eq!(
+            clip.root_delta_at(&rig, tick),
+            fresh.root_delta_at(&rig, tick)
+        );
+        assert_eq!(clip.pose_at(&rig, tick), fresh.pose_at(&rig, tick));
+    }
+    clip.root_motion = RootMotion::Xyz;
+    assert_eq!(clip.root_delta_at(&rig, 4).unwrap(), [3.0, 4.0, 5.0]);
+    assert_eq!(clip.local_pose_at(&rig, 3).unwrap()[0].t, rest[0].t);
+    clip.looping = false;
+    assert_eq!(clip.root_delta_at(&rig, 4).unwrap(), [3.0, 4.0, 5.0]);
+    for tick in [5, 8, 100, u32::MAX] {
+        assert_eq!(clip.root_delta_at(&rig, tick).unwrap(), [0.0; 3]);
+    }
+    clip.root_motion = RootMotion::None;
+    assert_eq!(
+        clip.local_pose_at(&rig, 4).unwrap()[0].t,
+        [18.0, 32.0, 46.0]
+    );
+    assert_eq!(clip.root_delta_at(&rig, 4).unwrap(), [0.0; 3]);
+    clip.root_motion = RootMotion::Xyz;
+    clip.tracks.clear();
+    assert_eq!(clip.root_delta_at(&rig, 3).unwrap(), [0.0; 3]);
+    assert_eq!(clip.local_pose_at(&rig, 3).unwrap(), rest);
+    // No zero-duration JSON clip is currently accepted; keep that validation.
+    assert!(
+        Clip::load(
+            &source.replace("\"lengthTicks\":4", "\"lengthTicks\":0"),
+            &rig
+        )
+        .is_err()
+    );
+    // Public runtime duration can be changed; the defensive zero case must
+    // neither divide by zero nor underflow, with either addressing mode.
+    clip = Clip::load(source, &rig).unwrap();
+    clip.length_ticks = 0;
+    for looping in [false, true] {
+        clip.looping = looping;
+        for tick in [0, 1, 100, u32::MAX] {
+            assert_eq!(clip.root_delta_at(&rig, tick).unwrap(), [0.0; 3]);
+        }
     }
 }

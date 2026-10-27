@@ -42,14 +42,14 @@ other delta components stay zero. Tick 0 returns `[0,0,0]`. For positive `L` and
 
 Selected root translation axes in the returned local pose are restored to the rig rest values;
 unselected components keep their normal sampled values. Pose addressing stays modulo for looping
-clips. S17 rejects zero-duration clips, which would otherwise have zero delta.
+clips. Any permitted zero duration yields zero delta (the current JSON loader rejects it).
 
 ## Pose (S16)
 
 Rest and sampled quaternions are normalized first. A bone model matrix is
 `parent_model * TRS(local)`; `inverse_bind` is the analytic `S^-1 * R(conjugate) * T(-t)` composed
 with the parent inverse; `skin = model(pose) * inverse_bind`. Matrices are column-major f64 arrays
-with the same product and sum order as the Rust reference.
+independent of runtime precision repairs. These root-motion amendments leave the canonical `none` records unchanged.
 
 ## Record shape
 

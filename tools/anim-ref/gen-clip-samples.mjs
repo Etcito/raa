@@ -141,7 +141,7 @@ function inverseBinds(rig, rest) {
 }
 function rootDelta(rig, clip, tick) {
   const delta = [0, 0, 0]
-  if (clip.rootMotion === 'none' || tick === 0) return delta
+  if (clip.rootMotion === 'none' || tick === 0 || clip.lengthTicks === 0) return delta
   const axes = clip.rootMotion === 'xz' ? [0, 2] : [0, 1, 2], L = clip.lengthTicks
   const track = clip.tracks.find((t) => t.bone === rig.bones[rig.root].name && t.channel === 'translation')
   const at = (s) => (track ? sampleRaw(track, s) : rig.rest[rig.root].t)
@@ -149,7 +149,7 @@ function rootDelta(rig, clip, tick) {
     const span = axes.map((c) => at(L)[c] - at(0)[c])
     const q = Math.floor(tick / L), qp = Math.floor((tick - 1) / L)
     axes.forEach((c, i) => { delta[c] = (at(tick % L)[c] + q * span[i]) - (at((tick - 1) % L)[c] + qp * span[i]) })
-  } else if (tick <= L) for (const c of axes) delta[c] = at(tick)[c] - at(tick - 1)[c]
+  } else for (const c of axes) delta[c] = at(Math.min(tick, L))[c] - at(Math.min(tick - 1, L))[c]
   return delta
 }
 function poseAt(rig, clip, tick, inverse) {

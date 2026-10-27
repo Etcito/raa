@@ -1,7 +1,7 @@
 //! S17 integer-tick sampling: tick addressing, key clamping, source-ordered
 //! f32 interpolation of prepared runtime keys, plus pose construction.
 
-use crate::{AnimError, Channel, Clip, ClipTrack, Interp, LocalPose, Pose, Rig};
+use crate::{AnimError, Channel, Clip, ClipTrack, Interp, LocalPose, Pose, Rig, RootMotion};
 use raa_det::{bezier, lerp, normalize};
 
 /// Address a clip tick. Looping clips wrap by `lengthTicks`; sampling then
@@ -108,7 +108,61 @@ impl Clip {
                 Channel::Scale => local[bone].s = [values[0], values[1], values[2]],
             }
         }
+        if self.root_motion != RootMotion::None {
+            if let Some(root) = rig.bones.iter().position(|bone| bone.parent.is_none()) {
+                for axis in 0..3 {
+                    if self.root_motion == RootMotion::Xyz || axis != 1 {
+                        local[root].t[axis] = rig.bones[root].rest.t[axis] as f32;
+                    }
+                }
+            }
+        }
         Ok(local)
+    }
+
+    /// Stateless adjacent-tick translation delta. Loop seams use the unwrapped
+    /// endpoint; selected axes are removed by `local_pose_at` and `pose_at`.
+    pub fn root_delta_at(&self, rig: &Rig, tick: u32) -> Result<[f32; 3], AnimError> {
+        let mut delta = [0.0; 3];
+        if self.root_motion == RootMotion::None || tick == 0 || self.length_ticks == 0 {
+            return Ok(delta);
+        }
+        let Some(root) = rig.bones.iter().find(|bone| bone.parent.is_none()) else {
+            return Ok(delta);
+        };
+        let Some((index, track)) =
+            self.tracks.iter().enumerate().find(|(_, track)| {
+                track.bone == root.name && track.channel == Channel::Translation
+            })
+        else {
+            return Ok(delta);
+        };
+        let end = if self.looping {
+            let r = tick % self.length_ticks;
+            if r == 0 { self.length_ticks } else { r }
+        } else {
+            tick.min(self.length_ticks)
+        };
+        let previous = if self.looping {
+            end - 1
+        } else {
+            (tick - 1).min(self.length_ticks)
+        };
+        let path = format!("/tracks/{index}");
+        if let (Some(now), Some(before)) = (
+            sample_values(track, end, &path)?,
+            sample_values(track, previous, &path)?,
+        ) {
+            for axis in 0..3 {
+                if self.root_motion == RootMotion::Xyz || axis != 1 {
+                    delta[axis] = now[axis] - before[axis];
+                    if !delta[axis].is_finite() {
+                        return Err(sample_error(&path, "root delta is not finite"));
+                    }
+                }
+            }
+        }
+        Ok(delta)
     }
 
     /// S16 pose (local TRS, model and skin matrices) at integer `tick`.
