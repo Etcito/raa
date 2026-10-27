@@ -34,3 +34,6 @@ impl std::error::Error for AnimError {}
 
 pub mod rig;
 pub use rig::{Bone, MAX_BONES, RestTransform, Rig};
+
+pub mod pose;
+pub use pose::{LocalPose, Mat4, Pose};

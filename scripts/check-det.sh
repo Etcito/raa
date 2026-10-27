@@ -4,8 +4,8 @@
 # clocks and random sources. raa-det is required; raa-anim and raa-anim-graph
 # join as soon as those crates exist. Hits print as `file:line: category: code`.
 # Exit 0 = clean (explicit zero-hit line), 1 = hits, 2 = scan failure.
-# The tick-seconds helpers in crates/raa-det/src/tick.rs are the one sanctioned
-# f64 boundary: only TICK_SECONDS_F64 / tick_seconds_f64 lines are exempt.
+# f64 boundaries: tick-seconds helpers, animation document json.rs/rig.rs,
+# canonical-writer tests, and its two S4 source-number serialization uses.
 # Usage: scripts/check-det.sh [--self-test]
 set -euo pipefail
 
@@ -34,7 +34,7 @@ scan_file() {
       cats[6] = "random"
       pat[6] = "(^|[^A-Za-z0-9_])(rand|rand_core|rand_chacha|fastrand|nanorand|getrandom|OsRng|ThreadRng|StdRng|SmallRng|SeedableRng|thread_rng|random|Random)([^A-Za-z0-9_]|$)"
     }
-    function strip(s,    out, i, n, c) {
+    function strip(s,    out, i, n, c, tail, q) {
       out = ""; i = 1; n = length(s)
       while (i <= n) {
         c = substr(s, i, 1)
@@ -49,6 +49,15 @@ scan_file() {
           i++
           continue
         }
+        # Match a complete character literal only; an unmatched quote is a
+        # lifetime, never a string opener. Include escaped quotes and Unicode.
+        q = sprintf("%c", 39)
+        if (c == q) {
+          tail = substr(s, i)
+          if (match(tail, "^" q "([^\\\\" q "]|\\\\(x[0-9A-Fa-f][0-9A-Fa-f]|u\\{[0-9A-Fa-f_]+\\}|.))" q)) {
+            out = out " CHAR "; i += RLENGTH; continue
+          }
+        }
         if (c == "\"") { in_str = 1; out = out c; i++; continue }
         if (c == "/" && substr(s, i + 1, 1) == "*") { in_block = 1; i += 2; continue }
         if (c == "/" && substr(s, i + 1, 1) == "/") break
@@ -58,10 +67,26 @@ scan_file() {
       return out
     }
     {
+      if (file == "crates/raa-anim/src/canon.rs") {
+        if (canon_test_pending && $0 ~ /^mod tests \{$/) canon_test = 1
+        canon_test_pending = ($0 ~ /^#\[cfg\(test\)\]$/)
+        if ($0 ~ /^\}/) canon_test = 0
+      }
       code = strip($0)
+      if (file == "crates/raa-anim/src/canon.rs") {
+        if (code ~ /^pub fn format_number\(value: f64, out: &mut String\) \{$/) canon_number = 1
+        if (code ~ /^\}/) canon_number = 0
+      }
       if (code ~ /^[[:space:]]*$/) next
       for (k = 1; k <= ncats; k++) {
         if (code !~ pat[k]) continue
+        if (cats[k] == "f64" &&
+            (file == "crates/raa-anim/src/json.rs" ||
+             file == "crates/raa-anim/src/rig.rs" || canon_test)) continue
+        # Exact statements, not a function exemption: any additional use fails.
+        if (cats[k] == "f64" && canon_number &&
+            (code ~ /^pub fn format_number\(value: f64, out: &mut String\) \{$/ ||
+             code ~ /^[[:space:]]*let sci = if rounded\.parse::<f64>\(\) == Ok\(x\) \{[[:space:]]*$/)) continue
         if (cats[k] == "f64" && file == f64_allow &&
             code ~ /TICK_SECONDS_F64|tick_seconds_f64|ANIM_TICK_HZ[[:space:]]+as[[:space:]]+f64/) continue
         printf "%s:%d: %s: %s\n", file, NR, cats[k], code
@@ -81,6 +106,21 @@ fn threads() { std::thread::spawn(|| {}); }
 fn clock() -> Instant { Instant::now() }
 fn rng() -> u32 { rand::random() }
 EOF
+  cat >"$tmp/characters.rs" <<'EOF'
+let quote = '"'; let bad: f64 = 0.0;
+let slash = '\\'; let bad: f64 = 0.0;
+let quote = '\''; let bad: f64 = 0.0;
+let hex = '\x22'; let bad: f64 = 0.0;
+let unicode = '\u{22}'; let bad: f64 = 0.0;
+fn lifetime<'a>(x: &'a f64) {}
+let quote = '"';
+let bad: f64 = 0.0;
+EOF
+  out=$(scan_file "$tmp/characters.rs")
+  if [[ $(grep -c ': f64:' <<<"$out") != 7 ]]; then
+    printf 'check-det: self-test FAIL: character/lifetime scanning:\n%s\n' "$out" >&2
+    return 1
+  fi
   cat >"$tmp/negative.rs" <<'EOF'
 // f64 HashMap Instant thread sin( rand::random()
 const RATE: f32 = 1.0 / 30.0;

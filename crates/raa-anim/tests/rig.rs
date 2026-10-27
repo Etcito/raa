@@ -352,3 +352,109 @@ fn rig_canonical() {
     let attach = sorted.split("\"attach\"").nth(1).unwrap();
     assert!(attach.find("\"a\"").unwrap() < attach.find("\"z\"").unwrap());
 }
+
+fn matrix_near(actual: raa_anim::Mat4, expected: raa_anim::Mat4) {
+    for (i, (a, b)) in actual.into_iter().zip(expected).enumerate() {
+        assert!((a - b).abs() < 0.00002, "entry {i}: {a} != {b}");
+    }
+}
+const IDENTITY: raa_anim::Mat4 = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+#[test]
+fn pose_matrices() {
+    let rig = Rig::load(BASIC).unwrap();
+    let canonical = rig.to_canonical_json();
+    let rest = rig.rest_pose().unwrap();
+    for skin in rest.skin {
+        matrix_near(skin, IDENTITY);
+    }
+    assert_eq!(rig.to_canonical_json(), canonical);
+
+    let rig = Rig::load(&document(&[
+        bone("root", "null"),
+        bone("child", "\"root\""),
+        bone("tip", "\"child\""),
+        bone("sibling", "\"root\""),
+    ]))
+    .unwrap();
+    let mut local = rig.local_rest_pose().unwrap();
+    local[0].t = [1.0, 2.0, 3.0];
+    local[1].t = [2.0, 0.0, 0.0];
+    let translated = rig.pose(&local).unwrap();
+    assert_eq!(&translated.model[1][12..15], &[3.0, 2.0, 3.0]);
+    assert_eq!(&translated.model[2][12..15], &[3.0, 2.0, 3.0]);
+    assert_eq!(&translated.model[3][12..15], &[1.0, 2.0, 3.0]);
+    local[0].r = [0.0, 0.0, 0.6, 0.8];
+    let rotated = rig.pose(&local).unwrap();
+    matrix_near(
+        rotated.model[1],
+        [
+            0.28, 0.96, 0.0, 0.0, -0.96, 0.28, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.56, 3.92, 3.0, 1.0,
+        ],
+    );
+    matrix_near(rotated.skin[1], rotated.model[1]);
+
+    // Nonuniform scales and differing rotation axes produce a sheared model.
+    let mut sheared = rig.clone();
+    sheared.bones[0].rest.t = [1.0, 2.0, 3.0];
+    sheared.bones[0].rest.s = [2.0, 3.0, 4.0];
+    sheared.bones[1].rest.t = [2.0, 0.0, 0.0];
+    sheared.bones[1].rest.r = [0.0, 0.0, 0.6, 0.8];
+    sheared.bones[1].rest.s = [1.0, 2.0, 1.0];
+    sheared.bones[2].rest.t = [0.0, 1.0, 2.0];
+    sheared.bones[2].rest.r = [0.6, 0.0, 0.0, 0.8];
+    sheared.bones[2].rest.s = [3.0, 1.0, 2.0];
+    let rest = sheared.rest_pose().unwrap();
+    let inverse = sheared.inverse_bind_matrices().unwrap();
+    // Independently calculated S^-1 R^-1 T^-1, followed by the parent inverse.
+    matrix_near(
+        inverse[1],
+        [
+            0.14,
+            -0.24,
+            0.0,
+            0.0,
+            0.32,
+            0.046666667,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.25,
+            0.0,
+            -1.34,
+            1.1066667,
+            -0.75,
+            1.0,
+        ],
+    );
+    matrix_near(
+        rest.model[1],
+        [
+            0.56, 2.88, 0.0, 0.0, -3.84, 1.68, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 5.0, 2.0, 3.0, 1.0,
+        ],
+    );
+    for skin in rest.skin {
+        matrix_near(skin, IDENTITY);
+    }
+    let mut moved = sheared.local_rest_pose().unwrap();
+    moved[0].t[0] += 5.0;
+    let pose = sheared.pose(&moved).unwrap();
+    let mut expected = IDENTITY;
+    expected[12] = 5.0;
+    for skin in pose.skin {
+        matrix_near(skin, expected);
+    }
+    assert!(sheared.pose(&moved[..2]).is_err());
+
+    // Accepted near-unit source quaternions normalize only in the runtime pose.
+    sheared.bones[0].rest.r = [0.0, 0.0, 0.0, -1.0005];
+    for skin in sheared.rest_pose().unwrap().skin {
+        matrix_near(skin, IDENTITY);
+    }
+    assert_eq!(sheared.bones[0].rest.r[3], -1.0005);
+    sheared.bones[0].rest.s[0] = 1e-100;
+    assert!(sheared.rest_pose().is_err());
+}
