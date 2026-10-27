@@ -472,3 +472,70 @@ fn sample_basic() {
     let rotate = Clip::load(rotate, &rig).unwrap();
     assert_eq!(rotate.sample_track(0, 5).unwrap(), [0.0, 0.0, 0.0, 1.0]);
 }
+
+#[test]
+fn sample_curves() {
+    let rig = Rig::load(RIG).unwrap();
+    let fixture = include_str!("fixtures/clip-bezier.json");
+    let clip = Clip::load(fixture, &rig).unwrap();
+    assert_eq!(clip.to_canonical_json().as_bytes(), fixture.as_bytes());
+
+    let bezier = |p0: f32, p1: f32, p2: f32, p3: f32, u: f32| {
+        let v = 1.0 - u;
+        ((v * v * v) * p0 + (3.0 * v * v * u) * p1) + (3.0 * v * u * u) * p2 + (u * u * u) * p3
+    };
+    assert_eq!(
+        clip.sample_track(0, 12).unwrap(),
+        [
+            bezier(0.0, 1.5, 9.0, 10.0, 0.5),
+            bezier(0.0, -2.0, 4.5, 4.0, 0.5),
+            bezier(0.0, 0.5, 0.0, -2.0, 0.5),
+        ]
+    );
+    assert_eq!(clip.sample_track(0, 0).unwrap(), [0.0, 0.0, 0.0]);
+    assert_eq!(clip.sample_track(0, 24).unwrap(), [10.0, 4.0, -2.0]);
+
+    // Handle dt offsets are stored but never sampled.
+    let shifted = fixture
+        .replace("\"hr\": [\n            4,", "\"hr\": [\n            31.5,")
+        .replace(
+            "\"hl\": [\n            -8,",
+            "\"hl\": [\n            -0.25,",
+        );
+    let shifted = Clip::load(&shifted, &rig).unwrap();
+    for tick in [0, 1, 7, 12, 23, 24] {
+        assert_eq!(clip.sample_track(0, tick), shifted.sample_track(0, tick));
+    }
+
+    let flip_fixture = include_str!("fixtures/clip-rotation-flip.json");
+    let flip = Clip::load(flip_fixture, &rig).unwrap();
+    assert_eq!(flip.to_canonical_json().as_bytes(), flip_fixture.as_bytes());
+    assert_eq!(flip.sample_track(0, 16).unwrap(), [0.0, 0.0, 0.0, 1.0]);
+
+    let normalized = |v: [f32; 4]| {
+        let squared = ((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]) + v[3] * v[3];
+        let inverse = 1.0 / squared.sqrt();
+        v.map(|x| x * inverse)
+    };
+    // Incoming flipped handle: p2 = aligned b.v + (-b.hl.dv).
+    let incoming = [
+        bezier(0.0, 0.1, 0.05, 0.0, 0.5),
+        bezier(0.0, 0.2, -0.1, 0.0, 0.5),
+        bezier(0.0, 0.3, 0.2, 0.0, 0.5),
+        bezier(1.0, 1.0, 1.0, 1.0, 0.5),
+    ];
+    assert_eq!(flip.sample_track(0, 8).unwrap(), normalized(incoming));
+    // Outgoing flipped handle: p1 = aligned a.v + (-a.hr.dv).
+    let outgoing = [
+        bezier(0.0, 0.1, 0.2, 0.2, 0.25),
+        0.0,
+        0.0,
+        bezier(1.0, 1.0, 0.9, 0.9, 0.25),
+    ];
+    assert_eq!(flip.sample_track(0, 20).unwrap(), normalized(outgoing));
+    for tick in [0, 8, 16, 20, 32] {
+        let v = flip.sample_track(0, tick).unwrap();
+        let squared = ((v[0] * v[0] + v[1] * v[1]) + v[2] * v[2]) + v[3] * v[3];
+        assert!((squared - 1.0).abs() < 1e-6, "tick {tick}: {v:?}");
+    }
+}

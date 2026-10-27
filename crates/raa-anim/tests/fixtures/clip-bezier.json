@@ -1,0 +1,48 @@
+{
+  "format": "raa.clip",
+  "version": 2,
+  "name": "clip-bezier",
+  "rig": "rig-basic",
+  "lengthTicks": 24,
+  "loop": false,
+  "rootMotion": "none",
+  "tracks": [
+    {
+      "bone": "root",
+      "channel": "translation",
+      "keys": [
+        {
+          "tick": 0,
+          "v": [
+            0,
+            0,
+            0
+          ],
+          "interp": "BEZIER",
+          "hr": [
+            4,
+            1.5,
+            -2,
+            0.5
+          ]
+        },
+        {
+          "tick": 24,
+          "v": [
+            10,
+            4,
+            -2
+          ],
+          "interp": "BEZIER",
+          "hl": [
+            -8,
+            -1,
+            0.5,
+            2
+          ]
+        }
+      ]
+    }
+  ],
+  "events": []
+}

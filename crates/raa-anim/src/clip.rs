@@ -4,6 +4,7 @@ use crate::{
     AnimError, JsonValue, Rig,
     json::{parse_clip, pointer_child},
 };
+use raa_det::sign_align;
 
 /// S17 count limits. All are inclusive: a document exactly at a limit is
 /// accepted and a document one above it fails with `clip.cap`, never truncated.
@@ -124,11 +125,23 @@ pub struct ClipKey {
     pub hr: Option<JsonValue>,
 }
 
+/// Prepared runtime key: f32 values plus handle value offsets (dt dropped),
+/// sign-aligned along rotation tracks. Source `ClipKey` data is never mutated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct RuntimeKey {
+    pub tick: u32,
+    pub interp: Interp,
+    pub v: [f32; 4],
+    pub hl: [f32; 4],
+    pub hr: [f32; 4],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipTrack {
     pub bone: String,
     pub channel: Channel,
     pub keys: Vec<ClipKey>,
+    pub(crate) runtime: Vec<RuntimeKey>,
 }
 
 /// An S17 clip bound to the rig it names.
@@ -308,10 +321,12 @@ fn tracks(values: &[JsonValue], rig: &Rig) -> Result<Vec<ClipTrack>, AnimError> 
             }
             keys.push(parsed);
         }
+        let runtime = runtime_keys(channel, &keys, &keys_path)?;
         tracks.push(ClipTrack {
             bone: bone.to_owned(),
             channel,
             keys,
+            runtime,
         });
     }
     Ok(tracks)
@@ -378,6 +393,85 @@ fn events(value: Option<&JsonValue>) -> Result<Vec<ClipEvent>, AnimError> {
             })
         })
         .collect()
+}
+
+/// Convert one track to runtime precision. Rotation keys are sign-aligned to
+/// the previous key; a flipped key also flips its handle value offsets so the
+/// curve keeps its shape. Handle dt is stored and never used by sampling.
+fn runtime_keys(
+    channel: Channel,
+    keys: &[ClipKey],
+    path: &str,
+) -> Result<Vec<RuntimeKey>, AnimError> {
+    let width = channel.width();
+    let mut runtime = Vec::with_capacity(keys.len());
+    let mut previous: Option<[f32; 4]> = None;
+    for (i, key) in keys.iter().enumerate() {
+        let key_path = format!("{path}/{i}");
+        let v_path = pointer_child(&key_path, "v");
+        let mut v = runtime_numbers(&key.v, width, 0, &v_path)?;
+        let mut hl = runtime_handle(key.hl.as_ref(), width, &pointer_child(&key_path, "hl"))?;
+        let mut hr = runtime_handle(key.hr.as_ref(), width, &pointer_child(&key_path, "hr"))?;
+        if channel == Channel::Rotation {
+            if let Some(previous) = previous {
+                let aligned = sign_align(previous, v)
+                    .map_err(|e| error("clip.not_finite", &v_path, e.to_string()))?;
+                if aligned != v {
+                    v = v.map(|x| -x);
+                    hl = hl.map(|x| -x);
+                    hr = hr.map(|x| -x);
+                }
+            }
+            previous = Some(v);
+        }
+        runtime.push(RuntimeKey {
+            tick: key.tick,
+            interp: key.interp,
+            v,
+            hl,
+            hr,
+        });
+    }
+    Ok(runtime)
+}
+
+/// Convert already-validated numbers to runtime f32, skipping `skip` leading
+/// elements (the handle dt offset).
+fn runtime_numbers(
+    value: &JsonValue,
+    width: usize,
+    skip: usize,
+    path: &str,
+) -> Result<[f32; 4], AnimError> {
+    let JsonValue::Array(items) = value else {
+        unreachable!("clip keys are validated before runtime preparation")
+    };
+    let mut out = [0.0f32; 4];
+    for (i, item) in items.iter().enumerate().skip(skip).take(width) {
+        let JsonValue::Number(n) = item else {
+            unreachable!("clip keys are validated before runtime preparation")
+        };
+        out[i - skip] = *n as f32;
+        if !out[i - skip].is_finite() {
+            return Err(error(
+                "clip.not_finite",
+                &pointer_child(path, &i.to_string()),
+                "value is not finite in f32",
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn runtime_handle(
+    value: Option<&JsonValue>,
+    width: usize,
+    path: &str,
+) -> Result<[f32; 4], AnimError> {
+    match value {
+        Some(value) => runtime_numbers(value, width, 1, path),
+        None => Ok([0.0; 4]),
+    }
 }
 
 fn key(name: &str, value: JsonValue) -> (String, JsonValue) {
