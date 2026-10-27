@@ -69,3 +69,46 @@ non-finite inputs/results give `det.not_finite`; invalid rotation lengths
 give `det.not_unit`. There is no identity fallback. Sign alignment negates
 only on a negative dot product; nlerp aligns before component interpolation.
 Tests cover antipodes, normalization, composition, TRS layout and refusals.
+
+## Sixteen-body simulation (Q16)
+
+`selftest(seed: u32, ticks: Tick) -> u32` runs sixteen independent bodies
+in index order, with no allocation, wall clock, workers or external inputs.
+Initialization advances one wrapping u32 LCG per sample:
+`state = state * 1664525 + 1013904223`, starting at the supplied seed.
+Each sample is `((state >> 8) as f32 / 16777216) * 2 - 1` (implemented
+with the exact reciprocal). For each body, samples are consumed in xyz
+order for anchor, position offset (times 0.5), velocity (times 0.25),
+rotation xyz and angular velocity xyz. Rotation w is 1 before normalization.
+The angular increment is normalized `[omega * (0.5 * dt), 1]`.
+
+Each integer tick uses `dt = TICK_SECONDS_F32`. Per axis, semi-implicit
+Euler evaluates `a = (anchor - position) * 8 - velocity * 2`, then
+`velocity += a * dt`, then `position += velocity * dt`. Rotation advances
+by normalizing `quat_mul(rotation, increment)`, then nlerping from the
+old rotation to that result with weight 0.5. Bounded initial state and the
+damped fixed step keep the internal helper inputs valid.
+
+One continuous DET_HASH stream accumulates **every completed tick**,
+then bodies 0 through 15, then position xyz, velocity xyz, rotation xyzw,
+and the 16 column-major components of unit-scale TRS, in that order.
+That is 26 f32 values per body, 416 per tick; temporary arithmetic values
+and initialization are not outputs. Each value uses the little-endian
+bit encoding above. Zero ticks returns the empty-stream offset basis for
+every seed. Tests cover repeatability, seed/tick sensitivity and zero ticks.
+
+`DET_CASES` is the ordered `(seed, ticks)` sequence `(0, 0)`, `(1, 60)`,
+`(305419896, 600)`. Run `cargo run -p raa-det --example selftest` to emit
+one JSON array with exactly three records, computed through `selftest`,
+including the zero-step case:
+
+```json
+[{"case":"det-selftest","seed":0,"ticks":0,"hash":"811c9dc5"},{"case":"det-selftest","seed":1,"ticks":60,"hash":"935f1896"},{"case":"det-selftest","seed":305419896,"ticks":600,"hash":"77aeeadf"}]
+```
+
+Each record has exactly `case`, `seed`, `ticks`, and `hash`, in that order.
+Seed and ticks are u32 JSON numbers; hash is eight lowercase hexadecimal
+digits, zero-padded without a prefix. Stdout contains only the array and
+a trailing newline; diagnostics use stderr. Cases execute serially.
+The tests pin all three native hashes and the example's exact serialized
+document to detect changes in the simulation or cross-runtime contract.

@@ -112,6 +112,49 @@ fn ticks_wrap() {
     assert_eq!(wrapping_advance(2, MAX_TICK), 1);
 }
 
+#[test]
+fn q16_sim_repeatability_and_sensitivity() {
+    for seed in [0, 1, 0x1234_5678, u32::MAX] {
+        let hash = raa_det::selftest(seed, 60);
+        assert_eq!(hash, raa_det::selftest(seed, 60));
+        assert_ne!(hash, raa_det::selftest(seed.wrapping_add(1), 60));
+        assert_ne!(hash, raa_det::selftest(seed, 59));
+        assert_ne!(hash, raa_det::selftest(seed, 61));
+    }
+}
+
+#[test]
+fn q16_sim_zero_ticks() {
+    for seed in [0, 1, 0x1234_5678, u32::MAX] {
+        assert_eq!(raa_det::selftest(seed, 0), FNV1A32_OFFSET);
+        assert_ne!(raa_det::selftest(seed, 1), FNV1A32_OFFSET);
+    }
+}
+
+#[allow(dead_code)]
+#[path = "../examples/selftest.rs"]
+mod native_example;
+
+#[test]
+fn q16_canonical_cases_and_serialization() {
+    assert_eq!(raa_det::DET_CASES, [(0, 0), (1, 60), (305419896, 600)]);
+    let expected = [0x811c_9dc5, 0x935f_1896, 0x77ae_eadf];
+    for ((seed, ticks), hash) in raa_det::DET_CASES.into_iter().zip(expected) {
+        assert_eq!(raa_det::selftest(seed, ticks), hash);
+        assert_eq!(raa_det::selftest(seed, ticks), hash);
+    }
+    let mut output = Vec::new();
+    native_example::write_json(&mut output).unwrap();
+    assert_eq!(
+        String::from_utf8(output).unwrap(),
+        concat!(
+            "[{\"case\":\"det-selftest\",\"seed\":0,\"ticks\":0,\"hash\":\"811c9dc5\"},",
+            "{\"case\":\"det-selftest\",\"seed\":1,\"ticks\":60,\"hash\":\"935f1896\"},",
+            "{\"case\":\"det-selftest\",\"seed\":305419896,\"ticks\":600,\"hash\":\"77aeeadf\"}]\n"
+        )
+    );
+}
+
 use raa_det::{
     MathError, bezier, lerp, nlerp, normalize, quat_mul, quat_rotate, sign_align, trs_compose,
 };
