@@ -1,8 +1,4 @@
 [
   {"name": "test-sdfm", "command": "node --test 'packages/raa-sdfm/test/*.test.js'", "timeout_s": 300, "cwd": "."},
-  {"name": "test-sdfm-compare", "command": "node --test 'examples/sdfm-compare/test/*.test.js'", "timeout_s": 300, "cwd": "."},
-  {"name": "build-sdfm-compare", "command": "bash scripts/build-sdfm-compare.sh --mama ../MAMA", "timeout_s": 3600, "cwd": ".", "after": ["test-sdfm", "test-sdfm-compare"]},
-  {"name": "capture-m12", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --page sdfm-compare --milestone m12", "timeout_s": 3600, "cwd": ".", "after": ["build-sdfm-compare"]},
-  {"name": "proof-m12", "command": "node proofs/m12-sdfm.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m12"]},
-  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m12"]}
+  {"name": "check-scripts", "command": "env GALLIUM_DRIVER=llvmpipe bash scripts/check.sh", "timeout_s": 1500, "cwd": "."}
 ]
