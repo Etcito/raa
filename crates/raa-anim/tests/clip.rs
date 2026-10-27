@@ -405,3 +405,70 @@ fn clip_canonical() {
         assert!(Clip::load(&text, &rig).is_ok());
     }
 }
+
+#[test]
+fn sample_basic() {
+    use raa_anim::address_tick;
+
+    let rig = Rig::load(RIG).unwrap();
+    let fixture = include_str!("fixtures/clip-linear-constant.json");
+    let clip = Clip::load(fixture, &rig).unwrap();
+    let linear = |a: [f32; 3], b: [f32; 3], from: u32, to: u32, tick: u32| {
+        let u = (tick - from) as f32 / (to - from) as f32;
+        [
+            a[0] + (b[0] - a[0]) * u,
+            a[1] + (b[1] - a[1]) * u,
+            a[2] + (b[2] - a[2]) * u,
+        ]
+    };
+    assert_eq!(address_tick(48, 48, true), 0);
+    assert_eq!(address_tick(95, 48, true), 47);
+    assert_eq!(address_tick(48, 48, false), 48);
+
+    // Keys sit at 4 (LINEAR), 24 (CONSTANT) and 44 (LINEAR).
+    assert_eq!(clip.sample_track(0, 0).unwrap(), [0.0, 0.0, 0.0]);
+    assert_eq!(clip.sample_track(0, 4).unwrap(), [0.0, 0.0, 0.0]);
+    let expected = linear([0.0, 0.0, 0.0], [10.0, 2.0, -4.0], 4, 24, 12);
+    assert_eq!(clip.sample_track(0, 12).unwrap(), expected);
+    assert_eq!(clip.sample_track(0, 24).unwrap(), [10.0, 2.0, -4.0]);
+    assert_eq!(clip.sample_track(0, 34).unwrap(), [10.0, 2.0, -4.0]);
+    assert_eq!(clip.sample_track(0, 43).unwrap(), [10.0, 2.0, -4.0]);
+    assert_eq!(clip.sample_track(0, 44).unwrap(), [20.0, 0.0, 4.0]);
+    assert_eq!(clip.sample_track(0, 47).unwrap(), [20.0, 0.0, 4.0]);
+    assert_eq!(clip.sample_track(0, 480).unwrap(), [20.0, 0.0, 4.0]);
+
+    // Tracked channels are replaced; the rest value survives everywhere else.
+    let rest = rig.local_rest_pose().unwrap();
+    let local = clip.local_pose_at(&rig, 12).unwrap();
+    assert_eq!(local[0].t, expected);
+    assert_eq!(local[0].r, rest[0].r);
+    assert_eq!(local[0].s, rest[0].s);
+    assert_eq!(local[1], rest[1], "child has no track");
+    let pose = clip.pose_at(&rig, 12).unwrap();
+    assert_eq!(&pose.model[0][12..15], &expected);
+    assert_eq!(pose.model.len(), rig.bones.len());
+    assert!(pose.skin.iter().flatten().all(|v| v.is_finite()));
+
+    let still = r#"{"format":"raa.clip","version":2,"name":"still","rig":"rig-basic","lengthTicks":48,"loop":true,"rootMotion":"none","tracks":[],"events":[]}"#;
+    let still = Clip::load(still, &rig).unwrap();
+    assert_eq!(still.pose_at(&rig, 5).unwrap(), rig.rest_pose().unwrap());
+
+    // Looping wraps at lengthTicks before key lookup and clamping.
+    let looping = Clip::load(&fixture.replace("\"loop\": false", "\"loop\": true"), &rig).unwrap();
+    assert_eq!(looping.sample_track(0, 48).unwrap(), [0.0, 0.0, 0.0]);
+    assert_eq!(looping.sample_track(0, 49).unwrap(), [0.0, 0.0, 0.0]);
+    assert_eq!(looping.sample_track(0, 52).unwrap(), [0.0, 0.0, 0.0]);
+    assert_eq!(
+        looping.sample_track(0, 58).unwrap(),
+        linear([0.0, 0.0, 0.0], [10.0, 2.0, -4.0], 4, 24, 10)
+    );
+    assert_eq!(looping.sample_track(0, 72).unwrap(), [10.0, 2.0, -4.0]);
+    assert_eq!(looping.sample_track(0, 92).unwrap(), [20.0, 0.0, 4.0]);
+    assert_eq!(looping.sample_track(0, 95).unwrap(), [20.0, 0.0, 4.0]);
+    assert_eq!(looping.sample_track(0, 96).unwrap(), [0.0, 0.0, 0.0]);
+
+    // Rotation keys sign-align to the previous key, then normalize with sqrt.
+    let rotate = r#"{"format":"raa.clip","version":2,"name":"rotate","rig":"rig-basic","lengthTicks":10,"loop":false,"rootMotion":"none","tracks":[{"bone":"child","channel":"rotation","keys":[{"tick":0,"v":[0,0,0,2],"interp":"LINEAR"},{"tick":10,"v":[0,0,0,-2],"interp":"LINEAR"}]}],"events":[]}"#;
+    let rotate = Clip::load(rotate, &rig).unwrap();
+    assert_eq!(rotate.sample_track(0, 5).unwrap(), [0.0, 0.0, 0.0, 1.0]);
+}

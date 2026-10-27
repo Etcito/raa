@@ -42,3 +42,6 @@ pub mod clip;
 pub use clip::{
     CLIP_CAPS, Channel, Clip, ClipCaps, ClipEvent, ClipKey, ClipTrack, Interp, RootMotion,
 };
+
+pub mod sample;
+pub use sample::address_tick;
