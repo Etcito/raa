@@ -31,3 +31,6 @@ impl fmt::Display for AnimError {
 }
 
 impl std::error::Error for AnimError {}
+
+pub mod rig;
+pub use rig::{Bone, MAX_BONES, RestTransform, Rig};
