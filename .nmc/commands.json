@@ -1,4 +1,0 @@
-[
-  {"name": "test-sdfm", "command": "node --test 'packages/raa-sdfm/test/*.test.js'", "timeout_s": 300, "cwd": "."},
-  {"name": "check-scripts", "command": "env GALLIUM_DRIVER=llvmpipe bash scripts/check.sh", "timeout_s": 1500, "cwd": "."}
-]
