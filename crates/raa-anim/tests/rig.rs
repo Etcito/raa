@@ -1,7 +1,13 @@
-use raa_anim::{MAX_BONES, Rig};
+use raa_anim::{MAX_BONES, Rig, rig::ChainSolver};
 
 const BASIC: &str = include_str!("fixtures/rig-basic.json");
 const REST: &str = r#""rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}"#;
+const META: &str = concat!(
+    r#","roles":{"root":"r","head":"b"},"#,
+    r#""ikChains":[{"name":"arm","solver":"twoBone","bones":["r","a","b"],"pole":[0,0,1],"iterations":16}],"#,
+    r#""limits":[{"bone":"b","min":[-10,-20,-30],"max":[10,20,30]}],"#,
+    r#""attach":{"beak":{"bone":"b","t":[0,0.1,0],"r":[0,0.6,0,0.8]}}"#
+);
 
 fn bone(name: &str, parent: &str) -> String {
     format!(r#"{{"name":"{name}","parent":{parent},{REST}}}"#)
@@ -10,6 +16,15 @@ fn document(bones: &[String]) -> String {
     format!(
         r#"{{"format":"raa.rig","version":1,"name":"test","bones":[{}]}}"#,
         bones.join(",")
+    )
+}
+fn meta_document() -> String {
+    format!(
+        r#"{{"format":"raa.rig","version":1,"name":"meta","bones":[{},{},{}]{}}}"#,
+        bone("r", "null"),
+        bone("a", "\"r\""),
+        bone("b", "\"a\""),
+        META
     )
 }
 fn refusal(text: &str, code: &str, path: &str) {
@@ -27,6 +42,12 @@ fn rig_basic() {
     assert_eq!(rig.bones[0].rest.t, [1.0, 2.0, 3.0]);
     assert_eq!(rig.bones[0].rest.r, [0.0, 0.0, 0.6, 0.8]);
     assert_eq!(rig.bones[1].rest.s, [1.0, 1.5, 1.0]);
+    assert_eq!(rig.roles["head"], 1);
+    assert_eq!(rig.ik_chains[0].solver, ChainSolver::Ccd);
+    assert_eq!(rig.ik_chains[0].bones, [0, 1]);
+    assert_eq!(rig.ik_chains[0].iterations, 8);
+    assert_eq!(rig.limits[0].max, [40.0, 70.0, 30.0]);
+    assert_eq!(rig.attach["beak"].bone, 1);
 }
 
 #[test]
@@ -174,5 +195,64 @@ fn rig_schema() {
         ),
     ] {
         refusal(&valid.replace(from, to), code, path);
+    }
+}
+
+#[test]
+fn rig_metadata() {
+    let text = meta_document();
+    let rig = Rig::load(&text).unwrap();
+    assert_eq!(rig.roles["head"], 2);
+    assert_eq!(rig.ik_chains[0].solver, ChainSolver::TwoBone);
+    assert_eq!(rig.ik_chains[0].bones, [0, 1, 2]);
+    assert_eq!(rig.ik_chains[0].pole, Some([0.0, 0.0, 1.0]));
+    assert_eq!(rig.ik_chains[0].iterations, 16);
+    assert_eq!(rig.limits[0].min, [-10.0, -20.0, -30.0]);
+    assert_eq!(rig.attach["beak"].bone, 2);
+
+    for (from, to, code) in [
+        (r#""head":"b""#, r#""snout":"b""#, "rig.role_unknown"),
+        (r#""head":"b""#, r#""head":"nope""#, "rig.role_unknown"),
+        (r#""twoBone""#, r#""rope""#, "rig.chain"),
+        (r#"["r","a","b"]"#, r#"["r","a"]"#, "rig.chain"),
+        (r#"["r","a","b"]"#, r#"["a","r","b"]"#, "rig.chain"),
+        (r#""pole":[0,0,1]"#, r#""pole":[0,0,2]"#, "rig.chain"),
+        (r#""iterations":16"#, r#""iterations":17"#, "rig.chain"),
+        (r#"[-10,-20,-30]"#, r#"[-10,30,-30]"#, "rig.limit"),
+        (r#""bone":"b","t""#, r#""bone":"nope","t""#, "rig.attach"),
+        (r#"[0,0.6,0,0.8]"#, r#"[0,0,0,0]"#, "rig.attach"),
+    ] {
+        let error = Rig::load(&text.replace(from, to)).unwrap_err();
+        assert_eq!(error.code, code, "{error}");
+    }
+    let mut ragdoll = text.clone();
+    ragdoll.insert_str(ragdoll.len() - 1, r#","ragdoll":{}"#);
+    assert_eq!(Rig::load(&ragdoll).unwrap_err().code, "rig.schema");
+
+    for (fixture, code) in [
+        (
+            include_str!("fixtures/invalid-rig-unknown-field.json"),
+            "rig.schema",
+        ),
+        (
+            include_str!("fixtures/invalid-rig-duplicate-bone.json"),
+            "rig.bone_duplicate",
+        ),
+        (
+            include_str!("fixtures/invalid-rig-parent-order.json"),
+            "rig.parent_order",
+        ),
+        (
+            include_str!("fixtures/invalid-rig-role.json"),
+            "rig.role_unknown",
+        ),
+        (include_str!("fixtures/invalid-rig-chain.json"), "rig.chain"),
+        (
+            include_str!("fixtures/invalid-rig-attach.json"),
+            "rig.attach",
+        ),
+    ] {
+        let error = Rig::load(fixture).unwrap_err();
+        assert_eq!(error.code, code, "{error}");
     }
 }

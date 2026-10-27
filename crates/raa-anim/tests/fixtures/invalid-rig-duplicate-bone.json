@@ -1,0 +1,1 @@
+{"format":"raa.rig","version":1,"name":"invalid-duplicate-bone","bones":[{"name":"root","parent":null,"rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}},{"name":"root","parent":null,"rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}}]}

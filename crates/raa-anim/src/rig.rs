@@ -4,6 +4,7 @@ use crate::{
     AnimError, JsonValue,
     json::{parse_rig, pointer_child},
 };
+use std::collections::BTreeMap;
 
 /// Maximum number of bones accepted in an S16 rig; larger rigs are refused.
 pub const MAX_BONES: usize = 256;
@@ -24,15 +25,49 @@ pub struct Bone {
     pub rest: RestTransform,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainSolver {
+    TwoBone,
+    Ccd,
+    Fabrik,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct IkChain {
+    pub name: String,
+    pub solver: ChainSolver,
+    pub bones: Vec<usize>,
+    pub pole: Option<[f64; 3]>,
+    pub iterations: usize,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointLimit {
+    pub bone: usize,
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attachment {
+    pub bone: usize,
+    pub t: [f64; 3],
+    pub r: [f64; 4],
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rig {
     pub name: String,
     pub bones: Vec<Bone>,
+    pub roles: BTreeMap<String, usize>,
+    pub ik_chains: Vec<IkChain>,
+    pub limits: Vec<JointLimit>,
+    pub attach: BTreeMap<String, Attachment>,
 }
+const ROLE_NAMES: &str = concat!(
+    "root hips spine chest neck head jaw tail shoulder.l shoulder.r upperArm.l upperArm.r ",
+    "lowerArm.l lowerArm.r hand.l hand.r upperLeg.l upperLeg.r lowerLeg.l lowerLeg.r ",
+    "foot.l foot.r toe.l toe.r eye.l eye.r"
+);
 
 impl Rig {
-    /// Parse bones and hierarchy. Roles, chains, limits and attachments are
-    /// reserved S16 fields whose validation is implemented separately.
+    /// Parse S16 bones, hierarchy, roles, IK chains, limits and attachments.
     pub fn load(text: &str) -> Result<Self, AnimError> {
         let value = parse_rig(text)?;
         let obj = object(
@@ -141,8 +176,163 @@ impl Rig {
         if roots != 1 {
             return Err(error("rig.root", "/bones", "exactly one root required"));
         }
-        Ok(Self { name, bones })
+        let (roles, ik_chains, limits, attach) = metadata(obj, &bones)?;
+        Ok(Self {
+            name,
+            bones,
+            roles,
+            ik_chains,
+            limits,
+            attach,
+        })
     }
+}
+
+type Metadata = (
+    BTreeMap<String, usize>,
+    Vec<IkChain>,
+    Vec<JointLimit>,
+    BTreeMap<String, Attachment>,
+);
+
+const CHAIN_KEYS: [&str; 5] = ["name", "solver", "bones", "pole", "iterations"];
+const ATTACH_KEYS: [&str; 3] = ["bone", "t", "r"];
+
+fn metadata(fields: &[(String, JsonValue)], bones: &[Bone]) -> Result<Metadata, AnimError> {
+    let mut roles = BTreeMap::new();
+    if let Some(value) = optional(fields, "roles") {
+        let JsonValue::Object(entries) = value else {
+            return Err(error("rig.schema", "/roles", "expected object"));
+        };
+        for (role, value) in entries {
+            let path = pointer_child("/roles", role);
+            if !ROLE_NAMES.split(' ').any(|name| name == role) {
+                return Err(error("rig.role_unknown", &path, "unknown role"));
+            }
+            let bone = bone_at(bones, string(value, &path)?, &path, "rig.role_unknown")?;
+            roles.insert(role.clone(), bone);
+        }
+    }
+    let mut ik_chains = Vec::new();
+    if let Some(value) = optional(fields, "ikChains") {
+        let JsonValue::Array(entries) = value else {
+            return Err(error("rig.schema", "/ikChains", "expected array"));
+        };
+        for (i, value) in entries.iter().enumerate() {
+            let path = format!("/ikChains/{i}");
+            let chain = object(value, &path, &CHAIN_KEYS)?;
+            let name = string(
+                required(chain, "name", &path)?,
+                &pointer_child(&path, "name"),
+            )?;
+            let solver_path = pointer_child(&path, "solver");
+            let solver = match string(required(chain, "solver", &path)?, &solver_path)? {
+                "twoBone" => ChainSolver::TwoBone,
+                "ccd" => ChainSolver::Ccd,
+                "fabrik" => ChainSolver::Fabrik,
+                _ => return Err(error("rig.chain", &solver_path, "unknown solver")),
+            };
+            let bones_path = pointer_child(&path, "bones");
+            let JsonValue::Array(names) = required(chain, "bones", &path)? else {
+                return Err(error("rig.chain", &bones_path, "expected array"));
+            };
+            let mut chain_bones = Vec::with_capacity(names.len());
+            for (j, name) in names.iter().enumerate() {
+                let item_path = pointer_child(&bones_path, &j.to_string());
+                let bone = bone_at(bones, string(name, &item_path)?, &item_path, "rig.chain")?;
+                if let Some(previous) = chain_bones.last()
+                    && bones[bone].parent != Some(*previous)
+                {
+                    return Err(error("rig.chain", &item_path, "chain order"));
+                }
+                chain_bones.push(bone);
+            }
+            let count_ok = match solver {
+                ChainSolver::TwoBone => chain_bones.len() == 3,
+                _ => (2..=8).contains(&chain_bones.len()),
+            };
+            if !count_ok {
+                return Err(error("rig.chain", &bones_path, "wrong bone count"));
+            }
+            let pole_path = pointer_child(&path, "pole");
+            let pole = match optional(chain, "pole") {
+                None | Some(JsonValue::Null) => None,
+                Some(value) => {
+                    let pole: [f64; 3] = vector(value, &pole_path)?;
+                    let norm = pole.iter().map(|v| v * v).sum::<f64>().sqrt();
+                    if (norm - 1.0).abs() > 1e-3 {
+                        return Err(error("rig.chain", &pole_path, "pole must be unit"));
+                    }
+                    Some(pole)
+                }
+            };
+            let iterations_path = pointer_child(&path, "iterations");
+            let iterations = match optional(chain, "iterations") {
+                None => 16,
+                Some(JsonValue::Number(n)) if n.fract() == 0.0 && (1.0..=16.0).contains(n) => {
+                    *n as usize
+                }
+                Some(_) => return Err(error("rig.chain", &iterations_path, "bad iterations")),
+            };
+            ik_chains.push(IkChain {
+                name: name.to_owned(),
+                solver,
+                bones: chain_bones,
+                pole,
+                iterations,
+            });
+        }
+    }
+    let mut limits = Vec::new();
+    if let Some(value) = optional(fields, "limits") {
+        let JsonValue::Array(entries) = value else {
+            return Err(error("rig.schema", "/limits", "expected array"));
+        };
+        for (i, value) in entries.iter().enumerate() {
+            let path = format!("/limits/{i}");
+            let limit = object(value, &path, &["bone", "min", "max"])?;
+            let bone_path = pointer_child(&path, "bone");
+            let name = string(required(limit, "bone", &path)?, &bone_path)?;
+            let bone = bone_at(bones, name, &bone_path, "rig.limit")?;
+            let min_path = pointer_child(&path, "min");
+            let min: [f64; 3] = vector(required(limit, "min", &path)?, &min_path)?;
+            let max: [f64; 3] =
+                vector(required(limit, "max", &path)?, &pointer_child(&path, "max"))?;
+            if min.iter().zip(max).any(|(low, high)| low > &high) {
+                return Err(error("rig.limit", &min_path, "min > max"));
+            }
+            limits.push(JointLimit { bone, min, max });
+        }
+    }
+    let mut attach = BTreeMap::new();
+    if let Some(value) = optional(fields, "attach") {
+        let JsonValue::Object(entries) = value else {
+            return Err(error("rig.schema", "/attach", "expected object"));
+        };
+        for (name, value) in entries {
+            let path = pointer_child("/attach", name);
+            let point = object(value, &path, &ATTACH_KEYS)?;
+            let bone_path = pointer_child(&path, "bone");
+            let bone_name = string(required(point, "bone", &path)?, &bone_path)?;
+            let bone = bone_at(bones, bone_name, &bone_path, "rig.attach")?;
+            let t = vector(required(point, "t", &path)?, &pointer_child(&path, "t"))?;
+            let r_path = pointer_child(&path, "r");
+            let r: [f64; 4] = vector(required(point, "r", &path)?, &r_path)?;
+            let norm = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if (norm - 1.0).abs() > 1e-3 {
+                return Err(error("rig.attach", &r_path, "bad quaternion"));
+            }
+            attach.insert(name.clone(), Attachment { bone, t, r });
+        }
+    }
+    Ok((roles, ik_chains, limits, attach))
+}
+
+fn bone_at(bones: &[Bone], name: &str, path: &str, code: &'static str) -> Result<usize, AnimError> {
+    bones
+        .iter()
+        .position(|bone| bone.name == name)
+        .ok_or_else(|| error(code, path, "unknown bone"))
 }
 
 fn error(code: &'static str, path: &str, message: &str) -> AnimError {
@@ -167,6 +357,13 @@ fn object<'a>(
         }
     }
     Ok(fields)
+}
+
+fn optional<'a>(fields: &'a [(String, JsonValue)], key: &str) -> Option<&'a JsonValue> {
+    fields
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, value)| value)
 }
 
 fn required<'a>(
