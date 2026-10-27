@@ -48,7 +48,7 @@
     "timeout_s": 600,
     "cwd": ".",
     "after": [
-      "capture-m12"
+      "proof-m12"
     ]
   },
   {
