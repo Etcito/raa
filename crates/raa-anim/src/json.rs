@@ -2,6 +2,7 @@
 //! canonical writing never serializes rounded `f32` runtime values.
 
 use crate::AnimError;
+use std::collections::BTreeSet;
 
 /// Maximum nesting of arrays and objects.
 pub const MAX_DEPTH: usize = 32;
@@ -22,6 +23,7 @@ pub fn parse(text: &str) -> Result<JsonValue, AnimError> {
     let mut p = Parser {
         b: text.as_bytes(),
         pos: 0,
+        path: String::new(),
     };
     let v = p.value(0)?;
     p.ws();
@@ -31,9 +33,41 @@ pub fn parse(text: &str) -> Result<JsonValue, AnimError> {
     Ok(v)
 }
 
+/// Append an object key or array index to an RFC 6901 JSON pointer.
+/// Schema consumers can use the same escaping as parser errors.
+pub fn pointer_child(parent: &str, token: &str) -> String {
+    format!("{parent}/{}", token.replace('~', "~0").replace('/', "~1"))
+}
+
+/// Read a rig document, mapping reader failures to the S16 refusal codes.
+pub fn parse_rig(text: &str) -> Result<JsonValue, AnimError> {
+    parse_document(text, "rig.schema", "rig.not_finite")
+}
+
+/// Read a clip document, mapping reader failures to the S17 refusal codes.
+pub fn parse_clip(text: &str) -> Result<JsonValue, AnimError> {
+    parse_document(text, "clip.schema", "clip.not_finite")
+}
+
+fn parse_document(
+    text: &str,
+    schema: &'static str,
+    not_finite: &'static str,
+) -> Result<JsonValue, AnimError> {
+    parse(text).map_err(|mut error| {
+        error.code = if error.code == "json.not_finite" {
+            not_finite
+        } else {
+            schema
+        };
+        error
+    })
+}
+
 struct Parser<'a> {
     b: &'a [u8],
     pos: usize,
+    path: String,
 }
 
 impl Parser<'_> {
@@ -41,7 +75,7 @@ impl Parser<'_> {
         self.b.get(self.pos).copied()
     }
     fn err(&self, code: &'static str, msg: &str) -> AnimError {
-        AnimError::new(code, format!("@{}", self.pos), msg)
+        AnimError::new(code, &self.path, format!("{msg} at byte {}", self.pos))
     }
     fn ws(&mut self) {
         while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
@@ -83,7 +117,10 @@ impl Parser<'_> {
             return Ok(JsonValue::Array(items));
         }
         loop {
+            let parent_len = self.path.len();
+            self.path = pointer_child(&self.path, &items.len().to_string());
             items.push(self.value(depth)?);
+            self.path.truncate(parent_len);
             self.ws();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -101,6 +138,7 @@ impl Parser<'_> {
         }
         self.pos += 1;
         let mut members = Vec::new();
+        let mut keys = BTreeSet::new();
         self.ws();
         if self.peek() == Some(b'}') {
             self.pos += 1;
@@ -112,12 +150,18 @@ impl Parser<'_> {
                 return Err(self.err("json.syntax", "expected a string key"));
             }
             let key = self.string()?;
+            let parent_len = self.path.len();
+            self.path = pointer_child(&self.path, &key);
+            if !keys.insert(key.clone()) {
+                return Err(self.err("json.duplicate_key", "duplicate object key"));
+            }
             self.ws();
             if self.peek() != Some(b':') {
                 return Err(self.err("json.syntax", "expected `:`"));
             }
             self.pos += 1;
             members.push((key, self.value(depth)?));
+            self.path.truncate(parent_len);
             self.ws();
             match self.peek() {
                 Some(b',') => self.pos += 1,
@@ -169,8 +213,23 @@ impl Parser<'_> {
             }
         }
         let text = std::str::from_utf8(&self.b[start..self.pos]).unwrap_or("");
-        text.parse::<f64>()
-            .map_err(|_| self.err("json.syntax", "invalid number"))
+        let number = text
+            .parse::<f64>()
+            .map_err(|_| self.err("json.syntax", "invalid number"))?;
+        if !number.is_finite() {
+            return Err(self.err("json.not_finite", "number is not finite"));
+        }
+        Ok(number)
+    }
+    fn hex_quad(&mut self) -> Result<u32, AnimError> {
+        let hex = self.b.get(self.pos..self.pos + 4).unwrap_or(&[]);
+        if hex.len() != 4 || !hex.iter().all(u8::is_ascii_hexdigit) {
+            return Err(self.err("json.syntax", "expected 4 hex digits"));
+        }
+        self.pos += 4;
+        Ok(hex
+            .iter()
+            .fold(0, |n, &b| n * 16 + (b as char).to_digit(16).unwrap()))
     }
     fn escape(&mut self) -> Result<char, AnimError> {
         let e = self
@@ -187,13 +246,19 @@ impl Parser<'_> {
             b'r' => '\r',
             b't' => '\t',
             b'u' => {
-                let hex = self.b.get(self.pos..self.pos + 4).unwrap_or(&[]);
-                if hex.len() != 4 || !hex.iter().all(u8::is_ascii_hexdigit) {
-                    return Err(self.err("json.syntax", "expected 4 hex digits"));
+                let mut point = self.hex_quad()?;
+                if (0xd800..=0xdbff).contains(&point) {
+                    if self.b.get(self.pos..self.pos + 2) != Some(b"\\u") {
+                        return Err(self.err("json.syntax", "expected low surrogate escape"));
+                    }
+                    self.pos += 2;
+                    let low = self.hex_quad()?;
+                    if !(0xdc00..=0xdfff).contains(&low) {
+                        return Err(self.err("json.syntax", "expected low surrogate"));
+                    }
+                    point = 0x10000 + ((point - 0xd800) << 10) + low - 0xdc00;
                 }
-                self.pos += 4;
-                let hex = std::str::from_utf8(hex).unwrap_or("");
-                char::from_u32(u32::from_str_radix(hex, 16).unwrap())
+                char::from_u32(point)
                     .ok_or_else(|| self.err("json.syntax", "invalid code point"))?
             }
             _ => return Err(self.err("json.syntax", "bad escape")),
@@ -232,6 +297,129 @@ mod tests {
     use super::*;
     fn code(text: &str) -> &'static str {
         parse(text).expect_err(text).code
+    }
+
+    #[test]
+    fn json_structure_nested_strings() {
+        assert_eq!(
+            parse(r#" {"a":[null,true,{"b":[]},{}],"z":1} "#).unwrap(),
+            JsonValue::Object(vec![
+                (
+                    "a".into(),
+                    JsonValue::Array(vec![
+                        JsonValue::Null,
+                        JsonValue::Bool(true),
+                        JsonValue::Object(vec![("b".into(), JsonValue::Array(vec![]))]),
+                        JsonValue::Object(vec![])
+                    ])
+                ),
+                ("z".into(), JsonValue::Number(1.0)),
+            ])
+        );
+        for (source, expected) in [
+            (r#""\"\\\/\b\f\n\r\t""#, "\"\\/\u{8}\u{c}\n\r\t"),
+            (r#""é水🦀""#, "é水🦀"),
+            (r#""\u0000\u00E9\u6c34\ud83e\udd80""#, "\0é水🦀"),
+            (r#""\ud800\udc00\uDBFF\uDFFF""#, "\u{10000}\u{10ffff}"),
+        ] {
+            assert_eq!(parse(source).unwrap(), JsonValue::String(expected.into()));
+        }
+        assert!(parse(r#"[{"a":1},{"a":2}]"#).is_ok());
+    }
+
+    #[test]
+    fn json_structure_malformed() {
+        for source in [
+            "",
+            "[",
+            "{",
+            "[1,]",
+            "[,1]",
+            "[1 2]",
+            "{\"a\":1,}",
+            "{a:1}",
+            "{\"a\" 1}",
+            "{\"a\":}",
+            "{\"a\":1 \"b\":2}",
+            "[]{}",
+            "/* comment */null",
+            "\u{feff}null",
+            "[truex]",
+            "[01]",
+            r#""\x20""#,
+            r#""\u123""#,
+            r#""\u12xz""#,
+            r#""\uDC00""#,
+            r#""\uD800""#,
+            r#""\uD800x""#,
+            r#""\uD800\u0041""#,
+            r#""\uD800\uD800""#,
+            r#""\uD800\uZZZZ""#,
+            "\"abc\\",
+            "\"abc",
+        ] {
+            assert_eq!(code(source), "json.syntax", "{source:?}");
+        }
+        for byte in 0..32u8 {
+            assert_eq!(code(&format!("\"{}\"", char::from(byte))), "json.syntax");
+        }
+    }
+
+    #[test]
+    fn json_structure_paths_and_duplicates() {
+        for source in [
+            r#"{"x":[{"a/b~":0,"a/b~":1}]}"#,
+            r#"{"x":[{"a/b~":0,"a\u002fb\u007e":1}]}"#,
+        ] {
+            let error = parse(source).unwrap_err();
+            assert_eq!(error.code, "json.duplicate_key");
+            assert_eq!(error.path, "/x/0/a~1b~0");
+        }
+        assert_eq!(parse(r#"{"": [0, "\q"]}"#).unwrap_err().path, "//1");
+        assert_eq!(
+            parse(r#"{"a": [], "b": [false, ?]}"#).unwrap_err().path,
+            "/b/1"
+        );
+        assert_eq!(parse("[] trailing").unwrap_err().path, "");
+        assert_eq!(pointer_child("/bones/0", "~/"), "/bones/0/~0~1");
+    }
+
+    #[test]
+    fn json_structure_depth_and_overflow() {
+        for (open, close) in [("[", "]"), ("{\"k\":", "}")] {
+            let nested = |n| format!("{}0{}", open.repeat(n), close.repeat(n));
+            assert!(parse(&nested(MAX_DEPTH)).is_ok());
+            assert_eq!(code(&nested(MAX_DEPTH + 1)), "json.depth");
+            assert_eq!(
+                parse_rig(&nested(MAX_DEPTH + 1)).unwrap_err().code,
+                "rig.schema"
+            );
+        }
+        for source in ["1e309", "-1e309", "9e99999"] {
+            assert_eq!(code(source), "json.not_finite");
+            let nested = format!("{{\"v\":[{source}]}}");
+            for (parser, expected) in [
+                (
+                    parse_rig as fn(&str) -> Result<JsonValue, AnimError>,
+                    "rig.not_finite",
+                ),
+                (parse_clip, "clip.not_finite"),
+            ] {
+                let error = parser(&nested).unwrap_err();
+                assert_eq!(error.code, expected);
+                assert_eq!(error.path, "/v/0");
+            }
+        }
+        assert_eq!(
+            parse_clip(r#"{"a":1,"a":2}"#).unwrap_err().code,
+            "clip.schema"
+        );
+        assert!(parse("1.7976931348623157e308").is_ok());
+        assert_eq!(parse("1e-9999").unwrap(), JsonValue::Number(0.0));
+        assert_eq!(
+            parse("1.0000000000000002").unwrap(),
+            JsonValue::Number(1.0000000000000002)
+        );
     }
 
     #[test]
