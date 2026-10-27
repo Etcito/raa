@@ -271,6 +271,23 @@ fn clip_caps() {
 #[test]
 fn clip_canonical() {
     let rig = Rig::load(RIG).unwrap();
+    let fixture = include_str!("fixtures/clip-linear-constant.json");
+    let clip = Clip::load(fixture, &rig).unwrap();
+    assert_eq!(clip.to_canonical_json().as_bytes(), fixture.as_bytes());
+    assert_eq!(Clip::load(&clip.to_canonical_json(), &rig).unwrap(), clip);
+    // Intervals cover before-first, exact keys, linear midpoint, constant
+    // midpoint and after-last; child deliberately has no animated channel.
+    assert_eq!(
+        clip.tracks[0]
+            .keys
+            .iter()
+            .map(|k| k.tick)
+            .collect::<Vec<_>>(),
+        [4, 24, 44]
+    );
+    assert!(clip.tracks.iter().all(|track| track.bone != "child"));
+    assert!(!clip.looping);
+    assert_eq!(clip.events.last().unwrap().tick, clip.length_ticks);
     let text = Clip::load(VALID, &rig).unwrap().to_canonical_json();
     let mut at = 0;
     for field in [
@@ -299,4 +316,92 @@ fn clip_canonical() {
         Clip::load(&canonical, &rig).unwrap().to_canonical_json(),
         canonical
     );
+
+    let key_doc = |key: &str| {
+        format!(
+            r#"{{"events":[],"tracks":[{{"keys":[{key}],"channel":"translation","bone":"root"}}],"rootMotion":"none","loop":false,"lengthTicks":48,"rig":"rig-basic","name":"x","version":2,"format":"raa.clip"}}"#
+        )
+    };
+    for (key, code, suffix) in [
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"linear"}"#,
+            "clip.interp",
+            "/interp",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"CONSTANT","hr":[1,0,0,0]}"#,
+            "clip.handles",
+            "",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"BEZIER","hr":[1,0,0]}"#,
+            "clip.handles",
+            "/hr",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"BEZIER","hl":null}"#,
+            "clip.handles",
+            "/hl",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"BEZIER","hl":[false,0,0,0]}"#,
+            "clip.handles",
+            "/hl/0",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"LINEAR","extra":0}"#,
+            "clip.schema",
+            "/extra",
+        ),
+        (
+            r#"{"tick":0,"v":[1e999,0,0],"interp":"LINEAR"}"#,
+            "clip.not_finite",
+            "/v/0",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"BEZIER","hl":[-1e999,0,0,0]}"#,
+            "clip.not_finite",
+            "/hl/0",
+        ),
+        (
+            r#"{"tick":0,"v":[0,0,0],"interp":"BEZIER","hr":[1,0,1e999,0]}"#,
+            "clip.not_finite",
+            "/hr/2",
+        ),
+    ] {
+        let error = Clip::load(&key_doc(key), &rig).unwrap_err();
+        assert_eq!(error.code, code, "{error}");
+        assert_eq!(error.path, format!("/tracks/0/keys/0{suffix}"));
+    }
+    let source = key_doc(
+        r#"{"hr":[2.75,1e21,1e-7,-0],"interp":"BEZIER","v":[0.30000000000000004,1e-6,1e20],"tick":0,"hl":[-4.25,0,0,0]}"#,
+    );
+    let mut clip = Clip::load(&source, &rig).unwrap();
+    let canonical = clip.to_canonical_json();
+    assert_eq!(Clip::load(&canonical, &rig).unwrap(), clip);
+    assert_eq!(
+        Clip::load(&canonical, &rig).unwrap().to_canonical_json(),
+        canonical
+    );
+    for number in [
+        "-4.25",
+        "2.75",
+        "1e+21",
+        "1e-7",
+        "0.000001",
+        "100000000000000000000",
+        "0.30000000000000004",
+    ] {
+        assert!(canonical.contains(number), "{number}");
+    }
+    let mut at = 0;
+    for field in ["tick", "v", "interp", "hl", "hr"] {
+        at += canonical[at..].find(&format!("\"{field}\":")).unwrap() + field.len() + 3;
+    }
+    for interp in [Interp::Linear, Interp::Constant] {
+        clip.tracks[0].keys[0].interp = interp;
+        let text = clip.to_canonical_json();
+        assert!(!text.contains("\"hl\"") && !text.contains("\"hr\""));
+        assert!(Clip::load(&text, &rig).is_ok());
+    }
 }

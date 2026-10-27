@@ -63,7 +63,7 @@ pub enum Interp {
 }
 
 impl Interp {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Constant => "CONSTANT",
             Self::Linear => "LINEAR",
@@ -113,7 +113,8 @@ pub struct ClipEvent {
 }
 
 /// One key. `v` and the handles keep their parsed source values so canonical
-/// writing never reserializes them through runtime precision.
+/// writing never reserializes them through runtime precision. Handle element 0
+/// is the document dt offset (fractional and signed); sampling ignores it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipKey {
     pub tick: u32,
@@ -217,20 +218,7 @@ impl Clip {
                 let keys = track
                     .keys
                     .iter()
-                    .map(|entry| {
-                        let mut fields = vec![
-                            key("tick", JsonValue::Number(entry.tick.into())),
-                            key("v", entry.v.clone()),
-                            key("interp", JsonValue::String(entry.interp.name().into())),
-                        ];
-                        if let Some(hl) = &entry.hl {
-                            fields.push(key("hl", hl.clone()));
-                        }
-                        if let Some(hr) = &entry.hr {
-                            fields.push(key("hr", hr.clone()));
-                        }
-                        JsonValue::Object(fields)
-                    })
+                    .map(crate::canon::clip_key)
                     .collect();
                 JsonValue::Object(vec![
                     key("bone", JsonValue::String(track.bone.clone())),
@@ -361,7 +349,10 @@ fn handle(
     let Some(value) = optional(fields, name) else {
         return Ok(None);
     };
-    vector(value, channel.width() + 1, path, "clip.handles")?;
+    vector(value, channel.width() + 1, path, "clip.handles").map_err(|mut error| {
+        error.code = "clip.handles";
+        error
+    })?;
     Ok(Some(value.clone()))
 }
 

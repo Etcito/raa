@@ -4,6 +4,24 @@
 use crate::JsonValue;
 use std::fmt::Write;
 
+/// S17 key order. Handles belong only to Bezier keys, including when an editor
+/// changes a loaded key's interpolation without clearing its stored handles.
+pub(crate) fn clip_key(key: &crate::ClipKey) -> JsonValue {
+    let mut fields = vec![
+        ("tick".into(), JsonValue::Number(key.tick.into())),
+        ("v".into(), key.v.clone()),
+        ("interp".into(), JsonValue::String(key.interp.name().into())),
+    ];
+    if key.interp == crate::Interp::Bezier {
+        for (name, handle) in [("hl", &key.hl), ("hr", &key.hr)] {
+            if let Some(value) = handle {
+                fields.push((name.into(), value.clone()));
+            }
+        }
+    }
+    JsonValue::Object(fields)
+}
+
 /// Two-space JSON with exactly one final LF. Schema validation must reject
 /// non-finite document numbers before writing (JSON.stringify maps them to null).
 pub fn to_canonical_json(value: &JsonValue) -> String {
