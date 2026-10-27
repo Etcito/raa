@@ -76,11 +76,12 @@
   },
   {
     "name": "check-m16-scripts",
-    "command": "bash scripts/check.sh",
-    "timeout_s": 600,
+    "command": "env GALLIUM_DRIVER=llvmpipe bash scripts/check.sh",
+    "timeout_s": 1500,
     "cwd": ".",
     "after": [
-      "capture-m16-anim"
+      "capture-m16-anim",
+      "check-m16-cargo"
     ]
   },
   {
