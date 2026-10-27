@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAA animation brick diagnostic</title>
+  <style>
+    body { margin: 2rem; font: 16px system-ui, sans-serif; }
+    textarea { display: block; width: min(100%, 48rem); height: 6rem; margin: 1rem 0; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+    #error { color: #b00020; }
+  </style>
+</head>
+<body>
+  <h1>RAA animation brick diagnostic</h1>
+  <p>Hashes are computed by the Rust animation simulation running as browser WebAssembly.</p>
+  <p>Canonical seed/tick pairs: (0, 0), (1, 60), (305419896, 600). Run each tick count separately.</p>
+  <form id="request">
+    <label for="input">Run request (JSON)</label>
+    <textarea id="input">{"case":"det-selftest","seeds":[0],"ticks":0}</textarea>
+    <button type="submit">Run</button>
+  </form>
+  <p id="status" role="status">Loading diagnostic…</p>
+  <pre id="adapter"></pre>
+  <pre id="results"></pre>
+  <pre id="error" role="alert"></pre>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
