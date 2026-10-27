@@ -1,0 +1,16 @@
+[
+  {
+    "name": "build-clip-sample",
+    "command": "env npm_config_cache=/tmp/raa-5426-npm-cache bash scripts/build-bricks.sh",
+    "timeout_s": 3600,
+    "cwd": ".",
+    "after": []
+  },
+  {
+    "name": "capture-clip-sample",
+    "command": "node scripts/anim-capture.mjs clip-sample",
+    "timeout_s": 600,
+    "cwd": ".",
+    "after": ["build-clip-sample"]
+  }
+]

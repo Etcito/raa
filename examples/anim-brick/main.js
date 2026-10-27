@@ -67,10 +67,10 @@ function isU32(value) {
 
 function validate(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)
-      || args.case !== 'det-selftest' || !isU32(args.ticks)
+      || (args.case !== 'det-selftest' && args.case !== 'clip-sample') || !isU32(args.ticks)
       || !Array.isArray(args.seeds) || args.seeds.length === 0
       || !Array.from(args.seeds).every(isU32)) {
-    throw new TypeError('Expected {case:"det-selftest",seeds:[u32, ...],ticks:u32}; seeds must be nonempty.');
+    throw new TypeError('Expected {case:"det-selftest"|"clip-sample",seeds:[u32, ...],ticks:u32}; seeds must be nonempty.');
   }
   return { case: args.case, seeds: [...args.seeds], ticks: args.ticks };
 }

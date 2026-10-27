@@ -81,16 +81,66 @@ endpoint. Any zero-duration clip permitted by S17 produces zero delta.
 ## Selftest integration
 
 `clips::register` is discovered by the existing build registry and registers
-`selftest("clip-sample", seed, ticks)`. Its implementation is also available as
-`clips::clip_sample_selftest(seed, ticks)` for card 5426 integration. No changes
-to the brick dispatcher are needed. Inputs retain the dispatcher's u32 checks.
+the brick's `selftest("clip-sample", seed, ticks)` case. The native worker is
+`clips::clip_sample_selftest(seed, ticks)`. Inputs retain the dispatcher's u32
+checks; `det-selftest` keeps its existing behavior.
 
 The test loads `rig-basic` and the linear/constant, Bezier and rotation-flip
 fixtures. For each offset in `[0,ticks)`, it samples all three clips in that
 order at `seed.wrapping_add(offset)`, computes root deltas, checks finite output,
 and feeds skin matrices in bone/component order into DET_HASH. Zero ticks
-still loads and validates the fixtures. The returned record is exactly
+samples all three fixtures once at `seed`, through the same runtime path.
+The returned record is exactly
 `{case, seed, ticks, hash}`, with an eight-digit lowercase hexadecimal hash.
 The hash is API data; acceptance executes cases and does not compare hashes
 across native, Node or browser targets. Canonical cases are `(0,0)`, `(1,60)`
 and `(305419896,600)`.
+
+`cargo test -p raa-anim-js clip_sample` executes these inputs and checks sampled
+local transforms and root deltas against the committed independent
+f64 reference at its listed ticks (or its clamped endpoint), within 1e-6.
+Every sampled model and skin matrix must be finite. Registry coverage runs with
+`cargo test -p raa-anim-js --test api_registry`. Neither check compares hashes.
+
+Browser operation integration uses the existing
+`window.nmcGpu.ops.run({case, seeds, ticks})` on `examples/anim-brick` after a
+local brick build. Both `det-selftest` and `clip-sample` accept the same request
+shape: a nonempty array of u32 seeds and a u32 tick count. Other cases and
+invalid inputs are rejected before dispatch. Invoke the canonical cases
+separately, in order:
+
+```js
+for (const [seed, ticks] of [[0, 0], [1, 60], [305419896, 600]]) {
+  const result = await window.nmcGpu.ops.run({
+    case: 'clip-sample', seeds: [seed], ticks,
+  });
+  console.log(result.results); // [{case: 'clip-sample', seed, ticks, hash}]
+}
+```
+
+Successful execution and the returned record shape are the checks; retain the
+hash as API data.
+
+The managed capture command is `node scripts/anim-capture.mjs clip-sample`
+(`--case clip-sample` is equivalent). It requires `NMC_GPU_CLIENT`, publishes
+`dist/anim-brick/` after staging the built brick and shared page helper, and calls
+the declared `render` operation separately for the three canonical requests above.
+It first publishes and runs a blank diagnostic page to check the client protocol.
+The zero-tick request then runs first; any failure stops the sequence. Each client call
+has a 60-second limit. Software/fallback adapters and malformed records fail.
+Only after all requests succeed does it write
+`proofs/results/anim/clip-sample.json`, preserving the capture envelope
+`{adapter, hardware, adapterText, records}` and each dispatcher's exact
+`{case, seed, ticks, hash}` record in canonical order. No hash values are compared.
+`node scripts/anim-capture.mjs --case det-selftest` retains its existing local
+Chrome runner, stdout envelope and exit codes.
+
+`.nmc/commands.json` prepares the build and capture for programmatic execution.
+The build sets `npm_config_cache=/tmp/raa-5426-npm-cache` because the default
+cache is read-only. Model cards do not execute GPU jobs. Client-GPU capture
+acceptance remains pending until that execution succeeds; no evidence record is
+created by this card. The diagnostic operation returns JSON and no screenshot.
+`node --test scripts/anim-capture.test.mjs` covers CLI parsing/usage, staging,
+output location and failure handling with a stubbed client in temporary
+directories. It also exercises page validation and real staged WASM dispatch
+without GPU setup. Stub records are never acceptance evidence.

@@ -5,6 +5,12 @@ use crate::Case;
 pub const BRICK_VERSION: &str = "0.5.0";
 pub const BRICK_NAME: &str = "raa-anim";
 
+// Installed by the automatically discovered clips module.
+pub(crate) const CLIP_SAMPLE: Case = Case {
+    name: "clip-sample",
+    run: crate::clips::clip_sample_selftest,
+};
+
 pub fn register(cases: &mut Vec<Case>) {
     cases.push(Case {
         name: "det-selftest",

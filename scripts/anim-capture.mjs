@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Functional Chrome runner for examples/anim-brick: loads the staged animation brick
-// in a real Chrome and calls run() for each canonical det-selftest input. Records are
+// Functional Chrome runner for examples/anim-brick: det-selftest uses local Chrome;
+// clip-sample publishes the staged brick through NMC_GPU_CLIENT. Records are
 // checked for their exact shape and requested seed/ticks only; no hash or SHA value is
 // compared with anything (owner rule: no hash proofs).
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, resolve, sep } from 'node:path';
@@ -150,9 +150,9 @@ async function waitReady(pipe, sessionId, timeoutMs = 30_000) {
   throw new Error(`page did not become ready: ${last}`);
 }
 
-function validateOne(op, seed, ticks) {
+function validateOne(op, seed, ticks, caseName = 'det-selftest') {
   if (!op || typeof op !== 'object' || Array.isArray(op)) throw new Error('browser run returned no object');
-  if (op.case !== 'det-selftest' || op.ticks !== ticks || !Array.isArray(op.seeds)
+  if (op.case !== caseName || op.ticks !== ticks || !Array.isArray(op.seeds)
       || op.seeds.length !== 1 || op.seeds[0] !== seed) {
     throw new Error('browser run inputs differ from the request');
   }
@@ -170,7 +170,7 @@ function validateOne(op, seed, ticks) {
   if (!Array.isArray(op.results) || op.results.length !== 1) throw new Error('expected one browser record');
   const record = op.results[0];
   if (!record || Object.keys(record).sort().join(',') !== 'case,hash,seed,ticks'
-      || record.case !== 'det-selftest' || record.seed !== seed || record.ticks !== ticks
+      || record.case !== caseName || record.seed !== seed || record.ticks !== ticks
       || !isU32(record.seed) || !isU32(record.ticks)
       || typeof record.hash !== 'string' || !/^[0-9a-f]{8}$/.test(record.hash)) {
     throw new Error('browser selftest record is malformed');
@@ -222,11 +222,134 @@ export async function captureAnimBrick({ cases = DET_CASES } = {}) {
   }
 }
 
+// Only clip-sample uses the managed client; the det-selftest runner above retains
+// its existing local Chrome behavior and output. Each client call is bounded.
+function gpuClient(client, args) {
+  return new Promise((done, fail) => {
+    const child = spawn(process.execPath, [client, ...args], {
+      cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 60_000);
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    child.once('error', error => { clearTimeout(timer); fail(error); });
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) done(stdout);
+      else {
+        const token = process.env.NMC_GPU_TOKEN;
+        const detail = (token ? stderr.replaceAll(token, '[REDACTED]') : stderr).slice(-4000).trim();
+        fail(new Error(`GPU client ${args[0]} failed (${signal ?? code}); no record written`
+          + (detail ? `\n${detail}` : '')));
+      }
+    });
+  });
+}
+
+function pageRef(stdout) {
+  for (const text of [stdout, ...stdout.split(/\r?\n/)]) {
+    try {
+      const doc = JSON.parse(text);
+      for (const value of [doc, doc?.result, doc?.data]) {
+        const ref = value?.page_ref ?? value?.pageRef;
+        if (typeof ref === 'string' && ref.trim()) return ref.trim();
+      }
+    } catch { /* The client may also print progress lines. */ }
+  }
+  throw new Error('GPU publish returned no page_ref; no record written');
+}
+
+function opResult(doc, accept = value => value.adapter && Array.isArray(value.results)) {
+  const queue = [doc];
+  for (let i = 0; i < queue.length && i < 32; i++) {
+    const value = queue[i];
+    if (!value || typeof value !== 'object') continue;
+    if (accept(value)) return value;
+    for (const key of ['json', 'result', 'value', 'data', 'output', 'opResult', 'op_result', 'run']) {
+      if (value[key] && typeof value[key] === 'object') queue.push(value[key]);
+    }
+  }
+  throw new Error('GPU client returned no animation operation result; no record written');
+}
+
+export async function captureClipSample() {
+  const client = process.env.NMC_GPU_CLIENT;
+  if (!client || !existsSync(client)) throw new Error('NMC_GPU_CLIENT is required; no record written');
+  const work = mkdtempSync(join(tmpdir(), 'raa-clip-sample-'));
+  try {
+    // Establish the client protocol with a blank page before loading the brick.
+    const probe = join(work, 'probe');
+    mkdirSync(probe);
+    writeFileSync(join(probe, 'nmc.gpu.json'), JSON.stringify({ page: 'index.html', ops: ['render'] }));
+    writeFileSync(join(probe, 'index.html'), '<script>window.nmcGpu={ops:{render:async()=>({json:{ok:1},files:[]})}}</script>');
+    const probeRef = pageRef(await gpuClient(client, ['publish', probe]));
+    const probeInput = join(work, 'probe.json');
+    const probeOut = join(work, 'probe-out');
+    writeFileSync(probeInput, '{}');
+    await gpuClient(client, ['render', probeInput, '--page-ref', probeRef, '-o', probeOut]);
+    const probeResult = JSON.parse(readFileSync(join(probeOut, 'result.json'), 'utf8'));
+    opResult(probeResult, value => value.ok === 1);
+    stagePage();
+    const ref = pageRef(await gpuClient(client, ['publish', STAGE]));
+    const runs = [];
+    // Start with the smallest canonical request; do not proceed if it fails.
+    for (const [index, [seed, ticks]] of DET_CASES.entries()) {
+      const input = join(work, `${index}.json`);
+      const out = join(work, String(index));
+      writeFileSync(input, JSON.stringify({ args: { case: 'clip-sample', seeds: [seed], ticks } }));
+      await gpuClient(client, ['render', input, '--page-ref', ref, '-o', out]);
+      const op = opResult(JSON.parse(readFileSync(join(out, 'result.json'), 'utf8')));
+      const run = validateOne(op, seed, ticks, 'clip-sample');
+      if (!run.hardware || run.adapter.isFallbackAdapter || !label(run.adapter)
+          || /swiftshader|llvmpipe|lavapipe|software|basic render/i.test(label(run.adapter))) {
+        throw new Error('clip-sample requires a named hardware adapter; no record written');
+      }
+      if (runs.length && JSON.stringify(run.adapter) !== JSON.stringify(runs[0].adapter)) {
+        throw new Error('GPU adapter changed between cases; no record written');
+      }
+      runs.push(run);
+    }
+    const result = {
+      adapter: runs[0].adapter,
+      hardware: runs[0].hardware,
+      adapterText: label(runs[0].adapter),
+      records: runs.map(run => run.record),
+    };
+    const output = join(ROOT, 'proofs/results/anim/clip-sample.json');
+    mkdirSync(dirname(output), { recursive: true });
+    writeFileSync(output, JSON.stringify(result, null, 2) + '\n');
+    return result;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+export const USAGE = 'usage: node scripts/anim-capture.mjs --case det-selftest\n'
+  + '       node scripts/anim-capture.mjs clip-sample (or --case clip-sample; requires NMC_GPU_CLIENT)';
+
+export function parseArgs(argv) {
+  const text = argv.join(' ');
+  if (text === '--case det-selftest') return 'det-selftest';
+  if (text === 'clip-sample' || text === '--case clip-sample') return 'clip-sample';
+  return null;
+}
+
 const invoked = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 if (invoked) {
-  if (process.argv.slice(2).join(' ') !== '--case det-selftest') {
-    console.error('usage: node scripts/anim-capture.mjs --case det-selftest');
+  const mode = parseArgs(process.argv.slice(2));
+  if (!mode) {
+    console.error(USAGE);
     process.exitCode = 2;
+  } else if (mode === 'clip-sample') {
+    captureClipSample().then(result => {
+      console.log(JSON.stringify(result));
+      console.error('anim-capture: 3/3 client GPU records; wrote proofs/results/anim/clip-sample.json');
+    }).catch(error => {
+      console.error(`anim-capture: ${error.message}`);
+      process.exitCode = 1;
+    });
   } else {
     captureAnimBrick().then((result) => {
       console.log(JSON.stringify(result));

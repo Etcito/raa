@@ -36,15 +36,23 @@ pub fn sample_clip(clip: &AnimationClip, tick: u32) -> Result<(Pose, [f32; 3]), 
 }
 
 pub fn register(cases: &mut Vec<crate::Case>) {
-    cases.push(crate::Case {
-        name: "clip-sample",
-        run: clip_sample_selftest,
-    });
+    cases.push(crate::brick::CLIP_SAMPLE);
 }
 
 /// Exercise the S17 fixtures at consecutive ticks starting at seed (wrapping u32).
 /// DET_HASH is API data, not a cross-platform acceptance comparison.
 pub fn clip_sample_selftest(seed: u32, ticks: u32) -> u32 {
+    let mut hash = raa_det::DET_HASH;
+    visit_clip_samples(seed, ticks, |_, _, pose, _| {
+        for matrix in &pose.skin {
+            hash.f32s(matrix);
+        }
+    });
+    hash.finish()
+}
+
+// Keep native tests and the dispatched worker on the same ordinary runtime path.
+fn visit_clip_samples(seed: u32, ticks: u32, mut visit: impl FnMut(&str, u32, &Pose, [f32; 3])) {
     let rig = load_rig(include_str!(
         "../../../raa-anim/tests/fixtures/rig-basic.json"
     ))
@@ -55,19 +63,18 @@ pub fn clip_sample_selftest(seed: u32, ticks: u32) -> u32 {
         include_str!("../../../raa-anim/tests/fixtures/clip-rotation-flip.json"),
     ]
     .map(|json| load_clip(&rig, json).expect("selftest clip"));
-    let mut hash = raa_det::DET_HASH;
-    for offset in 0..ticks {
+    // Even the zero-tick input samples all fixtures once, at its starting tick.
+    for offset in 0..ticks.max(1) {
+        let tick = seed.wrapping_add(offset);
         for clip in &clips {
-            let (pose, delta) =
-                sample_clip(clip, seed.wrapping_add(offset)).expect("selftest sample");
+            let (pose, delta) = sample_clip(clip, tick).expect("selftest sample");
             assert!(delta.iter().all(|v| v.is_finite()));
-            for matrix in pose.skin {
+            for matrix in pose.model.iter().chain(&pose.skin) {
                 assert!(matrix.iter().all(|v| v.is_finite()));
-                hash.f32s(&matrix);
             }
+            visit(&clip.clip.name, tick, &pose, delta);
         }
     }
-    hash.finish()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -126,6 +133,7 @@ mod wasm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_anim::JsonValue;
     const RIG: &str = include_str!("../../../raa-anim/tests/fixtures/rig-basic.json");
     const CLIP: &str = include_str!("../../../raa-anim/tests/fixtures/clip-linear-constant.json");
 
@@ -169,9 +177,80 @@ mod tests {
         assert_eq!(sample_clip(&clip, 0).unwrap().1, [0.0; 3]);
     }
 
+    fn field<'a>(value: &'a JsonValue, name: &str) -> &'a JsonValue {
+        let JsonValue::Object(fields) = value else {
+            panic!("expected object")
+        };
+        &fields.iter().find(|(key, _)| key == name).unwrap().1
+    }
+
+    fn array(value: &JsonValue) -> &[JsonValue] {
+        let JsonValue::Array(values) = value else {
+            panic!("expected array")
+        };
+        values
+    }
+
+    fn compare(actual: &[f32], expected: &JsonValue) {
+        let expected = array(expected);
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, expected) in actual.iter().zip(expected) {
+            let JsonValue::Number(expected) = expected else {
+                panic!("expected number")
+            };
+            assert!(actual.is_finite());
+            assert!(
+                (f64::from(actual) - expected).abs() <= 1e-6,
+                "sample {actual} differs from reference {expected}"
+            );
+        }
+    }
+
     #[test]
-    fn selftest_executes_canonical_cases() {
+    fn clip_sample_executes_canonical_cases_and_checks_values() {
+        // Independently generated f64 expectations, never runtime-derived hashes.
+        let reference = raa_anim::parse(include_str!(
+            "../../../raa-anim/tests/fixtures/samples.json"
+        ))
+        .unwrap();
         for (seed, ticks) in raa_det::DET_CASES {
+            let mut visited = 0;
+            let mut compared = [0; 3];
+            visit_clip_samples(seed, ticks, |name, tick, pose, delta| {
+                visited += 1;
+                let records = array(field(&reference, "clips"));
+                let index = records
+                    .iter()
+                    .position(|r| field(r, "name") == &JsonValue::String(name.into()))
+                    .unwrap();
+                let poses = array(field(&records[index], "poses"));
+                let last = poses.last().unwrap();
+                // These committed fixtures are non-looping: high seeds clamp.
+                let expected = poses
+                    .iter()
+                    .find(|p| field(p, "tick") == &JsonValue::Number(tick.into()))
+                    .or_else(|| {
+                        let JsonValue::Number(end) = field(last, "tick") else {
+                            unreachable!()
+                        };
+                        (f64::from(tick) > *end).then_some(last)
+                    });
+                if let Some(expected) = expected {
+                    compared[index] += 1;
+                    compare(&delta, field(expected, "rootDelta"));
+                    let locals = array(field(expected, "local"));
+                    assert_eq!(pose.local.len(), locals.len());
+                    for (local, expected) in pose.local.iter().zip(locals) {
+                        compare(&local.t, field(expected, "t"));
+                        compare(&local.r, field(expected, "r"));
+                        compare(&local.s, field(expected, "s"));
+                    }
+                    assert_eq!(pose.model.len(), locals.len());
+                    assert_eq!(pose.skin.len(), locals.len());
+                }
+            });
+            assert_eq!(visited, ticks.max(1) * 3);
+            assert!(compared.iter().all(|&count| count > 0));
             let result = crate::dispatch("clip-sample", seed.into(), ticks.into()).unwrap();
             assert_eq!(
                 (result.case, result.seed, result.ticks),
