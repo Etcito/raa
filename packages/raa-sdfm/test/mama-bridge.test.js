@@ -177,3 +177,22 @@ test('MAMA BASE_WGSL is the first helper, so a body calling mat_clamp01 maps to 
   await assert.rejects(meshDocument(noBase, doc(), { pool: fakeMama.fakePool() }),
     (e) => rejectsWith('sdfm.material_unmappable')(e) && /BASE_WGSL/.test(e.message));
 });
+
+test('importMama exposes the root serializer for URL-based asset loading', async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { pathToFileURL } = await import('node:url');
+  const { importMama } = await import('../src/mama-bridge.js');
+  const dir = await mkdtemp(join(tmpdir(), 'raa-mama-test-'));
+  try {
+    await mkdir(join(dir, 'core/game'), { recursive: true });
+    await mkdir(join(dir, 'core/material-graph'), { recursive: true });
+    await writeFile(join(dir, 'package.json'), '{"type":"module"}');
+    await writeFile(join(dir, 'index.js'), 'export const serializeDocument = d => JSON.stringify(d); export const readSdfm = d => d;');
+    await writeFile(join(dir, 'core/game/mesh-assets.js'), 'export const meshAssets = async () => [];');
+    await writeFile(join(dir, 'core/material-graph/helpers.js'), 'export const HELPERS = {}; export const BASE_WGSL = "";');
+    const mama = await importMama(pathToFileURL(dir + '/'), { browser: false });
+    assert.equal(mama.serializeDocument({ test: 1 }), '{"test":1}');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

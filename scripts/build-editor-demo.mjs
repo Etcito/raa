@@ -3,7 +3,6 @@
 import { cpSync, mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { documentHash } from '../packages/raa-sdfm/src/canonical.js';
 const [mamaArg, assetArg] = process.argv.slice(2);
 if (!mamaArg || !assetArg) throw new Error('usage: node scripts/build-editor-demo.mjs <MAMA checkout> <asset.json>');
 const mama=resolve(mamaArg), out=resolve('dist/editor');
@@ -24,11 +23,5 @@ for(const dir of ['','core/game','core/material-graph','browser']) {
   const highs=join(mama,'node_modules/highs/build/highs.wasm');
   if(existsSync(highs))cpSync(highs,join(out,'mama',dir,'highs.wasm'));
 }
-// Normalise only the export hash to this adapter's canonical-document convention.
-// The source and the mesh/material document remain unchanged.
-const asset=JSON.parse(readFileSync(assetArg,'utf8'));
-const hash=await documentHash(asset.document);
-if(asset.hash!==hash) console.log('Normalised staged asset hash to the adapter canonical-document convention.');
-asset.hash=hash;
-writeFileSync(join(out,'asset.json'),JSON.stringify(asset,null,2)+'\n');
+cpSync(assetArg,join(out,'asset.json'));
 console.log('Staged dist/editor; serve with: node web/serve.mjs dist/editor --port 8080');

@@ -229,3 +229,18 @@ test('worker handler: a failed init answers each mesh request with an error', as
   await handle({ type: 'mesh', id: 1, document: doc('a'), mesher: {} });
   assert.deepEqual(posted, [{ type: 'error', id: 1, code: 'sdfm.worker', message: 'cannot import MAMA module x' }]);
 });
+
+
+test('worker transfers optional polygon edges, including an empty list', async () => {
+  for (const edges of [[0, 1, 1, 2], []]) {
+    const { created, createWorker } = fakeFactory();
+    const pool = createPool({ size: 1, workerUrl: 'worker.js', createWorker });
+    try {
+      const input = doc('polygon');
+      input.nodes.polygon.fake.parts[0].subMeshes[0].edges = edges;
+      const result = await pool.mesh(input, {});
+      assert.deepEqual(result.groups[0].parts[0].meshes[0].edges, Uint32Array.from(edges));
+      assert.equal(created[0].transfers[0].length, 5);
+    } finally { pool.terminate(); }
+  }
+});

@@ -10,8 +10,9 @@ MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones 
 
 | specifier | export | signature used | returns | MAMA file @ 864ebc3 |
 |---|---|---|---|---|
+| `mama` | `serializeDocument` | `serializeDocument(document)` | Document text whose UTF-8 bytes define the asset sha256 | MAMA index export |
 | `mama` | `readSdfm` | `readSdfm(document)` (the asset's `document`, unchanged) | `SdfDocument` | `src/sdfm.ts:26` |
-| `mama/core/game/mesh-assets.js` | `meshAssets` | `meshAssets(doc, { pool, groups })`; `pool: ComputePool` (node: the caller's pool; browser: from `setupBrowserHost`); `groups: NodeId[]` | `Promise<AssetMeshResult[]>`; each result `{ group, parts: [{ partId, name, frame: Float64Array, subMeshes: [{ material: string \| null, positions: Float32Array, normals: Float32Array, uvs?: Float32Array, indices: Uint32Array }] }], materials, error: { code, message, fix } \| null }` | `src/core/game/mesh-assets.ts:133` |
+| `mama/core/game/mesh-assets.js` | `meshAssets` | `meshAssets(doc, { pool, groups })`; `pool: ComputePool` (node: the caller's pool; browser: from `setupBrowserHost`); `groups: NodeId[]` | `Promise<AssetMeshResult[]>`; each result `{ group, parts: [{ partId, name, frame: Float64Array, subMeshes: [{ material: string \| null, positions: Float32Array, normals: Float32Array, uvs?: Float32Array, indices: Uint32Array, edges?: Uint32Array }] }], materials, error: { code, message, fix } \| null }` | `src/core/game/mesh-assets.ts:133` |
 | `mama` | `buildMaterial` | not called by the bridge: `meshAssets` calls `buildMaterial(subset, id)` for the materials of each group; the bridge reads the values in `AssetMeshResult.materials` | `BuiltMaterial { id, name, def, graph: CompiledGraph \| null, error }`; the bridge reads `id`, `error`, `graph.wgslBody`, `graph.helpers`, `graph.constants` | `src/sdfm.ts:77` |
 | `mama/core/material-graph/helpers.js` | `HELPERS` | `HELPERS[id].code`, `HELPERS[id].deps` (helper id -> WGSL text) | `Record<HelperId, { deps?: HelperId[], code: string }>` | `src/core/material-graph/helpers.ts:73` |
 | `mama/core/material-graph/helpers.js` | `BASE_WGSL` | read as text (MAMA emits it in front of every material module, `src/core/material-graph/slots.ts:402`) | `string`: the always-emitted constants and scalar helpers (`mat_clamp01`, `mat_smoothstep`, ...) | `src/core/material-graph/helpers.ts:37` |
@@ -72,7 +73,7 @@ Every exported name of `index.d.ts`:
 | `SdfmProgress` | One `onProgress` record: `stage` (`validate`, `mesh`, `upload`), `done`, `total`. |
 | `SdfmValidationResult` | The `validate` result: `{ ok, errors }`; validation is synchronous and needs no MAMA. |
 | `SdfmValidationError` | One validation entry: an S15 `code`, a JSON pointer `path` and a human `message`. |
-| `SdfmMamaModule` | The MAMA exports used for in-process meshing: `readSdfm`, `meshAssets`, `HELPERS`, `BASE_WGSL`, `setupBrowserHost?`, `pool?`. |
+| `SdfmMamaModule` | The MAMA exports used for in-process meshing: `readSdfm`, `serializeDocument`, `meshAssets`, `HELPERS`, `BASE_WGSL`, `setupBrowserHost?`, `pool?`. |
 | `SdfmCompiledMaterial` | A MAMA compiled material as the bridge normalises it: `name`, `key` (sha256 hex), `body`, `helpers`, `constants`, `fields`. |
 | `SdfmMappedMaterial` | The `mapMaterial` result: `functionName`, `wgsl` (an S11 `material_main`), `desc` (always `blend: 'opaque'`), `dropped`. |
 | `mapMaterial` | Wraps a `SdfmCompiledMaterial` into an S11 user material function and a surface-material description. |
@@ -93,7 +94,7 @@ Every exported name of `index.d.ts`:
 | `sdfm.not_finite` | A number anywhere in the asset is not finite (JSON pointer). |
 | `sdfm.id` | `id` does not match `^[a-z][a-z0-9]*(\.[a-z0-9-]+)+$` (path `/id`). |
 | `sdfm.cap_document` | The canonical document text exceeds 2 MiB (path `/document`). |
-| `sdfm.hash_mismatch` | The recomputed sha256 of the canonical document differs from `hash` (path `/hash`). |
+| `sdfm.hash_mismatch` | The recomputed sha256 of the UTF-8 bytes of MAMA `serializeDocument(document)` differs from `hash` (path `/hash`). |
 | `sdfm.mesher_refused` | MAMA refused a group with a value error (`MESHER_GROUP_UNSUPPORTED`); the first refused group in result order wins, the message names the group and its fix (path `/document`). |
 | `sdfm.material_unmappable` | MAMA could not build a material or resolve a helper, or the mapped WGSL is not an S11 function (unknown field, forbidden token, `raa_` identifier, more than 65536 bytes); the message names the material and the token. |
 | `sdfm.worker` | MAMA could not be imported or threw, a worker crashed or broke the protocol, or `options.mama()` failed. |
@@ -133,3 +134,10 @@ loader.dispose();
 ## Packaging
 
 `scripts/build-package.sh` packs this JavaScript adapter alongside RAA at the same version. The published manifest declares no peer dependencies: the consuming app provides RAA and MAMA, which are distributed outside the npm registry. This preserves the packaging policy introduced in 0.1.1.
+
+Asset hashes use MAMA’s exported `serializeDocument(document)` exactly, without
+extra whitespace or a newline from the adapter. `importMama` includes this export;
+callers supplying exports directly must include it. Material graph keys still use
+`canonicalJson`. Optional MAMA submesh polygon `edges` pass through as `MeshDesc.edges`,
+with vertex offsets after material grouping. Missing lists use triangle edges; an
+explicit empty list stays empty.

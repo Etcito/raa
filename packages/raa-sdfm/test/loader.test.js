@@ -1,3 +1,4 @@
+import { serializeDocument } from './fake-mama.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -33,7 +34,7 @@ async function variant(id, edit) {
   const asset = fixture();
   asset.id = id;
   edit(asset.document);
-  asset.hash = await documentHash(asset.document);
+  asset.hash = await documentHash(asset.document, serializeDocument);
   return asset;
 }
 
@@ -178,12 +179,12 @@ test('an invalid asset is refused with its S15 code and path, without calling MA
   assert.equal(engine.calls.addMesh.length, 2);
 });
 
-test('a tampered document is sdfm.hash_mismatch and MAMA is not called', async () => {
+test('a tampered document is sdfm.hash_mismatch before meshing or upload', async () => {
   const { loader, mamaCalls } = setup();
   const asset = fixture();
   asset.document.nodes.cart.name = 'Tampered';
   await assert.rejects(loader.load(asset), code('sdfm.hash_mismatch'));
-  assert.equal(mamaCalls(), 0);
+  assert.equal(mamaCalls(), 1, 'MAMA supplies the serializer');
 });
 
 test('a MAMA group refusal surfaces as sdfm.mesher_refused naming the group', async () => {
@@ -275,4 +276,41 @@ test('a function the engine already has (material.fn_duplicate) counts as regist
   const asset = await second.load(fixture());
   assert.equal(engine.calls.addMaterialFunction.length, 2);
   assert.equal(asset.parts.length, 2);
+});
+
+
+test('polygon edges follow material grouping and vertex offsets; absent and empty stay distinct', async () => {
+  const { engine, loader } = setup();
+  const input = await variant('test.edges', (doc) => {
+    const subs = doc.nodes.cart.fake.parts[0].subMeshes;
+    subs[0].edges = [0, 1, 1, 2];
+    subs[1].edges = [];
+    subs[2].edges = [0, 2];
+  });
+  const asset = await loader.load(input);
+  const desc = engine.meshes.get(asset.parts[0].mesh);
+  assert.deepEqual(desc.edges, new Uint32Array([0, 1, 1, 2, 6, 8]));
+  assert.equal(engine.meshes.get(asset.parts[1].mesh).edges, undefined);
+});
+
+test('mixed polygon and legacy submeshes retain legacy triangle edges', async () => {
+  const { engine, loader } = setup();
+  const input = await variant('test.mixed-edges', (doc) => {
+    doc.nodes.cart.fake.parts[0].subMeshes[0].edges = [];
+  });
+  const asset = await loader.load(input);
+  assert.deepEqual(engine.meshes.get(asset.parts[0].mesh).edges,
+    new Uint32Array([6, 7, 7, 8, 8, 6, 9, 10, 10, 11, 11, 9]));
+});
+
+
+test('loader hashes serializer bytes rather than adapter pretty JSON', async () => {
+  const { sha256Hex, canonicalJson } = await import('../src/canonical.js');
+  const { loader } = setup();
+  const input = fixture();
+  assert.notEqual(input.hash, await sha256Hex(canonicalJson(input.document)));
+  await loader.load(input);
+  input.hash = await sha256Hex(canonicalJson(input.document));
+  await assert.rejects(loader.load(input), (e) =>
+    code('sdfm.hash_mismatch')(e) && e.path === '/hash' && /sha256/.test(e.message));
 });

@@ -105,11 +105,12 @@ export function validateAsset(asset) {
  * Recomputes the document hash and compares it with `asset.hash`.
  *
  * @param {{ document: unknown, hash: string }} asset a validated asset
+ * @param {(document: unknown) => string} serializeDocument MAMA serializer export
  * @returns {Promise<void>}
  * @throws SdfmError `sdfm.hash_mismatch` at `/hash`
  */
-export async function checkHash(asset) {
-  const actual = await documentHash(asset.document);
+export async function checkHash(asset, serializeDocument) {
+  const actual = await documentHash(asset.document, serializeDocument);
   if (actual !== asset.hash) {
     throw new SdfmError('sdfm.hash_mismatch', `hash ${asset.hash} does not match the document (sha256 ${actual})`, '/hash');
   }

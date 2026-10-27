@@ -137,3 +137,33 @@ fn shafts_params_field_order_matches_size() {
     let size: u64 = expected.iter().map(|(_, _, s)| s).sum();
     assert_eq!(size, shaders::PARAMS_SIZE);
 }
+
+#[test]
+fn march_depth_is_finite_in_binary16_and_bilateral_weights_remain_finite() {
+    let source = shaders::SHAFTS_WGSL;
+    let sky: f32 = source
+        .split("const SKY_DEPTH: f32 = ")
+        .nth(1)
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Binary16's maximum finite value: an old 1e6 sentinel fails here.
+    assert!(sky > 1000.0 && sky <= 65504.0);
+    assert!(source.contains("clamp(view_depth_of(world), 0.0, SKY_DEPTH)"));
+    assert!(source.contains("clamp(view_depth_of(unproject(uv, d)), 0.0, SKY_DEPTH)"));
+    for depth in [3.0_f32, sky] {
+        let mut sum = 0.0;
+        let mut weight = 0.0;
+        for tap in [sky, sky, sky, 3.0] {
+            let rel = (tap - depth).abs() / depth.max(1e-3);
+            let w = 0.25 / (1e-2 + rel);
+            sum += 0.5 * w;
+            weight += w;
+        }
+        assert!(weight.is_finite() && weight > 0.0);
+        assert!((sum / weight - 0.5).abs() < 1e-5);
+    }
+}

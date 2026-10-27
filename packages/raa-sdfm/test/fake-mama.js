@@ -91,7 +91,7 @@ function fakeSubMesh(spec) {
   const normals = new Float32Array(n * 3).map((_, i) => (i % 3 === 1 ? 1 : 0));
   const indices = new Uint32Array(n).map((_, i) => i);
   const uvs = spec.uvs ? new Float32Array(n * 2).map((_, i) => i / (n * 2)) : undefined;
-  return { material: spec.material, positions, normals, ...(uvs ? { uvs } : {}), indices };
+  return { material: spec.material, positions, normals, ...(uvs ? { uvs } : {}), indices, ...(spec.edges != null ? { edges: Uint32Array.from(spec.edges) } : {}) };
 }
 
 /** meshAssets(doc, { groups?, output?, pool?, onProgress?, onNotice? }): Promise<AssetMeshResult[]>. */
@@ -148,3 +148,6 @@ export function fakePool(size = 1) {
     dispose() {},
   };
 }
+
+// Deliberately differs from adapter pretty JSON: tests must use the supplied serializer.
+export const serializeDocument = (document) => JSON.stringify(document);

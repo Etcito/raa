@@ -4,7 +4,7 @@
 import { SdfmError } from './errors.js';
 import { validateAsset, checkHash } from './validate.js';
 import { mapMaterial } from './map-material.js';
-import { meshDocument } from './mama-bridge.js';
+import { importMama, meshDocument } from './mama-bridge.js';
 import { createPool } from './pool.js';
 
 const DISPOSED = 'the sdfm loader was disposed';
@@ -30,6 +30,7 @@ export function createSdfmLoader(options) {
   const functions = new Set();
   let source = null;
   let pool = null;
+  let hashMama = null;
   let disposed = false;
 
   const disposedError = () => new SdfmError('sdfm.disposed', DISPOSED);
@@ -135,7 +136,14 @@ export function createSdfmLoader(options) {
         const [first] = errors;
         throw new SdfmError(first.code, first.message, first.path);
       }
-      await checkHash(asset);
+      const m = await resolveMama();
+      hashMama ??= typeof m === 'string' || m instanceof URL
+        ? importMama(m, { browser: false }) : Promise.resolve(m);
+      const exports = await hashMama;
+      if (typeof exports?.serializeDocument !== 'function') {
+        throw new SdfmError('sdfm.worker', 'MAMA serializeDocument export is required for asset hashes');
+      }
+      await checkHash(asset, exports.serializeDocument);
       checkLive();
       progress('validate', 1, 1);
 
@@ -206,6 +214,7 @@ function partMesh(part, handles) {
   const uvs = withUvs ? new Float32Array(vertices * 2) : null;
   const indices = new Uint32Array(indexCount);
 
+  const edges = ordered.some((m) => m.edges != null) ? [] : null;
   const subMeshes = [];
   const materials = [];
   let base = 0;
@@ -217,6 +226,20 @@ function partMesh(part, handles) {
       normals.set(m.normals, base * 3);
       if (uvs && m.uvs) uvs.set(m.uvs, base * 2);
       for (let i = 0; i < m.indices.length; i += 1) indices[first + i] = m.indices[i] + base;
+      if (edges) {
+        // Preserve polygon topology where supplied; use triangle edges for older meshes.
+        if (m.edges != null) {
+          for (const index of m.edges) edges.push(index + base);
+        } else {
+          const seen = new Set();
+          for (let i = 0; i < m.indices.length; i += 3) {
+            for (const [a, b] of [[m.indices[i], m.indices[i + 1]], [m.indices[i + 1], m.indices[i + 2]], [m.indices[i + 2], m.indices[i]]]) {
+              const key = `${Math.min(a, b)},${Math.max(a, b)}`;
+              if (!seen.has(key)) { seen.add(key); edges.push(a + base, b + base); }
+            }
+          }
+        }
+      }
       base += m.positions.length / 3;
       first += m.indices.length;
     }
@@ -233,6 +256,7 @@ function partMesh(part, handles) {
   }
   const desc = { positions, normals, indices, subMeshes };
   if (uvs) desc.uvs = uvs;
+  if (edges) desc.edges = Uint32Array.from(edges);
   return { desc, materials };
 }
 

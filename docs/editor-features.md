@@ -231,9 +231,8 @@ complete 1280×600 → 960×540 → 1280×600 resize cycles, including repeated 
 resize calls.
 
 The capture script refuses an empty frame or GPU error and asserts that the
-fully disabled variant records no editor render pass. The staging script
-normalizes the source export hash to the adapter's canonical-document hash in
-`dist/` only: source files and geometry/material documents are unchanged.
+fully disabled variant records no editor render pass. The staging script copies the source asset unchanged. The adapter checks its hash
+with MAMA's `serializeDocument(document)` UTF-8 bytes.
 
 ## Validation and remaining work
 
@@ -264,6 +263,5 @@ Open limits:
   hardware/MSAA edge cases and extreme camera near-plane cases need further review.
 - Camera-dependent optional post effects were disabled for the polygon proof.
   Their orthographic assumptions have not been audited.
-- The source adapter currently supplies triangle indices without a polygon edge
-  list. Consumers with polygon topology should pass it explicitly; extraction
-  of that topology through the adapter is separate work.
+- The source adapter preserves optional MAMA polygon edge lists, including material-local
+  vertex offsets; older meshes without them use triangle edges.

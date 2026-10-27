@@ -1,4 +1,4 @@
-// Canonical JSON text (S4) and the sha256 of it (S15 document hash). Web standards only.
+// Canonical JSON for adapter data and SHA-256, including MAMA-serialized document hashes.
 import { SdfmError } from './errors.js';
 
 /**
@@ -86,14 +86,14 @@ export function sha256Bytes(bytes) {
 }
 
 /**
- * SHA-256 of the canonical text of a document (the asset `hash` field).
+ * SHA-256 of MAMA serializeDocument(document), as UTF-8 (the asset `hash` field).
  *
  * @param {unknown} document
  * @returns {Promise<string>}
- * @throws SdfmError as {@link canonicalJson}
+ * @param {(document: unknown) => string} serializeDocument MAMA serializer export
  */
-export async function documentHash(document) {
-  return sha256Hex(canonicalJson(document));
+export async function documentHash(document, serializeDocument) {
+  return sha256Hex(serializeDocument(document));
 }
 
 function checkJson(value, pointer) {

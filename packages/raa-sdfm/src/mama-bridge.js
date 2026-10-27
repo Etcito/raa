@@ -25,7 +25,7 @@ const SPECIFIERS = Object.freeze({
  *
  * @param {string | URL} [base]
  * @param {{ browser?: boolean }} [options] browser false skips `mama/browser` (node)
- * @returns {Promise<{ readSdfm: Function, meshAssets: Function, HELPERS: object, BASE_WGSL: string,
+ * @returns {Promise<{ readSdfm: Function, serializeDocument: Function, meshAssets: Function, HELPERS: object, BASE_WGSL: string,
  *   setupBrowserHost?: Function }>}
  * @throws SdfmError `sdfm.worker` when a module cannot be imported
  */
@@ -47,6 +47,7 @@ export async function importMama(base, options = {}) {
   ]);
   return {
     readSdfm: root.readSdfm,
+    serializeDocument: root.serializeDocument,
     meshAssets: mesh.meshAssets,
     HELPERS: helpers.HELPERS,
     BASE_WGSL: helpers.BASE_WGSL,
@@ -91,7 +92,7 @@ export function createBrowserPool(mama, options) {
  * @returns {Promise<{
  *   groups: { group: string, parts: { partId: string, name: string, frame: Float64Array,
  *     meshes: { material: string | null, positions: Float32Array, normals: Float32Array,
- *       uvs: Float32Array | null, indices: Uint32Array }[] }[] }[],
+ *       uvs: Float32Array | null, indices: Uint32Array, edges?: Uint32Array }[] }[] }[],
  *   materials: MamaMaterial[] }>}
  * @throws SdfmError `sdfm.mesher_refused` (first refused group in result order, path /document),
  *   `sdfm.material_unmappable` (a material MAMA cannot build or a helper without source),
@@ -132,6 +133,7 @@ export async function meshDocument(mama, document, options) {
           normals: Float32Array.from(sub.normals),
           uvs: sub.uvs ? Float32Array.from(sub.uvs) : null,
           indices: Uint32Array.from(sub.indices),
+          ...(sub.edges != null ? { edges: Uint32Array.from(sub.edges) } : {}),
         })),
       })),
     });

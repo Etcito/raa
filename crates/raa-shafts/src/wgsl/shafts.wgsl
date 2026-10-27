@@ -64,8 +64,9 @@ struct EnvGpu {
 const STEPS: u32 = 32u;
 const HG_G: f32 = 0.7;
 const PI: f32 = 3.14159265359;
-// View depth given to background pixels (depth 1), so the bilateral weights still match.
-const SKY_DEPTH: f32 = 1e6;
+// Largest finite binary16 value, exactly representable in the march alpha. Clamp
+// geometry in both passes too, so distant surfaces and sky compare in the same range.
+const SKY_DEPTH: f32 = 65504.0;
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -105,7 +106,7 @@ fn scene_view_depth(uv: vec2<f32>) -> f32 {
     if (d >= 1.0) {
         return SKY_DEPTH;
     }
-    return view_depth_of(unproject(uv, d));
+    return clamp(view_depth_of(unproject(uv, d)), 0.0, SKY_DEPTH);
 }
 
 // Interleaved gradient noise (Jimenez 2014) in [0, 1), animated by the frame index.
@@ -169,7 +170,7 @@ fn fs_march(in: VsOut) -> @location(0) vec4<f32> {
         let world = unproject(in.uv, d);
         dir = normalize(world - cam);
         scene_dist = length(world - cam);
-        vd = view_depth_of(world);
+        vd = clamp(view_depth_of(world), 0.0, SKY_DEPTH);
     }
     let dist = min(scene_dist, shafts.params.y);
     let step_len = dist / f32(STEPS);

@@ -1,3 +1,4 @@
+import { serializeDocument } from './fake-mama.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -19,7 +20,7 @@ function expectError(asset, code, path) {
 test('fixture validates and its hash matches', async () => {
   const a = fixture();
   assert.deepEqual(validateAsset(a), { ok: true, errors: [] });
-  await checkHash(a);
+  await checkHash(a, serializeDocument);
 });
 
 test('non-object root is sdfm.schema at the root', () => {
@@ -76,8 +77,8 @@ test('document over 2 MB is sdfm.cap_document', () => {
 test('tampered document is sdfm.hash_mismatch at /hash', async () => {
   const a = fixture();
   a.document.root.halfExtents[0] = 0.75;
-  assert.notEqual(await documentHash(a.document), a.hash);
-  await assert.rejects(checkHash(a), (e) => {
+  assert.notEqual(await documentHash(a.document, serializeDocument), a.hash);
+  await assert.rejects(checkHash(a, serializeDocument), (e) => {
     assert.ok(e instanceof SdfmError);
     assert.equal(e.code, 'sdfm.hash_mismatch');
     assert.equal(e.path, '/hash');

@@ -81,6 +81,7 @@ function transferList(result) {
         add(mesh.normals);
         add(mesh.uvs);
         add(mesh.indices);
+        add(mesh.edges);
       }
     }
   }

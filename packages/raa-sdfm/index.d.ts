@@ -130,7 +130,7 @@ export interface SdfmPart {
 export interface SdfmAsset {
   /** Asset id (`^[a-z][a-z0-9]*(\.[a-z0-9-]+)+$`). */
   id: string;
-  /** sha256 of the canonical document; the load cache key. */
+  /** sha256 of UTF-8 MAMA serializeDocument(document); the load cache key. */
   hash: string;
   name: string;
   category: string;
@@ -162,6 +162,8 @@ export interface SdfmSpawned {
  * MAMA cannot build.
  */
 export interface SdfmMamaModule {
+  /** MAMA serializer used verbatim for the asset document hash. */
+  serializeDocument(document: unknown): string;
   /** MAMA's `readSdfm`: builds MAMA's document from the asset's `document`. */
   readSdfm(document: unknown): unknown;
   /** MAMA's `meshAssets(doc, { pool, groups })`; each result is `{ group, parts, materials, error }`. */

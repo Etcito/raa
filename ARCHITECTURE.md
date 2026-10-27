@@ -515,7 +515,7 @@ RAA uses only:
 - `document`, meshed by MAMA in workers;
 - `mesher`, passed to MAMA unchanged;
 - `anchors` and `bounds`;
-- `hash`, the cache key: the recomputed sha256 of the canonical document must match.
+- `hash`, the cache key: the recomputed sha256 of the UTF-8 bytes of MAMA `serializeDocument(document)` must match.
 
 `collision` is passed through untouched and never used for rendering. MAMA's typed mesher refusals surface as `sdfm.mesher_refused`, with MAMA's message naming the group.
 

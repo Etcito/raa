@@ -1,3 +1,4 @@
+import { serializeDocument } from './fake-mama.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -94,8 +95,8 @@ test('canonicalJson refuses values that are not JSON with sdfm.schema', () => {
   assert.throws(() => canonicalJson(new Date(0)), (err) => err.code === 'sdfm.schema');
 });
 
-test('documentHash is the sha256 of the canonical text and depends on key order', async () => {
+test('documentHash is the sha256 of MAMA serializer output and depends on key order', async () => {
   const document = { name: 'chair', parts: [{ name: 'seat', t: [0, 0.5, 0] }] };
-  assert.equal(await documentHash(document), nodeSha256(canonicalJson(document)));
-  assert.notEqual(await documentHash({ a: 1, b: 2 }), await documentHash({ b: 2, a: 1 }));
+  assert.equal(await documentHash(document, serializeDocument), nodeSha256(serializeDocument(document)));
+  assert.notEqual(await documentHash({ a: 1, b: 2 }, serializeDocument), await documentHash({ b: 2, a: 1 }, serializeDocument));
 });

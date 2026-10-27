@@ -2,7 +2,7 @@
 // crate in ./pkg/ (built by scripts/build-package.sh). Types live in index.d.ts.
 import init, { Engine } from './pkg/raa_js.js';
 
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 
 // Editor controls are native Engine methods: updateMesh, setWireframe,
 // setSelectionOutline and setCamera (perspective or orthographic). Returning
