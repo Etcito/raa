@@ -757,6 +757,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-det"
+version = "0.4.1"
+
+[[package]]
 name = "raa-dof"
 version = "0.4.1"
 dependencies = [
