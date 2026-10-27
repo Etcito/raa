@@ -4,5 +4,8 @@
   {"name": "build-sdfm-compare", "command": "bash scripts/build-sdfm-compare.sh --mama ../MAMA", "timeout_s": 3600, "cwd": ".", "after": ["test-sdfm", "test-sdfm-compare"]},
   {"name": "capture-m12", "command": "env NMC_CPUS=1 node scripts/lookdev-capture.mjs --page sdfm-compare --milestone m12", "timeout_s": 3600, "cwd": ".", "after": ["build-sdfm-compare"]},
   {"name": "proof-m12", "command": "node proofs/m12-sdfm.mjs", "timeout_s": 1800, "cwd": ".", "after": ["capture-m12"]},
-  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m12"]}
+  {"name": "p2-smoke", "command": "node proofs/lib/p2-smoke.mjs", "timeout_s": 600, "cwd": ".", "after": ["capture-m12"]},
+  {"name": "capture-m16-anim", "command": "node scripts/anim-capture.mjs --case det-selftest", "timeout_s": 2400, "cwd": ".", "after": ["test-sdfm", "test-sdfm-compare", "build-sdfm-compare", "capture-m12", "proof-m12", "p2-smoke"]},
+  {"name": "verify-m16-anim", "command": "node proofs/m16-anim-brick.mjs", "timeout_s": 3600, "cwd": ".", "after": ["capture-m16-anim"]},
+  {"name": "check-m16-cargo", "command": "cargo check", "timeout_s": 600, "cwd": ".", "after": ["verify-m16-anim"]}
 ]
