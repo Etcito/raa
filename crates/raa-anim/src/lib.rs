@@ -1,7 +1,9 @@
 //! Animation brick for RAA: strict JSON reading and the shared refusal type.
 
 use std::fmt;
+pub mod canon;
 pub mod json;
+pub use canon::to_canonical_json;
 pub use json::{JsonValue, parse};
 
 /// A refusal with a stable code (`json.*`, `rig.*`, `clip.*`) and path.
