@@ -1,178 +1,240 @@
 #!/usr/bin/env node
-// Programmatic-card entry point; never substitutes native or Node hashes.
+// Functional Chrome runner for examples/anim-brick: loads the staged animation brick
+// in a real Chrome and calls run() for each canonical det-selftest input. Records are
+// checked for their exact shape and requested seed/ticks only; no hash or SHA value is
+// compared with anything (owner rule: no hash proofs).
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, renameSync,
-  rmSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { gzipSync } from 'node:zlib';
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { dirname, extname, join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-process.chdir(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
-const DET_CASES = [[0, 0], [1, 60], [305419896, 600]];
-const resultPath = 'proofs/results/anim/det-selftest.json';
-const work = 'target/gpu-out/anim-brick';
-const stage = 'dist/anim-brick';
-const deny = /swiftshader|llvmpipe|lavapipe|software|basic render/i;
-const json = path => JSON.parse(readFileSync(path, 'utf8'));
-const writeJson = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
-const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
-let phase = 'configuration';
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+export const DET_CASES = Object.freeze([[0, 0], [1, 60], [305419896, 600]]);
+const STAGE = join(ROOT, 'dist/anim-brick');
+const BRICKS = join(ROOT, 'dist/bricks');
+const U32_MAX = 0xffffffff;
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.json': 'application/json; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+};
 
-class CaptureError extends Error {}
-function requireValue(ok, message) {
-  if (!ok) throw new CaptureError(message);
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+const isU32 = (value) => Number.isInteger(value) && value >= 0 && value <= U32_MAX;
+const label = (adapter) => ['vendor', 'architecture', 'device', 'description']
+  .map((key) => adapter?.[key]).filter((value) => typeof value === 'string' && value.trim() !== '')
+  .join(' / ');
+
+function stagePage() {
+  const anim = join(BRICKS, 'raa-anim');
+  if (!existsSync(join(anim, 'index.js')) || !existsSync(join(anim, 'pkg', 'raa_anim_js_bg.wasm'))) {
+    throw new Error('missing dist/bricks/raa-anim; run bash scripts/build-bricks.sh first');
+  }
+  rmSync(STAGE, { recursive: true, force: true });
+  cpSync(join(ROOT, 'examples/anim-brick'), STAGE, { recursive: true });
+  cpSync(join(ROOT, 'web/common'), join(STAGE, 'common'), { recursive: true });
+  cpSync(anim, join(STAGE, 'raa-anim'), { recursive: true });
 }
 
-// Do not echo child output: it can contain credentials, URLs or arbitrary env values.
-// Static phase labels and exit/timeout codes provide safe, actionable friction.
-function execute(program, args, timeoutMs) {
-  return new Promise((resolveRun, reject) => {
-    const child = spawn(program, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '';
-    let size = 0;
-    let failure;
-    const timer = setTimeout(() => {
-      failure = 'deadline exceeded';
-      child.kill('SIGKILL');
-    }, timeoutMs);
-    for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => {
-      size += chunk.length;
-      if (size > 16 * 1024 * 1024) {
-        failure = 'output limit exceeded';
-        child.kill('SIGKILL');
-      } else if (stream === child.stdout) stdout += chunk;
-    });
-    child.on('error', () => { failure = 'could not start process'; });
-    child.on('close', code => {
-      clearTimeout(timer);
-      if (failure || code !== 0) reject(new CaptureError(failure || `process exit ${code}`));
-      else resolveRun(stdout);
-    });
+function serve(root) {
+  const server = http.createServer((req, res) => {
+    const raw = (req.url ?? '/').split('?')[0].split('#')[0];
+    let pathname;
+    try { pathname = decodeURIComponent(raw); } catch { res.writeHead(400); res.end('bad request\n'); return; }
+    if (pathname.includes('\0')) { res.writeHead(400); res.end('bad request\n'); return; }
+    let file = resolve(root, '.' + (pathname === '/' ? '/index.html' : pathname));
+    if (file !== root && !file.startsWith(root + sep)) { res.writeHead(403); res.end('forbidden\n'); return; }
+    try {
+      if (statSync(file).isDirectory()) file = join(file, 'index.html');
+      const body = readFileSync(file);
+      res.writeHead(200, {
+        'Content-Type': MIME[extname(file)] ?? 'application/octet-stream',
+        'Cache-Control': 'no-store',
+      });
+      res.end(body);
+    } catch {
+      res.writeHead(404);
+      res.end('not found\n');
+    }
+  });
+  return new Promise((ready, fail) => {
+    server.once('error', fail);
+    server.listen(0, '127.0.0.1', () => ready({ server, port: server.address().port }));
   });
 }
 
-function pageRef(output) {
-  for (const text of [output, ...output.split(/\r?\n/)]) {
-    let doc;
-    try { doc = JSON.parse(text); } catch { continue; }
-    for (const value of [doc, doc?.result, doc?.data]) {
-      const ref = value?.page_ref ?? value?.pageRef;
-      if (typeof ref === 'string' && ref.trim()) return ref;
+class Pipe {
+  constructor(child) {
+    this.child = child;
+    this.buffer = '';
+    this.nextId = 0;
+    this.pending = new Map();
+    child.stdio[4].on('data', (chunk) => this.receive(chunk));
+    child.on('exit', (code, signal) => this.failAll(`Chrome exited (${signal ?? code})`));
+  }
+
+  receive(chunk) {
+    this.buffer += chunk.toString('utf8');
+    for (let end = this.buffer.indexOf('\0'); end >= 0; end = this.buffer.indexOf('\0')) {
+      const text = this.buffer.slice(0, end);
+      this.buffer = this.buffer.slice(end + 1);
+      if (!text) continue;
+      let message;
+      try { message = JSON.parse(text); } catch { continue; }
+      const entry = this.pending.get(message.id);
+      if (!entry) continue;
+      this.pending.delete(message.id);
+      if (message.error) entry.fail(new Error(message.error.message));
+      else entry.ready(message.result);
     }
   }
-  throw new CaptureError('publish returned no page_ref');
-}
 
-function unwrap(doc, predicate) {
-  const queue = [doc];
-  for (let i = 0; i < queue.length && i < 32; i++) {
-    const value = queue[i];
-    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-    if (predicate(value)) return value;
-    for (const key of ['json', 'result', 'value', 'data', 'output', 'opResult', 'op_result', 'run']) {
-      if (value[key]) queue.push(value[key]);
-    }
+  failAll(message) {
+    for (const entry of this.pending.values()) entry.fail(new Error(message));
+    this.pending.clear();
   }
-  throw new CaptureError('missing operation result');
+
+  send(method, params = {}, sessionId) {
+    return new Promise((ready, fail) => {
+      const message = { id: ++this.nextId, method, params };
+      if (sessionId) message.sessionId = sessionId;
+      this.pending.set(message.id, { ready, fail });
+      this.child.stdio[3].write(JSON.stringify(message) + '\0');
+    });
+  }
 }
 
-function validate(op, seed, ticks) {
-  requireValue(op.case === 'det-selftest' && op.ticks === ticks
-    && Array.isArray(op.seeds) && op.seeds.length === 1 && op.seeds[0] === seed,
-  'browser case inputs differ from request');
-  requireValue(op.brick?.name === 'raa-anim' && op.brick.version === '0.5.0'
-    && Object.keys(op.brick).length === 2, 'invalid browser brick metadata');
-  const a = op.adapter;
+function openChrome() {
+  const chrome = process.env.CHROME_PATH ?? process.env.NMC_APP_CHROME;
+  if (!chrome || !existsSync(chrome)) throw new Error('CHROME_PATH is unavailable');
+  const profile = mkdtempSync(join(tmpdir(), 'raa-anim-chrome-'));
+  const child = spawn(chrome, [
+    '--no-sandbox', '--disable-dev-shm-usage', '--remote-debugging-pipe',
+    `--user-data-dir=${profile}`, 'about:blank',
+  ], { stdio: ['ignore', 'ignore', 'ignore', 'pipe', 'pipe'] });
+  const exit = new Promise((done) => child.once('exit', done));
+  return { child, profile, pipe: new Pipe(child), exit };
+}
+
+async function evaluate(pipe, sessionId, expression) {
+  const response = await pipe.send('Runtime.evaluate',
+    { expression, awaitPromise: true, returnByValue: true }, sessionId);
+  if (response.exceptionDetails) {
+    const detail = response.exceptionDetails.exception?.description ?? response.exceptionDetails.text;
+    throw new Error(`page run failed: ${detail ?? 'unknown error'}`);
+  }
+  return response.result?.value;
+}
+
+async function waitReady(pipe, sessionId, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = 'no response';
+  while (Date.now() < deadline) {
+    try {
+      const state = await evaluate(pipe, sessionId,
+        '({ready: !!(window.nmcGpu && window.nmcGpu.ready), status: (document.getElementById("status")||{}).textContent, error: (document.getElementById("error")||{}).textContent})');
+      if (state?.error) throw new Error(`page error: ${state.error}`);
+      if (state?.ready) return state;
+      last = state?.status ?? last;
+    } catch (error) {
+      if (/page error:/.test(error.message)) throw error;
+      last = error.message;
+    }
+    await sleep(250);
+  }
+  throw new Error(`page did not become ready: ${last}`);
+}
+
+function validateOne(op, seed, ticks) {
+  if (!op || typeof op !== 'object' || Array.isArray(op)) throw new Error('browser run returned no object');
+  if (op.case !== 'det-selftest' || op.ticks !== ticks || !Array.isArray(op.seeds)
+      || op.seeds.length !== 1 || op.seeds[0] !== seed) {
+    throw new Error('browser run inputs differ from the request');
+  }
+  if (!op.brick || Object.keys(op.brick).sort().join(',') !== 'name,version'
+      || op.brick.name !== 'raa-anim' || op.brick.version !== '0.5.0') {
+    throw new Error('browser brick metadata is not raa-anim 0.5.0');
+  }
+  const adapter = op.adapter;
   const fields = ['vendor', 'architecture', 'device', 'description'];
-  requireValue(a && fields.every(key => typeof a[key] === 'string')
-    && typeof a.isFallbackAdapter === 'boolean', 'invalid browser adapter');
-  const hardware = a.isFallbackAdapter === false && !fields.some(key => deny.test(a[key]));
-  requireValue(op.hardware === hardware, 'browser hardware classification disagrees with rule');
-  requireValue(hardware, 'software or fallback adapter refused');
-  requireValue(Array.isArray(op.results) && op.results.length === 1, 'expected one browser result');
-  const r = op.results[0];
-  requireValue(r && Object.keys(r).sort().join(',') === 'case,hash,seed,ticks'
-    && r.case === 'det-selftest' && r.seed === seed && r.ticks === ticks
-    && Number.isInteger(r.seed) && r.seed >= 0 && r.seed <= 0xffffffff
-    && Number.isInteger(r.ticks) && r.ticks >= 0 && r.ticks <= 0xffffffff
-    && typeof r.hash === 'string' && /^[0-9a-f]{8}$/.test(r.hash), 'invalid browser result record');
-}
-
-async function main() {
-  requireValue(process.argv.slice(2).join(' ') === '--case det-selftest',
-    'usage: node scripts/anim-capture.mjs --case det-selftest');
-  const waitS = Number(process.env.NMC_GPU_WAIT_S ?? 60);
-  requireValue(Number.isFinite(waitS) && waitS > 0, 'NMC_GPU_WAIT_S must be positive seconds');
-  const client = process.env.NMC_GPU_CLIENT;
-  requireValue(client && existsSync(client), 'NMC_GPU_CLIENT is unavailable');
-  // Each client call respects both the configured wait and the 60-second step ceiling.
-  const clientMs = Math.min(waitS, 60) * 1000;
-  const call = args => execute(process.execPath, [client, ...args], clientMs);
-  rmSync(work, { recursive: true, force: true });
-  mkdirSync(work, { recursive: true });
-  phase = 'blank-page probe';
-  const probe = `${work}/probe`;
-  mkdirSync(probe);
-  writeFileSync(`${probe}/index.html`, '<!doctype html><script>window.nmcGpu={ops:{render:async()=>({json:{ok:1},files:[]})}};</script>');
-  writeJson(`${probe}/nmc.gpu.json`, { page: 'index.html', ops: ['render'] });
-  const probeRef = pageRef(await call(['publish', probe]));
-  writeJson(`${work}/probe-input.json`, {});
-  await call(['render', `${work}/probe-input.json`, '--page-ref', probeRef, '-o', `${work}/probe-out`]);
-  unwrap(json(`${work}/probe-out/result.json`), value => value.ok === 1);
-
-  phase = 'local brick build';
-  console.log('anim-capture: building local bricks');
-  await execute('bash', ['scripts/build-bricks.sh'], 1800000);
-  phase = 'page staging';
-  rmSync(stage, { recursive: true, force: true });
-  cpSync('examples/anim-brick', stage, { recursive: true });
-  cpSync('web/common', `${stage}/common`, { recursive: true });
-  cpSync('dist/bricks/raa-anim', `${stage}/raa-anim`, { recursive: true });
-  cpSync('dist/bricks/bricks.json', `${stage}/bricks.json`);
-  const manifest = json(`${stage}/nmc.gpu.json`);
-  requireValue(manifest.page === 'index.html' && manifest.ops.includes('render'), 'invalid page manifest');
-  const bytes = readFileSync(`${stage}/raa-anim/pkg/raa_anim_js_bg.wasm`);
-  const wasm = { raw: bytes.length, gzip: gzipSync(bytes, { level: 9 }).length, sha256: sha256(bytes) };
-  const built = json(`${stage}/bricks.json`).bricks.find(brick => brick.name === 'raa-anim');
-  requireValue(built && ['raw', 'gzip', 'sha256'].every(key => built.wasm[key] === wasm[key]),
-    'published wasm differs from bricks manifest');
-  requireValue(wasm.gzip <= 300000, 'animation wasm exceeds gzip budget');
-  console.log(`anim-capture: wasm raw ${wasm.raw} B, gzip ${wasm.gzip} B, sha256 ${wasm.sha256}`);
-  phase = 'animation page publish';
-  const ref = pageRef(await call(['publish', stage]));
-  const runs = [];
-  for (const [seed, ticks] of DET_CASES) {
-    phase = `Chrome case seed=${seed} ticks=${ticks}`;
-    const input = `${work}/input-${ticks}.json`;
-    writeJson(input, { args: { case: 'det-selftest', seeds: [seed], ticks } });
-    const out = `${work}/case-${ticks}`;
-    await call(['render', input, '--page-ref', ref, '-o', out]);
-    const op = unwrap(json(`${out}/result.json`), value => 'adapter' in value && 'results' in value);
-    validate(op, seed, ticks);
-    if (runs.length) requireValue(['vendor', 'architecture', 'device', 'description', 'isFallbackAdapter']
-      .every(key => op.adapter[key] === runs[0].adapter[key]), 'adapter changed between cases');
-    runs.push(op);
-    console.log(`anim-capture: seed=${seed} ticks=${ticks} hash=${op.results[0].hash} (hardware)`);
+  if (!adapter || !fields.every((key) => typeof adapter[key] === 'string')
+      || typeof adapter.isFallbackAdapter !== 'boolean') {
+    throw new Error('browser adapter is malformed');
   }
-  phase = 'validated record write';
-  requireValue(sha256(readFileSync(`${stage}/raa-anim/pkg/raa_anim_js_bg.wasm`)) === wasm.sha256,
-    'staged wasm changed during capture');
-  const record = { name: 'det-selftest', milestone: 'm16', capturedAt: new Date().toISOString(),
-    case: 'det-selftest', adapter: runs[0].adapter, hardware: runs[0].hardware,
-    brick: runs[0].brick, wasm, results: runs.flatMap(run => run.results), runs };
-  mkdirSync(dirname(resultPath), { recursive: true });
-  writeJson(`${resultPath}.tmp`, record);
-  renameSync(`${resultPath}.tmp`, resultPath);
-  console.log(`anim-capture: wrote ${resultPath}`);
+  if (typeof op.hardware !== 'boolean') throw new Error('browser hardware classification is missing');
+  if (!Array.isArray(op.results) || op.results.length !== 1) throw new Error('expected one browser record');
+  const record = op.results[0];
+  if (!record || Object.keys(record).sort().join(',') !== 'case,hash,seed,ticks'
+      || record.case !== 'det-selftest' || record.seed !== seed || record.ticks !== ticks
+      || !isU32(record.seed) || !isU32(record.ticks)
+      || typeof record.hash !== 'string' || !/^[0-9a-f]{8}$/.test(record.hash)) {
+    throw new Error('browser selftest record is malformed');
+  }
+  return {
+    adapter,
+    hardware: op.hardware,
+    record: { case: record.case, seed: record.seed, ticks: record.ticks, hash: record.hash },
+  };
 }
 
-main().catch(error => {
-  // Only locally generated messages are safe; parsing/fs errors may include input data.
-  const detail = error instanceof CaptureError ? error.message : 'invalid JSON or filesystem setup failed';
-  const message = `anim-capture: ${phase}: ${detail}; no new browser evidence written`;
-  console.error(message);
-  mkdirSync('docs/dogfood', { recursive: true });
-  appendFileSync('docs/dogfood/m16.md', `\n- ${new Date().toISOString()} capture friction: ${message}. Inspect local inputs/tool availability; client output omitted to protect secrets.\n`);
-  process.exitCode = 1;
-});
+export async function captureAnimBrick({ cases = DET_CASES } = {}) {
+  stagePage();
+  const { server, port } = await serve(STAGE);
+  const chrome = openChrome();
+  try {
+    const target = await chrome.pipe.send('Target.createTarget', {
+      url: `http://127.0.0.1:${port}/index.html`,
+    });
+    const attached = await chrome.pipe.send('Target.attachToTarget',
+      { targetId: target.targetId, flatten: true });
+    const sessionId = attached.sessionId;
+    await waitReady(chrome.pipe, sessionId);
+    const runs = [];
+    for (const [seed, ticks] of cases) {
+      const op = await evaluate(chrome.pipe, sessionId,
+        `window.nmcGpu.ops.run({case:"det-selftest",seeds:[${seed}],ticks:${ticks}})`);
+      runs.push(validateOne(op, seed, ticks));
+    }
+    const adapter = runs[0]?.adapter;
+    if (!label(adapter)) throw new Error('browser did not name its adapter');
+    for (const run of runs) {
+      if (JSON.stringify(run.adapter) !== JSON.stringify(adapter) || run.hardware !== runs[0].hardware) {
+        throw new Error('browser adapter changed between cases');
+      }
+    }
+    return {
+      adapter,
+      hardware: runs[0].hardware,
+      adapterText: label(adapter),
+      records: runs.map((run) => run.record),
+    };
+  } finally {
+    try { await chrome.pipe.send('Browser.close'); } catch { /* already closed */ }
+    chrome.child.kill('SIGKILL');
+    await Promise.race([chrome.exit, sleep(2000)]);
+    server.close();
+    rmSync(chrome.profile, { recursive: true, force: true });
+  }
+}
+
+const invoked = process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+if (invoked) {
+  if (process.argv.slice(2).join(' ') !== '--case det-selftest') {
+    console.error('usage: node scripts/anim-capture.mjs --case det-selftest');
+    process.exitCode = 2;
+  } else {
+    captureAnimBrick().then((result) => {
+      console.log(JSON.stringify(result));
+      console.error(`anim-capture: 3/3 Chrome records; adapter ${result.adapterText} (`
+        + `${result.hardware ? 'hardware' : 'software'}); hash values are data, never compared`);
+    }).catch((error) => {
+      console.error(`anim-capture: ${error.message}`);
+      process.exitCode = 1;
+    });
+  }
+}

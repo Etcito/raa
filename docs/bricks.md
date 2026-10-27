@@ -71,10 +71,11 @@ it. The script checks that every `package.json` entrypoint (`main`, `types`, `ex
 
 `bricks` is ordered `raa`, `raa-sdfm`, `raa-anim`; `wasm` is `null` for a JavaScript-only
 brick (and an array if a brick ever ships several). `raw` is bytes, `gzip` is
-`zlib.gzipSync` at level 9 and `sha256` is over the raw bytes. Every staged wasm is
-measured and both sizes are printed. `wasmGzipMax` is the Q2 budget enforced for a brick:
-300000 bytes for the animation brick this milestone ships; the inherited `raa` wasm is
-recorded with `null` (it is already above 300000 B gzip at 0.4.1, and its size belongs to
+`zlib.gzipSync` at level 9 and `sha256` is over the raw bytes. Hashes are recorded as
+data, never as proof material: no check compares a `sha256` or a selftest hash value.
+Every staged wasm is measured and its raw/gzip sizes are printed. `wasmGzipMax` is the
+Q2 budget enforced for a brick: 300000 bytes for the animation brick this milestone
+ships; the inherited `raa` wasm is recorded with `null` (it is already above 300000 B gzip at 0.4.1, and its size belongs to
 the engine milestones).
 
 ## File-based consumption
@@ -110,11 +111,17 @@ in canonical order:
 ```
 
 Each record has exactly `case`, `seed`, `ticks` and `hash`; seed and ticks are u32 JSON
-numbers and the hash is eight lowercase hexadecimal digits without a prefix. One
-`selftest(case, seed, ticks)` call returns one such record. Compare all four fields in
-Node, and in Chrome through `examples/anim-brick` (`run({case, seeds, ticks})`). The
-capture `node scripts/anim-capture.mjs --case det-selftest` invokes the page separately
-for each canonical tick count, keeps canonical order and commits
-`proofs/results/anim/det-selftest.json`. `node proofs/m16-anim-brick.mjs` checks unit
-tests, this staging and manifest, `scripts/check-det.sh`, Node/native parity and the
-committed Chrome record.
+numbers and the hash is eight lowercase hexadecimal digits without a prefix. The hash is
+the simulation's output data: proofs check that a call returns a well-formed record for
+the requested seed/ticks, and never compare a hash value with native, Node or Chrome
+(the owner rule: no hash proofs). One `selftest(case, seed, ticks)` call returns one such
+record.
+
+`node proofs/m16-anim-brick.mjs` runs five functional checks: the `raa-det` and
+`raa-anim-js` tests, this staging and manifest (raw/gzip sizes and the gzip cap),
+`scripts/check-det.sh`, a Node load of the staged brick whose `selftest` returns the
+three canonical records, and a Chrome load of `examples/anim-brick` whose
+`run({case, seeds, ticks})` returns them. `node scripts/anim-capture.mjs --case
+det-selftest` runs the same Chrome page check and prints the records; it writes no
+committed hash record. The Chrome check uses `$CHROME_PATH`, serves the staged page on
+127.0.0.1 and needs no GPU client.
