@@ -12,6 +12,8 @@ pub mod ccd;
 pub use ccd::{CcdOutcome, ccd};
 pub mod fabrik;
 pub use fabrik::{FabrikOutcome, fabrik};
+pub mod foot_placement;
+pub use foot_placement::{GroundHit, PELVIS_DROP_LIMIT, foot_placement};
 pub mod limits;
 pub use limits::{clamp_pose, clamp_rotation};
 pub mod pose;
