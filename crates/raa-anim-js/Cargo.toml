@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 raa-det = { path = "../raa-det" }
 raa-anim = { path = "../raa-anim" }
+raa-anim-graph = { path = "../raa-anim-graph" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }

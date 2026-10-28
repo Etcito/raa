@@ -21,6 +21,18 @@ pub fn load_rig(json: &str) -> Result<AnimationRig, AnimError> {
     })
 }
 
+impl AnimationRig {
+    pub(crate) fn shared_rig(&self) -> &Arc<Rig> {
+        &self.rig
+    }
+}
+
+impl AnimationClip {
+    pub(crate) fn parts(&self) -> (&Arc<Rig>, &Clip) {
+        (&self.rig, &self.clip)
+    }
+}
+
 pub fn load_clip(rig: &AnimationRig, json: &str) -> Result<AnimationClip, AnimError> {
     Ok(AnimationClip {
         clip: Clip::load(json, &rig.rig)?,
