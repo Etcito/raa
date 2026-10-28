@@ -3,8 +3,10 @@
 
 #![forbid(unsafe_code)]
 
+mod cpu;
 mod error;
 mod mesh;
 
+pub use cpu::{CpuSkin, skin_cpu};
 pub use error::SkinError;
 pub use mesh::{MAX_INFLUENCES, MAX_JOINTS, SkinMesh, WEIGHT_SUM_EPS};
