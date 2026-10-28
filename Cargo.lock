@@ -874,6 +874,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-ik"
+version = "0.5.0"
+dependencies = [
+ "raa-anim",
+ "raa-math",
+]
+
+[[package]]
 name = "raa-js"
 version = "0.5.0"
 dependencies = [
