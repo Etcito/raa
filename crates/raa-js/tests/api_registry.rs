@@ -93,6 +93,34 @@ fn feature_bits_keep_prior_rows_and_register_skin_at_20() {
 }
 
 #[test]
+fn m18_skinning_registers_pose_setters_after_m15() {
+    let reg = out_file("api_registry.rs");
+    let m15 = reg.find("mod m15_animation;").expect("m15 module");
+    let m18 = reg.find("mod m18_skinning;").expect("m18 module");
+    assert!(m15 < m18, "m18 sorts after m15");
+    assert!(reg.contains("m18_skinning::install(ctx)?;"));
+    assert!(reg.contains("m18_skinning::frame(st, gpu, input)?;"));
+    let src = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("api")
+            .join("m18_skinning.rs"),
+    )
+    .expect("m18 source");
+    for name in ["setSkinPose", "setSkinPoses"] {
+        assert!(src.contains(&format!("js_name = {name}")), "no {name}");
+    }
+    for code in [
+        "skin.not_skinned",
+        "skin.pose_length",
+        "skin.joint_range",
+        "skin.cap_joints",
+    ] {
+        assert!(src.contains(code), "no {code}");
+    }
+}
+
+#[test]
 fn registry_calls_install_and_frame_in_file_order() {
     let reg = out_file("api_registry.rs");
     let install_at = reg.find("pub(crate) fn install_all(").expect("install_all");

@@ -14,12 +14,12 @@ use raa_lit::{LitMeshId, LitRenderer, RestMeshView};
 use raa_loader::LoaderRegistry;
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, RecordCtx};
 use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene};
-use raa_skin::{SKIN_ORDER, SKIN_PASS, SkinMesh, SkinPass, SkinVertexInputs};
+use raa_skin::{SKIN_ORDER, SKIN_PASS, SkinMesh, SkinPass, SkinVertexInputs, validate_pose};
 use raa_tonemap::TonemapControl;
 
 use raa_scene::SceneError;
 
-use crate::convert::{HandleMap, scene_error};
+use crate::convert::{HandleMap, api_error, scene_error, skin_error};
 use crate::feature_map::FeatureMap;
 
 /// The material drawn by a sub-mesh without one (the lit renderer's default material).
@@ -58,6 +58,73 @@ fn skin_busy() -> RaaError {
         code: "pipeline.busy",
         message: "the skin pass is borrowed (called while a frame executes)".into(),
     }
+}
+
+/// S18 pose joint count of `skin`: one past the highest joint index it references.
+pub(crate) fn skin_pose_joints(skin: &SkinMesh) -> usize {
+    skin.joints
+        .iter()
+        .copied()
+        .max()
+        .map_or(0, |j| usize::from(j) + 1)
+}
+
+/// Validates one mesh-space pose for `skin`: 16 finite, column-major floats per joint
+/// (`skin.pose_length`, `skin.cap_joints`), every referenced joint present
+/// (`skin.joint_range`) and exactly [`skin_pose_joints`] joints, the batch layout's
+/// per-instance slice (`skin.pose_length`).
+pub(crate) fn validate_skin_pose(skin: &SkinMesh, matrices: &[f32]) -> Result<(), RaaError> {
+    let joints = validate_pose(matrices).map_err(|e| skin_error(&e))?;
+    skin.validate_joint_count(joints)
+        .map_err(|e| skin_error(&e))?;
+    let expected = skin_pose_joints(skin);
+    if joints != expected {
+        return Err(api_error(
+            "skin.pose_length",
+            format!(
+                "pose has {joints} joints; this mesh's skin pose has {expected} \
+                 (16 column-major floats per joint)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// The `(start, end)` float ranges of the S18 pose batch layout: one slice of
+/// 16 x [`skin_pose_joints`] per skin, concatenated in order (mixed joint counts
+/// allowed). Every slice, and the total `floats`, is validated before any upload.
+pub(crate) fn skin_pose_ranges(
+    skins: &[&SkinMesh],
+    matrices: &[f32],
+) -> Result<Vec<(usize, usize)>, RaaError> {
+    let floats = matrices.len();
+    let total = skins
+        .iter()
+        .map(|skin| skin_pose_joints(skin) * 16)
+        .sum::<usize>();
+    let mismatch = || {
+        api_error(
+            "skin.pose_length",
+            format!(
+                "pose data has {floats} floats; {} instance(s) need {total} (16 floats per \
+                 joint, one slice per mesh skin)",
+                skins.len()
+            ),
+        )
+    };
+    let mut ranges = Vec::with_capacity(skins.len());
+    let mut offset = 0usize;
+    for skin in skins {
+        let end = offset + skin_pose_joints(skin) * 16;
+        let slice = matrices.get(offset..end).ok_or_else(mismatch)?;
+        validate_skin_pose(skin, slice)?;
+        ranges.push((offset, end));
+        offset = end;
+    }
+    if offset != floats {
+        return Err(mismatch());
+    }
+    Ok(ranges)
 }
 
 /// The `skin` feature (S18): the order-15 pass and per-mesh rest uploads.
@@ -433,6 +500,85 @@ impl EngineState {
         self.skins.retain(|e| e.mesh != mesh);
     }
 
+    /// Plans a pose batch: looks up every handle and its mesh skin, then validates the
+    /// concatenated slices ([`skin_pose_ranges`]) before anything is uploaded.
+    fn plan_skin_poses(
+        &self,
+        instances: &[u32],
+        matrices: &[f32],
+    ) -> Result<Vec<(u32, LitMeshId, usize, usize)>, RaaError> {
+        let mut plan = Vec::with_capacity(instances.len());
+        let mut skins = Vec::with_capacity(instances.len());
+        for &h in instances {
+            let group = self.instance_group(h)?;
+            let skin = self.skin(group.mesh).ok_or_else(|| {
+                api_error(
+                    "skin.not_skinned",
+                    format!("instance {h} draws a mesh without S18 joints and weights"),
+                )
+            })?;
+            skins.push(skin);
+            plan.push((group.tag, group.mesh));
+        }
+        let ranges = skin_pose_ranges(&skins, matrices)?;
+        Ok(plan
+            .into_iter()
+            .zip(ranges)
+            .map(|((tag, mesh), (start, end))| (tag, mesh, start, end))
+            .collect())
+    }
+
+    /// Sets the mesh-space, column-major pose of JS instance `h` (16 floats per joint).
+    /// Refusals: `api.unknown_handle`, `skin.not_skinned`, `skin.pose_length`,
+    /// `skin.cap_joints`, `skin.joint_range`; a refusal changes nothing.
+    pub(crate) fn set_skin_pose(
+        &mut self,
+        gpu: &GpuContext,
+        h: u32,
+        matrices: &[f32],
+    ) -> Result<(), RaaError> {
+        validate_pose(matrices).map_err(|e| skin_error(&e))?;
+        let plan = self.plan_skin_poses(&[h], matrices)?;
+        self.apply_skin_poses(gpu, &plan, matrices)
+    }
+
+    /// Sets many poses at once: `matrices` concatenates one slice per `instances` entry
+    /// in order, each 16 x its mesh skin's joint count (mixed joint counts allowed). The
+    /// whole batch is validated before any instance is updated.
+    pub(crate) fn set_skin_poses(
+        &mut self,
+        gpu: &GpuContext,
+        instances: &[u32],
+        matrices: &[f32],
+    ) -> Result<(), RaaError> {
+        let plan = self.plan_skin_poses(instances, matrices)?;
+        self.apply_skin_poses(gpu, &plan, matrices)
+    }
+
+    fn apply_skin_poses(
+        &mut self,
+        gpu: &GpuContext,
+        plan: &[(u32, LitMeshId, usize, usize)],
+        matrices: &[f32],
+    ) -> Result<(), RaaError> {
+        self.rebuild_dirty_groups()?;
+        self.flush_skins(gpu)?;
+        let feature = self.features.get::<SkinFeature>().ok_or_else(|| {
+            api_error(
+                "api.feature_missing",
+                "feature `skin` is not installed in this engine",
+            )
+        })?;
+        for &(tag, _, start, end) in plan {
+            feature
+                .pass
+                .try_borrow_mut()
+                .map_err(|_| skin_busy())?
+                .set_pose(gpu, tag, &matrices[start..end])?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn instance_group(&self, h: u32) -> Result<&InstanceGroup, RaaError> {
         self.instances.get_ref(h)
     }
@@ -757,5 +903,51 @@ mod tests {
             assert_eq!(groups.get_ref(h).unwrap_err().code(), "api.unknown_handle");
         }
         assert_eq!(groups.next_handle(), 2);
+    }
+
+    fn test_skin(joints: &[u16]) -> SkinMesh {
+        let vertices = joints.len() / 4;
+        let positions: Vec<f32> = (0..vertices).flat_map(|i| [i as f32, 0.0, 0.0]).collect();
+        let normals = [0.0, 0.0, 1.0].repeat(vertices);
+        let mesh =
+            raa_mesh::from_js_arrays(&positions, &normals, None, None, None, &[0, 0, 0], &[])
+                .unwrap();
+        let weights = [1.0, 0.0, 0.0, 0.0].repeat(vertices);
+        SkinMesh::new(mesh, joints, &weights).unwrap()
+    }
+
+    #[test]
+    fn skin_pose_joints_is_one_past_the_highest_referenced_joint() {
+        assert_eq!(skin_pose_joints(&test_skin(&[0; 4])), 1);
+        assert_eq!(skin_pose_joints(&test_skin(&[0, 0, 0, 0, 2, 0, 0, 0])), 3);
+    }
+
+    #[test]
+    fn skin_pose_validation_uses_the_s18_codes() {
+        let skin = test_skin(&[0, 0, 0, 0, 2, 0, 0, 0]);
+        let code = |matrices: Vec<f32>| validate_skin_pose(&skin, &matrices).unwrap_err().code();
+        validate_skin_pose(&skin, &[0.0; 48]).unwrap();
+        assert_eq!(code(vec![]), "skin.pose_length");
+        assert_eq!(code(vec![0.0; 15]), "skin.pose_length");
+        assert_eq!(code(vec![f32::NAN; 48]), "skin.pose_length");
+        assert_eq!(code(vec![0.0; 32]), "skin.joint_range");
+        assert_eq!(code(vec![0.0; 64]), "skin.pose_length");
+        assert_eq!(code(vec![0.0; 257 * 16]), "skin.cap_joints");
+    }
+
+    #[test]
+    fn skin_pose_batch_slices_mixed_joint_counts_before_any_update() {
+        let one = test_skin(&[0; 4]);
+        let three = test_skin(&[0, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0]);
+        let skins = [&one, &three];
+        let ok = vec![0.0; (1 + 3) * 16];
+        assert_eq!(skin_pose_ranges(&skins, &ok).unwrap(), [(0, 16), (16, 64)]);
+        for (floats, mentions) in [(63usize, "63"), (64 + 16, "80")] {
+            let e = skin_pose_ranges(&skins, &vec![0.0; floats]).unwrap_err();
+            assert_eq!(e.code(), "skin.pose_length");
+            assert!(e.to_string().contains(mentions), "{e}");
+        }
+        let e = skin_pose_ranges(&skins, &[f32::NAN; 80]).unwrap_err();
+        assert_eq!(e.code(), "skin.pose_length");
     }
 }
