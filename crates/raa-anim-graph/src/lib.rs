@@ -3,10 +3,12 @@
 
 pub mod decode;
 pub mod error;
+pub mod load;
 pub mod model;
 
 pub use decode::{GraphParts, decode_conditions, decode_document};
 pub use error::{GraphError, codes};
+pub use load::decode_graph;
 pub use model::{
     BlendPoint, BlendSpace, CondOp, Condition, GRAPH_CAPS, Graph, GraphCaps, GraphRootMotion,
     Layer, Machine, Num, Param, ParamType, State, Transition, WILDCARD,
