@@ -12,6 +12,8 @@ pub mod limits;
 pub use limits::{clamp_pose, clamp_rotation};
 pub mod pose;
 pub use pose::IkPose;
+pub mod two_bone;
+pub use two_bone::two_bone;
 
 /// Refusals use the shared raa-anim error type with an `ik.*` code.
 pub type IkError = AnimError;
