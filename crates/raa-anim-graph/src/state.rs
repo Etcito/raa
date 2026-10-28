@@ -12,6 +12,13 @@ pub struct Crossfade {
     pub elapsed: Tick,
     pub ticks: Tick,
 }
+impl Crossfade {
+    /// Destination weight; zero-duration fades are immediately complete.
+    pub fn weight(&self) -> f32 {
+        if self.ticks == 0 || self.elapsed >= self.ticks { 1.0 }
+        else { self.elapsed as f32 / self.ticks as f32 }
+    }
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct LayerState {
     pub machine: usize,

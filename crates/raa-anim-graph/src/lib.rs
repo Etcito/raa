@@ -9,6 +9,7 @@ pub mod load;
 pub mod model;
 pub mod params; pub mod state;
 pub mod triangulation;
+pub mod transitions;
 
 pub use blend_weights::{BlendWeight, evaluate, evaluate_1d, evaluate_2d};
 pub use canon::{graph_value, to_canonical};
