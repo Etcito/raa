@@ -1,6 +1,6 @@
 //! S19 graph loading, ticking and rollback over the existing S16/S17 handles.
 //! The graph borrows the caller's rig and clips; each state keeps its graph, so
-//! steps and restores never mix graphs. The graph-run selftest is its own card.
+//! steps and restores never mix graphs.
 use crate::clips::{AnimationClip, AnimationRig};
 use raa_anim_graph::{
     GraphError, GraphEvent, GraphRuntime, GraphState, ParamType, ParamValue, Params, RootDelta,
@@ -88,8 +88,83 @@ pub fn load_graph(
     Ok(AnimationGraph { runtime })
 }
 
-/// The `graph-run` selftest case is contributed by its own card.
-pub fn register(_cases: &mut Vec<crate::Case>) {}
+pub fn register(cases: &mut Vec<crate::Case>) {
+    cases.push(crate::brick::GRAPH_RUN);
+}
+
+/// Run a prefix of the shared 600-tick script, capped at its length. Seed is
+/// record metadata only: this scenario uses scripted inputs, not randomness.
+/// The digest is API data, not a cross-platform acceptance comparison.
+pub fn graph_run_selftest(_seed: u32, ticks: u32) -> u32 {
+    let run = graph_run(ticks).expect("graph-run scenario");
+    if let Some(rollback) = &run.rollback {
+        assert!(rollback.matched, "graph-run rollback replay diverged");
+    }
+    run.digest()
+}
+
+fn graph_run(ticks: u32) -> Result<raa_anim_graph::ScenarioRun, GraphError> {
+    use raa_anim_graph::scenario_data::{
+        PENGUIN_GRAPH, PENGUIN_TIMELINE, Timeline, penguin_clips, penguin_rig,
+    };
+    let rig = penguin_rig();
+    let runtime = GraphRuntime::load(PENGUIN_GRAPH, &rig, &penguin_clips(&rig))?;
+    let mut timeline = Timeline::load(PENGUIN_TIMELINE, &runtime.new_params())?;
+    timeline.ticks = ticks.min(timeline.ticks);
+    raa_anim_graph::scenario::run(&runtime, &timeline)
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use crate::{ApiError, SelftestResult, dispatch};
+
+    #[test]
+    fn graph_run_is_registered_once_and_dispatches_the_record() {
+        let cases = crate::registered_cases();
+        let entries: Vec<_> = cases.iter().filter(|c| c.name == "graph-run").collect();
+        assert_eq!(entries.len(), 1);
+        assert!(std::ptr::fn_addr_eq(
+            entries[0].run,
+            graph_run_selftest as fn(u32, u32) -> u32,
+        ));
+        for (seed, ticks) in [(0, 0), (1, 1), (305419896, 600), (u32::MAX, 601)] {
+            let SelftestResult { case, seed: actual_seed, ticks: actual_ticks, hash } =
+                dispatch("graph-run", seed.into(), ticks.into()).unwrap();
+            assert_eq!((case, actual_seed, actual_ticks), ("graph-run", seed, ticks));
+            assert_eq!(hash.len(), 8);
+            assert!(hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        }
+    }
+
+    #[test]
+    fn graph_run_rejects_invalid_dispatch_inputs() {
+        for value in [f64::NAN, f64::INFINITY, -1.0, 0.5, 4294967296.0] {
+            assert_eq!(dispatch("graph-run", value, 600.0), Err(ApiError::InvalidInput("seed")));
+            assert_eq!(dispatch("graph-run", 0.0, value), Err(ApiError::InvalidInput("ticks")));
+        }
+        assert_eq!(dispatch("graph-run-extra", 0.0, 0.0),
+            Err(ApiError::UnknownCase("graph-run-extra".into())));
+    }
+
+    #[test]
+    fn graph_run_uses_the_shared_script_and_replays_rollback() {
+        let empty = graph_run(0).unwrap();
+        assert!(empty.trace.is_empty());
+        assert!(empty.rollback.is_none());
+        assert_eq!(graph_run(1).unwrap().steps(), 1);
+        let full = graph_run(600).unwrap();
+        assert_eq!(full.steps(), raa_anim_graph::SCENARIO_TICKS);
+        assert!(!full.events.is_empty());
+        assert!(full.travel.iter().any(|v| *v != 0.0));
+        let rollback = full.rollback.as_ref().unwrap();
+        assert!(rollback.matched);
+        assert!(rollback.replayed > 0);
+        assert!(!rollback.fades.is_empty());
+        assert_eq!(full, raa_anim_graph::scenario::run_penguin().unwrap());
+        assert_eq!(full, graph_run(u32::MAX).unwrap());
+    }
+}
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl AnimationGraph {

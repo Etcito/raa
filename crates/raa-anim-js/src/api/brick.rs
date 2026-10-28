@@ -11,6 +11,12 @@ pub(crate) const CLIP_SAMPLE: Case = Case {
     run: crate::clips::clip_sample_selftest,
 };
 
+// Installed by the automatically discovered graph module (M9).
+pub(crate) const GRAPH_RUN: Case = Case {
+    name: "graph-run",
+    run: crate::graph::graph_run_selftest,
+};
+
 pub fn register(cases: &mut Vec<Case>) {
     cases.push(Case {
         name: "det-selftest",
