@@ -11,6 +11,16 @@ as contact points, grab points, and look targets. IK is a visual correction:
 the simulation never consumes a corrected IK pose. Inputs are read only, and
 each call returns fresh arrays; calls do not mutate the input pose or rig.
 
+## Lookdev integration
+
+Lookdev pages initialize the animation package and provide it as `lib.anim` to
+scene `build` and `frame` functions. The M20 scene imports its metadata without
+initializing WASM; during `build`, it uses `lib.anim.loadRig` and
+`lib.anim.ik`. Its `ik-on` variant applies those corrections, while `ik-off`
+uses the same rig, sampled source pose, mesh, targets, camera, and lighting
+without applying IK. Targets still come from simulation state, and corrected
+skin matrices are used only for rendering.
+
 ## Pose and coordinates
 
 Pass either an S17 `local` array or an object containing `local`. It must be an
