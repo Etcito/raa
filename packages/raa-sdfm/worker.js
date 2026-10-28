@@ -82,6 +82,8 @@ function transferList(result) {
         add(mesh.uvs);
         add(mesh.indices);
         add(mesh.edges);
+        add(mesh.skin?.joints);
+        add(mesh.skin?.weights);
       }
     }
   }

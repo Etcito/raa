@@ -86,15 +86,20 @@ export function createSdfmLoader(options) {
     const names = new Set();
     const parts = [];
     for (const { group, part } of partsIn) {
-      const { desc, materials } = partMesh(part, handles);
+      const { desc, materials, skin } = partMesh(part, handles);
       const handle = engine.addMesh(desc);
       const name = names.has(part.name) ? `${group}/${part.partId}` : part.name;
       names.add(name);
       const { t, r } = frameToTr(part.frame);
-      parts.push({ name, groupId: group, rigid: true, parent: null, t, r, mesh: handle, materials });
+      parts.push({
+        name, groupId: group, rigid: true, parent: null, t, r, mesh: handle, materials,
+        ...(skin ? { skin } : {}),
+      });
       progress('upload', (done += 1), total);
     }
 
+    const rigged = meshed.groups.find((g) => g.rig !== undefined);
+    const clips = meshed.groups.flatMap((g) => g.clips ?? []);
     return {
       id: asset.id,
       hash: asset.hash,
@@ -105,6 +110,8 @@ export function createSdfmLoader(options) {
       anchors: asset.anchors,
       bounds: asset.bounds,
       collision: asset.collision,
+      ...(rigged ? { rig: rigged.rig } : {}),
+      ...(meshed.groups.some((g) => g.clips !== undefined) ? { clips } : {}),
     };
   }
 
@@ -194,9 +201,12 @@ function parse(input) {
 /**
  * One S13 MeshDesc for a part: its MAMA meshes concatenated, one sub-mesh per material (meshes of
  * one material are contiguous, materials in order of first use). uvs are (0, 0) for a mesh
- * without them, and absent when no mesh has any.
+ * without them, and absent when no mesh has any. joints/weights are 4 per vertex in the same
+ * concatenated vertex numbering when MAMA exported skin; a mesh without skin falls back to joint 0
+ * (the S16 root) at weight 1.
  *
- * @returns {{ desc: object, materials: number[] }} materials: the sub-mesh material handles, in sub-mesh order
+ * @returns {{ desc: object, materials: number[], skin: object | null }}
+ *   materials: the sub-mesh material handles, in sub-mesh order; skin: { joints, weights, rig }
  */
 function partMesh(part, handles) {
   const byMaterial = new Map();
@@ -209,10 +219,13 @@ function partMesh(part, handles) {
   const vertices = ordered.reduce((n, m) => n + m.positions.length / 3, 0);
   const indexCount = ordered.reduce((n, m) => n + m.indices.length, 0);
   const withUvs = ordered.some((m) => m.uvs);
+  const skinned = ordered.find((m) => m.skin != null);
   const positions = new Float32Array(vertices * 3);
   const normals = new Float32Array(vertices * 3);
   const uvs = withUvs ? new Float32Array(vertices * 2) : null;
   const indices = new Uint32Array(indexCount);
+  const joints = skinned ? new Uint16Array(vertices * 4) : null;
+  const weights = skinned ? new Float32Array(vertices * 4) : null;
 
   const edges = ordered.some((m) => m.edges != null) ? [] : null;
   const subMeshes = [];
@@ -225,6 +238,15 @@ function partMesh(part, handles) {
       positions.set(m.positions, base * 3);
       normals.set(m.normals, base * 3);
       if (uvs && m.uvs) uvs.set(m.uvs, base * 2);
+      if (joints) {
+        const count = m.positions.length / 3;
+        if (m.skin) {
+          joints.set(m.skin.joints, base * 4);
+          weights.set(m.skin.weights, base * 4);
+        } else {
+          for (let v = 0; v < count; v += 1) weights[(base + v) * 4] = 1;
+        }
+      }
       for (let i = 0; i < m.indices.length; i += 1) indices[first + i] = m.indices[i] + base;
       if (edges) {
         // Preserve polygon topology where supplied; use triangle edges for older meshes.
@@ -257,7 +279,12 @@ function partMesh(part, handles) {
   const desc = { positions, normals, indices, subMeshes };
   if (uvs) desc.uvs = uvs;
   if (edges) desc.edges = Uint32Array.from(edges);
-  return { desc, materials };
+  if (joints) {
+    desc.joints = joints;
+    desc.weights = weights;
+  }
+  const skin = joints ? { joints, weights, rig: skinned.skin.rig } : null;
+  return { desc, materials, skin };
 }
 
 /**

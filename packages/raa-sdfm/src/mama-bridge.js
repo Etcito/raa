@@ -92,9 +92,12 @@ export function createBrowserPool(mama, options) {
  * @returns {Promise<{
  *   groups: { group: string, parts: { partId: string, name: string, frame: Float64Array,
  *     meshes: { material: string | null, positions: Float32Array, normals: Float32Array,
- *       uvs: Float32Array | null, indices: Uint32Array, edges?: Uint32Array }[] }[] }[],
+ *       uvs: Float32Array | null, indices: Uint32Array, edges?: Uint32Array,
+ *       skin?: { joints: Uint16Array, weights: Float32Array, rig?: object } }[] }[],
+ *     rig?: object, clips?: object[] }[],
  *   materials: MamaMaterial[] }>}
- * @throws SdfmError `sdfm.mesher_refused` (first refused group in result order, path /document),
+ * @throws SdfmError `sdfm.rig` (MAMA refused an invalid S16 rig), `sdfm.mesher_refused`
+ *   (first other refused group in result order, path /document),
  *   `sdfm.material_unmappable` (a material MAMA cannot build or a helper without source),
  *   `sdfm.worker` (any other MAMA exception)
  */
@@ -113,30 +116,45 @@ export async function meshDocument(mama, document, options) {
 
   const refused = results.find((r) => r.error);
   if (refused) {
-    const { message, fix } = refused.error;
+    const { code, message, fix } = refused.error;
     const tail = fix ? ` (fix: ${fix})` : '';
-    throw new SdfmError('sdfm.mesher_refused', `${refused.group}: ${message}${tail}`, '/document');
+    // MAMA reports S16 rig refusals with the S18 adapter code; everything else is a mesher value refusal.
+    const errorCode = code === 'sdfm.rig' ? 'sdfm.rig' : 'sdfm.mesher_refused';
+    throw new SdfmError(errorCode, `${refused.group}: ${message}${tail}`, '/document');
   }
 
   const out = { groups: [], materials: [] };
   const seen = new Set();
   for (const result of results) {
-    out.groups.push({
+    const group = {
       group: result.group,
       parts: result.parts.map((part) => ({
         partId: part.partId,
         name: part.name,
         frame: Float64Array.from(part.frame),
-        meshes: part.subMeshes.map((sub) => ({
-          material: sub.material ?? null,
-          positions: Float32Array.from(sub.positions),
-          normals: Float32Array.from(sub.normals),
-          uvs: sub.uvs ? Float32Array.from(sub.uvs) : null,
-          indices: Uint32Array.from(sub.indices),
-          ...(sub.edges != null ? { edges: Uint32Array.from(sub.edges) } : {}),
-        })),
+        meshes: part.subMeshes.map((sub) => {
+          const rig = sub.skin?.rig ?? result.rig;
+          return {
+            material: sub.material ?? null,
+            positions: Float32Array.from(sub.positions),
+            normals: Float32Array.from(sub.normals),
+            uvs: sub.uvs ? Float32Array.from(sub.uvs) : null,
+            indices: Uint32Array.from(sub.indices),
+            ...(sub.edges != null ? { edges: Uint32Array.from(sub.edges) } : {}),
+            ...(sub.skin != null ? {
+              skin: {
+                joints: Uint16Array.from(sub.skin.joints),
+                weights: Float32Array.from(sub.skin.weights),
+                ...(rig !== undefined ? { rig } : {}),
+              },
+            } : {}),
+          };
+        }),
       })),
-    });
+    };
+    if (result.rig !== undefined) group.rig = result.rig;
+    if (result.clips !== undefined) group.clips = result.clips;
+    out.groups.push(group);
     for (const built of result.materials) {
       if (seen.has(built.id)) continue;
       seen.add(built.id);
