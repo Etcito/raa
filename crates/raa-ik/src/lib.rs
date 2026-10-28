@@ -10,6 +10,8 @@ use raa_math::Vec3;
 
 pub mod ccd;
 pub use ccd::{CcdOutcome, ccd};
+pub mod fabrik;
+pub use fabrik::{FabrikOutcome, fabrik};
 pub mod limits;
 pub use limits::{clamp_pose, clamp_rotation};
 pub mod pose;
