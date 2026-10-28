@@ -13,7 +13,7 @@ use raa_mesh::{AttributedMesh, Colors, MeshError, SubMesh, from_js_arrays};
 use raa_web::FrameInput;
 use wasm_bindgen::{JsCast, prelude::*};
 
-use crate::convert::{INVALID_ARGUMENT, UNKNOWN_HANDLE, api_error};
+use crate::convert::{INVALID_ARGUMENT, UNKNOWN_HANDLE, api_error, js};
 use crate::engine::{Engine, InstallCtx};
 use crate::state::{EngineState, MeshEntry, MeshOrigin};
 
@@ -219,11 +219,13 @@ impl Engine {
     pub fn add_mesh(&mut self, desc: JsValue) -> Result<u32, JsValue> {
         self.with_state(|gpu, st| {
             let mesh = mesh_desc(st, &desc)?;
+            let skin = js::skin_desc(&desc)?.to_skin(&mesh)?;
             let edges = mesh_edges(&desc, &mesh)?;
             let lit = st.lit.upload(gpu, &mesh)?;
             if let Some(edges) = edges {
                 st.lit.handle().set_mesh_edges(lit, &mesh, &edges);
             }
+            st.set_skin(lit, skin);
             Ok(st.meshes.insert(MeshEntry {
                 lit,
                 origin: MeshOrigin::M07,
@@ -239,11 +241,13 @@ impl Engine {
         self.with_state(|gpu, st| {
             let entry = st.mesh(id)?;
             let mesh = mesh_desc(st, &desc)?;
+            let skin = js::skin_desc(&desc)?.to_skin(&mesh)?;
             let edges = mesh_edges(&desc, &mesh)?;
             st.lit.update(gpu, entry.lit, &mesh)?;
             if let Some(edges) = edges {
                 st.lit.handle().set_mesh_edges(entry.lit, &mesh, &edges);
             }
+            st.set_skin(entry.lit, skin);
             st.mark_mesh_dirty(entry.lit);
             Ok(())
         })
