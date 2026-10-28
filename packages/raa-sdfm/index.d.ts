@@ -100,6 +100,18 @@ export interface SdfmProgress {
 /** One S16 rig bone; `rest` is local to `parent` (null at the root). `bones` order is joint order. */
 export interface SdfmRigBone { name: string; parent: string | null; rest: { t: Vec3; r: Quat; s: Vec3 } }
 
+/** One S16 IK chain (`twoBone` has exactly 3 bones; `ccd` and `fabrik` have 2 to 8). */
+export interface SdfmRigChain {
+  name: string; solver: 'twoBone' | 'ccd' | 'fabrik'; bones: string[];
+  pole?: Vec3 | null; iterations?: number;
+}
+
+/** One S16 pose-mode limit: XYZ Euler degrees relative to rest. */
+export interface SdfmRigLimit { bone: string; min: Vec3; max: Vec3 }
+
+/** One S16 named attachment point on a bone (props and costumes bind to it). */
+export interface SdfmRigAttachment { bone: string; t: Vec3; r: Quat }
+
 /** One S18 binding: a shape or a Paramesh group maps to weighted bones. */
 export interface SdfmRigBinding { source: { group: string } | { shape: string }; bones: { bone: string; factor: number }[] }
 
@@ -109,14 +121,25 @@ export interface SdfmRigBinding { source: { group: string } | { shape: string };
  */
 export interface SdfmRig {
   format: 'raa.rig'; version: 1; name: string; bones: SdfmRigBone[]; roles?: Record<string, string>;
-  ikChains?: unknown[]; limits?: unknown[]; attach?: Record<string, { bone: string; t: Vec3; r: Quat }>;
+  ikChains?: SdfmRigChain[]; limits?: SdfmRigLimit[]; attach?: Record<string, SdfmRigAttachment>;
   bindings?: SdfmRigBinding[]; smooth?: number;
 }
+
+/** One S17 clip key; `hl`/`hr` are `[dtTicks, dv...]` and only exist on BEZIER keys. */
+export interface SdfmClipKey {
+  tick: number; v: number[]; interp: 'CONSTANT' | 'LINEAR' | 'BEZIER'; hl?: number[]; hr?: number[];
+}
+
+/** One S17 clip track: one bone and channel, keys in strictly increasing tick order. */
+export interface SdfmClipTrack { bone: string; channel: 'translation' | 'rotation' | 'scale'; keys: SdfmClipKey[] }
+
+/** One S17 clip event. */
+export interface SdfmClipEvent { tick: number; name: string }
 
 /** One S17 `raa.clip` v2 clip exported with a rigged group, unchanged. */
 export interface SdfmClip {
   format: 'raa.clip'; version: 2; name: string; rig: string; lengthTicks: number; loop: boolean;
-  rootMotion: 'none' | 'xz' | 'xyz'; tracks: unknown[]; events: unknown[];
+  rootMotion: 'none' | 'xz' | 'xyz'; tracks: SdfmClipTrack[]; events?: SdfmClipEvent[];
 }
 
 /**
@@ -256,10 +279,12 @@ export interface SdfmLoader {
   /**
    * Validates, checks the document hash, then meshes (workers or in-process through the bridge),
    * uploads one mesh and its materials per part and caches the result by hash. A second load of
-   * the same hash resolves from the cache and calls MAMA no more.
+   * the same hash resolves from the cache and calls MAMA no more. The returned asset exposes the
+   * meshed group's S16 `rig` and S17 `clips` beside the S15 fields (absent when unrigged).
    * Refusals: the first validation error as `SdfmError` (with its path), otherwise
-   * `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.material_unmappable`, `sdfm.worker`,
-   * `sdfm.disposed`; engine refusals are RaaError.
+   * `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.rig` (an invalid S16/S18 rig, with the S16
+   * code in the message), `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`; engine
+   * refusals are RaaError.
    */
   load(
     asset: string | object,
