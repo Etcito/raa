@@ -400,10 +400,25 @@ export type WireframeMode = 'off' | 'overlay' | 'only';
 export interface MeshDesc {
   /** Optional polygon edge pairs; absent uses unique triangle-index edges. */
   edges?: Uint32Array;
+  /** S18: 4 joint indices per vertex, each < 256; paired with weights. */
+  joints?: Uint16Array;
+  /** S18: 4 finite non-negative weights per vertex, sum within 1e-4 of 1. */
+  weights?: Float32Array;
 }
 export interface Engine {
   /** Global default, or an instance override; inherit restores the global default. */
   setWireframe(mode: WireframeMode | 'inherit', instance?: number): void;
   /** Enables selection with an sRGB colour; null disables it. Multiple selections allowed. */
   setSelectionOutline(instance: number, desc: { color?: Vec3 } | null): void;
+  /**
+   * Mesh-space model(pose) * inverse_bind matrices, column-major, in joint order.
+   * Exactly 16 * (1 + max(mesh.joints)) finite floats. Unposed instances draw rest.
+   * See docs/api/m18-skinning.md and types/m18-skinning.d.ts for validation codes.
+   */
+  setSkinPose(instance: number, matrices: Float32Array): void;
+  /**
+   * Pose slices in instances order, no padding; each uses its mesh's joint count.
+   * Validates the whole batch before updating. See setSkinPose for matrix layout.
+   */
+  setSkinPoses(instances: Uint32Array, matrices: Float32Array): void;
 }
