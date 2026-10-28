@@ -8,6 +8,7 @@ use raa_det::Tick;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Crossfade {
     pub from: usize,
+    /// Frozen source progress, in the source state's `motion` units.
     pub from_phase: f32,
     pub elapsed: Tick,
     pub ticks: Tick,
@@ -24,6 +25,7 @@ pub struct LayerState {
     pub machine: usize,
     pub state: usize,
     pub clock: Tick,
+    /// Current-state progress (clip ticks, or normalized for sync spaces); see `motion`.
     pub phase: f32,
     pub fade: Option<Crossfade>,
 }
@@ -115,8 +117,9 @@ impl GraphState {
                 _ => return Err(bad("invalid crossfade flag")),
             };
             let states = &compiled.graph.machines[expected.machine].states;
-            let invalid = state >= states.len() || !phase.is_finite()
-                || fade.is_some_and(|f| f.from >= states.len() || !f.from_phase.is_finite());
+            let progress = |p: f32| p.is_finite() && p >= 0.0;
+            let invalid = state >= states.len() || !progress(phase)
+                || fade.is_some_and(|f| f.from >= states.len() || !progress(f.from_phase));
             if invalid { return Err(bad("invalid layer snapshot")); }
             layers.push(LayerState { machine: expected.machine, state, clock, phase, fade });
         }

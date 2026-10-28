@@ -7,6 +7,7 @@ pub mod decode;
 pub mod error;
 pub mod load;
 pub mod model;
+pub mod motion;
 pub mod params; pub mod state;
 pub mod triangulation;
 pub mod transitions;
@@ -20,5 +21,6 @@ pub use model::{
     BlendPoint, BlendSpace, CondOp, Condition, GRAPH_CAPS, Graph, GraphCaps, GraphRootMotion,
     Layer, Machine, Num, Param, ParamType, State, Transition, WILDCARD,
 };
+pub use motion::{Contribution, blend_local};
 pub use {params::{ParamValue, Params}, state::{Crossfade, GraphState, LayerState}};
 pub use triangulation::{Triangulation, triangulate};
