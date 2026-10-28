@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::{cell::RefCell, rc::Rc};
 
 /// Live draw resources, shared with lit without retaining removed instance buffers.
-type DrawResources = (bool, BTreeMap<u32, (wgpu::Buffer, wgpu::Buffer)>);
+type DrawResources = (bool, BTreeMap<u32, (wgpu::Buffer, wgpu::Buffer, Option<Vec<f32>>)>);
 #[derive(Clone, Debug, Default)]
 pub struct SkinDrawSource(pub(crate) Rc<RefCell<DrawResources>>);
 
@@ -108,7 +108,7 @@ impl SkinViews {
             .0
             .borrow_mut()
             .1
-            .insert(instance, (stream0.clone(), tangents.clone()));
+            .insert(instance, (stream0.clone(), tangents.clone(), None));
         self.views.insert(
             instance,
             SkinnedView {
@@ -119,6 +119,13 @@ impl SkinViews {
             },
         );
         Ok(())
+    }
+
+    /// Internal pose delivery after successful GPU upload; replaced with the geometry.
+    pub fn set_joint_matrices(&mut self, instance: u32, matrices: &[f32]) {
+        if let Some(view) = self.source.0.borrow_mut().1.get_mut(&instance) {
+            view.2 = Some(matrices.to_vec());
+        }
     }
 
     /// Drops the view of `instance` and its buffers; other views are untouched.

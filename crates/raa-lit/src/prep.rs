@@ -101,6 +101,7 @@ pub struct DrawPrep {
     fur: Vec<LitDraw>,
     transparent: Vec<LitDraw>,
     sort: Vec<SortKey>,
+    camera: [Vec<LitDraw>; 3],
     bindings: HashMap<MeshId, (MeshId, u32)>,
 }
 
@@ -118,6 +119,7 @@ impl DrawPrep {
             fur: Vec::with_capacity(n),
             transparent: Vec::with_capacity(n),
             sort: Vec::with_capacity(n),
+            camera: std::array::from_fn(|_| Vec::with_capacity(n)),
             bindings: HashMap::with_capacity(n),
         }
     }
@@ -131,6 +133,7 @@ impl DrawPrep {
         self.transparent.clear();
         self.sort.clear();
         self.bindings.clear();
+        for draws in &mut self.camera { draws.clear(); }
     }
 
     /// S1 instance records (128 B each) in draw order: opaque, then fur, then transparent.
@@ -192,7 +195,43 @@ impl DrawPrep {
         self.clear();
         self.validate(input)?;
         self.fill(input, skinned);
+        for (out, draws) in self.camera.iter_mut().zip([&self.opaque, &self.fur, &self.transparent]) {
+            out.extend_from_slice(draws);
+        }
         Ok(())
+    }
+
+    /// Filters camera draws only, splitting batches while sharing instance records and bindings.
+    pub fn cull_camera(&mut self, visible: &dyn Fn(MeshId, u32, Mat4) -> bool) {
+        for (slot, draws) in [&self.opaque, &self.fur, &self.transparent].into_iter().enumerate() {
+            let out = &mut self.camera[slot];
+            out.clear();
+            for draw in draws {
+                let start = out.len();
+                let mesh = self.bindings.get(&draw.mesh).map_or(draw.mesh, |v| v.0);
+                for i in draw.first_instance..draw.first_instance + draw.instance_count {
+                    let bytes = &self.instances[i as usize * INSTANCE_GPU_SIZE..];
+                    let tag = u32::from_le_bytes(bytes[116..120].try_into().unwrap());
+                    let mut world = Mat4::IDENTITY;
+                    for (j, value) in world.cols.iter_mut().flatten().enumerate() {
+                        *value = f32::from_le_bytes(bytes[j * 4..j * 4 + 4].try_into().unwrap());
+                    }
+                    if !visible(mesh, tag, world) { continue; }
+                    if let Some(last) = out.get_mut(start..).and_then(|run| run.last_mut()) {
+                        if last.mesh == draw.mesh && last.material == draw.material
+                            && last.first_instance + last.instance_count == i {
+                            last.instance_count += 1;
+                            continue;
+                        }
+                    }
+                    out.push(LitDraw { first_instance: i, instance_count: 1, ..*draw });
+                }
+            }
+        }
+    }
+
+    pub fn camera_draws(&self, class: DrawClass) -> &[LitDraw] {
+        &self.camera[match class { DrawClass::Opaque => 0, DrawClass::Fur => 1, DrawClass::Transparent => 2 }]
     }
 
     fn validate(&self, input: &PrepInput<'_>) -> Result<(), RaaError> {

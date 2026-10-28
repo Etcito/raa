@@ -23,3 +23,17 @@ pub fn entry_points(pass: PassKind, posed: bool) -> String {
         )
         .replace("v1.tangent.xyz", "raa_posed_tangent")
 }
+
+
+/// Match culling bounds to the selected geometry; unknown posed bounds stay visible.
+pub fn instance_bounds(
+    rest: raa_math::Aabb,
+    posed: bool,
+    joints: Option<&[f32]>,
+) -> Option<raa_math::Aabb> {
+    if posed {
+        joints.and_then(|joints| crate::skin_bounds::posed_bounds(rest, joints))
+    } else {
+        Some(rest)
+    }
+}

@@ -28,6 +28,7 @@ mod renderer;
 mod slots;
 pub mod skin_views;
 pub mod skin_draw;
+pub mod skin_bounds;
 pub use skin_views::{RestMeshView, SkinViews, SkinnedView, SKINNED_EDGE_STRIDE, SKINNED_STREAM0_STRIDE, SKINNED_TANGENT_STRIDE};
 
 pub use contributor::ForwardContributor;

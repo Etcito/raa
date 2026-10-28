@@ -86,6 +86,7 @@ impl SkinPass {
             self.views.add_skinned_view(gpu, instance, rest.clone())?;
             self.views.set_skinning_enabled(self.enabled);
         }
+        self.views.set_joint_matrices(instance, matrices);
         Ok(())
     }
 

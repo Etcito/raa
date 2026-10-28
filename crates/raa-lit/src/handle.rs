@@ -523,11 +523,22 @@ impl LitHandle {
         LitHandle { shared }
     }
 
-    /// The prepared draws of `class` in submission order (transparent: back to front).
+    /// Opaque/fur caster lists; transparent camera draws (back to front).
     /// Instances `first_instance..first_instance + instance_count` index the instance
     /// stream and the extras array (`@builtin(instance_index)`).
     pub fn draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
-        Ref::map(self.shared.borrow(), |s| s.prep.draws(class))
+        Ref::map(self.shared.borrow(), |s| {
+            if class == DrawClass::Transparent {
+                s.prep.camera_draws(class)
+            } else {
+                s.prep.draws(class)
+            }
+        })
+    }
+
+    /// Camera-only lists; the unfiltered opaque/fur lists remain available to shadows.
+    pub fn camera_draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
+        Ref::map(self.shared.borrow(), |s| s.prep.camera_draws(class))
     }
 
     /// Sets the vertex buffers of sub-mesh `mesh` and the instance stream (stream 0 at slot
@@ -547,7 +558,7 @@ impl LitHandle {
         let posed = tag.and_then(|tag| (!source.0).then(|| source.1.get(&tag)).flatten());
         s.bound_skin.set(posed.is_some());
         pass.set_vertex_buffer(STREAM0_SLOT, posed.map_or(&g.stream0, |v| &v.0).slice(..));
-        if let Some((_, tangent)) = posed {
+        if let Some((_, tangent, _)) = posed {
             pass.set_vertex_buffer(3, tangent.slice(..));
         }
         pass.set_vertex_buffer(INSTANCE_SLOT, s.instance_buffer.slice(..));
