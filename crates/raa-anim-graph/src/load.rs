@@ -1,5 +1,8 @@
 //! Machine, layer and root-motion decoding, [`Graph`] assembly in file order and [`Graph::load`].
-//! Only in-document references are checked here; rig and clip names are left to the reference pass.
+//! Reference validation follows decoding without changing document order.
+
+#[path = "validate.rs"]
+pub mod validate;
 
 use crate::decode::{decode_conditions, decode_document};
 use crate::error::{GraphError, codes};
@@ -16,7 +19,14 @@ type List<'a> = (&'a [JsonValue], String);
 impl Graph {
     /// Decode an S19 document and bind it to `rig` and `clips`.
     pub fn load(text: &str, rig: &Rig, clips: &[Clip]) -> Out<Self> {
-        resolve_references(decode_graph(text)?, rig, clips)
+        Self::load_resolved(text, rig, clips).map(|(graph, _)| graph)
+    }
+
+    /// Load with index tables for runtime use; indices follow the supplied arrays.
+    pub fn load_resolved(text: &str, rig: &Rig, clips: &[Clip]) -> Out<(Self, validate::References)> {
+        let graph = decode_graph(text)?;
+        let references = validate::resolve(&graph, rig, clips)?;
+        Ok((graph, references))
     }
 }
 
@@ -47,11 +57,6 @@ pub fn decode_graph(text: &str) -> Out<Graph> {
         machines,
         root_motion: GraphRootMotion { bone, mode },
     })
-}
-
-/// Motion and bone names resolve in the reference pass; until then a graph is refused.
-fn resolve_references(_graph: Graph, _rig: &Rig, _clips: &[Clip]) -> Out<Graph> {
-    Err(GraphError::new(codes::SCHEMA, "", "references unresolved"))
 }
 
 fn machines_of(values: List, params: &[Param]) -> Out<Vec<Machine>> {
