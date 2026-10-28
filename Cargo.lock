@@ -898,6 +898,7 @@ dependencies = [
  "raa-shader",
  "raa-shadow",
  "raa-shafts",
+ "raa-skin",
  "raa-sky",
  "raa-ssr",
  "raa-tonemap",

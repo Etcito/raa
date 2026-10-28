@@ -13,6 +13,7 @@ use raa_lit::{LitMeshId, LitRenderer};
 use raa_loader::LoaderRegistry;
 use raa_pipeline::Pipeline;
 use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene};
+use raa_skin::SkinMesh;
 use raa_tonemap::TonemapControl;
 
 use raa_scene::SceneError;
@@ -37,6 +38,13 @@ pub(crate) enum MeshOrigin {
 pub(crate) struct MeshEntry {
     pub lit: LitMeshId,
     pub origin: MeshOrigin,
+}
+
+/// The S18 skin retained for one lit mesh: the validated typed joints (`u16x4`) and
+/// weights (`f32x4`) per vertex, with the rest geometry they were validated against.
+pub(crate) struct SkinEntry {
+    pub mesh: LitMeshId,
+    pub skin: SkinMesh,
 }
 
 /// A JS instance handle: one scene instance per sub-mesh of `mesh` at `node`.
@@ -205,6 +213,8 @@ pub(crate) struct EngineState {
     pub features: FeatureMap,
     pub max_materials: u32,
     pub meshes: HandleMap<MeshEntry>,
+    /// The S18 skin of every mesh uploaded with joints and weights, keyed by lit mesh.
+    pub skins: Vec<SkinEntry>,
     pub materials: HandleMap<MaterialId>,
     pub nodes: HandleMap<NodeId>,
     pub instances: HandleMap<InstanceGroup>,
@@ -232,6 +242,24 @@ impl EngineState {
 
     pub(crate) fn mesh(&self, h: u32) -> Result<MeshEntry, RaaError> {
         self.meshes.get(h)
+    }
+
+    /// Retains the S18 skin of `mesh`, replacing a previous one; `None` clears it.
+    pub(crate) fn set_skin(&mut self, mesh: LitMeshId, skin: Option<SkinMesh>) {
+        self.clear_skin(mesh);
+        if let Some(skin) = skin {
+            self.skins.push(SkinEntry { mesh, skin });
+        }
+    }
+
+    /// The S18 skin of `mesh`, when it was uploaded with joints and weights.
+    pub(crate) fn skin(&self, mesh: LitMeshId) -> Option<&SkinMesh> {
+        self.skins.iter().find(|e| e.mesh == mesh).map(|e| &e.skin)
+    }
+
+    /// Drops the skin of `mesh`, if any.
+    pub(crate) fn clear_skin(&mut self, mesh: LitMeshId) {
+        self.skins.retain(|e| e.mesh != mesh);
     }
 
     pub(crate) fn instance_group(&self, h: u32) -> Result<&InstanceGroup, RaaError> {
@@ -304,6 +332,7 @@ impl EngineState {
     /// Frees the mesh of JS handle `h` (any origin) and drops it from the dirty list.
     pub(crate) fn remove_mesh(&mut self, h: u32) -> Result<(), RaaError> {
         let mesh = self.meshes.remove(h)?;
+        self.clear_skin(mesh.lit);
         self.dirty_meshes.retain(|&m| m != mesh.lit);
         self.lit.remove(mesh.lit);
         Ok(())

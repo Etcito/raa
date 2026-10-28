@@ -24,6 +24,7 @@ raa-loader = { workspace = true }
 raa-csg = { workspace = true }
 wgpu = { workspace = true }
 raa-mesh = { path = "../raa-mesh" }
+raa-skin = { path = "../raa-skin" }
 raa-shader = { path = "../raa-shader" }
 raa-pipeline = { path = "../raa-pipeline" }
 raa-lit = { path = "../raa-lit" }

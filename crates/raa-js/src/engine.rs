@@ -223,6 +223,7 @@ impl WebApp for EngineApp {
             features,
             max_materials: o.max_materials,
             meshes: HandleMap::new("mesh"),
+            skins: Vec::new(),
             materials: HandleMap::new("material"),
             nodes: HandleMap::new("node"),
             instances: HandleMap::new("instance"),
