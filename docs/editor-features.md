@@ -71,7 +71,9 @@ small capped slope-scaled tolerance. Hidden edges are discarded; this is not x-r
 wireframe. The width does not depend on object scale, distance or projection.
 
 Edges draw once per mesh instance, including meshes with several submeshes.
-`only` suppresses shaded surface draws but retains the surface depth prepass,
+With GPU skinning enabled the wireframe reads each instance's posed edge segments,
+so it follows the skinned pose; disabling skinning returns it to the rest edges in
+the same frame. `only` suppresses shaded surface draws but retains the surface depth prepass,
 so back edges remain hidden. A background-colour fill in the display overlay
 removes the surface tone-mapping footprint; the line colour switches to a
 contrasting light colour on dark backgrounds. Built-in opaque, transparency and fur surface
@@ -103,7 +105,10 @@ Instance handles are validated before mutation. Removing an instance or its node
 clears its outline and wireframe override.
 
 Selected triangles write a full-resolution RGBA8 colour mask after a strict
-depth comparison with the surface prepass, respecting material face culling. A fullscreen shader dilates the visible mask
+depth comparison with the surface prepass, respecting material face culling. The
+mask draws the instance's posed mesh view while skinning is live, so the selection
+outline follows the skinned pose; disabling skinning returns it to the rest mesh
+in the same frame. A fullscreen shader dilates the visible mask
 with a circular kernel, omits its interior and blends an antialiased outline
 about 2–3 backing-store pixels wide into the final canvas. Multiple selected
 instances share one mask; where their visible masks meet they form a union.
@@ -253,9 +258,9 @@ not hardware performance, startup budgets or release WASM size. The demo package
 is a development build; no archive, version bump, commit, push or release is made.
 
 Open limits:
-- Overlay geometry currently follows rigid node transforms. Material-defined
+- Overlay geometry follows rigid node transforms and GPU-skinned poses. Material-defined
   vertex deformation and squash/jiggle are not replayed by this independent
-  overlay shader; animated/deformed silhouettes need shared vertex composition.
+  overlay shader; those silhouettes still need shared vertex composition.
   Fur outlines follow the polygon base rather than the outer shell envelope.
 - Transparent objects do not occlude overlays as solid objects do; the depth
   prepass intentionally represents opaque surfaces.

@@ -7,8 +7,36 @@ use std::{cell::RefCell, rc::Rc};
 
 /// Live draw resources, shared with lit without retaining removed instance buffers.
 type DrawResources = (bool, BTreeMap<u32, (wgpu::Buffer, wgpu::Buffer, Option<Vec<f32>>)>);
+/// Posed edge-segment lists of the same instances, keyed by instance tag.
+type EdgeResources = BTreeMap<u32, wgpu::Buffer>;
+
 #[derive(Clone, Debug, Default)]
-pub struct SkinDrawSource(pub(crate) Rc<RefCell<DrawResources>>);
+pub struct SkinDrawSource(
+    pub(crate) Rc<RefCell<DrawResources>>,
+    pub(crate) Rc<RefCell<EdgeResources>>,
+);
+
+impl SkinDrawSource {
+    /// Whether `tag` draws posed geometry: a live view exists and skinning is enabled.
+    pub fn posed(&self, tag: u32) -> bool {
+        let state = self.0.borrow();
+        !state.0 && state.1.contains_key(&tag)
+    }
+
+    /// The posed stream 0 of `tag`; `None` draws the rest mesh.
+    pub fn stream0(&self, tag: u32) -> Option<wgpu::Buffer> {
+        self.posed(tag)
+            .then(|| self.0.borrow().1.get(&tag).map(|v| v.0.clone()))
+            .flatten()
+    }
+
+    /// The posed edge segments of `tag`; `None` draws the rest edge list.
+    pub fn edges(&self, tag: u32) -> Option<wgpu::Buffer> {
+        self.posed(tag)
+            .then(|| self.1.borrow().get(&tag).cloned())
+            .flatten()
+    }
+}
 
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
@@ -109,6 +137,14 @@ impl SkinViews {
             .borrow_mut()
             .1
             .insert(instance, (stream0.clone(), tangents.clone(), None));
+        match &edges {
+            Some(edges) => {
+                self.source.1.borrow_mut().insert(instance, edges.clone());
+            }
+            None => {
+                self.source.1.borrow_mut().remove(&instance);
+            }
+        }
         self.views.insert(
             instance,
             SkinnedView {
@@ -131,6 +167,7 @@ impl SkinViews {
     /// Drops the view of `instance` and its buffers; other views are untouched.
     pub fn remove_skinned_view(&mut self, instance: u32) -> Option<SkinnedView> {
         self.source.0.borrow_mut().1.remove(&instance);
+        self.source.1.borrow_mut().remove(&instance);
         self.views.remove(&instance)
     }
 
@@ -177,6 +214,7 @@ impl SkinViews {
 impl Drop for SkinViews {
     fn drop(&mut self) {
         self.source.0.borrow_mut().1.clear();
+        self.source.1.borrow_mut().clear();
     }
 }
 
