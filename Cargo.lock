@@ -1078,6 +1078,7 @@ dependencies = [
 name = "raa-skin"
 version = "0.4.1"
 dependencies = [
+ "raa-core",
  "raa-mesh",
 ]
 

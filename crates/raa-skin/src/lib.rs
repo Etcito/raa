@@ -5,8 +5,13 @@
 
 mod cpu;
 mod error;
+mod gpu;
 mod mesh;
 
 pub use cpu::{CpuSkin, skin_cpu};
 pub use error::SkinError;
+pub use gpu::{SKIN_WGSL, SkinVertexInputs, SkinVertexKernel};
 pub use mesh::{MAX_INFLUENCES, MAX_JOINTS, SkinMesh, WEIGHT_SUM_EPS};
+
+/// Absolute component-wise GPU/CPU tolerance; both values must also be finite.
+pub const SKIN_PARITY_EPS: f32 = 1e-5;

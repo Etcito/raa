@@ -7,4 +7,5 @@ rust-version.workspace = true
 description = "S18 skinned-mesh data: joints/weights validation and little-endian upload streams."
 
 [dependencies]
+raa-core = { workspace = true }
 raa-mesh = { path = "../raa-mesh" }
