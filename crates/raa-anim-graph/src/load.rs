@@ -1,5 +1,6 @@
 //! Machine, layer and root-motion decoding, [`Graph`] assembly in file order and [`Graph::load`].
-//! Reference validation follows decoding without changing document order.
+//! Reference validation follows decoding without changing document order; 2D blend
+//! geometry is then precomputed once and retained in [`Compiled`].
 
 #[path = "validate.rs"]
 pub mod validate;
@@ -8,6 +9,7 @@ use crate::decode::{decode_conditions, decode_document};
 use crate::error::{GraphError, codes};
 use crate::model::{GRAPH_CAPS, Graph, GraphRootMotion, Layer, Machine, Num, Param};
 use crate::model::{ParamType::Float, ParamType::Int, State, Transition, WILDCARD};
+use crate::triangulation::{Triangulation, triangulate};
 use raa_anim::json::{JsonValue, parse, pointer_child};
 use raa_anim::{Clip, Rig, RootMotion};
 use raa_det::Tick;
@@ -16,17 +18,42 @@ type Fields = [(String, JsonValue)];
 type Out<T> = Result<T, GraphError>;
 type List<'a> = (&'a [JsonValue], String);
 
+/// A loaded graph with its references and its load-time blend geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Compiled {
+    pub graph: Graph,
+    pub references: validate::References,
+    /// Parallel to `graph.blend_spaces`: `Some` for 2D spaces, `None` for 1D.
+    pub triangulations: Vec<Option<Triangulation>>,
+}
+
 impl Graph {
     /// Decode an S19 document and bind it to `rig` and `clips`.
     pub fn load(text: &str, rig: &Rig, clips: &[Clip]) -> Out<Self> {
-        Self::load_resolved(text, rig, clips).map(|(graph, _)| graph)
+        Self::load_compiled(text, rig, clips).map(|compiled| compiled.graph)
     }
 
     /// Load with index tables for runtime use; indices follow the supplied arrays.
     pub fn load_resolved(text: &str, rig: &Rig, clips: &[Clip]) -> Out<(Self, validate::References)> {
+        Self::load_compiled(text, rig, clips).map(|c| (c.graph, c.references))
+    }
+
+    /// Load, resolve and triangulate every 2D blend space at its runtime coordinates.
+    pub fn load_compiled(text: &str, rig: &Rig, clips: &[Clip]) -> Out<Compiled> {
         let graph = decode_graph(text)?;
         let references = validate::resolve(&graph, rig, clips)?;
-        Ok((graph, references))
+        let mut triangulations = Vec::with_capacity(graph.blend_spaces.len());
+        for (i, space) in graph.blend_spaces.iter().enumerate() {
+            let points = space.points.iter().map(|p| match p.at[..] {
+                [x, y] => Some([x.rt, y.rt]),
+                _ => None,
+            });
+            triangulations.push(match points.collect::<Option<Vec<_>>>() {
+                Some(points) => Some(triangulate(&points, &format!("/blendSpaces/{i}"))?),
+                None => None,
+            });
+        }
+        Ok(Compiled { graph, references, triangulations })
     }
 }
 
