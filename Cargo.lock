@@ -705,6 +705,7 @@ dependencies = [
  "raa-anim",
  "raa-anim-graph",
  "raa-det",
+ "raa-ik",
  "wasm-bindgen",
 ]
 
