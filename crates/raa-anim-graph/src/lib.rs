@@ -13,6 +13,7 @@ pub mod motion;
 pub mod output;
 pub mod params; pub mod state;
 pub mod runtime;
+pub mod scenario_data;
 pub mod snapshot;
 pub mod triangulation;
 pub mod transitions;
