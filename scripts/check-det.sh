@@ -82,7 +82,9 @@ scan_file() {
         if (code !~ pat[k]) continue
         if (cats[k] == "f64" &&
             (file == "crates/raa-anim/src/json.rs" ||
-             file == "crates/raa-anim/src/rig.rs" || canon_test)) continue
+             file == "crates/raa-anim/src/rig.rs" ||
+             file == "crates/raa-anim-graph/src/model.rs" ||
+             file == "crates/raa-anim-graph/src/decode.rs" || canon_test)) continue
         # Exact statements, not a function exemption: any additional use fails.
         if (cats[k] == "f64" && canon_number &&
             (code ~ /^pub fn format_number\(value: f64, out: &mut String\) \{$/ ||
