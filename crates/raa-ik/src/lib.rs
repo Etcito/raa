@@ -16,6 +16,8 @@ pub mod limits;
 pub use limits::{clamp_pose, clamp_rotation};
 pub mod pose;
 pub use pose::IkPose;
+pub mod reach;
+pub use reach::{hand_reach, look_at};
 pub mod two_bone;
 pub use two_bone::two_bone;
 
