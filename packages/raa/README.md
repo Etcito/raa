@@ -1,16 +1,16 @@
 # @etcito/raa
 
 A small, extensible rendering engine in Rust, compiled to WebAssembly over WebGPU.
-It has 8 primitive kinds, prims v0 assets with CSG booleans, instancing and a
-PBR-lite forward renderer. Version 0.1.0 (public API v0).
+It has 8 primitive kinds, prims v0 assets with CSG booleans, instancing, GPU
+skinning and a PBR-lite forward renderer. Version 0.5.0 (public API v0).
 
 ## Install
 
 The package is built offline into a tarball (`scripts/build-package.sh` in the RAA
-repository writes `dist/etcito-raa-0.1.0.tgz`). Install it from that file:
+repository writes `dist/etcito-raa-0.5.0.tgz`). Install it from that file:
 
 ```sh
-npm install ./dist/etcito-raa-0.1.0.tgz
+npm install ./dist/etcito-raa-0.5.0.tgz
 ```
 
 The package is a plain ES module with no dependencies. It needs a browser with WebGPU
@@ -59,6 +59,22 @@ const spawned = engine.spawnAsset(info.id, root); // { root, nodes, instances }
 To move many nodes per frame, use `setTransforms(nodes: Uint32Array, trs: Float32Array)`
 with 10 floats per node (t3, r4 `[x, y, z, w]`, s3). Reuse the typed arrays from frame
 to frame.
+
+## Skinned meshes
+
+`addMesh` and `updateMesh` accept `joints: Uint16Array` and `weights: Float32Array`
+(four slots per vertex; supply both or neither; each vertex's weights sum to 1
+within 1e-4). Pose an instance with `setSkinPose(instance, matrices)`, or many at
+once with `setSkinPoses(instances, matrices)`: column-major mesh-space
+`model(pose) * inverse_bind` matrices, 16 floats per joint in S16 bone order.
+Instances sharing a mesh keep independent poses; an instance without a pose draws
+at rest.
+
+The `skin` compute pass (order 15, feature bit 20) is enabled by default; toggle it
+with `setPassEnabled('skin', false)`. When disabled, the frame draws at rest.
+Prepass, forward, shadows, transparent, editor wireframe and selection outline all
+follow the pose. Declarations are in `types/m18-skinning.d.ts`; details are in
+`docs/api/m18-skinning.md`.
 
 Units: metres, radians (except `fovYDeg`, in degrees), milliseconds. Coordinates are
 right-handed with Y up. Material `color` is sRGB. Light, ambient and emissive colours

@@ -2,7 +2,16 @@
 
 Adapter that loads `sdfm.game-asset` v1 files and turns them into RAA meshes and materials, so an asset can be shown side by side with SDF Modeler.
 
-Meshing and material compilation are done by MAMA (the SDF document engine, package `mama`). RAA renders the result through `@etcito/raa`. Both are peer dependencies: `@etcito/raa` `^0.1.0` and `mama` `^0.1.0`. The package has no dependencies and no build step.
+Meshing and material compilation are done by MAMA (the SDF document engine, package `mama`). RAA renders the result through `@etcito/raa`. The consuming app provides both; the package declares no dependencies and has no build step.
+
+## Skinned assets
+
+A part of a group with a `rig` carries `skin: { joints, weights, rig }`. The loader
+passes those arrays through unchanged as the mesh's `MeshDesc.joints` and
+`MeshDesc.weights`; joint indices are in the rig's `bones` order. The loaded asset
+exposes the group's S16 `rig` and S17 `clips` as `asset.rig` and `asset.clips`;
+unrigged assets load exactly as before. An invalid rig is refused as `sdfm.rig`,
+with the S16 code in the message.
 
 MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones that file makes, reviewed against MAMA 0.1.0 at commit 864ebc3 (sibling checkout `../MAMA`).
 

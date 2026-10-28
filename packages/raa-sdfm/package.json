@@ -1,6 +1,6 @@
 {
   "name": "@etcito/raa-sdfm",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Adapter that loads sdfm.game-asset v1 files as RAA meshes and materials, meshed by MAMA.",
   "type": "module",
   "license": "MIT",
