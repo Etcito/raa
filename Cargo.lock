@@ -1074,6 +1074,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-skin"
+version = "0.4.1"
+dependencies = [
+ "raa-mesh",
+]
+
+[[package]]
 name = "raa-sky"
 version = "0.4.1"
 dependencies = [
