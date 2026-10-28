@@ -13,6 +13,7 @@ pub mod motion;
 pub mod output;
 pub mod params; pub mod state;
 pub mod runtime;
+pub mod scenario;
 pub mod scenario_data;
 pub mod snapshot;
 pub mod triangulation;
@@ -30,5 +31,7 @@ pub use model::{
 pub use motion::{Contribution, blend_local};
 pub use output::{GraphEvent, RootDelta, TickOut};
 pub use runtime::{Frame, GraphRuntime};
+pub use scenario::{Rollback, RouteEntry, SCENARIO_TICKS, ScenarioEvent, ScenarioRun, ScenarioTick,
+    run, run_penguin};
 pub use {params::{ParamValue, Params}, state::{Crossfade, GraphState, LayerState}};
 pub use triangulation::{Triangulation, triangulate};
