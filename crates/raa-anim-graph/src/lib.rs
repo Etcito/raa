@@ -5,6 +5,7 @@ pub mod blend_weights;
 pub mod canon;
 pub mod decode;
 pub mod error;
+pub mod layers;
 pub mod load;
 pub mod model;
 pub mod motion;
