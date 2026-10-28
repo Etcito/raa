@@ -9,6 +9,7 @@ pub mod layers;
 pub mod load;
 pub mod model;
 pub mod motion;
+pub mod output;
 pub mod params; pub mod state;
 pub mod triangulation;
 pub mod transitions;
@@ -23,5 +24,6 @@ pub use model::{
     Layer, Machine, Num, Param, ParamType, State, Transition, WILDCARD,
 };
 pub use motion::{Contribution, blend_local};
+pub use output::{GraphEvent, RootDelta, TickOut};
 pub use {params::{ParamValue, Params}, state::{Crossfade, GraphState, LayerState}};
 pub use triangulation::{Triangulation, triangulate};
