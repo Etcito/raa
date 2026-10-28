@@ -1079,7 +1079,9 @@ name = "raa-skin"
 version = "0.4.1"
 dependencies = [
  "raa-core",
+ "raa-lit",
  "raa-mesh",
+ "raa-pipeline",
 ]
 
 [[package]]

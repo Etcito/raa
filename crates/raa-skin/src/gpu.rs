@@ -171,6 +171,26 @@ impl SkinVertexKernel {
         pass.dispatch_workgroups(vertices.div_ceil(64), 1, 1);
     }
 
+    /// Dispatch one posed instance: vertices first, then edges when a segment buffer is
+    /// bound, so every endpoint comes from that instance's freshly posed stream 0.
+    pub fn dispatch(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        inputs: &SkinVertexInputs,
+        pose: &wgpu::Buffer,
+        stream0: &wgpu::Buffer,
+        tangents: &wgpu::Buffer,
+        segments: Option<&wgpu::Buffer>,
+    ) {
+        let binding = self.bind(gpu, inputs, pose, stream0, tangents);
+        self.encode(encoder, &binding, inputs.vertices);
+        if let Some(segments) = segments {
+            let edges = self.bind_edges(gpu, inputs, stream0, segments);
+            self.encode_edges(encoder, &edges, inputs.edges);
+        }
+    }
+
     /// Dispatch after [`Self::encode`] so endpoints come from that instance's posed stream.
     pub fn encode_edges(
         &self,

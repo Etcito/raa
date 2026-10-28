@@ -8,4 +8,6 @@ description = "S18 skinned-mesh data: joints/weights validation and little-endia
 
 [dependencies]
 raa-core = { workspace = true }
+raa-lit = { path = "../raa-lit" }
 raa-mesh = { path = "../raa-mesh" }
+raa-pipeline = { path = "../raa-pipeline" }
