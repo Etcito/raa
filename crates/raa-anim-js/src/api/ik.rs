@@ -1,10 +1,12 @@
 //! S20 visual IK over S17 poses, exposed as the JavaScript `ik` namespace.
 use raa_anim::{AnimError, LocalPose, Pose, Rig};
-use raa_ik::{IkPose, ccd, fabrik, two_bone};
+use raa_ik::{GroundHit, IkPose, ccd, fabrik, foot_placement, hand_reach, look_at, two_bone};
 #[cfg(target_arch = "wasm32")]
 use {crate::clips::AnimationRig, wasm_bindgen::prelude::*};
 pub const DEFAULT_TOLERANCE: f32 = 0.001;
 pub const DEFAULT_WEIGHT: f32 = 1.0;
+/// An omitted `lookAt` cap: 180 degrees is the largest possible turn.
+pub const DEFAULT_MAX_DEGREES: f32 = 180.0;
 /// A corrected pose plus the outcome of iterative solvers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IkOutput {
@@ -14,6 +16,7 @@ pub struct IkOutput {
     pub converged: Option<bool>,
     pub passes: Option<usize>,
     pub distance: Option<f32>,
+    pub drop: Option<f32>,
 }
 fn invalid(message: impl Into<String>) -> AnimError {
     AnimError::new("api.invalid_input", "/pose", message)
@@ -42,6 +45,7 @@ fn flatten(pose: Pose) -> IkOutput {
         converged: None,
         passes: None,
         distance: None,
+        drop: None,
     }
 }
 /// `two_bone` on the S16 chain named `name`.
@@ -79,6 +83,38 @@ pub fn solve_ccd(rig: &Rig, name: &str, values: &[f32], target: [f32; 3],
 pub fn solve_fabrik(rig: &Rig, name: &str, values: &[f32], target: [f32; 3],
     iterations: usize, tol: f32) -> Result<IkOutput, AnimError> {
     solve_iterative(rig, name, values, target, iterations, tol, true)
+}
+
+/// `foot_placement` over the S16 `twoBone` chains named in `legs`, one hit each.
+/// Returns the corrected pose and the applied pelvis drop in world units.
+pub fn solve_foot_placement(rig: &Rig, legs: &[&str], values: &[f32], hits: &[GroundHit])
+    -> Result<IkOutput, AnimError> {
+    let chains = legs.iter().map(|name| raa_ik::chain(rig, name))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut ik = IkPose::new(rig, &local_pose(rig, values)?)?;
+    let drop = foot_placement(&mut ik, &chains, hits)?;
+    let mut output = flatten(ik.into_pose());
+    output.drop = Some(drop);
+    Ok(output)
+}
+
+/// `hand_reach` on the S16 chain named `name`, blended by `weight` in [0, 1].
+pub fn solve_hand_reach(rig: &Rig, name: &str, values: &[f32], target: [f32; 3], weight: f32)
+    -> Result<IkOutput, AnimError> {
+    let chain = raa_ik::chain(rig, name)?;
+    let mut ik = IkPose::new(rig, &local_pose(rig, values)?)?;
+    hand_reach(&mut ik, chain, target, weight)?;
+    Ok(flatten(ik.into_pose()))
+}
+
+/// `look_at` on the bone named `bone`, turning its local `axis` toward `target`
+/// by at most `max_deg` degrees.
+pub fn solve_look_at(rig: &Rig, bone: &str, values: &[f32], target: [f32; 3],
+    axis: [f32; 3], max_deg: f32) -> Result<IkOutput, AnimError> {
+    let bone = raa_ik::bone_index(rig, bone)?;
+    let mut ik = IkPose::new(rig, &local_pose(rig, values)?)?;
+    look_at(&mut ik, bone, target, axis, max_deg)?;
+    Ok(flatten(ik.into_pose()))
 }
 pub fn register(_cases: &mut Vec<crate::Case>) {}
 #[cfg(target_arch = "wasm32")]
@@ -129,6 +165,35 @@ mod wasm {
         floats(value, "pose")
     }
 
+    fn chain_names(value: &JsValue) -> Result<Vec<String>, JsValue> {
+        if !js_sys::Array::is_array(value) {
+            return Err(invalid("legs must be an Array of chain names"));
+        }
+        let array: &js_sys::Array = value.unchecked_ref();
+        array.iter().enumerate().map(|(i, name)| {
+            name.as_string()
+                .ok_or_else(|| invalid(&format!("legs[{i}] must be a chain name")))
+        }).collect()
+    }
+
+    fn ground_hits(value: &JsValue) -> Result<Vec<GroundHit>, JsValue> {
+        if !js_sys::Array::is_array(value) {
+            return Err(invalid("hits must be an Array of ground hits"));
+        }
+        let array: &js_sys::Array = value.unchecked_ref();
+        array.iter().enumerate().map(|(i, hit)| {
+            if !hit.is_object() || js_sys::Array::is_array(&hit) {
+                return Err(invalid(&format!("hits[{i}] must be an object")));
+            }
+            let field = |key: &str| js_sys::Reflect::get(&hit, &key.into())
+                .map_err(|_| invalid(&format!("cannot read hits[{i}].{key}")));
+            Ok(GroundHit {
+                point: vec3(&field("point")?, &format!("hits[{i}].point"))?,
+                normal: vec3(&field("normal")?, &format!("hits[{i}].normal"))?,
+            })
+        }).collect()
+    }
+
     fn vec3(value: &JsValue, what: &str) -> Result<[f32; 3], JsValue> {
         let values = floats(value, what)?;
         if values.len() != 3 {
@@ -167,6 +232,7 @@ mod wasm {
         if let Some(v) = out.converged { set("converged", &v.into())?; }
         if let Some(v) = out.passes { set("passes", &(v as u32).into())?; }
         if let Some(v) = out.distance { set("distance", &v.into())?; }
+        if let Some(v) = out.drop { set("drop", &v.into())?; }
         Ok(object.into())
     }
 
@@ -211,6 +277,39 @@ mod wasm {
     pub fn fabrik_js(rig: &AnimationRig, pose: &JsValue, name: &str, target: &JsValue,
         iterations: &JsValue, tolerance: &JsValue) -> Result<JsValue, JsValue> {
         iterative_js(rig, pose, name, target, iterations, tolerance, true)
+    }
+
+    /// Plant each named `twoBone` leg on its `{point, normal}` ground hit; the
+    /// result also carries the applied `drop`.
+    #[wasm_bindgen(js_namespace = ik, js_name = footPlacement)]
+    pub fn foot_placement_js(rig: &AnimationRig, pose: &JsValue, legs: &JsValue,
+        hits: &JsValue) -> Result<JsValue, JsValue> {
+        let names = chain_names(legs)?;
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let out = solve_foot_placement(rig.shared_rig(), &names, &pose_values(pose)?,
+            &ground_hits(hits)?).map_err(error)?;
+        output_to_js(out)
+    }
+
+    /// Weighted reach of the named chain; omitted weight is 1 (a full solve).
+    #[wasm_bindgen(js_namespace = ik, js_name = handReach)]
+    pub fn hand_reach_js(rig: &AnimationRig, pose: &JsValue, name: &str, target: &JsValue,
+        weight: &JsValue) -> Result<JsValue, JsValue> {
+        let weight = number(weight, "weight", f64::from(DEFAULT_WEIGHT))? as f32;
+        let out = solve_hand_reach(rig.shared_rig(), name, &pose_values(pose)?,
+            vec3(target, "target")?, weight).map_err(error)?;
+        output_to_js(out)
+    }
+
+    /// Turn the named bone's local `axis` toward `target`, at most `maxDeg`
+    /// degrees; omitted `maxDeg` is 180.
+    #[wasm_bindgen(js_namespace = ik, js_name = lookAt)]
+    pub fn look_at_js(rig: &AnimationRig, pose: &JsValue, bone: &str, target: &JsValue,
+        axis: &JsValue, max_deg: &JsValue) -> Result<JsValue, JsValue> {
+        let max_deg = number(max_deg, "maxDeg", f64::from(DEFAULT_MAX_DEGREES))? as f32;
+        let out = solve_look_at(rig.shared_rig(), bone, &pose_values(pose)?,
+            vec3(target, "target")?, vec3(axis, "axis")?, max_deg).map_err(error)?;
+        output_to_js(out)
     }
 }
 
@@ -290,5 +389,115 @@ mod tests {
             pole: None, iterations: 4,
         });
         assert_eq!(code(solve_ccd(&broken, "bad", &values, TARGET, 4, 0.001)), IK_BONE_UNKNOWN);
+    }
+
+    /// Two straight 0.45 + 0.45 legs under one pelvis; the feet rest 0.1 above
+    /// the root bone, the ground reference.
+    const LEG_RIG: &str = r#"{"format":"raa.rig","version":1,"name":"legs","bones":[
+ {"name":"root","parent":null,"rest":{"t":[0,0,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"pelvis","parent":"root","rest":{"t":[0,1,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"thighL","parent":"pelvis","rest":{"t":[0.2,0,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"shinL","parent":"thighL","rest":{"t":[0,-0.45,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"footL","parent":"shinL","rest":{"t":[0,-0.45,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"thighR","parent":"pelvis","rest":{"t":[-0.2,0,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"shinR","parent":"thighR","rest":{"t":[0,-0.45,0],"r":[0,0,0,1],"s":[1,1,1]}},
+ {"name":"footR","parent":"shinR","rest":{"t":[0,-0.45,0],"r":[0,0,0,1],"s":[1,1,1]}}],
+ "roles":{},"ikChains":[
+ {"name":"legL","solver":"twoBone","bones":["thighL","shinL","footL"],"pole":[0,0,1],"iterations":1},
+ {"name":"legR","solver":"twoBone","bones":["thighR","shinR","footR"],"pole":[0,0,1],"iterations":1}],
+ "limits":[],"attach":{}}"#;
+
+    fn leg_rig() -> Rig { Rig::load(LEG_RIG).unwrap() }
+
+    /// A corrected pose's bone translation or model-space column.
+    fn point(out: &IkOutput, bone: usize) -> [f32; 3] { column(out, bone, 3) }
+
+    fn column(out: &IkOutput, bone: usize, column: usize) -> [f32; 3] {
+        let m = &out.model[bone * 16..bone * 16 + 16];
+        [m[column * 4], m[column * 4 + 1], m[column * 4 + 2]]
+    }
+
+    fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+        let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+    }
+
+    #[test]
+    fn converts_ground_hits_into_planted_feet_and_a_pelvis_drop() {
+        let rig = leg_rig();
+        let values = flat(&rig);
+        let slope = core::f32::consts::FRAC_1_SQRT_2;
+        let hits = [
+            GroundHit { point: [0.2, -0.05, 0.0], normal: [0.0, slope, slope] },
+            GroundHit { point: [-0.2, 0.0, 0.0], normal: [0.0, 1.0, 0.0] },
+        ];
+        let out = solve_foot_placement(&rig, &["legL", "legR"], &values, &hits).unwrap();
+        let drop = out.drop.unwrap();
+        assert!(drop > 0.0 && drop < 0.45, "{drop}");
+        let target = |hit: &GroundHit| {
+            [0, 1, 2].map(|i| hit.point[i] + hit.normal[i] * 0.1)
+        };
+        assert!(distance(point(&out, 4), target(&hits[0])) < 2e-3);
+        assert!(distance(point(&out, 7), target(&hits[1])) < 2e-3);
+        assert!(distance(column(&out, 4, 1), hits[0].normal) < 2e-3);
+        assert_eq!(out.local.len(), rig.bones.len() * 10);
+        assert!(out.model.iter().chain(&out.skin).all(|v| v.is_finite()));
+        assert_eq!(out.local[..10], values[..10], "the root local is preserved");
+        assert!(out.local[11] < values[11], "the pelvis moves down");
+    }
+
+    #[test]
+    fn carries_reach_weight_and_look_at_angular_cap() {
+        let rig = rig();
+        let values = flat(&rig);
+        let still = solve_hand_reach(&rig, "cd", &values, TARGET, 0.0).unwrap();
+        assert_eq!(still.local, values);
+        let half = solve_hand_reach(&rig, "cd", &values, TARGET, 0.5).unwrap();
+        let full = solve_hand_reach(&rig, "cd", &values, TARGET, 1.0).unwrap();
+        assert_ne!(half.local, values);
+        assert_ne!(half.local, full.local);
+        assert!(distance(point(&full, 4), TARGET) < 2e-3, "the tip reaches");
+        let turn = |out: &IkOutput| {
+            let z = column(out, 3, 2);
+            (z[2] / distance(z, [0.0; 3])).clamp(-1.0, 1.0).acos().to_degrees()
+        };
+        let capped = solve_look_at(&rig, "foot", &values, [3.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0], 30.0).unwrap();
+        let turned = solve_look_at(&rig, "foot", &values, [3.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0], 180.0).unwrap();
+        assert!((turn(&capped) - 30.0).abs() < 1e-2);
+        assert!((turn(&turned) - 90.0).abs() < 1e-2);
+        assert_eq!(capped.local[..30], values[..30]);
+        assert_ne!(capped.local[30..40], values[30..40]);
+    }
+
+    #[test]
+    fn propagates_foot_reach_and_look_at_helper_errors() {
+        let rig = leg_rig();
+        let values = flat(&rig);
+        let hit = GroundHit { point: [0.2, 0.0, 0.0], normal: [0.0, 1.0, 0.0] };
+        assert_eq!(code(solve_foot_placement(&rig, &["missing"], &values, &[hit])), IK_CHAIN);
+        assert_eq!(code(solve_foot_placement(&rig, &["legL", "legR"], &values, &[hit])),
+            IK_CHAIN);
+        let bad_point = GroundHit { point: [f32::NAN, 0.0, 0.0], normal: hit.normal };
+        assert_eq!(code(solve_foot_placement(&rig, &["legL"], &values, &[bad_point])),
+            IK_TARGET_NOT_FINITE);
+        let down = GroundHit { point: hit.point, normal: [0.0, -1.0, 0.0] };
+        assert_eq!(code(solve_foot_placement(&rig, &["legL"], &values, &[down])),
+            IK_TARGET_NOT_FINITE);
+
+        let rig = self::rig();
+        let values = flat(&rig);
+        assert_eq!(code(solve_hand_reach(&rig, "missing", &values, TARGET, 1.0)), IK_CHAIN);
+        assert_eq!(code(solve_hand_reach(&rig, "cd", &values, [f32::NAN; 3], 1.0)),
+            IK_TARGET_NOT_FINITE);
+        assert_eq!(code(solve_hand_reach(&rig, "cd", &values, TARGET, f32::NAN)),
+            IK_TARGET_NOT_FINITE);
+        assert_eq!(code(solve_look_at(&rig, "missing", &values, [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0], 90.0)), IK_BONE_UNKNOWN);
+        assert_eq!(code(solve_look_at(&rig, "foot", &values, [1.0, 0.0, 0.0],
+            [f32::NAN, 0.0, 1.0], 90.0)), IK_TARGET_NOT_FINITE);
+        assert_eq!(code(solve_look_at(&rig, "foot", &values, [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0], f32::NAN)), IK_TARGET_NOT_FINITE);
     }
 }
