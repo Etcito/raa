@@ -35,6 +35,9 @@ pub struct GraphState {
     pub tick: Tick,
     pub layers: Vec<LayerState>,
     pub pending: Vec<bool>,
+    /// Last applied inputs (including trigger pulses); `pending` tracks consumption separately.
+    pub params: Params,
+    pub(crate) binding: Vec<u8>,
 }
 fn bad(message: &str) -> GraphError {
     GraphError::new(codes::SCHEMA, "/state", message)
@@ -42,8 +45,9 @@ fn bad(message: &str) -> GraphError {
 fn word(out: &mut Vec<u8>, value: u32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
-fn next(words: &mut std::slice::Iter<'_, u32>) -> Result<u32, GraphError> {
-    words.next().copied().ok_or_else(|| bad("snapshot is truncated"))
+fn next(words: &mut std::slice::ChunksExact<'_, u8>) -> Result<u32, GraphError> {
+    words.next().map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+        .ok_or_else(|| bad("snapshot is truncated"))
 }
 fn boolean(word: u32) -> Result<bool, GraphError> {
     match word { 0 => Ok(false), 1 => Ok(true), _ => Err(bad("invalid snapshot bool")) }
@@ -58,16 +62,18 @@ impl GraphState {
             phase: 0.0,
             fade: None,
         }).collect();
-        Self { tick: 0, layers, pending: vec![false; compiled.graph.params.len()] }
+        Self { tick: 0, layers, pending: vec![false; compiled.graph.params.len()],
+            params: Params::new(&compiled.graph), binding: crate::snapshot::binding(compiled) }
     }
     /// Fold one tick of fired triggers into the pending state.
     pub fn apply(&mut self, inputs: &Params) {
+        self.params = inputs.clone();
         for (index, pending) in self.pending.iter_mut().enumerate() {
             *pending |= inputs.pending(index);
         }
     }
     /// Append every future-affecting field as little-endian 32-bit words.
-    pub fn write(&self, out: &mut Vec<u8>) {
+    pub(crate) fn write_payload(&self, out: &mut Vec<u8>) {
         word(out, u32::from_le_bytes(*b"RGS1"));
         word(out, self.tick);
         word(out, self.layers.len() as u32);
@@ -90,14 +96,12 @@ impl GraphState {
         for &pending in &self.pending { word(out, pending as u32); }
     }
     /// Restore a snapshot, validating it against `compiled`.
-    pub fn read(compiled: &Compiled, bytes: &[u8]) -> Result<Self, GraphError> {
+    pub(crate) fn read_payload(compiled: &Compiled, bytes: &[u8]) -> Result<Self, GraphError> {
         if bytes.len() % 4 != 0 { return Err(bad("snapshot length is not word aligned")); }
-        let words: Vec<u32> = bytes.chunks_exact(4)
-            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
-        if words.first() != Some(&u32::from_le_bytes(*b"RGS1")) {
+        let mut words = bytes.chunks_exact(4);
+        if next(&mut words)? != u32::from_le_bytes(*b"RGS1") {
             return Err(bad("unknown snapshot format"));
         }
-        let mut words = words[1..].iter();
         let tick = next(&mut words)?;
         let count = next(&mut words)? as usize;
         if count != compiled.graph.layers.len() { return Err(bad("snapshot layer count mismatch")); }
@@ -107,7 +111,9 @@ impl GraphState {
             let clock = next(&mut words)?;
             let phase = f32::from_bits(next(&mut words)?);
             let fade = match next(&mut words)? {
-                0 => { for _ in 0..4 { next(&mut words)?; } None }
+                0 => { for _ in 0..4 {
+                    if next(&mut words)? != 0 { return Err(bad("nonzero absent fade data")); }
+                } None }
                 1 => Some(Crossfade {
                     from: next(&mut words)? as usize,
                     from_phase: f32::from_bits(next(&mut words)?),
@@ -119,15 +125,21 @@ impl GraphState {
             let states = &compiled.graph.machines[expected.machine].states;
             let progress = |p: f32| p.is_finite() && p >= 0.0;
             let invalid = state >= states.len() || !progress(phase)
-                || fade.is_some_and(|f| f.from >= states.len() || !progress(f.from_phase));
+                || fade.is_some_and(|f| f.from >= states.len() || !progress(f.from_phase)
+                    || f.ticks == 0 || f.elapsed >= f.ticks);
             if invalid { return Err(bad("invalid layer snapshot")); }
             layers.push(LayerState { machine: expected.machine, state, clock, phase, fade });
         }
         let count = next(&mut words)? as usize;
         if count != compiled.graph.params.len() { return Err(bad("snapshot parameter count mismatch")); }
         let mut pending = Vec::with_capacity(count);
-        for _ in 0..count { pending.push(boolean(next(&mut words)?)?); }
+        for param in &compiled.graph.params {
+            let value = boolean(next(&mut words)?)?;
+            if value && param.ty != crate::ParamType::Trigger { return Err(bad("non-trigger pending")); }
+            pending.push(value);
+        }
         if words.next().is_some() { return Err(bad("snapshot has trailing words")); }
-        Ok(Self { tick, layers, pending })
+        Ok(Self { tick, layers, pending, params: Params::new(&compiled.graph),
+            binding: crate::snapshot::binding(compiled) })
     }
 }
