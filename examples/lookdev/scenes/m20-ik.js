@@ -1,7 +1,6 @@
 // S14: importing metadata creates no scene, GPU resources, timers or DOM state.
-// Visual IK over the m18 skin API. The page supplies the animation brick as lib.anim
-// ({ loadRig(json), ik: { footPlacement, handReach, lookAt } }). Without lib.anim the
-// figure is built at its rest pose and no IK runs.
+// Visual IK over the m18 skin API. The lookdev page supplies the animation brick as
+// lib.anim ({ loadRig(json), ik: { footPlacement, handReach, lookAt } }).
 import { uvSphere, sweepTube, roundedBox, grid, merge } from '../lib/geometry.js';
 
 const TARGET = [0.42, 1.38, 0.38];
@@ -178,13 +177,12 @@ export default {
     const figure = engine.addInstance(at([0, 0, 0]), engine.addMesh(figureMesh()), body);
 
     const anim = lib?.anim;
-    if (anim) {
-      const rig = anim.loadRig(RIG);
-      try {
-        engine.setSkinPose(figure, skinMatrices(anim, rig, variant.settings?.ik === true));
-      } finally {
-        rig.free();
-      }
+    if (!anim) throw new Error('m20-ik: lib.anim is required');
+    const rig = anim.loadRig(RIG);
+    try {
+      engine.setSkinPose(figure, skinMatrices(anim, rig, variant.settings?.ik === true));
+    } finally {
+      rig.free();
     }
   },
 };

@@ -4,8 +4,17 @@
 /// <reference path="./types/all.d.ts" />
 
 import type { RaaAnimApi } from './types/brick.js';
+import type { RaaAnimClipsApi } from './types/clips.js';
+import type { RaaAnimIkApi } from './types/ik.js';
 
 export type { BrickInfo, RaaAnimApi, SelftestCase, SelftestResult } from './types/brick.js';
+export type { RaaAnimClipsApi } from './types/clips.js';
+export type { RaaAnimIkApi } from './types/ik.js';
+
+/** The initialised brick: metadata, selftest, clip loaders and the visual IK namespace. */
+export interface RaaAnimLoaded extends RaaAnimApi, Pick<RaaAnimClipsApi, 'loadRig' | 'loadClip' | 'sampleClip'> {
+  readonly ik: RaaAnimIkApi;
+}
 
 /**
  * What {@link loadRaaAnim} accepts: a wasm file path or URL, or preloaded wasm bytes.
@@ -27,4 +36,4 @@ export type RaaAnimSource = string | URL | ArrayBuffer | Uint8Array;
  *
  * @param source wasm location or preloaded wasm bytes; default `pkg/raa_anim_js_bg.wasm`
  */
-export function loadRaaAnim(source?: RaaAnimSource): Promise<RaaAnimApi>;
+export function loadRaaAnim(source?: RaaAnimSource): Promise<RaaAnimLoaded>;

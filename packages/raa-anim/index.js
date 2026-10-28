@@ -1,7 +1,7 @@
 // @etcito/raa-anim entry point. The brick itself is the wasm-bindgen output of the
-// raa-anim-js crate in ./pkg/. The public API is brickInfo() and selftest(); types
-// live in index.d.ts and types/brick.d.ts.
-import init, { brickInfo, selftest } from './pkg/raa_anim_js.js';
+// raa-anim-js crate in ./pkg/. The public API is brickInfo(), selftest(), the clip
+// loaders and the visual ik namespace; types live in index.d.ts and types/*.d.ts.
+import init, { brickInfo, ik, loadClip, loadRig, sampleClip, selftest } from './pkg/raa_anim_js.js';
 
 const WASM_FILE = 'raa_anim_js_bg.wasm';
 const DEFAULT_WASM_URL = new URL(`./pkg/${WASM_FILE}`, import.meta.url);
@@ -91,7 +91,9 @@ async function resolveModule(source) {
  * @param {string | URL | ArrayBuffer | Uint8Array} [source] wasm location or preloaded bytes
  * @returns {Promise<{ brickInfo: () => { name: 'raa-anim', version: '0.5.0' },
  *   selftest: (testCase: string, seed: number, ticks: number) =>
- *     { case: string, seed: number, ticks: number, hash: string } }>}
+ *     { case: string, seed: number, ticks: number, hash: string },
+ *   loadRig: (json: string) => object, loadClip: (rig: object, json: string) => object,
+ *   sampleClip: (clip: object, tick: number) => object, ik: object }>}
  */
 export async function loadRaaAnim(source) {
   const moduleOrPath = await resolveModule(source);
@@ -99,5 +101,9 @@ export async function loadRaaAnim(source) {
   return Object.freeze({
     brickInfo: () => brickInfo(),
     selftest: (testCase, seed, ticks) => selftest(testCase, seed, ticks),
+    loadRig,
+    loadClip,
+    sampleClip,
+    ik,
   });
 }

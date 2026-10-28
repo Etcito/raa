@@ -3,6 +3,7 @@
 // ./common/nmc-gpu.js registers the ops of nomorechat's GPU client. The page requests a
 // core adapter through the package and never substitutes a compatibility adapter.
 import { loadRaa } from './raa/index.js';
+import { loadRaaAnim } from './anim/index.js';
 import { registerNmcGpu } from './common/nmc-gpu.js';
 import * as geometry from './lib/geometry.js';
 import * as objects from './lib/objects.js';
@@ -58,7 +59,7 @@ function flat(engine, color, opts = {}) {
   return engine.addMaterial({ ...opts, color, model: 'flat' });
 }
 
-const lib = Object.freeze({ geometry, objects, materials: Object.freeze({ pbr, flat }), pbr, flat });
+const baseLib = Object.freeze({ geometry, objects, materials: Object.freeze({ pbr, flat }), pbr, flat });
 
 // scenes.json (S14): [{ id, milestone, file }], file relative to the page ('scenes/x.js').
 async function loadScenes() {
@@ -76,8 +77,8 @@ async function loadScenes() {
 
 const ready = (async () => {
   installGpuErrorListener();
-  const [raa, scenes] = await Promise.all([loadRaa(), loadScenes()]);
-  return { raa, scenes };
+  const [raa, anim, scenes] = await Promise.all([loadRaa(), loadRaaAnim(), loadScenes()]);
+  return { raa, anim, scenes };
 })();
 
 let engine = null;
@@ -85,7 +86,7 @@ let last = null; // { scene, variant } of the last run, for the screenshot
 let running = false;
 
 async function run(args) {
-  const { raa, scenes } = await ready;
+  const { raa, anim, scenes } = await ready;
   if (running) throw new Error('run: a run is already in progress');
   const scene = scenes.get(args.scene);
   if (!scene) throw new Error(`run: unknown scene ${JSON.stringify(args.scene)}`);
@@ -101,7 +102,7 @@ async function run(args) {
     const result = await runScene(raa, canvas, scene, variant, {
       width: args.width,
       height: args.height,
-      lib,
+      lib: Object.freeze({ ...baseLib, anim }),
       onEngine: (created) => { engine = created; },
     });
     last = { scene, variant };
