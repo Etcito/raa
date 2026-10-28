@@ -8,6 +8,8 @@ use raa_anim::rig::{ChainSolver, IkChain};
 use raa_anim::{AnimError, Rig};
 use raa_math::Vec3;
 
+pub mod limits;
+pub use limits::{clamp_pose, clamp_rotation};
 pub mod pose;
 pub use pose::IkPose;
 
