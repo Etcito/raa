@@ -1,22 +1,75 @@
-//! S19 graph loading and state creation over the existing S16/S17 handles.
-//! The graph borrows the rig and clips the caller already loaded; ticking,
-//! snapshots and the graph-run selftest belong to their own cards.
+//! S19 graph loading, ticking and rollback over the existing S16/S17 handles.
+//! The graph borrows the caller's rig and clips; each state keeps its graph, so
+//! steps and restores never mix graphs. The graph-run selftest is its own card.
 use crate::clips::{AnimationClip, AnimationRig};
-use raa_anim_graph::{GraphError, GraphRuntime, GraphState};
+use raa_anim_graph::{
+    GraphError, GraphEvent, GraphRuntime, GraphState, ParamType, ParamValue, Params, RootDelta,
+    codes,
+};
+use std::sync::Arc;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
 /// A compiled S19 graph retaining the rig and clips it was loaded with.
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct AnimationGraph {
-    runtime: GraphRuntime,
+    runtime: Arc<GraphRuntime>,
 }
 
 /// One independent S19 execution state created from an [`AnimationGraph`].
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct AnimationGraphState {
-    #[allow(dead_code)]
+    graph: Arc<GraphRuntime>,
     state: GraphState,
+}
+
+/// One JavaScript parameter value before it is checked against its declared type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ParamInput {
+    Number(f64),
+    Bool(bool),
+}
+
+/// One tick for JavaScript: S16 skin matrices flattened column-major in rig bone
+/// order (16 floats per bone, the S18 `setSkinPose` layout), root delta, events.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepOutput {
+    pub skin: Vec<f32>,
+    pub root_delta: RootDelta,
+    pub events: Vec<GraphEvent>,
+}
+
+/// This tick's typed parameters: values persist from the state's last inputs and
+/// triggers pulse only on `true`. `float` takes a finite number, `int` an integer
+/// in i32 range, `bool` and `trigger` a boolean.
+fn params_for<S: AsRef<str>>(
+    state: &GraphState,
+    inputs: &[(S, ParamInput)],
+) -> Result<Params, GraphError> {
+    use {ParamInput as I, ParamType as T};
+    let mut params = state.params.clone();
+    (0..params.len()).for_each(|i| _ = params.consume(i));
+    for (name, input) in inputs {
+        let name = name.as_ref();
+        let unknown = || GraphError::new(codes::PARAM, "/params", format!("unknown {name:?}"));
+        let i = params.index_of(name).ok_or_else(unknown)?;
+        let int = |n: f64| n.fract() == 0.0 && (-2147483648.0..=2147483647.0).contains(&n);
+        let value = match (params.ty(i), *input) {
+            (Some(T::Trigger), I::Bool(false)) => continue,
+            (Some(T::Trigger), I::Bool(true)) => {
+                params.fire_at(i)?;
+                continue;
+            }
+            // `set_at` refuses non-finite floats.
+            (Some(T::Float), I::Number(n)) => Some(ParamValue::Float(n as f32)),
+            (Some(T::Int), I::Number(n)) => int(n).then_some(ParamValue::Int(n as i32)),
+            (Some(T::Bool), I::Bool(b)) => Some(ParamValue::Bool(b)),
+            _ => None,
+        };
+        let mismatch = || GraphError::new(codes::PARAM, format!("/params/{i}"), "type mismatch");
+        params.set_at(i, value.ok_or_else(mismatch)?)?;
+    }
+    Ok(params)
 }
 
 /// Load S19 graph JSON against the rig handle and the supplied clip handles.
@@ -31,7 +84,8 @@ pub fn load_graph(
         let (_, clip) = clip.parts();
         owned.push(clip.clone());
     }
-    GraphRuntime::load(json, rig.shared_rig(), &owned).map(|runtime| AnimationGraph { runtime })
+    let runtime = Arc::new(GraphRuntime::load(json, rig.shared_rig(), &owned)?);
+    Ok(AnimationGraph { runtime })
 }
 
 /// The `graph-run` selftest case is contributed by its own card.
@@ -43,8 +97,49 @@ impl AnimationGraph {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = newState))]
     pub fn new_state(&self) -> AnimationGraphState {
         AnimationGraphState {
+            graph: Arc::clone(&self.runtime),
             state: self.runtime.new_state(),
         }
+    }
+}
+
+impl AnimationGraph {
+    /// `Graph::step` on a state of this graph. A refused call (another graph's
+    /// state, unknown or mistyped parameters, runtime errors) leaves it untouched.
+    pub fn step<S: AsRef<str>>(
+        &self,
+        state: &mut AnimationGraphState,
+        inputs: &[(S, ParamInput)],
+    ) -> Result<StepOutput, GraphError> {
+        if !Arc::ptr_eq(&self.runtime, &state.graph) {
+            return Err(GraphError::new(codes::SCHEMA, "/state", "foreign state"));
+        }
+        let params = params_for(&state.state, inputs)?;
+        let frame = self.runtime.frame(&mut state.state, &params)?;
+        Ok(StepOutput {
+            skin: frame.skin.into_iter().flatten().collect(),
+            root_delta: frame.out.root_delta,
+            events: frame.out.events,
+        })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+impl AnimationGraphState {
+    /// `GraphState::write`: a complete snapshot for rollback, bound to this graph.
+    pub fn save(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        self.state.write(&mut bytes);
+        bytes
+    }
+}
+
+impl AnimationGraphState {
+    /// `GraphState::read` against this state's graph; the live state is replaced
+    /// only after the whole snapshot validates.
+    pub fn restore_bytes(&mut self, bytes: &[u8]) -> Result<(), GraphError> {
+        self.state = self.graph.read_state(bytes)?;
+        Ok(())
     }
 }
 
@@ -98,6 +193,74 @@ mod wasm {
         }
         let clips: Vec<&AnimationClip> = anchors.iter().map(|anchor| &**anchor).collect();
         super::load_graph(json, rig, &clips).map_err(error)
+    }
+
+    fn inputs(params: &JsValue) -> Result<Vec<(String, ParamInput)>, JsValue> {
+        if params.is_undefined() || params.is_null() {
+            return Ok(Vec::new());
+        }
+        if !params.is_object() || js_sys::Array::is_array(params) {
+            return Err(invalid("params must be an object of parameter values"));
+        }
+        let entries = js_sys::Object::entries(params.unchecked_ref());
+        let mut inputs = Vec::with_capacity(entries.length() as usize);
+        for entry in entries.iter() {
+            let entry: js_sys::Array = entry.unchecked_into();
+            let (name, value) = (entry.get(0).as_string().unwrap_or_default(), entry.get(1));
+            let message = || format!("parameter {name:?} must be a number or boolean");
+            let input = (value.as_bool().map(ParamInput::Bool))
+                .or(value.as_f64().map(ParamInput::Number))
+                .ok_or_else(|| error(GraphError::new(codes::PARAM, "/params", message())))?;
+            inputs.push((name, input));
+        }
+        Ok(inputs)
+    }
+
+    fn set(target: &js_sys::Object, key: &str, value: &JsValue) -> Result<(), JsValue> {
+        js_sys::Reflect::set(target, &key.into(), value).map(drop)
+    }
+
+    fn output(out: StepOutput) -> Result<JsValue, JsValue> {
+        let f32s = |values: &[f32]| js_sys::Float32Array::from(values).into();
+        let root = js_sys::Object::new();
+        set(&root, "t", &f32s(&out.root_delta.t))?;
+        set(&root, "r", &f32s(&out.root_delta.r))?;
+        let events = js_sys::Array::new();
+        for event in out.events {
+            let value = js_sys::Object::new();
+            set(&value, "name", &event.name.into())?;
+            set(&value, "tick", &event.tick.into())?;
+            set(&value, "layer", &(event.layer as u32).into())?;
+            set(&value, "clip", &(event.clip as u32).into())?;
+            events.push(&value);
+        }
+        let result = js_sys::Object::new();
+        set(&result, "skin", &f32s(&out.skin))?;
+        set(&result, "rootDelta", &root)?;
+        set(&result, "events", &events)?;
+        Ok(result.into())
+    }
+
+    #[wasm_bindgen]
+    impl AnimationGraph {
+        /// `graph.step(state, params) -> {skin, rootDelta: {t, r}, events}`.
+        #[wasm_bindgen(js_name = step)]
+        pub fn js_step(
+            &self,
+            state: &mut AnimationGraphState,
+            params: JsValue,
+        ) -> Result<JsValue, JsValue> {
+            output(self.step(state, &inputs(&params)?).map_err(error)?)
+        }
+    }
+
+    #[wasm_bindgen]
+    impl AnimationGraphState {
+        /// `state.restore(bytes)`; a refused snapshot keeps the live state.
+        #[wasm_bindgen(js_name = restore)]
+        pub fn js_restore(&mut self, bytes: &[u8]) -> Result<(), JsValue> {
+            self.restore_bytes(bytes).map_err(error)
+        }
     }
 }
 
@@ -165,5 +328,128 @@ mod tests {
             .err()
             .expect("rig mismatch refused");
         assert_eq!(error.code, "graph.schema");
+    }
+
+    fn load(json: &str) -> AnimationGraph {
+        let (rig, clips) = penguin();
+        let refs: Vec<&AnimationClip> = clips.iter().collect();
+        load_graph(json, &rig, &refs).expect("penguin graph")
+    }
+
+    fn value(state: &AnimationGraphState, name: &str) -> ParamValue {
+        let params = &state.state.params;
+        params.value(params.index_of(name).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn typed_params_are_checked_persist_and_triggers_pulse() {
+        use ParamInput::{Bool, Number};
+        let graph = load(PENGUIN_GRAPH);
+        let mut state = graph.new_state();
+        let before = state.save();
+        for bad in [
+            ("speed", Bool(true)),
+            ("speed", Number(1e39)),
+            ("emote", Number(1.5)),
+            ("emote", Number(2147483648.0)),
+            ("grounded", Number(1.0)),
+            ("jump", Number(1.0)),
+            ("missing", Number(0.0)),
+        ] {
+            let error = graph.step(&mut state, &[bad]).err().expect("refused");
+            assert_eq!(error.code, "graph.param", "{bad:?}");
+        }
+        assert_eq!(state.save(), before, "refused steps keep the state");
+        let typed = [
+            ("speed", Number(1.5)),
+            ("emote", Number(-2.0)),
+            ("jump", Bool(true)),
+        ];
+        graph.step(&mut state, &typed).unwrap();
+        assert_eq!(value(&state, "jump"), ParamValue::Trigger(true));
+        graph
+            .step(&mut state, &[("grounded", Bool(false))])
+            .unwrap();
+        assert_eq!(value(&state, "speed"), ParamValue::Float(1.5));
+        assert_eq!(value(&state, "emote"), ParamValue::Int(-2));
+        assert_eq!(value(&state, "grounded"), ParamValue::Bool(false));
+        assert_eq!(value(&state, "jump"), ParamValue::Trigger(false));
+    }
+
+    #[test]
+    fn skin_layout_and_event_order_follow_the_runtime() {
+        let graph = load(PENGUIN_GRAPH);
+        let (mut state, mut mirror) = (graph.new_state(), graph.runtime.new_state());
+        let mut params = graph.runtime.new_params();
+        params.set("speed", ParamValue::Float(1.5)).unwrap();
+        let bones = graph.runtime.rig().bones.len();
+        let mut events = Vec::new();
+        for tick in 0..120 {
+            // `*` transitions re-fire while their condition holds: enter dance once.
+            let emote = if tick == 0 { 2 } else { 0 };
+            params.set("emote", ParamValue::Int(emote)).unwrap();
+            let inputs = [
+                ("speed", ParamInput::Number(1.5)),
+                ("emote", ParamInput::Number(emote.into())),
+            ];
+            let out = graph.step(&mut state, &inputs).unwrap();
+            let frame = graph.runtime.frame(&mut mirror, &params).unwrap();
+            assert_eq!(out.skin.len(), bones * 16);
+            assert_eq!(out.skin, frame.skin.concat());
+            for m in out.skin.chunks_exact(16) {
+                assert_eq!([m[3], m[7], m[11], m[15]], [0.0, 0.0, 0.0, 1.0]);
+            }
+            // Column-major: hips (bone 1) translation is m[12..15], offset from rest.
+            assert!((out.skin[16 + 13] - (frame.out.pose[1].t[1] - 0.4)).abs() <= 1e-6);
+            assert_eq!(out.root_delta, frame.out.root_delta);
+            assert_eq!(out.events, frame.out.events);
+            assert!(out.events.windows(2).all(|w| w[0].layer <= w[1].layer));
+            events.extend(out.events.into_iter().map(|e| (e.layer, e.name)));
+        }
+        let steps: Vec<_> = events.iter().filter(|e| e.1.starts_with("step.")).collect();
+        assert!(steps.len() >= 4 && steps.windows(2).all(|w| w[0].1 != w[1].1));
+        assert!(
+            events.iter().any(|e| e.0 == 1),
+            "the emote layer reports events"
+        );
+    }
+
+    #[test]
+    fn snapshots_round_trip_and_stay_with_their_graph() {
+        let graph = load(PENGUIN_GRAPH);
+        let speed = [("speed", ParamInput::Number(4.0))];
+        let jump = [("jump", ParamInput::Bool(true))];
+        let run = |state: &mut AnimationGraphState| -> Vec<StepOutput> {
+            let tick = |i| {
+                graph
+                    .step(state, if i == 3 { &jump } else { &speed })
+                    .unwrap()
+            };
+            (0..20).map(tick).collect()
+        };
+        let mut state = graph.new_state();
+        run(&mut state);
+        let bytes = state.save();
+        let first = run(&mut state);
+        let advanced = state.save();
+        state.restore_bytes(&bytes).unwrap();
+        assert_eq!(state.save(), bytes, "byte round trip");
+        assert_eq!(run(&mut state), first, "replay matches");
+        let mut fresh = graph.new_state();
+        fresh.restore_bytes(&bytes).unwrap();
+        assert_eq!(run(&mut fresh), first, "restores into another state");
+        let other = load(&PENGUIN_GRAPH.replacen("\"penguin\"", "\"other\"", 1));
+        let foreign = other.new_state().save();
+        let (short, long) = (&bytes[..bytes.len() - 1], [&bytes[..], &[0]].concat());
+        for bad in [&[][..], &bytes[1..], short, &long, &foreign] {
+            assert_eq!(state.restore_bytes(bad).err().unwrap().code, "graph.schema");
+            assert_eq!(
+                state.save(),
+                advanced,
+                "failed restore keeps the live state"
+            );
+        }
+        let error = other.step(&mut state, &speed).err().unwrap();
+        assert_eq!((error.code, state.save()), ("graph.schema", advanced));
     }
 }
