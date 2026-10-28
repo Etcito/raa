@@ -20,6 +20,7 @@ pub const INSTANCE_GPU_SIZE: usize = 128;
 /// and extras buffers, all with one sub-mesh and one material.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct LitDraw {
+    /// Prepared binding id; `DrawPrep::mesh_binding` recovers the source submesh.
     pub mesh: MeshId,
     pub material: MaterialId,
     pub material_fn: MaterialFnId,
@@ -100,6 +101,7 @@ pub struct DrawPrep {
     fur: Vec<LitDraw>,
     transparent: Vec<LitDraw>,
     sort: Vec<SortKey>,
+    bindings: HashMap<MeshId, (MeshId, u32)>,
 }
 
 impl DrawPrep {
@@ -116,6 +118,7 @@ impl DrawPrep {
             fur: Vec::with_capacity(n),
             transparent: Vec::with_capacity(n),
             sort: Vec::with_capacity(n),
+            bindings: HashMap::with_capacity(n),
         }
     }
 
@@ -127,6 +130,7 @@ impl DrawPrep {
         self.fur.clear();
         self.transparent.clear();
         self.sort.clear();
+        self.bindings.clear();
     }
 
     /// S1 instance records (128 B each) in draw order: opaque, then fur, then transparent.
@@ -176,9 +180,18 @@ impl DrawPrep {
     /// `material.unknown_id` (an item material outside the library),
     /// `material.blend_unavailable` (a material whose class has no handler).
     pub fn prepare(&mut self, input: &PrepInput<'_>) -> Result<(), RaaError> {
+        self.prepare_skinned(input, &|_| false)
+    }
+
+    /// Splits posed instances and preserves their source submesh and scene tag.
+    pub fn prepare_skinned(
+        &mut self,
+        input: &PrepInput<'_>,
+        skinned: &dyn Fn(u32) -> bool,
+    ) -> Result<(), RaaError> {
         self.clear();
         self.validate(input)?;
-        self.fill(input);
+        self.fill(input, skinned);
         Ok(())
     }
 
@@ -232,13 +245,18 @@ impl DrawPrep {
     }
 
     /// Writes everything; `input` is validated, so every material lookup succeeds.
-    fn fill(&mut self, input: &PrepInput<'_>) {
-        self.fill_batched(input, DrawClass::Opaque);
-        self.fill_batched(input, DrawClass::Fur);
-        self.fill_transparent(input);
+    fn fill(&mut self, input: &PrepInput<'_>, skinned: &dyn Fn(u32) -> bool) {
+        self.fill_batched(input, DrawClass::Opaque, skinned);
+        self.fill_batched(input, DrawClass::Fur, skinned);
+        self.fill_transparent(input, skinned);
     }
 
-    fn fill_batched(&mut self, input: &PrepInput<'_>, class: DrawClass) {
+    fn fill_batched(
+        &mut self,
+        input: &PrepInput<'_>,
+        class: DrawClass,
+        skinned: &dyn Fn(u32) -> bool,
+    ) {
         let items = &input.list.items;
         let mut i = 0;
         while let Some(item) = items.get(i) {
@@ -257,12 +275,15 @@ impl DrawPrep {
                 if other.mesh != item.mesh || other.material != item.material {
                     break;
                 }
+                if j > i && (skinned(input.tags[i]) || skinned(input.tags[j])) {
+                    break;
+                }
                 depth = depth.min(view_depth(&input.view, other));
                 self.push_instance(input, j);
                 j += 1;
             }
             let draw = LitDraw {
-                mesh: item.mesh,
+                mesh: self.draw_binding(input, item.mesh, input.tags[i], skinned),
                 material: item.material,
                 material_fn: mc.material_fn,
                 class,
@@ -278,7 +299,7 @@ impl DrawPrep {
         }
     }
 
-    fn fill_transparent(&mut self, input: &PrepInput<'_>) {
+    fn fill_transparent(&mut self, input: &PrepInput<'_>, skinned: &dyn Fn(u32) -> bool) {
         let items = &input.list.items;
         for (i, item) in items.iter().enumerate() {
             let transparent = material_class(input, item.material)
@@ -311,8 +332,9 @@ impl DrawPrep {
             };
             let first_instance = self.instance_count();
             self.push_instance(input, key.item as usize);
+            let mesh = self.draw_binding(input, item.mesh, key.tag, skinned);
             self.transparent.push(LitDraw {
-                mesh: item.mesh,
+                mesh,
                 material: item.material,
                 material_fn: mc.material_fn,
                 class: DrawClass::Transparent,
@@ -321,6 +343,31 @@ impl DrawPrep {
                 view_depth: key.depth,
             });
         }
+    }
+
+    /// Resolves a frame-local draw id to its original submesh and optional instance tag.
+    pub fn mesh_binding(&self, mesh: MeshId) -> (MeshId, Option<u32>) {
+        self.bindings
+            .get(&mesh)
+            .map_or((mesh, None), |&(m, tag)| (m, Some(tag)))
+    }
+
+    fn draw_binding(
+        &mut self,
+        input: &PrepInput<'_>,
+        mesh: MeshId,
+        tag: u32,
+        skinned: &dyn Fn(u32) -> bool,
+    ) -> MeshId {
+        if !skinned(tag) {
+            return mesh;
+        }
+        let mut id = MeshId(u32::MAX - self.bindings.len() as u32);
+        while (input.known_mesh)(id) || self.bindings.contains_key(&id) {
+            id.0 -= 1;
+        }
+        self.bindings.insert(id, (mesh, tag));
+        id
     }
 
     /// Appends the instance and extras records of list item `i`.

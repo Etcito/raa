@@ -381,7 +381,10 @@ impl LitRenderer {
             known_mesh: &known_mesh,
             class_handled: &class_handled,
         };
-        s.prep.prepare(&input)?;
+        let source = s.skin_source.clone();
+        let source = source.0.borrow();
+        s.prep
+            .prepare_skinned(&input, &|tag| source.1.contains_key(&tag))?;
 
         let mut counts = FrameCounts {
             instances: s.prep.instance_count(),
@@ -389,7 +392,10 @@ impl LitRenderer {
         };
         for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
             for d in s.prep.draws(class) {
-                let (_, index_count) = s.meshes.submesh_range(d.mesh).unwrap_or((0, 0));
+                let (_, index_count) = s
+                    .meshes
+                    .submesh_range(s.prep.mesh_binding(d.mesh).0)
+                    .unwrap_or((0, 0));
                 counts.draw_calls += 1;
                 counts.triangles += u64::from(index_count / 3) * u64::from(d.instance_count);
             }

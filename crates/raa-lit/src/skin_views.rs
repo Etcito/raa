@@ -3,6 +3,12 @@
 //! mesh's stream 1 and u32 indices. An absent view or disabled skinning selects the rest.
 
 use std::collections::BTreeMap;
+use std::{cell::RefCell, rc::Rc};
+
+/// Live draw resources, shared with lit without retaining removed instance buffers.
+type DrawResources = (bool, BTreeMap<u32, (wgpu::Buffer, wgpu::Buffer)>);
+#[derive(Clone, Debug, Default)]
+pub struct SkinDrawSource(pub(crate) Rc<RefCell<DrawResources>>);
 
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
@@ -75,9 +81,15 @@ pub struct SkinnedView {
 pub struct SkinViews {
     views: BTreeMap<u32, SkinnedView>,
     disabled: bool,
+    source: SkinDrawSource,
 }
 
 impl SkinViews {
+    /// Connect once; additions, removals and enable changes remain live.
+    pub fn draw_source(&self) -> SkinDrawSource {
+        self.source.clone()
+    }
+
     /// Creates (or replaces) the view of `instance`, sized from `rest`. Each view gets its
     /// own `VERTEX | STORAGE | COPY_DST | COPY_SRC` buffers; the rest mesh is never written.
     /// Refusals: `render.invalid_mesh` from [`RestMeshView::new`].
@@ -92,6 +104,11 @@ impl SkinViews {
         let tangents = private(gpu, "tangents", instance, vertices * SKINNED_TANGENT_STRIDE);
         let edge_bytes = u64::from(rest.edge_count) * SKINNED_EDGE_STRIDE;
         let edges = (rest.edge_count > 0).then(|| private(gpu, "edges", instance, edge_bytes));
+        self.source
+            .0
+            .borrow_mut()
+            .1
+            .insert(instance, (stream0.clone(), tangents.clone()));
         self.views.insert(
             instance,
             SkinnedView {
@@ -106,17 +123,21 @@ impl SkinViews {
 
     /// Drops the view of `instance` and its buffers; other views are untouched.
     pub fn remove_skinned_view(&mut self, instance: u32) -> Option<SkinnedView> {
+        self.source.0.borrow_mut().1.remove(&instance);
         self.views.remove(&instance)
     }
 
     /// A disabled `skin` pass draws the rest pose (S18); views and buffers are kept.
     pub fn set_skinning_enabled(&mut self, enabled: bool) {
         self.disabled = !enabled;
+        self.source.0.borrow_mut().0 = !enabled;
     }
 
     /// The view that draws `instance`: `None` when absent or while disabled.
     pub fn skinned_view(&self, instance: u32) -> Option<&SkinnedView> {
-        (!self.disabled).then(|| self.views.get(&instance)).flatten()
+        (!self.disabled)
+            .then(|| self.views.get(&instance))
+            .flatten()
     }
 
     pub fn skinned_stream0(&self, instance: u32) -> Option<&wgpu::Buffer> {
@@ -143,6 +164,12 @@ impl SkinViews {
         rest: Option<&'a wgpu::Buffer>,
     ) -> Option<&'a wgpu::Buffer> {
         self.skinned_edge_segments(instance).or(rest)
+    }
+}
+
+impl Drop for SkinViews {
+    fn drop(&mut self) {
+        self.source.0.borrow_mut().1.clear();
     }
 }
 
