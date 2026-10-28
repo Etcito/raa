@@ -1,5 +1,6 @@
 //! Animation graph brick for RAA (S19): document model, refusals and caps.
 //! Written from the S19 contract; Sketchbook `GraphEntity` is not ported.
+//! The public tick is [`GraphRuntime::step`]; its ordering is documented in `runtime`.
 
 pub mod blend_weights;
 pub mod canon;
@@ -11,6 +12,7 @@ pub mod model;
 pub mod motion;
 pub mod output;
 pub mod params; pub mod state;
+pub mod runtime;
 pub mod triangulation;
 pub mod transitions;
 
@@ -25,5 +27,6 @@ pub use model::{
 };
 pub use motion::{Contribution, blend_local};
 pub use output::{GraphEvent, RootDelta, TickOut};
+pub use runtime::{Frame, GraphRuntime};
 pub use {params::{ParamValue, Params}, state::{Crossfade, GraphState, LayerState}};
 pub use triangulation::{Triangulation, triangulate};
