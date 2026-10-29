@@ -2,7 +2,7 @@
   "scene": "m12-fixtures",
   "variant": "compare-blend",
   "milestone": "m12",
-  "capturedAt": "2026-10-24T22:54:14.178Z",
+  "capturedAt": "2026-10-27T17:11:31.877Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -27,21 +27,27 @@
     "fur.shells",
     "particles.opaque",
     "sky.background",
+    "ssr",
+    "fog",
+    "sunshafts",
     "opaque.copy",
     "transparent.oit",
     "particles.blend",
+    "dof",
     "bloom",
-    "tonemap"
+    "grading",
+    "tonemap",
+    "editor"
   ],
   "instances": 2,
-  "triangles": 23538,
-  "firstFrameMs": 10455.800000011921,
+  "triangles": 2000,
+  "firstFrameMs": 10809.5,
   "wasm": {
-    "raw": 1926199,
-    "gzip": 658380,
-    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+    "raw": 2122964,
+    "gzip": 721497,
+    "sha256": "9c37dbb62a7ef6455dcb3eee276f5d2c6e5e58cd1f0baf96e26925381a6c567a"
   },
   "capture": "proofs/captures/lookdev/m12-fixtures--compare-blend.png",
-  "captureSha256": "cf1ad6435321a39ad6a4a14f0f82b1e90f03450abd447ae1106c7ab548e72c84",
+  "captureSha256": "ce47ef1138e0c50185574e455b2f62217614d2df0d014149b7e8dc7bba73464b",
   "judge": null
 }

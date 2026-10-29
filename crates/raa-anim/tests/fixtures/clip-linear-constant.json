@@ -1,0 +1,58 @@
+{
+  "format": "raa.clip",
+  "version": 2,
+  "name": "clip-linear-constant",
+  "rig": "rig-basic",
+  "lengthTicks": 48,
+  "loop": false,
+  "rootMotion": "none",
+  "tracks": [
+    {
+      "bone": "root",
+      "channel": "translation",
+      "keys": [
+        {
+          "tick": 4,
+          "v": [
+            0,
+            0,
+            0
+          ],
+          "interp": "LINEAR"
+        },
+        {
+          "tick": 24,
+          "v": [
+            10,
+            2,
+            -4
+          ],
+          "interp": "CONSTANT"
+        },
+        {
+          "tick": 44,
+          "v": [
+            20,
+            0,
+            4
+          ],
+          "interp": "LINEAR"
+        }
+      ]
+    }
+  ],
+  "events": [
+    {
+      "tick": 0,
+      "name": "start"
+    },
+    {
+      "tick": 24,
+      "name": "hold"
+    },
+    {
+      "tick": 48,
+      "name": "end"
+    }
+  ]
+}

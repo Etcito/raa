@@ -3,9 +3,11 @@
 // src/core/material-graph/compile.ts and helpers.ts, src/browser/index.ts). Geometry and
 // compiled graphs are not computed: the fake document carries them under `fake` keys.
 //
-// Fake document: { nodes: { <id>: { kind, name, asset?, fake?: { parts?, refuse?, throw? } } },
+// Fake document: { nodes: { <id>: { kind, name, asset?, rig?, clips?, fake?: { parts?, refuse?, throw?, rigError? } } },
 //   materials: { <id>: { name, fake: { wgslBody, helpers, constants } | { error } } } }
-// fake.parts: [{ partId, name, frame: number[16], subMeshes: [{ material, vertices, uvs? }] }]
+// fake.parts: [{ partId, name, frame: number[16],
+//   subMeshes: [{ material, vertices, uvs?, skin?: { joints, weights } }] }]
+// A node `rig` is exported as the group's rig and attached to every sub-mesh skin.
 
 /** Calls seen by the fake, for assertions. */
 export const calls = [];
@@ -85,13 +87,21 @@ function unsupported(name, output, inner) {
   };
 }
 
-function fakeSubMesh(spec) {
+function fakeSubMesh(spec, rig) {
   const n = spec.vertices;
   const positions = new Float32Array(n * 3).map((_, i) => (i % 3) * 0.25 + Math.floor(i / 3));
   const normals = new Float32Array(n * 3).map((_, i) => (i % 3 === 1 ? 1 : 0));
   const indices = new Uint32Array(n).map((_, i) => i);
   const uvs = spec.uvs ? new Float32Array(n * 2).map((_, i) => i / (n * 2)) : undefined;
-  return { material: spec.material, positions, normals, ...(uvs ? { uvs } : {}), indices, ...(spec.edges != null ? { edges: Uint32Array.from(spec.edges) } : {}) };
+  const skin = spec.skin ? {
+    joints: Uint16Array.from(spec.skin.joints), weights: Float32Array.from(spec.skin.weights),
+    ...(rig !== undefined ? { rig } : {}),
+  } : undefined;
+  return {
+    material: spec.material, positions, normals, ...(uvs ? { uvs } : {}), indices,
+    ...(spec.edges != null ? { edges: Uint32Array.from(spec.edges) } : {}),
+    ...(skin ? { skin } : {}),
+  };
 }
 
 /** meshAssets(doc, { groups?, output?, pool?, onProgress?, onNotice? }): Promise<AssetMeshResult[]>. */
@@ -122,13 +132,23 @@ export async function meshAssets(doc, o = {}) {
       out.push({ group, asset, output: docOutput, parts: [], materials: [], error: unsupported(name, docOutput, fake.refuse) });
       continue;
     }
+    if (fake.rigError) {
+      out.push({ group, asset, output: docOutput, parts: [], materials: [],
+        error: { code: 'sdfm.rig', message: fake.rigError, fix: '' } });
+      continue;
+    }
     const parts = (fake.parts ?? []).map((p) => ({
-      partId: p.partId, name: p.name, frame: Float64Array.from(p.frame), subMeshes: p.subMeshes.map(fakeSubMesh),
+      partId: p.partId, name: p.name, frame: Float64Array.from(p.frame),
+      subMeshes: p.subMeshes.map((s) => fakeSubMesh(s, node.rig)),
     }));
     const used = new Set();
     for (const part of parts) for (const s of part.subMeshes) if (s.material !== null) used.add(s.material);
     const materials = [...used].sort().map((id) => buildMaterial(doc, id));
-    out.push({ group, asset, output: docOutput, parts, materials, error: null });
+    out.push({
+      group, asset, output: docOutput, parts, materials, error: null,
+      ...(node.rig !== undefined ? { rig: node.rig } : {}),
+      ...(node.clips !== undefined ? { clips: node.clips } : {}),
+    });
   }
   return out;
 }

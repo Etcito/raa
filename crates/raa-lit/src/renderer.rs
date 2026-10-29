@@ -381,7 +381,23 @@ impl LitRenderer {
             known_mesh: &known_mesh,
             class_handled: &class_handled,
         };
-        s.prep.prepare(&input)?;
+        let source = s.skin_source.clone();
+        let source = source.0.borrow();
+        s.prep
+            .prepare_skinned(&input, &|tag| !source.0 && source.1.contains_key(&tag))?;
+
+        let vp = scene.camera.view_proj();
+        s.prep.cull_camera(&|mesh, tag, world| {
+            let Some(info) = meshes.submesh(mesh).and_then(|m| meshes.info(m.lit)) else {
+                return true;
+            };
+            let pose = (!source.0).then(|| source.1.get(&tag)).flatten();
+            // A manually supplied posed view without matrices cannot safely be rejected.
+            let bounds = crate::skin_draw::instance_bounds(
+                info.bounds, pose.is_some(), pose.and_then(|v| v.2.as_deref()),
+            );
+            crate::skin_bounds::visible(bounds, world, vp)
+        });
 
         let mut counts = FrameCounts {
             instances: s.prep.instance_count(),
@@ -389,7 +405,10 @@ impl LitRenderer {
         };
         for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
             for d in s.prep.draws(class) {
-                let (_, index_count) = s.meshes.submesh_range(d.mesh).unwrap_or((0, 0));
+                let (_, index_count) = s
+                    .meshes
+                    .submesh_range(s.prep.mesh_binding(d.mesh).0)
+                    .unwrap_or((0, 0));
                 counts.draw_calls += 1;
                 counts.triangles += u64::from(index_count / 3) * u64::from(d.instance_count);
             }

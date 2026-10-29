@@ -9,6 +9,18 @@ use crate::convert::api_error;
 
 pub(crate) const FEATURE_MISSING: &str = "api.feature_missing";
 
+/// S12's rows in feature-bit order (0..19 unchanged), then S18's `skin` at 20; the
+/// tuple is `(name, order, feature-bit index)`, so `1 << bit` is `FrameGpu.flags.z`.
+#[rustfmt::skip]
+pub(crate) const FEATURE_ROWS: [(&str, u32, u32); 21] = [
+    ("sky.env", 10, 0), ("shadow.csm", 20, 1), ("prepass", 30, 2), ("ao.gtao", 40, 3),
+    ("shadow.contact", 45, 4), ("particles.sim", 50, 5), ("forward", 60, 6),
+    ("fur.shells", 500, 7), ("particles.opaque", 600, 8), ("sky.background", 900, 9),
+    ("ssr", 65, 10), ("fog", 68, 11), ("sunshafts", 69, 12), ("opaque.copy", 70, 13),
+    ("transparent.oit", 80, 14), ("particles.blend", 85, 15), ("dof", 110, 16),
+    ("bloom", 120, 17), ("grading", 130, 18), ("tonemap", 200, 19), ("skin", 15, 20),
+];
+
 #[derive(Default)]
 pub(crate) struct FeatureMap {
     entries: Vec<(TypeId, Box<dyn Any>)>,

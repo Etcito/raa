@@ -1,7 +1,8 @@
 // Hand-written types of @etcito/raa-sdfm 0.1.0 (ARCHITECTURE S15). Plain ES modules, no build step.
 // The adapter turns `sdfm.game-asset` v1 files into RAA meshes and surface materials, meshed and
 // compiled by MAMA. Engine refusals (RaaError) propagate unchanged; the adapter's own refusals are
-// SdfmError with one of the eleven S15 codes. MAMA is reached only through src/mama-bridge.js.
+// SdfmError with one of the S15 codes (plus S18 `sdfm.rig`). MAMA is reached only through
+// src/mama-bridge.js.
 
 import type { Engine, SurfaceBlend } from '@etcito/raa';
 
@@ -25,10 +26,10 @@ export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 
 /**
- * The eleven S15 refusal codes:
+ * The S15 refusal codes plus the S18 `sdfm.rig`:
  * `sdfm.format`, `sdfm.version`, `sdfm.schema`, `sdfm.not_finite`, `sdfm.id`,
  * `sdfm.cap_document`, `sdfm.hash_mismatch`, `sdfm.mesher_refused`,
- * `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`.
+ * `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`, `sdfm.rig`.
  * Refusals: every code listed here is a possible `SdfmError.code`; the README table `S15 codes`
  * says when each one is raised.
  */
@@ -43,7 +44,8 @@ export type SdfmErrorCode =
   | 'sdfm.mesher_refused'
   | 'sdfm.material_unmappable'
   | 'sdfm.worker'
-  | 'sdfm.disposed';
+  | 'sdfm.disposed'
+  | 'sdfm.rig';
 
 /**
  * A refusal of the sdfm adapter. The message is prefixed with `<code>: `, like RaaError, and
@@ -51,7 +53,7 @@ export type SdfmErrorCode =
  * Refusals: any {@link SdfmErrorCode}; `path` is a JSON pointer into the asset where one exists.
  */
 export class SdfmError extends Error {
-  /** One of the eleven S15 codes. */
+  /** One of the S15 codes, or `sdfm.rig` for an invalid S16 rig. */
   readonly code: SdfmErrorCode;
   /** JSON pointer of the offending asset value, when the refusal has one (e.g. `/nodes/2/radius`). */
   readonly path?: string;
@@ -95,10 +97,62 @@ export interface SdfmProgress {
   total: number;
 }
 
+/** One S16 rig bone; `rest` is local to `parent` (null at the root). `bones` order is joint order. */
+export interface SdfmRigBone { name: string; parent: string | null; rest: { t: Vec3; r: Quat; s: Vec3 } }
+
+/** One S16 IK chain (`twoBone` has exactly 3 bones; `ccd` and `fabrik` have 2 to 8). */
+export interface SdfmRigChain {
+  name: string; solver: 'twoBone' | 'ccd' | 'fabrik'; bones: string[];
+  pole?: Vec3 | null; iterations?: number;
+}
+
+/** One S16 pose-mode limit: XYZ Euler degrees relative to rest. */
+export interface SdfmRigLimit { bone: string; min: Vec3; max: Vec3 }
+
+/** One S16 named attachment point on a bone (props and costumes bind to it). */
+export interface SdfmRigAttachment { bone: string; t: Vec3; r: Quat }
+
+/** One S18 binding: a shape or a Paramesh group maps to weighted bones. */
+export interface SdfmRigBinding { source: { group: string } | { shape: string }; bones: { bone: string; factor: number }[] }
+
+/**
+ * The validated S16 rig plus S18 authoring fields MAMA exports for a rigged group. An invalid rig
+ * is refused by {@link SdfmLoader.load} as `sdfm.rig`, with the S16 code in the message.
+ */
+export interface SdfmRig {
+  format: 'raa.rig'; version: 1; name: string; bones: SdfmRigBone[]; roles?: Record<string, string>;
+  ikChains?: SdfmRigChain[]; limits?: SdfmRigLimit[]; attach?: Record<string, SdfmRigAttachment>;
+  bindings?: SdfmRigBinding[]; smooth?: number;
+}
+
+/** One S17 clip key; `hl`/`hr` are `[dtTicks, dv...]` and only exist on BEZIER keys. */
+export interface SdfmClipKey {
+  tick: number; v: number[]; interp: 'CONSTANT' | 'LINEAR' | 'BEZIER'; hl?: number[]; hr?: number[];
+}
+
+/** One S17 clip track: one bone and channel, keys in strictly increasing tick order. */
+export interface SdfmClipTrack { bone: string; channel: 'translation' | 'rotation' | 'scale'; keys: SdfmClipKey[] }
+
+/** One S17 clip event. */
+export interface SdfmClipEvent { tick: number; name: string }
+
+/** One S17 `raa.clip` v2 clip exported with a rigged group, unchanged. */
+export interface SdfmClip {
+  format: 'raa.clip'; version: 2; name: string; rig: string; lengthTicks: number; loop: boolean;
+  rootMotion: 'none' | 'xz' | 'xyz'; tracks: SdfmClipTrack[]; events?: SdfmClipEvent[];
+}
+
+/**
+ * S18 skin of one part: 4n joint indices into `rig.bones` (authored order) and 4n weights, four
+ * per mesh vertex, plus the group rig. The same arrays are uploaded as `MeshDesc.joints`/`weights`.
+ */
+export interface SdfmPartSkin { joints: Uint16Array; weights: Float32Array; rig: SdfmRig }
+
 /**
  * One uploaded part of an {@link SdfmAsset}: a rigid MAMA part with its mesh and sub-mesh
  * material handles. MAMA has no rigid flag or parent link, so `rigid` is always true and
  * `parent` is always null: every part is flat under the spawn root and carries its own frame.
+ * A part of a rigged group also carries its S18 `skin`.
  * Refusals: none of its own; {@link SdfmLoader.load} raises the codes of {@link SdfmErrorCode}
  * before a part exists.
  */
@@ -119,12 +173,18 @@ export interface SdfmPart {
   mesh: number;
   /** Surface material handles of the sub-meshes, in sub-mesh order. */
   materials: number[];
+  /**
+   * S18 skin of a part of a rigged group; the same joints and weights are uploaded as the mesh's
+   * `joints`/`weights` attributes. Absent for an unrigged part.
+   */
+  skin?: SdfmPartSkin;
 }
 
 /**
  * A loaded asset: the `sdfm.game-asset` v1 fields passed through untouched (`id`, `hash`, `name`,
- * `category`, `world`, `anchors`, `bounds`, `collision`) plus the uploaded `parts`.
- * Refusals: {@link SdfmLoader.load} raises the validation/hash/mesh/material codes of
+ * `category`, `world`, `anchors`, `bounds`, `collision`) plus the uploaded `parts` and, for a
+ * rigged asset, the S18 `rig` and `clips`.
+ * Refusals: {@link SdfmLoader.load} raises the validation/hash/mesh/material/rig codes of
  * {@link SdfmErrorCode}; engine refusals are RaaError.
  */
 export interface SdfmAsset {
@@ -140,6 +200,13 @@ export interface SdfmAsset {
   bounds: { min: Vec3; max: Vec3 };
   /** Passed through untouched; never used for rendering. */
   collision: unknown[];
+  /**
+   * The validated S16 rig of the first group that carries one; every skinned part's `skin.rig` is
+   * this object. Absent for an unrigged asset. Joint indices are its `bones` order.
+   */
+  rig?: SdfmRig;
+  /** The S17 clips of the loaded groups, in group result order; absent when no group has clips. */
+  clips?: SdfmClip[];
 }
 
 /**
@@ -166,7 +233,7 @@ export interface SdfmMamaModule {
   serializeDocument(document: unknown): string;
   /** MAMA's `readSdfm`: builds MAMA's document from the asset's `document`. */
   readSdfm(document: unknown): unknown;
-  /** MAMA's `meshAssets(doc, { pool, groups })`; each result is `{ group, parts, materials, error }`. */
+  /** MAMA's `meshAssets(doc, { pool, groups })`; each result is `{ group, parts, materials, error, rig?, clips? }`. */
   meshAssets(document: unknown, options: { pool: unknown; groups?: string[] }): Promise<unknown[]>;
   /** MAMA's helper table: helper id -> WGSL source and dependencies. */
   HELPERS: Record<string, { code: string; deps?: string[] }>;
@@ -212,10 +279,12 @@ export interface SdfmLoader {
   /**
    * Validates, checks the document hash, then meshes (workers or in-process through the bridge),
    * uploads one mesh and its materials per part and caches the result by hash. A second load of
-   * the same hash resolves from the cache and calls MAMA no more.
+   * the same hash resolves from the cache and calls MAMA no more. The returned asset exposes the
+   * meshed group's S16 `rig` and S17 `clips` beside the S15 fields (absent when unrigged).
    * Refusals: the first validation error as `SdfmError` (with its path), otherwise
-   * `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.material_unmappable`, `sdfm.worker`,
-   * `sdfm.disposed`; engine refusals are RaaError.
+   * `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.rig` (an invalid S16/S18 rig, with the S16
+   * code in the message), `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`; engine
+   * refusals are RaaError.
    */
   load(
     asset: string | object,

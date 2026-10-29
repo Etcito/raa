@@ -146,7 +146,7 @@ fn draw_lit(
     specs: &Specs,
 ) -> Result<(), RaaError> {
     for class in DRAWN_CLASSES {
-        let draws = lit.draws(class);
+        let draws = lit.camera_draws(class);
         for d in draws.iter() {
             if d.instance_count == 0 {
                 continue;

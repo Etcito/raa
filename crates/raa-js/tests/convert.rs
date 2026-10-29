@@ -1,4 +1,13 @@
 use raa_js::convert::*;
+use raa_mesh::{AttributedMesh, from_js_arrays};
+use raa_skin::{MAX_JOINTS, WEIGHT_SUM_EPS};
+
+fn quad() -> AttributedMesh {
+    let positions = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
+    let normals = [0.0, 0.0, 1.0].repeat(4);
+    let indices = [0, 1, 2, 0, 2, 3];
+    from_js_arrays(&positions, &normals, None, None, None, &indices, &[]).expect("quad")
+}
 
 #[test]
 fn handles_increase_and_are_never_reused() {
@@ -167,4 +176,111 @@ fn engine_options_refuse_invalid_lit_values_naming_the_key() {
         });
         assert!(m.contains("exposureEv"), "{m}");
     }
+}
+
+#[test]
+fn skin_desc_keeps_typed_joints_and_weights() {
+    let rest = quad();
+    let joints = [0u16, 1, 2, 3].repeat(4);
+    let weights = [0.5f32, 0.25, 0.25, 0.0].repeat(4);
+    let desc = SkinDesc {
+        joints: Some(joints.clone()),
+        weights: Some(weights.clone()),
+    };
+    let skin = desc.to_skin(&rest).unwrap().expect("a skinned mesh");
+    assert_eq!(skin.joints, joints);
+    assert_eq!(skin.weights, weights);
+    assert_eq!(skin.rest.base.positions, rest.base.positions);
+    assert_eq!(skin.rest.base.normals, rest.base.normals);
+    assert_eq!(skin.rest.base.indices, rest.base.indices);
+    assert_eq!(skin.rest.submeshes, rest.submeshes);
+}
+
+#[test]
+fn skin_desc_requires_joints_and_weights_together() {
+    let rest = quad();
+    for desc in [
+        SkinDesc {
+            joints: Some(vec![0; 16]),
+            weights: None,
+        },
+        SkinDesc {
+            joints: None,
+            weights: Some(vec![0.25; 16]),
+        },
+    ] {
+        let err = desc.to_skin(&rest).unwrap_err();
+        assert_eq!(err.code(), "skin.length_mismatch");
+        assert!(err.to_string().contains("both or neither"), "{err}");
+    }
+    let short = SkinDesc {
+        joints: Some(vec![0; 15]),
+        weights: Some([1.0f32, 0.0, 0.0, 0.0].repeat(4)),
+    };
+    let err = short.to_skin(&rest).unwrap_err();
+    assert_eq!(err.code(), "skin.length_mismatch");
+    assert!(err.to_string().contains("joints"), "{err}");
+}
+
+#[test]
+fn skin_desc_surfaces_invalid_weights_and_joints() {
+    let rest = quad();
+    let joints = [0u16; 16];
+    let mut weights = [1.0f32, 0.0, 0.0, 0.0].repeat(4);
+    weights[0] = 0.5;
+    let err = SkinDesc {
+        joints: Some(joints.to_vec()),
+        weights: Some(weights),
+    }
+    .to_skin(&rest)
+    .unwrap_err();
+    assert_eq!(err.code(), "skin.weights_sum");
+
+    let mut weights = [1.0f32, 0.0, 0.0, 0.0].repeat(4);
+    weights[0] = 1.0 + WEIGHT_SUM_EPS / 2.0;
+    assert!(
+        SkinDesc {
+            joints: Some(joints.to_vec()),
+            weights: Some(weights),
+        }
+        .to_skin(&rest)
+        .is_ok(),
+        "a sum inside WEIGHT_SUM_EPS is accepted"
+    );
+
+    let mut weights = [1.0f32, 0.0, 0.0, 0.0].repeat(4);
+    weights[1] = -0.25;
+    let err = SkinDesc {
+        joints: Some(joints.to_vec()),
+        weights: Some(weights),
+    }
+    .to_skin(&rest)
+    .unwrap_err();
+    assert_eq!(err.code(), "skin.weights_sum");
+
+    let mut joints = [0u16; 16];
+    joints[3] = MAX_JOINTS as u16;
+    let err = SkinDesc {
+        joints: Some(joints.to_vec()),
+        weights: Some([1.0f32, 0.0, 0.0, 0.0].repeat(4)),
+    }
+    .to_skin(&rest)
+    .unwrap_err();
+    assert_eq!(err.code(), "skin.joint_range");
+}
+
+#[test]
+fn unskinned_desc_leaves_the_rest_mesh_unchanged() {
+    let rest = quad();
+    let before = (
+        rest.base.positions.clone(),
+        rest.base.normals.clone(),
+        rest.base.indices.clone(),
+        rest.submeshes.clone(),
+    );
+    assert!(SkinDesc::default().to_skin(&rest).unwrap().is_none());
+    assert_eq!(rest.base.positions, before.0);
+    assert_eq!(rest.base.normals, before.1);
+    assert_eq!(rest.base.indices, before.2);
+    assert_eq!(rest.submeshes, before.3);
 }

@@ -46,7 +46,7 @@ use crate::convert::{
     decode_trs, geom_error, js, load_error, quality, scene_error,
 };
 use crate::feature_map::FeatureMap;
-use crate::state::{AssetEntry, EngineState, MeshEntry, MeshOrigin};
+use crate::state::{AssetEntry, EngineState, MeshEntry, MeshOrigin, SkinFeature};
 
 /// WEBGPU_OPTIONAL: device features requested when the adapter has them, never required.
 const WEBGPU_OPTIONAL: wgpu::Features =
@@ -189,6 +189,14 @@ impl WebApp for EngineApp {
             .map_err(|_| pipeline_busy())?
             .add(Box::new(pass))?;
         let mut features = FeatureMap::new();
+        // S18: the `skin` pass runs at order 15, before every lit draw (feature bit 20).
+        let skin = SkinFeature::new(gpu);
+        skin.connect(&mut lit);
+        pipeline
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?
+            .add(Box::new(skin.pipeline_pass()))?;
+        features.insert(skin);
         api::install_all(&mut InstallCtx {
             gpu,
             surface_format,
@@ -223,6 +231,7 @@ impl WebApp for EngineApp {
             features,
             max_materials: o.max_materials,
             meshes: HandleMap::new("mesh"),
+            skins: Vec::new(),
             materials: HandleMap::new("material"),
             nodes: HandleMap::new("node"),
             instances: HandleMap::new("instance"),
@@ -248,6 +257,7 @@ impl WebApp for EngineApp {
             .set_time(input.now_ms);
         api::frame_all(s, gpu, input)?;
         s.rebuild_dirty_groups()?;
+        s.flush_skins(gpu)?;
         let c = s.lit.prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags)?;
         Ok(FrameCounters {
             instances: c.instances,

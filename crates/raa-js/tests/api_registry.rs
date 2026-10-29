@@ -59,6 +59,67 @@ fn registry_declares_a_path_module_per_file() {
     }
 }
 
+fn feature_rows() -> Vec<(String, u32, u32)> {
+    include_str!("../src/feature_map.rs")
+        .split("(\"")
+        .skip(1)
+        .filter_map(|row| {
+            let (name, rest) = row.split_once("\", ")?;
+            let (order, bit) = rest.split_once(", ")?;
+            let bit = bit.split(|c| c == ')' || c == ',').next()?;
+            Some((name.to_string(), order.parse().ok()?, bit.parse().ok()?))
+        })
+        .collect()
+}
+
+#[test]
+fn feature_bits_keep_prior_rows_and_register_skin_at_20() {
+    #[rustfmt::skip]
+    let expected = [
+        ("sky.env", 10, 0), ("shadow.csm", 20, 1), ("prepass", 30, 2), ("ao.gtao", 40, 3),
+        ("shadow.contact", 45, 4), ("particles.sim", 50, 5), ("forward", 60, 6),
+        ("fur.shells", 500, 7), ("particles.opaque", 600, 8), ("sky.background", 900, 9),
+        ("ssr", 65, 10), ("fog", 68, 11), ("sunshafts", 69, 12), ("opaque.copy", 70, 13),
+        ("transparent.oit", 80, 14), ("particles.blend", 85, 15), ("dof", 110, 16),
+        ("bloom", 120, 17), ("grading", 130, 18), ("tonemap", 200, 19)];
+    let rows = feature_rows();
+    assert_eq!(rows.len(), expected.len() + 1, "one appended skin row");
+    let actual: Vec<(&str, u32, u32)> = rows[..expected.len()]
+        .iter()
+        .map(|(n, o, b)| (n.as_str(), *o, *b))
+        .collect();
+    assert_eq!(actual, expected);
+    assert_eq!(rows.last(), Some(&("skin".to_string(), 15, 20)));
+}
+
+#[test]
+fn m18_skinning_registers_pose_setters_after_m15() {
+    let reg = out_file("api_registry.rs");
+    let m15 = reg.find("mod m15_animation;").expect("m15 module");
+    let m18 = reg.find("mod m18_skinning;").expect("m18 module");
+    assert!(m15 < m18, "m18 sorts after m15");
+    assert!(reg.contains("m18_skinning::install(ctx)?;"));
+    assert!(reg.contains("m18_skinning::frame(st, gpu, input)?;"));
+    let src = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("api")
+            .join("m18_skinning.rs"),
+    )
+    .expect("m18 source");
+    for name in ["setSkinPose", "setSkinPoses"] {
+        assert!(src.contains(&format!("js_name = {name}")), "no {name}");
+    }
+    for code in [
+        "skin.not_skinned",
+        "skin.pose_length",
+        "skin.joint_range",
+        "skin.cap_joints",
+    ] {
+        assert!(src.contains(code), "no {code}");
+    }
+}
+
 #[test]
 fn registry_calls_install_and_frame_in_file_order() {
     let reg = out_file("api_registry.rs");

@@ -2,7 +2,16 @@
 
 Adapter that loads `sdfm.game-asset` v1 files and turns them into RAA meshes and materials, so an asset can be shown side by side with SDF Modeler.
 
-Meshing and material compilation are done by MAMA (the SDF document engine, package `mama`). RAA renders the result through `@etcito/raa`. Both are peer dependencies: `@etcito/raa` `^0.1.0` and `mama` `^0.1.0`. The package has no dependencies and no build step.
+Meshing and material compilation are done by MAMA (the SDF document engine, package `mama`). RAA renders the result through `@etcito/raa`. The consuming app provides both; the package declares no dependencies and has no build step.
+
+## Skinned assets
+
+A part of a group with a `rig` carries `skin: { joints, weights, rig }`. The loader
+passes those arrays through unchanged as the mesh's `MeshDesc.joints` and
+`MeshDesc.weights`; joint indices are in the rig's `bones` order. The loaded asset
+exposes the group's S16 `rig` and S17 `clips` as `asset.rig` and `asset.clips`;
+unrigged assets load exactly as before. An invalid rig is refused as `sdfm.rig`,
+with the S16 code in the message.
 
 MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones that file makes, reviewed against MAMA 0.1.0 at commit 864ebc3 (sibling checkout `../MAMA`).
 
@@ -24,8 +33,8 @@ Notes on the table:
 - `buildMaterial` calls `compileMaterialGraph` (`src/core/material-graph/compile.ts:97`) internally. The bridge calls neither directly. A `BuiltMaterial` with `graph: null` throws `sdfm.material_unmappable` with MAMA's error.
 - Helpers: `BASE_WGSL` comes first as helper `base` (the graph bodies call its `mat_clamp01` without listing it in `graph.helpers`); then each id of `graph.helpers` and its `deps` (dependencies first) is resolved through `HELPERS`; an id without WGSL source throws `sdfm.material_unmappable` naming the material and the helper.
 - Imports: `importMama(base?)` in `src/mama-bridge.js` imports `mama`, `mama/core/game/mesh-assets.js`, `mama/core/material-graph/helpers.js` and `mama/browser` (bare specifiers, or the matching files under MAMA's `dist/` URL `base`).
-- Output of `meshDocument(mama, document, { pool, groups? })`: `{ groups: [{ group, parts: [{ partId, name, frame: Float64Array, meshes: [{ material, positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, indices: Uint32Array }] }] }], materials: MamaMaterial[] }`. Every part is rigid and the hierarchy is flat (one node per part under the spawn root, local transform = `frame`); no rigid flag or parent is read from the document. Each MAMA sub-mesh is one mesh; sub-meshes are not merged.
-- Refusals: a group whose `error` is set (`error.code` `MESHER_GROUP_UNSUPPORTED`, message naming the group) becomes `SdfmError('sdfm.mesher_refused', '<group>: <error.message>' plus `error.fix` when present, path '/document')`. The first refused group in result order wins. Any other exception from MAMA becomes `sdfm.worker`.
+- Output of `meshDocument(mama, document, { pool, groups? })`: `{ groups: [{ group, parts: [{ partId, name, frame: Float64Array, meshes: [{ material, positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, indices: Uint32Array, skin?: { joints: Uint16Array, weights: Float32Array, rig } }] }], rig?, clips? }], materials: MamaMaterial[] }`. Every part is rigid and the hierarchy is flat (one node per part under the spawn root, local transform = `frame`); no rigid flag or parent is read from the document. Each MAMA sub-mesh is one mesh; sub-meshes are not merged. MAMA's S18 skin arrays are copied with their joint order and rig association; `rig` and `clips` are the group's authored S16/S17 values.
+- Refusals: a group whose `error` is set (`error.code` `MESHER_GROUP_UNSUPPORTED`, message naming the group) becomes `SdfmError('sdfm.mesher_refused', '<group>: <error.message>' plus `error.fix` when present, path '/document')`. A group error with code `sdfm.rig` becomes `SdfmError('sdfm.rig', ...)` with the S16 code in the message. The first refused group in result order wins. Any other exception from MAMA becomes `sdfm.worker`.
 - Browser host: MAMA has no viewport host. Nothing in MAMA mounts a canvas, loads a document into a viewport, sets a camera or renders a frame. `setupBrowserHost` returns a meshing worker pool only, so this README has no rows for mount, load, camera or render. The MAMA pane of the side-by-side page is therefore a local reference viewport, `examples/sdfm-compare/lib/mama-view.js`, labelled `MAMA 864ebc3 mesher (reference viewport)`. It meshes the document with `readSdfm`, `setupBrowserHost` (`workerMode: 'blob'`) and `meshAssets` through `meshDocument`, colours each vertex with the `cpuGraphOrNull` base colour, and draws the result with plain WebGPU (Lambert shading, the same camera and size as the RAA pane). It is not SDF Modeler's viewport.
 
 ## MaterialFull fields
@@ -67,8 +76,9 @@ Every exported name of `index.d.ts`:
 | `createSdfmLoader` | Creates a loader bound to one engine; `mama` is resolved once and the hash cache is per loader. |
 | `SdfmLoaderOptions` | `{ engine, mama, workerUrl?, workers? }`; `mama` resolves to MAMA's `dist/` URL (workers) or to MAMA's exports (in-process). |
 | `SdfmLoader` | `validate`, `load` (validate, hash check, cache, mesh, upload), `spawn` (root plus one node and instance per part), `dispose`. |
-| `SdfmAsset` | A loaded asset: the v1 fields `id`, `hash`, `name`, `category`, `world`, `anchors`, `bounds`, `collision` passed through, plus `parts`. |
-| `SdfmPart` | One rigid part: `name`, `groupId`, `rigid` (always true), `parent` (always null), `t`, `r`, `mesh`, `materials`. |
+| `SdfmAsset` | A loaded asset: the v1 fields `id`, `hash`, `name`, `category`, `world`, `anchors`, `bounds`, `collision` passed through, plus `parts` and, when rigged, `rig` and `clips`. |
+| `SdfmPart` | One rigid part: `name`, `groupId`, `rigid` (always true), `parent` (always null), `t`, `r`, `mesh`, `materials`, and `skin?` for a part of a rigged group. |
+| `SdfmRig`, `SdfmRigBone`, `SdfmRigBinding`, `SdfmClip`, `SdfmPartSkin` | The S16 rig and S17 clips MAMA exports (`bones` order = joint order) and the part skin arrays uploaded as `MeshDesc.joints`/`weights`. |
 | `SdfmSpawned` | `{ root, parts }`: the spawn root node and, per part name, its `node` and `instance` handles. |
 | `SdfmProgress` | One `onProgress` record: `stage` (`validate`, `mesh`, `upload`), `done`, `total`. |
 | `SdfmValidationResult` | The `validate` result: `{ ok, errors }`; validation is synchronous and needs no MAMA. |
@@ -96,6 +106,7 @@ Every exported name of `index.d.ts`:
 | `sdfm.cap_document` | The canonical document text exceeds 2 MiB (path `/document`). |
 | `sdfm.hash_mismatch` | The recomputed sha256 of the UTF-8 bytes of MAMA `serializeDocument(document)` differs from `hash` (path `/hash`). |
 | `sdfm.mesher_refused` | MAMA refused a group with a value error (`MESHER_GROUP_UNSUPPORTED`); the first refused group in result order wins, the message names the group and its fix (path `/document`). |
+| `sdfm.rig` | MAMA refused a group's S16/S18 rig; the message names the group and the S16 code (path `/document`). |
 | `sdfm.material_unmappable` | MAMA could not build a material or resolve a helper, or the mapped WGSL is not an S11 function (unknown field, forbidden token, `raa_` identifier, more than 65536 bytes); the message names the material and the token. |
 | `sdfm.worker` | MAMA could not be imported or threw, a worker crashed or broke the protocol, or `options.mama()` failed. |
 | `sdfm.disposed` | `load`/`spawn` after `dispose` (or a worker pool request after termination). |

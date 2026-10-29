@@ -5,7 +5,9 @@ use raa_geom::{GeomError, Quality};
 use raa_loader::LoadError;
 use raa_material::{Material, MaterialError, ShadingModel, srgb_to_linear};
 use raa_math::{Quat, Vec3};
+use raa_mesh::AttributedMesh;
 use raa_scene::{SceneError, Transform};
+use raa_skin::{SkinError, SkinMesh};
 use raa_tonemap::ToneMapper;
 
 pub const LENGTH_MISMATCH: &str = "api.length_mismatch";
@@ -13,6 +15,8 @@ pub const UNKNOWN_HANDLE: &str = "api.unknown_handle";
 pub const INVALID_ARGUMENT: &str = "api.invalid_argument";
 pub const UNKNOWN_PARAM: &str = "api.unknown_param";
 pub const DISPOSED: &str = "api.disposed";
+/// S18: `joints` and `weights` come both or neither, four entries per vertex.
+pub const SKIN_LENGTH_MISMATCH: &str = "skin.length_mismatch";
 
 /// Builds an error with a non-core code. `RaaError` has no generic variant, so
 /// the `FrameGraph { code, message }` variant (whose `code()` returns the given
@@ -37,6 +41,11 @@ pub fn scene_error(e: &SceneError) -> RaaError {
 }
 
 pub fn material_error(e: &MaterialError) -> RaaError {
+    api_error(e.code, e.to_string())
+}
+
+/// A `skin.*` refusal with its code kept (S18).
+pub fn skin_error(e: &SkinError) -> RaaError {
     api_error(e.code, e.to_string())
 }
 
@@ -181,6 +190,35 @@ impl MaterialDesc {
         };
         m.validate().map_err(|e| material_error(&e))?;
         Ok(m)
+    }
+}
+
+/// The S18 skin arrays of a `MeshDesc`: `joints` (Uint16Array, four per vertex) and
+/// `weights` (Float32Array, four per vertex), which come both or neither.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SkinDesc {
+    pub joints: Option<Vec<u16>>,
+    pub weights: Option<Vec<f32>>,
+}
+
+impl SkinDesc {
+    /// Validates the paired arrays against the converted rest mesh; an unskinned
+    /// desc (both absent) yields `None` and leaves `rest` untouched.
+    pub fn to_skin(&self, rest: &AttributedMesh) -> Result<Option<SkinMesh>, RaaError> {
+        match (&self.joints, &self.weights) {
+            (None, None) => Ok(None),
+            (Some(joints), Some(weights)) => SkinMesh::new(rest.clone(), joints, weights)
+                .map(Some)
+                .map_err(|e| skin_error(&e)),
+            (joints, weights) => Err(api_error(
+                SKIN_LENGTH_MISMATCH,
+                format!(
+                    "joints and weights come both or neither (joints {}, weights {})",
+                    joints.as_ref().map_or(0, |a| a.len()),
+                    weights.as_ref().map_or(0, |a| a.len()),
+                ),
+            )),
+        }
     }
 }
 
@@ -367,9 +405,9 @@ pub fn tone_mapper(name: &str) -> Option<ToneMapper> {
 pub(crate) mod js {
     use super::{
         CameraDesc, EngineOptions, EngineOptionsInput, INVALID_ARGUMENT, MaterialDesc, ModelName,
-        UNKNOWN_PARAM, api_error, geom_error,
+        SkinDesc, UNKNOWN_PARAM, api_error, geom_error,
     };
-    use js_sys::{Array, Float32Array, Object, Reflect};
+    use js_sys::{Array, Float32Array, Object, Reflect, Uint16Array};
     use raa_core::RaaError;
     use raa_geom::{GeomError, ParamValue, Params};
     use raa_math::{Mat4, Vec3};
@@ -548,6 +586,28 @@ pub(crate) mod js {
             d.model = ModelName::parse(&model)?;
         }
         Ok(d)
+    }
+
+    /// S18 `joints` (`Uint16Array`) and `weights` (`Float32Array`) of a `MeshDesc`;
+    /// absent keys stay `None` and the pairing is checked by [`SkinDesc::to_skin`].
+    pub fn skin_desc(desc: &JsValue) -> Result<SkinDesc, RaaError> {
+        let joints = match get(desc, "joints")? {
+            None => None,
+            Some(v) => Some(
+                v.dyn_ref::<Uint16Array>()
+                    .ok_or_else(|| invalid("'joints' must be a Uint16Array".into()))?
+                    .to_vec(),
+            ),
+        };
+        let weights = match get(desc, "weights")? {
+            None => None,
+            Some(v) => Some(
+                v.dyn_ref::<Float32Array>()
+                    .ok_or_else(|| invalid("'weights' must be a Float32Array".into()))?
+                    .to_vec(),
+            ),
+        };
+        Ok(SkinDesc { joints, weights })
     }
 
     /// Camera description: `eye` and `target` required; `up` defaults to +Y.

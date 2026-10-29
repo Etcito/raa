@@ -1,0 +1,12 @@
+[package]
+name = "raa-ik"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "S20 visual IK on raa-anim poses; never consumed by the simulation."
+publish = false
+
+[dependencies]
+raa-anim = { path = "../raa-anim" }
+raa-math = { path = "../raa-math" }

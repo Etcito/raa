@@ -1,0 +1,8 @@
+[package]
+name = "raa-det"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Determinism primitives: the fixed simulation tick and the f32 little-endian FNV-1a 32-bit hash."
+publish = false

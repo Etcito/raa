@@ -1,0 +1,1 @@
+{"format":"raa.clip","version":2,"name":"bad-channel","rig":"rig-basic","lengthTicks":48,"loop":true,"rootMotion":"none","tracks":[{"bone":"root","channel":"colour","keys":[{"tick":0,"v":[0,0,0],"interp":"LINEAR"}]}],"events":[]}

@@ -2,7 +2,7 @@
   "scene": "m12-fixtures",
   "variant": "compare-crate",
   "milestone": "m12",
-  "capturedAt": "2026-10-24T22:54:08.908Z",
+  "capturedAt": "2026-10-27T17:11:26.545Z",
   "adapter": {
     "vendor": "",
     "architecture": "",
@@ -27,21 +27,27 @@
     "fur.shells",
     "particles.opaque",
     "sky.background",
+    "ssr",
+    "fog",
+    "sunshafts",
     "opaque.copy",
     "transparent.oit",
     "particles.blend",
+    "dof",
     "bloom",
-    "tonemap"
+    "grading",
+    "tonemap",
+    "editor"
   ],
   "instances": 3,
-  "triangles": 12076,
-  "firstFrameMs": 5375.200000017881,
+  "triangles": 2000,
+  "firstFrameMs": 5202.800000011921,
   "wasm": {
-    "raw": 1926199,
-    "gzip": 658380,
-    "sha256": "4836d22163ba0fde768750851bfaad58928dce353598b2fab688e8c81613812f"
+    "raw": 2122964,
+    "gzip": 721497,
+    "sha256": "9c37dbb62a7ef6455dcb3eee276f5d2c6e5e58cd1f0baf96e26925381a6c567a"
   },
   "capture": "proofs/captures/lookdev/m12-fixtures--compare-crate.png",
-  "captureSha256": "dc02e391ffef500367ad433d9d7c944b54173c08e785967ff0af59f33d171fec",
+  "captureSha256": "cde40bff34781f349c7b33fdf776bd72c5207a7ab60753a11dc029734442186c",
   "judge": null
 }

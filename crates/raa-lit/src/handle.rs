@@ -4,7 +4,7 @@
 //! the S1 instance stream, the shader composer and material functions, and the cache of
 //! render pipelines per shader variant and [`PipelineSpec`].
 
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::num::NonZeroU64;
@@ -210,6 +210,8 @@ impl<T: Clone> PipelineCache<T> {
 #[allow(dead_code, reason = "built and driven by LitRenderer")]
 pub(crate) struct LitShared {
     msaa: u32,
+    pub(crate) skin_source: crate::skin_views::SkinDrawSource,
+    bound_skin: Cell<bool>,
     pub(crate) meshes: MeshStore,
     pub(crate) editor: crate::editor::EditorState,
     /// The draw lists and the instance/extras bytes in draw order.
@@ -305,6 +307,8 @@ impl LitShared {
         });
         Ok(LitShared {
             msaa,
+            skin_source: Default::default(),
+            bound_skin: Cell::new(false),
             meshes: MeshStore::new(),
             editor: crate::editor::EditorState::default(),
             prep: DrawPrep::new(max_instances, max_materials),
@@ -402,6 +406,13 @@ impl LitShared {
             .composer
             .compose(&self.fns, key)
             .map_err(shader_error)?;
+        let rest_entry = crate::skin_draw::entry_points(key.pass, false);
+        let entry =
+            crate::skin_draw::entry_points(key.pass, key.flags & crate::skin_draw::POSED != 0);
+        let wgsl = wgsl
+            .strip_suffix(&rest_entry)
+            .map(|prefix| format!("{prefix}{entry}"))
+            .unwrap_or_else(|| wgsl.replacen(&rest_entry, &entry, 1));
         // Full source equality guards the hash lookup. Registration ids are not shader state.
         let content_key = (wgsl.clone(), spec.clone());
         if let Some(pipeline) = self.content_pipelines.borrow().get(&content_key) {
@@ -434,7 +445,15 @@ impl LitShared {
             bind_group_layouts: &groups,
             immediate_size: 0,
         });
-        let buffers = vertex_buffer_layouts();
+        let mut buffers = vertex_buffer_layouts().to_vec();
+        const TANGENT: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![13 => Float32x3];
+        if key.flags & crate::skin_draw::POSED != 0 {
+            buffers.push(Some(wgpu::VertexBufferLayout {
+                array_stride: 16,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &TANGENT,
+            }));
+        }
         let fragment = (!shadow).then(|| wgpu::FragmentState {
             module: &module,
             entry_point: Some("fs_main"),
@@ -504,11 +523,22 @@ impl LitHandle {
         LitHandle { shared }
     }
 
-    /// The prepared draws of `class` in submission order (transparent: back to front).
+    /// Opaque/fur caster lists; transparent camera draws (back to front).
     /// Instances `first_instance..first_instance + instance_count` index the instance
     /// stream and the extras array (`@builtin(instance_index)`).
     pub fn draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
-        Ref::map(self.shared.borrow(), |s| s.prep.draws(class))
+        Ref::map(self.shared.borrow(), |s| {
+            if class == DrawClass::Transparent {
+                s.prep.camera_draws(class)
+            } else {
+                s.prep.draws(class)
+            }
+        })
+    }
+
+    /// Camera-only lists; the unfiltered opaque/fur lists remain available to shadows.
+    pub fn camera_draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
+        Ref::map(self.shared.borrow(), |s| s.prep.camera_draws(class))
     }
 
     /// Sets the vertex buffers of sub-mesh `mesh` and the instance stream (stream 0 at slot
@@ -522,8 +552,15 @@ impl LitHandle {
         mesh: MeshId,
     ) -> Result<u32, RaaError> {
         let s = self.shared.borrow();
+        let (mesh, tag) = s.prep.mesh_binding(mesh);
         let (g, first, count) = s.meshes.resolve(mesh)?;
-        pass.set_vertex_buffer(STREAM0_SLOT, g.stream0.slice(..));
+        let source = s.skin_source.0.borrow();
+        let posed = tag.and_then(|tag| (!source.0).then(|| source.1.get(&tag)).flatten());
+        s.bound_skin.set(posed.is_some());
+        pass.set_vertex_buffer(STREAM0_SLOT, posed.map_or(&g.stream0, |v| &v.0).slice(..));
+        if let Some((_, tangent, _)) = posed {
+            pass.set_vertex_buffer(3, tangent.slice(..));
+        }
         pass.set_vertex_buffer(INSTANCE_SLOT, s.instance_buffer.slice(..));
         pass.set_vertex_buffer(STREAM1_SLOT, g.stream1.slice(..));
         let start = u64::from(first) * 4;
@@ -540,10 +577,9 @@ impl LitHandle {
     /// `(first_index, index_count)` of sub-mesh `mesh` in its lit mesh's index buffer;
     /// `(0, 0)` when unknown.
     pub fn submesh_range(&self, mesh: MeshId) -> (u32, u32) {
-        self.shared
-            .borrow()
-            .meshes
-            .submesh_range(mesh)
+        let s = self.shared.borrow();
+        s.meshes
+            .submesh_range(s.prep.mesh_binding(mesh).0)
             .unwrap_or((0, 0))
     }
 
@@ -577,7 +613,18 @@ impl LitHandle {
         key: VariantKey,
         spec: &PipelineSpec,
     ) -> Result<wgpu::RenderPipeline, RaaError> {
-        self.shared.borrow().pipeline_for(gpu, key, spec)
+        let s = self.shared.borrow();
+        let mut key = key;
+        if s.bound_skin.get() {
+            key.flags |= crate::skin_draw::POSED;
+        }
+        s.pipeline_for(gpu, key, spec)
+    }
+
+    /// Connect the skin pass's live views before preparing draws. Bind each mesh before
+    /// requesting its pipeline so the auxiliary tangent layout matches that draw.
+    pub fn set_skin_views(&self, views: &crate::SkinViews) {
+        self.shared.borrow_mut().skin_source = views.draw_source();
     }
 
     /// MSAA sample count of the forward pass (1 or 4).

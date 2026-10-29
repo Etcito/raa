@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build the lookdev page: scripts/build-lookdev.sh
 #
-# Runs scripts/build-package.sh, then rebuilds dist/lookdev/ from examples/lookdev/**,
-# the staged package dist/package/raa/ (as raa/) and web/common/* (as common/), and writes
+# Runs scripts/build-bricks.sh, then rebuilds dist/lookdev/ from examples/lookdev/**,
+# the staged package dist/package/raa/ (as raa/), the brick dist/bricks/raa-anim/ (as
+# anim/) and web/common/* (as common/), and writes
 #   dist/lookdev/scenes.json  S14: [{id, milestone, file}] sorted by id, read by importing
 #                             the default export of every examples/lookdev/scenes/*.js
 #                             (a file whose id differs from its file name stem is refused)
@@ -20,14 +21,19 @@ NODE="${NODE:-node}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-bash "$ROOT/scripts/build-package.sh"
+bash "$ROOT/scripts/build-bricks.sh"
 
 SRC="$ROOT/examples/lookdev"
 PKG="$ROOT/dist/package/raa"
+ANIM="$ROOT/dist/bricks/raa-anim"
 OUT="$ROOT/dist/lookdev"
 
 if [ ! -f "$PKG/pkg/raa_js_bg.wasm" ]; then
-  echo "build-lookdev.sh: dist/package/raa/pkg/raa_js_bg.wasm missing after build-package.sh" >&2
+  echo "build-lookdev.sh: dist/package/raa/pkg/raa_js_bg.wasm missing after build-bricks.sh" >&2
+  exit 1
+fi
+if [ ! -f "$ANIM/index.js" ] || [ ! -f "$ANIM/pkg/raa_anim_js_bg.wasm" ] || [ ! -f "$ANIM/pkg/raa_anim_js.js" ]; then
+  echo "build-lookdev.sh: dist/bricks/raa-anim is incomplete after build-bricks.sh" >&2
   exit 1
 fi
 
@@ -39,6 +45,7 @@ if [ -d "$SRC" ]; then
 fi
 rm -rf "$OUT/raa" "$OUT/common"
 cp -R "$PKG" "$OUT/raa"
+cp -R "$ANIM" "$OUT/anim"
 mkdir -p "$OUT/common"
 cp -R web/common/. "$OUT/common/"
 

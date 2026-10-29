@@ -106,6 +106,7 @@ struct Resources {
     group: wgpu::BindGroup,
     mask_group: wgpu::BindGroup,
     wire: wgpu::RenderPipeline,
+    wire_posed: wgpu::RenderPipeline,
     silhouette: wgpu::RenderPipeline,
     silhouette_double: wgpu::RenderPipeline,
     only: wgpu::RenderPipeline,
@@ -125,6 +126,11 @@ const INSTANCE: [wgpu::VertexAttribute; 4] =
     wgpu::vertex_attr_array![2=>Float32x4,3=>Float32x4,4=>Float32x4,5=>Float32x4];
 const SETTINGS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![6=>Float32x4,7=>Float32x4];
 const SEGMENT: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3];
+/// A posed edge record holds two S1 vertices: the second starts at byte 24.
+const POSED_SEGMENT: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 1 },
+];
 const POSITION: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0=>Float32x3];
 fn instance(stride: u64) -> Option<wgpu::VertexBufferLayout<'static>> {
     Some(wgpu::VertexBufferLayout {
@@ -264,18 +270,29 @@ impl Resources {
                 cache: None,
             })
         };
-        let wire = build(
-            "vs_wire",
-            "fs_wire",
-            &[
+        let wire_buffers = |stride, attributes| {
+            [
                 Some(wgpu::VertexBufferLayout {
-                    array_stride: 24,
+                    array_stride: stride,
                     step_mode: wgpu::VertexStepMode::Instance,
-                    attributes: &SEGMENT,
+                    attributes,
                 }),
                 instance(0),
                 settings_layout(0),
-            ],
+            ]
+        };
+        let wire = build(
+            "vs_wire",
+            "fs_wire",
+            &wire_buffers(24, &SEGMENT),
+            ctx.backbuffer_format,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            None,
+        );
+        let wire_posed = build(
+            "vs_wire",
+            "fs_wire",
+            &wire_buffers(crate::SKINNED_EDGE_STRIDE, &POSED_SEGMENT),
             ctx.backbuffer_format,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             None,
@@ -354,6 +371,7 @@ impl Resources {
             group,
             mask_group,
             wire,
+            wire_posed,
             silhouette,
             silhouette_double,
             only,
@@ -470,13 +488,18 @@ impl FeaturePass for EditorPass {
                         &r.silhouette
                     });
                     let (mesh, first, count) = s.meshes.resolve(draw.mesh)?;
-                    pass.set_vertex_buffer(0, mesh.stream0.slice(..));
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
-                        if s.editor
-                            .outlines
-                            .contains_key(&tag(s.prep.instance_bytes(), i))
-                        {
+                        let tag = tag(s.prep.instance_bytes(), i);
+                        if s.editor.outlines.contains_key(&tag) {
+                            // Selected instances write their own posed mesh view.
+                            let geometry = crate::skin_editor::OverlayGeometry::select(
+                                &s.skin_source,
+                                tag,
+                                &mesh.stream0,
+                                mesh.edges.as_ref(),
+                            );
+                            pass.set_vertex_buffer(0, geometry.stream0.slice(..));
                             pass.draw_indexed(first..first + count, 0, i..i + 1);
                         }
                     }
@@ -508,16 +531,23 @@ impl FeaturePass for EditorPass {
                         &r.only
                     });
                     let (mesh, first, count) = s.meshes.resolve(draw.mesh)?;
-                    pass.set_vertex_buffer(0, mesh.stream0.slice(..));
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
-                        if s.editor.mode(tag(s.prep.instance_bytes(), i)) == WireframeMode::Only {
+                        let tag = tag(s.prep.instance_bytes(), i);
+                        if s.editor.mode(tag) == WireframeMode::Only {
+                            // The flat fill must cover the same silhouette as the posed edges.
+                            let geometry = crate::skin_editor::OverlayGeometry::select(
+                                &s.skin_source,
+                                tag,
+                                &mesh.stream0,
+                                mesh.edges.as_ref(),
+                            );
+                            pass.set_vertex_buffer(0, geometry.stream0.slice(..));
                             pass.draw_indexed(first..first + count, 0, i..i + 1);
                         }
                     }
                 }
             }
-            pass.set_pipeline(&r.wire);
             for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
                 for draw in s.prep.draws(class) {
                     let Some(record) = s.meshes.submesh(draw.mesh) else {
@@ -529,14 +559,29 @@ impl FeaturePass for EditorPass {
                         continue;
                     }
                     let (mesh, _, _) = s.meshes.resolve(draw.mesh)?;
-                    let Some(edges) = &mesh.edges else {
-                        continue;
-                    };
-                    pass.set_vertex_buffer(0, edges.slice(..));
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
-                        if s.editor.mode(tag(s.prep.instance_bytes(), i)) == WireframeMode::Off {
+                        let tag = tag(s.prep.instance_bytes(), i);
+                        if s.editor.mode(tag) == WireframeMode::Off {
                             continue;
                         }
+                        // Each instance expands its own rest or posed edge segments.
+                        let geometry = crate::skin_editor::OverlayGeometry::select(
+                            &s.skin_source,
+                            tag,
+                            &mesh.stream0,
+                            mesh.edges.as_ref(),
+                        );
+                        let Some(edges) = &geometry.edges else {
+                            continue;
+                        };
+                        pass.set_pipeline(if geometry.edge_stride
+                            == crate::SKINNED_EDGE_STRIDE
+                        {
+                            &r.wire_posed
+                        } else {
+                            &r.wire
+                        });
+                        pass.set_vertex_buffer(0, edges.slice(..));
                         // Repeat the world/settings record for all segments of this instance.
                         pass.set_vertex_buffer(
                             1,
@@ -548,7 +593,7 @@ impl FeaturePass for EditorPass {
                             r.settings.slice(i as u64 * 32..i as u64 * 32 + 32),
                         );
                         // Instance streams 1/2 have a zero stride in the wire pipeline.
-                        pass.draw(0..6, 0..(mesh.edge_bytes.len() / 24) as u32);
+                        pass.draw(0..6, 0..geometry.edge_count());
                     }
                 }
             }

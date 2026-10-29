@@ -1,0 +1,69 @@
+{
+  "format": "raa.clip",
+  "version": 2,
+  "name": "clip-rotation-flip",
+  "rig": "rig-basic",
+  "lengthTicks": 32,
+  "loop": false,
+  "rootMotion": "none",
+  "tracks": [
+    {
+      "bone": "child",
+      "channel": "rotation",
+      "keys": [
+        {
+          "tick": 0,
+          "v": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "interp": "BEZIER",
+          "hr": [
+            4,
+            0.1,
+            0.2,
+            0.3,
+            0
+          ]
+        },
+        {
+          "tick": 16,
+          "v": [
+            0,
+            0,
+            0,
+            -1
+          ],
+          "interp": "BEZIER",
+          "hl": [
+            -4,
+            -0.05,
+            0.1,
+            -0.2,
+            0
+          ],
+          "hr": [
+            4,
+            -0.1,
+            0,
+            0,
+            0
+          ]
+        },
+        {
+          "tick": 32,
+          "v": [
+            0.2,
+            0,
+            0,
+            0.9
+          ],
+          "interp": "LINEAR"
+        }
+      ]
+    }
+  ],
+  "events": []
+}

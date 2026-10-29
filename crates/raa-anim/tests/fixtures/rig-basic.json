@@ -1,0 +1,102 @@
+{
+  "format": "raa.rig",
+  "version": 1,
+  "name": "rig-basic",
+  "bones": [
+    {
+      "name": "root",
+      "parent": null,
+      "rest": {
+        "t": [
+          1,
+          2,
+          3
+        ],
+        "r": [
+          0,
+          0,
+          0.6,
+          0.8
+        ],
+        "s": [
+          2,
+          1,
+          0.5
+        ]
+      }
+    },
+    {
+      "name": "child",
+      "parent": "root",
+      "rest": {
+        "t": [
+          0,
+          1,
+          0
+        ],
+        "r": [
+          0,
+          0.6,
+          0,
+          0.8
+        ],
+        "s": [
+          1,
+          1.5,
+          1
+        ]
+      }
+    }
+  ],
+  "roles": {
+    "head": "child",
+    "root": "root"
+  },
+  "ikChains": [
+    {
+      "name": "arm",
+      "solver": "ccd",
+      "bones": [
+        "root",
+        "child"
+      ],
+      "pole": [
+        0,
+        0,
+        1
+      ],
+      "iterations": 8
+    }
+  ],
+  "limits": [
+    {
+      "bone": "child",
+      "min": [
+        -40,
+        -70,
+        -30
+      ],
+      "max": [
+        40,
+        70,
+        30
+      ]
+    }
+  ],
+  "attach": {
+    "beak": {
+      "bone": "child",
+      "t": [
+        0,
+        0.1,
+        0
+      ],
+      "r": [
+        0,
+        0,
+        0,
+        1
+      ]
+    }
+  }
+}
