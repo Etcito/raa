@@ -95,9 +95,12 @@ fn raa_pass_material_input(v: RaaVaryings, front_facing: bool) -> MaterialInput 
     return in;
 }
 
-// material_main followed by the instance tint (S10).
+// material_main followed by the instance tint (S10). mat_instance_tint and
+// mat_instance_tint_set are set first so material graph code can read them (S23).
 fn raa_pass_material(in: MaterialInput, instance: u32) -> MaterialOutput {
-    return raa_apply_tint(material_main(in), raa_extras[instance]);
+    let x = raa_extras[instance];
+    raa_set_instance_tint(x);
+    return raa_apply_tint(material_main(in), x);
 }
 
 // Flat model or UNLIT flag: the fragment is base + emissive.

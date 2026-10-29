@@ -39,6 +39,79 @@ pub const PASS_TRANSPARENT_WGSL: &str = include_str!("wgsl/pass_transparent.wgsl
 /// `fs_main` writing colour and strand coverage as alpha (alpha-to-coverage).
 pub const PASS_FURSHELL_WGSL: &str = include_str!("wgsl/pass_furshell.wgsl");
 
+/// Post-material instance tint of a composed module (S23). `InstanceExtraGpu` keeps its
+/// 128-byte layout: `mat_instance_tint_set` reads the spare lane `reserved.x` (1 after
+/// setInstanceTint, 0 after clearInstanceTint and by default), written by the CPU side of
+/// the instance record.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TintMode {
+    /// Today's shader: the tint rgb multiplies the base colour, a multiplies the opacity.
+    #[default]
+    Multiply,
+    /// The material graph reads `mat_instance_tint` itself: only the opacity multiply.
+    Graph,
+}
+
+impl TintMode {
+    /// Refusal code of [`TintMode::from_name`].
+    pub const MODE_UNKNOWN: &'static str = "tint.mode_unknown";
+
+    /// `multiply` or `graph` (the m20 `TintMode` names).
+    pub fn name(self) -> &'static str {
+        match self {
+            TintMode::Multiply => "multiply",
+            TintMode::Graph => "graph",
+        }
+    }
+
+    /// The mode named `name`; refuses `tint.mode_unknown` for any other name.
+    pub fn from_name(name: &str) -> Result<TintMode, ShaderError> {
+        match name {
+            "multiply" => Ok(TintMode::Multiply),
+            "graph" => Ok(TintMode::Graph),
+            _ => Err(ShaderError::new(
+                TintMode::MODE_UNKNOWN,
+                format!("tint mode {name:?} is not \"multiply\" or \"graph\""),
+            )),
+        }
+    }
+}
+
+/// Options of [`Composer::compose_with`]. They sit beside [`VariantKey`] rather than in it,
+/// so the variant keys built across the workspace keep their fields.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ComposeOptions {
+    pub tint_mode: TintMode,
+}
+
+/// The post-material tint call of the prepass, forward, transparent and fur shell passes.
+const PASS_TINT_CALL: &str = "return raa_apply_tint(material_main(in), x);";
+/// Its tint mode `graph` replacement.
+const PASS_TINT_CALL_GRAPH: &str = "return raa_apply_tint_opacity(material_main(in), x);";
+
+impl Composer {
+    /// [`Composer::compose`] with `opts`. [`TintMode::Multiply`] returns exactly the
+    /// module of `compose`; [`TintMode::Graph`] replaces the pass's post-material
+    /// `raa_apply_tint` by `raa_apply_tint_opacity` (the shadow pass has none and is
+    /// unchanged).
+    pub fn compose_with(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+        opts: &ComposeOptions,
+    ) -> Result<String, ShaderError> {
+        let mut wgsl = self.compose(reg, key)?;
+        if opts.tint_mode == TintMode::Graph {
+            // The pass is the last section; recursion is not WGSL, so the material
+            // function cannot hold this call.
+            if let Some(at) = wgsl.rfind(PASS_TINT_CALL) {
+                wgsl.replace_range(at..at + PASS_TINT_CALL.len(), PASS_TINT_CALL_GRAPH);
+            }
+        }
+        Ok(wgsl)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +165,132 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
         if let Err(e) = Composer::validate(&module()) {
             panic!("{}: {}", e.code, e.message);
         }
+    }
+
+    fn stub_composer() -> Composer {
+        let mut composer = Composer::new();
+        for slot in SlotId::ALL {
+            let wgsl = match slot {
+                SlotId::Deform => "fn raa_slot_deform(p: vec3<f32>, n: vec3<f32>, x: InstanceExtraGpu, t: f32) -> VertexMaterialOutput {
+    return VertexMaterialOutput(p, n);
+}
+",
+                SlotId::Shadow => "fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
+    return 1.0;
+}
+",
+                SlotId::Ao => "fn raa_slot_ao(frag: vec4<f32>) -> f32 {
+    return 1.0;
+}
+",
+                SlotId::Ambient => "fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return s.base_color;
+}
+",
+                SlotId::Direct => "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+    return s.base_color * radiance;
+}
+",
+                SlotId::Transmission => "fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+",
+                SlotId::Fog => "fn raa_slot_fog(color: vec3<f32>, world_pos: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
+    return color;
+}
+",
+            };
+            let p = SlotProvider {
+                slot,
+                priority: 0,
+                provider: "stub",
+                wgsl: std::borrow::Cow::Borrowed(wgsl),
+            };
+            composer.add_slot(p).expect("add");
+        }
+        composer
+    }
+
+    /// The S23 `input.player_color` emit inside a user material function.
+    const PLAYER_COLOR_FN: &str = "fn material_main(in: MaterialInput) -> MaterialOutput {
+    var o = raa_default_output(in);
+    let c = select(vec3<f32>(0.5), mat_instance_tint.rgb, mat_instance_tint_set > 0.5);
+    o.base_color = c;
+    return o;
+}
+";
+
+    fn key(material_fn: MaterialFnId, pass: PassKind) -> VariantKey {
+        VariantKey {
+            material_fn,
+            pass,
+            msaa: 4,
+            flags: 0,
+        }
+    }
+
+    #[test]
+    fn both_tint_modes_compose_valid_wgsl_for_every_pass() {
+        let composer = stub_composer();
+        let mut reg = MaterialFnRegistry::new();
+        let player = reg
+            .register_user("player_color", PLAYER_COLOR_FN, &composer)
+            .expect("register");
+        for material_fn in [MaterialFnId::STANDARD, player] {
+            for pass in PassKind::ALL {
+                for tint_mode in [TintMode::Multiply, TintMode::Graph] {
+                    let k = key(material_fn, pass);
+                    let wgsl = composer
+                        .compose_with(&reg, &k, &ComposeOptions { tint_mode })
+                        .expect("compose");
+                    if let Err(e) = Composer::validate(&wgsl) {
+                        panic!("{material_fn:?} {pass:?} {tint_mode:?}: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multiply_is_todays_module_and_graph_drops_only_the_colour_multiply() {
+        let composer = stub_composer();
+        let reg = MaterialFnRegistry::new();
+        assert_eq!(ComposeOptions::default().tint_mode, TintMode::Multiply);
+        for pass in PassKind::ALL {
+            let k = key(MaterialFnId::STANDARD, pass);
+            let today = composer.compose(&reg, &k).expect("compose");
+            let multiply = composer
+                .compose_with(&reg, &k, &ComposeOptions::default())
+                .expect("multiply");
+            let graph = composer
+                .compose_with(
+                    &reg,
+                    &k,
+                    &ComposeOptions {
+                        tint_mode: TintMode::Graph,
+                    },
+                )
+                .expect("graph");
+            assert_eq!(multiply, today, "{pass:?}");
+            if pass == PassKind::Shadow {
+                assert_eq!(graph, today);
+                continue;
+            }
+            assert_eq!(multiply.matches(PASS_TINT_CALL).count(), 1, "{pass:?}");
+            assert!(multiply.contains("raa_set_instance_tint(x);"), "{pass:?}");
+            assert!(!graph.contains(PASS_TINT_CALL), "{pass:?}");
+            assert_eq!(graph.matches(PASS_TINT_CALL_GRAPH).count(), 1, "{pass:?}");
+            assert_eq!(graph.replace(PASS_TINT_CALL_GRAPH, PASS_TINT_CALL), today);
+        }
+    }
+
+    #[test]
+    fn tint_mode_names() {
+        for mode in [TintMode::Multiply, TintMode::Graph] {
+            assert_eq!(TintMode::from_name(mode.name()), Ok(mode));
+        }
+        let e = TintMode::from_name("add").unwrap_err();
+        assert_eq!(e.code(), "tint.mode_unknown");
     }
 
     #[test]

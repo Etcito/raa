@@ -201,10 +201,30 @@ fn raa_default_output(in: MaterialInput) -> MaterialOutput {
     return o;
 }
 
+// Instance tint of the shaded instance, readable by material graph code (S23). Each pass
+// sets both from InstanceExtraGpu with raa_set_instance_tint before material_main.
+// `mat_instance_tint_set` is 1 after setInstanceTint and 0 after clearInstanceTint; it is
+// the spare lane InstanceExtraGpu.reserved.x (the record layout is unchanged).
+var<private> mat_instance_tint: vec4<f32>;
+var<private> mat_instance_tint_set: f32;
+
+fn raa_set_instance_tint(x: InstanceExtraGpu) {
+    mat_instance_tint = x.tint;
+    mat_instance_tint_set = select(0.0, 1.0, x.reserved.x > 0.5);
+}
+
 // Instance tint (S10): rgb multiplies the base colour, a multiplies the opacity.
 fn raa_apply_tint(s: MaterialOutput, x: InstanceExtraGpu) -> MaterialOutput {
     var o = s;
     o.base_color = o.base_color * x.tint.rgb;
+    o.opacity = o.opacity * x.tint.a;
+    return o;
+}
+
+// Tint mode `graph` (S23): the material graph used mat_instance_tint itself, so only the
+// opacity multiply remains.
+fn raa_apply_tint_opacity(s: MaterialOutput, x: InstanceExtraGpu) -> MaterialOutput {
+    var o = s;
     o.opacity = o.opacity * x.tint.a;
     return o;
 }
