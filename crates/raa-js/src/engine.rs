@@ -286,6 +286,21 @@ impl Engine {
         self.runtime.as_mut().ok_or_else(disposed)
     }
 
+    /// Resizes the canvas backing store (zero sizes clamp to 1); the camera aspect follows.
+    /// The JS `resize(cssWidth, cssHeight, dpr?)` lives in api/m21_views.rs.
+    pub(crate) fn resize_backing(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
+        let size = (width.max(1), height.max(1));
+        // Reconfiguring an unchanged canvas clears its drawable in the browser.
+        // Editor layout observers may report the same size on successive frames.
+        if self.viewport != size {
+            self.runtime()?.resize(size.0, size.1);
+            self.viewport = size;
+        } else {
+            self.runtime()?;
+        }
+        Ok(())
+    }
+
     /// Runs `f` on the state, with the GPU context. The borrow ends before returning.
     /// Used by the engine methods and the api files.
     pub(crate) fn with_state<R>(
@@ -408,20 +423,6 @@ impl Engine {
     /// Renders one frame at `nowMs`.
     pub fn render(&mut self, now_ms: f64) -> Result<(), JsValue> {
         self.runtime()?.frame(now_ms).map_err(|e| js_err(&e))
-    }
-
-    /// Resizes the canvas backing store (zero sizes clamp to 1); the camera aspect follows.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
-        let size = (width.max(1), height.max(1));
-        // Reconfiguring an unchanged canvas clears its drawable in the browser.
-        // Editor layout observers may report the same size on successive frames.
-        if self.viewport != size {
-            self.runtime()?.resize(size.0, size.1);
-            self.viewport = size;
-        } else {
-            self.runtime()?;
-        }
-        Ok(())
     }
 
     /// Frame statistics, the adapter and the hardware flag.

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "cards": [
+    {
+      "id": "raa-tests",
+      "title": "RAA tests: raa-js cargo tests and the raa-sdfm node tests",
+      "command": "cargo test -p raa-js --quiet && node --test packages/raa-sdfm/test/",
+      "timeout_s": 2400
+    }
+  ]
+}
