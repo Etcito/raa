@@ -10,9 +10,9 @@ is intersected for clips.
 
 Access: the generated module `pkg/raa_anim_js.js` exports `loadRig`, `loadClip`,
 `loadGraph`, `AnimationGraph` and `AnimationGraphState`. The `loadRaaAnim()` facade
-currently returns only `brickInfo` and `selftest`, and the package `exports` map
-exposes only `.` and the wasm file. The graph calls are therefore not yet reachable
-from a published package import.
+returns `loadGraph` next to `loadRig`, `loadClip` and `sampleClip`, so the graph calls
+are reachable from a published `@etcito/raa-anim` import; the types `AnimationGraph`,
+`AnimationGraphState` and `GraphStep` are re-exported from the package entry.
 
 ## Loading
 
