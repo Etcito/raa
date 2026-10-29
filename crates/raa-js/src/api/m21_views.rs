@@ -16,7 +16,8 @@
 //! malformed JS arguments, a bad camera, dpr or widthPx throw `api.invalid_argument`.
 //! The pure part below compiles on the host (tests/views.rs includes this file).
 
-// The readers (viewports, camera, overlays) are m07_pipeline's, which lands in the next task.
+// The readers (viewports, camera, overlays) are m07_pipeline's (wasm32 only); the host
+// build (tests/views.rs) sees them unused.
 #![allow(dead_code)]
 
 use raa_core::RaaError;
@@ -84,7 +85,102 @@ impl OverlayLayer {
     pub fn is_empty(&self) -> bool {
         self.positions.is_empty()
     }
+
+    /// Number of segments (2 vertices each).
+    pub fn segments(&self) -> usize {
+        self.positions.len() / 6
+    }
+
+    /// Appends the GPU instance stream of the layer to `out`, [`OVERLAY_SEGMENT_FLOATS`]
+    /// floats per segment: `a.xyz, widthPx | color a | b.xyz, 0 | color b`.
+    pub fn write_instances(&self, out: &mut Vec<f32>) {
+        out.reserve(self.segments() * OVERLAY_SEGMENT_FLOATS);
+        for (p, c) in self
+            .positions
+            .chunks_exact(6)
+            .zip(self.colors.chunks_exact(8))
+        {
+            out.extend_from_slice(&[p[0], p[1], p[2], self.width_px]);
+            out.extend_from_slice(&c[0..4]);
+            out.extend_from_slice(&[p[3], p[4], p[5], 0.0]);
+            out.extend_from_slice(&c[4..8]);
+        }
+    }
 }
+
+/// Floats per segment in the overlay instance stream (64 bytes).
+pub const OVERLAY_SEGMENT_FLOATS: usize = 16;
+
+/// The overlay line shader. Group 0 is the lit renderer's 512-byte frame uniform (S10:
+/// view_proj @0, viewport @384, flags @416 whose x is "encode sRGB"), so each viewport
+/// draws with the camera its view uploaded. One instance per segment (see
+/// [`OverlayLayer::write_instances`]), 6 vertices: a screen-space quad `widthPx` wide,
+/// clipped to the near plane. Colours are linear and encoded when the surface is not sRGB.
+pub const OVERLAY_WGSL: &str = r#"
+struct Frame { vp: mat4x4<f32>, rest: array<vec4<f32>, 28> }
+@group(0) @binding(0) var<uniform> frame: Frame;
+
+struct In {
+    @location(0) a: vec4<f32>, @location(1) ca: vec4<f32>,
+    @location(2) b: vec4<f32>, @location(3) cb: vec4<f32>,
+}
+struct Out {
+    @builtin(position) p: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex fn vs_line(v: In, @builtin(vertex_index) k: u32) -> Out {
+    var a = frame.vp * vec4<f32>(v.a.xyz, 1.0);
+    var b = frame.vp * vec4<f32>(v.b.xyz, 1.0);
+    var ca = v.ca;
+    var cb = v.cb;
+    // Clip the segment to the near plane (z >= 0) before the perspective divide.
+    if a.z < 0.0 && b.z >= 0.0 {
+        let t = -a.z / (b.z - a.z);
+        a = mix(a, b, t);
+        ca = mix(ca, cb, t);
+    }
+    if b.z < 0.0 && a.z >= 0.0 {
+        let t = -b.z / (a.z - b.z);
+        b = mix(b, a, t);
+        cb = mix(cb, ca, t);
+    }
+    var o: Out;
+    if a.z < 0.0 || b.z < 0.0 || a.w <= 0.0 || b.w <= 0.0 {
+        o.p = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        o.color = vec4<f32>(0.0);
+        return o;
+    }
+    let size = max(frame.rest[20].xy, vec2<f32>(1.0));
+    let delta = (b.xy / b.w - a.xy / a.w) * size;
+    let len = length(delta);
+    let dir = select(vec2<f32>(1.0, 0.0), delta / len, len > 1e-5);
+    let n = vec2<f32>(-dir.y, dir.x);
+    let corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0));
+    let c = corners[k];
+    let p = mix(a, b, c.x);
+    // NDC spans 2 units over `size` pixels: half the width each side is width / size.
+    let offset = n * c.y * v.a.w / size;
+    o.p = vec4<f32>(p.xy + offset * p.w, p.zw);
+    o.color = mix(ca, cb, c.x);
+    return o;
+}
+
+fn encode(c: vec3<f32>) -> vec3<f32> {
+    let x = max(c, vec3<f32>(0.0));
+    return select(x * 12.92, 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055, x > vec3<f32>(0.0031308));
+}
+
+@fragment fn fs_line(v: Out) -> @location(0) vec4<f32> {
+    // flags.x != 0: the surface is not sRGB and the shader encodes.
+    if bitcast<vec4<u32>>(frame.rest[22]).x != 0u {
+        return vec4<f32>(encode(v.color.rgb), v.color.a);
+    }
+    return v.color;
+}
+"#;
 
 /// `views.count` (0 or more than 4 rects), then `views.rect` (a value non-finite or outside
 /// 0..1, a zero size, `x + width` or `y + height` above 1, or two rects overlapping).
@@ -314,12 +410,15 @@ impl ViewsState {
         Ok(())
     }
 
-    /// Empties `layer` (`overlay.layer`).
+    /// Empties `layer` and frees its memory (`overlay.layer`).
     pub fn clear_overlay(&mut self, layer: f64) -> Result<(), RaaError> {
-        let o = &mut self.overlays[overlay_layer(layer)?];
-        o.positions.clear();
-        o.colors.clear();
+        self.overlays[overlay_layer(layer)?] = OverlayLayer::default();
         Ok(())
+    }
+
+    /// True when at least one layer has segments.
+    pub fn has_overlay(&self) -> bool {
+        self.overlays.iter().any(|o| !o.is_empty())
     }
 
     /// The 8 overlay layers in draw order.
@@ -329,7 +428,7 @@ impl ViewsState {
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{frame, install};
+pub(crate) use web::{OverlayBuffers, frame, install};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
@@ -341,7 +440,65 @@ mod web {
     use raa_core::GpuContext;
     use raa_math::Vec3;
     use raa_web::{FrameInput, error_to_js};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use wasm_bindgen::prelude::*;
+
+    /// The GPU instance buffer of one overlay layer; `None` while the layer is empty.
+    #[derive(Default)]
+    pub(crate) struct OverlayGpuLayer {
+        pub buffer: Option<wgpu::Buffer>,
+        pub segments: u32,
+        pub depth_test: bool,
+    }
+
+    /// The 8 overlay layers on the GPU, shared by the `setOverlayLines`/`clearOverlay`
+    /// wrappers (which upload or free a layer) and m07_pipeline's `overlay` pass (which
+    /// draws them). m07_pipeline's install creates it, before this file's install.
+    #[derive(Clone, Default)]
+    pub(crate) struct OverlayBuffers(pub Rc<RefCell<[OverlayGpuLayer; OVERLAY_LAYERS]>>);
+
+    impl OverlayBuffers {
+        /// Uploads `layer` into slot `index`, reusing the buffer when it is large enough;
+        /// an empty layer frees the slot.
+        fn upload(&self, gpu: &GpuContext, index: usize, layer: &OverlayLayer) {
+            let mut slots = self.0.borrow_mut();
+            let slot = &mut slots[index];
+            if layer.is_empty() {
+                free(slot);
+                return;
+            }
+            let mut data = Vec::new();
+            layer.write_instances(&mut data);
+            let bytes: Vec<u8> = data.iter().flat_map(|f| f.to_le_bytes()).collect();
+            let size = bytes.len() as u64;
+            if slot.buffer.as_ref().is_none_or(|b| b.size() < size) {
+                free(slot);
+                slot.buffer = Some(gpu.device().create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("raa.overlay.segments"),
+                    size,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            if let Some(buffer) = &slot.buffer {
+                gpu.queue().write_buffer(buffer, 0, &bytes);
+            }
+            slot.segments = layer.segments() as u32;
+            slot.depth_test = layer.depth_test;
+        }
+
+        fn clear(&self, index: usize) {
+            free(&mut self.0.borrow_mut()[index]);
+        }
+    }
+
+    fn free(slot: &mut OverlayGpuLayer) {
+        if let Some(buffer) = slot.buffer.take() {
+            buffer.destroy();
+        }
+        slot.segments = 0;
+    }
 
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         ctx.features.insert(ViewsState::default());
@@ -462,18 +619,81 @@ mod web {
             colors: &[f32],
             opts: JsValue,
         ) -> Result<(), JsValue> {
-            self.with_state(|_, st| {
-                validate_overlay(layer, positions.len(), colors.len())?;
+            self.with_state(|gpu, st| {
+                let index = validate_overlay(layer, positions.len(), colors.len())?;
                 let depth_test = js::bool(&opts, "depthTest")?;
                 let width_px = js::required_f64(&opts, "widthPx")? as f32;
-                views(st)?.set_overlay_lines(layer, positions, colors, depth_test, width_px)
+                let buffers = st.features.get::<OverlayBuffers>().cloned();
+                let v = views(st)?;
+                v.set_overlay_lines(layer, positions, colors, depth_test, width_px)?;
+                if let Some(buffers) = buffers {
+                    buffers.upload(gpu, index, &v.overlays()[index]);
+                }
+                Ok(())
             })
         }
 
-        /// Empties overlay `layer` 0..7 (`overlay.layer`).
+        /// Empties overlay `layer` 0..7 and frees its GPU buffer (`overlay.layer`).
         #[wasm_bindgen(js_name = clearOverlay)]
         pub fn clear_overlay(&mut self, layer: f64) -> Result<(), JsValue> {
-            self.with_state(|_, st| views(st)?.clear_overlay(layer))
+            self.with_state(|_, st| {
+                views(st)?.clear_overlay(layer)?;
+                if let Some(buffers) = st.features.get::<OverlayBuffers>() {
+                    buffers.clear(overlay_layer(layer)?);
+                }
+                Ok(())
+            })
         }
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+    use wgpu::naga;
+
+    #[test]
+    fn overlay_wgsl_validates_with_naga() {
+        let module = naga::front::wgsl::parse_str(OVERLAY_WGSL).expect("overlay WGSL parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("overlay WGSL validates");
+        for entry in ["vs_line", "fs_line"] {
+            assert!(
+                module.entry_points.iter().any(|e| e.name == entry),
+                "entry point {entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn instances_pack_one_record_per_segment() {
+        let mut s = ViewsState::default();
+        assert!(!s.has_overlay());
+        let pos = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0];
+        let col: Vec<f32> = (0..16).map(|i| i as f32 / 16.0).collect();
+        s.set_overlay_lines(1.0, &pos, &col, false, 3.0)
+            .expect("two segments");
+        assert!(s.has_overlay());
+        let layer = &s.overlays()[1];
+        assert_eq!(layer.segments(), 2);
+        let mut out = Vec::new();
+        layer.write_instances(&mut out);
+        assert_eq!(out.len(), 2 * OVERLAY_SEGMENT_FLOATS);
+        assert_eq!(&out[0..4], &[0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(&out[4..8], &col[0..4]);
+        assert_eq!(&out[8..12], &[3.0, 4.0, 5.0, 0.0]);
+        assert_eq!(&out[12..16], &col[4..8]);
+        assert_eq!(&out[16..20], &[6.0, 7.0, 8.0, 3.0]);
+        s.clear_overlay(1.0).expect("clear");
+        assert!(!s.has_overlay());
+        assert_eq!(
+            s.overlays()[1].positions.capacity(),
+            0,
+            "clear frees the layer"
+        );
     }
 }

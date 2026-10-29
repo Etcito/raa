@@ -6,25 +6,189 @@
 //! get pixel-sized target sets and independent post passes. Camera uploads happen
 //! between ordered view submissions; output composition preserves earlier views.
 //!
+//! S25: the `overlay` pass (order 220, a display overlay after `tonemap` and `editor`)
+//! draws the m21 overlay layers 0..7 in order, per viewport with that viewport's camera
+//! (the lit frame uniform its view uploaded), into that view's final colour target only:
+//! the HDR chain, lighting and history buffers never see them. The scene depth is bound
+//! read-only for layers with `depthTest`. No overlay data means no render pass.
+//!
 //! Pipeline refusals (`pipeline.*`) and tone mapping refusals (`post.invalid`) are thrown
 //! with their own code; malformed JS arguments throw `api.invalid_argument`.
 
 use js_sys::{Array, Object, Reflect};
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{PassInfo, PassRole, Pipeline};
+use raa_lit::LitHandle;
+use raa_pipeline::{FeaturePass, PassInfo, PassRole, Pipeline, RecordCtx};
 use raa_tonemap::{Look, ToneMapping, TonemapControl};
 use raa_web::FrameInput;
 use wasm_bindgen::prelude::*;
 
+use super::m21_views::{OVERLAY_SEGMENT_FLOATS, OVERLAY_WGSL, OverlayBuffers};
 use crate::convert::{INVALID_ARGUMENT, api_error, js, tone_mapper};
 use crate::engine::{Engine, InstallCtx};
 use crate::state::EngineState;
 
 /// `InstallCtx` does not carry the tonemap control (engine.rs keeps it in
-/// `EngineState::tonemap`), so it is stored in the feature map by [`frame`].
+/// `EngineState::tonemap`), so it is stored in the feature map by [`frame`]. Adds the
+/// `overlay` pass and stores the overlay buffers it shares with m21_views.
 pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
-    let _ = ctx;
-    Ok(())
+    let buffers = OverlayBuffers::default();
+    ctx.features.insert(buffers.clone());
+    let pass = OverlayPass {
+        lit: ctx.lit.handle(),
+        buffers,
+        pipelines: None,
+    };
+    ctx.pipeline
+        .try_borrow_mut()
+        .map_err(|_| api_error("pipeline.busy", "the pipeline is borrowed during install"))?
+        .add(Box::new(pass))
+}
+
+/// Order of the `overlay` pass: after `tonemap` (200) and `editor` (210).
+const OVERLAY_ORDER: u32 = 220;
+const OVERLAY_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+const OVERLAY_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+    wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
+
+/// Draws the overlay layers after tone mapping (see the module doc).
+struct OverlayPass {
+    lit: LitHandle,
+    buffers: OverlayBuffers,
+    /// Built for the output format: [always on top, depth tested].
+    pipelines: Option<(wgpu::TextureFormat, [wgpu::RenderPipeline; 2])>,
+}
+
+impl OverlayPass {
+    fn build(&self, gpu: &GpuContext, format: wgpu::TextureFormat) -> [wgpu::RenderPipeline; 2] {
+        let d = gpu.device();
+        let frame_layout = self.lit.frame_layout();
+        let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raa.overlay"),
+            bind_group_layouts: &[Some(&frame_layout)],
+            immediate_size: 0,
+        });
+        let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa.overlay"),
+            source: wgpu::ShaderSource::Wgsl(OVERLAY_WGSL.into()),
+        });
+        let buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: (OVERLAY_SEGMENT_FLOATS * 4) as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &OVERLAY_ATTRIBUTES,
+        })];
+        [false, true].map(|tested| {
+            d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(if tested {
+                    "raa.overlay.tested"
+                } else {
+                    "raa.overlay.top"
+                }),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_line"),
+                    compilation_options: Default::default(),
+                    buffers: &buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                // The scene depth is never written; untested layers pass always (on top).
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: OVERLAY_DEPTH_FORMAT,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(if tested {
+                        wgpu::CompareFunction::LessEqual
+                    } else {
+                        wgpu::CompareFunction::Always
+                    }),
+                    stencil: wgpu::StencilState::default(),
+                    // Pulls tested lines lying on a surface in front of it.
+                    bias: wgpu::DepthBiasState {
+                        constant: if tested { -16 } else { 0 },
+                        slope_scale: if tested { -1.0 } else { 0.0 },
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_line"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        })
+    }
+}
+
+impl FeaturePass for OverlayPass {
+    fn name(&self) -> &str {
+        "overlay"
+    }
+
+    fn order(&self) -> u32 {
+        OVERLAY_ORDER
+    }
+
+    fn output_overlay(&self) -> bool {
+        true
+    }
+
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let layers = self.buffers.0.borrow();
+        if layers.iter().all(|l| l.segments == 0 || l.buffer.is_none()) {
+            return Ok(());
+        }
+        let format = ctx.backbuffer_format;
+        if self.pipelines.as_ref().is_none_or(|(f, _)| *f != format) {
+            self.pipelines = Some((format, self.build(ctx.gpu, format)));
+        }
+        let Some((_, pipelines)) = &self.pipelines else {
+            return Ok(());
+        };
+        let frame = self.lit.frame_bind_group();
+        // `backbuffer` is the canvas (single view) or this view's output target (split
+        // views, composited at its rect afterwards).
+        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("raa.overlay"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ctx.backbuffer,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.targets.depth(),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_bind_group(0, &frame, &[]);
+        for layer in layers.iter() {
+            let Some(buffer) = layer.buffer.as_ref().filter(|_| layer.segments > 0) else {
+                continue;
+            };
+            pass.set_pipeline(&pipelines[usize::from(layer.depth_test)]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..layer.segments);
+        }
+        Ok(())
+    }
 }
 
 /// Stores the tonemap control once and reconciles viewport targets/post-pass banks.
