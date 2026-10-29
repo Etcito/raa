@@ -182,7 +182,7 @@ impl FurContributor {
                 material_fn: d.material_fn,
                 pass: PassKind::FurShell,
                 msaa,
-                flags: record.flags & VARIANT_FLAGS,
+                flags: record.flags & VARIANT_FLAGS | lit.material_variant_flags(d.material),
             };
             let pipeline = lit.pipeline_for(gpu, key, &self.spec)?;
             self.plan.push(ShellDraw {

@@ -14,6 +14,9 @@ pub struct InstanceExtra {
     pub jiggle: [f32; 4],
     /// `MaterialInput.instance_params`.
     pub params: [[f32; 4]; 4],
+    /// 1 after setInstanceTint, 0 after clearInstanceTint and by default: `reserved.x`,
+    /// read by the shader as `mat_instance_tint_set` (S23).
+    pub tint_set: u32,
 }
 
 impl Default for InstanceExtra {
@@ -23,17 +26,20 @@ impl Default for InstanceExtra {
             squash: [0.0, 1.0, 0.0, 0.0],
             jiggle: [0.0; 4],
             params: [[0.0; 4]; 4],
+            tint_set: 0,
         }
     }
 }
 
 impl InstanceExtra {
-    /// Appends the 128-byte `InstanceExtraGpu` record to `out`.
+    /// Appends the 128-byte `InstanceExtraGpu` record to `out`; `reserved` is
+    /// (`tint_set` as f32, 0, 0, 0).
     pub fn write_gpu(&self, out: &mut Vec<u8>) {
+        let reserved = [self.tint_set as f32, 0.0, 0.0, 0.0];
         let vecs = [self.tint, self.squash, self.jiggle]
             .into_iter()
             .chain(self.params)
-            .chain([[0.0; 4]]);
+            .chain([reserved]);
         for v in vecs {
             for x in v {
                 out.extend_from_slice(&x.to_le_bytes());

@@ -351,7 +351,8 @@ fn fragment_targets_follow_the_pass() {
 fn group_two_bindings_are_private_to_their_pass() {
     let reg = MaterialFnRegistry::new();
     for (pass, module) in compose_all(&reg, MaterialFnId::STANDARD) {
-        assert_eq!(group_bindings(&module, 0), [0, 1, 2], "{pass:?}");
+        // Frame, materials, extras, then the material texture atlas, sampler and rects.
+        assert_eq!(group_bindings(&module, 0), [0, 1, 2, 3, 4, 5], "{pass:?}");
         assert_eq!(
             group_bindings(&module, 1),
             (0..12).collect::<Vec<u32>>(),

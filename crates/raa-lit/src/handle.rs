@@ -1,6 +1,7 @@
 //! The state the lit renderer shares with its passes and contributors through
 //! [`LitHandle`]: the mesh store, the draw lists, the group-0 buffers (S10 `FrameGpu`,
-//! `SurfaceMaterialGpu` array, `InstanceExtraGpu` array) with their layout and bind group,
+//! `SurfaceMaterialGpu` array, `InstanceExtraGpu` array, the material texture atlas, its
+//! sampler and rects) with their layout and bind group,
 //! the S1 instance stream, the shader composer and material functions, and the cache of
 //! render pipelines per shader variant and [`PipelineSpec`].
 
@@ -12,7 +13,8 @@ use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
 use raa_shader::{
-    Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError, SlotProvider, VariantKey,
+    ComposeOptions, Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError,
+    SlotProvider, TintMode, VariantKey,
 };
 
 use crate::extras::INSTANCE_EXTRA_GPU_SIZE;
@@ -22,6 +24,7 @@ use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::meshes::{INSTANCE_SLOT, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
 use crate::prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw};
 use crate::slots::default_slot_providers;
+use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas};
 
 /// Stride of S10 vertex stream 0 (S1 Vertex: position, normal).
 const STREAM0_STRIDE: u64 = 24;
@@ -84,12 +87,29 @@ fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
 
 /// S10 group 0: binding 0 `FrameGpu` uniform (512 B), binding 1 `array<SurfaceMaterialGpu>`
 /// and binding 2 `array<InstanceExtraGpu>`, both read-only storage.
-fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 6] {
     let read_only = wgpu::BufferBindingType::Storage { read_only: true };
     [
         buffer_entry(0, wgpu::BufferBindingType::Uniform, FRAME_GPU_SIZE),
         buffer_entry(1, read_only, SURFACE_MATERIAL_GPU_SIZE),
         buffer_entry(2, read_only, INSTANCE_EXTRA_GPU_SIZE),
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: FRAME_VISIBILITY,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: FRAME_VISIBILITY,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        buffer_entry(5, read_only, TEXTURE_RECT_SIZE),
     ]
 }
 
@@ -218,6 +238,8 @@ pub(crate) struct LitShared {
     pub(crate) prep: DrawPrep,
     pub(crate) materials: SurfaceLibrary,
     pub(crate) fns: MaterialFnRegistry,
+    /// S23 tint mode per material; a material absent from the map is `multiply`.
+    tint_modes: RefCell<HashMap<MaterialId, TintMode>>,
     composer: Composer,
     /// `composer.slots_hash()`, updated by [`LitShared::add_slot`].
     slots_hash: u64,
@@ -231,6 +253,8 @@ pub(crate) struct LitShared {
     extras_buffer: wgpu::Buffer,
     /// Scratch of `SurfaceLibrary::write_gpu_all`, preallocated for `max_materials`.
     material_bytes: Vec<u8>,
+    /// Material textures, group-0 bindings 3 (atlas), 4 (sampler) and 5 (rects).
+    textures: TextureAtlas,
     frame_layout: wgpu::BindGroupLayout,
     frame_bind_group: wgpu::BindGroup,
     /// The group-1 layout of `raa_pipeline::LightingResources`.
@@ -296,15 +320,13 @@ impl LitShared {
                     label: Some("raa.lit.frame_layout"),
                     entries: &frame_layout_entries(),
                 });
-        let frame_bind_group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa.lit.frame_bind_group"),
-            layout: &frame_layout,
-            entries: &[
-                whole(0, &frame_buffer),
-                whole(1, &material_buffer),
-                whole(2, &extras_buffer),
-            ],
-        });
+        let textures = TextureAtlas::new(gpu);
+        let frame_bind_group = create_frame_bind_group(
+            gpu,
+            &frame_layout,
+            [&frame_buffer, &material_buffer, &extras_buffer],
+            &textures,
+        );
         Ok(LitShared {
             msaa,
             skin_source: Default::default(),
@@ -314,6 +336,7 @@ impl LitShared {
             prep: DrawPrep::new(max_instances, max_materials),
             materials: SurfaceLibrary::new(),
             fns: MaterialFnRegistry::new(),
+            tint_modes: RefCell::new(HashMap::new()),
             slots_hash: composer.slots_hash(),
             composer,
             instance_buffer,
@@ -321,6 +344,7 @@ impl LitShared {
             material_buffer,
             extras_buffer,
             material_bytes: Vec::with_capacity(materials as usize * SURFACE_MATERIAL_GPU_SIZE),
+            textures,
             frame_layout,
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
@@ -363,6 +387,39 @@ impl LitShared {
             .map_err(shader_error)
     }
 
+    /// Adds a material texture to the atlas and returns its `raa_texture` id; group 0 is
+    /// bound again when the atlas texture is created (first add). Refusals (nothing
+    /// changes): `texture.invalid`, `texture.atlas_full`.
+    pub(crate) fn add_texture(
+        &mut self,
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        data: TexelData<'_>,
+    ) -> Result<u32, RaaError> {
+        let (id, created) = self.textures.add(gpu, width, height, data)?;
+        if created {
+            self.frame_bind_group = create_frame_bind_group(
+                gpu,
+                &self.frame_layout,
+                [&self.frame_buffer, &self.material_buffer, &self.extras_buffer],
+                &self.textures,
+            );
+        }
+        Ok(id)
+    }
+
+    /// Removes texture `id`; an unknown or removed id does nothing. Returns whether it was
+    /// live.
+    pub(crate) fn remove_texture(&mut self, gpu: &GpuContext, id: u32) -> bool {
+        self.textures.remove(gpu, id)
+    }
+
+    /// The atlas packing (rects of the live textures).
+    pub(crate) fn texture_packer(&self) -> &crate::textures::ShelfPacker {
+        self.textures.packer()
+    }
+
     /// Writes the frame's `FrameGpu`, the prepared instance and extras bytes and, when the
     /// library changed, every material record. Bytes beyond a buffer are not written (the
     /// prep refuses such frames before).
@@ -392,7 +449,8 @@ impl LitShared {
             })
     }
 
-    /// Composes the WGSL of `key`, validates it with naga (so a broken variant is a typed
+    /// Composes the WGSL of `key` (tint mode `graph` when the key holds
+    /// [`raa_shader::VARIANT_FLAG_TINT_GRAPH`]), validates it with naga (so a broken variant is a typed
     /// refusal, not a device error) and creates its render pipeline with the layouts
     /// [group 0, group 1 (lighting), `spec.extra_layout`]. Shadow variants leave group 1
     /// empty: that pass renders the shadow map group 1 samples and reads groups 0 and 2 only.
@@ -402,10 +460,14 @@ impl LitShared {
         key: &VariantKey,
         spec: &PipelineSpec,
     ) -> Result<wgpu::RenderPipeline, RaaError> {
-        let wgsl = self
-            .composer
-            .compose(&self.fns, key)
-            .map_err(shader_error)?;
+        let tint_mode = TintMode::from_variant_flags(key.flags);
+        let wgsl = if tint_mode == TintMode::Multiply {
+            self.composer.compose(&self.fns, key)
+        } else {
+            self.composer
+                .compose_with(&self.fns, key, &ComposeOptions { tint_mode })
+        }
+        .map_err(shader_error)?;
         let rest_entry = crate::skin_draw::entry_points(key.pass, false);
         let entry =
             crate::skin_draw::entry_points(key.pass, key.flags & crate::skin_draw::POSED != 0);
@@ -493,6 +555,30 @@ impl LitShared {
 }
 
 /// A bind group entry over the whole of `buffer`.
+/// The group-0 bind group: `buffers` (frame, materials, extras) at bindings 0..3 and the
+/// texture atlas entries at 3..6.
+fn create_frame_bind_group(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    buffers: [&wgpu::Buffer; 3],
+    textures: &TextureAtlas,
+) -> wgpu::BindGroup {
+    let [frame, materials, extras] = buffers;
+    let [atlas, sampler, rects] = textures.bind_entries();
+    gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa.lit.frame_bind_group"),
+        layout,
+        entries: &[
+            whole(0, frame),
+            whole(1, materials),
+            whole(2, extras),
+            atlas,
+            sampler,
+            rects,
+        ],
+    })
+}
+
 fn whole(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
@@ -589,12 +675,15 @@ impl LitHandle {
     }
 
     /// The S10 group-0 layout: `FrameGpu` uniform (512 B), `array<SurfaceMaterialGpu>` and
-    /// `array<InstanceExtraGpu>` read-only storage.
+    /// `array<InstanceExtraGpu>` read-only storage, then the material texture atlas
+    /// (`texture_2d<f32>`), its filtering sampler and `array<vec4<f32>>` rects.
     pub fn frame_layout(&self) -> wgpu::BindGroupLayout {
         self.shared.borrow().frame_layout.clone()
     }
 
-    /// The group-0 bind group over the renderer's frame, material and extras buffers.
+    /// The group-0 bind group over the renderer's frame, material and extras buffers and the
+    /// texture atlas. It is replaced when the first texture creates the atlas: fetch it for
+    /// each frame rather than keeping it.
     pub fn frame_bind_group(&self) -> wgpu::BindGroup {
         self.shared.borrow().frame_bind_group.clone()
     }
@@ -619,6 +708,33 @@ impl LitHandle {
             key.flags |= crate::skin_draw::POSED;
         }
         s.pipeline_for(gpu, key, spec)
+    }
+
+    /// Stores the S23 tint mode of material `id` (`multiply` by default). Draws of a
+    /// material in `graph` mode carry [`material_variant_flags`](Self::material_variant_flags)
+    /// in their [`VariantKey`], so their pipelines compose without the post-material tint
+    /// colour multiply; the variants of the other mode stay cached.
+    pub fn set_material_tint_mode(&self, id: MaterialId, mode: TintMode) {
+        let s = self.shared.borrow();
+        let mut modes = s.tint_modes.borrow_mut();
+        if mode == TintMode::Multiply {
+            modes.remove(&id);
+        } else {
+            modes.insert(id, mode);
+        }
+    }
+
+    /// The S23 tint mode of material `id` (`multiply` when never set).
+    pub fn material_tint_mode(&self, id: MaterialId) -> TintMode {
+        let s = self.shared.borrow();
+        let mode = s.tint_modes.borrow().get(&id).copied();
+        mode.unwrap_or_default()
+    }
+
+    /// The [`VariantKey::flags`] bits a draw of material `id` adds to its material flags:
+    /// [`raa_shader::VARIANT_FLAG_TINT_GRAPH`] in tint mode `graph`, 0 otherwise.
+    pub fn material_variant_flags(&self, id: MaterialId) -> u32 {
+        self.material_tint_mode(id).variant_flag()
     }
 
     /// Connect the skin pass's live views before preparing draws. Bind each mesh before
@@ -851,7 +967,9 @@ mod tests {
 
     #[test]
     fn frame_layout_follows_s10_group0() {
-        let sizes: Vec<(u32, bool, Option<u64>)> = frame_layout_entries()
+        let entries = frame_layout_entries();
+        let (buffers, textures) = entries.split_at(3);
+        let sizes: Vec<(u32, bool, Option<u64>)> = buffers
             .iter()
             .map(|e| match e.ty {
                 wgpu::BindingType::Buffer {
@@ -863,7 +981,7 @@ mod tests {
                     ty == wgpu::BufferBindingType::Uniform,
                     min_binding_size.map(NonZeroU64::get),
                 ),
-                _ => panic!("group 0 holds buffers only"),
+                _ => panic!("group 0 bindings 0..3 are buffers"),
             })
             .collect();
         assert_eq!(
@@ -874,7 +992,7 @@ mod tests {
                 (2, false, Some(128))
             ]
         );
-        for e in frame_layout_entries().iter().skip(1) {
+        for e in buffers.iter().skip(1) {
             assert!(matches!(
                 e.ty,
                 wgpu::BindingType::Buffer {
@@ -883,6 +1001,31 @@ mod tests {
                 }
             ));
         }
+        // Material textures: atlas, filtering sampler, read-only rects of 16 B.
+        assert_eq!(
+            textures.iter().map(|e| e.binding).collect::<Vec<_>>(),
+            [3, 4, 5]
+        );
+        assert!(matches!(
+            textures[0].ty,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            }
+        ));
+        assert!(matches!(
+            textures[1].ty,
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+        ));
+        assert!(matches!(
+            textures[2].ty,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                min_binding_size: Some(n),
+                ..
+            } if n.get() == 16
+        ));
     }
 
     #[test]

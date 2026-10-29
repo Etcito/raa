@@ -160,7 +160,7 @@ fn draw_lit(
                 material_fn: d.material_fn,
                 pass: kind,
                 msaa,
-                flags,
+                flags: flags | lit.material_variant_flags(d.material),
             };
             let pipeline = lit.pipeline_for(gpu, key, specs.get(flags))?;
             pass.set_pipeline(&pipeline);

@@ -69,6 +69,11 @@ struct EnvGpu {
 @group(0) @binding(0) var<uniform> raa_frame: FrameGpu;
 @group(0) @binding(1) var<storage, read> raa_materials: array<SurfaceMaterialGpu>;
 @group(0) @binding(2) var<storage, read> raa_extras: array<InstanceExtraGpu>;
+// Material textures (raa-lit atlas): rgba8unorm atlas, its linear clamp sampler and the rect
+// of each texture id, (x, y, width, height) in atlas uv. Id 0 and removed ids are zero rects.
+@group(0) @binding(3) var raa_texture_atlas: texture_2d<f32>;
+@group(0) @binding(4) var raa_texture_sampler: sampler;
+@group(0) @binding(5) var<storage, read> raa_texture_rects: array<vec4<f32>>;
 
 @group(1) @binding(0) var raa_shadow_map: texture_depth_2d_array;
 @group(1) @binding(1) var raa_shadow_cmp: sampler_comparison;
@@ -227,4 +232,17 @@ fn raa_apply_tint_opacity(s: MaterialOutput, x: InstanceExtraGpu) -> MaterialOut
     var o = s;
     o.opacity = o.opacity * x.tint.a;
     return o;
+}
+
+// Material texture `id` (Engine.addTexture) at `uv`, (0, 0) the first texel row's left edge,
+// clamped to [0, 1] like a clamp-to-edge texture and kept half a texel inside the texture's
+// atlas rect, so linear filtering never reads a neighbour. An unknown id gives (0, 0, 0, 0).
+// Level 0 explicitly, so material code may call it in non-uniform control flow.
+fn raa_texture(id: u32, uv: vec2<f32>) -> vec4<f32> {
+    let r = raa_texture_rects[min(id, arrayLength(&raa_texture_rects) - 1u)];
+    let half_texel = 0.5 / vec2<f32>(textureDimensions(raa_texture_atlas));
+    let p = r.xy + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * r.zw;
+    let q = clamp(p, r.xy + half_texel, max(r.xy + r.zw - half_texel, r.xy + half_texel));
+    let c = textureSampleLevel(raa_texture_atlas, raa_texture_sampler, q, 0.0);
+    return select(vec4<f32>(0.0), c, r.z > 0.0);
 }

@@ -345,7 +345,7 @@ impl OitPass {
                 material_fn: d.material_fn,
                 pass: PassKind::Transparent,
                 msaa: 1,
-                flags,
+                flags: flags | lit.material_variant_flags(d.material),
             };
             let pipeline = lit.pipeline_for(gpu, key, self.sized.pipelines.spec(flags))?;
             pass.set_pipeline(&pipeline);

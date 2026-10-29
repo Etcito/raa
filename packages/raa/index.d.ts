@@ -421,4 +421,24 @@ export interface Engine {
    * Validates the whole batch before updating. See setSkinPose for matrix layout.
    */
   setSkinPoses(instances: Uint32Array, matrices: Float32Array): void;
+  /**
+   * Uploads an rgba image into the material texture atlas and returns its id, sampled in
+   * material WGSL by `raa_texture(id, uv)`. Ids are reused once removed. See
+   * docs/api/m22-textures.md.
+   * @throws RaaError `texture.invalid` (data length is not width * height * 4, or a side is 0
+   *   or over 4096), `texture.atlas_full` (no room left), `api.invalid_argument`.
+   */
+  addTexture(desc: TextureData): number;
+  /** Frees a texture; it then samples (0, 0, 0, 0). An unknown or removed id does nothing. */
+  removeTexture(id: number): void;
+}
+/**
+ * An rgba image, rows top first: `width * height * 4` components. Bytes are stored as is
+ * (raa_texture returns them / 255; decode sRGB colour with raa_srgb_to_linear); floats are
+ * clamped to [0, 1] and quantized to 8 bits.
+ */
+export interface TextureData {
+  width: number;
+  height: number;
+  data: Uint8Array | Uint8ClampedArray | Float32Array;
 }

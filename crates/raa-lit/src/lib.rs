@@ -26,6 +26,7 @@ mod passes;
 mod prep;
 mod renderer;
 mod slots;
+mod textures;
 pub mod skin_views;
 pub mod skin_draw;
 pub mod skin_bounds;
@@ -46,5 +47,9 @@ pub use meshes::{LitMeshId, LitMeshInfo};
 pub use prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw, MaterialClass, PrepCapacity, PrepInput};
 pub use raa_core::{MaterialId, MeshId};
 pub use raa_mesh::{AttributedMesh, SubMesh};
-pub use raa_shader::MaterialFnId;
+pub use raa_shader::{MaterialFnId, TintMode};
 pub use renderer::{FrameCounts, LitOptions, LitRenderer};
+pub use textures::{
+    ATLAS_FORMAT, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker, TEXTURE_RECT_SIZE, TexelData,
+    quantize,
+};

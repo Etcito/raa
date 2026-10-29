@@ -301,6 +301,7 @@ impl Engine {
 
     /// Resizes the canvas backing store (zero sizes clamp to 1); the camera aspect follows.
     /// The JS `resize(cssWidth, cssHeight, dpr?)` lives in api/m21_views.rs.
+    /// The material textures (`addTexture`, `removeTexture`) live in api/m22_textures.rs.
     pub(crate) fn resize_backing(&mut self, width: u32, height: u32) -> Result<(), JsValue> {
         let size = (width.max(1), height.max(1));
         // Reconfiguring an unchanged canvas clears its drawable in the browser.

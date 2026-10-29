@@ -7,6 +7,10 @@ const VERSION = '0.5.0';
 // Editor controls are native Engine methods: updateMesh, setWireframe,
 // setSelectionOutline and setCamera (perspective or orthographic). Returning
 // the native object preserves the synchronous, validated setter contract.
+//
+// Material textures are native Engine methods too: addTexture({ width, height, data })
+// returns the id that material functions sample with raa_texture(id, uv), and
+// removeTexture(id) frees it (docs/api/m22-textures.md).
 
 /**
  * Initialises the wasm module and returns a RaaModule.

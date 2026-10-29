@@ -63,6 +63,7 @@ fn record_to_extra(data: &[f32; 32]) -> Result<InstanceExtra, RaaError> {
         squash: [axis[0], axis[1], axis[2], data[7]],
         jiggle: data[8..12].try_into().unwrap(),
         params: std::array::from_fn(|i| data[12 + i * 4..16 + i * 4].try_into().unwrap()),
+        tint_set: 0,
     })
 }
 
@@ -207,6 +208,8 @@ mod web {
                 let tint = linear_tint(numbers(&rgba, "rgba", true)?)?;
                 let mut extra = st.lit.instance_extra(tag);
                 extra.tint = tint;
+                // S23: graph-mode materials read the tint once it is set.
+                extra.tint_set = 1;
                 st.lit.set_instance_extra(tag, extra);
                 Ok(())
             })
@@ -328,7 +331,15 @@ mod web {
                 for i in 0..count {
                     let tag = st.instance_group(instances.get_index(i))?.tag;
                     let record = std::array::from_fn(|j| data.get_index(i * 32 + j as u32));
-                    writes.push((tag, record_to_extra(&record)?));
+                    // The record's reserved lanes are not the S23 flag: keep the instance's.
+                    let tint_set = st.lit.instance_extra(tag).tint_set;
+                    writes.push((
+                        tag,
+                        InstanceExtra {
+                            tint_set,
+                            ..record_to_extra(&record)?
+                        },
+                    ));
                 }
                 for (tag, extra) in writes {
                     st.lit.set_instance_extra(tag, extra);

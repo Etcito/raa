@@ -27,6 +27,7 @@ use crate::material::{DrawClass, SurfaceMaterial};
 use crate::meshes::{LitMeshId, LitMeshInfo};
 use crate::passes::install_passes;
 use crate::prep::{MaterialClass, PrepInput};
+use crate::textures::{AtlasRect, TexelData};
 
 /// Limits and sample count of a [`LitRenderer`]; the frame buffers are sized from them.
 #[derive(Copy, Clone, Debug)]
@@ -272,6 +273,35 @@ impl LitRenderer {
     /// Returns tag `tag` to the default extras.
     pub fn clear_instance_extra(&mut self, tag: u32) {
         self.extras.remove(&tag);
+    }
+
+    /// Adds a `width` x `height` material texture (rows top first, rgba) to the atlas and
+    /// returns its id, sampled in WGSL by `raa_texture(id, uv)`. Ids start at 1; a removed
+    /// id is given to a later texture. Float data is clamped to [0, 1] and quantized to 8
+    /// bits. Refusals (nothing changes): `texture.invalid` (a side of 0 or above
+    /// [`ATLAS_SIZE`](crate::ATLAS_SIZE), a data length other than width * height * 4),
+    /// `texture.atlas_full` (no room or no free id), `pipeline.busy`.
+    pub fn add_texture(
+        &mut self,
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        data: TexelData<'_>,
+    ) -> Result<u32, RaaError> {
+        let mut s = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        s.add_texture(gpu, width, height, data)
+    }
+
+    /// Removes texture `id`; its id then samples (0, 0, 0, 0). Idempotent: an unknown or
+    /// removed id does nothing. Returns whether it was live.
+    pub fn remove_texture(&mut self, gpu: &GpuContext, id: u32) -> Result<bool, RaaError> {
+        let mut s = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        Ok(s.remove_texture(gpu, id))
+    }
+
+    /// The atlas rect of live texture `id`.
+    pub fn texture_rect(&self, id: u32) -> Option<AtlasRect> {
+        self.shared.borrow().texture_packer().rect(id)
     }
 
     /// Adds a forward contributor and its pipeline contributor entry (enabled; the forward

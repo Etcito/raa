@@ -41,8 +41,8 @@ pub const PASS_FURSHELL_WGSL: &str = include_str!("wgsl/pass_furshell.wgsl");
 
 /// Post-material instance tint of a composed module (S23). `InstanceExtraGpu` keeps its
 /// 128-byte layout: `mat_instance_tint_set` reads the spare lane `reserved.x` (1 after
-/// setInstanceTint, 0 after clearInstanceTint and by default), written by the CPU side of
-/// the instance record.
+/// setInstanceTint, 0 after clearInstanceTint and by default), written from raa-lit
+/// `InstanceExtra::tint_set`. A draw selects the mode with [`VARIANT_FLAG_TINT_GRAPH`].
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TintMode {
     /// Today's shader: the tint rgb multiplies the base colour, a multiplies the opacity.
@@ -73,6 +73,31 @@ impl TintMode {
                 TintMode::MODE_UNKNOWN,
                 format!("tint mode {name:?} is not \"multiply\" or \"graph\""),
             )),
+        }
+    }
+}
+
+/// [`VariantKey::flags`] bit of a draw whose material is in tint mode `graph` (S23). Material
+/// flags use the low bits and raa-lit's posed-skin bit is bit 31, so the two variants of a
+/// material hash, cache and compose as different pipelines. A key without the bit composes
+/// exactly the module of [`Composer::compose`].
+pub const VARIANT_FLAG_TINT_GRAPH: u32 = 1 << 30;
+
+impl TintMode {
+    /// The [`VariantKey::flags`] bit of this mode: [`VARIANT_FLAG_TINT_GRAPH`] or 0.
+    pub fn variant_flag(self) -> u32 {
+        match self {
+            TintMode::Multiply => 0,
+            TintMode::Graph => VARIANT_FLAG_TINT_GRAPH,
+        }
+    }
+
+    /// The mode selected by the variant `flags`.
+    pub fn from_variant_flags(flags: u32) -> TintMode {
+        if flags & VARIANT_FLAG_TINT_GRAPH != 0 {
+            TintMode::Graph
+        } else {
+            TintMode::Multiply
         }
     }
 }
@@ -282,6 +307,26 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
             assert_eq!(graph.matches(PASS_TINT_CALL_GRAPH).count(), 1, "{pass:?}");
             assert_eq!(graph.replace(PASS_TINT_CALL_GRAPH, PASS_TINT_CALL), today);
         }
+    }
+
+    #[test]
+    fn graph_flag_selects_a_distinct_variant() {
+        assert_eq!(TintMode::Multiply.variant_flag(), 0);
+        assert_eq!(TintMode::Graph.variant_flag(), VARIANT_FLAG_TINT_GRAPH);
+        for mode in [TintMode::Multiply, TintMode::Graph] {
+            assert_eq!(TintMode::from_variant_flags(mode.variant_flag() | 8), mode);
+        }
+        let k = key(MaterialFnId::STANDARD, PassKind::Forward);
+        let graph = VariantKey {
+            flags: k.flags | VARIANT_FLAG_TINT_GRAPH,
+            ..k
+        };
+        assert_ne!(k, graph);
+        let composer = stub_composer();
+        let reg = MaterialFnRegistry::new();
+        let a = composer.compose(&reg, &k).expect("compose");
+        let b = composer.compose(&reg, &graph).expect("compose");
+        assert_ne!(a, b, "the flag reaches RAA_VARIANT_FLAGS");
     }
 
     #[test]

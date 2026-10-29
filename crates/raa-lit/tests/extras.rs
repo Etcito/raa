@@ -23,6 +23,7 @@ fn distinct_values_land_at_their_offsets() {
         squash: [5.0, 6.0, 7.0, 8.0],
         jiggle: [9.0, 10.0, 11.0, 12.0],
         params: [[0.0; 4]; 4],
+        tint_set: 0,
     };
     for (i, p) in x.params.iter_mut().enumerate() {
         for (j, v) in p.iter_mut().enumerate() {
@@ -37,6 +38,23 @@ fn distinct_values_land_at_their_offsets() {
         assert_eq!(f32_at(b, k * 4), (k + 1) as f32, "float {k}");
     }
     assert!(b[112..128].iter().all(|&v| v == 0));
+}
+
+#[test]
+fn tint_set_lands_in_reserved_x() {
+    let mut out = Vec::new();
+    let x = InstanceExtra {
+        tint_set: 1,
+        ..InstanceExtra::default()
+    };
+    x.write_gpu(&mut out);
+    assert_eq!(out.len(), INSTANCE_EXTRA_GPU_SIZE);
+    assert_eq!(f32_at(&out, 112), 1.0);
+    assert!(out[116..128].iter().all(|&v| v == 0));
+    let mut default = Vec::new();
+    InstanceExtra::default().write_gpu(&mut default);
+    assert_eq!(out[..112], default[..112]);
+    assert!(default[112..].iter().all(|&v| v == 0));
 }
 
 #[test]
