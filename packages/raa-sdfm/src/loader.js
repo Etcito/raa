@@ -79,7 +79,9 @@ export function createSdfmLoader(options) {
     for (const m of meshed.materials) {
       const mapped = mapMaterial(m);
       registerFunction(mapped.functionName, mapped.wgsl);
-      handles.set(m.name, engine.addSurfaceMaterial({ ...mapped.desc }));
+      const handle = engine.addSurfaceMaterial({ ...mapped.desc });
+      if (mapped.tintMode === 'graph') engine.setMaterialTintMode(handle, 'graph');
+      handles.set(m.name, handle);
       progress('upload', (done += 1), total);
     }
 

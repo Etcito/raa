@@ -56,7 +56,11 @@ const CONSTANT_READ = /extra_words\s*\[\s*b\s*\+\s*(\d+)u?\s*\]/g;
  *
  * @param {{ name: string, key: string, body: string, helpers: { id: string, wgsl: string }[],
  *   constants: number[], fields: string[] }} m MamaMaterial
- * @returns {{ functionName: string, wgsl: string, desc: { function: string, blend: 'opaque' }, dropped: string[] }}
+ * `tintMode` is 'graph' when the MAMA WGSL reads `mat_instance_tint` (only the S23 `input.player_color` node emits
+ * it): RAA then skips the post-material tint multiply. Otherwise it is 'multiply'.
+ *
+ * @returns {{ functionName: string, wgsl: string, desc: { function: string, blend: 'opaque' }, dropped: string[],
+ *   tintMode: 'graph' | 'multiply' }}
  * @throws {SdfmError} `sdfm.material_unmappable` naming the material and the offending token
  */
 export function mapMaterial(m) {
@@ -83,8 +87,10 @@ export function mapMaterial(m) {
   const helpers = m.helpers.map((h) => `// MAMA helper ${h.id}\n${rewrite(h.wgsl).trim()}\n`);
 
   // MAMA-sourced text: no binding read may remain and no raa_ identifier may appear.
+  let tintMode = 'multiply';
   for (const text of [body, ...helpers]) {
     const toks = tokens(text);
+    if (toks.includes('mat_instance_tint')) tintMode = 'graph';
     const left = toks.find((t) => t === 'extra_words');
     if (left) fail(`'extra_words' (a binding-7 read that is not a constant of this graph)`);
     const raa = toks.find((t) => /^raa_/.test(t));
@@ -122,7 +128,7 @@ export function mapMaterial(m) {
   if (bytes > MAX_BYTES) fail(`'${bytes} bytes' exceeds the ${MAX_BYTES}-byte limit`);
 
   const functionName = `sdfm.${m.key.slice(0, 16)}`;
-  return { functionName, wgsl, desc: { function: functionName, blend: 'opaque' }, dropped };
+  return { functionName, wgsl, desc: { function: functionName, blend: 'opaque' }, dropped, tintMode };
 }
 
 /** Checks the MamaMaterial shape; returns its name. */
