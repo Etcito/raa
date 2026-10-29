@@ -5,6 +5,7 @@
 
 mod env;
 mod lighting;
+mod output;
 mod pass;
 mod pipeline;
 mod targets;

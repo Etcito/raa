@@ -296,3 +296,240 @@ mod tests {
         assert_eq!([word(4), word(5), word(6), word(7)], [1, 2, 0, 1]);
     }
 }
+
+#[cfg(test)]
+mod views_tests {
+    use super::*;
+    use crate::ToneMapper;
+    use raa_core::testing::{skip, software_gpu};
+    use raa_core::{FrameGraph, OffscreenTarget};
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    // Camera-dependent scene signal followed by a temporal post effect. Each bank
+    // retains its history and targets: a shared bank would mix colours on frame two.
+    struct CameraPost {
+        camera: Rc<Cell<[f64; 3]>>,
+        history: [f64; 3],
+        texture: Option<wgpu::Texture>,
+        resized: Rc<Cell<u32>>,
+        dropped: Rc<Cell<u32>>,
+    }
+    impl Drop for CameraPost {
+        fn drop(&mut self) {
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+    impl FeaturePass for CameraPost {
+        fn name(&self) -> &str {
+            "test.camera_post"
+        }
+        fn order(&self) -> u32 {
+            100
+        }
+        fn resize(&mut self, _: &GpuContext, targets: &Targets) {
+            self.texture = Some(targets.depth_texture().clone());
+            self.history = [0.0; 3];
+            self.resized.set(self.resized.get() + 1);
+        }
+        fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            assert_eq!(self.texture.as_ref(), Some(ctx.targets.depth_texture()));
+            let eye = self.camera.get();
+            for (h, c) in self.history.iter_mut().zip(eye) {
+                *h = (*h + c) * 0.5;
+            }
+            let [r, g, b] = self.history;
+            {
+                let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("test.camera_post"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: ctx.targets.hdr().dst(),
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: ctx.targets.depth(),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.5),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            }
+            ctx.targets.hdr().swap();
+            Ok(())
+        }
+    }
+
+    fn run_views(count: usize) {
+        let Some(gpu) = software_gpu() else {
+            skip("view_composite", "no adapter");
+            return;
+        };
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let output = OffscreenTarget::new(&gpu, 16, 16, format);
+        let camera = Rc::new(Cell::new([0.0; 3]));
+        let eyes = [
+            [0.8, 0.0, 0.0],
+            [0.0, 0.8, 0.0],
+            [0.0, 0.0, 0.8],
+            [0.4, 0.4, 0.0],
+        ];
+        let rects = if count == 2 {
+            vec![[0, 0, 8, 16], [8, 0, 8, 16]]
+        } else {
+            vec![[0, 0, 8, 8], [8, 0, 8, 8], [0, 8, 8, 8], [8, 8, 8, 8]]
+        };
+        let mut p = Pipeline::new(&gpu, format, false);
+        let dropped = Rc::new(Cell::new(0));
+        let make = |resized| CameraPost {
+            camera: camera.clone(),
+            history: [0.0; 3],
+            texture: None,
+            resized,
+            dropped: dropped.clone(),
+        };
+        p.add(Box::new(make(Rc::new(Cell::new(0))))).unwrap();
+        let (tonemap, control) = TonemapPass::new(&gpu, &p);
+        control
+            .set(ToneMapping {
+                mapper: ToneMapper::Linear,
+                dither: false,
+                ..ToneMapping::default()
+            })
+            .unwrap();
+        p.add(Box::new(tonemap)).unwrap();
+        p.set_view_rects(&rects);
+        let resizes: Vec<_> = (0..count).map(|_| Rc::new(Cell::new(0))).collect();
+        for (i, resized) in resizes.iter().enumerate() {
+            let mut bank = Pipeline::new(&gpu, format, false);
+            bank.add(Box::new(make(resized.clone()))).unwrap();
+            p.set_view_passes(i, &mut bank);
+        }
+        let p = Rc::new(RefCell::new(p));
+        let weak = Rc::downgrade(&p);
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let seen_callback = seen.clone();
+        p.borrow_mut().set_view_prepare(Box::new(move |_, i, size| {
+            // Like LitRenderer, the uploader may inspect the pipeline without a
+            // RefCell collision. It must see this view's target size.
+            assert_eq!(
+                weak.upgrade().unwrap().borrow().targets().unwrap().size(),
+                size
+            );
+            camera.set(eyes[i]);
+            seen_callback.borrow_mut().push(i);
+            Ok(())
+        }));
+        let mut graph = FrameGraph::new(format);
+        Pipeline::install(&p, &mut graph);
+        graph.compile().unwrap();
+        for frame in 0..2 {
+            gpu.queue()
+                .submit([graph.execute(&gpu, output.view(), (16, 16)).unwrap()]);
+            let pixels = output.read_rgba8(&gpu).unwrap();
+            for (i, [x, y, w, h]) in rects.iter().copied().enumerate() {
+                let factor = if frame == 0 { 0.5 } else { 0.75 };
+                let expected = eyes[i]
+                    .map(|v| (crate::curves::srgb_oetf((v * factor) as f32) * 255.0).round() as u8);
+                for py in y..y + h {
+                    for px in x..x + w {
+                        let offset = ((py * 16 + px) * 4) as usize;
+                        for c in 0..3 {
+                            assert!(
+                                pixels[offset + c].abs_diff(expected[c]) <= 1,
+                                "view {i}, frame {frame}, pixel ({px},{py}): {:?} expected {expected:?}",
+                                &pixels[offset..offset + 4]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            &*seen.borrow(),
+            &(0..count).chain(0..count).collect::<Vec<_>>()
+        );
+        assert!(
+            resizes.iter().all(|n| n.get() == 1),
+            "post history must survive view switches"
+        );
+        // Removing all but the first view keeps its targets and history. A changed
+        // rectangle, including position alone, invalidates that view's target bank.
+        p.borrow_mut().set_view_rects(&rects[..1]);
+        assert_eq!(
+            dropped.get(),
+            count as u32 - 1,
+            "removed views release their pass banks"
+        );
+        gpu.queue()
+            .submit([graph.execute(&gpu, output.view(), (16, 16)).unwrap()]);
+        assert_eq!(resizes[0].get(), 1);
+        p.borrow_mut().set_view_rects(&[[1, 1, 6, 6]]);
+        gpu.queue()
+            .submit([graph.execute(&gpu, output.view(), (16, 16)).unwrap()]);
+        assert_eq!(resizes[0].get(), 2);
+        let pixels = output.read_rgba8(&gpu).unwrap();
+        assert_eq!(
+            &pixels[..4],
+            &[0, 0, 0, 255],
+            "uncovered canvas is cleared each frame"
+        );
+    }
+
+    #[test]
+    fn two_views_preserve_earlier_output_and_separate_history() {
+        run_views(2);
+    }
+    #[test]
+    fn four_views_preserve_earlier_output_and_separate_history() {
+        run_views(4);
+    }
+
+    #[test]
+    fn full_canvas_composite_matches_legacy_pixels() {
+        let Some(gpu) = software_gpu() else {
+            skip("single_view", "no adapter");
+            return;
+        };
+        let render = |composite: bool, format: wgpu::TextureFormat| {
+            let output = OffscreenTarget::new(&gpu, 16, 16, format);
+            let mut pipeline = Pipeline::new(&gpu, format, format.is_srgb());
+            pipeline
+                .add(Box::new(CameraPost {
+                    camera: Rc::new(Cell::new([0.8, 0.2, 0.1])),
+                    history: [0.0; 3],
+                    texture: None,
+                    resized: Rc::new(Cell::new(0)),
+                    dropped: Rc::new(Cell::new(0)),
+                }))
+                .unwrap();
+            let (pass, _) = TonemapPass::new(&gpu, &pipeline);
+            pipeline.add(Box::new(pass)).unwrap();
+            if composite {
+                pipeline.set_view_rects(&[[0, 0, 16, 16]]);
+            }
+            let pipeline = Rc::new(RefCell::new(pipeline));
+            let mut graph = FrameGraph::new(format);
+            Pipeline::install(&pipeline, &mut graph);
+            graph.compile().unwrap();
+            gpu.queue()
+                .submit([graph.execute(&gpu, output.view(), (16, 16)).unwrap()]);
+            output.read_rgba8(&gpu).unwrap()
+        };
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ] {
+            assert_eq!(render(false, format), render(true, format));
+        }
+    }
+}

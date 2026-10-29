@@ -204,6 +204,19 @@ impl WebApp for EngineApp {
             lit: &mut lit,
             features: &mut features,
         })?;
+        let state = Rc::downgrade(&self.state);
+        pipeline
+            .borrow_mut()
+            .set_view_prepare(Box::new(move |gpu, index, size| {
+                let shared = state
+                    .upgrade()
+                    .ok_or_else(|| api_error(DISPOSED, "the engine was disposed"))?;
+                let mut guard = shared.borrow_mut();
+                let st = guard
+                    .as_mut()
+                    .ok_or_else(|| api_error(DISPOSED, "the engine was disposed"))?;
+                st.prepare_pipeline_view(gpu, index, size)
+            }));
         Pipeline::install(&pipeline, graph);
 
         let max = o.max_instances as usize;

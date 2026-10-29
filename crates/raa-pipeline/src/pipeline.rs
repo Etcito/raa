@@ -369,6 +369,9 @@ impl Clock {
     }
 }
 
+/// Uploads a view's camera and scene immediately before that view is recorded.
+pub type ViewPrepare = dyn FnMut(&GpuContext, usize, (u32, u32)) -> Result<(), RaaError>;
+
 /// The lit renderer's pass pipeline: feature passes and contributor entries (configured
 /// through [`PipelineConfig`]), the group-1 lighting resources, the surface-sized targets and
 /// the frame time. `install` runs it as the one `raa.pipeline` frame graph pass.
@@ -383,6 +386,12 @@ pub struct Pipeline {
     surface_format: wgpu::TextureFormat,
     surface_is_srgb: bool,
     clock: Clock,
+    view_rects: Vec<[u32; 4]>,
+    view_targets: Vec<Option<Targets>>,
+    view_prepare: Option<Box<ViewPrepare>>,
+    view_passes: Vec<PipelineConfig>,
+    view_generations: Vec<u64>,
+    output: Option<crate::output::Output>,
 }
 
 impl Pipeline {
@@ -401,7 +410,65 @@ impl Pipeline {
             surface_format,
             surface_is_srgb,
             clock: Clock::default(),
+            view_rects: Vec::new(),
+            view_targets: Vec::new(),
+            view_prepare: None,
+            view_passes: Vec::new(),
+            view_generations: Vec::new(),
+            output: None,
         }
+    }
+
+    /// Configure ordered pixel rectangles. Empty retains the legacy single-view path.
+    /// Zero-area rectangles are retained as slots but skipped when rendering.
+    pub fn set_view_rects(&mut self, rects: &[[u32; 4]]) {
+        if self.view_rects.is_empty() != rects.is_empty() {
+            self.targets = None;
+            for entry in &mut self.config.passes {
+                entry.sized_for = 0;
+            }
+        }
+        self.view_passes.truncate(rects.len());
+        self.view_passes
+            .resize_with(rects.len(), PipelineConfig::new);
+        self.view_generations.resize(rects.len(), 0);
+        self.view_targets.truncate(rects.len());
+        self.view_targets.resize_with(rects.len(), || None);
+        for (i, rect) in rects.iter().enumerate() {
+            if self.view_rects.get(i) != Some(rect) {
+                self.view_targets[i] = None;
+                for entry in &mut self.view_passes[i].passes {
+                    entry.sized_for = 0;
+                }
+            }
+        }
+        self.view_rects.clear();
+        self.view_rects.extend_from_slice(rects);
+    }
+
+    /// Moves independently constructed feature passes into a view's retained bank.
+    /// Names must match passes in the main pipeline; order/enabled flags stay global.
+    pub fn set_view_passes(&mut self, index: usize, source: &mut Pipeline) {
+        self.view_passes[index] = std::mem::take(&mut source.config);
+    }
+
+    fn swap_view_passes(&mut self, index: usize) {
+        for alternate in &mut self.view_passes[index].passes {
+            if let Some(main) = self
+                .config
+                .passes
+                .iter_mut()
+                .find(|p| p.name == alternate.name)
+            {
+                std::mem::swap(&mut main.pass, &mut alternate.pass);
+                std::mem::swap(&mut main.sized_for, &mut alternate.sized_for);
+            }
+        }
+    }
+
+    /// Called once per view, after commands for the previous view have been submitted.
+    pub fn set_view_prepare(&mut self, prepare: Box<ViewPrepare>) {
+        self.view_prepare = Some(prepare);
     }
 
     /// Adds an enabled feature pass by its order (see [`PipelineConfig::add`]).
@@ -457,7 +524,7 @@ impl Pipeline {
         &mut self.lighting
     }
 
-    /// The surface-sized targets; `None` before the first prepare.
+    /// The active view targets; `None` before preparation or between split views.
     pub fn targets(&self) -> Option<&Targets> {
         self.targets.as_ref()
     }
@@ -483,6 +550,113 @@ impl Pipeline {
     }
 
     fn prepare_frame(&mut self, ctx: &PrepareContext<'_>) -> Result<(), RaaError> {
+        if self.view_rects.is_empty() {
+            self.prepare_single(ctx)?;
+        }
+        Ok(())
+    }
+
+    fn record_views(
+        this: &Rc<RefCell<Pipeline>>,
+        ctx: &mut RecordContext<'_>,
+    ) -> Result<(), RaaError> {
+        if this.borrow().view_rects.is_empty() {
+            return this.borrow_mut().record_single(ctx, false);
+        }
+        let backbuffer = ctx.view(BACKBUFFER)?;
+        {
+            let _clear = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raa.views.clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: backbuffer,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        let count = this.borrow().view_rects.len();
+        for i in 0..count {
+            let rect = this.borrow().view_rects[i];
+            if rect[2] == 0 || rect[3] == 0 {
+                continue;
+            }
+            // Queue writes are applied at submit, not at command recording. Submit the
+            // previous view before uploading this view's shared scene/camera buffers.
+            if i > 0 {
+                let next = ctx.gpu.device().create_command_encoder(&Default::default());
+                let previous = std::mem::replace(ctx.encoder, next);
+                ctx.gpu.queue().submit([previous.finish()]);
+            }
+            let size = (rect[2], rect[3]);
+            let mut prepare = {
+                let mut guard = this.borrow_mut();
+                let p = &mut *guard;
+                std::mem::swap(&mut p.targets, &mut p.view_targets[i]);
+                for entry in &mut p.config.passes {
+                    entry.sized_for = 0;
+                }
+                p.swap_view_passes(i);
+                std::mem::swap(&mut p.targets_generation, &mut p.view_generations[i]);
+                // LitRenderer::prepare reads the current targets through its pipeline.
+                if p.targets.is_none() {
+                    p.targets = Some(Targets::new(ctx.gpu, size));
+                    p.targets_generation += 1;
+                }
+                p.view_prepare.take()
+            };
+            let uploaded = match &mut prepare {
+                Some(prepare) => prepare(ctx.gpu, i, size),
+                None => Ok(()),
+            };
+            let mut guard = this.borrow_mut();
+            let p = &mut *guard;
+            p.view_prepare = prepare;
+            let result = uploaded
+                .and_then(|()| {
+                    p.prepare_single(&PrepareContext {
+                        gpu: ctx.gpu,
+                        size,
+                        frame: ctx.frame,
+                    })
+                })
+                .and_then(|()| {
+                    let format = ctx.format(BACKBUFFER);
+                    if let Some(targets) = &mut p.targets {
+                        targets.ensure_output(ctx.gpu, format);
+                    }
+                    p.record_single(ctx, true)?;
+                    if p.output.as_ref().is_none_or(|o| o.format() != format) {
+                        p.output = Some(crate::output::Output::new(ctx.gpu, format));
+                    }
+                    p.output.as_ref().expect("output created").record(
+                        ctx.gpu,
+                        ctx.encoder,
+                        p.targets
+                            .as_ref()
+                            .and_then(Targets::output)
+                            .expect("view output created"),
+                        backbuffer,
+                        rect,
+                    );
+                    Ok(())
+                });
+            std::mem::swap(&mut p.targets_generation, &mut p.view_generations[i]);
+            p.swap_view_passes(i);
+            std::mem::swap(&mut p.targets, &mut p.view_targets[i]);
+            result?;
+        }
+        Ok(())
+    }
+
+    fn prepare_single(&mut self, ctx: &PrepareContext<'_>) -> Result<(), RaaError> {
         let gpu = ctx.gpu;
         let targets = match &mut self.targets {
             Some(targets) => {
@@ -521,7 +695,7 @@ impl Pipeline {
         Ok(())
     }
 
-    fn record_frame(&mut self, ctx: &mut RecordContext<'_>) -> Result<(), RaaError> {
+    fn record_single(&mut self, ctx: &mut RecordContext<'_>, local: bool) -> Result<(), RaaError> {
         let backbuffer = ctx.view(BACKBUFFER)?;
         let backbuffer_format = ctx.format(BACKBUFFER);
         let Some(targets) = self.targets.as_ref() else {
@@ -532,12 +706,16 @@ impl Pipeline {
         let mut record = RecordCtx {
             gpu: ctx.gpu,
             encoder: &mut *ctx.encoder,
-            size: ctx.size,
+            size: targets.size(),
             frame: ctx.frame,
             time_s: self.clock.time_s,
             targets,
             lighting: &self.lighting,
-            backbuffer,
+            backbuffer: if local {
+                targets.output().expect("view output created")
+            } else {
+                backbuffer
+            },
             backbuffer_format,
             surface_is_srgb: self.surface_is_srgb,
         };
@@ -577,7 +755,7 @@ impl RenderPass for PipelinePass {
     }
 
     fn record(&mut self, ctx: &mut RecordContext<'_>) -> Result<(), RaaError> {
-        self.pipeline()?.record_frame(ctx)
+        Pipeline::record_views(&self.pipeline, ctx)
     }
 }
 

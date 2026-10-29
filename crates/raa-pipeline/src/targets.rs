@@ -130,6 +130,7 @@ pub struct Targets {
     normal: Target,
     material: Target,
     hdr: HdrChain,
+    output: Option<Target>,
 }
 
 impl Targets {
@@ -155,6 +156,7 @@ impl Targets {
                 GBUFFER_USAGE,
             ),
             hdr: HdrChain::new(gpu, size),
+            output: None,
         }
     }
 
@@ -167,6 +169,27 @@ impl Targets {
         }
         *self = Targets::new(gpu, size);
         true
+    }
+
+    /// Display-space target for tone mapping and overlays; absent on the direct path.
+    pub(crate) fn ensure_output(&mut self, gpu: &GpuContext, format: wgpu::TextureFormat) {
+        if self
+            .output
+            .as_ref()
+            .is_none_or(|t| t.texture.format() != format)
+        {
+            self.output = Some(Target::new(
+                gpu,
+                "raa.views.output",
+                self.size,
+                format,
+                GBUFFER_USAGE,
+            ));
+        }
+    }
+
+    pub(crate) fn output(&self) -> Option<&wgpu::TextureView> {
+        self.output.as_ref().map(|t| &t.view)
     }
 
     /// Current size in pixels (width, height).

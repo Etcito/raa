@@ -2,6 +2,10 @@
 //! `setPassOrder`), tone mapping (`setToneMapping`), the display-referred background
 //! (`setBackground`) and the device capabilities (`capabilities`).
 //!
+//! S26: the default full-canvas view retains the direct pipeline path. Split views
+//! get pixel-sized target sets and independent post passes. Camera uploads happen
+//! between ordered view submissions; output composition preserves earlier views.
+//!
 //! Pipeline refusals (`pipeline.*`) and tone mapping refusals (`post.invalid`) are thrown
 //! with their own code; malformed JS arguments throw `api.invalid_argument`.
 
@@ -23,16 +27,17 @@ pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
     Ok(())
 }
 
-/// Stores the tonemap control in the feature map once, when engine.rs did not (one
-/// allocation on the first frame, none after).
+/// Stores the tonemap control once and reconciles viewport targets/post-pass banks.
+/// The default full-canvas path performs no recurring allocations here.
 pub(crate) fn frame(
     st: &mut EngineState,
-    _gpu: &GpuContext,
-    _input: &FrameInput,
+    gpu: &GpuContext,
+    input: &FrameInput,
 ) -> Result<(), RaaError> {
     if st.features.get::<TonemapControl>().is_none() {
         st.features.insert(st.tonemap.clone());
     }
+    configure_views(st, gpu, input)?;
     Ok(())
 }
 
@@ -195,5 +200,145 @@ impl Engine {
             );
             Ok(o.into())
         })
+    }
+}
+
+/// Each post pass owns private scratch textures and (DOF) autofocus history.
+struct ViewPost {
+    ssr: raa_ssr::SsrHandle,
+    dof: raa_dof::DofHandle,
+    shafts: raa_shafts::ShaftsHandle,
+    bloom: raa_bloom::BloomHandle,
+    grading: raa_grading::GradingHandle,
+}
+#[derive(Default)]
+struct ViewPosts(Vec<ViewPost>);
+
+fn configure_views(
+    st: &mut EngineState,
+    gpu: &GpuContext,
+    input: &FrameInput,
+) -> Result<(), RaaError> {
+    use super::m21_views::{ViewRect, ViewsState};
+    let Some(views) = st.features.get::<ViewsState>() else {
+        return Ok(());
+    };
+    if views.viewports() == [ViewRect::FULL] {
+        st.pipeline.borrow_mut().set_view_rects(&[]);
+        if let Some(posts) = st.features.get_mut::<ViewPosts>() {
+            posts.0.clear();
+        }
+        return Ok(());
+    }
+    let rects: Vec<_> = views
+        .viewports()
+        .iter()
+        .map(|r| {
+            let x = (r.x * input.size.0 as f64).round() as u32;
+            let y = (r.y * input.size.1 as f64).round() as u32;
+            let right = ((r.x + r.width) * input.size.0 as f64).round() as u32;
+            let bottom = ((r.y + r.height) * input.size.1 as f64).round() as u32;
+            [x, y, right.saturating_sub(x), bottom.saturating_sub(y)]
+        })
+        .collect();
+    let mut p = st.pipeline.borrow_mut();
+    p.set_view_rects(&rects);
+    if st.features.get::<ViewPosts>().is_none() {
+        st.features.insert(ViewPosts::default());
+    }
+    let posts = st.features.get_mut::<ViewPosts>().expect("inserted above");
+    posts.0.truncate(rects.len());
+    while posts.0.len() < rects.len() {
+        let temp = std::rc::Rc::new(std::cell::RefCell::new(Pipeline::new(
+            gpu,
+            p.surface_format(),
+            p.surface_is_srgb(),
+        )));
+        let post = ViewPost {
+            ssr: raa_ssr::SsrFeature::install(gpu, &temp)?,
+            dof: raa_dof::DofFeature::install(gpu, &temp)?,
+            shafts: raa_shafts::ShaftsFeature::install(gpu, &temp)?,
+            bloom: raa_bloom::BloomFeature::install(gpu, &temp)?,
+            grading: raa_grading::GradingFeature::install(gpu, &temp)?,
+        };
+        p.set_view_passes(posts.0.len(), &mut temp.borrow_mut());
+        posts.0.push(post);
+    }
+    Ok(())
+}
+
+/// Runs only camera-dependent updates. Simulation and animation still advance once.
+pub(crate) fn prepare_view(
+    st: &mut EngineState,
+    gpu: &GpuContext,
+    index: usize,
+    size: (u32, u32),
+) -> Result<(), RaaError> {
+    use super::m21_views::ViewsState;
+    let original = st.scene.camera;
+    if let Some(camera) = st
+        .features
+        .get::<ViewsState>()
+        .and_then(|v| v.camera(index))
+        .copied()
+    {
+        let cam = &mut st.scene.camera;
+        cam.eye = raa_math::Vec3::from_array(camera.eye);
+        cam.target = raa_math::Vec3::from_array(camera.target);
+        cam.up = raa_math::Vec3::Y;
+        cam.fov_y_rad = camera.fov_y_deg.to_radians();
+        cam.near = camera.near;
+        cam.far = camera.far;
+        cam.ortho_height = None;
+    }
+    st.scene.camera.set_viewport(size.0, size.1);
+    let result = (|| {
+        let input = FrameInput {
+            size,
+            ..FrameInput::default()
+        };
+        super::m09_shadows_ao::frame(st, gpu, &input)?;
+        super::m14_camera_effects::frame(st, gpu, &input)?;
+        if let Some(post) = st.features.get::<ViewPosts>().and_then(|p| p.0.get(index)) {
+            let view = st.scene.camera.view();
+            let proj = st.scene.camera.projection();
+            if let Some(h) = st.features.get::<raa_ssr::SsrHandle>() {
+                post.ssr.set(h.get())?;
+            }
+            if let Some(h) = st.features.get::<raa_dof::DofHandle>() {
+                post.dof.set(h.get())?;
+            }
+            if let Some(h) = st.features.get::<raa_shafts::ShaftsHandle>() {
+                post.shafts.set(h.get())?;
+            }
+            if let Some(h) = st.features.get::<raa_bloom::BloomHandle>() {
+                post.bloom.set(h.get())?;
+            }
+            if let Some(h) = st.features.get::<raa_grading::GradingHandle>() {
+                post.grading.set(h.get())?;
+            }
+            post.ssr.set_camera(&view, &proj);
+            post.dof.set_camera(&view, &proj);
+            post.shafts.set_camera(&view, &proj);
+            let light = st.scene.light;
+            post.shafts
+                .set_sun(light.direction, light.color.map(|c| c * light.intensity));
+        }
+        st.lit
+            .prepare(gpu, &mut st.scene, &mut st.list, &mut st.tags)?;
+        Ok(())
+    })();
+    st.scene.camera = original;
+    result
+}
+
+impl EngineState {
+    pub(crate) fn prepare_pipeline_view(
+        &mut self,
+        gpu: &GpuContext,
+        index: usize,
+        size: (u32, u32),
+    ) -> Result<(), RaaError> {
+        prepare_view(self, gpu, index, size)
     }
 }
