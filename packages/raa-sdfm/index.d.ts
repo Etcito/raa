@@ -359,3 +359,53 @@ export function createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader;
  * identifier starting `raa_`, or more than 65536 bytes).
  */
 export function mapMaterial(material: SdfmCompiledMaterial): SdfmMappedMaterial;
+
+/** Format tag of a MAMA normal volume (MAMA src/core/game/normal-volume.ts). */
+export const NORMAL_VOLUME_FORMAT: 'sdfm.normal-volume';
+/** Normal volume versions this package reads. */
+export const NORMAL_VOLUME_VERSIONS: readonly number[];
+/** Prefix of the wrapped (volume-normal) material function names: `'sdfv.'` + the base name. */
+export const VOLUME_FUNCTION_PREFIX: 'sdfv.';
+/** Name of {@link volumeStandardMaterial}'s function. */
+export const VOLUME_STANDARD_FUNCTION: 'sdfv.standard';
+
+/**
+ * A MAMA normal volume: the unit SDF gradient around a part mesh (mesh space), sparse bricks packed in one rgba8 image.
+ * Layout: MAMA src/core/game/normal-volume.ts.
+ */
+export interface SdfmNormalVolume {
+  format: 'sdfm.normal-volume';
+  version: number;
+  origin: [number, number, number];
+  spacing: number;
+  bricks: [number, number, number];
+  count: number;
+  width: number;
+  height: number;
+  tilesPerRow: number;
+  indexRows: number;
+  texels: Uint8Array;
+}
+
+/**
+ * Wraps an S11 material function so it shades with the per-pixel volume normal (instance params from
+ * {@link volumeInstanceParams}, vertex streams from {@link volumeSurfaceAttributes}); without the params it behaves
+ * as its base. Refusals: `sdfm.material_unmappable` when `material_main` is not defined exactly once.
+ */
+export function volumeMaterial(functionName: string, wgsl: string): { functionName: string; wgsl: string };
+/** The wrapped standard surface (the material record's own values with the volume normal). */
+export function volumeStandardMaterial(): { functionName: string; wgsl: string };
+/** Checks a normal volume; refusals: `sdfm.schema` naming the first bad field. */
+export function checkNormalVolume(volume: unknown): SdfmNormalVolume;
+/** The `Engine.addTexture` argument of a volume. */
+export function volumeTexture(volume: SdfmNormalVolume): { width: number; height: number; data: Uint8Array };
+/**
+ * The 16 `Engine.setInstanceParams` floats of a volume uploaded as texture `textureId`; `debug` shows the shading
+ * normal as an emissive colour instead of the material.
+ */
+export function volumeInstanceParams(volume: SdfmNormalVolume, textureId: number, options?: { debug?: boolean }): number[];
+/** The vertex streams of a volume-shaded mesh: colours = rest position, uvs = octahedral rest normal, tangents. */
+export function volumeSurfaceAttributes(positions: Float32Array, normals: Float32Array):
+  { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };
+/** A unit tangent across a unit normal (Frisvad / Duff et al.). */
+export function orthoTangent(n: readonly number[]): [number, number, number];
