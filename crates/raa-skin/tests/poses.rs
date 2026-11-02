@@ -106,7 +106,7 @@ fn encode(pass: &SkinPass, gpu: &GpuContext) {
 
 fn pass(gpu: &GpuContext, mesh: &SkinMesh, instances: &[u32]) -> SkinPass {
     let mut pass = SkinPass::new(gpu);
-    let inputs = Rc::new(SkinVertexInputs::new(gpu, mesh));
+    let inputs = Rc::new(SkinVertexInputs::new(gpu, mesh).expect("skin inputs"));
     for &instance in instances {
         let (view, _) = rest(gpu, mesh);
         pass.add_instance(instance, inputs.clone(), view).unwrap();
@@ -155,8 +155,12 @@ fn missing_or_toggled_skinning_selects_rest_or_fresh_poses() {
     let mut pass = SkinPass::new(&gpu);
     assert_eq!((pass.name(), pass.order()), ("skin", 15));
     assert_eq!((SKIN_ORDER, SKIN_FEATURE_BIT), (15, 20));
-    pass.add_instance(7, Rc::new(SkinVertexInputs::new(&gpu, &mesh)), view)
-        .unwrap();
+    pass.add_instance(
+        7,
+        Rc::new(SkinVertexInputs::new(&gpu, &mesh).expect("skin inputs")),
+        view,
+    )
+    .unwrap();
     assert!(pass.views().skinned_stream0(7).is_none());
     assert!(std::ptr::eq(pass.views().stream0_for(7, &rest0), &rest0));
 

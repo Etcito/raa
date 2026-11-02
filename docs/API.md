@@ -123,6 +123,7 @@ Returned by `spawnAsset`; all handles are new. `root: number` is the new root no
 
 - `api.*` (raised by the JS layer): `api.invalid_argument` (a value of the wrong type or out of range), `api.unknown_param` (an extra primitive parameter key), `api.unknown_handle` (a handle that was never issued, or was removed), `api.length_mismatch` (`setTransforms` array sizes), `api.disposed` (any call after `dispose`).
 - Pass-through codes, kept as the Rust crates define them: `geom.unknown_kind`, `geom.missing_param`, `geom.invalid_param`, `geom.invalid_mesh`; `material.invalid`, `material.unknown_id`, `material.unknown`; `scene.stale_node`, `scene.stale_instance`, `scene.parent_cycle`; `render.too_many_materials`; `core.no_adapter`, `core.request_device`, `core.surface`, `core.resource`, `core.gpu`, `core.unsupported`.
+- A `GPUDevice` the browser lost or destroyed is reported as `core.gpu: device lost (<reason>)`; `render`, `probeNonEmpty` and every other engine call refuse instead of using the dead device.
 - Asset loader codes, kept as is: `json.*`, `format.*`, `schema.*`, `value.*`, `id.*`, `kind.unknown`, `kind.params`, `cap.nodes`, `cap.depth`, `cap.budget`, `collision.*`, `boolean.unsupported`, `boolean.csg.*`, `loader.*`.
 
 ### `Engine`

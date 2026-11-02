@@ -121,7 +121,7 @@ fn posed_edges_follow_bent_duplicates_and_isolate_instances() {
         panic!("posed edge parity requires an adapter; no comparison executed");
     };
     let mesh = fixture();
-    let inputs = SkinVertexInputs::new(&gpu, &mesh);
+    let inputs = SkinVertexInputs::new(&gpu, &mesh).expect("skin inputs");
     let kernel = SkinVertexKernel::new(&gpu);
     let pairs = pairs(&mesh);
     let mut scaled = ID;

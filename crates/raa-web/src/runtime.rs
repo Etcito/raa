@@ -124,6 +124,9 @@ impl WebRuntime {
     /// (`performance.now()` delta) in the ring and, with an alloc probe, the allocation count
     /// of the frame. Allocates nothing itself after warm-up, except the frame-0 callback.
     pub fn frame(&mut self, now_ms: f64) -> Result<(), RaaError> {
+        // A lost device cannot record or present a frame; refuse before any upload or pipeline
+        // work touches wgpu (which would panic on a destroyed device).
+        self.gpu.ensure_live()?;
         let allocs_before = self.alloc_probe.map(|probe| probe());
         let t0 = self.performance.now();
         let frame = self.update_and_acquire(now_ms)?;
@@ -212,6 +215,7 @@ impl WebRuntime {
     /// RGBA/BGRA canvas formats (`core.unsupported` otherwise); a mapping failure gives
     /// `core.gpu`.
     pub async fn probe_non_empty(&mut self, now_ms: f64) -> Result<bool, RaaError> {
+        self.gpu.ensure_live()?;
         let format = self.surface.format();
         let swap_red_blue = match format {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,

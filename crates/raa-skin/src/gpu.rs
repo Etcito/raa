@@ -2,8 +2,7 @@
 use std::collections::BTreeSet;
 
 use crate::SkinMesh;
-use raa_core::{GpuContext, wgpu};
-use wgpu::util::DeviceExt;
+use raa_core::{GpuContext, RaaError, wgpu};
 
 pub const SKIN_WGSL: &str = include_str!("skin.wgsl");
 pub const SKIN_EDGES_WGSL: &str = include_str!("skin_edges.wgsl");
@@ -18,8 +17,10 @@ pub struct SkinVertexInputs {
 
 impl SkinVertexInputs {
     /// Packs validated S18 inputs, resolving generated/default tangents as skin_cpu does.
-    /// The rest streams, UVs, colours and topology are never modified.
-    pub fn new(gpu: &GpuContext, mesh: &SkinMesh) -> Self {
+    /// The rest streams, UVs, colours and topology are never modified. Refuses
+    /// `core.gpu: device lost (...)` instead of touching a device the browser lost.
+    pub fn new(gpu: &GpuContext, mesh: &SkinMesh) -> Result<Self, RaaError> {
+        gpu.ensure_live()?;
         let bytes = Self::bytes(mesh);
         let mut set = BTreeSet::new();
         for tri in mesh.rest.base.indices.chunks_exact(3) {
@@ -29,20 +30,29 @@ impl SkinVertexInputs {
         }
         let pairs: Vec<u32> = set.into_iter().flat_map(|(a, b)| [a, b]).collect();
         let pair_bytes: Vec<_> = pairs.iter().flat_map(|i| i.to_le_bytes()).collect();
-        let buffer = |label, contents| {
-            gpu.device()
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                })
+        // A plain buffer plus a queue write, never `create_buffer_init`: its mapped-at-creation
+        // path panics when the browser has already lost the device (the lobby rebuild's skin
+        // upload hit exactly that trap). `GpuContext::ensure_live` then reports the loss.
+        let buffer = |label: &'static str, contents: &[u8]| {
+            let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: contents.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            if !contents.is_empty() {
+                gpu.queue().write_buffer(&buffer, 0, contents);
+            }
+            buffer
         };
-        Self {
+        Ok(Self {
             buffer: buffer("skin.rest", &bytes),
             edge_pairs: buffer("skin.edges", &pair_bytes),
             vertices: mesh.rest.vertex_count() as u32,
             edges: (pairs.len() / 2) as u32,
-        }
+        })
     }
 
     /// Little-endian 64-byte records matching binding 0 of [`SKIN_WGSL`].

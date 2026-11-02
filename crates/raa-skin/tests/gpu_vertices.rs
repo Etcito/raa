@@ -89,7 +89,7 @@ fn gpu_vertices_match_cpu_and_preserve_shared_attributes() {
         panic!("GPU parity requires an adapter; no comparison executed");
     };
     let mesh = fixture();
-    let inputs = SkinVertexInputs::new(&gpu, &mesh);
+    let inputs = SkinVertexInputs::new(&gpu, &mesh).expect("skin inputs");
     let kernel = SkinVertexKernel::new(&gpu);
     let mut stream1 = vec![];
     mesh.rest.write_stream1_bytes(&mut stream1);

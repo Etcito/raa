@@ -296,7 +296,11 @@ pub struct Engine {
 
 impl Engine {
     fn runtime(&mut self) -> Result<&mut WebRuntime, JsValue> {
-        self.runtime.as_mut().ok_or_else(disposed)
+        let runtime = self.runtime.as_mut().ok_or_else(disposed)?;
+        // Once the browser loses the device every GPU call would panic inside wgpu (the lobby
+        // rebuild's skin upload did); refuse with a typed `core.gpu` instead.
+        runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
+        Ok(runtime)
     }
 
     /// Resizes the canvas backing store (zero sizes clamp to 1); the camera aspect follows.
@@ -322,6 +326,7 @@ impl Engine {
         f: impl FnOnce(&GpuContext, &mut EngineState) -> Result<R, RaaError>,
     ) -> Result<R, JsValue> {
         let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
         let mut guard = self.state.borrow_mut();
         let s = guard.as_mut().ok_or_else(disposed)?;
         f(runtime.gpu(), s).map_err(|e| js_err(&e))

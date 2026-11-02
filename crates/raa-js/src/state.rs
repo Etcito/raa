@@ -206,7 +206,7 @@ impl SkinFeature {
         if let Some(data) = self.meshes.borrow().get(&mesh) {
             return Ok(Rc::clone(data));
         }
-        let inputs = Rc::new(SkinVertexInputs::new(gpu, skin));
+        let inputs = Rc::new(SkinVertexInputs::new(gpu, skin)?);
         let data = Rc::new(SkinnedMeshGpu {
             rest: rest_view(gpu, skin, inputs.edges)?,
             inputs,
@@ -243,20 +243,26 @@ impl FeaturePass for SkinPipelinePass {
 
 /// The rest view sizes: S1 stream 0, S10 stream 1, indices and 24 B per edge.
 fn rest_view(gpu: &GpuContext, skin: &SkinMesh, edges: u32) -> Result<RestMeshView, RaaError> {
-    use wgpu::util::DeviceExt;
+    gpu.ensure_live()?;
     let mut rest = skin.rest.clone();
     rest.ensure_tangents();
     let (mut stream0, mut stream1, mut index) = (Vec::new(), Vec::new(), Vec::new());
     rest.write_stream0_bytes(&mut stream0);
     rest.write_stream1_bytes(&mut stream1);
     rest.write_index_bytes(&mut index);
-    let buffer = |label, contents: &[u8], usage| {
-        gpu.device()
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents,
-                usage,
-            })
+    // A plain buffer plus a queue write: `create_buffer_init` maps at creation and panics on a
+    // device the browser has already lost, before `with_state` can report `core.gpu`.
+    let buffer = |label: &'static str, contents: &[u8], usage: wgpu::BufferUsages| {
+        let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: contents.len() as u64,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        if !contents.is_empty() {
+            gpu.queue().write_buffer(&buffer, 0, contents);
+        }
+        buffer
     };
     let edge_buffer = (edges > 0).then(|| {
         gpu.device().create_buffer(&wgpu::BufferDescriptor {

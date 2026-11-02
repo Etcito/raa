@@ -179,7 +179,8 @@ export interface SpawnedAsset {
  * - `scene.stale_node`, `scene.stale_instance`, `scene.parent_cycle`
  * - `render.too_many_materials`
  * - `core.no_adapter`, `core.request_device`, `core.surface`, `core.resource`,
- *   `core.gpu`, `core.unsupported`
+ *   `core.gpu`, `core.unsupported`; a lost or destroyed GPUDevice is
+ *   `core.gpu: device lost (<reason>)` and every later engine call refuses
  * - prims asset loader codes, kept as is: `json.*`, `format.*`, `schema.*`, `value.*`,
  *   `id.*`, `material.unknown`, `kind.unknown`, `kind.params`, `cap.nodes`, `cap.depth`,
  *   `cap.budget`, `collision.*`, `boolean.unsupported`, `boolean.csg.*`, `loader.*`

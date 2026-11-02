@@ -1,6 +1,9 @@
 //! Adapter, device and queue: [`GpuContext`], [`AdapterSummary`], [`GpuOptions`] and
 //! [`DeviceRequest`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use crate::RaaError;
 
 /// Substrings (lower case) that mark a software adapter (the Conventions hardware rule).
@@ -95,6 +98,44 @@ pub struct DeviceRequest {
     pub adapter_limits: bool,
 }
 
+/// What the browser reported when it lost the device: the reason and the message.
+#[derive(Debug, Default)]
+struct LostState {
+    lost: AtomicBool,
+    reason: Mutex<Option<(wgpu::DeviceLostReason, String)>>,
+}
+
+impl LostState {
+    /// Marks the device lost and keeps the browser's reason (first report wins).
+    fn report(&self, reason: wgpu::DeviceLostReason, message: String) {
+        if let Ok(mut slot) = self.reason.lock()
+            && slot.is_none()
+        {
+            *slot = Some((reason, message));
+        }
+        self.lost.store(true, Ordering::Release);
+    }
+
+    /// `device lost (destroyed)` or `device lost (unknown): <message>`.
+    fn message(&self) -> String {
+        let reason = self.reason.lock().ok().and_then(|slot| slot.clone());
+        match reason {
+            Some((reason, message)) => {
+                let name = match reason {
+                    wgpu::DeviceLostReason::Destroyed => "destroyed",
+                    _ => "unknown",
+                };
+                if message.is_empty() {
+                    format!("device lost ({name})")
+                } else {
+                    format!("device lost ({name}): {message}")
+                }
+            }
+            None => "device lost".to_string(),
+        }
+    }
+}
+
 /// The adapter, device and queue used by every other RAA object.
 #[derive(Debug)]
 pub struct GpuContext {
@@ -102,6 +143,7 @@ pub struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     summary: AdapterSummary,
+    lost: Arc<LostState>,
 }
 
 impl GpuContext {
@@ -119,6 +161,23 @@ impl GpuContext {
 
     pub fn summary(&self) -> &AdapterSummary {
         &self.summary
+    }
+
+    /// Whether the browser lost (or the code destroyed) this device.
+    ///
+    /// A lost device cannot create or use GPU resources any more; the engine returns a
+    /// `core.gpu` refusal instead of letting wgpu panic on the dead device.
+    pub fn is_lost(&self) -> bool {
+        self.lost.lost.load(Ordering::Acquire)
+    }
+
+    /// `core.gpu: device lost (...)` once the device is lost, `Ok(())` while it is live.
+    pub fn ensure_live(&self) -> Result<(), RaaError> {
+        if self.is_lost() {
+            Err(RaaError::Gpu(self.lost.message()))
+        } else {
+            Ok(())
+        }
     }
 
     /// The device's enabled features.
@@ -151,11 +210,15 @@ impl GpuContext {
             .request_device(&desc)
             .await
             .map_err(|e| RaaError::RequestDevice(e.to_string()))?;
+        let lost = Arc::new(LostState::default());
+        let report = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| report.report(reason, message));
         Ok(GpuContext {
             adapter,
             device,
             queue,
             summary,
+            lost,
         })
     }
 
