@@ -31,7 +31,7 @@ impl OverlayGeometry {
         rest_stream0: &wgpu::Buffer,
         rest_edges: Option<&wgpu::Buffer>,
     ) -> Self {
-        let posed = source.posed(tag);
+        let posed = source.overlay_posed(tag);
         let stream0 = source.stream0(tag).unwrap_or_else(|| rest_stream0.clone());
         let (edges, edge_stride) = match source.edges(tag) {
             Some(edges) => (Some(edges), SKINNED_EDGE_STRIDE),

@@ -1,0 +1,5 @@
+{
+  "_comment": "Page manifest for nomorechat's GPU client: the render op runs the N = 1..200 sweep and returns its structural counts (draws per pass, compute dispatches, palette writes).",
+  "page": "index.html",
+  "ops": ["render"]
+}

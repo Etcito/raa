@@ -81,6 +81,18 @@ Normals and tangent xyz use the blended matrix's upper 3x3 and are renormalised;
 tangent handedness, UVs and colours stay unchanged. Culling uses conservative
 posed bounds formed from the union of joint-transformed rest bounds.
 
+Instanced skinning: every pose lives in one shared joint palette (a block of
+whole 4-matrix units per instance, uploaded with one `write_buffer` per frame),
+and the lit vertex stage skins posed instances from it. Posed instances of one
+mesh and material are therefore one instanced draw per pass whatever their
+number, with no per-instance buffer and no compute dispatch. The `skin` pass
+dispatches compute only for editor overlay geometry (posed stream 0 and edge
+segments) of instances whose outline or wireframe is on.
+`engine.skinStats()` returns the last frame's structural counts: `posed`,
+`paletteWrites` (0 or 1), `dispatches` (0 without overlays) and `overlays`;
+`engine.stats().drawCalls` gives the draws of one pass.
+`examples/instanced-skin/` shows the draw count staying constant for N = 1..200.
+
 ## Errors
 
 Engine validation throws `RaaError` with a stable `code`:

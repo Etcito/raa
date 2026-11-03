@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAA instanced skinning counts</title>
+  <style>
+    html, body { margin: 0; background: #0b0d12; color: #e6e6e6; font: 14px system-ui, sans-serif; }
+    canvas { display: block; width: 100%; max-width: 960px; aspect-ratio: 16 / 9; }
+    .bar { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; padding: 0.75rem 1rem; }
+    pre { margin: 0; padding: 0 1rem 1rem; white-space: pre-wrap; }
+    #error { color: #ff8a80; }
+  </style>
+</head>
+<body>
+  <canvas id="c" width="960" height="540"></canvas>
+  <div class="bar">
+    <label>Instances <input id="n" type="range" min="1" max="200" value="60"> <output id="nOut">60</output></label>
+    <button id="sweep" type="button">Sweep N = 1..200</button>
+    <span id="source"></span>
+  </div>
+  <pre id="live"></pre>
+  <pre id="table"></pre>
+  <pre id="error" role="alert"></pre>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

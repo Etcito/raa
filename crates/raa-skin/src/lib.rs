@@ -14,7 +14,7 @@ pub use cpu::{CpuSkin, skin_cpu};
 pub use error::SkinError;
 pub use gpu::{SKIN_WGSL, SkinVertexInputs, SkinVertexKernel};
 pub use mesh::{MAX_INFLUENCES, MAX_JOINTS, SkinMesh, WEIGHT_SUM_EPS};
-pub use pass::{SKIN_FEATURE_BIT, SKIN_ORDER, SKIN_PASS, SkinPass};
+pub use pass::{SKIN_FEATURE_BIT, SKIN_ORDER, SKIN_PASS, SkinFrameStats, SkinPass};
 pub use pose::{POSE_BYTES, PoseBuffer, validate_pose};
 
 /// Absolute component-wise GPU/CPU tolerance; both values must also be finite.

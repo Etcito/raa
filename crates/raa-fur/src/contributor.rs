@@ -184,7 +184,7 @@ impl FurContributor {
                 msaa,
                 flags: record.flags & VARIANT_FLAGS | lit.material_variant_flags(d.material),
             };
-            let pipeline = lit.pipeline_for(gpu, key, &self.spec)?;
+            let pipeline = lit.pipeline_for_draw(gpu, d.mesh, key, &self.spec)?;
             self.plan.push(ShellDraw {
                 pipeline,
                 shells: shell_count(record.fur[3]),

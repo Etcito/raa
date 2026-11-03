@@ -1,5 +1,5 @@
 use raa_core::{MaterialId, MeshId};
-use raa_lit::{DrawClass, DrawPrep, MaterialClass, PrepInput, SurfaceMaterial};
+use raa_lit::{DrawClass, DrawPrep, MaterialClass, PrepInput, SkinDraw, SurfaceMaterial};
 use raa_lit::skin_bounds::{posed_bounds, visible};
 use raa_lit::skin_draw::instance_bounds;
 use raa_math::{Aabb, Mat4, Vec3};
@@ -55,7 +55,10 @@ fn independent_poses_camera_passes_rest_fallback_and_off_camera_casters() {
         let mut prep = DrawPrep::new(3, 1);
         let input = PrepInput { known_mesh: &|m| m.0 == 0, ..input };
         for enabled in [true, false] {
-            prep.prepare_skinned(&input, &|tag| enabled && tag < 2).unwrap();
+            prep.prepare_skinned(&input, &|tag| {
+                (enabled && tag < 2).then_some(SkinDraw { base: tag * 4, skin: 1 })
+            })
+            .unwrap();
             prep.cull_camera(&|_, tag, world| {
                 let bounds = if enabled && tag < 2 {
                     posed_bounds(rest(), &pose(if tag == 0 { -4. } else { 4. }))

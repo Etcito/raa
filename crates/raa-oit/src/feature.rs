@@ -347,7 +347,8 @@ impl OitPass {
                 msaa: 1,
                 flags: flags | lit.material_variant_flags(d.material),
             };
-            let pipeline = lit.pipeline_for(gpu, key, self.sized.pipelines.spec(flags))?;
+            let pipeline =
+                lit.pipeline_for_draw(gpu, d.mesh, key, self.sized.pipelines.spec(flags))?;
             pass.set_pipeline(&pipeline);
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
             lit.draw_surface_instances(pass, 0..count, instances);

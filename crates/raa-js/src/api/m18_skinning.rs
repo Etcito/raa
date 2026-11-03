@@ -48,4 +48,22 @@ impl Engine {
     ) -> Result<(), JsValue> {
         self.with_state(|gpu, st| st.set_skin_poses(gpu, &instances.to_vec(), &matrices.to_vec()))
     }
+
+    /// Structural skin counts of the last recorded frame (no timing): `posed` instances,
+    /// `paletteWrites` (0 or 1 joint-palette upload), `dispatches` (compute, editor
+    /// overlays only) and `overlays` (live overlay views). Zeros without the skin feature.
+    #[wasm_bindgen(js_name = skinStats)]
+    pub fn skin_stats(&mut self) -> Result<JsValue, JsValue> {
+        let s = self.with_state(|_, st| Ok(st.skin_stats()))?;
+        let obj = js_sys::Object::new();
+        for (key, value) in [
+            ("posed", s.posed),
+            ("paletteWrites", s.palette_writes),
+            ("dispatches", s.dispatches),
+            ("overlays", s.overlays),
+        ] {
+            let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(key), &JsValue::from(value));
+        }
+        Ok(obj.into())
+    }
 }

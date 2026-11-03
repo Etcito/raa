@@ -561,6 +561,14 @@ impl EngineState {
         self.apply_skin_poses(gpu, &plan, matrices)
     }
 
+    /// Structural counts of the skin pass's last frame (zeros without the feature).
+    pub(crate) fn skin_stats(&self) -> raa_skin::SkinFrameStats {
+        self.features
+            .get::<SkinFeature>()
+            .and_then(|f| f.pass.try_borrow().ok().map(|p| p.last_stats()))
+            .unwrap_or_default()
+    }
+
     fn apply_skin_poses(
         &mut self,
         gpu: &GpuContext,

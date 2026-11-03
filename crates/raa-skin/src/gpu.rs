@@ -38,6 +38,7 @@ impl SkinVertexInputs {
                 label: Some(label),
                 size: contents.len() as u64,
                 usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::VERTEX
                     | wgpu::BufferUsages::COPY_SRC
                     | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
@@ -136,6 +137,43 @@ impl SkinVertexKernel {
         })
     }
 
+    /// Like [`Self::bind`] with the pose as a buffer range (a palette block: offset a
+    /// multiple of 256 B).
+    pub fn bind_range(
+        &self,
+        gpu: &GpuContext,
+        inputs: &SkinVertexInputs,
+        pose: wgpu::BufferBinding<'_>,
+        stream0: &wgpu::Buffer,
+        tangents: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        assert_eq!(stream0.size(), u64::from(inputs.vertices) * 24);
+        assert_eq!(tangents.size(), u64::from(inputs.vertices) * 16);
+        let entries = [
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: inputs.buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Buffer(pose),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: stream0.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: tangents.as_entire_binding(),
+            },
+        ];
+        gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skin.instance"),
+            layout: &self.pipeline.get_bind_group_layout(0),
+            entries: &entries,
+        })
+    }
+
     /// Bind the rest edge topology and the posed stream0 (48-byte segment records).
     pub fn bind_edges(
         &self,
@@ -199,6 +237,35 @@ impl SkinVertexKernel {
             let edges = self.bind_edges(gpu, inputs, stream0, segments);
             self.encode_edges(encoder, &edges, inputs.edges);
         }
+    }
+
+    /// [`Self::dispatch`] with the pose as a buffer range (a palette block). Returns the
+    /// number of compute dispatches recorded (vertices, plus edges when bound).
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_binding(
+        &self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        inputs: &SkinVertexInputs,
+        pose: wgpu::BufferBinding<'_>,
+        stream0: &wgpu::Buffer,
+        tangents: &wgpu::Buffer,
+        segments: Option<&wgpu::Buffer>,
+    ) -> u32 {
+        let mut count = 0;
+        let binding = self.bind_range(gpu, inputs, pose, stream0, tangents);
+        if inputs.vertices > 0 {
+            self.encode(encoder, &binding, inputs.vertices);
+            count += 1;
+        }
+        if let Some(segments) = segments
+            && inputs.edges > 0
+        {
+            let edges = self.bind_edges(gpu, inputs, stream0, segments);
+            self.encode_edges(encoder, &edges, inputs.edges);
+            count += 1;
+        }
+        count
     }
 
     /// Dispatch after [`Self::encode`] so endpoints come from that instance's posed stream.

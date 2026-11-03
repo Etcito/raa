@@ -12,6 +12,7 @@ use raa_shader::MaterialFnId;
 
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::material::{DrawClass, SurfaceMaterial, SurfaceModel};
+use crate::skin_views::{INSTANCE_PALETTE_OFFSET, SkinDraw};
 
 /// Size in bytes of one S1 instance record.
 pub const INSTANCE_GPU_SIZE: usize = 128;
@@ -103,6 +104,8 @@ pub struct DrawPrep {
     sort: Vec<SortKey>,
     camera: [Vec<LitDraw>; 3],
     bindings: HashMap<MeshId, (MeshId, u32)>,
+    /// Scratch of one (mesh, material) run: (skin key, list index), rest first.
+    run: Vec<(Option<u64>, u32)>,
 }
 
 impl DrawPrep {
@@ -121,6 +124,7 @@ impl DrawPrep {
             sort: Vec::with_capacity(n),
             camera: std::array::from_fn(|_| Vec::with_capacity(n)),
             bindings: HashMap::with_capacity(n),
+            run: Vec::with_capacity(n),
         }
     }
 
@@ -183,14 +187,19 @@ impl DrawPrep {
     /// `material.unknown_id` (an item material outside the library),
     /// `material.blend_unavailable` (a material whose class has no handler).
     pub fn prepare(&mut self, input: &PrepInput<'_>) -> Result<(), RaaError> {
-        self.prepare_skinned(input, &|_| false)
+        self.prepare_skinned(input, &|_| None)
     }
 
-    /// Splits posed instances and preserves their source submesh and scene tag.
+    /// Like [`prepare`](Self::prepare) with instanced skinning: `skinned(tag)` is the
+    /// [`SkinDraw`] of a posed instance. Within each (mesh, material) run of an opaque or
+    /// fur class, rest instances come first (one batch), then posed instances grouped by
+    /// skin record buffer, each group ONE instanced draw; every posed instance record
+    /// carries its palette base at bytes 120..124. A posed draw gets a frame-local binding
+    /// id that [`mesh_binding`](Self::mesh_binding) maps to (source submesh, first tag).
     pub fn prepare_skinned(
         &mut self,
         input: &PrepInput<'_>,
-        skinned: &dyn Fn(u32) -> bool,
+        skinned: &dyn Fn(u32) -> Option<SkinDraw>,
     ) -> Result<(), RaaError> {
         self.clear();
         self.validate(input)?;
@@ -284,7 +293,7 @@ impl DrawPrep {
     }
 
     /// Writes everything; `input` is validated, so every material lookup succeeds.
-    fn fill(&mut self, input: &PrepInput<'_>, skinned: &dyn Fn(u32) -> bool) {
+    fn fill(&mut self, input: &PrepInput<'_>, skinned: &dyn Fn(u32) -> Option<SkinDraw>) {
         self.fill_batched(input, DrawClass::Opaque, skinned);
         self.fill_batched(input, DrawClass::Fur, skinned);
         self.fill_transparent(input, skinned);
@@ -294,7 +303,7 @@ impl DrawPrep {
         &mut self,
         input: &PrepInput<'_>,
         class: DrawClass,
-        skinned: &dyn Fn(u32) -> bool,
+        skinned: &dyn Fn(u32) -> Option<SkinDraw>,
     ) {
         let items = &input.list.items;
         let mut i = 0;
@@ -307,38 +316,59 @@ impl DrawPrep {
                 i += 1;
                 continue;
             }
-            let first_instance = self.instance_count();
-            let mut depth = f32::INFINITY;
-            let mut j = i;
-            while let Some(other) = items.get(j) {
-                if other.mesh != item.mesh || other.material != item.material {
-                    break;
-                }
-                if j > i && (skinned(input.tags[i]) || skinned(input.tags[j])) {
-                    break;
-                }
-                depth = depth.min(view_depth(&input.view, other));
-                self.push_instance(input, j);
-                j += 1;
+            let mut end = i + 1;
+            while items
+                .get(end)
+                .is_some_and(|o| o.mesh == item.mesh && o.material == item.material)
+            {
+                end += 1;
             }
-            let draw = LitDraw {
-                mesh: self.draw_binding(input, item.mesh, input.tags[i], skinned),
-                material: item.material,
-                material_fn: mc.material_fn,
-                class,
-                first_instance,
-                instance_count: (j - i) as u32,
-                view_depth: depth,
-            };
-            match class {
-                DrawClass::Fur => self.fur.push(draw),
-                _ => self.opaque.push(draw),
+            // Rest instances first, then posed ones grouped by skin; list order within.
+            self.run.clear();
+            for j in i..end {
+                let key = skinned(input.tags[j]).map(|d| d.skin);
+                self.run.push((key, j as u32));
             }
-            i = j;
+            self.run.sort_unstable();
+            let mut k = 0;
+            while let Some(&(key, rep)) = self.run.get(k) {
+                let first_instance = self.instance_count();
+                let start = k;
+                let mut depth = f32::INFINITY;
+                while let Some(&(other, j)) = self.run.get(k) {
+                    if other != key {
+                        break;
+                    }
+                    if let Some(it) = items.get(j as usize) {
+                        depth = depth.min(view_depth(&input.view, it));
+                    }
+                    self.push_instance(input, j as usize, skinned);
+                    k += 1;
+                }
+                let tag = input.tags[rep as usize];
+                let draw = LitDraw {
+                    mesh: self.draw_binding(input, item.mesh, tag, key.is_some()),
+                    material: item.material,
+                    material_fn: mc.material_fn,
+                    class,
+                    first_instance,
+                    instance_count: (k - start) as u32,
+                    view_depth: depth,
+                };
+                match class {
+                    DrawClass::Fur => self.fur.push(draw),
+                    _ => self.opaque.push(draw),
+                }
+            }
+            i = end;
         }
     }
 
-    fn fill_transparent(&mut self, input: &PrepInput<'_>, skinned: &dyn Fn(u32) -> bool) {
+    fn fill_transparent(
+        &mut self,
+        input: &PrepInput<'_>,
+        skinned: &dyn Fn(u32) -> Option<SkinDraw>,
+    ) {
         let items = &input.list.items;
         for (i, item) in items.iter().enumerate() {
             let transparent = material_class(input, item.material)
@@ -370,8 +400,9 @@ impl DrawPrep {
                 continue;
             };
             let first_instance = self.instance_count();
-            self.push_instance(input, key.item as usize);
-            let mesh = self.draw_binding(input, item.mesh, key.tag, skinned);
+            self.push_instance(input, key.item as usize, skinned);
+            let posed = skinned(key.tag).is_some();
+            let mesh = self.draw_binding(input, item.mesh, key.tag, posed);
             self.transparent.push(LitDraw {
                 mesh,
                 material: item.material,
@@ -396,9 +427,9 @@ impl DrawPrep {
         input: &PrepInput<'_>,
         mesh: MeshId,
         tag: u32,
-        skinned: &dyn Fn(u32) -> bool,
+        posed: bool,
     ) -> MeshId {
-        if !skinned(tag) {
+        if !posed {
             return mesh;
         }
         let mut id = MeshId(u32::MAX - self.bindings.len() as u32);
@@ -410,7 +441,12 @@ impl DrawPrep {
     }
 
     /// Appends the instance and extras records of list item `i`.
-    fn push_instance(&mut self, input: &PrepInput<'_>, i: usize) {
+    fn push_instance(
+        &mut self,
+        input: &PrepInput<'_>,
+        i: usize,
+        skinned: &dyn Fn(u32) -> Option<SkinDraw>,
+    ) {
         let Some(item) = input.list.items.get(i) else {
             return;
         };
@@ -418,6 +454,9 @@ impl DrawPrep {
         write_instance(&mut record, &item.world, item.material.0);
         let tag = input.tags.get(i).copied().unwrap_or(0);
         record[116..120].copy_from_slice(&tag.to_le_bytes());
+        let base = skinned(tag).map_or(0, |d| d.base);
+        record[INSTANCE_PALETTE_OFFSET..INSTANCE_PALETTE_OFFSET + 4]
+            .copy_from_slice(&base.to_le_bytes());
         self.instances.extend_from_slice(&record);
         input
             .extras
@@ -458,7 +497,8 @@ fn put_f32s(out: &mut [u8], values: &[f32]) {
     }
 }
 
-/// S1 instance: model @0, normal matrix columns @64, material index @112, zero padding.
+/// S1 instance: model @0, normal matrix columns @64, material index @112, zero padding
+/// (the caller writes the tag @116 and the skin palette base @120).
 fn write_instance(out: &mut [u8; INSTANCE_GPU_SIZE], world: &Mat4, material: u32) {
     world.write_le_bytes(&mut out[0..64]);
     put_f32s(&mut out[64..112], world.normal_matrix().as_flattened());

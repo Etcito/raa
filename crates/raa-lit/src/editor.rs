@@ -44,10 +44,13 @@ impl LitHandle {
         } else {
             s.editor.global = mode;
         }
+        s.sync_skin_overlays();
     }
     /// Removes the instance wireframe override, restoring the global default.
     pub fn clear_wireframe(&self, instance: u32) {
-        self.shared.borrow_mut().editor.wire.remove(&instance);
+        let mut s = self.shared.borrow_mut();
+        s.editor.wire.remove(&instance);
+        s.sync_skin_overlays();
     }
     /// Outline colour is display sRGB. None disables this instance's outline.
     pub fn set_outline(&self, instance: u32, color: Option<[f32; 3]>) {
@@ -57,6 +60,7 @@ impl LitHandle {
         } else {
             s.editor.outlines.remove(&instance);
         }
+        s.sync_skin_overlays();
     }
     /// Draws surface instances, respecting editor edges-only overrides.
     /// Contributors drawing mesh surfaces should use this instead of draw_indexed.
@@ -487,7 +491,8 @@ impl FeaturePass for EditorPass {
                     } else {
                         &r.silhouette
                     });
-                    let (mesh, first, count) = s.meshes.resolve(draw.mesh)?;
+                    let source_mesh = s.prep.mesh_binding(draw.mesh).0;
+                    let (mesh, first, count) = s.meshes.resolve(source_mesh)?;
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
                         let tag = tag(s.prep.instance_bytes(), i);
@@ -530,7 +535,8 @@ impl FeaturePass for EditorPass {
                     } else {
                         &r.only
                     });
-                    let (mesh, first, count) = s.meshes.resolve(draw.mesh)?;
+                    let source_mesh = s.prep.mesh_binding(draw.mesh).0;
+                    let (mesh, first, count) = s.meshes.resolve(source_mesh)?;
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
                         let tag = tag(s.prep.instance_bytes(), i);
@@ -550,15 +556,16 @@ impl FeaturePass for EditorPass {
             }
             for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
                 for draw in s.prep.draws(class) {
-                    let Some(record) = s.meshes.submesh(draw.mesh) else {
+                    let source_mesh = s.prep.mesh_binding(draw.mesh).0;
+                    let Some(record) = s.meshes.submesh(source_mesh) else {
                         continue;
                     };
                     if s.meshes.submesh_ids(record.lit).and_then(|ids| ids.first())
-                        != Some(&draw.mesh)
+                        != Some(&source_mesh)
                     {
                         continue;
                     }
-                    let (mesh, _, _) = s.meshes.resolve(draw.mesh)?;
+                    let (mesh, _, _) = s.meshes.resolve(source_mesh)?;
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
                         let tag = tag(s.prep.instance_bytes(), i);
                         if s.editor.mode(tag) == WireframeMode::Off {

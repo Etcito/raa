@@ -37,4 +37,24 @@ export interface Engine {
    *   `skin.joint_range`, `skin.cap_joints`, `api.feature_missing`, `pipeline.busy`.
    */
   setSkinPoses(instances: Uint32Array, matrices: Float32Array): void;
+
+  /**
+   * Structural skin counts of the last recorded frame (no timing). Posed instances
+   * are skinned in the vertex stage from one shared joint palette: one instanced draw
+   * per (mesh, material) and pass, one palette upload per frame, and compute only for
+   * editor overlay geometry (outline / wireframe). Zeros without the skin feature.
+   */
+  skinStats(): SkinStats;
+}
+
+/** Returned by {@link Engine.skinStats}. */
+export interface SkinStats {
+  /** Instances with a pose (palette blocks in use). */
+  posed: number;
+  /** Joint palette uploads in the last frame: 0 or 1. */
+  paletteWrites: number;
+  /** Compute dispatches in the last frame (editor overlays only; 0 in a game frame). */
+  dispatches: number;
+  /** Live editor overlay views. */
+  overlays: number;
 }

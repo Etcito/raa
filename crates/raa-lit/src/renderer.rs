@@ -397,6 +397,8 @@ impl LitRenderer {
                 }
             }
         }
+        // The palette bind group follows the skin palette buffer (re-created on growth).
+        s.sync_palette_group(gpu);
 
         let meshes = &s.meshes;
         let handlers = &self.class_handlers;
@@ -412,20 +414,21 @@ impl LitRenderer {
             class_handled: &class_handled,
         };
         let source = s.skin_source.clone();
-        let source = source.0.borrow();
-        s.prep
-            .prepare_skinned(&input, &|tag| !source.0 && source.1.contains_key(&tag))?;
+        let skins = source.0.borrow();
+        let has_palette = s.palette_ready();
+        s.prep.prepare_skinned(&input, &|tag| {
+            has_palette.then(|| skins.draw(tag)).flatten()
+        })?;
 
         let vp = scene.camera.view_proj();
         s.prep.cull_camera(&|mesh, tag, world| {
             let Some(info) = meshes.submesh(mesh).and_then(|m| meshes.info(m.lit)) else {
                 return true;
             };
-            let pose = (!source.0).then(|| source.1.get(&tag)).flatten();
-            // A manually supplied posed view without matrices cannot safely be rejected.
-            let bounds = crate::skin_draw::instance_bounds(
-                info.bounds, pose.is_some(), pose.and_then(|v| v.2.as_deref()),
-            );
+            let pose = has_palette
+                .then(|| skins.draw(tag).and_then(|_| skins.joints(tag)))
+                .flatten();
+            let bounds = crate::skin_draw::instance_bounds(info.bounds, pose.is_some(), pose);
             crate::skin_bounds::visible(bounds, world, vp)
         });
 

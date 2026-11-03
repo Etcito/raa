@@ -43,6 +43,64 @@ const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array!
 const STREAM1_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![10 => Float32x2, 11 => Float32x4, 12 => Float32x4];
 
+/// Posed variants (instanced skinning): the instance stream adds the palette base at
+/// byte 120 (`@location(15)`).
+const POSED_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = {
+    let [a, b, c, d, e, f, g, h] = INSTANCE_ATTRIBUTES;
+    [
+        a,
+        b,
+        c,
+        d,
+        e,
+        f,
+        g,
+        h,
+        wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Uint32,
+            offset: crate::skin_views::INSTANCE_PALETTE_OFFSET as u64,
+            shader_location: 15,
+        },
+    ]
+};
+
+/// Posed variants read uv and colour from stream 1; the rest tangent comes from slot 3.
+const POSED_STREAM1_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 0,
+        shader_location: 10,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 24,
+        shader_location: 12,
+    },
+];
+
+/// Slot 3 of posed variants: the mesh's 64-byte rest skin records (tangent @24, joints
+/// u16x4 @40, weights f32x4 @48).
+const SKIN_RECORD_ATTRIBUTES: [wgpu::VertexAttribute; 3] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 24,
+        shader_location: 11,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint16x4,
+        offset: 40,
+        shader_location: 13,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 48,
+        shader_location: 14,
+    },
+];
+
+/// Vertex slot of the rest skin records in posed variants.
+pub(crate) const SKIN_SLOT: u32 = 3;
+
 /// Stages that read group 0 (the vertex stage reads materials and extras too).
 const FRAME_VISIBILITY: wgpu::ShaderStages = wgpu::ShaderStages::VERTEX_FRAGMENT;
 
@@ -83,6 +141,47 @@ fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
             attributes: &STREAM1_ATTRIBUTES,
         }),
     ]
+}
+
+/// The vertex buffers of posed variants: stream 0 (rest), the instance stream with the
+/// palette base, stream 1 without its tangent and the rest skin records in slot 3.
+fn posed_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 4] {
+    [
+        Some(wgpu::VertexBufferLayout {
+            array_stride: STREAM0_STRIDE,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &STREAM0_ATTRIBUTES,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: INSTANCE_GPU_SIZE as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &POSED_INSTANCE_ATTRIBUTES,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: STREAM1_STRIDE,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &POSED_STREAM1_ATTRIBUTES,
+        }),
+        Some(wgpu::VertexBufferLayout {
+            array_stride: crate::skin_views::SKIN_RECORD_STRIDE,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &SKIN_RECORD_ATTRIBUTES,
+        }),
+    ]
+}
+
+/// Group 3 of posed variants: the joint palette, read-only storage (vertex stage).
+fn palette_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
+    [wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::VERTEX,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: NonZeroU64::new(crate::skin_views::PALETTE_MATRIX_BYTES),
+        },
+        count: None,
+    }]
 }
 
 /// S10 group 0: binding 0 `FrameGpu` uniform (512 B), binding 1 `array<SurfaceMaterialGpu>`
@@ -260,6 +359,9 @@ pub(crate) struct LitShared {
     /// The group-1 layout of `raa_pipeline::LightingResources`.
     lighting_layout: wgpu::BindGroupLayout,
     pipelines: RefCell<PipelineCache<wgpu::RenderPipeline>>,
+    /// Group 3 of posed variants and its bind group over the palette (by generation).
+    palette_layout: wgpu::BindGroupLayout,
+    palette_group: Option<(u64, wgpu::BindGroup)>,
     modules: RefCell<HashMap<String, wgpu::ShaderModule>>,
     content_pipelines: RefCell<HashMap<(String, PipelineSpec), wgpu::RenderPipeline>>,
 }
@@ -320,6 +422,12 @@ impl LitShared {
                     label: Some("raa.lit.frame_layout"),
                     entries: &frame_layout_entries(),
                 });
+        let palette_layout =
+            gpu.device()
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("raa.lit.skin_palette_layout"),
+                    entries: &palette_layout_entries(),
+                });
         let textures = TextureAtlas::new(gpu);
         let frame_bind_group = create_frame_bind_group(
             gpu,
@@ -349,6 +457,8 @@ impl LitShared {
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
             pipelines: RefCell::new(PipelineCache::new()),
+            palette_layout,
+            palette_group: None,
             modules: RefCell::new(HashMap::new()),
             content_pipelines: RefCell::new(HashMap::new()),
         })
@@ -434,6 +544,55 @@ impl LitShared {
         }
     }
 
+    /// Re-creates the palette bind group when the skin palette buffer was (re)created.
+    pub(crate) fn sync_palette_group(&mut self, gpu: &GpuContext) {
+        let Some((buffer, generation)) = self.skin_source.palette() else {
+            self.palette_group = None;
+            return;
+        };
+        if self
+            .palette_group
+            .as_ref()
+            .is_some_and(|(g, _)| *g == generation)
+        {
+            return;
+        }
+        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa.lit.skin_palette"),
+            layout: &self.palette_layout,
+            entries: &[whole(0, &buffer)],
+        });
+        self.palette_group = Some((generation, group));
+    }
+
+    /// Whether posed draws can bind the palette this frame.
+    pub(crate) fn palette_ready(&self) -> bool {
+        self.palette_group.is_some()
+    }
+
+    /// Mirrors the editor overlay state into the skin draw source (the skin pass builds
+    /// overlay geometry only for tags whose outline or wireframe is on).
+    pub(crate) fn sync_skin_overlays(&self) {
+        use crate::editor::WireframeMode;
+        let e = &self.editor;
+        self.skin_source.set_overlay_requests(
+            e.global != WireframeMode::Off,
+            e.wire.iter().map(|(&t, &m)| (t, m != WireframeMode::Off)),
+            e.outlines.keys().copied(),
+        );
+    }
+
+    /// The rest skin records and palette bind group a draw of instance `tag` binds when it
+    /// is drawn posed; `None` draws rest (no tag, no pose, skinning disabled or no palette).
+    pub(crate) fn posed_binding(
+        &self,
+        tag: Option<u32>,
+    ) -> Option<(wgpu::Buffer, wgpu::BindGroup)> {
+        let (_, group) = self.palette_group.as_ref()?;
+        let skin = self.skin_source.skin_buffer(tag?)?;
+        Some((skin, group.clone()))
+    }
+
     /// The cached pipeline of (`key`, `spec`, current slots), composed and built on a miss.
     fn pipeline_for(
         &self,
@@ -495,27 +654,29 @@ impl LitShared {
         };
         drop(modules);
         let shadow = key.pass == PassKind::Shadow;
+        let posed = key.flags & crate::skin_draw::POSED != 0;
         let mut groups = vec![
             Some(&self.frame_layout),
             (!shadow).then_some(&self.lighting_layout),
         ];
         if let Some(extra) = &spec.extra_layout {
             groups.push(Some(extra));
+        } else if posed {
+            groups.push(None);
+        }
+        if posed {
+            groups.push(Some(&self.palette_layout));
         }
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("raa.lit.pipeline_layout"),
             bind_group_layouts: &groups,
             immediate_size: 0,
         });
-        let mut buffers = vertex_buffer_layouts().to_vec();
-        const TANGENT: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![13 => Float32x3];
-        if key.flags & crate::skin_draw::POSED != 0 {
-            buffers.push(Some(wgpu::VertexBufferLayout {
-                array_stride: 16,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &TANGENT,
-            }));
-        }
+        let buffers = if posed {
+            posed_vertex_buffer_layouts().to_vec()
+        } else {
+            vertex_buffer_layouts().to_vec()
+        };
         let fragment = (!shadow).then(|| wgpu::FragmentState {
             module: &module,
             entry_point: Some("fs_main"),
@@ -640,12 +801,13 @@ impl LitHandle {
         let s = self.shared.borrow();
         let (mesh, tag) = s.prep.mesh_binding(mesh);
         let (g, first, count) = s.meshes.resolve(mesh)?;
-        let source = s.skin_source.0.borrow();
-        let posed = tag.and_then(|tag| (!source.0).then(|| source.1.get(&tag)).flatten());
+        let posed = s.posed_binding(tag);
         s.bound_skin.set(posed.is_some());
-        pass.set_vertex_buffer(STREAM0_SLOT, posed.map_or(&g.stream0, |v| &v.0).slice(..));
-        if let Some((_, tangent, _)) = posed {
-            pass.set_vertex_buffer(3, tangent.slice(..));
+        pass.set_vertex_buffer(STREAM0_SLOT, g.stream0.slice(..));
+        if let Some((skin, palette)) = &posed {
+            // Instanced skinning: rest skin records in slot 3, the palette in group 3.
+            pass.set_vertex_buffer(SKIN_SLOT, skin.slice(..));
+            pass.set_bind_group(crate::skin_draw::PALETTE_GROUP, palette, &[]);
         }
         pass.set_vertex_buffer(INSTANCE_SLOT, s.instance_buffer.slice(..));
         pass.set_vertex_buffer(STREAM1_SLOT, g.stream1.slice(..));
@@ -710,6 +872,31 @@ impl LitHandle {
         s.pipeline_for(gpu, key, spec)
     }
 
+    /// The pipeline of a draw of prepared binding `mesh`: the posed (instanced skinning)
+    /// variant when [`bind_mesh`](Self::bind_mesh) binds that draw posed, else the rest
+    /// variant. Unlike [`pipeline_for`](Self::pipeline_for) it does not depend on the last
+    /// bound mesh, so it can be resolved before any draw is bound (fur plans in prepare).
+    pub fn pipeline_for_draw(
+        &self,
+        gpu: &GpuContext,
+        mesh: MeshId,
+        key: VariantKey,
+        spec: &PipelineSpec,
+    ) -> Result<wgpu::RenderPipeline, RaaError> {
+        let s = self.shared.borrow();
+        let mut key = key;
+        if s.posed_binding(s.prep.mesh_binding(mesh).1).is_some() {
+            key.flags |= crate::skin_draw::POSED;
+        }
+        s.pipeline_for(gpu, key, spec)
+    }
+
+    /// Whether a draw of prepared binding `mesh` is drawn posed (instanced skinning).
+    pub fn draw_is_posed(&self, mesh: MeshId) -> bool {
+        let s = self.shared.borrow();
+        s.posed_binding(s.prep.mesh_binding(mesh).1).is_some()
+    }
+
     /// Stores the S23 tint mode of material `id` (`multiply` by default). Draws of a
     /// material in `graph` mode carry [`material_variant_flags`](Self::material_variant_flags)
     /// in their [`VariantKey`], so their pipelines compose without the post-material tint
@@ -740,7 +927,10 @@ impl LitHandle {
     /// Connect the skin pass's live views before preparing draws. Bind each mesh before
     /// requesting its pipeline so the auxiliary tangent layout matches that draw.
     pub fn set_skin_views(&self, views: &crate::SkinViews) {
-        self.shared.borrow_mut().skin_source = views.draw_source();
+        let mut s = self.shared.borrow_mut();
+        s.skin_source = views.draw_source();
+        s.palette_group = None;
+        s.sync_skin_overlays();
     }
 
     /// MSAA sample count of the forward pass (1 or 4).
