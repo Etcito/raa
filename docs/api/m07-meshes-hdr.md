@@ -99,6 +99,19 @@ The counts, sub-meshes and bounds of mesh `id`. Code: `api.unknown_handle`.
 
 Draws `mesh` at `node`, each sub-mesh with its own `material` (the engine's default material, a grey standard material, when the sub-mesh has none), and returns an instance handle. The handle behaves as a v0 instance: `removeInstance` and `setVisible` act on all of its sub-meshes. Codes: `api.unknown_handle`, `scene.stale_node`.
 
+### `setSingleMaterial`
+
+`engine.setSingleMaterial(enabled: boolean): void`
+`engine.setSingleMaterial(enabled: boolean | null, instance: number): void`
+
+Render option, default `false`. With `instance`, it is that instance's own setting and wins over the global one; `null` makes the instance follow the global setting again. The global setting takes a boolean only (`null` without an instance throws `api.invalid_argument`); other codes: `api.unknown_handle`, `scene.stale_instance`. `false` is the behaviour above: every instance draws each sub-mesh with its own material (the per-face material assignment the mesh carries). `true`: every instance draws all of its sub-meshes with the object's single material, the one `setInstanceMaterial` gave it, else the material of its sub-mesh with the most indices (the default material when that sub-mesh has none). The meshes and their sub-mesh materials are never changed (`meshInfo` still lists them); switching back to `false` restores the per sub-mesh materials. Live instances are rebuilt at once; meshes updated later follow the current setting. An instance made by v0 `addInstance(node, mesh, material)` keeps drawing that material either way.
+
+### `setInstanceMaterial`
+
+`engine.setInstanceMaterial(instance: number, material: number | null): void`
+
+The object's single material of `instance`, drawn on all of its sub-meshes while `setSingleMaterial(true)` is on; `null` clears it (the largest sub-mesh decides again). Ignored while the option is off. Codes: `api.unknown_handle` (instance or material), `scene.stale_instance`.
+
 ## Pipeline (S12)
 
 The engine runs one ordered list of passes each frame. Passes run by ascending order (unless `setPassOrder` set another one); contributors draw inside the forward pass after the opaque draws, at their own position. Milestone 1 installs these rows of the S12 table; later features add their own rows (sky, shadows, AO, bloom...):

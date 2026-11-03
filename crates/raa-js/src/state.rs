@@ -300,6 +300,12 @@ pub(crate) struct InstanceGroup {
     pub tag: u32,
     /// v0 `addInstance(node, mesh, material)`: every sub-mesh draws this material.
     pub material: Option<MaterialId>,
+    /// `setInstanceMaterial`: the object's single material, drawn on every sub-mesh while
+    /// `setSingleMaterial(true)` is on (ignored while it is off).
+    pub object_material: Option<MaterialId>,
+    /// `setSingleMaterial(enabled, instance)`: this instance's own setting; `None` follows the
+    /// engine's global setting.
+    pub single: Option<bool>,
     /// The node was removed (`removeNode`): the group is never rebuilt and using it
     /// throws `scene.stale_instance`, as a v0 instance of a removed node did.
     pub stale: bool,
@@ -319,6 +325,8 @@ impl InstanceGroup {
             visible: true,
             tag,
             material,
+            object_material: None,
+            single: None,
             stale: false,
         }
     }
@@ -463,6 +471,9 @@ pub(crate) struct EngineState {
     /// are rebuilt by [`EngineState::rebuild_dirty_groups`] in `update`, before
     /// `lit.prepare`.
     pub dirty_meshes: Vec<LitMeshId>,
+    /// `setSingleMaterial`: every instance draws its object's single material on all its
+    /// sub-meshes instead of the per sub-mesh materials. Default false.
+    pub single_material: bool,
     /// Asset handle to an index into `assets`.
     pub asset_handles: HandleMap<u32>,
     pub assets: Vec<AssetEntry>,
@@ -613,7 +624,8 @@ impl EngineState {
         let mut group = InstanceGroup::new(node, mesh, tag, material);
         let skin = self.features.get::<SkinFeature>();
         let registration = skin.zip(Some(self.skins.as_slice()));
-        let r = rebuild_group(&mut self.scene, &self.lit, registration, &mut group);
+        let single = self.single_material;
+        let r = rebuild_group(&mut self.scene, &self.lit, registration, single, &mut group);
         if let Err(e) = r {
             // Leave no half-built group in the scene.
             let _ = group.remove_from(&mut self.scene);
@@ -626,8 +638,53 @@ impl EngineState {
     pub(crate) fn rebuild_instance_group(&mut self, h: u32) -> Result<(), RaaError> {
         let skin = self.features.get::<SkinFeature>();
         let registration = skin.zip(Some(self.skins.as_slice()));
+        let single = self.single_material;
         let group = self.instances.get_mut(h)?;
-        rebuild_group(&mut self.scene, &self.lit, registration, group)
+        rebuild_group(&mut self.scene, &self.lit, registration, single, group)
+    }
+
+    /// `setSingleMaterial(enabled, instance)`: the setting of one instance (`None` follows the
+    /// global setting again); the group is rebuilt.
+    pub(crate) fn set_instance_single_material(
+        &mut self,
+        h: u32,
+        on: Option<bool>,
+    ) -> Result<(), RaaError> {
+        let group = self.instances.get_mut(h)?;
+        group.check_live()?;
+        if group.single == on {
+            return Ok(());
+        }
+        group.single = on;
+        self.rebuild_instance_group(h)
+    }
+
+    /// `setSingleMaterial`: switches the draw material of every instance group between the
+    /// per sub-mesh materials (off, the default) and the object's single material (on), and
+    /// rebuilds the live groups (an instance with its own setting keeps it). The meshes and
+    /// their sub-mesh materials are not changed.
+    pub(crate) fn set_single_material(&mut self, on: bool) -> Result<(), RaaError> {
+        if self.single_material == on {
+            return Ok(());
+        }
+        self.single_material = on;
+        let (scene, lit, skins) = (&mut self.scene, &self.lit, &self.skins);
+        let registration = self
+            .features
+            .get::<SkinFeature>()
+            .zip(Some(skins.as_slice()));
+        let mut first = Ok(());
+        for (_, group) in self.instances.iter_mut() {
+            if group.stale || lit.submesh_ids(group.mesh).is_none() {
+                continue;
+            }
+            if let Err(e) = rebuild_group(scene, lit, registration, on, group)
+                && first.is_ok()
+            {
+                first = Err(e);
+            }
+        }
+        first
     }
 
     /// Removes the group of JS handle `h` (its handle is never reused) and its scene
@@ -693,6 +750,7 @@ impl EngineState {
     /// `update` before `lit.prepare`). Stale groups and groups whose mesh was removed
     /// since are skipped. Nothing is done, and nothing allocated, when the list is empty.
     pub(crate) fn rebuild_dirty_groups(&mut self) -> Result<(), RaaError> {
+        let single = self.single_material;
         let (scene, lit, skins) = (&mut self.scene, &self.lit, &self.skins);
         let skin = self.features.get::<SkinFeature>();
         let registration = skin.zip(Some(skins.as_slice()));
@@ -700,7 +758,7 @@ impl EngineState {
             if lit.submesh_ids(group.mesh).is_none() {
                 return Ok(());
             }
-            rebuild_group(scene, lit, registration, group)
+            rebuild_group(scene, lit, registration, single, group)
         })
     }
 
@@ -722,6 +780,7 @@ fn rebuild_group(
     scene: &mut Scene,
     lit: &LitRenderer,
     skin: Option<(&SkinFeature, &[SkinEntry])>,
+    single: bool,
     group: &mut InstanceGroup,
 ) -> Result<(), RaaError> {
     let unknown = || {
@@ -732,11 +791,13 @@ fn rebuild_group(
     };
     let info = lit.info(group.mesh).ok_or_else(unknown)?;
     let ids = lit.submesh_ids(group.mesh).ok_or_else(unknown)?;
-    let parts = ids
+    let parts: Vec<(MeshId, Option<MaterialId>, u32)> = ids
         .iter()
         .zip(&info.submeshes)
-        .map(|(&id, sub)| (id, sub.material));
-    group.rebuild(scene, parts)?;
+        .map(|(&id, sub)| (id, sub.material, sub.index_count))
+        .collect();
+    let draws = group_draw_materials(group, &parts, single);
+    group.rebuild(scene, draws)?;
     if let Some((feature, skins)) = skin {
         feature.remove_instance(group.tag);
         if skins.iter().any(|e| e.mesh == group.mesh) {
@@ -744,6 +805,44 @@ fn rebuild_group(
         }
     }
     Ok(())
+}
+
+/// The draw material of each sub-mesh `(id, material, index count)`. Off: the sub-mesh's
+/// own material (the per-face assignment, unchanged). On (`setSingleMaterial(true)`): every
+/// sub-mesh draws the object's single material, `object` (`setInstanceMaterial`), else the
+/// material of the sub-mesh with the most indices (the first on a tie), else none (the
+/// default material). A v0 group material still wins over both (InstanceGroup::rebuild).
+/// [`draw_materials`] of `group`: its own `setSingleMaterial` setting, else the global one,
+/// and its `setInstanceMaterial` material.
+pub(crate) fn group_draw_materials(
+    group: &InstanceGroup,
+    parts: &[(MeshId, Option<MaterialId>, u32)],
+    global: bool,
+) -> Vec<(MeshId, Option<MaterialId>)> {
+    let single = group.single.unwrap_or(global);
+    draw_materials(
+        parts,
+        single,
+        if single { group.object_material } else { None },
+    )
+}
+
+pub(crate) fn draw_materials(
+    parts: &[(MeshId, Option<MaterialId>, u32)],
+    single: bool,
+    object: Option<MaterialId>,
+) -> Vec<(MeshId, Option<MaterialId>)> {
+    if !single {
+        return parts.iter().map(|&(id, m, _)| (id, m)).collect();
+    }
+    let mut largest: Option<(u32, Option<MaterialId>)> = None;
+    for &(_, m, count) in parts {
+        if largest.is_none_or(|(c, _)| count > c) {
+            largest = Some((count, m));
+        }
+    }
+    let one = object.or(largest.and_then(|(_, m)| m));
+    parts.iter().map(|&(id, _, _)| (id, one)).collect()
 }
 
 #[cfg(test)]
@@ -782,6 +881,107 @@ mod tests {
             [(MeshId(3), MaterialId(5)), (MeshId(4), DEFAULT_MATERIAL)]
         );
         assert_eq!(tags, [7, 7]);
+    }
+
+    /// The (mesh, material) of every render-list item of a group rebuilt from `parts`, sorted.
+    fn drawn(
+        parts: &[(MeshId, Option<MaterialId>, u32)],
+        single: bool,
+        object: Option<MaterialId>,
+        v0: Option<MaterialId>,
+    ) -> Vec<(MeshId, MaterialId)> {
+        let (mut scene, node) = scene_with_node();
+        let mut g = InstanceGroup::new(node, LitMeshId(0), 1, v0);
+        g.rebuild(&mut scene, draw_materials(parts, single, object))
+            .unwrap();
+        let (mut list, mut tags) = (RenderList::default(), Vec::new());
+        scene.update_world();
+        scene.build_render_list_tagged(&mut list, &mut tags);
+        let mut used: Vec<_> = list.items.iter().map(|i| (i.mesh, i.material)).collect();
+        used.sort();
+        used
+    }
+
+    // A mesh of 3 sub-meshes: 900 indices with no material (the object's faces), 300 with
+    // material 5 (a face assignment), 120 with material 6.
+    const FACES: [(MeshId, Option<MaterialId>, u32); 3] = [
+        (MeshId(3), None, 900),
+        (MeshId(4), Some(MaterialId(5)), 300),
+        (MeshId(5), Some(MaterialId(6)), 120),
+    ];
+
+    #[test]
+    fn single_material_off_keeps_the_per_face_materials() {
+        // Off is the behaviour before the option: each sub-mesh draws its own material.
+        let before: Vec<_> = FACES.iter().map(|&(id, m, _)| (id, m)).collect();
+        assert_eq!(draw_materials(&FACES, false, Some(MaterialId(9))), before);
+        assert_eq!(
+            drawn(&FACES, false, Some(MaterialId(9)), None),
+            [
+                (MeshId(3), DEFAULT_MATERIAL),
+                (MeshId(4), MaterialId(5)),
+                (MeshId(5), MaterialId(6))
+            ]
+        );
+    }
+
+    #[test]
+    fn single_material_on_draws_one_material_on_every_face() {
+        // The object's material (setInstanceMaterial) on all three sub-meshes.
+        assert_eq!(
+            drawn(&FACES, true, Some(MaterialId(9)), None),
+            [
+                (MeshId(3), MaterialId(9)),
+                (MeshId(4), MaterialId(9)),
+                (MeshId(5), MaterialId(9))
+            ]
+        );
+        // None given: the largest sub-mesh decides; here it has no material, so the default.
+        assert_eq!(
+            drawn(&FACES, true, None, None),
+            [
+                (MeshId(3), DEFAULT_MATERIAL),
+                (MeshId(4), DEFAULT_MATERIAL),
+                (MeshId(5), DEFAULT_MATERIAL)
+            ]
+        );
+        let painted = [
+            (MeshId(3), Some(MaterialId(7)), 900),
+            (MeshId(4), Some(MaterialId(5)), 300),
+        ];
+        assert_eq!(
+            drawn(&painted, true, None, None),
+            [(MeshId(3), MaterialId(7)), (MeshId(4), MaterialId(7))]
+        );
+        // A v0 addInstance material still wins.
+        assert_eq!(
+            drawn(&FACES, true, Some(MaterialId(9)), Some(MaterialId(2))),
+            [
+                (MeshId(3), MaterialId(2)),
+                (MeshId(4), MaterialId(2)),
+                (MeshId(5), MaterialId(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn single_material_instance_setting_wins_over_the_global_one() {
+        let (_, node) = scene_with_node();
+        let mut g = InstanceGroup::new(node, LitMeshId(0), 1, None);
+        g.object_material = Some(MaterialId(9));
+        let own: Vec<_> = FACES.iter().map(|&(id, m, _)| (id, m)).collect();
+        let one: Vec<_> = FACES
+            .iter()
+            .map(|&(id, _, _)| (id, Some(MaterialId(9))))
+            .collect();
+        // Follows the global setting while it has none.
+        assert_eq!(group_draw_materials(&g, &FACES, false), own);
+        assert_eq!(group_draw_materials(&g, &FACES, true), one);
+        // An instance turned off draws its per-face materials under a global on, and the reverse.
+        g.single = Some(false);
+        assert_eq!(group_draw_materials(&g, &FACES, true), own);
+        g.single = Some(true);
+        assert_eq!(group_draw_materials(&g, &FACES, false), one);
     }
 
     #[test]

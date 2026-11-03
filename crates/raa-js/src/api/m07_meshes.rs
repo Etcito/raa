@@ -301,6 +301,48 @@ impl Engine {
             st.add_instance_group(node, mesh.lit, None)
         })
     }
+
+    /// Render option, default off. Off: every instance draws each sub-mesh with its own
+    /// material (the per-face assignment of the mesh, as before). On: every instance draws
+    /// all its sub-meshes with the object's single material: the one `setInstanceMaterial`
+    /// gave it, else the material of its sub-mesh with the most indices (the default
+    /// material when that sub-mesh has none). The meshes and their sub-mesh materials are
+    /// never changed; switching back restores the per sub-mesh materials. An instance of v0
+    /// `addInstance(node, mesh, material)` keeps drawing that material either way.
+    ///
+    /// With `instance`: that instance's own setting, which wins over the global one; `null`
+    /// makes it follow the global setting again. Without `instance`, `enabled` must be a
+    /// boolean. Throws `api.invalid_argument` (global `null`), `api.unknown_handle`,
+    /// `scene.stale_instance`.
+    #[wasm_bindgen(js_name = setSingleMaterial)]
+    pub fn set_single_material(&mut self, enabled: Option<bool>, instance: Option<u32>) -> Result<(), JsValue> {
+        self.with_state(|_, st| match (instance, enabled) {
+            (Some(h), on) => st.set_instance_single_material(h, on),
+            (None, Some(on)) => st.set_single_material(on),
+            (None, None) => Err(api_error(
+                INVALID_ARGUMENT,
+                "setSingleMaterial(null) needs an instance: the global setting is a boolean",
+            )),
+        })
+    }
+
+    /// The object's single material of `instance`, drawn on all its sub-meshes while
+    /// `setSingleMaterial(true)` is on; `null` (or undefined) clears it (the sub-mesh with
+    /// the most indices decides). Ignored while the option is off.
+    /// Throws `api.unknown_handle` (instance or material), `scene.stale_instance`.
+    #[wasm_bindgen(js_name = setInstanceMaterial)]
+    pub fn set_instance_material(&mut self, instance: u32, material: Option<u32>) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            let material = material.map(|m| st.material(m)).transpose()?;
+            let group = st.instance_group_mut(instance)?;
+            group.check_live()?;
+            group.object_material = material;
+            if st.single_material {
+                st.rebuild_instance_group(instance)?;
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Validate edge pairs before mutating any uploaded geometry.

@@ -151,6 +151,29 @@ export interface Engine {
    */
   addMeshInstance(node: number, mesh: number): number;
 
+  /**
+   * Render option, default `false`. `false`: every instance draws each sub-mesh with its own
+   * material (the per-face material assignment of the mesh, unchanged). `true`: every instance
+   * draws all its sub-meshes with the object's single material: the one
+   * {@link Engine.setInstanceMaterial} gave it, else the material of its sub-mesh with the most
+   * indices (the default material when that sub-mesh has none). Meshes and their sub-mesh
+   * materials are never changed; `false` restores the per sub-mesh materials. An instance of
+   * v0 `addInstance(node, mesh, material)` keeps drawing that material either way.
+   * With `instance`: that instance's own setting, which wins over the global one; `null` makes
+   * it follow the global setting again (the global setting itself takes a boolean only).
+   * @throws RaaError `api.invalid_argument` (global `null`), `api.unknown_handle`,
+   *   `scene.stale_instance`.
+   */
+  setSingleMaterial(enabled: boolean): void;
+  setSingleMaterial(enabled: boolean | null, instance: number): void;
+
+  /**
+   * The object's single material of `instance`, drawn on all its sub-meshes while
+   * {@link Engine.setSingleMaterial} is on; `null` clears it. Ignored while the option is off.
+   * @throws RaaError `api.unknown_handle` (instance or material), `scene.stale_instance`.
+   */
+  setInstanceMaterial(instance: number, material: number | null): void;
+
   /** Every pass and forward contributor, in execution order. */
   passes(): PassInfo[];
 

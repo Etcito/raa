@@ -249,6 +249,7 @@ impl WebApp for EngineApp {
             nodes: HandleMap::new("node"),
             instances: HandleMap::new("instance"),
             dirty_meshes: Vec::new(),
+            single_material: false,
             asset_handles: HandleMap::new("asset"),
             assets: Vec::new(),
             scratch_nodes: Vec::new(),
