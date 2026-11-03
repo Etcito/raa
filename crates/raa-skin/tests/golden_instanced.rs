@@ -412,6 +412,101 @@ fn instanced_skinning_matches_the_cpu_reference_in_three_poses() {
     std::mem::forget(gpu);
 }
 
+/// Texels of `got` differing from `want` by more than 0.02 in any channel.
+fn texels_off(got: &[[f32; 4]], want: &[[f32; 4]]) -> usize {
+    got.iter()
+        .zip(want)
+        .filter(|(g, w)| g.iter().zip(w.iter()).any(|(x, y)| (x - y).abs() > 0.02))
+        .count()
+}
+
+/// Regression (Royal Fiesta penguin, 2026-11-03): a material in tint mode `graph` (every
+/// player-tinted character material) composes its entry points with the graph tint call,
+/// so the posed variant must be derived from the composed pass, not from the raw pass
+/// source; otherwise the rest pipeline is reused and posed instances draw in rest pose.
+/// Two instances of one mesh, the pose changing every frame (setSkinPose per frame), must
+/// match the CPU reference and differ from the rest pose.
+#[test]
+fn graph_tint_posed_instances_follow_their_pose_every_frame() {
+    let test = "graph_tint_posed_instances_follow_their_pose_every_frame";
+    let Some(gpu) = software_gpu() else {
+        skip(
+            test,
+            "software_gpu returned None; the golden needs an adapter",
+        );
+        return;
+    };
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let skin_mesh = tube();
+    let centre = Vec3::new(0.0, 0.0, 0.0);
+    let graph = |rig: &Rig| {
+        rig.lit
+            .handle()
+            .set_material_tint_mode(MaterialId(0), raa_lit::TintMode::Graph);
+    };
+
+    let skin = Rc::new(RefCell::new(SkinPass::new(&gpu)));
+    let mut new = Rig::new(&gpu, Some(Rc::clone(&skin)), 2);
+    graph(&new);
+    let lit_id = new.lit.upload(&gpu, &skin_mesh.rest).expect("upload");
+    let mesh = new.lit.submesh_ids(lit_id).expect("submeshes")[0];
+    let inputs = Rc::new(SkinVertexInputs::new(&gpu, &skin_mesh).expect("inputs"));
+    for (tag, x) in [(1, -0.45), (2, 0.45)] {
+        new.place(mesh, x, tag);
+        skin.borrow_mut()
+            .add_instance(
+                tag,
+                Rc::clone(&inputs),
+                rest_view(&gpu, &skin_mesh, inputs.edges),
+            )
+            .expect("skin instance");
+    }
+    // Rest frame (no pose yet).
+    let (_, rest) = new.frame(&gpu);
+
+    for (k, angle) in [0.9f32, -0.7, 1.2].into_iter().enumerate() {
+        let a = pose(Mat4::IDENTITY, joint(centre, angle, Vec3::ZERO));
+        let b = pose(Mat4::IDENTITY, joint(centre, -angle, Vec3::ZERO));
+        skin.borrow_mut().set_pose(&gpu, 1, &a).expect("pose a");
+        skin.borrow_mut().set_pose(&gpu, 2, &b).expect("pose b");
+        let (draws, got) = new.frame(&gpu);
+        assert_eq!(
+            draws, 1,
+            "frame {k}: both posed instances in ONE instanced draw"
+        );
+
+        let mut reference = Rig::new(&gpu, None, 2);
+        graph(&reference);
+        for (tag, x, m) in [(1, -0.45, &a), (2, 0.45, &b)] {
+            let id = reference
+                .lit
+                .upload(&gpu, &cpu_mesh(&skin_mesh, m))
+                .expect("ref");
+            let sub = reference.lit.submesh_ids(id).expect("sub")[0];
+            reference.place(sub, x, tag);
+        }
+        let (_, want) = reference.frame(&gpu);
+        let covered = want.iter().filter(|t| **t != want[0]).count();
+        let moved = texels_off(&want, &rest);
+        let off = texels_off(&got, &want);
+        let from_rest = texels_off(&got, &rest);
+        eprintln!(
+            "graph tint frame {k}: {covered} covered, pose moves {moved} texels, new path {off} off reference, {from_rest} off rest"
+        );
+        assert!(
+            moved > 100,
+            "frame {k}: the pose must move the tubes ({moved})"
+        );
+        assert!(
+            off * 100 <= covered,
+            "frame {k}: {off} of {covered} texels differ from the CPU reference (rest pose drawn?)"
+        );
+    }
+    let error = block_on(errors.pop());
+    assert!(error.is_none(), "GPU validation error: {error:?}");
+    std::mem::forget(gpu);
+}
+
 /// Structural counts per frame for N = 1..200 posed instances of one mesh and material
 /// (what examples/instanced-skin shows in the browser): one draw per pass, one palette
 /// write, zero compute dispatches, whatever N.

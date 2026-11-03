@@ -63,18 +63,38 @@ pub fn entry_points(pass: PassKind, posed: bool) -> String {
     if !posed {
         return source.into();
     }
+    posed_entry_points(source).unwrap_or_else(|| source.into())
+}
+
+/// The instanced skinning variant of pass entry points `source` as the composer emitted
+/// them (after any composer rewrite such as tint mode `graph`), or `None` when `source`
+/// has no `vs_main` taking `v0: RaaVertex0` and `v1: RaaVertex1` to skin.
+pub fn posed_entry_points(source: &str) -> Option<String> {
+    if !source.contains("    v0: RaaVertex0,") || !source.contains("    v1: RaaVertex1,") {
+        return None;
+    }
     let mut out = source
         .replace("    v0: RaaVertex0,", "    raa_rest0: RaaVertex0,")
         .replace("    v1: RaaVertex1,", POSED_PARAMS)
         .replace("v1.tangent.xyz", "raa_posed_tangent");
     // The prologue goes at the top of vs_main's body (after `) -> ... {`).
-    if let Some(start) = out.find("fn vs_main(")
-        && let Some(rel) = out[start..].find("{\n")
-    {
-        let at = start + rel + 2;
-        out.insert_str(at, POSED_PROLOGUE);
-    }
-    format!("{POSED_DECLS}{out}")
+    let start = out.find("fn vs_main(")?;
+    let rel = out[start..].find("{\n")?;
+    out.insert_str(start + rel + 2, POSED_PROLOGUE);
+    Some(format!("{POSED_DECLS}{out}"))
+}
+
+/// Marker the composer writes before the pass entry points (its last section).
+const PASS_SECTION: &str = "\n// raa section: pass ";
+
+/// The posed variant of a whole composed module: the instanced skinning rewrite applied to
+/// its pass section, whatever the composer changed in it (tint mode `graph` rewrites the
+/// tint call there). `None` when the module has no pass section the rewrite applies to;
+/// the caller refuses, since the rest pipeline with posed bindings draws the rest pose.
+pub fn posed_module(wgsl: &str) -> Option<String> {
+    let at = wgsl.rfind(PASS_SECTION)?;
+    let (head, pass) = wgsl.split_at(at);
+    Some(format!("{head}{}", posed_entry_points(pass)?))
 }
 
 /// Match culling bounds to the selected geometry; unknown posed bounds stay visible.

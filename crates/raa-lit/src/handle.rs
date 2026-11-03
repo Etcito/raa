@@ -627,13 +627,21 @@ impl LitShared {
                 .compose_with(&self.fns, key, &ComposeOptions { tint_mode })
         }
         .map_err(shader_error)?;
-        let rest_entry = crate::skin_draw::entry_points(key.pass, false);
-        let entry =
-            crate::skin_draw::entry_points(key.pass, key.flags & crate::skin_draw::POSED != 0);
-        let wgsl = wgsl
-            .strip_suffix(&rest_entry)
-            .map(|prefix| format!("{prefix}{entry}"))
-            .unwrap_or_else(|| wgsl.replacen(&rest_entry, &entry, 1));
+        // A posed variant rewrites the composed pass section itself, so composer rewrites
+        // of the entry points (tint mode `graph`) keep their skinning. Matching the raw
+        // pass source missed them and silently reused the rest pipeline: graph-tinted
+        // skinned meshes drew in rest pose.
+        let wgsl = if key.flags & crate::skin_draw::POSED != 0 {
+            crate::skin_draw::posed_module(&wgsl).ok_or_else(|| RaaError::FrameGraph {
+                code: "shader.validate",
+                message: format!(
+                    "pass {:?}: the composed entry points have no vs_main to skin",
+                    key.pass
+                ),
+            })?
+        } else {
+            wgsl
+        };
         // Full source equality guards the hash lookup. Registration ids are not shader state.
         let content_key = (wgsl.clone(), spec.clone());
         if let Some(pipeline) = self.content_pipelines.borrow().get(&content_key) {
