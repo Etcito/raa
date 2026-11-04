@@ -396,6 +396,39 @@ fn composed_forward_variant_must_validate() {
     );
 }
 
+/// S23: `prelude.wgsl` declares `mat_instance_tint`/`mat_instance_tint_set` unconditionally, for
+/// every pass, so a material graph may read them without declaring them itself (MAMA's
+/// `input.player_color` node emit, as sdfm's SDF material builders splice it into a user
+/// function body: `sdf-material.ts` `sdfMaterialWgsl`/`surfaceVolumeMaterialWgsl`).
+const PLAYER_COLOR_TINT: &str = "fn material_main(in: MaterialInput) -> MaterialOutput {
+    var o = raa_default_output(in);
+    o.base_color = select(vec3<f32>(0.5, 0.5, 0.5), mat_instance_tint.rgb, mat_instance_tint_set > 0.5);
+    return o;
+}
+";
+
+#[test]
+fn player_color_tint_is_readable_without_declaring_it() {
+    let mut reg = MaterialFnRegistry::new();
+    assert_eq!(
+        register(&mut reg, "sdfm.surface.penguin", PLAYER_COLOR_TINT),
+        MaterialFnId(1)
+    );
+}
+
+/// The penguin's Game view (Polygons) crash of 2026-11-04: a body that reads the prelude's tint
+/// globals must never also declare them (MAMA's `instanceTintDeclFor`, which sdfm's SDF material
+/// builders used to splice into the same body as a leftover workaround from before this prelude
+/// declaration existed). Pinned here so that mistake cannot come back unnoticed: the prelude owns
+/// `mat_instance_tint`/`mat_instance_tint_set`, never a material function body.
+#[test]
+fn redeclaring_instance_tint_in_a_body_is_refused() {
+    let src = format!(
+        "var<private> mat_instance_tint: vec4<f32> = vec4<f32>(1.0);\nvar<private> mat_instance_tint_set: f32 = 0.0;\n{PLAYER_COLOR_TINT}"
+    );
+    assert_refused(&src, "parse", &["redefinition", "mat_instance_tint"]);
+}
+
 #[test]
 fn missing_slot_provider_is_reported_unchanged() {
     let mut reg = MaterialFnRegistry::new();
