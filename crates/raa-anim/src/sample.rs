@@ -54,13 +54,13 @@ fn sample_values(
     match a.interp {
         Interp::Constant => out = a.v,
         Interp::Linear => {
-            for c in 0..width {
-                out[c] = lerp(a.v[c], b.v[c], u).map_err(|e| sample_error(path, e.to_string()))?;
+            for (c, slot) in out.iter_mut().enumerate().take(width) {
+                *slot = lerp(a.v[c], b.v[c], u).map_err(|e| sample_error(path, e.to_string()))?;
             }
         }
         Interp::Bezier => {
-            for c in 0..width {
-                out[c] = bezier(a.v[c], a.v[c] + a.hr[c], b.v[c] + b.hl[c], b.v[c], u)
+            for (c, slot) in out.iter_mut().enumerate().take(width) {
+                *slot = bezier(a.v[c], a.v[c] + a.hr[c], b.v[c] + b.hl[c], b.v[c], u)
                     .map_err(|e| sample_error(path, e.to_string()))?;
             }
         }
@@ -108,12 +108,12 @@ impl Clip {
                 Channel::Scale => local[bone].s = [values[0], values[1], values[2]],
             }
         }
-        if self.root_motion != RootMotion::None {
-            if let Some(root) = rig.bones.iter().position(|bone| bone.parent.is_none()) {
-                for axis in 0..3 {
-                    if self.root_motion == RootMotion::Xyz || axis != 1 {
-                        local[root].t[axis] = rig.bones[root].rest.t[axis] as f32;
-                    }
+        if self.root_motion != RootMotion::None
+            && let Some(root) = rig.bones.iter().position(|bone| bone.parent.is_none())
+        {
+            for axis in 0..3 {
+                if self.root_motion == RootMotion::Xyz || axis != 1 {
+                    local[root].t[axis] = rig.bones[root].rest.t[axis] as f32;
                 }
             }
         }

@@ -23,6 +23,31 @@ pub struct Bone {
     /// Index of an earlier bone, or None for the single root.
     pub parent: Option<usize>,
     pub rest: RestTransform,
+    /// Visual-only secondary motion (crate::jiggle); None for an ordinary bone.
+    pub jiggle: Option<Jiggle>,
+}
+
+/// A jiggle bone: a spring-damper pulling the bone back toward its animated pose. Missing fields take the
+/// [`Jiggle::DEFAULT`] values; the solver is crate::jiggle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Jiggle {
+    /// Largest swing away from the animated pose, degrees in 0..=180.
+    pub max_angle: f64,
+    /// 0..=1: spring frequency from 0.5 Hz (floppy) to 10 Hz (stiff).
+    pub stiffness: f64,
+    /// 0..=1: damping ratio (0 keeps swinging, 1 settles without overshoot).
+    pub damping: f64,
+    /// 0..=1: share of gravity (9.81 m/s2 along -Y) pulling the tip.
+    pub gravity: f64,
+}
+
+impl Jiggle {
+    pub const DEFAULT: Jiggle = Jiggle {
+        max_angle: 30.0,
+        stiffness: 0.5,
+        damping: 0.3,
+        gravity: 0.0,
+    };
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +84,8 @@ pub struct Rig {
     pub ik_chains: Vec<IkChain>,
     pub limits: Vec<JointLimit>,
     pub attach: BTreeMap<String, Attachment>,
+    /// A cosmetic armature mounted on a character: the character bone its root follows (e.g. `head`).
+    pub parent_bone: Option<String>,
 }
 const ROLE_NAMES: &str = concat!(
     "root hips spine chest neck head jaw tail shoulder.l shoulder.r upperArm.l upperArm.r ",
@@ -74,7 +101,15 @@ impl Rig {
             &value,
             "",
             &[
-                "format", "version", "name", "bones", "roles", "ikChains", "limits", "attach",
+                "format",
+                "version",
+                "name",
+                "bones",
+                "roles",
+                "ikChains",
+                "limits",
+                "attach",
+                "parentBone",
             ],
         )?;
         if required(obj, "format", "")? != &JsonValue::String("raa.rig".into()) {
@@ -98,15 +133,10 @@ impl Rig {
         let mut roots = 0;
         for (i, value) in values.iter().enumerate() {
             let path = format!("/bones/{i}");
-            let obj = object(value, &path, &["name", "parent", "rest"])?;
+            let obj = object(value, &path, &["name", "parent", "rest", "jiggle"])?;
             let name_path = pointer_child(&path, "name");
             let name = string(required(obj, "name", &path)?, &name_path)?;
-            if name.is_empty()
-                || name.len() > 32
-                || !name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
-            {
+            if !valid_bone_name(name) {
                 return Err(error("rig.bone_name", &name_path, "invalid bone name"));
             }
             if bones.iter().any(|bone| bone.name == name) {
@@ -167,16 +197,31 @@ impl Rig {
                     ));
                 }
             }
+            let jiggle = match optional(obj, "jiggle") {
+                None => None,
+                Some(value) => Some(jiggle(value, &pointer_child(&path, "jiggle"))?),
+            };
             bones.push(Bone {
                 name: name.to_owned(),
                 parent,
                 rest: RestTransform { t, r, s },
+                jiggle,
             });
         }
         if roots != 1 {
             return Err(error("rig.root", "/bones", "exactly one root required"));
         }
         let (roles, ik_chains, limits, attach) = metadata(obj, &bones)?;
+        let parent_bone = match optional(obj, "parentBone") {
+            None => None,
+            Some(value) => {
+                let name = string(value, "/parentBone")?;
+                if !valid_bone_name(name) {
+                    return Err(error("rig.bone_name", "/parentBone", "invalid bone name"));
+                }
+                Some(name.to_owned())
+            }
+        };
         Ok(Self {
             name,
             bones,
@@ -184,6 +229,7 @@ impl Rig {
             ik_chains,
             limits,
             attach,
+            parent_bone,
         })
     }
 }
@@ -247,7 +293,7 @@ impl Rig {
                 ])
             })
             .collect();
-        JsonValue::Object(vec![
+        let mut fields = vec![
             key("format", JsonValue::String("raa.rig".into())),
             key("version", JsonValue::Number(1.0)),
             key("name", JsonValue::String(self.name.clone())),
@@ -257,7 +303,7 @@ impl Rig {
                     self.bones
                         .iter()
                         .map(|bone| {
-                            JsonValue::Object(vec![
+                            let mut fields = vec![
                                 key("name", JsonValue::String(bone.name.clone())),
                                 key("parent", bone.parent.map_or(JsonValue::Null, bone_name)),
                                 key(
@@ -268,7 +314,19 @@ impl Rig {
                                         key("s", numbers(&bone.rest.s)),
                                     ]),
                                 ),
-                            ])
+                            ];
+                            if let Some(j) = bone.jiggle {
+                                fields.push(key(
+                                    "jiggle",
+                                    JsonValue::Object(vec![
+                                        key("maxAngle", JsonValue::Number(j.max_angle)),
+                                        key("stiffness", JsonValue::Number(j.stiffness)),
+                                        key("damping", JsonValue::Number(j.damping)),
+                                        key("gravity", JsonValue::Number(j.gravity)),
+                                    ]),
+                                ));
+                            }
+                            JsonValue::Object(fields)
                         })
                         .collect(),
                 ),
@@ -277,13 +335,52 @@ impl Rig {
             key("ikChains", JsonValue::Array(ik_chains)),
             key("limits", JsonValue::Array(limits)),
             key("attach", JsonValue::Object(attach)),
-        ])
+        ];
+        if let Some(parent) = &self.parent_bone {
+            fields.push(key("parentBone", JsonValue::String(parent.clone())));
+        }
+        JsonValue::Object(fields)
     }
 
     /// S4 canonical text of this rig, including the final LF.
     pub fn to_canonical_json(&self) -> String {
         crate::canon::to_canonical_json(&self.to_json())
     }
+}
+
+fn valid_bone_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+const JIGGLE_KEYS: [&str; 4] = ["maxAngle", "stiffness", "damping", "gravity"];
+
+/// One bone's `jiggle` object: every field optional (Jiggle::DEFAULT), each a finite number in its range.
+fn jiggle(value: &JsonValue, path: &str) -> Result<Jiggle, AnimError> {
+    let fields = object(value, path, &JIGGLE_KEYS)?;
+    let mut out = Jiggle::DEFAULT;
+    for (name, max, slot) in [
+        ("maxAngle", 180.0, &mut out.max_angle),
+        ("stiffness", 1.0, &mut out.stiffness),
+        ("damping", 1.0, &mut out.damping),
+        ("gravity", 1.0, &mut out.gravity),
+    ] {
+        let Some(value) = optional(fields, name) else {
+            continue;
+        };
+        let field_path = pointer_child(path, name);
+        let JsonValue::Number(n) = value else {
+            return Err(error("rig.jiggle", &field_path, "expected number"));
+        };
+        if !n.is_finite() || *n < 0.0 || *n > max {
+            return Err(error("rig.jiggle", &field_path, "out of range"));
+        }
+        *slot = *n;
+    }
+    Ok(out)
 }
 
 fn solver_name(solver: ChainSolver) -> &'static str {

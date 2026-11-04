@@ -209,6 +209,8 @@ mod tests {
     }
 
     #[test]
+    // 1000000000000000128.0 is the exact f64 the test writes back: its digits are the point.
+    #[allow(clippy::excessive_precision)]
     fn canon_difficult_round_trip_decimals() {
         for (x, expected) in [
             (0.30000000000000004, "0.30000000000000004"),

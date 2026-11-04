@@ -1,7 +1,8 @@
 // @etcito/raa-anim entry point. The brick itself is the wasm-bindgen output of the
 // raa-anim-js crate in ./pkg/. The public API is brickInfo(), selftest(), the clip
-// loaders, the S19 animation graph (loadGraph) and the visual ik namespace; types live in index.d.ts and types/*.d.ts.
-import init, { brickInfo, ik, loadClip, loadGraph, loadRig, sampleClip, selftest } from './pkg/raa_anim_js.js';
+// loaders, the S19 animation graph (loadGraph), the visual ik namespace and the visual jiggle bones
+// (createJiggleWorld); types live in index.d.ts and types/*.d.ts.
+import init, { brickInfo, ik, JiggleWorld, loadClip, loadGraph, loadRig, sampleClip, selftest } from './pkg/raa_anim_js.js';
 
 const WASM_FILE = 'raa_anim_js_bg.wasm';
 const DEFAULT_WASM_URL = new URL(`./pkg/${WASM_FILE}`, import.meta.url);
@@ -94,7 +95,8 @@ async function resolveModule(source) {
  *     { case: string, seed: number, ticks: number, hash: string },
  *   loadRig: (json: string) => object, loadClip: (rig: object, json: string) => object,
  *   sampleClip: (clip: object, tick: number) => object,
- *   loadGraph: (json: string, rig: object, clips: object[]) => object, ik: object }>}
+ *   loadGraph: (json: string, rig: object, clips: object[]) => object, ik: object,
+ *   createJiggleWorld: () => object }>}
  */
 export async function loadRaaAnim(source) {
   const moduleOrPath = await resolveModule(source);
@@ -107,5 +109,6 @@ export async function loadRaaAnim(source) {
     sampleClip,
     loadGraph,
     ik,
+    createJiggleWorld: () => new JiggleWorld(),
   });
 }

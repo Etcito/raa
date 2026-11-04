@@ -7,14 +7,17 @@ import type { RaaAnimApi } from './types/brick.js';
 import type { RaaAnimClipsApi } from './types/clips.js';
 import type { RaaAnimGraphApi } from './types/graph.js';
 import type { RaaAnimIkApi } from './types/ik.js';
+import type { RaaAnimJiggleApi } from './types/jiggle.js';
 
 export type { BrickInfo, RaaAnimApi, SelftestCase, SelftestResult } from './types/brick.js';
 export type { RaaAnimClipsApi } from './types/clips.js';
 export type { AnimationGraph, AnimationGraphState, GraphStep, RaaAnimGraphApi } from './types/graph.js';
 export type { RaaAnimIkApi } from './types/ik.js';
+export type { JiggleWorld, RaaAnimJiggleApi } from './types/jiggle.js';
 
-/** The initialised brick: metadata, selftest, clip loaders, the S19 graph loader and the visual IK namespace. */
-export interface RaaAnimLoaded extends RaaAnimApi, Pick<RaaAnimClipsApi, 'loadRig' | 'loadClip' | 'sampleClip'>, Pick<RaaAnimGraphApi, 'loadGraph'> {
+/** The initialised brick: metadata, selftest, clip loaders, the S19 graph loader, the visual IK namespace and the
+ * visual jiggle bones. */
+export interface RaaAnimLoaded extends RaaAnimApi, Pick<RaaAnimClipsApi, 'loadRig' | 'loadClip' | 'sampleClip'>, Pick<RaaAnimGraphApi, 'loadGraph'>, RaaAnimJiggleApi {
   readonly ik: RaaAnimIkApi;
 }
 

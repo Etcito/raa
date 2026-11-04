@@ -431,7 +431,7 @@ mod tests {
             ("jump", Number(1.0)),
             ("missing", Number(0.0)),
         ] {
-            let error = graph.step(&mut state, &[bad]).err().expect("refused");
+            let error = graph.step(&mut state, &[bad]).expect_err("refused");
             assert_eq!(error.code, "graph.param", "{bad:?}");
         }
         assert_eq!(state.save(), before, "refused steps keep the state");

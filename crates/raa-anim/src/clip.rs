@@ -228,11 +228,7 @@ impl Clip {
             .tracks
             .iter()
             .map(|track| {
-                let keys = track
-                    .keys
-                    .iter()
-                    .map(crate::canon::clip_key)
-                    .collect();
+                let keys = track.keys.iter().map(crate::canon::clip_key).collect();
                 JsonValue::Object(vec![
                     key("bone", JsonValue::String(track.bone.clone())),
                     key("channel", JsonValue::String(track.channel.name().into())),

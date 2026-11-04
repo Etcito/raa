@@ -26,7 +26,7 @@ runs sequentially and starts no workers; any future independent-case workers mus
 The record covers every key endpoint, three interior ticks per key interval (half and two
 quarters), ticks clamped before the first and after the last key, and `0`/`lengthTicks` (plus
 seam ticks for looping clips). The f64 values deliberately differ in the last bits from the
-runtime f32 path; conformance compares them within the existing 1e-6 reference tolerance.
+runtime f32 path; conformance compares them within 1e-6 plus two f32 steps of each reference value.
 
 ## Root motion
 

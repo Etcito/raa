@@ -33,7 +33,10 @@ impl fmt::Display for AnimError {
 impl std::error::Error for AnimError {}
 
 pub mod rig;
-pub use rig::{Bone, MAX_BONES, RestTransform, Rig};
+pub use rig::{Bone, Jiggle, MAX_BONES, RestTransform, Rig};
+
+pub mod jiggle;
+pub use jiggle::{JiggleChain, JiggleWorld};
 
 pub mod pose;
 pub use pose::{LocalPose, Mat4, Pose};

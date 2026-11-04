@@ -95,6 +95,26 @@ Invalid arguments throw a `TypeError`: `code: 'api.invalid_input'` for a non-str
 or a seed or tick count outside the u32 range, and `code: 'api.unknown_case'` for an
 unknown case name.
 
+## Jiggle bones
+
+`createJiggleWorld()` returns a `JiggleWorld`: visual-only secondary motion for armature bones whose rig entry
+carries `jiggle: { maxAngle?, stiffness?, damping?, gravity? }` (degrees 0..180, then 0..1 each; defaults 30,
+0.5, 0.3, 0). A rig may also name `parentBone`, the character bone its root follows (a cosmetic armature mounted on
+the penguin `head`).
+
+```js
+const world = anim.createJiggleWorld();          // one per view
+const handle = world.add(anim.loadRig(hatRigJson)); // one per worn instance
+// each rendered frame, after the main pose, for the visible handles only:
+const palettes = world.step(dtSeconds, Uint32Array.of(handle), frames); // frames: world (16) + mount (16) per handle
+```
+
+`step` integrates fixed 1/240 s substeps of the real frame time (at most 1/15 s per frame) and returns each
+handle's skin palette in the instance frame (`inverse(world) * jiggled model * inverse bind`; at rest every bone
+returns `mount`). A handle left out of one call restarts at its animated pose when it is stepped again, so callers
+may cull or skip it freely. `setPose(handle, model)` feeds the armature's own animation (mount-frame model
+matrices). See `types/jiggle.d.ts` and `crates/raa-anim/src/jiggle.rs`.
+
 ## Types
 
 `index.d.ts` is the public entry point and references the generated `types/all.d.ts`;

@@ -14,6 +14,16 @@ null-parent root; S16 roles; `twoBone` (three bones) or `ccd`/`fabrik` (two to
 eight bones) chains with optional unit pole and 1-16 iterations; per-bone XYZ
 limits with `min <= max`; named attachment transforms.
 
+Two optional fields serve cosmetic armatures: a bone's `jiggle` object (`maxAngle` degrees 0..180,
+`stiffness`, `damping`, `gravity` 0..1; missing fields default to 30, 0.5, 0.3, 0; `rig.jiggle` refuses a value
+out of range) and the rig's `parentBone`, the character bone the armature root follows (e.g. `head`). Canonical
+JSON writes `jiggle` with all four resolved fields and `parentBone` only when present.
+
+`jiggle::JiggleWorld` is the visual jiggle solver: one `JiggleChain` per worn armature instance, all stepped in one
+call per rendered frame from the real frame time in fixed 1/240 s substeps (a spring-damper on each jiggle bone's
+tip toward the animated pose, damping relative to the animated motion, the swing clamped to `maxAngle`). It never
+touches simulation state; `tests/jiggle.rs` covers the clamp, damping decay and frame-rate independence.
+
 Ragdoll data is deliberately unsupported: S16 is the Sketchbook `RigPreset`
 schema without ragdoll fields, so a `ragdoll` key or any unknown field is
 refused with `rig.schema`.
@@ -46,7 +56,8 @@ Run `cargo test -p raa-anim --test clip sample_reference -- --nocapture` to
 compare native track values, local transforms, model matrices and skin matrices
 against every tick in `tests/fixtures/samples.json`. The test widens native
 values to document-number precision and prints the measured maximum absolute
-difference, requiring at most `1e-6`; it does not compare hashes. The independent
+difference, requiring each value within `1e-6` plus two f32 steps of the reference (one f32 step is already
+9.5e-7 past 8); it does not compare hashes. The independent
 JavaScript reference and regeneration instructions live in
 [`tools/anim-ref`](../../tools/anim-ref/README.md). Cases run sequentially, so no
 independent worker processes are started.
