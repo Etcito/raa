@@ -8,7 +8,8 @@ use std::path::Path;
 mod m21_views;
 
 use m21_views::{
-    ViewCamera, ViewRect, ViewsState, backing_size, validate_overlay, validate_viewports,
+    ViewCamera, ViewRect, ViewsState, backing_size, scaled_backing_size, validate_overlay,
+    validate_viewports,
 };
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> ViewRect {
@@ -162,4 +163,51 @@ fn overlay_length_and_layer_validation() {
     assert_eq!(code(s.clear_overlay(8.0)), "overlay.layer");
     s.clear_overlay(2.0).expect("clear");
     assert!(s.overlays()[2].is_empty());
+}
+
+#[test]
+fn render_scale_scales_the_backing_and_follows_the_last_resize() {
+    assert_eq!(
+        scaled_backing_size(800.0, 600.0, Some(1.5), 1.0).unwrap(),
+        backing_size(800.0, 600.0, Some(1.5)).unwrap()
+    );
+    assert_eq!(
+        scaled_backing_size(800.0, 600.0, Some(1.5), 0.5).unwrap(),
+        (600, 450)
+    );
+    assert_eq!(
+        scaled_backing_size(800.0, 600.0, None, 2.0).unwrap(),
+        (1600, 1200)
+    );
+    // dpr is capped before the scale; a supersampled side stops at 8192.
+    assert_eq!(
+        scaled_backing_size(800.0, 600.0, Some(3.0), 2.0).unwrap(),
+        (3200, 2400)
+    );
+    assert_eq!(
+        scaled_backing_size(5000.0, 100.0, None, 2.0).unwrap(),
+        (8192, 200)
+    );
+    for bad in [0.2, 2.5, f64::NAN] {
+        assert_eq!(
+            code(scaled_backing_size(800.0, 600.0, None, bad)),
+            "api.invalid_argument"
+        );
+    }
+
+    let mut views = ViewsState::default();
+    assert_eq!(views.render_scale(), 1.0);
+    assert!(views.rescaled().is_none());
+    assert_eq!(
+        views.resize(1000.0, 500.0, Some(2.0)).unwrap(),
+        (2000, 1000)
+    );
+    views.set_render_scale(0.5).unwrap();
+    assert_eq!(views.rescaled().unwrap().unwrap(), (1000, 500));
+    assert_eq!(views.resize(400.0, 300.0, None).unwrap(), (200, 150));
+    assert_eq!(code(views.set_render_scale(3.0)), "api.invalid_argument");
+    assert_eq!(views.render_scale(), 0.5);
+    // A refused resize is not remembered.
+    assert!(views.resize(f64::NAN, 1.0, None).is_err());
+    assert_eq!(views.rescaled().unwrap().unwrap(), (200, 150));
 }

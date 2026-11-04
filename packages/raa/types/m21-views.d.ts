@@ -45,6 +45,20 @@ export interface Engine {
   resize(cssWidth: number, cssHeight: number, dpr: number): void;
 
   /**
+   * Draws the 3D image at `scale` (0.25..2) times the backing size {@link Engine.resize} gives:
+   * below 1 the canvas holds fewer pixels and the browser upsamples it to its CSS size
+   * (bilinear, or nearest under CSS `image-rendering: pixelated`), above 1 it holds more and
+   * the browser downsamples it (supersampling; at most 8192 px per side). Viewports are canvas
+   * fractions, so they follow. Applied at once when `resize` was called, else at the first
+   * `resize`. Default 1.
+   * @throws RaaError `api.invalid_argument` (outside 0.25..2 or non-finite).
+   */
+  setRenderScale(scale: number): void;
+
+  /** The render scale {@link Engine.setRenderScale} set (1 by default). */
+  renderScale(): number;
+
+  /**
    * Replaces the segments of overlay `layer` (0..7). `positions` holds xyz pairs in world
    * space (length a multiple of 6), `colors` linear rgba per vertex (4 per vertex).
    * Overlays draw after tonemap and are never captured into lighting.

@@ -1,5 +1,5 @@
 // ao.gtao: ground-truth ambient occlusion (Jimenez 2016, GTAO values: 4 slices x 8 steps
-// per side, radius 0.8 m). Standalone compute module (no PRELUDE), own bindings in group 0.
+// per side by default, the AoQuality in `quality`, radius 0.8 m). Standalone compute module (no PRELUDE), own bindings in group 0.
 // Workgroup 8x8 over the S12 `depth` and `normal` targets; the output is 1 = unoccluded.
 //
 // Per pixel: the view position is reconstructed from depth through `inv_proj`; four slice
@@ -21,6 +21,7 @@ struct GtaoParams {
     inv_proj: mat4x4<f32>, // @64
     viewport: vec4<f32>,   // @128 (w, h, 1/w, 1/h)
     params: vec4<f32>,     // @144 (radius_m, intensity, power, frame index)
+    quality: vec4<f32>,    // @160 (slices, steps per side, 0, 0)
 }
 
 @group(0) @binding(0) var depth_tex: texture_depth_2d;
@@ -28,8 +29,6 @@ struct GtaoParams {
 @group(0) @binding(2) var<uniform> gtao_params: GtaoParams;
 @group(0) @binding(3) var out_ao: texture_storage_2d<r32float, write>;
 
-const SLICES: u32 = 4u;
-const STEPS: u32 = 8u;
 const PI: f32 = 3.14159265359;
 
 // Interleaved gradient noise (Jimenez 2014), shifted per frame.
@@ -67,8 +66,9 @@ fn raa_gtao_horizon_cos(
     low: f32,
 ) -> f32 {
     var hc = low;
-    for (var i = 0u; i < STEPS; i = i + 1u) {
-        let s = (f32(i) + jitter) / f32(STEPS);
+    let steps = max(u32(gtao_params.quality.y), 1u);
+    for (var i = 0u; i < steps; i = i + 1u) {
+        let s = (f32(i) + jitter) / f32(steps);
         // Quadratic spacing (denser near the pixel), at least one pixel per step.
         let dist = max(s * s * radius_px, f32(i) + 1.0);
         let sp = clamp(
@@ -125,8 +125,9 @@ fn gtao(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var visible = 0.0;
     var unoccluded = 0.0;
-    for (var s = 0u; s < SLICES; s = s + 1u) {
-        let phi = (f32(s) + noise) * (PI / f32(SLICES));
+    let slices = max(u32(gtao_params.quality.x), 1u);
+    for (var s = 0u; s < slices; s = s + 1u) {
+        let phi = (f32(s) + noise) * (PI / f32(slices));
         let c = cos(phi);
         let sn = sin(phi);
         // Screen y grows downwards; the view-space slice direction is orthonormalised

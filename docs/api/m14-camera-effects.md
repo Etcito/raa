@@ -147,6 +147,16 @@ to AgX (`mapper` `'agx'`) in every preset; ACES is selected with `mapper: 'aces'
 | `jungle` | `jungle` | 0.06, 0.8 | `agx`, look `golden` |
 | `neon` | `neon` | 0.12, 0.9 | `agx`, look `punchy` |
 
+## Post strength
+
+`engine.setPostStrength(strength: number): void` scales the screen post-processing by `strength`
+in [0, 1]. The colour grade is mixed with the ungraded colour (`mix(ungraded, graded, strength)`,
+so 0 passes the HDR colour through ungraded), and the bloom composite strength is multiplied by
+`strength`. The scale is kept apart from the looks: a `setGrading`, `setBloom` or
+`applyEnvironment` applied later stays scaled. 1 (the default) is the look as authored. Turning a
+post effect off entirely stays `setPassEnabled('grading' | 'bloom', false)`. Refusal:
+`post.invalid` (outside [0, 1] or non-finite); nothing changes on it.
+
 ## Applying an environment
 
 `applyEnvironment(env)` sets a whole look in one call. The sections are applied in this order:

@@ -43,6 +43,48 @@ impl AoDesc {
     }
 }
 
+/// The sampling effort of the `ao.gtao` pass: `slices` directions per pixel, each marching
+/// `steps` horizon samples per side. The default (4 x 8) is the GTAO row of the values
+/// table; fewer is cheaper and noisier. Kept apart from [`AoDesc`] so a look (radius,
+/// intensity, power) and a player's quality choice never overwrite each other.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct AoQuality {
+    /// Slice directions per pixel, in `1..=8`.
+    pub slices: u32,
+    /// Horizon steps per side of a slice, in `1..=16`.
+    pub steps: u32,
+}
+
+impl Default for AoQuality {
+    /// 4 slices x 8 steps.
+    fn default() -> Self {
+        AoQuality {
+            slices: 4,
+            steps: 8,
+        }
+    }
+}
+
+impl AoQuality {
+    /// Refuses with `ao.invalid` when `slices` is outside `1..=8` or `steps` outside
+    /// `1..=16`.
+    pub fn validate(&self) -> Result<(), RaaError> {
+        if !(1..=8).contains(&self.slices) {
+            return Err(invalid(format!(
+                "`slices` must be in 1..=8, got {}",
+                self.slices
+            )));
+        }
+        if !(1..=16).contains(&self.steps) {
+            return Err(invalid(format!(
+                "`steps` must be in 1..=16, got {}",
+                self.steps
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn invalid(message: String) -> RaaError {
     RaaError::FrameGraph {
         code: "ao.invalid",
@@ -85,6 +127,24 @@ fn closed(field: &str, v: f32, min: f32, max: f32) -> Result<(), RaaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quality_default_is_4_by_8_and_bounds_are_refused() {
+        assert_eq!(
+            AoQuality::default(),
+            AoQuality {
+                slices: 4,
+                steps: 8
+            }
+        );
+        for (slices, steps) in [(1, 1), (8, 16)] {
+            AoQuality { slices, steps }.validate().unwrap();
+        }
+        for (slices, steps) in [(0, 8), (9, 8), (4, 0), (4, 17)] {
+            let err = AoQuality { slices, steps }.validate().unwrap_err();
+            assert_eq!(err.code(), "ao.invalid");
+        }
+    }
 
     #[test]
     fn default_matches_contract() {

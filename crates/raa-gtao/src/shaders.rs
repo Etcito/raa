@@ -16,8 +16,8 @@ pub(crate) const GTAO_WGSL: &str = include_str!("wgsl/gtao.wgsl");
 /// 4 `GtaoParams`.
 pub(crate) const DENOISE_WGSL: &str = include_str!("wgsl/denoise.wgsl");
 
-/// Byte size of `GtaoParams`: proj @0, inv_proj @64, viewport @128, params @144.
-pub(crate) const PARAMS_SIZE: u64 = 160;
+/// Byte size of `GtaoParams`: proj @0, inv_proj @64, viewport @128, params @144, quality @160.
+pub(crate) const PARAMS_SIZE: u64 = 176;
 
 /// `raa_slot_ao` of provider `gtao`: `textureLoad` of the S10 group-1 AO texture at the
 /// fragment's pixel, value in `.r`.

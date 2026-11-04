@@ -367,6 +367,30 @@ impl Engine {
         self.with_state(|_, st| apply_grading(st, &settings))
     }
 
+    /// Scales the screen post-processing by `strength` in [0, 1]: the colour grade is mixed
+    /// with the ungraded colour (0 = ungraded) and the bloom composite strength is
+    /// multiplied by it. It is kept apart from the looks: `setGrading`, `setBloom` and
+    /// `applyEnvironment` presets applied later stay scaled. 1 (the default) is the look as
+    /// authored. `post.invalid` outside [0, 1]; nothing changes on a refusal.
+    #[wasm_bindgen(js_name = setPostStrength)]
+    pub fn set_post_strength(&mut self, strength: f64) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            if !(strength.is_finite() && (0.0..=1.0).contains(&strength)) {
+                return Err(RaaError::FrameGraph {
+                    code: "post.invalid",
+                    message: format!("post strength must be in [0, 1], got {strength}"),
+                });
+            }
+            let s = strength as f32;
+            st.features
+                .require_mut::<GradingHandle>("grading")?
+                .set_amount(s)?;
+            st.features
+                .require_mut::<raa_bloom::BloomHandle>("bloom")?
+                .set_scale(s)
+        })
+    }
+
     /// Applies a whole environment `{sky?, sun?, fog?, post?}` in the contract order sky,
     /// sun, fog, post. A `sky` string is a sky preset applied as `setSky({preset})`; a sky
     /// object is passed to `setSky` unchanged. `sun` `{dir, color, intensity}` is applied as

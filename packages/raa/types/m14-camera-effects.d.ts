@@ -179,6 +179,14 @@ export interface Engine {
   setGrading(settings: GradingSettings): void;
 
   /**
+   * Scales the screen post-processing by `strength` in [0, 1]: the colour grade is mixed with
+   * the ungraded colour (0 = ungraded) and the bloom composite strength is multiplied by it.
+   * Looks applied later (setGrading, setBloom, applyEnvironment) stay scaled. Default 1.
+   * @throws RaaError `post.invalid` (outside [0, 1] or non-finite).
+   */
+  setPostStrength(strength: number): void;
+
+  /**
    * Applies a named environment: the sky, the sun, the fog and the post stack, in that order. A
    * string names a preset; an object overrides it. A refusal changes nothing.
    * @throws RaaError `sky.invalid` (sky preset or field, from {@link Engine.setSky}),

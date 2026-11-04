@@ -22,7 +22,7 @@ struct GradingParams {
     shadows_tint: vec4<f32>,
     // soft-light tint of the highlights, 0.5 grey = none (w unused)
     highlights_tint: vec4<f32>,
-    // (split_balance, vignette amount, viewport aspect w / h, 0)
+    // (split_balance, vignette amount, viewport aspect w / h, grade amount 0..1)
     misc: vec4<f32>,
 }
 
@@ -81,7 +81,8 @@ fn grading_soft_light(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_grading(in: VsOut) -> @location(0) vec4<f32> {
     let src = textureSampleLevel(src_tex, src_samp, in.uv, 0.0);
-    var c = grading_sanitize(src.rgb);
+    let ungraded = grading_sanitize(src.rgb);
+    var c = ungraded;
 
     // (1) white balance.
     let wb = mat3x3<f32>(params.wb_col0.xyz, params.wb_col1.xyz, params.wb_col2.xyz);
@@ -122,5 +123,6 @@ fn fs_grading(in: VsOut) -> @location(0) vec4<f32> {
     let cos2 = 1.0 / (1.0 + dot(d, d));
     c = c * mix(1.0, cos2 * cos2, params.misc.y);
 
-    return vec4<f32>(grading_sanitize(c), src.a);
+    // (8) the grade amount mixes the ungraded colour back in (1 = the full grade).
+    return vec4<f32>(mix(ungraded, grading_sanitize(c), params.misc.w), src.a);
 }

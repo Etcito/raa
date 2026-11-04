@@ -64,6 +64,9 @@ fn state_busy() -> RaaError {
 /// State shared by the pass and every clone of a `BloomHandle`.
 struct BloomState {
     desc: BloomDesc,
+    /// Multiplies the composite strength (`set_scale`, 1 until set): a player's post
+    /// strength over whatever look set the desc.
+    scale: f32,
 }
 
 type SharedBloom = Rc<RefCell<BloomState>>;
@@ -483,7 +486,11 @@ impl FeaturePass for BloomPass {
 
     /// Writes the params of every draw from the handle's description (in place).
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let desc = self.state.try_borrow().map_err(|_| state_busy())?.desc;
+        let (mut desc, scale) = {
+            let st = self.state.try_borrow().map_err(|_| state_busy())?;
+            (st.desc, st.scale)
+        };
+        desc.strength *= scale;
         let Some(chain) = self.chain.as_ref() else {
             return Ok(());
         };
@@ -548,6 +555,7 @@ impl BloomFeature {
         }
         let state = Rc::new(RefCell::new(BloomState {
             desc: BloomDesc::default(),
+            scale: 1.0,
         }));
         p.add(Box::new(BloomPass::new(gpu, state.clone())))?;
         Ok(BloomHandle { state })
@@ -575,6 +583,24 @@ impl BloomHandle {
             .try_borrow()
             .map(|st| st.desc)
             .unwrap_or_default()
+    }
+
+    /// Multiplies the composite strength by `scale` in `[0, 1]` (`bloom.invalid` outside,
+    /// unchanged on refusal); `set` keeps it, so a look applied later stays scaled.
+    pub fn set_scale(&self, scale: f32) -> Result<(), RaaError> {
+        if !(scale.is_finite() && (0.0..=1.0).contains(&scale)) {
+            return Err(RaaError::FrameGraph {
+                code: "bloom.invalid",
+                message: format!("`scale` must be in [0, 1], got {scale}"),
+            });
+        }
+        self.state.try_borrow_mut().map_err(|_| state_busy())?.scale = scale;
+        Ok(())
+    }
+
+    /// The strength scale (1 until set).
+    pub fn scale(&self) -> f32 {
+        self.state.try_borrow().map(|st| st.scale).unwrap_or(1.0)
     }
 }
 
@@ -645,6 +671,7 @@ mod tests {
         let handle = BloomHandle {
             state: Rc::new(RefCell::new(BloomState {
                 desc: BloomDesc::default(),
+                scale: 1.0,
             })),
         };
         let bad = BloomDesc {
@@ -654,6 +681,11 @@ mod tests {
         let err = handle.set(bad).unwrap_err();
         assert_eq!(err.code(), "bloom.invalid");
         assert_eq!(handle.get(), BloomDesc::default());
+        assert_eq!(handle.scale(), 1.0);
+        assert_eq!(handle.set_scale(1.5).unwrap_err().code(), "bloom.invalid");
+        handle.set_scale(0.25).unwrap();
+        handle.set(BloomDesc::default()).unwrap();
+        assert_eq!(handle.clone().scale(), 0.25);
         let good = BloomDesc {
             radius: 0.5,
             ..BloomDesc::default()

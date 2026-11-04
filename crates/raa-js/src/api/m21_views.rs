@@ -25,6 +25,12 @@ use raa_core::RaaError;
 pub const MAX_VIEWPORTS: usize = 4;
 pub const OVERLAY_LAYERS: usize = 8;
 pub const DPR_CAP: f64 = 2.0;
+/// `setRenderScale` range: the 3D image is drawn at this fraction (or multiple) of the
+/// backing size `resize` gives, and the browser scales the canvas to its CSS size.
+pub const RENDER_SCALE_MIN: f64 = 0.25;
+pub const RENDER_SCALE_MAX: f64 = 2.0;
+/// A scaled backing side never exceeds this (the WebGPU default `maxTextureDimension2D`).
+pub const SCALED_BACKING_MAX: f64 = 8192.0;
 /// Rounding slack for `x + width <= 1` and for rects that only touch.
 const EPS: f64 = 1e-9;
 
@@ -279,11 +285,51 @@ pub fn backing_size(css_w: f64, css_h: f64, dpr: Option<f64>) -> Result<(u32, u3
     Ok((px(css_w), px(css_h)))
 }
 
+/// The backing size of `resize` at render scale `scale`: round(css * min(dpr, DPR_CAP) *
+/// scale), at least 1 and, when `scale` > 1, at most SCALED_BACKING_MAX per side. Scale 1 is
+/// exactly `backing_size`. Refusals as `backing_size`, plus `api.invalid_argument` for a
+/// scale outside RENDER_SCALE_MIN..=RENDER_SCALE_MAX.
+pub fn scaled_backing_size(
+    css_w: f64,
+    css_h: f64,
+    dpr: Option<f64>,
+    scale: f64,
+) -> Result<(u32, u32), RaaError> {
+    check_render_scale(scale)?;
+    let (w, h) = backing_size(css_w, css_h, dpr)?;
+    if scale == 1.0 {
+        return Ok((w, h));
+    }
+    let max = if scale > 1.0 {
+        SCALED_BACKING_MAX
+    } else {
+        f64::from(u32::MAX)
+    };
+    let dpr = dpr.unwrap_or(1.0).min(DPR_CAP);
+    let px = |css: f64, unscaled: u32| {
+        (css * dpr * scale)
+            .round()
+            .clamp(1.0, max.max(f64::from(unscaled))) as u32
+    };
+    Ok((px(css_w, w), px(css_h, h)))
+}
+
+/// `api.invalid_argument` unless `scale` is finite and in RENDER_SCALE_MIN..=RENDER_SCALE_MAX.
+pub fn check_render_scale(scale: f64) -> Result<(), RaaError> {
+    if scale.is_finite() && (RENDER_SCALE_MIN..=RENDER_SCALE_MAX).contains(&scale) {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "render scale must be in {RENDER_SCALE_MIN}..={RENDER_SCALE_MAX}, got {scale}"
+        )))
+    }
+}
+
 /// `overlay.layer` (outside 0..7), then `overlay.length` (positions not a multiple of 6,
 /// or colors not 4 per vertex).
 pub fn validate_overlay(layer: f64, positions: usize, colors: usize) -> Result<usize, RaaError> {
     let index = overlay_layer(layer)?;
-    if positions % 6 != 0 {
+    if !positions.is_multiple_of(6) {
         return Err(error(
             "overlay.length",
             format!("positions must be a multiple of 6 (xyz pairs), got {positions}"),
@@ -322,6 +368,10 @@ pub struct ViewsState {
     /// Slot i is viewport i's camera; slot 0 stays None (the scene camera).
     cameras: [Option<ViewCamera>; MAX_VIEWPORTS],
     overlays: [OverlayLayer; OVERLAY_LAYERS],
+    /// The last `resize(cssWidth, cssHeight, dpr?)` arguments, re-applied by `setRenderScale`.
+    resized: Option<(f64, f64, Option<f64>)>,
+    /// `setRenderScale` (1 until set).
+    render_scale: f64,
 }
 
 impl Default for ViewsState {
@@ -330,11 +380,45 @@ impl Default for ViewsState {
             rects: vec![ViewRect::FULL],
             cameras: [None; MAX_VIEWPORTS],
             overlays: Default::default(),
+            resized: None,
+            render_scale: 1.0,
         }
     }
 }
 
 impl ViewsState {
+    /// The render scale (1 until `set_render_scale`).
+    pub fn render_scale(&self) -> f64 {
+        self.render_scale
+    }
+
+    /// Stores the render scale (`api.invalid_argument` outside the range, unchanged then).
+    pub fn set_render_scale(&mut self, scale: f64) -> Result<(), RaaError> {
+        check_render_scale(scale)?;
+        self.render_scale = scale;
+        Ok(())
+    }
+
+    /// The backing size of a `resize` call at the current render scale; the call is
+    /// remembered (for `setRenderScale`) only when it is valid.
+    pub fn resize(
+        &mut self,
+        css_w: f64,
+        css_h: f64,
+        dpr: Option<f64>,
+    ) -> Result<(u32, u32), RaaError> {
+        let size = scaled_backing_size(css_w, css_h, dpr, self.render_scale)?;
+        self.resized = Some((css_w, css_h, dpr));
+        Ok(size)
+    }
+
+    /// The backing size of the last `resize` at the current render scale; None before the
+    /// first `resize`.
+    pub fn rescaled(&self) -> Option<Result<(u32, u32), RaaError>> {
+        self.resized
+            .map(|(w, h, dpr)| scaled_backing_size(w, h, dpr, self.render_scale))
+    }
+
     /// The viewports, 1..4, in index order.
     pub fn viewports(&self) -> &[ViewRect] {
         &self.rects
@@ -439,7 +523,7 @@ mod web {
     use js_sys::{Array, Reflect};
     use raa_core::GpuContext;
     use raa_math::Vec3;
-    use raa_web::{FrameInput, error_to_js};
+    use raa_web::FrameInput;
     use std::cell::RefCell;
     use std::rc::Rc;
     use wasm_bindgen::prelude::*;
@@ -595,17 +679,49 @@ mod web {
             })
         }
 
-        /// Resizes the canvas backing store to round(css * min(dpr, 2)) (zero clamps to 1);
-        /// the camera aspect follows. `dpr` omitted is 1: the v0 call `resize(width,
-        /// height)` passes backing pixels and keeps that meaning.
+        /// Resizes the canvas backing store to round(css * min(dpr, 2) * renderScale) (zero
+        /// clamps to 1); the camera aspect follows. `dpr` omitted is 1: the v0 call
+        /// `resize(width, height)` passes backing pixels and keeps that meaning.
         pub fn resize(
             &mut self,
             css_width: f64,
             css_height: f64,
             dpr: Option<f64>,
         ) -> Result<(), JsValue> {
-            let (w, h) = backing_size(css_width, css_height, dpr).map_err(|e| error_to_js(&e))?;
+            let (w, h) = self.with_state(|_, st| views(st)?.resize(css_width, css_height, dpr))?;
             self.resize_backing(w, h)
+        }
+
+        /// Draws the 3D image at `scale` (0.25..2) times the backing size `resize` gives:
+        /// below 1 the canvas holds fewer pixels and the browser upsamples it (bilinear) to
+        /// its CSS size, above 1 it holds more and the browser downsamples it
+        /// (supersampling, at most 8192 px per side). Viewports are canvas fractions, so
+        /// they follow. Applied at once when `resize` was called, else at the first
+        /// `resize`. `api.invalid_argument` outside the range; nothing changes on it.
+        #[wasm_bindgen(js_name = setRenderScale)]
+        pub fn set_render_scale(&mut self, scale: f64) -> Result<(), JsValue> {
+            let size = self.with_state(|_, st| {
+                let v = views(st)?;
+                let previous = v.render_scale();
+                v.set_render_scale(scale)?;
+                match v.rescaled().transpose() {
+                    Ok(size) => Ok(size),
+                    Err(e) => {
+                        v.set_render_scale(previous)?;
+                        Err(e)
+                    }
+                }
+            })?;
+            match size {
+                Some((w, h)) => self.resize_backing(w, h),
+                None => Ok(()),
+            }
+        }
+
+        /// The render scale `setRenderScale` set (1 by default).
+        #[wasm_bindgen(js_name = renderScale)]
+        pub fn render_scale(&self) -> Result<f64, JsValue> {
+            self.with_state(|_, st| Ok(views(st)?.render_scale()))
         }
 
         /// Replaces the segments of overlay `layer` 0..7: positions are xyz pairs in world

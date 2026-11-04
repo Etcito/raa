@@ -53,14 +53,17 @@ fn state_busy() -> RaaError {
 /// State shared by the pass and every clone of a `GradingHandle`.
 struct GradingState {
     desc: GradingDesc,
+    /// How much of the grade applies, in `[0, 1]` (`set_amount`, 1 until set): kept apart from
+    /// the desc, which a post preset rewrites.
+    amount: f32,
 }
 
 type SharedGrading = Rc<RefCell<GradingState>>;
 
 /// Packs `GradingParams` in place: wb columns @0/@16/@32, exposure_contrast @48, lift @64,
 /// gamma @80, gain @96, shadows_tint @112, highlights_tint @128, misc @144 (split_balance,
-/// vignette, aspect w / h of `size`, 0).
-fn pack_params(out: &mut [u8; UNIFORM_LEN], size: (u32, u32), d: &GradingDesc) {
+/// vignette, aspect w / h of `size`, amount).
+fn pack_params(out: &mut [u8; UNIFORM_LEN], size: (u32, u32), d: &GradingDesc, amount: f32) {
     let m = white_balance_matrix(d.temperature_k, d.tint);
     let col = |j: usize| [m[0][j], m[1][j], m[2][j], 0.0];
     let rgb = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
@@ -75,7 +78,7 @@ fn pack_params(out: &mut [u8; UNIFORM_LEN], size: (u32, u32), d: &GradingDesc) {
         rgb(d.gain),
         rgb(d.shadows_tint),
         rgb(d.highlights_tint),
-        [d.split_balance, d.vignette, aspect, 0.0],
+        [d.split_balance, d.vignette, aspect, amount],
     ];
     for (chunk, x) in out
         .chunks_exact_mut(4)
@@ -243,8 +246,11 @@ impl FeaturePass for GradingPass {
 
     /// Writes the params from the handle's description and the viewport aspect (in place).
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let desc = self.state.try_borrow().map_err(|_| state_busy())?.desc;
-        pack_params(&mut self.bytes, ctx.size, &desc);
+        let (desc, amount) = {
+            let st = self.state.try_borrow().map_err(|_| state_busy())?;
+            (st.desc, st.amount)
+        };
+        pack_params(&mut self.bytes, ctx.size, &desc, amount);
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         Ok(())
     }
@@ -306,6 +312,7 @@ impl GradingFeature {
         }
         let state = Rc::new(RefCell::new(GradingState {
             desc: GradingDesc::default(),
+            amount: 1.0,
         }));
         p.add(Box::new(GradingPass::new(gpu, state.clone())))?;
         Ok(GradingHandle { state })
@@ -334,6 +341,27 @@ impl GradingHandle {
             .map(|st| st.desc)
             .unwrap_or_default()
     }
+
+    /// How much of the grade applies: 0 passes the HDR colour through ungraded, 1 is the
+    /// full grade (`post.invalid` outside `[0, 1]`, unchanged on refusal); `set` keeps it.
+    pub fn set_amount(&self, amount: f32) -> Result<(), RaaError> {
+        if !(amount.is_finite() && (0.0..=1.0).contains(&amount)) {
+            return Err(refusal(
+                "post.invalid",
+                &format!("`amount` must be in [0, 1], got {amount}"),
+            ));
+        }
+        self.state
+            .try_borrow_mut()
+            .map_err(|_| state_busy())?
+            .amount = amount;
+        Ok(())
+    }
+
+    /// The grade amount (1 until set).
+    pub fn amount(&self) -> f32 {
+        self.state.try_borrow().map(|st| st.amount).unwrap_or(1.0)
+    }
 }
 
 #[cfg(test)]
@@ -355,7 +383,7 @@ mod tests {
     #[test]
     fn neutral_params_pack_identity() {
         let mut out = [0u8; UNIFORM_LEN];
-        pack_params(&mut out, (200, 100), &GradingDesc::default());
+        pack_params(&mut out, (200, 100), &GradingDesc::default(), 1.0);
         for j in 0..3 {
             let c = read(&out, j);
             for (i, v) in c.iter().enumerate() {
@@ -369,7 +397,7 @@ mod tests {
         assert_eq!(read(&out, 6), [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(read(&out, 7), [0.5, 0.5, 0.5, 0.0]);
         assert_eq!(read(&out, 8), [0.5, 0.5, 0.5, 0.0]);
-        assert_eq!(read(&out, 9), [0.0, 0.0, 2.0, 0.0]);
+        assert_eq!(read(&out, 9), [0.0, 0.0, 2.0, 1.0]);
     }
 
     #[test]
@@ -381,10 +409,11 @@ mod tests {
         };
         let m = white_balance_matrix(9000.0, 0.0);
         let mut out = [0u8; UNIFORM_LEN];
-        pack_params(&mut out, (1, 1), &d);
+        pack_params(&mut out, (1, 1), &d, 0.5);
         assert_eq!(read(&out, 0), [m[0][0], m[1][0], m[2][0], 0.0]);
         assert_eq!(read(&out, 2), [m[0][2], m[1][2], m[2][2], 0.0]);
         assert_eq!(read(&out, 3)[0], 4.0);
+        assert_eq!(read(&out, 9)[3], 0.5);
     }
 
     #[test]
@@ -392,6 +421,7 @@ mod tests {
         let handle = GradingHandle {
             state: Rc::new(RefCell::new(GradingState {
                 desc: GradingDesc::default(),
+                amount: 1.0,
             })),
         };
         let good = GradingDesc::preset("candy").unwrap();

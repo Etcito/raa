@@ -83,6 +83,8 @@ interface AoSettings {
   radius?: number;     // metres, > 0 and <= 10
   intensity?: number;  // [0, 1]
   power?: number;      // > 0 and <= 8
+  slices?: number;     // whole number, 1..8
+  steps?: number;      // whole number, 1..16
 }
 ```
 
@@ -96,6 +98,13 @@ smooth the raw signal without bleeding across depth edges.
 | `radius` | metres | `0.8` | > 0 and <= 10 | World-space sampling radius. |
 | `intensity` | - | `1` | `[0, 1]` | Strength of the AO darkening: 0 leaves the ambient light unchanged, 1 applies it fully. |
 | `power` | - | `1.5` | > 0 and <= 8 | Exponent shaping the AO falloff. |
+| `slices` | directions | `4` | whole, 1..8 | Sampling effort: slice directions per pixel. |
+| `steps` | samples | `8` | whole, 1..16 | Sampling effort: horizon samples per side of a slice. |
+
+`slices` and `steps` are the AO quality: the pass costs about `slices x steps` samples per pixel,
+so `2 x 4` is about a quarter of the default and noisier (the denoise passes smooth part of it).
+They are stored apart from the look (`radius`, `intensity`, `power`), so a quality choice and a
+look set later never overwrite each other.
 
 A wrong type, a non-finite number or a value outside its range throws `ao.invalid` naming the
 field.

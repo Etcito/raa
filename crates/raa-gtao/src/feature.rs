@@ -16,7 +16,7 @@ use raa_lit::LitRenderer;
 use raa_math::Mat4;
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets};
 
-use crate::desc::AoDesc;
+use crate::desc::{AoDesc, AoQuality};
 use crate::shaders::{DENOISE_WGSL, GTAO_WGSL, PARAMS_SIZE, ao_provider};
 
 /// S12 name of the pass.
@@ -32,6 +32,7 @@ const OFF_PROJ: usize = 0;
 const OFF_INV_PROJ: usize = 64;
 const OFF_VIEWPORT: usize = 128;
 const OFF_PARAMS: usize = 144;
+const OFF_QUALITY: usize = 160;
 /// The frame index given to the noise wraps here so it stays exact as an f32.
 const FRAME_WRAP: u64 = 1024;
 
@@ -68,6 +69,7 @@ struct GtaoCamera {
 /// State shared by the pass and every clone of a `GtaoHandle`.
 struct GtaoState {
     desc: AoDesc,
+    quality: AoQuality,
     /// None until the first `set_camera`.
     camera: Option<GtaoCamera>,
 }
@@ -81,12 +83,13 @@ fn write_vec4(out: &mut [u8], v: [f32; 4]) {
 }
 
 /// Packs `GtaoParams`: proj @0, inv_proj @64, viewport (w, h, 1/w, 1/h) @128, params
-/// (radius_m, intensity, power, frame) @144.
+/// (radius_m, intensity, power, frame) @144, quality (slices, steps, 0, 0) @160.
 fn pack_params(
     out: &mut [u8; PARAMS_LEN],
     camera: &GtaoCamera,
     size: (u32, u32),
     desc: &AoDesc,
+    quality: &AoQuality,
     frame: u64,
 ) {
     let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
@@ -96,13 +99,17 @@ fn pack_params(
         .write_le_bytes(&mut out[OFF_INV_PROJ..OFF_VIEWPORT]);
     write_vec4(&mut out[OFF_VIEWPORT..OFF_PARAMS], [w, h, 1.0 / w, 1.0 / h]);
     write_vec4(
-        &mut out[OFF_PARAMS..PARAMS_LEN],
+        &mut out[OFF_PARAMS..OFF_QUALITY],
         [
             desc.radius_m,
             desc.intensity,
             desc.power,
             (frame % FRAME_WRAP) as f32,
         ],
+    );
+    write_vec4(
+        &mut out[OFF_QUALITY..PARAMS_LEN],
+        [quality.slices as f32, quality.steps as f32, 0.0, 0.0],
     );
 }
 
@@ -318,7 +325,14 @@ impl FeaturePass for GtaoPass {
             self.needs_bind = true;
             return Ok(());
         };
-        pack_params(&mut self.bytes, &camera, ctx.size, &st.desc, ctx.frame);
+        pack_params(
+            &mut self.bytes,
+            &camera,
+            ctx.size,
+            &st.desc,
+            &st.quality,
+            ctx.frame,
+        );
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         if self.needs_bind {
             ctx.lighting.set_ao(textures.out_view.clone());
@@ -388,6 +402,7 @@ impl GtaoFeature {
         lit.add_slot(ao_provider())?;
         let state = Rc::new(RefCell::new(GtaoState {
             desc: AoDesc::default(),
+            quality: AoQuality::default(),
             camera: None,
         }));
         p.add(Box::new(GtaoPass::new(gpu, state.clone())))?;
@@ -415,6 +430,25 @@ impl GtaoHandle {
         self.state
             .try_borrow()
             .map(|st| st.desc)
+            .unwrap_or_default()
+    }
+
+    /// Replaces the sampling effort after `AoQuality::validate` (`ao.invalid`; unchanged on
+    /// refusal). `pipeline.busy` on a re-entrant call.
+    pub fn set_quality(&self, q: AoQuality) -> Result<(), RaaError> {
+        q.validate()?;
+        self.state
+            .try_borrow_mut()
+            .map_err(|_| state_busy())?
+            .quality = q;
+        Ok(())
+    }
+
+    /// The current sampling effort (4 x 8 until set).
+    pub fn quality(&self) -> AoQuality {
+        self.state
+            .try_borrow()
+            .map(|st| st.quality)
             .unwrap_or_default()
     }
 
@@ -456,13 +490,18 @@ mod tests {
             power: 2.0,
         };
         let mut out = [0u8; PARAMS_LEN];
-        pack_params(&mut out, &camera, (1280, 720), &desc, 7);
+        let quality = AoQuality {
+            slices: 2,
+            steps: 5,
+        };
+        pack_params(&mut out, &camera, (1280, 720), &desc, &quality, 7);
         assert_eq!(out.len() as u64, PARAMS_SIZE);
         assert_eq!(f32_at(&out, 0), 2.0);
         assert_eq!(f32_at(&out, 64), 0.5);
         let at = |o: usize| [0, 4, 8, 12].map(|i| f32_at(&out, o + i));
         assert_eq!(at(128), [1280.0, 720.0, 1.0 / 1280.0, 1.0 / 720.0]);
         assert_eq!(at(144), [0.5, 0.75, 2.0, 7.0]);
+        assert_eq!(at(160), [2.0, 5.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -470,6 +509,7 @@ mod tests {
         let handle = GtaoHandle {
             state: Rc::new(RefCell::new(GtaoState {
                 desc: AoDesc::default(),
+                quality: AoQuality::default(),
                 camera: None,
             })),
         };
@@ -486,5 +526,18 @@ mod tests {
         };
         handle.set(good).unwrap();
         assert_eq!(handle.clone().get(), good);
+        assert_eq!(handle.quality(), AoQuality::default());
+        let bad_quality = AoQuality {
+            slices: 0,
+            steps: 4,
+        };
+        assert!(handle.set_quality(bad_quality).is_err());
+        let low = AoQuality {
+            slices: 2,
+            steps: 4,
+        };
+        handle.set_quality(low).unwrap();
+        assert_eq!(handle.clone().quality(), low);
+        assert_eq!(handle.get(), good);
     }
 }

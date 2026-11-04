@@ -11,6 +11,7 @@ struct GtaoParams {
     inv_proj: mat4x4<f32>, // @64
     viewport: vec4<f32>,   // @128 (w, h, 1/w, 1/h)
     params: vec4<f32>,     // @144 (radius_m, intensity, power, frame index)
+    quality: vec4<f32>,    // @160 (slices, steps per side, 0, 0)
 }
 
 @group(0) @binding(0) var src_ao: texture_2d<f32>;

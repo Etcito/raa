@@ -60,6 +60,18 @@ The v0 call `resize(width, height)` stays valid. When `dpr` is omitted it is 1, 
 two numbers are backing pixels, exactly as before. The game's
 `engine.resize(target.width, target.height)` therefore keeps its meaning.
 
+### Render scale
+
+`setRenderScale(scale)` draws the 3D image at `scale` (0.25..2) times the size above:
+the backing store becomes `round(css × min(dpr, 2) × scale)` per axis. Below 1 the canvas
+holds fewer pixels and the browser upsamples it to its CSS size (bilinear; nearest under the
+canvas's CSS `image-rendering: pixelated`); above 1 it holds more and the browser
+downsamples it (supersampling), at most 8192 px per side. Viewports are fractions of the
+canvas, so split views follow. The engine remembers the last `resize` arguments: a scale set
+after one applies at once, a scale set before the first applies at that `resize`.
+`renderScale()` reads it back (1 by default). Refusal: `api.invalid_argument` (outside
+0.25..2 or non-finite); nothing changes on it.
+
 The JS method moved from `engine.rs` to `m21_views.rs`. `engine.rs` keeps the
 backing-store update as the crate-private `resize_backing`.
 

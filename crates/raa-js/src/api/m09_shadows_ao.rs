@@ -95,6 +95,21 @@ fn read_f32(obj: &JsValue, key: &str, slot: &mut f32) -> Result<(), RaaError> {
     Ok(())
 }
 
+/// Overwrites `*slot` with the whole number at `key` when present (`ao.invalid` for a
+/// fraction or a negative number; the range is the desc's).
+fn read_count(obj: &JsValue, key: &str, slot: &mut u32) -> Result<(), RaaError> {
+    if let Some(x) = optional_f64(obj, key)? {
+        if !(x.is_finite() && x.fract() == 0.0 && x >= 0.0 && x <= f64::from(u32::MAX)) {
+            return Err(RaaError::FrameGraph {
+                code: "ao.invalid",
+                message: format!("`{key}` must be a whole number, got {x}"),
+            });
+        }
+        *slot = x as u32;
+    }
+    Ok(())
+}
+
 /// Checks that `settings` is an object (`api.invalid_argument` otherwise).
 fn require_object(settings: &JsValue, method: &str) -> Result<(), RaaError> {
     if settings.is_object() {
@@ -130,9 +145,11 @@ impl Engine {
         })
     }
 
-    /// Sets the ambient occlusion: `{radius?, intensity?, power?}` merged over the current
-    /// settings. Out-of-range values throw `ao.invalid` naming the field; nothing changes on
-    /// a refusal.
+    /// Sets the ambient occlusion: `{radius?, intensity?, power?, slices?, steps?}` merged
+    /// over the current settings. `slices` (1..8 directions per pixel) and `steps` (1..16
+    /// horizon samples per side) are the sampling effort, 4 x 8 by default; fewer is cheaper
+    /// and noisier. Out-of-range values throw `ao.invalid` naming the field; nothing changes
+    /// on a refusal.
     #[wasm_bindgen(js_name = setAo)]
     pub fn set_ao(&mut self, settings: JsValue) -> Result<(), JsValue> {
         self.with_state(|_, st| {
@@ -142,7 +159,13 @@ impl Engine {
             read_f32(&settings, "radius", &mut d.radius_m)?;
             read_f32(&settings, "intensity", &mut d.intensity)?;
             read_f32(&settings, "power", &mut d.power)?;
-            ao.set(d)
+            let mut q = ao.quality();
+            read_count(&settings, "slices", &mut q.slices)?;
+            read_count(&settings, "steps", &mut q.steps)?;
+            d.validate()?;
+            q.validate()?;
+            ao.set(d)?;
+            ao.set_quality(q)
         })
     }
 

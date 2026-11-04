@@ -469,3 +469,34 @@ export function volumeSurfaceAttributes(positions: Float32Array, normals: Float3
 export const REST_TANGENT_AXIS: readonly [number, number, number];
 /** The rest tangent cross(REST_TANGENT_AXIS, n) of a rest normal, not normalised (linear in n). */
 export function restTangent(n: readonly number[]): [number, number, number];
+
+/**
+ * The player-facing render options an sdfm game applies to RAA (the values of MAMA's GameRenderOptions contract,
+ * src/core/game/render-options.ts). Every field is optional; keys this adapter does not apply to the engine (shading,
+ * bake sizes, frame pacing, lodOffset) are reported in `skipped` with the reason.
+ */
+export interface SdfmRenderOptions {
+  /** 0 = AO off, 1..4 = the GTAO effort of {@link AO_QUALITY_LEVELS} (3 = RAA's default, 4 slices x 8 steps). */
+  aoQuality?: number;
+  /** Engine.setRenderScale: 0.25..2 times the backing size; the browser up/downsamples the canvas. */
+  renderScale?: number;
+  /** false turns the bloom pass off; true leaves it as the scene look sets it. */
+  postBloom?: boolean;
+  /** false turns the colour grading pass off; true leaves it as the scene look sets it. */
+  postGrading?: boolean;
+  /** Engine.setPostStrength: 0..1, the grade mixed with the ungraded colour and the bloom scaled. */
+  postStrength?: number;
+  [key: string]: unknown;
+}
+
+/** GTAO slices x steps per AO quality level; level 0 is null (the `ao.gtao` pass off). */
+export const AO_QUALITY_LEVELS: readonly ({ readonly slices: number; readonly steps: number } | null)[];
+
+/**
+ * Applies `options` to `engine`. `look` names the post passes the current scene look uses (an option only turns a
+ * pass off, never on against the look); call it again after every `applyEnvironment`. Engine refusals (RaaError)
+ * propagate. Returns the keys applied and, for every other key given, why not (an @etcito/raa without the call, or
+ * an option with no engine side).
+ */
+export function applyRenderOptions(engine: Engine, options: SdfmRenderOptions,
+  look?: { bloom?: boolean; grading?: boolean }): { applied: string[]; skipped: { key: string; reason: string }[] };

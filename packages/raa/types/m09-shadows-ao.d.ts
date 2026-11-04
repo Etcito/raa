@@ -43,6 +43,15 @@ export interface AoSettings {
    * Exponent shaping the AO falloff; finite, > 0 and <= 8. Default 1.5.
    */
   power?: number;
+  /**
+   * Sampling effort: slice directions per pixel, a whole number in 1..8. Default 4. Fewer is
+   * cheaper and noisier.
+   */
+  slices?: number;
+  /**
+   * Sampling effort: horizon samples per side of a slice, a whole number in 1..16. Default 8.
+   */
+  steps?: number;
 }
 
 /**
