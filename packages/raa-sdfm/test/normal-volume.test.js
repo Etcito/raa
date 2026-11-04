@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { mapMaterial } from '../src/map-material.js';
 import { SdfmError } from '../src/errors.js';
 import {
-  checkNormalVolume, orthoTangent, volumeInstanceParams, volumeMaterial, volumeStandardMaterial, volumeSurfaceAttributes,
+  REST_TANGENT_AXIS, checkNormalVolume, restTangent, volumeInstanceParams, volumeMaterial, volumeStandardMaterial, volumeSurfaceAttributes,
   volumeTexture,
 } from '../src/normal-volume.js';
 
@@ -46,21 +46,42 @@ test('volumeSurfaceAttributes: rest position in the colour, a rest frame the WGS
   const normals = new Float32Array(raw.flat());
   const { colors, uvs, tangents } = volumeSurfaceAttributes(positions, normals);
   for (let v = 0; v < 3; v++) {
-    assert.deepEqual(Array.from(colors.subarray(v * 4, v * 4 + 4)), [...positions.subarray(v * 3, v * 3 + 3), 1]);
-    // octahedral decode (sdfv_oct_decode) of the uv gives the unit rest normal back
-    const [x, y] = uvs.subarray(v * 2, v * 2 + 2);
-    let n = [x, y, 1 - Math.abs(x) - Math.abs(y)];
-    if (n[2] < 0) n = [(1 - Math.abs(n[1])) * (n[0] >= 0 ? 1 : -1), (1 - Math.abs(n[0])) * (n[1] >= 0 ? 1 : -1), n[2]];
-    const l = Math.hypot(...n);
-    n = n.map((c) => c / l);
+    assert.deepEqual(Array.from(colors.subarray(v * 4, v * 4 + 3)), Array.from(positions.subarray(v * 3, v * 3 + 3)));
+    // (uv, colour w) is the unit rest normal (sdfv_shading_normal reads it so)
+    const n = [uvs[v * 2], uvs[v * 2 + 1], colors[v * 4 + 3]];
     const r = raw[v], rl = Math.hypot(...r);
     assert.ok(n.every((c, i) => Math.abs(c - r[i] / rl) < 1e-6), `normal ${v}`);
     const t = Array.from(tangents.subarray(v * 4, v * 4 + 3));
-    assert.ok(Math.abs(Math.hypot(...t) - 1) < 1e-6, 'unit tangent');
     assert.ok(Math.abs(t[0] * n[0] + t[1] * n[1] + t[2] * n[2]) < 1e-6, 'tangent across the normal');
     assert.equal(tangents[v * 4 + 3], 1);
-    assert.deepEqual(t.map((c) => Math.fround(c)), orthoTangent(n).map((c) => Math.fround(c)));
+    assert.deepEqual(t.map((c) => Math.fround(c)), restTangent(n).map((c) => Math.fround(c)));
   }
+});
+
+test('volumeSurfaceAttributes: the frame rebuilt from interpolated streams is the interpolated frame (any hemisphere)', () => {
+  // sdfv_shading_normal in JS, at rest (posed = rest): it must hand the rest gradient back unchanged inside every
+  // triangle, also across the octahedral fold and the z = 0 seam that broke the former encoding (file 34, 2026-11-04).
+  const norm = (a) => { const l = Math.hypot(...a); return a.map((c) => c / l); };
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const tris = [[[0.1, -0.1, -1], [-0.1, 0.05, -1], [0.02, 0.1, -1]], [[0.3, 0.2, 0.05], [0.3, 0.1, -0.05], [0.25, 0.3, 0]],
+    [[-0.5, -0.5, -0.7], [0.5, -0.5, -0.7], [0, 0.6, -0.8]]];
+  let worst = 0;
+  for (const tri of tris) {
+    const ns = tri.map(norm);
+    const { colors, uvs, tangents } = volumeSurfaceAttributes(new Float32Array(9), new Float32Array(ns.flat()));
+    for (const [u, w] of [[1 / 3, 1 / 3], [0.5, 0.25], [0.1, 0.8], [0.45, 0.45]]) {
+      const bw = [1 - u - w, u, w], lerp = (f) => [0, 1, 2].map((k) => bw.reduce((s, b, j) => s + b * f(j)[k], 0));
+      const nr0 = lerp((j) => [uvs[j * 2], uvs[j * 2 + 1], colors[j * 4 + 3]]);
+      const tan = lerp((j) => Array.from(tangents.subarray(j * 4, j * 4 + 3)));
+      const n = norm(lerp((j) => ns[j])), g = norm(lerp((j) => ns[j]).map((c, k) => c + [0.2, -0.1, 0.3][k]));
+      const nr = norm(nr0), tr0 = cross(REST_TANGENT_AXIS, nr0), tr = norm(tr0.map((c, k) => c - nr[k] * dot(nr, tr0)));
+      const t = norm(tan.map((c, k) => c - n[k] * dot(n, tan))), br = cross(nr, tr), bw2 = cross(n, t);
+      const m = norm([0, 1, 2].map((k) => dot(g, tr) * t[k] + dot(g, br) * bw2[k] + dot(g, nr) * n[k]));
+      worst = Math.max(worst, Math.acos(Math.min(1, dot(m, g))));
+    }
+  }
+  assert.ok(worst < 1e-4, `rebuilt frame off by ${(worst * 180 / Math.PI).toFixed(3)} degrees`);
 });
 
 test('checkNormalVolume accepts the MAMA layout and names the first bad field', () => {

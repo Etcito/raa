@@ -4,11 +4,15 @@
 // instance params of each mesh instance.
 //
 // Data a fragment needs, and where it travels:
-//   - the rest position in the part's mesh space: the vertex colour xyz (w = 1), unclamped f32, passed through RAA's
+//   - the rest position in the part's mesh space: the vertex colour xyz, unclamped f32, passed through RAA's
 //     skinning untouched, so a posed skinned part still reads the field at its rest point;
-//   - the rest frame: uv = the octahedral rest normal, tangent = orthoTangent of the decoded normal (handedness +1);
-//     RAA moves tangent and normal with the instance and the skin, and the rest-space gradient is re-expressed in that
-//     posed frame (the same construction as SDF Modeler's per-pixel 'sdf' material, app/paramesh/sdf-material.ts);
+//   - the rest frame: (uv, colour w) = the rest normal as plain xyz, tangent = restTangent = cross(REST_TANGENT_AXIS,
+//     rest normal) (handedness +1); RAA moves tangent and normal with the instance and the skin, and the rest-space
+//     gradient is re-expressed in that posed frame (the same construction as SDF Modeler's per-pixel 'sdf' material,
+//     app/paramesh/sdf-material.ts). Both streams are LINEAR in the rest normal, so a fragment rebuilds exactly the
+//     interpolated rest frame RAA interpolated in posed space (an octahedral normal and a Frisvad tangent do not
+//     interpolate: across the octahedral fold and the z = 0 tangent seam the rebuilt frame turned up to 160 degrees,
+//     dark streaks on the -z half of a sphere, SDF Modeler file 34, 2026-11-04);
 //   - the volume: instance params (Engine.setInstanceParams, 16 floats) p0 = origin xyz, spacing; p1 = brick cells
 //     xyz, texture id; p2 = image width, height, tiles per row, index rows; p3.x = 1 when the volume is set.
 // An instance without the params (p3.x = 0), a point outside the stored bricks, a node without gradient or a sampled
@@ -22,6 +26,11 @@ export const NORMAL_VOLUME_VERSIONS = Object.freeze([1]);
 const BRICK = 4;
 const TILE_W = (BRICK + 1) * (BRICK + 1);
 const TILE_H = 2 * (BRICK + 1);
+/**
+ * The fixed axis of the rest tangent cross(axis, n): (1, 2, 3) / sqrt(14), parallel to no axis-aligned or 45-degree
+ * face, so only isolated points of curved surfaces meet its singularity.
+ */
+export const REST_TANGENT_AXIS = Object.freeze([1 / Math.sqrt(14), 2 / Math.sqrt(14), 3 / Math.sqrt(14)]);
 
 /** Prefix of the wrapped function names; the rest of the name is the base function's. */
 export const VOLUME_FUNCTION_PREFIX = 'sdfv.';
@@ -66,22 +75,12 @@ fn sdfv_volume_gradient(in: MaterialInput) -> vec3<f32> {
   return mix(s0, s1, l.z - z0);
 }
 
-fn sdfv_oct_decode(e: vec2<f32>) -> vec3<f32> {
-  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
-  if (n.z < 0.0) { n = vec3<f32>((1.0 - abs(n.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), n.xy >= vec2<f32>(0.0)), n.z); }
-  return normalize(n);
-}
-
-// orthoTangent of normal-volume.js: a unit tangent across n (Frisvad / Duff et al.).
-fn sdfv_ortho_tangent(n: vec3<f32>) -> vec3<f32> {
-  let s = select(-1.0, 1.0, n.z >= 0.0);
-  let a = -1.0 / (s + n.z);
-  let b = n.x * n.y * a;
-  return vec3<f32>(1.0 + s * n.x * n.x * a, s * b, -s * n.x);
-}
+const SDFV_REST_TANGENT_AXIS = vec3<f32>(${REST_TANGENT_AXIS.map((v) => Math.fround(v).toPrecision(9)).join(', ')});
 
 // The unit shading normal of the fragment: the rest-space volume gradient carried onto the drawn (posed, world)
-// surface through the rest frame (uv, tangent); the mesh normal where the volume has nothing to say.
+// surface through the rest frame (uv + colour w, tangent); the mesh normal where the volume has nothing to say. The
+// interpolated rest normal and its tangent cross(axis, normal) are rebuilt unnormalised, i.e. exactly the vectors RAA
+// interpolated in posed space, then both frames are orthonormalised the same way.
 fn sdfv_shading_normal(in: MaterialInput) -> vec3<f32> {
   let n = normalize(in.normal);
   let g = sdfv_volume_gradient(in);
@@ -89,11 +88,16 @@ fn sdfv_shading_normal(in: MaterialInput) -> vec3<f32> {
   // Trilinear unit vectors keep a length near 1; a short one mixes opposite sides of a thin wall or empty nodes.
   if (!(len > 0.5)) { return n; }
   let gr = g / len;
-  let nr = sdfv_oct_decode(in.uv);
-  let tr = sdfv_ortho_tangent(nr);
-  let br = cross(nr, tr);
+  let nr0 = vec3<f32>(in.uv, in.color.w);
+  if (dot(nr0, nr0) < 1e-12) { return n; }
+  let nr = normalize(nr0);
+  let tr0 = cross(SDFV_REST_TANGENT_AXIS, nr0);
+  let trp = tr0 - nr * dot(nr, tr0);
   let tw = in.tangent.xyz - n * dot(n, in.tangent.xyz);
-  if (dot(tw, tw) < 1e-12) { return n; }
+  // At the axis singularity (one point of a curved surface) both tangents vanish together: the mesh normal there.
+  if (dot(trp, trp) < 1e-8 || dot(tw, tw) < 1e-12) { return n; }
+  let tr = normalize(trp);
+  let br = cross(nr, tr);
   let t = normalize(tw);
   let bw = cross(n, t) * select(-1.0, 1.0, in.tangent.w >= 0.0);
   var m = normalize(dot(gr, tr) * t + dot(gr, br) * bw + dot(gr, nr) * n);
@@ -198,29 +202,18 @@ export function volumeInstanceParams(v, textureId, options = {}) {
   ];
 }
 
-/** A unit tangent across the unit normal `n` (Frisvad, Duff et al. 2017); sdfv_ortho_tangent is the same in WGSL. */
-export function orthoTangent(n) {
-  const s = n[2] >= 0 ? 1 : -1, a = -1 / (s + n[2]), b = n[0] * n[1] * a;
-  return [1 + s * n[0] * n[0] * a, s * b, -s * n[0]];
-}
-
-function octEncode(n) {
-  const l1 = Math.abs(n[0]) + Math.abs(n[1]) + Math.abs(n[2]) || 1;
-  let x = n[0] / l1, y = n[1] / l1;
-  if (n[2] < 0) [x, y] = [(1 - Math.abs(y)) * (x >= 0 ? 1 : -1), (1 - Math.abs(x)) * (y >= 0 ? 1 : -1)];
-  return [x, y];
-}
-
-function octDecode(e) {
-  let n = [e[0], e[1], 1 - Math.abs(e[0]) - Math.abs(e[1])];
-  if (n[2] < 0) n = [(1 - Math.abs(n[1])) * (n[0] >= 0 ? 1 : -1), (1 - Math.abs(n[0])) * (n[1] >= 0 ? 1 : -1), n[2]];
-  const l = Math.hypot(n[0], n[1], n[2]) || 1;
-  return n.map((c) => c / l);
+/**
+ * The rest tangent of a rest normal `n`: cross(REST_TANGENT_AXIS, n), not normalised (linear in `n`, so its
+ * interpolation across a triangle is the tangent of the interpolated normal; sdfv_shading_normal rebuilds it).
+ */
+export function restTangent(n) {
+  const [ax, ay, az] = REST_TANGENT_AXIS;
+  return [ay * n[2] - az * n[1], az * n[0] - ax * n[2], ax * n[1] - ay * n[0]];
 }
 
 /**
  * The per-vertex streams of a volume-shaded mesh (positions and normals in the part's mesh space, at rest): colours =
- * the rest position (w = 1), uvs = the octahedral rest normal, tangents = orthoTangent of the decoded normal.
+ * the rest position with w = the unit rest normal's z, uvs = its x and y, tangents = restTangent of it.
  * @param {Float32Array} positions
  * @param {Float32Array} normals
  * @returns {{ colors: Float32Array, uvs: Float32Array, tangents: Float32Array }}
@@ -230,14 +223,12 @@ export function volumeSurfaceAttributes(positions, normals) {
   const colors = new Float32Array(count * 4), uvs = new Float32Array(count * 2), tangents = new Float32Array(count * 4);
   for (let v = 0; v < count; v++) {
     colors[v * 4] = positions[v * 3]; colors[v * 4 + 1] = positions[v * 3 + 1]; colors[v * 4 + 2] = positions[v * 3 + 2];
-    colors[v * 4 + 3] = 1;
     let n = [normals[v * 3], normals[v * 3 + 1], normals[v * 3 + 2]];
     const l = Math.hypot(n[0], n[1], n[2]);
     n = l > 1e-12 ? n.map((c) => c / l) : [0, 0, 1];
-    const e = octEncode(n);
-    uvs[v * 2] = e[0]; uvs[v * 2 + 1] = e[1];
-    // The tangent of the DECODED normal, so the WGSL rebuilds the very same rest frame.
-    const t = orthoTangent(octDecode(e));
+    colors[v * 4 + 3] = n[2];
+    uvs[v * 2] = n[0]; uvs[v * 2 + 1] = n[1];
+    const t = restTangent(n);
     tangents[v * 4] = t[0]; tangents[v * 4 + 1] = t[1]; tangents[v * 4 + 2] = t[2]; tangents[v * 4 + 3] = 1;
   }
   return { colors, uvs, tangents };

@@ -404,8 +404,10 @@ export function volumeTexture(volume: SdfmNormalVolume): { width: number; height
  * normal as an emissive colour instead of the material.
  */
 export function volumeInstanceParams(volume: SdfmNormalVolume, textureId: number, options?: { debug?: boolean }): number[];
-/** The vertex streams of a volume-shaded mesh: colours = rest position, uvs = octahedral rest normal, tangents. */
+/** The vertex streams of a volume-shaded mesh: colours = rest position + rest normal z, uvs = rest normal xy, tangents = restTangent. */
 export function volumeSurfaceAttributes(positions: Float32Array, normals: Float32Array):
   { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };
-/** A unit tangent across a unit normal (Frisvad / Duff et al.). */
-export function orthoTangent(n: readonly number[]): [number, number, number];
+/** The fixed axis of the rest tangent: (1, 2, 3) / sqrt(14). */
+export const REST_TANGENT_AXIS: readonly [number, number, number];
+/** The rest tangent cross(REST_TANGENT_AXIS, n) of a rest normal, not normalised (linear in n). */
+export function restTangent(n: readonly number[]): [number, number, number];
