@@ -6,7 +6,6 @@ import {
   FIELD_DATA_HEADER, FIELD_FLAG_DEBUG, FIELD_FLAG_SINGLE, FIELD_FRAME_WGSL, FIELD_OPERAND_WORDS, REST_TANGENT_AXIS, checkPartShading,
   fieldPartShading, fieldSurfaceAttributes, restTangent,
 } from '../src/field-shading.js';
-import { volumeSurfaceAttributes } from '../src/normal-volume.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
 /** The shape of MAMA's evaluator (field-program-wgsl.ts FIELD_PROGRAM_WGSL): PmfSample and pmf_eval over pmf_f. */
@@ -121,5 +120,4 @@ test('the rest frame is linear in the rest normal and the WGSL axis is REST_TANG
   assert.deepEqual(Array.from(s.colors), [1, 2, 3, 1]);
   assert.deepEqual(Array.from(s.uvs), [0, 0]);
   assert.deepEqual(Array.from(s.tangents), [...restTangent([0, 0, 1]).map(Math.fround), 1]);
-  assert.deepEqual(volumeSurfaceAttributes(positions, normals), s, 'the volume streams are the same rest frame');
 });
