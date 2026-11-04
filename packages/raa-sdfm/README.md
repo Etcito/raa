@@ -74,6 +74,7 @@ MAMA's game render option `shading: 'baked'` (`core/game/render-options.ts`) bak
 - `tangents = partTangents(positions, normals, uvs, indices)`: pass the same array to the bake and to the drawn mesh (`MeshDesc.tangents`).
 - `size`: MAMA `bakeTextureSize(atlasScale(positions, uvs, indices), options)`, then `fitBakeSizes(parts)` for every part of the engine so the bakes fit RAA's 4096 x 4096 texture atlas (the densest parts halve first).
 - Upload the images with `Engine.addTexture`, register `BAKED_MATERIAL_WGSL` once as `BAKED_FUNCTION`, and give each part a surface material with `data: addMaterialData(bakedMaterialWords(normal, color, emissive))`. A part whose material takes the player colour keeps its per-pixel shading.
+- Or let `createBakeScheduler(engine, { device, field, textureSize })` do all of it (`src/bake-scheduler.js`), as Royal Fiesta and SDF Modeler's Game view do: `prepare(part)` at upload gives the part's surface material and tangents, `queue(parts)` when a scene first shows them starts one run that fits everything queued into `BAKE_RUN_SHARE` (3/4) of the atlas left and bakes `BAKE_BATCH` parts at a time; `onChange` says which parts became done (show the baked draw) or failed (keep the vertex-colour copy, reported once by `onFailed`); `release(part)` gives its textures and data block back.
 
 ## Browser build
 

@@ -467,6 +467,71 @@ export interface SdfmBakeResult { size: number; normal: Uint8Array; color: Uint8
 /** A baker on the GPUDevice RAA renders with: pipelines cached by shader text (one for all constant-material parts). */
 export function createFieldBaker(device: unknown): { bake(input: SdfmBakeInput): Promise<SdfmBakeResult>; readonly pipelines: number };
 
+/** What one bake run may take of the texture atlas left (0.75); the rest stays for what a later scene brings. */
+export const BAKE_RUN_SHARE: number;
+/** Parts baked at once by a bake run. */
+export const BAKE_BATCH: number;
+/** Textures a part's bake uploads: 2 (normal, colour), 3 when an operand may glow (a graph or an emissive constant). */
+export function bakeTextureCount(shading: SdfmPartShading): number;
+/**
+ * A part the 'baked' shading draws (SdfmBakeScheduler.prepare): draw its mesh (positions, normals, uvs, `tangents`,
+ * indices) with `material`, hidden while `state` is not 'done' (the renderer's vertex-colour copy covers it; 'failed'
+ * keeps that copy, `error` says why).
+ */
+export interface SdfmBakedPart {
+  state: 'idle' | 'queued' | 'done' | 'failed' | 'released';
+  label: string;
+  shading: SdfmPartShading;
+  materials: SdfmBakeInput['materials'];
+  positions: Float32Array; normals: Float32Array; uvs: Float32Array; indices: Uint32Array;
+  /** partTangents of the part: the drawn mesh carries the same array. */
+  tangents: Float32Array;
+  /** Its material data block (bakedMaterialWords; texture ids written when baked) and its surface material handle. */
+  data: number; material: number;
+  /** Engine.addTexture ids once baked, the bake side and the texels they take of the atlas. */
+  textures: number[]; size: number; texels: number;
+  error: string | null;
+}
+export interface SdfmBakeStats {
+  parts: number; failed: number; ms: number; texels: number; bytes: number; textures: number; pipelines: number;
+  /** What the done, unreleased parts hold now. */
+  resident: { textures: number; texels: number };
+  /** Texels of RAA's texture atlas the bakes take now (the next run fits in what remains). */
+  used: number;
+}
+export interface SdfmBakeScheduler {
+  /** Registers the shared baked function once, adds the part's data block and surface material, computes its tangents. */
+  prepare(part: { shading: SdfmPartShading; materials: SdfmBakeInput['materials']; positions: Float32Array; normals: Float32Array;
+    uvs: Float32Array; indices: Uint32Array; look?: { roughness: number; metallic: number }; label?: string }): SdfmBakedPart;
+  /** Queues the idle parts a scene shows; one run (next macrotask) fits and bakes everything queued. */
+  queue(parts: readonly SdfmBakedPart[]): void;
+  /** Frees a part (textures, texels, data block); idempotent. */
+  release(part: SdfmBakedPart): void;
+  /** Settles once nothing waits. */
+  done(): Promise<void>;
+  stats(): SdfmBakeStats;
+  dispose(): void;
+}
+/**
+ * The bake scheduling shared by sdfm game renderers (Royal Fiesta's port, SDF Modeler's Game view): parts prepared at
+ * upload, queued when a scene first shows them, each run fitted into BAKE_RUN_SHARE of the atlas left, baked
+ * BAKE_BATCH at a time on `device()`, texture ids written into the parts' data blocks.
+ */
+export function createBakeScheduler(engine: Engine, options: {
+  device: () => unknown;
+  field: string;
+  /** MAMA render-options.ts bakeTextureSize(scale, options). */
+  textureSize: (scale: number) => number;
+  onChange?: (parts: SdfmBakedPart[]) => void;
+  onFailed?: (part: SdfmBakedPart, why: string) => void;
+  onRun?: (stats: SdfmBakeStats) => void;
+  budget?: number;
+  runShare?: number;
+  batch?: number;
+  /** A baker to use instead of createFieldBaker(device()) (tests). */
+  baker?: { bake(input: SdfmBakeInput): Promise<SdfmBakeResult>; readonly pipelines: number };
+}): SdfmBakeScheduler;
+
 /** The fixed axis of the rest tangent: (1, 2, 3) / sqrt(14). */
 export const REST_TANGENT_AXIS: readonly [number, number, number];
 /** The rest tangent cross(REST_TANGENT_AXIS, n) of a rest normal, not normalised (linear in n). */

@@ -12,3 +12,4 @@ export {
   BAKED_DATA_VERSION, BAKED_DATA_WORDS, BAKED_FUNCTION, BAKED_MATERIAL_WGSL, BAKED_NO_TEXTURE, BAKE_ATLAS_BUDGET, BAKE_DILATE_PASSES,
   BAKE_DILATE_WGSL, BAKE_MIN_SIZE, atlasScale, bakedMaterialWords, createFieldBaker, fieldBakeWgsl, fitBakeSizes, partTangents,
 } from './src/field-bake.js';
+export { BAKE_BATCH, BAKE_RUN_SHARE, bakeTextureCount, createBakeScheduler } from './src/bake-scheduler.js';
