@@ -369,35 +369,51 @@ export const MATERIAL_FUNCTION_MAX_BYTES: 65536;
 export const FIELD_FRAME_WGSL: string;
 /** WGSL of `sdff_normal(in, s: PmfSample)`: the field normal on the posed surface, the mesh normal past 60 degrees. */
 export const FIELD_NORMAL_WGSL: string;
-/** How one field operand is shaded (MAMA field-wgsl.ts FieldOperandShading). */
+/** How one field operand is shaded (MAMA field-program.ts FieldOperandShading). */
 export interface SdfmFieldOperandShading {
   color: [number, number, number];
   material: string | null;
   /** Rows of the program -> node space 3x4 affine: 12 floats. */
   toNode: number[];
+  /** The material's output when its graph reads no point, normal, mask or player colour: no graph code runs for it. */
+  constant?: { color: [number, number, number]; metallic: number; roughness: number; emissive: [number, number, number] };
 }
 /**
- * The per-pixel shading of a field part (MAMA field-wgsl.ts PartShading; a saved game mesh part's `shading`): the field
- * WGSL (`pmf_field`, part frame), its operands' shading, the part -> program frame (absent = identity) and the look.
+ * The per-pixel shading of a field part (MAMA field-program.ts PartShading; a saved game mesh part's `shading`, mesh
+ * format 3): the field program (read by MAMA FIELD_PROGRAM_WGSL, part frame), its operands' shading, the part -> program
+ * frame (absent = identity), the look, and whether the source used lattices or deformers (approximate normals).
  */
 export interface SdfmPartShading {
-  field: string;
+  program: number[];
   operands: SdfmFieldOperandShading[];
   frame?: number[];
   single: boolean;
   look: { roughness: number; metallic: number };
+  deformed?: true;
 }
+/** Field program layout version the interpreter reads. */
+export const FIELD_PROGRAM_VERSION: 1;
+/** Data block layout of a part: version, words before the program, words per operand, flags of word 1. */
+export const FIELD_DATA_VERSION: 1;
+export const FIELD_DATA_HEADER: 20;
+export const FIELD_OPERAND_WORDS: 24;
+export const FIELD_FLAG_SINGLE: 1;
+export const FIELD_FLAG_DEBUG: 2;
 /** Checks a part shading record; refusals: `sdfm.schema` naming the first bad field. */
 export function checkPartShading(shading: unknown): SdfmPartShading;
 /**
- * The material function of a field part, the one per-pixel material path of SDF Modeler's Game view and of the game:
- * the field normal at the rest point ({@link fieldSurfaceAttributes}) and the operands' materials (the asset's compiled
- * materials, by name) at the program-space and node-space points, mixed by the field's weights. A missing material wears
- * its operand colour and is listed in `missing`. `single` leaves roughness/metallic to the surface record (`look`).
- * Refusals: `sdfm.schema` (record), `sdfm.material_unmappable` (a material that cannot be inlined, over 65536 bytes).
+ * The per-pixel shading of a field part, the one material path of SDF Modeler's Game view and of the game: ONE
+ * interpreter material function (fixed text; every part whose operands are constant or colours shares it, a part with
+ * material graphs adds them, named by the set of graph bodies) and the part's data block. Register the function once
+ * per `name` (`Engine.addFunction`), add `words` with `Engine.addMaterialData` and pass the base as the surface
+ * material's `data`. The field normal comes from the rest point ({@link fieldSurfaceAttributes}), the operands' materials
+ * (constant values, graphs at the program-space and node-space points, else colours) are mixed by the field's weights. A
+ * graph material missing from `materials` wears its operand colour and is listed in `missing`. `single` leaves
+ * roughness/metallic to the surface record (`look`); `debug` shows the normal (a data flag, same function).
+ * Refusals: `sdfm.schema` (record, evaluator), `sdfm.material_unmappable` (a material that cannot be inlined, over 65536 bytes).
  */
-export function fieldPartMaterialWgsl(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
-  options?: { debug?: boolean }): { wgsl: string; tintMode: 'graph' | 'multiply'; missing: string[] };
+export function fieldPartShading(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
+  options: { field: string; debug?: boolean }): { name: string; wgsl: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[] };
 /** The vertex streams of a field-shaded mesh: colours = rest position + rest normal z, uvs = rest normal xy, tangents = restTangent. */
 export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32Array):
   { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };

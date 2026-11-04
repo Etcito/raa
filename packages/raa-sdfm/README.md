@@ -57,6 +57,15 @@ The field names, in declaration order, are `base_color`, `metallic`, `roughness`
 | `emissive` | `emissive` | copied |
 | `height` | none | dropped; named in the `dropped` list |
 
+## Per-pixel field shading
+
+A saved game mesh part carries `shading` (MAMA `core/paramesh/field-program.ts` `PartShading`, mesh format 3): the part's SDF as a field program (numbers), each field operand's colour, material (or folded `constant` values) and node frame, the part frame and the look. `fieldPartShading(shading, materials, { field: FIELD_PROGRAM_WGSL })` returns ONE interpreter material function and the part's data block:
+
+- `name` and `wgsl`: the function. Its text is fixed. Every part whose operands are constant materials or colours gets the same text, so a scene compiles one pipeline for all of them. A part whose operands run material graphs (a pattern, the player colour) adds those graphs, and parts with the same graphs share that text too. Register it once per `name` with `Engine.addFunction`.
+- `words`: the part's data block (layout `FIELD_DATA_*` in `src/field-shading.js`). Add it with `Engine.addMaterialData(words)` and pass the returned base as the surface material's `data`. Free it with `removeMaterialData` when the part goes away.
+
+The caller hands in the evaluator text, MAMA's `FIELD_PROGRAM_WGSL` from `core/paramesh/field-program-wgsl.js`, so this package imports nothing from MAMA. `debug` (the normal as an emissive colour) and `single` (one material per object) are data flags, so they reuse the same pipeline. The vertex streams come from `fieldSurfaceAttributes(positions, normals)`.
+
 ## Browser build
 
 MAMA's build is `dist/` in the MAMA checkout. Build it with `npm run build` in `../MAMA`. That runs the `@real3d/quadmesh` build and then `tsc -p tsconfig.json`. That output imports npm packages by bare specifier, so `scripts/build-sdfm-compare.sh --mama ../MAMA` stages a browser ESM bundle of the entry points above (`index.js`, `core/game/mesh-assets.js`, `core/material-graph/helpers.js`, `browser/index.js`, `browser/compute-worker.js`, plus `core/material-graph/cpu-eval.js` for the compare page's reference viewport) as `mama/` with MAMA's own esbuild, at the same paths as under `dist/`, plus `manifold.wasm`. The `base` of `importMama` in the page is that `mama/` URL.
