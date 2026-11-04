@@ -291,6 +291,26 @@ impl JiggleChain {
         Ok(())
     }
 
+    /// The animated pose as skin matrices (model * inverse bind, 16 floats per bone, the palette a renderer draws
+    /// without jiggle); an empty slice restores rest. For callers that only hold the skin palette (an editor preview).
+    pub fn set_skin(&mut self, skin: &[f32]) -> Result<(), AnimError> {
+        if skin.is_empty() {
+            return self.set_pose(skin);
+        }
+        let n = self.parents.len();
+        if skin.len() != n * 16 {
+            return Err(bad(format!("skin must be {} floats (16 per bone)", n * 16)));
+        }
+        let mut model = vec![0.0; n * 16];
+        for i in 0..n {
+            let bind = affine_inverse(&self.inverse_bind[i])
+                .ok_or_else(|| bad(format!("bone {i} bind is singular")))?;
+            let s: Mat4 = skin[i * 16..i * 16 + 16].try_into().expect("16 floats");
+            model[i * 16..i * 16 + 16].copy_from_slice(&mat_mul(&s, &bind));
+        }
+        self.set_pose(&model)
+    }
+
     /// The next step starts from the animated pose (after a teleport or a cut).
     pub fn reset(&mut self) {
         self.live = false;

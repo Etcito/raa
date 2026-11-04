@@ -334,3 +334,44 @@ fn animated_pose_input_drives_the_target() {
     }
     assert!(peak > 3.0, "a nod should swing the horn, peak {peak}");
 }
+
+#[test]
+fn skin_input_is_the_same_pose_as_model_input() {
+    // An editor preview only holds the skin palette (model * inverse bind): set_skin must pose the chain identically.
+    let rig = hat(r#"{"maxAngle":40,"stiffness":0.3,"damping":0.2}"#);
+    let rest = rig.rest_pose().unwrap();
+    let (s, c) = 0.4_f32.sin_cos();
+    let nod: Mat4 = [
+        c, s, 0.0, 0.0, -s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.1, 0.0, 0.0, 1.0,
+    ];
+    let model: Vec<f32> = rest
+        .model
+        .iter()
+        .flat_map(|m| raa_anim::jiggle::mat_mul(&nod, m))
+        .collect();
+    let skin: Vec<f32> = rest
+        .model
+        .iter()
+        .zip(rig.inverse_bind_matrices().unwrap())
+        .flat_map(|(m, ib)| raa_anim::jiggle::mat_mul(&raa_anim::jiggle::mat_mul(&nod, m), &ib))
+        .collect();
+    let mut a = JiggleChain::new(&rig).unwrap();
+    let mut b = JiggleChain::new(&rig).unwrap();
+    a.set_pose(&model).unwrap();
+    b.set_skin(&skin).unwrap();
+    for _ in 0..30 {
+        let pa = a
+            .step(4, 1.0 / JIGGLE_SUBSTEP_HZ, &IDENTITY, &IDENTITY)
+            .unwrap()
+            .to_vec();
+        let pb = b
+            .step(4, 1.0 / JIGGLE_SUBSTEP_HZ, &IDENTITY, &IDENTITY)
+            .unwrap()
+            .to_vec();
+        for (x, y) in pa.iter().zip(&pb) {
+            assert!((x - y).abs() < 1e-4, "{x} vs {y}");
+        }
+    }
+    assert!(b.set_skin(&[0.0; 5]).is_err());
+    b.set_skin(&[]).unwrap();
+}

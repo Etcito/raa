@@ -59,6 +59,12 @@ mod wasm {
             self.inner.chain_mut(handle).map_err(error)?.set_pose(model).map_err(error)
         }
 
+        /// Animated pose as skin matrices (model * inverse bind, 16 floats per bone); empty restores rest.
+        #[wasm_bindgen(js_name = setPoseSkin)]
+        pub fn set_pose_skin(&mut self, handle: u32, skin: &[f32]) -> Result<(), JsValue> {
+            self.inner.chain_mut(handle).map_err(error)?.set_skin(skin).map_err(error)
+        }
+
         /// The next step of this handle starts from its animated pose (teleport, respawn, cut).
         pub fn reset(&mut self, handle: u32) -> Result<(), JsValue> {
             self.inner.chain_mut(handle).map_err(error)?.reset();

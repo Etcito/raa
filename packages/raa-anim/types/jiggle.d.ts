@@ -22,6 +22,8 @@ export class JiggleWorld {
   jiggleCount(handle: number): number;
   /** Animated pose: model matrices in the mount frame, 16 column-major floats per bone; empty restores rest. */
   setPose(handle: number, model: Float32Array): void;
+  /** Animated pose as skin matrices (model * inverse bind, the palette drawn without jiggle); empty restores rest. */
+  setPoseSkin(handle: number, skin: Float32Array): void;
   /** The handle's next step starts from its animated pose (teleport, respawn, camera cut). */
   reset(handle: number): void;
   /** Live handles. */
