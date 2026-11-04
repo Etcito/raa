@@ -84,3 +84,20 @@ test('volumeInstanceParams and volumeTexture follow the WGSL params layout', () 
   assert.deepEqual(volumeInstanceParams(v, 7), [-1, -1, -1, 0.5, 1, 1, 1, 7, 25, 11, 1, 1, 1, 0, 0, 0]);
   assert.deepEqual(volumeTexture(v), { width: 25, height: 11, data: v.texels });
 });
+
+test('vertexColors (default off): the rest point is the local position and the vertex colour reaches the base', () => {
+  const off = volumeStandardMaterial(), on = volumeStandardMaterial({ vertexColors: true });
+  assert.equal(off.functionName, 'sdfv.standard');
+  assert.equal(on.functionName, 'sdfvc.standard');
+  assert.ok(off.wgsl.includes('return in.color.xyz;') && off.wgsl.includes('b.color = vec4<f32>(1.0);'), 'default: rest point in the colour, base sees white');
+  assert.ok(on.wgsl.includes('return in.local_position;') && !on.wgsl.includes('b.color = vec4<f32>(1.0);'), 'vertexColors: local position, real colour');
+  assert.equal(on.wgsl.match(/\bfn\s+material_main\s*\(/g).length, 1);
+  assert.ok(!/\bfn\s+raa_/.test(on.wgsl));
+  const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), normals = new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]);
+  const rgba = new Float32Array([1, 0, 0, 1, 0.5, 0, 0.5, 1, 0, 0, 1, 1]);
+  const { colors, uvs } = volumeSurfaceAttributes(positions, normals, { colors: rgba });
+  assert.deepEqual(Array.from(colors), Array.from(rgba));
+  assert.notEqual(colors, rgba, 'a copy');
+  assert.equal(uvs.length, 6);
+  assert.throws(() => volumeSurfaceAttributes(positions, normals, { colors: new Float32Array(4) }), (e) => e instanceof SdfmError && e.code === 'sdfm.schema');
+});

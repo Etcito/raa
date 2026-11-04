@@ -27,6 +27,15 @@ const TILE_H = 2 * (BRICK + 1);
 export const VOLUME_FUNCTION_PREFIX = 'sdfv.';
 /** The wrapped standard surface (no MAMA material): raa_default_output with the volume normal. */
 export const VOLUME_STANDARD_FUNCTION = 'sdfv.standard';
+/**
+ * Prefix of the vertex-colour variant (option `vertexColors`, default off): the rest point comes from
+ * MaterialInput.local_position (unskinned meshes only: a skinned mesh's local position is posed) and the colour stream
+ * keeps real vertex colours, which multiply the base colour (one material per object: the shapes' material colours
+ * blended at the smooth rims, SDF Modeler core/game/single-material.ts).
+ */
+export const VOLUME_COLOR_FUNCTION_PREFIX = 'sdfvc.';
+/** Name of volumeStandardMaterial({ vertexColors: true })'s function. */
+export const VOLUME_COLOR_STANDARD_FUNCTION = 'sdfvc.standard';
 
 const VOLUME_WGSL = /* wgsl */ `
 // sdfv: per-pixel normal from a MAMA normal volume (@etcito/raa-sdfm normal-volume.js).
@@ -45,7 +54,7 @@ fn sdfv_slice(tex: u32, size: vec2<f32>, t: vec2<f32>) -> vec3<f32> {
 fn sdfv_volume_gradient(in: MaterialInput) -> vec3<f32> {
   let q = in.instance_params;
   if (q[3].x < 0.5 || !(q[0].w > 0.0)) { return vec3<f32>(0.0); }
-  let c = (in.color.xyz - q[0].xyz) / q[0].w;
+  let c = (sdfv_rest_point(in) - q[0].xyz) / q[0].w;
   let bc = floor(c / ${BRICK}.0);
   if (any(bc < vec3<f32>(0.0)) || any(bc >= q[1].xyz)) { return vec3<f32>(0.0); }
   let tex = u32(q[1].w + 0.5);
@@ -114,11 +123,14 @@ const MAIN = /\bfn\s+material_main\s*\(/g;
  *
  * @param {string} functionName the base function's registered name
  * @param {string} wgsl the base function's WGSL (it defines material_main exactly once)
+ * @param {{ vertexColors?: boolean }} [options] vertexColors (default false): the rest point is the fragment's local
+ *   position and the base runs with the real vertex colour (see VOLUME_COLOR_FUNCTION_PREFIX); the mesh then carries
+ *   volumeSurfaceAttributes(positions, normals, { colors }). Unskinned meshes only.
  * @returns {{ functionName: string, wgsl: string }}
  * @throws {SdfmError} `sdfm.material_unmappable` when the base does not define material_main exactly once or already
  *   uses the sdfv_ names
  */
-export function volumeMaterial(functionName, wgsl) {
+export function volumeMaterial(functionName, wgsl, options = {}) {
   if (typeof functionName !== 'string' || functionName === '' || typeof wgsl !== 'string') {
     throw new SdfmError('sdfm.material_unmappable', 'volumeMaterial: pass the base function name and its WGSL');
   }
@@ -130,8 +142,15 @@ export function volumeMaterial(functionName, wgsl) {
     throw new SdfmError('sdfm.material_unmappable', `material function '${functionName}' already uses sdfv_ names`);
   }
   const base = wgsl.replace(MAIN, 'fn sdfv_base_main(');
-  return { functionName: VOLUME_FUNCTION_PREFIX + functionName, wgsl: `${base}\n${VOLUME_WGSL}\n${WRAPPED_MAIN}` };
+  const colors = options?.vertexColors === true;
+  return { functionName: (colors ? VOLUME_COLOR_FUNCTION_PREFIX : VOLUME_FUNCTION_PREFIX) + functionName,
+    wgsl: `${base}\n${colors ? REST_LOCAL : REST_COLOR}\n${VOLUME_WGSL}\n${colors ? WRAPPED_MAIN.replace(WHITE, '') : WRAPPED_MAIN}` };
 }
+
+// Where the fragment's rest point travels: the colour stream (default) or the local position (vertexColors).
+const REST_COLOR = 'fn sdfv_rest_point(in: MaterialInput) -> vec3<f32> {\n  return in.color.xyz;\n}\n';
+const REST_LOCAL = 'fn sdfv_rest_point(in: MaterialInput) -> vec3<f32> {\n  return in.local_position;\n}\n';
+const WHITE = '  b.color = vec4<f32>(1.0);\n';
 
 const WRAPPED_MAIN = /* wgsl */ `
 fn material_main(in: MaterialInput) -> MaterialOutput {
@@ -152,9 +171,10 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
 }
 `;
 
-/** The wrapped standard surface: the material record's own values (raa_default_output), shaded with the volume normal. */
-export function volumeStandardMaterial() {
-  return volumeMaterial('standard', 'fn material_main(in: MaterialInput) -> MaterialOutput {\n  return raa_default_output(in);\n}\n');
+/** The wrapped standard surface: the material record's own values (raa_default_output), shaded with the volume normal.
+ * `{ vertexColors: true }`: the vertex-colour variant (the record's colour times the vertex colour). */
+export function volumeStandardMaterial(options = {}) {
+  return volumeMaterial('standard', 'fn material_main(in: MaterialInput) -> MaterialOutput {\n  return raa_default_output(in);\n}\n', options);
 }
 
 /**
@@ -221,16 +241,25 @@ function octDecode(e) {
 /**
  * The per-vertex streams of a volume-shaded mesh (positions and normals in the part's mesh space, at rest): colours =
  * the rest position (w = 1), uvs = the octahedral rest normal, tangents = orthoTangent of the decoded normal.
+ * `options.colors` (linear rgba, 4 per vertex; for the vertexColors functions only): the colours are those, not the rest
+ * position.
  * @param {Float32Array} positions
  * @param {Float32Array} normals
+ * @param {{ colors?: Float32Array }} [options]
  * @returns {{ colors: Float32Array, uvs: Float32Array, tangents: Float32Array }}
  */
-export function volumeSurfaceAttributes(positions, normals) {
+export function volumeSurfaceAttributes(positions, normals, options = {}) {
   const count = positions.length / 3;
-  const colors = new Float32Array(count * 4), uvs = new Float32Array(count * 2), tangents = new Float32Array(count * 4);
+  const own = options?.colors;
+  if (own !== undefined && (!(own instanceof Float32Array) || own.length !== count * 4)) {
+    throw new SdfmError('sdfm.schema', `volumeSurfaceAttributes: colors must be a Float32Array of ${count * 4} (rgba per vertex)`);
+  }
+  const colors = own !== undefined ? own.slice() : new Float32Array(count * 4), uvs = new Float32Array(count * 2), tangents = new Float32Array(count * 4);
   for (let v = 0; v < count; v++) {
-    colors[v * 4] = positions[v * 3]; colors[v * 4 + 1] = positions[v * 3 + 1]; colors[v * 4 + 2] = positions[v * 3 + 2];
-    colors[v * 4 + 3] = 1;
+    if (own === undefined) {
+      colors[v * 4] = positions[v * 3]; colors[v * 4 + 1] = positions[v * 3 + 1]; colors[v * 4 + 2] = positions[v * 3 + 2];
+      colors[v * 4 + 3] = 1;
+    }
     let n = [normals[v * 3], normals[v * 3 + 1], normals[v * 3 + 2]];
     const l = Math.hypot(n[0], n[1], n[2]);
     n = l > 1e-12 ? n.map((c) => c / l) : [0, 0, 1];

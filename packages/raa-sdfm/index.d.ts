@@ -392,9 +392,19 @@ export interface SdfmNormalVolume {
  * {@link volumeInstanceParams}, vertex streams from {@link volumeSurfaceAttributes}); without the params it behaves
  * as its base. Refusals: `sdfm.material_unmappable` when `material_main` is not defined exactly once.
  */
-export function volumeMaterial(functionName: string, wgsl: string): { functionName: string; wgsl: string };
+export function volumeMaterial(functionName: string, wgsl: string, options?: VolumeMaterialOptions): { functionName: string; wgsl: string };
 /** The wrapped standard surface (the material record's own values with the volume normal). */
-export function volumeStandardMaterial(): { functionName: string; wgsl: string };
+export function volumeStandardMaterial(options?: VolumeMaterialOptions): { functionName: string; wgsl: string };
+/**
+ * Vertex-colour volume functions (default off): `vertexColors: true` reads the rest point from the fragment's local
+ * position (unskinned meshes only) and lets the real vertex colour multiply the base colour; the mesh carries
+ * `volumeSurfaceAttributes(positions, normals, { colors })`. Function names start with {@link VOLUME_COLOR_FUNCTION_PREFIX}.
+ */
+export interface VolumeMaterialOptions { vertexColors?: boolean }
+/** Prefix of the vertexColors volume functions. */
+export const VOLUME_COLOR_FUNCTION_PREFIX: 'sdfvc.';
+/** Name of volumeStandardMaterial({ vertexColors: true })'s function. */
+export const VOLUME_COLOR_STANDARD_FUNCTION: 'sdfvc.standard';
 /** Checks a normal volume; refusals: `sdfm.schema` naming the first bad field. */
 export function checkNormalVolume(volume: unknown): SdfmNormalVolume;
 /** The `Engine.addTexture` argument of a volume. */
@@ -405,7 +415,7 @@ export function volumeTexture(volume: SdfmNormalVolume): { width: number; height
  */
 export function volumeInstanceParams(volume: SdfmNormalVolume, textureId: number, options?: { debug?: boolean }): number[];
 /** The vertex streams of a volume-shaded mesh: colours = rest position, uvs = octahedral rest normal, tangents. */
-export function volumeSurfaceAttributes(positions: Float32Array, normals: Float32Array):
+export function volumeSurfaceAttributes(positions: Float32Array, normals: Float32Array, options?: { colors?: Float32Array }):
   { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };
 /** A unit tangent across a unit normal (Frisvad / Duff et al.). */
 export function orthoTangent(n: readonly number[]): [number, number, number];
