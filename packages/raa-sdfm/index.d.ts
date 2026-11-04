@@ -360,6 +360,48 @@ export function createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader;
  */
 export function mapMaterial(material: SdfmCompiledMaterial): SdfmMappedMaterial;
 
+/** S11 user functions are at most this many bytes. */
+export const MATERIAL_FUNCTION_MAX_BYTES: 65536;
+/**
+ * WGSL of `sdfm_posed_normal(in, g)`: a rest-space normal carried onto the posed surface through the rest frame
+ * (rest normal in uv + colour w, tangent cross(REST_TANGENT_AXIS, rest normal)); declares `SDFM_TANGENT_AXIS`.
+ */
+export const FIELD_FRAME_WGSL: string;
+/** WGSL of `sdff_normal(in, s: PmfSample)`: the field normal on the posed surface, the mesh normal past 60 degrees. */
+export const FIELD_NORMAL_WGSL: string;
+/** How one field operand is shaded (MAMA field-wgsl.ts FieldOperandShading). */
+export interface SdfmFieldOperandShading {
+  color: [number, number, number];
+  material: string | null;
+  /** Rows of the program -> node space 3x4 affine: 12 floats. */
+  toNode: number[];
+}
+/**
+ * The per-pixel shading of a field part (MAMA field-wgsl.ts PartShading; a saved game mesh part's `shading`): the field
+ * WGSL (`pmf_field`, part frame), its operands' shading, the part -> program frame (absent = identity) and the look.
+ */
+export interface SdfmPartShading {
+  field: string;
+  operands: SdfmFieldOperandShading[];
+  frame?: number[];
+  single: boolean;
+  look: { roughness: number; metallic: number };
+}
+/** Checks a part shading record; refusals: `sdfm.schema` naming the first bad field. */
+export function checkPartShading(shading: unknown): SdfmPartShading;
+/**
+ * The material function of a field part, the one per-pixel material path of SDF Modeler's Game view and of the game:
+ * the field normal at the rest point ({@link fieldSurfaceAttributes}) and the operands' materials (the asset's compiled
+ * materials, by name) at the program-space and node-space points, mixed by the field's weights. A missing material wears
+ * its operand colour and is listed in `missing`. `single` leaves roughness/metallic to the surface record (`look`).
+ * Refusals: `sdfm.schema` (record), `sdfm.material_unmappable` (a material that cannot be inlined, over 65536 bytes).
+ */
+export function fieldPartMaterialWgsl(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
+  options?: { debug?: boolean }): { wgsl: string; tintMode: 'graph' | 'multiply'; missing: string[] };
+/** The vertex streams of a field-shaded mesh: colours = rest position + rest normal z, uvs = rest normal xy, tangents = restTangent. */
+export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32Array):
+  { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };
+
 /** Format tag of a MAMA normal volume (MAMA src/core/game/normal-volume.ts). */
 export const NORMAL_VOLUME_FORMAT: 'sdfm.normal-volume';
 /** Normal volume versions this package reads. */

@@ -18,6 +18,10 @@
 // An instance without the params (p3.x = 0), a point outside the stored bricks, a node without gradient or a sampled
 // normal more than 60 degrees off the mesh normal keeps the mesh normal: the wrapped function is a drop-in for its base.
 import { SdfmError } from './errors.js';
+import { REST_TANGENT_AXIS, fieldSurfaceAttributes, restTangent } from './field-shading.js';
+
+// The rest frame is the field normal's (field-shading.js): one definition for both.
+export { REST_TANGENT_AXIS, restTangent };
 
 export const NORMAL_VOLUME_FORMAT = 'sdfm.normal-volume';
 /** The volume versions this module reads. */
@@ -26,11 +30,6 @@ export const NORMAL_VOLUME_VERSIONS = Object.freeze([1]);
 const BRICK = 4;
 const TILE_W = (BRICK + 1) * (BRICK + 1);
 const TILE_H = 2 * (BRICK + 1);
-/**
- * The fixed axis of the rest tangent cross(axis, n): (1, 2, 3) / sqrt(14), parallel to no axis-aligned or 45-degree
- * face, so only isolated points of curved surfaces meet its singularity.
- */
-export const REST_TANGENT_AXIS = Object.freeze([1 / Math.sqrt(14), 2 / Math.sqrt(14), 3 / Math.sqrt(14)]);
 
 /** Prefix of the wrapped function names; the rest of the name is the base function's. */
 export const VOLUME_FUNCTION_PREFIX = 'sdfv.';
@@ -203,33 +202,12 @@ export function volumeInstanceParams(v, textureId, options = {}) {
 }
 
 /**
- * The rest tangent of a rest normal `n`: cross(REST_TANGENT_AXIS, n), not normalised (linear in `n`, so its
- * interpolation across a triangle is the tangent of the interpolated normal; sdfv_shading_normal rebuilds it).
- */
-export function restTangent(n) {
-  const [ax, ay, az] = REST_TANGENT_AXIS;
-  return [ay * n[2] - az * n[1], az * n[0] - ax * n[2], ax * n[1] - ay * n[0]];
-}
-
-/**
- * The per-vertex streams of a volume-shaded mesh (positions and normals in the part's mesh space, at rest): colours =
- * the rest position with w = the unit rest normal's z, uvs = its x and y, tangents = restTangent of it.
+ * The per-vertex streams of a volume-shaded mesh: field-shading.js fieldSurfaceAttributes (rest position + rest normal z
+ * in the colour, rest normal xy in the uvs, restTangent).
  * @param {Float32Array} positions
  * @param {Float32Array} normals
  * @returns {{ colors: Float32Array, uvs: Float32Array, tangents: Float32Array }}
  */
 export function volumeSurfaceAttributes(positions, normals) {
-  const count = positions.length / 3;
-  const colors = new Float32Array(count * 4), uvs = new Float32Array(count * 2), tangents = new Float32Array(count * 4);
-  for (let v = 0; v < count; v++) {
-    colors[v * 4] = positions[v * 3]; colors[v * 4 + 1] = positions[v * 3 + 1]; colors[v * 4 + 2] = positions[v * 3 + 2];
-    let n = [normals[v * 3], normals[v * 3 + 1], normals[v * 3 + 2]];
-    const l = Math.hypot(n[0], n[1], n[2]);
-    n = l > 1e-12 ? n.map((c) => c / l) : [0, 0, 1];
-    colors[v * 4 + 3] = n[2];
-    uvs[v * 2] = n[0]; uvs[v * 2 + 1] = n[1];
-    const t = restTangent(n);
-    tangents[v * 4] = t[0]; tangents[v * 4 + 1] = t[1]; tangents[v * 4 + 2] = t[2]; tangents[v * 4 + 3] = 1;
-  }
-  return { colors, uvs, tangents };
+  return fieldSurfaceAttributes(positions, normals);
 }

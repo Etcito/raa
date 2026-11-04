@@ -132,7 +132,7 @@ export function mapMaterial(m) {
 }
 
 /** Checks the MamaMaterial shape; returns its name. */
-function checkShape(m) {
+export function checkShape(m) {
   const bad = (what) => {
     const label = m && typeof m.name === 'string' ? m.name : '(unnamed)';
     throw new SdfmError('sdfm.material_unmappable', `material '${label}': ${what}`);
@@ -156,7 +156,7 @@ function checkShape(m) {
 }
 
 /** WGSL tokens of `src` with comments removed (line comments and nested block comments). */
-function tokens(src) {
+export function tokens(src) {
   let out = '';
   for (let i = 0; i < src.length;) {
     if (src.startsWith('//', i)) {
@@ -175,7 +175,7 @@ function tokens(src) {
 }
 
 /** The first S11-forbidden token of `src` (token scan, comments ignored, as raa-shader does), or null. */
-function forbiddenToken(src) {
+export function forbiddenToken(src) {
   const t = tokens(src);
   for (let i = 0; i < t.length; i++) {
     if (t[i] === '@' && ['group', 'binding', 'vertex', 'fragment', 'compute'].includes(t[i + 1])) return `@${t[i + 1]}`;
