@@ -32,9 +32,9 @@ test('fieldPartMaterialWgsl: field normal, operand graphs at p and pn, colours e
   assert.ok(wgsl.includes(`const SDFM_K0 = array<u32, ${m.constants.length}>(`));
   assert.ok(!/extra_words/.test(wgsl), 'constants are inlined');
   assert.ok(wgsl.includes('case 0: { return sdfm_graph_0(0u, p, pn, n, SdfmMatMasks(0.5, 1.0, 1.0, 0.0, 1.0)); }'));
-  assert.ok(wgsl.includes('vec4<f32>(1.0, 0.0, 0.0, 0.0)'), 'operand 0: red, material 0');
-  assert.ok(wgsl.includes('vec4<f32>(0.0, 0.0, 1.0, -1.0)'), 'operand 1: blue, no material');
-  assert.ok(wgsl.includes('vec4<f32>(2.0, 0.0, 0.0, 1.0)'), 'operand 1 node rows');
+  assert.ok(wgsl.includes('vec4f(1.0,0.0,0.0,0.0)'), 'operand 0: red, material 0');
+  assert.ok(wgsl.includes('vec4f(0.0,0.0,1.0,-1.0)'), 'operand 1: blue, no material');
+  assert.ok(wgsl.includes('vec4f(2.0,0.0,0.0,1.0)'), 'operand 1 node rows (the graph reads pn)');
   assert.ok(wgsl.includes('o.roughness = m.roughness;'), 'per-face look unless single');
   assert.ok(wgsl.includes('fn sdff_program_point(q: vec3<f32>) -> vec3<f32> {\n  return q;'), 'identity frame');
   assert.equal(tintMode, 'multiply');

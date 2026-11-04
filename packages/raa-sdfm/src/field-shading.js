@@ -80,12 +80,14 @@ fn sdff_normal(in: MaterialInput, s: PmfSample) -> vec3f {
 const MATERIAL_FULL_FIELDS = Object.freeze(['base_color', 'metallic', 'roughness', 'emissive', 'height']);
 const CONSTANT_READ = /extra_words\s*\[\s*b\s*\+\s*(\d+)u?\s*\]/g;
 
-/** WGSL f32 literal that reads back as exactly `x` once rounded to f32. */
+/** The shortest WGSL f32 literal that reads back as exactly `x` once rounded to f32 (the 64 KB cap counts every byte). */
 function f32(x) {
   const v = Math.fround(x);
   if (!Number.isFinite(v)) return v > 0 ? '3.4e38' : v < 0 ? '-3.4e38' : '0.0';
   if (v === 0) return '0.0';
-  const [mantissa, exponent] = v.toPrecision(9).split('e');
+  let digits = 1;
+  while (digits < 9 && Math.fround(Number(v.toPrecision(digits))) !== v) digits++;
+  const [mantissa, exponent] = v.toPrecision(digits).split('e');
   const m = mantissa.includes('.') ? mantissa.replace(/0+$/, '').replace(/\.$/, '.0') : `${mantissa}.0`;
   return exponent ? `${m}e${exponent}` : m;
 }
@@ -134,6 +136,7 @@ export function fieldPartMaterialWgsl(shading, materials, options = {}) {
   }
   const helpers = new Map();
   let tintMode = 'multiply';
+  let readsNode = false;
   const graphs = used.map((name, k) => {
     const m = byName.get(name);
     checkShape(m);
@@ -150,6 +153,7 @@ export function fieldPartMaterialWgsl(shading, materials, options = {}) {
       if (known !== undefined && known !== text) fail(`material '${name}': helper '${h.id}' differs from another material's`);
       helpers.set(h.id, text);
     }
+    if (tokens(body).includes('pn')) readsNode = true;
     for (const text of [body, ...m.helpers.map((h) => h.wgsl)]) {
       const toks = tokens(text);
       if (toks.includes('mat_instance_tint')) tintMode = 'graph';
@@ -161,17 +165,19 @@ export function fieldPartMaterialWgsl(shading, materials, options = {}) {
       `fn sdfm_graph_${k}(b: u32, p: vec3<f32>, pn: vec3<f32>, n: vec3<f32>, mk: SdfmMatMasks) -> SdfmMaterialFull {`,
       body.replace(/\s+$/, ''), '}'].filter(Boolean).join('\n');
   });
-  const count = Math.max(1, shading.operands.length);
-  const ops = shading.operands.length ? shading.operands.flatMap((o) => {
+  // Per operand: colour + material index, then (only when a graph reads its node-space point) the 3 node rows.
+  const count = Math.max(1, shading.operands.length), stride = readsNode ? 4 : 1;
+  const operands = shading.operands.length ? shading.operands : [{ color: [0.5, 0.5, 0.5], material: null, toNode: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] }];
+  const ops = operands.flatMap((o) => {
     const k = o.material === null ? -1 : used.indexOf(o.material);
     const r = o.toNode.map(f32);
-    return [`vec4<f32>(${o.color.map(f32).join(', ')}, ${f32(k)})`, `vec4<f32>(${r.slice(0, 4).join(', ')})`,
-      `vec4<f32>(${r.slice(4, 8).join(', ')})`, `vec4<f32>(${r.slice(8, 12).join(', ')})`];
-  }) : ['vec4<f32>(0.5, 0.5, 0.5, -1.0)', 'vec4<f32>(1.0, 0.0, 0.0, 0.0)', 'vec4<f32>(0.0, 1.0, 0.0, 0.0)', 'vec4<f32>(0.0, 0.0, 1.0, 0.0)'];
+    return [`vec4f(${o.color.map(f32).join(',')},${f32(k)})`,
+      ...(readsNode ? [`vec4f(${r.slice(0, 4).join(',')})`, `vec4f(${r.slice(4, 8).join(',')})`, `vec4f(${r.slice(8, 12).join(',')})`] : [])];
+  });
   const f = shading.frame === undefined ? null : Array.from(shading.frame);
   const toProgram = f === null ? 'return q;'
     : `return vec3<f32>(${f32(f[0])} * q.x + ${f32(f[4])} * q.y + ${f32(f[8])} * q.z + ${f32(f[12])}, ${f32(f[1])} * q.x + ${f32(f[5])} * q.y + ${f32(f[9])} * q.z + ${f32(f[13])}, ${f32(f[2])} * q.x + ${f32(f[6])} * q.y + ${f32(f[10])} * q.z + ${f32(f[14])});`;
-  const cases = used.map((_, k) => `    case ${k}: { return sdfm_graph_${k}(0u, p, pn, n, SdfmMatMasks(0.5, 1.0, 1.0, 0.0, 1.0)); }`);
+  const cases = used.map((_, k) => `    case ${k}: { return sdfm_graph_${k}(0u, p, ${readsNode ? 'pn' : 'p'}, n, SdfmMatMasks(0.5, 1.0, 1.0, 0.0, 1.0)); }`);
   const debug = options.debug ? `
   o.base_color = vec3<f32>(0.0);
   o.metallic = 0.0;
@@ -186,18 +192,18 @@ export function fieldPartMaterialWgsl(shading, materials, options = {}) {
     shading.field,
     FIELD_FRAME_WGSL,
     FIELD_NORMAL_WGSL,
-    `var<private> sdff_ops: array<vec4<f32>, ${count * 4}> = array<vec4<f32>, ${count * 4}>(${ops.join(', ')});
+    `var<private> sdff_ops: array<vec4<f32>, ${count * stride}> = array<vec4<f32>, ${count * stride}>(${ops.join(',')});
 
 // Local fields' evalLabel for field operand i: its material graph at p and its node-space point, else its colour.
 fn sdff_label(i: u32, p: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
   if (i >= ${count}u) { return SdfmMaterialFull(vec3<f32>(0.5), 0.0, 0.5, vec3<f32>(0.0), 0.0); }
-  let o = i * 4u;
+  let o = i * ${stride}u;
   let h = sdff_ops[o];
-${used.length ? `  let r0 = sdff_ops[o + 1u];
+${used.length ? `${readsNode ? `  let r0 = sdff_ops[o + 1u];
   let r1 = sdff_ops[o + 2u];
   let r2 = sdff_ops[o + 3u];
   let pn = vec3<f32>(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
-  switch i32(h.w) {
+` : ''}  switch i32(h.w) {
 ${cases.join('\n')}
     default: { }
   }
