@@ -432,6 +432,23 @@ export interface Engine {
   addTexture(desc: TextureData): number;
   /** Frees a texture; it then samples (0, 0, 0, 0). An unknown or removed id does nothing. */
   removeTexture(id: number): void;
+  /**
+   * Stores a block of material data words (group 0 binding 6) and returns its base word
+   * offset, given to a surface material as `SurfaceMaterialDesc.data` and read in its
+   * material function by `raa_material_word(raa_material_data_base(in.record) + i)` /
+   * `raa_material_f32(...)`. A Float32Array is stored as its bits. See
+   * docs/api/m25-material-data.md.
+   * @throws RaaError `material.data_invalid` (no word), `material.data_full` (past the
+   *   device's storage binding size), `api.invalid_argument`.
+   */
+  addMaterialData(words: Uint32Array | Float32Array | Int32Array): number;
+  /**
+   * Overwrites the live block at `base` with exactly as many words as it holds.
+   * @throws RaaError `material.data_invalid` (unknown base, other length), `api.invalid_argument`.
+   */
+  setMaterialData(base: number, words: Uint32Array | Float32Array | Int32Array): void;
+  /** Frees the block at `base`; its words read zero. An unknown or removed base does nothing. */
+  removeMaterialData(base: number): void;
 }
 /**
  * An rgba image, rows top first: `width * height * 4` components. Bytes are stored as is

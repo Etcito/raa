@@ -24,6 +24,7 @@ use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
 use crate::handle::{LitHandle, LitShared};
 use crate::library::SurfaceLibrary;
 use crate::material::{DrawClass, SurfaceMaterial};
+use crate::material_data::MaterialDataStats;
 use crate::meshes::{LitMeshId, LitMeshInfo};
 use crate::passes::install_passes;
 use crate::prep::{MaterialClass, PrepInput};
@@ -302,6 +303,61 @@ impl LitRenderer {
     /// The atlas rect of live texture `id`.
     pub fn texture_rect(&self, id: u32) -> Option<AtlasRect> {
         self.shared.borrow().texture_packer().rect(id)
+    }
+
+    /// Adds a block of material data words (group 0 binding 6) and returns its base word
+    /// offset, the value a surface material carries as [`SurfaceMaterial::data`] and a
+    /// material function reads with `raa_material_word(raa_material_data_base(in.record) + i)`.
+    /// Blocks start after the reserved zero words; a freed range is reused. Refusals
+    /// (nothing changes): `material.data_invalid` (no word), `material.data_full` (the buffer
+    /// would pass the device's storage binding size), `pipeline.busy`.
+    ///
+    /// [`SurfaceMaterial::data`]: crate::SurfaceMaterial::data
+    pub fn add_material_data(&mut self, gpu: &GpuContext, words: &[u32]) -> Result<u32, RaaError> {
+        let mut s = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        s.add_material_data(gpu, words)
+    }
+
+    /// Overwrites the live block at `base` with as many words as it holds. Refusals
+    /// (nothing changes): `material.data_invalid` (unknown base, other length),
+    /// `pipeline.busy`.
+    pub fn set_material_data(
+        &mut self,
+        gpu: &GpuContext,
+        base: u32,
+        words: &[u32],
+    ) -> Result<(), RaaError> {
+        let mut s = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        s.set_material_data(gpu, base, words)
+    }
+
+    /// Frees the block at `base` (its words read zero again). Idempotent: an unknown or
+    /// removed base does nothing. Returns whether it was live.
+    pub fn remove_material_data(&mut self, gpu: &GpuContext, base: u32) -> Result<bool, RaaError> {
+        let mut s = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        Ok(s.remove_material_data(gpu, base))
+    }
+
+    /// The words of the live block at `base`, as stored.
+    pub fn material_data(&self, base: u32) -> Option<Vec<u32>> {
+        self.shared
+            .borrow()
+            .material_data()
+            .block(base)
+            .map(<[u32]>::to_vec)
+    }
+
+    /// Material data placement: live blocks, words they hold, end of the highest block and
+    /// capacity of the GPU buffer, in words.
+    pub fn material_data_stats(&self) -> MaterialDataStats {
+        let s = self.shared.borrow();
+        let d = s.material_data();
+        MaterialDataStats {
+            blocks: d.allocator().blocks(),
+            used_words: d.allocator().used_words(),
+            top: d.allocator().top(),
+            capacity: d.capacity(),
+        }
     }
 
     /// Adds a forward contributor and its pipeline contributor entry (enabled; the forward

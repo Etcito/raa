@@ -74,6 +74,10 @@ struct EnvGpu {
 @group(0) @binding(3) var raa_texture_atlas: texture_2d<f32>;
 @group(0) @binding(4) var raa_texture_sampler: sampler;
 @group(0) @binding(5) var<storage, read> raa_texture_rects: array<vec4<f32>>;
+// Material data words (raa-lit add_material_data, JS addMaterialData): read with
+// raa_material_word / raa_material_f32 from the base of the material record
+// (raa_material_data_base). Words 0..4 are reserved zeros.
+@group(0) @binding(6) var<storage, read> raa_material_data: array<u32>;
 
 @group(1) @binding(0) var raa_shadow_map: texture_depth_2d_array;
 @group(1) @binding(1) var raa_shadow_cmp: sampler_comparison;
@@ -232,6 +236,23 @@ fn raa_apply_tint_opacity(s: MaterialOutput, x: InstanceExtraGpu) -> MaterialOut
     var o = s;
     o.opacity = o.opacity * x.tint.a;
     return o;
+}
+
+// Base word of the material's data block (SurfaceMaterialGpu.header.w; 0 = no data, the
+// reserved zero words). Pass `in.record` of MaterialInput or VertexMaterialInput.
+fn raa_material_data_base(record: SurfaceMaterialGpu) -> u32 {
+    return record.header.w;
+}
+
+// Material data word `i` (absolute: base + offset); 0 past the end of the buffer.
+fn raa_material_word(i: u32) -> u32 {
+    let n = arrayLength(&raa_material_data);
+    return select(0u, raa_material_data[min(i, n - 1u)], i < n);
+}
+
+// Material data word `i` read as the f32 it holds (bitcast).
+fn raa_material_f32(i: u32) -> f32 {
+    return bitcast<f32>(raa_material_word(i));
 }
 
 // Material texture `id` (Engine.addTexture) at `uv`, (0, 0) the first texel row's left edge,

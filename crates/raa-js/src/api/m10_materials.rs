@@ -261,6 +261,18 @@ fn map_surface(d: &SurfaceDesc, st: &EngineState) -> Result<raa_lit::SurfaceMate
     raa_matfn::to_surface_material_with(d, &st.lit, extras)
 }
 
+/// `data`: the base word of the material's data block (m25 addMaterialData), a whole number
+/// in 0..=u32::MAX; absent = 0 (no data).
+fn surface_data(desc: &JsValue) -> Result<u32, RaaError> {
+    match optional_f64(desc, "data")? {
+        None => Ok(0),
+        Some(v) if v.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&v) => Ok(v as u32),
+        Some(v) => Err(invalid(format!(
+            "'data' must be a material data base (a whole number >= 0), got {v}"
+        ))),
+    }
+}
+
 #[wasm_bindgen(js_class = Engine)]
 impl Engine {
     /// Adds a surface material from a `SurfaceMaterialDesc` and returns its material handle
@@ -271,7 +283,8 @@ impl Engine {
     pub fn add_surface_material(&mut self, desc: JsValue) -> Result<u32, JsValue> {
         self.with_state(|_, st| {
             let d = surface_desc(&desc)?;
-            let m = map_surface(&d, st)?;
+            let mut m = map_surface(&d, st)?;
+            m.data = surface_data(&desc)?;
             let len = st.lit.materials().len();
             if len >= st.max_materials as usize {
                 return Err(api_error(
@@ -294,7 +307,8 @@ impl Engine {
         self.with_state(|_, st| {
             let target = st.material(id)?;
             let d = surface_desc(&desc)?;
-            let m = map_surface(&d, st)?;
+            let mut m = map_surface(&d, st)?;
+            m.data = surface_data(&desc)?;
             st.lit.materials_mut().set(target, m)
         })
     }

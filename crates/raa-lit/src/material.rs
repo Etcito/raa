@@ -96,6 +96,10 @@ pub struct SurfaceMaterial {
     pub params: [[f32; 4]; 8],
     /// Fur: length m, density strands per cm2, droop, shell count; finite.
     pub fur: [f32; 4],
+    /// Base word offset of the material's data block (`LitRenderer::add_material_data`),
+    /// `SurfaceMaterialGpu.header.w`, read in WGSL by `raa_material_data_base(in.record)`;
+    /// 0 (default) = no data (the reserved zero words).
+    pub data: u32,
 }
 
 impl Default for SurfaceMaterial {
@@ -120,6 +124,7 @@ impl Default for SurfaceMaterial {
             flags: 0,
             params: [[0.0; 4]; 8],
             fur: [0.0; 4],
+            data: 0,
         }
     }
 }
@@ -227,7 +232,7 @@ impl SurfaceMaterial {
     /// opacity) @0, emissive @16, surface @32 (roughness clamped to [0.03, 1], metallic,
     /// clearcoat, clearcoat roughness), sheen @48, transmission @64 (transmission, ior,
     /// thickness, 0), attenuation @80 (rgb, distance, infinity as 1e30), header @96 (model,
-    /// fn id, flags, 0), p @112, fur @240.
+    /// fn id, flags, data base), p @112, fur @240.
     pub fn write_gpu(&self, out: &mut Vec<u8>) {
         let f = |out: &mut Vec<u8>, v: [f32; 4]| {
             for x in v {
@@ -255,7 +260,7 @@ impl SurfaceMaterial {
         f(out, [self.transmission, self.ior, self.thickness, 0.0]);
         f(out, rgb(self.attenuation_color, distance));
         let (model, fn_id) = self.model.header();
-        for x in [model, fn_id, self.flags, 0] {
+        for x in [model, fn_id, self.flags, self.data] {
             out.extend_from_slice(&x.to_le_bytes());
         }
         for p in self.params {

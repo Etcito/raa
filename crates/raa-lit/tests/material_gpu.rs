@@ -48,6 +48,7 @@ fn distinct() -> SurfaceMaterial {
         flags: FLAG_DOUBLE_SIDED | FLAG_NO_SHADOW,
         params,
         fur: [0.71, 0.72, 0.73, 32.0],
+        data: 4097,
     }
 }
 
@@ -71,7 +72,7 @@ fn write_gpu_lays_out_every_256_byte_offset() {
             u32_at(b, 104),
             u32_at(b, 108)
         ],
-        [2, 7, FLAG_DOUBLE_SIDED | FLAG_NO_SHADOW, 0]
+        [2, 7, FLAG_DOUBLE_SIDED | FLAG_NO_SHADOW, 4097]
     );
     for i in 0..8 {
         let base = 100.0 + (i * 4) as f32;

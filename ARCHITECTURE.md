@@ -332,7 +332,7 @@ Little-endian, written with `to_le_bytes`. Owned by raa-mesh (streams) and raa-l
 - Defaults: uv (0, 0); tangent = `default_tangent(normal)`; colour (1, 1, 1, 1). Primitive and prims-asset meshes get the defaults.
 - The instance stream is the S1 Instance (128 B, locations 2-9) in draw order. `@builtin(instance_index)` indexes the extras array.
 
-**Group 0 (frame)**: 0 `FrameGpu` uniform (512 B), 1 `array<SurfaceMaterialGpu>`, 2 `array<InstanceExtraGpu>` (read-only storage).
+**Group 0 (frame)**: 0 `FrameGpu` uniform (512 B), 1 `array<SurfaceMaterialGpu>`, 2 `array<InstanceExtraGpu>` (read-only storage), 3-5 the material texture atlas, its sampler and rects (m22), 6 `array<u32>` material data words (read-only storage, m25: `raa_material_word`, `raa_material_f32`, base `raa_material_data_base(record)`).
 
 **FrameGpu** (512 B)
 - Matrices: `view_proj` @0, `view` @64, `proj` @128, `inv_proj` @192, `inv_view` @256.
@@ -352,7 +352,7 @@ Little-endian, written with `to_le_bytes`. Owned by raa-mesh (streams) and raa-l
 - `sheen` @48: (rgb, roughness).
 - `transmission` @64: (transmission, ior, thickness m, 0).
 - `attenuation` @80: (rgb, distance m).
-- `header: vec4<u32>` @96: (model 0 flat / 1 standard / 2 function, function id, flags, 0).
+- `header: vec4<u32>` @96: (model 0 flat / 1 standard / 2 function, function id, flags, material data base word (0 = none)).
 - `p: array<vec4, 8>` @112.
 - `fur` @240: (length m, density per cm², droop, shells).
 - Flags: 1 TRANSPARENT, 2 TRANSMISSIVE, 4 FUR, 8 DOUBLE_SIDED, 16 NO_SHADOW, 32 VERTEX_FN, 64 UNLIT.

@@ -11,6 +11,10 @@ const VERSION = '0.5.0';
 // Material textures are native Engine methods too: addTexture({ width, height, data })
 // returns the id that material functions sample with raa_texture(id, uv), and
 // removeTexture(id) frees it (docs/api/m22-textures.md).
+//
+// Material data words as well: addMaterialData(words) returns the base a surface material
+// carries as `data`, read in WGSL by raa_material_word / raa_material_f32
+// (docs/api/m25-material-data.md).
 
 /**
  * Initialises the wasm module and returns a RaaModule.

@@ -439,3 +439,28 @@ fn missing_slot_provider_is_reported_unchanged() {
     assert_eq!(reg.len(), 1);
     assert_eq!(register(&mut reg, "user.marble", MARBLE), MaterialFnId(1));
 }
+
+/// A function that reads its inputs from the material data words (raa-lit
+/// add_material_data): the prelude declares the binding and the accessors, the user source
+/// only calls them, so it stays binding-free.
+const MATERIAL_DATA_READER: &str = "fn material_main(in: MaterialInput) -> MaterialOutput {
+    var o = raa_default_output(in);
+    let b = raa_material_data_base(in.record);
+    o.base_color = vec3<f32>(raa_material_f32(b), raa_material_f32(b + 1u), f32(raa_material_word(b + 2u)));
+    return o;
+}
+";
+
+#[test]
+fn material_data_words_are_readable_without_a_binding() {
+    let mut reg = MaterialFnRegistry::new();
+    assert_eq!(
+        register(&mut reg, "data.reader", MATERIAL_DATA_READER),
+        MaterialFnId(1)
+    );
+    // Declaring the binding itself stays refused.
+    let src = format!(
+        "@group(0) @binding(6) var<storage, read> words: array<u32>;\n{MATERIAL_DATA_READER}"
+    );
+    assert_refused(&src, "forbidden attribute", &["@group"]);
+}

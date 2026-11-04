@@ -1,7 +1,7 @@
 //! The state the lit renderer shares with its passes and contributors through
 //! [`LitHandle`]: the mesh store, the draw lists, the group-0 buffers (S10 `FrameGpu`,
 //! `SurfaceMaterialGpu` array, `InstanceExtraGpu` array, the material texture atlas, its
-//! sampler and rects) with their layout and bind group,
+//! sampler and rects, the material data words) with their layout and bind group,
 //! the S1 instance stream, the shader composer and material functions, and the cache of
 //! render pipelines per shader variant and [`PipelineSpec`].
 
@@ -21,6 +21,7 @@ use crate::extras::INSTANCE_EXTRA_GPU_SIZE;
 use crate::frame::FRAME_GPU_SIZE;
 use crate::library::SurfaceLibrary;
 use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
+use crate::material_data::MaterialData;
 use crate::meshes::{INSTANCE_SLOT, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
 use crate::prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw};
 use crate::slots::default_slot_providers;
@@ -185,8 +186,9 @@ fn palette_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
 }
 
 /// S10 group 0: binding 0 `FrameGpu` uniform (512 B), binding 1 `array<SurfaceMaterialGpu>`
-/// and binding 2 `array<InstanceExtraGpu>`, both read-only storage.
-fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 6] {
+/// and binding 2 `array<InstanceExtraGpu>`, both read-only storage; 3, 4, 5 the material
+/// texture atlas, its sampler and rects; 6 the material data words (read-only storage).
+fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 7] {
     let read_only = wgpu::BufferBindingType::Storage { read_only: true };
     [
         buffer_entry(0, wgpu::BufferBindingType::Uniform, FRAME_GPU_SIZE),
@@ -209,6 +211,7 @@ fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 6] {
             count: None,
         },
         buffer_entry(5, read_only, TEXTURE_RECT_SIZE),
+        buffer_entry(6, read_only, 4),
     ]
 }
 
@@ -354,6 +357,8 @@ pub(crate) struct LitShared {
     material_bytes: Vec<u8>,
     /// Material textures, group-0 bindings 3 (atlas), 4 (sampler) and 5 (rects).
     textures: TextureAtlas,
+    /// Material data words, group-0 binding 6.
+    data: MaterialData,
     frame_layout: wgpu::BindGroupLayout,
     frame_bind_group: wgpu::BindGroup,
     /// The group-1 layout of `raa_pipeline::LightingResources`.
@@ -429,11 +434,13 @@ impl LitShared {
                     entries: &palette_layout_entries(),
                 });
         let textures = TextureAtlas::new(gpu);
+        let data = MaterialData::new(gpu);
         let frame_bind_group = create_frame_bind_group(
             gpu,
             &frame_layout,
             [&frame_buffer, &material_buffer, &extras_buffer],
             &textures,
+            &data,
         );
         Ok(LitShared {
             msaa,
@@ -453,6 +460,7 @@ impl LitShared {
             extras_buffer,
             material_bytes: Vec::with_capacity(materials as usize * SURFACE_MATERIAL_GPU_SIZE),
             textures,
+            data,
             frame_layout,
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
@@ -514,9 +522,51 @@ impl LitShared {
                 &self.frame_layout,
                 [&self.frame_buffer, &self.material_buffer, &self.extras_buffer],
                 &self.textures,
+                &self.data,
             );
         }
         Ok(id)
+    }
+
+    /// Adds a block of material data words and returns its base; group 0 is bound again
+    /// when the buffer grows. Refusals (nothing changes): `material.data_invalid`,
+    /// `material.data_full`.
+    pub(crate) fn add_material_data(
+        &mut self,
+        gpu: &GpuContext,
+        words: &[u32],
+    ) -> Result<u32, RaaError> {
+        let (base, grown) = self.data.add(gpu, words)?;
+        if grown {
+            self.frame_bind_group = create_frame_bind_group(
+                gpu,
+                &self.frame_layout,
+                [&self.frame_buffer, &self.material_buffer, &self.extras_buffer],
+                &self.textures,
+                &self.data,
+            );
+        }
+        Ok(base)
+    }
+
+    /// Overwrites the block at `base` (same length); `material.data_invalid` otherwise.
+    pub(crate) fn set_material_data(
+        &mut self,
+        gpu: &GpuContext,
+        base: u32,
+        words: &[u32],
+    ) -> Result<(), RaaError> {
+        self.data.set(gpu, base, words)
+    }
+
+    /// Frees the block at `base`; an unknown base does nothing. Returns whether it was live.
+    pub(crate) fn remove_material_data(&mut self, gpu: &GpuContext, base: u32) -> bool {
+        self.data.remove(gpu, base)
+    }
+
+    /// The material data store (placement, capacity, host copy of the blocks).
+    pub(crate) fn material_data(&self) -> &MaterialData {
+        &self.data
     }
 
     /// Removes texture `id`; an unknown or removed id does nothing. Returns whether it was
@@ -724,13 +774,14 @@ impl LitShared {
 }
 
 /// A bind group entry over the whole of `buffer`.
-/// The group-0 bind group: `buffers` (frame, materials, extras) at bindings 0..3 and the
-/// texture atlas entries at 3..6.
+/// The group-0 bind group: `buffers` (frame, materials, extras) at bindings 0..3, the
+/// texture atlas entries at 3..6 and the material data words at 6.
 fn create_frame_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     buffers: [&wgpu::Buffer; 3],
     textures: &TextureAtlas,
+    data: &MaterialData,
 ) -> wgpu::BindGroup {
     let [frame, materials, extras] = buffers;
     let [atlas, sampler, rects] = textures.bind_entries();
@@ -744,6 +795,7 @@ fn create_frame_bind_group(
             atlas,
             sampler,
             rects,
+            data.bind_entry(),
         ],
     })
 }
@@ -1166,7 +1218,8 @@ mod tests {
     #[test]
     fn frame_layout_follows_s10_group0() {
         let entries = frame_layout_entries();
-        let (buffers, textures) = entries.split_at(3);
+        let (buffers, rest) = entries.split_at(3);
+        let (textures, data) = rest.split_at(3);
         let sizes: Vec<(u32, bool, Option<u64>)> = buffers
             .iter()
             .map(|e| match e.ty {
@@ -1223,6 +1276,18 @@ mod tests {
                 min_binding_size: Some(n),
                 ..
             } if n.get() == 16
+        ));
+        // Material data words: read-only storage of u32 words, both stages.
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].binding, 6);
+        assert_eq!(data[0].visibility, wgpu::ShaderStages::VERTEX_FRAGMENT);
+        assert!(matches!(
+            data[0].ty,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                min_binding_size: Some(n),
+                ..
+            } if n.get() == 4
         ));
     }
 

@@ -46,6 +46,12 @@ export interface SurfaceMaterialDesc {
   doubleSided?: boolean;
   /** Casts sun shadows. Default true. */
   castShadow?: boolean;
+  /**
+   * Base word offset of the material's data block (`Engine.addMaterialData`), read by its
+   * material function through `raa_material_data_base(in.record)`. Default 0 (no data: the
+   * reserved zero words). See docs/api/m25-material-data.md.
+   */
+  data?: number;
   /** Base colour, sRGB [0, 1]. Default [0.8, 0.8, 0.8]. */
   color?: [number, number, number];
   /** Perceptual roughness [0, 1]. Default 0.5. */

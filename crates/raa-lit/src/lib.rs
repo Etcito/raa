@@ -21,6 +21,7 @@ mod frame;
 mod handle;
 mod library;
 mod material;
+mod material_data;
 mod meshes;
 mod passes;
 mod prep;
@@ -46,6 +47,9 @@ pub use library::SurfaceLibrary;
 pub use material::{
     DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
     FLAG_UNLIT, FLAG_VERTEX_FN, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial, SurfaceModel,
+};
+pub use material_data::{
+    DataAllocator, MATERIAL_DATA_INITIAL_WORDS, MATERIAL_DATA_RESERVED_WORDS, MaterialDataStats,
 };
 pub use meshes::{LitMeshId, LitMeshInfo};
 pub use prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw, MaterialClass, PrepCapacity, PrepInput};

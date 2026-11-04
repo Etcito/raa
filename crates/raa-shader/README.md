@@ -49,6 +49,14 @@ The highest priority wins. The default providers (priority 0) are installed by r
 | `Transmission` | `raa_slot_transmission(s, c) -> vec3<f32>` | 0 |
 | `Fog` | `raa_slot_fog(color, world_pos, c) -> vec3<f32>` | identity |
 
+## Material data words
+
+The prelude declares group 0 binding 6, `raa_material_data: array<u32>` (read-only storage,
+filled by raa-lit `add_material_data`), and three accessors a user function may call without
+declaring any binding: `raa_material_data_base(record)` (the record's `header.w`),
+`raa_material_word(i)` and `raa_material_f32(i)` (absolute word index, 0 past the end). One
+function can so shade many materials whose inputs are data (docs/api/m25-material-data.md).
+
 ## User material functions
 
 `register_user(name, wgsl, composer)` refuses `material.fn_duplicate` when `name` is
