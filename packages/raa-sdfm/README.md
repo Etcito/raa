@@ -66,6 +66,15 @@ A saved game mesh part carries `shading` (MAMA `core/paramesh/field-program.ts` 
 
 The caller hands in the evaluator text, MAMA's `FIELD_PROGRAM_WGSL` from `core/paramesh/field-program-wgsl.js`, so this package imports nothing from MAMA. `debug` (the normal as an emissive colour) and `single` (one material per object) are data flags, so they reuse the same pipeline. The vertex streams come from `fieldSurfaceAttributes(positions, normals)`.
 
+## Baked field shading
+
+MAMA's game render option `shading: 'baked'` (`core/game/render-options.ts`) bakes a part's normal and material once, at load time, on the GPU, into 2D textures laid out by the part's UV atlas (saved mesh format 4; MAMA `core/game/part-atlas.ts`). Nothing is downloaded and nothing is a 3D volume (`src/field-bake.js`):
+
+- `createFieldBaker(device).bake({ shading, materials, field, positions, normals, uvs, tangents, indices, size })` rasterises the part's triangles in UV space with the same interpreter as the per-pixel shading (`fieldShadingCore`), dilates every chart into its gutter and reads back three RGBA8 images: the tangent-space normal with metallic, the sRGB colour with roughness, and the emissive (null when black). Parts with the same material graphs share one bake pipeline. `device` is the `GPUDevice` RAA renders with.
+- `tangents = partTangents(positions, normals, uvs, indices)`: pass the same array to the bake and to the drawn mesh (`MeshDesc.tangents`).
+- `size`: MAMA `bakeTextureSize(atlasScale(positions, uvs, indices), options)`, then `fitBakeSizes(parts)` for every part of the engine so the bakes fit RAA's 4096 x 4096 texture atlas (the densest parts halve first).
+- Upload the images with `Engine.addTexture`, register `BAKED_MATERIAL_WGSL` once as `BAKED_FUNCTION`, and give each part a surface material with `data: addMaterialData(bakedMaterialWords(normal, color, emissive))`. A part whose material takes the player colour keeps its per-pixel shading.
+
 ## Browser build
 
 MAMA's build is `dist/` in the MAMA checkout. Build it with `npm run build` in `../MAMA`. That runs the `@real3d/quadmesh` build and then `tsc -p tsconfig.json`. That output imports npm packages by bare specifier, so `scripts/build-sdfm-compare.sh --mama ../MAMA` stages a browser ESM bundle of the entry points above (`index.js`, `core/game/mesh-assets.js`, `core/material-graph/helpers.js`, `browser/index.js`, `browser/compute-worker.js`, plus `core/material-graph/cpu-eval.js` for the compare page's reference viewport) as `mama/` with MAMA's own esbuild, at the same paths as under `dist/`, plus `manifold.wasm`. The `base` of `importMama` in the page is that `mama/` URL.

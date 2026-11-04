@@ -417,6 +417,55 @@ export function fieldPartShading(shading: SdfmPartShading, materials: ReadonlyMa
 /** The vertex streams of a field-shaded mesh: colours = rest position + rest normal z, uvs = rest normal xy, tangents = restTangent. */
 export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32Array):
   { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };
+/**
+ * The interpreter's text without an entry point (structs, graphs, the field evaluator, the operand shading
+ * `sdff_material(base, s, q, n)`) and the part's data block; it reads the block through `raa_material_word` /
+ * `raa_material_f32`, which the RAA prelude (fieldPartShading) or the bake shim (field-bake) define.
+ */
+export function fieldShadingCore(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
+  options: { field: string; debug?: boolean }): { core: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[] };
+
+/** The one material function every baked part draws with (game render option shading 'baked'). */
+export const BAKED_FUNCTION: 'sdfb.baked';
+/** Its WGSL (S11 user function): samples the part's normal (tangent space + metallic) and colour (sRGB + roughness) textures. */
+export const BAKED_MATERIAL_WGSL: string;
+export const BAKED_DATA_VERSION: 1;
+export const BAKED_DATA_WORDS: 4;
+/** The emissive texture id of a baked part without emissive. */
+export const BAKED_NO_TEXTURE: 4294967295;
+export const BAKE_DILATE_PASSES: number;
+export const BAKE_DILATE_WGSL: string;
+/** A baked part's material data words: version, normal, colour and emissive texture ids (Engine.addTexture ids). */
+export function bakedMaterialWords(normal: number, color: number, emissive?: number): Uint32Array;
+/** Per-vertex tangents (xyz + handedness) from the atlas uvs; the bake and the drawn mesh must use the same array. */
+export function partTangents(positions: Float32Array, normals: Float32Array, uvs: Float32Array, indices: Uint32Array): Float32Array;
+/** UV units per metre of a part's atlas (sqrt(uv area / surface area)); 0 without area. The bake side is MAMA bakeTextureSize(scale, options). */
+export function atlasScale(positions: Float32Array, uvs: Float32Array, indices: Uint32Array): number;
+/** Texels the bakes of one engine may take in RAA's 4096 x 4096 texture atlas. */
+export const BAKE_ATLAS_BUDGET: number;
+/** The smallest side fitBakeSizes goes down to. */
+export const BAKE_MIN_SIZE: number;
+/** Bake sides that fit `budget` texels: the densest part (size x atlas scale) is halved first, down to BAKE_MIN_SIZE. */
+export function fitBakeSizes(parts: readonly { size: number; textures: number; scale?: number }[], budget?: number): number[];
+/** The bake shader of an interpreter core ({@link fieldShadingCore}). */
+export function fieldBakeWgsl(core: string): string;
+/** One part's bake input: the rest-space mesh with its atlas uvs and tangents, its shading and materials, MAMA's evaluator. */
+export interface SdfmBakeInput {
+  shading: SdfmPartShading;
+  materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[];
+  field: string;
+  positions: Float32Array;
+  normals: Float32Array;
+  uvs: Float32Array;
+  tangents: Float32Array;
+  indices: Uint32Array;
+  /** Texture side in texels (MAMA render-options.ts bakeTextureSize). */
+  size: number;
+}
+/** A part's baked textures, RGBA8 rows top first (Engine.addTexture data); emissive null when every texel is black. */
+export interface SdfmBakeResult { size: number; normal: Uint8Array; color: Uint8Array; emissive: Uint8Array | null; missing: string[]; pipeline: string }
+/** A baker on the GPUDevice RAA renders with: pipelines cached by shader text (one for all constant-material parts). */
+export function createFieldBaker(device: unknown): { bake(input: SdfmBakeInput): Promise<SdfmBakeResult>; readonly pipelines: number };
 
 /** The fixed axis of the rest tangent: (1, 2, 3) / sqrt(14). */
 export const REST_TANGENT_AXIS: readonly [number, number, number];

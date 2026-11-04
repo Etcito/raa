@@ -105,8 +105,11 @@ fn sdff_normal(in: MaterialInput, s: PmfSample) -> vec3f {
 }
 `;
 
-/** The interpreter's fixed part: data readers, the operand shading and material_main (after the field and the graphs). */
-const INTERPRETER_WGSL = /* wgsl */ `
+/**
+ * The interpreter's fixed core: data readers and the operand shading (after the field and the graphs). The per-pixel
+ * material (INTERPRETER_MAIN_WGSL) and the UV-space bake (field-bake.js) both run it.
+ */
+const INTERPRETER_CORE_WGSL = /* wgsl */ `
 fn pmf_f(i: u32) -> f32 { return raa_material_f32(i); }
 fn sdff_w(i: u32) -> u32 { return raa_material_word(i); }
 fn sdff_v3(i: u32) -> vec3<f32> { return vec3<f32>(raa_material_f32(i), raa_material_f32(i + 1u), raa_material_f32(i + 2u)); }
@@ -133,6 +136,22 @@ fn sdff_label(base: u32, i: u32, p: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull
   return SdfmMaterialFull(c, 0.0, 0.5, vec3<f32>(0.0), 0.0);
 }
 
+// The material of the field at rest point q with shading normal n: the heaviest operand, mixed with the second by the
+// field's weight.
+fn sdff_material(base: u32, s: PmfSample, q: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
+  let p = sdff_affine(base + 8u, q);
+  var m = sdff_label(base, s.la, p, n);
+  if (s.lb != s.la && s.t > 0.0) {
+    let b = sdff_label(base, s.lb, p, n);
+    m = SdfmMaterialFull(mix(m.base_color, b.base_color, s.t), mix(m.metallic, b.metallic, s.t),
+      mix(m.roughness, b.roughness, s.t), mix(m.emissive, b.emissive, s.t), mix(m.height, b.height, s.t));
+  }
+  return m;
+}
+`;
+
+/** The per-pixel material function's entry point (after FIELD_FRAME_WGSL, FIELD_NORMAL_WGSL and the core). */
+const INTERPRETER_MAIN_WGSL = /* wgsl */ `
 fn material_main(in: MaterialInput) -> MaterialOutput {
   var o = raa_default_output(in);
   o.opacity = 1.0; // the vertex colour's w is the rest normal's z, not an alpha
@@ -140,13 +159,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let flags = sdff_w(base + 1u);
   let s = pmf_eval(base + sdff_w(base + 2u), in.color.xyz);
   o.normal = sdff_normal(in, s);
-  let p = sdff_affine(base + 8u, in.color.xyz);
-  var m = sdff_label(base, s.la, p, o.normal);
-  if (s.lb != s.la && s.t > 0.0) {
-    let b = sdff_label(base, s.lb, p, o.normal);
-    m = SdfmMaterialFull(mix(m.base_color, b.base_color, s.t), mix(m.metallic, b.metallic, s.t),
-      mix(m.roughness, b.roughness, s.t), mix(m.emissive, b.emissive, s.t), mix(m.height, b.height, s.t));
-  }
+  let m = sdff_material(base, s, in.color.xyz, o.normal);
   o.base_color = m.base_color;
   o.emissive = m.emissive;
   if ((flags & ${FIELD_FLAG_SINGLE}u) == 0u) {
@@ -214,7 +227,7 @@ export function checkPartShading(s) {
 }
 
 /** 16 hex digits of two independent 32-bit passes (FNV-1a, a rotating odd multiply) over the UTF-16 units of `text` (a name, not a security hash). */
-function textHash(text) {
+export function textHash(text) {
   let a = 0x811c9dc5, b = 0x9e3779b9;
   for (let i = 0; i < text.length; i++) {
     const c = text.charCodeAt(i);
@@ -240,6 +253,30 @@ function textHash(text) {
  *   cannot be inlined, a forbidden token, or more than MATERIAL_FUNCTION_MAX_BYTES bytes
  */
 export function fieldPartShading(shading, materials, options) {
+  const { core, words, tintMode, missing } = fieldShadingCore(shading, materials, options);
+  const wgsl = [core, FIELD_FRAME_WGSL, FIELD_NORMAL_WGSL, INTERPRETER_MAIN_WGSL].join('\n');
+  const fail = (what) => { throw new SdfmError('sdfm.material_unmappable', what); };
+  const forbidden = forbiddenToken(wgsl);
+  if (forbidden) fail(`'${forbidden}' is forbidden in a material function (S11)`);
+  const bytes = new TextEncoder().encode(wgsl).length;
+  if (bytes > MATERIAL_FUNCTION_MAX_BYTES) fail(`the per-pixel SDF shading needs ${bytes} bytes of WGSL (RAA limit ${MATERIAL_FUNCTION_MAX_BYTES})`);
+  return { name: `sdff.${textHash(wgsl)}`, wgsl, words, tintMode, missing };
+}
+
+/**
+ * The interpreter's text without an entry point, and the part's data block: the structs, the graph helpers and
+ * functions, the dispatch, the field evaluator (`options.field`), the data readers and the operand shading
+ * (sdff_label, sdff_material). It reads its block through raa_material_word / raa_material_f32 and, for graphs with
+ * the player colour, mat_instance_tint: RAA's prelude defines them for fieldPartShading, field-bake.js for the bake.
+ * Same checks and errors as fieldPartShading (except the size cap and the forbidden tokens, which apply to RAA
+ * material functions only).
+ *
+ * @param {object} shading PartShading (MAMA field-program.ts)
+ * @param {ReadonlyMap<string, object> | readonly object[]} materials SdfmCompiledMaterial by name, or a list of them
+ * @param {{ field: string, debug?: boolean }} options
+ * @returns {{ core: string, words: Uint32Array, tintMode: 'graph' | 'multiply', missing: string[] }}
+ */
+export function fieldShadingCore(shading, materials, options) {
   checkPartShading(shading);
   const field = options?.field;
   if (typeof field !== 'string' || !/\bfn\s+pmf_eval\s*\(/.test(field) || !/\bstruct\s+PmfSample\b/.test(field)) {
@@ -292,23 +329,17 @@ ${bodies.map((_, k) => `    case ${k}u: { out = SdffGraph(true, sdfm_graph_${k}(
 ` : ''}  return out;
 }
 `;
-  const wgsl = [
-    `// sdff: the per-pixel SDF shading interpreter, ${bodies.length} material graphs (@etcito/raa-sdfm field-shading.js)`,
+  const core = [
+    `// sdff: the SDF shading interpreter, ${bodies.length} material graphs (@etcito/raa-sdfm field-shading.js)`,
     `struct SdfmMaterialFull { ${MATERIAL_FULL_FIELDS.map((x) => `${x}: ${x === 'base_color' || x === 'emissive' ? 'vec3<f32>' : 'f32'}`).join(', ')} }`,
     'struct SdfmMatMasks { curvature: f32, cavity: f32, ao: f32, height: f32, proximity: f32 }',
     ...[...helpers].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([id, text]) => `// MAMA helper ${id}\n${text}\n`),
     ...graphs,
     dispatch,
     field.trim(),
-    FIELD_FRAME_WGSL,
-    FIELD_NORMAL_WGSL,
-    INTERPRETER_WGSL,
+    INTERPRETER_CORE_WGSL,
   ].join('\n');
-  const forbidden = forbiddenToken(wgsl);
-  if (forbidden) fail(`'${forbidden}' is forbidden in a material function (S11)`);
-  const bytes = new TextEncoder().encode(wgsl).length;
-  if (bytes > MATERIAL_FUNCTION_MAX_BYTES) fail(`the per-pixel SDF shading needs ${bytes} bytes of WGSL (RAA limit ${MATERIAL_FUNCTION_MAX_BYTES})`);
-  return { name: `sdff.${textHash(wgsl)}`, wgsl, words: fieldShadingWords(shading, graphOf, bodies, options.debug === true), tintMode, missing };
+  return { core, words: fieldShadingWords(shading, graphOf, bodies, options.debug === true), tintMode, missing };
 }
 
 /** The data block of a part (FIELD_DATA_* layout). */
