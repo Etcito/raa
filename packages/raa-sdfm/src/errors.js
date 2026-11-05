@@ -11,6 +11,8 @@ export const CODES = Object.freeze([
   'sdfm.material_unmappable',
   'sdfm.worker',
   'sdfm.disposed',
+  'sdfm.scene_format',
+  'sdfm.scene_resolve',
 ]);
 
 /**
