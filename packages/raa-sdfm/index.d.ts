@@ -26,10 +26,11 @@ export type Vec3 = [number, number, number];
 export type Quat = [number, number, number, number];
 
 /**
- * The S15 refusal codes plus the S18 `sdfm.rig`:
+ * The S15 refusal codes plus the S18 `sdfm.rig` and the two procedural-scene codes (S66):
  * `sdfm.format`, `sdfm.version`, `sdfm.schema`, `sdfm.not_finite`, `sdfm.id`,
  * `sdfm.cap_document`, `sdfm.hash_mismatch`, `sdfm.mesher_refused`,
- * `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`, `sdfm.rig`.
+ * `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`, `sdfm.rig`,
+ * `sdfm.scene_format`, `sdfm.scene_resolve`.
  * Refusals: every code listed here is a possible `SdfmError.code`; the README table `S15 codes`
  * says when each one is raised.
  */
@@ -45,7 +46,9 @@ export type SdfmErrorCode =
   | 'sdfm.material_unmappable'
   | 'sdfm.worker'
   | 'sdfm.disposed'
-  | 'sdfm.rig';
+  | 'sdfm.rig'
+  | 'sdfm.scene_format'
+  | 'sdfm.scene_resolve';
 
 /**
  * A refusal of the sdfm adapter. The message is prefixed with `<code>: `, like RaaError, and
@@ -348,6 +351,101 @@ export interface SdfmMappedMaterial {
  * {@link SdfmLoader}.
  */
 export function createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader;
+
+/**
+ * The MAMA procedural scene functions `loadProceduralScene` calls, exactly what
+ * src/mama-bridge.js `importProcedural()` resolves (bare `mama/procgen/scene-file.js`,
+ * `mama/procgen/scene-build.js` and `mama`, or the matching files under a `base` URL).
+ * The scene is typed `string | object` because this package declares no MAMA types: pass the parsed
+ * `sdfm.procedural-scene` v1 file (section 66) in the shape MAMA's `ProceduralScene` defines.
+ * Refusals: none of its own; an import failure is `sdfm.worker`.
+ */
+export interface SdfmProceduralMama {
+  /** MAMA `parseProceduralScene(text)`: strict parse of an `sdfm.procedural-scene` v1 file. */
+  parseProceduralScene(text: string): object;
+  /**
+   * MAMA `sceneSourceDocument(scene, sourceIndex, lookupAsset)`: the SDF document of one composite
+   * source (csg, realized) or of the asset source a bent instance wraps.
+   */
+  sceneSourceDocument(scene: string | object, sourceIndex: number,
+    lookupAsset: (file: string) => object | null): object;
+  /** MAMA `serializeDocument(document)`: canonical document text. */
+  serializeDocument(document: object): string;
+}
+
+/**
+ * Options of {@link loadProceduralScene}. `resolveAsset` is used by an sdf-refs scene and
+ * `resolveMesh` by a mesh-refs scene; the other one is ignored.
+ * Refusals: none of its own; the resolve callbacks' failures become `sdfm.scene_resolve`.
+ */
+export interface ProceduralSceneOptions {
+  /** Return the asset text (JSON string) or its parsed game-asset object, once per distinct `file`. */
+  resolveAsset?: (file: string) => Promise<string | object>;
+  /** Return the saved S24 `.mesh` bytes, once per mesh source. */
+  resolveMesh?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
+  /** Parent node of the scene root (null: a top-level root). */
+  parent?: number | null;
+  /** Only `'mesh'` is accepted; the trace mode is not available in this version. */
+  mode?: 'mesh';
+  /** MAMA accessor; the default is mama-bridge `importProcedural()`. */
+  mama?: () => Promise<SdfmProceduralMama>;
+}
+
+/**
+ * The handle of one loaded `sdfm.procedural-scene` (section 66). Every scene instance is one engine
+ * node under `root`; its parts are spawned under it, never flattened.
+ * Refusals: `sdfm.disposed` from `setVisible` and `stats` after {@link ProceduralSceneHandle.dispose}.
+ */
+export interface ProceduralSceneHandle {
+  /** Engine node every instance node is parented to. */
+  root: number;
+  /** Number of scene instances (one engine node each). */
+  instanceCount: number;
+  /** Number of scene sources (assets, composites, or meshes). */
+  sourceCount: number;
+  /** Show or hide every spawned part instance. */
+  setVisible(visible: boolean): void;
+  /** `instances` is the scene instance count, `meshes` the distinct loaded assets' parts, `pending` the uploads left. */
+  stats(): { instances: number; meshes: number; pending: number };
+  /** Remove the root node and every mesh this handle added; idempotent. */
+  dispose(): void;
+}
+
+/**
+ * Loads one `sdfm.procedural-scene` v1 file (`scene` text or parsed object). An sdf-refs scene
+ * resolves its asset sources and loads them, plus an in-memory game asset per composite (csg,
+ * realized) and per distinct bend. A mesh-refs scene decodes each S24 `.mesh` (section 24) and
+ * uploads it with `Engine.addMesh`, then one instance per scene instance. Instances are never
+ * flattened.
+ * Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode` or a deform on a mesh-refs
+ * instance; `sdfm.scene_resolve` when `resolveAsset`, `resolveMesh`, the mesh decode or
+ * `sceneSourceDocument` fails; `sdfm.worker` when the default MAMA import fails; `sdfm.disposed`
+ * from the handle after disposal; engine refusals (RaaError) propagate unchanged.
+ */
+export function loadProceduralScene(engine: Engine, loader: SdfmLoader,
+  scene: string | object, options?: ProceduralSceneOptions): Promise<ProceduralSceneHandle>;
+
+/**
+ * Decodes an S24 saved mesh file (`assets/<world>/<id>.mesh`): format byte 1, big-endian u32 header
+ * length and buffer count, a UTF-8 JSON header with `{$buffer}` / `{$array}` markers, then each
+ * buffer's big-endian u32 length and bytes. Typed arrays are views on the decoded buffers.
+ * Refusals: `sdfm.scene_resolve` for a bad format byte, a truncated buffer, trailing bytes, an
+ * unknown array type or an invalid JSON header.
+ */
+export function decodeMeshFile(bytes: Uint8Array): object;
+
+/**
+ * Validates the `data` payload of a decoded S24 file with the saved-asset rules and wraps it with
+ * its materials, naming the group and part of a bad record.
+ * Refusals: `sdfm.scene_resolve` naming the group and part (a non-16-number frame, positions,
+ * normals, uvs or indices of the wrong type or length, or an out-of-range index).
+ */
+export function meshFilePayload(value: object): {
+  groups: { group: string; parts: { partId: string; name: string; frame: Float64Array;
+    meshes: { material: string | null; positions: Float32Array; normals: Float32Array;
+      uvs: Float32Array | null; indices: Uint32Array }[] }[] }[];
+  materials: object[];
+};
 
 /**
  * Wraps a MAMA compiled material into an S11 `material_main` function: MAMA's MaterialFull and

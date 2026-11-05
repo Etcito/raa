@@ -13,3 +13,5 @@ export {
   BAKE_DILATE_WGSL, BAKE_MIN_SIZE, atlasScale, bakedMaterialWords, createFieldBaker, fieldBakeWgsl, fitBakeSizes, partTangents,
 } from './src/field-bake.js';
 export { BAKE_BATCH, BAKE_RUN_SHARE, bakeTextureCount, createBakeScheduler } from './src/bake-scheduler.js';
+export { loadProceduralScene } from './src/procedural.js';
+export { decodeMeshFile, meshFilePayload } from './src/mesh-file.js';
