@@ -155,6 +155,7 @@ import { readFile } from 'node:fs/promises';
 import { createFakeEngine } from './fake-engine.js';
 import { loadProceduralScene } from '../src/procedural.js';
 import { importProcedural } from '../src/mama-bridge.js';
+import { ASSET_KEYS } from '../src/validate.js';
 
 const fixture = JSON.parse(await readFile(new URL('./fixtures/procedural-mesh.json', import.meta.url), 'utf8'));
 const material = JSON.parse(await readFile(new URL('./fixtures/compiled-basic.json', import.meta.url), 'utf8'));
@@ -221,7 +222,7 @@ test('starts all mesh resolutions before waiting, and reports failures with thei
     (e) => e.code === 'sdfm.scene_resolve' && e.message.includes(fixture.sources[0].mesh));
 });
 
-test('refuses invalid scenes, trace mode, mesh deforms and sdf references', async () => {
+test('refuses invalid scenes, trace mode and mesh deforms', async () => {
   const engine = recordingEngine();
   await assert.rejects(loadProceduralScene(engine, null, 'marker', { mama }),
     (e) => e.code === 'sdfm.scene_format' && e.message.includes('PSCENE_SCHEMA') && e.path === '/sources/0');
@@ -229,8 +230,6 @@ test('refuses invalid scenes, trace mode, mesh deforms and sdf references', asyn
   const bent = structuredClone(fixture);
   bent.instances[0].deform = {};
   await assert.rejects(loadProceduralScene(engine, null, bent, { mama }), { code: 'sdfm.scene_format' });
-  await assert.rejects(loadProceduralScene(engine, null, { ...fixture, variant: 'sdf-refs' }, { mama }),
-    (e) => e.code === 'sdfm.scene_format' && e.message.includes('SDF reference scenes load in the next version'));
 });
 
 test('procedural bridge reports the failing module specifier', async () => {
@@ -262,4 +261,156 @@ test('handles existing material functions, graph tint and part frames', async ()
   assert.deepStrictEqual(partNode.t, [4, 0, 0]);
   assert.deepStrictEqual(partNode.r, [0, 0, 0, 1]);
   assert.deepStrictEqual(partNode.s, [1, 1, 1]);
+});
+
+const sdfFixture = JSON.parse(await readFile(new URL('./fixtures/procedural-sdf.json', import.meta.url), 'utf8'));
+
+function fixtureAsset(file) {
+  const id = file.startsWith('procedural/') ? 'procedural.demo.s1' : 'common.post.test';
+  return {
+    format: 'sdfm.game-asset',
+    version: 1,
+    game: 'fixture',
+    id,
+    name: id,
+    category: 'prop',
+    world: 'fixture',
+    mesher: { output: 'paramesh' },
+    document: { format: 'sdfm', version: 2, name: id, root: [], nodes: {}, materials: {} },
+    collision: [],
+    anchors: {},
+    bounds: { min: [0, 0, 0], max: [1, 1, 1] },
+    hash: '0'.repeat(64),
+  };
+}
+
+function sdfLog() {
+  return { load: [], spawn: [], docs: [], resolve: [] };
+}
+
+function sdfFakes(log) {
+  const loader = {
+    load(value) {
+      log.load.push(value);
+      return { parts: [{ name: 'p', mesh: 1 }] };
+    },
+    spawn(asset, parent) {
+      log.spawn.push({ asset, parent });
+      return { root: parent, parts: { p: { node: parent, instance: parent } } };
+    },
+  };
+  const mama = async () => ({
+    parseProceduralScene(text) {
+      if (text === 'marker') throw { code: 'PSCENE_SCHEMA', message: 'bad source', path: '/sources/0' };
+      return JSON.parse(text);
+    },
+    sceneSourceDocument(scene, index) {
+      log.docs.push(index);
+      return {
+        format: 'sdfm',
+        version: 2,
+        name: scene.name,
+        root: ['source'],
+        nodes: { source: { id: 'source', kind: 'group', children: [] } },
+        materials: {},
+      };
+    },
+    serializeDocument: JSON.stringify,
+  });
+  const resolveAsset = async (file) => {
+    log.resolve.push(file);
+    return fixtureAsset(file);
+  };
+  return { loader, mama, resolveAsset };
+}
+
+test('loads sdf references as game assets, composites and bent instances without flattening', async () => {
+  const engines = [recordingEngine(), recordingEngine()];
+  const logs = [sdfLog(), sdfLog()];
+  const handles = [];
+  for (let i = 0; i < 2; i += 1) {
+    const fakes = sdfFakes(logs[i]);
+    handles.push(await loadProceduralScene(engines[i], fakes.loader, sdfFixture, {
+      mama: fakes.mama, resolveAsset: fakes.resolveAsset,
+    }));
+  }
+  assert.deepStrictEqual(logs[0], logs[1]);
+  const log = logs[0];
+  const { calls } = engines[0];
+
+  const files = [sdfFixture.sources[0].file, sdfFixture.sources[1].file];
+  assert.deepStrictEqual(log.resolve, files);
+
+  assert.equal(log.load.length, 5);
+  const ids = log.load.map((asset) => asset.id);
+  assert.deepStrictEqual(ids.filter((id) => id.startsWith('procedural.demo.c')), ['procedural.demo.c2', 'procedural.demo.c3']);
+  assert.deepStrictEqual(ids.filter((id) => id.startsWith('procedural.demo.b')), ['procedural.demo.b0-0']);
+
+  const composite = log.load.find((asset) => asset.id === 'procedural.demo.c2');
+  assert.deepStrictEqual(Object.keys(composite), ASSET_KEYS);
+  assert.equal(composite.category, 'prop');
+  assert.equal(composite.world, 'fixture');
+  assert.deepStrictEqual(composite.mesher, { output: 'paramesh' });
+  assert.deepStrictEqual(composite.bounds, sdfFixture.sources[2].bounds);
+  assert.deepStrictEqual(composite.collision, []);
+  assert.deepStrictEqual(composite.anchors, {});
+  assert.equal(composite.game, sdfFixture.game);
+
+  const bent = log.load.find((asset) => asset.id === 'procedural.demo.b0-0');
+  assert.deepStrictEqual(Object.keys(bent), ASSET_KEYS);
+  assert.deepStrictEqual(bent.document.nodes.source.deformers, [
+    { id: 'bend', kind: 'bend', enabled: true, params: sdfFixture.instances[2].deform.params },
+  ]);
+
+  assert.equal(log.spawn.length, sdfFixture.instances.length);
+  const byId = new Map(calls.addNode.map((node) => [node.id, node]));
+  const parents = log.spawn.map((entry) => entry.parent);
+  assert.deepStrictEqual(
+    parents.map((id) => {
+      const node = byId.get(id);
+      return { t: node.t, r: node.r, s: node.s };
+    }),
+    sdfFixture.instances.map(({ t, r, s }) => ({ t, r, s })),
+  );
+  assert.equal(new Set(parents).size, sdfFixture.instances.length);
+
+  assert.equal(handles[0].instanceCount, 5);
+  assert.equal(handles[0].sourceCount, 4);
+  assert.deepStrictEqual(handles[0].stats(), { instances: 5, meshes: 5, pending: 0 });
+  handles[0].setVisible(false);
+  assert.deepStrictEqual(calls.setVisible, parents.map((id) => [id, false]));
+  handles[0].dispose();
+  assert.deepStrictEqual(engines[0].calls.removeNode, [[handles[0].root]]);
+});
+
+test('sdf references report asset resolution failures and bad JSON with the file name', async () => {
+  const missing = sdfFixture.sources[0].file;
+  const fakes = sdfFakes(sdfLog());
+  await assert.rejects(loadProceduralScene(recordingEngine(), fakes.loader, sdfFixture, {
+    mama: fakes.mama,
+    resolveAsset: async (file) => {
+      if (file === missing) throw new Error('unavailable');
+      return fixtureAsset(file);
+    },
+  }), (e) => e.code === 'sdfm.scene_resolve' && e.message.includes(missing));
+
+  const badJson = sdfFakes(sdfLog());
+  await assert.rejects(loadProceduralScene(recordingEngine(), badJson.loader, sdfFixture, {
+    mama: badJson.mama,
+    resolveAsset: async (file) => (file === missing ? '{' : fixtureAsset(file)),
+  }), (e) => e.code === 'sdfm.scene_resolve' && e.message.includes(missing));
+});
+
+test('sdf references report a sceneSourceDocument failure as sdfm.scene_resolve', async () => {
+  const fakes = sdfFakes(sdfLog());
+  const broken = {
+    ...(await fakes.mama()),
+    sceneSourceDocument() {
+      throw new Error('source could not be built');
+    },
+  };
+  await assert.rejects(loadProceduralScene(recordingEngine(), fakes.loader, sdfFixture, {
+    mama: async () => broken,
+    resolveAsset: fakes.resolveAsset,
+  }), (e) => e.code === 'sdfm.scene_resolve' && e.message.includes('source could not be built'));
 });

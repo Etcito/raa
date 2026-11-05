@@ -1,0 +1,65 @@
+{
+  "format": "sdfm.procedural-scene",
+  "version": 1,
+  "variant": "sdf-refs",
+  "name": "demo",
+  "game": "fixture",
+  "generator": { "document": "fixture", "node": "scatter", "seed": 1, "params": {} },
+  "sources": [
+    {
+      "kind": "asset",
+      "file": "assets/common/post.test.asset.json",
+      "ref": { "game": "fixture", "id": "common.post.test" },
+      "bounds": { "min": [-1, -1, -1], "max": [1, 1, 1] }
+    },
+    {
+      "kind": "asset",
+      "file": "procedural/demo/assets/procedural.demo.s1.asset.json",
+      "ref": { "game": "fixture", "id": "procedural.demo.s1" },
+      "bounds": { "min": [-2, -1, -1], "max": [2, 1, 1] }
+    },
+    {
+      "kind": "csg",
+      "op": "subtract",
+      "smooth": 0,
+      "a": 0,
+      "b": 1,
+      "bounds": { "min": [-2, -1, -1], "max": [2, 1, 1] }
+    },
+    {
+      "kind": "realized",
+      "smooth": 0.1,
+      "members": [
+        { "source": 0, "t": [0, 0, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1] },
+        { "source": 1, "t": [1, 0, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1] }
+      ],
+      "bounds": { "min": [-2, -1, -1], "max": [3, 1, 1] }
+    }
+  ],
+  "instances": [
+    { "key": 1, "source": 2, "t": [0, 0, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1], "group": -1 },
+    { "key": 2, "source": 3, "t": [1, 2, 3], "r": [0, 0, 0, 1], "s": [1, 2, 1], "group": -1 },
+    {
+      "key": 3,
+      "source": 0,
+      "t": [-1, 0, 1],
+      "r": [0, 0, 0, 1],
+      "s": [-1, 1, 1],
+      "group": -1,
+      "deform": {
+        "kind": "bend",
+        "params": { "axis": "y", "angle": 90, "direction": 0, "start": -0.5, "end": 0.5, "center": [0, 0, 0] },
+        "angle": 1.5707963267948966,
+        "length": 1,
+        "along": [0, 1, 0],
+        "toward": null
+      }
+    },
+    { "key": 4, "source": 1, "t": [2, 0, 0], "r": [0, 0, 1, 0], "s": [1, 1, 1], "group": -1 },
+    { "key": 5, "source": 0, "t": [0, 0, 2], "r": [0, 0, 0, 1], "s": [1, 1, 1], "group": -1 }
+  ],
+  "groups": [],
+  "colliders": [],
+  "visual": [],
+  "runtime": null
+}
