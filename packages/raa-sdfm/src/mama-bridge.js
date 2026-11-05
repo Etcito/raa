@@ -55,6 +55,28 @@ export async function importMama(base, options = {}) {
   };
 }
 
+/** Import the MAMA procedural scene functions, optionally from a dist/ URL. */
+export async function importProcedural(base) {
+  const load = async (bare, file) => {
+    const specifier = base === undefined ? bare : new URL(file, base).href;
+    try {
+      return await import(specifier);
+    } catch (e) {
+      throw new SdfmError('sdfm.worker', `cannot import MAMA module ${specifier}: ${messageOf(e)}`);
+    }
+  };
+  const [scene, build, root] = await Promise.all([
+    load('mama/procgen/scene-file.js', 'procgen/scene-file.js'),
+    load('mama/procgen/scene-build.js', 'procgen/scene-build.js'),
+    load('mama', 'index.js'),
+  ]);
+  return {
+    parseProceduralScene: scene.parseProceduralScene,
+    sceneSourceDocument: build.sceneSourceDocument,
+    serializeDocument: root.serializeDocument,
+  };
+}
+
 /**
  * The browser meshing pool: MAMA's `setupBrowserHost`. In node the caller builds its own pool.
  *

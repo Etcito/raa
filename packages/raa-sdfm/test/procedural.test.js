@@ -150,3 +150,116 @@ test('an index equal to the vertex count is refused, naming the part', () => {
   value.data.groups[0].parts[0].meshes[0].indices = new Uint32Array([0, 1, 3]);
   sceneError(() => meshFilePayload(value));
 });
+
+import { readFile } from 'node:fs/promises';
+import { createFakeEngine } from './fake-engine.js';
+import { loadProceduralScene } from '../src/procedural.js';
+import { importProcedural } from '../src/mama-bridge.js';
+
+const fixture = JSON.parse(await readFile(new URL('./fixtures/procedural-mesh.json', import.meta.url), 'utf8'));
+const material = JSON.parse(await readFile(new URL('./fixtures/compiled-basic.json', import.meta.url), 'utf8'));
+const mama = async () => ({
+  parseProceduralScene(text) {
+    if (text === 'marker') throw { code: 'PSCENE_SCHEMA', message: 'bad source', path: '/sources/0' };
+    return JSON.parse(text);
+  },
+});
+function recordingEngine() {
+  const engine = createFakeEngine();
+  for (const name of ['setVisible', 'removeNode', 'removeMesh', 'setMaterialTintMode']) {
+    engine.calls[name] = [];
+    engine[name] = (...args) => engine.calls[name].push(args);
+  }
+  return engine;
+}
+function sceneBytes() {
+  const value = validMeshFile();
+  const part = value.data.groups[0].parts[0];
+  part.meshes[0].material = material.name;
+  part.meshes.push({ ...part.meshes[0], uvs: null });
+  value.data.materials = [material];
+  return encodeMeshFile(value);
+}
+const resolveMesh = async () => sceneBytes();
+
+test('loads mesh references deterministically, preserves transforms, visibility and disposal', async () => {
+  const engines = [recordingEngine(), recordingEngine()];
+  const handles = [];
+  for (const engine of engines) handles.push(await loadProceduralScene(engine, null, fixture, { mama, resolveMesh }));
+  assert.deepStrictEqual(engines[0].calls, engines[1].calls);
+  const { calls } = engines[0];
+  const root = handles[0].root;
+  const nodes = calls.addNode.filter((node) => node.parent === root);
+  assert.deepStrictEqual(nodes.map(({ t, r, s }) => ({ t, r, s })), fixture.instances.map(({ t, r, s }) => ({ t, r, s })));
+  assert.equal(calls.addMeshInstance.length, 6);
+  assert.equal(calls.addMesh.length, 4);
+  assert.equal(calls.addMaterialFunction.length, 1);
+  assert.equal(handles[0].instanceCount, 3);
+  assert.equal(handles[0].sourceCount, 2);
+  assert.deepStrictEqual(handles[0].stats(), { instances: 3, meshes: 4, pending: 0 });
+  handles[0].setVisible(false);
+  assert.deepStrictEqual(calls.setVisible, calls.addMeshInstance.map(({ id }) => [id, false]));
+  handles[0].dispose();
+  handles[0].dispose();
+  assert.deepStrictEqual(calls.removeNode, [[root]]);
+  assert.deepStrictEqual(calls.removeMesh, calls.addMesh.map(({ id }) => [id]));
+  for (const fn of [() => handles[0].stats(), () => handles[0].setVisible(true)]) {
+    assert.throws(fn, { code: 'sdfm.disposed' });
+  }
+});
+
+test('starts all mesh resolutions before waiting, and reports failures with their paths', async () => {
+  const paths = [];
+  await assert.rejects(loadProceduralScene(recordingEngine(), null, fixture, {
+    mama, resolveMesh: (path) => {
+      paths.push(path);
+      return path === fixture.sources[0].mesh ? Promise.reject(new Error('unavailable')) : Promise.resolve(sceneBytes());
+    },
+  }), (e) => e.code === 'sdfm.scene_resolve' && e.message.includes(fixture.sources[0].mesh));
+  assert.deepStrictEqual(paths, fixture.sources.map((source) => source.mesh));
+  await assert.rejects(loadProceduralScene(recordingEngine(), null, fixture, { mama, resolveMesh: async () => 'bad' }),
+    (e) => e.code === 'sdfm.scene_resolve' && e.message.includes(fixture.sources[0].mesh));
+});
+
+test('refuses invalid scenes, trace mode, mesh deforms and sdf references', async () => {
+  const engine = recordingEngine();
+  await assert.rejects(loadProceduralScene(engine, null, 'marker', { mama }),
+    (e) => e.code === 'sdfm.scene_format' && e.message.includes('PSCENE_SCHEMA') && e.path === '/sources/0');
+  await assert.rejects(loadProceduralScene(engine, null, fixture, { mama, mode: 'trace' }), { code: 'sdfm.scene_format' });
+  const bent = structuredClone(fixture);
+  bent.instances[0].deform = {};
+  await assert.rejects(loadProceduralScene(engine, null, bent, { mama }), { code: 'sdfm.scene_format' });
+  await assert.rejects(loadProceduralScene(engine, null, { ...fixture, variant: 'sdf-refs' }, { mama }),
+    (e) => e.code === 'sdfm.scene_format' && e.message.includes('SDF reference scenes load in the next version'));
+});
+
+test('procedural bridge reports the failing module specifier', async () => {
+  await assert.rejects(importProcedural(new URL('./missing/', import.meta.url)),
+    (e) => e.code === 'sdfm.worker' && e.message.includes('cannot import MAMA module') && e.message.includes('/missing/'));
+});
+
+test('handles existing material functions, graph tint and part frames', async () => {
+  const engine = recordingEngine();
+  const graph = structuredClone(material);
+  graph.body = `  let tint = mat_instance_tint;\n${graph.body}`;
+  const value = validMeshFile();
+  const part = value.data.groups[0].parts[0];
+  part.frame[0] = 2;
+  part.frame[12] = 4;
+  part.meshes[0].material = graph.name;
+  value.data.materials = [graph];
+  const { mapMaterial } = await import('../src/map-material.js');
+  const mapped = mapMaterial(graph);
+  engine.addMaterialFunction(mapped.functionName, mapped.wgsl);
+  const handle = await loadProceduralScene(engine, null, fixture, {
+    mama, resolveMesh: async () => encodeMeshFile(value),
+  });
+  assert.equal(engine.calls.addMaterialFunction.length, 1);
+  assert.equal(engine.calls.setMaterialTintMode.length, 2);
+  assert.ok(engine.calls.setMaterialTintMode.every(([, mode]) => mode === 'graph'));
+  const firstInstanceNode = engine.calls.addNode.find((node) => node.parent === handle.root);
+  const partNode = engine.calls.addNode.find((node) => node.parent === firstInstanceNode.id);
+  assert.deepStrictEqual(partNode.t, [4, 0, 0]);
+  assert.deepStrictEqual(partNode.r, [0, 0, 0, 1]);
+  assert.deepStrictEqual(partNode.s, [1, 1, 1]);
+});

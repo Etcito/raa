@@ -1,0 +1,18 @@
+{
+  "format": "sdfm.procedural-scene",
+  "version": 1,
+  "variant": "mesh-refs",
+  "name": "demo",
+  "game": "fixture",
+  "generator": { "document": "fixture", "node": "scatter", "seed": 1, "params": {} },
+  "sources": [
+    { "kind": "mesh", "mesh": "procedural/demo/meshes/12345678.mesh", "meshKey": "12345678", "bounds": { "min": [-1, -1, -1], "max": [1, 1, 1] } },
+    { "kind": "mesh", "mesh": "procedural/demo/meshes/abcdef01.mesh", "meshKey": "abcdef01", "bounds": { "min": [-1, -1, -1], "max": [1, 1, 1] } }
+  ],
+  "instances": [
+    { "key": 1, "source": 0, "t": [0, 0, 0], "r": [0, 0, 0, 1], "s": [1, 1, 1], "group": -1 },
+    { "key": 2, "source": 1, "t": [1, 2, 3], "r": [0, 0, 0, 1], "s": [1, 2, 1], "group": -1 },
+    { "key": 3, "source": 0, "t": [-1, 0, 1], "r": [0, 0, 0, 1], "s": [-1, 1, 1], "group": -1 }
+  ],
+  "groups": [], "colliders": [], "visual": [], "runtime": null
+}
