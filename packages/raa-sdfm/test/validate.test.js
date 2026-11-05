@@ -86,3 +86,19 @@ test('tampered document is sdfm.hash_mismatch at /hash', async () => {
     return true;
   });
 });
+
+test('an asset of no world and no own mesher (MAMA writes null for both) validates', () => {
+  // 2026-11-05: the fixture-fiesta prop.cone (world null, mesher null, as MAMA's asset-file.ts writes them) was
+  // refused with "'world' must be a string", failing the exported-scene evidence of the procedural project.
+  assert.deepEqual(validateAsset({ ...fixture(), world: null, mesher: null }), { ok: true, errors: [] });
+  expectError({ ...fixture(), world: 3 }, 'sdfm.schema', '/world');
+  expectError({ ...fixture(), mesher: 'quad' }, 'sdfm.schema', '/mesher');
+});
+
+test('physics is optional, between collision and anchors, and an object', () => {
+  const entries = Object.entries(fixture());
+  const at = entries.findIndex(([k]) => k === 'anchors');
+  const withPhysics = Object.fromEntries([...entries.slice(0, at), ['physics', { bodies: [] }], ...entries.slice(at)]);
+  assert.deepEqual(validateAsset(withPhysics), { ok: true, errors: [] });
+  expectError({ ...withPhysics, physics: [] }, 'sdfm.schema', '/physics');
+});

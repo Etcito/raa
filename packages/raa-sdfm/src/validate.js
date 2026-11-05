@@ -2,11 +2,13 @@
 import { SdfmError } from './errors.js';
 import { canonicalJson, documentHash } from './canonical.js';
 
-/** Canonical key order of an sdfm.game-asset v1 file. */
+/** Canonical key order of an sdfm.game-asset v1 file, as MAMA writes it (core/game/asset-file.ts FILE_KEYS). */
 export const ASSET_KEYS = Object.freeze([
   'format', 'version', 'game', 'id', 'name', 'category', 'world',
-  'mesher', 'document', 'collision', 'anchors', 'bounds', 'hash',
+  'mesher', 'document', 'collision', 'physics', 'anchors', 'bounds', 'hash',
 ]);
+/** Keys a file may leave out: MAMA writes `physics` only for an asset that has physics bodies. */
+const OPTIONAL_KEYS = Object.freeze(['physics']);
 
 /** Largest canonical document text, in UTF-8 bytes. */
 export const DOCUMENT_CAP_BYTES = 2 * 1024 * 1024;
@@ -37,7 +39,7 @@ export function validateAsset(asset) {
 
   const keys = Object.keys(asset);
   for (const key of ASSET_KEYS) {
-    if (!(key in asset)) add('sdfm.schema', `/${key}`, `missing required key '${key}'`);
+    if (!(key in asset) && !OPTIONAL_KEYS.includes(key)) add('sdfm.schema', `/${key}`, `missing required key '${key}'`);
   }
   for (const key of keys) {
     if (!ASSET_KEYS.includes(key)) add('sdfm.schema', `/${escape(key)}`, `unknown key '${key}'`);
@@ -49,10 +51,17 @@ export function validateAsset(asset) {
     add('sdfm.schema', `/${known[at]}`, `key '${known[at]}' out of canonical order (expected '${expected[at]}' here)`);
   }
 
-  for (const key of ['game', 'id', 'name', 'category', 'world', 'hash']) {
+  for (const key of ['game', 'id', 'name', 'category', 'hash']) {
     if (key in asset && typeof asset[key] !== 'string') add('sdfm.schema', `/${key}`, `'${key}' must be a string`);
   }
-  for (const key of ['mesher', 'document', 'anchors', 'bounds']) {
+  // MAMA writes null for an asset of no world and for a group without its own mesher (the document default meshes it).
+  if ('world' in asset && asset.world !== null && typeof asset.world !== 'string') {
+    add('sdfm.schema', '/world', "'world' must be a string or null");
+  }
+  if ('mesher' in asset && asset.mesher !== null && !isObject(asset.mesher)) {
+    add('sdfm.schema', '/mesher', "'mesher' must be an object or null");
+  }
+  for (const key of ['document', 'physics', 'anchors', 'bounds']) {
     if (key in asset && !isObject(asset[key])) add('sdfm.schema', `/${key}`, `'${key}' must be an object`);
   }
   if ('collision' in asset && !Array.isArray(asset.collision)) {
