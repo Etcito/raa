@@ -13,7 +13,9 @@ pub mod wgsl;
 pub use cpu::{Hit, distance, material, trace_ray};
 pub use pass::{
     COLOR_FORMAT, COMPOSITE_NAME, COMPOSITE_ORDER, DEPTH_FORMAT, FRAME_BYTES, TRACE_NAME,
-    TRACE_ORDER, TraceFeature, TraceHandle, TraceScene, TraceStats, TraceTargets, target_size,
+    TRACE_ORDER, TraceFeature, TraceHandle, TraceScene, TraceStats, TraceTargets, TraceVolume,
+    VOLUME_AXIS_ALIGN, VOLUME_MAX_AXIS, VOLUME_MIPS, VOLUME_ROW_ALIGN, VOLUME_UNIFORM_BYTES,
+    VolumeLayout, VolumeMip, target_size,
 };
 pub use program::{
     DATA, DATA_SHIFT, FORMAT, HEADER_WORDS, INSTANCE_COUNT, INSTANCE_WORDS, Instance, LIMITS,

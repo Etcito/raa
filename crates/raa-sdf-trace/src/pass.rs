@@ -82,6 +82,8 @@ pub struct TraceScene {
     pub frame: [u8; FRAME_BYTES],
     targets: Option<TraceTargets>,
     frame_buffer: Option<wgpu::Buffer>,
+    volume: Option<TraceVolume>,
+    volume_revision: Option<u64>,
     target_revision: u64,
     revision: u64,
     enabled: bool,
@@ -95,6 +97,8 @@ impl Default for TraceScene {
             frame: [0; FRAME_BYTES],
             targets: None,
             frame_buffer: None,
+            volume: None,
+            volume_revision: None,
             target_revision: 0,
             revision: 0,
             enabled: false,
@@ -107,6 +111,7 @@ impl TraceScene {
         let program = parse(bytes)?;
         self.bvh = bvh::build(&program);
         self.program = Some(program);
+        self.volume = None;
         self.revision += 1;
         Ok(())
     }
@@ -141,6 +146,7 @@ impl TraceScene {
         crate::program::validate_instances(&next)?;
         self.bvh = bvh::build(&next);
         self.program = Some(next);
+        self.volume = None;
         self.revision += 1;
         Ok(())
     }
@@ -148,6 +154,7 @@ impl TraceScene {
     pub fn clear(&mut self) {
         self.program = None;
         self.bvh = Bvh::default();
+        self.volume = None;
         self.revision += 1;
     }
 
@@ -162,6 +169,28 @@ impl TraceScene {
             placeholders: program
                 .map_or(0, |p| p.sources.iter().filter(|s| s.placeholder()).count()),
         }
+    }
+
+    /// World volume bounds derived from the current BVH; `None` without instances.
+    pub fn volume_layout(&self) -> Option<VolumeLayout> {
+        let program = self.program.as_ref()?;
+        if program.instances.is_empty() {
+            return None;
+        }
+        VolumeLayout::enclose(self.bvh.nodes.first()?.min, self.bvh.nodes.first()?.max)
+    }
+
+    /// Build (or rebuild) the volume before its consumers read it. Program, instance and
+    /// bounds changes bump the revision, so a stale volume is never returned.
+    pub fn volume(&mut self, gpu: &GpuContext) -> Option<&TraceVolume> {
+        if self.volume_revision == Some(self.revision) {
+            return self.volume.as_ref();
+        }
+        self.volume = None;
+        self.volume_revision = Some(self.revision);
+        let layout = self.volume_layout()?;
+        self.volume = Some(TraceVolume::new(gpu, layout));
+        self.volume.as_ref()
     }
 }
 
@@ -192,6 +221,179 @@ fn read_instance(words: &[u32], bend: Option<[f64; 8]>) -> Instance {
         bend_length: f32::from_bits(words[30]),
         axes: words[31],
         bend,
+    }
+}
+
+/// Section 67 world volume: five mip levels over an R8Snorm 3D texture whose longest base
+/// axis is at most 1024 voxels, rounded up to a multiple of 16.
+pub const VOLUME_MIPS: u32 = 5;
+pub const VOLUME_MAX_AXIS: u32 = 1024;
+pub const VOLUME_AXIS_ALIGN: u32 = 16;
+pub const VOLUME_ROW_ALIGN: u32 = 256;
+pub const VOLUME_UNIFORM_BYTES: u64 = 64;
+
+fn align_up(value: u32, align: u32) -> u32 {
+    value.div_ceil(align) * align
+}
+
+/// World bounds, isotropic voxel spacing and signed-distance range of the volume.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeLayout {
+    pub origin: [f32; 3],
+    pub spacing: f32,
+    pub base: [u32; 3],
+    pub range: f32,
+}
+
+/// One mip's dimensions plus its buffer-to-texture copy layout (bytes and u32 words).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumeMip {
+    pub level: u32,
+    pub size: [u32; 3],
+    pub bytes_per_row: u32,
+    pub rows_per_image: u32,
+    pub pitch_words: u32,
+    pub dispatch: [u32; 3],
+}
+
+impl VolumeLayout {
+    /// Enclose `min..max` (the instance BVH root). Empty, non-finite or degenerate bounds
+    /// own no volume; `range` covers the padded diagonal so no interior distance saturates.
+    pub fn enclose(min: [f32; 3], max: [f32; 3]) -> Option<VolumeLayout> {
+        if !min.iter().chain(max.iter()).all(|value| value.is_finite()) {
+            return None;
+        }
+        let mut extent = [0.0f32; 3];
+        let mut longest = 0.0f32;
+        let mut longest_axis = 0;
+        for axis in 0..3 {
+            if max[axis] <= min[axis] {
+                return None;
+            }
+            extent[axis] = max[axis] - min[axis];
+            if extent[axis] > longest {
+                longest = extent[axis];
+                longest_axis = axis;
+            }
+        }
+        let spacing = longest / VOLUME_MAX_AXIS as f32;
+        let mut base = [VOLUME_AXIS_ALIGN; 3];
+        for axis in 0..3 {
+            let cells = (extent[axis] / spacing).ceil() as u32;
+            base[axis] =
+                align_up(cells.max(VOLUME_AXIS_ALIGN), VOLUME_AXIS_ALIGN).min(VOLUME_MAX_AXIS);
+        }
+        base[longest_axis] = VOLUME_MAX_AXIS;
+        let diagonal = spacing
+            * (0..3)
+                .map(|axis| (base[axis] * base[axis]) as f32)
+                .sum::<f32>()
+                .sqrt();
+        Some(VolumeLayout {
+            origin: min,
+            spacing,
+            base,
+            range: diagonal,
+        })
+    }
+
+    pub fn mip(&self, level: u32) -> VolumeMip {
+        let size = [0, 1, 2].map(|axis| (self.base[axis] >> level).max(1));
+        let bytes_per_row = align_up(size[0], VOLUME_ROW_ALIGN);
+        VolumeMip {
+            level,
+            size,
+            bytes_per_row,
+            rows_per_image: size[1],
+            pitch_words: bytes_per_row / 4,
+            dispatch: [size[0].div_ceil(32), size[1].div_ceil(8), size[2]],
+        }
+    }
+
+    /// The packed stamp buffer for the base mip; each coarser level reuses its prefix.
+    pub fn buffer_bytes(&self) -> u64 {
+        let mip = self.mip(0);
+        u64::from(mip.pitch_words) * u64::from(mip.size[1]) * u64::from(mip.size[2]) * 4
+    }
+
+    /// The 64-byte `TraceVolume` uniform: origin/spacing, base shape, encoding and build.
+    /// `build.x` is the mip level and `build.y` the row pitch in u32 words.
+    pub fn uniform(&self, level: u32) -> [u8; VOLUME_UNIFORM_BYTES as usize] {
+        let mut words = [0u32; 16];
+        for axis in 0..3 {
+            words[axis] = self.origin[axis].to_bits();
+        }
+        words[3] = self.spacing.to_bits();
+        words[4..7].copy_from_slice(&self.base);
+        words[8] = self.range.to_bits();
+        words[12] = level;
+        words[13] = self.mip(level).pitch_words;
+        let mut bytes = [0u8; VOLUME_UNIFORM_BYTES as usize];
+        for (index, word) in words.iter().enumerate() {
+            bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+        }
+        bytes
+    }
+}
+
+/// The scene's R8Snorm world volume and the packed buffer compute stamps into before each
+/// mip is copied into the texture. Frame scheduling binds and fills it.
+#[derive(Clone, Debug)]
+pub struct TraceVolume {
+    pub layout: VolumeLayout,
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub buffer: wgpu::Buffer,
+    pub uniform: wgpu::Buffer,
+}
+
+impl TraceVolume {
+    pub fn new(gpu: &GpuContext, layout: VolumeLayout) -> TraceVolume {
+        let device = gpu.device();
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-sdf-trace.volume"),
+            size: wgpu::Extent3d {
+                width: layout.base[0],
+                height: layout.base[1],
+                depth_or_array_layers: layout.base[2],
+            },
+            mip_level_count: VOLUME_MIPS,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::R8Snorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("raa-sdf-trace.volume"),
+            format: Some(wgpu::TextureFormat::R8Snorm),
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            aspect: wgpu::TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: Some(VOLUME_MIPS),
+            base_array_layer: 0,
+            array_layer_count: None,
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-sdf-trace.volume.stamp"),
+            size: layout.buffer_bytes(),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-sdf-trace.volume.uniform"),
+            size: VOLUME_UNIFORM_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        TraceVolume {
+            layout,
+            texture,
+            view,
+            buffer,
+            uniform,
+        }
     }
 }
 // ---- frame passes (S12) ----
