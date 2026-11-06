@@ -203,6 +203,18 @@ fn refuses_an_instruction_past_the_source_data() {
 }
 
 #[test]
+fn refuses_a_combination_below_the_stack() {
+    let mut f = Fixture::minimal();
+    f.code[0] = opcode::UNION;
+    assert_eq!(
+        parse(&f.bytes())
+            .expect_err("a union needs two operands")
+            .code(),
+        STACK
+    );
+}
+
+#[test]
 fn refuses_an_unbalanced_stack() {
     let mut f = Fixture::minimal();
     let mut data = sphere_data();
@@ -287,4 +299,32 @@ fn refuses_an_unknown_deform_kind() {
         parse(&f.bytes()).expect_err("kind 2 is unknown").code(),
         FORMAT
     );
+}
+
+#[test]
+fn keeps_bend_bits_and_refuses_an_incomplete_bend() {
+    let mut f = Fixture::minimal();
+    f.instances[0][28] = 1; // bend
+    f.instances[0][29] = 0.5f32.to_bits();
+    f.instances[0][30] = 2.0f32.to_bits();
+    f.instances[0][31] = 40; // +X along, -Z toward
+    let program = parse(&f.bytes()).expect("a complete bend record");
+    let bend = &program.instances[0];
+    assert_eq!((bend.deform_kind, bend.axes), (1, 40));
+    assert_eq!(bend.bend_angle, 0.5);
+
+    for axes in [7, ((6 << 3) | 1), (1 << 20)] {
+        let mut f = Fixture::minimal();
+        f.instances[0][28] = 1;
+        f.instances[0][30] = 2.0f32.to_bits();
+        f.instances[0][31] = axes;
+        let err = parse(&f.bytes()).expect_err("an incomplete bend frame");
+        assert_eq!(err.code(), FORMAT, "axes {axes}");
+    }
+
+    let mut f = Fixture::minimal();
+    f.instances[0][28] = 1;
+    f.instances[0][30] = 0.0f32.to_bits();
+    f.instances[0][31] = 40;
+    assert_eq!(parse(&f.bytes()).expect_err("zero length").code(), FORMAT);
 }

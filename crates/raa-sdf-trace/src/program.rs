@@ -578,9 +578,18 @@ fn validate_instances(program: &TraceProgram) -> Result<(), TraceError> {
                 "the distance scale must be positive"
             );
         }
+        let (along, toward) = (instance.axes & 7, (instance.axes >> 3) & 7);
         match instance.deform_kind {
             0 => {}
-            1 if instance.bend_length > 0.0 => {}
+            1 if instance.bend_length > 0.0 => {
+                if along > 5 || toward == 6 || instance.axes >> 6 != 0 {
+                    refuse!(
+                        FORMAT,
+                        format!("{path}.bendAxes"),
+                        "the bend frame is incomplete: along must be one of the six signed axes, toward one of them or 7 (no aim)"
+                    );
+                }
+            }
             1 => refuse!(
                 FORMAT,
                 format!("{path}.bendLength"),

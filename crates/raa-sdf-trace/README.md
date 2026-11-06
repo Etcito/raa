@@ -40,7 +40,9 @@ Integer record slots keep their 32-bit patterns: the key is a `u32`, the materia
 `parse` checks the header counts and the exact word total before slicing, then validates every
 source range, Lipschitz bound and bounds box, all geometric values (bounds, matrices, distance
 scales, bend values and data) for finiteness, every instruction's opcode and data range, the
-stack balance (one value left per source), and every instance/source/material reference.
+stack balance (one value left per source), and every instance/source/material reference. A
+bend record also needs a positive length and a packed frame whose along axis is one of the six
+signed axes (`toward` 7 means no aim); an incomplete frame is refused.
 
 ## Test
 
