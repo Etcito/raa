@@ -6,6 +6,7 @@ use raa_sdf_trace::wgsl::{
 };
 use raa_sdf_trace::{
     COMPOSITE_NAME, COMPOSITE_ORDER, Instance, Source, TRACE_NAME, TRACE_ORDER, TraceProgram,
+    VolumeLayout, target_size,
 };
 
 fn program(sources: usize, code_len: u32) -> TraceProgram {
@@ -559,4 +560,90 @@ fn volume_guards_stale_results_and_preserves_full_target_coordinates() {
     }
     assert!(!shader.contains("MAX_TARGET"));
     assert!(composite_module().contains("if (color.a == 0.0) { discard; }"));
+}
+
+#[test]
+fn scheduled_mips_and_uniforms_follow_the_frozen_abi() {
+    let layout = VolumeLayout::enclose([-4.0, -2.0, 0.5], [12.0, 6.0, 4.5]).expect("bounds");
+    assert!(
+        layout
+            .base
+            .iter()
+            .all(|&axis| axis > 0 && axis <= VOLUME_MAX_AXIS && axis % 16 == 0)
+    );
+    assert!(layout.spacing > 0.0 && layout.range > 0.0 && layout.roundoff() > 0.0);
+    for level in 0..VOLUME_MIP_LEVELS {
+        let mip = layout.mip(level);
+        let abi = volume_mip_layout(layout.base, level).expect("frozen ABI layout");
+        assert_eq!(abi.dimensions, mip.size, "mip {level} dimensions");
+        assert_eq!(
+            abi.bytes_per_row, mip.bytes_per_row,
+            "mip {level} row pitch"
+        );
+        assert_eq!(abi.rows_per_image, mip.rows_per_image);
+        assert_eq!(abi.workgroups, mip.dispatch);
+        assert_eq!(
+            abi.slice_stride,
+            u64::from(mip.bytes_per_row) * u64::from(mip.size[1])
+        );
+        let uniform = layout.uniform_revision(level, 7);
+        assert_eq!(uniform.len(), 64);
+        assert_eq!(
+            f32::from_le_bytes(uniform[0..4].try_into().unwrap()),
+            layout.origin[0]
+        );
+        assert_eq!(
+            f32::from_le_bytes(uniform[12..16].try_into().unwrap()),
+            layout.spacing
+        );
+        assert_eq!(
+            u32::from_le_bytes(uniform[16..20].try_into().unwrap()),
+            layout.base[0]
+        );
+        assert_eq!(u32::from_le_bytes(uniform[28..32].try_into().unwrap()), 7);
+        assert_eq!(
+            f32::from_le_bytes(uniform[32..36].try_into().unwrap()),
+            layout.range
+        );
+        assert_eq!(
+            f32::from_le_bytes(uniform[36..40].try_into().unwrap()),
+            layout.roundoff()
+        );
+        assert_eq!(
+            u32::from_le_bytes(uniform[48..52].try_into().unwrap()),
+            level
+        );
+        assert_eq!(
+            u32::from_le_bytes(uniform[52..56].try_into().unwrap()),
+            mip.pitch_words
+        );
+        assert_eq!(u32::from_le_bytes(uniform[56..60].try_into().unwrap()), 7);
+    }
+    let base = volume_mip_layout(layout.base, 0).expect("base copy");
+    assert!(layout.buffer_bytes() >= base.buffer_size);
+}
+
+#[test]
+fn empty_scene_dummy_volume_and_full_target_are_independent() {
+    let layout = VolumeLayout::dummy();
+    assert!(
+        layout
+            .base
+            .iter()
+            .all(|&axis| (16..=VOLUME_MAX_AXIS).contains(&axis) && axis % 16 == 0)
+    );
+    for level in 0..VOLUME_MIP_LEVELS {
+        assert!(volume_mip_layout(layout.base, level).is_some());
+    }
+    // The volume-axis limit never caps the image: targets keep every render pixel.
+    assert_eq!(target_size(4096, 2160), (4096, 2160));
+    assert_eq!(target_size(1, 1), (1, 1));
+    let coarse = |(w, h): (u32, u32)| {
+        (
+            w.div_ceil(VOLUME_COARSE_TILE),
+            h.div_ceil(VOLUME_COARSE_TILE),
+        )
+    };
+    assert_eq!(coarse(target_size(1920, 1080)), (240, 135));
+    assert_eq!(coarse(target_size(2057, 1235)), (258, 155));
 }

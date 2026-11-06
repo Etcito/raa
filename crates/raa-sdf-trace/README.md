@@ -1,9 +1,10 @@
 # raa-sdf-trace
 
 The section 67 trace program: RAA's reader of the packed SDF program and its raytrace passes.
-`src/program.rs` reads the file, `src/bvh.rs` and `src/cpu.rs` are the conservative CPU twin
-and `src/wgsl.rs` generates the shared WGSL evaluator, the `trace.sdf` compute shader and the
-`trace.composite` display shader.
+`src/program.rs` reads the file, `src/bvh.rs` and `src/cpu.rs` are the conservative CPU twin,
+`src/wgsl.rs` generates the shared WGSL evaluator and owns the frozen internal volume ABI
+(`VOLUME_ABI_VERSION`), and `src/pass.rs` schedules the world volume, the cone prepass, the
+full-resolution trace and the `trace.composite` overlay.
 
 ## File layout
 
@@ -52,16 +53,49 @@ signed axes (`toward` 7 means no aim); an incomplete frame is refused.
 `TraceScene`). Set the program with `set_program`, the instance records with
 `update_instances` and the frame's 512-byte S10 `FrameGpu` (camera and inverse matrices, sun
 direction/colour, ambient, viewport) in `scene.frame`; both passes read the same bytes.
-`stats` reports the source, instance and BVH counts with the capped target size.
+`stats` reports the source, instance and BVH counts with the full target size.
 
 `trace.sdf` uploads the packed program sections, the instance and bend records, the BVH nodes
-and order, and the materials, then dispatches 8x8 workgroups over `target_size(w, h)` (never
-larger than 1024 on the longest side). It writes the linear colour to `Rgba16Float` and the
-projection depth to `R32Float`.
+and order, and the materials, then schedules the Claybook-style world volume and the trace:
 
-`trace.composite` loads the normal frame's colour and depth attachments. It draws the trace
-colour with the trace depth as `frag_depth` under RAA's `Less` depth test and discards misses,
-so scene meshes occlude traced surfaces and the depth written here is seen by later overlays.
+1. **World volume.** The instance BVH root gives the world bounds; spacing is the longest
+   extent divided by at most 1024 and the base dimensions are multiples of 16. The volume is
+   an `R8Snorm` 3D texture with exactly five mip levels. Base distances are normalized to the
+   padded diagonal range `R` and encoded in a packed `u32` buffer (four adjacent x bytes per
+   word) by `sdf_stamp`, then copied into mip 0 with `bytesPerRow = align_up(width, 256)`,
+   `rowsPerImage = height` and zero buffer offset; row padding is never sampled. Every coarser
+   mip takes the minimum signed byte of its eight children (`sdf_mip`) and is copied the same
+   way. The shader subtracts the half-diagonal voxel footprint and the roundoff allowance
+   before quantizing, so every stored value bounds its whole cell, never an average.
+2. **Cone prepass.** After all five mips are copied, `sdf_coarse` covers one texel per 8x8
+   full-resolution pixel tile (`ceil(target/8)`), encloses every covered pixel footprint in
+   its cone and stores `(resume distance, validity state, revision)`; state 1 is a certified
+   empty prefix, state 2 forces exact fallback and there is no miss state.
+3. **Full trace.** `sdf_trace` runs at the full render-target resolution (there is no image
+   cap; 1024 is the longest volume axis only). It resumes from the coarse prefix only when the
+   state and revision match, walks the mips chosen by clearance and pixel-cone size, then
+   refines every candidate with the exact packed programs and retained BVH. Final hit
+   distance, position and normal come from the exact evaluator, never from baked data;
+   material lookup and named unsupported-shape placeholders are preserved.
+4. **Composite.** `trace.composite` loads the frame colour and depth attachments and draws the
+   trace colour with the trace depth as `frag_depth` under RAA's `Less` depth test, discarding
+   misses, so meshes occlude traced surfaces and later overlays see the composed depth.
+
+Program, instance, bend or bounds changes bump the scene revision; the pass rebuilds the
+volume, stamps and copies mip 0..4 and publishes the revision to every uniform snapshot
+*before* the cone prepass and full trace record. A rejected update keeps the previous program,
+BVH and volume. A resize recreates the trace and coarse textures without restamping, and the
+coarse prepass runs every frame because camera changes invalidate it.
+
+## Limits
+
+- Volume: at most 1024 voxels on the longest axis, at least 16 and multiples of 16 per axis,
+  exactly five mips, `R8Snorm` sampled without filtering. A scene whose padded base buffer
+  would exceed the default 128 MiB storage-binding limit is coarsened (spacing doubles) until
+  it fits, never clipped; a scene without instances keeps a valid dummy volume.
+- Trace output: the full render-target size (an empty frame collapses to 1x1), `Rgba16Float`
+  colour and `R32Float` depth; the coarse prepass is `ceil(target/8)` `Rgba32Float`. The
+  CPU twin `cpu::trace_ray` remains the exact reference for the GPU refinement.
 
 ## Test
 
