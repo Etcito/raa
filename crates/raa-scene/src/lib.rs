@@ -8,12 +8,14 @@ use std::fmt;
 
 mod camera;
 mod graph;
+mod instance_index;
 mod light;
 mod render_list;
 mod transform;
 
 pub use camera::{Camera, OrbitController};
 pub use graph::Scene;
+pub use instance_index::{InstanceIndex, frustum_planes};
 pub use light::{Ambient, DirectionalLight};
 pub use render_list::{Batch, RenderItem, RenderList};
 pub use transform::{InstanceId, NodeId, Transform};
