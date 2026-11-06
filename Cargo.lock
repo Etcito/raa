@@ -1062,6 +1062,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-sdf-trace"
+version = "0.5.0"
+dependencies = [
+ "naga",
+ "raa-core",
+ "raa-math",
+ "raa-pipeline",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-shader"
 version = "0.5.0"
 dependencies = [

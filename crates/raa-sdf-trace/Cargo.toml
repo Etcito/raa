@@ -1,0 +1,15 @@
+[package]
+name = "raa-sdf-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Reader of the section 67 trace program: sources, instructions, materials and instances."
+publish = false
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+wgpu = { workspace = true }
+naga = { workspace = true }
