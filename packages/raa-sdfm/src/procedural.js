@@ -3,6 +3,7 @@ import { importProcedural } from './mama-bridge.js';
 import { mapMaterial } from './map-material.js';
 import { decodeMeshFile, meshFilePayload } from './mesh-file.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
+import { instanceParams } from './instance-params.js';
 
 /**
  * Load one `sdfm.procedural-scene` v1 file (section 66). Mesh sources are decoded and uploaded;
@@ -28,6 +29,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
   const meshes = [];
   const instances = [];
   let meshCount = 0;
+  let attributed = 0;
   let disposed = false;
   const dispose = () => {
     if (disposed) return;
@@ -40,6 +42,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
       const loaded = await loadSdfRefs(engine, loader, scene, mama, options, root);
       instances.push(...loaded.instances);
       meshCount = loaded.meshes;
+      attributed = loaded.attributed;
     } else {
       const payloads = await Promise.all(scene.sources.map(async (source) => {
         let bytes;
@@ -86,10 +89,16 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
       });
       for (const instance of scene.instances) {
         const node = engine.addNode(root, instance.t, instance.r, instance.s);
+        const spawned = [];
         for (const part of sources[instance.source]) {
           const partNode = engine.addNode(node, part.t, part.r);
-          for (const mesh of part.meshes) instances.push(engine.addMeshInstance(partNode, mesh));
+          for (const mesh of part.meshes) {
+            const handle = engine.addMeshInstance(partNode, mesh);
+            instances.push(handle);
+            spawned.push(handle);
+          }
         }
+        attributed += applyInstanceParams(engine, instance, spawned);
       }
       meshCount = meshes.length;
     }
@@ -110,7 +119,9 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
     },
     stats() {
       checkLive();
-      return { instances: scene.instances.length, meshes: meshCount, pending: 0 };
+      const stats = { instances: scene.instances.length, meshes: meshCount, pending: 0 };
+      if (attributed > 0) stats.attributed = attributed;
+      return stats;
     },
     dispose,
   };
@@ -195,15 +206,37 @@ async function loadSdfRefs(engine, loader, scene, mama, options, root) {
   }
 
   const instances = [];
+  let attributed = 0;
   for (const [index, instance] of scene.instances.entries()) {
     const node = engine.addNode(root, instance.t, instance.r, instance.s);
     const spawned = loader.spawn(instanceAssets[index], node);
+    const parts = [];
     for (const part of Object.values(spawned?.parts ?? {})) {
-      if (part && part.instance !== undefined) instances.push(part.instance);
+      if (part && part.instance !== undefined) {
+        instances.push(part.instance);
+        parts.push(part.instance);
+      }
     }
+    attributed += applyInstanceParams(engine, instance, parts);
   }
   const meshes = loaded.reduce((count, asset) => count + (Array.isArray(asset?.parts) ? asset.parts.length : 0), 0);
-  return { instances, meshes };
+  return { instances, meshes, attributed };
+}
+
+/**
+ * Forward one scene instance's procgen attributes and detail hint to every engine instance it spawned.
+ * `attributed` counts the scene instances whose attributes were set (once, however many parts they have).
+ */
+function applyInstanceParams(engine, instance, handles) {
+  const params = instanceParams(instance.attrs);
+  const bias = instance.lod?.bias;
+  const setBias = Number.isInteger(bias) && bias !== 0 && typeof engine.setInstanceLodBias === 'function';
+  if (params === null && !setBias) return 0;
+  for (const handle of handles) {
+    if (params !== null) engine.setInstanceParams(handle, params);
+    if (setBias) engine.setInstanceLodBias(handle, bias);
+  }
+  return params !== null && handles.length > 0 ? 1 : 0;
 }
 
 function sourceDocument(mama, scene, index, lookup) {

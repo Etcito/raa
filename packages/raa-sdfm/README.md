@@ -29,9 +29,12 @@ with the S16 code in the message.
   never carries a deform.
 
 Either variant spawns one engine node per scene instance and its parts under it: instances are
-never flattened, merged or baked into the root. `stats()` reports the instance count, the number
-of distinct loaded assets' parts and the pending uploads; `setVisible` covers every spawned part
-instance; `dispose` removes the root node and every mesh the handle added.
+never flattened, merged or baked into the root. A scene instance's `attrs` and `lod` are forwarded
+to every part it spawned through `Engine.setInstanceParams` and, when the engine has it,
+`Engine.setInstanceLodBias`; `stats().attributed` counts the scene instances whose parameters were
+set. `stats()` reports the instance count, the number of distinct loaded assets' parts and the
+pending uploads; `setVisible` covers every spawned part instance; `dispose` removes the root node
+and every mesh the handle added.
 
 Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode` or a deform on a mesh-refs
 instance; `sdfm.scene_resolve` when a resolve callback, the S24 decode or `sceneSourceDocument`
@@ -174,7 +177,7 @@ Every exported name of `index.d.ts`:
 | `SdfmError` | The adapter's refusal: `code` (an S15 code) and an optional JSON pointer `path`; message prefixed `<code>: `. |
 | `SdfmErrorCode` | Union of the thirteen S15 codes listed in the table below, plus the S18 `sdfm.rig`. |
 | `loadProceduralScene` | Loads an `sdfm.procedural-scene` v1 file (sdf-refs or mesh-refs) into one engine node per instance; returns a `ProceduralSceneHandle`. |
-| `ProceduralSceneHandle` | `root`, `instanceCount`, `sourceCount`, `setVisible`, `stats` (`{ instances, meshes, pending }`) and `dispose`. |
+| `ProceduralSceneHandle` | `root`, `instanceCount`, `sourceCount`, `setVisible`, `stats` (`{ instances, meshes, pending, attributed? }`) and `dispose`. |
 | `ProceduralSceneOptions` | `{ resolveAsset?, resolveMesh?, parent?, mode?: 'mesh', mama? }`; `mama` defaults to the bridge's `importProcedural`. |
 | `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`. |
 | `decodeMeshFile` | Decodes an S24 saved `.mesh` file into its header and typed-array views. |
