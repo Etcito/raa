@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
-use raa_math::Aabb;
+use raa_math::{Aabb, Vec3};
 use raa_mesh::AttributedMesh;
 use raa_pipeline::Pipeline;
-use raa_scene::{RenderList, Scene, frustum_planes};
+use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
 use raa_shader::{Composer, MaterialFnId, MaterialFnRegistry, SlotProvider};
 
 use crate::contributor::ForwardContributor;
@@ -26,12 +26,14 @@ use crate::extras::InstanceExtra;
 use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
 use crate::handle::{LitHandle, LitShared};
 use crate::library::SurfaceLibrary;
+use crate::lod::{LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level};
 use crate::material::{DrawClass, SurfaceMaterial};
 use crate::material_data::MaterialDataStats;
 use crate::meshes::{LitMeshId, LitMeshInfo};
 use crate::passes::install_passes;
 use crate::prep::MaterialClass;
 use crate::select::SelectInput;
+use crate::skin_views::SkinDraw;
 use crate::textures::{AtlasRect, TexelData};
 
 /// Limits and sample count of a [`LitRenderer`]; the frame buffers are sized from them.
@@ -78,6 +80,96 @@ pub struct FrameCounts {
     pub draw_calls: u32,
     /// Triangles drawn (sub-mesh triangles x instances).
     pub triangles: u64,
+}
+
+/// Instance selection and persistent-record uploads of the last prepared frame.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct InstanceFrameStats {
+    pub instances: u32,
+    pub camera: u32,
+    pub cascades: [u32; 4],
+    /// Camera instances per level, including full resolution at index 0.
+    pub lods: [u32; MAX_LOD_LEVELS],
+    pub uploaded_bytes: u64,
+}
+
+pub(crate) const NO_CAMERA_LEVEL: u8 = u8::MAX;
+
+struct CameraLodInput<'a> {
+    list: &'a RenderList,
+    tags: &'a [u32],
+    slots: &'a [u32],
+    index: &'a InstanceIndex,
+    camera: &'a Camera,
+    viewport_height: u32,
+    lods: &'a LodRegistry,
+    bias: &'a HashMap<u32, i8>,
+    options: &'a LodParams,
+    skinned: &'a dyn Fn(u32) -> Option<SkinDraw>,
+}
+
+/// Compute before IdPrep so its level lookup can remain an immutable Fn.
+fn camera_levels(input: &CameraLodInput<'_>, levels: &mut [u8]) {
+    let focal_px = input.viewport_height as f32 / (2.0 * (input.camera.fov_y_rad * 0.5).tan());
+    for ((item, &tag), &slot) in input.list.items.iter().zip(input.tags).zip(input.slots) {
+        let level = &mut levels[slot as usize];
+        // Posed draws bind the full mesh's rest skin records. Drop hysteresis while posed.
+        if (input.skinned)(tag).is_some() {
+            *level = NO_CAMERA_LEVEL;
+            continue;
+        }
+        let Some(chain) = input.lods.chain(item.mesh) else {
+            *level = NO_CAMERA_LEVEL;
+            continue;
+        };
+        let world = &item.world;
+        let scales: [f32; 3] = std::array::from_fn(|i| {
+            let c = world.cols[i];
+            Vec3::new(c[0], c[1], c[2]).length()
+        });
+        let world_scale = if scales.iter().all(|scale| scale.is_finite()) {
+            scales.into_iter().fold(0.0, f32::max)
+        } else {
+            f32::NAN
+        };
+        let distance = match input.index.bounds(slot).flatten() {
+            Some(bounds) => (input.camera.eye - bounds.center()).length() - bounds.diagonal() * 0.5,
+            None => (input.camera.eye - world.transform_point(Vec3::ZERO)).length(),
+        };
+        let params = LodParams {
+            bias: input.options.bias + f32::from(input.bias.get(&tag).copied().unwrap_or(0)),
+            ..*input.options
+        };
+        let prev = (*level != NO_CAMERA_LEVEL).then_some(*level as usize);
+        *level = camera_level(chain, world_scale, distance, focal_px, prev, &params) as u8;
+    }
+}
+
+fn camera_mesh(lods: &LodRegistry, levels: &[u8], slot: u32, mesh: MeshId) -> MeshId {
+    lods.chain(mesh)
+        .and_then(|chain| chain.get(levels[slot as usize] as usize))
+        .map_or(mesh, |level| level.mesh)
+}
+
+/// Layout is (sub-mesh count, sub-mesh ordinal); index counts may change at each level.
+fn register_mesh_lods(
+    lods: &mut LodRegistry,
+    full: MeshId,
+    levels: &[LodLevel],
+    layout: &dyn Fn(MeshId) -> Option<(usize, usize)>,
+) -> Result<(), RaaError> {
+    let full_layout = layout(full)
+        .ok_or_else(|| refusal("render.invalid_lod", "Full mesh is not uploaded".into()))?;
+    if levels
+        .iter()
+        .any(|level| layout(level.mesh) != Some(full_layout))
+    {
+        return Err(refusal(
+            "render.invalid_lod",
+            "Detail meshes must be uploaded with matching sub-mesh layouts".into(),
+        ));
+    }
+    lods.set(full, levels)
 }
 
 /// One forward contributor with its pipeline entry flag (the forward pass records it only
@@ -245,6 +337,52 @@ impl LitRenderer {
     /// Counts, effective sub-meshes and bounds of mesh `id`.
     pub fn info(&self, id: LitMeshId) -> Option<LitMeshInfo> {
         self.shared.borrow().meshes.info(id)
+    }
+
+    /// Registers coarser uploaded sub-meshes, finest first, preserving instance materials.
+    /// Refuses invalid chains or mismatched sub-mesh layouts with `render.invalid_lod`.
+    /// Skinning is per instance tag and does not restrict registration.
+    pub fn set_mesh_lods(&mut self, full: MeshId, levels: &[LodLevel]) -> Result<(), RaaError> {
+        let mut shared = self.shared.borrow_mut();
+        let s: &mut LitShared = &mut shared;
+        let meshes = &s.meshes;
+        register_mesh_lods(&mut s.lods, full, levels, &|mesh| {
+            let submesh = meshes.submesh(mesh)?;
+            let ids = meshes.submesh_ids(submesh.lit)?;
+            Some((ids.len(), ids.iter().position(|&id| id == mesh)?))
+        })?;
+        s.levels.fill(NO_CAMERA_LEVEL);
+        Ok(())
+    }
+
+    /// Removes a detail chain; an unknown full mesh is ignored.
+    pub fn clear_mesh_lods(&mut self, full: MeshId) {
+        let mut s = self.shared.borrow_mut();
+        s.lods.clear(full);
+        s.levels.fill(NO_CAMERA_LEVEL);
+    }
+
+    /// Sets camera selection parameters; per-tag bias is added to `options.bias`.
+    pub fn set_lod_options(&mut self, options: LodParams) {
+        self.shared.borrow_mut().lod_options = options;
+    }
+
+    pub fn lod_options(&self) -> LodParams {
+        self.shared.borrow().lod_options
+    }
+
+    /// Positive bias allows coarser geometry sooner. Zero removes the tag override.
+    pub fn set_instance_lod_bias(&mut self, tag: u32, bias: i8) {
+        let mut s = self.shared.borrow_mut();
+        if bias == 0 {
+            s.lod_bias.remove(&tag);
+        } else {
+            s.lod_bias.insert(tag, bias);
+        }
+    }
+
+    pub fn frame_stats(&self) -> InstanceFrameStats {
+        self.shared.borrow().stats
     }
 
     // ---- materials, functions, slots ----
@@ -521,6 +659,10 @@ impl LitRenderer {
         // select the camera section through the scene index.
         let end = slots.iter().copied().max().map_or(0, |slot| slot + 1);
         s.store.ensure(end);
+        // Compare every frame: the store's doubling capacity, not the live count,
+        // determines the range of stable slots, including holes.
+        s.levels
+            .resize(s.store.capacity() as usize, NO_CAMERA_LEVEL);
         let source = s.skin_source.clone();
         let skins = source.0.borrow();
         let has_palette = s.palette_ready();
@@ -528,6 +670,21 @@ impl LitRenderer {
         s.store.sync(list, tags, slots, &self.extras, &|tag| {
             skinned(tag).map_or(0, |draw| draw.base)
         });
+        camera_levels(
+            &CameraLodInput {
+                list,
+                tags,
+                slots,
+                index: scene.instance_index(),
+                camera: &scene.camera,
+                viewport_height: viewport.1,
+                lods: &s.lods,
+                bias: &s.lod_bias,
+                options: &s.lod_options,
+                skinned: &skinned,
+            },
+            &mut s.levels,
+        );
 
         let planes = frustum_planes(scene.camera.view_proj());
         let words = (s.store.capacity() as usize).div_ceil(64).max(1);
@@ -549,6 +706,9 @@ impl LitRenderer {
             let Some(item) = list.items.get(i) else {
                 return false;
             };
+            if s.lods.is_level(item.mesh) {
+                return false;
+            }
             let tag = tags.get(i).copied().unwrap_or(0);
             if skinned(tag).is_some() {
                 let Some(info) = meshes.submesh(item.mesh).and_then(|m| meshes.info(m.lit)) else {
@@ -562,7 +722,7 @@ impl LitRenderer {
             bits.get(slot / 64)
                 .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)
         };
-        let level_mesh = |_: u32, mesh: MeshId| mesh;
+        let level_mesh = |slot: u32, mesh: MeshId| camera_mesh(&s.lods, &s.levels, slot, mesh);
         let input = SelectInput {
             list,
             tags,
@@ -575,6 +735,21 @@ impl LitRenderer {
             level_mesh: &level_mesh,
         };
         s.select.prepare_camera(&input, &skinned)?;
+
+        let mut stats = InstanceFrameStats {
+            instances: scene.instance_count() as u32,
+            camera: s.select.camera_count(),
+            ..InstanceFrameStats::default()
+        };
+        for id in s.select.id_bytes().chunks_exact(4) {
+            let slot = u32::from_le_bytes(id.try_into().unwrap()) as usize;
+            let level = s.levels[slot];
+            stats.lods[if level == NO_CAMERA_LEVEL {
+                0
+            } else {
+                level as usize
+            }] += 1;
+        }
 
         let mut counts = FrameCounts {
             instances: s.select.camera_count(),
@@ -607,6 +782,8 @@ impl LitRenderer {
         s.item_slots.clone_from(slots);
 
         s.upload(gpu, &self.frame_bytes);
+        stats.uploaded_bytes = s.store.last_uploaded_bytes();
+        s.stats = stats;
         self.frame_index += 1;
         Ok(counts)
     }
@@ -615,6 +792,204 @@ impl LitRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_math::Mat4;
+    use raa_scene::RenderItem;
+
+    struct LodFrame {
+        list: RenderList,
+        tags: Vec<u32>,
+        slots: Vec<u32>,
+        index: InstanceIndex,
+        camera: Camera,
+        lods: LodRegistry,
+        bias: HashMap<u32, i8>,
+        levels: Vec<u8>,
+    }
+
+    impl LodFrame {
+        fn new(distances: &[f32]) -> Self {
+            let mut lods = LodRegistry::new();
+            // Registration deliberately knows nothing about instance poses.
+            register_mesh_lods(
+                &mut lods,
+                MeshId(0),
+                &[
+                    LodLevel {
+                        mesh: MeshId(1),
+                        error: 0.01,
+                    },
+                    LodLevel {
+                        mesh: MeshId(2),
+                        error: 0.04,
+                    },
+                    LodLevel {
+                        mesh: MeshId(3),
+                        error: 0.16,
+                    },
+                ],
+                &|_| Some((1, 0)),
+            )
+            .unwrap();
+            Self {
+                list: RenderList {
+                    items: distances
+                        .iter()
+                        .map(|&distance| RenderItem {
+                            mesh: MeshId(0),
+                            material: MaterialId(0),
+                            world: Mat4::from_translation(Vec3::new(0.0, 0.0, -distance)),
+                        })
+                        .collect(),
+                    batches: Vec::new(),
+                },
+                tags: (10..10 + distances.len() as u32).collect(),
+                // Deliberately sparse and different from tags and list indices.
+                slots: (0..distances.len() as u32).map(|i| i * 2 + 1).collect(),
+                index: InstanceIndex::new(),
+                camera: Camera {
+                    eye: Vec3::ZERO,
+                    ..Camera::default()
+                },
+                lods,
+                bias: HashMap::new(),
+                levels: vec![NO_CAMERA_LEVEL; distances.len() * 2 + 1],
+            }
+        }
+
+        fn pass(&mut self, skinned: &dyn Fn(u32) -> Option<SkinDraw>) {
+            camera_levels(
+                &CameraLodInput {
+                    list: &self.list,
+                    tags: &self.tags,
+                    slots: &self.slots,
+                    index: &self.index,
+                    camera: &self.camera,
+                    viewport_height: 1080,
+                    lods: &self.lods,
+                    bias: &self.bias,
+                    options: &LodParams::default(),
+                    skinned,
+                },
+                &mut self.levels,
+            );
+        }
+
+        fn selected_levels(&self) -> Vec<u8> {
+            self.slots
+                .iter()
+                .map(|&slot| self.levels[slot as usize])
+                .collect()
+        }
+    }
+
+    #[test]
+    fn camera_levels_select_by_distance_and_return_near_in_one_frame() {
+        let mut f = LodFrame::new(&[5.0, 60.0, 2000.0]);
+        f.pass(&|_| None);
+        // Q3's projected-error rule allows level 2 at 60 m: 0.04 * 935.3 / 60 < 1.
+        assert_eq!(f.selected_levels(), [0, 2, 3]);
+        f.list.items[2].world = f.list.items[0].world;
+        f.pass(&|_| None);
+        assert_eq!(f.selected_levels(), [0, 2, 0]);
+        assert_eq!(f.levels[0], NO_CAMERA_LEVEL);
+    }
+
+    #[test]
+    fn camera_levels_apply_tag_bias_before_hysteresis() {
+        let mut f = LodFrame::new(&[5.0, 5.0]);
+        f.bias.insert(f.tags[0], 1);
+        f.pass(&|_| None);
+        assert_eq!(f.selected_levels(), [1, 0]);
+    }
+
+    #[test]
+    fn camera_levels_use_world_sphere_distance_and_largest_column_scale() {
+        let mut f = LodFrame::new(&[60.0, 60.0]);
+        // Centre distance 60 would select 1; sphere-surface distance 5 selects 0.
+        f.index.insert(
+            f.slots[0],
+            Some(Aabb {
+                min: Vec3::new(0.0, 0.0, -115.0),
+                max: Vec3::new(0.0, 0.0, -5.0),
+            }),
+        );
+        f.list.items[1].world.cols[1][1] = -10.0;
+        f.pass(&|_| None);
+        assert_eq!(f.selected_levels(), [0, 0]);
+    }
+
+    #[test]
+    fn mesh_lods_refuse_missing_or_mismatched_uploads_atomically() {
+        let mut f = LodFrame::new(&[]);
+        let original = f.lods.chain(MeshId(0)).unwrap().to_vec();
+        let levels = [LodLevel {
+            mesh: MeshId(4),
+            error: 0.02,
+        }];
+        for layouts in [
+            [None, Some((1, 0))],
+            [Some((1, 0)), None],
+            [Some((1, 0)), Some((2, 0))],
+            [Some((2, 0)), Some((2, 1))],
+        ] {
+            let err = register_mesh_lods(&mut f.lods, MeshId(0), &levels, &|mesh| {
+                layouts[usize::from(mesh != MeshId(0))]
+            })
+            .unwrap_err();
+            assert_eq!(err.code(), "render.invalid_lod");
+            assert_eq!(f.lods.chain(MeshId(0)).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn posed_camera_instances_keep_full_geometry_and_drop_hysteresis() {
+        let mut f = LodFrame::new(&[20.0, 20.0]);
+        let posed_tag = f.tags[0];
+        let skinned = |tag| (tag == posed_tag).then_some(SkinDraw { base: 4, skin: 7 });
+        f.pass(&|_| None);
+        assert_eq!(f.selected_levels(), [1, 1]);
+        f.pass(&skinned);
+        assert_eq!(f.selected_levels(), [NO_CAMERA_LEVEL, 1]);
+
+        let materials = [MaterialClass {
+            class: DrawClass::Opaque,
+            material_fn: MaterialFnId(7),
+        }];
+        let mut prep = crate::IdPrep::new(2, 1);
+        let level_mesh = |slot, mesh| camera_mesh(&f.lods, &f.levels, slot, mesh);
+        prep.prepare_camera(
+            &SelectInput {
+                list: &f.list,
+                tags: &f.tags,
+                slots: &f.slots,
+                selected: &|_| true,
+                materials: &materials,
+                view: Mat4::IDENTITY,
+                known_mesh: &|_| true,
+                class_handled: &|_| true,
+                level_mesh: &level_mesh,
+            },
+            &skinned,
+        )
+        .unwrap();
+        let draws = prep.draws(DrawClass::Opaque);
+        assert_eq!(draws.len(), 2);
+        assert_eq!(prep.mesh_binding(draws[0].mesh), (MeshId(1), None));
+        assert_eq!(
+            prep.mesh_binding(draws[1].mesh),
+            (MeshId(0), Some(posed_tag))
+        );
+        assert!(draws.iter().all(|draw| {
+            draw.material == MaterialId(0) && draw.material_fn == materials[0].material_fn
+        }));
+
+        // Level 1 is allowed at 0.9 px, but coarsening from previous 0 needs <= 0.8.
+        // Clearing the pose must use None rather than a fabricated previous level 0.
+        let distance = 0.01 * 1080.0 / (2.0 * (f.camera.fov_y_rad * 0.5).tan()) / 0.9;
+        f.list.items[0].world = Mat4::from_translation(Vec3::new(0.0, 0.0, -distance));
+        f.pass(&|_| None);
+        assert_eq!(f.selected_levels(), [1, 1]);
+    }
 
     struct Fake(&'static str, u32);
 

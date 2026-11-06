@@ -63,7 +63,7 @@ pub use prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 pub use raa_core::{MaterialId, MeshId};
 pub use raa_mesh::{AttributedMesh, SubMesh};
 pub use raa_shader::{MaterialFnId, TintMode};
-pub use renderer::{FrameCounts, LitOptions, LitRenderer};
+pub use renderer::{FrameCounts, InstanceFrameStats, LitOptions, LitRenderer};
 pub use select::{IdPrep, SelectCapacity, SelectInput};
 pub use textures::{
     ATLAS_FORMAT, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker, TEXTURE_RECT_SIZE, TexelData,

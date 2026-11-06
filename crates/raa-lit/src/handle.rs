@@ -23,10 +23,12 @@ use crate::extras::INSTANCE_EXTRA_GPU_SIZE;
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
+use crate::lod::{LodParams, LodRegistry};
 use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::material_data::MaterialData;
 use crate::meshes::{INSTANCE_SLOT, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
 use crate::prep::{INSTANCE_GPU_SIZE, LitDraw};
+use crate::renderer::{InstanceFrameStats, NO_CAMERA_LEVEL};
 use crate::select::IdPrep;
 use crate::slots::default_slot_providers;
 use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas};
@@ -346,6 +348,12 @@ pub(crate) struct LitShared {
     pub(crate) select: IdPrep,
     /// The persistent instance and extras records by stable scene slot.
     pub(crate) store: InstanceStore,
+    pub(crate) lods: LodRegistry,
+    pub(crate) lod_options: LodParams,
+    /// Camera hysteresis by stable slot; NO_CAMERA_LEVEL means no previous selection.
+    pub(crate) levels: Vec<u8>,
+    pub(crate) lod_bias: HashMap<u32, i8>,
+    pub(crate) stats: InstanceFrameStats,
     pub(crate) materials: SurfaceLibrary,
     pub(crate) fns: MaterialFnRegistry,
     /// S23 tint mode per material; a material absent from the map is `multiply`.
@@ -464,6 +472,11 @@ impl LitShared {
             meshes: MeshStore::new(),
             editor: crate::editor::EditorState::default(),
             select: IdPrep::new(max_instances, max_materials),
+            lods: LodRegistry::new(),
+            lod_options: LodParams::default(),
+            levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize],
+            lod_bias: HashMap::new(),
+            stats: InstanceFrameStats::default(),
             store,
             materials: SurfaceLibrary::new(),
             fns: MaterialFnRegistry::new(),
