@@ -12,6 +12,8 @@ const VERSION = '0.5.0';
 // returns the id that material functions sample with raa_texture(id, uv), and
 // removeTexture(id) frees it (docs/api/m22-textures.md).
 //
+// Trace scene methods are native Engine methods (docs/api/m23-sdf-trace.md).
+//
 // Material data words as well: addMaterialData(words) returns the base a surface material
 // carries as `data`, read in WGSL by raa_material_word / raa_material_f32
 // (docs/api/m25-material-data.md).

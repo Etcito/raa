@@ -913,6 +913,7 @@ dependencies = [
  "raa-prims",
  "raa-render",
  "raa-scene",
+ "raa-sdf-trace",
  "raa-shader",
  "raa-shadow",
  "raa-shafts",

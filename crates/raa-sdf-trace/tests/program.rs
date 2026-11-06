@@ -308,7 +308,12 @@ fn keeps_bend_bits_and_refuses_an_incomplete_bend() {
     f.instances[0][29] = 0.5f32.to_bits();
     f.instances[0][30] = 2.0f32.to_bits();
     f.instances[0][31] = 40; // +X along, -Z toward
-    let program = parse(&f.bytes()).expect("a complete bend record");
+    assert_eq!(
+        parse(&f.bytes()).expect_err("missing bend record").code(),
+        FORMAT
+    );
+    let bytes = with_bend_record(&f);
+    let program = parse(&bytes).expect("a complete bend record");
     let bend = &program.instances[0];
     assert_eq!((bend.deform_kind, bend.axes), (1, 40));
     assert_eq!(bend.bend_angle, 0.5);
@@ -318,7 +323,7 @@ fn keeps_bend_bits_and_refuses_an_incomplete_bend() {
         f.instances[0][28] = 1;
         f.instances[0][30] = 2.0f32.to_bits();
         f.instances[0][31] = axes;
-        let err = parse(&f.bytes()).expect_err("an incomplete bend frame");
+        let err = parse(&with_bend_record(&f)).expect_err("an incomplete bend frame");
         assert_eq!(err.code(), FORMAT, "axes {axes}");
     }
 
@@ -326,7 +331,22 @@ fn keeps_bend_bits_and_refuses_an_incomplete_bend() {
     f.instances[0][28] = 1;
     f.instances[0][30] = 0.0f32.to_bits();
     f.instances[0][31] = 40;
-    assert_eq!(parse(&f.bytes()).expect_err("zero length").code(), FORMAT);
+    assert_eq!(
+        parse(&with_bend_record(&f))
+            .expect_err("zero length")
+            .code(),
+        FORMAT
+    );
+}
+
+fn with_bend_record(f: &Fixture) -> Vec<u8> {
+    let mut words = f.words();
+    words[7] = 1;
+    for value in [0.0f64, 30.0, 0.0, -0.5, 0.5, 0.0, 0.0, 0.0] {
+        let bits = value.to_bits();
+        words.extend([bits as u32, (bits >> 32) as u32]);
+    }
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
 fn instance_floats(words: Vec<u32>) -> Vec<f32> {
@@ -436,4 +456,26 @@ fn update_rebuilds_the_bvh_and_clear_is_safe() {
     scene
         .set_program(&Fixture::minimal().bytes())
         .expect("loaded again");
+}
+
+#[test]
+fn update_rejects_a_bend_without_a_record_atomically() {
+    let mut scene = TraceScene::default();
+    scene.set_program(&Fixture::minimal().bytes()).unwrap();
+    let program = scene.program.clone();
+    let bvh = scene.bvh.clone();
+    let mut bent = instance(0, u32::MAX);
+    bent[28] = 1;
+    bent[29] = 0.5f32.to_bits();
+    bent[30] = 2.0f32.to_bits();
+    bent[31] = 40;
+    assert_eq!(
+        scene
+            .update_instances(&instance_floats(bent))
+            .unwrap_err()
+            .code(),
+        FORMAT
+    );
+    assert_eq!(scene.program, program);
+    assert_eq!(scene.bvh, bvh);
 }

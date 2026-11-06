@@ -48,6 +48,7 @@ raa-fog = { path = "../raa-fog" }
 raa-shafts = { path = "../raa-shafts" }
 raa-grading = { path = "../raa-grading" }
 raa-deform = { path = "../raa-deform" }
+raa-sdf-trace = { path = "../raa-sdf-trace" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }

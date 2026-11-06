@@ -13,6 +13,8 @@ pub(crate) mod feature_map;
 #[allow(dead_code)]
 pub(crate) mod state;
 
+mod trace;
+
 #[cfg(target_arch = "wasm32")]
 mod engine;
 #[cfg(target_arch = "wasm32")]
@@ -30,4 +32,5 @@ pub(crate) mod api {
     use raa_web::FrameInput;
 
     include!(concat!(env!("OUT_DIR"), "/api_registry.rs"));
+    pub(crate) use m21_views::ViewsState;
 }

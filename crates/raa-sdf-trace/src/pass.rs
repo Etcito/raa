@@ -150,6 +150,7 @@ impl TraceScene {
             let instance = read_instance(&raw, current.instances[index].bend);
             next.instances[index] = instance;
         }
+        crate::program::validate_instances(&next)?;
         self.bvh = bvh::build(&next);
         self.program = Some(next);
         self.revision += 1;

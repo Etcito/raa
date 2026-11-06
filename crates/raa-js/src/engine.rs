@@ -197,6 +197,8 @@ impl WebApp for EngineApp {
             .map_err(|_| pipeline_busy())?
             .add(Box::new(skin.pipeline_pass()))?;
         features.insert(skin);
+        let trace = raa_sdf_trace::TraceFeature::install(gpu, &mut pipeline.borrow_mut())?;
+        features.insert(trace);
         api::install_all(&mut InstallCtx {
             gpu,
             surface_format,
@@ -215,6 +217,7 @@ impl WebApp for EngineApp {
                 let st = guard
                     .as_mut()
                     .ok_or_else(|| api_error(DISPOSED, "the engine was disposed"))?;
+                crate::trace::prepare_view(st, index, size)?;
                 st.prepare_pipeline_view(gpu, index, size)
             }));
         Pipeline::install(&pipeline, graph);
@@ -273,6 +276,7 @@ impl WebApp for EngineApp {
         api::frame_all(s, gpu, input)?;
         s.rebuild_dirty_groups()?;
         s.flush_skins(gpu)?;
+        crate::trace::prepare_view(s, 0, input.size)?;
         let c = s
             .lit
             .prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags, &mut s.slots)?;
@@ -295,7 +299,7 @@ impl WebApp for EngineApp {
 pub struct Engine {
     runtime: Option<WebRuntime>,
     state: Shared,
-    viewport: (u32, u32),
+    pub(crate) viewport: (u32, u32),
 }
 
 impl Engine {
