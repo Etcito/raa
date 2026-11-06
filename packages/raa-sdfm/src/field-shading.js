@@ -107,7 +107,10 @@ fn sdff_normal(in: MaterialInput, s: PmfSample) -> vec3f {
 
 /**
  * The interpreter's fixed core: data readers and the operand shading (after the field and the graphs). The per-pixel
- * material (INTERPRETER_MAIN_WGSL) and the UV-space bake (field-bake.js) both run it.
+ * material (INTERPRETER_MAIN_WGSL) and the UV-space bake (field-bake.js) both run it. The field sample `s` that
+ * material_main already computed is the only field read: the normal and the material both consume it, and the material
+ * reads the two labels of that sample through one call site (the shader compiler inlines every call, so a second
+ * sdff_label site would inline the whole graph dispatch and its material bodies again).
  */
 const INTERPRETER_CORE_WGSL = /* wgsl */ `
 fn pmf_f(i: u32) -> f32 { return raa_material_f32(i); }
@@ -122,29 +125,36 @@ fn sdff_affine(i: u32, q: vec3<f32>) -> vec3<f32> {
 }
 
 // Local fields' evalLabel for field operand i of the block at base: its constant values, its material graph at p and
-// its node-space point, else its colour.
-fn sdff_label(base: u32, i: u32, p: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
-  if (i >= sdff_w(base + 4u)) { return SdfmMaterialFull(vec3<f32>(0.5), 0.0, 0.5, vec3<f32>(0.0), 0.0); }
-  let o = base + sdff_w(base + 3u) + ${FIELD_OPERAND_WORDS}u * i;
+// its node-space point, else its colour. table, count and p are read once by sdff_material, shared by both labels; the
+// colour is read only when the operand has no graph or its graph fails, the node point only when a graph uses pn.
+fn sdff_label(base: u32, table: u32, count: u32, i: u32, p: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
+  if (i >= count) { return SdfmMaterialFull(vec3<f32>(0.5), 0.0, 0.5, vec3<f32>(0.0), 0.0); }
+  let o = base + table + ${FIELD_OPERAND_WORDS}u * i;
   let mode = sdff_w(o + 3u);
-  let c = sdff_v3(o);
-  if (mode == ${MODE.constant}u) { return SdfmMaterialFull(c, pmf_f(o + 6u), pmf_f(o + 7u), sdff_v3(o + 8u), 0.0); }
+  if (mode == ${MODE.constant}u) { return SdfmMaterialFull(sdff_v3(o), pmf_f(o + 6u), pmf_f(o + 7u), sdff_v3(o + 8u), 0.0); }
   if (mode == ${MODE.graph}u) {
-    let m = sdff_graph(sdff_w(o + 4u), base + sdff_w(o + 5u), p, sdff_affine(o + 12u, p), n);
+    let m = sdff_graph(sdff_w(o + 4u), base + sdff_w(o + 5u), p, __SDFF_NODE_POINT__, n);
     if (m.ok) { return m.m; }
   }
-  return SdfmMaterialFull(c, 0.0, 0.5, vec3<f32>(0.0), 0.0);
+  return SdfmMaterialFull(sdff_v3(o), 0.0, 0.5, vec3<f32>(0.0), 0.0);
 }
 
-// The material of the field at rest point q with shading normal n: the heaviest operand, mixed with the second by the
-// field's weight.
+fn sdff_mix(a: SdfmMaterialFull, b: SdfmMaterialFull, t: f32) -> SdfmMaterialFull {
+  return SdfmMaterialFull(mix(a.base_color, b.base_color, t), mix(a.metallic, b.metallic, t),
+    mix(a.roughness, b.roughness, t), mix(a.emissive, b.emissive, t), mix(a.height, b.height, t));
+}
+
+// The material of the field at rest point q: the heaviest operand of the sample s, mixed with the second by the field's
+// weight (both through ONE sdff_label site); the second label is read only when it differs and its weight is above 0.
 fn sdff_material(base: u32, s: PmfSample, q: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
   let p = sdff_affine(base + 8u, q);
-  var m = sdff_label(base, s.la, p, n);
-  if (s.lb != s.la && s.t > 0.0) {
-    let b = sdff_label(base, s.lb, p, n);
-    m = SdfmMaterialFull(mix(m.base_color, b.base_color, s.t), mix(m.metallic, b.metallic, s.t),
-      mix(m.roughness, b.roughness, s.t), mix(m.emissive, b.emissive, s.t), mix(m.height, b.height, s.t));
+  let table = sdff_w(base + 3u);
+  let count = sdff_w(base + 4u);
+  let labels = select(1u, 2u, s.lb != s.la && s.t > 0.0);
+  var m = SdfmMaterialFull(vec3<f32>(0.0), 0.0, 0.0, vec3<f32>(0.0), 0.0);
+  for (var k = 0u; k < labels; k = k + 1u) {
+    let label = sdff_label(base, table, count, select(s.lb, s.la, k == 0u), p, n);
+    if (k == 0u) { m = label; } else { m = sdff_mix(m, label, s.t); }
   }
   return m;
 }
@@ -159,6 +169,14 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let flags = sdff_w(base + 1u);
   let s = pmf_eval(base + sdff_w(base + 2u), in.color.xyz);
   o.normal = sdff_normal(in, s);
+  if ((flags & ${FIELD_FLAG_DEBUG}u) != 0u) {
+    // The normal debug view shows no material: the one sample already gives its normal, so skip the label reads.
+    o.base_color = vec3<f32>(0.0);
+    o.metallic = 0.0;
+    o.roughness = 1.0;
+    o.emissive = o.normal * 0.5 + vec3<f32>(0.5);
+    return o;
+  }
   let m = sdff_material(base, s, in.color.xyz, o.normal);
   o.base_color = m.base_color;
   o.emissive = m.emissive;
@@ -166,12 +184,6 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   if ((flags & ${FIELD_FLAG_SINGLE}u) == 0u) {
     o.metallic = m.metallic;
     o.roughness = m.roughness;
-  }
-  if ((flags & ${FIELD_FLAG_DEBUG}u) != 0u) {
-    o.base_color = vec3<f32>(0.0);
-    o.metallic = 0.0;
-    o.roughness = 1.0;
-    o.emissive = o.normal * 0.5 + vec3<f32>(0.5);
   }
   return o;
 }
@@ -318,6 +330,9 @@ export function fieldShadingCore(shading, materials, options) {
   }
   // One function per distinct body, in text order: the same graphs give the same function text whatever the part.
   const bodies = [...new Set([...graphOf.values()].map((g) => g.body))].sort();
+  // A graph that never mentions its node-space point pn needs no program -> node transform: sdff_label then passes p
+  // and skips the 12 material words and the 3x3 multiply per label, per fragment (the text stays part-independent).
+  const nodePoint = bodies.some((body) => tokens(body).includes('pn')) ? 'sdff_affine(o + 12u, p)' : 'p';
   const graphs = bodies.map((body, k) => [
     `fn sdfm_graph_${k}(b: u32, p: vec3<f32>, pn: vec3<f32>, n: vec3<f32>, mk: SdfmMatMasks) -> SdfmMaterialFull {`, body, '}'].join('\n'));
   const masks = 'SdfmMatMasks(0.5, 1.0, 1.0, 0.0, 1.0)';
@@ -340,7 +355,7 @@ ${bodies.map((_, k) => `    case ${k}u: { out = SdffGraph(true, sdfm_graph_${k}(
     ...graphs,
     dispatch,
     field.trim(),
-    INTERPRETER_CORE_WGSL,
+    INTERPRETER_CORE_WGSL.replace('__SDFF_NODE_POINT__', nodePoint),
   ].join('\n');
   return { core, words: fieldShadingWords(shading, graphOf, bodies, options.debug === true), tintMode, missing };
 }

@@ -402,6 +402,11 @@ pub(crate) struct LitShared {
     /// The group-1 layout of `raa_pipeline::LightingResources`.
     lighting_layout: wgpu::BindGroupLayout,
     pipelines: RefCell<PipelineCache<wgpu::RenderPipeline>>,
+    /// Composed WGSL by canonical variant; cleared with the pipeline cache.
+    composed: RefCell<HashMap<VariantKey, String>>,
+    /// The first function id registered with the same source, per function id. A
+    /// registration id is not shader state, so equal sources reuse one variant.
+    canonical_fns: RefCell<HashMap<MaterialFnId, MaterialFnId>>,
     /// Group 3 of posed variants and its bind group over the palette (by generation).
     palette_layout: wgpu::BindGroupLayout,
     palette_group: Option<(u64, wgpu::BindGroup)>,
@@ -519,6 +524,8 @@ impl LitShared {
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
             pipelines: RefCell::new(PipelineCache::new()),
+            composed: RefCell::new(HashMap::new()),
+            canonical_fns: RefCell::new(HashMap::new()),
             palette_layout,
             palette_group: None,
             modules: RefCell::new(HashMap::new()),
@@ -542,6 +549,7 @@ impl LitShared {
         self.composer.add_slot(p).map_err(shader_error)?;
         self.slots_hash = self.composer.slots_hash();
         self.pipelines.get_mut().clear();
+        self.composed.get_mut().clear();
         self.modules.get_mut().clear();
         self.content_pipelines.get_mut().clear();
         Ok(())
@@ -734,32 +742,30 @@ impl LitShared {
         Some((skin, group.clone()))
     }
 
-    /// The cached pipeline of (`key`, `spec`, current slots), composed and built on a miss.
-    fn pipeline_for(
-        &self,
-        gpu: &GpuContext,
-        key: VariantKey,
-        spec: &PipelineSpec,
-    ) -> Result<wgpu::RenderPipeline, RaaError> {
-        check_msaa(key.msaa)?;
-        self.pipelines
-            .borrow_mut()
-            .get_or_build(key, spec, self.slots_hash, || {
-                self.build_pipeline(gpu, &key, spec)
-            })
+    /// The first function id registered with the same WGSL as `id`. Registration ids are
+    /// not shader source, so equal functions share one composed variant and one pipeline.
+    fn canonical_fn(&self, id: MaterialFnId) -> MaterialFnId {
+        if let Some(&canonical) = self.canonical_fns.borrow().get(&id) {
+            return canonical;
+        }
+        let Some(entry) = self.fns.get(id) else {
+            return id;
+        };
+        let end = id.0.min(self.fns.len() as u32);
+        let canonical = (0..end)
+            .map(MaterialFnId)
+            .find(|&other| self.fns.get(other).is_some_and(|e| e.wgsl == entry.wgsl))
+            .unwrap_or(id);
+        self.canonical_fns.borrow_mut().insert(id, canonical);
+        canonical
     }
 
-    /// Composes the WGSL of `key` (tint mode `graph` when the key holds
-    /// [`raa_shader::VARIANT_FLAG_TINT_GRAPH`]), validates it with naga (so a broken variant is a typed
-    /// refusal, not a device error) and creates its render pipeline with the layouts
-    /// [group 0, group 1 (lighting), `spec.extra_layout`]. Shadow variants leave group 1
-    /// empty: that pass renders the shadow map group 1 samples and reads groups 0 and 2 only.
-    fn build_pipeline(
-        &self,
-        gpu: &GpuContext,
-        key: &VariantKey,
-        spec: &PipelineSpec,
-    ) -> Result<wgpu::RenderPipeline, RaaError> {
+    /// The composed WGSL of `key`, composed once per canonical variant and reused by every
+    /// [`PipelineSpec`] of that variant until the slot providers change.
+    fn composed_source(&self, key: &VariantKey) -> Result<String, RaaError> {
+        if let Some(wgsl) = self.composed.borrow().get(key) {
+            return Ok(wgsl.clone());
+        }
         let tint_mode = TintMode::from_variant_flags(key.flags);
         let wgsl = if tint_mode == TintMode::Multiply {
             self.composer.compose(&self.fns, key)
@@ -783,6 +789,40 @@ impl LitShared {
         } else {
             wgsl
         };
+        self.composed.borrow_mut().insert(*key, wgsl.clone());
+        Ok(wgsl)
+    }
+
+    /// The cached pipeline of (`key`, `spec`, current slots), composed and built on a miss.
+    fn pipeline_for(
+        &self,
+        gpu: &GpuContext,
+        key: VariantKey,
+        spec: &PipelineSpec,
+    ) -> Result<wgpu::RenderPipeline, RaaError> {
+        check_msaa(key.msaa)?;
+        let key = VariantKey {
+            material_fn: self.canonical_fn(key.material_fn),
+            ..key
+        };
+        self.pipelines
+            .borrow_mut()
+            .get_or_build(key, spec, self.slots_hash, || {
+                self.build_pipeline(gpu, &key, spec)
+            })
+    }
+
+    /// Builds the render pipeline of `key` and `spec`: composes/validates its WGSL (shared
+    /// by every spec of the variant), with the layouts [group 0, group 1 (lighting),
+    /// `spec.extra_layout`]. Shadow variants leave group 1 empty: that pass renders the
+    /// shadow map group 1 samples and reads groups 0 and 2 only.
+    fn build_pipeline(
+        &self,
+        gpu: &GpuContext,
+        key: &VariantKey,
+        spec: &PipelineSpec,
+    ) -> Result<wgpu::RenderPipeline, RaaError> {
+        let wgsl = self.composed_source(key)?;
         // Full source equality guards the hash lookup. Registration ids are not shader state.
         let content_key = (wgsl.clone(), spec.clone());
         if let Some(pipeline) = self.content_pipelines.borrow().get(&content_key) {
@@ -1197,10 +1237,11 @@ impl LitHandle {
     /// composed by raa-shader (material function, slot winners, pass entry points),
     /// validated with naga and built with the layouts [group 0, group 1 lighting,
     /// `spec.extra_layout`] (shadow variants leave group 1 empty) and the vertex buffers of
-    /// [`bind_mesh`](Self::bind_mesh). Cached by (key, spec hash, slots hash); installing a
-    /// slot provider clears the cache. Refusals: `render.invalid_msaa` (key msaa not 1 or
-    /// 4) and the raa-shader codes (`shader.unknown_fn`, `shader.slot_missing`,
-    /// `shader.parse`, `shader.validate`).
+    /// [`bind_mesh`](Self::bind_mesh). Cached by (key, spec hash, slots hash); a function
+    /// whose WGSL equals an earlier registration reuses that function's variant, and
+    /// installing a slot provider clears the cache. Refusals: `render.invalid_msaa` (key
+    /// msaa not 1 or 4) and the raa-shader codes (`shader.unknown_fn`,
+    /// `shader.slot_missing`, `shader.parse`, `shader.validate`).
     pub fn pipeline_for(
         &self,
         gpu: &GpuContext,
@@ -1428,32 +1469,63 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn identical_sources_share_modules_and_pipelines_but_state_does_not() {
+    fn live_handle_reuses_equal_sources_and_keeps_distinct_render_states() {
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip("content_cache", "no adapter");
             return;
         };
         let lighting = raa_pipeline::LightingResources::new(&gpu);
         let mut shared = LitShared::new(&gpu, lighting.layout(), 1, 1, 4).unwrap();
-        let source = shared.fns.get(MaterialFnId::STANDARD).unwrap().wgsl.clone();
+        let source = shared.fns.get(MaterialFnId::STANDARD).unwrap().wgsl.clone()
+            + "\nfn probe_unused() -> f32 { return 1.0; }\n";
         let a = shared.register_user_fn("first", &source).unwrap();
         let b = shared.register_user_fn("second", &source).unwrap();
+        assert_ne!(a, b, "registration state keeps both names");
+        let shared = Rc::new(RefCell::new(shared));
+        let live = LitHandle::new(Rc::clone(&shared));
         let spec = forward_spec();
         let variant = |material_fn| VariantKey {
             material_fn,
             ..key(PassKind::Forward, 4)
         };
-        let first = shared.pipeline_for(&gpu, variant(a), &spec).unwrap();
-        let second = shared.pipeline_for(&gpu, variant(b), &spec).unwrap();
+        let first = live.pipeline_for(&gpu, variant(a), &spec).unwrap();
+        let second = live.pipeline_for(&gpu, variant(b), &spec).unwrap();
         assert_eq!(first, second);
-        assert_eq!(shared.modules.borrow().len(), 1);
-        assert_eq!(shared.content_pipelines.borrow().len(), 1);
-        let other = shared
-            .pipeline_for(&gpu, variant(b), &PipelineSpec { cull: None, ..spec })
+        assert_eq!(shared.borrow().pipelines.borrow().len(), 1, "one variant");
+        assert_eq!(shared.borrow().composed.borrow().len(), 1);
+        assert_eq!(shared.borrow().modules.borrow().len(), 1);
+        assert_eq!(shared.borrow().content_pipelines.borrow().len(), 1);
+        let again = live.pipeline_for(&gpu, variant(b), &spec).unwrap();
+        assert_eq!(again, first);
+        assert_eq!(
+            shared.borrow().composed.borrow().len(),
+            1,
+            "a repeat composes nothing"
+        );
+        let other = live
+            .pipeline_for(
+                &gpu,
+                variant(b),
+                &PipelineSpec {
+                    cull: None,
+                    ..spec.clone()
+                },
+            )
             .unwrap();
-        assert_ne!(first, other);
-        assert_eq!(shared.modules.borrow().len(), 1);
-        assert_eq!(shared.content_pipelines.borrow().len(), 2);
+        assert_ne!(first, other, "the cull state stays a distinct pipeline");
+        assert_eq!(
+            shared.borrow().composed.borrow().len(),
+            1,
+            "both specs share the source"
+        );
+        assert_eq!(shared.borrow().modules.borrow().len(), 1);
+        assert_eq!(shared.borrow().content_pipelines.borrow().len(), 2);
+        let spaced = live
+            .pipeline_for(&gpu, key(PassKind::Forward, 1), &spec)
+            .unwrap();
+        assert_ne!(first, spaced, "another MSAA count stays distinct");
+        assert_eq!(shared.borrow().composed.borrow().len(), 2);
+        assert_eq!(shared.borrow().modules.borrow().len(), 2);
     }
 
     /// Expected stride, step mode and (location, offset) of one vertex buffer.
