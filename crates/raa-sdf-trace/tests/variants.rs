@@ -1,7 +1,7 @@
 //! Section 67 WGSL evaluator: complete shader variants generated through the public
-//! `eval_module` interface parse and type-check with naga; the shared snippet stays composable.
-use raa_sdf_trace::wgsl::{PROGRAM_EVAL_WGSL, eval_module};
-use raa_sdf_trace::{Source, TraceProgram};
+//! public generation interfaces parse and type-check with naga; no GPU rendering is done here.
+use raa_sdf_trace::wgsl::{PROGRAM_EVAL_WGSL, composite_module, eval_module, trace_module};
+use raa_sdf_trace::{Instance, Source, TraceProgram};
 
 fn program(sources: usize, code_len: u32) -> TraceProgram {
     let source = Source {
@@ -19,20 +19,52 @@ fn program(sources: usize, code_len: u32) -> TraceProgram {
         code: vec![1; code_len as usize],
         data: vec![0.0; 18],
         materials: Vec::new(),
-        instances: Vec::new(),
+        instances: (0..sources)
+            .map(|index| Instance {
+                world_from_local: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                ],
+                local_from_world: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                ],
+                dist_scale: 1.0,
+                source: index as u32,
+                material: -1,
+                key: index as u32,
+                deform_kind: u32::from(index % 2 == 1),
+                bend_angle: 0.5,
+                bend_length: 2.0,
+                axes: 56,
+                bend: (index % 2 == 1).then_some([0.0, 30.0, 90.0, -1.0, 1.0, 0.0, 1.0, 0.0]),
+            })
+            .collect(),
     }
 }
 
 fn check(program: &TraceProgram) {
-    let source = eval_module(program);
+    for source in [
+        eval_module(program),
+        trace_module(program),
+        composite_module(),
+    ] {
+        validate(&source);
+    }
+}
+
+fn validate(source: &str) -> naga::Module {
     let module =
-        naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("parse: {}", e.message()));
+        naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("parse: {}", e.message()));
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
     )
     .validate(&module)
     .unwrap_or_else(|e| panic!("validate: {e:?}"));
+    module
 }
 
 #[test]
@@ -69,4 +101,34 @@ fn shared_evaluator_is_a_composable_snippet() {
         module.contains("fn sdf_eval"),
         "the generated module has its entry point"
     );
+}
+
+#[test]
+fn trace_and_composite_entry_points_and_layouts() {
+    let compute = validate(&trace_module(&program(1, 2)));
+    assert_eq!(compute.entry_points.len(), 1);
+    assert_eq!(compute.entry_points[0].workgroup_size, [8, 8, 1]);
+    let composite = validate(&composite_module());
+    assert_eq!(composite.entry_points.len(), 2);
+    assert_eq!(composite.entry_points[0].stage, naga::ShaderStage::Vertex);
+    assert_eq!(composite.entry_points[1].stage, naga::ShaderStage::Fragment);
+    for (name, size) in [
+        ("TraceSource", 48),
+        ("TraceInstance", 128),
+        ("TraceBend", 32),
+        ("TraceNode", 32),
+        ("TraceMaterial", 32),
+        ("TraceFrame", 512),
+    ] {
+        let ty = compute
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some(name))
+            .unwrap()
+            .1;
+        assert!(
+            matches!(ty.inner, naga::TypeInner::Struct { span, .. } if span == size),
+            "{name}"
+        );
+    }
 }

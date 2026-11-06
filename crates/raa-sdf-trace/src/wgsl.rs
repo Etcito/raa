@@ -212,3 +212,195 @@ fn sdf_eval(@builtin(global_invocation_id) id: vec3<u32>) {{
     );
     out
 }
+
+// Byte-compatible with raa-lit's 512-byte FrameGpu; light colours include intensity.
+const TRACE_FRAME_WGSL: &str = r#"
+struct TraceFrame {
+  view_proj: mat4x4<f32>, view: mat4x4<f32>, proj: mat4x4<f32>,
+  inv_proj: mat4x4<f32>, inv_view: mat4x4<f32>,
+  camera_pos: vec4<f32>, sun_dir: vec4<f32>, sun_color: vec4<f32>,
+  ambient: vec4<f32>, viewport: vec4<f32>, clip: vec4<f32>,
+  flags: vec4<u32>, exposure: vec4<f32>, reserved: array<vec4<f32>, 4>,
+}
+"#;
+
+/// Complete `sdf_trace` compute module (8x8 workgroups), including the shared evaluator.
+/// Group 0: 0 code, 1 data, 2 sources (48-byte file records), 3 instances (128-byte file
+/// records), 4 normalized bends (two f32 vec4s per instance, zero for rigid instances),
+/// 5 BVH nodes (min.xyz, left, max.xyz, count), 6 BVH order, 7 materials (32-byte records),
+/// 8 FrameGpu, 9 rgba16float colour, 10 r32float depth. Upload dummy records for empty buffers.
+/// The caller caps target dimensions to section 67's 1024 limit; dispatch rounds up by 8.
+pub fn trace_module(program: &TraceProgram) -> String {
+    format!(
+        "{PROGRAM_EVAL_WGSL}{TRACE_FRAME_WGSL}\nconst TRACE_COUNT: u32 = {}u;\n{TRACE_WGSL}",
+        program.instances.len()
+    )
+}
+
+const TRACE_WGSL: &str = r#"
+struct TraceSource {
+  code_start: u32, code_len: u32, data_start: u32, data_len: u32,
+  lo: array<f32, 3>, hi: array<f32, 3>, lipschitz: f32, flags: u32,
+}
+struct TraceInstance {
+  world: array<vec4<f32>, 3>, local: array<vec4<f32>, 3>,
+  scale: f32, source: u32, material: i32, key: u32,
+  kind: u32, angle: f32, chord: f32, axes: u32,
+}
+struct TraceBend { a: vec4<f32>, b: vec4<f32> }
+struct TraceNode { lo: vec3<f32>, left: u32, hi: vec3<f32>, count: u32 }
+struct TraceMaterial { color: vec4<f32>, rest: vec4<f32> }
+@group(0) @binding(2) var<storage, read> trace_sources: array<TraceSource>;
+@group(0) @binding(3) var<storage, read> trace_instances: array<TraceInstance>;
+@group(0) @binding(4) var<storage, read> trace_bends: array<TraceBend>;
+@group(0) @binding(5) var<storage, read> trace_nodes: array<TraceNode>;
+@group(0) @binding(6) var<storage, read> trace_order: array<u32>;
+@group(0) @binding(7) var<storage, read> trace_materials: array<TraceMaterial>;
+@group(0) @binding(8) var<uniform> trace_frame: TraceFrame;
+@group(0) @binding(9) var trace_color: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(10) var trace_depth: texture_storage_2d<r32float, write>;
+fn trace_lo(s: TraceSource) -> vec3<f32> { return vec3<f32>(s.lo[0], s.lo[1], s.lo[2]); }
+fn trace_hi(s: TraceSource) -> vec3<f32> { return vec3<f32>(s.hi[0], s.hi[1], s.hi[2]); }
+fn trace_value(index: u32, p: vec3<f32>) -> TraceSdf {
+  let i = trace_instances[index];
+  let s = trace_sources[i.source];
+  let b = trace_bends[index];
+  let value = trace_instance(s.code_start, s.code_len, s.data_start,
+    i.local[0], i.local[1], i.local[2], i.scale, i.kind, b.a, b.b,
+    i.angle, i.chord, length(trace_hi(s) - trace_lo(s)), p);
+  return TraceSdf(value.d / max(s.lipschitz, 1.0), trace_material(i.material, value));
+}
+fn trace_interval(lo: vec3<f32>, hi: vec3<f32>, o: vec3<f32>, d: vec3<f32>, limit: f32) -> vec2<f32> {
+  var near = 0.0;
+  var far = limit;
+  for (var a = 0u; a < 3u; a = a + 1u) {
+    if (abs(d[a]) < 1e-30) {
+      if (o[a] < lo[a] || o[a] > hi[a]) { return vec2<f32>(1.0, -1.0); }
+    } else {
+      let x = (lo[a] - o[a]) / d[a];
+      let y = (hi[a] - o[a]) / d[a];
+      near = max(near, min(x, y));
+      far = min(far, max(x, y));
+    }
+  }
+  return vec2<f32>(near, far);
+}
+fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, limit: f32) -> f32 {
+  let i = trace_instances[index];
+  let s = trace_sources[i.source];
+  var lo = trace_lo(s);
+  var hi = trace_hi(s);
+  if (i.kind == 1u) {
+    let b = trace_bends[index];
+    // Same conservative deformation envelope as bvh::instance_bounds.
+    let margin = 16.0 * max(abs(radians(b.a.y)), 1.0) *
+      (length(hi - lo) + abs(b.a.w) + abs(b.b.x) + length(b.b.yzw) + 1.0);
+    lo = lo - vec3<f32>(margin);
+    hi = hi + vec3<f32>(margin);
+  }
+  let local_o = trace_map(i.local[0], i.local[1], i.local[2], o);
+  // Keep world-distance t: the inverse-transformed direction must not be normalized.
+  let local_d = vec3<f32>(dot(i.local[0].xyz, d), dot(i.local[1].xyz, d), dot(i.local[2].xyz, d));
+  let interval = trace_interval(lo, hi, local_o, local_d, limit);
+  var t = interval.x;
+  for (var step = 0u; step < 128u && t <= interval.y; step = step + 1u) {
+    let distance = trace_value(index, o + d * t).d;
+    if (distance < max(1e-4, 1e-4 * t)) { return t; }
+    t = t + distance;
+  }
+  return limit;
+}
+fn trace_unproject(ndc: vec2<f32>, z: f32) -> vec3<f32> {
+  let p = trace_frame.inv_view * trace_frame.inv_proj * vec4<f32>(ndc, z, 1.0);
+  return p.xyz / p.w;
+}
+@compute @workgroup_size(8, 8)
+fn sdf_trace(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = textureDimensions(trace_color);
+  if (any(id.xy >= size)) { return; }
+  let pixel = vec2<i32>(id.xy);
+  textureStore(trace_color, pixel, vec4<f32>(0.0));
+  textureStore(trace_depth, pixel, vec4<f32>(1.0));
+  if (TRACE_COUNT == 0u) { return; }
+  let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(size);
+  let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+  let origin = trace_unproject(ndc, 0.0);
+  let far = trace_unproject(ndc, 1.0);
+  let direction = normalize(far - origin);
+  var nearest = length(far - origin);
+  var hit = TRACE_COUNT;
+  var stack: array<u32, 32>;
+  stack[0] = 0u;
+  var depth = 1u;
+  loop {
+    if (depth == 0u) { break; }
+    depth = depth - 1u;
+    let node = trace_nodes[stack[depth]];
+    let span = trace_interval(node.lo, node.hi, origin, direction, nearest);
+    if (span.x > span.y) { continue; }
+    if (node.count == 0u) {
+      stack[depth] = node.left;
+      stack[depth + 1u] = node.left + 1u;
+      depth = depth + 2u;
+    } else {
+      for (var k = 0u; k < node.count; k = k + 1u) {
+        let index = trace_order[node.left + k];
+        let t = trace_candidate(index, origin, direction, nearest);
+        if (t < nearest) {
+          nearest = t;
+          hit = index;
+        }
+      }
+    }
+  }
+  if (hit == TRACE_COUNT) { return; }
+  let p = origin + direction * nearest;
+  let e = 1e-3;
+  let x = vec3<f32>(e, 0.0, 0.0);
+  let y = vec3<f32>(0.0, e, 0.0);
+  let z = vec3<f32>(0.0, 0.0, e);
+  let gradient = vec3<f32>(trace_value(hit, p + x).d - trace_value(hit, p - x).d,
+    trace_value(hit, p + y).d - trace_value(hit, p - y).d,
+    trace_value(hit, p + z).d - trace_value(hit, p - z).d);
+  var normal = vec3<f32>(0.0, 1.0, 0.0);
+  if (length(gradient) > 1e-12) { normal = normalize(gradient); }
+  let base = trace_materials[trace_value(hit, p).material].color.rgb;
+  let light = trace_frame.ambient.rgb + trace_frame.sun_color.rgb * max(dot(normal, -trace_frame.sun_dir.xyz), 0.0);
+  let clip = trace_frame.view_proj * vec4<f32>(p, 1.0);
+  textureStore(trace_color, pixel, vec4<f32>(base * light, 1.0));
+  textureStore(trace_depth, pixel, vec4<f32>(clamp(clip.z / clip.w, 0.0, 1.0)));
+}
+"#;
+
+/// Fullscreen forward composition: `vs_main` (3 vertices), `fs_main` (HDR + frag_depth).
+/// Group 0 binding 0 is FrameGpu; group 1 bindings 0/1 are the trace colour/depth textures.
+/// Use RAA's Less depth test with depth writes enabled and load the existing frame attachments.
+/// Misses discard, preserving mesh depth; no mesh depth texture is sampled while it is attached.
+pub fn composite_module() -> String {
+    format!("{TRACE_FRAME_WGSL}{COMPOSITE_WGSL}")
+}
+
+const COMPOSITE_WGSL: &str = r#"
+@group(0) @binding(0) var<uniform> trace_frame: TraceFrame;
+@group(1) @binding(0) var trace_color: texture_2d<f32>;
+@group(1) @binding(1) var trace_depth: texture_2d<f32>;
+struct TraceOutput {
+  @location(0) color: vec4<f32>,
+  @builtin(frag_depth) depth: f32,
+}
+@vertex
+fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
+  let xy = vec2<f32>(f32((vertex << 1u) & 2u), f32(vertex & 2u)) * 2.0 - vec2<f32>(1.0);
+  return vec4<f32>(xy, 0.0, 1.0);
+}
+@fragment
+fn fs_main(@builtin(position) frag: vec4<f32>) -> TraceOutput {
+  let size = textureDimensions(trace_color);
+  // Actual rounded target size, not the nominal reduction factor; clamp the last row/column.
+  let uv = frag.xy / trace_frame.viewport.xy;
+  let pixel = vec2<i32>(min(vec2<u32>(uv * vec2<f32>(size)), size - vec2<u32>(1u)));
+  let color = textureLoad(trace_color, pixel, 0);
+  if (color.a == 0.0) { discard; }
+  return TraceOutput(color, textureLoad(trace_depth, pixel, 0).x);
+}
+"#;
