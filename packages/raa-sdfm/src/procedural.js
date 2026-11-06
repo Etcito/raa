@@ -1,5 +1,6 @@
 import { SdfmError } from './errors.js';
 import { importProcedural } from './mama-bridge.js';
+import { loadProceduralTrace } from './procedural-trace.js';
 import { mapMaterial } from './map-material.js';
 import { decodeMeshFile, meshFilePayload } from './mesh-file.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
@@ -18,9 +19,10 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
   } catch (e) {
     throw new SdfmError('sdfm.scene_format', `${e?.code ?? 'PSCENE_FORMAT'}: ${e?.message ?? String(e)}`, e?.path ?? '');
   }
-  if (options.mode !== undefined && options.mode !== 'mesh') {
-    throw new SdfmError('sdfm.scene_format', 'Raytrace loading is not available in this version');
+  if (options.mode !== undefined && options.mode !== 'mesh' && options.mode !== 'trace') {
+    throw new SdfmError('sdfm.scene_format', `unknown procedural scene mode '${options.mode}'`);
   }
+  if (options.mode === 'trace') return loadProceduralTrace(engine, loader, scene, mama, options);
   if (scene.variant === 'mesh-refs' && scene.instances.some((instance) => instance.deform !== undefined)) {
     throw new SdfmError('sdfm.scene_format', 'Mesh reference instances cannot carry deform');
   }

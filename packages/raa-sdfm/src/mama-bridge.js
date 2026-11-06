@@ -65,15 +65,18 @@ export async function importProcedural(base) {
       throw new SdfmError('sdfm.worker', `cannot import MAMA module ${specifier}: ${messageOf(e)}`);
     }
   };
-  const [scene, build, root] = await Promise.all([
+  const [scene, build, trace, root] = await Promise.all([
     load('mama/procgen/scene-file.js', 'procgen/scene-file.js'),
     load('mama/procgen/scene-build.js', 'procgen/scene-build.js'),
+    load('mama/procgen/trace.js', 'procgen/trace.js'),
     load('mama', 'index.js'),
   ]);
   return {
     parseProceduralScene: scene.parseProceduralScene,
     sceneSourceDocument: build.sceneSourceDocument,
     serializeDocument: root.serializeDocument,
+    buildSceneTraceInput: trace.buildSceneTraceInput,
+    packTrace: trace.packTrace,
   };
 }
 

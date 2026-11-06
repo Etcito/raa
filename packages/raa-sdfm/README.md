@@ -28,6 +28,11 @@ with the S16 code in the message.
   each scene instance becomes `Engine.addMeshInstance` under its own node. A mesh-refs instance
   never carries a deform.
 
+`mode: 'trace'` loads an sdf-refs scene without meshing: MAMA's `buildSceneTraceInput` builds the
+traces, `packTrace` (evaluator op 4) packs them in Rust and the engine installs the program with
+`Engine.setTraceScene`. Live handles share that one slot: `setVisible` and `dispose` repack the
+visible inputs (`placement` translates a scene's sources), and the last handle clears it.
+
 Either variant spawns one engine node per scene instance and its parts under it: instances are
 never flattened, merged or baked into the root. A scene instance's `attrs` and `lod` are forwarded
 to every part it spawned through `Engine.setInstanceParams` and, when the engine has it,
@@ -36,9 +41,10 @@ set. `stats()` reports the instance count, the number of distinct loaded assets'
 pending uploads; `setVisible` covers every spawned part instance; `dispose` removes the root node
 and every mesh the handle added.
 
-Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode` or a deform on a mesh-refs
-instance; `sdfm.scene_resolve` when a resolve callback, the S24 decode or `sceneSourceDocument`
-fails (the message names the file or mesh); `sdfm.worker` when the default MAMA import fails.
+Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a mesh-refs scene in trace
+mode or a deform on a mesh-refs instance; `sdfm.scene_resolve` when a resolve callback, the S24
+decode, `sceneSourceDocument` or trace packing fails; `sdfm.worker` when the default MAMA import
+fails.
 
 MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones that file makes, reviewed against MAMA 0.1.0 at commit 864ebc3 (sibling checkout `../MAMA`).
 
@@ -55,6 +61,7 @@ MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones 
 | `mama/browser` | `setupBrowserHost` | `setupBrowserHost({ workerUrl, manifoldWasmUrl, size?, workerMode? })`; `workerMode: 'blob'` starts classic `blob:` workers (opaque-origin pages) | `ComputePool` (a meshing worker pool) | `src/browser/index.ts:111` |
 | `mama/procgen/scene-file.js` | `parseProceduralScene` | `parseProceduralScene(text)` (the `sdfm.procedural-scene` v1 text) | MAMA's strict `ProceduralScene` value | `src/procgen/scene-file.ts` |
 | `mama/procgen/scene-build.js` | `sceneSourceDocument` | `sceneSourceDocument(scene, sourceIndex, lookupAsset)`; `lookupAsset(file)` returns the parsed asset object or null | `SdfDocument` of one composite (csg, realized) or of the asset source a bend wraps | `src/procgen/scene-build.ts` |
+| `mama/procgen/trace.js` | `buildSceneTraceInput`, `packTrace` | `buildSceneTraceInput(scene, lookupAsset)` resolves every sdf-refs source; `packTrace(procgen, input)` is evaluator op 4, given `options.procgen` | section 67 `TraceInput`, then the little-endian TraceProgram v1 bytes `Engine.setTraceScene` takes | `src/procgen/trace.ts` @ 2086284 |
 | `mama/core/material-graph/cpu-eval.js` | `cpuGraphOrNull` | compare page only (`examples/sdfm-compare/lib/mama-view.js`), not the bridge: `cpuGraphOrNull(def, doc).eval(p, p, n, masks, {})` per vertex, `p` and `n` in world space | `CpuGraph \| null`; the page reads `MaterialValues.baseColor` (linear) | `src/core/material-graph/cpu-eval.ts:482` |
 
 Notes on the table:
@@ -62,7 +69,7 @@ Notes on the table:
 - `buildMaterial` calls `compileMaterialGraph` (`src/core/material-graph/compile.ts:97`) internally. The bridge calls neither directly. A `BuiltMaterial` with `graph: null` throws `sdfm.material_unmappable` with MAMA's error.
 - Helpers: `BASE_WGSL` comes first as helper `base` (the graph bodies call its `mat_clamp01` without listing it in `graph.helpers`); then each id of `graph.helpers` and its `deps` (dependencies first) is resolved through `HELPERS`; an id without WGSL source throws `sdfm.material_unmappable` naming the material and the helper.
 - Imports: `importMama(base?)` in `src/mama-bridge.js` imports `mama`, `mama/core/game/mesh-assets.js`, `mama/core/material-graph/helpers.js` and `mama/browser` (bare specifiers, or the matching files under MAMA's `dist/` URL `base`).
-- Procedural scenes: `importProcedural(base?)` in `src/mama-bridge.js` imports `mama/procgen/scene-file.js` (for `parseProceduralScene`), `mama/procgen/scene-build.js` (for `sceneSourceDocument`) and `mama` (for `serializeDocument`); with `base` (MAMA's `dist/` URL) it imports `procgen/scene-file.js`, `procgen/scene-build.js` and `index.js` under it. It is the default `options.mama()` of `loadProceduralScene`; an import failure is `sdfm.worker` naming the specifier.
+- Procedural scenes: `importProcedural(base?)` in `src/mama-bridge.js` imports `mama/procgen/scene-file.js` (for `parseProceduralScene`), `mama/procgen/scene-build.js` (for `sceneSourceDocument`), `mama/procgen/trace.js` (for `buildSceneTraceInput` and `packTrace`) and `mama` (for `serializeDocument`); with `base` (MAMA's `dist/` URL) it imports `procgen/scene-file.js`, `procgen/scene-build.js`, `procgen/trace.js` and `index.js` under it. It is the default `options.mama()` of `loadProceduralScene`; an import failure is `sdfm.worker` naming the specifier.
 - Output of `meshDocument(mama, document, { pool, groups? })`: `{ groups: [{ group, parts: [{ partId, name, frame: Float64Array, meshes: [{ material, positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, indices: Uint32Array, skin?: { joints: Uint16Array, weights: Float32Array, rig } }] }], rig?, clips? }], materials: MamaMaterial[] }`. Every part is rigid and the hierarchy is flat (one node per part under the spawn root, local transform = `frame`); no rigid flag or parent is read from the document. Each MAMA sub-mesh is one mesh; sub-meshes are not merged. MAMA's S18 skin arrays are copied with their joint order and rig association; `rig` and `clips` are the group's authored S16/S17 values.
 - Refusals: a group whose `error` is set (`error.code` `MESHER_GROUP_UNSUPPORTED`, message naming the group) becomes `SdfmError('sdfm.mesher_refused', '<group>: <error.message>' plus `error.fix` when present, path '/document')`. A group error with code `sdfm.rig` becomes `SdfmError('sdfm.rig', ...)` with the S16 code in the message. The first refused group in result order wins. Any other exception from MAMA becomes `sdfm.worker`.
 - Browser host: MAMA has no viewport host. Nothing in MAMA mounts a canvas, loads a document into a viewport, sets a camera or renders a frame. `setupBrowserHost` returns a meshing worker pool only, so this README has no rows for mount, load, camera or render. The MAMA pane of the side-by-side page is therefore a local reference viewport, `examples/sdfm-compare/lib/mama-view.js`, labelled `MAMA 864ebc3 mesher (reference viewport)`. It meshes the document with `readSdfm`, `setupBrowserHost` (`workerMode: 'blob'`) and `meshAssets` through `meshDocument`, colours each vertex with the `cpuGraphOrNull` base colour, and draws the result with plain WebGPU (Lambert shading, the same camera and size as the RAA pane). It is not SDF Modeler's viewport.

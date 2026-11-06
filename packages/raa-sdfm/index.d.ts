@@ -377,6 +377,15 @@ export interface SdfmProceduralMama {
     lookupAsset: (file: string) => object | null): object;
   /** MAMA `serializeDocument(document)`: canonical document text. */
   serializeDocument(document: object): string;
+  /** MAMA `buildSceneTraceInput(scene, lookupAsset)`; trace mode only. */
+  buildSceneTraceInput?(scene: string | object, lookupAsset: (file: string) => object | null):
+    { sources: object[]; instances: { source: number }[] };
+  /** MAMA `packTrace(procgen, input)`: evaluator op 4 packs the TraceProgram in Rust; trace mode only. */
+  packTrace?(procgen: SdfmProcgen, input: { sources: object[]; instances: { source: number }[] }): Uint8Array;
+}
+
+export interface SdfmProcgen {
+  call(op: number, input: Uint8Array): Uint8Array;
 }
 
 /**
@@ -391,19 +400,24 @@ export interface ProceduralSceneOptions {
   resolveMesh?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
   /** Parent node of the scene root (null: a top-level root). */
   parent?: number | null;
-  /** Only `'mesh'` is accepted; the trace mode is not available in this version. */
-  mode?: 'mesh';
+  /** `'mesh'` (default) meshes through the loader; `'trace'` packs an sdf-refs scene for the trace scene. */
+  mode?: 'mesh' | 'trace';
+  /** The loaded MAMA procedural evaluator; trace mode needs it to pack. */
+  procgen?: SdfmProcgen;
+  /** Trace mode only: a translation in metres for every traced source. */
+  placement?: Vec3;
   /** MAMA accessor; the default is mama-bridge `importProcedural()`. */
   mama?: () => Promise<SdfmProceduralMama>;
 }
 
 /**
  * The handle of one loaded `sdfm.procedural-scene` (section 66). Every scene instance is one engine
- * node under `root`; its parts are spawned under it, never flattened.
+ * node under `root`; its parts are spawned under it, never flattened. In trace mode `setVisible`
+ * packs or removes the handle's instances from the shared trace scene.
  * Refusals: `sdfm.disposed` from `setVisible` and `stats` after {@link ProceduralSceneHandle.dispose}.
  */
 export interface ProceduralSceneHandle {
-  /** Engine node every instance node is parented to. */
+  /** Engine node every instance node is parented to; trace mode parents nothing to it. */
   root: number;
   /** Number of scene instances (one engine node each). */
   instanceCount: number;
@@ -423,10 +437,15 @@ export interface ProceduralSceneHandle {
  * realized) and per distinct bend. A mesh-refs scene decodes each S24 `.mesh` (section 24) and
  * uploads it with `Engine.addMesh`, then one instance per scene instance. Instances are never
  * flattened.
- * Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode` or a deform on a mesh-refs
- * instance; `sdfm.scene_resolve` when `resolveAsset`, `resolveMesh`, the mesh decode or
- * `sceneSourceDocument` fails; `sdfm.worker` when the default MAMA import fails; `sdfm.disposed`
- * from the handle after disposal; engine refusals (RaaError) propagate unchanged.
+ * Trace mode resolves an sdf-refs scene through MAMA's `buildSceneTraceInput` without meshing,
+ * merges it with every live handle and installs the op 4 packed program with
+ * `Engine.setTraceScene`; `setVisible` and `dispose` repack it, and the last handle calls
+ * `Engine.clearTraceScene`.
+ * Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a deform on a mesh-refs
+ * instance or a mesh-refs scene in trace mode; `sdfm.scene_resolve` when `resolveAsset`,
+ * `resolveMesh`, the mesh decode, `sceneSourceDocument`, trace input building or trace packing
+ * fails; `sdfm.worker` when the default MAMA import fails; `sdfm.disposed` from the handle after
+ * disposal; engine refusals (RaaError) propagate unchanged.
  */
 export function loadProceduralScene(engine: Engine, loader: SdfmLoader,
   scene: string | object, options?: ProceduralSceneOptions): Promise<ProceduralSceneHandle>;
