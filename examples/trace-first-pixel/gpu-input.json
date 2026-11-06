@@ -1,0 +1,4 @@
+{
+  "_comment": "Render input for nomorechat's GPU client (scripts/trace-first-pixel.mjs render -> scripts/gpu-capture.mjs). 1280x720 at devicePixelRatio 1, no resize cycle: the capture is the screen-resolution trace output.",
+  "args": { "width": 1280, "height": 720, "warmup": 30, "frames": 60, "resize": false }
+}
