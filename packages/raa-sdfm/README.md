@@ -29,9 +29,10 @@ with the S16 code in the message.
   never carries a deform.
 
 `mode: 'trace'` loads an sdf-refs scene without meshing: MAMA's `buildSceneTraceInput` builds the
-traces, `packTrace` (evaluator op 4) packs them in Rust and the engine installs the program with
-`Engine.setTraceScene`. Live handles share that one slot: `setVisible` and `dispose` repack the
-visible inputs (`placement` translates a scene's sources), and the last handle clears it.
+traces, `packTrace` (evaluator op 4, given `options.procgen`) packs them in Rust and the engine
+installs the program with `Engine.setTraceScene`. Live handles share that one slot: `setVisible`
+and `dispose` repack the visible inputs (`placement` offsets a scene's instances), and the last
+handle clears it.
 
 Either variant spawns one engine node per scene instance and its parts under it: instances are
 never flattened, merged or baked into the root. A scene instance's `attrs` and `lod` are forwarded
@@ -183,10 +184,10 @@ Every exported name of `index.d.ts`:
 | `mapMaterial` | Wraps a `SdfmCompiledMaterial` into an S11 user material function and a surface-material description. |
 | `SdfmError` | The adapter's refusal: `code` (an S15 code) and an optional JSON pointer `path`; message prefixed `<code>: `. |
 | `SdfmErrorCode` | Union of the thirteen S15 codes listed in the table below, plus the S18 `sdfm.rig`. |
-| `loadProceduralScene` | Loads an `sdfm.procedural-scene` v1 file (sdf-refs or mesh-refs) into one engine node per instance; returns a `ProceduralSceneHandle`. |
+| `loadProceduralScene` | Loads an `sdfm.procedural-scene` v1 file (sdf-refs or mesh-refs) into one engine node per instance; `mode: 'trace'` packs an sdf-refs scene into the engine trace slot; returns a `ProceduralSceneHandle`. |
 | `ProceduralSceneHandle` | `root`, `instanceCount`, `sourceCount`, `setVisible`, `stats` (`{ instances, meshes, pending, attributed? }`) and `dispose`. |
-| `ProceduralSceneOptions` | `{ resolveAsset?, resolveMesh?, parent?, mode?: 'mesh', mama? }`; `mama` defaults to the bridge's `importProcedural`. |
-| `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`. |
+| `ProceduralSceneOptions` | `{ resolveAsset?, resolveMesh?, parent?, mode?: 'mesh' \| 'trace', procgen?, placement?, mama? }`; `mode` defaults to `'mesh'` and `mama` to the bridge's `importProcedural`. |
+| `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`, plus `buildSceneTraceInput` and `packTrace` in trace mode. |
 | `decodeMeshFile` | Decodes an S24 saved `.mesh` file into its header and typed-array views. |
 | `meshFilePayload` | Validates a decoded S24 payload and wraps its groups, parts and materials. |
 | `INSTANCE_PARAM_SLOTS` | The first slot of each group of an instance's 16 parameter floats: `{ tint: 0, wind: 4, scale: 5, free: 6 }`. |
@@ -215,8 +216,8 @@ Every exported name of `index.d.ts`:
 | `sdfm.material_unmappable` | MAMA could not build a material or resolve a helper, or the mapped WGSL is not an S11 function (unknown field, forbidden token, `raa_` identifier, more than 65536 bytes); the message names the material and the token. |
 | `sdfm.worker` | MAMA could not be imported or threw, a worker crashed or broke the protocol, or `options.mama()` failed. |
 | `sdfm.disposed` | `load`/`spawn` after `dispose` (or a worker pool request after termination). |
-| `sdfm.scene_format` | A procedural scene does not parse, `mode` is unknown, or a mesh-refs instance carries a deform. |
-| `sdfm.scene_resolve` | A procedural scene asset or mesh could not be resolved or decoded, or `sceneSourceDocument` failed; the message names the file or mesh. |
+| `sdfm.scene_format` | A procedural scene does not parse, `mode` is unknown, a mesh-refs instance carries a deform, or trace mode is asked for a mesh-refs scene. |
+| `sdfm.scene_resolve` | A procedural scene asset or mesh could not be resolved or decoded, `sceneSourceDocument` failed, or trace input building or packing failed; the message names the file or the reason. |
 
 ### Usage
 

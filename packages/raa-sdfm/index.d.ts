@@ -361,7 +361,7 @@ export function createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader;
 /**
  * The MAMA procedural scene functions `loadProceduralScene` calls, exactly what
  * src/mama-bridge.js `importProcedural()` resolves (bare `mama/procgen/scene-file.js`,
- * `mama/procgen/scene-build.js` and `mama`, or the matching files under a `base` URL).
+ * `mama/procgen/scene-build.js`, `mama/procgen/trace.js` and `mama`, or the matching files under a `base` URL).
  * The scene is typed `string | object` because this package declares no MAMA types: pass the parsed
  * `sdfm.procedural-scene` v1 file (section 66) in the shape MAMA's `ProceduralScene` defines.
  * Refusals: none of its own; an import failure is `sdfm.worker`.
@@ -404,7 +404,7 @@ export interface ProceduralSceneOptions {
   mode?: 'mesh' | 'trace';
   /** The loaded MAMA procedural evaluator; trace mode needs it to pack. */
   procgen?: SdfmProcgen;
-  /** Trace mode only: a translation in metres for every traced source. */
+  /** Trace mode only: a translation in metres added to every scene instance. */
   placement?: Vec3;
   /** MAMA accessor; the default is mama-bridge `importProcedural()`. */
   mama?: () => Promise<SdfmProceduralMama>;
@@ -423,7 +423,7 @@ export interface ProceduralSceneHandle {
   instanceCount: number;
   /** Number of scene sources (assets, composites, or meshes). */
   sourceCount: number;
-  /** Show or hide every spawned part instance. */
+  /** Show or hide every spawned part instance; trace mode packs or removes the handle's traced objects. */
   setVisible(visible: boolean): void;
   /** `instances` is the scene instance count, `meshes` the distinct loaded assets' parts, `pending` the uploads left. */
   stats(): { instances: number; meshes: number; pending: number };
