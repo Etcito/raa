@@ -15,3 +15,4 @@ export {
 export { BAKE_BATCH, BAKE_RUN_SHARE, bakeTextureCount, createBakeScheduler } from './src/bake-scheduler.js';
 export { loadProceduralScene } from './src/procedural.js';
 export { decodeMeshFile, meshFilePayload } from './src/mesh-file.js';
+export { INSTANCE_PARAM_SLOTS, instanceParams } from './src/instance-params.js';

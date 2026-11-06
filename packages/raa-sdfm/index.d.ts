@@ -665,3 +665,12 @@ export const AO_QUALITY_LEVELS: readonly ({ readonly slices: number; readonly st
  */
 export function applyRenderOptions(engine: Engine, options: SdfmRenderOptions,
   look?: { bloom?: boolean; grading?: boolean }): { applied: string[]; skipped: { key: string; reason: string }[] };
+
+/** The slots of the 16 floats of an instance's parameters (engine.setInstanceParams): tint 0..3, wind 4, scale 5, free 6..15. */
+export const INSTANCE_PARAM_SLOTS: { readonly tint: 0; readonly wind: 4; readonly scale: 5; readonly free: 6 };
+/**
+ * The 16 floats of one instance's procgen attributes: linear tint rgb (tint.r/g/b, sRGB 0..1; a missing channel is 1)
+ * and a flag in float 3 when any tint.* key exists, wind, scale, then the other attributes in ascending key byte order.
+ * Null when `attrs` is absent or has no keys.
+ */
+export function instanceParams(attrs?: Record<string, number> | null): Float32Array | null;

@@ -103,6 +103,20 @@ MAMA's game render option `shading: 'baked'` (`core/game/render-options.ts`) bak
 - Upload the images with `Engine.addTexture`, register `BAKED_MATERIAL_WGSL` once as `BAKED_FUNCTION`, and give each part a surface material with `data: addMaterialData(bakedMaterialWords(normal, color, emissive))`. A part whose material takes the player colour keeps its per-pixel shading.
 - Or let `createBakeScheduler(engine, { device, field, textureSize })` do all of it (`src/bake-scheduler.js`), as Royal Fiesta and SDF Modeler's Game view do: `prepare(part)` at upload gives the part's surface material and tangents, `queue(parts)` when a scene first shows them starts one run that fits everything queued into `BAKE_RUN_SHARE` (3/4) of the atlas left and bakes `BAKE_BATCH` parts at a time; `onChange` says which parts became done (show the baked draw) or failed (keep the vertex-colour copy, reported once by `onFailed`); `release(part)` gives its textures and data block back.
 
+## Instance parameters
+
+Procgen attributes of one placed instance (`instanceParams(attrs)`, `src/instance-params.js`) become the 16 floats that `engine.setInstanceParams` stores in the instance's `InstanceExtra.params`. The per-pixel field shading (`fieldPartShading`) multiplies the base colour by the tint in slot 0 when its flag is set, so one material and one pipeline serve every variant:
+
+| floats | slot | content |
+|---|---|---|
+| 0..2 | `INSTANCE_PARAM_SLOTS.tint` (0) | linear rgb from `tint.r`, `tint.g`, `tint.b` (sRGB 0..1 converted; a missing channel is 1) |
+| 3 | tint flag | 1 when any `tint.*` key exists, else 0 (and the rgb is 0) |
+| 4 | `INSTANCE_PARAM_SLOTS.wind` (4) | `wind` (0 if absent) |
+| 5 | `INSTANCE_PARAM_SLOTS.scale` (5) | `scale` (0 if absent) |
+| 6..15 | `INSTANCE_PARAM_SLOTS.free` (6) | the other attributes, in ascending key byte order, at most 10; the rest are dropped |
+
+`instanceParams` returns `null` when `attrs` is absent or has no keys, so an instance without attributes sets nothing.
+
 ## Browser build
 
 MAMA's build is `dist/` in the MAMA checkout. Build it with `npm run build` in `../MAMA`. That runs the `@real3d/quadmesh` build and then `tsc -p tsconfig.json`. That output imports npm packages by bare specifier, so `scripts/build-sdfm-compare.sh --mama ../MAMA` stages a browser ESM bundle of the entry points above (`index.js`, `core/game/mesh-assets.js`, `core/material-graph/helpers.js`, `browser/index.js`, `browser/compute-worker.js`, plus `core/material-graph/cpu-eval.js` for the compare page's reference viewport) as `mama/` with MAMA's own esbuild, at the same paths as under `dist/`, plus `manifold.wasm`. The `base` of `importMama` in the page is that `mama/` URL.
@@ -141,6 +155,8 @@ Every exported name of `index.d.ts`:
 | `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`. |
 | `decodeMeshFile` | Decodes an S24 saved `.mesh` file into its header and typed-array views. |
 | `meshFilePayload` | Validates a decoded S24 payload and wraps its groups, parts and materials. |
+| `INSTANCE_PARAM_SLOTS` | The first slot of each group of an instance's 16 parameter floats: `{ tint: 0, wind: 4, scale: 5, free: 6 }`. |
+| `instanceParams` | Converts procgen attributes into the 16 floats of `setInstanceParams`, or `null` without attributes. |
 | `Vec3` | `[x, y, z]`, metres for positions; same shape as `@etcito/raa`'s `Vec3`. |
 | `Quat` | `[x, y, z, w]`, a rotation quaternion; same shape as `@etcito/raa`'s `Quat`. |
 | `Engine` | Re-exported from `@etcito/raa`: the engine the loader uploads meshes and materials to. |

@@ -162,6 +162,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let m = sdff_material(base, s, in.color.xyz, o.normal);
   o.base_color = m.base_color;
   o.emissive = m.emissive;
+  if (in.instance_params[0].w > 0.5) { o.base_color = o.base_color * in.instance_params[0].xyz; }
   if ((flags & ${FIELD_FLAG_SINGLE}u) == 0u) {
     o.metallic = m.metallic;
     o.roughness = m.roughness;
@@ -244,6 +245,8 @@ export function textHash(text) {
  * material graph (`materials`: the asset's compiled materials, by name), else its colour; a graph material missing from
  * `materials` wears its colour and is named in `missing`. `single` leaves roughness and metallic to the surface record
  * (`look`). `debug` shows the shading normal as an emissive colour (0.5 + n / 2) on black (a data flag: same text).
+ * The per-instance tint is read from MaterialInput.instance_params[0] (INSTANCE_PARAM_SLOTS.tint): when its w is above
+ * 0.5, the base colour is multiplied by its xyz.
  *
  * @param {object} shading PartShading (MAMA field-program.ts)
  * @param {ReadonlyMap<string, object> | readonly object[]} materials SdfmCompiledMaterial by name, or a list of them

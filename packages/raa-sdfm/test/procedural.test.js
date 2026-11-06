@@ -156,6 +156,7 @@ import { createFakeEngine } from './fake-engine.js';
 import { loadProceduralScene } from '../src/procedural.js';
 import { importProcedural } from '../src/mama-bridge.js';
 import { ASSET_KEYS } from '../src/validate.js';
+const ENVELOPE_KEYS = ASSET_KEYS.filter((key) => key !== 'physics'); // physics is optional and procedural envelopes carry no bodies
 
 const fixture = JSON.parse(await readFile(new URL('./fixtures/procedural-mesh.json', import.meta.url), 'utf8'));
 const material = JSON.parse(await readFile(new URL('./fixtures/compiled-basic.json', import.meta.url), 'utf8'));
@@ -347,7 +348,7 @@ test('loads sdf references as game assets, composites and bent instances without
   assert.deepStrictEqual(ids.filter((id) => id.startsWith('procedural.demo.b')), ['procedural.demo.b0-0']);
 
   const composite = log.load.find((asset) => asset.id === 'procedural.demo.c2');
-  assert.deepStrictEqual(Object.keys(composite), ASSET_KEYS);
+  assert.deepStrictEqual(Object.keys(composite), ENVELOPE_KEYS);
   assert.equal(composite.category, 'prop');
   assert.equal(composite.world, 'fixture');
   assert.deepStrictEqual(composite.mesher, { output: 'paramesh' });
@@ -357,7 +358,7 @@ test('loads sdf references as game assets, composites and bent instances without
   assert.equal(composite.game, sdfFixture.game);
 
   const bent = log.load.find((asset) => asset.id === 'procedural.demo.b0-0');
-  assert.deepStrictEqual(Object.keys(bent), ASSET_KEYS);
+  assert.deepStrictEqual(Object.keys(bent), ENVELOPE_KEYS);
   assert.deepStrictEqual(bent.document.nodes.source.deformers, [
     { id: 'bend', kind: 'bend', enabled: true, params: sdfFixture.instances[2].deform.params },
   ]);
