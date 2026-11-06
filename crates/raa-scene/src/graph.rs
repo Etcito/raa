@@ -12,11 +12,11 @@
 use std::cmp::Ordering;
 
 use raa_core::{MaterialId, MeshId};
-use raa_math::Mat4;
+use raa_math::{Aabb, Mat4, Vec3};
 
 use crate::{
-    Ambient, Batch, Camera, DirectionalLight, InstanceId, NodeId, RenderItem, RenderList,
-    SceneError, Transform,
+    Ambient, Batch, Camera, DirectionalLight, InstanceId, InstanceIndex, NodeId, RenderItem,
+    RenderList, SceneError, Transform,
 };
 
 /// One node of the hierarchy.
@@ -29,6 +29,8 @@ struct Node {
     dirty: bool,
     /// The world matrix was recomputed in the current `update_world` pass.
     updated: bool,
+    /// Moves on each time `update_world` recomputes this node's world.
+    stamp: u32,
 }
 
 /// A slot of the node arena. `generation` moves on when the occupant is removed.
@@ -45,6 +47,10 @@ struct Instance {
     visible: bool,
     /// Caller-defined tag reported by `build_render_list_tagged`; 0 on creation.
     tag: u32,
+    /// Node stamp the index entry was built from.
+    seen_stamp: u32,
+    /// Mesh bounds generation the index entry was built from.
+    seen_bounds_gen: u32,
 }
 
 /// A slot of the instance arena. `generation` moves on when the occupant is removed.
@@ -76,6 +82,12 @@ pub struct Scene {
     /// mutating methods, never sorted in the frame path.
     draw_order: Vec<u32>,
     instance_count: usize,
+    /// Incremental BVH over the world bounds of the visible instances.
+    index: InstanceIndex,
+    /// Local mesh bounds per mesh slot; `None` when the mesh has no bounds.
+    mesh_bounds: Vec<Option<Aabb>>,
+    /// Bounds generation per mesh slot, bumped by the `*_mesh_bounds` methods.
+    mesh_bounds_gen: Vec<u32>,
 }
 
 impl Default for Scene {
@@ -105,6 +117,9 @@ impl Scene {
             free_instances: Vec::with_capacity(instances),
             draw_order: Vec::with_capacity(instances),
             instance_count: 0,
+            index: InstanceIndex::new(),
+            mesh_bounds: Vec::new(),
+            mesh_bounds_gen: Vec::new(),
         }
     }
 
@@ -126,6 +141,7 @@ impl Scene {
             world: Mat4::IDENTITY,
             dirty: true,
             updated: false,
+            stamp: 0,
         };
         let id = match self.free_nodes.pop() {
             Some(index) => {
@@ -185,6 +201,7 @@ impl Scene {
                 slot.generation = slot.generation.wrapping_add(1);
                 // Invariant: the arena never exceeds u32::MAX slots (checked on insert).
                 self.free_instances.push(index as u32);
+                self.index.remove(index as u32);
                 self.instance_count -= 1;
                 dropped = true;
             }
@@ -249,6 +266,7 @@ impl Scene {
                     Some(pw) => pw * local,
                     None => local,
                 };
+                node.stamp = node.stamp.wrapping_add(1);
             }
         }
         for &id in &self.order {
@@ -256,6 +274,40 @@ impl Scene {
                 node.dirty = false;
                 node.updated = false;
             }
+        }
+        self.update_index();
+    }
+
+    /// Brings the instance index up to date with the world matrices and mesh bounds
+    /// that changed since the last pass. Only instances whose node stamp or mesh
+    /// bounds generation moved are touched, so an idle frame changes no index node.
+    fn update_index(&mut self) {
+        let nodes = &self.nodes;
+        let mesh_bounds = &self.mesh_bounds;
+        let mesh_bounds_gen = &self.mesh_bounds_gen;
+        let index = &mut self.index;
+        for (slot, entry) in self.instances.iter_mut().enumerate() {
+            let Some(inst) = entry.instance.as_mut() else {
+                continue;
+            };
+            let Some(node) = Self::lookup(nodes, inst.node) else {
+                continue;
+            };
+            let bounds_gen = mesh_bounds_gen
+                .get(inst.mesh.0 as usize)
+                .copied()
+                .unwrap_or(0);
+            if inst.seen_stamp == node.stamp && inst.seen_bounds_gen == bounds_gen {
+                continue;
+            }
+            let bounds = mesh_bounds
+                .get(inst.mesh.0 as usize)
+                .copied()
+                .flatten()
+                .map(|b| b.transform(&node.world));
+            index.update(slot as u32, bounds);
+            inst.seen_stamp = node.stamp;
+            inst.seen_bounds_gen = bounds_gen;
         }
     }
 
@@ -276,6 +328,8 @@ impl Scene {
             material,
             visible: true,
             tag: 0,
+            seen_stamp: 0,
+            seen_bounds_gen: 0,
         };
         let id = match self.free_instances.pop() {
             Some(index) => {
@@ -297,6 +351,14 @@ impl Scene {
         };
         self.insert_draw_order(id.index());
         self.instance_count += 1;
+        let stamp = self.node(node)?.stamp;
+        let bounds_gen = self.mesh_gen(mesh);
+        if let Ok(inst) = self.instance_mut(id) {
+            inst.seen_stamp = stamp;
+            inst.seen_bounds_gen = bounds_gen;
+        }
+        let bounds = self.world_bounds(node, mesh);
+        self.index.insert(id.index(), bounds);
         Ok(id)
     }
 
@@ -304,6 +366,7 @@ impl Scene {
     pub fn remove_instance(&mut self, id: InstanceId) -> Result<(), SceneError> {
         self.instance(id)?;
         self.remove_draw_order(id.index());
+        self.index.remove(id.index());
         if let Some(slot) = self.instances.get_mut(id.index() as usize) {
             slot.instance = None;
             slot.generation = slot.generation.wrapping_add(1);
@@ -320,7 +383,26 @@ impl Scene {
         id: InstanceId,
         visible: bool,
     ) -> Result<(), SceneError> {
+        let (node, mesh, was_visible) = {
+            let inst = self.instance(id)?;
+            (inst.node, inst.mesh, inst.visible)
+        };
+        if was_visible == visible {
+            return Ok(());
+        }
         self.instance_mut(id)?.visible = visible;
+        if visible {
+            let stamp = self.node(node)?.stamp;
+            let bounds_gen = self.mesh_gen(mesh);
+            let bounds = self.world_bounds(node, mesh);
+            if let Ok(inst) = self.instance_mut(id) {
+                inst.seen_stamp = stamp;
+                inst.seen_bounds_gen = bounds_gen;
+            }
+            self.index.insert(id.index(), bounds);
+        } else {
+            self.index.remove(id.index());
+        }
         Ok(())
     }
 
@@ -358,6 +440,56 @@ impl Scene {
         self.instance_count
     }
 
+    /// Sets the local-space bounds of `mesh` and moves that mesh's bounds generation on,
+    /// so the next [`Scene::update_world`] refreshes the index entries of its instances.
+    pub fn set_mesh_bounds(&mut self, mesh: MeshId, bounds: Aabb) {
+        self.ensure_mesh(mesh);
+        let slot = mesh.0 as usize;
+        self.mesh_bounds[slot] = Some(bounds);
+        self.mesh_bounds_gen[slot] = self.mesh_bounds_gen[slot].wrapping_add(1);
+    }
+
+    /// Removes the local-space bounds of `mesh` (its instances become unbounded: always
+    /// selected by frustum queries, never hit by ray queries) and moves its generation on.
+    pub fn clear_mesh_bounds(&mut self, mesh: MeshId) {
+        self.ensure_mesh(mesh);
+        let slot = mesh.0 as usize;
+        self.mesh_bounds[slot] = None;
+        self.mesh_bounds_gen[slot] = self.mesh_bounds_gen[slot].wrapping_add(1);
+    }
+
+    /// The incremental index of the visible instances' world bounds.
+    pub fn instance_index(&self) -> &InstanceIndex {
+        &self.index
+    }
+
+    /// The handle of a live instance slot, for callers that hold an index slot.
+    pub fn instance_at_slot(&self, slot: u32) -> Option<InstanceId> {
+        let entry = self.instances.get(slot as usize)?;
+        entry.instance.as_ref()?;
+        Some(InstanceId::new(slot, entry.generation))
+    }
+
+    /// Fills `out` with the instances whose world bounds the ray enters within
+    /// `max_t`, nearest first, each with its entry distance. Hidden instances and
+    /// instances of a mesh without bounds are never hit.
+    pub fn ray_instances(
+        &self,
+        origin: Vec3,
+        dir: Vec3,
+        max_t: f32,
+        out: &mut Vec<(InstanceId, f32)>,
+    ) {
+        out.clear();
+        let mut hits = Vec::new();
+        self.index.query_ray(origin, dir, max_t, &mut hits);
+        for (slot, t) in hits {
+            if let Some(id) = self.instance_at_slot(slot) {
+                out.push((id, t));
+            }
+        }
+    }
+
     /// Fills `out` with the visible instances, ordered by (mesh, material, instance
     /// slot), and with one [`Batch`] per contiguous run of the same mesh. `out` is
     /// cleared first. The result is deterministic: it depends only on the scene state.
@@ -369,22 +501,41 @@ impl Scene {
     /// and nothing is allocated when both `out.items` and `out.batches` have room for
     /// the visible instances (for example `RenderList::with_capacity(instance_count)`).
     pub fn build_render_list(&self, out: &mut RenderList) {
-        self.fill_render_list(out, None);
+        self.fill_render_list(out, None, None);
     }
 
     /// Same as [`Scene::build_render_list`] (identical items, batches and order), and
     /// also fills `tags` so that `tags[i]` is the tag of `out.items[i]`. `tags` is
     /// cleared first; nothing is allocated when it has room for the visible instances.
     pub fn build_render_list_tagged(&self, out: &mut RenderList, tags: &mut Vec<u32>) {
-        self.fill_render_list(out, Some(tags));
+        self.fill_render_list(out, Some(tags), None);
     }
 
-    /// The shared body of `build_render_list` and `build_render_list_tagged`, so the
-    /// two cannot diverge.
-    fn fill_render_list(&self, out: &mut RenderList, mut tags: Option<&mut Vec<u32>>) {
+    /// Same as [`Scene::build_render_list`] (identical items, batches and order), and
+    /// also fills `tags` and `slots`: `slots[i]` is the instance slot
+    /// (`InstanceId::index`) of `out.items[i]`. Both are cleared first.
+    pub fn build_render_list_slots(
+        &self,
+        out: &mut RenderList,
+        tags: &mut Vec<u32>,
+        slots: &mut Vec<u32>,
+    ) {
+        self.fill_render_list(out, Some(tags), Some(slots));
+    }
+
+    /// The shared body of the three list builders, so they cannot diverge.
+    fn fill_render_list(
+        &self,
+        out: &mut RenderList,
+        mut tags: Option<&mut Vec<u32>>,
+        mut slots: Option<&mut Vec<u32>>,
+    ) {
         out.clear();
         if let Some(tags) = tags.as_deref_mut() {
             tags.clear();
+        }
+        if let Some(slots) = slots.as_deref_mut() {
+            slots.clear();
         }
         for &slot in &self.draw_order {
             let Some(inst) = self.instance_at(slot) else {
@@ -406,6 +557,9 @@ impl Scene {
             if let Some(tags) = tags.as_deref_mut() {
                 tags.push(inst.tag);
             }
+            if let Some(slots) = slots.as_deref_mut() {
+                slots.push(slot);
+            }
             match out.batches.last_mut() {
                 Some(batch) if batch.mesh == inst.mesh => batch.count += 1,
                 _ => out.batches.push(Batch {
@@ -419,6 +573,30 @@ impl Scene {
 
     fn instance_at(&self, slot: u32) -> Option<&Instance> {
         self.instances.get(slot as usize)?.instance.as_ref()
+    }
+
+    fn mesh_gen(&self, mesh: MeshId) -> u32 {
+        self.mesh_bounds_gen
+            .get(mesh.0 as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Grows the per-mesh bounds arrays so `mesh` can be indexed.
+    fn ensure_mesh(&mut self, mesh: MeshId) {
+        let need = mesh.0 as usize + 1;
+        if self.mesh_bounds.len() < need {
+            self.mesh_bounds.resize(need, None);
+            self.mesh_bounds_gen.resize(need, 0);
+        }
+    }
+
+    /// World bounds of an instance of `mesh` at `node`'s current world matrix, or
+    /// `None` when the mesh has no bounds.
+    fn world_bounds(&self, node: NodeId, mesh: MeshId) -> Option<Aabb> {
+        let node = self.node(node).ok()?;
+        let local = self.mesh_bounds.get(mesh.0 as usize).copied().flatten()?;
+        Some(local.transform(&node.world))
     }
 
     fn instance(&self, id: InstanceId) -> Result<&Instance, SceneError> {
