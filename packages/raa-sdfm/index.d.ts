@@ -400,7 +400,9 @@ export interface ProceduralSceneOptions {
   resolveMesh?: (path: string) => Promise<Uint8Array | ArrayBuffer>;
   /** Parent node of the scene root (null: a top-level root). */
   parent?: number | null;
-  /** `'mesh'` (default) meshes through the loader; `'trace'` packs an sdf-refs scene for the trace scene. */
+  /** `'mesh'` (default) meshes through the loader; `'trace'` packs an sdf-refs scene for the
+   * engine's world-volume trace scene (its volume, never the image, is limited to 1024 voxels
+   * on the longest axis). */
   mode?: 'mesh' | 'trace';
   /** The loaded MAMA procedural evaluator; trace mode needs it to pack. */
   procgen?: SdfmProcgen;
@@ -423,7 +425,8 @@ export interface ProceduralSceneHandle {
   instanceCount: number;
   /** Number of scene sources (assets, composites, or meshes). */
   sourceCount: number;
-  /** Show or hide every spawned part instance; trace mode packs or removes the handle's traced objects. */
+  /** Show or hide every spawned part instance; trace mode packs or removes the handle's traced
+   * objects (an accepted repack invalidates the world volume). */
   setVisible(visible: boolean): void;
   /** `instances` is the scene instance count, `meshes` the distinct loaded assets' parts, `pending` the uploads left. */
   stats(): { instances: number; meshes: number; pending: number };
@@ -439,8 +442,12 @@ export interface ProceduralSceneHandle {
  * flattened.
  * Trace mode resolves an sdf-refs scene through MAMA's `buildSceneTraceInput` without meshing,
  * merges it with every live handle and installs the op 4 packed program with
- * `Engine.setTraceScene`; `setVisible` and `dispose` repack it, and the last handle calls
- * `Engine.clearTraceScene`.
+ * `Engine.setTraceScene`, which selects the GPU-stamped world-volume raytracer: a five-mip R8Snorm
+ * distance volume whose longest axis is at most 1024 voxels, a coarse cone prepass, a trace at the
+ * full render-target resolution (the 1024 limit is the volume, never the image), exact-program hit
+ * and normal refinement, and depth composition with meshes. Every accepted repack (`setVisible`,
+ * `dispose`, a new handle) replaces the program and so invalidates and rebuilds the volume before
+ * its next frame; the last handle calls `Engine.clearTraceScene`.
  * Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a deform on a mesh-refs
  * instance or a mesh-refs scene in trace mode; `sdfm.scene_resolve` when `resolveAsset`,
  * `resolveMesh`, the mesh decode, `sceneSourceDocument`, trace input building or trace packing

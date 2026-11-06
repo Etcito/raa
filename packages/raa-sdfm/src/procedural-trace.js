@@ -1,12 +1,17 @@
 import { SdfmError } from './errors.js';
 
 // One engine has a single trace slot: each handle keeps its MAMA TraceInput, a change merges the
-// visible inputs, and MAMA op 4 packs them in Rust. No geometry is composed here.
+// visible inputs, and MAMA op 4 packs them in Rust. Installing a program selects the engine's
+// world-volume trace scene (GPU-stamped R8Snorm volume with five mips, full-resolution trace and
+// exact-program refinement); no geometry is composed here.
 const sessions = new WeakMap();
 
 export async function loadProceduralTrace(engine, loader, scene, mama, options) {
   if (scene.variant !== 'sdf-refs') {
     throw new SdfmError('sdfm.scene_format', 'Trace mode loads SDF reference scenes only; a mesh reference scene has no SDF sources to trace');
+  }
+  if (typeof engine.setTraceScene !== 'function' || typeof engine.clearTraceScene !== 'function') {
+    throw new SdfmError('sdfm.scene_resolve', 'Trace mode needs the engine trace scene (setTraceScene and clearTraceScene); this engine has none');
   }
   const procgen = options.procgen;
   if (typeof mama.buildSceneTraceInput !== 'function' || typeof mama.packTrace !== 'function' || procgen == null) {
@@ -58,7 +63,9 @@ export async function loadProceduralTrace(engine, loader, scene, mama, options) 
     },
   };
 }
-// Pack the visible inputs into the one trace slot; no visible handle clears it.
+// Pack the visible inputs into the one trace slot; no visible handle clears it. Every accepted
+// install replaces the program, so the engine invalidates and rebuilds the world volume before it
+// draws the changed scene.
 function commit(engine, session) {
   const entries = [...session].filter((entry) => entry.visible);
   if (entries.length === 0) return engine.clearTraceScene();

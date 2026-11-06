@@ -15,15 +15,22 @@ const scene = (overrides = {}) => ({
 const lastProgram = (engine) => JSON.parse(new TextDecoder().decode(engine.calls.setTraceScene.at(-1)));
 
 function fakeEngine() {
-  const calls = { addNode: [], removeNode: [], setTraceScene: [], clearTraceScene: [] };
+  const calls = { addNode: [], removeNode: [], setTraceScene: [], clearTraceScene: [], traceArgs: [] };
   let trace = null;
+  let volume = 0;
   let next = 1;
   return {
     calls,
     get trace() { return trace; },
+    get volume() { return volume; },
     addNode(parent, t = [0, 0, 0]) { const id = next++; calls.addNode.push({ id, parent, t: [...t] }); return id; },
     removeNode(id) { calls.removeNode.push(id); },
-    setTraceScene(bytes) { calls.setTraceScene.push(bytes); trace = JSON.parse(new TextDecoder().decode(bytes)); },
+    setTraceScene(bytes, ...rest) {
+      calls.setTraceScene.push(bytes);
+      calls.traceArgs.push(rest.length);
+      trace = JSON.parse(new TextDecoder().decode(bytes));
+      volume += 1;
+    },
     clearTraceScene() { calls.clearTraceScene.push(true); trace = null; },
   };
 }
@@ -76,6 +83,30 @@ test('trace mode packs through MAMA op 4 without meshing and keeps the handle li
   assert.throws(() => handle.stats(), (error) => error.code === 'sdfm.disposed');
 });
 
+test('trace mode installs the world-volume trace scene and invalidates it on every accepted change', async () => {
+  const [fake, engine, loader] = [fakeMama(), fakeEngine(), fakeLoader()];
+  const value = options(fake);
+  const handle = await loadProceduralScene(engine, loader, scene(), value);
+  assert.equal(engine.calls.setTraceScene.length, 1);
+  assert.deepEqual(engine.calls.traceArgs, [0]);
+  assert.ok(engine.calls.setTraceScene[0] instanceof Uint8Array);
+  assert.equal(engine.volume, 1);
+  assert.deepEqual(['addMesh', 'addMeshInstance', 'addSurfaceMaterial', 'addMaterialFunction'].filter((name) => name in engine), []);
+  handle.setVisible(false);
+  assert.equal(engine.trace, null);
+  handle.setVisible(true);
+  assert.equal(engine.calls.setTraceScene.length, 2);
+  assert.equal(engine.volume, 2);
+  const b = await loadProceduralScene(engine, loader, scene({ name: 'b', instances: [{ key: 9, source: 0, ...pose() }] }), value);
+  assert.equal(engine.volume, 3);
+  b.dispose();
+  assert.equal(engine.calls.setTraceScene.length, 4);
+  assert.equal(engine.volume, 4);
+  handle.dispose();
+  assert.equal(engine.trace, null);
+  assert.equal(engine.volume, 4);
+});
+
 test('trace handles share one slot: placement, visibility and disposal repack the merged input', async () => {
   const [fake, engine, loader] = [fakeMama(), fakeEngine(), fakeLoader()];
   const base = options(fake);
@@ -103,6 +134,10 @@ test('trace mode refuses invalid scenes and a rejected program keeps the previou
   const meshRefs = scene({ variant: 'mesh-refs', sources: [{ kind: 'mesh', mesh: 'procedural/trace/meshes/x.mesh', meshKey: 'x', bounds: BOUNDS }],
     instances: [{ key: 1, source: 0, ...pose() }] });
   assert.equal(await failureCode(loadProceduralScene(engine, loader, meshRefs, value)), 'sdfm.scene_format');
+  const noTrace = fakeEngine();
+  delete noTrace.setTraceScene;
+  assert.equal(await failureCode(loadProceduralScene(noTrace, loader, scene(), value)), 'sdfm.scene_resolve');
+  assert.deepEqual([noTrace.calls.setTraceScene.length, noTrace.calls.addNode.length], [0, 0]);
   assert.equal(await failureCode(loadProceduralScene(engine, loader, scene(), {
     ...value, resolveAsset: async () => { throw new Error('offline'); } })), 'sdfm.scene_resolve');
   assert.equal(await failureCode(loadProceduralScene(engine, loader, scene(), { ...value, procgen: undefined })), 'sdfm.scene_resolve');

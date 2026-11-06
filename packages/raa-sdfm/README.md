@@ -30,9 +30,15 @@ with the S16 code in the message.
 
 `mode: 'trace'` loads an sdf-refs scene without meshing: MAMA's `buildSceneTraceInput` builds the
 traces, `packTrace` (evaluator op 4, given `options.procgen`) packs them in Rust and the engine
-installs the program with `Engine.setTraceScene`. Live handles share that one slot: `setVisible`
-and `dispose` repack the visible inputs (`placement` offsets a scene's instances), and the last
-handle clears it.
+installs the program with `Engine.setTraceScene`. That installs the GPU-stamped world-volume
+raytracer: the packed SDFs become an R8Snorm distance volume with five mip levels whose longest
+axis is at most 1024 voxels, traced at the full render-target resolution from a coarse cone
+prepass, with every accepted hit and normal refined against the exact packed programs. The 1024
+limit is the volume's voxel resolution, never the image. The composite writes colour and depth
+into the normal frame, so meshes and traced surfaces occlude each other. Live handles share that
+one slot: `setVisible` and `dispose` repack the visible inputs (`placement` offsets a scene's
+instances), each accepted change replaces the program and so invalidates and rebuilds the volume
+before its next frame, and the last handle clears it.
 
 Either variant spawns one engine node per scene instance and its parts under it: instances are
 never flattened, merged or baked into the root. A scene instance's `attrs` and `lod` are forwarded
@@ -183,8 +189,8 @@ Every exported name of `index.d.ts`:
 | `SdfmMappedMaterial` | The `mapMaterial` result: `functionName`, `wgsl` (an S11 `material_main`), `desc` (always `blend: 'opaque'`), `dropped`. |
 | `mapMaterial` | Wraps a `SdfmCompiledMaterial` into an S11 user material function and a surface-material description. |
 | `SdfmError` | The adapter's refusal: `code` (an S15 code) and an optional JSON pointer `path`; message prefixed `<code>: `. |
-| `SdfmErrorCode` | Union of the thirteen S15 codes listed in the table below, plus the S18 `sdfm.rig`. |
-| `loadProceduralScene` | Loads an `sdfm.procedural-scene` v1 file (sdf-refs or mesh-refs) into one engine node per instance; `mode: 'trace'` packs an sdf-refs scene into the engine trace slot; returns a `ProceduralSceneHandle`. |
+| `SdfmErrorCode` | Union of the thirteen S15 codes listed in the table below, plus the S18 `sdfm.rig` and the two procedural-scene codes. |
+| `loadProceduralScene` | Loads an `sdfm.procedural-scene` v1 file (sdf-refs or mesh-refs) into one engine node per instance; `mode: 'trace'` packs an sdf-refs scene into the engine's world-volume trace scene; returns a `ProceduralSceneHandle`. |
 | `ProceduralSceneHandle` | `root`, `instanceCount`, `sourceCount`, `setVisible`, `stats` (`{ instances, meshes, pending, attributed? }`) and `dispose`. |
 | `ProceduralSceneOptions` | `{ resolveAsset?, resolveMesh?, parent?, mode?: 'mesh' \| 'trace', procgen?, placement?, mama? }`; `mode` defaults to `'mesh'` and `mama` to the bridge's `importProcedural`. |
 | `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`, plus `buildSceneTraceInput` and `packTrace` in trace mode. |
@@ -217,7 +223,7 @@ Every exported name of `index.d.ts`:
 | `sdfm.worker` | MAMA could not be imported or threw, a worker crashed or broke the protocol, or `options.mama()` failed. |
 | `sdfm.disposed` | `load`/`spawn` after `dispose` (or a worker pool request after termination). |
 | `sdfm.scene_format` | A procedural scene does not parse, `mode` is unknown, a mesh-refs instance carries a deform, or trace mode is asked for a mesh-refs scene. |
-| `sdfm.scene_resolve` | A procedural scene asset or mesh could not be resolved or decoded, `sceneSourceDocument` failed, or trace input building or packing failed; the message names the file or the reason. |
+| `sdfm.scene_resolve` | A procedural scene asset or mesh could not be resolved or decoded, `sceneSourceDocument` failed, trace input building or packing failed, or the engine has no trace scene; the message names the file or the reason. |
 
 ### Usage
 
