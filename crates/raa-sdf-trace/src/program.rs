@@ -169,6 +169,7 @@ pub struct Instance {
     pub bend_angle: f32,
     pub bend_length: f32,
     pub axes: u32,
+    pub bend: Option<[f64; 8]>,
 }
 
 /// Linear material of the program: colour, roughness and metallic.
@@ -225,13 +226,6 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
             header[1]
         );
     }
-    if header[7] != 0 {
-        refuse!(
-            FORMAT,
-            "header.reserved",
-            "the reserved header word is not zero"
-        );
-    }
     let expected = total_words(&header)
         .ok_or_else(|| TraceError::at(LIMITS, "header", "the section lengths overflow"))?;
     if expected != word_count as u64 {
@@ -256,15 +250,14 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
     let (source_words, rest) = cut(&body, header[2] as usize * SOURCE_WORDS, "sources")?;
     let (code, rest) = cut(rest, header[4] as usize, "code")?;
     let (data_words, rest) = cut(rest, header[5] as usize, "data")?;
-    let (material_words, instance_words) =
-        cut(rest, header[6] as usize * MATERIAL_WORDS, "materials")?;
-    if instance_words.len() != header[3] as usize * INSTANCE_WORDS {
-        refuse!(
-            FORMAT,
-            "instances",
-            "the instance section has the wrong length"
-        );
+    let (material_words, rest) = cut(rest, header[6] as usize * MATERIAL_WORDS, "materials")?;
+    let (instance_words, bend_words) = cut(rest, header[3] as usize * INSTANCE_WORDS, "instances")?;
+    let mut instances: Vec<Instance> = instance_words.chunks_exact(INSTANCE_WORDS).map(read_instance).collect();
+    if header[7] != 0 && header[7] as usize != instances.iter().filter(|i| i.deform_kind == 1).count() {
+        refuse!(FORMAT, "bends", "the bend records do not match the bent instances");
     }
+    let mut records = bend_words.chunks_exact(16);
+    instances.iter_mut().filter(|i| i.deform_kind == 1).for_each(|i| i.bend = records.next().map(read_bend));
 
     let program = TraceProgram {
         sources: source_words
@@ -277,10 +270,7 @@ pub fn parse(bytes: &[u8]) -> Result<TraceProgram, TraceError> {
             .chunks_exact(MATERIAL_WORDS)
             .map(read_material)
             .collect(),
-        instances: instance_words
-            .chunks_exact(INSTANCE_WORDS)
-            .map(read_instance)
-            .collect(),
+        instances,
     };
     validate(&program)?;
     Ok(program)
@@ -294,12 +284,14 @@ fn total_words(header: &[u32]) -> Option<u64> {
     let sources = u64::from(header[2]).checked_mul(SOURCE_WORDS as u64)?;
     let instances = u64::from(header[3]).checked_mul(INSTANCE_WORDS as u64)?;
     let materials = u64::from(header[6]).checked_mul(MATERIAL_WORDS as u64)?;
+    let bends = u64::from(header[7]).checked_mul(16)?;
     (HEADER_WORDS as u64)
         .checked_add(sources)?
         .checked_add(instances)?
         .checked_add(u64::from(header[4]))?
         .checked_add(u64::from(header[5]))?
-        .checked_add(materials)
+        .checked_add(materials)?
+        .checked_add(bends)
 }
 
 fn cut<'a>(
@@ -365,7 +357,12 @@ fn read_instance(w: &[u32]) -> Instance {
         bend_angle: f32::from_bits(w[29]),
         bend_length: f32::from_bits(w[30]),
         axes: w[31],
+        bend: None,
     }
+}
+
+fn read_bend(w: &[u32]) -> [f64; 8] {
+    core::array::from_fn(|i| f64::from_bits(u64::from(w[i * 2]) | (u64::from(w[i * 2 + 1]) << 32)))
 }
 
 fn validate(program: &TraceProgram) -> Result<(), TraceError> {
@@ -588,6 +585,9 @@ fn validate_instances(program: &TraceProgram) -> Result<(), TraceError> {
                         format!("{path}.bendAxes"),
                         "the bend frame is incomplete: along must be one of the six signed axes, toward one of them or 7 (no aim)"
                     );
+                }
+                if let Some(b) = instance.bend && (!(0.0..=2.0).contains(&b[0]) || b[0].fract() != 0.0 || b.iter().any(|v| !v.is_finite()) || b[1] == 0.0 || !(b[4] > b[3])) {
+                    refuse!(FORMAT, format!("{path}.bend"), "the bend record is incomplete");
                 }
             }
             1 => refuse!(
