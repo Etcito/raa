@@ -1,8 +1,9 @@
 # raa-sdf-trace
 
-The section 67 trace program: RAA's reader of the packed SDF program that the raytrace pass
-evaluates. This crate starts with the reader (`src/program.rs`); the instance BVH, the CPU
-distance twin, the WGSL evaluator and the render pass land with their own cards.
+The section 67 trace program: RAA's reader of the packed SDF program and its raytrace passes.
+`src/program.rs` reads the file, `src/bvh.rs` and `src/cpu.rs` are the conservative CPU twin
+and `src/wgsl.rs` generates the shared WGSL evaluator, the `trace.sdf` compute shader and the
+`trace.composite` display shader.
 
 ## File layout
 
@@ -44,8 +45,27 @@ stack balance (one value left per source), and every instance/source/material re
 bend record also needs a positive length and a packed frame whose along axis is one of the six
 signed axes (`toward` 7 means no aim); an incomplete frame is refused.
 
+## Installation and frame passes
+
+`TraceFeature::install(gpu, &mut pipeline)` adds `trace.sdf` (compute, order 55) and
+`trace.composite` (display overlay, order 560) and returns a `TraceHandle` (a shared
+`TraceScene`). Set the program with `set_program`, the instance records with
+`update_instances` and the frame's 512-byte S10 `FrameGpu` (camera and inverse matrices, sun
+direction/colour, ambient, viewport) in `scene.frame`; both passes read the same bytes.
+`stats` reports the source, instance and BVH counts with the capped target size.
+
+`trace.sdf` uploads the packed program sections, the instance and bend records, the BVH nodes
+and order, and the materials, then dispatches 8x8 workgroups over `target_size(w, h)` (never
+larger than 1024 on the longest side). It writes the linear colour to `Rgba16Float` and the
+projection depth to `R32Float`.
+
+`trace.composite` loads the normal frame's colour and depth attachments. It draws the trace
+colour with the trace depth as `frag_depth` under RAA's `Less` depth test and discards misses,
+so scene meshes occlude traced surfaces and the depth written here is seen by later overlays.
+
 ## Test
 
 ```
 cargo test -p raa-sdf-trace --test program
+cargo test -p raa-sdf-trace --test variants
 ```

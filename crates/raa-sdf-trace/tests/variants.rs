@@ -1,7 +1,9 @@
 //! Section 67 WGSL evaluator: complete shader variants generated through the public
 //! public generation interfaces parse and type-check with naga; no GPU rendering is done here.
 use raa_sdf_trace::wgsl::{PROGRAM_EVAL_WGSL, composite_module, eval_module, trace_module};
-use raa_sdf_trace::{Instance, Source, TraceProgram};
+use raa_sdf_trace::{
+    COMPOSITE_NAME, COMPOSITE_ORDER, Instance, Source, TRACE_NAME, TRACE_ORDER, TraceProgram,
+};
 
 fn program(sources: usize, code_len: u32) -> TraceProgram {
     let source = Source {
@@ -131,4 +133,58 @@ fn trace_and_composite_entry_points_and_layouts() {
             "{name}"
         );
     }
+}
+
+fn bindings(module: &naga::Module) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| {
+            global
+                .binding
+                .map(|binding| (binding.group, binding.binding))
+        })
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+fn storage_format(module: &naga::Module, group: u32, binding: u32) -> Option<naga::StorageFormat> {
+    let global = module
+        .global_variables
+        .iter()
+        .map(|(_, global)| global)
+        .find(|global| {
+            global
+                .binding
+                .is_some_and(|b| b.group == group && b.binding == binding)
+        })?;
+    match module.types[global.ty].inner {
+        naga::TypeInner::Image {
+            class: naga::ImageClass::Storage { format, .. },
+            ..
+        } => Some(format),
+        _ => None,
+    }
+}
+
+#[test]
+fn installed_shader_layouts_match_the_frame_passes() {
+    assert_eq!((TRACE_NAME, TRACE_ORDER), ("trace.sdf", 55));
+    assert_eq!((COMPOSITE_NAME, COMPOSITE_ORDER), ("trace.composite", 560));
+    let compute = validate(&trace_module(&program(1, 2)));
+    assert_eq!(
+        bindings(&compute),
+        (0..=10).map(|binding| (0, binding)).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        storage_format(&compute, 0, 9),
+        Some(naga::StorageFormat::Rgba16Float)
+    );
+    assert_eq!(
+        storage_format(&compute, 0, 10),
+        Some(naga::StorageFormat::R32Float)
+    );
+    let composite = validate(&composite_module());
+    assert_eq!(bindings(&composite), vec![(0, 0), (1, 0), (1, 1)]);
 }

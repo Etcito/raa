@@ -12,7 +12,9 @@ pub mod wgsl;
 
 pub use cpu::{Hit, distance, material, trace_ray};
 pub use pass::{
-    COLOR_FORMAT, DEPTH_FORMAT, MAX_TARGET, TraceScene, TraceStats, TraceTargets, target_size,
+    COLOR_FORMAT, COMPOSITE_NAME, COMPOSITE_ORDER, DEPTH_FORMAT, FRAME_BYTES, MAX_TARGET,
+    TRACE_NAME, TRACE_ORDER, TraceFeature, TraceHandle, TraceScene, TraceStats, TraceTargets,
+    target_size,
 };
 pub use program::{
     DATA, DATA_SHIFT, FORMAT, HEADER_WORDS, INSTANCE_COUNT, INSTANCE_WORDS, Instance, LIMITS,
