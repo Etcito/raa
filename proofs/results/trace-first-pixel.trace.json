@@ -1,0 +1,179 @@
+{
+  "name": "trace-first-pixel",
+  "milestone": "m10",
+  "capture": "proofs/captures/trace-first-pixel.png",
+  "output": {
+    "width": 1280,
+    "height": 720
+  },
+  "scene": {
+    "box": {
+      "center": [
+        -1.1,
+        0,
+        0
+      ],
+      "halfExtents": [
+        0.8,
+        0.8,
+        0.8
+      ],
+      "color": [
+        0.85,
+        0.25,
+        0.2
+      ]
+    },
+    "sphere": {
+      "center": [
+        1.1,
+        0,
+        0
+      ],
+      "radius": 0.9,
+      "color": [
+        0.2,
+        0.45,
+        0.9
+      ]
+    },
+    "camera": {
+      "target": [
+        0,
+        0,
+        0
+      ],
+      "distance": 6.5,
+      "yaw": 0.35,
+      "pitch": 0.35
+    },
+    "light": {
+      "direction": [
+        -0.4,
+        -1,
+        -0.3
+      ],
+      "color": [
+        1,
+        0.96,
+        0.9
+      ],
+      "intensity": 3
+    },
+    "ambient": {
+      "color": [
+        0.55,
+        0.6,
+        0.7
+      ],
+      "intensity": 0.35
+    },
+    "background": [
+      0.02,
+      0.025,
+      0.035
+    ]
+  },
+  "volume": "R8Snorm 3D world volume, GPU compute stamped (raa-sdf-trace TracePass)",
+  "trace": {
+    "sources": 2,
+    "instances": 2,
+    "bvhNodes": 1,
+    "width": 1280,
+    "height": 720,
+    "placeholders": 0
+  },
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "code": {
+    "commit": "8d32bb576c2be0b79d974a0891232709a0e44baa",
+    "dirty": false
+  },
+  "program": {
+    "bytes": 588
+  },
+  "artifact": {
+    "pageRef": "exec-12774-bfafed8c1c948ff60b878479a86dacd0353237d648e70393bab53dcc6661051e",
+    "wasm": "raa/pkg/raa_js_bg.wasm",
+    "raw": 2507159,
+    "commit": "8d32bb576c2be0b79d974a0891232709a0e44baa"
+  },
+  "commands": {
+    "volumes": [
+      {
+        "format": "r8snorm",
+        "dimension": "3d",
+        "size": {
+          "width": 512,
+          "height": 240,
+          "depthOrArrayLayers": 240
+        },
+        "mips": 5
+      }
+    ],
+    "passes": [
+      "raa-ibl.brdf_lut",
+      "raa-ibl.filter.downsample",
+      "raa-ibl.filter.prefilter_sh",
+      "raa-gtao.ao",
+      "raa-contact.contact",
+      "raa-sdf-trace.stamp",
+      "raa-sdf-trace.mip",
+      "raa-sdf-trace.mip",
+      "raa-sdf-trace.mip",
+      "raa-sdf-trace.mip",
+      "raa-sdf-trace.coarse",
+      "raa-sdf-trace.trace",
+      "raa-ssr.hiz",
+      "raa-dof.coc"
+    ],
+    "copies": [
+      {
+        "mip": 0,
+        "size": {
+          "width": 512,
+          "height": 240,
+          "depthOrArrayLayers": 240
+        }
+      },
+      {
+        "mip": 1,
+        "size": {
+          "width": 256,
+          "height": 120,
+          "depthOrArrayLayers": 120
+        }
+      },
+      {
+        "mip": 2,
+        "size": {
+          "width": 128,
+          "height": 60,
+          "depthOrArrayLayers": 60
+        }
+      },
+      {
+        "mip": 3,
+        "size": {
+          "width": 64,
+          "height": 30,
+          "depthOrArrayLayers": 30
+        }
+      },
+      {
+        "mip": 4,
+        "size": {
+          "width": 32,
+          "height": 15,
+          "depthOrArrayLayers": 15
+        }
+      }
+    ]
+  },
+  "capturedAt": "2026-11-06T22:39:15.000Z"
+}
