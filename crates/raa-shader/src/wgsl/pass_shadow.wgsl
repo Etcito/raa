@@ -15,10 +15,10 @@ struct RaaShadowCasterGpu {
 fn vs_main(
     v0: RaaVertex0,
     v1: RaaVertex1,
-    inst: RaaInstance,
-    @builtin(instance_index) instance: u32,
+    @location(2) raa_instance_id: u32,
 ) -> @builtin(position) vec4<f32> {
-    let x = raa_extras[instance];
+    let inst = raa_instance(raa_instance_id);
+    let x = raa_extras[raa_instance_id];
     let time = raa_frame.camera_pos.w;
     var vin: VertexMaterialInput;
     vin.local_position = v0.position;

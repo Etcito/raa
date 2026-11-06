@@ -351,11 +351,11 @@ fn fragment_targets_follow_the_pass() {
 fn group_two_bindings_are_private_to_their_pass() {
     let reg = MaterialFnRegistry::new();
     for (pass, module) in compose_all(&reg, MaterialFnId::STANDARD) {
-        // Frame, materials, extras, the material texture atlas, sampler and rects, then the
-        // material data words.
+        // Frame, materials, extras, the material texture atlas, sampler and rects, the
+        // material data words, then the persistent instance records.
         assert_eq!(
             group_bindings(&module, 0),
-            [0, 1, 2, 3, 4, 5, 6],
+            [0, 1, 2, 3, 4, 5, 6, 7],
             "{pass:?}"
         );
         assert_eq!(

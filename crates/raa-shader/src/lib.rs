@@ -347,6 +347,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
             ("FrameGpu", 512),
             ("SurfaceMaterialGpu", 256),
             ("InstanceExtraGpu", 128),
+            ("RaaInstanceGpu", 128),
             ("ShadowGpu", 320),
             ("EnvSh", 160),
             ("EnvGpu", 256),

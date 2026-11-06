@@ -66,6 +66,23 @@ struct EnvGpu {
     reserved: array<vec4<f32>, 4>,
 }
 
+// Persistent instance record (S1 Instance, 128 B): model columns @0, normal matrix columns
+// @64, material index @112, tag @116, skin palette base @120. Indexed by the stable scene
+// instance slot carried by the compacted id stream.
+struct RaaInstanceGpu {
+    model0: vec4<f32>,
+    model1: vec4<f32>,
+    model2: vec4<f32>,
+    model3: vec4<f32>,
+    normal0: vec4<f32>,
+    normal1: vec4<f32>,
+    normal2: vec4<f32>,
+    material_index: u32,
+    tag: u32,
+    palette_base: u32,
+    reserved: u32,
+}
+
 @group(0) @binding(0) var<uniform> raa_frame: FrameGpu;
 @group(0) @binding(1) var<storage, read> raa_materials: array<SurfaceMaterialGpu>;
 @group(0) @binding(2) var<storage, read> raa_extras: array<InstanceExtraGpu>;
@@ -78,6 +95,9 @@ struct EnvGpu {
 // raa_material_word / raa_material_f32 from the base of the material record
 // (raa_material_data_base). Words 0..4 are reserved zeros.
 @group(0) @binding(6) var<storage, read> raa_material_data: array<u32>;
+// Persistent instance records, indexed by the stable scene instance slot (the value of the
+// compacted id stream).
+@group(0) @binding(7) var<storage, read> raa_instances: array<RaaInstanceGpu>;
 
 @group(1) @binding(0) var raa_shadow_map: texture_depth_2d_array;
 @group(1) @binding(1) var raa_shadow_cmp: sampler_comparison;
@@ -110,16 +130,34 @@ struct RaaVertex0 {
     @location(1) normal: vec3<f32>,
 }
 
-// Instance stream (S1 Instance, 128 B).
+// One instance as the lit passes use it: the S1 instance record's matrices, its material
+// index and its skin palette base, read by the stable slot in the compacted id stream.
 struct RaaInstance {
-    @location(2) model0: vec4<f32>,
-    @location(3) model1: vec4<f32>,
-    @location(4) model2: vec4<f32>,
-    @location(5) model3: vec4<f32>,
-    @location(6) normal0: vec4<f32>,
-    @location(7) normal1: vec4<f32>,
-    @location(8) normal2: vec4<f32>,
-    @location(9) material_index: u32,
+    model0: vec4<f32>,
+    model1: vec4<f32>,
+    model2: vec4<f32>,
+    model3: vec4<f32>,
+    normal0: vec4<f32>,
+    normal1: vec4<f32>,
+    normal2: vec4<f32>,
+    material_index: u32,
+    palette_base: u32,
+}
+
+// The instance of compacted id `id` (a stable scene instance slot).
+fn raa_instance(id: u32) -> RaaInstance {
+    let r = raa_instances[id];
+    return RaaInstance(
+        r.model0,
+        r.model1,
+        r.model2,
+        r.model3,
+        r.normal0,
+        r.normal1,
+        r.normal2,
+        r.material_index,
+        r.palette_base,
+    );
 }
 
 // Vertex stream 1 (S10, 40 B).
