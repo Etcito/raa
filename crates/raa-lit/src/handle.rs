@@ -13,7 +13,8 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
-use raa_scene::{InstanceIndex, RenderList};
+use raa_math::{Mat4, Vec3};
+use raa_scene::{InstanceIndex, RenderList, frustum_planes};
 use raa_shader::{
     ComposeOptions, Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError,
     SlotProvider, TintMode, VariantKey,
@@ -23,13 +24,13 @@ use crate::extras::INSTANCE_EXTRA_GPU_SIZE;
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
-use crate::lod::{LodParams, LodRegistry};
+use crate::lod::{LodParams, LodRegistry, shadow_level};
 use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::material_data::MaterialData;
 use crate::meshes::{INSTANCE_SLOT, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
-use crate::prep::{INSTANCE_GPU_SIZE, LitDraw};
+use crate::prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 use crate::renderer::{InstanceFrameStats, NO_CAMERA_LEVEL};
-use crate::select::IdPrep;
+use crate::select::{IdPrep, SelectInput};
 use crate::slots::default_slot_providers;
 use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas};
 
@@ -43,6 +44,9 @@ const STREAM0_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
 
 /// Stride of the compacted u32 instance id stream (S1 vertex slot 1).
 const ID_STRIDE: u64 = 4;
+
+/// Shadow id sections after the camera: one per CSM cascade.
+pub(crate) const SHADOW_CASCADES: usize = 4;
 
 /// The compacted instance id stream: one u32 slot per instance, read by
 /// `@builtin(instance_index)` and resolved with `raa_instance(id)`.
@@ -352,6 +356,9 @@ pub(crate) struct LitShared {
     pub(crate) lod_options: LodParams,
     /// Camera hysteresis by stable slot; NO_CAMERA_LEVEL means no previous selection.
     pub(crate) levels: Vec<u8>,
+    /// Shadow hysteresis by stable slot and cascade (`slot * 4 + cascade`);
+    /// NO_CAMERA_LEVEL means no previous selection.
+    pub(crate) shadow_levels: Vec<u8>,
     pub(crate) lod_bias: HashMap<u32, i8>,
     pub(crate) stats: InstanceFrameStats,
     pub(crate) materials: SurfaceLibrary,
@@ -376,6 +383,11 @@ pub(crate) struct LitShared {
     pub(crate) items: RenderList,
     pub(crate) item_tags: Vec<u32>,
     pub(crate) item_slots: Vec<u32>,
+    /// Reusable cascade frustum result (instance slots) and its per-slot bitset.
+    pub(crate) caster_slots: Vec<u32>,
+    pub(crate) caster_bits: Vec<u64>,
+    /// Material classes the cascade selection validates against, rebuilt in place.
+    pub(crate) caster_materials: Vec<MaterialClass>,
     /// Scratch of `SurfaceLibrary::write_gpu_all`, preallocated for `max_materials`.
     material_bytes: Vec<u8>,
     /// Material textures, group-0 bindings 3 (atlas), 4 (sampler) and 5 (rects).
@@ -475,6 +487,7 @@ impl LitShared {
             lods: LodRegistry::new(),
             lod_options: LodParams::default(),
             levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize],
+            shadow_levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize * SHADOW_CASCADES],
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
             store,
@@ -492,6 +505,9 @@ impl LitShared {
             items: RenderList::default(),
             item_tags: Vec::new(),
             item_slots: Vec::new(),
+            caster_slots: Vec::new(),
+            caster_bits: Vec::new(),
+            caster_materials: Vec::with_capacity(materials as usize),
             material_bytes: Vec::with_capacity(materials as usize * SURFACE_MATERIAL_GPU_SIZE),
             textures,
             data,
@@ -888,6 +904,77 @@ fn write_prefix(queue: &wgpu::Queue, buffer: &wgpu::Buffer, bytes: &[u8]) {
     }
 }
 
+/// The five culling planes of one shadow cascade: its frustum without the near plane,
+/// in the order left, right, bottom, top, far. Casters between the sun and the
+/// cascade box would be clipped by an orthographic near plane, so they are kept.
+pub(crate) fn cascade_planes(view_proj: Mat4) -> [[f32; 4]; 5] {
+    let [left, right, bottom, top, _near, far] = frustum_planes(view_proj);
+    [left, right, bottom, top, far]
+}
+
+/// The level mesh of cascade `cascade` for a rest instance in `slot` (level 0 when the
+/// slot has no previous selection or the mesh has no chain).
+fn cascade_mesh(
+    lods: &LodRegistry,
+    levels: &[u8],
+    cascade: usize,
+    slot: u32,
+    mesh: MeshId,
+) -> MeshId {
+    let index = slot as usize * SHADOW_CASCADES + cascade;
+    let level = levels.get(index).copied().unwrap_or(NO_CAMERA_LEVEL);
+    lods.chain(mesh)
+        .and_then(|chain| chain.get(level as usize))
+        .map_or(mesh, |level| level.mesh)
+}
+
+/// Computes one cascade's shadow hysteresis level per stable slot before `IdPrep` reads
+/// them (its level lookup is an immutable `Fn`). A posed tag drops its previous level:
+/// its draw binds the full mesh's rest skin records.
+#[allow(clippy::too_many_arguments)]
+fn cascade_levels(
+    list: &RenderList,
+    tags: &[u32],
+    slots: &[u32],
+    cascade: usize,
+    lods: &LodRegistry,
+    levels: &mut [u8],
+    bias: &HashMap<u32, i8>,
+    options: &LodParams,
+    texel_world: f32,
+    skinned: &dyn Fn(u32) -> Option<crate::skin_views::SkinDraw>,
+) {
+    for ((item, &tag), &slot) in list.items.iter().zip(tags).zip(slots) {
+        let Some(level) = levels.get_mut(slot as usize * SHADOW_CASCADES + cascade) else {
+            continue;
+        };
+        if skinned(tag).is_some() {
+            *level = NO_CAMERA_LEVEL;
+            continue;
+        }
+        let Some(chain) = lods.chain(item.mesh) else {
+            *level = NO_CAMERA_LEVEL;
+            continue;
+        };
+        let world = &item.world;
+        let scales: [f32; 3] = std::array::from_fn(|i| {
+            let c = world.cols[i];
+            Vec3::new(c[0], c[1], c[2]).length()
+        });
+        let world_scale = if scales.iter().all(|scale| scale.is_finite()) {
+            scales.into_iter().fold(0.0, f32::max)
+        } else {
+            f32::NAN
+        };
+        let params = LodParams {
+            bias: options.bias + f32::from(bias.get(&tag).copied().unwrap_or(0)),
+            ..*options
+        };
+        let prev = (*level != NO_CAMERA_LEVEL).then_some(*level as usize);
+        *level = shadow_level(chain, world_scale, texel_world, prev, &params) as u8;
+    }
+}
+
 /// Shared view of the lit renderer for passes and contributors (an `Rc` to the renderer's
 /// state; clones share it). Every method borrows the state immutably.
 #[derive(Clone)]
@@ -908,10 +995,135 @@ impl LitHandle {
         self.camera_draws(class)
     }
 
-    /// The camera draws of `class`; shadows draw the camera list until the cascade
-    /// selection lands.
+    /// The camera draws of `class`; shadows draw their own cascade sections through
+    /// [`cascade_draws`](Self::cascade_draws).
     pub fn camera_draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
         Ref::map(self.shared.borrow(), |s| s.select.draws(class))
+    }
+
+    /// The caster draws of cascade `0..4` for `class` (empty for Transparent or a cascade
+    /// that was not selected this frame).
+    pub fn cascade_draws(&self, cascade: usize, class: DrawClass) -> Ref<'_, [LitDraw]> {
+        Ref::map(self.shared.borrow(), |s| {
+            s.select.cascade_draws(cascade, class)
+        })
+    }
+
+    /// Selects each shadow cascade's casters from the frame snapshot [`LitRenderer::prepare`]
+    /// left in the shared state, writes their compacted id sections after the camera section
+    /// and records each section's id count in the frame stats.
+    ///
+    /// For cascade `i`, `matrices[i]` is its orthographic view-projection and `texel_world`
+    /// is `2 / (resolution * |matrices[i].cols[0][0]|)`. Casters are the rest instances
+    /// passing the cascade frustum without its near plane (a reusable query result and
+    /// bitset); posed instances are always selected. The level mesh comes from
+    /// [`shadow_level`] with the tag's bias.
+    ///
+    /// Called by the shadow feature's prepare, after [`LitRenderer::prepare`] and before the
+    /// frame graph records, so the matrix list and the shared snapshot are one frame.
+    pub fn select_casters(
+        &self,
+        gpu: &GpuContext,
+        matrices: &[Mat4],
+        resolution: u32,
+    ) -> Result<(), RaaError> {
+        let mut guard = self.shared.borrow_mut();
+        let s: &mut LitShared = &mut guard;
+
+        // The material classes the cascade validation reads (rebuilt in place).
+        s.caster_materials.clear();
+        for id in 0..s.materials.len() as u32 {
+            if let Some(m) = s.materials.get(MaterialId(id)) {
+                s.caster_materials.push(MaterialClass::of(m));
+            }
+        }
+
+        let capacity = s.store.capacity() as usize;
+        s.shadow_levels
+            .resize(capacity * SHADOW_CASCADES, NO_CAMERA_LEVEL);
+        let words = capacity.div_ceil(64).max(1);
+        if s.caster_bits.len() != words {
+            s.caster_bits.resize(words, 0);
+        }
+
+        let source = s.skin_source.clone();
+        let skins = source.0.borrow();
+        let has_palette = s.palette_ready();
+        let skinned = |tag: u32| has_palette.then(|| skins.draw(tag)).flatten();
+        let meshes = &s.meshes;
+        let known_mesh = |m: MeshId| meshes.submesh(m).is_some();
+        let class_handled = |_: DrawClass| true;
+
+        for (cascade, matrix) in matrices.iter().take(SHADOW_CASCADES).enumerate() {
+            let planes = cascade_planes(*matrix);
+            s.index.query_frustum(&planes, &mut s.caster_slots);
+            s.caster_bits.fill(0);
+            for &slot in &s.caster_slots {
+                let slot = slot as usize;
+                if let Some(word) = s.caster_bits.get_mut(slot / 64) {
+                    *word |= 1u64 << (slot % 64);
+                }
+            }
+            let texel_world = if resolution == 0 {
+                0.0
+            } else {
+                2.0 / (resolution as f32 * matrix.cols[0][0].abs())
+            };
+            cascade_levels(
+                &s.items,
+                &s.item_tags,
+                &s.item_slots,
+                cascade,
+                &s.lods,
+                &mut s.shadow_levels,
+                &s.lod_bias,
+                &s.lod_options,
+                texel_world,
+                &skinned,
+            );
+            let bits = &s.caster_bits;
+            let selected = |i: usize| -> bool {
+                let Some(item) = s.items.items.get(i) else {
+                    return false;
+                };
+                if s.lods.is_level(item.mesh) {
+                    return false;
+                }
+                let tag = s.item_tags.get(i).copied().unwrap_or(0);
+                if skinned(tag).is_some() {
+                    return true;
+                }
+                let slot = s.item_slots.get(i).copied().unwrap_or(u32::MAX) as usize;
+                bits.get(slot / 64)
+                    .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)
+            };
+            let level_mesh = |slot: u32, mesh: MeshId| {
+                cascade_mesh(&s.lods, &s.shadow_levels, cascade, slot, mesh)
+            };
+            let input = SelectInput {
+                list: &s.items,
+                tags: &s.item_tags,
+                slots: &s.item_slots,
+                selected: &selected,
+                materials: &s.caster_materials,
+                // Caster draws are not sorted, so their view depth is never read.
+                view: Mat4::IDENTITY,
+                known_mesh: &known_mesh,
+                class_handled: &class_handled,
+                level_mesh: &level_mesh,
+            };
+            let before = s.select.id_count();
+            s.select.prepare_cascade(cascade, &input, &skinned)?;
+            s.stats.cascades[cascade] = s.select.id_count() - before;
+        }
+
+        // The camera section is already uploaded at offset 0; write only the cascades.
+        let start = s.select.camera_count() as usize * ID_STRIDE as usize;
+        let bytes = &s.select.id_bytes()[start..];
+        if !bytes.is_empty() {
+            gpu.queue().write_buffer(&s.id_buffer, start as u64, bytes);
+        }
+        Ok(())
     }
 
     /// Sets the vertex buffers of sub-mesh `mesh` and the id stream (stream 0 at slot 0,
@@ -1376,5 +1588,43 @@ mod tests {
             assert_eq!(err.code(), "render.invalid_msaa");
             assert!(err.message().contains(&n.to_string()));
         }
+    }
+
+    #[test]
+    fn cascade_planes_keep_casters_between_the_sun_and_the_cascade_box() {
+        use raa_math::{Aabb, Vec4};
+        // Cascade box: x/y in [-1, 1], view depth 1..3 (the view looks down -Z).
+        let view_proj = Mat4::from_cols(
+            Vec4::new(1.0, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 1.0, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, -0.5, 0.0),
+            Vec4::new(0.0, 0.0, -0.5, 1.0),
+        );
+        let boxed = |min: [f32; 3], max: [f32; 3]| {
+            Some(Aabb {
+                min: Vec3::new(min[0], min[1], min[2]),
+                max: Vec3::new(max[0], max[1], max[2]),
+            })
+        };
+        let mut index = InstanceIndex::new();
+        // Between the sun and the near plane (z -0.6..-0.4), inside x/y.
+        index.insert(0, boxed([-0.1, -0.1, -0.6], [0.1, 0.1, -0.4]));
+        // At the box depth but outside its x extent.
+        index.insert(1, boxed([1.9, -0.1, -2.1], [2.1, 0.1, -1.9]));
+        // Inside the cascade box.
+        index.insert(2, boxed([-0.1, -0.1, -2.1], [0.1, 0.1, -1.9]));
+
+        // The full frustum clips the caster in front of the box.
+        let mut all = Vec::new();
+        index.query_frustum(&frustum_planes(view_proj), &mut all);
+        assert!(!all.contains(&0));
+        assert!(all.contains(&2));
+
+        // Cascades drop only the near plane.
+        let mut casters = Vec::new();
+        index.query_frustum(&cascade_planes(view_proj), &mut casters);
+        assert!(casters.contains(&0), "casters between sun and box stay");
+        assert!(casters.contains(&2));
+        assert!(!casters.contains(&1), "outside the cascade x extent");
     }
 }

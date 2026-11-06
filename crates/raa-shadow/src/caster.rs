@@ -234,20 +234,22 @@ impl Casters {
             pass.set_bind_group(0, &frame, &[]);
             // Group 1 is never bound: it holds this map (Shadow variants leave it empty).
             pass.set_bind_group(2, &self.bind_group, &[(SLOT_SIZE * i as u64) as u32]);
-            self.draw_casters(gpu, &mut pass, lit)?;
+            self.draw_casters(gpu, &mut pass, lit, i)?;
         }
         Ok(())
     }
 
-    /// Draws the casting Opaque and Fur draws of `lit` into `pass` (groups 0 and 2 bound).
+    /// Draws cascade `cascade`'s casting Opaque and Fur draws of `lit` into `pass` (groups 0
+    /// and 2 bound).
     fn draw_casters(
         &self,
         gpu: &GpuContext,
         pass: &mut wgpu::RenderPass<'_>,
         lit: &LitHandle,
+        cascade: usize,
     ) -> Result<(), RaaError> {
         for class in CAST_CLASSES {
-            let draws = lit.draws(class);
+            let draws = lit.cascade_draws(cascade, class);
             for d in draws.iter() {
                 if d.instance_count == 0 {
                     continue;

@@ -194,6 +194,12 @@ impl FeaturePass for ShadowPass {
             );
             previous = splits[i];
         }
+        // `LitRenderer::prepare` has already run this frame: `WebRuntime::update`
+        // (crates/raa-js/src/engine.rs) prepares the lit frame before the frame graph runs
+        // `raa.pipeline`, whose pass prepares include this one. The shared scene snapshot and
+        // camera id section are therefore current when the cascades select their casters.
+        self.lit
+            .select_casters(ctx.gpu, &matrices, desc.resolution)?;
         let casters = st.casters.as_ref().expect("casters created above");
         casters.write(ctx.gpu, &matrices);
         let array_view = casters.array_view().clone();
