@@ -17,6 +17,7 @@ export interface Engine {
   updateTraceInstances(instances: Float32Array): void;
   /** Removes the trace scene. */
   clearTraceScene(): void;
-  /** Returns scene counts and the capped trace target dimensions. */
+  /** Returns scene counts and full trace target dimensions. The world volume has a
+   * separate longest-axis limit of 1024 voxels. */
   traceStats(): TraceStats;
 }
