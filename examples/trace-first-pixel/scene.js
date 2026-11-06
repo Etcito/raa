@@ -18,6 +18,14 @@ export const SCENE = Object.freeze({
   background: [0.02, 0.025, 0.035],
 });
 
+// Stage 7119 additional rendered case: a flat green mesh slab in front of the left part of
+// the box. The traced box surface at `hidden` sits exactly behind it, so the slab can only
+// win that pixel through trace.composite's frag_depth test. `centre` stays uncovered.
+export const OCCLUSION = Object.freeze({
+  mesh: { center: [-1.25, 0.37, 1.2], halfExtents: [0.5, 0.5, 0.05], color: [0.2, 0.75, 0.3] },
+  hidden: [-1.7, 0.3, 0.8],
+});
+
 const translate = ([x, y, z]) => [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z];
 
 // Source record: code start/len, data start/len, local bounds, lipschitz 1, flags 0.

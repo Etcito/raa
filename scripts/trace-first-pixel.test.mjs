@@ -2,9 +2,11 @@
 // without a browser or GPU.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { SCENE, programBytes, programWords } from '../examples/trace-first-pixel/scene.js';
+import { OCCLUSION, SCENE, programBytes, programWords } from '../examples/trace-first-pixel/scene.js';
 import { deflateSync } from 'node:zlib';
-import { checkCapture, decodePng, pngSize, projectPixel } from './trace-first-pixel.mjs';
+import {
+  checkCapture, checkOcclusion, decodePng, meshCoverage, pngSize, projectPixel,
+} from './trace-first-pixel.mjs';
 
 test('the box and sphere pack as a TraceProgram v1 with two sources and two instances', () => {
   const w = programWords();
@@ -48,13 +50,15 @@ function encodePng(width, height, at) {
     chunk('IDAT', deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
 }
 
-function frame({ background = [5, 6, 9], speckle = 0 } = {}) {
+function frame({ background = [5, 6, 9], speckle = 0, slab = false } = {}) {
   const [w, h] = [320, 180];
   const box = projectPixel(SCENE, SCENE.box.center, w, h);
   const sphere = projectPixel(SCENE, SCENE.sphere.center, w, h);
+  const slabPixels = [OCCLUSION.mesh.center, OCCLUSION.hidden].map((p) => projectPixel(SCENE, p, w, h));
   return decodePng(encodePng(w, h, (x, y) => {
     const near = ([cx, cy]) => Math.abs(x - cx) < 25 && Math.abs(y - cy) < 25;
     const dark = speckle && (x * 7 + y * 13) % speckle === 0;
+    if (slab && slabPixels.some(([cx, cy]) => Math.abs(x - cx) <= 1 && Math.abs(y - cy) <= 1)) return [51, 191, 77];
     if (near(box)) return dark ? [42, 13, 12] : [216, 63, 49];
     if (near(sphere)) return dark ? [10, 24, 56] : [105, 230, 255];
     return background;
@@ -74,4 +78,18 @@ test('the capture check refuses a light background and speckled surfaces', () =>
 test('the capture check refuses swapped shapes', () => {
   const swapped = { ...SCENE, box: { ...SCENE.box, center: SCENE.sphere.center }, sphere: { ...SCENE.sphere, center: SCENE.box.center } };
   assert.equal(checkCapture(frame(), swapped).filter((p) => /not (red|blue)/.test(p)).length, 2);
+});
+
+test('the occlusion check accepts a green slab over the box surface behind it', () => {
+  assert.deepEqual(checkOcclusion(frame({ slab: true }), SCENE, OCCLUSION), []);
+});
+
+test('the occlusion check refuses a capture where the trace wins the hidden pixel', () => {
+  assert.ok(checkOcclusion(frame(), SCENE, OCCLUSION).filter((p) => /not the green mesh/.test(p)).length === 2);
+});
+
+test('the occlusion preflight keeps the slab over the hidden surface and off the box centre', () => {
+  assert.deepEqual(meshCoverage(SCENE, OCCLUSION), { hidden: true, centre: false });
+  const away = { ...OCCLUSION, mesh: { ...OCCLUSION.mesh, center: [100, 100, 100] } };
+  assert.deepEqual(meshCoverage(SCENE, away), { hidden: false, centre: false });
 });

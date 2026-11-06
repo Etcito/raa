@@ -13,8 +13,18 @@
 //   node scripts/trace-first-pixel.mjs retain --out out/trace-first-pixel
 //                                               keeps the image and records for judgment
 //
-// The record (proofs/results/trace-first-pixel.trace.json) keeps the scene parameters, the
-// code and wasm identity and the output dimensions next to the image the judge reads.
+// Stage 7119 re-renders the same scene as its own fresh baseline (`--baseline`) and adds a
+// mesh-occlusion case (`--occlusion`): a green mesh slab in front of the box proves that
+// trace.composite's fragment depth lets meshes and traced surfaces occlude each other.
+//
+//   node scripts/trace-first-pixel.mjs render --baseline --out proofs/captures/trace-first-pixel-baseline.png
+//   node scripts/trace-first-pixel.mjs fresh --baseline
+//   node scripts/trace-first-pixel.mjs render --occlusion --out proofs/captures/trace-first-pixel-occlusion.png
+//   node scripts/trace-first-pixel.mjs fresh --occlusion
+//
+// The record (proofs/results/trace-first-pixel[-baseline|-occlusion].trace.json) keeps the
+// scene parameters, the code and wasm identity and the output dimensions next to the image
+// the judge reads.
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { inflateSync } from 'node:zlib';
@@ -23,20 +33,36 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCENE, programBytes } from '../examples/trace-first-pixel/scene.js';
+import { OCCLUSION, SCENE, programBytes } from '../examples/trace-first-pixel/scene.js';
 
 const NAME = 'trace-first-pixel';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXAMPLE = join(ROOT, 'examples', NAME);
 const DIST = join(ROOT, 'dist', NAME);
 const PKG = join(ROOT, 'packages', 'raa');
-const OUT = join(ROOT, 'target', 'gpu-out', NAME);
-const CAPTURE = join(ROOT, 'proofs', 'captures', `${NAME}.png`);
-const RESULT = join(ROOT, 'proofs', 'results', `${NAME}.json`);
-const RECORD = join(ROOT, 'proofs', 'results', `${NAME}.trace.json`);
-const EVIDENCE = join(ROOT, 'out', NAME);
-const CLEAN_MARK = join(ROOT, 'target', `${NAME}.clean`);
 const INPUT = join(EXAMPLE, 'gpu-input.json');
+
+// `first` is the accepted 7129 gate; `baseline` is stage 7119's fresh box-and-sphere
+// capture; `occlusion` adds the mesh slab. Each case owns its capture, result, record and
+// output folders so the cases never overwrite one another.
+const CASES = {
+  first: { suffix: '', mesh: false },
+  baseline: { suffix: '-baseline', mesh: false },
+  occlusion: { suffix: '-occlusion', mesh: true },
+};
+const CASE = process.argv.includes('--occlusion') ? 'occlusion'
+  : process.argv.includes('--baseline') ? 'baseline' : 'first';
+const INFO = CASES[CASE];
+const paths = (info) => ({
+  capture: join(ROOT, 'proofs', 'captures', `${NAME}${info.suffix}.png`),
+  result: join(ROOT, 'proofs', 'results', `${NAME}${info.suffix}.json`),
+  record: join(ROOT, 'proofs', 'results', `${NAME}${info.suffix}.trace.json`),
+  out: join(ROOT, 'target', 'gpu-out', `${NAME}${info.suffix}`),
+  evidence: join(ROOT, 'out', `${NAME}${info.suffix}`),
+});
+const { capture: CAPTURE, result: RESULT, record: RECORD, out: OUT, evidence: EVIDENCE } = paths(INFO);
+const CLEAN_MARK = join(ROOT, 'target', `${NAME}.clean`);
+const CASE_FLAG = INFO.suffix ? ` --${CASE}` : '';
 
 function fail(message) {
   process.stderr.write(`trace-first-pixel: ${message}\n`);
@@ -113,6 +139,15 @@ function capturePage() {
     engine.setOrbit(target, distance, yaw, pitch);
     engine.setLight(SCENE.light);
     engine.setAmbient(SCENE.ambient);
+    let mesh = null;
+    if (input.args.mesh) {
+      // A flat unlit slab drawn as a normal RAA mesh: trace.composite must lose the depth
+      // test behind it, so the green face replaces the red box surface on that pixel.
+      mesh = OCCLUSION.mesh;
+      const handle = engine.primitiveMesh('box', { halfExtents: mesh.halfExtents });
+      const material = engine.addMaterial({ color: mesh.color, model: 'flat' });
+      engine.addInstance(engine.addNode(null, mesh.center), handle, material);
+    }
     phase('stamp and trace one frame');
     engine.render(0);
     phase('read full-resolution canvas');
@@ -125,7 +160,7 @@ function capturePage() {
     }
     if (errors.length) throw new Error(errors.join('\n'));
     const stats = engine.stats();
-    const trace = { scene: SCENE, stats: engine.traceStats(), commands };
+    const trace = { scene: SCENE, stats: engine.traceStats(), commands, mesh };
     const artifact = await (await fetch('./sizes.json')).json();
     phase('return image and GPU command record');
     return { json: { adapter: stats.adapter, hardware: stats.hardware, canvas: [canvas.width, canvas.height], trace, artifact },
@@ -147,7 +182,7 @@ function stage() {
   }
   cpSync(join(PKG, 'pkg'), join(DIST, 'raa', 'pkg'), { recursive: true });
   cpSync(join(ROOT, 'web', 'common'), join(DIST, 'common'), { recursive: true });
-  writeFileSync(join(DIST, 'main.js'), `import { loadRaa } from './raa/index.js';\nimport { SCENE, programBytes } from './scene.js';\n(${capturePage.toString()})();\n`);
+  writeFileSync(join(DIST, 'main.js'), `import { loadRaa } from './raa/index.js';\nimport { SCENE, OCCLUSION, programBytes } from './scene.js';\n(${capturePage.toString()})();\n`);
   writeSizes(join(DIST, 'raa', 'pkg', 'raa_js_bg.wasm'), 'raa/pkg/raa_js_bg.wasm', join(DIST, 'sizes.json'));
   mkdirSync(join(DIST, 'probe'), { recursive: true });
   writeFileSync(join(DIST, 'probe', 'nmc.gpu.json'), JSON.stringify({ page: 'index.html', ops: ['probe'] }));
@@ -156,17 +191,22 @@ function stage() {
 }
 
 function clean() {
-  for (const p of [CAPTURE, RESULT, RECORD, OUT, EVIDENCE]) rmSync(p, { recursive: true, force: true });
+  for (const info of Object.values(CASES)) {
+    const p = paths(info);
+    for (const path of [p.capture, p.result, p.record, p.out, p.evidence]) {
+      rmSync(path, { recursive: true, force: true });
+    }
+  }
   mkdirSync(dirname(CLEAN_MARK), { recursive: true });
   writeFileSync(CLEAN_MARK, new Date().toISOString() + '\n');
-  console.log('trace-first-pixel: earlier capture, result and record removed');
+  console.log('trace-first-pixel: earlier first, baseline and occlusion captures removed');
 }
 
 function render() {
   // `--out` names the capture so the commands file shows which entry writes it.
   const out = process.argv[process.argv.indexOf('--out') + 1];
   if (!process.argv.includes('--out') || resolve(ROOT, out) !== CAPTURE) {
-    fail(`render needs --out proofs/captures/${NAME}.png`);
+    fail(`render needs --out proofs/captures/${NAME}${INFO.suffix}.png${CASE_FLAG}`);
   }
   if (!existsSync(join(DIST, 'sizes.json'))) fail(`${DIST}/sizes.json is missing: run the stage step first`);
   preflight();
@@ -193,7 +233,7 @@ function render() {
   if (!readOp(blank, (o) => o.ok === 1)) fail('blank-page probe did not answer');
   const pageRef = publish(DIST);
   const small = join(OUT, 'small');
-  run('render', { args: { width: 160, height: 90 } }, pageRef, small);
+  run('render', { args: { width: 160, height: 90, ...(INFO.mesh ? { mesh: true } : {}) } }, pageRef, small);
   validateOp(readOp(small, (o) => o.trace && o.adapter), 160, 90);
   const image = (folder, width, height) => {
     const png = readdirSync(folder, { recursive: true }).map(String).find((f) => f.endsWith('.png'));
@@ -204,6 +244,7 @@ function render() {
   };
   image(small, 160, 90);
   const input = JSON.parse(readFileSync(INPUT, 'utf8'));
+  if (INFO.mesh) input.args = { ...input.args, mesh: true };
   const full = join(OUT, 'full');
   run('render', input, pageRef, full);
   const op = opResult();
@@ -317,6 +358,39 @@ export function checkCapture(image, scene) {
   return problems;
 }
 
+// Stage 7119 preflight, without a GPU: the slab must contain the point where the eye-to-
+// hidden-point ray crosses its mid plane and must miss the eye-to-box-centre ray, so the
+// capture can show the mesh hiding the box surface while the box centre stays visible.
+export function meshCoverage(scene, occlusion) {
+  const { target, distance, yaw, pitch } = scene.camera;
+  const back = [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+  const eye = target.map((t, i) => t + back[i] * distance);
+  const { center, halfExtents } = occlusion.mesh;
+  const covers = (point) => {
+    const d = point.map((p, i) => p - eye[i]);
+    const t = (center[2] - eye[2]) / d[2];
+    const hit = eye.map((e, i) => e + d[i] * t);
+    return Math.abs(hit[0] - center[0]) <= halfExtents[0] && Math.abs(hit[1] - center[1]) <= halfExtents[1];
+  };
+  return { hidden: covers(occlusion.hidden), centre: covers(scene.box.center) };
+}
+
+// Additional-case check: the traced shapes still pass checkCapture, and the slab owns both
+// its own centre pixel and the box pixel directly behind it. The second pixel can only turn
+// green through trace.composite's depth test; the trace alone would leave the red box there.
+export function checkOcclusion(image, scene, occlusion) {
+  const { width, height, channels, data } = image;
+  const at = (x, y) => { const i = (y * width + x) * channels; return [data[i], data[i + 1], data[i + 2]]; };
+  const problems = checkCapture(image, scene);
+  for (const [name, point] of [['mesh centre', occlusion.mesh.center], ['hidden box surface', occlusion.hidden]]) {
+    const [x, y] = projectPixel(scene, point, width, height);
+    if (x < 0 || y < 0 || x >= width || y >= height) { problems.push(`${name} is off screen`); continue; }
+    const px = at(x, y);
+    if (!(px[1] > px[0] + 8 && px[1] > px[2] + 8)) problems.push(`${name} at ${x},${y} is ${px.join(',')}, not the green mesh`);
+  }
+  return problems;
+}
+
 // The raw op result the GPU client wrote (the page fields with `trace`).
 function readOp(folder, accepts) {
   if (!existsSync(folder)) return null;
@@ -348,9 +422,18 @@ function validateOp(op, width, height) {
     fail('the GPU trace scene or full-resolution output dimensions differ from the requested scene');
   }
   if (commands?.volumes?.length !== 1 || commands.volumes[0].format !== 'r8snorm' ||
-      commands.volumes[0].dimension !== '3d' ||
-      !commands.passes.includes('raa-sdf-trace.stamp') || !commands.passes.includes('raa-sdf-trace.trace') ||
-      !commands.copies.some((copy) => copy.mip === 0)) fail('missing GPU stamp, R8Snorm 3D copy or volume trace');
+      commands.volumes[0].dimension !== '3d' || commands.volumes[0].mips !== 5) {
+    fail('missing the five-mip R8Snorm 3D world volume');
+  }
+  const copies = new Set((commands.copies ?? []).map((copy) => copy.mip));
+  if (![0, 1, 2, 3, 4].every((mip) => copies.has(mip))) {
+    fail(`the volume received mip copies ${[...copies].sort().join(',')}, expected 0,1,2,3,4`);
+  }
+  const passes = commands.passes ?? [];
+  for (const pass of ['raa-sdf-trace.stamp', 'raa-sdf-trace.mip', 'raa-sdf-trace.coarse', 'raa-sdf-trace.trace']) {
+    if (!passes.includes(pass)) fail(`the frame did not record ${pass}`);
+  }
+  if (INFO.mesh !== Boolean(op.trace.mesh)) fail(`the page ${INFO.mesh ? 'did not draw' : 'drew'} the occlusion mesh`);
   if (JSON.stringify(op.trace.scene) !== JSON.stringify(SCENE)) fail('the page used another scene');
 }
 
@@ -386,7 +469,10 @@ function preflight() {
   assert.throws(() => checkView({ ...SCENE, sphere: { ...SCENE.sphere, center: [1000, 0, 0] } }, 1280, 720));
   assert.throws(() => checkView({ ...SCENE, box: { ...SCENE.box, center: [0, 0, 1000] } }, 1280, 720));
   checkView({ ...SCENE, box: { ...SCENE.box, halfExtents: [1000, 1000, 1000] } }, 1280, 720);
-  console.log('trace-first-pixel: both required shapes overlap the small and full capture views');
+  const coverage = meshCoverage(SCENE, OCCLUSION);
+  assert(coverage.hidden, 'the occlusion mesh must cover the box surface behind it');
+  assert(!coverage.centre, 'the occlusion mesh must leave the box centre visible');
+  console.log('trace-first-pixel: both required shapes and the mesh occlusion case fit the small and full views');
 }
 
 function fresh() {
@@ -406,7 +492,8 @@ function fresh() {
   if (!size || size[0] !== input.width || size[1] !== input.height) {
     fail(`capture is ${size ? size.join('x') : 'not a PNG'}, expected the ${input.width}x${input.height} canvas`);
   }
-  const problems = checkCapture(decodePng(png), SCENE);
+  const image = decodePng(png);
+  const problems = INFO.mesh ? checkOcclusion(image, SCENE, OCCLUSION) : checkCapture(image, SCENE);
   if (problems.length) fail(`capture content check failed:\n  ${problems.join('\n  ')}`);
   const op = opResult();
   if (!op) fail(`no op result with trace stats in ${OUT}/`);
@@ -422,10 +509,12 @@ function fresh() {
   if (JSON.stringify(op.trace.scene) !== JSON.stringify(SCENE)) fail('the page traced another scene than examples/trace-first-pixel/scene.js');
   const record = {
     name: NAME,
+    case: CASE,
     milestone: 'm10',
-    capture: 'proofs/captures/trace-first-pixel.png',
+    capture: `proofs/captures/${NAME}${INFO.suffix}.png`,
     output: { width: size[0], height: size[1] },
     scene: SCENE,
+    mesh: INFO.mesh ? OCCLUSION : null,
     volume: 'R8Snorm 3D world volume, GPU compute stamped (raa-sdf-trace TracePass)',
     trace: stats,
     adapter: result.adapter,

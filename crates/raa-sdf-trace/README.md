@@ -87,6 +87,18 @@ volume, stamps and copies mip 0..4 and publishes the revision to every uniform s
 BVH and volume. A resize recreates the trace and coarse textures without restamping, and the
 coarse prepass runs every frame because camera changes invalidate it.
 
+## Stage captures
+
+`scripts/trace-first-pixel.mjs` renders the box-and-sphere scene through this pass on the
+managed GPU client. `--baseline` writes a stage-fresh copy to
+`proofs/captures/trace-first-pixel-baseline.png`; `--occlusion` adds a flat green mesh slab
+in front of the left part of the box (`OCCLUSION` in `examples/trace-first-pixel/scene.js`)
+and writes `proofs/captures/trace-first-pixel-occlusion.png`. Both cases check the GPU
+command record (one R8Snorm 3D volume with five mips, the five buffer-to-texture copies, and
+the `stamp`, `mip`, `coarse` and `trace` passes at the full target) and the pixels before a
+judge scores them. The occlusion case fails unless the slab owns the box pixel behind it,
+which only `trace.composite`'s fragment depth can produce.
+
 ## Limits
 
 - Volume: at most 1024 voxels on the longest axis, at least 16 and multiples of 16 per axis,
