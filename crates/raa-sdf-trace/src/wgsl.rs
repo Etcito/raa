@@ -229,13 +229,21 @@ struct TraceFrame {
 /// records), 4 normalized bends (two f32 vec4s per instance, zero for rigid instances),
 /// 5 BVH nodes (min.xyz, left, max.xyz, count), 6 BVH order, 7 materials (32-byte records),
 /// 8 FrameGpu, 9 rgba16float colour, 10 r32float depth. Upload dummy records for empty buffers.
-/// The caller caps target dimensions to section 67's 1024 limit; dispatch rounds up by 8.
+/// Analytic fallback; target dimensions are unrestricted and dispatch rounds up by 8.
 pub fn trace_module(program: &TraceProgram) -> String {
+    trace_shader(program, TRACE_FALLBACK_WGSL)
+}
+
+fn trace_shader(program: &TraceProgram, traversal: &str) -> String {
     format!(
-        "{PROGRAM_EVAL_WGSL}{TRACE_FRAME_WGSL}\nconst TRACE_COUNT: u32 = {}u;\n{TRACE_WGSL}",
+        "{PROGRAM_EVAL_WGSL}{TRACE_FRAME_WGSL}\nconst TRACE_COUNT: u32 = {}u;\n{TRACE_WGSL}{traversal}",
         program.instances.len()
     )
 }
+
+const TRACE_FALLBACK_WGSL: &str = r#"
+fn trace_start(uv: vec2<f32>, o: vec3<f32>, d: vec3<f32>, limit: f32) -> f32 { return 0.0; }
+"#;
 
 const TRACE_WGSL: &str = r#"
 struct TraceSource {
@@ -285,7 +293,7 @@ fn trace_interval(lo: vec3<f32>, hi: vec3<f32>, o: vec3<f32>, d: vec3<f32>, limi
   }
   return vec2<f32>(near, far);
 }
-fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, limit: f32) -> f32 {
+fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, start: f32, limit: f32) -> f32 {
   let i = trace_instances[index];
   let s = trace_sources[i.source];
   var lo = trace_lo(s);
@@ -302,11 +310,11 @@ fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, limit: f32) -> f32 {
   // Keep world-distance t: the inverse-transformed direction must not be normalized.
   let local_d = vec3<f32>(dot(i.local[0].xyz, d), dot(i.local[1].xyz, d), dot(i.local[2].xyz, d));
   let interval = trace_interval(lo, hi, local_o, local_d, limit);
-  var t = interval.x;
+  var t = max(interval.x, start);
   for (var step = 0u; step < 128u && t <= interval.y; step = step + 1u) {
     let distance = trace_value(index, o + d * t).d;
-    if (distance < max(1e-4, 1e-4 * t)) { return t; }
-    t = t + distance;
+    if (abs(distance) < max(1e-4, 1e-5 * t)) { return t; }
+    t = t + abs(distance);
   }
   return limit;
 }
@@ -328,6 +336,7 @@ fn sdf_trace(@builtin(global_invocation_id) id: vec3<u32>) {
   let far = trace_unproject(ndc, 1.0);
   let direction = normalize(far - origin);
   var nearest = length(far - origin);
+  let start = trace_start(uv, origin, direction, nearest);
   var hit = TRACE_COUNT;
   var stack: array<u32, 32>;
   stack[0] = 0u;
@@ -345,7 +354,7 @@ fn sdf_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     } else {
       for (var k = 0u; k < node.count; k = k + 1u) {
         let index = trace_order[node.left + k];
-        let t = trace_candidate(index, origin, direction, nearest);
+        let t = trace_candidate(index, origin, direction, start, nearest);
         if (t < nearest) {
           nearest = t;
           hit = index;
@@ -369,6 +378,142 @@ fn sdf_trace(@builtin(global_invocation_id) id: vec3<u32>) {
   let clip = trace_frame.view_proj * vec4<f32>(p, 1.0);
   textureStore(trace_color, pixel, vec4<f32>(base * light, 1.0));
   textureStore(trace_depth, pixel, vec4<f32>(clamp(clip.z / clip.w, 0.0, 1.0)));
+}
+"#;
+
+/// Volume variant: `sdf_stamp`, `sdf_mip`, `sdf_coarse`, and full-resolution `sdf_trace`.
+/// Group 0 is unchanged. Group 1: 0 a 64-byte TraceVolume uniform, 1 sampled R8Snorm D3
+/// (all five mips), 2 writable packed u32 copy buffer, 3 sampled coarse R32Float D2,
+/// 4 writable coarse R32Float D2. Unused bindings may be omitted per entry point.
+/// Uniform: origin.xyz/world minimum, origin.w/isotropic voxel spacing; shape.xyz/base
+/// dimensions (multiples of 16, <=1024); encoding.x/positive distance range in metres;
+/// build.x/output mip (0 for stamping, 1..4 for reduction), build.y/row pitch in u32s.
+/// Bounds must enclose the instance BVH. Distances decode as snorm * range; base cells
+/// subtract their half diagonal, round toward minus infinity and clip to +/-range.
+/// Mips take the minimum of eight children, retaining conservative exterior distances.
+/// Dispatch stamp/mip over ceil(width/32), ceil(height/8), depth, then copy the buffer
+/// with a 256-byte-aligned row pitch into that texture mip before its next consumer.
+/// Rebuild all levels after program, instance, bounds or encoding changes, before tracing.
+/// Coarse size is ceil(viewport/8); dispatch both 2D entries in 8x8 workgroups.
+/// The colour target and FrameGpu viewport must have the same full image dimensions.
+pub fn volume_module(program: &TraceProgram) -> String {
+    trace_shader(program, VOLUME_WGSL)
+}
+
+const VOLUME_WGSL: &str = r#"
+struct TraceVolume {
+  origin: vec4<f32>, shape: vec4<u32>, encoding: vec4<f32>, build: vec4<u32>,
+}
+@group(1) @binding(0) var<uniform> trace_volume: TraceVolume;
+@group(1) @binding(1) var trace_field: texture_3d<f32>;
+@group(1) @binding(2) var<storage, read_write> trace_voxels: array<u32>;
+@group(1) @binding(3) var trace_coarse: texture_2d<f32>;
+@group(1) @binding(4) var trace_coarse_out: texture_storage_2d<r32float, write>;
+fn trace_world_distance(p: vec3<f32>, range: f32) -> f32 {
+  var best = range;
+  if (TRACE_COUNT == 0u) { return best; }
+  var stack: array<u32, 32>;
+  stack[0] = 0u;
+  var depth = 1u;
+  loop {
+    if (depth == 0u) { break; }
+    depth = depth - 1u;
+    let node = trace_nodes[stack[depth]];
+    let outside = max(max(node.lo - p, p - node.hi), vec3<f32>(0.0));
+    if (best >= 0.0 && length(outside) > best) { continue; }
+    if (node.count == 0u) {
+      stack[depth] = node.left;
+      stack[depth + 1u] = node.left + 1u;
+      depth = depth + 2u;
+    } else {
+      for (var k = 0u; k < node.count; k = k + 1u) {
+        best = min(best, trace_value(trace_order[node.left + k], p).d);
+      }
+    }
+  }
+  return best;
+}
+fn trace_write_voxels(id: vec3<u32>, reduce: bool) {
+  let level = trace_volume.build.x;
+  let size = trace_volume.shape.xyz >> vec3<u32>(level);
+  if (id.x * 4u >= size.x || id.y >= size.y || id.z >= size.z) { return; }
+  let range = trace_volume.encoding.x;
+  var packed = 0u;
+  for (var b = 0u; b < 4u; b = b + 1u) {
+    let cell = vec3<u32>(id.x * 4u + b, id.y, id.z);
+    var distance = range;
+    if (reduce) {
+      for (var c = 0u; c < 8u; c = c + 1u) {
+        let child = cell * 2u + vec3<u32>(c & 1u, (c >> 1u) & 1u, c >> 2u);
+        distance = min(distance, textureLoad(trace_field, vec3<i32>(child), i32(level) - 1).x * range);
+      }
+    } else {
+      let p = trace_volume.origin.xyz + (vec3<f32>(cell) + vec3<f32>(0.5)) * trace_volume.origin.w;
+      distance = trace_world_distance(p, range) - sqrt(3.0) * trace_volume.origin.w * 0.5;
+    }
+    let byte = bitcast<u32>(i32(floor(clamp(distance / range, -1.0, 1.0) * 127.0))) & 255u;
+    packed = packed | (byte << (b * 8u));
+  }
+  trace_voxels[(id.z * size.y + id.y) * trace_volume.build.y + id.x] = packed;
+}
+@compute @workgroup_size(8, 8)
+fn sdf_stamp(@builtin(global_invocation_id) id: vec3<u32>) { trace_write_voxels(id, false); }
+@compute @workgroup_size(8, 8)
+fn sdf_mip(@builtin(global_invocation_id) id: vec3<u32>) { trace_write_voxels(id, true); }
+fn trace_volume_distance(p: vec3<f32>, level: u32) -> f32 {
+  let local = (p - trace_volume.origin.xyz) / trace_volume.origin.w;
+  let size = vec3<f32>(trace_volume.shape.xyz);
+  if (any(local < vec3<f32>(0.0)) || any(local >= size)) {
+    return length(max(max(-local, local - size), vec3<f32>(0.0))) * trace_volume.origin.w;
+  }
+  let cell = min(vec3<u32>(local) >> vec3<u32>(level), textureDimensions(trace_field, level) - vec3<u32>(1u));
+  return max(0.0, textureLoad(trace_field, vec3<i32>(cell), i32(level)).x * trace_volume.encoding.x);
+}
+struct TraceRay { origin: vec3<f32>, direction: vec3<f32> }
+fn trace_ray_at(uv: vec2<f32>) -> TraceRay {
+  let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+  let o = trace_unproject(ndc, 0.0);
+  return TraceRay(o, normalize(trace_unproject(ndc, 1.0) - o));
+}
+fn trace_cone(uv: vec2<f32>, half_uv: vec2<f32>) -> vec2<f32> {
+  let ray = trace_ray_at(uv);
+  var cone = vec2<f32>(0.0);
+  for (var c = 0u; c < 4u; c = c + 1u) {
+    let sign = vec2<f32>(f32(c & 1u), f32(c >> 1u)) * 2.0 - vec2<f32>(1.0);
+    let corner = trace_ray_at(uv + sign * half_uv);
+    cone = max(cone, vec2<f32>(length(corner.origin - ray.origin), length(corner.direction - ray.direction)));
+  }
+  return cone;
+}
+fn trace_volume_walk(o: vec3<f32>, d: vec3<f32>, limit: f32, cone: vec2<f32>, start: f32) -> f32 {
+  var t = min(start, limit);
+  var distance = trace_volume.origin.w;
+  for (var step = 0u; step < 128u && t < limit; step = step + 1u) {
+    let radius = cone.x + cone.y * t;
+    let level = u32(clamp(floor(log2(max(max(radius, distance) / trace_volume.origin.w, 1.0))), 0.0, 4.0));
+    distance = trace_volume_distance(o + d * t, level);
+    if (distance <= radius + 1e-5) { break; }
+    // The cone expands while advancing; never step across a potential surface.
+    t = min(limit, t + (distance - radius) / (1.0 + cone.y));
+  }
+  // Exhaustion retains this potential interval for exact BVH tracing, never a miss.
+  return t;
+}
+@compute @workgroup_size(8, 8)
+fn sdf_coarse(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (any(id.xy >= textureDimensions(trace_coarse_out))) { return; }
+  let lo = vec2<f32>(id.xy * 8u) / trace_frame.viewport.xy;
+  let hi = min(vec2<f32>((id.xy + vec2<u32>(1u)) * 8u) / trace_frame.viewport.xy, vec2<f32>(1.0));
+  let uv = (lo + hi) * 0.5;
+  let ray = trace_ray_at(uv);
+  let far = trace_unproject(vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0), 1.0);
+  let start = trace_volume_walk(ray.origin, ray.direction, length(far - ray.origin), trace_cone(uv, (hi - lo) * 0.5), 0.0);
+  textureStore(trace_coarse_out, vec2<i32>(id.xy), vec4<f32>(start));
+}
+fn trace_start(uv: vec2<f32>, o: vec3<f32>, d: vec3<f32>, limit: f32) -> f32 {
+  let cell = min(vec2<u32>(uv * trace_frame.viewport.xy) / 8u, textureDimensions(trace_coarse) - vec2<u32>(1u));
+  let start = textureLoad(trace_coarse, vec2<i32>(cell), 0).x;
+  return trace_volume_walk(o, d, limit, trace_cone(uv, vec2<f32>(0.5) / trace_frame.viewport.xy), start);
 }
 "#;
 

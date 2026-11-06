@@ -1,6 +1,8 @@
 //! Section 67 WGSL evaluator: complete shader variants generated through the public
 //! public generation interfaces parse and type-check with naga; no GPU rendering is done here.
-use raa_sdf_trace::wgsl::{PROGRAM_EVAL_WGSL, composite_module, eval_module, trace_module};
+use raa_sdf_trace::wgsl::{
+    PROGRAM_EVAL_WGSL, composite_module, eval_module, trace_module, volume_module,
+};
 use raa_sdf_trace::{
     COMPOSITE_NAME, COMPOSITE_ORDER, Instance, Source, TRACE_NAME, TRACE_ORDER, TraceProgram,
 };
@@ -51,6 +53,7 @@ fn check(program: &TraceProgram) {
     for source in [
         eval_module(program),
         trace_module(program),
+        volume_module(program),
         composite_module(),
     ] {
         validate(&source);
@@ -187,4 +190,100 @@ fn installed_shader_layouts_match_the_frame_passes() {
     );
     let composite = validate(&composite_module());
     assert_eq!(bindings(&composite), vec![(0, 0), (1, 0), (1, 1)]);
+}
+
+#[test]
+fn volume_entry_points_and_copy_layout() {
+    let module = validate(&volume_module(&program(2, 7)));
+    let entries: Vec<_> = module
+        .entry_points
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.stage, entry.workgroup_size))
+        .collect();
+    assert_eq!(
+        entries,
+        ["sdf_trace", "sdf_stamp", "sdf_mip", "sdf_coarse"].map(|name| (
+            name,
+            naga::ShaderStage::Compute,
+            [8, 8, 1]
+        ))
+    );
+    let expected: Vec<_> = (0..=10)
+        .map(|binding| (0, binding))
+        .chain((0..=4).map(|binding| (1, binding)))
+        .collect();
+    assert_eq!(bindings(&module), expected);
+    assert_eq!(storage_format(&module, 1, 1), None);
+    assert_eq!(
+        storage_format(&module, 1, 4),
+        Some(naga::StorageFormat::R32Float)
+    );
+    for (_, global) in module.global_variables.iter() {
+        let Some(binding) = global.binding.filter(|b| b.group == 1) else {
+            continue;
+        };
+        let ty = &module.types[global.ty].inner;
+        match binding.binding {
+            0 => assert!(matches!(ty, naga::TypeInner::Struct { span: 64, .. })),
+            1 => assert!(matches!(
+                ty,
+                naga::TypeInner::Image {
+                    dim: naga::ImageDimension::D3,
+                    class: naga::ImageClass::Sampled { multi: false, .. },
+                    ..
+                }
+            )),
+            2 => assert!(matches!(ty, naga::TypeInner::Array { stride: 4, .. })),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn volume_tracing_keeps_exact_refinement_and_depth_outputs() {
+    let module = validate(&volume_module(&program(2, 7)));
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap();
+    for (index, entry) in module.entry_points.iter().enumerate() {
+        let used: Vec<_> = module
+            .global_variables
+            .iter()
+            .filter(|(handle, _)| !info.get_entry_point(index)[*handle].is_empty())
+            .filter_map(|(_, global)| global.name.as_deref())
+            .collect();
+        let required: &[&str] = match entry.name.as_str() {
+            "sdf_trace" => &[
+                "trace_code",
+                "trace_data",
+                "trace_bends",
+                "trace_nodes",
+                "trace_order",
+                "trace_materials",
+                "trace_field",
+                "trace_coarse",
+                "trace_color",
+                "trace_depth",
+            ],
+            "sdf_stamp" => &[
+                "trace_code",
+                "trace_data",
+                "trace_instances",
+                "trace_voxels",
+            ],
+            "sdf_mip" => &["trace_field", "trace_voxels"],
+            "sdf_coarse" => &["trace_frame", "trace_field", "trace_coarse_out"],
+            _ => panic!("unexpected entry {}", entry.name),
+        };
+        for name in required {
+            assert!(used.contains(name), "{} must use {name}", entry.name);
+        }
+        if entry.name == "sdf_trace" {
+            assert!(!used.contains(&"trace_voxels"));
+            assert!(!used.contains(&"trace_coarse_out"));
+        }
+    }
 }
