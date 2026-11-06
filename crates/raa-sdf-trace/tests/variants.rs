@@ -1,7 +1,8 @@
 //! Section 67 WGSL evaluator: complete shader variants generated through the public
-//! public generation interfaces parse and type-check with naga; no GPU rendering is done here.
+//! generation interfaces parse and type-check with naga; no GPU rendering is done here.
 use raa_sdf_trace::wgsl::{
-    PROGRAM_EVAL_WGSL, composite_module, eval_module, trace_module, volume_module,
+    PROGRAM_EVAL_WGSL, VOLUME_ABI_VERSION, VOLUME_COARSE_TILE, VOLUME_MAX_AXIS, VOLUME_MIP_LEVELS,
+    VolumeUniform, composite_module, eval_module, trace_module, volume_mip_layout, volume_module,
 };
 use raa_sdf_trace::{
     COMPOSITE_NAME, COMPOSITE_ORDER, Instance, Source, TRACE_NAME, TRACE_ORDER, TraceProgram,
@@ -42,7 +43,7 @@ fn program(sources: usize, code_len: u32) -> TraceProgram {
                 deform_kind: u32::from(index % 2 == 1),
                 bend_angle: 0.5,
                 bend_length: 2.0,
-                axes: 56,
+                axes: 56 | (index as u32 & 1), // Bent cases: negative along, toward=7.
                 bend: (index % 2 == 1).then_some([0.0, 30.0, 90.0, -1.0, 1.0, 0.0, 1.0, 0.0]),
             })
             .collect(),
@@ -216,7 +217,7 @@ fn volume_entry_points_and_copy_layout() {
     assert_eq!(storage_format(&module, 1, 1), None);
     assert_eq!(
         storage_format(&module, 1, 4),
-        Some(naga::StorageFormat::R32Float)
+        Some(naga::StorageFormat::Rgba32Float)
     );
     for (_, global) in module.global_variables.iter() {
         let Some(binding) = global.binding.filter(|b| b.group == 1) else {
@@ -286,4 +287,276 @@ fn volume_tracing_keeps_exact_refinement_and_depth_outputs() {
             assert!(!used.contains(&"trace_coarse_out"));
         }
     }
+}
+
+#[test]
+fn frozen_volume_uniform_and_all_mip_copy_strides() {
+    assert_eq!(
+        (VOLUME_ABI_VERSION, VOLUME_MIP_LEVELS, VOLUME_MAX_AXIS),
+        (1, 5, 1024)
+    );
+    assert_eq!(std::mem::size_of::<VolumeUniform>(), 64);
+    assert_eq!(std::mem::align_of::<VolumeUniform>(), 16);
+    assert_eq!(std::mem::offset_of!(VolumeUniform, origin), 0);
+    assert_eq!(std::mem::offset_of!(VolumeUniform, shape), 16);
+    assert_eq!(std::mem::offset_of!(VolumeUniform, encoding), 32);
+    assert_eq!(std::mem::offset_of!(VolumeUniform, build), 48);
+    let module = validate(&volume_module(&program(1, 1)));
+    let ty = module
+        .types
+        .iter()
+        .find(|(_, t)| t.name.as_deref() == Some("TraceVolume"))
+        .unwrap()
+        .1;
+    let naga::TypeInner::Struct { members, span } = &ty.inner else {
+        panic!("uniform");
+    };
+    assert_eq!(*span, 64);
+    assert_eq!(
+        members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+        [0, 16, 32, 48]
+    );
+    for dimensions in [[16, 16, 16], [1008, 48, 16], [1024, 1024, 512]] {
+        for mip in 0..VOLUME_MIP_LEVELS {
+            let layout = volume_mip_layout(dimensions, mip).unwrap();
+            let [w, h, d] = dimensions.map(|n| n >> mip);
+            assert_eq!(layout.dimensions, [w, h, d]);
+            assert_eq!(layout.bytes_per_row % 256, 0);
+            assert!(layout.bytes_per_row >= w && layout.bytes_per_row - w < 256);
+            assert_eq!(layout.rows_per_image, h);
+            assert_eq!(
+                layout.slice_stride,
+                u64::from(layout.bytes_per_row) * u64::from(h)
+            );
+            assert_eq!(layout.buffer_size, layout.slice_stride * u64::from(d));
+            assert_eq!(layout.workgroups, [w.div_ceil(32), h.div_ceil(8), d]);
+            // Last valid byte and final packed word fit; a narrow mip never copies padding.
+            let last_byte = u64::from(d - 1) * layout.slice_stride
+                + u64::from(h - 1) * u64::from(layout.bytes_per_row)
+                + u64::from(w - 1);
+            assert!(last_byte < layout.buffer_size);
+            assert!(w.div_ceil(4) * 4 <= layout.bytes_per_row);
+        }
+    }
+    for dims in [[0, 16, 16], [1025, 16, 16], [31, 16, 16]] {
+        assert!(volume_mip_layout(dims, 0).is_none());
+    }
+    assert!(volume_mip_layout([16; 3], 5).is_none());
+}
+
+fn encode(distance: f64, range: f64) -> i8 {
+    ((distance / range).clamp(-1.0, 1.0) * 127.0).floor() as i8
+}
+
+fn decode(byte: i8, range: f64) -> f64 {
+    (f64::from(byte) / 127.0).max(-1.0) * range
+}
+
+#[test]
+fn snorm_encoding_rounding_saturation_and_gpu_byte_order() {
+    for range in [0.01, 1.0, 1e6] {
+        for step in -2048..=2048 {
+            let distance = f64::from(step) * range / 1024.0;
+            let byte = encode(distance, range);
+            assert_ne!(byte, -128);
+            let decoded = decode(byte, range);
+            if distance >= -range {
+                assert!(decoded <= distance + range * 1e-12);
+                if distance <= range {
+                    assert!(distance - decoded <= range / 127.0 + range * 1e-12);
+                }
+            }
+            // Traversal never takes abs(): negative clipping cannot turn an interior into a skip.
+            assert!(decoded.max(0.0) <= distance.max(0.0) + range * 1e-12);
+        }
+        assert_eq!(decode(-128, range), -range);
+    }
+    let bytes = [-127i8, -1, 0, 127];
+    let packed = bytes
+        .iter()
+        .enumerate()
+        .fold(0u32, |p, (lane, b)| p | (u32::from(*b as u8) << (8 * lane)));
+    assert_eq!(packed.to_le_bytes(), [129, 255, 0, 127]);
+    for lane in 0..4 {
+        assert_eq!(((packed >> (8 * lane)) & 255) as u8 as i8, bytes[lane]);
+    }
+}
+
+fn length(p: [f64; 3]) -> f64 {
+    p.iter().map(|v| v * v).sum::<f64>().sqrt()
+}
+
+// Independent mathematical field: a sphere and an off-grid, sub-voxel thin plate.
+fn reference_field(p: [f64; 3]) -> f64 {
+    let sphere = length([p[0] + 0.3, p[1] - 0.1, p[2]]) - 0.23;
+    let q = [
+        (p[0] - 0.04).abs() - 0.003,
+        p[1].abs() - 0.4,
+        p[2].abs() - 0.8,
+    ];
+    let plate =
+        length(q.map(|v| v.max(0.0))) + q.into_iter().fold(f64::NEG_INFINITY, f64::max).min(0.0);
+    sphere.min(plate)
+}
+
+#[test]
+fn five_mips_bound_entire_cells_including_thin_surfaces_and_clipping() {
+    let n = 16usize;
+    let h = 2.0 / n as f64;
+    for range in [0.01, 0.2, 4.0] {
+        let mut cells = Vec::new();
+        for z in 0..n {
+            for y in 0..n {
+                for x in 0..n {
+                    let p = [x, y, z].map(|i| -1.0 + (i as f64 + 0.5) * h);
+                    cells.push(encode(
+                        reference_field(p) / 3.0 - 3f64.sqrt() * h / 2.0 - 1e-6,
+                        range,
+                    ));
+                }
+            }
+        }
+        let mut width = n;
+        for mip in 0..5 {
+            let spacing = h * f64::from(1 << mip);
+            for z in 0..width {
+                for y in 0..width {
+                    for x in 0..width {
+                        let clearance = (decode(cells[(z * width + y) * width + x], range)
+                            - range / 127.0
+                            - 1e-6)
+                            .max(0.0);
+                        // Corners, center and off-center points exercise the full footprint, not only samples.
+                        for fraction in [[0.5; 3], [0.13, 0.89, 0.37]]
+                            .into_iter()
+                            .chain((0..8).map(|c| [0, 1, 2].map(|a| f64::from((c >> a) & 1))))
+                        {
+                            let p = [x, y, z].map(|i| i as f64);
+                            let p = [0, 1, 2].map(|a| -1.0 + (p[a] + fraction[a]) * spacing);
+                            assert!(
+                                clearance <= reference_field(p).max(0.0) + 1e-12,
+                                "mip {mip}, {p:?}"
+                            );
+                        }
+                    }
+                }
+            }
+            if mip == 4 {
+                break;
+            }
+            let next = width / 2;
+            let mut reduced = vec![127; next * next * next];
+            for z in 0..next {
+                for y in 0..next {
+                    for x in 0..next {
+                        reduced[(z * next + y) * next + x] = (0..8)
+                            .map(|c| {
+                                let [cx, cy, cz] =
+                                    [x * 2 + (c & 1), y * 2 + ((c >> 1) & 1), z * 2 + (c >> 2)];
+                                cells[(cz * width + cy) * width + cx]
+                            })
+                            .min()
+                            .unwrap();
+                    }
+                }
+            }
+            cells = reduced;
+            width = next;
+        }
+        assert!(
+            cells[0] <= 0,
+            "the root must retain both sub-voxel surfaces"
+        );
+    }
+    let children = [-1i8, 127, 127, 127, 127, 127, 127, 127];
+    assert!(children.into_iter().map(f64::from).sum::<f64>() / 8.0 > 0.0);
+    assert!(
+        children.into_iter().min().unwrap() < 0,
+        "averaging would skip this possible surface"
+    );
+}
+
+#[test]
+fn coarse_cones_cover_full_resolution_edge_tiles_and_off_axis_rays() {
+    let target = [2057u32, 1235];
+    let tile = VOLUME_COARSE_TILE;
+    let coarse = target.map(|d| d.div_ceil(tile));
+    assert_eq!(coarse, [258, 155]);
+    let subtract = |a: [f64; 3], b: [f64; 3]| [0, 1, 2].map(|i| a[i] - b[i]);
+    let normalize = |v: [f64; 3]| v.map(|x| x / length(v));
+    for orthographic in [false, true] {
+        let ray = |uv: [f64; 2]| {
+            let xy = [uv[0] * 5.0 - 1.7, 1.3 - uv[1] * 3.0];
+            if orthographic {
+                ([xy[0] * 10.0, xy[1] * 10.0, 0.1], [0.0, 0.0, 99.9])
+            } else {
+                (
+                    [xy[0] * 0.1, xy[1] * 0.1, 0.1],
+                    [xy[0] * 99.9, xy[1] * 99.9, 99.9],
+                )
+            }
+        };
+        for cell in [[0, 0], [128, 77], [257, 154]] {
+            let lo = [0, 1].map(|a| f64::from(cell[a] * tile) / f64::from(target[a]));
+            let hi = [0, 1]
+                .map(|a| f64::from(((cell[a] + 1) * tile).min(target[a])) / f64::from(target[a]));
+            let uv = [0, 1].map(|a| (lo[a] + hi[a]) * 0.5);
+            let (o, delta) = ray(uv);
+            let dir = normalize(delta);
+            let mut origin_radius = 0f64;
+            let mut delta_radius = 0f64;
+            let mut projection = length(delta);
+            for corner in 0..4 {
+                let corner_uv = [0, 1].map(|a| if corner & (1 << a) == 0 { lo[a] } else { hi[a] });
+                let (co, cd) = ray(corner_uv);
+                origin_radius = origin_radius.max(length(subtract(co, o)));
+                delta_radius = delta_radius.max(length(subtract(cd, delta)));
+                projection = projection.min((0..3).map(|a| cd[a] * dir[a]).sum::<f64>());
+            }
+            let direction_radius = (2.0 * delta_radius / projection).min(2.0);
+            for y in 0..=16 {
+                for x in 0..=16 {
+                    let uv = [
+                        lo[0] + (hi[0] - lo[0]) * f64::from(x) / 16.0,
+                        lo[1] + (hi[1] - lo[1]) * f64::from(y) / 16.0,
+                    ];
+                    let (po, pd) = ray(uv);
+                    let pd = normalize(pd);
+                    for t in [0.0, 0.01, 1.0, 100.0, 10000.0] {
+                        let offset = [0, 1, 2].map(|a| po[a] - o[a] + t * (pd[a] - dir[a]));
+                        assert!(length(offset) <= origin_radius + direction_radius * t + 1e-10);
+                    }
+                }
+            }
+        }
+    }
+    // Every full pixel, including a partial tile on both axes, maps to a valid coarse texel.
+    for y in 0..target[1] {
+        for x in 0..target[0] {
+            assert!(x / tile < coarse[0] && y / tile < coarse[1]);
+        }
+    }
+}
+
+#[test]
+fn volume_guards_stale_results_and_preserves_full_target_coordinates() {
+    let shader = volume_module(&program(1, 1));
+    // Guard the ABI's safety-critical wiring as well as validating every entry's data flow above.
+    for required in [
+        "trace_volume.build.z == trace_volume.shape.w",
+        "if (!trace_volume_ready()) { return 0.0; }",
+        "coarse.y == 1.0 && coarse.z == f32(trace_volume.shape.w)",
+        "if (cone.x < 0.0) { return 0.0; }",
+        "var start = 0.0;",
+        "let size = textureDimensions(trace_color);",
+        "let pixel = vec2<i32>(id.xy);",
+        "trace_candidate(index, origin, direction, start, nearest)",
+        "trace_value(hit, p + x).d - trace_value(hit, p - x).d",
+        "let clip = trace_frame.view_proj * vec4<f32>(p, 1.0);",
+        "if (cell.x >= size.x) { continue; }",
+    ] {
+        assert!(shader.contains(required), "missing invariant: {required}");
+    }
+    assert!(!shader.contains("MAX_TARGET"));
+    assert!(composite_module().contains("if (color.a == 0.0) { discard; }"));
 }

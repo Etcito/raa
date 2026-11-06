@@ -1,4 +1,5 @@
-//! Shared WGSL evaluator of the section 67 packed SDF program.
+//! Section 67 evaluator and authoritative internal volume ABI (see [`VOLUME_ABI_VERSION`]).
+//! [`volume_module`] supplies the primary renderer; [`trace_module`] is the analytic fallback.
 //!
 //! [`PROGRAM_EVAL_WGSL`] declares the two packed program buffers at group 0 bindings 0 and 1 and
 //! defines the evaluator functions; it has no entry points. The trace pass and the GPU scatter pass
@@ -293,28 +294,93 @@ fn trace_interval(lo: vec3<f32>, hi: vec3<f32>, o: vec3<f32>, d: vec3<f32>, limi
   }
   return vec2<f32>(near, far);
 }
-fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, start: f32, limit: f32) -> f32 {
+// Smooth polynomial combinations preserve the maximum input Lipschitz bound.
+// Frobenius norms bound affine operator norms, including nonuniform and mirrored scales.
+fn trace_lipschitz(index: u32) -> f32 {
   let i = trace_instances[index];
   let s = trace_sources[i.source];
-  var lo = trace_lo(s);
-  var hi = trace_hi(s);
+  var bound = 1.0;
+  for (var k = 0u; k < s.code_len; k = k + 1u) {
+    let word = trace_code[s.code_start + k];
+    let op = word & 255u;
+    if (op < 1u || op > 8u) { continue; }
+    let b = s.data_start + (word >> 8u);
+    var norm2 = 0.0;
+    for (var row = 0u; row < 3u; row = row + 1u) {
+      for (var col = 0u; col < 3u; col = col + 1u) {
+        let v = trace_data[b + row * 4u + col];
+        norm2 = norm2 + v * v;
+      }
+    }
+    var primitive = 1.0;
+    if (op == 8u) {
+      let r = vec3<f32>(trace_data[b + 14u], trace_data[b + 15u], trace_data[b + 16u]);
+      let ratio = max(r.x, max(r.y, r.z)) / min(r.x, min(r.y, r.z));
+      primitive = 2.0 * ratio + ratio * ratio;
+    }
+    bound = max(bound, primitive * trace_data[b + 12u] * sqrt(norm2));
+  }
+  let norm = sqrt(dot(i.local[0].xyz, i.local[0].xyz) +
+    dot(i.local[1].xyz, i.local[1].xyz) + dot(i.local[2].xyz, i.local[2].xyz));
+  return max(1.0, bound * i.scale * norm / max(s.lipschitz, 1.0));
+}
+struct TraceBounds { lo: vec3<f32>, hi: vec3<f32> }
+fn trace_bounds(index: u32) -> TraceBounds {
+  let i = trace_instances[index];
+  let s = trace_sources[i.source];
+  var bounds = TraceBounds(trace_lo(s), trace_hi(s));
   if (i.kind == 1u) {
     let b = trace_bends[index];
-    // Same conservative deformation envelope as bvh::instance_bounds.
+    // Keep this identical to bvh::instance_bounds; normalized record is authoritative.
     let margin = 16.0 * max(abs(radians(b.a.y)), 1.0) *
-      (length(hi - lo) + abs(b.a.w) + abs(b.b.x) + length(b.b.yzw) + 1.0);
-    lo = lo - vec3<f32>(margin);
-    hi = hi + vec3<f32>(margin);
+      (length(bounds.hi - bounds.lo) + abs(b.a.w) + abs(b.b.x) + length(b.b.yzw) + 1.0);
+    bounds.lo = bounds.lo - vec3<f32>(margin);
+    bounds.hi = bounds.hi + vec3<f32>(margin);
   }
+  return bounds;
+}
+fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, start: f32, limit: f32) -> f32 {
+  let i = trace_instances[index];
+  let bounds = trace_bounds(index);
   let local_o = trace_map(i.local[0], i.local[1], i.local[2], o);
   // Keep world-distance t: the inverse-transformed direction must not be normalized.
   let local_d = vec3<f32>(dot(i.local[0].xyz, d), dot(i.local[1].xyz, d), dot(i.local[2].xyz, d));
-  let interval = trace_interval(lo, hi, local_o, local_d, limit);
+  let interval = trace_interval(bounds.lo, bounds.hi, local_o, local_d, limit);
   var t = max(interval.x, start);
-  for (var step = 0u; step < 128u && t <= interval.y; step = step + 1u) {
+  var previous_t = t;
+  var previous_d = trace_value(index, o + d * t).d;
+  for (var step = 0u; step < 256u && t <= interval.y; step = step + 1u) {
     let distance = trace_value(index, o + d * t).d;
-    if (abs(distance) < max(1e-4, 1e-5 * t)) { return t; }
-    t = t + abs(distance);
+    if (distance * previous_d < 0.0) {
+      // A bracket is refined on the exact program, including rays starting inside.
+      var lo = previous_t;
+      var hi = t;
+      for (var refine = 0u; refine < 24u; refine = refine + 1u) {
+        let mid = (lo + hi) * 0.5;
+        let value = trace_value(index, o + d * mid).d;
+        if (value * previous_d > 0.0) { lo = mid; } else { hi = mid; }
+      }
+      let root = (lo + hi) * 0.5;
+      // A bend branch discontinuity must not be mistaken for a root.
+      if (abs(trace_value(index, o + d * root).d) < max(1e-5, 1e-6 * root)) { return root; }
+    }
+    if (abs(distance) < max(1e-5, 1e-6 * t)) {
+      for (var refine = 0u; refine < 16u; refine = refine + 1u) {
+        let residual = abs(trace_value(index, o + d * t).d);
+        if (residual < 1e-7) { break; }
+        let next = t + residual;
+        if (next > interval.y) { return limit; }
+        if (next <= t) { break; }
+        t = next;
+      }
+      if (abs(trace_value(index, o + d * t).d) < max(1e-5, 1e-6 * t)) { return t; }
+    }
+    previous_t = t;
+    previous_d = trace_value(index, o + d * t).d;
+    // Preserve the CPU twin distance estimator; the voxel footprint uses a separate bound.
+    let next = t + abs(previous_d);
+    if (!(next > t)) { break; }
+    t = next;
   }
   return limit;
 }
@@ -381,21 +447,134 @@ fn sdf_trace(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 "#;
 
-/// Volume variant: `sdf_stamp`, `sdf_mip`, `sdf_coarse`, and full-resolution `sdf_trace`.
-/// Group 0 is unchanged. Group 1: 0 a 64-byte TraceVolume uniform, 1 sampled R8Snorm D3
-/// (all five mips), 2 writable packed u32 copy buffer, 3 sampled coarse R32Float D2,
-/// 4 writable coarse R32Float D2. Unused bindings may be omitted per entry point.
-/// Uniform: origin.xyz/world minimum, origin.w/isotropic voxel spacing; shape.xyz/base
-/// dimensions (multiples of 16, <=1024); encoding.x/positive distance range in metres;
-/// build.x/output mip (0 for stamping, 1..4 for reduction), build.y/row pitch in u32s.
-/// Bounds must enclose the instance BVH. Distances decode as snorm * range; base cells
-/// subtract their half diagonal, round toward minus infinity and clip to +/-range.
-/// Mips take the minimum of eight children, retaining conservative exterior distances.
-/// Dispatch stamp/mip over ceil(width/32), ceil(height/8), depth, then copy the buffer
-/// with a 256-byte-aligned row pitch into that texture mip before its next consumer.
-/// Rebuild all levels after program, instance, bounds or encoding changes, before tracing.
-/// Coarse size is ceil(viewport/8); dispatch both 2D entries in 8x8 workgroups.
-/// The colour target and FrameGpu viewport must have the same full image dimensions.
+/// Frozen internal volume ABI v1, shared by resource card 7118, scheduler 7119 and duel 7129.
+///
+/// Bindings (entry-point reflection may omit unused bindings): group 0 is exactly
+/// [`trace_module`]'s layout. Source stride 48/alignment 4, instance stride 128/alignment
+/// 16, bend stride 32/alignment 16, BVH stride 32/alignment 16, order stride 4,
+/// material stride 32/alignment 16; FrameGpu is 512 bytes/alignment 16. Packed file
+/// f64 bends are converted to two f32 vec4s per instance in normalized record order;
+/// rigid records are zero. Never reconstruct bends from angle/chord/axes or bounds.
+/// Group 1: 0 [`VolumeUniform`] (64 bytes/alignment 16); 1 sampled R8Snorm D3 with
+/// exactly five mips; 2 read_write storage array<u32> + COPY_SRC staging buffer;
+/// 3 sampled RGBA32Float D2 coarse results; 4 RGBA32Float write-only D2 coarse output.
+/// Sampled bindings use nonfiltering float sample types. No sampler, filtering,
+/// atomics or R8Snorm storage-write feature is required.
+///
+/// Uniform offsets: origin @0 = (world_min.xyz, isotropic base voxel spacing h);
+/// shape @16 = (base dimensions.xyz, revision); encoding @32 = (positive distance
+/// range R, nonnegative absolute evaluator/coordinate roundoff allowance E, 0, 0);
+/// build @48 = (destination mip, bytes_per_row/4, ready_revision, 0).
+/// Dimensions are positive multiples of 16, each <=1024. h and R are finite and
+/// positive. World bounds are [origin, origin+h*shape.xyz], enclosing the complete
+/// instance BVH, including bent envelopes. Empty scenes use a valid dummy volume.
+/// Mip m has shape.xyz>>m cells, spacing h*2^m, and centers at
+/// origin+(cell+0.5)*h*2^m, for m=0..4. The host must also fit texture dimensions and
+/// staging buffers within negotiated device limits. The volume limit never limits
+/// image size: colour, depth and FrameGpu.viewport.xy equal the full render target.
+///
+/// Base stamping computes a signed conservative proximity to the union of packed
+/// instances. Rigid fields divide by a derived Lipschitz bound (including primitive
+/// transforms and ellipsoid anisotropy). Bent inverse maps have angular singularities:
+/// positive steps are limited by the conservative instance envelope, becoming zero
+/// inside it. Exact bend evaluation still supplies signs; exact tracing resolves the
+/// envelope. This deliberately trades acceleration for safety near bent geometry.
+/// Subtract sqrt(3)*h/2 + E, then encode floor(127*clamp(d/R,-1,1)) as signed i8.
+/// -128 is never emitted. Decode = max(byte/127,-1)*R, as R8Snorm specifies.
+/// Unsaturated rounding error is in [-R/127,0]; positive saturation only shortens
+/// steps. Negative saturation is NOT a signed lower bound: all negative samples
+/// are treated as zero traversal clearance, never abs(sample). E must cover numeric
+/// evaluation error for the scene's coordinate/parameter range; if unavailable, set
+/// ready_revision=0 to use exact fallback. Sampling subtracts an additional R/127+E
+/// to cover floating encode/decode error. Each base value bounds its ENTIRE cell.
+/// Mips take the minimum signed byte of all eight children, not an average; thus
+/// positive clearance bounds the entire parent cell without another footprint term.
+/// TextureLoad selects one cell; there is no interpolation or filtering error.
+///
+/// [`volume_mip_layout`] defines every copy. One invocation owns four adjacent x
+/// bytes in one u32, with x+0 in bits 0..7 (little endian). bytesPerRow=align_up(width,
+/// 256), rowsPerImage=height, sliceStride=bytesPerRow*height, buffer size=sliceStride*
+/// depth. Buffer offset is zero. Last word lanes beyond width are zero. Row padding
+/// are not voxels: dispatch excludes padding words, texture copy extent is exactly
+/// (width,height,depth), and mip reduction never reads padding. Each dispatch uses
+/// a separate immutable uniform snapshot. Dispatch stamp/mip as
+/// (ceil(width/32),ceil(height/8),depth); copy before reading that mip for reduction.
+/// Dispatch coarse/full as (ceil(target_width/8),ceil(target_height/8),1) using each
+/// entry's own target dimensions; all four entries have workgroup size (8,8,1).
+/// A full sampled texture view is legal since writes target the separate buffer.
+///
+/// Coarse texture dimensions are ceil(full_target/8). Texel c covers full pixels
+/// [8*c,min(8*(c+1),target)); its cone encloses their complete pixel footprints.
+/// Coarse RGBA = (resume world-ray distance, state, revision as f32, 0).
+/// State 0=invalid/uninitialized; 1=certified empty prefix [0,resume); 2=ambiguous
+/// (resume must be zero). There is NO miss/discard state. Exhaustion returns a safe
+/// prefix; a cone candidate always runs exact refinement. Revision is 1..=2^24-1.
+/// Coarse and full rays measure t from their own near-plane origin. The cone bounds
+/// both origin offsets and normalized direction differences, including orthographic
+/// rays; only conventional perspective/orthographic projections with constant
+/// near/far homogeneous w over the viewport are accelerated. Other projections use
+/// state 2 / exact fallback. Full tracing maps pixel/8, validates state and revision,
+/// and otherwise resumes at zero. Mips follow clearance and pixel-cone footprint;
+/// cone termination starts exact BVH/program tracing, never accepts a baked hit.
+/// Exact gradients, material lookup and projected refined position supply colour
+/// and depth to [`composite_module`], preserving the mesh depth test.
+///
+/// Any accepted program/instance/bend/bounds/encoding change invalidates ready_revision
+/// and coarse results BEFORE consumers. Rebuild mip 0, copy, reduce/copy mips 1..4,
+/// then publish ready_revision=revision and run coarse before full trace. Revisions
+/// must match; clear coarse to zero on resize/wrap. Reject invalid updates atomically
+/// before changing revision. Target size/camera changes require a new coarse prepass
+/// (clear it first); they need no restamp. Never reuse coarse from a different frame.
+/// The shader checks revisions, but ordering and camera invalidation belong to 7119.
+pub const VOLUME_ABI_VERSION: u32 = 1;
+pub const VOLUME_MIP_LEVELS: u32 = 5;
+pub const VOLUME_MAX_AXIS: u32 = 1024;
+pub const VOLUME_COARSE_TILE: u32 = 8;
+
+/// Host representation of group 1 binding 0. See [`VOLUME_ABI_VERSION`] for fields.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VolumeUniform {
+    pub origin: [f32; 4],
+    pub shape: [u32; 4],
+    pub encoding: [f32; 4],
+    pub build: [u32; 4],
+}
+
+/// Buffer-to-texture copy layout; offsets are zero and no padding is sampled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VolumeMipLayout {
+    pub dimensions: [u32; 3],
+    pub bytes_per_row: u32,
+    pub rows_per_image: u32,
+    pub slice_stride: u64,
+    pub buffer_size: u64,
+    pub workgroups: [u32; 3],
+}
+
+pub fn volume_mip_layout(dimensions: [u32; 3], mip: u32) -> Option<VolumeMipLayout> {
+    if mip >= VOLUME_MIP_LEVELS
+        || dimensions
+            .iter()
+            .any(|&d| d == 0 || d > VOLUME_MAX_AXIS || d % 16 != 0)
+    {
+        return None;
+    }
+    let dimensions = dimensions.map(|d| d >> mip);
+    let [width, height, depth] = dimensions;
+    let bytes_per_row = width.div_ceil(256) * 256;
+    let slice_stride = u64::from(bytes_per_row) * u64::from(height);
+    Some(VolumeMipLayout {
+        dimensions,
+        bytes_per_row,
+        rows_per_image: height,
+        slice_stride,
+        buffer_size: slice_stride * u64::from(depth),
+        workgroups: [width.div_ceil(32), height.div_ceil(8), depth],
+    })
+}
+
+/// All four volume compute entry points, using [`VOLUME_ABI_VERSION`].
 pub fn volume_module(program: &TraceProgram) -> String {
     trace_shader(program, VOLUME_WGSL)
 }
@@ -408,7 +587,7 @@ struct TraceVolume {
 @group(1) @binding(1) var trace_field: texture_3d<f32>;
 @group(1) @binding(2) var<storage, read_write> trace_voxels: array<u32>;
 @group(1) @binding(3) var trace_coarse: texture_2d<f32>;
-@group(1) @binding(4) var trace_coarse_out: texture_storage_2d<r32float, write>;
+@group(1) @binding(4) var trace_coarse_out: texture_storage_2d<rgba32float, write>;
 fn trace_world_distance(p: vec3<f32>, range: f32) -> f32 {
   var best = range;
   if (TRACE_COUNT == 0u) { return best; }
@@ -427,7 +606,18 @@ fn trace_world_distance(p: vec3<f32>, range: f32) -> f32 {
       depth = depth + 2u;
     } else {
       for (var k = 0u; k < node.count; k = k + 1u) {
-        best = min(best, trace_value(trace_order[node.left + k], p).d);
+        let index = trace_order[node.left + k];
+        let i = trace_instances[index];
+        var distance = trace_value(index, p).d;
+        if (i.kind == 1u) {
+          let bounds = trace_bounds(index);
+          let local = trace_map(i.local[0], i.local[1], i.local[2], p);
+          let outside = max(max(bounds.lo - local, local - bounds.hi), vec3<f32>(0.0));
+          distance = min(distance, length(outside) * i.scale);
+        } else {
+          distance = distance / trace_lipschitz(index);
+        }
+        best = min(best, distance);
       }
     }
   }
@@ -441,6 +631,7 @@ fn trace_write_voxels(id: vec3<u32>, reduce: bool) {
   var packed = 0u;
   for (var b = 0u; b < 4u; b = b + 1u) {
     let cell = vec3<u32>(id.x * 4u + b, id.y, id.z);
+    if (cell.x >= size.x) { continue; }
     var distance = range;
     if (reduce) {
       for (var c = 0u; c < 8u; c = c + 1u) {
@@ -449,9 +640,11 @@ fn trace_write_voxels(id: vec3<u32>, reduce: bool) {
       }
     } else {
       let p = trace_volume.origin.xyz + (vec3<f32>(cell) + vec3<f32>(0.5)) * trace_volume.origin.w;
-      distance = trace_world_distance(p, range) - sqrt(3.0) * trace_volume.origin.w * 0.5;
+      distance = trace_world_distance(p, range) - sqrt(3.0) * trace_volume.origin.w * 0.5 - trace_volume.encoding.y;
     }
-    let byte = bitcast<u32>(i32(floor(clamp(distance / range, -1.0, 1.0) * 127.0))) & 255u;
+    let normalized = clamp(distance / range, -1.0, 1.0) * 127.0;
+    let code = select(floor(normalized), round(normalized), reduce);
+    let byte = bitcast<u32>(i32(code)) & 255u;
     packed = packed | (byte << (b * 8u));
   }
   trace_voxels[(id.z * size.y + id.y) * trace_volume.build.y + id.x] = packed;
@@ -464,10 +657,12 @@ fn trace_volume_distance(p: vec3<f32>, level: u32) -> f32 {
   let local = (p - trace_volume.origin.xyz) / trace_volume.origin.w;
   let size = vec3<f32>(trace_volume.shape.xyz);
   if (any(local < vec3<f32>(0.0)) || any(local >= size)) {
-    return length(max(max(-local, local - size), vec3<f32>(0.0))) * trace_volume.origin.w;
+    return max(0.0, length(max(max(-local, local - size), vec3<f32>(0.0))) * trace_volume.origin.w
+      - trace_volume.encoding.y);
   }
   let cell = min(vec3<u32>(local) >> vec3<u32>(level), textureDimensions(trace_field, level) - vec3<u32>(1u));
-  return max(0.0, textureLoad(trace_field, vec3<i32>(cell), i32(level)).x * trace_volume.encoding.x);
+  return max(0.0, textureLoad(trace_field, vec3<i32>(cell), i32(level)).x * trace_volume.encoding.x
+    - trace_volume.encoding.x / 127.0 - trace_volume.encoding.y);
 }
 struct TraceRay { origin: vec3<f32>, direction: vec3<f32> }
 fn trace_ray_at(uv: vec2<f32>) -> TraceRay {
@@ -475,15 +670,42 @@ fn trace_ray_at(uv: vec2<f32>) -> TraceRay {
   let o = trace_unproject(ndc, 0.0);
   return TraceRay(o, normalize(trace_unproject(ndc, 1.0) - o));
 }
+fn trace_volume_ready() -> bool {
+  return trace_volume.shape.w > 0u && trace_volume.shape.w < 16777216u &&
+    trace_volume.build.z == trace_volume.shape.w &&
+    all(trace_volume.shape.xyz == textureDimensions(trace_field, 0)) &&
+    textureNumLevels(trace_field) == 5u &&
+    trace_volume.origin.w > 0.0 && trace_volume.origin.w < 1e30 &&
+    trace_volume.encoding.x > 0.0 && trace_volume.encoding.x < 1e30 &&
+    trace_volume.encoding.y >= 0.0 && trace_volume.encoding.y < 1e30;
+}
 fn trace_cone(uv: vec2<f32>, half_uv: vec2<f32>) -> vec2<f32> {
-  let ray = trace_ray_at(uv);
-  var cone = vec2<f32>(0.0);
+  // Constant homogeneous w makes near and far world positions affine in uv.
+  // General projective cameras cannot use the corner proof: fall back exactly.
+  if (trace_frame.inv_proj[0].w != 0.0 || trace_frame.inv_proj[1].w != 0.0 ||
+      trace_frame.inv_view[0].w != 0.0 || trace_frame.inv_view[1].w != 0.0 ||
+      trace_frame.inv_view[2].w != 0.0) { return vec2<f32>(-1.0); }
+  let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+  let origin = trace_unproject(ndc, 0.0);
+  let delta = trace_unproject(ndc, 1.0) - origin;
+  let direction = normalize(delta);
+  var origin_radius = 0.0;
+  var delta_radius = 0.0;
+  var projection = length(delta);
   for (var c = 0u; c < 4u; c = c + 1u) {
     let sign = vec2<f32>(f32(c & 1u), f32(c >> 1u)) * 2.0 - vec2<f32>(1.0);
-    let corner = trace_ray_at(uv + sign * half_uv);
-    cone = max(cone, vec2<f32>(length(corner.origin - ray.origin), length(corner.direction - ray.direction)));
+    let corner_uv = uv + sign * half_uv;
+    let corner_ndc = vec2<f32>(corner_uv.x * 2.0 - 1.0, 1.0 - corner_uv.y * 2.0);
+    let corner_origin = trace_unproject(corner_ndc, 0.0);
+    let corner_delta = trace_unproject(corner_ndc, 1.0) - corner_origin;
+    origin_radius = max(origin_radius, length(corner_origin - origin));
+    delta_radius = max(delta_radius, length(corner_delta - delta));
+    projection = min(projection, dot(corner_delta, direction));
   }
-  return cone;
+  if (!(projection > 0.0)) { return vec2<f32>(-1.0); }
+  // ||normalize(v)-normalize(w)|| <= 2||v-w||/min(|v|,|w|).
+  // Corner extrema bound the affine rectangle, including every interior pixel.
+  return vec2<f32>(origin_radius, min(2.0, 2.0 * delta_radius / projection));
 }
 fn trace_volume_walk(o: vec3<f32>, d: vec3<f32>, limit: f32, cone: vec2<f32>, start: f32) -> f32 {
   var t = min(start, limit);
@@ -502,19 +724,35 @@ fn trace_volume_walk(o: vec3<f32>, d: vec3<f32>, limit: f32, cone: vec2<f32>, st
 @compute @workgroup_size(8, 8)
 fn sdf_coarse(@builtin(global_invocation_id) id: vec3<u32>) {
   if (any(id.xy >= textureDimensions(trace_coarse_out))) { return; }
+  let pixel = vec2<i32>(id.xy);
+  textureStore(trace_coarse_out, pixel, vec4<f32>(0.0));
+  if (!trace_volume_ready()) { return; }
   let lo = vec2<f32>(id.xy * 8u) / trace_frame.viewport.xy;
   let hi = min(vec2<f32>((id.xy + vec2<u32>(1u)) * 8u) / trace_frame.viewport.xy, vec2<f32>(1.0));
   let uv = (lo + hi) * 0.5;
+  let cone = trace_cone(uv, (hi - lo) * 0.5);
+  if (cone.x < 0.0) {
+    textureStore(trace_coarse_out, pixel, vec4<f32>(0.0, 2.0, f32(trace_volume.shape.w), 0.0));
+    return;
+  }
   let ray = trace_ray_at(uv);
   let far = trace_unproject(vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0), 1.0);
-  let start = trace_volume_walk(ray.origin, ray.direction, length(far - ray.origin), trace_cone(uv, (hi - lo) * 0.5), 0.0);
-  textureStore(trace_coarse_out, vec2<i32>(id.xy), vec4<f32>(start));
+  let start = trace_volume_walk(ray.origin, ray.direction, length(far - ray.origin), cone, 0.0);
+  textureStore(trace_coarse_out, pixel, vec4<f32>(start, 1.0, f32(trace_volume.shape.w), 0.0));
 }
 fn trace_start(uv: vec2<f32>, o: vec3<f32>, d: vec3<f32>, limit: f32) -> f32 {
+  if (!trace_volume_ready()) { return 0.0; }
+  let cone = trace_cone(uv, vec2<f32>(0.5) / trace_frame.viewport.xy);
+  if (cone.x < 0.0) { return 0.0; }
   let cell = min(vec2<u32>(uv * trace_frame.viewport.xy) / 8u, textureDimensions(trace_coarse) - vec2<u32>(1u));
-  let start = textureLoad(trace_coarse, vec2<i32>(cell), 0).x;
-  return trace_volume_walk(o, d, limit, trace_cone(uv, vec2<f32>(0.5) / trace_frame.viewport.xy), start);
+  let coarse = textureLoad(trace_coarse, vec2<i32>(cell), 0);
+  var start = 0.0;
+  if (coarse.y == 1.0 && coarse.z == f32(trace_volume.shape.w) && coarse.x >= 0.0 && coarse.x < 1e30) {
+    start = min(coarse.x, limit);
+  }
+  return trace_volume_walk(o, d, limit, cone, start);
 }
+
 "#;
 
 /// Fullscreen forward composition: `vs_main` (3 vertices), `fs_main` (HDR + frag_depth).
@@ -541,7 +779,7 @@ fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> TraceOutput {
   let size = textureDimensions(trace_color);
-  // Actual rounded target size, not the nominal reduction factor; clamp the last row/column.
+  // Colour/depth and viewport have the same full target size; clamp edge coordinates.
   let uv = frag.xy / trace_frame.viewport.xy;
   let pixel = vec2<i32>(min(vec2<u32>(uv * vec2<f32>(size)), size - vec2<u32>(1u)));
   let color = textureLoad(trace_color, pixel, 0);
