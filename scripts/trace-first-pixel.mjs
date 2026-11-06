@@ -8,7 +8,8 @@
 //   node scripts/trace-first-pixel.mjs render --out proofs/captures/trace-first-pixel.png
 //                                               blank probe, small frame, full frame
 //   node scripts/trace-first-pixel.mjs fresh    checks the capture is this run's GPU trace
-//                                               output and writes the capture record
+//                                               output (dark background, both shapes, no
+//                                               speckles) and writes the capture record
 //   node scripts/trace-first-pixel.mjs retain --out out/trace-first-pixel
 //                                               keeps the image and records for judgment
 //
@@ -16,6 +17,7 @@
 // code and wasm identity and the output dimensions next to the image the judge reads.
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { inflateSync } from 'node:zlib';
 import {
   copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from 'node:fs';
@@ -102,6 +104,10 @@ function capturePage() {
     phase('load delivered RAA wasm and create engine');
     const raa = await loadRaa();
     const engine = await raa.createEngine(canvas, { msaa: 1 });
+    // The first pixel is the traced shapes alone on a dark flat background: the default
+    // sky image would fill every miss with a light gradient.
+    engine.setPassEnabled('sky.background', false);
+    engine.setBackground(SCENE.background);
     engine.setTraceScene(programBytes(SCENE));
     const { target, distance, yaw, pitch } = SCENE.camera;
     engine.setOrbit(target, distance, yaw, pitch);
@@ -233,6 +239,84 @@ export function pngSize(buf) {
   return [buf.readUInt32BE(16), buf.readUInt32BE(20)];
 }
 
+// RGB(A) 8-bit non-interlaced PNG -> { width, height, channels, data } (filters 0-4).
+export function decodePng(buf) {
+  const size = pngSize(buf);
+  if (!size) throw new Error('not a PNG');
+  const [width, height] = size;
+  const depth = buf[24], type = buf[25], interlace = buf[28];
+  const channels = { 2: 3, 6: 4 }[type];
+  if (depth !== 8 || !channels || interlace !== 0) throw new Error(`unsupported PNG (depth ${depth}, type ${type}, interlace ${interlace})`);
+  const chunks = [];
+  for (let at = 8; at + 8 <= buf.length;) {
+    const len = buf.readUInt32BE(at), kind = buf.toString('ascii', at + 4, at + 8);
+    if (kind === 'IDAT') chunks.push(buf.subarray(at + 8, at + 8 + len));
+    if (kind === 'IEND') break;
+    at += 12 + len;
+  }
+  const raw = inflateSync(Buffer.concat(chunks));
+  const stride = width * channels;
+  const data = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= channels ? data[y * stride + x - channels] : 0;
+      const b = y > 0 ? data[(y - 1) * stride + x] : 0;
+      const c = x >= channels && y > 0 ? data[(y - 1) * stride + x - channels] : 0;
+      const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
+      const pred = [0, a, b, (a + b) >> 1, pa <= pb && pa <= pc ? a : pb <= pc ? b : c][filter];
+      if (pred === undefined) throw new Error(`bad PNG filter ${filter}`);
+      data[y * stride + x] = (line[x] + pred) & 255;
+    }
+  }
+  return { width, height, channels, data };
+}
+
+// Pixel of a world point under the capture camera (same convention as checkView).
+export function projectPixel(scene, point, width, height) {
+  const { target, distance, yaw, pitch } = scene.camera;
+  const right = [Math.cos(yaw), 0, -Math.sin(yaw)];
+  const back = [Math.cos(pitch) * Math.sin(yaw), Math.sin(pitch), Math.cos(pitch) * Math.cos(yaw)];
+  const up = [-Math.sin(pitch) * Math.sin(yaw), Math.cos(pitch), -Math.sin(pitch) * Math.cos(yaw)];
+  const v = point.map((p, a) => p - target[a]);
+  const dot = (a, b) => a.reduce((sum, x, i) => sum + x * b[i], 0);
+  const fy = Math.tan(Math.PI / 6), fx = fy * width / height, z = distance - dot(v, back);
+  return [Math.round((dot(v, right) / (z * fx) + 1) / 2 * width), Math.round((1 - dot(v, up) / (z * fy)) / 2 * height)];
+}
+
+// Deterministic capture check, run before the visual judge: the background is dark at the
+// four corners, the box (reddish) and the sphere (bluish) cover their projected centres, and
+// their lit surfaces carry no dark speckles (back-face hits of a broken refinement).
+export function checkCapture(image, scene) {
+  const { width, height, channels, data } = image;
+  const at = (x, y) => { const i = (y * width + x) * channels; return [data[i], data[i + 1], data[i + 2]]; };
+  const problems = [];
+  const m = Math.round(Math.min(width, height) * 0.03);
+  for (const [x, y] of [[m, m], [width - 1 - m, m], [m, height - 1 - m], [width - 1 - m, height - 1 - m]]) {
+    const px = at(x, y);
+    if (Math.max(...px) > 80) problems.push(`background at ${x},${y} is ${px.join(',')}, not dark`);
+  }
+  const r = Math.max(2, Math.round(height / 40));
+  for (const [name, hue] of [['box', 0], ['sphere', 2]]) {
+    const [cx, cy] = projectPixel(scene, scene[name].center, width, height);
+    const px = [];
+    for (let y = cy - r; y <= cy + r; y++) for (let x = cx - r; x <= cx + r; x++) {
+      if (x >= 0 && y >= 0 && x < width && y < height) px.push(at(x, y));
+    }
+    if (!px.length) { problems.push(`${name} centre ${cx},${cy} is off screen`); continue; }
+    const luma = px.map((p) => Math.max(...p)).sort((a, b) => a - b);
+    const median = luma[luma.length >> 1];
+    const mean = [0, 1, 2].map((c) => px.reduce((s, p) => s + p[c], 0) / px.length);
+    if (!(mean[hue] > mean[1] && mean[hue] > mean[2 - hue])) {
+      problems.push(`${name} centre ${cx},${cy} is ${mean.map(Math.round).join(',')}, not ${hue ? 'blue' : 'red'}`);
+    }
+    const dark = luma.filter((v) => v < median / 2).length;
+    if (dark > px.length * 0.005) problems.push(`${name} surface has ${dark} of ${px.length} dark speckle pixels`);
+  }
+  return problems;
+}
+
 // The raw op result the GPU client wrote (the page fields with `trace`).
 function readOp(folder, accepts) {
   if (!existsSync(folder)) return null;
@@ -322,6 +406,8 @@ function fresh() {
   if (!size || size[0] !== input.width || size[1] !== input.height) {
     fail(`capture is ${size ? size.join('x') : 'not a PNG'}, expected the ${input.width}x${input.height} canvas`);
   }
+  const problems = checkCapture(decodePng(png), SCENE);
+  if (problems.length) fail(`capture content check failed:\n  ${problems.join('\n  ')}`);
   const op = opResult();
   if (!op) fail(`no op result with trace stats in ${OUT}/`);
   validateOp(op, size[0], size[1]);

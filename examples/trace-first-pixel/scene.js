@@ -15,6 +15,7 @@ export const SCENE = Object.freeze({
   camera: { target: [0, 0, 0], distance: 6.5, yaw: 0.35, pitch: 0.35 },
   light: { direction: [-0.4, -1, -0.3], color: [1, 0.96, 0.9], intensity: 3 },
   ambient: { color: [0.55, 0.6, 0.7], intensity: 0.35 },
+  background: [0.02, 0.025, 0.035],
 });
 
 const translate = ([x, y, z]) => [1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z];

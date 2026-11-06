@@ -552,6 +552,9 @@ fn volume_guards_stale_results_and_preserves_full_target_coordinates() {
         "let size = textureDimensions(trace_color);",
         "let pixel = vec2<i32>(id.xy);",
         "trace_candidate(index, origin, direction, start, nearest)",
+        // Near-surface refinement steps by the signed residual (CPU twin): an abs() step
+        // marched rounded-inside hits through the solid to the unlit back face (speckles).
+        "let residual = trace_value(index, o + d * t).d;",
         "trace_value(hit, p + x).d - trace_value(hit, p - x).d",
         "let clip = trace_frame.view_proj * vec4<f32>(p, 1.0);",
         "if (cell.x >= size.x) { continue; }",
@@ -559,6 +562,7 @@ fn volume_guards_stale_results_and_preserves_full_target_coordinates() {
         assert!(shader.contains(required), "missing invariant: {required}");
     }
     assert!(!shader.contains("MAX_TARGET"));
+    assert!(!shader.contains("let residual = abs("));
     assert!(composite_module().contains("if (color.a == 0.0) { discard; }"));
 }
 

@@ -366,7 +366,9 @@ fn trace_candidate(index: u32, o: vec3<f32>, d: vec3<f32>, start: f32, limit: f3
     }
     if (abs(distance) < max(1e-5, 1e-6 * t)) {
       for (var refine = 0u; refine < 16u; refine = refine + 1u) {
-        let residual = abs(trace_value(index, o + d * t).d);
+        // Signed, as in the CPU twin: a hit rounded inside must stop here; stepping by
+        // |d| would march through the solid and return the unlit back face.
+        let residual = trace_value(index, o + d * t).d;
         if (residual < 1e-7) { break; }
         let next = t + residual;
         if (next > interval.y) { return limit; }
