@@ -19,6 +19,7 @@ pub use editor::WireframeMode;
 mod extras;
 mod frame;
 mod handle;
+mod instance_store;
 mod library;
 mod material;
 mod material_data;
@@ -26,23 +27,24 @@ mod meshes;
 mod passes;
 mod prep;
 mod renderer;
+pub mod skin_bounds;
+pub mod skin_draw;
+pub mod skin_editor;
+pub mod skin_views;
 mod slots;
 mod textures;
-pub mod skin_views;
-pub mod skin_draw;
-pub mod skin_bounds;
-pub mod skin_editor;
+pub use skin_editor::{OverlayGeometry, REST_EDGE_STRIDE};
 pub use skin_views::{
     INSTANCE_PALETTE_OFFSET, PALETTE_BLOCK, PALETTE_MATRIX_BYTES, RestMeshView, SKIN_RECORD_STRIDE,
     SKINNED_EDGE_STRIDE, SKINNED_STREAM0_STRIDE, SKINNED_TANGENT_STRIDE, SkinDraw, SkinDrawSource,
     SkinViews, SkinnedView,
 };
-pub use skin_editor::{OverlayGeometry, REST_EDGE_STRIDE};
 
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_frame_gpu};
 pub use handle::{LitHandle, PipelineSpec};
+pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
 pub use material::{
     DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
