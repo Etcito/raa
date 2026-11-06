@@ -1,8 +1,8 @@
 //! Section 67 reader: a valid program, truncation, bad references and malformed instructions.
 
 use raa_sdf_trace::{
-    DATA, FORMAT, MAGIC, NOT_FINITE, OPCODE, REFERENCE, SOURCE, STACK, TraceProgram, VERSION,
-    VERSION_ERROR, opcode, parse,
+    DATA, FORMAT, INSTANCE_COUNT, MAGIC, MAX_TARGET, NOT_FINITE, OPCODE, REFERENCE, SOURCE, STACK,
+    TraceProgram, TraceScene, VERSION, VERSION_ERROR, opcode, parse, target_size,
 };
 
 const IDENTITY: [[f32; 4]; 3] = [
@@ -327,4 +327,113 @@ fn keeps_bend_bits_and_refuses_an_incomplete_bend() {
     f.instances[0][30] = 0.0f32.to_bits();
     f.instances[0][31] = 40;
     assert_eq!(parse(&f.bytes()).expect_err("zero length").code(), FORMAT);
+}
+
+fn instance_floats(words: Vec<u32>) -> Vec<f32> {
+    words.into_iter().map(f32::from_bits).collect()
+}
+
+#[test]
+fn target_size_preserves_aspect_under_the_cap() {
+    assert_eq!(MAX_TARGET, 1024);
+    assert_eq!(target_size(2048, 1024), (1024, 512), "landscape");
+    assert_eq!(target_size(1024, 2048), (512, 1024), "portrait");
+    assert_eq!(target_size(800, 600), (800, 600), "already small");
+    assert_eq!(target_size(3000, 1000), (1024, 342), "ceil");
+    assert_eq!(target_size(0, 0), (1, 1));
+
+    let mut scene = TraceScene::default();
+    scene
+        .set_program(&Fixture::minimal().bytes())
+        .expect("valid");
+    let stats = scene.stats(target_size(2048, 1024));
+    assert_eq!(
+        (stats.sources, stats.instances, stats.placeholders),
+        (1, 1, 0)
+    );
+    assert_eq!((stats.width, stats.height), (1024, 512));
+}
+
+#[test]
+fn keeps_the_working_program_when_a_replacement_is_refused() {
+    let mut scene = TraceScene::default();
+    scene
+        .set_program(&Fixture::minimal().bytes())
+        .expect("valid");
+    let program = scene.program.clone().expect("a program");
+    let bvh = scene.bvh.clone();
+
+    let mut bad = Fixture::minimal().bytes();
+    bad[..4].copy_from_slice(b"XXXX");
+    assert_eq!(
+        scene.set_program(&bad).expect_err("bad magic").code(),
+        FORMAT
+    );
+    let mut bad = Fixture::minimal().bytes();
+    bad.truncate(bad.len() - 4);
+    assert_eq!(
+        scene.set_program(&bad).expect_err("truncated").code(),
+        FORMAT
+    );
+    assert_eq!(scene.program.as_ref(), Some(&program));
+    assert_eq!(&scene.bvh, &bvh);
+}
+
+#[test]
+fn refuses_an_instance_update_with_the_wrong_count() {
+    let mut scene = TraceScene::default();
+    assert_eq!(
+        scene.update_instances(&[]).expect_err("no program").code(),
+        INSTANCE_COUNT
+    );
+    scene
+        .set_program(&Fixture::minimal().bytes())
+        .expect("valid");
+    let program = scene.program.clone().expect("a program");
+    let bvh = scene.bvh.clone();
+
+    let one = instance_floats(instance(0, u32::MAX));
+    let two = [one.clone(), one.clone()].concat();
+    for words in [Vec::new(), two, one[..one.len() - 1].to_vec()] {
+        assert_eq!(
+            scene
+                .update_instances(&words)
+                .expect_err("wrong count")
+                .code(),
+            INSTANCE_COUNT
+        );
+    }
+    assert_eq!(scene.program.as_ref(), Some(&program));
+    assert_eq!(&scene.bvh, &bvh);
+}
+
+#[test]
+fn update_rebuilds_the_bvh_and_clear_is_safe() {
+    let mut scene = TraceScene::default();
+    scene
+        .set_program(&Fixture::minimal().bytes())
+        .expect("valid");
+    let before = scene.bvh.nodes[0].min[0];
+
+    let mut moved = instance(0, u32::MAX);
+    moved[3] = 10.0f32.to_bits();
+    scene
+        .update_instances(&instance_floats(moved))
+        .expect("same count");
+    assert_eq!(
+        scene.program.as_ref().expect("a program").instances[0].world_from_local[0][3],
+        10.0
+    );
+    assert!(scene.bvh.nodes[0].min[0] > before);
+
+    scene.clear();
+    assert!(scene.program.is_none() && scene.bvh.nodes.is_empty());
+    scene.clear();
+    assert_eq!(
+        scene.update_instances(&[]).expect_err("cleared").code(),
+        INSTANCE_COUNT
+    );
+    scene
+        .set_program(&Fixture::minimal().bytes())
+        .expect("loaded again");
 }
