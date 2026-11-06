@@ -1,7 +1,7 @@
 //! Section 67 reader: a valid program, truncation, bad references and malformed instructions.
 
 use raa_sdf_trace::{
-    DATA, FORMAT, INSTANCE_COUNT, MAGIC, MAX_TARGET, NOT_FINITE, OPCODE, REFERENCE, SOURCE, STACK,
+    DATA, FORMAT, INSTANCE_COUNT, MAGIC, NOT_FINITE, OPCODE, REFERENCE, SOURCE, STACK,
     TraceProgram, TraceScene, VERSION, VERSION_ERROR, opcode, parse, target_size,
 };
 
@@ -354,12 +354,15 @@ fn instance_floats(words: Vec<u32>) -> Vec<f32> {
 }
 
 #[test]
-fn target_size_preserves_aspect_under_the_cap() {
-    assert_eq!(MAX_TARGET, 1024);
-    assert_eq!(target_size(2048, 1024), (1024, 512), "landscape");
-    assert_eq!(target_size(1024, 2048), (512, 1024), "portrait");
+fn target_size_keeps_the_full_render_target() {
+    assert_eq!(target_size(2048, 1024), (2048, 1024), "landscape");
+    assert_eq!(target_size(1024, 2048), (1024, 2048), "portrait");
     assert_eq!(target_size(800, 600), (800, 600), "already small");
-    assert_eq!(target_size(3000, 1000), (1024, 342), "ceil");
+    assert_eq!(
+        target_size(3000, 1000),
+        (3000, 1000),
+        "above the volume cap"
+    );
     assert_eq!(target_size(0, 0), (1, 1));
 
     let mut scene = TraceScene::default();
@@ -371,7 +374,7 @@ fn target_size_preserves_aspect_under_the_cap() {
         (stats.sources, stats.instances, stats.placeholders),
         (1, 1, 0)
     );
-    assert_eq!((stats.width, stats.height), (1024, 512));
+    assert_eq!((stats.width, stats.height), (2048, 1024));
 }
 
 #[test]

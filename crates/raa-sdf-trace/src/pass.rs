@@ -12,24 +12,12 @@ use crate::bvh::{self, Bvh};
 use crate::program::{INSTANCE_COUNT, INSTANCE_WORDS, Instance, TraceError, TraceProgram, parse};
 use crate::wgsl::{composite_module, trace_module};
 
-pub const MAX_TARGET: u32 = 1024;
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
-/// `ceil(w*f)` x `ceil(h*f)` with `f = min(1, MAX_TARGET / max(w, h))`.
+/// The trace pass runs at the full size of the render target; a zero axis collapses to one pixel.
 pub fn target_size(width: u32, height: u32) -> (u32, u32) {
-    let longest = width.max(height);
-    if longest == 0 {
-        return (1, 1);
-    }
-    if longest <= MAX_TARGET {
-        return (width.max(1), height.max(1));
-    }
-    let scale = f64::from(MAX_TARGET) / f64::from(longest);
-    (
-        ((f64::from(width) * scale).ceil() as u32).max(1),
-        ((f64::from(height) * scale).ceil() as u32).max(1),
-    )
+    (width.max(1), height.max(1))
 }
 
 #[derive(Clone, Debug)]
