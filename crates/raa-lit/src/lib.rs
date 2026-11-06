@@ -21,6 +21,7 @@ mod frame;
 mod handle;
 mod instance_store;
 mod library;
+mod lod;
 mod material;
 mod material_data;
 mod meshes;
@@ -46,6 +47,9 @@ pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_f
 pub use handle::{LitHandle, PipelineSpec};
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
+pub use lod::{
+    LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level, lod_error, shadow_level,
+};
 pub use material::{
     DrawClass, FLAG_DOUBLE_SIDED, FLAG_FUR, FLAG_NO_SHADOW, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT,
     FLAG_UNLIT, FLAG_VERTEX_FN, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial, SurfaceModel,
