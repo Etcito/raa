@@ -354,6 +354,9 @@ pub(crate) struct LitShared {
     pub(crate) store: InstanceStore,
     pub(crate) lods: LodRegistry,
     pub(crate) lod_options: LodParams,
+    /// Cascade caster selection parameters; threshold_px is in shadow-map texels and the
+    /// per-tag bias is added to `bias`.
+    pub(crate) shadow_lod_options: LodParams,
     /// Camera hysteresis by stable slot; NO_CAMERA_LEVEL means no previous selection.
     pub(crate) levels: Vec<u8>,
     /// Shadow hysteresis by stable slot and cascade (`slot * 4 + cascade`);
@@ -486,6 +489,7 @@ impl LitShared {
             select: IdPrep::new(max_instances, max_materials),
             lods: LodRegistry::new(),
             lod_options: LodParams::default(),
+            shadow_lod_options: LodParams::default(),
             levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize],
             shadow_levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize * SHADOW_CASCADES],
             lod_bias: HashMap::new(),
@@ -1077,7 +1081,7 @@ impl LitHandle {
                 &s.lods,
                 &mut s.shadow_levels,
                 &s.lod_bias,
-                &s.lod_options,
+                &s.shadow_lod_options,
                 texel_world,
                 &skinned,
             );
@@ -1626,5 +1630,64 @@ mod tests {
         assert!(casters.contains(&0), "casters between sun and box stay");
         assert!(casters.contains(&2));
         assert!(!casters.contains(&1), "outside the cascade x extent");
+    }
+
+    #[test]
+    fn cascade_levels_follow_the_shadow_options_not_the_camera_ones() {
+        use crate::lod::{LodLevel, camera_level};
+        use raa_scene::RenderItem;
+
+        let mut lods = LodRegistry::new();
+        lods.set(
+            MeshId(0),
+            &[LodLevel {
+                mesh: MeshId(1),
+                error: 2.0,
+            }],
+        )
+        .unwrap();
+        let list = RenderList {
+            items: vec![RenderItem {
+                mesh: MeshId(0),
+                material: MaterialId(0),
+                world: Mat4::IDENTITY,
+            }],
+            batches: Vec::new(),
+        };
+        let tags = [7u32];
+        let slots = [0u32];
+        let bias = HashMap::new();
+        let camera = LodParams {
+            bias: 3.0,
+            ..LodParams::default()
+        };
+        let shadow = LodParams::default();
+        // One world unit per texel: the level's error (2 texels) is above the shadow
+        // threshold (1 texel) but below the camera bias +3 threshold (8 texels).
+        let mut shadow_levels = vec![NO_CAMERA_LEVEL; SHADOW_CASCADES];
+        cascade_levels(
+            &list,
+            &tags,
+            &slots,
+            0,
+            &lods,
+            &mut shadow_levels,
+            &bias,
+            &shadow,
+            1.0,
+            &|_| None,
+        );
+        assert_eq!(shadow_levels[0], 0, "shadow options keep level 0");
+        let chain = lods.chain(MeshId(0)).unwrap();
+        assert_eq!(
+            shadow_level(chain, 1.0, 1.0, None, &shadow),
+            0,
+            "the cascade level follows the shadow options"
+        );
+        assert_eq!(
+            camera_level(chain, 1.0, 1.0, 1.0, None, &camera),
+            1,
+            "the camera options would pick the coarser level"
+        );
     }
 }

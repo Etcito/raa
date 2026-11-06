@@ -151,6 +151,18 @@ fn camera_mesh(lods: &LodRegistry, levels: &[u8], slot: u32, mesh: MeshId) -> Me
         .map_or(mesh, |level| level.mesh)
 }
 
+/// Whether `full` has a detail chain.
+fn has_chain(lods: &LodRegistry, full: MeshId) -> bool {
+    lods.chain(full).is_some()
+}
+
+/// Removes the chain of `full`, returning whether it existed.
+fn clear_chain(lods: &mut LodRegistry, full: MeshId) -> bool {
+    let had = has_chain(lods, full);
+    lods.clear(full);
+    had
+}
+
 /// Layout is (sub-mesh count, sub-mesh ordinal); index counts may change at each level.
 fn register_mesh_lods(
     lods: &mut LodRegistry,
@@ -352,14 +364,23 @@ impl LitRenderer {
             Some((ids.len(), ids.iter().position(|&id| id == mesh)?))
         })?;
         s.levels.fill(NO_CAMERA_LEVEL);
+        s.shadow_levels.fill(NO_CAMERA_LEVEL);
         Ok(())
     }
 
-    /// Removes a detail chain; an unknown full mesh is ignored.
-    pub fn clear_mesh_lods(&mut self, full: MeshId) {
+    /// Whether `full` has a detail chain.
+    pub fn has_mesh_lods(&self, full: MeshId) -> bool {
+        has_chain(&self.shared.borrow().lods, full)
+    }
+
+    /// Removes a detail chain and returns whether `full` had one; an unknown id is ignored
+    /// and returns false.
+    pub fn clear_mesh_lods(&mut self, full: MeshId) -> bool {
         let mut s = self.shared.borrow_mut();
-        s.lods.clear(full);
+        let had = clear_chain(&mut s.lods, full);
         s.levels.fill(NO_CAMERA_LEVEL);
+        s.shadow_levels.fill(NO_CAMERA_LEVEL);
+        had
     }
 
     /// Sets camera selection parameters; per-tag bias is added to `options.bias`.
@@ -369,6 +390,16 @@ impl LitRenderer {
 
     pub fn lod_options(&self) -> LodParams {
         self.shared.borrow().lod_options
+    }
+
+    /// Cascade caster selection parameters; `threshold_px` is in shadow-map texels and the
+    /// per-tag bias is added to `options.bias`.
+    pub fn set_shadow_lod_options(&mut self, options: LodParams) {
+        self.shared.borrow_mut().shadow_lod_options = options;
+    }
+
+    pub fn shadow_lod_options(&self) -> LodParams {
+        self.shared.borrow().shadow_lod_options
     }
 
     /// Positive bias allows coarser geometry sooner. Zero removes the tag override.
@@ -1050,5 +1081,33 @@ mod tests {
         }
         let names: Vec<&str> = slots.iter().map(|s| s.contributor.name()).collect();
         assert_eq!(names, ["b", "e", "d", "a", "c"]);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn clear_mesh_lods_returns_true_once_then_false() {
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip("clear_mesh_lods", "no adapter");
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).unwrap();
+        let levels = [LodLevel {
+            mesh: MeshId(1),
+            error: 1.0,
+        }];
+        lit.shared
+            .borrow_mut()
+            .lods
+            .set(MeshId(0), &levels)
+            .unwrap();
+        assert!(lit.has_mesh_lods(MeshId(0)));
+        assert!(lit.clear_mesh_lods(MeshId(0)));
+        assert!(!lit.has_mesh_lods(MeshId(0)));
+        assert!(!lit.clear_mesh_lods(MeshId(0)));
     }
 }
