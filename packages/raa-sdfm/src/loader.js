@@ -6,12 +6,13 @@ import { validateAsset, checkHash } from './validate.js';
 import { mapMaterial } from './map-material.js';
 import { importMama, meshDocument } from './mama-bridge.js';
 import { createPool } from './pool.js';
+import { LOD_LEVELS_DEFAULT, lodDocument, attachLods } from './lods.js';
 
 const DISPOSED = 'the sdfm loader was disposed';
 
 /**
  * @param {{ engine: object, mama: () => Promise<string | URL | object>, workerUrl?: string | URL,
- *   workers?: number }} options `mama` resolves to the URL of MAMA's `dist/` (meshing in the worker
+ *   workers?: number, lods?: number }} options `mama` resolves to the URL of MAMA's `dist/` (meshing in the worker
  *   pool) or to MAMA's exports as `importMama` returns them, optionally with `pool` (a MAMA
  *   ComputePool), meshed in-process (node).
  * @returns {{ validate(asset: unknown): { ok: boolean, errors: { code: string, path: string, message: string }[] },
@@ -20,9 +21,10 @@ const DISPOSED = 'the sdfm loader was disposed';
  *   dispose(): void }}
  */
 export function createSdfmLoader(options) {
-  const { engine, mama, workerUrl = new URL('../worker.js', import.meta.url), workers } = options ?? {};
+  const { engine, mama, workerUrl = new URL('../worker.js', import.meta.url), workers, lods = LOD_LEVELS_DEFAULT } = options ?? {};
   if (!engine || typeof engine !== 'object') throw new TypeError('createSdfmLoader: options.engine is required');
   if (typeof mama !== 'function') throw new TypeError('createSdfmLoader: options.mama must be a function');
+  if (!Number.isInteger(lods) || lods < 0 || lods > 3) throw new TypeError('createSdfmLoader: options.lods must be an integer from 0 to 3');
 
   /** @type {Map<string, Promise<object>>} hash -> SdfmAsset */
   const cache = new Map();
@@ -87,6 +89,7 @@ export function createSdfmLoader(options) {
 
     const names = new Set();
     const parts = [];
+    const fullMeshes = [];
     for (const { group, part } of partsIn) {
       const { desc, materials, skin } = partMesh(part, handles);
       const handle = engine.addMesh(desc);
@@ -94,10 +97,56 @@ export function createSdfmLoader(options) {
       names.add(name);
       const { t, r } = frameToTr(part.frame);
       parts.push({
-        name, groupId: group, rigid: true, parent: null, t, r, mesh: handle, materials,
+        name, groupId: group, rigid: true, parent: null, t, r, mesh: handle, materials, lods: [],
         ...(skin ? { skin } : {}),
       });
+      fullMeshes.push({ key: `${group}/${part.partId}`, desc, part: parts.at(-1) });
       progress('upload', (done += 1), total);
+    }
+
+    const eligible = fullMeshes.filter(({ part }) => !part.skin);
+    if (lods > 0 && eligible.length > 0 && typeof engine.setMeshLods === 'function') {
+      const levels = [];
+      const lodTotal = lods + eligible.length;
+      progress('lod', 0, lodTotal);
+      for (let k = 1; k <= lods; k += 1) {
+        try {
+          const level = await mesh({ ...asset, document: lodDocument(asset.document, k) });
+          levels.push(new Map(level.groups.flatMap((g) => g.parts.map((p) => [`${g.group}/${p.partId}`, p]))));
+        } catch {
+          // A failed level invalidates the entire chain, leaving the full mesh usable.
+          levels.push(null);
+        }
+        checkLive();
+        progress('lod', k, lodTotal);
+      }
+      for (const [i, full] of eligible.entries()) {
+        const levelHandles = [];
+        const levelDescs = [];
+        try {
+          for (const level of levels) {
+            const part = level?.get(full.key);
+            if (!part || part.skin) break;
+            const { desc, skin } = partMesh(part, handles);
+            if (skin) break;
+            levelHandles.push(engine.addMesh(desc));
+            levelDescs.push(desc);
+          }
+          if (levelHandles.length === lods) {
+            const errors = attachLods(engine, full.part.mesh, full.desc, levelHandles, levelDescs);
+            if (errors.length === lods) full.part.lods = levelHandles;
+          }
+        } catch {
+          // Meshing, upload and LOD registration are optional for each part.
+        } finally {
+          if (full.part.lods.length === 0) {
+            for (const handle of levelHandles) {
+              try { engine.removeMesh(handle); } catch { /* LOD cleanup cannot fail the load. */ }
+            }
+          }
+        }
+        progress('lod', lods + i + 1, lodTotal);
+      }
     }
 
     const rigged = meshed.groups.find((g) => g.rig !== undefined);

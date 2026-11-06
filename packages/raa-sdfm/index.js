@@ -16,3 +16,4 @@ export { BAKE_BATCH, BAKE_RUN_SHARE, bakeTextureCount, createBakeScheduler } fro
 export { loadProceduralScene } from './src/procedural.js';
 export { decodeMeshFile, meshFilePayload } from './src/mesh-file.js';
 export { INSTANCE_PARAM_SLOTS, instanceParams } from './src/instance-params.js';
+export { LOD_LEVELS_DEFAULT, lodDocument, attachLods } from './src/lods.js';

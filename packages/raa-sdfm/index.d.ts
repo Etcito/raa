@@ -4,7 +4,7 @@
 // SdfmError with one of the S15 codes (plus S18 `sdfm.rig`). MAMA is reached only through
 // src/mama-bridge.js.
 
-import type { Engine, SurfaceBlend } from '@etcito/raa';
+import type { Engine, MeshDesc, SurfaceBlend } from '@etcito/raa';
 
 /**
  * Re-exported from `@etcito/raa`: the engine the loader uploads meshes and materials to, and the
@@ -91,11 +91,11 @@ export interface SdfmValidationResult {
 
 /**
  * One progress report of {@link SdfmLoader.load}, passed to `opts.onProgress`.
- * `stage` runs validate, then mesh, then upload; `done` is between 0 and `total`.
+ * `stage` runs validate, then mesh, then upload, then lod when supported; `done` is between 0 and `total`.
  * Refusals: none; progress is informational.
  */
 export interface SdfmProgress {
-  stage: 'validate' | 'mesh' | 'upload';
+  stage: 'validate' | 'mesh' | 'upload' | 'lod';
   done: number;
   total: number;
 }
@@ -174,6 +174,8 @@ export interface SdfmPart {
   r: Quat;
   /** Engine mesh handle returned by `Engine.addMesh`. */
   mesh: number;
+  /** Attached coarser mesh handles, finest first; empty for skinned parts or unavailable LODs. */
+  lods: number[];
   /** Surface material handles of the sub-meshes, in sub-mesh order. */
   materials: number[];
   /**
@@ -250,7 +252,7 @@ export interface SdfmMamaModule {
 
 /**
  * Options of {@link createSdfmLoader}.
- * Refusals: a missing `engine` or `mama` throws `TypeError`; failures during `load` are
+ * Refusals: a missing `engine` or `mama`, or invalid `lods`, throws `TypeError`; failures during `load` are
  * `SdfmError` (`sdfm.worker`, `sdfm.disposed`) or RaaError from the engine.
  */
 export interface SdfmLoaderOptions {
@@ -266,6 +268,8 @@ export interface SdfmLoaderOptions {
   workerUrl?: string | URL;
   /** Worker count of the pool; default `min(4, navigator.hardwareConcurrency || 2)`. */
   workers?: number;
+  /** Coarser Paramesh levels, an integer 0..3; default LOD_LEVELS_DEFAULT (2). Zero disables LODs. */
+  lods?: number;
 }
 
 /**
@@ -284,6 +288,8 @@ export interface SdfmLoader {
    * uploads one mesh and its materials per part and caches the result by hash. A second load of
    * the same hash resolves from the cache and calls MAMA no more. The returned asset exposes the
    * meshed group's S16 `rig` and S17 `clips` beside the S15 fields (absent when unrigged).
+   * Coarser meshes reuse the full mesh's material handles. LOD failures leave that part's
+   * `lods` empty and do not fail the load; unattached level meshes are removed.
    * Refusals: the first validation error as `SdfmError` (with its path), otherwise
    * `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.rig` (an invalid S16/S18 rig, with the S16
    * code in the message), `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`; engine
@@ -674,3 +680,21 @@ export const INSTANCE_PARAM_SLOTS: { readonly tint: 0; readonly wind: 4; readonl
  * Null when `attrs` is absent or has no keys.
  */
 export function instanceParams(attrs?: Record<string, number> | null): Float32Array | null;
+
+/** Default number of coarser Paramesh meshes made by createSdfmLoader. */
+export const LOD_LEVELS_DEFAULT: 2;
+
+/**
+ * Clone a canonical document and halve settings.paramesh subdivisions and fieldResolution
+ * per level, flooring to integers and clamping at 1 and 16. Missing values use MAMA's
+ * defaults (16 and 96). Does not mutate the input. A non-integer or negative level throws TypeError.
+ */
+export function lodDocument<T extends object>(document: T, level: number): T;
+
+/**
+ * Compute Rust meshLodError(fullDesc, levelDesc) for each uploaded level and call
+ * setMeshLods(full, [{ mesh, error }]) once. Returns the errors in level order, or []
+ * for no levels or an engine without the LOD API. Engine refusals propagate unchanged.
+ */
+export function attachLods(engine: Engine, full: number, fullDesc: MeshDesc,
+  levels: number[], levelDescs: MeshDesc[]): number[];

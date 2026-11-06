@@ -117,6 +117,30 @@ Procgen attributes of one placed instance (`instanceParams(attrs)`, `src/instanc
 
 `instanceParams` returns `null` when `attrs` is absent or has no keys, so an instance without attributes sets nothing.
 
+## LOD levels
+
+`createSdfmLoader({ engine, mama, lods: 2 })` makes two coarser Paramesh meshes of each
+unskinned part by default (`LOD_LEVELS_DEFAULT = 2`). `lods` must be an integer from 0 to 3;
+0 disables levels and any other value throws `TypeError` naming `options.lods`.
+
+After uploading the full meshes, the loader meshes `lodDocument(asset.document, k)` for
+each level through the same MAMA path and mesher settings. `lodDocument` clones the document
+and halves `settings.paramesh.subdivisions` and `fieldResolution` per level, flooring to
+integers and clamping at 1 and 16 respectively. Missing quality values use MAMA's defaults
+of 16 and 96. Other document content stays intact.
+
+Parts match by `group/partId`; their levels reuse the full mesh's material handles.
+`attachLods(engine, full, fullDesc, levels, levelDescs)` asks Rust's `meshLodError` to measure
+each level against the full mesh, registers the `{ mesh, error }` pairs with `setMeshLods`
+once, and returns the measured errors. The engine selects a level per instance for the
+camera and shadows, keeping the same shading at every level.
+
+Each loaded part exposes `lods: number[]`, the attached handles in increasing level order.
+Skinned parts and engines without `setMeshLods` keep `[]`. A failed level, missing matching
+part, or upload/attachment failure leaves that part with `[]` and still resolves the load;
+unattached level meshes are removed with `removeMesh`. Progress includes stage `'lod'`
+when the loader builds levels.
+
 ## Browser build
 
 MAMA's build is `dist/` in the MAMA checkout. Build it with `npm run build` in `../MAMA`. That runs the `@real3d/quadmesh` build and then `tsc -p tsconfig.json`. That output imports npm packages by bare specifier, so `scripts/build-sdfm-compare.sh --mama ../MAMA` stages a browser ESM bundle of the entry points above (`index.js`, `core/game/mesh-assets.js`, `core/material-graph/helpers.js`, `browser/index.js`, `browser/compute-worker.js`, plus `core/material-graph/cpu-eval.js` for the compare page's reference viewport) as `mama/` with MAMA's own esbuild, at the same paths as under `dist/`, plus `manifold.wasm`. The `base` of `importMama` in the page is that `mama/` URL.
@@ -134,13 +158,13 @@ Every exported name of `index.d.ts`:
 | name | description |
 |---|---|
 | `createSdfmLoader` | Creates a loader bound to one engine; `mama` is resolved once and the hash cache is per loader. |
-| `SdfmLoaderOptions` | `{ engine, mama, workerUrl?, workers? }`; `mama` resolves to MAMA's `dist/` URL (workers) or to MAMA's exports (in-process). |
+| `SdfmLoaderOptions` | `{ engine, mama, workerUrl?, workers?, lods? }`; `mama` resolves to MAMA's `dist/` URL (workers) or to MAMA's exports (in-process). |
 | `SdfmLoader` | `validate`, `load` (validate, hash check, cache, mesh, upload), `spawn` (root plus one node and instance per part), `dispose`. |
 | `SdfmAsset` | A loaded asset: the v1 fields `id`, `hash`, `name`, `category`, `world`, `anchors`, `bounds`, `collision` passed through, plus `parts` and, when rigged, `rig` and `clips`. |
-| `SdfmPart` | One rigid part: `name`, `groupId`, `rigid` (always true), `parent` (always null), `t`, `r`, `mesh`, `materials`, and `skin?` for a part of a rigged group. |
+| `SdfmPart` | One rigid part: `name`, `groupId`, `rigid` (always true), `parent` (always null), `t`, `r`, `mesh`, `lods`, `materials`, and `skin?` for a part of a rigged group. |
 | `SdfmRig`, `SdfmRigBone`, `SdfmRigBinding`, `SdfmClip`, `SdfmPartSkin` | The S16 rig and S17 clips MAMA exports (`bones` order = joint order) and the part skin arrays uploaded as `MeshDesc.joints`/`weights`. |
 | `SdfmSpawned` | `{ root, parts }`: the spawn root node and, per part name, its `node` and `instance` handles. |
-| `SdfmProgress` | One `onProgress` record: `stage` (`validate`, `mesh`, `upload`), `done`, `total`. |
+| `SdfmProgress` | One `onProgress` record: `stage` (`validate`, `mesh`, `upload`, `lod`), `done`, `total`. |
 | `SdfmValidationResult` | The `validate` result: `{ ok, errors }`; validation is synchronous and needs no MAMA. |
 | `SdfmValidationError` | One validation entry: an S15 `code`, a JSON pointer `path` and a human `message`. |
 | `SdfmMamaModule` | The MAMA exports used for in-process meshing: `readSdfm`, `serializeDocument`, `meshAssets`, `HELPERS`, `BASE_WGSL`, `setupBrowserHost?`, `pool?`. |
@@ -157,6 +181,9 @@ Every exported name of `index.d.ts`:
 | `meshFilePayload` | Validates a decoded S24 payload and wraps its groups, parts and materials. |
 | `INSTANCE_PARAM_SLOTS` | The first slot of each group of an instance's 16 parameter floats: `{ tint: 0, wind: 4, scale: 5, free: 6 }`. |
 | `instanceParams` | Converts procgen attributes into the 16 floats of `setInstanceParams`, or `null` without attributes. |
+| `LOD_LEVELS_DEFAULT` | Default number of coarser Paramesh meshes (2). |
+| `lodDocument` | Copies a document with Paramesh subdivisions and field resolution halved per level. |
+| `attachLods` | Measures coarser meshes in Rust, registers the chain with the engine, and returns its errors. |
 | `Vec3` | `[x, y, z]`, metres for positions; same shape as `@etcito/raa`'s `Vec3`. |
 | `Quat` | `[x, y, z, w]`, a rotation quaternion; same shape as `@etcito/raa`'s `Quat`. |
 | `Engine` | Re-exported from `@etcito/raa`: the engine the loader uploads meshes and materials to. |
