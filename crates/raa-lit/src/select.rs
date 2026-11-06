@@ -1,7 +1,7 @@
 //! Compacted visible id lists per mesh, material and LOD level.
 //!
-//! [`IdPrep`] is the id-list successor of `prep::DrawPrep`: it validates the same way,
-//! keeps the same transparent sort and the same rest-then-posed grouping, but writes u32
+//! [`IdPrep`] validates each scene list, keeps the transparent sort and the
+//! rest-then-posed grouping, and writes u32
 //! instance slots instead of the 128-byte S1 records (those live in
 //! [`InstanceStore`](crate::InstanceStore), addressed by the same slot). One camera
 //! section plus one section per shadow cascade make one contiguous id list; each

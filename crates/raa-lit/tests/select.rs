@@ -1,14 +1,13 @@
-//! Compacted id-list preparation: DrawPrep parity, batch splitting by level mesh, the
+//! Compacted id-list preparation: draw order, batch splitting by level mesh, the
 //! transparent sort, cascade sections and their frame reset, refusals, posed grouping and
 //! capacity reuse.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 use raa_core::{MaterialId, MeshId, RaaError};
 use raa_lit::{
-    DrawClass, DrawPrep, FLAG_FUR, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT, INSTANCE_GPU_SIZE, IdPrep,
-    LitDraw, MaterialClass, PrepInput, SelectInput, SkinDraw, SurfaceMaterial,
+    DrawClass, FLAG_FUR, FLAG_TRANSMISSIVE, FLAG_TRANSPARENT, IdPrep, LitDraw, MaterialClass,
+    SelectInput, SkinDraw, SurfaceMaterial,
 };
 use raa_math::{Quat, Vec3};
 use raa_scene::{RenderList, Scene, Transform};
@@ -69,19 +68,6 @@ impl Frame {
             materials: materials(),
         }
     }
-
-    fn prep(&self, prep: &mut DrawPrep) -> Result<(), RaaError> {
-        let extras = HashMap::new();
-        prep.prepare(&PrepInput {
-            list: &self.list,
-            tags: &self.tags,
-            materials: &self.materials,
-            extras: &extras,
-            view: self.scene.camera.view(),
-            known_mesh: &|_| true,
-            class_handled: &|_| true,
-        })
-    }
 }
 
 fn input<'a>(
@@ -125,17 +111,12 @@ fn shape(draw: &LitDraw) -> (u32, u32, u32, u32) {
     )
 }
 
-fn draw_prep_tags(prep: &DrawPrep, count: u32) -> Vec<u32> {
-    (0..count)
-        .map(|i| {
-            let o = i as usize * INSTANCE_GPU_SIZE + 116;
-            u32::from_le_bytes(prep.instance_bytes()[o..o + 4].try_into().unwrap())
-        })
-        .collect()
+fn shapes(prep: &IdPrep, class: DrawClass) -> Vec<(u32, u32, u32, u32)> {
+    prep.draws(class).iter().map(shape).collect()
 }
 
 #[test]
-fn opaque_matches_draw_prep_with_identity_levels() {
+fn opaque_and_transparent_ids_follow_the_list_with_identity_levels() {
     let f = Frame::new(&[
         (0, 0, [0.0, 0.0, 0.0], 1),
         (0, 0, [1.0, 0.0, 0.0], 2),
@@ -147,8 +128,6 @@ fn opaque_matches_draw_prep_with_identity_levels() {
         (0, 1, [0.0, 0.0, -3.0], 8),
         (0, 1, [0.0, 0.0, 3.0], 9),
     ]);
-    let mut dp = DrawPrep::new(16, 8);
-    f.prep(&mut dp).unwrap();
     let mut ip = IdPrep::new(16, 8);
     let selected = |_| true;
     let level = |_: u32, mesh: MeshId| mesh;
@@ -157,31 +136,24 @@ fn opaque_matches_draw_prep_with_identity_levels() {
     ip.prepare_camera(&input(&f, &selected, &level, &known, &handled), &|_| None)
         .unwrap();
 
-    let dp_shapes: Vec<_> = dp.draws(DrawClass::Opaque).iter().map(shape).collect();
-    let ip_shapes: Vec<_> = ip.draws(DrawClass::Opaque).iter().map(shape).collect();
-    assert_eq!(ip_shapes, dp_shapes);
-    let dp_depths: Vec<_> = dp
-        .draws(DrawClass::Opaque)
-        .iter()
-        .map(|d| d.view_depth.to_bits())
-        .collect();
-    let ip_depths: Vec<_> = ip
-        .draws(DrawClass::Opaque)
-        .iter()
-        .map(|d| d.view_depth.to_bits())
-        .collect();
-    assert_eq!(ip_depths, dp_depths);
-
-    let opaque_count: u32 = dp
-        .draws(DrawClass::Opaque)
-        .iter()
-        .map(|d| d.instance_count)
-        .sum();
     assert_eq!(
-        ids(&ip)[..opaque_count as usize],
-        draw_prep_tags(&dp, opaque_count)[..]
+        shapes(&ip, DrawClass::Opaque),
+        vec![(0, 0, 0, 2), (1, 0, 2, 3)]
     );
-    assert_eq!(ids(&ip), draw_prep_tags(&dp, dp.instance_count()));
+    assert_eq!(shapes(&ip, DrawClass::Fur), vec![(0, 2, 5, 2)]);
+    assert_eq!(
+        shapes(&ip, DrawClass::Transparent),
+        vec![(0, 1, 7, 1), (0, 1, 8, 1)]
+    );
+    // Each layer appends after the previous one: opaque, fur, then back-to-front
+    // transparent, every id the stable slot of its item.
+    assert_eq!(ids(&ip), vec![1, 2, 3, 4, 7, 5, 6, 8, 9]);
+    assert_eq!(ip.camera_count(), 9);
+    assert!(
+        ip.draws(DrawClass::Opaque)
+            .iter()
+            .all(|d| d.view_depth > 0.0)
+    );
 }
 
 #[test]

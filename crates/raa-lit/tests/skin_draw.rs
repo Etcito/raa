@@ -1,9 +1,8 @@
 //! CPU coverage of the shared draw path used by prepass, forward, shadow, OIT and fur:
-//! the posed (instanced skinning) entry points and the posed batching of the draw prep.
+//! the posed (instanced skinning) entry points and the posed batching of the id selection.
 use raa_core::{MaterialId, MeshId};
 use raa_lit::{
-    DrawClass, DrawPrep, INSTANCE_PALETTE_OFFSET, MaterialClass, PrepInput, SkinDraw,
-    SurfaceMaterial,
+    DrawClass, IdPrep, InstanceStore, MaterialClass, SelectInput, SkinDraw, SurfaceMaterial,
 };
 use raa_math::Mat4;
 use raa_scene::{RenderList, Scene, Transform};
@@ -21,9 +20,17 @@ fn pass_selection_preserves_shared_tangent_handedness() {
     ] {
         for posed in [false, true] {
             let entry = raa_lit::skin_draw::entry_points(pass, posed);
-            for location in ["@location(13)", "@location(14)", "@location(15)"] {
+            for location in ["@location(13)", "@location(14)"] {
                 assert_eq!(entry.contains(location), posed, "{pass:?} {location}");
             }
+            assert!(
+                !entry.contains("@location(15)"),
+                "{pass:?}: the palette base is a storage read"
+            );
+            assert_eq!(
+                entry.contains("raa_instances[raa_instance_id].palette_base"),
+                posed
+            );
             assert_eq!(entry.contains("raa_skin_palette"), posed);
             assert_eq!(entry.contains("@group(3)"), posed);
             if pass != PassKind::Shadow {
@@ -65,36 +72,49 @@ fn posed_instances_of_one_mesh_and_material_share_one_instanced_draw() {
         scene.update_world();
         let mut list = RenderList::with_capacity(8);
         let mut tags = Vec::with_capacity(8);
-        scene.build_render_list_tagged(&mut list, &mut tags);
+        let mut slots = Vec::with_capacity(8);
+        scene.build_render_list_slots(&mut list, &mut tags, &mut slots);
         let materials = [MaterialClass {
             class,
             ..MaterialClass::of(&SurfaceMaterial::default())
         }; 2];
         let extras = HashMap::new();
-        let input = PrepInput {
-            list: &list,
-            tags: &tags,
-            materials: &materials,
-            extras: &extras,
-            view: Mat4::IDENTITY,
-            known_mesh: &|m| m.0 < 2,
-            class_handled: &|_| true,
-        };
-        let mut prep = DrawPrep::new(8, 2);
         // Tags 17 and 29 are posed (palette blocks 0 and 4, one skin per mesh id).
         let skinned = |tag: u32| match tag {
             17 => Some(SkinDraw { base: 0, skin: 7 }),
             29 => Some(SkinDraw { base: 4, skin: 7 }),
             _ => None,
         };
-        prep.prepare_skinned(&input, &skinned).unwrap();
+        // The persistent records carry the tag and palette base the posed batches read.
+        let mut store = InstanceStore::new(8);
+        store.sync(&list, &tags, &slots, &extras, &|tag| {
+            skinned(tag).map_or(0, |draw| draw.base)
+        });
+        let input = SelectInput {
+            list: &list,
+            tags: &tags,
+            slots: &slots,
+            selected: &|_| true,
+            materials: &materials,
+            view: Mat4::IDENTITY,
+            known_mesh: &|m| m.0 < 2,
+            class_handled: &|_| true,
+            level_mesh: &|_, mesh| mesh,
+        };
+        let mut prep = IdPrep::new(8, 2);
+        prep.prepare_camera(&input, &skinned).unwrap();
         let mut posed = Vec::new();
         for draw in prep.draws(class) {
             let (mesh, tag) = prep.mesh_binding(draw.mesh);
             assert_eq!(mesh.0, draw.material.0);
-            let records: Vec<&[u8]> = (draw.first_instance
-                ..draw.first_instance + draw.instance_count)
-                .map(|i| &prep.instance_bytes()[i as usize * 128..i as usize * 128 + 128])
+            let first = draw.first_instance as usize * 4;
+            let end = (draw.first_instance + draw.instance_count) as usize * 4;
+            let records: Vec<&[u8]> = prep.id_bytes()[first..end]
+                .chunks_exact(4)
+                .map(|id| {
+                    let slot = u32::from_le_bytes(id.try_into().unwrap());
+                    store.record(slot).unwrap()
+                })
                 .collect();
             for record in &records {
                 assert_eq!(u32_at(record, 112), mesh.0, "material index");
@@ -102,7 +122,7 @@ fn posed_instances_of_one_mesh_and_material_share_one_instanced_draw() {
             if tag.is_some() {
                 for record in &records {
                     let t = u32_at(record, 116);
-                    let base = u32_at(record, INSTANCE_PALETTE_OFFSET);
+                    let base = u32_at(record, 120);
                     posed.push((mesh.0, t, base));
                 }
                 if class != DrawClass::Transparent {
@@ -110,7 +130,7 @@ fn posed_instances_of_one_mesh_and_material_share_one_instanced_draw() {
                 }
             } else {
                 for record in &records {
-                    assert_eq!(u32_at(record, INSTANCE_PALETTE_OFFSET), 0);
+                    assert_eq!(u32_at(record, 120), 0);
                 }
                 if class != DrawClass::Transparent {
                     assert_eq!(draw.instance_count, 2, "rigid instances still batch");
@@ -129,7 +149,7 @@ fn posed_instances_of_one_mesh_and_material_share_one_instanced_draw() {
             4
         };
         assert_eq!(prep.draws(class).len(), expected_draws, "{class:?}");
-        prep.prepare(&input).unwrap();
+        prep.prepare_camera(&input, &|_| None).unwrap();
         assert!(
             prep.draws(class)
                 .iter()
@@ -150,20 +170,22 @@ fn draw_count_does_not_grow_with_posed_instances() {
         scene.update_world();
         let mut list = RenderList::with_capacity(n as usize);
         let mut tags = Vec::new();
-        scene.build_render_list_tagged(&mut list, &mut tags);
+        let mut slots = Vec::new();
+        scene.build_render_list_slots(&mut list, &mut tags, &mut slots);
         let materials = [MaterialClass::of(&SurfaceMaterial::default())];
-        let extras = HashMap::new();
-        let input = PrepInput {
+        let input = SelectInput {
             list: &list,
             tags: &tags,
+            slots: &slots,
+            selected: &|_| true,
             materials: &materials,
-            extras: &extras,
             view: Mat4::IDENTITY,
             known_mesh: &|m| m.0 == 0,
             class_handled: &|_| true,
+            level_mesh: &|_, mesh| mesh,
         };
-        let mut prep = DrawPrep::new(n, 1);
-        prep.prepare_skinned(&input, &|tag| {
+        let mut prep = IdPrep::new(n, 1);
+        prep.prepare_camera(&input, &|tag| {
             Some(SkinDraw {
                 base: tag * 4,
                 skin: 1,

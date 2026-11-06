@@ -42,10 +42,12 @@ the per-frame draw lists and the two required feature passes of the lit pipeline
 - `InstanceExtra` (`INSTANCE_EXTRA_GPU_SIZE` 128): per-instance extra data keyed by tag.
 - `write_frame_gpu`, `FrameParams`, `FRAME_GPU_SIZE` (512) and
   `SUN_ANGULAR_RADIUS_DEFAULT`: the S10 `FrameGpu` writer.
-- `DrawPrep`, `PrepInput`, `PrepCapacity`, `LitDraw`, `MaterialClass` and
-  `INSTANCE_GPU_SIZE` (128): the CPU draw-list builder.
-  - Opaque and fur draws are batched by (mesh, material).
+- `IdPrep`, `SelectInput`, `SelectCapacity`, `LitDraw`, `MaterialClass` and
+  `INSTANCE_GPU_SIZE` (128): the CPU id-list builder.
+  - Opaque and fur draws are batched by (level mesh, material).
   - Transparent draws are one per instance, sorted back to front.
+- `InstanceStore`, `StoreKind`, `write_instance_record` and `InstanceExtra`: the persistent
+  128-byte instance and extras records by stable slot, with per-page uploads.
 - `LitMeshId`, `LitMeshInfo`, and the re-exports `MeshId`, `MaterialId`,
   `AttributedMesh`, `SubMesh`, `MaterialFnId`.
 

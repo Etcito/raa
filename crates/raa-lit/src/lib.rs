@@ -3,8 +3,8 @@
 //! [`DrawClass`] a material is drawn in and the [`SurfaceLibrary`] of dense material ids, the
 //! per-instance [`InstanceExtra`], the GPU mesh store ([`LitMeshId`], with one internal
 //! [`MeshId`] per sub-mesh), the default slot providers (S11) the renderer installs, the
-//! 512-byte S10 `FrameGpu` writer ([`write_frame_gpu`]) and the CPU draw-list builder
-//! ([`DrawPrep`], [`LitDraw`]), and what passes and contributors share: the
+//! 512-byte S10 `FrameGpu` writer ([`write_frame_gpu`]) and the CPU id-list builder
+//! ([`IdPrep`], [`LitDraw`]), and what passes and contributors share: the
 //! [`LitHandle`] with its pipeline cache per shader variant and [`PipelineSpec`], and the
 //! [`ForwardContributor`] extension point of the forward pass. [`LitRenderer`] owns all of
 //! it, prepares each frame ([`LitOptions`], [`FrameCounts`]) and registers the two required
@@ -59,7 +59,7 @@ pub use material_data::{
     DataAllocator, MATERIAL_DATA_INITIAL_WORDS, MATERIAL_DATA_RESERVED_WORDS, MaterialDataStats,
 };
 pub use meshes::{LitMeshId, LitMeshInfo};
-pub use prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw, MaterialClass, PrepCapacity, PrepInput};
+pub use prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 pub use raa_core::{MaterialId, MeshId};
 pub use raa_mesh::{AttributedMesh, SubMesh};
 pub use raa_shader::{MaterialFnId, TintMode};
