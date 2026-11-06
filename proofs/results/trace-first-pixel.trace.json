@@ -1,5 +1,6 @@
 {
   "name": "trace-first-pixel",
+  "case": "first",
   "milestone": "m10",
   "capture": "proofs/captures/trace-first-pixel.png",
   "output": {
@@ -74,6 +75,7 @@
       0.035
     ]
   },
+  "mesh": null,
   "volume": "R8Snorm 3D world volume, GPU compute stamped (raa-sdf-trace TracePass)",
   "trace": {
     "sources": 2,
@@ -91,17 +93,17 @@
     "isFallbackAdapter": false
   },
   "code": {
-    "commit": "8d32bb576c2be0b79d974a0891232709a0e44baa",
-    "dirty": false
+    "commit": "d1cf6cfe80898a96f5598796bbf4f6bde40ae581",
+    "dirty": true
   },
   "program": {
     "bytes": 588
   },
   "artifact": {
-    "pageRef": "exec-12774-bfafed8c1c948ff60b878479a86dacd0353237d648e70393bab53dcc6661051e",
+    "pageRef": "exec-12785-1cd81427aad4ae672c3d3fdc186215ebd6b49086a67abd1f74f7dc02c7e4e3c5",
     "wasm": "raa/pkg/raa_js_bg.wasm",
-    "raw": 2507159,
-    "commit": "8d32bb576c2be0b79d974a0891232709a0e44baa"
+    "raw": 2512268,
+    "commit": "d1cf6cfe80898a96f5598796bbf4f6bde40ae581"
   },
   "commands": {
     "volumes": [
@@ -175,5 +177,5 @@
       }
     ]
   },
-  "capturedAt": "2026-11-06T22:39:15.000Z"
+  "capturedAt": "2026-11-06T23:31:34.188Z"
 }

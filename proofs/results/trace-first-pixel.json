@@ -159,13 +159,14 @@
           }
         }
       ]
-    }
+    },
+    "mesh": null
   },
   "artifact": {
     "wasm": "raa/pkg/raa_js_bg.wasm",
-    "raw": 2507159,
-    "commit": "8d32bb576c2be0b79d974a0891232709a0e44baa"
+    "raw": 2512268,
+    "commit": "d1cf6cfe80898a96f5598796bbf4f6bde40ae581"
   },
-  "pageRef": "exec-12774-bfafed8c1c948ff60b878479a86dacd0353237d648e70393bab53dcc6661051e",
-  "capturedAt": "2026-11-06T22:39:15.000Z"
+  "pageRef": "exec-12785-1cd81427aad4ae672c3d3fdc186215ebd6b49086a67abd1f74f7dc02c7e4e3c5",
+  "capturedAt": "2026-11-06T23:31:34.188Z"
 }
