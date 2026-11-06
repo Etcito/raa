@@ -233,6 +233,7 @@ impl WebApp for EngineApp {
             scene,
             list: RenderList::with_capacity(max),
             tags: Vec::with_capacity(max),
+            slots: Vec::with_capacity(max),
             orbit,
             geometry,
             loaders,
@@ -272,7 +273,9 @@ impl WebApp for EngineApp {
         api::frame_all(s, gpu, input)?;
         s.rebuild_dirty_groups()?;
         s.flush_skins(gpu)?;
-        let c = s.lit.prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags)?;
+        let c = s
+            .lit
+            .prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags, &mut s.slots)?;
         Ok(FrameCounters {
             instances: c.instances,
             draw_calls: c.draw_calls,

@@ -154,10 +154,11 @@ impl Rig {
 
     fn centre(&mut self, gpu: &GpuContext) -> [f32; 3] {
         let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
-        let (mut list, mut tags) = (RenderList::with_capacity(1), Vec::new());
+        let (mut list, mut tags, mut slots) =
+            (RenderList::with_capacity(1), Vec::new(), Vec::new());
         let counts = self
             .lit
-            .prepare(gpu, &mut self.scene, &mut list, &mut tags)
+            .prepare(gpu, &mut self.scene, &mut list, &mut tags, &mut slots)
             .expect("prepare");
         assert_eq!(counts.draw_calls, 1);
         let commands = self

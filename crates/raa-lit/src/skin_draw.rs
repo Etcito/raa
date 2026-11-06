@@ -6,8 +6,9 @@
 //! collapsed directions become zero). Per vertex, the joints (`@location(13)`, u16x4),
 //! weights (`@location(14)`) and rest tangent (`@location(11)`, handedness in w) come
 //! from the mesh's 64-byte rest skin records bound in vertex slot 3; per instance, the
-//! palette base comes from the S1 record bytes 120..124 (`@location(15)`); the palette
-//! itself is group 3, binding 0. Rest variants use the unmodified entry point.
+//! palette base comes from the persistent instance record (group 0 binding 7,
+//! `raa_instances[id].palette_base`); the palette itself is group 3, binding 0. Rest
+//! variants use the unmodified entry point.
 use raa_shader::PassKind;
 
 pub(crate) const POSED: u32 = 1 << 31;
@@ -28,10 +29,10 @@ fn raa_skin_direction(v: vec3<f32>) -> vec3<f32> {
 
 const POSED_PARAMS: &str = "    v1: RaaVertex1,
     @location(13) raa_skin_joints: vec4<u32>,
-    @location(14) raa_skin_weights: vec4<f32>,
-    @location(15) raa_skin_base: u32,";
+    @location(14) raa_skin_weights: vec4<f32>,";
 
 const POSED_PROLOGUE: &str = "
+    let raa_skin_base = raa_instances[raa_instance_id].palette_base;
     var raa_skin_m = mat4x4<f32>(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0));
     for (var k = 0u; k < 4u; k++) {
         let raa_joint = raa_skin_base + raa_skin_joints[k];

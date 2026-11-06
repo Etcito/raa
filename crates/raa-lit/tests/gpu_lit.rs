@@ -138,6 +138,7 @@ struct Rig {
     scene: Scene,
     list: RenderList,
     tags: Vec<u32>,
+    slots: Vec<u32>,
     graph: FrameGraph,
     backbuffer: OffscreenTarget,
 }
@@ -170,6 +171,7 @@ impl Rig {
             scene,
             list: RenderList::with_capacity(1),
             tags: Vec::with_capacity(1),
+            slots: Vec::with_capacity(1),
             graph,
             backbuffer: OffscreenTarget::new(gpu, SIZE.0, SIZE.1, SURFACE),
         }
@@ -179,7 +181,13 @@ impl Rig {
     fn frame(&mut self, gpu: &GpuContext) {
         let counts = self
             .lit
-            .prepare(gpu, &mut self.scene, &mut self.list, &mut self.tags)
+            .prepare(
+                gpu,
+                &mut self.scene,
+                &mut self.list,
+                &mut self.tags,
+                &mut self.slots,
+            )
             .expect("prepare");
         assert_eq!(
             (counts.instances, counts.draw_calls, counts.triangles),

@@ -449,6 +449,8 @@ pub(crate) struct EngineState {
     pub list: RenderList,
     /// `tags[i]` is the scene tag of `list.items[i]`.
     pub tags: Vec<u32>,
+    /// `slots[i]` is the scene instance slot of `list.items[i]`.
+    pub slots: Vec<u32>,
     pub orbit: OrbitController,
     /// The 8 S3 kinds; assets load with strict kinds.
     pub geometry: GeometryRegistry,

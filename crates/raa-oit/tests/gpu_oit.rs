@@ -115,6 +115,7 @@ struct Rig {
     scene: Scene,
     list: RenderList,
     tags: Vec<u32>,
+    slots: Vec<u32>,
     graph: FrameGraph,
     backbuffer: OffscreenTarget,
     readback: Rc<wgpu::Buffer>,
@@ -164,6 +165,7 @@ impl Rig {
             scene,
             list: RenderList::with_capacity(2),
             tags: Vec::with_capacity(2),
+            slots: Vec::with_capacity(2),
             graph,
             backbuffer: OffscreenTarget::new(gpu, SIZE.0, SIZE.1, SURFACE),
             readback,
@@ -179,7 +181,13 @@ impl Rig {
         }
         let counts = self
             .lit
-            .prepare(gpu, &mut self.scene, &mut self.list, &mut self.tags)
+            .prepare(
+                gpu,
+                &mut self.scene,
+                &mut self.list,
+                &mut self.tags,
+                &mut self.slots,
+            )
             .expect("prepare");
         assert_eq!((counts.instances, counts.triangles), (2, 4));
         let order = self

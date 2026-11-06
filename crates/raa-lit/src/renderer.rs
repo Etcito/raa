@@ -1,9 +1,11 @@
 //! [`LitRenderer`]: the owner of the lit renderer's state. It uploads meshes, holds the
 //! surface materials (default material id 0, grey standard), the material functions and
 //! slot providers, the class handlers, the instance extras by tag and the forward
-//! contributors, and prepares each frame: scene world update, tagged render list, draw
-//! lists ([`DrawPrep`]), `FrameGpu` and the queue writes. Every frame buffer is sized at
-//! [`LitRenderer::new`] from [`LitOptions`], so a warm frame allocates nothing.
+//! contributors, and prepares each frame: mesh bounds into the scene, scene world update,
+//! the tagged and slotted render list, index-based camera selection, the persistent
+//! instance records and the id stream ([`IdPrep`]), `FrameGpu` and the queue writes. Every
+//! frame buffer is sized at [`LitRenderer::new`] from [`LitOptions`], so a warm frame
+//! allocates nothing.
 //!
 //! The renderer's state is shared with passes and contributors through [`LitHandle`]
 //! (`Rc<RefCell<..>>`), so the accessors into it return `Ref`/`RefMut` guards.
@@ -13,9 +15,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
+use raa_math::Aabb;
 use raa_mesh::AttributedMesh;
 use raa_pipeline::Pipeline;
-use raa_scene::{RenderList, Scene};
+use raa_scene::{RenderList, Scene, frustum_planes};
 use raa_shader::{Composer, MaterialFnId, MaterialFnRegistry, SlotProvider};
 
 use crate::contributor::ForwardContributor;
@@ -27,7 +30,8 @@ use crate::material::{DrawClass, SurfaceMaterial};
 use crate::material_data::MaterialDataStats;
 use crate::meshes::{LitMeshId, LitMeshInfo};
 use crate::passes::install_passes;
-use crate::prep::{MaterialClass, PrepInput};
+use crate::prep::MaterialClass;
+use crate::select::SelectInput;
 use crate::textures::{AtlasRect, TexelData};
 
 /// Limits and sample count of a [`LitRenderer`]; the frame buffers are sized from them.
@@ -124,6 +128,13 @@ pub struct LitRenderer {
     frame_index: u64,
     /// A background that could not reach the pipeline (borrowed), applied at `prepare`.
     pending_background: Option<[f32; 3]>,
+    /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
+    sent_bounds: HashMap<MeshId, Aabb>,
+    /// Sub-mesh ids of every uploaded lit mesh, refreshed on upload/update.
+    submeshes: HashMap<LitMeshId, Vec<MeshId>>,
+    /// Reusable frustum query result (instance slots) and its per-slot bitset.
+    visible_slots: Vec<u32>,
+    visible_bits: Vec<u64>,
 }
 
 impl LitRenderer {
@@ -160,6 +171,10 @@ impl LitRenderer {
             frame_bytes: [0; FRAME_GPU_SIZE],
             frame_index: 0,
             pending_background: None,
+            sent_bounds: HashMap::new(),
+            submeshes: HashMap::new(),
+            visible_slots: Vec::new(),
+            visible_bits: Vec::new(),
         };
         install_passes(pipeline, renderer.handle(), renderer.contributors())?;
         Ok(renderer)
@@ -180,7 +195,9 @@ impl LitRenderer {
     /// Validates and uploads `m` (`render.invalid_mesh` carrying the `mesh.*` code); one
     /// internal [`MeshId`] is assigned per sub-mesh ([`submesh_ids`](Self::submesh_ids)).
     pub fn upload(&mut self, gpu: &GpuContext, m: &AttributedMesh) -> Result<LitMeshId, RaaError> {
-        self.shared.borrow_mut().meshes.upload(gpu, m)
+        let id = self.shared.borrow_mut().meshes.upload(gpu, m)?;
+        self.refresh_submeshes(id);
+        Ok(id)
     }
 
     /// Replaces mesh `id` (`render.unknown_mesh`, `render.invalid_mesh`; a refused mesh
@@ -191,12 +208,33 @@ impl LitRenderer {
         id: LitMeshId,
         m: &AttributedMesh,
     ) -> Result<(), RaaError> {
-        self.shared.borrow_mut().meshes.update(gpu, id, m)
+        self.shared.borrow_mut().meshes.update(gpu, id, m)?;
+        self.refresh_submeshes(id);
+        Ok(())
     }
 
     /// Frees mesh `id` and its sub-mesh ids (reused lowest first). Unknown ids are ignored.
     pub fn remove(&mut self, id: LitMeshId) {
         self.shared.borrow_mut().meshes.remove(id);
+        self.submeshes.remove(&id);
+    }
+
+    /// Records the sub-mesh ids of `id` for the per-frame bounds sync.
+    fn refresh_submeshes(&mut self, id: LitMeshId) {
+        let ids = self
+            .shared
+            .borrow()
+            .meshes
+            .submesh_ids(id)
+            .map(<[MeshId]>::to_vec);
+        match ids {
+            Some(ids) => {
+                self.submeshes.insert(id, ids);
+            }
+            None => {
+                self.submeshes.remove(&id);
+            }
+        }
     }
 
     /// The internal [`MeshId`] of each sub-mesh of `id`, in sub-mesh order.
@@ -404,11 +442,12 @@ impl LitRenderer {
 
     // ---- frame ----
 
-    /// Prepares a frame: `scene.update_world`, `scene.build_render_list_tagged(list,
-    /// tags)`, the draw lists (opaque and fur batched by (mesh, material), transparent one
-    /// per instance back to front by view depth, ties by tag) with the instance and extras
-    /// bytes in draw order, the `FrameGpu` from the scene camera, light and ambient, then
-    /// the queue writes (frame, instances, extras and, when changed, every material).
+    /// Prepares a frame: syncs the uploaded mesh bounds into the scene, `scene.update_world`,
+    /// `scene.build_render_list_slots(list, tags, slots)`, the persistent instance records
+    /// and extras, the index-based camera selection (`IdPrep`: posed instances are tested
+    /// through their skin bounds, the rest through the scene index), the `FrameGpu` from the
+    /// scene camera, light and ambient, then the queue writes (frame, changed instance
+    /// pages, id stream and, when changed, every material).
     ///
     /// Refusals (nothing written): `render.too_many_instances`, `render.too_many_materials`,
     /// `render.unknown_mesh`, `material.unknown_id`, `material.blend_unavailable` (a
@@ -419,6 +458,7 @@ impl LitRenderer {
         scene: &mut Scene,
         list: &mut RenderList,
         tags: &mut Vec<u32>,
+        slots: &mut Vec<u32>,
     ) -> Result<FrameCounts, RaaError> {
         if let Some(rgb) = self.pending_background {
             self.set_background(rgb);
@@ -430,11 +470,27 @@ impl LitRenderer {
                 !p.surface_is_srgb(),
             )
         };
-        scene.update_world();
-        scene.build_render_list_tagged(list, tags);
-
         let mut guard = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
         let s: &mut LitShared = &mut guard;
+
+        // The scene index follows the uploaded mesh bounds; send only what changed.
+        {
+            let meshes = &s.meshes;
+            for ids in self.submeshes.values() {
+                for &mesh in ids {
+                    let Some(info) = meshes.submesh(mesh).and_then(|m| meshes.info(m.lit)) else {
+                        continue;
+                    };
+                    if self.sent_bounds.get(&mesh) != Some(&info.bounds) {
+                        scene.set_mesh_bounds(mesh, info.bounds);
+                        self.sent_bounds.insert(mesh, info.bounds);
+                    }
+                }
+            }
+        }
+        scene.update_world();
+        scene.build_render_list_slots(list, tags, slots);
+
         let max_materials = self.opts.max_materials as usize;
         if s.materials.len() > max_materials {
             return Err(refusal(
@@ -460,43 +516,75 @@ impl LitRenderer {
         let handlers = &self.class_handlers;
         let known_mesh = |m: MeshId| meshes.submesh(m).is_some();
         let class_handled = |c: DrawClass| c == DrawClass::Opaque || handlers.contains_key(&c);
-        let input = PrepInput {
-            list,
-            tags,
-            materials: &self.material_classes,
-            extras: &self.extras,
-            view: scene.camera.view(),
-            known_mesh: &known_mesh,
-            class_handled: &class_handled,
-        };
+
+        // Fill the persistent records of every listed instance by its stable slot, then
+        // select the camera section through the scene index.
+        let end = slots.iter().copied().max().map_or(0, |slot| slot + 1);
+        s.store.ensure(end);
         let source = s.skin_source.clone();
         let skins = source.0.borrow();
         let has_palette = s.palette_ready();
-        s.prep.prepare_skinned(&input, &|tag| {
-            has_palette.then(|| skins.draw(tag)).flatten()
-        })?;
-
-        let vp = scene.camera.view_proj();
-        s.prep.cull_camera(&|mesh, tag, world| {
-            let Some(info) = meshes.submesh(mesh).and_then(|m| meshes.info(m.lit)) else {
-                return true;
-            };
-            let pose = has_palette
-                .then(|| skins.draw(tag).and_then(|_| skins.joints(tag)))
-                .flatten();
-            let bounds = crate::skin_draw::instance_bounds(info.bounds, pose.is_some(), pose);
-            crate::skin_bounds::visible(bounds, world, vp)
+        let skinned = |tag: u32| has_palette.then(|| skins.draw(tag)).flatten();
+        s.store.sync(list, tags, slots, &self.extras, &|tag| {
+            skinned(tag).map_or(0, |draw| draw.base)
         });
 
+        let planes = frustum_planes(scene.camera.view_proj());
+        let words = (s.store.capacity() as usize).div_ceil(64).max(1);
+        self.visible_bits.clear();
+        self.visible_bits.resize(words, 0);
+        self.visible_slots.clear();
+        scene
+            .instance_index()
+            .query_frustum(&planes, &mut self.visible_slots);
+        for &slot in &self.visible_slots {
+            let slot = slot as usize;
+            if let Some(word) = self.visible_bits.get_mut(slot / 64) {
+                *word |= 1u64 << (slot % 64);
+            }
+        }
+        let bits = &self.visible_bits;
+        let vp = scene.camera.view_proj();
+        let selected = |i: usize| -> bool {
+            let Some(item) = list.items.get(i) else {
+                return false;
+            };
+            let tag = tags.get(i).copied().unwrap_or(0);
+            if skinned(tag).is_some() {
+                let Some(info) = meshes.submesh(item.mesh).and_then(|m| meshes.info(m.lit)) else {
+                    return true;
+                };
+                let pose = skins.joints(tag);
+                let bounds = crate::skin_draw::instance_bounds(info.bounds, pose.is_some(), pose);
+                return crate::skin_bounds::visible(bounds, item.world, vp);
+            }
+            let slot = slots.get(i).copied().unwrap_or(u32::MAX) as usize;
+            bits.get(slot / 64)
+                .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)
+        };
+        let level_mesh = |_: u32, mesh: MeshId| mesh;
+        let input = SelectInput {
+            list,
+            tags,
+            slots,
+            selected: &selected,
+            materials: &self.material_classes,
+            view: scene.camera.view(),
+            known_mesh: &known_mesh,
+            class_handled: &class_handled,
+            level_mesh: &level_mesh,
+        };
+        s.select.prepare_camera(&input, &skinned)?;
+
         let mut counts = FrameCounts {
-            instances: s.prep.instance_count(),
+            instances: s.select.camera_count(),
             ..FrameCounts::default()
         };
         for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
-            for d in s.prep.draws(class) {
+            for d in s.select.draws(class) {
                 let (_, index_count) = s
                     .meshes
-                    .submesh_range(s.prep.mesh_binding(d.mesh).0)
+                    .submesh_range(s.select.mesh_binding(d.mesh).0)
                     .unwrap_or((0, 0));
                 counts.draw_calls += 1;
                 counts.triangles += u64::from(index_count / 3) * u64::from(d.instance_count);
@@ -511,6 +599,13 @@ impl LitRenderer {
             ..FrameParams::default()
         };
         write_frame_gpu(&mut self.frame_bytes, scene, &params)?;
+
+        // Snapshot the frame the shadow cascade selection will read.
+        s.index.clone_from(scene.instance_index());
+        s.items.clone_from(list);
+        s.item_tags.clone_from(tags);
+        s.item_slots.clone_from(slots);
+
         s.upload(gpu, &self.frame_bytes);
         self.frame_index += 1;
         Ok(counts)

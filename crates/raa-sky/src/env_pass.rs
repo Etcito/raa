@@ -323,9 +323,10 @@ mod tests {
         scene.camera.set_viewport(SIZE.0, SIZE.1);
         let mut list = RenderList::with_capacity(1);
         let mut tags = Vec::with_capacity(1);
+        let mut slots = Vec::with_capacity(1);
         // Frame 0 renders and filters the cube; later frames map and apply the SH readback.
         for frame in 0..20 {
-            lit.prepare(&gpu, &mut scene, &mut list, &mut tags)
+            lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
                 .expect("lit prepare");
             let commands = graph
                 .execute(&gpu, backbuffer.view(), SIZE)

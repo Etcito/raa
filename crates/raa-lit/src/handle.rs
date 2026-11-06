@@ -1,9 +1,10 @@
 //! The state the lit renderer shares with its passes and contributors through
 //! [`LitHandle`]: the mesh store, the draw lists, the group-0 buffers (S10 `FrameGpu`,
-//! `SurfaceMaterialGpu` array, `InstanceExtraGpu` array, the material texture atlas, its
-//! sampler and rects, the material data words) with their layout and bind group,
-//! the S1 instance stream, the shader composer and material functions, and the cache of
-//! render pipelines per shader variant and [`PipelineSpec`].
+//! `SurfaceMaterialGpu` array, `InstanceExtraGpu` array, the persistent instance records,
+//! the material texture atlas, its sampler and rects, the material data words) with their
+//! layout and bind group, the compacted u32 instance id stream, the shader composer and
+//! material functions, and the cache of render pipelines per shader variant and
+//! [`PipelineSpec`].
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
+use raa_scene::{InstanceIndex, RenderList};
 use raa_shader::{
     ComposeOptions, Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError,
     SlotProvider, TintMode, VariantKey,
@@ -19,11 +21,13 @@ use raa_shader::{
 
 use crate::extras::INSTANCE_EXTRA_GPU_SIZE;
 use crate::frame::FRAME_GPU_SIZE;
+use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
 use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::material_data::MaterialData;
 use crate::meshes::{INSTANCE_SLOT, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
-use crate::prep::{DrawPrep, INSTANCE_GPU_SIZE, LitDraw};
+use crate::prep::{INSTANCE_GPU_SIZE, LitDraw};
+use crate::select::IdPrep;
 use crate::slots::default_slot_providers;
 use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas};
 
@@ -35,35 +39,19 @@ const STREAM1_STRIDE: u64 = 40;
 const STREAM0_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
 
-const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = wgpu::vertex_attr_array![
-    2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-    6 => Float32x4, 7 => Float32x4, 8 => Float32x4,
-    9 => Uint32
-];
+/// Stride of the compacted u32 instance id stream (S1 vertex slot 1).
+const ID_STRIDE: u64 = 4;
+
+/// The compacted instance id stream: one u32 slot per instance, read by
+/// `@builtin(instance_index)` and resolved with `raa_instance(id)`.
+const INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![2 => Uint32];
 
 const STREAM1_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![10 => Float32x2, 11 => Float32x4, 12 => Float32x4];
 
-/// Posed variants (instanced skinning): the instance stream adds the palette base at
-/// byte 120 (`@location(15)`).
-const POSED_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = {
-    let [a, b, c, d, e, f, g, h] = INSTANCE_ATTRIBUTES;
-    [
-        a,
-        b,
-        c,
-        d,
-        e,
-        f,
-        g,
-        h,
-        wgpu::VertexAttribute {
-            format: wgpu::VertexFormat::Uint32,
-            offset: crate::skin_views::INSTANCE_PALETTE_OFFSET as u64,
-            shader_location: 15,
-        },
-    ]
-};
+/// Posed variants (instanced skinning) read the same id stream; the palette base comes
+/// from the persistent instance record (group 0 binding 7).
+const POSED_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 1] = INSTANCE_ATTRIBUTES;
 
 /// Posed variants read uv and colour from stream 1; the rest tangent comes from slot 3.
 const POSED_STREAM1_ATTRIBUTES: [wgpu::VertexAttribute; 2] = [
@@ -122,8 +110,9 @@ pub struct PipelineSpec {
 }
 
 /// The vertex buffers of every lit pipeline, in slot order: S10 stream 0 at
-/// [`STREAM0_SLOT`] (locations 0-1), the S1 instance stream at [`INSTANCE_SLOT`]
-/// (locations 2-9, step Instance) and S10 stream 1 at [`STREAM1_SLOT`] (locations 10-12).
+/// [`STREAM0_SLOT`] (locations 0-1), the compacted u32 instance id stream at
+/// [`INSTANCE_SLOT`] (location 2, step Instance) and S10 stream 1 at [`STREAM1_SLOT`]
+/// (locations 10-12).
 fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
     [
         Some(wgpu::VertexBufferLayout {
@@ -132,7 +121,7 @@ fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
             attributes: &STREAM0_ATTRIBUTES,
         }),
         Some(wgpu::VertexBufferLayout {
-            array_stride: INSTANCE_GPU_SIZE as u64,
+            array_stride: ID_STRIDE,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &INSTANCE_ATTRIBUTES,
         }),
@@ -144,8 +133,8 @@ fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
     ]
 }
 
-/// The vertex buffers of posed variants: stream 0 (rest), the instance stream with the
-/// palette base, stream 1 without its tangent and the rest skin records in slot 3.
+/// The vertex buffers of posed variants: stream 0 (rest), the id stream, stream 1
+/// without its tangent and the rest skin records in slot 3.
 fn posed_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 4] {
     [
         Some(wgpu::VertexBufferLayout {
@@ -154,7 +143,7 @@ fn posed_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 
             attributes: &STREAM0_ATTRIBUTES,
         }),
         Some(wgpu::VertexBufferLayout {
-            array_stride: INSTANCE_GPU_SIZE as u64,
+            array_stride: ID_STRIDE,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &POSED_INSTANCE_ATTRIBUTES,
         }),
@@ -187,8 +176,9 @@ fn palette_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
 
 /// S10 group 0: binding 0 `FrameGpu` uniform (512 B), binding 1 `array<SurfaceMaterialGpu>`
 /// and binding 2 `array<InstanceExtraGpu>`, both read-only storage; 3, 4, 5 the material
-/// texture atlas, its sampler and rects; 6 the material data words (read-only storage).
-fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 7] {
+/// texture atlas, its sampler and rects; 6 the material data words (read-only storage);
+/// 7 the persistent instance records (read-only storage).
+fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 8] {
     let read_only = wgpu::BufferBindingType::Storage { read_only: true };
     [
         buffer_entry(0, wgpu::BufferBindingType::Uniform, FRAME_GPU_SIZE),
@@ -212,7 +202,23 @@ fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 7] {
         },
         buffer_entry(5, read_only, TEXTURE_RECT_SIZE),
         buffer_entry(6, read_only, 4),
+        buffer_entry(7, read_only, INSTANCE_GPU_SIZE),
     ]
+}
+
+/// A buffer of `size` bytes with `usage | COPY_DST`.
+fn buffer(
+    gpu: &GpuContext,
+    label: &'static str,
+    size: u64,
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 fn buffer_entry(
@@ -336,8 +342,10 @@ pub(crate) struct LitShared {
     bound_skin: Cell<bool>,
     pub(crate) meshes: MeshStore,
     pub(crate) editor: crate::editor::EditorState,
-    /// The draw lists and the instance/extras bytes in draw order.
-    pub(crate) prep: DrawPrep,
+    /// The camera and cascade id sections and their draw lists.
+    pub(crate) select: IdPrep,
+    /// The persistent instance and extras records by stable scene slot.
+    pub(crate) store: InstanceStore,
     pub(crate) materials: SurfaceLibrary,
     pub(crate) fns: MaterialFnRegistry,
     /// S23 tint mode per material; a material absent from the map is `multiply`.
@@ -345,14 +353,21 @@ pub(crate) struct LitShared {
     composer: Composer,
     /// `composer.slots_hash()`, updated by [`LitShared::add_slot`].
     slots_hash: u64,
-    /// S1 instance stream, `max_instances` x 128 B.
-    pub(crate) instance_buffer: wgpu::Buffer,
+    /// Compacted u32 instance ids, 5 sections of `max_instances` (camera + cascades).
+    pub(crate) id_buffer: wgpu::Buffer,
     /// `FrameGpu`, 512 B.
     frame_buffer: wgpu::Buffer,
     /// `SurfaceMaterialGpu` array, `max_materials` x 256 B.
     material_buffer: wgpu::Buffer,
-    /// `InstanceExtraGpu` array, `max_instances` x 128 B.
+    /// Persistent S1 instance records, group-0 binding 7.
+    pub(crate) instance_storage: wgpu::Buffer,
+    /// `InstanceExtraGpu` array, one record per slot.
     extras_buffer: wgpu::Buffer,
+    /// The frame snapshot the cascade selection reads (index, list, tags, slots).
+    pub(crate) index: InstanceIndex,
+    pub(crate) items: RenderList,
+    pub(crate) item_tags: Vec<u32>,
+    pub(crate) item_slots: Vec<u32>,
     /// Scratch of `SurfaceLibrary::write_gpu_all`, preallocated for `max_materials`.
     material_bytes: Vec<u8>,
     /// Material textures, group-0 bindings 3 (atlas), 4 (sampler) and 5 (rects).
@@ -392,35 +407,30 @@ impl LitShared {
         }
         let instances = u64::from(max_instances.max(1));
         let materials = u64::from(max_materials.max(1));
-        let buffer = |label, size: u64, usage: wgpu::BufferUsages| {
-            gpu.device().create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size,
-                usage: usage | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            })
-        };
+        let store = InstanceStore::new(max_instances.max(1));
+        let instance_bytes = store.instance_bytes().len().max(INSTANCE_GPU_SIZE) as u64;
+        let extra_bytes = store.extra_bytes().len().max(INSTANCE_EXTRA_GPU_SIZE) as u64;
         let storage = wgpu::BufferUsages::STORAGE;
-        let instance_buffer = buffer(
-            "raa.lit.instances",
-            instances * INSTANCE_GPU_SIZE as u64,
+        let id_buffer = buffer(
+            gpu,
+            "raa.lit.ids",
+            instances * 5 * ID_STRIDE,
             wgpu::BufferUsages::VERTEX,
         );
         let frame_buffer = buffer(
+            gpu,
             "raa.lit.frame",
             FRAME_GPU_SIZE as u64,
             wgpu::BufferUsages::UNIFORM,
         );
         let material_buffer = buffer(
+            gpu,
             "raa.lit.materials",
             materials * SURFACE_MATERIAL_GPU_SIZE as u64,
             storage,
         );
-        let extras_buffer = buffer(
-            "raa.lit.extras",
-            instances * INSTANCE_EXTRA_GPU_SIZE as u64,
-            storage,
-        );
+        let instance_storage = buffer(gpu, "raa.lit.instance_records", instance_bytes, storage);
+        let extras_buffer = buffer(gpu, "raa.lit.extras", extra_bytes, storage);
         let frame_layout =
             gpu.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -438,7 +448,12 @@ impl LitShared {
         let frame_bind_group = create_frame_bind_group(
             gpu,
             &frame_layout,
-            [&frame_buffer, &material_buffer, &extras_buffer],
+            [
+                &frame_buffer,
+                &material_buffer,
+                &extras_buffer,
+                &instance_storage,
+            ],
             &textures,
             &data,
         );
@@ -448,16 +463,22 @@ impl LitShared {
             bound_skin: Cell::new(false),
             meshes: MeshStore::new(),
             editor: crate::editor::EditorState::default(),
-            prep: DrawPrep::new(max_instances, max_materials),
+            select: IdPrep::new(max_instances, max_materials),
+            store,
             materials: SurfaceLibrary::new(),
             fns: MaterialFnRegistry::new(),
             tint_modes: RefCell::new(HashMap::new()),
             slots_hash: composer.slots_hash(),
             composer,
-            instance_buffer,
+            id_buffer,
             frame_buffer,
             material_buffer,
+            instance_storage,
             extras_buffer,
+            index: InstanceIndex::new(),
+            items: RenderList::default(),
+            item_tags: Vec::new(),
+            item_slots: Vec::new(),
             material_bytes: Vec::with_capacity(materials as usize * SURFACE_MATERIAL_GPU_SIZE),
             textures,
             data,
@@ -520,7 +541,12 @@ impl LitShared {
             self.frame_bind_group = create_frame_bind_group(
                 gpu,
                 &self.frame_layout,
-                [&self.frame_buffer, &self.material_buffer, &self.extras_buffer],
+                [
+                    &self.frame_buffer,
+                    &self.material_buffer,
+                    &self.extras_buffer,
+                    &self.instance_storage,
+                ],
                 &self.textures,
                 &self.data,
             );
@@ -541,7 +567,12 @@ impl LitShared {
             self.frame_bind_group = create_frame_bind_group(
                 gpu,
                 &self.frame_layout,
-                [&self.frame_buffer, &self.material_buffer, &self.extras_buffer],
+                [
+                    &self.frame_buffer,
+                    &self.material_buffer,
+                    &self.extras_buffer,
+                    &self.instance_storage,
+                ],
                 &self.textures,
                 &self.data,
             );
@@ -580,18 +611,45 @@ impl LitShared {
         self.textures.packer()
     }
 
-    /// Writes the frame's `FrameGpu`, the prepared instance and extras bytes and, when the
-    /// library changed, every material record. Bytes beyond a buffer are not written (the
-    /// prep refuses such frames before).
+    /// Writes the frame's `FrameGpu`, the changed instance and extras pages, the compacted
+    /// id stream and, when the library changed, every material record. A grown store
+    /// re-creates its GPU buffers and the frame bind group first.
     pub(crate) fn upload(&mut self, gpu: &GpuContext, frame: &[u8; FRAME_GPU_SIZE]) {
         let queue = gpu.queue();
         queue.write_buffer(&self.frame_buffer, 0, frame);
-        write_prefix(queue, &self.instance_buffer, self.prep.instance_bytes());
-        write_prefix(queue, &self.extras_buffer, self.prep.extra_bytes());
+        self.ensure_store_buffers(gpu);
+        self.store
+            .upload(queue, &self.instance_storage, &self.extras_buffer);
+        write_prefix(queue, &self.id_buffer, self.select.id_bytes());
         if self.materials.is_dirty() {
             self.materials.write_gpu_all(&mut self.material_bytes);
             write_prefix(queue, &self.material_buffer, &self.material_bytes);
         }
+    }
+
+    /// Re-creates the instance and extras buffers, and the frame bind group over them,
+    /// when the store grew past their size.
+    fn ensure_store_buffers(&mut self, gpu: &GpuContext) {
+        let instances = self.store.instance_bytes().len().max(INSTANCE_GPU_SIZE) as u64;
+        let extras = self.store.extra_bytes().len().max(INSTANCE_EXTRA_GPU_SIZE) as u64;
+        if self.instance_storage.size() == instances && self.extras_buffer.size() == extras {
+            return;
+        }
+        let storage = wgpu::BufferUsages::STORAGE;
+        self.instance_storage = buffer(gpu, "raa.lit.instance_records", instances, storage);
+        self.extras_buffer = buffer(gpu, "raa.lit.extras", extras, storage);
+        self.frame_bind_group = create_frame_bind_group(
+            gpu,
+            &self.frame_layout,
+            [
+                &self.frame_buffer,
+                &self.material_buffer,
+                &self.extras_buffer,
+                &self.instance_storage,
+            ],
+            &self.textures,
+            &self.data,
+        );
     }
 
     /// Re-creates the palette bind group when the skin palette buffer was (re)created.
@@ -773,17 +831,16 @@ impl LitShared {
     }
 }
 
-/// A bind group entry over the whole of `buffer`.
-/// The group-0 bind group: `buffers` (frame, materials, extras) at bindings 0..3, the
-/// texture atlas entries at 3..6 and the material data words at 6.
+/// The group-0 bind group: `buffers` (frame, materials, extras, instance records) at
+/// bindings 0..3 and 7, the texture atlas entries at 3..6 and the material data words at 6.
 fn create_frame_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
-    buffers: [&wgpu::Buffer; 3],
+    buffers: [&wgpu::Buffer; 4],
     textures: &TextureAtlas,
     data: &MaterialData,
 ) -> wgpu::BindGroup {
-    let [frame, materials, extras] = buffers;
+    let [frame, materials, extras, instances] = buffers;
     let [atlas, sampler, rects] = textures.bind_entries();
     gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raa.lit.frame_bind_group"),
@@ -792,6 +849,7 @@ fn create_frame_bind_group(
             whole(0, frame),
             whole(1, materials),
             whole(2, extras),
+            whole(7, instances),
             atlas,
             sampler,
             rects,
@@ -830,26 +888,21 @@ impl LitHandle {
         LitHandle { shared }
     }
 
-    /// Opaque/fur caster lists; transparent camera draws (back to front).
-    /// Instances `first_instance..first_instance + instance_count` index the instance
-    /// stream and the extras array (`@builtin(instance_index)`).
+    /// The camera draws of `class` in submission order (transparent: back to front).
+    /// Instances `first_instance..first_instance + instance_count` index the compacted id
+    /// stream (`@builtin(instance_index)`), whose ids address the instance records.
     pub fn draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
-        Ref::map(self.shared.borrow(), |s| {
-            if class == DrawClass::Transparent {
-                s.prep.camera_draws(class)
-            } else {
-                s.prep.draws(class)
-            }
-        })
+        self.camera_draws(class)
     }
 
-    /// Camera-only lists; the unfiltered opaque/fur lists remain available to shadows.
+    /// The camera draws of `class`; shadows draw the camera list until the cascade
+    /// selection lands.
     pub fn camera_draws(&self, class: DrawClass) -> Ref<'_, [LitDraw]> {
-        Ref::map(self.shared.borrow(), |s| s.prep.camera_draws(class))
+        Ref::map(self.shared.borrow(), |s| s.select.draws(class))
     }
 
-    /// Sets the vertex buffers of sub-mesh `mesh` and the instance stream (stream 0 at slot
-    /// 0, instances at slot 1, stream 1 at slot 2) and binds the index buffer starting at
+    /// Sets the vertex buffers of sub-mesh `mesh` and the id stream (stream 0 at slot 0,
+    /// ids at slot 1, stream 1 at slot 2) and binds the index buffer starting at
     /// the sub-mesh's first index ([`submesh_range`](Self::submesh_range)), so
     /// `draw_indexed(0..count, 0, first..first + n)` draws exactly the sub-mesh. Returns
     /// `count`, the sub-mesh's index count. Unknown ids give `render.unknown_mesh`.
@@ -859,7 +912,7 @@ impl LitHandle {
         mesh: MeshId,
     ) -> Result<u32, RaaError> {
         let s = self.shared.borrow();
-        let (mesh, tag) = s.prep.mesh_binding(mesh);
+        let (mesh, tag) = s.select.mesh_binding(mesh);
         let (g, first, count) = s.meshes.resolve(mesh)?;
         let posed = s.posed_binding(tag);
         s.bound_skin.set(posed.is_some());
@@ -869,7 +922,7 @@ impl LitHandle {
             pass.set_vertex_buffer(SKIN_SLOT, skin.slice(..));
             pass.set_bind_group(crate::skin_draw::PALETTE_GROUP, palette, &[]);
         }
-        pass.set_vertex_buffer(INSTANCE_SLOT, s.instance_buffer.slice(..));
+        pass.set_vertex_buffer(INSTANCE_SLOT, s.id_buffer.slice(..));
         pass.set_vertex_buffer(STREAM1_SLOT, g.stream1.slice(..));
         let start = u64::from(first) * 4;
         let end = start + u64::from(count) * 4;
@@ -887,18 +940,19 @@ impl LitHandle {
     pub fn submesh_range(&self, mesh: MeshId) -> (u32, u32) {
         let s = self.shared.borrow();
         s.meshes
-            .submesh_range(s.prep.mesh_binding(mesh).0)
+            .submesh_range(s.select.mesh_binding(mesh).0)
             .unwrap_or((0, 0))
     }
 
-    /// The S1 instance stream (128 B per instance, in draw order).
-    pub fn instance_buffer(&self) -> wgpu::Buffer {
-        self.shared.borrow().instance_buffer.clone()
+    /// The compacted u32 instance id stream (4 B per id, camera section first).
+    pub fn id_buffer(&self) -> wgpu::Buffer {
+        self.shared.borrow().id_buffer.clone()
     }
 
-    /// The S10 group-0 layout: `FrameGpu` uniform (512 B), `array<SurfaceMaterialGpu>` and
-    /// `array<InstanceExtraGpu>` read-only storage, then the material texture atlas
-    /// (`texture_2d<f32>`), its filtering sampler and `array<vec4<f32>>` rects.
+    /// The S10 group-0 layout: `FrameGpu` uniform (512 B), `array<SurfaceMaterialGpu>`,
+    /// `array<InstanceExtraGpu>` and `array<RaaInstanceGpu>` read-only storage, then the
+    /// material texture atlas (`texture_2d<f32>`), its filtering sampler and
+    /// `array<vec4<f32>>` rects, and the material data words.
     pub fn frame_layout(&self) -> wgpu::BindGroupLayout {
         self.shared.borrow().frame_layout.clone()
     }
@@ -945,7 +999,7 @@ impl LitHandle {
     ) -> Result<wgpu::RenderPipeline, RaaError> {
         let s = self.shared.borrow();
         let mut key = key;
-        if s.posed_binding(s.prep.mesh_binding(mesh).1).is_some() {
+        if s.posed_binding(s.select.mesh_binding(mesh).1).is_some() {
             key.flags |= crate::skin_draw::POSED;
         }
         s.pipeline_for(gpu, key, spec)
@@ -954,7 +1008,7 @@ impl LitHandle {
     /// Whether a draw of prepared binding `mesh` is drawn posed (instanced skinning).
     pub fn draw_is_posed(&self, mesh: MeshId) -> bool {
         let s = self.shared.borrow();
-        s.posed_binding(s.prep.mesh_binding(mesh).1).is_some()
+        s.posed_binding(s.select.mesh_binding(mesh).1).is_some()
     }
 
     /// Stores the S23 tint mode of material `id` (`multiply` by default). Draws of a
@@ -1182,20 +1236,7 @@ mod tests {
         let layouts = vertex_buffer_layouts();
         let expect: [ExpectedBuffer; 3] = [
             (24, wgpu::VertexStepMode::Vertex, &[(0, 0), (1, 12)]),
-            (
-                128,
-                wgpu::VertexStepMode::Instance,
-                &[
-                    (2, 0),
-                    (3, 16),
-                    (4, 32),
-                    (5, 48),
-                    (6, 64),
-                    (7, 80),
-                    (8, 96),
-                    (9, 112),
-                ],
-            ),
+            (4, wgpu::VertexStepMode::Instance, &[(2, 0)]),
             (
                 40,
                 wgpu::VertexStepMode::Vertex,
@@ -1212,7 +1253,7 @@ mod tests {
                 .collect();
             assert_eq!(got, attrs);
         }
-        assert_eq!(INSTANCE_ATTRIBUTES[7].format, wgpu::VertexFormat::Uint32);
+        assert_eq!(INSTANCE_ATTRIBUTES[0].format, wgpu::VertexFormat::Uint32);
     }
 
     #[test]
@@ -1277,18 +1318,21 @@ mod tests {
                 ..
             } if n.get() == 16
         ));
-        // Material data words: read-only storage of u32 words, both stages.
-        assert_eq!(data.len(), 1);
-        assert_eq!(data[0].binding, 6);
-        assert_eq!(data[0].visibility, wgpu::ShaderStages::VERTEX_FRAGMENT);
-        assert!(matches!(
-            data[0].ty,
-            wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                min_binding_size: Some(n),
-                ..
-            } if n.get() == 4
-        ));
+        // Material data words (binding 6) and the instance records (binding 7): read-only
+        // storage, both stages.
+        assert_eq!(data.len(), 2);
+        assert_eq!((data[0].binding, data[1].binding), (6, 7));
+        for (entry, min) in data.iter().zip([4, 128]) {
+            assert_eq!(entry.visibility, wgpu::ShaderStages::VERTEX_FRAGMENT);
+            assert!(matches!(
+                entry.ty,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    min_binding_size: Some(n),
+                    ..
+                } if n.get() == min
+            ));
+        }
     }
 
     #[test]

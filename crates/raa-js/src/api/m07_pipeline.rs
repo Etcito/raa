@@ -488,8 +488,13 @@ pub(crate) fn prepare_view(
             post.shafts
                 .set_sun(light.direction, light.color.map(|c| c * light.intensity));
         }
-        st.lit
-            .prepare(gpu, &mut st.scene, &mut st.list, &mut st.tags)?;
+        st.lit.prepare(
+            gpu,
+            &mut st.scene,
+            &mut st.list,
+            &mut st.tags,
+            &mut st.slots,
+        )?;
         Ok(())
     })();
     st.scene.camera = original;

@@ -1,4 +1,5 @@
 //! Optional editor overlays. No textures, buffers, uploads or commands while inactive.
+use crate::handle::LitShared;
 use crate::{DrawClass, LitHandle, LitMeshId};
 use raa_core::RaaError;
 use raa_pipeline::{FeaturePass, RecordCtx};
@@ -28,9 +29,16 @@ impl EditorState {
         self.wire.get(&tag).copied().unwrap_or(self.global)
     }
 }
-fn tag(bytes: &[u8], i: u32) -> u32 {
-    bytes
-        .get(i as usize * 128 + 116..i as usize * 128 + 120)
+/// The persistent record of camera id `i`: the id stream holds stable scene slots.
+fn record(s: &LitShared, i: u32) -> Option<&[u8]> {
+    let at = i as usize * 4;
+    let slot = u32::from_le_bytes(s.select.id_bytes().get(at..at + 4)?.try_into().ok()?);
+    s.store.record(slot)
+}
+
+fn tag(s: &LitShared, i: u32) -> u32 {
+    record(s, i)
+        .and_then(|r| r.get(116..120))
         .and_then(|b| b.try_into().ok())
         .map(u32::from_le_bytes)
         .unwrap_or(0)
@@ -78,7 +86,7 @@ impl LitHandle {
             return;
         }
         for i in instances {
-            if s.editor.mode(tag(s.prep.instance_bytes(), i)) != WireframeMode::Only {
+            if s.editor.mode(tag(&s, i)) != WireframeMode::Only {
                 pass.draw_indexed(indices.clone(), 0, i..i + 1);
             }
         }
@@ -100,6 +108,9 @@ pub(crate) struct EditorPass {
     lit: LitHandle,
     resources: Option<Resources>,
     bytes: Vec<u8>,
+    /// The 128 B instance records of the camera ids, in id order.
+    records: Vec<u8>,
+    record_buffer: Option<wgpu::Buffer>,
 }
 struct Resources {
     size: (u32, u32),
@@ -123,6 +134,8 @@ impl EditorPass {
             lit,
             resources: None,
             bytes: Vec::new(),
+            records: Vec::new(),
+            record_buffer: None,
         }
     }
 }
@@ -132,8 +145,16 @@ const SETTINGS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![6=>Float32
 const SEGMENT: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3];
 /// A posed edge record holds two S1 vertices: the second starts at byte 24.
 const POSED_SEGMENT: [wgpu::VertexAttribute; 2] = [
-    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 1 },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 24,
+        shader_location: 1,
+    },
 ];
 const POSITION: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0=>Float32x3];
 fn instance(stride: u64) -> Option<wgpu::VertexBufferLayout<'static>> {
@@ -420,12 +441,11 @@ impl FeaturePass for EditorPass {
             s.meshes.prepare_edges(ctx.gpu);
         }
         self.bytes.clear();
-        for record in s.prep.instance_bytes().chunks_exact(128) {
-            let tag = u32::from_le_bytes(
-                record[116..120]
-                    .try_into()
-                    .map_err(|_| RaaError::Resource("invalid instance record".into()))?,
-            );
+        self.records.clear();
+        for i in 0..s.select.camera_count() {
+            let tag = tag(&s, i);
+            self.records
+                .extend_from_slice(record(&s, i).unwrap_or(&[0u8; 128]));
             let mode = match s.editor.mode(tag) {
                 WireframeMode::Off => 0.0_f32,
                 WireframeMode::Overlay => 1.0,
@@ -448,6 +468,32 @@ impl FeaturePass for EditorPass {
             }
         }
         drop(s);
+        let needed = (self.records.len() as u64).max(128);
+        if self
+            .record_buffer
+            .as_ref()
+            .is_none_or(|b| b.size() < needed)
+        {
+            let mut size = self
+                .record_buffer
+                .as_ref()
+                .map_or(128, |b| b.size().max(128));
+            while size < needed {
+                size = size.saturating_mul(2);
+            }
+            self.record_buffer = Some(ctx.gpu.device().create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raa.editor.instances"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let records = self.record_buffer.clone();
+        if let Some(buffer) = &records
+            && !self.records.is_empty()
+        {
+            ctx.gpu.queue().write_buffer(buffer, 0, &self.records);
+        }
         let capacity = (self.bytes.len() as u64).max(32).next_power_of_two();
         if self.resources.as_ref().is_none_or(|r| {
             r.size != ctx.size || r.format != ctx.backbuffer_format || r.capacity < capacity
@@ -478,10 +524,12 @@ impl FeaturePass for EditorPass {
             pass.set_pipeline(&r.silhouette);
             pass.set_bind_group(0, &frame, &[]);
             pass.set_bind_group(1, &r.mask_group, &[]);
-            pass.set_vertex_buffer(1, s.instance_buffer.slice(..));
+            if let Some(buffer) = &records {
+                pass.set_vertex_buffer(1, buffer.slice(..));
+            }
             pass.set_vertex_buffer(2, r.settings.slice(..));
             for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
-                for draw in s.prep.draws(class) {
+                for draw in s.select.draws(class) {
                     let double_sided = s
                         .materials
                         .get(draw.material)
@@ -491,11 +539,11 @@ impl FeaturePass for EditorPass {
                     } else {
                         &r.silhouette
                     });
-                    let source_mesh = s.prep.mesh_binding(draw.mesh).0;
+                    let source_mesh = s.select.mesh_binding(draw.mesh).0;
                     let (mesh, first, count) = s.meshes.resolve(source_mesh)?;
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
-                        let tag = tag(s.prep.instance_bytes(), i);
+                        let tag = tag(&s, i);
                         if s.editor.outlines.contains_key(&tag) {
                             // Selected instances write their own posed mesh view.
                             let geometry = crate::skin_editor::OverlayGeometry::select(
@@ -522,10 +570,12 @@ impl FeaturePass for EditorPass {
         pass.set_bind_group(0, &frame, &[]);
         pass.set_bind_group(1, &r.group, &[]);
         if wire {
-            pass.set_vertex_buffer(1, s.instance_buffer.slice(..));
+            if let Some(buffer) = &records {
+                pass.set_vertex_buffer(1, buffer.slice(..));
+            }
             pass.set_vertex_buffer(2, r.settings.slice(..));
             for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
-                for draw in s.prep.draws(class) {
+                for draw in s.select.draws(class) {
                     let double_sided = s
                         .materials
                         .get(draw.material)
@@ -535,11 +585,11 @@ impl FeaturePass for EditorPass {
                     } else {
                         &r.only
                     });
-                    let source_mesh = s.prep.mesh_binding(draw.mesh).0;
+                    let source_mesh = s.select.mesh_binding(draw.mesh).0;
                     let (mesh, first, count) = s.meshes.resolve(source_mesh)?;
                     pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
-                        let tag = tag(s.prep.instance_bytes(), i);
+                        let tag = tag(&s, i);
                         if s.editor.mode(tag) == WireframeMode::Only {
                             // The flat fill must cover the same silhouette as the posed edges.
                             let geometry = crate::skin_editor::OverlayGeometry::select(
@@ -555,8 +605,8 @@ impl FeaturePass for EditorPass {
                 }
             }
             for class in [DrawClass::Opaque, DrawClass::Fur, DrawClass::Transparent] {
-                for draw in s.prep.draws(class) {
-                    let source_mesh = s.prep.mesh_binding(draw.mesh).0;
+                for draw in s.select.draws(class) {
+                    let source_mesh = s.select.mesh_binding(draw.mesh).0;
                     let Some(record) = s.meshes.submesh(source_mesh) else {
                         continue;
                     };
@@ -567,7 +617,7 @@ impl FeaturePass for EditorPass {
                     }
                     let (mesh, _, _) = s.meshes.resolve(source_mesh)?;
                     for i in draw.first_instance..draw.first_instance + draw.instance_count {
-                        let tag = tag(s.prep.instance_bytes(), i);
+                        let tag = tag(&s, i);
                         if s.editor.mode(tag) == WireframeMode::Off {
                             continue;
                         }
@@ -581,20 +631,17 @@ impl FeaturePass for EditorPass {
                         let Some(edges) = &geometry.edges else {
                             continue;
                         };
-                        pass.set_pipeline(if geometry.edge_stride
-                            == crate::SKINNED_EDGE_STRIDE
-                        {
+                        pass.set_pipeline(if geometry.edge_stride == crate::SKINNED_EDGE_STRIDE {
                             &r.wire_posed
                         } else {
                             &r.wire
                         });
                         pass.set_vertex_buffer(0, edges.slice(..));
                         // Repeat the world/settings record for all segments of this instance.
-                        pass.set_vertex_buffer(
-                            1,
-                            s.instance_buffer
-                                .slice(i as u64 * 128..i as u64 * 128 + 128),
-                        );
+                        let start = i as u64 * 128;
+                        if let Some(buffer) = &records {
+                            pass.set_vertex_buffer(1, buffer.slice(start..start + 128));
+                        }
                         pass.set_vertex_buffer(
                             2,
                             r.settings.slice(i as u64 * 32..i as u64 * 32 + 32),
