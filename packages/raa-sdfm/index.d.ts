@@ -361,7 +361,8 @@ export function createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader;
 /**
  * The MAMA procedural scene functions `loadProceduralScene` calls, exactly what
  * src/mama-bridge.js `importProcedural()` resolves (bare `mama/procgen/scene-file.js`,
- * `mama/procgen/scene-build.js`, `mama/procgen/trace.js` and `mama`, or the matching files under a `base` URL).
+ * `mama/procgen/scene-build.js`, `mama/procgen/trace.js`, `mama/procgen/runtime.js` and `mama`,
+ * or the matching files under a `base` URL).
  * The scene is typed `string | object` because this package declares no MAMA types: pass the parsed
  * `sdfm.procedural-scene` v1 file (section 66) in the shape MAMA's `ProceduralScene` defines.
  * Refusals: none of its own; an import failure is `sdfm.worker`.
@@ -382,10 +383,47 @@ export interface SdfmProceduralMama {
     { sources: object[]; instances: { source: number }[] };
   /** MAMA `packTrace(procgen, input)`: evaluator op 4 packs the TraceProgram in Rust; trace mode only. */
   packTrace?(procgen: SdfmProcgen, input: { sources: object[]; instances: { source: number }[] }): Uint8Array;
+  /**
+   * MAMA `Runtime` (mama/procgen/runtime.js): owns one evaluator handle in the Rust/WASM
+   * evaluator; `Runtime.create(procgen, scene.runtime.input)` is what
+   * {@link ProceduralSceneHandle.runtime} builds.
+   */
+  Runtime?: {
+    create(procgen: SdfmProcgen, input: object): {
+      set(values: Record<string, ProceduralRuntimeValue>): void;
+      step(tick: number): object;
+      dispose(): void;
+    };
+  };
 }
 
 export interface SdfmProcgen {
   call(op: number, input: Uint8Array): Uint8Array;
+}
+
+/** One MAMA runtime parameter value (`RuntimeValue` in MAMA's src/procgen/types.ts). */
+export type ProceduralRuntimeValue = number | boolean | Vec3;
+
+/**
+ * The stateful runtime handle of one loaded procedural scene (section 68), backed by MAMA
+ * `Runtime` in the Rust/WASM evaluator. Every `step` evaluates one tick in call order and applies
+ * its sorted delta to the scene's engine instances (mesh mode) or to the engine's trace scene
+ * (trace mode). A new mesh key is meshed by the loader's worker pool while the previous mesh stays
+ * alive; added instances are attached under the scene root and removed ones lose their subtree.
+ * Refusals: `sdfm.scene_format` for a scene without runtime input or a bad tick;
+ * `sdfm.scene_resolve` when MAMA, the runtime, a remesh/attach step or the trace packer fails;
+ * `sdfm.disposed` after {@link ProceduralSceneRuntime.dispose}.
+ */
+export interface ProceduralSceneRuntime {
+  /** Evaluate one tick and apply its delta; resolves with the applied counts. */
+  step(tick: number): Promise<{
+    moved: number; remeshed: number; added: number; removed: number;
+    ok: boolean; issues: object[];
+  }>;
+  /** Replace the explicit parameter overrides (runtime drivers still apply). */
+  set(values: Record<string, ProceduralRuntimeValue>): void;
+  /** Free the MAMA runtime handle and detach the instances it added; idempotent. */
+  dispose(): void;
 }
 
 /**
@@ -430,6 +468,13 @@ export interface ProceduralSceneHandle {
   setVisible(visible: boolean): void;
   /** `instances` is the scene instance count, `meshes` the distinct loaded assets' parts, `pending` the uploads left. */
   stats(): { instances: number; meshes: number; pending: number };
+  /**
+   * Build the MAMA runtime handle of a scene whose file carries `runtime` (section 68). The
+   * returned adapter applies each tick's delta to the instances this handle loaded (mesh mode) or
+   * to the engine's trace scene (trace mode). A scene without runtime input refuses with
+   * `sdfm.scene_format`.
+   */
+  runtime(procgen: SdfmProcgen): ProceduralSceneRuntime;
   /** Remove the root node and every mesh this handle added; idempotent. */
   dispose(): void;
 }

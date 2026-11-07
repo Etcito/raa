@@ -1,4 +1,5 @@
 import { SdfmError } from './errors.js';
+import { createProceduralRuntime } from './procedural-runtime.js';
 
 // One engine has a single trace slot: each handle keeps its MAMA TraceInput, a change merges the
 // visible inputs, and MAMA op 4 packs them in Rust. Installing a program selects the engine's
@@ -53,6 +54,28 @@ export async function loadProceduralTrace(engine, loader, scene, mama, options) 
     stats() {
       check();
       return { instances: scene.instances.length, meshes: 0, pending: 0 };
+    },
+    runtime(procgen) {
+      check();
+      // The adapter repacks the delta-updated instance list through MAMA op 4. The merged trace
+      // slot is rebuilt from this handle's entry, so the newest packed input is stored on it
+      // before the shared commit merges every visible handle.
+      let packed = null;
+      return createProceduralRuntime({
+        engine, scene, procgen, mama,
+        trace: {
+          input: entry.input,
+          procgen,
+          packTrace(p, value) {
+            packed = value;
+            return mama.packTrace(p, value);
+          },
+          commit() {
+            if (packed !== null) entry.input = packed;
+            commit(engine, session);
+          },
+        },
+      });
     },
     dispose() {
       if (disposed) return;

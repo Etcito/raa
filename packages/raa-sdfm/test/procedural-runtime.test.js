@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createFakeEngine } from './fake-engine.js';
 import { createProceduralRuntime } from '../src/procedural-runtime.js';
+import { loadProceduralScene } from '../src/procedural.js';
 import { SdfmError } from '../src/errors.js';
 
 function runtimeEngine() {
@@ -967,4 +968,186 @@ test('disposing a trace runtime disposes the handle and applies no further step'
   await assert.rejects(adapter.step(1), (error) => error instanceof SdfmError && error.code === 'sdfm.disposed');
   assert.equal(engine.trace.updates.length, 0);
   assert.equal(engine.trace.sets.length, 0);
+});
+
+// --- Public attachment: loadProceduralScene(...).runtime(procgen) ---------------------------------
+
+const BEND_A = { kind: 'bend', params: { axis: 'y', angle: 20 }, angle: 0.349, length: 1, along: 'x', toward: 'y' };
+const BEND_B = { kind: 'bend', params: { axis: 'y', angle: 45 }, angle: 0.785, length: 1, along: 'x', toward: 'y' };
+
+function publicScene(overrides = {}) {
+  return {
+    format: 'sdfm.procedural-scene', version: 1, variant: 'sdf-refs', name: 'demo', game: 'fixture',
+    generator: { document: 'demo.sdfm.json', node: 'host', seed: 1, params: {} },
+    sources: [{
+      kind: 'asset', file: 'assets/common/post.test.asset.json', ref: { game: 'fixture', id: 'common.post.test' },
+      bounds: { min: [-1, -1, -1], max: [1, 1, 1] },
+    }],
+    instances: [{ key: 1, source: 0, t: [0, 0, 0], r: [0, 0, 0, 1], s: [1, 1, 1], group: -1 }],
+    groups: [], colliders: [], visual: [],
+    runtime: { input: { version: 1, graph: {}, paramValues: {}, timeTicks: 0, sources: {} } },
+    ...overrides,
+  };
+}
+
+function publicMama(deltas, { trace = false } = {}) {
+  const calls = { create: [], packed: [] };
+  const runtime = fakeRuntime(deltas);
+  const mama = {
+    parseProceduralScene: (text) => JSON.parse(text),
+    sceneSourceDocument(scene) {
+      return {
+        format: 'sdfm', version: 2, name: scene.name, root: ['source'],
+        nodes: { source: { id: 'source', kind: 'group', children: [] } }, materials: {},
+      };
+    },
+    serializeDocument: (doc) => JSON.stringify(doc),
+    Runtime: {
+      create(procgen, input) {
+        calls.create.push({ procgen, input });
+        return runtime;
+      },
+    },
+  };
+  if (trace) {
+    mama.buildSceneTraceInput = (scene) => ({
+      sources: scene.sources.map((_source, index) => ({ key: `source:${index}`, tree: { root: '', nodes: {} } })),
+      instances: scene.instances.map((instance) => ({ ...instance })),
+    });
+    mama.packTrace = (procgen, input) => {
+      calls.packed.push(input);
+      return runtimeTraceProgram(input);
+    };
+  }
+  return { mama, runtime, calls };
+}
+
+function publicLoader(log) {
+  return {
+    async load(asset) {
+      log.load.push(asset);
+      return { id: asset.id, parts: [{ name: 'p', mesh: 1 }] };
+    },
+    spawn(asset, parent) {
+      const root = 5000 + log.spawn.length;
+      log.spawn.push({ id: asset.id, parent, root });
+      return { root, parts: { p: { node: root, instance: root + 1 } } };
+    },
+  };
+}
+
+const loadOptions = (fake) => ({ mama: async () => fake.mama, resolveAsset: async (file) => ({ file }) });
+
+test('the public handle builds the MAMA runtime, applies deltas and forwards set', async () => {
+  const engine = runtimeEngine();
+  const log = { load: [], spawn: [] };
+  const fake = publicMama([
+    delta(),
+    delta({ moved: [{ key: 1, t: [2, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+  ]);
+  const handle = await loadProceduralScene(engine, publicLoader(log), publicScene(), loadOptions(fake));
+  const runtime = handle.runtime({ call() {} });
+  assert.equal(fake.calls.create.length, 1);
+  assert.deepStrictEqual(fake.calls.create[0].input, publicScene().runtime.input);
+
+  const baseline = await runtime.step(0);
+  assert.deepStrictEqual([baseline.moved, baseline.remeshed], [0, 0]);
+  const moved = await runtime.step(1);
+  assert.equal(moved.moved, 1);
+  assert.deepStrictEqual(engine.calls.setTransform.at(-1).t, [2, 0, 0]);
+
+  runtime.set({ spin: 2 });
+  assert.deepStrictEqual(fake.runtime.sets, [{ spin: 2 }]);
+  runtime.dispose();
+  assert.equal(fake.runtime.disposed, true);
+  handle.dispose();
+});
+
+test('the public handle remeshes a metadata-only change by stable key, never by source', async () => {
+  const engine = runtimeEngine();
+  const log = { load: [], spawn: [] };
+  const fake = publicMama([
+    delta({
+      output: {
+        ok: true,
+        instances: [outInstance(1, { meshKey: 'a', deform: BEND_A }), outInstance(2, { meshKey: 'b', deform: BEND_B })],
+      },
+    }),
+    delta({
+      remesh: [{ meshKey: 'c', source: 0, deform: BEND_B }, { meshKey: 'd', source: 0, deform: BEND_A }],
+      output: {
+        ok: true,
+        instances: [outInstance(1, { meshKey: 'c', deform: BEND_B }), outInstance(2, { meshKey: 'd', deform: BEND_A })],
+      },
+    }),
+  ]);
+  const scene = publicScene({
+    instances: [
+      { key: 1, source: 0, t: [0, 0, 0], r: [0, 0, 0, 1], s: [1, 1, 1], group: -1, deform: BEND_A },
+      { key: 2, source: 0, t: [1, 0, 0], r: [0, 0, 0, 1], s: [1, 1, 1], group: -1, deform: BEND_B },
+    ],
+  });
+  const handle = await loadProceduralScene(engine, publicLoader(log), scene, loadOptions(fake));
+  const nodes = engine.calls.addNode.filter((node) => node.parent === handle.root).map((node) => node.id);
+  assert.equal(nodes.length, 2);
+
+  const runtime = handle.runtime({ call() {} });
+  await runtime.step(0);
+  const result = await runtime.step(1);
+  assert.deepStrictEqual([result.moved, result.added, result.removed, result.remeshed], [0, 0, 0, 2]);
+
+  const runtimeLoads = log.load.filter((asset) => typeof asset.id === 'string' && asset.id.includes('.r0-'));
+  assert.deepStrictEqual(runtimeLoads.map((asset) => asset.id), ['procedural.demo.r0-c', 'procedural.demo.r0-d']);
+  assert.deepStrictEqual(runtimeLoads[0].document.nodes.source.deformers,
+    [{ id: 'bend', kind: 'bend', enabled: true, params: BEND_B.params }]);
+  assert.deepStrictEqual(runtimeLoads[1].document.nodes.source.deformers,
+    [{ id: 'bend', kind: 'bend', enabled: true, params: BEND_A.params }]);
+
+  const initialRoots = log.spawn.filter((spawn) => !spawn.id.includes('.r0-')).map((spawn) => spawn.root);
+  assert.deepStrictEqual(engine.calls.removeNode, initialRoots);
+  const runtimeSpawns = log.spawn.filter((spawn) => spawn.id.includes('.r0-'));
+  assert.deepStrictEqual(runtimeSpawns.map((spawn) => [spawn.id, spawn.parent]), [
+    ['procedural.demo.r0-c', nodes[0]],
+    ['procedural.demo.r0-d', nodes[1]],
+  ]);
+  runtime.dispose();
+  handle.dispose();
+});
+
+test('the public handle applies a trace scene runtime delta through the shared trace slot', async () => {
+  const engine = runtimeTraceEngine();
+  const log = { load: [], spawn: [] };
+  const fake = publicMama([
+    delta(),
+    delta({ moved: [{ key: 1, t: [3, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+  ], { trace: true });
+  const handle = await loadProceduralScene(engine, publicLoader(log), publicScene(), {
+    ...loadOptions(fake), mode: 'trace', procgen: { call() {} },
+  });
+  assert.equal(engine.trace.sets.length, 1);
+
+  const runtime = handle.runtime({ call() {} });
+  assert.equal(fake.calls.create.length, 1);
+  const baseline = await runtime.step(0);
+  assert.deepStrictEqual([baseline.moved, baseline.added, baseline.removed], [0, 0, 0]);
+  assert.equal(engine.trace.sets.length, 1, 'the loader installed the baseline program');
+
+  const moved = await runtime.step(1);
+  assert.equal(moved.moved, 1);
+  assert.equal(engine.trace.sets.length, 2, 'the delta repacks the shared trace scene');
+  assert.deepStrictEqual(fake.calls.packed.at(-1).instances[0].t, [3, 0, 0]);
+  runtime.dispose();
+  assert.equal(fake.runtime.disposed, true);
+  handle.dispose();
+  assert.ok(engine.trace.clears >= 1, 'the last handle clears the trace slot');
+});
+
+test('the public handle refuses runtime for a scene without runtime input', async () => {
+  const engine = runtimeEngine();
+  const fake = publicMama([]);
+  const handle = await loadProceduralScene(engine, publicLoader({ load: [], spawn: [] }),
+    publicScene({ runtime: null }), loadOptions(fake));
+  assert.throws(() => handle.runtime({ call() {} }),
+    (error) => error instanceof SdfmError && error.code === 'sdfm.scene_format');
+  handle.dispose();
 });

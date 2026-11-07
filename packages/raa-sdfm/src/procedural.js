@@ -5,6 +5,7 @@ import { mapMaterial } from './map-material.js';
 import { decodeMeshFile, meshFilePayload } from './mesh-file.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import { instanceParams } from './instance-params.js';
+import { createProceduralRuntime } from './procedural-runtime.js';
 
 /**
  * Load one `sdfm.procedural-scene` v1 file (section 66). Mesh sources are decoded and uploaded;
@@ -30,6 +31,10 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
   const root = engine.addNode(options.parent ?? null);
   const meshes = [];
   const instances = [];
+  const entries = [];
+  let meshSource = null;
+  let assetsByKey = null;
+  let sourceParts = null;
   let meshCount = 0;
   let attributed = 0;
   let disposed = false;
@@ -43,6 +48,9 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
     if (scene.variant === 'sdf-refs') {
       const loaded = await loadSdfRefs(engine, loader, scene, mama, options, root);
       instances.push(...loaded.instances);
+      entries.push(...loaded.entries);
+      meshSource = loaded.meshSource;
+      assetsByKey = loaded.assetsByKey;
       meshCount = loaded.meshes;
       attributed = loaded.attributed;
     } else {
@@ -89,6 +97,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
           return { ...frameToTr(part.frame), meshes: handles };
         }));
       });
+      sourceParts = sources;
       for (const instance of scene.instances) {
         const node = engine.addNode(root, instance.t, instance.r, instance.s);
         const spawned = [];
@@ -100,6 +109,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
             spawned.push(handle);
           }
         }
+        entries.push({ key: instance.key, node, parts: spawned, source: instance.source });
         attributed += applyInstanceParams(engine, instance, spawned);
       }
       meshCount = meshes.length;
@@ -124,6 +134,15 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
       const stats = { instances: scene.instances.length, meshes: meshCount, pending: 0 };
       if (attributed > 0) stats.attributed = attributed;
       return stats;
+    },
+    runtime(procgen) {
+      checkLive();
+      return meshRuntime({
+        scene, engine, loader, mama, procgen, root, entries,
+        ...(scene.variant === 'sdf-refs'
+          ? { meshSource, assetsByKey }
+          : { sourceParts }),
+      });
     },
     dispose,
   };
@@ -208,21 +227,104 @@ async function loadSdfRefs(engine, loader, scene, mama, options, root) {
   }
 
   const instances = [];
+  const entries = [];
+  const assetsByKey = new Map();
   let attributed = 0;
   for (const [index, instance] of scene.instances.entries()) {
     const node = engine.addNode(root, instance.t, instance.r, instance.s);
     const spawned = loader.spawn(instanceAssets[index], node);
-    const parts = [];
-    for (const part of Object.values(spawned?.parts ?? {})) {
-      if (part && part.instance !== undefined) {
-        instances.push(part.instance);
-        parts.push(part.instance);
-      }
-    }
+    const parts = spawnedHandles(spawned);
+    instances.push(...parts);
+    assetsByKey.set(assetKey(instance.source, instance.deform), instanceAssets[index]);
+    entries.push({
+      key: instance.key,
+      node,
+      parts,
+      spawnRoot: spawned?.root ?? null,
+      source: instance.source,
+      ...(instance.deform !== undefined ? { deform: instance.deform } : {}),
+    });
     attributed += applyInstanceParams(engine, instance, parts);
   }
+  const meshSource = async (item) => {
+    const doc = sourceDocument(mama, scene, item.source, lookup);
+    if (item.deform !== undefined) {
+      doc.nodes.source.deformers = [{ id: 'bend', kind: 'bend', enabled: true, params: item.deform.params }];
+    }
+    return buildEnvelope(mama, scene, item.source, doc, parsedAssets,
+      `procedural.${scene.name}.r${item.source}-${item.meshKey}`,
+      `${scene.name} source ${item.source} runtime ${item.meshKey}`);
+  };
   const meshes = loaded.reduce((count, asset) => count + (Array.isArray(asset?.parts) ? asset.parts.length : 0), 0);
-  return { instances, meshes, attributed };
+  return { instances, entries, meshSource, assetsByKey, meshes, attributed };
+}
+
+/**
+ * Runtime wiring of a loaded scene (section 68): the adapter moves, adds and removes the engine
+ * instances it already tracks and, for an sdf-refs scene, builds a new in-memory asset for a new
+ * mesh key and lets the loader (its worker pool) mesh it; the previous mesh stays alive. A
+ * mesh-refs scene reuses the meshes it decoded for added instances of a known source.
+ */
+function meshRuntime({ scene, engine, loader, mama, procgen, root, entries, meshSource, assetsByKey, sourceParts }) {
+  return createProceduralRuntime({
+    engine, scene, procgen, mama, root, instances: entries,
+    ...(scene.variant === 'sdf-refs'
+      ? {
+          loader,
+          meshSource,
+          attach: (instance, token) => attachSdfInstance(engine, loader, root, instance, token, assetsByKey),
+          reattach: (entry, token) => reattachSdfInstance(engine, loader, entry, token),
+        }
+      : { attach: (instance) => attachMeshInstance(engine, root, instance, sourceParts) }),
+  });
+}
+
+function attachSdfInstance(engine, loader, root, instance, token, assetsByKey) {
+  const node = engine.addNode(root, instance.t, instance.r, instance.s);
+  const asset = token ?? assetsByKey?.get(assetKey(instance.source, instance.deform));
+  const spawned = asset === undefined ? null : loader.spawn(asset, node);
+  return {
+    key: instance.key,
+    node,
+    parts: spawnedHandles(spawned),
+    spawnRoot: spawned?.root ?? null,
+    source: instance.source,
+    ...(instance.deform !== undefined ? { deform: instance.deform } : {}),
+  };
+}
+
+function reattachSdfInstance(engine, loader, entry, token) {
+  if (entry.spawnRoot !== null && entry.spawnRoot !== undefined) engine.removeNode(entry.spawnRoot);
+  const spawned = loader.spawn(token, entry.node);
+  entry.spawnRoot = spawned?.root ?? null;
+  entry.parts = spawnedHandles(spawned);
+}
+
+function attachMeshInstance(engine, root, instance, sourceParts) {
+  const parts = sourceParts?.[instance.source];
+  if (!Array.isArray(parts)) {
+    throw new SdfmError('sdfm.scene_resolve', `mesh-refs runtime has no mesh for source ${instance.source}`);
+  }
+  const node = engine.addNode(root, instance.t, instance.r, instance.s);
+  const handles = [];
+  for (const part of parts) {
+    const partNode = engine.addNode(node, part.t, part.r);
+    for (const mesh of part.meshes) handles.push(engine.addMeshInstance(partNode, mesh));
+  }
+  return { key: instance.key, node, parts: handles, source: instance.source };
+}
+
+function spawnedHandles(spawned) {
+  const parts = [];
+  for (const part of Object.values(spawned?.parts ?? {})) {
+    if (part && part.instance !== undefined) parts.push(part.instance);
+  }
+  return parts;
+}
+
+/** One in-memory asset per distinct source and bend, keyed like the loader's bend assets. */
+function assetKey(source, deform) {
+  return deform === undefined ? `${source}` : `${source}|${canonicalJson(deform.params)}`;
 }
 
 /**

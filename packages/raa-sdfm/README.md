@@ -48,6 +48,14 @@ set. `stats()` reports the instance count, the number of distinct loaded assets'
 pending uploads; `setVisible` covers every spawned part instance; `dispose` removes the root node
 and every mesh the handle added.
 
+A scene whose file carries `runtime` (section 68) also exposes `handle.runtime(procgen)`: it builds
+MAMA's `Runtime` in the Rust/WASM evaluator (through `mama-bridge.js`) and returns
+`{ step(tick), set(values), dispose() }`. `step` evaluates one tick in call order and applies its
+sorted delta: moved instances keep their node, added instances are attached under the scene root,
+removed ones lose their subtree, and a new mesh key is meshed by the loader's worker pool while the
+previous mesh stays alive. In trace mode the same delta repacks the shared trace scene by stable
+instance key. A scene without runtime input refuses with `sdfm.scene_format`.
+
 Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a mesh-refs scene in trace
 mode or a deform on a mesh-refs instance; `sdfm.scene_resolve` when a resolve callback, the S24
 decode, `sceneSourceDocument` or trace packing fails; `sdfm.worker` when the default MAMA import
@@ -69,6 +77,7 @@ MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones 
 | `mama/procgen/scene-file.js` | `parseProceduralScene` | `parseProceduralScene(text)` (the `sdfm.procedural-scene` v1 text) | MAMA's strict `ProceduralScene` value | `src/procgen/scene-file.ts` |
 | `mama/procgen/scene-build.js` | `sceneSourceDocument` | `sceneSourceDocument(scene, sourceIndex, lookupAsset)`; `lookupAsset(file)` returns the parsed asset object or null | `SdfDocument` of one composite (csg, realized) or of the asset source a bend wraps | `src/procgen/scene-build.ts` |
 | `mama/procgen/trace.js` | `buildSceneTraceInput`, `packTrace` | `buildSceneTraceInput(scene, lookupAsset)` resolves every sdf-refs source; `packTrace(procgen, input)` is evaluator op 4, given `options.procgen` | section 67 `TraceInput`, then the little-endian TraceProgram v1 bytes `Engine.setTraceScene` takes | `src/procgen/trace.ts` @ 2086284 |
+| `mama/procgen/runtime.js` | `Runtime` | `Runtime.create(procgen, scene.runtime.input)` (evaluator op 5), then `set(values)` (op 6), `step(tick)` (op 7, a section 68 `RuntimeDelta`) and `dispose()` (op 8) | the Rust/WASM runtime handle `ProceduralSceneHandle.runtime(procgen)` drives | `src/procgen/runtime.ts` |
 | `mama/core/material-graph/cpu-eval.js` | `cpuGraphOrNull` | compare page only (`examples/sdfm-compare/lib/mama-view.js`), not the bridge: `cpuGraphOrNull(def, doc).eval(p, p, n, masks, {})` per vertex, `p` and `n` in world space | `CpuGraph \| null`; the page reads `MaterialValues.baseColor` (linear) | `src/core/material-graph/cpu-eval.ts:482` |
 
 Notes on the table:
@@ -76,7 +85,7 @@ Notes on the table:
 - `buildMaterial` calls `compileMaterialGraph` (`src/core/material-graph/compile.ts:97`) internally. The bridge calls neither directly. A `BuiltMaterial` with `graph: null` throws `sdfm.material_unmappable` with MAMA's error.
 - Helpers: `BASE_WGSL` comes first as helper `base` (the graph bodies call its `mat_clamp01` without listing it in `graph.helpers`); then each id of `graph.helpers` and its `deps` (dependencies first) is resolved through `HELPERS`; an id without WGSL source throws `sdfm.material_unmappable` naming the material and the helper.
 - Imports: `importMama(base?)` in `src/mama-bridge.js` imports `mama`, `mama/core/game/mesh-assets.js`, `mama/core/material-graph/helpers.js` and `mama/browser` (bare specifiers, or the matching files under MAMA's `dist/` URL `base`).
-- Procedural scenes: `importProcedural(base?)` in `src/mama-bridge.js` imports `mama/procgen/scene-file.js` (for `parseProceduralScene`), `mama/procgen/scene-build.js` (for `sceneSourceDocument`), `mama/procgen/trace.js` (for `buildSceneTraceInput` and `packTrace`) and `mama` (for `serializeDocument`); with `base` (MAMA's `dist/` URL) it imports `procgen/scene-file.js`, `procgen/scene-build.js`, `procgen/trace.js` and `index.js` under it. It is the default `options.mama()` of `loadProceduralScene`; an import failure is `sdfm.worker` naming the specifier.
+- Procedural scenes: `importProcedural(base?)` in `src/mama-bridge.js` imports `mama/procgen/scene-file.js` (for `parseProceduralScene`), `mama/procgen/scene-build.js` (for `sceneSourceDocument`), `mama/procgen/trace.js` (for `buildSceneTraceInput` and `packTrace`), `mama/procgen/runtime.js` (for `Runtime`) and `mama` (for `serializeDocument`); with `base` (MAMA's `dist/` URL) it imports `procgen/scene-file.js`, `procgen/scene-build.js`, `procgen/trace.js`, `procgen/runtime.js` and `index.js` under it. It is the default `options.mama()` of `loadProceduralScene`; an import failure is `sdfm.worker` naming the specifier.
 - Output of `meshDocument(mama, document, { pool, groups? })`: `{ groups: [{ group, parts: [{ partId, name, frame: Float64Array, meshes: [{ material, positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, indices: Uint32Array, skin?: { joints: Uint16Array, weights: Float32Array, rig } }] }], rig?, clips? }], materials: MamaMaterial[] }`. Every part is rigid and the hierarchy is flat (one node per part under the spawn root, local transform = `frame`); no rigid flag or parent is read from the document. Each MAMA sub-mesh is one mesh; sub-meshes are not merged. MAMA's S18 skin arrays are copied with their joint order and rig association; `rig` and `clips` are the group's authored S16/S17 values.
 - Refusals: a group whose `error` is set (`error.code` `MESHER_GROUP_UNSUPPORTED`, message naming the group) becomes `SdfmError('sdfm.mesher_refused', '<group>: <error.message>' plus `error.fix` when present, path '/document')`. A group error with code `sdfm.rig` becomes `SdfmError('sdfm.rig', ...)` with the S16 code in the message. The first refused group in result order wins. Any other exception from MAMA becomes `sdfm.worker`.
 - Browser host: MAMA has no viewport host. Nothing in MAMA mounts a canvas, loads a document into a viewport, sets a camera or renders a frame. `setupBrowserHost` returns a meshing worker pool only, so this README has no rows for mount, load, camera or render. The MAMA pane of the side-by-side page is therefore a local reference viewport, `examples/sdfm-compare/lib/mama-view.js`, labelled `MAMA 864ebc3 mesher (reference viewport)`. It meshes the document with `readSdfm`, `setupBrowserHost` (`workerMode: 'blob'`) and `meshAssets` through `meshDocument`, colours each vertex with the `cpuGraphOrNull` base colour, and draws the result with plain WebGPU (Lambert shading, the same camera and size as the RAA pane). It is not SDF Modeler's viewport.
@@ -191,9 +200,10 @@ Every exported name of `index.d.ts`:
 | `SdfmError` | The adapter's refusal: `code` (an S15 code) and an optional JSON pointer `path`; message prefixed `<code>: `. |
 | `SdfmErrorCode` | Union of the thirteen S15 codes listed in the table below, plus the S18 `sdfm.rig` and the two procedural-scene codes. |
 | `loadProceduralScene` | Loads an `sdfm.procedural-scene` v1 file (sdf-refs or mesh-refs) into one engine node per instance; `mode: 'trace'` packs an sdf-refs scene into the engine's world-volume trace scene; returns a `ProceduralSceneHandle`. |
-| `ProceduralSceneHandle` | `root`, `instanceCount`, `sourceCount`, `setVisible`, `stats` (`{ instances, meshes, pending, attributed? }`) and `dispose`. |
+| `ProceduralSceneHandle` | `root`, `instanceCount`, `sourceCount`, `setVisible`, `stats` (`{ instances, meshes, pending, attributed? }`), `runtime(procgen)` and `dispose`. |
+| `ProceduralSceneRuntime` | The MAMA runtime handle of a scene with `runtime`: `step(tick)` (resolves with `{ moved, remeshed, added, removed, ok, issues }`), `set(values)` and `dispose`. |
 | `ProceduralSceneOptions` | `{ resolveAsset?, resolveMesh?, parent?, mode?: 'mesh' \| 'trace', procgen?, placement?, mama? }`; `mode` defaults to `'mesh'` and `mama` to the bridge's `importProcedural`. |
-| `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`, plus `buildSceneTraceInput` and `packTrace` in trace mode. |
+| `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`, `Runtime` for a scene with `runtime`, plus `buildSceneTraceInput` and `packTrace` in trace mode. |
 | `decodeMeshFile` | Decodes an S24 saved `.mesh` file into its header and typed-array views. |
 | `meshFilePayload` | Validates a decoded S24 payload and wraps its groups, parts and materials. |
 | `INSTANCE_PARAM_SLOTS` | The first slot of each group of an instance's 16 parameter floats: `{ tint: 0, wind: 4, scale: 5, free: 6 }`. |
