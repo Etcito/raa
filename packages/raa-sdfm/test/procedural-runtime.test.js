@@ -184,6 +184,14 @@ test('a new mesh key is built once, handed to added instances and old meshes sta
     delta({
       remesh: [{ meshKey: 'k2', source: 0, deform: BEND }],
       added: [outInstance(30, { meshKey: 'k2', deform: BEND, t: [2, 0, 0] })],
+      output: {
+        ok: true,
+        instances: [
+          outInstance(7, { meshKey: 'k2', deform: BEND }),
+          outInstance(8, { meshKey: 'k2', deform: BEND }),
+          outInstance(30, { meshKey: 'k2', deform: BEND, t: [2, 0, 0] }),
+        ],
+      },
     }),
   ]);
   const released = [];
@@ -223,6 +231,154 @@ test('a new mesh key is built once, handed to added instances and old meshes sta
 
   adapter.dispose();
   assert.deepStrictEqual(released, [{ mesh: 'k2' }]);
+});
+
+test('a metadata-only step reattaches each surviving instance by its own stable key, never the request source', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  const nodeA = engine.addNode(root);
+  const nodeB = engine.addNode(root);
+  const bendA = { ...BEND, params: { axis: 'y', angle: 20 }, angle: 0.349 };
+  const bendB = { ...BEND, params: { axis: 'y', angle: 45 }, angle: 0.785 };
+  const runtime = fakeRuntime([
+    delta({
+      output: {
+        ok: true,
+        instances: [
+          outInstance(7, { meshKey: 'a', deform: bendA }),
+          outInstance(8, { meshKey: 'b', deform: bendB }),
+        ],
+      },
+    }),
+    delta({
+      remesh: [
+        { meshKey: 'c', source: 0, deform: bendB },
+        { meshKey: 'd', source: 0, deform: bendA },
+      ],
+      output: {
+        ok: true,
+        instances: [
+          outInstance(7, { meshKey: 'c', deform: bendB }),
+          outInstance(8, { meshKey: 'd', deform: bendA }),
+        ],
+      },
+    }),
+  ]);
+  const built = [];
+  const reattached = [];
+  const released = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    instances: new Map([
+      [7, { node: nodeA, source: 0, deform: bendA, meshKey: 'a', mesh: { old: 7 } }],
+      [8, { node: nodeB, source: 0, deform: bendB, meshKey: 'b', mesh: { old: 8 } }],
+    ]),
+    remesh(item) {
+      built.push(item.meshKey);
+      return { mesh: item.meshKey };
+    },
+    reattach(entry, token, item) {
+      reattached.push({ key: entry.key, token, meshKey: item.meshKey });
+    },
+    release(token) {
+      released.push(token);
+    },
+  });
+
+  await adapter.step(0);
+  const result = await adapter.step(1);
+  assert.deepStrictEqual([result.moved, result.added, result.removed, result.remeshed], [0, 0, 0, 2]);
+  assert.deepStrictEqual(built, ['c', 'd']);
+  // The bends are swapped between two instances of one source: a source+deform inference would
+  // give 8 the "c" mesh and 7 the "d" mesh. Their stable keys say 7 -> c and 8 -> d.
+  assert.deepStrictEqual(reattached, [
+    { key: 7, token: { mesh: 'c' }, meshKey: 'c' },
+    { key: 8, token: { mesh: 'd' }, meshKey: 'd' },
+  ]);
+  assert.deepStrictEqual(released, [], 'the old meshes stay alive while the replacements are used');
+
+  adapter.dispose();
+  assert.deepStrictEqual(released, [{ mesh: 'c' }, { mesh: 'd' }]);
+});
+
+test('a metadata-only step reconciles source, mesh key and deform for later steps', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  const nodeA = engine.addNode(root);
+  const runtime = fakeRuntime([
+    delta(),
+    delta({
+      output: { ok: true, instances: [outInstance(7, { source: 1, meshKey: 'k1', deform: BEND })] },
+    }),
+    delta({
+      remesh: [{ meshKey: 'k2', source: 1, deform: BEND }],
+      output: { ok: true, instances: [outInstance(7, { source: 1, meshKey: 'k2', deform: BEND })] },
+    }),
+  ]);
+  const reattached = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    instances: new Map([[7, { node: nodeA, source: 0, deform: BEND, meshKey: 'k1', mesh: { old: 1 } }]]),
+    remesh: (item) => ({ mesh: item.meshKey }),
+    reattach(entry, token, item) {
+      reattached.push({ key: entry.key, meshKey: item.meshKey });
+    },
+  });
+
+  await adapter.step(0);
+  const clean = await adapter.step(1);
+  assert.deepStrictEqual([clean.moved, clean.added, clean.removed, clean.remeshed], [0, 0, 0, 0]);
+  const replaced = await adapter.step(2);
+  assert.deepStrictEqual([replaced.moved, replaced.added, replaced.removed, replaced.remeshed], [0, 0, 0, 1]);
+  assert.deepStrictEqual(reattached, [{ key: 7, meshKey: 'k2' }]);
+  assert.deepStrictEqual(engine.calls.removeNode, []);
+});
+
+test('a surviving instance returns to an already built mesh without rebuilding it', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  const nodeA = engine.addNode(root);
+  const bendA = { ...BEND, angle: 0.1 };
+  const bendB = { ...BEND, angle: 0.2 };
+  const step = (meshKey, deform) => delta({
+    remesh: [{ meshKey, source: 0, deform }],
+    output: { ok: true, instances: [outInstance(7, { meshKey, deform })] },
+  });
+  const runtime = fakeRuntime([delta(), step('kB', bendB), step('kA', bendA), step('kB', bendB)]);
+  const builds = [];
+  const reattached = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    instances: new Map([[7, { node: nodeA, source: 0, deform: bendA, meshKey: 'kA', mesh: { old: 1 } }]]),
+    remesh(item) {
+      builds.push(item.meshKey);
+      return { mesh: item.meshKey };
+    },
+    reattach(entry, token, item) {
+      reattached.push({ key: entry.key, meshKey: item.meshKey });
+    },
+  });
+
+  await adapter.step(0);
+  await adapter.step(1);
+  await adapter.step(2);
+  const result = await adapter.step(3);
+  assert.equal(result.remeshed, 0, 'the key was built by the first change');
+  assert.deepStrictEqual(builds, ['kB', 'kA']);
+  assert.deepStrictEqual(reattached, [
+    { key: 7, meshKey: 'kB' },
+    { key: 7, meshKey: 'kA' },
+    { key: 7, meshKey: 'kB' },
+  ]);
 });
 
 test('a rejected evaluation changes nothing and reports its issues', async () => {
@@ -403,4 +559,412 @@ test('an added instance forwards its procgen attributes and LOD bias to every sp
   assert.equal(params[3], 1);
   assert.equal(params[4], 2);
   assert.equal(params[6], 3);
+});
+
+test('a new mesh key listed twice is requested once and shared by every added instance', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  const runtime = fakeRuntime([
+    delta(),
+    delta({
+      remesh: [{ meshKey: 'k2', source: 0 }, { meshKey: 'k2', source: 0 }],
+      added: [outInstance(1, { meshKey: 'k2', t: [1, 0, 0] }), outInstance(2, { meshKey: 'k2', t: [2, 0, 0] })],
+    }),
+  ]);
+  let builds = 0;
+  const tokens = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    remesh(item) {
+      builds += 1;
+      return { mesh: item.meshKey };
+    },
+    attach(instance, token) {
+      tokens.push(token);
+      return { node: engine.addNode(root, instance.t, instance.r, instance.s) };
+    },
+  });
+
+  await adapter.step(0);
+  const result = await adapter.step(1);
+  assert.equal(builds, 1);
+  assert.equal(result.remeshed, 1);
+  assert.equal(result.added, 2);
+  assert.deepStrictEqual(tokens, [{ mesh: 'k2' }, { mesh: 'k2' }]);
+});
+
+test('overlapping steps evaluate in call order and apply the newest transforms with one build', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  let releaseBuild;
+  const build = new Promise((resolve) => { releaseBuild = resolve; });
+  let startedBuild;
+  const started = new Promise((resolve) => { startedBuild = resolve; });
+  const runtime = fakeRuntime([
+    delta(),
+    delta({ remesh: [{ meshKey: 'k2', source: 0 }], added: [outInstance(1, { meshKey: 'k2', t: [1, 0, 0] })] }),
+    delta({ moved: [{ key: 1, t: [2, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+  ]);
+  let builds = 0;
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    remesh() {
+      builds += 1;
+      startedBuild();
+      return build;
+    },
+    attach(instance) {
+      return { node: engine.addNode(root, instance.t, instance.r, instance.s) };
+    },
+  });
+
+  await adapter.step(0);
+  const first = adapter.step(1);
+  await started;
+  const second = adapter.step(2);
+  assert.equal(runtime.lastTick, 2, 'the second tick is evaluated while the first mesh is still building');
+  releaseBuild({ mesh: 'k2' });
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a.added, 1);
+  assert.equal(b.moved, 1);
+  assert.equal(builds, 1);
+  assert.deepStrictEqual(engine.calls.setTransform.at(-1).t, [2, 0, 0]);
+});
+
+test('a failed remesh rejects the step and leaves the old mesh attached', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  const nodeA = engine.addNode(root);
+  const runtime = fakeRuntime([
+    delta(),
+    delta({ remesh: [{ meshKey: 'k9', source: 0, deform: BEND }], added: [outInstance(40, { meshKey: 'k9', deform: BEND })] }),
+  ]);
+  const attached = [];
+  let reattached = 0;
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    instances: new Map([[7, { node: nodeA, source: 0, deform: BEND, meshKey: 'k1', mesh: { old: 1 } }]]),
+    remesh() {
+      throw new Error('the mesher refused the document');
+    },
+    reattach() {
+      reattached += 1;
+    },
+    attach() {
+      attached.push(1);
+      return { node: engine.addNode(root) };
+    },
+  });
+
+  await adapter.step(0);
+  await assert.rejects(
+    adapter.step(1),
+    (error) => error instanceof SdfmError && error.code === 'sdfm.scene_resolve',
+  );
+  assert.equal(reattached, 0);
+  assert.deepStrictEqual(attached, []);
+  assert.deepStrictEqual(engine.calls.removeNode, []);
+  assert.equal(engine.nodes.has(nodeA), true);
+
+  adapter.dispose();
+  assert.deepStrictEqual(engine.calls.removeNode, [nodeA]);
+});
+
+test('a mesh completion whose instances a newer step removed is dropped and released', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  let releaseBuild;
+  const build = new Promise((resolve) => { releaseBuild = resolve; });
+  let startedBuild;
+  const started = new Promise((resolve) => { startedBuild = resolve; });
+  const runtime = fakeRuntime([
+    delta(),
+    delta({ remesh: [{ meshKey: 'k9', source: 0 }], added: [outInstance(40, { meshKey: 'k9' })] }),
+    delta({ removed: [40] }),
+  ]);
+  const attached = [];
+  const released = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    remesh() {
+      startedBuild();
+      return build;
+    },
+    attach(instance) {
+      attached.push(instance.key);
+      return { node: engine.addNode(root) };
+    },
+    release(token) {
+      released.push(token);
+    },
+  });
+
+  await adapter.step(0);
+  const first = adapter.step(1);
+  await started;
+  const second = adapter.step(2);
+  releaseBuild({ mesh: 'k9' });
+  const [a, b] = await Promise.all([first, second]);
+  assert.deepStrictEqual([a.added, a.remeshed], [0, 0]);
+  assert.equal(b.removed, 0);
+  assert.deepStrictEqual(attached, []);
+  assert.deepStrictEqual(released, [{ mesh: 'k9' }]);
+
+  adapter.dispose();
+  assert.deepStrictEqual(released, [{ mesh: 'k9' }], 'a released completion is not released twice');
+});
+
+test('a new mesh key is requested through the existing loader when no remesh callback is given', async () => {
+  const engine = runtimeEngine();
+  const root = engine.addNode(null);
+  const loads = [];
+  const loader = {
+    async load(asset) {
+      loads.push(asset);
+      return { id: asset.id, parts: [] };
+    },
+  };
+  const runtime = fakeRuntime([
+    delta(),
+    delta({ remesh: [{ meshKey: 'k2', source: 0, deform: BEND }], added: [outInstance(1, { meshKey: 'k2', deform: BEND })] }),
+  ]);
+  const tokens = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    root,
+    scene: runtimeScene(),
+    runtime,
+    loader,
+    meshSource(item) {
+      return { id: `procedural.demo.b0-${item.meshKey}`, hash: 'h', document: {} };
+    },
+    attach(instance, token) {
+      tokens.push(token);
+      return { node: engine.addNode(root) };
+    },
+  });
+
+  await adapter.step(0);
+  const result = await adapter.step(1);
+  assert.equal(loads.length, 1);
+  assert.equal(loads[0].id, 'procedural.demo.b0-k2');
+  assert.deepStrictEqual(tokens, [{ id: 'procedural.demo.b0-k2', parts: [] }]);
+  assert.equal(result.remeshed, 1);
+});
+
+function runtimeTraceEngine() {
+  const engine = runtimeEngine();
+  engine.trace = { sets: [], updates: [], clears: 0 };
+  engine.setTraceScene = (program) => engine.trace.sets.push(program);
+  engine.updateTraceInstances = (instances) => engine.trace.updates.push(instances);
+  engine.clearTraceScene = () => { engine.trace.clears += 1; };
+  return engine;
+}
+
+function runtimeTraceProgram(input) {
+  const sources = Array.isArray(input.sources) ? input.sources.length : 0;
+  const instances = Array.isArray(input.instances) ? input.instances : [];
+  const words = new Uint32Array(8 + sources * 12 + instances.length * 32);
+  words[0] = 0x50544453;
+  words[1] = 1;
+  words[2] = sources;
+  words[3] = instances.length;
+  let at = 8 + sources * 12;
+  for (const instance of instances) {
+    words[at] = instance.key;
+    words[at + 1] = instance.source;
+    at += 32;
+  }
+  return new Uint8Array(words.buffer);
+}
+
+function runtimeTraceInput(instances) {
+  return { sources: [{ key: 'node:one', tree: { root: '', nodes: {} } }], instances };
+}
+
+function runtimeTraceInstance(key, extra = {}) {
+  return { source: 0, t: [0, 0, 0], r: [0, 0, 0, 1], s: [1, 1, 1], key, ...extra };
+}
+
+test('trace stepping moves instances through updateTraceInstances, rebuilds on a topology change and clears when empty', async () => {
+  const engine = runtimeTraceEngine();
+  const runtime = fakeRuntime([
+    delta({ added: [outInstance(1), outInstance(2)] }),
+    delta({ moved: [{ key: 1, t: [3, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+    delta({ added: [outInstance(3, { t: [1, 0, 0] })] }),
+    delta({ removed: [1, 2, 3] }),
+  ]);
+  const packed = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    scene: runtimeScene(),
+    runtime,
+    trace: {
+      input: runtimeTraceInput([runtimeTraceInstance(1), runtimeTraceInstance(2)]),
+      procgen: {},
+      packTrace(procgen, input) {
+        packed.push(input);
+        return runtimeTraceProgram(input);
+      },
+    },
+  });
+
+  const baseline = await adapter.step(0);
+  assert.deepStrictEqual([baseline.moved, baseline.added, baseline.removed], [0, 0, 0]);
+  assert.equal(engine.trace.sets.length + engine.trace.updates.length, 0);
+
+  const moved = await adapter.step(1);
+  assert.equal(moved.moved, 1);
+  assert.equal(engine.trace.updates.length, 1);
+  assert.equal(engine.trace.sets.length, 0);
+  const records = new Uint32Array(engine.trace.updates[0].buffer);
+  assert.deepStrictEqual([...records].filter((_, index) => index % 32 === 0), [1, 2]);
+  assert.deepStrictEqual(packed.at(-1).instances[0].t, [3, 0, 0]);
+
+  const added = await adapter.step(2);
+  assert.equal(added.added, 1);
+  assert.equal(engine.trace.sets.length, 1);
+  assert.equal(engine.trace.updates.length, 1);
+
+  const removed = await adapter.step(3);
+  assert.equal(removed.removed, 3);
+  assert.equal(engine.trace.clears, 1);
+});
+
+test('trace stepping reconciles a metadata-only output by key and repacks the program', async () => {
+  const engine = runtimeTraceEngine();
+  const bendA = { ...BEND, params: { axis: 'y', angle: 20 }, angle: 0.349 };
+  const bendB = { ...BEND, params: { axis: 'y', angle: 45 }, angle: 0.785 };
+  const runtime = fakeRuntime([
+    delta(),
+    delta({
+      output: {
+        ok: true,
+        instances: [
+          outInstance(1, { source: 1, meshKey: 'm1' }),
+          outInstance(2, { source: 0, meshKey: 'm2', deform: bendB }),
+          outInstance(3, { source: 0, meshKey: 'm3', deform: bendA }),
+        ],
+      },
+    }),
+  ]);
+  const packed = [];
+  const adapter = createProceduralRuntime({
+    engine,
+    scene: runtimeScene(),
+    runtime,
+    trace: {
+      input: runtimeTraceInput([
+        runtimeTraceInstance(1),
+        runtimeTraceInstance(2, { deform: bendA }),
+        runtimeTraceInstance(3, { deform: bendB }),
+      ]),
+      procgen: {},
+      packTrace(procgen, input) {
+        packed.push(input);
+        return runtimeTraceProgram(input);
+      },
+    },
+  });
+
+  await adapter.step(0);
+  const result = await adapter.step(1);
+  assert.deepStrictEqual([result.moved, result.added, result.removed, result.remeshed], [0, 0, 0, 0]);
+  assert.equal(engine.trace.sets.length, 1, 'the changed source and bends replace the program');
+  assert.equal(engine.trace.updates.length, 0);
+  assert.deepStrictEqual(
+    packed.at(-1).instances.map((instance) => [instance.key, instance.source, instance.deform?.angle]),
+    [
+      [1, 1, undefined],
+      [2, 0, bendB.angle],
+      [3, 0, bendA.angle],
+    ],
+  );
+});
+
+test('a refused trace install and a failed trace pack both leave the installed program in place', async () => {
+  const engine = runtimeTraceEngine();
+  const runtime = fakeRuntime([
+    delta(),
+    delta({ moved: [{ key: 1, t: [1, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+    delta({ moved: [{ key: 1, t: [2, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+    delta({ moved: [{ key: 1, t: [3, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+  ]);
+  let packFails = false;
+  const adapter = createProceduralRuntime({
+    engine,
+    scene: runtimeScene(),
+    runtime,
+    trace: {
+      input: runtimeTraceInput([runtimeTraceInstance(1)]),
+      procgen: {},
+      packTrace(procgen, input) {
+        if (packFails) throw new Error('PROC_LIMIT: too many objects');
+        return runtimeTraceProgram(input);
+      },
+    },
+  });
+  const install = engine.updateTraceInstances;
+
+  await adapter.step(0);
+  engine.updateTraceInstances = () => {
+    throw new Error('trace.instance_count: refused');
+  };
+  await assert.rejects(adapter.step(1), /trace\.instance_count/);
+  assert.equal(engine.trace.sets.length, 0);
+  assert.equal(engine.trace.updates.length, 0);
+
+  engine.updateTraceInstances = install;
+  packFails = true;
+  await assert.rejects(
+    adapter.step(2),
+    (error) => error instanceof SdfmError && error.code === 'sdfm.scene_resolve' && /PROC_LIMIT/.test(error.message),
+  );
+  assert.equal(engine.trace.sets.length, 0);
+  assert.equal(engine.trace.updates.length, 0);
+
+  packFails = false;
+  const accepted = await adapter.step(3);
+  assert.equal(accepted.moved, 1);
+  assert.equal(engine.trace.updates.length, 1);
+  assert.equal(new Uint32Array(engine.trace.updates[0].buffer)[0], 1);
+});
+
+test('disposing a trace runtime disposes the handle and applies no further step', async () => {
+  const engine = runtimeTraceEngine();
+  const runtime = fakeRuntime([
+    delta(),
+    delta({ moved: [{ key: 1, t: [1, 0, 0], r: [0, 0, 0, 1], rDeg: [0, 0, 0], s: [1, 1, 1] }] }),
+  ]);
+  const adapter = createProceduralRuntime({
+    engine,
+    scene: runtimeScene(),
+    runtime,
+    trace: {
+      input: runtimeTraceInput([runtimeTraceInstance(1)]),
+      procgen: {},
+      packTrace(procgen, input) {
+        return runtimeTraceProgram(input);
+      },
+    },
+  });
+
+  await adapter.step(0);
+  adapter.dispose();
+  assert.equal(runtime.disposed, true);
+  await assert.rejects(adapter.step(1), (error) => error instanceof SdfmError && error.code === 'sdfm.disposed');
+  assert.equal(engine.trace.updates.length, 0);
+  assert.equal(engine.trace.sets.length, 0);
 });
