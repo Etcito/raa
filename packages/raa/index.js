@@ -18,20 +18,31 @@ const VERSION = '0.5.0';
 // carries as `data`, read in WGSL by raa_material_word / raa_material_f32
 // (docs/api/m25-material-data.md).
 
+// The one instantiation of the wasm module. wasm-bindgen's init only skips instantiating once a
+// previous call has FINISHED: two overlapping calls each instantiate the module and the second
+// replaces the glue's exports, so engines made by the first then call into the other instance's
+// memory and closure table ("memory access out of bounds", "table index is out of bounds",
+// "closure invoked recursively or after being dropped": sdfm card 7126, runs 12681-12791).
+let ready = null;
+
 /**
  * Initialises the wasm module and returns a RaaModule.
  *
- * index.js keeps no module-level mutable state: the only state is inside the
- * wasm-bindgen glue, whose init is idempotent (later calls reuse the instantiated
- * module). Each call returns a new, independent, frozen RaaModule object.
+ * Every call, overlapping or not, shares the first call's instantiation; a failed one is
+ * forgotten so a later call can try again. Each call returns a new, independent, frozen
+ * RaaModule object.
  *
  * @param {{ wasmUrl?: string | URL }} [options]
  * @returns {Promise<import('./index.d.ts').RaaModule>}
  */
 export async function loadRaa(options = {}) {
-  await init({
+  ready ??= init({
     module_or_path: options.wasmUrl ?? new URL('./pkg/raa_js_bg.wasm', import.meta.url),
+  }).catch((error) => {
+    ready = null;
+    throw error;
   });
+  await ready;
   return Object.freeze({
     version: VERSION,
     createEngine: (canvas, opts) => Engine.create(canvas, opts ?? {}),
