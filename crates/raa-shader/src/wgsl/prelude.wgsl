@@ -63,6 +63,7 @@ struct EnvGpu {
     fog: vec4<f32>,
     fog_color: vec4<f32>,
     aerial: vec4<f32>,
+    // reserved[0]: cel toon enabled, softness, specular strength, unused.
     reserved: array<vec4<f32>, 4>,
 }
 
@@ -123,6 +124,7 @@ const RAA_FLAG_DOUBLE_SIDED: u32 = 8u;
 const RAA_FLAG_NO_SHADOW: u32 = 16u;
 const RAA_FLAG_VERTEX_FN: u32 = 32u;
 const RAA_FLAG_UNLIT: u32 = 64u;
+const RAA_FLAG_CEL: u32 = 128u;
 
 // Vertex stream 0 (S1 Vertex, 24 B).
 struct RaaVertex0 {
@@ -217,6 +219,7 @@ struct VertexMaterialOutput {
 }
 
 struct ShadeCtx {
+    material_flags: u32,
     position: vec3<f32>,
     view_dir: vec3<f32>,
     frag: vec4<f32>,

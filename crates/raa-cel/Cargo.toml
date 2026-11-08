@@ -1,0 +1,20 @@
+[package]
+name = "raa-cel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Cel palette resolve, outlines and per-material toon lighting."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
+raa-lit = { path = "../raa-lit" }
+raa-brdf = { path = "../raa-brdf" }
+raa-math = { path = "../raa-math" }
+
+[dev-dependencies]
+raa-matfn = { path = "../raa-matfn" }
+naga = { workspace = true }
+raa-particles = { path = "../raa-particles" }

@@ -125,6 +125,7 @@ fn raa_pass_f0(s: MaterialOutput) -> vec3<f32> {
 
 fn raa_pass_shade_ctx(s: MaterialOutput, in: MaterialInput, ao: f32, shadow: f32) -> ShadeCtx {
     var c: ShadeCtx;
+    c.material_flags = in.record.header.z;
     c.position = in.position;
     c.view_dir = in.view_dir;
     c.frag = in.frag_coord;

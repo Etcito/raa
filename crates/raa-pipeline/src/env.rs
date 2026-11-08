@@ -2,7 +2,7 @@
 
 use raa_core::CLEAR_COLOR;
 
-/// S10 `EnvGpu` uniform, one named `vec4<f32>` per field; `reserved` @192..256 is written as
+/// S10 `EnvGpu` uniform, one named `vec4<f32>` per field; `cel` @192 carries toon controls; `reserved` @208..256 is written as
 /// zeros. Feature crates edit it through `LightingResources::env_mut`, which marks it changed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EnvGpu {
@@ -30,6 +30,8 @@ pub struct EnvGpu {
     pub fog_color: [f32; 4],
     /// @176: strength, distance scale, 0, 0.
     pub aerial: [f32; 4],
+    /// @192: cel toon enabled, transition softness, specular strength, unused.
+    pub cel: [f32; 4],
 }
 
 impl Default for EnvGpu {
@@ -54,6 +56,7 @@ impl Default for EnvGpu {
             fog: [0.0; 4],
             fog_color: [0.0; 4],
             aerial: [0.0; 4],
+            cel: [0.0; 4],
         }
     }
 }
@@ -62,7 +65,7 @@ impl EnvGpu {
     /// Size in bytes of the uniform (S10).
     pub const SIZE: usize = 256;
 
-    /// Little-endian S10 bytes (fields in declaration order @0..192, zeros @192..256).
+    /// Little-endian S10 bytes (fields in declaration order @0..208, zeros @208..256).
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let fields = [
             &self.sun_disc,
@@ -77,6 +80,7 @@ impl EnvGpu {
             &self.fog,
             &self.fog_color,
             &self.aerial,
+            &self.cel,
         ];
         let mut out = [0u8; Self::SIZE];
         let values = fields.iter().flat_map(|field| field.iter());

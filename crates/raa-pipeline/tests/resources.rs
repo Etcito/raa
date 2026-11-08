@@ -40,7 +40,7 @@ fn env_gpu_defaults_are_the_clear_colour_and_constant_background() {
 #[test]
 fn env_gpu_fields_are_written_at_their_s10_offsets() {
     let mut env = EnvGpu::default();
-    let fields: [(&mut [f32; 4], usize); 12] = [
+    let fields: [(&mut [f32; 4], usize); 13] = [
         (&mut env.sun_disc, 0),
         (&mut env.zenith, 16),
         (&mut env.horizon, 32),
@@ -53,6 +53,7 @@ fn env_gpu_fields_are_written_at_their_s10_offsets() {
         (&mut env.fog, 144),
         (&mut env.fog_color, 160),
         (&mut env.aerial, 176),
+        (&mut env.cel, 192),
     ];
     let mut expected = Vec::new();
     for (field, offset) in fields {
@@ -68,7 +69,7 @@ fn env_gpu_fields_are_written_at_their_s10_offsets() {
             &(offset as f32 + 1.0).to_le_bytes()
         );
     }
-    assert!(bytes[192..].iter().all(|b| *b == 0), "reserved @192..256");
+    assert!(bytes[208..].iter().all(|b| *b == 0), "reserved @208..256");
 }
 
 /// Group 1 as the shader prelude declares it (S10), and a fragment shader that reads every

@@ -118,6 +118,7 @@ fn write_env_places_the_s10_fields_and_keeps_the_rest() {
         fog: [9.0; 4],
         fog_color: [9.0; 4],
         aerial: [9.0; 4],
+        cel: [1.0, 0.12, 0.7, 0.0],
     };
     let before = env.clone();
 
@@ -126,6 +127,7 @@ fn write_env_places_the_s10_fields_and_keeps_the_rest() {
     assert_eq!(env.fog, [0.012, 0.12, 0.0, 0.0]);
     assert_eq!(env.fog_color, [0.84, 0.80, 0.72, 0.6]);
     assert_eq!(env.aerial, [0.5, 400.0, 0.0, 0.0]);
+    assert_eq!(env.cel, before.cel);
     assert_eq!(env.sun_disc, before.sun_disc);
     assert_eq!(env.zenith, before.zenith);
     assert_eq!(env.horizon, before.horizon);

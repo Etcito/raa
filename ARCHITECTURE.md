@@ -2293,3 +2293,18 @@ Each milestone's proof, run from the repository root at its final commit.
 
 See [docs/editor-features.md](docs/editor-features.md) for the mesh edge list,
 wireframe modes, selection masks, orthographic camera, disabled cost and proof.
+
+## Module: raa-cel
+
+`crates/raa-cel` owns the `cel.resolve` HDR pass at order 190 (after grading,
+before the required final HDR pass, tonemap). It reads HDR, depth and normals,
+quantizes colours in Oklab and composites protected geometric ink. CelPost is
+112 bytes; a separate 128-byte camera uniform supplies inverse projection/view.
+The priority-30 Direct slot uses material flag 128 and preserves layered BRDF
+lighting for unflagged materials. ShadeCtx carries the material flags. EnvGpu's
+formerly reserved lane at byte 192 holds toon enabled, softness and specular;
+the remaining reserved bytes and total 256-byte ABI are unchanged.
+
+The JS module m27 installs cel disabled. `setCel` enables it and selects linear,
+zero-exposure tone mapping without display dither; `getCel` returns its controls.
+See `docs/api/m27-cel.md` for the exact API and phase-one limitations.

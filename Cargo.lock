@@ -741,6 +741,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-cel"
+version = "0.5.0"
+dependencies = [
+ "naga",
+ "raa-brdf",
+ "raa-core",
+ "raa-lit",
+ "raa-matfn",
+ "raa-math",
+ "raa-particles",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-contact"
 version = "0.5.0"
 dependencies = [
@@ -889,6 +904,7 @@ dependencies = [
  "js-sys",
  "raa-bloom",
  "raa-brdf",
+ "raa-cel",
  "raa-contact",
  "raa-core",
  "raa-csg",
