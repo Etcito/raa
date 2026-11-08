@@ -4,7 +4,7 @@
 // palette uploads (Engine.skinStats()). Its only purpose is to show that the draw count
 // does not grow with N. No timing is measured.
 //
-// Mesh: the Royal Fiesta penguin's saved .mesh (S24 wire format) when `?mesh=<url>` (or
+// Mesh: the instanced character's saved .mesh (S24 wire format) when `?mesh=<url>` (or
 // ./penguin.body.mesh next to this page) loads; otherwise a 12-joint synthetic capsule.
 // Publish alongside raa/ (dist/bricks/raa or dist/package/raa) and common/ (web/common).
 import { loadRaa } from './raa/index.js';
@@ -22,7 +22,7 @@ const SWEEP = [1, 2, 5, 10, 20, 60, 100, 150, 200];
 
 // ---- mesh sources ----
 
-/** Decodes the S24 .mesh wire format (royal-fiesta apps/web/src/sdf/meshWire.ts). */
+/** Decodes the S24 .mesh wire format (meshWire encoding). */
 function decodeMeshWire(bytes) {
   if (bytes[0] !== 1) throw new Error('unsupported mesh format');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);

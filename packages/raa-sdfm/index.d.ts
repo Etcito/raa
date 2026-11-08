@@ -489,7 +489,7 @@ export interface ProceduralSceneHandle {
  * flattened.
  * Trace mode resolves an sdf-refs scene through MAMA's `buildSceneTraceInput` without meshing,
  * merges it with every live handle and installs the op 4 packed program with
- * `Engine.setTraceScene`, which selects the GPU-stamped world-volume raytracer: a five-mip R8Snorm
+ * `Engine.setTraceScene`, which selects the GPU-stamped world-volume ray marcher: a five-mip R8Snorm
  * distance volume whose longest axis is at most 1024 voxels, a coarse cone prepass, a trace at the
  * full render-target resolution (the 1024 limit is the volume, never the image), exact-program hit
  * and normal refinement, and depth composition with meshes. Every accepted repack (`setVisible`,
@@ -690,7 +690,7 @@ export interface SdfmBakeScheduler {
   dispose(): void;
 }
 /**
- * The bake scheduling shared by sdfm game renderers (Royal Fiesta's port, SDF Modeler's Game view): parts prepared at
+ * The bake scheduling shared by sdfm game renderers (host game and editor views): parts prepared at
  * upload, queued when a scene first shows them, each run fitted into BAKE_RUN_SHARE of the atlas left, baked
  * BAKE_BATCH at a time on `device()`, texture ids written into the parts' data blocks.
  */

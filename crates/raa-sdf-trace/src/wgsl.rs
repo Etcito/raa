@@ -666,11 +666,11 @@ fn trace_volume_distance(p: vec3<f32>, level: u32) -> f32 {
   return max(0.0, textureLoad(trace_field, vec3<i32>(cell), i32(level)).x * trace_volume.encoding.x
     - trace_volume.encoding.x / 127.0 - trace_volume.encoding.y);
 }
-struct TraceRay { origin: vec3<f32>, direction: vec3<f32> }
-fn trace_ray_at(uv: vec2<f32>) -> TraceRay {
+struct MarchRay { origin: vec3<f32>, direction: vec3<f32> }
+fn trace_ray_at(uv: vec2<f32>) -> MarchRay {
   let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
   let o = trace_unproject(ndc, 0.0);
-  return TraceRay(o, normalize(trace_unproject(ndc, 1.0) - o));
+  return MarchRay(o, normalize(trace_unproject(ndc, 1.0) - o));
 }
 fn trace_volume_ready() -> bool {
   return trace_volume.shape.w > 0u && trace_volume.shape.w < 16777216u &&

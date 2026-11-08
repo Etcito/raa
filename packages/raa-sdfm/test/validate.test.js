@@ -88,7 +88,7 @@ test('tampered document is sdfm.hash_mismatch at /hash', async () => {
 });
 
 test('an asset of no world and no own mesher (MAMA writes null for both) validates', () => {
-  // 2026-11-05: the fixture-fiesta prop.cone (world null, mesher null, as MAMA's asset-file.ts writes them) was
+  // 2026-11-05: the exported prop.cone fixture (world null, mesher null, as MAMA's asset-file.ts writes them) was
   // refused with "'world' must be a string", failing the exported-scene evidence of the procedural project.
   assert.deepEqual(validateAsset({ ...fixture(), world: null, mesher: null }), { ok: true, errors: [] });
   expectError({ ...fixture(), world: 3 }, 'sdfm.schema', '/world');

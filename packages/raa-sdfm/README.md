@@ -31,7 +31,7 @@ with the S16 code in the message.
 `mode: 'trace'` loads an sdf-refs scene without meshing: MAMA's `buildSceneTraceInput` builds the
 traces, `packTrace` (evaluator op 4, given `options.procgen`) packs them in Rust and the engine
 installs the program with `Engine.setTraceScene`. That installs the GPU-stamped world-volume
-raytracer: the packed SDFs become an R8Snorm distance volume with five mip levels whose longest
+ray marcher: the packed SDFs become an R8Snorm distance volume with five mip levels whose longest
 axis is at most 1024 voxels, traced at the full render-target resolution from a coarse cone
 prepass, with every accepted hit and normal refined against the exact packed programs. The 1024
 limit is the volume's voxel resolution, never the image. The composite writes colour and depth
@@ -127,7 +127,7 @@ MAMA's game render option `shading: 'baked'` (`core/game/render-options.ts`) bak
 - `tangents = partTangents(positions, normals, uvs, indices)`: pass the same array to the bake and to the drawn mesh (`MeshDesc.tangents`).
 - `size`: MAMA `bakeTextureSize(atlasScale(positions, uvs, indices), options)`, then `fitBakeSizes(parts)` for every part of the engine so the bakes fit RAA's 4096 x 4096 texture atlas (the densest parts halve first).
 - Upload the images with `Engine.addTexture`, register `BAKED_MATERIAL_WGSL` once as `BAKED_FUNCTION`, and give each part a surface material with `data: addMaterialData(bakedMaterialWords(normal, color, emissive))`. A part whose material takes the player colour keeps its per-pixel shading.
-- Or let `createBakeScheduler(engine, { device, field, textureSize })` do all of it (`src/bake-scheduler.js`), as Royal Fiesta and SDF Modeler's Game view do: `prepare(part)` at upload gives the part's surface material and tangents, `queue(parts)` when a scene first shows them starts one run that fits everything queued into `BAKE_RUN_SHARE` (3/4) of the atlas left and bakes `BAKE_BATCH` parts at a time; `onChange` says which parts became done (show the baked draw) or failed (keep the vertex-colour copy, reported once by `onFailed`); `release(part)` gives its textures and data block back.
+- Or let `createBakeScheduler(engine, { device, field, textureSize })` do all of it (`src/bake-scheduler.js`), as host game and editor views do: `prepare(part)` at upload gives the part's surface material and tangents, `queue(parts)` when a scene first shows them starts one run that fits everything queued into `BAKE_RUN_SHARE` (3/4) of the atlas left and bakes `BAKE_BATCH` parts at a time; `onChange` says which parts became done (show the baked draw) or failed (keep the vertex-colour copy, reported once by `onFailed`); `release(part)` gives its textures and data block back.
 
 ## Instance parameters
 

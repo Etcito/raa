@@ -1,5 +1,5 @@
 // The bake scheduling of the 'baked' field shading (MAMA core/game/render-options.ts shading 'baked'), shared by every
-// sdfm game renderer: Royal Fiesta's SDF port and SDF Modeler's Game view run the same code, so the same asset with the
+// sdfm game renderer: host game and editor views run the same code, so the same asset with the
 // same options gets the same textures.
 //
 // A part is prepared when it uploads (prepare: its baked surface material, the ONE shared function BAKED_FUNCTION with a

@@ -1,6 +1,6 @@
 // Per-pixel SDF shading of a mesh part, computed in the fragment shader from the part's own field (owner 2026-11-04: the
 // normal AND the materials of a game mesh come from the SDF in the shader, nothing is baked). The ONE material code
-// path of SDF Modeler's Game view and of the game (royal-fiesta sdfPort.ts): both hand the same PartShading record
+// path of SDF Modeler's Game view and of the host game: both hand the same PartShading record
 // (MAMA src/core/paramesh/field-program.ts PartShading, stored with a saved game mesh part as `shading`) and the same
 // compiled materials (SdfmCompiledMaterial) to fieldPartShading. Pure text and array work, no engine call, no MAMA
 // import (the field evaluator text, MAMA field-program-wgsl.ts FIELD_PROGRAM_WGSL, is handed in by the caller).

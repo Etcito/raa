@@ -428,7 +428,7 @@ fn texels_off(got: &[[f32; 4]], want: &[[f32; 4]]) -> usize {
         .count()
 }
 
-/// Regression (Royal Fiesta penguin, 2026-11-03): a material in tint mode `graph` (every
+/// Regression (instanced character, 2026-11-03): a material in tint mode `graph` (every
 /// player-tinted character material) composes its entry points with the graph tint call,
 /// so the posed variant must be derived from the composed pass, not from the raw pass
 /// source; otherwise the rest pipeline is reused and posed instances draw in rest pose.

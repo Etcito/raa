@@ -1,4 +1,4 @@
-// S24 saved mesh (`assets/<world>/<id>.mesh`): the royal-fiesta meshWire encoding of a meshed asset.
+// S24 saved mesh (`assets/<world>/<id>.mesh`): the meshWire encoding of a meshed asset.
 // Byte 0 = 1, big-endian u32 header length @1 and buffer count @5, a UTF-8 JSON header where an ArrayBuffer is
 // {$buffer: i} and a view is {$array: name, buffer: i, offset: byteOffset, length: byteLength}, then per buffer a
 // big-endian u32 length and its bytes. Plain JS port of MAMA src/core/game/mesh-file.ts decodeMeshFile; it does not
