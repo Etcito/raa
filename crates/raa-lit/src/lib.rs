@@ -18,6 +18,7 @@ mod editor;
 pub use editor::WireframeMode;
 mod extras;
 mod frame;
+mod frame_history;
 mod handle;
 mod instance_store;
 mod library;
