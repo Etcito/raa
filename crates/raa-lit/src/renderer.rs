@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
-use raa_math::{Aabb, Vec3};
+use raa_math::{Aabb, Mat4, Vec3};
 use raa_mesh::AttributedMesh;
 use raa_pipeline::Pipeline;
 use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
@@ -24,7 +24,9 @@ use raa_shader::{Composer, MaterialFnId, MaterialFnRegistry, SlotProvider};
 use crate::contributor::ForwardContributor;
 use crate::extras::InstanceExtra;
 use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
+use crate::frame_history::{CameraHistory, FrameHistory, MAX_VIEWS, frame_jitter};
 use crate::handle::{LitHandle, LitShared};
+use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
 use crate::lod::{LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level};
 use crate::material::{DrawClass, SurfaceMaterial};
@@ -94,6 +96,10 @@ pub struct InstanceFrameStats {
 }
 
 pub(crate) const NO_CAMERA_LEVEL: u8 = u8::MAX;
+
+/// No temporal-accumulation consumer exists in this milestone (S10), so every viewport
+/// reports zero current and previous jitter.
+const JITTER_CONSUMER: bool = false;
 
 struct CameraLodInput<'a> {
     list: &'a RenderList,
@@ -213,6 +219,118 @@ pub(crate) fn pipeline_busy() -> RaaError {
     )
 }
 
+/// One scene invocation's four reused viewport histories (RAA-FRAME) and the scene-instance
+/// slots each viewport staged for previous-instance history.
+///
+/// Handoff: `LitRenderer::begin_scene_frame(&mut self, index: u64) -> ()`,
+/// `prepare_scene_view(&mut self, view: usize, discontinuity: bool) -> ()`,
+/// `submitted_scene_view(&mut self, view: usize) -> ()` and `finish_scene_frame(&mut self,
+/// complete: bool) -> ()` in `crates/raa-lit/src/renderer.rs` are called by the Engine
+/// around one render invocation; camera state is keyed by viewport 0..3 (`FrameHistory`),
+/// previous-instance state by the existing scene-instance slot (`InstanceId::index()`, one
+/// per submesh) through `InstanceStore::previous_submitted`/`finish_previous_frame`.
+struct SceneLifecycle {
+    history: FrameHistory,
+    frame_index: u64,
+    open: bool,
+    selected: Option<(usize, bool)>,
+    current_view: usize,
+    slots: [Vec<u32>; MAX_VIEWS],
+    acknowledged: u8,
+    commit_pending: bool,
+}
+
+impl SceneLifecycle {
+    fn new() -> Self {
+        SceneLifecycle {
+            history: FrameHistory::new(),
+            frame_index: 0,
+            open: false,
+            selected: None,
+            current_view: 0,
+            slots: std::array::from_fn(|_| Vec::new()),
+            acknowledged: 0,
+            commit_pending: false,
+        }
+    }
+
+    fn begin(&mut self, index: u64) {
+        if self.open {
+            self.history.invalidate();
+            self.commit_pending = true;
+        }
+        self.history.begin(index);
+        self.frame_index = index;
+        self.open = true;
+        self.selected = None;
+    }
+
+    fn prepare(&mut self, scene: &Scene, size: (u32, u32), consumer: bool) -> CameraHistory {
+        if !self.open {
+            let index = self.frame_index;
+            self.begin(index);
+        }
+        let (view, discontinuity) = self.selected.take().unwrap_or((0, false));
+        self.current_view = view;
+        let jitter = frame_jitter(self.frame_index, size, consumer);
+        let (proj, view_matrix) = (scene.camera.projection(), scene.camera.view());
+        let unjittered_view_proj = proj * view_matrix;
+        let view_proj = if jitter == [0.0; 2] {
+            unjittered_view_proj
+        } else {
+            let mut offset = Mat4::IDENTITY;
+            offset.cols[3] = [jitter[0], jitter[1], 0.0, 1.0];
+            (offset * proj) * view_matrix
+        };
+        self.history.prepare(
+            view,
+            view_proj,
+            unjittered_view_proj,
+            size,
+            consumer,
+            discontinuity,
+        )
+    }
+
+    fn submitted(&mut self, view: usize) {
+        if !self.open {
+            return;
+        }
+        let view = view % MAX_VIEWS;
+        self.history.submitted(view);
+        self.acknowledged |= 1 << view;
+    }
+
+    fn finish(&mut self, complete: bool) {
+        if !self.open {
+            return;
+        }
+        self.history.finish(complete);
+        self.open = false;
+        self.selected = None;
+        self.commit_pending = true;
+        self.frame_index = self.frame_index.saturating_add(1);
+    }
+
+    fn flush(&mut self, store: &mut InstanceStore) {
+        for view in 0..MAX_VIEWS {
+            if self.acknowledged & (1 << view) != 0 {
+                for &slot in &self.slots[view] {
+                    store.previous_submitted(slot);
+                }
+            }
+        }
+        self.acknowledged = 0;
+        if self.commit_pending {
+            store.finish_previous_frame();
+            self.commit_pending = false;
+        }
+        for slots in &mut self.slots {
+            slots.clear();
+        }
+    }
+}
+
 /// The HDR lit renderer; see the module docs.
 pub struct LitRenderer {
     opts: LitOptions,
@@ -228,8 +346,8 @@ pub struct LitRenderer {
     material_classes: Vec<MaterialClass>,
     /// The frame's `FrameGpu` bytes.
     frame_bytes: [u8; FRAME_GPU_SIZE],
-    /// Frames prepared so far (`FrameGpu.clip.z`).
-    frame_index: u64,
+    /// Per-viewport camera history and the open scene invocation (RAA-FRAME).
+    scene_frame: SceneLifecycle,
     /// A background that could not reach the pipeline (borrowed), applied at `prepare`.
     pending_background: Option<[f32; 3]>,
     /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
@@ -273,7 +391,7 @@ impl LitRenderer {
             contributors: Rc::new(RefCell::new(Vec::new())),
             material_classes: Vec::with_capacity(opts.max_materials as usize),
             frame_bytes: [0; FRAME_GPU_SIZE],
-            frame_index: 0,
+            scene_frame: SceneLifecycle::new(),
             pending_background: None,
             sent_bounds: HashMap::new(),
             submeshes: HashMap::new(),
@@ -611,6 +729,30 @@ impl LitRenderer {
 
     // ---- frame ----
 
+    /// Opens scene invocation `index`; one index spans all of its viewports.
+    pub fn begin_scene_frame(&mut self, index: u64) {
+        self.scene_frame.begin(index);
+    }
+
+    /// Selects viewport 0..3 for the next `prepare`; `discontinuity` drops its history.
+    pub fn prepare_scene_view(&mut self, view: usize, discontinuity: bool) {
+        self.scene_frame.selected = Some((view % MAX_VIEWS, discontinuity));
+    }
+
+    /// Acknowledges a really submitted view (never a mere prepare); only these commit.
+    pub fn submitted_scene_view(&mut self, view: usize) {
+        self.scene_frame.submitted(view);
+    }
+
+    /// Closes the invocation; `complete` false invalidates camera history before the next
+    /// begin and commits only the acknowledged instances.
+    pub fn finish_scene_frame(&mut self, complete: bool) {
+        self.scene_frame.finish(complete);
+        if let Ok(mut guard) = self.shared.try_borrow_mut() {
+            self.scene_frame.flush(&mut guard.store);
+        }
+    }
+
     /// Prepares a frame: syncs the uploaded mesh bounds into the scene, `scene.update_world`,
     /// `scene.build_render_list_slots(list, tags, slots)`, the persistent instance records
     /// and extras, the index-based camera selection (`IdPrep`: posed instances are tested
@@ -639,8 +781,18 @@ impl LitRenderer {
                 !p.surface_is_srgb(),
             )
         };
+        // Direct native callers keep the bounded single-view lifecycle: one invocation per
+        // prepare, its only viewport is view 0 and it is submitted by returning Ok.
+        let single_view = !self.scene_frame.open;
+        if single_view {
+            let index = self.scene_frame.frame_index;
+            self.scene_frame.begin(index);
+        }
+        let camera = self.scene_frame.prepare(scene, viewport, JITTER_CONSUMER);
         let mut guard = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
         let s: &mut LitShared = &mut guard;
+        // Commit the previous invocation before this one stages its records.
+        self.scene_frame.flush(&mut s.store);
 
         // The scene index follows the uploaded mesh bounds; send only what changed.
         {
@@ -701,6 +853,17 @@ impl LitRenderer {
         s.store.sync(list, tags, slots, &self.extras, &|tag| {
             skinned(tag).map_or(0, |draw| draw.base)
         });
+        // A posed (deformed) instance cannot reconstruct its earlier geometry, so only
+        // rigid previous models participate in the previous-instance commit.
+        let recorded = &mut self.scene_frame.slots[self.scene_frame.current_view];
+        recorded.clear();
+        recorded.extend(
+            list.items
+                .iter()
+                .zip(tags.iter())
+                .zip(slots.iter())
+                .filter_map(|((_, &tag), &slot)| skinned(tag).is_none().then_some(slot)),
+        );
         camera_levels(
             &CameraLodInput {
                 list,
@@ -801,7 +964,12 @@ impl LitRenderer {
             viewport,
             encode_srgb,
             msaa: self.opts.msaa,
-            frame_index: self.frame_index,
+            frame_index: camera.frame_index,
+            camera_jitter_ndc: camera.current_jitter,
+            previous_jitter_ndc: camera.previous_jitter,
+            previous_view_proj: camera.previous_view_proj,
+            history_valid: camera.history_valid,
+            frame_parity: (camera.frame_index & 1) as u32,
             ..FrameParams::default()
         };
         write_frame_gpu(&mut self.frame_bytes, scene, &params)?;
@@ -815,7 +983,11 @@ impl LitRenderer {
         s.upload(gpu, &self.frame_bytes);
         stats.uploaded_bytes = s.store.last_uploaded_bytes();
         s.stats = stats;
-        self.frame_index += 1;
+        if single_view {
+            self.scene_frame.submitted(0);
+            self.scene_frame.finish(true);
+            self.scene_frame.flush(&mut s.store);
+        }
         Ok(counts)
     }
 }
@@ -1109,5 +1281,121 @@ mod tests {
         assert!(lit.clear_mesh_lods(MeshId(0)));
         assert!(!lit.has_mesh_lods(MeshId(0)));
         assert!(!lit.clear_mesh_lods(MeshId(0)));
+    }
+
+    const LIFE_SIZE: (u32, u32) = (640, 360);
+
+    fn life_scene(eye: Vec3) -> Scene {
+        let mut scene = Scene::new();
+        scene.camera.eye = eye;
+        scene.camera.set_viewport(LIFE_SIZE.0, LIFE_SIZE.1);
+        scene
+    }
+
+    /// The sequence `LitRenderer::prepare` runs, without a GPU device.
+    struct LifeFrame {
+        store: InstanceStore,
+        list: RenderList,
+        tags: Vec<u32>,
+        slots: Vec<u32>,
+        lifecycle: SceneLifecycle,
+    }
+
+    impl LifeFrame {
+        fn new(worlds: &[Mat4]) -> Self {
+            let list = RenderList {
+                items: worlds
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &world)| RenderItem {
+                        mesh: MeshId(i as u32),
+                        material: MaterialId(0),
+                        world,
+                    })
+                    .collect(),
+                ..RenderList::default()
+            };
+            LifeFrame {
+                store: InstanceStore::new(worlds.len().max(1) as u32),
+                tags: (0..worlds.len() as u32).collect(),
+                slots: (0..worlds.len() as u32).collect(),
+                list,
+                lifecycle: SceneLifecycle::new(),
+            }
+        }
+
+        fn prepare(&mut self, scene: &Scene, view: usize, discontinuity: bool) -> CameraHistory {
+            self.lifecycle.selected = Some((view % MAX_VIEWS, discontinuity));
+            let history = self.lifecycle.prepare(scene, LIFE_SIZE, JITTER_CONSUMER);
+            self.store
+                .sync(&self.list, &self.tags, &self.slots, &HashMap::new(), &|_| 0);
+            let recorded = &mut self.lifecycle.slots[view % MAX_VIEWS];
+            recorded.clear();
+            recorded.extend(self.slots.iter().copied());
+            history
+        }
+
+        fn finish(&mut self, complete: bool) {
+            self.lifecycle.finish(complete);
+            self.lifecycle.flush(&mut self.store);
+        }
+    }
+
+    fn previous_valid(bytes: &[u8], slot: usize) -> u32 {
+        u32::from_le_bytes(bytes[slot * 64 + 48..slot * 64 + 52].try_into().unwrap())
+    }
+
+    fn previous_tx(bytes: &[u8], slot: usize) -> f32 {
+        f32::from_le_bytes(bytes[slot * 64 + 12..slot * 64 + 16].try_into().unwrap())
+    }
+
+    #[test]
+    fn frame_lifecycle_two_cameras_share_frozen_instance_history() {
+        let mut frame = LifeFrame::new(&[
+            Mat4::IDENTITY,
+            Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0)),
+        ]);
+        let (a, b) = (
+            life_scene(Vec3::new(0.0, 0.0, 6.0)),
+            life_scene(Vec3::new(3.0, 0.0, 6.0)),
+        );
+        frame.lifecycle.begin(0);
+        frame.prepare(&a, 0, false);
+        frame.lifecycle.submitted(0);
+        frame.finish(true);
+        let frozen = frame.store.previous_bytes().to_vec();
+        assert_eq!(
+            (previous_valid(&frozen, 0), previous_valid(&frozen, 1)),
+            (1, 1)
+        );
+
+        // One invocation draws two cameras: both see the same frozen previous records.
+        frame.lifecycle.begin(1);
+        let view0 = frame.prepare(&b, 0, false);
+        assert_eq!((view0.history_valid, view0.frame_index), (true, 1));
+        assert_eq!(view0.previous_view_proj, a.camera.view_proj());
+        assert_eq!(frame.store.previous_bytes(), frozen.as_slice());
+        let view1 = frame.prepare(&a, 1, false);
+        assert!(!view1.history_valid && view1.frame_index == 1);
+        assert_eq!(frame.store.previous_bytes(), frozen.as_slice());
+        frame.lifecycle.submitted(1);
+        frame.finish(true);
+        assert_eq!(frame.store.previous_bytes(), frozen.as_slice());
+    }
+
+    #[test]
+    fn frame_lifecycle_previous_history_catches_up_without_another_transform_edit() {
+        let mut frame = LifeFrame::new(&[Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0))]);
+        let scene = life_scene(Vec3::new(0.0, 0.0, 6.0));
+        // Frame 1 moves the instance; frame 2 has no edit and finds the catch-up model.
+        for (index, x, committed) in [(0, 1.0, 1.0), (1, 4.0, 1.0), (2, 4.0, 4.0)] {
+            frame.list.items[0].world = Mat4::from_translation(Vec3::new(x, 0.0, 0.0));
+            frame.lifecycle.begin(index);
+            frame.prepare(&scene, 0, false);
+            assert_eq!(previous_tx(frame.store.previous_bytes(), 0), committed);
+            frame.lifecycle.submitted(0);
+            frame.finish(true);
+        }
+        assert_eq!(previous_tx(frame.store.previous_bytes(), 0), 4.0);
     }
 }
