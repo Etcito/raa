@@ -454,6 +454,9 @@ impl Engine {
                 if let Some(v) = get(&post, "sunShafts").map_err(js_error)? {
                     self.set_sun_shafts(v)?;
                 }
+                if let Some(v) = get(&post, "cel").map_err(js_error)? {
+                    self.set_cel(v)?;
+                }
                 if let Some(v) = get(&post, "toneMapping").map_err(js_error)? {
                     self.set_tone_mapping(v)?;
                 }

@@ -276,6 +276,7 @@ impl Engine {
     /// `pipeline.required_pass`).
     #[wasm_bindgen(js_name = setPassEnabled)]
     pub fn set_pass_enabled(&mut self, name: &str, enabled: bool) -> Result<(), JsValue> {
+        let name = if name == "cel" { "cel.resolve" } else { name };
         self.with_state(|_, st| with_pipeline(st, |p| p.set_enabled(name, enabled)))
     }
 
@@ -374,6 +375,7 @@ struct ViewPost {
     shafts: raa_shafts::ShaftsHandle,
     bloom: raa_bloom::BloomHandle,
     grading: raa_grading::GradingHandle,
+    cel: raa_cel::CelHandle,
 }
 #[derive(Default)]
 struct ViewPosts(Vec<ViewPost>);
@@ -424,6 +426,7 @@ fn configure_views(
             shafts: raa_shafts::ShaftsFeature::install(gpu, &temp)?,
             bloom: raa_bloom::BloomFeature::install(gpu, &temp)?,
             grading: raa_grading::GradingFeature::install(gpu, &temp)?,
+            cel: raa_cel::CelFeature::install(gpu, &temp)?,
         };
         p.set_view_passes(posts.0.len(), &mut temp.borrow_mut());
         posts.0.push(post);
@@ -481,6 +484,10 @@ pub(crate) fn prepare_view(
             if let Some(h) = st.features.get::<raa_grading::GradingHandle>() {
                 post.grading.set(h.get())?;
             }
+            if let Some(h) = st.features.get::<raa_cel::CelHandle>() {
+                post.cel.set(h.get())?;
+            }
+            post.cel.set_camera(&view, &proj);
             post.ssr.set_camera(&view, &proj);
             post.dof.set_camera(&view, &proj);
             post.shafts.set_camera(&view, &proj);

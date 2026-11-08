@@ -22,7 +22,8 @@
     "index.d.ts",
     "README.md",
     "LICENSE",
-    "pkg/"
+    "pkg/",
+    "types/"
   ],
   "sideEffects": false,
   "keywords": [

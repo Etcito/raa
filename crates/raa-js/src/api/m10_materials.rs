@@ -285,6 +285,12 @@ impl Engine {
             let d = surface_desc(&desc)?;
             let mut m = map_surface(&d, st)?;
             m.data = surface_data(&desc)?;
+            if optional_bool(&desc, "unlit", false)? {
+                m.flags |= raa_lit::FLAG_UNLIT;
+            }
+            if optional_bool(&desc, "cel", false)? {
+                m.flags |= raa_cel::FLAG_CEL;
+            }
             let len = st.lit.materials().len();
             if len >= st.max_materials as usize {
                 return Err(api_error(
@@ -309,6 +315,12 @@ impl Engine {
             let d = surface_desc(&desc)?;
             let mut m = map_surface(&d, st)?;
             m.data = surface_data(&desc)?;
+            if optional_bool(&desc, "unlit", false)? {
+                m.flags |= raa_lit::FLAG_UNLIT;
+            }
+            if optional_bool(&desc, "cel", false)? {
+                m.flags |= raa_cel::FLAG_CEL;
+            }
             st.lit.materials_mut().set(target, m)
         })
     }

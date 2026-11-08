@@ -55,15 +55,16 @@ const CONSTANT_READ = /extra_words\s*\[\s*b\s*\+\s*(\d+)u?\s*\]/g;
  * the SDF surface values (no mesh UV, white vertex colour), as in SDF Modeler's viewport.
  *
  * @param {{ name: string, key: string, body: string, helpers: { id: string, wgsl: string }[],
- *   constants: number[], fields: string[] }} m MamaMaterial
+ *   constants: number[], fields: string[], cel?: boolean }} m MamaMaterial
+ * @param {{cel?: boolean}} [options] Host override; cel:true sets the surface option (material flag 128).
  * `tintMode` is 'graph' when the MAMA WGSL reads `mat_instance_tint` (only the S23 `input.player_color` node emits
  * it): RAA then skips the post-material tint multiply. Otherwise it is 'multiply'.
  *
- * @returns {{ functionName: string, wgsl: string, desc: { function: string, blend: 'opaque' }, dropped: string[],
+ * @returns {{ functionName: string, wgsl: string, desc: { function: string, blend: 'opaque', cel?: boolean }, dropped: string[],
  *   tintMode: 'graph' | 'multiply' }}
  * @throws {SdfmError} `sdfm.material_unmappable` naming the material and the offending token
  */
-export function mapMaterial(m) {
+export function mapMaterial(m, options = {}) {
   const name = checkShape(m);
   const fail = (what) => {
     throw new SdfmError('sdfm.material_unmappable', `material '${name}': ${what}`);
@@ -128,7 +129,7 @@ export function mapMaterial(m) {
   if (bytes > MAX_BYTES) fail(`'${bytes} bytes' exceeds the ${MAX_BYTES}-byte limit`);
 
   const functionName = `sdfm.${m.key.slice(0, 16)}`;
-  return { functionName, wgsl, desc: { function: functionName, blend: 'opaque' }, dropped, tintMode };
+  return { functionName, wgsl, desc: { function: functionName, blend: 'opaque', ...((options.cel ?? m.cel) === true ? { cel: true } : {}) }, dropped, tintMode };
 }
 
 /** Checks the MamaMaterial shape; returns its name. */

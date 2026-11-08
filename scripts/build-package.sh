@@ -128,9 +128,12 @@ append_dts() {
   fi
 }
 append_dts "$PKG_DIR/index.d.ts"
+# m27 is an exported type module, referenced by index.d.ts instead of concatenated.
+mkdir -p "$STAGE/types"
+cp "$PKG_DIR/types/m27-cel.d.ts" "$STAGE/types/"
 if [ -d "$PKG_DIR/types" ]; then
   while IFS= read -r f; do
-    append_dts "$f"
+    [[ $(basename "$f") == m27-cel.d.ts ]] || append_dts "$f"
   done < <(find "$PKG_DIR/types" -maxdepth 1 -type f -name '*.d.ts' | LC_ALL=C sort)
 fi
 
@@ -145,6 +148,7 @@ mkdir -p "$EX/raa" "$EX/common"
 cp examples/basic/index.html examples/basic/main.js examples/basic/nmc.gpu.json "$EX/"
 cp "$PKG_DIR/package.json" "$PKG_DIR/index.js" "$PKG_DIR/index.d.ts" "$PKG_DIR/README.md" "$EX/raa/"
 cp -R "$PKG_DIR/pkg" "$EX/raa/pkg"
+cp -R "$PKG_DIR/types" "$EX/raa/types"
 cp -R web/common/. "$EX/common/"
 write_sizes "$EX/raa/pkg/raa_js_bg.wasm" "raa/pkg/raa_js_bg.wasm" "$EX/sizes.json"
 

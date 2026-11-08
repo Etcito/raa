@@ -321,6 +321,8 @@ export interface SdfmLoader {
  * Refusals: {@link mapMaterial} raises `sdfm.material_unmappable` for a malformed record.
  */
 export interface SdfmCompiledMaterial {
+  /** Opt into cel Direct lighting when mapped. */
+  cel?: boolean;
   /** MAMA material id. */
   name: string;
   /** 64 lowercase hex digits: the material graph hash. */
@@ -345,7 +347,7 @@ export interface SdfmMappedMaterial {
   /** WGSL defining `fn material_main(in: MaterialInput) -> MaterialOutput` (S11). */
   wgsl: string;
   /** Description for `Engine.addSurfaceMaterial`; `blend` is always `'opaque'` (MAMA has none). */
-  desc: { function: string; blend: SurfaceBlend };
+  desc: { function: string; blend: SurfaceBlend; cel?: boolean };
   /** MaterialFull fields with no MaterialOutput counterpart, in declaration order. */
   dropped: string[];
 }
@@ -533,7 +535,7 @@ export function meshFilePayload(value: object): {
  * record, unknown field, unresolvable constant read, a remaining S11-forbidden token, an
  * identifier starting `raa_`, or more than 65536 bytes).
  */
-export function mapMaterial(material: SdfmCompiledMaterial): SdfmMappedMaterial;
+export function mapMaterial(material: SdfmCompiledMaterial, options?: { cel?: boolean }): SdfmMappedMaterial;
 
 /** S11 user functions are at most this many bytes. */
 export const MATERIAL_FUNCTION_MAX_BYTES: 65536;

@@ -66,7 +66,7 @@ fn feature_rows() -> Vec<(String, u32, u32)> {
         .filter_map(|row| {
             let (name, rest) = row.split_once("\", ")?;
             let (order, bit) = rest.split_once(", ")?;
-            let bit = bit.split(|c| c == ')' || c == ',').next()?;
+            let bit = bit.split([')', ',']).next()?;
             Some((name.to_string(), order.parse().ok()?, bit.parse().ok()?))
         })
         .collect()
@@ -83,13 +83,16 @@ fn feature_bits_keep_prior_rows_and_register_skin_at_20() {
         ("transparent.oit", 80, 14), ("particles.blend", 85, 15), ("dof", 110, 16),
         ("bloom", 120, 17), ("grading", 130, 18), ("tonemap", 200, 19)];
     let rows = feature_rows();
-    assert_eq!(rows.len(), expected.len() + 1, "one appended skin row");
+    assert_eq!(rows.len(), expected.len() + 4, "skin, trace and cel rows");
     let actual: Vec<(&str, u32, u32)> = rows[..expected.len()]
         .iter()
         .map(|(n, o, b)| (n.as_str(), *o, *b))
         .collect();
     assert_eq!(actual, expected);
-    assert_eq!(rows.last(), Some(&("skin".to_string(), 15, 20)));
+    assert_eq!(rows[20], ("skin".to_string(), 15, 20));
+    assert_eq!(rows[21], ("trace.sdf".to_string(), 55, 21));
+    assert_eq!(rows[22], ("trace.composite".to_string(), 560, 22));
+    assert_eq!(rows[23], ("cel.resolve".to_string(), 190, 23));
 }
 
 #[test]

@@ -46,6 +46,7 @@ raa-ssr = { path = "../raa-ssr" }
 raa-dof = { path = "../raa-dof" }
 raa-fog = { path = "../raa-fog" }
 raa-shafts = { path = "../raa-shafts" }
+raa-cel = { path = "../raa-cel" }
 raa-grading = { path = "../raa-grading" }
 raa-deform = { path = "../raa-deform" }
 raa-sdf-trace = { path = "../raa-sdf-trace" }

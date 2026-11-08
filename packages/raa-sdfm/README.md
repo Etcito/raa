@@ -276,3 +276,14 @@ callers supplying exports directly must include it. Material graph keys still us
 `canonicalJson`. Optional MAMA submesh polygon `edges` pass through as `MeshDesc.edges`,
 with vertex offsets after material grouping. Missing lists use triangle edges; an
 explicit empty list stays empty.
+
+### Host cel style
+
+The host calls `engine.setCel(settings)` directly (see `docs/api/m27-cel.md` in RAA),
+or uses `engine.applyEnvironment({ post: { cel: settings } })`. The loader reads no
+cel style document option. `mapMaterial(material, { cel: true })` returns a surface
+description with `cel: true`, which RAA maps to flag 128. A compiled material's
+optional `cel: true` is also accepted; an explicit mapper option takes precedence.
+The host can pass that description to `engine.addSurfaceMaterial` or replace an
+existing material with `engine.setSurfaceMaterial`. `setPassEnabled('cel', false)`
+disables the effect while retaining its settings.

@@ -1,3 +1,6 @@
+import type { CelSettings, CelState } from './types/m27-cel';
+export type { CelDither, CelSettings, CelState } from './types/m27-cel';
+
 // Hand-written types of @etcito/raa 0.1.0 (public API v0). The wasm-bindgen output in
 // pkg/*.d.ts is an implementation detail and is not re-exported.
 //
@@ -459,4 +462,11 @@ export interface TextureData {
   width: number;
   height: number;
   data: Uint8Array | Uint8ClampedArray | Float32Array;
+}
+
+export interface Engine {
+  /** Merge controls, enable cel.resolve, select linear tonemap at 0 EV with display dither off. */
+  setCel(settings: CelSettings): void;
+  /** A fresh object containing all cel controls. */
+  getCel(): CelState;
 }

@@ -106,6 +106,8 @@ export type PostPreset = 'neutral' | 'candy' | 'ice' | 'jungle' | 'neon';
 
 /** Post settings of {@link EnvironmentDesc.post}. Each field is applied with the same rules as its own setter. */
 export interface PostSettings {
+  /** Same merge, enabling and neutral tone mapping as setCel. Applied before toneMapping. */
+  cel?: CelSettings;
   /** Grading settings, merged as {@link Engine.setGrading} does. */
   grading?: GradingSettings;
   /** Bloom settings, merged as {@link Engine.setBloom} does. */

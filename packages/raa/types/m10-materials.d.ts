@@ -36,6 +36,10 @@ export type SurfaceBlend = 'opaque' | 'transparent' | 'transmissive';
  * except `emissive`, which is linear and may exceed 1 (HDR, feeds bloom). Lengths are metres.
  */
 export interface SurfaceMaterialDesc {
+  /** Opt into the cel Direct provider (flag 128); effective when cel and toon are enabled. Default false. */
+  cel?: boolean;
+  /** Use base + emissive directly, bypassing lighting (flag 64). Default false; takes precedence over cel. */
+  unlit?: boolean;
   /** Material function name. Default `raa.standard`. */
   function?: string;
   /** Function parameters by name: a number for `scalar`, three numbers for `vec3`/`color`. Missing = default. */

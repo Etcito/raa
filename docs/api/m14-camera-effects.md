@@ -132,7 +132,7 @@ Grading presets. Each lists the fields it changes from the defaults above.
 
 `PostSettings` groups the post effects: `grading` (as `setGrading`), `bloom` (as `setBloom`,
 `BloomSettings` = `{ strength, radius }`), `dof` (as `setDof`), `ssr` (as `setSsr`), `sunShafts`
-(as `setSunShafts`) and `toneMapping` (as `setToneMapping`, `ToneMappingDesc`). Every field merges
+(as `setSunShafts`), `cel` (as [`setCel`](m27-cel.md)) and `toneMapping` (as `setToneMapping`, `ToneMappingDesc`). Every field merges
 over the current values with the same range and refusal rules as its own setter.
 
 `PostPreset` names a post look. A preset sets the grading preset, the bloom strength and radius,
