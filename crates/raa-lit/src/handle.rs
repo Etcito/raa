@@ -44,6 +44,7 @@ const STREAM0_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
 
 /// Stride of the compacted u32 instance id stream (S1 vertex slot 1).
 const ID_STRIDE: u64 = 4;
+const PREVIOUS_RECORD_BYTES: usize = 64;
 
 /// Shadow id sections after the camera: one per CSM cascade.
 pub(crate) const SHADOW_CASCADES: usize = 4;
@@ -183,8 +184,8 @@ fn palette_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
 /// S10 group 0: binding 0 `FrameGpu` uniform (`FRAME_GPU_SIZE`), binding 1 `array<SurfaceMaterialGpu>`
 /// and binding 2 `array<InstanceExtraGpu>`, both read-only storage; 3, 4, 5 the material
 /// texture atlas, its sampler and rects; 6 the material data words (read-only storage);
-/// 7 the persistent instance records (read-only storage).
-fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 8] {
+/// 7 the persistent instance records; 8 the previous affine records (vertex-only storage).
+fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
     let read_only = wgpu::BufferBindingType::Storage { read_only: true };
     [
         buffer_entry(0, wgpu::BufferBindingType::Uniform, FRAME_GPU_SIZE),
@@ -209,6 +210,10 @@ fn frame_layout_entries() -> [wgpu::BindGroupLayoutEntry; 8] {
         buffer_entry(5, read_only, TEXTURE_RECT_SIZE),
         buffer_entry(6, read_only, 4),
         buffer_entry(7, read_only, INSTANCE_GPU_SIZE),
+        wgpu::BindGroupLayoutEntry {
+            visibility: wgpu::ShaderStages::VERTEX,
+            ..buffer_entry(8, read_only, PREVIOUS_RECORD_BYTES)
+        },
     ]
 }
 
@@ -379,6 +384,8 @@ pub(crate) struct LitShared {
     material_buffer: wgpu::Buffer,
     /// Persistent S1 instance records, group-0 binding 7.
     pub(crate) instance_storage: wgpu::Buffer,
+    /// S10 affine history, group 0 binding 8, keyed by the same scene slots.
+    previous_storage: wgpu::Buffer,
     /// `InstanceExtraGpu` array, one record per slot.
     extras_buffer: wgpu::Buffer,
     /// The frame snapshot the cascade selection reads (index, list, tags, slots).
@@ -459,6 +466,13 @@ impl LitShared {
         );
         let instance_storage = buffer(gpu, "raa.lit.instance_records", instance_bytes, storage);
         let extras_buffer = buffer(gpu, "raa.lit.extras", extra_bytes, storage);
+        let previous_storage = buffer(
+            gpu,
+            "raa.lit.previous_records",
+            store.previous_bytes().len() as u64,
+            storage,
+        );
+        write_prefix(gpu.queue(), &previous_storage, store.previous_bytes());
         let frame_layout =
             gpu.device()
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -481,6 +495,7 @@ impl LitShared {
                 &material_buffer,
                 &extras_buffer,
                 &instance_storage,
+                &previous_storage,
             ],
             &textures,
             &data,
@@ -509,6 +524,7 @@ impl LitShared {
             frame_buffer,
             material_buffer,
             instance_storage,
+            previous_storage,
             extras_buffer,
             index: InstanceIndex::new(),
             items: RenderList::default(),
@@ -587,6 +603,7 @@ impl LitShared {
                     &self.material_buffer,
                     &self.extras_buffer,
                     &self.instance_storage,
+                    &self.previous_storage,
                 ],
                 &self.textures,
                 &self.data,
@@ -613,6 +630,7 @@ impl LitShared {
                     &self.material_buffer,
                     &self.extras_buffer,
                     &self.instance_storage,
+                    &self.previous_storage,
                 ],
                 &self.textures,
                 &self.data,
@@ -661,6 +679,7 @@ impl LitShared {
         self.ensure_store_buffers(gpu);
         self.store
             .upload(queue, &self.instance_storage, &self.extras_buffer);
+        self.store.upload_previous(queue, &self.previous_storage);
         write_prefix(queue, &self.id_buffer, self.select.id_bytes());
         if self.materials.is_dirty() {
             self.materials.write_gpu_all(&mut self.material_bytes);
@@ -668,12 +687,32 @@ impl LitShared {
         }
     }
 
+    /// Handoff: `InstanceStore::ensure_previous(&mut self) -> bool`,
+    /// `InstanceStore::previous_bytes(&self) -> &[u8]`, and
+    /// `InstanceStore::upload_previous(&mut self, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> u64`
+    /// in `crates/raa-lit/src/instance_store.rs` attach the previous mirror to binding 8.
+    /// Keys remain scene-instance slots, one per submesh. InstanceStore::ensure already
+    /// grows that mirror, so byte length also detects growth consumed by that call.
     /// Re-creates the instance and extras buffers, and the frame bind group over them,
     /// when the store grew past their size.
     fn ensure_store_buffers(&mut self, gpu: &GpuContext) {
         let instances = self.store.instance_bytes().len().max(INSTANCE_GPU_SIZE) as u64;
         let extras = self.store.extra_bytes().len().max(INSTANCE_EXTRA_GPU_SIZE) as u64;
-        if self.instance_storage.size() == instances && self.extras_buffer.size() == extras {
+        let previous_grew = self.store.ensure_previous();
+        let previous = self.store.previous_bytes().len() as u64;
+        let previous_grew = previous_grew || self.previous_storage.size() != previous;
+        if previous_grew {
+            self.previous_storage = buffer(
+                gpu,
+                "raa.lit.previous_records",
+                previous,
+                wgpu::BufferUsages::STORAGE,
+            );
+        }
+        if !previous_grew
+            && self.instance_storage.size() == instances
+            && self.extras_buffer.size() == extras
+        {
             return;
         }
         let storage = wgpu::BufferUsages::STORAGE;
@@ -687,6 +726,7 @@ impl LitShared {
                 &self.material_buffer,
                 &self.extras_buffer,
                 &self.instance_storage,
+                &self.previous_storage,
             ],
             &self.textures,
             &self.data,
@@ -905,15 +945,15 @@ impl LitShared {
 }
 
 /// The group-0 bind group: `buffers` (frame, materials, extras, instance records) at
-/// bindings 0..3 and 7, the texture atlas entries at 3..6 and the material data words at 6.
+/// bindings 0..3, 7 and 8, the texture atlas entries at 3..6 and the material data words at 6.
 fn create_frame_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
-    buffers: [&wgpu::Buffer; 4],
+    buffers: [&wgpu::Buffer; 5],
     textures: &TextureAtlas,
     data: &MaterialData,
 ) -> wgpu::BindGroup {
-    let [frame, materials, extras, instances] = buffers;
+    let [frame, materials, extras, instances, previous] = buffers;
     let [atlas, sampler, rects] = textures.bind_entries();
     gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raa.lit.frame_bind_group"),
@@ -923,6 +963,7 @@ fn create_frame_bind_group(
             whole(1, materials),
             whole(2, extras),
             whole(7, instances),
+            whole(8, previous),
             atlas,
             sampler,
             rects,
@@ -1621,7 +1662,7 @@ mod tests {
         ));
         // Material data words (binding 6) and the instance records (binding 7): read-only
         // storage, both stages.
-        assert_eq!(data.len(), 2);
+        assert_eq!(data.len(), 3);
         assert_eq!((data[0].binding, data[1].binding), (6, 7));
         for (entry, min) in data.iter().zip([4, 128]) {
             assert_eq!(entry.visibility, wgpu::ShaderStages::VERTEX_FRAGMENT);
@@ -1633,6 +1674,44 @@ mod tests {
                     ..
                 } if n.get() == min
             ));
+        }
+    }
+
+    #[test]
+    fn previous_storage_is_vertex_only_and_preserves_stage_budgets() {
+        let entries = frame_layout_entries();
+        let previous = entries[8];
+        assert_eq!(
+            (previous.binding, previous.visibility),
+            (8, wgpu::ShaderStages::VERTEX)
+        );
+        assert!(matches!(previous.ty, wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            min_binding_size: Some(n), has_dynamic_offset: false,
+        } if n.get() == 64));
+        for posed in [false, true] {
+            let palette = palette_layout_entries();
+            let all = entries
+                .iter()
+                .chain(palette.iter().take(usize::from(posed)));
+            let count = |stage| {
+                all.clone()
+                    .filter(|e| {
+                        e.visibility.contains(stage)
+                            && matches!(
+                                e.ty,
+                                wgpu::BindingType::Buffer {
+                                    ty: wgpu::BufferBindingType::Storage { .. },
+                                    ..
+                                }
+                            )
+                    })
+                    .count()
+            };
+            assert_eq!(count(wgpu::ShaderStages::VERTEX), 6 + usize::from(posed));
+            assert_eq!(count(wgpu::ShaderStages::FRAGMENT), 5);
+            // OIT adds three fragment storage buffers; posed palettes add none there.
+            assert_eq!(count(wgpu::ShaderStages::FRAGMENT) + 3, 8);
         }
     }
 

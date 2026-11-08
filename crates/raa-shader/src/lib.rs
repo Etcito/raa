@@ -342,7 +342,30 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
 
     #[test]
     fn s10_struct_sizes_match() {
-        let m = naga::front::wgsl::parse_str(&module()).expect("parse");
+        let source = module()
+            + "
+@vertex fn history_probe(@location(2) id: u32) -> @builtin(position) vec4<f32> {
+    let r = raa_previous_instances[id];
+    return raa_previous_model(r) * vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}";
+        let m = naga::front::wgsl::parse_str(&source).expect("parse");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&m)
+        .expect("validate every entry point");
+        let (history, _) = m
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.name.as_deref() == Some("raa_previous_instances"))
+            .unwrap();
+        for (i, entry) in m.entry_points.iter().enumerate() {
+            assert_eq!(
+                !info.get_entry_point(i)[history].is_empty(),
+                entry.stage == naga::ShaderStage::Vertex
+            );
+        }
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(m.to_ctx()).expect("layout");
         for (name, size) in [
@@ -350,6 +373,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
             ("SurfaceMaterialGpu", 256),
             ("InstanceExtraGpu", 128),
             ("RaaInstanceGpu", 128),
+            ("RaaPreviousInstanceGpu", 64),
             ("ShadowGpu", 320),
             ("EnvSh", 160),
             ("EnvGpu", 256),
@@ -361,6 +385,84 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
                 .expect(name);
             assert_eq!(layouter[h].size, size, "{name}");
         }
+        let (_, previous) = m
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.name.as_deref() == Some("raa_previous_instances"))
+            .unwrap();
+        assert_eq!(
+            previous.binding,
+            Some(naga::ResourceBinding {
+                group: 0,
+                binding: 8
+            })
+        );
+        let naga::TypeInner::Array { base, stride, .. } = m.types[previous.ty].inner else {
+            panic!("previous records are an array");
+        };
+        assert_eq!(stride, 64);
+        let naga::TypeInner::Struct { ref members, span } = m.types[base].inner else {
+            panic!("previous record is a struct");
+        };
+        assert_eq!(span, 64);
+        assert_eq!(
+            members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+            [0, 16, 32, 48, 52, 56, 60]
+        );
+        for member in &members[3..] {
+            assert_eq!(
+                m.types[member.ty].inner,
+                naga::TypeInner::Scalar(naga::Scalar::U32)
+            );
+        }
+        // Evaluate the actual reconstruction expression on translated, rotated and
+        // non-uniformly scaled affine rows, without a GPU or a second shader formula.
+        let (_, f) = m
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_deref() == Some("raa_previous_model"))
+            .unwrap();
+        let naga::Statement::Return { value: Some(value) } = f.body.last().unwrap() else {
+            panic!("matrix return");
+        };
+        let naga::Expression::Compose { ref components, .. } = f.expressions[*value] else {
+            panic!("matrix columns");
+        };
+        let rows = [
+            [0.0, -3.0, 0.0, 7.0],
+            [2.0, 0.0, 0.0, -8.0],
+            [0.0, 0.0, 4.0, 9.0],
+        ];
+        let mut columns = Vec::new();
+        for column in components {
+            let naga::Expression::Compose { ref components, .. } = f.expressions[*column] else {
+                panic!("column components");
+            };
+            for component in components {
+                columns.push(match f.expressions[*component] {
+                    naga::Expression::Literal(naga::Literal::F32(v)) => v,
+                    naga::Expression::AccessIndex { base, index } => {
+                        let naga::Expression::AccessIndex { base, index: row } =
+                            f.expressions[base]
+                        else {
+                            panic!("row access");
+                        };
+                        assert!(matches!(
+                            f.expressions[base],
+                            naga::Expression::FunctionArgument(0)
+                        ));
+                        rows[row as usize][index as usize]
+                    }
+                    _ => panic!("affine component"),
+                });
+            }
+        }
+        assert_eq!(
+            columns,
+            [
+                0.0, 2.0, 0.0, 0.0, -3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 7.0, -8.0, 9.0, 1.0
+            ]
+        );
         let (frame, _) = m
             .types
             .iter()
