@@ -17,15 +17,25 @@ pub const SCENARIO_TICKS: u32 = 600;
 
 /// A layer changed state at `tick`; the first entry of every layer is included.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RouteEntry { pub tick: u32, pub layer: usize, pub state: String }
+pub struct RouteEntry {
+    pub tick: u32,
+    pub layer: usize,
+    pub state: String,
+}
 
 /// One clip event with the absolute script tick of the step that reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScenarioEvent { pub tick: u32, pub event: GraphEvent }
+pub struct ScenarioEvent {
+    pub tick: u32,
+    pub event: GraphEvent,
+}
 
 /// One scripted tick: its output plus the simulated state after the step.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ScenarioTick { pub tick: u32, pub out: TickOut }
+pub struct ScenarioTick {
+    pub tick: u32,
+    pub out: TickOut,
+}
 
 /// Snapshot rollback taken inside a running crossfade and replayed to the end.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,22 +59,40 @@ pub struct ScenarioRun {
     pub rollback: Option<Rollback>,
 }
 
-struct Checkpoint { tick: u32, bytes: Vec<u8>, held: Params, fades: Vec<usize> }
+struct Checkpoint {
+    tick: u32,
+    bytes: Vec<u8>,
+    held: Params,
+    fades: Vec<usize>,
+}
 
 fn active_fades(state: &GraphState) -> Vec<usize> {
-    state.layers.iter().enumerate()
+    state
+        .layers
+        .iter()
+        .enumerate()
         .filter(|(_, l)| l.fade.is_some_and(|f| f.elapsed > 0))
-        .map(|(i, _)| i).collect()
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn capture(state: &GraphState, tick: u32, held: &Params) -> Checkpoint {
     let mut bytes = Vec::new();
     state.write(&mut bytes);
-    Checkpoint { tick, bytes, held: held.clone(), fades: active_fades(state) }
+    Checkpoint {
+        tick,
+        bytes,
+        held: held.clone(),
+        fades: active_fades(state),
+    }
 }
 
-fn replay(rt: &GraphRuntime, timeline: &Timeline, trace: &[ScenarioTick], saved: &Checkpoint)
-    -> Result<Rollback, GraphError> {
+fn replay(
+    rt: &GraphRuntime,
+    timeline: &Timeline,
+    trace: &[ScenarioTick],
+    saved: &Checkpoint,
+) -> Result<Rollback, GraphError> {
     let mut state = rt.read_state(&saved.bytes)?;
     let mut held = saved.held.clone();
     let (mut replayed, mut matched, mut first_mismatch) = (0, true, None);
@@ -77,12 +105,20 @@ fn replay(rt: &GraphRuntime, timeline: &Timeline, trace: &[ScenarioTick], saved:
             first_mismatch.get_or_insert(step.tick);
         }
         for index in 0..params.len() {
-            if params.ty(index) == Some(ParamType::Trigger) { params.consume(index); }
+            if params.ty(index) == Some(ParamType::Trigger) {
+                params.consume(index);
+            }
         }
         held = params;
         replayed += 1;
     }
-    Ok(Rollback { checkpoint: saved.tick, replayed, fades: saved.fades.clone(), matched, first_mismatch })
+    Ok(Rollback {
+        checkpoint: saved.tick,
+        replayed,
+        fades: saved.fades.clone(),
+        matched,
+        first_mismatch,
+    })
 }
 
 /// Drive `rt` with `timeline` from tick zero for `timeline.ticks` (at most
@@ -91,7 +127,8 @@ pub fn run(rt: &GraphRuntime, timeline: &Timeline) -> Result<ScenarioRun, GraphE
     let total = timeline.ticks.min(SCENARIO_TICKS);
     let mut state = rt.new_state();
     let mut held = rt.new_params();
-    let (mut trace, mut route, mut events) = (Vec::with_capacity(total as usize), Vec::new(), Vec::new());
+    let (mut trace, mut route, mut events) =
+        (Vec::with_capacity(total as usize), Vec::new(), Vec::new());
     let mut last = vec![usize::MAX; state.layers.len()];
     let mut travel = [0.0f32; 3];
     let mut saved = None;
@@ -99,26 +136,46 @@ pub fn run(rt: &GraphRuntime, timeline: &Timeline) -> Result<ScenarioRun, GraphE
         let mut params = held.clone();
         timeline.apply(tick, &mut params)?;
         let out = rt.step(&mut state, &params)?;
-        for bone in 0..3 { travel[bone] += out.root_delta.t[bone]; }
+        for (component, delta) in travel.iter_mut().zip(out.root_delta.t) {
+            *component += delta;
+        }
         for (layer, cursor) in state.layers.iter().enumerate() {
             if cursor.state != last[layer] {
                 last[layer] = cursor.state;
-                let state = rt.graph().machines[cursor.machine].states[cursor.state].name.clone();
+                let state = rt.graph().machines[cursor.machine].states[cursor.state]
+                    .name
+                    .clone();
                 route.push(RouteEntry { tick, layer, state });
             }
         }
-        for event in &out.events { events.push(ScenarioEvent { tick, event: event.clone() }); }
+        for event in &out.events {
+            events.push(ScenarioEvent {
+                tick,
+                event: event.clone(),
+            });
+        }
         trace.push(ScenarioTick { tick, out });
         for index in 0..params.len() {
-            if params.ty(index) == Some(ParamType::Trigger) { params.consume(index); }
+            if params.ty(index) == Some(ParamType::Trigger) {
+                params.consume(index);
+            }
         }
         held = params;
         if saved.is_none() && !active_fades(&state).is_empty() {
             saved = Some(capture(&state, tick, &held));
         }
     }
-    let rollback = saved.as_ref().map(|s| replay(rt, timeline, &trace, s)).transpose()?;
-    Ok(ScenarioRun { trace, route, events, travel, rollback })
+    let rollback = saved
+        .as_ref()
+        .map(|s| replay(rt, timeline, &trace, s))
+        .transpose()?;
+    Ok(ScenarioRun {
+        trace,
+        route,
+        events,
+        travel,
+        rollback,
+    })
 }
 
 /// Load the preceding task's penguin data and run the canonical script.
@@ -131,10 +188,16 @@ pub fn run_penguin() -> Result<ScenarioRun, GraphError> {
 
 impl ScenarioRun {
     /// Ticks actually stepped (never above [`SCENARIO_TICKS`]).
-    pub fn steps(&self) -> u32 { self.trace.len() as u32 }
+    pub fn steps(&self) -> u32 {
+        self.trace.len() as u32
+    }
     /// State names entered by `layer`, in route order.
     pub fn states(&self, layer: usize) -> Vec<&str> {
-        self.route.iter().filter(|r| r.layer == layer).map(|r| r.state.as_str()).collect()
+        self.route
+            .iter()
+            .filter(|r| r.layer == layer)
+            .map(|r| r.state.as_str())
+            .collect()
     }
     /// FNV-1a over the full ordered trace, for the `graph-run` selftest record.
     /// The value is API data, never a cross-platform acceptance comparison.

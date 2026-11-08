@@ -45,12 +45,19 @@ fn expect(got: &[BlendWeight], want: &[(usize, f32)]) {
     }
     let sum: f32 = got.iter().map(|w| w.weight).sum();
     assert!((sum - 1.0).abs() <= 1e-6, "{got:?} sums to {sum}");
-    assert!(got.iter().all(|w| w.weight.is_finite() && w.weight >= 0.0), "{got:?}");
+    assert!(
+        got.iter().all(|w| w.weight.is_finite() && w.weight >= 0.0),
+        "{got:?}"
+    );
 }
 
 fn weights(space: &BlendSpace, at: &[f32]) -> Vec<BlendWeight> {
     let geometry = (space.params.len() == 2).then(|| {
-        let points: Vec<[f32; 2]> = space.points.iter().map(|p| [p.at[0].rt, p.at[1].rt]).collect();
+        let points: Vec<[f32; 2]> = space
+            .points
+            .iter()
+            .map(|p| [p.at[0].rt, p.at[1].rt])
+            .collect();
         triangulate(&points, "/blendSpaces/0").unwrap()
     });
     evaluate(space, geometry.as_ref(), at).unwrap()
@@ -82,8 +89,14 @@ fn interpolates_one_dimensional_neighbours_and_endpoints() {
 #[test]
 fn interpolates_two_dimensional_triangle_interiors_in_source_order() {
     let space = square();
-    expect(&weights(&space, &[0.25, 0.1]), &[(0, 0.75), (1, 0.15), (2, 0.1)]);
-    expect(&weights(&space, &[0.1, 0.5]), &[(0, 0.5), (2, 0.1), (3, 0.4)]);
+    expect(
+        &weights(&space, &[0.25, 0.1]),
+        &[(0, 0.75), (1, 0.15), (2, 0.1)],
+    );
+    expect(
+        &weights(&space, &[0.1, 0.5]),
+        &[(0, 0.5), (2, 0.1), (3, 0.4)],
+    );
     let single = blend_space(
         &["x", "y"],
         &[("a", &[0.0, 0.0]), ("c", &[0.0, 1.0]), ("b", &[1.0, 0.0])],
@@ -115,7 +128,10 @@ fn projects_outside_points_onto_the_nearest_hull_edge() {
     expect(&weights(&space, &[2.0, 2.0]), &[(2, 1.0)]);
     assert_eq!(
         weights(&space, &[2.0, 2.0]),
-        vec![BlendWeight { point: 2, weight: 1.0 }]
+        vec![BlendWeight {
+            point: 2,
+            weight: 1.0
+        }]
     );
 }
 
@@ -123,7 +139,11 @@ fn projects_outside_points_onto_the_nearest_hull_edge() {
 fn refuses_bad_runtime_coordinates() {
     let line = line();
     let square = square();
-    let points: Vec<[f32; 2]> = square.points.iter().map(|p| [p.at[0].rt, p.at[1].rt]).collect();
+    let points: Vec<[f32; 2]> = square
+        .points
+        .iter()
+        .map(|p| [p.at[0].rt, p.at[1].rt])
+        .collect();
     let geometry = triangulate(&points, "/b").unwrap();
     assert!(evaluate(&line, None, &[1.0, 2.0]).is_err());
     assert!(evaluate_1d(&line, f32::NAN).is_err());

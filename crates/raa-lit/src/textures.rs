@@ -356,8 +356,17 @@ mod tests {
     #[test]
     fn quantize_clamps_and_rounds() {
         assert_eq!(
-            [-1.0, 0.0, 0.5, 1.0, 2.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY]
-                .map(quantize),
+            [
+                -1.0,
+                0.0,
+                0.5,
+                1.0,
+                2.0,
+                f32::NAN,
+                f32::INFINITY,
+                f32::NEG_INFINITY
+            ]
+            .map(quantize),
             [0, 0, 128, 255, 255, 0, 255, 0]
         );
         assert_eq!(quantize(0.2), 51);
@@ -370,9 +379,33 @@ mod tests {
         let (b, rb) = p.alloc(32, 8).unwrap();
         let (c, rc) = p.alloc(16, 16).unwrap();
         assert_eq!((a, b, c), (1, 2, 3));
-        assert_eq!(ra, AtlasRect { x: 0, y: 0, width: 32, height: 16 });
-        assert_eq!(rb, AtlasRect { x: 32, y: 0, width: 32, height: 8 });
-        assert_eq!(rc, AtlasRect { x: 0, y: 16, width: 16, height: 16 });
+        assert_eq!(
+            ra,
+            AtlasRect {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 16
+            }
+        );
+        assert_eq!(
+            rb,
+            AtlasRect {
+                x: 32,
+                y: 0,
+                width: 32,
+                height: 8
+            }
+        );
+        assert_eq!(
+            rc,
+            AtlasRect {
+                x: 0,
+                y: 16,
+                width: 16,
+                height: 16
+            }
+        );
         assert_eq!(p.rect(0), None);
         assert_eq!(p.len(), 3);
     }
@@ -417,7 +450,12 @@ mod tests {
 
     #[test]
     fn rect_bytes_are_normalised() {
-        let r = AtlasRect { x: 1024, y: 2048, width: 512, height: 4096 };
+        let r = AtlasRect {
+            x: 1024,
+            y: 2048,
+            width: 512,
+            height: 4096,
+        };
         let b = r.gpu_bytes();
         let f = |i: usize| f32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
         assert_eq!([f(0), f(1), f(2), f(3)], [0.25, 0.5, 0.125, 1.0]);

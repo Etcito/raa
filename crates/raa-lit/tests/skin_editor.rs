@@ -25,18 +25,27 @@ fn rest(gpu: &GpuContext) -> (RestMeshView, [wgpu::Buffer; 4]) {
     let s1 = buffer(gpu, "rest.s1", 4 * 40);
     let ix = buffer(gpu, "rest.ix", 6 * 4);
     let ed = buffer(gpu, "rest.ed", 4 * REST_EDGE_STRIDE);
-    let view = RestMeshView::new(s0.clone(), s1.clone(), ix.clone(), Some(ed.clone())).expect("rest");
+    let view =
+        RestMeshView::new(s0.clone(), s1.clone(), ix.clone(), Some(ed.clone())).expect("rest");
     (view, [s0, s1, ix, ed])
 }
 
-fn select(skins: &SkinViews, tag: u32, rest0: &wgpu::Buffer, edges: &wgpu::Buffer) -> OverlayGeometry {
+fn select(
+    skins: &SkinViews,
+    tag: u32,
+    rest0: &wgpu::Buffer,
+    edges: &wgpu::Buffer,
+) -> OverlayGeometry {
     OverlayGeometry::select(&skins.draw_source(), tag, rest0, Some(edges))
 }
 
 #[test]
 fn posed_instances_route_both_overlays_to_their_own_views() {
     let test = "posed_instances_route_both_overlays_to_their_own_views";
-    let Some(gpu) = software_gpu() else { skip(test, "software_gpu returned None"); return; };
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
     let (rest, [rest0, _, _, rest_edges]) = rest(&gpu);
     let mut skins = SkinViews::default();
     skins.add_skinned_view(&gpu, 1, rest.clone()).expect("one");
@@ -46,17 +55,26 @@ fn posed_instances_route_both_overlays_to_their_own_views() {
     assert!(a.posed && b.posed);
     assert_eq!(a.edge_stride, SKINNED_EDGE_STRIDE);
     assert_eq!(a.edge_count(), 4);
-    assert_eq!(a.edges.as_ref().expect("posed edges").size(), 4 * SKINNED_EDGE_STRIDE);
+    assert_eq!(
+        a.edges.as_ref().expect("posed edges").size(),
+        4 * SKINNED_EDGE_STRIDE
+    );
     assert_eq!(a.stream0, *skins.skinned_stream0(1).expect("posed stream"));
     assert_eq!(b.stream0, *skins.skinned_stream0(2).expect("posed stream"));
-    assert_ne!(a.stream0, b.stream0, "instances keep separate posed streams");
+    assert_ne!(
+        a.stream0, b.stream0,
+        "instances keep separate posed streams"
+    );
     assert_ne!(a.edges, b.edges, "instances keep separate posed segments");
 }
 
 #[test]
 fn absent_and_removed_views_select_rest() {
     let test = "absent_and_removed_views_select_rest";
-    let Some(gpu) = software_gpu() else { skip(test, "software_gpu returned None"); return; };
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
     let (rest, [rest0, _, _, rest_edges]) = rest(&gpu);
     let mut skins = SkinViews::default();
     skins.add_skinned_view(&gpu, 3, rest).expect("view");
@@ -76,7 +94,10 @@ fn absent_and_removed_views_select_rest() {
 #[test]
 fn disabled_skinning_returns_both_overlays_to_rest_in_the_same_frame() {
     let test = "disabled_skinning_returns_both_overlays_to_rest_in_the_same_frame";
-    let Some(gpu) = software_gpu() else { skip(test, "software_gpu returned None"); return; };
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
     let (rest, [rest0, _, _, rest_edges]) = rest(&gpu);
     let mut skins = SkinViews::default();
     skins.add_skinned_view(&gpu, 5, rest).expect("view");

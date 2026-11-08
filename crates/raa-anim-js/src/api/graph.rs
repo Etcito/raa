@@ -250,6 +250,7 @@ mod wasm {
             })
             .ok_or_else(|| invalid("clips must contain AnimationClip handles"))?;
         let abi = WasmPtr::from_usize(pointer as usize);
+        // SAFETY: the JS API requires live AnimationClip handles from this wasm instance; RcRef anchors their shared borrows until graph construction returns (test: clip_handles_stay_usable_after_loading)
         Ok(unsafe { <AnimationClip as RefFromWasmAbi>::ref_from_abi(abi) })
     }
 

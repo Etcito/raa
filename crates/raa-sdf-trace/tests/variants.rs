@@ -378,8 +378,8 @@ fn snorm_encoding_rounding_saturation_and_gpu_byte_order() {
         .enumerate()
         .fold(0u32, |p, (lane, b)| p | (u32::from(*b as u8) << (8 * lane)));
     assert_eq!(packed.to_le_bytes(), [129, 255, 0, 127]);
-    for lane in 0..4 {
-        assert_eq!(((packed >> (8 * lane)) & 255) as u8 as i8, bytes[lane]);
+    for (lane, byte) in bytes.iter().enumerate() {
+        assert_eq!(((packed >> (8 * lane)) & 255) as u8 as i8, *byte);
     }
 }
 

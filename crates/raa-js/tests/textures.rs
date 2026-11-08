@@ -28,7 +28,14 @@ fn registry_exports_add_texture_and_remove_texture() {
 fn sides_are_whole_numbers() {
     assert_eq!(texture_side("width", Some(0.0)).unwrap(), 0);
     assert_eq!(texture_side("width", Some(256.0)).unwrap(), 256);
-    for bad in [None, Some(-1.0), Some(1.5), Some(f64::NAN), Some(f64::INFINITY), Some(5e9)] {
+    for bad in [
+        None,
+        Some(-1.0),
+        Some(1.5),
+        Some(f64::NAN),
+        Some(f64::INFINITY),
+        Some(5e9),
+    ] {
         let e = texture_side("width", bad).unwrap_err();
         assert_eq!(e.code(), "api.invalid_argument", "{bad:?}");
         assert!(e.to_string().contains("width"), "{e}");

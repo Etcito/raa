@@ -1,8 +1,8 @@
 //! S20 helpers built on the chain solvers: weighted hand reach and bounded look-at.
 
+use crate::validate_chain;
 use crate::{IK_TARGET_NOT_FINITE, IkError, IkPose, MAX_ITERATIONS};
 use crate::{ccd, clamp_rotation, fabrik, finite_target, finite_weight, two_bone};
-use crate::validate_chain;
 use raa_anim::rig::{ChainSolver, IkChain};
 use raa_math::{Quat, Vec3};
 
@@ -34,7 +34,13 @@ pub fn hand_reach(
     finite_target(target)?;
     let weight = finite_weight(weight)?;
     if chain.solver == ChainSolver::TwoBone {
-        two_bone(ik, chain, target, chain.pole.map(|p| p.map(|v| v as f32)), weight)?;
+        two_bone(
+            ik,
+            chain,
+            target,
+            chain.pole.map(|p| p.map(|v| v as f32)),
+            weight,
+        )?;
         for &bone in &chain.bones {
             clamp_bone(ik, bone)?;
         }
@@ -77,7 +83,11 @@ pub fn look_at(
     let target = finite_target(target)?;
     let axis = Vec3::new(axis[0], axis[1], axis[2]);
     if !axis.is_finite() || !max_deg.is_finite() {
-        return Err(IkError::new(IK_TARGET_NOT_FINITE, "", "axis or angle is not finite"));
+        return Err(IkError::new(
+            IK_TARGET_NOT_FINITE,
+            "",
+            "axis or angle is not finite",
+        ));
     }
     let model = ik.model(bone)?;
     let from = model.transform_vector(axis);
@@ -85,7 +95,10 @@ pub fn look_at(
     if from.length() < 1e-10 || to.length() < 1e-10 {
         return Ok(());
     }
-    let cos = from.normalize_or_zero().dot(to.normalize_or_zero()).clamp(-1.0, 1.0);
+    let cos = from
+        .normalize_or_zero()
+        .dot(to.normalize_or_zero())
+        .clamp(-1.0, 1.0);
     let angle = cos.acos().to_degrees();
     let cap = max_deg.max(0.0);
     let weight = if angle <= cap { 1.0 } else { cap / angle };
@@ -95,4 +108,3 @@ pub fn look_at(
     }
     clamp_bone(ik, bone)
 }
-

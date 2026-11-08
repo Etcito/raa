@@ -7,11 +7,23 @@ fn writes_s19_order_and_s4_numbers_idempotently() {
     let text = to_canonical(&decode_graph(DOC).unwrap());
     assert!(text.ends_with("}\n") && !text.ends_with("\n\n"));
     assert!(text.starts_with("{\n  \"format\": \"raa.animgraph\",\n  \"version\": 1,\n"));
-    for needle in ["1e-7", "\"default\": true", "\"default\": 0", "4.5", "\"value\": false"] {
+    for needle in [
+        "1e-7",
+        "\"default\": true",
+        "\"default\": 0",
+        "4.5",
+        "\"value\": false",
+    ] {
         assert!(text.contains(needle), "{needle}\n{text}");
     }
     assert!(!text.contains("\"type\": \"trigger\",\n      \"default\""));
-    let keys = ["\"params\"", "\"blendSpaces\"", "\"layers\"", "\"machines\"", "\"rootMotion\""];
+    let keys = [
+        "\"params\"",
+        "\"blendSpaces\"",
+        "\"layers\"",
+        "\"machines\"",
+        "\"rootMotion\"",
+    ];
     let at: Vec<usize> = keys.iter().map(|k| text.find(k).unwrap()).collect();
     assert!(at.windows(2).all(|w| w[0] < w[1]));
     let back = decode_graph(&text).unwrap();

@@ -608,7 +608,7 @@ pub(crate) fn validate_instances(program: &TraceProgram) -> Result<(), TraceErro
                     || b[0].fract() != 0.0
                     || b.iter().any(|v| !v.is_finite())
                     || b[1] == 0.0
-                    || !(b[4] > b[3])
+                    || b[4] <= b[3]
                 {
                     refuse!(
                         FORMAT,

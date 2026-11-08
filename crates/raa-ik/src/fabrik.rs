@@ -21,7 +21,11 @@ pub struct FabrikOutcome {
 
 fn direction(v: Vec3) -> Vec3 {
     let length = v.length();
-    if length < 1e-10 { Vec3::ZERO } else { v / length }
+    if length < 1e-10 {
+        Vec3::ZERO
+    } else {
+        v / length
+    }
 }
 
 /// Solve a 2..=8 bone chain. Iterations above 16 and non-finite tolerances are
@@ -40,7 +44,11 @@ pub fn fabrik(
         return Err(IkError::new(IK_CHAIN, &chain.name, "iterations above 16"));
     }
     if !tol.is_finite() {
-        return Err(IkError::new(IK_TARGET_NOT_FINITE, "", "tolerance is not finite"));
+        return Err(IkError::new(
+            IK_TARGET_NOT_FINITE,
+            "",
+            "tolerance is not finite",
+        ));
     }
     let tol = tol.max(0.0);
     let mut positions: Vec<Vec3> = chain
@@ -48,7 +56,10 @@ pub fn fabrik(
         .iter()
         .map(|&b| ik.world_position(b))
         .collect::<Result<_, _>>()?;
-    let lengths: Vec<f32> = positions.windows(2).map(|p| (p[1] - p[0]).length()).collect();
+    let lengths: Vec<f32> = positions
+        .windows(2)
+        .map(|p| (p[1] - p[0]).length())
+        .collect();
     let root = positions[0];
     let last = positions.len() - 1;
     let mut outcome = FabrikOutcome {

@@ -4,11 +4,15 @@
 //! Restore requires the same rig/clip assets; snapshots do not embed asset data.
 //! Tick, local clocks and last sampled phases also encode event progress: no
 //! separate event cursor exists. Readers build a candidate before replacing state.
-use crate::{Compiled, GraphError, GraphState, ParamType, ParamValue, codes};
 use crate::load::validate::Motion;
+use crate::{Compiled, GraphError, GraphState, ParamType, ParamValue, codes};
 
-fn bad() -> GraphError { GraphError::new(codes::SCHEMA, "/state", "invalid or incompatible snapshot") }
-fn word(out: &mut Vec<u8>, v: u32) { out.extend_from_slice(&v.to_le_bytes()); }
+fn bad() -> GraphError {
+    GraphError::new(codes::SCHEMA, "/state", "invalid or incompatible snapshot")
+}
+fn word(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
 fn take<'a>(bytes: &mut &'a [u8], count: usize) -> Result<&'a [u8], GraphError> {
     let (head, tail) = bytes.split_at_checked(count).ok_or_else(bad)?;
     *bytes = tail;
@@ -24,15 +28,25 @@ pub(crate) fn binding(c: &Compiled) -> Vec<u8> {
     for l in &c.references.layers {
         word(&mut out, l.machine as u32);
         word(&mut out, l.bones.len() as u32);
-        for &bone in &l.bones { word(&mut out, bone as u32); }
+        for &bone in &l.bones {
+            word(&mut out, bone as u32);
+        }
     }
     for m in &c.references.machines {
         for s in &m.states {
-            let (tag, index) = match s.motion { Motion::Clip(i) => (0, i), Motion::BlendSpace(i) => (1, i) };
-            word(&mut out, tag); word(&mut out, index as u32);
+            let (tag, index) = match s.motion {
+                Motion::Clip(i) => (0, i),
+                Motion::BlendSpace(i) => (1, i),
+            };
+            word(&mut out, tag);
+            word(&mut out, index as u32);
         }
     }
-    for b in &c.references.blends { for &clip in &b.clips { word(&mut out, clip as u32); } }
+    for b in &c.references.blends {
+        for &clip in &b.clips {
+            word(&mut out, clip as u32);
+        }
+    }
     out
 }
 impl GraphState {
@@ -42,18 +56,26 @@ impl GraphState {
         word(out, self.binding.len() as u32);
         out.extend_from_slice(&self.binding);
         for (_, value) in self.params.iter() {
-            word(out, match value {
-                ParamValue::Float(v) => v.to_bits(), ParamValue::Int(v) => v as u32,
-                ParamValue::Bool(v) | ParamValue::Trigger(v) => v as u32,
-            });
+            word(
+                out,
+                match value {
+                    ParamValue::Float(v) => v.to_bits(),
+                    ParamValue::Int(v) => v as u32,
+                    ParamValue::Bool(v) | ParamValue::Trigger(v) => v as u32,
+                },
+            );
         }
         self.write_payload(out);
     }
     /// Checked, allocation-bounded decode; old versions and trailing data are refused.
     pub fn read(compiled: &Compiled, mut bytes: &[u8]) -> Result<Self, GraphError> {
-        if take(&mut bytes, 4)? != b"RGS2" { return Err(bad()); }
+        if take(&mut bytes, 4)? != b"RGS2" {
+            return Err(bad());
+        }
         let count = next(&mut bytes)? as usize;
-        if take(&mut bytes, count)? != binding(compiled) { return Err(bad()); }
+        if take(&mut bytes, count)? != binding(compiled) {
+            return Err(bad());
+        }
         let mut params = crate::Params::new(&compiled.graph);
         for (i, p) in compiled.graph.params.iter().enumerate() {
             let v = next(&mut bytes)?;
@@ -62,7 +84,12 @@ impl GraphState {
                 ParamType::Int => ParamValue::Int(v as i32),
                 ParamType::Bool | ParamType::Trigger if v > 1 => return Err(bad()),
                 ParamType::Bool => ParamValue::Bool(v != 0),
-                ParamType::Trigger => { if v != 0 { params.fire_at(i)?; } continue; }
+                ParamType::Trigger => {
+                    if v != 0 {
+                        params.fire_at(i)?;
+                    }
+                    continue;
+                }
             };
             params.set_at(i, value)?;
         }

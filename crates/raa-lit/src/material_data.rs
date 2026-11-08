@@ -211,8 +211,9 @@ impl MaterialData {
                 )
             })?;
         let limits = gpu.limits();
-        let max_bytes =
-            limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        let max_bytes = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size);
         let max_words = u32::try_from(max_bytes / 4).unwrap_or(u32::MAX);
         let full = |need: u64| {
             data_error(

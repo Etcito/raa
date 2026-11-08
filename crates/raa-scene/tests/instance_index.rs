@@ -166,10 +166,10 @@ fn brute_ray(entries: &Entries, origin: Vec3, dir: Vec3, max_t: f32) -> Vec<(u32
         return out;
     }
     for (slot, b) in entries {
-        if let Some(b) = b {
-            if let Some(t) = slab(b, origin, dir, max_t) {
-                out.push((*slot, t));
-            }
+        if let Some(b) = b
+            && let Some(t) = slab(b, origin, dir, max_t)
+        {
+            out.push((*slot, t));
         }
     }
     out.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));

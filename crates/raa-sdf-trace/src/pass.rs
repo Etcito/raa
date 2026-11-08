@@ -401,8 +401,8 @@ impl VolumeLayout {
     /// [`uniform_revision`]: VolumeLayout::uniform_revision
     pub fn uniform(&self, level: u32) -> [u8; VOLUME_UNIFORM_BYTES as usize] {
         let mut words = [0u32; 16];
-        for axis in 0..3 {
-            words[axis] = self.origin[axis].to_bits();
+        for (word, component) in words[..3].iter_mut().zip(self.origin) {
+            *word = component.to_bits();
         }
         words[3] = self.spacing.to_bits();
         words[4..7].copy_from_slice(&self.base);

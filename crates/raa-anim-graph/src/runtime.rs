@@ -51,16 +51,32 @@ impl GraphRuntime {
     /// `Graph::load` keeping the compiled tables, rig and clips for stepping.
     pub fn load(text: &str, rig: &Rig, clips: &[Clip]) -> Result<Self, GraphError> {
         let compiled = Graph::load_compiled(text, rig, clips)?;
-        Ok(Self { compiled, rig: rig.clone(), clips: clips.to_vec() })
+        Ok(Self {
+            compiled,
+            rig: rig.clone(),
+            clips: clips.to_vec(),
+        })
     }
-    pub fn compiled(&self) -> &Compiled { &self.compiled }
-    pub fn graph(&self) -> &Graph { &self.compiled.graph }
-    pub fn rig(&self) -> &Rig { &self.rig }
-    pub fn clips(&self) -> &[Clip] { &self.clips }
+    pub fn compiled(&self) -> &Compiled {
+        &self.compiled
+    }
+    pub fn graph(&self) -> &Graph {
+        &self.compiled.graph
+    }
+    pub fn rig(&self) -> &Rig {
+        &self.rig
+    }
+    pub fn clips(&self) -> &[Clip] {
+        &self.clips
+    }
     /// `GraphState::new` for this graph.
-    pub fn new_state(&self) -> GraphState { GraphState::new(&self.compiled) }
+    pub fn new_state(&self) -> GraphState {
+        GraphState::new(&self.compiled)
+    }
     /// Declared parameter defaults for this graph.
-    pub fn new_params(&self) -> Params { Params::new(&self.compiled.graph) }
+    pub fn new_params(&self) -> Params {
+        Params::new(&self.compiled.graph)
+    }
     /// `GraphState::read` validated against this graph.
     pub fn read_state(&self, bytes: &[u8]) -> Result<GraphState, GraphError> {
         GraphState::read(&self.compiled, bytes)
@@ -70,20 +86,43 @@ impl GraphRuntime {
     pub fn check(&self, state: &GraphState, params: &Params) -> Result<(), GraphError> {
         let graph = &self.compiled.graph;
         let same = params.len() == graph.params.len()
-            && params.iter().zip(&graph.params).enumerate()
+            && params
+                .iter()
+                .zip(&graph.params)
+                .enumerate()
                 .all(|(i, ((name, _), p))| name == p.name && params.ty(i) == Some(p.ty));
-        if !same { return Err(GraphError::new(codes::PARAM, "/params", "parameters belong to another graph")); }
+        if !same {
+            return Err(GraphError::new(
+                codes::PARAM,
+                "/params",
+                "parameters belong to another graph",
+            ));
+        }
         if state.pending.len() != graph.params.len() {
             return Err(schema("/state/pending", "pending trigger count mismatch"));
         }
         if state.layers.len() != graph.layers.len() {
             return Err(schema("/state/layers", "layer state count mismatch"));
         }
-        for (i, (layer, refs)) in state.layers.iter().zip(&self.compiled.references.layers).enumerate() {
-            let states = graph.machines.get(layer.machine).map_or(0, |m| m.states.len());
-            let valid = layer.machine == refs.machine && layer.state < states
+        for (i, (layer, refs)) in state
+            .layers
+            .iter()
+            .zip(&self.compiled.references.layers)
+            .enumerate()
+        {
+            let states = graph
+                .machines
+                .get(layer.machine)
+                .map_or(0, |m| m.states.len());
+            let valid = layer.machine == refs.machine
+                && layer.state < states
                 && layer.fade.is_none_or(|f| f.from < states);
-            if !valid { return Err(schema(&format!("/state/layers/{i}"), "layer state does not match the graph")); }
+            if !valid {
+                return Err(schema(
+                    &format!("/state/layers/{i}"),
+                    "layer state does not match the graph",
+                ));
+            }
         }
         Ok(())
     }
@@ -98,10 +137,16 @@ impl GraphRuntime {
     pub fn frame(&self, state: &mut GraphState, params: &Params) -> Result<Frame, GraphError> {
         self.check(state, params)?;
         let mut next = state.clone();
-        let mut out = self.compiled.step_outputs(&self.rig, &self.clips, &mut next, params)?;
+        let mut out = self
+            .compiled
+            .step_outputs(&self.rig, &self.clips, &mut next, params)?;
         let pose = self.rig.pose(&out.pose)?;
         out.pose = pose.local;
         *state = next;
-        Ok(Frame { out, model: pose.model, skin: pose.skin })
+        Ok(Frame {
+            out,
+            model: pose.model,
+            skin: pose.skin,
+        })
     }
 }

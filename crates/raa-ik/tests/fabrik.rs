@@ -28,7 +28,13 @@ fn chain(bones: &[usize]) -> IkChain {
     }
 }
 
-fn solve<'r>(rig: &'r Rig, bones: &[usize], target: Vec3, it: usize, tol: f32) -> (IkPose<'r>, FabrikOutcome) {
+fn solve<'r>(
+    rig: &'r Rig,
+    bones: &[usize],
+    target: Vec3,
+    it: usize,
+    tol: f32,
+) -> (IkPose<'r>, FabrikOutcome) {
     let mut ik = IkPose::new(rig, &rig.local_rest_pose().unwrap()).unwrap();
     let out = fabrik(&mut ik, &chain(bones), target.to_array(), it, tol).unwrap();
     (ik, out)
@@ -63,17 +69,17 @@ fn reference_pass_and_convergence() {
         (
             1,
             [
-                [-0.06489165, 1.49499054, -0.02781071],
-                [0.34812697, 1.71427071, 0.14919727],
-                [0.70333893, 1.39701788, 0.30143097],
+                [-0.06489165, 1.494_990_6, -0.02781071],
+                [0.34812697, 1.714_270_7, 0.14919727],
+                [0.703_338_9, 1.397_017_8, 0.30143097],
             ],
         ),
         (
             16,
             [
-                [-0.06656711, 1.49472713, -0.02852876],
-                [0.34494386, 1.71733713, 0.14783308],
-                [0.70005506, 1.39995079, 0.30002360],
+                [-0.06656711, 1.494_727_1, -0.02852876],
+                [0.34494386, 1.717_337_1, 0.14783308],
+                [0.70005506, 1.399_950_7, 0.300_023_6],
             ],
         ),
     ] {
@@ -112,12 +118,20 @@ fn unreachable_extends_even_with_zero_iterations() {
         assert_eq!((out.converged, out.passes), (false, 0));
         let dir = (target - at(&ik, 1)).normalize_or_zero();
         for bone in 2..=4 {
-            close(at(&ik, bone), at(&ik, 1) + dir * (0.5 * (bone - 1) as f32), 1e-5);
+            close(
+                at(&ik, bone),
+                at(&ik, 1) + dir * (0.5 * (bone - 1) as f32),
+                1e-5,
+            );
         }
         lengths(&ik, &ARM);
     }
     // Reference regards the exact reach boundary as unreachable, even at the tip.
-    assert!(!solve(&rig, &ARM, Vec3::new(0.0, 2.5, 0.0), 16, 0.001).1.converged);
+    assert!(
+        !solve(&rig, &ARM, Vec3::new(0.0, 2.5, 0.0), 16, 0.001)
+            .1
+            .converged
+    );
 }
 
 #[test]
@@ -163,7 +177,9 @@ fn bounded_iterations_and_invalid_inputs() {
     }
     let mut ik = IkPose::new(&rig, &rig.local_rest_pose().unwrap()).unwrap();
     assert_eq!(
-        fabrik(&mut ik, &chain(&ARM), T.to_array(), 17, 0.001).unwrap_err().code,
+        fabrik(&mut ik, &chain(&ARM), T.to_array(), 17, 0.001)
+            .unwrap_err()
+            .code,
         IK_CHAIN
     );
     for (bones, expected) in [
@@ -181,7 +197,9 @@ fn bounded_iterations_and_invalid_inputs() {
     }
     for (target, tol) in [([f32::NAN, 0.0, 0.0], 0.001), (T.to_array(), f32::INFINITY)] {
         assert_eq!(
-            fabrik(&mut ik, &chain(&ARM), target, 16, tol).unwrap_err().code,
+            fabrik(&mut ik, &chain(&ARM), target, 16, tol)
+                .unwrap_err()
+                .code,
             IK_TARGET_NOT_FINITE
         );
     }

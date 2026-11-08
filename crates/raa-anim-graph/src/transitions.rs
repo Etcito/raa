@@ -13,7 +13,9 @@ fn compare<T: PartialOrd>(a: T, b: T, op: CondOp) -> bool {
     }
 }
 fn matches(condition: &Condition, params: &Params, pending: &[bool]) -> bool {
-    let Some(index) = params.index_of(&condition.param) else { return false; };
+    let Some(index) = params.index_of(&condition.param) else {
+        return false;
+    };
     match params.value(index) {
         Some(ParamValue::Trigger(_)) => condition.op == CondOp::Trigger && pending[index],
         Some(ParamValue::Float(v)) => compare(v, condition.value.rt, condition.op),
@@ -43,19 +45,27 @@ impl Compiled {
     pub fn advance_transitions(&self, state: &mut GraphState, params: &Params) {
         state.apply(params);
         for (machine_index, machine) in self.graph.machines.iter().enumerate() {
-            let Some(index) = state.layers.iter().position(|l| l.machine == machine_index)
-                else { continue; };
+            let Some(index) = state.layers.iter().position(|l| l.machine == machine_index) else {
+                continue;
+            };
             let mut cursor = state.layers[index].clone();
             if let Some(fade) = &mut cursor.fade {
                 fade.elapsed = fade.elapsed.saturating_add(1);
-                if fade.elapsed >= fade.ticks { cursor.fade = None; }
+                if fade.elapsed >= fade.ticks {
+                    cursor.fade = None;
+                }
             }
             let current = &machine.states[cursor.state].name;
-            let winner = machine.transitions.iter().enumerate().filter(|(_, t)| {
-                (t.from == *current || t.from == WILDCARD)
-                    && t.exit_tick.is_none_or(|exit| cursor.clock >= exit)
-                    && t.when.iter().all(|c| matches(c, params, &state.pending))
-            }).min_by_key(|(order, t)| (t.from == WILDCARD, t.priority, *order));
+            let winner = machine
+                .transitions
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    (t.from == *current || t.from == WILDCARD)
+                        && t.exit_tick.is_none_or(|exit| cursor.clock >= exit)
+                        && t.when.iter().all(|c| matches(c, params, &state.pending))
+                })
+                .min_by_key(|(order, t)| (t.from == WILDCARD, t.priority, *order));
             if let Some((_, transition)) = winner {
                 for condition in &transition.when {
                     if condition.op == CondOp::Trigger {
@@ -63,16 +73,26 @@ impl Compiled {
                     }
                 }
                 cursor.fade = (transition.blend_ticks != 0).then_some(Crossfade {
-                    from: cursor.state, from_phase: cursor.phase,
-                    elapsed: 0, ticks: transition.blend_ticks,
+                    from: cursor.state,
+                    from_phase: cursor.phase,
+                    elapsed: 0,
+                    ticks: transition.blend_ticks,
                 });
-                cursor.state = machine.states.iter().position(|s| s.name == transition.to).unwrap();
+                cursor.state = machine
+                    .states
+                    .iter()
+                    .position(|s| s.name == transition.to)
+                    .unwrap();
                 cursor.clock = 0;
                 cursor.phase = 0.0;
             } else {
                 cursor.clock = cursor.clock.saturating_add(1);
             }
-            for layer in state.layers.iter_mut().filter(|l| l.machine == machine_index) {
+            for layer in state
+                .layers
+                .iter_mut()
+                .filter(|l| l.machine == machine_index)
+            {
                 *layer = cursor.clone();
             }
         }

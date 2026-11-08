@@ -194,7 +194,10 @@ fn clear_resets_the_tint_and_its_flag_only() {
     assert_eq!(cleared.tint_set, 0);
     assert_eq!(
         (cleared.tint, cleared.tint_set),
-        (InstanceExtra::default().tint, InstanceExtra::default().tint_set)
+        (
+            InstanceExtra::default().tint,
+            InstanceExtra::default().tint_set
+        )
     );
     assert_eq!(
         InstanceExtra {
@@ -216,7 +219,9 @@ fn clear_resets_the_tint_and_its_flag_only() {
 #[test]
 fn set_instance_tint_sets_the_flag() {
     let src = include_str!("../src/api/m15_animation.rs");
-    let at = src.find("js_name = setInstanceTint").expect("setInstanceTint");
+    let at = src
+        .find("js_name = setInstanceTint")
+        .expect("setInstanceTint");
     let body = &src[at..at + src[at..].find("js_name = setInstanceParams").unwrap()];
     assert!(body.contains("extra.tint_set = 1;"));
     let m20 = include_str!("../src/api/m20_player_tint.rs");

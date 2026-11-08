@@ -107,7 +107,9 @@ pub fn graph_value(graph: &Graph) -> JsonValue {
                 }
                 obj(fields)
             });
-            let exit = t.exit_tick.map_or(JsonValue::Null, |x| JsonValue::Number(x.into()));
+            let exit = t
+                .exit_tick
+                .map_or(JsonValue::Null, |x| JsonValue::Number(x.into()));
             obj(vec![
                 ("from", s(&t.from)),
                 ("to", s(&t.to)),
@@ -134,7 +136,13 @@ pub fn graph_value(graph: &Graph) -> JsonValue {
         ("blendSpaces", JsonValue::Array(spaces.collect())),
         ("layers", JsonValue::Array(layers.collect())),
         ("machines", JsonValue::Array(machines.collect())),
-        ("rootMotion", obj(vec![("bone", s(&root.bone)), ("mode", s(mode_name(root.mode)))])),
+        (
+            "rootMotion",
+            obj(vec![
+                ("bone", s(&root.bone)),
+                ("mode", s(mode_name(root.mode))),
+            ]),
+        ),
     ])
 }
 

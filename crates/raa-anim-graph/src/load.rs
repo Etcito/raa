@@ -34,7 +34,11 @@ impl Graph {
     }
 
     /// Load with index tables for runtime use; indices follow the supplied arrays.
-    pub fn load_resolved(text: &str, rig: &Rig, clips: &[Clip]) -> Out<(Self, validate::References)> {
+    pub fn load_resolved(
+        text: &str,
+        rig: &Rig,
+        clips: &[Clip],
+    ) -> Out<(Self, validate::References)> {
         Self::load_compiled(text, rig, clips).map(|c| (c.graph, c.references))
     }
 
@@ -53,7 +57,11 @@ impl Graph {
                 None => None,
             });
         }
-        Ok(Compiled { graph, references, triangulations })
+        Ok(Compiled {
+            graph,
+            references,
+            triangulations,
+        })
     }
 }
 

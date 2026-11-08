@@ -221,6 +221,7 @@ impl SkinVertexKernel {
 
     /// Dispatch one posed instance: vertices first, then edges when a segment buffer is
     /// bound, so every endpoint comes from that instance's freshly posed stream 0.
+    #[allow(clippy::too_many_arguments)] // Explicit GPU resources at the dispatch boundary.
     pub fn dispatch(
         &self,
         gpu: &GpuContext,

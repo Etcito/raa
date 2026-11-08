@@ -20,7 +20,13 @@ fn rig(limits: &str) -> Rig {
 }
 
 fn chain(solver: ChainSolver, bones: &[usize]) -> IkChain {
-    IkChain { name: "arm".into(), solver, bones: bones.to_vec(), pole: None, iterations: 16 }
+    IkChain {
+        name: "arm".into(),
+        solver,
+        bones: bones.to_vec(),
+        pole: None,
+        iterations: 16,
+    }
 }
 
 fn rest(rig: &Rig) -> IkPose<'_> {
@@ -98,7 +104,11 @@ fn look_at_full_and_capped() {
     assert!((head_axis(&ik) - Vec3::X).length() < 1e-4);
     let mut ik = rest(&rig);
     look_at(&mut ik, 5, [3.0, 0.0, 0.0], [0.0, 0.0, 1.0], 30.0).unwrap();
-    let deg = head_axis(&ik).dot(Vec3::Z).clamp(-1.0, 1.0).acos().to_degrees();
+    let deg = head_axis(&ik)
+        .dot(Vec3::Z)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
     assert!((deg - 30.0).abs() < 1e-2, "{deg}");
     assert_eq!(ik.pose().local[1], rest(&rig).pose().local[1]);
 }
@@ -123,12 +133,22 @@ fn look_at_degeneracies_are_finite() {
     assert_eq!(ik.pose(), rest(&rig).pose());
     // Opposite direction: capped turn is deterministic and finite.
     look_at(&mut ik, 5, [2.0, 0.0, -5.0], [0.0, 0.0, 1.0], 45.0).unwrap();
-    let deg = head_axis(&ik).dot(Vec3::Z).clamp(-1.0, 1.0).acos().to_degrees();
+    let deg = head_axis(&ik)
+        .dot(Vec3::Z)
+        .clamp(-1.0, 1.0)
+        .acos()
+        .to_degrees();
     assert!((deg - 45.0).abs() < 1e-2, "{deg}");
     let mut full = rest(&rig);
     look_at(&mut full, 5, [2.0, 0.0, -5.0], [0.0, 0.0, 1.0], 180.0).unwrap();
     assert!((head_axis(&full) + Vec3::Z).length() < 1e-3);
     let mut reach = rest(&rig);
-    hand_reach(&mut reach, &chain(ChainSolver::Fabrik, &ARM), [0.0, 1.0, 0.0], 1.0).unwrap();
+    hand_reach(
+        &mut reach,
+        &chain(ChainSolver::Fabrik, &ARM),
+        [0.0, 1.0, 0.0],
+        1.0,
+    )
+    .unwrap();
     tip(&reach);
 }
