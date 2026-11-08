@@ -7,17 +7,19 @@
 
 mod composer;
 mod error;
+mod gpu_constants;
 mod ids;
 mod registry;
 
 pub use composer::{Composer, SlotProvider};
 pub use error::ShaderError;
+pub use gpu_constants::*;
 pub use ids::{MaterialFnId, PassKind, SlotId, VariantKey};
 pub use registry::{MaterialFnEntry, MaterialFnRegistry};
 
 /// S10 structs and bindings of groups 0-1, S11 material structs, flag constants,
 /// `raa_default_output` and the tint helper.
-pub const PRELUDE_WGSL: &str = include_str!("wgsl/prelude.wgsl");
+pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.wgsl"));
 /// S11 helper library (`raa_hash3`, `raa_noise3`, `raa_fbm3`, `raa_voronoi3`,
 /// `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`).
 pub const LIB_WGSL: &str = include_str!("wgsl/lib.wgsl");
