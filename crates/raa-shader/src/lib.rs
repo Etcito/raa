@@ -346,7 +346,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
         let mut layouter = naga::proc::Layouter::default();
         layouter.update(m.to_ctx()).expect("layout");
         for (name, size) in [
-            ("FrameGpu", 512),
+            ("FrameGpu", FRAME_GPU_SIZE as u32),
             ("SurfaceMaterialGpu", 256),
             ("InstanceExtraGpu", 128),
             ("RaaInstanceGpu", 128),
@@ -360,6 +360,70 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
                 .find(|(_, t)| t.name.as_deref() == Some(name))
                 .expect(name);
             assert_eq!(layouter[h].size, size, "{name}");
+        }
+        let (frame, _) = m
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("FrameGpu"))
+            .expect("FrameGpu");
+        let naga::TypeInner::Struct { members, span } = &m.types[frame].inner else {
+            panic!("FrameGpu is a struct");
+        };
+        assert_eq!(*span as usize, FRAME_GPU_SIZE);
+        let member_kind = |ty: naga::Handle<naga::Type>| match &m.types[ty].inner {
+            naga::TypeInner::Matrix {
+                columns: naga::VectorSize::Quad,
+                rows: naga::VectorSize::Quad,
+                scalar,
+            } if scalar.width == 4 && scalar.kind == naga::ScalarKind::Float => "mat4x4<f32>",
+            naga::TypeInner::Vector {
+                size: naga::VectorSize::Quad,
+                scalar,
+            } if scalar.width == 4 && scalar.kind == naga::ScalarKind::Float => "vec4<f32>",
+            naga::TypeInner::Vector {
+                size: naga::VectorSize::Quad,
+                scalar,
+            } if scalar.width == 4 && scalar.kind == naga::ScalarKind::Uint => "vec4<u32>",
+            naga::TypeInner::Array {
+                base, stride: 16, ..
+            } if m.types[*base].inner
+                == (naga::TypeInner::Vector {
+                    size: naga::VectorSize::Quad,
+                    scalar: naga::Scalar::F32,
+                }) =>
+            {
+                "array<vec4>"
+            }
+            _ => "other",
+        };
+        for (name, offset, kind) in [
+            ("view_proj", 0, "mat4x4<f32>"),
+            ("view", 64, "mat4x4<f32>"),
+            ("proj", 128, "mat4x4<f32>"),
+            ("inv_proj", 192, "mat4x4<f32>"),
+            ("inv_view", 256, "mat4x4<f32>"),
+            ("camera_pos", 320, "vec4<f32>"),
+            ("sun_dir", 336, "vec4<f32>"),
+            ("sun_color", 352, "vec4<f32>"),
+            ("ambient", 368, "vec4<f32>"),
+            ("viewport", 384, "vec4<f32>"),
+            ("clip", 400, "vec4<f32>"),
+            ("flags", 416, "vec4<u32>"),
+            ("exposure", 432, "vec4<f32>"),
+            ("reserved", 448, "array<vec4>"),
+            ("previous_view_proj", 512, "mat4x4<f32>"),
+            ("unjittered_view_proj", 576, "mat4x4<f32>"),
+            ("camera_jitter", 640, "vec4<f32>"),
+            ("light_info", 656, "vec4<u32>"),
+            ("temporal", 672, "vec4<u32>"),
+            ("reserved2", 688, "array<vec4>"),
+        ] {
+            let member = members
+                .iter()
+                .find(|x| x.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("FrameGpu.{name}"));
+            assert_eq!(member.offset, offset, "FrameGpu.{name} offset");
+            assert_eq!(member_kind(member.ty), kind, "FrameGpu.{name} type");
         }
     }
 }

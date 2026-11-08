@@ -40,7 +40,7 @@ mod binding {
     use crate::{convert::api_error, engine::Engine, state::EngineState};
     use js_sys::{Float32Array, Object, Reflect, Uint8Array};
     use raa_core::RaaError;
-    use raa_sdf_trace::{TraceError, TraceHandle, target_size};
+    use raa_sdf_trace::{FRAME_BYTES, TraceError, TraceHandle, target_size};
     use wasm_bindgen::prelude::*;
 
     fn trace_error(error: TraceError) -> RaaError {
@@ -71,8 +71,9 @@ mod binding {
         }
         camera.set_viewport(size.0, size.1);
         let original = std::mem::replace(&mut st.scene.camera, camera);
+        let mut frame = [0u8; raa_lit::FRAME_GPU_SIZE];
         let result = raa_lit::write_frame_gpu(
-            &mut handle.borrow_mut().frame,
+            &mut frame,
             &st.scene,
             &raa_lit::FrameParams {
                 viewport: size,
@@ -80,6 +81,12 @@ mod binding {
             },
         );
         st.scene.camera = original;
+        if result.is_ok() {
+            handle
+                .borrow_mut()
+                .frame
+                .copy_from_slice(&frame[..FRAME_BYTES]);
+        }
         result
     }
 

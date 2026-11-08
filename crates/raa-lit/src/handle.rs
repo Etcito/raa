@@ -180,7 +180,7 @@ fn palette_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
     }]
 }
 
-/// S10 group 0: binding 0 `FrameGpu` uniform (512 B), binding 1 `array<SurfaceMaterialGpu>`
+/// S10 group 0: binding 0 `FrameGpu` uniform (`FRAME_GPU_SIZE`), binding 1 `array<SurfaceMaterialGpu>`
 /// and binding 2 `array<InstanceExtraGpu>`, both read-only storage; 3, 4, 5 the material
 /// texture atlas, its sampler and rects; 6 the material data words (read-only storage);
 /// 7 the persistent instance records (read-only storage).
@@ -373,7 +373,7 @@ pub(crate) struct LitShared {
     slots_hash: u64,
     /// Compacted u32 instance ids, 5 sections of `max_instances` (camera + cascades).
     pub(crate) id_buffer: wgpu::Buffer,
-    /// `FrameGpu`, 512 B.
+    /// `FrameGpu`, `FRAME_GPU_SIZE` bytes.
     frame_buffer: wgpu::Buffer,
     /// `SurfaceMaterialGpu` array, `max_materials` x 256 B.
     material_buffer: wgpu::Buffer,
@@ -1218,7 +1218,7 @@ impl LitHandle {
         self.shared.borrow().id_buffer.clone()
     }
 
-    /// The S10 group-0 layout: `FrameGpu` uniform (512 B), `array<SurfaceMaterialGpu>`,
+    /// The S10 group-0 layout: `FrameGpu` uniform (`FRAME_GPU_SIZE`), `array<SurfaceMaterialGpu>`,
     /// `array<InstanceExtraGpu>` and `array<RaaInstanceGpu>` read-only storage, then the
     /// material texture atlas (`texture_2d<f32>`), its filtering sampler and
     /// `array<vec4<f32>>` rects, and the material data words.
@@ -1580,7 +1580,7 @@ mod tests {
         assert_eq!(
             sizes,
             [
-                (0, true, Some(512)),
+                (0, true, Some(FRAME_GPU_SIZE as u64)),
                 (1, false, Some(256)),
                 (2, false, Some(128))
             ]

@@ -15,6 +15,15 @@ struct FrameGpu {
     flags: vec4<u32>,
     exposure: vec4<f32>,
     reserved: array<vec4<f32>, 4>,
+    previous_view_proj: mat4x4<f32>,
+    unjittered_view_proj: mat4x4<f32>,
+    // Current NDC xy followed by previous NDC xy; zero when no consumer requests jitter.
+    camera_jitter: vec4<f32>,
+    // Active light count, tile columns, tile rows and tile stride in words.
+    light_info: vec4<u32>,
+    // Frame parity, accumulation enabled (0/1), history valid (0/1), reserved zero.
+    temporal: vec4<u32>,
+    reserved2: array<vec4<f32>, 5>,
 }
 
 struct SurfaceMaterialGpu {
