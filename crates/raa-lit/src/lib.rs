@@ -28,6 +28,7 @@ mod material_data;
 mod meshes;
 mod passes;
 mod prep;
+mod previous_instances;
 mod renderer;
 mod select;
 pub mod skin_bounds;
