@@ -13,7 +13,7 @@ mod targets;
 pub use env::EnvGpu;
 pub use lighting::LightingResources;
 pub use pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
-pub use pipeline::{Pipeline, PipelineConfig};
+pub use pipeline::{Pipeline, PipelineConfig, SubmissionState};
 pub use targets::{HdrChain, Targets};
 
 /// Format of the HDR chain, the opaque copy, bloom and the env cube (HDR_FORMAT).

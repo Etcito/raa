@@ -372,6 +372,76 @@ impl Clock {
 /// Uploads a view's camera and scene immediately before that view is recorded.
 pub type ViewPrepare = dyn FnMut(&GpuContext, usize, (u32, u32)) -> Result<(), RaaError>;
 
+/// Viewport slots a scene invocation observes, one bit per slot (M2-SUBMISSION-OBSERVATIONS).
+const SUBMISSION_VIEWS: usize = 4;
+
+/// The bit of `view` in [`SubmissionState`]'s masks; views outside 0..4 contribute none.
+fn view_bit(view: usize) -> u8 {
+    if view < SUBMISSION_VIEWS {
+        1 << view
+    } else {
+        0
+    }
+}
+
+/// What the pipeline observed while recording one scene invocation
+/// (M2-SUBMISSION-OBSERVATIONS). Bit `i` denotes viewport `i`, indices 0..3.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SubmissionState {
+    /// Views whose commands were passed to an intermediate `queue().submit` inside
+    /// `record_views`, so they are already submitted even though the invocation is not.
+    pub submitted_mask: u8,
+    /// Successfully recorded views in the final encoder; the engine acknowledges these only
+    /// after the final command buffer was actually submitted at runtime.
+    pub pending_mask: u8,
+    /// A recording error happened: the final encoder is not submitted and nothing pending may
+    /// be acknowledged. Intermediate submissions above remain real.
+    pub record_failed: bool,
+}
+
+/// The event tracker behind [`SubmissionState`]: device-free and allocation-free.
+#[derive(Clone, Copy, Debug, Default)]
+struct ViewSubmission {
+    state: SubmissionState,
+    /// The last successfully recorded view awaiting the next intermediate submit.
+    last_recorded: Option<usize>,
+}
+
+impl ViewSubmission {
+    /// Clears the observation before one scene invocation, keeping no state.
+    fn begin(&mut self) {
+        *self = Self::default();
+    }
+
+    fn state(&self) -> SubmissionState {
+        self.state
+    }
+
+    /// A view was recorded into the current encoder: it is pending until that encoder is
+    /// submitted.
+    fn recorded(&mut self, view: usize) {
+        self.state.pending_mask |= view_bit(view);
+        self.last_recorded = Some(view);
+    }
+
+    /// The current encoder was submitted: the view it holds moves from pending to submitted.
+    fn intermediate_submitted(&mut self) {
+        let Some(view) = self.last_recorded.take() else {
+            return;
+        };
+        let bit = view_bit(view);
+        self.state.pending_mask &= !bit;
+        self.state.submitted_mask |= bit;
+    }
+
+    /// A recording error means the final encoder is never submitted: pending becomes invalid.
+    fn failed(&mut self) {
+        self.state.record_failed = true;
+        self.state.pending_mask = 0;
+        self.last_recorded = None;
+    }
+}
+
 /// The lit renderer's pass pipeline: feature passes and contributor entries (configured
 /// through [`PipelineConfig`]), the group-1 lighting resources, the surface-sized targets and
 /// the frame time. `install` runs it as the one `raa.pipeline` frame graph pass.
@@ -391,6 +461,7 @@ pub struct Pipeline {
     view_prepare: Option<Box<ViewPrepare>>,
     view_passes: Vec<PipelineConfig>,
     view_generations: Vec<u64>,
+    submission: ViewSubmission,
     output: Option<crate::output::Output>,
 }
 
@@ -415,8 +486,21 @@ impl Pipeline {
             view_prepare: None,
             view_passes: Vec::new(),
             view_generations: Vec::new(),
+            submission: ViewSubmission::default(),
             output: None,
         }
+    }
+
+    /// Clears the submission observation before one scene invocation's record. The engine
+    /// surrounds a render invocation with this call and [`Self::scene_submission`].
+    pub fn begin_scene_submission(&mut self) {
+        self.submission.begin();
+    }
+
+    /// The submission observation of the current scene invocation
+    /// (M2-SUBMISSION-OBSERVATIONS). Bit `i` denotes viewport `i`, indices 0..3.
+    pub fn scene_submission(&self) -> SubmissionState {
+        self.submission.state()
     }
 
     /// Configure ordered pixel rectangles. Empty retains the legacy single-view path.
@@ -560,8 +644,24 @@ impl Pipeline {
         this: &Rc<RefCell<Pipeline>>,
         ctx: &mut RecordContext<'_>,
     ) -> Result<(), RaaError> {
+        let result = Self::record_views_observed(this, ctx);
+        if result.is_err() {
+            // The final encoder is not submitted after a record failure, so no pending view
+            // can be acknowledged; intermediate submits above remain real.
+            this.borrow_mut().submission.failed();
+        }
+        result
+    }
+
+    fn record_views_observed(
+        this: &Rc<RefCell<Pipeline>>,
+        ctx: &mut RecordContext<'_>,
+    ) -> Result<(), RaaError> {
         if this.borrow().view_rects.is_empty() {
-            return this.borrow_mut().record_single(ctx, false);
+            let mut pipeline = this.borrow_mut();
+            pipeline.record_single(ctx, false)?;
+            pipeline.submission.recorded(0);
+            return Ok(());
         }
         let backbuffer = ctx.view(BACKBUFFER)?;
         {
@@ -594,6 +694,8 @@ impl Pipeline {
                 let next = ctx.gpu.device().create_command_encoder(&Default::default());
                 let previous = std::mem::replace(ctx.encoder, next);
                 ctx.gpu.queue().submit([previous.finish()]);
+                // Only a view whose commands went into that submission counts as submitted.
+                this.borrow_mut().submission.intermediate_submitted();
             }
             let size = (rect[2], rect[3]);
             let mut prepare = {
@@ -652,6 +754,7 @@ impl Pipeline {
             p.swap_view_passes(i);
             std::mem::swap(&mut p.targets, &mut p.view_targets[i]);
             result?;
+            p.submission.recorded(i);
         }
         Ok(())
     }
@@ -814,6 +917,188 @@ mod tests {
             assert!(!err.message().is_empty());
         }
     }
+    fn submission(submitted: u8, pending: u8, failed: bool) -> SubmissionState {
+        SubmissionState {
+            submitted_mask: submitted,
+            pending_mask: pending,
+            record_failed: failed,
+        }
+    }
+
+    #[test]
+    fn submission_without_recorded_views_is_empty() {
+        let mut views = ViewSubmission::default();
+        views.begin();
+        assert_eq!(views.state(), submission(0, 0, false));
+    }
+
+    #[test]
+    fn submission_one_view_is_pending_for_the_runtime() {
+        let mut views = ViewSubmission::default();
+        views.begin();
+        views.recorded(0);
+        assert_eq!(views.state(), submission(0, 0b0001, false));
+    }
+
+    #[test]
+    fn submission_multiple_views_submit_all_but_the_last() {
+        let mut views = ViewSubmission::default();
+        views.begin();
+        views.recorded(0);
+        views.intermediate_submitted();
+        views.recorded(1);
+        views.intermediate_submitted();
+        views.recorded(2);
+        assert_eq!(views.state(), submission(0b0011, 0b0100, false));
+    }
+
+    #[test]
+    fn submission_skipped_views_contribute_no_bit() {
+        let mut views = ViewSubmission::default();
+        views.begin();
+        views.recorded(0);
+        views.intermediate_submitted();
+        // view 1 is zero-sized: record_views skips it without recording or submitting it.
+        views.recorded(3);
+        assert_eq!(views.state(), submission(0b0001, 0b1000, false));
+        assert_eq!(view_bit(4), 0, "only viewport indices 0..3 have a bit");
+    }
+
+    #[test]
+    fn submission_failure_after_an_intermediate_submit_keeps_it_submitted() {
+        let mut views = ViewSubmission::default();
+        views.begin();
+        views.recorded(0);
+        views.intermediate_submitted();
+        views.recorded(1);
+        views.failed();
+        assert_eq!(views.state(), submission(0b0001, 0, true));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    const SUBMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_software_gpu(test: &str, run: impl FnOnce(&GpuContext)) {
+        use raa_core::testing::{skip, software_gpu};
+        let Some(gpu) = software_gpu() else {
+            skip(
+                test,
+                "software_gpu returned None; see the software_gpu line above",
+            );
+            return;
+        };
+        run(&gpu);
+    }
+
+    /// Records one scene invocation through the installed `raa.pipeline` pass and submits
+    /// the final encoder, as the engine does around `record_views`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn execute_scene(pipeline: &Rc<RefCell<Pipeline>>, gpu: &GpuContext) -> Result<(), RaaError> {
+        let target = raa_core::OffscreenTarget::new(gpu, 32, 16, SUBMISSION_FORMAT);
+        let mut graph = FrameGraph::new(SUBMISSION_FORMAT);
+        Pipeline::install(pipeline, &mut graph);
+        graph.compile()?;
+        let commands = graph.execute(gpu, target.view(), target.size())?;
+        gpu.queue().submit([commands]);
+        Ok(())
+    }
+
+    /// A pass whose second record call fails, to provoke a partial recording failure.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct FailOnSecondRecord(Rc<Cell<u32>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl FeaturePass for FailOnSecondRecord {
+        fn name(&self) -> &str {
+            "submission.failing"
+        }
+
+        fn order(&self) -> u32 {
+            60
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            let calls = self.0.get() + 1;
+            self.0.set(calls);
+            if calls == 2 {
+                return Err(RaaError::Gpu("mock record failure".into()));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn submission_gpu_single_view_is_pending() {
+        with_software_gpu("submission_gpu_single_view_is_pending", |gpu| {
+            let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, SUBMISSION_FORMAT, false)));
+            pipeline.borrow_mut().begin_scene_submission();
+            execute_scene(&pipeline, gpu).expect("legacy frame runs");
+            assert_eq!(
+                pipeline.borrow().scene_submission(),
+                submission(0, 0b0001, false)
+            );
+        });
+    }
+
+    #[test]
+    fn submission_gpu_multiple_views_observe_intermediate_submits() {
+        with_software_gpu(
+            "submission_gpu_multiple_views_observe_intermediate_submits",
+            |gpu| {
+                let rects = [[0, 0, 8, 8], [8, 0, 8, 8], [16, 0, 8, 8]];
+                let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, SUBMISSION_FORMAT, false)));
+                pipeline.borrow_mut().begin_scene_submission();
+                pipeline.borrow_mut().set_view_rects(&rects);
+                execute_scene(&pipeline, gpu).expect("multi-view frame runs");
+                assert_eq!(
+                    pipeline.borrow().scene_submission(),
+                    submission(0b0011, 0b0100, false)
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn submission_gpu_skipped_view_contributes_no_bit() {
+        with_software_gpu("submission_gpu_skipped_view_contributes_no_bit", |gpu| {
+            let rects = [[0, 0, 8, 8], [8, 0, 0, 8], [16, 0, 8, 8]];
+            let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, SUBMISSION_FORMAT, false)));
+            pipeline.borrow_mut().begin_scene_submission();
+            pipeline.borrow_mut().set_view_rects(&rects);
+            execute_scene(&pipeline, gpu).expect("skipping frame runs");
+            assert_eq!(
+                pipeline.borrow().scene_submission(),
+                submission(0b0001, 0b0100, false)
+            );
+        });
+    }
+
+    #[test]
+    fn submission_gpu_failure_after_intermediate_submit_keeps_it_submitted() {
+        with_software_gpu(
+            "submission_gpu_failure_after_intermediate_submit_keeps_it_submitted",
+            |gpu| {
+                let rects = [[0, 0, 8, 8], [8, 0, 8, 8], [16, 0, 8, 8]];
+                let mut pipeline = Pipeline::new(gpu, SUBMISSION_FORMAT, false);
+                let calls = Rc::new(Cell::new(0));
+                pipeline
+                    .add(Box::new(FailOnSecondRecord(Rc::clone(&calls))))
+                    .expect("added");
+                pipeline.set_view_rects(&rects);
+                let pipeline = Rc::new(RefCell::new(pipeline));
+                pipeline.borrow_mut().begin_scene_submission();
+                let error = execute_scene(&pipeline, gpu).expect_err("view 1 record fails");
+                assert_eq!(error.message(), "mock record failure");
+                assert_eq!(
+                    pipeline.borrow().scene_submission(),
+                    submission(0b0001, 0, true),
+                    "view 0 was submitted, view 1 failed before pending was set"
+                );
+            },
+        );
+    }
+
     #[test]
     fn display_overlays_follow_tonemap_but_hdr_passes_cannot() {
         assert!(
