@@ -1,7 +1,5 @@
 //! S10 previous affine records, indexed by the existing scene instance slot per submesh.
 //! This encoding is independent of the live binding-7 instance record.
-#![allow(dead_code)] // Encoding lands before the lifecycle and binding consumers.
-
 use raa_math::Mat4;
 
 const RECORD_BYTES: usize = 64;
@@ -32,31 +30,136 @@ pub(crate) fn write_previous_record(out: &mut [u8; 64], model: &Mat4, valid: boo
 /// are attached through `lib.rs`; the binding share initializes binding 8 from `bytes()`
 /// and preserves binding 7. Capacity comes from the existing instance store, in records.
 ///
-/// Handoff: the lifecycle share extends this type in this file with
-/// `ensure(&mut self, capacity: u32) -> bool`,
-/// `stage(&mut self, slot: u32, model: &Mat4, history_supported: bool) -> ()`,
-/// `clear(&mut self, slot: u32) -> ()`, `submitted(&mut self, slot: u32) -> ()`,
-/// `finish_frame(&mut self) -> ()` and
-/// `upload(&mut self, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> u64`.
-/// InstanceStore passes its existing live slots to ensure/stage/clear. LitShared recreates
-/// the buffer only on ensure growth and uses bytes/upload. The renderer share acknowledges
-/// submitted slots using submitted, then finish_frame once after all views; committed
-/// records stay frozen across views. These lifecycle methods belong to the next share.
+/// Handoff: `PreviousInstances::ensure(&mut self, capacity: u32) -> bool`,
+/// `PreviousInstances::stage(&mut self, slot: u32, model: &Mat4, history_supported: bool)`,
+/// `PreviousInstances::submitted(&mut self, slot: u32)`, and
+/// `PreviousInstances::finish_frame(&mut self)` in `crates/raa-lit/src/previous_instances.rs`
+/// are attached by `InstanceStore::sync` and its crate-visible forwarding methods in
+/// `crates/raa-lit/src/instance_store.rs`. The registry is the existing scene-instance
+/// slot (`InstanceId::index()`), one slot per submesh; draw order is not a key.
 #[derive(Clone, Debug)]
 pub(crate) struct PreviousInstances {
     records: Vec<u8>,
+    staged: Vec<[u8; RECORD_BYTES]>,
+    pending: Vec<bool>,
+    submitted: Vec<bool>,
+    dirty_pages: Vec<bool>,
 }
 
 impl PreviousInstances {
     pub(crate) fn new(capacity: u32) -> Self {
         let pages = (capacity as usize).div_ceil(PAGE_RECORDS);
+        let slots = pages * PAGE_RECORDS;
         Self {
-            records: vec![0; pages * PAGE_RECORDS * RECORD_BYTES],
+            records: vec![0; slots * RECORD_BYTES],
+            staged: vec![[0; RECORD_BYTES]; slots],
+            pending: vec![false; slots],
+            submitted: vec![false; slots],
+            dirty_pages: vec![false; pages],
+        }
+    }
+
+    /// Grows by 32-record pages, preserving all existing records.
+    pub(crate) fn ensure(&mut self, capacity: u32) -> bool {
+        let pages = (capacity as usize).div_ceil(PAGE_RECORDS);
+        if pages <= self.dirty_pages.len() {
+            return false;
+        }
+        let slots = pages * PAGE_RECORDS;
+        self.records.resize(slots * RECORD_BYTES, 0);
+        self.staged.resize(slots, [0; RECORD_BYTES]);
+        self.pending.resize(slots, false);
+        self.submitted.resize(slots, false);
+        self.dirty_pages.resize(pages, true);
+        self.dirty_pages.fill(true);
+        true
+    }
+
+    /// Stages this frame's model without replacing valid committed history.
+    pub(crate) fn stage(&mut self, slot: u32, model: &Mat4, history_supported: bool) {
+        let i = slot as usize;
+        if i >= self.staged.len() {
+            return;
+        }
+        write_previous_record(&mut self.staged[i], model, history_supported);
+        self.pending[i] = true;
+        let offset = i * RECORD_BYTES;
+        let valid =
+            u32::from_le_bytes(self.records[offset + 48..offset + 52].try_into().unwrap()) != 0;
+        if !history_supported || !valid {
+            let mut record = [0; RECORD_BYTES];
+            write_previous_record(&mut record, model, false);
+            self.write_record(i, &record);
+        }
+    }
+
+    /// Immediately invalidates a removed or reused slot.
+    pub(crate) fn clear(&mut self, slot: u32) {
+        let i = slot as usize;
+        if i >= self.pending.len() {
+            return;
+        }
+        self.pending[i] = false;
+        self.submitted[i] = false;
+        self.staged[i] = [0; RECORD_BYTES];
+        self.write_record(i, &[0; RECORD_BYTES]);
+    }
+
+    /// Marks a staged slot as participating in the submitted frame.
+    pub(crate) fn submitted(&mut self, slot: u32) {
+        if let Some(value) = self.submitted.get_mut(slot as usize) {
+            *value = true;
+        }
+    }
+
+    /// Commits submitted slots and schedules the next-frame catch-up upload.
+    pub(crate) fn finish_frame(&mut self) {
+        for i in 0..self.submitted.len() {
+            if self.submitted[i] && self.pending[i] {
+                let record = self.staged[i];
+                self.write_record(i, &record);
+            }
+            self.submitted[i] = false;
+            self.pending[i] = false;
         }
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.records
+    }
+
+    /// Uploads adjacent dirty pages as one queue write and returns bytes written.
+    #[allow(dead_code)] // Consumed by the binding-8 buffer owner in the next share.
+    pub(crate) fn upload(&mut self, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> u64 {
+        let page_bytes = PAGE_RECORDS * RECORD_BYTES;
+        let mut written = 0;
+        let mut page = 0;
+        while page < self.dirty_pages.len() {
+            if !self.dirty_pages[page] {
+                page += 1;
+                continue;
+            }
+            let start = page;
+            page += 1;
+            while page < self.dirty_pages.len() && self.dirty_pages[page] {
+                page += 1;
+            }
+            let begin = start * page_bytes;
+            let end = page * page_bytes;
+            queue.write_buffer(buffer, begin as u64, &self.records[begin..end]);
+            written += (end - begin) as u64;
+            self.dirty_pages[start..page].fill(false);
+        }
+        written
+    }
+
+    fn write_record(&mut self, slot: usize, record: &[u8; RECORD_BYTES]) {
+        let begin = slot * RECORD_BYTES;
+        if self.records[begin..begin + RECORD_BYTES] == record[..] {
+            return;
+        }
+        self.records[begin..begin + RECORD_BYTES].copy_from_slice(record);
+        self.dirty_pages[slot / PAGE_RECORDS] = true;
     }
 }
 
@@ -122,6 +225,98 @@ mod tests {
         assert_eq!(&record[28..32], &[0, 0, 0, 192]);
         assert_eq!(&record[44..48], &[0, 0, 0, 63]);
         assert_eq!(&record[48..64], &[0; 16]);
+    }
+
+    fn valid(store: &PreviousInstances, slot: usize) -> u32 {
+        u32::from_le_bytes(
+            store.records[slot * 64 + 48..slot * 64 + 52]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    fn tx(store: &PreviousInstances, slot: usize) -> f32 {
+        f32::from_le_bytes(
+            store.records[slot * 64 + 12..slot * 64 + 16]
+                .try_into()
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn new_reused_slots_and_submeshes_have_independent_history() {
+        let mut store = PreviousInstances::new(3);
+        let one = Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0));
+        let two = Mat4::from_translation(Vec3::new(2.0, 0.0, 0.0));
+        store.stage(0, &one, true);
+        store.stage(1, &two, true);
+        assert_eq!((valid(&store, 0), valid(&store, 1)), (0, 0));
+        store.submitted(0);
+        store.submitted(1);
+        store.finish_frame();
+        assert_eq!((valid(&store, 0), valid(&store, 1)), (1, 1));
+        store.clear(0);
+        assert_eq!(valid(&store, 0), 0);
+        store.stage(0, &two, true);
+        assert_eq!(valid(&store, 0), 0);
+        assert_eq!(tx(&store, 0), 2.0);
+        assert_eq!(tx(&store, 1), 2.0);
+    }
+
+    #[test]
+    fn reorder_and_partial_submission_commit_only_participants() {
+        let mut store = PreviousInstances::new(2);
+        let a = Mat4::from_translation(Vec3::new(3.0, 0.0, 0.0));
+        let b = Mat4::from_translation(Vec3::new(7.0, 0.0, 0.0));
+        store.stage(0, &a, true);
+        store.stage(1, &b, true);
+        store.submitted(0);
+        store.submitted(1);
+        store.finish_frame();
+        store.dirty_pages.fill(false);
+
+        let moved_a = Mat4::from_translation(Vec3::new(4.0, 0.0, 0.0));
+        let moved_b = Mat4::from_translation(Vec3::new(8.0, 0.0, 0.0));
+        // A draw-list reorder changes traversal order only; slot identity remains stable.
+        store.stage(1, &moved_b, true);
+        store.stage(0, &moved_a, true);
+        assert_eq!((tx(&store, 0), tx(&store, 1)), (3.0, 7.0));
+        store.submitted(0);
+        store.finish_frame();
+        assert_eq!((tx(&store, 0), tx(&store, 1)), (4.0, 7.0));
+        assert_eq!((valid(&store, 0), valid(&store, 1)), (1, 1));
+        assert!(store.dirty_pages[0]);
+        store.dirty_pages.fill(false);
+        store.stage(0, &moved_a, true);
+        store.submitted(0);
+        store.finish_frame();
+        assert!(store.dirty_pages.iter().all(|dirty| !dirty));
+    }
+
+    #[test]
+    fn unsupported_history_growth_and_motion_catch_up() {
+        let mut store = PreviousInstances::new(1);
+        let initial = Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0));
+        store.stage(0, &initial, false);
+        store.submitted(0);
+        store.finish_frame();
+        assert_eq!(valid(&store, 0), 0);
+        assert!(store.ensure(33));
+        assert_eq!(store.bytes().len(), 64 * 64);
+        assert_eq!(tx(&store, 0), 1.0);
+
+        let moved = Mat4::from_translation(Vec3::new(9.0, 0.0, 0.0));
+        store.stage(0, &moved, true);
+        assert_eq!(valid(&store, 0), 0);
+        store.submitted(0);
+        store.finish_frame();
+        assert_eq!(valid(&store, 0), 1);
+        assert_eq!(tx(&store, 0), 9.0);
+        store.dirty_pages.fill(false);
+        store.stage(0, &moved, true);
+        store.submitted(0);
+        store.finish_frame();
+        assert!(store.dirty_pages.iter().all(|dirty| !dirty));
     }
 
     #[test]

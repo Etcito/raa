@@ -16,6 +16,7 @@ use raa_scene::RenderList;
 
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::prep::INSTANCE_GPU_SIZE;
+use crate::previous_instances::PreviousInstances;
 
 /// Records per dirty page.
 const PAGE_RECORDS: usize = 32;
@@ -66,6 +67,9 @@ pub struct InstanceStore {
     dirty_extras: Vec<bool>,
     scratch: Vec<u8>,
     last_uploaded: u64,
+    previous: PreviousInstances,
+    live_slots: Vec<bool>,
+    live_scratch: Vec<bool>,
 }
 
 impl InstanceStore {
@@ -81,6 +85,9 @@ impl InstanceStore {
             dirty_extras: vec![false; pages],
             scratch: Vec::with_capacity(INSTANCE_EXTRA_GPU_SIZE),
             last_uploaded: 0,
+            previous: PreviousInstances::new(capacity),
+            live_slots: vec![false; pages * PAGE_RECORDS],
+            live_scratch: vec![false; pages * PAGE_RECORDS],
         }
     }
 
@@ -102,6 +109,7 @@ impl InstanceStore {
             capacity = capacity.saturating_mul(2);
         }
         self.capacity = capacity;
+        self.previous.ensure(capacity);
         let len = pages_for(capacity) * PAGE_RECORDS * INSTANCE_GPU_SIZE;
         self.instances.resize(len, 0);
         self.extras.resize(len, 0);
@@ -110,6 +118,10 @@ impl InstanceStore {
         self.dirty_extras.resize(pages, true);
         self.dirty_instances.fill(true);
         self.dirty_extras.fill(true);
+        self.live_slots
+            .resize(pages_for(capacity) * PAGE_RECORDS, false);
+        self.live_scratch
+            .resize(pages_for(capacity) * PAGE_RECORDS, false);
         true
     }
 
@@ -165,6 +177,13 @@ impl InstanceStore {
     /// tag without an entry in `extras` gets `InstanceExtra::default()`.
     /// `palette_base(tag)` supplies the skin palette base (0 when not posed). Unchanged
     /// bytes leave their page clean.
+    ///
+    /// Handoff: `InstanceStore::sync(&mut self, list: &RenderList, tags: &[u32], slots: &[u32], extras: &HashMap<u32, InstanceExtra>, palette_base: &dyn Fn(u32) -> u32) -> ()`
+    /// in `crates/raa-lit/src/instance_store.rs` attaches `PreviousInstances::stage` and
+    /// `clear`; `ensure` grows both mirrors, and `previous_bytes`/`upload_previous` expose
+    /// the record bytes and dirty upload to LitShared. Renderer preparation calls
+    /// `previous_submitted` then `finish_previous_frame`. All methods pass the existing
+    /// scene instance slot (`InstanceId::index()`), one per submesh, as the registry key.
     pub fn sync(
         &mut self,
         list: &RenderList,
@@ -174,6 +193,7 @@ impl InstanceStore {
         palette_base: &dyn Fn(u32) -> u32,
     ) {
         let mut record = [0u8; INSTANCE_GPU_SIZE];
+        self.live_scratch.fill(false);
         for (i, item) in list.items.iter().enumerate() {
             let Some(&slot) = slots.get(i) else {
                 continue;
@@ -187,9 +207,49 @@ impl InstanceStore {
                 palette_base(tag),
             );
             self.write(slot, &record);
+            if (slot as usize) < self.live_scratch.len() {
+                self.live_scratch[slot as usize] = true;
+                self.previous.stage(slot, &item.world, true);
+            }
             let extra = extras.get(&tag).copied().unwrap_or_default();
             self.write_extra(slot, &extra);
         }
+        for slot in 0..self.live_slots.len() {
+            if self.live_slots[slot] && !self.live_scratch[slot] {
+                self.previous.clear(slot as u32);
+            }
+        }
+        self.live_slots.copy_from_slice(&self.live_scratch);
+    }
+
+    /// Ensures the previous-instance mirror follows this store's current capacity.
+    #[allow(dead_code)] // Consumed by the binding-8 buffer owner in the next share.
+    pub(crate) fn ensure_previous(&mut self) -> bool {
+        self.previous.ensure(self.capacity)
+    }
+
+    /// Binding-8 mirror bytes for buffer creation and inspection.
+    #[allow(dead_code)] // Consumed by the binding-8 buffer owner in the next share.
+    pub(crate) fn previous_bytes(&self) -> &[u8] {
+        self.previous.bytes()
+    }
+
+    /// Uploads dirty binding-8 pages, returning the number of bytes written.
+    #[allow(dead_code)] // Consumed by the binding-8 buffer owner in the next share.
+    pub(crate) fn upload_previous(&mut self, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> u64 {
+        self.previous.upload(queue, buffer)
+    }
+
+    /// Marks an existing scene-instance slot as submitted for this scene frame.
+    #[allow(dead_code)] // Consumed by the submitted-frame renderer share.
+    pub(crate) fn previous_submitted(&mut self, slot: u32) {
+        self.previous.submitted(slot);
+    }
+
+    /// Commits submitted instance history once after all views have been recorded.
+    #[allow(dead_code)] // Consumed by the submitted-frame renderer share.
+    pub(crate) fn finish_previous_frame(&mut self) {
+        self.previous.finish_frame();
     }
 
     /// Appends the dirty 4096 B page ranges of `kind`, ascending, into `out`.
