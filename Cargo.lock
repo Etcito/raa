@@ -1082,6 +1082,7 @@ dependencies = [
 name = "raa-sdf-trace"
 version = "0.5.0"
 dependencies = [
+ "half",
  "naga",
  "raa-core",
  "raa-math",

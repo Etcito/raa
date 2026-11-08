@@ -2,7 +2,7 @@
 
 Every engine installs `trace.sdf` and `trace.composite`. Call
 `engine.setTraceScene(program)` with a `Uint8Array` containing a complete little-endian
-TraceProgram v1, as produced by MAMA's trace packer. GPU compute stamps the scene into an
+TraceProgram v1 or v2, as produced by MAMA's trace packer. GPU compute stamps the scene into an
 R8Snorm world-space distance volume with five mip levels. Its longest axis is at most 1024
 voxels; this limit does not apply to the image. A coarse cone prepass guides volume tracing
 at the full render-target resolution. Hits and normals are refined against the exact packed
@@ -29,4 +29,6 @@ including toward value 7 for no aim. Zero-angle identity bends carry no record.
 Validation errors carry their `trace.*` code and describe the invalid field; an update with
 an incorrect instance count returns `trace.instance_count`. The reader also reports specific
 format, version, limit, reference and numeric errors. See `raa-sdf-trace` for the packed
-format and supported shapes; unsupported sources are placeholders.
+format and supported shapes. Version 2 adds scalar sampled leaves; see
+[the version 2 format](trace-program-v2.md). Producers must refuse unsupported geometry
+with a named error instead of silently omitting it. Legacy v1 placeholders remain readable.

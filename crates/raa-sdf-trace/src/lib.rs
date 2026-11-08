@@ -8,6 +8,7 @@ pub mod bvh;
 pub mod cpu;
 pub mod pass;
 mod program;
+mod sampled;
 pub mod wgsl;
 
 pub use cpu::{Hit, distance, material, trace_ray};

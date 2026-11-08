@@ -9,8 +9,9 @@ export interface TraceStats {
 }
 
 export interface Engine {
-  /** Installs a complete little-endian TraceProgram v1 byte stream. A bent instance
-   * requires its matching packed bend record. A rejected program leaves the scene intact. */
+  /** Installs a complete little-endian TraceProgram v1 or v2 byte stream (v2 adds sampled SDF leaves).
+   * Samples live in the packed data buffer; normals are evaluated from the SDF gradient.
+   * A bent instance requires its matching packed bend record. A rejected program leaves the scene intact. */
   setTraceScene(program: Uint8Array): void;
   /** Replaces the 32-word records, preserving their bit patterns. The count and existing
    * bend-record associations must remain valid; a rejected update leaves the scene intact. */

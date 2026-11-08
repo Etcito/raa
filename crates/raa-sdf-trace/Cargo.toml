@@ -8,6 +8,7 @@ description = "Reader of the section 67 trace program: sources, instructions, ma
 publish = false
 
 [dependencies]
+half = "2.7.1"
 raa-core = { workspace = true }
 raa-math = { workspace = true }
 raa-pipeline = { path = "../raa-pipeline" }
