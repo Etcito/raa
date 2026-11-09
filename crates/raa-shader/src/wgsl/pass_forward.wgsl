@@ -107,8 +107,9 @@ fn raa_pass_shade_ctx(s: MaterialOutput, in: MaterialInput, ao: f32, shadow: f32
     return c;
 }
 
-// S11 final colour. Every slot runs before the unlit select so the slot calls stay in
-// uniform control flow.
+// S11 final colour: emissive, sun, ambient/environment, indirect and the shared tiled local
+// lights. Every slot and helper runs before the unlit select so the calls stay in uniform
+// control flow. The Composer attaches LOCAL_LIGHTING_WGSL ahead of this pass.
 @fragment
 fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     let in = raa_pass_material_input(v, front_facing);
@@ -118,7 +119,9 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @locati
     let c = raa_pass_shade_ctx(s, in, ao, shadow);
     let lit = s.emissive
         + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_frame.sun_color.rgb * shadow)
-        + raa_slot_ambient(s, c) * min(s.ao, ao);
+        + raa_slot_ambient(s, c) * min(s.ao, ao)
+        + raa_slot_indirect(s, c)
+        + raa_local_lighting(s, c);
     let color = select(lit, s.base_color + s.emissive, raa_pass_unlit(in.record));
     return vec4<f32>(color, 1.0);
 }

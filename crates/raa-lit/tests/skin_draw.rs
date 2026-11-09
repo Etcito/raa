@@ -39,8 +39,9 @@ fn pass_selection_preserves_shared_tangent_handedness() {
                 assert!(entry.contains("out.uv = v1.uv"));
                 assert!(entry.contains("out.color = v1.color"));
             }
-            let source = format!("{}\n{}\n{}\n{}\n{}", raa_shader::PRELUDE_WGSL,
+            let source = format!("{}\n{}\n{}\n{}\n{}\n{}", raa_shader::PRELUDE_WGSL,
                 raa_shader::LIB_WGSL, include_str!("../src/wgsl/slots_default.wgsl"),
+                raa_shader::LOCAL_LIGHTING_WGSL,
                 "const RAA_MSAA: u32 = 1u; const RAA_VARIANT_FLAGS: u32 = 0u;
                 fn material_main(in: MaterialInput) -> MaterialOutput { return raa_default_output(in); }
                 fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput {

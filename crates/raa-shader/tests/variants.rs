@@ -488,8 +488,18 @@ fn local_lighting_composes_with_selected_providers() {
     let wgsl = default_composer().compose(&reg, &key).expect("compose") + LOCAL_PROBE;
     assert_eq!(Composer::validate(&wgsl), Ok(()));
     assert!(!raa_shader::PRELUDE_WGSL.contains("raa_slot_"));
-    // Existing pass sources retain their separate sun and Flat/UNLIT selection.
-    assert!(!raa_shader::PASS_FORWARD_WGSL.contains("raa_local_lighting("));
+    // The forward pass composes the shared helper with the existing sun and ambient terms
+    // and the neutral indirect slot; emissive and the Flat/UNLIT selection stay.
+    let forward = raa_shader::PASS_FORWARD_WGSL;
+    assert!(forward.contains("raa_slot_direct(s, c, -raa_frame.sun_dir.xyz"));
+    assert!(forward.contains("raa_slot_ambient(s, c) * min(s.ao, ao)"));
+    assert!(forward.contains("raa_slot_indirect(s, c)"));
+    assert!(forward.contains("raa_local_lighting(s, c)"));
+    assert!(forward.contains("raa_pass_unlit(in.record)"));
+    assert!(
+        forward.find("raa_local_lighting(s, c)").unwrap()
+            < forward.find("raa_pass_unlit(in.record)").unwrap()
+    );
 }
 
 #[test]
