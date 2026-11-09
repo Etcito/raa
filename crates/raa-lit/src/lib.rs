@@ -22,6 +22,7 @@ mod frame_history;
 mod handle;
 mod instance_store;
 mod library;
+mod light_math;
 mod local_light;
 mod local_lights;
 mod lod;
