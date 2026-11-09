@@ -10,6 +10,70 @@ import { SdfmError } from './errors.js';
  */
 export const MATERIAL_FULL_FIELDS = Object.freeze(['base_color', 'metallic', 'roughness', 'emissive', 'height']);
 
+/**
+ * Maps one flattened MAMA ProcLight record to a copied S17 LocalLightDesc. MAMA's `t`, `r`
+ * and `s` are placement in metres and an [x,y,z,w] quaternion; travel direction is the
+ * normalized `R(r) * S(s) * [0,0,-1]`. Range and area size stay in metres. MAMA color is
+ * linear, while the JS API accepts sRGB and converts it to linear once at its boundary.
+ * Spot angles remain full degrees, and an absent `innerAngleDeg` stays absent so S17 applies
+ * its default. No handles or resources cross this mapping boundary.
+ *
+ * @param {import('mama/procgen/output-types').ProcLight} light
+ * @returns {import('@etcito/raa').LocalLightDesc}
+ * @throws {SdfmError} `sdfm.scene_format` for malformed values or a degenerate transformed direction
+ */
+export function toMamaLight(light) {
+  const fail = (field, message) => { throw new SdfmError('sdfm.scene_format', `light ${field}: ${message}`, `/lights/${field}`); };
+  if (light === null || typeof light !== 'object' || Array.isArray(light)) fail('', 'expected a record');
+  const vector = (field, length) => {
+    const value = light[field];
+    if (!Array.isArray(value) || value.length !== length) fail(field, `expected ${length} numbers`);
+    if (!value.every(Number.isFinite)) fail(field, 'components must be finite');
+    return value.slice();
+  };
+  const scalar = (field) => {
+    if (typeof light[field] !== 'number' || !Number.isFinite(light[field])) fail(field, 'expected a finite number');
+    return light[field];
+  };
+  const { kind } = light;
+  if (!['point', 'spot', 'directional', 'area'].includes(kind)) fail('kind', 'unsupported light kind');
+  const t = vector('t', 3);
+  const r = vector('r', 4);
+  const s = vector('s', 3);
+  const linear = vector('color', 3);
+  if (typeof light.shadows !== 'boolean') fail('shadows', 'expected a boolean');
+  const intensity = scalar('intensity');
+  const range = scalar('range');
+  const qLength = Math.hypot(...r);
+  if (!(qLength > 0) || !Number.isFinite(qLength)) fail('r', 'rotation quaternion must be nonzero');
+  const q = r.map((value) => value / qLength);
+  const scaled = [0, 0, -s[2]];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const xyz = q.slice(0, 3);
+  const first = cross(xyz, scaled);
+  const second = cross(xyz, first);
+  const rotated = scaled.map((v, i) => v + 2 * (q[3] * first[i] + second[i]));
+  const length = Math.hypot(...rotated);
+  if (!(length > 0) || !Number.isFinite(length)) fail('s', 'scaled travel direction is degenerate');
+  const color = linear.map((c) => c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+  const desc = {
+    kind,
+    position: t,
+    direction: rotated.map((v) => v / length),
+    color,
+    intensity,
+    range,
+    shadows: light.shadows,
+  };
+  if (kind === 'spot') {
+    desc.angleDeg = scalar('angleDeg');
+    if (light.innerAngleDeg !== undefined) desc.innerAngleDeg = scalar('innerAngleDeg');
+  } else if (kind === 'area') {
+    desc.size = vector('size', 2);
+  }
+  return desc;
+}
+
 /** MAMA import specifiers -> paths of MAMA's `dist/` (its package.json `exports`). */
 const SPECIFIERS = Object.freeze({
   root: ['mama', 'index.js'],

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
 import * as fakeMama from './fake-mama.js';
-import { createBrowserPool, MATERIAL_FULL_FIELDS, meshDocument } from '../src/mama-bridge.js';
+import { createBrowserPool, MATERIAL_FULL_FIELDS, meshDocument, toMamaLight } from '../src/mama-bridge.js';
 import { canonicalJson } from '../src/canonical.js';
 import { SdfmError } from '../src/errors.js';
 
@@ -50,6 +50,67 @@ function doc({ paintConstants = [1061997773, 1048576000, 1040187392, 1, 10905190
 function rejectsWith(code) {
   return (e) => e instanceof SdfmError && e.code === code;
 }
+
+const light = (kind, fields = {}) => ({
+  id: 'lamp', node: 'node', key: 7, t: [1, 2, 3], r: [0, 0, 0, 1], s: [2, 3, 4],
+  kind, color: [1, 0.21404114048223255, 0.0031308049535603713], intensity: 3,
+  range: 8, shadows: true, ...fields,
+});
+
+test('MAMA lights map all kinds, preserve metres and full authored spot angles', () => {
+  const point = toMamaLight(light('point'));
+  assert.deepEqual({ ...point, color: undefined }, {
+    kind: 'point', position: [1, 2, 3], direction: [0, 0, -1], color: undefined,
+    intensity: 3, range: 8, shadows: true,
+  });
+  point.color.forEach((c, i) => assert.ok(Math.abs(c - [1, 0.5, 0.04045][i]) < 1e-6));
+  assert.deepEqual(toMamaLight(light('directional')).direction, [0, 0, -1]);
+  const spot = toMamaLight(light('spot', { angleDeg: 70, innerAngleDeg: 40 }));
+  assert.equal(spot.angleDeg, 70);
+  assert.equal(spot.innerAngleDeg, 40);
+  const omitted = toMamaLight(light('spot', { angleDeg: 35 }));
+  assert.equal(Object.hasOwn(omitted, 'innerAngleDeg'), false);
+  assert.equal(point.range, 8);
+  assert.deepEqual(toMamaLight(light('area', { size: [2.5, 1.25] })).size, [2.5, 1.25]);
+});
+
+test('MAMA light placement rotates and normalizes travel direction without scaling metres', () => {
+  const half = Math.sqrt(0.5);
+  const mapped = toMamaLight(light('area', {
+    t: [4, 5, 6], r: [0, half, 0, half], s: [2, 3, 7], size: [4, 6], range: 12,
+  }));
+  assert.ok(Math.abs(mapped.direction[0] + 1) < 1e-12);
+  assert.ok(Math.abs(mapped.direction[2]) < 1e-12);
+  assert.deepEqual(mapped.position, [4, 5, 6]);
+  assert.equal(mapped.range, 12);
+  assert.deepEqual(mapped.size, [4, 6]);
+});
+
+test('MAMA light mapping returns fresh arrays and sRGB API color round-trips to linear once', () => {
+  const source = light('spot', { angleDeg: 90, innerAngleDeg: 45 });
+  const first = toMamaLight(source);
+  const second = toMamaLight(source);
+  for (const field of ['position', 'direction', 'color']) assert.notEqual(first[field], second[field]);
+  const sourceArea = light('area', { size: [2, 3] });
+  const area = toMamaLight(sourceArea);
+  assert.notEqual(area.size, sourceArea.size);
+  assert.deepEqual(area.size, [2, 3]);
+  assert.notEqual(first.position, source.t);
+  assert.notEqual(first.color, source.color);
+  const apiToLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  first.color.forEach((c, i) => assert.ok(Math.abs(apiToLinear(c) - source.color[i]) < 1e-7));
+  first.direction[0] = 99;
+  first.position[0] = 99;
+  assert.deepEqual(source.t, [1, 2, 3]);
+  assert.equal(source.r[0], 0);
+});
+
+test('malformed and degenerate MAMA light mappings refuse with sdfm.scene_format paths', () => {
+  assert.throws(() => toMamaLight(light('point', { t: [0, 1] })), (e) =>
+    rejectsWith('sdfm.scene_format')(e) && e.path === '/lights/t');
+  assert.throws(() => toMamaLight(light('point', { s: [1, 1, 0] })), (e) =>
+    rejectsWith('sdfm.scene_format')(e) && e.path === '/lights/s');
+});
 
 test('a group value refusal becomes sdfm.mesher_refused naming the group, message and fix', async () => {
   const d = doc();
