@@ -26,6 +26,7 @@ mod lod;
 mod material;
 mod material_data;
 mod meshes;
+mod motion_display;
 mod passes;
 mod prep;
 mod previous_instances;
@@ -61,6 +62,7 @@ pub use material_data::{
     DataAllocator, MATERIAL_DATA_INITIAL_WORDS, MATERIAL_DATA_RESERVED_WORDS, MaterialDataStats,
 };
 pub use meshes::{LitMeshId, LitMeshInfo};
+pub use motion_display::install_motion_display;
 pub use prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 pub use raa_core::{MaterialId, MeshId};
 pub use raa_mesh::{AttributedMesh, SubMesh};
