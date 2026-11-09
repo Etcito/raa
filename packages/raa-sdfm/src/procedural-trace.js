@@ -1,5 +1,6 @@
 import { SdfmError } from './errors.js';
 import { createProceduralRuntime } from './procedural-runtime.js';
+import { createMamaLightOwner } from './mama-light-owner.js';
 
 // One engine has a single trace slot: each handle keeps its MAMA TraceInput, a change merges the
 // visible inputs, and MAMA op 4 packs them in Rust. Installing a program selects the engine's
@@ -22,17 +23,30 @@ export async function loadProceduralTrace(engine, loader, scene, mama, options) 
   if (options.placement !== undefined) input = placed(input, options.placement);
   const session = sessions.get(engine) ?? new Set();
   sessions.set(engine, session);
-  const entry = { input, visible: true, procgen, packTrace: mama.packTrace };
+  // This handle retains one owner across runtime access. It copies static scene.lights and raw
+  // runtime output.lights and adds options.placement exactly once on every prepare. The placed
+  // function above owns geometry translation only; never translate the light records here.
+  const lights = createMamaLightOwner(engine, options.placement);
+  const entry = { input, visible: true, procgen, packTrace: mama.packTrace, lights };
   const root = engine.addNode(options.parent ?? null, options.placement ?? [0, 0, 0]);
-  session.add(entry);
+  let transaction;
+  let published = false;
   try {
+    transaction = lights.prepare(scene.lights);
+    session.add(entry);
     commit(engine, session);
+    published = true;
+    transaction.commit();
   } catch (e) {
     session.delete(entry);
+    transaction?.rollback();
+    lights.dispose();
     engine.removeNode(root);
+    if (published) commit(engine, session);
     throw e;
   }
   let disposed = false;
+  const runtimes = new Set();
   const check = () => {
     if (disposed) throw new SdfmError('sdfm.disposed', 'procedural scene has been disposed');
   };
@@ -43,11 +57,13 @@ export async function loadProceduralTrace(engine, loader, scene, mama, options) 
     setVisible(visible) {
       check();
       if (entry.visible === visible) return;
+      entry.lights.setVisible(visible);
       entry.visible = visible;
       try {
         commit(engine, session);
       } catch (e) {
         entry.visible = !visible;
+        entry.lights.setVisible(entry.visible);
         throw e;
       }
     },
@@ -61,8 +77,8 @@ export async function loadProceduralTrace(engine, loader, scene, mama, options) 
       // slot is rebuilt from this handle's entry, so the newest packed input is stored on it
       // before the shared commit merges every visible handle.
       let packed = null;
-      return createProceduralRuntime({
-        engine, scene, procgen, mama,
+      const runtime = createProceduralRuntime({
+        engine, scene, procgen, mama, lights: entry.lights,
         trace: {
           input: entry.input,
           procgen,
@@ -71,15 +87,26 @@ export async function loadProceduralTrace(engine, loader, scene, mama, options) 
             return mama.packTrace(p, value);
           },
           commit() {
+            check();
+            const previous = entry.input;
             if (packed !== null) entry.input = packed;
-            commit(engine, session);
+            try {
+              commit(engine, session);
+            } catch (e) {
+              entry.input = previous;
+              throw e;
+            }
           },
         },
       });
+      runtimes.add(runtime);
+      return runtime;
     },
     dispose() {
       if (disposed) return;
       disposed = true;
+      for (const runtime of runtimes) runtime.dispose();
+      entry.lights.dispose();
       session.delete(entry);
       engine.removeNode(root);
       commit(engine, session);

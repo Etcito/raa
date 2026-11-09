@@ -12,15 +12,27 @@ const scene = (overrides = {}) => ({
   instances: [{ key: 1, source: 0, ...pose() }, { key: 2, source: 0, ...pose([1, 0, 0]) }],
   groups: [], colliders: [], visual: [], runtime: null, ...overrides,
 });
-const lastProgram = (engine) => JSON.parse(new TextDecoder().decode(engine.calls.setTraceScene.at(-1)));
+const programs = new WeakMap();
+const lastProgram = (engine) => programs.get(engine.calls.setTraceScene.at(-1));
+const light = (id = 'lamp', t = [1, 2, 3]) => ({
+  id, node: 'light', key: 99, ...pose(t), kind: 'point', color: [1, 1, 1], intensity: 2, range: 6, shadows: false,
+});
+const delta = (extra = {}) => ({ ok: true, issues: [], added: [], moved: [], removed: [], remesh: [], ...extra });
+const snapshot = (extra = {}) => ({ ok: true, instances: [], ...extra });
+const liveScene = (extra = {}) => scene({ runtime: { input: {} }, ...extra });
 
 function fakeEngine() {
-  const calls = { addNode: [], removeNode: [], setTraceScene: [], clearTraceScene: [], traceArgs: [] };
+  const calls = { addNode: [], removeNode: [], setTraceScene: [], clearTraceScene: [], traceArgs: [], addLight: [], removeLight: [] };
+  const lights = new Map();
   let trace = null;
   let volume = 0;
   let next = 1;
   return {
     calls,
+    lights,
+    addLight(desc) { const id = next++; lights.set(id, structuredClone(desc)); calls.addLight.push(id); return id; },
+    updateLight(id, changes) { assert.ok(lights.has(id)); Object.assign(lights.get(id), structuredClone(changes)); },
+    removeLight(id) { assert.ok(lights.delete(id)); calls.removeLight.push(id); },
     get trace() { return trace; },
     get volume() { return volume; },
     addNode(parent, t = [0, 0, 0]) { const id = next++; calls.addNode.push({ id, parent, t: [...t] }); return id; },
@@ -28,27 +40,38 @@ function fakeEngine() {
     setTraceScene(bytes, ...rest) {
       calls.setTraceScene.push(bytes);
       calls.traceArgs.push(rest.length);
-      trace = JSON.parse(new TextDecoder().decode(bytes));
+      trace = structuredClone(programs.get(bytes));
       volume += 1;
     },
     clearTraceScene() { calls.clearTraceScene.push(true); trace = null; },
   };
 }
 
-function fakeMama() {
-  const calls = { build: 0, pack: [] };
+function fakeMama(deltas = []) {
+  const calls = { build: 0, pack: [], create: 0, dispose: 0 };
   const tree = { root: '$root', nodes: { $root: { kind: 'group', children: [], transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } } } };
   return {
     calls,
     mama: {
       parseProceduralScene: (text) => JSON.parse(text),
+      Runtime: { create() {
+        calls.create++;
+        return { set() {}, step() { return deltas.shift(); }, dispose() { calls.dispose++; } };
+      } },
       buildSceneTraceInput(parsed, lookup) {
         calls.build++;
         if (parsed.sources.some((source) => source.kind === 'asset' && lookup(source.file) === null)) throw new Error('asset not resolved');
         return { sources: parsed.sources.map((_source, index) => ({ key: `source:${index}`, tree })),
           instances: parsed.instances.map((instance) => ({ ...instance })) };
       },
-      packTrace(procgen, input) { calls.pack.push({ procgen, input }); return new TextEncoder().encode(JSON.stringify(input)); },
+      packTrace(procgen, input) {
+        calls.pack.push({ procgen, input });
+        const words = new Uint32Array(8 + input.sources.length * 12 + input.instances.length * 32);
+        words.set([0x50544453, 1, input.sources.length, input.instances.length]);
+        const bytes = new Uint8Array(words.buffer);
+        programs.set(bytes, structuredClone(input));
+        return bytes;
+      },
     },
   };
 }
@@ -155,4 +178,167 @@ test('trace mode refuses invalid scenes and a rejected program keeps the previou
   assert.equal(engine.calls.removeNode.length, 1);
   a.dispose();
   assert.equal(engine.trace, null);
+});
+
+test('static trace lights retain per-handle identity, placement and visibility without runtime input', async () => {
+  const [fake, engine, loader] = [fakeMama(), fakeEngine(), fakeLoader()];
+  const source = scene({ lights: [light()] });
+  const original = structuredClone(source);
+  const placement = [10, -20, 30];
+  const a = await loadProceduralScene(engine, loader, source, options(fake, { placement }));
+  const b = await loadProceduralScene(engine, loader, source, options(fake));
+  const [aId, bId] = engine.lights.keys();
+  assert.deepEqual(engine.lights.get(aId).position, [11, -18, 33]);
+  assert.deepEqual(engine.lights.get(bId).position, [1, 2, 3]);
+  assert.deepEqual(source, original);
+  assert.throws(() => a.runtime({}), (error) => error.code === 'sdfm.scene_format');
+  a.setVisible(false);
+  assert.deepEqual([...engine.lights.values()].map((desc) => desc.intensity), [0, 2]);
+  a.setVisible(true);
+  assert.deepEqual([...engine.lights.keys()], [aId, bId]);
+  a.dispose();
+  a.dispose();
+  assert.deepEqual([...engine.lights.keys()], [bId]);
+  for (const lights of [[], undefined, [light()]]) {
+    const reloaded = await loadProceduralScene(engine, loader, scene({ lights, sources: [], instances: [] }), options(fake));
+    assert.equal(engine.lights.size, lights?.length ? 2 : 1);
+    reloaded.dispose();
+    reloaded.dispose();
+    assert.deepEqual([...engine.lights.keys()], [bId]);
+  }
+  b.dispose();
+  assert.equal(engine.lights.size, 0);
+});
+
+test('runtime access shares the trace owner and translates every complete light snapshot once', async () => {
+  const first = light();
+  const moved = light('lamp', [4, 5, 6]);
+  const changed = { ...moved, intensity: 7 };
+  const outputs = [snapshot({ lights: [light('lamp', [2, 3, 4])] }), snapshot({ lights: [moved] }), snapshot({ lights: [changed] })];
+  const original = structuredClone(outputs);
+  const fake = fakeMama([
+    ...outputs.map((output) => delta({ output })), delta(),
+    delta({ ok: false, output: snapshot() }), delta({ output: snapshot() }),
+    delta({ output: snapshot({ lights: [first] }) }), delta({ output: snapshot({ lights: [] }) }),
+  ]);
+  const [engine, loader] = [fakeEngine(), fakeLoader()];
+  const placement = [10, -20, 30];
+  const a = await loadProceduralScene(engine, loader, liveScene({ lights: [first] }), options(fake, { placement }));
+  const b = await loadProceduralScene(engine, loader, scene({ lights: [first] }), options(fake));
+  const [aId, bId] = engine.lights.keys();
+  const runtime = a.runtime({});
+  a.runtime({});
+  assert.equal(engine.calls.addLight.length, 2, 'runtime access must not reconstruct the registry');
+  placement[0] = 1000;
+  const baseline = await runtime.step(0);
+  assert.deepEqual([baseline.moved, baseline.added, baseline.removed], [0, 0, 0]);
+  assert.deepEqual(engine.lights.get(aId).position, [12, -17, 34]);
+  await runtime.step(1);
+  assert.deepEqual(engine.lights.get(aId).position, [14, -15, 36]);
+  a.setVisible(false);
+  await runtime.step(2);
+  assert.equal(engine.lights.get(aId).intensity, 0);
+  a.setVisible(true);
+  assert.equal(engine.lights.get(aId).intensity, 7);
+  await runtime.step(3);
+  assert.equal((await runtime.step(4)).ok, false);
+  assert.equal(engine.lights.get(aId).intensity, 7);
+  const publications = engine.calls.setTraceScene.length;
+  await runtime.step(5);
+  assert.deepEqual([...engine.lights.keys()], [bId]);
+  await runtime.step(6);
+  assert.deepEqual([...engine.lights.values()][1].position, [11, -18, 33]);
+  await runtime.step(7);
+  assert.deepEqual([...engine.lights.keys()], [bId]);
+  assert.equal(engine.calls.setTraceScene.length, publications, 'light removal is independent of geometry');
+  assert.deepEqual(outputs, original);
+  runtime.dispose();
+  a.dispose();
+  assert.equal(fake.calls.dispose, 2);
+  assert.deepEqual([...engine.lights.keys()], [bId]);
+  b.dispose();
+});
+
+test('light creation and refused trace publications roll back only the attempted handle changes', async () => {
+  const refusal = Object.assign(new Error('trace.format: refused'), { code: 'trace.format' });
+  const fake = fakeMama([delta(), delta({
+    moved: [{ key: 1, ...pose([9, 0, 0]) }], output: snapshot({ lights: [light('replacement')] }),
+  })]);
+  const [engine, loader] = [fakeEngine(), fakeLoader()];
+  const value = options(fake);
+  const a = await loadProceduralScene(engine, loader, liveScene({ lights: [light()] }), value);
+  const b = await loadProceduralScene(engine, loader, scene({ lights: [light()] }), value);
+  const before = structuredClone([...engine.lights]);
+  const previous = engine.trace;
+  const add = engine.addLight;
+  let additions = 0;
+  engine.addLight = (desc) => { if (++additions === 2) throw refusal; return add(desc); };
+  await assert.rejects(loadProceduralScene(engine, loader, scene({ lights: [light('x'), light('y')] }), value),
+    (error) => error === refusal);
+  engine.addLight = add;
+  assert.deepEqual([...engine.lights], before);
+  assert.equal(engine.trace, previous);
+  const set = engine.setTraceScene;
+  engine.setTraceScene = () => { throw refusal; };
+  await assert.rejects(loadProceduralScene(engine, loader, scene({ lights: [light('x')] }), value),
+    (error) => error === refusal);
+  assert.deepEqual([...engine.lights], before);
+  const runtime = a.runtime({});
+  await runtime.step(0);
+  await assert.rejects(runtime.step(1), (error) => error === refusal);
+  assert.equal(engine.trace, previous);
+  assert.deepEqual([...engine.lights], before);
+  assert.throws(() => a.setVisible(false), (error) => error === refusal);
+  assert.deepEqual([...engine.lights], before);
+  engine.setTraceScene = set;
+  b.setVisible(false);
+  assert.deepEqual(lastProgram(engine).instances[0].t, [0, 0, 0], 'failed runtime input cannot leak into a later merge');
+  b.setVisible(true);
+  a.dispose();
+  assert.deepEqual([...engine.lights], before.slice(1));
+  b.dispose();
+});
+
+test('failure activating staged lights restores the prior merged trace publication', async () => {
+  const [fake, engine, loader] = [fakeMama(), fakeEngine(), fakeLoader()];
+  const value = options(fake);
+  const a = await loadProceduralScene(engine, loader, scene({ lights: [light()] }), value);
+  const before = structuredClone([...engine.lights]);
+  const previous = engine.trace;
+  const update = engine.updateLight;
+  const refusal = Object.assign(new Error('light activation refused'), { code: 'light.invalid_desc' });
+  engine.updateLight = (id, changes) => {
+    if (changes.intensity === 2) throw refusal;
+    update(id, changes);
+  };
+  await assert.rejects(loadProceduralScene(engine, loader, scene({ lights: [light('new')] }), value),
+    (error) => error === refusal);
+  engine.updateLight = update;
+  assert.deepEqual(engine.trace, previous);
+  assert.deepEqual([...engine.lights], before);
+  a.dispose();
+});
+
+test('disposal aborts staged runtime lights and queued runtime work cannot resurrect them', async () => {
+  const fake = fakeMama([delta(), delta({
+    moved: [{ key: 1, ...pose([9, 0, 0]) }], output: snapshot({ lights: [light('staged')] }),
+  }), delta({ output: snapshot({ lights: [light('queued')] }) })]);
+  const [engine, loader] = [fakeEngine(), fakeLoader()];
+  const a = await loadProceduralScene(engine, loader, liveScene({ lights: [light()] }), options(fake));
+  const b = await loadProceduralScene(engine, loader, scene({ lights: [light()] }), options(fake));
+  const bId = [...engine.lights.keys()][1];
+  const runtime = a.runtime({});
+  await runtime.step(0);
+  const set = engine.setTraceScene;
+  engine.setTraceScene = (bytes) => { set(bytes); engine.setTraceScene = set; a.dispose(); };
+  const pending = runtime.step(1);
+  const queued = runtime.step(2);
+  await assert.rejects(queued, (error) => error.code === 'sdfm.disposed');
+  assert.equal((await pending).disposed, true);
+  assert.deepEqual([...engine.lights.keys()], [bId]);
+  assert.equal(fake.calls.dispose, 1);
+  assert.equal(lastProgram(engine).instances.length, 2);
+  a.dispose();
+  b.dispose();
+  assert.equal(engine.lights.size, 0);
 });
