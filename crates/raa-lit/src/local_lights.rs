@@ -463,15 +463,19 @@ mod tests {
             .replace(handle, LocalLight::default(), false)
             .unwrap();
         assert!(!lights.is_dirty());
-        let mut invalid = LocalLight::default();
-        invalid.range = f32::NAN;
+        let invalid = LocalLight {
+            range: f32::NAN,
+            ..LocalLight::default()
+        };
         assert_eq!(
             lights.replace(handle, invalid, false).unwrap_err().code(),
             "light.invalid_desc"
         );
         assert_eq!(*lights.get(handle).unwrap(), LocalLight::default());
-        let mut changed = LocalLight::default();
-        changed.intensity = 4.0;
+        let changed = LocalLight {
+            intensity: 4.0,
+            ..LocalLight::default()
+        };
         lights.replace(handle, changed, false).unwrap();
         assert!(lights.is_dirty());
     }

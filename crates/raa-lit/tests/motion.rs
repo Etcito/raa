@@ -41,7 +41,7 @@ fn parse_case(line: &str) -> Case {
 
 /// True for a finite f32, the same guard the WGSL uses.
 fn finite(v: f32) -> bool {
-    (v - v) == 0.0
+    v.is_finite()
 }
 
 /// CPU twin of `raa_pass_motion`: remove both jitters, then encode the NDC delta as a UV
@@ -51,7 +51,9 @@ fn motion(case: &Case) -> [f32; 2] {
         return [0.0; 2];
     }
     let (cw, pw) = (case.current_clip[2], case.previous_clip[2]);
-    if !(cw > 0.0) || !(pw > 0.0) {
+    if cw.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater)
+        || pw.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater)
+    {
         return [0.0; 2];
     }
     let current = [

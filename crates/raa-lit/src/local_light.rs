@@ -278,11 +278,13 @@ mod tests {
             (lit(|l| l.radius = INF), "radius"),
         ];
         for (light, field) in cases { assert_refused(light, field); }
-        let mut edges = LocalLight::default();
-        edges.color = [0.0, 1.0, 0.5];
-        edges.intensity = 0.0;
-        edges.angle_deg = 1.0;
-        edges.size = [f32::MIN_POSITIVE, 2.0];
+        let edges = LocalLight {
+            color: [0.0, 1.0, 0.5],
+            intensity: 0.0,
+            angle_deg: 1.0,
+            size: [f32::MIN_POSITIVE, 2.0],
+            ..LocalLight::default()
+        };
         assert!(edges.validate().is_ok());
         assert!(lit(|l| l.angle_deg = 179.0).validate().is_ok());
     }
@@ -300,9 +302,11 @@ mod tests {
             (lit(|l| l.inner_angle_deg = Some(NAN)), "inner_angle_deg"),
         ];
         for (light, field) in bad { assert_refused(light, field); }
-        let mut authored = LocalLight::default();
-        authored.angle_deg = 60.0;
-        authored.inner_angle_deg = Some(45.0);
+        let authored = LocalLight {
+            angle_deg: 60.0,
+            inner_angle_deg: Some(45.0),
+            ..LocalLight::default()
+        };
         for outer in [60.0, 90.0, 179.0] {
             let mut updated = authored;
             updated.angle_deg = outer;
@@ -318,10 +322,12 @@ mod tests {
     #[test]
     fn metadata_and_kinds_are_retained() {
         for kind in [Point, Spot, Directional, Area] {
-            let mut light = LocalLight::default();
-            light.kind = kind;
-            light.radius = 2.5;
-            light.shadows = true;
+            let light = LocalLight {
+                kind,
+                radius: 2.5,
+                shadows: true,
+                ..LocalLight::default()
+            };
             let accepted = light.validate().unwrap();
             assert_eq!((accepted.kind, accepted.radius, accepted.shadows), (kind, 2.5, true));
         }
