@@ -26,6 +26,68 @@ export function renderAt(engine, scene, variant, timeMs) {
 // rAF fires rarely in the capture client, so a zero timeout steps the loop instead.
 const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** Nearest-rank percentile ceil(p*n)-1 of an ascending array. */
+export function percentile(sorted, p) {
+  return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)];
+}
+
+/**
+ * Turns measured animation-frame intervals (milliseconds) into the S20 timing keys.
+ * Every interval must be a positive finite number: missing or nonpositive timestamps
+ * reject the whole timing result, and no timer fallback ever stands in for them.
+ */
+export function summarizeFrameIntervals(intervals) {
+  if (!Array.isArray(intervals) || intervals.length === 0) {
+    throw new Error('runScene: measured mode recorded no frame intervals');
+  }
+  for (const interval of intervals) {
+    if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) {
+      throw new Error('runScene: measured mode requires positive finite frame intervals');
+    }
+  }
+  const ascending = [...intervals].sort((a, b) => a - b);
+  const fps = intervals.map((interval) => 1000 / interval).sort((a, b) => a - b);
+  const totalMs = intervals.reduce((sum, interval) => sum + interval, 0);
+  return {
+    frameIntervalMsMedian: percentile(ascending, 0.5),
+    frameIntervalMsP95: percentile(ascending, 0.95),
+    fpsMean: intervals.length / (totalMs / 1000),
+    fpsMedian: percentile(fps, 0.5),
+    fpsP95: percentile(fps, 0.95),
+  };
+}
+
+function nextAnimationFrame() {
+  return new Promise((resolve, reject) => {
+    if (typeof globalThis.requestAnimationFrame !== 'function') {
+      reject(new Error('runScene: measured mode requires requestAnimationFrame'));
+      return;
+    }
+    globalThis.requestAnimationFrame((timestamp) => resolve(timestamp));
+  });
+}
+
+// Boundary after warm-up, then exactly `frames` rendered frames whose consecutive
+// animation-frame timestamps give the measured intervals.
+export async function measureAnimationFrames(engine, scene, variant, timeMs, frames) {
+  let previous = await nextAnimationFrame();
+  const intervals = [];
+  for (let i = 0; i < frames; i++) {
+    const timestamp = await nextAnimationFrame();
+    renderAt(engine, scene, variant, timeMs);
+    intervals.push(timestamp - previous);
+    previous = timestamp;
+  }
+  return summarizeFrameIntervals(intervals);
+}
+
+function measureCount(value, name) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`runScene: measure.${name} must be a positive integer`);
+  }
+  return value;
+}
+
 function setCanvasSize(canvas, width, height) {
   // devicePixelRatio 1: the backing store equals the CSS size.
   canvas.width = width;
@@ -42,9 +104,27 @@ function applyPasses(engine, passes) {
 
 /**
  * Runs `variant` of `scene` on `canvas` with the package module `raa` (from loadRaa).
- * `args` = { width?, height?, onEngine?(engine) }: onEngine receives the new engine as
- * soon as it exists, so the caller owns it (screenshot, dispose) even when a later step
- * throws. Resolves to the S14 op result without gpuErrors (the page adds them).
+ * `args` = { width?, height?, lib?, measure?, onEngine?(engine) }: onEngine receives
+ * the new engine as soon as it exists, so the caller owns it (screenshot, dispose) even
+ * when a later step throws. Resolves to the S14 op result without gpuErrors (the page
+ * adds them).
+ *
+ * Omitting `args.measure` keeps the default capture: 30 warm-up frames, one capture
+ * frame and exactly the existing result keys. Passing `args.measure =
+ * { warmup: number, frames: number }` (both positive integers) runs the opt-in measured
+ * mode: `warmup` frames, then a requestAnimationFrame boundary, then exactly `frames`
+ * scheduled frames whose positive consecutive timestamps add `frameIntervalMsMedian`,
+ * `frameIntervalMsP95`, `fpsMean`, `fpsMedian` and `fpsP95`. Missing or nonpositive
+ * intervals reject; no timer fallback contributes to FPS. `cpuMsMedian` and `cpuMsP95`
+ * keep their CPU submission meaning in both modes.
+ *
+ * Handoff: `runScene(raa, canvas, scene, variant, args = {})` in
+ * `examples/lookdev/lib/runner.js`. The many-lights operation (examples/lights/main.js,
+ * card "Ship the 64-light preset with integrated on/off functional results") attaches
+ * this runner by importing it and calling it once per variant with
+ * `args.measure = { warmup: 60, frames: 300 }`, then returns both results keyed by
+ * `scene`/`variant` and carrying `canvas`, `adapter`, `hardware`, `nonEmpty`,
+ * `gpuErrors` plus the measured timing keys above.
  */
 export async function runScene(raa, canvas, scene, variant, args = {}) {
   const width = args.width ?? DEFAULT_SIZE[0];
@@ -59,24 +139,38 @@ export async function runScene(raa, canvas, scene, variant, args = {}) {
   await scene.build(engine, args.lib, variant);
   applyPasses(engine, variant.passes);
 
+  const measure = args.measure;
+  const warmup = measure ? measureCount(measure.warmup, 'warmup') : WARMUP;
+  const frames = measure ? measureCount(measure.frames, 'frames') : FRAMES;
+
   const timeMs = variantTimeMs(variant);
-  for (let i = 0; i < WARMUP + FRAMES; i++) {
+  for (let i = 0; i < warmup; i++) {
     renderAt(engine, scene, variant, timeMs);
     await yieldTask();
+  }
+
+  let timing = null;
+  if (measure) {
+    timing = await measureAnimationFrames(engine, scene, variant, timeMs, frames);
+  } else {
+    for (let i = 0; i < frames; i++) {
+      renderAt(engine, scene, variant, timeMs);
+      await yieldTask();
+    }
   }
 
   if (typeof scene.frame === 'function') scene.frame(engine, timeMs, variant);
   const nonEmpty = await engine.probeNonEmpty(timeMs);
   const stats = engine.stats();
 
-  return {
+  const result = {
     adapter: stats.adapter,
     hardware: stats.hardware,
     canvas: [width, height],
     nonEmpty: nonEmpty === true,
     firstFrameMs: stats.firstFrameMs,
-    warmup: WARMUP,
-    frames: FRAMES,
+    warmup,
+    frames,
     cpuMsMedian: stats.cpuMsMedian,
     cpuMsP95: stats.cpuMsP95,
     instances: stats.instances,
@@ -88,4 +182,6 @@ export async function runScene(raa, canvas, scene, variant, args = {}) {
     variant: variant.id,
     passes: engine.passes(),
   };
+  if (timing) Object.assign(result, timing);
+  return result;
 }
