@@ -109,3 +109,76 @@ test('uncaptured errors and device loss retain their causes and reject the opera
       kind === 'uncaptured' ? /shader failed: invalid binding/ : /unknown: device vanished: driver reset/);
   }
 });
+
+test('capture preserves the creating adapter identity when wgpu loses its labels', async () => {
+  let current;
+  const navigator = { userAgent: 'browser', platform: 'platform', gpu: {
+    requestAdapter: async () => ({ info: current, requestDevice: async () => ({
+      lost: new Promise(() => {}), addEventListener() {},
+    }) }),
+  } };
+  const { gpu, packageReady } = page([{ id: 'point', file: 'scenes/point.js' }], {
+    navigator,
+    runScene: async (_raa, _canvas, scene, variant, args) => {
+      await (await navigator.gpu.requestAdapter()).requestDevice();
+      args.onEngine({ dispose() {} });
+      return { scene: scene.id, variant: variant.id, nonEmpty: true,
+        adapter: { vendor: '', architecture: '', device: '', description: '', isFallbackAdapter: false }, hardware: true };
+    },
+  });
+  packageReady.resolve({});
+  for (const info of [
+    { vendor: 'nvidia', architecture: 'ampere', device: '', description: '', isFallbackAdapter: false },
+    { vendor: 'google', architecture: '', device: '', description: 'SwiftShader', isFallbackAdapter: false },
+    { vendor: 'nvidia', architecture: 'ampere', device: '', description: '', isFallbackAdapter: true },
+    { vendor: '', architecture: '', device: '', description: '', isFallbackAdapter: false },
+  ]) {
+    current = info;
+    const { json } = await gpu.ops.render({ args: { scene: 'point', variant: 'on' } });
+    assert.deepEqual({ ...json.adapter }, info);
+    assert.equal(json.hardware, !info.isFallbackAdapter && !/SwiftShader/.test(info.description));
+  }
+});
+
+
+test('one whole-flow operation continues after failures and collects errors and captures', async () => {
+  const events = new Map();
+  const window = {
+    addEventListener: (type, handler) => { const handlers = events.get(type) ?? new Set(); handlers.add(handler); events.set(type, handlers); },
+    removeEventListener: (type, handler) => events.get(type)?.delete(handler),
+  };
+  const console = { error() {} };
+  const calls = [];
+  const { gpu, packageReady, context } = page([{ id: 'point', file: 'scenes/point.js' }], {
+    window, console,
+    runScene: async (_raa, _canvas, scene, variant, args) => {
+      calls.push(variant.id);
+      if (variant.id === 'on') {
+        console.error('shader diagnostic');
+        for (const handler of events.get('error')) handler({ error: new Error('page broke') });
+        for (const handler of events.get('unhandledrejection')) handler({ reason: new Error('async broke') });
+        await context.fetch('missing-asset');
+        throw new Error('expected state absent');
+      }
+      args.onEngine({ dispose() {} });
+      return { scene: scene.id, variant: variant.id, nonEmpty: true };
+    },
+  });
+  packageReady.resolve({});
+  await tick();
+  context.fetch = async () => ({ ok: false, status: 404 });
+  const fetch = context.fetch, error = console.error;
+  const result = await gpu.ops.render({ args: { pairs: [
+    { scene: 'point', variant: 'on' }, { scene: 'point', variant: 'off' },
+  ] } });
+  assert.deepEqual(calls, ['on', 'off']);
+  assert.match(result.json.steps[0].error, /expected state absent/);
+  assert.equal(result.json.steps[1].result.variant, 'off');
+  assert.equal(result.files[0].name, 's-point/off/capture.png');
+  for (const kind of ['console.error', 'pageerror', 'failed-request', 'unmet-state']) {
+    assert.ok(result.json.diagnostics.some(d => d.kind === kind), kind);
+  }
+  assert.equal(context.fetch, fetch);
+  assert.equal(console.error, error);
+  assert.ok([...events.values()].every(handlers => handlers.size === 0));
+});

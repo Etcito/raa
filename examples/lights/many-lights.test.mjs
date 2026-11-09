@@ -72,13 +72,13 @@ function measured(fps = { on: BASE.fpsMean, off: BASE.fpsMean }) {
 }
 
 // Execute the actual page and shared envelope as in page.test.mjs and motion.test.mjs.
-function page(runScene) {
+function page(runScene, gpu) {
   const canvas = { style: {}, toDataURL: () => 'data:image/png;base64,cG5n' };
   const context = {
     window: {},
     navigator: {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/142.0.0.0 Safari/537.36',
-      platform: 'Win32',
+      platform: 'Win32', gpu,
     },
     devicePixelRatio: 1, geometry, objects: {}, runScene, renderAt: () => {}, variantTimeMs: (variant) => variant.timeMs,
     document: { getElementById: (id) => id === 'c' ? canvas : {} },
@@ -189,4 +189,26 @@ test('the operation retains a slow measurement for downstream judgment and rejec
     page(smallRun).gpu.ops.render({ args: { scene: many.id, variant: 'on' } }),
     /is not 1920x1080/,
   );
+});
+
+
+test('measured on/off runs retain their own creating adapter metadata', async () => {
+  let info;
+  const browserGpu = { requestAdapter: async () => ({
+    info, requestDevice: async () => ({ lost: new Promise(() => {}), addEventListener() {} }),
+  }) };
+  const fixture = measured();
+  const run = async (...args) => {
+    const variant = args[3].id;
+    info = { vendor: variant === 'on' ? 'nvidia' : 'google', architecture: '',
+      device: '', description: '', isFallbackAdapter: variant === 'off' };
+    await (await browserGpu.requestAdapter()).requestDevice();
+    return fixture.runScene(...args);
+  };
+  const { json } = await page(run, browserGpu).gpu.ops.render({ args: { scene: many.id, variant: 'on' } });
+  assert.equal(json.runs.on.adapter.vendor, 'nvidia');
+  assert.equal(json.runs.on.hardware, true);
+  assert.equal(json.runs.off.adapter.vendor, 'google');
+  assert.equal(json.runs.off.adapter.isFallbackAdapter, true);
+  assert.equal(json.runs.off.hardware, false);
 });

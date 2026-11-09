@@ -161,10 +161,15 @@ if (op === 'publish') {
   console.log(mode === 'publish-line' ? 'page_ref: ' + ref : JSON.stringify({data:{page_ref:ref}}));
   process.exit(0);
 }
-const pair = JSON.parse(readFileSync(input)).args;
-if (Object.keys(pair).sort().join(',') !== 'scene,variant') throw Error('unexpected render arguments');
+const pairs = JSON.parse(readFileSync(input)).args.pairs;
+if (!Array.isArray(pairs)) throw Error('expected whole selection');
 if (args[args.indexOf('--page-ref') + 1] !== 'host-page-123') throw Error('wrong page reference');
-const dir = args[args.indexOf('-o') + 1];
+const batchDir = args[args.indexOf('-o') + 1];
+const steps = [], diagnostics = [];
+const job_id = randomUUID();
+for (const pair of pairs) {
+if (Object.keys(pair).sort().join(',') !== 'scene,variant') throw Error('unexpected render arguments');
+const dir = join(batchDir, 's-' + encodeURIComponent(pair.scene), pair.variant);
 mkdirSync(dir, { recursive:true });
 const old = process.env.LIGHTS_TEST_OLD;
 if (mode === 'failed-old') {
@@ -213,6 +218,7 @@ if (measured) {
 if (mode === 'wrong-pair') result.variant='wrong';
 if (mode === 'empty-scene') result.nonEmpty=false;
 if (mode === 'software') result.adapter.description='SwiftShader software';
+if (mode === 'blank-identity') for (const key of ['vendor','architecture','device','description']) result.adapter[key]='';
 if (mode === 'fallback') result.adapter.isFallbackAdapter=true;
 if (mode === 'wrong-platform') browser.platform='Linux x86_64';
 if (mode === 'wrong-browser') browser.userAgent=browser.userAgent.replace('Chrome/','Firefox/');
@@ -222,10 +228,14 @@ if (mode === 'wrong-dpr') browser.devicePixelRatio=2;
 if (mode === 'wrong-size') result.canvas=[32,32];
 if (mode === 'wrong-counts') result.frames=0;
 if (mode !== 'no-output') {
-  if (mode !== 'no-result') writeFileSync(join(dir,'result.json'),JSON.stringify({job_id:randomUUID(),client_id:'host-windows-client',result}));
+  steps.push({...pair,result});
   if (mode !== 'no-capture') writeFileSync(join(dir,mode === 'arbitrary-png'?'other.png':'capture.png'), mode === 'corrupt-png'?Buffer.from('not PNG'):mode === 'empty-png'?Buffer.alloc(0):png());
   if (mode !== 'missing-lifecycle') for (const name of lifecycleNames) writeFileSync(join(dir,name + '.png'),png());
 }
+}
+if (mode === 'page-errors') diagnostics.push({pair:pairs[0],kind:'pageerror',message:'all frames still attempted'});
+if (mode === 'missing-step') steps.pop();
+if (mode !== 'no-result' && mode !== 'no-output') writeFileSync(join(batchDir,'result.json'),JSON.stringify({job_id,client_id:'host-windows-client',result:{steps,diagnostics}}));
 `;
 
 async function transportFixture(t, measured = false, definitions = null) {
@@ -287,7 +297,7 @@ test('managed publication/render/fresh preserve explicit captures, page JSON and
     assert.equal(doc.result.variant,pair.variant);
   }
   const calls = readFileSync(f.trace,'utf8').trim().split('\n').map(JSON.parse);
-  assert.deepEqual(calls.map(c => c.op), ['publish','render','render']);
+  assert.deepEqual(calls.map(c => c.op), ['publish','render']);
   assert.equal(calls[0].input,f.page);
   for (const call of calls.slice(1)) assert.equal(call.args[1],record.pageRef);
 });
@@ -355,9 +365,9 @@ test('failed producer cannot reuse an old valid PNG or completion', async t => {
 test('transport rejects wrong identity, absent/corrupt outputs and invalid hardware/browser evidence', async t => {
   for (const [mode,pattern] of [
     ['wrong-pair',/wrong scene\/variant/], ['empty-scene',/nonEmpty/],
-    ['no-output',/capture\.png/], ['no-result',/result\.json/], ['no-capture',/capture\.png/],
+    ['no-output',/result\.json/], ['no-result',/result\.json/], ['no-capture',/capture\.png/],
     ['arbitrary-png',/capture\.png/], ['empty-png',/empty\/missing output/], ['corrupt-png',/corrupt\/empty PNG/],
-    ['software',/hardware adapter/], ['fallback',/hardware adapter/],
+    ['software',/hardware adapter/], ['fallback',/hardware adapter/], ['blank-identity',/adapter identity is blank/],
     ['wrong-platform',/Chrome on Windows/], ['wrong-browser',/Chrome on Windows/],
     ['device-errors',/device lost: reset; shader validation failed/], ['missing-errors',/gpuErrors/],
     ['wrong-dpr',/DPR 1/], ['wrong-size',/dimensions/], ['wrong-counts',/frame counts/],
@@ -531,4 +541,21 @@ test('judge fails closed across primary and attachment lifecycle captures', asyn
   rmSync(stagePath);
   failed(await cli(f, 'judge'), /missing lifecycle output: rotated\.png/);
   writeFileSync(stagePath, savedStage);
+});
+
+
+test('whole-flow diagnostics fail the run after every pair is collected in one job', async t => {
+  const f = await transportFixture(t);
+  failed(await cli(f, 'render', 'page-errors'), /pageerror: all frames still attempted/);
+  const record = read(join(f.out, 'run.json'));
+  const attempt = read(join(f.out, '.lights-current.json')).attempt;
+  assert.equal(record.complete, false);
+  assert.equal(record.pairs.length, 2);
+  const batch = read(join(f.out, attempt, 'result.json'));
+  assert.deepEqual(batch.result.steps.map(s => s.variant), ['on', 'off']);
+  assert.deepEqual(readFileSync(f.trace, 'utf8').trim().split('\n').map(JSON.parse).map(c => c.op), ['publish', 'render']);
+  failed(await cli(f, 'fresh'), /incomplete/);
+  failed(await cli(f, 'render', 'missing-step'), /step count differs/);
+  failed(await cli(f, 'fresh'), /incomplete/);
+  failed(await cli(f, 'render', 'software'), /point\/on.*hardware adapter[\s\S]*point\/off.*hardware adapter/);
 });

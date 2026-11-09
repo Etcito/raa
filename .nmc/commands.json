@@ -1,6 +1,6 @@
 [
   {"name": "m2-lights-build", "command": "bash scripts/build-lights.sh", "timeout_s": 1800},
-  {"name": "m2-lights-functional", "command": "node --test web/common/lights-job.test.mjs", "timeout_s": 120, "after": ["m2-lights-build"]},
+  {"name": "m2-lights-functional", "command": "node --test web/common/lights-job.test.mjs examples/lights/page.test.mjs examples/lights/many-lights.test.mjs", "timeout_s": 120, "after": ["m2-lights-build"]},
   {"name": "m2-lights-select", "command": "node web/common/lights-job.mjs select --page dist/lights --out out/lights", "timeout_s": 120, "after": ["m2-lights-build"]},
   {"name": "m2-lights-clean", "command": "node web/common/lights-job.mjs clean --page dist/lights --out out/lights", "timeout_s": 60, "after": ["m2-lights-select"]},
   {"name": "m2-lights-render", "command": "node web/common/lights-job.mjs render --page dist/lights --out out/lights", "timeout_s": 3600, "after": ["m2-lights-clean"]},

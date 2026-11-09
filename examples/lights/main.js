@@ -12,6 +12,7 @@ let engine = null;
 let residents = [];
 let last = null;
 let running = false;
+let deviceAdapter = null;
 
 function installGpuErrors() {
   const gpu = navigator.gpu;
@@ -23,6 +24,16 @@ function installGpuErrors() {
     const requestDevice = adapter.requestDevice.bind(adapter);
     adapter.requestDevice = async (descriptor) => {
       const device = await requestDevice(descriptor);
+      // wgpu 30 maps only info.description to AdapterInfo.name and drops the
+      // other WebGPU identity fields. Chrome may leave description empty even
+      // while vendor/architecture identify the hardware. Read the SAME adapter
+      // that created this device; never request a second adapter for evidence.
+      const info = adapter.info;
+      deviceAdapter = {
+        vendor: info?.vendor, architecture: info?.architecture,
+        device: info?.device, description: info?.description,
+        isFallbackAdapter: info?.isFallbackAdapter ?? adapter.isFallbackAdapter,
+      };
       const errors = gpuErrors;
       device.addEventListener('uncapturederror', (event) => errors.push(errorDetails('uncaptured GPU error', event.error)));
       device.lost.then(
@@ -77,6 +88,20 @@ const ready = (async () => {
   return { raa, scenes };
 })();
 
+// Each run creates one engine/device. Reset before creation so evidence cannot
+// leak from another scene or from the other measured variant.
+async function runLightsScene(...args) {
+  deviceAdapter = null;
+  const result = await runScene(...args);
+  if (deviceAdapter) {
+    result.adapter = deviceAdapter;
+    result.hardware = deviceAdapter.isFallbackAdapter === false
+      && !['vendor', 'architecture', 'device', 'description'].some((key) =>
+        /software|swiftshader|llvmpipe|lavapipe|softpipe|fallback|basic render|microsoft basic|warp\b/i.test(deviceAdapter[key]));
+  }
+  return result;
+}
+
 // Chrome/Windows metadata for a measurement, recorded next to the adapter identity.
 function browserMetadata() {
   const nav = typeof navigator === 'object' && navigator ? navigator : {};
@@ -111,7 +136,7 @@ async function runMeasured(raa, scene, variant) {
   // capture; both engines stay resident for the operation.
   for (const candidate of [...scene.variants.filter((v) => v.id !== variant.id), variant]) {
     window.__nmcGpuProgress = `measure:${candidate.id}`;
-    runs[candidate.id] = await runScene(raa, canvas, scene, candidate, {
+    runs[candidate.id] = await runLightsScene(raa, canvas, scene, candidate, {
       width: config.width, height: config.height, lib,
       measure: { warmup: config.warmup, frames: config.frames },
       onEngine: (created) => {
@@ -158,7 +183,7 @@ async function run(args) {
     gpuErrors = [];
     if (scene.measure) return await runMeasured(raa, scene, variant);
     window.__nmcGpuProgress = 'runScene';
-    const result = await runScene(raa, canvas, scene, variant, {
+    const result = await runLightsScene(raa, canvas, scene, variant, {
       width: args.width, height: args.height, lib,
       onEngine: (created) => { engine = created; residents.push(created); },
     });
@@ -198,10 +223,64 @@ registerNmcGpu({
   },
 });
 const render = window.nmcGpu.ops.render;
+// A complete selection stays in one managed job. Keep errors as data so later
+// pairs still run, and return every completed capture even when another fails.
 window.nmcGpu.ops.render = async (input) => {
-  const result = await render(input);
-  result.files.push(...last.captures);
-  return result;
+  if (!Array.isArray(input?.args?.pairs)) {
+    const result = await render(input);
+    result.files.push(...last.captures);
+    return result;
+  }
+  const steps = [], files = [], diagnostics = [];
+  let active = null;
+  const note = (kind, message) => diagnostics.push({ pair: active, kind, message });
+  const onError = (event) => note('pageerror', errorDetails('page error', event.error || event.message));
+  const onReject = (event) => note('pageerror', errorDetails('unhandled rejection', event.reason));
+  const onResource = (event) => {
+    const url = event.target?.src || event.target?.href;
+    if (url) note('failed-request', url);
+  };
+  const originalError = console.error;
+  console.error = (...args) => { note('console.error', args.map(String).join(' ')); originalError.apply(console, args); };
+  window.addEventListener('error', onError);
+  window.addEventListener('error', onResource, true);
+  window.addEventListener('unhandledrejection', onReject);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (...args) => {
+    try {
+      const response = await originalFetch(...args);
+      if (!response.ok) note('failed-request', `${args[0]}: HTTP ${response.status}`);
+      return response;
+    } catch (error) { note('failed-request', `${args[0]}: ${error.message}`); throw error; }
+  };
+  try {
+    for (const pair of input.args.pairs) {
+      active = { scene: pair.scene, variant: pair.variant };
+      window.__nmcGpuProgress = `${pair.scene}/${pair.variant}`;
+      try {
+        const result = await render({ args: active });
+        result.files.push(...last.captures);
+        const prefix = `s-${encodeURIComponent(pair.scene)}/${pair.variant}/`;
+        files.push(...result.files.map((file) => ({ ...file, name: prefix + file.name })));
+        steps.push({ ...active, result: result.json });
+      } catch (error) {
+        const message = errorDetails('render failed', error);
+        steps.push({ ...active, error: message });
+        note('unmet-state', message);
+      }
+    }
+    return { json: { steps, diagnostics }, files };
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.error = originalError;
+    window.removeEventListener('error', onError);
+    window.removeEventListener('error', onResource, true);
+    window.removeEventListener('unhandledrejection', onReject);
+    for (const resident of residents) resident.dispose();
+    residents = [];
+    engine = null;
+    last = null;
+  }
 };
 window.nmcGpu.ready = false;
 window.nmcGpu.preparation = preparation;

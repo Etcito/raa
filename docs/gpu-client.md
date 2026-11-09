@@ -32,7 +32,12 @@ node web/common/lights-job.mjs judge --page dist/lights --out out/lights
 retaining selection, unrelated files, sibling runs and archives. It is idempotent.
 `render` invalidates the previous completion before requesting a client, publishes its own `dist/lights`
 through `NMC_GPU_CLIENT`, then uses the returned `page_ref` for metadata-selected
-pairs. Each input is exactly `{args: {scene, variant}}`. `fresh` requires successful
+pairs in ONE job with `{args: {pairs: [{scene, variant}, ...]}}`. The page runs
+each pair sequentially, catches per-pair failures and returns all completed
+captures plus `steps` and `diagnostics`. Page errors, rejected promises, console
+errors and failed fetch/resource requests are collected during that pass. The
+transport validates every returned pair and prints the full failure list.
+`fresh` requires successful
 results and captures from that invocation. `judge` calls `fresh` before joining
 run pairs to selection pairs by scene/variant. It invokes
 `python3 "$NMC_JUDGE_CLIENT" <capture> --description <description> --min-score 6`
@@ -49,7 +54,7 @@ waiting for a GPU slot. The installed CLI reports queue/running transitions on
 stderr. A separate 300-second running deadline rejects and terminates a hung
 producer; queue time is not charged to that deadline. No spawn timeout wraps the
 GPU client's entire lifetime. A timeout never accepts partial files. Producers
-run sequentially, using at most one independent CPU worker; the build sets
+run sequentially inside that one job; the build sets
 `CARGO_BUILD_JOBS` from `NMC_CPUS` (default 1). Jobs require observed Chrome on
 Windows, DPR 1 and a hardware adapter. Software/fallback identities and any
 shader/device errors reject. Model tasks do not publish, render or judge.
@@ -112,10 +117,11 @@ equal Git `HEAD`. Missing Git/build provenance fails; a timestamp never substitu
 for a commit. No assumed `NMC_RUN_ID` or `NMC_COMMIT` variables are used.
 
 The run's `pageRef` is the actual host-issued publication reference. A completed
-run's `runId` is its first producer's actual host `job_id` (as a string); before
-that producer returns, the incomplete record carries its publication reference
-as the available host context. Each producer's real `job_id` and `client_id` are
-retained in its client wrapper and completion receipt. The client at
+run's `runId` is the whole-flow job's actual host `job_id` (as a string); before
+that job returns, the incomplete record carries its publication reference
+as the available host context. That same real `job_id` and `client_id` are
+retained in every pair wrapper and completion receipt. Freshness also verifies
+each pair against the original whole-flow result and requires empty diagnostics. The client at
 `$NMC_GPU_CLIENT` was inspected: `publish`
 prints `page_ref`; `render input.json --page-ref REF -o DIR` writes
 `result.json` as `{job_id, client_id, result: <operation json>}` and downloads the
@@ -137,8 +143,11 @@ pair. `fresh(page, out)` rechecks all these conditions, including current build
 identity, without publishing or rendering. A failed producer cannot inherit an
 older attempt's success, PNG or completion receipt.
 
-`m2-lights-functional` runs `node --test web/common/lights-job.test.mjs` after the
-lights build. The command-check entry follows the functional and judge entries.
+`m2-lights-functional` runs the transport, page and many-lights Node tests after
+the lights build. Adapter evidence preserves the raw WebGPU identity of the
+adapter that created each device: wgpu 30 discards vendor/architecture and maps
+only description to name, so its summary alone can have four blank strings even
+on hardware. Blank identity, software markers and fallback adapters still fail. The command-check entry follows the functional and judge entries.
 `dist/` and `out/` are ignored; captures/binaries remain there and in the managed
 capture store, never committed. No reference image or output-hash check is used.
 

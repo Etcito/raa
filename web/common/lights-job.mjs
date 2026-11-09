@@ -284,9 +284,11 @@ function validateRun(op, pair, measured) {
   const adapter = op.adapter;
   const keys = ['vendor', 'architecture', 'device', 'description'];
   ensure(op.hardware === true && adapter?.isFallbackAdapter === false
-    && keys.every((k) => typeof adapter[k] === 'string') && keys.some((k) => nonblank(adapter[k]))
+    && keys.every((k) => typeof adapter[k] === 'string')
     && !keys.some((k) => /software|swiftshader|llvmpipe|lavapipe|softpipe|fallback|basic render|microsoft basic|warp\b/i.test(adapter[k])),
   `${pair.scene}/${pair.variant}: hardware adapter required; software/fallback adapter refused`);
+  ensure(keys.some((k) => nonblank(adapter[k])),
+    `${pair.scene}/${pair.variant}: adapter identity is blank; capture must preserve WebGPU adapter info`);
   const size = measured ? [1920, 1080] : [1280, 720];
   ensure(JSON.stringify(op.canvas) === JSON.stringify(size), `invalid canvas dimensions for ${pair.scene}`);
   ensure(op.warmup === (measured ? 60 : 30) && op.frames === (measured ? 300 : 1), 'invalid warm-up/frame counts');
@@ -409,29 +411,40 @@ export async function render(page, out) {
   const client = await managedClient(waitS);
   const pageRef = pageReference(await clientCall(client, ['publish', resolve(page)], waitS));
   // Before a producer returns, the only host-issued context is its publication.
-  // A completed run is identified by its first real managed job, never a clock
-  // or an assumed NMC_RUN_ID. All jobs remain in result.json and receipts.
+  // One real managed job identifies the complete selection, never a clock
+  // or an assumed NMC_RUN_ID. Its result remains alongside the pair receipts.
   const record = { pageRef, pairs: [], complete: false, buildId: build.buildId,
     runId: pageRef, commit: build.commit, startedAt: new Date().toISOString(), completedAt: null };
   jsonWrite(inside(out, 'run.json'), record);
   try {
-    // Sequential producers also bound independent CPU work to 1 (NMC_CPUS default).
-    for (const [index, pair] of pairs.entries()) {
+    const input = inside(out, `${attempt}/input.json`);
+    const batchDir = inside(out, attempt);
+    jsonWrite(input, { args: { pairs: pairs.map(({ scene, variant }) => ({ scene, variant })) } });
+    await clientCall(client, ['render', input, '--page-ref', pageRef, '-o', batchDir], waitS, true);
+    const batch = readJson(join(batchDir, 'result.json'), 'managed job must return the complete selection');
+    ensure(hostId(batch.job_id) && hostId(batch.client_id), 'missing managed job/client provenance');
+    record.runId = String(batch.job_id);
+    ensure(Array.isArray(batch.result?.steps) && Array.isArray(batch.result?.diagnostics), 'missing whole-flow diagnostics/steps');
+    const errors = batch.result.diagnostics.map((d) => `${d.pair?.scene ?? 'page'}/${d.pair?.variant ?? ''} ${d.kind}: ${d.message}`);
+    if (batch.result.steps.length !== pairs.length) errors.push('whole-flow step count differs from selection');
+    for (const pair of pairs) {
       const namespace = `${attempt}/s-${encodeURIComponent(pair.scene)}/${pair.variant}`;
       const dir = inside(out, namespace);
-      mkdirSync(dir, { recursive: true });
-      const input = inside(out, `${attempt}/input-${index}.json`);
-      jsonWrite(input, { args: { scene: pair.scene, variant: pair.variant } });
-      await clientCall(client, ['render', input, '--page-ref', pageRef, '-o', dir], waitS, true);
-      const { doc, files } = await pairOutput(page, dir, pair);
-      if (index === 0) record.runId = String(doc.job_id);
-      jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId,
-        commit: record.commit, scene: pair.scene, variant: pair.variant, jobId: doc.job_id, clientId: doc.client_id, files });
-      record.pairs.push({ scene: pair.scene, variant: pair.variant,
-        capture: `${namespace}/capture.png`, result: `${namespace}/result.json` });
-      ensure(currentAttempt(out) === attempt, 'render attempt was superseded');
-      jsonWrite(inside(out, 'run.json'), record);
+      try {
+        const steps = batch.result.steps.filter((s) => s.scene === pair.scene && s.variant === pair.variant);
+        ensure(steps.length === 1, `${pair.scene}/${pair.variant}: missing/duplicate whole-flow step`);
+        ensure(!steps[0].error, steps[0].error);
+        mkdirSync(dir, { recursive: true });
+        jsonWrite(join(dir, 'result.json'), { job_id: batch.job_id, client_id: batch.client_id, result: steps[0].result });
+        const { doc, files } = await pairOutput(page, dir, pair);
+        jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId,
+          commit: record.commit, scene: pair.scene, variant: pair.variant, jobId: doc.job_id, clientId: doc.client_id, files });
+        record.pairs.push({ scene: pair.scene, variant: pair.variant,
+          capture: `${namespace}/capture.png`, result: `${namespace}/result.json` });
+      } catch (error) { errors.push(`${pair.scene}/${pair.variant}: ${error.message}`); }
     }
+    jsonWrite(join(batchDir, 'diagnostics.json'), { errors });
+    ensure(errors.length === 0, `whole-flow failures:\n${errors.join('\n')}`);
     ensure(currentAttempt(out) === attempt, 'render attempt was superseded');
     record.complete = true;
     record.completedAt = new Date().toISOString();
@@ -456,7 +469,11 @@ export async function fresh(page, out) {
     && record.commit === build.commit, 'stale/missing run/build/commit provenance');
   const attempt = currentAttempt(out);
   ensure(Array.isArray(record.pairs) && record.pairs.length === selection.length, 'run pairs do not match selection');
-  const jobs = new Set();
+  const batch = readJson(inside(out, `${attempt}/result.json`), 'missing whole-flow result');
+  ensure(String(batch.job_id) === record.runId && hostId(batch.client_id), 'wrong managed job provenance');
+  ensure(Array.isArray(batch.result?.steps) && batch.result.steps.length === selection.length
+    && Array.isArray(batch.result?.diagnostics) && batch.result.diagnostics.length === 0, 'incomplete/failed whole-flow result');
+  let clientId;
   for (const pair of selection) {
     const matches = record.pairs.filter((p) => p.scene === pair.scene && p.variant === pair.variant);
     ensure(matches.length === 1, `missing/duplicate run pair: ${pair.scene}/${pair.variant}`);
@@ -469,8 +486,12 @@ export async function fresh(page, out) {
       && receipt.scene === pair.scene && receipt.variant === pair.variant, 'stale/unsuccessful producer completion');
     const { doc, files } = await pairOutput(page, dir, pair);
     if (pair === selection[0]) ensure(record.runId === String(doc.job_id), 'wrong managed run provenance');
-    ensure(receipt.jobId === doc.job_id && receipt.clientId === doc.client_id && !jobs.has(doc.job_id), 'wrong/duplicate managed job provenance');
-    jobs.add(doc.job_id);
+    const steps = batch.result.steps.filter((s) => s.scene === pair.scene && s.variant === pair.variant);
+    ensure(steps.length === 1 && !steps[0].error && JSON.stringify(steps[0].result) === JSON.stringify(doc.result)
+      && doc.client_id === batch.client_id, 'pair differs from whole-flow result');
+    clientId ??= doc.client_id;
+    ensure(receipt.jobId === doc.job_id && receipt.clientId === doc.client_id
+      && String(doc.job_id) === record.runId && doc.client_id === clientId, 'wrong managed job provenance');
     ensure(JSON.stringify(receipt.files) === JSON.stringify(files), 'missing/changed producer output inventory');
   }
   ensure(currentAttempt(out) === attempt && JSON.stringify(readJson(join(out, 'run.json'), 'current run')) === JSON.stringify(record),
