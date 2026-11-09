@@ -45,7 +45,7 @@ function merge(base, changes) {
 // before mutation, so a refusal leaves the stored light exactly as it was.
 function lightEngine() {
   const lights = new Map();
-  const calls = { sun: null, ambient: null, meshes: 0, nodes: 0 };
+  const calls = { sun: null, ambient: null, meshes: 0, nodes: 0, surfaces: [], shapes: [], positions: [] };
   let nextHandle = 1;
   let completed = { dropped: null, frame: null, pending: true };
   return {
@@ -77,8 +77,9 @@ function lightEngine() {
     setLight(light) { calls.sun = structuredClone(light); },
     setAmbient(light) { calls.ambient = structuredClone(light); },
     addMaterial: () => 1,
-    addMesh() { calls.meshes += 1; return calls.meshes; },
-    addNode() { calls.nodes += 1; return calls.nodes; },
+    addSurfaceMaterial(desc) { calls.surfaces.push(desc); return calls.surfaces.length + 1; },
+    addMesh(shape) { calls.shapes.push(shape); calls.meshes += 1; return calls.meshes; },
+    addNode(_parent, position) { calls.positions.push(position); calls.nodes += 1; return calls.nodes; },
     addMeshInstance() {},
   };
 }
@@ -102,8 +103,8 @@ test('on adds bounded point lights through the public API and off adds none', as
   for (const variant of point.variants) {
     const engine = lightEngine();
     await point.build(engine, lib, variant);
-    assert.equal(engine.calls.meshes, 4);
-    assert.equal(engine.calls.nodes, 4);
+    assert.equal(engine.calls.meshes, 6);
+    assert.equal(engine.calls.nodes, 6);
     assert.deepEqual(engine.calls.sun, { direction: [-0.5, -1, -0.5], color: [1, 1, 1], intensity: 2 });
     assert.ok(engine.calls.ambient);
     const lights = engine.localLights();
@@ -120,6 +121,49 @@ test('on adds bounded point lights through the public API and off adds none', as
     assert.ok(key, 'the on scene leaves its atomic update applied');
     assert.deepEqual([key.position, key.color, key.range], [[1.4, 1.5, 2.4], [1, 0.75, 0.5], 4.5]);
   }
+});
+
+test('transparent and fur samples share on/off geometry with opaque prepass coverage', async () => {
+  const built = [];
+  for (const variant of point.variants) {
+    const engine = lightEngine();
+    await point.build(engine, lib, variant);
+    built.push(engine.calls);
+    const { surfaces, shapes, positions } = engine.calls;
+    assert.equal(surfaces[0].function, 'raa.glass');
+    assert.equal(surfaces[0].blend, 'transparent');
+    assert.ok(surfaces[0].opacity > 0 && surfaces[0].opacity < 1);
+    assert.equal(surfaces[1].function, 'raa.plush');
+    assert.equal(surfaces[1].blend ?? 'opaque', 'opaque');
+    assert.ok(surfaces[1].furLength > 0 && surfaces[1].furShells > 0);
+    assert.equal(surfaces[1].params.furLength, surfaces[1].furLength);
+    assert.equal(shapes[0].subMeshes[0].material, 1, 'floor is opaque');
+    assert.deepEqual(shapes.slice(4).map((s) => s.subMeshes[0].material), [2, 3]);
+    const { camera, subjects } = variant.selection;
+    assert.equal(subjects.length, shapes.length, 'every drawn subject is selection-checked');
+    for (const [i, box] of subjects.entries()) {
+      for (let axis = 0; axis < 3; axis++) {
+        const values = Array.from(shapes[i].positions).filter((_, k) => k % 3 === axis);
+        assert.ok(Math.min(...values) + positions[i][axis] >= box.min[axis] - 1e-6);
+        assert.ok(Math.max(...values) + positions[i][axis] <= box.max[axis] + 1e-6);
+      }
+      if (i < 4) continue;
+      // All corners of the sample bounds project onto the floor inside its extent,
+      // including the displaced fur silhouette. Thus even glass has occupied tiles.
+      for (const x of [box.min[0], box.max[0]]) for (const y of [box.min[1], box.max[1]]) {
+        for (const z of [box.min[2], box.max[2]]) {
+          const t = -camera.eye[1] / (y - camera.eye[1]);
+          assert.ok(t >= 1);
+          for (const axis of [0, 2]) {
+            const hit = camera.eye[axis] + t * ([x, y, z][axis] - camera.eye[axis]);
+            assert.ok(hit >= subjects[0].min[axis] && hit <= subjects[0].max[axis]);
+          }
+        }
+      }
+    }
+    assert.match(variant.description, /tiles without prepass coverage receive no local light/);
+  }
+  assert.deepEqual(built[0], built[1]);
 });
 
 test('public updateLight merges atomically and a refusal leaves the light untouched', () => {

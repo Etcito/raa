@@ -177,6 +177,8 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     let lit = s.emissive
         + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_frame.sun_color.rgb * shadow)
         + raa_slot_ambient(s, c) * min(s.ao, ao)
+        + raa_slot_indirect(s, c)
+        + raa_local_lighting(s, c)
         + raa_slot_transmission(s, c);
     let shaded = raa_slot_fog(lit, in.position, c);
     let color = select(shaded, s.base_color + s.emissive, raa_pass_unlit(in.record));

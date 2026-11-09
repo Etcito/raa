@@ -93,9 +93,14 @@ fn layered_and_default_win_their_slots() {
 
 #[test]
 fn plush_furshell_variants_validate() {
-    let reg = registry();
-    let keys = plush_furshell_keys(&reg);
-    assert_eq!(keys.len(), 4);
+    let mut reg = registry();
+    let custom = reg.register_user("test.fur", "fn material_main(in: MaterialInput) -> MaterialOutput { return raa_default_output(in); }", &full_composer()).expect("custom material");
+    let mut keys = plush_furshell_keys(&reg);
+    keys.extend(plush_furshell_keys(&reg).into_iter().map(|key| VariantKey {
+        material_fn: custom,
+        ..key
+    }));
+    assert_eq!(keys.len(), 8);
     let mut count = 0;
     for (name, composer) in slot_sets() {
         for key in &keys {
@@ -103,11 +108,32 @@ fn plush_furshell_variants_validate() {
             if let Err(e) = Composer::validate(&wgsl) {
                 panic!("{name} {key:?}: {e}");
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            check_resources(&wgsl);
+            let posed = raa_lit::skin_draw::posed_module(&wgsl).expect("posed fur");
+            Composer::validate(&posed).expect("posed validation");
+            #[cfg(not(target_arch = "wasm32"))]
+            check_resources(&posed);
             count += 1;
         }
         println!("raa.plush FurShell validates with {name} slots");
     }
-    assert_eq!(count, 12);
+    assert_eq!(count, 24);
+}
+
+#[test]
+fn shared_lighting_keeps_roots_fog_and_coverage() {
+    let pass = raa_shader::PASS_FURSHELL_WGSL;
+    for term in [
+        "raa_local_lighting(s, c) * root",
+        "raa_slot_indirect(s, c) * root",
+    ] {
+        assert!(pass.find(term).expect(term) < pass.find("raa_slot_fog(lit,").unwrap());
+    }
+    assert!(pass.contains("select(shaded, s.base_color + s.emissive, raa_pass_unlit(in.record))"));
+    assert!(pass.contains("coverage * clamp(s.opacity, 0.0, 1.0)"));
+    assert!(pass.contains("RAA_MSAA <= 1u && alpha < 0.5"));
+    assert!(pass.contains("return vec4<f32>(color, alpha)"));
 }
 
 /// The fields of `struct <name> { ... }` in `wgsl` as (field, type) pairs.
@@ -158,4 +184,61 @@ fn group2_uniform_matches_the_contributor_slots() {
         assert_eq!(fields.len() as u64 * 4, SHELL_UNIFORM_SIZE);
         assert!(wgsl.contains("raa_fur_shell.index"), "{key:?}");
     }
+}
+
+// Reflect every entry point, including posed/custom variants. Count declared fragment
+// storage conservatively (even unused bindings), excluding only vertex-only resources.
+#[cfg(not(target_arch = "wasm32"))]
+fn check_resources(source: &str) {
+    use wgpu::naga::{AddressSpace, ShaderStage, TypeInner, front::wgsl, valid};
+    let module = wgsl::parse_str(source).expect("parse resources");
+    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+        .validate(&module)
+        .expect("validate resources");
+    let mut fragment_storage = 0;
+    for (handle, global) in module.global_variables.iter() {
+        let Some(binding) = &global.binding else {
+            continue;
+        };
+        assert!(binding.group < 4, "four bind groups maximum");
+        let vertex_only = (binding.group, binding.binding) == (0, 8) || binding.group == 3;
+        if binding.group == 3 {
+            assert_eq!(binding.binding, 0);
+            assert_eq!(global.name.as_deref(), Some("raa_skin_palette"));
+        }
+        if matches!(global.space, AddressSpace::Storage { .. }) && !vertex_only {
+            fragment_storage += 1;
+        }
+        if binding.group == 1 && binding.binding == 12 {
+            assert_eq!(global.space, AddressSpace::Uniform);
+        }
+        if binding.group == 1 && binding.binding == 13 {
+            assert_eq!(global.space, AddressSpace::Handle);
+            assert!(matches!(
+                module.types[global.ty].inner,
+                TypeInner::Image { .. }
+            ));
+        }
+        for (index, entry) in module.entry_points.iter().enumerate() {
+            if entry.stage == ShaderStage::Fragment && vertex_only {
+                assert!(
+                    info.get_entry_point(index)[handle].is_empty(),
+                    "vertex-only resource"
+                );
+            }
+            if entry.stage == ShaderStage::Fragment
+                && binding.group == 1
+                && [12, 13].contains(&binding.binding)
+            {
+                assert!(
+                    !info.get_entry_point(index)[handle].is_empty(),
+                    "lights reached by fragment"
+                );
+            }
+        }
+    }
+    assert!(
+        fragment_storage <= 8,
+        "fragment storage budget: {fragment_storage}"
+    );
 }

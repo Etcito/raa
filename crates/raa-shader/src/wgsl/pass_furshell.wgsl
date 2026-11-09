@@ -154,7 +154,9 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @locati
     let root = mix(0.35, 1.0, v.shell_height);
     let lit = s.emissive
         + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_frame.sun_color.rgb * shadow) * root
-        + raa_slot_ambient(s, c) * min(s.ao, ao) * root;
+        + raa_slot_ambient(s, c) * min(s.ao, ao) * root
+        + raa_slot_indirect(s, c) * root
+        + raa_local_lighting(s, c) * root;
     let shaded = raa_slot_fog(lit, in.position, c);
     let color = select(shaded, s.base_color + s.emissive, raa_pass_unlit(in.record));
     let alpha = coverage * clamp(s.opacity, 0.0, 1.0);
