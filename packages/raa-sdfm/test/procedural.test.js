@@ -415,3 +415,217 @@ test('sdf references report a sceneSourceDocument failure as sdfm.scene_resolve'
     resolveAsset: fakes.resolveAsset,
   }), (e) => e.code === 'sdfm.scene_resolve' && e.message.includes('source could not be built'));
 });
+
+const sceneLight = (id, fields = {}) => ({
+  id, node: 'light', key: 0xffffffff, t: [1, 2, 3], r: [0, 0, 0, 1], s: [1, 1, 1],
+  kind: 'point', color: [1, 1, 1], intensity: 3, range: 8, shadows: false, ...fields,
+});
+const lightRefusal = Object.assign(new Error('light creation refused'), { code: 'light.invalid_desc' });
+
+function lightEngine() {
+  const engine = recordingEngine();
+  const removeNode = engine.removeNode;
+  engine.removeNode = (node) => {
+    assert.ok(engine.nodes.has(node), 'remove each node once');
+    removeNode(node);
+    const stack = [node];
+    while (stack.length > 0) {
+      const id = stack.pop();
+      engine.nodes.delete(id);
+      for (const [child, value] of engine.nodes) if (value.parent === id) stack.push(child);
+    }
+  };
+  engine.lights = new Map();
+  engine.lightAdds = 0;
+  engine.lightRemovals = [];
+  engine.addLight = (desc) => {
+    const handle = ++engine.lightAdds;
+    if (handle === engine.failAddAt) throw lightRefusal;
+    engine.lights.set(handle, structuredClone(desc));
+    return handle;
+  };
+  engine.updateLight = (handle, changes) => {
+    assert.ok(engine.lights.has(handle));
+    Object.assign(engine.lights.get(handle), structuredClone(changes));
+  };
+  engine.removeLight = (handle) => {
+    assert.ok(engine.lights.delete(handle), 'remove each light once');
+    engine.lightRemovals.push(handle);
+  };
+  return engine;
+}
+
+for (const source of [fixture, sdfFixture]) {
+  for (const empty of [false, true]) {
+    test(`${source.variant} owns static lights with ${empty ? 'zero' : 'existing'} geometry and runtime:null`, async () => {
+      const engine = lightEngine();
+      const fakes = sdfFakes(sdfLog());
+      const scene = structuredClone(source);
+      if (empty) {
+        scene.sources = [];
+        scene.instances = [];
+      }
+      scene.lights = [sceneLight('a'), sceneLight('b', { kind: 'spot', angleDeg: 60, innerAngleDeg: 20 })];
+      const before = structuredClone(scene);
+      const parent = engine.addNode(null);
+      const options = { ...fakes, resolveMesh, parent, placement: [10, 20, 30] };
+      const handle = await loadProceduralScene(engine, fakes.loader, scene, options);
+      assert.deepEqual(Object.keys(handle), ['root', 'instanceCount', 'sourceCount', 'setVisible', 'stats', 'runtime', 'dispose']);
+      assert.equal(engine.nodes.get(handle.root).parent, parent);
+      assert.equal(handle.instanceCount, scene.instances.length);
+      assert.equal(handle.sourceCount, scene.sources.length);
+      assert.deepEqual(handle.stats(), {
+        instances: scene.instances.length, meshes: empty ? 0 : source === fixture ? 4 : 5, pending: 0,
+      });
+      assert.deepEqual(engine.lights.get(1).position, [1, 2, 3]);
+      assert.equal(engine.lights.get(2).innerAngleDeg, 20);
+      assert.throws(() => handle.runtime({}), { code: 'sdfm.scene_format' });
+      handle.setVisible(false);
+      assert.deepEqual([...engine.lights.values()].map((light) => light.intensity), [0, 0]);
+      handle.setVisible(true);
+      assert.deepEqual([...engine.lights.values()].map((light) => light.intensity), [3, 3]);
+      assert.equal(engine.lightAdds, 2);
+      assert.deepEqual(scene, before);
+      handle.dispose();
+      handle.dispose();
+      assert.deepEqual(engine.lightRemovals, [1, 2]);
+      assert.deepEqual(engine.calls.removeNode, [[handle.root]]);
+      assert.deepEqual(engine.calls.removeMesh, engine.calls.addMesh.map(({ id }) => [id]));
+      const reloaded = await loadProceduralScene(engine, fakes.loader, scene, options);
+      assert.deepEqual([...engine.lights.keys()], [3, 4]);
+      reloaded.dispose();
+      assert.equal(engine.lights.size, 0);
+    });
+  }
+
+  test(`${source.variant} accepts omitted and empty lights with zero geometry`, async () => {
+    for (const lights of [undefined, []]) {
+      const engine = lightEngine();
+      const scene = { ...source, sources: [], instances: [], lights };
+      const handle = await loadProceduralScene(engine, null, scene, { mama });
+      handle.setVisible(false);
+      handle.setVisible(true);
+      handle.dispose();
+      assert.equal(engine.lightAdds, 0);
+      assert.deepEqual(engine.lightRemovals, []);
+    }
+  });
+
+  test(`${source.variant} failed replacement releases its lights and geometry while the live handle survives`, async () => {
+    const engine = lightEngine();
+    const fakes = sdfFakes(sdfLog());
+    const scene = { ...source, lights: [sceneLight('a')] };
+    const options = { ...fakes, resolveMesh };
+    const live = await loadProceduralScene(engine, fakes.loader, scene, options);
+    const published = structuredClone([...engine.lights]);
+    engine.failAddAt = 3;
+    await assert.rejects(loadProceduralScene(engine, fakes.loader,
+      { ...scene, lights: [sceneLight('a'), sceneLight('b')] }, options), (error) => error === lightRefusal);
+    assert.deepEqual([...engine.lights], published);
+    assert.deepEqual(engine.lightRemovals, [2]);
+    assert.deepEqual(engine.calls.removeNode, [[engine.calls.addNode.at(-1).id]]);
+    const refusal = Object.assign(new Error('spawn refused'), { code: 'api.unknown_handle' });
+    const spawn = source === fixture ? engine.addMeshInstance : fakes.loader.spawn;
+    if (source === fixture) engine.addMeshInstance = () => { throw refusal; };
+    else fakes.loader.spawn = () => { throw refusal; };
+    const meshStart = engine.calls.addMesh.length;
+    await assert.rejects(loadProceduralScene(engine, fakes.loader, scene, options), (error) => error === refusal);
+    assert.deepEqual([...engine.lights], published);
+    assert.deepEqual(engine.lightRemovals, [2, 4]);
+    assert.ok(engine.calls.removeNode.every(([node]) => node !== live.root));
+    assert.deepEqual(engine.calls.removeMesh, engine.calls.addMesh.slice(meshStart).map(({ id }) => [id]));
+    assert.equal(live.stats().instances, source.instances.length);
+    live.setVisible(false);
+    live.setVisible(true);
+    if (source === fixture) engine.addMeshInstance = spawn;
+    else fakes.loader.spawn = spawn;
+    live.dispose();
+    assert.equal(engine.lights.size, 0);
+  });
+
+  test(`${source.variant} shares static lights across runtime adapters and aborts pending work on unload`, async () => {
+    const engine = lightEngine();
+    const fakes = sdfFakes(sdfLog());
+    const scene = { ...source, lights: [sceneLight('a')], runtime: { input: {} } };
+    const evaluators = [];
+    let delta = {
+      ok: true, issues: [], added: [], moved: [], removed: [], remesh: [],
+      output: { ok: true, instances: source.instances, lights: [sceneLight('a', { t: [4, 5, 6], intensity: 9 })] },
+    };
+    const runtimeMama = {
+      ...(await fakes.mama()),
+      Runtime: {
+        create() {
+          const evaluator = {
+            step: () => delta,
+            set() {},
+            disposeCount: 0,
+            dispose() {
+              this.disposeCount += 1;
+            },
+          };
+          evaluators.push(evaluator);
+          return evaluator;
+        },
+      },
+    };
+    const options = {
+      ...fakes, resolveMesh, mama: async () => runtimeMama,
+    };
+    const handle = await loadProceduralScene(engine, fakes.loader, scene, options);
+    const first = handle.runtime({});
+    const second = handle.runtime({});
+    assert.deepEqual(Object.keys(first), ['step', 'set', 'dispose']);
+    assert.equal(engine.lightAdds, 1);
+    handle.setVisible(false);
+    await first.step(0);
+    await second.step(0);
+    assert.equal(engine.lightAdds, 1);
+    assert.deepEqual(engine.lights.get(1).position, [4, 5, 6]);
+    assert.equal(engine.lights.get(1).intensity, 0);
+    handle.setVisible(true);
+    assert.equal(engine.lights.get(1).intensity, 9);
+
+    let started;
+    let finish;
+    const moving = new Promise((resolve) => { started = resolve; });
+    const pending = new Promise((resolve) => { finish = resolve; });
+    engine.setTransform = () => {
+      started();
+      return pending;
+    };
+    delta = {
+      ...delta, moved: [source.instances[0]],
+      output: { ...delta.output, lights: [sceneLight('b')] },
+    };
+    const stepping = first.step(1);
+    await moving;
+    assert.equal(engine.lightAdds, 2);
+    assert.equal(engine.lights.get(2).intensity, 0, 'pending additions stay dark');
+    delta = { ...delta, output: { ...delta.output, lights: [sceneLight('c')] } };
+    const queued = assert.rejects(first.step(2), { code: 'sdfm.disposed' });
+    handle.dispose();
+    handle.dispose();
+    assert.equal(engine.lights.size, 0);
+    assert.deepEqual(evaluators.map((runtime) => runtime.disposeCount), [1, 1]);
+    finish();
+    assert.equal((await stepping).disposed, true);
+    await queued;
+    assert.equal(engine.lightAdds, 2);
+    assert.equal(engine.lights.size, 0);
+    assert.deepEqual(engine.calls.removeNode, [[handle.root]]);
+    await assert.rejects(second.step(3), { code: 'sdfm.disposed' });
+    assert.throws(() => handle.runtime({}), { code: 'sdfm.disposed' });
+    first.dispose();
+    second.dispose();
+    assert.deepEqual(evaluators.map((runtime) => runtime.disposeCount), [1, 1]);
+    const reloaded = await loadProceduralScene(engine, fakes.loader, scene, options);
+    const third = reloaded.runtime({});
+    const fourth = reloaded.runtime({});
+    third.dispose();
+    fourth.dispose();
+    reloaded.dispose();
+    assert.equal(engine.lights.size, 0);
+    assert.deepEqual(evaluators.map((runtime) => runtime.disposeCount), [1, 1, 1, 1]);
+  });
+}

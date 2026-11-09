@@ -6,6 +6,7 @@ import { decodeMeshFile, meshFilePayload } from './mesh-file.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
 import { instanceParams } from './instance-params.js';
 import { createProceduralRuntime } from './procedural-runtime.js';
+import { createMamaLightOwner } from './mama-light-owner.js';
 
 /**
  * Load one `sdfm.procedural-scene` v1 file (section 66). Mesh sources are decoded and uploaded;
@@ -32,19 +33,42 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
   const meshes = [];
   const instances = [];
   const entries = [];
+  const runtimes = new Set();
+  const detached = new Set();
+  let lights = null;
   let meshSource = null;
   let assetsByKey = null;
   let sourceParts = null;
   let meshCount = 0;
   let attributed = 0;
   let disposed = false;
+  const detach = (entry) => {
+    if (disposed || entry?.node == null || detached.has(entry.node)) return;
+    engine.removeNode(entry.node);
+    detached.add(entry.node);
+  };
   const dispose = () => {
     if (disposed) return;
     disposed = true;
-    engine.removeNode(root);
-    for (const mesh of meshes) engine.removeMesh(mesh);
+    const errors = [];
+    const release = (action) => {
+      try {
+        action();
+      } catch (e) {
+        errors.push(e);
+      }
+    };
+    for (const runtime of runtimes) release(() => runtime.dispose());
+    runtimes.clear();
+    release(() => lights?.dispose());
+    release(() => engine.removeNode(root));
+    for (const mesh of meshes) release(() => engine.removeMesh(mesh));
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'procedural scene disposal failed');
   };
   try {
+    lights = createMamaLightOwner(engine);
+    const lightTransaction = lights.prepare(scene.lights);
     if (scene.variant === 'sdf-refs') {
       const loaded = await loadSdfRefs(engine, loader, scene, mama, options, root);
       instances.push(...loaded.instances);
@@ -114,6 +138,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
       }
       meshCount = meshes.length;
     }
+    lightTransaction.commit();
   } catch (e) {
     dispose();
     throw e;
@@ -127,6 +152,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
     sourceCount: scene.sources.length,
     setVisible(visible) {
       checkLive();
+      lights.setVisible(visible);
       for (const instance of instances) engine.setVisible(instance, visible);
     },
     stats() {
@@ -137,12 +163,14 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
     },
     runtime(procgen) {
       checkLive();
-      return meshRuntime({
-        scene, engine, loader, mama, procgen, root, entries,
+      const runtime = meshRuntime({
+        scene, engine, loader, mama, procgen, root, entries, lights, detach,
         ...(scene.variant === 'sdf-refs'
           ? { meshSource, assetsByKey }
           : { sourceParts }),
       });
+      runtimes.add(runtime);
+      return runtime;
     },
     dispose,
   };
@@ -264,10 +292,15 @@ async function loadSdfRefs(engine, loader, scene, mama, options, root) {
  * instances it already tracks and, for an sdf-refs scene, builds a new in-memory asset for a new
  * mesh key and lets the loader (its worker pool) mesh it; the previous mesh stays alive. A
  * mesh-refs scene reuses the meshes it decoded for added instances of a known source.
+ * M3_RUNTIME_LIGHT_HANDOFF: options.lights is the root's private owner, created without placement
+ * and initialized from scene.lights inside the load failure boundary, even with no geometry/runtime.
+ * Every adapter shares it; raw runtime output.lights use the same identities and zero placement.
+ * The scene owns adapter disposal so pending work cannot recreate lights after unloading.
+ * Shared detach is idempotent across adapters; scene disposal removes their existing root once.
  */
-function meshRuntime({ scene, engine, loader, mama, procgen, root, entries, meshSource, assetsByKey, sourceParts }) {
+function meshRuntime({ scene, engine, loader, mama, procgen, root, entries, lights, detach, meshSource, assetsByKey, sourceParts }) {
   return createProceduralRuntime({
-    engine, scene, procgen, mama, root, instances: entries,
+    engine, scene, procgen, mama, root, instances: entries, lights, detach,
     ...(scene.variant === 'sdf-refs'
       ? {
           loader,
