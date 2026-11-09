@@ -24,5 +24,12 @@
   {"name": "trace-api-binding-unit", "command": "cargo test -p raa-js --lib trace --quiet", "timeout_s": 900},
   {"name": "trace-api-render", "command": "node scripts/trace-first-pixel.mjs render --baseline --out proofs/captures/trace-first-pixel-baseline.png", "timeout_s": 900, "after": ["trace-volume-baseline-judge"]},
   {"name": "trace-api-fresh", "command": "node scripts/trace-first-pixel.mjs fresh --baseline", "timeout_s": 120, "after": ["trace-api-render"]},
-  {"name": "trace-api-judge", "command": "python3 \"$NMC_JUDGE_CLIENT\" proofs/captures/trace-first-pixel-baseline.png --description \"A fresh engine-API capture of exactly two solid shapes on a dark background: a reddish cube on the left and a blue sphere on the right, both fully visible and fully resolved at the screen resolution, with clean silhouettes and no mesh in the scene. The image is the volume trace installed through setTraceScene on the public RAA engine API.\" --min-score 6", "timeout_s": 600, "after": ["trace-api-render", "trace-api-fresh"]}
+  {"name": "trace-api-judge", "command": "python3 \"$NMC_JUDGE_CLIENT\" proofs/captures/trace-first-pixel-baseline.png --description \"A fresh engine-API capture of exactly two solid shapes on a dark background: a reddish cube on the left and a blue sphere on the right, both fully visible and fully resolved at the screen resolution, with clean silhouettes and no mesh in the scene. The image is the volume trace installed through setTraceScene on the public RAA engine API.\" --min-score 6", "timeout_s": 600, "after": ["trace-api-render", "trace-api-fresh"]},
+  {"name": "m2-lights-build", "command": "bash scripts/build-lights.sh", "timeout_s": 1800},
+  {"name": "m2-lights-select", "command": "node web/common/lights-job.mjs select --page dist/lights --out out/lights", "timeout_s": 120, "after": ["m2-lights-build"]},
+  {"name": "m2-lights-clean", "command": "node web/common/lights-job.mjs clean --page dist/lights --out out/lights", "timeout_s": 60, "after": ["m2-lights-select"]},
+  {"name": "m2-lights-render", "command": "node web/common/lights-job.mjs render --page dist/lights --out out/lights", "timeout_s": 3600, "after": ["m2-lights-clean"]},
+  {"name": "m2-lights-fresh", "command": "node web/common/lights-job.mjs fresh --page dist/lights --out out/lights", "timeout_s": 120, "after": ["m2-lights-render"]},
+  {"name": "m2-lights-judge", "command": "node web/common/lights-job.mjs judge --page dist/lights --out out/lights", "timeout_s": 3600, "after": ["m2-lights-render", "m2-lights-fresh"]},
+  {"name": "m2-lights-command-check", "command": "nmc-commands-check", "timeout_s": 60}
 ]
