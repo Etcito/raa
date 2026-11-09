@@ -6,13 +6,14 @@ Build with `bash scripts/build-lights.sh`; it produces `dist/lights/` from this
 checkout's package, runner, wrapper and discovered scene modules.
 
 Implementation status: [lights-job.mjs](../web/common/lights-job.mjs) implements
-`select`, read-only `check`, `clean`, `render` and `fresh` under
-`M2B-MANAGED-TRANSPORT`. Judgment and final command registration belong to the
-downstream integration card; `judge` is not implemented by this transport.
+`select`, read-only `check`, `clean`, `render`, `fresh` and fail-closed `judge`.
+Judgment calls `fresh` first, joins run pairs to selection metadata by scene and
+variant, then judges primary captures and attached-light lifecycle captures.
 
 ## Commands and ordering
 
 The registered names in `.nmc/commands.json` are `m2-lights-build`,
+`m2-lights-functional`,
 `m2-lights-select`, `m2-lights-clean`, `m2-lights-render`, `m2-lights-fresh`,
 `m2-lights-judge` and `m2-lights-command-check`. The chain builds before selecting,
 selects before cleaning/rendering, then validates freshness before judgment.
@@ -23,6 +24,7 @@ node web/common/lights-job.mjs select --page dist/lights --out out/lights
 node web/common/lights-job.mjs clean --page dist/lights --out out/lights
 node web/common/lights-job.mjs render --page dist/lights --out out/lights
 node web/common/lights-job.mjs fresh --page dist/lights --out out/lights
+node web/common/lights-job.mjs judge --page dist/lights --out out/lights
 ```
 
 `select` imports the produced build and refuses invalid/empty selections.
@@ -31,9 +33,15 @@ retaining selection, unrelated files, sibling runs and archives. It is idempoten
 `render` invalidates the previous completion before requesting a client, publishes its own `dist/lights`
 through `NMC_GPU_CLIENT`, then uses the returned `page_ref` for metadata-selected
 pairs. Each input is exactly `{args: {scene, variant}}`. `fresh` requires successful
-results and captures from that invocation. The downstream `judge` must call `fresh`
-before joining run pairs to selection pairs by scene/variant and judging each
-explicit capture against its metadata description with `--min-score 6`.
+results and captures from that invocation. `judge` calls `fresh` before joining
+run pairs to selection pairs by scene/variant. It invokes
+`python3 "$NMC_JUDGE_CLIENT" <capture> --description <description> --min-score 6`
+for every selected primary capture and each attached-light lifecycle capture.
+Each result records its scene, variant, relative capture path, description, score
+and judge exit code in `judge.json`. A missing verdict, failed process, score
+outside [6, 10], incomplete prerequisite or missing lifecycle image leaves the
+batch incomplete and rejects the command. The nine lifecycle stages are judged
+in the order produced by the page, after their scene/variant primary capture.
 Subprocesses use argument arrays without a shell. There is no local browser fallback.
 
 `NMC_GPU_WAIT_S` defaults to 60 seconds for client availability, publication and
@@ -129,6 +137,8 @@ pair. `fresh(page, out)` rechecks all these conditions, including current build
 identity, without publishing or rendering. A failed producer cannot inherit an
 older attempt's success, PNG or completion receipt.
 
+`m2-lights-functional` runs `node --test web/common/lights-job.test.mjs` after the
+lights build. The command-check entry follows the functional and judge entries.
 `dist/` and `out/` are ignored; captures/binaries remain there and in the managed
 capture store, never committed. No reference image or output-hash check is used.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Metadata selection, managed transport and fail-closed freshness. Judgment is downstream.
+// Metadata selection, managed transport, fail-closed freshness and judgment.
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -9,8 +9,8 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs as parse } from 'node:util';
 
-const OPS = ['select', 'check', 'clean', 'render', 'fresh'];
-const USAGE = 'usage: node web/common/lights-job.mjs <select|check|clean|render|fresh> --page dist/lights [--out out/lights]';
+const OPS = ['select', 'check', 'clean', 'render', 'fresh', 'judge'];
+const USAGE = 'usage: node web/common/lights-job.mjs <select|check|clean|render|fresh|judge> --page dist/lights [--out out/lights]';
 const ASPECT = 16 / 9;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const vec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(isNum);
@@ -478,11 +478,102 @@ export async function fresh(page, out) {
   return record;
 }
 
+const ATTACHED_STAGES = [
+  ['initial', 'Initial lifecycle frame: a small orange source marker is beside the central grey parent block.'],
+  ['translated', 'Translated lifecycle frame: the grey parent block and orange source marker appear at their translated positions.'],
+  ['rotated', 'Rotated lifecycle frame: the grey parent block is rotated and the orange source marker has followed its parent.'],
+  ['reattached', 'Reattached lifecycle frame: the orange source marker is beside the second grey parent block.'],
+  ['detached', 'Detached lifecycle frame: the orange source marker stays in world space while the second parent block moves away.'],
+  ['reattached-before-delete', 'Reattached-before-delete lifecycle frame: the orange source marker is beside the second parent block before deletion.'],
+  ['parent-deleted', 'Parent-deleted lifecycle frame: the second parent block is gone and the source marker remains at its last world position.'],
+  ['light-removed', 'Light-removed lifecycle frame: the orange source marker is hidden after the local light is removed.'],
+  ['attached-final', 'Attached-final lifecycle frame: the orange source marker is visible beside the first grey parent block.'],
+];
+
+function judgeScore(text) {
+  for (const chunk of [text.trim(), ...text.split(/\r?\n/).reverse()]) {
+    if (!chunk.trim().startsWith('{')) continue;
+    try { const score = JSON.parse(chunk).score; if (isNum(score)) return score; } catch { /* progress output */ }
+  }
+  const verdicts = [...text.matchAll(/\bJUDGE (?:PASS|FAIL): (\d+(?:\.\d+)?)\/10\b/g)];
+  if (verdicts.length) return Number(verdicts.at(-1)[1]);
+  const scores = [...text.matchAll(/(?<![-\w])score\W{0,4}(\d+(?:\.\d+)?)/gi)];
+  return scores.length ? Number(scores.at(-1)[1]) : null;
+}
+
+function judgeOne(capture, description) {
+  const client = process.env.NMC_JUDGE_CLIENT;
+  ensure(nonblank(client), 'NMC_JUDGE_CLIENT is missing');
+  return new Promise((resolveJudge, rejectJudge) => {
+    const child = spawn('python3', [client, capture, '--description', description, '--min-score', '6'],
+      { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+    child.on('error', (cause) => rejectJudge(new Error(`judge process could not start: ${cause.message}`, { cause })));
+    child.on('close', (exitCode, signal) => {
+      const score = judgeScore(`${stdout}\n${stderr}`);
+      if (exitCode !== 0) return rejectJudge(new Error(`judge process failed (${exitCode ?? signal}, score ${score ?? 'unknown'}): ${(stderr || stdout).trim()}`));
+      if (!isNum(score)) return rejectJudge(new Error('judge returned no parseable score verdict'));
+      if (score < 6 || score > 10) return rejectJudge(new Error(`judge score ${score} is outside the accepted range [6, 10]`));
+      resolveJudge({ score, exitCode });
+    });
+  });
+}
+
+export async function judge(page, out) {
+  const run = await fresh(page, out);
+  const selection = await selectionAt(page, out);
+  ensure(selection.length === 14, `judge requires fourteen primary scene/variant captures; found ${selection.length}`);
+  const record = { runId: run.runId, buildId: run.buildId, commit: run.commit, complete: false, images: [] };
+  jsonWrite(inside(out, 'judge.json'), record);
+  const runPairs = new Map(run.pairs.map((pair) => [`${pair.scene}\0${pair.variant}`, pair]));
+  for (const pair of selection) {
+    const runPair = runPairs.get(`${pair.scene}\0${pair.variant}`);
+    ensure(runPair, `missing run prerequisite for ${pair.scene}/${pair.variant}`);
+    const capture = inside(out, runPair.capture);
+    const primary = await judgeOne(capture, pair.description);
+    record.images.push({ scene: pair.scene, variant: pair.variant, capture: runPair.capture,
+      description: pair.description, ...primary });
+    jsonWrite(inside(out, 'judge.json'), record);
+
+    if (pair.scene === 'attached-light') {
+      const resultPath = inside(out, runPair.result);
+      const doc = readJson(resultPath, 'fresh render result is required for lifecycle judgment');
+      const frames = doc.result?.lifecycle?.frames;
+      ensure(Array.isArray(frames), `missing attachment lifecycle output for ${pair.scene}/${pair.variant}`);
+      ensure(JSON.stringify(frames.map((frame) => frame.name)) === JSON.stringify(ATTACHED_STAGES.map(([name]) => name)),
+        `incomplete attachment lifecycle for ${pair.scene}/${pair.variant}`);
+      for (const [name, description] of ATTACHED_STAGES) {
+        const relativeCapture = `${relative(resolve(out), resolve(resultPath)).replace(/result\.json$/, `${name}.png`)}`;
+        const stagePath = inside(out, relativeCapture);
+        ensure(existsSync(stagePath) && lstatSync(stagePath).isFile() && lstatSync(stagePath).size > 0,
+          `missing lifecycle output: ${name}.png`);
+        const variantDescription = pair.variant === 'off'
+          ? ' Local illumination is disabled in the off variant.'
+          : name === 'light-removed' ? ' The local light has been removed in this stage.'
+            : ' The local light is enabled in this variant.';
+        const stageDescription = `${description}${variantDescription}`;
+        const stage = await judgeOne(stagePath, stageDescription);
+        record.images.push({ scene: pair.scene, variant: pair.variant, capture: relativeCapture,
+          description: stageDescription, ...stage });
+        jsonWrite(inside(out, 'judge.json'), record);
+      }
+    }
+  }
+  ensure(JSON.stringify(readJson(inside(out, 'run.json'), 'current run')) === JSON.stringify(run),
+    'run changed during judgment');
+  record.complete = true;
+  jsonWrite(inside(out, 'judge.json'), record);
+  return record;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const { op, page, out } = parseArgs(argv);
-  const result = await ({ check, select, clean, render, fresh })[op](page, out);
-  const count = Array.isArray(result) ? result.length : result?.pairs.length;
-  process.stdout.write(`lights-job: ${op}${count === undefined ? '' : ` ${count} pairs`}\n`);
+  const result = await ({ check, select, clean, render, fresh, judge })[op](page, out);
+  const count = Array.isArray(result) ? result.length : result?.pairs?.length ?? result?.images?.length;
+  const label = op === 'judge' ? ' images' : ' pairs';
+  process.stdout.write(`lights-job: ${op}${count === undefined ? '' : ` ${count}${label}`}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

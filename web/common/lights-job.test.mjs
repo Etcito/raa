@@ -189,7 +189,10 @@ function png() {
 }
 const base = variant => ({scene:pair.scene, variant, adapter:{vendor:'NVIDIA',architecture:'ampere',device:'RTX 3090',description:'NVIDIA hardware',isFallbackAdapter:false}, hardware:true, nonEmpty:true, canvas:[width,height], warmup:measured?60:30, frames:measured?300:1});
 const browser={userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36',platform:'Win32',devicePixelRatio:1};
-let result = {...base(pair.variant),browser,gpuErrors:[],lifecycle:{frames:[{name:'supplement'}]}};
+const lifecycleNames = pair.scene === 'attached-light'
+  ? ['initial','translated','rotated','reattached','detached','reattached-before-delete','parent-deleted','light-removed','attached-final']
+  : ['supplement'];
+let result = {...base(pair.variant),browser,gpuErrors:[],lifecycle:{frames:lifecycleNames.map(name => ({name,stats:{}}))}};
 if (measured) {
   const page = JSON.parse(readFileSync(process.env.LIGHTS_TEST_CONFIG));
   const {summarizeFrameIntervals} = await import(page.runner);
@@ -221,17 +224,18 @@ if (mode === 'wrong-counts') result.frames=0;
 if (mode !== 'no-output') {
   if (mode !== 'no-result') writeFileSync(join(dir,'result.json'),JSON.stringify({job_id:randomUUID(),client_id:'host-windows-client',result}));
   if (mode !== 'no-capture') writeFileSync(join(dir,mode === 'arbitrary-png'?'other.png':'capture.png'), mode === 'corrupt-png'?Buffer.from('not PNG'):mode === 'empty-png'?Buffer.alloc(0):png());
-  if (mode !== 'missing-lifecycle') writeFileSync(join(dir,'supplement.png'),png());
+  if (mode !== 'missing-lifecycle') for (const name of lifecycleNames) writeFileSync(join(dir,name + '.png'),png());
 }
 `;
 
-async function transportFixture(t, measured = false) {
+async function transportFixture(t, measured = false, definitions = null) {
   const base = join(WORKTREE, 'out');
   mkdirSync(base, { recursive: true });
-  const def = scene(measured ? 'many-lights' : 'point');
-  if (measured) def.measure = (await import('../../examples/lights/scenes/many-lights.js')).default.measure;
+  const defs = definitions ?? [scene(measured ? 'many-lights' : 'point')];
+  const manyLights = defs.find(definition => definition.id === 'many-lights');
+  if (measured || manyLights) (manyLights ?? defs[0]).measure = (await import('../../examples/lights/scenes/many-lights.js')).default.measure;
   // Place the build fixture in the real worktree: provenance reads real Git HEAD.
-  const f = writePage(t, [def], base);
+  const f = writePage(t, defs, base);
   mkdirSync(join(f.page, 'lib'));
   writeFileSync(join(f.page, 'lib/runner.js'), readFileSync(new URL('../../examples/lookdev/lib/runner.js', import.meta.url)));
   writeFileSync(join(f.page, 'build.json'), JSON.stringify({buildId:'build-fixture',commit:COMMIT,builtAt:new Date().toISOString()}));
@@ -239,7 +243,7 @@ async function transportFixture(t, measured = false) {
   f.trace = join(f.root, 'trace.jsonl');
   f.config = join(f.root, 'config.json');
   writeFileSync(f.client, CLIENT);
-  writeFileSync(f.config, JSON.stringify({runner:new URL('../../examples/lookdev/lib/runner.js', import.meta.url).href,measurementFor:def.measure?.measurementFor}));
+  writeFileSync(f.config, JSON.stringify({runner:new URL('../../examples/lookdev/lib/runner.js', import.meta.url).href,measurementFor:(manyLights ?? defs[0]).measure?.measurementFor}));
   await select(f.page, f.out);
   return f;
 }
@@ -248,7 +252,7 @@ function cli(f, op, mode = 'ok', extra = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(process.execPath, [JOB, op, '--page', f.page, '--out', f.out], {
       env: {...process.env, NMC_GPU_CLIENT:f.client, NMC_GPU_REVISION:COMMIT, NMC_GPU_WAIT_S:'2', NMC_CPUS:'1',
-        LIGHTS_TEST_TRACE:f.trace,LIGHTS_TEST_CONFIG:f.config,LIGHTS_TEST_CASE:mode,...extra},
+        LIGHTS_TEST_TRACE:f.trace,LIGHTS_TEST_CONFIG:f.config,LIGHTS_TEST_CASE:mode,NMC_JUDGE_CLIENT:f.judgeClient,...extra},
       stdio:['ignore','pipe','pipe'],shell:false,
     });
     let stdout='',stderr='';
@@ -463,4 +467,68 @@ test('a completed GPU job keeps its separate output download window', async t =>
     "console.error('GPU job fake: running (0 s)'); console.error('GPU job fake: done'); await new Promise(r => setTimeout(r,40));\nconst measured ="));
   passed(await cli(f,'render','ok',{NODE_OPTIONS:`--import=${clock}`}));
   passed(await cli(f,'fresh'));
+});
+
+const JUDGE_CLIENT = String.raw`import json, os, sys
+from pathlib import Path
+capture, *args = sys.argv[1:]
+assert Path(capture).is_file() and Path(capture).stat().st_size > 0
+assert args[0] == '--description' and args[1]
+assert args[2:] == ['--min-score', '6']
+mode = os.environ.get('LIGHTS_TEST_JUDGE_CASE', 'ok')
+if mode == 'no-verdict':
+    print('judgment finished without a verdict')
+elif mode == 'failed-score':
+    print('{"score": 8}')
+    sys.exit(1)
+elif mode == 'score-low':
+    print('JUDGE FAIL: 5/10')
+else:
+    print('{"score": 8}')
+`;
+
+test('judge fails closed across primary and attachment lifecycle captures', async t => {
+  const ids = ['point','spot','directional','area','many-lights','attached-light','motion'];
+  const f = await transportFixture(t, false, ids.map(id => scene(id)));
+  f.judgeClient = join(f.root, 'judge.py');
+  writeFileSync(f.judgeClient, JUDGE_CLIENT);
+  passed(await cli(f, 'render'));
+
+  const judged = await cli(f, 'judge');
+  passed(judged);
+  const record = read(join(f.out, 'judge.json'));
+  assert.equal(record.complete, true);
+  assert.equal(record.images.length, 14 + 18);
+  assert.deepEqual(record.images.slice(0, 2).map(image => image.variant), ['on', 'off']);
+  const lifecycle = record.images.filter(image => image.scene === 'attached-light');
+  assert.deepEqual(lifecycle.map(image => image.capture.split('/').at(-1)), [
+    'capture.png','initial.png','translated.png','rotated.png','reattached.png','detached.png',
+    'reattached-before-delete.png','parent-deleted.png','light-removed.png','attached-final.png',
+    'capture.png','initial.png','translated.png','rotated.png','reattached.png','detached.png',
+    'reattached-before-delete.png','parent-deleted.png','light-removed.png','attached-final.png',
+  ]);
+  assert.ok(lifecycle.every(image => image.score === 8 && image.exitCode === 0));
+
+  for (const [mode, pattern] of [
+    ['score-low', /score 5 is outside/],
+    ['failed-score', /judge process failed/],
+    ['no-verdict', /no parseable score verdict/],
+  ]) failed(await cli(f, 'judge', 'ok', {LIGHTS_TEST_JUDGE_CASE:mode}), pattern);
+
+  const runPath = join(f.out, 'run.json'), savedRun = readFileSync(runPath, 'utf8');
+  const run = JSON.parse(savedRun); run.complete = false; writeFileSync(runPath, JSON.stringify(run));
+  failed(await cli(f, 'judge'), /unsuccessful or incomplete/);
+  writeFileSync(runPath, savedRun);
+
+  const buildPath = join(f.page, 'build.json'), savedBuild = readFileSync(buildPath, 'utf8');
+  const build = JSON.parse(savedBuild); build.buildId = 'stale-build'; writeFileSync(buildPath, JSON.stringify(build));
+  failed(await cli(f, 'judge'), /stale build commit provenance|stale\/missing run\/build\/commit provenance/);
+  writeFileSync(buildPath, savedBuild);
+
+  const attachedPair = read(runPath).pairs.find(pair => pair.scene === 'attached-light' && pair.variant === 'on');
+  const stagePath = join(f.out, attachedPair.capture.replace('capture.png', 'rotated.png'));
+  const savedStage = readFileSync(stagePath);
+  rmSync(stagePath);
+  failed(await cli(f, 'judge'), /missing lifecycle output: rotated\.png/);
+  writeFileSync(stagePath, savedStage);
 });
