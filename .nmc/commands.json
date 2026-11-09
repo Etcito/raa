@@ -10,5 +10,7 @@
   {"name": "m2-lights-render", "command": "node web/common/lights-job.mjs render --page dist/lights --out out/lights", "timeout_s": 3600, "after": ["m2-lights-clean"]},
   {"name": "m2-lights-fresh", "command": "node web/common/lights-job.mjs fresh --page dist/lights --out out/lights", "timeout_s": 120, "after": ["m2-lights-render"]},
   {"name": "m2-lights-judge", "command": "node web/common/lights-job.mjs judge --page dist/lights --out out/lights", "timeout_s": 3600, "after": ["m2-lights-render", "m2-lights-fresh"]},
-  {"name": "m2-lights-command-check", "command": "nmc-commands-check", "timeout_s": 60, "after": ["m2-lights-functional", "m2-lights-judge"]}
+  {"name": "m2-lights-command-check", "command": "nmc-commands-check", "timeout_s": 60, "after": ["m2-lights-functional", "m2-lights-judge"]},
+  {"name": "m2-s20-cargo-check", "command": "cargo check", "timeout_s": 1800, "after": ["m2-lights-command-check"]},
+  {"name": "m2-s20-milestone-check", "command": "bash scripts/check.sh", "timeout_s": 3600, "after": ["m2-s20-cargo-check"]}
 ]
