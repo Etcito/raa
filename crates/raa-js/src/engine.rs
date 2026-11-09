@@ -46,7 +46,7 @@ use crate::convert::{
     decode_trs, geom_error, js, load_error, quality, scene_error,
 };
 use crate::feature_map::FeatureMap;
-use crate::state::{AssetEntry, EngineState, MeshEntry, MeshOrigin, SkinFeature};
+use crate::state::{AssetEntry, EngineState, MeshEntry, MeshOrigin, SceneInvocation, SkinFeature};
 
 /// WEBGPU_OPTIONAL: device features requested when the adapter has them, never required.
 const WEBGPU_OPTIONAL: wgpu::Features =
@@ -246,6 +246,8 @@ impl WebApp for EngineApp {
             pipeline,
             tonemap,
             features,
+            scene_invocation: SceneInvocation::default(),
+            view_cameras: [None; 4],
             max_materials: o.max_materials,
             meshes: HandleMap::new("mesh"),
             skins: Vec::new(),
@@ -277,6 +279,9 @@ impl WebApp for EngineApp {
         s.rebuild_dirty_groups()?;
         s.flush_skins(gpu)?;
         crate::trace::prepare_view(s, 0, input.size)?;
+        // Viewport 0 of the invocation; split views select their slot in the callback.
+        let discontinuity = s.scene_invocation.prepare(0);
+        s.lit.prepare_scene_view(0, discontinuity);
         let c = s
             .lit
             .prepare(gpu, &mut s.scene, &mut s.list, &mut s.tags, &mut s.slots)?;
@@ -290,6 +295,7 @@ impl WebApp for EngineApp {
     fn resize(&mut self, _gpu: &GpuContext, size: (u32, u32)) {
         if let Some(s) = self.state.borrow_mut().as_mut() {
             s.scene.camera.set_viewport(size.0, size.1);
+            s.scene_invocation.discontinuity_all();
         }
     }
 }
@@ -338,6 +344,37 @@ impl Engine {
         let mut guard = self.state.borrow_mut();
         let s = guard.as_mut().ok_or_else(disposed)?;
         f(runtime.gpu(), s).map_err(|e| js_err(&e))
+    }
+
+    /// Opens one scene invocation: clear the observation and open the renderer's index.
+    fn begin_scene_invocation(&mut self) -> Result<(), JsValue> {
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
+        let mut guard = self.state.borrow_mut();
+        let s = guard.as_mut().ok_or_else(disposed)?;
+        let index = s.scene_invocation.begin();
+        s.pipeline
+            .try_borrow_mut()
+            .map_err(|_| js_err(&pipeline_busy()))?
+            .begin_scene_submission();
+        s.lit.begin_scene_frame(index);
+        Ok(())
+    }
+
+    /// Closes it from the pipeline observation (only real submissions are acknowledged).
+    fn finish_scene_invocation(&mut self, runtime_ok: bool) {
+        let mut guard = self.state.borrow_mut();
+        let Some(s) = guard.as_mut() else { return };
+        let submission = s
+            .pipeline
+            .try_borrow()
+            .map(|p| p.scene_submission())
+            .unwrap_or_default();
+        let (acknowledge, complete) = s.scene_invocation.finish(runtime_ok, submission);
+        for view in (0..4).filter(|v| acknowledge & (1 << v) != 0) {
+            s.lit.submitted_scene_view(view);
+        }
+        s.lit.finish_scene_frame(complete);
     }
 }
 
@@ -447,9 +484,14 @@ impl Engine {
         })
     }
 
-    /// Renders one frame at `nowMs`.
+    /// Renders one frame at `nowMs`; one invocation, one scene-frame index.
     pub fn render(&mut self, now_ms: f64) -> Result<(), JsValue> {
-        self.runtime()?.frame(now_ms).map_err(|e| js_err(&e))
+        self.begin_scene_invocation()?;
+        let result = self
+            .runtime()
+            .and_then(|rt| rt.frame(now_ms).map_err(|e| js_err(&e)));
+        self.finish_scene_invocation(result.is_ok());
+        result
     }
 
     /// Frame statistics, the adapter and the hardware flag.
@@ -461,10 +503,13 @@ impl Engine {
     /// Renders one frame and tells whether any pixel differs from the clear colour.
     #[wasm_bindgen(js_name = probeNonEmpty)]
     pub async fn probe_non_empty(&mut self, now_ms: f64) -> Result<bool, JsValue> {
-        self.runtime()?
-            .probe_non_empty(now_ms)
-            .await
-            .map_err(|e| js_err(&e))
+        self.begin_scene_invocation()?;
+        let result = match self.runtime() {
+            Ok(rt) => rt.probe_non_empty(now_ms).await.map_err(|e| js_err(&e)),
+            Err(e) => Err(e),
+        };
+        self.finish_scene_invocation(result.is_ok());
+        result
     }
 
     /// Releases the GPU objects and the scene; every later call throws `api.disposed`.
@@ -566,6 +611,7 @@ impl Engine {
             cam.ortho_height = d.ortho_height;
             cam.near = d.near;
             cam.far = d.far;
+            s.scene_invocation.discontinuity(0);
             Ok(())
         })
     }
@@ -613,6 +659,7 @@ impl Engine {
             orbit.rotate(yaw, pitch);
             s.orbit = orbit;
             s.orbit.apply(&mut s.scene.camera);
+            s.scene_invocation.discontinuity(0);
             Ok(())
         })
     }

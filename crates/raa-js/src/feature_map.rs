@@ -9,10 +9,12 @@ use crate::convert::api_error;
 
 pub(crate) const FEATURE_MISSING: &str = "api.feature_missing";
 
-/// S12's rows in feature-bit order (0..19 unchanged), then S18's `skin` at 20; the
-/// tuple is `(name, order, feature-bit index)`, so `1 << bit` is `FrameGpu.flags.z`.
+/// S12's rows in feature-bit order (0..19 unchanged), then S18's `skin` at 20 and
+/// S12's tiling at 24; the tuple is `(name, order, feature-bit index)`, so `1 << bit` is
+/// `FrameGpu.flags.z` for every row here. The mapping from a logical id to its absolute
+/// flags word and bit is [`feature_address`], never a hard-coded word.
 #[rustfmt::skip]
-pub(crate) const FEATURE_ROWS: [(&str, u32, u32); 24] = [
+pub(crate) const FEATURE_ROWS: [(&str, u32, u32); 25] = [
     ("sky.env", 10, 0), ("shadow.csm", 20, 1), ("prepass", 30, 2), ("ao.gtao", 40, 3),
     ("shadow.contact", 45, 4), ("particles.sim", 50, 5), ("forward", 60, 6),
     ("fur.shells", 500, 7), ("particles.opaque", 600, 8), ("sky.background", 900, 9),
@@ -20,7 +22,24 @@ pub(crate) const FEATURE_ROWS: [(&str, u32, u32); 24] = [
     ("transparent.oit", 80, 14), ("particles.blend", 85, 15), ("dof", 110, 16),
     ("bloom", 120, 17), ("grading", 130, 18), ("tonemap", 200, 19), ("skin", 15, 20),
     ("trace.sdf", 55, 21), ("trace.composite", 560, 22), ("cel.resolve", 190, 23),
+    ("tiling", 35, 24),
 ];
+
+pub(crate) const TILING_FEATURE_ID: u32 = 24;
+
+#[rustfmt::skip]
+pub(crate) const RESERVED_FEATURE_IDS: [(u32, &str); 14] = [
+    (25, "weather.procedural"), (26, "daynight.cycle"), (27, "virtualized.geometry"),
+    (28, "visibility.shading"), (29, "gi.global"), (30, "volume.visibility"),
+    (31, "taa.temporal"), (32, "exposure.histogram"), (33, "sharpening.cas"),
+    (34, "atlas.mipgen"), (35, "reconstruction.temporal"), (36, "vg.extension"),
+    (37, "gi.extension"), (38, "post.extension"),
+];
+
+/// The absolute flags word and bit of feature `id` through `raa-shader`'s shared mapping.
+pub(crate) fn feature_address(id: u32) -> Option<(usize, u32)> {
+    raa_shader::feature_address(id)
+}
 
 #[derive(Default)]
 pub(crate) struct FeatureMap {

@@ -443,12 +443,27 @@ pub(crate) fn prepare_view(
 ) -> Result<(), RaaError> {
     use super::m21_views::ViewsState;
     let original = st.scene.camera;
-    if let Some(camera) = st
+    let own_camera = st
         .features
         .get::<ViewsState>()
         .and_then(|v| v.camera(index))
-        .copied()
-    {
+        .copied();
+    // An m21 viewport camera is static until `setViewportCamera` rewrites it, so a change
+    // is a camera cut there; viewport 0 cuts are marked by `setCamera`/`setOrbit`.
+    if index < 4 {
+        let signature = own_camera.map(|c| {
+            let mut s = [0.0; 9];
+            s[..3].copy_from_slice(&c.eye);
+            s[3..6].copy_from_slice(&c.target);
+            s[6..].copy_from_slice(&[c.fov_y_deg.to_radians(), c.near, c.far]);
+            s
+        });
+        if st.view_cameras[index].is_some_and(|previous| Some(previous) != signature) {
+            st.scene_invocation.discontinuity(index);
+        }
+        st.view_cameras[index] = signature;
+    }
+    if let Some(camera) = own_camera {
         let cam = &mut st.scene.camera;
         cam.eye = raa_math::Vec3::from_array(camera.eye);
         cam.target = raa_math::Vec3::from_array(camera.target);
@@ -495,6 +510,9 @@ pub(crate) fn prepare_view(
             post.shafts
                 .set_sun(light.direction, light.color.map(|c| c * light.intensity));
         }
+        // Consume the viewport's one-shot discontinuity mark before staging its camera.
+        let discontinuity = st.scene_invocation.prepare(index);
+        st.lit.prepare_scene_view(index, discontinuity);
         st.lit.prepare(
             gpu,
             &mut st.scene,

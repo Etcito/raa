@@ -12,7 +12,7 @@ use raa_csg::CsgResolver;
 use raa_geom::{GeometryRegistry, MeshData};
 use raa_lit::{LitMeshId, LitRenderer, RestMeshView};
 use raa_loader::LoaderRegistry;
-use raa_pipeline::{FeaturePass, LightingResources, Pipeline, RecordCtx};
+use raa_pipeline::{FeaturePass, LightingResources, Pipeline, RecordCtx, SubmissionState};
 use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene};
 use raa_skin::{SKIN_ORDER, SKIN_PASS, SkinMesh, SkinPass, SkinVertexInputs, validate_pose};
 use raa_tonemap::TonemapControl;
@@ -24,6 +24,53 @@ use crate::feature_map::FeatureMap;
 
 /// The material drawn by a sub-mesh without one (the lit renderer's default material).
 pub(crate) const DEFAULT_MATERIAL: MaterialId = MaterialId(0);
+
+/// One scene-frame index per Engine invocation (all viewports share it) and the one-shot
+/// resize/camera-cut marks its prepares consume.
+#[derive(Copy, Clone, Debug, Default)]
+pub(crate) struct SceneInvocation {
+    index: u64,
+    open: bool,
+    discontinuity: u8,
+}
+
+impl SceneInvocation {
+    pub(crate) fn begin(&mut self) -> u64 {
+        self.open = true;
+        self.index
+    }
+    pub(crate) fn discontinuity(&mut self, view: usize) {
+        self.discontinuity |= view_bit(view);
+    }
+    pub(crate) fn discontinuity_all(&mut self) {
+        self.discontinuity = 0b1111;
+    }
+    pub(crate) fn prepare(&mut self, view: usize) -> bool {
+        let bit = view_bit(view);
+        let dropped = self.discontinuity & bit != 0;
+        self.discontinuity &= !bit;
+        dropped
+    }
+    /// `(views to acknowledge, history complete)`: nothing submitted keeps history and
+    /// index; anything submitted advances once; partial or failed drops history.
+    pub(crate) fn finish(&mut self, runtime_ok: bool, s: SubmissionState) -> (u8, bool) {
+        if !self.open {
+            return (0, true);
+        }
+        let acknowledge = s.submitted_mask | if runtime_ok { s.pending_mask } else { 0 };
+        let skipped = (s.submitted_mask | s.pending_mask) == 0 && !s.record_failed;
+        let complete = skipped || (runtime_ok && !s.record_failed);
+        if acknowledge != 0 {
+            self.index = self.index.saturating_add(1);
+        }
+        self.open = false;
+        (acknowledge, complete)
+    }
+}
+
+fn view_bit(view: usize) -> u8 {
+    1 << (view % 4)
+}
 
 /// Which API created a mesh handle.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -462,6 +509,12 @@ pub(crate) struct EngineState {
     pub pipeline: Rc<RefCell<Pipeline>>,
     pub tonemap: TonemapControl,
     pub features: FeatureMap,
+    /// The open render/probe invocation and the scene-frame index advancing once per
+    /// submitted invocation (M2-FRAME-LIFECYCLE handoff in `engine.rs`).
+    pub scene_invocation: SceneInvocation,
+    /// Last effective camera (eye3, target3, fov, near, far) of each viewport that has its
+    /// own m21 camera: a change is a camera discontinuity for that viewport.
+    pub view_cameras: [Option<[f32; 9]>; 4],
     pub max_materials: u32,
     pub meshes: HandleMap<MeshEntry>,
     /// The S18 skin of every mesh uploaded with joints and weights, keyed by lit mesh.

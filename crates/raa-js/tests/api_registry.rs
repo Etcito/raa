@@ -73,7 +73,7 @@ fn feature_rows() -> Vec<(String, u32, u32)> {
 }
 
 #[test]
-fn feature_bits_keep_prior_rows_and_register_skin_at_20() {
+fn feature_bits_keep_prior_rows_and_register_tiling_at_24() {
     #[rustfmt::skip]
     let expected = [
         ("sky.env", 10, 0), ("shadow.csm", 20, 1), ("prepass", 30, 2), ("ao.gtao", 40, 3),
@@ -83,7 +83,7 @@ fn feature_bits_keep_prior_rows_and_register_skin_at_20() {
         ("transparent.oit", 80, 14), ("particles.blend", 85, 15), ("dof", 110, 16),
         ("bloom", 120, 17), ("grading", 130, 18), ("tonemap", 200, 19)];
     let rows = feature_rows();
-    assert_eq!(rows.len(), expected.len() + 4, "skin, trace and cel rows");
+    assert_eq!(rows.len(), expected.len() + 5);
     let actual: Vec<(&str, u32, u32)> = rows[..expected.len()]
         .iter()
         .map(|(n, o, b)| (n.as_str(), *o, *b))
@@ -93,6 +93,28 @@ fn feature_bits_keep_prior_rows_and_register_skin_at_20() {
     assert_eq!(rows[21], ("trace.sdf".to_string(), 55, 21));
     assert_eq!(rows[22], ("trace.composite".to_string(), 560, 22));
     assert_eq!(rows[23], ("cel.resolve".to_string(), 190, 23));
+    assert_eq!(rows[24], ("tiling".to_string(), 35, 24));
+}
+
+/// The reserved rows parse as `(id, "name")`; no `("` prefix, so `feature_rows` skips them.
+fn reserved_feature_ids() -> Vec<u32> {
+    let src = include_str!("../src/feature_map.rs");
+    let body = &src[src.find("RESERVED_FEATURE_IDS").expect("reserved table")..];
+    let body = &body[..body.find("];").expect("reserved table end")];
+    body.split('(')
+        .skip(1)
+        .filter_map(|row| row.split(',').next()?.trim().parse().ok())
+        .collect()
+}
+
+#[test]
+fn tiling_and_reservations_map_through_gpu_constants() {
+    assert_eq!(reserved_feature_ids(), (25..=38).collect::<Vec<u32>>());
+    for (id, address) in [(24, (2, 24)), (32, (3, 0)), (38, (3, 6))] {
+        assert_eq!(raa_shader::feature_address(id), Some(address), "id {id}");
+    }
+    let src = include_str!("../src/feature_map.rs");
+    assert!(src.contains("TILING_FEATURE_ID") && src.contains("raa_shader::feature_address(id)"));
 }
 
 #[test]
@@ -148,4 +170,43 @@ fn registry_calls_install_and_frame_in_file_order() {
     assert!(at.windows(2).all(|w| w[0] < w[1]), "frame order {at:?}");
 
     assert!(install_body.contains("Ok(())") && frame_body.contains("Ok(())"));
+}
+
+#[test]
+fn engine_wraps_render_and_probe_with_the_scene_invocation_boundary() {
+    let src = include_str!("../src/engine.rs");
+    assert_eq!(src.matches("self.begin_scene_invocation()?;").count(), 2);
+    assert_eq!(
+        src.matches("self.finish_scene_invocation(result.is_ok());")
+            .count(),
+        2
+    );
+    for needle in [
+        ".begin_scene_submission()",
+        ".begin_scene_frame(index)",
+        ".scene_submission()",
+        ".submitted_scene_view(view)",
+        ".finish_scene_frame(complete)",
+        "s.lit.prepare_scene_view(0, discontinuity)",
+        "s.scene_invocation.discontinuity_all()",
+    ] {
+        assert!(src.contains(needle), "engine.rs lacks `{needle}`");
+    }
+    assert!(src.matches("s.scene_invocation.discontinuity(0)").count() >= 2);
+    let pipeline = include_str!("../src/api/m07_pipeline.rs");
+    for needle in [
+        "st.lit.prepare_scene_view(index, discontinuity)",
+        "st.scene_invocation.prepare(index)",
+        "st.scene_invocation.discontinuity(index)",
+    ] {
+        assert!(pipeline.contains(needle), "m07 lacks `{needle}`");
+    }
+    // The exact public interfaces the Engine calls (signatures from the landed crates).
+    let _: fn(&mut raa_lit::LitRenderer, u64) = raa_lit::LitRenderer::begin_scene_frame;
+    let _: fn(&mut raa_lit::LitRenderer, usize, bool) = raa_lit::LitRenderer::prepare_scene_view;
+    let _: fn(&mut raa_lit::LitRenderer, usize) = raa_lit::LitRenderer::submitted_scene_view;
+    let _: fn(&mut raa_lit::LitRenderer, bool) = raa_lit::LitRenderer::finish_scene_frame;
+    let _: fn(&mut raa_pipeline::Pipeline) = raa_pipeline::Pipeline::begin_scene_submission;
+    let _: fn(&raa_pipeline::Pipeline) -> raa_pipeline::SubmissionState =
+        raa_pipeline::Pipeline::scene_submission;
 }
