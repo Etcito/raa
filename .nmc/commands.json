@@ -84,5 +84,99 @@
     "after": [
       "m2-s20-cargo-check"
     ]
+  },
+  {
+    "name": "m3-lights-build",
+    "command": "bash scripts/build-lights.sh",
+    "timeout_s": 1800
+  },
+  {
+    "name": "m3-lights-stage",
+    "command": "node examples/lights/mama-lights.test.mjs --stage dist/lights",
+    "timeout_s": 120,
+    "after": [
+      "m3-lights-build"
+    ]
+  },
+  {
+    "name": "m3-lights-functional",
+    "command": "node --test examples/lights/mama-lights.test.mjs web/common/lights-job.test.mjs packages/raa-sdfm/test/mama-bridge.test.js packages/raa-sdfm/test/mama-light-owner.test.js packages/raa-sdfm/test/procedural.test.js packages/raa-sdfm/test/procedural-runtime.test.js packages/raa-sdfm/test/procedural-trace.test.js",
+    "timeout_s": 300,
+    "after": [
+      "m3-lights-stage"
+    ]
+  },
+  {
+    "name": "m3-lights-command-check",
+    "command": "nmc-commands-check",
+    "timeout_s": 60,
+    "after": [
+      "m3-lights-functional"
+    ]
+  },
+  {
+    "name": "m3-lights-check",
+    "command": "node web/common/lights-job.mjs check --milestone m03 --page dist/lights --out out/lights-m3",
+    "timeout_s": 120,
+    "after": [
+      "m3-lights-command-check"
+    ]
+  },
+  {
+    "name": "m3-lights-select",
+    "command": "node web/common/lights-job.mjs select --milestone m03 --page dist/lights --out out/lights-m3",
+    "timeout_s": 120,
+    "after": [
+      "m3-lights-check"
+    ]
+  },
+  {
+    "name": "m3-lights-clean",
+    "command": "node web/common/lights-job.mjs clean --milestone m03 --page dist/lights --out out/lights-m3",
+    "timeout_s": 60,
+    "after": [
+      "m3-lights-select"
+    ]
+  },
+  {
+    "name": "m3-lights-render",
+    "command": "node web/common/lights-job.mjs render --milestone m03 --page dist/lights --out out/lights-m3",
+    "timeout_s": 3600,
+    "after": [
+      "m3-lights-clean"
+    ]
+  },
+  {
+    "name": "m3-lights-fresh",
+    "command": "node web/common/lights-job.mjs fresh --milestone m03 --page dist/lights --out out/lights-m3",
+    "timeout_s": 120,
+    "after": [
+      "m3-lights-render"
+    ]
+  },
+  {
+    "name": "m3-lights-judge",
+    "command": "node web/common/lights-job.mjs judge --milestone m03 --page dist/lights --out out/lights-m3",
+    "timeout_s": 3600,
+    "after": [
+      "m3-lights-render",
+      "m3-lights-fresh"
+    ]
+  },
+  {
+    "name": "m3-cargo-check",
+    "command": "cargo check",
+    "timeout_s": 1800,
+    "after": [
+      "m3-lights-command-check"
+    ]
+  },
+  {
+    "name": "m3-branch-check",
+    "command": "bash scripts/check.sh",
+    "timeout_s": 3600,
+    "after": [
+      "m3-cargo-check"
+    ]
   }
 ]
