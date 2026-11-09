@@ -11,7 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs as parse } from 'node:util';
 
 const OPS = ['select', 'check', 'clean', 'render', 'fresh', 'judge'];
-const USAGE = 'usage: node web/common/lights-job.mjs <select|check|clean|render|fresh|judge> --page dist/lights [--out out/lights]';
+const USAGE = 'usage: node web/common/lights-job.mjs <select|check|clean|render|fresh|judge> --page dist/lights [--out out/lights] [--milestone mNN]';
 const ASPECT = 16 / 9;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const vec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(isNum);
@@ -30,10 +30,12 @@ function readJson(path, hint) {
 
 function parseArgs(argv) {
   const { values, positionals } = parse({ args: argv, allowPositionals: true,
-    options: { page: { type: 'string' }, out: { type: 'string' } } });
+    options: { page: { type: 'string' }, out: { type: 'string' }, milestone: { type: 'string' } } });
   ensure(positionals.length === 1 && OPS.includes(positionals[0]) && values.page, USAGE);
   ensure(positionals[0] === 'check' || values.out, USAGE);
-  return { op: positionals[0], page: values.page, out: values.out };
+  const milestone = values.milestone ?? 'm28';
+  ensure(/^m\d\d$/.test(milestone), `invalid milestone selector: ${milestone}`);
+  return { op: positionals[0], page: values.page, out: values.out, milestone };
 }
 
 /** True when `box` overlaps the camera's view volume (conservative AABB/frustum test). */
@@ -132,16 +134,30 @@ function collect(scenes) {
   return pairs;
 }
 
+async function checkFor(page, milestone) {
+  const scenes = await loadScenes(page);
+  const selected = new Map([...scenes].filter(([, scene]) => scene.milestone === milestone));
+  ensure(selected.size > 0, 'selection is empty');
+  for (const [id, scene] of selected) ensure(scene.variants.length === 2
+    && scene.variants.some(variant => variant.id === 'on') && scene.variants.some(variant => variant.id === 'off'),
+  `scene ${id} must include on and off variants`);
+  return collect(selected);
+}
+
 export async function check(page) {
-  return collect(await loadScenes(page));
+  return checkFor(page, 'm28');
 }
 
 // The selection records its produced build so later commands cannot run a stale one.
-export async function select(page, out) {
-  const pairs = await check(page);
+async function selectFor(page, out, milestone) {
+  const pairs = await checkFor(page, milestone);
   mkdirSync(out, { recursive: true });
-  writeFileSync(join(out, 'selection.json'), `${JSON.stringify({ page: resolve(page), pairs }, null, 2)}\n`);
+  writeFileSync(join(out, 'selection.json'), `${JSON.stringify({ page: resolve(page), pairs, milestone }, null, 2)}\n`);
   return pairs;
+}
+
+export async function select(page, out) {
+  return selectFor(page, out, 'm28');
 }
 
 const nonblank = (v) => typeof v === 'string' && v.trim().length > 0;
@@ -172,11 +188,12 @@ function buildIdentity(page) {
   return build;
 }
 
-async function selectionAt(page, out) {
+async function selectionAt(page, out, milestone) {
   const selection = readJson(join(out, 'selection.json'), 'select the produced page first');
   ensure(selection.page === resolve(page), 'selection belongs to a different page');
-  const pairs = await check(page);
   ensure(Array.isArray(selection.pairs) && selection.pairs.length > 0, 'selection is empty');
+  ensure(selection.milestone === milestone, `selection milestone ${selection.milestone} does not match invocation ${milestone}`);
+  const pairs = await checkFor(page, milestone);
   ensure(JSON.stringify(selection.pairs) === JSON.stringify(pairs), 'selection differs from produced metadata: select again');
   return pairs;
 }
@@ -209,13 +226,18 @@ function currentAttempt(out) {
   return pointer.attempt;
 }
 
-export async function clean(page, out) {
-  await selectionAt(page, out);
+async function cleanFor(page, out, milestone) {
+  await selectionAt(page, out, milestone);
+  buildIdentity(page);
   if (existsSync(inside(out, '.lights-current.json'))) {
     rmSync(inside(out, currentAttempt(out)), { recursive: true, force: true });
     rmSync(inside(out, '.lights-current.json'));
   }
   rmSync(inside(out, 'run.json'), { force: true });
+}
+
+export async function clean(page, out) {
+  return cleanFor(page, out, 'm28');
 }
 
 const primaryEvidence = (pair) => pair.evidence ?? captureEvidence(pair.scene, pair.variant) ?? { filename: 'capture.png', label: pair.description };
@@ -302,9 +324,10 @@ function validateRun(op, pair, measured) {
   ensure(op.warmup === (measured ? 60 : 30) && op.frames === (measured ? 300 : 1), 'invalid warm-up/frame counts');
 }
 
-async function validateEvidence(op, pair, page) {
+async function validateEvidence(op, pair, page, milestone) {
   const scenes = await loadScenes(page);
   const scene = scenes.get(pair.scene);
+  ensure(scene?.milestone === milestone, `scene ${pair.scene} metadata does not match invocation ${milestone}`);
   const measured = !!scene.measure;
   validateRun(op, pair, measured);
   const browser = op.browser;
@@ -392,27 +415,36 @@ function outputFiles(dir, prefix = '') {
   });
 }
 
-async function pairOutput(page, dir, pair) {
+async function pairOutput(page, dir, pair, milestone, missing = null) {
   const files = outputFiles(dir).filter((name) => name !== 'completion.json');
-  ensure(files.includes(primaryFile(pair)), 'missing explicit capture.png output');
+  if (!files.includes(primaryFile(pair))) {
+    if (!missing) ensure(false, 'missing explicit capture.png output');
+    missing.push(`${pair.scene}/${pair.variant}: missing capture ${primaryFile(pair)}`);
+  }
   ensure(files.includes('result.json'), 'missing operation result.json output');
   const doc = readJson(join(dir, 'result.json'), 'managed render must produce its operation result');
   ensure(hostId(doc.job_id) && hostId(doc.client_id), 'missing managed job/client provenance');
-  await validateEvidence(doc.result, pair, page);
+  await validateEvidence(doc.result, pair, page, milestone);
   for (const file of files.filter((name) => name.endsWith('.png'))) validatePng(inside(dir, file), doc.result.canvas);
-  if (pair.scene === 'attached-light') ensure(JSON.stringify(doc.result.lifecycle?.frames?.map(frame => frame.name))
-    === JSON.stringify(attachedStages.map(([name]) => name)), 'incomplete attachment lifecycle');
+  if (milestone === 'm28' && pair.scene === 'attached-light'
+    && JSON.stringify(doc.result.lifecycle?.frames?.map(frame => frame.name)) !== JSON.stringify(attachedStages.map(([name]) => name))) {
+    if (!missing) ensure(false, 'incomplete attachment lifecycle');
+    missing.push(`${pair.scene}/${pair.variant}: incomplete attachment lifecycle`);
+  }
   // Attached lifecycle filenames are authored by the page, not guessed from any PNG.
-  for (const frame of doc.result.lifecycle?.frames ?? []) if (frame.name !== undefined) {
-    ensure(files.includes(stageFile(pair, frame.name)), `missing lifecycle output: ${frame.name}.png`);
+  for (const frame of milestone === 'm28' ? doc.result.lifecycle?.frames ?? [] : []) if (frame.name !== undefined) {
+    if (!files.includes(stageFile(pair, frame.name))) {
+      if (!missing) ensure(false, `missing lifecycle output: ${frame.name}.png`);
+      missing.push(`${pair.scene}/${pair.variant}: missing lifecycle output: ${frame.name}.png`);
+    }
   }
   return { doc, files };
 }
 
-export async function render(page, out) {
-  const pairs = await selectionAt(page, out);
+async function renderFor(page, out, milestone) {
+  const pairs = await selectionAt(page, out, milestone);
   // Invalidate the previous completion before any operation that can fail.
-  await clean(page, out);
+  await cleanFor(page, out, milestone);
   const attempt = `.lights-runs/${randomUUID()}`;
   mkdirSync(inside(out, attempt), { recursive: true });
   jsonWrite(inside(out, '.lights-current.json'), { attempt });
@@ -423,16 +455,16 @@ export async function render(page, out) {
   // Before a producer returns, the only host-issued context is its publication.
   // One real managed job identifies the complete selection, never a clock
   // or an assumed NMC_RUN_ID. Its result remains alongside the pair receipts.
-  const record = { pageRef, pairs: [], complete: false, buildId: build.buildId,
+  const record = { pageRef, pairs: [], complete: false, milestone, buildId: build.buildId,
     runId: pageRef, images: pairs.flatMap(pair => [
       { scene: pair.scene, variant: pair.variant, ...primaryEvidence(pair) },
-      ...(pair.scene === 'attached-light' ? attachedStages.map(([stage]) => ({ scene: pair.scene, variant: pair.variant, stage, ...captureEvidence(pair.scene, pair.variant, stage) })) : []),
+      ...(milestone === 'm28' && pair.scene === 'attached-light' ? attachedStages.map(([stage]) => ({ scene: pair.scene, variant: pair.variant, stage, ...captureEvidence(pair.scene, pair.variant, stage) })) : []),
     ]), commit: build.commit, startedAt: new Date().toISOString(), completedAt: null };
   jsonWrite(inside(out, 'run.json'), record);
   try {
     const input = inside(out, `${attempt}/input.json`);
     const batchDir = inside(out, attempt);
-    jsonWrite(input, { args: { pairs: pairs.map(({ scene, variant }) => ({ scene, variant })) } });
+    jsonWrite(input, { args: { milestone, pairs: pairs.map(({ scene, variant }) => ({ scene, variant })) } });
     await clientCall(client, ['render', input, '--page-ref', pageRef, '-o', batchDir], waitS, true);
     const batch = readJson(join(batchDir, 'result.json'), 'managed job must return the complete selection');
     ensure(hostId(batch.job_id) && hostId(batch.client_id), 'missing managed job/client provenance');
@@ -449,8 +481,8 @@ export async function render(page, out) {
         ensure(!steps[0].error, steps[0].error);
         mkdirSync(dir, { recursive: true });
         jsonWrite(join(dir, 'result.json'), { job_id: batch.job_id, client_id: batch.client_id, result: steps[0].result });
-        const { doc, files } = await pairOutput(page, dir, pair);
-        jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId,
+        const { doc, files } = await pairOutput(page, dir, pair, milestone);
+        jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId, milestone,
           commit: record.commit, scene: pair.scene, variant: pair.variant, jobId: doc.job_id, clientId: doc.client_id, files });
         record.pairs.push({ scene: pair.scene, variant: pair.variant,
           capture: `${namespace}/${primaryFile(pair)}`, result: `${namespace}/result.json` });
@@ -462,7 +494,7 @@ export async function render(page, out) {
     record.complete = true;
     record.completedAt = new Date().toISOString();
     jsonWrite(inside(out, 'run.json'), record);
-    return await fresh(page, out);
+    return await freshFor(page, out, milestone);
   } catch (cause) {
     record.complete = false;
     record.completedAt = null;
@@ -471,10 +503,15 @@ export async function render(page, out) {
   }
 }
 
-export async function fresh(page, out) {
-  const selection = await selectionAt(page, out);
+export async function render(page, out) {
+  return renderFor(page, out, 'm28');
+}
+
+async function freshFor(page, out, milestone, missing = null) {
+  const selection = await selectionAt(page, out, milestone);
   const build = buildIdentity(page);
   const record = readJson(inside(out, 'run.json'), 'render must complete successfully first');
+  ensure(record.milestone === milestone, `run milestone ${record.milestone} does not match invocation ${milestone}`);
   ensure(record.complete === true && iso(record.startedAt) && iso(record.completedAt)
     && Date.parse(record.completedAt) >= Date.parse(record.startedAt)
     && Date.parse(record.startedAt) >= Date.parse(build.builtAt), 'run is unsuccessful or incomplete');
@@ -488,10 +525,11 @@ export async function fresh(page, out) {
     && Array.isArray(batch.result?.diagnostics) && batch.result.diagnostics.length === 0, 'incomplete/failed whole-flow result');
   const expectedImages = selection.flatMap(pair => [
     { scene: pair.scene, variant: pair.variant, ...primaryEvidence(pair) },
-    ...(pair.scene === 'attached-light' ? attachedStages.map(([stage]) => ({ scene: pair.scene, variant: pair.variant, stage, ...captureEvidence(pair.scene, pair.variant, stage) })) : []),
+    ...(milestone === 'm28' && pair.scene === 'attached-light' ? attachedStages.map(([stage]) => ({ scene: pair.scene, variant: pair.variant, stage, ...captureEvidence(pair.scene, pair.variant, stage) })) : []),
   ]);
   ensure(JSON.stringify(record.images) === JSON.stringify(expectedImages), 'capture manifest differs from produced metadata');
-  ensure(new Set(record.images.map(image => image.filename)).size === record.images.length, 'capture filenames collide');
+  ensure(new Set(record.images.map(image => image.filename)).size === record.images.length,
+    `capture filenames collide: ${record.images.map(image => image.filename).join(', ')}`);
   let clientId;
   for (const pair of selection) {
     const matches = record.pairs.filter((p) => p.scene === pair.scene && p.variant === pair.variant);
@@ -501,9 +539,9 @@ export async function fresh(page, out) {
     ensure(run.capture === `${namespace}/${primaryFile(pair)}` && run.result === `${namespace}/result.json`, 'stale/unsafe pair paths');
     const dir = inside(out, namespace);
     const receipt = readJson(inside(dir, 'completion.json'), 'producer must validate successfully');
-    ensure(receipt.complete === true && ['pageRef', 'buildId', 'runId', 'commit'].every((k) => receipt[k] === record[k])
+    ensure(receipt.complete === true && ['pageRef', 'buildId', 'runId', 'commit', 'milestone'].every((k) => receipt[k] === record[k])
       && receipt.scene === pair.scene && receipt.variant === pair.variant, 'stale/unsuccessful producer completion');
-    const { doc, files } = await pairOutput(page, dir, pair);
+    const { doc, files } = await pairOutput(page, dir, pair, milestone, missing);
     if (pair === selection[0]) ensure(record.runId === String(doc.job_id), 'wrong managed run provenance');
     const steps = batch.result.steps.filter((s) => s.scene === pair.scene && s.variant === pair.variant);
     ensure(steps.length === 1 && !steps[0].error && JSON.stringify(steps[0].result) === JSON.stringify(doc.result)
@@ -511,11 +549,18 @@ export async function fresh(page, out) {
     clientId ??= doc.client_id;
     ensure(receipt.jobId === doc.job_id && receipt.clientId === doc.client_id
       && String(doc.job_id) === record.runId && doc.client_id === clientId, 'wrong managed job provenance');
-    ensure(JSON.stringify(receipt.files) === JSON.stringify(files), 'missing/changed producer output inventory');
+    if (JSON.stringify(receipt.files) !== JSON.stringify(files)) {
+      if (!missing) ensure(false, 'missing/changed producer output inventory');
+      missing.push(`${pair.scene}/${pair.variant}: missing/changed producer output inventory`);
+    }
   }
   ensure(currentAttempt(out) === attempt && JSON.stringify(readJson(join(out, 'run.json'), 'current run')) === JSON.stringify(record),
     'run changed during freshness validation');
   return record;
+}
+
+export async function fresh(page, out) {
+  return freshFor(page, out, 'm28');
 }
 
 const ATTACHED_STAGES = attachedStages.map(([name, , label]) => [name, label]);
@@ -551,15 +596,22 @@ function judgeOne(capture, description) {
   });
 }
 
-export async function judge(page, out) {
-  const run = await fresh(page, out);
-  const selection = await selectionAt(page, out);
-  ensure(selection.length === 14, `judge requires fourteen primary scene/variant captures; found ${selection.length}`);
-  const record = { runId: run.runId, buildId: run.buildId, commit: run.commit, complete: false, images: [], errors: [] };
+async function judgeFor(page, out, milestone) {
+  const missing = [];
+  const run = await freshFor(page, out, milestone, missing);
+  const selection = await selectionAt(page, out, milestone);
+  if (milestone === 'm28') ensure(selection.length === 14, `judge requires fourteen primary scene/variant captures; found ${selection.length}`);
+  const requiredCount = selection.length + (milestone === 'm28'
+    ? selection.filter(pair => pair.scene === 'attached-light').length * ATTACHED_STAGES.length : 0);
+  const record = { runId: run.runId, buildId: run.buildId, commit: run.commit, milestone, complete: false, images: [], errors: missing };
   jsonWrite(inside(out, 'judge.json'), record);
   const judgeImage = async (pair, capture, description) => {
     const entry = { scene: pair.scene, variant: pair.variant, capture, description, label: description, aspect: 'functional' };
-    try { Object.assign(entry, await judgeOne(inside(out, capture), description)); }
+    try {
+      const path = inside(out, capture);
+      ensure(existsSync(path) && lstatSync(path).isFile() && lstatSync(path).size > 0, 'missing required image');
+      Object.assign(entry, await judgeOne(path, description));
+    }
     catch (error) {
       Object.assign(entry, { error: error.message, score: error.score ?? null, exitCode: error.exitCode ?? null,
         stdout: error.stdout ?? '', stderr: error.stderr ?? '' });
@@ -574,34 +626,41 @@ export async function judge(page, out) {
     ensure(runPair, `missing run prerequisite for ${pair.scene}/${pair.variant}`);
     await judgeImage(pair, runPair.capture, primaryEvidence(pair).label);
 
-    if (pair.scene === 'attached-light') {
+    if (milestone === 'm28' && pair.scene === 'attached-light') {
       const resultPath = inside(out, runPair.result);
       const doc = readJson(resultPath, 'fresh render result is required for lifecycle judgment');
       const frames = doc.result?.lifecycle?.frames;
-      ensure(Array.isArray(frames), `missing attachment lifecycle output for ${pair.scene}/${pair.variant}`);
-      ensure(JSON.stringify(frames.map((frame) => frame.name)) === JSON.stringify(ATTACHED_STAGES.map(([name]) => name)),
-        `incomplete attachment lifecycle for ${pair.scene}/${pair.variant}`);
+      if (!Array.isArray(frames) || JSON.stringify(frames.map((frame) => frame.name)) !== JSON.stringify(ATTACHED_STAGES.map(([name]) => name))) {
+        record.errors.push(`incomplete attachment lifecycle for ${pair.scene}/${pair.variant}`);
+        jsonWrite(inside(out, 'judge.json'), record);
+      }
       for (const [name] of ATTACHED_STAGES) {
         const relativeCapture = `${relative(resolve(out), resolve(resultPath)).replace(/result\.json$/, stageFile(pair, name))}`;
-        const stagePath = inside(out, relativeCapture);
-        ensure(existsSync(stagePath) && lstatSync(stagePath).isFile() && lstatSync(stagePath).size > 0,
-          `missing lifecycle output: ${name}.png`);
         await judgeImage(pair, relativeCapture, captureEvidence(pair.scene, pair.variant, name).label);
       }
     }
   }
   ensure(JSON.stringify(readJson(inside(out, 'run.json'), 'current run')) === JSON.stringify(run),
     'run changed during judgment');
-  ensure(record.images.length === 32, `judge requires 32 images; found ${record.images.length}`);
-  ensure(record.errors.length === 0, `image judgment failures (${record.errors.length}/32):\n${record.errors.join('\n')}`);
+  if (milestone === 'm28') ensure(record.images.length === 32, `judge requires 32 images; found ${record.images.length}`);
+  else ensure(record.images.length === requiredCount, `judge image inventory differs from selected metadata; found ${record.images.length} of ${requiredCount}`);
+  ensure(record.errors.length === 0, `image judgment failures (${record.errors.length}/${requiredCount}):\n${record.errors.join('\n')}`);
   record.complete = true;
   jsonWrite(inside(out, 'judge.json'), record);
   return record;
 }
 
+export async function judge(page, out) {
+  return judgeFor(page, out, 'm28');
+}
+
 export async function main(argv = process.argv.slice(2)) {
-  const { op, page, out } = parseArgs(argv);
-  const result = await ({ check, select, clean, render, fresh, judge })[op](page, out);
+  const { op, page, out, milestone } = parseArgs(argv);
+  const result = await ({
+    check: () => checkFor(page, milestone), select: () => selectFor(page, out, milestone),
+    clean: () => cleanFor(page, out, milestone), render: () => renderFor(page, out, milestone),
+    fresh: () => freshFor(page, out, milestone), judge: () => judgeFor(page, out, milestone),
+  })[op]();
   const count = Array.isArray(result) ? result.length : result?.pairs?.length ?? result?.images?.length;
   const label = op === 'judge' ? ' images' : ' pairs';
   process.stdout.write(`lights-job: ${op}${count === undefined ? '' : ` ${count}${label}`}\n`);

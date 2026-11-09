@@ -13,7 +13,7 @@ const CAM = { eye: [0, 2, 5], target: [0, 0, 0], fovYDeg: 60, near: 0.1, far: 10
 const FLOOR = { min: [-50, -1, -50], max: [50, 0, 50] };
 const BEHIND = { min: [0, 0, 10], max: [1, 1, 11] };
 const EDGE = { min: [4.5, 0, -1], max: [5, 1, 1] };
-const scene = (id = 'point', subjects = [FLOOR]) => ({ id, milestone: 'm02', variants: ['on', 'off'].map((variant) =>
+const scene = (id = 'point', subjects = [FLOOR], milestone = 'm28') => ({ id, milestone, variants: ['on', 'off'].map((variant) =>
   ({ id: variant, description: `${id} ${variant}`, judge: true, timeMs: 1000, selection: { camera: CAM, subjects } })) });
 const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
 const source = (def) => `export default { ...${JSON.stringify(def)}, build: async () => {} };`;
@@ -53,6 +53,43 @@ test('select reads only the requested build and writes its on/off pairs', async 
   assert.deepEqual((await check(spot.page)).map((p) => p.scene), ['spot', 'spot']);
 });
 
+test('m28 defaults and explicit m28 stay separate from metadata-selected m03', async t => {
+  const m3 = scene('mama-lights', [FLOOR], 'm03');
+  m3.variants.forEach(variant => { variant.evidence = { filename: `mama-${variant.id}.png`, label: `MAMA ${variant.id} lights` }; });
+  const f = writePage(t, [scene(), m3]);
+  assert.deepEqual((await check(f.page)).map(pair => pair.scene), ['point', 'point']);
+  assert.deepEqual((await main(['check', '--page', f.page, '--milestone', 'm28'])), undefined);
+  assert.deepEqual((await main(['check', '--page', f.page, '--milestone', 'm03'])), undefined);
+  const m28out = join(f.root, 'out/m28'), m03out = join(f.root, 'out/m03');
+  await main(['select', '--page', f.page, '--out', m28out]);
+  await main(['select', '--page', f.page, '--out', m03out, '--milestone', 'm03']);
+  const oldSelection = read(join(m28out, 'selection.json'));
+  const newSelection = read(join(m03out, 'selection.json'));
+  assert.equal(oldSelection.milestone, 'm28');
+  assert.deepEqual(oldSelection.pairs.map(pair => pair.scene), ['point', 'point']);
+  assert.equal(newSelection.milestone, 'm03');
+  assert.deepEqual(newSelection.pairs.map(pair => pair.evidence.filename), ['mama-on.png', 'mama-off.png']);
+  for (const milestone of ['28', 'm3', 'm300', '']) {
+    await assert.rejects(main(['check', '--page', f.page, '--milestone', milestone]), /invalid milestone selector/);
+  }
+  await assert.rejects(main(['check', '--page', f.page, '--milestone', 'm99']), /selection is empty/);
+});
+
+test('selector mismatch is rejected before cleanup and changed metadata invalidates the selected inventory', async t => {
+  const f = writePage(t, [scene(), scene('mama-lights', [FLOOR], 'm03')]);
+  await select(f.page, f.out);
+  mkdirSync(join(f.out, '.lights-runs/00000000-0000-4000-8000-000000000000'), { recursive: true });
+  writeFileSync(join(f.out, '.lights-current.json'), JSON.stringify({attempt:'.lights-runs/00000000-0000-4000-8000-000000000000'}));
+  await assert.rejects(main(['clean', '--page', f.page, '--out', f.out, '--milestone', 'm03']), /selection milestone m28 does not match/);
+  assert.equal(existsSync(join(f.out, '.lights-current.json')), true);
+  writeFileSync(join(f.page, 'scenes/late-scene.js'), source(scene('late-scene')));
+  const index = read(join(f.page, 'scenes.json'));
+  index.push({id:'late-scene',milestone:'m28',file:'scenes/late-scene.js'});
+  writeFileSync(join(f.page, 'scenes.json'), JSON.stringify(index));
+  await assert.rejects(main(['clean', '--page', f.page, '--out', f.out]), /selection differs from produced metadata/);
+  assert.equal(existsSync(join(f.out, '.lights-current.json')), true);
+});
+
 test('select refuses missing, empty, malformed and escaping scene indexes', async (t) => {
   const missing = writePage(t, [scene()]);
   rmSync(join(missing.page, 'scenes.json'));
@@ -65,7 +102,7 @@ test('select refuses missing, empty, malformed and escaping scene indexes', asyn
   await assert.rejects(check(malformed.page), /entry 0 is not \{ id, milestone, file \}/);
   const escaping = writePage(t, [scene()]);
   writeFileSync(join(escaping.root, 'outside.js'), 'export default {};');
-  writeFileSync(join(escaping.page, 'scenes.json'), JSON.stringify([{ id: 'point', milestone: 'm02', file: '../../outside.js' }]));
+  writeFileSync(join(escaping.page, 'scenes.json'), JSON.stringify([{ id: 'point', milestone: 'm28', file: '../../outside.js' }]));
   await assert.rejects(check(escaping.page), /is not in the page build/);
   const absent = writePage(t, [scene()]);
   rmSync(join(absent.page, 'scenes/point.js'));
@@ -86,6 +123,10 @@ test('select refuses invalid scene metadata', async (t) => {
   def.variants[0].id = 'both';
   writeFileSync(join(wrongVariant.page, 'scenes/point.js'), source(def));
   await assert.rejects(check(wrongVariant.page), /variant both is not on or off/);
+  const missingOff = writePage(t, [scene()]);
+  const onlyOn = scene(); onlyOn.variants.pop();
+  writeFileSync(join(missingOff.page, 'scenes/point.js'), source(onlyOn));
+  await assert.rejects(check(missingOff.page), /must include on and off variants/);
 });
 
 test('select refuses invalid variant metadata', async (t) => {
@@ -196,6 +237,8 @@ function png() {
 }
 const base = variant => ({scene:pair.scene, variant, adapter:{vendor:'NVIDIA',architecture:'ampere',device:'RTX 3090',description:'NVIDIA hardware',isFallbackAdapter:false}, hardware:true, nonEmpty:true, canvas:[width,height], warmup:measured?60:30, frames:measured?300:1});
 const browser={userAgent:'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36',platform:'Win32',devicePixelRatio:1};
+const pageConfig = JSON.parse(readFileSync(process.env.LIGHTS_TEST_CONFIG));
+const primaryName = pageConfig.captures?.[pair.scene]?.[pair.variant] ?? 'capture.png';
 const lifecycleNames = pair.scene === 'attached-light'
   ? ['initial','translated','rotated','reattached','detached','reattached-before-delete','parent-deleted','light-removed','attached-final']
   : ['supplement'];
@@ -231,7 +274,7 @@ if (mode === 'wrong-size') result.canvas=[32,32];
 if (mode === 'wrong-counts') result.frames=0;
 if (mode !== 'no-output') {
   steps.push({...pair,result});
-  if (mode !== 'no-capture') writeFileSync(join(dir,mode === 'arbitrary-png'?'other.png':(captureEvidence(pair.scene,pair.variant)?.filename ?? 'capture.png')), mode === 'corrupt-png'?Buffer.from('not PNG'):mode === 'empty-png'?Buffer.alloc(0):png());
+  if (mode !== 'no-capture') writeFileSync(join(dir,mode === 'arbitrary-png'?'other.png':primaryName), mode === 'corrupt-png'?Buffer.from('not PNG'):mode === 'empty-png'?Buffer.alloc(0):png());
   if (mode !== 'missing-lifecycle') for (const name of lifecycleNames) writeFileSync(join(dir,pair.scene === 'attached-light' ? captureEvidence(pair.scene,pair.variant,name).filename : name + '.png'),png());
 }
 }
@@ -255,14 +298,17 @@ async function transportFixture(t, measured = false, definitions = null) {
   f.trace = join(f.root, 'trace.jsonl');
   f.config = join(f.root, 'config.json');
   writeFileSync(f.client, CLIENT);
-  writeFileSync(f.config, JSON.stringify({runner:new URL('../../examples/lookdev/lib/runner.js', import.meta.url).href,measurementFor:(manyLights ?? defs[0]).measure?.measurementFor}));
+  writeFileSync(f.config, JSON.stringify({runner:new URL('../../examples/lookdev/lib/runner.js', import.meta.url).href,
+    measurementFor:(manyLights ?? defs[0]).measure?.measurementFor,
+    captures:Object.fromEntries(defs.map(definition => [definition.id, Object.fromEntries(definition.variants.map(variant =>
+      [variant.id, variant.evidence?.filename ?? captureEvidence(definition.id, variant.id)?.filename ?? 'capture.png']))]))}));
   await select(f.page, f.out);
   return f;
 }
 
-function cli(f, op, mode = 'ok', extra = {}) {
+function cli(f, op, mode = 'ok', extra = {}, milestone) {
   return new Promise((resolveRun, reject) => {
-    const child = spawn(process.execPath, [JOB, op, '--page', f.page, '--out', f.out], {
+    const child = spawn(process.execPath, [JOB, op, '--page', f.page, '--out', f.out, ...(milestone ? ['--milestone', milestone] : [])], {
       env: {...process.env, NMC_GPU_CLIENT:f.client, NMC_GPU_REVISION:COMMIT, NMC_GPU_WAIT_S:'2', NMC_CPUS:'1',
         LIGHTS_TEST_TRACE:f.trace,LIGHTS_TEST_CONFIG:f.config,LIGHTS_TEST_CASE:mode,NMC_JUDGE_CLIENT:f.judgeClient,...extra},
       stdio:['ignore','pipe','pipe'],shell:false,
@@ -302,6 +348,40 @@ test('managed publication/render/fresh preserve explicit captures, page JSON and
   assert.deepEqual(calls.map(c => c.op), ['publish','render']);
   assert.equal(calls[0].input,f.page);
   for (const call of calls.slice(1)) assert.equal(call.args[1],record.pageRef);
+});
+
+test('all CLI operations carry explicit m03 and judge only its metadata inventory', async t => {
+  const m3 = scene('mama-lights', [FLOOR], 'm03');
+  m3.variants.forEach(variant => { variant.evidence = { filename: `mama-${variant.id}.png`, label: `MAMA ${variant.id}` }; });
+  const f = await transportFixture(t, false, [scene(), m3]);
+  f.judgeClient = join(f.root, 'judge.py');
+  writeFileSync(f.judgeClient, JUDGE_CLIENT);
+  await main(['check', '--page', f.page, '--milestone', 'm03']);
+  await main(['select', '--page', f.page, '--out', f.out, '--milestone', 'm03']);
+  assert.equal(read(join(f.out, 'selection.json')).milestone, 'm03');
+  passed(await cli(f, 'clean', 'ok', {}, 'm03'));
+  passed(await cli(f, 'render', 'ok', {}, 'm03'));
+  passed(await cli(f, 'fresh', 'ok', {}, 'm03'));
+  passed(await cli(f, 'judge', 'ok', {}, 'm03'));
+  const run = read(join(f.out, 'run.json'));
+  const judged = read(join(f.out, 'judge.json'));
+  assert.equal(run.milestone, 'm03');
+  assert.equal(judged.milestone, 'm03');
+  assert.deepEqual(run.pairs.map(pair => pair.scene), ['mama-lights', 'mama-lights']);
+  assert.deepEqual(judged.images.map(image => image.description), ['MAMA on', 'MAMA off']);
+  assert.equal(judged.images.length, 2);
+  const renderInput = JSON.parse(readFileSync(join(f.out, read(join(f.out, '.lights-current.json')).attempt, 'input.json')));
+  assert.equal(renderInput.args.milestone, 'm03');
+  for (const pair of run.pairs) assert.equal(read(join(f.out, pair.result.replace('result.json', 'completion.json'))).milestone, 'm03');
+  const missingCapture = join(f.out, run.pairs[0].capture);
+  rmSync(missingCapture);
+  failed(await cli(f, 'judge', 'ok', {}, 'm03'), /image judgment failures/);
+  const partial = read(join(f.out, 'judge.json'));
+  assert.equal(partial.complete, false);
+  assert.equal(partial.images.length, 2, 'judgment continues for every selected image');
+  assert.ok(partial.images.some(image => image.error === 'missing required image'));
+  assert.ok(partial.images.some(image => image.score === 8));
+  failed(await cli(f, 'fresh'), /selection milestone m03 does not match invocation m28/);
 });
 
 test('publication accepts the reference client page_ref line convention', async t => {
@@ -586,6 +666,12 @@ test('real staged metadata resolves functional labels and 32 unique filenames', 
   execFileSync(process.execPath, ['--input-type=module', '-', join(f.page, 'scenes')], { input: imports });
   const staging = script.split("<<'JS'\n")[1].split('\nJS\n')[0];
   execFileSync(process.execPath, ['--input-type=module', '-', f.page], { input: staging, cwd: WORKTREE });
+  const m03 = scene('mama-produced-light', [FLOOR], 'm03');
+  m03.variants.forEach(variant => { variant.evidence = { filename: `mama-produced-${variant.id}.png`, label: `MAMA-produced ${variant.id} light` }; });
+  writeFileSync(join(f.page, 'scenes/mama-produced-light.js'), source(m03));
+  const index = read(join(f.page, 'scenes.json'));
+  index.push({ id: m03.id, milestone: m03.milestone, file: 'scenes/mama-produced-light.js' });
+  writeFileSync(join(f.page, 'scenes.json'), JSON.stringify(index));
   const pairs = await check(f.page);
   assert.equal(pairs.length, 14);
   const images = pairs.flatMap(pair => [pair.evidence,
@@ -595,4 +681,8 @@ test('real staged metadata resolves functional labels and 32 unique filenames', 
   assert.equal(images.length, 32);
   assert.equal(new Set(images.map(image => image.filename)).size, 32);
   assert.ok(images.every(image => image.label && !/prepass|metre|intensity equality|dark background/.test(image.label)));
+  const m03out = join(f.root, 'out/m03');
+  await main(['select', '--page', f.page, '--out', m03out, '--milestone', 'm03']);
+  const m03Pairs = read(join(m03out, 'selection.json')).pairs;
+  assert.deepEqual(m03Pairs.map(pair => pair.evidence.filename), ['mama-produced-on.png', 'mama-produced-off.png']);
 });
