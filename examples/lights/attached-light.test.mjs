@@ -79,7 +79,8 @@ function page() {
   const engines = [];
   const canvas = { style: {}, toDataURL: () => 'data:image/png;base64,cG5n' };
   const context = {
-    window: {}, navigator: {}, geometry, objects: {}, runScene, renderAt, variantTimeMs,
+    window: {}, navigator: { userAgent: 'fixture', platform: 'fixture' }, devicePixelRatio: 1,
+    geometry, objects: {}, runScene, renderAt, variantTimeMs,
     document: { getElementById: (id) => id === 'c' ? canvas : {} },
     fetch: async () => ({ ok: true, json: async () => [{ id: attached.id, file: 'scenes/attached-light.js' }] }),
     loadRaa: async () => ({ createEngine: async () => {
@@ -103,6 +104,7 @@ test('attached-light selects visible surface, parents and source for on/off', ()
     assert.deepEqual(variantProblems(variant), []);
     assert.equal(variant.selection.subjects.length, 3);
     assert.match(variant.description, /Local lights cast no shadow yet/);
+    assert.match(variant.description, /Transparent and displaced fur.*prepass tile bounds; tiles without prepass coverage receive no local light/);
   }
 });
 

@@ -70,6 +70,7 @@ test('nearest-rank percentiles use ceil(p*n)-1 on ascending values', () => {
 
 test('interval arithmetic and FPS percentiles follow the contract', () => {
   const timing = summarizeFrameIntervals([10, 20, 30, 40]);
+  assert.deepEqual(Object.keys(timing).sort(), [...TIMING_KEYS].sort());
   close(timing.frameIntervalMsMedian, 20);
   close(timing.frameIntervalMsP95, 40);
   close(timing.fpsMean, 40);
@@ -106,6 +107,7 @@ test('measured mode excludes warm-up and schedules exactly frames intervals', as
   assert.equal(result.warmup, 2);
   assert.equal(result.frames, 4);
   assert.equal(calls.render, 2 + 4, 'warm-up renders plus measured renders');
+  assert.deepEqual(result.frameIntervalsMs, [10, 20, 20, 30]);
   close(result.frameIntervalMsMedian, 20);
   close(result.frameIntervalMsP95, 30);
   close(result.fpsMean, 4 / 0.08);
@@ -158,7 +160,16 @@ test('measureAnimationFrames returns the same summary for a fixed schedule', asy
   withRaf(t, [0, 16, 32, 48]);
   const engine = await raa.createEngine(canvas);
   const timing = await measureAnimationFrames(engine, scene, variant, 1000, 3);
-  assert.deepEqual(Object.keys(timing).sort(), [...TIMING_KEYS].sort());
+  assert.deepEqual(Object.keys(timing).sort(), [...TIMING_KEYS, 'frameIntervalsMs'].sort());
+  assert.deepEqual(timing.frameIntervalsMs, [16, 16, 16]);
   close(timing.frameIntervalMsMedian, 16);
   close(timing.fpsMean, 3 / 0.048);
+});
+
+test('measurement rejects nonnumeric timestamps and invalid direct frame counts', async (t) => {
+  const { raa, canvas, scene, variant } = harness();
+  const engine = await raa.createEngine(canvas);
+  withRaf(t, ['100', 116]);
+  await assert.rejects(measureAnimationFrames(engine, scene, variant, 1000, 1), /finite timestamps/);
+  await assert.rejects(measureAnimationFrames(engine, scene, variant, 1000, 1.5), /positive integer/);
 });

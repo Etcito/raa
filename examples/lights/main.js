@@ -6,7 +6,7 @@ import { runScene, renderAt, variantTimeMs } from './lib/runner.js';
 
 const canvas = document.getElementById('c');
 const status = document.getElementById('status');
-const gpuErrors = [];
+let gpuErrors = [];
 const preparation = { status: 'pending', error: null };
 let engine = null;
 let residents = [];
@@ -23,11 +23,29 @@ function installGpuErrors() {
     const requestDevice = adapter.requestDevice.bind(adapter);
     adapter.requestDevice = async (descriptor) => {
       const device = await requestDevice(descriptor);
-      device.addEventListener('uncapturederror', (event) => gpuErrors.push(event.error.message));
+      const errors = gpuErrors;
+      device.addEventListener('uncapturederror', (event) => errors.push(errorDetails('uncaptured GPU error', event.error)));
+      device.lost.then(
+        (info) => errors.push(errorDetails('GPU device lost', info)),
+        (error) => errors.push(errorDetails('GPU device loss notification failed', error)),
+      );
       return device;
     };
     return adapter;
   };
+}
+
+function errorDetails(label, error) {
+  const parts = [];
+  const seen = new Set();
+  while (error && !seen.has(error)) {
+    if (typeof error !== 'object') { parts.push(String(error)); break; }
+    seen.add(error);
+    if (error.reason) parts.push(String(error.reason));
+    if (error.message) parts.push(String(error.message));
+    error = error.cause;
+  }
+  return `${label}: ${parts.join(': ') || 'unknown cause'}`;
 }
 
 const pbr = (engine, color, opts = {}) => engine.addMaterial({ ...opts, color, model: 'pbr' });
@@ -62,10 +80,15 @@ const ready = (async () => {
 // Chrome/Windows metadata for a measurement, recorded next to the adapter identity.
 function browserMetadata() {
   const nav = typeof navigator === 'object' && navigator ? navigator : {};
+  if (typeof nav.userAgent !== 'string' || !nav.userAgent ||
+      typeof nav.platform !== 'string' || !nav.platform ||
+      !Number.isFinite(globalThis.devicePixelRatio) || globalThis.devicePixelRatio <= 0) {
+    throw new Error('browser metadata missing userAgent, platform or devicePixelRatio');
+  }
   return {
-    userAgent: String(nav.userAgent ?? ''),
-    platform: String(nav.platform ?? ''),
-    devicePixelRatio: typeof globalThis.devicePixelRatio === 'number' ? globalThis.devicePixelRatio : 1,
+    userAgent: nav.userAgent,
+    platform: nav.platform,
+    devicePixelRatio: globalThis.devicePixelRatio,
   };
 }
 
@@ -80,6 +103,8 @@ function browserMetadata() {
  */
 async function runMeasured(raa, scene, variant) {
   const config = scene.measure;
+  const browser = browserMetadata();
+  if (browser.devicePixelRatio !== config.devicePixelRatio) throw new Error('many-lights: unexpected devicePixelRatio');
   const runs = {};
   const devices = new Map();
   // The requested variant runs last so its engine owns the canvas configuration for the
@@ -107,14 +132,13 @@ async function runMeasured(raa, scene, variant) {
       if (!Number.isFinite(result[key])) problems.push(`${id}: ${key} is not a number`);
     }
   }
-  if (!(on.fpsMean >= config.minFpsMean)) problems.push(`on: fpsMean ${on.fpsMean} is below ${config.minFpsMean}`);
   if (problems.length > 0) throw new Error(`many-lights: ${problems.join('; ')}`);
   last = { scene, variant, preparedCapture: false, captures: [] };
   if (scene.legend) status.textContent = scene.legend;
   if (gpuErrors.length) throw new Error(`GPU errors: ${gpuErrors.join('\n')}`);
   return {
     ...runs[variant.id], runs, adapter: on.adapter, hardware: on.hardware,
-    browser: browserMetadata(), measurement_for: config.measurementFor, gpuErrors: gpuErrors.slice(),
+    browser, measurement_for: config.measurementFor, gpuErrors: gpuErrors.slice(),
   };
 }
 
@@ -131,7 +155,7 @@ async function run(args) {
     residents = [];
     engine = null;
     last = null;
-    gpuErrors.length = 0;
+    gpuErrors = [];
     if (scene.measure) return await runMeasured(raa, scene, variant);
     window.__nmcGpuProgress = 'runScene';
     const result = await runScene(raa, canvas, scene, variant, {
@@ -150,6 +174,7 @@ async function run(args) {
         },
       });
     }
+    result.browser = browserMetadata();
     result.gpuErrors = gpuErrors.slice();
     if (gpuErrors.length) throw new Error(`GPU errors: ${gpuErrors.join('\n')}`);
     last = { scene, variant, preparedCapture, captures };

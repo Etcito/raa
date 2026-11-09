@@ -16,7 +16,8 @@ export default {
       + (id === 'on' ? 'A warm bounded pool illuminates the floor around the source. '
         : 'The source marker remains visible but local illumination is disabled. ')
       + 'Lifecycle PNGs show movement, reattachment, world-preserving detach and parent deletion, '
-      + 'then light removal. Local lights cast no shadow yet.',
+      + 'then light removal. Local lights cast no shadow yet. Transparent and displaced fur '
+      + 'use the nearest opaque or fur-base prepass tile bounds; tiles without prepass coverage receive no local light.',
     judge: true,
     timeMs: 1000,
     selection: {

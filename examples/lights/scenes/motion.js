@@ -20,7 +20,8 @@ export default {
         + legend
       : 'Ordinarily shaded grey scene: four solid boxes and a central sphere above a broad '
         + 'stationary floor against a dark background. The motion diagnostic is disabled. ')
-      + ' Local lights cast no shadow yet.',
+      + ' Local lights cast no shadow yet. Transparent and displaced fur use the nearest opaque '
+      + 'or fur-base prepass tile bounds; tiles without prepass coverage receive no local light.',
     judge: true,
     timeMs: 128,
     passes: { disable: id === 'off' ? ['motion.display'] : [] },

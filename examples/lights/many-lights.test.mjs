@@ -25,6 +25,7 @@ const BASE = {
   fpsMean: 60.2,
   fpsMedian: 60.1,
   fpsP95: 58.9,
+  frameIntervalsMs: Array(300).fill(16.6),
 };
 
 // The S17 public light methods plus the page's scene-building calls; the preset must
@@ -79,7 +80,7 @@ function page(runScene) {
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/142.0.0.0 Safari/537.36',
       platform: 'Win32',
     },
-    geometry, objects: {}, runScene, renderAt: () => {}, variantTimeMs: (variant) => variant.timeMs,
+    devicePixelRatio: 1, geometry, objects: {}, runScene, renderAt: () => {}, variantTimeMs: (variant) => variant.timeMs,
     document: { getElementById: (id) => id === 'c' ? canvas : {} },
     fetch: async () => ({ ok: true, json: async () => [{ id: many.id, file: 'scenes/many-lights.js' }] }),
     loadRaa: async () => ({ createEngine: async () => { throw new Error('measured runs must use runScene'); } }),
@@ -155,6 +156,8 @@ test('the operation returns both measured runs with adapter and browser metadata
   assert.equal(json.variant, 'on');
   assert.deepEqual(Object.keys(json.runs).sort(), ['off', 'on']);
   assert.equal(json.runs.on.fpsMean, 60.2);
+  assert.equal(json.runs.on.frameIntervalsMs.length, 300);
+  assert.equal(json.runs.off.frameIntervalsMs.length, 300);
   assert.deepEqual(plain(json.adapter), BASE.adapter);
   assert.match(json.browser.userAgent, /Chrome/);
   assert.equal(json.browser.platform, 'Win32');
@@ -164,22 +167,20 @@ test('the operation returns both measured runs with adapter and browser metadata
   assert.deepEqual(plain(files.map((file) => file.name)), ['capture.png']);
   const engines = fixture.calls.map((call) => call.engine);
   assert.deepEqual(engines.map((engine) => engine.disposed), [0, 0], 'both devices stay resident');
-  await gpu.ops.render({ args: { scene: many.id, variant: 'off' } });
+  const off = await gpu.ops.render({ args: { scene: many.id, variant: 'off' } });
+  assert.deepEqual(fixture.calls.slice(-2).map((call) => call.variant), ['on', 'off']);
+  assert.equal(off.json.variant, 'off');
+  assert.deepEqual(Object.keys(off.json.runs).sort(), ['off', 'on']);
   assert.deepEqual(engines.map((engine) => engine.disposed), [1, 1], 'the next operation replaces them');
 });
 
-test('the operation rejects an on run below 60 fps or a non-1920x1080 canvas', async () => {
+test('the operation retains a slow measurement for downstream judgment and rejects a wrong canvas', async () => {
   const slow = measured({ on: 59.4, off: 61 });
   const { gpu } = page(slow.runScene);
-  await assert.rejects(
-    gpu.ops.render({ args: { scene: many.id, variant: 'on' } }),
-    /on: fpsMean 59\.4 is below 60/,
-  );
-  await assert.rejects(
-    gpu.ops.render({ args: { scene: many.id, variant: 'off' } }),
-    /on: fpsMean 59\.4 is below 60/,
-    'the on gate applies to the off capture too, because both runs are reported',
-  );
+  for (const variant of ['on', 'off']) {
+    const result = await gpu.ops.render({ args: { scene: many.id, variant } });
+    assert.equal(result.json.runs.on.fpsMean, 59.4);
+  }
   const small = measured();
   const smallRun = async (raa, canvas, scene, variant, args) => ({
     ...await small.runScene(raa, canvas, scene, variant, args), canvas: [1280, 720],

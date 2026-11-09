@@ -9,10 +9,11 @@ import point from './scenes/point.js';
 const read = (file) => readFileSync(new URL(file, import.meta.url), 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
-function page(index = []) {
+function page(index = [], overrides = {}) {
   const packageReady = Promise.withResolvers();
   const context = {
-    window: {}, navigator: {}, geometry: {}, objects: {},
+    window: {}, navigator: { userAgent: 'fixture browser', platform: 'fixture platform' },
+    devicePixelRatio: 2, geometry: {}, objects: {},
     document: { getElementById: () => ({ toDataURL: () => 'data:image/png;base64,cG5n' }) },
     loadRaa: () => packageReady.promise,
     fetch: async () => ({ ok: true, json: async () => index }),
@@ -20,7 +21,7 @@ function page(index = []) {
       args.onEngine({ dispose() {} });
       return { scene: scene.id, variant: variant.id, nonEmpty: true };
     },
-    renderAt: () => {}, variantTimeMs: (variant) => variant.timeMs,
+    renderAt: () => {}, variantTimeMs: (variant) => variant.timeMs, ...overrides,
   };
   // Same page-function CPU execution convention as scripts/anim-capture.test.mjs.
   const transport = read('../../web/common/nmc-gpu.js').replace('export function', 'function');
@@ -74,6 +75,37 @@ test('discovered scene dispatch returns the shared transport capture envelope', 
   assert.equal(gpu.ready, true);
   assert.equal(result.json.scene, 'point');
   assert.equal(result.json.variant, 'off');
+  assert.deepEqual({ ...result.json.browser }, { userAgent: 'fixture browser', platform: 'fixture platform', devicePixelRatio: 2 });
   assert.equal(result.files[0].name, 'capture.png');
   assert.equal(result.files[0].base64, 'cG5n');
+});
+
+test('missing browser identity rejects instead of inventing metadata', async () => {
+  const { gpu, packageReady } = page([{ id: 'point', file: 'scenes/point.js' }], { navigator: {} });
+  packageReady.resolve({});
+  await assert.rejects(gpu.ops.render({ args: { scene: 'point', variant: 'on' } }), /browser metadata missing/);
+});
+
+test('uncaptured errors and device loss retain their causes and reject the operation', async () => {
+  for (const kind of ['uncaptured', 'lost']) {
+    const loss = Promise.withResolvers();
+    let listener;
+    const device = { lost: loss.promise, addEventListener: (_name, callback) => { listener = callback; } };
+    const navigator = { userAgent: 'browser', platform: 'platform', gpu: {
+      requestAdapter: async () => ({ requestDevice: async () => device }),
+    } };
+    const { gpu, packageReady } = page([{ id: 'point', file: 'scenes/point.js' }], {
+      navigator,
+      runScene: async (_raa, _canvas, scene, variant, args) => {
+        args.onEngine({ dispose() {} });
+        await (await navigator.gpu.requestAdapter()).requestDevice();
+        if (kind === 'uncaptured') listener({ error: new Error('shader failed', { cause: new Error('invalid binding') }) });
+        else { loss.resolve({ reason: 'unknown', message: 'device vanished', cause: new Error('driver reset') }); await Promise.resolve(); }
+        return { scene: scene.id, variant: variant.id };
+      },
+    });
+    packageReady.resolve({});
+    await assert.rejects(gpu.ops.render({ args: { scene: 'point', variant: 'on' } }),
+      kind === 'uncaptured' ? /shader failed: invalid binding/ : /unknown: device vanished: driver reset/);
+  }
 });

@@ -55,7 +55,8 @@ function page() {
   const canvas = { style: {}, toDataURL: () => 'data:image/png;base64,cG5n' };
   const status = {};
   const context = {
-    window: {}, navigator: {}, geometry, objects: {}, runScene, renderAt, variantTimeMs,
+    window: {}, navigator: { userAgent: 'fixture', platform: 'fixture' }, devicePixelRatio: 1,
+    geometry, objects: {}, runScene, renderAt, variantTimeMs,
     document: { getElementById: (id) => id === 'c' ? canvas : status },
     fetch: async () => ({ ok: true, json: async () => [{ id: motion.id, file: 'scenes/motion.js' }] }),
     loadRaa: async () => ({
@@ -82,6 +83,7 @@ test('motion selection covers every captured subject and documents the signed le
     assert.deepEqual(variantProblems(variant), []);
     assert.equal(variant.selection.subjects.length, 6);
     assert.match(variant.description, /[Ll]ocal lights cast no shadow yet/);
+    assert.match(variant.description, /Transparent and displaced fur.*prepass tile bounds; tiles without prepass coverage receive no local light/);
   }
   assert.match(motion.variants[0].description, /Stationary floor.*newly introduced.*zero motion/);
   assert.match(motion.variants[1].description, /Ordinarily shaded.*diagnostic is disabled/);

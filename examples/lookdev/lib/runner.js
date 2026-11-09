@@ -70,15 +70,20 @@ function nextAnimationFrame() {
 // Boundary after warm-up, then exactly `frames` rendered frames whose consecutive
 // animation-frame timestamps give the measured intervals.
 export async function measureAnimationFrames(engine, scene, variant, timeMs, frames) {
+  measureCount(frames, 'frames');
   let previous = await nextAnimationFrame();
   const intervals = [];
   for (let i = 0; i < frames; i++) {
     const timestamp = await nextAnimationFrame();
+    if (typeof previous !== 'number' || !Number.isFinite(previous) ||
+        typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
+      throw new Error('runScene: measured mode requires positive finite frame intervals from finite timestamps');
+    }
     renderAt(engine, scene, variant, timeMs);
     intervals.push(timestamp - previous);
     previous = timestamp;
   }
-  return summarizeFrameIntervals(intervals);
+  return { ...summarizeFrameIntervals(intervals), frameIntervalsMs: intervals };
 }
 
 function measureCount(value, name) {
