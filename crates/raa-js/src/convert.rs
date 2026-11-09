@@ -177,7 +177,7 @@ impl MaterialDesc {
         }
     }
 
-    pub fn to_material(&self) -> Result<Material, RaaError> {
+    pub fn to_material(self) -> Result<Material, RaaError> {
         let m = Material {
             base_color: self.color.map(srgb_to_linear),
             roughness: self.roughness,
