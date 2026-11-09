@@ -50,6 +50,11 @@ defines `install(ctx: &mut InstallCtx)` (run at init, after the M1 passes exist)
     material, mesh, node), `api.invalid_argument` (missing array, wrong array type).
 - `m07_pipeline.rs`: `passes`, `setPassEnabled`, `setPassOrder`, `setToneMapping`,
   `setBackground`, `capabilities`.
+- `m28_lights.rs`: additive local-light descriptions, stable handles, attachment
+  lifecycle and synchronous `lightStats`; the existing sun `setLight` is unchanged.
+  The package declarations and lifecycle contract are linked from
+  [`packages/raa/README.md`](../../packages/raa/README.md) and
+  [`docs/api/m28-lights.md`](../../docs/api/m28-lights.md).
 
 ## Public items
 

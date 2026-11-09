@@ -76,9 +76,17 @@ Prepass, forward, shadows, transparent, editor wireframe and selection outline a
 follow the pose. Declarations are in `types/m18-skinning.d.ts`; details are in
 `docs/api/m18-skinning.md`.
 
+## Local lights
+
+Use `addLight`, `updateLight` and `removeLight` for point, spot, directional and
+area lights; `attachLight` and `detachLight` follow an instance group. The sun's
+existing `setLight` method is unchanged. Declarations are in
+[`types/m28-lights.d.ts`](types/m28-lights.d.ts); lifecycle, defaults, validation
+and statistics are documented in [docs/api/m28-lights.md](../../docs/api/m28-lights.md).
+
 Units: metres, radians (except `fovYDeg`, in degrees), milliseconds. Coordinates are
-right-handed with Y up. Material `color` is sRGB. Light, ambient and emissive colours
-are linear.
+right-handed with Y up. Material and local-light `color` values are sRGB and converted
+once at the API boundary. The sun, ambient and emissive colours are linear.
 
 ## Error model
 
