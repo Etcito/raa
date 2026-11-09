@@ -3,7 +3,7 @@
 //!
 //! - `prepass` (order 30, required): the Opaque and Fur draws, single sample, with the
 //!   `Prepass` shader variants into the pipeline targets `depth` (Depth32Float, Less,
-//!   cleared to 1.0), `normal` and `material`.
+//!   cleared to 1.0), `normal`, `material` and `motion` (Rg16Float, cleared to zero).
 //! - `forward` (order 60, required): the Opaque and Fur draws with the `Forward` variants
 //!   into an MSAA HDR_FORMAT colour target and an MSAA Depth32Float target (Less, cleared to
 //!   1.0) of `LitOptions::msaa` samples, created on resize, then the enabled forward
@@ -44,6 +44,8 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// S12 `material` target: F0 rgb sRGB-encoded, metallic.
 const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// S12 `motion` target: signed UV displacement, Rg16Float.
+const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 /// The classes both passes draw, in order: opaque, then fur (drawn as opaque base).
 const DRAWN_CLASSES: [DrawClass; 2] = [DrawClass::Opaque, DrawClass::Fur];
@@ -188,6 +190,7 @@ impl Prepass {
             specs: Specs::new(vec![
                 color_target(NORMAL_FORMAT),
                 color_target(MATERIAL_FORMAT),
+                color_target(MOTION_FORMAT),
             ]),
         }
     }
@@ -245,6 +248,7 @@ impl FeaturePass for Prepass {
             color_attachments: &[
                 cleared(targets.normal(), wgpu::Color::TRANSPARENT),
                 cleared(targets.material(), wgpu::Color::TRANSPARENT),
+                cleared(targets.motion(), wgpu::Color::TRANSPARENT),
             ],
             depth_stencil_attachment: Some(cleared_depth(targets.depth(), wgpu::StoreOp::Store)),
             timestamp_writes: None,
@@ -450,10 +454,11 @@ mod tests {
     }
 
     #[test]
-    fn prepass_writes_the_s12_normal_and_material_targets() {
+    fn prepass_writes_the_s12_normal_material_and_motion_targets() {
         let pass = Specs::new(vec![
             color_target(NORMAL_FORMAT),
             color_target(MATERIAL_FORMAT),
+            color_target(MOTION_FORMAT),
         ]);
         let formats: Vec<_> = pass
             .culled
@@ -465,7 +470,8 @@ mod tests {
             formats,
             [
                 Some(wgpu::TextureFormat::Rgba16Float),
-                Some(wgpu::TextureFormat::Rgba8Unorm)
+                Some(wgpu::TextureFormat::Rgba8Unorm),
+                Some(wgpu::TextureFormat::Rg16Float)
             ]
         );
     }

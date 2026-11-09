@@ -1,0 +1,17 @@
+# S12 motion CPU twin. Each case has 15 tokens:
+#   name cur_cx cur_cy cur_w prev_cx prev_cy prev_w cur_jx cur_jy prev_jx prev_jy
+#        history_valid instance_valid expected_uv_x expected_uv_y
+# NDC is clip.xy / w minus the matching jitter; motion is the UV displacement with
+# positive X right and positive Y down. Invalid history, a new/re-used instance and an
+# unusable projection write zero.
+right 0.24 0 2 -0.01 0 1 0.02 0 -0.01 0 1 1 0.05 0
+down 0 -0.4 2 0 0 1 0 0 0 0 1 1 0 0.1
+up 0 0.2 1 0 0 1 0 0 0 0 1 1 0 -0.1
+camera_right -0.09 0 1 -0.02 0 1 0.01 0 -0.02 0 1 1 -0.05 0
+jitter_only 0.13 0 1 0.07 0 1 0.03 0 -0.03 0 1 1 0 0
+zero_motion 0.1 -0.1 1 0.1 -0.1 1 0 0 0 0 1 1 0 0
+invalid_history 0.24 0 2 -0.01 0 1 0.02 0 -0.01 0 0 1 0 0
+new_instance 0.24 0 2 -0.01 0 1 0.02 0 -0.01 0 1 0 0 0
+invalid_current_w 0.24 0 0 -0.01 0 1 0.02 0 -0.01 0 1 1 0 0
+invalid_previous_w 0.24 0 2 -0.01 0 -1 0.02 0 -0.01 0 1 1 0 0
+not_finite nan 0 1 0 0 1 0 0 0 0 1 1 0 0

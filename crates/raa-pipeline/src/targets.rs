@@ -1,4 +1,5 @@
-//! Surface-sized pipeline targets (S12): depth, normal, material and the HDR A/B chain.
+//! Surface-sized pipeline targets (S12): depth, normal, material, motion and the HDR A/B
+//! chain.
 
 use std::cell::Cell;
 
@@ -9,6 +10,7 @@ use crate::HDR_FORMAT;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
 
 const GBUFFER_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
@@ -129,6 +131,7 @@ pub struct Targets {
     depth: Target,
     normal: Target,
     material: Target,
+    motion: Target,
     hdr: HdrChain,
     output: Option<Target>,
 }
@@ -153,6 +156,13 @@ impl Targets {
                 "raa-pipeline.material",
                 size,
                 MATERIAL_FORMAT,
+                GBUFFER_USAGE,
+            ),
+            motion: Target::new(
+                gpu,
+                "raa-pipeline.motion",
+                size,
+                MOTION_FORMAT,
                 GBUFFER_USAGE,
             ),
             hdr: HdrChain::new(gpu, size),
@@ -212,6 +222,11 @@ impl Targets {
         &self.material.view
     }
 
+    /// Rg16Float signed UV motion written by the prepass (location 2).
+    pub fn motion(&self) -> &wgpu::TextureView {
+        &self.motion.view
+    }
+
     /// Texture behind `depth()`.
     pub fn depth_texture(&self) -> &wgpu::Texture {
         &self.depth.texture
@@ -225,6 +240,11 @@ impl Targets {
     /// Texture behind `material()`.
     pub fn material_texture(&self) -> &wgpu::Texture {
         &self.material.texture
+    }
+
+    /// Texture behind `motion()`.
+    pub fn motion_texture(&self) -> &wgpu::Texture {
+        &self.motion.texture
     }
 
     /// The HDR A/B chain.
@@ -241,6 +261,13 @@ mod tests {
     fn reset_makes_a_the_destination() {
         assert_eq!(RESET_DST, 0);
         assert_eq!(src_of(RESET_DST), 1);
+    }
+
+    #[test]
+    fn motion_uses_the_s12_format_and_attachment_usage() {
+        assert_eq!(MOTION_FORMAT, wgpu::TextureFormat::Rg16Float);
+        assert!(GBUFFER_USAGE.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
+        assert!(GBUFFER_USAGE.contains(wgpu::TextureUsages::TEXTURE_BINDING));
     }
 
     #[test]

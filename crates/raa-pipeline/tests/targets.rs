@@ -40,6 +40,12 @@ fn targets_have_s12_sizes_formats_and_usages(gpu: &GpuContext) {
         wgpu::TextureFormat::Rgba8Unorm,
     );
     assert_eq!(targets.material_texture().usage(), GBUFFER);
+    check(
+        targets.motion_texture(),
+        (64, 48),
+        wgpu::TextureFormat::Rg16Float,
+    );
+    assert_eq!(targets.motion_texture().usage(), GBUFFER);
 
     assert_eq!(HDR_FORMAT, wgpu::TextureFormat::Rgba16Float);
     let hdr_usage = GBUFFER
@@ -81,6 +87,11 @@ fn ensure_recreates_only_when_the_size_changes(gpu: &GpuContext) {
     assert_eq!(targets.size(), (40, 24));
     assert_ne!(targets.depth_texture(), &depth);
     check(targets.hdr().dst_texture(), (40, 24), HDR_FORMAT);
+    check(
+        targets.motion_texture(),
+        (40, 24),
+        wgpu::TextureFormat::Rg16Float,
+    );
 
     assert!(targets.ensure(gpu, (0, 0)));
     assert_eq!(targets.size(), (1, 1));
