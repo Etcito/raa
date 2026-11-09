@@ -20,10 +20,9 @@
 //! `LocalLights::add`/`replace`, which validates with `LocalLight::validate` before it
 //! mutates. Handles pass through [`handle_arg`] before any narrowing to `LightHandle`.
 //!
-//! Handoff: the remaining S17 slice (`attachLight`, `detachLight`, `lightStats`) is another
-//! api-m28 card's work in this file; it reads and mutates the same renderer-owned
-//! `LocalLights` registry through the same stable handles. `add`/`update`/`remove` here are
-//! the helpers it can reuse, and the sun's `setLight` remains untouched.
+//! S17 lifecycle methods share the renderer-owned `LocalLights` registry and stable handles
+//! with the add/update/remove methods. Parent keys are JS instance-group handles resolved by
+//! `EngineState::instance_parent_world`; their submesh instance slots are never used.
 
 use raa_core::RaaError;
 use raa_lit::{LightHandle, LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE};
@@ -300,6 +299,24 @@ pub(crate) fn remove(lights: &mut LocalLights, handle: LightHandle) -> Result<()
     lights.remove(handle)
 }
 
+/// S17 `attachLight`: the caller resolves `parent` as an Engine instance-group handle and
+/// supplies its current world transform. Registry validation completes before either the
+/// attachment or the previous world-space light state changes.
+pub(crate) fn attach(
+    lights: &mut LocalLights,
+    handle: LightHandle,
+    parent: u32,
+    offset: [f32; 3],
+    world: &raa_math::Mat4,
+) -> Result<(), RaaError> {
+    lights.attach(handle, parent, offset, world)
+}
+
+/// S17 `detachLight`: preserve the latest world-space position and direction.
+pub(crate) fn detach(lights: &mut LocalLights, handle: LightHandle) -> Result<(), RaaError> {
+    lights.detach(handle)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{frame, install};
 
@@ -308,7 +325,7 @@ mod web {
     use super::*;
     use crate::engine::{Engine, InstallCtx};
     use crate::state::EngineState;
-    use js_sys::{Array, Float32Array, Reflect};
+    use js_sys::{Array, Float32Array, Object, Reflect};
     use raa_core::GpuContext;
     use raa_web::FrameInput;
     use wasm_bindgen::{JsCast, prelude::*};
@@ -379,6 +396,93 @@ mod web {
         Raw::Other
     }
 
+    fn attachment_offset(value: &JsValue) -> Result<[f32; 3], RaaError> {
+        let values = if let Some(array) = value.dyn_ref::<Float32Array>() {
+            array
+                .to_vec()
+                .into_iter()
+                .map(f64::from)
+                .collect::<Vec<_>>()
+        } else if let Some(array) = value.dyn_ref::<Array>() {
+            (0..array.length())
+                .map(|index| array.get(index).as_f64().unwrap_or(f64::NAN))
+                .collect()
+        } else {
+            return Err(RaaError::FrameGraph {
+                code: "light.invalid_attachment",
+                message: "'localOffset' must be an array of three finite numbers".into(),
+            });
+        };
+        if values.len() != 3 {
+            return Err(RaaError::FrameGraph {
+                code: "light.invalid_attachment",
+                message: "'localOffset' must have three components".into(),
+            });
+        }
+        let mut offset = [0.0; 3];
+        for (out, value) in offset.iter_mut().zip(values) {
+            *out = value as f32;
+            if !value.is_finite() || !out.is_finite() {
+                return Err(RaaError::FrameGraph {
+                    code: "light.invalid_attachment",
+                    message: "'localOffset' components must be finite f32 values".into(),
+                });
+            }
+        }
+        Ok(offset)
+    }
+
+    fn set_stats_value(object: &Object, key: &str, value: &JsValue) -> Result<(), RaaError> {
+        Reflect::set(object, &JsValue::from_str(key), value)
+            .map(|_| ())
+            .map_err(|_| RaaError::FrameGraph {
+                code: INVALID_ARGUMENT,
+                message: format!("could not construct lightStats field '{key}'"),
+            })
+    }
+
+    fn stats_value(st: &EngineState) -> Result<JsValue, RaaError> {
+        let stats = st.lit.light_stats();
+        let out = Object::new();
+        set_stats_value(
+            &out,
+            "activeLights",
+            &JsValue::from_f64(stats.active_lights as f64),
+        )?;
+        set_stats_value(
+            &out,
+            "attachedLights",
+            &JsValue::from_f64(stats.attached_lights as f64),
+        )?;
+        set_stats_value(
+            &out,
+            "tileColumns",
+            &JsValue::from_f64(stats.tile_columns as f64),
+        )?;
+        set_stats_value(&out, "tileRows", &JsValue::from_f64(stats.tile_rows as f64))?;
+        set_stats_value(
+            &out,
+            "tileCapacity",
+            &JsValue::from_f64(stats.tile_capacity as f64),
+        )?;
+        set_stats_value(
+            &out,
+            "droppedLightReferences",
+            &stats
+                .dropped_light_references
+                .map_or(JsValue::NULL, |v| JsValue::from_f64(v as f64)),
+        )?;
+        set_stats_value(
+            &out,
+            "statsFrameIndex",
+            &stats
+                .stats_frame_index
+                .map_or(JsValue::NULL, |v| JsValue::from_f64(v as f64)),
+        )?;
+        set_stats_value(&out, "pending", &JsValue::from_bool(stats.pending))?;
+        Ok(out.into())
+    }
+
     /// Parses a JS light description or change object into a patch. The S17 mutators call
     /// this and merge the result onto the current descriptor with [`merge`].
     pub(crate) fn read_patch(object: &JsValue) -> Result<LocalLightPatch, RaaError> {
@@ -422,6 +526,46 @@ mod web {
                 let handle = handle_arg("handle", handle)?;
                 remove(st.lit.local_lights_mut(), handle)
             })
+        }
+
+        /// Attaches a light to an instance group, using the group's complete world transform.
+        /// Reattachment is atomic; invalid handles, offsets, parents or transformed directions
+        /// leave the current attachment unchanged.
+        #[wasm_bindgen(js_name = attachLight)]
+        pub fn attach_light(
+            &mut self,
+            handle: f64,
+            instance_id: u32,
+            local_offset: JsValue,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                let handle = handle_arg("handle", handle)?;
+                let offset = attachment_offset(&local_offset)?;
+                let world = st.instance_parent_world(instance_id)?;
+                attach(
+                    st.lit.local_lights_mut(),
+                    handle,
+                    instance_id,
+                    offset,
+                    &world,
+                )
+            })
+        }
+
+        /// Detaches a light while preserving its latest world position and direction.
+        #[wasm_bindgen(js_name = detachLight)]
+        pub fn detach_light(&mut self, handle: f64) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                let handle = handle_arg("handle", handle)?;
+                detach(st.lit.local_lights_mut(), handle)
+            })
+        }
+
+        /// Returns current registry counts and the latest fully completed asynchronous
+        /// overflow result. This synchronous call never waits for GPU readback.
+        #[wasm_bindgen(js_name = lightStats)]
+        pub fn light_stats(&mut self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| stats_value(st))
         }
     }
 }

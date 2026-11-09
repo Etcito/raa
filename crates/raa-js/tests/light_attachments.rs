@@ -284,6 +284,101 @@ fn removing_a_group_or_node_detaches_at_the_last_valid_world() {
 }
 
 #[test]
+fn reattach_refusal_is_atomic_and_detach_preserves_the_world_pose() {
+    let mut scene = Scene::new();
+    let original = node(&mut scene, None, translation(Vec3::new(3.0, 0.0, 0.0)));
+    let invalid = node(
+        &mut scene,
+        None,
+        Transform::from_trs(Vec3::ZERO, Quat::IDENTITY, Vec3::new(1.0, 1.0, 0.0)),
+    );
+    let replacement = node(&mut scene, None, translation(Vec3::new(6.0, 0.0, 0.0)));
+    let parents: NodeParents = vec![(original, None), (invalid, None), (replacement, None)];
+    let mut instances = HandleMap::new("instance");
+    let original_group = instances.insert(group(original, 1));
+    let invalid_group = instances.insert(group(invalid, 2));
+    let replacement_group = instances.insert(group(replacement, 3));
+    scene.update_world();
+
+    let mut lights = LocalLights::new();
+    let light = lights.add(LocalLight::default()).expect("light");
+    lights
+        .attach(
+            light,
+            original_group,
+            [1.0, 0.0, 0.0],
+            &scene.world(original).expect("original world"),
+        )
+        .expect("initial attach");
+    let before = *lights.get(light).expect("light");
+
+    // The candidate parent collapses the light's direction to zero. Failed reattachment
+    // must keep the old parent, offset and world pose together.
+    let err = lights
+        .attach(
+            light,
+            invalid_group,
+            [2.0, 0.0, 0.0],
+            &scene.world(invalid).expect("invalid world"),
+        )
+        .expect_err("degenerate direction");
+    assert_eq!(err.code(), "light.invalid_attachment");
+    assert_eq!(*lights.get(light).expect("light"), before);
+    assert_eq!(lights.attached_count(), 1);
+
+    let bad_offset = lights
+        .attach(
+            light,
+            invalid_group,
+            [f32::NAN, 0.0, 0.0],
+            &scene.world(original).unwrap(),
+        )
+        .expect_err("non-finite offset");
+    assert_eq!(bad_offset.code(), "light.invalid_attachment");
+    assert_eq!(*lights.get(light).expect("light"), before);
+
+    lights
+        .attach(
+            light,
+            replacement_group,
+            [2.0, 0.0, 0.0],
+            &scene.world(replacement).expect("replacement world"),
+        )
+        .expect("valid reattach replaces the previous parent");
+    assert!(close(position(&lights, light), [8.0, 0.0, 0.0]));
+
+    let moved = translation(Vec3::new(10.0, 0.0, 0.0));
+    set_local_checked(
+        &mut scene,
+        &instances,
+        &parents,
+        &mut lights,
+        original,
+        moved,
+    )
+    .expect("move old parent");
+    let attached_world = *lights.get(light).expect("light");
+    assert!(close(attached_world.position, [8.0, 0.0, 0.0]));
+
+    lights.detach(light).expect("detach");
+    assert_eq!(lights.attached_count(), 0);
+    let detached = *lights.get(light).expect("light");
+    assert!(close(detached.position, attached_world.position));
+    assert!(close(detached.direction, [0.0, 0.0, -1.0]));
+
+    set_local_checked(
+        &mut scene,
+        &instances,
+        &parents,
+        &mut lights,
+        replacement,
+        translation(Vec3::new(20.0, 0.0, 0.0)),
+    )
+    .expect("move detached parent");
+    assert_eq!(*lights.get(light).expect("light"), detached);
+}
+
+#[test]
 fn a_group_rebuild_keeps_the_attachment_keyed_by_the_instance_handle() {
     let mut scene = Scene::new();
     let node = node(&mut scene, None, Transform::IDENTITY);
