@@ -37,8 +37,8 @@ prepass, with every accepted hit and normal refined against the exact packed pro
 limit is the volume's voxel resolution, never the image. The composite writes colour and depth
 into the normal frame, so meshes and traced surfaces occlude each other. Live handles share that
 one slot: `setVisible` and `dispose` repack the visible inputs (`placement` offsets a scene's
-instances), each accepted change replaces the program and so invalidates and rebuilds the volume
-before its next frame, and the last handle clears it.
+traced geometry and owned light positions), each accepted change replaces the program and so
+invalidates and rebuilds the volume before its next frame, and the last handle clears it.
 
 Either variant spawns one engine node per scene instance and its parts under it: instances are
 never flattened, merged or baked into the root. A scene instance's `attrs` and `lod` are forwarded
@@ -56,32 +56,100 @@ removed ones lose their subtree, and a new mesh key is meshed by the loader's wo
 previous mesh stays alive. In trace mode the same delta repacks the shared trace scene by stable
 instance key. A scene without runtime input refuses with `sdfm.scene_format`.
 
-Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a mesh-refs scene in trace
-mode or a deform on a mesh-refs instance; `sdfm.scene_resolve` when a resolve callback, the S24
-decode, `sceneSourceDocument` or trace packing fails; `sdfm.worker` when the default MAMA import
-fails.
+Static `scene.lights` uses MAMA's existing `ProcLight` records in both variants and trace mode,
+including `runtime: null` and scenes with no geometry. Missing lights and [] create no handles;
+null is invalid. All four kinds (point, spot, directional and area) cross the transport. Records
+retain their order, full evaluator `id`, `node`, u32 `key`, `t/r/s`, linear RGB and units. A light
+key is independent of geometry indices. MAMA owns these types; the adapter adds no public loader
+or registry. Each scene handle has one private light owner shared with every runtime it creates;
+repeated runtime access does not initialize more lights.
+Internally, `createProceduralRuntime` receives that exact owner through optional `options.lights`.
+Direct internal callers that omit it get a zero-placement owner initialized from `scene.lights`.
 
-MAMA is reached only through `src/mama-bridge.js`. The calls below are the ones that file makes, reviewed against MAMA 0.1.0 at commit 864ebc3 (sibling checkout `../MAMA`).
+The internal `toMamaLight` mapping (M3_LIGHT_MAPPING) creates copied descriptors and fresh arrays,
+without resources or input mutation. Position is `t`; travel direction is normalized
+`R(r) * S(s) * [0,0,-1]`, with quaternion `[x,y,z,w]`. A degenerate direction refuses rather than
+producing NaN. Range and area size (full width/height) remain metres and are not scaled. Kind,
+intensity, range, shadows and applicable angle/size fields are preserved. Spot `angleDeg` and
+optional `innerAngleDeg` are full angles in [1,179] degrees, with inner no greater than outer.
+Omitted inner angles remain absent and use the engine default, 0.8 times the outer angle.
+MAMA's linear RGB is converted to sRGB for the existing local-light JS API; that boundary converts
+it back to linear exactly once. `shadows` stays metadata: local lights cast no shadows yet.
+
+The internal owner (M3_LIGHT_OWNER) keys stable engine handles by the complete light `id`, never
+by a geometry key. Mesh loading uses zero placement. Trace `options.placement` is a copied finite
+translation in metres, default [0,0,0]. Geometry placement and light placement are applied by their
+respective owners; the light owner alone adds its captured offset to copied `t` on every static
+and runtime snapshot, exactly once. It never mutates evaluator records, accumulates offsets or
+translates direction, range or size. Lights are world-space resources; moving the scene root
+does not attach them to an engine instance.
+
+Runtime reconciliation (M3_RUNTIME_LIGHT_HANDOFF) consumes only successful complete snapshots:
+absent `delta.output` leaves lights unchanged; present successful output with missing `lights`
+or [] clears them, including final removal. Failed evaluation preserves the published set.
+The owner treats both undefined and [] as an empty desired set; an absent snapshot is handled
+by skipping preparation entirely.
+The first accepted snapshot reconciles lights even if geometry treats it only as its baseline.
+Light changes prepare before geometry application and commit after successful application;
+application failure or disposal rolls back staged light work. Surviving ids keep their handles,
+and removing an authored inner angle explicitly resets the engine field to its default.
+`step`, `set`, `dispose`, step result fields and scene stats retain their existing shapes.
+
+All records map before allocation; additions are staged without illumination. Only one light
+transaction may be pending. Creation failure releases staged handles, update failure restores
+already updated descriptors, and obsolete handles are removed only after successful updates.
+A failed load releases that load's resources and preserves independently published scenes;
+failed trace publication restores the prior session entry/publication. Transaction completion
+is idempotent. `setVisible` suppresses/restores this handle's illumination while retaining authored
+descriptors and identities; a failed light visibility update restores its prior state. Other live
+handles retain their lights. Scene disposal aborts pending work, disposes tracked runtimes and
+removes owned lights once. Runtime disposal also disposes the shared light owner. Disposal is
+idempotent and pending work cannot recreate resources; later mutations refuse with `sdfm.disposed`.
+Unloading before reloading releases the previous lights, so reload leaves no stale illumination.
+
+Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a mesh-refs scene in trace
+mode, a deform on a mesh-refs instance, malformed/duplicate lights, invalid placement or degenerate
+light direction (with useful light-field paths); `sdfm.scene_resolve` when a resolve callback, the S24
+decode, `sceneSourceDocument` or trace packing fails; `sdfm.worker` when the default MAMA import
+fails. Engine light refusals propagate unchanged. Transport-valid records are never silently
+dropped or clamped to fit the engine domain: for example MAMA transports two finite area extents,
+while the engine requires positive extents. Colour outside the engine's [0,1] domain and the
+257th local light also refuse through the engine, preserving the prior published light set.
+
+MAMA imports are centralized in `src/mama-bridge.js`; the existing loaders/runtime call the
+resolved exports. The table preserves historical attribution for unchanged calls. Light
+contracts were inspected in the read-only MAMA@f8a26dd checkout; their producer revisions below
+identify the landed changes, rather than attributing every API to that checkout's tip.
 
 ## MAMA calls
 
-| specifier | export | signature used | returns | MAMA file @ 864ebc3 |
+| specifier | export | signature used | returns | MAMA source / producer revision |
 |---|---|---|---|---|
-| `mama` | `serializeDocument` | `serializeDocument(document)` | Document text whose UTF-8 bytes define the asset sha256 | MAMA index export |
-| `mama` | `readSdfm` | `readSdfm(document)` (the asset's `document`, unchanged) | `SdfDocument` | `src/sdfm.ts:26` |
-| `mama/core/game/mesh-assets.js` | `meshAssets` | `meshAssets(doc, { pool, groups })`; `pool: ComputePool` (node: the caller's pool; browser: from `setupBrowserHost`); `groups: NodeId[]` | `Promise<AssetMeshResult[]>`; each result `{ group, parts: [{ partId, name, frame: Float64Array, subMeshes: [{ material: string \| null, positions: Float32Array, normals: Float32Array, uvs?: Float32Array, indices: Uint32Array, edges?: Uint32Array }] }], materials, error: { code, message, fix } \| null }` | `src/core/game/mesh-assets.ts:133` |
-| `mama` | `buildMaterial` | not called by the bridge: `meshAssets` calls `buildMaterial(subset, id)` for the materials of each group; the bridge reads the values in `AssetMeshResult.materials` | `BuiltMaterial { id, name, def, graph: CompiledGraph \| null, error }`; the bridge reads `id`, `error`, `graph.wgslBody`, `graph.helpers`, `graph.constants` | `src/sdfm.ts:77` |
-| `mama/core/material-graph/helpers.js` | `HELPERS` | `HELPERS[id].code`, `HELPERS[id].deps` (helper id -> WGSL text) | `Record<HelperId, { deps?: HelperId[], code: string }>` | `src/core/material-graph/helpers.ts:73` |
-| `mama/core/material-graph/helpers.js` | `BASE_WGSL` | read as text (MAMA emits it in front of every material module, `src/core/material-graph/slots.ts:402`) | `string`: the always-emitted constants and scalar helpers (`mat_clamp01`, `mat_smoothstep`, ...) | `src/core/material-graph/helpers.ts:37` |
-| `mama/browser` | `setupBrowserHost` | `setupBrowserHost({ workerUrl, manifoldWasmUrl, size?, workerMode? })`; `workerMode: 'blob'` starts classic `blob:` workers (opaque-origin pages) | `ComputePool` (a meshing worker pool) | `src/browser/index.ts:111` |
-| `mama/procgen/scene-file.js` | `parseProceduralScene` | `parseProceduralScene(text)` (the `sdfm.procedural-scene` v1 text) | MAMA's strict `ProceduralScene` value | `src/procgen/scene-file.ts` |
-| `mama/procgen/scene-build.js` | `sceneSourceDocument` | `sceneSourceDocument(scene, sourceIndex, lookupAsset)`; `lookupAsset(file)` returns the parsed asset object or null | `SdfDocument` of one composite (csg, realized) or of the asset source a bend wraps | `src/procgen/scene-build.ts` |
+| `mama` | `serializeDocument` | `serializeDocument(document)` | Document text whose UTF-8 bytes define the asset sha256 | MAMA index export @ 864ebc3 |
+| `mama` | `readSdfm` | `readSdfm(document)` (the asset's `document`, unchanged) | `SdfDocument` | `src/sdfm.ts:26` @ 864ebc3 |
+| `mama/core/game/mesh-assets.js` | `meshAssets` | `meshAssets(doc, { pool, groups })`; `pool: ComputePool` (node: the caller's pool; browser: from `setupBrowserHost`); `groups: NodeId[]` | `Promise<AssetMeshResult[]>`; each result `{ group, parts: [{ partId, name, frame: Float64Array, subMeshes: [{ material: string \| null, positions: Float32Array, normals: Float32Array, uvs?: Float32Array, indices: Uint32Array, edges?: Uint32Array }] }], materials, error: { code, message, fix } \| null }` | `src/core/game/mesh-assets.ts:133` @ 864ebc3 |
+| `mama` | `buildMaterial` | not called by the bridge: `meshAssets` calls `buildMaterial(subset, id)` for the materials of each group; the bridge reads the values in `AssetMeshResult.materials` | `BuiltMaterial { id, name, def, graph: CompiledGraph \| null, error }`; the bridge reads `id`, `error`, `graph.wgslBody`, `graph.helpers`, `graph.constants` | `src/sdfm.ts:77` @ 864ebc3 |
+| `mama/core/material-graph/helpers.js` | `HELPERS` | `HELPERS[id].code`, `HELPERS[id].deps` (helper id -> WGSL text) | `Record<HelperId, { deps?: HelperId[], code: string }>` | `src/core/material-graph/helpers.ts:73` @ 864ebc3 |
+| `mama/core/material-graph/helpers.js` | `BASE_WGSL` | read as text (MAMA emits it in front of every material module, `src/core/material-graph/slots.ts:402`) | `string`: the always-emitted constants and scalar helpers (`mat_clamp01`, `mat_smoothstep`, ...) | `src/core/material-graph/helpers.ts:37` @ 864ebc3 |
+| `mama/browser` | `setupBrowserHost` | `setupBrowserHost({ workerUrl, manifoldWasmUrl, size?, workerMode? })`; `workerMode: 'blob'` starts classic `blob:` workers (opaque-origin pages) | `ComputePool` (a meshing worker pool) | `src/browser/index.ts:111` @ 864ebc3 |
+| `mama/procgen/scene-file.js` | `parseProceduralScene` | `parseProceduralScene(text)` (the `sdfm.procedural-scene` v1 text) | MAMA's strict `ProceduralScene`, including optional ordered `lights` | `src/procgen/scene-file.ts`; light transport @ 2195ac8f6d (historical API @ 864ebc3) |
+| `mama/procgen/scene-build.js` | `sceneSourceDocument` | `sceneSourceDocument(scene, sourceIndex, lookupAsset)`; `lookupAsset(file)` returns the parsed asset object or null | `SdfDocument` of one composite (csg, realized) or of the asset source a bend wraps | `src/procgen/scene-build.ts` @ 864ebc3 |
 | `mama/procgen/trace.js` | `buildSceneTraceInput`, `packTrace` | `buildSceneTraceInput(scene, lookupAsset)` resolves every sdf-refs source; `packTrace(procgen, input)` is evaluator op 4, given `options.procgen` | section 67 `TraceInput`, then the little-endian TraceProgram v1 bytes `Engine.setTraceScene` takes | `src/procgen/trace.ts` @ 2086284 |
-| `mama/procgen/runtime.js` | `Runtime` | `Runtime.create(procgen, scene.runtime.input)` (evaluator op 5), then `set(values)` (op 6), `step(tick)` (op 7, a section 68 `RuntimeDelta`) and `dispose()` (op 8) | the Rust/WASM runtime handle `ProceduralSceneHandle.runtime(procgen)` drives | `src/procgen/runtime.ts` |
-| `mama/core/material-graph/cpu-eval.js` | `cpuGraphOrNull` | compare page only (`examples/sdfm-compare/lib/mama-view.js`), not the bridge: `cpuGraphOrNull(def, doc).eval(p, p, n, masks, {})` per vertex, `p` and `n` in world space | `CpuGraph \| null`; the page reads `MaterialValues.baseColor` (linear) | `src/core/material-graph/cpu-eval.ts:482` |
+| `mama/procgen/runtime.js` | `Runtime` | `Runtime.create(procgen, scene.runtime.input)` (evaluator op 5), then `set(values)` (op 6), `step(tick)` (op 7, a section 68 `RuntimeDelta`) and `dispose()` (op 8) | the Rust/WASM handle; complete output on light changes, including final removal | `src/procgen/runtime.ts` API @ 864ebc3; light snapshots: `crates/procgen/src/ext/runtime/delta.rs` @ 79cf61c19c |
+| `mama/core/material-graph/cpu-eval.js` | `cpuGraphOrNull` | compare page only (`examples/sdfm-compare/lib/mama-view.js`), not the bridge: `cpuGraphOrNull(def, doc).eval(p, p, n, masks, {})` per vertex, `p` and `n` in world space | `CpuGraph \| null`; the page reads `MaterialValues.baseColor` (linear) | `src/core/material-graph/cpu-eval.ts:482` @ 864ebc3 |
+| `mama/procgen/scene-build.js` | `planProceduralScene` | Export/demonstration only, not called by the adapter: `planProceduralScene(b, variant)` | `SceneFilePlan`; both variants copy evaluated lights, including with `runtime: null` | `src/procgen/scene-build.ts`; light export @ 4587eaadbf |
+| `mama/procgen/scene-file.js` | `serializeProceduralScene` | Export/demonstration only, not called by the adapter: `serializeProceduralScene(scene)` | canonical v1 scene text preserving absent/empty lights and optional-angle omission | `src/procgen/scene-file.ts`; light serialization @ 2195ac8f6d |
 
 Notes on the table:
 
+- `ProcLight` is data, not a MAMA call: the landed record baseline is
+  6efeefb245d4b83ba3655a51206544ea6e75ee73. Its current declaration is
+  `src/procgen/output-types.ts` (inspected at MAMA@f8a26dd). That record revision does not provide
+  the new scene parser/serializer, export-plan or runtime light-snapshot behavior; those are
+  attributed separately above. Mapping/ownership call the engine's `addLight`, `updateLight`
+  and `removeLight`, not a MAMA light-loader API.
+- Export/demonstration rows describe producer calls outside the adapter. The compare-page-only
+  `cpuGraphOrNull` row remains demonstration-only; it is not an adapter call.
 - `buildMaterial` calls `compileMaterialGraph` (`src/core/material-graph/compile.ts:97`) internally. The bridge calls neither directly. A `BuiltMaterial` with `graph: null` throws `sdfm.material_unmappable` with MAMA's error.
 - Helpers: `BASE_WGSL` comes first as helper `base` (the graph bodies call its `mat_clamp01` without listing it in `graph.helpers`); then each id of `graph.helpers` and its `deps` (dependencies first) is resolved through `HELPERS`; an id without WGSL source throws `sdfm.material_unmappable` naming the material and the helper.
 - Imports: `importMama(base?)` in `src/mama-bridge.js` imports `mama`, `mama/core/game/mesh-assets.js`, `mama/core/material-graph/helpers.js` and `mama/browser` (bare specifiers, or the matching files under MAMA's `dist/` URL `base`).
@@ -177,7 +245,7 @@ MAMA's build is `dist/` in the MAMA checkout. Build it with `npm run build` in `
 
 ## API
 
-MAMA is reached only through `src/mama-bridge.js`: no other module of this package imports it. Outside this package, only the compare page's reference viewport (`examples/sdfm-compare/lib/mama-view.js`) uses MAMA: it calls this bridge, plus `readSdfm` and `cpuGraphOrNull` directly (see the table above). Every failure of the adapter is an `SdfmError` with one of the S15 codes below; refusals of the engine propagate unchanged as `RaaError`.
+MAMA is reached only through `src/mama-bridge.js`: no other module of this package imports it. The compare page's reference viewport (`examples/sdfm-compare/lib/mama-view.js`) also uses MAMA: it calls this bridge, plus `readSdfm` and `cpuGraphOrNull` directly (see the table above). Every failure of the adapter is an `SdfmError` with one of the S15 codes below; refusals of the engine propagate unchanged as `RaaError`.
 
 Every exported name of `index.d.ts`:
 
@@ -231,8 +299,8 @@ Every exported name of `index.d.ts`:
 | `sdfm.rig` | MAMA refused a group's S16/S18 rig; the message names the group and the S16 code (path `/document`). |
 | `sdfm.material_unmappable` | MAMA could not build a material or resolve a helper, or the mapped WGSL is not an S11 function (unknown field, forbidden token, `raa_` identifier, more than 65536 bytes); the message names the material and the token. |
 | `sdfm.worker` | MAMA could not be imported or threw, a worker crashed or broke the protocol, or `options.mama()` failed. |
-| `sdfm.disposed` | `load`/`spawn` after `dispose` (or a worker pool request after termination). |
-| `sdfm.scene_format` | A procedural scene does not parse, `mode` is unknown, a mesh-refs instance carries a deform, or trace mode is asked for a mesh-refs scene. |
+| `sdfm.disposed` | `load`/`spawn` after `dispose`, procedural scene/runtime mutations after disposal, or a worker pool request after termination. |
+| `sdfm.scene_format` | A procedural scene does not parse, `mode` is unknown, a mesh-refs instance carries a deform, trace mode is asked for a mesh-refs scene, or lights/placement are malformed (including duplicate ids or degenerate light directions); invalid runtime input/ticks also refuse. |
 | `sdfm.scene_resolve` | A procedural scene asset or mesh could not be resolved or decoded, `sceneSourceDocument` failed, trace input building or packing failed, or the engine has no trace scene; the message names the file or the reason. |
 
 ### Usage

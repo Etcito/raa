@@ -367,10 +367,13 @@ export function createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader;
  * or the matching files under a `base` URL).
  * The scene is typed `string | object` because this package declares no MAMA types: pass the parsed
  * `sdfm.procedural-scene` v1 file (section 66) in the shape MAMA's `ProceduralScene` defines.
+ * Its optional `lights` contains MAMA's existing `ProcLight` records, including with `runtime: null`.
+ * Missing lights and [] are valid; null is invalid. No light registry or loader is exposed here.
  * Refusals: none of its own; an import failure is `sdfm.worker`.
  */
 export interface SdfmProceduralMama {
-  /** MAMA `parseProceduralScene(text)`: strict parse of an `sdfm.procedural-scene` v1 file. */
+  /** MAMA `parseProceduralScene(text)`: strict parse of an `sdfm.procedural-scene` v1 file,
+   * preserving optional ordered light records and omitted inner angles. */
   parseProceduralScene(text: string): object;
   /**
    * MAMA `sceneSourceDocument(scene, sourceIndex, lookupAsset)`: the SDF document of one composite
@@ -389,6 +392,8 @@ export interface SdfmProceduralMama {
    * MAMA `Runtime` (mama/procgen/runtime.js): owns one evaluator handle in the Rust/WASM
    * evaluator; `Runtime.create(procgen, scene.runtime.input)` is what
    * {@link ProceduralSceneHandle.runtime} builds.
+   * Successful light changes produce complete output snapshots, including final removal;
+   * unchanged steps can omit output. A failed evaluation is not a clearing snapshot.
    */
   Runtime?: {
     create(procgen: SdfmProcgen, input: object): {
@@ -412,9 +417,19 @@ export type ProceduralRuntimeValue = number | boolean | Vec3;
  * its sorted delta to the scene's engine instances (mesh mode) or to the engine's trace scene
  * (trace mode). A new mesh key is meshed by the loader's worker pool while the previous mesh stays
  * alive; added instances are attached under the scene root and removed ones lose their subtree.
+ * Lights share this scene's private registry, keyed by the complete evaluator light id,
+ * independently of geometry keys. Surviving ids retain their engine handles. An absent
+ * delta.output leaves lights unchanged; a successful output with missing lights or [] clears
+ * them. Failed evaluation preserves them. The first accepted snapshot reconciles lights even
+ * when geometry uses it only as a baseline. Light preparation precedes geometry application;
+ * commit follows successful application, and failure/disposal rolls back staged lights.
+ * Removed optional inner angles reset to the engine default. Step results and scene stats
+ * keep their existing fields; light reconciliation adds no count or registry field.
  * Refusals: `sdfm.scene_format` for a scene without runtime input or a bad tick;
  * `sdfm.scene_resolve` when MAMA, the runtime, a remesh/attach step or the trace packer fails;
- * `sdfm.disposed` after {@link ProceduralSceneRuntime.dispose}.
+ * `sdfm.scene_format` also covers malformed/duplicate light records and degenerate directions;
+ * engine light refusals propagate unchanged; `sdfm.disposed` after
+ * {@link ProceduralSceneRuntime.dispose}.
  */
 export interface ProceduralSceneRuntime {
   /** Evaluate one tick and apply its delta; resolves with the applied counts. */
@@ -424,7 +439,8 @@ export interface ProceduralSceneRuntime {
   }>;
   /** Replace the explicit parameter overrides (runtime drivers still apply). */
   set(values: Record<string, ProceduralRuntimeValue>): void;
-  /** Free the MAMA runtime handle and detach the instances it added; idempotent. */
+  /** Free the MAMA runtime handle, detach its instances and dispose the shared scene light
+   * registry, aborting staged work. Idempotent; pending steps cannot recreate disposed lights. */
   dispose(): void;
 }
 
@@ -446,7 +462,10 @@ export interface ProceduralSceneOptions {
   mode?: 'mesh' | 'trace';
   /** The loaded MAMA procedural evaluator; trace mode needs it to pack. */
   procgen?: SdfmProcgen;
-  /** Trace mode only: a translation in metres added to every scene instance. */
+  /** Trace mode only: a copied finite translation in metres, default [0,0,0], added to traced
+   * geometry and owned light positions. The light owner adds it exactly once to copied `t`
+   * on static loading and every runtime snapshot, without accumulating offsets or changing
+   * direction, range or area size. Mesh mode uses zero light placement. */
   placement?: Vec3;
   /** MAMA accessor; the default is mama-bridge `importProcedural()`. */
   mama?: () => Promise<SdfmProceduralMama>;
@@ -456,6 +475,9 @@ export interface ProceduralSceneOptions {
  * The handle of one loaded `sdfm.procedural-scene` (section 66). Every scene instance is one engine
  * node under `root`; its parts are spawned under it, never flattened. In trace mode `setVisible`
  * packs or removes the handle's instances from the shared trace scene.
+ * Each handle owns its static lights even without geometry or runtime input. Runtime access
+ * shares that owner without adding duplicate handles. Lights are world-space engine resources,
+ * independent of geometry nodes; parenting the root does not attach them to an instance.
  * Refusals: `sdfm.disposed` from `setVisible` and `stats` after {@link ProceduralSceneHandle.dispose}.
  */
 export interface ProceduralSceneHandle {
@@ -465,8 +487,10 @@ export interface ProceduralSceneHandle {
   instanceCount: number;
   /** Number of scene sources (assets, composites, or meshes). */
   sourceCount: number;
-  /** Show or hide every spawned part instance; trace mode packs or removes the handle's traced
-   * objects (an accepted repack invalidates the world volume). */
+  /** Show or hide every spawned part instance and this handle's illumination; authored light
+   * descriptors and identities survive hide/show. Trace mode packs or removes this handle's
+   * traced objects (an accepted repack invalidates the world volume). Other handles retain
+   * their lights. Failed light visibility updates restore the prior light state. */
   setVisible(visible: boolean): void;
   /** `instances` is the scene instance count, `meshes` the distinct loaded assets' parts, `pending` the uploads left. */
   stats(): { instances: number; meshes: number; pending: number };
@@ -474,10 +498,12 @@ export interface ProceduralSceneHandle {
    * Build the MAMA runtime handle of a scene whose file carries `runtime` (section 68). The
    * returned adapter applies each tick's delta to the instances this handle loaded (mesh mode) or
    * to the engine's trace scene (trace mode). A scene without runtime input refuses with
-   * `sdfm.scene_format`.
+   * `sdfm.scene_format`; its static lights remain owned by this handle.
    */
   runtime(procgen: SdfmProcgen): ProceduralSceneRuntime;
-  /** Remove the root node and every mesh this handle added; idempotent. */
+  /** Dispose tracked runtimes, abort pending light work, remove owned lights, the root and
+   * every mesh this handle added. Idempotent; other scene handles retain their resources.
+   * Disposal releases lights so a subsequent reload leaves no stale illumination. */
   dispose(): void;
 }
 
@@ -487,6 +513,20 @@ export interface ProceduralSceneHandle {
  * realized) and per distinct bend. A mesh-refs scene decodes each S24 `.mesh` (section 24) and
  * uploads it with `Engine.addMesh`, then one instance per scene instance. Instances are never
  * flattened.
+ * Optional static lights are consumed in either variant, including with `runtime: null` or
+ * zero geometry. Missing lights and [] create no handles. MAMA owns the `ProcLight` type:
+ * position comes from copied `t`, direction from normalized R(r) * S(s) * [0,0,-1] using the
+ * [x,y,z,w] quaternion. Range and full area extents remain metres, independent of scale.
+ * Kind, intensity, range, shadows and applicable angle/size fields retain their meaning.
+ * Spot outer/inner angles are full degrees in [1,179], with inner <= outer; an absent inner
+ * stays absent and defaults to 0.8 * outer. MAMA linear RGB becomes sRGB for Engine.addLight;
+ * the engine boundary converts it back to linear once. Mapping copies arrays and never mutates
+ * evaluator records. Shadows are retained metadata; these lights cast no local shadows yet.
+ * Lights are validated/mapped before allocation and staged before scene publication. A failed
+ * load releases its own resources without disturbing another published handle. Failed light
+ * updates restore prior descriptors and release additions before propagating the typed error.
+ * Transport-valid records are never silently dropped: engine domain/capacity refusals remain
+ * engine errors (for example nonpositive area extents, out-of-domain colour or exhausted capacity).
  * Trace mode resolves an sdf-refs scene through MAMA's `buildSceneTraceInput` without meshing,
  * merges it with every live handle and installs the op 4 packed program with
  * `Engine.setTraceScene`, which selects the GPU-stamped world-volume ray marcher: a five-mip R8Snorm
@@ -496,7 +536,8 @@ export interface ProceduralSceneHandle {
  * `dispose`, a new handle) replaces the program and so invalidates and rebuilds the volume before
  * its next frame; the last handle calls `Engine.clearTraceScene`.
  * Refusals: `sdfm.scene_format` for a parse failure, an unknown `mode`, a deform on a mesh-refs
- * instance or a mesh-refs scene in trace mode; `sdfm.scene_resolve` when `resolveAsset`,
+ * instance, a mesh-refs scene in trace mode, malformed/duplicate lights, invalid trace placement
+ * or a degenerate light direction (with a useful light-field path); `sdfm.scene_resolve` when `resolveAsset`,
  * `resolveMesh`, the mesh decode, `sceneSourceDocument`, trace input building or trace packing
  * fails; `sdfm.worker` when the default MAMA import fails; `sdfm.disposed` from the handle after
  * disposal; engine refusals (RaaError) propagate unchanged.
