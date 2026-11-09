@@ -255,6 +255,66 @@ fn standard_fn_every_pass_and_msaa_validates() {
     }
 }
 
+// Ported from solstice@7e465b5, crates/solstice-render/src/shaders.rs:261-266.
+// MIT License, Copyright (c) 2026 SamG-Coder.
+#[test]
+fn all_entry_points_compile() {
+    let reg = MaterialFnRegistry::new();
+    for pass in PassKind::ALL {
+        for msaa in [1, 4] {
+            let key = VariantKey {
+                material_fn: MaterialFnId::STANDARD,
+                pass,
+                msaa,
+                flags: 0,
+            };
+            let wgsl = default_composer()
+                .compose(&reg, &key)
+                .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+            Composer::validate(&wgsl).unwrap_or_else(|e| panic!("{key:?}: {e}"));
+            let module = naga::front::wgsl::parse_str(&wgsl).expect("parse");
+            let names: Vec<&str> = module
+                .entry_points
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect();
+            // The shadow caster has no fragment stage.
+            let expected: &[&str] = match pass {
+                PassKind::Shadow => &["vs_main"],
+                _ => &["vs_main", "fs_main"],
+            };
+            assert_eq!(names, expected, "{key:?}");
+            check_entry_points(pass, &module);
+        }
+    }
+}
+
+#[test]
+fn composed_variant_rejects_unparenthesised_bitwise_mix() {
+    use raa_shader::{SlotId, SlotProvider};
+    let reg = MaterialFnRegistry::new();
+    let key = VariantKey {
+        material_fn: MaterialFnId::STANDARD,
+        pass: PassKind::Forward,
+        msaa: 1,
+        flags: 0,
+    };
+    let mut composer = default_composer();
+    composer
+        .add_slot(SlotProvider {
+            slot: SlotId::Direct,
+            priority: 1,
+            provider: "mixed",
+            wgsl: "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {\n    return radiance * f32(1u * 3u ^ 5u);\n}\n"
+                .into(),
+        })
+        .expect("provider");
+    let wgsl = composer.compose(&reg, &key).expect("compose");
+    let e = Composer::validate(&wgsl).expect_err("a browser-rejected mix must fail");
+    assert_eq!(e.code(), "shader.validate", "{e}");
+    assert!(e.message.contains("unparenthesised mix"), "{e}");
+}
+
 #[test]
 fn vertex_fn_every_pass_and_msaa_validates() {
     let mut reg = MaterialFnRegistry::new();
@@ -510,6 +570,58 @@ fn local_zero_count_and_coincidence_return_before_reads_or_division() {
         1
     );
     assert!(source.contains("direction, distance), 0.0, 1.0)"));
+}
+
+#[test]
+fn area_light_uses_s11_rectangle_basis_and_representative_point() {
+    let source = raa_shader::LOCAL_LIGHTING_WGSL;
+    let basis = source
+        .split("fn raa_area_basis(")
+        .nth(1)
+        .expect("area basis");
+    // Y-up seed unless travel is within 0.99 of Y, then X-up; tangent first.
+    assert!(basis.contains("abs(dot(travel, vec3<f32>(0.0, 1.0, 0.0))) < 0.99"));
+    assert!(basis.contains("let tangent = normalize(cross(up0, travel));"));
+    assert!(basis.contains("cross(travel, tangent)"));
+    let representative = source
+        .split("fn raa_area_representative(")
+        .nth(1)
+        .expect("representative point");
+    // Clamped to the half extents along both basis axes, centred on the light position.
+    assert!(representative.contains("-half_extent.x, half_extent.x"));
+    assert!(representative.contains("-half_extent.y, half_extent.y"));
+    assert!(representative.contains("light.position_range.xyz + basis[0] * along_t"));
+    let contribution = source
+        .split("fn raa_local_contribution(")
+        .nth(1)
+        .expect("contribution");
+    // One-sided emission along +travel, checked before the representative point.
+    let emission = contribution
+        .find("dot(c.position - light.position_range.xyz, travel) <= 0.0")
+        .expect("emission side");
+    assert!(
+        emission
+            < contribution
+                .find("raa_area_representative(light, c.position)")
+                .unwrap()
+    );
+    // Direction and distance come from the representative point.
+    let area = contribution
+        .find("let to_light = representative - c.position;")
+        .expect("area distance");
+    // Finite near-field: coincidence and range guards precede the area division, and the
+    // windowed inverse square keeps its near clamp.
+    let branch = &contribution[area..];
+    assert!(
+        branch
+            .find("if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }")
+            .unwrap()
+            < branch.find("direction = to_light / distance;").unwrap()
+    );
+    assert!(source.contains("max(distance * distance, 0.04)"));
+    // A mathematical [0, 0] size degenerates to the point formula: representative == position.
+    assert!(source.contains("max(light.width, 0.0)"));
+    assert!(source.contains("max(light.height, 0.0)"));
 }
 
 #[test]

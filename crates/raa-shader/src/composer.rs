@@ -168,9 +168,12 @@ impl Composer {
         Ok(out)
     }
 
-    /// Parses `wgsl` with the naga WGSL front-end and validates the module with the
-    /// capabilities core WebGPU allows. Refuses with `shader.parse` or `shader.validate`;
-    /// the message starts with the line:col of the first span when naga gives one.
+    /// Parses `wgsl` with the naga WGSL front-end and validates every entry point of the
+    /// module with the capabilities core WebGPU allows, on the CPU only: a synchronous
+    /// setter never waits on a WebGPU error-scope future. Also refuses the unparenthesised
+    /// operator mixes browsers reject but naga accepts. Refuses with `shader.parse` or
+    /// `shader.validate`; the message starts with the line:col of the first span when naga
+    /// gives one.
     pub fn validate(wgsl: &str) -> Result<(), ShaderError> {
         let module = naga::front::wgsl::parse_str(wgsl).map_err(|e| {
             let mut message = e.message().to_string();
@@ -185,6 +188,7 @@ impl Composer {
             let span = e.labels().next().map(|(span, _)| span);
             ShaderError::new(ShaderError::PARSE, located(wgsl, span, message))
         })?;
+        validate_operator_mixes(wgsl)?;
         validate_local_derivatives(&module)?;
         let mut validator = Validator::new(ValidationFlags::all(), core_webgpu_capabilities());
         validator.validate(&module).map_err(|e| {
@@ -271,6 +275,87 @@ fn validate_local_derivatives(module: &naga::Module) -> Result<(), ShaderError> 
         }
     }
     Ok(())
+}
+
+// Operator-mix guard ported from solstice@7e465b5,
+// crates/solstice-render/src/shaders.rs:272-310. MIT License
+//
+// Copyright (c) 2026 SamG-Coder
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+/// Refuses the first unparenthesised operator mix in `source` with `shader.validate`.
+fn validate_operator_mixes(source: &str) -> Result<(), ShaderError> {
+    match unparenthesised_mixes(source).first() {
+        Some(problem) => Err(ShaderError::new(
+            ShaderError::VALIDATE,
+            format!(
+                "{problem}: WGSL rejects an unparenthesised mix of a bitwise operator with \
+                 another operator; add parentheses"
+            ),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Operators WGSL will not mix without parentheses: a bitwise operator with any other
+/// binary operator, or two different bitwise operators. Some compilers, naga among them,
+/// accept the mix anyway, so validation alone misses it, but browsers reject the shader.
+fn unparenthesised_mixes(source: &str) -> Vec<String> {
+    const BITWISE: [&str; 3] = [" ^ ", " | ", " & "];
+    const OTHER: [&str; 7] = [" * ", " / ", " % ", " + ", " - ", " << ", " >> "];
+    let mut found = Vec::new();
+    for (number, line) in source.lines().enumerate() {
+        let code = line.split("//").next().unwrap_or("");
+        // Text at each depth of parentheses, with nested groups left out.
+        let mut levels: Vec<String> = vec![String::new()];
+        for c in code.chars() {
+            match c {
+                '(' | '[' => {
+                    levels.last_mut().unwrap().push(' ');
+                    levels.push(String::new());
+                }
+                ')' | ']' => {
+                    let inner = levels.pop().unwrap_or_default();
+                    check(&inner, number, line, &mut found);
+                    if levels.is_empty() {
+                        levels.push(String::new());
+                    }
+                }
+                _ => levels.last_mut().unwrap().push(c),
+            }
+        }
+        for level in &levels {
+            check(level, number, line, &mut found);
+        }
+    }
+    fn check(text: &str, number: usize, line: &str, found: &mut Vec<String>) {
+        let text = text.replace("&&", "  ").replace("||", "  ");
+        let bitwise: Vec<_> = BITWISE.iter().filter(|op| text.contains(**op)).collect();
+        if bitwise.is_empty() {
+            return;
+        }
+        if bitwise.len() > 1 || OTHER.iter().any(|op| text.contains(op)) {
+            found.push(format!("line {}: {}", number + 1, line.trim()));
+        }
+    }
+    found
 }
 
 /// Entry points of `pass`.
@@ -365,6 +450,32 @@ fn fs_main() -> @location(0) vec4<f32> {
         assert_eq!(e.code(), "shader.validate");
         assert!(e.message.starts_with("2:12: "), "{e}");
         assert!(e.message.contains("1:1: Function [0]"), "{e}");
+    }
+
+    #[test]
+    fn validate_refuses_unparenthesised_bitwise_mixes() {
+        // Ported cases from solstice@7e465b5's operator-mix tests (MIT).
+        let mixed = "fn f(a: u32, b: u32) -> u32 {\n    return a * 3u ^ b * 5u;\n}\n";
+        let e = Composer::validate(mixed).unwrap_err();
+        assert_eq!(e.code(), "shader.validate", "{e}");
+        assert!(e.message.contains("line 2: return a * 3u ^ b * 5u;"), "{e}");
+        let two_bitwise = "fn f(a: u32, b: u32) -> u32 {\n    return a & b | a;\n}\n";
+        let e = Composer::validate(two_bitwise).unwrap_err();
+        assert_eq!(e.code(), "shader.validate", "{e}");
+        assert_eq!(unparenthesised_mixes(mixed).len(), 1);
+    }
+
+    #[test]
+    fn validate_accepts_parenthesised_mixes() {
+        let explicit = "fn f(a: u32, b: u32) -> u32 {\n    return (a * 3u) ^ (b * 5u);\n}\n";
+        assert_eq!(Composer::validate(explicit), Ok(()));
+        let nested =
+            "fn f(a: u32, b: u32) -> u32 {\n    let m = (a & b) | (a >> 1u);\n    return m;\n}\n";
+        assert_eq!(Composer::validate(nested), Ok(()));
+        // `&&` is a logical operator, not an unparenthesised bitwise mix.
+        let logic = "fn f(a: bool, b: bool, c: bool) -> bool {\n    return a && b || c;\n}\n";
+        assert_eq!(Composer::validate(logic), Ok(()));
+        assert!(unparenthesised_mixes(explicit).is_empty());
     }
 
     #[test]

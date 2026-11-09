@@ -14,7 +14,28 @@ fn raa_local_spot(cosine: f32, outer: f32, inner: f32) -> f32 {
     return smoothstep(outer, inner, cosine);
 }
 
-// Handoff: area evaluation extends this function's kind branch before visible wiring.
+// S11 rectangle basis: forward is the light's travel direction d; up0 is Y unless d is
+// within 0.99 of Y, then X; tangent = normalize(cross(up0, d)); bitangent = cross(d, tangent).
+// The rectangle is centred on the light and spans width along tangent, height along bitangent.
+fn raa_area_basis(travel: vec3<f32>) -> mat3x3<f32> {
+    let up0 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+        abs(dot(travel, vec3<f32>(0.0, 1.0, 0.0))) < 0.99);
+    let tangent = normalize(cross(up0, travel));
+    return mat3x3<f32>(tangent, cross(travel, tangent), travel);
+}
+
+// Karis representative point over the oriented rectangle, evaluated from the shading
+// position. The rectangle emits along +travel only. Callers keep the extents positive;
+// a mathematical [0, 0] still degenerates to the point formula below.
+fn raa_area_representative(light: LightGpu, position: vec3<f32>) -> vec3<f32> {
+    let basis = raa_area_basis(light.direction_cos_outer.xyz);
+    let offset = position - light.position_range.xyz;
+    let half_extent = vec2<f32>(max(light.width, 0.0), max(light.height, 0.0)) * 0.5;
+    let along_t = clamp(dot(offset, basis[0]), -half_extent.x, half_extent.x);
+    let along_b = clamp(dot(offset, basis[1]), -half_extent.y, half_extent.y);
+    return light.position_range.xyz + basis[0] * along_t + basis[1] * along_b;
+}
+
 // The caller passes the packed uniform index (not a stable CPU handle) to visibility.
 fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let light = raa_local_lights[index];
@@ -32,8 +53,18 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
             falloff *= raa_local_spot(dot(light.direction_cos_outer.xyz, -direction),
                 light.direction_cos_outer.w, light.cos_inner);
         }
+    } else if light.kind == 3u {
+        let travel = light.direction_cos_outer.xyz;
+        // One-sided emission: behind the rectangle contributes nothing.
+        if dot(c.position - light.position_range.xyz, travel) <= 0.0 { return vec3<f32>(0.0); }
+        let representative = raa_area_representative(light, c.position);
+        let to_light = representative - c.position;
+        distance = length(to_light);
+        if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
+        direction = to_light / distance;
+        falloff = raa_local_falloff(distance, light.position_range.w);
     } else if light.kind != 2u {
-        // Area is completed by the next share; never misinterpret it as point/directional.
+        // Directional ignores position and range; unknown kinds contribute nothing.
         return vec3<f32>(0.0);
     }
     if dot(s.normal, direction) <= 0.0 || falloff <= 0.0 { return vec3<f32>(0.0); }
