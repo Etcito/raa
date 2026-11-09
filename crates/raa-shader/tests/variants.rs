@@ -404,3 +404,143 @@ fn group_two_bindings_are_private_to_their_pass() {
         assert!(group_bindings(&module, 3).is_empty(), "{pass:?}");
     }
 }
+
+// Exercise the additive export through an entry point before production pass wiring lands.
+const LOCAL_PROBE: &str = "
+@fragment fn local_probe(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    var s: MaterialOutput;
+    s.normal = vec3<f32>(0.0, 1.0, 0.0);
+    var c: ShadeCtx;
+    c.frag = frag;
+    c.position = frag.xyz;
+    return vec4<f32>(raa_local_lighting(s, c), 1.0);
+}";
+
+#[test]
+fn local_lighting_composes_with_selected_providers() {
+    let reg = MaterialFnRegistry::new();
+    let key = VariantKey {
+        material_fn: MaterialFnId::STANDARD,
+        pass: PassKind::Forward,
+        msaa: 1,
+        flags: 0,
+    };
+    let wgsl = default_composer().compose(&reg, &key).expect("compose") + LOCAL_PROBE;
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
+    assert!(!raa_shader::PRELUDE_WGSL.contains("raa_slot_"));
+    // Existing pass sources retain their separate sun and Flat/UNLIT selection.
+    assert!(!raa_shader::PASS_FORWARD_WGSL.contains("raa_local_lighting("));
+}
+
+#[test]
+fn local_loop_rejects_derivatives_but_accepts_explicit_lod() {
+    use raa_shader::{ShaderError, SlotId, SlotProvider};
+    let reg = MaterialFnRegistry::new();
+    let key = VariantKey {
+        material_fn: MaterialFnId::STANDARD,
+        pass: PassKind::Forward,
+        msaa: 1,
+        flags: 0,
+    };
+    for slot in [SlotId::Direct, SlotId::LocalVisibility] {
+        for expression in [
+            "dpdx(c.position.x)",
+            "textureSample(raa_texture_atlas, raa_texture_sampler, c.position.xy).x",
+            "textureSampleLevel(raa_texture_atlas, raa_texture_sampler, c.position.xy, 0.0).x",
+        ] {
+            let mut composer = default_composer();
+            let source = if slot == SlotId::Direct {
+                format!(
+                    "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {{ return vec3<f32>({expression}); }}"
+                )
+            } else {
+                let expression = expression.replace("c.position", "world_position");
+                format!(
+                    "fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {{ return {expression}; }}"
+                )
+            };
+            composer
+                .add_slot(SlotProvider {
+                    slot,
+                    priority: 1,
+                    provider: "probe",
+                    wgsl: source.into(),
+                })
+                .expect("provider");
+            let wgsl = composer.compose(&reg, &key).expect("compose") + LOCAL_PROBE;
+            let result = Composer::validate(&wgsl);
+            if expression.contains("textureSampleLevel") {
+                assert_eq!(result, Ok(()));
+            } else {
+                let error = result.expect_err("nonuniform derivative must fail");
+                assert_eq!(error.code, ShaderError::VALIDATE);
+                assert!(error.message.contains("uniform"), "{error}");
+            }
+        }
+    }
+}
+
+#[test]
+fn local_zero_count_and_coincidence_return_before_reads_or_division() {
+    let source = raa_shader::LOCAL_LIGHTING_WGSL;
+    // Pin the control-flow guards, not a CPU reimplementation of the shader formula.
+    let helper = source
+        .split("fn raa_local_lighting(")
+        .nth(1)
+        .expect("helper");
+    assert!(
+        helper
+            .find("if raa_frame.light_info.x == 0u { return result; }")
+            .unwrap()
+            < helper.find("textureLoad(").unwrap()
+    );
+    let contribution = source
+        .split("fn raa_local_contribution(")
+        .nth(1)
+        .expect("contribution");
+    assert!(contribution.find("if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }").unwrap()
+        < contribution.find("direction = to_light / distance;").unwrap());
+    assert!(source.contains("max(distance * distance, 0.04)"));
+    assert!(source.contains("tile, i32(word), 0"));
+    assert!(source.contains("tile, 0, 0"));
+    assert_eq!(
+        source
+            .matches("raa_slot_direct(s, c, direction, radiance)")
+            .count(),
+        1
+    );
+    assert!(source.contains("direction, distance), 0.0, 1.0)"));
+}
+
+#[test]
+fn local_lighting_accepts_shipped_cel_and_matfn_sources() {
+    let mut composer = default_composer();
+    let fallback = include_str!("../../raa-brdf/src/wgsl/direct.wgsl")
+        .replace("raa_slot_direct", "raa_cel_fallback")
+        .replace("raa_layered_", "raa_cel_layered_")
+        .replace("RAA_LAYERED_", "raa_cel_LAYERED_");
+    composer
+        .add_slot(raa_shader::SlotProvider {
+            slot: raa_shader::SlotId::Direct,
+            priority: 30,
+            provider: "cel",
+            wgsl: format!(
+                "{fallback}\n{}",
+                include_str!("../../raa-cel/src/wgsl/direct.wgsl")
+            )
+            .into(),
+        })
+        .expect("cel provider");
+    let mut reg = MaterialFnRegistry::new();
+    let material_fn = reg
+        .register_builtin("raa.mud", include_str!("../../raa-matfn/src/wgsl/mud.wgsl"))
+        .expect("matfn");
+    let key = VariantKey {
+        material_fn,
+        pass: PassKind::Forward,
+        msaa: 1,
+        flags: 0,
+    };
+    let wgsl = composer.compose(&reg, &key).expect("compose") + LOCAL_PROBE;
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
+}

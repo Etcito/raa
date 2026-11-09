@@ -8,8 +8,8 @@ use crate::error::ShaderError;
 use crate::ids::{PassKind, SlotId, VariantKey};
 use crate::registry::MaterialFnRegistry;
 use crate::{
-    LIB_WGSL, PASS_FORWARD_WGSL, PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL, PASS_SHADOW_WGSL,
-    PASS_TRANSPARENT_WGSL, PRELUDE_WGSL,
+    LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL, PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL,
+    PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL, PRELUDE_WGSL,
 };
 
 /// Inserted after the material function when it defines no `material_vertex`.
@@ -102,7 +102,7 @@ impl Composer {
 
     /// The WGSL module of `key`, in the S11 order: PRELUDE, LIB, the material function, a
     /// passthrough `material_vertex` when the function defines none, the winner of each
-    /// slot in [`SlotId::ALL`] order, then the pass entry points preceded by the variant
+    /// slot in [`SlotId::ALL`] order, shared local lighting, then the pass entry points preceded by the variant
     /// constants `RAA_MSAA` and `RAA_VARIANT_FLAGS`. Refuses `shader.unknown_fn` when the
     /// registry has no function `key.material_fn` and `shader.slot_missing` when a slot has
     /// no provider. The result is not validated (see [`Composer::validate`]).
@@ -157,6 +157,7 @@ impl Composer {
             );
             section(&mut out, &title, &p.wgsl);
         }
+        section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
         let pass = format!(
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
             key.msaa,
@@ -184,6 +185,7 @@ impl Composer {
             let span = e.labels().next().map(|(span, _)| span);
             ShaderError::new(ShaderError::PARSE, located(wgsl, span, message))
         })?;
+        validate_local_derivatives(&module)?;
         let mut validator = Validator::new(ValidationFlags::all(), core_webgpu_capabilities());
         validator.validate(&module).map_err(|e| {
             let mut message = e.to_string();
@@ -211,6 +213,64 @@ impl Composer {
         })?;
         Ok(())
     }
+}
+
+// Naga does not reject every interprocedural derivative-uniformity violation.
+// Enforce S11 on the entire call graph reached inside the tiled light loop.
+fn validate_local_derivatives(module: &naga::Module) -> Result<(), ShaderError> {
+    let mut pending: Vec<_> = module
+        .functions
+        .iter()
+        .filter(|(_, f)| f.name.as_deref() == Some("raa_local_contribution"))
+        .map(|(h, _)| h)
+        .collect();
+    let mut visited = std::collections::HashSet::new();
+    while let Some(handle) = pending.pop() {
+        if !visited.insert(handle) {
+            continue;
+        }
+        let function = &module.functions[handle];
+        for (_, expression) in function.expressions.iter() {
+            if matches!(
+                expression,
+                naga::Expression::Derivative { .. }
+                    | naga::Expression::ImageSample {
+                        level: naga::SampleLevel::Auto | naga::SampleLevel::Bias(_),
+                        ..
+                    }
+            ) {
+                return Err(ShaderError::new(
+                    ShaderError::VALIDATE,
+                    format!(
+                        "nonuniform local-light loop reaches derivative-dependent function `{}`; use explicit LOD, established gradients or textureLoad",
+                        function.name.as_deref().unwrap_or("unnamed")
+                    ),
+                ));
+            }
+        }
+        let mut blocks = vec![&function.body];
+        while let Some(block) = blocks.pop() {
+            for statement in block.iter() {
+                match statement {
+                    naga::Statement::Call { function, .. } => pending.push(*function),
+                    naga::Statement::Block(b) => blocks.push(b),
+                    naga::Statement::If { accept, reject, .. } => {
+                        blocks.extend([accept, reject]);
+                    }
+                    naga::Statement::Switch { cases, .. } => {
+                        blocks.extend(cases.iter().map(|case| &case.body));
+                    }
+                    naga::Statement::Loop {
+                        body, continuing, ..
+                    } => {
+                        blocks.extend([body, continuing]);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Entry points of `pass`.

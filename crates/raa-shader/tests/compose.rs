@@ -105,6 +105,8 @@ fn sections_follow_contract_order() {
         .collect();
     needles.extend(slot_fns.iter().map(String::as_str));
     needles.extend([
+        "// raa section: local lighting",
+        "fn raa_local_lighting(",
         "// raa section: pass Forward",
         "const RAA_MSAA: u32 = 4u;",
         "fn vs_main(",

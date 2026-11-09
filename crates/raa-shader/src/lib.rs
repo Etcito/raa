@@ -24,6 +24,11 @@ pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.w
 /// `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`).
 pub const LIB_WGSL: &str = include_str!("wgsl/lib.wgsl");
 
+/// Shared tiled local-light evaluation, composed alongside Direct and LocalVisibility.
+/// Handoff: exports `raa_local_lighting(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>`;
+/// consumes frame light counts, packed light indices and the binding-13 tile texture.
+pub const LOCAL_LIGHTING_WGSL: &str = include_str!("wgsl/local_lighting.wgsl");
+
 /// Prepass entry points: `vs_main` and `fs_main` writing the S12 `normal` (location 0:
 /// view-space normal xyz, roughness) and `material` (location 1: F0 rgb sRGB-encoded,
 /// metallic) targets.
