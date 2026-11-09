@@ -12,8 +12,9 @@ use raa_math::{Mat4, Vec3};
 
 use crate::local_light::{LightHandle, LocalLight, MAX_LIGHT_HANDLE};
 
+use raa_shader::LIGHT_GPU_SIZE;
 /// Maximum number of local lights held by the renderer.
-pub const MAX_LOCAL_LIGHTS: usize = 256;
+pub use raa_shader::MAX_LOCAL_LIGHTS;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Attachment {
@@ -236,6 +237,21 @@ impl LocalLights {
             .count() as u32
     }
 
+    /// Handoff: `LocalLights::write_gpu(&self, out: &mut [u8; 16384]) -> ()`
+    /// in `crates/raa-lit/src/local_lights.rs` writes world-space records in stable
+    /// handle order for upload. Shared `raa_shader::{MAX_LOCAL_LIGHTS, LIGHT_GPU_SIZE}`
+    /// exports from `gpu_constants.rs` define the allocation and stride; no keys are sent.
+    pub fn write_gpu(&self, out: &mut [u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE]) {
+        out.fill(0);
+        for (entry, record) in self.entries[..self.len]
+            .iter()
+            .flatten()
+            .zip(out.chunks_exact_mut(LIGHT_GPU_SIZE))
+        {
+            world_desc(entry).write_gpu(record.try_into().expect("one light record"));
+        }
+    }
+
     /// Whether a registry mutation requires its backing GPU data to be refreshed.
     pub fn is_dirty(&self) -> bool {
         self.dirty
@@ -304,6 +320,112 @@ fn unknown_handle() -> RaaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gpu_float(bytes: &[u8], offset: usize) -> f32 {
+        f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn local_light_gpu_four_kinds_offsets_and_defaults() {
+        use crate::LocalLightKind::{Area, Directional, Point, Spot};
+        let mut lights = LocalLights::new();
+        for kind in [Point, Spot, Directional, Area] {
+            lights
+                .add(LocalLight {
+                    kind,
+                    position: [3.0, 4.0, 5.0],
+                    color: [0.25, 0.5, 1.0],
+                    intensity: 8.0,
+                    range: 4.0,
+                    size: [2.0, 3.0],
+                    radius: 99.0,
+                    shadows: true,
+                    ..LocalLight::default()
+                })
+                .unwrap();
+        }
+        let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        for (rank, record) in out[..4 * LIGHT_GPU_SIZE]
+            .chunks_exact(LIGHT_GPU_SIZE)
+            .enumerate()
+        {
+            for (offset, expected) in [
+                (0, 3.0),
+                (4, 4.0),
+                (8, 5.0),
+                (12, 4.0),
+                (16, 2.0),
+                (20, 4.0),
+                (24, 8.0),
+                (28, 1.0 / 16.0),
+                (32, 0.0),
+                (36, 0.0),
+                (40, -1.0),
+                (56, 2.0),
+                (60, 3.0),
+            ] {
+                assert_eq!(gpu_float(record, offset), expected, "offset {offset}");
+            }
+            assert!((gpu_float(record, 44) - 17.5_f32.to_radians().cos()).abs() < 1e-6);
+            assert!((gpu_float(record, 48) - 14.0_f32.to_radians().cos()).abs() < 1e-6);
+            assert_eq!(
+                u32::from_le_bytes(record[52..56].try_into().unwrap()),
+                rank as u32
+            );
+        }
+        assert!(out[4 * LIGHT_GPU_SIZE..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn local_light_gpu_handles_stay_outside_dense_records() {
+        let mut lights = LocalLights::new();
+        let first = lights.add(LocalLight::default()).unwrap();
+        let removed = lights.add(LocalLight::default()).unwrap();
+        let last = lights.add(LocalLight::default()).unwrap();
+        lights.remove(removed).unwrap();
+        assert!(first < removed && removed < last);
+        let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        assert_eq!(
+            &out[..LIGHT_GPU_SIZE],
+            &out[LIGHT_GPU_SIZE..2 * LIGHT_GPU_SIZE]
+        );
+        assert!(out[2 * LIGHT_GPU_SIZE..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn local_light_gpu_dense_world_records_and_finite_extremes() {
+        let mut lights = LocalLights::new();
+        let removed = lights.add(LocalLight::default()).unwrap();
+        let kept = lights
+            .add(LocalLight {
+                kind: crate::LocalLightKind::Spot,
+                inner_angle_deg: Some(20.0),
+                range: f32::from_bits(1),
+                ..LocalLight::default()
+            })
+            .unwrap();
+        lights.attach(kept, 7, [1.0, 2.0, 3.0], &posed()).unwrap();
+        lights.remove(removed).unwrap();
+        let mut out = [0xff; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE];
+        lights.write_gpu(&mut out);
+        for i in 0..3 {
+            assert!((gpu_float(&out, i * 4) - [11.5, 0.0, 2.0][i]).abs() < 1e-5);
+            assert!((gpu_float(&out, 32 + i * 4) - [-1.0, 0.0, 0.0][i]).abs() < 1e-5);
+        }
+        assert_eq!(gpu_float(&out, 28), f32::MAX);
+        assert!((gpu_float(&out, 48) - 10.0_f32.to_radians().cos()).abs() < 1e-6);
+        assert!(
+            out[..64]
+                .chunks_exact(4)
+                .all(|b| f32::from_le_bytes(b.try_into().unwrap()).is_finite())
+        );
+        assert!(out[64..].iter().all(|b| *b == 0));
+        lights.remove(kept).unwrap();
+        lights.write_gpu(&mut out);
+        assert!(out.iter().all(|b| *b == 0));
+    }
 
     #[test]
     fn bounded_capacity_handles_and_stale_references() {

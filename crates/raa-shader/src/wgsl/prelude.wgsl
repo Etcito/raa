@@ -1,5 +1,16 @@
 // RAA prelude (S10 structs and bindings of groups 0-1, S11 material structs).
 
+// S10: four 16-byte lanes; stable handles and authoring metadata remain on the CPU.
+struct LightGpu {
+    position_range: vec4<f32>,       // 0: world xyz, range in metres
+    color_inv_range_sq: vec4<f32>,   // 16: linear RGB * intensity, inverse range squared
+    direction_cos_outer: vec4<f32>,  // 32: unit travel xyz, outer half-angle cosine
+    cos_inner: f32,                 // 48
+    kind: u32,                      // 52: point 0, spot 1, directional 2, area 3
+    width: f32,                     // 56: full extent in metres
+    height: f32,                    // 60: full extent in metres
+}
+
 struct FrameGpu {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,

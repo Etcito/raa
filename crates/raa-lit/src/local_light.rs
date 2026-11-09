@@ -138,6 +138,39 @@ fn normalized_direction(direction: [f32; 3]) -> Result<[f32; 3], RaaError> {
 }
 
 impl LocalLight {
+    /// Handoff: `LocalLight::write_gpu(self, out: &mut [u8; LIGHT_GPU_SIZE]) -> ()`
+    /// in `crates/raa-lit/src/local_light.rs` encodes a validated world descriptor.
+    /// `LocalLights::write_gpu` attaches this to its ascending `LightHandle` registry;
+    /// handles, radius and shadows stay outside the S10 record.
+    pub(crate) fn write_gpu(self, out: &mut [u8; raa_shader::LIGHT_GPU_SIZE]) {
+        // Compute in f64 to avoid intermediate overflow; extremely small positive
+        // ranges saturate at the largest finite GPU value instead of emitting infinity.
+        let inverse_range_squared =
+            (1.0 / f64::from(self.range).powi(2)).min(f64::from(f32::MAX)) as f32;
+        let words = [
+            self.position[0],
+            self.position[1],
+            self.position[2],
+            self.range,
+            self.color[0] * self.intensity,
+            self.color[1] * self.intensity,
+            self.color[2] * self.intensity,
+            inverse_range_squared,
+            self.direction[0],
+            self.direction[1],
+            self.direction[2],
+            (self.angle_deg.to_radians() * 0.5).cos(),
+            (self.effective_inner_angle_deg().to_radians() * 0.5).cos(),
+            0.0,
+            self.size[0],
+            self.size[1],
+        ];
+        for (bytes, value) in out.chunks_exact_mut(4).zip(words) {
+            bytes.copy_from_slice(&value.to_le_bytes());
+        }
+        out[52..56].copy_from_slice(&self.kind.rank().to_le_bytes());
+    }
+
     /// Effective full inner cone angle: the authored value, or 80 percent of `angle_deg`.
     pub fn effective_inner_angle_deg(self) -> f32 {
         self.inner_angle_deg.unwrap_or(self.angle_deg * 0.8)

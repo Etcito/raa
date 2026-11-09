@@ -340,10 +340,33 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
         assert_eq!(e.code(), "tint.mode_unknown");
     }
 
+    // Layout reflection adapted from solstice@7e465b5, crates/solstice-render/src/frame.rs:250.
+    // MIT License
+    //
+    // Copyright (c) 2026 SamG-Coder
+    //
+    // Permission is hereby granted, free of charge, to any person obtaining a copy
+    // of this software and associated documentation files (the "Software"), to deal
+    // in the Software without restriction, including without limitation the rights
+    // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    // copies of the Software, and to permit persons to whom the Software is
+    // furnished to do so, subject to the following conditions:
+    //
+    // The above copyright notice and this permission notice shall be included in all
+    // copies or substantial portions of the Software.
+    //
+    // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    // SOFTWARE.
     #[test]
     fn s10_struct_sizes_match() {
         let source = module()
             + "
+struct LightLayoutProbe { records: array<LightGpu, MAX_LOCAL_LIGHTS>, }
 @vertex fn history_probe(@location(2) id: u32) -> @builtin(position) vec4<f32> {
     let r = raa_previous_instances[id];
     return raa_previous_model(r) * vec4<f32>(0.0, 0.0, 0.0, 1.0);
@@ -384,6 +407,65 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
                 .find(|(_, t)| t.name.as_deref() == Some(name))
                 .expect(name);
             assert_eq!(layouter[h].size, size, "{name}");
+        }
+        let (_, probe) = m
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("LightLayoutProbe"))
+            .unwrap();
+        let naga::TypeInner::Struct {
+            members: probe_members,
+            span: probe_span,
+        } = &probe.inner
+        else {
+            panic!("light array probe is a struct");
+        };
+        assert_eq!(*probe_span as usize, MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE);
+        let naga::TypeInner::Array { stride, size, .. } = m.types[probe_members[0].ty].inner else {
+            panic!("light records are an array");
+        };
+        assert_eq!(stride as usize, LIGHT_GPU_SIZE);
+        assert_eq!(
+            size,
+            naga::ArraySize::Constant(std::num::NonZeroU32::new(MAX_LOCAL_LIGHTS as u32).unwrap())
+        );
+        // Reflect member names, offsets and scalar/vector types as well as total size.
+        let (light_handle, light) = m
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("LightGpu"))
+            .expect("LightGpu");
+        let naga::TypeInner::Struct { members, span } = &light.inner else {
+            panic!("LightGpu is a struct");
+        };
+        assert_eq!(*span as usize, LIGHT_GPU_SIZE);
+        assert_eq!(layouter[light_handle].size, *span);
+        assert_eq!(
+            layouter[light_handle].alignment,
+            naga::proc::Alignment::SIXTEEN
+        );
+        let vector = naga::TypeInner::Vector {
+            size: naga::VectorSize::Quad,
+            scalar: naga::Scalar::F32,
+        };
+        let float = naga::TypeInner::Scalar(naga::Scalar::F32);
+        let expected = [
+            ("position_range", 0, vector.clone()),
+            ("color_inv_range_sq", 16, vector.clone()),
+            ("direction_cos_outer", 32, vector),
+            ("cos_inner", 48, float.clone()),
+            ("kind", 52, naga::TypeInner::Scalar(naga::Scalar::U32)),
+            ("width", 56, float.clone()),
+            ("height", 60, float),
+        ];
+        assert_eq!(members.len(), expected.len());
+        for (name, offset, ty) in expected {
+            let member = members
+                .iter()
+                .find(|m| m.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("{name} missing from LightGpu"));
+            assert_eq!(member.offset, offset, "{name}");
+            assert_eq!(m.types[member.ty].inner, ty, "{name}");
         }
         let (_, previous) = m
             .global_variables
