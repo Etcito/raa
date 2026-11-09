@@ -656,7 +656,7 @@ test('whole-flow diagnostics fail the run after every pair is collected in one j
 });
 
 
-test('real staged metadata resolves functional labels and 32 unique filenames', async t => {
+test('real staged metadata preserves M2 inventory and selects exactly two M3 captures', async t => {
   const f = writePage(t, [scene()]);
   cpSync(new URL('../../examples/lights/scenes/', import.meta.url), join(f.page, 'scenes'), { recursive: true });
   mkdirSync(join(f.page, 'common'), { recursive: true });
@@ -666,12 +666,6 @@ test('real staged metadata resolves functional labels and 32 unique filenames', 
   execFileSync(process.execPath, ['--input-type=module', '-', join(f.page, 'scenes')], { input: imports });
   const staging = script.split("<<'JS'\n")[1].split('\nJS\n')[0];
   execFileSync(process.execPath, ['--input-type=module', '-', f.page], { input: staging, cwd: WORKTREE });
-  const m03 = scene('mama-produced-light', [FLOOR], 'm03');
-  m03.variants.forEach(variant => { variant.evidence = { filename: `mama-produced-${variant.id}.png`, label: `MAMA-produced ${variant.id} light` }; });
-  writeFileSync(join(f.page, 'scenes/mama-produced-light.js'), source(m03));
-  const index = read(join(f.page, 'scenes.json'));
-  index.push({ id: m03.id, milestone: m03.milestone, file: 'scenes/mama-produced-light.js' });
-  writeFileSync(join(f.page, 'scenes.json'), JSON.stringify(index));
   const pairs = await check(f.page);
   assert.equal(pairs.length, 14);
   const images = pairs.flatMap(pair => [pair.evidence,
@@ -684,5 +678,8 @@ test('real staged metadata resolves functional labels and 32 unique filenames', 
   const m03out = join(f.root, 'out/m03');
   await main(['select', '--page', f.page, '--out', m03out, '--milestone', 'm03']);
   const m03Pairs = read(join(m03out, 'selection.json')).pairs;
-  assert.deepEqual(m03Pairs.map(pair => pair.evidence.filename), ['mama-produced-on.png', 'mama-produced-off.png']);
+  assert.deepEqual(m03Pairs.map(pair => pair.evidence.filename), [
+    'mama-lights-on-soft-spot-illumination.png',
+    'mama-lights-off-valid-floor-without-spot.png',
+  ]);
 });
