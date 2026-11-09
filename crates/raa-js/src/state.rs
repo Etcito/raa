@@ -10,10 +10,11 @@ use std::rc::Rc;
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError, wgpu};
 use raa_csg::CsgResolver;
 use raa_geom::{GeometryRegistry, MeshData};
-use raa_lit::{LitMeshId, LitRenderer, RestMeshView};
+use raa_lit::{LitMeshId, LitRenderer, LocalLights, RestMeshView};
 use raa_loader::LoaderRegistry;
+use raa_math::Mat4;
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, RecordCtx, SubmissionState};
-use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene};
+use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene, Transform};
 use raa_skin::{SKIN_ORDER, SKIN_PASS, SkinMesh, SkinPass, SkinVertexInputs, validate_pose};
 use raa_tonemap::TonemapControl;
 
@@ -451,6 +452,139 @@ impl InstanceGroup {
     }
 }
 
+/// Node parent links of the Engine's scene graph, recorded when a node is created (the scene
+/// arena does not expose them). A local transform change is validated against the
+/// prospective world matrices of the whole subtree it moves.
+pub(crate) type NodeParents = Vec<(NodeId, Option<NodeId>)>;
+
+/// The recorded parent of `node`, or None for a root (or an untracked node).
+fn parent_of(parents: &[(NodeId, Option<NodeId>)], node: NodeId) -> Option<NodeId> {
+    parents
+        .iter()
+        .find(|(id, _)| *id == node)
+        .and_then(|(_, parent)| *parent)
+}
+
+/// Prospective world matrices of `node` and every tracked descendant after replacing the
+/// local transform of `node`: `world = parent.world * local`, parents before children.
+fn subtree_worlds(
+    scene: &Scene,
+    parents: &[(NodeId, Option<NodeId>)],
+    node: NodeId,
+    local: Transform,
+) -> Result<Vec<(NodeId, Mat4)>, RaaError> {
+    let base = match parent_of(parents, node) {
+        Some(parent) => scene.world(parent).map_err(|e| scene_error(&e))?,
+        None => Mat4::IDENTITY,
+    };
+    let mut worlds = vec![(node, base * local.to_mat4())];
+    let mut next = 0;
+    while next < worlds.len() {
+        let (id, world) = worlds[next];
+        next += 1;
+        for &(child, parent) in parents {
+            if parent == Some(id) {
+                let local = scene.local(child).map_err(|e| scene_error(&e))?;
+                worlds.push((child, world * local.to_mat4()));
+            }
+        }
+    }
+    Ok(worlds)
+}
+
+/// Validates every local light attached to the instance-group handles whose node is `node`
+/// or a descendant of it against the world transforms the new `local` would produce. Returns
+/// the `(JS instance-group handle, prospective world)` pairs to commit after the scene
+/// changed. A degenerate result refuses with `light.invalid_attachment` before any mutation.
+pub(crate) fn validate_node_change(
+    scene: &Scene,
+    instances: &HandleMap<InstanceGroup>,
+    parents: &[(NodeId, Option<NodeId>)],
+    lights: &LocalLights,
+    node: NodeId,
+    local: Transform,
+) -> Result<Vec<(u32, Mat4)>, RaaError> {
+    let worlds = subtree_worlds(scene, parents, node, local)?;
+    let mut plan = Vec::new();
+    for (handle, group) in instances.iter() {
+        if let Some(&(_, world)) = worlds.iter().find(|(id, _)| *id == group.node) {
+            lights.validate_parent(handle, &world)?;
+            plan.push((handle, world));
+        }
+    }
+    Ok(plan)
+}
+
+/// Validates and applies a local transform: refresh the current worlds (parents may be dirty),
+/// validate the attachments of the moved subtree, then `Scene::set_local`, the world refresh
+/// and `LocalLights::update_parent` for every affected JS instance-group handle. A refusal
+/// leaves the scene and the registry untouched.
+pub(crate) fn set_local_checked(
+    scene: &mut Scene,
+    instances: &HandleMap<InstanceGroup>,
+    parents: &[(NodeId, Option<NodeId>)],
+    lights: &mut LocalLights,
+    node: NodeId,
+    local: Transform,
+) -> Result<(), RaaError> {
+    // Fast path: without an attached light there is nothing to validate or follow, so the
+    // batch keeps its old cost (the next prepare refreshes the world).
+    if lights.attached_count() == 0 {
+        return scene.set_local(node, local).map_err(|e| scene_error(&e));
+    }
+    scene.update_world();
+    let plan = validate_node_change(scene, instances, parents, lights, node, local)?;
+    scene.set_local(node, local).map_err(|e| scene_error(&e))?;
+    scene.update_world();
+    for (handle, world) in plan {
+        lights.update_parent(handle, &world)?;
+    }
+    Ok(())
+}
+
+/// Detaches the lights of every group whose node is gone at their last valid world transform
+/// and prunes the node links that no longer exist.
+pub(crate) fn detach_removed_groups(
+    scene: &Scene,
+    instances: &HandleMap<InstanceGroup>,
+    parents: &mut NodeParents,
+    lights: &mut LocalLights,
+) {
+    for (handle, group) in instances.iter() {
+        if scene.local(group.node).is_err() {
+            lights.remove_parent(handle);
+        }
+    }
+    parents.retain(|(id, _)| scene.local(*id).is_ok());
+}
+
+/// Removes `node` and its subtree, marks the groups whose node went away stale and detaches
+/// their lights at the last valid world transform. The caller clears its per-tag extras.
+pub(crate) fn remove_node_checked(
+    scene: &mut Scene,
+    instances: &mut HandleMap<InstanceGroup>,
+    parents: &mut NodeParents,
+    lights: &mut LocalLights,
+    node: NodeId,
+) -> Result<(), RaaError> {
+    scene.remove_node(node).map_err(|e| scene_error(&e))?;
+    mark_stale_groups(scene, instances);
+    detach_removed_groups(scene, instances, parents, lights);
+    Ok(())
+}
+
+/// Removes the instance group of JS handle `h` and detaches its lights at the last valid
+/// world transform; the handle is never reused.
+pub(crate) fn remove_instance_checked(
+    instances: &mut HandleMap<InstanceGroup>,
+    lights: &mut LocalLights,
+    h: u32,
+) -> Result<InstanceGroup, RaaError> {
+    let group = instances.remove(h)?;
+    lights.remove_parent(h);
+    Ok(group)
+}
+
 /// Marks stale every live group whose node no longer exists in `scene`.
 fn mark_stale_groups(scene: &Scene, groups: &mut HandleMap<InstanceGroup>) {
     for (_, group) in groups.iter_mut() {
@@ -522,6 +656,9 @@ pub(crate) struct EngineState {
     pub materials: HandleMap<MaterialId>,
     pub nodes: HandleMap<NodeId>,
     pub instances: HandleMap<InstanceGroup>,
+    /// Parent link of every Engine-created node, used to validate and refresh the local
+    /// lights attached to the instance groups of a moved node's subtree.
+    pub node_parents: NodeParents,
     /// Lit meshes whose geometry was replaced since the last frame: their instance groups
     /// are rebuilt by [`EngineState::rebuild_dirty_groups`] in `update`, before
     /// `lit.prepare`.
@@ -667,6 +804,44 @@ impl EngineState {
         self.instances.get_mut(h)
     }
 
+    /// The parent world matrix of a JS instance-group handle: the latest world transform of
+    /// the group's node, never one compacted submesh slot. Instance movement and light
+    /// attachments are therefore reflected in the same submitted frame.
+    ///
+    /// Handoff: `EngineState::instance_parent_world(&mut self, h: u32) -> Result<Mat4,
+    /// RaaError>` in `crates/raa-js/src/state.rs` is the entry point the S17 light mutators
+    /// (`crates/raa-js/src/api/m28_lights.rs`) use: they resolve the JS instance-group handle
+    /// here and pass the returned matrix to `LocalLights::attach(handle, parent, offset,
+    /// world)` in the renderer-owned `M2-LOCAL-STATE` registry keyed by the stable
+    /// `LightHandle`. This module attaches that registry through
+    /// `LitRenderer::local_lights_mut` and keys attachments by the same JS group handle.
+    pub(crate) fn instance_parent_world(&mut self, h: u32) -> Result<Mat4, RaaError> {
+        let node = {
+            let group = self.instances.get_ref(h)?;
+            group.check_live()?;
+            group.node
+        };
+        self.scene.update_world();
+        self.scene.world(node).map_err(|e| scene_error(&e))
+    }
+
+    /// Validates and applies a local node transform together with the local lights attached
+    /// to that node's instance groups (and its descendants').
+    pub(crate) fn set_node_local(
+        &mut self,
+        node: NodeId,
+        local: Transform,
+    ) -> Result<(), RaaError> {
+        set_local_checked(
+            &mut self.scene,
+            &self.instances,
+            &self.node_parents,
+            self.lit.local_lights_mut(),
+            node,
+            local,
+        )
+    }
+
     /// Creates the instance group of JS handle `next_handle()` for `mesh` at `node` and
     /// returns that handle. `material` overrides every sub-mesh material (v0 addInstance).
     pub(crate) fn add_instance_group(
@@ -743,10 +918,12 @@ impl EngineState {
     }
 
     /// Removes the group of JS handle `h` (its handle is never reused) and its scene
-    /// instances; the instance extras of its tag are cleared. A stale group (its node was
+    /// instances; the lights attached to the group detach at their last valid world
+    /// transform and the instance extras of its tag are cleared. A stale group (its node was
     /// removed) is unmapped too and throws `scene.stale_instance`, as in v0.
     pub(crate) fn remove_instance_group(&mut self, h: u32) -> Result<(), RaaError> {
-        let mut group = self.instances.remove(h)?;
+        let mut group =
+            remove_instance_checked(&mut self.instances, self.lit.local_lights_mut(), h)?;
         if let Some(skin) = self.features.get::<SkinFeature>() {
             skin.remove_instance(group.tag);
         }
@@ -757,11 +934,17 @@ impl EngineState {
     }
 
     /// Removes `node`, its subtree and their scene instances, and marks stale the groups
-    /// whose node went away (later use throws `scene.stale_instance`). Their instance
-    /// extras are cleared; their handles stay mapped, as in v0.
+    /// whose node went away (later use throws `scene.stale_instance`). Their attached lights
+    /// detach at their last valid world transform and their instance extras are cleared;
+    /// their handles stay mapped, as in v0.
     pub(crate) fn remove_node(&mut self, node: NodeId) -> Result<(), RaaError> {
-        self.scene.remove_node(node).map_err(|e| scene_error(&e))?;
-        mark_stale_groups(&self.scene, &mut self.instances);
+        remove_node_checked(
+            &mut self.scene,
+            &mut self.instances,
+            &mut self.node_parents,
+            self.lit.local_lights_mut(),
+            node,
+        )?;
         let skin = self.features.get::<SkinFeature>();
         for (_, group) in self.instances.iter() {
             if group.stale {

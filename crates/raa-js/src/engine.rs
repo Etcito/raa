@@ -97,6 +97,7 @@ impl EngineState {
             .scene
             .add_node(parent, t)
             .map_err(|e| scene_error(&e))?;
+        self.node_parents.push((id, parent));
         Ok(self.nodes.insert(id))
     }
 
@@ -254,6 +255,7 @@ impl WebApp for EngineApp {
             materials: HandleMap::new("material"),
             nodes: HandleMap::new("node"),
             instances: HandleMap::new("instance"),
+            node_parents: Vec::with_capacity(max),
             dirty_meshes: Vec::new(),
             single_material: false,
             asset_handles: HandleMap::new("asset"),
@@ -699,7 +701,9 @@ impl Engine {
         })
     }
 
-    /// Sets the local transform of `node`.
+    /// Sets the local transform of `node`; local lights attached to the node's instance
+    /// groups (and its descendants') are validated before the scene changes and follow the
+    /// new world transforms in the same frame (`light.invalid_attachment` refuses atomically).
     #[wasm_bindgen(js_name = setTransform)]
     pub fn set_transform(
         &mut self,
@@ -711,13 +715,14 @@ impl Engine {
         self.with_state(|_, st| {
             let id = st.nodes.get(node)?;
             let local = trs_arg(Some(t), Some(r), Some(s))?;
-            st.scene.set_local(id, local).map_err(|e| scene_error(&e))
+            st.set_node_local(id, local)
         })
     }
 
     /// Sets many local transforms: `trs` holds 10 floats per node (t3, r4 [x, y, z, w],
     /// s3). A length mismatch throws `api.length_mismatch`. Nodes before a failing entry
-    /// keep their new transform.
+    /// keep their new transform; each entry is validated (attached local lights included)
+    /// before it applies, so a failing entry changes neither scene nor lights.
     #[wasm_bindgen(js_name = setTransforms)]
     pub fn set_transforms(
         &mut self,
@@ -738,16 +743,20 @@ impl Engine {
             let (handles, floats) = (&mut st.scratch_nodes[..n], &mut st.scratch_trs[..f]);
             nodes.copy_to(handles);
             trs.copy_to(floats);
-            for (i, &h) in handles.iter().enumerate() {
+            for i in 0..n {
+                let h = st.scratch_nodes[i];
+                let start = i * 10;
                 let id = st.nodes.get(h)?;
-                if !floats[i * 10..i * 10 + 10].iter().all(|c| c.is_finite()) {
+                if !st.scratch_trs[start..start + 10]
+                    .iter()
+                    .all(|c| c.is_finite())
+                {
                     return Err(invalid(format!(
                         "'trs' of node {i} must hold finite numbers"
                     )));
                 }
-                st.scene
-                    .set_local(id, decode_trs(floats, i))
-                    .map_err(|e| scene_error(&e))?;
+                let local = decode_trs(&st.scratch_trs, i);
+                st.set_node_local(id, local)?;
             }
             Ok(())
         })

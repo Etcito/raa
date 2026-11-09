@@ -28,6 +28,7 @@ use crate::frame_history::{CameraHistory, FrameHistory, MAX_VIEWS, frame_jitter}
 use crate::handle::{LitHandle, LitShared};
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
+use crate::local_lights::LocalLights;
 use crate::lod::{LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level};
 use crate::material::{DrawClass, SurfaceMaterial};
 use crate::material_data::MaterialDataStats;
@@ -348,6 +349,18 @@ pub struct LitRenderer {
     frame_bytes: [u8; FRAME_GPU_SIZE],
     /// Per-viewport camera history and the open scene invocation (RAA-FRAME).
     scene_frame: SceneLifecycle,
+    /// The renderer-owned S17 local-light registry (M2-LOCAL-STATE).
+    ///
+    /// Handoff: `LitRenderer::local_lights_mut(&mut self) -> &mut LocalLights` in
+    /// `crates/raa-lit/src/renderer.rs` (with the read-only `local_lights`) exposes this
+    /// registry. The Engine attaches it by carrying the `LitRenderer` in
+    /// `crates/raa-js/src/state.rs` and calling the accessors from its object mutators:
+    /// `LocalLights::validate_parent(parent: u32, world: &Mat4)` before
+    /// `Scene::set_local`, then `update_parent(parent: u32, world: &Mat4)` or
+    /// `remove_parent(parent: u32)`. The state is keyed by the stable `LightHandle`
+    /// (`u64`) and the parent is the existing JS instance-group handle (`u32`), never a
+    /// compacted submesh slot.
+    local_lights: LocalLights,
     /// A background that could not reach the pipeline (borrowed), applied at `prepare`.
     pending_background: Option<[f32; 3]>,
     /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
@@ -392,6 +405,7 @@ impl LitRenderer {
             material_classes: Vec::with_capacity(opts.max_materials as usize),
             frame_bytes: [0; FRAME_GPU_SIZE],
             scene_frame: SceneLifecycle::new(),
+            local_lights: LocalLights::new(),
             pending_background: None,
             sent_bounds: HashMap::new(),
             submeshes: HashMap::new(),
@@ -725,6 +739,20 @@ impl LitRenderer {
             }
             Err(_) => self.pending_background = Some(rgb),
         }
+    }
+
+    // ---- local lights (M2-LOCAL-STATE) ----
+
+    /// The S17 local-light registry owned by this renderer: stable handles, validated
+    /// descriptors and instance-group attachments.
+    pub fn local_lights(&self) -> &LocalLights {
+        &self.local_lights
+    }
+
+    /// Mutable access for the Engine's S17 mutators and object-mutation validation; every
+    /// mutation of the registry is validated by `LocalLights` before it applies.
+    pub fn local_lights_mut(&mut self) -> &mut LocalLights {
+        &mut self.local_lights
     }
 
     // ---- frame ----
