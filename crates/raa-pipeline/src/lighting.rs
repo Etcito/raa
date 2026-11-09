@@ -5,6 +5,7 @@
 use std::num::NonZeroU64;
 
 use raa_core::GpuContext;
+use raa_shader::{LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, TILE_WORDS};
 
 use crate::HDR_FORMAT;
 use crate::env::EnvGpu;
@@ -13,12 +14,13 @@ use crate::env::EnvGpu;
 const SHADOW_GPU_SIZE: usize = 320;
 /// Size in bytes of the `EnvSh` uniform (binding 4).
 const ENV_SH_SIZE: usize = 160;
+const LOCAL_LIGHTS_SIZE: usize = MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE;
 
 /// Linear colour of the dummy env cube: the default ambient term (colour (0.6, 0.65, 0.75)
 /// x intensity 0.3), so a frame without an env reads the flat ambient.
 const DUMMY_ENV_COLOR: [f32; 3] = [0.6 * 0.3, 0.65 * 0.3, 0.75 * 0.3];
 
-/// The seven texture bindings of group 1.
+/// The eight texture bindings of group 1.
 #[derive(Clone, Debug, PartialEq)]
 struct Views<V> {
     shadow_map: V,
@@ -28,6 +30,7 @@ struct Views<V> {
     contact: V,
     opaque_color: V,
     opaque_depth: V,
+    light_tiles: V,
 }
 
 /// What `upload` has to do: rebuild the bind group and/or write each uniform.
@@ -37,6 +40,7 @@ struct Pending {
     shadow: bool,
     env_sh: bool,
     env: bool,
+    local_lights: bool,
 }
 
 /// Device-free part of `LightingResources`: current views, uniform contents and the dirty
@@ -44,6 +48,9 @@ struct Pending {
 struct State<V> {
     dummies: Views<V>,
     views: Views<V>,
+    bound_views: Views<V>,
+    local_lights: [u8; LOCAL_LIGHTS_SIZE],
+    uploaded_lights: [u8; LOCAL_LIGHTS_SIZE],
     shadow: [u8; SHADOW_GPU_SIZE],
     sh: [[f32; 4]; 9],
     sh_info: [f32; 4],
@@ -51,11 +58,14 @@ struct State<V> {
     pending: Pending,
 }
 
-impl<V: Clone> State<V> {
+impl<V: Clone + PartialEq> State<V> {
     fn new(dummies: Views<V>) -> State<V> {
         State {
             views: dummies.clone(),
+            bound_views: dummies.clone(),
             dummies,
+            local_lights: [0; LOCAL_LIGHTS_SIZE],
+            uploaded_lights: [0; LOCAL_LIGHTS_SIZE],
             shadow: [0; SHADOW_GPU_SIZE],
             sh: [[0.0; 4]; 9],
             sh_info: [0.0; 4],
@@ -136,8 +146,26 @@ impl<V: Clone> State<V> {
         &mut self.env
     }
 
+    fn set_local_lights(&mut self, bytes: &[u8; LOCAL_LIGHTS_SIZE], tiles: V) {
+        self.local_lights.copy_from_slice(bytes);
+        self.views.light_tiles = tiles;
+    }
+
+    fn clear_local_lights(&mut self) {
+        self.local_lights.fill(0);
+        self.views.light_tiles = self.dummies.light_tiles.clone();
+    }
+
     /// Returns the pending work and marks everything clean.
     fn take_pending(&mut self) -> Pending {
+        self.pending.bind_group = self.views != self.bound_views;
+        if self.pending.bind_group {
+            self.bound_views = self.views.clone();
+        }
+        self.pending.local_lights = self.local_lights != self.uploaded_lights;
+        if self.pending.local_lights {
+            self.uploaded_lights.copy_from_slice(&self.local_lights);
+        }
         std::mem::take(&mut self.pending)
     }
 
@@ -223,8 +251,8 @@ fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// The 12 S10 group-1 bindings with their exact types.
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 12] {
+/// The 14 S10 group-1 bindings with their exact types.
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 14] {
     use wgpu::TextureSampleType as S;
     use wgpu::TextureViewDimension as D;
     let filterable = S::Float { filterable: true };
@@ -241,6 +269,14 @@ fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 12] {
         texture_entry(9, filterable, D::D2),
         texture_entry(10, S::Float { filterable: false }, D::D2),
         uniform_entry(11, EnvGpu::SIZE),
+        wgpu::BindGroupLayoutEntry {
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ..uniform_entry(12, LOCAL_LIGHTS_SIZE)
+        },
+        wgpu::BindGroupLayoutEntry {
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ..texture_entry(13, S::Uint, D::D2Array)
+        },
     ]
 }
 
@@ -379,6 +415,13 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
     gpu.queue().submit([encoder.finish()]);
 
     let one_view = view_of(&one, D::D2);
+    let tiles = dummy_texture(
+        gpu,
+        "raa-pipeline.dummy.light_tiles",
+        wgpu::TextureFormat::R32Uint,
+        TILE_WORDS,
+        &0u32.to_le_bytes(),
+    );
     Views {
         shadow_map: view_of(&shadow, D::D2Array),
         env_specular: view_of(&env, D::Cube),
@@ -387,6 +430,7 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         contact: one_view,
         opaque_color: view_of(&black, D::D2),
         opaque_depth: view_of(&depth, D::D2),
+        light_tiles: view_of(&tiles, D::D2Array),
     }
 }
 
@@ -412,6 +456,7 @@ pub struct LightingResources {
     shadow_buffer: wgpu::Buffer,
     sh_buffer: wgpu::Buffer,
     env_buffer: wgpu::Buffer,
+    light_buffer: wgpu::Buffer,
     state: State<wgpu::TextureView>,
 }
 
@@ -441,12 +486,13 @@ impl LightingResources {
         let shadow_buffer = uniform_buffer(gpu, "raa-pipeline.shadow_gpu", &state.shadow);
         let sh_buffer = uniform_buffer(gpu, "raa-pipeline.env_sh", &state.sh_bytes());
         let env_buffer = uniform_buffer(gpu, "raa-pipeline.env_gpu", &state.env.to_bytes());
+        let light_buffer = uniform_buffer(gpu, "raa-pipeline.local_lights", &state.local_lights);
         let bind_group = build_bind_group(
             gpu,
             &layout,
             &state.views,
             [&shadow_cmp, &linear_clamp],
-            [&shadow_buffer, &sh_buffer, &env_buffer],
+            [&shadow_buffer, &sh_buffer, &env_buffer, &light_buffer],
         );
         LightingResources {
             layout,
@@ -456,6 +502,7 @@ impl LightingResources {
             shadow_buffer,
             sh_buffer,
             env_buffer,
+            light_buffer,
             state,
         }
     }
@@ -527,6 +574,21 @@ impl LightingResources {
         self.state.clear_opaque_copy();
     }
 
+    /// Handoff: `LightingResources::set_local_lights(&mut self, bytes: &[u8; 16384],
+    /// tiles: wgpu::TextureView) -> ()` in `crates/raa-pipeline/src/lighting.rs` accepts
+    /// `LocalLights::write_gpu` dense records and the current viewport's R32Uint D2Array
+    /// tile view before forward recording. The tiling pass maintains its own equivalent
+    /// compute uniform from these bytes and its own layout; this layout stays fragment-only.
+    pub fn set_local_lights(&mut self, bytes: &[u8; LOCAL_LIGHTS_SIZE], tiles: wgpu::TextureView) {
+        self.state.set_local_lights(bytes, tiles);
+    }
+
+    /// Restores zero records and the 1x1x128 zero tile array. Disabled tiling calls this
+    /// and clears `FrameGpu.light_info` before forward recording.
+    pub fn clear_local_lights(&mut self) {
+        self.state.clear_local_lights();
+    }
+
     /// The `EnvGpu` uniform contents.
     pub fn env(&self) -> &EnvGpu {
         &self.state.env
@@ -554,26 +616,35 @@ impl LightingResources {
             gpu.queue()
                 .write_buffer(&self.env_buffer, 0, &self.state.env.to_bytes());
         }
+        if pending.local_lights {
+            gpu.queue()
+                .write_buffer(&self.light_buffer, 0, &self.state.local_lights);
+        }
         if pending.bind_group {
             self.bind_group = build_bind_group(
                 gpu,
                 &self.layout,
                 &self.state.views,
                 [&self.shadow_cmp, &self.linear_clamp],
-                [&self.shadow_buffer, &self.sh_buffer, &self.env_buffer],
+                [
+                    &self.shadow_buffer,
+                    &self.sh_buffer,
+                    &self.env_buffer,
+                    &self.light_buffer,
+                ],
             );
         }
     }
 }
 
 /// Bind group over `views`, the samplers (comparison, linear clamp) and the uniforms
-/// (ShadowGpu, EnvSh, EnvGpu) in S10 binding order.
+/// (ShadowGpu, EnvSh, EnvGpu, local lights) in S10 binding order.
 fn build_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     views: &Views<wgpu::TextureView>,
     [shadow_cmp, linear_clamp]: [&wgpu::Sampler; 2],
-    [shadow, sh, env]: [&wgpu::Buffer; 3],
+    [shadow, sh, env, lights]: [&wgpu::Buffer; 4],
 ) -> wgpu::BindGroup {
     use wgpu::BindingResource as R;
     let resources = [
@@ -589,6 +660,8 @@ fn build_bind_group(
         R::TextureView(&views.opaque_color),
         R::TextureView(&views.opaque_depth),
         env.as_entire_binding(),
+        lights.as_entire_binding(),
+        R::TextureView(&views.light_tiles),
     ];
     let entries: Vec<wgpu::BindGroupEntry> = resources
         .into_iter()
@@ -615,6 +688,7 @@ mod tests {
             contact: 3,
             opaque_color: 4,
             opaque_depth: 5,
+            light_tiles: 6,
         }
     }
 
@@ -623,7 +697,104 @@ mod tests {
         shadow: false,
         env_sh: false,
         env: false,
+        local_lights: false,
     };
+
+    #[test]
+    fn local_light_layout_is_fragment_only_without_storage_or_sampler() {
+        let entries = layout_entries();
+        assert_eq!(LOCAL_LIGHTS_SIZE, 16384);
+        for (binding, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.binding, binding as u32);
+            assert_eq!(entry.count, None);
+            assert_eq!(
+                entry.visibility,
+                if binding < 12 {
+                    VISIBILITY
+                } else {
+                    wgpu::ShaderStages::FRAGMENT
+                }
+            );
+            assert!(!matches!(
+                entry.ty,
+                wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { .. },
+                    ..
+                }
+            ));
+        }
+        assert_eq!(
+            entries[12].ty,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(16384),
+            }
+        );
+        assert_eq!(
+            entries[13].ty,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            }
+        );
+        assert_eq!(TILE_WORDS, 128);
+    }
+
+    #[test]
+    fn local_lights_compare_uploaded_bytes_and_views_independently() {
+        let mut state = State::new(dummies());
+        let mut bytes = [0; LOCAL_LIGHTS_SIZE];
+        assert_eq!(state.local_lights, bytes);
+        state.clear_local_lights();
+        assert_eq!(state.take_pending(), Pending::default());
+        bytes[0] = 1;
+        bytes[LOCAL_LIGHTS_SIZE - 1] = 2;
+        state.set_local_lights(&bytes, 10);
+        let changed = Pending {
+            local_lights: true,
+            ..ONLY_BIND
+        };
+        assert_eq!(state.take_pending(), changed);
+        state.set_local_lights(&bytes, 10);
+        assert_eq!(state.take_pending(), Pending::default());
+        state.set_local_lights(&bytes, 11);
+        assert_eq!(state.take_pending(), ONLY_BIND);
+        bytes[LOCAL_LIGHTS_SIZE - 1] = 0;
+        state.set_local_lights(&bytes, 11);
+        assert!(state.local_lights[LIGHT_GPU_SIZE..].iter().all(|b| *b == 0));
+        assert_eq!(
+            state.take_pending(),
+            Pending {
+                local_lights: true,
+                ..Pending::default()
+            }
+        );
+        state.clear_local_lights();
+        assert_eq!(state.take_pending(), changed);
+        assert_eq!(state.local_lights, [0; LOCAL_LIGHTS_SIZE]);
+        assert_eq!(state.views, dummies());
+        state.clear_local_lights();
+        assert_eq!(state.take_pending(), Pending::default());
+        state.set_local_lights(&bytes, 11);
+        state.clear_local_lights();
+        assert_eq!(
+            state.take_pending(),
+            Pending::default(),
+            "reverted before upload"
+        );
+    }
+
+    #[test]
+    fn unchanged_existing_views_do_not_rebuild_bindings() {
+        let mut state = State::new(dummies());
+        state.set_ao(3);
+        state.set_contact(3);
+        state.clear_opaque_copy();
+        state.set_brdf_lut(2);
+        assert_eq!(state.take_pending(), Pending::default());
+    }
 
     #[test]
     fn a_new_state_is_clean_and_bound_to_the_dummies() {
@@ -777,6 +948,35 @@ mod tests {
         lighting.upload(&gpu);
         assert_ne!(lighting.bind_group(), &second);
         assert_eq!(lighting.state.views, lighting.state.dummies);
+
+        let empty = lighting.bind_group().clone();
+        let bytes = [1; LOCAL_LIGHTS_SIZE];
+        lighting.set_local_lights(&bytes, lighting.state.dummies.light_tiles.clone());
+        lighting.upload(&gpu);
+        assert_eq!(lighting.bind_group(), &empty, "bytes alone do not rebuild");
+        let tiles = dummy_texture(
+            &gpu,
+            "test.tiles",
+            wgpu::TextureFormat::R32Uint,
+            TILE_WORDS,
+            &[0; 4],
+        );
+        let tiles = view_of(&tiles, wgpu::TextureViewDimension::D2Array);
+        lighting.set_local_lights(&bytes, tiles.clone());
+        lighting.upload(&gpu);
+        let populated = lighting.bind_group().clone();
+        assert_ne!(populated, empty);
+        lighting.set_local_lights(&bytes, tiles);
+        lighting.upload(&gpu);
+        assert_eq!(lighting.bind_group(), &populated);
+        lighting.clear_local_lights();
+        lighting.upload(&gpu);
+        let cleared = lighting.bind_group().clone();
+        assert_ne!(cleared, populated);
+        lighting.clear_local_lights();
+        lighting.upload(&gpu);
+        assert_eq!(lighting.bind_group(), &cleared);
+        assert_eq!(lighting.state.take_pending(), Pending::default());
         std::mem::forget(lighting);
         std::mem::forget(gpu);
     }

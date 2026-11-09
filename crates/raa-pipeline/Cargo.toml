@@ -8,4 +8,5 @@ description = "Configurable pass pipeline of the lit renderer: surface-sized tar
 
 [dependencies]
 raa-core = { workspace = true }
+raa-shader = { path = "../raa-shader" }
 wgpu = { workspace = true }

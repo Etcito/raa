@@ -155,6 +155,9 @@ fn raa_previous_model(r: RaaPreviousInstanceGpu) -> mat4x4<f32> {
 @group(1) @binding(9) var raa_opaque_color: texture_2d<f32>;
 @group(1) @binding(10) var raa_opaque_depth: texture_2d<f32>;
 @group(1) @binding(11) var<uniform> raa_env: EnvGpu;
+// Fragment-only shared resources; compute tiling uses its own layout and equivalent bytes.
+@group(1) @binding(12) var<uniform> raa_local_lights: array<LightGpu, MAX_LOCAL_LIGHTS>;
+@group(1) @binding(13) var raa_light_tiles: texture_2d_array<u32>;
 
 // SurfaceMaterialGpu.header.x models and header.z flags.
 const RAA_MODEL_FLAT: u32 = 0u;

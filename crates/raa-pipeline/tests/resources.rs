@@ -10,6 +10,19 @@ use raa_core::testing::{block_on, skip, software_gpu};
 use raa_core::{CLEAR_COLOR, GpuContext, wgpu};
 use raa_pipeline::{EnvGpu, LightingResources};
 
+#[test]
+fn prelude_exposes_dense_light_uniform_and_integer_tile_array() {
+    let prelude = raa_shader::PRELUDE_WGSL;
+    assert_eq!(
+        raa_shader::MAX_LOCAL_LIGHTS * raa_shader::LIGHT_GPU_SIZE,
+        16384
+    );
+    assert!(prelude.contains(
+        "@group(1) @binding(12) var<uniform> raa_local_lights: array<LightGpu, MAX_LOCAL_LIGHTS>;"
+    ));
+    assert!(prelude.contains("@group(1) @binding(13) var raa_light_tiles: texture_2d_array<u32>;"));
+}
+
 fn f32_at(bytes: &[u8], offset: usize) -> f32 {
     let mut word = [0u8; 4];
     word.copy_from_slice(&bytes[offset..offset + 4]);
@@ -115,6 +128,8 @@ struct EnvGpu {
 @group(1) @binding(9) var opaque_color: texture_2d<f32>;
 @group(1) @binding(10) var opaque_depth: texture_2d<f32>;
 @group(1) @binding(11) var<uniform> env: EnvGpu;
+@group(1) @binding(12) var<uniform> lights: array<vec4<u32>, 1024>;
+@group(1) @binding(13) var light_tiles: texture_2d_array<u32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -136,7 +151,14 @@ fn fs() -> Out {
     let contact_shadow = textureSampleLevel(contact, linear_clamp, uv, 0.0).r;
     let depth = textureLoad(opaque_depth, vec2<i32>(0, 0), 0).r;
     let cube = textureSampleLevel(env_specular, linear_clamp, vec3<f32>(0.3, 1.0, -0.2), 0.0);
-    let zeros = shadow.params.w + shadow.cascade_view_proj[0][0][0] + env_sh.info.w
+    var local_zeros = 0u;
+    for (var i = 0u; i < 1024u; i += 1u) {
+        local_zeros |= lights[i].x | lights[i].y | lights[i].z | lights[i].w;
+    }
+    for (var layer = 0; layer < 128; layer += 1) {
+        local_zeros |= textureLoad(light_tiles, vec2<i32>(0), layer, 0).x;
+    }
+    let zeros = f32(local_zeros) + shadow.params.w + shadow.cascade_view_proj[0][0][0] + env_sh.info.w
         + env_sh.sh[0].r + env.sky_params.z
         + textureSampleLevel(opaque_color, linear_clamp, uv, 0.0).r;
     var out: Out;
@@ -328,6 +350,7 @@ fn cleared_features_still_bind(gpu: &GpuContext) {
     lighting.clear_ao();
     lighting.clear_contact();
     lighting.clear_opaque_copy();
+    lighting.clear_local_lights();
     lighting.env_mut().background = [0.25, 0.5, 1.0, 0.0];
     assert_eq!(lighting.env().background, [0.25, 0.5, 1.0, 0.0]);
     render_with_group_1(gpu, &lighting);
