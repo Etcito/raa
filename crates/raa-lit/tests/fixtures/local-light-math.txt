@@ -34,3 +34,40 @@ cone default_mid 35 28 0.5 0.5
 cone default_three_quarter 35 28 0.75 0.84375
 cone default_inner 35 28 1 1
 cone authored_mid 60 45 0.5 0.5
+
+# basis <name> <dir.x> <dir.y> <dir.z> <tan.x> <tan.y> <tan.z> <bit.x> <bit.y> <bit.z>
+# Y-up seed when abs(dot(dir, Y)) < 0.99, X-up seed otherwise.
+basis y_up_seed 0.0 0.0 1.0 1.0 0.0 0.0 0.0 1.0 0.0
+basis x_up_seed 0.0 1.0 0.0 0.0 0.0 1.0 1.0 0.0 0.0
+basis x_up_seed_down 0.0 -1.0 0.0 0.0 0.0 -1.0 1.0 0.0 0.0
+basis y_up_tilted 1.0 2.0 3.0 0.9486833214759827 0.0 -0.3162277936935425 -0.16903086006641388 0.8451542854309082 -0.5070925354957581
+basis x_up_tilted 0.1 0.995 0.02 0.0 -0.020096443593502045 0.999798059463501 0.9949896931648254 -0.09995856881141663 -0.002009217394515872
+basis y_up_near_threshold 0.2 0.98 0.01 0.04993761330842972 0.0 -0.9987522959709167 -0.9785326719284058 0.20019979774951935 -0.04892663285136223
+
+# point <name> <pos xyz> <dir xyz> <size x y> <surface xyz> <representative xyz>
+# Half extents clamp; [0, 0] degenerates to the light position.
+point centre 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 0.0 0.0 5.0 0.0 0.0 0.0
+point edge_t 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 5.0 0.0 5.0 1.0 0.0 0.0
+point edge_b 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 0.0 7.0 5.0 0.0 2.0 0.0
+point corner 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 5.0 7.0 5.0 1.0 2.0 0.0
+point negative_corner 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 -5.0 -7.0 5.0 -1.0 -2.0 0.0
+point inside 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 0.5 -1.0 5.0 0.5 -1.0 0.0
+point full_extent_t 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 100.0 0.0 5.0 1.0 0.0 0.0
+point full_extent_b 0.0 0.0 0.0 0.0 0.0 1.0 2.0 4.0 0.0 -100.0 5.0 0.0 -2.0 0.0
+point zero_size 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 5.0 7.0 5.0 0.0 0.0 0.0
+point offset_position 1.0 2.0 3.0 0.0 0.0 1.0 2.0 2.0 4.0 6.0 8.0 2.0 3.0 3.0
+point tilted_forward_axis 0.0 0.0 0.0 1.0 1.0 1.0 2.0 2.0 3.0 3.0 3.0 0.0 0.0 0.0
+point tilted_offaxis 0.0 0.0 0.0 1.0 2.0 3.0 2.0 2.0 5.0 -4.0 6.0 1.1177141666412354 -0.8451542854309082 0.19086474180221558
+
+# emit <name> <pos xyz> <dir xyz> <surface xyz> <expected 0|1>  (one-sided +direction)
+emit front 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 5.0 1
+emit behind 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 -5.0 0
+emit coplanar 0.0 0.0 0.0 0.0 0.0 1.0 5.0 5.0 0.0 0
+emit front_offset 1.0 2.0 3.0 0.0 0.0 -1.0 1.0 2.0 -1.0 1
+emit behind_offset 1.0 2.0 3.0 0.0 0.0 -1.0 1.0 2.0 5.0 0
+
+# near <name> <pos xyz> <dir xyz> <size x y> <surface xyz> <range_m> <expected_falloff>
+# Falloff is evaluated from the representative point, so a coincident surface stays finite.
+near area_coincident 0.0 0.0 0.0 0.0 0.0 1.0 2.0 2.0 0.0 0.0 0.0 6.0 25.0
+near area_offset 1.0 2.0 3.0 0.0 0.0 1.0 2.0 2.0 1.0 2.0 3.0 6.0 25.0
+near area_near_edge 0.0 0.0 0.0 0.0 0.0 1.0 2.0 2.0 1.0 0.0 0.1 6.0 24.999998092651367
