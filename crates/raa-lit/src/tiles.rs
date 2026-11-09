@@ -20,6 +20,9 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use crate::light_stats::ReadbackCoordinator;
 
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx, Targets};
@@ -42,6 +45,10 @@ const MAX_VIEWS: usize = 4;
 pub(crate) struct TileInputs {
     pub frame: [u8; FRAME_GPU_SIZE],
     pub lights: [u8; LIGHT_BYTES],
+    /// Engine invocation and viewport identity, independent of target-cache position.
+    pub index: u64,
+    pub view: usize,
+    pub readback: Arc<Mutex<ReadbackCoordinator>>,
 }
 
 /// Tile grid of a framebuffer: `ceil(width/16)` by `ceil(height/16)`.
@@ -159,6 +166,12 @@ impl LightTiles {
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[whole(0, &frame)],
         });
+        inputs
+            .borrow()
+            .readback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .attach(gpu);
         Ok(Self {
             inputs,
             pipeline,
@@ -248,6 +261,13 @@ impl LightTiles {
         pass.set_bind_group(0, &self.frame_group, &[]);
         pass.set_bind_group(2, &view.compute_group, &[]);
         pass.dispatch_workgroups(view.grid.0, view.grid.1, 1);
+        drop(pass);
+        let inputs = self.inputs.borrow();
+        inputs
+            .readback
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .copy(inputs.index, inputs.view, ctx.encoder, &view.counter);
     }
 }
 
