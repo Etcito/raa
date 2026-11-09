@@ -23,6 +23,7 @@ mod handle;
 mod instance_store;
 mod library;
 mod local_light;
+mod local_lights;
 mod lod;
 mod material;
 mod material_data;
@@ -53,6 +54,7 @@ pub use handle::{LitHandle, PipelineSpec};
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
 pub use local_light::{LightHandle, LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
+pub use local_lights::{LocalLights, MAX_LOCAL_LIGHTS};
 pub use lod::{
     LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level, lod_error, shadow_level,
 };
