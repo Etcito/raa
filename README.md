@@ -25,6 +25,10 @@ Status: M6 — public API v0 frozen. Part of the Etcito open-source game stack (
 
 ## Lookdev
 
+- [M2 local lights, frame/motion interfaces and resource reservations](docs/API.md#m2-stable-interfaces-and-extension-reservations)
+  extend API v0; the sun still uses `setLight(LightDesc)`.
+- [Lights page and managed job commands](docs/gpu-client.md) describe the seven
+  on/off presets, metadata selection and ignored capture outputs.
 - `scripts/build-lookdev.sh` builds the lookdev page from the packed `@etcito/raa` package.
 - `node scripts/lookdev-capture.mjs --milestone m07` captures every scene variant of a milestone on the GPU client.
 - `raa-scene`: scene graph, camera, lights, instances, and render list.

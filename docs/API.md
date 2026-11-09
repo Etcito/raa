@@ -361,6 +361,181 @@ Rust extension points added after v0:
 - `ForwardContributor` (raa-lit): draws extra content inside the forward render pass, after the opaque draws.
 - Slot providers (raa-shader `SlotProvider`): supply the WGSL function for a named shader slot; the highest priority wins.
 
+## M2 stable interfaces and extension reservations
+
+M2 is additive to API v0. The sun keeps `setLight(LightDesc)` and its callers.
+The [m28 API](api/m28-lights.md) and [declarations](../packages/raa/types/m28-lights.d.ts)
+define `LocalLightKind`, `LightHandle`, `LocalLightDesc`, `LocalLightChanges`,
+`LightStats`, and `Engine.addLight`, `updateLight`, `removeLight`, `attachLight`,
+`detachLight`, `lightStats`. Attachment parents are the public instance-group
+handles returned by `addInstance`/`addMeshInstance`.
+
+Defaults remain intensity 2, range 6 metres and full spot angle 35 degrees.
+An omitted inner angle is 80% of the outer angle; explicit `undefined` resets a
+field. Changes validate atomically. `radius` and `shadows` remain metadata;
+local lights cast no shadow yet. See m28 for all defaults, validation and errors.
+
+QB9 remains binding: existing startup, allocation, geometry, documentation and
+extensibility requirements continue, including the shipped-wasm gzip cap of
+**300000 bytes per shipped `.wasm`**. The v0 size table above remains historical
+evidence. M2 adds no hash or reference-image acceptance comparison.
+[ARCHITECTURE.md](../ARCHITECTURE.md) remains intact; consolidation follows the
+final milestone.
+
+### Lit frame ABI and history
+
+`FrameGpu` is 768 bytes, controlled by `FRAME_GPU_SIZE`; this does not change the
+v0 renderer's 144-byte `FrameUniform`. Serialization is little-endian, matrices
+are column-major f32, and the existing trace-frame prefix is preserved.
+
+| Byte offset | Field/type or reserved bytes |
+| --- | --- |
+| 0, 64, 128 | `view_proj`, `view`, `proj`: mat4x4<f32> |
+| 192, 256 | `inv_proj`, `inv_view`: mat4x4<f32> |
+| 320, 336, 352, 368 | `camera_pos`, `sun_dir`, `sun_color`, `ambient`: vec4<f32> |
+| 384, 400 | `viewport`, `clip`: vec4<f32> |
+| 416 | `flags`: vec4<u32> |
+| 432 | `exposure`: vec4<f32> |
+| 448–511 | Reserved, zero |
+| 512 | `previous_view_proj`: mat4x4<f32> |
+| 576 | `unjittered_view_proj`: mat4x4<f32> |
+| 640 | `camera_jitter`: vec4<f32>, current NDC xy then previous NDC xy |
+| 656 | `light_info`: vec4<u32>, active count, tile columns, rows, word stride |
+| 672 | `temporal`: vec4<u32>, parity, accumulation enabled, history valid, zero |
+| 688–767 | Reserved, zero |
+
+`view` and `proj` stay unjittered; `view_proj` and `inv_proj` use the current
+jittered projection. `previous_view_proj` is the preceding submitted view's
+matrix including jitter; `unjittered_view_proj` is `proj * view`. Jitter requires
+an explicit consumer and otherwise current/previous offsets are zero. Its eight
+Halton base-2/base-3 samples (indices 1–8 minus 0.5) convert pixels to NDC using
+the viewport and Y convention. M2 enables no temporal accumulation consumer.
+
+Creation, resize, camera discontinuity and jitter-consumer mode changes invalidate
+history. One Engine render invocation advances one scene-frame index across all
+views. Camera history commits per submitted viewport; previous instances stay
+fixed throughout that invocation. Partial submission invalidates the next history.
+
+Group 0 binding 8 holds vertex-only previous-instance read-only storage, stride
+64 bytes. It uses the same compacted instance id as binding 7, one slot per
+existing submesh instance; draw order does not remap history. Offsets 0, 16, 32
+hold affine **rows** `[M00,M01,M02,Tx]`, `[M10,M11,M12,Ty]`, `[M20,M21,M22,Tz]`.
+The implicit bottom row is `[0,0,0,1]`; offset 48 holds `previous_valid: u32`
+(0/1), and offsets 52, 56, 60 are zero. This encoding preserves translation.
+Binding 7, live instance records and extras lanes retain their existing layouts.
+New, reused or re-posed slots clear validity and produce zero motion until first
+submission. The previous mirror catches up after motion even without another
+edit; settled frames upload nothing. Removal, reordering and growth preserve
+slot ownership. Earlier deformation that cannot be reconstructed yields zero.
+
+`Targets.motion` is surface-sized, single-sample `Rg16Float`, with
+`RENDER_ATTACHMENT | TEXTURE_BINDING`, recreated on resize. The prepass adds
+location 2, clears it to zero and keeps existing normal/material/depth behavior.
+Motion is current minus previous **unjittered** NDC, converted to UV displacement:
+positive X right, positive Y down. Both jitter offsets are removed. Invalid
+history/projection, new geometry, unsupported deformation and sky write zero.
+The opt-in `motion.display` pass uses ordinary pass controls. No second
+screen-space history target, TAA, upscaling or HDR-chain change is introduced.
+
+### Tiling, capacity and synchronous statistics
+
+| Feature | Logical id | Flag address | Pass order |
+| --- | --- | --- | --- |
+| `light.tiles` | 24 | `flags.z` bit 24 | 35, after `prepass`, before `ao.gtao` and `forward` |
+
+Reordering refuses violations of those dependencies. Tiles cover 16×16 framebuffer
+pixels, independent of MSAA, with grid `ceil(width/16)` × `ceil(height/16)`.
+Each tile has 128 u32 words: count then up to 127 indices. Word `w` is layer `w`
+of an `r32uint` 2D array texture at tile texel `(x,y)`, written with `textureStore`
+and read with unfiltered `textureLoad`.
+
+Standard-Z depth reduction ignores clear pixels. Finite lights use conservative
+tile-frustum bounds; directionals qualify for every covered tile. The global
+capacity is exactly 256 (`MAX_LOCAL_LIGHTS`); the 257th add refuses with
+`lights.invalid`. Selection is the **exact strongest 127** from at most 256
+candidates, descending estimated contribution at nearest valid tile depth, then
+ascending stable handle. The authoritative [estimator and CPU text-fixture rules](../crates/raa-lit/README.md#m2-tile-selection)
+specify ranking once. Fixed capacity bounds work and storage; no first-127 scan
+or approximate subset substitutes for selection. Disabled tiling publishes zero
+local counts and valid empty resources.
+
+Coverage comes solely from the opaque/fur-base prepass. Transparent and displaced
+fur fragments read their own pixel's tile but use that tile's prepass depth bounds;
+without prepass coverage they receive no local light. This approximation and the
+absence of local shadows are stated in preset descriptions.
+
+`lightStats()` returns current active/attached counts and the latest completed
+asynchronous overflow result without a GPU fence. `tileCapacity` is 127;
+`tileColumns`/`tileRows` describe viewport 0. `droppedLightReferences` counts
+excluded light/tile references, summed only across submitted views of the
+invocation named by `statsFrameIndex`. Publication waits for every readback of
+that invocation. Both result fields are `null` before the first completion;
+`pending` distinguishes outstanding work from ready results. A bounded reusable
+readback pool avoids per-frame allocation after warm-up and never stalls the API.
+
+### Shared shading and allocation budget
+
+`LOCAL_LIGHTING_WGSL` exports
+`raa_local_lighting(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>` separately from
+`PRELUDE_WGSL`. Compose it alongside selected slot providers; the standalone
+prelude contains layouts/bindings without slot calls. Forward, transparent and
+fur paths share local evaluation, retaining their existing shading behavior.
+Flat/UNLIT behavior and the separate sun call remain unchanged.
+
+The existing Direct signature remains
+`raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32>`.
+Providers called inside the nonuniform light loop must use explicit LOD
+`textureSampleLevel`, `textureSampleGrad` with gradients computed **before**
+divergent control flow, or `textureLoad`. Implicit-derivative sampling and
+derivative-dependent control flow are forbidden there, including cel, matfn and
+user-material Direct providers.
+
+`raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32`
+defaults to 1 and is clamped to [0,1]; it does not consume sun/contact visibility.
+`raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>` defaults to black,
+added alongside unchanged ambient/environment lighting. These neutral extension
+slots reserve provider interfaces without implementing shadows or GI.
+
+| Group | Allocation and stage restrictions |
+| --- | --- |
+| 0 | Existing frame/material/instance resources, bindings 0–7 preserved; binding 8 previous records, vertex only |
+| 1 | Lighting bindings 0–11 preserved; 12 local-light uniform and 13 tile texture, fragment only |
+| 2 | Pass-specific resources; tiling uses depth, light uniform, writable tile texture and compute overflow counter |
+| 3 | Vertex skin palette; unavailable as a spare extension group |
+
+Four groups remain the maximum. Vertex storage buffers total six unposed, seven
+posed. Fragment storage buffers total five from the frame layout plus three for
+OIT: eight, the default limit. Neither new light binding is storage. Binding 12
+is 256 × 64 bytes = 16 KiB, within the default 64 KiB uniform-binding maximum;
+inactive records are zero. `LightGpu` has lanes position/range at 0, linear
+RGB×intensity/inverse-range-squared at 16, travel direction/outer cosine at 32,
+then inner cosine f32 at 48, kind u32 at 52, full width/height f32 at 56/60.
+Kinds are point=0, spot=1, directional=2, area=3. Binding 13 uses 128 array layers.
+The compute overflow counter/readback does not consume fragment bindings.
+
+### Reserved logical feature ids
+
+`feature_address` and generated `raa_feature_enabled` share one mapping:
+ids 0–31 use `flags.z` bit id; ids 32–63 use `flags.w` bit (id−32).
+These reservations allocate ids only; they neither implement nor enable features.
+
+| Id | Future feature |
+| --- | --- |
+| 25 | Procedural weather |
+| 26 | Day/night cycle |
+| 27 | Virtualized geometry |
+| 28 | Visibility shading |
+| 29 | Global indirect illumination |
+| 30 | Volume visibility |
+| 31 | Temporal antialiasing |
+| 32 | Histogram exposure |
+| 33 | Contrast-adaptive sharpening |
+| 34 | Atlas mip generation |
+| 35 | Temporal reconstruction |
+| 36 | Virtualized-geometry extension |
+| 37 | Global-illumination extension |
+| 38 | Postprocessing extension |
+
 ## Editor display additions
 
 See [Editor features](editor-features.md) for MeshDesc.edges, setWireframe,
