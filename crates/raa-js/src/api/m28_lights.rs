@@ -13,16 +13,20 @@
 //! one whose value is `undefined` with `Reflect::has`, because `Reflect::get` returns
 //! `undefined` for both; `tests/api_registry.rs` pins that distinction in the source.
 //!
-//! Handoff: the S17 mutators (`addLight`, `updateLight`, `removeLight`, `attachLight`,
-//! `detachLight`, `lightStats`) land in the later api-m28 cards of this file. They read a
-//! JS object with `web::read_patch`, merge it onto the current `LocalLight` with [`merge`]
-//! (`add` starts from `LocalLight::default()`, `update` from
+//! This share implements the additive S17 mutators `addLight`, `updateLight` and
+//! `removeLight`. They read a JS object with `web::read_patch`, merge it onto the current
+//! `LocalLight` with [`merge`] (`add` starts from `LocalLight::default()`, `update` from
 //! `LitRenderer::local_lights().get(handle)`), and hand the result to
 //! `LocalLights::add`/`replace`, which validates with `LocalLight::validate` before it
 //! mutates. Handles pass through [`handle_arg`] before any narrowing to `LightHandle`.
+//!
+//! Handoff: the remaining S17 slice (`attachLight`, `detachLight`, `lightStats`) is another
+//! api-m28 card's work in this file; it reads and mutates the same renderer-owned
+//! `LocalLights` registry through the same stable handles. `add`/`update`/`remove` here are
+//! the helpers it can reuse, and the sun's `setLight` remains untouched.
 
 use raa_core::RaaError;
-use raa_lit::{LightHandle, LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
+use raa_lit::{LightHandle, LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE};
 
 /// The refusal code of every malformed local-light description (S17).
 pub(crate) const INVALID_DESC: &str = "light.invalid_desc";
@@ -262,18 +266,52 @@ pub(crate) fn handle_arg(name: &str, value: f64) -> Result<LightHandle, RaaError
     }
 }
 
+/// S17 `addLight`: merges the parsed description onto the S17 defaults, then validates and
+/// registers it. The 257th light refuses with `lights.invalid` and a capacity message, and
+/// handle exhaustion refuses instead of reusing a value; neither mutates the registry.
+#[allow(dead_code)] // called from the wasm32 Engine methods below
+pub(crate) fn add(
+    lights: &mut LocalLights,
+    patch: &LocalLightPatch,
+) -> Result<LightHandle, RaaError> {
+    lights.add(merge(LocalLight::default(), patch))
+}
+
+/// S17 `updateLight`: resolves the handle, merges the changes onto the stored descriptor and
+/// validates the merged result before [`LocalLights::replace`] mutates anything, so a refusal
+/// leaves the light unchanged. Fields the update omits (metadata included) are retained, and
+/// an explicit inner angle stays subject to the merged outer angle. Only a real position
+/// value counts as an authored position, which an attached light refuses.
+#[allow(dead_code)] // called from the wasm32 Engine methods below
+pub(crate) fn update(
+    lights: &mut LocalLights,
+    handle: LightHandle,
+    patch: &LocalLightPatch,
+) -> Result<(), RaaError> {
+    let base = *lights.get(handle)?;
+    let position_authored = matches!(patch.position, Patch::Set(_));
+    lights.replace(handle, merge(base, patch), position_authored)
+}
+
+/// S17 `removeLight`: removes a live light. A stale or unknown handle refuses with
+/// `api.unknown_handle`; a removed handle is never handed out again.
+#[allow(dead_code)] // called from the wasm32 Engine methods below
+pub(crate) fn remove(lights: &mut LocalLights, handle: LightHandle) -> Result<(), RaaError> {
+    lights.remove(handle)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{frame, install};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::*;
-    use crate::engine::InstallCtx;
+    use crate::engine::{Engine, InstallCtx};
     use crate::state::EngineState;
     use js_sys::{Array, Float32Array, Reflect};
     use raa_core::GpuContext;
     use raa_web::FrameInput;
-    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen::{JsCast, prelude::*};
 
     /// Registers the order-35 `light.tiles` pass against the renderer-owned `LocalLights`.
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
@@ -343,8 +381,47 @@ mod web {
 
     /// Parses a JS light description or change object into a patch. The S17 mutators call
     /// this and merge the result onto the current descriptor with [`merge`].
-    #[allow(dead_code)] // used by the S17 mutators of the later api-m28 cards
     pub(crate) fn read_patch(object: &JsValue) -> Result<LocalLightPatch, RaaError> {
         parse(&ReflectSource(object))
+    }
+
+    #[wasm_bindgen(js_class = Engine)]
+    impl Engine {
+        /// Adds a local light from a `LocalLightDesc` and returns its stable handle
+        /// (a positive safe JS integer). Omitted fields take the S17 defaults; a refusal
+        /// (`light.invalid_desc`, or `lights.invalid` at the 256-light capacity) adds
+        /// nothing. The sun's `setLight` is a separate, unchanged call.
+        #[wasm_bindgen(js_name = addLight)]
+        pub fn add_light(&mut self, desc: JsValue) -> Result<f64, JsValue> {
+            self.with_state(|_, st| {
+                let patch = read_patch(&desc)?;
+                add(st.lit.local_lights_mut(), &patch).map(|handle| handle as f64)
+            })
+        }
+
+        /// Merges `changes` onto the light behind `handle` and validates the result before
+        /// applying it, so a refusal leaves the light unchanged. Omitted fields, including
+        /// `radius` and `shadows`, are retained across kind changes; an explicit retained
+        /// inner angle must not exceed the merged outer angle. Unknown or removed handles
+        /// throw `api.unknown_handle`, an attached light's authored position throws
+        /// `light.attached_position`.
+        #[wasm_bindgen(js_name = updateLight)]
+        pub fn update_light(&mut self, handle: f64, changes: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                let handle = handle_arg("handle", handle)?;
+                let patch = read_patch(&changes)?;
+                update(st.lit.local_lights_mut(), handle, &patch)
+            })
+        }
+
+        /// Removes the light behind `handle`; its stable handle is never reused. An unknown
+        /// or already removed handle throws `api.unknown_handle`.
+        #[wasm_bindgen(js_name = removeLight)]
+        pub fn remove_light(&mut self, handle: f64) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                let handle = handle_arg("handle", handle)?;
+                remove(st.lit.local_lights_mut(), handle)
+            })
+        }
     }
 }

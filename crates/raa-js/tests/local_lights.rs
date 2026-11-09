@@ -4,15 +4,15 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use raa_core::RaaError;
-use raa_lit::{LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
+use raa_lit::{LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE, MAX_LOCAL_LIGHTS};
 
 #[allow(dead_code)]
 #[path = "../src/api/m28_lights.rs"]
 mod m28;
 
 use m28::{
-    INVALID_ARGUMENT, INVALID_DESC, LocalLightPatch, Patch, Properties, Raw, handle_arg, merge,
-    parse, srgb_to_linear,
+    INVALID_ARGUMENT, INVALID_DESC, LocalLightPatch, Patch, Properties, Raw, add, handle_arg,
+    merge, parse, remove, srgb_to_linear, update,
 };
 
 /// A native stand-in for a JS description object: a key is present exactly when it is
@@ -212,4 +212,138 @@ fn handles_are_positive_safe_integers_before_narrowing() {
             INVALID_ARGUMENT
         );
     }
+}
+
+// ---- S17 add/update/remove against the renderer-owned registry ----
+
+#[test]
+fn add_uses_s17_defaults_and_returns_a_live_handle() {
+    let mut lights = LocalLights::new();
+    let patch = parse(&Mock::empty()).unwrap();
+    let handle = add(&mut lights, &patch).unwrap();
+    assert!(handle >= 1);
+    assert_eq!(*lights.get(handle).unwrap(), LocalLight::default());
+}
+
+#[test]
+fn add_and_update_normalize_the_stored_direction() {
+    let mut lights = LocalLights::new();
+    let patch = parse(&Mock::new(&[(
+        "direction",
+        Raw::Numbers(vec![3.0, 4.0, 0.0]),
+    )]))
+    .unwrap();
+    let handle = add(&mut lights, &patch).unwrap();
+    let stored = *lights.get(handle).unwrap();
+    assert!((stored.direction[0] - 0.6).abs() < 1e-6);
+    assert!((stored.direction[1] - 0.8).abs() < 1e-6);
+    assert_eq!(stored.direction[2], 0.0);
+}
+
+#[test]
+fn add_converts_colour_from_srgb_exactly_once() {
+    let mut lights = LocalLights::new();
+    let patch = parse(&Mock::new(&[("color", Raw::Numbers(vec![0.5, 0.0, 1.0]))])).unwrap();
+    let expected = [0.5f32, 0.0, 1.0].map(srgb_to_linear);
+    let handle = add(&mut lights, &patch).unwrap();
+    assert_eq!(lights.get(handle).unwrap().color, expected);
+    // A later update that omits `color` keeps the linear value, unconverted again.
+    let keep = parse(&Mock::empty()).unwrap();
+    update(&mut lights, handle, &keep).unwrap();
+    assert_eq!(lights.get(handle).unwrap().color, expected);
+    assert_ne!(expected, [0.5, 0.0, 1.0]);
+}
+
+#[test]
+fn capacity_refuses_the_257th_without_mutating_the_registry() {
+    let mut lights = LocalLights::new();
+    let patch = parse(&Mock::empty()).unwrap();
+    let handles: Vec<_> = (0..MAX_LOCAL_LIGHTS)
+        .map(|_| add(&mut lights, &patch).unwrap())
+        .collect();
+    assert_eq!((lights.active_count(), handles.len()), (256, 256));
+    let err = add(&mut lights, &patch).unwrap_err();
+    assert_eq!(code(&err), "lights.invalid");
+    assert!(err.to_string().contains("256"), "{}", err);
+    assert_eq!(lights.active_count(), 256);
+}
+
+#[test]
+fn stale_handles_refuse_and_are_never_reused() {
+    let mut lights = LocalLights::new();
+    let patch = parse(&Mock::empty()).unwrap();
+    let stale = add(&mut lights, &patch).unwrap();
+    let fresh = add(&mut lights, &patch).unwrap();
+    remove(&mut lights, stale).unwrap();
+    assert_eq!(
+        code(&update(&mut lights, stale, &patch).unwrap_err()),
+        "api.unknown_handle"
+    );
+    assert_eq!(
+        code(&remove(&mut lights, stale).unwrap_err()),
+        "api.unknown_handle"
+    );
+    // The next handle is larger: the removed value is never aliased.
+    let next = add(&mut lights, &patch).unwrap();
+    assert!(next > fresh);
+}
+
+#[test]
+fn kind_changes_retain_valid_fields_and_metadata() {
+    let mut lights = LocalLights::new();
+    let created = parse(&Mock::new(&[
+        ("kind", Raw::String("spot".into())),
+        ("angleDeg", Raw::Number(60.0)),
+        ("innerAngleDeg", Raw::Number(45.0)),
+        ("range", Raw::Number(12.0)),
+        ("radius", Raw::Number(2.5)),
+        ("shadows", Raw::Bool(true)),
+    ]))
+    .unwrap();
+    let handle = add(&mut lights, &created).unwrap();
+    let changes = parse(&Mock::new(&[("kind", Raw::String("area".into()))])).unwrap();
+    update(&mut lights, handle, &changes).unwrap();
+    let stored = *lights.get(handle).unwrap();
+    assert_eq!(stored.kind, LocalLightKind::Area);
+    assert_eq!(
+        (stored.angle_deg, stored.inner_angle_deg, stored.range),
+        (60.0, Some(45.0), 12.0)
+    );
+    assert_eq!((stored.radius, stored.shadows), (2.5, true));
+}
+
+#[test]
+fn refused_updates_leave_the_stored_light_unchanged() {
+    let mut lights = LocalLights::new();
+    let created = parse(&Mock::new(&[
+        ("angleDeg", Raw::Number(60.0)),
+        ("innerAngleDeg", Raw::Number(45.0)),
+        ("intensity", Raw::Number(3.0)),
+    ]))
+    .unwrap();
+    let handle = add(&mut lights, &created).unwrap();
+    let before = *lights.get(handle).unwrap();
+    // The retained explicit inner angle must fit the merged outer angle.
+    let narrowed = parse(&Mock::new(&[("angleDeg", Raw::Number(40.0))])).unwrap();
+    assert_eq!(
+        code(&update(&mut lights, handle, &narrowed).unwrap_err()),
+        INVALID_DESC
+    );
+    // A malformed merged field is refused without clearing the others.
+    let malformed = parse(&Mock::new(&[("intensity", Raw::Number(f64::NAN))])).unwrap();
+    assert_eq!(
+        code(&update(&mut lights, handle, &malformed).unwrap_err()),
+        INVALID_DESC
+    );
+    assert_eq!(*lights.get(handle).unwrap(), before);
+    // Clearing the explicit inner angle restores the default, so the narrower cone is valid.
+    let cleared = parse(&Mock::new(&[
+        ("innerAngleDeg", Raw::Undefined),
+        ("angleDeg", Raw::Number(40.0)),
+    ]))
+    .unwrap();
+    update(&mut lights, handle, &cleared).unwrap();
+    let stored = *lights.get(handle).unwrap();
+    assert_eq!((stored.angle_deg, stored.inner_angle_deg), (40.0, None));
+    assert_eq!(stored.intensity, 3.0);
 }
