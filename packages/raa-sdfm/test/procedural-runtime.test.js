@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createFakeEngine } from './fake-engine.js';
 import { createProceduralRuntime } from '../src/procedural-runtime.js';
+import { createMamaLightOwner } from '../src/mama-light-owner.js';
 import { loadProceduralScene } from '../src/procedural.js';
 import { SdfmError } from '../src/errors.js';
 
@@ -418,7 +419,7 @@ test('a rejected evaluation changes nothing and reports its issues', async () =>
 });
 
 test('disposing during a pending remesh removes the scene and applies nothing afterwards', async () => {
-  const engine = runtimeEngine();
+  const engine = runtimeLightEngine();
   const root = engine.addNode(null);
   const nodeA = engine.addNode(root);
   let releaseRemesh;
@@ -428,6 +429,7 @@ test('disposing during a pending remesh removes the scene and applies nothing af
   const runtime = fakeRuntime([
     delta(),
     delta({
+      output: { ok: true, instances: [outInstance(40, { meshKey: 'k9' })], lights: [runtimeLight('b')] },
       remesh: [{ meshKey: 'k9', source: 0, deform: BEND }],
       added: [outInstance(40, { meshKey: 'k9', deform: BEND })],
     }),
@@ -437,7 +439,7 @@ test('disposing during a pending remesh removes the scene and applies nothing af
   const adapter = createProceduralRuntime({
     engine,
     root,
-    scene: runtimeScene(),
+    scene: { ...runtimeScene(), lights: [runtimeLight('a')] },
     runtime,
     instances: new Map([[7, { node: nodeA, source: 0, deform: BEND }]]),
     remesh() {
@@ -456,12 +458,15 @@ test('disposing during a pending remesh removes the scene and applies nothing af
   await adapter.step(0);
   const stepping = adapter.step(1);
   await started;
+  assert.equal(engine.lights.size, 2, 'the addition is staged while the published light stays live');
   adapter.dispose();
+  assert.equal(engine.lights.size, 0);
   assert.deepStrictEqual(engine.calls.removeNode, [nodeA]);
   assert.equal(runtime.disposed, true);
   releaseRemesh({ mesh: 'k9' });
   const result = await stepping;
   assert.equal(result.disposed, true);
+  assert.equal(engine.lights.size, 0, 'a stale mesh completion cannot recreate lights');
   assert.equal(attached, 0);
   assert.deepStrictEqual(released, [{ mesh: 'k9' }]);
   assert.equal(engine.calls.addNode.length, 2);
@@ -1150,4 +1155,185 @@ test('the public handle refuses runtime for a scene without runtime input', asyn
   assert.throws(() => handle.runtime({ call() {} }),
     (error) => error instanceof SdfmError && error.code === 'sdfm.scene_format');
   handle.dispose();
+});
+
+const runtimeLight = (id, fields = {}) => ({
+  id, node: 'light', key: 1, t: [1, 2, 3], r: [0, 0, 0, 1], s: [1, 1, 1],
+  kind: 'spot', color: [1, 1, 1], intensity: 3, range: 8, angleDeg: 60, shadows: false, ...fields,
+});
+const lightOutput = (sections = {}) => ({ ok: true, instances: [outInstance(1)], ...sections });
+const lightRefusal = Object.assign(new Error('light creation refused'), { code: 'light.invalid_desc' });
+
+// Local S17 double keeps handle identities and explicit optional-field resets observable.
+function runtimeLightEngine() {
+  const engine = runtimeTraceEngine();
+  engine.lights = new Map();
+  engine.lightAdds = 0;
+  engine.addLight = (desc) => {
+    const handle = ++engine.lightAdds;
+    if (handle === engine.failAddAt) throw lightRefusal;
+    engine.lights.set(handle, structuredClone(desc));
+    return handle;
+  };
+  engine.updateLight = (handle, changes) => {
+    assert.ok(engine.lights.has(handle));
+    Object.assign(engine.lights.get(handle), structuredClone(changes));
+  };
+  engine.removeLight = (handle) => assert.ok(engine.lights.delete(handle), 'remove each handle once');
+  return engine;
+}
+
+function lightAdapter(engine, deltas, trace, options = {}) {
+  const node = engine.addNode(null);
+  return createProceduralRuntime({
+    engine, runtime: fakeRuntime(deltas),
+    scene: { ...runtimeScene(), lights: [runtimeLight('a')] },
+    instances: [{ key: 1, node }],
+    ...(trace ? { trace: {
+      input: runtimeTraceInput([runtimeTraceInstance(1)]), procgen: {}, packTrace: (_, input) => runtimeTraceProgram(input),
+    } } : {}),
+    ...options,
+  });
+}
+
+for (const trace of [false, true]) {
+  test(`${trace ? 'trace' : 'mesh'} reconciles complete light snapshots with stable identities and placement`, async () => {
+    const engine = runtimeLightEngine();
+    const placement = trace ? [10, -20, 30] : [0, 0, 0];
+    const options = {};
+    if (trace) {
+      options.lights = createMamaLightOwner(engine, placement);
+      options.lights.prepare([runtimeLight('a')]).commit();
+    }
+    const first = runtimeLight('a', { t: [2, 3, 4], innerAngleDeg: 20 });
+    const changed = runtimeLight('a', { t: [-2, 5, 8], intensity: 9, range: 12 });
+    const original = structuredClone([first, changed]);
+    const adapter = lightAdapter(engine, [
+      delta({ output: lightOutput({ lights: [first] }), added: [outInstance(1)], remesh: [{ meshKey: 'm', source: 0 }] }),
+      delta(),
+      delta({ ok: false, output: lightOutput(), issues: ['delta refused'] }),
+      delta({ output: lightOutput({ ok: false }), issues: ['output refused'] }),
+      delta({ output: lightOutput({ lights: [first] }) }),
+      delta({ output: lightOutput({ lights: [changed] }) }),
+      delta({ output: lightOutput({ lights: [runtimeLight('b')] }) }),
+      delta({ output: lightOutput() }),
+      delta({ output: lightOutput({ lights: [runtimeLight('c')] }) }),
+      delta({ output: lightOutput({ lights: [] }) }),
+    ], trace, { ...options, remesh() { throw new Error('baseline geometry must not rebuild'); } });
+    const initialHandle = [...engine.lights.keys()][0];
+    const baseline = await adapter.step(0);
+    assert.deepEqual([baseline.moved, baseline.added, baseline.removed, baseline.remeshed], [0, 0, 0, 0]);
+    assert.deepEqual(Object.keys(baseline).sort(), ['added', 'delta', 'issues', 'moved', 'ok', 'remeshed', 'removed']);
+    assert.deepEqual(engine.lights.get(initialHandle).position, first.t.map((v, i) => v + placement[i]));
+    for (let tick = 1; tick <= 4; tick += 1) {
+      const result = await adapter.step(tick);
+      assert.equal(result.ok, tick !== 2 && tick !== 3);
+      if (!result.ok) assert.deepEqual(result.issues, [tick === 2 ? 'delta refused' : 'output refused']);
+      assert.deepEqual([...engine.lights.keys()], [initialHandle]);
+      assert.equal(engine.lights.get(initialHandle).innerAngleDeg, 20);
+    }
+    await adapter.step(5);
+    assert.deepEqual([...engine.lights.keys()], [initialHandle]);
+    assert.deepEqual(engine.lights.get(initialHandle).position, changed.t.map((v, i) => v + placement[i]));
+    assert.equal(engine.lights.get(initialHandle).intensity, 9);
+    assert.equal(engine.lights.get(initialHandle).range, 12);
+    assert.equal(engine.lights.get(initialHandle).innerAngleDeg, undefined);
+    assert.deepEqual([first, changed], original);
+    await adapter.step(6);
+    assert.equal(engine.lights.has(initialHandle), false);
+    assert.equal(engine.lights.size, 1);
+    await adapter.step(7);
+    assert.equal(engine.lights.size, 0);
+    await adapter.step(8);
+    assert.equal(engine.lights.size, 1);
+    await adapter.step(9);
+    assert.equal(engine.lights.size, 0);
+    assert.equal(engine.lightAdds, 3, 'the supplied registry is reused and repeated snapshots allocate nothing');
+    assert.equal(engine.calls.setTransform.length + engine.trace.updates.length + engine.trace.sets.length, 0);
+    adapter.dispose();
+    adapter.dispose();
+    if (options.lights) assert.throws(() => options.lights.prepare([]), { code: 'sdfm.disposed' });
+  });
+
+  test(`${trace ? 'trace' : 'mesh'} prepares before geometry and rolls lights back on application failure`, async () => {
+    const engine = runtimeLightEngine();
+    const refusal = Object.assign(new Error('application refused'), { code: 'api.unknown_handle' });
+    const snapshot = lightOutput({ lights: [runtimeLight('a', { intensity: 9 }), runtimeLight('b'), runtimeLight('c')] });
+    const moved = [outInstance(1, { t: [5, 0, 0] })];
+    const adapter = lightAdapter(engine, [
+      delta(), delta({ moved, removed: trace ? [] : [1], output: snapshot }),
+      delta({ moved, output: snapshot }), delta({ moved, output: snapshot }),
+    ], trace);
+    await adapter.step(0);
+    engine.failAddAt = 3;
+    await assert.rejects(adapter.step(1), (error) => error === lightRefusal);
+    assert.equal(engine.calls.removeNode.length + engine.calls.setTransform.length + engine.trace.updates.length, 0);
+    assert.deepEqual([...engine.lights.keys()], [1]);
+    assert.equal(engine.lights.get(1).intensity, 3);
+    const apply = trace ? engine.updateTraceInstances : engine.setTransform;
+    engine[trace ? 'updateTraceInstances' : 'setTransform'] = () => { throw refusal; };
+    await assert.rejects(adapter.step(2), (error) => error === refusal);
+    assert.deepEqual([...engine.lights.keys()], [1]);
+    assert.equal(engine.lights.get(1).intensity, 3);
+    engine[trace ? 'updateTraceInstances' : 'setTransform'] = apply;
+    const accepted = await adapter.step(3);
+    assert.equal(accepted.moved, 1);
+    assert.equal(accepted.ok, true);
+    assert.equal(engine.lights.size, 3);
+    assert.equal(engine.lights.get(1).intensity, 9);
+    adapter.dispose();
+    assert.equal(engine.lights.size, 0);
+  });
+}
+
+test('disposal aborts lights while a trace application is pending and queued steps cannot recreate them', async () => {
+  const engine = runtimeLightEngine();
+  const lights = createMamaLightOwner(engine, [10, 20, 30]);
+  lights.prepare([runtimeLight('a')]).commit();
+  let started;
+  let finish;
+  const applying = new Promise((resolve) => { started = resolve; });
+  const pending = new Promise((resolve) => { finish = resolve; });
+  const adapter = lightAdapter(engine, [
+    delta(),
+    delta({ moved: [outInstance(1)], output: lightOutput({ lights: [runtimeLight('b')] }) }),
+    delta({ output: lightOutput({ lights: [runtimeLight('c')] }) }),
+  ], true, {
+    lights,
+    trace: {
+      input: runtimeTraceInput([runtimeTraceInstance(1)]), procgen: {}, packTrace: (_, input) => runtimeTraceProgram(input),
+      commit() {
+        assert.equal(engine.lights.get(1).intensity, 3);
+        assert.equal([...engine.lights.values()][1].intensity, 0, 'staged additions stay dark until application succeeds');
+        started();
+        return pending;
+      },
+    },
+  });
+  await adapter.step(0);
+  const stepping = adapter.step(1);
+  await applying;
+  const queued = adapter.step(2);
+  const rejected = assert.rejects(queued, { code: 'sdfm.disposed' });
+  adapter.dispose();
+  adapter.dispose();
+  assert.equal(engine.lights.size, 0);
+  finish();
+  assert.equal((await stepping).disposed, true);
+  await rejected;
+  assert.equal(engine.lightAdds, 2);
+  assert.equal(engine.lights.size, 0);
+  assert.throws(() => lights.prepare([]), { code: 'sdfm.disposed' });
+});
+
+test('direct runtime initialization releases staged lights and its evaluator on creation failure', () => {
+  const engine = runtimeLightEngine();
+  const runtime = fakeRuntime([]);
+  engine.failAddAt = 2;
+  assert.throws(() => createProceduralRuntime({
+    engine, runtime, scene: { ...runtimeScene(), lights: [runtimeLight('a'), runtimeLight('b')] },
+  }), (error) => error === lightRefusal);
+  assert.equal(engine.lights.size, 0);
+  assert.equal(runtime.disposed, true);
+  assert.equal(engine.calls.addNode.length + engine.calls.setTransform.length, 0);
 });

@@ -19,6 +19,7 @@
 // never loads a scene itself.
 import { SdfmError } from './errors.js';
 import { instanceParams } from './instance-params.js';
+import { createMamaLightOwner } from './mama-light-owner.js';
 
 const TRACE_HEADER_WORDS = 8;
 const TRACE_SOURCE_WORDS = 12;
@@ -29,6 +30,14 @@ const TRACE_INSTANCE_WORDS = 32;
  * Create the runtime adapter of one scene. `options.runtime` is a MAMA `Runtime` (or any object
  * with the same `set`/`step`/`dispose`); without it `options.mama.Runtime.create(procgen,
  * scene.runtime.input)` builds one (the object `importProcedural` returns in mama-bridge.js).
+ * M3_RUNTIME_LIGHT_HANDOFF: both loaders pass options.lights, the exact scene-owned registry
+ * from M3_LIGHT_OWNER; direct callers may omit it for a zero-placement owner seeded from
+ * scene.lights. M3_RUNTIME_SNAPSHOT supplies complete successful outputs: absent output leaves
+ * lights unchanged, omitted/empty lights clear them, and failed evaluation preserves them.
+ * Raw output.lights go to prepare before geometry application, including the first baseline;
+ * commit follows successful application, rollback follows failure/disposal. Only the owner
+ * applies its captured placement (including trace placement); runtime never translates lights.
+ * Runtime disposal also disposes this owner, even when supplied by a loader.
  *
  * @param {{
  *   engine: object,
@@ -36,6 +45,7 @@ const TRACE_INSTANCE_WORDS = 32;
  *   runtime?: { set(values: object): void, step(tick: number): object, dispose(): void },
  *   mama?: { Runtime?: { create(procgen: object, input: object): object } },
  *   procgen?: object,
+ *   lights?: import('./mama-light-owner.js').MamaLightOwner,
  *   root?: number | null,
  *   instances?: Map<number, object> | object[] | Record<string, object>,
  *   attach?: (instance: object, mesh: unknown) => object | number | Promise<object | number>,
@@ -96,6 +106,16 @@ export function createProceduralRuntime(options = {}) {
     if (!Number.isInteger(entry.key)) throw new TypeError('createProceduralRuntime: every instance entry needs an integer key');
     entries.set(entry.key, { ...entry });
   }
+  const lights = options.lights ?? createMamaLightOwner(engine);
+  if (options.lights == null) {
+    try {
+      lights.prepare(scene.lights).commit();
+    } catch (e) {
+      lights.dispose();
+      runtime.dispose();
+      throw e;
+    }
+  }
 
   const disposedError = () => new SdfmError('sdfm.disposed', 'procedural runtime has been disposed');
   const checkLive = () => {
@@ -139,6 +159,11 @@ export function createProceduralRuntime(options = {}) {
     if (disposed) return;
     disposed = true;
     const errors = [];
+    try {
+      lights.dispose();
+    } catch (e) {
+      errors.push(e);
+    }
     for (const entry of entries.values()) {
       try {
         detach(entry);
@@ -171,15 +196,26 @@ export function createProceduralRuntime(options = {}) {
     checkLive();
     const issues = Array.isArray(delta.issues) ? delta.issues : [];
     // A rejected evaluation changes nothing: the previous valid state stays.
-    if (delta.ok === false || !Array.isArray(delta.added) || !Array.isArray(delta.moved)) {
+    if (delta.ok === false || delta.output?.ok === false || !Array.isArray(delta.added) || !Array.isArray(delta.moved)) {
       return { moved: 0, remeshed: 0, added: 0, removed: 0, ok: false, issues, delta };
     }
-    // The baseline output describes the scene the loader already installed: it adds no change.
-    if (trace !== null) {
-      if (baseline) return { moved: 0, remeshed: 0, added: 0, removed: 0, ok: true, issues, delta };
-      return trace.apply(delta, issues);
+    const transaction = delta.output ? lights.prepare(delta.output.lights) : null;
+    try {
+      // Geometry's first baseline is already installed; its lights still need reconciliation.
+      let result;
+      if (trace === null) result = await applyNodes(delta, issues, baseline);
+      else if (baseline) result = { moved: 0, remeshed: 0, added: 0, removed: 0, ok: true, issues, delta };
+      else result = await trace.apply(delta, issues);
+      if (disposed) {
+        transaction?.rollback();
+        return settled();
+      }
+      transaction?.commit();
+      return result;
+    } catch (e) {
+      transaction?.rollback();
+      throw e;
     }
-    return applyNodes(delta, issues, baseline);
   }
 
   async function applyNodes(delta, issues, baseline) {
@@ -323,7 +359,7 @@ export function createProceduralRuntime(options = {}) {
   }
 
   function noteOutput(delta) {
-    if (delta.ok === false) return;
+    if (delta.ok === false || delta.output?.ok === false) return;
     const added = Array.isArray(delta.added) ? delta.added : [];
     const removed = Array.isArray(delta.removed) ? delta.removed : [];
     if (!seenOutput) seenOutput = true;
