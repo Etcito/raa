@@ -1,15 +1,16 @@
 #!/usr/bin/env node
-// Lights-page selection and visibility validation (S20, M2-PAGE-SELECTION): `select`
-// reads only the requested page's produced build, validates every scene/variant record,
-// checks each authored subject box against its camera and writes selection.json; `check`
-// validates without writing. GPU transport and freshness checks belong to card 7263.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+// Metadata selection, managed transport and fail-closed freshness. Judgment is downstream.
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { inflateSync } from 'node:zlib';
+import { setTimeout as delay } from 'node:timers/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs as parse } from 'node:util';
 
-const OPS = ['select', 'check'];
-const USAGE = 'usage: node web/common/lights-job.mjs <select|check> --page dist/lights [--out out/lights]';
+const OPS = ['select', 'check', 'clean', 'render', 'fresh'];
+const USAGE = 'usage: node web/common/lights-job.mjs <select|check|clean|render|fresh> --page dist/lights [--out out/lights]';
 const ASPECT = 16 / 9;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const vec3 = (v) => Array.isArray(v) && v.length === 3 && v.every(isNum);
@@ -30,7 +31,7 @@ function parseArgs(argv) {
   const { values, positionals } = parse({ args: argv, allowPositionals: true,
     options: { page: { type: 'string' }, out: { type: 'string' } } });
   ensure(positionals.length === 1 && OPS.includes(positionals[0]) && values.page, USAGE);
-  ensure(positionals[0] !== 'select' || values.out, USAGE);
+  ensure(positionals[0] === 'check' || values.out, USAGE);
   return { op: positionals[0], page: values.page, out: values.out };
 }
 
@@ -139,10 +140,349 @@ export async function select(page, out) {
   return pairs;
 }
 
+const nonblank = (v) => typeof v === 'string' && v.trim().length > 0;
+const hostId = (v) => nonblank(v) || (Number.isSafeInteger(v) && v > 0);
+const iso = (v) => nonblank(v) && Number.isFinite(Date.parse(v)) && new Date(v).toISOString() === v;
+const jsonWrite = (path, doc) => {
+  const temp = `${path}.${randomUUID()}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(doc, null, 2)}\n`);
+  renameSync(temp, path);
+};
+
+// Do not invent NMC_RUN_ID/NMC_COMMIT variables. Git is the worktree execution
+// context; the installed client's NMC_GPU_REVISION is the host's launch revision.
+function commitAt(page) {
+  let commit;
+  try { commit = execFileSync('git', ['-C', resolve(page), 'rev-parse', '--verify', 'HEAD'], { encoding: 'utf8' }).trim(); }
+  catch (cause) { throw new Error('missing commit provenance: page must belong to its producing Git worktree', { cause }); }
+  ensure(/^[0-9a-f]{40,64}$/.test(commit), 'missing commit provenance');
+  ensure(!process.env.NMC_GPU_REVISION || process.env.NMC_GPU_REVISION === commit,
+    'host NMC_GPU_REVISION differs from the producing worktree commit');
+  return commit;
+}
+
+function buildIdentity(page) {
+  const build = readJson(join(page, 'build.json'), 'rebuild lights with build-lights.sh for provenance');
+  ensure(nonblank(build.buildId) && nonblank(build.commit) && iso(build.builtAt), 'missing build provenance');
+  ensure(build.commit === commitAt(page), 'stale build commit provenance: rebuild lights');
+  return build;
+}
+
+async function selectionAt(page, out) {
+  const selection = readJson(join(out, 'selection.json'), 'select the produced page first');
+  ensure(selection.page === resolve(page), 'selection belongs to a different page');
+  const pairs = await check(page);
+  ensure(Array.isArray(selection.pairs) && selection.pairs.length > 0, 'selection is empty');
+  ensure(JSON.stringify(selection.pairs) === JSON.stringify(pairs), 'selection differs from produced metadata: select again');
+  return pairs;
+}
+
+// All generated paths are contained and symlink-free, including existing ancestors.
+function inside(root, name) {
+  ensure(nonblank(name) && !name.includes('\\') && !name.includes(':') && !isAbsolute(name)
+    && name.split('/').every((s) => s && s !== '.' && s !== '..'), `unsafe output path: ${name}`);
+  const dest = resolve(root, name);
+  ensure(!relative(resolve(root), dest).startsWith('..'), `escaping output path: ${name}`);
+  let cursor = resolve(root);
+  for (;;) {
+    ensure(!lstatSync(cursor, { throwIfNoEntry: false })?.isSymbolicLink(), `symlink output path: ${cursor}`);
+    const parent = resolve(cursor, '..');
+    if (parent === cursor) break;
+    cursor = parent;
+  }
+  cursor = resolve(root);
+  for (const part of name.split('/')) {
+    cursor = join(cursor, part);
+    ensure(!lstatSync(cursor, { throwIfNoEntry: false })?.isSymbolicLink(), `symlink output path: ${cursor}`);
+  }
+  return dest;
+}
+
+function currentAttempt(out) {
+  const pointer = readJson(inside(out, '.lights-current.json'), 'render a new lights run');
+  ensure(/^\.lights-runs\/[0-9a-f-]{36}$/.test(pointer.attempt), 'invalid lights attempt pointer');
+  inside(out, pointer.attempt);
+  return pointer.attempt;
+}
+
+export async function clean(page, out) {
+  await selectionAt(page, out);
+  if (existsSync(inside(out, '.lights-current.json'))) {
+    rmSync(inside(out, currentAttempt(out)), { recursive: true, force: true });
+    rmSync(inside(out, '.lights-current.json'));
+  }
+  rmSync(inside(out, 'run.json'), { force: true });
+}
+
+const waitSeconds = () => {
+  const n = process.env.NMC_GPU_WAIT_S === undefined ? 60 : Number(process.env.NMC_GPU_WAIT_S);
+  ensure(Number.isFinite(n) && n > 0, 'NMC_GPU_WAIT_S must be positive seconds');
+  return n;
+};
+
+async function managedClient(waitS) {
+  const client = process.env.NMC_GPU_CLIENT;
+  ensure(nonblank(client), 'NMC_GPU_CLIENT is missing: managed Windows Chrome is required');
+  const until = Date.now() + waitS * 1000;
+  while (!existsSync(client) && Date.now() < until) await delay(Math.min(100, Math.max(1, until - Date.now())));
+  ensure(existsSync(client) && lstatSync(client).isFile(), `NMC_GPU_CLIENT unavailable after ${waitS}s`);
+  return client;
+}
+
+// The installed CLI reports its queue/running transitions on stderr. Its running
+// clock is separate from slot availability; never pass a wall-clock spawn timeout.
+function clientCall(client, args, waitS, gpu = false) {
+  return new Promise((resolveCall, reject) => {
+    const child = spawn(process.execPath, [client, ...args], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    let stdout = '', stderr = '', lineBuffer = '', failure = null, running = false;
+    const stop = (message) => { failure ??= new Error(message); child.kill('SIGKILL'); };
+    let timer = setTimeout(() => stop(`managed client ${gpu ? 'GPU waiting' : 'publication'} timeout after ${waitS}s`), waitS * 1000);
+    child.stdout.on('data', (data) => { stdout += data; if (stdout.length > 1024 * 1024) stop('managed client stdout too large'); });
+    child.stderr.on('data', (data) => {
+      stderr = (stderr + data).slice(-16000);
+      lineBuffer += data;
+      const lines = lineBuffer.split(/\r?\n/);
+      lineBuffer = lines.pop().slice(-16000);
+      for (const line of lines) {
+        if (gpu && /^GPU job .+: running \(/.test(line) && !running) {
+          running = true;
+          clearTimeout(timer);
+          timer = setTimeout(() => stop('GPU job running timeout after 300s'), 300000);
+        } else if (gpu && /^GPU job .+: done$/.test(line)) {
+          // Downloads happen after the job finishes. Do not truncate a successful
+          // job just because its separate file transfer crosses the running limit.
+          clearTimeout(timer);
+          timer = setTimeout(() => stop('managed output download timeout'), waitS * 1000);
+        }
+      }
+    });
+    child.on('error', (cause) => { failure = new Error(`managed client could not start: ${cause.message}`, { cause }); });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (failure) return reject(failure);
+      const token = process.env.NMC_GPU_TOKEN;
+      const details = token ? stderr.split(token).join('[redacted]') : stderr;
+      if (code !== 0) return reject(new Error(`managed client failed (${code ?? signal}): ${details.trim()}`));
+      resolveCall(stdout);
+    });
+  });
+}
+
+function pageReference(stdout) {
+  const pick = (o) => [o, o?.result, o?.data].map((v) => v?.page_ref ?? v?.pageRef).find(nonblank);
+  for (const text of [stdout, ...stdout.split(/\r?\n/)]) {
+    try { const ref = pick(JSON.parse(text)); if (ref) return ref.trim(); } catch { /* CLI progress line */ }
+    const match = /^\s*(?:page_ref|pageRef)\s*[:=]\s*["']?([^\s"']+)["']?\s*$/.exec(text);
+    if (match) return match[1];
+  }
+  throw new Error('managed publication returned no page_ref');
+}
+
+function validateRun(op, pair, measured) {
+  ensure(op?.scene === pair.scene && op?.variant === pair.variant, `wrong scene/variant: expected ${pair.scene}/${pair.variant}`);
+  ensure(op.nonEmpty === true, `${pair.scene}/${pair.variant}: nonEmpty must be true`);
+  const adapter = op.adapter;
+  const keys = ['vendor', 'architecture', 'device', 'description'];
+  ensure(op.hardware === true && adapter?.isFallbackAdapter === false
+    && keys.every((k) => typeof adapter[k] === 'string') && keys.some((k) => nonblank(adapter[k]))
+    && !keys.some((k) => /software|swiftshader|llvmpipe|lavapipe|softpipe|fallback|basic render|microsoft basic|warp\b/i.test(adapter[k])),
+  `${pair.scene}/${pair.variant}: hardware adapter required; software/fallback adapter refused`);
+  const size = measured ? [1920, 1080] : [1280, 720];
+  ensure(JSON.stringify(op.canvas) === JSON.stringify(size), `invalid canvas dimensions for ${pair.scene}`);
+  ensure(op.warmup === (measured ? 60 : 30) && op.frames === (measured ? 300 : 1), 'invalid warm-up/frame counts');
+}
+
+async function validateEvidence(op, pair, page) {
+  const scenes = await loadScenes(page);
+  const scene = scenes.get(pair.scene);
+  const measured = !!scene.measure;
+  validateRun(op, pair, measured);
+  const browser = op.browser;
+  ensure(browser && /\b(?:Headless)?Chrome\/\d+/.test(browser.userAgent)
+    && /Windows NT/.test(browser.userAgent) && !/Edg\/|OPR\//.test(browser.userAgent)
+    && /^Win(?:32|64|dows)$/.test(browser.platform), 'actual Chrome on Windows is required');
+  ensure(isNum(browser.devicePixelRatio) && browser.devicePixelRatio === 1, 'invalid devicePixelRatio: DPR 1 is required');
+  ensure(Array.isArray(op.gpuErrors), 'missing shader/device gpuErrors evidence');
+  ensure(op.gpuErrors.length === 0, `shader/device GPU errors: ${op.gpuErrors.join('; ')}`);
+  if (!measured) return;
+  const config = scene.measure;
+  ensure(config.width === 1920 && config.height === 1080 && config.warmup === 60 && config.frames === 300
+    && config.devicePixelRatio === 1 && config.minFpsMean === 60, 'invalid measured scene configuration');
+  ensure(nonblank(config.measurementFor) && op.measurement_for === config.measurementFor, 'missing/wrong measurement_for');
+  // Consume the staged upstream summary implementation, never implement timing here.
+  const { summarizeFrameIntervals } = await import(pathToFileURL(join(resolve(page), 'lib/runner.js')).href);
+  for (const variant of ['on', 'off']) {
+    const run = op.runs?.[variant];
+    validateRun(run, { scene: pair.scene, variant }, true);
+    ensure(Array.isArray(run.frameIntervalsMs) && run.frameIntervalsMs.length === 300
+      && run.frameIntervalsMs.every((n) => isNum(n) && n > 0), `${variant}: invalid raw frame intervals`);
+    const summary = summarizeFrameIntervals(run.frameIntervalsMs);
+    for (const [key, value] of Object.entries(summary)) {
+      ensure(isNum(run[key]) && run[key] > 0 && run[key] === value, `${variant}: invalid timing ${key}`);
+    }
+    if (run.gpuErrors !== undefined) ensure(Array.isArray(run.gpuErrors) && run.gpuErrors.length === 0, `${variant}: GPU errors`);
+  }
+  ensure(op.runs.on.fpsMean >= 60, 'many-lights on fpsMean must be >= 60');
+  for (const key of ['frameIntervalsMs', 'frameIntervalMsMedian', 'frameIntervalMsP95', 'fpsMean', 'fpsMedian', 'fpsP95']) {
+    ensure(JSON.stringify(op[key]) === JSON.stringify(op.runs[pair.variant][key]), `capture timing differs from ${pair.variant}: ${key}`);
+  }
+}
+
+// PNG format validation (chunk CRCs and decoded scanlines), not an image comparison.
+function validatePng(path, size) {
+  const bytes = readFileSync(path);
+  const bad = () => { throw new Error(`corrupt/empty PNG: ${path}`); };
+  if (bytes.length < 45 || !bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) bad();
+  let offset = 8, header, palette = false, ended = false;
+  const data = [];
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset), end = offset + 8 + length;
+    if (end + 4 > bytes.length) bad();
+    const type = bytes.toString('ascii', offset + 4, offset + 8);
+    let crc = 0xffffffff;
+    for (const value of bytes.subarray(offset + 4, end)) {
+      crc ^= value;
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    if (((crc ^ 0xffffffff) >>> 0) !== bytes.readUInt32BE(end)) bad();
+    const chunk = bytes.subarray(offset + 8, end);
+    if (!header && type !== 'IHDR') bad();
+    if (type === 'IHDR') {
+      if (header || length !== 13) bad();
+      header = chunk;
+    } else if (type === 'PLTE') {
+      if (palette || data.length || length === 0 || length % 3 || length > 768) bad();
+      palette = true;
+    } else if (type === 'IDAT') data.push(chunk);
+    else if (type === 'IEND') { if (length !== 0) bad(); ended = true; }
+    else if (!/^[a-z]/.test(type)) bad(); // unknown critical PNG chunk
+    offset = end + 4;
+    if (ended) break;
+  }
+  if (!ended || offset !== bytes.length || !header || !data.length) bad();
+  if (header.readUInt32BE(0) !== size[0] || header.readUInt32BE(4) !== size[1]) bad();
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[header[9]], depth = header[8];
+  const validDepths = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+  if (!channels || !validDepths[header[9]].includes(depth) || header[10] || header[11] || header[12]
+    || (header[9] === 3 && !palette)) bad();
+  const stride = 1 + Math.ceil(size[0] * channels * depth / 8), expected = stride * size[1];
+  let raw;
+  try { raw = inflateSync(Buffer.concat(data), { maxOutputLength: expected }); } catch { bad(); }
+  if (raw.length !== expected) bad();
+  for (let row = 0; row < size[1]; row++) if (raw[row * stride] > 4) bad();
+}
+
+function outputFiles(dir, prefix = '') {
+  return readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
+    const name = `${prefix}${entry.name}`, path = inside(dir, name);
+    ensure(!entry.isSymbolicLink(), `symlink managed output: ${name}`);
+    if (entry.isDirectory()) return outputFiles(path).map((child) => `${name}/${child}`);
+    ensure(entry.isFile() && lstatSync(path).size > 0, `empty/missing output: ${name}`);
+    return [name];
+  });
+}
+
+async function pairOutput(page, dir, pair) {
+  const files = outputFiles(dir).filter((name) => name !== 'completion.json');
+  ensure(files.includes('capture.png'), 'missing explicit capture.png output');
+  ensure(files.includes('result.json'), 'missing operation result.json output');
+  const doc = readJson(join(dir, 'result.json'), 'managed render must produce its operation result');
+  ensure(hostId(doc.job_id) && hostId(doc.client_id), 'missing managed job/client provenance');
+  await validateEvidence(doc.result, pair, page);
+  for (const file of files.filter((name) => name.endsWith('.png'))) validatePng(inside(dir, file), doc.result.canvas);
+  // Attached lifecycle filenames are authored by the page, not guessed from any PNG.
+  for (const frame of doc.result.lifecycle?.frames ?? []) if (frame.name !== undefined) {
+    ensure(files.includes(`${frame.name}.png`), `missing lifecycle output: ${frame.name}.png`);
+  }
+  return { doc, files };
+}
+
+export async function render(page, out) {
+  const pairs = await selectionAt(page, out);
+  // Invalidate the previous completion before any operation that can fail.
+  await clean(page, out);
+  const attempt = `.lights-runs/${randomUUID()}`;
+  mkdirSync(inside(out, attempt), { recursive: true });
+  jsonWrite(inside(out, '.lights-current.json'), { attempt });
+  const build = buildIdentity(page);
+  const waitS = waitSeconds();
+  const client = await managedClient(waitS);
+  const pageRef = pageReference(await clientCall(client, ['publish', resolve(page)], waitS));
+  // Before a producer returns, the only host-issued context is its publication.
+  // A completed run is identified by its first real managed job, never a clock
+  // or an assumed NMC_RUN_ID. All jobs remain in result.json and receipts.
+  const record = { pageRef, pairs: [], complete: false, buildId: build.buildId,
+    runId: pageRef, commit: build.commit, startedAt: new Date().toISOString(), completedAt: null };
+  jsonWrite(inside(out, 'run.json'), record);
+  try {
+    // Sequential producers also bound independent CPU work to 1 (NMC_CPUS default).
+    for (const [index, pair] of pairs.entries()) {
+      const namespace = `${attempt}/s-${encodeURIComponent(pair.scene)}/${pair.variant}`;
+      const dir = inside(out, namespace);
+      mkdirSync(dir, { recursive: true });
+      const input = inside(out, `${attempt}/input-${index}.json`);
+      jsonWrite(input, { args: { scene: pair.scene, variant: pair.variant } });
+      await clientCall(client, ['render', input, '--page-ref', pageRef, '-o', dir], waitS, true);
+      const { doc, files } = await pairOutput(page, dir, pair);
+      if (index === 0) record.runId = String(doc.job_id);
+      jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId,
+        commit: record.commit, scene: pair.scene, variant: pair.variant, jobId: doc.job_id, clientId: doc.client_id, files });
+      record.pairs.push({ scene: pair.scene, variant: pair.variant,
+        capture: `${namespace}/capture.png`, result: `${namespace}/result.json` });
+      ensure(currentAttempt(out) === attempt, 'render attempt was superseded');
+      jsonWrite(inside(out, 'run.json'), record);
+    }
+    ensure(currentAttempt(out) === attempt, 'render attempt was superseded');
+    record.complete = true;
+    record.completedAt = new Date().toISOString();
+    jsonWrite(inside(out, 'run.json'), record);
+    return await fresh(page, out);
+  } catch (cause) {
+    record.complete = false;
+    record.completedAt = null;
+    if (currentAttempt(out) === attempt) jsonWrite(inside(out, 'run.json'), record);
+    throw cause;
+  }
+}
+
+export async function fresh(page, out) {
+  const selection = await selectionAt(page, out);
+  const build = buildIdentity(page);
+  const record = readJson(inside(out, 'run.json'), 'render must complete successfully first');
+  ensure(record.complete === true && iso(record.startedAt) && iso(record.completedAt)
+    && Date.parse(record.completedAt) >= Date.parse(record.startedAt)
+    && Date.parse(record.startedAt) >= Date.parse(build.builtAt), 'run is unsuccessful or incomplete');
+  ensure(nonblank(record.pageRef) && nonblank(record.runId) && record.buildId === build.buildId
+    && record.commit === build.commit, 'stale/missing run/build/commit provenance');
+  const attempt = currentAttempt(out);
+  ensure(Array.isArray(record.pairs) && record.pairs.length === selection.length, 'run pairs do not match selection');
+  const jobs = new Set();
+  for (const pair of selection) {
+    const matches = record.pairs.filter((p) => p.scene === pair.scene && p.variant === pair.variant);
+    ensure(matches.length === 1, `missing/duplicate run pair: ${pair.scene}/${pair.variant}`);
+    const run = matches[0];
+    const namespace = `${attempt}/s-${encodeURIComponent(pair.scene)}/${pair.variant}`;
+    ensure(run.capture === `${namespace}/capture.png` && run.result === `${namespace}/result.json`, 'stale/unsafe pair paths');
+    const dir = inside(out, namespace);
+    const receipt = readJson(inside(dir, 'completion.json'), 'producer must validate successfully');
+    ensure(receipt.complete === true && ['pageRef', 'buildId', 'runId', 'commit'].every((k) => receipt[k] === record[k])
+      && receipt.scene === pair.scene && receipt.variant === pair.variant, 'stale/unsuccessful producer completion');
+    const { doc, files } = await pairOutput(page, dir, pair);
+    if (pair === selection[0]) ensure(record.runId === String(doc.job_id), 'wrong managed run provenance');
+    ensure(receipt.jobId === doc.job_id && receipt.clientId === doc.client_id && !jobs.has(doc.job_id), 'wrong/duplicate managed job provenance');
+    jobs.add(doc.job_id);
+    ensure(JSON.stringify(receipt.files) === JSON.stringify(files), 'missing/changed producer output inventory');
+  }
+  ensure(currentAttempt(out) === attempt && JSON.stringify(readJson(join(out, 'run.json'), 'current run')) === JSON.stringify(record),
+    'run changed during freshness validation');
+  return record;
+}
+
 export async function main(argv = process.argv.slice(2)) {
   const { op, page, out } = parseArgs(argv);
-  const pairs = op === 'check' ? await check(page) : await select(page, out);
-  process.stdout.write(`lights-job: ${op} ${pairs.length} pairs\n`);
+  const result = await ({ check, select, clean, render, fresh })[op](page, out);
+  const count = Array.isArray(result) ? result.length : result?.pairs.length;
+  process.stdout.write(`lights-job: ${op}${count === undefined ? '' : ` ${count} pairs`}\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
