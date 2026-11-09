@@ -67,3 +67,169 @@ fn discontinuity_marks_are_one_shot_per_view() {
     assert!(!invocation.prepare(0));
     assert!(invocation.prepare(2), "unprepared views keep their mark");
 }
+
+/// The public renderer and pipeline wired as the Engine wires them, on a software GPU.
+/// Every viewport selects itself and prepares through `LitRenderer`, then the real pipeline
+/// records the views: a skipped view contributes no bit, a later view's record failure keeps
+/// only the view that already reached an intermediate submit, and `begin` clears the
+/// observation for the next invocation.
+#[test]
+fn software_gpu_public_renderer_pipeline_tracks_only_submitted_views() {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use raa_core::testing::{skip, software_gpu};
+    use raa_core::{FrameGraph, GpuContext, OffscreenTarget, RaaError, wgpu};
+    use raa_lit::{LitOptions, LitRenderer};
+    use raa_pipeline::{FeaturePass, Pipeline, RecordCtx};
+    use raa_scene::{RenderList, Scene};
+
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    const SIZE: (u32, u32) = (64, 16);
+
+    /// Fails one view's record: the invocation's final encoder is never submitted.
+    struct FailOnRecord {
+        calls: Rc<Cell<u32>>,
+        fail_at: u32,
+    }
+
+    impl FeaturePass for FailOnRecord {
+        fn name(&self) -> &str {
+            "submission.failing"
+        }
+        fn order(&self) -> u32 {
+            61
+        }
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            let calls = self.calls.get() + 1;
+            self.calls.set(calls);
+            if calls == self.fail_at {
+                return Err(RaaError::Gpu("mock record failure".into()));
+            }
+            Ok(())
+        }
+    }
+
+    fn execute(pipeline: &Rc<RefCell<Pipeline>>, gpu: &GpuContext) -> Result<(), RaaError> {
+        let target = OffscreenTarget::new(gpu, SIZE.0, SIZE.1, FORMAT);
+        let mut graph = FrameGraph::new(FORMAT);
+        Pipeline::install(pipeline, &mut graph);
+        graph.compile()?;
+        let commands = graph.execute(gpu, target.view(), target.size())?;
+        gpu.queue().submit([commands]);
+        Ok(())
+    }
+
+    let Some(gpu) = software_gpu() else {
+        skip(
+            "public_renderer_pipeline_views",
+            "software_gpu returned None",
+        );
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, FORMAT, false)));
+    let lit = Rc::new(RefCell::new(
+        LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit renderer"),
+    ));
+    let calls = Rc::new(Cell::new(0));
+    pipeline
+        .borrow_mut()
+        .add(Box::new(FailOnRecord {
+            calls: Rc::clone(&calls),
+            fail_at: 4,
+        }))
+        .expect("failing pass");
+    {
+        let lit = Rc::clone(&lit);
+        let scene = Rc::new(RefCell::new(Scene::new()));
+        let list = Rc::new(RefCell::new(RenderList::default()));
+        let tags = Rc::new(RefCell::new(Vec::new()));
+        let slots = Rc::new(RefCell::new(Vec::new()));
+        pipeline
+            .borrow_mut()
+            .set_view_prepare(Box::new(move |gpu, view, size| {
+                let mut lit = lit.borrow_mut();
+                let mut scene = scene.borrow_mut();
+                scene.camera.set_viewport(size.0, size.1);
+                lit.prepare_scene_view(view, false);
+                lit.prepare(
+                    gpu,
+                    &mut scene,
+                    &mut list.borrow_mut(),
+                    &mut tags.borrow_mut(),
+                    &mut slots.borrow_mut(),
+                )
+                .map(|_| ())
+            }));
+    }
+
+    // Invocation 0: view 0 is submitted intermediately, view 1 is skipped (zero area) and
+    // view 2 is recorded into the final encoder, pending the runtime's own submit.
+    pipeline
+        .borrow_mut()
+        .set_view_rects(&[[0, 0, 32, 16], [0, 0, 0, 16], [32, 0, 32, 16]]);
+    lit.borrow_mut().begin_scene_frame(0);
+    pipeline.borrow_mut().begin_scene_submission();
+    assert_eq!(
+        pipeline.borrow().scene_submission(),
+        SubmissionState::default(),
+        "begin opens a cleared observation"
+    );
+    execute(&pipeline, &gpu).expect("first invocation records");
+    let first = pipeline.borrow().scene_submission();
+    assert_eq!(
+        (
+            first.submitted_mask,
+            first.pending_mask,
+            first.record_failed
+        ),
+        (0b001, 0b100, false),
+        "view 1 was skipped and never submitted"
+    );
+    let acknowledged = first.submitted_mask | first.pending_mask;
+    for view in (0..4).filter(|v| acknowledged & (1 << v) != 0) {
+        lit.borrow_mut().submitted_scene_view(view);
+    }
+    lit.borrow_mut().finish_scene_frame(true);
+
+    // Invocation 1: view 0 reaches the intermediate submit, then view 1's record fails, so
+    // the observation keeps only view 0 and marks the invocation incomplete.
+    pipeline
+        .borrow_mut()
+        .set_view_rects(&[[0, 0, 32, 16], [32, 0, 32, 16]]);
+    lit.borrow_mut().begin_scene_frame(1);
+    pipeline.borrow_mut().begin_scene_submission();
+    assert_eq!(
+        pipeline.borrow().scene_submission(),
+        SubmissionState::default()
+    );
+    assert!(
+        execute(&pipeline, &gpu).is_err(),
+        "the failing pass aborts the final encoder"
+    );
+    let second = pipeline.borrow().scene_submission();
+    assert_eq!(
+        (
+            second.submitted_mask,
+            second.pending_mask,
+            second.record_failed
+        ),
+        (0b01, 0, true),
+        "view 1 never reached a submit"
+    );
+    lit.borrow_mut().submitted_scene_view(0);
+    lit.borrow_mut().finish_scene_frame(false);
+
+    // Invocation 2: every view is skipped. The invocation records nothing, submits nothing
+    // and still closes (skipped is a complete invocation for history).
+    pipeline.borrow_mut().set_view_rects(&[[0, 0, 0, 0]]);
+    lit.borrow_mut().begin_scene_frame(2);
+    pipeline.borrow_mut().begin_scene_submission();
+    execute(&pipeline, &gpu).expect("skipped invocation records");
+    assert_eq!(
+        pipeline.borrow().scene_submission(),
+        SubmissionState::default(),
+        "no skipped view contributes a bit"
+    );
+    lit.borrow_mut().finish_scene_frame(true);
+}
