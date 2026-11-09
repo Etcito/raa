@@ -22,6 +22,7 @@ mod frame_history;
 mod handle;
 mod instance_store;
 mod library;
+mod local_light;
 mod lod;
 mod material;
 mod material_data;
@@ -51,6 +52,7 @@ pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_f
 pub use handle::{LitHandle, PipelineSpec};
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
+pub use local_light::{LightHandle, LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
 pub use lod::{
     LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level, lod_error, shadow_level,
 };
