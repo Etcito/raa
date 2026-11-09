@@ -7,8 +7,12 @@
 @group(2) @binding(0) var tile_depth: texture_depth_2d;
 @group(2) @binding(1) var<uniform> tile_lights: array<LightGpu, MAX_LOCAL_LIGHTS>;
 @group(2) @binding(2) var tile_words: texture_storage_2d_array<r32uint, write>;
+// Compute-only accumulation; recording clears once per submitted-view counter,
+// and readback aggregates those counters by submitted scene-frame invocation.
+@group(2) @binding(3) var<storage, read_write> droppedLightReferences: atomic<u32>;
 var<workgroup> nearest_bits: atomic<u32>;
 var<workgroup> farthest_bits: atomic<u32>;
+var<workgroup> qualifying_count: atomic<u32>;
 // Handoff to fixed-network selection: one lane per dense handle-ordered GPU index.
 // Eligibility is independent of score; zero-score conservative candidates survive.
 var<workgroup> candidate_eligible: array<u32, MAX_LOCAL_LIGHTS>;
@@ -78,14 +82,31 @@ fn tile_reaches(light: LightGpu, lo: vec2<f32>, hi: vec2<f32>, near: vec3<f32>, 
     return true;
 }
 
+fn tile_precedes(a: u32, b: u32) -> bool {
+    if candidate_eligible[a] != candidate_eligible[b] {
+        return candidate_eligible[a] > candidate_eligible[b];
+    }
+    if candidate_scores[a] != candidate_scores[b] {
+        return candidate_scores[a] > candidate_scores[b];
+    }
+    return candidate_indices[a] < candidate_indices[b];
+}
+
+/// Handoff: follows `pub(crate) fn select_tile(candidates: &[(u64, f32)], out: &mut [u64; 127]) -> (usize, u32)`
+/// in `crates/raa-lit/src/tile_selection.rs`, attached by the test module in lib.rs.
+/// LocalLights::write_gpu supplies dense indices in ascending stable-handle order;
+/// the CPU text-fixture oracle specifies this network, never compares GPU results.
+/// Handoff: `fn light_tiles(group: vec3<u32>, id: vec3<u32>, lane: u32)` in
+/// `crates/raa-lit/src/wgsl/light_tiles.wgsl` is attached by `light_tiles_source()`
+/// in tiles.rs. Recording binds group 2/0..2 as before, plus a zeroed compute-only
+/// atomic<u32> storage counter at 2/3; S12 tile words use layers 0..127.
 @compute @workgroup_size(TILE_SIZE, TILE_SIZE)
 fn light_tiles(@builtin(workgroup_id) group: vec3<u32>,
     @builtin(global_invocation_id) id: vec3<u32>, @builtin(local_invocation_index) lane: u32) {
     if lane == 0u {
         atomicStore(&nearest_bits, bitcast<u32>(1.0));
         atomicStore(&farthest_bits, 0u);
-        // Selection's emission stage replaces this covered-tile count later.
-        textureStore(tile_words, vec2<i32>(group.xy), 0, vec4<u32>(0u));
+        atomicStore(&qualifying_count, 0u);
     }
     candidate_eligible[lane] = 0u;
     candidate_scores[lane] = 0.0;
@@ -112,8 +133,42 @@ fn light_tiles(@builtin(workgroup_id) group: vec3<u32>,
         if tile_reaches(light, lo, hi, near, far) {
             candidate_eligible[lane] = 1u;
             candidate_scores[lane] = tile_score(light, near);
+            atomicAdd(&qualifying_count, 1u);
         }
     }
     workgroupBarrier();
-    // Fixed-capacity strongest-127 selection attaches here, consuming all 256 lanes.
+    // Exact 256-wide bitonic network: 8 merge widths, 36 compare/exchange stages.
+    // Each lower lane owns both entries of its disjoint pair. All lanes rendezvous
+    // before the next stride reads either entry; no light-dependent loop bound.
+    for (var width = 2u; width <= MAX_LOCAL_LIGHTS; width *= 2u) {
+        for (var stride = width / 2u; stride > 0u; stride /= 2u) {
+            let partner = lane ^ stride;
+            if partner > lane {
+                let ascending = (lane & width) == 0u;
+                let swap = select(tile_precedes(lane, partner), tile_precedes(partner, lane), ascending);
+                if swap {
+                    let eligible = candidate_eligible[lane];
+                    let score = candidate_scores[lane];
+                    let index = candidate_indices[lane];
+                    candidate_eligible[lane] = candidate_eligible[partner];
+                    candidate_scores[lane] = candidate_scores[partner];
+                    candidate_indices[lane] = candidate_indices[partner];
+                    candidate_eligible[partner] = eligible;
+                    candidate_scores[partner] = score;
+                    candidate_indices[partner] = index;
+                }
+            }
+            workgroupBarrier();
+        }
+    }
+    let qualified = atomicLoad(&qualifying_count);
+    let retained = min(qualified, TILE_MAX_LIGHTS);
+    if lane == 0u {
+        textureStore(tile_words, vec2<i32>(group.xy), 0, vec4<u32>(retained, 0u, 0u, 0u));
+        atomicAdd(&droppedLightReferences, qualified - retained);
+    }
+    if lane < TILE_MAX_LIGHTS {
+        let index = select(0u, candidate_indices[lane], lane < retained);
+        textureStore(tile_words, vec2<i32>(group.xy), i32(lane + 1u), vec4<u32>(index, 0u, 0u, 0u));
+    }
 }
