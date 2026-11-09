@@ -210,3 +210,32 @@ fn engine_wraps_render_and_probe_with_the_scene_invocation_boundary() {
     let _: fn(&raa_pipeline::Pipeline) -> raa_pipeline::SubmissionState =
         raa_pipeline::Pipeline::scene_submission;
 }
+
+/// m28 lights: the generated page registry installs the order-35 tiling pass against the
+/// renderer-owned `LocalLights`, and the JS description parser distinguishes an absent key
+/// from an explicit `undefined` through `Reflect::has` (the sun's `setLight` is unchanged).
+#[test]
+fn m28_lights_installs_tiling_and_distinguishes_js_property_presence() {
+    let reg = out_file("api_registry.rs");
+    assert!(reg.contains("mod m28_lights;"));
+    assert!(reg.contains("m28_lights::install(ctx)?;"));
+    assert!(reg.contains("m28_lights::frame(st, gpu, input)?;"));
+    let src = include_str!("../src/api/m28_lights.rs");
+    for needle in [
+        "raa_lit::install_local_lights",
+        "Reflect::has",
+        "Reflect::get",
+        "srgb_to_linear",
+        "MAX_LIGHT_HANDLE",
+        "light.invalid_desc",
+    ] {
+        assert!(src.contains(needle), "m28_lights.rs lacks `{needle}`");
+    }
+    // The property-presence reader is only on the page (wasm32) side; the native merge
+    // itself is covered by tests/local_lights.rs.
+    assert!(src.contains("#[cfg(target_arch = \"wasm32\")]"));
+    // The sun API keeps its name and signature.
+    let engine = include_str!("../src/engine.rs");
+    assert!(engine.contains("js_name = setLight"));
+    assert!(engine.contains("pub fn set_light(&mut self, desc: JsValue)"));
+}
