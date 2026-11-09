@@ -80,6 +80,16 @@ fn every_material_and_pass_validates_at_msaa_one_and_four() {
                         flags: flags | extra,
                     };
                     let source = c.compose(&reg, &key).unwrap();
+                    if name == "raa.standard" && pass == PassKind::Forward {
+                        // One Direct definition and exactly the shared loop's call per light.
+                        assert_eq!(source.matches("fn raa_slot_direct(").count(), 1);
+                        assert_eq!(
+                            source
+                                .matches("raa_slot_direct(s, c, direction, radiance)")
+                                .count(),
+                            1
+                        );
+                    }
                     Composer::validate(&source).unwrap_or_else(|e| panic!("{name} {key:?}: {e}"));
                 }
             }
@@ -103,5 +113,20 @@ fn particle_modules_accept_the_cel_provider() {
         raa_particles::blend_module_wgsl,
     ] {
         Composer::validate(&module(&composer).unwrap()).unwrap();
+    }
+}
+
+#[test]
+fn direct_is_priority_30_at_flag_bit_7() {
+    let provider = raa_cel::provider();
+    assert_eq!(
+        (provider.slot, provider.priority, provider.provider),
+        (SlotId::Direct, 30, "cel")
+    );
+    assert_eq!(raa_cel::FLAG_CEL, 1 << 7);
+    assert_eq!(provider.wgsl.matches("fn raa_cel_fallback(").count(), 1);
+    assert_eq!(provider.wgsl.matches("fn raa_slot_direct(").count(), 1);
+    for token in ["textureSample(", "dpdx(", "dpdy(", "fwidth("] {
+        assert!(!provider.wgsl.contains(token), "{token}");
     }
 }

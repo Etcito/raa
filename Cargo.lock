@@ -818,12 +818,14 @@ version = "0.5.0"
 dependencies = [
  "raa-core",
  "raa-geom",
+ "raa-lit",
  "raa-loader",
  "raa-material",
  "raa-math",
  "raa-prims",
  "raa-render",
  "raa-scene",
+ "raa-shader",
 ]
 
 [[package]]

@@ -16,3 +16,7 @@ raa-scene = { workspace = true }
 raa-material = { workspace = true }
 raa-loader = { workspace = true }
 raa-prims = { workspace = true }
+
+[dev-dependencies]
+raa-shader = { path = "../../crates/raa-shader" }
+raa-lit = { path = "../../crates/raa-lit" }

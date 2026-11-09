@@ -38,6 +38,30 @@ fn registry() -> MaterialFnRegistry {
     reg
 }
 
+fn forward_key() -> VariantKey {
+    VariantKey {
+        material_fn: MaterialFnId::STANDARD,
+        pass: PassKind::Forward,
+        msaa: 1,
+        flags: 0,
+    }
+}
+
+fn compose_with_direct(direct: String) -> String {
+    let mut composer = composer();
+    composer
+        .add_slot(raa_shader::SlotProvider {
+            slot: SlotId::Direct,
+            priority: 30,
+            provider: "probe",
+            wgsl: direct.into(),
+        })
+        .expect("probe slot");
+    composer
+        .compose(&registry(), &forward_key())
+        .expect("compose")
+}
+
 #[test]
 fn layered_wins_direct_and_ambient() {
     let composer = composer();
@@ -94,4 +118,51 @@ fn every_builtin_validates_with_layered_providers() {
     println!("{fns} material functions, {count} variants");
     assert_eq!(fns, BUILTINS.len() + 1);
     assert!(count >= fns * PassKind::ALL.len() * 2 * 2);
+}
+
+#[test]
+fn direct_sampling_follows_the_nonuniform_loop_rules() {
+    for token in [
+        "textureSample(",
+        "textureSampleBias(",
+        "dpdx(",
+        "dpdy(",
+        "fwidth(",
+    ] {
+        assert!(!raa_brdf::BRDF_WGSL.contains(token), "{token}");
+    }
+    let wgsl = composer()
+        .compose(&registry(), &forward_key())
+        .expect("compose");
+    assert_eq!(wgsl.matches("fn raa_slot_direct(").count(), 1);
+    assert_eq!(
+        wgsl.matches("raa_slot_direct(s, c, direction, radiance)")
+            .count(),
+        1
+    );
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
+
+    let wgsl = compose_with_direct(
+        "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
+    let at = c.position.xy;
+    let a = textureSampleLevel(raa_texture_atlas, raa_texture_sampler, at, 0.0).rgb;
+    let g = vec2<f32>(0.0, 0.0);
+    let b = textureSampleGrad(raa_texture_atlas, raa_texture_sampler, at, g, g).rgb;
+    return (a + b) * radiance * max(dot(s.normal, l), 0.0);
+}
+"
+        .into(),
+    );
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
+    for expression in [
+        "dpdx(c.position.x)",
+        "textureSample(raa_texture_atlas, raa_texture_sampler, c.position.xy).x",
+    ] {
+        let wgsl = compose_with_direct(format!(
+            "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {{ return vec3<f32>({expression}); }}"
+        ));
+        let error = Composer::validate(&wgsl).expect_err("implicit derivative must fail");
+        assert_eq!(error.code(), "shader.validate", "{error}");
+        assert!(error.message.contains("uniform"), "{error}");
+    }
 }
