@@ -84,4 +84,4 @@ pub use textures::{
     quantize,
 };
 
-pub use tiles::{LIGHT_TILES_WGSL, light_tiles_source};
+pub use tiles::{LIGHT_TILES_WGSL, install_local_lights, light_tiles_source};

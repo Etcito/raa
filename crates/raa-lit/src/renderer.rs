@@ -13,13 +13,16 @@
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
 use raa_math::{Aabb, Mat4, Vec3};
 use raa_mesh::AttributedMesh;
-use raa_pipeline::Pipeline;
+use raa_pipeline::{Pipeline, SubmissionState};
 use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
-use raa_shader::{Composer, MaterialFnId, MaterialFnRegistry, SlotProvider};
+use raa_shader::{
+    Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, SlotProvider,
+};
 
 use crate::contributor::ForwardContributor;
 use crate::extras::InstanceExtra;
@@ -28,6 +31,7 @@ use crate::frame_history::{CameraHistory, FrameHistory, MAX_VIEWS, frame_jitter}
 use crate::handle::{LitHandle, LitShared};
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
+use crate::light_stats::{LocalLightStats, ReadbackCoordinator};
 use crate::local_lights::LocalLights;
 use crate::lod::{LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level};
 use crate::material::{DrawClass, SurfaceMaterial};
@@ -38,6 +42,9 @@ use crate::prep::MaterialClass;
 use crate::select::SelectInput;
 use crate::skin_views::SkinDraw;
 use crate::textures::{AtlasRect, TexelData};
+use crate::tiles::{
+    LIGHT_TILES_NAME, TILING_FEATURE_ID, TileInputs, light_info, publish_local_lights,
+};
 
 /// Limits and sample count of a [`LitRenderer`]; the frame buffers are sized from them.
 #[derive(Copy, Clone, Debug)]
@@ -361,6 +368,16 @@ pub struct LitRenderer {
     /// (`u64`) and the parent is the existing JS instance-group handle (`u32`), never a
     /// compacted submesh slot.
     local_lights: LocalLights,
+    /// The order-35 tiling pass's shared inputs: the per-viewport `FrameGpu` snapshot
+    /// (`light_info` = active count, tile columns, rows and `TILE_WORDS`), the dense
+    /// `LocalLights` records and the invocation/view identity of M2-FRAME-LIFECYCLE.
+    /// `install_local_lights` attaches the pass to this same `Rc`.
+    tile_inputs: Rc<RefCell<TileInputs>>,
+    /// The bounded asynchronous overflow pool shared through `TileInputs::readback`.
+    readback: Arc<Mutex<ReadbackCoordinator>>,
+    /// The last closed invocation's submission observation, resolved (with the GPU it
+    /// needs) at the next `prepare`; readback never fences synchronously.
+    pending_resolve: Option<(u64, SubmissionState, bool)>,
     /// A background that could not reach the pipeline (borrowed), applied at `prepare`.
     pending_background: Option<[f32; 3]>,
     /// Bounds last sent to the scene per uploaded sub-mesh; only changes are sent.
@@ -395,6 +412,18 @@ impl LitRenderer {
             )?
         };
         shared.materials.add(SurfaceMaterial::default())?;
+        // `ReadbackCoordinator::resolve` takes this exact shared type; on wasm32 its wgpu
+        // handles are `JsValue`-backed and not `Send`, while the renderer is single-threaded.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let readback = Arc::new(Mutex::new(ReadbackCoordinator::new()));
+        let tile_inputs = Rc::new(RefCell::new(TileInputs {
+            frame: [0; FRAME_GPU_SIZE],
+            lights: [0; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE],
+            index: 0,
+            view: 0,
+            readback: Arc::clone(&readback),
+            lights_dirty: false,
+        }));
         let renderer = LitRenderer {
             opts,
             shared: Rc::new(RefCell::new(shared)),
@@ -406,6 +435,9 @@ impl LitRenderer {
             frame_bytes: [0; FRAME_GPU_SIZE],
             scene_frame: SceneLifecycle::new(),
             local_lights: LocalLights::new(),
+            tile_inputs,
+            readback,
+            pending_resolve: None,
             pending_background: None,
             sent_bounds: HashMap::new(),
             submeshes: HashMap::new(),
@@ -419,6 +451,12 @@ impl LitRenderer {
     /// A shared view of the renderer's state for passes and contributors.
     pub fn handle(&self) -> LitHandle {
         LitHandle::new(Rc::clone(&self.shared))
+    }
+
+    /// The inputs the order-35 `light.tiles` pass reads, shared with the pass that
+    /// `install_local_lights` registers.
+    pub(crate) fn tile_inputs(&self) -> Rc<RefCell<TileInputs>> {
+        Rc::clone(&self.tile_inputs)
     }
 
     /// The forward contributors in recording order (for the forward pass).
@@ -755,6 +793,24 @@ impl LitRenderer {
         &mut self.local_lights
     }
 
+    /// The latest completed S12 tile-overflow statistics of this renderer: registry
+    /// counts, viewport 0's grid, the newest published submitted-invocation sum and its
+    /// pending state. Synchronous and never a GPU fence (S17 `lightStats`).
+    ///
+    /// Handoff: the m28 `Engine.lightStats()` implementation calls
+    /// `LitRenderer::light_stats(&self) -> LocalLightStats` in
+    /// `crates/raa-lit/src/renderer.rs`; the returned fields map one-to-one to S17's
+    /// `LightStats` and read the same `LightHandle` registry and overflow pool as the
+    /// order-35 pass.
+    pub fn light_stats(&self) -> LocalLightStats {
+        let readback = self.readback.lock().unwrap_or_else(|e| e.into_inner());
+        LocalLightStats::from_coordinator(
+            self.local_lights.active_count(),
+            self.local_lights.attached_count(),
+            &readback,
+        )
+    }
+
     // ---- frame ----
 
     /// Opens scene invocation `index`; one index spans all of its viewports.
@@ -773,12 +829,24 @@ impl LitRenderer {
     }
 
     /// Closes the invocation; `complete` false invalidates camera history before the next
-    /// begin and commits only the acknowledged instances.
+    /// begin and commits only the acknowledged instances. The pipeline's submission
+    /// observation is captured here and the bounded overflow pool resolves it (with the
+    /// GPU the map needs) at the next `prepare`.
     pub fn finish_scene_frame(&mut self, complete: bool) {
+        if !self.scene_frame.open {
+            return;
+        }
+        let index = self.scene_frame.frame_index;
+        let observation = self
+            .pipeline
+            .try_borrow()
+            .map(|p| p.scene_submission())
+            .unwrap_or_default();
         self.scene_frame.finish(complete);
         if let Ok(mut guard) = self.shared.try_borrow_mut() {
             self.scene_frame.flush(&mut guard.store);
         }
+        self.pending_resolve = Some((index, observation, complete));
     }
 
     /// Prepares a frame: syncs the uploaded mesh bounds into the scene, `scene.update_world`,
@@ -802,11 +870,15 @@ impl LitRenderer {
         if let Some(rgb) = self.pending_background {
             self.set_background(rgb);
         }
-        let (viewport, encode_srgb) = {
+        if let Some((index, observation, submitted)) = self.pending_resolve.take() {
+            ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
+        }
+        let (viewport, encode_srgb, tiling) = {
             let p = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             (
                 p.targets().map_or((1, 1), |t| t.size()),
                 !p.surface_is_srgb(),
+                p.entry_enabled(LIGHT_TILES_NAME).unwrap_or(false),
             )
         };
         // Direct native callers keep the bounded single-view lifecycle: one invocation per
@@ -988,7 +1060,9 @@ impl LitRenderer {
             }
         }
 
-        let params = FrameParams {
+        let [active_lights, tile_columns, tile_rows, tile_stride] =
+            light_info(self.local_lights.active_count(), viewport, tiling);
+        let mut params = FrameParams {
             viewport,
             encode_srgb,
             msaa: self.opts.msaa,
@@ -998,9 +1072,31 @@ impl LitRenderer {
             previous_view_proj: camera.previous_view_proj,
             history_valid: camera.history_valid,
             frame_parity: (camera.frame_index & 1) as u32,
+            active_lights,
+            tile_columns,
+            tile_rows,
+            tile_stride,
             ..FrameParams::default()
         };
+        params.set_feature(TILING_FEATURE_ID, tiling);
         write_frame_gpu(&mut self.frame_bytes, scene, &params)?;
+        // Publish the order-35 pass inputs before it prepares: the same frame snapshot,
+        // the invocation/view identity and the current dense registry records (attachments
+        // are applied by the Engine before prepare; `world_desc` carries their latest
+        // world transform). Authored lights are never deleted by disabling the pass.
+        {
+            let mut inputs = self.tile_inputs.borrow_mut();
+            inputs.frame.copy_from_slice(&self.frame_bytes);
+            inputs.index = self.scene_frame.frame_index;
+            inputs.view = self.scene_frame.current_view;
+            publish_local_lights(&mut inputs, &mut self.local_lights);
+        }
+        if tiling {
+            self.readback
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .begin(self.scene_frame.frame_index, (tile_columns, tile_rows));
+        }
 
         // Snapshot the frame the shadow cascade selection will read.
         s.index.clone_from(scene.instance_index());
@@ -1012,9 +1108,16 @@ impl LitRenderer {
         stats.uploaded_bytes = s.store.last_uploaded_bytes();
         s.stats = stats;
         if single_view {
+            let index = self.scene_frame.frame_index;
             self.scene_frame.submitted(0);
             self.scene_frame.finish(true);
             self.scene_frame.flush(&mut s.store);
+            // The caller submits this frame after prepare; the next prepare resolves it.
+            let observation = SubmissionState {
+                submitted_mask: 1,
+                ..SubmissionState::default()
+            };
+            self.pending_resolve = Some((index, observation, true));
         }
         Ok(counts)
     }

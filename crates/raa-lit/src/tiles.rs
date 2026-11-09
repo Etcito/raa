@@ -16,19 +16,27 @@
 //! attached by the test module in `lib.rs`; this compute workgroup uses its dense
 //! handle-ordered GPU indices and its CPU fixture stays text-only.
 
-#![allow(dead_code)] // Staged before the order-35 installation share lands; see Handoff.
+#![allow(dead_code)] // Retained per-view GPU handles outlive their views; see Handoff.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::light_stats::ReadbackCoordinator;
+use crate::local_lights::LocalLights;
+use crate::renderer::{LitRenderer, pipeline_busy};
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets};
 use raa_shader::{
     Composer, FRAME_GPU_SIZE, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, TILE_SIZE, TILE_WORDS,
 };
+
+/// S12 `light.tiles` pass name and default order.
+pub(crate) const LIGHT_TILES_NAME: &str = "light.tiles";
+const LIGHT_TILES_ORDER: u32 = 35;
+/// M2-GPU-CONSTANTS logical feature id 24 (tiling); resolved through `feature_address`.
+pub(crate) const TILING_FEATURE_ID: u32 = 24;
 
 /// Tile coverage and conservative candidate source, appended after PRELUDE_WGSL.
 pub const LIGHT_TILES_WGSL: &str = include_str!("wgsl/light_tiles.wgsl");
@@ -49,12 +57,64 @@ pub(crate) struct TileInputs {
     pub index: u64,
     pub view: usize,
     pub readback: Arc<Mutex<ReadbackCoordinator>>,
+    /// The light records changed since their last upload (warm frames upload nothing).
+    pub lights_dirty: bool,
 }
 
 /// Tile grid of a framebuffer: `ceil(width/16)` by `ceil(height/16)`.
 pub(crate) fn tile_grid(size: (u32, u32)) -> (u32, u32) {
     let axis = |v: u32| v.max(1).div_ceil(TILE_SIZE);
     (axis(size.0), axis(size.1))
+}
+
+/// S10 `light_info` of one viewport: active count (zero while the tiling feature is
+/// disabled), tile columns, tile rows and the tile stride in words.
+pub(crate) fn light_info(active: u32, viewport: (u32, u32), enabled: bool) -> [u32; 4] {
+    let (columns, rows) = tile_grid(viewport);
+    [if enabled { active } else { 0 }, columns, rows, TILE_WORDS]
+}
+
+/// Copies the renderer-owned registry into the shared tile inputs only when it changed;
+/// authored lights stay in the registry whether or not the tiling pass runs.
+pub(crate) fn publish_local_lights(inputs: &mut TileInputs, lights: &mut LocalLights) {
+    if lights.is_dirty() {
+        lights.write_gpu(&mut inputs.lights);
+        lights.clear_dirty();
+        inputs.lights_dirty = true;
+    }
+}
+
+/// Registers the order-35 `light.tiles` pass against `lit`'s renderer-owned `LocalLights`.
+///
+/// Handoff: `pub fn install_local_lights(gpu: &GpuContext, pipeline:
+/// &Rc<RefCell<Pipeline>>, lit: &mut LitRenderer) -> Result<(), RaaError>` in
+/// `crates/raa-lit/src/tiles.rs` is called by the m28 light installation after
+/// `LitRenderer::new`; it attaches the pass to the renderer's `Rc<RefCell<TileInputs>>`,
+/// which carries the invocation index/view, the `FrameGpu` snapshot and the dense
+/// `LocalLights::write_gpu` records keyed by stable `LightHandle`. Its setters borrow the
+/// same registry through `LitRenderer::local_lights`/`local_lights_mut`. A duplicate name,
+/// a busy pipeline or a CPU shader-validation error refuses without adding anything.
+pub fn install_local_lights(
+    gpu: &GpuContext,
+    pipeline: &Rc<RefCell<Pipeline>>,
+    lit: &mut LitRenderer,
+) -> Result<(), RaaError> {
+    if pipeline
+        .try_borrow()
+        .map_err(|_| pipeline_busy())?
+        .entry_enabled(LIGHT_TILES_NAME)
+        .is_some()
+    {
+        return Err(RaaError::FrameGraph {
+            code: "pipeline.duplicate_pass",
+            message: format!("an entry named `{LIGHT_TILES_NAME}` is already in the pipeline"),
+        });
+    }
+    let tiles = LightTiles::new(gpu, lit.tile_inputs())?;
+    pipeline
+        .try_borrow_mut()
+        .map_err(|_| pipeline_busy())?
+        .add(Box::new(tiles))
 }
 
 /// The S12 tile-word texture: `grid` texels, one layer per word.
@@ -233,14 +293,18 @@ impl LightTiles {
         self.views.len() - 1
     }
 
-    /// Uploads this viewport's frame/lights and publishes its tile view for forward.
+    /// Uploads this viewport's frame (always) and lights (only when changed), then
+    /// publishes its tile view for forward.
     fn prepare_frame(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let index = self.view_index(ctx.gpu, ctx.targets);
-        let inputs = self.inputs.borrow();
+        let mut inputs = self.inputs.borrow_mut();
         ctx.gpu.queue().write_buffer(&self.frame, 0, &inputs.frame);
-        ctx.gpu
-            .queue()
-            .write_buffer(&self.lights, 0, &inputs.lights);
+        if inputs.lights_dirty {
+            ctx.gpu
+                .queue()
+                .write_buffer(&self.lights, 0, &inputs.lights);
+            inputs.lights_dirty = false;
+        }
         ctx.lighting
             .set_local_lights(&inputs.lights, self.views[index].fragment.clone());
         self.current = index;
@@ -273,11 +337,11 @@ impl LightTiles {
 
 impl FeaturePass for LightTiles {
     fn name(&self) -> &str {
-        "light.tiles"
+        LIGHT_TILES_NAME
     }
 
     fn order(&self) -> u32 {
-        35
+        LIGHT_TILES_ORDER
     }
 
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
@@ -300,11 +364,24 @@ impl FeaturePass for LightTiles {
 mod tests {
     use super::*;
 
+    fn inputs() -> TileInputs {
+        TileInputs {
+            frame: [0; FRAME_GPU_SIZE],
+            lights: [0; LIGHT_BYTES],
+            index: 0,
+            view: 0,
+            readback: Arc::new(Mutex::new(ReadbackCoordinator::new())),
+            lights_dirty: false,
+        }
+    }
+
     #[test]
     fn tile_resources_match_s12() {
         assert_eq!((TILE_SIZE, TILE_WORDS, MAX_LOCAL_LIGHTS), (16, 128, 256));
         assert_eq!(LIGHT_BYTES, 16384);
         assert_eq!(tile_grid((1920, 1080)), (120, 68));
+        assert_eq!(tile_grid((1, 1)), (1, 1));
+        assert_eq!(tile_grid((17, 33)), (2, 3));
         let desc = texture_desc((3, 2));
         assert_eq!(desc.format, wgpu::TextureFormat::R32Uint);
         let size = desc.size;
@@ -312,5 +389,73 @@ mod tests {
             (size.width, size.height, size.depth_or_array_layers),
             (3, 2, TILE_WORDS)
         );
+    }
+
+    #[test]
+    fn light_info_zeroes_counts_while_disabled() {
+        assert_eq!(light_info(7, (1920, 1080), true), [7, 120, 68, TILE_WORDS]);
+        assert_eq!(light_info(7, (1920, 1080), false), [0, 120, 68, TILE_WORDS]);
+        assert_eq!(light_info(0, (16, 16), true), [0, 1, 1, TILE_WORDS]);
+    }
+
+    #[test]
+    fn unchanged_registry_uploads_nothing() {
+        let mut inputs = inputs();
+        let mut lights = LocalLights::new();
+        publish_local_lights(&mut inputs, &mut lights);
+        assert!(
+            !inputs.lights_dirty,
+            "an empty registry has nothing to upload"
+        );
+        let handle = lights
+            .add(crate::local_light::LocalLight::default())
+            .expect("light");
+        publish_local_lights(&mut inputs, &mut lights);
+        assert!(inputs.lights_dirty, "the first light is uploaded");
+        assert!(!lights.is_dirty(), "the upload marks the registry clean");
+        inputs.lights_dirty = false; // the pass uploaded the records
+        let mut sentinel = inputs.lights;
+        sentinel[0] ^= 0xff;
+        inputs.lights = sentinel;
+        publish_local_lights(&mut inputs, &mut lights);
+        assert_eq!(
+            inputs.lights, sentinel,
+            "an unchanged registry is not rewritten"
+        );
+        assert!(!inputs.lights_dirty);
+        lights
+            .remove(handle)
+            .expect("removing the light dirties the registry");
+        publish_local_lights(&mut inputs, &mut lights);
+        assert!(inputs.lights_dirty && !lights.is_dirty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn per_view_state_is_reused_and_resized() {
+        let test = "per_view_state_is_reused_and_resized";
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut tiles = LightTiles::new(&gpu, Rc::new(RefCell::new(inputs()))).expect("tiles");
+        let first = Targets::new(&gpu, (64, 48));
+        let a = tiles.view_index(&gpu, &first);
+        assert_eq!(tiles.views[a].grid, (4, 3));
+        assert_eq!(
+            tiles.view_index(&gpu, &first),
+            a,
+            "the same depth is reused"
+        );
+        let resized = Targets::new(&gpu, (32, 16));
+        let b = tiles.view_index(&gpu, &resized);
+        assert_ne!(b, a, "a new depth allocates new per-viewport state");
+        assert_eq!(tiles.views[b].grid, (2, 1));
+        for _ in 0..MAX_VIEWS {
+            let fresh = Targets::new(&gpu, (8, 8));
+            tiles.view_index(&gpu, &fresh);
+            assert!(tiles.views.len() <= MAX_VIEWS, "stale views are disposed");
+        }
+        assert_eq!(tiles.views.last().map(|v| v.grid), Some((1, 1)));
     }
 }

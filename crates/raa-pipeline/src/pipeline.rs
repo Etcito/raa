@@ -20,13 +20,38 @@ const HOST: &str = "forward";
 /// Passes that keep this relative order; the last of them also runs last.
 const REQUIRED_ORDER: [&str; 3] = ["prepass", "forward", "tonemap"];
 
+/// S12 `light.tiles` dependencies: every pair present in a sequence keeps this order.
+const TILE_DEPENDENCIES: [(&str, &str); 3] = [
+    ("prepass", "light.tiles"),
+    ("light.tiles", "ao.gtao"),
+    ("light.tiles", "forward"),
+];
+
 fn refusal(code: &'static str, message: String) -> RaaError {
     RaaError::FrameGraph { code, message }
 }
 
 /// Refuses a sequence where `prepass`, `forward` and `tonemap` (those present) are out of
-/// order or an HDR pass runs after `tonemap` (`pipeline.required_order`).
+/// order, an HDR pass runs after `tonemap`, or the order-35 `light.tiles` pass is not after
+/// `prepass` and before `ao.gtao`/`forward` (`pipeline.required_order`).
 fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
+    for (before, after) in TILE_DEPENDENCIES {
+        let (Some(before_at), Some(after_at)) = (
+            names.iter().position(|n| *n == before),
+            names.iter().position(|n| *n == after),
+        ) else {
+            continue;
+        };
+        if after_at < before_at {
+            return Err(refusal(
+                "pipeline.required_order",
+                format!(
+                    "`{after}` must run after `{before}` (order: {})",
+                    names.join(", ")
+                ),
+            ));
+        }
+    }
     let mut previous: Option<(&str, usize)> = None;
     for required in REQUIRED_ORDER {
         let Some(at) = names.iter().position(|n| *n == required) else {
@@ -253,6 +278,18 @@ impl PipelineConfig {
             out.extend(self.contributors.iter().map(ContributorEntry::info));
         }
         out
+    }
+
+    /// Enabled state of the pass or contributor `name`, `None` when it is unknown. The
+    /// allocation-free form of [`PipelineConfig::passes`] for per-frame feature checks.
+    pub fn entry_enabled(&self, name: &str) -> Option<bool> {
+        if let Some(contributor) = self.contributors.iter().find(|c| c.name == name) {
+            return Some(contributor.enabled.get());
+        }
+        self.passes
+            .iter()
+            .find(|p| p.name == name)
+            .map(|p| p.enabled)
     }
 
     /// Enables or disables the entry `name`. For a pass, returns it so the caller hands it
@@ -558,6 +595,12 @@ impl Pipeline {
     /// Adds an enabled feature pass by its order (see [`PipelineConfig::add`]).
     pub fn add(&mut self, pass: Box<dyn FeaturePass>) -> Result<(), RaaError> {
         self.config.add(pass)
+    }
+
+    /// Enabled state of the pass or contributor `name` (see
+    /// [`PipelineConfig::entry_enabled`]); no allocation.
+    pub fn entry_enabled(&self, name: &str) -> Option<bool> {
+        self.config.entry_enabled(name)
     }
 
     /// Adds a contributor entry of the forward pass (see
@@ -907,15 +950,70 @@ mod tests {
         assert!(check_required_order(&[]).is_ok());
         assert!(check_required_order(&["a", "prepass", "b", "forward", "tonemap"]).is_ok());
         assert!(check_required_order(&["forward", "x"]).is_ok());
+        assert!(check_required_order(&["prepass", "light.tiles", "ao.gtao", "forward"]).is_ok());
         for names in [
             &["forward", "prepass"][..],
             &["tonemap", "forward"][..],
             &["prepass", "tonemap", "bloom"][..],
+            &["light.tiles", "prepass"][..],
+            &["ao.gtao", "light.tiles"][..],
+            &["forward", "light.tiles"][..],
         ] {
             let err = check_required_order(names).expect_err("refused");
             assert_eq!(err.code(), "pipeline.required_order", "{names:?}");
             assert!(!err.message().is_empty());
         }
+    }
+
+    struct OrderMock(&'static str, u32);
+
+    impl FeaturePass for OrderMock {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn order(&self) -> u32 {
+            self.1
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            Ok(())
+        }
+    }
+
+    fn order_names(config: &PipelineConfig) -> Vec<String> {
+        config.passes().into_iter().map(|p| p.name).collect()
+    }
+
+    #[test]
+    fn required_order_refusals_are_atomic_for_light_tiles() {
+        let mut config = PipelineConfig::new();
+        for (name, order) in [("prepass", 30), ("ao.gtao", 40), ("forward", 60)] {
+            config.add(Box::new(OrderMock(name, order))).expect("added");
+        }
+        let before = order_names(&config);
+        let err = config
+            .add(Box::new(OrderMock("light.tiles", 25)))
+            .expect_err("before prepass is refused");
+        assert_eq!(err.code(), "pipeline.required_order");
+        assert_eq!(order_names(&config), before, "nothing half-added");
+        config
+            .add(Box::new(OrderMock("light.tiles", 35)))
+            .expect("order 35 fits");
+        let added = order_names(&config);
+        assert_eq!(added, ["prepass", "light.tiles", "ao.gtao", "forward"]);
+        let err = config
+            .set_order(&["light.tiles", "prepass", "ao.gtao", "forward"])
+            .expect_err("reordering before prepass is refused");
+        assert_eq!(err.code(), "pipeline.required_order");
+        assert_eq!(order_names(&config), added, "the order is unchanged");
+        let err = config
+            .set_order(&["prepass", "forward", "ao.gtao", "light.tiles"])
+            .expect_err("reordering after forward is refused");
+        assert_eq!(err.code(), "pipeline.required_order");
+        assert_eq!(order_names(&config), added, "the order is unchanged");
+        assert_eq!(config.entry_enabled("light.tiles"), Some(true));
+        assert_eq!(config.entry_enabled("missing"), None);
     }
     fn submission(submitted: u8, pending: u8, failed: bool) -> SubmissionState {
         SubmissionState {

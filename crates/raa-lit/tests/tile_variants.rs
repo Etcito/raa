@@ -1,6 +1,17 @@
-//! CPU-only validation; never dispatches a GPU or compares against GPU output.
+//! Shader-structure and installation validation; GPU parts run on the software adapter
+//! (SKIP without one) and never compare against GPU output.
 use raa_lit::{LIGHT_TILES_WGSL, light_tiles_source};
 use raa_shader::{Composer, MAX_LOCAL_LIGHTS, TILE_MAX_LIGHTS, TILE_SIZE, TILE_WORDS};
+
+#[test]
+fn tiling_feature_uses_shared_logical_id_24() {
+    assert_eq!(raa_shader::feature_address(24), Some((2, 24)));
+    let mut params = raa_lit::FrameParams::default();
+    params.set_feature(24, true);
+    assert_eq!(params.feature_bits & (1 << 24), 1 << 24);
+    params.set_feature(24, false);
+    assert_eq!(params.feature_bits & (1 << 24), 0);
+}
 
 #[test]
 fn compute_entrypoint_validates() {
@@ -159,4 +170,199 @@ fn conservative_candidates_keep_zero_scores_and_stable_indices() {
     let bounds = bounds.split("@compute").next().unwrap();
     assert!(!bounds.contains("tile_score"));
     assert!(!bounds.contains("cos_inner"));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod install {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use raa_core::testing::{block_on, skip, software_gpu};
+    use raa_core::{FrameGraph, OffscreenTarget, RaaError, wgpu};
+    use raa_lit::{LitOptions, LitRenderer, LocalLight, install_local_lights};
+    use raa_pipeline::{FeaturePass, PassRole, Pipeline, RecordCtx};
+    use raa_scene::{RenderList, Scene};
+
+    const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    const SIZE: (u32, u32) = (32, 16);
+
+    /// An optional S12 pass the order-35 tiling pass must precede.
+    struct AoGtao;
+
+    impl FeaturePass for AoGtao {
+        fn name(&self) -> &str {
+            "ao.gtao"
+        }
+
+        fn order(&self) -> u32 {
+            40
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            Ok(())
+        }
+    }
+
+    fn installed(test: &str) -> Option<(raa_core::GpuContext, Rc<RefCell<Pipeline>>, LitRenderer)> {
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return None;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, FORMAT, false)));
+        let mut lit = LitRenderer::new(
+            &gpu,
+            &pipeline,
+            LitOptions {
+                msaa: 1,
+                ..LitOptions::default()
+            },
+        )
+        .expect("lit renderer");
+        pipeline
+            .borrow_mut()
+            .add(Box::new(AoGtao))
+            .expect("ao.gtao");
+        install_local_lights(&gpu, &pipeline, &mut lit).expect("install tiling");
+        Some((gpu, pipeline, lit))
+    }
+
+    fn names(pipeline: &Rc<RefCell<Pipeline>>) -> Vec<String> {
+        pipeline
+            .borrow()
+            .passes()
+            .into_iter()
+            .map(|p| p.name)
+            .collect()
+    }
+
+    #[test]
+    fn install_registers_order_35_and_refuses_duplicates_atomically() {
+        let test = "install_registers_order_35_and_refuses_duplicates_atomically";
+        let Some((gpu, pipeline, mut lit)) = installed(test) else {
+            return;
+        };
+        let rows: Vec<_> = pipeline
+            .borrow()
+            .passes()
+            .into_iter()
+            .filter(|p| p.role == PassRole::Pass)
+            .map(|p| (p.name, p.order))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("prepass".to_string(), 30),
+                ("light.tiles".to_string(), 35),
+                ("ao.gtao".to_string(), 40),
+                ("forward".to_string(), 60),
+                ("editor".to_string(), 210),
+            ]
+        );
+        let before = names(&pipeline);
+        let err = install_local_lights(&gpu, &pipeline, &mut lit).expect_err("duplicate refused");
+        assert_eq!(err.code(), "pipeline.duplicate_pass");
+        assert_eq!(names(&pipeline), before, "installation adds nothing twice");
+
+        let handle = lit
+            .local_lights_mut()
+            .add(LocalLight::default())
+            .expect("light");
+        let stats = lit.light_stats();
+        assert_eq!(
+            (stats.active_lights, stats.tile_capacity),
+            (1, TILE_MAX_LIGHTS)
+        );
+        pipeline
+            .borrow_mut()
+            .set_enabled("light.tiles", false)
+            .expect("disabled");
+        assert_eq!(
+            lit.local_lights().active_count(),
+            1,
+            "authored lights survive"
+        );
+        assert!(lit.local_lights().get(handle).is_ok());
+        assert!(lit.light_stats().dropped_light_references.is_none());
+    }
+
+    /// One prepared-and-submitted frame of an empty scene; returns a validation error.
+    fn frame(
+        gpu: &raa_core::GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        lit: &mut LitRenderer,
+    ) -> Option<wgpu::Error> {
+        let mut scene = Scene::new();
+        scene.camera.set_viewport(SIZE.0, SIZE.1);
+        let mut list = RenderList::with_capacity(1);
+        let (mut tags, mut slots) = (Vec::new(), Vec::new());
+        lit.prepare(gpu, &mut scene, &mut list, &mut tags, &mut slots)
+            .expect("prepare");
+        let target = OffscreenTarget::new(gpu, SIZE.0, SIZE.1, FORMAT);
+        let mut graph = FrameGraph::new(FORMAT);
+        Pipeline::install(pipeline, &mut graph);
+        graph.compile().expect("compile");
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let commands = graph
+            .execute(gpu, target.view(), target.size())
+            .expect("execute");
+        gpu.queue().submit([commands]);
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        block_on(scope.pop())
+    }
+
+    #[test]
+    fn disabled_tiling_renders_with_valid_dummies_and_zero_counts() {
+        let test = "disabled_tiling_renders_with_valid_dummies_and_zero_counts";
+        let Some((gpu, pipeline, mut lit)) = installed(test) else {
+            return;
+        };
+        lit.local_lights_mut()
+            .add(LocalLight::default())
+            .expect("light");
+        pipeline
+            .borrow_mut()
+            .set_enabled("light.tiles", false)
+            .expect("disabled");
+        let error = frame(&gpu, &pipeline, &mut lit);
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+        let stats = lit.light_stats();
+        assert_eq!(stats.active_lights, 1);
+        assert!(
+            stats.stats_frame_index.is_none(),
+            "no result while disabled"
+        );
+        assert!(!stats.pending);
+    }
+
+    #[test]
+    fn light_stats_publish_the_latest_completed_invocation() {
+        let test = "light_stats_publish_the_latest_completed_invocation";
+        let Some((gpu, pipeline, mut lit)) = installed(test) else {
+            return;
+        };
+        lit.local_lights_mut()
+            .add(LocalLight::default())
+            .expect("light");
+        assert!(frame(&gpu, &pipeline, &mut lit).is_none());
+        assert!(
+            lit.light_stats().stats_frame_index.is_none(),
+            "the first invocation is still pending"
+        );
+        // The pipeline creates its targets after the first view prepare, so the first
+        // frame's published grid is the fallback; the settled grid follows it.
+        for _ in 0..2 {
+            assert!(frame(&gpu, &pipeline, &mut lit).is_none());
+        }
+        let stats = lit.light_stats();
+        assert_eq!(stats.stats_frame_index, Some(1));
+        assert_eq!(stats.dropped_light_references, Some(0));
+        assert_eq!(
+            (stats.tile_columns, stats.tile_rows, stats.tile_capacity),
+            (2, 1, TILE_MAX_LIGHTS)
+        );
+        assert_eq!((stats.active_lights, stats.attached_lights), (1, 0));
+    }
 }
