@@ -77,15 +77,20 @@ async function run(args) {
       onEngine: (created) => { engine = created; },
     });
     const preparedCapture = typeof scene.prepareCapture === 'function';
+    const captures = [];
     if (preparedCapture) {
       window.__nmcGpuProgress = 'prepareCapture';
       result.lifecycle = await scene.prepareCapture(engine, variant, {
         width: canvas.width, height: canvas.height,
+        capture: (name) => {
+          window.__nmcGpuProgress = `capture:${name}`;
+          captures.push({ name, base64: canvas.toDataURL('image/png').split(',')[1] });
+        },
       });
     }
     result.gpuErrors = gpuErrors.slice();
     if (gpuErrors.length) throw new Error(`GPU errors: ${gpuErrors.join('\n')}`);
-    last = { scene, variant, preparedCapture };
+    last = { scene, variant, preparedCapture, captures };
     if (scene.legend) status.textContent = scene.legend;
     return result;
   } finally {
@@ -105,6 +110,12 @@ registerNmcGpu({
     return canvas.toDataURL('image/png').split(',')[1];
   },
 });
+const render = window.nmcGpu.ops.render;
+window.nmcGpu.ops.render = async (input) => {
+  const result = await render(input);
+  result.files.push(...last.captures);
+  return result;
+};
 window.nmcGpu.ready = false;
 window.nmcGpu.preparation = preparation;
 ready.then(() => {
