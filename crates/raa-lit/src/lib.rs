@@ -43,6 +43,7 @@ mod slots;
 mod textures;
 #[cfg(test)]
 pub(crate) mod tile_selection;
+mod tiles;
 pub use skin_editor::{OverlayGeometry, REST_EDGE_STRIDE};
 pub use skin_views::{
     INSTANCE_PALETTE_OFFSET, PALETTE_BLOCK, PALETTE_MATRIX_BYTES, RestMeshView, SKIN_RECORD_STRIDE,
@@ -80,3 +81,5 @@ pub use textures::{
     ATLAS_FORMAT, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker, TEXTURE_RECT_SIZE, TexelData,
     quantize,
 };
+
+pub use tiles::{LIGHT_TILES_WGSL, light_tiles_source};
