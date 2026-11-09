@@ -8,7 +8,12 @@ use raa_matfn::{
     BUILTINS, Blend, BuiltinFn, DrawClass, ExtraBuiltins, MaterialFnRegistry, ParamKind, ParamSpec,
     StandardOverrides, SurfaceDesc, map_desc, map_desc_with, register_builtins,
 };
-use raa_shader::{Composer, SlotId, SlotProvider};
+use raa_shader::Composer;
+
+// Keep material-registration tests on the renderer's complete slot contract.
+#[allow(dead_code)]
+#[path = "../../raa-lit/src/slots.rs"]
+mod lit_slots;
 
 fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
@@ -18,48 +23,11 @@ fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// Trivial providers for every slot, enough for the user fn's Forward variant to validate.
+/// Renderer defaults for every slot, enough for the user fn's Forward variant to validate.
 fn test_composer() -> Composer {
-    let slots = [
-        (
-            SlotId::Deform,
-            "fn raa_slot_deform(p: vec3<f32>, n: vec3<f32>, x: InstanceExtraGpu, t: f32) -> VertexMaterialOutput { return VertexMaterialOutput(p, n); }",
-        ),
-        (
-            SlotId::Shadow,
-            "fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 { return 1.0; }",
-        ),
-        (
-            SlotId::Ao,
-            "fn raa_slot_ao(frag: vec4<f32>) -> f32 { return 1.0; }",
-        ),
-        (
-            SlotId::Ambient,
-            "fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> { return s.base_color * 0.1; }",
-        ),
-        (
-            SlotId::Direct,
-            "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> { return s.base_color * radiance; }",
-        ),
-        (
-            SlotId::Transmission,
-            "fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> { return vec3<f32>(0.0); }",
-        ),
-        (
-            SlotId::Fog,
-            "fn raa_slot_fog(color: vec3<f32>, world_pos: vec3<f32>, c: ShadeCtx) -> vec3<f32> { return color; }",
-        ),
-    ];
     let mut composer = Composer::new();
-    for (slot, wgsl) in slots {
-        composer
-            .add_slot(SlotProvider {
-                slot,
-                priority: 0,
-                provider: "test",
-                wgsl: wgsl.into(),
-            })
-            .expect("test slot");
+    for provider in lit_slots::default_slot_providers() {
+        composer.add_slot(provider).expect("test slot");
     }
     composer
 }

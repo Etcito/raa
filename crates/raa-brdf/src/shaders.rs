@@ -69,56 +69,25 @@ pub fn install(lit: &mut LitRenderer) -> Result<(), RaaError> {
     lit.add_slot(ambient)
 }
 
+// Use the renderer's defaults so the composition test follows additions to SlotId.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../raa-lit/src/slots.rs"]
+mod lit_slots;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use raa_shader::{Composer, MaterialFnId, MaterialFnRegistry, PassKind, VariantKey};
 
-    /// The S11 default of every slot at priority 0 (raa-lit's `raa.default` bodies, Direct
-    /// reduced to Lambert): raa-lit's own providers are crate-private and only tests/ may
-    /// include their source by path.
-    const DEFAULTS: [(SlotId, &str); 7] = [
-        (
-            SlotId::Deform,
-            "fn raa_slot_deform(p: vec3<f32>, n: vec3<f32>, x: InstanceExtraGpu, t: f32) -> VertexMaterialOutput {\n    return VertexMaterialOutput(p, n);\n}\n",
-        ),
-        (
-            SlotId::Shadow,
-            "fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {\n    return 1.0;\n}\n",
-        ),
-        (
-            SlotId::Ao,
-            "fn raa_slot_ao(frag: vec4<f32>) -> f32 {\n    return 1.0;\n}\n",
-        ),
-        (
-            SlotId::Ambient,
-            "fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {\n    return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic);\n}\n",
-        ),
-        (
-            SlotId::Direct,
-            "fn raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {\n    return s.base_color * (1.0 - s.metallic) / 3.14159265 * radiance * max(dot(s.normal, l), 0.0);\n}\n",
-        ),
-        (
-            SlotId::Transmission,
-            "fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {\n    return vec3<f32>(0.0);\n}\n",
-        ),
-        (
-            SlotId::Fog,
-            "fn raa_slot_fog(color: vec3<f32>, world_pos: vec3<f32>, c: ShadeCtx) -> vec3<f32> {\n    return color;\n}\n",
-        ),
-    ];
-
     const CPU_RS: &str = include_str!("cpu.rs");
 
     fn layered_composer() -> Composer {
         let mut composer = Composer::new();
-        let defaults = DEFAULTS.map(|(slot, wgsl)| SlotProvider {
-            slot,
-            priority: 0,
-            provider: "test.default",
-            wgsl: Cow::Borrowed(wgsl),
-        });
-        for p in defaults.into_iter().chain(providers()) {
+        for p in lit_slots::default_slot_providers()
+            .into_iter()
+            .chain(providers())
+        {
             if let Err(e) = composer.add_slot(p) {
                 panic!("{e}");
             }
