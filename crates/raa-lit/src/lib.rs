@@ -23,6 +23,7 @@ mod handle;
 mod instance_store;
 mod library;
 mod light_math;
+mod light_stats;
 mod local_light;
 mod local_lights;
 mod lod;
@@ -57,6 +58,7 @@ pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_f
 pub use handle::{LitHandle, PipelineSpec};
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
+pub use light_stats::LocalLightStats;
 pub use local_light::{LightHandle, LocalLight, LocalLightKind, MAX_LIGHT_HANDLE};
 pub use local_lights::{LocalLights, MAX_LOCAL_LIGHTS};
 pub use lod::{
