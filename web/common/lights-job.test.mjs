@@ -1,10 +1,10 @@
 // node --test web/common/lights-job.test.mjs: CPU-only selection and visibility checks.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { check, inView, main, select } from './lights-job.mjs';
+import { check, inView, main, select, variantProblems } from './lights-job.mjs';
 
 const CAM = { eye: [0, 2, 5], target: [0, 0, 0], fovYDeg: 60, near: 0.1, far: 100 };
 const FLOOR = { min: [-50, -1, -50], max: [50, 0, 50] };
@@ -117,4 +117,22 @@ test('check validates without writing and the CLI runs both commands', async (t)
   await assert.rejects(main(['select', '--page', f.page]), /usage/);
   await main(['select', '--page', f.page, '--out', f.out]);
   assert.equal(read(join(f.out, 'selection.json')).pairs.length, 2);
+});
+
+test('every lights scene is discovered with each preset and on/off variant selectable', async () => {
+  const scenes = new URL('../../examples/lights/scenes/', import.meta.url);
+  const ids = [];
+  for (const file of readdirSync(scenes).filter((name) => name.endsWith('.js')).sort()) {
+    const scene = (await import(new URL(file, scenes))).default;
+    assert.equal(scene.id, file.slice(0, -3), 'build-lights.sh discovers a scene by its file name');
+    assert.match(scene.milestone, /^m\d\d$/);
+    assert.deepEqual(scene.variants.map((variant) => variant.id), ['on', 'off']);
+    for (const variant of scene.variants) {
+      assert.deepEqual(variantProblems(variant), [], `${scene.id}--${variant.id}`);
+    }
+    ids.push(scene.id);
+  }
+  for (const id of ['point', 'spot', 'directional', 'area', 'many-lights', 'attached-light', 'motion']) {
+    assert.ok(ids.includes(id), `${id} is discovered`);
+  }
 });

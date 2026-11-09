@@ -9,6 +9,7 @@ const status = document.getElementById('status');
 const gpuErrors = [];
 const preparation = { status: 'pending', error: null };
 let engine = null;
+let residents = [];
 let last = null;
 let running = false;
 
@@ -58,6 +59,65 @@ const ready = (async () => {
   return { raa, scenes };
 })();
 
+// Chrome/Windows metadata for a measurement, recorded next to the adapter identity.
+function browserMetadata() {
+  const nav = typeof navigator === 'object' && navigator ? navigator : {};
+  return {
+    userAgent: String(nav.userAgent ?? ''),
+    platform: String(nav.platform ?? ''),
+    devicePixelRatio: typeof globalThis.devicePixelRatio === 'number' ? globalThis.devicePixelRatio : 1,
+  };
+}
+
+/**
+ * Handoff: `runMeasured(raa, scene, variant)` in `examples/lights/main.js` is the
+ * many-lights operation. It calls `runScene(raa, canvas, scene, variant, args)` from
+ * `examples/lookdev/lib/runner.js` once per on/off variant with the scene's `measure`
+ * configuration (`warmup`, `frames`, `width`, `height`), keeps both engines resident for
+ * the operation and returns `{ runs: { on, off }, adapter, hardware, browser,
+ * measurement_for, gpuErrors }`. The `loadScenes()` Map<scene.id, default> and variant.id
+ * on/off registry are unchanged by this operation.
+ */
+async function runMeasured(raa, scene, variant) {
+  const config = scene.measure;
+  const runs = {};
+  const devices = new Map();
+  // The requested variant runs last so its engine owns the canvas configuration for the
+  // capture; both engines stay resident for the operation.
+  for (const candidate of [...scene.variants.filter((v) => v.id !== variant.id), variant]) {
+    window.__nmcGpuProgress = `measure:${candidate.id}`;
+    runs[candidate.id] = await runScene(raa, canvas, scene, candidate, {
+      width: config.width, height: config.height, lib,
+      measure: { warmup: config.warmup, frames: config.frames },
+      onEngine: (created) => {
+        devices.set(candidate.id, created);
+        residents.push(created);
+      },
+    });
+  }
+  engine = devices.get(variant.id);
+  const on = runs.on;
+  const problems = [];
+  for (const [id, result] of Object.entries(runs)) {
+    if (!Array.isArray(result.canvas) || result.canvas[0] !== config.width || result.canvas[1] !== config.height) {
+      problems.push(`${id}: canvas ${JSON.stringify(result.canvas)} is not ${config.width}x${config.height}`);
+    }
+    if (!(Number.isFinite(result.fpsMean) && result.fpsMean > 0)) problems.push(`${id}: fpsMean is not a frame rate`);
+    for (const key of ['frameIntervalMsMedian', 'frameIntervalMsP95', 'fpsMedian', 'fpsP95']) {
+      if (!Number.isFinite(result[key])) problems.push(`${id}: ${key} is not a number`);
+    }
+  }
+  if (!(on.fpsMean >= config.minFpsMean)) problems.push(`on: fpsMean ${on.fpsMean} is below ${config.minFpsMean}`);
+  if (problems.length > 0) throw new Error(`many-lights: ${problems.join('; ')}`);
+  last = { scene, variant, preparedCapture: false, captures: [] };
+  if (scene.legend) status.textContent = scene.legend;
+  if (gpuErrors.length) throw new Error(`GPU errors: ${gpuErrors.join('\n')}`);
+  return {
+    ...runs[variant.id], runs, adapter: on.adapter, hardware: on.hardware,
+    browser: browserMetadata(), measurement_for: config.measurementFor, gpuErrors: gpuErrors.slice(),
+  };
+}
+
 async function run(args) {
   window.__nmcGpuProgress = 'preparation';
   const { raa, scenes } = await ready;
@@ -67,14 +127,16 @@ async function run(args) {
   if (!variant) throw new Error(`unknown scene/variant: ${args.scene}/${args.variant}`);
   running = true;
   try {
-    if (engine) engine.dispose();
+    for (const resident of residents) resident.dispose();
+    residents = [];
     engine = null;
     last = null;
     gpuErrors.length = 0;
+    if (scene.measure) return await runMeasured(raa, scene, variant);
     window.__nmcGpuProgress = 'runScene';
     const result = await runScene(raa, canvas, scene, variant, {
       width: args.width, height: args.height, lib,
-      onEngine: (created) => { engine = created; },
+      onEngine: (created) => { engine = created; residents.push(created); },
     });
     const preparedCapture = typeof scene.prepareCapture === 'function';
     const captures = [];
