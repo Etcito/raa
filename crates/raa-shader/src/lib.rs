@@ -18,7 +18,7 @@ pub use ids::{MaterialFnId, PassKind, SlotId, VariantKey};
 pub use registry::{MaterialFnEntry, MaterialFnRegistry};
 
 /// S10 structs and bindings of groups 0-1, S11 material structs, flag constants,
-/// `raa_default_output` and the tint helper.
+/// `raa_default_output` and the tint helper. Self-contained: no slot definitions or calls.
 pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.wgsl"));
 /// S11 helper library (`raa_hash3`, `raa_noise3`, `raa_fbm3`, `raa_voronoi3`,
 /// `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`).
@@ -194,6 +194,12 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
         }
     }
 
+    #[test]
+    fn prelude_validates_without_slot_providers() {
+        assert!(!PRELUDE_WGSL.contains("raa_slot_"));
+        assert_eq!(Composer::validate(PRELUDE_WGSL), Ok(()));
+    }
+
     fn stub_composer() -> Composer {
         let mut composer = Composer::new();
         for slot in SlotId::ALL {
@@ -224,6 +230,14 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
 ",
                 SlotId::Fog => "fn raa_slot_fog(color: vec3<f32>, world_pos: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
     return color;
+}
+",
+                SlotId::LocalVisibility => "fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {
+    return 1.0;
+}
+",
+                SlotId::Indirect => "fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
 }
 ",
             };

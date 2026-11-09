@@ -76,6 +76,18 @@ mod default_slots {
 }
 ";
 
+    /// Local lights fully visible (no local shadows yet).
+    pub const LOCAL_VISIBILITY: &str = "fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {
+    return 1.0;
+}
+";
+
+    /// Additional indirect illumination is black.
+    pub const INDIRECT: &str = "fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+";
+
     /// The default provider of `slot`.
     pub fn provider(slot: SlotId) -> SlotProvider {
         let wgsl = match slot {
@@ -86,6 +98,8 @@ mod default_slots {
             SlotId::Direct => DIRECT,
             SlotId::Transmission => TRANSMISSION,
             SlotId::Fog => FOG,
+            SlotId::LocalVisibility => LOCAL_VISIBILITY,
+            SlotId::Indirect => INDIRECT,
         };
         SlotProvider {
             slot,
@@ -326,6 +340,17 @@ fn raa_prefixed_definitions_are_refused() {
     ] {
         let src = format!("{MAIN}{extra}\n");
         assert_refused(&src, "reserved prefix", &[what, " at 4:"]);
+    }
+}
+
+#[test]
+fn extension_slot_definitions_are_reserved() {
+    for (name, body) in [
+        ("raa_slot_local_visibility", default_slots::LOCAL_VISIBILITY),
+        ("raa_slot_indirect", default_slots::INDIRECT),
+    ] {
+        let src = format!("{MAIN}{body}");
+        assert_refused(&src, "reserved prefix", &[name, " at 4:"]);
     }
 }
 

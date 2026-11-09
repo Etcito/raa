@@ -75,6 +75,18 @@ mod default_slots {
 }
 ";
 
+    /// Local lights fully visible (no local shadows yet).
+    pub const LOCAL_VISIBILITY: &str = "fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {
+    return 1.0;
+}
+";
+
+    /// Additional indirect illumination is black.
+    pub const INDIRECT: &str = "fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+";
+
     /// The default provider of `slot`.
     pub fn provider(slot: SlotId) -> SlotProvider {
         let wgsl = match slot {
@@ -85,6 +97,8 @@ mod default_slots {
             SlotId::Direct => DIRECT,
             SlotId::Transmission => TRANSMISSION,
             SlotId::Fog => FOG,
+            SlotId::LocalVisibility => LOCAL_VISIBILITY,
+            SlotId::Indirect => INDIRECT,
         };
         SlotProvider {
             slot,
@@ -373,9 +387,10 @@ fn group_two_bindings_are_private_to_their_pass() {
             [0, 1, 2, 3, 4, 5, 6, 7, 8],
             "{pass:?}"
         );
+        // Existing lighting resources plus the local-light uniform and tile texture.
         assert_eq!(
             group_bindings(&module, 1),
-            (0..12).collect::<Vec<u32>>(),
+            (0..14).collect::<Vec<u32>>(),
             "{pass:?}"
         );
         let expected: &[u32] = match pass {

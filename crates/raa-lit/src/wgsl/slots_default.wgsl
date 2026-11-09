@@ -79,3 +79,15 @@ fn raa_slot_transmission(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
 fn raa_slot_fog(color: vec3<f32>, world_pos: vec3<f32>, c: ShadeCtx) -> vec3<f32> {
     return color;
 }
+
+// @slot local_visibility
+// Local lights are fully visible; they cast no shadow yet.
+fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {
+    return 1.0;
+}
+
+// @slot indirect
+// Additional indirect illumination is black; existing ambient/environment lighting stays.
+fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}

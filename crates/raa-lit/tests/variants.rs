@@ -94,6 +94,26 @@ fn defaults_follow_s11() {
     assert!(direct.contains("(1.0 - s.metallic)"));
     assert!(wgsl(SlotId::Transmission).contains("return vec3<f32>(0.0);"));
     assert!(wgsl(SlotId::Fog).contains("return color;"));
+    assert!(wgsl(SlotId::LocalVisibility).contains("return 1.0;"));
+    assert!(wgsl(SlotId::Indirect).contains("return vec3<f32>(0.0);"));
+}
+
+#[test]
+fn extension_slot_signatures_are_callable() {
+    let providers: String = slots::default_slot_providers()
+        .iter()
+        .map(|p| p.wgsl.as_ref())
+        .collect();
+    let entry = "
+@fragment fn probe() -> @location(0) vec4<f32> {
+    var s: MaterialOutput;
+    var c: ShadeCtx;
+    let visibility = raa_slot_local_visibility(0u, vec3<f32>(0.0),
+        vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), 1.0);
+    return vec4<f32>(raa_slot_indirect(s, c), visibility);
+}";
+    let wgsl = format!("{}\n{providers}\n{entry}", raa_shader::PRELUDE_WGSL);
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
 }
 
 #[test]

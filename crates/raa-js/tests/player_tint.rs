@@ -65,6 +65,14 @@ fn stub_wgsl(slot: SlotId) -> &'static str {
     return color;
 }
 ",
+        SlotId::LocalVisibility => "fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {
+    return 1.0;
+}
+",
+        SlotId::Indirect => "fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+",
     }
 }
 

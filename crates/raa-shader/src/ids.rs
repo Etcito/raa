@@ -36,11 +36,15 @@ pub enum SlotId {
     Direct,
     Transmission,
     Fog,
+    /// Visibility of a local light; defaults to fully visible (no local shadows yet).
+    LocalVisibility,
+    /// Additional indirect illumination; defaults to black.
+    Indirect,
 }
 
 impl SlotId {
     /// Every slot, in composition order.
-    pub const ALL: [SlotId; 7] = [
+    pub const ALL: [SlotId; 9] = [
         SlotId::Deform,
         SlotId::Shadow,
         SlotId::Ao,
@@ -48,6 +52,8 @@ impl SlotId {
         SlotId::Direct,
         SlotId::Transmission,
         SlotId::Fog,
+        SlotId::LocalVisibility,
+        SlotId::Indirect,
     ];
 
     /// Name of the WGSL function a provider of this slot defines (S11).
@@ -60,6 +66,8 @@ impl SlotId {
             SlotId::Direct => "raa_slot_direct",
             SlotId::Transmission => "raa_slot_transmission",
             SlotId::Fog => "raa_slot_fog",
+            SlotId::LocalVisibility => "raa_slot_local_visibility",
+            SlotId::Indirect => "raa_slot_indirect",
         }
     }
 }
@@ -100,6 +108,8 @@ mod tests {
                 "raa_slot_direct",
                 "raa_slot_transmission",
                 "raa_slot_fog",
+                "raa_slot_local_visibility",
+                "raa_slot_indirect",
             ]
         );
     }

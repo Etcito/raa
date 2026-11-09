@@ -39,6 +39,14 @@ fn stub_wgsl(slot: SlotId) -> &'static str {
     return color;
 }
 ",
+        SlotId::LocalVisibility => "fn raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32 {
+    return 1.0;
+}
+",
+        SlotId::Indirect => "fn raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    return vec3<f32>(0.0);
+}
+",
     }
 }
 
@@ -226,6 +234,47 @@ fn raa_tinted_scale() -> vec3<f32> {
     assert!(wgsl.contains("provider \"tinted\", priority 10"));
     assert_eq!(Composer::validate(&wgsl), Ok(()));
     assert_ne!(composer.slots_hash(), defaults_hash);
+}
+
+#[test]
+fn extension_slots_preserve_provider_rules() {
+    let reg = MaterialFnRegistry::new();
+    for slot in [SlotId::LocalVisibility, SlotId::Indirect] {
+        let mut composer = stub_composer();
+        let original_hash = composer.slots_hash();
+        let e = composer
+            .add_slot(stub(slot, 0, "duplicate"))
+            .expect_err("conflict");
+        assert_eq!(e.code(), "shader.slot_conflict");
+        assert!(e.message.contains(slot.fn_name()), "{e}");
+        assert_eq!(composer.slots_hash(), original_hash);
+        composer
+            .add_slot(stub(slot, 10, "extension"))
+            .expect("override");
+        let winner_hash = composer.slots_hash();
+        assert_ne!(winner_hash, original_hash);
+        composer.add_slot(stub(slot, -1, "lower")).expect("lower");
+        assert_eq!(composer.slots_hash(), winner_hash);
+        let winner = composer.winner(slot).expect("winner");
+        assert_eq!((winner.provider, winner.priority), ("extension", 10));
+        let wgsl = composer
+            .compose(&reg, &key(PassKind::Forward))
+            .expect("compose");
+        position(&wgsl, &format!("fn {}(", slot.fn_name()));
+        assert_eq!(Composer::validate(&wgsl), Ok(()));
+
+        let mut missing = Composer::new();
+        for other in SlotId::ALL.into_iter().filter(|&s| s != slot) {
+            missing.add_slot(stub(other, 0, "stub")).expect("add");
+        }
+        for pass in PassKind::ALL {
+            let e = missing
+                .compose(&reg, &key(pass))
+                .expect_err("missing extension");
+            assert_eq!(e.code(), "shader.slot_missing");
+            assert!(e.message.contains(slot.fn_name()), "{e}");
+        }
+    }
 }
 
 #[test]
