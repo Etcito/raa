@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 // The 64-light preset (S20, RAA-LIGHTS-PAGE, QB8): a fixed camera over an eight-by-eight
 // field of instances, each with its own bounded point light. The on variant adds all 64
 // distinct lights; the off variant keeps the same geometry under sun and ambient light.
@@ -63,6 +64,7 @@ export default {
       : 'Many lights off: the same fixed camera and eight-by-eight field of 64 solid grey '
         + 'boxes on a broad grey floor under dim sun and ambient light only, with no local '
         + 'lights and no coloured pools. ') + approximation,
+    evidence: captureEvidence('many-lights', id),
     judge: true,
     timeMs: 1000,
     selection,

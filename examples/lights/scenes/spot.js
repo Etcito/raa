@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 const camera = { eye: [0, 6, 9], target: [0, 0.8, 0], fovYDeg: 45, near: 0.1, far: 100 };
 const sources = [
   { position: [-1.9, 2.6, 0], color: [1, 0.72, 0.4], innerAngleDeg: 24 },
@@ -35,6 +36,7 @@ export default {
       : 'The same broad matte grey floor and two small warm-left and cool-right source markers '
         + 'under dim sun and ambient light only. Local spots are off, with no coloured cone footprints. ')
       + approximation,
+    evidence: captureEvidence('spot', id),
     judge: true,
     timeMs: 1000,
     selection,

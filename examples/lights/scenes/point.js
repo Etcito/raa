@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 // Bounded point preset (S20, RAA-LIGHTS-PAGE): three solid boxes at increasing distances
 // from a warm key light and a cool fill light. Every local light has a finite range, so its
 // pool of illumination dims with distance and reaches zero at the range limit; geometry
@@ -43,6 +44,7 @@ export default {
         + 'shadow yet.') + ' In the foreground, a translucent glass sphere on the left and '
         + 'a soft grey fur sphere on the right stand over the opaque floor; both respond to '
         + (id === 'on' ? 'the local lights. ' : 'sun and ambient only. ') + approximation,
+    evidence: captureEvidence('point', id),
     judge: true,
     timeMs: 1000,
     selection,

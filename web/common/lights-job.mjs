@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { captureEvidence, attachedStages } from './lights-evidence.js';
 // Metadata selection, managed transport, fail-closed freshness and judgment.
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
@@ -73,6 +74,8 @@ export function variantProblems(variant) {
   const problems = [];
   if (typeof variant?.description !== 'string' || !variant.description.trim()) problems.push('no description');
   if (!isNum(variant?.timeMs) || variant.timeMs < 0) problems.push('timeMs is not a duration');
+  if (variant?.evidence !== undefined && (!nonblank(variant.evidence?.label)
+    || !/^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/.test(variant.evidence?.filename))) problems.push('invalid functional image acceptance');
   if (variant?.judge !== true) problems.push('judge must be true');
   const cameraErrors = cameraProblems(selection?.camera);
   problems.push(...cameraErrors);
@@ -121,7 +124,8 @@ function collect(scenes) {
   for (const def of scenes.values()) for (const variant of def.variants) {
     const invalid = variantProblems(variant).map((p) => `${def.id}--${variant.id}: ${p}`);
     if (invalid.length > 0) problems.push(...invalid);
-    else pairs.push({ scene: def.id, variant: variant.id, description: variant.description, timeMs: variant.timeMs });
+    else pairs.push({ scene: def.id, variant: variant.id, description: variant.description, timeMs: variant.timeMs,
+      ...(variant.evidence ? { evidence: variant.evidence } : {}) });
   }
   ensure(problems.length === 0, `invalid selection:\n  ${problems.join('\n  ')}`);
   ensure(pairs.length > 0, 'selection is empty');
@@ -213,6 +217,10 @@ export async function clean(page, out) {
   }
   rmSync(inside(out, 'run.json'), { force: true });
 }
+
+const primaryEvidence = (pair) => pair.evidence ?? captureEvidence(pair.scene, pair.variant) ?? { filename: 'capture.png', label: pair.description };
+const primaryFile = (pair) => primaryEvidence(pair).filename;
+const stageFile = (pair, name) => pair.scene === 'attached-light' ? captureEvidence(pair.scene, pair.variant, name).filename : `${name}.png`;
 
 const waitSeconds = () => {
   const n = process.env.NMC_GPU_WAIT_S === undefined ? 60 : Number(process.env.NMC_GPU_WAIT_S);
@@ -386,15 +394,17 @@ function outputFiles(dir, prefix = '') {
 
 async function pairOutput(page, dir, pair) {
   const files = outputFiles(dir).filter((name) => name !== 'completion.json');
-  ensure(files.includes('capture.png'), 'missing explicit capture.png output');
+  ensure(files.includes(primaryFile(pair)), 'missing explicit capture.png output');
   ensure(files.includes('result.json'), 'missing operation result.json output');
   const doc = readJson(join(dir, 'result.json'), 'managed render must produce its operation result');
   ensure(hostId(doc.job_id) && hostId(doc.client_id), 'missing managed job/client provenance');
   await validateEvidence(doc.result, pair, page);
   for (const file of files.filter((name) => name.endsWith('.png'))) validatePng(inside(dir, file), doc.result.canvas);
+  if (pair.scene === 'attached-light') ensure(JSON.stringify(doc.result.lifecycle?.frames?.map(frame => frame.name))
+    === JSON.stringify(attachedStages.map(([name]) => name)), 'incomplete attachment lifecycle');
   // Attached lifecycle filenames are authored by the page, not guessed from any PNG.
   for (const frame of doc.result.lifecycle?.frames ?? []) if (frame.name !== undefined) {
-    ensure(files.includes(`${frame.name}.png`), `missing lifecycle output: ${frame.name}.png`);
+    ensure(files.includes(stageFile(pair, frame.name)), `missing lifecycle output: ${frame.name}.png`);
   }
   return { doc, files };
 }
@@ -414,7 +424,10 @@ export async function render(page, out) {
   // One real managed job identifies the complete selection, never a clock
   // or an assumed NMC_RUN_ID. Its result remains alongside the pair receipts.
   const record = { pageRef, pairs: [], complete: false, buildId: build.buildId,
-    runId: pageRef, commit: build.commit, startedAt: new Date().toISOString(), completedAt: null };
+    runId: pageRef, images: pairs.flatMap(pair => [
+      { scene: pair.scene, variant: pair.variant, ...primaryEvidence(pair) },
+      ...(pair.scene === 'attached-light' ? attachedStages.map(([stage]) => ({ scene: pair.scene, variant: pair.variant, stage, ...captureEvidence(pair.scene, pair.variant, stage) })) : []),
+    ]), commit: build.commit, startedAt: new Date().toISOString(), completedAt: null };
   jsonWrite(inside(out, 'run.json'), record);
   try {
     const input = inside(out, `${attempt}/input.json`);
@@ -440,7 +453,7 @@ export async function render(page, out) {
         jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId,
           commit: record.commit, scene: pair.scene, variant: pair.variant, jobId: doc.job_id, clientId: doc.client_id, files });
         record.pairs.push({ scene: pair.scene, variant: pair.variant,
-          capture: `${namespace}/capture.png`, result: `${namespace}/result.json` });
+          capture: `${namespace}/${primaryFile(pair)}`, result: `${namespace}/result.json` });
       } catch (error) { errors.push(`${pair.scene}/${pair.variant}: ${error.message}`); }
     }
     jsonWrite(join(batchDir, 'diagnostics.json'), { errors });
@@ -473,13 +486,19 @@ export async function fresh(page, out) {
   ensure(String(batch.job_id) === record.runId && hostId(batch.client_id), 'wrong managed job provenance');
   ensure(Array.isArray(batch.result?.steps) && batch.result.steps.length === selection.length
     && Array.isArray(batch.result?.diagnostics) && batch.result.diagnostics.length === 0, 'incomplete/failed whole-flow result');
+  const expectedImages = selection.flatMap(pair => [
+    { scene: pair.scene, variant: pair.variant, ...primaryEvidence(pair) },
+    ...(pair.scene === 'attached-light' ? attachedStages.map(([stage]) => ({ scene: pair.scene, variant: pair.variant, stage, ...captureEvidence(pair.scene, pair.variant, stage) })) : []),
+  ]);
+  ensure(JSON.stringify(record.images) === JSON.stringify(expectedImages), 'capture manifest differs from produced metadata');
+  ensure(new Set(record.images.map(image => image.filename)).size === record.images.length, 'capture filenames collide');
   let clientId;
   for (const pair of selection) {
     const matches = record.pairs.filter((p) => p.scene === pair.scene && p.variant === pair.variant);
     ensure(matches.length === 1, `missing/duplicate run pair: ${pair.scene}/${pair.variant}`);
     const run = matches[0];
     const namespace = `${attempt}/s-${encodeURIComponent(pair.scene)}/${pair.variant}`;
-    ensure(run.capture === `${namespace}/capture.png` && run.result === `${namespace}/result.json`, 'stale/unsafe pair paths');
+    ensure(run.capture === `${namespace}/${primaryFile(pair)}` && run.result === `${namespace}/result.json`, 'stale/unsafe pair paths');
     const dir = inside(out, namespace);
     const receipt = readJson(inside(dir, 'completion.json'), 'producer must validate successfully');
     ensure(receipt.complete === true && ['pageRef', 'buildId', 'runId', 'commit'].every((k) => receipt[k] === record[k])
@@ -499,17 +518,7 @@ export async function fresh(page, out) {
   return record;
 }
 
-const ATTACHED_STAGES = [
-  ['initial', 'Initial lifecycle frame: a small orange source marker is beside the central grey parent block.'],
-  ['translated', 'Translated lifecycle frame: the grey parent block and orange source marker appear at their translated positions.'],
-  ['rotated', 'Rotated lifecycle frame: the grey parent block is rotated and the orange source marker has followed its parent.'],
-  ['reattached', 'Reattached lifecycle frame: the orange source marker is beside the second grey parent block.'],
-  ['detached', 'Detached lifecycle frame: the orange source marker stays in world space while the second parent block moves away.'],
-  ['reattached-before-delete', 'Reattached-before-delete lifecycle frame: the orange source marker is beside the second parent block before deletion.'],
-  ['parent-deleted', 'Parent-deleted lifecycle frame: the second parent block is gone and the source marker remains at its last world position.'],
-  ['light-removed', 'Light-removed lifecycle frame: the orange source marker is hidden after the local light is removed.'],
-  ['attached-final', 'Attached-final lifecycle frame: the orange source marker is visible beside the first grey parent block.'],
-];
+const ATTACHED_STAGES = attachedStages.map(([name, , label]) => [name, label]);
 
 function judgeScore(text) {
   for (const chunk of [text.trim(), ...text.split(/\r?\n/).reverse()]) {
@@ -526,7 +535,7 @@ function judgeOne(capture, description) {
   const client = process.env.NMC_JUDGE_CLIENT;
   ensure(nonblank(client), 'NMC_JUDGE_CLIENT is missing');
   return new Promise((resolveJudge, rejectJudge) => {
-    const child = spawn('python3', [client, capture, '--description', description, '--min-score', '6'],
+    const child = spawn('python3', [client, capture, '--description', description, '--min-score', '6', '--aspect', 'functional'],
       { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
     let stdout = '', stderr = '';
     child.stdout.on('data', (data) => { stdout += data; });
@@ -534,10 +543,10 @@ function judgeOne(capture, description) {
     child.on('error', (cause) => rejectJudge(new Error(`judge process could not start: ${cause.message}`, { cause })));
     child.on('close', (exitCode, signal) => {
       const score = judgeScore(`${stdout}\n${stderr}`);
-      if (exitCode !== 0) return rejectJudge(new Error(`judge process failed (${exitCode ?? signal}, score ${score ?? 'unknown'}): ${(stderr || stdout).trim()}`));
-      if (!isNum(score)) return rejectJudge(new Error('judge returned no parseable score verdict'));
-      if (score < 6 || score > 10) return rejectJudge(new Error(`judge score ${score} is outside the accepted range [6, 10]`));
-      resolveJudge({ score, exitCode });
+      if (exitCode !== 0) return rejectJudge(Object.assign(new Error(`judge process failed (${exitCode ?? signal}, score ${score ?? 'unknown'}): ${(stderr || stdout).trim()}`), { score, exitCode, stdout, stderr }));
+      if (!isNum(score)) return rejectJudge(Object.assign(new Error('judge returned no parseable score verdict'), { exitCode, stdout, stderr }));
+      if (score < 6 || score > 10) return rejectJudge(Object.assign(new Error(`judge score ${score} is outside the accepted range [6, 10]`), { score, exitCode, stdout, stderr }));
+      resolveJudge({ score, exitCode, stdout, stderr });
     });
   });
 }
@@ -546,17 +555,24 @@ export async function judge(page, out) {
   const run = await fresh(page, out);
   const selection = await selectionAt(page, out);
   ensure(selection.length === 14, `judge requires fourteen primary scene/variant captures; found ${selection.length}`);
-  const record = { runId: run.runId, buildId: run.buildId, commit: run.commit, complete: false, images: [] };
+  const record = { runId: run.runId, buildId: run.buildId, commit: run.commit, complete: false, images: [], errors: [] };
   jsonWrite(inside(out, 'judge.json'), record);
+  const judgeImage = async (pair, capture, description) => {
+    const entry = { scene: pair.scene, variant: pair.variant, capture, description, label: description, aspect: 'functional' };
+    try { Object.assign(entry, await judgeOne(inside(out, capture), description)); }
+    catch (error) {
+      Object.assign(entry, { error: error.message, score: error.score ?? null, exitCode: error.exitCode ?? null,
+        stdout: error.stdout ?? '', stderr: error.stderr ?? '' });
+      record.errors.push(`${capture}: ${error.message}`);
+    }
+    record.images.push(entry);
+    jsonWrite(inside(out, 'judge.json'), record);
+  };
   const runPairs = new Map(run.pairs.map((pair) => [`${pair.scene}\0${pair.variant}`, pair]));
   for (const pair of selection) {
     const runPair = runPairs.get(`${pair.scene}\0${pair.variant}`);
     ensure(runPair, `missing run prerequisite for ${pair.scene}/${pair.variant}`);
-    const capture = inside(out, runPair.capture);
-    const primary = await judgeOne(capture, pair.description);
-    record.images.push({ scene: pair.scene, variant: pair.variant, capture: runPair.capture,
-      description: pair.description, ...primary });
-    jsonWrite(inside(out, 'judge.json'), record);
+    await judgeImage(pair, runPair.capture, primaryEvidence(pair).label);
 
     if (pair.scene === 'attached-light') {
       const resultPath = inside(out, runPair.result);
@@ -565,25 +581,19 @@ export async function judge(page, out) {
       ensure(Array.isArray(frames), `missing attachment lifecycle output for ${pair.scene}/${pair.variant}`);
       ensure(JSON.stringify(frames.map((frame) => frame.name)) === JSON.stringify(ATTACHED_STAGES.map(([name]) => name)),
         `incomplete attachment lifecycle for ${pair.scene}/${pair.variant}`);
-      for (const [name, description] of ATTACHED_STAGES) {
-        const relativeCapture = `${relative(resolve(out), resolve(resultPath)).replace(/result\.json$/, `${name}.png`)}`;
+      for (const [name] of ATTACHED_STAGES) {
+        const relativeCapture = `${relative(resolve(out), resolve(resultPath)).replace(/result\.json$/, stageFile(pair, name))}`;
         const stagePath = inside(out, relativeCapture);
         ensure(existsSync(stagePath) && lstatSync(stagePath).isFile() && lstatSync(stagePath).size > 0,
           `missing lifecycle output: ${name}.png`);
-        const variantDescription = pair.variant === 'off'
-          ? ' Local illumination is disabled in the off variant.'
-          : name === 'light-removed' ? ' The local light has been removed in this stage.'
-            : ' The local light is enabled in this variant.';
-        const stageDescription = `${description}${variantDescription}`;
-        const stage = await judgeOne(stagePath, stageDescription);
-        record.images.push({ scene: pair.scene, variant: pair.variant, capture: relativeCapture,
-          description: stageDescription, ...stage });
-        jsonWrite(inside(out, 'judge.json'), record);
+        await judgeImage(pair, relativeCapture, captureEvidence(pair.scene, pair.variant, name).label);
       }
     }
   }
   ensure(JSON.stringify(readJson(inside(out, 'run.json'), 'current run')) === JSON.stringify(run),
     'run changed during judgment');
+  ensure(record.images.length === 32, `judge requires 32 images; found ${record.images.length}`);
+  ensure(record.errors.length === 0, `image judgment failures (${record.errors.length}/32):\n${record.errors.join('\n')}`);
   record.complete = true;
   jsonWrite(inside(out, 'judge.json'), record);
   return record;

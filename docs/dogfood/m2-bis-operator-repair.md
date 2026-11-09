@@ -62,3 +62,84 @@ cargo-check and milestone-check, with an actual passing result for every
 selected entry. No card rerun is authorized by this report before that passes.
 The operator shell has no GPU client/expose route and did not start a GPU
 job or any browser. Render and the downstream checks remain unverified.
+
+Operator 5363: controlling functional acceptance (owner decisions 5353–5358)
+
+Measured chain: execution 13286 passed build, functional tests, selection of 14
+pairs, clean, render and freshness. Judgment rejected area/on at 4/10 (samples
+4,4,4; required 6), citing background, warmth and inability to infer emitter
+sizes, equal intensity or prepass behavior from the PNG. It recorded no further
+judgments and skipped command-check, cargo-check and milestone-check. Operator
+5349 committed 6f3e221 to change sky presentation; verification 13287 then
+rejected attached-light/on at 5/10 (5,5,6), citing marker colour and inability
+to infer lifecycle/prepass behavior from one PNG. That commit was cancelled
+and is not an ancestor of this checkout. Do not stack its aesthetic changes.
+The current base ea5e460 preserves the adapter and one-job repairs, proven
+through render/fresh in 13286; its whole command chain has not passed.
+
+Failure <- unsuitable description-based image criteria <- technical scene notes
+and multi-frame claims passed as single-image acceptance, with default look
+judging <- missing separation of functional visual acceptance from deterministic
+requirements. Fix the producer and judge call: scene metadata now supplies a
+functional evidence label and descriptive filename from lights-evidence.js.
+Explanatory scene descriptions still document no local shadows and the
+transparent/displaced-fur prepass approximation. Those notes, numerical sizes,
+intensity equality, API behavior and frame counts are not image criteria.
+The full scene/API/transport Node suite remains mandatory and now runs in the
+functional entry, including the existing area equality/extents tests. FPS,
+canvas, hardware, browser, warmup, frames and provenance checks remain intact.
+No scene appearance or light configuration changed.
+
+relaxed (not in the brief): decorative background, exact source-marker hue,
+and single-image inference of emitter dimensions/intensity equality/prepass or
+lifecycle transitions; brief says: "Area shows a rectangular emitter approximation
+whose extents visibly affect representative illumination" and "attached-light
+shows the source and illumination moving with its parent." Owner 5353 explicitly
+assigns numerical/API/prepass facts to deterministic checks. Score >=6 remains.
+
+All 14 primary and 18 attachment-stage outputs receive distinct descriptive
+filenames in the ONE managed job. run.json includes the complete filename/label
+manifest; freshness validates it against produced metadata and output files.
+Judge receives exactly those labels and names, explicitly --aspect functional,
+--min-score 6. It retains every score/process result/stdout/stderr, attempts all
+32 judgments even after rejection, and only then fails with the full error list.
+The host's current nmc_judge.py supports functional mode and passes image basename,
+description and source identity to captures_archive.record_judged. No repository
+mailer, archive replacement, approval request or hold release is introduced.
+The existing page diagnostic collectors remain active for all pairs.
+
+Command-check now depends on functional checks, and cargo/milestone checks follow
+command-check, independently of image judgment. All remain mandatory. This
+prevents a rejected image from silently suppressing branch checks. The local
+m2-lights-judge-local entry exercises selection, isolated clean, controlled managed
+transport, freshness and all-image judgment with CPU fixtures; it starts no
+browser and supplies no GPU proof. Its build dependency satisfies the commands
+validator. No timeout increased and no foreign milestone command was added.
+
+Instruction audit: read complete execution 13286 checks_json; owner 5353 and
+propagations 5354–5358; current milestone 7326/7327 contract; descriptions and
+metadata of 7332/7334/7335; dependency edges; and 5349's complete stored work and
+verification results. Host functional mode and archive identity support already
+exist. 7335 has judge_aspect=functional; 7332/7334 lack that metadata. Explicit
+functional mode in the shared command now covers all three consumers. 7332's
+embedded old contracts still name capture.png and omit --aspect functional;
+7334 names its old producer. Historical supervisor rationale 5349 calls the
+background required; 5353 expressly supersedes it. These database descriptions
+and historical records were not rewritten: this operator may only GET the API
+(and PATCH sibling_repos/env_paths), and may never write the database. The
+supervisor must propagate the controlling filename/functional-label contract
+into those live card descriptions/metadata without releasing any hold. M3,
+archive and successful informational delivery gates remain required.
+
+Evidence boundary: the available archived 13286 render directory retains only
+18 PNGs (a partial archive), and its judge.json has zero accepted images. The
+live 7335 output retains JSON but no PNGs; 7335-opverify was removed. These are
+historical diagnostics only, never replayed proof. No claim of 32 fresh real
+images, green GPU flow, archive delivery or email delivery is made by this repair.
+The supervisor's preflight and single managed programmatic job at the committed
+revision must supply that evidence before one normal card run is allowed.
+
+Local validation before commit: 65 Node tests passed, cargo check exited 0,
+and nmc-commands-check accepted all 11 entries. The registered local preflight
+is rerun after committing; these CPU checks neither render nor judge real GPU
+images. scripts/check.sh remains mandatory in the programmatic command chain.

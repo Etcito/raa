@@ -1,3 +1,4 @@
+import { captureEvidence } from './common/lights-evidence.js';
 import { loadRaa } from './raa/index.js';
 import { registerNmcGpu } from './common/nmc-gpu.js';
 import * as geometry from './lib/geometry.js';
@@ -261,7 +262,12 @@ window.nmcGpu.ops.render = async (input) => {
         const result = await render({ args: active });
         result.files.push(...last.captures);
         const prefix = `s-${encodeURIComponent(pair.scene)}/${pair.variant}/`;
-        files.push(...result.files.map((file) => ({ ...file, name: prefix + file.name })));
+        files.push(...result.files.map((file) => {
+          const evidence = file.name === 'capture.png' ? last.variant.evidence
+            : captureEvidence(pair.scene, pair.variant, file.name.replace(/\.png$/, ''));
+          if (!evidence) throw new Error(`missing capture acceptance: ${pair.scene}/${file.name}`);
+          return { ...file, name: prefix + evidence.filename, label: evidence.label };
+        }));
         steps.push({ ...active, result: result.json });
       } catch (error) {
         const message = errorDetails('render failed', error);

@@ -27,6 +27,15 @@ cp -R dist/package/raa "$OUT/raa"
 cp -R web/common/. "$OUT/common/"
 cp examples/lookdev/lib/{geometry,objects,runner}.js "$OUT/lib/"
 cp -R examples/lights/scenes/. "$OUT/scenes/"
+# Rewrite the source-tree common import to the identical staged module.
+"$NODE" --input-type=module - "$OUT/scenes" <<'IMPORTS'
+import fs from 'node:fs';
+import path from 'node:path';
+for (const file of fs.readdirSync(process.argv[2]).filter(f => f.endsWith('.js'))) {
+  const dest = path.join(process.argv[2], file);
+  fs.writeFileSync(dest, fs.readFileSync(dest, 'utf8').replaceAll('../../../web/common/lights-evidence.js', '../common/lights-evidence.js'));
+}
+IMPORTS
 "$NODE" --input-type=module - "$OUT" <<'JS'
 import fs from 'node:fs';
 import path from 'node:path';

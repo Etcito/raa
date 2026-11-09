@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 const camera = { eye: [7, 9, 13], target: [0, 0, 0], fovYDeg: 45, near: 0.1, far: 100 };
 const boxes = [[-3.2, 0.4, 1.5], [3.2, 0.4, 1.5]];
 const selection = {
@@ -28,6 +29,7 @@ export default {
       : 'Rectangular area lighting off: the same two grey boxes and broad grey floor under '
         + 'dim sun and ambient light only, without the two warm area-light pools.')
       + limitations,
+    evidence: captureEvidence('area', id),
     judge: true,
     timeMs: 1000,
     selection,

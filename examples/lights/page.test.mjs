@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../web/common/lights-evidence.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,7 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 function page(index = [], overrides = {}) {
   const packageReady = Promise.withResolvers();
   const context = {
-    window: {}, navigator: { userAgent: 'fixture browser', platform: 'fixture platform' },
+    captureEvidence, window: {}, navigator: { userAgent: 'fixture browser', platform: 'fixture platform' },
     devicePixelRatio: 2, geometry: {}, objects: {},
     document: { getElementById: () => ({ toDataURL: () => 'data:image/png;base64,cG5n' }) },
     loadRaa: () => packageReady.promise,
@@ -174,7 +175,7 @@ test('one whole-flow operation continues after failures and collects errors and 
   assert.deepEqual(calls, ['on', 'off']);
   assert.match(result.json.steps[0].error, /expected state absent/);
   assert.equal(result.json.steps[1].result.variant, 'off');
-  assert.equal(result.files[0].name, 's-point/off/capture.png');
+  assert.equal(result.files[0].name, 's-point/off/point-off-distance-attenuation.png');
   for (const kind of ['console.error', 'pageerror', 'failed-request', 'unmet-state']) {
     assert.ok(result.json.diagnostics.some(d => d.kind === kind), kind);
   }

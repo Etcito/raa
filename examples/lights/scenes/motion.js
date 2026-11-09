@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 const states = new WeakMap();
 const camera = { eye: [0, 2, 9], target: [0, 2, 0], fovYDeg: 45, near: 0.1, far: 100 };
 const bases = [[-2, 2.7, 0], [2, 2.7, 0], [-2, 1.1, 0], [2, 1.1, 0]];
@@ -22,6 +23,7 @@ export default {
         + 'stationary floor against a dark background. The motion diagnostic is disabled. ')
       + ' Local lights cast no shadow yet. Transparent and displaced fur use the nearest opaque '
       + 'or fur-base prepass tile bounds; tiles without prepass coverage receive no local light.',
+    evidence: captureEvidence('motion', id),
     judge: true,
     timeMs: 128,
     passes: { disable: id === 'off' ? ['motion.display'] : [] },

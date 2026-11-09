@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 const states = new WeakMap();
 const camera = { eye: [4, 4, 7], target: [0, 0.5, 0], fovYDeg: 45, near: 0.1, far: 100 };
 const identity = [0, 0, 0, 1];
@@ -18,6 +19,7 @@ export default {
       + 'Lifecycle PNGs show movement, reattachment, world-preserving detach and parent deletion, '
       + 'then light removal. Local lights cast no shadow yet. Transparent and displaced fur '
       + 'use the nearest opaque or fur-base prepass tile bounds; tiles without prepass coverage receive no local light.',
+    evidence: captureEvidence('attached-light', id),
     judge: true,
     timeMs: 1000,
     selection: {

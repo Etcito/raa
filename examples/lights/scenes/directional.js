@@ -1,3 +1,4 @@
+import { captureEvidence } from '../../../web/common/lights-evidence.js';
 const camera = { eye: [7, 5, 10], target: [0, 0.6, 0], fovYDeg: 45, near: 0.1, far: 100 };
 const boxes = [[-3, 0.5, 0], [0, 0.5, 0], [3, 0.5, 0]];
 const selection = {
@@ -27,6 +28,7 @@ export default {
       : 'Directional lighting off: the same three grey boxes and broad grey floor under dim '
         + 'sun and ambient light, with no local directional light, against a dark background.')
       + limitations,
+    evidence: captureEvidence('directional', id),
     judge: true,
     timeMs: 1000,
     selection,

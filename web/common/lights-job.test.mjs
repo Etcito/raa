@@ -1,6 +1,7 @@
+import { captureEvidence } from './lights-evidence.js';
 // node --test web/common/lights-job.test.mjs: CPU-only selection and visibility checks.
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,6 +147,7 @@ const COMMIT = execFileSync('git', ['-C', WORKTREE, 'rev-parse', 'HEAD'], { enco
 // This is a controlled CLI producer, not a browser or a GPU/timing substitute.
 // It uses the installed client's actual publication/result-file conventions.
 const CLIENT = String.raw`
+import { captureEvidence } from '${new URL('./lights-evidence.js',import.meta.url).href}';
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { deflateSync } from 'node:zlib';
@@ -229,8 +231,8 @@ if (mode === 'wrong-size') result.canvas=[32,32];
 if (mode === 'wrong-counts') result.frames=0;
 if (mode !== 'no-output') {
   steps.push({...pair,result});
-  if (mode !== 'no-capture') writeFileSync(join(dir,mode === 'arbitrary-png'?'other.png':'capture.png'), mode === 'corrupt-png'?Buffer.from('not PNG'):mode === 'empty-png'?Buffer.alloc(0):png());
-  if (mode !== 'missing-lifecycle') for (const name of lifecycleNames) writeFileSync(join(dir,name + '.png'),png());
+  if (mode !== 'no-capture') writeFileSync(join(dir,mode === 'arbitrary-png'?'other.png':(captureEvidence(pair.scene,pair.variant)?.filename ?? 'capture.png')), mode === 'corrupt-png'?Buffer.from('not PNG'):mode === 'empty-png'?Buffer.alloc(0):png());
+  if (mode !== 'missing-lifecycle') for (const name of lifecycleNames) writeFileSync(join(dir,pair.scene === 'attached-light' ? captureEvidence(pair.scene,pair.variant,name).filename : name + '.png'),png());
 }
 }
 if (mode === 'page-errors') diagnostics.push({pair:pairs[0],kind:'pageerror',message:'all frames still attempted'});
@@ -288,9 +290,9 @@ test('managed publication/render/fresh preserve explicit captures, page JSON and
   assert.deepEqual(record.pairs.map(p => p.variant), ['on', 'off']);
   assert.equal(new Set(record.pairs.map(p => p.capture)).size, 2);
   for (const pair of record.pairs) {
-    assert.match(pair.capture, /^\.lights-runs\/[\da-f-]+\/s-point\/(on|off)\/capture\.png$/);
+    assert.match(pair.capture, /^\.lights-runs\/[\da-f-]+\/s-point\/(on|off)\/point-(on|off)-distance-attenuation\.png$/);
     assert.ok(existsSync(join(f.out,pair.capture)));
-    assert.ok(existsSync(join(f.out,pair.capture.replace('capture.png','supplement.png'))));
+    assert.ok(existsSync(join(f.out,pair.capture.replace(/[^/]+$/, 'supplement.png'))));
     const doc = read(join(f.out,pair.result));
     assert.ok(doc.job_id);
     assert.equal(doc.client_id,'host-windows-client');
@@ -484,12 +486,16 @@ from pathlib import Path
 capture, *args = sys.argv[1:]
 assert Path(capture).is_file() and Path(capture).stat().st_size > 0
 assert args[0] == '--description' and args[1]
-assert args[2:] == ['--min-score', '6']
+assert args[2:] == ['--min-score', '6', '--aspect', 'functional']
+assert 'prepass' not in args[1] and 'metre' not in args[1]
 mode = os.environ.get('LIGHTS_TEST_JUDGE_CASE', 'ok')
 if mode == 'no-verdict':
     print('judgment finished without a verdict')
 elif mode == 'failed-score':
     print('{"score": 8}')
+    sys.exit(1)
+elif mode == 'one-low' and Path(capture).name.startswith('point-on-'):
+    print('JUDGE FAIL: 5/10')
     sys.exit(1)
 elif mode == 'score-low':
     print('JUDGE FAIL: 5/10')
@@ -511,19 +517,28 @@ test('judge fails closed across primary and attachment lifecycle captures', asyn
   assert.equal(record.images.length, 14 + 18);
   assert.deepEqual(record.images.slice(0, 2).map(image => image.variant), ['on', 'off']);
   const lifecycle = record.images.filter(image => image.scene === 'attached-light');
-  assert.deepEqual(lifecycle.map(image => image.capture.split('/').at(-1)), [
-    'capture.png','initial.png','translated.png','rotated.png','reattached.png','detached.png',
-    'reattached-before-delete.png','parent-deleted.png','light-removed.png','attached-final.png',
-    'capture.png','initial.png','translated.png','rotated.png','reattached.png','detached.png',
-    'reattached-before-delete.png','parent-deleted.png','light-removed.png','attached-final.png',
-  ]);
+  assert.equal(new Set(record.images.map(image => image.capture.split('/').at(-1))).size, 32);
+  assert.ok(record.images.every(image => image.description && image.aspect === 'functional'));
   assert.ok(lifecycle.every(image => image.score === 8 && image.exitCode === 0));
 
   for (const [mode, pattern] of [
     ['score-low', /score 5 is outside/],
     ['failed-score', /judge process failed/],
     ['no-verdict', /no parseable score verdict/],
-  ]) failed(await cli(f, 'judge', 'ok', {LIGHTS_TEST_JUDGE_CASE:mode}), pattern);
+    ]) {
+    failed(await cli(f, 'judge', 'ok', {LIGHTS_TEST_JUDGE_CASE:mode}), pattern);
+    const rejected = read(join(f.out, 'judge.json'));
+    assert.equal(rejected.complete, false);
+    assert.equal(rejected.images.length, 32, 'every image is attempted despite earlier rejections');
+    assert.equal(rejected.errors.length, 32);
+  }
+
+  failed(await cli(f, 'judge', 'ok', {LIGHTS_TEST_JUDGE_CASE:'one-low'}), /image judgment failures \(1\/32\)/);
+  const oneFailure = read(join(f.out, 'judge.json'));
+  assert.equal(oneFailure.images.length, 32);
+  assert.equal(oneFailure.errors.length, 1);
+  assert.equal(oneFailure.images.at(-1).score, 8);
+  assert.match(oneFailure.images[0].stdout, /JUDGE FAIL/);
 
   const runPath = join(f.out, 'run.json'), savedRun = readFileSync(runPath, 'utf8');
   const run = JSON.parse(savedRun); run.complete = false; writeFileSync(runPath, JSON.stringify(run));
@@ -536,7 +551,7 @@ test('judge fails closed across primary and attachment lifecycle captures', asyn
   writeFileSync(buildPath, savedBuild);
 
   const attachedPair = read(runPath).pairs.find(pair => pair.scene === 'attached-light' && pair.variant === 'on');
-  const stagePath = join(f.out, attachedPair.capture.replace('capture.png', 'rotated.png'));
+  const stagePath = join(f.out, attachedPair.capture.replace(captureEvidence('attached-light','on').filename, captureEvidence('attached-light','on','rotated').filename));
   const savedStage = readFileSync(stagePath);
   rmSync(stagePath);
   failed(await cli(f, 'judge'), /missing lifecycle output: rotated\.png/);
@@ -558,4 +573,26 @@ test('whole-flow diagnostics fail the run after every pair is collected in one j
   failed(await cli(f, 'render', 'missing-step'), /step count differs/);
   failed(await cli(f, 'fresh'), /incomplete/);
   failed(await cli(f, 'render', 'software'), /point\/on.*hardware adapter[\s\S]*point\/off.*hardware adapter/);
+});
+
+
+test('real staged metadata resolves functional labels and 32 unique filenames', async t => {
+  const f = writePage(t, [scene()]);
+  cpSync(new URL('../../examples/lights/scenes/', import.meta.url), join(f.page, 'scenes'), { recursive: true });
+  mkdirSync(join(f.page, 'common'), { recursive: true });
+  cpSync(new URL('./lights-evidence.js', import.meta.url), join(f.page, 'common/lights-evidence.js'));
+  const script = readFileSync(new URL('../../scripts/build-lights.sh', import.meta.url), 'utf8');
+  const imports = script.split("<<'IMPORTS'\n")[1].split('\nIMPORTS\n')[0];
+  execFileSync(process.execPath, ['--input-type=module', '-', join(f.page, 'scenes')], { input: imports });
+  const staging = script.split("<<'JS'\n")[1].split('\nJS\n')[0];
+  execFileSync(process.execPath, ['--input-type=module', '-', f.page], { input: staging, cwd: WORKTREE });
+  const pairs = await check(f.page);
+  assert.equal(pairs.length, 14);
+  const images = pairs.flatMap(pair => [pair.evidence,
+    ...(pair.scene === 'attached-light' ? ['initial','translated','rotated','reattached','detached',
+      'reattached-before-delete','parent-deleted','light-removed','attached-final'].map(stage => captureEvidence(pair.scene,pair.variant,stage)) : []),
+  ]);
+  assert.equal(images.length, 32);
+  assert.equal(new Set(images.map(image => image.filename)).size, 32);
+  assert.ok(images.every(image => image.label && !/prepass|metre|intensity equality|dark background/.test(image.label)));
 });
