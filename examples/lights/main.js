@@ -76,9 +76,17 @@ async function run(args) {
       width: args.width, height: args.height, lib,
       onEngine: (created) => { engine = created; },
     });
+    const preparedCapture = typeof scene.prepareCapture === 'function';
+    if (preparedCapture) {
+      window.__nmcGpuProgress = 'prepareCapture';
+      result.lifecycle = await scene.prepareCapture(engine, variant, {
+        width: canvas.width, height: canvas.height,
+      });
+    }
     result.gpuErrors = gpuErrors.slice();
     if (gpuErrors.length) throw new Error(`GPU errors: ${gpuErrors.join('\n')}`);
-    last = { scene, variant };
+    last = { scene, variant, preparedCapture };
+    if (scene.legend) status.textContent = scene.legend;
     return result;
   } finally {
     running = false;
@@ -90,7 +98,9 @@ registerNmcGpu({
   screenshot: async () => {
     window.__nmcGpuProgress = 'capture';
     if (!engine || !last) throw new Error('no completed run');
-    renderAt(engine, last.scene, last.variant, variantTimeMs(last.variant));
+    if (!last.preparedCapture) {
+      renderAt(engine, last.scene, last.variant, variantTimeMs(last.variant));
+    }
     if (gpuErrors.length) throw new Error(`GPU errors: ${gpuErrors.join('\n')}`);
     return canvas.toDataURL('image/png').split(',')[1];
   },
