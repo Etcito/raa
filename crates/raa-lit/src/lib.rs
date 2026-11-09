@@ -41,6 +41,8 @@ pub mod skin_editor;
 pub mod skin_views;
 mod slots;
 mod textures;
+#[cfg(test)]
+pub(crate) mod tile_selection;
 pub use skin_editor::{OverlayGeometry, REST_EDGE_STRIDE};
 pub use skin_views::{
     INSTANCE_PALETTE_OFFSET, PALETTE_BLOCK, PALETTE_MATRIX_BYTES, RestMeshView, SKIN_RECORD_STRIDE,

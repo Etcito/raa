@@ -112,3 +112,41 @@ The optional `editor` output overlay (order 210) records no GPU commands while o
 `WireframeMode` and `LitHandle::{set_wireframe, clear_wireframe, set_outline,
 set_mesh_edges}` control it. Surface contributors use `draw_surface_instances`
 to respect edges-only overrides. See [editor features](../../docs/editor-features.md).
+
+## M2-TILE-SELECTION
+
+The CPU oracle `tile_selection::select_tile` is crate-visible in library tests; run
+`cargo test -p raa-lit --lib tile_selection::tests`. Text fixtures specify the estimator
+and exact rank before the separate GPU coverage, selection and order-35 recording shares.
+The shared `raa_shader` constants are 16 pixels, 127 lights and 128 words, matching
+solstice@7e465b5 `crates/solstice-render/shaders/lighting/light_tiles_common.wgsl:5,10,12`.
+The nondeterministic source overflow algorithm is not used.
+
+For each clipped 16 by 16 tile, ignore out-of-viewport samples, nonfinite depth and
+depth outside `[0,1)`. Standard-Z nearest is the minimum remaining depth; farthest
+is the maximum. An empty tile emits count zero, including for directionals. Reconstruct
+the world point at the centre of the clipped pixel rectangle at nearest depth:
+NDC is `(2*x/width-1, 1-2*y/height, depth)`; apply inverse jittered projection,
+divide by homogeneous w, then inverse view. Bounds use the four inward normalized
+tile-frustum side planes and near/far view-axis planes reconstructed at these depths.
+A point or spot qualifies when its range sphere intersects all six half-spaces
+(tangency included). An area uses radius `range + hypot(width,height)/2` about its
+centre, covering every representative point. Directionals qualify on every covered tile.
+Cone, emission-side and centre-point falloff never exclude conservative candidates.
+
+At the reconstructed point, score is luminance of linear colour times intensity,
+`0.2126*R + 0.7152*G + 0.0722*B`, times S11 `windowed_falloff(distance, range)`.
+Spots additionally multiply by `spot_factor(dot(travelDirection,directionFromLight),
+cosOuter,cosInner)`. Areas measure distance from S11 `representative_point` and multiply
+by `area_light_emits` (0 or 1). Directionals use luminance alone. No surface-normal,
+visibility or shadow term enters ranking. Clamp scores to `[0,f32::MAX]`, saturating
+positive overflow and mapping undefined arithmetic to zero; every score is finite.
+
+Retain qualified zero-score candidates too. A fixed 256-wide bitonic sorting network
+orders eligible entries first, descending numeric score then ascending stable handle;
+signed zeros tie. Padding has separate eligibility, never a sentinel score/handle.
+GPU indices already follow handle order in `LocalLights::write_gpu`, including after
+removal. Emit exactly `min(qualifying_count,127)` entries, zeroing unused CPU slots.
+`droppedLightReferences` is `qualifying_count-min(qualifying_count,127)`, summed over
+tiles and submitted views of the invocation, counting references rather than objects.
+The CPU fixture passes no mutable registry state and never compares with GPU output.
