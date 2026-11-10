@@ -47,10 +47,80 @@ pub enum EnvUpdate {
     EveryFrame,
 }
 
+/// Sky evaluation model.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SkyModel {
+    #[default]
+    Physical,
+    Legacy,
+}
+
+/// Artistic profile and physical preset identity.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SkyPreset {
+    #[default]
+    Day,
+    Snow,
+    Jungle,
+    Night,
+}
+
+/// Physical atmosphere controls.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AtmosphereDesc {
+    pub ground_albedo: [f32; 3],
+    pub mie_multiplier: f32,
+}
+
+impl SkyPreset {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Day => "day",
+            Self::Snow => "snow",
+            Self::Jungle => "jungle",
+            Self::Night => "night",
+        }
+    }
+    pub fn atmosphere(self) -> AtmosphereDesc {
+        let (ground_albedo, mie_multiplier) = match self {
+            Self::Day | Self::Night => ([0.3; 3], 1.0),
+            Self::Snow => ([0.9; 3], 1.5),
+            Self::Jungle => ([0.18, 0.26, 0.14], 1.2),
+        };
+        AtmosphereDesc {
+            ground_albedo,
+            mie_multiplier,
+        }
+    }
+}
+
+/// Explicitly supplied shared legacy cloud fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LegacyCloudFields(pub u8);
+impl LegacyCloudFields {
+    pub const NONE: Self = Self(0);
+    pub const COVERAGE: Self = Self(1);
+    pub const DENSITY: Self = Self(2);
+    pub const ALTITUDE: Self = Self(4);
+    pub const WIND: Self = Self(8);
+    pub const ALL: Self = Self(15);
+}
+
+/// A merged descriptor together with the caller's explicit intent.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SkyTransaction {
+    pub desc: SkyDesc,
+    pub preset: Option<SkyPreset>,
+    pub cloud_fields: LegacyCloudFields,
+}
+
 /// Procedural sky: zenith/horizon/ground gradient (linear rgb, scaled by `intensity`), sun
 /// disc and cloud layer. Scene-referred linear HDR.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkyDesc {
+    pub model: SkyModel,
+    pub profile: SkyPreset,
+    pub atmosphere: AtmosphereDesc,
     /// Linear rgb at the zenith (>= 0).
     pub zenith: [f32; 3],
     /// Linear rgb at the horizon (>= 0).
@@ -78,6 +148,9 @@ impl SkyDesc {
             // Bright midday: deep blue zenith fading into a pale warm horizon, scattered
             // fluffy white clouds with a strong silver lining.
             "day" => Some(SkyDesc {
+                model: SkyModel::Physical,
+                profile: SkyPreset::Day,
+                atmosphere: SkyPreset::Day.atmosphere(),
                 zenith: [0.15, 0.35, 0.85],
                 horizon: [0.85, 0.80, 0.70],
                 ground: [0.35, 0.30, 0.25],
@@ -91,6 +164,9 @@ impl SkyDesc {
             // Cold overcast: pale blue-grey sky mostly hidden by thick grey-white clouds,
             // bright white snowy ground bouncing light back up.
             "snow" => Some(SkyDesc {
+                model: SkyModel::Physical,
+                profile: SkyPreset::Snow,
+                atmosphere: SkyPreset::Snow.atmosphere(),
                 zenith: [0.55, 0.62, 0.72],
                 horizon: [0.82, 0.85, 0.90],
                 ground: [0.95, 0.96, 0.98],
@@ -111,6 +187,9 @@ impl SkyDesc {
             // Humid tropics: teal-green haze at the horizon, warm sun, many puffy clouds over
             // a dark green canopy.
             "jungle" => Some(SkyDesc {
+                model: SkyModel::Physical,
+                profile: SkyPreset::Jungle,
+                atmosphere: SkyPreset::Jungle.atmosphere(),
                 zenith: [0.20, 0.42, 0.62],
                 horizon: [0.55, 0.78, 0.68],
                 ground: [0.18, 0.26, 0.14],
@@ -131,6 +210,9 @@ impl SkyDesc {
             // Moonlit night: dark navy zenith, faint horizon glow, a small cool moon-like
             // disc and a few thin dim clouds.
             "night" => Some(SkyDesc {
+                model: SkyModel::Physical,
+                profile: SkyPreset::Night,
+                atmosphere: SkyPreset::Night.atmosphere(),
                 zenith: [0.01, 0.02, 0.06],
                 horizon: [0.04, 0.06, 0.10],
                 ground: [0.02, 0.02, 0.025],
@@ -154,6 +236,10 @@ impl SkyDesc {
 
     /// Refuses with `sky.invalid` and a message naming the first offending field.
     pub fn validate(&self) -> Result<(), RaaError> {
+        for (i, value) in self.atmosphere.ground_albedo.into_iter().enumerate() {
+            within(&format!("atmosphere.ground_albedo[{i}]"), value, 0.0, 1.0)?;
+        }
+        positive("atmosphere.mie_multiplier", self.atmosphere.mie_multiplier)?;
         color("zenith", self.zenith)?;
         color("horizon", self.horizon)?;
         color("ground", self.ground)?;

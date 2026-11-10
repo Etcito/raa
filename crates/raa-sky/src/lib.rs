@@ -22,7 +22,10 @@ mod state;
 mod time_of_day;
 mod weather;
 
-pub use desc::{CloudDesc, EnvUpdate, SkyDesc};
+pub use desc::{
+    AtmosphereDesc, CloudDesc, EnvUpdate, LegacyCloudFields, SkyDesc, SkyModel, SkyPreset,
+    SkyTransaction,
+};
 pub use feature::{SkyFeature, SkyHandle};
 pub use time_of_day::*;
 pub use weather::*;

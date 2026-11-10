@@ -13,11 +13,11 @@ use raa_pipeline::Pipeline;
 use raa_scene::DirectionalLight;
 
 use crate::background::SkyBackground;
-use crate::desc::SkyDesc;
+use crate::desc::{LegacyCloudFields, SkyDesc, SkyModel, SkyPreset, SkyTransaction};
 use crate::env_pass::SkyEnvPass;
 use crate::state::{SharedSky, SkyState, invalid};
 use crate::time_of_day::{TimeOfDaySettings, TimeOfDayState};
-use crate::weather::{ResolvedWeatherState, WeatherSettings, WeatherUpdate};
+use crate::weather::{ResolvedWeatherState, WeatherPreset, WeatherSettings, WeatherUpdate};
 
 /// `pipeline.busy`: the pipeline or the sky state is borrowed (called while a frame executes).
 fn busy(what: &str) -> RaaError {
@@ -72,9 +72,78 @@ impl SkyHandle {
     /// next frame. `sky.invalid` (naming the field) leaves the current sky unchanged;
     /// `pipeline.busy` when called while a frame executes.
     pub fn set(&self, d: SkyDesc) -> Result<(), RaaError> {
-        d.validate()?;
+        self.set_transaction(SkyTransaction {
+            desc: d,
+            preset: None,
+            cloud_fields: LegacyCloudFields::ALL,
+        })
+    }
+
+    /// Atomically accepts a merged sky description and its explicit preset and cloud intent.
+    pub fn set_transaction(&self, transaction: SkyTransaction) -> Result<(), RaaError> {
+        let SkyTransaction {
+            desc,
+            preset,
+            cloud_fields,
+        } = transaction;
+        desc.validate()?;
+        if cloud_fields.0 & !LegacyCloudFields::ALL.0 != 0 {
+            return Err(invalid("cloud_fields contains unknown bits"));
+        }
+        if preset.is_some_and(|p| p != desc.profile) {
+            return Err(invalid("preset must agree with profile"));
+        }
         let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
-        s.desc = d;
+        let mut time = s.time;
+        let mut weather = s.weather.clone();
+        if desc.model == SkyModel::Physical {
+            let mut settings = weather.settings;
+            let mut start = None;
+            if let Some(p) = preset {
+                let (weather_preset, hours) = match p {
+                    SkyPreset::Day => (WeatherPreset::Fair, 9.0),
+                    SkyPreset::Snow => (WeatherPreset::Overcast, 12.0),
+                    SkyPreset::Jungle => (WeatherPreset::Broken, 15.0),
+                    SkyPreset::Night => (WeatherPreset::Clear, 0.0),
+                };
+                let mut time_settings = time.state.settings;
+                time_settings.time.day = 172;
+                time_settings.time.hours = hours;
+                time_settings.validate()?;
+                time.apply_preset_time(time_settings);
+                settings.target = crate::weather::Weather::by_name(weather_preset.as_str())
+                    .expect("built-in weather preset");
+                start = Some(weather_preset);
+            }
+            let fields = cloud_fields.0;
+            if fields & LegacyCloudFields::COVERAGE.0 != 0 {
+                settings.target.coverage = desc.clouds.coverage;
+            }
+            if fields & LegacyCloudFields::DENSITY.0 != 0 {
+                settings.target.density = desc.clouds.density;
+            }
+            if fields & LegacyCloudFields::ALTITUDE.0 != 0 {
+                settings.target.base = desc.clouds.altitude_m;
+            }
+            if fields & LegacyCloudFields::WIND.0 != 0 {
+                let [x, z] = desc.clouds.wind_mps;
+                settings.target.wind_speed = x.hypot(z);
+                settings.target.wind_from = (-x).atan2(z).to_degrees().rem_euclid(360.0);
+            }
+            if preset.is_none() && fields != 0 && settings.target != weather.settings.target {
+                settings.changing = false;
+            }
+            let update = WeatherUpdate {
+                settings,
+                cycle_start: start,
+                restart_cycle: preset.is_some(),
+            };
+            update.validate()?;
+            weather.apply_update(update)?;
+        }
+        s.desc = desc;
+        s.time = time;
+        s.weather = weather;
         s.env_dirty = true;
         s.gpu_dirty = true;
         Ok(())
@@ -225,6 +294,112 @@ mod tests {
         SkyHandle {
             state: SkyState::shared(),
         }
+    }
+
+    #[test]
+    fn transactions_preserve_presence_and_are_atomic() {
+        let h = handle();
+        for (preset, weather, hours) in [
+            (SkyPreset::Day, WeatherPreset::Fair, 9.0),
+            (SkyPreset::Snow, WeatherPreset::Overcast, 12.0),
+            (SkyPreset::Jungle, WeatherPreset::Broken, 15.0),
+            (SkyPreset::Night, WeatherPreset::Clear, 0.0),
+        ] {
+            let desc = SkyDesc::preset(preset.as_str()).unwrap();
+            h.set_transaction(SkyTransaction {
+                desc,
+                preset: Some(preset),
+                cloud_fields: LegacyCloudFields::NONE,
+            })
+            .unwrap();
+            assert_eq!(h.time_of_day().settings.time.hours, hours);
+            assert_eq!(
+                h.weather().settings.target,
+                Weather::by_name(weather.as_str()).unwrap()
+            );
+        }
+        let desc = SkyDesc::preset("day").unwrap();
+        h.set_transaction(SkyTransaction {
+            desc: desc.clone(),
+            preset: Some(SkyPreset::Day),
+            cloud_fields: LegacyCloudFields::NONE,
+        })
+        .unwrap();
+        let mut time = h.time_of_day().settings;
+        time.time.hours = 18.0;
+        h.set_time_of_day(time).unwrap();
+        h.set_transaction(SkyTransaction {
+            desc: desc.clone(),
+            preset: None,
+            cloud_fields: LegacyCloudFields::NONE,
+        })
+        .unwrap();
+        assert_eq!(h.time_of_day().settings.time.hours, 18.0);
+        h.set_transaction(SkyTransaction {
+            desc: desc.clone(),
+            preset: Some(SkyPreset::Day),
+            cloud_fields: LegacyCloudFields::COVERAGE,
+        })
+        .unwrap();
+        assert_eq!(h.time_of_day().settings.time.hours, 9.0);
+        assert_eq!(h.weather().settings.target.coverage, desc.clouds.coverage);
+        let before = h.state.borrow().clone();
+        let mut bad = desc.clone();
+        bad.clouds.wind_mps = [f32::MAX, f32::MAX];
+        assert!(
+            h.set_transaction(SkyTransaction {
+                desc: bad,
+                preset: Some(SkyPreset::Day),
+                cloud_fields: LegacyCloudFields::WIND
+            })
+            .is_err()
+        );
+        assert_eq!(*h.state.borrow(), before);
+        assert!(
+            h.set_transaction(SkyTransaction {
+                desc,
+                preset: None,
+                cloud_fields: LegacyCloudFields(16)
+            })
+            .is_err()
+        );
+        assert_eq!(*h.state.borrow(), before);
+    }
+
+    #[test]
+    fn shared_cloud_edits_and_later_weather_setters_win() {
+        let h = handle();
+        let mut desc = h.get();
+        desc.clouds.density = 2.5;
+        desc.clouds.wind_mps = [3.0, 4.0];
+        h.set_transaction(SkyTransaction {
+            desc: desc.clone(),
+            preset: Some(SkyPreset::Day),
+            cloud_fields: LegacyCloudFields(
+                LegacyCloudFields::DENSITY.0 | LegacyCloudFields::WIND.0,
+            ),
+        })
+        .unwrap();
+        let mut settings = h.weather().settings;
+        assert_eq!(settings.target.density, 2.5);
+        assert_eq!(settings.target.wind_speed, 5.0);
+        settings.target.coverage = 0.7;
+        h.set_weather(settings).unwrap();
+        desc.model = SkyModel::Legacy;
+        h.set_transaction(SkyTransaction {
+            desc: desc.clone(),
+            preset: None,
+            cloud_fields: LegacyCloudFields::NONE,
+        })
+        .unwrap();
+        desc.model = SkyModel::Physical;
+        h.set_transaction(SkyTransaction {
+            desc,
+            preset: None,
+            cloud_fields: LegacyCloudFields::NONE,
+        })
+        .unwrap();
+        assert_eq!(h.weather().settings, settings);
     }
 
     fn clean(h: &SkyHandle) {

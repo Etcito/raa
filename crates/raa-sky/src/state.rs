@@ -146,6 +146,13 @@ impl TimePlayback {
         self.visible() != before
     }
 
+    /// Explicit preset selection resets playback even when authored values are equal.
+    pub(crate) fn apply_preset_time(&mut self, settings: TimeOfDaySettings) {
+        self.state.current = settings.time;
+        self.state.settings = settings;
+        self.evaluate();
+    }
+
     /// Stores a validated manual light descriptor. While automatic lighting is enabled its
     /// direction is ignored (the astronomical direction wins) but its colour and intensity
     /// are the undimmed daylight baseline. Returns whether the accepted light changed.
