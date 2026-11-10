@@ -175,7 +175,8 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) {
     let ao = raa_slot_ao(in.frag_coord);
     let c = raa_pass_shade_ctx(s, in, ao, shadow);
     let lit = s.emissive
-        + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz, raa_frame.sun_color.rgb * shadow)
+        + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
+            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)
         + raa_slot_ambient(s, c) * min(s.ao, ao)
         + raa_slot_indirect(s, c)
         + raa_local_lighting(s, c)

@@ -513,6 +513,78 @@ fn local_lighting_composes_with_selected_providers() {
 }
 
 #[test]
+fn directional_radiance_is_applied_once_at_each_lit_pass_boundary() {
+    for (pass, source) in [
+        (PassKind::Forward, raa_shader::PASS_FORWARD_WGSL),
+        (PassKind::Transparent, raa_shader::PASS_TRANSPARENT_WGSL),
+        (PassKind::FurShell, raa_shader::PASS_FURSHELL_WGSL),
+    ] {
+        // The dominant sun term carries the single atmospheric boundary: raw frame
+        // radiance is the helper's input and the shadow scales the transmitted result.
+        assert_eq!(
+            source.matches("raa_directional_radiance(").count(),
+            1,
+            "{pass:?}"
+        );
+        assert!(
+            source.contains(
+                "raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,\n            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)"
+            ),
+            "{pass:?}"
+        );
+        assert!(!source.contains("raa_frame.sun_color ="), "{pass:?}");
+        // Material ordering: direct, ambient, indirect, local lighting, then the
+        // Flat/UNLIT select.
+        let direct = source
+            .find("raa_directional_radiance(raa_frame.sun_color.rgb)")
+            .expect("boundary");
+        let ambient = source.find("raa_slot_ambient(s, c)").expect("ambient");
+        let indirect = source.find("raa_slot_indirect(s, c)").expect("indirect");
+        let local = source.find("raa_local_lighting(s, c)").expect("local");
+        let unlit = source.find("raa_pass_unlit(in.record)").expect("unlit");
+        assert!(
+            direct < ambient && ambient < indirect && indirect < local && local < unlit,
+            "{pass:?}"
+        );
+        // Local lights keep their raw radiance: only the sun term reaches the boundary.
+        assert!(
+            !source.contains("raa_directional_radiance(direction)")
+                && !source.contains("raa_directional_radiance(raa_local"),
+            "{pass:?}"
+        );
+    }
+    // Prepass and the shadow caster never shade a material light boundary.
+    for source in [raa_shader::PASS_PREPASS_WGSL, raa_shader::PASS_SHADOW_WGSL] {
+        assert!(!source.contains("raa_directional_radiance("));
+    }
+
+    let reg = MaterialFnRegistry::new();
+    let composer = default_composer();
+    for pass in [PassKind::Forward, PassKind::Transparent, PassKind::FurShell] {
+        let key = VariantKey {
+            material_fn: MaterialFnId::STANDARD,
+            pass,
+            msaa: 4,
+            flags: 0,
+        };
+        let wgsl = composer.compose(&reg, &key).expect("compose");
+        // The prelude declares the boundary once and the pass calls it once.
+        assert_eq!(
+            wgsl.matches("fn raa_directional_radiance(").count(),
+            1,
+            "{pass:?}"
+        );
+        assert_eq!(
+            wgsl.matches("raa_directional_radiance(raa_frame.sun_color.rgb)")
+                .count(),
+            1,
+            "{pass:?}"
+        );
+        assert_eq!(Composer::validate(&wgsl), Ok(()));
+    }
+}
+
+#[test]
 fn local_loop_rejects_derivatives_but_accepts_explicit_lod() {
     use raa_shader::{ShaderError, SlotId, SlotProvider};
     let reg = MaterialFnRegistry::new();

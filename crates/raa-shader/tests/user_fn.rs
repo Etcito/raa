@@ -489,3 +489,29 @@ fn material_data_words_are_readable_without_a_binding() {
     );
     assert_refused(&src, "forbidden attribute", &["@group"]);
 }
+
+/// The dominant directional boundary is prelude code: a material function may call it
+/// without declaring the weather bindings, while redeclaring it stays refused.
+const DIRECTIONAL_READER: &str = "fn material_main(in: MaterialInput) -> MaterialOutput {
+    var o = raa_default_output(in);
+    o.base_color = o.base_color * raa_directional_radiance(vec3<f32>(1.0));
+    return o;
+}
+";
+
+#[test]
+fn directional_radiance_is_readable_but_not_declarable() {
+    let mut reg = MaterialFnRegistry::new();
+    assert_eq!(
+        register(&mut reg, "directional.reader", DIRECTIONAL_READER),
+        MaterialFnId(1)
+    );
+    let src = format!(
+        "fn raa_directional_radiance(raw: vec3<f32>) -> vec3<f32> {{\n    return raw;\n}}\n{DIRECTIONAL_READER}"
+    );
+    assert_refused(
+        &src,
+        "reserved prefix",
+        &["`raa_directional_radiance`", " at 1:"],
+    );
+}

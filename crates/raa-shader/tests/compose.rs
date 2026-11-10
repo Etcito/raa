@@ -92,6 +92,7 @@ fn sections_follow_contract_order() {
     let mut needles = vec![
         "// raa section: prelude",
         "struct FrameGpu {",
+        "fn raa_directional_radiance(",
         "// raa section: lib",
         "fn raa_hash3(",
         "// raa section: cloud shadow",
@@ -168,6 +169,43 @@ fn cloud_shadow_is_attached_once_before_the_providers() {
             1,
             "{pass:?}"
         );
+        if let Err(e) = Composer::validate(&wgsl) {
+            panic!("{pass:?}: {e}");
+        }
+    }
+}
+
+#[test]
+fn directional_boundary_is_declared_once_and_called_by_the_lit_passes() {
+    let reg = MaterialFnRegistry::new();
+    let composer = stub_composer();
+    for pass in PassKind::ALL {
+        let wgsl = composer.compose(&reg, &key(pass)).expect("compose");
+        // The prelude owns the boundary and the weather record it reads.
+        assert_eq!(
+            wgsl.matches("fn raa_directional_radiance(").count(),
+            1,
+            "{pass:?}"
+        );
+        assert_eq!(
+            wgsl.matches("@group(1) @binding(16)").count(),
+            1,
+            "{pass:?}"
+        );
+        let lit = matches!(
+            pass,
+            PassKind::Forward | PassKind::Transparent | PassKind::FurShell
+        );
+        let call = "raa_directional_radiance(raa_frame.sun_color.rgb)";
+        assert_eq!(wgsl.matches(call).count(), usize::from(lit), "{pass:?}");
+        if lit {
+            // The raw frame radiance stays the only input, before the Flat/UNLIT select.
+            assert!(
+                wgsl.find(call).unwrap() < wgsl.find("raa_pass_unlit(in.record)").unwrap(),
+                "{pass:?}"
+            );
+        }
+        assert!(!wgsl.contains("raa_frame.sun_color ="), "{pass:?}");
         if let Err(e) = Composer::validate(&wgsl) {
             panic!("{pass:?}: {e}");
         }
