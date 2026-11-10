@@ -8,11 +8,10 @@ description = "Procedural sky of the lit renderer: gradient sky, sun disc and cl
 
 [dependencies]
 raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-scene = { workspace = true }
 wgpu = { workspace = true }
 raa-pipeline = { path = "../raa-pipeline" }
 raa-lit = { path = "../raa-lit" }
 raa-shader = { path = "../raa-shader" }
 raa-ibl = { path = "../raa-ibl" }
-
-[dev-dependencies]
-raa-scene = { workspace = true }

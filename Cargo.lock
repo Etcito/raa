@@ -1143,6 +1143,7 @@ dependencies = [
  "raa-core",
  "raa-ibl",
  "raa-lit",
+ "raa-math",
  "raa-pipeline",
  "raa-scene",
  "raa-shader",
