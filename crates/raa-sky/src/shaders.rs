@@ -1,8 +1,11 @@
-//! Full WGSL modules of the `sky.env` pass and the `sky.background` contributor.
+//! Full WGSL modules of the `sky.env` pass, the `sky.background` contributor and the
+//! atmosphere LUT compute passes.
 //!
-//! Each module is `PRELUDE_WGSL + LIB_WGSL + SKY_WGSL +` its entry file, so groups 0 (frame)
-//! and 1 (lighting) are declared exactly as in the forward pass. Self-contained (no `crate::`
-//! paths) so `tests/variants.rs` can include it with `#[path]`.
+//! The render modules are `PRELUDE_WGSL + LIB_WGSL + SKY_WGSL +` their entry file, so groups 0
+//! (frame) and 1 (lighting) are declared exactly as in the forward pass. The atmosphere LUT
+//! module is the S23 helper source plus its three compute entries and deliberately omits the
+//! prelude: groups 0/1 stay empty and every resource is an explicit group-2 binding.
+//! Self-contained (no `crate::` paths) so `tests/variants.rs` can include it with `#[path]`.
 
 use raa_shader::{LIB_WGSL, PRELUDE_WGSL};
 
@@ -12,6 +15,11 @@ const SKY_SRC: &str = include_str!("wgsl/sky.wgsl");
 const SKY_ENV_SRC: &str = include_str!("wgsl/sky_env.wgsl");
 /// Entry points of the background contributor.
 const SKY_BACKGROUND_SRC: &str = include_str!("wgsl/sky_background.wgsl");
+/// The S23 atmosphere helpers and the S10 `PhysicalSkyGpu` record, without bindings.
+const ATMOSPHERE_SRC: &str = include_str!("wgsl/atmosphere.wgsl");
+/// The three LUT compute entries (static transmittance, static multiple scattering, dynamic
+/// sky view) of the physical atmosphere.
+const ATMOSPHERE_LUTS_SRC: &str = include_str!("wgsl/atmosphere_luts.wgsl");
 
 fn assemble(entry: &str) -> String {
     let mut s = String::with_capacity(
@@ -36,6 +44,32 @@ pub(crate) fn env_module_wgsl() -> String {
 #[allow(dead_code)] // consumed by SkyFeature (sky.env, sky.background) and tests/variants.rs
 pub(crate) fn background_module_wgsl() -> String {
     assemble(SKY_BACKGROUND_SRC)
+}
+
+/// The three compute entries of [`atmosphere_luts_module_wgsl`], in build order: the static
+/// transmittance table, the static multiple-scattering table and the per-view sky view.
+#[allow(dead_code)] // consumed by the atmosphere resource/share cards (7428+)
+pub(crate) const ATMOSPHERE_LUT_ENTRIES: [&str; 3] = [
+    "raa_atmosphere_build_transmittance",
+    "raa_atmosphere_build_multi_scatter",
+    "raa_atmosphere_build_sky_view",
+];
+
+/// The atmosphere LUT compute module: the S23 helper source plus the three compute entries.
+///
+/// It deliberately composes without `PRELUDE_WGSL`/`LIB_WGSL`, so groups 0 and 1 are empty
+/// and a pipeline layout only needs an explicit group 2 with the S10 private compute
+/// resources: binding 0 `PhysicalSkyGpu` uniform (256 bytes), 1 transmittance LUT, 2
+/// multiple-scattering LUT, 3 filtering sampler and 4 Rgba16Float storage output. The
+/// dispatched entry selects the LUT written to binding 4.
+#[allow(dead_code)] // consumed by the atmosphere resource/share cards (7428+)
+pub(crate) fn atmosphere_luts_module_wgsl() -> String {
+    let mut s = String::with_capacity(ATMOSPHERE_SRC.len() + ATMOSPHERE_LUTS_SRC.len() + 2);
+    for part in [ATMOSPHERE_SRC, ATMOSPHERE_LUTS_SRC] {
+        s.push_str(part);
+        s.push('\n');
+    }
+    s
 }
 
 /// CPU port of `raa_sky_env_face_dir`: unit direction of face coordinates (u, v) in [-1, 1]

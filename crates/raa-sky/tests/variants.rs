@@ -202,3 +202,185 @@ fn legacy_sky_remains_standalone() {
         panic!("legacy sky shader refused: {e}");
     }
 }
+
+/// The adapted LUT source (S23): the static transmittance and multiple-scattering tables and
+/// the dynamic sky-view table, as three explicit group-2 compute entries.
+const ATMOSPHERE_LUTS_WGSL: &str = include_str!("../src/wgsl/atmosphere_luts.wgsl");
+
+#[test]
+fn atmosphere_lut_module_is_explicit_group_two_compute() {
+    let wgsl = shaders::atmosphere_luts_module_wgsl();
+    assert!(
+        wgsl.contains(ATMOSPHERE_WGSL),
+        "the LUT module omits the atmosphere helpers and record"
+    );
+    assert!(
+        wgsl.contains(ATMOSPHERE_LUTS_WGSL),
+        "the LUT module omits its compute source"
+    );
+    // The lit prelude/library are not composed: the compute pipeline has empty groups 0/1
+    // and binds everything explicitly in group 2.
+    assert!(
+        !wgsl.contains("@group(0)") && !wgsl.contains("@group(1)"),
+        "the LUT module must not declare group 0/1 resources"
+    );
+    assert!(
+        !wgsl.contains("raa_frame"),
+        "the LUT module must not depend on the frame ABI"
+    );
+    if let Err(e) = Composer::validate(&wgsl) {
+        panic!("atmosphere LUT shader refused: {e}");
+    }
+    for entry in shaders::ATMOSPHERE_LUT_ENTRIES {
+        assert!(
+            wgsl.contains(&format!("@compute @workgroup_size(8, 8)\nfn {entry}(")),
+            "compute entry {entry} missing"
+        );
+    }
+}
+
+#[test]
+fn atmosphere_luts_preserve_source_steps_and_authorable_ground() {
+    for text in [
+        "const STEPS: i32 = 40;",
+        "const SQRT_DIRECTIONS: u32 = 8u;",
+        "const STEPS: i32 = 20;",
+        "const STEPS: i32 = 32;",
+        "let t = f * f * t_max;",
+        "fn raa_atmosphere_lut_optical_depth_to_top(",
+        "fn raa_atmosphere_lut_integrate(",
+        "sky.ground_albedo.rgb",
+        "raa_atmosphere_min_scale",
+    ] {
+        assert!(
+            ATMOSPHERE_LUTS_WGSL.contains(text),
+            "source integration detail missing: {text}"
+        );
+    }
+    // The ground albedo is authored through the S10 lane, never a hidden shader constant.
+    assert!(
+        !ATMOSPHERE_LUTS_WGSL.contains("GROUND_ALBEDO"),
+        "ground albedo must come from PhysicalSkyGpu.ground_albedo"
+    );
+    let mut names = Vec::new();
+    for line in ATMOSPHERE_LUTS_WGSL.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("fn ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            names.push(name);
+        }
+    }
+    assert!(!names.is_empty(), "LUT helpers are empty");
+    for name in names {
+        assert!(
+            name.starts_with("raa_atmosphere_"),
+            "LUT function {name} is not prefixed raa_atmosphere_"
+        );
+    }
+}
+
+#[test]
+fn atmosphere_luts_reflect_the_s10_private_compute_layout() {
+    use wgpu::naga::{
+        AddressSpace, ImageClass, ImageDimension, ScalarKind, ShaderStage, StorageAccess,
+        StorageFormat, TypeInner, front::wgsl, valid,
+    };
+    let source = shaders::atmosphere_luts_module_wgsl();
+    let module = wgsl::parse_str(&source).expect("atmosphere LUT module parses");
+    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+        .validate(&module)
+        .expect("atmosphere LUT module validates");
+
+    let mut bindings = Vec::new();
+    for (handle, global) in module.global_variables.iter() {
+        if let Some(binding) = &global.binding {
+            assert_eq!(binding.group, 2, "every LUT resource lives in group 2");
+            bindings.push((binding.group, binding.binding, handle));
+        }
+    }
+    bindings.sort_by_key(|(group, binding, _)| (*group, *binding));
+    let points: Vec<(u32, u32)> = bindings.iter().map(|(g, b, _)| (*g, *b)).collect();
+    assert_eq!(
+        points,
+        vec![(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)],
+        "atmosphere LUT layout is uniform, two sampled LUTs, sampler and storage output"
+    );
+    for (_, binding, handle) in &bindings {
+        let global = &module.global_variables[*handle];
+        let inner = &module.types[global.ty].inner;
+        match *binding {
+            0 => {
+                assert_eq!(global.space, AddressSpace::Uniform);
+                let TypeInner::Struct { span, .. } = *inner else {
+                    panic!("binding 0 is not the PhysicalSkyGpu struct");
+                };
+                assert_eq!(span, 256, "PhysicalSkyGpu is the S10 256-byte record");
+            }
+            1 | 2 => assert!(
+                matches!(
+                    inner,
+                    TypeInner::Image {
+                        dim: ImageDimension::D2,
+                        arrayed: false,
+                        class: ImageClass::Sampled {
+                            kind: ScalarKind::Float,
+                            multi: false,
+                        },
+                    }
+                ),
+                "binding {binding} is not a sampled 2D f32 LUT"
+            ),
+            3 => assert!(
+                matches!(inner, TypeInner::Sampler { comparison: false }),
+                "binding 3 is not a filtering sampler"
+            ),
+            4 => assert!(
+                matches!(
+                    inner,
+                    TypeInner::Image {
+                        dim: ImageDimension::D2,
+                        arrayed: false,
+                        class: ImageClass::Storage {
+                            format: StorageFormat::Rgba16Float,
+                            access: StorageAccess::STORE,
+                        },
+                    }
+                ),
+                "binding 4 is not an Rgba16Float storage output"
+            ),
+            other => panic!("unexpected atmosphere LUT binding {other}"),
+        }
+    }
+
+    assert_eq!(
+        module.entry_points.len(),
+        shaders::ATMOSPHERE_LUT_ENTRIES.len(),
+        "the LUT module has exactly three compute entries"
+    );
+    let mut used = Vec::new();
+    for (index, entry) in module.entry_points.iter().enumerate() {
+        assert_eq!(entry.stage, ShaderStage::Compute);
+        assert_eq!(entry.workgroup_size, [8, 8, 1]);
+        let point = info.get_entry_point(index);
+        let mut resources: Vec<u32> = bindings
+            .iter()
+            .filter(|(_, _, handle)| !point[*handle].is_empty())
+            .map(|(_, binding, _)| *binding)
+            .collect();
+        resources.sort_unstable();
+        used.push((entry.name.as_str(), resources));
+    }
+    used.sort_by_key(|(name, _)| *name);
+    assert_eq!(
+        used,
+        vec![
+            ("raa_atmosphere_build_multi_scatter", vec![0, 1, 3, 4]),
+            ("raa_atmosphere_build_sky_view", vec![0, 1, 2, 3, 4]),
+            ("raa_atmosphere_build_transmittance", vec![0, 4]),
+        ],
+        "reflected per-entry group-2 resource use changed"
+    );
+}
