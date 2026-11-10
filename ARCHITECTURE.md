@@ -170,6 +170,17 @@ Review criteria. The owner answers yes or no on each saved capture:
   - each on/off pair shows what its feature adds, with no artefacts (banding, acne, haloes, flicker between pairs);
   - **R12:** sdfm-compare shows RAA's rendering beside SDF Modeler's for the same asset and camera, with matching shape and materials.
 
+### Local-light quality criteria carried into M4
+The project QB identifiers supplement the preserved historical quality bar, under M4_WORK_RULES' acceptance exclusions:
+- QB1: preserve sun callers, ambient/environment, material providers, document lights and supported paths through branch checks and focused behavior tests.
+- QB2: zero local lights and no jitter consumer retain existing inputs/zero jitter, supported by state/layout tests and description-judged off rendering.
+- QB3: point distance decay, smooth spot cone, directional no-distance-falloff and area extent response use functional on/off descriptions; no local shadows are claimed.
+- QB4: move, rotate, detach, delete and reattach preserve object ownership without duplicates/stale illumination, established by lifecycle tests and managed captures.
+- QB5: moving forward geometry has coherent signed motion; stationary scenes, newly introduced geometry and sky have the stated zero-motion behavior (S10/S12).
+- QB6: one selected document node through one addNode; applicable inspector fields and Game edits/movement use document/UI tests and managed editor evidence.
+- QB7: at most four bind groups, stage storage limits, validated shader variants and reported overflow remain established by resource tests and managed errors.
+- QB8/QB9: retain the earlier renderer's requested many-lights measurement and existing size/startup/allocation/geometry/API/extensibility requirements; M4 adds no performance target or standalone measurement milestone.
+
 ## S1. GPU layouts
 All layouts are little-endian, written with `to_le_bytes`, with no unsafe code. These are the v0 forward renderer layouts (raa-render). The lit renderer extends them in S10 and keeps the Vertex and Instance layouts.
 
@@ -714,6 +725,212 @@ interface Engine {
 - `light.invalid_desc`: malformed/out-of-range descriptor; `light.invalid_attachment`: invalid offset/parent/transformed direction; `light.attached_position`: attached position edit.
 - `api.invalid_argument`: malformed numeric light handle; `api.unknown_handle`: well-formed unknown/removed light handle; `lights.invalid`: capacity; `api.disposed`: disposed engine. Refusals remain typed RaaErrors and preserve state.
 
+## S18. Document-light compatibility and inspector
+Result id: SDFM-DOCUMENT-LIGHTS. Owner: sdfm-light-authoring, display M4 / graph index 5. Source for S18–S22's delivered SDFM declarations and behavior: `sdfm@9613d52`, unless an earlier evidence revision is explicitly named. S16/S17 and the unchanged sun, ambient, environment, pass settings and earlier rendering contracts remain authoritative.
+
+`src/core/scene-lights.ts` retains runtime node kind `pointLight`; `params.kind` selects point, spot, directional or area, with absent kind meaning point. `DocumentGameLight` derives applicable fields from MAMA `ProcLight`, adding document id/parent, composed world position, normalized direction, sRGB colour, radius and effective ancestor visibility. `documentGameLights(doc: SdfDocument): DocumentGameLight[]` preserves traversal order and enumerates every document light without the legacy eight-light cap. It does not mutate the document. `installSceneLights`, `sceneLighting`, `documentPointLights`, `packPointLights`, `PointLight`, `MAX_POINT_LIGHTS` and `POINT_LIGHT_BYTES` retain compatibility: Local fields/deferred and Cel pack only the first eight visible point-kind lights, never other kinds as points.
+
+Legacy document defaults remain intensity 8, range 4 m, radius 0.08 m and shadows false; the add command supplies `#ffad55`. Spot outer angle defaults to 35 degrees and area size to `[1,1]` metres. Optional inner-angle absence is meaningful through serialization, reload and reset; an explicitly authored value survives default elision. The registry's inner-angle default 0 is an unauthored sentinel, not an accepted explicit angle. Hidden kind-specific authored values survive kind switches. These document defaults do not replace MAMA/RAA defaults.
+
+The existing `src/plugins/ui/30-point-lights.ts` flow uses `createNode`, one store `apply` of `addNode`, then selects that same node. Only a selected group becomes parent; otherwise insertion is at root at the camera target. Undo removes that single creation and redo restores it. There is no hidden companion node or extra undo step.
+
+`PointLightSection.vue` exposes kind, colour, intensity, range, radius and Contact shadows, spot full outer/optional inner angles with an explicit reset button, and area width/height. Directional controls explain rotation and no distance falloff. Common numeric controls remain visible for every kind; position/range do not affect directional Game illumination. Raw numeric text reaches `setDocumentLightParams(doc, id, changes): Op[]` without clamping or partial parsing; empty numeric input is invalid, and inner-angle omission is restored by the reset action. The setter validates the complete effective state, including retained hidden fields and coupled angles, before creating operations. Rejection shows the originating useful message/fix in the inspector, reports the error, restores the displayed valid value and preserves canonical document and valid rendering. Locked nodes refuse UI edits. Colour uses the existing live transaction and `setField`, committing on change, selection change or unmount; transforms remain on their existing document paths.
+
+The inspector explicitly distinguishes existing point-only screen-space contact shadows from Game: RAA local shadows are not implemented and radius is metadata there. Document colours go as sRGB directly to S17; only procedural linear `ProcLight.color` takes the adapter's OETF followed by the API EOTF. No second document-colour conversion occurs. Light-only edits do not invalidate geometry jobs/draws.
+
+Q1's landed generator inclusion is conditional on registered `pointLight` in `src/node/schema/docs.ts` and `json-schema.ts`. Both use the registered NodeKindDef/ParamSpec metadata, preserving other kinds, ordering, serialization and document version. Generated schema/catalog document optionality without materializing absent values or adding another validation policy. Focused authoring/generator tests cover defaults, all kinds, optional save/reload/reset, hidden values, atomic invalid edits, geometry stability, packing and registered/unregistered inclusion. The real component regression loader resolves its exact `../../core/scene-lights.js` import against the compiled test module; it does not mock the setter.
+
+## S19. GameDisplay ownership, frames and lifecycle
+Result id: SDFM-GAME-LIGHT-SYNC. Owner: sdfm-game-light-sync, display M4 / graph index 5. The closed-M3 RAA-MAMA-LIGHT-BRIDGE remains in S15/S16; adapter resources and document resources have separate owners.
+
+`src/app/paramesh/game-light-sync.ts` owns the following public handoff (Mat4/Vec3 come from MAMA; Engine/LocalLightDesc come from `@etcito/raa`):
+
+```ts
+export type GameLightAttachment = {
+  instance: number; instanceWorld: Mat4; ownerDocumentWorld: Mat4; ownerWorld: Mat4
+}
+export type ResolveGameLightAttachment = (light: DocumentGameLight) => GameLightAttachment | null
+export type PlannedGameLight = {
+  id: string; visible: boolean; desc: LocalLightDesc
+  attachment: { instance: number; offset: Vec3 } | null
+}
+export type GameLightEngine = Pick<Engine, 'addLight' | 'updateLight' | 'removeLight' | 'attachLight' | 'detachLight'>
+export type DocumentLightHandle = { id: string; handle: number; instance: number | null; visible: boolean }
+export type GameLightSync = {
+  sync(lights: readonly DocumentGameLight[], resolve: ResolveGameLightAttachment): void
+  beforeInstanceRemoval(instance: number): void
+  snapshot(): DocumentLightHandle[]
+  dispose(): void
+}
+export function planGameLights(lights: readonly DocumentGameLight[], resolve: ResolveGameLightAttachment): PlannedGameLight[]
+export function createGameLightSync(engine: GameLightEngine): GameLightSync
+```
+
+`GameDisplay` resolves the nearest mapped ancestor through actual `Entry.members`, `Draw.pick.world` and public `Draw.instance` group handles, preferring the exact placed member and replacement entry while excluding retiring draws. It uses the same decomposed TRS instance frame sent to the engine, including part/placement corrections. Let C = ownerWorld × inverse(ownerDocumentWorld): corrected world placement is C × document placement; attachment offset is inverse(instanceWorld) × corrected position, and local direction is normalized inverse(instanceWorld) × C × document direction. Range and size stay metres under scale. Before a mapping exists, composed world placement is used. No competing hierarchy, per-submesh light or inferred compacted instance id is introduced.
+
+The reconciler validates the entire plan before engine mutation, keeps one stable owned handle per surviving document id, suppresses unchanged calls and explicitly resets omitted kind-specific engine fields. Hidden lights retain handles with zero intensity. New handles stage at zero intensity before publication. Attachment changes, detachment, parent retirement, deletion, recreation and disposal follow S17; GameDisplay reconciles before retiring/replacing resources and after runtime movement. Failure rolls back staged/touched resources and retains valid published observations and the originating error. Rollback of an already removed light may recreate its handle; ordinary stable-identity guarantees do not assert that a removed engine handle is resurrected. Recovery failure retains an AggregateError and prevents further normal synchronization. Disposal removes only owned document handles, not adapter lights.
+
+`src/app/paramesh/game-display.ts` exports `GameDisplayLightState = { lights: DocumentLightHandle[]; engine: LightStats | null; ready: boolean; error: string | null }` via `documentLightState(): GameDisplayLightState`. Readiness is light reconciliation readiness, not geometry readiness or proof of a submitted GPU frame. Engine counts can include adapter-owned lights; subtraction does not identify their ownership. Engine creation/recreation, setDocument, publication/replacement, movement, rendering and disposal wire the same reconciler. Geometry invalidation excludes light records/tree membership so light-only changes preserve reusable geometry. Focused reconciler and real GameDisplay integration tests establish calls, rollback, cleanup and resource stability that browser snapshots cannot expose.
+
+Q2's declaration ownership is settled: card 7360 exports `DocumentLightHandle`, card 7361 exposes real GameDisplay observations, and evidence imports the former type-only from `../app/paramesh/game-light-sync.js`. Use `import type { LocalLightDesc, LocalLightChanges, LightStats } from '@etcito/raa'`. The declarations already ship through `scripts/build-package.sh` and `scripts/build-bricks.sh` into `dist/bricks/raa`; the unstaged source index is not the shipped surface. Missing resolved exports require configured host preparation in mama → raa → sdfm order, not deep imports, ambient declarations, replacement types or an upstream API change.
+
+## S20. M4 browser facts and the single capture inventory
+Result id: SDFM-LIGHT-RENDER-FLOW. Owner: sdfm-light-evidence, display M4 / graph index 5. Card 7365 established the first Q3 schema in `sdfm:src/core/scene-lights-evidence.ts`; there was no earlier wire format to recover. Its landed version 1 is separate from the node-side record lifecycle in S21. Exact declarations:
+
+```ts
+export type LightSnapshot = {
+  document: string
+  selection: string[]
+  projection: DocumentGameLight[]
+  game: GameDisplayLightState
+}
+
+export const M4_BROWSER_FACTS = { format: 'sdfm.scene-lights.browser-facts', version: 1 } as const
+export type LightFactJson = null | boolean | number | string | LightFactJson[] | { [key: string]: LightFactJson }
+export type SceneLightFactsBase<J extends SceneLightJob, O extends string> = typeof M4_BROWSER_FACTS & {
+  job: J
+  provenance: { attempt: string; revision: string; pageRef: string }
+  captures: { id: string; filename: string; observation: O }[]
+  observations: Record<O, LightSnapshot>
+}
+export type PointLightFacts = SceneLightFactsBase<'point', 'before' | 'added' | 'undo' | 'redo'> & { lightId: string }
+export type SpotLightFacts = SceneLightFactsBase<'spot', 'on' | 'off'> & { lightId: string }
+export type KindsLightFacts = SceneLightFactsBase<'kinds', 'directionalOn' | 'directionalOff' | 'areaSmall' | 'areaWide'> & { directionalId: string; areaId: string }
+export type OwnershipLightFacts = SceneLightFactsBase<'ownership', 'before' | 'moved' | 'rotated' | 'detached' | 'deleted'> & { lightId: string; ownerId: string }
+export type ManyLightFacts = SceneLightFactsBase<'many', 'many'>
+export type InvalidLightFacts = SceneLightFactsBase<'invalid', 'before' | 'after'> & {
+  lightId: string
+  attempted: { field: keyof DocumentLightParams | 'color'; value: LightFactJson }
+  inspectorError: string
+}
+export type SceneLightBrowserFacts = PointLightFacts | SpotLightFacts | KindsLightFacts | OwnershipLightFacts | ManyLightFacts | InvalidLightFacts
+```
+
+Snapshots observe canonical `serializeDocument` text, actual selection, uncapped `documentGameLights` projection and `documentLightState()`. Projection is authored/world data, not an inferred accepted engine descriptor. Canonical text preserves hidden parameters and optional inner-angle absence. `validateLightSnapshot` requires exact keys, canonical parse/serialize, unique existing selection ids, complete ordered projection, finite placement/normalized direction, unique document ids/handles and consistent readiness/error/statistics. Authored fields use canonical rounding; observed composed placement is not reconstructed from rounded saved text. Nullable asynchronous LightStats fields remain nullable. Ready snapshots require complete matching document handles; engine totals stay separate.
+
+`validateSceneLightBrowserFacts(value, expected?)` rejects unsupported versions, malformed variants, non-JSON/cyclic/nonfinite data, missing observations, duplicate/mismatched captures and externally mismatched attempt/revision/pageRef/job. Managed consumers supply expected provenance independently. Point retains before/add/undo/redo; spot on/off; kinds directional on/off and area dimensions; ownership before/move/rotate/detach/delete; many retains all twelve document-id/handle mappings; invalid retains before/after, attempted field/value and actual visible inspector error. Inspector rejection is distinct from originating Game engine errors. Comparisons require valid reconciliation and the actual functional transitions. Noncaptured comparisons add no required image. Core/topic fixtures pin all six variants, JSON round trips, omission, nullable stats, identities and negative cases.
+
+`SCENE_LIGHT_CAPTURES`, `validateSceneLightCaptures`, `selectSceneLightCaptures` and `sceneLightJobs` are the sole executable inventory/selection/grouping source. Stages are cumulative point → spot → kinds → ownership → limits; jobs are point, spot, kinds, ownership, many and invalid. The explicit `SCENE_LIGHT_IMPLEMENTED_STAGE` is now `limits`, delivered by card 7379; selection refuses missing/invalid declarations or stages beyond implementation, and `all` is available only at limits. No caller infers implementation from the last planned row. The following is the delivered inventory index; filenames, baselines and complete visual descriptions are consumed from that source, never a second selector:
+
+| Capture identity | Filename | Baseline |
+|---|---|---|
+| point-selected | `editor-point-added-selected-light-pool.png` | null |
+| point-undo | `editor-light-undo-node-and-illumination-removed.png` | point-selected |
+| point-redo | `editor-light-redo-node-and-illumination-restored.png` | point-undo |
+| spot-on | `editor-spot-inner-angle-soft-edge.png` | null |
+| spot-off | `editor-spot-disabled-pool-removed.png` | spot-on |
+| directional-on | `editor-directional-near-and-far-lit.png` | null |
+| directional-off | `editor-directional-disabled-receivers.png` | directional-on |
+| area-small | `editor-area-small-extents-illumination.png` | null |
+| area-wide | `editor-area-wide-extents-changed-illumination.png` | area-small |
+| owner-before | `editor-owned-spot-before-parent-move.png` | null |
+| owner-moved | `editor-parent-moved-light-pool-followed.png` | owner-before |
+| owner-rotated | `editor-parent-rotated-light-direction-followed.png` | owner-moved |
+| detached | `editor-light-detached-placement-preserved.png` | owner-rotated |
+| deleted | `editor-light-deleted-illumination-removed.png` | detached |
+| many | `editor-twelve-document-lights-in-game.png` | null |
+| invalid | `editor-invalid-light-input-prior-state-preserved.png` | spot-on |
+
+Functional visual criteria remain readable Layers/Properties and Game where requested, a distance-fading point pool, add/undo/redo removal/restoration, smooth spot cone and disabled contribution, directional near/far illumination without distance attenuation, changed area illumination with changed extents, parent-following movement/rotation, preserved detached placement and removed deleted illumination. The twelve-light scene and useful invalid-input error retain their stated criteria; invalid reproduces the declared spot-on baseline and preserves the prior valid scene. Numeric identity/counts, angles, calls, cleanup and no-truncation are facts/tests, never screenshot deductions. No decorative polish, exact marker colour, local-shadow, reference-image or additional performance criterion is added. S18–S20 and QB1/QB3/QB4/QB6/QB7 acceptance remain intact; S14's existing page contracts and earlier renderer criteria remain unchanged.
+
+The actual app scenario mounts the editor and uses real Layers/Properties add/select/edit/move/undo/redo handlers, including twelve additions and coupled-angle invalid input. It uses app test mode, opt-in UI-driver state readiness and bounded named waits/progress, not arbitrary sleeps or fabricated renderer flags. Each sequential managed job is at most 300 seconds. `src/node/gpu-client/job-client.ts` returns `reply.result` directly; no extra wrapper is accepted. Publish the current build to managed Windows Chrome on a hardware GPU, refusing missing configuration, fallback/software devices, page/GPU errors and device loss. No local browser, Computer Use, Playwright or Linux substitute is evidence.
+
+## S21. Node-side M4_EVIDENCE_RECORDS lifecycle
+Card 7365 supplies runtime verification, inventory-selection helpers and browser-facts v1. Card 7366 solely implemented/tested the node-side declarations, preparation/selection/current producers, bounded runner and freshness lifecycle in `sdfm:src/node/evidence/topics/scene-lights.ts` and its topic test. Card 7367 consumes them for judgments; card 7368 authors their command chain. Card 7383 documents them here. No missing node-side producer is assigned back to node 8/card 7365.
+
+The exact landed declarations below are the single node-side handoff, not an extension to M4_BROWSER_FACTS. `Stage = SceneLightStage | 'all'`; viewport types come from the existing viewport protocol:
+
+```ts
+export const M4_EVIDENCE_RECORDS = { schema: 1, milestone: 'm4' } as const
+
+export type RepoSource = { repo: 'mama' | 'raa' | 'sdfm'; revision: string; branch: string; dirty: boolean }
+export type FileStamp = { path: string; bytes: number; mtimeMs: number }
+export type BuiltFile = FileStamp & { repo: RepoSource['repo']; kind: 'js' | 'wasm' | 'types'; exports: string[] }
+export type RuntimeReceipt = { schema: 1; milestone: 'm4'; preparationId: string; repo: 'mama' | 'raa'; source: RepoSource;
+  builder: { program: string; args: string[]; cwd: string; exitCode: number }; startedAt: string; finishedAt: string;
+  files: BuiltFile[]; status: 'passed' | 'failed'; error: string | null }
+export type Selection = { schema: 1; milestone: 'm4'; selectionId: string; preparationId: string; stage: Stage;
+  sources: RepoSource[]; inputs: FileStamp[]; captures: SceneLightCapture[] }
+export type CurrentAttempt = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; attemptDir: string }
+export type BuildReceipt = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; buildId: string;
+  preparationId: string; sources: RepoSource[]; inputs: FileStamp[]; files: BuiltFile[]; createdAt: string }
+export type ManagedJobRecord = { schema: 1; selectionId: string; attemptId: string; buildId: string; job: SceneLightJob;
+  pageRef: string; jobId: string | null; clientId: string | null; request: ViewportJobInput; result: ViewportJobOutput | null;
+  status: 'passed' | 'failed'; error: string | null }
+export type ImageRecord = { id: string; filename: string; path: string; job: SceneLightJob; jobId: string; clientId: string; buildId: string }
+export type RunRecord = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; buildId: string; pageRef: string;
+  jobs: SceneLightJob[]; images: ImageRecord[]; status: 'running' | 'passed' | 'failed'; errors: string[] }
+export type FreshRecord = { schema: 1; selectionId: string; attemptId: string; buildId: string; imageIds: string[];
+  status: 'passed' | 'failed'; errors: string[] }
+export type JudgeImage = { id: string; filename: string; path: string; selectionId: string; attemptId: string; buildId: string;
+  jobId: string; clientId: string; description: string; aspect: 'functional'; minScore: 6; score: number | null;
+  exitCode: number | null; stdout: string; stderr: string; error: string | null; status: 'passed' | 'failed' | 'missing'; at: string }
+export type JudgeRecord = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; buildId: string;
+  images: JudgeImage[]; complete: boolean; errors: string[] }
+```
+
+**Preparation and identities.** `verifySceneLightRuntime` verifies configured linked package paths/revisions and host preparation receipts, shipped root declarations, reachable browser imports, staged copies, usable WASM exports and functional runtime probes. A timestamp or source revision alone does not establish a usable runtime. `runtimeBuild('mama')` records verified prepared artifacts in `runtime-mama.json`; RAA verification follows and shares its random UUID preparationId in `runtime-raa.json`. These actions verify host-built outputs; their `builder` fields describe the verification invocation, not an invented upstream build. A failed receipt retains status/error and is never preparation success. Missing/stale siblings enter configured host recovery, never edits to read-only dependencies.
+
+Managed `select` validates prepared receipts against actual source and artifact observations, checks the implemented stage and complete canonical ordered capture rows (including descriptions, baselines and jobs), assigns a random UUID selectionId and atomically publishes root `out/solstice-m4/selection.json`. Selection binds preparationId/stage/sources/inputs/captures; the attempt is bound separately through CurrentAttempt and its immutable selection copy. Neither identity is a hash or a fabricated consumer upgrade of a legacy record. Consumers revalidate sources, tracked input stamps, actual runtime files, preparation receipts and canonical inventory, rather than trusting record claims.
+
+**Current means a pointer, not a pass.** In the landed implementation `clean()` validates selection and path containment, allocates a new UUID attempt under `attempts/<attemptId>`, writes its `selection.json`, then atomically publishes root `current.json` as CurrentAttempt. It publishes before rendering. It carries selectionId/attemptId/attemptDir; preparationId and stage are resolved through the matching selection, not duplicated fields. This exact public shape supersedes the forecast that current.json itself would be a post-render success envelope. Consumers must require `active()` linkage plus successful run/fresh records to establish validated current rendering. A pointer alone, including a pointer from a failed attempt, never satisfies evidence acceptance.
+
+Cleaning allocates isolation rather than deleting previous evidence: it preserves preparation/selection inputs, other attempts, previous milestones and recovery inputs. Root/path checks reject traversal, absolute paths, unsafe identities and symlink escapes. An attempt that already has run.json cannot rerun; normal retry allocates another attempt. This prevents old images/verdicts from satisfying the new selection without deleting recovery material. Writes of records use atomic replacement; no partial root JSON is exposed.
+
+`publishFiles()` records actual dist outputs in attempt `build.json` with a fresh buildId and includes that receipt as `scene-lights-build.json` in the published page after the evidence runner's rebuild. Requests echo selectionId/attemptId/buildId/job/captureIds/pageRef; browser-facts provenance uses attemptId, build.sources' SDFM revision and published pageRef. Separate browser metrics report actual userAgent/platform/adapter/hardware status and page/GPU errors. Run/job/image records retain real jobId/clientId and direct managed results; a stale terminal job id is never attributed to a timeout. Failure retains attributable diagnostics and recoverable images, stops submission for configured recovery, and cannot publish a passing run/fresh result.
+
+`fresh()` writes attempt `fresh.json` even for failed prerequisites when the attempt can be safely identified. It checks current selection/preparation/build/artifacts, exact job list, unique actual job identities, validated browser facts/provenance/hardware, exact required image identities/paths and complete coverage. PNG integrity and equality to the retained direct-result bytes protect artifact transport; this is not a reference-image, pixel-difference or hash acceptance test. Missing, stale, failed, duplicate, mismatched, partial or unexpected results fail; invalid-input facts must reproduce the spot-on canonical baseline. Successful `run()` also invokes freshness, and the explicit CLI freshness command revalidates it. No fallback to another attempt or milestone is permitted.
+
+`judge()` revalidates freshness and judges every required image against its inventory functional description using `python3 "$NMC_JUDGE_CLIENT" ... --min-score 6`, retaining all available verdicts before failing. Each JudgeImage binds selection/attempt/build/job/client/image identities and keeps score, exit status, stdout/stderr and error; credentials are redacted. Each image must score at least 6 and exit successfully. JudgeRecord.complete requires full coverage and every image passed, with no errors and no intervening selection/attempt change. Topic fixtures exercise producer-to-consumer linkage, standalone compatibility, contained cleanup, failure publication, real direct-result structure, missing/stale/duplicate records and all-image judgment. Browser observations, validated current rendering, all-image judgments and host completion are four distinct claims.
+
+**CLI compatibility.** The legacy invocations remain `node build-node/node/evidence/topics/scene-lights.js runtime-build <stage> <attempt> [mamaRevision] [raaRevision]` and `... select <stage> <attempt>`. Their exclusive-create attempt-local `runtime-build.json` and `select.json` retain their existing fields/meaning; standalone selection needs no managed preparation and cannot become current evidence. Legacy selection starts `{format:'sdfm.scene-lights.selection',version:1,stage,attempt,outDir,captures,jobs}`. Managed invocations use `runtime-build mama`, then `runtime-build raa`, `select` without positional attempt, `clean`, `fresh`, and `judge`, with optional `--out out/solstice-m4` confined to that root. `NMC_M4_STAGE` overrides managed selection stage; the default is the explicit implemented stage. Managed rendering uses `node scripts/gpu-evidence.mjs scene-lights`.
+
+## S22. Execution, verified recovery and host completion
+The closed-M3 starting revisions in M4_WORK_RULES remain historical baselines, not immutable expectations for later prepared linked targets. Preserve valid consolidation from card 7380 (`1928bac`), frame/layout consolidation and card 7382 (`09b4abb343`); card 7383 retains its dependencies on 7377, 7379 and 7382. Source correction `e360318da8d7` from 7376 replaces the stale hard-coded RAA expectation with configured linked-revision consistency. Execution 13445 expected historical `b38bca9090e0d3d665fd498746d831e4bea07b60` while the configured target was `09b4abb34370b6b689104b09dfee1e4cd876e6b7`. Do not pin that dependency backward or call the stale project assertion a proven host preparation defect. Actual configured path, package, source, build and shipped-artifact checks remain required.
+
+**Delivered command dependencies.** The 14-command chain below is read from `sdfm@9613d52:.nmc/commands.json`. The four older `m4-recovery-*` entries remain unchanged and are not substitutes for this chain. Select all fourteen commands explicitly; `after` does not imply automatic selection. Host preparation builds/stages configured upstream targets in mama → raa → sdfm order before the receipt-verification actions. Retain configured target policy and branch checks. Each command is one program, and affected tests use anchored selectors and `--jobs 1`; independent work respects NMC_CPUS, default 1.
+
+| Command | Program | Explicit after |
+|---|---|---|
+| `m4-mama-build` | `node src/node/evidence/topics/scene-lights.ts runtime-build mama --out out/solstice-m4` |  |
+| `m4-raa-build` | `node src/node/evidence/topics/scene-lights.ts runtime-build raa --out out/solstice-m4` | `m4-mama-build` |
+| `m4-node-build` | `node node_modules/typescript/bin/tsc -p tsconfig.node.json` | `m4-raa-build` |
+| `m4-sdfm-build` | `npm run build` | `m4-node-build` |
+| `m4-functional` | `node scripts/proof/unit.mjs --only "^(core/scene-lights(-authoring\|-evidence)?\|app/paramesh/game-(light-sync\|display-lights)\|app/gpu-page/(ui-driver\|scene-lights-controls)\|node/evidence/topics/scene-lights)\.test\.js$" --jobs 1` | `m4-sdfm-build` |
+| `m4-typecheck` | `npm run typecheck` | `m4-functional` |
+| `m4-guard` | `npm run guard` | `m4-typecheck` |
+| `m4-command-check` | `nmc-boot-check --dist dist --wait 15` | `m4-guard` |
+| `m4-select` | `node build-node/node/evidence/topics/scene-lights.js select --out out/solstice-m4` | `m4-command-check` |
+| `m4-clean` | `node build-node/node/evidence/topics/scene-lights.js clean --out out/solstice-m4` | `m4-select` |
+| `m4-render-local` | `node scripts/proof/unit.mjs --only "^(core/scene-lights(-authoring\|-evidence)?\|app/paramesh/game-(light-sync\|display-lights)\|app/gpu-page/(ui-driver\|scene-lights-controls)\|node/evidence/topics/scene-lights)\.test\.js$" --jobs 1` | `m4-node-build` |
+| `m4-render` | `node scripts/gpu-evidence.mjs scene-lights` | `m4-clean`, `m4-render-local` |
+| `m4-fresh` | `node build-node/node/evidence/topics/scene-lights.js fresh --out out/solstice-m4` | `m4-render` |
+| `m4-judge` | `node build-node/node/evidence/topics/scene-lights.js judge --out out/solstice-m4` | `m4-fresh` |
+
+The render entry allows the bounded jobs to run sequentially; its 2400-second chain timeout does not raise the 300-second per-job cap. Build precedes dist readers, selection precedes attempt allocation/render, and render precedes freshness and judgment. The managed boot check remains required. RAA documentation cards run `cargo check`; `bash scripts/check.sh` remains mandatory at milestone verification, as assigned in 7380. It is not displaced by documentation checks or by SDFM's chain.
+
+**Verified evidence as of 2026-11-10.** Retained `/refs/.runs/<command>/<execution>/files/out/solstice-m4/` records establish the following actual prepared/build/source bindings. Both runs prepared MAMA `c17b0c3cd02db25faa1519afd0ce07a3015823ca` and RAA `09b4abb34370b6b689104b09dfee1e4cd876e6b7`; both receipt sources are detached HEAD and clean, with 757 MAMA and 28 RAA built-file observations. Selection/build records retain 2724 input observations and 74 SDFM output files. These counts describe those executions, not new thresholds.
+
+| Record | 7376 / execution 13448 | 7378 / execution 13451 |
+|---|---|---|
+| SDFM source/build revision | `b03cb9d80aece49b836de0a27d2fab398cd0f330` | `b7e517364e14cc5558b20df35c5c3c6bc051988b` |
+| Stage | kinds | ownership |
+| preparationId | `b9d67094-4d9b-4c78-9ac1-cdc2aff891e3` | `34abec1b-c7b9-4c44-b2c5-5315a2f3437b` |
+| selectionId | `fd030ef9-5068-4297-a2fd-e67d8ed3a943` | `ed33e308-f033-4be6-8d30-0411d1fc43d3` |
+| attemptId | `a0b92960-de1d-4f76-97a6-880442267bf6` | `bfb9a7b7-6dee-455f-bfa5-c2547a4bfbb8` |
+| buildId | `95eba9b9-3114-4822-8816-db6172d3bee2` | `8a70b176-ec8e-42be-8b7e-ad2942d3d7de` |
+| Current Windows Chrome rendering, fresh, judge | passed, 9 images | passed, 14 images including all five ownership captures |
+
+These are representative real producer records, not illustrative invented identities: a 13451 CurrentAttempt is `{schema:1,milestone:'m4',selectionId:'ed33e308-f033-4be6-8d30-0411d1fc43d3',attemptId:'bfb9a7b7-6dee-455f-bfa5-c2547a4bfbb8',attemptDir:'attempts/bfb9a7b7-6dee-455f-bfa5-c2547a4bfbb8'}`. Its matching fresh.json records status passed, errors `[]` and the fourteen canonical ids through deleted; judge.json records complete true, errors `[]` and all fourteen verdicts. Scores include directional-on 7, owner-moved/owner-rotated 8 and the remaining eleven 10. Every image in both runs met 6; the host's verified handoff records all fourteen commands passed in each execution. A successful current result includes these linked records, not current.json alone.
+
+Actual programmatic recovery supersedes the earlier pending Windows verification: browser-free checks alone did not prove it, but 13448 and 13451 now do. Preserve the `b03cb9d8` scene-pane startup change without claiming it caused or explained the earlier disconnect: the Windows-to-WSL relay outage was independently confirmed. Successful recovery and causal attribution remain separate. Superseded failures are history, not commands to retry blindly. Earlier point/spot/common-inspector runs and M2 bis/M3 results remain earlier evidence; quota interruptions do not erase delivered work. None of these intermediate images closes M4 after the limits scenario changed the source.
+
+**Final binding.** The host has bound `required_render_evidence.card_id = 7384` to a final-card-only snapshot of this complete fourteen-command chain, with `env NMC_M4_STAGE=all` on `m4-select`. Project-wide NMC_* variables are reserved; no project-wide override is required. Resolve filenames, images, descriptions, baselines and complete coverage from S20's producer inventory: all sixteen captures across all six jobs, `min_score = 6` for each image. The full current execution follows 7379 and 7383, using the final configured sources and actual prepared/shipped builds; 13451's fourteen-image success cannot substitute for it. Preserve the existing graph and configured recovery gate without a new card, dependency, API or acceptance waiver.
+
+Closure requires 7384's latest successful complete execution, all fourteen commands passing, valid current provenance/coverage and all sixteen current images judged successfully. Host archive presence and informational email delivery receipts must cover every attachment to `kevin+solstice-p1-lights-in-objects@real3d.fr`; readable captures and judgments appear in card outputs as available. No final execution/archive/mail success is asserted here ahead of that host evidence. A DONE implementation, browser facts, fresh.json or complete judge.json alone is not host completion. The informational mail requires no approval reply and introduces no human-approval card.
+
+Technical failures enter one configured Doctor/Operator flow with configured delegate defaults: preserve originating diagnostics, repair source and missing guard, expose repair status and rerun invalidated work. Reuse unchanged successful work only through guarded host recovery; release jobs promptly and avoid competing repairs/blind retries. Delivery-only failures retry delivery without rebuilding valid captures. Keep recovery inputs until archive and complete attachment delivery are verified. Host cleanup preserves unmerged work, earlier evidence and final artifacts; never modify or compact the WSL disk container. Captures/binaries stay in ignored output and managed capture storage, never committed.
+
 ## Module ownership
 
 | Module | Files | Consumes |
@@ -753,6 +970,9 @@ interface Engine {
 | raa-sdfm-pkg | `packages/raa-sdfm/**` | api-m28, mama-light-record, js-package, mama-light-transport |
 | mama-light-record | `mama:crates/procgen/src/nodes/game_markers.rs`<br>`mama:crates/procgen/src/passes/gameplay.rs`<br>`mama:crates/procgen/src/output.rs`<br>`mama:crates/procgen/SPEC.md`<br>`mama:src/procgen/output-types.ts` | none |
 | mama-light-transport | `mama:src/procgen/scene-file.ts`<br>`mama:src/procgen/scene-build.ts`<br>`mama:src/procgen/{scene-file,scene-build,runtime}.test.ts`<br>`mama:crates/procgen/src/ext/runtime/delta.rs`<br>`mama:crates/procgen/tests/runtime.rs` | mama-light-record |
+| sdfm-light-authoring | `sdfm:src/core/scene-lights.ts` and focused tests<br>`sdfm:src/plugins/ui/30-point-lights.ts`<br>`sdfm:src/components/editor/PointLightSection.vue`<br>`sdfm:src/node/schema/{docs,json-schema}.ts`<br>`sdfm:docs/schema/{sdfm-document.schema,tools}.json`<br>`sdfm:docs/llm/catalog.md` | mama-light-record |
+| sdfm-game-light-sync | `sdfm:src/app/paramesh/game-render-settings.ts`<br>`sdfm:src/app/paramesh/game-light-sync.ts` and its test<br>`sdfm:src/app/paramesh/game-display.ts` and game-display-lights.test.ts<br>`sdfm:tsconfig.node.json` (two named test includes only) | sdfm-light-authoring, api-m28, raa-sdfm-pkg, mama-light-record |
+| sdfm-light-evidence | `sdfm:src/core/scene-lights-evidence.ts` and its test<br>`sdfm:src/node/evidence/topics/scene-lights.ts` and its test<br>`sdfm:src/app/gpu-page/scenarios/{scene-lights-app,ui-driver}.ts`<br>`sdfm:src/app/gpu-page/ui-driver.test.ts`<br>`sdfm:src/node/evidence/run.ts`<br>`sdfm:.nmc/commands.json` | sdfm-light-authoring, sdfm-game-light-sync, raa-sdfm-pkg |
 | solstice-architecture-finalization | `raa:ARCHITECTURE.md` | mama-light-record, api-m28, raa-js, js-package, raa-lit, raa-pipeline, raa-sdfm-pkg, mama-light-transport, sdfm-light-authoring, sdfm-game-light-sync, sdfm-light-evidence |
 | proof-m15 | `proofs/m15-animation.mjs`<br>`examples/lookdev/scenes/m15-waddle.js`<br>`docs/dogfood/m15.md` | lookdev-tools, api-m15 |
 
@@ -2308,10 +2528,19 @@ Files: `mama:src/procgen/scene-file.ts`, `mama:src/procgen/scene-build.ts`, `mam
 
 Owns S16's optional scene section, canonical serialization, independently copied export plans and complete Runtime.step snapshot triggers. It precedes the RAA bridge in dependency order. No light-record redefinition, new runtime method or M4 MAMA implementation is assigned.
 
+## Module: sdfm-light-authoring
+Owner: display M4, graph index 5. Files/consumers: Module ownership. Implements S18 through the existing registration, document projection, add command, inspector and generated schema/catalog. Focused tests are `src/core/scene-lights.test.ts`, `scene-lights-authoring.test.ts` and the narrowly authorized real component loader regression in `src/app/gpu-page/scene-lights-controls.test.ts`, all in sdfm. No MAMA type ownership transfers here.
+
+## Module: sdfm-game-light-sync
+Owner: display M4, graph index 5. Files/consumers: Module ownership. Implements S19's planning, stable document ownership and actual GameDisplay integration. `game-light-sync.test.ts` and `game-display-lights.test.ts` cover reconciliation and integration; tsconfig's grant includes only those two tests. Authoring precedes synchronization, which precedes evidence; there is no reverse dependency.
+
+## Module: sdfm-light-evidence
+Owner: display M4, graph index 5. Files/consumers: Module ownership. Implements S20/S21 through the existing compiled-topic discovery in `src/node/evidence/run.ts`, `scripts/gpu-evidence.mjs`, and `registerViewportScenario` discovery for `scene-lights-app`. Card 7363 owns inventory; 7364 opt-in readiness; 7365 runtime verification/browser facts; 7366 node record lifecycle; 7367 retained judgments; 7368 commands. Scenario owners advance the explicit implemented stage only with real delivered jobs. The command producer remains sole writer of `.nmc/commands.json`; later programmatic cards execute those definitions. Host completion/cleanup remains S22, outside these implementation owners.
+
 ## Module: solstice-architecture-finalization
 Files: `raa:ARCHITECTURE.md`. Owner: display M4, graph index 5. Consumes: the linked modules listed in Module ownership.
 
-Consolidates the complete existing contract in place, preserving all unchanged sections, historical results and public contracts. The linked-conventions/S15–S17 share hands this complete file to node 24; later shares retain it while consolidating their own sections. Documentation cards run `cargo check`; milestone verification retains `bash scripts/check.sh`.
+Consolidates the complete existing contract in place, preserving all unchanged sections, historical results and public contracts. The landed linked-conventions/S15–S17, frame/layout and S11/S12 shares remain intact; the S18–S22 share consolidates delivered editor ownership and evidence contracts without replacing earlier content. Documentation cards run `cargo check`; milestone verification retains `bash scripts/check.sh`.
 
 ## Module: sdfm-compare
 Files: `examples/sdfm-compare/**`, `scripts/build-sdfm-compare.sh`.
