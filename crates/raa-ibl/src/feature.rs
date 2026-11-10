@@ -8,6 +8,12 @@
 //! submitted). The coefficients land one or more frames later; until the first SH arrives
 //! the env stays cleared (`EnvSh.info.w = 0`) and the provider falls back to the flat S1
 //! ambient.
+//!
+//! Lifecycle: every successfully recorded filter request obtains a monotonically increasing
+//! generation and the current invalidation epoch. `invalidate` bumps that epoch through a
+//! gate outside the `RefCell`-borrowed filter state, clears the published environment and
+//! cancels every earlier request, so callbacks that land later can never restore it.
+//! `publication`/`publication_error` observe the lifecycle without advancing any work.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,7 +22,7 @@ use raa_core::{GpuContext, RaaError};
 use raa_lit::LitRenderer;
 use raa_pipeline::{LightingResources, Pipeline};
 
-use crate::filter::{ENV_MIPS, Filter, Sh9};
+use crate::filter::{ENV_MIPS, Filter, PublicationGate};
 use crate::lut::{BrdfLut, create_brdf_lut};
 use crate::provider::ambient_provider;
 
@@ -46,6 +52,20 @@ fn state_busy() -> RaaError {
     )
 }
 
+/// The observable lifecycle of the IBL environment.
+///
+/// `requested_generation` counts successfully recorded filter requests and keeps increasing
+/// across invalidation. `published_generation` is the generation last given to
+/// `LightingResources::set_env` (None while the environment is cleared). `pending` is true
+/// while eligible work of the current epoch (recorded, or completed but not yet applied) is
+/// outstanding; it never counts callbacks cancelled by `invalidate`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IblPublication {
+    pub requested_generation: u64,
+    pub published_generation: Option<u64>,
+    pub pending: bool,
+}
+
 /// State shared by every clone of an `IblHandle`.
 struct IblState {
     filter: Filter,
@@ -53,8 +73,6 @@ struct IblState {
     _lut: BrdfLut,
     diffuse: f32,
     specular: f32,
-    /// The SH9 last given to `set_env` (None while the env is cleared).
-    sh: Option<Sh9>,
     /// The intensities changed since the last `set_env`.
     changed: bool,
 }
@@ -84,11 +102,11 @@ impl IblFeature {
             _lut: lut,
             diffuse: 1.0,
             specular: 1.0,
-            sh: None,
             changed: false,
         };
         Ok(IblHandle {
             state: Rc::new(RefCell::new(state)),
+            gate: PublicationGate::new(),
         })
     }
 }
@@ -97,6 +115,8 @@ impl IblFeature {
 #[derive(Clone)]
 pub struct IblHandle {
     state: Rc<RefCell<IblState>>,
+    /// Cancellation/publication gate, independent of the `RefCell` borrow of `state`.
+    gate: PublicationGate,
 }
 
 impl IblHandle {
@@ -117,32 +137,32 @@ impl IblHandle {
         lighting: &mut LightingResources,
     ) -> Result<(), RaaError> {
         let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
-        st.filter.record(gpu, encoder, cube);
-        if let Some(e) = st.filter.invalid_source().cloned() {
+        let result = st.filter.record(gpu, encoder, cube, &self.gate);
+        if result.is_err() {
+            st.changed = false;
             lighting.clear_env();
-            st.sh = None;
-            return Err(e);
         }
-        Ok(())
+        result
     }
 
     /// The per-frame hook (`sky.env` prepare): maps the staging buffers written by earlier
-    /// `filter` calls (their encoders were submitted since), and when a new SH arrived or
-    /// the intensities changed, calls `set_env(output cube, sh, [specular, diffuse, 5, 1])`.
-    /// Returns true when a readback was skipped because every staging buffer was busy, so
-    /// the caller filters again. Native callers poll the device for the map callbacks; on
-    /// wasm the browser drives them.
+    /// `filter` calls (their encoders were submitted since), and when a completed accepted
+    /// SH arrived or the intensities changed, calls
+    /// `set_env(output cube, sh, [specular, diffuse, 5, 1])` and records that request's
+    /// generation. Returns true when a readback was skipped because every staging buffer was
+    /// busy, so the caller filters again. Native callers poll the device for the map
+    /// callbacks; on wasm the browser drives them.
     pub fn apply_pending(&self, lighting: &mut LightingResources) -> bool {
         let Ok(mut st) = self.state.try_borrow_mut() else {
             return false;
         };
-        st.filter.after_submit();
-        if let Some(sh) = st.filter.take_sh() {
-            st.sh = Some(sh);
-            st.changed = true;
-        }
-        if st.changed
-            && let Some(sh) = st.sh
+        st.filter.after_submit(&self.gate);
+        if let Some((_, sh)) = self.gate.take_publication() {
+            let info = [st.specular, st.diffuse, MAX_MIP, 1.0];
+            lighting.set_env(st.filter.output_view().clone(), sh, info);
+            st.changed = false;
+        } else if st.changed
+            && let Some(sh) = self.gate.published_sh()
         {
             let info = [st.specular, st.diffuse, MAX_MIP, 1.0];
             lighting.set_env(st.filter.output_view().clone(), sh, info);
@@ -172,7 +192,37 @@ impl IblHandle {
     /// The SH9 irradiance coefficients last applied by `apply_pending` (rgb, w = 0;
     /// cosine-convolved / pi), None while the env is cleared.
     pub fn sh(&self) -> Option<[[f32; 4]; 9]> {
-        self.state.try_borrow().ok().and_then(|st| st.sh)
+        self.gate.published_sh()
+    }
+
+    /// The current lifecycle observation; the getter never advances filtering or readback.
+    pub fn publication(&self) -> IblPublication {
+        let snapshot = self.gate.snapshot();
+        IblPublication {
+            requested_generation: snapshot.requested_generation,
+            published_generation: snapshot.published_generation,
+            pending: snapshot.pending,
+        }
+    }
+
+    /// The attributable readback failure of the current environment (code `ibl.readback`),
+    /// distinct from pending work. Cleared by a successful publication or `invalidate`.
+    pub fn publication_error(&self) -> Option<RaaError> {
+        self.gate.error()
+    }
+
+    /// Invalidates the published environment and every in-flight request of the current
+    /// epoch, then clears the lighting environment. Infallible and allocation-free; the
+    /// gate is cancelled even when the filter state is borrowed, so a later callback can
+    /// never restore the cleared resources. Intensities, the BRDF LUT, the source/output
+    /// textures and the monotonically increasing requested-generation counter are kept, and
+    /// an outstanding staging slot is never freed before its own callback.
+    pub fn invalidate(&self, lighting: &mut LightingResources) {
+        self.gate.invalidate();
+        if let Ok(mut st) = self.state.try_borrow_mut() {
+            st.changed = false;
+        }
+        lighting.clear_env();
     }
 }
 

@@ -5,17 +5,16 @@
 //! into a ring of 3 staging buffers for asynchronous readback.
 //!
 //! Everything is allocated by `Filter::new`; a `record` only creates bind groups when the
-//! source texture changes (cached for the last source). Readback: `record` copies into the
-//! next free staging buffer (or sets the retry flag), the caller submits, then
-//! `after_submit` maps it. The map callback stores the coefficients with their sequence
-//! number and unmaps. On wasm the browser drives map callbacks; native callers poll the
-//! device (`Device::poll`). The shared slot is an `Arc<Mutex<..>>` rather than an
-//! `Rc<RefCell<..>>` because wgpu requires a `Send` map callback on native.
-
-#![allow(
-    dead_code,
-    reason = "used by IblHandle::filter / apply_pending (later task)"
-)]
+//! source texture changes (cached for the last source). Readback: a successful `record`
+//! reserves a free staging buffer and tags it with its publication generation and the
+//! current invalidation epoch, copies into it (or, with every buffer busy, sets the retry
+//! flag), the caller submits, then `after_submit` maps it. The map callback first matches
+//! and frees its original slot/sequence, then reports the tagged value to the
+//! [`PublicationGate`], which publishes only current-epoch, non-superseded completions. On
+//! wasm the browser drives map callbacks; native callers poll the device (`Device::poll`).
+//! The shared slot is an `Arc<Mutex<..>>` rather than an `Rc<RefCell<..>>` because wgpu
+//! requires a `Send` map callback on native; the gate is separate so invalidation never
+//! needs the `RefCell`-borrowed filter state.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -55,6 +54,14 @@ pub(crate) const SH_PROJECT_WGSL: &str = include_str!("wgsl/sh_project.wgsl");
 /// SH9 irradiance coefficients (rgb, w = 0), the shape `LightingResources::set_env` takes.
 pub(crate) type Sh9 = [[f32; 4]; 9];
 
+/// Identity of one filter request: the publication generation it obtained and the
+/// invalidation epoch that was current when it was recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RequestTag {
+    pub(crate) generation: u64,
+    pub(crate) epoch: u64,
+}
+
 /// State of one staging buffer of the ring.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
@@ -65,42 +72,72 @@ enum Slot {
     Mapping(u64),
 }
 
-/// Device-free ring and sequence bookkeeping of the readback (`T` = the read value).
+/// Result of one map callback. The slot was matched and freed before this is built; the
+/// gate decides whether the tagged request may still publish.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Completion<T> {
+    /// The slot no longer holds this request (it was reused): nothing was freed.
+    Stale,
+    /// The request's copy was unmapped and freed but its map/decode failed.
+    Failed(RequestTag),
+    /// The request's copy was unmapped, freed and is newer than every accepted one.
+    Accepted { tag: RequestTag, value: T },
+    /// The request's copy was unmapped and freed but a newer accepted one exists.
+    Superseded(RequestTag),
+}
+
+/// Device-free ring, tag and sequence bookkeeping of the SH9 readback.
 #[derive(Debug)]
-pub(crate) struct Readback<T> {
+pub(crate) struct Readback {
     slots: [Slot; STAGING_RING],
+    /// Tag of the request occupying each slot (valid while the slot is not free).
+    tags: [RequestTag; STAGING_RING],
     /// Next slot tried by `reserve` (round robin).
     cursor: usize,
     /// Sequence number of the next reservation (starts at 1).
     next_seq: u64,
-    /// Sequence number of the newest stored result (0 = none yet).
+    /// Sequence number of the newest accepted completion (0 = none yet).
     applied_seq: u64,
-    newest: Option<T>,
     retry: bool,
 }
 
-impl<T> Readback<T> {
-    pub(crate) fn new() -> Readback<T> {
+impl Readback {
+    pub(crate) fn new() -> Readback {
         Readback {
             slots: [Slot::Free; STAGING_RING],
+            tags: [RequestTag {
+                generation: 0,
+                epoch: 0,
+            }; STAGING_RING],
             cursor: 0,
             next_seq: 1,
             applied_seq: 0,
-            newest: None,
             retry: false,
         }
     }
 
-    /// Reserves the next free slot for a copy and gives it the next sequence number. With
-    /// every slot busy it returns None and sets the retry flag.
-    pub(crate) fn reserve(&mut self) -> Option<usize> {
+    /// Whether at least one staging buffer can be reserved.
+    pub(crate) fn has_free(&self) -> bool {
+        self.slots.contains(&Slot::Free)
+    }
+
+    /// Requests another filter because every staging buffer is busy.
+    pub(crate) fn set_retry(&mut self) {
+        self.retry = true;
+    }
+
+    /// Reserves the next free slot for a copy tagged `tag` and gives it the next sequence
+    /// number. With every slot busy it returns None and sets the retry flag.
+    pub(crate) fn reserve(&mut self, tag: RequestTag) -> Option<(usize, u64)> {
         for k in 0..STAGING_RING {
             let i = (self.cursor + k) % STAGING_RING;
             if self.slots[i] == Slot::Free {
                 self.slots[i] = Slot::Written(self.next_seq);
+                self.tags[i] = tag;
+                let seq = self.next_seq;
                 self.next_seq += 1;
                 self.cursor = (i + 1) % STAGING_RING;
-                return Some(i);
+                return Some((i, seq));
             }
         }
         self.retry = true;
@@ -120,25 +157,30 @@ impl<T> Readback<T> {
         out
     }
 
-    /// Map callback of `slot` for `seq`: frees the slot and stores `value` (None = map
-    /// failed) unless a newer result was already stored.
-    pub(crate) fn complete(&mut self, slot: usize, seq: u64, value: Option<T>) {
-        if let Some(s) = self.slots.get_mut(slot)
-            && *s == Slot::Mapping(seq)
-        {
-            *s = Slot::Free;
+    /// Map callback of `slot` for `seq`: first matches and frees that exact slot/sequence,
+    /// then classifies `value` (None = map/decode failed). A callback whose sequence no
+    /// longer occupies its slot frees nothing (`Stale`).
+    pub(crate) fn complete(
+        &mut self,
+        slot: usize,
+        seq: u64,
+        value: Option<Sh9>,
+    ) -> Completion<Sh9> {
+        let tag = match self.slots.get(slot) {
+            Some(Slot::Mapping(mapped)) if *mapped == seq => {
+                self.slots[slot] = Slot::Free;
+                self.tags[slot]
+            }
+            _ => return Completion::Stale,
+        };
+        match value {
+            Some(value) if seq > self.applied_seq => {
+                self.applied_seq = seq;
+                Completion::Accepted { tag, value }
+            }
+            Some(_) => Completion::Superseded(tag),
+            None => Completion::Failed(tag),
         }
-        if let Some(v) = value
-            && seq > self.applied_seq
-        {
-            self.applied_seq = seq;
-            self.newest = Some(v);
-        }
-    }
-
-    /// The newest completed result, once.
-    pub(crate) fn take(&mut self) -> Option<T> {
-        self.newest.take()
     }
 
     /// Whether a copy was skipped since the last call (all staging buffers busy).
@@ -161,6 +203,156 @@ fn decode_sh(bytes: &[u8]) -> Option<Sh9> {
         *c = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     Some(sh)
+}
+
+/// What the publication getters observe without advancing any work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublicationSnapshot {
+    pub(crate) requested_generation: u64,
+    pub(crate) published_generation: Option<u64>,
+    pub(crate) pending: bool,
+}
+
+#[derive(Debug)]
+struct GateState {
+    /// Invalidation epoch of the current environment; every cancellation bumps it.
+    epoch: u64,
+    /// Monotonic count of successfully recorded filter requests.
+    requested_generation: u64,
+    published_generation: Option<u64>,
+    /// The SH9 last given to the lighting, None while the environment is cleared.
+    published_sh: Option<Sh9>,
+    /// Current-epoch requests whose readback has not completed yet.
+    outstanding: usize,
+    /// A completion accepted by the readback, waiting for `apply_pending`.
+    ready: Option<(u64, Sh9)>,
+    /// Attributable `ibl.readback` failure, cleared by publication or invalidation.
+    error: Option<RaaError>,
+}
+
+/// Cancellation and publication gate shared with the map callbacks. It owns its
+/// `Arc<Mutex<..>>` independently of the `RefCell`-borrowed filter state, so
+/// `IblHandle::invalidate` always cancels in-flight work and every callback checks the
+/// current epoch before it can publish.
+#[derive(Clone, Debug)]
+pub(crate) struct PublicationGate {
+    inner: Arc<Mutex<GateState>>,
+}
+
+impl PublicationGate {
+    pub(crate) fn new() -> PublicationGate {
+        PublicationGate {
+            inner: Arc::new(Mutex::new(GateState {
+                epoch: 0,
+                requested_generation: 0,
+                published_generation: None,
+                published_sh: None,
+                outstanding: 0,
+                ready: None,
+                error: None,
+            })),
+        }
+    }
+
+    /// Obtains the generation of a successfully recorded filter request in the current
+    /// epoch. The request stays pending until its completion is published.
+    pub(crate) fn begin_request(&self) -> RequestTag {
+        let mut state = lock(&self.inner);
+        state.requested_generation = state.requested_generation.saturating_add(1);
+        state.outstanding = state.outstanding.saturating_add(1);
+        RequestTag {
+            generation: state.requested_generation,
+            epoch: state.epoch,
+        }
+    }
+
+    /// Drops a request whose staging reservation failed, without a publication.
+    pub(crate) fn abandon(&self, tag: RequestTag) {
+        let mut state = lock(&self.inner);
+        if state.epoch == tag.epoch {
+            state.outstanding = state.outstanding.saturating_sub(1);
+        }
+    }
+
+    /// Records a readback completion. The readback already matched, unmapped and freed the
+    /// slot; this publishes only when the request epoch is still current and the readback
+    /// accepted the value as newer than every earlier completion.
+    pub(crate) fn complete(&self, completion: Completion<Sh9>) {
+        let mut state = lock(&self.inner);
+        match completion {
+            Completion::Stale => {}
+            Completion::Superseded(tag) => {
+                if state.epoch == tag.epoch {
+                    state.outstanding = state.outstanding.saturating_sub(1);
+                }
+            }
+            Completion::Failed(tag) => {
+                if state.epoch == tag.epoch {
+                    state.outstanding = state.outstanding.saturating_sub(1);
+                    state.error = Some(RaaError::FrameGraph {
+                        code: "ibl.readback",
+                        message: format!(
+                            "the environment SH9 readback of requested generation {} failed to map",
+                            tag.generation
+                        ),
+                    });
+                }
+            }
+            Completion::Accepted { tag, value } => {
+                if state.epoch == tag.epoch {
+                    state.outstanding = state.outstanding.saturating_sub(1);
+                    let superseded = state
+                        .ready
+                        .is_some_and(|(ready, _)| ready >= tag.generation);
+                    if !superseded {
+                        state.ready = Some((tag.generation, value));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cancels every request of the current epoch and clears the published environment and
+    /// its error. The requested-generation counter is preserved.
+    pub(crate) fn invalidate(&self) {
+        let mut state = lock(&self.inner);
+        state.epoch = state.epoch.saturating_add(1);
+        state.published_generation = None;
+        state.published_sh = None;
+        state.outstanding = 0;
+        state.ready = None;
+        state.error = None;
+    }
+
+    /// Publishes the completed accepted environment once and records its generation.
+    pub(crate) fn take_publication(&self) -> Option<(u64, Sh9)> {
+        let mut state = lock(&self.inner);
+        let (generation, sh) = state.ready.take()?;
+        state.published_generation = Some(generation);
+        state.published_sh = Some(sh);
+        state.error = None;
+        Some((generation, sh))
+    }
+
+    /// The SH9 last given to the lighting, None while the environment is cleared.
+    pub(crate) fn published_sh(&self) -> Option<Sh9> {
+        lock(&self.inner).published_sh
+    }
+
+    /// The attributable readback failure of the current epoch.
+    pub(crate) fn error(&self) -> Option<RaaError> {
+        lock(&self.inner).error.clone()
+    }
+
+    /// A consistent copy of the lifecycle observations.
+    pub(crate) fn snapshot(&self) -> PublicationSnapshot {
+        let state = lock(&self.inner);
+        PublicationSnapshot {
+            requested_generation: state.requested_generation,
+            published_generation: state.published_generation,
+            pending: state.outstanding > 0 || state.ready.is_some(),
+        }
+    }
 }
 
 /// Bind groups over one source cube (cached for the last source texture).
@@ -199,10 +391,8 @@ pub(crate) struct Filter {
     coefficients: wgpu::Buffer,
     /// MAP_READ | COPY_DST, SH_BYTES each.
     staging: [wgpu::Buffer; STAGING_RING],
-    readback: Arc<Mutex<Readback<Sh9>>>,
+    readback: Arc<Mutex<Readback>>,
     source: Option<SourceBinds>,
-    /// `ibl.invalid_source` refusal of the last `record`, None after a valid one.
-    invalid_source: Option<RaaError>,
 }
 
 fn texture_entry(
@@ -496,23 +686,12 @@ impl Filter {
             staging,
             readback: Arc::new(Mutex::new(Readback::new())),
             source: None,
-            invalid_source: None,
         }
-    }
-
-    /// The output cube texture.
-    pub(crate) fn output(&self) -> &wgpu::Texture {
-        &self.output
     }
 
     /// Cube view of the output (every mip), for `LightingResources::set_env`.
     pub(crate) fn output_view(&self) -> &wgpu::TextureView {
         &self.output_view
-    }
-
-    /// The `ibl.invalid_source` refusal of the last `record` (None after a valid source).
-    pub(crate) fn invalid_source(&self) -> Option<&RaaError> {
-        self.invalid_source.as_ref()
     }
 
     /// Caches the bind groups over `source`, rebuilt only when the source texture changes.
@@ -591,27 +770,29 @@ impl Filter {
 
     /// Records the whole filter of `source` into `encoder`: source mips 1..5 by downsample,
     /// source mip 0 copied to the output, output mips 1..5 by GGX prefilter, sh_partial and
-    /// sh_final, then the coefficients copied into the next free staging buffer (none free:
-    /// the retry flag is set). Invariant: a source that is not SKY_ENV with SOURCE_USAGE is
-    /// skipped (nothing recorded) and leaves `ibl.invalid_source` in `invalid_source()`.
+    /// sh_final, then the coefficients copied into the next free staging buffer tagged with
+    /// the next generation of `gate` (none free: the retry flag is set and no generation is
+    /// invented). A source that is not SKY_ENV with SOURCE_USAGE records nothing, cancels
+    /// `gate` and returns `ibl.invalid_source`.
     pub(crate) fn record(
         &mut self,
         gpu: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::Texture,
-    ) {
+        gate: &PublicationGate,
+    ) -> Result<(), RaaError> {
         if let Some(message) = source_mismatch(source) {
-            self.invalid_source = Some(RaaError::FrameGraph {
+            let error = RaaError::FrameGraph {
                 code: "ibl.invalid_source",
                 message,
-            });
-            return;
+            };
+            gate.invalidate();
+            return Err(error);
         }
-        self.invalid_source = None;
         self.ensure_source(gpu, source);
         // Invariant: ensure_source just set it.
         let Some(binds) = self.source.as_ref() else {
-            return;
+            return Ok(());
         };
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -649,23 +830,37 @@ impl Filter {
             pass.set_pipeline(&self.sh_final);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        let reserved = lock(&self.readback).reserve();
-        if let Some(staging) = reserved.and_then(|i| self.staging.get(i)) {
+        let mut readback = lock(&self.readback);
+        if !readback.has_free() {
+            readback.set_retry();
+            return Ok(());
+        }
+        let tag = gate.begin_request();
+        let Some((slot, _seq)) = readback.reserve(tag) else {
+            drop(readback);
+            gate.abandon(tag);
+            return Ok(());
+        };
+        drop(readback);
+        if let Some(staging) = self.staging.get(slot) {
             encoder.copy_buffer_to_buffer(&self.coefficients, 0, staging, 0, SH_BYTES);
         }
+        Ok(())
     }
 
     /// Call after submitting the encoder of `record`: maps the staging buffers written
-    /// since the last call. Each map callback stores the coefficients with their sequence
-    /// number (older than the newest stored: dropped) and unmaps. On wasm the browser drives
-    /// the callbacks; native callers poll the device.
-    pub(crate) fn after_submit(&mut self) {
+    /// since the last call. Each map callback first matches and frees its slot/sequence,
+    /// then reports the decoded coefficients to `gate`, which publishes only a current-epoch
+    /// completion newer than every earlier one. On wasm the browser drives the callbacks;
+    /// native callers poll the device.
+    pub(crate) fn after_submit(&self, gate: &PublicationGate) {
         let mapping = lock(&self.readback).start_mapping();
         for (slot, (seq, buffer)) in mapping.into_iter().zip(&self.staging).enumerate() {
             let Some(seq) = seq else {
                 continue;
             };
             let readback = Arc::clone(&self.readback);
+            let callback_gate = gate.clone();
             let mapped = buffer.clone();
             buffer.map_async(wgpu::MapMode::Read, .., move |result| {
                 let value = result.ok().and_then(|()| {
@@ -676,14 +871,10 @@ impl Filter {
                 });
                 // Unmapping an unmapped buffer (failed map) is a no-op.
                 mapped.unmap();
-                lock(&readback).complete(slot, seq, value);
+                let completion = lock(&readback).complete(slot, seq, value);
+                callback_gate.complete(completion);
             });
         }
-    }
-
-    /// The newest completed SH9, once.
-    pub(crate) fn take_sh(&self) -> Option<Sh9> {
-        lock(&self.readback).take()
     }
 
     /// Whether a readback was skipped since the last call (all staging buffers busy), so
@@ -697,14 +888,76 @@ impl Filter {
 mod tests {
     use super::*;
 
+    fn tag(generation: u64) -> RequestTag {
+        RequestTag {
+            generation,
+            epoch: 0,
+        }
+    }
+
+    fn uniform_sh(value: f32) -> Sh9 {
+        let mut sh = [[0.0; 4]; 9];
+        sh[0] = [value, value, value, 0.0];
+        sh
+    }
+
+    fn snapshot(requested: u64, published: Option<u64>, pending: bool) -> PublicationSnapshot {
+        PublicationSnapshot {
+            requested_generation: requested,
+            published_generation: published,
+            pending,
+        }
+    }
+
+    /// Drives `Readback` and `PublicationGate` like `Filter::record` and its map callbacks.
+    struct Harness {
+        gate: PublicationGate,
+        readback: Readback,
+    }
+
+    impl Harness {
+        fn new() -> Harness {
+            Harness {
+                gate: PublicationGate::new(),
+                readback: Readback::new(),
+            }
+        }
+
+        /// The reservation and generation allocation of a successful `Filter::record`.
+        fn request(&mut self) -> Option<(usize, u64, RequestTag)> {
+            if !self.readback.has_free() {
+                self.readback.set_retry();
+                return None;
+            }
+            let tag = self.gate.begin_request();
+            match self.readback.reserve(tag) {
+                Some((slot, seq)) => Some((slot, seq, tag)),
+                None => {
+                    self.gate.abandon(tag);
+                    None
+                }
+            }
+        }
+
+        fn mapping(&mut self) -> [Option<u64>; STAGING_RING] {
+            self.readback.start_mapping()
+        }
+
+        /// One map callback: the readback frees the slot, then the gate decides.
+        fn complete(&mut self, slot: usize, seq: u64, value: Option<Sh9>) {
+            let completion = self.readback.complete(slot, seq, value);
+            self.gate.complete(completion);
+        }
+    }
+
     #[test]
     fn readback_reserves_round_robin_and_sets_retry_when_full() {
-        let mut r = Readback::<u32>::new();
-        assert_eq!(r.reserve(), Some(0));
-        assert_eq!(r.reserve(), Some(1));
-        assert_eq!(r.reserve(), Some(2));
+        let mut r = Readback::new();
+        assert_eq!(r.reserve(tag(1)), Some((0, 1)));
+        assert_eq!(r.reserve(tag(2)), Some((1, 2)));
+        assert_eq!(r.reserve(tag(3)), Some((2, 3)));
         assert!(!r.take_retry());
-        assert_eq!(r.reserve(), None);
+        assert_eq!(r.reserve(tag(4)), None);
         assert!(r.take_retry());
         assert!(!r.take_retry(), "take_retry clears the flag");
         assert_eq!(
@@ -713,31 +966,246 @@ mod tests {
             "slots carry increasing sequence numbers"
         );
         assert_eq!(r.start_mapping(), [None; STAGING_RING], "mapped once");
-        assert_eq!(r.reserve(), None, "mapping slots stay busy");
-        r.complete(1, 2, Some(20));
-        assert_eq!(r.reserve(), Some(1), "a completed slot is free again");
+        assert_eq!(r.reserve(tag(4)), None, "mapping slots stay busy");
+        assert_eq!(
+            r.complete(1, 2, Some(uniform_sh(2.0))),
+            Completion::Accepted {
+                tag: tag(2),
+                value: uniform_sh(2.0)
+            }
+        );
+        assert_eq!(
+            r.reserve(tag(4)),
+            Some((1, 4)),
+            "a completed slot is free again"
+        );
         assert_eq!(r.start_mapping(), [None, Some(4), None]);
     }
 
     #[test]
-    fn readback_keeps_only_the_newest_result_and_gives_it_once() {
-        let mut r = Readback::<u32>::new();
-        for _ in 0..3 {
-            r.reserve();
+    fn readback_keeps_only_the_newest_completion_and_frees_failed_slots() {
+        let mut r = Readback::new();
+        for generation in 1..=3 {
+            r.reserve(tag(generation));
         }
         r.start_mapping();
-        assert_eq!(r.take(), None);
-        r.complete(1, 2, Some(20));
-        r.complete(0, 1, Some(10));
-        assert_eq!(r.take(), Some(20), "the older result 1 is dropped");
-        assert_eq!(r.take(), None, "given once");
-        r.complete(2, 3, None);
-        assert_eq!(r.take(), None, "a failed map stores nothing");
+        assert_eq!(
+            r.complete(1, 2, Some(uniform_sh(2.0))),
+            Completion::Accepted {
+                tag: tag(2),
+                value: uniform_sh(2.0)
+            }
+        );
+        assert_eq!(
+            r.complete(0, 1, Some(uniform_sh(1.0))),
+            Completion::Superseded(tag(1)),
+            "an older sequence is dropped"
+        );
+        assert_eq!(
+            r.complete(2, 3, None),
+            Completion::Failed(tag(3)),
+            "a failed map frees the slot without a value"
+        );
         assert_eq!(r.start_mapping(), [None; STAGING_RING]);
-        assert_eq!(r.reserve(), Some(0), "the failed slot is free again");
-        r.start_mapping();
-        r.complete(0, 4, Some(40));
-        assert_eq!(r.take(), Some(40));
+        assert_eq!(
+            r.reserve(tag(4)),
+            Some((0, 4)),
+            "the failed slot is free again"
+        );
+    }
+
+    #[test]
+    fn initial_publication_is_empty_and_a_request_stays_pending_until_applied() {
+        let mut h = Harness::new();
+        assert_eq!(h.gate.snapshot(), snapshot(0, None, false));
+        assert_eq!(h.gate.error(), None);
+        assert_eq!(h.gate.published_sh(), None);
+
+        let (slot, seq, _) = h.request().expect("one free slot");
+        assert_eq!(h.gate.snapshot(), snapshot(1, None, true));
+        assert_eq!(h.mapping(), [Some(seq), None, None]);
+        h.complete(slot, seq, Some(uniform_sh(2.0)));
+        assert_eq!(
+            h.gate.snapshot(),
+            snapshot(1, None, true),
+            "a completed readback is not published by the getter"
+        );
+        let (generation, sh) = h.gate.take_publication().expect("publish once");
+        assert_eq!(generation, 1);
+        assert_eq!(sh, uniform_sh(2.0));
+        assert_eq!(h.gate.snapshot(), snapshot(1, Some(1), false));
+        assert_eq!(h.gate.published_sh(), Some(uniform_sh(2.0)));
+        assert_eq!(h.gate.take_publication(), None, "published once");
+    }
+
+    #[test]
+    fn failed_readback_is_attributable_and_distinct_from_pending_work() {
+        let mut h = Harness::new();
+        let (slot, seq, _) = h.request().expect("one free slot");
+        h.mapping();
+        h.complete(slot, seq, None);
+        assert_eq!(h.gate.snapshot(), snapshot(1, None, false));
+        let error = h.gate.error().expect("a readback error");
+        assert_eq!(error.code(), "ibl.readback");
+        assert!(
+            error.message().contains("generation 1"),
+            "attributable: {error}"
+        );
+        assert_eq!(h.gate.published_sh(), None);
+
+        let (slot, seq, _) = h.request().expect("retry request");
+        assert_eq!(h.gate.snapshot(), snapshot(2, None, true));
+        assert_eq!(
+            h.gate.error().map(|e| e.code()),
+            Some("ibl.readback"),
+            "the failure stays visible while the retry is pending"
+        );
+        h.mapping();
+        h.complete(slot, seq, Some(uniform_sh(3.0)));
+        h.gate.take_publication().expect("publication");
+        assert_eq!(h.gate.snapshot(), snapshot(2, Some(2), false));
+        assert_eq!(h.gate.error(), None, "publication clears the error");
+    }
+
+    #[test]
+    fn earlier_completion_publishes_while_a_newer_request_is_outstanding() {
+        let mut h = Harness::new();
+        let (slot1, seq1, _) = h.request().expect("first slot");
+        let (slot2, seq2, _) = h.request().expect("second slot");
+        h.mapping();
+        h.complete(slot1, seq1, Some(uniform_sh(1.0)));
+        let (generation, _) = h.gate.take_publication().expect("earlier publish");
+        assert_eq!(generation, 1);
+        assert_eq!(h.gate.snapshot(), snapshot(2, Some(1), true));
+        h.complete(slot2, seq2, Some(uniform_sh(2.0)));
+        let (generation, _) = h.gate.take_publication().expect("newer publish");
+        assert_eq!(generation, 2);
+        assert_eq!(h.gate.snapshot(), snapshot(2, Some(2), false));
+    }
+
+    #[test]
+    fn superseded_completions_never_downgrade_the_publication() {
+        let mut h = Harness::new();
+        let (slot1, seq1, _) = h.request().expect("first slot");
+        let (slot2, seq2, _) = h.request().expect("second slot");
+        h.mapping();
+        h.complete(slot2, seq2, Some(uniform_sh(2.0)));
+        h.gate.take_publication().expect("publish the newer value");
+        h.complete(slot1, seq1, Some(uniform_sh(1.0)));
+        assert_eq!(
+            h.gate.published_sh(),
+            Some(uniform_sh(2.0)),
+            "the older completion cannot downgrade the environment"
+        );
+        assert_eq!(h.gate.snapshot(), snapshot(2, Some(2), false));
+    }
+
+    #[test]
+    fn invalidation_clears_publication_and_keeps_the_request_counter() {
+        let mut h = Harness::new();
+        let (slot, seq, _) = h.request().expect("one free slot");
+        h.mapping();
+        h.complete(slot, seq, Some(uniform_sh(2.0)));
+        h.gate.take_publication().expect("publish");
+        assert_eq!(h.gate.snapshot(), snapshot(1, Some(1), false));
+
+        h.gate.invalidate();
+        assert_eq!(
+            h.gate.snapshot(),
+            snapshot(1, None, false),
+            "requested generation survives the invalidation"
+        );
+        assert_eq!(h.gate.published_sh(), None);
+        assert_eq!(h.gate.error(), None);
+
+        let (_, _, request) = h.request().expect("a new epoch request");
+        assert_eq!(request.generation, 2);
+        assert_eq!(request.epoch, 1);
+        assert_eq!(h.gate.snapshot(), snapshot(2, None, true));
+    }
+
+    #[test]
+    fn callbacks_after_invalidation_or_source_replacement_cannot_restore_cleared_state() {
+        let mut h = Harness::new();
+        // Source A: request generation 1.
+        let (old_slot, old_seq, _) = h.request().expect("source A slot");
+        h.mapping();
+        assert_eq!(h.gate.snapshot(), snapshot(1, None, true));
+
+        // The pass disables the environment or replaces the model/source.
+        h.gate.invalidate();
+        assert_eq!(h.gate.snapshot(), snapshot(1, None, false));
+
+        // Source B: request generation 2 in the new epoch.
+        let (new_slot, new_seq, _) = h.request().expect("source B slot");
+        assert_eq!(h.gate.snapshot(), snapshot(2, None, true));
+        h.mapping();
+
+        // The old callback lands after the invalidation: it frees its slot, publishes nothing.
+        h.complete(old_slot, old_seq, Some(uniform_sh(1.0)));
+        assert_eq!(h.gate.snapshot(), snapshot(2, None, true));
+        assert_eq!(h.gate.published_sh(), None);
+        assert_eq!(h.gate.error(), None);
+
+        // Only the replaced source's completion publishes.
+        h.complete(new_slot, new_seq, Some(uniform_sh(2.0)));
+        let (generation, sh) = h.gate.take_publication().expect("new publication");
+        assert_eq!(generation, 2);
+        assert_eq!(sh, uniform_sh(2.0));
+        assert_eq!(h.gate.snapshot(), snapshot(2, Some(2), false));
+    }
+
+    #[test]
+    fn invalidation_keeps_outstanding_staging_slots_until_their_callbacks_free_them() {
+        let mut h = Harness::new();
+        let mut requests = Vec::new();
+        for _ in 0..STAGING_RING {
+            requests.push(h.request().expect("a free slot"));
+        }
+        h.mapping();
+        h.gate.invalidate();
+        assert_eq!(
+            h.gate.snapshot(),
+            snapshot(STAGING_RING as u64, None, false)
+        );
+        assert!(h.request().is_none(), "mapping slots are not reused early");
+        assert!(h.readback.take_retry(), "the skip asks for a retry");
+
+        let (slot, seq, _) = requests[1];
+        h.complete(slot, seq, Some(uniform_sh(1.0)));
+        assert_eq!(
+            h.gate.published_sh(),
+            None,
+            "a cancelled callback publishes nothing"
+        );
+        assert!(h.request().is_some(), "its slot is free for a new request");
+    }
+
+    #[test]
+    fn a_late_callback_for_a_reused_slot_frees_nothing() {
+        let mut h = Harness::new();
+        let (slot, seq, _) = h.request().expect("first request");
+        h.mapping();
+        h.gate.invalidate();
+        h.complete(slot, seq, Some(uniform_sh(1.0)));
+        let (slot2, seq2, _) = h.request().expect("second request");
+        h.mapping();
+        assert_eq!(
+            h.readback.complete(slot2, seq, Some(uniform_sh(9.0))),
+            Completion::Stale,
+            "an old sequence does not match the reused slot"
+        );
+        assert!(
+            h.readback.complete(slot2, seq2, Some(uniform_sh(2.0)))
+                == Completion::Accepted {
+                    tag: RequestTag {
+                        generation: 2,
+                        epoch: 1,
+                    },
+                    value: uniform_sh(2.0),
+                },
+            "the real completion still matches"
+        );
     }
 
     #[test]
@@ -773,6 +1241,7 @@ mod tests {
             return;
         };
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let gate = PublicationGate::new();
         let mut filter = Filter::new(&gpu);
         let source = gpu.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("test.source"),
@@ -821,17 +1290,26 @@ mod tests {
         let mut encoder = gpu
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        filter.record(&gpu, &mut encoder, &source);
-        assert!(filter.invalid_source().is_none());
+        filter
+            .record(&gpu, &mut encoder, &source, &gate)
+            .expect("valid source");
+        assert_eq!(
+            gate.snapshot(),
+            snapshot(1, None, true),
+            "the recorded request is pending"
+        );
         gpu.queue().submit([encoder.finish()]);
-        filter.after_submit();
+        filter.after_submit(&gate);
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");
         let error = raa_core::testing::block_on(scope.pop());
         assert!(error.is_none(), "validation error: {error:?}");
-        let sh = filter.take_sh().expect("SH read back after the poll");
-        assert!(filter.take_sh().is_none(), "given once");
+        let (generation, sh) = gate
+            .take_publication()
+            .expect("SH read back after the poll");
+        assert_eq!(generation, 1);
+        assert_eq!(gate.take_publication(), None, "published once");
         assert!(!filter.take_retry());
         let l00 = 0.282_095 * 4.0 * std::f32::consts::PI;
         for (c, want) in [1.0, 0.5, 0.25].into_iter().enumerate() {
@@ -863,10 +1341,17 @@ mod tests {
         let mut encoder = gpu
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        filter.record(&gpu, &mut encoder, &small);
-        let refusal = filter.invalid_source().expect("small cube refused");
-        assert_eq!(refusal.code(), "ibl.invalid_source");
-        assert!(refusal.message().contains("128x128x6"), "{refusal}");
+        let error = filter
+            .record(&gpu, &mut encoder, &small, &gate)
+            .expect_err("small cube refused");
+        assert_eq!(error.code(), "ibl.invalid_source");
+        assert!(error.message().contains("128x128x6"), "{error}");
+        assert_eq!(
+            gate.snapshot(),
+            snapshot(1, None, false),
+            "an invalid source invalidates the publication"
+        );
+        assert_eq!(gate.published_sh(), None);
         drop(filter);
         std::mem::forget(gpu);
     }

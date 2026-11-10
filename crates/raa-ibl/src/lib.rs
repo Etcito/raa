@@ -7,6 +7,11 @@
 //! `apply_pending` (every prepare) maps the coefficient readbacks of earlier frames and sets
 //! the env once they land, so the SH reaches the lighting asynchronously, at least one frame
 //! after the filter. Until then the provider falls back to the flat S1 ambient.
+//!
+//! Requests and completions are tagged with a publication generation and an invalidation
+//! epoch. [`IblHandle::invalidate`] cancels every earlier request and clears the environment;
+//! [`IblHandle::publication`] and [`IblHandle::publication_error`] expose the lifecycle
+//! without advancing work.
 
 mod feature;
 mod filter;
@@ -14,7 +19,7 @@ mod lut;
 mod provider;
 mod sh;
 
-pub use feature::{IblFeature, IblHandle};
+pub use feature::{IblFeature, IblHandle, IblPublication};
 
 /// IBL contract functions over the S10 group-1 environment, reused by other providers:
 /// `raa_ibl_irradiance(n) -> vec3` (SH9, cosine-convolved / pi, so a constant environment
