@@ -2,9 +2,10 @@
 // normal-offset receiver picks the cascade by view depth (blending across the cascade
 // band and fading to 1 past the shadow distance), estimates the penumbra from a
 // 16-sample Poisson blocker search and filters 32 Poisson samples with hardware
-// comparison; the result is multiplied by the contact-shadow texture. Reads only the
-// prelude bindings raa_shadow_map, raa_shadow_cmp, raa_shadow, raa_contact_tex and
-// raa_frame.
+// comparison; the result is multiplied by the contact-shadow texture and by the shared
+// cloud-shadow transmittance `raa_cloud_shadow`. Reads only the prelude bindings
+// raa_shadow_map, raa_shadow_cmp, raa_shadow, raa_contact_tex and raa_frame; the cloud
+// helper consumes the group-1 weather declarations and binding-6 sampler, not this file.
 
 // 32 fixed Poisson-disk positions in the unit disk; the blocker search uses the first 16.
 const RAA_CSM_POISSON: array<vec2<f32>, 32> = array<vec2<f32>, 32>(
@@ -121,12 +122,13 @@ fn raa_csm_cascade(
     return pcf / 32.0;
 }
 
-// S11 Shadow slot: contact term when shadows are cleared, otherwise the cascade shadow
-// (blended across the 10% band, faded to 1 past the shadow distance) x contact.
+// S11 Shadow slot: contact and cloud terms when shadows are cleared, otherwise the cascade
+// shadow (blended across the 10% band, faded to 1 past the shadow distance) x contact,
+// times the shared cloud-shadow visibility. Disabled clouds return 1 from the helper.
 fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
     let contact = textureLoad(raa_contact_tex, vec2<i32>(frag.xy), 0).r;
     if (raa_shadow.params.w < 0.5) {
-        return contact;
+        return contact * raa_cloud_shadow(world_pos);
     }
     let view_depth = -(raa_frame.view * vec4<f32>(world_pos, 1.0)).z;
     let s = raa_shadow.splits;
@@ -150,5 +152,5 @@ fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
         let fade = clamp((view_depth - far_split) / band_world, 0.0, 1.0);
         vis = mix(vis, 1.0, fade);
     }
-    return vis * contact;
+    return vis * contact * raa_cloud_shadow(world_pos);
 }

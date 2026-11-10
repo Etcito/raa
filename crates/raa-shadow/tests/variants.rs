@@ -39,6 +39,13 @@ fn compose_and_validate(composer: &Composer, key: VariantKey) {
         .unwrap_or_else(|e| panic!("{key:?}: {e}"));
     assert!(wgsl.contains("fn raa_slot_shadow("), "{key:?}");
     assert!(wgsl.contains("raa_csm_"), "{key:?}");
+    // The shared composer supplies `raa_cloud_shadow` once, ahead of the provider that
+    // consumes it; the provider itself defines only its `raa_csm_` helpers.
+    assert_eq!(wgsl.matches("fn raa_cloud_shadow(").count(), 1, "{key:?}");
+    assert!(
+        wgsl.find("fn raa_cloud_shadow(") < wgsl.find("fn raa_slot_shadow("),
+        "{key:?}"
+    );
     if let Err(e) = Composer::validate(&wgsl) {
         panic!("{key:?}: {e}");
     }
@@ -77,6 +84,30 @@ fn provider_defines_the_slot_and_prefixed_helpers() {
     }
     // The slot reads the contact-shadow texture.
     assert!(p.wgsl.contains("raa_contact_tex"));
+}
+
+#[test]
+fn cloud_shadow_multiplies_both_result_paths() {
+    let p = provider::csm_provider();
+    // The common cloud helper belongs to the shared composer, never to provider text.
+    assert!(!p.wgsl.contains("fn raa_cloud_shadow("), "{}", p.wgsl);
+    assert_eq!(
+        p.wgsl.matches("raa_cloud_shadow(world_pos)").count(),
+        2,
+        "cloud transmittance must be consumed exactly once in each result path"
+    );
+    assert!(
+        p.wgsl
+            .contains("return contact * raa_cloud_shadow(world_pos);"),
+        "{}",
+        p.wgsl
+    );
+    assert!(
+        p.wgsl
+            .contains("return vis * contact * raa_cloud_shadow(world_pos);"),
+        "{}",
+        p.wgsl
+    );
 }
 
 #[test]
