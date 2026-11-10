@@ -17,6 +17,7 @@ use crate::desc::SkyDesc;
 use crate::env_pass::SkyEnvPass;
 use crate::state::{SharedSky, SkyState, invalid};
 use crate::time_of_day::{TimeOfDaySettings, TimeOfDayState};
+use crate::weather::{ResolvedWeatherState, WeatherSettings, WeatherUpdate};
 
 /// `pipeline.busy`: the pipeline or the sky state is borrowed (called while a frame executes).
 fn busy(what: &str) -> RaaError {
@@ -128,11 +129,11 @@ impl SkyHandle {
         Ok(())
     }
 
-    /// Advances the runtime clock by the real frame delta once per `invocation` and returns
-    /// the accepted directional light. The first accepted invocation and a nonpositive
-    /// delta do not advance; a repeated invocation returns the accepted snapshot without
-    /// advancing again; a nonfinite delta refuses with `sky.invalid` before any mutation.
-    /// `pipeline.busy` when called while a frame executes.
+    /// Advances the runtime clock and the weather animation by the real frame delta once per
+    /// `invocation` and returns the accepted directional light. The first accepted invocation
+    /// and a nonpositive delta advance neither; a repeated invocation returns the accepted
+    /// snapshot without advancing again; a nonfinite delta refuses with `sky.invalid` before
+    /// any mutation. `pipeline.busy` when called while a frame executes.
     pub fn advance_frame(
         &self,
         invocation: u64,
@@ -143,10 +144,48 @@ impl SkyHandle {
         }
         let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
         let (light, advanced) = s.time.advance(invocation, dt_seconds)?;
+        let north = s.time.state.settings.place.north;
+        // Drifting clouds refresh reflections only under `EnvUpdate::EveryFrame`; `OnChange`
+        // keeps the authored snapshot, so only an accepted settings edit marks the env dirty.
+        s.weather.advance(invocation, dt_seconds, north);
         if advanced {
             s.env_dirty = true;
         }
         Ok(light)
+    }
+
+    /// Validates and stores the complete authored weather settings without an explicit
+    /// cycle-start identity. A changed seed or a changing false-to-true edit restarts an
+    /// enabled cycle; an unchanged `changing: true` alone keeps it running. `sky.invalid`
+    /// (naming the field) leaves the state unchanged; `pipeline.busy` when called while a
+    /// frame executes.
+    pub fn set_weather(&self, settings: WeatherSettings) -> Result<(), RaaError> {
+        self.set_weather_update(WeatherUpdate {
+            settings,
+            cycle_start: None,
+            restart_cycle: false,
+        })
+    }
+
+    /// Validates the complete weather candidate before mutation, then stores the authored
+    /// settings, the retained cycle-start identity and the explicit restart intent. An
+    /// new start identity, explicit restart intent, a changed seed or a changing false-to-true
+    /// edit restarts an enabled cycle; `restart_cycle` never enables changing by itself. `sky.invalid` (naming the
+    /// field) leaves the state unchanged; `pipeline.busy` when called while a frame executes.
+    pub fn set_weather_update(&self, update: WeatherUpdate) -> Result<(), RaaError> {
+        update.validate()?;
+        let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
+        if s.weather.apply_update(update)? {
+            s.env_dirty = true;
+        }
+        Ok(())
+    }
+
+    /// The authored weather settings, the currently rendered weather and the active cycle's
+    /// preset identity (`None` whenever no cycle is active). The getter returns a copy and
+    /// never generates text.
+    pub fn weather(&self) -> ResolvedWeatherState {
+        self.state.borrow().weather.resolved()
     }
 }
 
@@ -179,6 +218,7 @@ fn validate_light(light: &DirectionalLight) -> Result<(), RaaError> {
 mod tests {
     use super::*;
     use crate::time_of_day::{DominantLight, Place, TimeOfDay};
+    use crate::weather::{Weather, WeatherCycle, WeatherPreset};
     use raa_math::Vec3;
 
     fn handle() -> SkyHandle {
@@ -472,5 +512,279 @@ mod tests {
         assert_eq!(h.state.borrow().time.manual, before_light);
         assert_eq!(h.time_of_day(), before, "a refusal changes nothing");
         assert!(!h.state.borrow().env_dirty, "a refusal marks nothing");
+    }
+
+    fn weather_settings(changing: bool, target: Weather) -> WeatherSettings {
+        WeatherSettings {
+            changing,
+            target,
+            ..WeatherSettings::default()
+        }
+    }
+
+    fn cycle_name(h: &SkyHandle) -> Option<&'static str> {
+        h.state
+            .borrow()
+            .weather
+            .cycle
+            .as_ref()
+            .map(WeatherCycle::current)
+    }
+
+    #[test]
+    fn weather_starts_fair_and_a_full_edit_stores_authored_values() {
+        let h = handle();
+        let initial = h.weather();
+        assert_eq!(initial.settings, WeatherSettings::default());
+        assert_eq!(initial.current, Weather::default());
+        assert_eq!(initial.cycle_preset, None);
+
+        clean(&h);
+        let storm = Weather::by_name("storm").expect("storm preset");
+        let settings = weather_settings(false, storm);
+        h.set_weather(settings).expect("valid weather");
+        let resolved = h.weather();
+        assert_eq!(resolved.settings, settings);
+        assert_eq!(resolved.current, storm, "transition 0 is immediate");
+        assert_eq!(resolved.cycle_preset, None);
+        assert!(h.state.borrow().env_dirty);
+    }
+
+    #[test]
+    fn invalid_weather_edits_refuse_without_mutation() {
+        let h = handle();
+        let storm = Weather::by_name("storm").expect("storm preset");
+        h.set_weather(weather_settings(false, storm))
+            .expect("valid weather");
+        let before = h.weather();
+        clean(&h);
+        for bad in [
+            WeatherSettings {
+                target: Weather { rain: 2.0, ..storm },
+                ..WeatherSettings::default()
+            },
+            WeatherSettings {
+                transition_seconds: -1.0,
+                ..WeatherSettings::default()
+            },
+            WeatherSettings {
+                target: Weather {
+                    wind_from: f32::NAN,
+                    ..storm
+                },
+                ..WeatherSettings::default()
+            },
+        ] {
+            assert_eq!(
+                h.set_weather(bad).expect_err("invalid weather").code(),
+                "sky.invalid"
+            );
+            let update = WeatherUpdate {
+                settings: bad,
+                cycle_start: Some(WeatherPreset::Storm),
+                restart_cycle: true,
+            };
+            assert_eq!(
+                h.set_weather_update(update)
+                    .expect_err("invalid update")
+                    .code(),
+                "sky.invalid"
+            );
+            assert_eq!(h.weather(), before, "a refusal changes nothing");
+        }
+        assert!(!h.state.borrow().env_dirty, "a refusal marks nothing");
+
+        let _frame = h.state.borrow_mut();
+        assert_eq!(
+            h.set_weather(WeatherSettings::default())
+                .expect_err("busy")
+                .code(),
+            "pipeline.busy"
+        );
+    }
+
+    #[test]
+    fn preset_plus_overrides_keeps_the_named_cycle_start() {
+        let h = handle();
+        let mut target = Weather::by_name("storm").expect("storm preset");
+        target.coverage = 0.55;
+        let mut settings = weather_settings(true, target);
+        settings.seed = 9;
+        h.set_weather_update(WeatherUpdate {
+            settings,
+            cycle_start: Some(WeatherPreset::Storm),
+            restart_cycle: true,
+        })
+        .expect("valid update");
+        let resolved = h.weather();
+        assert_eq!(resolved.cycle_preset, Some(WeatherPreset::Storm));
+        assert_eq!(resolved.settings.target, target, "overrides are authored");
+        assert_eq!(cycle_name(&h), Some("storm"), "the cycle starts at storm");
+    }
+
+    #[test]
+    fn seed_and_enable_edits_restart_while_an_unchanged_enable_does_not() {
+        let h = handle();
+        let fair = Weather::default();
+        h.set_weather_update(WeatherUpdate {
+            settings: weather_settings(true, fair),
+            cycle_start: Some(WeatherPreset::Fair),
+            restart_cycle: true,
+        })
+        .expect("start cycle");
+        assert_eq!(cycle_name(&h), Some("fair"));
+
+        let mut settings = weather_settings(true, fair);
+        h.advance_frame(1, 0.0).expect("first invocation");
+        for invocation in 2..=(4 * (WeatherCycle::DWELL.1 as u64 + 2)) {
+            h.advance_frame(invocation, 1.0).expect("advance cycle");
+        }
+        assert_ne!(cycle_name(&h), Some("fair"), "the cycle moved on");
+
+        h.set_weather(settings)
+            .expect("unchanged enable keeps the cycle");
+        assert_ne!(
+            cycle_name(&h),
+            Some("fair"),
+            "an unchanged changing:true alone does not restart"
+        );
+
+        settings.seed = 42;
+        h.set_weather(settings).expect("seed change");
+        assert_eq!(cycle_name(&h), Some("fair"), "a seed change restarts");
+
+        h.set_weather(weather_settings(false, fair))
+            .expect("stop changing");
+        assert_eq!(h.weather().cycle_preset, None);
+        h.set_weather(weather_settings(true, fair))
+            .expect("enable changing");
+        assert_eq!(
+            h.weather().cycle_preset,
+            Some(WeatherPreset::Fair),
+            "false-to-true restarts"
+        );
+    }
+
+    #[test]
+    fn explicit_selection_restarts_even_when_values_are_unchanged() {
+        let h = handle();
+        let broken = Weather::by_name("broken").expect("broken preset");
+        let settings = weather_settings(true, broken);
+        let select = WeatherUpdate {
+            settings,
+            cycle_start: Some(WeatherPreset::Broken),
+            restart_cycle: true,
+        };
+        h.set_weather_update(select).expect("select broken");
+        h.advance_frame(1, 0.0).expect("first invocation");
+        for invocation in 2..=(4 * (WeatherCycle::DWELL.1 as u64 + 2)) {
+            h.advance_frame(invocation, 1.0).expect("advance cycle");
+        }
+        assert_ne!(cycle_name(&h), Some("broken"));
+
+        h.set_weather_update(WeatherUpdate {
+            restart_cycle: false,
+            ..select
+        })
+        .expect("identity only");
+        assert_ne!(
+            cycle_name(&h),
+            Some("broken"),
+            "reapplying an identity without intent does not reset playback"
+        );
+
+        h.set_weather_update(select).expect("reselect broken");
+        assert_eq!(
+            cycle_name(&h),
+            Some("broken"),
+            "the explicit selection restarts the cycle"
+        );
+    }
+
+    #[test]
+    fn manual_target_edit_stops_changing_until_enabled_again() {
+        let h = handle();
+        let fair = Weather::default();
+        h.set_weather_update(WeatherUpdate {
+            settings: weather_settings(true, fair),
+            cycle_start: Some(WeatherPreset::Broken),
+            restart_cycle: true,
+        })
+        .expect("cycle from broken");
+        assert_eq!(h.weather().cycle_preset, Some(WeatherPreset::Broken));
+
+        let storm = Weather::by_name("storm").expect("storm preset");
+        h.set_weather(weather_settings(false, storm))
+            .expect("manual target edit");
+        let stopped = h.weather();
+        assert_eq!(stopped.settings.target, storm);
+        assert_eq!(stopped.cycle_preset, None, "a manual edit stops changing");
+        assert_eq!(stopped.current, storm);
+
+        h.set_weather(weather_settings(true, storm))
+            .expect("enable changing");
+        assert_eq!(
+            h.weather().cycle_preset,
+            Some(WeatherPreset::Broken),
+            "the retained start is used at the next enable"
+        );
+    }
+
+    #[test]
+    fn weather_advances_once_per_invocation_and_eases_exponentially() {
+        let h = handle();
+        let storm = Weather::by_name("storm").expect("storm preset");
+        h.set_weather(WeatherSettings {
+            transition_seconds: 2.0,
+            ..weather_settings(false, storm)
+        })
+        .expect("easing target");
+
+        h.advance_frame(1, 1.0).expect("first invocation");
+        assert_eq!(
+            h.weather().current,
+            Weather::default(),
+            "the first frame does not advance"
+        );
+        h.advance_frame(2, 1.0).expect("advance");
+        let eased = h.weather().current;
+        assert_ne!(eased, Weather::default(), "the weather moved toward storm");
+        assert_ne!(eased, storm, "the transition is exponential, not immediate");
+        let offset = h.state.borrow().weather.wind_offset;
+        assert_ne!(offset, [0.0; 2], "the wind drifted");
+
+        h.advance_frame(2, 1.0).expect("repeated invocation");
+        assert_eq!(h.weather().current, eased, "a repeated ID does not advance");
+        assert_eq!(h.state.borrow().weather.wind_offset, offset);
+    }
+
+    #[test]
+    fn wind_drift_is_rotated_by_the_place_north() {
+        let h = handle();
+        let mut settings = weather_settings(false, Weather::default());
+        settings.target.wind_from = 270.0;
+        settings.target.wind_speed = 10.0;
+        h.set_weather(settings).expect("windy weather");
+        let mut time = crate::time_of_day::TimeOfDaySettings {
+            enabled: false,
+            playing: false,
+            ..Default::default()
+        };
+        time.place.north = std::f32::consts::FRAC_PI_2;
+        h.set_time_of_day(time).expect("turn the place");
+        h.advance_frame(1, 0.0).expect("first invocation");
+        h.advance_frame(2, 1.0).expect("advance");
+        let [east, south] = h.state.borrow().weather.wind_offset;
+        let east = if east > 126_000.0 {
+            east - 252_000.0
+        } else {
+            east
+        };
+        assert!(east.abs() < 1.0e-3, "{east}");
+        let expected = 252_000.0 - 10.0 * 0.25;
+        assert!(
+            (south - expected).abs() < 1.0e-3,
+            "the wind turned into +Z: {south}"
+        );
     }
 }

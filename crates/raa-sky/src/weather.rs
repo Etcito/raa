@@ -458,7 +458,7 @@ impl WeatherUpdate {
 /// A sky that changes by itself. After a few minutes in one weather it moves on to one that
 /// could follow it, as weather does: fair cumulus grows into broken cloud, which may close into
 /// overcast and break into a storm, then clear again. It never leaps from clear to storm.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WeatherCycle {
     current: &'static str,
     remaining: f32,
