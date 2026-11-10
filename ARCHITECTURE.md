@@ -461,7 +461,9 @@ The frame layout exposes five fragment storage buffers; OIT adds three, reaching
 Layout evidence remains in owning source/tests: `raa-lit/src/frame.rs`, `previous_instances.rs`, `instance_store.rs`, `handle.rs` and `local_lights.rs`; `raa-shader/src/gpu_constants.rs` and the size/member-type/offset assertions in `src/lib.rs`; `raa-pipeline/src/lighting.rs` and `tests/resources.rs`; default composed variants in `raa-lit/tests/variants.rs`, and posed/unposed, transparent, fur and custom-material resource-budget checks in `raa-oit/tests/variants.rs` and `raa-fur/tests/variants.rs`. Previous-record fixtures cover translation, rotation, non-uniform scale, invalid/reused slots and lifecycle catch-up. These tests are read-only evidence for this documentation reconciliation.
 
 ## S11. Shader and material function contract (raa-shader)
-A composed module = `PRELUDE` (S10 structs, groups 0-1) + `LIB` + one material function + the winning provider of each slot + the pass entry points. Variant key = (material fn id, pass kind, msaa, flags, slots hash).
+Result id: RAA-SHARED-SHADING, owner raa-shader in milestone 2.
+
+A composed module = `PRELUDE` (S10 structs, groups 0-1) + `LIB` + one material function + the winning provider of each slot + `LOCAL_LIGHTING_WGSL` + the pass entry points. Variant key = (material fn id, pass kind, msaa, flags, slots hash).
 ```wgsl
 struct MaterialInput { position: vec3<f32>, local_position: vec3<f32>, normal: vec3<f32>, tangent: vec4<f32>, uv: vec2<f32>, color: vec4<f32>, view_dir: vec3<f32>, time: f32, front_facing: bool, frag_coord: vec4<f32>, instance_params: array<vec4<f32>, 4>, record: SurfaceMaterialGpu }
 struct MaterialOutput { base_color: vec3<f32>, metallic: f32, roughness: f32, emissive: vec3<f32>, normal: vec3<f32>, ao: f32, opacity: f32, clearcoat: f32, clearcoat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, transmission: f32, ior: f32, thickness: f32, attenuation_color: vec3<f32>, attenuation_distance: f32 }
@@ -487,24 +489,38 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 - `Shadow`: `raa_slot_shadow(world_pos, n, frag) -> f32` (sun visibility including contact; default 1).
 - `Ao`: `raa_slot_ao(frag) -> f32` (default 1).
 - `Ambient`: `raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3` (default = the S1 ambient term).
-- `Direct`: `raa_slot_direct(s, c, l, radiance) -> vec3` (default = S1 GGX + Lambert).
+- `Direct`: `raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32>` (default = S1 GGX + Lambert; existing providers retain this signature).
+- `LocalVisibility`: `raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32` (default 1, clamped to [0,1]; index is the packed light index, not the stable CPU handle). It does not consume sun/contact-shadow visibility.
+- `Indirect`: `raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>` (default black, additive to existing ambient/environment lighting).
 - `Transmission`: `raa_slot_transmission(s, c) -> vec3` (default 0; reached only by TRANSMISSIVE materials).
 - `Fog`: `raa_slot_fog(color, world_pos, c) -> vec3` (transparent, fur and blended particles; default identity).
 - `ShadeCtx { position, view_dir, frag, n_dot_v, ao, shadow, f0 }`.
 
 **Final colour**
-- Opaque: `emissive + raa_slot_direct(s, c, -sun_dir, sun_color * shadow) + raa_slot_ambient(s, c) * min(s.ao, ao)`.
-- Transparent passes add `raa_slot_transmission` and apply `raa_slot_fog`.
+- Opaque: `emissive + raa_slot_direct(s, c, -sun_dir, sun_color * shadow) + raa_slot_ambient(s, c) * min(s.ao, ao) + raa_local_lighting(s, c) + raa_slot_indirect(s, c)`.
+- Transparent passes use the same local/indirect terms, add `raa_slot_transmission` and apply `raa_slot_fog`. Fur shells use the same helper and indirect slot with their existing root factor `mix(0.35, 1.0, shell_height)` on lighting, then fog and strand coverage. Their tile selection is the S12 prepass approximation. Particle shaders retain their own material contract; this does not claim slot integration for particles.
 - Flat or UNLIT returns `base + emissive`.
 
+**Shared local lighting**
+- `crates/raa-shader/src/wgsl/local_lighting.wgsl` exports `raa_local_lighting(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>` through the additive public `LOCAL_LIGHTING_WGSL` constant. Composer includes it after selected providers. `PRELUDE_WGSL` contains layouts/bindings but no slot-calling helper, so sky, fog and material-registration parsing can still compose the prelude alone. Future shading compositions include the helper with their own providers.
+- The helper reads the current pixel's tile, evaluates its packed light indices, multiplies incident radiance by clamped local visibility and calls Direct once per contributing local light. The sun remains a separate call. Local lights cast no shadows yet; retained shadow metadata does not change this neutral visibility contract.
+- Point: zero at coincidence, at/beyond range, or when `dot(s.normal, direction_to_light) <= 0`. Otherwise, with `q = distance/range`, `window = clamp(1 - q^4, 0, 1)` and falloff `window^2 / max(distance^2, 0.04)`. The window/incidence formula retains the MIT attribution to solstice@7e465b5, `crates/solstice-render/shaders/lighting/deferred.wgsl`, `local_light`.
+- Spot: point falloff times `smoothstep(cosOuter, cosInner, dot(travelDirection, directionFromLight))`. Equal cone angles use a hard boundary, avoiding division by zero. Absent `innerAngleDeg` means inner half-angle is 0.8 times outer half-angle; authored angles are full cone angles.
+- Directional: direction to light is `-travelDirection`, with no distance attenuation; position/range are ignored and visibility receives distance zero.
+- Area: Karis representative-point approximation on a rectangle centred at the light. For unit travel direction `d`, choose `up0 = Y` if `abs(dot(d,Y)) < 0.99`, otherwise X; `t = normalize(cross(up0,d))`, `b = cross(d,t)`. For `v = surfacePosition - lightPosition`, the representative point is `lightPosition + t*clamp(dot(v,t), -width/2, width/2) + b*clamp(dot(v,b), -height/2, height/2)`. Evaluate direction, distance and the point window from that point. Emission is one-sided along +d (`dot(v,d) <= 0` gives zero), with finite near-field behavior. Roll is derived, not authored. Mathematical zero extents degenerate to the point formula on the emitting side; the public API requires positive extents.
+- Providers reached inside the nonuniform light loop must use explicit `textureSampleLevel`, `textureSampleGrad` with gradients established before divergence, or `textureLoad`; implicit derivatives and derivative-dependent control flow are forbidden there. Default, cel, matfn and user-material compositions retain variant validation.
+- Existing CPU text fixtures in `crates/raa-lit/tests/fixtures/local-light-math.txt` cover the formulas and rectangle basis/representative point. Existing shader layout/every-entry-point validation and the browser bitwise-parenthesis guard retain their attribution; these are not CPU/GPU comparisons or a new acceptance mechanism.
+
 **Pass kinds**
-- `Prepass`: vs + fs writing the S12 normal and material targets.
+- `Prepass`: vs + fs writing the S12 normal, material and motion targets.
 - `Forward`: vs + fs to HDR, MSAA.
 - `Shadow`: vs only, with material_vertex and deform.
 - `Transparent`: vs + fs appending to the OIT list.
 - `FurShell`: vs extruding shells + fs with alpha-to-coverage.
 
 ## S12. Pipeline passes and targets (raa-pipeline)
+Result ids: RAA-MOTION and RAA-TILING, owners raa-pipeline and raa-lit in milestone 2.
+
 - One raa-core RenderPass, `raa.pipeline` (writes BACKBUFFER), runs the enabled feature passes by `order`. The order is overridable from JS. Required passes cannot be disabled, and `prepass` < `forward` < `tonemap` with `tonemap` last among HDR passes (`pipeline.required_order`). Display passes declaring `FeaturePass::output_overlay() == true` follow the HDR sequence and tone mapping.
 
 | order | name | role | crate |
@@ -512,6 +528,7 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 | 10 | sky.env | pass | raa-sky |
 | 20 | shadow.csm | pass | raa-shadow |
 | 30 | prepass | pass, required | raa-lit |
+| 35 | light.tiles | pass | raa-lit |
 | 40 | ao.gtao | pass | raa-gtao |
 | 45 | shadow.contact | pass | raa-contact |
 | 50 | particles.sim | pass | raa-particles |
@@ -530,11 +547,12 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 | 130 | grading | pass | raa-grading |
 | 200 | tonemap | pass, required | raa-tonemap |
 
-- Contributor orders are positions inside the forward MSAA pass, after the opaque draws. Feature bits use the authoritative logical-id mapping in S10, independently of this table's row positions.
+- Contributor orders are positions inside the forward MSAA pass, after the opaque draws. Feature bits use the authoritative logical-id mapping in S10, independently of this table's row positions. `light.tiles` uses logical id 24 (flags.z bit 24); reordering must keep it after `prepass` and before `ao.gtao` and `forward`, otherwise `pipeline.required_order` refuses the change.
 - Targets (`raa_pipeline::Targets`, surface-sized, recreated on resize):
   - `depth` (Depth32Float, single-sample, written by prepass, RENDER_ATTACHMENT | TEXTURE_BINDING);
   - `normal` (Rgba16Float: view-space normal, roughness);
   - `material` (Rgba8Unorm: F0 sRGB-encoded, metallic);
+  - `motion` (Rg16Float, single-sample, RENDER_ATTACHMENT | TEXTURE_BINDING, prepass colour location 2, cleared to zero);
   - `hdr` chain A/B (HDR_FORMAT, RENDER_ATTACHMENT | TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC | COPY_DST).
 - HDR chain use:
   - `forward` resolves into `hdr.dst()` and swaps;
@@ -542,6 +560,24 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
   - `tonemap` reads `src`.
 - Disabling a pass calls `set_enabled(false, lighting)`, which resets its group-1 resources to dummies, so the frame stays valid.
 - Background rule: with EnvGpu background mode 0 (no sky contributor enabled), tonemap writes `background` unchanged where `depth == 1`. An empty scene therefore equals CLEAR_COLOR, and `probeNonEmpty` keeps its v0 meaning.
+
+
+**Motion validity**
+- Prepass forward meshes write current unjittered NDC minus previous unjittered NDC, converted to UV displacement: `(delta.x/2, -delta.y/2)`, positive X right and Y down. Current projection uses `unjittered_view_proj`; previous NDC subtracts `camera_jitter.zw`. No screen-space history target, temporal accumulation consumer or HDR-chain change is added.
+- Both S10 frame history and the same compacted instance slot's `previous_valid` must be valid. New/re-used slots, invalid history, absent previous geometry, material vertex functions or unsupported earlier deformation write zero. Nonpositive projection w or nonfinite projected coordinates also write zero. Sky leaves the cleared zero. Only previous rigid model transforms are supplied; a newly posed/re-posed slot has no valid prior pose.
+- S10 submission rules govern progression: one scene-frame index per render invocation, camera history per submitted viewport, unchanged previous-instance records across that invocation's views, and invalidation after partial submission. Initial creation, resize, camera discontinuity and jitter-consumer changes invalidate history. Without a jitter consumer, jitter remains zero. Existing CPU motion/history fixtures and variant checks remain the verification contracts.
+
+**Tiling and bounded selection**
+- Tiles are 16 by 16 framebuffer pixels, with grid `ceil(width/16)` by `ceil(height/16)`. Each tile has 128 u32 words: count then at most 127 packed light indices. S10 binding 13 is an `r32uint` `texture_2d_array`, grid-sized with 128 layers: word w is layer w at texel (x,y). Compute writes through its own group-2 storage-texture binding; fragments use `textureLoad`, not sampling or a storage buffer. Fragment tile is `floor(pixel/16)`, independent of forward MSAA; single-sample prepass depth needs no resolve.
+- Standard-Z reduction ignores out-of-viewport, nonfinite and clear-depth samples, retaining depths in [0,1); nearest is minimum and farthest maximum. Empty tiles have count zero, including for directional lights. Point/spot range spheres conservatively intersect the tile's four side and two depth half-spaces, tangency included. Area bounds use `range + hypot(width,height)/2`; directionals qualify for every covered tile. The port retains attribution to solstice@7e465b5 `lighting/light_tiles.wgsl` and `light_tiles_common.wgsl`, with reversed-Z assumptions inverted.
+- Coverage and depth bounds come solely from the existing opaque/fur-base prepass. Later transparent fragments (read-only depth) and displaced fur shells read their own pixel's tile but receive the nearest opaque/fur-base surface's selection. This is the stated approximation: without prepass coverage they receive no local lighting. Preset descriptions retain this limitation beside the no-local-shadows statement. Tiling adds no auxiliary coverage attachment; exact transparent/displaced coverage belongs to later geometry work.
+- Global capacity is fixed: `MAX_LOCAL_LIGHTS = 256`, 64 bytes each, a 16 KiB uniform buffer. `addLight` refuses light 257 with `lights.invalid` and a capacity message. Selection uses the exact strongest 127 of at most 256 qualified candidates, not first-127 or a capped scan. A fixed 256-wide bitonic network bounds work independently of active light count; tile storage never grows with light count.
+- The single estimator specification is `crates/raa-lit/README.md`, **M2-TILE-SELECTION**, pinned by `tests/fixtures/tile-selection.txt` and `src/tile_selection.rs`. It reconstructs the clipped tile centre at nearest valid depth, scores linear radiance luminance times the S11 kind-specific attenuation (directionals use luminance alone), with no surface-normal, visibility or shadow term, and finite saturated scores. Conservative eligibility is independent of score, so qualified zero-score lights remain candidates. Order is descending score, then ascending stable light handle; dense GPU indices preserve handle order even after removal. The CPU fixture is not compared with a running GPU.
+- `droppedLightReferences` counts qualifying light/tile references excluded by the 127-slot cap, summed over tiles and submitted views, not distinct light objects. Disabling tiling publishes zero local-light counts and valid empty resources while retaining the registry.
+
+**Submitted-frame overflow readback**
+- `crates/raa-lit/src/light_stats.rs` reuses a bounded three-sample asynchronous staging pool, with counters for up to four views. Full pools defer without growth or a synchronous wait; resources are not fragment-stage bindings and do not allocate per frame after warm-up.
+- `lightStats()` publishes the latest completed submitted invocation only after every submitted view's readback completes. `statsFrameIndex` identifies that invocation; `droppedLightReferences` is its sum and grid dimensions describe viewport 0, never the last prepared view. Unsubmitted work is excluded. Before a result exists the index/count are null; `pending` distinguishes outstanding/deferred work while an older completed result may remain available. Synchronous stats are not a GPU fence.
 
 ## S13. Mesh API data (JS `addMesh`, raa-mesh)
 `MeshDesc { positions: Float32Array (3n), normals: Float32Array (3n), uvs?: Float32Array (2n), tangents?: Float32Array (4n), colors?: Float32Array (4n linear) | Uint8Array (4n sRGB rgba8), indices: Uint32Array (3m), subMeshes?: [{ first (index offset, multiple of 3), count (multiple of 3, > 0), material?: number }] }`.
