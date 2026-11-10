@@ -81,7 +81,7 @@ fn defaults_follow_s11() {
             .wgsl
     };
     assert!(wgsl(SlotId::Deform).contains("return VertexMaterialOutput(p, n);"));
-    assert!(wgsl(SlotId::Shadow).contains("return 1.0;"));
+    assert!(wgsl(SlotId::Shadow).contains("return raa_cloud_shadow(world_pos);"));
     assert!(wgsl(SlotId::Ao).contains("return 1.0;"));
     assert!(
         wgsl(SlotId::Ambient)
@@ -112,7 +112,11 @@ fn extension_slot_signatures_are_callable() {
         vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), 1.0);
     return vec4<f32>(raa_slot_indirect(s, c), visibility);
 }";
-    let wgsl = format!("{}\n{providers}\n{entry}", raa_shader::PRELUDE_WGSL);
+    let wgsl = format!(
+        "{}\n{}\n{providers}\n{entry}",
+        raa_shader::PRELUDE_WGSL,
+        raa_shader::CLOUD_SHADOW_WGSL
+    );
     assert_eq!(Composer::validate(&wgsl), Ok(()));
 }
 

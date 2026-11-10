@@ -6,12 +6,12 @@
 //! commands, the per-frame claim counters and the `StepGpu` uniform (dynamic offset).
 //! Entry `cs_sim`, workgroup 64, one thread per slot.
 //!
-//! [`lit_module`] builds the head of the particle draw shaders: PRELUDE + LIB + the winner
+//! [`lit_module`] builds the head of the particle draw shaders: PRELUDE + LIB + cloud shadow + the winner
 //! of every slot in [`SlotId::ALL`] order, followed by the pass body, so the draws shade
 //! with the installed lighting slots.
 
 use raa_core::RaaError;
-use raa_shader::{Composer, LIB_WGSL, PRELUDE_WGSL, SlotId};
+use raa_shader::{CLOUD_SHADOW_WGSL, Composer, LIB_WGSL, PRELUDE_WGSL, SlotId};
 
 /// The `particles.sim` compute module.
 pub(crate) const SIM_WGSL: &str = include_str!("wgsl/sim.wgsl");
@@ -21,7 +21,7 @@ pub fn sim_module_wgsl() -> &'static str {
     SIM_WGSL
 }
 
-/// PRELUDE + LIB + the winner WGSL of every slot in [`SlotId::ALL`] order + `body`.
+/// PRELUDE + LIB + cloud shadow + the winner WGSL of every slot in [`SlotId::ALL`] order + `body`.
 /// Refuses `shader.slot_missing` when a slot has no provider. Not validated.
 #[allow(
     dead_code,
@@ -31,6 +31,7 @@ pub(crate) fn lit_module(composer: &Composer, body: &str) -> Result<String, RaaE
     let mut out = String::new();
     section(&mut out, "prelude", PRELUDE_WGSL);
     section(&mut out, "lib", LIB_WGSL);
+    section(&mut out, "cloud shadow", CLOUD_SHADOW_WGSL);
     for slot in SlotId::ALL {
         let p = composer.winner(slot).ok_or_else(|| RaaError::FrameGraph {
             code: "shader.slot_missing",
@@ -92,6 +93,9 @@ mod tests {
     #[test]
     fn lit_module_with_default_slots_and_empty_body_validates() {
         let wgsl = lit_module(&default_composer(), "").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(wgsl.matches("fn raa_cloud_shadow(").count(), 1);
+        assert_eq!(wgsl.matches(raa_shader::WEATHER_LIGHTING_WGSL).count(), 1);
+        assert!(wgsl.find("fn raa_cloud_shadow(") < wgsl.find("fn raa_slot_shadow("));
         for slot in SlotId::ALL {
             assert!(
                 wgsl.contains(&format!("fn {}(", slot.fn_name())),

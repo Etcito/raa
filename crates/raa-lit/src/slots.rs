@@ -50,7 +50,7 @@ fn section(name: &str) -> &'static str {
 }
 
 /// One provider per [`SlotId`] in [`SlotId::ALL`] order, priority 0, provider
-/// [`DEFAULT_PROVIDER`], with the S11 defaults: identity deform, shadow 1, AO 1, the S1
+/// [`DEFAULT_PROVIDER`], with the S11 defaults: identity deform, cloud visibility, AO 1, the S1
 /// PbrLite ambient term, S1 GGX + Lambert direct light, no transmission, no fog,
 /// local visibility 1 (no local shadows yet), and additional indirect illumination black.
 #[allow(dead_code, reason = "installed by LitRenderer::new")]

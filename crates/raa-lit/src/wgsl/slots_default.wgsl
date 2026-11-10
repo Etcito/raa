@@ -10,9 +10,9 @@ fn raa_slot_deform(p: vec3<f32>, n: vec3<f32>, x: InstanceExtraGpu, t: f32) -> V
 }
 
 // @slot shadow
-// The sun is fully visible.
+// Clouds attenuate the dominant light; disabled clouds are fully visible.
 fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
-    return 1.0;
+    return raa_cloud_shadow(world_pos);
 }
 
 // @slot ao
