@@ -110,3 +110,95 @@ fn env_face_directions_match_ibl_convention() {
         }
     }
 }
+
+/// The adapted physical-atmosphere helper source (S23); no bindings, functions prefixed
+/// `raa_atmosphere_`, and the S10 `PhysicalSkyGpu` record.
+const ATMOSPHERE_WGSL: &str = include_str!("../src/wgsl/atmosphere.wgsl");
+
+/// Minimal fragment entry binding the S10 group-2 record and exercising every helper.
+const ATMOSPHERE_ENTRY: &str = "
+@group(2) @binding(0) var<uniform> raa_sky: PhysicalSkyGpu;
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    let direction = raa_atmosphere_sky_view_direction(vec2<f32>(0.5, 0.5));
+    let medium = raa_atmosphere_sample_medium(1.0, raa_sky);
+    let transmittance = raa_atmosphere_transmittance_uv(raa_sky.viewer.w, 1.0, raa_sky);
+    let params = raa_atmosphere_transmittance_params(transmittance, raa_sky);
+    let hit = raa_atmosphere_ray_sphere(
+        vec3<f32>(0.0, raa_sky.viewer.w, 0.0), direction, raa_sky.planet.y,
+    );
+    let phase = raa_atmosphere_rayleigh_phase(0.5) + raa_atmosphere_mie_phase(0.5, raa_sky.mie.w);
+    let uv = raa_atmosphere_sky_view_uv(direction);
+    return vec4<f32>(
+        medium.extinction.x + medium.mie + transmittance.x + params.y + hit + phase + uv.x + uv.y,
+        0.0, 0.0, 1.0,
+    );
+}
+";
+
+#[test]
+fn atmosphere_wgsl_validates_and_helpers_are_prefixed() {
+    let wgsl = format!("{PRELUDE_WGSL}\n{LIB_WGSL}\n{ATMOSPHERE_WGSL}\n{ATMOSPHERE_ENTRY}");
+    if let Err(e) = Composer::validate(&wgsl) {
+        panic!("atmosphere shader refused: {e}");
+    }
+    for name in [
+        "sample_medium",
+        "rayleigh_phase",
+        "mie_phase",
+        "ray_sphere",
+        "transmittance_uv",
+        "transmittance_params",
+        "sky_view_uv",
+        "sky_view_direction",
+    ] {
+        assert!(
+            ATMOSPHERE_WGSL.contains(&format!("fn raa_atmosphere_{name}(")),
+            "raa_atmosphere_{name} missing"
+        );
+    }
+    let mut names = Vec::new();
+    for line in ATMOSPHERE_WGSL.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("fn ") {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            names.push(name);
+        }
+    }
+    assert!(!names.is_empty(), "atmosphere helpers are empty");
+    for name in names {
+        assert!(
+            name.starts_with("raa_atmosphere_"),
+            "helper {name} is not prefixed raa_atmosphere_"
+        );
+    }
+    // The source constants stay in the helper file, parameterised by the S10 record.
+    for constant in [
+        "raa_atmosphere_ground_radius_km: f32 = 6360.0",
+        "raa_atmosphere_top_radius_km: f32 = 6460.0",
+        "vec3<f32>(5.802e-3, 13.558e-3, 33.1e-3)",
+        "raa_atmosphere_mie_scale_height_km: f32 = 1.6",
+        "vec3<f32>(0.650e-3, 1.881e-3, 0.085e-3)",
+    ] {
+        assert!(
+            ATMOSPHERE_WGSL.contains(constant),
+            "source constant missing: {constant}"
+        );
+    }
+}
+
+#[test]
+fn legacy_sky_remains_standalone() {
+    // The physical helper is a separate source: the legacy constant composition must
+    // neither embed the S10 record nor the atmosphere helpers.
+    assert!(!SKY_WGSL.contains("PhysicalSkyGpu"));
+    assert!(!SKY_WGSL.contains("raa_atmosphere_"));
+    let wgsl = format!("{PRELUDE_WGSL}\n{LIB_WGSL}\n{SKY_WGSL}\n{ENTRY}");
+    if let Err(e) = Composer::validate(&wgsl) {
+        panic!("legacy sky shader refused: {e}");
+    }
+}

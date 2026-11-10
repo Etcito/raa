@@ -13,6 +13,7 @@
 //! each frame and `sky.background` switches it to sky while enabled, so disabling the
 //! contributor brings back the flat background colour.
 
+mod atmosphere;
 mod background;
 mod desc;
 mod env_pass;
