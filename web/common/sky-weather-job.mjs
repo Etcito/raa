@@ -2,6 +2,7 @@
 // P2 sky-weather page protocol: verify the staged build, select the cumulative
 // inventory and allocate immutable, non-destructive render attempts.
 import fs from 'node:fs';
+import { publishGpuPage, runGpuPageOp } from './gpu-job.mjs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -88,7 +89,7 @@ export const RECORD_FIELDS = Object.freeze({
 });
 
 export const STAGES = Object.freeze(['foundation', 'atmosphere', 'weather']);
-export const ACTIONS = Object.freeze(['check', 'select', 'clean']);
+export const ACTIONS = Object.freeze(['check', 'select', 'clean', 'render']);
 
 /** Record names inside an allocated `<out>/attempts/<UUID>` directory. */
 export function attemptRecords(directory) {
@@ -108,7 +109,7 @@ export function attemptRecords(directory) {
   });
 }
 
-const USAGE = 'usage: node web/common/sky-weather-job.mjs <check|select|clean> --page dist/sky-weather --out out/sky-weather/<stage> --stage <foundation|atmosphere|weather>';
+const USAGE = 'usage: node web/common/sky-weather-job.mjs <check|select|clean|render> --page dist/sky-weather --out out/sky-weather/<stage> --stage <foundation|atmosphere|weather>';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function ensure(condition, message) { if (!condition) throw new Error(message); }
@@ -294,6 +295,124 @@ export async function clean(page, out, stage) {
   return attempt;
 }
 
+/** Render once; transport owns queue, running and download clocks independently. */
+export async function render(page, out, stage, transport = { publishGpuPage, runGpuPageOp }) {
+  const { build, inventory } = await verifyPage(page, stage);
+  const read = (name) => readJsonRecord(containedPath(out, name));
+  const write = (name, value) => writeJsonRecord(containedPath(out, name), value);
+  const pointer = read('current.json');
+  exact(pointer, RECORD_FIELDS.current, 'current pointer');
+  ensure(isUuid(pointer.attemptId) && isUuid(pointer.selectionId)
+    && pointer.directory === `attempts/${pointer.attemptId}`, 'invalid current attempt identity');
+  const records = attemptRecords(pointer.directory);
+  const selection = read(records.selection);
+  validateSelection(selection, stage, build, inventory, 'frozen selection');
+  ensure(isDeepStrictEqual(read('selection.json'), selection), 'current selection differs from frozen selection');
+  ensure(isDeepStrictEqual(read(records.build), build), 'frozen build differs from current build');
+  const attempt = read(records.attempt);
+  exact(attempt, RECORD_FIELDS.attempt, 'attempt');
+  ensure(attempt.attemptId === pointer.attemptId && attempt.selectionId === pointer.selectionId
+    && attempt.selectionId === selection.selectionId && attempt.buildId === build.buildId
+    && attempt.directory === pointer.directory, 'frozen attempt identities differ');
+  ensure(attempt.status === 'allocated' && attempt.error === null, 'attempt already started; clean before rendering');
+  ensure(!fs.existsSync(containedPath(out, records.run)), 'attempt already has a run; clean before rendering');
+  // Exclusive directory creation also prevents concurrent render callers from claiming this attempt.
+  fs.mkdirSync(containedPath(out, `${pointer.directory}/jobs`));
+  const run = {
+    selectionId: selection.selectionId, attemptId: attempt.attemptId, buildId: build.buildId,
+    preparationId: build.preparationId, pageRef: '', jobs: [], images: [], status: 'failed', errors: [],
+  };
+  const message = (error) => String(error?.message ?? error);
+  const current = () => ensure(isDeepStrictEqual(read('current.json'), pointer), 'current pointer was superseded');
+  const saveCaptures = (job, rows) => {
+    for (const image of Array.isArray(job.result?.images) ? job.result.images : []) {
+      try {
+        const row = rows.find((row) => row.id === image.id && row.filename === image.filename);
+        ensure(row && image.mime === 'image/png' && typeof image.observation === 'string', 'unexpected capture identity or format');
+        ensure(!run.images.some((saved) => saved.id === image.id), `duplicate capture ${image.id}`);
+        ensure(typeof image.data === 'string' && /^[A-Za-z0-9+/]+={0,2}$/.test(image.data), `invalid PNG payload ${image.id}`);
+        const bytes = Buffer.from(image.data, 'base64');
+        ensure(bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])), `invalid PNG signature ${image.id}`);
+        const file = containedPath(out, records.image(row.filename));
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, bytes, { flag: 'wx' });
+        run.images.push({ id: image.id, filename: row.filename, path: `images/${row.filename}`,
+          jobId: job.jobId, clientId: job.clientId, observation: image.observation });
+      } catch (error) { run.errors.push(message(error)); }
+    }
+  };
+  try {
+    write(records.attempt, { ...attempt, status: 'running' });
+    current();
+    const published = await transport.publishGpuPage(build.page, { timeoutMs: 300000 });
+    ensure(nonblank(published?.pageRef), 'publication returned no pageRef');
+    run.pageRef = published.pageRef;
+    const groups = new Map();
+    for (const row of inventory) {
+      const key = JSON.stringify([row.scenario, row.mode]);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    }
+    for (const rows of groups.values()) {
+      current();
+      const { scenario, mode } = rows[0];
+      const index = run.jobs.length;
+      const input = { selectionId: run.selectionId, attemptId: run.attemptId, buildId: run.buildId,
+        scenario, mode, width: 1280, height: 720, remainingMs: 270000 };
+      write(records.input(index), input);
+      const job = { jobId: '', clientId: '', scenario, mode, result: null, error: null };
+      run.jobs.push(job);
+      try {
+        const reply = await transport.runGpuPageOp(run.pageRef, 'run', input, {
+          timeoutMs: 300000, out: containedPath(out, `${pointer.directory}/jobs/${index}`),
+        });
+        job.jobId = nonblank(reply.jobId) ? reply.jobId : '';
+        job.clientId = nonblank(reply.clientId) ? reply.clientId : '';
+        job.result = reply.result ?? null;
+        write(records.result(index), job.result);
+        ensure(nonblank(job.jobId) && nonblank(job.clientId), 'missing job/client identity');
+        ensure(isRecord(job.result), 'missing or malformed direct operation result');
+      } catch (error) {
+        job.error = message(error);
+        // The transport leaves the actual host reply here even when download/operation fails.
+        const file = containedPath(out, records.result(index));
+        if (job.result === null && fs.existsSync(file)) {
+          try {
+            const reply = readJsonRecord(file);
+            if (Object.hasOwn(reply ?? {}, 'result')) {
+              job.jobId = String(reply.job_id ?? '');
+              job.clientId = String(reply.client_id ?? '');
+              job.result = reply.result;
+              write(records.result(index), job.result);
+            }
+          } catch (recovery) { run.errors.push(message(recovery)); }
+        }
+        if (!fs.existsSync(file)) write(records.result(index), null);
+        run.errors.push(job.error);
+      }
+      saveCaptures(job, rows);
+      if (job.error) throw new Error(job.error);
+      const expected = { selectionId: run.selectionId, attemptId: run.attemptId, buildId: run.buildId, scenario, mode };
+      ensure(isDeepStrictEqual(job.result.provenance, expected), 'operation provenance differs from input');
+      ensure(rows.every((row) => run.images.some((image) => image.id === row.id)), 'operation is missing selected captures');
+      for (const kind of ['console', 'page', 'gpu']) {
+        ensure(Array.isArray(job.result.errors?.[kind]), `missing ${kind} error observations`);
+        run.errors.push(...job.result.errors[kind].map((error) => `${kind}: ${error}`));
+      }
+      write(records.run, run);
+      ensure(run.errors.length === 0, run.errors.join('\n'));
+    }
+    current();
+    run.status = 'passed';
+  } catch (error) {
+    if (!run.errors.includes(message(error))) run.errors.push(message(error));
+  }
+  write(records.run, run);
+  write(records.attempt, { ...attempt, status: run.status, error: run.errors.length ? run.errors.join('\n') : null });
+  ensure(run.status === 'passed', run.errors.join('\n'));
+  return run;
+}
+
 export function parseArgs(argv) {
   const { values, positionals } = parse({ args: argv, allowPositionals: true,
     options: { page: { type: 'string' }, out: { type: 'string' }, stage: { type: 'string' } } });
@@ -314,6 +433,9 @@ export async function main(argv = process.argv.slice(2)) {
   } else if (action === 'select') {
     const selection = await select(page, out, stage);
     process.stdout.write(`sky-weather-job: select ${stage}: ${selection.inventory.length} image(s), selection ${selection.selectionId}\n`);
+  } else if (action === 'render') {
+    const run = await render(page, out, stage);
+    process.stdout.write(`sky-weather-job: render ${stage}: attempt ${run.attemptId}: ${run.status}\n`);
   } else {
     const attempt = await clean(page, out, stage);
     process.stdout.write(`sky-weather-job: clean ${stage}: attempt ${attempt.attemptId} at ${attempt.directory}\n`);

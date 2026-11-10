@@ -6,7 +6,7 @@ import path from 'node:path';
 import childProcess from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
-import { check, select, clean, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
+import { check, select, clean, render, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
 
 function scratch(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sky-job-'));
@@ -273,15 +273,177 @@ test('clean refuses stale selections without allocating an attempt', async (t) =
   await assert.rejects(clean(state.page, path.join(state.root, 'out/sky-weather/atmosphere'), 'atmosphere'), /unavailable/);
 });
 
-test('CLI parses the protocol and drives select without inventing actions yet', async (t) => {
+test('CLI parses the protocol and preserves selection', async (t) => {
   const state = fixture(t);
   const out = path.join(state.root, 'out/sky-weather/foundation');
   assert.throws(() => parseArgs(['select', '--page', state.page, '--out', out]), /invalid stage/);
-  assert.throws(() => parseArgs(['render', '--page', state.page, '--out', out, '--stage', 'foundation']), /usage/);
+  assert.equal(parseArgs(['render', '--page', state.page, '--out', out, '--stage', 'foundation']).action, 'render');
+  assert.throws(() => parseArgs(['fresh', '--page', state.page, '--out', out, '--stage', 'foundation']), /usage/);
   assert.throws(() => parseArgs(['select', '--page', state.page, '--stage', 'foundation']), /usage/);
   assert.deepEqual(parseArgs(['check', '--page', state.page, '--stage', 'foundation']),
     { action: 'check', page: state.page, out: undefined, stage: 'foundation' });
   t.mock.method(process.stdout, 'write', () => true);
   await main(['select', '--page', state.page, '--out', out, '--stage', 'foundation']);
   assert.equal(readJsonRecord(containedPath(out, 'selection.json')).stage, 'foundation');
+});
+
+async function renderFixture(t, scenes = [foundation]) {
+  const state = fixture(t, { scenes });
+  state.out = path.join(state.root, 'out/sky-weather', scenes.length > 1 ? 'atmosphere' : 'foundation');
+  state.stage = scenes.length > 1 ? 'atmosphere' : 'foundation';
+  state.selection = await select(state.page, state.out, state.stage);
+  state.attempt = await clean(state.page, state.out, state.stage);
+  state.records = attemptRecords(state.attempt.directory);
+  state.read = (name) => readJsonRecord(containedPath(state.out, name));
+  state.calls = [];
+  state.transport = {
+    async publishGpuPage(page, options) {
+      state.calls.push('publish');
+      assert.equal(page, state.page);
+      assert.deepEqual(options, { timeoutMs: 300000 });
+      return { pageRef: 'host-page' };
+    },
+    async runGpuPageOp(pageRef, op, input, options) {
+      state.calls.push(input.scenario);
+      assert.equal(pageRef, 'host-page');
+      assert.equal(op, 'run');
+      assert.equal(options.timeoutMs, 300000);
+      assert.equal(input.remainingMs, 270000);
+      assert.equal(input.width, 1280);
+      assert.equal(input.height, 720);
+      const { width, height, remainingMs, ...provenance } = input;
+      return { jobId: `job-${state.calls.length}`, clientId: 'windows-client', result: {
+        provenance, json: { legacy: 'must not unwrap' }, nested: [1, { values: [false, null] }],
+        images: state.selection.inventory.filter((row) => row.scenario === input.scenario && row.mode === input.mode)
+          .map((row) => ({ id: row.id, filename: row.filename, mime: 'image/png',
+            data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jf1sAAAAASUVORK5CYII=',
+            observation: 'Actual capture' })),
+        errors: { console: [], page: [], gpu: [] },
+      } };
+    },
+  };
+  state.render = () => render(state.page, state.out, state.stage, state.transport);
+  return state;
+}
+
+test('render publishes once, saves direct results and named captures, and refuses reuse', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const run = await s.render();
+  assert.deepEqual(Object.keys(run), RECORD_FIELDS.run);
+  assert.equal(run.status, 'passed');
+  assert.equal(s.calls.filter((call) => call === 'publish').length, 1);
+  assert.equal(run.jobs.length, 2);
+  for (const [index, job] of run.jobs.entries()) {
+    assert.deepEqual(s.read(s.records.result(index)), job.result);
+    assert.deepEqual(job.result.nested, [1, { values: [false, null] }]);
+    assert.equal(s.read(s.records.input(index)).remainingMs, 270000);
+  }
+  for (const image of run.images) {
+    assert.equal(image.path, `images/${image.filename}`);
+    assert.ok(fs.statSync(containedPath(s.out, `${s.attempt.directory}/${image.path}`)).size > 8);
+    assert.equal(image.clientId, 'windows-client');
+  }
+  assert.deepEqual(s.read(s.records.run), run);
+  assert.equal(s.read(s.records.attempt).status, 'passed');
+  await assert.rejects(s.render(), /already started/);
+});
+
+test('render preserves failed operation captures and originating download attribution', async (t) => {
+  const s = await renderFixture(t);
+  const runOp = s.transport.runGpuPageOp;
+  s.transport.runGpuPageOp = async (...args) => {
+    const reply = await runOp(...args);
+    writeJsonRecord(path.join(args[3].out, 'result.json'), {
+      job_id: reply.jobId, client_id: reply.clientId, result: reply.result,
+    });
+    throw new Error('managed output download timeout');
+  };
+  await assert.rejects(s.render(), /managed output download timeout/);
+  const run = s.read(s.records.run);
+  assert.equal(run.status, 'failed');
+  assert.equal(run.jobs[0].error, 'managed output download timeout');
+  assert.equal(run.images.length, 1);
+  assert.deepEqual(s.read(s.records.result(0)), run.jobs[0].result);
+  await assert.rejects(s.render(), /already started/);
+});
+
+for (const failure of ['GPU waiting timeout after 60s', 'operation budget expired', 'GPU job running timeout after 300s']) {
+  test(`render records ${failure} without resetting or retrying the allowance`, async (t) => {
+    const s = await renderFixture(t);
+    s.transport.runGpuPageOp = async () => { throw new Error(failure); };
+    await assert.rejects(s.render(), { message: failure });
+    const run = s.read(s.records.run);
+    assert.equal(run.jobs[0].result, null);
+    assert.equal(run.jobs[0].error, failure);
+    assert.equal(s.read(s.records.result(0)), null);
+    assert.equal(s.read(s.records.attempt).status, 'failed');
+  });
+}
+
+test('superseded pointers fail while retaining recoverable captures', async (t) => {
+  const s = await renderFixture(t);
+  const runOp = s.transport.runGpuPageOp;
+  s.transport.runGpuPageOp = async (...args) => {
+    const result = await runOp(...args);
+    await clean(s.page, s.out, s.stage);
+    return result;
+  };
+  await assert.rejects(s.render(), /superseded/);
+  assert.equal(s.read(s.records.run).images.length, 1);
+  assert.equal(s.read(s.records.attempt).status, 'failed');
+  assert.notEqual(s.read('current.json').attemptId, s.attempt.attemptId);
+});
+
+test('render rejects altered frozen records, stale builds and symlink outputs before publication', async (t) => {
+  for (const kind of ['build', 'selection', 'attempt', 'stale', 'symlink']) {
+    const s = await renderFixture(t);
+    if (kind === 'stale') {
+      put(s.root, 'examples/sky-weather/lib/inventory.js', 'changed source');
+    } else if (kind === 'symlink') {
+      fs.symlinkSync(s.parent, path.join(s.out, s.attempt.directory, 'jobs'));
+    } else {
+      const name = s.records[kind];
+      const record = s.read(name);
+      record.buildId = randomUUID();
+      writeJsonRecord(containedPath(s.out, name), record);
+    }
+    await assert.rejects(s.render(), /differs|differ|belongs to build|changed input|symlink/);
+    assert.deepEqual(s.calls, []);
+  }
+});
+
+test('publication failure leaves a complete failed run and consumes the attempt', async (t) => {
+  const s = await renderFixture(t);
+  s.transport.publishGpuPage = async () => { throw new Error('publication refused'); };
+  await assert.rejects(s.render(), /publication refused/);
+  const run = s.read(s.records.run);
+  assert.deepEqual(Object.keys(run), RECORD_FIELDS.run);
+  assert.deepEqual(run.jobs, []);
+  assert.deepEqual(run.errors, ['publication refused']);
+  await assert.rejects(s.render(), /already started/);
+});
+
+test('null and array direct results are retained but cannot pass as sky output', async (t) => {
+  for (const result of [null, [1, { nested: [true] }]]) {
+    const s = await renderFixture(t);
+    s.transport.runGpuPageOp = async () => ({ jobId: 'host-job', clientId: 'host-client', result });
+    await assert.rejects(s.render(), /missing or malformed direct operation result/);
+    assert.deepEqual(s.read(s.records.result(0)), result);
+    assert.deepEqual(s.read(s.records.run).jobs[0].result, result);
+  }
+});
+
+test('capture containment failures retain the direct result and other valid captures', async (t) => {
+  const s = await renderFixture(t);
+  const runOp = s.transport.runGpuPageOp;
+  s.transport.runGpuPageOp = async (...args) => {
+    const reply = await runOp(...args);
+    reply.result.images.unshift({ ...reply.result.images[0], filename: '../../escape.png' });
+    return reply;
+  };
+  await assert.rejects(s.render(), /unexpected capture identity/);
+  const run = s.read(s.records.run);
+  assert.equal(run.images.length, 1);
+  assert.equal(run.jobs[0].result.images.length, 2);
+  assert.equal(fs.existsSync(path.join(s.out, 'escape.png')), false);
 });
