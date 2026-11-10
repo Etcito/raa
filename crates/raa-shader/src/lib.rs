@@ -20,6 +20,10 @@ pub use registry::{MaterialFnEntry, MaterialFnRegistry};
 /// S10 structs and bindings of groups 0-1, S11 material structs, flag constants,
 /// `raa_default_output` and the tint helper. Self-contained: no slot definitions or calls.
 pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.wgsl"));
+/// Standalone S10 weather declarations, neutral defaults and directional radiance boundary.
+/// Already included once in [`PRELUDE_WGSL`]. Cloud shadow composition consumes these
+/// bindings; standalone directional consumers can include this source without the prelude.
+pub const WEATHER_LIGHTING_WGSL: &str = include_str!("wgsl/weather_lighting.wgsl");
 /// S11 helper library (`raa_hash3`, `raa_noise3`, `raa_fbm3`, `raa_voronoi3`,
 /// `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`).
 pub const LIB_WGSL: &str = include_str!("wgsl/lib.wgsl");
@@ -203,6 +207,117 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
     fn prelude_validates_without_slot_providers() {
         assert!(!PRELUDE_WGSL.contains("raa_slot_"));
         assert_eq!(Composer::validate(PRELUDE_WGSL), Ok(()));
+    }
+
+    #[test]
+    fn weather_lighting_standalone_layout_and_defaults() {
+        assert_eq!(PRELUDE_WGSL.matches(WEATHER_LIGHTING_WGSL).count(), 1);
+        let source = format!(
+            "{WEATHER_LIGHTING_WGSL}\n\
+@fragment fn weather_probe() -> @location(0) vec4<f32> {{
+    let cloud = textureLoad(raa_cloud_transmittance, vec2<i32>(0), 0, 0);
+    return vec4<f32>(raa_directional_radiance(cloud.rgb), 1.0);
+}}"
+        );
+        assert_eq!(Composer::validate(WEATHER_LIGHTING_WGSL), Ok(()));
+        assert_eq!(Composer::validate(&source), Ok(()));
+        let m = naga::front::wgsl::parse_str(&source).unwrap();
+        let (handle, weather) = m
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("WeatherLightingGpu"))
+            .unwrap();
+        let naga::TypeInner::Struct { members, span } = &weather.inner else {
+            panic!("WeatherLightingGpu is a struct");
+        };
+        assert_eq!(*span as usize, WEATHER_LIGHTING_GPU_SIZE);
+        let mut layouter = naga::proc::Layouter::default();
+        layouter.update(m.to_ctx()).unwrap();
+        assert_eq!(layouter[handle].alignment, naga::proc::Alignment::SIXTEEN);
+        assert_eq!(members.len(), 4);
+        for (member, (name, offset, scalar)) in members.iter().zip([
+            ("map", 0, naga::Scalar::F32),
+            ("light", 16, naga::Scalar::F32),
+            ("atmosphericTransmission", 32, naga::Scalar::F32),
+            ("flags", 48, naga::Scalar::U32),
+        ]) {
+            assert_eq!(member.name.as_deref(), Some(name));
+            assert_eq!(member.offset, offset);
+            assert_eq!(
+                m.types[member.ty].inner,
+                naga::TypeInner::Vector {
+                    size: naga::VectorSize::Quad,
+                    scalar,
+                }
+            );
+        }
+        assert_eq!(m.global_variables.len(), 2, "no fragment storage added");
+        for (_, global) in m.global_variables.iter() {
+            let binding = global.binding.as_ref().unwrap();
+            assert_eq!(binding.group, 1);
+            match binding.binding {
+                15 => {
+                    assert_eq!(global.name.as_deref(), Some("raa_cloud_transmittance"));
+                    assert_eq!(global.space, naga::AddressSpace::Handle);
+                    assert_eq!(
+                        m.types[global.ty].inner,
+                        naga::TypeInner::Image {
+                            dim: naga::ImageDimension::D2,
+                            arrayed: true,
+                            class: naga::ImageClass::Sampled {
+                                kind: naga::ScalarKind::Float,
+                                multi: false,
+                            },
+                        }
+                    );
+                }
+                16 => {
+                    assert_eq!(global.name.as_deref(), Some("raa_weather_lighting"));
+                    assert_eq!(global.space, naga::AddressSpace::Uniform);
+                    assert_eq!(global.ty, handle);
+                }
+                _ => panic!("unexpected weather binding"),
+            }
+        }
+        let (_, default) = m
+            .constants
+            .iter()
+            .find(|(_, c)| c.name.as_deref() == Some("RAA_WEATHER_LIGHTING_DEFAULT"))
+            .unwrap();
+        assert_eq!(default.ty, handle);
+        let naga::Expression::Compose { components, .. } = &m.global_expressions[default.init]
+        else {
+            panic!("neutral record constructor");
+        };
+        assert_eq!(components.len(), 4);
+        for (lane, expected) in components.iter().zip([
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ]) {
+            let naga::Expression::Compose { components, .. } = &m.global_expressions[*lane] else {
+                panic!("neutral lane constructor");
+            };
+            assert_eq!(components.len(), 4);
+            for (value, expected) in components.iter().zip(expected) {
+                let actual = match m.global_expressions[*value] {
+                    naga::Expression::Literal(naga::Literal::F32(v)) => v,
+                    naga::Expression::Literal(naga::Literal::U32(v)) => v as f32,
+                    _ => panic!("neutral literal"),
+                };
+                assert_eq!(actual, expected);
+            }
+        }
+        // Pin the directional boundary itself, without reproducing its math on the CPU.
+        assert!(
+            WEATHER_LIGHTING_WGSL
+                .contains("if (raa_weather_lighting.flags.x == 0u) {\n        return raw;\n    }")
+        );
+        assert!(
+            WEATHER_LIGHTING_WGSL
+                .contains("return raw * raa_weather_lighting.atmosphericTransmission.rgb;")
+        );
     }
 
     fn stub_composer() -> Composer {
@@ -419,6 +534,7 @@ struct LightLayoutProbe { records: array<LightGpu, MAX_LOCAL_LIGHTS>, }
             ("ShadowGpu", 320),
             ("EnvSh", 160),
             ("EnvGpu", 256),
+            ("WeatherLightingGpu", WEATHER_LIGHTING_GPU_SIZE as u32),
         ] {
             let (h, _) = m
                 .types

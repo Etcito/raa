@@ -5,11 +5,13 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/wgsl/prelude.wgsl");
+    println!("cargo:rerun-if-changed=src/wgsl/weather_lighting.wgsl");
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let constants = [
         ("FRAME_GPU_SIZE", "usize", 768),
         ("MAX_LOCAL_LIGHTS", "usize", 256),
         ("LIGHT_GPU_SIZE", "usize", 64),
+        ("WEATHER_LIGHTING_GPU_SIZE", "usize", 64),
         ("TILE_SIZE", "u32", 16),
         ("TILE_MAX_LIGHTS", "u32", 127),
         ("TILE_WORDS", "u32", 128),
@@ -46,6 +48,12 @@ fn raa_feature_enabled(id: u32) -> bool {{\n\
     )
     .unwrap();
     let prelude = fs::read_to_string("src/wgsl/prelude.wgsl").expect("read prelude");
+    let weather =
+        fs::read_to_string("src/wgsl/weather_lighting.wgsl").expect("read weather lighting");
     fs::write(out.join("gpu_constants.rs"), rust).expect("write Rust constants");
-    fs::write(out.join("prelude.wgsl"), format!("{prelude}\n{wgsl}")).expect("write prelude");
+    fs::write(
+        out.join("prelude.wgsl"),
+        format!("{prelude}\n{weather}\n{wgsl}"),
+    )
+    .expect("write prelude");
 }

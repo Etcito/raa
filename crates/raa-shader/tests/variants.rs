@@ -447,10 +447,10 @@ fn group_two_bindings_are_private_to_their_pass() {
             [0, 1, 2, 3, 4, 5, 6, 7, 8],
             "{pass:?}"
         );
-        // Existing lighting resources plus the local-light uniform and tile texture.
+        // Lighting, local lights and weather texture/uniform; 14 stays reserved for GI.
         assert_eq!(
             group_bindings(&module, 1),
-            (0..14).collect::<Vec<u32>>(),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16],
             "{pass:?}"
         );
         let expected: &[u32] = match pass {

@@ -158,6 +158,8 @@ fn raa_previous_model(r: RaaPreviousInstanceGpu) -> mat4x4<f32> {
 // Fragment-only shared resources; compute tiling uses its own layout and equivalent bytes.
 @group(1) @binding(12) var<uniform> raa_local_lights: array<LightGpu, MAX_LOCAL_LIGHTS>;
 @group(1) @binding(13) var raa_light_tiles: texture_2d_array<u32>;
+// Binding 14 remains reserved for GI. The generated prelude appends weather_lighting.wgsl
+// exactly once for the fragment-only texture/uniform bindings 15/16; no added storage.
 
 // SurfaceMaterialGpu.header.x models and header.z flags.
 const RAA_MODEL_FLAT: u32 = 0u;
