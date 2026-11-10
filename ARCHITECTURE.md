@@ -1,11 +1,12 @@
 # RAA architecture
 
-RAA is an extensible rendering engine library: small Rust crates compiled to WebAssembly over WebGPU, a JS package `@etcito/raa`, demo pages and an example page. This document is the single contract for its modules. Conventions apply to every module. The numbered shared sections (S1 to S9) define data shapes that modules implement and never redefine.
+This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is an extensible Rust/WebAssembly/WebGPU renderer with the JS package `@etcito/raa`; MAMA owns procedural scene data; SDF Modeler owns document authoring. The consolidated contract lives only in `raa:ARCHITECTURE.md`. Conventions apply to every module. The numbered shared sections define data shapes that modules implement and never redefine.
 
 ## Conventions
 
 ### Repository, toolchain, layout
-- One repository: `raa`. Paths are relative to it. It contains `Cargo.toml`, `Cargo.lock` (committed), `LICENSE` (MIT), `README.md` and `.gitignore`. The `.gitignore` is kept as is and blocks target/, node_modules/, dist/, pkg/, *.log, *.glb, *.gltf, *.png, *.jpg, *.avif, *.ktx2 and *.bin.
+- Repository aliases qualify cross-repository paths (`raa:`, `mama:`, `sdfm:`); unqualified paths here are relative to RAA. Every implementation file belongs to one module in one repository. Each task edits only its listed files in one repository; the host creates its worktree and commit. Integration order is mama, then raa, then sdfm. The external solstice checkout is read-only reference material.
+- RAA contains `Cargo.toml`, `Cargo.lock` (committed), `LICENSE` (MIT), `README.md` and `.gitignore`. The `.gitignore` is kept as is and blocks target/, node_modules/, dist/, pkg/, *.log, *.glb, *.gltf, *.png, *.jpg, *.avif, *.ktx2 and *.bin.
 - Rust edition 2024, rust-version 1.96.0, `members = ["crates/*", "demos/*", "tests/*"]`. These are globs, so adding a crate never edits the root manifest. Third-party versions live in `[workspace.dependencies]`. Members use `{ workspace = true }` and may only add features. rustfmt and clippy are required.
 - Closed dependency list:
   - `wgpu` 30.0.1, `default-features = false`, features `["wgsl"]`. wasm32 adds `webgpu`, native adds `vulkan` and `gl`.
@@ -24,11 +25,16 @@ RAA is an extensible rendering engine library: small Rust crates compiled to Web
 - Every crate compiles for the host and for `wasm32-unknown-unknown`. Native-only code sits behind `#[cfg(not(target_arch = "wasm32"))]` and web-only code behind `#[cfg(target_arch = "wasm32")]`.
 - `[profile.wasm-release]` inherits `release` with `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true` and `debug = false`.
 - Tools: `node` (scripts use `${NODE:-node}`, npm next to it), the `wasm-bindgen` CLI 0.2.129 on PATH, and `python3` for the judge client. wasm-opt is not used by default.
+- Existing workspace path dependencies remain. In particular, raa-pipeline, raa-shader, raa-lit, raa-mesh, raa-sky, raa-oit and raa-fog are not root workspace dependencies: consumers use the existing sibling `path = "../<crate>"` form, never `{ workspace = true }` for them.
+- MAMA's evaluator package is `mama-procgen`, library `procgen`; load `. .rust-toolchain/activate.sh` before cargo there. Rust procedural checks use `node scripts/test.mjs --only procgen`, including `cargo test -p mama-procgen`. Type checks use `npm run typecheck`, never a fetching `npx tsc`. Nodes are discovered by filename; this chain consumes the existing `game_light` and its landed SPEC, without new MAMA implementation.
+- SDF Modeler imports procedural scene/light types from MAMA. Schema/tool changes regenerate with `node bin/sdfm.mjs schema` and retain guard/typecheck. Runtime remesh APIs remain unchanged.
+- The harness links sibling dependencies through kong. No installation, new external dependency or git-pinned dependency is introduced; separately authorized git dependencies require HTTPS, a full commit id and the clean-copy kong rules check.
 
 ### Coordinates, units, colour
 - Right-handed, Y up, the camera looks down -Z, units are metres. Front faces are counter-clockwise, back faces are culled and normals point outward.
 - Matrices are column-major f32 with column vectors (`M * v`). Clip depth is [0, 1]. Depth is `Depth32Float`, compare `Less`, cleared to 1.0. Quaternions are `[x, y, z, w]`.
 - Colours are linear RGB in Rust and on the GPU. Asset files and JS colour inputs are sRGB in [0, 1] unless the API says linear, and are converted at the boundary.
+- S17 local-light JS colours are sRGB; the engine converts them once to linear. MAMA's flattened `ProcLight.color` is already linear: the adapter applies the sRGB OETF before calling S17, whose EOTF restores linear RGB. Document colours in SDF Modeler are sRGB and go directly to that public API. Never apply the procedural conversion to document colours. Intensity is nonnegative linear light intensity at one metre; positions, range and full area extents remain metres across repositories.
 - The v0 renderer shades straight to the canvas (S1). The lit renderer shades linear HDR into HDR_FORMAT, and only `tonemap` converts to display (S12). When the canvas is not `*Srgb`, the shader encodes sRGB itself.
 
 ### Errors and refusals
@@ -36,6 +42,8 @@ RAA is an extensible rendering engine library: small Rust crates compiled to Web
   - P2 crates return `raa_core::RaaError`, using `RaaError::FrameGraph { code, message }` for their area codes.
   - Refusals are typed values, never NaN, an empty output, a panic or a skip.
   - A refused setter leaves the previous state unchanged.
+- S17 `addLight`, `updateLight`, `attachLight` and `detachLight` are atomic. The existing `setTransforms` batch retains earlier applied entries when a later entry fails; each entry validates its scene transform and attached lights before applying. This preserves `crates/raa-js/src/engine.rs`'s sequential behavior.
+- Synchronous shader setters use CPU naga validation and never synchronously wait for a WebGPU error-scope future. Managed render jobs or the existing asynchronous reporting path collect browser validation failures.
 - No `unwrap`, `expect` or indexing panic on paths that public API with user data can reach. They are allowed in tests and on commented invariants.
 
 ### No global state, no hidden allocation, unsafe
@@ -48,6 +56,19 @@ RAA is an extensible rendering engine library: small Rust crates compiled to Web
 - Native GPU tests call `raa_core::testing::software_gpu()`. Without an adapter they print `SKIP <test name>: no software adapter (<reason>)` to stderr and return. They never fail for lack of an adapter, and never skip silently.
 - Shader code is tested by naga validation of every composed variant (`variants.rs`). GPU algorithms have CPU twins tested on the CPU.
 - Code generates test geometry and assets. JSON text fixtures are allowed, binary fixtures never are.
+
+### M4_WORK_RULES
+- Display M4 has graph owner index 5. Its closed-M3 starting results are raa `b38bca9090e0d3d665fd498746d831e4bea07b60`, mama `c17b0c3cd02db25faa1519afd0ce07a3015823ca` and sdfm `e258ddcef291b346f0ca969e1b894d40d537b56f`. Source inspection is authorized; historical no-read planning assumptions and missing-transport placeholders are resolved.
+- Model cards change only their listed files; the host makes the single commit. Target 300 formatted added-plus-deleted lines, including source, tests and handwritten documentation; replacements count twice. Only lockfiles and mechanically generated build output are excluded. Existing compact forms are permitted only for the same construct in the named source file, which the completion report names. Never invent compressed formatting, remove useful blank lines, omit behavior or drop tests to fit; deliver and report any unavoidable overrun.
+- RAA documentation cards run `cargo check`. `bash scripts/check.sh` remains the mandatory milestone check. Retain every repository's inherited tests and branch checks: MAMA typecheck, build, cargo check and affected `scripts/test.mjs` tests; SDFM typecheck, build, guard, affected `scripts/proof/unit.mjs` tests and host-managed boot.
+- Build upstream dependencies before tests importing their `dist/` outputs. In SDFM run `npm run build` before dist readers and compile Node tests with `node node_modules/typescript/bin/tsc -p tsconfig.node.json` before the unit runner. Use anchored selectors for affected test modules and `--jobs 1`; independent harness work respects `NMC_CPUS`, default 1.
+- Rust formatting covers changed files with their crate edition and the baseline-aware formatter; task clippy names the affected crate, uses `--no-deps` and denies warnings for applicable native/wasm targets. Do not reformat unrelated inherited files. Before authorizing asserted API/binding/shader-string changes, inspect source/tests and put discovered pinning tests in the owner's scope.
+- Required MAMA/RAA runtime preparation and long render chains execute programmatically through configured host preparation, retaining configured target policy. `scripts/build-package.sh` assembles m28 declarations into the shipped root `index.d.ts`; `scripts/build-bricks.sh` stages that package in `dist/bricks/raa`. Missing linked declarations require host preparation in dependency order, not source aliases, deep imports or replacement interfaces.
+- Model cards author code, fixtures and commands; only programmatic cards run GPU jobs. Node 11 alone writes sdfm `.nmc/commands.json`, preserving every older entry verbatim. Commands are single programs with explicit build -> readers -> selection -> render -> freshness -> judge dependencies. Long jobs are not awaited by model cards; host archive, informational mail and cleanup remain host responsibilities.
+- Technical failures enter one configured Operator/Doctor recovery flow using configured delegate defaults: retain the originating error, repair its source and missing guard, expose repair status and rerun invalidated work. Reuse successful work only through guarded host recovery. No model choice is prescribed.
+- This chain adds no legacy proof/regression card, milestone proof script, extra full-suite loop, new performance target, reference image, pixel comparison, CPU/GPU parity or hash comparison. CPU formula fixtures run only on the CPU. Existing asset formats, content hashes and metadata hashes remain data, including their loader validation/cache semantics; they are not build-output or rendering acceptance comparisons.
+- Historical proof modules, capture/judge commands, reference-based criteria and milestone lists below remain historical documentation of their original contracts, not new executable cards. Preserve the complete S14 scene/record contract and all unchanged public contracts. Existing build, shipped-wasm size, startup/speed, allocation, geometry, API documentation, extensibility, feature-toggle, hardware-labeling, asset and neutrality requirements retain their definitions and thresholds below; only the excluded acceptance mechanisms above do not enter this chain.
+- Local-light shadows, a second screen-space history target, temporal antialiasing, upscaling and HDR pass-chain restructuring remain outside scope. New-light descriptions state that they cast no shadows yet. Adapted solstice source retains MIT attribution, including Copyright (c) 2026 SamG-Coder; no binary/image/`.bin` is committed, and additional neutrality searches use whole-word matching.
 
 ### Web build and demo pages
 - `scripts/build-web.sh <crate-dir> [--features <list>]` runs these steps:
@@ -521,6 +542,93 @@ RAA uses only:
 
 Codes: `sdfm.format`, `sdfm.version`, `sdfm.schema` (JSON pointer), `sdfm.not_finite`, `sdfm.id`, `sdfm.cap_document`, `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`.
 
+**Closed-M3 procedural entrypoints.** Inspected at raa `b38bca9090e0d3d665fd498746d831e4bea07b60`; detailed options and refusals remain in `packages/raa-sdfm/index.d.ts` and its owning implementations. Asset loading above remains unchanged, including the format's hash data and cache validation.
+- Package-root exports include `createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader` and `loadProceduralScene(engine: Engine, loader: SdfmLoader, scene: string | object, options?: ProceduralSceneOptions): Promise<ProceduralSceneHandle>`. Preserve every other existing root export in `packages/raa-sdfm/index.js`.
+- `SdfmLoaderOptions.mama` is an accessor returning `Promise<string | URL | SdfmMamaModule>`; it resolves once per loader. A URL selects workers; an object meshes in-process. Existing worker options, LODs, rigs, clips, material mapping and asset return shapes remain.
+- `ProceduralSceneOptions` carries `resolveAsset?`, `resolveMesh?`, `parent?`, `mode?: 'mesh' | 'trace'` (default mesh), `procgen?`, trace-only `placement?: Vec3` and `mama?: () => Promise<SdfmProceduralMama>`. MAMA parses both text and object input; mesh mode supports both S16 variants, trace mode only sdf-refs. No alternate loader or hierarchy is introduced.
+- `ProceduralSceneHandle` exposes `root`, `instanceCount`, `sourceCount`, `setVisible(visible)`, `stats()`, `runtime(procgen)` and `dispose()`. Existing stats remain `{ instances, meshes, pending }` (mesh implementation may also report `attributed`); no light registry/count is added. Each mesh scene instance keeps its own node under root; trace mode retains the existing shared engine trace slot.
+- `ProceduralSceneRuntime` exposes `step(tick): Promise<{ moved, remeshed, added, removed, ok, issues }>`, `set(values: Record<string, ProceduralRuntimeValue>): void` and `dispose(): void`; `ProceduralRuntimeValue` is `number | boolean | Vec3`. Preserve existing implementation result extensions and instance lifecycle callbacks.
+- Internal module exports are not additional package-root APIs: `src/mama-bridge.js` exports `importMama(base, options = {})`, `importProcedural(base)`, `createBrowserPool(mama, options)`, `meshDocument(mama, document, options)`, `toMamaMaterial(mama, built)` and `toMamaLight(light)`; `src/procedural-runtime.js` exports `createProceduralRuntime(options = {})`; `src/procedural-trace.js` exports `loadProceduralTrace(engine, loader, scene, mama, options)`. MAMA imports stay centralized in the bridge; Rust crates never name or depend on MAMA.
+
+**Light mapping and resource ownership.** `toMamaLight` copies the S16 record into an S17 `LocalLightDesc`: position from `t`, travel direction from normalized `R(r) * S(s) * [0,0,-1]`, with quaternion `[x,y,z,w]`. Range and full area extents stay in metres independent of scale. It preserves kind, intensity, range, shadows and applicable spot angles/area size; an omitted inner angle stays absent. It converts linear RGB to sRGB for the engine boundary exactly as specified in Conventions, without mutating evaluator arrays.
+- `src/mama-light-owner.js`'s internal `createMamaLightOwner(engine, placement = [0,0,0])` gives each loaded scene one private full-evaluator-id-to-handle registry, independent of geometry keys. Both static loaders pass this same owner to their runtime adapters; accessing runtime never duplicates static lights. These are world-space lights: parenting the scene root does not implicitly attach them to an engine instance. Document-owned Game handles are a separate ownership domain.
+- Static optional lights work with `runtime: null` and zero geometry. Trace placement is a copied finite translation added once to copied `t` for every static/runtime snapshot; it never accumulates or changes direction, range or size. Mesh mode uses zero placement.
+- Preparation validates/maps all records before allocation, stages new lights without illumination, and commits after the external scene application succeeds. Surviving ids retain handles, removed ids release them, and replacement never leaves duplicates. Failed light updates restore previous descriptors and release staged additions; failed loads release their own resources without disturbing other published scene handles. Engine refusals propagate unchanged.
+- A complete snapshot resets removed optional `angleDeg`, `innerAngleDeg` and `size` fields explicitly before merging its descriptor. This differs from an ordinary partial S17 update: a removed authored inner angle must not linger. Missing `delta.output` leaves the published set unchanged; a successful complete output with omitted lights or `[]` clears it. Failed evaluation preserves the previous set, including on the first geometry-baseline step.
+- `setVisible` suppresses illumination through intensity zero while retaining authored descriptors/identities; show restores them. Failed light visibility updates restore prior light state. Scene/runtime disposal aborts pending preparation and removes owned lights; pending steps cannot recreate disposed resources. Cleanup is idempotent and does not remove another scene's lights; reload after disposal leaves no stale illumination.
+- Malformed/duplicate records, degenerate direction and invalid placement use `sdfm.scene_format` with useful paths. Resolve/decode/trace-pack failures use `sdfm.scene_resolve`, imports use `sdfm.worker`, disposed owners use `sdfm.disposed`. Transport-valid values outside engine domains or capacity are refused by S17, never silently skipped or clamped. Existing asset, mesher and material errors remain unchanged.
+
+## S16. Procedural light interchange
+Result id: MAMA-LIGHT-RECORD. Owner: mama-light-record (landed M1); transport: mama-light-transport (closed M3). Consumers: raa-sdfm-pkg and sdfm-light-authoring. This section consumes existing MAMA implementation, not a new producer task.
+
+**Record.** Inspected at mama `c17b0c3cd02db25faa1519afd0ce07a3015823ca`, `src/procgen/output-types.ts`:
+- `ProcLightKind = 'point' | 'spot' | 'directional' | 'area'`.
+- `ProcLight extends ProcGameplayEntry`, whose fields are `id: string`, `node: string`, `key: number`, `t: ProcVec3`, `r: ProcQuat`, `s: ProcVec3`. The light adds `kind: ProcLightKind`, `color: ProcVec3`, `intensity: number`, `range: number`, `shadows: boolean`, `angleDeg?: number`, `innerAngleDeg?: number`, `size?: [number, number]`. There is no separate position/direction field.
+- Rust retains generic Json payloads: `game_markers.rs` emits data, `passes/gameplay.rs` flattens identity and placement and converts only colour from sRGB to linear, and `output.rs` holds `OutputSections.lights: Option<Json>`. No competing Rust ProcLight struct is required. Record order is retained, translation/scale use 1e-6 grids, rotation uses the 1e-9 quaternion grid, and an empty family emits no section.
+- Existing `game_light` defaults remain point, colour `#fff1d6`, intensity 2, range 6 m, outer angle 35 degrees, size setting `[1,1,0]` and shadows false. Range must be above zero. The record emits only the first two size components for area, and angles only for spot. These defaults do not replace SDF Modeler's legacy document defaults.
+- Both cone angles are full angles. Explicit `innerAngleDeg` must be finite in [1,179] and no greater than `angleDeg`; invalid authored values refuse with the existing typed policy, without clamping. Omission stays absent and means effective inner half-angle = 0.8 times outer half-angle (also full inner = 0.8 times full outer). The effective default is not materialized or clamped to one degree.
+
+**Static and runtime transport.** Existing declarations/implementation at the same mama revision are `src/procgen/scene-file.ts`, `scene-build.ts`, `runtime.ts` and `crates/procgen/src/ext/runtime/delta.rs`.
+- `ProceduralScene` keeps format `sdfm.procedural-scene`, version 1, variants `sdf-refs`/`mesh-refs` and `runtime: null | { input: ProcgenInput }`, with optional `lights?: ProcLight[]` imported from its owning output-types module. Missing lights and `[]` are valid; `null` is invalid. Light-free serialization remains unchanged; omitted sections stay omitted.
+- `parseProceduralScene(text: string): ProceduralScene` and `serializeProceduralScene(s: ProceduralScene): string` validate and canonically preserve ordered records, identities, placement, linear colour, units and inner-angle omission using existing scene numeric serialization. Required fields are id/node/key/t/r/s/kind/color/intensity/range/shadows. Vectors have the correct finite dimensions, key is u32, identities are strings, intensity is nonnegative and range positive; no geometry-instance-index requirement is imposed on light keys.
+- Spot requires `angleDeg` in [1,179] and permits `innerAngleDeg` in [1,angleDeg]; area requires two finite size numbers, matching the producer domain. Unknown and kind-inapplicable keys refuse with existing scene schema errors/JSON-pointer paths; nonfinite numbers retain `PSCENE_NOT_FINITE`. RAA's positive-size and colour domains are separate engine acceptance rules.
+- `planProceduralScene(b: SceneBuildInput, variant: 'sdf-refs' | 'mesh-refs'): SceneFilePlan` independently copies evaluated `output.lights` into both plans, including parameter-free and runtime-null scenes, without aliasing input or inserting optional angles.
+- `Runtime.create(procgen, input)`, `set(values)`, `step(tick)` and `dispose()` retain their interfaces and geometry deltas. A successful change to the complete lights section triggers a complete next ProcgenOutput in `delta.output`, alongside the existing first-step, source-table and surviving-instance metadata triggers. Addition, properties, placement, replacement, final removal and omitted/empty transitions are covered; otherwise unchanged steps may omit output. A failed evaluation is not a successful empty snapshot.
+- Existing focused producer tests cover scene-file/scene-build round trips, both variants/runtime modes, invalid records, optional angles and real Rust/WASM Runtime.step light-only changes/removal/unchanged suppression. The bridge consumes this landed transport before integration; no MAMA runtime method is added.
+
+## S17. Local-light API and lifecycle
+Result id: RAA-LOCAL-API. Owner: api-m28 (landed M2). The existing `Engine.setLight(LightDesc)` remains the sun API, with its signature and callers unchanged. Sun, ambient, environment and existing pass settings remain independent of local lights.
+
+**Public declarations.** Verified at closed-M3 raa `b38bca9090e0d3d665fd498746d831e4bea07b60`, `packages/raa/types/m28-lights.d.ts` (shipped at the package root through declaration assembly):
+
+```ts
+type LocalLightKind = 'point' | 'spot' | 'directional' | 'area';
+type LightHandle = number;
+interface LocalLightDesc {
+  kind?: LocalLightKind;
+  position?: [number, number, number];
+  direction?: [number, number, number];
+  color?: [number, number, number];
+  intensity?: number;
+  range?: number;
+  angleDeg?: number;
+  innerAngleDeg?: number;
+  size?: [number, number];
+  radius?: number;
+  shadows?: boolean;
+}
+type LocalLightChanges = Partial<LocalLightDesc>;
+interface LightStats {
+  activeLights: number;
+  attachedLights: number;
+  tileColumns: number;
+  tileRows: number;
+  tileCapacity: 127;
+  droppedLightReferences: number | null;
+  statsFrameIndex: number | null;
+  pending: boolean;
+}
+interface Engine {
+  addLight(desc: LocalLightDesc): LightHandle;
+  updateLight(handle: LightHandle, changes: LocalLightChanges): void;
+  removeLight(handle: LightHandle): void;
+  attachLight(handle: LightHandle, instanceId: number,
+    localOffset: [number, number, number]): void;
+  detachLight(handle: LightHandle): void;
+  lightStats(): LightStats;
+}
+```
+
+**Defaults and validation.** Defaults are point, position `[0,0,0]`, direction `[0,0,-1]`, sRGB colour `[1,1,1]`, intensity 2, range 6, outer angle 35, absent inner angle, size `[1,1]`, radius 0 and shadows false. All numbers are finite; colour is in [0,1], intensity/radius nonnegative, range/size positive, direction nonzero and normalized on acceptance. Angles follow S16. Size is full width/height in metres. Radius and shadows are retained authoring metadata; the 64-byte GPU light record has no radius, and neither field enables local shadows. Local lights cast no shadows yet.
+
+**Updates and identity.** Merge the complete descriptor and validate before mutation. Omitted update properties retain their values; explicit `undefined` resets a property to its default, including clearing `innerAngleDeg` to the implicit 80% cone. A reduced outer angle refuses if a retained explicit inner angle exceeds it. Kind changes preserve other valid authored fields. Colour conversion runs only on a newly supplied sRGB colour, never on a retained linear value. Handles are positive safe JS integers, stable and never reused. Global capacity is 256; the 257th light refuses with `lights.invalid` naming capacity and changes nothing.
+
+**Attachment.** `instanceId` is the public instance-group handle returned by `addInstance`/`addMeshInstance`, never an internal compacted submesh index. Position becomes `instance.model * [localOffset,1]`; direction is local while attached, transformed by the instance's linear transform and normalized. Range/size remain metres independent of object scale. An authored position update while attached refuses with `light.attached_position`; change the offset through `attachLight`. Reattachment replaces parent/offset atomically, and detach preserves latest world position/direction. Parent removal detaches lights at their last valid world transforms; light removal removes its attachment. Movement/light changes are reflected before tile construction in the same submitted frame; degenerate attached directions refuse the owning transform update with prior state preserved (the batch exception remains in Conventions).
+
+**Statistics and errors.** `lightStats()` returns current registry counts and latest fully completed asynchronous overflow statistics without a GPU fence. Before any completion, droppedLightReferences/statsFrameIndex are null. Pending indicates outstanding readback; tileColumns/tileRows describe viewport 0, and dropped references sum qualifying light/tile references excluded by the 127-slot cap across submitted viewports of that invocation, not distinct objects. Publish a result only after all its invocation's readbacks complete. Aggregate totals do not identify which scene/document owns handles.
+- `light.invalid_desc`: malformed/out-of-range descriptor; `light.invalid_attachment`: invalid offset/parent/transformed direction; `light.attached_position`: attached position edit.
+- `api.invalid_argument`: malformed numeric light handle; `api.unknown_handle`: well-formed unknown/removed light handle; `lights.invalid`: capacity; `api.disposed`: disposed engine. Refusals remain typed RaaErrors and preserve state.
+
 ## Module ownership
 
 | Module | Files | Consumes |
@@ -556,6 +664,11 @@ Codes: `sdfm.format`, `sdfm.version`, `sdfm.schema` (JSON pointer), `sdfm.not_fi
 | api-m14 | `crates/raa-js/src/api/m14_camera_effects.rs`<br>`packages/raa/types/m14-camera-effects.d.ts`<br>`docs/api/m14-camera-effects.md` | raa-js, raa-ssr, raa-dof, raa-fog, raa-shafts, raa-grading, api-m8, api-m10 |
 | proof-m14 | `proofs/m14-camera-effects.mjs`<br>`examples/lookdev/scenes/m14-camera-effects.js`<br>`docs/dogfood/m14.md` | lookdev-tools, api-m14 |
 | api-m15 | `crates/raa-js/src/api/m15_animation.rs`<br>`packages/raa/types/m15-animation.d.ts`<br>`docs/api/m15-animation.md` | raa-js, raa-deform |
+| api-m28 | `crates/raa-js/src/api/m28_lights.rs`<br>`packages/raa/types/m28-lights.d.ts`<br>`docs/api/m28-lights.md` | raa-lit |
+| raa-sdfm-pkg | `packages/raa-sdfm/**` | api-m28, mama-light-record, js-package, mama-light-transport |
+| mama-light-record | `mama:crates/procgen/src/nodes/game_markers.rs`<br>`mama:crates/procgen/src/passes/gameplay.rs`<br>`mama:crates/procgen/src/output.rs`<br>`mama:crates/procgen/SPEC.md`<br>`mama:src/procgen/output-types.ts` | none |
+| mama-light-transport | `mama:src/procgen/scene-file.ts`<br>`mama:src/procgen/scene-build.ts`<br>`mama:src/procgen/{scene-file,scene-build,runtime}.test.ts`<br>`mama:crates/procgen/src/ext/runtime/delta.rs`<br>`mama:crates/procgen/tests/runtime.rs` | mama-light-record |
+| solstice-architecture-finalization | `raa:ARCHITECTURE.md` | mama-light-record, api-m28, raa-js, js-package, raa-lit, raa-pipeline, raa-sdfm-pkg, mama-light-transport, sdfm-light-authoring, sdfm-game-light-sync, sdfm-light-evidence |
 | proof-m15 | `proofs/m15-animation.mjs`<br>`examples/lookdev/scenes/m15-waddle.js`<br>`docs/dogfood/m15.md` | lookdev-tools, api-m15 |
 
 ## Module: workspace
@@ -2049,11 +2162,11 @@ Files: `packages/raa-sdfm/**`.
 
 `@etcito/raa-sdfm` 0.1.0: plain ES modules, a hand-written `index.d.ts`, no build step.
 - `package.json`: `type: module`, `exports` index.js / index.d.ts, `peerDependencies` on `@etcito/raa` ^0.1.0 and MAMA.
-- MAMA (0.1.0 @ 864ebc3) is reached only through `src/mama-bridge.js`.
+- MAMA is reached only through `src/mama-bridge.js`. The closed-M3 light record/transport inspected here is mama `c17b0c3cd02db25faa1519afd0ce07a3015823ca`; older call-table revisions remain historical attribution, not the current light baseline.
 - The README's `## MAMA calls` table (specifier | export | signature | returns | MAMA file @ commit) lists every MAMA call of the package and of the compare page. No call appears in code without a row.
 
 **API**
-- `createSdfmLoader({ engine, mama, workerUrl?, workers? (min(4, hardwareConcurrency || 2)) }) -> SdfmLoader`.
+- `createSdfmLoader({ engine, mama, workerUrl?, workers? (min(4, hardwareConcurrency || 2)), lods? (2) }) -> SdfmLoader`; `mama` is the async accessor described in S15, and lods is an integer 0..3.
 - `SdfmLoader`:
   - `validate(asset)`: `{ ok, errors: { code, path, message }[] }` (S15, without MAMA);
   - `load(asset, { onProgress? })`: validate, hash check, cache by hash, worker meshing with transferable arrays, then per mesh `engine.addMesh`, `addMaterialFunction` (once per key) and `addSurfaceMaterial`;
@@ -2064,6 +2177,12 @@ Files: `packages/raa-sdfm/**`.
   - `SdfmPart { name, groupId, rigid, parent, t, r, mesh, materials }`;
   - `SdfmSpawned { root, parts: Record<name, { node, instance }> }`.
 - `SdfmError extends Error { code, path? }` (S15 codes).
+
+**Procedural loading and light ownership (closed M3)**
+- S15 records the complete existing procedural entrypoints/options and their resource-owner semantics; S16 records the consumed MAMA wire transport; S17 records the public engine API. `loadProceduralScene` is the package-root entrypoint, dispatching through `src/procedural.js` to mesh or `src/procedural-trace.js`, with `src/procedural-runtime.js` applying subsequent deltas. Preserve the declared scene/runtime return shapes, including no public light registry.
+- Shared mapping is `src/mama-bridge.js:toMamaLight(light)`; shared ownership is `src/mama-light-owner.js:createMamaLightOwner(engine, placement)`. Loaders create one owner and pass it as `options.lights` to `createProceduralRuntime`; the owner exposes internal `prepare(records) -> { commit(), rollback() }`, `setVisible(visible)` and `dispose()`. These internal handoffs do not add package-root exports.
+- MAMA crossing calls are `parseProceduralScene`, `sceneSourceDocument`, `serializeDocument`, trace `buildSceneTraceInput`/`packTrace` and `Runtime.create/set/step/dispose`, resolved by `importProcedural`. Export-side `planProceduralScene`/`serializeProceduralScene` produce the consumed file; they are not adapter calls. The MAMA-call table remains authoritative for unchanged meshing/material/browser calls.
+- A scene owns its static and runtime light handles by complete evaluator id, independently of renderable keys. Omitted output, complete empty snapshots, optional resets, colour conversion, trace placement, rollback, visibility and disposal follow S15/S16. This consumes closed M3; it assigns no new MAMA work and leaves unrelated asset, rig, clip, LOD, mesh, material and trace behavior intact.
 
 **Meshing.** The bridge calls `meshAssets(doc, { pool, groups })` from `mama/core/game/mesh-assets.js`. The pool comes from `setupBrowserHost` (`mama/browser`) in the browser, or from the caller in node.
 - A group result with `error` gives `sdfm.mesher_refused` (path `/document`, message naming the group with MAMA's message and fix). Any other MAMA exception gives `sdfm.worker`.
@@ -2086,6 +2205,28 @@ Files: `packages/raa-sdfm/**`.
 **`worker.js`** protocol: `{type: 'init', mamaUrl}`; `{type: 'mesh', id, document, mesher}` answered by `{type: 'meshed', id, parts}` or `{type: 'error', id, code, message}`.
 
 Tests (`node --test packages/raa-sdfm/test/`): validate, map-material, loader (`test/fake-mama.js` reproduces the real meshAssets shape). Fixtures `test/fixtures/*.asset.json` use `game: 'raa-test'`.
+
+Closed-M3 focused light coverage also lives in `test/mama-bridge.test.js`, `test/mama-light-owner.test.js`, `test/procedural.test.js`, `test/procedural-trace.test.js` and `test/procedural-runtime.test.js`: mapping/default omission, stable identity, static/runtime ownership, replacement/reset, refusal rollback and cleanup. These are existing tests, not additional legacy proof cards; Node.js 24 test invocations use named files or quoted globs rather than a directory argument.
+
+## Module: api-m28
+Files: `crates/raa-js/src/api/m28_lights.rs`, `packages/raa/types/m28-lights.d.ts`, `docs/api/m28-lights.md`. Owner: landed M2. Consumes: raa-lit.
+
+The existing filename-discovered API registration installs `light.tiles` at order 35 against the renderer-owned registry. The additive declarations and Engine methods implement S17 without overloading the sun. Existing parser/lifecycle tests are `crates/raa-js/tests/local_lights.rs` and `tests/api_registry.rs` in that crate; source pins distinguish property absence from explicit reset. The shipped root exports already include LocalLightDesc, LocalLightChanges and LightStats through package assembly; consumers import those owning declarations.
+
+## Module: mama-light-record
+Files: `mama:crates/procgen/src/nodes/game_markers.rs`, `mama:crates/procgen/src/passes/gameplay.rs`, `mama:crates/procgen/src/output.rs`, `mama:crates/procgen/SPEC.md`, `mama:src/procgen/output-types.ts`. Owner: landed M1. Consumes: nothing.
+
+Owns S16's generic Rust record emission/flattening and TypeScript ProcLight declaration, including optional inner-angle omission and unchanged defaults. Existing pinning tests include `mama:crates/procgen/tests/gameplay.rs` and `mama:src/procgen/gameplay-wire.test.ts`; retain their wire/spec/default checks. M4 consumes this closed implementation.
+
+## Module: mama-light-transport
+Files: `mama:src/procgen/scene-file.ts`, `mama:src/procgen/scene-build.ts`, `mama:src/procgen/{scene-file,scene-build,runtime}.test.ts`, `mama:crates/procgen/src/ext/runtime/delta.rs`, `mama:crates/procgen/tests/runtime.rs`. Owner: closed M3. Consumes: mama-light-record.
+
+Owns S16's optional scene section, canonical serialization, independently copied export plans and complete Runtime.step snapshot triggers. It precedes the RAA bridge in dependency order. No light-record redefinition, new runtime method or M4 MAMA implementation is assigned.
+
+## Module: solstice-architecture-finalization
+Files: `raa:ARCHITECTURE.md`. Owner: display M4, graph index 5. Consumes: the linked modules listed in Module ownership.
+
+Consolidates the complete existing contract in place, preserving all unchanged sections, historical results and public contracts. The linked-conventions/S15–S17 share hands this complete file to node 24; later shares retain it while consolidating their own sections. Documentation cards run `cargo check`; milestone verification retains `bash scripts/check.sh`.
 
 ## Module: sdfm-compare
 Files: `examples/sdfm-compare/**`, `scripts/build-sdfm-compare.sh`.
