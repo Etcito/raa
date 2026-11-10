@@ -8,7 +8,43 @@
 
 use raa_core::testing::{block_on, skip, software_gpu};
 use raa_core::{CLEAR_COLOR, GpuContext, wgpu};
-use raa_pipeline::{EnvGpu, LightingResources};
+use raa_pipeline::{EnvGpu, LightingResources, WeatherLightingGpu};
+
+#[test]
+fn weather_lighting_gpu_is_the_neutral_s10_record_at_exact_offsets() {
+    let weather = WeatherLightingGpu::default();
+    assert_eq!(WeatherLightingGpu::SIZE, 64);
+    assert_eq!(weather.map, [0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(weather.light, [0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(weather.atmospheric_transmission, [1.0; 4]);
+    assert_eq!(weather.flags, [0; 4]);
+
+    let bytes = weather.to_bytes();
+    assert_eq!(bytes.len(), 64);
+    assert_eq!(vec4_at(&bytes, 0), [0.0, 0.0, 1.0, 0.0]);
+    assert_eq!(vec4_at(&bytes, 16), [0.0, 1.0, 0.0, 0.0]);
+    assert_eq!(vec4_at(&bytes, 32), [1.0; 4]);
+    assert!(
+        bytes[48..].iter().all(|byte| *byte == 0),
+        "flags @48..64 are zero"
+    );
+
+    let custom = WeatherLightingGpu {
+        map: [10.0, 20.0, 30.0, 1.0],
+        light: [0.0, 0.5, 0.5, 0.0],
+        atmospheric_transmission: [0.25, 0.5, 0.75, 1.0],
+        flags: [1, 0, 0, 0],
+    };
+    let bytes = custom.to_bytes();
+    assert_eq!(vec4_at(&bytes, 0), custom.map);
+    assert_eq!(vec4_at(&bytes, 16), custom.light);
+    assert_eq!(vec4_at(&bytes, 32), custom.atmospheric_transmission);
+    assert_eq!(
+        u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]),
+        1
+    );
+    assert!(bytes[52..].iter().all(|byte| *byte == 0));
+}
 
 #[test]
 fn prelude_exposes_dense_light_uniform_and_integer_tile_array() {
@@ -115,6 +151,12 @@ struct EnvGpu {
     aerial: vec4<f32>,
     reserved: array<vec4<f32>, 4>,
 }
+struct WeatherLightingGpu {
+    map: vec4<f32>,
+    light: vec4<f32>,
+    atmosphericTransmission: vec4<f32>,
+    flags: vec4<u32>,
+}
 
 @group(1) @binding(0) var shadow_map: texture_depth_2d_array;
 @group(1) @binding(1) var shadow_cmp: sampler_comparison;
@@ -130,6 +172,8 @@ struct EnvGpu {
 @group(1) @binding(11) var<uniform> env: EnvGpu;
 @group(1) @binding(12) var<uniform> lights: array<vec4<u32>, 1024>;
 @group(1) @binding(13) var light_tiles: texture_2d_array<u32>;
+@group(1) @binding(15) var cloud_transmittance: texture_2d_array<f32>;
+@group(1) @binding(16) var<uniform> weather: WeatherLightingGpu;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -140,6 +184,8 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 struct Out {
     @location(0) a: vec4<f32>,
     @location(1) b: vec4<f32>,
+    @location(2) c: vec4<f32>,
+    @location(3) d: vec4<f32>,
 }
 
 @fragment
@@ -151,6 +197,7 @@ fn fs() -> Out {
     let contact_shadow = textureSampleLevel(contact, linear_clamp, uv, 0.0).r;
     let depth = textureLoad(opaque_depth, vec2<i32>(0, 0), 0).r;
     let cube = textureSampleLevel(env_specular, linear_clamp, vec3<f32>(0.3, 1.0, -0.2), 0.0);
+    let transmittance = textureSampleLevel(cloud_transmittance, linear_clamp, uv, 0, 0.0).r;
     var local_zeros = 0u;
     for (var i = 0u; i < 1024u; i += 1u) {
         local_zeros |= lights[i].x | lights[i].y | lights[i].z | lights[i].w;
@@ -162,8 +209,10 @@ fn fs() -> Out {
         + env_sh.sh[0].r + env.sky_params.z
         + textureSampleLevel(opaque_color, linear_clamp, uv, 0.0).r;
     var out: Out;
-    out.a = vec4<f32>(cmp, lut.x, lut.y, occlusion);
+    out.a = vec4<f32>(cmp, lut.x, lut.y, occlusion * transmittance);
     out.b = vec4<f32>(contact_shadow, depth, cube.r, env.background.r + zeros);
+    out.c = vec4<f32>(weather.atmosphericTransmission.rgb, transmittance);
+    out.d = vec4<f32>(weather.map.x, weather.map.w, weather.map.z, f32(weather.flags.x));
     return out;
 }
 "#;
@@ -243,8 +292,8 @@ fn assert_near(got: [f32; 4], want: [f32; 4], what: &str) {
     }
 }
 
-/// Renders one pixel with `lighting.bind_group()` at group 1 and returns both targets.
-fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 2] {
+/// Renders one pixel with `lighting.bind_group()` at group 1 and returns all four targets.
+fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 4] {
     let device = gpu.device();
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("resources test shader"),
@@ -285,13 +334,13 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
             module: &module,
             entry_point: Some("fs"),
             compilation_options: Default::default(),
-            targets: &[color.clone(), color],
+            targets: &[color.clone(), color.clone(), color.clone(), color],
         }),
         multiview_mask: None,
         cache: None,
     });
 
-    let targets = [target(gpu), target(gpu)];
+    let targets = [target(gpu), target(gpu), target(gpu), target(gpu)];
     let views = targets
         .each_ref()
         .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -328,11 +377,18 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
 fn dummies_bind_and_read_their_values(gpu: &GpuContext) {
     let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
     let lighting = LightingResources::new(gpu);
-    let [a, b] = render_with_group_1(gpu, &lighting);
+    let weather_buffer = lighting.atmospheric_transmission_buffer();
+    assert_eq!(weather_buffer.size(), 64);
+    assert_eq!(
+        weather_buffer.usage(),
+        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        "the S10 compute copies its result into this uniform, never a CPU storage write"
+    );
+    let [a, b, c, d] = render_with_group_1(gpu, &lighting);
     let error = block_on(scope.pop());
     assert!(error.is_none(), "validation error: {error:?}");
 
-    // compare 0.5 <= depth 1 passes; LUT (1, 0); ao 1
+    // compare 0.5 <= depth 1 passes; LUT (1, 0); ao 1 x cloud transmittance dummy 1
     assert_near(a, [1.0, 1.0, 0.0, 1.0], "shadow, brdf lut, ao");
     // contact 1; opaque depth 1; cube = ambient red 0.6 x 0.3; background red 0.05
     assert_near(
@@ -340,6 +396,104 @@ fn dummies_bind_and_read_their_values(gpu: &GpuContext) {
         [1.0, 1.0, 0.18, 0.05],
         "contact, depth, env cube, background",
     );
+    // neutral weather: transmission (1,1,1), dummy transmittance 1
+    assert_near(c, [1.0; 4], "weather transmission");
+    // disabled clouds: map (0, 0, 1, 0) and flags.x 0
+    assert_near(d, [0.0, 0.0, 1.0, 0.0], "weather map and flags");
+}
+
+fn invalid_weather_resources_are_refused_before_publication(gpu: &GpuContext) {
+    let mut lighting = LightingResources::new(gpu);
+    let bad_format = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("resources test bad weather format"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 2,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let error = lighting
+        .set_cloud_transmittance(
+            bad_format.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }),
+            [0.0, 0.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0],
+        )
+        .expect_err("Rgba8Unorm weather texture");
+    assert_eq!(error.code(), "core.resource");
+    assert!(error.message().contains("Rgba16Float"), "{error}");
+
+    let one_layer = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("resources test one-layer weather"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let error = lighting
+        .set_cloud_transmittance(
+            one_layer.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            }),
+            [0.0, 0.0, 1.0, 1.0],
+            [0.0, 1.0, 0.0, 0.0],
+        )
+        .expect_err("one-layer weather texture");
+    assert_eq!(error.code(), "core.resource");
+
+    let valid = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("resources test valid weather"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 2,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = || {
+        valid.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        })
+    };
+    let error = lighting
+        .set_cloud_transmittance(view(), [f32::NAN, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 0.0])
+        .expect_err("non-finite map");
+    assert_eq!(error.code(), "core.resource");
+    let error = lighting
+        .set_cloud_transmittance(view(), [0.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0])
+        .expect_err("zero extent");
+    assert_eq!(error.code(), "core.resource");
+    let error = lighting
+        .set_cloud_transmittance(view(), [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0])
+        .expect_err("zero light direction");
+    assert_eq!(error.code(), "core.resource");
+    lighting
+        .set_cloud_transmittance(view(), [0.0, 0.0, 1.0, 1.0], [0.0, 1.0, 0.0, 0.0])
+        .expect("valid replacement");
+    lighting.clear_cloud_transmittance();
+    lighting.set_physical_atmosphere(false);
 }
 
 fn cleared_features_still_bind(gpu: &GpuContext) {
@@ -351,6 +505,8 @@ fn cleared_features_still_bind(gpu: &GpuContext) {
     lighting.clear_contact();
     lighting.clear_opaque_copy();
     lighting.clear_local_lights();
+    lighting.clear_cloud_transmittance();
+    lighting.set_physical_atmosphere(false);
     lighting.env_mut().background = [0.25, 0.5, 1.0, 0.0];
     assert_eq!(lighting.env().background, [0.25, 0.5, 1.0, 0.0]);
     render_with_group_1(gpu, &lighting);
@@ -371,5 +527,6 @@ fn lighting_resources_on_the_software_gpu() {
     };
     dummies_bind_and_read_their_values(&gpu);
     cleared_features_still_bind(&gpu);
+    invalid_weather_resources_are_refused_before_publication(&gpu);
     std::mem::forget(gpu);
 }

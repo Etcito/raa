@@ -11,7 +11,7 @@ mod pipeline;
 mod targets;
 
 pub use env::EnvGpu;
-pub use lighting::LightingResources;
+pub use lighting::{LightingResources, WeatherLightingGpu};
 pub use pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
 pub use pipeline::{Pipeline, PipelineConfig, SubmissionState};
 pub use targets::{HdrChain, Targets};

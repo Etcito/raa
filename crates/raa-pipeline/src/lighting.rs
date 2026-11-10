@@ -4,7 +4,7 @@
 
 use std::num::NonZeroU64;
 
-use raa_core::GpuContext;
+use raa_core::{GpuContext, RaaError};
 use raa_shader::{LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, TILE_WORDS};
 
 use crate::HDR_FORMAT;
@@ -16,11 +16,129 @@ const SHADOW_GPU_SIZE: usize = 320;
 const ENV_SH_SIZE: usize = 160;
 const LOCAL_LIGHTS_SIZE: usize = MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE;
 
+/// Byte offset of `WeatherLightingGpu.atmosphericTransmission` (S10 binding 16).
+const WEATHER_TRANSMISSION_OFFSET: u64 = 32;
+
+/// S10 `WeatherLightingGpu` (group 1 binding 16), a 64-byte `UNIFORM | COPY_DST` record
+/// separate from `FrameGpu` and `EnvGpu`.
+///
+/// The CPU uploads `map`, `light` and `flags` only. The atmosphere compute writes a
+/// separate 16-byte `STORAGE | COPY_SRC` result that is copied to byte offset 32 after its
+/// dispatch; a CPU upload must never overwrite that lane with a stale value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeatherLightingGpu {
+    /// @0: ground-map origin x/z, extent in metres, cloud enabled (0/1).
+    pub map: [f32; 4],
+    /// @16: unit direction toward the dominant light, w zero.
+    pub light: [f32; 4],
+    /// @32: directional atmospheric transmission rgb, w one (GPU-written lane).
+    pub atmospheric_transmission: [f32; 4],
+    /// @48: physical atmosphere enabled, then three zeros.
+    pub flags: [u32; 4],
+}
+
+impl Default for WeatherLightingGpu {
+    /// S10 neutral state: disabled clouds, +Y dominant light, unit transmission, physical off.
+    fn default() -> Self {
+        WeatherLightingGpu {
+            map: [0.0, 0.0, 1.0, 0.0],
+            light: [0.0, 1.0, 0.0, 0.0],
+            atmospheric_transmission: [1.0, 1.0, 1.0, 1.0],
+            flags: [0; 4],
+        }
+    }
+}
+
+impl WeatherLightingGpu {
+    /// Size in bytes of the uniform (S10).
+    pub const SIZE: usize = raa_shader::WEATHER_LIGHTING_GPU_SIZE;
+
+    /// The CPU-owned fields differ from `other`; the GPU-written transmission lane is
+    /// excluded so a compute copy never looks like a pending CPU upload.
+    fn cpu_changed(&self, other: &WeatherLightingGpu) -> bool {
+        self.map != other.map || self.light != other.light || self.flags != other.flags
+    }
+
+    /// The three CPU upload ranges: map @0, light @16 and flags @48. The transmission lane
+    /// at byte offset 32 is written by the atmosphere compute, never here.
+    fn upload_ranges(&self) -> [(u64, [u8; 16]); 3] {
+        [
+            (0, vec4_bytes(&self.map)),
+            (16, vec4_bytes(&self.light)),
+            (48, uvec4_bytes(&self.flags)),
+        ]
+    }
+
+    /// Little-endian S10 bytes: map @0, light @16, transmission @32, flags @48.
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut out = [0u8; Self::SIZE];
+        out[0..16].copy_from_slice(&vec4_bytes(&self.map));
+        out[16..32].copy_from_slice(&vec4_bytes(&self.light));
+        let transmission = WEATHER_TRANSMISSION_OFFSET as usize;
+        out[transmission..transmission + 16]
+            .copy_from_slice(&vec4_bytes(&self.atmospheric_transmission));
+        out[48..64].copy_from_slice(&uvec4_bytes(&self.flags));
+        out
+    }
+}
+
+/// Refuses non-finite CPU weather data, a non-positive map extent, a cloud-enabled flag
+/// outside 0/1 and a zero dominant-light direction before any state is published.
+fn validate_weather_data(map: &[f32; 4], light: &[f32; 4]) -> Result<(), RaaError> {
+    if let Some((index, value)) = map
+        .iter()
+        .chain(light)
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        let field = if index < 4 { "map" } else { "light" };
+        return Err(RaaError::Resource(format!(
+            "weather lighting {field}[{}] must be finite, got {value}",
+            index % 4
+        )));
+    }
+    if map[2] <= 0.0 {
+        return Err(RaaError::Resource(format!(
+            "weather lighting map.z (extent metres) must be positive, got {}",
+            map[2]
+        )));
+    }
+    if map[3] != 0.0 && map[3] != 1.0 {
+        return Err(RaaError::Resource(format!(
+            "weather lighting map.w (cloud enabled) must be 0 or 1, got {}",
+            map[3]
+        )));
+    }
+    if light[0] == 0.0 && light[1] == 0.0 && light[2] == 0.0 {
+        return Err(RaaError::Resource(
+            "weather lighting light.xyz (direction toward the dominant light) must be non-zero"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn vec4_bytes(values: &[f32; 4]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+        chunk.copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn uvec4_bytes(values: &[u32; 4]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
+        chunk.copy_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
 /// Linear colour of the dummy env cube: the default ambient term (colour (0.6, 0.65, 0.75)
 /// x intensity 0.3), so a frame without an env reads the flat ambient.
 const DUMMY_ENV_COLOR: [f32; 3] = [0.6 * 0.3, 0.65 * 0.3, 0.75 * 0.3];
 
-/// The eight texture bindings of group 1.
+/// The nine texture bindings of group 1.
 #[derive(Clone, Debug, PartialEq)]
 struct Views<V> {
     shadow_map: V,
@@ -31,6 +149,7 @@ struct Views<V> {
     opaque_color: V,
     opaque_depth: V,
     light_tiles: V,
+    cloud_transmittance: V,
 }
 
 /// What `upload` has to do: rebuild the bind group and/or write each uniform.
@@ -41,6 +160,7 @@ struct Pending {
     env_sh: bool,
     env: bool,
     local_lights: bool,
+    weather: bool,
 }
 
 /// Device-free part of `LightingResources`: current views, uniform contents and the dirty
@@ -55,6 +175,8 @@ struct State<V> {
     sh: [[f32; 4]; 9],
     sh_info: [f32; 4],
     env: EnvGpu,
+    weather: WeatherLightingGpu,
+    uploaded_weather: WeatherLightingGpu,
     pending: Pending,
 }
 
@@ -70,6 +192,8 @@ impl<V: Clone + PartialEq> State<V> {
             sh: [[0.0; 4]; 9],
             sh_info: [0.0; 4],
             env: EnvGpu::default(),
+            weather: WeatherLightingGpu::default(),
+            uploaded_weather: WeatherLightingGpu::default(),
             pending: Pending::default(),
         }
     }
@@ -156,6 +280,24 @@ impl<V: Clone + PartialEq> State<V> {
         self.views.light_tiles = self.dummies.light_tiles.clone();
     }
 
+    fn set_cloud_transmittance(&mut self, view: V, map: [f32; 4], light: [f32; 4]) {
+        self.views.cloud_transmittance = view;
+        self.weather.map = map;
+        self.weather.light = light;
+        self.pending.bind_group = true;
+    }
+
+    fn clear_cloud_transmittance(&mut self) {
+        self.views.cloud_transmittance = self.dummies.cloud_transmittance.clone();
+        self.weather.map = WeatherLightingGpu::default().map;
+        self.weather.light = WeatherLightingGpu::default().light;
+        self.pending.bind_group = true;
+    }
+
+    fn set_physical_atmosphere(&mut self, enabled: bool) {
+        self.weather.flags[0] = u32::from(enabled);
+    }
+
     /// Returns the pending work and marks everything clean.
     fn take_pending(&mut self) -> Pending {
         self.pending.bind_group = self.views != self.bound_views;
@@ -165,6 +307,12 @@ impl<V: Clone + PartialEq> State<V> {
         self.pending.local_lights = self.local_lights != self.uploaded_lights;
         if self.pending.local_lights {
             self.uploaded_lights.copy_from_slice(&self.local_lights);
+        }
+        self.pending.weather = self.weather.cpu_changed(&self.uploaded_weather);
+        if self.pending.weather {
+            self.uploaded_weather.map = self.weather.map;
+            self.uploaded_weather.light = self.weather.light;
+            self.uploaded_weather.flags = self.weather.flags;
         }
         std::mem::take(&mut self.pending)
     }
@@ -251,11 +399,12 @@ fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// The 14 S10 group-1 bindings with their exact types.
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 14] {
+/// The explicit S10 group-1 binding set: 0..=13, 15 and 16. Binding 14 stays reserved.
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 16] {
     use wgpu::TextureSampleType as S;
     use wgpu::TextureViewDimension as D;
     let filterable = S::Float { filterable: true };
+    let fragment = wgpu::ShaderStages::FRAGMENT;
     [
         texture_entry(0, S::Depth, D::D2Array),
         sampler_entry(1, wgpu::SamplerBindingType::Comparison),
@@ -270,12 +419,20 @@ fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 14] {
         texture_entry(10, S::Float { filterable: false }, D::D2),
         uniform_entry(11, EnvGpu::SIZE),
         wgpu::BindGroupLayoutEntry {
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: fragment,
             ..uniform_entry(12, LOCAL_LIGHTS_SIZE)
         },
         wgpu::BindGroupLayoutEntry {
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: fragment,
             ..texture_entry(13, S::Uint, D::D2Array)
+        },
+        wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..texture_entry(15, filterable, D::D2Array)
+        },
+        wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..uniform_entry(16, WeatherLightingGpu::SIZE)
         },
     ]
 }
@@ -422,6 +579,14 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         TILE_WORDS,
         &0u32.to_le_bytes(),
     );
+    // S10 disabled cloud transmittance: a valid initialized 1x1 two-layer texture of ones.
+    let transmittance = dummy_texture(
+        gpu,
+        "raa-pipeline.dummy.cloud_transmittance",
+        wgpu::TextureFormat::Rgba16Float,
+        2,
+        &f16_texel(&[1.0; 4]),
+    );
     Views {
         shadow_map: view_of(&shadow, D::D2Array),
         env_specular: view_of(&env, D::Cube),
@@ -431,6 +596,7 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         opaque_color: view_of(&black, D::D2),
         opaque_depth: view_of(&depth, D::D2),
         light_tiles: view_of(&tiles, D::D2Array),
+        cloud_transmittance: view_of(&transmittance, D::D2Array),
     }
 }
 
@@ -457,6 +623,7 @@ pub struct LightingResources {
     sh_buffer: wgpu::Buffer,
     env_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
+    weather_buffer: wgpu::Buffer,
     state: State<wgpu::TextureView>,
 }
 
@@ -487,12 +654,23 @@ impl LightingResources {
         let sh_buffer = uniform_buffer(gpu, "raa-pipeline.env_sh", &state.sh_bytes());
         let env_buffer = uniform_buffer(gpu, "raa-pipeline.env_gpu", &state.env.to_bytes());
         let light_buffer = uniform_buffer(gpu, "raa-pipeline.local_lights", &state.local_lights);
+        let weather_buffer = uniform_buffer(
+            gpu,
+            "raa-pipeline.weather_lighting",
+            &state.weather.to_bytes(),
+        );
         let bind_group = build_bind_group(
             gpu,
             &layout,
             &state.views,
             [&shadow_cmp, &linear_clamp],
-            [&shadow_buffer, &sh_buffer, &env_buffer, &light_buffer],
+            [
+                &shadow_buffer,
+                &sh_buffer,
+                &env_buffer,
+                &light_buffer,
+                &weather_buffer,
+            ],
         );
         LightingResources {
             layout,
@@ -503,6 +681,7 @@ impl LightingResources {
             sh_buffer,
             env_buffer,
             light_buffer,
+            weather_buffer,
             state,
         }
     }
@@ -589,6 +768,59 @@ impl LightingResources {
         self.state.clear_local_lights();
     }
 
+    /// Publishes the Rgba16Float two-layer ground cloud-transmission map and the S10 weather
+    /// `map`/`light` lanes. The view must be a `texture_2d_array` of two Rgba16Float layers:
+    /// layer 0 holds the ground map, layer 1 texel (0,0) its mean. Everything is validated
+    /// before publication; a refusal leaves the previous resources bound.
+    pub fn set_cloud_transmittance(
+        &mut self,
+        view: wgpu::TextureView,
+        map: [f32; 4],
+        light: [f32; 4],
+    ) -> Result<(), RaaError> {
+        validate_weather_data(&map, &light)?;
+        let texture = view.texture();
+        if texture.dimension() != wgpu::TextureDimension::D2
+            || texture.format() != wgpu::TextureFormat::Rgba16Float
+            || texture.depth_or_array_layers() != 2
+            || texture.sample_count() != 1
+            || !texture
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+        {
+            return Err(RaaError::Resource(format!(
+                "cloud transmittance must be a texture_2d_array of two Rgba16Float layers \
+                 sampled without MSAA, got {:?} {:?}x{} layers, sample count {} and usage {:?}",
+                texture.format(),
+                texture.size().width,
+                texture.depth_or_array_layers(),
+                texture.sample_count(),
+                texture.usage()
+            )));
+        }
+        self.state.set_cloud_transmittance(view, map, light);
+        Ok(())
+    }
+
+    /// Returns to the S10 disabled dummies: the 1x1 two-layer ones texture and the neutral
+    /// `map` (0, 0, 1, 0) and `light` (0, 1, 0, 0). The GPU-written transmission lane is
+    /// left untouched; `raa_directional_radiance` ignores it while `flags.x` is 0.
+    pub fn clear_cloud_transmittance(&mut self) {
+        self.state.clear_cloud_transmittance();
+    }
+
+    /// Sets `WeatherLightingGpu.flags.x`, the physical-atmosphere enable.
+    pub fn set_physical_atmosphere(&mut self, enabled: bool) {
+        self.state.set_physical_atmosphere(enabled);
+    }
+
+    /// The 64-byte `WeatherLightingGpu` uniform (S10 binding 16), `UNIFORM | COPY_DST`.
+    /// The atmosphere compute copies its separate 16-byte result to byte offset 32 after
+    /// its dispatch; the CPU upload writes only the map/light/flags ranges.
+    pub fn atmospheric_transmission_buffer(&self) -> &wgpu::Buffer {
+        &self.weather_buffer
+    }
+
     /// The `EnvGpu` uniform contents.
     pub fn env(&self) -> &EnvGpu {
         &self.state.env
@@ -620,6 +852,12 @@ impl LightingResources {
             gpu.queue()
                 .write_buffer(&self.light_buffer, 0, &self.state.local_lights);
         }
+        if pending.weather {
+            for (offset, bytes) in self.state.weather.upload_ranges() {
+                gpu.queue()
+                    .write_buffer(&self.weather_buffer, offset, &bytes);
+            }
+        }
         if pending.bind_group {
             self.bind_group = build_bind_group(
                 gpu,
@@ -631,6 +869,7 @@ impl LightingResources {
                     &self.sh_buffer,
                     &self.env_buffer,
                     &self.light_buffer,
+                    &self.weather_buffer,
                 ],
             );
         }
@@ -638,35 +877,37 @@ impl LightingResources {
 }
 
 /// Bind group over `views`, the samplers (comparison, linear clamp) and the uniforms
-/// (ShadowGpu, EnvSh, EnvGpu, local lights) in S10 binding order.
+/// (ShadowGpu, EnvSh, EnvGpu, local lights, weather lighting) at their explicit S10
+/// bindings: 0..=13, 15 and 16. Binding 14 stays reserved.
 fn build_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     views: &Views<wgpu::TextureView>,
     [shadow_cmp, linear_clamp]: [&wgpu::Sampler; 2],
-    [shadow, sh, env, lights]: [&wgpu::Buffer; 4],
+    [shadow, sh, env, lights, weather]: [&wgpu::Buffer; 5],
 ) -> wgpu::BindGroup {
     use wgpu::BindingResource as R;
-    let resources = [
-        R::TextureView(&views.shadow_map),
-        R::Sampler(shadow_cmp),
-        shadow.as_entire_binding(),
-        R::TextureView(&views.env_specular),
-        sh.as_entire_binding(),
-        R::TextureView(&views.brdf_lut),
-        R::Sampler(linear_clamp),
-        R::TextureView(&views.ao),
-        R::TextureView(&views.contact),
-        R::TextureView(&views.opaque_color),
-        R::TextureView(&views.opaque_depth),
-        env.as_entire_binding(),
-        lights.as_entire_binding(),
-        R::TextureView(&views.light_tiles),
+    let resources: [(u32, R<'_>); 16] = [
+        (0, R::TextureView(&views.shadow_map)),
+        (1, R::Sampler(shadow_cmp)),
+        (2, shadow.as_entire_binding()),
+        (3, R::TextureView(&views.env_specular)),
+        (4, sh.as_entire_binding()),
+        (5, R::TextureView(&views.brdf_lut)),
+        (6, R::Sampler(linear_clamp)),
+        (7, R::TextureView(&views.ao)),
+        (8, R::TextureView(&views.contact)),
+        (9, R::TextureView(&views.opaque_color)),
+        (10, R::TextureView(&views.opaque_depth)),
+        (11, env.as_entire_binding()),
+        (12, lights.as_entire_binding()),
+        (13, R::TextureView(&views.light_tiles)),
+        (15, R::TextureView(&views.cloud_transmittance)),
+        (16, weather.as_entire_binding()),
     ];
     let entries: Vec<wgpu::BindGroupEntry> = resources
         .into_iter()
-        .zip(0u32..)
-        .map(|(resource, binding)| wgpu::BindGroupEntry { binding, resource })
+        .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
         .collect();
     gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("raa-pipeline.lighting"),
@@ -689,6 +930,7 @@ mod tests {
             opaque_color: 4,
             opaque_depth: 5,
             light_tiles: 6,
+            cloud_transmittance: 7,
         }
     }
 
@@ -698,22 +940,30 @@ mod tests {
         env_sh: false,
         env: false,
         local_lights: false,
+        weather: false,
     };
 
     #[test]
     fn local_light_layout_is_fragment_only_without_storage_or_sampler() {
         let entries = layout_entries();
         assert_eq!(LOCAL_LIGHTS_SIZE, 16384);
-        for (binding, entry) in entries.iter().enumerate() {
-            assert_eq!(entry.binding, binding as u32);
+        let bindings: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
+        assert_eq!(
+            bindings,
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16],
+            "explicit S10 set; 14 stays reserved"
+        );
+        for entry in &entries {
             assert_eq!(entry.count, None);
             assert_eq!(
                 entry.visibility,
-                if binding < 12 {
+                if entry.binding < 12 {
                     VISIBILITY
                 } else {
                     wgpu::ShaderStages::FRAGMENT
-                }
+                },
+                "binding {}",
+                entry.binding
             );
             assert!(!matches!(
                 entry.ty,
@@ -739,7 +989,140 @@ mod tests {
                 multisampled: false,
             }
         );
+        assert_eq!(
+            entries[14].ty,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            }
+        );
+        assert_eq!(
+            entries[15].ty,
+            wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(64),
+            }
+        );
         assert_eq!(TILE_WORDS, 128);
+    }
+
+    #[test]
+    fn weather_lighting_defaults_are_neutral_and_serialize_at_s10_offsets() {
+        let weather = WeatherLightingGpu::default();
+        assert_eq!(WeatherLightingGpu::SIZE, 64);
+        assert_eq!(weather.map, [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(weather.light, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(weather.atmospheric_transmission, [1.0; 4]);
+        assert_eq!(weather.flags, [0; 4]);
+
+        let bytes = weather.to_bytes();
+        assert_eq!(bytes.len(), 64);
+        let float_at = |offset: usize| {
+            f32::from_le_bytes([
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            ])
+        };
+        assert_eq!(
+            [float_at(0), float_at(4), float_at(8), float_at(12)],
+            weather.map
+        );
+        assert_eq!(
+            [float_at(16), float_at(20), float_at(24), float_at(28)],
+            weather.light
+        );
+        assert_eq!(
+            [float_at(32), float_at(36), float_at(40), float_at(44)],
+            weather.atmospheric_transmission
+        );
+        assert_eq!(
+            u32::from_le_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]),
+            0
+        );
+    }
+
+    #[test]
+    fn weather_upload_ranges_never_include_the_gpu_transmission_lane() {
+        let weather = WeatherLightingGpu {
+            map: [10.0, 20.0, 30.0, 1.0],
+            light: [0.0, 0.5, 0.5, 0.0],
+            flags: [1, 0, 0, 0],
+            ..WeatherLightingGpu::default()
+        };
+        let ranges = weather.upload_ranges();
+        assert_eq!(ranges.map(|(offset, _)| offset), [0, 16, 48]);
+        assert!(
+            ranges
+                .iter()
+                .all(|(offset, _)| *offset != WEATHER_TRANSMISSION_OFFSET),
+            "the atmosphere compute owns bytes 32..48"
+        );
+        assert_eq!(ranges[0].1, weather.to_bytes()[0..16]);
+        assert_eq!(ranges[1].1, weather.to_bytes()[16..32]);
+        assert_eq!(ranges[2].1, weather.to_bytes()[48..64]);
+    }
+
+    #[test]
+    fn weather_validation_accepts_neutral_and_refuses_malformed_data() {
+        assert_eq!(
+            validate_weather_data(&[0.0, 0.0, 1.0, 0.0], &[0.0, 1.0, 0.0, 0.0]),
+            Ok(())
+        );
+        for (map, light) in [
+            ([f32::NAN, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 0.0]),
+            ([0.0, 0.0, f32::INFINITY, 0.0], [0.0, 1.0, 0.0, 0.0]),
+            ([0.0, 0.0, 1.0, 0.0], [0.0, f32::NAN, 0.0, 0.0]),
+            ([0.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]),
+            ([0.0, 0.0, -1.0, 0.0], [0.0, 1.0, 0.0, 0.0]),
+            ([0.0, 0.0, 1.0, 0.5], [0.0, 1.0, 0.0, 0.0]),
+            ([0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
+        ] {
+            let error = validate_weather_data(&map, &light).expect_err("malformed weather data");
+            assert_eq!(error.code(), "core.resource", "{map:?} {light:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn cloud_transmittance_setters_track_the_neutral_dummy_and_cpu_lanes() {
+        let mut state = State::new(dummies());
+        state.set_cloud_transmittance(8, [10.0, 20.0, 30.0, 1.0], [0.0, 0.5, 0.5, 0.0]);
+        assert_eq!(state.views.cloud_transmittance, 8);
+        assert_eq!(
+            state.take_pending(),
+            Pending {
+                weather: true,
+                ..ONLY_BIND
+            }
+        );
+        state.set_physical_atmosphere(true);
+        assert_eq!(
+            state.take_pending(),
+            Pending {
+                weather: true,
+                ..Pending::default()
+            }
+        );
+        state.set_physical_atmosphere(true);
+        assert_eq!(state.take_pending(), Pending::default());
+
+        state.clear_cloud_transmittance();
+        assert_eq!(state.views.cloud_transmittance, 7);
+        assert_eq!(state.weather.map, [0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(state.weather.light, [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(state.weather.flags[0], 1, "physical enable is independent");
+        assert_eq!(
+            state.take_pending(),
+            Pending {
+                weather: true,
+                ..ONLY_BIND
+            }
+        );
+        state.clear_cloud_transmittance();
+        assert_eq!(state.take_pending(), Pending::default());
     }
 
     #[test]
