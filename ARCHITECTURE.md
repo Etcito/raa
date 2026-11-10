@@ -342,7 +342,7 @@ Page op contract:
 `[{"id", "op", "host": {kind, params, transform}, "tools": [{op, kind, params, transform, hasChildren}], "status": "ok"|"refused", "triangles", "watertight", "volume", "volumeIdentityRelErr"|null, "code"|null, "message"|null, "expected": "ok"|<code>}]`
 
 ## S10. P2 GPU layouts (lit pipeline)
-Little-endian, written with `to_le_bytes`. Owned by raa-mesh (streams) and raa-lit (buffers, bind groups). Every P2 shader uses exactly these.
+Little-endian, written with `to_le_bytes`, without unsafe casts. Offsets below are bytes from the start of each record; ranges exclude their upper endpoint. Matrix columns have 16-byte stride and vec4 components occupy consecutive 4-byte words. Owned by raa-mesh (streams), raa-lit (frame/instance/light writers), raa-pipeline (lighting resources) and raa-shader (shared declarations/constants). These are the landed layouts, not a new ABI change. Result ids: RAA-FRAME, RAA-PREVIOUS-INSTANCES and RAA-LIGHT-LAYOUT.
 
 **Vertex and instance streams**
 - Stream 0 = the S1 Vertex (24 B, locations 0-1).
@@ -351,20 +351,52 @@ Little-endian, written with `to_le_bytes`. Owned by raa-mesh (streams) and raa-l
   - `tangent: f32x4` at 8 (location 11; xyz unit, w = ±1);
   - `color: f32x4` at 24 (location 12; linear rgba).
 - Defaults: uv (0, 0); tangent = `default_tangent(normal)`; colour (1, 1, 1, 1). Primitive and prims-asset meshes get the defaults.
-- The instance stream is the S1 Instance (128 B, locations 2-9) in draw order. `@builtin(instance_index)` indexes the extras array.
+- S1 retains the v0 Instance stream. The lit path instead supplies a 4-byte `u32` scene-instance slot at location 2 through its compacted instance-id stream; `raa_instance(id)` reads binding 7. Draw ordering changes the id stream, not persistent record addresses.
+- `RaaInstanceGpu` remains 128 B: full column-major model columns @0, 16, 32, 48 (translation in column 3); inverse-transpose normal columns @64, 80, 96 (xyz, w = 0); `material_index: u32` @112, `tag: u32` @116, `palette_base: u32` @120 (matrix index), reserved zero u32 @124.
+- Posed variants retain stream 1 uv/colour and read the tangent from vertex slot 3: a 64 B rest-skin record with position f32x3 @0, normal f32x3 @12, tangent f32x4 @24 (location 11), joints u16x4 @40 (location 13), weights f32x4 @48 (location 14). Group 3 supplies the joint matrices.
+- Each existing scene instance has its own slot, one per submesh of a JS instance group. Bindings 2, 7 and 8 share that slot; the tag still selects the JS group's authored extras. No draw-to-history mapping or shared submesh history slot is introduced.
 
-**Group 0 (frame)**: 0 `FrameGpu` uniform (512 B), 1 `array<SurfaceMaterialGpu>`, 2 `array<InstanceExtraGpu>` (read-only storage), 3-5 the material texture atlas, its sampler and rects (m22), 6 `array<u32>` material data words (read-only storage, m25: `raa_material_word`, `raa_material_f32`, base `raa_material_data_base(record)`).
+**Group 0 (frame)**: bindings 0-7 are visible to VERTEX and FRAGMENT; binding 8 is VERTEX-only. Storage buffers below are read-only.
+- 0 `FrameGpu` uniform (768 B minimum binding size).
+- 1 `array<SurfaceMaterialGpu>` storage (256 B record).
+- 2 `array<InstanceExtraGpu>` storage (128 B record).
+- 3 material texture atlas, 4 its filtering sampler, 5 atlas rect storage (m22): vec4 `(x, y, width, height)` in atlas UV, @0 per 16 B record; id 0 and removed ids have zero rects.
+- 6 `array<u32>` material data storage (m25, 4 B words): `raa_material_word`, `raa_material_f32`, base `raa_material_data_base(record)`; first four words reserved zero.
+- 7 `array<RaaInstanceGpu>` persistent instance storage (128 B record), retaining its actual implementation.
+- 8 `array<RaaPreviousInstanceGpu>` previous-instance storage (64 B record), never fragment-visible; history/validity reach fragments through varyings.
 
-**FrameGpu** (512 B)
+**FrameGpu** (768 B; `FRAME_GPU_SIZE` from `raa-shader` controls serialization, allocation, minimum binding size and layout assertions)
 - Matrices: `view_proj` @0, `view` @64, `proj` @128, `inv_proj` @192, `inv_view` @256.
 - `camera_pos` @320 (w = time s).
 - `sun_dir` @336: travel direction, w = sun angular radius (default 0.0047).
-- `sun_color` @352 and `ambient` @368: rgb x intensity.
+- `sun_color` @352 and `ambient` @368: rgb x intensity, w = 0.
 - `viewport` @384: (w, h, 1/w, 1/h).
 - `clip` @400: (near, far, frame index, dt s).
-- `flags: vec4<u32>` @416: x = 1 to encode sRGB in tonemap, y = msaa, z = enabled-feature bits (1 << S12 row index), w = 0.
+- `flags: vec4<u32>` @416: x @416 = 1 to encode sRGB in tonemap, y @420 = msaa, z @424 and w @428 = logical feature words as mapped below.
 - `exposure` @432: (ev, 2^ev, mapper 0 agx / 1 aces / 2 linear, look 0 none / 1 punchy / 2 golden).
-- `reserved` @448..512, zero.
+- `reserved` @448..512: 16 zero words, retained in place.
+- `previous_view_proj: mat4x4<f32>` @512: preceding submitted view's jittered view-projection.
+- `unjittered_view_proj: mat4x4<f32>` @576: `proj * view`.
+- `camera_jitter: vec4<f32>` @640: current NDC x/y @640/644, previous NDC x/y @648/652.
+- `light_info: vec4<u32>` @656: active light count @656, tile columns @660, tile rows @664, tile stride in words @668 (128 for tiling).
+- `temporal: vec4<u32>` @672: frame parity @672, accumulation enabled 0/1 @676, history valid 0/1 @680, reserved zero @684.
+- `reserved2` @688..768: 20 zero words.
+
+`view` and `proj` remain unjittered; `view_proj` and `inv_proj` use the current jittered projection. Jitter is opt-in: eight Halton base-2/base-3 samples (indices 1-8), centred by subtracting 0.5 and converted from pixel offset `(dx, dy)` to NDC `(2*dx/max(width,1), -2*dy/max(height,1))` (pixel Y down, NDC Y up). Without a consumer, current and previous jitter are zero; this project enables no accumulation consumer. Creation, resize, camera discontinuity and jitter-mode changes invalidate camera history. One Engine render invocation advances one scene frame across all its viewports; camera history commits per submitted viewport, and instance history remains frozen throughout that invocation. Partial submission invalidates history before the next invocation.
+
+**Logical feature addressing**
+`crates/raa-shader/build.rs` generates Rust `feature_address(id) -> Option<(usize, u32)>` and WGSL `raa_feature_enabled(id)` from the same word/bit definition. `FrameParams::set_feature` uses that mapping: ids 0-31 map to flags word 2 (`z`), bit id; ids 32-63 map to word 3 (`w`), bit id minus 32. Out-of-range ids have no address. Pass-table row positions are not feature ids. Local-light tiling is logical id 24, flags.z bit 24.
+- Reserved ids 25-31: procedural weather, day/night cycle, virtualized geometry, visibility shading, global indirect illumination, volume visibility, temporal antialiasing, respectively.
+- Reserved ids 32-38: histogram exposure, contrast-adaptive sharpening, atlas mip generation, temporal reconstruction, virtualized-geometry extension, global-illumination extension, postprocessing extension, respectively (flags.w bits 0-6).
+- Reservations allocate ids only; they neither implement nor enable those features.
+
+**RaaPreviousInstanceGpu** (64 B, group 0 binding 8)
+- `row0: vec4<f32>` @0 = `[M00, M01, M02, Tx]`.
+- `row1: vec4<f32>` @16 = `[M10, M11, M12, Ty]`.
+- `row2: vec4<f32>` @32 = `[M20, M21, M22, Tz]`.
+- `previous_valid: u32` @48 = 0 or 1; reserved zero u32 words @52, 56, 60.
+
+This independent affine-row encoding preserves translation; the shader reconstructs bottom row `[0,0,0,1]`. It is not the first three columns of the live instance record. Validity belongs to the same slot and record, with no extra binding. New/reused/re-posed slots have no history and produce zero motion, never camera-only motion; invalid live records still contain their current model. Removal/reuse clears validity in the same update. Only submitted slots commit history, and only rigid model history is supplied: unsupported earlier deformation produces zero motion. Storage grows in the existing 32-record pages, retaining slot identity across draw reorder and growth. After movement the previous mirror catches up on the next frame even without another transform edit; a settled unchanged frame uploads nothing.
 
 **SurfaceMaterialGpu** (256 B)
 - `base` @0: linear rgb, a = opacity.
@@ -374,25 +406,25 @@ Little-endian, written with `to_le_bytes`. Owned by raa-mesh (streams) and raa-l
 - `transmission` @64: (transmission, ior, thickness m, 0).
 - `attenuation` @80: (rgb, distance m).
 - `header: vec4<u32>` @96: (model 0 flat / 1 standard / 2 function, function id, flags, material data base word (0 = none)).
-- `p: array<vec4, 8>` @112.
+- `p: array<vec4, 8>` @112: lanes @112, 128, 144, 160, 176, 192, 208, 224.
 - `fur` @240: (length m, density per cm², droop, shells).
-- Flags: 1 TRANSPARENT, 2 TRANSMISSIVE, 4 FUR, 8 DOUBLE_SIDED, 16 NO_SHADOW, 32 VERTEX_FN, 64 UNLIT.
+- Flags: 1 TRANSPARENT, 2 TRANSMISSIVE, 4 FUR, 8 DOUBLE_SIDED, 16 NO_SHADOW, 32 VERTEX_FN, 64 UNLIT, 128 CEL.
 - A v0 Material maps to model 0 or 1.
 
 **InstanceExtraGpu** (128 B)
 - `tint` @0: default 1.
 - `squash` @16: (axis, amount), default (0, 1, 0, 0).
 - `jiggle` @32: (local offset m, height m), default 0.
-- `params: array<vec4, 4>` @48.
-- `reserved` @112.
-- Keyed by the scene instance tag, so every sub-mesh draw of one JS instance shares it.
+- `params: array<vec4, 4>` @48: lanes @48, 64, 80, 96.
+- `reserved: vec4<f32>` @112: x @112 is the occupied `tint_set` lane (0/1 encoded as f32); y/z/w @116/120/124 remain zero.
+- Authored extras are keyed by the scene instance tag, shared by submeshes of one JS instance; the GPU mirror copies them to each scene-instance slot for lookup alongside binding 7.
 
-**Group 1 (lighting)**, used by the forward, transparent, fur and particle passes. It is built by `LightingResources`, with 1x1 dummies until a feature sets a resource:
+**Group 1 (lighting)**, used by the forward, transparent, fur and particle passes. It is built by `LightingResources`, with 1x1 dummies until a feature sets a resource. Bindings 0-11 retain VERTEX/FRAGMENT visibility; new bindings 12-13 are FRAGMENT-only:
 - 0 `shadow_map: texture_depth_2d_array` (dummy 1);
 - 1 `shadow_cmp` (LessEqual, linear);
-- 2 `ShadowGpu` (320 B): `cascade_view_proj[4]` @0, `splits` @256, `params` @272 (penumbra scale, normal offset texels, texel size, enabled), `params2` @288 (light size, blend band, 0, 0), reserved @304;
+- 2 `ShadowGpu` (320 B): `cascade_view_proj[4]` @0 (matrices @0, 64, 128, 192), `splits` @256, `params` @272 (penumbra scale, normal offset texels, texel size, enabled), `params2` @288 (light size, blend band, 0, 0), reserved zero vec4 @304;
 - 3 `env_specular: texture_cube` (dummy = ambient);
-- 4 `EnvSh` (160 B): 9 x vec4 SH9 @0, `info` @144 (specular, diffuse, max mip, enabled);
+- 4 `EnvSh` (160 B): 9 x vec4 SH9 @0 (16 B stride through @128), `info` @144 (specular, diffuse, max mip, enabled);
 - 5 `brdf_lut` (Rg16Float scale/bias, dummy (1, 0));
 - 6 `linear_clamp`;
 - 7 `ao` (dummy 1);
@@ -407,9 +439,26 @@ Little-endian, written with `to_le_bytes`. Owned by raa-mesh (streams) and raa-l
   - `clouds` @96 (coverage, density, altitude, scale), `clouds2` @112 (wind x, wind z, silver lining), `cloud_color` @128;
   - `fog` @144 (density, falloff, base height, start), `fog_color` @160 (rgb, inscatter);
   - `aerial` @176 (strength, distance scale);
-  - reserved @192.
+  - `cel` @192 (toon enabled @192, softness @196, specular strength @200, unused @204); WGSL retains this occupied lane as `reserved[0]`;
+  - reserved zero words @208..256. Unused components remain zero: sun_disc.zw @8/12, zenith/horizon/ground.w @28/44/60, sky_params.w @76, background.w @92, clouds2.w @124, cloud_color.w @140, aerial.zw @184/188.
+- 12 `raa_local_lights: array<LightGpu, MAX_LOCAL_LIGHTS>` UNIFORM, `MAX_LOCAL_LIGHTS = 256`, 64 B stride and 16384 B allocation/minimum binding size. The shared constant drives Rust and WGSL array lengths and layout assertions; records beyond the active count are zero. This fits the default 64 KiB uniform binding limit.
+- 13 `raa_light_tiles: texture_2d_array<u32>`, R32Uint, integer `textureLoad` only, never sampled/filtered. Width/height are ceil(viewport width/16) and ceil(viewport height/16); 128 array layers store tile words: layer 0 count, layers 1-127 dense light indices. Word w for tile (x,y) is texel (x,y), layer w. The order-35 compute tiling pass writes through its private COMPUTE-only group 2: binding 0 prepass depth texture, 1 the same light uniform layout, 2 write-only R32Uint storage texture, 3 read-write storage containing the dropped-reference atomic u32 @0 (4 B). These compute resources are not fragment bindings. Empty tiles have zero count; disabled tiling publishes zero active counts and valid empty resources.
 
-**Group 2** is private to the pass that binds it. **Group 3** is reserved for extensions.
+**LightGpu** (64 B, four aligned 16 B lanes; `LIGHT_GPU_SIZE`)
+- `position_range: vec4<f32>` @0: world position xyz @0/4/8, range @12.
+- `color_inv_range_sq: vec4<f32>` @16: linear RGB times intensity @16/20/24, inverse range squared @28.
+- `direction_cos_outer: vec4<f32>` @32: unit travel direction xyz @32/36/40, outer-half-angle cosine @44.
+- `cos_inner: f32` @48: inner-half-angle cosine.
+- `kind: u32` @52: point 0, spot 1, directional 2, area 3.
+- `width: f32` @56 and `height: f32` @60: full area extents in metres.
+
+All 16 words are occupied, with no reserved word or handle/radius/shadow lane. Directional evaluation ignores position/range; unused kind-specific values remain finite. `LocalLights::write_gpu` packs active records in stable handle order and zeroes the remainder; tile indices address this dense array, not public handles.
+
+**Group 2** is private to the pass that binds it. **Group 3** retains the posed variant's skin palette at binding 0: VERTEX-only read-only storage of column-major mat4x4<f32> (64 B stride/minimum binding size, columns @0/16/32/48 per matrix), addressed from the live record's `palette_base`. It is not an available extension group.
+
+The frame layout exposes five fragment storage buffers; OIT adds three, reaching the default limit of eight. Neither local-light binding is a storage buffer. Previous-instance storage and skin palettes are vertex-only (six vertex storage buffers without skin, seven with it). No fifth group, OIT layout change or extra fragment storage allocation is introduced.
+
+Layout evidence remains in owning source/tests: `raa-lit/src/frame.rs`, `previous_instances.rs`, `instance_store.rs`, `handle.rs` and `local_lights.rs`; `raa-shader/src/gpu_constants.rs` and the size/member-type/offset assertions in `src/lib.rs`; `raa-pipeline/src/lighting.rs` and `tests/resources.rs`; default composed variants in `raa-lit/tests/variants.rs`, and posed/unposed, transparent, fur and custom-material resource-budget checks in `raa-oit/tests/variants.rs` and `raa-fur/tests/variants.rs`. Previous-record fixtures cover translation, rotation, non-uniform scale, invalid/reused slots and lifecycle catch-up. These tests are read-only evidence for this documentation reconciliation.
 
 ## S11. Shader and material function contract (raa-shader)
 A composed module = `PRELUDE` (S10 structs, groups 0-1) + `LIB` + one material function + the winning provider of each slot + the pass entry points. Variant key = (material fn id, pass kind, msaa, flags, slots hash).
@@ -481,7 +530,7 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 | 130 | grading | pass | raa-grading |
 | 200 | tonemap | pass, required | raa-tonemap |
 
-- Contributor orders are positions inside the forward MSAA pass, after the opaque draws. The row index of this table is the feature-bit index of `FrameGpu.flags.z`.
+- Contributor orders are positions inside the forward MSAA pass, after the opaque draws. Feature bits use the authoritative logical-id mapping in S10, independently of this table's row positions.
 - Targets (`raa_pipeline::Targets`, surface-sized, recreated on resize):
   - `depth` (Depth32Float, single-sample, written by prepass, RENDER_ATTACHMENT | TEXTURE_BINDING);
   - `normal` (Rgba16Float: view-space normal, roughness);
