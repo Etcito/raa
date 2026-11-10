@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import test from 'node:test';
 import { DET_CASES, parseArgs, USAGE } from './anim-capture.mjs';
@@ -132,10 +132,16 @@ test('missing NMC_GPU_CLIENT fails without launching Chrome or writing a record'
   assert.equal(existsSync(join(f.dir, 'proofs/results/anim/clip-sample.json')), false);
 });
 
-test('page validation reaches real WASM dispatch for both cases before any GPU setup', async () => {
+test('page validation reaches real WASM dispatch for both cases before any GPU setup', async t => {
   // Execute the page's actual validation/run functions with setup supplied by this
   // CPU test. This is dispatch coverage, not browser/GPU capture evidence.
-  const { loadRaaAnim } = await import('../dist/bricks/raa-anim/index.js');
+  const buildDir = mkdtempSync(join(root, '.anim-capture-bricks-'));
+  t.after(() => rmSync(buildDir, { recursive: true, force: true }));
+  const build = spawnSync('bash', ['scripts/build-bricks.sh', '--out', buildDir], {
+    cwd: root, encoding: 'utf8', timeout: 1_800_000,
+  });
+  assert.equal(build.status, 0, `brick build failed: ${build.error ?? ''}\n${build.stdout}\n${build.stderr}`);
+  const { loadRaaAnim } = await import(pathToFileURL(join(buildDir, 'raa-anim/index.js')).href);
   const api = await loadRaaAnim();
   const source = readFileSync(join(root, 'examples/anim-brick/main.js'), 'utf8');
   const calls = [];
