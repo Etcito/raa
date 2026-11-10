@@ -20,7 +20,7 @@ use raa_math::{Mat4, Vec3};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
 
 use crate::desc::ShaftsDesc;
-use crate::shaders::{FS_COMPOSITE, FS_MARCH, PARAMS_SIZE, SHAFTS_WGSL, VS_MAIN};
+use crate::shaders::{FS_COMPOSITE, FS_MARCH, PARAMS_SIZE, VS_MAIN, shafts_module_wgsl};
 
 /// S12 name of the pass.
 const NAME: &str = "sunshafts";
@@ -268,7 +268,7 @@ impl ShaftsPass {
         let device = gpu.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-shafts.shafts"),
-            source: wgpu::ShaderSource::Wgsl(SHAFTS_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(shafts_module_wgsl().into()),
         });
         let layout = create_layout(device);
         let layouts = [&layout, lighting_layout];

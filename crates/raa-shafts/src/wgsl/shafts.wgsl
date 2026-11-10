@@ -2,8 +2,10 @@
 // ray march of the view ray through the CSM shadow map (32 steps, interleaved-gradient
 // jitter by pixel and frame), with the local density scaled by the height-fog factor of
 // EnvGpu.fog and a Henyey-Greenstein phase (g 0.7) toward the sun, then a depth-aware
-// bilateral 4-tap upsample added to the HDR source. No PRELUDE: group 0 is private, group 1
-// declares only the lighting bindings it reads, verbatim from raa-shader's prelude.
+// bilateral 4-tap upsample added to the HDR source. No PRELUDE: group 0 is private; group 1
+// declares the lighting bindings it reads (0, 1, 2, 11) plus the composed S11
+// weather-lighting declarations of `WEATHER_LIGHTING_WGSL` (bindings 15/16), verbatim from
+// raa-shader.
 
 struct ShaftsParams {
     // clip -> world of the scene camera
@@ -182,7 +184,8 @@ fn fs_march(in: VsOut) -> @location(0) vec4<f32> {
         let density = shafts.params.x * height_factor(p.y);
         sum = sum + sun_visibility(p) * density;
     }
-    let radiance = shafts.sun_color.rgb * shafts.sun_dir.w * (sum * phase * step_len);
+    let radiance =
+        raa_directional_radiance(shafts.sun_color.rgb) * shafts.sun_dir.w * (sum * phase * step_len);
     return vec4<f32>(radiance, vd);
 }
 

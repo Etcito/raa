@@ -1,8 +1,10 @@
 //! Q11: the sun-shafts render module passes naga validation, defines the fullscreen vertex
 //! entry and the two fragment entries named by `shaders.rs`, declares only private group-0
 //! bindings plus the group-1 lighting bindings 0, 1, 2 and 11 copied verbatim from
-//! `raa_shader::PRELUDE_WGSL` (with its `ShadowGpu` and `EnvGpu` members), and
-//! `ShaftsParams` has the field order and size of `PARAMS_SIZE`.
+//! `raa_shader::PRELUDE_WGSL` (with its `ShadowGpu` and `EnvGpu` members) and the composed
+//! `WEATHER_LIGHTING_WGSL` bindings 15/16, and `ShaftsParams` has the field order and size
+//! of `PARAMS_SIZE`. The march applies `raa_directional_radiance` to the raw sun radiance
+//! exactly once and keeps the disabled-CSM no-op.
 
 // The shader module is crate-private; the test compiles its file.
 #[path = "../src/shaders.rs"]
@@ -59,14 +61,34 @@ fn bindings(wgsl: &str, group: u32) -> Vec<u32> {
 
 #[test]
 fn shafts_module_validates() {
-    if let Err(e) = Composer::validate(shaders::SHAFTS_WGSL) {
+    let wgsl = shaders::shafts_module_wgsl();
+    if let Err(e) = Composer::validate(&wgsl) {
         panic!("shafts: {e}");
     }
 }
 
 #[test]
+fn directional_radiance_is_applied_once_in_the_march() {
+    let wgsl = shaders::shafts_module_wgsl();
+    assert_eq!(wgsl.matches(raa_shader::WEATHER_LIGHTING_WGSL).count(), 1);
+    assert_eq!(wgsl.matches("fn raa_directional_radiance(").count(), 1);
+    let calls: Vec<&str> = code_lines(&wgsl)
+        .filter(|l| l.contains("raa_directional_radiance(") && !l.starts_with("fn "))
+        .collect();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert!(calls[0].contains("shafts.sun_color.rgb"), "{calls:?}");
+    // The march still reads the private 208-byte params and keeps the disabled-CSM no-op.
+    assert!(wgsl.contains("shafts.sun_dir.w"));
+    assert!(
+        wgsl.contains("if (raa_shadow.params.w < 0.5) {\n        return vec4<f32>(0.0);\n    }")
+    );
+    assert_eq!(shaders::PARAMS_SIZE, 208);
+}
+
+#[test]
 fn one_vertex_and_two_fragment_entries() {
-    let entries = entry_points(shaders::SHAFTS_WGSL);
+    let wgsl = shaders::shafts_module_wgsl();
+    let entries = entry_points(&wgsl);
     let expected = [
         ("@vertex", shaders::VS_MAIN),
         ("@fragment", shaders::FS_MARCH),
@@ -76,7 +98,6 @@ fn one_vertex_and_two_fragment_entries() {
         assert!(entries.contains(&e), "missing {e:?} in {entries:?}");
     }
     assert_eq!(entries.len(), expected.len(), "{entries:?}");
-    let wgsl = shaders::SHAFTS_WGSL;
     assert_eq!(wgsl.matches("@vertex").count(), 1);
     assert_eq!(wgsl.matches("@fragment").count(), 2);
     assert_eq!(wgsl.matches("@compute").count(), 0);
@@ -84,11 +105,13 @@ fn one_vertex_and_two_fragment_entries() {
 
 #[test]
 fn groups_are_private_zero_and_lighting_one_only() {
-    let wgsl = shaders::SHAFTS_WGSL;
-    assert_eq!(bindings(wgsl, 0), [0, 1, 2, 3, 4]);
-    assert_eq!(bindings(wgsl, 1), [0, 1, 2, 11]);
-    let groups = code_lines(wgsl).filter(|l| l.contains("@group(")).count();
-    assert_eq!(groups, 9, "only groups 0 and 1 are declared");
+    let wgsl = shaders::shafts_module_wgsl();
+    assert_eq!(bindings(&wgsl, 0), [0, 1, 2, 3, 4]);
+    let mut lighting = bindings(&wgsl, 1);
+    lighting.sort_unstable();
+    assert_eq!(lighting, [0, 1, 2, 11, 15, 16]);
+    let groups = code_lines(&wgsl).filter(|l| l.contains("@group(")).count();
+    assert_eq!(groups, 11, "only groups 0 and 1 are declared");
     // No PRELUDE prepended: the group-0 frame bindings are absent.
     assert!(!wgsl.contains("raa_frame"), "PRELUDE prepended");
 }
@@ -96,15 +119,17 @@ fn groups_are_private_zero_and_lighting_one_only() {
 #[test]
 fn group_one_lines_occur_verbatim_in_prelude() {
     let prelude: Vec<&str> = code_lines(PRELUDE_WGSL).collect();
-    for l in code_lines(shaders::SHAFTS_WGSL).filter(|l| l.starts_with("@group(1)")) {
+    let wgsl = shaders::shafts_module_wgsl();
+    for l in code_lines(&wgsl).filter(|l| l.starts_with("@group(1)")) {
         assert!(prelude.contains(&l), "not in PRELUDE_WGSL: {l}");
     }
 }
 
 #[test]
 fn lighting_structs_match_prelude() {
+    let wgsl = shaders::shafts_module_wgsl();
     for name in ["ShadowGpu", "EnvGpu"] {
-        let ours = struct_members(shaders::SHAFTS_WGSL, name);
+        let ours = struct_members(&wgsl, name);
         let prelude = struct_members(PRELUDE_WGSL, name);
         assert_eq!(ours, prelude, "struct {name} differs from PRELUDE_WGSL");
     }
@@ -112,7 +137,8 @@ fn lighting_structs_match_prelude() {
 
 #[test]
 fn shafts_params_field_order_matches_size() {
-    let got: Vec<(String, String)> = struct_members(shaders::SHAFTS_WGSL, "ShaftsParams")
+    let wgsl = shaders::shafts_module_wgsl();
+    let got: Vec<(String, String)> = struct_members(&wgsl, "ShaftsParams")
         .into_iter()
         .filter_map(|l| l.split_once(':'))
         .map(|(n, t)| {
@@ -140,7 +166,7 @@ fn shafts_params_field_order_matches_size() {
 
 #[test]
 fn march_depth_is_finite_in_binary16_and_bilateral_weights_remain_finite() {
-    let source = shaders::SHAFTS_WGSL;
+    let source = shaders::shafts_module_wgsl();
     let sky: f32 = source
         .split("const SKY_DEPTH: f32 = ")
         .nth(1)

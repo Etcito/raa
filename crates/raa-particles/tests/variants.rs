@@ -110,6 +110,35 @@ fn blend_module_validates_with_the_engine_slot_set() {
 }
 
 #[test]
+fn draw_modules_attenuate_directional_radiance_once() {
+    let composer = composer();
+    let opaque = opaque_module_wgsl(&composer).unwrap_or_else(|e| panic!("{e}"));
+    let blend = blend_module_wgsl(&composer).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(opaque.matches(raa_shader::WEATHER_LIGHTING_WGSL).count(), 1);
+    assert_eq!(blend.matches(raa_shader::WEATHER_LIGHTING_WGSL).count(), 1);
+    for (name, wgsl, call) in [
+        (
+            "particles.opaque",
+            &opaque,
+            "raa_directional_radiance(raa_frame.sun_color.rgb) * shadow",
+        ),
+        (
+            "particles.blend",
+            &blend,
+            "let sun = raa_directional_radiance(raa_frame.sun_color.rgb);",
+        ),
+    ] {
+        assert!(wgsl.contains(call), "{name}: {call}");
+        let calls = wgsl
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or("").trim())
+            .filter(|l| l.contains("raa_directional_radiance(") && !l.starts_with("fn "))
+            .count();
+        assert_eq!(calls, 1, "{name}");
+    }
+}
+
+#[test]
 fn draw_modules_refuse_a_missing_slot() {
     let mut without_fog = Composer::new();
     for p in lit_slots::default_slot_providers()

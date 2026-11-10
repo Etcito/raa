@@ -198,7 +198,7 @@ fn fs_splash(v: ParticlesBlendVaryings) -> @location(0) vec4<f32> {
     let fresnel = PARTICLES_SPLASH_F0 + (1.0 - PARTICLES_SPLASH_F0) * pow(1.0 - n_dot_v, 5.0);
     let r = reflect(-view_dir, n);
     let l = -raa_frame.sun_dir.xyz;
-    let sun = raa_frame.sun_color.rgb;
+    let sun = raa_directional_radiance(raa_frame.sun_color.rgb);
     let glint = sun * pow(max(dot(r, l), 0.0), 256.0) * 4.0 * fresnel;
     let lit = raa_frame.ambient.rgb + sun * max(dot(n, l), 0.0) / 3.14159265;
     let water = fresnel * particles_env(r) + glint + 0.08 * v.color * lit;
