@@ -1,5 +1,8 @@
 use raa_core::RaaError;
-use raa_sky::{ResolvedWeatherState, Weather, WeatherPreset, WeatherSettings, WeatherUpdate};
+use raa_sky::{
+    Observation, ResolvedWeatherState, Weather, WeatherCycle, WeatherPreset, WeatherSettings,
+    WeatherUpdate,
+};
 
 fn fair() -> Weather {
     Weather {
@@ -431,4 +434,239 @@ fn authored_text_keeps_field_order_and_round_trips() {
          wind speed=8.5 from=359.5\nevolution 0.6\nrain 0.25\n"
     );
     assert_eq!(Weather::parse(&weather.to_text()), Ok(weather));
+}
+
+fn close(a: f32, b: f32) -> bool {
+    (a - b).abs() < 1.0e-4
+}
+
+#[test]
+fn observations_carry_percent_kmh_degrees_code_and_millimetre_units() {
+    let report = Observation {
+        cover_low: 40.0,
+        cover_mid: 20.0,
+        cover_high: 60.0,
+        wind_kmh: 18.0,
+        wind_from: 725.0,
+        code: 2,
+        precipitation: 2.0,
+    };
+    let weather = Weather::observed(&report);
+    assert!(close(weather.coverage, 0.36), "{}", weather.coverage);
+    assert!(close(weather.cloud_type, 0.95));
+    assert_eq!(weather.base, 1000.0);
+    assert_eq!(weather.thickness, 1500.0);
+    assert_eq!(weather.density, 1.0);
+    assert!(close(weather.cirrus, 0.6));
+    assert!(close(weather.wind_speed, 10.0), "{}", weather.wind_speed);
+    assert_eq!(weather.wind_from, 725.0);
+    assert_eq!(weather.rain, 0.0);
+    assert_eq!(weather.evolution, 1.0);
+}
+
+#[test]
+fn nonfinite_reports_normalize_to_zero_and_negative_values_clamp() {
+    let weather = Weather::observed(&Observation {
+        cover_low: f32::NAN,
+        cover_mid: f32::INFINITY,
+        cover_high: -10.0,
+        wind_kmh: -5.0,
+        wind_from: f32::NEG_INFINITY,
+        code: 1,
+        precipitation: -2.0,
+    });
+    assert_eq!(weather.coverage, 0.0);
+    assert_eq!(weather.cirrus, 0.0);
+    assert_eq!(weather.wind_speed, 0.0);
+    assert_eq!(weather.wind_from, 0.0);
+    assert_eq!(weather.rain, 0.0);
+
+    let clamped = Weather::observed(&Observation {
+        cover_low: 250.0,
+        code: 3,
+        ..Default::default()
+    });
+    assert!(close(clamped.coverage, 0.9), "{}", clamped.coverage);
+    let negative_cover = Weather::observed(&Observation {
+        cover_low: -100.0,
+        code: 3,
+        ..Default::default()
+    });
+    assert_eq!(negative_cover.coverage, 0.0);
+}
+
+#[test]
+fn unknown_wmo_codes_take_the_general_cover_branch() {
+    let unknown = Weather::observed(&Observation {
+        cover_low: 100.0,
+        code: 42,
+        ..Default::default()
+    });
+    assert!(unknown.coverage > 0.85);
+    assert_eq!(unknown.rain, 0.0);
+    assert!(unknown.thickness < 3000.0);
+
+    let clear = Weather::observed(&Observation {
+        cover_low: 100.0,
+        code: 0,
+        ..Default::default()
+    });
+    assert!(clear.coverage <= 0.05);
+}
+
+#[test]
+fn report_codes_map_to_cloud_rain_and_wind_behavior() {
+    let showers = Weather::observed(&Observation {
+        cover_low: 80.0,
+        code: 80,
+        wind_kmh: 36.0,
+        precipitation: 2.0,
+        ..Default::default()
+    });
+    assert!(showers.cloud_type >= 0.85);
+    assert_eq!(showers.thickness, 3500.0);
+    assert_eq!(showers.density, 1.5);
+    assert_eq!(showers.base, 800.0);
+    assert!(close(showers.rain, 0.8));
+    assert!(close(showers.evolution, 1.8));
+    assert!(close(showers.wind_speed, 20.0));
+
+    let storm = Weather::observed(&Observation {
+        cover_low: 80.0,
+        cover_high: 90.0,
+        code: 95,
+        precipitation: 10.0,
+        ..Default::default()
+    });
+    assert_eq!(storm.cloud_type, 1.0);
+    assert_eq!(storm.base, 900.0);
+    assert_eq!(storm.thickness, 7000.0);
+    assert_eq!(storm.density, 2.0);
+    assert_eq!(storm.rain, 1.0);
+    assert!(close(storm.cirrus, 0.9));
+    assert_eq!(storm.evolution, 2.0);
+
+    let rain = Weather::observed(&Observation {
+        cover_mid: 60.0,
+        code: 63,
+        precipitation: 8.0,
+        ..Default::default()
+    });
+    assert_eq!(rain.base, 800.0);
+    assert_eq!(rain.thickness, 1200.0);
+    assert_eq!(rain.density, 1.5);
+    assert_eq!(rain.rain, 1.0);
+    assert!(rain.cloud_type < 0.6);
+}
+
+#[test]
+fn interpolation_eases_fields_and_turns_the_wind_the_short_way() {
+    let west = Weather {
+        wind_from: 350.0,
+        ..Weather::default()
+    };
+    let east = Weather {
+        wind_from: 10.0,
+        ..Weather::default()
+    };
+    assert_eq!(west.lerp(&east, 0.0), west);
+    assert_eq!(west.lerp(&east, 1.0), east);
+
+    let quarter = west.lerp(&east, 0.25);
+    assert!(close(quarter.wind_from, 355.0), "{}", quarter.wind_from);
+    let half = west.lerp(&east, 0.5);
+    assert!(
+        half.wind_from < 1.0e-3 || (half.wind_from - 360.0).abs() < 1.0e-3,
+        "{}",
+        half.wind_from
+    );
+    let back = east.lerp(&west, 0.5);
+    assert!(
+        back.wind_from < 1.0e-3 || (back.wind_from - 360.0).abs() < 1.0e-3,
+        "{}",
+        back.wind_from
+    );
+
+    let clear = Weather::by_name("clear").unwrap();
+    let storm = Weather::by_name("storm").unwrap();
+    let middle = clear.lerp(&storm, 0.5);
+    assert!(close(
+        middle.coverage,
+        (clear.coverage + storm.coverage) * 0.5
+    ));
+    assert!(close(middle.rain, storm.rain * 0.5));
+}
+
+#[test]
+fn wind_velocity_is_the_from_direction_in_east_and_south_coordinates() {
+    let weather = |from: f32| Weather {
+        wind_speed: 10.0,
+        wind_from: from,
+        ..Weather::default()
+    };
+    let [east, south] = weather(0.0).wind_velocity();
+    assert!(east.abs() < 1.0e-4 && close(south, 10.0));
+    let [east, south] = weather(90.0).wind_velocity();
+    assert!(close(east, -10.0) && south.abs() < 1.0e-4);
+    let [east, south] = weather(180.0).wind_velocity();
+    assert!(east.abs() < 1.0e-4 && close(south, -10.0));
+    let [east, south] = weather(270.0).wind_velocity();
+    assert!(close(east, 10.0) && south.abs() < 1.0e-4);
+
+    let turned = weather(725.0).wind_velocity();
+    let direct = weather(5.0).wind_velocity();
+    assert!(close(turned[0], direct[0]) && close(turned[1], direct[1]));
+}
+
+#[test]
+fn cycles_move_only_to_neighbouring_weather_and_are_deterministic() {
+    let neighbours = |name: &str| match name {
+        "clear" => vec!["fair", "cirrus"],
+        "cirrus" => vec!["fair", "broken"],
+        "fair" => vec!["broken", "clear"],
+        "broken" => vec!["overcast", "fair"],
+        "overcast" => vec!["storm", "broken"],
+        "storm" => vec!["broken", "overcast"],
+        other => panic!("unknown weather {other}"),
+    };
+    let run = |seed: u32| {
+        let mut cycle = WeatherCycle::new("clear", seed);
+        let mut visits = vec![cycle.current()];
+        let mut since_change = 0.0;
+        for _ in 0..(3 * 60 * 60) {
+            since_change += 1.0;
+            if let Some(next) = cycle.advance(1.0) {
+                let previous = *visits.last().unwrap();
+                assert!(
+                    neighbours(previous).contains(&next),
+                    "{previous} jumped to {next}"
+                );
+                assert!(since_change >= WeatherCycle::DWELL.0);
+                assert!(Weather::by_name(next).is_some());
+                visits.push(next);
+                since_change = 0.0;
+            }
+        }
+        visits
+    };
+    let first = run(7);
+    for name in Weather::names() {
+        assert!(first.contains(&name), "never reached {name}: {first:?}");
+    }
+    assert_eq!(run(7), first);
+    assert_ne!(run(11), first);
+}
+
+#[test]
+fn cycles_fall_back_to_fair_and_keep_their_dwell_and_transition() {
+    assert_eq!(WeatherCycle::new("hail", 1).current(), "fair");
+    assert_eq!(WeatherCycle::new("Clear", 1).current(), "fair");
+    assert_eq!(WeatherCycle::new("cirrus", 1).current(), "cirrus");
+    assert_eq!(WeatherCycle::DWELL, (120.0, 300.0));
+    assert_eq!(WeatherCycle::TRANSITION, 90.0);
+
+    let mut cycle = WeatherCycle::new("fair", 1);
+    assert_eq!(cycle.advance(0.0), None);
+    assert_eq!(cycle.advance(WeatherCycle::DWELL.0 - 0.5), None);
+    assert!(cycle.advance(WeatherCycle::DWELL.1 + 0.5).is_some());
 }

@@ -59,6 +59,26 @@ pub struct Weather {
     pub rain: f32,
 }
 
+/// A live weather report, as a weather service gives it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Observation {
+    /// Cloud cover below about 2 km, in percent.
+    pub cover_low: f32,
+    /// Cloud cover between about 2 and 6 km, in percent.
+    pub cover_mid: f32,
+    /// Cloud cover above about 6 km, in percent.
+    pub cover_high: f32,
+    /// Near-ground wind speed in kilometres per hour.
+    pub wind_kmh: f32,
+    /// Compass direction the wind blows FROM, in degrees.
+    pub wind_from: f32,
+    /// WMO weather code: 0 clear, 1 to 3 cloudier, 45 fog, 51 to 67 rain, 71 to 86 snow and
+    /// showers, 95 to 99 thunderstorm.
+    pub code: u32,
+    /// Precipitation accumulated during the last hour, in millimetres.
+    pub precipitation: f32,
+}
+
 /// The built-in weather states, in rank order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WeatherPreset {
@@ -241,6 +261,108 @@ impl Weather {
         )
     }
 
+    /// Part way from this state to `to`, by `t` in `0..1`. The wind turns the short way round.
+    pub fn lerp(&self, to: &Self, t: f32) -> Self {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        let turn = (to.wind_from - self.wind_from + 540.0).rem_euclid(360.0) - 180.0;
+        Self {
+            coverage: mix(self.coverage, to.coverage),
+            cloud_type: mix(self.cloud_type, to.cloud_type),
+            base: mix(self.base, to.base),
+            thickness: mix(self.thickness, to.thickness),
+            density: mix(self.density, to.density),
+            cirrus: mix(self.cirrus, to.cirrus),
+            wind_speed: mix(self.wind_speed, to.wind_speed),
+            wind_from: (self.wind_from + turn * t).rem_euclid(360.0),
+            evolution: mix(self.evolution, to.evolution),
+            rain: mix(self.rain, to.rain),
+        }
+    }
+
+    /// The wind's velocity over the ground, in metres per second, as (east, south): the
+    /// scene's +X and +Z. A wind FROM the west (270 degrees) blows towards +X.
+    pub fn wind_velocity(&self) -> [f32; 2] {
+        let from = self.wind_from.rem_euclid(360.0);
+        let towards = (from + 180.0).to_radians();
+        // Compass bearings run clockwise from north (-Z): east is +X, south is +Z.
+        [
+            towards.sin() * self.wind_speed,
+            -towards.cos() * self.wind_speed,
+        ]
+    }
+
+    /// A state that matches a live report. Low and middle cloud make up the main layer, whose
+    /// kind follows the report's weather code; high cloud becomes cirrus. Report values are
+    /// normalized first: nonfinite floats become zero, covers clamp to 0..100 percent, wind and
+    /// precipitation clamp below at zero, and finite wind directions are retained. Unknown WMO
+    /// codes use the general cloud-cover behavior.
+    ///
+    /// This is an infallible pure conversion, not a service client or a structured setter.
+    pub fn observed(report: &Observation) -> Self {
+        let low = report_float(report.cover_low).clamp(0.0, 100.0) / 100.0;
+        let mid = report_float(report.cover_mid).clamp(0.0, 100.0) / 100.0;
+        let high = report_float(report.cover_high).clamp(0.0, 100.0) / 100.0;
+        let wind_kmh = report_float(report.wind_kmh).max(0.0);
+        let wind_from = report_float(report.wind_from);
+        let precipitation = report_float(report.precipitation).max(0.0);
+        let code = report.code;
+        let storm = (95..=99).contains(&code);
+        let showers = (80..=86).contains(&code);
+        let rain_code = (51..=67).contains(&code) || (71..=77).contains(&code) || showers;
+        // Meteorologists' cover counts sky that is only thinly clouded, and the eye counts
+        // gaps between clouds, so the visible coverage is a little less than reported.
+        let coverage = (low.max(mid * 0.85) * 0.9).clamp(0.0, 1.0);
+        // Mostly low cloud covering the sky is a sheet; broken low cloud is heaped cumulus;
+        // middle cloud alone is altocumulus, lumpy but flatter.
+        let mut cloud_type = if low >= mid {
+            0.95 - 0.75 * smooth(0.6, 0.95, low)
+        } else {
+            0.55 - 0.25 * smooth(0.6, 0.95, mid)
+        };
+        let mut base: f32 = if low >= mid { 1000.0 } else { 3000.0 };
+        let mut thickness = if low >= mid { 1500.0 } else { 1200.0 };
+        let mut density: f32 = 1.0;
+        if showers {
+            cloud_type = cloud_type.max(0.85);
+            thickness = 3500.0;
+            density = 1.4;
+        }
+        if storm {
+            cloud_type = 1.0;
+            base = 900.0;
+            thickness = 7000.0;
+            density = 2.0;
+        }
+        if rain_code {
+            base = base.min(800.0);
+            density = density.max(1.5);
+        }
+        let rain = if storm {
+            1.0
+        } else if rain_code {
+            (0.3 + precipitation / 4.0).min(1.0)
+        } else {
+            0.0
+        };
+        Self {
+            coverage: if code == 0 {
+                coverage.min(0.05)
+            } else {
+                coverage
+            },
+            cloud_type,
+            base,
+            thickness,
+            density,
+            cirrus: high,
+            // Wind at cloud height is about twice that near the ground.
+            wind_speed: wind_kmh / 3.6 * 2.0,
+            wind_from,
+            evolution: 1.0 + rain,
+            rain,
+        }
+    }
+
     /// Strict structured validation: refuses out-of-domain and nonfinite fields, including a
     /// nonfinite `base + thickness`, with `sky.invalid`.
     pub fn validate(&self) -> Result<(), RaaError> {
@@ -331,6 +453,90 @@ impl WeatherUpdate {
     pub fn validate(&self) -> Result<(), RaaError> {
         self.settings.validate()
     }
+}
+
+/// A sky that changes by itself. After a few minutes in one weather it moves on to one that
+/// could follow it, as weather does: fair cumulus grows into broken cloud, which may close into
+/// overcast and break into a storm, then clear again. It never leaps from clear to storm.
+#[derive(Clone, Debug)]
+pub struct WeatherCycle {
+    current: &'static str,
+    remaining: f32,
+    state: u32,
+}
+
+/// Which weather can follow which.
+const NEXT: [(&str, [&str; 2]); 6] = [
+    ("clear", ["fair", "cirrus"]),
+    ("cirrus", ["fair", "broken"]),
+    ("fair", ["broken", "clear"]),
+    ("broken", ["overcast", "fair"]),
+    ("overcast", ["storm", "broken"]),
+    ("storm", ["broken", "overcast"]),
+];
+
+impl WeatherCycle {
+    /// Seconds spent in one weather before moving on, at least and at most.
+    pub const DWELL: (f32, f32) = (120.0, 300.0);
+    /// Seconds over which each change eases in.
+    pub const TRANSITION: f32 = 90.0;
+
+    /// A cycle starting in the named weather, or in fair weather if there is none of that name.
+    pub fn new(start: &str, seed: u32) -> Self {
+        let current = NEXT
+            .iter()
+            .map(|(name, _)| *name)
+            .find(|name| *name == start)
+            .unwrap_or("fair");
+        let mut cycle = Self {
+            current,
+            remaining: 0.0,
+            state: seed.wrapping_mul(747_796_405).wrapping_add(2_891_336_453),
+        };
+        cycle.remaining = cycle.dwell();
+        cycle
+    }
+
+    /// The weather the cycle is in, or moving to.
+    pub fn current(&self) -> &'static str {
+        self.current
+    }
+
+    fn random(&mut self) -> f32 {
+        self.state = self
+            .state
+            .wrapping_mul(747_796_405)
+            .wrapping_add(2_891_336_453);
+        let word =
+            ((self.state >> ((self.state >> 28) + 4)) ^ self.state).wrapping_mul(277_803_737);
+        ((word >> 22) ^ word) as f32 / u32::MAX as f32
+    }
+
+    fn dwell(&mut self) -> f32 {
+        Self::DWELL.0 + (Self::DWELL.1 - Self::DWELL.0) * self.random()
+    }
+
+    /// Moves time on by `seconds`. Returns the next weather when it is time to change; `None`
+    /// means no transition happened.
+    pub fn advance(&mut self, seconds: f32) -> Option<&'static str> {
+        self.remaining -= seconds;
+        if self.remaining > 0.0 {
+            return None;
+        }
+        let (_, options) = NEXT.iter().find(|(name, _)| *name == self.current)?;
+        self.current = options[(self.random() * 1.999) as usize];
+        self.remaining = self.dwell();
+        Some(self.current)
+    }
+}
+
+fn report_float(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+fn smooth(low: f32, high: f32, x: f32) -> f32 {
+    let t = ((x - low) / (high - low)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn number(text: &str) -> Result<f32, String> {
