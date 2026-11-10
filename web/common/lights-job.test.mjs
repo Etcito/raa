@@ -413,6 +413,29 @@ test('missing/unavailable clients and publication failures invalidate previous c
   ]) {
     const f = await transportFixture(t);
     passed(await cli(f,'render'));
+    if (mode === 'waiting-timeout') {
+      // Start the simulated queue wait only after the client reports that it is ready.
+      const clock = join(f.root, 'queue-clock.mjs');
+      writeFileSync(clock, `
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const spawn = childProcess.spawn;
+const original = globalThis.setTimeout;
+let ready;
+childProcess.spawn = (...args) => {
+  const child = spawn(...args);
+  if (args[1]?.[1] === 'render') child.stderr.once('data', () => ready?.());
+  return child;
+};
+syncBuiltinESMExports();
+globalThis.setTimeout = (fn, ms, ...args) => {
+  if (ms !== 100) return original(fn, ms, ...args);
+  const timer = original(() => {}, 2147483647);
+  ready = () => { clearTimeout(timer); original(fn, ms, ...args); };
+  return timer;
+};`);
+      env.NODE_OPTIONS = `--import=${clock}`;
+    }
     failed(await cli(f,'render',mode,env),pattern);
     failed(await cli(f,'fresh'),/run\.json is missing|incomplete/);
   }
