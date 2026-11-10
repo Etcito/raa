@@ -94,6 +94,8 @@ fn sections_follow_contract_order() {
         "struct FrameGpu {",
         "// raa section: lib",
         "fn raa_hash3(",
+        "// raa section: cloud shadow",
+        "fn raa_cloud_shadow(",
         "// raa section: material\n",
         "fn material_main(",
         "// raa section: material_vertex passthrough",
@@ -128,6 +130,48 @@ fn sections_follow_contract_order() {
             .lines()
             .all(|l| l.starts_with("//") || l.is_empty())
     );
+}
+
+#[test]
+fn cloud_shadow_is_attached_once_before_the_providers() {
+    let reg = MaterialFnRegistry::new();
+    let mut composer = stub_composer();
+    composer
+        .add_slot(SlotProvider {
+            slot: SlotId::Shadow,
+            priority: 1,
+            provider: "clouds",
+            wgsl: Cow::Borrowed(
+                "fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {\n    return raa_cloud_shadow(world_pos);\n}\n",
+            ),
+        })
+        .expect("add");
+    for pass in PassKind::ALL {
+        let wgsl = composer.compose(&reg, &key(pass)).expect("compose");
+        let helper = position(&wgsl, "fn raa_cloud_shadow(");
+        let provider = position(&wgsl, "fn raa_slot_shadow(");
+        assert!(helper < provider, "{pass:?}");
+        // The weather declarations exist once, in the prelude, not again in the helper.
+        assert_eq!(wgsl.matches("fn raa_cloud_shadow(").count(), 1, "{pass:?}");
+        assert_eq!(
+            wgsl.matches("struct WeatherLightingGpu").count(),
+            1,
+            "{pass:?}"
+        );
+        assert_eq!(
+            wgsl.matches("@group(1) @binding(15)").count(),
+            1,
+            "{pass:?}"
+        );
+        assert_eq!(
+            wgsl.matches("@group(1) @binding(16)").count(),
+            1,
+            "{pass:?}"
+        );
+        if let Err(e) = Composer::validate(&wgsl) {
+            panic!("{pass:?}: {e}");
+        }
+    }
 }
 
 #[test]

@@ -24,6 +24,13 @@ pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.w
 /// Already included once in [`PRELUDE_WGSL`]. Cloud shadow composition consumes these
 /// bindings; standalone directional consumers can include this source without the prelude.
 pub const WEATHER_LIGHTING_WGSL: &str = include_str!("wgsl/weather_lighting.wgsl");
+/// S25 ground cloud shadow sampler `raa_cloud_shadow(world_pos: vec3<f32>) -> f32`, taking
+/// world position in metres and returning 1 when clouds are off. It consumes the group 1
+/// weather declarations and binding 6 sampler of [`PRELUDE_WGSL`] without redeclaring them;
+/// [`Composer::compose`] attaches it once before the slot providers, and standalone lighting
+/// consumers include it after the prelude (or after [`WEATHER_LIGHTING_WGSL`] plus their own
+/// sampler declaration).
+pub const CLOUD_SHADOW_WGSL: &str = include_str!("wgsl/cloud_shadow.wgsl");
 /// S11 helper library (`raa_hash3`, `raa_noise3`, `raa_fbm3`, `raa_voronoi3`,
 /// `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`).
 pub const LIB_WGSL: &str = include_str!("wgsl/lib.wgsl");
@@ -318,6 +325,35 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
             WEATHER_LIGHTING_WGSL
                 .contains("return raw * raa_weather_lighting.atmosphericTransmission.rgb;")
         );
+    }
+
+    #[test]
+    fn cloud_shadow_consumes_the_weather_declarations_once() {
+        // The sampler lives beside the prelude, not inside it: the prelude stays the
+        // standalone declaration source and compose attaches the helper once.
+        assert_eq!(CLOUD_SHADOW_WGSL.matches("fn raa_cloud_shadow(").count(), 1);
+        assert!(!PRELUDE_WGSL.contains("fn raa_cloud_shadow("));
+        // It consumes the landed declarations instead of repeating them.
+        assert!(!CLOUD_SHADOW_WGSL.contains("struct WeatherLightingGpu"));
+        assert!(!CLOUD_SHADOW_WGSL.contains("@group(1) @binding("));
+        let source = format!("{PRELUDE_WGSL}\n{CLOUD_SHADOW_WGSL}");
+        assert_eq!(Composer::validate(&source), Ok(()));
+        // Disabled clouds return 1, so CSM/contact visibility is untouched.
+        assert!(
+            CLOUD_SHADOW_WGSL
+                .contains("if raa_weather_lighting.map.w < 0.5 {\n        return 1.0;\n    }")
+        );
+        // Receiver projection and the edge-to-mean fade of the adapted source.
+        assert!(
+            CLOUD_SHADOW_WGSL
+                .contains("world_pos.xz - to_light.xz * (world_pos.y / max(to_light.y, 0.08))")
+        );
+        assert!(CLOUD_SHADOW_WGSL.contains("smoothstep(0.75, 1.0, edge)"));
+        assert!(
+            CLOUD_SHADOW_WGSL
+                .contains("textureLoad(raa_cloud_transmittance, vec2<i32>(0, 0), 1, 0)")
+        );
+        assert!(CLOUD_SHADOW_WGSL.contains("raa_linear_clamp"));
     }
 
     fn stub_composer() -> Composer {

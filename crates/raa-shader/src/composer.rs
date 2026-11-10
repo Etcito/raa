@@ -8,8 +8,8 @@ use crate::error::ShaderError;
 use crate::ids::{PassKind, SlotId, VariantKey};
 use crate::registry::MaterialFnRegistry;
 use crate::{
-    LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL, PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL,
-    PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL, PRELUDE_WGSL,
+    CLOUD_SHADOW_WGSL, LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL, PASS_FURSHELL_WGSL,
+    PASS_PREPASS_WGSL, PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL, PRELUDE_WGSL,
 };
 
 /// Inserted after the material function when it defines no `material_vertex`.
@@ -100,10 +100,12 @@ impl Composer {
         h
     }
 
-    /// The WGSL module of `key`, in the S11 order: PRELUDE, LIB, the material function, a
-    /// passthrough `material_vertex` when the function defines none, the winner of each
-    /// slot in [`SlotId::ALL`] order, shared local lighting, then the pass entry points preceded by the variant
-    /// constants `RAA_MSAA` and `RAA_VARIANT_FLAGS`. Refuses `shader.unknown_fn` when the
+    /// The WGSL module of `key`, in the S11 order: PRELUDE, LIB, the S25 cloud shadow
+    /// sampler, the material function, a passthrough `material_vertex` when the function
+    /// defines none, the winner of each slot in [`SlotId::ALL`] order, shared local lighting,
+    /// then the pass entry points preceded by the variant
+    /// constants `RAA_MSAA` and `RAA_VARIANT_FLAGS`. The cloud shadow sampler consumes the
+    /// weather declarations already in PRELUDE and is available to every provider. Refuses `shader.unknown_fn` when the
     /// registry has no function `key.material_fn` and `shader.slot_missing` when a slot has
     /// no provider. The result is not validated (see [`Composer::validate`]).
     pub fn compose(
@@ -142,6 +144,7 @@ impl Composer {
         ));
         section(&mut out, "prelude", PRELUDE_WGSL);
         section(&mut out, "lib", LIB_WGSL);
+        section(&mut out, "cloud shadow", CLOUD_SHADOW_WGSL);
         section(&mut out, "material", &entry.wgsl);
         if !entry.has_vertex {
             section(

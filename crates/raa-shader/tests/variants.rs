@@ -462,6 +462,16 @@ fn group_two_bindings_are_private_to_their_pass() {
         };
         assert_eq!(group_bindings(&module, 2), expected, "{pass:?}");
         assert!(group_bindings(&module, 3).is_empty(), "{pass:?}");
+        // The S25 cloud shadow helper rides on those same bindings exactly once.
+        assert_eq!(
+            module
+                .functions
+                .iter()
+                .filter(|(_, f)| f.name.as_deref() == Some("raa_cloud_shadow"))
+                .count(),
+            1,
+            "{pass:?}"
+        );
     }
 }
 
