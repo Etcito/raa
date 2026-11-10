@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // P2 sky-weather page protocol: verify the staged build, select the cumulative
-// inventory and allocate immutable, non-destructive render attempts.
+// inventory, allocate immutable render attempts, render bounded managed jobs,
+// verify actual GPU evidence and judge every selected capture.
 import fs from 'node:fs';
+import { spawn } from 'node:child_process';
 import { publishGpuPage, runGpuPageOp } from './gpu-job.mjs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { isDeepStrictEqual, parseArgs as parse } from 'node:util';
 import { containedPath, readJsonRecord, writeJsonRecord, assertCurrentInputs } from '../../examples/sky-weather/lib/evidence.mjs';
-import { validateInventory } from '../../examples/sky-weather/lib/inventory.js';
+import { validateInventory, validateRequiredFacts } from '../../examples/sky-weather/lib/inventory.js';
+import { validateFeatureMeasurement } from '../../examples/sky-weather/lib/measure.js';
 
 /**
  * @typedef {Object} BuildReceipt
@@ -89,7 +92,7 @@ export const RECORD_FIELDS = Object.freeze({
 });
 
 export const STAGES = Object.freeze(['foundation', 'atmosphere', 'weather']);
-export const ACTIONS = Object.freeze(['check', 'select', 'clean', 'render']);
+export const ACTIONS = Object.freeze(['check', 'select', 'clean', 'render', 'fresh', 'judge']);
 
 /** Record names inside an allocated `<out>/attempts/<UUID>` directory. */
 export function attemptRecords(directory) {
@@ -109,13 +112,17 @@ export function attemptRecords(directory) {
   });
 }
 
-const USAGE = 'usage: node web/common/sky-weather-job.mjs <check|select|clean|render> --page dist/sky-weather --out out/sky-weather/<stage> --stage <foundation|atmosphere|weather>';
+const USAGE = 'usage: node web/common/sky-weather-job.mjs <check|select|clean|render|fresh|judge> --page dist/sky-weather --out out/sky-weather/<stage> --stage <foundation|atmosphere|weather>';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const ADAPTER_FIELDS = ['vendor', 'architecture', 'device', 'description'];
+const SOFTWARE_ADAPTER = /software|swiftshader|llvmpipe|lavapipe|softpipe|fallback|basic render|microsoft basic|warp\b/i;
 
 function ensure(condition, message) { if (!condition) throw new Error(message); }
 function nonblank(value) { return typeof value === 'string' && value.trim() !== ''; }
 function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function isUuid(value) { return nonblank(value) && UUID.test(value); }
+function message(error) { return String(error?.message ?? error); }
 function isIso(value) {
   return nonblank(value) && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
@@ -413,6 +420,358 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
   return run;
 }
 
+/** Resolve the stage pointer to the frozen attempt and its current page build. */
+async function resolveAttempt(page, out, stage) {
+  const { build, namespaces, inventory } = await verifyPage(page, stage);
+  const pointerFile = containedPath(out, 'current.json');
+  ensure(fs.existsSync(pointerFile), `${pointerFile} is missing: render an attempt before verifying it`);
+  const pointer = readJsonRecord(pointerFile);
+  exact(pointer, RECORD_FIELDS.current, 'current pointer');
+  ensure(isUuid(pointer.selectionId) && isUuid(pointer.attemptId)
+    && pointer.directory === `attempts/${pointer.attemptId}`, 'invalid current attempt identity');
+  const records = attemptRecords(pointer.directory);
+  const selection = readJsonRecord(containedPath(out, records.selection));
+  validateSelection(selection, stage, build, inventory, 'frozen selection');
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(out, 'selection.json')), selection),
+    'current selection differs from frozen selection');
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(out, records.build)), build),
+    'frozen build differs from current build');
+  const attempt = readJsonRecord(containedPath(out, records.attempt));
+  exact(attempt, RECORD_FIELDS.attempt, 'attempt');
+  ensure(attempt.attemptId === pointer.attemptId && attempt.selectionId === pointer.selectionId
+    && attempt.selectionId === selection.selectionId && attempt.buildId === build.buildId
+    && attempt.directory === pointer.directory, 'frozen attempt identities differ');
+  return { page, out, stage, build, namespaces, inventory, pointer, records, selection, attempt };
+}
+
+function sceneVariant(namespaces, scenario, mode, label) {
+  const namespace = namespaces.find((entry) => entry.default?.id === scenario);
+  ensure(namespace, `${label}: scene ${scenario} is not a delivered namespace`);
+  const variant = namespace.default.variants.find((entry) => entry.id === mode);
+  ensure(variant, `${label}: scene ${scenario} has no variant ${mode}`);
+  return variant;
+}
+
+function decodePng(data, label) {
+  ensure(typeof data === 'string' && data.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(data),
+    `${label}: invalid base64 PNG payload`);
+  const bytes = Buffer.from(data, 'base64');
+  ensure(bytes.length > PNG_SIGNATURE.length && bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE),
+    `${label}: invalid PNG signature`);
+  return bytes;
+}
+
+/** Actual Chrome on Windows driving a physical (non-fallback) GPU adapter. */
+function validateProvenance(label, result) {
+  ensure(isRecord(result.browser), `${label}: browser provenance is missing`);
+  exact(result.browser, ['userAgent', 'platform', 'devicePixelRatio'], `${label}: browser`);
+  const browser = result.browser;
+  ensure(/\b(?:Headless)?Chrome\/\d+/.test(browser.userAgent)
+    && /Windows NT/.test(browser.userAgent) && !/Edg\/|OPR\//.test(browser.userAgent)
+    && /^Win(?:32|64|dows)$/.test(browser.platform), `${label}: actual Chrome on Windows is required`);
+  ensure(browser.devicePixelRatio === 1, `${label}: device pixel ratio must be 1`);
+  ensure(isRecord(result.adapter), `${label}: adapter provenance is missing`);
+  exact(result.adapter, [...ADAPTER_FIELDS, 'isFallbackAdapter'], `${label}: adapter`);
+  ensure(ADAPTER_FIELDS.every((key) => typeof result.adapter[key] === 'string'),
+    `${label}: adapter identity must be text`);
+  ensure(ADAPTER_FIELDS.some((key) => nonblank(result.adapter[key])),
+    `${label}: adapter identity is blank`);
+  ensure(result.hardware === true && result.adapter.isFallbackAdapter === false,
+    `${label}: a physical GPU adapter is required; fallback or software adapters are refused`);
+  ensure(!ADAPTER_FIELDS.some((key) => SOFTWARE_ADAPTER.test(result.adapter[key])),
+    `${label}: software or fallback adapter is refused`);
+}
+
+function validateJobErrors(label, errors) {
+  ensure(isRecord(errors), `${label}: console/page/GPU error observations are missing`);
+  exact(errors, ['console', 'page', 'gpu'], `${label}: errors`);
+  for (const kind of ['console', 'page', 'gpu']) {
+    ensure(Array.isArray(errors[kind]) && errors[kind].every((entry) => typeof entry === 'string'),
+      `${label}: ${kind} errors must be an array of messages`);
+    ensure(errors[kind].length === 0, `${label}: ${kind} errors: ${errors[kind].join('; ')}`);
+  }
+}
+
+/** Exact measurement records declared by the selected variant's measurement. */
+function validateMeasurements(declared, result, label, seen) {
+  const expected = declared ? [declared] : [];
+  ensure(Array.isArray(result.measurements), `${label}: measurements must be an array`);
+  ensure(result.measurements.length === expected.length,
+    `${label}: expected ${expected.length} measurement record(s), found ${result.measurements.length}`);
+  for (const measurement of result.measurements) {
+    validateFeatureMeasurement(measurement);
+    const spec = expected.find((entry) => entry.pair === measurement.pair && entry.state === measurement.state);
+    ensure(spec && measurement.preset === spec.preset && isDeepStrictEqual(measurement.features, spec.features),
+      `${label}: measurement differs from the declared ${spec?.pair ?? 'unknown'} ${spec?.state ?? ''} record`);
+    const key = `${measurement.pair}\0${measurement.state}`;
+    ensure(!seen.has(key), `${label}: duplicate measurement ${measurement.pair} ${measurement.state}`);
+    seen.set(key, measurement);
+  }
+}
+
+/** One managed job: direct result, provenance, captures, facts and measurements. */
+function validateJob(job, index, ctx, state) {
+  const label = `run job ${index}`;
+  exact(job, ['jobId', 'clientId', 'scenario', 'mode', 'result', 'error'], label);
+  ensure(nonblank(job.jobId) && nonblank(job.clientId), `${label}: managed job/client identity is missing`);
+  ensure(job.error === null, `${label}: ${job.error}`);
+  ensure(isRecord(job.result), `${label}: a direct GPU operation result is required`);
+  const key = `${job.scenario}\0${job.mode}`;
+  ensure(!state.jobs.has(key), `${label}: duplicate scenario/mode ${job.scenario}/${job.mode}`);
+  const rows = state.groups.get(key);
+  ensure(rows, `${label}: unexpected scenario/mode ${job.scenario}/${job.mode}`);
+  const result = job.result;
+  ensure(isDeepStrictEqual(result.provenance, {
+    selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
+    scenario: job.scenario, mode: job.mode,
+  }), `${label}: operation provenance differs from the frozen attempt`);
+  const scoped = `${label} (${job.scenario}/${job.mode})`;
+  validateProvenance(scoped, result);
+  validateJobErrors(scoped, result.errors);
+  ensure(isRecord(result.facts), `${scoped}: scene facts are missing`);
+  const readiness = result.facts.readiness;
+  ensure(readiness?.status === 'ready' && readiness.error === null,
+    `${scoped}: preparation is not ready (${readiness?.status ?? 'missing'}${readiness?.error ? `: ${readiness.error}` : ''})`);
+  const factNames = state.factNames.get(job.scenario);
+  ensure(Array.isArray(factNames), `${scoped}: scene ${job.scenario} has no factNames registry`);
+  ensure(Array.isArray(result.images), `${scoped}: operation returned no image inventory`);
+  ensure(result.images.length === rows.length,
+    `${scoped}: returned ${result.images.length} image(s) for ${rows.length} selected capture(s)`);
+  const captures = new Map();
+  for (const image of result.images) {
+    exact(image, ['id', 'filename', 'mime', 'data', 'observation'], `${scoped}: image`);
+    const row = rows.find((entry) => entry.id === image.id && entry.filename === image.filename);
+    ensure(row, `${scoped}: unexpected capture ${image.id} (${image.filename})`);
+    ensure(!captures.has(image.id), `${scoped}: duplicate capture ${image.id}`);
+    ensure(image.mime === 'image/png', `${scoped}: capture ${image.id} is not image/png`);
+    ensure(nonblank(image.observation), `${scoped}: capture ${image.id} has no observation`);
+    captures.set(image.id, { row, image, bytes: decodePng(image.data, `${scoped}: capture ${image.id}`) });
+  }
+  for (const row of rows) {
+    ensure(captures.has(row.id), `${scoped}: missing selected capture ${row.id}`);
+    validateRequiredFacts(row, result.facts, factNames);
+  }
+  const variant = sceneVariant(ctx.namespaces, job.scenario, job.mode, scoped);
+  validateMeasurements(variant.measurement ?? null, result, scoped, state.measurements);
+  state.jobs.set(key, { job, captures });
+}
+
+/** Run images must exactly cover the selected inventory and match the direct payloads. */
+function validateRunImages(ctx, run, state) {
+  ensure(run.images.length === ctx.inventory.length,
+    `run records ${run.images.length} image(s) for ${ctx.inventory.length} selected image(s)`);
+  const byId = new Map(), filenames = new Set();
+  for (const image of run.images) {
+    exact(image, ['id', 'filename', 'path', 'jobId', 'clientId', 'observation'], 'run image');
+    const row = ctx.inventory.find((entry) => entry.id === image.id && entry.filename === image.filename);
+    ensure(row, `run image ${image.id} is not a selected capture`);
+    ensure(!byId.has(image.id), `duplicate run image ${image.id}`);
+    ensure(!filenames.has(image.filename), `duplicate run image filename ${image.filename}`);
+    ensure(image.path === `images/${image.filename}`, `run image ${image.id} has an unexpected path`);
+    let capture = null;
+    for (const entry of state.jobs.values()) {
+      const candidate = entry.captures.get(image.id);
+      if (candidate && entry.job.jobId === image.jobId && entry.job.clientId === image.clientId) capture = candidate;
+    }
+    ensure(capture, `run image ${image.id} has no matching managed job attribution`);
+    ensure(capture.image.observation === image.observation,
+      `run image ${image.id} observation differs from the direct operation result`);
+    const file = containedPath(ctx.out, ctx.records.image(image.filename));
+    ensure(fs.existsSync(file) && fs.lstatSync(file).isFile(), `run image ${image.id} is missing at ${image.path}`);
+    ensure(fs.readFileSync(file).equals(capture.bytes),
+      `run image ${image.id} differs from the direct operation payload`);
+    byId.set(image.id, image);
+    filenames.add(image.filename);
+  }
+  for (const row of ctx.inventory) ensure(byId.has(row.id), `selected image ${row.id} is missing from the run`);
+  const imagesDirectory = containedPath(ctx.out, `${ctx.pointer.directory}/images`);
+  if (fs.existsSync(imagesDirectory)) {
+    for (const name of fs.readdirSync(imagesDirectory)) {
+      ensure(filenames.has(name), `unexpected capture file images/${name}`);
+    }
+  }
+}
+
+/** Every declared measurement pair must have been collected in both states. */
+function validatePairCoverage(ctx, state) {
+  const scenes = new Set(ctx.inventory.map((row) => row.scenario));
+  const declared = new Map();
+  for (const scenario of scenes) {
+    const namespace = ctx.namespaces.find((entry) => entry.default?.id === scenario);
+    for (const variant of namespace.default.variants) {
+      const measurement = variant.measurement;
+      if (!measurement) continue;
+      const states = declared.get(measurement.pair) ?? new Set();
+      states.add(measurement.state);
+      declared.set(measurement.pair, states);
+    }
+  }
+  for (const [pair, states] of declared) {
+    ensure(states.has('on') && states.has('off'), `measurement pair ${pair} does not declare both on and off states`);
+    ensure(state.measurements.has(`${pair}\0on`) && state.measurements.has(`${pair}\0off`),
+      `measurement pair ${pair} was not collected in both on and off states`);
+  }
+}
+
+function validateFreshRecord(ctx) {
+  ensure(ctx.attempt.status === 'passed' && ctx.attempt.error === null,
+    `attempt ${ctx.attempt.attemptId} is ${ctx.attempt.status}${ctx.attempt.error ? `: ${ctx.attempt.error}` : ''}: a completed GPU render is required`);
+  const runFile = containedPath(ctx.out, ctx.records.run);
+  ensure(fs.existsSync(runFile), `${runFile} is missing: render must complete before freshness`);
+  const run = readJsonRecord(runFile);
+  exact(run, RECORD_FIELDS.run, 'run record');
+  ensure(run.selectionId === ctx.selection.selectionId && run.attemptId === ctx.attempt.attemptId
+    && run.buildId === ctx.build.buildId && run.preparationId === ctx.build.preparationId,
+  'run identity differs from the frozen attempt');
+  ensure(nonblank(run.pageRef), 'run has no managed page reference');
+  ensure(run.status === 'passed', `run is ${run.status}${run.errors?.length ? `: ${run.errors.join('; ')}` : ''}`);
+  ensure(Array.isArray(run.errors) && run.errors.length === 0, `run errors: ${run.errors.join('; ')}`);
+  ensure(Array.isArray(run.jobs) && run.jobs.length > 0, 'run has no managed jobs');
+  ensure(Array.isArray(run.images), 'run has no image inventory');
+  const state = { groups: new Map(), jobs: new Map(), measurements: new Map(), factNames: new Map() };
+  for (const row of ctx.inventory) {
+    const key = `${row.scenario}\0${row.mode}`;
+    if (!state.groups.has(key)) state.groups.set(key, []);
+    state.groups.get(key).push(row);
+  }
+  ensure(run.jobs.length === state.groups.size,
+    `run has ${run.jobs.length} job(s) for ${state.groups.size} selected scenario/mode group(s)`);
+  for (const namespace of ctx.namespaces) state.factNames.set(namespace.default.id, namespace.factNames);
+  for (const [index, job] of run.jobs.entries()) validateJob(job, index, ctx, state);
+  ensure(state.jobs.size === state.groups.size, 'run is missing selected scenario/mode jobs');
+  validateRunImages(ctx, run, state);
+  validatePairCoverage(ctx, state);
+  return run;
+}
+
+function assertCurrentAttempt(ctx, run) {
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(ctx.out, 'current.json')), ctx.pointer),
+    'current pointer was superseded during freshness');
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(ctx.out, ctx.records.selection)), ctx.selection),
+    'frozen selection changed during freshness');
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(ctx.out, ctx.records.build)), ctx.build),
+    'frozen build changed during freshness');
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(ctx.out, ctx.records.attempt)), ctx.attempt),
+    'frozen attempt changed during freshness');
+  ensure(isDeepStrictEqual(readJsonRecord(containedPath(ctx.out, ctx.records.run)), run),
+    'run changed during freshness');
+}
+
+/** Verify the current attempt's actual GPU results and write attempt fresh.json. */
+export async function verifyFresh(page, out, stage) {
+  const ctx = await resolveAttempt(page, out, stage);
+  const record = {
+    selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
+    status: 'failed', errors: [],
+  };
+  let run = null;
+  try {
+    run = validateFreshRecord(ctx);
+    assertCurrentAttempt(ctx, run);
+    record.status = 'passed';
+  } catch (error) {
+    record.errors.push(message(error));
+  }
+  writeJsonRecord(containedPath(out, ctx.records.fresh), record);
+  ensure(record.status === 'passed', record.errors.join('\n'));
+  return { ...ctx, record, run };
+}
+
+export async function fresh(page, out, stage) {
+  return (await verifyFresh(page, out, stage)).record;
+}
+
+function judgeScore(text) {
+  for (const chunk of [text.trim(), ...text.split(/\r?\n/).reverse()]) {
+    if (!chunk.trim().startsWith('{')) continue;
+    try { const score = JSON.parse(chunk).score; if (typeof score === 'number' && Number.isFinite(score)) return score; }
+    catch { /* progress output */ }
+  }
+  const verdicts = [...text.matchAll(/\bJUDGE (?:PASS|FAIL): (\d+(?:\.\d+)?)\/10\b/g)];
+  if (verdicts.length) return Number(verdicts.at(-1)[1]);
+  const scores = [...text.matchAll(/(?<![-\w])score\W{0,4}(\d+(?:\.\d+)?)/gi)];
+  return scores.length ? Number(scores.at(-1)[1]) : null;
+}
+
+/** One judge process on one capture; no reference image is ever passed. */
+export function judgeCapture(capture, description) {
+  const client = process.env.NMC_JUDGE_CLIENT;
+  ensure(nonblank(client), 'NMC_JUDGE_CLIENT is missing');
+  return new Promise((resolveVerdict, rejectVerdict) => {
+    const child = spawn('python3', [client, capture, '--description', description, '--min-score', '6'],
+      { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+    child.on('error', (cause) => rejectVerdict(new Error(`judge process could not start: ${cause.message}`, { cause })));
+    child.on('close', (code, signal) => {
+      const output = [stdout, stderr].filter((text) => text.trim()).join('\n').trimEnd();
+      resolveVerdict({ exit: typeof code === 'number' ? code : -1, score: judgeScore(`${stdout}\n${stderr}`),
+        output: signal ? `${output}\njudge terminated by ${signal}`.trim() : output });
+    });
+  });
+}
+
+/** Judge every selected capture and retain every verdict before failing. */
+export async function judge(page, out, stage, options = {}) {
+  const runJudge = options.judge ?? judgeCapture;
+  ensure(typeof runJudge === 'function', 'judge runner must be a function');
+  const ctx = await resolveAttempt(page, out, stage);
+  const record = {
+    selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
+    images: [], status: 'failed', errors: [],
+  };
+  const write = () => writeJsonRecord(containedPath(out, ctx.records.judge), record);
+  let verified;
+  try {
+    verified = await verifyFresh(page, out, stage);
+  } catch (error) {
+    record.errors.push(message(error));
+    write();
+    throw error;
+  }
+  const images = new Map(verified.run.images.map((image) => [image.id, image]));
+  for (const row of verified.inventory) {
+    const capture = containedPath(out, verified.records.image(row.filename));
+    const entry = {
+      id: row.id, filename: row.filename, description: row.expectedVisibleBehavior, minScore: 6,
+      exit: -1, score: null, output: '', judgedAt: new Date().toISOString(),
+    };
+    try {
+      const image = images.get(row.id);
+      ensure(image && image.filename === row.filename, `selected image ${row.id} is missing from the run`);
+      ensure(fs.existsSync(capture) && fs.lstatSync(capture).isFile(), `capture ${row.filename} is missing`);
+      const verdict = await runJudge(capture, row.expectedVisibleBehavior);
+      ensure(isRecord(verdict), `judge returned no verdict for ${row.filename}`);
+      ensure(Number.isInteger(verdict.exit), `judge verdict for ${row.filename} has no exit code`);
+      ensure(typeof verdict.output === 'string', `judge verdict for ${row.filename} has no output`);
+      ensure(verdict.score === null || (typeof verdict.score === 'number' && Number.isFinite(verdict.score)),
+        `judge verdict for ${row.filename} has an invalid score`);
+      Object.assign(entry, { exit: verdict.exit, score: verdict.score, output: verdict.output });
+      ensure(entry.exit === 0, `judge exited ${entry.exit}: ${entry.output}`);
+      ensure(entry.score !== null, 'judge returned no parseable score verdict');
+      ensure(entry.score >= 6, `judge score ${entry.score} is below the minimum 6`);
+    } catch (error) {
+      if (!entry.output) entry.output = message(error);
+      record.errors.push(`${row.filename}: ${message(error)}`);
+    }
+    record.images.push(entry);
+    write();
+  }
+  try {
+    assertCurrentAttempt(verified, verified.run);
+    ensure(record.images.length === verified.inventory.length,
+      `judged ${record.images.length} of ${verified.inventory.length} selected images`);
+  } catch (error) {
+    record.errors.push(message(error));
+  }
+  record.status = record.errors.length === 0 ? 'passed' : 'failed';
+  write();
+  ensure(record.status === 'passed',
+    `image judgment failures (${record.errors.length}):\n${record.errors.join('\n')}`);
+  return record;
+}
+
 export function parseArgs(argv) {
   const { values, positionals } = parse({ args: argv, allowPositionals: true,
     options: { page: { type: 'string' }, out: { type: 'string' }, stage: { type: 'string' } } });
@@ -436,6 +795,12 @@ export async function main(argv = process.argv.slice(2)) {
   } else if (action === 'render') {
     const run = await render(page, out, stage);
     process.stdout.write(`sky-weather-job: render ${stage}: attempt ${run.attemptId}: ${run.status}\n`);
+  } else if (action === 'fresh') {
+    const record = await fresh(page, out, stage);
+    process.stdout.write(`sky-weather-job: fresh ${stage}: attempt ${record.attemptId}: ${record.status}\n`);
+  } else if (action === 'judge') {
+    const record = await judge(page, out, stage);
+    process.stdout.write(`sky-weather-job: judge ${stage}: ${record.images.length} image(s): ${record.status}\n`);
   } else {
     const attempt = await clean(page, out, stage);
     process.stdout.write(`sky-weather-job: clean ${stage}: attempt ${attempt.attemptId} at ${attempt.directory}\n`);

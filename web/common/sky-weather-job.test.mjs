@@ -6,7 +6,7 @@ import path from 'node:path';
 import childProcess from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
-import { check, select, clean, render, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
+import { check, select, clean, render, fresh, judge, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
 
 function scratch(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sky-job-'));
@@ -23,38 +23,86 @@ function put(root, name, text) {
 
 const foundation = { id: 'foundation-scene', milestone: 'foundation', file: 'scenes/foundation.mjs', filename: 'foundation-sky-and-sphere.png' };
 const atmosphere = { id: 'atmosphere-scene', milestone: 'atmosphere', file: 'scenes/atmosphere.mjs', filename: 'atmosphere-clear-day.png' };
+const paired = {
+  id: 'paired-scene', milestone: 'foundation', file: 'scenes/paired.mjs',
+  variants: [
+    { id: 'on', measurement: { pair: 'cloud-shadows', state: 'on', preset: 'fair', features: { shadows: true } } },
+    { id: 'off', measurement: { pair: 'cloud-shadows', state: 'off', preset: 'fair', features: { shadows: false } } },
+  ],
+  rows: [
+    { id: 'paired-on-image', mode: 'on', filename: 'paired-cloud-shadows-on.png', pair: 'cloud-shadows' },
+    { id: 'paired-off-image', mode: 'off', filename: 'paired-cloud-shadows-off.png', pair: 'cloud-shadows' },
+  ],
+};
+
+const DEFAULT_SELECTION = {
+  camera: { eye: [0, 1, 5], target: [0, 1, 0], fovYDeg: 60, near: 0.1, far: 100 },
+  subjects: [{ name: 'sphere', min: [-1, 0, -1], max: [1, 2, 1] }],
+};
+const DEFAULT_FACTS = ['snapshot:sky', 'runtime:passes', 'runtime:viewSizes', 'runtime:ready', 'assertion:sky-visible'];
 
 function sceneModule(scene) {
   const factNames = scene.factNames ?? ['sky-visible'];
-  const requiredFacts = scene.requiredFacts ?? ['snapshot:sky', 'runtime:passes', 'runtime:viewSizes', 'runtime:ready', 'assertion:sky-visible'];
+  const variants = scene.variants ?? [{ id: 'default' }];
+  const rows = scene.rows ?? [{ id: `${scene.id}-image`, mode: 'default', filename: scene.filename, pair: null }];
+  const inventory = rows.map((row) => ({
+    id: row.id,
+    criterionName: row.criterionName ?? 'Sky weather scene',
+    scenario: scene.id,
+    mode: row.mode,
+    filename: row.filename,
+    expectedVisibleBehavior: row.expectedVisibleBehavior ?? 'The accepted sky state renders above the ground receiver.',
+    requiredFacts: row.requiredFacts ?? scene.requiredFacts ?? DEFAULT_FACTS,
+    pair: row.pair ?? null,
+  }));
+  const definitions = variants.map((variant) => ({
+    id: variant.id,
+    description: variant.description ?? `${variant.id} state`,
+    selection: variant.selection ?? DEFAULT_SELECTION,
+    ...(variant.measurement ? { measurement: variant.measurement } : {}),
+  }));
   return `
 export const factNames = ${JSON.stringify(factNames)};
-export const inventory = [{
-  id: '${scene.id}-image',
-  criterionName: 'Sky weather scene',
-  scenario: '${scene.id}',
-  mode: 'default',
-  filename: '${scene.filename}',
-  expectedVisibleBehavior: 'The accepted sky state renders above the ground receiver.',
-  requiredFacts: ${JSON.stringify(requiredFacts)},
-  pair: null,
-}];
+export const inventory = ${JSON.stringify(inventory)};
 export async function observe() { return { sky: null, time: null, weather: null, diagnostics: null, assertions: [], edits: [] }; }
 export default {
   id: '${scene.id}',
   milestone: '${scene.milestone}',
   title: '${scene.id}',
   build() {},
-  variants: [{
-    id: 'default',
-    description: 'default state',
-    selection: {
-      camera: { eye: [0, 1, 5], target: [0, 1, 0], fovYDeg: 60, near: 0.1, far: 100 },
-      subjects: [{ name: 'sphere', min: [-1, 0, -1], max: [1, 2, 1] }],
-    },
-  }],
+  variants: ${JSON.stringify(definitions)},
 };
 `;
+}
+
+function factsRecord(overrides = {}) {
+  return {
+    sky: { model: 'physical' },
+    time: null,
+    weather: null,
+    diagnostics: null,
+    assertions: [{ name: 'sky-visible', passed: true, detail: 'The sky renders above the ground receiver.' }],
+    edits: [],
+    passes: [{ name: 'forward', role: 'pass', enabled: true, order: 60, required: true }],
+    viewSizes: [{ view: 0, width: 1280, height: 720 }],
+    readiness: { status: 'ready', stage: 'foundation', error: null },
+    ...overrides,
+  };
+}
+
+function measurementRecord(spec) {
+  return {
+    pair: spec.pair, state: spec.state, preset: spec.preset, features: { ...spec.features },
+    width: 1280, height: 720, warmup: 30, frames: 300,
+    frameTimesMs: Array.from({ length: 300 }, () => 10),
+    fps: 100, p50Ms: 10, p95Ms: 10, p99Ms: 10,
+  };
+}
+
+function variantOf(state, scenario, mode) {
+  const scene = state.scenes.find((entry) => entry.id === scenario);
+  const variants = scene?.variants ?? [{ id: 'default' }];
+  return variants.find((entry) => entry.id === mode) ?? null;
 }
 
 function fixture(t, options = {}) {
@@ -278,7 +326,9 @@ test('CLI parses the protocol and preserves selection', async (t) => {
   const out = path.join(state.root, 'out/sky-weather/foundation');
   assert.throws(() => parseArgs(['select', '--page', state.page, '--out', out]), /invalid stage/);
   assert.equal(parseArgs(['render', '--page', state.page, '--out', out, '--stage', 'foundation']).action, 'render');
-  assert.throws(() => parseArgs(['fresh', '--page', state.page, '--out', out, '--stage', 'foundation']), /usage/);
+  assert.equal(parseArgs(['fresh', '--page', state.page, '--out', out, '--stage', 'foundation']).action, 'fresh');
+  assert.equal(parseArgs(['judge', '--page', state.page, '--out', out, '--stage', 'foundation']).action, 'judge');
+  assert.throws(() => parseArgs(['verify', '--page', state.page, '--out', out, '--stage', 'foundation']), /usage/);
   assert.throws(() => parseArgs(['select', '--page', state.page, '--stage', 'foundation']), /usage/);
   assert.deepEqual(parseArgs(['check', '--page', state.page, '--stage', 'foundation']),
     { action: 'check', page: state.page, out: undefined, stage: 'foundation' });
@@ -287,7 +337,7 @@ test('CLI parses the protocol and preserves selection', async (t) => {
   assert.equal(readJsonRecord(containedPath(out, 'selection.json')).stage, 'foundation');
 });
 
-async function renderFixture(t, scenes = [foundation]) {
+async function renderFixture(t, scenes = [foundation], options = {}) {
   const state = fixture(t, { scenes });
   state.out = path.join(state.root, 'out/sky-weather', scenes.length > 1 ? 'atmosphere' : 'foundation');
   state.stage = scenes.length > 1 ? 'atmosphere' : 'foundation';
@@ -297,31 +347,48 @@ async function renderFixture(t, scenes = [foundation]) {
   state.read = (name) => readJsonRecord(containedPath(state.out, name));
   state.calls = [];
   state.transport = {
-    async publishGpuPage(page, options) {
+    async publishGpuPage(page, settings) {
       state.calls.push('publish');
       assert.equal(page, state.page);
-      assert.deepEqual(options, { timeoutMs: 300000 });
+      assert.deepEqual(settings, { timeoutMs: 300000 });
       return { pageRef: 'host-page' };
     },
-    async runGpuPageOp(pageRef, op, input, options) {
+    async runGpuPageOp(pageRef, op, input, settings) {
       state.calls.push(input.scenario);
       assert.equal(pageRef, 'host-page');
       assert.equal(op, 'run');
-      assert.equal(options.timeoutMs, 300000);
+      assert.equal(settings.timeoutMs, 300000);
       assert.equal(input.remainingMs, 270000);
       assert.equal(input.width, 1280);
       assert.equal(input.height, 720);
       const { width, height, remainingMs, ...provenance } = input;
-      return { jobId: `job-${state.calls.length}`, clientId: 'windows-client', result: {
-        provenance, json: { legacy: 'must not unwrap' }, nested: [1, { values: [false, null] }],
-        images: state.selection.inventory.filter((row) => row.scenario === input.scenario && row.mode === input.mode)
-          .map((row) => ({ id: row.id, filename: row.filename, mime: 'image/png',
-            data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jf1sAAAAASUVORK5CYII=',
-            observation: 'Actual capture' })),
+      const rows = state.selection.inventory.filter((row) => row.scenario === input.scenario && row.mode === input.mode);
+      const variant = variantOf(state, input.scenario, input.mode);
+      const result = {
+        provenance,
+        browser: {
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36',
+          platform: 'Win32', devicePixelRatio: 1,
+        },
+        adapter: {
+          vendor: 'nvidia', architecture: 'ampere', device: 'NVIDIA GeForce RTX 3090',
+          description: 'NVIDIA GeForce RTX 3090 (0x00002204)', isFallbackAdapter: false,
+        },
+        hardware: true,
+        json: { legacy: 'must not unwrap' }, nested: [1, { values: [false, null] }],
+        images: rows.map((row) => ({ id: row.id, filename: row.filename, mime: 'image/png',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jf1sAAAAASUVORK5CYII=',
+          observation: `Actual capture ${row.id}` })),
+        facts: state.factsFor ? state.factsFor(input, rows) : factsRecord(),
+        measurements: variant?.measurement ? [measurementRecord(variant.measurement)] : [],
         errors: { console: [], page: [], gpu: [] },
-      } };
+      };
+      return { jobId: `job-${state.calls.length}`, clientId: 'windows-client',
+        result: state.resultFor ? state.resultFor(result, input, rows) : result };
     },
   };
+  if (options.factsFor) state.factsFor = options.factsFor;
+  if (options.resultFor) state.resultFor = options.resultFor;
   state.render = () => render(state.page, state.out, state.stage, state.transport);
   return state;
 }
@@ -446,4 +513,275 @@ test('capture containment failures retain the direct result and other valid capt
   assert.equal(run.images.length, 1);
   assert.equal(run.jobs[0].result.images.length, 2);
   assert.equal(fs.existsSync(path.join(s.out, 'escape.png')), false);
+});
+
+async function freshFixture(t, scenes = [foundation], options = {}) {
+  const s = await renderFixture(t, scenes, options);
+  await s.render();
+  s.fresh = () => fresh(s.page, s.out, s.stage);
+  s.judge = (judgeOptions = {}) => judge(s.page, s.out, s.stage, judgeOptions);
+  return s;
+}
+
+function retamper(s, mutate) {
+  const run = s.read(s.records.run);
+  mutate(run);
+  writeJsonRecord(containedPath(s.out, s.records.run), run);
+}
+
+test('fresh verifies the frozen attempt and actual GPU results and writes fresh.json', async (t) => {
+  const s = await freshFixture(t);
+  const record = await s.fresh();
+  assert.deepEqual(Object.keys(record).sort(), [...RECORD_FIELDS.fresh].sort());
+  assert.equal(record.status, 'passed');
+  assert.deepEqual(record.errors, []);
+  assert.equal(record.selectionId, s.selection.selectionId);
+  assert.equal(record.attemptId, s.attempt.attemptId);
+  assert.equal(record.buildId, s.build.buildId);
+  assert.deepEqual(s.read(s.records.fresh), record);
+  assert.equal(s.read(s.records.attempt).status, 'passed');
+  assert.equal(s.read(s.records.run).status, 'passed');
+  await s.fresh();
+});
+
+test('fresh rejects superseded pointers, stale builds and altered frozen records', async (t) => {
+  const superseded = await freshFixture(t);
+  await clean(superseded.page, superseded.out, superseded.stage);
+  await assert.rejects(superseded.fresh(), /allocated|superseded|completed GPU render/);
+  const current = readJsonRecord(containedPath(superseded.out, 'current.json'));
+  assert.equal(superseded.read(attemptRecords(current.directory).fresh).status, 'failed');
+
+  const rebuilt = await freshFixture(t);
+  writeJsonRecord(containedPath(rebuilt.page, 'build.json'),
+    rewrite(rebuilt.build, (build) => { build.buildId = randomUUID(); }));
+  await assert.rejects(rebuilt.fresh(), /belongs to build|select again/);
+
+  const changed = await freshFixture(t);
+  put(changed.root, 'examples/sky-weather/lib/inventory.js', 'export const criteria = [2];\n');
+  await assert.rejects(changed.fresh(), /changed input/);
+
+  const frozenBuild = await freshFixture(t);
+  writeJsonRecord(containedPath(frozenBuild.out, frozenBuild.records.build),
+    rewrite(frozenBuild.build, (build) => { build.buildId = randomUUID(); }));
+  await assert.rejects(frozenBuild.fresh(), /frozen build differs/);
+
+  const failedAttempt = await freshFixture(t);
+  writeJsonRecord(containedPath(failedAttempt.out, failedAttempt.records.attempt),
+    rewrite(failedAttempt.attempt, (attempt) => { attempt.status = 'failed'; attempt.error = 'render failed'; }));
+  await assert.rejects(failedAttempt.fresh(), /failed: render failed|completed GPU render/);
+
+  const failedRun = await freshFixture(t);
+  retamper(failedRun, (run) => { run.status = 'failed'; run.errors = ['actual GPU failure']; });
+  await assert.rejects(failedRun.fresh(), /run is failed|actual GPU failure/);
+});
+
+test('fresh rejects missing, duplicate, unexpected and stale images', async (t) => {
+  const missing = await freshFixture(t);
+  retamper(missing, (run) => { run.images = []; });
+  await assert.rejects(missing.fresh(), /records 0 image|selected image/);
+
+  const duplicate = await freshFixture(t);
+  retamper(duplicate, (run) => { run.images.push({ ...run.images[0] }); });
+  await assert.rejects(duplicate.fresh(), /records 2 image|duplicate run image/);
+
+  const unexpected = await freshFixture(t);
+  retamper(unexpected, (run) => { run.images[0].id = 'unexpected-image'; });
+  await assert.rejects(unexpected.fresh(), /not a selected capture|selected image/);
+
+  const changedBytes = await freshFixture(t);
+  const changedImage = changedBytes.read(changedBytes.records.run).images[0];
+  const changedFile = containedPath(changedBytes.out, changedBytes.records.image(changedImage.filename));
+  const bytes = fs.readFileSync(changedFile);
+  bytes[bytes.length - 1] ^= 0xff;
+  fs.writeFileSync(changedFile, bytes);
+  await assert.rejects(changedBytes.fresh(), /differs from the direct operation payload/);
+
+  const absent = await freshFixture(t);
+  const absentImage = absent.read(absent.records.run).images[0];
+  fs.rmSync(containedPath(absent.out, absent.records.image(absentImage.filename)));
+  await assert.rejects(absent.fresh(), /is missing at/);
+
+  const stray = await freshFixture(t);
+  fs.writeFileSync(path.join(stray.out, stray.attempt.directory, 'images', 'stray-capture.png'), 'not selected');
+  await assert.rejects(stray.fresh(), /unexpected capture file images\/stray-capture\.png/);
+});
+
+test('fresh rejects incomplete jobs, unexpected captures and failed operation results', async (t) => {
+  const jobError = await freshFixture(t);
+  retamper(jobError, (run) => { run.jobs[0].error = 'operation failed'; });
+  await assert.rejects(jobError.fresh(), /operation failed/);
+
+  const nullResult = await freshFixture(t);
+  retamper(nullResult, (run) => { run.jobs[0].result = null; });
+  await assert.rejects(nullResult.fresh(), /direct GPU operation result/);
+
+  const shortResult = await freshFixture(t);
+  retamper(shortResult, (run) => { run.jobs[0].result.images = []; });
+  await assert.rejects(shortResult.fresh(), /returned 0 image|missing selected capture/);
+
+  const duplicateJob = await freshFixture(t, [foundation, atmosphere]);
+  retamper(duplicateJob, (run) => { run.jobs[1] = { ...run.jobs[0], jobId: 'job-copy' }; });
+  await assert.rejects(duplicateJob.fresh(), /duplicate scenario\/mode/);
+
+  const unexpectedJob = await freshFixture(t);
+  retamper(unexpectedJob, (run) => { run.jobs.push({ ...run.jobs[0], jobId: 'job-extra', scenario: 'other' }); });
+  await assert.rejects(unexpectedJob.fresh(), /job\(s\) for|unexpected scenario/);
+});
+
+test('fresh rejects software adapters, non-Windows browsers and console/page/GPU errors', async (t) => {
+  const cases = [
+    [(result) => { result.adapter.isFallbackAdapter = true; }, /physical GPU|fallback/],
+    [(result) => { result.hardware = false; }, /physical GPU|hardware/],
+    [(result) => { result.adapter.device = 'SwiftShader Device'; }, /software or fallback adapter/],
+    [(result) => { result.browser.userAgent = result.browser.userAgent.replace('Windows NT 10.0', 'X11; Linux x86_64'); }, /Chrome on Windows/],
+    [(result) => { result.browser.platform = 'Linux x86_64'; }, /Chrome on Windows/],
+    [(result) => { result.browser.devicePixelRatio = 2; }, /device pixel ratio/],
+    [(result) => { result.errors.console = ['uncaught error']; }, /console errors/],
+    [(result) => { result.errors.page = ['page error']; }, /page errors/],
+    [(result) => { result.errors.gpu = ['validation error']; }, /gpu errors/],
+  ];
+  for (const [mutate, expected] of cases) {
+    const s = await freshFixture(t);
+    retamper(s, (run) => mutate(run.jobs[0].result));
+    await assert.rejects(s.fresh(), expected);
+  }
+});
+
+test('fresh evaluates every requiredFacts selector against the scene registry', async (t) => {
+  const falseAssertion = await freshFixture(t);
+  retamper(falseAssertion, (run) => { run.jobs[0].result.facts.assertions[0].passed = false; });
+  await assert.rejects(falseAssertion.fresh(), /assertion:sky-visible/);
+
+  const missingAssertion = await freshFixture(t);
+  retamper(missingAssertion, (run) => { run.jobs[0].result.facts.assertions = []; });
+  await assert.rejects(missingAssertion.fresh(), /assertion:sky-visible/);
+
+  const nullSky = await freshFixture(t);
+  retamper(nullSky, (run) => { run.jobs[0].result.facts.sky = null; });
+  await assert.rejects(nullSky.fresh(), /snapshot:sky/);
+
+  const noPasses = await freshFixture(t);
+  retamper(noPasses, (run) => { run.jobs[0].result.facts.passes = []; });
+  await assert.rejects(noPasses.fresh(), /runtime:passes/);
+
+  const notReady = await freshFixture(t);
+  retamper(notReady, (run) => {
+    run.jobs[0].result.facts.readiness = { status: 'pending', stage: 'foundation', error: null };
+  });
+  await assert.rejects(notReady.fresh(), /not ready|pending/);
+});
+
+test('fresh validates declared pair coverage and exact measurement records', async (t) => {
+  const valid = await freshFixture(t, [paired]);
+  assert.equal(valid.read(valid.records.run).jobs.length, 2);
+  const record = await valid.fresh();
+  assert.equal(record.status, 'passed');
+
+  const missing = await freshFixture(t, [paired]);
+  retamper(missing, (run) => { run.jobs[0].result.measurements = []; });
+  await assert.rejects(missing.fresh(), /measurement record/);
+
+  const unexpected = await freshFixture(t);
+  retamper(unexpected, (run) => {
+    run.jobs[0].result.measurements = [measurementRecord({ pair: 'cloud-shadows', state: 'on', preset: 'fair', features: {} })];
+  });
+  await assert.rejects(unexpected.fresh(), /expected 0 measurement record/);
+
+  const corrupted = await freshFixture(t, [paired]);
+  retamper(corrupted, (run) => { run.jobs[0].result.measurements[0].p95Ms = 99; });
+  await assert.rejects(corrupted.fresh(), /measurement\.p95Ms|p95Ms/);
+
+  const uncovered = await freshFixture(t, [{ ...paired, rows: [paired.rows[0]] }]);
+  await assert.rejects(uncovered.fresh(), /not collected in both on and off states/);
+});
+
+function judgeStub(t, source) {
+  const directory = scratch(t);
+  const script = path.join(directory, 'judge.py');
+  const calls = path.join(directory, 'calls.txt');
+  fs.writeFileSync(script, source);
+  const previous = { client: process.env.NMC_JUDGE_CLIENT, calls: process.env.JUDGE_CALLS };
+  process.env.NMC_JUDGE_CLIENT = script;
+  process.env.JUDGE_CALLS = calls;
+  t.after(() => {
+    if (previous.client === undefined) delete process.env.NMC_JUDGE_CLIENT;
+    else process.env.NMC_JUDGE_CLIENT = previous.client;
+    if (previous.calls === undefined) delete process.env.JUDGE_CALLS;
+    else process.env.JUDGE_CALLS = previous.calls;
+  });
+  return calls;
+}
+
+const PASSING_JUDGE = [
+  'import os, sys',
+  'open(os.environ["JUDGE_CALLS"], "a").write(" ".join(sys.argv[1:]) + "\\n")',
+  'print("JUDGE PASS: 8/10")',
+].join('\n');
+
+test('judge scores every selected capture without a reference image', async (t) => {
+  const s = await freshFixture(t);
+  const calls = judgeStub(t, PASSING_JUDGE);
+  const record = await s.judge();
+  assert.deepEqual(Object.keys(record).sort(), [...RECORD_FIELDS.judge].sort());
+  assert.equal(record.status, 'passed');
+  assert.deepEqual(record.errors, []);
+  assert.equal(record.images.length, 1);
+  const [image] = record.images;
+  assert.equal(image.id, 'foundation-scene-image');
+  assert.equal(image.filename, 'foundation-sky-and-sphere.png');
+  assert.equal(image.description, 'The accepted sky state renders above the ground receiver.');
+  assert.equal(image.minScore, 6);
+  assert.equal(image.exit, 0);
+  assert.equal(image.score, 8);
+  assert.match(image.output, /JUDGE PASS: 8\/10/);
+  assert.equal(new Date(image.judgedAt).toISOString(), image.judgedAt);
+  assert.deepEqual(s.read(s.records.judge), record);
+  assert.equal(s.read(s.records.fresh).status, 'passed');
+  const lines = fs.readFileSync(calls, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /--description The accepted sky state renders above the ground receiver\./);
+  assert.match(lines[0], /--min-score 6/);
+  assert.doesNotMatch(lines[0], /--reference/);
+});
+
+test('judge retains one failed image verdict among passes before failing', async (t) => {
+  const s = await freshFixture(t, [foundation, atmosphere]);
+  const calls = judgeStub(t, [
+    'import os, sys',
+    'open(os.environ["JUDGE_CALLS"], "a").write(" ".join(sys.argv[1:]) + "\\n")',
+    'if os.path.basename(sys.argv[1]) == "atmosphere-clear-day.png":',
+    '    print("JUDGE FAIL: 4/10")',
+    '    sys.exit(1)',
+    'print("JUDGE PASS: 9/10")',
+  ].join('\n'));
+  await assert.rejects(s.judge(), /image judgment failures/);
+  const record = s.read(s.records.judge);
+  assert.deepEqual(Object.keys(record).sort(), [...RECORD_FIELDS.judge].sort());
+  assert.equal(record.status, 'failed');
+  assert.equal(record.images.length, 2);
+  const failed = record.images.find((image) => image.filename === 'atmosphere-clear-day.png');
+  const passed = record.images.find((image) => image.filename === 'foundation-sky-and-sphere.png');
+  assert.equal(failed.exit, 1);
+  assert.equal(failed.score, 4);
+  assert.match(failed.output, /JUDGE FAIL: 4\/10/);
+  assert.equal(failed.minScore, 6);
+  assert.equal(passed.exit, 0);
+  assert.equal(passed.score, 9);
+  assert.match(passed.output, /JUDGE PASS: 9\/10/);
+  assert.equal(record.errors.length, 1);
+  assert.match(record.errors[0], /atmosphere-clear-day\.png/);
+  assert.equal(s.read(s.records.fresh).status, 'passed');
+  assert.equal(fs.readFileSync(calls, 'utf8').trim().split('\n').length, 2);
+});
+
+test('judge refuses stale evidence and records the freshness failure', async (t) => {
+  const s = await freshFixture(t);
+  retamper(s, (run) => { run.jobs[0].result.facts.assertions[0].passed = false; });
+  const calls = judgeStub(t, PASSING_JUDGE);
+  await assert.rejects(s.judge(), /assertion:sky-visible/);
+  const record = s.read(s.records.judge);
+  assert.equal(record.status, 'failed');
+  assert.deepEqual(record.images, []);
+  assert.match(record.errors[0], /assertion:sky-visible/);
+  assert.equal(fs.existsSync(calls), false);
 });
