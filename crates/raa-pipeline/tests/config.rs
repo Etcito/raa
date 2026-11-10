@@ -458,6 +458,133 @@ fn prepass_forward_tonemap_keep_their_order_and_tonemap_runs_last() {
     assert_eq!(names(&other.passes()), ["forward"]);
 }
 
+/// The P2 sky passes, added out of order; then the declared orders sort them.
+fn add_sky_passes(config: &mut PipelineConfig, log: &Log) {
+    for (name, order) in [
+        ("sky.cloud-screen", 55),
+        ("sky.env", 10),
+        ("sky.cloud-lighting", 8),
+        ("sky.atmosphere", 5),
+    ] {
+        config
+            .add(Mock::boxed(name, order, false, log))
+            .expect("added");
+    }
+}
+
+const SKY_DEFAULT_ORDER: [&str; 10] = [
+    "sky.atmosphere",
+    "sky.cloud-lighting",
+    "sky.env",
+    "shadow.csm",
+    "prepass",
+    "ao.gtao",
+    "sky.cloud-screen",
+    "forward",
+    "bloom",
+    "tonemap",
+];
+
+#[test]
+fn sky_passes_accept_default_and_override_orders() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_passes(&mut config, &log);
+    add_sky_passes(&mut config, &log);
+    assert_eq!(names(&config.passes()), SKY_DEFAULT_ORDER);
+
+    // an override may move any pass as long as the four sky constraints still hold
+    let override_order = [
+        "sky.atmosphere",
+        "sky.cloud-lighting",
+        "sky.env",
+        "prepass",
+        "shadow.csm",
+        "sky.cloud-screen",
+        "ao.gtao",
+        "forward",
+        "bloom",
+        "tonemap",
+    ];
+    config.set_order(&override_order).expect("valid override");
+    assert_eq!(names(&config.passes()), override_order);
+    // the sky passes keep their declared orders; only the execution order changed
+    let orders: Vec<(String, u32)> = config
+        .passes()
+        .into_iter()
+        .map(|p| (p.name, p.order))
+        .collect();
+    let expected = [
+        ("sky.atmosphere", 5),
+        ("sky.cloud-lighting", 8),
+        ("sky.env", 10),
+        ("prepass", 30),
+        ("shadow.csm", 20),
+        ("sky.cloud-screen", 55),
+        ("ao.gtao", 40),
+        ("forward", 60),
+        ("bloom", 120),
+        ("tonemap", 200),
+    ]
+    .map(|(name, order)| (name.to_string(), order));
+    assert_eq!(orders, expected);
+}
+
+#[test]
+fn each_inverted_sky_pair_is_refused_atomically() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_passes(&mut config, &log);
+    add_sky_passes(&mut config, &log);
+
+    for (first, second) in [
+        ("sky.atmosphere", "sky.cloud-lighting"),
+        ("sky.cloud-lighting", "sky.env"),
+        ("prepass", "sky.cloud-screen"),
+        ("sky.cloud-screen", "forward"),
+    ] {
+        let mut order = SKY_DEFAULT_ORDER;
+        let a = order.iter().position(|n| *n == first).expect("present");
+        let b = order.iter().position(|n| *n == second).expect("present");
+        order.swap(a, b);
+        assert_refused(config.set_order(&order), "pipeline.required_order");
+        assert_eq!(
+            names(&config.passes()),
+            SKY_DEFAULT_ORDER,
+            "the `{second}` before `{first}` override left the order unchanged"
+        );
+    }
+
+    // adding a sky pass where its declared order inverts a present pair is refused and
+    // nothing is half-added
+    let mut partial = PipelineConfig::new();
+    for (name, order) in [("sky.atmosphere", 5), ("sky.env", 10)] {
+        partial
+            .add(Mock::boxed(name, order, false, &log))
+            .expect("added");
+    }
+    assert_refused(
+        partial.add(Mock::boxed("sky.cloud-lighting", 12, false, &log)),
+        "pipeline.required_order",
+    );
+    assert_eq!(names(&partial.passes()), ["sky.atmosphere", "sky.env"]);
+    partial
+        .add(Mock::boxed("sky.cloud-lighting", 8, false, &log))
+        .expect("the declared order fits");
+    assert_eq!(
+        names(&partial.passes()),
+        ["sky.atmosphere", "sky.cloud-lighting", "sky.env"]
+    );
+
+    // a lone sky pass is accepted: a pair only constrains when both names are present
+    let mut lone = PipelineConfig::new();
+    lone.add(Mock::boxed("sky.env", 10, false, &log))
+        .expect("a lone sky.env has no pair to invert");
+    lone.add(Mock::boxed("sky.atmosphere", 12, false, &log))
+        .expect("atmosphere and env alone keep no pair");
+    assert_eq!(names(&lone.passes()), ["sky.env", "sky.atmosphere"]);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu {
     use super::*;

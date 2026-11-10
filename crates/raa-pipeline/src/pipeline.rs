@@ -27,15 +27,27 @@ const TILE_DEPENDENCIES: [(&str, &str); 3] = [
     ("light.tiles", "forward"),
 ];
 
+/// S12 P2 sky dependencies: `sky.atmosphere` before `sky.cloud-lighting` before `sky.env`,
+/// and `prepass` before `sky.cloud-screen` before `forward`. Every pair present in a sequence
+/// keeps this order; a missing pass removes only its own pairs.
+const SKY_DEPENDENCIES: [(&str, &str); 4] = [
+    ("sky.atmosphere", "sky.cloud-lighting"),
+    ("sky.cloud-lighting", "sky.env"),
+    ("prepass", "sky.cloud-screen"),
+    ("sky.cloud-screen", "forward"),
+];
+
 fn refusal(code: &'static str, message: String) -> RaaError {
     RaaError::FrameGraph { code, message }
 }
 
 /// Refuses a sequence where `prepass`, `forward` and `tonemap` (those present) are out of
-/// order, an HDR pass runs after `tonemap`, or the order-35 `light.tiles` pass is not after
-/// `prepass` and before `ao.gtao`/`forward` (`pipeline.required_order`).
+/// order, an HDR pass runs after `tonemap`, the order-35 `light.tiles` pass is not after
+/// `prepass` and before `ao.gtao`/`forward`, or the P2 sky passes break
+/// `sky.atmosphere` < `sky.cloud-lighting` < `sky.env` or
+/// `prepass` < `sky.cloud-screen` < `forward` (`pipeline.required_order`).
 fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
-    for (before, after) in TILE_DEPENDENCIES {
+    for (before, after) in TILE_DEPENDENCIES.into_iter().chain(SKY_DEPENDENCIES) {
         let (Some(before_at), Some(after_at)) = (
             names.iter().position(|n| *n == before),
             names.iter().position(|n| *n == after),
@@ -951,6 +963,17 @@ mod tests {
         assert!(check_required_order(&["a", "prepass", "b", "forward", "tonemap"]).is_ok());
         assert!(check_required_order(&["forward", "x"]).is_ok());
         assert!(check_required_order(&["prepass", "light.tiles", "ao.gtao", "forward"]).is_ok());
+        assert!(
+            check_required_order(&[
+                "sky.atmosphere",
+                "sky.cloud-lighting",
+                "sky.env",
+                "prepass",
+                "sky.cloud-screen",
+                "forward",
+            ])
+            .is_ok()
+        );
         for names in [
             &["forward", "prepass"][..],
             &["tonemap", "forward"][..],
@@ -958,6 +981,10 @@ mod tests {
             &["light.tiles", "prepass"][..],
             &["ao.gtao", "light.tiles"][..],
             &["forward", "light.tiles"][..],
+            &["sky.cloud-lighting", "sky.atmosphere"][..],
+            &["sky.env", "sky.cloud-lighting"][..],
+            &["sky.cloud-screen", "prepass"][..],
+            &["forward", "sky.cloud-screen"][..],
         ] {
             let err = check_required_order(names).expect_err("refused");
             assert_eq!(err.code(), "pipeline.required_order", "{names:?}");
