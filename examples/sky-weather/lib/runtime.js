@@ -173,6 +173,7 @@ export function createSkyPageRunner(options) {
   let running = false;
   let disposed = false;
   let restoreGpu = null;
+  let deviceAdapter = null;
   let pageListening = false;
 
   const onWindowError = event => {
@@ -203,6 +204,15 @@ export function createSkyPageRunner(options) {
       const requestDevice = adapter.requestDevice.bind(adapter);
       adapter.requestDevice = async deviceDescriptor => {
         const device = await requestDevice(deviceDescriptor);
+        // wgpu 30 retains description but drops the browser's vendor/architecture.
+        // Chrome may leave description blank. Preserve the SAME adapter that
+        // created the Engine device; a separate request is not its provenance.
+        const info = adapter.info;
+        if (info) deviceAdapter = adapterFacts({
+          vendor: info.vendor, architecture: info.architecture,
+          device: info.device, description: info.description,
+          isFallbackAdapter: info.isFallbackAdapter ?? adapter.isFallbackAdapter,
+        });
         if (device && typeof device.addEventListener === 'function') {
           device.addEventListener('uncapturederror', event => {
             const error = event && event.error !== undefined ? event.error : event;
@@ -258,6 +268,7 @@ export function createSkyPageRunner(options) {
     }
     setCanvasSize(canvas, width, height);
     const module = await loadModule();
+    deviceAdapter = null;
     const created = await module.createEngine(canvas, { ...(scene.engine ?? {}), ...(variant.engine ?? {}) });
     if (disposed) {
       if (created && typeof created.dispose === 'function') created.dispose();
@@ -331,6 +342,7 @@ export function createSkyPageRunner(options) {
           const target = await createEngineFor(selection.scene, selection.variant, input.width, input.height);
           const stats = target.stats();
           if (!record(stats)) fail('engine.stats() must return frame statistics');
+          const adapter = deviceAdapter ?? adapterFacts(stats.adapter);
           checkBudget(budget, 'Engine creation');
           await selection.scene.build(target, options.lib, selection.variant);
           checkBudget(budget, 'scene preparation');
@@ -361,8 +373,10 @@ export function createSkyPageRunner(options) {
               mode: input.mode,
             },
             browser: browserFacts(),
-            adapter: adapterFacts(stats.adapter),
-            hardware: stats.hardware === true,
+            adapter,
+            hardware: stats.hardware === true && !adapter.isFallbackAdapter &&
+              ![adapter.vendor, adapter.architecture, adapter.device, adapter.description].some(value =>
+                /software|swiftshader|llvmpipe|lavapipe|softpipe|fallback|basic render|microsoft basic|warp\b/i.test(value)),
             images: selection.rows.map(row => ({
               id: row.id,
               filename: row.filename,

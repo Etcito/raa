@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import childProcess from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
+import { createSkyPageRunner } from '../../examples/sky-weather/lib/runtime.js';
 import { check, select, clean, render, fresh, judge, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
 
 function scratch(t) {
@@ -542,6 +544,80 @@ test('fresh verifies the frozen attempt and actual GPU results and writes fresh.
   assert.equal(s.read(s.records.attempt).status, 'passed');
   assert.equal(s.read(s.records.run).status, 'passed');
   await s.fresh();
+});
+
+test('creating adapter identity propagates from the page through render records to fresh', async (t) => {
+  const hardware = { vendor: 'nvidia', architecture: 'ampere', device: '', description: '', isFallbackAdapter: false };
+  for (const [info, expectedError] of [
+    [hardware, null],
+    [{ ...hardware, vendor: '', architecture: '' }, /adapter identity is blank/],
+    [{ ...hardware, isFallbackAdapter: true }, /physical GPU/],
+    [{ ...hardware, description: 'SwiftShader' }, /physical GPU|software/],
+  ]) await t.test(expectedError?.source ?? 'physical GPU', async (t) => {
+    const s = await renderFixture(t);
+    const originalOp = s.transport.runGpuPageOp;
+    let requests = 0;
+    const gpu = {
+      async requestAdapter() {
+        requests++;
+        return {
+          // WebIDL identity fields are prototype accessors, not own properties.
+          info: Object.create(Object.defineProperties({}, Object.fromEntries(
+            Object.entries(info).map(([key, value]) => [key, { get: () => value }]),
+          ))),
+          async requestDevice() { return { addEventListener() {} }; },
+        };
+      },
+    };
+    const globals = {
+      navigator: { gpu, userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/156.0.0.0', platform: 'Win32' },
+      devicePixelRatio: 1,
+      requestAnimationFrame() {}, cancelAnimationFrame() {},
+    };
+    for (const [key, value] of Object.entries(globals)) {
+      const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+      Object.defineProperty(globalThis, key, { configurable: true, value });
+      t.after(() => {
+        if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+        else delete globalThis[key];
+      });
+    }
+    s.transport.runGpuPageOp = async (...args) => {
+      const reply = await originalOp(...args);
+      const namespace = await import(pathToFileURL(path.join(s.page, foundation.file)).href);
+      const context = { drawImage() {}, fillRect() {}, fillText() {} };
+      const canvas = { ownerDocument: { createElement: () => ({
+        getContext: () => context,
+        toDataURL: () => `data:image/png;base64,${reply.result.images[0].data}`,
+      }) } };
+      const runner = createSkyPageRunner({
+        canvas, status: { textContent: '' }, lib: {},
+        scenes: new Map([[foundation.id, { ...namespace, observe: async () => factsRecord() }]]),
+        load: async () => ({ createEngine: async () => {
+          await (await gpu.requestAdapter()).requestDevice();
+          return {
+            resize() {}, render() {}, dispose() {}, passes: () => factsRecord().passes,
+            stats: () => ({ adapter: { vendor: '', architecture: '', device: '', description: '', isFallbackAdapter: false }, hardware: true }),
+          };
+        } }),
+      });
+      try { reply.result = await runner.run(args[2]); }
+      finally { runner.dispose(); }
+      return reply;
+    };
+    const run = await s.render();
+    assert.equal(requests, 1, 'evidence must use the adapter that created the engine device');
+    assert.deepEqual(run.jobs[0].result.adapter, info);
+    assert.equal(run.jobs[0].result.hardware, !info.isFallbackAdapter && info.description !== 'SwiftShader');
+    assert.deepEqual(s.read(s.records.result(0)).adapter, info);
+    assert.deepEqual(s.read(s.records.run).jobs[0].result.adapter, info);
+    if (expectedError) {
+      await assert.rejects(fresh(s.page, s.out, s.stage), expectedError);
+      assert.equal(s.read(s.records.fresh).status, 'failed');
+    } else {
+      assert.equal((await fresh(s.page, s.out, s.stage)).status, 'passed');
+    }
+  });
 });
 
 test('fresh rejects superseded pointers, stale builds and altered frozen records', async (t) => {
