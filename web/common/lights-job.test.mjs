@@ -29,6 +29,8 @@ function writePage(t, defs, base = tmpdir()) {
     return { id: def.id, milestone: def.milestone, file };
   });
   writeFileSync(join(page, 'scenes.json'), JSON.stringify(index));
+  writeFileSync(join(page, 'nmc.gpu.json'), JSON.stringify({ page: 'index.html', ops: ['render'] }));
+  writeFileSync(join(page, 'index.html'), '<!doctype html><script>window.nmcGpu={ops:{}}</script>\n');
   return { root, page, out: join(root, 'out/lights') };
 }
 

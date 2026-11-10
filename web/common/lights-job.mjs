@@ -5,10 +5,10 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { spawn, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { inflateSync } from 'node:zlib';
-import { setTimeout as delay } from 'node:timers/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs as parse } from 'node:util';
+import { publishGpuPage, runGpuPageOp } from './gpu-job.mjs';
 
 const OPS = ['select', 'check', 'clean', 'render', 'fresh', 'judge'];
 const USAGE = 'usage: node web/common/lights-job.mjs <select|check|clean|render|fresh|judge> --page dist/lights [--out out/lights] [--milestone mNN]';
@@ -250,64 +250,6 @@ const waitSeconds = () => {
   return n;
 };
 
-async function managedClient(waitS) {
-  const client = process.env.NMC_GPU_CLIENT;
-  ensure(nonblank(client), 'NMC_GPU_CLIENT is missing: managed Windows Chrome is required');
-  const until = Date.now() + waitS * 1000;
-  while (!existsSync(client) && Date.now() < until) await delay(Math.min(100, Math.max(1, until - Date.now())));
-  ensure(existsSync(client) && lstatSync(client).isFile(), `NMC_GPU_CLIENT unavailable after ${waitS}s`);
-  return client;
-}
-
-// The installed CLI reports its queue/running transitions on stderr. Its running
-// clock is separate from slot availability; never pass a wall-clock spawn timeout.
-function clientCall(client, args, waitS, gpu = false) {
-  return new Promise((resolveCall, reject) => {
-    const child = spawn(process.execPath, [client, ...args], { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
-    let stdout = '', stderr = '', lineBuffer = '', failure = null, running = false;
-    const stop = (message) => { failure ??= new Error(message); child.kill('SIGKILL'); };
-    let timer = setTimeout(() => stop(`managed client ${gpu ? 'GPU waiting' : 'publication'} timeout after ${waitS}s`), waitS * 1000);
-    child.stdout.on('data', (data) => { stdout += data; if (stdout.length > 1024 * 1024) stop('managed client stdout too large'); });
-    child.stderr.on('data', (data) => {
-      stderr = (stderr + data).slice(-16000);
-      lineBuffer += data;
-      const lines = lineBuffer.split(/\r?\n/);
-      lineBuffer = lines.pop().slice(-16000);
-      for (const line of lines) {
-        if (gpu && /^GPU job .+: running \(/.test(line) && !running) {
-          running = true;
-          clearTimeout(timer);
-          timer = setTimeout(() => stop('GPU job running timeout after 300s'), 300000);
-        } else if (gpu && /^GPU job .+: done$/.test(line)) {
-          // Downloads happen after the job finishes. Do not truncate a successful
-          // job just because its separate file transfer crosses the running limit.
-          clearTimeout(timer);
-          timer = setTimeout(() => stop('managed output download timeout'), waitS * 1000);
-        }
-      }
-    });
-    child.on('error', (cause) => { failure = new Error(`managed client could not start: ${cause.message}`, { cause }); });
-    child.on('close', (code, signal) => {
-      clearTimeout(timer);
-      if (failure) return reject(failure);
-      const token = process.env.NMC_GPU_TOKEN;
-      const details = token ? stderr.split(token).join('[redacted]') : stderr;
-      if (code !== 0) return reject(new Error(`managed client failed (${code ?? signal}): ${details.trim()}`));
-      resolveCall(stdout);
-    });
-  });
-}
-
-function pageReference(stdout) {
-  const pick = (o) => [o, o?.result, o?.data].map((v) => v?.page_ref ?? v?.pageRef).find(nonblank);
-  for (const text of [stdout, ...stdout.split(/\r?\n/)]) {
-    try { const ref = pick(JSON.parse(text)); if (ref) return ref.trim(); } catch { /* CLI progress line */ }
-    const match = /^\s*(?:page_ref|pageRef)\s*[:=]\s*["']?([^\s"']+)["']?\s*$/.exec(text);
-    if (match) return match[1];
-  }
-  throw new Error('managed publication returned no page_ref');
-}
-
 function validateRun(op, pair, measured) {
   ensure(op?.scene === pair.scene && op?.variant === pair.variant, `wrong scene/variant: expected ${pair.scene}/${pair.variant}`);
   ensure(op.nonEmpty === true, `${pair.scene}/${pair.variant}: nonEmpty must be true`);
@@ -449,9 +391,9 @@ async function renderFor(page, out, milestone) {
   mkdirSync(inside(out, attempt), { recursive: true });
   jsonWrite(inside(out, '.lights-current.json'), { attempt });
   const build = buildIdentity(page);
-  const waitS = waitSeconds();
-  const client = await managedClient(waitS);
-  const pageRef = pageReference(await clientCall(client, ['publish', resolve(page)], waitS));
+  // Publication is a bounded work step; the queue allowance stays separate.
+  // The floor absorbs managed-client start-up without weakening the queue test.
+  const pageRef = (await publishGpuPage(page, { timeoutMs: Math.max(1000, Math.round(waitSeconds() * 1000)) })).pageRef;
   // Before a producer returns, the only host-issued context is its publication.
   // One real managed job identifies the complete selection, never a clock
   // or an assumed NMC_RUN_ID. Its result remains alongside the pair receipts.
@@ -462,25 +404,23 @@ async function renderFor(page, out, milestone) {
     ]), commit: build.commit, startedAt: new Date().toISOString(), completedAt: null };
   jsonWrite(inside(out, 'run.json'), record);
   try {
-    const input = inside(out, `${attempt}/input.json`);
     const batchDir = inside(out, attempt);
-    jsonWrite(input, { args: { milestone, pairs: pairs.map(({ scene, variant }) => ({ scene, variant })) } });
-    await clientCall(client, ['render', input, '--page-ref', pageRef, '-o', batchDir], waitS, true);
-    const batch = readJson(join(batchDir, 'result.json'), 'managed job must return the complete selection');
-    ensure(hostId(batch.job_id) && hostId(batch.client_id), 'missing managed job/client provenance');
-    record.runId = String(batch.job_id);
-    ensure(Array.isArray(batch.result?.steps) && Array.isArray(batch.result?.diagnostics), 'missing whole-flow diagnostics/steps');
-    const errors = batch.result.diagnostics.map((d) => `${d.pair?.scene ?? 'page'}/${d.pair?.variant ?? ''} ${d.kind}: ${d.message}`);
-    if (batch.result.steps.length !== pairs.length) errors.push('whole-flow step count differs from selection');
+    const { jobId, clientId, result } = await runGpuPageOp(pageRef, 'render',
+      { args: { milestone, pairs: pairs.map(({ scene, variant }) => ({ scene, variant })) } },
+      { timeoutMs: 300000, out: batchDir });
+    record.runId = jobId;
+    ensure(Array.isArray(result?.steps) && Array.isArray(result?.diagnostics), 'missing whole-flow diagnostics/steps');
+    const errors = result.diagnostics.map((d) => `${d.pair?.scene ?? 'page'}/${d.pair?.variant ?? ''} ${d.kind}: ${d.message}`);
+    if (result.steps.length !== pairs.length) errors.push('whole-flow step count differs from selection');
     for (const pair of pairs) {
       const namespace = `${attempt}/s-${encodeURIComponent(pair.scene)}/${pair.variant}`;
       const dir = inside(out, namespace);
       try {
-        const steps = batch.result.steps.filter((s) => s.scene === pair.scene && s.variant === pair.variant);
+        const steps = result.steps.filter((s) => s.scene === pair.scene && s.variant === pair.variant);
         ensure(steps.length === 1, `${pair.scene}/${pair.variant}: missing/duplicate whole-flow step`);
         ensure(!steps[0].error, steps[0].error);
         mkdirSync(dir, { recursive: true });
-        jsonWrite(join(dir, 'result.json'), { job_id: batch.job_id, client_id: batch.client_id, result: steps[0].result });
+        jsonWrite(join(dir, 'result.json'), { job_id: jobId, client_id: clientId, result: steps[0].result });
         const { doc, files } = await pairOutput(page, dir, pair, milestone);
         jsonWrite(join(dir, 'completion.json'), { complete: true, pageRef, buildId: record.buildId, runId: record.runId, milestone,
           commit: record.commit, scene: pair.scene, variant: pair.variant, jobId: doc.job_id, clientId: doc.client_id, files });
