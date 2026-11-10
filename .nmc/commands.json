@@ -178,5 +178,157 @@
     "after": [
       "m3-cargo-check"
     ]
+  },
+  {
+    "name": "p2-sky-build",
+    "command": "bash scripts/build-sky-weather.sh",
+    "timeout_s": 1800
+  },
+  {
+    "name": "p2-sky-foundation-check",
+    "command": "node web/common/sky-weather-job.mjs check --page dist/sky-weather --out out/sky-weather/foundation --stage foundation",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-build"
+    ]
+  },
+  {
+    "name": "p2-sky-foundation-select",
+    "command": "node web/common/sky-weather-job.mjs select --page dist/sky-weather --out out/sky-weather/foundation --stage foundation",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-foundation-check"
+    ]
+  },
+  {
+    "name": "p2-sky-foundation-clean",
+    "command": "node web/common/sky-weather-job.mjs clean --page dist/sky-weather --out out/sky-weather/foundation --stage foundation",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-foundation-select"
+    ]
+  },
+  {
+    "name": "p2-sky-foundation-render",
+    "command": "node web/common/sky-weather-job.mjs render --page dist/sky-weather --out out/sky-weather/foundation --stage foundation",
+    "timeout_s": 900,
+    "after": [
+      "p2-sky-foundation-clean"
+    ]
+  },
+  {
+    "name": "p2-sky-foundation-fresh",
+    "command": "node web/common/sky-weather-job.mjs fresh --page dist/sky-weather --out out/sky-weather/foundation --stage foundation",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-foundation-render"
+    ]
+  },
+  {
+    "name": "p2-sky-foundation-judge",
+    "command": "node web/common/sky-weather-job.mjs judge --page dist/sky-weather --out out/sky-weather/foundation --stage foundation",
+    "timeout_s": 600,
+    "after": [
+      "p2-sky-foundation-render",
+      "p2-sky-foundation-fresh"
+    ]
+  },
+  {
+    "name": "p2-sky-atmosphere-check",
+    "command": "node web/common/sky-weather-job.mjs check --page dist/sky-weather --out out/sky-weather/atmosphere --stage atmosphere",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-build"
+    ]
+  },
+  {
+    "name": "p2-sky-atmosphere-select",
+    "command": "node web/common/sky-weather-job.mjs select --page dist/sky-weather --out out/sky-weather/atmosphere --stage atmosphere",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-atmosphere-check"
+    ]
+  },
+  {
+    "name": "p2-sky-atmosphere-clean",
+    "command": "node web/common/sky-weather-job.mjs clean --page dist/sky-weather --out out/sky-weather/atmosphere --stage atmosphere",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-atmosphere-select"
+    ]
+  },
+  {
+    "name": "p2-sky-atmosphere-render",
+    "command": "node web/common/sky-weather-job.mjs render --page dist/sky-weather --out out/sky-weather/atmosphere --stage atmosphere",
+    "timeout_s": 900,
+    "after": [
+      "p2-sky-atmosphere-clean"
+    ]
+  },
+  {
+    "name": "p2-sky-atmosphere-fresh",
+    "command": "node web/common/sky-weather-job.mjs fresh --page dist/sky-weather --out out/sky-weather/atmosphere --stage atmosphere",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-atmosphere-render"
+    ]
+  },
+  {
+    "name": "p2-sky-atmosphere-judge",
+    "command": "node web/common/sky-weather-job.mjs judge --page dist/sky-weather --out out/sky-weather/atmosphere --stage atmosphere",
+    "timeout_s": 600,
+    "after": [
+      "p2-sky-atmosphere-render",
+      "p2-sky-atmosphere-fresh"
+    ]
+  },
+  {
+    "name": "p2-sky-weather-check",
+    "command": "node web/common/sky-weather-job.mjs check --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-build"
+    ]
+  },
+  {
+    "name": "p2-sky-weather-select",
+    "command": "node web/common/sky-weather-job.mjs select --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-weather-check"
+    ]
+  },
+  {
+    "name": "p2-sky-weather-clean",
+    "command": "node web/common/sky-weather-job.mjs clean --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-weather-select"
+    ]
+  },
+  {
+    "name": "p2-sky-weather-render",
+    "command": "node web/common/sky-weather-job.mjs render --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "timeout_s": 900,
+    "after": [
+      "p2-sky-weather-clean"
+    ]
+  },
+  {
+    "name": "p2-sky-weather-fresh",
+    "command": "node web/common/sky-weather-job.mjs fresh --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "timeout_s": 20,
+    "after": [
+      "p2-sky-weather-render"
+    ]
+  },
+  {
+    "name": "p2-sky-weather-judge",
+    "command": "node web/common/sky-weather-job.mjs judge --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "timeout_s": 600,
+    "after": [
+      "p2-sky-weather-render",
+      "p2-sky-weather-fresh"
+    ]
   }
 ]
