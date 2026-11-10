@@ -20,10 +20,12 @@ mod feature;
 mod shaders;
 mod state;
 mod time_of_day;
+mod weather;
 
 pub use desc::{CloudDesc, EnvUpdate, SkyDesc};
 pub use feature::{SkyFeature, SkyHandle};
 pub use time_of_day::*;
+pub use weather::*;
 
 /// WGSL of the procedural sky: defines
 /// `fn raa_sky_radiance(dir: vec3<f32>, env: EnvGpu, sun_dir: vec3<f32>, sun_color: vec3<f32>, time: f32) -> vec3<f32>`
