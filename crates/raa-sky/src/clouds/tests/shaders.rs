@@ -11,7 +11,7 @@ use wgpu::naga::{
 use super::super::resources::CloudGpu;
 use super::super::shaders::{
     COVERAGE_ENTRIES, NOISE_ENTRIES, cloud_volume_wgsl, coverage_module_wgsl, noise_module_wgsl,
-    shadow_mean_module_wgsl, shadow_module_wgsl,
+    panorama_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
 };
 
 #[test]
@@ -372,4 +372,23 @@ fn cloud_volume_names_keep_the_cloud_prefix() {
         cloud_functions > 0,
         "the file defines cloud helpers to check"
     );
+}
+
+#[test]
+fn panorama_module_is_valid_wgsl_and_fits_the_s10_budget() {
+    let source = panorama_module_wgsl();
+    let module = wgsl::parse_str(&source).expect("panorama module parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("panorama module validates");
+    assert!(Composer::validate(&source).is_ok());
+    assert_eq!(resource_counts(&source), [5, 2, 2, 1, 1]);
+    for (_, global) in module.global_variables.iter() {
+        if let Some(binding) = &global.binding {
+            assert_eq!(binding.group, 2, "groups 0 and 1 stay empty");
+        }
+    }
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].name, "raa_cloud_panorama_main");
+    assert_eq!(module.entry_points[0].stage, ShaderStage::Compute);
 }

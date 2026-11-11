@@ -82,3 +82,12 @@ const SHADOW_MEAN_SRC: &str = include_str!("wgsl/shadow_mean.wgsl");
 pub(super) fn shadow_mean_module_wgsl() -> String {
     SHADOW_MEAN_SRC.to_string()
 }
+
+/// The cloud panorama pass: 32 primary and 4 light samples per sky-view direction.
+const PANORAMA_SRC: &str = include_str!("wgsl/panorama.wgsl");
+
+/// The panorama module (entry `raa_cloud_panorama_main`): the common cloud text, the
+/// output binding 10 and the panorama pass.
+pub(super) fn panorama_module_wgsl() -> String {
+    format!("{}\n{CLOUD_OUTPUT}\n{PANORAMA_SRC}", cloud_volume_wgsl())
+}

@@ -9,8 +9,8 @@ use raa_core::{GpuContext, RaaError};
 
 use super::super::{MAX_VIEWS, invalid};
 use super::noise::CloudNoise;
-use super::resources::{CloudTargets, SHADOW_SIZE};
-use super::shaders::{shadow_mean_module_wgsl, shadow_module_wgsl};
+use super::resources::{CloudTargets, PANORAMA_SIZE, SHADOW_SIZE};
+use super::shaders::{panorama_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl};
 use crate::atmosphere::AtmosphereResources;
 
 /// Bind groups of one view, valid for the sky-view LUT they were built with.
@@ -18,6 +18,7 @@ struct ViewGroups {
     sky_view: wgpu::TextureView,
     shadow: wgpu::BindGroup,
     mean: wgpu::BindGroup,
+    panorama: wgpu::BindGroup,
 }
 
 /// The cloud pipelines with their per-view bind groups.
@@ -27,6 +28,7 @@ pub(super) struct CloudPasses {
     mean_layout: wgpu::BindGroupLayout,
     shadow: wgpu::ComputePipeline,
     mean: wgpu::ComputePipeline,
+    panorama: wgpu::ComputePipeline,
     views: [Option<ViewGroups>; MAX_VIEWS],
 }
 
@@ -152,11 +154,20 @@ impl CloudPasses {
             &empty,
             &mean_layout,
         )?;
+        let panorama = pipeline(
+            gpu,
+            "raa-sky.cloud_panorama",
+            &panorama_module_wgsl(),
+            "raa_cloud_panorama_main",
+            &empty,
+            &march_layout,
+        )?;
         Ok(CloudPasses {
             march_layout,
             mean_layout,
             shadow,
             mean,
+            panorama,
             views: std::array::from_fn(|_| None),
         })
     }
@@ -195,6 +206,15 @@ impl CloudPasses {
             targets.shadow_map(),
             "raa-sky.cloud_shadow",
         )?;
+        let panorama = self.march_bind_group(
+            gpu,
+            view,
+            noise,
+            targets,
+            atmosphere,
+            targets.panorama(),
+            "raa-sky.cloud_panorama",
+        )?;
         let mean = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raa-sky.cloud_shadow_mean"),
             layout: &self.mean_layout,
@@ -213,6 +233,7 @@ impl CloudPasses {
             sky_view: sky_view.clone(),
             shadow,
             mean,
+            panorama,
         });
         Ok(())
     }
@@ -277,6 +298,21 @@ impl CloudPasses {
         pass.set_pipeline(&self.mean);
         pass.set_bind_group(2, &groups.mean, &[]);
         pass.dispatch_workgroups(1, 1, 1);
+    }
+
+    /// Records the cloud panorama (solstice `clouds/mod.rs:548-556`); nothing for a view
+    /// without bind groups.
+    pub(super) fn record_panorama(&self, encoder: &mut wgpu::CommandEncoder, view: u32) {
+        let Some(groups) = self.views.get(view as usize).and_then(Option::as_ref) else {
+            return;
+        };
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa-sky.cloud_panorama"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.panorama);
+        pass.set_bind_group(2, &groups.panorama, &[]);
+        pass.dispatch_workgroups(PANORAMA_SIZE.0.div_ceil(8), PANORAMA_SIZE.1.div_ceil(8), 1);
     }
 
     /// Drops the bind groups of `view`.

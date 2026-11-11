@@ -154,7 +154,7 @@ impl CloudRenderer for VolumetricClouds {
         Self::validate(frame)?;
         let marchable = marchable(frame, atmosphere.sky_view(frame.view).is_some());
         self.history
-            .prepare(frame.view, frame.size, frame.invocation, marchable, false);
+            .prepare(frame.view, frame.size, frame.invocation, marchable, true);
         if marchable {
             self.passes
                 .bind_view(gpu, frame.view, &self.noise, &self.targets, atmosphere)?;
@@ -178,7 +178,7 @@ impl CloudRenderer for VolumetricClouds {
     }
 
     /// Records the noise generation of a marchable frame until it is acknowledged,
-    /// then its ground shadow map and mean when cloud shadows are on.
+    /// then its ground shadow map and mean when cloud shadows are on, then the panorama.
     fn record_lighting(
         &mut self,
         gpu: &GpuContext,
@@ -193,6 +193,7 @@ impl CloudRenderer for VolumetricClouds {
             if frame.cloud_shadows {
                 self.passes.record_ground_shadow(encoder, frame.view);
             }
+            self.passes.record_panorama(encoder, frame.view);
         }
         Ok(())
     }
@@ -213,10 +214,17 @@ impl CloudRenderer for VolumetricClouds {
         Ok(())
     }
 
-    /// Neutral views carrying the view's lifecycle flags; nothing is allocated.
+    /// The view's lifecycle flags, the shared panorama while it is valid and neutral
+    /// views otherwise; nothing is allocated.
     fn views(&self, view: u32) -> CloudViews {
         let (panorama_valid, screen_valid) = self.history.flags(view);
+        let panorama = if panorama_valid {
+            self.targets.panorama().clone()
+        } else {
+            self.views.panorama.clone()
+        };
         CloudViews {
+            panorama,
             panorama_valid,
             screen_valid,
             ..self.views.clone()

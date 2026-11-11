@@ -23,9 +23,6 @@ pub(super) const SHADOW_SIZE: u32 = 256;
 /// The panorama, laid out like the sky-view table (`solstice clouds/mod.rs:31-35`).
 pub(super) const PANORAMA_SIZE: (u32, u32) = (192, 108);
 
-// Keeps the panorama size reachable until the panorama card allocates its target.
-const _: (u32, u32) = PANORAMA_SIZE;
-
 /// The group-2 binding-0 cloud uniform of every cloud march module.
 #[repr(C)]
 #[derive(Clone, Debug, PartialEq)]
@@ -255,6 +252,7 @@ pub(super) struct CloudTargets {
     shadow_map: wgpu::TextureView,
     shadow_mean: wgpu::TextureView,
     transmittance: wgpu::TextureView,
+    panorama: wgpu::TextureView,
 }
 
 impl CloudTargets {
@@ -319,8 +317,26 @@ impl CloudTargets {
                 ..Default::default()
             })
         };
+        // One shared panorama: each view re-marches it before its own consumers sample it.
+        let panorama = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("raa-sky.cloud_panorama"),
+                size: wgpu::Extent3d {
+                    width: PANORAMA_SIZE.0,
+                    height: PANORAMA_SIZE.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
         use wgpu::TextureViewDimension::{D2, D2Array};
         Ok(CloudTargets {
+            panorama,
             params,
             sky,
             noise_sampler,
@@ -358,5 +374,10 @@ impl CloudTargets {
     /// D2Array view of both layers: the view published to `LightingResources`.
     pub(super) fn transmittance(&self) -> &wgpu::TextureView {
         &self.transmittance
+    }
+
+    /// The shared 192x108 Rgba16Float cloud panorama: the panorama pass output.
+    pub(super) fn panorama(&self) -> &wgpu::TextureView {
+        &self.panorama
     }
 }
