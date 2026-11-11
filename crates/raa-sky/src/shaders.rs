@@ -24,6 +24,21 @@ const ATMOSPHERE_LUTS_SRC: &str = include_str!("wgsl/atmosphere_luts.wgsl");
 const MILKY_WAY_SRC: &str = include_str!("wgsl/milky_way.wgsl");
 const MILKY_WAY_BAKE_SRC: &str = include_str!("wgsl/milky_way_bake.wgsl");
 
+/// Body-helper composition harness. Card 7432 owns the production celestial builder
+/// and evaluator; it will compose these same sources with the S10 sky bindings.
+#[cfg(test)]
+pub(crate) fn celestial_body_test_module_wgsl(entry: &str) -> String {
+    let bodies = include_str!("wgsl/celestial.wgsl");
+    let bindings = "
+@group(2) @binding(0) var<uniform> raa_physical_sky: PhysicalSkyGpu;
+@group(2) @binding(1) var raa_sky_transmittance: texture_2d<f32>;
+@group(2) @binding(6) var raa_sky_clamp_sampler: sampler;
+";
+    format!(
+        "{PRELUDE_WGSL}\n{LIB_WGSL}\n{ATMOSPHERE_SRC}\n{MILKY_WAY_SRC}\n{bindings}\n{bodies}\n{entry}"
+    )
+}
+
 /// Immutable celestial-map bake, entry `raa_milky_way_bake`, with empty groups 0/1
 /// and one write-only Rgba8Unorm D2 storage output at group 2 binding 0.
 pub(crate) fn milky_way_bake_module_wgsl() -> String {

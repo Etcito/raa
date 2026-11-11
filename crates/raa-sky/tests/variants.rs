@@ -536,3 +536,74 @@ fn milky_way_helpers_compose_with_shared_and_atmosphere_sources() {
         assert!(source.contains("OUT OF OR IN CONNECTION WITH THE SOFTWARE"));
     }
 }
+
+#[test]
+fn celestial_body_contracts_are_callable_with_s10_resources() {
+    use wgpu::naga::{front::wgsl, valid};
+    // Call every handoff helper, including the surface helpers, from a fragment entry.
+    let entry = "
+@fragment fn fs_bodies(@builtin(position) frag: vec4f) -> @location(0) vec4f {
+    let direction = normalize(vec3f(frag.xy * 0.001, 1.0));
+    let pixel_angle = raa_physical_sky.discs.w;
+    let moon = moon_body(direction, pixel_angle);
+    let sun = sun_body(direction, pixel_angle);
+    let coords = selenographic(direction);
+    let rays = crater_rays(direction, normalize(vec3f(0.2, 0.3, 1.0)), 0.5, 31u);
+    let surface = moon_surface(direction, 1.0);
+    let coverage = disc_coverage(coords.x, 0.0075, pixel_angle);
+    return moon + vec4f(sun + air_transmittance(direction) * surface * rays, coverage);
+}";
+    let source = shaders::celestial_body_test_module_wgsl(entry);
+    Composer::validate(&source).expect("body helpers compose with the shared prelude and noise");
+    let module = wgsl::parse_str(&source).expect("body module parses");
+    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+        .validate(&module)
+        .expect("body module validates");
+    let used: Vec<_> = module
+        .global_variables
+        .iter()
+        .filter_map(|(handle, global)| {
+            if info.get_entry_point(0)[handle].is_empty() {
+                return None;
+            }
+            global.binding.as_ref().map(|b| (b.group, b.binding))
+        })
+        .collect();
+    assert_eq!(
+        used,
+        [(2, 0), (2, 1), (2, 6)],
+        "only private sky resources are read"
+    );
+}
+
+#[test]
+fn celestial_bodies_retain_surface_and_display_contracts() {
+    let source = include_str!("../src/wgsl/celestial.wgsl");
+    assert!(!source.contains("@group"), "the composer owns bindings");
+    assert!(!source.contains("frame."), "no Solstice combined frame ABI");
+    for retained in [
+        "const raa_celestial_moon_radius: f32 = 0.0075;",
+        "array<vec4f, 17>",
+        "Oceanus Procellarum",
+        "Sinus Roris",
+        "vec3f(-0.1433, -0.6859, 0.7134)", // Tycho
+        "vec3f(-0.3385, 0.1671, 0.9260)",  // Copernicus
+        "vec3f(-0.6096, 0.1412, 0.7800)",  // Kepler
+        "vec3f(-0.6748, 0.4024, 0.6186)",  // Aristarchus
+        "raa_physical_sky.discs.x <= 0.0",
+        "raa_physical_sky.discs.y",
+        "vec3f(0.55, 0.62, 0.72)",
+        "let earthshine = 0.035 * earth;",
+        "pow(max(cos_phase, 0.0), 60.0)",
+        "return vec4f(radiance * cover, cover);",
+        "smoothstep(dip - 0.006, dip + 0.006, direction.y)",
+        "Copyright (c) 2026 SamG-Coder",
+        "Permission is hereby granted, free of charge",
+        "OUT OF OR IN CONNECTION WITH THE SOFTWARE",
+    ] {
+        assert!(
+            source.contains(retained),
+            "missing source contract: {retained}"
+        );
+    }
+}
