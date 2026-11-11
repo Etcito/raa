@@ -24,12 +24,6 @@ const ATMOSPHERE_LUTS_SRC: &str = include_str!("wgsl/atmosphere_luts.wgsl");
 const MILKY_WAY_SRC: &str = include_str!("wgsl/milky_way.wgsl");
 const MILKY_WAY_BAKE_SRC: &str = include_str!("wgsl/milky_way_bake.wgsl");
 
-/// Retained body-helper harness, using the production celestial composition.
-#[cfg(test)]
-pub(crate) fn celestial_body_test_module_wgsl(entry: &str) -> String {
-    format!("{}\n{entry}", celestial_module_wgsl())
-}
-
 /// Common celestial evaluator with the canonical S10 evaluation bindings, without entries.
 /// Card 7436 appends both physical sky consumers to this module. Bind the map through
 /// `AtmosphereResources::milky_way()`; allocation is not submitted-bake readiness.

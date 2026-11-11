@@ -553,7 +553,7 @@ fn celestial_body_contracts_are_callable_with_s10_resources() {
     let coverage = disc_coverage(coords.x, 0.0075, pixel_angle);
     return moon + vec4f(sun + air_transmittance(direction) * surface * rays, coverage);
 }";
-    let source = shaders::celestial_body_test_module_wgsl(entry);
+    let source = format!("{}\n{entry}", shaders::celestial_module_wgsl());
     Composer::validate(&source).expect("body helpers compose with the shared prelude and noise");
     let module = wgsl::parse_str(&source).expect("body module parses");
     let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
