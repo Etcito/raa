@@ -2,7 +2,8 @@
 
 use raa_shader::Composer;
 use wgpu::naga::{
-    AddressSpace, ImageClass, ImageDimension, ShaderStage, StorageAccess, StorageFormat, TypeInner,
+    AddressSpace, ImageClass, ImageDimension, Scalar, ShaderStage, StorageAccess, StorageFormat,
+    TypeInner, VectorSize,
     front::wgsl,
     valid::{Capabilities, ValidationFlags, Validator},
 };
@@ -281,4 +282,94 @@ fn shadow_module_fits_the_s10_compute_budget() {
     }
     assert_eq!(shadow[4], 1, "one storage texture output");
     assert_eq!(resource_counts(&shadow_mean_module_wgsl()), [1, 0, 0, 0, 1]);
+}
+
+#[test]
+fn cloud_march_text_with_a_probe_function_is_valid_wgsl() {
+    let mut source = cloud_volume_wgsl();
+    source.push_str(
+        "\n@group(2) @binding(10) var raa_cloud_probe_output: texture_storage_2d<rgba16float, write>;\n\
+         @compute @workgroup_size(1)\nfn raa_cloud_probe() {\n    \
+         let sample = raa_cloud_along(vec3<f32>(0.0, 1.0, 0.0), 32, 4, 0.5);\n    \
+         textureStore(\n        raa_cloud_probe_output,\n        vec2<i32>(0, 0),\n        \
+         vec4<f32>(sample.radiance, sample.transmittance),\n    );\n}\n",
+    );
+    let module = wgsl::parse_str(&source).expect("cloud march module parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("cloud march module validates");
+    Composer::validate(&source).expect("cloud march module composes");
+}
+
+#[test]
+fn cloud_sample_struct_has_radiance_transmittance_distance() {
+    let module = wgsl::parse_str(&cloud_volume_wgsl()).expect("cloud volume module parses");
+    let (_, ty) = module
+        .types
+        .iter()
+        .find(|(_, ty)| ty.name.as_deref() == Some("RaaCloudSample"))
+        .expect("the module declares RaaCloudSample");
+    let TypeInner::Struct { members, .. } = &ty.inner else {
+        panic!("RaaCloudSample is not a struct");
+    };
+    let names: Vec<&str> = members
+        .iter()
+        .map(|member| member.name.as_deref().expect("named member"))
+        .collect();
+    assert_eq!(names, ["radiance", "transmittance", "distance"]);
+    assert!(matches!(
+        module.types[members[0].ty].inner,
+        TypeInner::Vector {
+            size: VectorSize::Tri,
+            scalar: Scalar::F32,
+        }
+    ));
+    for member in &members[1..] {
+        assert!(matches!(
+            module.types[member.ty].inner,
+            TypeInner::Scalar(Scalar::F32)
+        ));
+    }
+}
+
+#[test]
+fn cloud_volume_has_no_aerial_perspective_or_fog_helper() {
+    let source = include_str!("../wgsl/cloud_volume.wgsl");
+    let code: String = source
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    let words: Vec<&str> = code
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    for forbidden in ["aerial", "fog"] {
+        assert!(
+            !words.contains(&forbidden),
+            "cloud_volume.wgsl still names {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn cloud_volume_names_keep_the_cloud_prefix() {
+    let module = wgsl::parse_str(&cloud_volume_wgsl()).expect("cloud volume module parses");
+    let mut cloud_functions = 0;
+    for (_, function) in module.functions.iter() {
+        let name = function.name.as_deref().expect("named helper");
+        if name.starts_with("raa_atmosphere_") {
+            continue;
+        }
+        assert!(
+            name.starts_with("raa_cloud_"),
+            "helper {name} is not prefixed raa_cloud_"
+        );
+        cloud_functions += 1;
+    }
+    assert!(
+        cloud_functions > 0,
+        "the file defines cloud helpers to check"
+    );
 }
