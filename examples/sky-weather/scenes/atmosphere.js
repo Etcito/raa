@@ -3,10 +3,10 @@ import { buildSkySample, sampleSelection } from '../lib/scene.js';
 // Physical atmosphere and celestial time through the delivered public m08 API only.
 // Every observation below is read back from Engine getters; nothing is inferred from
 // the authored constants except the comparisons the assertions name.
-// M1 scope: clouds go through the neutral backend, so overcast/broken weather is accepted
-// authored state without volumetric structure (M2 owns that). The legacy model is the retained
-// gradient/layer evaluator; it keeps the full authored weather but only approximates it as a
-// planar layer and never claims volumetric parity with the physical model.
+// The M2 volumetric backend renders the physical model's clouds for the authored weather (see the
+// mode descriptions below). The legacy model is the retained gradient/layer evaluator; it keeps
+// the full authored weather but only approximates it as a planar layer, shows no volumetric clouds
+// and never claims volumetric parity with the physical model.
 
 const dayCamera = { eye: [0, 2.6, 9], target: [0, 1.9, -8], fovYDeg: 47, near: .1, far: 300 };
 // Night cameras tilt up so the moon (placed ahead by the authored north rotation) is framed.
@@ -64,30 +64,30 @@ const shared = 'A broad neutral ground with a terracotta matte sphere on the lef
   + 'and three distant block forms behind them. The status below the view reads ready, with no displayed failure.';
 const behaviors = {
   day: 'A clear late-afternoon daytime sky: readable deep blue overhead brightening to a warm pale golden horizon, '
-    + 'with no clouds. The chrome sphere clearly reflects the blue sky and the warm horizon band. ' + shared,
+    + 'with no cumulus or cloud sheet, at most a few faint thin high wisps. The chrome sphere clearly reflects the blue sky and the warm horizon band. ' + shared,
   twilight: 'Twilight just after sunset: a darkening blue-violet upper sky above a warm orange glow along the horizon, '
     + 'the distant block forms silhouetted against that glow and the spheres dimly lit. ' + shared,
   night: 'A dark night sky that stays dark overall, with a visibly partially lit moon showing its phase above the horizon, '
     + 'many small stars and a faint band of the Milky Way readable against the dark sky. The ground and spheres are dim, softly moonlit. ' + shared,
   later: 'The same dark night one day and one hour later: the moon is at a different place in the sky and shows a fuller phase, '
     + 'the stars and the faint Milky Way band have rotated to new positions, and the sky remains dark. ' + shared,
-  // M1 renders clouds through the neutral backend: the overcast/broken weather targets are
-  // accepted state only; volumetric cloud structure is M2's, so none is described here.
+  // The M2 volumetric backend renders the overcast and broken weather targets as cloud structure,
+  // so the snow and jungle descriptions below state the clouds that backend draws for them.
   // The ground is the scene's fixed ground plane (lib/scene.js), not controlled by the sky stage.
-  snow: 'Snow preset at midday: a bright, pale whitish-blue hazy sky with a bright milky horizon from the stronger haze, '
-    + 'even soft lighting, and the chrome sphere reflecting the pale sky. No volumetric cloud forms are expected in this '
-    + 'physical-atmosphere stage. The scene\'s fixed ground plane carries a terracotta matte sphere on the left, a chrome '
+  snow: 'Snow preset at midday: a pale whitish-blue hazy sky with a bright milky horizon from the stronger haze, '
+    + 'under a low pale grey-white overcast sheet covering the sky with soft, nearly shadowless light, and the chrome '
+    + 'sphere reflecting the pale sky. The scene\'s fixed ground plane carries a terracotta matte sphere on the left, a chrome '
     + 'sphere on the right and three distant block forms behind them, all readable. The status below the view reads ready, '
     + 'with no displayed failure.',
   jungle: 'Jungle preset in mid-afternoon: a humid, slightly hazy blue sky with a soft bright greenish-warm horizon haze, '
-    + 'warm sunlight on the spheres and the chrome sphere reflecting the sky. No volumetric cloud forms are expected in '
-    + 'this physical-atmosphere stage. ' + shared,
+    + 'broken volumetric cumulus with blue gaps under warm afternoon light, warm sunlight on the spheres and the chrome '
+    + 'sphere reflecting the sky. ' + shared,
   legacy: 'The retained legacy sky model for comparison: a smooth artistic gradient from a blue zenith to a pale warm horizon '
     + 'with a flat painted look rather than physical scattering, at most a soft flat planar cloud layer and no volumetric '
     + 'clouds; the chrome sphere reflects that gradient. ' + shared,
 };
 
-// M1 neutral cloud backend: no mode below expects volumetric cloud forms.
+// M2 volumetric backend: each mode below describes the cloud structure its authored weather renders.
 const dayLook = 'a clear late-afternoon blue sky brightening to a warm pale horizon';
 Object.assign(behaviors, {
   'fog-on': `Height fog switched on under ${dayLook}: the three distant block forms are visibly softened and washed toward `
@@ -123,9 +123,9 @@ Object.assign(behaviors, {
     + 'previous view, trails or smeared sky; the chrome sphere reflects the current sky. ' + shared,
   'model-switch': `After switching the sky model to legacy and back to physical, the frame shows the physical ${dayLook}, `
     + 'not the flat legacy gradient, with no stale panorama or trails; the chrome sphere reflects that current sky. ' + shared,
-  'weather-change': `After a weather change that starts a broken-weather cycle and restarts it with a new seed, the physical sky `
-    + `still shows ${dayLook} cleanly without stale history or trails; volumetric cloud forms are not expected in this `
-    + 'physical-atmosphere stage. ' + shared,
+  'weather-change': 'After a weather change that starts a broken-weather cycle and restarts it with a new seed, the physical sky '
+    + 'shows current broken volumetric clouds with blue gaps between them, with no stale panorama, doubled edges or trails. '
+    + shared,
   're-enable': `After the sky environment and cloud-lighting passes were disabled and re-enabled, ${dayLook} is shown and the `
     + 'chrome sphere again clearly reflects the current sky, with no black or stale reflection. ' + shared,
 });
@@ -138,7 +138,7 @@ export const factNames = [
   'weather-retained-across-model-switches', 'sky-model-legacy',
   'fog-pass-on', 'fog-pass-off', 'ibl-lighting-accepted', 'environment-cleared', 'background-pass-off',
   'invalid-edits-rejected', 'invalid-edits-preserve-state', 'invalid-edits-preserve-rendering',
-  'views-two-submitted', 'views-same-clock', 'neutral-cloud-flags',
+  'views-two-submitted', 'views-same-clock', 'cloud-flags-current',
   'reset-resize', 'view-size-restored', 'reset-camera-discontinuity', 'reset-model', 'model-weather-retained',
   'reset-weather', 'weather-cycle-start', 'weather-cycle-restart', 'reset-enable', 'environment-republished',
 ];
@@ -191,17 +191,17 @@ export const inventory = [
   row('invalid-edits', 'Invalid input keeps last valid state', 'invalid', 'error-invalid-sky-time-weather-edits-last-valid-state.png',
     ['invalid-edits-rejected', 'invalid-edits-preserve-state', 'invalid-edits-preserve-rendering']),
   row('multi-view-same-clock', 'Multi-view same-time facts', 'multi-view', 'multi-view-two-cameras-same-sky-clock.png',
-    ['sun-daylight', 'views-two-submitted', 'views-same-clock', 'neutral-cloud-flags']),
+    ['sun-daylight', 'views-two-submitted', 'views-same-clock', 'cloud-flags-current']),
   row('transition-resize', 'Resize transition', 'resize', 'transition-resize-current-sky-history-reset.png',
-    ['reset-resize', 'view-size-restored', 'neutral-cloud-flags']),
+    ['reset-resize', 'view-size-restored', 'cloud-flags-current']),
   row('transition-camera-cut', 'Camera discontinuity transition', 'camera-cut', 'transition-camera-cut-current-sky-no-trails.png',
-    ['reset-camera-discontinuity', 'neutral-cloud-flags']),
+    ['reset-camera-discontinuity', 'cloud-flags-current']),
   row('transition-model-switch', 'Model change transition', 'model-switch', 'transition-model-switch-physical-sky-restored.png',
-    ['reset-model', 'model-weather-retained', 'neutral-cloud-flags']),
+    ['reset-model', 'model-weather-retained', 'cloud-flags-current']),
   row('transition-weather-change', 'Weather change transition', 'weather-change', 'transition-weather-cycle-start-and-restart.png',
-    ['reset-weather', 'weather-cycle-start', 'weather-cycle-restart', 'neutral-cloud-flags']),
+    ['reset-weather', 'weather-cycle-start', 'weather-cycle-restart', 'cloud-flags-current']),
   row('transition-re-enable', 'Re-enable transition', 're-enable', 'transition-re-enable-sky-environment-restored.png',
-    ['reset-enable', 'environment-republished', 'neutral-cloud-flags']),
+    ['reset-enable', 'environment-republished', 'cloud-flags-current']),
 ];
 
 const snapshot = engine => ({ sky: engine.sky(), time: engine.timeOfDay(), weather: engine.weather() });
@@ -558,8 +558,8 @@ export function featureAssertions(engine, mode, records, d) {
         && d.views.every(v => v.invocation === d.invocation && v.submittedInvocation === d.submittedInvocation),
       detail: `one timeOfDay snapshot serves both views; engine invocation ${d.invocation}, submitted ${d.submittedInvocation}; views ${viewFacts(d)}` });
   }
-  // The M1 neutral backend publishes no cloud screen or panorama; the flags must say so.
-  out.push({ name: 'neutral-cloud-flags', passed: d.views.length > 0 && d.views.every(v => v.cloudScreenValid === false && v.cloudPanoramaValid === false),
+  // The M2 volumetric backend renders the cloud screen and panorama: every view must publish both as current.
+  out.push({ name: 'cloud-flags-current', passed: d.views.length > 0 && d.views.every(v => v.cloudPanoramaValid === true && v.cloudScreenValid === true),
     detail: JSON.stringify(d.views.map(v => [v.view, v.cloudScreenValid, v.cloudPanoramaValid])) });
   return out;
 }

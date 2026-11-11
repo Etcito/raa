@@ -137,7 +137,7 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
       return { invocation: renders || null, submittedInvocation: ready ? renders : null, weatherGeneration, atmosphereGeneration: ready ? 1 : 0,
         environment: { requestedGeneration: requested, publishedGeneration: published, pending: passes.get('sky.env') && published !== requested },
         views: slots.map(slot => ({ view: slot.view, width: slot.width, height: slot.height, invocation: renders, submittedInvocation: ready ? renders : null,
-          skyViewGeneration: 1, historyValid: true, resetReasons: [...slot.reasons], cloudScreenValid: false, cloudPanoramaValid: false })),
+          skyViewGeneration: 1, historyValid: true, resetReasons: [...slot.reasons], cloudScreenValid: true, cloudPanoramaValid: true })),
         readiness: ready ? { status: 'ready', stage: 'submission', error: null } : { status: 'pending', stage: 'milkyWay', error: null } };
     },
   };
@@ -537,12 +537,58 @@ test('transitions record actual reset reasons, restored sizes, cycle start/resta
   }
 });
 
-test('neutral backend volume flags stay truthful and new selectors reject missing, null and false', async () => {
-  const lying = await runWith('resize', engine => {
+test('volumetric cloud flags are required and missing, null and false evidence rejects', async () => {
+  const cloudModes = ['multi-view', 'resize', 'camera-cut', 'model-switch', 'weather-change', 're-enable'];
+  // Only the six physical rows (weather enabled, both cloud passes enabled) require the flag; legacy requires none.
+  assert.deepEqual(atmosphere.inventory.filter(r => r.requiredFacts.includes('assertion:cloud-flags-current')).map(r => r.mode).sort(), [...cloudModes].sort());
+  const legacy = await runWith('legacy', engine => {
     const read = engine.skyWeatherDiagnostics;
-    engine.skyWeatherDiagnostics = () => { const d = read(); for (const v of d.views) v.cloudScreenValid = true; return d; };
+    engine.skyWeatherDiagnostics = () => { const d = read(); for (const v of d.views) v.cloudScreenValid = false; return d; };
   });
-  assert.equal(named(lying.observation, 'neutral-cloud-flags')[0].passed, false);
+  assert.equal(named(legacy.observation, 'cloud-flags-current')[0].passed, false);
+  assert.doesNotThrow(() => validateRequiredFacts(rowOf('legacy'), factsOf(legacy.observation), atmosphere.factNames));
+  // The fake engine reports both flags true for each view, so every required row passes.
+  for (const mode of cloudModes) {
+    const { observation } = await runWith(mode);
+    assert.equal(named(observation, 'cloud-flags-current')[0].passed, true, mode);
+    validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames);
+  }
+  // A reader reporting a false, null or missing flag on any view fails the fact and rejects the row.
+  const readers = {
+    'screen false': v => { v.cloudScreenValid = false; },
+    'panorama false': v => { v.cloudPanoramaValid = false; },
+    'screen null': v => { v.cloudScreenValid = null; },
+    'panorama missing': v => { delete v.cloudPanoramaValid; },
+  };
+  for (const mode of cloudModes) {
+    for (const [label, mutateView] of Object.entries(readers)) {
+      const { observation } = await runWith(mode, engine => {
+        const read = engine.skyWeatherDiagnostics;
+        engine.skyWeatherDiagnostics = () => { const d = read(); for (const v of d.views) mutateView(v); return d; };
+      });
+      assert.equal(named(observation, 'cloud-flags-current')[0].passed, false, `${mode} ${label}`);
+      assert.throws(() => validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames), /cloud-flags-current/, `${mode} ${label}`);
+    }
+  }
+  // A reader that reports no views at all cannot satisfy the flag.
+  const none = atmosphere.featureAssertions(fakeEngine(), 'resize', [], { views: [] }).find(a => a.name === 'cloud-flags-current');
+  assert.equal(none.passed, false);
+  // The flag judges the views the reader reports; dropping one of the two multi-view rows fails views-two-submitted.
+  const oneView = { views: [{ view: 0, width: 640, height: 720, invocation: 1, submittedInvocation: 1, cloudScreenValid: true, cloudPanoramaValid: true }] };
+  assert.equal(atmosphere.featureAssertions(fakeEngine(), 'multi-view', [], oneView).find(a => a.name === 'views-two-submitted').passed, false);
+  // Missing, null, false and duplicate assertion evidence rejects for every cloud row.
+  for (const mode of cloudModes) {
+    const { observation } = await runWith(mode);
+    for (const mutate of [
+      f => { f.assertions = f.assertions.filter(a => a.name !== 'cloud-flags-current'); },
+      f => { f.assertions.find(a => a.name === 'cloud-flags-current').passed = null; },
+      f => { f.assertions.find(a => a.name === 'cloud-flags-current').passed = false; },
+      f => { f.assertions.push({ ...f.assertions.find(a => a.name === 'cloud-flags-current') }); },
+    ]) {
+      const facts = factsOf(observation); mutate(facts);
+      assert.throws(() => validateRequiredFacts(rowOf(mode), facts, atmosphere.factNames), /cloud-flags-current/, mode);
+    }
+  }
   for (const mode of ['fog-off', 'env-off', 'multi-view', 'weather-change', 're-enable']) {
     const row = rowOf(mode), { observation } = await runWith(mode);
     for (const name of row.requiredFacts.filter(f => f.startsWith('assertion:')).map(f => f.slice(10)).slice(-2)) {
