@@ -34,6 +34,7 @@ SOFTWARE.
 */
 
 mod history;
+mod noise;
 mod shaders;
 #[cfg(test)]
 mod tests;
@@ -45,9 +46,9 @@ use raa_pipeline::LightingResources;
 use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS, invalid};
 use crate::atmosphere::AtmosphereResources;
 use history::CloudHistory;
+use noise::CloudNoise;
 
 // Contract checks keeping the lifecycle entry points of later cards reachable.
-const _: fn(&history::CloudHistory, u32, u64) -> bool = history::CloudHistory::marchable;
 const _: fn(&history::CloudHistory, u32, bool) -> Option<Mat4> = history::CloudHistory::history;
 
 /// The S25 factory registered under `M2_BACKEND`.
@@ -55,6 +56,7 @@ pub(crate) fn create(gpu: &GpuContext) -> Result<Box<dyn CloudRenderer>, RaaErro
     Ok(Box::new(VolumetricClouds {
         views: CloudViews::neutral(gpu)?,
         history: CloudHistory::new(),
+        noise: CloudNoise::new(gpu)?,
         neutral_published: false,
     }))
 }
@@ -63,6 +65,8 @@ pub(crate) fn create(gpu: &GpuContext) -> Result<Box<dyn CloudRenderer>, RaaErro
 struct VolumetricClouds {
     views: CloudViews,
     history: CloudHistory,
+    /// One-time noise and coverage generation.
+    noise: CloudNoise,
     /// Published the neutral transmittance once per enabled resource set.
     neutral_published: bool,
 }
@@ -108,16 +112,20 @@ impl CloudRenderer for VolumetricClouds {
         Ok(())
     }
 
-    /// No march exists yet, so there is no lighting work to record.
+    /// Records the noise generation of a marchable frame until it is acknowledged.
     fn record_lighting(
         &mut self,
         gpu: &GpuContext,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         frame: &CloudFrame,
         _atmosphere: &AtmosphereResources,
     ) -> Result<(), RaaError> {
         gpu.ensure_live()?;
-        Self::validate(frame)
+        Self::validate(frame)?;
+        if self.history.marchable(frame.view, frame.invocation) {
+            self.noise.record(encoder, frame.invocation, frame.view);
+        }
+        Ok(())
     }
 
     /// No screen march exists yet; notes that none was recorded.
@@ -155,5 +163,6 @@ impl CloudRenderer for VolumetricClouds {
 
     fn submitted(&mut self, view: u32, invocation: u64) {
         self.history.submitted(view, invocation);
+        self.noise.acknowledge(view, invocation);
     }
 }

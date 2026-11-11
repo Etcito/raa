@@ -20,6 +20,17 @@ pub(super) fn noise_module_wgsl() -> String {
     NOISE_SRC.to_string()
 }
 
-// The next card consumes both; these pins keep them reachable until its noise.rs lands.
-const _: fn() -> String = noise_module_wgsl;
-const _: [&str; 3] = NOISE_ENTRIES;
+/// The coverage CDF of the weather map's red channel (256 bins).
+const COVERAGE_SRC: &str = include_str!("wgsl/coverage.wgsl");
+
+/// The coverage compute entries in dispatch order.
+pub(super) const COVERAGE_ENTRIES: [&str; 2] = [
+    "raa_cloud_coverage_histogram",
+    "raa_cloud_coverage_accumulate",
+];
+
+/// The standalone coverage module; group 2 binding 0 is the weather map, 1 the
+/// atomic bins and 2 the cumulative distribution.
+pub(super) fn coverage_module_wgsl() -> String {
+    COVERAGE_SRC.to_string()
+}

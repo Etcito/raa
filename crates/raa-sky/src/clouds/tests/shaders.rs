@@ -2,12 +2,14 @@
 
 use raa_shader::Composer;
 use wgpu::naga::{
-    ImageClass, ImageDimension, ShaderStage, StorageAccess, StorageFormat, TypeInner,
+    AddressSpace, ImageClass, ImageDimension, ShaderStage, StorageAccess, StorageFormat, TypeInner,
     front::wgsl,
     valid::{Capabilities, ValidationFlags, Validator},
 };
 
-use super::super::shaders::{NOISE_ENTRIES, noise_module_wgsl};
+use super::super::shaders::{
+    COVERAGE_ENTRIES, NOISE_ENTRIES, coverage_module_wgsl, noise_module_wgsl,
+};
 
 #[test]
 fn noise_module_is_valid_wgsl() {
@@ -90,5 +92,57 @@ fn noise_helpers_keep_the_cloud_prefix() {
     assert!(helpers > 0, "the module has helpers to check");
     for entry in &module.entry_points {
         assert!(entry.name.starts_with("raa_cloud_noise_"));
+    }
+}
+
+#[test]
+fn coverage_module_is_valid_wgsl() {
+    let source = coverage_module_wgsl();
+    let module = wgsl::parse_str(&source).expect("coverage module parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("coverage module validates");
+    Composer::validate(&source).expect("coverage module composes");
+}
+
+#[test]
+fn coverage_module_declares_two_compute_functions_and_group2_bindings() {
+    let module = wgsl::parse_str(&coverage_module_wgsl()).expect("coverage module parses");
+    let names: Vec<&str> = module
+        .entry_points
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry.stage, ShaderStage::Compute, "{}", entry.name);
+            entry.name.as_str()
+        })
+        .collect();
+    assert_eq!(names, COVERAGE_ENTRIES);
+
+    let mut bindings = Vec::new();
+    for (_, global) in module.global_variables.iter() {
+        if let Some(binding) = &global.binding {
+            bindings.push((binding.group, binding.binding, global));
+        }
+    }
+    bindings.sort_by_key(|(group, binding, _)| (*group, *binding));
+    let points: Vec<(u32, u32)> = bindings.iter().map(|(g, b, _)| (*g, *b)).collect();
+    assert_eq!(points, [(2, 0), (2, 1), (2, 2)]);
+    assert!(matches!(
+        module.types[bindings[0].2.ty].inner,
+        TypeInner::Image {
+            dim: ImageDimension::D2,
+            arrayed: false,
+            class: ImageClass::Sampled { multi: false, .. },
+        }
+    ));
+    for (_, binding, global) in &bindings[1..] {
+        assert!(
+            matches!(global.space, AddressSpace::Storage { access } if access.contains(StorageAccess::STORE)),
+            "binding (2,{binding}) is not a read_write storage buffer"
+        );
+        assert!(matches!(
+            module.types[global.ty].inner,
+            TypeInner::Array { .. }
+        ));
     }
 }
