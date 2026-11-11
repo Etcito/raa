@@ -169,7 +169,10 @@ const controls = [
 // For intensity 3 the brightest clamp is exactly 0 EV (0.18 / (3 x 0.06) = 1), and twilight
 // below the civil band and night meter under the darkest clamp, i.e. 128x = +7 EV. RAA has
 // no automatic exposure in P2, so each capture authors that fixed equivalent through the
-// public tone-mapping option; the sky still renders dark, only readable.
+// public tone-mapping option; the sky still renders dark, only readable. Headroom check from
+// run 13615 at 0 EV (AgX, MSAA 4): 99.5% of the twilight/night pixels were under 14/255, i.e.
+// linear scene radiance under ~(14/255)^2.2 = 1.7e-3; x128 keeps them under ~0.22, below
+// middle grey, so night stays night while the moon disc (3 x 0.0024 x 128 ~ 0.9) reads.
 export const DARK_ADAPTATION_EV = Math.log2(128);
 export const exposureEv = { day: 0, twilight: DARK_ADAPTATION_EV, night: DARK_ADAPTATION_EV, later: DARK_ADAPTATION_EV };
 
