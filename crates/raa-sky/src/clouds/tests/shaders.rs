@@ -10,6 +10,7 @@ use wgpu::naga::{
 use super::super::resources::CloudGpu;
 use super::super::shaders::{
     COVERAGE_ENTRIES, NOISE_ENTRIES, cloud_volume_wgsl, coverage_module_wgsl, noise_module_wgsl,
+    shadow_mean_module_wgsl, shadow_module_wgsl,
 };
 
 #[test]
@@ -214,4 +215,70 @@ fn cloud_gpu_wgsl_struct_is_192_bytes() {
         assert_eq!(member.name.as_deref(), Some(name));
         assert_eq!(member.offset, offset as u32, "member {name}");
     }
+}
+
+#[test]
+fn shadow_modules_are_valid_wgsl_with_group2_only() {
+    for (source, entry) in [
+        (shadow_module_wgsl(), "raa_cloud_shadow_main"),
+        (shadow_mean_module_wgsl(), "raa_cloud_shadow_mean_main"),
+    ] {
+        let module = wgsl::parse_str(&source).expect("shadow module parses");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("shadow module validates");
+        Composer::validate(&source).expect("shadow module composes");
+        let names: Vec<&str> = module
+            .entry_points
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, [entry]);
+        assert_eq!(module.entry_points[0].stage, ShaderStage::Compute);
+        for (_, global) in module.global_variables.iter() {
+            if let Some(binding) = &global.binding {
+                assert_eq!(binding.group, 2, "{entry}: groups 0 and 1 stay empty");
+            }
+        }
+    }
+}
+
+/// Counts of (sampled textures, samplers, uniforms, storage buffers, storage textures).
+fn resource_counts(source: &str) -> [u32; 5] {
+    let module = wgsl::parse_str(source).expect("module parses");
+    let mut counts = [0; 5];
+    for (_, global) in module.global_variables.iter() {
+        if global.binding.is_none() {
+            continue;
+        }
+        let slot = match (&module.types[global.ty].inner, global.space) {
+            (
+                TypeInner::Image {
+                    class: ImageClass::Storage { .. },
+                    ..
+                },
+                _,
+            ) => 4,
+            (TypeInner::Image { .. }, _) => 0,
+            (TypeInner::Sampler { .. }, _) => 1,
+            (_, AddressSpace::Uniform) => 2,
+            (_, AddressSpace::Storage { .. }) => 3,
+            (inner, space) => panic!("unexpected binding {inner:?} in {space:?}"),
+        };
+        counts[slot] += 1;
+    }
+    counts
+}
+
+#[test]
+fn shadow_module_fits_the_s10_compute_budget() {
+    let shadow = resource_counts(&shadow_module_wgsl());
+    for (count, max) in shadow.into_iter().zip([5, 2, 2, 1, 1]) {
+        assert!(
+            count <= max,
+            "shadow module {shadow:?} exceeds [5, 2, 2, 1, 1]"
+        );
+    }
+    assert_eq!(shadow[4], 1, "one storage texture output");
+    assert_eq!(resource_counts(&shadow_mean_module_wgsl()), [1, 0, 0, 0, 1]);
 }

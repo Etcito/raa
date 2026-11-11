@@ -60,6 +60,11 @@ pub(super) struct CloudNoise {
     /// Pipelines in dispatch order with their group-2 bind groups.
     passes: Vec<(wgpu::ComputePipeline, wgpu::BindGroup)>,
     gate: NoiseGate,
+    /// The resources the march passes sample (group 2 bindings 2, 3, 4 and 9).
+    shape: wgpu::TextureView,
+    detail: wgpu::TextureView,
+    weather_map: wgpu::TextureView,
+    coverage_cdf: wgpu::Buffer,
 }
 
 fn texture(
@@ -262,6 +267,10 @@ impl CloudNoise {
         Ok(CloudNoise {
             passes,
             gate: NoiseGate::default(),
+            shape,
+            detail,
+            weather_map,
+            coverage_cdf,
         })
     }
 
@@ -293,5 +302,25 @@ impl CloudNoise {
 
     pub(super) fn generated(&self) -> bool {
         self.gate.generated()
+    }
+
+    /// The 128^3 shape noise (group 2 binding 2).
+    pub(super) fn shape(&self) -> &wgpu::TextureView {
+        &self.shape
+    }
+
+    /// The 32^3 detail noise (group 2 binding 3).
+    pub(super) fn detail(&self) -> &wgpu::TextureView {
+        &self.detail
+    }
+
+    /// The 512^2 weather map (group 2 binding 4).
+    pub(super) fn weather_map(&self) -> &wgpu::TextureView {
+        &self.weather_map
+    }
+
+    /// The 256-entry coverage CDF (group 2 binding 9).
+    pub(super) fn coverage_cdf(&self) -> &wgpu::Buffer {
+        &self.coverage_cdf
     }
 }

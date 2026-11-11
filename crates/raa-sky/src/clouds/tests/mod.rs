@@ -2,6 +2,7 @@
 
 mod history;
 mod noise;
+mod passes;
 mod resources;
 mod shaders;
 

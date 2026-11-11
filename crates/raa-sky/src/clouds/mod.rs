@@ -4,10 +4,11 @@
 //! It adapts Solstice `crates/solstice-render/src/clouds/mod.rs` at revision
 //! 7e465b599c13da165948ebaa44df824c36c3ae07: weather-driven volumetric clouds
 //! rendered into a panorama for the environment, a half-resolution screen march
-//! with cloud-only history, and a ground transmittance map. Until those passes
-//! land it validates frames, tracks the per-view lifecycle of contract
-//! `P2-CLOUD-VALIDITY` in [`history::CloudHistory`] and publishes the neutral
-//! transmittance (map [0,0,1,0], cloudEnabled 0).
+//! with cloud-only history, and a ground transmittance map. It validates frames,
+//! tracks the per-view lifecycle of contract `P2-CLOUD-VALIDITY` in
+//! [`history::CloudHistory`], marches the ground transmittance map of marchable frames
+//! and publishes it to `LightingResources` (S10 map/light), or the neutral
+//! transmittance (map [0,0,1,0], cloudEnabled 0) when shadows cannot apply.
 
 /* Adapted from solstice@7e465b5 crates/solstice-render/src/clouds/mod.rs.
 MIT License
@@ -35,6 +36,7 @@ SOFTWARE.
 
 mod history;
 mod noise;
+mod passes;
 mod resources;
 mod shaders;
 #[cfg(test)]
@@ -48,6 +50,8 @@ use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS,
 use crate::atmosphere::AtmosphereResources;
 use history::CloudHistory;
 use noise::CloudNoise;
+use passes::CloudPasses;
+use resources::{CloudGpu, CloudTargets, SHADOW_EXTENT, cloud_sky_parameters};
 
 // Contract checks keeping the lifecycle entry points of later cards reachable.
 const _: fn(&history::CloudHistory, u32, bool) -> Option<Mat4> = history::CloudHistory::history;
@@ -58,8 +62,54 @@ pub(crate) fn create(gpu: &GpuContext) -> Result<Box<dyn CloudRenderer>, RaaErro
         views: CloudViews::neutral(gpu)?,
         history: CloudHistory::new(),
         noise: CloudNoise::new(gpu)?,
-        neutral_published: false,
+        targets: CloudTargets::new(gpu)?,
+        passes: CloudPasses::new(gpu)?,
+        published: None,
     }))
+}
+
+/// One cloud transmittance publication: the published view (the ground map when
+/// `cloud`, else the neutral dummy) with its S10 map and light lanes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Publication {
+    cloud: bool,
+    map: [f32; 4],
+    light: [f32; 4],
+}
+
+impl Publication {
+    /// The neutral transmittance: map [0,0,1,0] (cloudEnabled 0), default light.
+    const NEUTRAL: Publication = Publication {
+        cloud: false,
+        map: [0.0, 0.0, 1.0, 0.0],
+        light: [0.0, 1.0, 0.0, 0.0],
+    };
+
+    /// What a prepared frame publishes: its ground map (origin and extent of the cloud
+    /// record, light toward the dominant body) when it is marchable with cloud shadows
+    /// on, the neutral transmittance otherwise.
+    fn for_frame(frame: &CloudFrame, marchable: bool) -> Self {
+        if !(marchable && frame.cloud_shadows) {
+            return Self::NEUTRAL;
+        }
+        let [x, z] = CloudGpu::from_frame(frame, None).shadow_origin;
+        let toward = cloud_sky_parameters(frame).dominant;
+        Publication {
+            cloud: true,
+            map: [x, z, SHADOW_EXTENT, 1.0],
+            light: [toward[0], toward[1], toward[2], 0.0],
+        }
+    }
+}
+
+/// MARCHABLE: the physical model renders weather and the view has a sky-view LUT.
+fn marchable(frame: &CloudFrame, sky_view: bool) -> bool {
+    frame.physical && frame.weather_enabled && sky_view
+}
+
+/// Whether `next` must be published over the last published value.
+fn needs_publication(last: Option<Publication>, next: Publication) -> bool {
+    last != Some(next)
 }
 
 /// The M2 volumetric cloud backend.
@@ -68,8 +118,12 @@ struct VolumetricClouds {
     history: CloudHistory,
     /// One-time noise and coverage generation.
     noise: CloudNoise,
-    /// Published the neutral transmittance once per enabled resource set.
-    neutral_published: bool,
+    /// Per-view uniforms, the noise sampler and the ground transmittance texture.
+    targets: CloudTargets,
+    /// The ground shadow pipelines and per-view bind groups.
+    passes: CloudPasses,
+    /// The last published transmittance; `None` forces the next publication.
+    published: Option<Publication>,
 }
 
 impl VolumetricClouds {
@@ -98,22 +152,33 @@ impl CloudRenderer for VolumetricClouds {
     ) -> Result<(), RaaError> {
         gpu.ensure_live()?;
         Self::validate(frame)?;
-        let marchable =
-            frame.physical && frame.weather_enabled && atmosphere.sky_view(frame.view).is_some();
+        let marchable = marchable(frame, atmosphere.sky_view(frame.view).is_some());
         self.history
             .prepare(frame.view, frame.size, frame.invocation, marchable, false);
-        if !self.neutral_published {
-            lighting.set_cloud_transmittance(
-                self.views.transmittance.clone(),
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-            )?;
-            self.neutral_published = true;
+        if marchable {
+            self.passes
+                .bind_view(gpu, frame.view, &self.noise, &self.targets, atmosphere)?;
+            let record = CloudGpu::from_frame(frame, None).to_bytes();
+            let sky = cloud_sky_parameters(frame).to_bytes();
+            let queue = gpu.queue();
+            queue.write_buffer(self.targets.params(frame.view), 0, &record);
+            queue.write_buffer(self.targets.sky(frame.view), 0, &sky);
+        }
+        let next = Publication::for_frame(frame, marchable);
+        if needs_publication(self.published, next) {
+            let view = if next.cloud {
+                self.targets.transmittance()
+            } else {
+                &self.views.transmittance
+            };
+            lighting.set_cloud_transmittance(view.clone(), next.map, next.light)?;
+            self.published = Some(next);
         }
         Ok(())
     }
 
-    /// Records the noise generation of a marchable frame until it is acknowledged.
+    /// Records the noise generation of a marchable frame until it is acknowledged,
+    /// then its ground shadow map and mean when cloud shadows are on.
     fn record_lighting(
         &mut self,
         gpu: &GpuContext,
@@ -125,6 +190,9 @@ impl CloudRenderer for VolumetricClouds {
         Self::validate(frame)?;
         if self.history.marchable(frame.view, frame.invocation) {
             self.noise.record(encoder, frame.invocation, frame.view);
+            if frame.cloud_shadows {
+                self.passes.record_ground_shadow(encoder, frame.view);
+            }
         }
         Ok(())
     }
@@ -157,8 +225,13 @@ impl CloudRenderer for VolumetricClouds {
 
     fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation) {
         self.history.invalidate(view, reason);
-        if matches!(reason, CloudInvalidation::Model | CloudInvalidation::Enable) {
-            self.neutral_published = false;
+        match reason {
+            CloudInvalidation::Model | CloudInvalidation::Enable => self.published = None,
+            CloudInvalidation::ViewRemoved => match view {
+                Some(view) => self.passes.release_view(view),
+                None => (0..MAX_VIEWS as u32).for_each(|view| self.passes.release_view(view)),
+            },
+            _ => {}
         }
     }
 

@@ -10,9 +10,10 @@
 //! [`cloud_sky_parameters`] builds the 256-byte `PhysicalSkyGpu` record the cloud passes
 //! receive from the accepted frame alone, so the backend never reads M1 state.
 
+use raa_core::{GpuContext, RaaError};
 use raa_math::{Mat4, Vec3};
 
-use super::super::CloudFrame;
+use super::super::{CloudFrame, MAX_VIEWS};
 use crate::atmosphere::{PhysicalSkyGpu, atmospheric_radius_km};
 
 /// Ground covered by the shadow map, in metres along each side.
@@ -244,7 +245,118 @@ fn put_f32x4(out: &mut [u8; CloudGpu::SIZE], offset: usize, values: [f32; 4]) {
     }
 }
 
-// Contract checks until the ground-shadow card uploads these records.
-const _: fn(&CloudFrame, Option<Mat4>) -> CloudGpu = CloudGpu::from_frame;
-const _: fn(&CloudGpu) -> [u8; 192] = CloudGpu::to_bytes;
-const _: fn(&CloudFrame) -> PhysicalSkyGpu = cloud_sky_parameters;
+/// Shared GPU resources of the cloud passes (contract `P2-CLOUD-PASSES`): the per-view
+/// uniforms, the noise sampler (`solstice clouds/mod.rs:160-168`) and the ground
+/// transmittance texture, layer 0 the map and layer 1 the mean at texel (0,0).
+pub(super) struct CloudTargets {
+    params: [wgpu::Buffer; MAX_VIEWS],
+    sky: [wgpu::Buffer; MAX_VIEWS],
+    noise_sampler: wgpu::Sampler,
+    shadow_map: wgpu::TextureView,
+    shadow_mean: wgpu::TextureView,
+    transmittance: wgpu::TextureView,
+}
+
+impl CloudTargets {
+    /// Allocates every resource once; both shadow layers start at ones.
+    pub(super) fn new(gpu: &GpuContext) -> Result<CloudTargets, RaaError> {
+        gpu.ensure_live()?;
+        let device = gpu.device();
+        let uniform = |label: &str, size: usize| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        let params = std::array::from_fn(|_| uniform("raa-sky.cloud_params", CloudGpu::SIZE));
+        let sky = std::array::from_fn(|_| uniform("raa-sky.cloud_sky", PhysicalSkyGpu::SIZE));
+        let noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raa-sky.cloud_noise_sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let size = wgpu::Extent3d {
+            width: SHADOW_SIZE,
+            height: SHADOW_SIZE,
+            depth_or_array_layers: 2,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-sky.cloud_transmittance"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        // f16 1.0 is 0x3C00: every channel of every texel of both layers starts at one.
+        let ones = [0x00u8, 0x3C].repeat((SHADOW_SIZE * SHADOW_SIZE * 2 * 4) as usize);
+        gpu.queue().write_texture(
+            texture.as_image_copy(),
+            &ones,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(SHADOW_SIZE * 8),
+                rows_per_image: Some(SHADOW_SIZE),
+            },
+            size,
+        );
+        let layer = |base: u32, count: u32, dimension| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("raa-sky.cloud_transmittance"),
+                dimension: Some(dimension),
+                base_array_layer: base,
+                array_layer_count: Some(count),
+                ..Default::default()
+            })
+        };
+        use wgpu::TextureViewDimension::{D2, D2Array};
+        Ok(CloudTargets {
+            params,
+            sky,
+            noise_sampler,
+            shadow_map: layer(0, 1, D2),
+            shadow_mean: layer(1, 1, D2),
+            transmittance: layer(0, 2, D2Array),
+        })
+    }
+
+    /// The 192-byte CloudGpu uniform of `view` (< 4); group 2 binding 0.
+    pub(super) fn params(&self, view: u32) -> &wgpu::Buffer {
+        &self.params[view as usize]
+    }
+
+    /// The 256-byte PhysicalSkyGpu uniform of `view` (< 4); group 2 binding 1.
+    pub(super) fn sky(&self, view: u32) -> &wgpu::Buffer {
+        &self.sky[view as usize]
+    }
+
+    /// Linear sampler repeating on all axes; group 2 binding 7.
+    pub(super) fn noise_sampler(&self) -> &wgpu::Sampler {
+        &self.noise_sampler
+    }
+
+    /// D2 view of layer 0: the shadow pass output and the mean pass input.
+    pub(super) fn shadow_map(&self) -> &wgpu::TextureView {
+        &self.shadow_map
+    }
+
+    /// D2 view of layer 1: the mean pass output.
+    pub(super) fn shadow_mean(&self) -> &wgpu::TextureView {
+        &self.shadow_mean
+    }
+
+    /// D2Array view of both layers: the view published to `LightingResources`.
+    pub(super) fn transmittance(&self) -> &wgpu::TextureView {
+        &self.transmittance
+    }
+}
