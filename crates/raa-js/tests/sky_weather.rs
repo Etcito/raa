@@ -22,14 +22,15 @@ use std::rc::Rc;
 
 use m08::{
     MAX_SAFE_COUNTER, Properties, Raw, parse_sky_transaction, parse_time_of_day,
-    serialize_diagnostics, serialize_time_of_day,
+    parse_weather_update, serialize_diagnostics, serialize_time_of_day,
 };
 use raa_core::RaaError;
 use raa_ibl::IblPublication;
 use raa_sky::{
     CloudResetReasons, DominantLight, EnvUpdate, LegacyCloudFields, SkyDesc, SkyDiagnostics,
     SkyModel, SkyPreset, SkyReadiness, SkyReadinessStage, SkyReadinessStatus, SkyTransaction,
-    SkyViewDiagnostics, TimeOfDay, TimeOfDaySettings, TimeOfDayState,
+    SkyViewDiagnostics, TimeOfDay, TimeOfDaySettings, TimeOfDayState, Weather, WeatherPreset,
+    WeatherSettings, WeatherUpdate,
 };
 
 /// A native stand-in for a JS description object: a key is present exactly when it is
@@ -614,6 +615,412 @@ fn time_patch_refuses_null_wrong_types_unknown_keys_and_domains() {
     expect_time_invalid(time(&[("speed", Raw::Number(-1.0))]), "speed");
     expect_time_invalid(time(&[("speed", Raw::Number(f64::INFINITY))]), "speed");
     expect_time_invalid(time(&[("altitude", Raw::Number(1.0))]), "altitude");
+}
+
+fn weather(
+    current: &WeatherSettings,
+    fields: &[(&'static str, Raw)],
+) -> Result<WeatherUpdate, RaaError> {
+    parse_weather_update(current, &Obj::new(fields))
+}
+
+fn expect_weather_invalid(result: Result<WeatherUpdate, RaaError>, path: &str) {
+    let error = result.expect_err("the weather patch must be refused");
+    assert_eq!(error.code(), "sky.invalid", "{error}");
+    assert!(
+        error.message().contains(&format!("'{path}'")),
+        "message must name '{path}': {error}"
+    );
+}
+
+/// An explicit preset supplies the base before every override, keeps its named identity and
+/// requests a restart even when the structured values happen to equal the base. Text has no
+/// preset identity, so it supplies fair as the cycle start.
+#[test]
+fn weather_preset_and_text_supply_explicit_start_before_overrides() {
+    let current = WeatherSettings::default();
+    let storm = Weather::by_name("storm").unwrap();
+    let update = weather(
+        &current,
+        &[
+            ("preset", Raw::String("storm".into())),
+            ("coverage", Raw::Number(0.22)),
+            ("changing", Raw::Bool(true)),
+        ],
+    )
+    .expect("preset plus overrides");
+    assert_eq!(update.cycle_start, Some(WeatherPreset::Storm));
+    assert!(update.restart_cycle, "an explicit base selection restarts");
+    assert!(update.settings.changing);
+    assert_eq!(update.settings.target.coverage, 0.22);
+    assert_eq!(update.settings.target.thickness, storm.thickness);
+    assert_eq!(update.settings.target.wind_speed, storm.wind_speed);
+    assert_eq!(update.settings.target.base, storm.base);
+    assert_eq!(update.settings.seed, current.seed);
+    assert_eq!(
+        update.settings.transition_seconds,
+        current.transition_seconds
+    );
+
+    let parsed = Weather::parse("coverage 0.8\nrain 1\n").unwrap();
+    let text = weather(
+        &current,
+        &[("text", Raw::String("coverage 0.8\nrain 1\n".into()))],
+    )
+    .expect("text weather");
+    assert_eq!(text.cycle_start, Some(WeatherPreset::Fair));
+    assert!(text.restart_cycle);
+    assert_eq!(text.settings.target, parsed);
+
+    // Text that describes storm values still reports fair as its start identity.
+    let storm_text = weather(&current, &[("text", Raw::String(storm.to_text()))]).unwrap();
+    assert_eq!(storm_text.cycle_start, Some(WeatherPreset::Fair));
+    assert_eq!(storm_text.settings.target, storm);
+}
+
+/// The parser returns intent, never an inference from resolved equality: equal-valued
+/// patches differ in cycle start and restart, and an empty patch retains the current values.
+#[test]
+fn weather_equal_values_keep_distinct_cycle_intent() {
+    let current = WeatherSettings::default();
+    let explicit = weather(&current, &[("preset", Raw::String("fair".into()))]).unwrap();
+    let empty = weather(&current, &[]).unwrap();
+    assert_eq!(explicit.settings.target, current.target);
+    assert_eq!(empty.settings.target, current.target);
+    assert_eq!(explicit.cycle_start, Some(WeatherPreset::Fair));
+    assert!(explicit.restart_cycle);
+    assert_eq!(empty.cycle_start, None);
+    assert!(!empty.restart_cycle);
+    assert_eq!(empty.settings, current);
+
+    // The values override the preset but stay equal to both bases; intent is still explicit.
+    let overridden = weather(
+        &current,
+        &[
+            ("preset", Raw::String("fair".into())),
+            ("coverage", Raw::Number(f64::from(current.target.coverage))),
+            (
+                "wind",
+                obj(&[("speed", Raw::Number(f64::from(current.target.wind_speed)))]),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(overridden.settings.target, current.target);
+    assert_eq!(overridden.cycle_start, Some(WeatherPreset::Fair));
+    assert!(overridden.restart_cycle);
+}
+
+/// A manual target edit stops the cycle unless the same patch explicitly re-enables it. A
+/// changed seed or a false-to-true changing edit restarts; unchanged `changing: true` alone
+/// keeps the running cycle and does not restart it.
+#[test]
+fn weather_manual_target_edits_and_explicit_restart_intent() {
+    let current = WeatherSettings {
+        changing: true,
+        seed: 7,
+        ..WeatherSettings::default()
+    };
+    let edit = weather(&current, &[("coverage", Raw::Number(0.4))]).unwrap();
+    assert!(
+        !edit.settings.changing,
+        "a manual target edit stops changing"
+    );
+    assert!(!edit.restart_cycle);
+    assert_eq!(edit.settings.target.coverage, 0.4);
+    assert_eq!(edit.settings.seed, 7);
+
+    let kept = weather(
+        &current,
+        &[
+            ("coverage", Raw::Number(0.4)),
+            ("changing", Raw::Bool(true)),
+        ],
+    )
+    .unwrap();
+    assert!(
+        kept.settings.changing,
+        "an explicit true wins over the stop"
+    );
+    assert!(
+        !kept.restart_cycle,
+        "an unchanged changing:true never restarts"
+    );
+
+    let idle = weather(&current, &[("changing", Raw::Bool(true))]).unwrap();
+    assert!(idle.settings.changing);
+    assert!(!idle.restart_cycle);
+    assert_eq!(idle.settings, current);
+
+    let stopped = WeatherSettings {
+        changing: false,
+        ..current
+    };
+    let enabled = weather(&stopped, &[("changing", Raw::Bool(true))]).unwrap();
+    assert!(enabled.settings.changing);
+    assert!(enabled.restart_cycle, "false-to-true restarts");
+
+    let reseeded = weather(&current, &[("seed", Raw::Number(8.0))]).unwrap();
+    assert_eq!(reseeded.settings.seed, 8);
+    assert!(reseeded.restart_cycle, "a changed seed restarts");
+
+    // Changing false with no base selection or seed change never restarts.
+    let stopped = weather(&stopped, &[("changing", Raw::Bool(false))]).unwrap();
+    assert!(!stopped.settings.changing);
+    assert!(!stopped.restart_cycle);
+}
+
+/// Omitted and `undefined` fields merge over the accepted authored settings, including each
+/// wind component separately; null is a refusal, never an omission.
+#[test]
+fn weather_omissions_merge_nested_wind() {
+    let current = WeatherSettings {
+        enabled: false,
+        shadows: false,
+        changing: true,
+        seed: 42,
+        transition_seconds: 2.5,
+        target: Weather::by_name("broken").unwrap(),
+    };
+    let update = weather(&current, &[("wind", obj(&[("speed", Raw::Number(3.0))]))]).unwrap();
+    assert_eq!(update.settings.target.wind_speed, 3.0);
+    assert_eq!(update.settings.target.wind_from, current.target.wind_from);
+    assert_eq!(update.settings.target.coverage, current.target.coverage);
+    assert!(!update.settings.enabled);
+    assert!(!update.settings.shadows);
+    assert_eq!(update.settings.seed, 42);
+    assert_eq!(update.settings.transition_seconds, 2.5);
+    assert!(!update.settings.changing, "the wind edit is manual");
+
+    // A wind object whose components are undefined is an omission of both components.
+    let undefined_wind = weather(
+        &current,
+        &[(
+            "wind",
+            obj(&[("speed", Raw::Undefined), ("from", Raw::Undefined)]),
+        )],
+    )
+    .unwrap();
+    assert_eq!(undefined_wind.settings, current);
+    assert!(undefined_wind.settings.changing, "undefined is not an edit");
+
+    let omitted = weather(
+        &current,
+        &[
+            ("preset", Raw::Undefined),
+            ("text", Raw::Undefined),
+            ("enabled", Raw::Undefined),
+            ("shadows", Raw::Undefined),
+            ("changing", Raw::Undefined),
+            ("seed", Raw::Undefined),
+            ("transitionSeconds", Raw::Undefined),
+            ("coverage", Raw::Undefined),
+            ("type", Raw::Undefined),
+            ("base", Raw::Undefined),
+            ("thickness", Raw::Undefined),
+            ("density", Raw::Undefined),
+            ("cirrus", Raw::Undefined),
+            ("wind", Raw::Undefined),
+            ("evolution", Raw::Undefined),
+            ("rain", Raw::Undefined),
+        ],
+    )
+    .unwrap();
+    assert_eq!(omitted.settings, current);
+    assert_eq!(omitted.cycle_start, None);
+    assert!(!omitted.restart_cycle);
+}
+
+/// Every structured refusal names its complete field path with `sky.invalid`, and the
+/// accepted current settings are never mutated by a refused patch.
+#[test]
+fn weather_candidate_refusals_name_complete_paths() {
+    let current = WeatherSettings::default();
+    let before = current;
+    expect_weather_invalid(weather(&current, &[("preset", Raw::Null)]), "preset");
+    expect_weather_invalid(
+        weather(&current, &[("preset", Raw::String("drizzle".into()))]),
+        "preset",
+    );
+    expect_weather_invalid(weather(&current, &[("preset", Raw::Number(1.0))]), "preset");
+    expect_weather_invalid(weather(&current, &[("text", Raw::Null)]), "text");
+    expect_weather_invalid(
+        weather(&current, &[("text", Raw::String("coverage nope\n".into()))]),
+        "text",
+    );
+    expect_weather_invalid(
+        weather(
+            &current,
+            &[
+                ("preset", Raw::String("fair".into())),
+                ("text", Raw::String(String::new())),
+            ],
+        ),
+        "text",
+    );
+    expect_weather_invalid(weather(&current, &[("enabled", Raw::Null)]), "enabled");
+    expect_weather_invalid(
+        weather(&current, &[("enabled", Raw::Number(1.0))]),
+        "enabled",
+    );
+    expect_weather_invalid(weather(&current, &[("shadows", Raw::Null)]), "shadows");
+    expect_weather_invalid(
+        weather(&current, &[("shadows", Raw::String("on".into()))]),
+        "shadows",
+    );
+    expect_weather_invalid(weather(&current, &[("changing", Raw::Null)]), "changing");
+    expect_weather_invalid(
+        weather(&current, &[("changing", Raw::Number(1.0))]),
+        "changing",
+    );
+
+    expect_weather_invalid(weather(&current, &[("seed", Raw::Null)]), "seed");
+    expect_weather_invalid(weather(&current, &[("seed", Raw::Number(-1.0))]), "seed");
+    expect_weather_invalid(weather(&current, &[("seed", Raw::Number(1.5))]), "seed");
+    expect_weather_invalid(
+        weather(
+            &current,
+            &[("seed", Raw::Number(f64::from(u32::MAX) + 1.0))],
+        ),
+        "seed",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("seed", Raw::Number(f64::NAN))]),
+        "seed",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("seed", Raw::Number(f64::INFINITY))]),
+        "seed",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("seed", Raw::String("1".into()))]),
+        "seed",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("transitionSeconds", Raw::Null)]),
+        "transitionSeconds",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("transitionSeconds", Raw::Number(-0.5))]),
+        "transitionSeconds",
+    );
+    expect_weather_invalid(
+        weather(
+            &current,
+            &[("transitionSeconds", Raw::Number(f64::INFINITY))],
+        ),
+        "transitionSeconds",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("transitionSeconds", Raw::Number(1e300))]),
+        "transitionSeconds",
+    );
+
+    expect_weather_invalid(weather(&current, &[("coverage", Raw::Null)]), "coverage");
+    expect_weather_invalid(
+        weather(&current, &[("coverage", Raw::Number(1.5))]),
+        "coverage",
+    );
+    expect_weather_invalid(weather(&current, &[("type", Raw::Null)]), "type");
+    expect_weather_invalid(weather(&current, &[("type", Raw::Number(-0.1))]), "type");
+    expect_weather_invalid(weather(&current, &[("base", Raw::Null)]), "base");
+    expect_weather_invalid(weather(&current, &[("base", Raw::Number(-1.0))]), "base");
+    expect_weather_invalid(weather(&current, &[("thickness", Raw::Null)]), "thickness");
+    expect_weather_invalid(
+        weather(&current, &[("thickness", Raw::Number(99.0))]),
+        "thickness",
+    );
+    expect_weather_invalid(weather(&current, &[("density", Raw::Null)]), "density");
+    expect_weather_invalid(
+        weather(&current, &[("density", Raw::Number(-1.0))]),
+        "density",
+    );
+    expect_weather_invalid(weather(&current, &[("cirrus", Raw::Null)]), "cirrus");
+    expect_weather_invalid(weather(&current, &[("cirrus", Raw::Number(1.1))]), "cirrus");
+    expect_weather_invalid(weather(&current, &[("evolution", Raw::Null)]), "evolution");
+    expect_weather_invalid(
+        weather(&current, &[("evolution", Raw::Number(-1.0))]),
+        "evolution",
+    );
+    expect_weather_invalid(weather(&current, &[("rain", Raw::Null)]), "rain");
+    expect_weather_invalid(weather(&current, &[("rain", Raw::Number(2.0))]), "rain");
+
+    expect_weather_invalid(weather(&current, &[("wind", Raw::Null)]), "wind");
+    expect_weather_invalid(
+        weather(&current, &[("wind", Raw::String("north".into()))]),
+        "wind",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("wind", obj(&[("speed", Raw::Null)]))]),
+        "wind.speed",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("wind", obj(&[("speed", Raw::Number(-1.0))]))]),
+        "wind.speed",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("wind", obj(&[("from", Raw::Null)]))]),
+        "wind.from",
+    );
+    expect_weather_invalid(
+        weather(
+            &current,
+            &[("wind", obj(&[("from", Raw::Number(f64::INFINITY))]))],
+        ),
+        "wind.from",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("wind", obj(&[("gust", Raw::Number(1.0))]))]),
+        "wind.gust",
+    );
+
+    // A parsed text base does not hide a later structured refusal, and the derived
+    // base + thickness stays finite in f32.
+    expect_weather_invalid(
+        weather(
+            &current,
+            &[
+                ("text", Raw::String("coverage 0.5\n".into())),
+                ("thickness", Raw::Number(10.0)),
+            ],
+        ),
+        "thickness",
+    );
+    expect_weather_invalid(
+        weather(
+            &current,
+            &[
+                ("base", Raw::Number(f64::from(f32::MAX))),
+                ("thickness", Raw::Number(f64::from(f32::MAX))),
+            ],
+        ),
+        "base",
+    );
+    expect_weather_invalid(weather(&current, &[("bogus", Raw::Number(1.0))]), "bogus");
+    assert_eq!(
+        current, before,
+        "a refusal never mutates the current settings"
+    );
+}
+
+/// The JS boundary keeps the required private parser signature and the preceding sky/time
+/// methods; setWeather is the separate consumer that applies the returned candidate once.
+#[test]
+fn weather_candidate_parser_exists_with_the_js_description_signature() {
+    let src = include_str!("../src/api/m08_sky_ibl.rs");
+    assert!(src.contains("fn parse_weather_candidate("));
+    assert!(src.contains("desc: &JsValue,"));
+    assert!(src.contains("current: &raa_sky::WeatherSettings,"));
+    assert!(src.contains("-> Result<raa_sky::WeatherUpdate, RaaError>"));
+    for name in [
+        "setSky",
+        "setEnvironmentLighting",
+        "setTimeOfDay",
+        "timeOfDay",
+        "skyWeatherDiagnostics",
+    ] {
+        assert!(src.contains(&format!("js_name = {name})]")), "no {name}");
+    }
 }
 
 fn view(view: u32, reasons: CloudResetReasons) -> SkyViewDiagnostics {

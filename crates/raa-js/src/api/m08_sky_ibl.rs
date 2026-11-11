@@ -32,7 +32,7 @@ use raa_core::RaaError;
 use raa_ibl::IblPublication;
 use raa_sky::{
     EnvUpdate, LegacyCloudFields, SkyDesc, SkyDiagnostics, SkyModel, SkyTransaction,
-    TimeOfDaySettings,
+    TimeOfDaySettings, Weather, WeatherPreset, WeatherSettings,
 };
 
 /// The refusal code of an invalid sky/time/weather candidate (S24).
@@ -509,6 +509,187 @@ pub(crate) fn parse_time_of_day(
     }
     settings.validate()?;
     Ok(settings)
+}
+
+/// The S24 `WeatherDesc` fields; `undefined` is the only omission.
+const WEATHER_FIELDS: &[&str] = &[
+    "preset",
+    "text",
+    "enabled",
+    "shadows",
+    "changing",
+    "seed",
+    "transitionSeconds",
+    "coverage",
+    "type",
+    "base",
+    "thickness",
+    "density",
+    "cirrus",
+    "wind",
+    "evolution",
+    "rain",
+];
+
+const WIND_FIELDS: &[&str] = &["speed", "from"];
+
+/// Parses a JS `WeatherDesc` patch over the accepted authored settings into the complete
+/// `WeatherUpdate` candidate without mutating anything.
+///
+/// `preset` and `text` are mutually exclusive and supply the base target before the
+/// structured overrides; an explicit preset keeps its `WeatherPreset` identity even when
+/// the patch also overrides values, and text supplies `Fair` as the cycle start. Either
+/// explicit base selection requests a restart. A changed seed or a changing false-to-true
+/// edit also requests a restart; a manual target edit stops an active cycle unless the same
+/// patch explicitly sets `changing: true`, while an unchanged `changing: true` alone never
+/// restarts. The complete candidate, including `base + thickness`, is validated before it
+/// is returned, so `set_weather_update` sees only an accepted candidate.
+pub(crate) fn parse_weather_update(
+    current: &WeatherSettings,
+    obj: &dyn Properties,
+) -> Result<raa_sky::WeatherUpdate, RaaError> {
+    reject_unknown(obj, "", WEATHER_FIELDS)?;
+    let preset = strict_string(obj, "preset", "preset")?;
+    let text = strict_string(obj, "text", "text")?;
+    if preset.is_some() && text.is_some() {
+        return Err(invalid("text", "must not be combined with 'preset'"));
+    }
+
+    let mut target = current.target;
+    let mut cycle_start = None;
+    if let Some(name) = &preset {
+        let selected = WeatherPreset::by_name(name).ok_or_else(|| {
+            invalid(
+                "preset",
+                format!(
+                    "must be 'clear', 'fair', 'broken', 'overcast', 'storm' or 'cirrus', got '{name}'"
+                ),
+            )
+        })?;
+        target = Weather::by_name(name)
+            .ok_or_else(|| invalid("preset", format!("has no built-in weather '{name}'")))?;
+        cycle_start = Some(selected);
+    }
+    if let Some(text) = &text {
+        // Text files are normalized by raa-sky, so the structured validation below still
+        // governs the merged candidate; only a malformed file refuses here.
+        target = Weather::parse(text).map_err(|message| invalid("text", message))?;
+        cycle_start = Some(WeatherPreset::Fair);
+    }
+
+    let mut target_edited = false;
+    if let Some(value) = strict_number(obj, "coverage", "coverage")? {
+        within("coverage", value, 0.0, 1.0)?;
+        target.coverage = value;
+        target_edited = true;
+    }
+    if let Some(value) = strict_number(obj, "type", "type")? {
+        within("type", value, 0.0, 1.0)?;
+        target.cloud_type = value;
+        target_edited = true;
+    }
+    if let Some(value) = strict_number(obj, "base", "base")? {
+        at_least("base", value, 0.0)?;
+        target.base = value;
+        target_edited = true;
+    }
+    if let Some(value) = strict_number(obj, "thickness", "thickness")? {
+        at_least("thickness", value, 100.0)?;
+        target.thickness = value;
+        target_edited = true;
+    }
+    if let Some(value) = strict_number(obj, "density", "density")? {
+        at_least("density", value, 0.0)?;
+        target.density = value;
+        target_edited = true;
+    }
+    if let Some(value) = strict_number(obj, "cirrus", "cirrus")? {
+        within("cirrus", value, 0.0, 1.0)?;
+        target.cirrus = value;
+        target_edited = true;
+    }
+    if let Some(wind) = strict_object(obj, "wind", "wind")? {
+        let wind: &dyn Properties = &*wind;
+        reject_unknown(wind, "wind", WIND_FIELDS)?;
+        if let Some(value) = strict_number(wind, "speed", "wind.speed")? {
+            at_least("wind.speed", value, 0.0)?;
+            target.wind_speed = value;
+            target_edited = true;
+        }
+        if let Some(value) = strict_number(wind, "from", "wind.from")? {
+            target.wind_from = value;
+            target_edited = true;
+        }
+    }
+    if let Some(value) = strict_number(obj, "evolution", "evolution")? {
+        at_least("evolution", value, 0.0)?;
+        target.evolution = value;
+        target_edited = true;
+    }
+    if let Some(value) = strict_number(obj, "rain", "rain")? {
+        within("rain", value, 0.0, 1.0)?;
+        target.rain = value;
+        target_edited = true;
+    }
+
+    if !(target.base + target.thickness).is_finite() {
+        return Err(invalid(
+            "base",
+            format!(
+                "plus 'thickness' must stay finite, got {} + {}",
+                target.base, target.thickness
+            ),
+        ));
+    }
+    target.validate()?;
+
+    let enabled = strict_bool(obj, "enabled", "enabled")?;
+    let shadows = strict_bool(obj, "shadows", "shadows")?;
+    let changing = strict_bool(obj, "changing", "changing")?;
+    let mut seed = current.seed;
+    if let Some(value) = strict_f64(obj, "seed", "seed")? {
+        if value.fract() != 0.0 || !(0.0..=(u32::MAX as f64)).contains(&value) {
+            return Err(invalid(
+                "seed",
+                format!("must be an unsigned 32-bit integer, got {value}"),
+            ));
+        }
+        seed = value as u32;
+    }
+    let mut transition_seconds = current.transition_seconds;
+    if let Some(value) = strict_number(obj, "transitionSeconds", "transitionSeconds")? {
+        if value < 0.0 {
+            return Err(invalid(
+                "transitionSeconds",
+                format!("must be finite and >= 0, got {value}"),
+            ));
+        }
+        transition_seconds = value;
+    }
+
+    // A manual target edit stops an active cycle unless this same patch turns changing back
+    // on; an explicit value always wins over the inferred stop.
+    let changing = match changing {
+        Some(value) => value,
+        None if target_edited => false,
+        None => current.changing,
+    };
+    let update = raa_sky::WeatherUpdate {
+        settings: WeatherSettings {
+            enabled: enabled.unwrap_or(current.enabled),
+            shadows: shadows.unwrap_or(current.shadows),
+            changing,
+            seed,
+            transition_seconds,
+            target,
+        },
+        cycle_start,
+        restart_cycle: cycle_start.is_some()
+            || seed != current.seed
+            || (!current.changing && changing),
+    };
+    update.validate()?;
+    Ok(update)
 }
 
 /// The S24 `TimeOfDayState` flattened into its JS fields (fresh on every getter call).
@@ -994,6 +1175,19 @@ mod web {
         o.into()
     }
 
+    /// Parses a JS `WeatherDesc` into the complete owned candidate, including cycle-start
+    /// and restart intent, without mutating the accepted state. The caller applies it once
+    /// through `SkyHandle::set_weather_update`.
+    fn parse_weather_candidate(
+        desc: &JsValue,
+        current: &raa_sky::WeatherSettings,
+    ) -> Result<raa_sky::WeatherUpdate, RaaError> {
+        if !desc.is_object() || desc.is_null() || Array::is_array(desc) {
+            return Err(arg_invalid("weather description must be an object"));
+        }
+        parse_weather_update(current, &ReflectSource(desc.clone()))
+    }
+
     /// A finite intensity >= 0 at `key`, if present (existing `setEnvironmentLighting` rule).
     fn intensity(obj: &JsValue, key: &str) -> Result<Option<f32>, RaaError> {
         match js::optional_f64(obj, key)?.map(|x| x as f32) {
@@ -1060,6 +1254,19 @@ mod web {
                 Ok(time_of_day_to_js(&serialize_time_of_day(
                     &sky.time_of_day(),
                 )))
+            })
+        }
+
+        /// Parses the S24 weather patch fully into an owned candidate (settings plus
+        /// cycle-start/restart intent) and then applies it exactly once. Nothing changes on
+        /// a refusal. HANDOFF 7443: extend this entry (getter, declarations, documentation).
+        #[wasm_bindgen(js_name = setWeather)]
+        pub fn set_weather(&mut self, desc: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                let sky = st.features.require_mut::<SkyHandle>("sky")?;
+                let current = sky.weather().settings;
+                let update = parse_weather_candidate(&desc, &current)?;
+                sky.set_weather_update(update)
             })
         }
 
