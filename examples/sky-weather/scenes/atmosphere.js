@@ -67,9 +67,12 @@ const behaviors = {
     + 'the stars and the faint Milky Way band have rotated to new positions, and the sky remains dark. ' + shared,
   // M1 renders clouds through the neutral backend: the overcast/broken weather targets are
   // accepted state only; volumetric cloud structure is M2's, so none is described here.
-  snow: 'Snow preset at midday: a bright, pale whitish-blue hazy sky with a bright milky horizon from the stronger haze '
-    + 'and high snow ground albedo; the scene is evenly and brightly lit and the chrome sphere reflects the pale sky. '
-    + 'No volumetric cloud forms are expected in this physical-atmosphere stage. ' + shared,
+  // The ground is the scene's fixed ground plane (lib/scene.js), not controlled by the sky stage.
+  snow: 'Snow preset at midday: a bright, pale whitish-blue hazy sky with a bright milky horizon from the stronger haze, '
+    + 'even soft lighting, and the chrome sphere reflecting the pale sky. No volumetric cloud forms are expected in this '
+    + 'physical-atmosphere stage. The scene\'s fixed ground plane carries a terracotta matte sphere on the left, a chrome '
+    + 'sphere on the right and three distant block forms behind them, all readable. The status below the view reads ready, '
+    + 'with no displayed failure.',
   jungle: 'Jungle preset in mid-afternoon: a humid, slightly hazy blue sky with a soft bright greenish-warm horizon haze, '
     + 'warm sunlight on the spheres and the chrome sphere reflecting the sky. No volumetric cloud forms are expected in '
     + 'this physical-atmosphere stage. ' + shared,

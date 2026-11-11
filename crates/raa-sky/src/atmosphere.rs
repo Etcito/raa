@@ -2144,6 +2144,43 @@ mod tests {
         assert!(error.is_none(), "validation error: {error:?}");
     }
 
+    /// The snow preset's physical mapping reaches the uploaded S10 lanes the LUT shaders
+    /// read: a denser aerosol (Mie multiplier in `ground_albedo.w`), a brighter ground
+    /// albedo for multiple scattering, and therefore a smaller direct-sun fraction (the
+    /// analytic zenith transmittance of the exponential Rayleigh/Mie columns) against the
+    /// clear-day default.
+    #[test]
+    fn snow_preset_uploads_denser_haze_brighter_albedo_and_less_direct_sun() {
+        let upload = |name: &str| {
+            let state = SkyState {
+                desc: crate::desc::SkyDesc::preset(name).expect("preset"),
+                ..SkyState::default()
+            };
+            PhysicalSkyGpu::from_state(&state, &Camera::default(), (1280, 720), 0.0)
+        };
+        let direct = |gpu: &PhysicalSkyGpu| {
+            let rayleigh = (gpu.rayleigh[0] + gpu.rayleigh[1] + gpu.rayleigh[2]) / 3.0;
+            let mie = gpu.mie[0] * gpu.ground_albedo[3] + gpu.mie[1];
+            (-(rayleigh * gpu.rayleigh[3] + mie * gpu.mie[2])).exp()
+        };
+        let (day, snow) = (upload("day"), upload("snow"));
+        assert_eq!(day.ground_albedo, [0.3, 0.3, 0.3, 1.0]);
+        assert_eq!(snow.ground_albedo, [0.9, 0.9, 0.9, 1.5]);
+        assert!(
+            snow.ground_albedo[3] > day.ground_albedo[3],
+            "aerosol density"
+        );
+        assert!(
+            snow.ground_albedo[0] > day.ground_albedo[0],
+            "ground albedo"
+        );
+        assert!(direct(&snow) < direct(&day), "direct sun fraction");
+        let bytes = snow.to_bytes();
+        let lane =
+            |i: usize| f32::from_le_bytes(bytes[128 + i * 4..132 + i * 4].try_into().unwrap());
+        assert_eq!([lane(0), lane(1), lane(2), lane(3)], [0.9, 0.9, 0.9, 1.5]);
+    }
+
     /// The night celestial state the atmosphere scene captures (day 13, 22:00, 38 N, north
     /// -1.8 rad) uploads non-zero moon and star radiance and a moonlit dominant light, so
     /// a black night frame cannot come from a zeroed sky term or a missing moonlight.

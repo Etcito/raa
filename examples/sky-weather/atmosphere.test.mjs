@@ -350,3 +350,11 @@ test('weather overrides, omitted/explicit presets and model switches check reque
   assert.equal(atmosphere.editAssertions(sw(['legacy', 'physical', 'legacy']), lc).find(a => a.name === 'weather-retained-across-model-switches').passed, true);
   assert.equal(atmosphere.editAssertions(sw(['legacy', 'legacy', 'legacy']), lc).find(a => a.name === 'weather-retained-across-model-switches').passed, false);
 });
+
+test('snow expectation describes only what the sky stage controls', async () => {
+  const { inventory } = await import('./scenes/atmosphere.js');
+  const text = inventory.find(r => r.mode === 'snow').expectedVisibleBehavior;
+  for (const word of ['ground albedo', 'neutral ground']) assert.ok(!text.includes(word), word);
+  assert.match(text, /pale whitish-blue hazy sky/);
+  assert.match(text, /milky horizon/);
+});
