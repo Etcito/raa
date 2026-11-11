@@ -57,6 +57,7 @@ use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx};
 use raa_scene::{Camera, DirectionalLight};
 
 use crate::atmosphere::{AtmosphereResources, SharedAtmosphere};
+use crate::desc::SkyModel;
 use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage};
 use crate::state::{SharedSky, SkyState};
 use crate::time_of_day::CelestialSky;
@@ -113,6 +114,20 @@ pub struct CloudFrame {
     pub dominant: DirectionalLight,
     /// Animation seconds since the feature started, for evolution and jitter.
     pub animation_seconds: f64,
+    /// Accepted wind drift in metres (x = east, z = south, rotated by `Place.north`,
+    /// wrapped to 252000).
+    pub wind_offset: [f32; 2],
+    /// Current weather wind velocity in metres per second, same axes, rotated by the
+    /// accepted `Place.north`.
+    pub wind_velocity: [f32; 2],
+    /// Accepted cloud-boil phase in metres, wrapped to 7000.
+    pub evolution: f32,
+    /// The accepted `WeatherSettings.enabled` flag.
+    pub weather_enabled: bool,
+    /// The accepted `WeatherSettings.shadows` flag.
+    pub cloud_shadows: bool,
+    /// True when the accepted sky model is `SkyModel::Physical`.
+    pub physical: bool,
 }
 
 /// The panorama, screen and transmittance views a cloud backend exposes.
@@ -220,6 +235,8 @@ fn cloud_frame(
         .get(view as usize)
         .and_then(Option::as_ref)
         .ok_or_else(|| invalid(format!("cloud view {view} is not prepared")))?;
+    let [east, south] = state.weather.current.wind_velocity();
+    let (sin, cos) = state.time.state.settings.place.north.sin_cos();
     Ok(CloudFrame {
         invocation,
         view,
@@ -231,6 +248,12 @@ fn cloud_frame(
         sky: state.time.state.sky,
         dominant: state.time.last_light,
         animation_seconds: f64::from(time_s),
+        wind_offset: state.weather.wind_offset,
+        wind_velocity: [east * cos + south * sin, -east * sin + south * cos],
+        evolution: state.weather.evolution,
+        weather_enabled: state.weather.settings.enabled,
+        cloud_shadows: state.weather.settings.shadows,
+        physical: state.desc.model == SkyModel::Physical,
     })
 }
 
@@ -274,8 +297,9 @@ impl FeaturePass for SkyCloudLightingPass {
         CLOUD_LIGHTING_ORDER
     }
 
-    /// Disabling publishes the neutral transmittance again; re-enabling discards the cloud
-    /// history and records the `Enable` reset reason.
+    /// Disabling publishes the neutral transmittance again and, only on the enabled-to-disabled
+    /// transition, invalidates the backend; re-enabling discards the cloud history and
+    /// records the `Enable` reset reason.
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
         if enabled && !self.enabled {
             if let Ok(mut cloud) = self.cloud.try_borrow_mut() {
@@ -285,6 +309,12 @@ impl FeaturePass for SkyCloudLightingPass {
                 s.reset_reasons(None, CloudResetReasons::ENABLE);
                 s.readiness = SkyReadiness::pending(SkyReadinessStage::CloudLighting);
             }
+        }
+        if !enabled
+            && self.enabled
+            && let Ok(mut cloud) = self.cloud.try_borrow_mut()
+        {
+            cloud.invalidate(None, CloudInvalidation::Enable);
         }
         self.enabled = enabled;
         if !enabled {
@@ -806,7 +836,130 @@ mod tests {
             sky: TimeOfDayState::default().sky,
             dominant: DirectionalLight::default(),
             animation_seconds: 3.5,
+            wind_offset: [0.0; 2],
+            wind_velocity: [0.0; 2],
+            evolution: 0.0,
+            weather_enabled: true,
+            cloud_shadows: true,
+            physical: true,
         }
+    }
+
+    fn state_with_view() -> SkyState {
+        let mut state = SkyState::default();
+        state.views[0] = Some(crate::state::ViewSlot::new(0, Camera::default(), true));
+        state
+    }
+
+    #[test]
+    fn cloud_frame_copies_drift_evolution_flags_and_model() {
+        let mut state = state_with_view();
+        state.weather.wind_offset = [12.0, -3.0];
+        state.weather.evolution = 42.0;
+        state.weather.settings.enabled = false;
+        state.weather.settings.shadows = false;
+        state.desc.model = SkyModel::Legacy;
+        let frame = cloud_frame(&state, 1, 0, (64, 64), 0.0).expect("frame");
+        assert_eq!(frame.wind_offset, [12.0, -3.0]);
+        assert_eq!(frame.evolution, 42.0);
+        assert!(!frame.weather_enabled && !frame.cloud_shadows && !frame.physical);
+    }
+
+    #[test]
+    fn cloud_frame_rotates_wind_velocity_by_north() {
+        let mut state = state_with_view();
+        state.weather.current.wind_speed = 9.0;
+        state.weather.current.wind_from = 250.0;
+        state.time.state.settings.place.north = std::f32::consts::FRAC_PI_2;
+        let [east, south] = state.weather.current.wind_velocity();
+        let frame = cloud_frame(&state, 1, 0, (64, 64), 0.0).expect("frame");
+        assert!((frame.wind_velocity[0] - south).abs() < 1e-5);
+        assert!((frame.wind_velocity[1] + east).abs() < 1e-5);
+    }
+
+    type InvalidationLog = Rc<RefCell<Vec<(Option<u32>, CloudInvalidation)>>>;
+
+    /// Records the invalidations it receives; every other method is inert.
+    struct Recording {
+        views: CloudViews,
+        log: InvalidationLog,
+    }
+
+    impl CloudRenderer for Recording {
+        fn prepare(
+            &mut self,
+            _: &GpuContext,
+            _: &CloudFrame,
+            _: &AtmosphereResources,
+            _: &mut LightingResources,
+        ) -> Result<(), RaaError> {
+            Ok(())
+        }
+
+        fn record_lighting(
+            &mut self,
+            _: &GpuContext,
+            _: &mut wgpu::CommandEncoder,
+            _: &CloudFrame,
+            _: &AtmosphereResources,
+        ) -> Result<(), RaaError> {
+            Ok(())
+        }
+
+        fn record_screen(
+            &mut self,
+            _: &GpuContext,
+            _: &mut wgpu::CommandEncoder,
+            _: &CloudFrame,
+            _: &wgpu::TextureView,
+            _: &AtmosphereResources,
+        ) -> Result<(), RaaError> {
+            Ok(())
+        }
+
+        fn views(&self, _: u32) -> CloudViews {
+            self.views.clone()
+        }
+
+        fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation) {
+            self.log.borrow_mut().push((view, reason));
+        }
+
+        fn submitted(&mut self, _: u32, _: u64) {}
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn disabling_cloud_lighting_invalidates_the_backend() {
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(
+                "disabling_cloud_lighting_invalidates_the_backend",
+                "software_gpu returned None; see the software_gpu line above",
+            );
+            return;
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let backend: Box<dyn CloudRenderer> = Box::new(Recording {
+            views: CloudViews::neutral(&gpu).expect("neutral views"),
+            log: log.clone(),
+        });
+        let state: SharedSky = Rc::new(RefCell::new(SkyState::default()));
+        let atmosphere = Rc::new(RefCell::new(
+            AtmosphereResources::new(&gpu).expect("atmosphere resources"),
+        ));
+        let mut pass =
+            SkyCloudLightingPass::new(state.clone(), Rc::new(RefCell::new(backend)), atmosphere);
+        let mut lighting = LightingResources::new(&gpu);
+        let readiness = state.borrow().readiness.clone();
+        let once = vec![(None, CloudInvalidation::Enable)];
+        pass.set_enabled(false, &mut lighting);
+        assert_eq!(*log.borrow(), once);
+        assert_eq!(state.borrow().readiness, readiness);
+        pass.set_enabled(false, &mut lighting);
+        assert_eq!(*log.borrow(), once, "a second disable adds nothing");
+        pass.set_enabled(true, &mut lighting);
+        assert_eq!(log.borrow().len(), 2);
+        assert_eq!(log.borrow()[1], (None, CloudInvalidation::Enable));
     }
 
     #[test]

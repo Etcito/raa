@@ -48,6 +48,12 @@ fn cloud_frame_carries_the_copied_snapshot() {
         sky: TimeOfDayState::default().sky,
         dominant: DirectionalLight::default(),
         animation_seconds: 12.5,
+        wind_offset: [0.0; 2],
+        wind_velocity: [0.0; 2],
+        evolution: 0.0,
+        weather_enabled: true,
+        cloud_shadows: true,
+        physical: true,
     };
     assert_eq!(frame.invocation, 9);
     assert_eq!(frame.view, 2);
@@ -55,6 +61,10 @@ fn cloud_frame_carries_the_copied_snapshot() {
     assert!(!frame.history_valid);
     assert_eq!(frame.animation_seconds, 12.5);
     assert_eq!(frame.dominant, DirectionalLight::default());
+    assert_eq!(frame.wind_offset, [0.0; 2]);
+    assert_eq!(frame.wind_velocity, [0.0; 2]);
+    assert_eq!(frame.evolution, 0.0);
+    assert!(frame.weather_enabled && frame.cloud_shadows && frame.physical);
     // `CloudFrame` is a copied snapshot, so a copy leaves the original intact.
     let copy = frame;
     assert_eq!(copy, frame);
