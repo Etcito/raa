@@ -34,3 +34,32 @@ pub(super) const COVERAGE_ENTRIES: [&str; 2] = [
 pub(super) fn coverage_module_wgsl() -> String {
     COVERAGE_SRC.to_string()
 }
+
+/// The read-only physical atmosphere helpers every cloud march module composes first.
+const ATMOSPHERE_SRC: &str = include_str!("../wgsl/atmosphere.wgsl");
+
+/// The uniform record and density model; the march share appends its lighting and march.
+const CLOUD_VOLUME_SRC: &str = include_str!("wgsl/cloud_volume.wgsl");
+
+/// The private group-2 bindings 0-9 every cloud march module declares.
+const CLOUD_BINDINGS: &str = "\
+@group(2) @binding(0) var<uniform> raa_cloud: CloudGpu;
+@group(2) @binding(1) var<uniform> raa_cloud_sky: PhysicalSkyGpu;
+@group(2) @binding(2) var raa_cloud_shape: texture_3d<f32>;
+@group(2) @binding(3) var raa_cloud_detail: texture_3d<f32>;
+@group(2) @binding(4) var raa_cloud_weather_map: texture_2d<f32>;
+@group(2) @binding(5) var raa_cloud_transmittance_lut: texture_2d<f32>;
+@group(2) @binding(6) var raa_cloud_sky_view: texture_2d<f32>;
+@group(2) @binding(7) var raa_cloud_noise_sampler: sampler;
+@group(2) @binding(8) var raa_cloud_lut_sampler: sampler;
+@group(2) @binding(9) var<storage, read> raa_cloud_coverage_cdf: array<f32, 256>;";
+
+/// The common part of every cloud march module: the atmosphere helpers, the group-2
+/// bindings 0-9 and the whole cloud uniform/density text, with no compute function.
+/// A pass module appends its output binding and its compute function.
+pub(super) fn cloud_volume_wgsl() -> String {
+    format!("{ATMOSPHERE_SRC}\n{CLOUD_BINDINGS}\n{CLOUD_VOLUME_SRC}")
+}
+
+// Contract check until the ground-shadow card builds a march pass from this builder.
+const _: fn() -> String = cloud_volume_wgsl;

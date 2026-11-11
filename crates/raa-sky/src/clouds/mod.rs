@@ -35,6 +35,7 @@ SOFTWARE.
 
 mod history;
 mod noise;
+mod resources;
 mod shaders;
 #[cfg(test)]
 mod tests;

@@ -2,6 +2,7 @@
 
 mod history;
 mod noise;
+mod resources;
 mod shaders;
 
 use raa_math::Mat4;
