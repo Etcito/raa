@@ -3,6 +3,10 @@ import { buildSkySample, sampleSelection } from '../lib/scene.js';
 // Physical atmosphere and celestial time through the delivered public m08 API only.
 // Every observation below is read back from Engine getters; nothing is inferred from
 // the authored constants except the comparisons the assertions name.
+// M1 scope: clouds go through the neutral backend, so overcast/broken weather is accepted
+// authored state without volumetric structure (M2 owns that). The legacy model is the retained
+// gradient/layer evaluator; it keeps the full authored weather but only approximates it as a
+// planar layer and never claims volumetric parity with the physical model.
 
 const dayCamera = { eye: [0, 2.6, 9], target: [0, 1.9, -8], fovYDeg: 47, near: .1, far: 300 };
 // Night cameras tilt up so the moon (placed ahead by the authored north rotation) is framed.
@@ -15,6 +19,27 @@ const moments = {
   twilight: { day: 172, hours: 19.9, latitude: 38, north: -.6 },
   night: { day: 13, hours: 22, latitude: 38, north: -1.8 },
   later: { day: 14, hours: 23, latitude: 38, north: -1.8 },
+  // Physical snow/jungle keep their preset moment (day 172 at 12:00 / 15:00).
+  snow: { day: 172, hours: 12, latitude: 38, north: 0 },
+  jungle: { day: 172, hours: 15, latitude: 38, north: 0 },
+  // Same moment as the physical day capture, which is its comparison partner.
+  legacy: { day: 172, hours: 17.5, latitude: 38, north: 0 },
+};
+
+// S24 physical preset mappings: weather target, preset hour on day 172, ground albedo, Mie.
+// Weather values are the delivered built-in targets (coverage, base, thickness).
+export const physicalPresets = {
+  day: { weather: 'fair', coverage: .3, base: 1200, thickness: 1600, hours: 9, groundAlbedo: [.3, .3, .3], mieMultiplier: 1 },
+  snow: { weather: 'overcast', coverage: .97, base: 600, thickness: 900, hours: 12, groundAlbedo: [.9, .9, .9], mieMultiplier: 1.5 },
+  jungle: { weather: 'broken', coverage: .62, base: 1000, thickness: 2600, hours: 15, groundAlbedo: [.18, .26, .14], mieMultiplier: 1.2 },
+  night: { weather: 'clear', coverage: 0, base: 1200, thickness: 1600, hours: 0, groundAlbedo: [.3, .3, .3], mieMultiplier: 1 },
+};
+const presetOf = { day: 'day', twilight: 'day', night: 'night', later: 'night', snow: 'snow', jungle: 'jungle', legacy: 'day' };
+// The authored weather of each mode (named preset, then overrides).
+const authoredWeather = {
+  snow: null, // keeps the overcast target the snow preset supplied
+  jungle: { preset: 'broken', coverage: .7, wind: { speed: 12 } },
+  legacy: { preset: 'clear', cirrus: .2, wind: { speed: 9 } },
 };
 
 const shared = 'A broad neutral ground with a terracotta matte sphere on the left, a chrome sphere on the right '
@@ -28,20 +53,37 @@ const behaviors = {
     + 'many small stars and a faint band of the Milky Way readable against the dark sky. The ground and spheres are dim, softly moonlit. ' + shared,
   later: 'The same dark night one day and one hour later: the moon is at a different place in the sky and shows a fuller phase, '
     + 'the stars and the faint Milky Way band have rotated to new positions, and the sky remains dark. ' + shared,
+  // M1 renders clouds through the neutral backend: the overcast/broken weather targets are
+  // accepted state only; volumetric cloud structure is M2's, so none is described here.
+  snow: 'Snow preset at midday: a bright, pale whitish-blue hazy sky with a bright milky horizon from the stronger haze '
+    + 'and high snow ground albedo; the scene is evenly and brightly lit and the chrome sphere reflects the pale sky. '
+    + 'No volumetric cloud forms are expected in this physical-atmosphere stage. ' + shared,
+  jungle: 'Jungle preset in mid-afternoon: a humid, slightly hazy blue sky with a soft bright greenish-warm horizon haze, '
+    + 'warm sunlight on the spheres and the chrome sphere reflecting the sky. No volumetric cloud forms are expected in '
+    + 'this physical-atmosphere stage. ' + shared,
+  legacy: 'The retained legacy sky model for comparison: a smooth artistic gradient from a blue zenith to a pale warm horizon '
+    + 'with a flat painted look rather than physical scattering, at most a soft flat planar cloud layer and no volumetric '
+    + 'clouds; the chrome sphere reflects that gradient. ' + shared,
 };
 
 export const factNames = [
   'atmosphere-submitted', 'environment-published', 'view-submitted', 'time-authored',
   'sun-daylight', 'sun-twilight-band', 'sun-below-night', 'moon-in-view', 'moon-phase-partial',
-  'celestial-positions-changed',
+  'celestial-positions-changed', 'physical-preset-mapping', 'omitted-preset-retains-moment',
+  'explicit-preset-resets-moment', 'weather-preset-overrides', 'legacy-preset-mappings',
+  'weather-retained-across-model-switches', 'sky-model-legacy',
 ];
 
 const common = ['snapshot:sky', 'snapshot:time', 'snapshot:weather', 'snapshot:diagnostics',
   'runtime:passes', 'runtime:viewSizes', 'runtime:ready',
-  'assertion:atmosphere-submitted', 'assertion:environment-published', 'assertion:view-submitted', 'assertion:time-authored'];
+  'assertion:atmosphere-submitted', 'assertion:environment-published', 'assertion:view-submitted', 'assertion:time-authored',
+  'assertion:physical-preset-mapping'];
+// Physical/legacy pair for the shared 30/300-frame functional collector.
+export const MODEL_PAIR = 'sky-model';
+const pairOf = { day: MODEL_PAIR, legacy: MODEL_PAIR };
 const row = (id, criterionName, mode, filename, extra) => ({
   id, criterionName, scenario: 'atmosphere', mode, filename, expectedVisibleBehavior: behaviors[mode],
-  requiredFacts: [...common, ...extra.map(name => `assertion:${name}`)], pair: null,
+  requiredFacts: [...common, ...extra.map(name => `assertion:${name}`)], pair: pairOf[mode] ?? null,
 });
 
 export const inventory = [
@@ -49,6 +91,11 @@ export const inventory = [
   row('twilight-warm-horizon', 'Continuous twilight', 'twilight', 'twilight-warm-horizon-distant-forms.png', ['sun-twilight-band']),
   row('night-moon-stars-milky-way', 'Dark readable night', 'night', 'night-moon-phase-stars-and-milky-way.png', ['sun-below-night', 'moon-in-view', 'moon-phase-partial']),
   row('night-later-celestial-positions', 'Changed celestial time and date', 'later', 'night-later-celestial-positions.png', ['sun-below-night', 'moon-in-view', 'moon-phase-partial', 'celestial-positions-changed']),
+  row('snow-preset', 'Snow preset mapping', 'snow', 'snow-preset-cold-overcast-bright-ground.png',
+    ['sun-daylight', 'omitted-preset-retains-moment', 'explicit-preset-resets-moment']),
+  row('jungle-preset', 'Jungle preset mapping', 'jungle', 'jungle-preset-humid-broken-cloud.png', ['sun-daylight', 'weather-preset-overrides']),
+  row('legacy-comparison', 'Physical/legacy comparison', 'legacy', 'legacy-gradient-layer-comparison.png',
+    ['sun-daylight', 'legacy-preset-mappings', 'weather-retained-across-model-switches', 'sky-model-legacy']),
 ];
 
 const snapshot = engine => ({ sky: engine.sky(), time: engine.timeOfDay(), weather: engine.weather() });
@@ -57,6 +104,78 @@ const actions = new WeakMap();
 
 function errorOf(error) {
   return { code: typeof error?.code === 'string' ? error.code : 'error', message: String(error?.message ?? error) };
+}
+
+// Tagged public edits performed by build, keyed by the engine they ran on.
+const recorded = new WeakMap();
+/** Runs one public edit, recording the actual before/after getter snapshots and outcome. */
+function record(engine, tag, operation, apply) {
+  const before = snapshot(engine);
+  let accepted = true, error = null;
+  try { apply(); } catch (cause) { accepted = false; error = errorOf(cause); }
+  const edit = { operation, accepted, error, before, after: snapshot(engine) };
+  if (!recorded.has(engine)) recorded.set(engine, []);
+  recorded.get(engine).push({ tag, edit });
+  if (!accepted) throw new Error(`${operation}: ${error.code}: ${error.message}`);
+  return edit;
+}
+const near = (a, b) => Math.abs(a - b) <= 1e-4 * Math.max(1, Math.abs(b));
+const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const placeKeys = ['latitude', 'north', 'enabled', 'playing', 'speed'];
+
+/** The accepted physical preset transaction matches the S24 mapping and keeps place/playback. */
+function presetMapping(edit, preset) {
+  const want = physicalPresets[preset], { sky, time, weather } = edit.after, t = weather?.target;
+  const passed = edit.accepted && sky?.model === 'physical' && sky.profile === preset
+    && sky.atmosphere.groundAlbedo.every((v, i) => near(v, want.groundAlbedo[i])) && near(sky.atmosphere.mieMultiplier, want.mieMultiplier)
+    && time.day === 172 && near(time.hours, want.hours) && time.currentDay === 172 && near(time.currentHours, want.hours)
+    && placeKeys.every(key => time[key] === edit.before.time[key])
+    && near(t.coverage, want.coverage) && near(t.base, want.base) && near(t.thickness, want.thickness);
+  return { name: 'physical-preset-mapping', passed,
+    detail: `${edit.operation}: profile ${sky?.profile} model ${sky?.model} atmosphere ${JSON.stringify(sky?.atmosphere)}; `
+      + `time ${time?.day}/${time?.hours} current ${time?.currentDay}/${time?.currentHours}; weather target ${JSON.stringify(t)}; expected ${JSON.stringify(want)}` };
+}
+
+/** Assertions over the recorded preset, override and model-switch edits. */
+function editAssertions(records, current) {
+  const by = tag => records.filter(r => r.tag === tag).map(r => r.edit);
+  const out = [];
+  const [mapping] = by('preset');
+  if (mapping) out.push(presetMapping(mapping, mapping.after.sky?.profile));
+  const [omitted] = by('omitted'), [explicit] = by('explicit');
+  if (omitted) out.push({ name: 'omitted-preset-retains-moment',
+    passed: omitted.accepted && omitted.before.time.hours === 13 && omitted.after.time.hours === 13 && omitted.after.time.currentHours === 13
+      && omitted.after.sky.profile === 'snow' && sameJson(omitted.after.weather.target, omitted.before.weather.target),
+    detail: `${omitted.operation}: hours ${omitted.before.time.hours}->${omitted.after.time.hours}, current ${omitted.after.time.currentHours}, profile ${omitted.after.sky.profile}` });
+  if (explicit) out.push({ name: 'explicit-preset-resets-moment',
+    passed: explicit.accepted && explicit.before.time.hours === 13 && near(explicit.after.time.hours, 12) && near(explicit.after.time.currentHours, 12)
+      && sameJson(explicit.after.sky, omitted?.after.sky),
+    detail: `${explicit.operation}: hours ${explicit.before.time.hours}->${explicit.after.time.hours}, current ${explicit.after.time.currentHours}; resolved sky identical to omitted-preset result ${sameJson(explicit.after.sky, omitted?.after.sky)}` });
+  const [overrides] = by('weather');
+  if (overrides) {
+    const t = overrides.after.weather.target, b = physicalPresets.jungle;
+    out.push({ name: 'weather-preset-overrides',
+      passed: overrides.accepted && near(t.coverage, .7) && near(t.wind.speed, 12) && near(t.base, b.base) && near(t.thickness, b.thickness)
+        && overrides.after.weather.changing === false && sameJson(current.weather.target, t),
+      detail: `${overrides.operation}: target ${JSON.stringify(t)}; cyclePreset ${overrides.after.weather.cyclePreset}; current getter equal ${sameJson(current.weather.target, t)}` });
+  }
+  const legacy = by('legacy-preset');
+  if (legacy.length) out.push({ name: 'legacy-preset-mappings',
+    passed: sameJson(legacy.map(e => e.after.sky.profile), ['snow', 'jungle', 'night', 'day']) && legacy.every(e => e.accepted && e.after.sky.model === 'legacy'
+      && sameJson(e.after.weather.target, e.before.weather.target) && e.after.time.day === e.before.time.day && e.after.time.hours === e.before.time.hours),
+    detail: legacy.map(e => `${e.operation}: profile ${e.after.sky.profile} model ${e.after.sky.model}, weather kept ${sameJson(e.after.weather.target, e.before.weather.target)}, time ${e.after.time.day}/${e.after.time.hours}`).join('; ') });
+  const switches = by('model');
+  if (switches.length) {
+    const authored = switches[0].before.weather;
+    const keep = w => sameJson(w.target, authored.target) && ['enabled', 'shadows', 'changing', 'seed', 'transitionSeconds'].every(k => w[k] === authored[k]);
+    out.push({ name: 'weather-retained-across-model-switches',
+      passed: sameJson(switches.map(e => e.after.sky.model), ['legacy', 'physical', 'legacy']) && switches.every(e => e.accepted && keep(e.after.weather))
+        && keep(current.weather) && near(authored.target.cirrus, .2) && near(authored.target.wind.speed, 9),
+      detail: `authored ${JSON.stringify(authored.target)}; ` + switches.map(e => `${e.operation}: model ${e.after.sky.model}, kept ${keep(e.after.weather)}`).join('; ') });
+    out.push({ name: 'sky-model-legacy', passed: current.sky?.model === 'legacy' && current.sky.profile === 'day',
+      detail: `final sky model ${current.sky?.model} profile ${current.sky?.profile}` });
+  }
+  return out;
 }
 
 /** Applies the authored moment with automatic celestial lighting, paused for capture. */
@@ -127,7 +246,9 @@ export async function observe(engine, variant) {
       detail: `moon direction ${JSON.stringify(time.moonDirection)}, altitude ${moonAlt.toFixed(2)} deg, camera ${JSON.stringify(camera)}` },
     { name: 'moon-phase-partial', passed: time.moonLit > .2 && time.moonLit < .95, detail: `moonLit ${time.moonLit}` },
   ];
-  const edits = [];
+  const records = recorded.get(engine) ?? [];
+  assertions.push(...editAssertions(records, { sky, time, weather }));
+  const edits = records.map(r => r.edit);
   const action = actions.get(engine);
   if (mode === 'later' && action) {
     edits.push(action.edit);
@@ -174,15 +295,24 @@ const controls = [
 // linear scene radiance under ~(14/255)^2.2 = 1.7e-3; x128 keeps them under ~0.22, below
 // middle grey, so night stays night while the moon disc (3 x 0.0024 x 128 ~ 0.9) reads.
 export const DARK_ADAPTATION_EV = Math.log2(128);
-export const exposureEv = { day: 0, twilight: DARK_ADAPTATION_EV, night: DARK_ADAPTATION_EV, later: DARK_ADAPTATION_EV };
+export const exposureEv = { day: 0, twilight: DARK_ADAPTATION_EV, night: DARK_ADAPTATION_EV, later: DARK_ADAPTATION_EV,
+  snow: 0, jungle: 0, legacy: 0 };
 
+// The physical day capture and the legacy comparison share the preset and moment; the
+// collector measures each at 1280x720 within the functional render.
+const measurements = {
+  day: { pair: MODEL_PAIR, state: 'on', preset: 'day', features: { model: 'physical' } },
+  legacy: { pair: MODEL_PAIR, state: 'off', preset: 'day', features: { model: 'legacy' } },
+};
 const variant = (id, camera) => ({ id, description: behaviors[id], references: [], judge: true, timeMs: 1000,
-  engine: { exposureEv: exposureEv[id] }, selection: sampleSelection(camera) });
+  engine: { exposureEv: exposureEv[id] }, selection: sampleSelection(camera),
+  ...(measurements[id] ? { measurement: measurements[id] } : {}) });
 
 export default {
   id: 'atmosphere', milestone: 'atmosphere', title: 'Physical atmosphere and celestial time',
   engine: { msaa: 4, toneMapper: 'agx', exposureEv: 0 },
-  variants: [variant('day', dayCamera), variant('twilight', dayCamera), variant('night', nightCamera), variant('later', nightCamera)],
+  variants: [variant('day', dayCamera), variant('twilight', dayCamera), variant('night', nightCamera), variant('later', nightCamera),
+    variant('snow', dayCamera), variant('jungle', dayCamera), variant('legacy', dayCamera)],
   controls,
   async build(engine, lib, selected) {
     const mode = selected.id;
@@ -192,8 +322,20 @@ export default {
     // Manual daylight baseline; automatic celestial control supplies the direction.
     engine.setLight({ direction: [-.35, -.6, -.55], color: [1, .95, .88], intensity: 3 });
     engine.setAmbient({ color: [.55, .62, .75], intensity: night ? .02 : .15 });
-    engine.setSky({ preset: night ? 'night' : 'day', model: 'physical' });
-    engine.setWeather({ preset: 'clear' });
+    const preset = presetOf[mode];
+    record(engine, 'preset', `setSky({preset:'${preset}',model:'physical'})`, () => engine.setSky({ preset, model: 'physical' }));
+    if (mode === 'snow') {
+      // Omitted preset keeps the edited moment; an explicit preset resets it.
+      engine.setTimeOfDay({ hours: 13 });
+      record(engine, 'omitted', 'setSky({}) after setTimeOfDay({hours:13})', () => engine.setSky({}));
+      record(engine, 'explicit', "setSky({preset:'snow'})", () => engine.setSky({ preset: 'snow' }));
+    } else if (mode === 'jungle') {
+      record(engine, 'weather', "setWeather({preset:'broken',coverage:0.7,wind:{speed:12}})", () => engine.setWeather(authoredWeather.jungle));
+    } else if (mode === 'legacy') {
+      engine.setWeather(authoredWeather.legacy);
+    } else {
+      engine.setWeather({ preset: 'clear' });
+    }
     engine.setEnvironmentLighting({ diffuse: 1, specular: 1 });
     if (mode === 'later') {
       // Documented action: start from the night moment, then advance date and time.
@@ -205,6 +347,15 @@ export default {
       if (!accepted) throw new Error(`${error.code}: ${error.message}`);
     } else {
       applyMoment(engine, mode);
+    }
+    if (mode === 'legacy') {
+      // Model-only switches and legacy presets retain the authored weather and moment.
+      record(engine, 'model', "setSky({model:'legacy'})", () => engine.setSky({ model: 'legacy' }));
+      for (const p of ['snow', 'jungle', 'night', 'day']) {
+        record(engine, 'legacy-preset', `setSky({preset:'${p}',model:'legacy'})`, () => engine.setSky({ preset: p, model: 'legacy' }));
+      }
+      record(engine, 'model', "setSky({model:'physical'})", () => engine.setSky({ model: 'physical' }));
+      record(engine, 'model', "setSky({model:'legacy'})", () => engine.setSky({ model: 'legacy' }));
     }
     await buildSkySample(engine, lib, selected.selection.camera);
   },

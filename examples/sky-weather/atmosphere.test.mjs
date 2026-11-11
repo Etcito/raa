@@ -6,7 +6,9 @@ import * as atmosphere from './scenes/atmosphere.js';
 
 const scene = atmosphere.default;
 const filenames = ['clear-day-warm-horizon-and-reflective-sphere.png', 'twilight-warm-horizon-distant-forms.png',
-  'night-moon-phase-stars-and-milky-way.png', 'night-later-celestial-positions.png'];
+  'night-moon-phase-stars-and-milky-way.png', 'night-later-celestial-positions.png',
+  'snow-preset-cold-overcast-bright-ground.png', 'jungle-preset-humid-broken-cloud.png', 'legacy-gradient-layer-comparison.png'];
+const modes = ['day', 'twilight', 'night', 'later', 'snow', 'jungle', 'legacy'];
 
 // Public-API fake: records delivered calls and evaluates the authored moments with the
 // source celestial formulas only to supply plausible getter values for the observer.
@@ -37,12 +39,40 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
     return { ...time, ...cursor, sunDirection: sun, moonDirection: moon,
       moonLit: .5 - .5 * Math.cos(T * age), starPole: [0, .6, -.8], starEquinox: hz(aa(0, sh + 1.5 * time.day / 100, L), time.north), dominant };
   };
-  const ws = { coverage: 0, type: .9, base: 1200, thickness: 1600, density: 1, cirrus: .05, wind: { speed: 5, from: 250 }, evolution: 1, rain: 0 };
+  // Documented m08 sky/weather contract: preset first, then overrides; physical presets set
+  // weather target and day 172 preset hour; legacy presets and model-only switches keep both.
+  const fair = { coverage: .3, type: .9, base: 1200, thickness: 1600, density: 1, cirrus: .15, wind: { speed: 7, from: 250 }, evolution: 1, rain: 0 };
+  const weatherPresets = { fair, clear: { ...fair, coverage: 0, cirrus: .05, wind: { speed: 5, from: 250 } },
+    broken: { coverage: .62, type: .95, base: 1000, thickness: 2600, density: 1.15, cirrus: .3, wind: { speed: 10, from: 240 }, evolution: 1.3, rain: 0 },
+    overcast: { coverage: .97, type: .12, base: 600, thickness: 900, density: 1.3, cirrus: 0, wind: { speed: 8, from: 220 }, evolution: .6, rain: 0 } };
+  const skyPresets = { day: ['fair', 9, [.3, .3, .3], 1], snow: ['overcast', 12, [.9, .9, .9], 1.5], jungle: ['broken', 15, [.18, .26, .14], 1.2], night: ['clear', 0, [.3, .3, .3], 1] };
+  let sky = { model: 'physical', profile: 'day', intensity: 1, zenith: [0, .2, 1], horizon: [1, .8, .6], ground: [.3, .3, .3], atmosphere: { groundAlbedo: [.3, .3, .3], mieMultiplier: 1 } };
+  let weather = { enabled: true, shadows: true, changing: false, seed: 1, transitionSeconds: 0, target: structuredClone(fair), cyclePreset: null };
   const engine = {
     calls,
     setBackground: v => calls.push(['setBackground', v]), setLight: v => calls.push(['setLight', v]),
-    setAmbient: v => calls.push(['setAmbient', v]), setSky: v => calls.push(['setSky', v]),
-    setWeather: v => calls.push(['setWeather', v]), setEnvironmentLighting: v => calls.push(['setEnvironmentLighting', v]),
+    setAmbient: v => calls.push(['setAmbient', v]),
+    setSky: v => {
+      calls.push(['setSky', v]);
+      const next = structuredClone(sky);
+      if (v.preset) {
+        if (!skyPresets[v.preset]) throw invalid('preset unknown');
+        const [w, hours, groundAlbedo, mieMultiplier] = skyPresets[v.preset];
+        Object.assign(next, { model: 'physical', profile: v.preset, atmosphere: { groundAlbedo, mieMultiplier } });
+        if ((v.model ?? 'physical') === 'physical') {
+          time = { ...time, day: 172, hours }; cursor = { currentDay: 172, currentHours: hours };
+          weather = { ...weather, target: structuredClone(weatherPresets[w]), cyclePreset: w };
+        }
+      }
+      if (v.model) next.model = v.model;
+      sky = next;
+    },
+    setWeather: v => {
+      calls.push(['setWeather', v]);
+      const { preset, wind, ...rest } = v;
+      const base = preset ? structuredClone(weatherPresets[preset]) : structuredClone(weather.target);
+      weather = { ...weather, target: { ...base, ...rest, wind: { ...base.wind, ...wind } }, cyclePreset: preset ?? weather.cyclePreset };
+    }, setEnvironmentLighting: v => calls.push(['setEnvironmentLighting', v]),
     setTimeOfDay: v => {
       calls.push(['setTimeOfDay', v]);
       const next = { ...time, ...v };
@@ -56,9 +86,9 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
     setCamera: v => calls.push(['setCamera', v]), primitiveMesh: () => 1, addMaterial: () => 1, addNode: () => 1,
     addInstance: () => calls.push(['addInstance']),
     render: () => { renders++; },
-    sky: () => (failGetter === 'sky' ? null : { model: 'physical', profile: 'day', intensity: 1, zenith: [0, .2, 1], horizon: [1, .8, .6], ground: [.3, .3, .3] }),
+    sky: () => (failGetter === 'sky' ? null : structuredClone(sky)),
     timeOfDay: () => state(),
-    weather: () => ({ enabled: true, shadows: true, changing: false, seed: 1, transitionSeconds: 0, target: ws, current: ws, cyclePreset: null, text: '' }),
+    weather: () => ({ ...structuredClone(weather), current: structuredClone(weather.target), text: '' }),
     skyWeatherDiagnostics: () => {
       const ready = renders >= readyAfter;
       return { invocation: renders || null, submittedInvocation: ready ? renders : null, weatherGeneration: 1, atmosphereGeneration: ready ? 1 : 0,
@@ -82,7 +112,9 @@ async function run(mode, options) {
 test('atmosphere scenes resolve cumulatively with exact selectors and framed subjects', () => {
   const rows = validateInventory([foundation, atmosphere], 'atmosphere');
   assert.deepEqual(rows.filter(r => r.scenario === 'atmosphere').map(r => r.filename), filenames);
-  assert.deepEqual(scene.variants.map(v => v.id), ['day', 'twilight', 'night', 'later']);
+  assert.deepEqual(scene.variants.map(v => v.id), modes);
+  assert.deepEqual(atmosphere.inventory.filter(r => r.pair).map(r => [r.mode, r.pair]), [['day', 'sky-model'], ['legacy', 'sky-model']]);
+  assert.deepEqual(scene.variants.filter(v => v.measurement).map(v => [v.id, v.measurement.state, v.measurement.features.model]), [['day', 'on', 'physical'], ['legacy', 'off', 'legacy']]);
   for (const row of atmosphere.inventory) {
     for (const fact of row.requiredFacts) assert.match(fact, /^(snapshot:(sky|time|weather|diagnostics)|runtime:(passes|viewSizes|ready)|assertion:[a-z0-9-]+)$/);
     for (const fact of row.requiredFacts.filter(f => f.startsWith('assertion:'))) assert.ok(atmosphere.factNames.includes(fact.slice(10)));
@@ -95,12 +127,13 @@ test('atmosphere scenes resolve cumulatively with exact selectors and framed sub
 });
 
 test('build delivers public sky, weather and time calls with automatic paused lighting', async () => {
-  for (const mode of ['day', 'twilight', 'night', 'later']) {
+  for (const mode of modes) {
     const { engine, variant } = await run(mode);
     const names = engine.calls.map(c => c[0]);
-    for (const name of ['setSky', 'setWeather', 'setTimeOfDay', 'setCamera', 'addInstance']) assert.ok(names.includes(name), `${mode} ${name}`);
+    for (const name of ['setSky', 'setTimeOfDay', 'setCamera', 'addInstance']) assert.ok(names.includes(name), `${mode} ${name}`);
+    assert.equal(names.includes('setWeather'), mode !== 'snow', `${mode} setWeather (snow keeps its preset weather)`);
     assert.equal(engine.calls.find(c => c[0] === 'setSky')[1].model, 'physical');
-    assert.deepEqual(engine.calls.find(c => c[0] === 'setWeather')[1], { preset: 'clear' });
+    assert.equal(engine.calls.find(c => c[0] === 'setWeather')?.[1].preset ?? 'overcast', { snow: 'overcast', jungle: 'broken' }[mode] ?? 'clear');
     const last = engine.calls.filter(c => c[0] === 'setTimeOfDay').at(-1)[1];
     assert.equal(last.enabled, true); assert.equal(last.playing, false);
     assert.deepEqual(engine.calls.find(c => c[0] === 'setCamera')[1].position ?? engine.calls.find(c => c[0] === 'setCamera')[1].eye, variant.selection.camera.eye);
@@ -113,8 +146,8 @@ test('observe waits for publication and satisfies every row from actual getters'
     validateRequiredFacts(row, { ...observation, ...runtime }, atmosphere.factNames);
   }
   const { observation } = await run('later');
-  assert.equal(observation.edits.length, 1);
-  assert.equal(observation.edits[0].before.time.day, 13); assert.equal(observation.edits[0].after.time.day, 14);
+  const later = observation.edits.find(e => e.operation.startsWith('setTimeOfDay'));
+  assert.equal(later.before.time.day, 13); assert.equal(later.after.time.day, 14);
 });
 
 test('missing, null and false required facts reject', async () => {
@@ -190,10 +223,57 @@ test('out-of-domain edits throw sky.invalid and keep the last accepted state', (
 test('night and twilight captures author the dark-adaptation exposure; day stays at 0 EV', () => {
   assert.equal(atmosphere.DARK_ADAPTATION_EV, 7);
   const ev = Object.fromEntries(scene.variants.map(v => [v.id, { ...scene.engine, ...v.engine }.exposureEv]));
-  assert.deepEqual(ev, { day: 0, twilight: 7, night: 7, later: 7 });
+  assert.deepEqual(ev, { day: 0, twilight: 7, night: 7, later: 7, snow: 0, jungle: 0, legacy: 0 });
   for (const v of scene.variants) {
     const options = { ...scene.engine, ...v.engine };
     assert.equal(options.toneMapper, 'agx');
     assert.equal(options.msaa, 4);
   }
+});
+
+test('physical presets map profile, weather, preset hour and atmosphere; day/night captures reuse them', async () => {
+  for (const [mode, preset] of [['day', 'day'], ['night', 'night'], ['snow', 'snow'], ['jungle', 'jungle']]) {
+    const { observation } = await run(mode);
+    const edit = observation.edits.find(e => e.operation.startsWith('setSky({preset'));
+    assert.equal(edit.after.sky.profile, preset);
+    assert.equal(edit.after.time.hours, atmosphere.physicalPresets[preset].hours);
+    assert.equal(edit.after.weather.target.coverage, atmosphere.physicalPresets[preset].coverage);
+    assert.equal(observation.assertions.find(a => a.name === 'physical-preset-mapping').passed, true, mode);
+  }
+});
+
+test('explicit preset resets the moment while an omitted preset retains it', async () => {
+  const { observation } = await run('snow');
+  const omitted = observation.edits.find(e => e.operation.startsWith('setSky({})'));
+  const explicit = observation.edits.find(e => e.operation === "setSky({preset:'snow'})");
+  assert.deepEqual([omitted.before.time.hours, omitted.after.time.hours, explicit.after.time.hours], [13, 13, 12]);
+  assert.deepEqual(explicit.after.sky, omitted.after.sky);
+  for (const name of ['omitted-preset-retains-moment', 'explicit-preset-resets-moment']) assert.equal(observation.assertions.find(a => a.name === name).passed, true, name);
+});
+
+test('named weather preset plus overrides keeps the remaining preset values', async () => {
+  const { observation } = await run('jungle');
+  const t = observation.weather.target;
+  assert.deepEqual([t.coverage, t.wind.speed, t.wind.from, t.base, t.thickness], [.7, 12, 240, 1000, 2600]);
+  assert.equal(observation.assertions.find(a => a.name === 'weather-preset-overrides').passed, true);
+});
+
+test('legacy presets and model switches retain authored weather and moment', async () => {
+  const { observation } = await run('legacy');
+  assert.deepEqual(observation.edits.filter(e => e.operation.includes("model:'legacy'") && e.operation.includes('preset')).map(e => e.after.sky.profile), ['snow', 'jungle', 'night', 'day']);
+  assert.equal(observation.sky.model, 'legacy');
+  assert.equal(observation.weather.target.cirrus, .2);
+  for (const name of ['legacy-preset-mappings', 'weather-retained-across-model-switches', 'sky-model-legacy']) assert.equal(observation.assertions.find(a => a.name === name).passed, true, name);
+});
+
+test('a lost weather target across a model switch fails the retention assertion', async () => {
+  const variant = scene.variants.find(v => v.id === 'legacy');
+  const engine = fakeEngine();
+  const setSky = engine.setSky;
+  engine.setSky = v => { setSky(v); if (v.model === 'physical' && !v.preset) engine.setWeather({ preset: 'fair' }); };
+  await scene.build(engine, {}, variant);
+  const observation = await atmosphere.observe(engine, variant);
+  assert.equal(observation.assertions.find(a => a.name === 'weather-retained-across-model-switches').passed, false);
+  const row = atmosphere.inventory.find(r => r.mode === 'legacy');
+  assert.throws(() => validateRequiredFacts(row, { ...observation, ...runtime }, atmosphere.factNames), /legacy-comparison/);
 });
