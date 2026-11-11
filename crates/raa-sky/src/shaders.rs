@@ -20,6 +20,15 @@ const ATMOSPHERE_SRC: &str = include_str!("wgsl/atmosphere.wgsl");
 /// The three LUT compute entries (static transmittance, static multiple scattering, dynamic
 /// sky view) of the physical atmosphere.
 const ATMOSPHERE_LUTS_SRC: &str = include_str!("wgsl/atmosphere_luts.wgsl");
+/// Shared galactic basis, noise and celestial-map coordinates; no bindings.
+const MILKY_WAY_SRC: &str = include_str!("wgsl/milky_way.wgsl");
+const MILKY_WAY_BAKE_SRC: &str = include_str!("wgsl/milky_way_bake.wgsl");
+
+/// Immutable celestial-map bake, entry `raa_milky_way_bake`, with empty groups 0/1
+/// and one write-only Rgba8Unorm D2 storage output at group 2 binding 0.
+pub(crate) fn milky_way_bake_module_wgsl() -> String {
+    format!("{MILKY_WAY_SRC}\n{MILKY_WAY_BAKE_SRC}")
+}
 
 fn assemble(entry: &str) -> String {
     let mut s = String::with_capacity(

@@ -458,3 +458,81 @@ fn atmosphere_luts_reflect_the_s10_private_compute_layout() {
         "reflected per-entry group-2 resource use changed"
     );
 }
+
+#[test]
+fn milky_way_bake_reflects_one_explicit_group_two_output() {
+    use wgpu::naga::{
+        ImageClass, ImageDimension, ShaderStage, StorageAccess, StorageFormat, TypeInner,
+        front::wgsl, valid,
+    };
+    let source = shaders::milky_way_bake_module_wgsl();
+    Composer::validate(&source).expect("Milky Way bake validates");
+    let module = wgsl::parse_str(&source).expect("Milky Way bake parses");
+    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+        .validate(&module)
+        .expect("Milky Way bake validates");
+    let globals: Vec<_> = module.global_variables.iter().collect();
+    assert_eq!(
+        globals.len(),
+        1,
+        "no uniforms, sampled textures or extra groups"
+    );
+    let (handle, output) = globals[0];
+    let binding = output.binding.as_ref().expect("explicit output binding");
+    assert_eq!((binding.group, binding.binding), (2, 0));
+    assert!(matches!(
+        module.types[output.ty].inner,
+        TypeInner::Image {
+            dim: ImageDimension::D2,
+            arrayed: false,
+            class: ImageClass::Storage {
+                format: StorageFormat::Rgba8Unorm,
+                access: StorageAccess::STORE
+            }
+        }
+    ));
+    assert_eq!(module.entry_points.len(), 1);
+    let entry = &module.entry_points[0];
+    assert_eq!(entry.name, "raa_milky_way_bake");
+    assert_eq!(entry.stage, ShaderStage::Compute);
+    assert_eq!(entry.workgroup_size, [8, 8, 1]);
+    let usage = info.get_entry_point(0)[handle];
+    assert!(usage.contains(valid::GlobalUse::WRITE));
+    assert!(!usage.contains(valid::GlobalUse::READ));
+    for (_, function) in module.functions.iter() {
+        assert!(
+            function
+                .name
+                .as_ref()
+                .expect("named helper")
+                .starts_with("raa_milky_way_")
+        );
+    }
+    assert!(
+        source.contains("if any(id.xy >= size)"),
+        "guard rounded-up dispatches"
+    );
+    assert!(source.contains("const raa_milky_way_range: f32 = 4.0;"));
+    assert!(source.contains("sqrt(clamp(galaxy.rgb / raa_milky_way_range"));
+}
+
+#[test]
+fn milky_way_helpers_compose_with_shared_and_atmosphere_sources() {
+    let helpers = include_str!("../src/wgsl/milky_way.wgsl");
+    let entry = "
+@fragment fn fs_milky_way() -> @location(0) vec4<f32> {
+    let direction = raa_milky_way_celestial_direction(vec2f(0.5));
+    let uv = raa_milky_way_celestial_uv(direction);
+    return raa_milky_way_glow(raa_milky_way_celestial_direction(uv));
+}";
+    Composer::validate(&format!(
+        "{PRELUDE_WGSL}\n{LIB_WGSL}\n{ATMOSPHERE_WGSL}\n{SKY_WGSL}\n{helpers}\n{entry}"
+    ))
+    .expect("prefixed celestial noise and map coordinates compose without collisions");
+    for source in [helpers, include_str!("../src/wgsl/milky_way_bake.wgsl")] {
+        assert!(source.contains("Copyright (c) 2026 SamG-Coder"));
+        assert!(source.contains("Permission is hereby granted, free of charge"));
+        assert!(source.contains("THE SOFTWARE IS PROVIDED \"AS IS\""));
+        assert!(source.contains("OUT OF OR IN CONNECTION WITH THE SOFTWARE"));
+    }
+}

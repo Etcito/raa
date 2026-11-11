@@ -26,6 +26,11 @@
 //! acknowledged submission, so readiness observers still require real
 //! submission. The CPU-owned map/light/flags bytes of the destination are never
 //! touched here.
+//!
+//! The shared Milky Way map uses `src/lighting.rs:14-15` and
+//! `shaders/sky/milky_way.wgsl:9-96` at the same Solstice revision. Initialization
+//! makes its binding valid; [`AtmosphereResources::observe_submission`] alone
+//! accepts the immutable bake after a complete actual submission.
 /*
 MIT License
 
@@ -56,6 +61,7 @@ use raa_core::{GpuContext, RaaError};
 
 use crate::shaders::{
     ATMOSPHERE_DIRECTIONAL_ENTRY, ATMOSPHERE_LUT_ENTRIES, atmosphere_luts_module_wgsl,
+    milky_way_bake_module_wgsl,
 };
 
 /// Ground radius at sea level, in kilometres.
@@ -219,6 +225,9 @@ const TRANSMITTANCE_SIZE: (u32, u32) = (256, 64);
 const MULTI_SCATTER_SIZE: (u32, u32) = (32, 32);
 /// Per-view sky-view LUT dimensions (`sky.rs:11`).
 const SKY_VIEW_SIZE: (u32, u32) = (256, 144);
+/// Solstice `src/lighting.rs:14-15` at the revision cited above.
+const MILKY_WAY_SIZE: (u32, u32) = (2048, 1024);
+const MILKY_WAY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Prepared atmosphere views, matching the engine's four view slots.
 const MAX_VIEWS: usize = 4;
 /// Byte offset of `WeatherLightingGpu.atmosphericTransmission` (S10 binding 16).
@@ -441,6 +450,26 @@ struct ViewGpu {
     directional_group: wgpu::BindGroup,
 }
 
+/// Recording is provisional until the matching invocation actually submits completely.
+#[derive(Default)]
+struct MilkyWayBake {
+    recorded: Option<u64>,
+    ready: bool,
+}
+
+impl MilkyWayBake {
+    fn needs_record(&self, invocation: u64) -> bool {
+        !self.ready && self.recorded != Some(invocation)
+    }
+
+    fn observe_submission(&mut self, invocation: u64, submitted_views: u8, complete: bool) {
+        if self.recorded == Some(invocation) {
+            self.ready |= complete && submitted_views & 0x0f != 0;
+            self.recorded = None;
+        }
+    }
+}
+
 /// The shared atmosphere LUTs and the per-view resources that fill them.
 ///
 /// The static transmittance and multiple-scattering targets are created once; the
@@ -465,16 +494,21 @@ pub(crate) struct AtmosphereResources {
     static_groups: [wgpu::BindGroup; 2],
     /// The separate 16-byte `STORAGE | COPY_SRC` directional result.
     transmission_result: wgpu::Buffer,
+    milky_way: wgpu::TextureView,
+    milky_way_pipeline: wgpu::ComputePipeline,
+    milky_way_group: wgpu::BindGroup,
+    milky_way_bake: MilkyWayBake,
     views: [Option<ViewGpu>; MAX_VIEWS],
     lifecycle: Lifecycle,
 }
 
 impl AtmosphereResources {
-    /// Creates the two static LUT targets, the placeholder dummy, the sampler, the two
-    /// explicit group-2 layouts, the four compute pipelines and the directional result.
+    /// Creates the LUT targets, placeholder, sampler, directional result and explicit
+    /// group-2 compute pipelines, plus the initialized shared Milky Way bake target.
     pub(crate) fn new(gpu: &GpuContext) -> Result<Self, RaaError> {
         gpu.ensure_live()?;
         let device = gpu.device();
+        let (milky_way, milky_way_pipeline, milky_way_group) = milky_way_resources(gpu)?;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raa-sky.atmosphere"),
             entries: &layout_entries(),
@@ -542,6 +576,10 @@ impl AtmosphereResources {
             static_uniform,
             static_groups,
             transmission_result,
+            milky_way,
+            milky_way_pipeline,
+            milky_way_group,
+            milky_way_bake: MilkyWayBake::default(),
             views: std::array::from_fn(|_| None),
             lifecycle: Lifecycle::new(),
         })
@@ -680,6 +718,56 @@ impl AtmosphereResources {
         Ok(())
     }
 
+    /// Shared initialized 2048x1024 Rgba8Unorm celestial map. Before baking it is
+    /// transparent black; binding validity alone does not establish readiness.
+    pub(crate) fn milky_way(&self) -> &wgpu::TextureView {
+        &self.milky_way
+    }
+
+    /// True only after the bake's complete actual submission was acknowledged.
+    pub(crate) fn milky_way_ready(&self) -> bool {
+        self.milky_way_bake.ready
+    }
+
+    /// Call before sampling the map in this invocation's encoder. Records once per
+    /// invocation and submits nothing. Unacknowledged work retries next invocation;
+    /// failed/incomplete acknowledgements also permit retrying the same invocation.
+    /// After success the immutable shared map survives all view/time/weather edits.
+    pub(crate) fn record_milky_way(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        invocation: u64,
+    ) -> Result<(), RaaError> {
+        gpu.ensure_live()?;
+        if self.milky_way_bake.needs_record(invocation) {
+            dispatch_lut(
+                &mut encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("raa-sky.milky_way.bake"),
+                    timestamp_writes: None,
+                }),
+                &self.milky_way_pipeline,
+                &self.milky_way_group,
+                MILKY_WAY_SIZE,
+            );
+            self.milky_way_bake.recorded = Some(invocation);
+        }
+        Ok(())
+    }
+
+    /// Acknowledge actual pipeline submissions, never preparation/recording alone.
+    /// Zero submitted views or an incomplete/failed submission leaves the bake pending.
+    /// Unrelated acknowledgements cannot publish or discard the pending bake.
+    pub(crate) fn observe_submission(
+        &mut self,
+        invocation: u64,
+        submitted_views: u8,
+        complete: bool,
+    ) {
+        self.milky_way_bake
+            .observe_submission(invocation, submitted_views, complete);
+    }
+
     /// The static 256x64 transmittance table.
     pub(crate) fn transmittance(&self) -> &wgpu::TextureView {
         &self.transmittance
@@ -736,6 +824,16 @@ const _: () = {
     type SkyView = for<'a> fn(&'a AtmosphereResources, u32) -> Option<&'a wgpu::TextureView>;
     type SamplerRef = for<'a> fn(&'a AtmosphereResources) -> &'a wgpu::Sampler;
     type Remove = fn(&mut AtmosphereResources, u32);
+    type RecordMilkyWay = fn(
+        &mut AtmosphereResources,
+        &GpuContext,
+        &mut wgpu::CommandEncoder,
+        u64,
+    ) -> Result<(), RaaError>;
+    let _: ViewRef = AtmosphereResources::milky_way;
+    let _: fn(&AtmosphereResources) -> bool = AtmosphereResources::milky_way_ready;
+    let _: RecordMilkyWay = AtmosphereResources::record_milky_way;
+    let _: fn(&mut AtmosphereResources, u64, u8, bool) = AtmosphereResources::observe_submission;
     let _: (
         New,
         Prepare,
@@ -844,6 +942,83 @@ fn directional_layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
             count: None,
         },
     ]
+}
+
+/// The bake's sole resource is a write-only output at group 2 binding 0.
+fn milky_way_layout_entries() -> [wgpu::BindGroupLayoutEntry; 1] {
+    [wgpu::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format: MILKY_WAY_FORMAT,
+            view_dimension: wgpu::TextureViewDimension::D2,
+        },
+        count: None,
+    }]
+}
+
+fn milky_way_descriptor() -> wgpu::TextureDescriptor<'static> {
+    wgpu::TextureDescriptor {
+        format: MILKY_WAY_FORMAT,
+        ..lut_descriptor("raa-sky.milky_way", MILKY_WAY_SIZE)
+    }
+}
+
+fn milky_way_resources(
+    gpu: &GpuContext,
+) -> Result<(wgpu::TextureView, wgpu::ComputePipeline, wgpu::BindGroup), RaaError> {
+    let source = milky_way_bake_module_wgsl();
+    raa_shader::Composer::validate(&source)
+        .map_err(|error| RaaError::Gpu(format!("Milky Way bake shader: {error}")))?;
+    let device = gpu.device();
+    let descriptor = milky_way_descriptor();
+    let texture = device.create_texture(&descriptor);
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        &vec![0; (MILKY_WAY_SIZE.0 * MILKY_WAY_SIZE.1 * 4) as usize],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(MILKY_WAY_SIZE.0 * 4),
+            rows_per_image: Some(MILKY_WAY_SIZE.1),
+        },
+        descriptor.size,
+    );
+    let view = texture.create_view(&Default::default());
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("raa-sky.milky_way"),
+        entries: &milky_way_layout_entries(),
+    });
+    let empty = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("raa-sky.milky_way.empty"),
+        entries: &[],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("raa-sky.milky_way"),
+        bind_group_layouts: &[Some(&empty), Some(&empty), Some(&layout)],
+        immediate_size: 0,
+    });
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raa-sky.milky_way"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("raa_milky_way_bake"),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some("raa_milky_way_bake"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa-sky.milky_way"),
+        layout: &layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&view),
+        }],
+    });
+    Ok((view, pipeline, group))
 }
 
 /// Groups 0 and 1 stay empty; the resources live explicitly in shader group 2. The three
@@ -1040,6 +1215,85 @@ fn uniform_buffer(gpu: &GpuContext, label: &str) -> wgpu::Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn milky_way_requires_matching_complete_actual_submission_and_retries() {
+        let mut bake = MilkyWayBake::default();
+        // Initialization, failed preparation/recording and unrelated submissions cannot
+        // create a recorded bake. Invocation zero is a valid first identity.
+        bake.observe_submission(0, 1, true);
+        assert!(!bake.ready);
+        assert!(bake.needs_record(0));
+        bake.recorded = Some(0);
+        assert!(!bake.ready, "recording alone is pending");
+        assert!(!bake.needs_record(0), "all views share one invocation bake");
+        bake.observe_submission(1, 1, true);
+        assert_eq!(bake.recorded, Some(0), "unrelated acknowledgement");
+
+        for (views, complete) in [(0, true), (1, false), (0b1111, false), (0x80, true)] {
+            bake.observe_submission(0, views, complete);
+            assert!(!bake.ready, "unsubmitted/failed work remains pending");
+            assert!(bake.needs_record(0), "retry after rejected submission");
+            bake.recorded = Some(0);
+        }
+        assert!(
+            bake.needs_record(2),
+            "an unacknowledged encoder may be dropped"
+        );
+        bake.recorded = Some(2);
+        bake.observe_submission(0, 1, true);
+        assert!(
+            !bake.ready,
+            "a stale acknowledgement cannot publish newer work"
+        );
+        bake.observe_submission(2, 0b1000, true);
+        assert!(bake.ready, "any actually submitted view may carry the bake");
+        for invocation in [0, 2, 3, u64::MAX] {
+            assert!(
+                !bake.needs_record(invocation),
+                "the accepted map is immutable"
+            );
+            bake.observe_submission(invocation, 0, false);
+            assert!(
+                bake.ready,
+                "later failures cannot invalidate an immutable map"
+            );
+        }
+    }
+
+    #[test]
+    fn milky_way_descriptor_and_compute_output_match_the_contract() {
+        let descriptor = milky_way_descriptor();
+        assert_eq!(
+            (descriptor.size.width, descriptor.size.height),
+            (2048, 1024)
+        );
+        assert_eq!(descriptor.size.depth_or_array_layers, 1);
+        assert_eq!(descriptor.dimension, wgpu::TextureDimension::D2);
+        assert_eq!(descriptor.format, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!(
+            (descriptor.mip_level_count, descriptor.sample_count),
+            (1, 1)
+        );
+        assert_eq!(
+            descriptor.usage,
+            wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+        );
+        let [entry] = milky_way_layout_entries();
+        assert_eq!(entry.binding, 0);
+        assert_eq!(entry.visibility, wgpu::ShaderStages::COMPUTE);
+        assert_eq!(entry.count, None);
+        assert_eq!(
+            entry.ty,
+            wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: descriptor.format,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            }
+        );
+    }
 
     fn f32_at(bytes: &[u8; 256], offset: usize) -> f32 {
         f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
@@ -1366,6 +1620,14 @@ mod tests {
             return;
         };
         let mut resources = AtmosphereResources::new(&gpu).expect("atmosphere resources");
+        let galaxy = resources.milky_way().clone();
+        let texture = galaxy.texture();
+        assert_eq!((texture.width(), texture.height()), MILKY_WAY_SIZE);
+        assert_eq!(texture.format(), MILKY_WAY_FORMAT);
+        assert!(
+            !resources.milky_way_ready(),
+            "initialization is not a submitted bake"
+        );
         let transmittance = resources.transmittance().texture();
         assert_eq!(
             (transmittance.width(), transmittance.height()),
@@ -1399,6 +1661,28 @@ mod tests {
             resources.sky_view(3).is_some(),
             "removing another index keeps view 3"
         );
+        assert_eq!(resources.milky_way(), &galaxy, "all views reuse one map");
+        assert!(
+            !resources.milky_way_ready(),
+            "view preparation cannot publish the bake"
+        );
+        // Exercise the recorder without executing a bake or claiming a submission.
+        let mut dropped = gpu.device().create_command_encoder(&Default::default());
+        for _ in 0..2 {
+            resources
+                .record_milky_way(&gpu, &mut dropped, 0)
+                .expect("record once");
+            assert_eq!(resources.milky_way_bake.recorded, Some(0));
+            assert!(!resources.milky_way_ready());
+        }
+        drop(dropped);
+        resources.observe_submission(0, 0, false);
+        let mut retry = gpu.device().create_command_encoder(&Default::default());
+        resources
+            .record_milky_way(&gpu, &mut retry, 1)
+            .expect("retry dropped bake");
+        assert_eq!(resources.milky_way_bake.recorded, Some(1));
+        assert!(!resources.milky_way_ready());
     }
 
     /// Reads the 256-byte destination back after one `record` call. The test checks the
