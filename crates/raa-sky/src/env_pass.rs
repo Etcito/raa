@@ -95,15 +95,20 @@ fn physical_readiness(sky_view: bool, submitted_generation: u64, bake_ready: boo
 }
 
 /// The accepted authored source of the env cube: the description and the authored time,
-/// manual-light and weather settings (including the retained cycle-start identity).
+/// manual-light and weather settings (including the retained cycle-start identity), plus the
+/// accepted source generation.
 ///
 /// Continuous playback evolves the runtime time cursor, the current weather, the wind drift
 /// and the evolution phase without touching these authored records. Playback therefore sets
 /// `env_dirty` to refresh the cube while the identity stays stable, so asynchronous IBL
-/// publication is not cancelled on every animated frame. A model switch or any accepted
-/// authored edit replaces the identity and invalidates the older publication epoch.
+/// publication is not cancelled on every animated frame. A model switch, any accepted
+/// authored edit or an explicit preset/cycle restart replaces the identity and invalidates
+/// the older publication epoch. The generation covers resets whose authored values are
+/// equal (selecting the same preset or restarting an unchanged cycle), which value equality
+/// alone cannot detect.
 #[derive(Clone, Debug, PartialEq)]
 struct SourceIdentity {
+    generation: u64,
     desc: SkyDesc,
     time: TimeOfDaySettings,
     manual: DirectionalLight,
@@ -114,6 +119,7 @@ struct SourceIdentity {
 /// The current accepted authored source identity.
 fn source_identity(state: &SkyState) -> SourceIdentity {
     SourceIdentity {
+        generation: state.source_generation,
         desc: state.desc.clone(),
         time: state.time.state.settings,
         manual: state.time.manual,
@@ -695,6 +701,19 @@ mod tests {
             );
         }
 
+        // An explicit reset can leave every authored value equal (selecting the same preset
+        // or restarting an unchanged cycle); its generation still replaces the source.
+        let mut reset = state.clone();
+        reset.source_generation += 1;
+        assert_eq!(reset.desc, first.desc);
+        assert_eq!(reset.time.state.settings, first.time);
+        assert_eq!(reset.weather.settings, first.weather);
+        assert_eq!(reset.weather.start, first.cycle_start);
+        assert!(
+            source_replaced(Some(&first), &source_identity(&reset)),
+            "an accepted explicit reset replaces the source even when values are equal"
+        );
+
         // A model switch is captured by the description; the first prepare has no previous
         // identity and therefore nothing to cancel.
         let mut switched = state.clone();
@@ -1227,6 +1246,248 @@ mod tests {
         std::mem::forget(ibl);
         std::mem::forget(lit);
         std::mem::forget(pipeline);
+        std::mem::forget(gpu);
+    }
+
+    /// A minimal installed-sky frame harness for the explicit source-reset regressions
+    /// (device-free state + real submitted frames).
+    #[cfg(not(target_arch = "wasm32"))]
+    const HARNESS_SIZE: (u32, u32) = (32, 32);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct LifecycleHarness {
+        pipeline: std::rc::Rc<std::cell::RefCell<raa_pipeline::Pipeline>>,
+        lit: raa_lit::LitRenderer,
+        ibl: IblHandle,
+        sky: crate::feature::SkyHandle,
+        graph: raa_core::FrameGraph,
+        backbuffer: raa_core::OffscreenTarget,
+        scene: raa_scene::Scene,
+        list: raa_scene::RenderList,
+        tags: Vec<u32>,
+        slots: Vec<u32>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl LifecycleHarness {
+        fn new(gpu: &GpuContext) -> Self {
+            use raa_ibl::IblFeature;
+            use raa_lit::{LitOptions, LitRenderer};
+            use raa_pipeline::Pipeline;
+
+            const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+            let pipeline =
+                std::rc::Rc::new(std::cell::RefCell::new(Pipeline::new(gpu, SURFACE, false)));
+            let mut lit = LitRenderer::new(gpu, &pipeline, LitOptions::default()).expect("lit");
+            let ibl = IblFeature::install(gpu, &pipeline, &mut lit).expect("ibl");
+            let sky = crate::feature::SkyFeature::install(gpu, &pipeline, &mut lit, ibl.clone())
+                .expect("sky");
+            let mut graph = raa_core::FrameGraph::new(SURFACE);
+            Pipeline::install(&pipeline, &mut graph);
+            graph.compile().expect("compile");
+            let backbuffer =
+                raa_core::OffscreenTarget::new(gpu, HARNESS_SIZE.0, HARNESS_SIZE.1, SURFACE);
+            let mut scene = raa_scene::Scene::with_capacity(1, 1);
+            scene.camera.set_viewport(HARNESS_SIZE.0, HARNESS_SIZE.1);
+            LifecycleHarness {
+                pipeline,
+                lit,
+                ibl,
+                sky,
+                graph,
+                backbuffer,
+                scene,
+                list: raa_scene::RenderList::with_capacity(1),
+                tags: Vec::with_capacity(1),
+                slots: Vec::with_capacity(1),
+            }
+        }
+
+        fn frame(&mut self, gpu: &GpuContext) {
+            self.lit
+                .prepare(
+                    gpu,
+                    &mut self.scene,
+                    &mut self.list,
+                    &mut self.tags,
+                    &mut self.slots,
+                )
+                .expect("lit prepare");
+            let commands = self
+                .graph
+                .execute(gpu, self.backbuffer.view(), HARNESS_SIZE)
+                .expect("execute");
+            gpu.queue().submit([commands]);
+            gpu.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll");
+        }
+
+        /// Leaks the GPU owners like the other device tests (the WSL GL backend crashed
+        /// dropping the device after creating Rgba16Float textures).
+        fn leak(self) {
+            let LifecycleHarness {
+                pipeline,
+                lit,
+                ibl,
+                sky,
+                graph,
+                backbuffer,
+                ..
+            } = self;
+            std::mem::forget(pipeline);
+            std::mem::forget(lit);
+            std::mem::forget(ibl);
+            std::mem::forget(sky);
+            std::mem::forget(graph);
+            std::mem::forget(backbuffer);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn same_preset_reselection_rejects_an_older_ibl_completion() {
+        use raa_core::testing::{block_on, skip, software_gpu};
+
+        use crate::desc::{LegacyCloudFields, SkyPreset, SkyTransaction};
+
+        let test = "same_preset_reselection_rejects_an_older_ibl_completion";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut harness = LifecycleHarness::new(&gpu);
+        let day = SkyDesc::preset("day").expect("day preset");
+        harness
+            .sky
+            .set_transaction(SkyTransaction {
+                desc: day.clone(),
+                preset: Some(SkyPreset::Day),
+                cloud_fields: LegacyCloudFields::NONE,
+            })
+            .expect("day preset");
+        harness
+            .sky
+            .set_view(0, &raa_scene::Camera::default(), false)
+            .expect("view 0");
+        let mut time = harness.sky.time_of_day().settings;
+        time.enabled = true;
+        time.playing = true;
+        time.speed = 3600.0;
+        harness.sky.set_time_of_day(time).expect("playback");
+        harness.sky.advance_frame(1, 1.0).expect("first invocation");
+        harness.sky.advance_frame(2, 1.0).expect("advance");
+        assert_eq!(harness.sky.time_of_day().current.hours, 10.0);
+        harness.frame(&gpu);
+        assert_eq!(harness.ibl.publication().requested_generation, 1);
+        assert!(
+            harness.ibl.sh().is_none(),
+            "the first completion is still pending"
+        );
+
+        let authored = harness.sky.time_of_day().settings;
+        // Selecting the same preset resets the runtime moment without changing one
+        // authored value; an older completion must not be published.
+        harness
+            .sky
+            .set_transaction(SkyTransaction {
+                desc: day,
+                preset: Some(SkyPreset::Day),
+                cloud_fields: LegacyCloudFields::NONE,
+            })
+            .expect("reselect the same preset");
+        assert_eq!(harness.sky.time_of_day().current.hours, 9.0);
+        assert_eq!(harness.sky.time_of_day().settings, authored);
+        harness.frame(&gpu);
+        assert!(
+            harness.ibl.sh().is_none(),
+            "a completion of the pre-reset source was published"
+        );
+        let mut published = None;
+        for _ in 0..20 {
+            harness.frame(&gpu);
+            if let Some(generation) = harness.ibl.publication().published_generation {
+                published = Some(generation);
+                break;
+            }
+        }
+        let generation = published.expect("the reset source publishes its own filter");
+        assert!(
+            generation > 1,
+            "the pre-reset request's generation was published: {generation}"
+        );
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+        harness.leak();
+        std::mem::forget(gpu);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn unchanged_weather_cycle_restart_rejects_an_older_ibl_completion() {
+        use raa_core::testing::{block_on, skip, software_gpu};
+
+        use crate::weather::{WeatherPreset, WeatherUpdate};
+
+        let test = "unchanged_weather_cycle_restart_rejects_an_older_ibl_completion";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut harness = LifecycleHarness::new(&gpu);
+        harness
+            .sky
+            .set_view(0, &raa_scene::Camera::default(), false)
+            .expect("view 0");
+        let mut settings = harness.sky.weather().settings;
+        settings.changing = true;
+        settings.transition_seconds = 0.0;
+        let update = WeatherUpdate {
+            settings,
+            cycle_start: Some(WeatherPreset::Fair),
+            restart_cycle: true,
+        };
+        harness
+            .sky
+            .set_weather_update(update)
+            .expect("start the cycle");
+        harness.frame(&gpu);
+        assert_eq!(harness.ibl.publication().requested_generation, 1);
+        assert!(
+            harness.ibl.sh().is_none(),
+            "the first completion is still pending"
+        );
+
+        // Restarting the unchanged cycle replaces the accepted source even though every
+        // authored value is equal; the pending pre-restart completion must be refused.
+        harness
+            .sky
+            .set_weather_update(update)
+            .expect("restart the unchanged cycle");
+        assert_eq!(harness.sky.weather().settings, settings);
+        harness.frame(&gpu);
+        assert!(
+            harness.ibl.sh().is_none(),
+            "a completion of the pre-restart source was published"
+        );
+        let mut published = None;
+        for _ in 0..20 {
+            harness.frame(&gpu);
+            if let Some(generation) = harness.ibl.publication().published_generation {
+                published = Some(generation);
+                break;
+            }
+        }
+        let generation = published.expect("the restarted cycle publishes its own filter");
+        assert!(
+            generation > 1,
+            "the pre-restart request's generation was published: {generation}"
+        );
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+        harness.leak();
         std::mem::forget(gpu);
     }
 }

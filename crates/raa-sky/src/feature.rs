@@ -132,6 +132,7 @@ impl SkyHandle {
         let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
         let model_changed = s.desc.model != desc.model;
         let mut weather_changed = false;
+        let mut source_reset = false;
         let mut time = s.time;
         let mut weather = s.weather.clone();
         if desc.model == SkyModel::Physical {
@@ -152,6 +153,9 @@ impl SkyHandle {
                 settings.target = crate::weather::Weather::by_name(weather_preset.as_str())
                     .expect("built-in weather preset");
                 start = Some(weather_preset);
+                // An explicit preset selection is an accepted source replacement even when
+                // the authored values equal the previous ones: it resets the runtime moment.
+                source_reset = true;
             }
             let fields = cloud_fields.0;
             if fields & LegacyCloudFields::COVERAGE.0 != 0 {
@@ -181,6 +185,9 @@ impl SkyHandle {
         }
         if weather_changed {
             s.bump_weather()?;
+        }
+        if source_reset {
+            s.bump_source()?;
         }
         s.desc = desc;
         s.time = time;
@@ -305,6 +312,9 @@ impl SkyHandle {
         let accepted = weather.apply_update(update)?;
         if accepted {
             s.bump_weather()?;
+            // A restart (or any accepted authored edit) replaces the accepted source even
+            // when an unchanged cycle restarts to equal values.
+            s.bump_source()?;
             s.weather = weather;
             s.reset_reasons(None, CloudResetReasons::WEATHER);
             self.invalidate_cloud(None, CloudInvalidation::Weather);
@@ -731,6 +741,74 @@ mod tests {
         let mut s = h.state.borrow_mut();
         s.env_dirty = false;
         s.gpu_dirty = false;
+    }
+
+    #[test]
+    fn explicit_resets_advance_the_source_generation_independently_of_values() {
+        let h = handle();
+        let day = SkyDesc::preset("day").expect("day preset");
+        h.set_transaction(SkyTransaction {
+            desc: day.clone(),
+            preset: Some(SkyPreset::Day),
+            cloud_fields: LegacyCloudFields::NONE,
+        })
+        .unwrap();
+        let after_preset = h.state.borrow().source_generation;
+        assert_eq!(
+            after_preset, 1,
+            "preset selection is an accepted source event"
+        );
+
+        // Playback moves the runtime moment but keeps every authored value.
+        h.set_time_of_day(settings(9.0)).unwrap();
+        h.advance_frame(1, 1.0).unwrap();
+        h.advance_frame(2, 1.0).unwrap();
+        assert_eq!(h.time_of_day().current.hours, 10.0);
+        assert_eq!(h.time_of_day().settings.time.hours, 9.0);
+        assert_eq!(
+            h.state.borrow().source_generation,
+            after_preset,
+            "playback is evolution within the accepted source"
+        );
+
+        // Reselecting the same preset resets the runtime moment without changing any
+        // authored value; it is still an accepted source replacement.
+        h.set_transaction(SkyTransaction {
+            desc: day,
+            preset: Some(SkyPreset::Day),
+            cloud_fields: LegacyCloudFields::NONE,
+        })
+        .unwrap();
+        assert_eq!(h.time_of_day().current.hours, 9.0);
+        assert_eq!(h.state.borrow().source_generation, after_preset + 1);
+
+        // An unchanged weather-cycle restart is the same kind of accepted event.
+        let mut weather = h.weather().settings;
+        weather.changing = true;
+        weather.transition_seconds = 0.0;
+        h.set_weather_update(WeatherUpdate {
+            settings: weather,
+            cycle_start: Some(WeatherPreset::Fair),
+            restart_cycle: true,
+        })
+        .unwrap();
+        let after_start = h.state.borrow().source_generation;
+        h.set_weather_update(WeatherUpdate {
+            settings: weather,
+            cycle_start: Some(WeatherPreset::Fair),
+            restart_cycle: true,
+        })
+        .unwrap();
+        assert_eq!(h.weather().settings, weather, "authored values are equal");
+        assert_eq!(
+            h.state.borrow().source_generation,
+            after_start + 1,
+            "an unchanged explicit cycle restart replaces the source"
+        );
+
+        // Advancing playback still does not replace the source.
+        h.advance_frame(3, 1.0).unwrap();
+        assert_eq!(h.state.borrow().source_generation, after_start + 1);
     }
 
     fn near(a: Vec3, b: Vec3, tolerance: f32) {

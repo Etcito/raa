@@ -78,6 +78,9 @@ pub(crate) struct SkyState {
     pub submitted_invocation: Option<u64>,
     /// Accepted weather changes and explicit cycle restarts.
     pub weather_generation: u64,
+    /// Accepted explicit source replacements (preset reselection and weather-cycle
+    /// restarts) that may leave every authored value equal but reset the runtime source.
+    pub source_generation: u64,
     /// Acknowledged atmosphere (Milky Way / LUT) work.
     pub atmosphere_generation: u64,
     /// The sky pipeline's readiness observation.
@@ -114,6 +117,7 @@ impl Default for SkyState {
             recorded_invocation: None,
             submitted_invocation: None,
             weather_generation: 0,
+            source_generation: 0,
             atmosphere_generation: 0,
             readiness: SkyReadiness::default(),
             active_view: None,
@@ -202,6 +206,17 @@ impl SkyState {
                 }
             }
         }
+    }
+
+    /// Counts one accepted explicit source replacement even when the authored values are
+    /// unchanged; the env pass cancels older IBL completions before publishing. Exhaustion
+    /// refuses rather than reusing an identity.
+    pub(crate) fn bump_source(&mut self) -> Result<(), RaaError> {
+        self.source_generation = self
+            .source_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("source_generation is exhausted"))?;
+        Ok(())
     }
 
     /// Counts one accepted effective weather change; exhaustion refuses rather than
