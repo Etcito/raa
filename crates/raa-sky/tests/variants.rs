@@ -710,7 +710,8 @@ fn celestial_decode_occlusion_and_finite_input_guards_are_retained() {
 /// The physical consumers keep the legacy entry points and the S11 `raa_sky_radiance` seam,
 /// but attach the completed atmosphere, celestial and cloud resources through the unchanged
 /// S10 group-2 layout. Allocation is not readiness: the Rust prepare supplies validity flags
-/// from `CloudViews` and the bind group only after the view's sky-view LUT exists.
+/// from `CloudViews` and the bind group only after the view's sky-view LUT and the Milky Way
+/// bake were carried by actual submissions.
 #[test]
 fn physical_consumers_attach_the_exact_s10_group_two_layout() {
     use wgpu::naga::{
