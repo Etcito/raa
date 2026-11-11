@@ -70,6 +70,8 @@ impl SkyFeature {
                 ibl.clone(),
                 lit.handle(),
                 p.lighting().layout(),
+                Rc::clone(&atmosphere),
+                Rc::clone(&cloud),
             );
             p.add(Box::new(pass))?;
             p.add(Box::new(SkyCloudScreenPass::new(
@@ -79,7 +81,10 @@ impl SkyFeature {
             )))?;
         }
         // `add_contributor` borrows the pipeline itself: the borrow above is released.
-        lit.add_contributor(Box::new(SkyBackground::new(Rc::clone(&state))))?;
+        lit.add_contributor(Box::new(
+            SkyBackground::new(Rc::clone(&state))
+                .with_resources(Rc::clone(&atmosphere), Rc::clone(&cloud)),
+        ))?;
         Ok(SkyHandle {
             state,
             ibl: Some(ibl),

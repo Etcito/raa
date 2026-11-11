@@ -1,4 +1,4 @@
-use raa_sky::SkyDesc;
+use raa_sky::{SkyDesc, SkyModel, SkyPreset};
 
 const PRESETS: [&str; 4] = ["day", "snow", "jungle", "night"];
 
@@ -55,4 +55,36 @@ fn presets_differ() {
     assert!(night.intensity < day.intensity * 0.1);
     let luma = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     assert!(luma(night.zenith) < luma(day.zenith));
+}
+
+#[test]
+fn physical_presets_keep_the_s24_mapping_and_legacy_cases() {
+    let day = day();
+    assert_eq!(day.model, SkyModel::Physical);
+    assert_eq!(day.profile, SkyPreset::Day);
+    assert_eq!(day.atmosphere.ground_albedo, [0.3; 3]);
+    assert_eq!(day.atmosphere.mie_multiplier, 1.0);
+
+    let snow = SkyDesc::preset("snow").expect("snow");
+    assert_eq!(snow.profile, SkyPreset::Snow);
+    assert_eq!(snow.atmosphere.ground_albedo, [0.9; 3]);
+    assert_eq!(snow.atmosphere.mie_multiplier, 1.5);
+
+    let jungle = SkyDesc::preset("jungle").expect("jungle");
+    assert_eq!(jungle.profile, SkyPreset::Jungle);
+    assert_eq!(jungle.atmosphere.ground_albedo, [0.18, 0.26, 0.14]);
+    assert_eq!(jungle.atmosphere.mie_multiplier, 1.2);
+
+    let night = SkyDesc::preset("night").expect("night");
+    assert_eq!(night.profile, SkyPreset::Night);
+    assert_eq!(night.atmosphere.ground_albedo, [0.3; 3]);
+    assert_eq!(night.atmosphere.mie_multiplier, 1.0);
+
+    // The legacy comparison keeps the same authored artistic controls.
+    let mut legacy = day.clone();
+    legacy.model = SkyModel::Legacy;
+    assert_eq!(legacy.zenith, day.zenith);
+    assert_eq!(legacy.horizon, day.horizon);
+    assert_eq!(legacy.intensity, day.intensity);
+    legacy.validate().expect("legacy day");
 }

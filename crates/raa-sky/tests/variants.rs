@@ -706,3 +706,159 @@ fn celestial_decode_occlusion_and_finite_input_guards_are_retained() {
     );
     Composer::validate(&source).expect("finite-input celestial call fixtures validate");
 }
+
+/// The physical consumers keep the legacy entry points and the S11 `raa_sky_radiance` seam,
+/// but attach the completed atmosphere, celestial and cloud resources through the unchanged
+/// S10 group-2 layout. Allocation is not readiness: the Rust prepare supplies validity flags
+/// from `CloudViews` and the bind group only after the view's sky-view LUT exists.
+#[test]
+fn physical_consumers_attach_the_exact_s10_group_two_layout() {
+    use wgpu::naga::{
+        AddressSpace, ImageClass, ImageDimension, ScalarKind, ShaderStage, TypeInner, front::wgsl,
+        valid,
+    };
+    for (name, source) in [
+        ("sky.env", shaders::physical_env_module_wgsl()),
+        ("sky.background", shaders::physical_background_module_wgsl()),
+    ] {
+        assert!(source.starts_with(PRELUDE_WGSL), "{name}: prelude first");
+        assert!(
+            source.contains("fn raa_sky_radiance("),
+            "{name}: the common seam is replaced, not bypassed"
+        );
+        assert!(
+            source.contains("raa_celestial_radiance"),
+            "{name}: the celestial evaluator is folded in"
+        );
+        if let Err(e) = Composer::validate(&source) {
+            panic!("{name} physical shader refused: {e}");
+        }
+        let module = wgsl::parse_str(&source).expect("physical module parses");
+        let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+            .validate(&module)
+            .expect("physical module validates");
+
+        let mut bindings = Vec::new();
+        for (handle, global) in module.global_variables.iter() {
+            let Some(binding) = &global.binding else {
+                continue;
+            };
+            if binding.group == 2 {
+                bindings.push((binding.binding, handle));
+            }
+        }
+        bindings.sort_by_key(|(binding, _)| *binding);
+        let points: Vec<u32> = bindings.iter().map(|(binding, _)| *binding).collect();
+        assert_eq!(points, (0..8).collect::<Vec<_>>(), "{name}: group-2 layout");
+        for (binding, handle) in &bindings {
+            let global = &module.global_variables[*handle];
+            let inner = &module.types[global.ty].inner;
+            match *binding {
+                0 => {
+                    assert_eq!(global.space, AddressSpace::Uniform, "{name}: binding 0");
+                    let TypeInner::Struct { span, .. } = *inner else {
+                        panic!("{name}: binding 0 is not PhysicalSkyGpu");
+                    };
+                    assert_eq!(span, 256, "{name}: S10 uniform size");
+                }
+                1..=5 => assert!(
+                    matches!(
+                        inner,
+                        TypeInner::Image {
+                            dim: ImageDimension::D2,
+                            arrayed: false,
+                            class: ImageClass::Sampled {
+                                kind: ScalarKind::Float,
+                                multi: false,
+                            },
+                        }
+                    ),
+                    "{name}: binding {binding} is not a filterable D2 texture"
+                ),
+                6 | 7 => assert!(
+                    matches!(inner, TypeInner::Sampler { comparison: false }),
+                    "{name}: binding {binding} is not a filtering sampler"
+                ),
+                other => panic!("{name}: unexpected group-2 binding {other}"),
+            }
+        }
+
+        let fragment = module
+            .entry_points
+            .iter()
+            .position(|entry| entry.name == "fs_main" && entry.stage == ShaderStage::Fragment)
+            .expect("fs_main");
+        let usage = info.get_entry_point(fragment);
+        let mut used: Vec<u32> = bindings
+            .iter()
+            .filter(|(_, handle)| !usage[*handle].is_empty())
+            .map(|(binding, _)| *binding)
+            .collect();
+        used.sort_unstable();
+        let expected = if name == "sky.env" {
+            vec![0, 1, 2, 3, 5, 6, 7]
+        } else {
+            vec![0, 1, 2, 3, 4, 5, 6, 7]
+        };
+        assert_eq!(used, expected, "{name}: group-2 use");
+    }
+}
+
+#[test]
+fn physical_composition_keeps_clear_sky_and_clouds_separate() {
+    let source = shaders::physical_env_module_wgsl();
+    for contract in [
+        // Solstice environment.wgsl:93-113 at 7e465b5: clear * cloud.a + cloud.rgb.
+        "clear * clamp(cloud.a, 0.0, 1.0) + max(cloud.rgb",
+        // The raw accepted factors, never a previously attenuated or replayed value.
+        "raa_physical_sky.daylight.w",
+        "raa_physical_sky.equinox.w",
+        "raa_physical_sky.discs.w",
+        // Exact CloudViews validity lanes and the reserved negative screen alpha.
+        "raa_physical_sky.flags.y",
+        "raa_physical_sky.flags.z",
+        "cloud.a >= 0.0",
+        // Artistic controls are ratios written by the prepare, not a second preset tint.
+        "raa_physical_sky_tint(direction, env)",
+        "raa_atmosphere_sky_view_uv(direction)",
+    ] {
+        assert!(
+            source.contains(contract),
+            "missing physical contract: {contract}"
+        );
+    }
+    assert_eq!(
+        source.matches("raa_directional_radiance(").count(),
+        1,
+        "the prelude defines the material boundary; the sky evaluator must not call it a second time"
+    );
+    assert!(
+        !source.contains("moon.rgb *"),
+        "the moon radiance already carries coverage"
+    );
+    let background = shaders::physical_background_module_wgsl();
+    assert!(
+        background.contains("in.clip.xy * raa_frame.viewport.zw"),
+        "screen clouds use viewport UV"
+    );
+    assert!(background.contains("raa_physical_sky_radiance_screen"));
+}
+
+#[test]
+fn legacy_builders_do_not_embed_the_physical_module() {
+    for (name, wgsl) in [
+        ("sky.env", shaders::env_module_wgsl()),
+        ("sky.background", shaders::background_module_wgsl()),
+    ] {
+        assert!(wgsl.contains(SKY_WGSL), "{name}: legacy sky source");
+        assert!(!wgsl.contains("PhysicalSkyGpu"), "{name}: physical uniform");
+        assert!(
+            !wgsl.contains("raa_physical_sky"),
+            "{name}: physical helpers"
+        );
+        assert!(
+            !wgsl.contains("raa_celestial_radiance"),
+            "{name}: celestial"
+        );
+    }
+}

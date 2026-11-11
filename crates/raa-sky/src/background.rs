@@ -1,12 +1,21 @@
 //! The `sky.background` forward contributor (S12, order 900): a fullscreen triangle at
 //! depth 1 (LessEqual, no depth write) shading every uncovered pixel with the per-pixel
-//! `raa_sky_radiance` along the world view ray.
+//! common `raa_sky_radiance` seam along the world view ray.
+//!
+//! The legacy model keeps [`background_module_wgsl`]. The physical model uses
+//! [`physical_background_module_wgsl`], sampling the screen-cloud result in viewport UV
+//! through the private S10 group-2 bindings while the clear sky comes from the atmosphere
+//! LUTs and the celestial evaluator. The contributor remains independently controllable.
 
 use raa_core::RaaError;
 use raa_lit::{ForwardContributor, LitHandle};
 use raa_pipeline::{HDR_FORMAT, PrepareCtx};
 
-use crate::shaders::background_module_wgsl;
+use crate::atmosphere::SharedAtmosphere;
+use crate::cloud_backend::SharedCloud;
+use crate::desc::SkyModel;
+use crate::env_pass::PhysicalSkyBinding;
+use crate::shaders::{background_module_wgsl, physical_background_module_wgsl};
 use crate::state::SharedSky;
 
 /// S12 name of the contributor.
@@ -15,36 +24,71 @@ pub(crate) const BACKGROUND_NAME: &str = "sky.background";
 pub(crate) const BACKGROUND_ORDER: u32 = 900;
 
 /// Draws the procedural sky behind the opaque geometry of the forward pass.
-#[allow(dead_code)] // consumed by SkyFeature (sky.background)
 pub(crate) struct SkyBackground {
     state: SharedSky,
-    /// The render pipeline and the msaa count it was built for.
-    pipeline: Option<(u32, wgpu::RenderPipeline)>,
+    atmosphere: Option<SharedAtmosphere>,
+    cloud: Option<SharedCloud>,
+    binding: Option<PhysicalSkyBinding>,
+    /// The legacy and physical pipelines and the msaa count they were built for.
+    legacy: Option<(u32, wgpu::RenderPipeline)>,
+    physical: Option<(u32, wgpu::RenderPipeline)>,
+    model: SkyModel,
+    physical_ready: bool,
 }
 
 impl SkyBackground {
-    #[allow(dead_code)] // consumed by SkyFeature (sky.background)
     pub(crate) fn new(state: SharedSky) -> Self {
         SkyBackground {
             state,
-            pipeline: None,
+            atmosphere: None,
+            cloud: None,
+            binding: None,
+            legacy: None,
+            physical: None,
+            model: SkyModel::Legacy,
+            physical_ready: false,
         }
+    }
+
+    /// Attaches the completed atmosphere and cloud resources of the same sky feature.
+    pub(crate) fn with_resources(
+        mut self,
+        atmosphere: SharedAtmosphere,
+        cloud: SharedCloud,
+    ) -> Self {
+        self.atmosphere = Some(atmosphere);
+        self.cloud = Some(cloud);
+        self
     }
 }
 
-/// Builds the background pipeline: groups [frame, lighting], no vertex buffers, HDR colour
-/// without blending, Depth32Float LessEqual without depth writes, `msaa` samples.
-fn build_pipeline(lit: &LitHandle, ctx: &PrepareCtx<'_>, msaa: u32) -> wgpu::RenderPipeline {
+/// Builds a background pipeline: groups [frame, lighting] and, for the physical model, the
+/// private physical-sky group 2; no vertex buffers, HDR colour without blending,
+/// Depth32Float LessEqual without depth writes, `msaa` samples.
+fn build_pipeline(
+    lit: &LitHandle,
+    ctx: &PrepareCtx<'_>,
+    msaa: u32,
+    physical_layout: Option<&wgpu::BindGroupLayout>,
+    wgsl: String,
+) -> wgpu::RenderPipeline {
     let device = ctx.gpu.device();
-    let wgsl = background_module_wgsl();
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("raa.sky.background"),
         source: wgpu::ShaderSource::Wgsl(wgsl.into()),
     });
     let frame_layout = lit.frame_layout();
+    let groups: Vec<Option<&wgpu::BindGroupLayout>> = match physical_layout {
+        Some(physical) => vec![
+            Some(&frame_layout),
+            Some(ctx.lighting.layout()),
+            Some(physical),
+        ],
+        None => vec![Some(&frame_layout), Some(ctx.lighting.layout())],
+    };
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("raa.sky.background.layout"),
-        bind_group_layouts: &[Some(&frame_layout), Some(ctx.lighting.layout())],
+        bind_group_layouts: &groups,
         immediate_size: 0,
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -98,13 +142,34 @@ impl ForwardContributor for SkyBackground {
         BACKGROUND_ORDER
     }
 
-    /// Builds the pipeline once per msaa count, writes the `EnvGpu` sky fields when the
+    /// Builds the pipelines once per msaa count, writes the `EnvGpu` sky fields when the
     /// description changed and keeps the background mode at 1 (sky), so the S12 tonemap
     /// background rule leaves the sky alone. Only runs while the contributor is enabled.
     fn prepare(&mut self, lit: &LitHandle, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let msaa = lit.msaa();
-        if self.pipeline.as_ref().is_none_or(|(m, _)| *m != msaa) {
-            self.pipeline = Some((msaa, build_pipeline(lit, ctx, msaa)));
+        if self.binding.is_none() && self.atmosphere.is_some() && self.cloud.is_some() {
+            self.binding = Some(PhysicalSkyBinding::new(ctx.gpu));
+        }
+        if self.legacy.as_ref().is_none_or(|(m, _)| *m != msaa) {
+            self.legacy = Some((
+                msaa,
+                build_pipeline(lit, ctx, msaa, None, background_module_wgsl()),
+            ));
+            self.physical = None;
+        }
+        if self.physical.is_none()
+            && let Some(binding) = &self.binding
+        {
+            self.physical = Some((
+                msaa,
+                build_pipeline(
+                    lit,
+                    ctx,
+                    msaa,
+                    Some(binding.layout()),
+                    physical_background_module_wgsl(),
+                ),
+            ));
         }
         let mut state = self
             .state
@@ -118,17 +183,53 @@ impl ForwardContributor for SkyBackground {
         if ctx.lighting.env().sky_params[2] != 1.0 {
             ctx.lighting.env_mut().sky_params[2] = 1.0;
         }
+        self.model = state.desc.model;
+        self.physical_ready = false;
+        if self.model == SkyModel::Physical
+            && let (Some(view), Some(binding), Some(atmosphere), Some(cloud)) = (
+                state.active_view,
+                self.binding.as_mut(),
+                self.atmosphere.as_ref(),
+                self.cloud.as_ref(),
+            )
+        {
+            let views = cloud.try_borrow().ok().map(|backend| backend.views(view));
+            let atmosphere = atmosphere.try_borrow().ok();
+            if let (Some(views), Some(atmosphere)) = (views, atmosphere) {
+                self.physical_ready = binding.prepare(
+                    ctx.gpu,
+                    &crate::env_pass::PhysicalFrame {
+                        state: &state,
+                        view,
+                        size: ctx.size,
+                        time_s: ctx.time_s,
+                        atmosphere: &atmosphere,
+                        views: &views,
+                    },
+                );
+            }
+        }
         Ok(())
     }
 
-    /// Draws the fullscreen triangle; groups 0 and 1 are bound by the forward pass.
+    /// Draws the fullscreen triangle; groups 0 and 1 are bound by the forward pass and, for
+    /// the ready physical model, group 2 is its private sky-resource set.
     fn record(&self, pass: &mut wgpu::RenderPass<'_>, _lit: &LitHandle) -> Result<(), RaaError> {
-        let Some((_, pipeline)) = &self.pipeline else {
+        let physical = self.model == SkyModel::Physical && self.physical_ready;
+        let pipeline = if physical {
+            self.physical.as_ref()
+        } else {
+            self.legacy.as_ref()
+        };
+        let Some((_, pipeline)) = pipeline else {
             return Err(RaaError::Resource(format!(
                 "{BACKGROUND_NAME}: record ran before prepare built its pipeline"
             )));
         };
         pass.set_pipeline(pipeline);
+        if physical && let Some(group) = self.binding.as_ref().and_then(PhysicalSkyBinding::group) {
+            pass.set_bind_group(2, group, &[]);
+        }
         pass.draw(0..3, 0..1);
         Ok(())
     }

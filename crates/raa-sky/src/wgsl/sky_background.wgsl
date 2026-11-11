@@ -1,10 +1,13 @@
 // RAA sky background (S12 `sky.background`, forward contributor 900).
 //
-// Composed after PRELUDE + LIB + SKY_WGSL; groups 0 (frame) and 1 (lighting) are bound as in
-// the forward pass. A fullscreen triangle at clip z = 1, drawn with LessEqual and no depth
-// write, so it covers only the pixels no geometry wrote. The fragment reconstructs the world
-// view ray through inv_proj and inv_view and returns the sky radiance (scene-referred HDR,
-// unscaled: the tonemap pass applies exposure).
+// Composed after PRELUDE + LIB + the common `raa_sky_radiance` seam: the legacy builder puts
+// SKY_WGSL there and the physical builder puts the atmosphere/celestial/cloud evaluator.
+// Groups 0 (frame) and 1 (lighting) are bound as in the forward pass; the physical builder
+// adds its private S10 group 2 and samples the screen cloud result in viewport UV.
+// A fullscreen triangle at clip z = 1, drawn with LessEqual and no depth write, so it covers
+// only the pixels no geometry wrote. The fragment reconstructs the world view ray through
+// inv_proj and inv_view and returns the sky radiance (scene-referred HDR, unscaled: the
+// tonemap pass applies exposure).
 
 struct RaaSkyBackgroundVaryings {
     @builtin(position) clip: vec4<f32>,

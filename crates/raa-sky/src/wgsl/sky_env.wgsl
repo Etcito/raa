@@ -1,8 +1,11 @@
 // RAA sky env pass (S12 `sky.env`): renders one face of the SKY_ENV cube per draw.
 //
-// Composed after PRELUDE + LIB + SKY_WGSL; groups 0 (frame) and 1 (lighting) are bound as in
-// the forward pass. The pass draws vertices 0..3 with the instance range face..face+1, so
-// `instance_index` is the cube face in wgpu order +X, -X, +Y, -Y, +Z, -Z. Target: HDR_FORMAT.
+// Composed after PRELUDE + LIB + the common `raa_sky_radiance` seam: the legacy builder puts
+// SKY_WGSL there and the physical builder puts the atmosphere/celestial/cloud evaluator.
+// Groups 0 (frame) and 1 (lighting) are bound as in the forward pass; the physical builder
+// adds its private S10 group 2. The pass draws vertices 0..3 with the instance range
+// face..face+1, so `instance_index` is the cube face in wgpu order +X, -X, +Y, -Y, +Z, -Z.
+// Target: HDR_FORMAT.
 
 struct RaaSkyEnvVaryings {
     @builtin(position) clip: vec4<f32>,

@@ -267,8 +267,11 @@ impl SkyDesc {
     /// Writes the S10 `EnvGpu` sky fields: `sun_disc`, `zenith`, `horizon`, `ground`,
     /// `sky_params.x/y` (intensity, softness), `clouds`, `clouds2`, `cloud_color`. The
     /// background mode (`sky_params.z`), `background`, `fog` and `aerial` are left untouched.
-    // The `sky.env` pass (a later task) is the caller.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// The legacy model stores the authored artistic values verbatim. The physical model
+    /// stores the same controls relative to the selected profile's original values, so the
+    /// preset defaults contribute exactly one and never double-tint the atmosphere radiance;
+    /// an explicit override still scales or tints it.
     pub(crate) fn write_env(&self, env: &mut EnvGpu) {
         let rgb = |c: [f32; 3]| [c[0], c[1], c[2], 0.0];
         env.sun_disc = [
@@ -277,16 +280,46 @@ impl SkyDesc {
             0.0,
             0.0,
         ];
-        env.zenith = rgb(self.zenith);
-        env.horizon = rgb(self.horizon);
-        env.ground = rgb(self.ground);
-        env.sky_params[0] = self.intensity;
+        let (zenith, horizon, ground, intensity) = if self.model == SkyModel::Physical {
+            // Invariant: `profile` is always a built-in preset (desc.rs tests check them).
+            let reference =
+                SkyDesc::preset(self.profile.as_str()).expect("a sky profile is a built-in preset");
+            (
+                ratio3(self.zenith, reference.zenith),
+                ratio3(self.horizon, reference.horizon),
+                ratio3(self.ground, reference.ground),
+                ratio(self.intensity, reference.intensity),
+            )
+        } else {
+            (self.zenith, self.horizon, self.ground, self.intensity)
+        };
+        env.zenith = rgb(zenith);
+        env.horizon = rgb(horizon);
+        env.ground = rgb(ground);
+        env.sky_params[0] = intensity;
         env.sky_params[1] = self.horizon_softness;
         let c = &self.clouds;
         env.clouds = [c.coverage, c.density, c.altitude_m, c.scale_m];
         env.clouds2 = [c.wind_mps[0], c.wind_mps[1], c.silver_lining, 0.0];
         env.cloud_color = rgb(c.color);
     }
+}
+
+/// A profile-relative scalar; the preset value is a positive constant or zero colour.
+fn ratio(value: f32, reference: f32) -> f32 {
+    if reference > 0.0 {
+        value / reference
+    } else {
+        value
+    }
+}
+
+fn ratio3(value: [f32; 3], reference: [f32; 3]) -> [f32; 3] {
+    [
+        ratio(value[0], reference[0]),
+        ratio(value[1], reference[1]),
+        ratio(value[2], reference[2]),
+    ]
 }
 
 fn invalid(message: String) -> RaaError {
@@ -346,7 +379,9 @@ mod tests {
 
     #[test]
     fn write_env_places_fields_and_keeps_background() {
-        let sky = SkyDesc::preset("day").unwrap();
+        // The legacy model keeps the authored artistic colours verbatim.
+        let mut sky = SkyDesc::preset("day").unwrap();
+        sky.model = SkyModel::Legacy;
         let mut env = EnvGpu {
             sky_params: [9.0, 9.0, 1.0, 7.0],
             fog: [1.0, 2.0, 3.0, 4.0],
@@ -368,6 +403,31 @@ mod tests {
         assert_eq!(env.fog, before.fog);
         assert_eq!(env.fog_color, before.fog_color);
         assert_eq!(env.aerial, before.aerial);
+    }
+
+    #[test]
+    fn physical_env_stores_profile_relative_artistic_controls() {
+        let mut env = EnvGpu::default();
+        let mut sky = SkyDesc::preset("day").unwrap();
+        sky.write_env(&mut env);
+        assert_eq!(env.zenith, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(env.horizon, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(env.ground, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(env.sky_params[0], 1.0, "preset intensity is the unit");
+        assert_eq!(env.sky_params[1], 4.0, "softness is not rescaled");
+        assert_eq!(env.cloud_color, [0.95, 0.95, 0.97, 0.0]);
+
+        // Explicit overrides stay effective, scaled against the profile's own values.
+        sky.zenith = [0.30, 0.35, 0.85];
+        sky.intensity = 0.8;
+        sky.write_env(&mut env);
+        assert_eq!(env.zenith, [2.0, 1.0, 1.0, 0.0]);
+        assert_eq!(env.sky_params[0], 0.5);
+        // A model switch back to legacy restores raw authored values.
+        sky.model = SkyModel::Legacy;
+        sky.write_env(&mut env);
+        assert_eq!(env.zenith, [0.30, 0.35, 0.85, 0.0]);
+        assert_eq!(env.sky_params[0], 0.8);
     }
 
     #[test]
