@@ -218,6 +218,7 @@ impl WebApp for EngineApp {
                 let st = guard
                     .as_mut()
                     .ok_or_else(|| api_error(DISPOSED, "the engine was disposed"))?;
+                prepare_sky_view(st, index, size)?;
                 crate::trace::prepare_view(st, index, size)?;
                 st.prepare_pipeline_view(gpu, index, size)
             }));
@@ -248,6 +249,7 @@ impl WebApp for EngineApp {
             tonemap,
             features,
             scene_invocation: SceneInvocation::default(),
+            sky_invocation_id: 0,
             view_cameras: [None; 4],
             max_materials: o.max_materials,
             meshes: HandleMap::new("mesh"),
@@ -277,9 +279,24 @@ impl WebApp for EngineApp {
             .try_borrow_mut()
             .map_err(|_| pipeline_busy())?
             .set_time(input.now_ms);
+        s.advance_sky_frame(input)?;
         api::frame_all(s, gpu, input)?;
+        retire_sky_views(s)?;
         s.rebuild_dirty_groups()?;
         s.flush_skins(gpu)?;
+        let size = s
+            .features
+            .get::<api::ViewsState>()
+            .map_or(input.size, |views| {
+                let r = views.viewports()[0];
+                let x = (r.x * input.size.0 as f64).round() as u32;
+                let y = (r.y * input.size.1 as f64).round() as u32;
+                (
+                    ((r.x + r.width) * input.size.0 as f64).round() as u32 - x,
+                    ((r.y + r.height) * input.size.1 as f64).round() as u32 - y,
+                )
+            });
+        prepare_sky_view(s, 0, size)?;
         crate::trace::prepare_view(s, 0, input.size)?;
         // Viewport 0 of the invocation; split views select their slot in the callback.
         let discontinuity = s.scene_invocation.prepare(0);
@@ -300,6 +317,50 @@ impl WebApp for EngineApp {
             s.scene_invocation.discontinuity_all();
         }
     }
+}
+
+/// Mirror m07's effective camera without consuming its discontinuity or changing the scene.
+fn prepare_sky_view(st: &EngineState, index: usize, size: (u32, u32)) -> Result<(), RaaError> {
+    let Some(sky) = st.features.get::<raa_sky::SkyHandle>() else {
+        return Ok(());
+    };
+    let mut camera = st.scene.camera;
+    let own = st
+        .features
+        .get::<api::ViewsState>()
+        .and_then(|v| v.camera(index));
+    let signature = own.map(|c| {
+        let mut signature = [0.0; 9];
+        signature[..3].copy_from_slice(&c.eye);
+        signature[3..6].copy_from_slice(&c.target);
+        signature[6..].copy_from_slice(&[c.fov_y_deg.to_radians(), c.near, c.far]);
+        camera.eye = Vec3::from_array(c.eye);
+        camera.target = Vec3::from_array(c.target);
+        camera.up = Vec3::Y;
+        camera.fov_y_rad = c.fov_y_deg.to_radians();
+        camera.near = c.near;
+        camera.far = c.far;
+        camera.ortho_height = None;
+        signature
+    });
+    let cut = st.scene_invocation.is_discontinuous(index)
+        || st.view_cameras[index].is_some_and(|previous| Some(previous) != signature);
+    camera.set_viewport(size.0, size.1);
+    sky.set_view(index as u32, &camera, !cut)
+}
+
+fn retire_sky_views(st: &mut EngineState) -> Result<(), RaaError> {
+    let count = st
+        .features
+        .get::<api::ViewsState>()
+        .map_or(1, |v| v.viewports().len());
+    if let Some(sky) = st.features.get::<raa_sky::SkyHandle>() {
+        for view in count..4 {
+            sky.remove_view(view as u32)?;
+            st.view_cameras[view] = None;
+        }
+    }
+    Ok(())
 }
 
 /// The RAA engine: one canvas, one scene, the HDR lit pipeline.
@@ -354,11 +415,13 @@ impl Engine {
         runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
         let mut guard = self.state.borrow_mut();
         let s = guard.as_mut().ok_or_else(disposed)?;
-        let index = s.scene_invocation.begin();
-        s.pipeline
+        let mut pipeline = s
+            .pipeline
             .try_borrow_mut()
-            .map_err(|_| js_err(&pipeline_busy()))?
-            .begin_scene_submission();
+            .map_err(|_| js_err(&pipeline_busy()))?;
+        crate::state::next_sky_invocation(&mut s.sky_invocation_id).map_err(|e| js_err(&e))?;
+        let index = s.scene_invocation.begin();
+        pipeline.begin_scene_submission();
         s.lit.begin_scene_frame(index);
         Ok(())
     }
@@ -377,6 +440,9 @@ impl Engine {
             s.lit.submitted_scene_view(view);
         }
         s.lit.finish_scene_frame(complete);
+        if let Some(sky) = s.features.get::<raa_sky::SkyHandle>() {
+            sky.observe_submission(s.sky_invocation_id(), acknowledge, complete);
+        }
     }
 }
 
@@ -670,7 +736,11 @@ impl Engine {
     #[wasm_bindgen(js_name = setLight)]
     pub fn set_light(&mut self, desc: JsValue) -> Result<(), JsValue> {
         self.with_state(|_, s| {
-            s.scene.light = js::light_desc(&desc)?;
+            let light = js::light_desc(&desc)?;
+            if let Some(sky) = s.features.get::<raa_sky::SkyHandle>() {
+                sky.set_manual_light(light)?;
+            }
+            s.scene.light = light;
             Ok(())
         })
     }

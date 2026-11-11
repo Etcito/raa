@@ -131,6 +131,47 @@ fn software_gpu_public_renderer_pipeline_tracks_only_submitted_views() {
     let lit = Rc::new(RefCell::new(
         LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit renderer"),
     ));
+    {
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, FORMAT, false)));
+        let lit = RefCell::new(LitRenderer::new(&gpu, &pipeline, LitOptions::default()).unwrap());
+        // The same sky handle receives one runtime delta and every view observes that snapshot.
+        let ibl = raa_ibl::IblFeature::install(&gpu, &pipeline, &mut lit.borrow_mut()).unwrap();
+        let sky =
+            raa_sky::SkyFeature::install(&gpu, &pipeline, &mut lit.borrow_mut(), ibl).unwrap();
+        let mut settings = sky.time_of_day().settings;
+        settings.enabled = true;
+        settings.playing = true;
+        settings.speed = 3600.0;
+        sky.set_time_of_day(settings).unwrap();
+        sky.advance_frame(1, 0.0).unwrap();
+        let light = sky.advance_frame(2, 0.5).unwrap();
+        let snapshot = sky.time_of_day();
+        assert!((snapshot.current.hours - settings.time.hours - 0.5).abs() < 1e-9);
+        let mut camera = raa_scene::Camera::default();
+        for view in 0..2 {
+            camera.eye.y = 10.0 + view as f32 * 100.0;
+            sky.set_view(view, &camera, true).unwrap();
+            assert_eq!(sky.time_of_day(), snapshot);
+            assert_eq!(sky.advance_frame(2, 99.0).unwrap(), light);
+        }
+        assert_eq!(
+            sky.advance_frame(3, f64::NAN).unwrap_err().code(),
+            "sky.invalid"
+        );
+        assert_eq!(sky.time_of_day(), snapshot);
+        sky.advance_frame(3, -1.0).unwrap();
+        assert_eq!(sky.time_of_day(), snapshot);
+        sky.observe_submission(3, 0, true);
+        assert_eq!(sky.diagnostics().submitted_invocation, None);
+        sky.observe_submission(3, 1, false);
+        let diagnostics = sky.diagnostics();
+        assert_eq!(diagnostics.submitted_invocation, Some(3));
+        assert_eq!(diagnostics.views[0].unwrap().submitted_invocation, Some(3));
+        assert_eq!(diagnostics.views[1].unwrap().submitted_invocation, None);
+        assert!(!diagnostics.views[0].unwrap().history_valid);
+        sky.remove_view(1).unwrap();
+        assert!(sky.diagnostics().views[1].is_none());
+    }
     let calls = Rc::new(Cell::new(0));
     pipeline
         .borrow_mut()
@@ -232,4 +273,39 @@ fn software_gpu_public_renderer_pipeline_tracks_only_submitted_views() {
         "no skipped view contributes a bit"
     );
     lit.borrow_mut().finish_scene_frame(true);
+}
+
+#[test]
+fn sky_identity_survives_skipped_failed_and_partial_submissions() {
+    let mut id = 0;
+    let mut history = SceneInvocation::default();
+    for (expected, ok, submission) in [
+        (1, true, observed(0, 0, false)),
+        (2, false, observed(0, 0, true)),
+        (3, false, observed(1, 2, true)),
+        (4, true, observed(0, 3, false)),
+    ] {
+        state::next_sky_invocation(&mut id).unwrap();
+        assert_eq!(id, expected);
+        history.begin();
+        history.finish(ok, submission);
+    }
+    assert_eq!(history.begin(), 2, "submission history remains independent");
+    id = u64::MAX;
+    assert_eq!(
+        state::next_sky_invocation(&mut id).unwrap_err().code(),
+        "sky.invalid"
+    );
+    assert_eq!(id, u64::MAX);
+}
+
+#[test]
+fn sky_inspection_does_not_consume_lit_discontinuity() {
+    let mut invocation = SceneInvocation::default();
+    invocation.discontinuity(2);
+    assert!(invocation.is_discontinuous(2));
+    assert!(invocation.is_discontinuous(2));
+    assert!(!invocation.is_discontinuous(1));
+    assert!(invocation.prepare(2));
+    assert!(!invocation.is_discontinuous(2));
 }

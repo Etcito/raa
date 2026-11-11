@@ -46,6 +46,9 @@ impl SceneInvocation {
     pub(crate) fn discontinuity_all(&mut self) {
         self.discontinuity = 0b1111;
     }
+    pub(crate) fn is_discontinuous(&self, view: usize) -> bool {
+        self.discontinuity & view_bit(view) != 0
+    }
     pub(crate) fn prepare(&mut self, view: usize) -> bool {
         let bit = view_bit(view);
         let dropped = self.discontinuity & bit != 0;
@@ -67,6 +70,14 @@ impl SceneInvocation {
         self.open = false;
         (acknowledge, complete)
     }
+}
+
+/// Advance independently of submitted-frame history, refusing exhaustion atomically.
+pub(crate) fn next_sky_invocation(id: &mut u64) -> Result<(), RaaError> {
+    *id = id
+        .checked_add(1)
+        .ok_or_else(|| api_error("sky.invalid", "sky invocation identity is exhausted"))?;
+    Ok(())
 }
 
 fn view_bit(view: usize) -> u8 {
@@ -646,6 +657,7 @@ pub(crate) struct EngineState {
     /// The open render/probe invocation and the scene-frame index advancing once per
     /// submitted invocation (M2-FRAME-LIFECYCLE handoff in `engine.rs`).
     pub scene_invocation: SceneInvocation,
+    pub sky_invocation_id: u64,
     /// Last effective camera (eye3, target3, fov, near, far) of each viewport that has its
     /// own m21 camera: a change is a camera discontinuity for that viewport.
     pub view_cameras: [Option<[f32; 9]>; 4],
@@ -675,6 +687,21 @@ pub(crate) struct EngineState {
 }
 
 impl EngineState {
+    pub(crate) fn sky_invocation_id(&self) -> u64 {
+        self.sky_invocation_id
+    }
+
+    /// WebRuntime supplies the consecutive-now delta, including zero on its first call.
+    pub(crate) fn advance_sky_frame(
+        &mut self,
+        input: &raa_web::FrameInput,
+    ) -> Result<(), RaaError> {
+        if let Some(sky) = self.features.get::<raa_sky::SkyHandle>() {
+            self.scene.light = sky.advance_frame(self.sky_invocation_id(), input.dt_ms / 1000.0)?;
+        }
+        Ok(())
+    }
+
     /// The scene node behind JS handle `h` (`api.unknown_handle`).
     pub(crate) fn node(&self, h: u32) -> Result<NodeId, RaaError> {
         self.nodes.get(h)

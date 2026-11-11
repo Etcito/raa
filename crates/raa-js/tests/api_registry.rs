@@ -239,3 +239,42 @@ fn m28_lights_installs_tiling_and_distinguishes_js_property_presence() {
     assert!(engine.contains("js_name = setLight"));
     assert!(engine.contains("pub fn set_light(&mut self, desc: JsValue)"));
 }
+
+#[test]
+fn sky_advancement_uses_runtime_delta_once_before_api_observers() {
+    let engine = include_str!("../src/engine.rs");
+    let state = include_str!("../src/state.rs");
+    let observer = include_str!("../src/api/m08_sky_ibl.rs");
+    assert!(state.contains("pub sky_invocation_id: u64"));
+    assert!(state.contains("fn sky_invocation_id(&self) -> u64"));
+    assert!(engine.contains("sky_invocation_id: 0"));
+    assert_eq!(engine.matches("s.advance_sky_frame(input)?;").count(), 1);
+    let advance = engine.find("s.advance_sky_frame(input)?;").unwrap();
+    assert!(engine.find(".set_time(input.now_ms)").unwrap() < advance);
+    assert!(advance < engine.find("api::frame_all(s, gpu, input)?;").unwrap());
+    assert!(state.contains("sky.advance_frame(self.sky_invocation_id(), input.dt_ms / 1000.0)?"));
+    assert!(!observer.contains("advance_frame("));
+    let runtime = include_str!("../../raa-web/src/runtime.rs");
+    assert!(runtime.contains("self.last_now_ms.map_or(0.0, |last| now_ms - last)"));
+    let begin = &engine[engine.find("fn begin_scene_invocation(").unwrap()..];
+    assert!(
+        begin.find(".try_borrow_mut()").unwrap()
+            < begin
+                .find("next_sky_invocation(&mut s.sky_invocation_id)")
+                .unwrap()
+    );
+    let _: fn(
+        &raa_sky::SkyHandle,
+        u64,
+        f64,
+    ) -> Result<raa_scene::DirectionalLight, raa_core::RaaError> =
+        raa_sky::SkyHandle::advance_frame;
+    let _: fn(&raa_sky::SkyHandle, u64, u8, bool) = raa_sky::SkyHandle::observe_submission;
+
+    assert!(
+        engine.contains("sky.observe_submission(s.sky_invocation_id(), acknowledge, complete)")
+    );
+    let manual = engine.find("sky.set_manual_light(light)?;").unwrap();
+    assert!(engine.find("let light = js::light_desc(&desc)?;").unwrap() < manual);
+    assert!(manual < engine.find("s.scene.light = light;").unwrap());
+}

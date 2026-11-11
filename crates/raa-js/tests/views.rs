@@ -211,3 +211,31 @@ fn render_scale_scales_the_backing_and_follows_the_last_resize() {
     assert!(views.resize(f64::NAN, 1.0, None).is_err());
     assert_eq!(views.rescaled().unwrap().unwrap(), (200, 150));
 }
+
+#[test]
+fn sky_views_share_snapshot_and_precede_lit_preparation() {
+    let engine = include_str!("../src/engine.rs");
+    let start = engine.find("fn prepare_sky_view(").unwrap();
+    let end = engine[start..].find("fn retire_sky_views(").unwrap() + start;
+    let prepare = &engine[start..end];
+    assert!(prepare.contains("v.camera(index)"));
+    assert!(prepare.contains("camera.set_viewport(size.0, size.1)"));
+    assert!(prepare.contains("st.scene_invocation.is_discontinuous(index)"));
+    assert!(prepare.contains("st.view_cameras[index].is_some_and"));
+    assert!(prepare.contains("sky.set_view(index as u32, &camera, !cut)"));
+    assert!(!prepare.contains("advance_frame"));
+    assert!(!prepare.contains("scene_invocation.prepare("));
+    assert!(
+        engine.find("prepare_sky_view(st, index, size)?").unwrap()
+            < engine
+                .find("st.prepare_pipeline_view(gpu, index, size)")
+                .unwrap()
+    );
+    assert!(
+        engine.find("prepare_sky_view(s, 0, size)?").unwrap()
+            < engine
+                .find("s.lit.prepare_scene_view(0, discontinuity)")
+                .unwrap()
+    );
+    assert!(engine.contains("sky.remove_view(view as u32)?"));
+}
