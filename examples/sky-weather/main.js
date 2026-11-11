@@ -52,7 +52,14 @@ export async function discoverScenes({ fetchIndex = () => fetch('./scenes.json')
 // share the resident runner, while controls edit its actual accepted Engine state.
 export async function attachSkyPage({ target, canvas, status, picker, controls, runButton,
   discover = discoverScenes, load = loadRaa, readBuild = readBuildId, createRunner = createSkyPageRunner }) {
-  target.nmcGpu = { ready: false, ops: {} };
+  // The managed host bridge calls ops[op] as soon as window.nmcGpu exists; an ops object
+  // without run made it answer 'Render operation unavailable' (run 13630, legacy job).
+  // Publish run from the first moment: during discovery it waits for the attached runner
+  // (or the originating discovery failure) and then delegates exactly once.
+  let settle;
+  const attached = new Promise(resolve => { settle = resolve; });
+  const pendingRun = async input => (await attached)(input);
+  target.nmcGpu = { ready: false, ops: { run: pendingRun } };
   status.textContent = 'pending: discovering built scenes';
   picker.disabled = true;
   runButton.disabled = true;
@@ -60,6 +67,7 @@ export async function attachSkyPage({ target, canvas, status, picker, controls, 
     const scenes = await discover();
     const runner = createRunner({ canvas, status, scenes, lib, load });
     target.nmcGpu.ops.run = runner.run;
+    settle(runner.run);
     target.nmcGpu.ready = true;
     const selections = [];
     for (const namespace of scenes.values()) {
@@ -159,7 +167,9 @@ export async function attachSkyPage({ target, canvas, status, picker, controls, 
     return runner;
   } catch (error) {
     status.textContent = `failed: ${message(error)}`;
-    target.nmcGpu.ops.run = async () => { throw error; };
+    const rejectRun = async () => { throw error; };
+    target.nmcGpu.ops.run = rejectRun;
+    settle(rejectRun);
     target.nmcGpu.ready = true;
     throw error;
   }

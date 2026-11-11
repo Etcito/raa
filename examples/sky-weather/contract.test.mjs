@@ -227,7 +227,8 @@ test('page keeps discovery pending and then attaches the exact runner operation 
   const preparation = attachSkyPage({ ...page, discover: () => pending, createRunner: value => { options = value; return runner; } });
   assert.match(page.status.textContent, /^pending:/);
   assert.equal(page.target.nmcGpu.ready, false);
-  assert.equal(page.target.nmcGpu.ops.run, undefined);
+  assert.equal(typeof page.target.nmcGpu.ops.run, 'function'); // Never a half-built ops object.
+  assert.notEqual(page.target.nmcGpu.ops.run, runner.run);
   assert.equal(page.runButton.disabled, true);
   const namespaces = new Map([['foundation', foundation]]);
   resolve(namespaces);
