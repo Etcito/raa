@@ -201,3 +201,40 @@ fn m2_backend_prepares_and_rejects_like_the_seam_requires() {
         assert_eq!(error.code(), "sky.invalid", "{name}");
     }
 }
+
+#[test]
+fn committed_matrix_is_the_marched_camera_not_the_frame_previous() {
+    use super::super::resources::CloudGpu;
+    use raa_math::Vec3;
+
+    let mut h = CloudHistory::new();
+    let first = test_frame(0, 1, SIZE);
+    let mut moved = test_frame(0, 2, SIZE);
+    moved.camera.eye = Vec3::new(3.0, 2.0, 6.0);
+    // The feature updates previous_view_proj only when the camera changes.
+    moved.previous_view_proj = first.camera.view_proj();
+    let stopped = test_frame(0, 3, SIZE);
+    let stopped = super::super::super::CloudFrame {
+        camera: moved.camera,
+        previous_view_proj: moved.previous_view_proj,
+        ..stopped
+    };
+    for frame in [first, moved] {
+        h.prepare(0, SIZE, frame.invocation, true, true);
+        h.record_screen(0, frame.invocation, Some(frame.camera.view_proj()));
+        h.submitted(0, frame.invocation);
+    }
+    h.prepare(0, SIZE, stopped.invocation, true, true);
+    let history = h
+        .history(0, stopped.history_valid)
+        .expect("committed history");
+    assert_eq!(history, moved.camera.view_proj(), "the last marched camera");
+    assert_ne!(
+        history, stopped.previous_view_proj,
+        "not the stale frame matrix"
+    );
+    let record = CloudGpu::from_frame(&stopped, Some(history));
+    assert_eq!(record.previous_view_proj, moved.camera.view_proj().cols);
+    assert_eq!(record.forward[3], 1.0, "historyUsable");
+    assert_eq!(h.history(0, false), None, "the frame refuses history");
+}

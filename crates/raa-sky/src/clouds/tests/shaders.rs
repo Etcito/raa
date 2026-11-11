@@ -11,7 +11,7 @@ use wgpu::naga::{
 use super::super::resources::CloudGpu;
 use super::super::shaders::{
     COVERAGE_ENTRIES, NOISE_ENTRIES, cloud_volume_wgsl, coverage_module_wgsl, noise_module_wgsl,
-    panorama_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
+    panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
 };
 
 #[test]
@@ -391,4 +391,57 @@ fn panorama_module_is_valid_wgsl_and_fits_the_s10_budget() {
     assert_eq!(module.entry_points.len(), 1);
     assert_eq!(module.entry_points[0].name, "raa_cloud_panorama_main");
     assert_eq!(module.entry_points[0].stage, ShaderStage::Compute);
+}
+
+fn assert_valid_screen_module(multisampled_depth: bool) {
+    let source = screen_module_wgsl(multisampled_depth);
+    let module = wgsl::parse_str(&source).expect("screen module parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("screen module validates");
+    Composer::validate(&source).expect("screen module composes");
+    let (_, depth) = module
+        .global_variables
+        .iter()
+        .find(|(_, global)| global.name.as_deref() == Some("raa_cloud_depth"))
+        .expect("the module declares raa_cloud_depth");
+    assert_eq!(
+        depth.binding.as_ref().map(|b| (b.group, b.binding)),
+        Some((2, 12))
+    );
+    assert!(matches!(
+        module.types[depth.ty].inner,
+        TypeInner::Image {
+            dim: ImageDimension::D2,
+            arrayed: false,
+            class: ImageClass::Depth { multi },
+        } if multi == multisampled_depth
+    ));
+}
+
+#[test]
+fn screen_module_is_valid_wgsl_for_one_sample_depth() {
+    assert_valid_screen_module(false);
+}
+
+#[test]
+fn screen_module_is_valid_wgsl_for_multisampled_depth() {
+    assert_valid_screen_module(true);
+}
+
+#[test]
+fn screen_module_fits_the_s10_budget() {
+    for multisampled_depth in [false, true] {
+        let source = screen_module_wgsl(multisampled_depth);
+        assert_eq!(resource_counts(&source), [7, 2, 2, 1, 1]);
+        let module = wgsl::parse_str(&source).expect("screen module parses");
+        for (_, global) in module.global_variables.iter() {
+            if let Some(binding) = &global.binding {
+                assert_eq!(binding.group, 2, "groups 0 and 1 stay empty");
+            }
+        }
+        assert_eq!(module.entry_points.len(), 1);
+        assert_eq!(module.entry_points[0].name, "raa_cloud_screen_main");
+        assert_eq!(module.entry_points[0].stage, ShaderStage::Compute);
+    }
 }

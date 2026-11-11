@@ -13,7 +13,7 @@
 use raa_core::{GpuContext, RaaError};
 use raa_math::{Mat4, Vec3};
 
-use super::super::{CloudFrame, MAX_VIEWS};
+use super::super::{CloudFrame, MAX_VIEWS, invalid};
 use crate::atmosphere::{PhysicalSkyGpu, atmospheric_radius_km};
 
 /// Ground covered by the shadow map, in metres along each side.
@@ -253,6 +253,20 @@ pub(super) struct CloudTargets {
     shadow_mean: wgpu::TextureView,
     transmittance: wgpu::TextureView,
     panorama: wgpu::TextureView,
+    /// Half-resolution screen targets of each view slot, created on its first marchable
+    /// prepare and recreated on a size change.
+    screens: [Option<ScreenTargets>; MAX_VIEWS],
+}
+
+/// The half-resolution screen pair of one view (solstice `clouds/mod.rs:479`): the march
+/// writes `current`, the texture handed out, then the encoder copies it into `history`,
+/// which the next march reads. Identities never swap, so the handed-out texture stays the
+/// same across frames at one size.
+struct ScreenTargets {
+    /// Half-resolution size (ceil(w/2), ceil(h/2)).
+    size: (u32, u32),
+    current: wgpu::TextureView,
+    history: wgpu::TextureView,
 }
 
 impl CloudTargets {
@@ -337,6 +351,7 @@ impl CloudTargets {
         use wgpu::TextureViewDimension::{D2, D2Array};
         Ok(CloudTargets {
             panorama,
+            screens: std::array::from_fn(|_| None),
             params,
             sky,
             noise_sampler,
@@ -379,5 +394,89 @@ impl CloudTargets {
     /// The shared 192x108 Rgba16Float cloud panorama: the panorama pass output.
     pub(super) fn panorama(&self) -> &wgpu::TextureView {
         &self.panorama
+    }
+
+    /// Creates the screen pair of `view` (< 4) for a full-resolution `size`, or recreates
+    /// it when the half-resolution size changed; true when it created or recreated. A new
+    /// `history` holds alpha -1 (not marched) everywhere.
+    pub(super) fn ensure_screen(
+        &mut self,
+        gpu: &GpuContext,
+        view: u32,
+        size: (u32, u32),
+    ) -> Result<bool, RaaError> {
+        gpu.ensure_live()?;
+        let Some(slot) = self.screens.get_mut(view as usize) else {
+            return Err(invalid(format!(
+                "cloud view {view} is outside 0..{MAX_VIEWS}"
+            )));
+        };
+        let half = (size.0.div_ceil(2).max(1), size.1.div_ceil(2).max(1));
+        if slot.as_ref().is_some_and(|screen| screen.size == half) {
+            return Ok(false);
+        }
+        let extent = wgpu::Extent3d {
+            width: half.0,
+            height: half.1,
+            depth_or_array_layers: 1,
+        };
+        let create = |label: &str, usage: wgpu::TextureUsages| {
+            gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage,
+                view_formats: &[],
+            })
+        };
+        use wgpu::TextureUsages as U;
+        let current = create(
+            "raa-sky.cloud_screen",
+            U::STORAGE_BINDING | U::TEXTURE_BINDING | U::COPY_SRC,
+        );
+        let history = create(
+            "raa-sky.cloud_screen_history",
+            U::TEXTURE_BINDING | U::COPY_DST,
+        );
+        // f16 -1.0 is 0xBC00: (0, 0, 0, -1) marks every texel as not marched.
+        let unknown = [0u8, 0, 0, 0, 0, 0, 0x00, 0xBC].repeat((half.0 * half.1) as usize);
+        gpu.queue().write_texture(
+            history.as_image_copy(),
+            &unknown,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(half.0 * 8),
+                rows_per_image: Some(half.1),
+            },
+            extent,
+        );
+        *slot = Some(ScreenTargets {
+            size: half,
+            current: current.create_view(&Default::default()),
+            history: history.create_view(&Default::default()),
+        });
+        Ok(true)
+    }
+
+    /// The screen march output of `view`, handed out as its screen view.
+    pub(super) fn screen_current(&self, view: u32) -> Option<&wgpu::TextureView> {
+        let screen = self.screens.get(view as usize)?.as_ref()?;
+        Some(&screen.current)
+    }
+
+    /// The previous screen march of `view`, read by its next march.
+    pub(super) fn screen_history(&self, view: u32) -> Option<&wgpu::TextureView> {
+        let screen = self.screens.get(view as usize)?.as_ref()?;
+        Some(&screen.history)
+    }
+
+    /// Drops the screen pair of `view` (ViewRemoved).
+    pub(super) fn release_screen(&mut self, view: u32) {
+        if let Some(slot) = self.screens.get_mut(view as usize) {
+            *slot = None;
+        }
     }
 }

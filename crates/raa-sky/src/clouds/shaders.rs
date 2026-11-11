@@ -91,3 +91,26 @@ const PANORAMA_SRC: &str = include_str!("wgsl/panorama.wgsl");
 pub(super) fn panorama_module_wgsl() -> String {
     format!("{}\n{CLOUD_OUTPUT}\n{PANORAMA_SRC}", cloud_volume_wgsl())
 }
+
+/// The screen march: 56 primary and 5 light samples per half-resolution texel, blended
+/// with the view's reprojected cloud history.
+const SCREEN_SRC: &str = include_str!("wgsl/screen.wgsl");
+
+/// The screen module (entry `raa_cloud_screen_main`, contract `P2-CLOUD-SCREEN-MODULE`):
+/// the common cloud text, the output binding 10, the history binding 11 and the scene
+/// depth binding 12, declared `texture_depth_multisampled_2d` when `multisampled_depth`
+/// (a depth target with more than one sample) and `texture_depth_2d` otherwise, then the
+/// screen pass, which reads the depth with `textureLoad` at index 0 in both variants.
+pub(super) fn screen_module_wgsl(multisampled_depth: bool) -> String {
+    let depth = if multisampled_depth {
+        "texture_depth_multisampled_2d"
+    } else {
+        "texture_depth_2d"
+    };
+    format!(
+        "{}\n{CLOUD_OUTPUT}\n\
+         @group(2) @binding(11) var raa_cloud_history: texture_2d<f32>;\n\
+         @group(2) @binding(12) var raa_cloud_depth: {depth};\n{SCREEN_SRC}",
+        cloud_volume_wgsl()
+    )
+}

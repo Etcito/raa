@@ -8,7 +8,9 @@
 //! tracks the per-view lifecycle of contract `P2-CLOUD-VALIDITY` in
 //! [`history::CloudHistory`], marches the ground transmittance map of marchable frames
 //! and publishes it to `LightingResources` (S10 map/light), or the neutral
-//! transmittance (map [0,0,1,0], cloudEnabled 0) when shadows cannot apply.
+//! transmittance (map [0,0,1,0], cloudEnabled 0) when shadows cannot apply. Each view's
+//! half-resolution screen march blends with that view's own committed history, which only
+//! an acknowledged submission commits and every invalidation or resize resets.
 
 /* Adapted from solstice@7e465b5 crates/solstice-render/src/clouds/mod.rs.
 MIT License
@@ -43,7 +45,6 @@ mod shaders;
 mod tests;
 
 use raa_core::{GpuContext, RaaError};
-use raa_math::Mat4;
 use raa_pipeline::LightingResources;
 
 use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS, invalid};
@@ -53,19 +54,9 @@ use noise::CloudNoise;
 use passes::CloudPasses;
 use resources::{CloudGpu, CloudTargets, SHADOW_EXTENT, cloud_sky_parameters};
 
-// Contract checks keeping the lifecycle entry points of later cards reachable.
-const _: fn(&history::CloudHistory, u32, bool) -> Option<Mat4> = history::CloudHistory::history;
-
 /// The S25 factory registered under `M2_BACKEND`.
 pub(crate) fn create(gpu: &GpuContext) -> Result<Box<dyn CloudRenderer>, RaaError> {
-    Ok(Box::new(VolumetricClouds {
-        views: CloudViews::neutral(gpu)?,
-        history: CloudHistory::new(),
-        noise: CloudNoise::new(gpu)?,
-        targets: CloudTargets::new(gpu)?,
-        passes: CloudPasses::new(gpu)?,
-        published: None,
-    }))
+    Ok(Box::new(VolumetricClouds::new(gpu)?))
 }
 
 /// One cloud transmittance publication: the published view (the ground map when
@@ -127,6 +118,18 @@ struct VolumetricClouds {
 }
 
 impl VolumetricClouds {
+    /// The backend with its shared resources and pipelines; no view prepared.
+    fn new(gpu: &GpuContext) -> Result<VolumetricClouds, RaaError> {
+        Ok(VolumetricClouds {
+            views: CloudViews::neutral(gpu)?,
+            history: CloudHistory::new(),
+            noise: CloudNoise::new(gpu)?,
+            targets: CloudTargets::new(gpu)?,
+            passes: CloudPasses::new(gpu)?,
+            published: None,
+        })
+    }
+
     /// Validates the frame's view index and physical size.
     fn validate(frame: &CloudFrame) -> Result<(), RaaError> {
         if frame.view as usize >= MAX_VIEWS {
@@ -158,7 +161,9 @@ impl CloudRenderer for VolumetricClouds {
         if marchable {
             self.passes
                 .bind_view(gpu, frame.view, &self.noise, &self.targets, atmosphere)?;
-            let record = CloudGpu::from_frame(frame, None).to_bytes();
+            self.targets.ensure_screen(gpu, frame.view, frame.size)?;
+            let history = self.history.history(frame.view, frame.history_valid);
+            let record = CloudGpu::from_frame(frame, history).to_bytes();
             let sky = cloud_sky_parameters(frame).to_bytes();
             let queue = gpu.queue();
             queue.write_buffer(self.targets.params(frame.view), 0, &record);
@@ -198,24 +203,39 @@ impl CloudRenderer for VolumetricClouds {
         Ok(())
     }
 
-    /// No screen march exists yet; notes that none was recorded.
+    /// Marches the screen clouds of a marchable frame and notes the camera it used;
+    /// records nothing (and notes that) otherwise.
     fn record_screen(
         &mut self,
         gpu: &GpuContext,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         frame: &CloudFrame,
-        _depth: &wgpu::TextureView,
-        _atmosphere: &AtmosphereResources,
+        depth: &wgpu::TextureView,
+        atmosphere: &AtmosphereResources,
     ) -> Result<(), RaaError> {
         gpu.ensure_live()?;
         Self::validate(frame)?;
+        if !self.history.marchable(frame.view, frame.invocation) {
+            self.history
+                .record_screen(frame.view, frame.invocation, None);
+            return Ok(());
+        }
+        self.passes.record_screen(
+            gpu,
+            encoder,
+            frame.view,
+            &self.noise,
+            &self.targets,
+            atmosphere,
+            depth,
+        )?;
         self.history
-            .record_screen(frame.view, frame.invocation, None);
+            .record_screen(frame.view, frame.invocation, Some(frame.camera.view_proj()));
         Ok(())
     }
 
-    /// The view's lifecycle flags, the shared panorama while it is valid and neutral
-    /// views otherwise; nothing is allocated.
+    /// The view's lifecycle flags, the shared panorama while it is valid, the view's screen
+    /// target while it exists, and neutral views otherwise; nothing is allocated.
     fn views(&self, view: u32) -> CloudViews {
         let (panorama_valid, screen_valid) = self.history.flags(view);
         let panorama = if panorama_valid {
@@ -223,8 +243,14 @@ impl CloudRenderer for VolumetricClouds {
         } else {
             self.views.panorama.clone()
         };
+        let screen = self
+            .targets
+            .screen_current(view)
+            .unwrap_or(&self.views.screen)
+            .clone();
         CloudViews {
             panorama,
+            screen,
             panorama_valid,
             screen_valid,
             ..self.views.clone()
@@ -235,10 +261,16 @@ impl CloudRenderer for VolumetricClouds {
         self.history.invalidate(view, reason);
         match reason {
             CloudInvalidation::Model | CloudInvalidation::Enable => self.published = None,
-            CloudInvalidation::ViewRemoved => match view {
-                Some(view) => self.passes.release_view(view),
-                None => (0..MAX_VIEWS as u32).for_each(|view| self.passes.release_view(view)),
-            },
+            CloudInvalidation::ViewRemoved => {
+                let views = match view {
+                    Some(view) => view..view.saturating_add(1),
+                    None => 0..MAX_VIEWS as u32,
+                };
+                for view in views {
+                    self.passes.release_view(view);
+                    self.targets.release_screen(view);
+                }
+            }
             _ => {}
         }
     }
