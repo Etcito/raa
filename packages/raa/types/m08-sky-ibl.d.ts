@@ -229,6 +229,94 @@ export interface SkyWeatherDiagnostics {
   readiness: SkyReadiness;
 }
 
+/** The built-in weather presets, in rank order clear=0 … cirrus=5. */
+export type WeatherPreset = 'clear' | 'fair' | 'broken' | 'overcast' | 'storm' | 'cirrus';
+
+/**
+ * One complete weather state. Fractions lie in [0, 1]; `base` >= 0 and `thickness` >= 100
+ * are metres; `density`, `evolution` and `wind.speed` (m/s) are >= 0; `wind.from` is a
+ * finite compass direction in degrees FROM north. Fair defaults: coverage 0.3, type 0.9,
+ * base 1200, thickness 1600, density 1, cirrus 0.15, wind 7 from 250, evolution 1, rain 0.
+ */
+export interface WeatherState {
+  coverage: number;
+  type: number;
+  base: number;
+  thickness: number;
+  density: number;
+  cirrus: number;
+  wind: { speed: number; from: number };
+  evolution: number;
+  rain: number;
+}
+
+/**
+ * The authored weather settings. Defaults: enabled true, shadows true, changing false,
+ * seed 1, transitionSeconds 0 (immediate), the fair target.
+ */
+export interface WeatherSettings {
+  enabled: boolean;
+  shadows: boolean;
+  /** Whether the seeded weather cycle drives the evolving target. */
+  changing: boolean;
+  /** Cycle seed, an integer u32. */
+  seed: number;
+  /** Exponential easing time towards a new target, finite and >= 0; 0 is immediate. */
+  transitionSeconds: number;
+  /** The authored target weather (not the runtime state). */
+  target: WeatherState;
+}
+
+/**
+ * A weather patch for {@link Engine.setWeather}. `undefined` is omission; omitted fields,
+ * including `wind.speed`/`wind.from`, keep the authored values. `preset` and `text` are
+ * mutually exclusive and supply the base before the structured overrides.
+ */
+export interface WeatherDesc {
+  preset?: WeatherPreset;
+  /** A complete `.weather` file, parsed fully before anything is applied. */
+  text?: string;
+  enabled?: boolean;
+  shadows?: boolean;
+  changing?: boolean;
+  seed?: number;
+  transitionSeconds?: number;
+  coverage?: number;
+  type?: number;
+  base?: number;
+  thickness?: number;
+  density?: number;
+  cirrus?: number;
+  wind?: { speed?: number; from?: number };
+  evolution?: number;
+  rain?: number;
+}
+
+/**
+ * The resolved weather: the authored settings, the runtime `current` state, the running
+ * cycle's preset (`null` when no cycle is active) and the `.weather` text of the authored
+ * target, generated when the getter is called.
+ */
+export interface ResolvedWeather extends WeatherSettings {
+  current: WeatherState;
+  cyclePreset: WeatherPreset | null;
+  text: string;
+}
+
+/**
+ * Parses `.weather` text into a complete state (pure; no Engine or GPU). Starts from fair
+ * defaults, strips `#` comments, keeps the last repeated value and clamps as the file
+ * format does.
+ * @throws Error with a one-based line message for an unknown key or malformed number.
+ */
+export declare function parseWeatherText(text: string): WeatherState;
+
+/**
+ * Formats a weather state as `.weather` text: coverage, type, base, thickness, density,
+ * cirrus, wind speed/from, evolution, rain, one setting per line with a final LF (pure).
+ */
+export declare function formatWeatherText(weather: WeatherState): string;
+
 /** The chain milestone 2 methods, merged into the v0 Engine. */
 export interface Engine {
   /**
@@ -291,4 +379,25 @@ export interface Engine {
    *   counter would not be a nonnegative safe JS integer).
    */
   skyWeatherDiagnostics(): SkyWeatherDiagnostics;
+
+  /**
+   * Parses a weather patch fully, then applies it atomically once. A `preset` (even with
+   * overrides) is an explicit cycle start with that preset's identity; `text` starts from
+   * fair. Either explicit base, a changed `seed` or `changing` false→true restarts the
+   * cycle; an unchanged `changing: true` alone keeps it. A manual target edit stops
+   * changing unless the same patch sets `changing: true`. A refusal changes nothing.
+   * @throws RaaError `sky.invalid` (wrong type, null, unknown key, out-of-range or
+   *   non-finite field, unknown preset, `preset` with `text`, malformed text; the message
+   *   names the field path), `api.invalid_argument` (not an object), `api.feature_missing`,
+   *   `pipeline.busy`.
+   */
+  setWeather(desc: WeatherDesc): void;
+
+  /**
+   * The authored settings, runtime current state, active cycle preset and authored target
+   * text as a fresh object; it never advances weather and is the value to persist (without
+   * `current`/`cyclePreset`).
+   * @throws RaaError `api.feature_missing` (no sky feature is installed).
+   */
+  weather(): ResolvedWeather;
 }

@@ -300,6 +300,80 @@ The authored settings, current playback moment and celestial snapshot. The resul
 object; mutating it never changes the engine, and reading it never advances the clock. Code:
 `api.feature_missing` (no sky feature is installed).
 
+## Weather
+
+### `WeatherState`, `WeatherSettings`, `WeatherDesc`, `ResolvedWeather`
+
+`WeatherState` is `{coverage, type, base, thickness, density, cirrus, wind:{speed, from},
+evolution, rain}`: fractions (`coverage`, `type`, `cirrus`, `rain`) in [0, 1], `base` >= 0 and
+`thickness` >= 100 metres, `density`/`evolution` >= 0, `wind.speed` >= 0 m/s and `wind.from` a
+finite compass direction in degrees FROM north (rotated by `TimeOfDaySettings.north` at the
+scene boundary). `base + thickness` must stay finite. `WeatherSettings` is
+`{enabled, shadows, changing, seed, transitionSeconds, target}` with defaults `true`, `true`,
+`false`, `1`, `0` and the fair target (coverage 0.3, type 0.9, base 1200, thickness 1600,
+density 1, cirrus 0.15, wind 7 from 250, evolution 1, rain 0). `seed` is an integer u32 and
+`transitionSeconds` a finite value >= 0 (0 is immediate; otherwise the state eases with
+`1 - exp(-dt / transitionSeconds)`). `WeatherDesc` is the flat patch: `preset`
+(`clear|fair|broken|overcast|storm|cirrus`), `text`, the settings fields and the state fields
+with a partial `wind`. These records mirror Rust `raa_sky::WeatherSettings` (`type` is
+`cloud_type`, `wind` is `wind_speed`/`wind_from`) and `raa_sky::ResolvedWeatherState`.
+
+**Authored versus runtime.** `target` is what the caller authored; `current` is the runtime
+state that eases towards the authored target, or towards the evolving cycle target while
+`changing` is true. Persist the authored settings (`WeatherSettings`), never `current`,
+`cyclePreset` or `text`. `text` is the `.weather` export of the authored `target`, generated
+from `settings.target.to_text()` only when `weather()` is called; nothing stores or formats
+text per frame.
+
+### `setWeather`
+
+`engine.setWeather(desc: WeatherDesc): void`
+
+The patch is parsed completely into one owned candidate, then committed once through
+`SkyHandle::set_weather_update`. `undefined` omits a field; omitted fields (including
+`wind.speed`/`wind.from` separately) keep the authored values. `preset` and `text` together
+reject. Either supplies the base before the structured overrides; `text` is parsed fully
+before the candidate exists.
+
+Cycle-start identity is intent, not equality: an explicit `preset` keeps that preset as the
+cycle start even with overrides (`{preset:'storm', coverage:0.5}` starts from storm), and
+`text` starts from fair because text has no preset identity. An explicit preset or text is a
+reset/restart event even when every resolved value equals the current one; omitting `preset`
+never resets. A changed `seed` or `changing` false→true also restarts the cycle; an unchanged
+`changing: true` alone keeps the running cycle. A manual target edit stops changing unless the
+same patch sets `changing: true`. With `changing` false the start is retained for a later
+enable and `cyclePreset` is `null`. Codes: `sky.invalid` (wrong type, `null`, unknown key,
+out-of-range/non-finite/f32-overflowing field, unknown preset, `preset` with `text`,
+malformed text with a one-based line message; the message names the field path),
+`api.invalid_argument` (not an object), `api.feature_missing`, `pipeline.busy`. A refusal
+changes neither settings, cycle, light nor any dirty flag.
+
+### `weather`
+
+`engine.weather(): ResolvedWeather`
+
+The authored settings flattened with `current`, `cyclePreset` (`null` without an active cycle)
+and `text`, as a fresh object; reading it never advances weather. Code: `api.feature_missing`.
+
+### Environment publication and the legacy model
+
+Accepted weather changes mark the sky environment dirty. With `envUpdate: 'onChange'` the
+environment/IBL is an authored snapshot republished on accepted changes only, so continuous
+cloud drift and cycle evolution do not refresh reflections; select `'everyFrame'` when
+reflections must follow drift. The background always evaluates the current state. The
+`legacy` model keeps the full authored weather but renders it with its planar gradient/layer
+approximation: volume-only properties (`type`, `thickness`, `cirrus`, evolution structure)
+have no volumetric equivalent there, and no parity with the physical model is claimed.
+
+### Pure text helpers
+
+The package root exports `parseWeatherText(text): WeatherState` and
+`formatWeatherText(weather): string` (declared here, implemented in
+`packages/raa/sky-weather.js`). They need no Engine or GPU. Parsing follows the `.weather`
+file rules (fair defaults, `#` comments, last value wins, file-format clamping, one-based line
+errors); formatting writes coverage, type, base, thickness, density, cirrus, wind, evolution
+and rain, one per line, with a final LF.
+
 ## Environment lighting
 
 ### `EnvironmentLighting`
@@ -377,10 +451,10 @@ Codes: `sky.invalid` (a counter exceeds the safe JS integer range), `api.feature
 
 | code | thrown by | when |
 |---|---|---|
-| `sky.invalid` | `setSky`, `setTimeOfDay`, `skyWeatherDiagnostics` | A `SkyDesc`, `CloudsDesc`, `AtmosphereDesc` or `TimeOfDayDesc` field is out of range, non-finite, overflows f32, of the wrong type or unknown (the message names the complete field path), or a diagnostics counter exceeds the safe JS integer range. |
-| `api.invalid_argument` | `setSky`, `setTimeOfDay`, `setEnvironmentLighting` | The argument is not an object, or an `EnvironmentLighting` value is non-finite or < 0. |
-| `api.feature_missing` | `setSky`, `sky`, `setTimeOfDay`, `timeOfDay`, `skyWeatherDiagnostics`, `setEnvironmentLighting` | The sky or environment lighting feature is not installed in this engine. |
-| `pipeline.busy` | `setSky`, `setTimeOfDay` | Called while a frame executes (the sky state is borrowed). |
+| `sky.invalid` | `setSky`, `setTimeOfDay`, `setWeather`, `skyWeatherDiagnostics` | A `SkyDesc`, `CloudsDesc`, `AtmosphereDesc`, `TimeOfDayDesc` or `WeatherDesc` field is out of range, non-finite, overflows f32, of the wrong type or unknown (the message names the complete field path), or a diagnostics counter exceeds the safe JS integer range. |
+| `api.invalid_argument` | `setSky`, `setTimeOfDay`, `setWeather`, `setEnvironmentLighting` | The argument is not an object, or an `EnvironmentLighting` value is non-finite or < 0. |
+| `api.feature_missing` | `setSky`, `sky`, `setTimeOfDay`, `timeOfDay`, `setWeather`, `weather`, `skyWeatherDiagnostics`, `setEnvironmentLighting` | The sky or environment lighting feature is not installed in this engine. |
+| `pipeline.busy` | `setSky`, `setTimeOfDay`, `setWeather` | Called while a frame executes (the sky state is borrowed). |
 | `api.disposed` | all | Any method after `dispose`. |
 
 ## Example
@@ -399,6 +473,8 @@ engine.setEnvironmentLighting({ diffuse: 1, specular: 1 });
 engine.setTimeOfDay({ day: 172, hours: 18.5, latitude: 38, enabled: true, playing: true, speed: 30 });
 console.log(engine.sky().profile, engine.sky().zenith, engine.passes().map((p) => p.name));
 console.log(engine.timeOfDay().currentHours, engine.timeOfDay().dominant);
+engine.setWeather({ preset: 'broken', changing: true, seed: 7, transitionSeconds: 30 });
+console.log(engine.weather().cyclePreset, engine.weather().text);
 console.log(engine.skyWeatherDiagnostics().readiness); // { status, stage, error }
 engine.setPassEnabled('sky.background', false); // keep the sky light, drop the sky image
 ```

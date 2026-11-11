@@ -743,6 +743,70 @@ pub(crate) fn serialize_time_of_day(state: &raa_sky::TimeOfDayState) -> TimeOfDa
     }
 }
 
+/// One S24 `WeatherState` record; `type` is `cloud_type` and `wind.from` is compass
+/// degrees FROM north.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WeatherStateView {
+    pub coverage: f32,
+    pub cloud_type: f32,
+    pub base: f32,
+    pub thickness: f32,
+    pub density: f32,
+    pub cirrus: f32,
+    pub wind_speed: f32,
+    pub wind_from: f32,
+    pub evolution: f32,
+    pub rain: f32,
+}
+
+/// The JS-shaped `ResolvedWeather`: flattened authored settings, the runtime `current`
+/// state, the active cycle preset (`None` while no cycle runs) and the authored target's
+/// text, generated only when the getter serializes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct WeatherView {
+    pub enabled: bool,
+    pub shadows: bool,
+    pub changing: bool,
+    pub seed: u32,
+    pub transition_seconds: f32,
+    pub target: WeatherStateView,
+    pub current: WeatherStateView,
+    pub cycle_preset: Option<&'static str>,
+    pub text: String,
+}
+
+fn weather_state(w: &Weather) -> WeatherStateView {
+    WeatherStateView {
+        coverage: w.coverage,
+        cloud_type: w.cloud_type,
+        base: w.base,
+        thickness: w.thickness,
+        density: w.density,
+        cirrus: w.cirrus,
+        wind_speed: w.wind_speed,
+        wind_from: w.wind_from,
+        evolution: w.evolution,
+        rain: w.rain,
+    }
+}
+
+/// Serializes the exact `ResolvedWeatherState` record; `text` comes from the authored
+/// `settings.target.to_text()` here, never from runtime interpolation or a stored string.
+pub(crate) fn serialize_weather(state: &raa_sky::ResolvedWeatherState) -> WeatherView {
+    let s = &state.settings;
+    WeatherView {
+        enabled: s.enabled,
+        shadows: s.shadows,
+        changing: s.changing,
+        seed: s.seed,
+        transition_seconds: s.transition_seconds,
+        target: weather_state(&s.target),
+        current: weather_state(&state.current),
+        cycle_preset: state.cycle_preset.map(WeatherPreset::as_str),
+        text: s.target.to_text(),
+    }
+}
+
 /// The JS-shaped `SkyWeatherDiagnostics`: the exact 7434 records with ordered views,
 /// option-to-null mapping, readiness strings and the ordered reset reason array.
 #[derive(Clone, Debug, PartialEq)]
@@ -1090,6 +1154,46 @@ mod web {
         o.into()
     }
 
+    fn weather_state_to_js(w: &WeatherStateView) -> JsValue {
+        let o = Object::new();
+        set(&o, "coverage", &JsValue::from(w.coverage));
+        set(&o, "type", &JsValue::from(w.cloud_type));
+        set(&o, "base", &JsValue::from(w.base));
+        set(&o, "thickness", &JsValue::from(w.thickness));
+        set(&o, "density", &JsValue::from(w.density));
+        set(&o, "cirrus", &JsValue::from(w.cirrus));
+        let wind = Object::new();
+        set(&wind, "speed", &JsValue::from(w.wind_speed));
+        set(&wind, "from", &JsValue::from(w.wind_from));
+        set(&o, "wind", &wind.into());
+        set(&o, "evolution", &JsValue::from(w.evolution));
+        set(&o, "rain", &JsValue::from(w.rain));
+        o.into()
+    }
+
+    /// The fresh S24 `ResolvedWeather` object.
+    fn weather_to_js(v: &WeatherView) -> JsValue {
+        let o = Object::new();
+        set(&o, "enabled", &JsValue::from_bool(v.enabled));
+        set(&o, "shadows", &JsValue::from_bool(v.shadows));
+        set(&o, "changing", &JsValue::from_bool(v.changing));
+        set(&o, "seed", &JsValue::from(v.seed));
+        set(
+            &o,
+            "transitionSeconds",
+            &JsValue::from(v.transition_seconds),
+        );
+        set(&o, "target", &weather_state_to_js(&v.target));
+        set(&o, "current", &weather_state_to_js(&v.current));
+        set(
+            &o,
+            "cyclePreset",
+            &v.cycle_preset.map_or(JsValue::NULL, JsValue::from_str),
+        );
+        set(&o, "text", &JsValue::from_str(&v.text));
+        o.into()
+    }
+
     fn view_diagnostics_to_js(v: &SkyWeatherView) -> JsValue {
         let o = Object::new();
         set(&o, "view", &JsValue::from(v.view));
@@ -1259,7 +1363,7 @@ mod web {
 
         /// Parses the S24 weather patch fully into an owned candidate (settings plus
         /// cycle-start/restart intent) and then applies it exactly once. Nothing changes on
-        /// a refusal. HANDOFF 7443: extend this entry (getter, declarations, documentation).
+        /// a refusal.
         #[wasm_bindgen(js_name = setWeather)]
         pub fn set_weather(&mut self, desc: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| {
@@ -1267,6 +1371,16 @@ mod web {
                 let current = sky.weather().settings;
                 let update = parse_weather_candidate(&desc, &current)?;
                 sky.set_weather_update(update)
+            })
+        }
+
+        /// The authored weather settings, the runtime current state, the active cycle preset
+        /// (null without a running cycle) and the authored target's `.weather` text, as a
+        /// fresh object generated on request; it is never persisted.
+        pub fn weather(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let sky = st.features.require_mut::<SkyHandle>("sky")?;
+                Ok(weather_to_js(&serialize_weather(&sky.weather())))
             })
         }
 

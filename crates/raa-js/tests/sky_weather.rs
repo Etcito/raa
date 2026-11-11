@@ -22,15 +22,15 @@ use std::rc::Rc;
 
 use m08::{
     MAX_SAFE_COUNTER, Properties, Raw, parse_sky_transaction, parse_time_of_day,
-    parse_weather_update, serialize_diagnostics, serialize_time_of_day,
+    parse_weather_update, serialize_diagnostics, serialize_time_of_day, serialize_weather,
 };
 use raa_core::RaaError;
 use raa_ibl::IblPublication;
 use raa_sky::{
-    CloudResetReasons, DominantLight, EnvUpdate, LegacyCloudFields, SkyDesc, SkyDiagnostics,
-    SkyModel, SkyPreset, SkyReadiness, SkyReadinessStage, SkyReadinessStatus, SkyTransaction,
-    SkyViewDiagnostics, TimeOfDay, TimeOfDaySettings, TimeOfDayState, Weather, WeatherPreset,
-    WeatherSettings, WeatherUpdate,
+    CloudResetReasons, DominantLight, EnvUpdate, LegacyCloudFields, ResolvedWeatherState, SkyDesc,
+    SkyDiagnostics, SkyModel, SkyPreset, SkyReadiness, SkyReadinessStage, SkyReadinessStatus,
+    SkyTransaction, SkyViewDiagnostics, TimeOfDay, TimeOfDaySettings, TimeOfDayState, Weather,
+    WeatherPreset, WeatherSettings, WeatherUpdate,
 };
 
 /// A native stand-in for a JS description object: a key is present exactly when it is
@@ -1194,4 +1194,34 @@ fn clock_advances_once_per_invocation_and_m08_only_observes_it() {
     assert!(observer.contains("fn frame("));
     assert!(!observer.contains("advance_frame("));
     assert!(!observer.contains("frame_index"));
+}
+
+#[test]
+fn weather_getter_serializes_authored_current_and_cycle_with_target_text() {
+    let fair = Weather::by_name("fair").unwrap();
+    let storm = Weather::by_name("storm").unwrap();
+    let mut settings = WeatherSettings::default();
+    settings.target = storm;
+    settings.seed = 9;
+    settings.transition_seconds = 4.0;
+    let state = ResolvedWeatherState {
+        settings,
+        current: fair,
+        cycle_preset: Some(WeatherPreset::Storm),
+    };
+    let v = serialize_weather(&state);
+    assert!(v.enabled && v.shadows && !v.changing);
+    assert_eq!((v.seed, v.transition_seconds), (9, 4.0));
+    assert_eq!(v.target.coverage, storm.coverage);
+    assert_eq!(v.target.wind_from, storm.wind_from);
+    assert_eq!(v.current.thickness, fair.thickness);
+    assert_eq!(v.cycle_preset, Some("storm"));
+    // Text is the authored target, never the runtime current state.
+    assert_eq!(v.text, storm.to_text());
+
+    let idle = ResolvedWeatherState {
+        cycle_preset: None,
+        ..state
+    };
+    assert_eq!(serialize_weather(&idle).cycle_preset, None);
 }
