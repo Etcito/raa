@@ -10,14 +10,12 @@
 // `default_slot_providers` is crate-private to raa-lit (used by `LitRenderer::new`); the test
 // compiles the same source file, as raa-lit's own variants test does. The ibl, csm and fog
 // providers are crate-private too; the test compiles their source files (all crates are only
-// read).
-#[allow(dead_code)]
+// read) and exercises their fixture interfaces directly below, so they need no lint
+// suppression.
 #[path = "../../raa-fog/src/shaders.rs"]
 mod fog_shaders;
-#[allow(dead_code)]
 #[path = "../../raa-ibl/src/provider.rs"]
 mod ibl_provider;
-#[allow(dead_code)]
 #[path = "../../raa-shadow/src/provider.rs"]
 mod shadow_provider;
 #[allow(dead_code)]
@@ -52,6 +50,28 @@ fn weather_composer() -> Composer {
         shadow_provider::csm_provider(),
         fog_shaders::slot_provider(),
     ])
+}
+
+/// The compiled fixture interfaces are the consumed S11 contract: provider names,
+/// priorities and WGSL hooks the composed Transparent variants rely on.
+#[test]
+fn weather_provider_fixtures_match_the_consumed_contract() {
+    assert_eq!(fog_shaders::HEIGHT_PROVIDER, "height");
+    assert_eq!(fog_shaders::HEIGHT_PRIORITY, 10);
+    assert!(fog_shaders::FOG_SLOT_WGSL.contains("fn raa_slot_fog("));
+    assert!(fog_shaders::FOG_PASS_WGSL.contains("fn fs_main("));
+    let fog_pass = fog_shaders::fog_pass_source();
+    assert!(fog_pass.contains(fog_shaders::FOG_SLOT_WGSL));
+    assert!(fog_pass.contains(fog_shaders::FOG_PASS_WGSL));
+    assert_eq!(ibl_provider::IBL_PROVIDER, "ibl");
+    assert_eq!(ibl_provider::IBL_PRIORITY, 10);
+    assert!(ibl_provider::IBL_LIB_SOURCE.contains("fn raa_ibl_irradiance("));
+    assert!(ibl_provider::AMBIENT_WGSL.contains("fn raa_slot_ambient("));
+    assert_eq!(shadow_provider::CSM_PROVIDER, "csm");
+    assert_eq!(shadow_provider::CSM_PRIORITY, 10);
+    let slot = shadow_provider::csm_provider();
+    assert_eq!(slot.wgsl, shadow_provider::CSM_WGSL);
+    assert!(shadow_provider::CSM_WGSL.contains("fn raa_slot_shadow("));
 }
 
 #[test]
