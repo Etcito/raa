@@ -1,8 +1,9 @@
 # RAA API m08: sky and environment lighting
 
-Additions of chain milestone 2 to `@etcito/raa`: a procedural sky with clouds and the
-image-based lighting derived from it. Types: `packages/raa/types/m08-sky-ibl.d.ts` (appended to
-`index.d.ts` when the package is staged, so `Engine` merges with its v0 declaration).
+Additions of chain milestone 2 to `@etcito/raa`: a procedural sky with clouds, the celestial
+time of day, the typed sky/weather lifecycle diagnostics and the image-based lighting derived
+from the sky. Types: `packages/raa/types/m08-sky-ibl.d.ts` (appended to `index.d.ts` when the
+package is staged, so `Engine` merges with its v0 declaration).
 
 Everything in `docs/API.md` (v0) and `docs/api/m07-meshes-hdr.md` stays valid. Conventions are
 those of v0: right-handed, Y up, the camera looks down -Z, metres, radians, front faces
@@ -215,6 +216,90 @@ overrides given to `setSky`), including a fully resolved `clouds` object and the
 `atmosphere` controls. The result is a fresh object: mutating it never changes the engine. Code:
 `api.feature_missing` (no sky feature is installed).
 
+## Celestial time
+
+### `TimeOfDaySettings`
+
+```ts
+interface TimeOfDaySettings {
+  day: number;      // integer [1, 365]
+  hours: number;    // [0, 24)
+  latitude: number; // degrees north [-90, 90]
+  north: number;    // radians about +Y
+  enabled: boolean; // automatic sun/moon light
+  playing: boolean; // advance the clock with the frame delta
+  speed: number;    // simulated seconds per real second, >= 0
+}
+```
+
+| field | unit | default | meaning |
+|---|---|---|---|
+| `day` | day of year | `172` | One-based day in [1, 365]. |
+| `hours` | local solar hours | `9` | Finite and in [0, 24); noon is 12. |
+| `latitude` | degrees north | `38` | Finite and in [-90, 90]. |
+| `north` | radians | `0` | Scene orientation about +Y; zero puts north at -Z and east at +X. |
+| `enabled` | - | `false` | Automatic dominant light: the sun/moon direction wins, the manual descriptor is the stored daylight baseline. |
+| `playing` | - | `false` | Advance the runtime clock; it only matters while `enabled` is true. |
+| `speed` | s/s | `1` | Simulated seconds per real second, finite and >= 0. |
+
+`TimeOfDayDesc` is `Partial<TimeOfDaySettings>`. The authored moment (`day`/`hours`) and the
+runtime cursor (`currentDay`/`currentHours`) are separate: changing an authored day or hour resets
+the cursor to that moment, while pause/resume and speed/place/orientation edits keep it. Save the
+authored settings, never the current cursor or frame counters.
+
+### `TimeOfDayState`
+
+```ts
+interface TimeOfDayState extends TimeOfDaySettings {
+  currentDay: number;
+  currentHours: number;
+  sunDirection: Vec3;  // toward the sun
+  moonDirection: Vec3; // toward the moon
+  moonLit: number;
+  starPole: Vec3;
+  starEquinox: Vec3;
+  dominant: 'manual' | 'sun' | 'moon';
+}
+```
+
+The authored settings plus the current playback moment and its celestial snapshot.
+`sunDirection`/`moonDirection`/`starPole`/`starEquinox` point toward the bodies (RAA directional
+lights store the opposite travel direction). `dominant` names the source of the accepted light.
+
+### `setTimeOfDay`
+
+`engine.setTimeOfDay(desc: TimeOfDayDesc): void`
+
+Merges the supplied fields over the accepted authored settings; `undefined` is an omission and
+the complete merged result is validated before anything changes. A changed authored `day` or
+`hours` resets the runtime cursor to that moment; the manual light descriptor and the undimmed
+daylight baseline remain owned by the sky. A physical `setSky` preset applies its moment and
+weather defaults first and retains the accepted place, `enabled`, `playing` and speed; a later
+`setTimeOfDay` wins. Manual `setLight` stays effective while automatic control is disabled; while
+it is enabled, the astronomical direction wins and the stored daylight baseline supplies colour
+and intensity. Disabling restores the stored manual descriptor.
+
+The clock advances once per Engine invocation: the engine applies
+`FrameInput.dt_ms / 1000.0` under its monotonic sky invocation identity before the per-view sky
+work. The first and nonpositive deltas advance neither clock; a repeated invocation identity
+returns the accepted snapshot without advancing again; a nonfinite delta refuses before any
+mutation. The per-view frame hook only observes the accepted light and marks the sky dirty; it
+never advances time a second time and uses no submitted-frame counter.
+
+Codes: `sky.invalid` (a field is non-finite, out of range, of the wrong type, unknown, or a
+place value overflows f32; `day` must be an integer and `hours` in [0, 24); the message names
+the complete field path), `api.invalid_argument` (the argument is not an object),
+`api.feature_missing` (no sky feature is installed), `pipeline.busy` (called while a frame
+executes).
+
+### `timeOfDay`
+
+`engine.timeOfDay(): TimeOfDayState`
+
+The authored settings, current playback moment and celestial snapshot. The result is a fresh
+object; mutating it never changes the engine, and reading it never advances the clock. Code:
+`api.feature_missing` (no sky feature is installed).
+
 ## Environment lighting
 
 ### `EnvironmentLighting`
@@ -240,14 +325,62 @@ keeps the diffuse term). A refusal changes nothing. Codes: `api.invalid_argument
 finite or < 0, or the argument is not an object), `api.feature_missing` (no environment lighting
 feature is installed).
 
+## Diagnostics
+
+### `SkyWeatherDiagnostics`
+
+```ts
+interface SkyWeatherDiagnostics {
+  invocation: number | null;
+  submittedInvocation: number | null;
+  weatherGeneration: number;
+  atmosphereGeneration: number;
+  environment: { requestedGeneration: number; publishedGeneration: number | null; pending: boolean };
+  views: SkyViewDiagnostics[];
+  readiness: SkyReadiness;
+}
+interface SkyViewDiagnostics {
+  view: number; width: number; height: number;
+  invocation: number | null; submittedInvocation: number | null;
+  skyViewGeneration: number; historyValid: boolean;
+  resetReasons: ('Resize' | 'CameraDiscontinuity' | 'Weather' | 'Model' | 'Enable' | 'ViewRemoved')[];
+  cloudScreenValid: boolean; cloudPanoramaValid: boolean;
+}
+interface SkyReadiness { status: 'pending' | 'ready' | 'failed'; stage: string; error: string | null }
+```
+
+`engine.skyWeatherDiagnostics(): SkyWeatherDiagnostics`
+
+The typed lifecycle observation of the sky pipeline: the invocation whose recording was
+accepted, the last invocation with an actual submitted view, the weather/atmosphere counter
+generations, the IBL environment publication, the prepared views and the readiness. It is
+observational: reading it never advances a clock, changes a resource or becomes a saved setting,
+and it allocates fresh objects only on request.
+
+- `views` holds only prepared views, in ascending slot order; no prepared view yields `[]`.
+  Removed views become absent after their `ViewRemoved` invalidation.
+- `resetReasons` lists the set reset bits in the order `Resize`, `CameraDiscontinuity`,
+  `Weather`, `Model`, `Enable`, `ViewRemoved`. A newly prepared view starts with no reasons
+  until an actual invalidation.
+- `readiness.stage` is one of `install`, `atmosphere`, `milkyWay`, `cloudLighting`,
+  `cloudScreen`, `environment`, `submission` (see `SkyReadiness` for the exact union).
+  Defaults are `pending`/`install`/`null`. A failure retains its originating `error` message
+  until a new successful preparation or submission; recording or allocation alone never
+  becomes `ready`.
+- Counters are nonnegative safe JS integers. A value that could not be represented exactly
+  throws `sky.invalid` instead of rounding; nothing is redefined or reused.
+
+Codes: `sky.invalid` (a counter exceeds the safe JS integer range), `api.feature_missing`
+(no sky feature is installed).
+
 ## Refusals
 
 | code | thrown by | when |
 |---|---|---|
-| `sky.invalid` | `setSky` | A `SkyDesc`, `CloudsDesc` or `AtmosphereDesc` field is out of range, non-finite, overflows f32, of the wrong type or unknown; the message names the complete field path. |
-| `api.invalid_argument` | `setSky`, `setEnvironmentLighting` | The argument is not an object, or an `EnvironmentLighting` value is non-finite or < 0. |
-| `api.feature_missing` | `setSky`, `sky`, `setEnvironmentLighting` | The sky or environment lighting feature is not installed in this engine. |
-| `pipeline.busy` | `setSky` | Called while a frame executes (the sky state is borrowed). |
+| `sky.invalid` | `setSky`, `setTimeOfDay`, `skyWeatherDiagnostics` | A `SkyDesc`, `CloudsDesc`, `AtmosphereDesc` or `TimeOfDayDesc` field is out of range, non-finite, overflows f32, of the wrong type or unknown (the message names the complete field path), or a diagnostics counter exceeds the safe JS integer range. |
+| `api.invalid_argument` | `setSky`, `setTimeOfDay`, `setEnvironmentLighting` | The argument is not an object, or an `EnvironmentLighting` value is non-finite or < 0. |
+| `api.feature_missing` | `setSky`, `sky`, `setTimeOfDay`, `timeOfDay`, `skyWeatherDiagnostics`, `setEnvironmentLighting` | The sky or environment lighting feature is not installed in this engine. |
+| `pipeline.busy` | `setSky`, `setTimeOfDay` | Called while a frame executes (the sky state is borrowed). |
 | `api.disposed` | all | Any method after `dispose`. |
 
 ## Example
@@ -263,6 +396,9 @@ engine.setSky({
   envUpdate: 'everyFrame',
 });
 engine.setEnvironmentLighting({ diffuse: 1, specular: 1 });
+engine.setTimeOfDay({ day: 172, hours: 18.5, latitude: 38, enabled: true, playing: true, speed: 30 });
 console.log(engine.sky().profile, engine.sky().zenith, engine.passes().map((p) => p.name));
+console.log(engine.timeOfDay().currentHours, engine.timeOfDay().dominant);
+console.log(engine.skyWeatherDiagnostics().readiness); // { status, stage, error }
 engine.setPassEnabled('sky.background', false); // keep the sky light, drop the sky image
 ```

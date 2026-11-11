@@ -1,9 +1,14 @@
-//! m08 sky and image-based lighting API: the procedural sky (`setSky`, `sky`) and the
-//! intensities of the sky-derived environment lighting (`setEnvironmentLighting`).
+//! m08 sky and image-based lighting API: the procedural sky (`setSky`, `sky`), the celestial
+//! clock (`setTimeOfDay`, `timeOfDay`), the typed sky/weather observation
+//! (`skyWeatherDiagnostics`) and the intensities of the sky-derived environment lighting
+//! (`setEnvironmentLighting`).
 //!
 //! `install` adds IBL first, then the sky (which filters its env cube through the IBL
-//! handle); `frame` marks the sky dirty when the scene light changed, so the env cube and
-//! its IBL follow the sun.
+//! handle); `frame` marks the sky dirty when the accepted scene light changed, so the env
+//! cube and its IBL follow the sun. The frame hook never advances the clock: `EngineApp`
+//! already advanced it once from `FrameInput.dt_ms / 1000.0` under
+//! `EngineState::sky_invocation_id()` before `api::frame_all`, and no submitted-frame
+//! counter is used here.
 //!
 //! `setSky` is the S24 transaction boundary: it merges the JS patch over the selected
 //! preset (or over the current sky when no preset is given), validates the complete
@@ -24,10 +29,17 @@ use std::fmt::Display;
 use std::rc::Rc;
 
 use raa_core::RaaError;
-use raa_sky::{EnvUpdate, LegacyCloudFields, SkyDesc, SkyModel, SkyTransaction};
+use raa_ibl::IblPublication;
+use raa_sky::{
+    EnvUpdate, LegacyCloudFields, SkyDesc, SkyDiagnostics, SkyModel, SkyTransaction,
+    TimeOfDaySettings,
+};
 
 /// The refusal code of an invalid sky/time/weather candidate (S24).
 pub(crate) const SKY_INVALID: &str = "sky.invalid";
+
+/// The largest integer JavaScript represents exactly (`Number.MAX_SAFE_INTEGER`).
+pub(crate) const MAX_SAFE_COUNTER: u64 = (1 << 53) - 1;
 
 /// A raw property value read from a description object.
 #[derive(Clone)]
@@ -38,6 +50,7 @@ pub(crate) enum Raw {
     Undefined,
     /// The key is present with `null`.
     Null,
+    Bool(bool),
     Number(f64),
     String(String),
     Numbers(Vec<f64>),
@@ -172,6 +185,27 @@ fn strict_number(obj: &dyn Properties, key: &str, path: &str) -> Result<Option<f
         Raw::Null => Err(invalid(path, "must not be null")),
         Raw::Number(value) => narrow(path, value).map(Some),
         _ => Err(invalid(path, "must be a number")),
+    }
+}
+
+/// A new `f64` field (the clock stores `hours`/`speed` as f64): only finiteness applies.
+fn strict_f64(obj: &dyn Properties, key: &str, path: &str) -> Result<Option<f64>, RaaError> {
+    match obj.read(key)? {
+        Raw::Absent | Raw::Undefined => Ok(None),
+        Raw::Null => Err(invalid(path, "must not be null")),
+        Raw::Number(value) if value.is_finite() => Ok(Some(value)),
+        Raw::Number(value) => Err(invalid(path, format!("must be finite, got {value}"))),
+        _ => Err(invalid(path, "must be a number")),
+    }
+}
+
+/// A new boolean field: `null` is refused, `undefined` is an omission.
+fn strict_bool(obj: &dyn Properties, key: &str, path: &str) -> Result<Option<bool>, RaaError> {
+    match obj.read(key)? {
+        Raw::Absent | Raw::Undefined => Ok(None),
+        Raw::Null => Err(invalid(path, "must not be null")),
+        Raw::Bool(value) => Ok(Some(value)),
+        _ => Err(invalid(path, "must be a boolean")),
     }
 }
 
@@ -419,6 +453,215 @@ pub(crate) fn parse_sky_transaction(
     })
 }
 
+/// The S24 `TimeOfDayDesc` fields; `undefined` is the only omission.
+const TIME_OF_DAY_FIELDS: &[&str] = &[
+    "day", "hours", "latitude", "north", "enabled", "playing", "speed",
+];
+
+/// Merges a JS `TimeOfDayDesc` over the accepted authored settings and validates the
+/// complete result (S24: day 1..=365, hours [0, 24), latitude [-90, 90], finite north,
+/// finite speed >= 0). `null`, unknown keys, wrong types and f32 overflow refuse with
+/// `sky.invalid` naming the complete field path before anything is applied.
+pub(crate) fn parse_time_of_day(
+    current: &TimeOfDaySettings,
+    obj: &dyn Properties,
+) -> Result<TimeOfDaySettings, RaaError> {
+    reject_unknown(obj, "", TIME_OF_DAY_FIELDS)?;
+    let mut settings = *current;
+    if let Some(value) = strict_f64(obj, "day", "day")? {
+        if value.fract() != 0.0 || !(1.0..=365.0).contains(&value) {
+            return Err(invalid(
+                "day",
+                format!("must be an integer in [1, 365], got {value}"),
+            ));
+        }
+        settings.time.day = value as u16;
+    }
+    if let Some(value) = strict_f64(obj, "hours", "hours")? {
+        if !(0.0..24.0).contains(&value) {
+            return Err(invalid("hours", format!("must be in [0, 24), got {value}")));
+        }
+        settings.time.hours = value;
+    }
+    if let Some(value) = strict_number(obj, "latitude", "latitude")? {
+        if !(-90.0..=90.0).contains(&value) {
+            return Err(invalid(
+                "latitude",
+                format!("must be in [-90, 90], got {value}"),
+            ));
+        }
+        settings.place.latitude = value;
+    }
+    if let Some(value) = strict_number(obj, "north", "north")? {
+        settings.place.north = value;
+    }
+    if let Some(value) = strict_bool(obj, "enabled", "enabled")? {
+        settings.enabled = value;
+    }
+    if let Some(value) = strict_bool(obj, "playing", "playing")? {
+        settings.playing = value;
+    }
+    if let Some(value) = strict_f64(obj, "speed", "speed")? {
+        if value < 0.0 {
+            return Err(invalid("speed", format!("must be >= 0, got {value}")));
+        }
+        settings.speed = value;
+    }
+    settings.validate()?;
+    Ok(settings)
+}
+
+/// The S24 `TimeOfDayState` flattened into its JS fields (fresh on every getter call).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TimeOfDayView {
+    pub day: u16,
+    pub hours: f64,
+    pub latitude: f32,
+    pub north: f32,
+    pub enabled: bool,
+    pub playing: bool,
+    pub speed: f64,
+    pub current_day: u16,
+    pub current_hours: f64,
+    pub sun_direction: [f32; 3],
+    pub moon_direction: [f32; 3],
+    pub moon_lit: f32,
+    pub star_pole: [f32; 3],
+    pub star_equinox: [f32; 3],
+    pub dominant: &'static str,
+}
+
+fn xyz(v: raa_math::Vec3) -> [f32; 3] {
+    [v.x, v.y, v.z]
+}
+
+/// Flattens the copied `TimeOfDayState`: authored settings, runtime cursor, celestial
+/// snapshot and the exact `manual`/`sun`/`moon` dominant spelling.
+pub(crate) fn serialize_time_of_day(state: &raa_sky::TimeOfDayState) -> TimeOfDayView {
+    let s = &state.settings;
+    TimeOfDayView {
+        day: s.time.day,
+        hours: s.time.hours,
+        latitude: s.place.latitude,
+        north: s.place.north,
+        enabled: s.enabled,
+        playing: s.playing,
+        speed: s.speed,
+        current_day: state.current.day,
+        current_hours: state.current.hours,
+        sun_direction: xyz(state.sky.sun),
+        moon_direction: xyz(state.sky.moon),
+        moon_lit: state.sky.moon_lit,
+        star_pole: xyz(state.sky.pole),
+        star_equinox: xyz(state.sky.equinox),
+        dominant: match state.dominant {
+            raa_sky::DominantLight::Manual => "manual",
+            raa_sky::DominantLight::Sun => "sun",
+            raa_sky::DominantLight::Moon => "moon",
+        },
+    }
+}
+
+/// The JS-shaped `SkyWeatherDiagnostics`: the exact 7434 records with ordered views,
+/// option-to-null mapping, readiness strings and the ordered reset reason array.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SkyWeatherDiagnostics {
+    pub invocation: Option<u64>,
+    pub submitted_invocation: Option<u64>,
+    pub weather_generation: u64,
+    pub atmosphere_generation: u64,
+    pub environment: IblPublication,
+    pub views: Vec<SkyWeatherView>,
+    pub readiness: SkyWeatherReadiness,
+}
+
+/// One prepared view's serialized diagnostics record.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SkyWeatherView {
+    pub view: u32,
+    pub width: u32,
+    pub height: u32,
+    pub invocation: Option<u64>,
+    pub submitted_invocation: Option<u64>,
+    pub sky_view_generation: u64,
+    pub history_valid: bool,
+    pub reset_reasons: Vec<&'static str>,
+    pub cloud_screen_valid: bool,
+    pub cloud_panorama_valid: bool,
+}
+
+/// The serialized readiness record; `error` is null unless the status is failed.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SkyWeatherReadiness {
+    pub status: &'static str,
+    pub stage: &'static str,
+    pub error: Option<String>,
+}
+
+/// A counter that must stay an exactly representable nonnegative JS integer; a larger value
+/// refuses rather than rounding or wrapping.
+fn safe_counter(path: &str, value: u64) -> Result<u64, RaaError> {
+    if value > MAX_SAFE_COUNTER {
+        return Err(invalid(
+            path,
+            format!("must stay a safe nonnegative JS integer, got {value}"),
+        ));
+    }
+    Ok(value)
+}
+
+fn optional_counter(path: &str, value: Option<u64>) -> Result<Option<u64>, RaaError> {
+    value.map(|v| safe_counter(path, v)).transpose()
+}
+
+/// Serializes the exact `SkyDiagnostics`: absent view slots are skipped in slot order,
+/// options become `None` (null at the JS boundary) and failures keep their originating
+/// message. Reading it never mutates the renderer state.
+pub(crate) fn serialize_diagnostics(d: &SkyDiagnostics) -> Result<SkyWeatherDiagnostics, RaaError> {
+    let environment = IblPublication {
+        requested_generation: safe_counter(
+            "environment.requestedGeneration",
+            d.environment.requested_generation,
+        )?,
+        published_generation: optional_counter(
+            "environment.publishedGeneration",
+            d.environment.published_generation,
+        )?,
+        pending: d.environment.pending,
+    };
+    let mut views = Vec::new();
+    for view in d.views.iter().flatten() {
+        views.push(SkyWeatherView {
+            view: view.view,
+            width: view.width,
+            height: view.height,
+            invocation: optional_counter("views.invocation", view.invocation)?,
+            submitted_invocation: optional_counter(
+                "views.submittedInvocation",
+                view.submitted_invocation,
+            )?,
+            sky_view_generation: safe_counter("views.skyViewGeneration", view.sky_view_generation)?,
+            history_valid: view.history_valid,
+            reset_reasons: view.reset_reasons.names(),
+            cloud_screen_valid: view.cloud_screen_valid,
+            cloud_panorama_valid: view.cloud_panorama_valid,
+        });
+    }
+    Ok(SkyWeatherDiagnostics {
+        invocation: optional_counter("invocation", d.invocation)?,
+        submitted_invocation: optional_counter("submittedInvocation", d.submitted_invocation)?,
+        weather_generation: safe_counter("weatherGeneration", d.weather_generation)?,
+        atmosphere_generation: safe_counter("atmosphereGeneration", d.atmosphere_generation)?,
+        environment,
+        views,
+        readiness: SkyWeatherReadiness {
+            status: d.readiness.status.as_str(),
+            stage: d.readiness.stage.as_str(),
+            error: d.readiness.error.clone(),
+        },
+    })
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{frame, install};
 
@@ -531,6 +774,9 @@ mod web {
             if value.is_null() {
                 return Raw::Null;
             }
+            if let Some(value) = value.as_bool() {
+                return Raw::Bool(value);
+            }
             if let Some(value) = value.as_f64() {
                 return Raw::Number(value);
             }
@@ -630,6 +876,124 @@ mod web {
         o.into()
     }
 
+    fn optional_number(value: Option<u64>) -> JsValue {
+        value.map_or(JsValue::NULL, |v| JsValue::from_f64(v as f64))
+    }
+
+    fn strings_to_js(values: &[&'static str]) -> JsValue {
+        values
+            .iter()
+            .map(|s| JsValue::from_str(s))
+            .collect::<Array>()
+            .into()
+    }
+
+    /// The S24 `TimeOfDayState` JS object: authored settings, cursor, celestial snapshot.
+    fn time_of_day_to_js(v: &TimeOfDayView) -> JsValue {
+        let o = Object::new();
+        set(&o, "day", &JsValue::from(v.day));
+        set(&o, "hours", &JsValue::from(v.hours));
+        set(&o, "latitude", &JsValue::from(v.latitude));
+        set(&o, "north", &JsValue::from(v.north));
+        set(&o, "enabled", &JsValue::from_bool(v.enabled));
+        set(&o, "playing", &JsValue::from_bool(v.playing));
+        set(&o, "speed", &JsValue::from(v.speed));
+        set(&o, "currentDay", &JsValue::from(v.current_day));
+        set(&o, "currentHours", &JsValue::from(v.current_hours));
+        set(&o, "sunDirection", &floats_to_js(&v.sun_direction));
+        set(&o, "moonDirection", &floats_to_js(&v.moon_direction));
+        set(&o, "moonLit", &JsValue::from(v.moon_lit));
+        set(&o, "starPole", &floats_to_js(&v.star_pole));
+        set(&o, "starEquinox", &floats_to_js(&v.star_equinox));
+        set(&o, "dominant", &JsValue::from_str(v.dominant));
+        o.into()
+    }
+
+    fn view_diagnostics_to_js(v: &SkyWeatherView) -> JsValue {
+        let o = Object::new();
+        set(&o, "view", &JsValue::from(v.view));
+        set(&o, "width", &JsValue::from(v.width));
+        set(&o, "height", &JsValue::from(v.height));
+        set(&o, "invocation", &optional_number(v.invocation));
+        set(
+            &o,
+            "submittedInvocation",
+            &optional_number(v.submitted_invocation),
+        );
+        set(
+            &o,
+            "skyViewGeneration",
+            &JsValue::from_f64(v.sky_view_generation as f64),
+        );
+        set(&o, "historyValid", &JsValue::from_bool(v.history_valid));
+        set(&o, "resetReasons", &strings_to_js(&v.reset_reasons));
+        set(
+            &o,
+            "cloudScreenValid",
+            &JsValue::from_bool(v.cloud_screen_valid),
+        );
+        set(
+            &o,
+            "cloudPanoramaValid",
+            &JsValue::from_bool(v.cloud_panorama_valid),
+        );
+        o.into()
+    }
+
+    /// The exact fresh `SkyWeatherDiagnostics` object; absent views are an empty array and
+    /// options are null.
+    fn diagnostics_to_js(d: &SkyWeatherDiagnostics) -> JsValue {
+        let environment = Object::new();
+        set(
+            &environment,
+            "requestedGeneration",
+            &JsValue::from_f64(d.environment.requested_generation as f64),
+        );
+        set(
+            &environment,
+            "publishedGeneration",
+            &optional_number(d.environment.published_generation),
+        );
+        set(
+            &environment,
+            "pending",
+            &JsValue::from_bool(d.environment.pending),
+        );
+        let views: Array = d.views.iter().map(view_diagnostics_to_js).collect();
+        let readiness = Object::new();
+        set(&readiness, "status", &JsValue::from_str(d.readiness.status));
+        set(&readiness, "stage", &JsValue::from_str(d.readiness.stage));
+        set(
+            &readiness,
+            "error",
+            &d.readiness
+                .error
+                .as_deref()
+                .map_or(JsValue::NULL, JsValue::from_str),
+        );
+        let o = Object::new();
+        set(&o, "invocation", &optional_number(d.invocation));
+        set(
+            &o,
+            "submittedInvocation",
+            &optional_number(d.submitted_invocation),
+        );
+        set(
+            &o,
+            "weatherGeneration",
+            &JsValue::from_f64(d.weather_generation as f64),
+        );
+        set(
+            &o,
+            "atmosphereGeneration",
+            &JsValue::from_f64(d.atmosphere_generation as f64),
+        );
+        set(&o, "environment", &environment.into());
+        set(&o, "views", &views.into());
+        set(&o, "readiness", &readiness.into());
+        o.into()
+    }
+
     /// A finite intensity >= 0 at `key`, if present (existing `setEnvironmentLighting` rule).
     fn intensity(obj: &JsValue, key: &str) -> Result<Option<f32>, RaaError> {
         match js::optional_f64(obj, key)?.map(|x| x as f32) {
@@ -666,6 +1030,49 @@ mod web {
             self.with_state(|_, st| {
                 let sky = st.features.require_mut::<SkyHandle>("sky")?;
                 Ok(sky_to_js(&sky.get()))
+            })
+        }
+
+        /// Merges a validated S24 time-of-day patch over the authored settings and applies
+        /// it once; a changed authored day or hour resets the runtime cursor in raa-sky.
+        /// Manual lighting and the daylight baseline stay owned by raa-sky.
+        #[wasm_bindgen(js_name = setTimeOfDay)]
+        pub fn set_time_of_day(&mut self, desc: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                if !desc.is_object() || desc.is_null() || Array::is_array(&desc) {
+                    return Err(arg_invalid(
+                        "setTimeOfDay expects a time-of-day description object",
+                    ));
+                }
+                let sky = st.features.require_mut::<SkyHandle>("sky")?;
+                let current = sky.time_of_day().settings;
+                let settings = parse_time_of_day(&current, &ReflectSource(desc.clone()))?;
+                sky.set_time_of_day(settings)
+            })
+        }
+
+        /// The authored time settings, the runtime playback moment and its celestial
+        /// snapshot, as a fresh object; it is never persisted.
+        #[wasm_bindgen(js_name = timeOfDay)]
+        pub fn time_of_day(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let sky = st.features.require_mut::<SkyHandle>("sky")?;
+                Ok(time_of_day_to_js(&serialize_time_of_day(
+                    &sky.time_of_day(),
+                )))
+            })
+        }
+
+        /// The exact typed sky/weather lifecycle observation: invocations, generations,
+        /// environment publication, ordered prepared views and readiness. Allocates fresh
+        /// objects only on request and changes no clock, resource or authored setting.
+        #[wasm_bindgen(js_name = skyWeatherDiagnostics)]
+        pub fn sky_weather_diagnostics(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let sky = st.features.require_mut::<SkyHandle>("sky")?;
+                Ok(diagnostics_to_js(&serialize_diagnostics(
+                    &sky.diagnostics(),
+                )?))
             })
         }
 

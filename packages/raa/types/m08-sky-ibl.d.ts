@@ -114,6 +114,121 @@ export interface EnvironmentLighting {
   specular?: number;
 }
 
+/**
+ * The authored celestial time of {@link Engine.setTimeOfDay}. `day` is one-based, `hours`
+ * uses local solar time, `latitude` is degrees north and `north` is the scene orientation in
+ * radians about +Y. `enabled` controls automatic lighting, `playing` advances the clock (both
+ * only while `enabled`), and `speed` is simulated seconds per real second.
+ */
+export interface TimeOfDaySettings {
+  /** Day of the year, an integer in [1, 365]. Default 172. */
+  day: number;
+  /** Local solar hours, finite and in [0, 24). Default 9. */
+  hours: number;
+  /** Degrees north, finite and in [-90, 90]. Default 38. */
+  latitude: number;
+  /** Scene orientation in radians about +Y; finite. Default 0. */
+  north: number;
+  /** Automatic dominant light (sun/moon) instead of the manual light. Default false. */
+  enabled: boolean;
+  /** Advance the clock with the engine frame delta. Default false. */
+  playing: boolean;
+  /** Simulated seconds per real second, finite and >= 0. Default 1. */
+  speed: number;
+}
+
+/**
+ * A partial authored time-of-day patch for {@link Engine.setTimeOfDay}: only supplied
+ * fields change. `undefined` is an omission; `null`, unknown keys, wrong types and
+ * out-of-domain values throw `sky.invalid` with the complete field path.
+ */
+export type TimeOfDayDesc = Partial<TimeOfDaySettings>;
+
+/**
+ * The authored time settings plus the current playback moment and its celestial snapshot,
+ * returned by {@link Engine.timeOfDay}. Day/hours are the authored moment; currentDay and
+ * currentHours are the runtime cursor. Directions point toward the bodies.
+ */
+export interface TimeOfDayState extends TimeOfDaySettings {
+  currentDay: number;
+  currentHours: number;
+  sunDirection: Vec3;
+  moonDirection: Vec3;
+  moonLit: number;
+  starPole: Vec3;
+  starEquinox: Vec3;
+  dominant: 'manual' | 'sun' | 'moon';
+}
+
+/** The ordered cloud-history reset reasons of a prepared view. */
+export type SkyResetReason =
+  | 'Resize'
+  | 'CameraDiscontinuity'
+  | 'Weather'
+  | 'Model'
+  | 'Enable'
+  | 'ViewRemoved';
+
+/** The lifecycle status of the physical-sky pipeline. */
+export type SkyReadinessStatus = 'pending' | 'ready' | 'failed';
+
+/** The pipeline stage a readiness observation refers to. */
+export type SkyReadinessStage =
+  | 'install'
+  | 'atmosphere'
+  | 'milkyWay'
+  | 'cloudLighting'
+  | 'cloudScreen'
+  | 'environment'
+  | 'submission';
+
+/** The IBL environment publication copied from its handle; generations are counters. */
+export interface SkyEnvironmentPublication {
+  requestedGeneration: number;
+  publishedGeneration: number | null;
+  pending: boolean;
+}
+
+/** One prepared view's lifecycle observation, in ascending view-slot order. */
+export interface SkyViewDiagnostics {
+  view: number;
+  width: number;
+  height: number;
+  invocation: number | null;
+  submittedInvocation: number | null;
+  skyViewGeneration: number;
+  historyValid: boolean;
+  resetReasons: SkyResetReason[];
+  cloudScreenValid: boolean;
+  cloudPanoramaValid: boolean;
+}
+
+/** Whether the sky pipeline is ready, pending or failed, with its stage and error. */
+export interface SkyReadiness {
+  status: SkyReadinessStatus;
+  stage: SkyReadinessStage;
+  /** The originating failure message while `status` is `'failed'`; otherwise null. */
+  error: string | null;
+}
+
+/**
+ * The exact typed sky/weather lifecycle observation returned by
+ * {@link Engine.skyWeatherDiagnostics}. Every counter is a nonnegative safe JS integer; a
+ * value beyond that range throws `sky.invalid` instead of rounding. All fields are
+ * observations of renderer state: reading them never advances a clock, changes a resource
+ * or becomes a saved setting.
+ */
+export interface SkyWeatherDiagnostics {
+  invocation: number | null;
+  submittedInvocation: number | null;
+  weatherGeneration: number;
+  atmosphereGeneration: number;
+  environment: SkyEnvironmentPublication;
+  /** Prepared views in ascending slot order; no prepared view yields `[]`. */
+  views: SkyViewDiagnostics[];
+  readiness: SkyReadiness;
+}
+
 /** The chain milestone 2 methods, merged into the v0 Engine. */
 export interface Engine {
   /**
@@ -146,4 +261,34 @@ export interface Engine {
    *   not an object), `api.feature_missing` (no environment lighting feature is installed).
    */
   setEnvironmentLighting(settings: EnvironmentLighting): void;
+
+  /**
+   * Merges a validated time-of-day patch over the authored settings and applies it once.
+   * A changed authored `day` or `hours` resets the runtime cursor to that moment;
+   * pause/resume and speed/place/orientation edits keep it. Automatic lighting and the
+   * stored manual daylight baseline stay owned by the sky; changing either authored moment
+   * does not by itself enable automatic control.
+   * @throws RaaError `sky.invalid` (a field is non-finite, out of range, of the wrong type,
+   *   unknown or overflows f32; `day` must be an integer and `hours` in [0, 24)),
+   *   `api.invalid_argument` (the argument is not an object), `api.feature_missing`,
+   *   `pipeline.busy` (called while a frame executes).
+   */
+  setTimeOfDay(desc: TimeOfDayDesc): void;
+
+  /**
+   * The authored time settings, the runtime playback moment and its celestial snapshot as a
+   * fresh object. It is never persisted and never advances the clock.
+   * @throws RaaError `api.feature_missing` (no sky feature is installed).
+   */
+  timeOfDay(): TimeOfDayState;
+
+  /**
+   * The exact typed sky/weather lifecycle observation: invocation identities, weather and
+   * atmosphere generations, the environment publication, the prepared views in slot order
+   * with their ordered reset reasons, and readiness. Allocates fresh objects only on
+   * request and is observational, never persisted.
+   * @throws RaaError `api.feature_missing` (no sky feature is installed), `sky.invalid` (a
+   *   counter would not be a nonnegative safe JS integer).
+   */
+  skyWeatherDiagnostics(): SkyWeatherDiagnostics;
 }
