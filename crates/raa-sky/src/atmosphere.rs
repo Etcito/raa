@@ -17,8 +17,15 @@
 //! (`crates/solstice-render/src/sky.rs:8-11,35-95`), the immutable sampler and
 //! group-2 layouts, and the compute pipelines that fill them. Static tables are
 //! invalidated only by atmosphere parameters; a view's sky view follows its own
-//! height and light snapshot. Prepared resources stay pending until the LUT work
-//! is recorded and submitted; allocation alone claims no readiness.
+//! height and light snapshot.
+//!
+//! [`AtmosphereResources::record`] records the pending static tables, the
+//! view's pending sky view and the 16-byte directional transmission, then copies
+//! that result into `WeatherLightingGpu.atmosphericTransmission` at byte offset
+//! 32. It submits nothing: recording consumes dirty work but never claims an
+//! acknowledged submission, so readiness observers still require real
+//! submission. The CPU-owned map/light/flags bytes of the destination are never
+//! touched here.
 /*
 MIT License
 
@@ -47,7 +54,9 @@ use std::num::NonZeroU64;
 
 use raa_core::{GpuContext, RaaError};
 
-use crate::shaders::{ATMOSPHERE_LUT_ENTRIES, atmosphere_luts_module_wgsl};
+use crate::shaders::{
+    ATMOSPHERE_DIRECTIONAL_ENTRY, ATMOSPHERE_LUT_ENTRIES, atmosphere_luts_module_wgsl,
+};
 
 /// Ground radius at sea level, in kilometres.
 pub(crate) const GROUND_RADIUS_KM: f32 = 6360.0;
@@ -212,6 +221,10 @@ const MULTI_SCATTER_SIZE: (u32, u32) = (32, 32);
 const SKY_VIEW_SIZE: (u32, u32) = (256, 144);
 /// Prepared atmosphere views, matching the engine's four view slots.
 const MAX_VIEWS: usize = 4;
+/// Byte offset of `WeatherLightingGpu.atmosphericTransmission` (S10 binding 16).
+const TRANSMISSION_OFFSET: u64 = 32;
+/// Size of the GPU-written directional transmission lane, one `vec4<f32>`.
+const TRANSMISSION_SIZE: u64 = 16;
 
 fn invalid(message: impl Into<String>) -> RaaError {
     RaaError::FrameGraph {
@@ -388,13 +401,44 @@ impl Lifecycle {
             *slot = None;
         }
     }
+
+    /// Consumes the pending table work for one record. The static tables are built once per
+    /// atmosphere-parameter change; the view's sky view follows its own size, height and light
+    /// snapshot. An invalid or unprepared view refuses before any dirty flag is consumed.
+    ///
+    /// This records dirty work only. Acknowledging a submission is a different operation, so
+    /// no readiness state changes here.
+    fn take_record_work(&mut self, view: u32) -> Result<RecordWork, RaaError> {
+        let index = validate_view(view)?;
+        let slot = self
+            .views
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| invalid(format!("atmosphere view {view} has not been prepared")))?;
+        let sky_view = std::mem::take(&mut slot.sky_view_pending);
+        let static_tables = std::mem::take(&mut self.static_tables_pending);
+        Ok(RecordWork {
+            static_tables,
+            sky_view,
+        })
+    }
+}
+
+/// The pending LUT dispatches one accepted `record` call has to emit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RecordWork {
+    static_tables: bool,
+    sky_view: bool,
 }
 
 struct ViewGpu {
     sky_view: wgpu::TextureView,
     uniform: wgpu::Buffer,
-    /// Bound by the LUT record step of card 7429, which reads `_bind_group`.
-    _bind_group: wgpu::BindGroup,
+    /// The sky-view LUT build: this view's uniform, the two static tables, sampler and output.
+    sky_view_group: wgpu::BindGroup,
+    /// The directional transmission build: this view's uniform, the transmittance table,
+    /// sampler and the shared 16-byte result buffer.
+    directional_group: wgpu::BindGroup,
 }
 
 /// The shared atmosphere LUTs and the per-view resources that fill them.
@@ -407,21 +451,27 @@ struct ViewGpu {
 /// no GPU allocation or upload.
 pub(crate) struct AtmosphereResources {
     sampler: wgpu::Sampler,
+    /// The LUT layout: uniform, two sampled tables, sampler and storage output.
     layout: wgpu::BindGroupLayout,
-    /// Dispatched by the LUT record step of card 7429, which reads `_pipelines`.
-    _pipelines: [wgpu::ComputePipeline; 3],
+    /// The directional layout: uniform, transmittance table, sampler and storage result.
+    directional_layout: wgpu::BindGroupLayout,
+    /// Transmittance, multiple scattering and sky view pipelines, in build order.
+    pipelines: [wgpu::ComputePipeline; 3],
+    directional_pipeline: wgpu::ComputePipeline,
     transmittance: wgpu::TextureView,
     multiple_scattering: wgpu::TextureView,
     static_uniform: wgpu::Buffer,
-    /// The two static-table bind groups recorded by card 7429.
-    _static_groups: [wgpu::BindGroup; 2],
+    /// The two static-table bind groups, bound for the first and second build.
+    static_groups: [wgpu::BindGroup; 2],
+    /// The separate 16-byte `STORAGE | COPY_SRC` directional result.
+    transmission_result: wgpu::Buffer,
     views: [Option<ViewGpu>; MAX_VIEWS],
     lifecycle: Lifecycle,
 }
 
 impl AtmosphereResources {
-    /// Creates the two static LUT targets, the placeholder dummy, the sampler, the
-    /// group-2 layout and the three LUT compute pipelines.
+    /// Creates the two static LUT targets, the placeholder dummy, the sampler, the two
+    /// explicit group-2 layouts, the four compute pipelines and the directional result.
     pub(crate) fn new(gpu: &GpuContext) -> Result<Self, RaaError> {
         gpu.ensure_live()?;
         let device = gpu.device();
@@ -429,6 +479,11 @@ impl AtmosphereResources {
             label: Some("raa-sky.atmosphere"),
             entries: &layout_entries(),
         });
+        let directional_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raa-sky.atmosphere.directional"),
+                entries: &directional_layout_entries(),
+            });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-sky.atmosphere"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -448,7 +503,14 @@ impl AtmosphereResources {
         let static_uniform = uniform_buffer(gpu, "raa-sky.atmosphere.static");
         gpu.queue()
             .write_buffer(&static_uniform, 0, &PhysicalSkyGpu::default().to_bytes());
-        let pipelines = lut_pipelines(gpu, &layout);
+        let (pipelines, directional_pipeline) =
+            atmosphere_pipelines(gpu, &layout, &directional_layout);
+        let transmission_result = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-sky.atmosphere.transmission"),
+            size: TRANSMISSION_SIZE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
         let static_groups = [
             lut_bind_group(
                 gpu,
@@ -472,11 +534,14 @@ impl AtmosphereResources {
         Ok(AtmosphereResources {
             sampler,
             layout,
-            _pipelines: pipelines,
+            directional_layout,
+            pipelines,
+            directional_pipeline,
             transmittance,
             multiple_scattering,
             static_uniform,
-            _static_groups: static_groups,
+            static_groups,
+            transmission_result,
             views: std::array::from_fn(|_| None),
             lifecycle: Lifecycle::new(),
         })
@@ -509,19 +574,28 @@ impl AtmosphereResources {
                 let uniform = uniform_buffer(gpu, "raa-sky.atmosphere.view");
                 gpu.queue()
                     .write_buffer(&uniform, 0, &parameters.to_bytes());
-                let bind_group = lut_bind_group(
+                let sky_view_group = lut_bind_group(
                     gpu,
                     &self.layout,
                     &uniform,
-                    &self.transmittance,
-                    &self.multiple_scattering,
-                    &self.sampler,
+                    self.transmittance(),
+                    self.multiple_scattering(),
+                    self.sampler(),
                     &sky_view,
+                );
+                let directional_group = directional_bind_group(
+                    gpu,
+                    &self.directional_layout,
+                    &uniform,
+                    self.transmittance(),
+                    self.sampler(),
+                    &self.transmission_result,
                 );
                 self.views[index] = Some(ViewGpu {
                     sky_view,
                     uniform,
-                    _bind_group: bind_group,
+                    sky_view_group,
+                    directional_group,
                 });
             }
             Prepare::Updated => {
@@ -532,6 +606,77 @@ impl AtmosphereResources {
             }
             Prepare::Unchanged => {}
         }
+        Ok(())
+    }
+
+    /// Records the pending LUT work of one prepared view, then the directional transmission
+    /// and the copy of its 16-byte result into `transmission_destination` at byte offset 32.
+    ///
+    /// Order inside the encoder: transmittance and multiple scattering when an atmosphere
+    /// parameter changed, the view's sky view when its size, height or light changed, then the
+    /// directional entry, then the buffer copy. Groups 0 and 1 stay empty; every resource is
+    /// bound explicitly at group 2. The CPU-owned `map`, `light` and `flags` lanes of the
+    /// destination are never written, and nothing is submitted: recording consumes dirty work
+    /// but establishes no submitted readiness.
+    ///
+    /// An invalid or unprepared view and a destination shorter than 48 bytes or without
+    /// `COPY_DST` refuse with `sky.invalid` before any dispatch or dirty-state change.
+    pub(crate) fn record(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        view: u32,
+        transmission_destination: &wgpu::Buffer,
+    ) -> Result<(), RaaError> {
+        gpu.ensure_live()?;
+        validate_transmission_destination(transmission_destination)?;
+        let work = self.lifecycle.take_record_work(view)?;
+        let index = view as usize;
+        let slot = self
+            .views
+            .get(index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| invalid(format!("atmosphere view {view} has not been prepared")))?;
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("raa-sky.atmosphere"),
+                timestamp_writes: None,
+            });
+            if work.static_tables {
+                dispatch_lut(
+                    &mut pass,
+                    &self.pipelines[0],
+                    &self.static_groups[0],
+                    TRANSMITTANCE_SIZE,
+                );
+                dispatch_lut(
+                    &mut pass,
+                    &self.pipelines[1],
+                    &self.static_groups[1],
+                    MULTI_SCATTER_SIZE,
+                );
+            }
+            if work.sky_view {
+                dispatch_lut(
+                    &mut pass,
+                    &self.pipelines[2],
+                    &slot.sky_view_group,
+                    SKY_VIEW_SIZE,
+                );
+            }
+            // Recorded for every view: the S10 destination is shared, so each view's
+            // submission must carry its own height and dominant-light snapshot.
+            pass.set_pipeline(&self.directional_pipeline);
+            pass.set_bind_group(2, &slot.directional_group, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(
+            &self.transmission_result,
+            0,
+            transmission_destination,
+            TRANSMISSION_OFFSET,
+            TRANSMISSION_SIZE,
+        );
         Ok(())
     }
 
@@ -580,13 +725,30 @@ const _: () = {
         (u32, u32),
         &PhysicalSkyGpu,
     ) -> Result<(), RaaError>;
+    type Record = fn(
+        &mut AtmosphereResources,
+        &GpuContext,
+        &mut wgpu::CommandEncoder,
+        u32,
+        &wgpu::Buffer,
+    ) -> Result<(), RaaError>;
     type ViewRef = for<'a> fn(&'a AtmosphereResources) -> &'a wgpu::TextureView;
     type SkyView = for<'a> fn(&'a AtmosphereResources, u32) -> Option<&'a wgpu::TextureView>;
     type SamplerRef = for<'a> fn(&'a AtmosphereResources) -> &'a wgpu::Sampler;
     type Remove = fn(&mut AtmosphereResources, u32);
-    let _: (New, Prepare, ViewRef, ViewRef, SkyView, SamplerRef, Remove) = (
+    let _: (
+        New,
+        Prepare,
+        Record,
+        ViewRef,
+        ViewRef,
+        SkyView,
+        SamplerRef,
+        Remove,
+    ) = (
         AtmosphereResources::new,
         AtmosphereResources::prepare_view,
+        AtmosphereResources::record,
         AtmosphereResources::transmittance,
         AtmosphereResources::multiple_scattering,
         AtmosphereResources::sky_view,
@@ -640,23 +802,72 @@ fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 5] {
     ]
 }
 
-/// Groups 0 and 1 stay empty; the resources live explicitly in shader group 2.
-fn lut_pipelines(gpu: &GpuContext, layout: &wgpu::BindGroupLayout) -> [wgpu::ComputePipeline; 3] {
+/// The directional group-2 compute layout: 0 uniform, 1 transmittance, 3 filtering sampler
+/// and 5 the 16-byte storage result. Bindings 2 and 4 stay absent: this pass neither reads
+/// the multiple-scattering table nor writes a storage texture.
+fn directional_layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(PhysicalSkyGpu::SIZE as u64),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 5,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(TRANSMISSION_SIZE),
+            },
+            count: None,
+        },
+    ]
+}
+
+/// Groups 0 and 1 stay empty; the resources live explicitly in shader group 2. The three
+/// LUT entries share the table layout; the directional entry has its own layout.
+fn atmosphere_pipelines(
+    gpu: &GpuContext,
+    lut_layout: &wgpu::BindGroupLayout,
+    directional_layout: &wgpu::BindGroupLayout,
+) -> ([wgpu::ComputePipeline; 3], wgpu::ComputePipeline) {
     let device = gpu.device();
     let empty = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("raa-sky.atmosphere.empty"),
         entries: &[],
     });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("raa-sky.atmosphere.lut"),
-        bind_group_layouts: &[Some(&empty), Some(&empty), Some(layout)],
-        immediate_size: 0,
-    });
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("raa-sky.atmosphere.lut"),
         source: wgpu::ShaderSource::Wgsl(atmosphere_luts_module_wgsl().into()),
     });
-    ATMOSPHERE_LUT_ENTRIES.map(|entry| {
+    let pipeline = |layout: &wgpu::BindGroupLayout, entry: &str| {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(entry),
+            bind_group_layouts: &[Some(&empty), Some(&empty), Some(layout)],
+            immediate_size: 0,
+        });
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
             layout: Some(&pipeline_layout),
@@ -665,6 +876,72 @@ fn lut_pipelines(gpu: &GpuContext, layout: &wgpu::BindGroupLayout) -> [wgpu::Com
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         })
+    };
+    (
+        ATMOSPHERE_LUT_ENTRIES.map(|entry| pipeline(lut_layout, entry)),
+        pipeline(directional_layout, ATMOSPHERE_DIRECTIONAL_ENTRY),
+    )
+}
+
+/// One `8x8`-workgroup dispatch of a LUT entry at the explicit group-2 layout.
+fn dispatch_lut(
+    pass: &mut wgpu::ComputePass<'_>,
+    pipeline: &wgpu::ComputePipeline,
+    group: &wgpu::BindGroup,
+    size: (u32, u32),
+) {
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(2, group, &[]);
+    pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
+}
+
+/// The copy destination is the 64-byte `WeatherLightingGpu` uniform; it must hold the
+/// transmission lane at offset 32 and accept a buffer-to-buffer copy.
+fn validate_transmission_destination(destination: &wgpu::Buffer) -> Result<(), RaaError> {
+    let required = TRANSMISSION_OFFSET + TRANSMISSION_SIZE;
+    if destination.size() < required {
+        return Err(invalid(format!(
+            "atmospheric transmission destination must hold at least {required} bytes, got {}",
+            destination.size()
+        )));
+    }
+    if !destination.usage().contains(wgpu::BufferUsages::COPY_DST) {
+        return Err(invalid(
+            "atmospheric transmission destination must allow COPY_DST",
+        ));
+    }
+    Ok(())
+}
+
+fn directional_bind_group(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    transmittance: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+    result: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa-sky.atmosphere.directional"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(transmittance),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: result.as_entire_binding(),
+            },
+        ],
     })
 }
 
@@ -977,6 +1254,85 @@ mod tests {
     }
 
     #[test]
+    fn record_work_consumes_static_and_view_dirty_state_atomically() {
+        let mut lifecycle = Lifecycle::new();
+        let parameters = PhysicalSkyGpu::default();
+        let missing = lifecycle.take_record_work(0).unwrap_err();
+        assert_eq!(missing.code(), "sky.invalid");
+        assert!(
+            lifecycle.static_tables_pending,
+            "a refused record consumes nothing"
+        );
+
+        lifecycle
+            .prepare(0, (1280, 720), &parameters)
+            .expect("view 0");
+        assert_eq!(
+            lifecycle.take_record_work(0).expect("view 0"),
+            RecordWork {
+                static_tables: true,
+                sky_view: true,
+            }
+        );
+        assert_eq!(
+            lifecycle.take_record_work(0).expect("view 0"),
+            RecordWork {
+                static_tables: false,
+                sky_view: false,
+            },
+            "an unchanged view records only the per-view directional copy"
+        );
+
+        let mut sun = parameters.clone();
+        sun.dominant = [1.0, 0.0, 0.0, 1.0];
+        lifecycle.prepare(0, (1280, 720), &sun).expect("view 0");
+        assert_eq!(
+            lifecycle.take_record_work(0).expect("view 0"),
+            RecordWork {
+                static_tables: false,
+                sky_view: true,
+            },
+            "a light snapshot change rebuilds only the sky view"
+        );
+
+        lifecycle.prepare(1, (800, 600), &sun).expect("view 1");
+        lifecycle.take_record_work(0).expect("view 0");
+        lifecycle.take_record_work(1).expect("view 1");
+        let mut albedo = sun.clone();
+        albedo.ground_albedo[0] = 0.42;
+        lifecycle.prepare(0, (1280, 720), &albedo).expect("view 0");
+        assert_eq!(
+            lifecycle.take_record_work(1).expect("view 1"),
+            RecordWork {
+                static_tables: true,
+                sky_view: true,
+            },
+            "a static parameter change rebuilds both tables and every prepared view"
+        );
+        assert!(
+            lifecycle.views[0]
+                .as_ref()
+                .expect("view 0")
+                .sky_view_pending,
+            "another view's unconsumed sky view stays pending"
+        );
+        let before = lifecycle.clone();
+        assert_eq!(
+            lifecycle
+                .take_record_work(MAX_VIEWS as u32)
+                .unwrap_err()
+                .code(),
+            "sky.invalid"
+        );
+        assert_eq!(
+            lifecycle.take_record_work(3).unwrap_err().code(),
+            "sky.invalid",
+            "an unprepared view refuses"
+        );
+        assert_eq!(lifecycle.views, before.views);
+    }
+
+    #[test]
     fn invalid_prepare_is_atomic_and_reports_sky_invalid() {
         let mut lifecycle = Lifecycle::new();
         let valid = PhysicalSkyGpu::default();
@@ -1043,5 +1399,123 @@ mod tests {
             resources.sky_view(3).is_some(),
             "removing another index keeps view 3"
         );
+    }
+
+    /// Reads the 256-byte destination back after one `record` call. The test checks the
+    /// layout, the copy offset and lane ownership, never CPU-computed atmosphere values.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn record_writes_only_the_directional_lane_of_the_weather_uniform() {
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(
+                "record_writes_only_the_directional_lane_of_the_weather_uniform",
+                "software_gpu returned None; see the software_gpu line above",
+            );
+            return;
+        };
+        let device = gpu.device();
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut resources = AtmosphereResources::new(&gpu).expect("atmosphere resources");
+        // Low sun and dominant light: the transmittance and horizon fade are exercised
+        // without comparing to a CPU atmosphere.
+        let parameters = PhysicalSkyGpu {
+            sun: [1.0, 0.02, 0.0, 1.0],
+            dominant: [1.0, 0.02, 0.0, 1.0],
+            ..PhysicalSkyGpu::default()
+        };
+        resources
+            .prepare_view(&gpu, 0, (1280, 720), &parameters)
+            .expect("view 0");
+
+        let destination = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-sky.test.weather"),
+            size: PhysicalSkyGpu::SIZE as u64,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-sky.test.weather.readback"),
+            size: PhysicalSkyGpu::SIZE as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut sentinel = [0u8; PhysicalSkyGpu::SIZE];
+        for (index, byte) in sentinel.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(7).wrapping_add(3);
+        }
+        gpu.queue().write_buffer(&destination, 0, &sentinel);
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        resources
+            .record(&gpu, &mut encoder, 0, &destination)
+            .expect("record view 0");
+        encoder.copy_buffer_to_buffer(&destination, 0, &readback, 0, PhysicalSkyGpu::SIZE as u64);
+        gpu.queue().submit([encoder.finish()]);
+
+        let slice = readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        rx.recv().expect("map callback").expect("map");
+        let mapped = slice.get_mapped_range().expect("mapped range");
+        assert_eq!(
+            &mapped[0..32],
+            &sentinel[0..32],
+            "CPU map and light lanes at 0 and 16 are untouched"
+        );
+        assert_eq!(
+            &mapped[48..256],
+            &sentinel[48..256],
+            "CPU flags at 48 and the reserved tail are untouched"
+        );
+        let lane: [u8; 16] = mapped[32..48].try_into().expect("16-byte lane");
+        let w = f32::from_le_bytes(lane[12..16].try_into().expect("w"));
+        assert_eq!(w, 1.0, "the directional lane is (rgb, 1)");
+        for channel in 0..3 {
+            let at = channel * 4;
+            let value = f32::from_le_bytes(lane[at..at + 4].try_into().expect("colour channel"));
+            assert!(
+                value.is_finite() && (0.0..=1.0).contains(&value),
+                "transmission channel {channel} is a finite ratio, got {value}"
+            );
+        }
+        drop(mapped);
+        readback.unmap();
+
+        // A second record after the dirty work was consumed is still valid: the shared
+        // destination must carry this view's directional lane every time.
+        let mut again = device.create_command_encoder(&Default::default());
+        resources
+            .record(&gpu, &mut again, 0, &destination)
+            .expect("record unchanged view 0");
+        let before = resources.lifecycle.clone();
+        let mut refused = device.create_command_encoder(&Default::default());
+        for (view, buffer) in [(MAX_VIEWS as u32, &destination), (1, &destination)] {
+            let error = resources
+                .record(&gpu, &mut refused, view, buffer)
+                .unwrap_err();
+            assert_eq!(error.code(), "sky.invalid");
+        }
+        let short = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-sky.test.short"),
+            size: TRANSMISSION_OFFSET,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        // A 16-byte result needs 48 bytes from the copy offset.
+        let error = resources.record(&gpu, &mut refused, 0, &short).unwrap_err();
+        assert_eq!(error.code(), "sky.invalid");
+        assert_eq!(
+            resources.lifecycle.views, before.views,
+            "refused records consume no dirty work"
+        );
+        let error = raa_core::testing::block_on(scope.pop());
+        assert!(error.is_none(), "validation error: {error:?}");
     }
 }

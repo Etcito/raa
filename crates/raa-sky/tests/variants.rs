@@ -237,6 +237,33 @@ fn atmosphere_lut_module_is_explicit_group_two_compute() {
             "compute entry {entry} missing"
         );
     }
+    assert_eq!(
+        shaders::ATMOSPHERE_DIRECTIONAL_ENTRY,
+        "raa_atmosphere_build_directional_transmission"
+    );
+    assert!(
+        wgsl.contains(&format!(
+            "@compute @workgroup_size(1, 1)\nfn {}()",
+            shaders::ATMOSPHERE_DIRECTIONAL_ENTRY
+        )),
+        "the one-texel directional entry is missing or has the wrong workgroup"
+    );
+    // Build order: the static tables, then the sky view, then the directional result that
+    // the recorder copies into the weather uniform.
+    let order = [
+        shaders::ATMOSPHERE_LUT_ENTRIES[0],
+        shaders::ATMOSPHERE_LUT_ENTRIES[1],
+        shaders::ATMOSPHERE_LUT_ENTRIES[2],
+        shaders::ATMOSPHERE_DIRECTIONAL_ENTRY,
+    ];
+    let mut last = 0;
+    for entry in order {
+        let at = ATMOSPHERE_LUTS_WGSL
+            .find(&format!("fn {entry}("))
+            .unwrap_or_else(|| panic!("entry {entry} source missing"));
+        assert!(at >= last, "entry {entry} is out of build order");
+        last = at;
+    }
 }
 
 #[test]
@@ -283,6 +310,30 @@ fn atmosphere_luts_preserve_source_steps_and_authorable_ground() {
 }
 
 #[test]
+fn directional_transmission_pins_the_horizon_source() {
+    // Adapted from Solstice `shaders/common/environment.wgsl:98-113`: the horizon dip blocks a
+    // light below it and the 0.006 half-width fades the cut; the result is (rgb, 1).
+    for text in [
+        "const raa_atmosphere_horizon_fade: f32 = 0.006;",
+        "fn raa_atmosphere_above_horizon(",
+        "let dip = -sqrt(max(1.0 - ratio * ratio, 0.0));",
+        "smoothstep(dip - raa_atmosphere_horizon_fade, dip + raa_atmosphere_horizon_fade, mu)",
+        "raa_atmosphere_unit_direction(sky.dominant.xyz)",
+        "raa_atmosphere_transmittance_uv(radius, mu, sky)",
+        "raa_atmosphere_directional_result.value = vec4<f32>(filtered * horizon, 1.0);",
+    ] {
+        assert!(
+            ATMOSPHERE_LUTS_WGSL.contains(text),
+            "directional transmission source detail missing: {text}"
+        );
+    }
+    assert!(
+        !ATMOSPHERE_LUTS_WGSL.contains("raa_frame"),
+        "directional transmission must not read the frame ABI"
+    );
+}
+
+#[test]
 fn atmosphere_luts_reflect_the_s10_private_compute_layout() {
     use wgpu::naga::{
         AddressSpace, ImageClass, ImageDimension, ScalarKind, ShaderStage, StorageAccess,
@@ -305,8 +356,9 @@ fn atmosphere_luts_reflect_the_s10_private_compute_layout() {
     let points: Vec<(u32, u32)> = bindings.iter().map(|(g, b, _)| (*g, *b)).collect();
     assert_eq!(
         points,
-        vec![(2, 0), (2, 1), (2, 2), (2, 3), (2, 4)],
-        "atmosphere LUT layout is uniform, two sampled LUTs, sampler and storage output"
+        vec![(2, 0), (2, 1), (2, 2), (2, 3), (2, 4), (2, 5)],
+        "atmosphere compute layout is uniform, two sampled LUTs, sampler, storage texture \
+         and the directional storage result"
     );
     for (_, binding, handle) in &bindings {
         let global = &module.global_variables[*handle];
@@ -351,19 +403,37 @@ fn atmosphere_luts_reflect_the_s10_private_compute_layout() {
                 ),
                 "binding 4 is not an Rgba16Float storage output"
             ),
+            5 => {
+                let AddressSpace::Storage { access } = global.space else {
+                    panic!("binding 5 is not a storage buffer");
+                };
+                assert!(
+                    access.contains(StorageAccess::LOAD | StorageAccess::STORE),
+                    "binding 5 is not read_write"
+                );
+                let TypeInner::Struct { span, .. } = *inner else {
+                    panic!("binding 5 is not the directional result struct");
+                };
+                assert_eq!(span, 16, "the directional result is one vec4<f32>");
+            }
             other => panic!("unexpected atmosphere LUT binding {other}"),
         }
     }
 
     assert_eq!(
         module.entry_points.len(),
-        shaders::ATMOSPHERE_LUT_ENTRIES.len(),
-        "the LUT module has exactly three compute entries"
+        shaders::ATMOSPHERE_LUT_ENTRIES.len() + 1,
+        "the LUT module has exactly three table entries and one directional entry"
     );
     let mut used = Vec::new();
     for (index, entry) in module.entry_points.iter().enumerate() {
         assert_eq!(entry.stage, ShaderStage::Compute);
-        assert_eq!(entry.workgroup_size, [8, 8, 1]);
+        let expected_workgroup = if entry.name == shaders::ATMOSPHERE_DIRECTIONAL_ENTRY {
+            [1, 1, 1]
+        } else {
+            [8, 8, 1]
+        };
+        assert_eq!(entry.workgroup_size, expected_workgroup);
         let point = info.get_entry_point(index);
         let mut resources: Vec<u32> = bindings
             .iter()
@@ -377,6 +447,10 @@ fn atmosphere_luts_reflect_the_s10_private_compute_layout() {
     assert_eq!(
         used,
         vec![
+            (
+                "raa_atmosphere_build_directional_transmission",
+                vec![0, 1, 3, 5]
+            ),
             ("raa_atmosphere_build_multi_scatter", vec![0, 1, 3, 4]),
             ("raa_atmosphere_build_sky_view", vec![0, 1, 2, 3, 4]),
             ("raa_atmosphere_build_transmittance", vec![0, 4]),

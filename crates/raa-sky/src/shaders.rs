@@ -48,21 +48,25 @@ pub(crate) fn background_module_wgsl() -> String {
 
 /// The three compute entries of [`atmosphere_luts_module_wgsl`], in build order: the static
 /// transmittance table, the static multiple-scattering table and the per-view sky view.
-#[allow(dead_code)] // consumed by the atmosphere resource/share cards (7428+)
 pub(crate) const ATMOSPHERE_LUT_ENTRIES: [&str; 3] = [
     "raa_atmosphere_build_transmittance",
     "raa_atmosphere_build_multi_scatter",
     "raa_atmosphere_build_sky_view",
 ];
 
-/// The atmosphere LUT compute module: the S23 helper source plus the three compute entries.
+/// The fourth compute entry: the 16-byte directional transmission toward the dominant light,
+/// written to the S10 `STORAGE | COPY_SRC` result after the table dispatches.
+pub(crate) const ATMOSPHERE_DIRECTIONAL_ENTRY: &str =
+    "raa_atmosphere_build_directional_transmission";
+
+/// The atmosphere LUT compute module: the S23 helper source plus the four compute entries.
 ///
 /// It deliberately composes without `PRELUDE_WGSL`/`LIB_WGSL`, so groups 0 and 1 are empty
 /// and a pipeline layout only needs an explicit group 2 with the S10 private compute
 /// resources: binding 0 `PhysicalSkyGpu` uniform (256 bytes), 1 transmittance LUT, 2
-/// multiple-scattering LUT, 3 filtering sampler and 4 Rgba16Float storage output. The
-/// dispatched entry selects the LUT written to binding 4.
-#[allow(dead_code)] // consumed by the atmosphere resource/share cards (7428+)
+/// multiple-scattering LUT, 3 filtering sampler, 4 Rgba16Float storage output and 5 the
+/// directional `STORAGE` result. The dispatched entry selects the table written to binding 4
+/// or the 16-byte result written to binding 5.
 pub(crate) fn atmosphere_luts_module_wgsl() -> String {
     let mut s = String::with_capacity(ATMOSPHERE_SRC.len() + ATMOSPHERE_LUTS_SRC.len() + 2);
     for part in [ATMOSPHERE_SRC, ATMOSPHERE_LUTS_SRC] {

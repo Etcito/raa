@@ -27,17 +27,30 @@
 // once. The sky view depends on the sun and the viewer height, so it is rebuilt per view.
 // Radiance is per unit of sun illuminance; distances are kilometres.
 //
-// The module is composed after `atmosphere.wgsl` only, never the lit prelude: its
-// pipeline has empty groups 0 and 1 and binds every resource explicitly in group 2:
+// The module is composed after `atmosphere.wgsl` only, never the lit prelude: every pipeline
+// has empty groups 0 and 1 and binds its resources explicitly in group 2:
 //   0 PhysicalSkyGpu uniform, 1 transmittance LUT, 2 multiple-scattering LUT,
-//   3 filtering sampler, 4 Rgba16Float storage output.
-// The dispatched entry selects which table the storage output receives.
+//   3 filtering sampler, 4 Rgba16Float storage output, 5 directional result buffer.
+// The dispatched LUT entry selects which table the storage output receives; the directional
+// entry writes its own 16-byte STORAGE buffer, copied to `WeatherLightingGpu` offset 32 by the
+// recorder. The two layouts are separate: the LUT pipelines never bind 5 and the directional
+// pipeline never binds 2 or 4.
 
 @group(2) @binding(0) var<uniform> raa_atmosphere_lut_sky: PhysicalSkyGpu;
 @group(2) @binding(1) var raa_atmosphere_lut_transmittance: texture_2d<f32>;
 @group(2) @binding(2) var raa_atmosphere_lut_multi_scatter: texture_2d<f32>;
 @group(2) @binding(3) var raa_atmosphere_lut_sampler: sampler;
 @group(2) @binding(4) var raa_atmosphere_lut_output: texture_storage_2d<rgba16float, write>;
+
+// The GPU-written directional transmission lane of the S10 `WeatherLightingGpu`: rgb is the
+// transmittance toward the dominant light and w is one. The recorder copies the 16 bytes into
+// the CPU-uploaded uniform at offset 32, after the dispatches below.
+struct RaaDirectionalTransmission {
+    value: vec4<f32>,
+}
+
+@group(2) @binding(5) var<storage, read_write> raa_atmosphere_directional_result:
+    RaaDirectionalTransmission;
 
 // The authored ground albedo, clamped to the physical [0, 1] domain. The `.w` component of
 // the lane is the Mie multiplier, applied by `raa_atmosphere_sample_medium` instead.
@@ -290,4 +303,37 @@ fn raa_atmosphere_build_sky_view(@builtin(global_invocation_id) id: vec3<u32>) {
             / raa_atmosphere_pi;
     }
     textureStore(raa_atmosphere_lut_output, id.xy, vec4<f32>(radiance, 1.0));
+}
+
+// The horizon fade of the directional transmission, adapted from Solstice
+// `shaders/common/environment.wgsl:98-113`: the transmittance table does not know the ground
+// is there, so a light below the horizon dip is blocked. The 0.006 half-width fades the cut
+// across the light's angular size; the authored ground radius replaces the source constant.
+const raa_atmosphere_horizon_fade: f32 = 0.006;
+
+fn raa_atmosphere_above_horizon(radius_km: f32, mu: f32, ground_km: f32) -> f32 {
+    let ratio = clamp(ground_km / max(radius_km, raa_atmosphere_min_radius_km), 0.0, 1.0);
+    let dip = -sqrt(max(1.0 - ratio * ratio, 0.0));
+    return smoothstep(dip - raa_atmosphere_horizon_fade, dip + raa_atmosphere_horizon_fade, mu);
+}
+
+// Directional transmission: the atmosphere-filtered light toward the dominant light at this
+// view's height, with the part below the horizon blocked. One invocation writes the separate
+// 16-byte result that the recorder copies into `WeatherLightingGpu.atmosphericTransmission`
+// after the table dispatches; the value is (transmittance rgb, 1), never a CPU-written lane.
+@compute @workgroup_size(1, 1)
+fn raa_atmosphere_build_directional_transmission() {
+    let sky = raa_atmosphere_lut_sky;
+    let radius = max(sky.viewer.w, raa_atmosphere_min_radius_km);
+    let direction = raa_atmosphere_unit_direction(sky.dominant.xyz);
+    let mu = clamp(direction.y, -1.0, 1.0);
+    let uv = raa_atmosphere_transmittance_uv(radius, mu, sky);
+    let filtered = textureSampleLevel(
+        raa_atmosphere_lut_transmittance,
+        raa_atmosphere_lut_sampler,
+        uv,
+        0.0,
+    ).rgb;
+    let horizon = raa_atmosphere_above_horizon(radius, mu, raa_atmosphere_ground_km(sky));
+    raa_atmosphere_directional_result.value = vec4<f32>(filtered * horizon, 1.0);
 }
