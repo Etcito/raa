@@ -13,7 +13,17 @@ const filenames = ['clear-day-warm-horizon-and-reflective-sphere.png', 'twilight
 function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
   const calls = [];
   let time = { day: 172, hours: 9, latitude: 38, north: 0, enabled: false, playing: false, speed: 1 };
+  let cursor = { currentDay: time.day, currentHours: time.hours };
   let renders = 0;
+  const invalid = msg => Object.assign(new Error(msg), { code: 'sky.invalid' });
+  const validate = t => {
+    for (const k of ['day', 'hours', 'latitude', 'north', 'speed']) if (typeof t[k] !== 'number' || !Number.isFinite(t[k])) throw invalid(`${k} must be finite`);
+    if (!Number.isInteger(t.day) || t.day < 1 || t.day > 365) throw invalid('day must be an integer 1..365');
+    if (t.hours < 0 || t.hours >= 24) throw invalid('hours must lie in [0,24)');
+    if (t.latitude < -90 || t.latitude > 90) throw invalid('latitude must lie in [-90,90]');
+    if (t.speed < 0) throw invalid('speed must be >= 0');
+    for (const k of ['enabled', 'playing']) if (typeof t[k] !== 'boolean') throw invalid(`${k} must be boolean`);
+  };
   const T = 2 * Math.PI, r = Math.PI / 180;
   const aa = (d, h, l) => [Math.asin(Math.sin(l) * Math.sin(d) + Math.cos(l) * Math.cos(d) * Math.cos(h)),
     Math.atan2(-Math.sin(h) * Math.cos(d), Math.sin(d) * Math.cos(l) - Math.cos(d) * Math.sin(l) * Math.cos(h))];
@@ -24,7 +34,7 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
     const age = (((time.day + time.hours / 24 - 6) / 29.53059) % 1 + 1) % 1;
     const sun = hz(aa(sd, sh, L), time.north), moon = hz(aa(sd * Math.cos(T * age), sh - T * age, L), time.north);
     const dominant = !time.enabled ? 'manual' : sun[1] > -.17 ? 'sun' : 'moon';
-    return { ...time, currentDay: time.day, currentHours: time.hours, sunDirection: sun, moonDirection: moon,
+    return { ...time, ...cursor, sunDirection: sun, moonDirection: moon,
       moonLit: .5 - .5 * Math.cos(T * age), starPole: [0, .6, -.8], starEquinox: hz(aa(0, sh + 1.5 * time.day / 100, L), time.north), dominant };
   };
   const ws = { coverage: 0, type: .9, base: 1200, thickness: 1600, density: 1, cirrus: .05, wind: { speed: 5, from: 250 }, evolution: 1, rain: 0 };
@@ -33,7 +43,16 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
     setBackground: v => calls.push(['setBackground', v]), setLight: v => calls.push(['setLight', v]),
     setAmbient: v => calls.push(['setAmbient', v]), setSky: v => calls.push(['setSky', v]),
     setWeather: v => calls.push(['setWeather', v]), setEnvironmentLighting: v => calls.push(['setEnvironmentLighting', v]),
-    setTimeOfDay: v => { calls.push(['setTimeOfDay', v]); time = { ...time, ...v }; },
+    setTimeOfDay: v => {
+      calls.push(['setTimeOfDay', v]);
+      const next = { ...time, ...v };
+      validate(next);
+      const moved = next.day !== time.day || next.hours !== time.hours;
+      time = next;
+      if (moved) cursor = { currentDay: time.day, currentHours: time.hours };
+    },
+    // Test-only: move the playback cursor away from the authored moment.
+    moveCursor: (currentDay, currentHours) => { cursor = { currentDay, currentHours }; },
     setCamera: v => calls.push(['setCamera', v]), primitiveMesh: () => 1, addMaterial: () => 1, addNode: () => 1,
     addInstance: () => calls.push(['addInstance']),
     render: () => { renders++; },
@@ -110,4 +129,60 @@ test('missing, null and false required facts reject', async () => {
   ]) { const f = base(); mutate(f); assert.throws(() => validateRequiredFacts(row, f, atmosphere.factNames), /night-moon-stars-milky-way/); }
   const stalled = await run('day', { readyAfter: Infinity });
   assert.throws(() => validateRequiredFacts(atmosphere.inventory[0], { ...stalled.observation, ...runtime }, atmosphere.factNames), /environment-published|atmosphere-submitted|view-submitted/);
+});
+
+test('controls are exactly the seven time/place/playback controls', () => {
+  assert.deepEqual(scene.controls.map(c => c.id), ['day', 'hours', 'latitude', 'north', 'enabled', 'playing', 'speed']);
+  for (const c of scene.controls) {
+    assert.notEqual(c.kind, 'button');
+    assert.ok(!/restart/i.test(c.id) && !/restart/i.test(c.label), c.id);
+  }
+});
+
+const newValues = { day: 200, hours: 17.5, latitude: -12, north: 0.7, enabled: true, playing: true, speed: 60 };
+const control = id => scene.controls.find(c => c.id === id);
+
+test('every control applies exactly one setTimeOfDay patch and reads the accepted value', () => {
+  for (const [key, value] of Object.entries(newValues)) {
+    const engine = fakeEngine();
+    control(key).apply(engine, value);
+    const calls = engine.calls.filter(c => c[0] === 'setTimeOfDay');
+    assert.equal(calls.length, 1, key);
+    assert.deepEqual(calls[0][1], { [key]: value });
+    assert.equal(control(key).read(engine), value);
+    assert.equal(engine.timeOfDay()[key], value);
+  }
+});
+
+test('changed day or hours moves the moved cursor to the merged authored moment', () => {
+  for (const key of ['day', 'hours']) {
+    const engine = fakeEngine();
+    engine.moveCursor(3, 4.25);
+    control(key).apply(engine, newValues[key]);
+    const t = engine.timeOfDay();
+    assert.deepEqual([t.currentDay, t.currentHours], [t.day, t.hours], key);
+    assert.equal(t[key], newValues[key]);
+  }
+});
+
+test('place and playback edits keep the moved cursor', () => {
+  for (const key of ['latitude', 'north', 'enabled', 'playing', 'speed']) {
+    const engine = fakeEngine();
+    engine.moveCursor(3, 4.25);
+    control(key).apply(engine, newValues[key]);
+    const t = engine.timeOfDay();
+    assert.deepEqual([t.currentDay, t.currentHours], [3, 4.25], key);
+  }
+});
+
+test('out-of-domain edits throw sky.invalid and keep the last accepted state', () => {
+  const bad = { day: 366, hours: 24, latitude: 91, speed: -1 };
+  for (const [key, value] of Object.entries(bad)) {
+    const engine = fakeEngine();
+    control(key).apply(engine, newValues[key]);
+    const before = engine.timeOfDay();
+    assert.throws(() => control(key).apply(engine, value), e => e.code === 'sky.invalid', key);
+    assert.equal(control(key).read(engine), newValues[key]);
+    assert.deepEqual(engine.timeOfDay(), before);
+  }
 });

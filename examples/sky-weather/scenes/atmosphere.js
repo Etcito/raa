@@ -149,6 +149,7 @@ const timeFlag = (id, label, key) => ({ id, label, kind: 'checkbox', unit: '', c
 
 // Time, place and playback controls edit the accepted Engine state; the runtime displays
 // a rejected edit's sky.invalid error and the getters keep the last valid settings.
+// Editing day or hours to a new value moves the playback cursor to the authored moment.
 const controls = [
   timeNumber('day', 'Day of year', 'day 1–365', 'day'),
   timeNumber('hours', 'Local time', 'hours 0–24', 'hours'),
@@ -157,10 +158,6 @@ const controls = [
   timeFlag('enabled', 'Automatic sun/moon lighting', 'enabled'),
   timeFlag('playing', 'Play time (pause when off)', 'playing'),
   timeNumber('speed', 'Playback speed', 'sim s per real s', 'speed'),
-  { id: 'current', label: 'Restart playback at authored time', kind: 'button', unit: '', choices: [],
-    read: engine => { const t = engine.timeOfDay(); return `${t.currentDay} / ${t.currentHours.toFixed(2)}`; },
-    // Resets the playback cursor to the authored moment by re-authoring it.
-    apply: engine => { const t = engine.timeOfDay(); engine.setTimeOfDay({ day: t.day, hours: t.hours }); } },
 ];
 
 const variant = (id, camera) => ({ id, description: behaviors[id], references: [], judge: true, timeMs: 1000, selection: sampleSelection(camera) });
