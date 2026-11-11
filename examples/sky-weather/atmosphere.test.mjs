@@ -7,8 +7,14 @@ import * as atmosphere from './scenes/atmosphere.js';
 const scene = atmosphere.default;
 const filenames = ['clear-day-warm-horizon-and-reflective-sphere.png', 'twilight-warm-horizon-distant-forms.png',
   'night-moon-phase-stars-and-milky-way.png', 'night-later-celestial-positions.png',
-  'snow-preset-cold-overcast-bright-ground.png', 'jungle-preset-humid-broken-cloud.png', 'legacy-gradient-layer-comparison.png'];
-const modes = ['day', 'twilight', 'night', 'later', 'snow', 'jungle', 'legacy'];
+  'snow-preset-cold-overcast-bright-ground.png', 'jungle-preset-humid-broken-cloud.png', 'legacy-gradient-layer-comparison.png',
+  'fog-on-sky-coherent-distant-forms.png', 'fog-off-distant-forms.png', 'ibl-on-current-sky-reflection.png', 'ibl-off-flat-ambient.png',
+  'ibl-diffuse-only-sky-fill-no-reflection.png', 'ibl-specular-only-chrome-sky-reflection.png', 'environment-disabled-cleared-ibl-sky-kept.png',
+  'background-disabled-flat-colour.png', 'error-invalid-sky-time-weather-edits-last-valid-state.png', 'multi-view-two-cameras-same-sky-clock.png',
+  'transition-resize-current-sky-history-reset.png', 'transition-camera-cut-current-sky-no-trails.png', 'transition-model-switch-physical-sky-restored.png',
+  'transition-weather-cycle-start-and-restart.png', 'transition-re-enable-sky-environment-restored.png'];
+const modes = ['day', 'twilight', 'night', 'later', 'snow', 'jungle', 'legacy', 'fog-on', 'fog-off', 'ibl-on', 'ibl-off', 'ibl-diffuse',
+  'ibl-specular', 'env-off', 'background-off', 'invalid', 'multi-view', 'resize', 'camera-cut', 'model-switch', 'weather-change', 're-enable'];
 
 // Public-API fake: records delivered calls and evaluates the authored moments with the
 // source celestial formulas only to supply plausible getter values for the observer.
@@ -17,6 +23,12 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
   let time = { day: 172, hours: 9, latitude: 38, north: 0, enabled: false, playing: false, speed: 1 };
   let cursor = { currentDay: time.day, currentHours: time.hours };
   let renders = 0;
+  // Renderer lifecycle model of the documented diagnostics: view slots, accumulated reset
+  // reasons, environment request/publication generations and pass enablement.
+  let slots = [], rects = 1, size = [1280, 720], requested = 2, published = null, weatherGeneration = 1, cameraSet = false;
+  const passes = new Map([['fog', true], ['sky.env', true], ['sky.background', true], ['sky.cloud-lighting', true], ['forward', true]]);
+  const reason = r => { for (const slot of slots) if (!slot.reasons.includes(r)) slot.reasons.push(r); };
+  const sourceChanged = () => { requested++; };
   const invalid = msg => Object.assign(new Error(msg), { code: 'sky.invalid' });
   const validate = t => {
     for (const k of ['day', 'hours', 'latitude', 'north', 'speed']) if (typeof t[k] !== 'number' || !Number.isFinite(t[k])) throw invalid(`${k} must be finite`);
@@ -54,6 +66,7 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
     setAmbient: v => calls.push(['setAmbient', v]),
     setSky: v => {
       calls.push(['setSky', v]);
+      if (v.atmosphere?.mieMultiplier !== undefined && !(v.atmosphere.mieMultiplier > 0)) throw invalid('atmosphere.mieMultiplier must be > 0');
       const next = structuredClone(sky);
       if (v.preset) {
         if (!skyPresets[v.preset]) throw invalid('preset unknown');
@@ -65,13 +78,21 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
         }
       }
       if (v.model) next.model = v.model;
-      sky = next;
+      if (next.model !== sky.model) reason('Model');
+      sky = next; sourceChanged();
     },
     setWeather: v => {
       calls.push(['setWeather', v]);
-      const { preset, wind, ...rest } = v;
+      const { preset, wind, changing, seed, ...rest } = v;
       const base = preset ? structuredClone(weatherPresets[preset]) : structuredClone(weather.target);
-      weather = { ...weather, target: { ...base, ...rest, wind: { ...base.wind, ...wind } }, cyclePreset: preset ?? weather.cyclePreset };
+      const target = { ...base, ...rest, wind: { ...base.wind, ...wind } };
+      if (!(target.coverage >= 0 && target.coverage <= 1)) throw invalid('coverage must lie in [0,1]');
+      // Explicit preset is the cycle start; manual target edits stop changing unless changing:true is in the patch.
+      const targetEdit = preset !== undefined || Object.keys(rest).length > 0 || wind !== undefined;
+      const nextChanging = changing ?? (targetEdit ? false : weather.changing);
+      const start = preset ?? weather.start ?? 'fair';
+      weather = { ...weather, target, changing: nextChanging, seed: seed ?? weather.seed, start, cyclePreset: nextChanging ? start : null };
+      weatherGeneration++; reason('Weather'); sourceChanged();
     }, setEnvironmentLighting: v => calls.push(['setEnvironmentLighting', v]),
     setTimeOfDay: v => {
       calls.push(['setTimeOfDay', v]);
@@ -83,17 +104,40 @@ function fakeEngine({ readyAfter = 3, failGetter = null } = {}) {
     },
     // Test-only: move the playback cursor away from the authored moment.
     moveCursor: (currentDay, currentHours) => { cursor = { currentDay, currentHours }; },
-    setCamera: v => calls.push(['setCamera', v]), primitiveMesh: () => 1, addMaterial: () => 1, addNode: () => 1,
+    setCamera: v => { calls.push(['setCamera', v]); if (cameraSet) reason('CameraDiscontinuity'); },
+    setFog: v => calls.push(['setFog', v]),
+    setPassEnabled: (name, enabled) => {
+      calls.push(['setPassEnabled', name, enabled]);
+      if (!passes.has(name)) throw Object.assign(new Error(`unknown pass ${name}`), { code: 'pipeline.unknown_pass' });
+      if (name === 'sky.env' && !enabled) published = null;
+      if (name === 'sky.env' && enabled && !passes.get(name)) sourceChanged();
+      if (name === 'sky.cloud-lighting' && enabled && !passes.get(name)) reason('Enable');
+      passes.set(name, enabled);
+    },
+    passes: () => [...passes].map(([name, enabled], order) => ({ name, role: name === 'sky.background' ? 'contributor' : 'pass', enabled, order, required: name === 'forward' })),
+    setViewports: r => { calls.push(['setViewports', r]); rects = r.length; },
+    setViewportCamera: (index, camera) => calls.push(['setViewportCamera', index, camera]),
+    resize: (w, h) => { calls.push(['resize', w, h]); size = [w, h]; }, primitiveMesh: () => 1, addMaterial: () => 1, addNode: () => 1,
     addInstance: () => calls.push(['addInstance']),
-    render: () => { renders++; },
+    render: () => {
+      renders++; cameraSet = true;
+      const width = size[0] / rects;
+      slots = Array.from({ length: rects }, (_, view) => {
+        const slot = slots[view] ?? { view, width, height: size[1], reasons: [] };
+        if (slot.width !== width || slot.height !== size[1]) slot.reasons.includes('Resize') || slot.reasons.push('Resize');
+        return { ...slot, width, height: size[1] };
+      });
+      if (renders >= readyAfter && passes.get('sky.env')) published = requested;
+    },
     sky: () => (failGetter === 'sky' ? null : structuredClone(sky)),
     timeOfDay: () => state(),
-    weather: () => ({ ...structuredClone(weather), current: structuredClone(weather.target), text: '' }),
+    weather: () => { const { start, ...w } = structuredClone(weather); return { ...w, current: structuredClone(weather.target), text: '' }; },
     skyWeatherDiagnostics: () => {
       const ready = renders >= readyAfter;
-      return { invocation: renders || null, submittedInvocation: ready ? renders : null, weatherGeneration: 1, atmosphereGeneration: ready ? 1 : 0,
-        environment: { requestedGeneration: 2, publishedGeneration: ready ? 2 : null, pending: !ready },
-        views: [{ view: 0, width: 1280, height: 720, invocation: renders, submittedInvocation: ready ? renders : null, skyViewGeneration: 1, historyValid: true, resetReasons: [], cloudScreenValid: false, cloudPanoramaValid: false }],
+      return { invocation: renders || null, submittedInvocation: ready ? renders : null, weatherGeneration, atmosphereGeneration: ready ? 1 : 0,
+        environment: { requestedGeneration: requested, publishedGeneration: published, pending: passes.get('sky.env') && published !== requested },
+        views: slots.map(slot => ({ view: slot.view, width: slot.width, height: slot.height, invocation: renders, submittedInvocation: ready ? renders : null,
+          skyViewGeneration: 1, historyValid: true, resetReasons: [...slot.reasons], cloudScreenValid: false, cloudPanoramaValid: false })),
         readiness: ready ? { status: 'ready', stage: 'submission', error: null } : { status: 'pending', stage: 'milkyWay', error: null } };
     },
   };
@@ -113,8 +157,10 @@ test('atmosphere scenes resolve cumulatively with exact selectors and framed sub
   const rows = validateInventory([foundation, atmosphere], 'atmosphere');
   assert.deepEqual(rows.filter(r => r.scenario === 'atmosphere').map(r => r.filename), filenames);
   assert.deepEqual(scene.variants.map(v => v.id), modes);
-  assert.deepEqual(atmosphere.inventory.filter(r => r.pair).map(r => [r.mode, r.pair]), [['day', 'sky-model'], ['legacy', 'sky-model']]);
-  assert.deepEqual(scene.variants.filter(v => v.measurement).map(v => [v.id, v.measurement.state, v.measurement.features.model]), [['day', 'on', 'physical'], ['legacy', 'off', 'legacy']]);
+  assert.deepEqual(atmosphere.inventory.filter(r => r.pair).map(r => [r.mode, r.pair]), [['day', 'sky-model'], ['legacy', 'sky-model'],
+    ['fog-on', 'fog'], ['fog-off', 'fog'], ['ibl-on', 'ibl'], ['ibl-off', 'ibl'], ['env-off', 'environment'], ['background-off', 'sky-background'],
+    ['camera-cut', 'sky-background'], ['re-enable', 'environment']]);
+  assert.deepEqual(scene.variants.filter(v => v.measurement && v.measurement.pair === 'sky-model').map(v => [v.id, v.measurement.state, v.measurement.features.model]), [['day', 'on', 'physical'], ['legacy', 'off', 'legacy']]);
   for (const row of atmosphere.inventory) {
     for (const fact of row.requiredFacts) assert.match(fact, /^(snapshot:(sky|time|weather|diagnostics)|runtime:(passes|viewSizes|ready)|assertion:[a-z0-9-]+)$/);
     for (const fact of row.requiredFacts.filter(f => f.startsWith('assertion:'))) assert.ok(atmosphere.factNames.includes(fact.slice(10)));
@@ -134,7 +180,8 @@ test('build delivers public sky, weather and time calls with automatic paused li
     assert.equal(names.includes('setWeather'), mode !== 'snow', `${mode} setWeather (snow keeps its preset weather)`);
     assert.equal(engine.calls.find(c => c[0] === 'setSky')[1].model, 'physical');
     assert.equal(engine.calls.find(c => c[0] === 'setWeather')?.[1].preset ?? 'overcast', { snow: 'overcast', jungle: 'broken' }[mode] ?? 'clear');
-    const last = engine.calls.filter(c => c[0] === 'setTimeOfDay').at(-1)[1];
+    // The invalid mode's observe adds a refused hours-only edit; the authored moment is the last full one.
+    const last = engine.calls.filter(c => c[0] === 'setTimeOfDay' && Object.hasOwn(c[1], 'enabled')).at(-1)[1];
     assert.equal(last.enabled, true); assert.equal(last.playing, false);
     assert.deepEqual(engine.calls.find(c => c[0] === 'setCamera')[1].position ?? engine.calls.find(c => c[0] === 'setCamera')[1].eye, variant.selection.camera.eye);
   }
@@ -223,7 +270,7 @@ test('out-of-domain edits throw sky.invalid and keep the last accepted state', (
 test('night and twilight captures author the dark-adaptation exposure; day stays at 0 EV', () => {
   assert.equal(atmosphere.DARK_ADAPTATION_EV, 7);
   const ev = Object.fromEntries(scene.variants.map(v => [v.id, { ...scene.engine, ...v.engine }.exposureEv]));
-  assert.deepEqual(ev, { day: 0, twilight: 7, night: 7, later: 7, snow: 0, jungle: 0, legacy: 0 });
+  assert.deepEqual(ev, { day: 0, twilight: 7, night: 7, later: 7, snow: 0, jungle: 0, legacy: 0, ...Object.fromEntries(modes.slice(7).map(m => [m, 0])) });
   for (const v of scene.variants) {
     const options = { ...scene.engine, ...v.engine };
     assert.equal(options.toneMapper, 'agx');
@@ -357,4 +404,157 @@ test('snow expectation describes only what the sky stage controls', async () => 
   for (const word of ['ground albedo', 'neutral ground']) assert.ok(!text.includes(word), word);
   assert.match(text, /pale whitish-blue hazy sky/);
   assert.match(text, /milky horizon/);
+});
+
+// ---- Controls, atomic edits, multi-view and transitions ----
+const rowOf = mode => atmosphere.inventory.find(r => r.mode === mode);
+const factsOf = observation => ({ ...structuredClone(observation), ...structuredClone(runtime) });
+async function runWith(mode, wrap, options) {
+  const variant = scene.variants.find(v => v.id === mode);
+  const engine = fakeEngine(options);
+  wrap?.(engine);
+  await scene.build(engine, {}, variant);
+  return { engine, variant, observation: await atmosphere.observe(engine, variant) };
+}
+const named = (observation, name) => observation.assertions.filter(a => a.name === name);
+
+test('inventory covers every controls, error, view and transition criterion with explicit filenames and pairs', () => {
+  const criteria = { 'fog-on': 'fog-on', 'fog-off': 'fog-off', 'ibl-on': 'ibl-on', 'ibl-off': 'ibl-off', 'ibl-diffuse': 'ibl-diffuse-only',
+    'ibl-specular': 'ibl-specular-only', 'env-off': 'environment-disabled', 'background-off': 'background-disabled', invalid: 'invalid-edits',
+    'multi-view': 'multi-view-same-clock', resize: 'transition-resize', 'camera-cut': 'transition-camera-cut',
+    'model-switch': 'transition-model-switch', 'weather-change': 'transition-weather-change', 're-enable': 'transition-re-enable' };
+  for (const [mode, id] of Object.entries(criteria)) assert.equal(rowOf(mode)?.id, id, mode);
+  for (const mode of atmosphere.TRANSITION_MODES) assert.match(rowOf(mode).filename, /^transition-[a-z0-9-]+\.png$/);
+  assert.match(rowOf('invalid').filename, /^error-invalid-/);
+  // Every pair is exactly one on and one off variant of the same preset, each with an inventory row.
+  const pairs = Map.groupBy(scene.variants.filter(v => v.measurement), v => v.measurement.pair);
+  assert.deepEqual([...pairs.keys()].sort(), ['environment', 'fog', 'ibl', 'sky-background', 'sky-model']);
+  for (const [pair, variants] of pairs) {
+    assert.deepEqual(variants.map(v => v.measurement.state).sort(), ['off', 'on'], pair);
+    for (const v of variants) assert.equal(rowOf(v.id).pair, pair);
+  }
+  // Selector registry is exact: unique names, every name required by some row, every selector registered.
+  assert.equal(new Set(atmosphere.factNames).size, atmosphere.factNames.length);
+  const used = new Set(atmosphere.inventory.flatMap(r => r.requiredFacts).filter(f => f.startsWith('assertion:')).map(f => f.slice(10)));
+  assert.deepEqual([...used].sort(), [...atmosphere.factNames].sort());
+  assert.ok(!rowOf('env-off').requiredFacts.includes('assertion:environment-published'));
+  const unknown = { ...rowOf('fog-on'), requiredFacts: ['assertion:fog-pass-unknown'] };
+  assert.throws(() => validateInventory([{ ...atmosphere, inventory: [unknown] }], 'atmosphere'), /unknown selector/);
+  assert.throws(() => validateRequiredFacts(unknown, factsOf({ assertions: [], edits: [] }), atmosphere.factNames), /unknown selector/);
+});
+
+test('second view and pre-cut cameras overlap every framed subject', () => {
+  for (const camera of [atmosphere.secondViewCamera, atmosphere.preCutCamera]) {
+    const aspect = camera === atmosphere.secondViewCamera ? atmosphere.MULTI_VIEW_ASPECT : 16 / 9;
+    const variants = scene.variants.map(v => ({ ...v, selection: { ...v.selection, camera: { ...camera, aspect } } }));
+    assert.doesNotThrow(() => validateInventory([{ ...atmosphere, default: { ...scene, variants } }], 'atmosphere'));
+  }
+  assert.ok(Math.abs(scene.variants.find(v => v.id === 'multi-view').selection.camera.aspect - 640 / 720) < 1e-12);
+});
+
+test('feature controls apply fog, independent IBL, environment disable and flat background through public calls', async () => {
+  for (const mode of atmosphere.FEATURE_MODES) {
+    const { engine, observation } = await runWith(mode);
+    validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames);
+    const pass = name => engine.passes().find(p => p.name === name).enabled;
+    if (mode.startsWith('fog')) {
+      assert.deepEqual(engine.calls.find(c => c[0] === 'setFog')[1], atmosphere.FOG_SETTINGS);
+      assert.equal(pass('fog'), mode === 'fog-on');
+    }
+    if (mode.startsWith('ibl')) assert.deepEqual(engine.calls.filter(c => c[0] === 'setEnvironmentLighting').at(-1)[1], atmosphere.IBL_SETTINGS[mode]);
+    assert.equal(pass('sky.env'), mode !== 'env-off');
+    assert.equal(pass('sky.background'), mode !== 'background-off');
+  }
+  const { engine, observation } = await runWith('env-off');
+  assert.equal(observation.diagnostics.environment.publishedGeneration, null);
+  assert.deepEqual(engine.calls.find(c => c[0] === 'setPassEnabled').slice(1), ['sky.env', false]);
+  const flat = (await runWith('background-off')).engine.calls.filter(c => c[0] === 'setBackground').at(-1)[1];
+  assert.deepEqual(flat, atmosphere.FLAT_BACKGROUND);
+});
+
+test('invalid edits reject atomically, keep accepted and rendered state and display their actual errors', async () => {
+  const status = { textContent: '' };
+  const previous = globalThis.document;
+  globalThis.document = { getElementById: id => (id === 'status' ? status : null) };
+  try {
+    const { engine, variant, observation } = await runWith('invalid');
+    validateRequiredFacts(rowOf('invalid'), factsOf(observation), atmosphere.factNames);
+    const refused = observation.edits.filter(e => !e.accepted);
+    assert.equal(refused.length, atmosphere.INVALID_EDITS.length);
+    for (const e of refused) { assert.equal(e.error.code, 'sky.invalid'); assert.deepEqual(e.after, e.before); }
+    status.textContent = 'ready: atmosphere/invalid';
+    scene.frame(engine, 1000, variant);
+    scene.frame(engine, 1000, variant);
+    const lines = status.textContent.split('\n');
+    assert.equal(lines.length, 2 + atmosphere.INVALID_EDITS.length, 'appended exactly once');
+    for (const e of refused) assert.ok(status.textContent.includes(e.error.message), e.operation);
+    status.textContent = 'pending: preparing';
+    scene.frame(engine, 1000, variant);
+    assert.equal(status.textContent, 'pending: preparing');
+  } finally { globalThis.document = previous; }
+  // An engine that accepts and applies an invalid coverage fails rejection and preservation.
+  const lax = await runWith('invalid', engine => {
+    const setWeather = engine.setWeather;
+    engine.setWeather = v => (v.coverage === 2 ? setWeather({ coverage: .9 }) : setWeather(v));
+  });
+  assert.equal(named(lax.observation, 'invalid-edits-rejected')[0].passed, false);
+  assert.equal(named(lax.observation, 'invalid-edits-preserve-state')[0].passed, false);
+  assert.equal(named(lax.observation, 'invalid-edits-preserve-rendering')[0].passed, false);
+  assert.throws(() => validateRequiredFacts(rowOf('invalid'), factsOf(lax.observation), atmosphere.factNames), /invalid-edits/);
+});
+
+test('multi-view observes two submitted views from one clock snapshot', async () => {
+  const { engine, observation } = await runWith('multi-view');
+  validateRequiredFacts(rowOf('multi-view'), factsOf(observation), atmosphere.factNames);
+  assert.deepEqual(engine.calls.find(c => c[0] === 'setViewports')[1], atmosphere.MULTI_VIEW_RECTS);
+  assert.deepEqual(engine.calls.find(c => c[0] === 'setViewportCamera').slice(1), [1, atmosphere.secondViewCamera]);
+  assert.deepEqual(observation.diagnostics.views.map(v => [v.view, v.width, v.height]), [[0, 640, 720], [1, 640, 720]]);
+  const skewed = await runWith('multi-view', engine => {
+    const read = engine.skyWeatherDiagnostics;
+    engine.skyWeatherDiagnostics = () => { const d = read(); if (d.views[1]) d.views[1].invocation = (d.invocation ?? 0) - 1; return d; };
+  });
+  assert.equal(named(skewed.observation, 'views-same-clock')[0].passed, false);
+});
+
+test('transitions record actual reset reasons, restored sizes, cycle start/restart and republication', async () => {
+  for (const mode of atmosphere.TRANSITION_MODES) {
+    const { observation } = await runWith(mode);
+    validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames);
+  }
+  const weather = (await runWith('weather-change')).observation.weather;
+  assert.deepEqual([weather.cyclePreset, weather.changing, weather.seed, weather.target.coverage], ['broken', true, 10, .7]);
+  const resize = (await runWith('resize')).engine.calls.filter(c => c[0] === 'resize').map(c => c.slice(1));
+  assert.deepEqual(resize, [atmosphere.RESIZE_TO, [1280, 720]]);
+  // Reasons that never appear, or appear already before the action, fail.
+  for (const mode of atmosphere.TRANSITION_MODES) {
+    const silent = await runWith(mode, engine => {
+      const read = engine.skyWeatherDiagnostics;
+      engine.skyWeatherDiagnostics = () => { const d = read(); for (const v of d.views) v.resetReasons = []; return d; };
+    });
+    const name = rowOf(mode).requiredFacts.find(f => f.startsWith('assertion:reset-')).slice(10);
+    assert.equal(named(silent.observation, name)[0].passed, false, mode);
+    assert.throws(() => validateRequiredFacts(rowOf(mode), factsOf(silent.observation), atmosphere.factNames), new RegExp(name));
+  }
+});
+
+test('neutral backend volume flags stay truthful and new selectors reject missing, null and false', async () => {
+  const lying = await runWith('resize', engine => {
+    const read = engine.skyWeatherDiagnostics;
+    engine.skyWeatherDiagnostics = () => { const d = read(); for (const v of d.views) v.cloudScreenValid = true; return d; };
+  });
+  assert.equal(named(lying.observation, 'neutral-cloud-flags')[0].passed, false);
+  for (const mode of ['fog-off', 'env-off', 'multi-view', 'weather-change', 're-enable']) {
+    const row = rowOf(mode), { observation } = await runWith(mode);
+    for (const name of row.requiredFacts.filter(f => f.startsWith('assertion:')).map(f => f.slice(10)).slice(-2)) {
+      for (const mutate of [f => { f.assertions = f.assertions.filter(a => a.name !== name); },
+        f => { f.assertions.find(a => a.name === name).passed = null; },
+        f => { f.assertions.find(a => a.name === name).passed = false; },
+        f => { f.assertions.push({ ...f.assertions.find(a => a.name === name) }); }]) {
+        const facts = factsOf(observation); mutate(facts);
+        assert.throws(() => validateRequiredFacts(row, facts, atmosphere.factNames), new RegExp(row.id), `${mode} ${name}`);
+      }
+    }
+    const facts = factsOf(observation); facts.diagnostics = null;
+    assert.throws(() => validateRequiredFacts(row, facts, atmosphere.factNames), /snapshot:diagnostics/);
+  }
 });
