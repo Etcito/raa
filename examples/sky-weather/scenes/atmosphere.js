@@ -160,7 +160,21 @@ const controls = [
   timeNumber('speed', 'Playback speed', 'sim s per real s', 'speed'),
 ];
 
-const variant = (id, camera) => ({ id, description: behaviors[id], references: [], judge: true, timeMs: 1000, selection: sampleSelection(camera) });
+// Camera exposure per moment. The physical sky keeps absolute radiance: with the daylight
+// baseline of intensity 3 below, the night glow (~1e-4), stars and moon (~1e-2) and the
+// moonlight (3/2500 x phase) sit under the AgX floor at 0 EV and the frame is black. The
+// Solstice source shows them through its automatic exposure, which meters the frame to
+// middle grey between a brightest average of 0.06 and a darkest average of 0.06/128 per
+// unit of daylight sun (crates/solstice-render/src/post.rs:12-20 at solstice@7e465b5).
+// For intensity 3 the brightest clamp is exactly 0 EV (0.18 / (3 x 0.06) = 1), and twilight
+// below the civil band and night meter under the darkest clamp, i.e. 128x = +7 EV. RAA has
+// no automatic exposure in P2, so each capture authors that fixed equivalent through the
+// public tone-mapping option; the sky still renders dark, only readable.
+export const DARK_ADAPTATION_EV = Math.log2(128);
+export const exposureEv = { day: 0, twilight: DARK_ADAPTATION_EV, night: DARK_ADAPTATION_EV, later: DARK_ADAPTATION_EV };
+
+const variant = (id, camera) => ({ id, description: behaviors[id], references: [], judge: true, timeMs: 1000,
+  engine: { exposureEv: exposureEv[id] }, selection: sampleSelection(camera) });
 
 export default {
   id: 'atmosphere', milestone: 'atmosphere', title: 'Physical atmosphere and celestial time',

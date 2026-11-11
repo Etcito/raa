@@ -2143,4 +2143,67 @@ mod tests {
         let error = raa_core::testing::block_on(scope.pop());
         assert!(error.is_none(), "validation error: {error:?}");
     }
+
+    /// The night celestial state the atmosphere scene captures (day 13, 22:00, 38 N, north
+    /// -1.8 rad) uploads non-zero moon and star radiance and a moonlit dominant light, so
+    /// a black night frame cannot come from a zeroed sky term or a missing moonlight.
+    #[test]
+    fn night_celestial_state_uploads_moon_stars_and_moonlit_ground_light() {
+        use crate::time_of_day::{DominantLight, Place, TimeOfDay, TimeOfDaySettings};
+        let mut state = SkyState {
+            desc: crate::desc::SkyDesc::preset("night").expect("night preset"),
+            ..SkyState::default()
+        };
+        state.time.apply_settings(TimeOfDaySettings {
+            time: TimeOfDay {
+                day: 13,
+                hours: 22.0,
+            },
+            place: Place {
+                latitude: 38.0,
+                north: -1.8,
+            },
+            enabled: true,
+            playing: false,
+            speed: 1.0,
+        });
+        let (light, _) = state.time.advance(1, 0.0).expect("first invocation");
+        let sky = state.time.state.sky;
+        assert_eq!(state.time.state.dominant, DominantLight::Moon);
+        assert!(
+            sky.sun.y < (-18.0f32).to_radians().sin(),
+            "astronomical night"
+        );
+        assert!(sky.moon.y > 0.0, "moon above the horizon: {:?}", sky.moon);
+
+        let gpu = PhysicalSkyGpu::from_state(&state, &Camera::default(), (1280, 720), 1.0);
+        let moon_lit = gpu.sun[3];
+        assert!(moon_lit > 0.1 && moon_lit < 0.9, "partial phase {moon_lit}");
+        assert!(gpu.moon[3] > 0.0, "moon radiance {}", gpu.moon[3]);
+        assert!(gpu.pole[3] > 0.0, "star intensity {}", gpu.pole[3]);
+        assert!(gpu.equinox[3] > 0.0, "night glow {}", gpu.equinox[3]);
+        assert!(
+            gpu.discs[2] > 0.0 && gpu.discs[3] > 0.0,
+            "moon disc and pixel angle"
+        );
+        assert_eq!(gpu.flags[0], 1, "physical model");
+
+        // Moonlight lights the ground: it travels downward from the moon with a positive
+        // intensity, and the uploaded dominant lane points toward the moon.
+        assert!(
+            light.intensity > 0.0,
+            "moonlight intensity {}",
+            light.intensity
+        );
+        assert!(
+            light.direction.y < 0.0,
+            "moonlight travels down onto the ground"
+        );
+        let toward = Vec3::new(gpu.dominant[0], gpu.dominant[1], gpu.dominant[2]);
+        assert!(
+            toward.dot(sky.moon) > 0.999,
+            "dominant lane points at the moon"
+        );
+        assert_eq!(gpu.dominant[3], light.intensity);
+    }
 }

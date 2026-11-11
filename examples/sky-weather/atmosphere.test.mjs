@@ -186,3 +186,14 @@ test('out-of-domain edits throw sky.invalid and keep the last accepted state', (
     assert.deepEqual(engine.timeOfDay(), before);
   }
 });
+
+test('night and twilight captures author the dark-adaptation exposure; day stays at 0 EV', () => {
+  assert.equal(atmosphere.DARK_ADAPTATION_EV, 7);
+  const ev = Object.fromEntries(scene.variants.map(v => [v.id, { ...scene.engine, ...v.engine }.exposureEv]));
+  assert.deepEqual(ev, { day: 0, twilight: 7, night: 7, later: 7 });
+  for (const v of scene.variants) {
+    const options = { ...scene.engine, ...v.engine };
+    assert.equal(options.toneMapper, 'agx');
+    assert.equal(options.msaa, 4);
+  }
+});
