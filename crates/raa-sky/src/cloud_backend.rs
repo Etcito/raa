@@ -48,14 +48,31 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use raa_core::{GpuContext, RaaError};
 use raa_math::Mat4;
-use raa_pipeline::LightingResources;
+use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx};
 use raa_scene::{Camera, DirectionalLight};
 
-use crate::atmosphere::AtmosphereResources;
+use crate::atmosphere::{AtmosphereResources, SharedAtmosphere};
+use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage};
+use crate::state::{SharedSky, SkyState};
 use crate::time_of_day::CelestialSky;
 use crate::weather::Weather;
+
+/// The shared backend handle (the feature and both cloud passes share one backend).
+pub(crate) type SharedCloud = Rc<RefCell<Box<dyn CloudRenderer>>>;
+
+/// S12 name of the cloud lighting pass.
+pub(crate) const CLOUD_LIGHTING_NAME: &str = "sky.cloud-lighting";
+/// S12 order of the cloud lighting pass.
+pub(crate) const CLOUD_LIGHTING_ORDER: u32 = 8;
+/// S12 name of the cloud screen pass.
+pub(crate) const CLOUD_SCREEN_NAME: &str = "sky.cloud-screen";
+/// S12 order of the cloud screen pass.
+pub(crate) const CLOUD_SCREEN_ORDER: u32 = 55;
 
 /// View slots the sky feature tracks; matches the atmosphere resource set.
 const MAX_VIEWS: usize = 4;
@@ -188,6 +205,247 @@ pub(crate) trait CloudRenderer {
     fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation);
 
     fn submitted(&mut self, view: u32, invocation: u64);
+}
+
+/// The copied snapshot of the active view, or `sky.invalid` when it is not prepared.
+fn cloud_frame(
+    state: &SkyState,
+    invocation: u64,
+    view: u32,
+    size: (u32, u32),
+    time_s: f32,
+) -> Result<CloudFrame, RaaError> {
+    let slot = state
+        .views
+        .get(view as usize)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| invalid(format!("cloud view {view} is not prepared")))?;
+    Ok(CloudFrame {
+        invocation,
+        view,
+        size,
+        camera: slot.camera,
+        previous_view_proj: slot.previous_view_proj,
+        history_valid: slot.history_valid,
+        weather: state.weather.current,
+        sky: state.time.state.sky,
+        dominant: state.time.last_light,
+        animation_seconds: f64::from(time_s),
+    })
+}
+
+fn state_busy(name: &str) -> RaaError {
+    RaaError::Resource(format!("{name}: sky state is busy"))
+}
+
+fn resources_busy(name: &str) -> RaaError {
+    RaaError::Resource(format!("{name}: resources are borrowed"))
+}
+
+/// The `sky.cloud-lighting` pass (S12 order 8): prepares the backend for the active view and
+/// records its panorama/transmittance work after the atmosphere LUTs are available.
+pub(crate) struct SkyCloudLightingPass {
+    state: SharedSky,
+    cloud: SharedCloud,
+    atmosphere: SharedAtmosphere,
+    enabled: bool,
+    /// Last physical size prepared per view, for backend resize invalidation.
+    sizes: [Option<(u32, u32)>; MAX_VIEWS],
+}
+
+impl SkyCloudLightingPass {
+    pub(crate) fn new(state: SharedSky, cloud: SharedCloud, atmosphere: SharedAtmosphere) -> Self {
+        SkyCloudLightingPass {
+            state,
+            cloud,
+            atmosphere,
+            enabled: true,
+            sizes: [None; MAX_VIEWS],
+        }
+    }
+}
+
+impl FeaturePass for SkyCloudLightingPass {
+    fn name(&self) -> &str {
+        CLOUD_LIGHTING_NAME
+    }
+
+    fn order(&self) -> u32 {
+        CLOUD_LIGHTING_ORDER
+    }
+
+    /// Disabling publishes the neutral transmittance again; re-enabling discards the cloud
+    /// history and records the `Enable` reset reason.
+    fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
+        if enabled && !self.enabled {
+            if let Ok(mut cloud) = self.cloud.try_borrow_mut() {
+                cloud.invalidate(None, CloudInvalidation::Enable);
+            }
+            if let Ok(mut s) = self.state.try_borrow_mut() {
+                s.reset_reasons(None, CloudResetReasons::ENABLE);
+                s.readiness = SkyReadiness::pending(SkyReadinessStage::CloudLighting);
+            }
+        }
+        self.enabled = enabled;
+        if !enabled {
+            lighting.clear_cloud_transmittance();
+        }
+    }
+
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let frame = {
+            let s = self
+                .state
+                .try_borrow()
+                .map_err(|_| state_busy(CLOUD_LIGHTING_NAME))?;
+            let Some(view) = s.active_view else {
+                return Ok(());
+            };
+            cloud_frame(&s, ctx.frame, view, ctx.size, ctx.time_s)?
+        };
+        let index = frame.view as usize;
+        let resized = self.sizes[index].is_some_and(|size| size != ctx.size);
+        self.sizes[index] = Some(ctx.size);
+        let atmosphere = self
+            .atmosphere
+            .try_borrow()
+            .map_err(|_| resources_busy(CLOUD_LIGHTING_NAME))?;
+        let mut backend = self
+            .cloud
+            .try_borrow_mut()
+            .map_err(|_| resources_busy(CLOUD_LIGHTING_NAME))?;
+        if resized {
+            backend.invalidate(Some(frame.view), CloudInvalidation::Resize);
+        }
+        let prepared = backend.prepare(ctx.gpu, &frame, &atmosphere, ctx.lighting);
+        drop(backend);
+        drop(atmosphere);
+        match prepared {
+            Ok(()) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness = SkyReadiness::pending(SkyReadinessStage::CloudLighting);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness =
+                        SkyReadiness::failed(SkyReadinessStage::CloudLighting, error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let frame = {
+            let s = self
+                .state
+                .try_borrow()
+                .map_err(|_| state_busy(CLOUD_LIGHTING_NAME))?;
+            let Some(view) = s.active_view else {
+                return Ok(());
+            };
+            cloud_frame(&s, ctx.frame, view, ctx.size, ctx.time_s)?
+        };
+        let atmosphere = self
+            .atmosphere
+            .try_borrow()
+            .map_err(|_| resources_busy(CLOUD_LIGHTING_NAME))?;
+        let recorded = self
+            .cloud
+            .try_borrow_mut()
+            .map_err(|_| resources_busy(CLOUD_LIGHTING_NAME))?
+            .record_lighting(ctx.gpu, ctx.encoder, &frame, &atmosphere);
+        drop(atmosphere);
+        match recorded {
+            Ok(()) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness = SkyReadiness::pending(SkyReadinessStage::CloudLighting);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness =
+                        SkyReadiness::failed(SkyReadinessStage::CloudLighting, error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
+/// The `sky.cloud-screen` pass (S12 order 55): records the backend's screen march after the
+/// opaque prepass and before the forward pass samples it.
+pub(crate) struct SkyCloudScreenPass {
+    state: SharedSky,
+    cloud: SharedCloud,
+    atmosphere: SharedAtmosphere,
+}
+
+impl SkyCloudScreenPass {
+    pub(crate) fn new(state: SharedSky, cloud: SharedCloud, atmosphere: SharedAtmosphere) -> Self {
+        SkyCloudScreenPass {
+            state,
+            cloud,
+            atmosphere,
+        }
+    }
+}
+
+impl FeaturePass for SkyCloudScreenPass {
+    fn name(&self) -> &str {
+        CLOUD_SCREEN_NAME
+    }
+
+    fn order(&self) -> u32 {
+        CLOUD_SCREEN_ORDER
+    }
+
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let frame = {
+            let s = self
+                .state
+                .try_borrow()
+                .map_err(|_| state_busy(CLOUD_SCREEN_NAME))?;
+            let Some(view) = s.active_view else {
+                return Ok(());
+            };
+            cloud_frame(&s, ctx.frame, view, ctx.size, ctx.time_s)?
+        };
+        let atmosphere = self
+            .atmosphere
+            .try_borrow()
+            .map_err(|_| resources_busy(CLOUD_SCREEN_NAME))?;
+        let recorded = self
+            .cloud
+            .try_borrow_mut()
+            .map_err(|_| resources_busy(CLOUD_SCREEN_NAME))?
+            .record_screen(
+                ctx.gpu,
+                ctx.encoder,
+                &frame,
+                ctx.targets.depth(),
+                &atmosphere,
+            );
+        drop(atmosphere);
+        match recorded {
+            Ok(()) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness = SkyReadiness::pending(SkyReadinessStage::CloudScreen);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness =
+                        SkyReadiness::failed(SkyReadinessStage::CloudScreen, error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
 /// The completed M1 neutral/legacy backend: valid dummies, no volume work.

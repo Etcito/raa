@@ -10,12 +10,19 @@ use raa_core::{GpuContext, RaaError};
 use raa_ibl::IblHandle;
 use raa_lit::LitRenderer;
 use raa_pipeline::Pipeline;
-use raa_scene::DirectionalLight;
+use raa_scene::{Camera, DirectionalLight};
 
+use crate::atmosphere::{AtmosphereResources, SharedAtmosphere, SkyAtmospherePass};
 use crate::background::SkyBackground;
+use crate::cloud_backend::{
+    CloudInvalidation, SharedCloud, SkyCloudLightingPass, SkyCloudScreenPass, create_cloud_backend,
+};
 use crate::desc::{LegacyCloudFields, SkyDesc, SkyModel, SkyPreset, SkyTransaction};
 use crate::env_pass::SkyEnvPass;
-use crate::state::{SharedSky, SkyState, invalid};
+use crate::observations::{
+    CloudResetReasons, SkyDiagnostics, SkyReadiness, SkyReadinessStage, SkyReadinessStatus,
+};
+use crate::state::{SharedSky, SkyState, VIEW_COUNT, ViewSlot, invalid};
 use crate::time_of_day::{TimeOfDaySettings, TimeOfDayState};
 use crate::weather::{ResolvedWeatherState, WeatherPreset, WeatherSettings, WeatherUpdate};
 
@@ -44,20 +51,41 @@ impl SkyFeature {
         ibl: IblHandle,
     ) -> Result<SkyHandle, RaaError> {
         let state = SkyState::shared();
+        let atmosphere: SharedAtmosphere = Rc::new(RefCell::new(AtmosphereResources::new(gpu)?));
+        let cloud: SharedCloud = Rc::new(RefCell::new(create_cloud_backend(gpu)?));
         {
             let mut p = pipeline.try_borrow_mut().map_err(|_| busy("pipeline"))?;
+            p.add(Box::new(SkyAtmospherePass::new(
+                Rc::clone(&state),
+                Rc::clone(&atmosphere),
+            )))?;
+            p.add(Box::new(SkyCloudLightingPass::new(
+                Rc::clone(&state),
+                Rc::clone(&cloud),
+                Rc::clone(&atmosphere),
+            )))?;
             let pass = SkyEnvPass::new(
                 gpu,
                 Rc::clone(&state),
-                ibl,
+                ibl.clone(),
                 lit.handle(),
                 p.lighting().layout(),
             );
             p.add(Box::new(pass))?;
+            p.add(Box::new(SkyCloudScreenPass::new(
+                Rc::clone(&state),
+                Rc::clone(&cloud),
+                Rc::clone(&atmosphere),
+            )))?;
         }
         // `add_contributor` borrows the pipeline itself: the borrow above is released.
         lit.add_contributor(Box::new(SkyBackground::new(Rc::clone(&state))))?;
-        Ok(SkyHandle { state })
+        Ok(SkyHandle {
+            state,
+            ibl: Some(ibl),
+            cloud: Some(cloud),
+            atmosphere: Some(atmosphere),
+        })
     }
 }
 
@@ -65,6 +93,9 @@ impl SkyFeature {
 #[derive(Clone)]
 pub struct SkyHandle {
     state: SharedSky,
+    ibl: Option<IblHandle>,
+    cloud: Option<SharedCloud>,
+    atmosphere: Option<SharedAtmosphere>,
 }
 
 impl SkyHandle {
@@ -94,6 +125,8 @@ impl SkyHandle {
             return Err(invalid("preset must agree with profile"));
         }
         let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
+        let model_changed = s.desc.model != desc.model;
+        let mut weather_changed = false;
         let mut time = s.time;
         let mut weather = s.weather.clone();
         if desc.model == SkyModel::Physical {
@@ -139,11 +172,22 @@ impl SkyHandle {
                 restart_cycle: preset.is_some(),
             };
             update.validate()?;
-            weather.apply_update(update)?;
+            weather_changed = weather.apply_update(update)?;
+        }
+        if weather_changed {
+            s.bump_weather()?;
         }
         s.desc = desc;
         s.time = time;
         s.weather = weather;
+        if model_changed {
+            s.reset_reasons(None, CloudResetReasons::MODEL);
+            self.invalidate_cloud(None, CloudInvalidation::Model);
+        }
+        if weather_changed {
+            s.reset_reasons(None, CloudResetReasons::WEATHER);
+            self.invalidate_cloud(None, CloudInvalidation::Weather);
+        }
         s.env_dirty = true;
         s.gpu_dirty = true;
         Ok(())
@@ -212,11 +256,19 @@ impl SkyHandle {
             return Err(invalid("advance_frame.dt_seconds must be finite"));
         }
         let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
+        let weather_advances = s.weather.last_invocation != Some(invocation)
+            && s.weather.last_invocation.is_some()
+            && dt_seconds > 0.0;
+        if weather_advances && s.weather_generation == u64::MAX {
+            return Err(invalid("weather_generation is exhausted"));
+        }
         let (light, advanced) = s.time.advance(invocation, dt_seconds)?;
         let north = s.time.state.settings.place.north;
         // Drifting clouds refresh reflections only under `EnvUpdate::EveryFrame`; `OnChange`
         // keeps the authored snapshot, so only an accepted settings edit marks the env dirty.
-        s.weather.advance(invocation, dt_seconds, north);
+        if s.weather.advance(invocation, dt_seconds, north) {
+            s.weather_generation += 1;
+        }
         if advanced {
             s.env_dirty = true;
         }
@@ -244,7 +296,13 @@ impl SkyHandle {
     pub fn set_weather_update(&self, update: WeatherUpdate) -> Result<(), RaaError> {
         update.validate()?;
         let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
-        if s.weather.apply_update(update)? {
+        let mut weather = s.weather.clone();
+        let accepted = weather.apply_update(update)?;
+        if accepted {
+            s.bump_weather()?;
+            s.weather = weather;
+            s.reset_reasons(None, CloudResetReasons::WEATHER);
+            self.invalidate_cloud(None, CloudInvalidation::Weather);
             s.env_dirty = true;
         }
         Ok(())
@@ -256,6 +314,265 @@ impl SkyHandle {
     pub fn weather(&self) -> ResolvedWeatherState {
         self.state.borrow().weather.resolved()
     }
+
+    /// Records (or updates) one view's real index, camera and history eligibility. The next
+    /// sky pass prepares this view at the frame's physical size; a `history_valid == false`
+    /// camera cut records the `CameraDiscontinuity` reset reason and discards the view's
+    /// cloud history. `sky.invalid` for an index outside `0..4` or a non-finite camera.
+    pub fn set_view(
+        &self,
+        view: u32,
+        camera: &Camera,
+        history_valid: bool,
+    ) -> Result<(), RaaError> {
+        if view as usize >= VIEW_COUNT {
+            return Err(invalid(format!("view {view} is outside 0..{VIEW_COUNT}")));
+        }
+        if !camera_is_finite(camera) {
+            return Err(invalid(format!("view {view} camera must be finite")));
+        }
+        let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
+        let index = view as usize;
+        let mut cut = false;
+        match s.views[index].as_mut() {
+            Some(slot) => {
+                if slot.camera != *camera {
+                    slot.previous_view_proj = slot.camera.view_proj();
+                    slot.camera = *camera;
+                }
+                cut = slot.history_valid && !history_valid;
+                slot.history_valid = history_valid;
+            }
+            None => {
+                s.views[index] = Some(ViewSlot::new(view, *camera, history_valid));
+            }
+        }
+        if cut {
+            if let Some(slot) = s.views[index].as_mut() {
+                slot.reset_reasons = slot
+                    .reset_reasons
+                    .union(CloudResetReasons::CAMERA_DISCONTINUITY);
+            }
+            self.invalidate_cloud(Some(view), CloudInvalidation::CameraDiscontinuity);
+        }
+        s.active_view = Some(view);
+        s.readiness = SkyReadiness::pending(SkyReadinessStage::Atmosphere);
+        Ok(())
+    }
+
+    /// Acknowledges exactly the views an actual pipeline submission carried. Nothing is
+    /// accepted for an empty mask; an incomplete submission acknowledges its submitted views
+    /// but invalidates every view's history and stays pending. Only acknowledged work advances
+    /// the atmosphere/sky-view generations, and no recording alone becomes ready.
+    pub fn observe_submission(&self, invocation: u64, submitted_views: u8, complete: bool) {
+        let recorded_invocation = {
+            let Ok(s) = self.state.try_borrow() else {
+                return;
+            };
+            s.recorded_invocation.unwrap_or(invocation)
+        };
+        let bake_ready = if let Some(atmosphere) = self.atmosphere() {
+            match atmosphere.try_borrow_mut() {
+                Ok(mut resources) => {
+                    resources.observe_submission(recorded_invocation, submitted_views, complete);
+                    resources.milky_way_ready()
+                }
+                Err(_) => false,
+            }
+        } else {
+            true
+        };
+        {
+            let Ok(mut s) = self.state.try_borrow_mut() else {
+                return;
+            };
+            let mask = submitted_views & 0x0f;
+            let prior_failed = s.readiness.status == SkyReadinessStatus::Failed;
+            let mut ack_failed = false;
+            if mask != 0 {
+                s.invocation = Some(invocation);
+                s.submitted_invocation = Some(invocation);
+                let mut acknowledged_sky = false;
+                for view in 0..VIEW_COUNT as u32 {
+                    if mask & (1 << view) == 0 {
+                        continue;
+                    }
+                    let Some(slot) = s.views[view as usize].as_mut() else {
+                        continue;
+                    };
+                    slot.invocation = Some(invocation);
+                    slot.submitted_invocation = Some(invocation);
+                    if slot.pending_sky_view {
+                        let next = slot.sky_view_generation.checked_add(1);
+                        slot.pending_sky_view = false;
+                        match next {
+                            Some(next) => {
+                                slot.sky_view_generation = next;
+                                acknowledged_sky = true;
+                            }
+                            None => {
+                                ack_failed = true;
+                                s.readiness = SkyReadiness::failed(
+                                    SkyReadinessStage::Submission,
+                                    "sky_view_generation is exhausted",
+                                );
+                            }
+                        }
+                    }
+                }
+                if (acknowledged_sky || s.pending_atmosphere) && !s.bump_atmosphere() {
+                    ack_failed = true;
+                }
+                s.pending_atmosphere = false;
+                if complete && bake_ready {
+                    s.milky_way_pending = false;
+                }
+                if !complete {
+                    for slot in s.views.iter_mut().flatten() {
+                        slot.history_valid = false;
+                    }
+                }
+                let pending = s.milky_way_pending
+                    || s.views.iter().flatten().any(|slot| slot.pending_sky_view);
+                if !ack_failed {
+                    s.readiness = if complete && !pending {
+                        SkyReadiness {
+                            status: SkyReadinessStatus::Ready,
+                            stage: SkyReadinessStage::Submission,
+                            error: None,
+                        }
+                    } else if prior_failed {
+                        s.readiness.clone()
+                    } else {
+                        SkyReadiness::pending(SkyReadinessStage::Submission)
+                    };
+                }
+            } else if !complete {
+                for slot in s.views.iter_mut().flatten() {
+                    slot.history_valid = false;
+                }
+                if !prior_failed {
+                    s.readiness = SkyReadiness::pending(SkyReadinessStage::Submission);
+                }
+            }
+        }
+        if let Some(cloud) = &self.cloud
+            && let Ok(mut backend) = cloud.try_borrow_mut()
+        {
+            for view in 0..VIEW_COUNT as u32 {
+                if submitted_views & (1 << view) != 0 {
+                    backend.submitted(view, invocation);
+                }
+            }
+        }
+    }
+
+    /// The exact typed lifecycle observation; reading it changes no clock, resource or
+    /// authored setting.
+    pub fn diagnostics(&self) -> SkyDiagnostics {
+        let state = self.state.borrow();
+        let environment = self.ibl.as_ref().map_or_else(
+            || raa_ibl::IblPublication {
+                requested_generation: 0,
+                published_generation: None,
+                pending: false,
+            },
+            IblHandle::publication,
+        );
+        let views = std::array::from_fn(|index| {
+            state.views[index].as_ref().map(|slot| {
+                let (screen, panorama) = self
+                    .cloud_views(slot.view)
+                    .map(|views| (views.screen_valid, views.panorama_valid))
+                    .unwrap_or((false, false));
+                slot.diagnostics(screen, panorama)
+            })
+        });
+        let mut readiness = state.readiness.clone();
+        if readiness.status != SkyReadinessStatus::Failed
+            && let Some(error) = self.ibl.as_ref().and_then(IblHandle::publication_error)
+        {
+            readiness = SkyReadiness::failed(SkyReadinessStage::Environment, error.to_string());
+        }
+        SkyDiagnostics {
+            invocation: state.invocation,
+            submitted_invocation: state.submitted_invocation,
+            weather_generation: state.weather_generation,
+            atmosphere_generation: state.atmosphere_generation,
+            environment,
+            views,
+            readiness,
+        }
+    }
+
+    /// Invalidates a removed view (`ViewRemoved`) and then releases its atmosphere and cloud
+    /// resources; the slot becomes `None`. Valid indexes without a prepared view are a no-op.
+    pub fn remove_view(&self, view: u32) -> Result<(), RaaError> {
+        if view as usize >= VIEW_COUNT {
+            return Err(invalid(format!("view {view} is outside 0..{VIEW_COUNT}")));
+        }
+        let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
+        let index = view as usize;
+        if s.views[index].is_none() {
+            return Ok(());
+        }
+        if let Some(slot) = s.views[index].as_mut() {
+            slot.reset_reasons = slot.reset_reasons.union(CloudResetReasons::VIEW_REMOVED);
+        }
+        self.invalidate_cloud(Some(view), CloudInvalidation::ViewRemoved);
+        if let Some(atmosphere) = &self.atmosphere
+            && let Ok(mut resources) = atmosphere.try_borrow_mut()
+        {
+            resources.remove_view(view);
+        }
+        s.views[index] = None;
+        if s.active_view == Some(view) {
+            s.active_view = None;
+        }
+        s.readiness = SkyReadiness::pending(SkyReadinessStage::Atmosphere);
+        Ok(())
+    }
+
+    /// The active view's cloned cloud views (crate seam for the physical sky consumers).
+    pub(crate) fn cloud_views(&self, view: u32) -> Option<crate::cloud_backend::CloudViews> {
+        let cloud = self.cloud.as_ref()?;
+        let backend = cloud.try_borrow().ok()?;
+        Some(backend.views(view))
+    }
+
+    /// The shared opaque atmosphere resources (crate seam for the physical sky consumers).
+    pub(crate) fn atmosphere(&self) -> Option<&SharedAtmosphere> {
+        self.atmosphere.as_ref()
+    }
+
+    /// Records an invalidation on the completed backend, if one is installed.
+    fn invalidate_cloud(&self, view: Option<u32>, reason: CloudInvalidation) {
+        if let Some(cloud) = &self.cloud
+            && let Ok(mut backend) = cloud.try_borrow_mut()
+        {
+            backend.invalidate(view, reason);
+        }
+    }
+}
+
+/// True when every camera field is finite and its clip/viewport domains are usable.
+fn camera_is_finite(camera: &Camera) -> bool {
+    let fields = [
+        camera.eye.x,
+        camera.eye.y,
+        camera.eye.z,
+        camera.target.x,
+        camera.target.y,
+        camera.target.z,
+        camera.up.x,
+        camera.up.y,
+        camera.up.z,
+        camera.fov_y_rad,
+        camera.near,
+        camera.far,
+        camera.aspect,
+    ];
+    fields.iter().all(|value| value.is_finite())
 }
 
 /// `sky.invalid` for a directional light that is not finite, has a zero direction or a
@@ -293,6 +610,9 @@ mod tests {
     fn handle() -> SkyHandle {
         SkyHandle {
             state: SkyState::shared(),
+            ibl: None,
+            cloud: None,
+            atmosphere: None,
         }
     }
 
@@ -931,6 +1251,155 @@ mod tests {
         h.advance_frame(2, 1.0).expect("repeated invocation");
         assert_eq!(h.weather().current, eased, "a repeated ID does not advance");
         assert_eq!(h.state.borrow().weather.wind_offset, offset);
+    }
+
+    #[test]
+    fn view_lifecycle_records_invalidations_and_only_submitted_masks() {
+        let h = handle();
+        let mut camera = Camera::default();
+        h.set_view(0, &camera, true).expect("first view");
+        let d = h.diagnostics();
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Pending);
+        assert_eq!(d.readiness.stage, SkyReadinessStage::Atmosphere);
+        assert_eq!(d.submitted_invocation, None);
+        let view = d.views[0].expect("view 0 record");
+        assert_eq!((view.view, view.width, view.height), (0, 0, 0));
+        assert_eq!(view.invocation, None);
+        assert_eq!(view.submitted_invocation, None);
+        assert_eq!(view.sky_view_generation, 0);
+        assert_eq!(
+            view.reset_reasons,
+            CloudResetReasons::NONE,
+            "creation is not an invalidation"
+        );
+        assert!(!view.history_valid, "no submitted cloud history yet");
+        assert!(!view.cloud_screen_valid && !view.cloud_panorama_valid);
+        assert_eq!(d.views[1], None);
+
+        assert_eq!(
+            h.set_view(4, &camera, true).expect_err("index").code(),
+            "sky.invalid"
+        );
+        camera.eye.x = 2.0;
+        h.set_view(0, &camera, false).expect("camera cut");
+        assert!(
+            h.state.borrow().views[0]
+                .as_ref()
+                .expect("slot")
+                .reset_reasons
+                .contains(CloudResetReasons::CAMERA_DISCONTINUITY)
+        );
+        h.set_view(0, &camera, true).expect("history eligible");
+        assert!(
+            h.state.borrow().views[0]
+                .as_ref()
+                .expect("slot")
+                .history_valid
+        );
+
+        let mut legacy = h.get();
+        legacy.model = SkyModel::Legacy;
+        h.set(legacy).expect("model switch");
+        let mut storm = h.weather().settings;
+        storm.target = Weather::by_name("storm").expect("storm");
+        h.set_weather(storm).expect("weather change");
+        let d = h.diagnostics();
+        let reasons = d.views[0].expect("view 0").reset_reasons;
+        assert!(reasons.contains(CloudResetReasons::MODEL));
+        assert!(reasons.contains(CloudResetReasons::WEATHER));
+        assert_eq!(d.weather_generation, 1, "one accepted weather change");
+
+        h.observe_submission(7, 0, false);
+        let d = h.diagnostics();
+        assert_eq!(d.submitted_invocation, None, "no view was submitted");
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Pending);
+
+        h.observe_submission(8, 0b0001, false);
+        let d = h.diagnostics();
+        assert_eq!(d.submitted_invocation, Some(8));
+        assert_eq!(d.views[0].expect("view 0").submitted_invocation, Some(8));
+        assert!(!d.views[0].expect("view 0").history_valid);
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Pending);
+        assert_eq!(d.readiness.stage, SkyReadinessStage::Submission);
+
+        h.observe_submission(9, 0b0001, true);
+        let d = h.diagnostics();
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Ready);
+        let reasons = d.views[0].expect("view 0").reset_reasons;
+        assert!(reasons.contains(CloudResetReasons::CAMERA_DISCONTINUITY));
+        assert!(reasons.contains(CloudResetReasons::MODEL));
+        assert!(reasons.contains(CloudResetReasons::WEATHER));
+
+        h.remove_view(0).expect("remove view");
+        assert_eq!(h.diagnostics().views[0], None);
+        assert_eq!(h.remove_view(4).expect_err("index").code(), "sky.invalid");
+    }
+
+    #[test]
+    fn acknowledged_generations_require_recorded_and_submitted_work() {
+        let h = handle();
+        let camera = Camera::default();
+        h.set_view(0, &camera, true).expect("view 0");
+        {
+            let mut s = h.state.borrow_mut();
+            s.recorded_invocation = Some(3);
+            s.invocation = Some(3);
+            s.pending_atmosphere = true;
+            s.milky_way_pending = true;
+            let slot = s.views[0].as_mut().expect("slot");
+            slot.pending_sky_view = true;
+            slot.size = (1280, 720);
+        }
+        h.observe_submission(3, 0b0001, true);
+        let d = h.diagnostics();
+        assert_eq!(d.atmosphere_generation, 1);
+        assert_eq!(d.views[0].expect("view 0").sky_view_generation, 1);
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Ready);
+        assert_eq!(d.environment.requested_generation, 0, "no IBL handle");
+
+        {
+            let mut s = h.state.borrow_mut();
+            s.pending_atmosphere = true;
+            s.milky_way_pending = true;
+            s.views[0].as_mut().expect("slot").pending_sky_view = true;
+        }
+        h.observe_submission(4, 0b0001, false);
+        let d = h.diagnostics();
+        assert_eq!(
+            d.atmosphere_generation, 2,
+            "an actually submitted view is acknowledged even when the invocation is partial"
+        );
+        assert_eq!(d.views[0].expect("view 0").sky_view_generation, 2);
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Pending);
+        assert!(!d.views[0].expect("view 0").history_valid);
+
+        h.observe_submission(5, 0b0001, true);
+        let d = h.diagnostics();
+        assert_eq!(d.atmosphere_generation, 2, "no double acknowledgement");
+        assert_eq!(d.views[0].expect("view 0").sky_view_generation, 2);
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Ready);
+    }
+
+    #[test]
+    fn a_failure_is_retained_until_a_new_preparation_or_submission() {
+        let h = handle();
+        {
+            let mut s = h.state.borrow_mut();
+            s.readiness = SkyReadiness::failed(SkyReadinessStage::CloudScreen, "gpu.device_lost");
+        }
+        let d = h.diagnostics();
+        assert_eq!(d.readiness.status, SkyReadinessStatus::Failed);
+        assert_eq!(d.readiness.stage, SkyReadinessStage::CloudScreen);
+        assert_eq!(d.readiness.error.as_deref(), Some("gpu.device_lost"));
+
+        h.set_view(0, &Camera::default(), true)
+            .expect("new preparation");
+        assert_eq!(
+            h.diagnostics().readiness.status,
+            SkyReadinessStatus::Pending
+        );
+        h.observe_submission(1, 0b0001, true);
+        assert_eq!(h.diagnostics().readiness.status, SkyReadinessStatus::Ready);
     }
 
     #[test]

@@ -32,16 +32,20 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use raa_core::RaaError;
-use raa_math::Vec3;
-use raa_scene::DirectionalLight;
+use raa_math::{Mat4, Vec3};
+use raa_scene::{Camera, DirectionalLight};
 
 use crate::desc::SkyDesc;
+use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage, SkyViewDiagnostics};
 use crate::time_of_day::{
     CelestialSky, DominantLight, TimeOfDay, TimeOfDaySettings, TimeOfDayState,
 };
 use crate::weather::{
     ResolvedWeatherState, Weather, WeatherCycle, WeatherPreset, WeatherSettings, WeatherUpdate,
 };
+
+/// View slots the sky feature tracks; matches the engine's four viewports.
+pub(crate) const VIEW_COUNT: usize = 4;
 
 /// The shared sky state; clones of the `Rc` see the same description and flags.
 #[allow(dead_code)] // consumed by SkyFeature (sky.env, sky.background)
@@ -64,6 +68,26 @@ pub(crate) struct SkyState {
     pub time: TimePlayback,
     /// Authored weather, its evolving cycle target and the animation cursor.
     pub weather: WeatherPlayback,
+    /// Prepared view lifecycles, indexed by view slot; `None` for an absent view.
+    pub views: [Option<ViewSlot>; VIEW_COUNT],
+    /// Invocation whose recording was last accepted.
+    pub invocation: Option<u64>,
+    /// Invocation the GPU resources were recorded for (the pipeline frame identity).
+    pub recorded_invocation: Option<u64>,
+    /// Last invocation with at least one actual submitted view.
+    pub submitted_invocation: Option<u64>,
+    /// Accepted weather changes and explicit cycle restarts.
+    pub weather_generation: u64,
+    /// Acknowledged atmosphere (Milky Way / LUT) work.
+    pub atmosphere_generation: u64,
+    /// The sky pipeline's readiness observation.
+    pub readiness: SkyReadiness,
+    /// The view the sky passes prepare and record.
+    pub active_view: Option<u32>,
+    /// Atmosphere work was recorded and awaits an actual submission.
+    pub pending_atmosphere: bool,
+    /// The Milky Way bake was recorded and awaits an actual submission.
+    pub milky_way_pending: bool,
 }
 
 impl SkyState {
@@ -85,6 +109,126 @@ impl Default for SkyState {
             background_on: false,
             time: TimePlayback::default(),
             weather: WeatherPlayback::default(),
+            views: std::array::from_fn(|_| None),
+            invocation: None,
+            recorded_invocation: None,
+            submitted_invocation: None,
+            weather_generation: 0,
+            atmosphere_generation: 0,
+            readiness: SkyReadiness::default(),
+            active_view: None,
+            pending_atmosphere: false,
+            milky_way_pending: false,
+        }
+    }
+}
+
+/// One prepared view's lifecycle state (device-free).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ViewSlot {
+    /// The view's real index.
+    pub view: u32,
+    /// Physical viewport size in pixels; `(0, 0)` until the first frame prepares it.
+    pub size: (u32, u32),
+    /// The view's camera at the last `set_view`.
+    pub camera: Camera,
+    /// The previous camera's unjittered view-projection for cloud history.
+    pub previous_view_proj: Mat4,
+    /// Whether the cloud history may be reprojected.
+    pub history_valid: bool,
+    /// Invocation whose work this view last recorded.
+    pub invocation: Option<u64>,
+    /// Last invocation actually submitted for this view.
+    pub submitted_invocation: Option<u64>,
+    /// Acknowledged sky-view LUT work.
+    pub sky_view_generation: u64,
+    /// Invalidation bits accepted for this view.
+    pub reset_reasons: CloudResetReasons,
+    /// The atmosphere pass recorded this view's sky view.
+    pub pending_sky_view: bool,
+}
+
+impl ViewSlot {
+    pub(crate) fn new(view: u32, camera: Camera, history_valid: bool) -> Self {
+        ViewSlot {
+            view,
+            size: (0, 0),
+            camera,
+            previous_view_proj: camera.view_proj(),
+            history_valid,
+            invocation: None,
+            submitted_invocation: None,
+            sky_view_generation: 0,
+            reset_reasons: CloudResetReasons::NONE,
+            pending_sky_view: false,
+        }
+    }
+
+    /// The public per-view observation; cloud validity comes from the backend's views.
+    pub(crate) fn diagnostics(
+        &self,
+        cloud_screen_valid: bool,
+        cloud_panorama_valid: bool,
+    ) -> SkyViewDiagnostics {
+        SkyViewDiagnostics {
+            view: self.view,
+            width: self.size.0,
+            height: self.size.1,
+            invocation: self.invocation,
+            submitted_invocation: self.submitted_invocation,
+            sky_view_generation: self.sky_view_generation,
+            history_valid: self.history_valid
+                && self.submitted_invocation.is_some()
+                && (cloud_screen_valid || cloud_panorama_valid),
+            reset_reasons: self.reset_reasons,
+            cloud_screen_valid,
+            cloud_panorama_valid,
+        }
+    }
+}
+
+impl SkyState {
+    /// Adds invalidation `reason` to one view or (`None`) every prepared view.
+    pub(crate) fn reset_reasons(&mut self, view: Option<u32>, reason: CloudResetReasons) {
+        match view {
+            Some(view) => {
+                if let Some(slot) = self.views.get_mut(view as usize).and_then(Option::as_mut) {
+                    slot.reset_reasons = slot.reset_reasons.union(reason);
+                }
+            }
+            None => {
+                for slot in self.views.iter_mut().flatten() {
+                    slot.reset_reasons = slot.reset_reasons.union(reason);
+                }
+            }
+        }
+    }
+
+    /// Counts one accepted effective weather change; exhaustion refuses rather than
+    /// rounding or reusing an identity.
+    pub(crate) fn bump_weather(&mut self) -> Result<(), RaaError> {
+        self.weather_generation = self
+            .weather_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("weather_generation is exhausted"))?;
+        Ok(())
+    }
+
+    /// Counts one acknowledged atmosphere submission; exhaustion fails readiness and
+    /// returns false instead of reusing an identity.
+    pub(crate) fn bump_atmosphere(&mut self) -> bool {
+        match self.atmosphere_generation.checked_add(1) {
+            Some(next) => {
+                self.atmosphere_generation = next;
+                true
+            }
+            None => {
+                self.readiness = SkyReadiness::failed(
+                    SkyReadinessStage::Submission,
+                    "atmosphere_generation is exhausted",
+                );
+                false
+            }
         }
     }
 }

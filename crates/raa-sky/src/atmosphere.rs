@@ -22,10 +22,10 @@
 //! [`AtmosphereResources::record`] records the pending static tables, the
 //! view's pending sky view and the 16-byte directional transmission, then copies
 //! that result into `WeatherLightingGpu.atmosphericTransmission` at byte offset
-//! 32. It submits nothing: recording consumes dirty work but never claims an
-//! acknowledged submission, so readiness observers still require real
-//! submission. The CPU-owned map/light/flags bytes of the destination are never
-//! touched here.
+//! 32. It submits nothing: recording keeps dirty work pending until
+//! [`AtmosphereResources::observe_submission`] sees an actual submitted mask, so
+//! readiness observers still require real submission. The CPU-owned
+//! map/light/flags bytes of the destination are never touched here.
 //!
 //! The shared Milky Way map uses `src/lighting.rs:14-15` and
 //! `shaders/sky/milky_way.wgsl:9-96` at the same Solstice revision. Initialization
@@ -55,14 +55,29 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+use std::cell::RefCell;
 use std::num::NonZeroU64;
+use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
+use raa_math::Vec3;
+use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx};
+use raa_scene::Camera;
 
+use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage};
 use crate::shaders::{
     ATMOSPHERE_DIRECTIONAL_ENTRY, ATMOSPHERE_LUT_ENTRIES, atmosphere_luts_module_wgsl,
     milky_way_bake_module_wgsl,
 };
+use crate::state::{SharedSky, SkyState};
+
+/// The shared opaque atmosphere resource set (LUTs plus the Milky Way map).
+pub(crate) type SharedAtmosphere = Rc<RefCell<AtmosphereResources>>;
+
+/// S12 name of the atmosphere pass.
+pub(crate) const ATMOSPHERE_NAME: &str = "sky.atmosphere";
+/// S12 order of the atmosphere pass.
+pub(crate) const ATMOSPHERE_ORDER: u32 = 5;
 
 /// Ground radius at sea level, in kilometres.
 pub(crate) const GROUND_RADIUS_KM: f32 = 6360.0;
@@ -201,6 +216,116 @@ impl PhysicalSkyGpu {
         debug_assert_eq!(self.reserved, [[0.0; 4]; 2]);
         out
     }
+
+    /// The S10 record for an accepted sky/time/weather snapshot.
+    ///
+    /// The viewer radius is the one [`atmospheric_radius_km`] conversion; every direction is
+    /// toward its body/light (`-DirectionalLight::direction` for the dominant light). The
+    /// `flags.x` lane is the physical-model selector, so a legacy snapshot still uploads a
+    /// valid record with the atmosphere disabled.
+    pub(crate) fn from_state(
+        state: &SkyState,
+        camera: &Camera,
+        size: (u32, u32),
+        animation_seconds: f64,
+    ) -> PhysicalSkyGpu {
+        let defaults = PhysicalSkyGpu::default();
+        let sky = state.time.state.sky;
+        let desc = &state.desc;
+        let height_m = camera.eye.y;
+        let dominant = -state.time.last_light.direction;
+        let dominant = dominant.normalize_or_zero();
+        let dominant = if dominant == Vec3::ZERO {
+            Vec3::Y
+        } else {
+            dominant
+        };
+        let pixel_angle = if size.1 == 0 {
+            0.0
+        } else {
+            2.0 * (camera.fov_y_rad * 0.5).tan() / size.1 as f32
+        };
+        // Solstice `time_of_day.rs:176-232`: stars fade in with the astronomical night and
+        // the moon radiance interpolates from daylight to night with the same curve.
+        let sun_height = sky.sun.y.clamp(-1.0, 1.0).asin().to_degrees();
+        let night = 1.0 - smoothstep(-14.0, -6.0, sun_height);
+        let illuminance = state.time.manual.intensity;
+        PhysicalSkyGpu {
+            viewer: [
+                camera.eye.x,
+                camera.eye.y,
+                camera.eye.z,
+                atmospheric_radius_km(height_m),
+            ],
+            sun: [sky.sun.x, sky.sun.y, sky.sun.z, sky.moon_lit],
+            moon: [
+                sky.moon.x,
+                sky.moon.y,
+                sky.moon.z,
+                illuminance * (0.03 + (0.0024 - 0.03) * night),
+            ],
+            pole: [
+                sky.pole.x,
+                sky.pole.y,
+                sky.pole.z,
+                illuminance * 0.002 * night,
+            ],
+            equinox: [
+                sky.equinox.x,
+                sky.equinox.y,
+                sky.equinox.z,
+                illuminance * 1.2e-4,
+            ],
+            dominant: [
+                dominant.x,
+                dominant.y,
+                dominant.z,
+                state.time.last_light.intensity,
+            ],
+            daylight: [
+                state.time.manual.color[0],
+                state.time.manual.color[1],
+                state.time.manual.color[2],
+                state.time.manual.intensity,
+            ],
+            discs: [
+                desc.sun_disc_angular_radius,
+                desc.sun_disc_intensity,
+                0.0075,
+                pixel_angle,
+            ],
+            ground_albedo: [
+                desc.atmosphere.ground_albedo[0],
+                desc.atmosphere.ground_albedo[1],
+                desc.atmosphere.ground_albedo[2],
+                desc.atmosphere.mie_multiplier,
+            ],
+            ozone: [
+                defaults.ozone[0],
+                defaults.ozone[1],
+                defaults.ozone[2],
+                state.weather.current.rain,
+            ],
+            planet: [
+                GROUND_RADIUS_KM,
+                TOP_RADIUS_KM,
+                animation_seconds as f32,
+                0.0,
+            ],
+            flags: [
+                u32::from(matches!(desc.model, crate::desc::SkyModel::Physical)),
+                0,
+                0,
+                0,
+            ],
+            ..defaults
+        }
+    }
+}
+
+fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
+    let t = ((x - low) / (high - low)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn put_f32x4(out: &mut [u8; PhysicalSkyGpu::SIZE], offset: usize, values: [f32; 4]) {
@@ -338,6 +463,8 @@ struct ViewSlot {
     parameters: PhysicalSkyGpu,
     size: (u32, u32),
     sky_view_pending: bool,
+    /// The sky view was recorded and awaits an actual submission.
+    sky_view_recorded: bool,
 }
 
 /// Device-free view lifecycle: validation, allocation decisions and pending table work.
@@ -345,6 +472,8 @@ struct ViewSlot {
 struct Lifecycle {
     static_params: Option<StaticParams>,
     static_tables_pending: bool,
+    /// The static tables were recorded and await an actual submission.
+    static_tables_recorded: bool,
     views: [Option<ViewSlot>; MAX_VIEWS],
 }
 
@@ -353,6 +482,7 @@ impl Lifecycle {
         Lifecycle {
             static_params: None,
             static_tables_pending: true,
+            static_tables_recorded: false,
             views: std::array::from_fn(|_| None),
         }
     }
@@ -396,6 +526,7 @@ impl Lifecycle {
                     parameters: parameters.clone(),
                     size,
                     sky_view_pending: true,
+                    sky_view_recorded: false,
                 });
                 Ok(Prepared {
                     outcome: Prepare::Created,
@@ -411,25 +542,67 @@ impl Lifecycle {
         }
     }
 
-    /// Consumes the pending table work for one record. The static tables are built once per
-    /// atmosphere-parameter change; the view's sky view follows its own size, height and light
-    /// snapshot. An invalid or unprepared view refuses before any dirty flag is consumed.
+    /// Reports the pending table work for one record without consuming it. The static tables
+    /// are built once per atmosphere-parameter change; the view's sky view follows its own
+    /// size, height and light snapshot. An invalid or unprepared view refuses before any
+    /// recording marker changes.
     ///
-    /// This records dirty work only. Acknowledging a submission is a different operation, so
-    /// no readiness state changes here.
-    fn take_record_work(&mut self, view: u32) -> Result<RecordWork, RaaError> {
+    /// Recording is provisional: [`Self::observe_submission`] alone consumes the work after a
+    /// real submission, so a cancelled or unsubmitted record stays pending and is re-recorded.
+    fn record_work(&mut self, view: u32) -> Result<RecordWork, RaaError> {
         let index = validate_view(view)?;
         let slot = self
             .views
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or_else(|| invalid(format!("atmosphere view {view} has not been prepared")))?;
-        let sky_view = std::mem::take(&mut slot.sky_view_pending);
-        let static_tables = std::mem::take(&mut self.static_tables_pending);
-        Ok(RecordWork {
-            static_tables,
-            sky_view,
-        })
+        let work = RecordWork {
+            static_tables: self.static_tables_pending,
+            sky_view: slot.sky_view_pending,
+        };
+        self.static_tables_recorded |= work.static_tables;
+        slot.sky_view_recorded |= work.sky_view;
+        Ok(work)
+    }
+
+    /// Acknowledges the views an actual submission carried. Only a submitted bit may clear
+    /// recorded work; every unsubmitted view keeps its pending flags so cancelled work is
+    /// re-recorded. The static tables are cleared once any genuinely submitted view carried
+    /// their dispatch; an empty mask acknowledges nothing.
+    fn observe_submission(&mut self, submitted_views: u8, _complete: bool) {
+        let mask = submitted_views & 0x0f;
+        if mask == 0 {
+            self.static_tables_recorded = false;
+            for slot in self.views.iter_mut().flatten() {
+                slot.sky_view_recorded = false;
+            }
+            return;
+        }
+        if self.static_tables_recorded {
+            self.static_tables_pending = false;
+            self.static_tables_recorded = false;
+        }
+        for (index, slot) in self.views.iter_mut().enumerate() {
+            if mask & (1 << index) == 0 {
+                continue;
+            }
+            if let Some(slot) = slot {
+                if slot.sky_view_recorded {
+                    slot.sky_view_pending = false;
+                }
+                slot.sky_view_recorded = false;
+            }
+        }
+    }
+
+    /// True when the view has pending LUT work to record.
+    fn view_pending(&self, view: u32) -> bool {
+        self.static_tables_pending
+            || self
+                .views
+                .get(view as usize)
+                .and_then(Option::as_ref)
+                .is_some_and(|slot| slot.sky_view_pending)
     }
 }
 
@@ -654,11 +827,11 @@ impl AtmosphereResources {
     /// parameter changed, the view's sky view when its size, height or light changed, then the
     /// directional entry, then the buffer copy. Groups 0 and 1 stay empty; every resource is
     /// bound explicitly at group 2. The CPU-owned `map`, `light` and `flags` lanes of the
-    /// destination are never written, and nothing is submitted: recording consumes dirty work
-    /// but establishes no submitted readiness.
+    /// destination are never written, and nothing is submitted: recording leaves the dirty
+    /// work pending until a real submitted mask acknowledges it.
     ///
     /// An invalid or unprepared view and a destination shorter than 48 bytes or without
-    /// `COPY_DST` refuse with `sky.invalid` before any dispatch or dirty-state change.
+    /// `COPY_DST` refuse with `sky.invalid` before any dispatch or recording marker changes.
     pub(crate) fn record(
         &mut self,
         gpu: &GpuContext,
@@ -668,7 +841,7 @@ impl AtmosphereResources {
     ) -> Result<(), RaaError> {
         gpu.ensure_live()?;
         validate_transmission_destination(transmission_destination)?;
-        let work = self.lifecycle.take_record_work(view)?;
+        let work = self.lifecycle.record_work(view)?;
         let index = view as usize;
         let slot = self
             .views
@@ -755,9 +928,17 @@ impl AtmosphereResources {
         Ok(())
     }
 
+    /// True when the view has pending static or sky-view LUT dispatches.
+    pub(crate) fn view_pending(&self, view: u32) -> bool {
+        self.lifecycle.view_pending(view)
+    }
+
     /// Acknowledge actual pipeline submissions, never preparation/recording alone.
-    /// Zero submitted views or an incomplete/failed submission leaves the bake pending.
-    /// Unrelated acknowledgements cannot publish or discard the pending bake.
+    ///
+    /// Zero submitted views or an incomplete/failed submission leaves the Milky Way bake and
+    /// the pending LUT work unacknowledged, so both are re-recorded by the next invocation.
+    /// Only the submitted bits of `submitted_views` may consume the LUT work they carried.
+    /// Unrelated acknowledgements cannot publish or discard pending work.
     pub(crate) fn observe_submission(
         &mut self,
         invocation: u64,
@@ -766,6 +947,7 @@ impl AtmosphereResources {
     ) {
         self.milky_way_bake
             .observe_submission(invocation, submitted_views, complete);
+        self.lifecycle.observe_submission(submitted_views, complete);
     }
 
     /// The static 256x64 transmittance table.
@@ -794,6 +976,143 @@ impl AtmosphereResources {
             *slot = None;
         }
         self.lifecycle.remove(view);
+    }
+}
+
+/// The `sky.atmosphere` pass (S12 order 5): prepares the active view's atmosphere LUTs and
+/// records the Milky Way bake, the pending LUT dispatches and the 16-byte directional
+/// transmission before every downstream sky/cloud pass samples them.
+///
+/// Recording never submits. The pass marks its work pending and the
+/// [`crate::feature::SkyHandle::observe_submission`] acknowledgement clears it only for the
+/// actual submitted view mask, so cancelled work is re-recorded next invocation.
+pub(crate) struct SkyAtmospherePass {
+    state: SharedSky,
+    resources: SharedAtmosphere,
+}
+
+impl SkyAtmospherePass {
+    pub(crate) fn new(state: SharedSky, resources: SharedAtmosphere) -> Self {
+        SkyAtmospherePass { state, resources }
+    }
+}
+
+fn state_busy() -> RaaError {
+    RaaError::Resource(format!("{ATMOSPHERE_NAME}: sky state is busy"))
+}
+
+impl FeaturePass for SkyAtmospherePass {
+    fn name(&self) -> &str {
+        ATMOSPHERE_NAME
+    }
+
+    fn order(&self) -> u32 {
+        ATMOSPHERE_ORDER
+    }
+
+    fn set_enabled(&mut self, enabled: bool, _lighting: &mut raa_pipeline::LightingResources) {
+        if enabled && let Ok(mut s) = self.state.try_borrow_mut() {
+            s.readiness = SkyReadiness::pending(SkyReadinessStage::Atmosphere);
+        }
+    }
+
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let (view, parameters) = {
+            let s = self.state.try_borrow().map_err(|_| state_busy())?;
+            let Some(view) = s.active_view else {
+                return Ok(());
+            };
+            let slot = s
+                .views
+                .get(view as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| invalid(format!("atmosphere view {view} is not prepared")))?;
+            let parameters =
+                PhysicalSkyGpu::from_state(&s, &slot.camera, ctx.size, f64::from(ctx.time_s));
+            (view, parameters)
+        };
+        // S10 weather flags.x: the physical model enables the single directional
+        // atmospheric-attenuation boundary; the legacy evaluator leaves it disabled.
+        ctx.lighting
+            .set_physical_atmosphere(parameters.flags[0] != 0);
+        let prepared = self
+            .resources
+            .try_borrow_mut()
+            .map_err(|_| RaaError::Resource("sky.atmosphere: resources are borrowed".into()))?
+            .prepare_view(ctx.gpu, view, ctx.size, &parameters);
+        match prepared {
+            Ok(()) => {
+                let mut s = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+                if let Some(slot) = s.views.get_mut(view as usize).and_then(Option::as_mut) {
+                    if slot.size != (0, 0) && slot.size != ctx.size {
+                        slot.reset_reasons = slot.reset_reasons.union(CloudResetReasons::RESIZE);
+                    }
+                    slot.size = ctx.size;
+                }
+                s.invocation = Some(ctx.frame);
+                s.recorded_invocation = Some(ctx.frame);
+                s.readiness = SkyReadiness::pending(SkyReadinessStage::Atmosphere);
+                Ok(())
+            }
+            Err(error) => {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness =
+                        SkyReadiness::failed(SkyReadinessStage::Atmosphere, error.to_string());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let view = {
+            let s = self.state.try_borrow().map_err(|_| state_busy())?;
+            s.active_view
+        };
+        let Some(view) = view else {
+            return Ok(());
+        };
+        let (pending, bake_ready) = {
+            let mut resources = self
+                .resources
+                .try_borrow_mut()
+                .map_err(|_| RaaError::Resource("sky.atmosphere: resources are borrowed".into()))?;
+            let recorded = resources
+                .record_milky_way(ctx.gpu, ctx.encoder, ctx.frame)
+                .and_then(|()| {
+                    resources.record(
+                        ctx.gpu,
+                        ctx.encoder,
+                        view,
+                        ctx.lighting.atmospheric_transmission_buffer(),
+                    )
+                });
+            if let Err(error) = recorded {
+                if let Ok(mut s) = self.state.try_borrow_mut() {
+                    s.readiness =
+                        SkyReadiness::failed(SkyReadinessStage::Atmosphere, error.to_string());
+                }
+                return Err(error);
+            }
+            (resources.view_pending(view), resources.milky_way_ready())
+        };
+        let mut s = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        s.recorded_invocation = Some(ctx.frame);
+        if pending {
+            s.pending_atmosphere = true;
+        }
+        if !bake_ready {
+            s.milky_way_pending = true;
+        }
+        if let Some(slot) = s.views.get_mut(view as usize).and_then(Option::as_mut) {
+            slot.pending_sky_view |= pending;
+        }
+        s.readiness = SkyReadiness::pending(if bake_ready {
+            SkyReadinessStage::Atmosphere
+        } else {
+            SkyReadinessStage::MilkyWay
+        });
+        Ok(())
     }
 }
 
@@ -1508,10 +1827,10 @@ mod tests {
     }
 
     #[test]
-    fn record_work_consumes_static_and_view_dirty_state_atomically() {
+    fn record_work_stays_pending_until_a_submitted_mask_acknowledges_it() {
         let mut lifecycle = Lifecycle::new();
         let parameters = PhysicalSkyGpu::default();
-        let missing = lifecycle.take_record_work(0).unwrap_err();
+        let missing = lifecycle.record_work(0).unwrap_err();
         assert_eq!(missing.code(), "sky.invalid");
         assert!(
             lifecycle.static_tables_pending,
@@ -1522,68 +1841,89 @@ mod tests {
             .prepare(0, (1280, 720), &parameters)
             .expect("view 0");
         assert_eq!(
-            lifecycle.take_record_work(0).expect("view 0"),
+            lifecycle.record_work(0).expect("view 0"),
             RecordWork {
                 static_tables: true,
                 sky_view: true,
             }
         );
         assert_eq!(
-            lifecycle.take_record_work(0).expect("view 0"),
+            lifecycle.record_work(0).expect("view 0"),
+            RecordWork {
+                static_tables: true,
+                sky_view: true,
+            },
+            "unsubmitted work is re-recorded"
+        );
+        lifecycle.observe_submission(0b0001, true);
+        assert_eq!(
+            lifecycle.record_work(0).expect("view 0"),
             RecordWork {
                 static_tables: false,
                 sky_view: false,
             },
-            "an unchanged view records only the per-view directional copy"
+            "a complete submitted mask consumes the work it carried"
         );
 
         let mut sun = parameters.clone();
         sun.dominant = [1.0, 0.0, 0.0, 1.0];
         lifecycle.prepare(0, (1280, 720), &sun).expect("view 0");
         assert_eq!(
-            lifecycle.take_record_work(0).expect("view 0"),
+            lifecycle.record_work(0).expect("view 0"),
             RecordWork {
                 static_tables: false,
                 sky_view: true,
             },
             "a light snapshot change rebuilds only the sky view"
         );
+        lifecycle.observe_submission(0b0000, false);
+        assert_eq!(
+            lifecycle.record_work(0).expect("view 0"),
+            RecordWork {
+                static_tables: false,
+                sky_view: true,
+            },
+            "an empty or incomplete acknowledgement stays pending"
+        );
 
         lifecycle.prepare(1, (800, 600), &sun).expect("view 1");
-        lifecycle.take_record_work(0).expect("view 0");
-        lifecycle.take_record_work(1).expect("view 1");
+        lifecycle.record_work(0).expect("view 0");
+        lifecycle.record_work(1).expect("view 1");
         let mut albedo = sun.clone();
         albedo.ground_albedo[0] = 0.42;
         lifecycle.prepare(0, (1280, 720), &albedo).expect("view 0");
         assert_eq!(
-            lifecycle.take_record_work(1).expect("view 1"),
+            lifecycle.record_work(1).expect("view 1"),
             RecordWork {
                 static_tables: true,
                 sky_view: true,
             },
             "a static parameter change rebuilds both tables and every prepared view"
         );
-        assert!(
-            lifecycle.views[0]
-                .as_ref()
-                .expect("view 0")
-                .sky_view_pending,
-            "another view's unconsumed sky view stays pending"
+        lifecycle.observe_submission(0b0010, true);
+        assert_eq!(
+            lifecycle.record_work(0).expect("view 0"),
+            RecordWork {
+                static_tables: false,
+                sky_view: true,
+            },
+            "only the submitted view's sky view is acknowledged"
         );
         let before = lifecycle.clone();
         assert_eq!(
-            lifecycle
-                .take_record_work(MAX_VIEWS as u32)
-                .unwrap_err()
-                .code(),
+            lifecycle.record_work(MAX_VIEWS as u32).unwrap_err().code(),
             "sky.invalid"
         );
         assert_eq!(
-            lifecycle.take_record_work(3).unwrap_err().code(),
+            lifecycle.record_work(3).unwrap_err().code(),
             "sky.invalid",
             "an unprepared view refuses"
         );
         assert_eq!(lifecycle.views, before.views);
+        assert_eq!(
+            lifecycle.static_tables_pending,
+            before.static_tables_pending
+        );
     }
 
     #[test]
@@ -1772,7 +2112,8 @@ mod tests {
         drop(mapped);
         readback.unmap();
 
-        // A second record after the dirty work was consumed is still valid: the shared
+        // An unacknowledged second record is valid: pending work stays recorded (and is
+        // re-recorded) until an actual submitted mask acknowledges it, and the shared
         // destination must carry this view's directional lane every time.
         let mut again = device.create_command_encoder(&Default::default());
         resources

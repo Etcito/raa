@@ -5,13 +5,16 @@
 //! moods (`day`, `snow`, `jungle`, `night`) and [`SkyDesc::validate`] refuses invalid
 //! descriptions with `sky.invalid`.
 //!
-//! [`SkyFeature::install`] adds the FeaturePass `sky.env` (order 10: renders the SKY_ENV cube
+//! [`SkyFeature::install`] adds the FeaturePasses `sky.atmosphere` (order 5: records the
+//! Milky Way bake, LUTs and the directional transmission), `sky.cloud-lighting` (order 8: the
+//! backend's panorama/transmittance work), `sky.env` (order 10: renders the SKY_ENV cube
 //! from [`SKY_WGSL`]'s `raa_sky_radiance` and filters it through raa-ibl, when the sky changed
-//! or every frame per [`EnvUpdate`]) and the forward contributor `sky.background` (order 900:
-//! the per-pixel sky at depth 1). The returned [`SkyHandle`] sets and reads the description and
-//! marks the env dirty when the sun moves. Background mode: `sky.env` writes the constant mode
-//! each frame and `sky.background` switches it to sky while enabled, so disabling the
-//! contributor brings back the flat background colour.
+//! or every frame per [`EnvUpdate`]), `sky.cloud-screen` (order 55: the screen march after the
+//! prepass) and the forward contributor `sky.background` (order 900: the per-pixel sky at
+//! depth 1). The returned [`SkyHandle`] sets and reads the description and
+//! [`SkyHandle::diagnostics`] reports the typed per-view submission lifecycle. Background
+//! mode: `sky.env` writes the constant mode each frame and `sky.background` switches it to
+//! sky while enabled, so disabling the contributor brings back the flat background colour.
 
 mod atmosphere;
 mod background;
@@ -19,6 +22,7 @@ mod cloud_backend;
 mod desc;
 mod env_pass;
 mod feature;
+mod observations;
 mod shaders;
 mod state;
 mod time_of_day;
@@ -33,6 +37,7 @@ pub use desc::{
     SkyTransaction,
 };
 pub use feature::{SkyFeature, SkyHandle};
+pub use observations::*;
 pub use time_of_day::*;
 pub use weather::*;
 
