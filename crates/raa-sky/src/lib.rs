@@ -15,6 +15,7 @@
 
 mod atmosphere;
 mod background;
+mod cloud_backend;
 mod desc;
 mod env_pass;
 mod feature;
@@ -23,6 +24,10 @@ mod state;
 mod time_of_day;
 mod weather;
 
+pub use cloud_backend::{
+    CLOUD_SCREEN_UNKNOWN_ALPHA, CloudFrame, CloudInvalidation, CloudViews, M2_CLOUD_SOURCE_PRESENT,
+    cloud_backend_names, registered_cloud_backend_names,
+};
 pub use desc::{
     AtmosphereDesc, CloudDesc, EnvUpdate, LegacyCloudFields, SkyDesc, SkyModel, SkyPreset,
     SkyTransaction,
