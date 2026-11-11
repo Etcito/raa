@@ -1138,9 +1138,11 @@ fn diagnostics_failed_readiness_retains_the_originating_error() {
 
 #[test]
 fn diagnostics_refuse_counters_beyond_safe_js_integers() {
-    let mut diagnostics = SkyDiagnostics::default();
-    diagnostics.weather_generation = MAX_SAFE_COUNTER;
-    diagnostics.invocation = Some(MAX_SAFE_COUNTER);
+    let mut diagnostics = SkyDiagnostics {
+        weather_generation: MAX_SAFE_COUNTER,
+        invocation: Some(MAX_SAFE_COUNTER),
+        ..SkyDiagnostics::default()
+    };
     let ok = serialize_diagnostics(&diagnostics).expect("largest safe counter");
     assert_eq!(ok.weather_generation, MAX_SAFE_COUNTER);
     assert_eq!(ok.invocation, Some(MAX_SAFE_COUNTER));
@@ -1200,10 +1202,12 @@ fn clock_advances_once_per_invocation_and_m08_only_observes_it() {
 fn weather_getter_serializes_authored_current_and_cycle_with_target_text() {
     let fair = Weather::by_name("fair").unwrap();
     let storm = Weather::by_name("storm").unwrap();
-    let mut settings = WeatherSettings::default();
-    settings.target = storm;
-    settings.seed = 9;
-    settings.transition_seconds = 4.0;
+    let settings = WeatherSettings {
+        target: storm,
+        seed: 9,
+        transition_seconds: 4.0,
+        ..WeatherSettings::default()
+    };
     let state = ResolvedWeatherState {
         settings,
         current: fair,
