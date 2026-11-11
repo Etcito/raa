@@ -34,6 +34,7 @@ SOFTWARE.
 */
 
 mod history;
+mod shaders;
 #[cfg(test)]
 mod tests;
 

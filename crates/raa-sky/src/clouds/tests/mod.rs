@@ -1,6 +1,7 @@
 //! Focused tests of the M2 cloud backend.
 
 mod history;
+mod shaders;
 
 use raa_math::Mat4;
 use raa_scene::{Camera, DirectionalLight};
