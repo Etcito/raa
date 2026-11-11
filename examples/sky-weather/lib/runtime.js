@@ -292,11 +292,38 @@ export function createSkyPageRunner(options) {
     };
   }
 
+  // Readiness, publication and submittedInvocation are CPU-side submission facts: the GPU may
+  // still be executing the prepared work (atmosphere LUTs, Milky Way bake, the unpaced warm-up
+  // and observation frames). Chrome delivers no requestAnimationFrame while that backlog drains.
+  // Modes whose observation awaits the IBL readback drain it there; env-off (the cleared
+  // environment never publishes) settled at once and started the 30/300 rAF collector behind
+  // seconds of GPU work, so warm-up frame 1 never arrived (run 13659). probeNonEmpty resolves
+  // from a map readback queued after every earlier submission, i.e. once the GPU completed it.
+  async function awaitGpuCompletion(target, scene, variant, budget) {
+    if (typeof target.probeNonEmpty !== 'function') fail('engine.probeNonEmpty is required to await GPU completion');
+    const remaining = budget.remainingMs();
+    if (remaining <= 0) fail('operation deadline expired before the GPU completed the prepared frames');
+    let timer = null;
+    const expired = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(
+        `sky page runner: the GPU did not complete the prepared frames within the remaining ${Math.round(remaining)} ms of the operation deadline`)), remaining);
+    });
+    try {
+      const timeMs = variantTimeMs(variant);
+      if (typeof scene.frame === 'function') scene.frame(target, timeMs, variant);
+      await Promise.race([target.probeNonEmpty(timeMs), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function collectMeasurements(target, scene, variant, clock, budget) {
     if (variant.measurement === undefined) return [];
     if (canvas.width !== MEASUREMENT_WIDTH || canvas.height !== MEASUREMENT_HEIGHT) {
       fail(`feature measurement requires a ${MEASUREMENT_WIDTH}x${MEASUREMENT_HEIGHT} canvas at device pixel ratio 1`);
     }
+    checkBudget(budget, 'feature measurement');
+    await awaitGpuCompletion(target, scene, variant, budget);
     checkBudget(budget, 'feature measurement');
     const measurement = await collectFeatureMeasurement(
       () => renderAt(target, scene, variant, variantTimeMs(variant)),

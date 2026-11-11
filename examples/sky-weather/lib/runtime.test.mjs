@@ -413,3 +413,55 @@ test('captureCurrent rejects invalid canvases and unusable documents', async () 
     if (originalDocument !== undefined) globalThis.document = originalDocument;
   }
 });
+
+// Run 13659 (atmosphere/env-off): readiness and observation are submission facts, so a mode
+// whose observation awaits no readback reached the rAF collector while the GPU still drained
+// the prepared work, and Chrome delivered no warm-up frame 1 within 10 s. The collector must
+// start only after a readback proves the GPU completed every earlier submission.
+test('feature measurement starts only after the GPU completed the prepared frames', async t => {
+  const setup = createRunner(t, { namespace: measuredNamespace() });
+  const order = [];
+  let drained = false;
+  const frame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = callback => {
+    order.push(drained ? 'frame' : 'frame-before-gpu-completion');
+    return frame(callback);
+  };
+  setup.factory.onCreate = () => queueMicrotask(() => {
+    const engine = setup.factory.engines.at(-1).engine;
+    engine.probeNonEmpty = async () => {
+      order.push('probe');
+      await new Promise(resolve => setTimeout(resolve, 5));
+      drained = true;
+      return true;
+    };
+  });
+  const result = await setup.runner.run(input({ remainingMs: 5000 }));
+  assert.equal(result.measurements.length, 1);
+  assert.equal(order[0], 'probe');
+  assert.ok(!order.includes('frame-before-gpu-completion'), 'no animation frame was requested before GPU completion');
+  assert.equal(order.filter(entry => entry === 'frame').length, 330);
+});
+
+test('a GPU that never completes the prepared frames fails at the operation deadline, not as a missing frame', async t => {
+  const setup = createRunner(t, { namespace: measuredNamespace() });
+  setup.factory.onCreate = () => queueMicrotask(() => {
+    setup.factory.engines.at(-1).engine.probeNonEmpty = () => new Promise(() => {});
+  });
+  await assert.rejects(setup.runner.run(input({ remainingMs: 200 })),
+    /the GPU did not complete the prepared frames within the remaining \d+ ms of the operation deadline/);
+  assert.equal(setup.clock.frames, 0);
+  assert.equal(setup.record.drawImage.length, 0);
+  assert.match(setup.status.textContent, /^failed:/);
+});
+
+test('scenes without a feature measurement do not wait for a GPU completion probe', async t => {
+  const setup = createRunner(t);
+  let probes = 0;
+  setup.factory.onCreate = () => queueMicrotask(() => {
+    setup.factory.engines.at(-1).engine.probeNonEmpty = async () => { probes += 1; return true; };
+  });
+  const result = await setup.runner.run(input());
+  assert.deepEqual(result.measurements, []);
+  assert.equal(probes, 0);
+});
