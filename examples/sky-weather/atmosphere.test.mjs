@@ -579,6 +579,16 @@ test('volumetric cloud flags are required and missing, null and false evidence r
     assert.equal(named(observation, 'cloud-flags-current')[0].passed, false, `${mode} views omitted`);
     assert.throws(() => validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames), new RegExp(`${rowOf(mode).id}: required`), `${mode} views omitted`);
   }
+  // The two-view row declares two views: a reader reporting only one fails the flag on its own and rejects the row.
+  const oneOfTwo = await runWith('multi-view', engine => {
+    const read = engine.skyWeatherDiagnostics;
+    engine.skyWeatherDiagnostics = () => { const d = read(); return { ...d, views: d.views.slice(0, 1) }; };
+  });
+  assert.equal(named(oneOfTwo.observation, 'cloud-flags-current')[0].passed, false, 'multi-view one of two views');
+  assert.throws(() => validateRequiredFacts({ ...rowOf('multi-view'), requiredFacts: ['assertion:cloud-flags-current'] }, factsOf(oneOfTwo.observation), atmosphere.factNames),
+    /multi-view-same-clock: required assertion:cloud-flags-current/, 'the flag alone rejects the two-view row');
+  assert.throws(() => validateRequiredFacts(rowOf('multi-view'), factsOf(oneOfTwo.observation), atmosphere.factNames),
+    /multi-view-same-clock: required/, 'the two-view row rejects');
   // A reader that reports no views at all cannot satisfy the flag.
   const none = atmosphere.featureAssertions(fakeEngine(), 'resize', [], { views: [] }).find(a => a.name === 'cloud-flags-current');
   assert.equal(none.passed, false);

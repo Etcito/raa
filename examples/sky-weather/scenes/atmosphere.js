@@ -404,6 +404,8 @@ export const IBL_SETTINGS = { 'ibl-on': { diffuse: 1, specular: 1 }, 'ibl-off': 
   'ibl-diffuse': { diffuse: 1, specular: 0 }, 'ibl-specular': { diffuse: 0, specular: 1 } };
 export const MULTI_VIEW_RECTS = [{ x: 0, y: 0, width: .5, height: 1 }, { x: .5, y: 0, width: .5, height: 1 }];
 export const MULTI_VIEW_ASPECT = (1280 * .5) / 720;
+// The views each mode declares: multi-view configures the MULTI_VIEW_RECTS viewports, every other mode renders one.
+const declaredViews = mode => (mode === 'multi-view' ? MULTI_VIEW_RECTS.length : 1);
 // View 1 looks at the same subjects from the right; tests prove its frustum overlap.
 export const secondViewCamera = { eye: [4.5, 3, 9.5], target: [.5, 1.8, -8], fovYDeg: 55, near: .1, far: 300 };
 // The camera-cut mode renders from this camera first and then cuts to its selection camera.
@@ -558,8 +560,11 @@ export function featureAssertions(engine, mode, records, d) {
         && d.views.every(v => v.invocation === d.invocation && v.submittedInvocation === d.submittedInvocation),
       detail: `one timeOfDay snapshot serves both views; engine invocation ${d.invocation}, submitted ${d.submittedInvocation}; views ${viewFacts(d)}` });
   }
-  // The M2 volumetric backend renders the cloud screen and panorama: every view must publish both as current.
-  out.push({ name: 'cloud-flags-current', passed: d.views.length > 0 && d.views.every(v => v.cloudPanoramaValid === true && v.cloudScreenValid === true),
+  // The M2 volumetric backend renders the cloud screen and panorama. Every view the mode declares must be reported,
+  // and every reported view must publish both flags as current; a missing view leaves its evidence unreported.
+  const reportedViews = new Set(d.views.map(v => v.view)).size;
+  out.push({ name: 'cloud-flags-current', passed: d.views.length > 0 && reportedViews >= declaredViews(mode)
+      && d.views.every(v => v.cloudPanoramaValid === true && v.cloudScreenValid === true),
     detail: JSON.stringify(d.views.map(v => [v.view, v.cloudScreenValid, v.cloudPanoramaValid])) });
   return out;
 }
