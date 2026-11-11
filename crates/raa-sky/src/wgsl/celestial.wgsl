@@ -22,10 +22,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 // Adapted from solstice@7e465b599c13da165948ebaa44df824c36c3ae07
-// crates/solstice-render/shaders/sky/bodies.wgsl:14,23-205.
+// crates/solstice-render/shaders/sky/bodies.wgsl:14,23-294.
 // Requires atmosphere.wgsl and the shared milky_way.wgsl noise helpers.
 // The composer supplies S10 group 2: raa_physical_sky (0),
-// raa_sky_transmittance (1), raa_sky_clamp_sampler (6). No bindings here.
+// raa_sky_transmittance (1), raa_sky_milky_way (5), clamp sampler (6),
+// and repeat-U/clamp-V sampler (7). No bindings here.
 // Authored discs.xy replace the source sun display constants; the lunar radius
 // remains the source 0.0075. Pixel angles are guarded for zero-sized footprints.
 const raa_celestial_moon_radius: f32 = 0.0075;
@@ -214,3 +215,107 @@ fn moon_body(direction: vec3f, pixel_angle: f32) -> vec4f {
     return vec4f(radiance * cover, cover);
 }
 
+// Right ascension 0 along x, 6 hours along y, celestial north along z.
+fn raa_celestial_orientation(direction: vec3f) -> vec3f {
+    let pole = raa_physical_sky.pole.xyz;
+    let equinox = raa_physical_sky.equinox.xyz;
+    return vec3f(dot(direction, equinox), dot(direction, cross(pole, equinox)), dot(direction, pole));
+}
+
+// ---- The stars ----
+
+// A star's colour from its surface temperature in kelvin: Planck's law at red, green and blue,
+// set to equal luminance, and paled, as the eye sees star colours only faintly.
+fn raa_celestial_star_color(kelvin: f32) -> vec3f {
+    let wavelength = vec3f(0.610, 0.550, 0.465); // micrometres
+    let planck = 1.0 / (pow(wavelength, vec3f(5.0)) * (exp(14388.0 / (wavelength * kelvin)) - 1.0));
+    return mix(vec3f(1.0), planck / dot(planck, vec3f(0.2126, 0.7152, 0.0722)), 0.65);
+}
+
+// Half the thickness of the shell of cells that stars are scattered through, in cells. Thin, so
+// that every star lies within half a cell of the sphere and is found among the eight cells
+// nearest the view direction, rather than the twenty-seven around it.
+const raa_celestial_star_shell: f32 = 0.15;
+
+// One layer of stars from `brightest` to `faintest` magnitude, scattered through a shell of cells
+// `cells` across the unit sphere, with `chance` of a star in each; `height` is the view
+// direction's y, for twinkling. Each star is a soft spot about a pixel across, whatever the
+// resolution, so it holds steady under jitter.
+fn raa_celestial_star_layer(c: vec3f, height: f32, cells: f32, chance: f32, brightest: f32, faintest: f32, salt: u32, pixel_angle: f32) -> vec3f {
+    let p = c * cells;
+    let base = floor(p - vec3f(0.5));
+    // Spots end where a star might otherwise be cut off by the cells searched.
+    let footprint = max(pixel_angle, 1.0e-8);
+    let reach = min(footprint * 3.5, (0.5 - raa_celestial_star_shell) / cells);
+    var light = vec3f(0.0);
+    for (var i = 0u; i < 8u; i++) {
+        let cell = base + vec3f(f32(i & 1u), f32((i >> 1u) & 1u), f32(i >> 2u));
+        let ic = bitcast<vec3u>(vec3i(cell));
+        let seed = raa_milky_way_pcg(ic.x ^ raa_milky_way_pcg(ic.y ^ raa_milky_way_pcg(ic.z ^ salt)));
+        if raa_milky_way_hash_to_unit(seed) > chance {
+            continue;
+        }
+        let point = cell + vec3f(raa_milky_way_hash_to_unit(seed + 1u), raa_milky_way_hash_to_unit(seed + 2u), raa_milky_way_hash_to_unit(seed + 3u));
+        // Only points in the shell count, which spreads stars evenly over the sphere.
+        let radius = length(point);
+        if abs(radius - cells) > raa_celestial_star_shell {
+            continue;
+        }
+        // The chord between unit vectors: the angle, without acos's lost precision near 1.
+        let angle = length(point / radius - c);
+        if angle > reach {
+            continue;
+        }
+        // Magnitude: each fainter step holds about three times as many stars.
+        let u = raa_milky_way_hash_to_unit(seed + 4u);
+        let range = exp2((brightest - faintest) * 0.5 * 3.3219);
+        let magnitude = faintest + 2.0 * log2(mix(range, 1.0, u)) * 0.30103;
+        // Shown with a gentler spread of brightness than the true 2.5 per magnitude, as the eye
+        // and long exposures see them, so the faint ones still register.
+        let brightness = exp2(-magnitude * 0.16 * 3.3219);
+        // Mostly sun-like, some cool and red, a few hot and blue.
+        let t = raa_milky_way_hash_to_unit(seed + 5u);
+        let kelvin = select(mix(3200.0, 7500.0, t / 0.85), mix(9000.0, 25000.0, (t - 0.85) / 0.15), t > 0.85);
+        // Twinkling, from turbulence in the air: stronger lower down, through more of it.
+        let rate = mix(5.0, 11.0, raa_milky_way_hash_to_unit(seed + 6u));
+        let phase = raa_milky_way_hash_to_unit(seed + 7u) * raa_milky_way_tau;
+        let strength = mix(0.4, 0.1, smoothstep(0.0, 0.6, height));
+        let twinkle = 1.0 + strength * (0.6 * sin(raa_physical_sky.planet.z * rate + phase) + 0.4 * sin(raa_physical_sky.planet.z * rate * 2.3 + phase * 1.7));
+        // Brighter stars look larger, as they spill across the eye.
+        let spread = footprint * (0.7 + 0.35 * sqrt(brightness));
+        light += raa_celestial_star_color(kelvin) * brightness * twinkle * exp(-(angle * angle) / (spread * spread));
+    }
+    return light;
+}
+
+// The stars and the Milky Way towards `direction`, through the air.
+fn raa_celestial_night(direction: vec3f, pixel_angle: f32) -> vec3f {
+    if raa_physical_sky.pole.w <= 0.0 || direction.y < -0.02 {
+        return vec3f(0.0);
+    }
+    let c = raa_celestial_orientation(direction);
+    let baked = textureSampleLevel(raa_sky_milky_way, raa_sky_repeat_sampler, raa_milky_way_celestial_uv(c), 0.0);
+    let galaxy = vec4f(baked.rgb * baked.rgb * raa_milky_way_range, baked.a);
+    // A few bright stars, more middling ones, and many faint ones, thickest along the Milky Way.
+    // About 150, 2500 and 8000 to 13000 over the whole sky.
+    var stars = raa_celestial_star_layer(c, direction.y, 12.0, 0.28, -1.0, 2.5, 1u, pixel_angle)
+        + raa_celestial_star_layer(c, direction.y, 28.0, 0.85, 2.5, 4.5, 2u, pixel_angle)
+        + raa_celestial_star_layer(c, direction.y, 60.0, min(0.6 * (1.0 + 0.7 * galaxy.a), 1.0), 4.5, 6.5, 3u, pixel_angle);
+    return (stars + galaxy.rgb * 0.05) * raa_physical_sky.pole.w * air_transmittance(direction);
+}
+
+// Common additive evaluator; no pass, shared-resource redeclaration or light attenuation seam.
+// Uniform intensities are raw accepted daylight/night factors, never dominant-light radiance.
+// Callers supply a world direction; scale before normalization to keep finite extremes safe.
+fn raa_celestial_radiance(direction: vec3<f32>) -> vec3<f32> {
+    let scale = max(max(abs(direction.x), abs(direction.y)), abs(direction.z));
+    if scale <= 0.0 {
+        return vec3f(0.0);
+    }
+    let ray = normalize(direction / scale);
+    let pixel_angle = max(raa_physical_sky.discs.w, 1.0e-8);
+    let moon = moon_body(ray, pixel_angle);
+    // moon.rgb already includes coverage: only the background night light is occluded.
+    return sun_body(ray, pixel_angle) + moon.rgb
+        + raa_celestial_night(ray, pixel_angle) * (1.0 - moon.a);
+}

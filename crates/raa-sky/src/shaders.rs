@@ -24,20 +24,33 @@ const ATMOSPHERE_LUTS_SRC: &str = include_str!("wgsl/atmosphere_luts.wgsl");
 const MILKY_WAY_SRC: &str = include_str!("wgsl/milky_way.wgsl");
 const MILKY_WAY_BAKE_SRC: &str = include_str!("wgsl/milky_way_bake.wgsl");
 
-/// Body-helper composition harness. Card 7432 owns the production celestial builder
-/// and evaluator; it will compose these same sources with the S10 sky bindings.
+/// Retained body-helper harness, using the production celestial composition.
 #[cfg(test)]
 pub(crate) fn celestial_body_test_module_wgsl(entry: &str) -> String {
+    format!("{}\n{entry}", celestial_module_wgsl())
+}
+
+/// Common celestial evaluator with the canonical S10 evaluation bindings, without entries.
+/// Card 7436 appends both physical sky consumers to this module. Bind the map through
+/// `AtmosphereResources::milky_way()`; allocation is not submitted-bake readiness.
+/// Binding 7 requires U repeat / V clamp, while binding 6 clamps both axes.
+pub(crate) fn celestial_module_wgsl() -> String {
     let bodies = include_str!("wgsl/celestial.wgsl");
     let bindings = "
 @group(2) @binding(0) var<uniform> raa_physical_sky: PhysicalSkyGpu;
 @group(2) @binding(1) var raa_sky_transmittance: texture_2d<f32>;
+@group(2) @binding(2) var raa_sky_view: texture_2d<f32>;
+@group(2) @binding(3) var raa_sky_cloud_panorama: texture_2d<f32>;
+@group(2) @binding(4) var raa_sky_cloud_screen: texture_2d<f32>;
+@group(2) @binding(5) var raa_sky_milky_way: texture_2d<f32>;
 @group(2) @binding(6) var raa_sky_clamp_sampler: sampler;
+@group(2) @binding(7) var raa_sky_repeat_sampler: sampler;
 ";
-    format!(
-        "{PRELUDE_WGSL}\n{LIB_WGSL}\n{ATMOSPHERE_SRC}\n{MILKY_WAY_SRC}\n{bindings}\n{bodies}\n{entry}"
-    )
+    format!("{PRELUDE_WGSL}\n{LIB_WGSL}\n{ATMOSPHERE_SRC}\n{MILKY_WAY_SRC}\n{bindings}\n{bodies}")
 }
+
+// Pin the producer signature until the physical consumers land, without a lint exemption.
+const _: fn() -> String = celestial_module_wgsl;
 
 /// Immutable celestial-map bake, entry `raa_milky_way_bake`, with empty groups 0/1
 /// and one write-only Rgba8Unorm D2 storage output at group 2 binding 0.

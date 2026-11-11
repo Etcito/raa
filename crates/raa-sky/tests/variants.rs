@@ -607,3 +607,102 @@ fn celestial_bodies_retain_surface_and_display_contracts() {
         );
     }
 }
+
+#[test]
+fn celestial_evaluator_composes_with_canonical_resources() {
+    use wgpu::naga::{AddressSpace, TypeInner, front::wgsl, valid};
+    let source = format!(
+        "{}\n@fragment fn fs_celestial(@builtin(position) p: vec4f) -> @location(0) vec4f {{
+            return vec4f(raa_celestial_radiance(vec3f(p.xy, 1.0)), 1.0);
+        }}",
+        shaders::celestial_module_wgsl()
+    );
+    Composer::validate(&source).expect("common celestial evaluator validates");
+    let module = wgsl::parse_str(&source).unwrap();
+    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+        .validate(&module)
+        .unwrap();
+    let mut private = Vec::new();
+    let mut used = Vec::new();
+    let mut budget = [0; 4]; // sampled textures, samplers, uniforms, storage buffers
+    for (handle, global) in module.global_variables.iter() {
+        let Some(binding) = &global.binding else {
+            continue;
+        };
+        assert!(binding.group < 4);
+        if binding.group == 2 {
+            private.push(binding.binding);
+        }
+        if !info.get_entry_point(0)[handle].is_empty() {
+            used.push((binding.group, binding.binding));
+        }
+        // S10 previous instances (group 0 binding 8) are VERTEX-only. Include all
+        // other declared shared resources in the conservative fragment budget.
+        if (binding.group, binding.binding) == (0, 8) {
+            assert!(info.get_entry_point(0)[handle].is_empty());
+            continue;
+        }
+        match module.types[global.ty].inner {
+            TypeInner::Image { .. } => budget[0] += 1,
+            TypeInner::Sampler { .. } => budget[1] += 1,
+            _ if global.space == AddressSpace::Uniform => budget[2] += 1,
+            _ if matches!(global.space, AddressSpace::Storage { .. }) => budget[3] += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(private, (0..8).collect::<Vec<_>>());
+    assert_eq!(used, [(2, 0), (2, 1), (2, 5), (2, 6), (2, 7)]);
+    for (count, limit) in budget.into_iter().zip([15, 5, 7, 5]) {
+        assert!(
+            count <= limit,
+            "composed resource count {count} exceeds {limit}"
+        );
+    }
+}
+
+#[test]
+fn celestial_decode_occlusion_and_finite_input_guards_are_retained() {
+    let source = include_str!("../src/wgsl/celestial.wgsl");
+    for contract in [
+        "baked.rgb * baked.rgb * raa_milky_way_range, baked.a",
+        "dot(direction, cross(pole, equinox))",
+        "raa_physical_sky.pole.w",
+        "raa_physical_sky.planet.z",
+        "vec3f(0.610, 0.550, 0.465)",
+        "12.0, 0.28, -1.0, 2.5, 1u",
+        "28.0, 0.85, 2.5, 4.5, 2u",
+        "60.0, min(0.6 * (1.0 + 0.7 * galaxy.a), 1.0)",
+        "let footprint = max(pixel_angle, 1.0e-8);",
+        "let spread = footprint *",
+        "if scale <= 0.0",
+        "normalize(direction / scale)",
+        "sun_body(ray, pixel_angle) + moon.rgb",
+        "raa_celestial_night(ray, pixel_angle) * (1.0 - moon.a)",
+    ] {
+        assert!(
+            source.contains(contract),
+            "missing celestial contract: {contract}"
+        );
+    }
+    assert!(!source.contains("moon.rgb *"));
+    assert!(!source.contains("raa_directional_radiance"));
+    // Exercise the WGSL call boundary for finite extremes, zero and both celestial poles.
+    // These are validation fixtures, not a CPU reimplementation or GPU output claim.
+    let calls = [
+        "vec3f(0.0)",
+        "vec3f(0.0, 1.0, 0.0)",
+        "vec3f(0.0, -1.0, 0.0)",
+        "vec3f(3.0e38, -3.0e38, 3.0e38)",
+        "vec3f(1.0e-30, 0.0, 0.0)",
+    ];
+    let body = calls
+        .map(|ray| format!("c += raa_celestial_radiance({ray});"))
+        .join("\n");
+    let source = format!(
+        "{}\n@fragment fn fs_finite() -> @location(0) vec4f {{
+            var c = vec3f(0.0); {body} return vec4f(c, 1.0);
+        }}",
+        shaders::celestial_module_wgsl()
+    );
+    Composer::validate(&source).expect("finite-input celestial call fixtures validate");
+}
