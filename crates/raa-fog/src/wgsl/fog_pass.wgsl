@@ -1,6 +1,9 @@
 // Fog pass (S12 `fog`, order 68): composed as PRELUDE_WGSL + fog_slot.wgsl + this file.
 // Group 0 = the LitHandle frame bind group, group 1 = lighting, group 2 private (below).
 // Reads hdr.src() and the scene depth, applies `raa_height_apply` per pixel and writes HDR.
+// Group 1 is the shared lighting layout (0..13, 15, 16): the published environment and the
+// weather lighting uniform read by `raa_directional_radiance`. Background pixels (depth 1,
+// physical/legacy sky or the flat colour) get only the horizon-weighted height part.
 
 // Scene depth (Depth32Float, clip z [0, 1], 1 = sky).
 @group(2) @binding(0) var fog_depth: texture_depth_2d;

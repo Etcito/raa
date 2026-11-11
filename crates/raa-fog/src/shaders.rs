@@ -9,11 +9,19 @@ use raa_shader::{PRELUDE_WGSL, SlotId, SlotProvider};
 /// The `Fog` slot provider `height`: `raa_slot_fog` plus private `raa_height_*` helpers
 /// (height fog optical depth mirroring `integral.rs`, env/sun fog radiance, aerial
 /// perspective). `raa_height_apply(color, world_pos, camera, sky)` is also used by the pass.
+///
+/// Uses only PRELUDE names. The ambient fog radiance samples the filtered environment only
+/// while an accepted publication is bound (`raa_env_sh.info.w`), otherwise the flat
+/// `raa_frame.ambient`; the sun inscatter applies the S11 `raa_directional_radiance` once
+/// to the raw `raa_frame.sun_color`. Transparent, fur and blended particle variants reach
+/// it through `raa_slot_fog`; the pass is the only aerial-perspective implementation.
 pub const FOG_SLOT_WGSL: &str = include_str!("wgsl/fog_slot.wgsl");
 
 /// Fullscreen pass body, composed after PRELUDE and [`FOG_SLOT_WGSL`] by
 /// [`fog_pass_source`]. Entry points `vs_main` (3-vertex triangle) and `fs_main` (HDR).
-/// Group 2 (private): 0 depth (`texture_depth_2d`), 1 hdr.src(), 2 linear clamp sampler.
+/// Group 0 is the lit frame, group 1 the shared lighting layout (bindings 0..13, 15, 16,
+/// including the weather lighting uniform), group 2 (private): 0 depth
+/// (`texture_depth_2d`), 1 hdr.src(), 2 linear clamp sampler.
 pub const FOG_PASS_WGSL: &str = include_str!("wgsl/fog_pass.wgsl");
 
 /// Provider name of the fog slot provider.

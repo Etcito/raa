@@ -6,7 +6,18 @@
 //! change-driven; transparent, fur and blended particle shading read the same fields
 //! through `raa_slot_fog`. Each frame it draws a fullscreen triangle from hdr.src() into
 //! hdr.dst() (group 0 = the lit frame, 1 = lighting, 2 = depth, hdr.src() and a sampler)
-//! and swaps. Disabling writes the `clear` description, so the slot becomes identity.
+//! and swaps. Disabling writes the `clear` description, so the slot becomes identity;
+//! re-enabling rewrites the handle's description at the next prepare.
+//!
+//! Sky integration: the fog pass stays the only scene aerial-perspective pass (no second
+//! aerial pass). It owns only the `EnvGpu` fog/fog_color/aerial fields and never binds,
+//! restores or caches environment resources: it reads group 1 as currently published. The
+//! shader samples the filtered environment only while an accepted IBL publication is bound
+//! (`EnvSh.info.w`); after `IblHandle::invalidate` / `clear_env` (sky.env disabled, model
+//! or source replaced) it falls back to the flat ambient, so a stale environment cannot
+//! leak into fog. Sun inscatter crosses the S11 `raa_directional_radiance` boundary once.
+//! Background pixels (physical or legacy sky, or the flat colour) receive only the
+//! horizon-weighted height fog; transparent, fur and particle shading reuse the same slot.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -74,6 +85,19 @@ fn sync_env<'e>(
 /// The env of a disabled pass: the `clear` description (density 0, aerial 0).
 fn disable_env(env: &mut EnvGpu) {
     FogDesc::default().write_env(env);
+}
+
+/// Pass enable/disable: disabling writes the `clear` description; either way the written
+/// description is forgotten so the next enabled prepare writes the handle's one again.
+fn toggle_env<'e>(
+    enabled: bool,
+    written: &mut Option<FogDesc>,
+    env: impl FnOnce() -> &'e mut EnvGpu,
+) {
+    if !enabled {
+        disable_env(env());
+    }
+    *written = None;
 }
 
 fn layout_entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
@@ -227,11 +251,9 @@ impl FeaturePass for FogPass {
 
     /// Disabling writes the `clear` description (the slot becomes identity); either way the
     /// next enabled prepare writes the handle's description again.
+    /// Environment resources are not touched: they belong to sky.env/IBL publication.
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
-        if !enabled {
-            disable_env(lighting.env_mut());
-        }
-        self.written = None;
+        toggle_env(enabled, &mut self.written, || lighting.env_mut());
     }
 
     /// Writes the description into the env fog fields when it changed (or after enabling).
@@ -388,8 +410,7 @@ mod tests {
         assert_eq!(env.fog[0], haze.density);
         assert!(!sync_env(haze, &mut written, || &mut env), "unchanged desc");
         // disabling: `clear` in the env and a rewrite on the next enabled prepare
-        disable_env(&mut env);
-        written = None;
+        toggle_env(false, &mut written, || &mut env);
         assert_eq!(env.fog[0], 0.0);
         assert_eq!(env.aerial[0], 0.0);
         assert_eq!(env.fog_color[3], 0.0);
@@ -398,6 +419,58 @@ mod tests {
             env.aerial,
             [haze.aerial_strength, haze.aerial_distance_m, 0.0, 0.0]
         );
+    }
+
+    #[test]
+    fn disable_reenable_cycles_restore_the_current_desc_once() {
+        let mut env = EnvGpu::default();
+        let mut written = None;
+        let haze = FogDesc::preset("haze").unwrap();
+        let snow = FogDesc::preset("snow").unwrap();
+        assert!(sync_env(haze, &mut written, || &mut env));
+        for desc in [haze, snow, haze] {
+            toggle_env(false, &mut written, || &mut env);
+            assert_eq!(env.fog[0], 0.0, "disabled fog is identity");
+            assert_eq!(env.aerial[0], 0.0, "disabled aerial is identity");
+            // re-enabling writes nothing itself (the env keeps `clear` until prepare) ...
+            toggle_env(true, &mut written, || -> &mut EnvGpu {
+                panic!("enabling must not touch the env")
+            });
+            assert_eq!(env.fog[0], 0.0);
+            // ... and the next prepare writes the description current at that time, once.
+            assert!(sync_env(desc, &mut written, || &mut env));
+            assert_eq!(env.fog[0], desc.density);
+            assert_eq!(env.fog_color[3], desc.inscatter);
+            assert!(!sync_env(desc, &mut written, || &mut env));
+        }
+        // enabling an enabled pass also forces one rewrite (env edited by someone else).
+        toggle_env(true, &mut written, || -> &mut EnvGpu { unreachable!() });
+        assert!(sync_env(haze, &mut written, || &mut env));
+    }
+
+    #[test]
+    fn fog_writes_only_its_env_fields_and_leaves_sky_lanes() {
+        let mut env = EnvGpu {
+            zenith: [0.1, 0.2, 0.9, 1.0],
+            horizon: [0.9, 0.6, 0.3, 1.0],
+            background: [0.05, 0.06, 0.08, 1.0],
+            ..EnvGpu::default()
+        };
+        let before = env.clone();
+        let mut written = None;
+        assert!(sync_env(
+            FogDesc::preset("jungle").unwrap(),
+            &mut written,
+            || &mut env
+        ));
+        toggle_env(false, &mut written, || &mut env);
+        let restore = |e: &EnvGpu| EnvGpu {
+            fog: before.fog,
+            fog_color: before.fog_color,
+            aerial: before.aerial,
+            ..e.clone()
+        };
+        assert_eq!(restore(&env), before, "sky/background lanes are not fog's");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -444,6 +517,100 @@ mod tests {
             assert!(error.is_none(), "GPU validation error: {error:?}");
             assert_eq!(pipeline.borrow().lighting().env().fog[0], 0.0);
             // Leaked like the other GPU tests (GL backend crash at device drop on WSL).
+            std::mem::forget(handle);
+            std::mem::forget(lit);
+            std::mem::forget(graph);
+            std::mem::forget(target);
+            std::mem::forget(pipeline);
+            std::mem::forget(gpu);
+        }
+
+        /// One frame; returns the validation error, if any.
+        fn frame(
+            gpu: &GpuContext,
+            graph: &mut FrameGraph,
+            target: &OffscreenTarget,
+        ) -> Option<wgpu::Error> {
+            let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+            let commands = graph.execute(gpu, target.view(), (SIZE, SIZE)).unwrap();
+            gpu.queue().submit([commands]);
+            gpu.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .unwrap();
+            block_on(errors.pop())
+        }
+
+        /// A 1x1 six-layer cube standing for an accepted filtered environment publication.
+        fn published_cube(gpu: &GpuContext) -> wgpu::TextureView {
+            let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("raa-fog.test.env"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 6,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::Cube),
+                ..Default::default()
+            })
+        }
+
+        #[test]
+        fn disable_reenable_and_cleared_environment_frames_validate() {
+            let test = "disable_reenable_and_cleared_environment_frames_validate";
+            let Some(gpu) = software_gpu() else {
+                skip(test, "software_gpu returned None");
+                return;
+            };
+            let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, FORMAT, false)));
+            let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).unwrap();
+            let handle = FogFeature::install(&gpu, &pipeline, &mut lit).unwrap();
+            let haze = FogDesc::preset("haze").unwrap();
+            handle.set(haze).unwrap();
+            let target = OffscreenTarget::new(&gpu, SIZE, SIZE, FORMAT);
+            let mut graph = FrameGraph::new(FORMAT);
+            Pipeline::install(&pipeline, &mut graph);
+            graph.compile().unwrap();
+            let fog = |p: &Rc<RefCell<Pipeline>>| p.borrow().lighting().env().fog[0];
+
+            assert!(frame(&gpu, &mut graph, &target).is_none());
+            assert_eq!(fog(&pipeline), haze.density);
+            // Disable: identity fog, kept across frames; order 68 is preserved.
+            pipeline.borrow_mut().set_enabled(NAME, false).unwrap();
+            assert_eq!(fog(&pipeline), 0.0);
+            assert!(frame(&gpu, &mut graph, &target).is_none());
+            assert_eq!(fog(&pipeline), 0.0);
+            let info = pipeline.borrow().passes();
+            let info = info.iter().find(|i| i.name == NAME).unwrap();
+            assert_eq!(info.order, ORDER);
+            // Re-enable: the current description is written at the next prepare.
+            pipeline.borrow_mut().set_enabled(NAME, true).unwrap();
+            assert!(frame(&gpu, &mut graph, &target).is_none());
+            assert_eq!(fog(&pipeline), haze.density);
+            // A published environment, then a cleared one (IBL invalidated): fog keeps its
+            // fields, binds whatever is published and every frame stays valid.
+            let cube = published_cube(&gpu);
+            let sh = [[0.0; 4]; 9];
+            pipeline
+                .borrow_mut()
+                .lighting_mut()
+                .set_env(cube, sh, [1.0, 1.0, 0.0, 1.0]);
+            assert!(frame(&gpu, &mut graph, &target).is_none());
+            pipeline.borrow_mut().lighting_mut().clear_env();
+            assert!(frame(&gpu, &mut graph, &target).is_none());
+            assert_eq!(fog(&pipeline), haze.density);
+            // Disabling with a cleared environment and re-enabling also stays valid.
+            pipeline.borrow_mut().set_enabled(NAME, false).unwrap();
+            pipeline.borrow_mut().set_enabled(NAME, true).unwrap();
+            assert!(frame(&gpu, &mut graph, &target).is_none());
+            assert_eq!(fog(&pipeline), haze.density);
             std::mem::forget(handle);
             std::mem::forget(lit);
             std::mem::forget(graph);

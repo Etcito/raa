@@ -1,6 +1,12 @@
 // Fog slot provider `height` (S11 `Fog`, priority 10): exponential height fog and aerial
 // perspective from EnvGpu.fog / fog_color / aerial. Uses only PRELUDE names; every helper
 // starts with `raa_height_`. The optical depth mirrors crates/raa-fog/src/integral.rs.
+// This is the only scene aerial-perspective path (no second aerial pass). Sky coherence:
+// - ambient fog radiance reads the accepted published environment only (EnvSh.info.w set
+//   by the IBL publication); a cleared or pending environment uses the flat FrameGpu
+//   ambient, as the IBL Ambient provider does, so stale cubes are never sampled;
+// - sun inscatter applies the S11 boundary `raa_directional_radiance` exactly once to the
+//   raw FrameGpu sun radiance (identity unless physical atmosphere is enabled).
 
 // Distance in metres toward which sky pixels integrate the height fog.
 const raa_height_sky_distance_m: f32 = 20000.0;
@@ -29,8 +35,12 @@ fn raa_height_optical_depth(origin_y: f32, dir_y: f32, end_m: f32) -> f32 {
     return max(integral, 0.0);
 }
 
-// Env cube radiance at its max mip (the blurred sky) in direction `dir`.
+// Published env cube radiance at its max mip (the blurred sky) in direction `dir`; the
+// flat FrameGpu ambient while no environment is published (info.w < 0.5).
 fn raa_height_env(dir: vec3<f32>) -> vec3<f32> {
+    if (raa_env_sh.info.w < 0.5) {
+        return raa_frame.ambient.rgb;
+    }
     return textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, raa_env_sh.info.z).rgb;
 }
 
@@ -42,10 +52,14 @@ fn raa_height_hg(cos_theta: f32, g: f32) -> f32 {
 }
 
 // Fog radiance seen along `dir`: env at max mip x fog colour + sun inscatter (HG g 0.6).
+// The raw sun radiance crosses the S11 directional boundary once, here (this fog path's
+// own call, separate from the material Direct boundary of the pass that composes it).
 fn raa_height_radiance(dir: vec3<f32>) -> vec3<f32> {
     let ambient = raa_height_env(dir) * raa_env.fog_color.rgb;
     let cos_sun = dot(dir, -raa_frame.sun_dir.xyz);
-    let sun = raa_height_hg(cos_sun, 0.6) * raa_frame.sun_color.rgb * raa_env.fog_color.w;
+    let raw_sun = raa_frame.sun_color.rgb;
+    let sun_radiance = raa_directional_radiance(raw_sun);
+    let sun = raa_height_hg(cos_sun, 0.6) * sun_radiance * raa_env.fog_color.w;
     return ambient + sun;
 }
 
