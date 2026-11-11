@@ -570,6 +570,15 @@ test('volumetric cloud flags are required and missing, null and false evidence r
       assert.throws(() => validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames), /cloud-flags-current/, `${mode} ${label}`);
     }
   }
+  // A reader that omits every view leaves no evidence for any of the six rows: the flag fails and the row rejects.
+  for (const mode of cloudModes) {
+    const { observation } = await runWith(mode, engine => {
+      const read = engine.skyWeatherDiagnostics;
+      engine.skyWeatherDiagnostics = () => ({ ...read(), views: [] });
+    });
+    assert.equal(named(observation, 'cloud-flags-current')[0].passed, false, `${mode} views omitted`);
+    assert.throws(() => validateRequiredFacts(rowOf(mode), factsOf(observation), atmosphere.factNames), new RegExp(`${rowOf(mode).id}: required`), `${mode} views omitted`);
+  }
   // A reader that reports no views at all cannot satisfy the flag.
   const none = atmosphere.featureAssertions(fakeEngine(), 'resize', [], { views: [] }).find(a => a.name === 'cloud-flags-current');
   assert.equal(none.passed, false);
