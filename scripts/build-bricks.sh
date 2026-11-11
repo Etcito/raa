@@ -55,7 +55,7 @@ fi
 echo "== scripts/build-package.sh (@etcito/raa, @etcito/raa-sdfm)"
 bash "$ROOT/scripts/build-package.sh"
 RAA_STAGE="$ROOT/dist/package/raa"
-[ -f "$RAA_STAGE/pkg/raa_js_bg.wasm" ] && [ -f "$RAA_STAGE/index.js" ] || {
+[ -f "$RAA_STAGE/pkg/raa_js_bg.wasm" ] && [ -f "$RAA_STAGE/index.js" ] && [ -f "$RAA_STAGE/sky-weather.js" ] || {
   echo "build-bricks.sh: dist/package/raa is incomplete after build-package.sh" >&2
   exit 1
 }

@@ -88,6 +88,33 @@ Units: metres, radians (except `fovYDeg`, in degrees), milliseconds. Coordinates
 right-handed with Y up. Material and local-light `color` values are sRGB and converted
 once at the API boundary. The sun, ambient and emissive colours are linear.
 
+## Sky, time of day and weather
+
+`setSky`, `setTimeOfDay` and `setWeather` validate a whole edit before changing anything:
+an invalid field throws `sky.invalid` with its field path and keeps the last accepted
+settings and rendering. Omitted (`undefined`) fields keep their current authored value;
+nested `clouds`, `atmosphere` and `wind` fields merge. An explicit `preset` applies first
+and overrides follow; in `setSky`, `{ preset: 'day' }` resets that preset's moment and
+weather even after a `setTimeOfDay` edit, while `setSky({})` keeps them. In `setWeather`,
+`preset` and `text` are exclusive; either selects the base, restarts the weather cycle
+from it (`text` starts from `fair`) and accepts structured overrides in the same call.
+
+`sky()`, `timeOfDay()` and `weather()` return fresh objects. `weather().text` is the
+authored target written as weather text; the current interpolated weather, cycle state
+and `skyWeatherDiagnostics()` are runtime observations and are not part of it.
+
+The pure text functions need no engine:
+
+```js
+import { parseWeatherText, formatWeatherText } from '@etcito/raa';
+const target = parseWeatherText('coverage 0.6\nwind speed=10 from=240\n'); // fair defaults, then the file
+const text = formatWeatherText(target); // authored field order, one per line, final LF
+```
+
+`parseWeatherText` normalizes values like `.weather` files (clamping) and reports
+malformed lines with one-based line numbers; `formatWeatherText` and the structured
+setters reject out-of-range values instead. See [docs/api/m08-sky-ibl.md](../../docs/api/m08-sky-ibl.md).
+
 ## Error model
 
 Every failure throws (or, for promises, rejects with) a `RaaError`: a JS `Error` whose

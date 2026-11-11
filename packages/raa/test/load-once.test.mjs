@@ -14,6 +14,8 @@ async function stubbedPackage(failFirst) {
   const dir = await mkdtemp(join(tmpdir(), 'raa-load-once-'));
   await mkdir(join(dir, 'pkg'));
   await copyFile(join(here, '..', 'index.js'), join(dir, 'index.js'));
+  // index.js re-exports the pure weather text functions from its sibling sky-weather.js.
+  await copyFile(join(here, '..', 'sky-weather.js'), join(dir, 'sky-weather.js'));
   await writeFile(join(dir, 'pkg', 'raa_js.js'), `
     export const calls = { init: 0 };
     let failures = ${failFirst ? 1 : 0};
@@ -37,6 +39,20 @@ test('overlapping loadRaa calls instantiate the wasm module once', async () => {
     assert.equal(calls.init, 1);
     assert.equal(new Set(modules).size, 3);
     assert.equal(modules[0].createEngine(), 'engine');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the pure weather text exports need no wasm instantiation', async () => {
+  const dir = await stubbedPackage(false);
+  try {
+    const raa = await import(pathToFileURL(join(dir, 'index.js')));
+    const { calls } = await import(pathToFileURL(join(dir, 'pkg', 'raa_js.js')));
+    const weather = raa.parseWeatherText('coverage 0.5\n');
+    assert.equal(weather.coverage, 0.5);
+    assert.deepEqual(raa.parseWeatherText(raa.formatWeatherText(weather)), weather);
+    assert.equal(calls.init, 0);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

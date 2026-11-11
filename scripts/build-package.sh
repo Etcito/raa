@@ -108,13 +108,14 @@ cp "$ROOT/LICENSE" "$PKG_DIR/LICENSE"
 
 # Stage the shipped package so index.d.ts can be assembled: the v0 API followed by every
 # P2 types file in file-name order (TypeScript merges the repeated declarations). The
-# sources packages/raa/index.d.ts and packages/raa/index.js stay unchanged.
+# sources packages/raa/index.d.ts and packages/raa/index.js stay unchanged. index.js re-exports
+# the pure weather text functions from sky-weather.js, which is staged beside it.
 echo "== stage the package in target/package-stage/raa"
 STAGE_ROOT="$TARGET_DIR/package-stage"
 STAGE="$STAGE_ROOT/raa"
 rm -rf "$STAGE_ROOT"
 mkdir -p "$STAGE"
-cp "$PKG_DIR/package.json" "$PKG_DIR/index.js" "$PKG_DIR/README.md" "$PKG_DIR/LICENSE" "$STAGE/"
+cp "$PKG_DIR/package.json" "$PKG_DIR/index.js" "$PKG_DIR/sky-weather.js" "$PKG_DIR/README.md" "$PKG_DIR/LICENSE" "$STAGE/"
 cp -R "$PKG_DIR/pkg" "$STAGE/pkg"
 
 DTS="$STAGE/index.d.ts"
@@ -146,7 +147,7 @@ EX="$DIST/example-basic"
 rm -rf "$EX"
 mkdir -p "$EX/raa" "$EX/common"
 cp examples/basic/index.html examples/basic/main.js examples/basic/nmc.gpu.json "$EX/"
-cp "$PKG_DIR/package.json" "$PKG_DIR/index.js" "$PKG_DIR/index.d.ts" "$PKG_DIR/README.md" "$EX/raa/"
+cp "$PKG_DIR/package.json" "$PKG_DIR/index.js" "$PKG_DIR/sky-weather.js" "$PKG_DIR/index.d.ts" "$PKG_DIR/README.md" "$EX/raa/"
 cp -R "$PKG_DIR/pkg" "$EX/raa/pkg"
 cp -R "$PKG_DIR/types" "$EX/raa/types"
 cp -R web/common/. "$EX/common/"
@@ -171,7 +172,7 @@ echo "== tar -tzf release/$TGZ_NAME"
 LIST="$(tar -tzf "$RELEASE/$TGZ_NAME")"
 printf '%s\n' "$LIST"
 MISSING=0
-for f in package/package.json package/index.js package/index.d.ts package/README.md \
+for f in package/package.json package/index.js package/sky-weather.js package/index.d.ts package/README.md \
   package/LICENSE package/pkg/raa_js_bg.wasm package/pkg/raa_js.js; do
   if ! printf '%s\n' "$LIST" | grep -qx "$f"; then
     echo "build-package.sh: $f missing from release/$TGZ_NAME" >&2

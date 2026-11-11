@@ -2,6 +2,9 @@
 // crate in ./pkg/ (built by scripts/build-package.sh). Types live in index.d.ts.
 import init, { Engine } from './pkg/raa_js.js';
 
+// Pure weather text parsing/formatting (no Engine, GPU or service); declared in types/m08-sky-ibl.d.ts.
+export { parseWeatherText, formatWeatherText } from './sky-weather.js';
+
 const VERSION = '0.5.0';
 
 // Editor controls are native Engine methods: updateMesh, setWireframe,
