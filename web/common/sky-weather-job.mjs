@@ -92,6 +92,15 @@ import { validateFeatureMeasurement } from '../../examples/sky-weather/lib/measu
  * only the other groups and publishes only when it renders one. clean still allocates a
  * fresh attempt and deletes no record; it also deletes the image files of earlier attempts
  * whose frozen build has a different build key or cannot be read.
+ * P2-RESUMABLE-RENDER FRESH: a job whose images are listed in run.kept passes the per-job checks
+ * against its kept entries' origin identities, and that origin attempt must still hold its frozen
+ * build of the current build key, the group's selection rows and the identical job record (and must
+ * not merely have copied the group). Every other job passes against the current identities. Coverage,
+ * image bytes and pair coverage apply to the union; the two states of a pair may come from different
+ * attempts of the same build.
+ * P2-RESUMABLE-RENDER JUDGE: a kept image reuses an earlier passed verdict of the byte-identical
+ * image with the identical description (exit 0, score >= 6), keeping its judgedAt; every other image
+ * is judged, and every verdict is written before failing.
  */
 export const RECORD_FIELDS = Object.freeze({
   buildReceipt: Object.freeze(['buildId', 'preparationId', 'inputs', 'builtAt', 'page', 'files', 'status', 'error']),
@@ -638,6 +647,7 @@ function validateMeasurements(declared, result, label, seen) {
 }
 
 const JOB_FIELDS = ['jobId', 'clientId', 'scenario', 'mode', 'result', 'error'];
+const KEPT_FIELDS = ['id', 'filename', 'attemptId', 'selectionId', 'buildId'];
 
 /**
  * P2-RESUMABLE-RENDER PER-JOB CHECKS of one managed job for its (scenario, mode) group
@@ -684,7 +694,40 @@ function checkJob(job, label, rows, identities, namespaces, factNames, seen) {
   return captures;
 }
 
-/** One managed job of the current attempt, checked against the current identities. */
+/**
+ * P2-RESUMABLE-RENDER: the originating attempt named by a kept entry must still hold its frozen
+ * build of the current build key, the selection rows of the group and the identical job record.
+ * An attempt that only copied the group (its run.kept lists these images) is not the origin.
+ */
+function verifyOrigin(ctx, origin, job, rows, label) {
+  ensure(isUuid(origin.attemptId) && `attempts/${origin.attemptId}` !== ctx.pointer.directory,
+    `${label}: kept origin ${origin.attemptId} is not an earlier attempt`);
+  const records = attemptRecords(`attempts/${origin.attemptId}`);
+  const read = (name) => {
+    const file = containedPath(ctx.out, name);
+    ensure(fs.existsSync(file), `${label}: kept origin attempt ${origin.attemptId} is missing ${path.basename(name)}`);
+    return readJsonRecord(file);
+  };
+  const build = read(records.build);
+  ensure(sameBuild(build, buildKey(ctx.build)) && build.buildId === origin.buildId,
+    `${label}: kept origin attempt ${origin.attemptId} belongs to another build`);
+  const selection = read(records.selection);
+  ensure(selection.selectionId === origin.selectionId
+    && rows.every((row) => selection.inventory.some((entry) => isDeepStrictEqual(entry, row))),
+  `${label}: kept origin attempt ${origin.attemptId} does not select the rows of ${job.scenario}/${job.mode}`);
+  const run = read(records.run);
+  ensure(run.attemptId === origin.attemptId && run.selectionId === origin.selectionId && run.buildId === origin.buildId,
+    `${label}: kept origin attempt ${origin.attemptId} has other identities`);
+  ensure(!(Array.isArray(run.kept) ? run.kept : []).some((entry) => rows.some((row) => row.id === entry?.id)),
+    `${label}: kept origin ${origin.attemptId} only copied this group; it is not the originating attempt`);
+  ensure(Array.isArray(run.jobs) && run.jobs.some((entry) => isDeepStrictEqual(entry, job)),
+    `${label}: kept origin attempt ${origin.attemptId} does not hold the identical job record`);
+}
+
+/**
+ * One managed job of the current attempt. A job whose images are listed in run.kept is checked
+ * against the identities of its kept entries (its origin); every other job against the current ones.
+ */
 function validateJob(job, index, ctx, state) {
   const label = `run job ${index}`;
   exact(job, JOB_FIELDS, label);
@@ -692,9 +735,19 @@ function validateJob(job, index, ctx, state) {
   ensure(!state.jobs.has(key), `${label}: duplicate scenario/mode ${job.scenario}/${job.mode}`);
   const rows = state.groups.get(key);
   ensure(rows, `${label}: unexpected scenario/mode ${job.scenario}/${job.mode}`);
-  const identities = {
+  let identities = {
     selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
   };
+  const listed = state.kept.filter((entry) => rows.some((row) => row.id === entry.id));
+  if (listed.length > 0) {
+    ensure(rows.every((row) => listed.some((entry) => entry.id === row.id && entry.filename === row.filename)),
+      `${label}: kept images must cover exactly the selected images of ${job.scenario}/${job.mode}`);
+    identities = { selectionId: listed[0].selectionId, attemptId: listed[0].attemptId, buildId: listed[0].buildId };
+    ensure(listed.every((entry) => isDeepStrictEqual({
+      selectionId: entry.selectionId, attemptId: entry.attemptId, buildId: entry.buildId,
+    }, identities)), `${label}: kept images name different origin attempts`);
+    verifyOrigin(ctx, identities, job, rows, label);
+  }
   const captures = checkJob(job, label, rows, identities, ctx.namespaces, state.factNames.get(job.scenario),
     state.measurements);
   state.jobs.set(key, { job, captures });
@@ -772,7 +825,14 @@ function validateFreshRecord(ctx) {
   ensure(Array.isArray(run.errors) && run.errors.length === 0, `run errors: ${run.errors.join('; ')}`);
   ensure(Array.isArray(run.jobs) && run.jobs.length > 0, 'run has no managed jobs');
   ensure(Array.isArray(run.images), 'run has no image inventory');
-  const state = { groups: new Map(), jobs: new Map(), measurements: new Map(), factNames: new Map() };
+  ensure(Array.isArray(run.kept), 'run has no kept image list');
+  for (const entry of run.kept) {
+    exact(entry, KEPT_FIELDS, 'kept image');
+    ensure(ctx.inventory.some((row) => row.id === entry.id && row.filename === entry.filename),
+      `kept image ${entry.id} is not a selected capture`);
+  }
+  ensure(new Set(run.kept.map((entry) => entry.id)).size === run.kept.length, 'run lists a kept image twice');
+  const state = { groups: new Map(), jobs: new Map(), measurements: new Map(), factNames: new Map(), kept: run.kept };
   for (const row of ctx.inventory) {
     const key = `${row.scenario}\0${row.mode}`;
     if (!state.groups.has(key)) state.groups.set(key, []);
@@ -856,7 +916,35 @@ export function judgeCapture(capture, description) {
   });
 }
 
-/** Judge every selected capture and retain every verdict before failing. */
+/**
+ * P2-RESUMABLE-RENDER JUDGE reuse: an earlier passed verdict of the byte-identical capture with the
+ * identical description (exit 0, minScore 6, score >= 6) from an attempt of the same build. The byte
+ * equality only establishes that the reused verdict is about the same file. Null when none exists.
+ */
+function reusableVerdict(out, currentDirectory, key, row, capture) {
+  let bytes;
+  try { bytes = readRegularFile(capture); } catch { return null; }
+  const sameBytes = (file) => { try { return readRegularFile(file).equals(bytes); } catch { return false; } };
+  for (const directory of earlierAttempts(out, currentDirectory)) {
+    try {
+      const records = attemptRecords(directory);
+      if (!sameBuild(readJsonRecord(containedPath(out, records.build)), key)) continue;
+      for (const entry of readJsonRecord(containedPath(out, records.judge)).images) {
+        const passed = entry?.id === row.id && entry.filename === row.filename
+          && entry.description === row.expectedVisibleBehavior && entry.minScore === 6
+          && entry.exit === 0 && typeof entry.score === 'number' && entry.score >= 6;
+        if (passed && sameBytes(containedPath(out, records.image(row.filename)))) return { ...entry };
+      }
+    } catch { /* an unreadable attempt supplies no verdict */ }
+  }
+  return null;
+}
+
+/**
+ * Judge every selected capture and retain every verdict before failing. A kept image reuses its
+ * earlier passed verdict (reusableVerdict, judgedAt retained); new and previously failed images
+ * are judged with the inventory behaviour and no reference image.
+ */
 export async function judge(page, out, stage, options = {}) {
   const runJudge = options.judge ?? judgeCapture;
   ensure(typeof runJudge === 'function', 'judge runner must be a function');
@@ -875,8 +963,16 @@ export async function judge(page, out, stage, options = {}) {
     throw error;
   }
   const images = new Map(verified.run.images.map((image) => [image.id, image]));
+  const kept = new Set(verified.run.kept.map((entry) => entry.id));
+  const key = buildKey(verified.build);
   for (const row of verified.inventory) {
     const capture = containedPath(out, verified.records.image(row.filename));
+    const reused = kept.has(row.id) ? reusableVerdict(out, verified.pointer.directory, key, row, capture) : null;
+    if (reused) {
+      record.images.push(reused);
+      write();
+      continue;
+    }
     const entry = {
       id: row.id, filename: row.filename, description: row.expectedVisibleBehavior, minScore: 6,
       exit: -1, score: null, output: '', judgedAt: new Date().toISOString(),

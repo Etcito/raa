@@ -1020,3 +1020,153 @@ test('an attempt left running by an interrupted render still supplies its comple
   assert.deepEqual(s.calls, ['publish', GROUP_B]);
   assert.equal(run.kept.length, 1);
 });
+
+/** Render the current attempt while the operation of the selected group fails; the attempt stays consumed. */
+async function renderFailing(s, failing) {
+  const runOp = s.transport.runGpuPageOp;
+  s.transport.runGpuPageOp = async (...args) => {
+    if (failing(args[2])) throw new Error('operation failed');
+    return runOp(...args);
+  };
+  try { await assert.rejects(s.render(), /operation failed/); }
+  finally { s.transport.runGpuPageOp = runOp; }
+}
+
+/** Attempt one renders both groups; the current attempt keeps both from it and passes freshness. */
+async function keptFixture(t) {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const origin = s.attempt;
+  await s.render();
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.equal(run.kept.length, 2);
+  assert.equal((await fresh(s.page, s.out, s.stage)).status, 'passed');
+  return { s, origin };
+}
+
+/** Lines the judge stub recorded, one per judged capture. */
+function judgedLines(calls) {
+  return fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [];
+}
+
+test('fresh passes on the union of kept and new images of the same build', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.attempt;
+  await renderFailing(s, (input) => input.scenario === GROUP_B);
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', GROUP_B]);
+  assert.equal(run.kept.length, 1);
+  assert.equal(run.kept[0].attemptId, first.attemptId);
+  assert.equal(run.images.length, 2);
+  const record = await fresh(s.page, s.out, s.stage);
+  assert.equal(record.status, 'passed');
+  assert.deepEqual(record.errors, []);
+  assert.equal(s.read(s.records.fresh).status, 'passed');
+});
+
+test('fresh rejects a kept job whose provenance is not its originating attempt', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const origin = s.attempt;
+  await renderFailing(s, (input) => input.scenario === GROUP_B);
+  await cleanAgain(s);
+  await renderFailing(s, (input) => input.scenario === GROUP_B);
+  const copier = s.attempt;
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.equal(run.kept[0].attemptId, origin.attemptId);
+  assert.equal((await fresh(s.page, s.out, s.stage)).status, 'passed');
+  // The copier holds the group only as a kept copy of the origin, so it cannot be the origin.
+  retamper(s, (value) => { for (const entry of value.kept) entry.attemptId = copier.attemptId; });
+  await assert.rejects(fresh(s.page, s.out, s.stage), /only copied this group/);
+  retamper(s, (value) => { for (const entry of value.kept) entry.attemptId = randomUUID(); });
+  await assert.rejects(fresh(s.page, s.out, s.stage), /is missing build\.json/);
+  assert.equal(s.read(s.records.fresh).status, 'failed');
+});
+
+test('fresh rejects a kept image whose originating attempt belongs to another build or was altered', async (t) => {
+  const otherBuild = await keptFixture(t);
+  const originBuild = attemptRecords(otherBuild.origin.directory).build;
+  writeJsonRecord(containedPath(otherBuild.s.out, originBuild), rewrite(otherBuild.s.read(originBuild), (build) => {
+    build.inputs.revision = '2'.repeat(40);
+  }));
+  await assert.rejects(fresh(otherBuild.s.page, otherBuild.s.out, otherBuild.s.stage), /belongs to another build/);
+
+  const altered = await keptFixture(t);
+  const originRun = attemptRecords(altered.origin.directory).run;
+  writeJsonRecord(containedPath(altered.s.out, originRun), rewrite(altered.s.read(originRun), (value) => {
+    value.jobs.find((job) => job.scenario === GROUP_A).result.facts.assertions[0].detail = 'altered after rendering';
+  }));
+  await assert.rejects(fresh(altered.s.page, altered.s.out, altered.s.stage), /identical job record/);
+});
+
+test('a measured pair may take its two states from different attempts of the same build', async (t) => {
+  const s = await renderFixture(t, [paired]);
+  const origin = s.attempt;
+  await renderFailing(s, (input) => input.mode === 'off');
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', paired.id]);
+  assert.deepEqual(run.kept.map((entry) => entry.attemptId), [origin.attemptId]);
+  assert.deepEqual(run.jobs.map((job) => [job.mode, job.result.provenance.attemptId]),
+    [['on', origin.attemptId], ['off', s.attempt.attemptId]]);
+  assert.equal((await fresh(s.page, s.out, s.stage)).status, 'passed');
+});
+
+test('judge reuses the passed verdict of a kept image and judges only new or previously failed images', async (t) => {
+  const s = await freshFixture(t, [foundation, atmosphere]);
+  const origin = s.attempt;
+  const calls = judgeStub(t, PASSING_JUDGE);
+  const first = await s.judge();
+  const originalA = first.images.find((entry) => entry.id === `${GROUP_A}-image`);
+  // The origin's capture of B goes missing, so B is rendered again while A is kept.
+  const originRecords = attemptRecords(origin.directory);
+  fs.rmSync(containedPath(s.out, originRecords.image(foundation.filename)));
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', GROUP_B]);
+  assert.deepEqual(run.kept.map((entry) => entry.attemptId), [origin.attemptId]);
+
+  const before = judgedLines(calls).length;
+  const second = await s.judge();
+  assert.equal(second.status, 'passed');
+  const judged = judgedLines(calls).slice(before);
+  assert.equal(judged.length, 1, 'only the re-rendered image is judged');
+  assert.match(judged[0], /foundation-sky-and-sphere\.png/);
+  assert.deepEqual(second.images.find((entry) => entry.id === `${GROUP_A}-image`), originalA);
+
+  // A kept image whose earlier verdict failed is judged again; the new image is judged in every run.
+  writeJsonRecord(containedPath(s.out, originRecords.judge), rewrite(s.read(originRecords.judge), (record) => {
+    for (const entry of record.images) if (entry.id === `${GROUP_A}-image`) Object.assign(entry, { exit: 1, score: 4 });
+  }));
+  assert.equal((await s.judge()).status, 'passed');
+  const again = judgedLines(calls).slice(before + 1);
+  assert.equal(again.length, 2);
+  assert.match(again[0], /atmosphere-clear-day\.png/);
+  assert.match(again[1], /foundation-sky-and-sphere\.png/);
+});
+
+test('judge judges a kept image again when its description changed', async (t) => {
+  const s = await freshFixture(t, [foundation, atmosphere]);
+  const origin = s.attempt;
+  const calls = judgeStub(t, PASSING_JUDGE);
+  const first = await s.judge();
+  // An earlier verdict of the same file that described the behaviour in other words.
+  const judgeFile = attemptRecords(origin.directory).judge;
+  writeJsonRecord(containedPath(s.out, judgeFile), rewrite(s.read(judgeFile), (record) => {
+    for (const entry of record.images) if (entry.id === `${GROUP_A}-image`) entry.description = 'An earlier wording of the same behaviour.';
+  }));
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.equal(run.kept.length, 2);
+  fs.rmSync(calls, { force: true });
+  const record = await s.judge();
+  assert.equal(record.status, 'passed');
+  const lines = judgedLines(calls);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /atmosphere-clear-day\.png/);
+  assert.equal(record.images.find((entry) => entry.id === `${GROUP_A}-image`).description,
+    'The accepted sky state renders above the ground receiver.');
+  assert.deepEqual(record.images.find((entry) => entry.id === `${GROUP_B}-image`),
+    first.images.find((entry) => entry.id === `${GROUP_B}-image`));
+});
