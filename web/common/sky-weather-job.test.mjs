@@ -861,3 +861,162 @@ test('judge refuses stale evidence and records the freshness failure', async (t)
   assert.match(record.errors[0], /assertion:sky-visible/);
   assert.equal(fs.existsSync(calls), false);
 });
+
+// P2-RESUMABLE-RENDER. scenes.json sorts atmosphere-scene first, so group A renders before B.
+const GROUP_A = atmosphere.id, GROUP_B = foundation.id;
+
+async function cleanAgain(s) {
+  s.attempt = await clean(s.page, s.out, s.stage);
+  s.records = attemptRecords(s.attempt.directory);
+  s.calls.length = 0;
+  return s;
+}
+
+/** A new build of the current sources: new buildId and preparationId, then select and clean. */
+async function rebuild(s) {
+  const preparationId = randomUUID();
+  const build = { ...s.build, buildId: randomUUID(), preparationId, inputs: captureInputs(s.root, preparationId),
+    builtAt: new Date().toISOString() };
+  writeJsonRecord(containedPath(s.page, 'build.json'), build);
+  s.build = build;
+  s.selection = await select(s.page, s.out, s.stage);
+  return cleanAgain(s);
+}
+
+function imageBytes(s, directory, filename) {
+  return fs.readFileSync(containedPath(s.out, `${directory}/images/${filename}`));
+}
+
+test('render after a failed run renders only the missing or failed groups and keeps the passed images', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.attempt;
+  const runOp = s.transport.runGpuPageOp;
+  s.transport.runGpuPageOp = async (...args) => {
+    if (args[2].scenario === GROUP_B) { s.calls.push(GROUP_B); throw new Error('operation failed'); }
+    return runOp(...args);
+  };
+  await assert.rejects(s.render(), /operation failed/);
+  s.transport.runGpuPageOp = runOp;
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.equal(run.status, 'passed');
+  assert.deepEqual(s.calls, ['publish', GROUP_B]);
+  assert.deepEqual(run.kept, [{ id: `${GROUP_A}-image`, filename: atmosphere.filename,
+    attemptId: first.attemptId, selectionId: first.selectionId, buildId: first.buildId }]);
+  assert.deepEqual(Object.keys(run), RECORD_FIELDS.run);
+  assert.equal(run.jobs.length, 2);
+  assert.deepEqual(s.read(s.records.result(0)), run.jobs[0].result);
+  assert.deepEqual(imageBytes(s, s.attempt.directory, atmosphere.filename), imageBytes(s, first.directory, atmosphere.filename));
+});
+
+test('a rebuild with identical inputs keeps the images although buildId changed', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.attempt;
+  await s.render();
+  await rebuild(s);
+  assert.notEqual(s.build.buildId, first.buildId);
+  const run = await s.render();
+  assert.deepEqual(s.calls, []);
+  assert.equal(run.buildId, s.build.buildId);
+  assert.ok(run.kept.length === 2 && run.kept.every((entry) => entry.buildId === first.buildId));
+  assert.ok(fs.readdirSync(containedPath(s.out, `${first.directory}/images`)).length === 2);
+});
+
+test('a changed source keeps nothing and clean removes only the older build images', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.attempt;
+  await s.render();
+  put(s.root, 'examples/sky-weather/lib/inventory.js', 'export const criteria = ["changed"];\n');
+  await rebuild(s);
+  assert.deepEqual(fs.readdirSync(containedPath(s.out, `${first.directory}/images`)), []);
+  for (const name of ['run', 'attempt', 'build', 'selection']) assert.ok(s.read(attemptRecords(first.directory)[name]));
+  const run = await s.render();
+  assert.deepEqual(run.kept, []);
+  assert.equal(s.calls.filter((call) => call !== 'publish').length, 2);
+  const second = s.attempt;
+  await cleanAgain(s);
+  assert.equal(fs.readdirSync(containedPath(s.out, `${second.directory}/images`)).length, 2);
+});
+
+test('render publishes nothing when every group is kept and reuses the pageRef of the attempt that supplied the first group', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const firstRun = await s.render();
+  const firstRecord = s.read(s.records.run);
+  firstRecord.pageRef = 'first-attempt-page';
+  writeJsonRecord(containedPath(s.out, s.records.run), firstRecord);
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.deepEqual(s.calls, []);
+  assert.equal(run.status, 'passed');
+  assert.equal(run.pageRef, 'first-attempt-page');
+  assert.deepEqual(run.jobs, firstRun.jobs);
+  assert.deepEqual(run.images, firstRun.images);
+});
+
+test('a kept candidate with page errors, a readiness that is not ready, a false required fact, a software adapter, an invalid measurement, a changed inventory row or a damaged PNG is rendered again', async (t) => {
+  const defects = {
+    page: { resultFor: (result) => ({ ...result, errors: { console: [], page: ['boom'], gpu: [] } }) },
+    readiness: { factsFor: () => factsRecord({ readiness: { status: 'pending', stage: 'foundation', error: null } }) },
+    fact: { factsFor: () => factsRecord({ assertions: [{ name: 'sky-visible', passed: false, detail: 'hidden' }] }) },
+    software: { resultFor: (result) => ({ ...result, adapter: { ...result.adapter, description: 'SwiftShader' } }) },
+    measurement: { resultFor: (result) => ({ ...result, measurements: [{}] }) },
+    row: { after: (s) => {
+      const selection = s.read(s.records.selection);
+      selection.inventory[0].expectedVisibleBehavior = 'changed';
+      writeJsonRecord(containedPath(s.out, s.records.selection), selection);
+    } },
+    png: { after: (s) => fs.writeFileSync(containedPath(s.out, s.records.image(foundation.filename)), 'damaged') },
+  };
+  for (const [name, defect] of Object.entries(defects)) {
+    const s = await renderFixture(t, [foundation], defect);
+    await s.render().catch(() => {});
+    defect.after?.(s);
+    s.factsFor = null; s.resultFor = null;
+    await cleanAgain(s);
+    const run = await s.render();
+    assert.deepEqual(s.calls, ['publish', GROUP_B], name);
+    assert.deepEqual(run.kept, [], name);
+  }
+});
+
+test('a group kept twice keeps the identities of the attempt that rendered it', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.attempt;
+  const runOp = s.transport.runGpuPageOp;
+  const failB = async (...args) => {
+    if (args[2].scenario === GROUP_B) throw new Error('operation failed');
+    return runOp(...args);
+  };
+  s.transport.runGpuPageOp = failB;
+  await assert.rejects(s.render(), /operation failed/);
+  await cleanAgain(s);
+  await assert.rejects(s.render(), /operation failed/);
+  s.transport.runGpuPageOp = runOp;
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', GROUP_B]);
+  assert.equal(run.kept.length, 1);
+  assert.equal(run.kept[0].attemptId, first.attemptId);
+  assert.equal(run.jobs[0].result.provenance.attemptId, first.attemptId);
+});
+
+test('an attempt left running by an interrupted render still supplies its completed groups', async (t) => {
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.records;
+  const runOp = s.transport.runGpuPageOp;
+  let snapshot = null;
+  s.transport.runGpuPageOp = async (...args) => {
+    if (args[2].scenario !== GROUP_B) return runOp(...args);
+    snapshot = { run: s.read(first.run), attempt: s.read(first.attempt) };
+    throw new Error('interrupted');
+  };
+  await assert.rejects(s.render(), /interrupted/);
+  writeJsonRecord(containedPath(s.out, first.run), snapshot.run);
+  writeJsonRecord(containedPath(s.out, first.attempt), snapshot.attempt);
+  assert.equal(s.read(first.attempt).status, 'running');
+  s.transport.runGpuPageOp = runOp;
+  await cleanAgain(s);
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', GROUP_B]);
+  assert.equal(run.kept.length, 1);
+});

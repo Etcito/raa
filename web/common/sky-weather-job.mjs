@@ -48,6 +48,9 @@ import { validateFeatureMeasurement } from '../../examples/sky-weather/lib/measu
  * @property {string} pageRef
  * @property {Array<{jobId:string,clientId:string,scenario:string,mode:string,result:object|null,error:string|null}>} jobs
  * @property {Array<{id:string,filename:string,path:string,jobId:string,clientId:string,observation:string}>} images
+ * @property {Array<{id:string,filename:string,attemptId:string,selectionId:string,buildId:string}>} kept
+ *   images copied from an earlier attempt of the same build, with the identities of the attempt
+ *   whose managed operation produced them (P2-RESUMABLE-RENDER ORIGIN); empty when nothing is kept
  * @property {'passed'|'failed'} status
  * @property {string[]} errors
  *
@@ -80,13 +83,22 @@ import { validateFeatureMeasurement } from '../../examples/sky-weather/lib/measu
  *   images       <out>/attempts/<UUID>/images/<inventory filename>
  * Later shares (render/fresh/judge) extend this module and must retain these
  * operations and record shapes. A pointer or an allocated attempt is never a pass.
+ * P2-RESUMABLE-RENDER: two builds are the same build when their buildKey() strings are
+ * equal (buildId/preparationId are redrawn by every build). render keeps a (scenario, mode)
+ * group from the first earlier attempt directory (ascending name, any status) of the same
+ * build whose selection holds the identical rows, whose job passes the per-job checks
+ * against its origin identities and whose images are intact regular files; it copies that
+ * job, its inputs/results and images into the new attempt, lists them in run.kept, renders
+ * only the other groups and publishes only when it renders one. clean still allocates a
+ * fresh attempt and deletes no record; it also deletes the image files of earlier attempts
+ * whose frozen build has a different build key or cannot be read.
  */
 export const RECORD_FIELDS = Object.freeze({
   buildReceipt: Object.freeze(['buildId', 'preparationId', 'inputs', 'builtAt', 'page', 'files', 'status', 'error']),
   selection: Object.freeze(['selectionId', 'stage', 'buildId', 'preparationId', 'inputs', 'inventory']),
   current: Object.freeze(['selectionId', 'attemptId', 'directory']),
   attempt: Object.freeze(['attemptId', 'selectionId', 'buildId', 'directory', 'status', 'error']),
-  run: Object.freeze(['selectionId', 'attemptId', 'buildId', 'preparationId', 'pageRef', 'jobs', 'images', 'status', 'errors']),
+  run: Object.freeze(['selectionId', 'attemptId', 'buildId', 'preparationId', 'pageRef', 'jobs', 'images', 'kept', 'status', 'errors']),
   fresh: Object.freeze(['selectionId', 'attemptId', 'buildId', 'status', 'errors']),
   judge: Object.freeze(['selectionId', 'attemptId', 'buildId', 'images', 'status', 'errors']),
 });
@@ -276,7 +288,81 @@ function validateSelection(value, stage, build, inventory, context) {
     `${context}: inventory changed; select again`);
 }
 
-/** Allocate a fresh immutable attempt; earlier attempts are never deleted. */
+/** P2-RESUMABLE-RENDER SAME BUILD identity: the receipt inputs without their preparationId. */
+export function buildKey(build) {
+  const { revision, dependencies, sources, toolchain, commandsText, criteriaText } = build.inputs;
+  return JSON.stringify({ revision, dependencies, sources, toolchain, commandsText, criteriaText });
+}
+
+function sameBuild(build, key) {
+  try { return buildKey(build) === key; } catch { return false; }
+}
+
+/** Earlier attempt directories of the stage root, in ascending directory name order. */
+function earlierAttempts(out, currentDirectory) {
+  const root = containedPath(out, 'attempts');
+  if (!fs.existsSync(root)) return [];
+  return fs.readdirSync(root).sort().map((name) => `attempts/${name}`)
+    .filter((directory) => directory !== currentDirectory && isUuid(directory.slice('attempts/'.length)));
+}
+
+/** Readable records of earlier attempts frozen with the given build key. */
+function keptCandidates(out, currentDirectory, key) {
+  const candidates = [];
+  for (const directory of earlierAttempts(out, currentDirectory)) {
+    try {
+      const records = attemptRecords(directory);
+      const build = readJsonRecord(containedPath(out, records.build));
+      if (!sameBuild(build, key)) continue;
+      candidates.push({ directory, records, selection: readJsonRecord(containedPath(out, records.selection)),
+        run: readJsonRecord(containedPath(out, records.run)) });
+    } catch { /* an unreadable attempt supplies nothing */ }
+  }
+  return candidates;
+}
+
+function readRegularFile(file) {
+  const descriptor = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    ensure(fs.fstatSync(descriptor).isFile(), `${file} is not a regular file`);
+    return fs.readFileSync(descriptor);
+  } finally { fs.closeSync(descriptor); }
+}
+
+/** KEPT GROUP: the first earlier attempt whose evidence of this group passes every check. */
+function keptGroup(out, candidates, rows, namespaces) {
+  const { scenario, mode } = rows[0];
+  const factNames = namespaces.find((entry) => entry.default?.id === scenario)?.factNames;
+  for (const candidate of candidates) {
+    try {
+      const { selection, run, records } = candidate;
+      ensure(rows.every((row) => selection.inventory.some((entry) => isDeepStrictEqual(entry, row))), 'changed rows');
+      const index = run.jobs.findIndex((job) => job?.scenario === scenario && job?.mode === mode);
+      ensure(index >= 0, 'no job');
+      const job = run.jobs[index];
+      const listed = (Array.isArray(run.kept) ? run.kept : []).filter((entry) => rows.some((row) => row.id === entry?.id));
+      const origin = listed.length
+        ? { selectionId: listed[0].selectionId, attemptId: listed[0].attemptId, buildId: listed[0].buildId }
+        : { selectionId: run.selectionId, attemptId: run.attemptId, buildId: run.buildId };
+      ensure(listed.length === 0 || (listed.length === rows.length
+        && listed.every((entry) => isDeepStrictEqual({ selectionId: entry.selectionId, attemptId: entry.attemptId,
+          buildId: entry.buildId }, origin))), 'partial kept origin');
+      const captures = checkJob(job, `${candidate.directory} job ${index}`, rows, origin, namespaces, factNames, new Map());
+      const images = rows.map((row) => {
+        const image = run.images.find((entry) => entry?.id === row.id && entry.filename === row.filename);
+        ensure(image, 'no image entry');
+        const bytes = readRegularFile(containedPath(out, records.image(row.filename)));
+        ensure(bytes.equals(captures.get(row.id).bytes), 'damaged image');
+        return { row, image, bytes };
+      });
+      const input = readJsonRecord(containedPath(out, records.input(index)));
+      return { candidate, job, input, origin, images };
+    } catch { /* not kept: rendered again */ }
+  }
+  return null;
+}
+
+/** Allocate a fresh immutable attempt; earlier records are never deleted, older-build images are. */
 export async function clean(page, out, stage) {
   const { build, inventory } = await verifyPage(page, stage);
   const selectionFile = containedPath(out, 'selection.json');
@@ -299,12 +385,28 @@ export async function clean(page, out, stage) {
   writeJsonRecord(containedPath(out, 'current.json'), {
     selectionId: selection.selectionId, attemptId, directory,
   });
+  const key = buildKey(build);
+  for (const earlier of earlierAttempts(out, directory)) {
+    let frozen = null;
+    try { frozen = readJsonRecord(containedPath(out, attemptRecords(earlier).build)); } catch { /* unreadable */ }
+    if (frozen !== null && sameBuild(frozen, key)) continue;
+    let images;
+    try { images = containedPath(out, `${earlier}/images`); } catch { continue; }
+    if (!fs.existsSync(images) || !fs.lstatSync(images).isDirectory()) continue;
+    for (const name of fs.readdirSync(images)) {
+      const file = path.join(images, name);
+      if (!fs.lstatSync(file).isDirectory()) fs.unlinkSync(file);
+    }
+  }
   return attempt;
 }
 
-/** Render once; transport owns queue, running and download clocks independently. */
+/**
+ * Render once; transport owns queue, running and download clocks independently. Groups kept
+ * from an earlier attempt of the same build are copied, not rendered (P2-RESUMABLE-RENDER).
+ */
 export async function render(page, out, stage, transport = { publishGpuPage, runGpuPageOp }) {
-  const { build, inventory } = await verifyPage(page, stage);
+  const { build, namespaces, inventory } = await verifyPage(page, stage);
   const read = (name) => readJsonRecord(containedPath(out, name));
   const write = (name, value) => writeJsonRecord(containedPath(out, name), value);
   const pointer = read('current.json');
@@ -327,7 +429,7 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
   fs.mkdirSync(containedPath(out, `${pointer.directory}/jobs`));
   const run = {
     selectionId: selection.selectionId, attemptId: attempt.attemptId, buildId: build.buildId,
-    preparationId: build.preparationId, pageRef: '', jobs: [], images: [], status: 'failed', errors: [],
+    preparationId: build.preparationId, pageRef: '', jobs: [], images: [], kept: [], status: 'failed', errors: [],
   };
   const message = (error) => String(error?.message ?? error);
   const current = () => ensure(isDeepStrictEqual(read('current.json'), pointer), 'current pointer was superseded');
@@ -351,16 +453,42 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
   try {
     write(records.attempt, { ...attempt, status: 'running' });
     current();
-    const published = await transport.publishGpuPage(build.page, { timeoutMs: 300000 });
-    ensure(nonblank(published?.pageRef), 'publication returned no pageRef');
-    run.pageRef = published.pageRef;
     const groups = new Map();
     for (const row of inventory) {
       const key = JSON.stringify([row.scenario, row.mode]);
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(row);
     }
+    const candidates = keptCandidates(out, pointer.directory, buildKey(build));
+    const pending = [];
+    let firstKept = null;
     for (const rows of groups.values()) {
+      const kept = keptGroup(out, candidates, rows, namespaces);
+      if (!kept) { pending.push(rows); continue; }
+      if (run.jobs.length === 0 && pending.length === 0) firstKept = kept;
+      const index = run.jobs.length;
+      write(records.input(index), kept.input);
+      write(records.result(index), kept.job.result);
+      run.jobs.push(kept.job);
+      for (const { row, image, bytes } of kept.images) {
+        const file = containedPath(out, records.image(row.filename));
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, bytes, { flag: 'wx' });
+        run.images.push(image);
+        run.kept.push({ id: row.id, filename: row.filename, ...kept.origin });
+      }
+    }
+    write(records.run, run);
+    if (pending.length > 0) {
+      current();
+      const published = await transport.publishGpuPage(build.page, { timeoutMs: 300000 });
+      ensure(nonblank(published?.pageRef), 'publication returned no pageRef');
+      run.pageRef = published.pageRef;
+    } else {
+      ensure(nonblank(firstKept.candidate.run.pageRef), 'kept attempt has no managed page reference');
+      run.pageRef = firstKept.candidate.run.pageRef;
+    }
+    for (const rows of pending) {
       current();
       const { scenario, mode } = rows[0];
       const index = run.jobs.length;
@@ -509,20 +637,21 @@ function validateMeasurements(declared, result, label, seen) {
   }
 }
 
-/** One managed job: direct result, provenance, captures, facts and measurements. */
-function validateJob(job, index, ctx, state) {
-  const label = `run job ${index}`;
-  exact(job, ['jobId', 'clientId', 'scenario', 'mode', 'result', 'error'], label);
+const JOB_FIELDS = ['jobId', 'clientId', 'scenario', 'mode', 'result', 'error'];
+
+/**
+ * P2-RESUMABLE-RENDER PER-JOB CHECKS of one managed job for its (scenario, mode) group
+ * against the given identities {selectionId, attemptId, buildId}. Returns the decoded
+ * captures by image id; `seen` collects measurements keyed by pair and state.
+ */
+function checkJob(job, label, rows, identities, namespaces, factNames, seen) {
+  exact(job, JOB_FIELDS, label);
   ensure(nonblank(job.jobId) && nonblank(job.clientId), `${label}: managed job/client identity is missing`);
   ensure(job.error === null, `${label}: ${job.error}`);
   ensure(isRecord(job.result), `${label}: a direct GPU operation result is required`);
-  const key = `${job.scenario}\0${job.mode}`;
-  ensure(!state.jobs.has(key), `${label}: duplicate scenario/mode ${job.scenario}/${job.mode}`);
-  const rows = state.groups.get(key);
-  ensure(rows, `${label}: unexpected scenario/mode ${job.scenario}/${job.mode}`);
   const result = job.result;
   ensure(isDeepStrictEqual(result.provenance, {
-    selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
+    selectionId: identities.selectionId, attemptId: identities.attemptId, buildId: identities.buildId,
     scenario: job.scenario, mode: job.mode,
   }), `${label}: operation provenance differs from the frozen attempt`);
   const scoped = `${label} (${job.scenario}/${job.mode})`;
@@ -532,7 +661,6 @@ function validateJob(job, index, ctx, state) {
   const readiness = result.facts.readiness;
   ensure(readiness?.status === 'ready' && readiness.error === null,
     `${scoped}: preparation is not ready (${readiness?.status ?? 'missing'}${readiness?.error ? `: ${readiness.error}` : ''})`);
-  const factNames = state.factNames.get(job.scenario);
   ensure(Array.isArray(factNames), `${scoped}: scene ${job.scenario} has no factNames registry`);
   ensure(Array.isArray(result.images), `${scoped}: operation returned no image inventory`);
   ensure(result.images.length === rows.length,
@@ -551,8 +679,24 @@ function validateJob(job, index, ctx, state) {
     ensure(captures.has(row.id), `${scoped}: missing selected capture ${row.id}`);
     validateRequiredFacts(row, result.facts, factNames);
   }
-  const variant = sceneVariant(ctx.namespaces, job.scenario, job.mode, scoped);
-  validateMeasurements(variant.measurement ?? null, result, scoped, state.measurements);
+  const variant = sceneVariant(namespaces, job.scenario, job.mode, scoped);
+  validateMeasurements(variant.measurement ?? null, result, scoped, seen);
+  return captures;
+}
+
+/** One managed job of the current attempt, checked against the current identities. */
+function validateJob(job, index, ctx, state) {
+  const label = `run job ${index}`;
+  exact(job, JOB_FIELDS, label);
+  const key = `${job.scenario}\0${job.mode}`;
+  ensure(!state.jobs.has(key), `${label}: duplicate scenario/mode ${job.scenario}/${job.mode}`);
+  const rows = state.groups.get(key);
+  ensure(rows, `${label}: unexpected scenario/mode ${job.scenario}/${job.mode}`);
+  const identities = {
+    selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
+  };
+  const captures = checkJob(job, label, rows, identities, ctx.namespaces, state.factNames.get(job.scenario),
+    state.measurements);
   state.jobs.set(key, { job, captures });
 }
 
