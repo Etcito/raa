@@ -7,9 +7,11 @@
 //! The legacy model renders [`env_module_wgsl`]; the physical model renders
 //! [`physical_env_module_wgsl`], which attaches the completed atmosphere LUTs, celestial
 //! evaluator and cloud views through the private S10 group-2 layout once those resources
-//! were carried by real submissions. Model and accepted source changes invalidate the IBL
-//! publication before its readback so no old callback can restore the previous environment,
-//! and disabling the pass invalidates it synchronously.
+//! were carried by real submissions. Model and accepted authored source replacements
+//! invalidate the IBL publication before its readback so no old callback can restore the
+//! previous environment, and disabling the pass invalidates it synchronously. Continuous
+//! time/weather playback is evolution within the accepted source: it marks the cube dirty
+//! without replacing the identity, so asynchronous publication keeps flowing.
 //!
 //! The lighting's `env_specular` is the IBL output cube, never this source cube, so the env
 //! render passes bind group 1 without a read/write hazard.
@@ -18,12 +20,15 @@ use raa_core::{GpuContext, RaaError};
 use raa_ibl::IblHandle;
 use raa_lit::LitHandle;
 use raa_pipeline::{FeaturePass, HDR_FORMAT, LightingResources, PrepareCtx, RecordCtx};
+use raa_scene::DirectionalLight;
 
 use crate::atmosphere::{AtmosphereResources, PhysicalSkyGpu, SharedAtmosphere};
 use crate::cloud_backend::{CloudViews, SharedCloud};
-use crate::desc::{EnvUpdate, SkyModel};
+use crate::desc::{EnvUpdate, SkyDesc, SkyModel};
 use crate::shaders::{env_module_wgsl, physical_env_module_wgsl};
 use crate::state::{SharedSky, SkyState};
+use crate::time_of_day::TimeOfDaySettings;
+use crate::weather::{WeatherPreset, WeatherSettings};
 
 /// S12 name of the pass.
 pub(crate) const ENV_NAME: &str = "sky.env";
@@ -89,11 +94,38 @@ fn physical_readiness(sky_view: bool, submitted_generation: u64, bake_ready: boo
     sky_view && submitted_generation > 0 && bake_ready
 }
 
-/// Whether prepare must cancel in-flight IBL work before it can publish: an accepted source
-/// change since the last recorded filter (the record clears `env_dirty`, so seeing it set at
-/// prepare entry means an edit replaced the source) or a switch of the evaluated model.
-fn source_replaced(env_dirty: bool, prepared: Option<SkyModel>, model: SkyModel) -> bool {
-    env_dirty || prepared.is_some_and(|previous| previous != model)
+/// The accepted authored source of the env cube: the description and the authored time,
+/// manual-light and weather settings (including the retained cycle-start identity).
+///
+/// Continuous playback evolves the runtime time cursor, the current weather, the wind drift
+/// and the evolution phase without touching these authored records. Playback therefore sets
+/// `env_dirty` to refresh the cube while the identity stays stable, so asynchronous IBL
+/// publication is not cancelled on every animated frame. A model switch or any accepted
+/// authored edit replaces the identity and invalidates the older publication epoch.
+#[derive(Clone, Debug, PartialEq)]
+struct SourceIdentity {
+    desc: SkyDesc,
+    time: TimeOfDaySettings,
+    manual: DirectionalLight,
+    weather: WeatherSettings,
+    cycle_start: WeatherPreset,
+}
+
+/// The current accepted authored source identity.
+fn source_identity(state: &SkyState) -> SourceIdentity {
+    SourceIdentity {
+        desc: state.desc.clone(),
+        time: state.time.state.settings,
+        manual: state.time.manual,
+        weather: state.weather.settings,
+        cycle_start: state.weather.start,
+    }
+}
+
+/// Whether prepare must cancel in-flight IBL work before it can publish: an accepted authored
+/// source replacement (same model or not) or a model switch, both captured by the identity.
+fn source_replaced(previous: Option<&SourceIdentity>, current: &SourceIdentity) -> bool {
+    previous.is_some_and(|previous| previous != current)
 }
 
 impl PhysicalSkyBinding {
@@ -286,8 +318,8 @@ pub(crate) struct SkyEnvPass {
     physical: PhysicalSkyBinding,
     /// Whether the physical group-2 bind group is ready for this frame.
     physical_ready: bool,
-    /// The model whose source cube and IBL the current pipeline composition renders.
-    prepared_model: Option<SkyModel>,
+    /// The accepted authored source identity the current cube composition renders.
+    prepared_source: Option<SourceIdentity>,
     /// The Milky Way bake was ready at the last prepare, for the one-time env refresh.
     milky_way_ready: bool,
     /// `IblHandle::filter` takes the lighting mutably to clear the env when it refuses the
@@ -430,7 +462,7 @@ impl SkyEnvPass {
             physical_pipeline,
             physical,
             physical_ready: false,
-            prepared_model: None,
+            prepared_source: None,
             milky_way_ready: false,
             scratch: LightingResources::new(gpu),
             clear_env: false,
@@ -480,14 +512,15 @@ impl FeaturePass for SkyEnvPass {
         }
         let mut state = self.state.try_borrow_mut().map_err(|_| state_busy())?;
         let model = state.desc.model;
-        // `record` clears `env_dirty`, so seeing it set before this prepare's own refresh
-        // decisions means an accepted edit replaced the source since the recorded filter.
-        // Both a same-model source replacement and a model switch must cancel the older
-        // callbacks before `apply_pending` can publish them.
-        if source_replaced(state.env_dirty, self.prepared_model, model) {
+        // A model switch or any accepted authored edit (same model or not) replaces the
+        // source identity and must cancel the older callbacks before `apply_pending` can
+        // publish them. Playback only marks `env_dirty`, so animated time/weather frames
+        // stay within the accepted identity and keep publishing asynchronously.
+        let source = source_identity(&state);
+        if source_replaced(self.prepared_source.as_ref(), &source) {
             self.ibl.invalidate(ctx.lighting);
         }
-        self.prepared_model = Some(model);
+        self.prepared_source = Some(source);
         let bake_ready = self
             .atmosphere
             .try_borrow()
@@ -615,32 +648,59 @@ mod tests {
     }
 
     #[test]
-    fn a_same_model_source_change_invalidates_before_pending_publication() {
-        // `record` clears `env_dirty`: an entry-time flag is an accepted source replacement,
-        // even while the evaluated model stays the same.
-        assert!(source_replaced(
-            true,
-            Some(SkyModel::Physical),
-            SkyModel::Physical
-        ));
-        assert!(!source_replaced(
-            false,
-            Some(SkyModel::Physical),
-            SkyModel::Physical
-        ));
-        assert!(source_replaced(
-            false,
-            Some(SkyModel::Legacy),
-            SkyModel::Physical
-        ));
-        assert!(
-            !source_replaced(false, None, SkyModel::Physical),
-            "the first prepare has no recorded source; its dirty state decides"
+    fn playback_keeps_the_source_identity_but_authored_edits_replace_it() {
+        use crate::desc::SkyDesc;
+
+        let mut state = SkyState::default();
+        let first = source_identity(&state);
+        // Playback evolves the runtime cursor, the current weather, the wind drift and the
+        // evolution phase; `advance_frame` marks `env_dirty` but replaces no authored record.
+        state.time.state.current.hours = 18.75;
+        state.time.state.sky.sun = raa_math::Vec3::new(0.0, -1.0, 0.0);
+        state.weather.current.coverage = 0.95;
+        state.weather.target.coverage = 0.7;
+        state.weather.wind_offset = [12.0, -3.0];
+        state.weather.evolution = 42.0;
+        state.env_dirty = true;
+        assert_eq!(
+            first,
+            source_identity(&state),
+            "animated playback is evolution within the accepted source"
         );
-        assert!(
-            source_replaced(true, None, SkyModel::Physical),
-            "a dirty first prepare still cancels stale work"
-        );
+        assert!(!source_replaced(Some(&first), &source_identity(&state)));
+
+        // An authored description edit replaces the source even when the model is unchanged.
+        let mut edited = state.clone();
+        edited.desc = SkyDesc {
+            zenith: [0.0, 0.0, 0.0],
+            ..edited.desc.clone()
+        };
+        let current = source_identity(&edited);
+        assert_ne!(first, current);
+        assert!(source_replaced(Some(&first), &current));
+
+        // Authored time, manual-light, weather and cycle-start edits are replacements too.
+        let mutations: [fn(&mut SkyState); 4] = [
+            |s| s.time.state.settings.time.hours = 10.0,
+            |s| s.time.manual.intensity = 2.0,
+            |s| s.weather.settings.target.coverage = 0.1,
+            |s| s.weather.start = WeatherPreset::Storm,
+        ];
+        for mutate in mutations {
+            let mut edited = state.clone();
+            mutate(&mut edited);
+            assert!(
+                source_replaced(Some(&first), &source_identity(&edited)),
+                "an accepted authored edit replaces the source identity"
+            );
+        }
+
+        // A model switch is captured by the description; the first prepare has no previous
+        // identity and therefore nothing to cancel.
+        let mut switched = state.clone();
+        switched.desc.model = SkyModel::Legacy;
+        assert!(source_replaced(Some(&first), &source_identity(&switched)));
+        assert!(!source_replaced(None, &first));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -924,6 +984,241 @@ mod tests {
         frame(&mut graph); // the new source's completion is applied now
         let sh = ibl.sh().expect("the new source publishes");
         assert!(sh.iter().flatten().all(|c| c.is_finite()), "sh {sh:?}");
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+
+        std::mem::forget(graph);
+        std::mem::forget(backbuffer);
+        std::mem::forget(ibl);
+        std::mem::forget(lit);
+        std::mem::forget(pipeline);
+        std::mem::forget(gpu);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn continuous_playback_publishes_and_keeps_publishing() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use raa_core::testing::{block_on, skip, software_gpu};
+        use raa_core::{FrameGraph, OffscreenTarget};
+        use raa_ibl::IblFeature;
+        use raa_lit::{LitOptions, LitRenderer};
+        use raa_pipeline::Pipeline;
+        use raa_scene::{RenderList, Scene};
+
+        use crate::cloud_backend::create_cloud_backend;
+        use crate::state::SkyState;
+
+        let test = "continuous_playback_publishes_and_keeps_publishing";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        const SIZE: (u32, u32) = (32, 32);
+        const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, SURFACE, false)));
+        let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit");
+        let ibl = IblFeature::install(&gpu, &pipeline, &mut lit).expect("ibl");
+        let state = SkyState::shared();
+        {
+            let mut s = state.borrow_mut();
+            // The legacy evaluator keeps the lifecycle independent of the physical LUT path.
+            s.desc.model = SkyModel::Legacy;
+            // Automatic playback: every later frame advances the clock and marks the env
+            // dirty, exactly like `SkyHandle::advance_frame`.
+            s.time.state.settings.enabled = true;
+            s.time.state.settings.playing = true;
+            s.time.state.settings.speed = 120.0;
+        }
+        let atmosphere: crate::atmosphere::SharedAtmosphere = Rc::new(RefCell::new(
+            AtmosphereResources::new(&gpu).expect("atmosphere"),
+        ));
+        let cloud: crate::cloud_backend::SharedCloud =
+            Rc::new(RefCell::new(create_cloud_backend(&gpu).expect("cloud")));
+        let pass = {
+            let p = pipeline.borrow();
+            SkyEnvPass::new(
+                &gpu,
+                Rc::clone(&state),
+                ibl.clone(),
+                lit.handle(),
+                p.lighting().layout(),
+                atmosphere,
+                cloud,
+            )
+        };
+        pipeline
+            .borrow_mut()
+            .add(Box::new(pass))
+            .expect("add sky.env");
+        let mut graph = FrameGraph::new(SURFACE);
+        Pipeline::install(&pipeline, &mut graph);
+        graph.compile().expect("compile");
+        let backbuffer = OffscreenTarget::new(&gpu, SIZE.0, SIZE.1, SURFACE);
+        let mut scene = Scene::with_capacity(1, 1);
+        scene.camera.set_viewport(SIZE.0, SIZE.1);
+        let mut list = RenderList::with_capacity(1);
+        let mut tags = Vec::with_capacity(1);
+        let mut slots = Vec::with_capacity(1);
+
+        let mut published = Vec::new();
+        for frame_index in 0..20u64 {
+            {
+                let mut s = state.borrow_mut();
+                let invocation = frame_index + 1;
+                let north = s.time.state.settings.place.north;
+                let (_, advanced) = s.time.advance(invocation, 1.0).expect("advance time");
+                s.weather.advance(invocation, 1.0, north);
+                if advanced {
+                    s.env_dirty = true;
+                }
+            }
+            lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
+                .expect("lit prepare");
+            let commands = graph
+                .execute(&gpu, backbuffer.view(), SIZE)
+                .expect("execute");
+            gpu.queue().submit([commands]);
+            gpu.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll");
+            if let Some(generation) = ibl.publication().published_generation {
+                published.push(generation);
+            }
+        }
+        let first = *published
+            .first()
+            .expect("continuous playback publishes an environment");
+        assert!(first > 0, "a published generation is accepted work");
+        let last = *published.last().expect("a publication");
+        assert!(
+            last > first,
+            "later playback frames keep publishing: {published:?}"
+        );
+        assert_eq!(
+            ibl.publication().published_generation,
+            Some(last),
+            "the observation does not advance work"
+        );
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
+
+        std::mem::forget(graph);
+        std::mem::forget(backbuffer);
+        std::mem::forget(ibl);
+        std::mem::forget(lit);
+        std::mem::forget(pipeline);
+        std::mem::forget(gpu);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn disabling_rejects_an_older_ibl_completion() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use raa_core::testing::{block_on, skip, software_gpu};
+        use raa_core::{FrameGraph, OffscreenTarget};
+        use raa_ibl::IblFeature;
+        use raa_lit::{LitOptions, LitRenderer};
+        use raa_pipeline::Pipeline;
+        use raa_scene::{RenderList, Scene};
+
+        use crate::cloud_backend::create_cloud_backend;
+        use crate::state::SkyState;
+
+        let test = "disabling_rejects_an_older_ibl_completion";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        const SIZE: (u32, u32) = (32, 32);
+        const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, SURFACE, false)));
+        let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit");
+        let ibl = IblFeature::install(&gpu, &pipeline, &mut lit).expect("ibl");
+        let state = SkyState::shared();
+        state.borrow_mut().desc.model = SkyModel::Legacy;
+        let atmosphere: crate::atmosphere::SharedAtmosphere = Rc::new(RefCell::new(
+            AtmosphereResources::new(&gpu).expect("atmosphere"),
+        ));
+        let cloud: crate::cloud_backend::SharedCloud =
+            Rc::new(RefCell::new(create_cloud_backend(&gpu).expect("cloud")));
+        let pass = {
+            let p = pipeline.borrow();
+            SkyEnvPass::new(
+                &gpu,
+                Rc::clone(&state),
+                ibl.clone(),
+                lit.handle(),
+                p.lighting().layout(),
+                atmosphere,
+                cloud,
+            )
+        };
+        pipeline
+            .borrow_mut()
+            .add(Box::new(pass))
+            .expect("add sky.env");
+        let mut graph = FrameGraph::new(SURFACE);
+        Pipeline::install(&pipeline, &mut graph);
+        graph.compile().expect("compile");
+        let backbuffer = OffscreenTarget::new(&gpu, SIZE.0, SIZE.1, SURFACE);
+        let mut scene = Scene::with_capacity(1, 1);
+        scene.camera.set_viewport(SIZE.0, SIZE.1);
+        let mut list = RenderList::with_capacity(1);
+        let mut tags = Vec::with_capacity(1);
+        let mut slots = Vec::with_capacity(1);
+        let mut frame = |graph: &mut FrameGraph| {
+            lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
+                .expect("lit prepare");
+            let commands = graph
+                .execute(&gpu, backbuffer.view(), SIZE)
+                .expect("execute");
+            gpu.queue().submit([commands]);
+            gpu.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll");
+        };
+
+        // Frame 0 records the first filter request; its completion is still in flight.
+        frame(&mut graph);
+        assert_eq!(ibl.publication().requested_generation, 1);
+        assert!(ibl.sh().is_none());
+        pipeline
+            .borrow_mut()
+            .set_enabled(ENV_NAME, false)
+            .expect("disable sky.env");
+        frame(&mut graph); // disabled: no prepare, no apply_pending
+        assert!(ibl.sh().is_none(), "disable clears the environment");
+        assert_eq!(ibl.publication().published_generation, None);
+
+        pipeline
+            .borrow_mut()
+            .set_enabled(ENV_NAME, true)
+            .expect("re-enable sky.env");
+        frame(&mut graph); // applies the pending map: the old epoch must be refused
+        assert!(
+            ibl.sh().is_none(),
+            "an old callback restored a disabled environment"
+        );
+        let mut published = None;
+        for _ in 0..20 {
+            frame(&mut graph);
+            if let Some(generation) = ibl.publication().published_generation {
+                published = Some(generation);
+                break;
+            }
+        }
+        let generation = published.expect("the re-enabled environment publishes its own filter");
+        assert!(
+            generation > 1,
+            "the replaced request's generation was published: {generation}"
+        );
         let error = block_on(errors.pop());
         assert!(error.is_none(), "GPU validation error: {error:?}");
 
