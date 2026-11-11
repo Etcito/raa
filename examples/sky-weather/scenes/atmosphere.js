@@ -26,14 +26,26 @@ const moments = {
   legacy: { day: 172, hours: 17.5, latitude: 38, north: 0 },
 };
 
-// S24 physical preset mappings: weather target, preset hour on day 172, ground albedo, Mie.
-// Weather values are the delivered built-in targets (coverage, base, thickness).
-export const physicalPresets = {
-  day: { weather: 'fair', coverage: .3, base: 1200, thickness: 1600, hours: 9, groundAlbedo: [.3, .3, .3], mieMultiplier: 1 },
-  snow: { weather: 'overcast', coverage: .97, base: 600, thickness: 900, hours: 12, groundAlbedo: [.9, .9, .9], mieMultiplier: 1.5 },
-  jungle: { weather: 'broken', coverage: .62, base: 1000, thickness: 2600, hours: 15, groundAlbedo: [.18, .26, .14], mieMultiplier: 1.2 },
-  night: { weather: 'clear', coverage: 0, base: 1200, thickness: 1600, hours: 0, groundAlbedo: [.3, .3, .3], mieMultiplier: 1 },
+// S24 built-in weather targets (solstice@7e465b5 crates/solstice-render/weather/*.weather).
+const fairTarget = { coverage: .3, type: .9, base: 1200, thickness: 1600, density: 1, cirrus: .15, wind: { speed: 7, from: 250 }, evolution: 1, rain: 0 };
+export const weatherTargets = {
+  fair: fairTarget,
+  clear: { ...fairTarget, coverage: 0, cirrus: .05, wind: { speed: 5, from: 250 } },
+  broken: { coverage: .62, type: .95, base: 1000, thickness: 2600, density: 1.15, cirrus: .3, wind: { speed: 10, from: 240 }, evolution: 1.3, rain: 0 },
+  overcast: { coverage: .97, type: .12, base: 600, thickness: 900, density: 1.3, cirrus: 0, wind: { speed: 8, from: 220 }, evolution: .6, rain: 0 },
 };
+// S24 physical preset mappings: weather target, preset hour on day 172, ground albedo, Mie.
+// Values are compared with the relative tolerance NEAR_TOLERANCE declared here (f32 round trip).
+export const NEAR_TOLERANCE = 1e-4;
+const mapping = (weather, hours, groundAlbedo, mieMultiplier) => ({ weather, ...weatherTargets[weather], target: weatherTargets[weather], day: 172, hours, groundAlbedo, mieMultiplier });
+export const physicalPresets = {
+  day: mapping('fair', 9, [.3, .3, .3], 1),
+  snow: mapping('overcast', 12, [.9, .9, .9], 1.5),
+  jungle: mapping('broken', 15, [.18, .26, .14], 1.2),
+  night: mapping('clear', 0, [.3, .3, .3], 1),
+};
+const OMITTED_HOURS = 13;
+const LEGACY_ORDER = ['snow', 'jungle', 'night', 'day'];
 const presetOf = { day: 'day', twilight: 'day', night: 'night', later: 'night', snow: 'snow', jungle: 'jungle', legacy: 'day' };
 // The authored weather of each mode (named preset, then overrides).
 const authoredWeather = {
@@ -108,72 +120,89 @@ function errorOf(error) {
 
 // Tagged public edits performed by build, keyed by the engine they ran on.
 const recorded = new WeakMap();
-/** Runs one public edit, recording the actual before/after getter snapshots and outcome. */
-function record(engine, tag, operation, apply) {
+/** Runs one public edit, recording the request it passed plus the actual before/after getter snapshots. */
+function record(engine, tag, operation, request, apply) {
   const before = snapshot(engine);
   let accepted = true, error = null;
   try { apply(); } catch (cause) { accepted = false; error = errorOf(cause); }
   const edit = { operation, accepted, error, before, after: snapshot(engine) };
   if (!recorded.has(engine)) recorded.set(engine, []);
-  recorded.get(engine).push({ tag, edit });
+  recorded.get(engine).push({ tag, request: structuredClone(request), edit });
   if (!accepted) throw new Error(`${operation}: ${error.code}: ${error.message}`);
   return edit;
 }
-const near = (a, b) => Math.abs(a - b) <= 1e-4 * Math.max(1, Math.abs(b));
+const isNum = v => typeof v === 'number' && Number.isFinite(v);
+const near = (a, b) => isNum(a) && isNum(b) && Math.abs(a - b) <= NEAR_TOLERANCE * Math.max(1, Math.abs(b));
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const placeKeys = ['latitude', 'north', 'enabled', 'playing', 'speed'];
+const weatherKeys = ['coverage', 'type', 'base', 'thickness', 'density', 'cirrus', 'evolution', 'rain'];
+/** Field-by-field comparison of an observed weather target with an expected static target. */
+const targetMatches = (t, want) => t != null && weatherKeys.every(k => near(t[k], want[k])) && near(t.wind?.speed, want.wind.speed) && near(t.wind?.from, want.wind.from);
+/** Expected target of a named weather preset plus structured overrides, from the static table. */
+export function expectedWeather(request) {
+  const { preset, wind, ...rest } = request;
+  const base = weatherTargets[preset];
+  return base ? { ...base, ...rest, wind: { ...base.wind, ...wind } } : null;
+}
 
-/** The accepted physical preset transaction matches the S24 mapping and keeps place/playback. */
-function presetMapping(edit, preset) {
-  const want = physicalPresets[preset], { sky, time, weather } = edit.after, t = weather?.target;
-  const passed = edit.accepted && sky?.model === 'physical' && sky.profile === preset
-    && sky.atmosphere.groundAlbedo.every((v, i) => near(v, want.groundAlbedo[i])) && near(sky.atmosphere.mieMultiplier, want.mieMultiplier)
-    && time.day === 172 && near(time.hours, want.hours) && time.currentDay === 172 && near(time.currentHours, want.hours)
-    && placeKeys.every(key => time[key] === edit.before.time[key])
-    && near(t.coverage, want.coverage) && near(t.base, want.base) && near(t.thickness, want.thickness);
+/** The accepted physical preset transaction matches the static S24 entry of the REQUESTED preset and keeps place/playback. */
+function presetMapping(rec) {
+  const preset = rec.request?.preset, want = Object.hasOwn(physicalPresets, preset ?? '') ? physicalPresets[preset] : null;
+  const { edit } = rec, { sky, time, weather } = edit.after, t = weather?.target;
+  const passed = want !== null && (rec.request.model ?? 'physical') === 'physical' && edit.accepted === true
+    && sky?.model === 'physical' && sky.profile === preset
+    && want.groundAlbedo.every((v, i) => near(sky.atmosphere?.groundAlbedo?.[i], v)) && near(sky.atmosphere?.mieMultiplier, want.mieMultiplier)
+    && time?.day === want.day && near(time.hours, want.hours) && time.currentDay === want.day && near(time.currentHours, want.hours)
+    && placeKeys.every(key => time[key] === edit.before.time?.[key])
+    && targetMatches(t, want.target);
   return { name: 'physical-preset-mapping', passed,
-    detail: `${edit.operation}: profile ${sky?.profile} model ${sky?.model} atmosphere ${JSON.stringify(sky?.atmosphere)}; `
+    detail: `${edit.operation} requested ${JSON.stringify(rec.request)}: profile ${sky?.profile} model ${sky?.model} atmosphere ${JSON.stringify(sky?.atmosphere)}; `
       + `time ${time?.day}/${time?.hours} current ${time?.currentDay}/${time?.currentHours}; weather target ${JSON.stringify(t)}; expected ${JSON.stringify(want)}` };
 }
 
-/** Assertions over the recorded preset, override and model-switch edits. */
-function editAssertions(records, current) {
-  const by = tag => records.filter(r => r.tag === tag).map(r => r.edit);
+/** Assertions over the recorded preset, override and model-switch edits; expectations come from requests and static tables. */
+export function editAssertions(records, current) {
+  const by = tag => records.filter(r => r.tag === tag);
   const out = [];
   const [mapping] = by('preset');
-  if (mapping) out.push(presetMapping(mapping, mapping.after.sky?.profile));
-  const [omitted] = by('omitted'), [explicit] = by('explicit');
+  if (mapping) out.push(presetMapping(mapping));
+  const [omittedRec] = by('omitted'), [explicitRec] = by('explicit');
+  const omitted = omittedRec?.edit, explicit = explicitRec?.edit;
   if (omitted) out.push({ name: 'omitted-preset-retains-moment',
-    passed: omitted.accepted && omitted.before.time.hours === 13 && omitted.after.time.hours === 13 && omitted.after.time.currentHours === 13
-      && omitted.after.sky.profile === 'snow' && sameJson(omitted.after.weather.target, omitted.before.weather.target),
+    passed: !Object.hasOwn(omittedRec.request, 'preset') && omitted.accepted === true && omitted.before.time.hours === OMITTED_HOURS
+      && omitted.after.time.hours === OMITTED_HOURS && omitted.after.time.currentHours === OMITTED_HOURS
+      && sameJson(omitted.after.sky, omitted.before.sky) && sameJson(omitted.after.weather.target, omitted.before.weather.target),
     detail: `${omitted.operation}: hours ${omitted.before.time.hours}->${omitted.after.time.hours}, current ${omitted.after.time.currentHours}, profile ${omitted.after.sky.profile}` });
-  if (explicit) out.push({ name: 'explicit-preset-resets-moment',
-    passed: explicit.accepted && explicit.before.time.hours === 13 && near(explicit.after.time.hours, 12) && near(explicit.after.time.currentHours, 12)
-      && sameJson(explicit.after.sky, omitted?.after.sky),
-    detail: `${explicit.operation}: hours ${explicit.before.time.hours}->${explicit.after.time.hours}, current ${explicit.after.time.currentHours}; resolved sky identical to omitted-preset result ${sameJson(explicit.after.sky, omitted?.after.sky)}` });
-  const [overrides] = by('weather');
-  if (overrides) {
-    const t = overrides.after.weather.target, b = physicalPresets.jungle;
-    out.push({ name: 'weather-preset-overrides',
-      passed: overrides.accepted && near(t.coverage, .7) && near(t.wind.speed, 12) && near(t.base, b.base) && near(t.thickness, b.thickness)
-        && overrides.after.weather.changing === false && sameJson(current.weather.target, t),
-      detail: `${overrides.operation}: target ${JSON.stringify(t)}; cyclePreset ${overrides.after.weather.cyclePreset}; current getter equal ${sameJson(current.weather.target, t)}` });
+  if (explicit) {
+    const m = presetMapping(explicitRec);
+    out.push({ name: 'explicit-preset-resets-moment',
+      passed: m.passed && explicit.before.time.hours === OMITTED_HOURS && sameJson(explicit.after.sky, omitted?.after.sky),
+      detail: `${explicit.operation}: hours ${explicit.before.time.hours}->${explicit.after.time.hours}, current ${explicit.after.time.currentHours}; mapping ${m.passed}; resolved sky identical to omitted-preset result ${sameJson(explicit.after.sky, omitted?.after.sky)}` });
   }
-  const legacy = by('legacy-preset');
+  const [overridesRec] = by('weather');
+  if (overridesRec) {
+    const overrides = overridesRec.edit, t = overrides.after.weather.target, want = expectedWeather(overridesRec.request);
+    out.push({ name: 'weather-preset-overrides',
+      passed: want !== null && overrides.accepted === true && targetMatches(t, want) && overrides.after.weather.changing === false && targetMatches(current.weather?.target, want),
+      detail: `${overrides.operation}: target ${JSON.stringify(t)}; expected ${JSON.stringify(want)}; cyclePreset ${overrides.after.weather.cyclePreset}` });
+  }
+const legacy = by('legacy-preset');
   if (legacy.length) out.push({ name: 'legacy-preset-mappings',
-    passed: sameJson(legacy.map(e => e.after.sky.profile), ['snow', 'jungle', 'night', 'day']) && legacy.every(e => e.accepted && e.after.sky.model === 'legacy'
+    passed: sameJson(legacy.map(r => r.request.preset), LEGACY_ORDER) && legacy.every(({ request, edit: e }) => request.model === 'legacy'
+      && e.accepted === true && e.after.sky?.model === 'legacy' && e.after.sky.profile === request.preset
       && sameJson(e.after.weather.target, e.before.weather.target) && e.after.time.day === e.before.time.day && e.after.time.hours === e.before.time.hours),
-    detail: legacy.map(e => `${e.operation}: profile ${e.after.sky.profile} model ${e.after.sky.model}, weather kept ${sameJson(e.after.weather.target, e.before.weather.target)}, time ${e.after.time.day}/${e.after.time.hours}`).join('; ') });
+    detail: legacy.map(({ request, edit: e }) => `${e.operation}: requested ${request.preset}/${request.model}, profile ${e.after.sky?.profile} model ${e.after.sky?.model}, weather kept ${sameJson(e.after.weather.target, e.before.weather.target)}`).join('; ') });
   const switches = by('model');
   if (switches.length) {
-    const authored = switches[0].before.weather;
-    const keep = w => sameJson(w.target, authored.target) && ['enabled', 'shadows', 'changing', 'seed', 'transitionSeconds'].every(k => w[k] === authored[k]);
+    const want = expectedWeather(authoredWeather.legacy), authored = switches[0].edit.before.weather;
+    const keep = w => w != null && targetMatches(w.target, want) && ['enabled', 'shadows', 'changing', 'seed', 'transitionSeconds'].every(k => w[k] === authored[k]);
     out.push({ name: 'weather-retained-across-model-switches',
-      passed: sameJson(switches.map(e => e.after.sky.model), ['legacy', 'physical', 'legacy']) && switches.every(e => e.accepted && keep(e.after.weather))
-        && keep(current.weather) && near(authored.target.cirrus, .2) && near(authored.target.wind.speed, 9),
-      detail: `authored ${JSON.stringify(authored.target)}; ` + switches.map(e => `${e.operation}: model ${e.after.sky.model}, kept ${keep(e.after.weather)}`).join('; ') });
-    out.push({ name: 'sky-model-legacy', passed: current.sky?.model === 'legacy' && current.sky.profile === 'day',
-      detail: `final sky model ${current.sky?.model} profile ${current.sky?.profile}` });
+      passed: sameJson(switches.map(r => r.request.model), ['legacy', 'physical', 'legacy']) && switches.every(({ request, edit: e }) => e.accepted === true
+        && !Object.hasOwn(request, 'preset') && e.after.sky?.model === request.model && keep(e.after.weather)) && keep(authored) && keep(current.weather),
+      detail: `expected ${JSON.stringify(want)}; ` + switches.map(({ request, edit: e }) => `${e.operation}: requested ${request.model}, model ${e.after.sky?.model}, kept ${keep(e.after.weather)}`).join('; ') });
+    const last = switches[switches.length - 1].request;
+    out.push({ name: 'sky-model-legacy', passed: last.model === 'legacy' && current.sky?.model === 'legacy' && current.sky.profile === 'day',
+      detail: `requested ${last.model}; final sky model ${current.sky?.model} profile ${current.sky?.profile}` });
   }
   return out;
 }
@@ -323,14 +352,15 @@ export default {
     engine.setLight({ direction: [-.35, -.6, -.55], color: [1, .95, .88], intensity: 3 });
     engine.setAmbient({ color: [.55, .62, .75], intensity: night ? .02 : .15 });
     const preset = presetOf[mode];
-    record(engine, 'preset', `setSky({preset:'${preset}',model:'physical'})`, () => engine.setSky({ preset, model: 'physical' }));
+    const presetRequest = { preset, model: 'physical' };
+    record(engine, 'preset', `setSky({preset:'${preset}',model:'physical'})`, presetRequest, () => engine.setSky(presetRequest));
     if (mode === 'snow') {
       // Omitted preset keeps the edited moment; an explicit preset resets it.
-      engine.setTimeOfDay({ hours: 13 });
-      record(engine, 'omitted', 'setSky({}) after setTimeOfDay({hours:13})', () => engine.setSky({}));
-      record(engine, 'explicit', "setSky({preset:'snow'})", () => engine.setSky({ preset: 'snow' }));
+      engine.setTimeOfDay({ hours: OMITTED_HOURS });
+      record(engine, 'omitted', 'setSky({}) after setTimeOfDay({hours:13})', {}, () => engine.setSky({}));
+      record(engine, 'explicit', "setSky({preset:'snow'})", { preset: 'snow' }, () => engine.setSky({ preset: 'snow' }));
     } else if (mode === 'jungle') {
-      record(engine, 'weather', "setWeather({preset:'broken',coverage:0.7,wind:{speed:12}})", () => engine.setWeather(authoredWeather.jungle));
+      record(engine, 'weather', "setWeather({preset:'broken',coverage:0.7,wind:{speed:12}})", authoredWeather.jungle, () => engine.setWeather(authoredWeather.jungle));
     } else if (mode === 'legacy') {
       engine.setWeather(authoredWeather.legacy);
     } else {
@@ -350,12 +380,12 @@ export default {
     }
     if (mode === 'legacy') {
       // Model-only switches and legacy presets retain the authored weather and moment.
-      record(engine, 'model', "setSky({model:'legacy'})", () => engine.setSky({ model: 'legacy' }));
-      for (const p of ['snow', 'jungle', 'night', 'day']) {
-        record(engine, 'legacy-preset', `setSky({preset:'${p}',model:'legacy'})`, () => engine.setSky({ preset: p, model: 'legacy' }));
+      record(engine, 'model', "setSky({model:'legacy'})", { model: 'legacy' }, () => engine.setSky({ model: 'legacy' }));
+      for (const p of LEGACY_ORDER) {
+        record(engine, 'legacy-preset', `setSky({preset:'${p}',model:'legacy'})`, { preset: p, model: 'legacy' }, () => engine.setSky({ preset: p, model: 'legacy' }));
       }
-      record(engine, 'model', "setSky({model:'physical'})", () => engine.setSky({ model: 'physical' }));
-      record(engine, 'model', "setSky({model:'legacy'})", () => engine.setSky({ model: 'legacy' }));
+      record(engine, 'model', "setSky({model:'physical'})", { model: 'physical' }, () => engine.setSky({ model: 'physical' }));
+      record(engine, 'model', "setSky({model:'legacy'})", { model: 'legacy' }, () => engine.setSky({ model: 'legacy' }));
     }
     await buildSkySample(engine, lib, selected.selection.camera);
   },

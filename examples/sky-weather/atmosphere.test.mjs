@@ -277,3 +277,76 @@ test('a lost weather target across a model switch fails the retention assertion'
   const row = atmosphere.inventory.find(r => r.mode === 'legacy');
   assert.throws(() => validateRequiredFacts(row, { ...observation, ...runtime }, atmosphere.factNames), /legacy-comparison/);
 });
+
+// Synthetic records fed straight to the selectors: expectations must come from the request.
+function presetRecord(request, mutate = () => {}) {
+  const engine = fakeEngine();
+  engine.setTimeOfDay({ latitude: 38 });
+  const before = { sky: engine.sky(), time: engine.timeOfDay(), weather: engine.weather() };
+  engine.setSky(request);
+  const after = { sky: engine.sky(), time: engine.timeOfDay(), weather: engine.weather() };
+  mutate(after);
+  return { tag: request.model === 'legacy' ? 'legacy-preset' : 'preset', request, edit: { operation: 'synthetic', accepted: true, error: null, before, after } };
+}
+const verdict = (records, name) => {
+  const last = records[records.length - 1].edit.after;
+  return atmosphere.editAssertions(records, last).find(a => a.name === name).passed;
+};
+const resolvedAs = preset => presetRecord({ preset, model: 'physical' }).edit.after;
+
+test('preset mapping selector passes the faithful snow and jungle mappings', () => {
+  for (const preset of ['snow', 'jungle', 'day', 'night']) assert.equal(verdict([presetRecord({ preset, model: 'physical' })], 'physical-preset-mapping'), true, preset);
+});
+
+test('requested snow resolved to a self-consistent jungle profile fails', () => {
+  const jungle = resolvedAs('jungle');
+  assert.equal(verdict([presetRecord({ preset: 'snow', model: 'physical' }, a => Object.assign(a, jungle))], 'physical-preset-mapping'), false);
+});
+
+test('requested snow with a wrong albedo or mie fails', () => {
+  assert.equal(verdict([presetRecord({ preset: 'snow', model: 'physical' }, a => { a.sky.atmosphere.groundAlbedo = [.3, .3, .3]; })], 'physical-preset-mapping'), false);
+  assert.equal(verdict([presetRecord({ preset: 'snow', model: 'physical' }, a => { a.sky.atmosphere.mieMultiplier = 1; })], 'physical-preset-mapping'), false);
+});
+
+test('requested jungle with wrong hours or weather fails', () => {
+  assert.equal(verdict([presetRecord({ preset: 'jungle', model: 'physical' }, a => { a.time.hours = 9; a.time.currentHours = 9; })], 'physical-preset-mapping'), false);
+  assert.equal(verdict([presetRecord({ preset: 'jungle', model: 'physical' }, a => { a.weather.target = structuredClone(resolvedAs('snow').weather.target); })], 'physical-preset-mapping'), false);
+  assert.equal(verdict([presetRecord({ preset: 'jungle', model: 'physical' }, a => { a.weather.target.type = .5; })], 'physical-preset-mapping'), false);
+});
+
+test('a legacy preset whose observed model is physical, or whose profile differs from the request, fails', () => {
+  const order = ['snow', 'jungle', 'night', 'day'];
+  const good = order.map(p => presetRecord({ preset: p, model: 'legacy' }));
+  assert.equal(verdict(good, 'legacy-preset-mappings'), true);
+  const physical = order.map(p => presetRecord({ preset: p, model: 'legacy' }, a => { if (p === 'night') a.sky.model = 'physical'; }));
+  assert.equal(verdict(physical, 'legacy-preset-mappings'), false);
+  const swapped = order.map(p => presetRecord({ preset: p, model: 'legacy' }, a => { if (p === 'jungle') a.sky.profile = 'snow'; }));
+  assert.equal(verdict(swapped, 'legacy-preset-mappings'), false);
+});
+
+test('weather overrides, omitted/explicit presets and model switches check requests, not observations', async () => {
+  const { engine } = await run('jungle');
+  const w = { tag: 'weather', request: { preset: 'broken', coverage: .7, wind: { speed: 12 } } };
+  const weatherAfter = engine.weather();
+  const edit = after => ({ operation: 'synthetic', accepted: true, error: null, before: { sky: engine.sky(), time: engine.timeOfDay(), weather: weatherAfter }, after });
+  const wrong = { ...weatherAfter, target: { ...weatherAfter.target, base: 600 } };
+  const cur = weather => ({ sky: engine.sky(), time: engine.timeOfDay(), weather });
+  assert.equal(atmosphere.editAssertions([{ ...w, edit: edit(cur(weatherAfter)) }], cur(weatherAfter)).find(a => a.name === 'weather-preset-overrides').passed, true);
+  assert.equal(atmosphere.editAssertions([{ ...w, edit: edit(cur(wrong)) }], cur(wrong)).find(a => a.name === 'weather-preset-overrides').passed, false);
+  const snow = await run('snow');
+  const recs = name => snow.observation.edits.filter(e => e.operation.startsWith(name));
+  const [omitted] = recs('setSky({})'), [explicit] = recs("setSky({preset:'snow'})");
+  const cs = { sky: snow.observation.sky, time: snow.observation.time, weather: snow.observation.weather };
+  const pick = (records, name) => atmosphere.editAssertions(records, cs).find(a => a.name === name).passed;
+  assert.equal(pick([{ tag: 'omitted', request: {}, edit: omitted }], 'omitted-preset-retains-moment'), true);
+  assert.equal(pick([{ tag: 'omitted', request: { preset: 'snow' }, edit: omitted }], 'omitted-preset-retains-moment'), false);
+  const ex = [{ tag: 'omitted', request: {}, edit: omitted }];
+  assert.equal(pick([...ex, { tag: 'explicit', request: { preset: 'snow' }, edit: explicit }], 'explicit-preset-resets-moment'), true);
+  assert.equal(pick([...ex, { tag: 'explicit', request: { preset: 'jungle' }, edit: explicit }], 'explicit-preset-resets-moment'), false);
+  const legacy = await run('legacy');
+  const switches = legacy.observation.edits.filter(e => /^setSky\(\{model:/.test(e.operation));
+  const lc = { sky: legacy.observation.sky, time: legacy.observation.time, weather: legacy.observation.weather };
+  const sw = models => switches.map((e, i) => ({ tag: 'model', request: { model: models[i] }, edit: e }));
+  assert.equal(atmosphere.editAssertions(sw(['legacy', 'physical', 'legacy']), lc).find(a => a.name === 'weather-retained-across-model-switches').passed, true);
+  assert.equal(atmosphere.editAssertions(sw(['legacy', 'legacy', 'legacy']), lc).find(a => a.name === 'weather-retained-across-model-switches').passed, false);
+});
