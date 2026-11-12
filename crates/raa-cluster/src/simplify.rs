@@ -31,6 +31,18 @@ pub struct Simplified {
     pub error: f32,
 }
 
+/// Reduces `triangles` towards `target_triangles`. Vertices for which `is_locked` returns true
+/// never move, and neither do the ends of any edge not shared by exactly two triangles.
+pub fn simplify(
+    triangles: &[Triangle],
+    positions: &[Vec3],
+    attributes: &[Attribute],
+    target_triangles: usize,
+    is_locked: &dyn Fn(u32) -> bool,
+) -> Simplified {
+    Simplifier::new(triangles, positions, attributes, is_locked).run(target_triangles)
+}
+
 /// Rejects a collapse that would rotate a face by more than about 78 degrees.
 pub const MIN_NORMAL_AGREEMENT: f64 = 0.2;
 /// Weight of the edge-length term that breaks ties on flat regions, relative to squared length.
@@ -180,10 +192,6 @@ pub fn best_wedge(attributes: &[Attribute], current: u32, wedges: &[u32], wanted
 
 /// The collapse state of one group: welded local vertices (ids in first-use order, mapped back to
 /// input positions through `global`), their quadrics, locks, stamps and the alive triangles.
-// The costs, the collapse and the run loop of the next share read the heap, stamps, texture
-// errors, quadrics, global ids, attributes and the running maximum error; until then they are
-// only written here.
-#[allow(dead_code)]
 pub struct Simplifier<'a> {
     attributes: &'a [Attribute],
     /// Global position id per local vertex.
@@ -393,6 +401,244 @@ impl<'a> Simplifier<'a> {
     pub fn alive_triangles(&self) -> usize {
         self.alive_count
     }
+
+    /// Collapses the cheapest admissible edge until the target or no candidate is left, then
+    /// reports the surviving triangles with their input position ids.
+    pub fn run(mut self, target_triangles: usize) -> Simplified {
+        for v in 0..self.positions.len() as u32 {
+            self.push_edges_around(v);
+        }
+        while self.alive_count > target_triangles {
+            let Some(candidate) = self.heap.pop() else {
+                break;
+            };
+            if self.stamps[candidate.from as usize] != candidate.from_stamp
+                || self.stamps[candidate.to as usize] != candidate.to_stamp
+            {
+                continue;
+            }
+            if self.can_collapse(candidate.from, candidate.to) {
+                self.collapse(candidate.from, candidate.to);
+            }
+        }
+        self.finish()
+    }
+
+    /// Queues every collapse of an unlocked vertex touching `v`, in both directions.
+    fn push_edges_around(&mut self, v: u32) {
+        for neighbor in self.neighbors(v) {
+            for (from, to) in [(v, neighbor), (neighbor, v)] {
+                if !self.locked(from) {
+                    let candidate = Candidate {
+                        cost: self.collapse_cost(from, to),
+                        from,
+                        to,
+                        from_stamp: self.stamps[from as usize],
+                        to_stamp: self.stamps[to as usize],
+                    };
+                    self.heap.push(candidate);
+                }
+            }
+        }
+    }
+
+    fn collapse_cost(&self, from: u32, to: u32) -> f64 {
+        let mut quadric = self.quadrics[from as usize];
+        quadric.add(&self.quadrics[to as usize]);
+        let target = self.positions[to as usize];
+        let length_squared = self.positions[from as usize].distance_squared(target);
+        let texture = self.texture_error(from, to) * TEXTURE_ERROR_WEIGHT;
+        quadric.mean_squared_distance(target)
+            + texture * texture
+            + length_squared
+                * (EDGE_LENGTH_WEIGHT + NORMAL_DIFFERENCE_WEIGHT * self.normal_difference(from, to))
+    }
+
+    /// How far the texture slides across the surface if `from` collapses into `to`, in world
+    /// units, including what earlier collapses already moved at `from`.
+    fn texture_error(&self, from: u32, to: u32) -> f64 {
+        let wedges = self.wedges_at(to);
+        let worst = self.vertex_triangles[from as usize]
+            .iter()
+            .map(|&t| self.triangles[t as usize])
+            .filter(|t| !t.iter().any(|corner| corner.position == to))
+            .map(|t| self.moved_corner(&t, from, to, &wedges).1)
+            .fold(0.0, f64::max);
+        worst.max(self.seam_movement(from, to)) + self.texture_errors[from as usize]
+    }
+
+    /// How far the collapse moves a UV seam. Each side's mapping can stay continuous while one
+    /// side grows over the other, replacing what the surface showed there.
+    fn seam_movement(&self, from: u32, to: u32) -> f64 {
+        let seams = self.seam_neighbors(from);
+        let start = self.positions[from as usize];
+        let end = self.positions[to as usize];
+        match seams[..] {
+            [] => 0.0,
+            // Sliding along a seam only moves it as far as the seam bends here.
+            [a, b] if a == to || b == to => {
+                let other = self.positions[(if a == to { b } else { a }) as usize];
+                distance_to_segment(start, other, end)
+            }
+            // Leaving the seam, the end of one or a junction of several: it must stay put.
+            _ => start.distance(end),
+        }
+    }
+
+    /// The neighbours of `v` connected by an edge whose two sides use different textures.
+    fn seam_neighbors(&self, v: u32) -> Vec<u32> {
+        let uv_of = |triangle: &Triangle, vertex: u32| {
+            triangle
+                .iter()
+                .find(|corner| corner.position == vertex)
+                .and_then(|corner| self.attributes.get(corner.attribute as usize))
+                .map(|attribute| attribute.uv)
+        };
+        let mut seams = self.neighbors(v);
+        seams.retain(|&n| {
+            let mut sides = self.vertex_triangles[v as usize]
+                .iter()
+                .map(|&t| &self.triangles[t as usize])
+                .filter(|t| t.iter().any(|corner| corner.position == n));
+            let (Some(first), Some(second)) = (sides.next(), sides.next()) else {
+                return false;
+            };
+            uv_of(first, v) != uv_of(second, v) || uv_of(first, n) != uv_of(second, n)
+        });
+        seams
+    }
+
+    /// The attribute the corner of `triangle` at `from` takes on moving to `to`, and how far the
+    /// texture slides as a result. A corner the triangle does not touch moves nowhere.
+    fn moved_corner(&self, triangle: &Triangle, from: u32, to: u32, wedges: &[u32]) -> (u32, f64) {
+        let Some(index) = triangle.iter().position(|corner| corner.position == from) else {
+            return (triangle[0].attribute, 0.0);
+        };
+        let current = triangle[index].attribute;
+        let uv_of = |corner: Corner| match self.attributes.get(corner.attribute as usize) {
+            Some(attribute) => DVec2::from_f32(attribute.uv),
+            None => DVec2::new(0.0, 0.0),
+        };
+        let (next, last) = (triangle[(index + 1) % 3], triangle[(index + 2) % 3]);
+        let origin = self.positions[from as usize];
+        let edge_a = self.positions[next.position as usize] - origin;
+        let edge_b = self.positions[last.position as usize] - origin;
+        let offset = self.positions[to as usize] - origin;
+        let uv_origin = uv_of(triangle[index]);
+        let uv_a = uv_of(next) - uv_origin;
+        let uv_b = uv_of(last) - uv_origin;
+
+        let (aa, ab, bb) = (edge_a.dot(edge_a), edge_a.dot(edge_b), edge_b.dot(edge_b));
+        let determinant = aa * bb - ab * ab;
+        let uv_area = uv_a.perp_dot(uv_b).abs();
+        if determinant <= 1.0e-12 * aa * bb || uv_area <= 0.0 {
+            // No usable mapping here, as for a sliver or a mesh without UVs.
+            return (best_wedge(self.attributes, current, wedges, uv_origin), 0.0);
+        }
+        let along_a = (bb * offset.dot(edge_a) - ab * offset.dot(edge_b)) / determinant;
+        let along_b = (aa * offset.dot(edge_b) - ab * offset.dot(edge_a)) / determinant;
+        let limit = MAX_EXTRAPOLATION;
+        let wanted =
+            uv_origin + uv_a * along_a.clamp(-limit, limit) + uv_b * along_b.clamp(-limit, limit);
+
+        let chosen = best_wedge(self.attributes, current, wedges, wanted);
+        let world_per_uv = (determinant.sqrt() / uv_area).sqrt();
+        let moved = self
+            .attributes
+            .get(chosen as usize)
+            .map_or(0.0, |attribute| {
+                DVec2::from_f32(attribute.uv).distance(wanted)
+            });
+        (chosen, moved * world_per_uv)
+    }
+
+    /// How much the shading normals disagree between the two ends, in `0..=1`.
+    fn normal_difference(&self, from: u32, to: u32) -> f64 {
+        let normal_at = |v: u32| {
+            self.vertex_triangles[v as usize]
+                .iter()
+                .flat_map(|&t| self.triangles[t as usize])
+                .find(|corner| corner.position == v)
+                .and_then(|corner| self.attributes.get(corner.attribute as usize))
+                .map_or(Vec3::Y, |attribute| attribute.normal)
+        };
+        f64::from((1.0 - normal_at(from).dot(normal_at(to))) * 0.5)
+    }
+
+    /// Moves `from` onto `to`, merges their quadrics and textures, drops the collapsed triangles
+    /// and invalidates the queued work around the changed neighbourhood.
+    fn collapse(&mut self, from: u32, to: u32) {
+        let target = self.positions[to as usize];
+        let mut merged = self.quadrics[to as usize];
+        merged.add(&self.quadrics[from as usize]);
+        let texture_error = self.texture_error(from, to);
+        let weighted = texture_error * TEXTURE_ERROR_WEIGHT;
+        self.max_error = self
+            .max_error
+            .max(merged.mean_squared_distance(target))
+            .max(weighted * weighted);
+        self.quadrics[to as usize] = merged;
+        self.texture_errors[to as usize] = self.texture_errors[to as usize].max(texture_error);
+
+        let target_wedges = self.wedges_at(to);
+        let from_triangles = std::mem::take(&mut self.vertex_triangles[from as usize]);
+        for triangle in from_triangles {
+            let index = triangle as usize;
+            if !self.alive[index] {
+                continue;
+            }
+            let corners = self.triangles[index];
+            if corners.iter().any(|corner| corner.position == to) {
+                self.alive[index] = false;
+                self.alive_count -= 1;
+                for corner in corners {
+                    if corner.position != from {
+                        self.vertex_triangles[corner.position as usize].retain(|&t| t != triangle);
+                    }
+                }
+            } else {
+                let (attribute, _) = self.moved_corner(&corners, from, to, &target_wedges);
+                for corner in &mut self.triangles[index] {
+                    if corner.position == from {
+                        corner.position = to;
+                        corner.attribute = attribute;
+                    }
+                }
+                self.vertex_triangles[to as usize].push(triangle);
+            }
+        }
+
+        // Invalidate every queued collapse touching the changed neighbourhood.
+        self.stamps[from as usize] += 1;
+        self.stamps[to as usize] += 1;
+        let neighbors = self.neighbors(to);
+        for &n in &neighbors {
+            self.stamps[n as usize] += 1;
+        }
+        self.push_edges_around(to);
+        for n in neighbors {
+            self.push_edges_around(n);
+        }
+    }
+
+    fn finish(self) -> Simplified {
+        let triangles = self
+            .triangles
+            .iter()
+            .zip(&self.alive)
+            .filter(|&(_, &alive)| alive)
+            .map(|(t, _)| {
+                t.map(|corner| Corner {
+                    position: self.global[corner.position as usize],
+                    attribute: corner.attribute,
+                })
+            })
+            .collect();
+        Simplified {
+            triangles,
+            error: self.max_error.sqrt() as f32,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -590,5 +836,183 @@ mod tests {
         assert!(simplifier.locked(0), "the closure gets the input id 20");
         assert_eq!(simplifier.neighbors(0), [1, 2, 3, 4]);
         assert!(simplifier.locked(1), "the outer ring is a border");
+    }
+
+    /// A flat `cells` x `cells` grid of positions with the identity texture mapping.
+    fn flat_grid(cells: u32) -> (Vec<Triangle>, Vec<Vec3>, Vec<Attribute>) {
+        let side = cells + 1;
+        let at = |x: u32, z: u32| z * side + x;
+        let positions: Vec<Vec3> = (0..side)
+            .flat_map(|z| (0..side).map(move |x| Vec3::new(x as f32, 0.0, z as f32)))
+            .collect();
+        let attributes: Vec<Attribute> = positions
+            .iter()
+            .map(|p| Attribute {
+                normal: Vec3::Y,
+                uv: [p.x, p.z],
+            })
+            .collect();
+        let mut triangles = Vec::new();
+        for z in 0..cells {
+            for x in 0..cells {
+                let corner = |px: u32, pz: u32| Corner {
+                    position: at(px, pz),
+                    attribute: at(px, pz),
+                };
+                let (a, b, c, d) = (
+                    corner(x, z),
+                    corner(x + 1, z),
+                    corner(x, z + 1),
+                    corner(x + 1, z + 1),
+                );
+                triangles.push([a, c, b]);
+                triangles.push([b, c, d]);
+            }
+        }
+        (triangles, positions, attributes)
+    }
+
+    fn border_vertices(cells: u32) -> Vec<u32> {
+        let side = cells + 1;
+        let mut border: Vec<u32> = (0..side)
+            .flat_map(|x| [x, cells * side + x])
+            .chain((0..side).flat_map(|z| [z * side, z * side + cells]))
+            .collect();
+        border.sort_unstable();
+        border.dedup();
+        border
+    }
+
+    #[test]
+    fn a_flat_grid_reaches_the_target_and_keeps_its_border() {
+        let (triangles, positions, attributes) = flat_grid(8);
+        let result = simplify(&triangles, &positions, &attributes, 64, &|_| false);
+        assert!(
+            result.triangles.len() <= 64,
+            "{} triangles",
+            result.triangles.len()
+        );
+        assert!(result.error < 1.0e-4, "error {}", result.error);
+        let present: Vec<u32> = result
+            .triangles
+            .iter()
+            .flatten()
+            .map(|corner| corner.position)
+            .collect();
+        for v in border_vertices(8) {
+            assert!(present.contains(&v), "border vertex {v} disappeared");
+        }
+    }
+
+    #[test]
+    fn every_vertex_locked_changes_nothing() {
+        let (triangles, positions, attributes) = flat_grid(8);
+        let result = simplify(&triangles, &positions, &attributes, 0, &|_| true);
+        assert_eq!(result.triangles, triangles);
+        assert_eq!(result.error, 0.0);
+    }
+
+    #[test]
+    fn a_bump_in_the_middle_reports_error_without_moving_locked_vertices() {
+        let (triangles, mut positions, attributes) = flat_grid(8);
+        positions[(4 * 9 + 4) as usize].y = 0.5;
+        let locked = border_vertices(8);
+        let result = simplify(&triangles, &positions, &attributes, 0, &|v| {
+            locked.contains(&v)
+        });
+        assert!(result.error > 0.0, "error {}", result.error);
+        let present: Vec<u32> = result
+            .triangles
+            .iter()
+            .flatten()
+            .map(|corner| corner.position)
+            .collect();
+        for v in locked {
+            assert!(present.contains(&v), "locked vertex {v} moved away");
+        }
+    }
+
+    #[test]
+    fn two_runs_give_identical_triangles() {
+        let (triangles, mut positions, attributes) = flat_grid(8);
+        positions[(4 * 9 + 4) as usize].y = 0.5;
+        let first = simplify(&triangles, &positions, &attributes, 0, &|_| false);
+        let second = simplify(&triangles, &positions, &attributes, 0, &|_| false);
+        assert_eq!(first.triangles, second.triangles);
+        assert_eq!(first.error, second.error);
+    }
+
+    /// A flat grid whose right half uses a texture shifted by `jump`, so the middle column is a
+    /// UV seam: each side has its own attribute set and the seam vertices carry one of each.
+    fn seamed_grid(cells: u32, jump: f32) -> (Vec<Triangle>, Vec<Vec3>, Vec<Attribute>) {
+        let side = cells + 1;
+        let seam = cells / 2;
+        let at = |x: u32, z: u32| z * side + x;
+        let count = side * side;
+        let mut positions = Vec::new();
+        let mut attributes = Vec::new();
+        for z in 0..side {
+            for x in 0..side {
+                positions.push(Vec3::new(x as f32, 0.0, z as f32));
+                let shift = if x > seam { jump } else { 0.0 };
+                attributes.push(Attribute {
+                    normal: Vec3::Y,
+                    uv: [x as f32 + shift, z as f32],
+                });
+            }
+        }
+        for z in 0..side {
+            for x in 0..side {
+                attributes.push(Attribute {
+                    normal: Vec3::Y,
+                    uv: [x as f32 + jump, z as f32],
+                });
+            }
+        }
+        let mut triangles = Vec::new();
+        for z in 0..cells {
+            for x in 0..cells {
+                let corner = |px: u32, pz: u32| Corner {
+                    position: at(px, pz),
+                    attribute: at(px, pz) + if x >= seam { count } else { 0 },
+                };
+                let (a, b, c, d) = (
+                    corner(x, z),
+                    corner(x + 1, z),
+                    corner(x, z + 1),
+                    corner(x + 1, z + 1),
+                );
+                triangles.push([a, c, b]);
+                triangles.push([b, c, d]);
+            }
+        }
+        (triangles, positions, attributes)
+    }
+
+    #[test]
+    fn a_uv_seam_keeps_its_vertices_on_the_seam_line() {
+        const JUMP: f32 = 50.0;
+        let (triangles, positions, attributes) = seamed_grid(8, JUMP);
+        let result = simplify(&triangles, &positions, &attributes, 64, &|_| false);
+        let shift = |corner: Corner| match attributes.get(corner.attribute as usize) {
+            Some(attribute) => attribute.uv[0] - positions[corner.position as usize].x,
+            None => f32::NAN,
+        };
+        for triangle in &result.triangles {
+            let shifts = triangle.map(shift);
+            assert!(
+                (shifts[0] - shifts[1]).abs() < 1.0e-3 && (shifts[1] - shifts[2]).abs() < 1.0e-3,
+                "a triangle spans the seam: {shifts:?}"
+            );
+        }
+        for corner in result.triangles.iter().flatten() {
+            if corner.position % 9 == 4 {
+                let x = attributes[corner.attribute as usize].uv[0];
+                assert!(
+                    (x - 4.0).abs() < 1.0e-3 || (x - (4.0 + JUMP)).abs() < 1.0e-3,
+                    "a seam vertex left the seam line: uv.x {x}"
+                );
+            }
+        }
     }
 }
