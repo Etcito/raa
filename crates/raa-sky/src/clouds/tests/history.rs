@@ -148,6 +148,7 @@ fn unknown_views_are_neutral() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn m2_backend_prepares_and_rejects_like_the_seam_requires() {
+    let _gpu = crate::gpu_test_guard();
     use super::super::create;
     use crate::atmosphere::AtmosphereResources;
     use crate::cloud_backend::CloudViews;

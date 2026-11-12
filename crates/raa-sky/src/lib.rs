@@ -16,6 +16,19 @@
 //! mode: `sky.env` writes the constant mode each frame and `sky.background` switches it to
 //! sky while enabled, so disabling the contributor brings back the flat background colour.
 
+/// Holds the native GPU test lock for the rest of a test. Unserialized tests that create
+/// software GPU devices in parallel crash the process with SIGSEGV inside `libvulkan`
+/// (reached from `wgpu` device creation, `GpuContext::from_adapter`, on a test thread).
+/// Every test that creates a software GPU device holds this guard from its first line, so
+/// the guard is released only after the test's device and its resources have been dropped.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn gpu_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GPU_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 mod atmosphere;
 mod background;
 mod cloud_backend;

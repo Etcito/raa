@@ -1952,6 +1952,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn resources_allocate_the_source_descriptors_and_release_views() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "resources_allocate_the_source_descriptors_and_release_views",
@@ -2030,6 +2031,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn record_writes_only_the_directional_lane_of_the_weather_uniform() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "record_writes_only_the_directional_lane_of_the_weather_uniform",

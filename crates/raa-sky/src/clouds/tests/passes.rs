@@ -84,6 +84,7 @@ fn shadows_off_weather_off_and_legacy_publish_the_neutral_map() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn ground_shadow_records_without_validation_errors() {
+    let _gpu = crate::gpu_test_guard();
     use crate::atmosphere::{AtmosphereResources, PhysicalSkyGpu};
     use raa_pipeline::LightingResources;
 
@@ -130,6 +131,7 @@ fn ground_shadow_records_without_validation_errors() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn published_transmittance_is_a_two_layer_rgba16float_array() {
+    let _gpu = crate::gpu_test_guard();
     use raa_pipeline::LightingResources;
 
     let Some(gpu) = raa_core::testing::software_gpu() else {
@@ -194,6 +196,7 @@ fn panorama_setup(
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn panorama_is_valid_from_a_marchable_prepare_and_neutral_otherwise() {
+    let _gpu = crate::gpu_test_guard();
     use crate::cloud_backend::CloudInvalidation;
 
     let Some((gpu, atmosphere, mut lighting, mut backend)) =
@@ -254,6 +257,7 @@ fn panorama_is_valid_from_a_marchable_prepare_and_neutral_otherwise() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn lighting_records_without_validation_errors_and_keeps_one_panorama_texture() {
+    let _gpu = crate::gpu_test_guard();
     let Some((gpu, mut atmosphere, mut lighting, mut backend)) =
         panorama_setup("lighting_records_without_validation_errors_and_keeps_one_panorama_texture")
     else {
@@ -405,6 +409,7 @@ impl ScreenSetup {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn screen_march_becomes_valid_only_after_submitted() {
+    let _gpu = crate::gpu_test_guard();
     use crate::cloud_backend::CloudRenderer;
     let Some(mut s) = ScreenSetup::new("screen_march_becomes_valid_only_after_submitted") else {
         return;
@@ -426,6 +431,7 @@ fn screen_march_becomes_valid_only_after_submitted() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn every_invalidation_and_resize_resets_screen_validity_and_history() {
+    let _gpu = crate::gpu_test_guard();
     use crate::cloud_backend::{CloudInvalidation, CloudRenderer};
     let Some(mut s) =
         ScreenSetup::new("every_invalidation_and_resize_resets_screen_validity_and_history")
@@ -483,6 +489,7 @@ fn every_invalidation_and_resize_resets_screen_validity_and_history() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn screen_pass_disabled_frame_drops_screen_validity() {
+    let _gpu = crate::gpu_test_guard();
     use crate::cloud_backend::CloudRenderer;
     let Some(mut s) = ScreenSetup::new("screen_pass_disabled_frame_drops_screen_validity") else {
         return;
@@ -501,6 +508,7 @@ fn screen_pass_disabled_frame_drops_screen_validity() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn multisampled_depth_uses_the_multisampled_screen_pipeline() {
+    let _gpu = crate::gpu_test_guard();
     use crate::cloud_backend::CloudRenderer;
     let Some(mut s) = ScreenSetup::new("multisampled_depth_uses_the_multisampled_screen_pipeline")
     else {
@@ -524,6 +532,7 @@ fn multisampled_depth_uses_the_multisampled_screen_pipeline() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn two_views_keep_separate_histories() {
+    let _gpu = crate::gpu_test_guard();
     use crate::cloud_backend::{CloudInvalidation, CloudRenderer};
     use raa_math::Vec3;
     let Some(mut s) = ScreenSetup::new("two_views_keep_separate_histories") else {
@@ -569,6 +578,7 @@ fn two_views_keep_separate_histories() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn installed_sky_feature_publishes_cloud_validity_and_drops_it_when_weather_is_off() {
+    let _gpu = crate::gpu_test_guard();
     use crate::{
         LegacyCloudFields, SkyDesc, SkyFeature, SkyPreset, SkyReadinessStatus, SkyTransaction,
         WeatherSettings,

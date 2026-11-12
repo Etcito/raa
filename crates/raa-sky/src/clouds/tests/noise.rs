@@ -43,6 +43,7 @@ fn acknowledged_generation_is_never_recorded_again() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn noise_generation_records_without_validation_errors() {
+    let _gpu = crate::gpu_test_guard();
     let Some(gpu) = raa_core::testing::software_gpu() else {
         raa_core::testing::skip(
             "noise_generation_records_without_validation_errors",

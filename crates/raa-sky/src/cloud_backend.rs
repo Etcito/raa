@@ -931,6 +931,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn disabling_cloud_lighting_invalidates_the_backend() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "disabling_cloud_lighting_invalidates_the_backend",
@@ -1006,6 +1007,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn neutral_views_are_initialized_and_invalid() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "neutral_views_are_initialized_and_invalid",
@@ -1038,6 +1040,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn missing_views_return_cloned_neutral_views() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "missing_views_return_cloned_neutral_views",
@@ -1071,6 +1074,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn prepare_and_recording_reject_invalid_indices() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "prepare_and_recording_reject_invalid_indices",
@@ -1127,6 +1131,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn all_invalidations_are_accepted_and_leave_views_neutral() {
+        let _gpu = crate::gpu_test_guard();
         let Some(gpu) = raa_core::testing::software_gpu() else {
             raa_core::testing::skip(
                 "all_invalidations_are_accepted_and_leave_views_neutral",

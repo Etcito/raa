@@ -725,6 +725,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn physical_consumers_wait_for_submitted_luts_and_the_bake() {
+        let _gpu = crate::gpu_test_guard();
         use raa_core::testing::{skip, software_gpu};
 
         let test = "physical_consumers_wait_for_submitted_luts_and_the_bake";
@@ -797,6 +798,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn gpu_frame_renders_and_filters_the_env() {
+        let _gpu = crate::gpu_test_guard();
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -915,6 +917,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn same_model_source_change_cancels_an_older_ibl_completion() {
+        let _gpu = crate::gpu_test_guard();
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -1017,6 +1020,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn continuous_playback_publishes_and_keeps_publishing() {
+        let _gpu = crate::gpu_test_guard();
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -1136,6 +1140,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn disabling_rejects_an_older_ibl_completion() {
+        let _gpu = crate::gpu_test_guard();
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -1347,6 +1352,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn same_preset_reselection_rejects_an_older_ibl_completion() {
+        let _gpu = crate::gpu_test_guard();
         use raa_core::testing::{block_on, skip, software_gpu};
 
         use crate::desc::{LegacyCloudFields, SkyPreset, SkyTransaction};
@@ -1426,6 +1432,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn unchanged_weather_cycle_restart_rejects_an_older_ibl_completion() {
+        let _gpu = crate::gpu_test_guard();
         use raa_core::testing::{block_on, skip, software_gpu};
 
         use crate::weather::{WeatherPreset, WeatherUpdate};
