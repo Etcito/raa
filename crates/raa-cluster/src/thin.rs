@@ -4,7 +4,7 @@
 //! `crates/solstice-builder/src/thin.rs`, revision 7e465b5.
 
 use crate::dvec::{DMat3, DVec3};
-use crate::simplify::Triangle;
+use crate::simplify::{Attribute, Triangle};
 use raa_math::Vec3;
 use std::collections::BTreeMap;
 
@@ -261,6 +261,176 @@ pub fn tube_radius(triangles: &[Triangle], piece: &[u32], positions: &[Vec3]) ->
     Some(area / (std::f64::consts::TAU * length))
 }
 
+/// Result of [`thin`].
+pub struct Thinned {
+    /// The surviving pieces. A corner whose position is `NEW_POSITION | i` uses `positions[i]`.
+    pub triangles: Vec<Triangle>,
+    pub positions: Vec<Vec3>,
+    /// Furthest any surviving vertex moved, in metres.
+    pub error: f32,
+}
+
+/// Marks a position index as one of [`Thinned::positions`] rather than an existing vertex.
+pub const NEW_POSITION: u32 = 1 << 31;
+
+/// The summed area of the piece's resolvable triangles.
+fn piece_area(triangles: &[Triangle], piece: &[u32], positions: &[Vec3]) -> f64 {
+    piece
+        .iter()
+        .filter_map(|&t| triangle_corners(triangles, positions, t))
+        .map(|[a, b, c]| (b - a).cross(c - a).length() * 0.5)
+        .sum()
+}
+
+/// Keeps pieces until at least `target_triangles` remain, and enlarges them to keep the total area.
+///
+/// Which pieces survive depends only on where they are, so the choice is the same however the
+/// pieces happen to be listed. Triangles or vertices that do not resolve are skipped.
+pub fn thin(
+    triangles: &[Triangle],
+    pieces: &[Vec<u32>],
+    positions: &[Vec3],
+    attributes: &[Attribute],
+    target_triangles: usize,
+) -> Thinned {
+    let mut order: Vec<(u64, usize)> = pieces
+        .iter()
+        .enumerate()
+        .map(|(index, piece)| {
+            (
+                placement_hash(piece_centroid(triangles, piece, positions)),
+                index,
+            )
+        })
+        .collect();
+    order.sort_unstable();
+
+    let mut kept = Vec::new();
+    let mut kept_triangles = 0;
+    for &(_, index) in &order {
+        if kept_triangles >= target_triangles {
+            break;
+        }
+        if let Some(piece) = pieces.get(index) {
+            kept.push(piece);
+            kept_triangles += piece.len();
+        }
+    }
+
+    let total_area: f64 = pieces
+        .iter()
+        .map(|p| piece_area(triangles, p, positions))
+        .sum();
+    let kept_area: f64 = kept
+        .iter()
+        .map(|p| piece_area(triangles, p, positions))
+        .sum();
+    let growth = if kept_area > 0.0 {
+        total_area / kept_area
+    } else {
+        1.0
+    };
+
+    let mut out = Thinned {
+        triangles: Vec::with_capacity(kept_triangles),
+        positions: Vec::new(),
+        error: 0.0,
+    };
+    for piece in kept {
+        let (vertices, points) = piece_points(triangles, piece, positions);
+        let tube = tube_radius(triangles, piece, positions);
+        let enlarge = enlargement(triangles, piece, positions, &points, growth);
+        // Each vertex's outward direction, from the normals of the corners that use it.
+        let mut outward: BTreeMap<u32, DVec3> = BTreeMap::new();
+        if tube.is_some() {
+            for triangle in piece.iter().filter_map(|&t| triangles.get(t as usize)) {
+                for corner in triangle {
+                    if let Some(a) = attributes.get(corner.attribute as usize) {
+                        *outward.entry(corner.position).or_default() += DVec3::from_vec3(a.normal);
+                    }
+                }
+            }
+        }
+        let mut moved: BTreeMap<u32, u32> = BTreeMap::new();
+        for (&v, &p) in vertices.iter().zip(&points) {
+            let to = match (tube, outward.get(&v)) {
+                // A tube's area grows with its radius, so every point moves out by the same
+                // fraction of the average radius.
+                (Some(radius), Some(n)) => p + n.normalize_or_zero() * (radius * (growth - 1.0)),
+                (Some(_), None) => p,
+                (None, _) => enlarge(p),
+            };
+            out.error = out.error.max(to.distance(p) as f32);
+            moved.insert(v, NEW_POSITION | out.positions.len() as u32);
+            out.positions.push(to.to_vec3());
+        }
+        for triangle in piece.iter().filter_map(|&t| triangles.get(t as usize)) {
+            let mut corners = *triangle;
+            let mut resolved = true;
+            for corner in &mut corners {
+                match moved.get(&corner.position) {
+                    Some(&position) => corner.position = position,
+                    None => resolved = false,
+                }
+            }
+            if resolved {
+                out.triangles.push(corners);
+            }
+        }
+    }
+    out
+}
+
+/// How to move a piece's vertices so its area grows by `growth`.
+fn enlargement(
+    triangles: &[Triangle],
+    piece: &[u32],
+    positions: &[Vec3],
+    points: &[DVec3],
+    growth: f64,
+) -> impl Fn(DVec3) -> DVec3 {
+    let Shape {
+        center,
+        across,
+        length,
+        width,
+    } = shape(triangles, piece, positions, points);
+    let widen = growth.min((length / width).max(1.0));
+    let scale = (growth / widen).sqrt();
+
+    move |p: DVec3| {
+        let d = p - center;
+        center + (d + across * (d.dot(across) * (widen - 1.0))) * scale
+    }
+}
+
+/// The f32 mean of the positions of all corners of the piece's resolvable triangles.
+fn piece_centroid(triangles: &[Triangle], piece: &[u32], positions: &[Vec3]) -> Vec3 {
+    let mut sum = Vec3::ZERO;
+    let mut count = 0usize;
+    for triangle in piece.iter().filter_map(|&t| triangles.get(t as usize)) {
+        for corner in triangle {
+            if let Some(p) = positions.get(corner.position as usize) {
+                sum += *p;
+                count += 1;
+            }
+        }
+    }
+    sum / count.max(1) as f32
+}
+
+/// A well-mixed number from a position, so survivors are spread evenly rather than in rows.
+fn placement_hash(p: Vec3) -> u64 {
+    let mut x = (p.x.to_bits() as u64)
+        ^ (p.y.to_bits() as u64).rotate_left(21)
+        ^ (p.z.to_bits() as u64).rotate_left(42);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +616,149 @@ mod tests {
         let all = find_pieces(&mesh.triangles, &|_| false);
         assert!(all.pieces.is_empty());
         assert_eq!(all.rest, vec![0, 1, 2]);
+    }
+
+    fn area_of(triangles: &[Triangle], positions: &[Vec3]) -> f64 {
+        let all: Vec<u32> = (0..triangles.len() as u32).collect();
+        piece_area(triangles, &all, positions)
+    }
+
+    fn quads(n: u32) -> (Mesh, Vec<Vec<u32>>) {
+        let mut mesh = Mesh::default();
+        for i in 0..n {
+            mesh.quad(10.0 * i as f32, 1.0, 1.0);
+        }
+        let pieces = (0..n).map(|i| vec![2 * i, 2 * i + 1]).collect();
+        (mesh, pieces)
+    }
+
+    #[test]
+    fn thinning_forty_quads_keeps_about_half_and_the_area() {
+        let (mut mesh, pieces) = quads(40);
+        // Pack the quads into a small grid so f32 rounding stays far below the tolerance.
+        for (i, p) in mesh.positions.iter_mut().enumerate() {
+            let quad = (i / 4) as f32;
+            p.x += 2.0 * (quad % 8.0) - 10.0 * quad;
+            p.z = 2.0 * (quad / 8.0).floor();
+        }
+        let out = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 40);
+        assert!(out.triangles.len() >= 40 && out.triangles.len() <= 42);
+        let before = area_of(&mesh.triangles, &mesh.positions);
+        let plain: Vec<Triangle> = out
+            .triangles
+            .iter()
+            .map(|t| {
+                t.map(|c| Corner {
+                    position: c.position & !NEW_POSITION,
+                    attribute: 0,
+                })
+            })
+            .collect();
+        let after = area_of(&plain, &out.positions);
+        assert!(
+            (after - before).abs() / before < 1e-6,
+            "{after} vs {before}"
+        );
+        for t in &out.triangles {
+            for c in t {
+                assert!(c.position & NEW_POSITION != 0);
+                assert!(((c.position & !NEW_POSITION) as usize) < out.positions.len());
+            }
+        }
+        assert!(out.error > 0.0);
+    }
+
+    #[test]
+    fn error_is_the_largest_displacement() {
+        let (mesh, pieces) = quads(40);
+        let out = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 40);
+        let mut largest = 0.0f32;
+        let mut seen = 0;
+        for t in &out.triangles {
+            for c in t {
+                let p = out.positions[(c.position & !NEW_POSITION) as usize];
+                let nearest = mesh
+                    .positions
+                    .iter()
+                    .map(|q| (p - *q).length())
+                    .fold(f32::MAX, f32::min);
+                largest = largest.max(nearest);
+                seen += 1;
+            }
+        }
+        assert!(seen > 0);
+        assert!(
+            out.error > 0.0 && out.error >= largest - 1e-4,
+            "{} {largest}",
+            out.error
+        );
+    }
+
+    #[test]
+    fn a_blade_grows_across_its_narrow_side_first() {
+        // Two equal blades, one survives: growth 2, so only the width doubles.
+        let mut mesh = Mesh::default();
+        mesh.quad(0.0, 1.0, 4.0);
+        mesh.quad(10.0, 1.0, 4.0);
+        let pieces = vec![vec![0, 1], vec![2, 3]];
+        let out = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 1);
+        assert_eq!(out.triangles.len(), 2);
+        let ys: Vec<f32> = out.positions.iter().map(|p| p.y).collect();
+        let length = ys.iter().cloned().fold(f32::MIN, f32::max)
+            - ys.iter().cloned().fold(f32::MAX, f32::min);
+        assert!((length - 4.0).abs() < 1e-6, "length {length}");
+        let xs: Vec<f32> = out.positions.iter().map(|p| p.x).collect();
+        let width = xs.iter().cloned().fold(f32::MIN, f32::max)
+            - xs.iter().cloned().fold(f32::MAX, f32::min);
+        assert!((width - 2.0).abs() < 1e-5, "width {width}");
+    }
+
+    #[test]
+    fn survivors_do_not_depend_on_the_order_of_the_list() {
+        let (mesh, pieces) = quads(40);
+        let mut reversed = pieces.clone();
+        reversed.reverse();
+        let key = |out: &Thinned| {
+            let mut v: Vec<u32> = out
+                .triangles
+                .iter()
+                .map(|t| {
+                    (out.positions[(t[0].position & !NEW_POSITION) as usize].x / 10.0).round()
+                        as u32
+                })
+                .collect();
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let a = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 40);
+        let b = thin(&mesh.triangles, &reversed, &mesh.positions, &[], 40);
+        assert_eq!(key(&a).len(), key(&b).len());
+        // Growth moves vertices, but quads stay near their slot: compare slot sets.
+        assert_eq!(key(&a), key(&b));
+    }
+
+    #[test]
+    fn a_target_at_the_total_keeps_everything_unmoved() {
+        let (mesh, pieces) = quads(10);
+        let out = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 20);
+        assert_eq!(out.triangles.len(), 20);
+        assert_eq!(out.error, 0.0);
+        let out = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 500);
+        assert_eq!(out.triangles.len(), 20);
+        assert_eq!(out.error, 0.0);
+    }
+
+    #[test]
+    fn thin_skips_unresolvable_ids() {
+        let (mut mesh, mut pieces) = quads(3);
+        let bad = Corner {
+            position: 999,
+            attribute: 77,
+        };
+        mesh.triangles.push([bad; 3]);
+        pieces[0].extend([6, 50]);
+        let out = thin(&mesh.triangles, &pieces, &mesh.positions, &[], 100);
+        assert_eq!(out.triangles.len(), 6);
     }
 }
