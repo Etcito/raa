@@ -1,7 +1,11 @@
 //! Inputs of the cluster build: the borrowed mesh with optional uvs, the owned copy the sliced
-//! bake keeps, and the `BuildOptions` with their validation.
+//! bake keeps, the `BuildOptions` with their validation, and the generated inputs.
 //! Adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder:
-//! `crates/solstice-builder/src/dag.rs`, lines 23-41, revision 7e465b5.
+//! `crates/solstice-builder/src/dag.rs`, lines 23-41 and the `bumpy_sphere` test helper at
+//! lines 708-760, revision 7e465b5.
+
+use std::collections::BTreeMap;
+use std::f32::consts::{PI, TAU};
 
 use raa_geom::MeshData;
 use raa_math::Vec3;
@@ -180,6 +184,169 @@ fn missing_vertex(index: usize) -> ClusterError {
         "indices",
         format!("vertex {index} is missing"),
     )
+}
+
+impl OwnedClusterInput {
+    /// A closed displaced icosphere: `20 * 4^subdivisions` triangles with shared vertices,
+    /// `subdivisions` clamped to 0..=7. Every unit direction `d` sits at
+    /// `d * (1 + 0.05 sin(7 d.x) sin(5 d.y) sin(6 d.z))` metres; normals are the normalised
+    /// area-weighted sums of the incident face normals and uvs the spherical map of `d`.
+    pub fn displaced_sphere(subdivisions: u32) -> OwnedClusterInput {
+        let subdivisions = subdivisions.min(7);
+        let t = (1.0 + 5.0_f32.sqrt()) / 2.0;
+        let mut directions: Vec<Vec3> = [
+            [-1.0, t, 0.0],
+            [1.0, t, 0.0],
+            [-1.0, -t, 0.0],
+            [1.0, -t, 0.0],
+            [0.0, -1.0, t],
+            [0.0, 1.0, t],
+            [0.0, -1.0, -t],
+            [0.0, 1.0, -t],
+            [t, 0.0, -1.0],
+            [t, 0.0, 1.0],
+            [-t, 0.0, -1.0],
+            [-t, 0.0, 1.0],
+        ]
+        .map(|p| Vec3::from_array(p).normalize_or_zero())
+        .to_vec();
+        let mut faces: Vec<[u32; 3]> = vec![
+            [0, 11, 5],
+            [0, 5, 1],
+            [0, 1, 7],
+            [0, 7, 10],
+            [0, 10, 11],
+            [1, 5, 9],
+            [5, 11, 4],
+            [11, 10, 2],
+            [10, 7, 6],
+            [7, 1, 8],
+            [3, 9, 4],
+            [3, 4, 2],
+            [3, 2, 6],
+            [3, 6, 8],
+            [3, 8, 9],
+            [4, 9, 5],
+            [2, 4, 11],
+            [6, 2, 10],
+            [8, 6, 7],
+            [9, 8, 1],
+        ];
+        for _ in 0..subdivisions {
+            let mut midpoints: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+            let mut next = Vec::with_capacity(faces.len() * 4);
+            for face in &faces {
+                let [a, b, c] = *face;
+                let mut midpoint = |i: u32, j: u32| {
+                    *midpoints.entry((i.min(j), i.max(j))).or_insert_with(|| {
+                        let p = directions.get(i as usize).map_or(Vec3::ZERO, |d| *d);
+                        let q = directions.get(j as usize).map_or(Vec3::ZERO, |d| *d);
+                        directions.push((p + q).normalize_or_zero());
+                        directions.len() as u32 - 1
+                    })
+                };
+                let (ab, bc, ca) = (midpoint(a, b), midpoint(b, c), midpoint(c, a));
+                next.extend([[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
+            }
+            faces = next;
+        }
+        let mut positions = Vec::with_capacity(directions.len());
+        let mut uvs = Vec::with_capacity(directions.len());
+        for d in &directions {
+            let bump = 1.0 + 0.05 * (7.0 * d.x).sin() * (5.0 * d.y).sin() * (6.0 * d.z).sin();
+            positions.push(*d * bump);
+            uvs.push([0.5 + d.z.atan2(d.x) / TAU, 0.5 - d.y.asin() / PI]);
+        }
+        let mut sums = vec![Vec3::ZERO; positions.len()];
+        for [a, b, c] in &faces {
+            let pa = positions.get(*a as usize).map_or(Vec3::ZERO, |p| *p);
+            let pb = positions.get(*b as usize).map_or(Vec3::ZERO, |p| *p);
+            let pc = positions.get(*c as usize).map_or(Vec3::ZERO, |p| *p);
+            let face_normal = (pb - pa).cross(pc - pa);
+            for index in [a, b, c] {
+                if let Some(sum) = sums.get_mut(*index as usize) {
+                    *sum += face_normal;
+                }
+            }
+        }
+        let normals = sums
+            .iter()
+            .map(|sum| sum.normalize_or_zero().to_array())
+            .collect();
+        OwnedClusterInput {
+            mesh: MeshData {
+                positions: positions.iter().map(|p| p.to_array()).collect(),
+                normals,
+                indices: faces.iter().flatten().copied().collect(),
+            },
+            uvs: Some(uvs),
+        }
+    }
+
+    /// `blades` separate upright quads (two triangles and four own vertices each, 0.02 m wide
+    /// and 0.1 m high) on a `0.05 * ceil(sqrt(blades))` m square centred at the origin on
+    /// y = 0, one per grid cell, with a jitter offset and a yaw from a 32-bit LCG seeded with 1.
+    pub fn foliage_patch(blades: u32) -> OwnedClusterInput {
+        let cells = ((blades as f64).sqrt().ceil() as u32).max(1);
+        let mut rng = Lcg(1);
+        let mut mesh = MeshData::new();
+        let mut uvs = Vec::with_capacity(blades as usize * 4);
+        mesh.positions.reserve(blades as usize * 4);
+        mesh.normals.reserve(blades as usize * 4);
+        mesh.indices.reserve(blades as usize * 6);
+        for blade in 0..blades {
+            let column = blade % cells;
+            let row = blade / cells;
+            let x =
+                (column as f32 + 0.5 - cells as f32 * 0.5) * 0.05 + (rng.next_unit() - 0.5) * 0.02;
+            let z = (row as f32 + 0.5 - cells as f32 * 0.5) * 0.05 + (rng.next_unit() - 0.5) * 0.02;
+            let (sin, cos) = (rng.next_unit() * TAU).sin_cos();
+            let corners = [
+                [x - 0.01 * cos, 0.0, z + 0.01 * sin],
+                [x + 0.01 * cos, 0.0, z - 0.01 * sin],
+                [x + 0.01 * cos, 0.1, z - 0.01 * sin],
+                [x - 0.01 * cos, 0.1, z + 0.01 * sin],
+            ];
+            let normal = (Vec3::from_array(corners[1]) - Vec3::from_array(corners[0]))
+                .cross(Vec3::from_array(corners[2]) - Vec3::from_array(corners[0]))
+                .normalize_or_zero()
+                .to_array();
+            let base = mesh.positions.len() as u32;
+            mesh.positions.extend(corners);
+            mesh.normals.extend([normal; 4]);
+            mesh.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            uvs.extend([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]);
+        }
+        OwnedClusterInput {
+            mesh,
+            uvs: Some(uvs),
+        }
+    }
+
+    /// One triangle in the xy plane: (0,0,0), (1,0,0), (0,1,0), normal +Z and uvs equal to x
+    /// and y.
+    pub fn single_triangle() -> OwnedClusterInput {
+        OwnedClusterInput {
+            mesh: MeshData {
+                positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                normals: vec![[0.0, 0.0, 1.0]; 3],
+                indices: vec![0, 1, 2],
+            },
+            uvs: Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+        }
+    }
+}
+
+/// A 32-bit linear congruential generator (Numerical Recipes constants), seeded per call.
+struct Lcg(u32);
+
+impl Lcg {
+    /// The next value in `[0, 1)`.
+    fn next_unit(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (self.0 >> 8) as f32 / (1u32 << 24) as f32
+    }
 }
 
 /// Bounds of an owned input: position box and uv rectangle.
@@ -420,5 +587,55 @@ mod tests {
             uvs: None,
         };
         assert_eq!(empty.bounds(), InputBounds::default());
+    }
+
+    fn assert_closed(mesh: &MeshData) {
+        let mut directed: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+        for triangle in mesh.indices.chunks_exact(3) {
+            for (a, b) in [
+                (triangle[0], triangle[1]),
+                (triangle[1], triangle[2]),
+                (triangle[2], triangle[0]),
+            ] {
+                *directed.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        assert_eq!(directed.len(), mesh.triangle_count() * 3);
+        for ((a, b), count) in &directed {
+            assert_eq!(*count, 1, "edge ({a}, {b}) is used {count} times one way");
+            assert_eq!(directed.get(&(*b, *a)), Some(&1), "edge ({a}, {b}) is open");
+        }
+    }
+
+    #[test]
+    fn displaced_sphere_is_closed_and_deterministic() {
+        let sphere = OwnedClusterInput::displaced_sphere(3);
+        assert_eq!(sphere.mesh.triangle_count(), 1280);
+        sphere.as_input().validate().expect("sphere validates");
+        assert_closed(&sphere.mesh);
+        let again = OwnedClusterInput::displaced_sphere(3);
+        assert_eq!(sphere.mesh, again.mesh);
+        assert_eq!(sphere.uvs, again.uvs);
+    }
+
+    #[test]
+    fn foliage_patch_has_two_triangles_and_four_vertices_per_blade() {
+        let patch = OwnedClusterInput::foliage_patch(100);
+        assert_eq!(patch.mesh.triangle_count(), 200);
+        assert_eq!(patch.mesh.vertex_count(), 400);
+        assert_eq!(patch.uvs.as_ref().map(Vec::len), Some(400));
+        patch.as_input().validate().expect("patch validates");
+        let again = OwnedClusterInput::foliage_patch(100);
+        assert_eq!(patch.mesh, again.mesh);
+        assert_eq!(patch.uvs, again.uvs);
+    }
+
+    #[test]
+    fn single_triangle_validates() {
+        let triangle = OwnedClusterInput::single_triangle();
+        assert_eq!(triangle.mesh.triangle_count(), 1);
+        assert_eq!(triangle.mesh.normals, vec![[0.0, 0.0, 1.0]; 3]);
+        assert_eq!(triangle.uvs, Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]));
+        triangle.as_input().validate().expect("triangle validates");
     }
 }
