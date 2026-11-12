@@ -471,12 +471,16 @@ impl SkyHandle {
                 }
             }
         }
+        // The cloud passes prepared and recorded under the pipeline frame index (`ctx.frame`),
+        // like the atmosphere above; `invocation` is the engine's sky invocation identity, a
+        // different counter. Acknowledging with it never matched the prepared invocation, so
+        // no screen march was committed and the noise was regenerated on every frame.
         if let Some(cloud) = &self.cloud
             && let Ok(mut backend) = cloud.try_borrow_mut()
         {
             for view in 0..VIEW_COUNT as u32 {
                 if submitted_views & (1 << view) != 0 {
-                    backend.submitted(view, invocation);
+                    backend.submitted(view, recorded_invocation);
                 }
             }
         }
@@ -1461,6 +1465,72 @@ mod tests {
         assert_eq!(d.atmosphere_generation, 2, "no double acknowledgement");
         assert_eq!(d.views[0].expect("view 0").sky_view_generation, 2);
         assert_eq!(d.readiness.status, SkyReadinessStatus::Ready);
+    }
+
+    type SubmittedLog = Rc<RefCell<Vec<(u32, u64)>>>;
+
+    /// Logs the submissions it is acknowledged with; nothing else is called.
+    struct SubmittedCloud(SubmittedLog);
+
+    impl crate::cloud_backend::CloudRenderer for SubmittedCloud {
+        fn prepare(
+            &mut self,
+            _: &GpuContext,
+            _: &crate::cloud_backend::CloudFrame,
+            _: &AtmosphereResources,
+            _: &mut raa_pipeline::LightingResources,
+        ) -> Result<(), RaaError> {
+            Ok(())
+        }
+        fn record_lighting(
+            &mut self,
+            _: &GpuContext,
+            _: &mut wgpu::CommandEncoder,
+            _: &crate::cloud_backend::CloudFrame,
+            _: &AtmosphereResources,
+        ) -> Result<(), RaaError> {
+            Ok(())
+        }
+        fn record_screen(
+            &mut self,
+            _: &GpuContext,
+            _: &mut wgpu::CommandEncoder,
+            _: &crate::cloud_backend::CloudFrame,
+            _: &wgpu::TextureView,
+            _: &AtmosphereResources,
+        ) -> Result<(), RaaError> {
+            Ok(())
+        }
+        fn views(&self, _: u32) -> crate::cloud_backend::CloudViews {
+            unreachable!("observe_submission reads no cloud views")
+        }
+        fn invalidate(&mut self, _: Option<u32>, _: CloudInvalidation) {}
+        fn submitted(&mut self, view: u32, invocation: u64) {
+            self.0.borrow_mut().push((view, invocation));
+        }
+    }
+
+    #[test]
+    fn the_cloud_backend_is_acknowledged_with_the_recorded_pipeline_frame() {
+        let log: SubmittedLog = Rc::default();
+        let backend: Box<dyn crate::cloud_backend::CloudRenderer> =
+            Box::new(SubmittedCloud(log.clone()));
+        let h = SkyHandle {
+            cloud: Some(Rc::new(RefCell::new(backend))),
+            ..handle()
+        };
+        let camera = Camera::default();
+        h.set_view(0, &camera, true).expect("view 0");
+        h.set_view(1, &camera, true).expect("view 1");
+        // The passes prepared and recorded both views under pipeline frame 6; the engine's
+        // sky invocation identity of the same frame is 7 (it is advanced before frame 0).
+        h.state.borrow_mut().recorded_invocation = Some(6);
+        h.observe_submission(7, 0b0011, true);
+        assert_eq!(
+            *log.borrow(),
+            vec![(0, 6), (1, 6)],
+            "every submitted view is acknowledged with the invocation the cloud passes prepared"
+        );
     }
 
     #[test]
