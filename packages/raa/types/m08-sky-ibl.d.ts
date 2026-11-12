@@ -263,6 +263,8 @@ export interface WeatherSettings {
   seed: number;
   /** Exponential easing time towards a new target, finite and >= 0; 0 is immediate. */
   transitionSeconds: number;
+  /** Screen-cloud march quality, finite in [0.25, 4]; scales the step count, 1 = default. */
+  quality: number;
   /** The authored target weather (not the runtime state). */
   target: WeatherState;
 }
@@ -281,6 +283,8 @@ export interface WeatherDesc {
   changing?: boolean;
   seed?: number;
   transitionSeconds?: number;
+  /** Screen-cloud march quality in [0.25, 4]; 2 doubles the march steps. Default 1. */
+  quality?: number;
   coverage?: number;
   type?: number;
   base?: number;

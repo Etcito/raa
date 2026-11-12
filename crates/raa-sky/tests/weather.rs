@@ -670,3 +670,16 @@ fn cycles_fall_back_to_fair_and_keep_their_dwell_and_transition() {
     assert_eq!(cycle.advance(WeatherCycle::DWELL.0 - 0.5), None);
     assert!(cycle.advance(WeatherCycle::DWELL.1 + 0.5).is_some());
 }
+
+#[test]
+fn quality_defaults_to_one_and_is_validated() {
+    assert_eq!(WeatherSettings::default().quality, 1.0);
+    for ok in [0.25_f32, 1.0, 2.0, 4.0] {
+        let s = WeatherSettings { quality: ok, ..WeatherSettings::default() };
+        s.validate().unwrap();
+    }
+    for bad in [0.0_f32, 0.24, 4.01, f32::NAN, f32::INFINITY] {
+        let s = WeatherSettings { quality: bad, ..WeatherSettings::default() };
+        refused(s.validate(), "quality");
+    }
+}

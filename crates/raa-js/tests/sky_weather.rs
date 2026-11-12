@@ -780,6 +780,7 @@ fn weather_omissions_merge_nested_wind() {
         changing: true,
         seed: 42,
         transition_seconds: 2.5,
+        quality: 1.0,
         target: Weather::by_name("broken").unwrap(),
     };
     let update = weather(&current, &[("wind", obj(&[("speed", Raw::Number(3.0))]))]).unwrap();
@@ -1228,4 +1229,23 @@ fn weather_getter_serializes_authored_current_and_cycle_with_target_text() {
         ..state
     };
     assert_eq!(serialize_weather(&idle).cycle_preset, None);
+}
+
+#[test]
+fn weather_quality_patch_is_ranged_and_read_back() {
+    let current = WeatherSettings::default();
+    let kept = weather(&current, &[]).unwrap();
+    assert_eq!(kept.settings.quality, 1.0);
+    let two = weather(&current, &[("quality", Raw::Number(2.0))]).unwrap();
+    assert_eq!(two.settings.quality, 2.0);
+    for bad in [0.1, 4.5, f64::NAN] {
+        expect_weather_invalid(weather(&current, &[("quality", Raw::Number(bad))]), "quality");
+    }
+    expect_weather_invalid(weather(&current, &[("quality", Raw::Null)]), "quality");
+    let state = ResolvedWeatherState {
+        settings: two.settings,
+        current: Weather::default(),
+        cycle_preset: None,
+    };
+    assert_eq!(serialize_weather(&state).quality, 2.0);
 }

@@ -36,6 +36,7 @@
 // replaces the reversed-Z sky test; history is reprojected with
 // `raa_cloud.previous_view_proj` and used only when `raa_cloud.forward.w` is 1.
 
+// Base step count; `raa_cloud.screen.w` (WeatherSettings.quality) scales it, 1 = 56.
 const RAA_CLOUD_SCREEN_STEPS: i32 = 56;
 const RAA_CLOUD_SCREEN_LIGHT_SAMPLES: i32 = 5;
 // The share of each new frame in the blend with the reprojected history.
@@ -69,9 +70,10 @@ fn raa_cloud_screen_main(@builtin(global_invocation_id) id: vec3<u32>) {
         raa_cloud.forward.xyz + raa_cloud.right.xyz * ndc.x + raa_cloud.up.xyz * ndc.y,
     );
     let jitter = raa_cloud_gradient_noise(vec2<f32>(id.xy), u32(raa_cloud.screen.z));
+    let steps = clamp(i32(round(f32(RAA_CLOUD_SCREEN_STEPS) * raa_cloud.screen.w)), 8, 224);
     let here = raa_cloud_along(
         direction,
-        RAA_CLOUD_SCREEN_STEPS,
+        steps,
         RAA_CLOUD_SCREEN_LIGHT_SAMPLES,
         jitter,
     );

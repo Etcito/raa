@@ -59,7 +59,7 @@ pub(super) struct CloudGpu {
     pub(super) up: [f32; 4],
     /// @96: camera forward, w = 1 when history is usable.
     pub(super) forward: [f32; 4],
-    /// @112: half-resolution width, height, invocation & 255, 0.
+    /// @112: half-resolution width, height, invocation & 255, march quality.
     pub(super) screen: [f32; 4],
     /// @128: previous camera view-projection, column-major.
     pub(super) previous_view_proj: [[f32; 4]; 4],
@@ -142,7 +142,7 @@ impl CloudGpu {
                 (frame.size.0 as f32 * 0.5).ceil(),
                 (frame.size.1 as f32 * 0.5).ceil(),
                 (frame.invocation & 255) as f32,
-                0.0,
+                frame.cloud_quality,
             ],
             previous_view_proj: history.unwrap_or(Mat4::IDENTITY).cols,
         }

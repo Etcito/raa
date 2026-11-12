@@ -16,7 +16,9 @@ per method; after `dispose` every method throws `api.disposed`.
 The sky is both a background image and the light source of the scene. From the current sky the
 engine builds an **environment cube** (256 px per face, `HDR_FORMAT`, 6 mips, `SKY_ENV`) and from
 it an **irradiance** signal (spherical harmonics, order 2) and **prefiltered specular**
-reflections with a BRDF LUT (`IBL`). Opaque objects are lit by the sun and by that environment;
+reflections with a BRDF LUT (`IBL`).  (default 1, finite in [0.25, 4]) scales the
+screen-cloud march step count (56 at 1, clamped to 8..224); it is not part of the  text.
+Opaque objects are lit by the sun and by that environment;
 glossy objects reflect it. The sky itself is drawn as the background behind everything else.
 
 Two rows of the pipeline take part (`S12`), both enabled by default:
@@ -313,7 +315,9 @@ scene boundary). `base + thickness` must stay finite. `WeatherSettings` is
 `false`, `1`, `0` and the fair target (coverage 0.3, type 0.9, base 1200, thickness 1600,
 density 1, cirrus 0.15, wind 7 from 250, evolution 1, rain 0). `seed` is an integer u32 and
 `transitionSeconds` a finite value >= 0 (0 is immediate; otherwise the state eases with
-`1 - exp(-dt / transitionSeconds)`). `WeatherDesc` is the flat patch: `preset`
+`1 - exp(-dt / transitionSeconds)`). `quality` (default 1, finite in [0.25, 4]) scales the
+screen-cloud march step count (56 at 1, clamped to 8..224); it is not part of the `.weather` text.
+`WeatherDesc` is the flat patch: `preset`
 (`clear|fair|broken|overcast|storm|cirrus`), `text`, the settings fields and the state fields
 with a partial `wind`. These records mirror Rust `raa_sky::WeatherSettings` (`type` is
 `cloud_type`, `wind` is `wind_speed`/`wind_from`) and `raa_sky::ResolvedWeatherState`.

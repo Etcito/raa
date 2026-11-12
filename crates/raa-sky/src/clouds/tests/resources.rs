@@ -112,7 +112,7 @@ fn history_none_serializes_identity_and_flag_zero() {
 #[test]
 fn screen_lane_holds_the_half_resolution_size() {
     let gpu = CloudGpu::from_frame(&test_frame(0, 9, (1281, 721)), None);
-    assert_eq!(gpu.screen, [641.0, 361.0, 9.0, 0.0]);
+    assert_eq!(gpu.screen, [641.0, 361.0, 9.0, 1.0]);
 }
 
 #[test]
@@ -127,4 +127,10 @@ fn cloud_sky_parameters_convert_the_viewer_height_once() {
     let sky = cloud_sky_parameters(&frame);
     assert_eq!(sky.viewer[1], 2000.0);
     assert_eq!(sky.viewer[3], 6362.0);
+}
+
+#[test]
+fn screen_lane_w_carries_the_march_quality() {
+    let frame = CloudFrame { cloud_quality: 2.0, ..test_frame(0, 9, (640, 360)) };
+    assert_eq!(CloudGpu::from_frame(&frame, None).screen[3], 2.0);
 }

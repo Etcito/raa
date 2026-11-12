@@ -126,6 +126,8 @@ pub struct CloudFrame {
     pub weather_enabled: bool,
     /// The accepted `WeatherSettings.shadows` flag.
     pub cloud_shadows: bool,
+    /// The accepted `WeatherSettings.quality`: screen march steps scale (1 = 56 steps).
+    pub cloud_quality: f32,
     /// True when the accepted sky model is `SkyModel::Physical`.
     pub physical: bool,
 }
@@ -253,6 +255,7 @@ fn cloud_frame(
         evolution: state.weather.evolution,
         weather_enabled: state.weather.settings.enabled,
         cloud_shadows: state.weather.settings.shadows,
+        cloud_quality: state.weather.settings.quality,
         physical: state.desc.model == SkyModel::Physical,
     })
 }
@@ -841,6 +844,7 @@ mod tests {
             evolution: 0.0,
             weather_enabled: true,
             cloud_shadows: true,
+            cloud_quality: 1.0,
             physical: true,
         }
     }

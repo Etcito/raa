@@ -398,6 +398,8 @@ pub struct WeatherSettings {
     pub seed: u32,
     /// Easing time for authored target changes, in seconds.
     pub transition_seconds: f32,
+    /// Screen-cloud march quality, `0.25..=4`; scales the step count (1 = authored default).
+    pub quality: f32,
     pub target: Weather,
 }
 
@@ -409,6 +411,7 @@ impl Default for WeatherSettings {
             changing: false,
             seed: 1,
             transition_seconds: 0.0,
+            quality: 1.0,
             target: Weather::default(),
         }
     }
@@ -422,6 +425,9 @@ impl WeatherSettings {
             return Err(invalid(
                 "transition_seconds must be finite and nonnegative".into(),
             ));
+        }
+        if !self.quality.is_finite() || !(0.25..=4.0).contains(&self.quality) {
+            return Err(invalid("quality must be finite and within 0.25..=4".into()));
         }
         Ok(())
     }
