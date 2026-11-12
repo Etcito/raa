@@ -126,9 +126,12 @@ fn forward_w_carries_the_accumulated_frame_count() {
 #[test]
 fn screen_lane_holds_scale_flags_jitter_and_samples() {
     let frame = CloudFrame { cloud_scale: 0.75, cloud_samples: 120, ..test_frame(0, 9, (1281, 721)) };
-    assert_eq!(CloudGpu::from_frame(&frame, None, false).screen, [0.75, 0.0, 9.0, 120.0]);
+    assert_eq!(CloudGpu::from_frame(&frame, None, false).screen, [0.75, 8.0, 9.0, 120.0]);
     let animated = CloudFrame { animated: true, ..frame };
-    assert_eq!(CloudGpu::from_frame(&animated, None, true).screen[1], 3.0);
+    assert_eq!(CloudGpu::from_frame(&animated, None, true).screen[1], 11.0);
+    let off = CloudFrame { cloud_dither: false, cloud_noise_size: 16, ..frame };
+    assert_eq!(CloudGpu::from_frame(&off, None, false).screen[1], 4.0 + 128.0);
+    assert_eq!(CloudGpu::from_frame(&off, None, true).screen[1], 5.0 + 128.0);
     assert_eq!(super::super::resources::screen_size((1281, 721), 0.5), (641, 361));
     assert_eq!(super::super::resources::screen_size((1281, 721), 1.0), (1281, 721));
     assert_eq!(super::super::resources::screen_size((100, 3), 0.25), (25, 1));

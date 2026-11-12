@@ -403,6 +403,12 @@ pub struct WeatherSettings {
     /// Screen-cloud buffer scale in `0.25..=1` (default 0.5 = half resolution); the buffer is
     /// `ceil(size * cloud_scale)`.
     pub cloud_scale: f32,
+    /// Per-pixel march-offset noise of the screen clouds (default on). Off = a constant offset,
+    /// a deterministic march with no crawling (fixed step banding instead).
+    pub cloud_dither: bool,
+    /// Edge, in cloud-buffer texels, of the blocks sharing one noise value, an integer in
+    /// `1..=16` (default 1); a larger size is a coarser grain.
+    pub cloud_noise_size: u32,
     pub target: Weather,
 }
 
@@ -416,6 +422,8 @@ impl Default for WeatherSettings {
             transition_seconds: 0.0,
             cloud_samples: 56,
             cloud_scale: 0.5,
+            cloud_dither: true,
+            cloud_noise_size: 1,
             target: Weather::default(),
         }
     }
@@ -438,6 +446,11 @@ impl WeatherSettings {
         if !self.cloud_scale.is_finite() || !(0.25..=1.0).contains(&self.cloud_scale) {
             return Err(invalid(
                 "cloud_scale must be finite and within 0.25..=1".into(),
+            ));
+        }
+        if !(1..=16).contains(&self.cloud_noise_size) {
+            return Err(invalid(
+                "cloud_noise_size must be an integer within 1..=16".into(),
             ));
         }
         Ok(())

@@ -691,4 +691,13 @@ fn cloud_samples_and_scale_default_and_are_validated() {
         let s = WeatherSettings { cloud_scale: bad, ..WeatherSettings::default() };
         refused(s.validate(), "cloud_scale");
     }
+    assert!(WeatherSettings::default().cloud_dither);
+    assert_eq!(WeatherSettings::default().cloud_noise_size, 1);
+    for ok in [1_u32, 8, 16] {
+        WeatherSettings { cloud_noise_size: ok, ..WeatherSettings::default() }.validate().unwrap();
+    }
+    for bad in [0_u32, 17, u32::MAX] {
+        let s = WeatherSettings { cloud_noise_size: bad, ..WeatherSettings::default() };
+        refused(s.validate(), "cloud_noise_size");
+    }
 }

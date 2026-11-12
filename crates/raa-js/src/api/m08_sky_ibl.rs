@@ -522,6 +522,8 @@ const WEATHER_FIELDS: &[&str] = &[
     "transitionSeconds",
     "cloudSamples",
     "cloudScale",
+    "cloudDither",
+    "cloudNoiseSize",
     "coverage",
     "type",
     "base",
@@ -688,6 +690,18 @@ pub(crate) fn parse_weather_update(
         }
         cloud_scale = value;
     }
+    let cloud_dither =
+        strict_bool(obj, "cloudDither", "cloudDither")?.unwrap_or(current.cloud_dither);
+    let mut cloud_noise_size = current.cloud_noise_size;
+    if let Some(value) = strict_f64(obj, "cloudNoiseSize", "cloudNoiseSize")? {
+        if value.fract() != 0.0 || !(1.0..=16.0).contains(&value) {
+            return Err(invalid(
+                "cloudNoiseSize",
+                format!("must be an integer in [1, 16], got {value}"),
+            ));
+        }
+        cloud_noise_size = value as u32;
+    }
 
     // A manual target edit stops an active cycle unless this same patch turns changing back
     // on; an explicit value always wins over the inferred stop.
@@ -705,6 +719,8 @@ pub(crate) fn parse_weather_update(
             transition_seconds,
             cloud_samples,
             cloud_scale,
+            cloud_dither,
+            cloud_noise_size,
             target,
         },
         cycle_start,
@@ -795,6 +811,8 @@ pub(crate) struct WeatherView {
     pub transition_seconds: f32,
     pub cloud_samples: u32,
     pub cloud_scale: f32,
+    pub cloud_dither: bool,
+    pub cloud_noise_size: u32,
     pub target: WeatherStateView,
     pub current: WeatherStateView,
     pub cycle_preset: Option<&'static str>,
@@ -828,6 +846,8 @@ pub(crate) fn serialize_weather(state: &raa_sky::ResolvedWeatherState) -> Weathe
         transition_seconds: s.transition_seconds,
         cloud_samples: s.cloud_samples,
         cloud_scale: s.cloud_scale,
+        cloud_dither: s.cloud_dither,
+        cloud_noise_size: s.cloud_noise_size,
         target: weather_state(&s.target),
         current: weather_state(&state.current),
         cycle_preset: state.cycle_preset.map(WeatherPreset::as_str),
@@ -1221,6 +1241,8 @@ mod web {
         );
         set(&o, "cloudSamples", &JsValue::from(v.cloud_samples));
         set(&o, "cloudScale", &JsValue::from(v.cloud_scale));
+        set(&o, "cloudDither", &JsValue::from_bool(v.cloud_dither));
+        set(&o, "cloudNoiseSize", &JsValue::from(v.cloud_noise_size));
         set(&o, "target", &weather_state_to_js(&v.target));
         set(&o, "current", &weather_state_to_js(&v.current));
         set(

@@ -130,6 +130,10 @@ pub struct CloudFrame {
     pub cloud_samples: u32,
     /// The accepted `WeatherSettings.cloud_scale`: screen buffer scale (0.5 = half resolution).
     pub cloud_scale: f32,
+    /// The accepted `WeatherSettings.cloud_dither`: false = constant march offset, no history.
+    pub cloud_dither: bool,
+    /// The accepted `WeatherSettings.cloud_noise_size`: noise block edge in buffer texels.
+    pub cloud_noise_size: u32,
     /// True while the sky changes by itself (wind drift, cloud boil, a weather transition or
     /// cycle, a playing time of day); a static view may then never freeze.
     pub animated: bool,
@@ -272,6 +276,8 @@ pub(crate) fn cloud_frame(
         cloud_shadows: state.weather.settings.shadows,
         cloud_samples: state.weather.settings.cloud_samples,
         cloud_scale: state.weather.settings.cloud_scale,
+        cloud_dither: state.weather.settings.cloud_dither,
+        cloud_noise_size: state.weather.settings.cloud_noise_size,
         animated,
         signature,
         physical: state.desc.model == SkyModel::Physical,
@@ -304,6 +310,8 @@ fn accumulation_state(state: &SkyState) -> (bool, u64) {
         weather.settings.cloud_samples,
         weather.settings.cloud_scale.to_bits(),
         u32::from(weather.settings.enabled) | u32::from(weather.settings.shadows) << 1,
+        u32::from(weather.settings.cloud_dither),
+        weather.settings.cloud_noise_size,
         u32::from(state.desc.model == SkyModel::Physical),
     ] {
         hash = mix(hash, word);
@@ -935,6 +943,8 @@ mod tests {
             cloud_shadows: true,
             cloud_samples: 56,
             cloud_scale: 0.5,
+            cloud_dither: true,
+            cloud_noise_size: 1,
             animated: false,
             signature: 0,
             physical: true,

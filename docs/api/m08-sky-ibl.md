@@ -318,7 +318,11 @@ density 1, cirrus 0.15, wind 7 from 250, evolution 1, rain 0). `seed` is an inte
 `1 - exp(-dt / transitionSeconds)`). `cloudSamples` (integer-valued number in [8, 256], default 56)
 is the screen-cloud march step count per ray and `cloudScale` (finite in [0.25, 1], default 0.5) the
 screen-cloud buffer scale: the buffer is `ceil(size * cloudScale)` texels, so 0.5 is half resolution
-and 1 is full resolution. Changing either restarts the screen-cloud accumulation (and a changed scale
+and 1 is full resolution. `cloudDither` (boolean, default true) switches the per-pixel march-offset noise
+of the screen clouds; false uses a constant offset and no history blend, so the march is deterministic
+and a moving camera shows no crawling (fixed step banding may show: raise `cloudSamples`). `cloudNoiseSize`
+(integer in [1, 16], default 1) is the edge, in buffer texels, of the blocks that share one noise value
+(larger = coarser grain). Changing any of these restarts the accumulation; changing either of the first two restarts the screen-cloud accumulation (and a changed scale
 recreates the buffer, resetting its history); neither is part of the `.weather` text. The screen
 clouds average successive frames: while the camera and the sky stand still the average converges
 (blend 1/(n + 6) after n unchanged frames), and when nothing is animated (no wind, no cloud boil, no

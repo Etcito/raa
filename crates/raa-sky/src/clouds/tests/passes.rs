@@ -59,6 +59,8 @@ fn shadows_off_weather_off_and_legacy_publish_the_neutral_map() {
             cloud_shadows: false,
             cloud_samples: 56,
             cloud_scale: 0.5,
+        cloud_dither: true,
+        cloud_noise_size: 1,
             animated: false,
             signature: 0,
             ..on

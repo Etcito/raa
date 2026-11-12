@@ -270,6 +270,10 @@ export interface WeatherSettings {
   cloudSamples: number;
   /** Screen-cloud buffer scale in [0.25, 1]: the buffer is ceil(size * cloudScale). Default 0.5. */
   cloudScale: number;
+  /** Per-pixel march-offset noise of the screen clouds. false = constant offset: no crawling while the camera moves (fixed step banding instead; raise cloudSamples). Default true. */
+  cloudDither: boolean;
+  /** Noise grain, an integer in [1, 16]: one noise value per cloudNoiseSize x cloudNoiseSize buffer texels; larger = coarser. Default 1. */
+  cloudNoiseSize: number;
   /** The authored target weather (not the runtime state). */
   target: WeatherState;
 }
@@ -292,6 +296,10 @@ export interface WeatherDesc {
   cloudSamples?: number;
   /** Screen-cloud buffer scale in [0.25, 1]; 0.5 is half resolution. Default 0.5. */
   cloudScale?: number;
+  /** See the `cloudDither` field of the weather read back by `weather()`. Default true. */
+  cloudDither?: boolean;
+  /** Integer in [1, 16]. Default 1. */
+  cloudNoiseSize?: number;
   coverage?: number;
   type?: number;
   base?: number;

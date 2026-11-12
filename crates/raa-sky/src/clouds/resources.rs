@@ -61,7 +61,8 @@ pub(super) struct CloudGpu {
     /// @96: camera forward, w = frames accumulated (0 = no usable history, 1 = the camera or
     /// the sky just changed: blend 0.12, 2.. = unchanged frames, blend 1/(n + 6)).
     pub(super) forward: [f32; 4],
-    /// @112: cloud_scale, flags (bit 0 refresh pass of a frozen view, bit 1 animated sky),
+    /// @112: cloud_scale, flags (bit 0 refresh pass of a frozen view, bit 1 animated sky, bit 2
+    /// dither off, bits 3.. the noise block size 1..=16; see [`pack_screen_flags`]),
     /// jitter index, cloud_samples.
     pub(super) screen: [f32; 4],
     /// @128: previous camera view-projection, column-major.
@@ -93,6 +94,21 @@ fn camera_basis(frame: &CloudFrame) -> Basis {
         up: right.cross(forward),
         forward,
     }
+}
+
+/// The `screen.y` flags lane: bit 0 refresh, bit 1 animated sky, bit 2 dither off, bits 3.. the
+/// noise block size (an exact small integer, 1..=16 once validated).
+pub(super) fn pack_screen_flags(
+    refresh: bool,
+    animated: bool,
+    dither: bool,
+    noise_size: u32,
+) -> f32 {
+    let bits = u32::from(refresh)
+        | u32::from(animated) << 1
+        | u32::from(!dither) << 2
+        | noise_size.clamp(1, 16) << 3;
+    bits as f32
 }
 
 impl CloudGpu {
@@ -147,7 +163,12 @@ impl CloudGpu {
             ],
             screen: [
                 frame.cloud_scale,
-                f32::from(u8::from(refresh) | u8::from(frame.animated) << 1),
+                pack_screen_flags(
+                    refresh,
+                    frame.animated,
+                    frame.cloud_dither,
+                    frame.cloud_noise_size,
+                ),
                 // Unchanged frames walk the golden-ratio sequence by their count; a moving
                 // camera uses the invocation so the offsets still differ frame to frame.
                 match history {

@@ -782,6 +782,8 @@ fn weather_omissions_merge_nested_wind() {
         transition_seconds: 2.5,
         cloud_samples: 56,
         cloud_scale: 0.5,
+        cloud_dither: true,
+        cloud_noise_size: 1,
         target: Weather::by_name("broken").unwrap(),
     };
     let update = weather(&current, &[("wind", obj(&[("speed", Raw::Number(3.0))]))]).unwrap();
@@ -1267,4 +1269,25 @@ fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
     };
     let view = serialize_weather(&state);
     assert_eq!((view.cloud_samples, view.cloud_scale), (128, 0.75));
+    assert!(kept.settings.cloud_dither && kept.settings.cloud_noise_size == 1);
+    let grain = weather(
+        &current,
+        &[("cloudDither", Raw::Bool(false)), ("cloudNoiseSize", Raw::Number(4.0))],
+    )
+    .unwrap();
+    assert!(!grain.settings.cloud_dither);
+    assert_eq!(grain.settings.cloud_noise_size, 4);
+    for bad in [0.0, 17.0, 2.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudNoiseSize", Raw::Number(bad))]),
+            "cloudNoiseSize",
+        );
+    }
+    expect_weather_invalid(weather(&current, &[("cloudDither", Raw::Number(1.0))]), "cloudDither");
+    let view = serialize_weather(&ResolvedWeatherState {
+        settings: grain.settings,
+        current: Weather::default(),
+        cycle_preset: None,
+    });
+    assert!(!view.cloud_dither && view.cloud_noise_size == 4);
 }

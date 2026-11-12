@@ -42,7 +42,12 @@
 // `raa_cloud.previous_view_proj` and used only when `raa_cloud.forward.w` is not 0.
 // `raa_cloud.screen` = (cloud_scale, flags, jitter index, cloud_samples); flags bit 0 is the
 // refresh pass of a frozen view (texels that kept a march are copied, the others marched), bit 1
-// an animated sky. A texel's full-resolution pixel is floor((texel + 0.5) / cloud_scale).
+// an animated sky, bit 2 dither off (constant march offset 0.5, one march per texel, no history
+// mix: a deterministic image that cannot crawl), bits 3.. the noise block size 1..16 (the hash
+// sees floor(texel / size), so a larger size is a coarser grain). With a camera and sky identical
+// to the history's, previous_uv lands on this very texel centre and the history is read exactly
+// (textureLoad), never bilinearly: repeated blends of a bilinear read at a tiny offset diffuse
+// the converged image into a blur. A texel's full-resolution pixel is floor((texel + 0.5) / cloud_scale).
 
 const RAA_CLOUD_SCREEN_LIGHT_SAMPLES: i32 = 5;
 // The share of each new frame while the camera or the sky changes (n = 1).
@@ -84,6 +89,8 @@ fn raa_cloud_screen_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let flags = u32(raa_cloud.screen.y + 0.5);
     let refresh = (flags & 1u) != 0u;
     let animated = (flags & 2u) != 0u;
+    let dither_off = (flags & 4u) != 0u;
+    let noise_size = clamp(flags >> 3u, 1u, 16u);
     // Standard Z: the sky keeps the clear depth 1; any nearer depth is geometry.
     let full = vec2<i32>(textureDimensions(raa_cloud_depth));
     let pixel = min(vec2<i32>(floor((vec2<f32>(id.xy) + 0.5) / scale)), full - vec2<i32>(1));
@@ -110,11 +117,18 @@ fn raa_cloud_screen_main(@builtin(global_invocation_id) id: vec3<u32>) {
     // low-discrepancy sequence, so the accumulated mean converges without flicker). Moving frames:
     // a fresh hash per frame.
     let sequence = u32(raa_cloud.screen.z);
-    var jitter = raa_cloud_hash_noise(id.xy, sequence);
+    let block = id.xy / vec2<u32>(noise_size);
+    var jitter = raa_cloud_hash_noise(block, sequence);
     if raa_cloud.forward.w >= 1.5 {
-        jitter = fract(raa_cloud_hash_noise(id.xy, 0u) + 0.61803398875 * f32(sequence));
+        jitter = fract(raa_cloud_hash_noise(block, 0u) + 0.61803398875 * f32(sequence));
     }
     let steps = clamp(i32(raa_cloud.screen.w + 0.5), 8, 256);
+    if dither_off {
+        // No noise at all: the same march every frame, so nothing crawls and nothing blurs.
+        let fixed = raa_cloud_along(direction, steps, RAA_CLOUD_SCREEN_LIGHT_SAMPLES, 0.5);
+        textureStore(raa_cloud_output, id.xy, vec4<f32>(fixed.radiance, fixed.transmittance));
+        return;
+    }
 
     // Where the clouds were on screen at the last committed march, when it can be used.
     var result = vec4<f32>(0.0);
@@ -141,13 +155,19 @@ fn raa_cloud_screen_main(@builtin(global_invocation_id) id: vec3<u32>) {
             if all(previous_uv >= vec2<f32>(0.0)) && all(previous_uv <= vec2<f32>(1.0)) {
                 // History is used only where all four texels it filters between were marched.
                 let marched = textureGather(3, raa_cloud_history, raa_cloud_lut_sampler, previous_uv);
-                if all(marched >= vec4<f32>(0.0)) {
-                    let past = textureSampleLevel(
+                let at_texel = previous_uv * vec2<f32>(size) - 0.5 - vec2<f32>(id.xy);
+                let same_texel = all(abs(at_texel) < vec2<f32>(0.02));
+                let exact = textureLoad(raa_cloud_history, vec2<i32>(id.xy), 0);
+                if (same_texel && exact.a >= 0.0) || all(marched >= vec4<f32>(0.0)) {
+                    var past = textureSampleLevel(
                         raa_cloud_history,
                         raa_cloud_lut_sampler,
                         previous_uv,
                         0.0,
                     );
+                    if same_texel {
+                        past = exact;
+                    }
                     result = mix(
                         past,
                         result,

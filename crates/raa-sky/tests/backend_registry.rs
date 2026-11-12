@@ -55,6 +55,8 @@ fn cloud_frame_carries_the_copied_snapshot() {
         cloud_shadows: true,
         cloud_samples: 56,
         cloud_scale: 0.5,
+        cloud_dither: true,
+        cloud_noise_size: 1,
         animated: false,
         signature: 0,
         physical: true,
