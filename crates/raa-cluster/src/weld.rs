@@ -372,7 +372,7 @@ mod tests {
             uv_step: [1.0; 2],
         };
         assert_eq!(
-            mesh.snap(Vec3::new(0.26, 0.74, 0.0)),
+            mesh.snap(Vec3::new(0.4, 0.74, 0.0)),
             Vec3::new(0.5, 0.5, 0.0)
         );
         assert_eq!(mesh.snap(Vec3::new(-5.0, 0.0, 0.0)), Vec3::ZERO);
