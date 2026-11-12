@@ -228,6 +228,347 @@ impl PieceGrid {
     }
 }
 
+/// Triangles partitioned per growth batch; a larger mesh is cut along the Morton order
+/// of its triangle centroids into chunks of at most this many triangles.
+pub const PARTITION_BATCH: usize = 4096;
+
+/// Partitions `triangles` (indices into `positions`) and returns the triangle indices of each
+/// cluster in growth order. Every triangle appears in exactly one cluster within `limits`.
+pub fn partition_triangles(
+    triangles: &[[u32; 3]],
+    positions: &[Vec3],
+    limits: ClusterLimits,
+) -> Vec<Vec<u32>> {
+    if triangles.is_empty() {
+        return Vec::new();
+    }
+    let local = LocalTriangles::new(triangles, positions);
+    let adjacency = triangle_adjacency(&local.triangles);
+    let clusters = grow_clusters(&local, &adjacency, limits);
+    merge_small_clusters(clusters, &local, &adjacency, limits)
+}
+
+/// Grows one compact cluster per seed, taking frontier triangles by score and handing
+/// over to the nearest separate piece when the frontier is empty.
+fn grow_clusters(
+    local: &LocalTriangles,
+    adjacency: &[[u32; 3]],
+    limits: ClusterLimits,
+) -> Vec<Vec<u32>> {
+    let seeds = morton_order(&local.centroids);
+    let mut assigned = vec![false; local.triangles.len()];
+    // `vertex_stamp[v] == current cluster id` marks a vertex as used by the cluster.
+    let mut vertex_stamp = vec![u32::MAX; local.vertex_count];
+    let mut clusters = Vec::new();
+    let mut frontier: Vec<u32> = Vec::new();
+
+    let pieces = PieceGrid::new(&local.centroids);
+    for &seed in &seeds {
+        if assigned.get(seed as usize).copied().unwrap_or(true) {
+            continue;
+        }
+        let cluster_id = clusters.len() as u32;
+        let mut cluster = Vec::with_capacity(limits.max_triangles);
+        let mut vertex_count = 0usize;
+        let mut center_sum = Vec3::ZERO;
+        frontier.clear();
+
+        let mut next = Some(seed);
+        while let Some(triangle) = next {
+            let index = triangle as usize;
+            let Some(&local_triangle) = local.triangles.get(index) else {
+                break;
+            };
+            assigned[index] = true;
+            cluster.push(triangle);
+            center_sum += local.centroids.get(index).copied().unwrap_or(Vec3::ZERO);
+            for &vertex in &local_triangle {
+                if let Some(stamp) = vertex_stamp.get_mut(vertex as usize)
+                    && *stamp != cluster_id
+                {
+                    *stamp = cluster_id;
+                    vertex_count += 1;
+                }
+            }
+            for &neighbor in adjacency.get(index).into_iter().flatten() {
+                if neighbor != u32::MAX && !assigned.get(neighbor as usize).copied().unwrap_or(true)
+                {
+                    frontier.push(neighbor);
+                }
+            }
+            if cluster.len() >= limits.max_triangles {
+                break;
+            }
+
+            // Pick the frontier triangle that best keeps the cluster compact.
+            let center = center_sum / cluster.len() as f32;
+            let mut best: Option<(f32, usize)> = None;
+            let mut slot = 0;
+            while slot < frontier.len() {
+                let candidate = frontier[slot] as usize;
+                if assigned.get(candidate).copied().unwrap_or(true) {
+                    frontier.swap_remove(slot);
+                    continue;
+                }
+                let Some(&candidate_triangle) = local.triangles.get(candidate) else {
+                    frontier.swap_remove(slot);
+                    continue;
+                };
+                let new_vertices = candidate_triangle
+                    .iter()
+                    .filter(|&&vertex| vertex_stamp.get(vertex as usize) != Some(&cluster_id))
+                    .count();
+                if vertex_count + new_vertices <= limits.max_vertices {
+                    // Taking triangles with few free neighbours first fills dead ends
+                    // that would otherwise be stranded as tiny clusters later.
+                    let free_neighbors = adjacency
+                        .get(candidate)
+                        .map(|sides| {
+                            sides
+                                .iter()
+                                .filter(|&&neighbor| {
+                                    neighbor != u32::MAX
+                                        && !assigned.get(neighbor as usize).copied().unwrap_or(true)
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0);
+                    let distance = local
+                        .centroids
+                        .get(candidate)
+                        .map(|&centroid| (centroid - center).length_squared())
+                        .unwrap_or(f32::MAX);
+                    let score = distance
+                        * (1.0 + new_vertices as f32 * 0.5)
+                        * (1.0 + free_neighbors as f32 * 0.5);
+                    if best.is_none_or(|(best_score, _)| score < best_score) {
+                        best = Some((score, slot));
+                    }
+                }
+                slot += 1;
+            }
+            next = match best {
+                Some((_, slot)) => frontier.get(slot).copied(),
+                None => pieces.nearest(
+                    local,
+                    &assigned,
+                    &vertex_stamp,
+                    cluster_id,
+                    vertex_count,
+                    center,
+                    limits,
+                ),
+            };
+        }
+        if !cluster.is_empty() {
+            clusters.push(cluster);
+        }
+    }
+    clusters
+}
+
+/// Merges clusters below `SMALL_CLUSTER` into their fullest neighbour that still fits.
+fn merge_small_clusters(
+    mut clusters: Vec<Vec<u32>>,
+    local: &LocalTriangles,
+    adjacency: &[[u32; 3]],
+    limits: ClusterLimits,
+) -> Vec<Vec<u32>> {
+    let mut owner = vec![0u32; local.triangles.len()];
+    for (index, cluster) in clusters.iter().enumerate() {
+        for &triangle in cluster {
+            if let Some(slot) = owner.get_mut(triangle as usize) {
+                *slot = index as u32;
+            }
+        }
+    }
+
+    // Smallest first, so tiny fragments claim the free space before larger ones.
+    let mut order: Vec<usize> = (0..clusters.len()).collect();
+    order.sort_by_key(|&index| clusters.get(index).map_or(0, Vec::len));
+
+    for index in order {
+        let small = clusters.get(index).map_or(0, Vec::len);
+        if small == 0 || small >= SMALL_CLUSTER {
+            continue;
+        }
+        let mut neighbors: Vec<u32> = clusters
+            .get(index)
+            .into_iter()
+            .flatten()
+            .flat_map(|&triangle| {
+                adjacency
+                    .get(triangle as usize)
+                    .into_iter()
+                    .flat_map(|sides| sides.iter().copied())
+            })
+            .filter(|&neighbor| neighbor != u32::MAX)
+            .map(|neighbor| owner.get(neighbor as usize).copied().unwrap_or(u32::MAX))
+            .filter(|&cluster| cluster != u32::MAX && cluster as usize != index)
+            .collect();
+        neighbors.sort_unstable();
+        neighbors.dedup();
+
+        // The fullest neighbour that still fits packs the tightest.
+        let target = neighbors
+            .into_iter()
+            .filter(|&candidate| {
+                let (Some(other), Some(current)) =
+                    (clusters.get(candidate as usize), clusters.get(index))
+                else {
+                    return false;
+                };
+                other.len() + current.len() <= limits.max_triangles
+                    && unique_vertices(local, other, current) <= limits.max_vertices
+            })
+            .max_by_key(|&candidate| clusters.get(candidate as usize).map_or(0, Vec::len));
+        if let Some(target) = target {
+            let Some(moved) = clusters.get_mut(index).map(std::mem::take) else {
+                continue;
+            };
+            for &triangle in &moved {
+                if let Some(slot) = owner.get_mut(triangle as usize) {
+                    *slot = target;
+                }
+            }
+            if let Some(other) = clusters.get_mut(target as usize) {
+                other.extend(moved);
+            }
+        }
+    }
+
+    clusters.retain(|cluster| !cluster.is_empty());
+    clusters
+}
+
+/// Distinct vertices used by two clusters of the same local mesh.
+fn unique_vertices(local: &LocalTriangles, a: &[u32], b: &[u32]) -> usize {
+    let mut vertices: Vec<u32> = a
+        .iter()
+        .chain(b)
+        .flat_map(|&triangle| local.triangles.get(triangle as usize).into_iter().flatten())
+        .copied()
+        .collect();
+    vertices.sort_unstable();
+    vertices.dedup();
+    vertices.len()
+}
+
+/// The exposed cell of one triangle centroid on the chunking grid: `(centroid - origin) / step`
+/// divided by 64, clamped to ten bits per axis.
+fn chunk_key(centroid: Vec3, origin: Vec3, step: f32) -> u32 {
+    let scale = if step > 0.0 && step.is_finite() {
+        step
+    } else {
+        1.0
+    };
+    let q = (centroid - origin) / scale / 64.0;
+    let bits = |value: f32| -> u32 { spread_bits(value.clamp(0.0, 1023.0) as u32) };
+    bits(q.x) | bits(q.y) << 1 | bits(q.z) << 2
+}
+
+/// The chunked partition of a whole mesh, advanced one unit per step: the Morton keys of the
+/// next `PARTITION_BATCH` triangles, one sort of the keyed pairs, then one chunk of at most
+/// `PARTITION_BATCH` consecutive triangles of that order partitioned on its own.
+pub struct PartitionState {
+    triangle_count: usize,
+    limits: ClusterLimits,
+    origin: Vec3,
+    step: f32,
+    keyed: Vec<(u32, u32)>,
+    next_key: usize,
+    chunk_start: usize,
+    covered: usize,
+    finished: Vec<Vec<u32>>,
+}
+
+impl PartitionState {
+    /// Prepares the partition of a mesh with `triangle_count` triangles.
+    pub fn new(
+        triangle_count: usize,
+        limits: ClusterLimits,
+        origin: Vec3,
+        step: f32,
+    ) -> PartitionState {
+        PartitionState {
+            triangle_count,
+            limits,
+            origin,
+            step,
+            keyed: Vec::new(),
+            next_key: 0,
+            chunk_start: 0,
+            covered: 0,
+            finished: Vec::new(),
+        }
+    }
+
+    /// Runs one unit. Returns true once every triangle is in a cluster.
+    pub fn step(&mut self, triangle: &dyn Fn(u32) -> [u32; 3], positions: &[Vec3]) -> bool {
+        if self.next_key < self.triangle_count {
+            let end = (self.next_key + PARTITION_BATCH).min(self.triangle_count);
+            for index in self.next_key..end {
+                let corners = triangle(index as u32);
+                let mut sum = Vec3::ZERO;
+                for vertex in corners {
+                    sum += positions
+                        .get(vertex as usize)
+                        .copied()
+                        .unwrap_or(Vec3::ZERO);
+                }
+                let key = chunk_key(sum / 3.0, self.origin, self.step);
+                self.keyed.push((key, index as u32));
+            }
+            self.next_key = end;
+            self.keyed.sort_unstable();
+            if self.next_key < self.triangle_count {
+                return false;
+            }
+        }
+
+        let Some(chunk_range) = self.keyed.get(self.chunk_start..) else {
+            return true;
+        };
+        if chunk_range.is_empty() {
+            return true;
+        }
+        let end = self.chunk_start + PARTITION_BATCH.min(chunk_range.len());
+        let Some(chunk) = self.keyed.get(self.chunk_start..end) else {
+            return true;
+        };
+        let mesh_indices: Vec<u32> = chunk.iter().map(|&(_, index)| index).collect();
+        let chunk_triangles: Vec<[u32; 3]> =
+            mesh_indices.iter().map(|&index| triangle(index)).collect();
+        for cluster in partition_triangles(&chunk_triangles, positions, self.limits) {
+            let mut mapped = Vec::with_capacity(cluster.len());
+            for &local in &cluster {
+                if let Some(&index) = mesh_indices.get(local as usize) {
+                    mapped.push(index);
+                }
+            }
+            if !mapped.is_empty() {
+                self.covered += mapped.len();
+                self.finished.push(mapped);
+            }
+        }
+        self.chunk_start = end;
+        self.chunk_start >= self.keyed.len()
+    }
+
+    /// The clusters finished since the last drain, as mesh triangle indices, in production order.
+    pub fn drain(&mut self) -> Vec<Vec<u32>> {
+        std::mem::take(&mut self.finished)
+    }
+
+    /// The covered fraction of the mesh, in 0..=1, never decreasing.
+    pub fn progress(&self) -> f32 {
+        if self.triangle_count == 0 {
+            return 1.0;
+        }
+        (self.covered as f32 / self.triangle_count as f32).clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +693,136 @@ mod tests {
             grid.nearest(&local, &assigned, &stamps, 0, 0, Vec3::ZERO, LIMITS),
             Some(0)
         );
+    }
+
+    /// A flat quad grid of `size` by `size` cells: two triangles per cell.
+    fn grid(size: u32) -> (Vec<[u32; 3]>, Vec<Vec3>) {
+        let mut positions = Vec::new();
+        for y in 0..=size {
+            for x in 0..=size {
+                positions.push(Vec3::new(x as f32, 0.0, y as f32));
+            }
+        }
+        let mut triangles = Vec::new();
+        let at = |x: u32, y: u32| y * (size + 1) + x;
+        for y in 0..size {
+            for x in 0..size {
+                triangles.push([at(x, y), at(x, y + 1), at(x + 1, y)]);
+                triangles.push([at(x + 1, y), at(x, y + 1), at(x + 1, y + 1)]);
+            }
+        }
+        (triangles, positions)
+    }
+
+    #[test]
+    fn a_grid_partitions_into_full_clusters_within_the_limits() {
+        let (triangles, positions) = grid(40);
+        assert_eq!(triangles.len(), 3200);
+        let clusters = partition_triangles(&triangles, &positions, LIMITS);
+        let mut seen = vec![0u32; triangles.len()];
+        let mut small = 0;
+        for cluster in &clusters {
+            assert!(!cluster.is_empty());
+            assert!(cluster.len() <= LIMITS.max_triangles);
+            let mut vertices: Vec<u32> = cluster
+                .iter()
+                .flat_map(|&triangle| triangles[triangle as usize])
+                .collect();
+            vertices.sort_unstable();
+            vertices.dedup();
+            assert!(vertices.len() <= LIMITS.max_vertices);
+            if cluster.len() < SMALL_CLUSTER {
+                small += 1;
+            }
+            for &triangle in cluster {
+                seen[triangle as usize] += 1;
+            }
+        }
+        assert!(seen.iter().all(|&count| count == 1));
+        assert!(small <= 4, "{small} clusters were below {SMALL_CLUSTER}");
+    }
+
+    #[test]
+    fn sixteen_triangle_limits_are_respected() {
+        let (triangles, positions) = grid(40);
+        let limits = ClusterLimits {
+            max_triangles: 16,
+            max_vertices: 32,
+        };
+        for cluster in partition_triangles(&triangles, &positions, limits) {
+            assert!(cluster.len() <= limits.max_triangles);
+            let mut vertices: Vec<u32> = cluster
+                .iter()
+                .flat_map(|&triangle| triangles[triangle as usize])
+                .collect();
+            vertices.sort_unstable();
+            vertices.dedup();
+            assert!(vertices.len() <= limits.max_vertices);
+        }
+    }
+
+    #[test]
+    fn separate_quads_pack_into_clusters_of_more_than_one_piece() {
+        let (mut triangles, mut positions) = (Vec::new(), Vec::new());
+        for z in 0..20u32 {
+            for x in 0..20u32 {
+                let base = positions.len() as u32;
+                let at = Vec3::new(x as f32 * 0.5, 0.0, z as f32 * 0.5);
+                positions.extend([
+                    at,
+                    at + Vec3::X * 0.1,
+                    at + Vec3::Z * 0.1,
+                    at + Vec3::new(0.1, 0.0, 0.1),
+                ]);
+                triangles.push([base, base + 1, base + 2]);
+                triangles.push([base + 1, base + 3, base + 2]);
+            }
+        }
+        let clusters = partition_triangles(&triangles, &positions, LIMITS);
+        let average = triangles.len() as f32 / clusters.len() as f32;
+        assert!(average > 2.0, "average cluster size was only {average}");
+        assert!(clusters.iter().any(|cluster| cluster.len() > 2));
+    }
+
+    #[test]
+    fn the_partition_state_covers_every_triangle_once_and_is_deterministic() {
+        let (triangles, positions) = grid(100);
+        assert_eq!(triangles.len(), 20000);
+        let access = |index: u32| triangles[index as usize];
+
+        let mut state = PartitionState::new(triangles.len(), LIMITS, Vec3::ZERO, 1.0);
+        let mut incremental = Vec::new();
+        let mut last = 0.0f32;
+        loop {
+            let done = state.step(&access, &positions);
+            let progress = state.progress();
+            assert!((0.0..=1.0).contains(&progress));
+            assert!(progress >= last, "progress went from {last} to {progress}");
+            last = progress;
+            incremental.extend(state.drain());
+            if done {
+                break;
+            }
+        }
+        assert_eq!(last, 1.0);
+        assert_eq!(state.progress(), 1.0);
+        assert!(state.drain().is_empty());
+
+        let mut state = PartitionState::new(triangles.len(), LIMITS, Vec3::ZERO, 1.0);
+        while !state.step(&access, &positions) {}
+        let at_end = state.drain();
+        assert_eq!(incremental, at_end);
+
+        let mut seen = vec![0u32; triangles.len()];
+        for cluster in &at_end {
+            for &triangle in cluster {
+                seen[triangle as usize] += 1;
+            }
+        }
+        assert!(seen.iter().all(|&count| count == 1));
+
+        let mut second = PartitionState::new(triangles.len(), LIMITS, Vec3::ZERO, 1.0);
+        while !second.step(&access, &positions) {}
+        assert_eq!(second.drain(), at_end);
     }
 }
