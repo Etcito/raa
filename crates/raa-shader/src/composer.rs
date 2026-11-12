@@ -341,6 +341,11 @@ fn unparenthesised_mixes(source: &str) -> Vec<String> {
                         levels.push(String::new());
                     }
                 }
+                // A comma ends an argument or element: operators on its two sides never mix.
+                ',' => {
+                    let part = std::mem::take(levels.last_mut().unwrap());
+                    check(&part, number, line, &mut found);
+                }
                 _ => levels.last_mut().unwrap().push(c),
             }
         }
@@ -466,6 +471,17 @@ fn fs_main() -> @location(0) vec4<f32> {
         let e = Composer::validate(two_bitwise).unwrap_err();
         assert_eq!(e.code(), "shader.validate", "{e}");
         assert_eq!(unparenthesised_mixes(mixed).len(), 1);
+    }
+
+    #[test]
+    fn validate_accepts_operators_in_separate_call_arguments() {
+        // A comma separates arguments: the shift, the mask and the `&` never share an expression.
+        let args = "fn g(a: u32, b: u32, c: u32) -> u32 { return a; }
+fn f(p: u32) -> u32 {
+    return g(p >> 4u, (p >> 2u) & 3u, p & 3u);
+}
+";
+        assert!(unparenthesised_mixes(args).is_empty());
     }
 
     #[test]
