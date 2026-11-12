@@ -8,7 +8,44 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
 import { createSkyPageRunner } from '../../examples/sky-weather/lib/runtime.js';
+import zlib from 'node:zlib';
 import { check, select, clean, render, fresh, judge, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
+
+// A card's sandbox exports the project store; these fixtures use their own stage roots unless a test sets one.
+delete process.env.NMC_CACHE_DIR;
+delete process.env.SKY_WEATHER_RERENDER_ALL;
+
+/** Base64 of an 8-bit RGB PNG whose pixel (x, y) is pixel(x, y). */
+function png(width, height, pixel) {
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) raw.set(pixel(x, y), y * (width * 3 + 1) + 1 + x * 3);
+  const chunk = (type, body) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(body.length);
+    head.write(type, 4, 'latin1');
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(zlib.crc32(Buffer.concat([head.subarray(4), body])));
+    return Buffer.concat([head, body, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+    chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]).toString('base64');
+}
+const SKY_PNG = png(8, 8, (x, y) => [40 + y * 20, 90 + y * 15, 200 - x * 5]);
+// An all-white 1280x720 canvas above the page's dark status band with light text in it.
+const WHITE_PNG = png(1280, 748, (x, y) => (y < 720 ? [255, 255, 255] : (x + y) % 7 === 0 ? [242, 242, 242] : [11, 13, 18]));
+const BLACK_PNG = png(8, 8, () => [0, 0, 0]);
+const FLAT_PNG = png(8, 8, () => [120, 170, 230]);
+
+/** Point the job at a fresh project store for the rest of the test. */
+function projectStore(t) {
+  process.env.NMC_CACHE_DIR = scratch(t);
+  t.after(() => { delete process.env.NMC_CACHE_DIR; delete process.env.SKY_WEATHER_RERENDER_ALL; });
+  return process.env.NMC_CACHE_DIR;
+}
 
 function scratch(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sky-job-'));
@@ -379,7 +416,7 @@ async function renderFixture(t, scenes = [foundation], options = {}) {
         hardware: true,
         json: { legacy: 'must not unwrap' }, nested: [1, { values: [false, null] }],
         images: rows.map((row) => ({ id: row.id, filename: row.filename, mime: 'image/png',
-          data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jf1sAAAAASUVORK5CYII=',
+          data: SKY_PNG,
           observation: `Actual capture ${row.id}` })),
         facts: state.factsFor ? state.factsFor(input, rows) : factsRecord(),
         measurements: variant?.measurement ? [measurementRecord(variant.measurement)] : [],
@@ -922,20 +959,18 @@ test('a rebuild with identical inputs keeps the images although buildId changed'
   assert.ok(fs.readdirSync(containedPath(s.out, `${first.directory}/images`)).length === 2);
 });
 
-test('a changed source keeps nothing and clean removes only the older build images', async (t) => {
+test('a changed page source alone keeps every image and clean deletes none', async (t) => {
   const s = await renderFixture(t, [foundation, atmosphere]);
   const first = s.attempt;
   await s.render();
   put(s.root, 'examples/sky-weather/lib/inventory.js', 'export const criteria = ["changed"];\n');
   await rebuild(s);
-  assert.deepEqual(fs.readdirSync(containedPath(s.out, `${first.directory}/images`)), []);
+  assert.equal(fs.readdirSync(containedPath(s.out, `${first.directory}/images`)).length, 2);
   for (const name of ['run', 'attempt', 'build', 'selection']) assert.ok(s.read(attemptRecords(first.directory)[name]));
   const run = await s.render();
-  assert.deepEqual(run.kept, []);
-  assert.equal(s.calls.filter((call) => call !== 'publish').length, 2);
-  const second = s.attempt;
-  await cleanAgain(s);
-  assert.equal(fs.readdirSync(containedPath(s.out, `${second.directory}/images`)).length, 2);
+  assert.deepEqual(s.calls, []);
+  assert.ok(run.kept.length === 2 && run.kept.every((entry) => entry.attemptId === first.attemptId));
+  assert.equal((await fresh(s.page, s.out, s.stage)).status, 'passed');
 });
 
 test('render publishes nothing when every group is kept and reuses the pageRef of the attempt that supplied the first group', async (t) => {
@@ -962,7 +997,7 @@ test('a kept candidate with page errors, a readiness that is not ready, a false 
     measurement: { resultFor: (result) => ({ ...result, measurements: [{}] }) },
     row: { after: (s) => {
       const selection = s.read(s.records.selection);
-      selection.inventory[0].expectedVisibleBehavior = 'changed';
+      selection.inventory[0].requiredFacts = ['runtime:ready'];
       writeJsonRecord(containedPath(s.out, s.records.selection), selection);
     } },
     png: { after: (s) => fs.writeFileSync(containedPath(s.out, s.records.image(foundation.filename)), 'damaged') },
@@ -1088,7 +1123,7 @@ test('fresh rejects a kept image whose originating attempt belongs to another bu
   const otherBuild = await keptFixture(t);
   const originBuild = attemptRecords(otherBuild.origin.directory).build;
   writeJsonRecord(containedPath(otherBuild.s.out, originBuild), rewrite(otherBuild.s.read(originBuild), (build) => {
-    build.inputs.revision = '2'.repeat(40);
+    build.buildId = randomUUID();
   }));
   await assert.rejects(fresh(otherBuild.s.page, otherBuild.s.out, otherBuild.s.stage), /belongs to another build/);
 
@@ -1196,4 +1231,69 @@ test('judge runs captures concurrently, keeps inventory order and logs every ver
   assert.match(lines.at(-1), new RegExp(`\\[${inventoryOrder.length}/${inventoryOrder.length}\\]`));
   assert.deepEqual(s.read(s.records.judge), record);
   await assert.rejects(s.judge({ concurrency: 0 }), /invalid judge concurrency/);
+});
+
+/** A new worktree of the project: its stage root starts empty, its page source differs. */
+async function newWorktree(s, source) {
+  fs.rmSync(s.out, { recursive: true, force: true });
+  put(s.root, 'examples/sky-weather/lib/inventory.js', `export const criteria = [${JSON.stringify(source)}];\n`);
+  return rebuild(s);
+}
+
+test('every worktree of the project keeps the rendered images and verdicts of the project store; only failed or missing jobs render', async (t) => {
+  projectStore(t);
+  const s = await renderFixture(t, [foundation, atmosphere]);
+  const first = s.attempt;
+  await renderFailing(s, (input) => input.scenario === GROUP_B);
+  const calls = judgeStub(t, PASSING_JUDGE);
+
+  await newWorktree(s, 'second');
+  const second = s.attempt;
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', GROUP_B], 'the job that passed before is not rendered again');
+  assert.deepEqual(run.kept.map((entry) => [entry.id, entry.attemptId]), [[`${GROUP_A}-image`, first.attemptId]]);
+  assert.equal((await judge(s.page, s.out, s.stage)).status, 'passed');
+  assert.equal(judgedLines(calls).length, 2);
+
+  await newWorktree(s, 'third');
+  const kept = await s.render();
+  assert.deepEqual(s.calls, []);
+  assert.deepEqual(kept.kept.map((entry) => entry.attemptId), [first.attemptId, second.attemptId]);
+  assert.equal((await judge(s.page, s.out, s.stage)).status, 'passed');
+  assert.equal(judgedLines(calls).length, 2, 'kept images reuse their verdicts');
+
+  process.env.SKY_WEATHER_RERENDER_ALL = '1';
+  await cleanAgain(s);
+  assert.deepEqual((await s.render()).kept, []);
+  assert.deepEqual(s.calls, ['publish', GROUP_A, GROUP_B]);
+});
+
+test('a blank capture fails the render before the next job is dispatched, the rendered images are kept, and fresh names every blank capture before any judge call', async (t) => {
+  projectStore(t);
+  const s = await renderFixture(t, [foundation, atmosphere, paired]);
+  s.resultFor = (result, input) => (input.scenario === GROUP_B
+    ? { ...result, images: result.images.map((image) => ({ ...image, data: WHITE_PNG })) } : result);
+  await assert.rejects(s.render(),
+    /foundation-sky-and-sphere\.png \(foundation-scene\/default\): one flat colour rgb\(255, 255, 255\)/);
+  assert.deepEqual(s.calls, ['publish', GROUP_A, GROUP_B]);
+  s.resultFor = null;
+  await newWorktree(s, 'after blank');
+  const run = await s.render();
+  assert.deepEqual(s.calls, ['publish', GROUP_B, paired.id, paired.id]);
+  assert.deepEqual(run.kept.map((entry) => entry.id), [`${GROUP_A}-image`]);
+
+  // Black and flat-colour captures that reach fresh: both are named and no judge client runs.
+  const blank = { [foundation.filename]: BLACK_PNG, 'paired-cloud-shadows-on.png': FLAT_PNG };
+  retamper(s, (value) => {
+    for (const job of value.jobs) for (const image of job.result.images) {
+      if (!blank[image.filename]) continue;
+      image.data = blank[image.filename];
+      fs.writeFileSync(containedPath(s.out, s.records.image(image.filename)), Buffer.from(image.data, 'base64'));
+    }
+  });
+  const calls = judgeStub(t, PASSING_JUDGE);
+  await assert.rejects(judge(s.page, s.out, s.stage),
+    /foundation-sky-and-sphere\.png \(foundation-scene\/default\): one flat colour rgb\(0, 0, 0\); paired-cloud-shadows-on\.png \(paired-scene\/on\): one flat colour rgb\(120, 170, 230\)/);
+  assert.deepEqual(judgedLines(calls), []);
+  assert.equal(s.read(s.records.judge).status, 'failed');
 });

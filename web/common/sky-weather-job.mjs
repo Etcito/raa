@@ -3,6 +3,7 @@
 // inventory, allocate immutable render attempts, render bounded managed jobs,
 // verify actual GPU evidence and judge every selected capture.
 import fs from 'node:fs';
+import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { publishGpuPage, runGpuPageOp } from './gpu-job.mjs';
 import path from 'node:path';
@@ -83,21 +84,29 @@ import { validateFeatureMeasurement } from '../../examples/sky-weather/lib/measu
  *   images       <out>/attempts/<UUID>/images/<inventory filename>
  * Later shares (render/fresh/judge) extend this module and must retain these
  * operations and record shapes. A pointer or an allocated attempt is never a pass.
- * P2-RESUMABLE-RENDER: two builds are the same build when their buildKey() strings are
- * equal (buildId/preparationId are redrawn by every build). render keeps a (scenario, mode)
- * group from the first earlier attempt directory (ascending name, any status) of the same
- * build whose selection holds the identical rows, whose job passes the per-job checks
- * against its origin identities and whose images are intact regular files; it copies that
- * job, its inputs/results and images into the new attempt, lists them in run.kept, renders
- * only the other groups and publishes only when it renders one. clean still allocates a
- * fresh attempt and deletes no record; it also deletes the image files of earlier attempts
- * whose frozen build has a different build key or cannot be read.
+ * P2-RESUMABLE-RENDER: an image already rendered is kept by every later attempt of the stage, in
+ * any worktree, while its inventory row (id, scenario, mode, filename, requiredFacts) is unchanged;
+ * a page-code change alone does not invalidate it. render keeps a (scenario, mode) group from the
+ * first earlier attempt directory (the stage root's attempts, then the store's; ascending name, any
+ * status) whose selection holds the same rows, whose job passes the per-job checks against its
+ * origin identities and whose images are intact, non-blank regular files; it copies that job, its
+ * inputs/results and images into the new attempt, lists them in run.kept, renders only the other
+ * groups and publishes only when it renders one. SKY_WEATHER_RERENDER_ALL=1 keeps nothing.
+ * clean allocates a fresh attempt and deletes no record and no image.
+ * P2-RESUMABLE-RENDER STORE: storeRoot() is $NMC_CACHE_DIR/sky-weather/<stage>, the per-project
+ * directory every worktree shares (the stage root itself when NMC_CACHE_DIR is unset). As soon as
+ * a rendered job passes, render saves it there in the attempt layout (selection.json, build.json,
+ * run.json listing only the jobs that attempt rendered and passed, jobs/<i>/, images/); judge
+ * saves its verdicts there with the judged images. A failing job never discards the saved ones.
+ * P2-RESUMABLE-RENDER BLANK: a capture that is fully transparent or one flat colour (blankCapture)
+ * fails render as soon as its job returns, before the next job is dispatched, and fails fresh (so
+ * judge calls no judge client) listing every blank filename with its scenario/mode.
  * P2-RESUMABLE-RENDER FRESH: a job whose images are listed in run.kept passes the per-job checks
- * against its kept entries' origin identities, and that origin attempt must still hold its frozen
- * build of the current build key, the group's selection rows and the identical job record (and must
- * not merely have copied the group). Every other job passes against the current identities. Coverage,
- * image bytes and pair coverage apply to the union; the two states of a pair may come from different
- * attempts of the same build.
+ * against its kept entries' origin identities, and that origin attempt (stage root or store) must
+ * still hold its frozen build of that buildId, the group's rows and the identical job record (and
+ * must not merely have copied the group). Every other job passes against the current identities.
+ * Coverage, image bytes and pair coverage apply to the union; the two states of a pair may come
+ * from different attempts.
  * P2-RESUMABLE-RENDER JUDGE: a kept image reuses an earlier passed verdict of the byte-identical
  * image with the identical description (exit 0, score >= 6), keeping its judgedAt; every other image
  * is judged, and every verdict is written before failing.
@@ -136,6 +145,8 @@ export function attemptRecords(directory) {
 const USAGE = 'usage: node web/common/sky-weather-job.mjs <check|select|clean|render|fresh|judge> --page dist/sky-weather --out out/sky-weather/<stage> --stage <foundation|atmosphere|weather>';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+/** The GPU canvas of every job; a capture is that canvas with the page status band below it. */
+const CANVAS = Object.freeze({ width: 1280, height: 720 });
 const ADAPTER_FIELDS = ['vendor', 'architecture', 'device', 'description'];
 const SOFTWARE_ADAPTER = /software|swiftshader|llvmpipe|lavapipe|softpipe|fallback|basic render|microsoft basic|warp\b/i;
 
@@ -297,37 +308,138 @@ function validateSelection(value, stage, build, inventory, context) {
     `${context}: inventory changed; select again`);
 }
 
-/** P2-RESUMABLE-RENDER SAME BUILD identity: the receipt inputs without their preparationId. */
-export function buildKey(build) {
-  const { revision, dependencies, sources, toolchain, commandsText, criteriaText } = build.inputs;
-  return JSON.stringify({ revision, dependencies, sources, toolchain, commandsText, criteriaText });
+/** P2-RESUMABLE-RENDER STORE root of a stage: shared by every worktree of the project. */
+export function storeRoot(out, stage) {
+  const cache = process.env.NMC_CACHE_DIR;
+  return nonblank(cache) ? path.join(path.resolve(cache), 'sky-weather', stage) : path.resolve(out);
 }
 
-function sameBuild(build, key) {
-  try { return buildKey(build) === key; } catch { return false; }
+/** The roots holding earlier attempts: the stage root, then the store when it is elsewhere. */
+function attemptRoots(out, stage) {
+  const roots = [path.resolve(out), storeRoot(out, stage)];
+  return roots[0] === roots[1] ? [roots[0]] : roots;
 }
 
-/** Earlier attempt directories of the stage root, in ascending directory name order. */
-function earlierAttempts(out, currentDirectory) {
-  const root = containedPath(out, 'attempts');
-  if (!fs.existsSync(root)) return [];
-  return fs.readdirSync(root).sort().map((name) => `attempts/${name}`)
-    .filter((directory) => directory !== currentDirectory && isUuid(directory.slice('attempts/'.length)));
+/** The inventory fields an earlier image must share with the selected row to be kept. */
+function sameRow(a, b) {
+  return ['id', 'scenario', 'mode', 'filename', 'requiredFacts'].every((key) => isDeepStrictEqual(a?.[key], b?.[key]));
 }
 
-/** Readable records of earlier attempts frozen with the given build key. */
-function keptCandidates(out, currentDirectory, key) {
+/** Earlier attempt directories of every root, each root in ascending directory name order. */
+function earlierAttempts(roots, currentDirectory) {
+  const found = [];
+  for (const root of roots) {
+    let names = [];
+    try {
+      const attempts = containedPath(root, 'attempts');
+      if (fs.existsSync(attempts)) names = fs.readdirSync(attempts).sort();
+    } catch { /* an unreadable root supplies nothing */ }
+    for (const name of names) {
+      const directory = `attempts/${name}`;
+      if (directory === currentDirectory || !isUuid(name)) continue;
+      found.push({ root, directory });
+    }
+  }
+  return found;
+}
+
+/** Readable records of earlier attempts. */
+function keptCandidates(roots, currentDirectory) {
   const candidates = [];
-  for (const directory of earlierAttempts(out, currentDirectory)) {
+  for (const { root, directory } of earlierAttempts(roots, currentDirectory)) {
     try {
       const records = attemptRecords(directory);
-      const build = readJsonRecord(containedPath(out, records.build));
-      if (!sameBuild(build, key)) continue;
-      candidates.push({ directory, records, selection: readJsonRecord(containedPath(out, records.selection)),
-        run: readJsonRecord(containedPath(out, records.run)) });
+      readJsonRecord(containedPath(root, records.build));
+      candidates.push({ root, directory, records, selection: readJsonRecord(containedPath(root, records.selection)),
+        run: readJsonRecord(containedPath(root, records.run)) });
     } catch { /* an unreadable attempt supplies nothing */ }
   }
   return candidates;
+}
+
+/**
+ * P2-RESUMABLE-RENDER BLANK: why a PNG capture shows nothing (fully transparent, or one flat
+ * colour: every channel's standard deviation below one level), or null when it shows something.
+ * Only the first `rows` rows are read: the GPU canvas, not the status text band the page draws
+ * below it. A local, deterministic check of the decoded pixels; a layout the decoder does not
+ * cover (interlaced, bit depth below 8) is not called blank here. Throws on an undecodable PNG.
+ */
+export function blankCapture(bytes, rows = CANVAS.height) {
+  ensure(Buffer.isBuffer(bytes) && bytes.subarray(0, 8).equals(PNG_SIGNATURE), 'not a PNG capture');
+  let header = null, palette = null, alphas = null;
+  const data = [];
+  for (let at = 8; at + 8 <= bytes.length;) {
+    const length = bytes.readUInt32BE(at), type = bytes.toString('latin1', at + 4, at + 8);
+    const body = bytes.subarray(at + 8, at + 8 + length);
+    ensure(body.length === length, `truncated PNG ${type} chunk`);
+    if (type === 'IHDR') header = { width: body.readUInt32BE(0), height: body.readUInt32BE(4), depth: body[8], color: body[9], interlace: body[12] };
+    else if (type === 'PLTE') palette = body;
+    else if (type === 'tRNS') alphas = body;
+    else if (type === 'IDAT') data.push(body);
+    else if (type === 'IEND') break;
+    at += 12 + length;
+  }
+  ensure(header && header.width > 0 && header.height > 0, 'PNG has no image header');
+  const channels = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 }[header.color];
+  ensure(channels !== undefined, `unknown PNG colour type ${header.color}`);
+  if (header.interlace !== 0 || (header.depth !== 8 && header.depth !== 16)) return null;
+  ensure(header.color !== 3 || palette, 'palette PNG has no palette');
+  const raw = zlib.inflateSync(Buffer.concat(data));
+  const step = channels * (header.depth / 8), stride = header.width * step;
+  ensure(raw.length >= (stride + 1) * header.height, 'PNG pixel data is truncated');
+  let previous = new Uint8Array(stride), current = new Uint8Array(stride);
+  const sum = [0, 0, 0], squares = [0, 0, 0];
+  let visible = 0;
+  for (let y = 0; y < Math.min(header.height, rows); y++) {
+    const line = (stride + 1) * y, filter = raw[line];
+    for (let x = 0; x < stride; x++) {
+      const left = x >= step ? current[x - step] : 0, up = previous[x], corner = x >= step ? previous[x - step] : 0;
+      let predicted = 0;
+      if (filter === 1) predicted = left;
+      else if (filter === 2) predicted = up;
+      else if (filter === 3) predicted = (left + up) >> 1;
+      else if (filter === 4) {
+        const p = left + up - corner, pa = Math.abs(p - left), pb = Math.abs(p - up), pc = Math.abs(p - corner);
+        predicted = pa <= pb && pa <= pc ? left : pb <= pc ? up : corner;
+      } else ensure(filter === 0, `unknown PNG filter ${filter}`);
+      current[x] = (raw[line + 1 + x] + predicted) & 255;
+    }
+    for (let x = 0; x < stride; x += step) {
+      const sample = (index) => current[x + index * (header.depth / 8)];
+      let rgb, alpha = 255;
+      if (header.color === 3) {
+        const index = current[x];
+        rgb = [palette[index * 3] ?? 0, palette[index * 3 + 1] ?? 0, palette[index * 3 + 2] ?? 0];
+        if (alphas && index < alphas.length) alpha = alphas[index];
+      } else if (header.color === 0 || header.color === 4) {
+        rgb = [sample(0), sample(0), sample(0)];
+        if (header.color === 4) alpha = sample(1);
+      } else {
+        rgb = [sample(0), sample(1), sample(2)];
+        if (header.color === 6) alpha = sample(3);
+      }
+      if (alpha === 0) continue;
+      visible += 1;
+      for (let c = 0; c < 3; c++) { sum[c] += rgb[c]; squares[c] += rgb[c] * rgb[c]; }
+    }
+    [previous, current] = [current, previous];
+  }
+  if (visible === 0) return 'fully transparent';
+  const mean = sum.map((value) => value / visible);
+  const deviation = Math.max(...squares.map((value, c) => Math.sqrt(Math.max(0, value / visible - mean[c] * mean[c]))));
+  if (deviation >= 1) return null;
+  return `one flat colour rgb(${mean.map((value) => Math.round(value)).join(', ')})`;
+}
+
+/** Throws one error naming every blank capture of the given {row, bytes} list. */
+function refuseBlank(captures, context) {
+  const blank = [];
+  for (const { row, bytes } of captures) {
+    let reason;
+    try { reason = blankCapture(bytes); } catch (error) { reason = `not a decodable PNG: ${message(error)}`; }
+    if (reason) blank.push(`${row.filename} (${row.scenario}/${row.mode}): ${reason}`);
+  }
+  ensure(blank.length === 0, `${context}: blank capture(s): ${blank.join('; ')}`);
 }
 
 function readRegularFile(file) {
@@ -339,13 +451,13 @@ function readRegularFile(file) {
 }
 
 /** KEPT GROUP: the first earlier attempt whose evidence of this group passes every check. */
-function keptGroup(out, candidates, rows, namespaces) {
+function keptGroup(candidates, rows, namespaces) {
   const { scenario, mode } = rows[0];
   const factNames = namespaces.find((entry) => entry.default?.id === scenario)?.factNames;
   for (const candidate of candidates) {
     try {
-      const { selection, run, records } = candidate;
-      ensure(rows.every((row) => selection.inventory.some((entry) => isDeepStrictEqual(entry, row))), 'changed rows');
+      const { selection, run, records, root } = candidate;
+      ensure(rows.every((row) => selection.inventory.some((entry) => sameRow(entry, row))), 'changed rows');
       const index = run.jobs.findIndex((job) => job?.scenario === scenario && job?.mode === mode);
       ensure(index >= 0, 'no job');
       const job = run.jobs[index];
@@ -360,18 +472,19 @@ function keptGroup(out, candidates, rows, namespaces) {
       const images = rows.map((row) => {
         const image = run.images.find((entry) => entry?.id === row.id && entry.filename === row.filename);
         ensure(image, 'no image entry');
-        const bytes = readRegularFile(containedPath(out, records.image(row.filename)));
+        const bytes = readRegularFile(containedPath(root, records.image(row.filename)));
         ensure(bytes.equals(captures.get(row.id).bytes), 'damaged image');
         return { row, image, bytes };
       });
-      const input = readJsonRecord(containedPath(out, records.input(index)));
+      refuseBlank(images, 'kept group');
+      const input = readJsonRecord(containedPath(root, records.input(index)));
       return { candidate, job, input, origin, images };
     } catch { /* not kept: rendered again */ }
   }
   return null;
 }
 
-/** Allocate a fresh immutable attempt; earlier records are never deleted, older-build images are. */
+/** Allocate a fresh immutable attempt; no earlier record or image is ever deleted. */
 export async function clean(page, out, stage) {
   const { build, inventory } = await verifyPage(page, stage);
   const selectionFile = containedPath(out, 'selection.json');
@@ -394,20 +507,34 @@ export async function clean(page, out, stage) {
   writeJsonRecord(containedPath(out, 'current.json'), {
     selectionId: selection.selectionId, attemptId, directory,
   });
-  const key = buildKey(build);
-  for (const earlier of earlierAttempts(out, directory)) {
-    let frozen = null;
-    try { frozen = readJsonRecord(containedPath(out, attemptRecords(earlier).build)); } catch { /* unreadable */ }
-    if (frozen !== null && sameBuild(frozen, key)) continue;
-    let images;
-    try { images = containedPath(out, `${earlier}/images`); } catch { continue; }
-    if (!fs.existsSync(images) || !fs.lstatSync(images).isDirectory()) continue;
-    for (const name of fs.readdirSync(images)) {
-      const file = path.join(images, name);
-      if (!fs.lstatSync(file).isDirectory()) fs.unlinkSync(file);
-    }
-  }
   return attempt;
+}
+
+/**
+ * P2-RESUMABLE-RENDER STORE: save one rendered job that passed, with its input, result and images,
+ * under the store's copy of the attempt. Nothing to do when the store is the stage root itself.
+ */
+function storeJob(store, ctx, job, input, images) {
+  if (store === path.resolve(ctx.out)) return;
+  const records = attemptRecords(ctx.directory);
+  const write = (name, value) => writeJsonRecord(containedPath(store, name), value);
+  if (!ctx.stored) {
+    write(records.selection, ctx.selection);
+    write(records.build, ctx.build);
+    ctx.stored = { ...ctx.run, jobs: [], images: [], kept: [], status: 'passed', errors: [] };
+  }
+  const index = ctx.stored.jobs.length;
+  write(records.input(index), input);
+  write(records.result(index), job.result);
+  for (const { image, bytes } of images) {
+    const file = containedPath(store, records.image(image.filename));
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes, { flag: 'wx' });
+  }
+  ctx.stored.jobs.push(job);
+  ctx.stored.images.push(...images.map(({ image }) => image));
+  ctx.stored.pageRef = ctx.run.pageRef;
+  write(records.run, ctx.stored);
 }
 
 /**
@@ -440,7 +567,8 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
     selectionId: selection.selectionId, attemptId: attempt.attemptId, buildId: build.buildId,
     preparationId: build.preparationId, pageRef: '', jobs: [], images: [], kept: [], status: 'failed', errors: [],
   };
-  const message = (error) => String(error?.message ?? error);
+  const store = storeRoot(out, stage);
+  const storeCtx = { out, directory: pointer.directory, selection, build, run, stored: null };
   const current = () => ensure(isDeepStrictEqual(read('current.json'), pointer), 'current pointer was superseded');
   const saveCaptures = (job, rows) => {
     for (const image of Array.isArray(job.result?.images) ? job.result.images : []) {
@@ -468,11 +596,12 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(row);
     }
-    const candidates = keptCandidates(out, pointer.directory, buildKey(build));
+    const candidates = process.env.SKY_WEATHER_RERENDER_ALL === '1' ? []
+      : keptCandidates(attemptRoots(out, stage), pointer.directory);
     const pending = [];
     let firstKept = null;
     for (const rows of groups.values()) {
-      const kept = keptGroup(out, candidates, rows, namespaces);
+      const kept = keptGroup(candidates, rows, namespaces);
       if (!kept) { pending.push(rows); continue; }
       if (run.jobs.length === 0 && pending.length === 0) firstKept = kept;
       const index = run.jobs.length;
@@ -502,7 +631,7 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
       const { scenario, mode } = rows[0];
       const index = run.jobs.length;
       const input = { selectionId: run.selectionId, attemptId: run.attemptId, buildId: run.buildId,
-        scenario, mode, width: 1280, height: 720, remainingMs: 270000 };
+        scenario, mode, width: CANVAS.width, height: CANVAS.height, remainingMs: 270000 };
       write(records.input(index), input);
       const job = { jobId: '', clientId: '', scenario, mode, result: null, error: null };
       run.jobs.push(job);
@@ -539,12 +668,21 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
       const expected = { selectionId: run.selectionId, attemptId: run.attemptId, buildId: run.buildId, scenario, mode };
       ensure(isDeepStrictEqual(job.result.provenance, expected), 'operation provenance differs from input');
       ensure(rows.every((row) => run.images.some((image) => image.id === row.id)), 'operation is missing selected captures');
+      const captures = rows.map((row) => ({ row, image: run.images.find((image) => image.id === row.id),
+        bytes: readRegularFile(containedPath(out, records.image(row.filename))) }));
+      // A blank capture fails at once: no further GPU job is dispatched for this attempt.
+      refuseBlank(captures, `${scenario}/${mode}`);
       for (const kind of ['console', 'page', 'gpu']) {
         ensure(Array.isArray(job.result.errors?.[kind]), `missing ${kind} error observations`);
         run.errors.push(...job.result.errors[kind].map((error) => `${kind}: ${error}`));
       }
       write(records.run, run);
       ensure(run.errors.length === 0, run.errors.join('\n'));
+      try {
+        storeJob(store, storeCtx, job, input, captures);
+      } catch (error) {
+        process.stderr.write(`sky-weather-job: ${scenario}/${mode} passed but was not saved to ${store}: ${message(error)}\n`);
+      }
     }
     current();
     run.status = 'passed';
@@ -703,17 +841,19 @@ function verifyOrigin(ctx, origin, job, rows, label) {
   ensure(isUuid(origin.attemptId) && `attempts/${origin.attemptId}` !== ctx.pointer.directory,
     `${label}: kept origin ${origin.attemptId} is not an earlier attempt`);
   const records = attemptRecords(`attempts/${origin.attemptId}`);
+  const roots = attemptRoots(ctx.out, ctx.stage);
+  const root = roots.find((entry) => fs.existsSync(containedPath(entry, records.build))) ?? roots[0];
   const read = (name) => {
-    const file = containedPath(ctx.out, name);
+    const file = containedPath(root, name);
     ensure(fs.existsSync(file), `${label}: kept origin attempt ${origin.attemptId} is missing ${path.basename(name)}`);
     return readJsonRecord(file);
   };
   const build = read(records.build);
-  ensure(sameBuild(build, buildKey(ctx.build)) && build.buildId === origin.buildId,
+  ensure(build.buildId === origin.buildId,
     `${label}: kept origin attempt ${origin.attemptId} belongs to another build`);
   const selection = read(records.selection);
   ensure(selection.selectionId === origin.selectionId
-    && rows.every((row) => selection.inventory.some((entry) => isDeepStrictEqual(entry, row))),
+    && rows.every((row) => selection.inventory.some((entry) => sameRow(entry, row))),
   `${label}: kept origin attempt ${origin.attemptId} does not select the rows of ${job.scenario}/${job.mode}`);
   const run = read(records.run);
   ensure(run.attemptId === origin.attemptId && run.selectionId === origin.selectionId && run.buildId === origin.buildId,
@@ -757,7 +897,7 @@ function validateJob(job, index, ctx, state) {
 function validateRunImages(ctx, run, state) {
   ensure(run.images.length === ctx.inventory.length,
     `run records ${run.images.length} image(s) for ${ctx.inventory.length} selected image(s)`);
-  const byId = new Map(), filenames = new Set();
+  const byId = new Map(), filenames = new Set(), captures = [];
   for (const image of run.images) {
     exact(image, ['id', 'filename', 'path', 'jobId', 'clientId', 'observation'], 'run image');
     const row = ctx.inventory.find((entry) => entry.id === image.id && entry.filename === image.filename);
@@ -779,8 +919,11 @@ function validateRunImages(ctx, run, state) {
       `run image ${image.id} differs from the direct operation payload`);
     byId.set(image.id, image);
     filenames.add(image.filename);
+    captures.push({ row, bytes: capture.bytes });
   }
   for (const row of ctx.inventory) ensure(byId.has(row.id), `selected image ${row.id} is missing from the run`);
+  // Every blank capture of the selection is named before any judge client is called.
+  refuseBlank(captures, 'fresh');
   const imagesDirectory = containedPath(ctx.out, `${ctx.pointer.directory}/images`);
   if (fs.existsSync(imagesDirectory)) {
     for (const name of fs.readdirSync(imagesDirectory)) {
@@ -918,22 +1061,22 @@ export function judgeCapture(capture, description) {
 
 /**
  * P2-RESUMABLE-RENDER JUDGE reuse: an earlier passed verdict of the byte-identical capture with the
- * identical description (exit 0, minScore 6, score >= 6) from an attempt of the same build. The byte
- * equality only establishes that the reused verdict is about the same file. Null when none exists.
+ * identical description (exit 0, minScore 6, score >= 6) from an earlier attempt (stage root or
+ * store). The byte equality only establishes that the reused verdict is about the same file. Null
+ * when none exists.
  */
-function reusableVerdict(out, currentDirectory, key, row, capture) {
+function reusableVerdict(roots, currentDirectory, row, capture) {
   let bytes;
   try { bytes = readRegularFile(capture); } catch { return null; }
   const sameBytes = (file) => { try { return readRegularFile(file).equals(bytes); } catch { return false; } };
-  for (const directory of earlierAttempts(out, currentDirectory)) {
+  for (const { root, directory } of earlierAttempts(roots, currentDirectory)) {
     try {
       const records = attemptRecords(directory);
-      if (!sameBuild(readJsonRecord(containedPath(out, records.build)), key)) continue;
-      for (const entry of readJsonRecord(containedPath(out, records.judge)).images) {
+      for (const entry of readJsonRecord(containedPath(root, records.judge)).images) {
         const passed = entry?.id === row.id && entry.filename === row.filename
           && entry.description === row.expectedVisibleBehavior && entry.minScore === 6
           && entry.exit === 0 && typeof entry.score === 'number' && entry.score >= 6;
-        if (passed && sameBytes(containedPath(out, records.image(row.filename)))) return { ...entry };
+        if (passed && sameBytes(containedPath(root, records.image(row.filename)))) return { ...entry };
       }
     } catch { /* an unreadable attempt supplies no verdict */ }
   }
@@ -962,7 +1105,23 @@ export async function judge(page, out, stage, options = {}) {
     selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
     images: [], status: 'failed', errors: [],
   };
-  const write = () => writeJsonRecord(containedPath(out, ctx.records.judge), record);
+  const store = storeRoot(out, stage);
+  const saveVerdicts = () => {
+    // P2-RESUMABLE-RENDER STORE: the verdicts and the judged images, for attempts in other worktrees.
+    if (store === path.resolve(out)) return;
+    try {
+      for (const entry of record.images) {
+        const file = containedPath(store, ctx.records.image(entry.filename));
+        if (fs.existsSync(file)) continue;
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, readRegularFile(containedPath(out, ctx.records.image(entry.filename))), { flag: 'wx' });
+      }
+      writeJsonRecord(containedPath(store, ctx.records.judge), record);
+    } catch (error) {
+      process.stderr.write(`sky-weather-job: verdicts not saved to ${store}: ${message(error)}\n`);
+    }
+  };
+  const write = () => { writeJsonRecord(containedPath(out, ctx.records.judge), record); saveVerdicts(); };
   let verified;
   try {
     verified = await verifyFresh(page, out, stage);
@@ -973,7 +1132,7 @@ export async function judge(page, out, stage, options = {}) {
   }
   const images = new Map(verified.run.images.map((image) => [image.id, image]));
   const kept = new Set(verified.run.kept.map((entry) => entry.id));
-  const key = buildKey(verified.build);
+  const roots = attemptRoots(out, stage);
   const log = options.log ?? ((line) => process.stdout.write(`${line}\n`));
   const total = verified.inventory.length;
   // Verdicts land in inventory order whatever order the judges finish in; only finished slots are written.
@@ -991,7 +1150,7 @@ export async function judge(page, out, stage, options = {}) {
   };
   const judgeRow = async (row, index) => {
     const capture = containedPath(out, verified.records.image(row.filename));
-    const reused = kept.has(row.id) ? reusableVerdict(out, verified.pointer.directory, key, row, capture) : null;
+    const reused = kept.has(row.id) ? reusableVerdict(roots, verified.pointer.directory, row, capture) : null;
     if (reused) {
       settle(index, reused, null, true);
       return;
