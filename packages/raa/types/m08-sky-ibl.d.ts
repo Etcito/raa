@@ -201,6 +201,9 @@ export interface SkyViewDiagnostics {
   resetReasons: SkyResetReason[];
   cloudScreenValid: boolean;
   cloudPanoramaValid: boolean;
+  /** Screen-cloud accumulation: committed count n, the animated flag the freeze decision used,
+   * whether the last frame skipped the march, and whether history was usable. */
+  cloud: { count: number; animated: boolean; frozen: boolean; historyUsed: boolean };
 }
 
 /** Whether the sky pipeline is ready, pending or failed, with its stage and error. */

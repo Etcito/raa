@@ -1037,6 +1037,7 @@ fn view(view: u32, reasons: CloudResetReasons) -> SkyViewDiagnostics {
         reset_reasons: reasons,
         cloud_screen_valid: false,
         cloud_panorama_valid: true,
+        cloud: Default::default(),
     }
 }
 

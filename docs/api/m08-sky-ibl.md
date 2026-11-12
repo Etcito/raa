@@ -431,6 +431,10 @@ interface SkyViewDiagnostics {
   skyViewGeneration: number; historyValid: boolean;
   resetReasons: ('Resize' | 'CameraDiscontinuity' | 'Weather' | 'Model' | 'Enable' | 'ViewRemoved')[];
   cloudScreenValid: boolean; cloudPanoramaValid: boolean;
+  // Screen-cloud accumulation of the view (read-only): committed count n; the animated flag the
+  // freeze decision used; frozen = the last frame did not march (skip or refresh only);
+  // historyUsed = the last frame could reproject from the committed history.
+  cloud: { count: number; animated: boolean; frozen: boolean; historyUsed: boolean };
 }
 interface SkyReadiness { status: 'pending' | 'ready' | 'failed'; stage: string; error: string | null }
 ```

@@ -56,9 +56,13 @@ const RAA_CLOUD_SCREEN_BURST: i32 = 2;
 // Transmittance stored by texels that were not marched (CLOUD_SCREEN_UNKNOWN_ALPHA).
 const RAA_CLOUD_SCREEN_UNKNOWN: f32 = -1.0;
 
-fn raa_cloud_gradient_noise(pixel: vec2<f32>, frame: u32) -> f32 {
-    let p = pixel + 5.588238 * f32(frame % 64u);
-    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
+// Integer hash (PCG) of the pixel and a sequence index, uniform in [0, 1) with no low-frequency
+// structure, so no ramp travels across the screen between frames.
+fn raa_cloud_hash_noise(pixel: vec2<u32>, sequence: u32) -> f32 {
+    var v = pixel.x * 1664525u + pixel.y * 1013904223u + sequence * 747796405u + 2891336453u;
+    v = v * 747796405u + 2891336453u;
+    let word = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    return f32(((word >> 22u) ^ word) >> 8u) * (1.0 / 16777216.0);
 }
 
 // The share of the new march in the blend with the history, for n frames accumulated.
@@ -102,13 +106,14 @@ fn raa_cloud_screen_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let direction = normalize(
         raa_cloud.forward.xyz + raa_cloud.right.xyz * ndc.x + raa_cloud.up.xyz * ndc.y,
     );
-    // A fixed per-pixel noise shifted by the golden ratio each frame: the offsets a pixel sees over
-    // successive frames cover 0..1 evenly (a low-discrepancy sequence), so the accumulated mean
-    // converges without the flicker of an unrelated random offset per frame.
-    let jitter = fract(
-        raa_cloud_gradient_noise(vec2<f32>(id.xy), 0u)
-            + 0.61803398875 * f32(u32(raa_cloud.screen.z)),
-    );
+    // Still frames: a fixed per-pixel noise shifted by the golden ratio each frame (a
+    // low-discrepancy sequence, so the accumulated mean converges without flicker). Moving frames:
+    // a fresh hash per frame.
+    let sequence = u32(raa_cloud.screen.z);
+    var jitter = raa_cloud_hash_noise(id.xy, sequence);
+    if raa_cloud.forward.w >= 1.5 {
+        jitter = fract(raa_cloud_hash_noise(id.xy, 0u) + 0.61803398875 * f32(sequence));
+    }
     let steps = clamp(i32(raa_cloud.screen.w + 0.5), 8, 256);
 
     // Where the clouds were on screen at the last committed march, when it can be used.

@@ -49,7 +49,7 @@ use raa_pipeline::LightingResources;
 
 use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS, invalid};
 use crate::atmosphere::AtmosphereResources;
-use history::{Accumulation, CloudHistory, FREEZE_FRAMES, Marked, REFRESH_PERIOD};
+use history::{Accumulation, CloudHistory, FREEZE_FRAMES, FrameNote, Marked, REFRESH_PERIOD};
 use noise::CloudNoise;
 use passes::CloudPasses;
 use resources::{CloudGpu, CloudTargets, SHADOW_EXTENT, cloud_sky_parameters};
@@ -271,7 +271,17 @@ impl CloudRenderer for VolumetricClouds {
             return Ok(());
         }
         let accumulation = self.accumulation(frame);
-        if Self::freeze(frame, accumulation) != Freeze::Skip {
+        let freeze = Self::freeze(frame, accumulation);
+        self.history.record_frame(
+            frame.view,
+            frame.invocation,
+            FrameNote {
+                animated: frame.animated,
+                frozen: freeze != Freeze::March,
+                history_used: accumulation.is_some(),
+            },
+        );
+        if freeze != Freeze::Skip {
             self.passes.record_screen(
                 gpu,
                 encoder,
@@ -334,6 +344,16 @@ impl CloudRenderer for VolumetricClouds {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn accumulation_observation(&self, view: u32) -> crate::CloudAccumulationDiagnostics {
+        let (count, note) = self.history.observation(view);
+        crate::CloudAccumulationDiagnostics {
+            count,
+            animated: note.is_some_and(|n| n.animated),
+            frozen: note.is_some_and(|n| n.frozen),
+            history_used: note.is_some_and(|n| n.history_used),
         }
     }
 

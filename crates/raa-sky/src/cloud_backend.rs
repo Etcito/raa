@@ -231,10 +231,15 @@ pub(crate) trait CloudRenderer {
     fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation);
 
     fn submitted(&mut self, view: u32, invocation: u64);
+
+    /// The view's screen-cloud accumulation as the last recorded frame saw it; read-only.
+    fn accumulation_observation(&self, _view: u32) -> crate::CloudAccumulationDiagnostics {
+        crate::CloudAccumulationDiagnostics::default()
+    }
 }
 
 /// The copied snapshot of the active view, or `sky.invalid` when it is not prepared.
-fn cloud_frame(
+pub(crate) fn cloud_frame(
     state: &SkyState,
     invocation: u64,
     view: u32,

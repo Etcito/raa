@@ -173,6 +173,7 @@ impl ViewSlot {
         &self,
         cloud_screen_valid: bool,
         cloud_panorama_valid: bool,
+        cloud: crate::observations::CloudAccumulationDiagnostics,
     ) -> SkyViewDiagnostics {
         SkyViewDiagnostics {
             view: self.view,
@@ -187,6 +188,7 @@ impl ViewSlot {
             reset_reasons: self.reset_reasons,
             cloud_screen_valid,
             cloud_panorama_valid,
+            cloud,
         }
     }
 }

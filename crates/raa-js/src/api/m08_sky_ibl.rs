@@ -861,6 +861,10 @@ pub(crate) struct SkyWeatherView {
     pub reset_reasons: Vec<&'static str>,
     pub cloud_screen_valid: bool,
     pub cloud_panorama_valid: bool,
+    pub cloud_count: u32,
+    pub cloud_animated: bool,
+    pub cloud_frozen: bool,
+    pub cloud_history_used: bool,
 }
 
 /// The serialized readiness record; `error` is null unless the status is failed.
@@ -918,6 +922,10 @@ pub(crate) fn serialize_diagnostics(d: &SkyDiagnostics) -> Result<SkyWeatherDiag
             reset_reasons: view.reset_reasons.names(),
             cloud_screen_valid: view.cloud_screen_valid,
             cloud_panorama_valid: view.cloud_panorama_valid,
+            cloud_count: view.cloud.count,
+            cloud_animated: view.cloud.animated,
+            cloud_frozen: view.cloud.frozen,
+            cloud_history_used: view.cloud.history_used,
         });
     }
     Ok(SkyWeatherDiagnostics {
@@ -1252,6 +1260,12 @@ mod web {
             "cloudPanoramaValid",
             &JsValue::from_bool(v.cloud_panorama_valid),
         );
+        let cloud = Object::new();
+        set(&cloud, "count", &JsValue::from(v.cloud_count));
+        set(&cloud, "animated", &JsValue::from_bool(v.cloud_animated));
+        set(&cloud, "frozen", &JsValue::from_bool(v.cloud_frozen));
+        set(&cloud, "historyUsed", &JsValue::from_bool(v.cloud_history_used));
+        set(&o, "cloud", &cloud.into());
         o.into()
     }
 

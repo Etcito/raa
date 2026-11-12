@@ -49,6 +49,16 @@ struct Slot {
     committed: Option<((u32, u32), Mat4)>,
     /// Count and signature of the committed march.
     committed_marked: Option<Marked>,
+    /// What the last recorded screen frame decided (diagnostics only).
+    last_frame: Option<FrameNote>,
+}
+
+/// The freeze decision of the last recorded frame of a slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FrameNote {
+    pub(super) animated: bool,
+    pub(super) frozen: bool,
+    pub(super) history_used: bool,
 }
 
 impl Slot {
@@ -124,6 +134,25 @@ impl CloudHistory {
         {
             slot.note = Some(marched);
         }
+    }
+
+    /// Notes the freeze decision of the prepared invocation (observation only).
+    pub(super) fn record_frame(&mut self, view: u32, invocation: u64, note: FrameNote) {
+        if let Some(slot) = self.slots.get_mut(view as usize)
+            && slot.prepared.is_some_and(|(_, i)| i == invocation)
+        {
+            slot.last_frame = Some(note);
+        }
+    }
+
+    /// `(committed count, last frame note)` of a view, for the diagnostics.
+    pub(super) fn observation(&self, view: u32) -> (u32, Option<FrameNote>) {
+        self.slots.get(view as usize).map_or((0, None), |slot| {
+            (
+                slot.committed_marked.map_or(0, |m| m.count),
+                slot.last_frame,
+            )
+        })
     }
 
     /// Notes the accumulation count and signature of the prepared invocation's screen march.

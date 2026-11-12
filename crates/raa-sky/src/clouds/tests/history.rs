@@ -271,3 +271,47 @@ fn count_grows_only_while_camera_and_signature_hold() {
     h.reset_screen(0);
     assert_eq!(frame_count(&mut h, 7, moved, 8), None, "a recreated target has no history");
 }
+
+/// The engine frame sequence on a real `SkyHandle` (`advance_frame`, `set_view` with an
+/// identical camera and `history_valid` true, the backend prepare/record/commit, then
+/// `observe_submission` complete) with wind 0, evolution 0 and no playing time: the count
+/// reaches 64 and the view freezes.
+#[test]
+fn still_sky_with_an_identical_camera_accumulates_and_freezes() {
+    use super::super::{Freeze, VolumetricClouds};
+    use crate::{SkyHandle, Weather, WeatherSettings};
+
+    let handle = SkyHandle::for_tests();
+    let mut settings = WeatherSettings::default();
+    settings.target = Weather { wind_speed: 0.0, evolution: 0.0, ..Weather::default() };
+    handle.set_weather(settings).expect("weather");
+    let mut time = handle.time_of_day().settings;
+    time.playing = false;
+    handle.set_time_of_day(time).expect("time");
+
+    let camera = raa_scene::Camera::default();
+    let mut h = CloudHistory::new();
+    let mut last = None;
+    for n in 1..=80u64 {
+        handle.advance_frame(n, 1.0 / 60.0).expect("advance");
+        handle.set_view(0, &camera, true).expect("set_view");
+        let frame = handle.cloud_frame_for_tests(n, SIZE);
+        h.prepare(0, SIZE, n, true, true);
+        let accumulation =
+            h.accumulation(0, frame.history_valid, frame.camera.view_proj(), frame.signature);
+        let freeze = VolumetricClouds::freeze(&frame, accumulation);
+        h.record_screen(0, n, Some(frame.camera.view_proj()));
+        h.record_marked(
+            0,
+            n,
+            Marked { count: accumulation.map_or(1, |a| a.count), signature: frame.signature },
+        );
+        h.submitted(0, n);
+        handle.observe_submission(n, 1, true);
+        assert!(!frame.animated, "frame {n}: a still sky is not animated");
+        last = Some((accumulation.map_or(1, |a| a.count), freeze));
+    }
+    let (count, freeze) = last.expect("frames");
+    assert_eq!(count, 80, "the count grows every frame");
+    assert_ne!(freeze, Freeze::March, "the view froze");
+}

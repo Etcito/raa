@@ -671,6 +671,7 @@ impl Engine {
                     "'up' must be non-zero and not parallel to the viewing direction".into(),
                 ));
             }
+            let before = s.scene.camera;
             let cam = &mut s.scene.camera;
             cam.eye = eye;
             cam.target = target;
@@ -679,7 +680,10 @@ impl Engine {
             cam.ortho_height = d.ortho_height;
             cam.near = d.near;
             cam.far = d.far;
-            s.scene_invocation.discontinuity(0);
+            // Re-setting the camera to equal values is not a cut: history (clouds, TAA) stays.
+            if s.scene.camera != before {
+                s.scene_invocation.discontinuity(0);
+            }
             Ok(())
         })
     }
@@ -723,11 +727,14 @@ impl Engine {
                 return Err(invalid(format!("'distance' must be > 0, got {distance}")));
             }
             let (yaw, pitch) = (finite("yawRad", yaw_rad)?, finite("pitchRad", pitch_rad)?);
+            let before = s.scene.camera;
             let mut orbit = OrbitController::new(target, distance);
             orbit.rotate(yaw, pitch);
             s.orbit = orbit;
             s.orbit.apply(&mut s.scene.camera);
-            s.scene_invocation.discontinuity(0);
+            if s.scene.camera != before {
+                s.scene_invocation.discontinuity(0);
+            }
             Ok(())
         })
     }
