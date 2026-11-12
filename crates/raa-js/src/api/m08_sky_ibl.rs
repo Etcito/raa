@@ -520,7 +520,8 @@ const WEATHER_FIELDS: &[&str] = &[
     "changing",
     "seed",
     "transitionSeconds",
-    "quality",
+    "cloudSamples",
+    "cloudScale",
     "coverage",
     "type",
     "base",
@@ -667,15 +668,25 @@ pub(crate) fn parse_weather_update(
         }
         transition_seconds = value;
     }
-    let mut quality = current.quality;
-    if let Some(value) = strict_number(obj, "quality", "quality")? {
-        if !(0.25..=4.0).contains(&value) {
+    let mut cloud_samples = current.cloud_samples;
+    if let Some(value) = strict_f64(obj, "cloudSamples", "cloudSamples")? {
+        if value.fract() != 0.0 || !(8.0..=256.0).contains(&value) {
             return Err(invalid(
-                "quality",
-                format!("must be finite and in [0.25, 4], got {value}"),
+                "cloudSamples",
+                format!("must be an integer in [8, 256], got {value}"),
             ));
         }
-        quality = value;
+        cloud_samples = value as u32;
+    }
+    let mut cloud_scale = current.cloud_scale;
+    if let Some(value) = strict_number(obj, "cloudScale", "cloudScale")? {
+        if !(0.25..=1.0).contains(&value) {
+            return Err(invalid(
+                "cloudScale",
+                format!("must be finite and in [0.25, 1], got {value}"),
+            ));
+        }
+        cloud_scale = value;
     }
 
     // A manual target edit stops an active cycle unless this same patch turns changing back
@@ -692,7 +703,8 @@ pub(crate) fn parse_weather_update(
             changing,
             seed,
             transition_seconds,
-            quality,
+            cloud_samples,
+            cloud_scale,
             target,
         },
         cycle_start,
@@ -781,7 +793,8 @@ pub(crate) struct WeatherView {
     pub changing: bool,
     pub seed: u32,
     pub transition_seconds: f32,
-    pub quality: f32,
+    pub cloud_samples: u32,
+    pub cloud_scale: f32,
     pub target: WeatherStateView,
     pub current: WeatherStateView,
     pub cycle_preset: Option<&'static str>,
@@ -813,7 +826,8 @@ pub(crate) fn serialize_weather(state: &raa_sky::ResolvedWeatherState) -> Weathe
         changing: s.changing,
         seed: s.seed,
         transition_seconds: s.transition_seconds,
-        quality: s.quality,
+        cloud_samples: s.cloud_samples,
+        cloud_scale: s.cloud_scale,
         target: weather_state(&s.target),
         current: weather_state(&state.current),
         cycle_preset: state.cycle_preset.map(WeatherPreset::as_str),
@@ -1197,7 +1211,8 @@ mod web {
             "transitionSeconds",
             &JsValue::from(v.transition_seconds),
         );
-        set(&o, "quality", &JsValue::from(v.quality));
+        set(&o, "cloudSamples", &JsValue::from(v.cloud_samples));
+        set(&o, "cloudScale", &JsValue::from(v.cloud_scale));
         set(&o, "target", &weather_state_to_js(&v.target));
         set(&o, "current", &weather_state_to_js(&v.current));
         set(

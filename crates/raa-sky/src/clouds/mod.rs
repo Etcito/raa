@@ -49,7 +49,7 @@ use raa_pipeline::LightingResources;
 
 use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS, invalid};
 use crate::atmosphere::AtmosphereResources;
-use history::CloudHistory;
+use history::{Accumulation, CloudHistory, FREEZE_FRAMES, Marked, REFRESH_PERIOD};
 use noise::CloudNoise;
 use passes::CloudPasses;
 use resources::{CloudGpu, CloudTargets, SHADOW_EXTENT, cloud_sky_parameters};
@@ -83,7 +83,7 @@ impl Publication {
         if !(marchable && frame.cloud_shadows) {
             return Self::NEUTRAL;
         }
-        let [x, z] = CloudGpu::from_frame(frame, None).shadow_origin;
+        let [x, z] = CloudGpu::from_frame(frame, None, false).shadow_origin;
         let toward = cloud_sky_parameters(frame).dominant;
         Publication {
             cloud: true,
@@ -101,6 +101,17 @@ fn marchable(frame: &CloudFrame, sky_view: bool) -> bool {
 /// Whether `next` must be published over the last published value.
 fn needs_publication(last: Option<Publication>, next: Publication) -> bool {
     last != Some(next)
+}
+
+/// What a frame does with its screen march (see `VolumetricClouds::freeze`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Freeze {
+    /// The full march with history blend.
+    March,
+    /// Nothing is dispatched; the screen texture keeps its converged result.
+    Skip,
+    /// The refresh pass of a frozen view.
+    Refresh,
 }
 
 /// The M2 volumetric cloud backend.
@@ -128,6 +139,34 @@ impl VolumetricClouds {
             passes: CloudPasses::new(gpu)?,
             published: None,
         })
+    }
+
+    /// The accumulation of `frame`'s view: its committed history and frame count.
+    fn accumulation(&self, frame: &CloudFrame) -> Option<Accumulation> {
+        self.history.accumulation(
+            frame.view,
+            frame.history_valid,
+            frame.camera.view_proj(),
+            frame.signature,
+        )
+    }
+
+    /// What a frame does with its screen march: a view whose camera and sky signature have
+    /// not changed for [`FREEZE_FRAMES`] frames and whose sky is not animated keeps its
+    /// converged screen texture and records nothing, except on every [`REFRESH_PERIOD`]th
+    /// invocation, a cheap pass that keeps the converged texels and marches only those that
+    /// have none (geometry that uncovered sky while the camera stood still).
+    fn freeze(frame: &CloudFrame, accumulation: Option<Accumulation>) -> Freeze {
+        match accumulation {
+            Some(a) if a.count >= FREEZE_FRAMES && !frame.animated => {
+                if frame.invocation % REFRESH_PERIOD == 0 {
+                    Freeze::Refresh
+                } else {
+                    Freeze::Skip
+                }
+            }
+            _ => Freeze::March,
+        }
     }
 
     /// Validates the frame's view index and physical size.
@@ -161,9 +200,20 @@ impl CloudRenderer for VolumetricClouds {
         if marchable {
             self.passes
                 .bind_view(gpu, frame.view, &self.noise, &self.targets, atmosphere)?;
-            self.targets.ensure_screen(gpu, frame.view, frame.size)?;
-            let history = self.history.history(frame.view, frame.history_valid);
-            let record = CloudGpu::from_frame(frame, history).to_bytes();
+            // A recreated screen target holds no march: its history restarts, whatever the
+            // size or `cloud_scale` change that caused it.
+            if self
+                .targets
+                .ensure_screen(gpu, frame.view, frame.size, frame.cloud_scale)?
+            {
+                self.history.reset_screen(frame.view);
+            }
+            let accumulation = self.accumulation(frame);
+            let refresh = matches!(
+                Self::freeze(frame, accumulation),
+                Freeze::Refresh
+            );
+            let record = CloudGpu::from_frame(frame, accumulation, refresh).to_bytes();
             let sky = cloud_sky_parameters(frame).to_bytes();
             let queue = gpu.queue();
             queue.write_buffer(self.targets.params(frame.view), 0, &record);
@@ -220,17 +270,29 @@ impl CloudRenderer for VolumetricClouds {
                 .record_screen(frame.view, frame.invocation, None);
             return Ok(());
         }
-        self.passes.record_screen(
-            gpu,
-            encoder,
-            frame.view,
-            &self.noise,
-            &self.targets,
-            atmosphere,
-            depth,
-        )?;
+        let accumulation = self.accumulation(frame);
+        if Self::freeze(frame, accumulation) != Freeze::Skip {
+            self.passes.record_screen(
+                gpu,
+                encoder,
+                frame.view,
+                &self.noise,
+                &self.targets,
+                atmosphere,
+                depth,
+            )?;
+        }
+        // A skipped march still commits: the screen texture stays valid and keeps counting.
         self.history
             .record_screen(frame.view, frame.invocation, Some(frame.camera.view_proj()));
+        self.history.record_marked(
+            frame.view,
+            frame.invocation,
+            Marked {
+                count: accumulation.map_or(1, |a| a.count),
+                signature: frame.signature,
+            },
+        );
         Ok(())
     }
 

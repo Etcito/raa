@@ -398,8 +398,11 @@ pub struct WeatherSettings {
     pub seed: u32,
     /// Easing time for authored target changes, in seconds.
     pub transition_seconds: f32,
-    /// Screen-cloud march quality, `0.25..=4`; scales the step count (1 = authored default).
-    pub quality: f32,
+    /// Screen-cloud march steps per ray, an integer in `8..=256` (default 56).
+    pub cloud_samples: u32,
+    /// Screen-cloud buffer scale in `0.25..=1` (default 0.5 = half resolution); the buffer is
+    /// `ceil(size * cloud_scale)`.
+    pub cloud_scale: f32,
     pub target: Weather,
 }
 
@@ -411,7 +414,8 @@ impl Default for WeatherSettings {
             changing: false,
             seed: 1,
             transition_seconds: 0.0,
-            quality: 1.0,
+            cloud_samples: 56,
+            cloud_scale: 0.5,
             target: Weather::default(),
         }
     }
@@ -426,8 +430,15 @@ impl WeatherSettings {
                 "transition_seconds must be finite and nonnegative".into(),
             ));
         }
-        if !self.quality.is_finite() || !(0.25..=4.0).contains(&self.quality) {
-            return Err(invalid("quality must be finite and within 0.25..=4".into()));
+        if !(8..=256).contains(&self.cloud_samples) {
+            return Err(invalid(
+                "cloud_samples must be an integer within 8..=256".into(),
+            ));
+        }
+        if !self.cloud_scale.is_finite() || !(0.25..=1.0).contains(&self.cloud_scale) {
+            return Err(invalid(
+                "cloud_scale must be finite and within 0.25..=1".into(),
+            ));
         }
         Ok(())
     }

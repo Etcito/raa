@@ -53,7 +53,10 @@ fn cloud_frame_carries_the_copied_snapshot() {
         evolution: 0.0,
         weather_enabled: true,
         cloud_shadows: true,
-        cloud_quality: 1.0,
+        cloud_samples: 56,
+        cloud_scale: 0.5,
+        animated: false,
+        signature: 0,
         physical: true,
     };
     assert_eq!(frame.invocation, 9);

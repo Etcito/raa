@@ -6,6 +6,33 @@ use raa_math::Mat4;
 
 use super::super::{CloudInvalidation, MAX_VIEWS};
 
+/// Frames of one unchanged view after which a non-animated view stops marching.
+pub(super) const FREEZE_FRAMES: u32 = 64;
+/// A frozen view still runs a cheap refresh pass on every invocation divisible by this.
+pub(super) const REFRESH_PERIOD: u64 = 8;
+/// Largest accumulation count kept.
+const MAX_COUNT: u32 = 1 << 16;
+
+/// What the committed screen march was made with, besides its camera matrix.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Marked {
+    /// Frames accumulated at the march: 1 after a change, then 2, 3, ... while unchanged.
+    pub(super) count: u32,
+    /// `CloudFrame::signature` of the march.
+    pub(super) signature: u64,
+}
+
+/// The accumulation of one frame: the committed camera to reproject from and the count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Accumulation {
+    /// The committed view-projection, reprojected from.
+    pub(super) previous: Mat4,
+    /// Frames accumulated including this one: 1 when the camera or the animation signature
+    /// changed since the committed march (the blend then stays the moving-camera EMA), else
+    /// the committed count + 1.
+    pub(super) count: u32,
+}
+
 /// One view slot's lifecycle state.
 #[derive(Clone, Copy, Debug, Default)]
 struct Slot {
@@ -16,8 +43,12 @@ struct Slot {
     screen_valid: bool,
     /// Screen-march note of the prepared invocation: `Some(None)` = recorded nothing.
     note: Option<Option<Mat4>>,
+    /// Count and signature of the noted march.
+    note_marked: Option<Marked>,
     /// Committed screen march: (size, camera view-projection).
     committed: Option<((u32, u32), Mat4)>,
+    /// Count and signature of the committed march.
+    committed_marked: Option<Marked>,
 }
 
 impl Slot {
@@ -25,7 +56,9 @@ impl Slot {
         self.panorama_valid = false;
         self.screen_valid = false;
         self.note = None;
+        self.note_marked = None;
         self.committed = None;
+        self.committed_marked = None;
     }
 }
 
@@ -58,11 +91,14 @@ impl CloudHistory {
         if let Some((old_size, old_invocation)) = slot.prepared {
             if old_invocation != invocation {
                 slot.note = None;
+                slot.note_marked = None;
             }
             if old_size != size {
                 slot.screen_valid = false;
                 slot.note = None;
+                slot.note_marked = None;
                 slot.committed = None;
+                slot.committed_marked = None;
             }
         }
         slot.prepared = Some((size, invocation));
@@ -90,6 +126,15 @@ impl CloudHistory {
         }
     }
 
+    /// Notes the accumulation count and signature of the prepared invocation's screen march.
+    pub(super) fn record_marked(&mut self, view: u32, invocation: u64, marked: Marked) {
+        if let Some(slot) = self.slots.get_mut(view as usize)
+            && slot.prepared.is_some_and(|(_, i)| i == invocation)
+        {
+            slot.note_marked = Some(marked);
+        }
+    }
+
     /// Commits the note of an acknowledged submission of the prepared invocation.
     pub(super) fn submitted(&mut self, view: u32, invocation: u64) {
         let Some(slot) = self.slots.get_mut(view as usize) else {
@@ -101,14 +146,17 @@ impl CloudHistory {
         if prepared != invocation {
             return;
         }
+        let marked = slot.note_marked.take();
         match slot.note.take().flatten() {
             Some(matrix) => {
                 slot.screen_valid = true;
                 slot.committed = Some((size, matrix));
+                slot.committed_marked = marked;
             }
             None => {
                 slot.screen_valid = false;
                 slot.committed = None;
+                slot.committed_marked = None;
             }
         }
     }
@@ -135,6 +183,38 @@ impl CloudHistory {
             .map_or((false, false), |slot| {
                 (slot.panorama_valid, slot.screen_valid)
             })
+    }
+
+    /// Forgets the committed screen march of `view` (its screen target was recreated).
+    pub(super) fn reset_screen(&mut self, view: u32) {
+        if let Some(slot) = self.slots.get_mut(view as usize) {
+            slot.screen_valid = false;
+            slot.note = None;
+            slot.note_marked = None;
+            slot.committed = None;
+            slot.committed_marked = None;
+        }
+    }
+
+    /// The accumulation of the frame when it allows history and the size still matches:
+    /// the count grows only while `view_proj` and `signature` equal the committed march's.
+    pub(super) fn accumulation(
+        &self,
+        view: u32,
+        frame_history_valid: bool,
+        view_proj: Mat4,
+        signature: u64,
+    ) -> Option<Accumulation> {
+        let previous = self.history(view, frame_history_valid)?;
+        let last = self.slots.get(view as usize)?.committed_marked;
+        let unchanged = previous == view_proj && last.is_some_and(|m| m.signature == signature);
+        Some(Accumulation {
+            previous,
+            count: match last {
+                Some(m) if unchanged => (m.count + 1).min(MAX_COUNT),
+                _ => 1,
+            },
+        })
     }
 
     /// The committed matrix when the frame allows history and the size still matches.

@@ -2,7 +2,7 @@
 
 use raa_math::Mat4;
 
-use super::super::history::CloudHistory;
+use super::super::history::{CloudHistory, Marked};
 use super::test_frame;
 use crate::cloud_backend::CloudInvalidation;
 
@@ -234,8 +234,40 @@ fn committed_matrix_is_the_marched_camera_not_the_frame_previous() {
         history, stopped.previous_view_proj,
         "not the stale frame matrix"
     );
-    let record = CloudGpu::from_frame(&stopped, Some(history));
+    let accumulation = h
+        .accumulation(0, true, history, 0)
+        .expect("committed history");
+    let record = CloudGpu::from_frame(&stopped, Some(accumulation), false);
     assert_eq!(record.previous_view_proj, moved.camera.view_proj().cols);
     assert_eq!(record.forward[3], 1.0, "historyUsable");
     assert_eq!(h.history(0, false), None, "the frame refuses history");
+}
+
+/// One backend frame on `h`: the accumulation it gets, then its commit like `record_screen` does.
+fn frame_count(h: &mut CloudHistory, invocation: u64, matrix: Mat4, signature: u64) -> Option<u32> {
+    h.prepare(0, SIZE, invocation, true, true);
+    let accumulation = h.accumulation(0, true, matrix, signature);
+    h.record_screen(0, invocation, Some(matrix));
+    h.record_marked(
+        0,
+        invocation,
+        Marked { count: accumulation.map_or(1, |a| a.count), signature },
+    );
+    h.submitted(0, invocation);
+    accumulation.map(|a| a.count)
+}
+
+#[test]
+fn count_grows_only_while_camera_and_signature_hold() {
+    let mut h = CloudHistory::new();
+    let still = matrix();
+    let moved = Mat4::from_translation(raa_math::Vec3::new(0.0, 0.0, 1.0)) * still;
+    assert_eq!(frame_count(&mut h, 1, still, 7), None, "no history yet");
+    assert_eq!(frame_count(&mut h, 2, still, 7), Some(2));
+    assert_eq!(frame_count(&mut h, 3, still, 7), Some(3));
+    assert_eq!(frame_count(&mut h, 4, moved, 7), Some(1), "the camera moved");
+    assert_eq!(frame_count(&mut h, 5, moved, 7), Some(2));
+    assert_eq!(frame_count(&mut h, 6, moved, 8), Some(1), "the signature changed");
+    h.reset_screen(0);
+    assert_eq!(frame_count(&mut h, 7, moved, 8), None, "a recreated target has no history");
 }

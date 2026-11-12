@@ -315,8 +315,16 @@ scene boundary). `base + thickness` must stay finite. `WeatherSettings` is
 `false`, `1`, `0` and the fair target (coverage 0.3, type 0.9, base 1200, thickness 1600,
 density 1, cirrus 0.15, wind 7 from 250, evolution 1, rain 0). `seed` is an integer u32 and
 `transitionSeconds` a finite value >= 0 (0 is immediate; otherwise the state eases with
-`1 - exp(-dt / transitionSeconds)`). `quality` (default 1, finite in [0.25, 4]) scales the
-screen-cloud march step count (56 at 1, clamped to 8..224); it is not part of the `.weather` text.
+`1 - exp(-dt / transitionSeconds)`). `cloudSamples` (integer-valued number in [8, 256], default 56)
+is the screen-cloud march step count per ray and `cloudScale` (finite in [0.25, 1], default 0.5) the
+screen-cloud buffer scale: the buffer is `ceil(size * cloudScale)` texels, so 0.5 is half resolution
+and 1 is full resolution. Changing either restarts the screen-cloud accumulation (and a changed scale
+recreates the buffer, resetting its history); neither is part of the `.weather` text. The screen
+clouds average successive frames: while the camera and the sky stand still the average converges
+(blend 1/(n + 6) after n unchanged frames), and when nothing is animated (no wind, no cloud boil, no
+weather transition or cycle, no playing time of day) after 64 unchanged frames the march stops
+entirely (a cheap refresh pass every 8th frame keeps newly uncovered sky filled). Texels that enter
+the view while the camera turns are marched with twice the steps.
 `WeatherDesc` is the flat patch: `preset`
 (`clear|fair|broken|overcast|storm|cirrus`), `text`, the settings fields and the state fields
 with a partial `wind`. These records mirror Rust `raa_sky::WeatherSettings` (`type` is

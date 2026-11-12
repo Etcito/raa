@@ -263,8 +263,10 @@ export interface WeatherSettings {
   seed: number;
   /** Exponential easing time towards a new target, finite and >= 0; 0 is immediate. */
   transitionSeconds: number;
-  /** Screen-cloud march quality, finite in [0.25, 4]; scales the step count, 1 = default. */
-  quality: number;
+  /** Screen-cloud march steps per ray, an integer-valued number in [8, 256]. Default 56. */
+  cloudSamples: number;
+  /** Screen-cloud buffer scale in [0.25, 1]: the buffer is ceil(size * cloudScale). Default 0.5. */
+  cloudScale: number;
   /** The authored target weather (not the runtime state). */
   target: WeatherState;
 }
@@ -283,8 +285,10 @@ export interface WeatherDesc {
   changing?: boolean;
   seed?: number;
   transitionSeconds?: number;
-  /** Screen-cloud march quality in [0.25, 4]; 2 doubles the march steps. Default 1. */
-  quality?: number;
+  /** Screen-cloud march steps per ray, an integer-valued number in [8, 256]. Default 56. */
+  cloudSamples?: number;
+  /** Screen-cloud buffer scale in [0.25, 1]; 0.5 is half resolution. Default 0.5. */
+  cloudScale?: number;
   coverage?: number;
   type?: number;
   base?: number;

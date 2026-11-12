@@ -57,7 +57,10 @@ fn shadows_off_weather_off_and_legacy_publish_the_neutral_map() {
     let frames = [
         CloudFrame {
             cloud_shadows: false,
-            cloud_quality: 1.0,
+            cloud_samples: 56,
+            cloud_scale: 0.5,
+            animated: false,
+            signature: 0,
             ..on
         },
         CloudFrame {

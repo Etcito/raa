@@ -780,7 +780,8 @@ fn weather_omissions_merge_nested_wind() {
         changing: true,
         seed: 42,
         transition_seconds: 2.5,
-        quality: 1.0,
+        cloud_samples: 56,
+        cloud_scale: 0.5,
         target: Weather::by_name("broken").unwrap(),
     };
     let update = weather(&current, &[("wind", obj(&[("speed", Raw::Number(3.0))]))]).unwrap();
@@ -1232,20 +1233,37 @@ fn weather_getter_serializes_authored_current_and_cycle_with_target_text() {
 }
 
 #[test]
-fn weather_quality_patch_is_ranged_and_read_back() {
+fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
     let current = WeatherSettings::default();
     let kept = weather(&current, &[]).unwrap();
-    assert_eq!(kept.settings.quality, 1.0);
-    let two = weather(&current, &[("quality", Raw::Number(2.0))]).unwrap();
-    assert_eq!(two.settings.quality, 2.0);
-    for bad in [0.1, 4.5, f64::NAN] {
-        expect_weather_invalid(weather(&current, &[("quality", Raw::Number(bad))]), "quality");
+    assert_eq!(kept.settings.cloud_samples, 56);
+    assert_eq!(kept.settings.cloud_scale, 0.5);
+    let set = weather(
+        &current,
+        &[("cloudSamples", Raw::Number(128.0)), ("cloudScale", Raw::Number(0.75))],
+    )
+    .unwrap();
+    assert_eq!(set.settings.cloud_samples, 128);
+    assert_eq!(set.settings.cloud_scale, 0.75);
+    for bad in [7.0, 257.0, 56.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudSamples", Raw::Number(bad))]),
+            "cloudSamples",
+        );
     }
-    expect_weather_invalid(weather(&current, &[("quality", Raw::Null)]), "quality");
+    for bad in [0.2, 1.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudScale", Raw::Number(bad))]),
+            "cloudScale",
+        );
+    }
+    expect_weather_invalid(weather(&current, &[("cloudSamples", Raw::Null)]), "cloudSamples");
+    expect_weather_invalid(weather(&current, &[("cloudScale", Raw::Null)]), "cloudScale");
     let state = ResolvedWeatherState {
-        settings: two.settings,
+        settings: set.settings,
         current: Weather::default(),
         cycle_preset: None,
     };
-    assert_eq!(serialize_weather(&state).quality, 2.0);
+    let view = serialize_weather(&state);
+    assert_eq!((view.cloud_samples, view.cloud_scale), (128, 0.75));
 }

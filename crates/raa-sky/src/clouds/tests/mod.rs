@@ -31,7 +31,10 @@ fn test_frame(view: u32, invocation: u64, size: (u32, u32)) -> CloudFrame {
         evolution: 0.0,
         weather_enabled: true,
         cloud_shadows: true,
-        cloud_quality: 1.0,
+        cloud_samples: 56,
+        cloud_scale: 0.5,
+        animated: false,
+        signature: 0,
         physical: true,
     }
 }
