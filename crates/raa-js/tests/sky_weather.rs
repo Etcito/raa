@@ -784,6 +784,8 @@ fn weather_omissions_merge_nested_wind() {
         cloud_scale: 0.5,
         cloud_dither: true,
         cloud_noise_size: 1,
+        cloud_dome: false,
+        cloud_dome_size: 1024,
         target: Weather::by_name("broken").unwrap(),
     };
     let update = weather(&current, &[("wind", obj(&[("speed", Raw::Number(3.0))]))]).unwrap();
@@ -1290,4 +1292,37 @@ fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
         cycle_preset: None,
     });
     assert!(!view.cloud_dither && view.cloud_noise_size == 4);
+}
+
+#[test]
+fn weather_cloud_dome_patch_is_ranged_and_read_back() {
+    let current = WeatherSettings::default();
+    let kept = weather(&current, &[]).unwrap();
+    assert!(!kept.settings.cloud_dome);
+    assert_eq!(kept.settings.cloud_dome_size, 1024);
+    let set = weather(
+        &current,
+        &[("cloudDome", Raw::Bool(true)), ("cloudDomeSize", Raw::Number(512.0))],
+    )
+    .unwrap();
+    assert!(set.settings.cloud_dome);
+    assert_eq!(set.settings.cloud_dome_size, 512);
+    for ok in [128.0, 2048.0] {
+        let edge = weather(&current, &[("cloudDomeSize", Raw::Number(ok))]).unwrap();
+        assert_eq!(edge.settings.cloud_dome_size, ok as u32);
+    }
+    for bad in [127.0, 2049.0, 512.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudDomeSize", Raw::Number(bad))]),
+            "cloudDomeSize",
+        );
+    }
+    expect_weather_invalid(weather(&current, &[("cloudDome", Raw::Number(1.0))]), "cloudDome");
+    expect_weather_invalid(weather(&current, &[("cloudDomeSize", Raw::Null)]), "cloudDomeSize");
+    let view = serialize_weather(&ResolvedWeatherState {
+        settings: set.settings,
+        current: Weather::default(),
+        cycle_preset: None,
+    });
+    assert!(view.cloud_dome && view.cloud_dome_size == 512);
 }

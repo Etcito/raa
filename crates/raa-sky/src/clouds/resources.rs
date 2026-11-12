@@ -14,7 +14,7 @@ use raa_core::{GpuContext, RaaError};
 use raa_math::{Mat4, Vec3};
 
 use super::super::{CloudFrame, MAX_VIEWS, invalid};
-use super::history::Accumulation;
+use super::history::{Accumulation, BURST_FRAMES, BURST_STRIDE};
 use crate::atmosphere::{PhysicalSkyGpu, atmospheric_radius_km};
 
 /// Ground covered by the shadow map, in metres along each side.
@@ -323,7 +323,13 @@ impl CloudTargets {
                 mapped_at_creation: false,
             })
         };
-        let params = std::array::from_fn(|_| uniform("raa-sky.cloud_params", CloudGpu::SIZE));
+        // BURST_FRAMES dynamic-offset slots: slot 0 is the frame's record, read by every pass.
+        let params = std::array::from_fn(|_| {
+            uniform(
+                "raa-sky.cloud_params",
+                (BURST_STRIDE * u64::from(BURST_FRAMES)) as usize,
+            )
+        });
         let sky = std::array::from_fn(|_| uniform("raa-sky.cloud_sky", PhysicalSkyGpu::SIZE));
         let noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-sky.cloud_noise_sampler"),

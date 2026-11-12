@@ -134,6 +134,11 @@ pub struct CloudFrame {
     pub cloud_dither: bool,
     /// The accepted `WeatherSettings.cloud_noise_size`: noise block edge in buffer texels.
     pub cloud_noise_size: u32,
+    /// The accepted `WeatherSettings.cloud_dome`: the clouds are marched into the world-space
+    /// dome texture instead of the screen buffer.
+    pub cloud_dome: bool,
+    /// The accepted `WeatherSettings.cloud_dome_size`: the dome texture's edge in texels.
+    pub cloud_dome_size: u32,
     /// True while the sky changes by itself (wind drift, cloud boil, a weather transition or
     /// cycle, a playing time of day); a static view may then never freeze.
     pub animated: bool,
@@ -163,6 +168,12 @@ pub struct CloudViews {
     pub screen_valid: bool,
     /// True only when `panorama` holds a completed march for this view.
     pub panorama_valid: bool,
+    /// Filterable D2 Rgba16Float world-space cloud dome (hemi-octahedral, see
+    /// `clouds/dome.rs`): RGB radiance, A transmittance.
+    pub dome: wgpu::TextureView,
+    /// True only when `dome` holds a committed march and the dome is on; the consumer then
+    /// samples it by world view direction instead of the screen result.
+    pub dome_valid: bool,
 }
 
 impl CloudViews {
@@ -173,9 +184,11 @@ impl CloudViews {
         Ok(CloudViews {
             panorama: neutral_radiance(gpu, "raa-sky.cloud.panorama")?,
             screen: neutral_radiance(gpu, "raa-sky.cloud.screen")?,
+            dome: neutral_radiance(gpu, "raa-sky.cloud.dome")?,
             transmittance: neutral_transmittance(gpu)?,
             screen_valid: false,
             panorama_valid: false,
+            dome_valid: false,
         })
     }
 }
@@ -278,6 +291,8 @@ pub(crate) fn cloud_frame(
         cloud_scale: state.weather.settings.cloud_scale,
         cloud_dither: state.weather.settings.cloud_dither,
         cloud_noise_size: state.weather.settings.cloud_noise_size,
+        cloud_dome: state.weather.settings.cloud_dome,
+        cloud_dome_size: state.weather.settings.cloud_dome_size,
         animated,
         signature,
         physical: state.desc.model == SkyModel::Physical,
@@ -312,6 +327,8 @@ fn accumulation_state(state: &SkyState) -> (bool, u64) {
         u32::from(weather.settings.enabled) | u32::from(weather.settings.shadows) << 1,
         u32::from(weather.settings.cloud_dither),
         weather.settings.cloud_noise_size,
+        u32::from(weather.settings.cloud_dome),
+        weather.settings.cloud_dome_size,
         u32::from(state.desc.model == SkyModel::Physical),
     ] {
         hash = mix(hash, word);
@@ -945,6 +962,8 @@ mod tests {
             cloud_scale: 0.5,
             cloud_dither: true,
             cloud_noise_size: 1,
+            cloud_dome: false,
+            cloud_dome_size: 1024,
             animated: false,
             signature: 0,
             physical: true,

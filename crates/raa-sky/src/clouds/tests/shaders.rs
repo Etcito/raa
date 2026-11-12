@@ -11,7 +11,7 @@ use wgpu::naga::{
 use super::super::resources::CloudGpu;
 use super::super::shaders::{
     COVERAGE_ENTRIES, NOISE_ENTRIES, cloud_volume_wgsl, coverage_module_wgsl, noise_module_wgsl,
-    panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
+    dome_module_wgsl, panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
 };
 
 #[test]
@@ -444,4 +444,24 @@ fn screen_module_fits_the_s10_budget() {
         assert_eq!(module.entry_points[0].name, "raa_cloud_screen_main");
         assert_eq!(module.entry_points[0].stage, ShaderStage::Compute);
     }
+}
+
+#[test]
+fn dome_module_is_valid_wgsl_and_fits_the_s10_budget() {
+    let source = dome_module_wgsl();
+    let module = wgsl::parse_str(&source).expect("dome module parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("dome module validates");
+    Composer::validate(&source).expect("dome module composes");
+    // The panorama bindings plus the dome history texture.
+    assert_eq!(resource_counts(&source), [6, 2, 2, 1, 1]);
+    for (_, global) in module.global_variables.iter() {
+        if let Some(binding) = &global.binding {
+            assert_eq!(binding.group, 2, "groups 0 and 1 stay empty");
+        }
+    }
+    assert_eq!(module.entry_points.len(), 1);
+    assert_eq!(module.entry_points[0].name, "raa_cloud_dome_main");
+    assert_eq!(module.entry_points[0].stage, ShaderStage::Compute);
 }

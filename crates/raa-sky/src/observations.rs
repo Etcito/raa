@@ -61,6 +61,23 @@ pub struct CloudAccumulationDiagnostics {
     pub frozen: bool,
     /// Whether the last frame could reproject from the committed history.
     pub history_used: bool,
+    /// Frames that ran the in-frame convergence burst of the screen march.
+    pub burst_frames: u32,
+    /// The world-space cloud dome (shared by every view).
+    pub dome: CloudDomeDiagnostics,
+}
+
+/// The cloud dome accumulation, as the last recorded frame saw it. Read-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CloudDomeDiagnostics {
+    /// `WeatherSettings.cloud_dome` was on for the last recorded frame of the view.
+    pub active: bool,
+    /// The committed accumulation count of the dome (0 before any march is committed).
+    pub count: u32,
+    /// The last recorded frame did not march the dome (frozen).
+    pub frozen: bool,
+    /// Frames that ran the in-frame convergence burst of the dome march.
+    pub burst_frames: u32,
 }
 
 /// One prepared view's lifecycle observation.

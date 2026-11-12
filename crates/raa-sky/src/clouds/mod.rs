@@ -36,6 +36,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+mod dome;
 mod history;
 mod noise;
 mod passes;
@@ -49,7 +50,11 @@ use raa_pipeline::LightingResources;
 
 use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS, invalid};
 use crate::atmosphere::AtmosphereResources;
-use history::{Accumulation, CloudHistory, FREEZE_FRAMES, FrameNote, Marked, REFRESH_PERIOD};
+use dome::{DomeGpu, DomeState, dome_record, dome_sky};
+use history::{
+    Accumulation, BURST_FRAMES, BURST_STRIDE, CloudHistory, FREEZE_FRAMES, FrameNote, Marked,
+    REFRESH_PERIOD,
+};
 use noise::CloudNoise;
 use passes::CloudPasses;
 use resources::{CloudGpu, CloudTargets, SHADOW_EXTENT, cloud_sky_parameters};
@@ -126,6 +131,18 @@ struct VolumetricClouds {
     passes: CloudPasses,
     /// The last published transmittance; `None` forces the next publication.
     published: Option<Publication>,
+    /// The world-space cloud dome (shared by every view), allocated while `cloudDome` is on.
+    dome: Option<DomeGpu>,
+    /// The dome's lifecycle: committed march, claim and note of the invocation.
+    dome_state: DomeState,
+    /// The last prepared marchable frame asked for the dome.
+    dome_active: bool,
+    /// `CloudFrame::signature` of the last prepared dome frame.
+    dome_signature: u64,
+    /// Marches of the prepared invocation's screen convergence burst, per view (1 = no burst).
+    screen_burst: [u32; MAX_VIEWS],
+    /// Frames that ran a screen convergence burst, per view.
+    screen_burst_frames: [u32; MAX_VIEWS],
 }
 
 impl VolumetricClouds {
@@ -138,7 +155,46 @@ impl VolumetricClouds {
             targets: CloudTargets::new(gpu)?,
             passes: CloudPasses::new(gpu)?,
             published: None,
+            dome: None,
+            dome_state: DomeState::default(),
+            dome_active: false,
+            dome_signature: 0,
+            screen_burst: [1; MAX_VIEWS],
+            screen_burst_frames: [0; MAX_VIEWS],
         })
+    }
+
+    /// Allocates (or resizes, which resets) the dome and claims this invocation's march for
+    /// `frame`'s view unless another view already did; uploads its uniforms when it did.
+    fn prepare_dome(&mut self, gpu: &GpuContext, frame: &CloudFrame) -> Result<(), RaaError> {
+        if self
+            .dome
+            .as_ref()
+            .is_none_or(|dome| dome.size != frame.cloud_dome_size)
+        {
+            self.dome = Some(DomeGpu::new(gpu, frame.cloud_dome_size)?);
+            self.dome_state.reset();
+        }
+        self.dome_signature = frame.signature;
+        let claim = self.dome_state.claim(
+            frame.invocation,
+            frame.view,
+            frame.signature,
+            frame.animated,
+            frame.cloud_dither,
+        );
+        if let (Some(plan), Some(dome)) = (claim, self.dome.as_ref()) {
+            let queue = gpu.queue();
+            for slot in 0..plan.burst {
+                queue.write_buffer(
+                    &dome.params,
+                    u64::from(slot) * BURST_STRIDE,
+                    &dome_record(frame, &plan, slot),
+                );
+            }
+            queue.write_buffer(&dome.sky, 0, &dome_sky(frame));
+        }
+        Ok(())
     }
 
     /// The accumulation of `frame`'s view: its committed history and frame count.
@@ -200,24 +256,66 @@ impl CloudRenderer for VolumetricClouds {
         if marchable {
             self.passes
                 .bind_view(gpu, frame.view, &self.noise, &self.targets, atmosphere)?;
-            // A recreated screen target holds no march: its history restarts, whatever the
-            // size or `cloud_scale` change that caused it.
-            if self
-                .targets
-                .ensure_screen(gpu, frame.view, frame.size, frame.cloud_scale)?
-            {
-                self.history.reset_screen(frame.view);
-            }
-            let accumulation = self.accumulation(frame);
+            // With the dome on no screen march exists: the screen target is not even made.
+            let accumulation = if frame.cloud_dome {
+                None
+            } else {
+                // A recreated screen target holds no march: its history restarts, whatever
+                // the size or `cloud_scale` change that caused it.
+                if self
+                    .targets
+                    .ensure_screen(gpu, frame.view, frame.size, frame.cloud_scale)?
+                {
+                    self.history.reset_screen(frame.view);
+                }
+                self.accumulation(frame)
+            };
             let refresh = matches!(
                 Self::freeze(frame, accumulation),
                 Freeze::Refresh
             );
+            // A changed signature or no history at all: converge inside this frame (see
+            // `BURST_FRAMES`); a still dither-off march is final after one.
+            let burst = if !frame.cloud_dome
+                && frame.cloud_dither
+                && self
+                    .history
+                    .signature_changed(frame.view, frame.signature)
+            {
+                BURST_FRAMES
+            } else {
+                1
+            };
+            self.screen_burst[frame.view as usize] = burst;
             let record = CloudGpu::from_frame(frame, accumulation, refresh).to_bytes();
             let sky = cloud_sky_parameters(frame).to_bytes();
             let queue = gpu.queue();
             queue.write_buffer(self.targets.params(frame.view), 0, &record);
+            if burst > 1 {
+                // Slot 0 restarts the march (no history), slots 1.. blend by running mean from
+                // the same camera, so each reads exactly the texel the last one wrote.
+                let still = frame.camera.view_proj();
+                for slot in 0..burst {
+                    let acc = (slot > 0).then_some(Accumulation {
+                        previous: still,
+                        count: slot + 1,
+                    });
+                    let record = CloudGpu::from_frame(frame, acc, false).to_bytes();
+                    queue.write_buffer(
+                        self.targets.params(frame.view),
+                        u64::from(slot) * BURST_STRIDE,
+                        &record,
+                    );
+                }
+            }
             queue.write_buffer(self.targets.sky(frame.view), 0, &sky);
+        }
+        self.dome_active = marchable && frame.cloud_dome;
+        if self.dome_active {
+            self.prepare_dome(gpu, frame)?;
+        } else if !frame.cloud_dome && self.dome.is_some() {
+            self.dome = None;
+            self.dome_state.reset();
         }
         let next = Publication::for_frame(frame, marchable);
         if needs_publication(self.published, next) {
@@ -270,15 +368,55 @@ impl CloudRenderer for VolumetricClouds {
                 .record_screen(frame.view, frame.invocation, None);
             return Ok(());
         }
+        if frame.cloud_dome {
+            // No screen-space march: the dome (once per invocation, by its claiming view) is
+            // the clouds, and the screen result stays invalid.
+            self.history.record_frame(
+                frame.view,
+                frame.invocation,
+                FrameNote {
+                    animated: frame.animated,
+                    frozen: true,
+                    history_used: false,
+                },
+            );
+            self.history
+                .record_screen(frame.view, frame.invocation, None);
+            if let Some(plan) = self.dome_state.record(frame.invocation, frame.view)
+                && !plan.frozen
+                && let Some(dome) = self.dome.as_ref()
+            {
+                self.passes.record_dome(
+                    gpu,
+                    encoder,
+                    frame.view,
+                    &self.noise,
+                    &self.targets,
+                    atmosphere,
+                    dome,
+                    plan.burst,
+                )?;
+            }
+            return Ok(());
+        }
         let accumulation = self.accumulation(frame);
         let freeze = Self::freeze(frame, accumulation);
+        let burst = if freeze == Freeze::March {
+            self.screen_burst[frame.view as usize]
+        } else {
+            1
+        };
+        if burst > 1 {
+            let frames = &mut self.screen_burst_frames[frame.view as usize];
+            *frames = frames.saturating_add(1);
+        }
         self.history.record_frame(
             frame.view,
             frame.invocation,
             FrameNote {
                 animated: frame.animated,
                 frozen: freeze != Freeze::March,
-                history_used: accumulation.is_some(),
+                history_used: accumulation.is_some() && burst == 1,
             },
         );
         if freeze != Freeze::Skip {
@@ -290,6 +428,7 @@ impl CloudRenderer for VolumetricClouds {
                 &self.targets,
                 atmosphere,
                 depth,
+                burst,
             )?;
         }
         // A skipped march still commits: the screen texture stays valid and keeps counting.
@@ -299,7 +438,11 @@ impl CloudRenderer for VolumetricClouds {
             frame.view,
             frame.invocation,
             Marked {
-                count: accumulation.map_or(1, |a| a.count),
+                count: if burst > 1 {
+                    burst
+                } else {
+                    accumulation.map_or(1, |a| a.count)
+                },
                 signature: frame.signature,
             },
         );
@@ -320,17 +463,31 @@ impl CloudRenderer for VolumetricClouds {
             .screen_current(view)
             .unwrap_or(&self.views.screen)
             .clone();
+        let dome_valid = self.dome_active && self.dome_state.valid_for(self.dome_signature);
+        let dome = self
+            .dome
+            .as_ref()
+            .map_or_else(|| self.views.dome.clone(), |dome| dome.current.clone());
         CloudViews {
             panorama,
             screen,
             panorama_valid,
             screen_valid,
+            dome,
+            dome_valid,
             ..self.views.clone()
         }
     }
 
     fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation) {
         self.history.invalidate(view, reason);
+        // The dome follows the sky, not a camera: only a sky-wide event restarts it.
+        if matches!(
+            reason,
+            CloudInvalidation::Weather | CloudInvalidation::Model | CloudInvalidation::Enable
+        ) {
+            self.dome_state.reset();
+        }
         match reason {
             CloudInvalidation::Model | CloudInvalidation::Enable => self.published = None,
             CloudInvalidation::ViewRemoved => {
@@ -349,7 +506,19 @@ impl CloudRenderer for VolumetricClouds {
 
     fn accumulation_observation(&self, view: u32) -> crate::CloudAccumulationDiagnostics {
         let (count, note) = self.history.observation(view);
+        let (dome_count, dome_frozen, dome_burst_frames) = self.dome_state.observation();
         crate::CloudAccumulationDiagnostics {
+            dome: crate::CloudDomeDiagnostics {
+                active: self.dome_active,
+                count: dome_count,
+                frozen: self.dome_active && dome_frozen,
+                burst_frames: dome_burst_frames,
+            },
+            burst_frames: self
+                .screen_burst_frames
+                .get(view as usize)
+                .copied()
+                .unwrap_or(0),
             count,
             animated: note.is_some_and(|n| n.animated),
             frozen: note.is_some_and(|n| n.frozen),
@@ -359,6 +528,7 @@ impl CloudRenderer for VolumetricClouds {
 
     fn submitted(&mut self, view: u32, invocation: u64) {
         self.history.submitted(view, invocation);
+        self.dome_state.submitted(view, invocation);
         self.noise.acknowledge(view, invocation);
     }
 }

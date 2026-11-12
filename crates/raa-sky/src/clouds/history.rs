@@ -8,6 +8,13 @@ use super::super::{CloudInvalidation, MAX_VIEWS};
 
 /// Frames of one unchanged view after which a non-animated view stops marching.
 pub(super) const FREEZE_FRAMES: u32 = 64;
+/// Marches recorded inside ONE frame when the sky signature changed (or there is no history at
+/// all): distinct golden-ratio jitter indices blended by a running mean, so the picture shown
+/// is already converged instead of a 1-sample result (a slower frame, never a degraded one).
+/// Skipped when the dither is off: one deterministic march is final.
+pub(super) const BURST_FRAMES: u32 = 16;
+/// Bytes between the burst records of a cloud uniform buffer (dynamic offsets, 256-aligned).
+pub(super) const BURST_STRIDE: u64 = 256;
 /// A frozen view still runs a cheap refresh pass on every invocation divisible by this.
 pub(super) const REFRESH_PERIOD: u64 = 8;
 /// Largest accumulation count kept.
@@ -244,6 +251,14 @@ impl CloudHistory {
                 _ => 1,
             },
         })
+    }
+
+    /// True when `view` has no committed march or it was made for another `signature`.
+    pub(super) fn signature_changed(&self, view: u32, signature: u64) -> bool {
+        self.slots
+            .get(view as usize)
+            .and_then(|slot| slot.committed_marked)
+            .is_none_or(|m| m.signature != signature)
     }
 
     /// The committed matrix when the frame allows history and the size still matches.

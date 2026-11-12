@@ -111,9 +111,33 @@ fn raa_physical_sky_cloud_panorama(direction: vec3<f32>) -> vec4<f32> {
     );
 }
 
+// The dome uv of a world direction (twin of `clouds/dome.rs` `dome_uv`): hemi-octahedral over
+// the direction shifted up by 0.05, so the dome reaches 0.05 below the horizon.
+fn raa_physical_sky_dome_uv(direction: vec3<f32>) -> vec2<f32> {
+    let v = vec3<f32>(direction.x, max(direction.y + 0.05, 0.0), direction.z);
+    let length_v = length(v);
+    var u = vec3<f32>(1.0, 0.0, 0.0);
+    if (length_v > 1.0e-6) {
+        u = v / length_v;
+    }
+    let p = u.xz / max(abs(u.x) + u.y + abs(u.z), 1.0e-6);
+    return vec2<f32>(p.x + p.y, p.x - p.y) * 0.5 + 0.5;
+}
+
 // Screen clouds use viewport UV. Texels M2 did not march hold the reserved negative alpha;
 // they never enter composition, falling back to a valid panorama or the neutral result.
+// With the cloud dome on (`flags.w`), binding 4 holds the dome instead and is sampled by world
+// direction with the bilinear clamping sampler: the viewport UV is not used.
 fn raa_physical_sky_cloud_screen(direction: vec3<f32>, uv: vec2<f32>) -> vec4<f32> {
+    if (raa_physical_sky.flags.w != 0u) {
+        let dome = textureSampleLevel(
+            raa_sky_cloud_screen,
+            raa_sky_clamp_sampler,
+            raa_physical_sky_dome_uv(direction),
+            0.0,
+        );
+        return vec4<f32>(max(dome.rgb, vec3<f32>(0.0)), clamp(dome.a, 0.0, 1.0));
+    }
     if (raa_physical_sky.flags.y != 0u) {
         let cloud = textureSampleLevel(raa_sky_cloud_screen, raa_sky_repeat_sampler, uv, 0.0);
         if (cloud.a >= 0.0) {

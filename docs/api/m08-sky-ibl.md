@@ -323,7 +323,23 @@ of the screen clouds; false uses a constant offset and no history blend, so the 
 and a moving camera shows no crawling (fixed step banding may show: raise `cloudSamples`). `cloudNoiseSize`
 (integer in [1, 16], default 1) is the edge, in buffer texels, of the blocks that share one noise value
 (larger = coarser grain). Changing any of these restarts the accumulation; changing either of the first two restarts the screen-cloud accumulation (and a changed scale
-recreates the buffer, resetting its history); neither is part of the `.weather` text. The screen
+recreates the buffer, resetting its history); neither is part of the `.weather` text.
+`cloudDome` (boolean, default false) replaces the screen march by a WORLD-SPACE cloud dome: a
+persistent Rgba16Float texture of `cloudDomeSize`^2 texels (integer in [128, 2048], default 1024)
+indexed by world view direction with a hemi-octahedral mapping (no pole singularity; it reaches
+about 3 degrees below the horizon). Each texel marches one ray with `cloudSamples` steps (the same
+hash noise, `cloudDither` and `cloudNoiseSize` apply) and accumulates by count in the dome's own
+history: a still sky is a 1/n running mean, then the pass stops dispatching after 64 unchanged
+frames; an animated sky blends at max(1/n, 1/16) and never stops. The dome does not depend on the
+camera: moving or rotating it never resets or re-marches the dome (only the viewer height is used;
+parallax is ignored, the horizontal origin is 0). It is per sky, shared by views, and recreated and
+reset when `cloudDomeSize` changes; the background samples it bilinearly per pixel. No screen-space
+cloud march is dispatched while it is on; cloud shadows and the weather panorama are unchanged.
+When the sky signature changes (a slider moved, the first frame, a resize) the dome and the screen
+march run a convergence burst inside that frame: 16 marches with distinct golden-ratio jitter
+indices blended by a running mean, so the picture is slow rather than degraded; no burst when
+`cloudDither` is false (one deterministic march is final). `skyWeatherDiagnostics().views[i].cloud`
+reports `burstFrames` and `dome: {active, count, frozen, burstFrames}`. The screen
 clouds average successive frames: while the camera and the sky stand still the average converges
 (blend 1/(n + 6) after n unchanged frames), and when nothing is animated (no wind, no cloud boil, no
 weather transition or cycle, no playing time of day) after 64 unchanged frames the march stops
@@ -438,7 +454,13 @@ interface SkyViewDiagnostics {
   // Screen-cloud accumulation of the view (read-only): committed count n; the animated flag the
   // freeze decision used; frozen = the last frame did not march (skip or refresh only);
   // historyUsed = the last frame could reproject from the committed history.
-  cloud: { count: number; animated: boolean; frozen: boolean; historyUsed: boolean };
+  cloud: {
+    count: number; animated: boolean; frozen: boolean; historyUsed: boolean;
+    burstFrames: number; // frames that ran the in-frame convergence burst (screen march)
+    // World-space cloud dome (shared by views): cloudDome on, committed count, last frame did not
+    // march it, frames that ran its convergence burst.
+    dome: { active: boolean; count: number; frozen: boolean; burstFrames: number };
+  };
 }
 interface SkyReadiness { status: 'pending' | 'ready' | 'failed'; stage: string; error: string | null }
 ```
