@@ -463,7 +463,7 @@ impl CloudRenderer for VolumetricClouds {
             .screen_current(view)
             .unwrap_or(&self.views.screen)
             .clone();
-        let dome_valid = self.dome_active && self.dome_state.valid_for(self.dome_signature);
+        let dome_valid = self.dome_active && self.dome_state.has_committed();
         let dome = self
             .dome
             .as_ref()
@@ -481,11 +481,10 @@ impl CloudRenderer for VolumetricClouds {
 
     fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation) {
         self.history.invalidate(view, reason);
-        // The dome follows the sky, not a camera: only a sky-wide event restarts it.
-        if matches!(
-            reason,
-            CloudInvalidation::Weather | CloudInvalidation::Model | CloudInvalidation::Enable
-        ) {
+        // The dome follows the sky, not a camera: only a model or enable event drops it. A
+        // weather edit keeps the committed dome displayable until the changed signature's
+        // march replaces it in the same frame.
+        if matches!(reason, CloudInvalidation::Model | CloudInvalidation::Enable) {
             self.dome_state.reset();
         }
         match reason {

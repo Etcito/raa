@@ -54,7 +54,7 @@ fn dome_accumulates_by_count_and_freezes_after_a_still_sky_without_a_camera() {
         assert_eq!(dome.record(invocation, 0), Some(plan));
         assert_eq!(dome.record(invocation, 0), None, "one march per invocation");
         // Nothing is committed before the submission is acknowledged.
-        assert!(invocation == 1 && !dome.valid_for(7) || dome.valid_for(7));
+        assert!(invocation == 1 && !dome.has_committed() || dome.has_committed());
         dome.submitted(0, invocation);
         last = plan.count;
     }
@@ -63,7 +63,7 @@ fn dome_accumulates_by_count_and_freezes_after_a_still_sky_without_a_camera() {
     assert!(!dome.claim(900, 0, 7, true, false).expect("claimed").frozen);
     assert_eq!(dome.claim(901, 0, 8, false, false).expect("claimed").count, 1);
     dome.reset();
-    assert!(!dome.valid_for(8) && dome.observation() == (0, false, 0));
+    assert!(!dome.has_committed() && dome.observation() == (0, false, 0));
 }
 
 #[test]

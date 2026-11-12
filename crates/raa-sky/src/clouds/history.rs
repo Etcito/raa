@@ -205,6 +205,14 @@ impl CloudHistory {
             None => 0..MAX_VIEWS,
         };
         for slot in &mut self.slots[range] {
+            // A weather edit changes what the next march shows, not what the last one is: the
+            // committed screen march stays displayable (a stale image for the frame the new
+            // march replaces, instead of the 192x108 panorama, which looked low resolution
+            // while a weather slider was dragged). The changed signature restarts the count.
+            if reason == CloudInvalidation::Weather {
+                slot.panorama_valid = false;
+                continue;
+            }
             slot.clear_validity();
             if reason == CloudInvalidation::ViewRemoved {
                 *slot = Slot::default();

@@ -43,12 +43,15 @@ fn panorama_valid_follows_marchable_prepare_and_every_invalidation() {
             let mut h = committed(0);
             h.prepare(1, SIZE, 1, true, true);
             h.invalidate(target, reason);
-            assert_eq!(h.flags(0), (false, false), "{reason:?} {target:?}");
-            assert_eq!(h.history(0, true), None, "{reason:?} {target:?}");
+            // A weather edit keeps the committed screen march displayable (its changed
+            // signature restarts the count); every other reason clears it.
+            let kept = reason == CloudInvalidation::Weather;
+            assert_eq!(h.flags(0), (false, kept), "{reason:?} {target:?}");
+            assert_eq!(h.history(0, true), kept.then(matrix), "{reason:?} {target:?}");
             let other = target.is_some();
             assert_eq!(h.flags(1).0, other, "{reason:?} {target:?}");
             h.prepare(0, SIZE, 2, true, true);
-            assert_eq!(h.flags(0), (true, false), "{reason:?} {target:?}");
+            assert_eq!(h.flags(0), (true, kept), "{reason:?} {target:?}");
         }
     }
 }
@@ -107,7 +110,8 @@ fn history_is_unusable_after_invalidation_or_frame_history_false() {
     for reason in REASONS {
         let mut h = committed(0);
         h.invalidate(Some(0), reason);
-        assert_eq!(h.history(0, true), None, "{reason:?}");
+        let kept = reason == CloudInvalidation::Weather;
+        assert_eq!(h.history(0, true), kept.then(matrix), "{reason:?}");
     }
 }
 

@@ -159,9 +159,10 @@ impl DomeState {
         }
     }
 
-    /// Whether the committed march was made for `signature`: the texture may be sampled.
-    pub(super) fn valid_for(&self, signature: u64) -> bool {
-        self.committed.is_some_and(|m| m.signature == signature)
+    /// Whether a march was committed: the texture may be sampled, a stale one until the march
+    /// of a changed signature (made in the same frame) replaces it.
+    pub(super) fn has_committed(&self) -> bool {
+        self.committed.is_some()
     }
 
     /// `(committed count, the last recorded frame did not march, burst frames so far)`.
