@@ -1341,3 +1341,19 @@ test('judge passes each judge call a kill time after the end of its start window
   assert.equal(kills.length, 1);
   assert.ok(Number.isFinite(kills[0]) && kills[0] >= before + 1000 + 150000);
 });
+
+test('the job that failed last time is dispatched first, before any other GPU job', async (t) => {
+  const store = projectStore(t);
+  const s = await renderFixture(t, [foundation, atmosphere, paired]);
+  await renderFailing(s, (input) => input.mode === 'off');
+  assert.deepEqual(readJsonRecord(path.join(store, 'sky-weather', s.stage, 'failed-jobs.json')).jobs
+    .map((job) => [job.scenario, job.mode]), [[paired.id, 'off']]);
+  process.env.SKY_WEATHER_RERENDER_ALL = '1';
+  await cleanAgain(s);
+  const order = [];
+  const runOp = s.transport.runGpuPageOp;
+  s.transport.runGpuPageOp = async (...args) => { order.push(`${args[2].scenario}/${args[2].mode}`); return runOp(...args); };
+  assert.equal((await s.render()).status, 'passed');
+  assert.deepEqual(order, [`${paired.id}/off`, `${GROUP_A}/default`, `${GROUP_B}/default`, `${paired.id}/on`]);
+  assert.deepEqual(readJsonRecord(path.join(store, 'sky-weather', s.stage, 'failed-jobs.json')).jobs, []);
+});

@@ -98,6 +98,8 @@ import { validateFeatureMeasurement } from '../../examples/sky-weather/lib/measu
  * a rendered job passes, render saves it there in the attempt layout (selection.json, build.json,
  * run.json listing only the jobs that attempt rendered and passed, jobs/<i>/, images/); judge
  * saves its verdicts there with the judged images. A failing job never discards the saved ones.
+ * P2-RESUMABLE-RENDER ORDER: render dispatches the jobs whose last dispatch failed (the store's
+ * failed-jobs.json, blank refusals included) first, then never-rendered jobs, then the rest.
  * P2-RESUMABLE-RENDER BLANK: a capture that is fully transparent or one flat colour (blankCapture)
  * fails render as soon as its job returns, before the next job is dispatched, and fails fresh (so
  * judge calls no judge client) listing every blank filename with its scenario/mode.
@@ -510,6 +512,20 @@ export async function clean(page, out, stage) {
   return attempt;
 }
 
+/** P2-RESUMABLE-RENDER ORDER: the store's record of the jobs whose last dispatch failed. */
+const FAILED_JOBS = 'failed-jobs.json';
+function sameJob(a, b) { return a?.scenario === b?.scenario && a?.mode === b?.mode; }
+function failedJobs(store) {
+  try {
+    const jobs = readJsonRecord(containedPath(store, FAILED_JOBS)).jobs;
+    return Array.isArray(jobs) ? jobs.filter((job) => nonblank(job?.scenario) && nonblank(job?.mode)) : [];
+  } catch { return []; }
+}
+function saveFailedJobs(store, jobs) {
+  try { writeJsonRecord(containedPath(store, FAILED_JOBS), { jobs }); }
+  catch (error) { process.stderr.write(`sky-weather-job: failed jobs not recorded in ${store}: ${message(error)}\n`); }
+}
+
 /**
  * P2-RESUMABLE-RENDER STORE: save one rendered job that passed, with its input, result and images,
  * under the store's copy of the attempt. Nothing to do when the store is the stage root itself.
@@ -569,6 +585,8 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
   };
   const store = storeRoot(out, stage);
   const storeCtx = { out, directory: pointer.directory, selection, build, run, stored: null };
+  let failed = failedJobs(store), dispatched = null;
+  const rendered = new Set();
   const current = () => ensure(isDeepStrictEqual(read('current.json'), pointer), 'current pointer was superseded');
   const saveCaptures = (job, rows) => {
     for (const image of Array.isArray(job.result?.images) ? job.result.images : []) {
@@ -602,7 +620,13 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
     let firstKept = null;
     for (const rows of groups.values()) {
       const kept = keptGroup(candidates, rows, namespaces);
-      if (!kept) { pending.push(rows); continue; }
+      if (!kept) {
+        pending.push(rows);
+        if (!failed.some((entry) => sameJob(entry, rows[0]))
+          && candidates.some((candidate) => Array.isArray(candidate.run?.jobs)
+            && candidate.run.jobs.some((job) => sameJob(job, rows[0])))) rendered.add(rows);
+        continue;
+      }
       if (run.jobs.length === 0 && pending.length === 0) firstKept = kept;
       const index = run.jobs.length;
       write(records.input(index), kept.input);
@@ -616,6 +640,10 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
         run.kept.push({ id: row.id, filename: row.filename, ...kept.origin });
       }
     }
+    // P2-RESUMABLE-RENDER ORDER: the jobs that failed last time first (a still-broken job fails the
+    // stage before other GPU time is spent), then the never-rendered ones, then the rest.
+    const rank = (rows) => (failed.some((entry) => sameJob(entry, rows[0])) ? 0 : rendered.has(rows) ? 2 : 1);
+    pending.sort((a, b) => rank(a) - rank(b));
     write(records.run, run);
     if (pending.length > 0) {
       current();
@@ -635,6 +663,7 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
       write(records.input(index), input);
       const job = { jobId: '', clientId: '', scenario, mode, result: null, error: null };
       run.jobs.push(job);
+      dispatched = { scenario, mode };
       try {
         const reply = await transport.runGpuPageOp(run.pageRef, 'run', input, {
           timeoutMs: 300000, out: containedPath(out, `${pointer.directory}/jobs/${index}`),
@@ -683,11 +712,21 @@ export async function render(page, out, stage, transport = { publishGpuPage, run
       } catch (error) {
         process.stderr.write(`sky-weather-job: ${scenario}/${mode} passed but was not saved to ${store}: ${message(error)}\n`);
       }
+      dispatched = null;
+      if (failed.some((entry) => sameJob(entry, job))) {
+        failed = failed.filter((entry) => !sameJob(entry, job));
+        saveFailedJobs(store, failed);
+      }
     }
     current();
     run.status = 'passed';
   } catch (error) {
     if (!run.errors.includes(message(error))) run.errors.push(message(error));
+    if (dispatched) {
+      failed = [{ ...dispatched, attemptId: attempt.attemptId, error: message(error) },
+        ...failed.filter((entry) => !sameJob(entry, dispatched))];
+      saveFailedJobs(store, failed);
+    }
   }
   write(records.run, run);
   write(records.attempt, { ...attempt, status: run.status, error: run.errors.length ? run.errors.join('\n') : null });
