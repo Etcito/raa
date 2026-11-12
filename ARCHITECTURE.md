@@ -4,182 +4,81 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 
 ## Conventions
 
-### Repository, toolchain, layout
-- Repository aliases qualify cross-repository paths (`raa:`, `mama:`, `sdfm:`); unqualified paths here are relative to RAA. Every implementation file belongs to one module in one repository. Each task edits only its listed files in one repository; the host creates its worktree and commit. Integration order is mama, then raa, then sdfm. The external solstice checkout is read-only reference material.
-- RAA contains `Cargo.toml`, `Cargo.lock` (committed), `LICENSE` (MIT), `README.md` and `.gitignore`. The `.gitignore` is kept as is and blocks target/, node_modules/, dist/, pkg/, *.log, *.glb, *.gltf, *.png, *.jpg, *.avif, *.ktx2 and *.bin.
-- Rust edition 2024, rust-version 1.96.0, `members = ["crates/*", "demos/*", "tests/*"]`. These are globs, so adding a crate never edits the root manifest. Third-party versions live in `[workspace.dependencies]`. Members use `{ workspace = true }` and may only add features. rustfmt and clippy are required.
-- Closed dependency list:
-  - `wgpu` 30.0.1, `default-features = false`, features `["wgsl"]`. wasm32 adds `webgpu`, native adds `vulkan` and `gl`.
-  - `naga`, at the version Cargo.lock already has through wgpu, with `features = ["wgsl-in"]` and default features off. Used for WGSL validation only.
-  - `wasm-bindgen = "=0.2.129"` (equal to the installed CLI), `wasm-bindgen-futures = "=0.4.79"`, `js-sys = "=0.3.106"`, `web-sys = "=0.3.106"`.
-  - `pollster` 1.0.1, for native tests and the bench only.
-
-  RAA has no serde, no glam or nalgebra, no bytemuck and no log framework. Adding a dependency needs the lead's authorisation and a minimal edit of the root manifest. The task that adds it runs `cargo fetch` for all targets, so the offline sandbox has every crate.
-- Library crates: `crates/<name>/{Cargo.toml, README.md, src/lib.rs, tests/<topic>.rs}`. The README states the purpose, the public items and how to test.
-- Other locations:
-  - demos in `demos/<mN-name>/` (a cdylib, `web/` and `gpu-input.json`);
-  - test-only crates in `tests/<name>/`;
-  - `proofs/`, `scripts/`, `web/` (shared web helpers) and `tools/`;
-  - JS packages `packages/raa/` (`@etcito/raa`) and `packages/raa-sdfm/` (`@etcito/raa-sdfm`, plain ES modules);
-  - pages `examples/basic/`, `examples/lookdev/` and `examples/sdfm-compare/`.
-- Every crate compiles for the host and for `wasm32-unknown-unknown`. Native-only code sits behind `#[cfg(not(target_arch = "wasm32"))]` and web-only code behind `#[cfg(target_arch = "wasm32")]`.
-- `[profile.wasm-release]` inherits `release` with `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`, `strip = true` and `debug = false`.
-- Tools: `node` (scripts use `${NODE:-node}`, npm next to it), the `wasm-bindgen` CLI 0.2.129 on PATH, and `python3` for the judge client. wasm-opt is not used by default.
-- Existing workspace path dependencies remain. In particular, raa-pipeline, raa-shader, raa-lit, raa-mesh, raa-sky, raa-oit and raa-fog are not root workspace dependencies: consumers use the existing sibling `path = "../<crate>"` form, never `{ workspace = true }` for them.
-- MAMA's evaluator package is `mama-procgen`, library `procgen`; load `. .rust-toolchain/activate.sh` before cargo there. Rust procedural checks use `node scripts/test.mjs --only procgen`, including `cargo test -p mama-procgen`. Type checks use `npm run typecheck`, never a fetching `npx tsc`. Nodes are discovered by filename; this chain consumes the existing `game_light` and its landed SPEC, without new MAMA implementation.
-- SDF Modeler imports procedural scene/light types from MAMA. Schema/tool changes regenerate with `node bin/sdfm.mjs schema` and retain guard/typecheck. Runtime remesh APIs remain unchanged.
-- The harness links sibling dependencies through kong. No installation, new external dependency or git-pinned dependency is introduced; separately authorized git dependencies require HTTPS, a full commit id and the clean-copy kong rules check.
+### Repositories, toolchain, layout
+- Writable repositories: `raa` and `sdfm`. `raa:`, `sdfm:` and `mama:` qualify cross-repository paths; unqualified paths are RAA's. MAMA and solstice (`7e465b599c13da165948ebaa44df824c36c3ae07`) are read-only; adapted solstice source keeps the MIT notice and `Copyright (c) 2026 SamG-Coder`. Kong resolves linked packages; host `dist/` directories and abandoned branches are never inputs.
+- Every file has one owner module; an explicit file or narrower directory assignment wins over a broad glob. A task writes one repository, only files of modules its milestone owns, in one commit that is never pushed. Repairing an earlier owner needs the lead's authorisation.
+- Workspace: edition 2024, rust-version 1.96.0, version 0.5.0, resolver 2, member globs `crates/*`, `demos/*`, `tests/*`, `Cargo.lock` committed.
+- Closed dependencies: `wgpu` 30.0.1 (no default features, `wgsl`; `webgpu` on wasm32, `vulkan` and `gl` native), `naga` 30.0.1 (`wgsl-in`, validation only), `wasm-bindgen` =0.2.129, `wasm-bindgen-futures` =0.4.79, `js-sys` and `web-sys` =0.3.106, `pollster` 1.0.1. No serde, glam, nalgebra, bytemuck, log framework, network service or threads.
+- Every crate builds for the host and `wasm32-unknown-unknown`. `[profile.wasm-release]`: opt-level z, LTO, one codegen unit, panic abort, strip. raa-pipeline, raa-shader, raa-lit, raa-mesh, raa-sky, raa-oit and raa-fog are sibling `path` dependencies, never `{ workspace = true }`.
+- Layout: `crates/<name>/{Cargo.toml, README.md, src/lib.rs, tests/<topic>.rs}`; `demos/<mN-name>/`; `tests/<name>/`; `proofs/`, `scripts/`, `web/`, `tools/`; `packages/raa/` (`@etcito/raa`) and `packages/raa-sdfm/`; `examples/{basic,lookdev,sdfm-compare,sky-weather}/`.
+- Tools: `node` (`${NODE:-node}`), the `wasm-bindgen` CLI, `python3` (judge), repository-local TypeScript; no fetching `npx`.
 
 ### Coordinates, units, colour
-- Right-handed, Y up, the camera looks down -Z, units are metres. Front faces are counter-clockwise, back faces are culled and normals point outward.
-- Matrices are column-major f32 with column vectors (`M * v`). Clip depth is [0, 1]. Depth is `Depth32Float`, compare `Less`, cleared to 1.0. Quaternions are `[x, y, z, w]`.
-- Colours are linear RGB in Rust and on the GPU. Asset files and JS colour inputs are sRGB in [0, 1] unless the API says linear, and are converted at the boundary.
-- S17 local-light JS colours are sRGB; the engine converts them once to linear. MAMA's flattened `ProcLight.color` is already linear: the adapter applies the sRGB OETF before calling S17, whose EOTF restores linear RGB. Document colours in SDF Modeler are sRGB and go directly to that public API. Never apply the procedural conversion to document colours. Intensity is nonnegative linear light intensity at one metre; positions, range and full area extents remain metres across repositories.
-- The v0 renderer shades straight to the canvas (S1). The lit renderer shades linear HDR into HDR_FORMAT, and only `tonemap` converts to display (S12). When the canvas is not `*Srgb`, the shader encodes sRGB itself.
+- Right-handed, +Y up, camera forward -Z, metres; counter-clockwise front faces, outward normals. Column-major f32 matrices with column vectors; quaternions `[x, y, z, w]`. Clip depth [0, 1], `Depth32Float`, `Less`, clear 1; the sky draws at depth 1 with `LessEqual`.
+- Rust and GPU colours are linear. Asset and JS colours are sRGB unless the API says linear; sky colours and `setLight` are linear, S17 light colours sRGB. MAMA's `ProcLight.color` is linear: the adapter applies the OETF before S17; document lights never get that conversion.
+- Atmosphere maths uses kilometres only behind S23's conversion; clouds, wind, fog and geometry stay in metres. Latitude is degrees north; `north` is radians about +Y (north = -Z, east = +X at zero); wind is a compass direction FROM north in degrees.
 
-### Errors and refusals
-- Each crate has one error type implementing `Display` and `std::error::Error`, with a stable `code() -> &'static str` of the form `<area>.<snake_case>` and a human message.
-  - P2 crates return `raa_core::RaaError`, using `RaaError::FrameGraph { code, message }` for their area codes.
-  - Refusals are typed values, never NaN, an empty output, a panic or a skip.
-  - A refused setter leaves the previous state unchanged.
-- S17 `addLight`, `updateLight`, `attachLight` and `detachLight` are atomic. The existing `setTransforms` batch retains earlier applied entries when a later entry fails; each entry validates its scene transform and attached lights before applying. This preserves `crates/raa-js/src/engine.rs`'s sequential behavior.
-- Synchronous shader setters use CPU naga validation and never synchronously wait for a WebGPU error-scope future. Managed render jobs or the existing asynchronous reporting path collect browser validation failures.
-- No `unwrap`, `expect` or indexing panic on paths that public API with user data can reach. They are allowed in tests and on commented invariants.
+### Errors, state, allocation
+- One error type per crate with a stable `code()` `<area>.<snake_case>`; lit crates return `raa_core::RaaError`. Refusals are typed values, never NaN, a panic or a skip; a refused setter changes nothing. Sky, time and weather edits reject atomically with `sky.invalid`; a disposed Engine answers `api.disposed`. S17 light operations are atomic; `setTransforms` keeps entries applied before a failing one.
+- Shader setters validate with naga synchronously; WebGPU validation errors arrive asynchronously. No `unwrap`, `expect` or indexing panic on paths public data can reach.
+- No `static mut`, `thread_local!` or lazy globals in libraries, except `raa-alloc-count`'s `#[global_allocator]`; a feature shares `Rc<RefCell<..>>` state with its handle. The v0 frame path allocates nothing after warm-up; lit crates reuse preallocated scratch.
+- One Engine invocation advances authored playback once for all views; GPU histories are view-local and commit only for submitted work.
+- `unsafe` needs `// SAFETY: <reason> (test: <test_fn_name>)` on the line above, with the named test; the only unsafe code is `unsafe impl GlobalAlloc for CountingAlloc`.
 
-### No global state, no hidden allocation, unsafe
-- No `static mut`, no `thread_local!` state and no lazy globals in library crates. The only exception is `crates/raa-alloc-count`, linked as `#[global_allocator]` only by raa-bench and by demos with the feature `alloc-count`. Shared state between a feature and its handle goes through `Rc<RefCell<..>>` or `Rc<Cell<..>>`.
-- The v0 frame path makes no heap allocation after warm-up (Q4): `Scene::update_world`, `Scene::build_render_list`, `FramePrep::prepare_cpu`, and RAA's code inside `FrameGraph::execute` and `WebRuntime::frame`. Allocations inside wgpu or web-sys are reported as `allocsPerFrameTotal`, as information. P2 crates preallocate and reuse their buffers.
-- `unsafe` needs a `// SAFETY: <reason> (test: <test_fn_name>)` comment on the line directly above, and the named test must exist (`scripts/check.sh`). The only unsafe code is `unsafe impl GlobalAlloc for CountingAlloc`.
+### Testing and checks
+- Unit tests in `#[cfg(test)] mod tests`, integration tests in `crates/<c>/tests/<topic>.rs`; text fixtures only. Native GPU tests use `raa_core::testing::software_gpu()` and print `SKIP <test name>: no software adapter (<reason>)` without an adapter. Every composed shader variant is naga-validated (`variants.rs`).
+- Sky and weather acceptance uses no reference image, pixel metric, output hash or CPU/GPU parity; CPU tests cover astronomy, weather parsing and cycles, state transitions and layouts.
+- Branch checks: RAA `cargo check`, affected `node --test`, `bash scripts/check.sh` at milestone verification; SDFM `npm run typecheck`, `npm run build`, `npm run guard`, `node scripts/proof/unit.mjs --only <anchored selector> --jobs 1` after `node node_modules/typescript/bin/tsc -p tsconfig.node.json`, and the managed Chrome boot check. Every dist, package or WASM reader has a build predecessor. Host work respects `NMC_CPUS` (default 1).
+- rustfmt covers changed files; clippy names the changed crate with `--no-deps -- -D warnings`. Asserted shader, API or binding text changes together with its pinning tests (S27).
 
-### Testing
-- Unit tests go in `#[cfg(test)] mod tests`, integration tests in `crates/<c>/tests/<topic>.rs`. Test names are snake_case and describe the behaviour.
-- Native GPU tests call `raa_core::testing::software_gpu()`. Without an adapter they print `SKIP <test name>: no software adapter (<reason>)` to stderr and return. They never fail for lack of an adapter, and never skip silently.
-- Shader code is tested by naga validation of every composed variant (`variants.rs`). GPU algorithms have CPU twins tested on the CPU.
-- Code generates test geometry and assets. JSON text fixtures are allowed, binary fixtures never are.
-
-### M4_WORK_RULES
-- Display M4 has graph owner index 5. Its closed-M3 starting results are raa `b38bca9090e0d3d665fd498746d831e4bea07b60`, mama `c17b0c3cd02db25faa1519afd0ce07a3015823ca` and sdfm `e258ddcef291b346f0ca969e1b894d40d537b56f`. Source inspection is authorized; historical no-read planning assumptions and missing-transport placeholders are resolved.
-- Model cards change only their listed files; the host makes the single commit. Target 300 formatted added-plus-deleted lines, including source, tests and handwritten documentation; replacements count twice. Only lockfiles and mechanically generated build output are excluded. Existing compact forms are permitted only for the same construct in the named source file, which the completion report names. Never invent compressed formatting, remove useful blank lines, omit behavior or drop tests to fit; deliver and report any unavoidable overrun.
-- RAA documentation cards run `cargo check`. `bash scripts/check.sh` remains the mandatory milestone check. Retain every repository's inherited tests and branch checks: MAMA typecheck, build, cargo check and affected `scripts/test.mjs` tests; SDFM typecheck, build, guard, affected `scripts/proof/unit.mjs` tests and host-managed boot.
-- Build upstream dependencies before tests importing their `dist/` outputs. In SDFM run `npm run build` before dist readers and compile Node tests with `node node_modules/typescript/bin/tsc -p tsconfig.node.json` before the unit runner. Use anchored selectors for affected test modules and `--jobs 1`; independent harness work respects `NMC_CPUS`, default 1.
-- Rust formatting covers changed files with their crate edition and the baseline-aware formatter; task clippy names the affected crate, uses `--no-deps` and denies warnings for applicable native/wasm targets. Do not reformat unrelated inherited files. Before authorizing asserted API/binding/shader-string changes, inspect source/tests and put discovered pinning tests in the owner's scope.
-- Required MAMA/RAA runtime preparation and long render chains execute programmatically through configured host preparation, retaining configured target policy. `scripts/build-package.sh` assembles m28 declarations into the shipped root `index.d.ts`; `scripts/build-bricks.sh` stages that package in `dist/bricks/raa`. Missing linked declarations require host preparation in dependency order, not source aliases, deep imports or replacement interfaces.
-- Model cards author code, fixtures and commands; only programmatic cards run GPU jobs. Node 11 alone writes sdfm `.nmc/commands.json`, preserving every older entry verbatim. Commands are single programs with explicit build -> readers -> selection -> render -> freshness -> judge dependencies. Long jobs are not awaited by model cards; host archive, informational mail and cleanup remain host responsibilities.
-- Technical failures enter one configured Operator/Doctor recovery flow using configured delegate defaults: retain the originating error, repair its source and missing guard, expose repair status and rerun invalidated work. Reuse successful work only through guarded host recovery. No model choice is prescribed.
-- This chain adds no legacy proof/regression card, milestone proof script, extra full-suite loop, new performance target, reference image, pixel comparison, CPU/GPU parity or hash comparison. CPU formula fixtures run only on the CPU. Existing asset formats, content hashes and metadata hashes remain data, including their loader validation/cache semantics; they are not build-output or rendering acceptance comparisons.
-- Historical proof modules, capture/judge commands, reference-based criteria and milestone lists below remain historical documentation of their original contracts, not new executable cards. Preserve the complete S14 scene/record contract and all unchanged public contracts. Existing build, shipped-wasm size, startup/speed, allocation, geometry, API documentation, extensibility, feature-toggle, hardware-labeling, asset and neutrality requirements retain their definitions and thresholds below; only the excluded acceptance mechanisms above do not enter this chain.
-- Local-light shadows, a second screen-space history target, temporal antialiasing, upscaling and HDR pass-chain restructuring remain outside scope. New-light descriptions state that they cast no shadows yet. Adapted solstice source retains MIT attribution, including Copyright (c) 2026 SamG-Coder; no binary/image/`.bin` is committed, and additional neutrality searches use whole-word matching.
-
-### Web build and demo pages
-- `scripts/build-web.sh <crate-dir> [--features <list>]` runs these steps:
-  1. `cargo build --profile wasm-release --target wasm32-unknown-unknown -p <crate>`.
-  2. `wasm-bindgen --target web --out-dir dist/<dir>/pkg`.
-  3. Copies `<crate-dir>/web/*` and `web/common/*` (into `common/`).
-  4. Writes `dist/<dir>/sizes.json` (S7).
-- Demo crate pattern:
-  - `#[wasm_bindgen] pub async fn start(canvas, options) -> Result<Demo, JsValue>`;
-  - `impl Demo { frame(now_ms), resize(w, h), stats(), async probe_non_empty(now_ms) }`;
-  - a `raa_web::WebApp` driven by a `WebRuntime`;
-  - `web/{index.html, main.js, nmc.gpu.json}`, which register `window.nmcGpu.ops` through `common/nmc-gpu.js`;
-  - optional feature `alloc-count`.
-- `node web/serve.mjs <dir> [--port N]` binds 127.0.0.1 only (port 0 = ephemeral). It sends correct MIME types (including `application/wasm`) and `Cache-Control: no-store`, and prints `serving <dir> on http://127.0.0.1:<port>/`.
-
-### Browser captures (GPU client only)
-- The project has no GPU. Browser rendering goes only through nomorechat's GPU client (`NMC_GPU_CLIENT`):
-  - `scripts/gpu-capture.mjs` for demos and example-basic (S6);
-  - `scripts/lookdev-capture.mjs` for the lookdev and sdfm-compare pages (S14).
-- Both publish `dist/<page>/`, render, write the committed JSON record and copy the PNG to `proofs/captures/`. The PNGs are gitignored review artefacts.
-- Linux Chrome is never launched in the sandbox, and `NMC_GPU_TOKEN` is never printed. When the client is unavailable, the task stops visibly and writes a dogfood entry. It never substitutes CPU output.
-- Hardware rule: `hardware = !isFallbackAdapter && none of /swiftshader|llvmpipe|lavapipe|software|basic render/i matches vendor, architecture, device or description`. Every report states in words whether the adapter is hardware or software.
-- Timing:
-  - `firstFrameMs` is the navigation-relative `performance.now()` when `onSubmittedWorkDone` of frame 0 resolves;
-  - `cpuMs` is the delta around one frame call;
-  - reports give the median and p95 over `frames` measured frames after `warmup` frames.
-
-### Judge (lookdev look)
-- Command: `python3 "$NMC_JUDGE_CLIENT" <capture.png> --description <variant description> --reference <ref-prefix><ref>.png ... --min-score JUDGE_MIN_SCORE`. Timeout 900 s.
-- The score is the JSON `score`, else the last `JUDGE PASS|FAIL: N/10` line, else the last `score: N`. The stored output is redacted (paths and env values) and kept within 4000 characters.
-- Pass = exit 0. `--judge-record-only` records a low score without failing the capture run. The milestone proof's `judge` check still requires exit 0.
-- Lookdev captures render at a fixed time with dt 0, so jiggle springs never move in a capture. A scene that shows jiggle in a capture writes the jiggle record directly through `setInstanceExtras` (floats 8..11). Springs (`setJiggle`) are for interactive loops with a real dt.
+### Builds, browser runs, judge, commands
+- `scripts/build-web.sh <crate-dir> [--features <list>]` builds `wasm-release`, runs `wasm-bindgen --target web` into `dist/<dir>/pkg`, copies `<crate-dir>/web/*` and `web/common/*` and writes `sizes.json` (S7). `node web/serve.mjs <dir> [--port N]` serves 127.0.0.1 only with `Cache-Control: no-store`.
+- Browser rendering is a page published to managed Windows Chrome on a physical GPU through nomorechat's GPU client; nothing substitutes, and a missing client is a visible failure for host recovery (S22). Credentials are never printed.
+- `hardware = !isFallbackAdapter && none of /swiftshader|llvmpipe|lavapipe|software|basic render/i matches vendor, architecture, device or description`; every record names the adapter.
+- `firstFrameMs` is the navigation-relative time when `onSubmittedWorkDone` of frame 0 resolves; `cpuMs` is the delta around one frame call.
+- Judge: `python3 $NMC_JUDGE_CLIENT <capture.png> --description <text> [--reference <png> ...] --min-score 6`, pass = exit 0, output stored redacted within 4000 characters. Lookdev (S14) passes references, sky and weather (S26) none. Lookdev captures render at a fixed time with dt 0; a scene showing jiggle writes `setInstanceExtras` floats 8..11.
+- Captures and binaries are never committed (`scripts/check-no-assets.sh`); they go to the ignored `proofs/captures/`, `out/sky-weather/` and `out/sky-weather-editor/`.
+- `.nmc/commands.json` holds appended single-program entries `{name, command, timeout_s, cwd?, after?}` validated by `nmc-commands-check`; a run names its complete ordered selection. Builds, GPU jobs (at most 300 s each) and judge chains run programmatically.
 
 ### Values (decided once, cited everywhere)
 | name | value |
 |---|---|
-| WASM_GZIP_MAX | 300000 bytes per shipped .wasm (gzip level 9 via node zlib), raw size reported next to it |
+| WASM_GZIP_MAX | 300000 bytes gzip (level 9, node zlib) per shipped .wasm; raw size reported |
 | FIRST_FRAME_MAX_MS | 500 |
 | CPU_MS_MEDIAN_MAX | 4.0 ms median CPU per frame, 1000 instances, hardware WebGPU only |
-| ALLOC_RUN | 1000 instances, 120 warm-up frames, 600 measured frames, allowed allocations = 0 |
+| ALLOC_RUN | 1000 instances, 120 warm-up frames, 600 measured frames, 0 allocations |
 | BROWSER_RUN | warmup 60, frames 300 |
-| CAPTURE | canvas 1280x720, devicePixelRatio 1; resize cycle 1280x720 to 960x540 (30 frames) and back |
+| CAPTURE | canvas 1280x720, devicePixelRatio 1; resize cycle to 960x540 (30 frames) and back |
 | CLEAR_COLOR | linear (0.05, 0.06, 0.08, 1.0) |
 | QUALITY | `Quality::LOW` = 8, `LOD0` = 24, `HIGH` = 64 segments; clamped to [3, 256] |
 | TRIANGLE_BUDGET_DEFAULT | 1500 triangles per asset at LOD0 |
 | ASSET_CAPS | nodes <= 64; nesting level <= 8 (roots are level 0); quaternion norm within 1e-3 of 1; scale components > 0 |
 | WELD_EPS | 1e-6 x max(1, bbox diagonal) |
 | NORMAL_RULE | per vertex: abs(len - 1) <= 1e-4; angle to the area-weighted mean of incident face normals <= 45 degrees; inward count = 0 |
-| SDF_REF_TOL | uniquePositions and triangles equal; bbox coordinate diff <= 1e-5 x max(1, diagonal); area and volume relative diff <= 1e-4 |
+| SDF_REF_TOL | uniquePositions and triangles equal; bbox diff <= 1e-5 x max(1, diagonal); area and volume relative diff <= 1e-4 |
 | CSG_EPS | 1e-6 x max(1, diagonal of host bbox union tool bbox); volume identity relative diff <= 1e-4 |
 | HDR_FORMAT | `Rgba16Float` (`raa_pipeline::HDR_FORMAT`) |
 | MSAA | forward samples 4 by default, 1 allowed (`LitOptions.msaa`, JS `msaa`) |
 | TONEMAP_DEFAULT | mapper agx, look none, exposure 0 EV, dither on |
-| WEBGPU_OPTIONAL | `FLOAT32_FILTERABLE`, `RG11B10UFLOAT_RENDERABLE`: requested when the core adapter has them, never required |
+| WEBGPU_OPTIONAL | `FLOAT32_FILTERABLE`, `RG11B10UFLOAT_RENDERABLE`: requested when available, never required |
 | SKY_ENV | sky cube 256 px per face, HDR_FORMAT, 6 mips |
-| LOOKDEV_CAPTURE | 1280x720, 30 warm-up frames + 1 frame, all at the variant's fixed `timeMs` (default 1000) |
+| LOOKDEV_CAPTURE | 1280x720, 30 warm-up frames + 1 frame at the variant's fixed `timeMs` (default 1000) |
 | JUDGE_MIN_SCORE | 6 (out of 10) |
+| PAIR_RUN | sky/weather on/off pairs: 30 warm-up + 300 measured rAF intervals at 1280x720, dpr 1 (S26) |
 
-### Proofs
-- One proof script per milestone, `proofs/mN-<name>.mjs`, built on `proofs/lib/proof.mjs` (P2 proofs also use `proofs/lib/p2.mjs`). Run it as `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]`. The default is `--quick`. A proof has at most 5 checks.
-- Each check prints `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`. The script exits non-zero at the first failing selected check. `--only` also reaches case-level runners.
-- Independent cases run in parallel, up to `NMC_CPUS` (1 when unset), never more.
-- Wall budget: at most 3 minutes on a warm cargo cache, and each artefact is built once per run. A threshold is never lowered.
-- Timing thresholds exist only for FIRST_FRAME_MAX_MS and CPU_MS_MEDIAN_MAX.
-- P2 milestone proofs check `unit`, `wasm-check`, `api-doc`, `captures` and, when variants are judged, `judge`.
-- Look is never measured by a proof, except through the judge on `judge: true` variants. The owner reviews the captures.
-- Dogfood: friction caused by nomorechat goes in `docs/dogfood/mN.md`: what broke, what was done by hand and what nomorechat must do instead.
-
-### Commits and scope
-- One commit per task, never pushed. No binaries or asset files (`scripts/check-no-assets.sh`).
-- A task edits only files of modules owned by its milestone. Fixing another module needs the lead's explicit authorisation and stays minimal.
-- Neutrality: the public API, docs and code comments in guarded paths never name a consumer game or game concept. `scripts/check.sh` rejects `royal|fiesta|monster|racer` (case-insensitive) in crates/, demos/, tests/, packages/, examples/ and docs/API.md, comments included.
-- The JS API grows additively: each P2 milestone adds `packages/raa/types/mNN-*.d.ts` and `docs/api/mNN-*.md`. `index.d.ts` and `docs/API.md` stay API v0.
+### Proofs and scope
+- Proof modules keep `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]` on `proofs/lib/proof.mjs` (`p2.mjs` for lookdev): at most 5 checks, each printing `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`; lookdev proofs check `unit`, `wasm-check`, `api-doc`, `captures`, `judge`. Sky and weather add no proof script or performance threshold (S26). Dogfood notes: `docs/dogfood/mN.md`.
+- Neutrality: `scripts/check.sh` rejects `royal|fiesta|monster|racer` (case-insensitive) in crates/, demos/, tests/, packages/, examples/ and docs/API.md.
+- The JS API grows through `packages/raa/types/mNN-*.d.ts` and `docs/api/mNN-*.md`; `index.d.ts` and `docs/API.md` stay API v0.
+- Not provided: local-light shadows, temporal antialiasing or full-scene history, upscaling, global illumination, precipitation particles, a second distance fog.
 
 ### Quality bar
-Criteria controlled by commands:
-- **Q1 Clean build:** `scripts/check.sh` exits 0.
-- **Q2 Size:** every shipped .wasm has gzip <= WASM_GZIP_MAX. Raw and gzip sizes are reported.
-- **Q3 Startup and speed:** every BrowserResult has `firstFrameMs` <= FIRST_FRAME_MAX_MS. The 1000-instance scene has `cpuMsMedian` <= CPU_MS_MEDIAN_MAX with `hardware: true`.
-- **Q4 Frame loop:** `raa-bench frame-allocs` reports 0 allocations over ALLOC_RUN.
-- **Q5 Primitive meshes:** the 8 kinds at LOW, LOD0 and HIGH on both sets are closed with positive volume, satisfy NORMAL_RULE, hash identically across runs and match the SDF Modeler reference within SDF_REF_TOL (48 cases).
-- **Q6 Assets:** canonical prims v0 round-trips byte-identical. Invalid cases are refused with their code. The budget is enforced.
-- **Q7 Booleans:** supported CSG cases are watertight within CSG_EPS. Unsupported ones return their typed refusal.
-- **Q8 Extensibility and API:** raa-ext-test extends RAA with no edit to other crates. Every exported JS name is documented (`docs/API.md` for index.d.ts, `docs/api/<tag>-*.md` for `types/<tag>-*.d.ts`, the raa-sdfm README for its index.d.ts). The neutrality guard passes.
-- **Q9 Honest GPU labelling:** every record names the adapter and states `hardware`.
-- **Q10 Lookdev records:** every declared variant of a milestone's scenes has an S14 record with `nonEmpty` and `hardware` true, and no GPU errors.
-- **Q11 Judged look:** every `judge: true` variant has `judge.exit == 0` against its references.
-- **Q15 Feature toggles:** every toggleable feature has variants `<feature>-on` and `<feature>-off`, and the frame stays valid with the feature disabled (S12).
-
-Review criteria. The owner answers yes or no on each saved capture:
-- **R1-R6 (base M1-M6):**
-  - a centred solid triangle;
-  - 1000 lit instances with correct occlusion, flat versus PBR-lite, nothing stretched after resize;
-  - 8 recognisable kinds per quality without cracks;
-  - assets matching their composition;
-  - clean boolean cuts;
-  - the example page rendered through `@etcito/raa` only.
-- **P2 lookdev:**
-  - each on/off pair shows what its feature adds, with no artefacts (banding, acne, haloes, flicker between pairs);
-  - **R12:** sdfm-compare shows RAA's rendering beside SDF Modeler's for the same asset and camera, with matching shape and materials.
-
-### Local-light quality criteria carried into M4
-The project QB identifiers supplement the preserved historical quality bar, under M4_WORK_RULES' acceptance exclusions:
-- QB1: preserve sun callers, ambient/environment, material providers, document lights and supported paths through branch checks and focused behavior tests.
-- QB2: zero local lights and no jitter consumer retain existing inputs/zero jitter, supported by state/layout tests and description-judged off rendering.
-- QB3: point distance decay, smooth spot cone, directional no-distance-falloff and area extent response use functional on/off descriptions; no local shadows are claimed.
-- QB4: move, rotate, detach, delete and reattach preserve object ownership without duplicates/stale illumination, established by lifecycle tests and managed captures.
-- QB5: moving forward geometry has coherent signed motion; stationary scenes, newly introduced geometry and sky have the stated zero-motion behavior (S10/S12).
-- QB6: one selected document node through one addNode; applicable inspector fields and Game edits/movement use document/UI tests and managed editor evidence.
-- QB7: at most four bind groups, stage storage limits, validated shader variants and reported overflow remain established by resource tests and managed errors.
-- QB8/QB9: retain the earlier renderer's requested many-lights measurement and existing size/startup/allocation/geometry/API/extensibility requirements; M4 adds no performance target or standalone measurement milestone.
+- **Q1** `scripts/check.sh` exits 0. **Q2** every shipped .wasm gzip <= WASM_GZIP_MAX. **Q3** `firstFrameMs` <= FIRST_FRAME_MAX_MS and the 1000-instance `cpuMsMedian` <= CPU_MS_MEDIAN_MAX on hardware. **Q4** `raa-bench frame-allocs` reports 0 allocations over ALLOC_RUN.
+- **Q5** the 8 primitive kinds at LOW, LOD0 and HIGH on both sets are closed, satisfy NORMAL_RULE, hash identically and match the reference within SDF_REF_TOL. **Q6** canonical prims v0 round-trips byte-identical and invalid cases are refused. **Q7** supported CSG cases are watertight within CSG_EPS; the others return their typed refusal.
+- **Q8** raa-ext-test extends RAA without editing other crates and every exported JS name is documented. **Q9** every record names the adapter and states `hardware`. **Q10** every lookdev variant has an S14 record with `nonEmpty` and `hardware` true and no GPU errors. **Q11** every `judge: true` variant has `judge.exit == 0`. **Q15** every toggleable feature has `-on` and `-off` variants and the frame stays valid when it is disabled.
+- **R1-R6, R12** (owner review of captures): a centred triangle; 1000 lit instances; 8 primitive kinds without cracks; assets matching their composition; clean boolean cuts; the example page through `@etcito/raa` only; sdfm-compare beside SDF Modeler.
+- **QB1-QB9** (local lights): earlier sun, ambient and material paths are unchanged; lights respond as S11 states, without local shadows; move, rotate, detach, delete and reattach keep ownership; four bind groups and the stage storage limits hold; overflow is reported.
+- **P2-Q1** a clear day has a blue sky and a warm low horizon, twilight is continuous, night is dark with readable moon phase, stars and Milky Way. **P2-Q2** background, reflections, diffuse IBL and fog follow the same accepted sky state. **P2-Q3** fair, broken, overcast, storm and cirrus differ in structure; wind and evolution move clouds; cloud shadows move and disappear when disabled while CSM and contact shadows stay. **P2-Q4** resize, camera cut, model or weather change and re-enable leave no stale panorama, trail or history. **P2-Q5** the Game time, place and weather controls are readable beside the Game view, with units, pause/play and validation, and survive reload. **P2-Q6** an invalid edit keeps the last valid settings and rendering. **P2-Q7** shared layouts, stage limits and the single attenuation path hold for every composed variant. **P2-Q8** every required image is current and judged at least 6.
 
 ## S1. GPU layouts
 All layouts are little-endian, written with `to_le_bytes`, with no unsafe code. These are the v0 forward renderer layouts (raa-render). The lit renderer extends them in S10 and keeps the Vertex and Instance layouts.
@@ -741,195 +640,168 @@ The inspector explicitly distinguishes existing point-only screen-space contact 
 Q1's landed generator inclusion is conditional on registered `pointLight` in `src/node/schema/docs.ts` and `json-schema.ts`. Both use the registered NodeKindDef/ParamSpec metadata, preserving other kinds, ordering, serialization and document version. Generated schema/catalog document optionality without materializing absent values or adding another validation policy. Focused authoring/generator tests cover defaults, all kinds, optional save/reload/reset, hidden values, atomic invalid edits, geometry stability, packing and registered/unregistered inclusion. The real component regression loader resolves its exact `../../core/scene-lights.js` import against the compiled test module; it does not mock the setter.
 
 ## S19. GameDisplay ownership, frames and lifecycle
-Result id: SDFM-GAME-LIGHT-SYNC. Owner: sdfm-game-light-sync, display M4 / graph index 5. The closed-M3 RAA-MAMA-LIGHT-BRIDGE remains in S15/S16; adapter resources and document resources have separate owners.
-
-`src/app/paramesh/game-light-sync.ts` owns the following public handoff (Mat4/Vec3 come from MAMA; Engine/LocalLightDesc come from `@etcito/raa`):
-
-```ts
-export type GameLightAttachment = {
-  instance: number; instanceWorld: Mat4; ownerDocumentWorld: Mat4; ownerWorld: Mat4
-}
-export type ResolveGameLightAttachment = (light: DocumentGameLight) => GameLightAttachment | null
-export type PlannedGameLight = {
-  id: string; visible: boolean; desc: LocalLightDesc
-  attachment: { instance: number; offset: Vec3 } | null
-}
-export type GameLightEngine = Pick<Engine, 'addLight' | 'updateLight' | 'removeLight' | 'attachLight' | 'detachLight'>
-export type DocumentLightHandle = { id: string; handle: number; instance: number | null; visible: boolean }
-export type GameLightSync = {
-  sync(lights: readonly DocumentGameLight[], resolve: ResolveGameLightAttachment): void
-  beforeInstanceRemoval(instance: number): void
-  snapshot(): DocumentLightHandle[]
-  dispose(): void
-}
-export function planGameLights(lights: readonly DocumentGameLight[], resolve: ResolveGameLightAttachment): PlannedGameLight[]
-export function createGameLightSync(engine: GameLightEngine): GameLightSync
-```
-
-`GameDisplay` resolves the nearest mapped ancestor through actual `Entry.members`, `Draw.pick.world` and public `Draw.instance` group handles, preferring the exact placed member and replacement entry while excluding retiring draws. It uses the same decomposed TRS instance frame sent to the engine, including part/placement corrections. Let C = ownerWorld × inverse(ownerDocumentWorld): corrected world placement is C × document placement; attachment offset is inverse(instanceWorld) × corrected position, and local direction is normalized inverse(instanceWorld) × C × document direction. Range and size stay metres under scale. Before a mapping exists, composed world placement is used. No competing hierarchy, per-submesh light or inferred compacted instance id is introduced.
-
-The reconciler validates the entire plan before engine mutation, keeps one stable owned handle per surviving document id, suppresses unchanged calls and explicitly resets omitted kind-specific engine fields. Hidden lights retain handles with zero intensity. New handles stage at zero intensity before publication. Attachment changes, detachment, parent retirement, deletion, recreation and disposal follow S17; GameDisplay reconciles before retiring/replacing resources and after runtime movement. Failure rolls back staged/touched resources and retains valid published observations and the originating error. Rollback of an already removed light may recreate its handle; ordinary stable-identity guarantees do not assert that a removed engine handle is resurrected. Recovery failure retains an AggregateError and prevents further normal synchronization. Disposal removes only owned document handles, not adapter lights.
-
-`src/app/paramesh/game-display.ts` exports `GameDisplayLightState = { lights: DocumentLightHandle[]; engine: LightStats | null; ready: boolean; error: string | null }` via `documentLightState(): GameDisplayLightState`. Readiness is light reconciliation readiness, not geometry readiness or proof of a submitted GPU frame. Engine counts can include adapter-owned lights; subtraction does not identify their ownership. Engine creation/recreation, setDocument, publication/replacement, movement, rendering and disposal wire the same reconciler. Geometry invalidation excludes light records/tree membership so light-only changes preserve reusable geometry. Focused reconciler and real GameDisplay integration tests establish calls, rollback, cleanup and resource stability that browser snapshots cannot expose.
-
-Q2's declaration ownership is settled: card 7360 exports `DocumentLightHandle`, card 7361 exposes real GameDisplay observations, and evidence imports the former type-only from `../app/paramesh/game-light-sync.js`. Use `import type { LocalLightDesc, LocalLightChanges, LightStats } from '@etcito/raa'`. The declarations already ship through `scripts/build-package.sh` and `scripts/build-bricks.sh` into `dist/bricks/raa`; the unstaged source index is not the shipped surface. Missing resolved exports require configured host preparation in mama → raa → sdfm order, not deep imports, ambient declarations, replacement types or an upstream API change.
+Owner: sdfm-game-light-sync.
+- `sdfm:src/app/paramesh/game-light-sync.ts` exports `GameLightAttachment { instance, instanceWorld, ownerDocumentWorld, ownerWorld }`, `ResolveGameLightAttachment(light) -> GameLightAttachment | null`, `PlannedGameLight { id, visible, desc: LocalLightDesc, attachment: { instance, offset } | null }`, `GameLightEngine` (the five S17 light methods of Engine), `DocumentLightHandle { id, handle, instance | null, visible }`, `GameLightSync { sync(lights, resolve), beforeInstanceRemoval(instance), snapshot(), dispose() }`, `planGameLights(lights, resolve)` and `createGameLightSync(engine)`.
+- `GameDisplay` resolves the nearest mapped ancestor through `Entry.members`, `Draw.pick.world` and the public `Draw.instance` group handles, excluding retiring draws, in the decomposed TRS frame sent to the engine. With C = ownerWorld x inverse(ownerDocumentWorld): world placement = C x document placement; attachment offset = inverse(instanceWorld) x corrected position; directions use the matching normalized linear transforms. Range and size stay metres. Before a mapping exists the composed world placement is used.
+- The reconciler validates the whole plan before any engine call, keeps one stable handle per surviving document id, suppresses unchanged calls, resets omitted kind-specific fields, hides through intensity 0 and stages new handles at 0. A failure rolls back and keeps the published observations and the originating error; a failed rollback keeps an AggregateError and stops normal synchronization. Disposal removes only owned document handles, never adapter lights.
+- `game-display.ts` exports `GameDisplayLightState = { lights: DocumentLightHandle[]; engine: LightStats | null; ready: boolean; error: string | null }` through `documentLightState()`: reconciliation readiness, not GPU submission or geometry readiness. Light-only changes do not invalidate geometry. Types come from the `@etcito/raa` root, never deep imports.
+- The sky observation `skyWeatherState()` (S25) is separate and leaves this hand-off unchanged.
 
 ## S20. M4 browser facts and the single capture inventory
-Result id: SDFM-LIGHT-RENDER-FLOW. Owner: sdfm-light-evidence, display M4 / graph index 5. Card 7365 established the first Q3 schema in `sdfm:src/core/scene-lights-evidence.ts`; there was no earlier wire format to recover. Its landed version 1 is separate from the node-side record lifecycle in S21. Exact declarations:
-
-```ts
-export type LightSnapshot = {
-  document: string
-  selection: string[]
-  projection: DocumentGameLight[]
-  game: GameDisplayLightState
-}
-
-export const M4_BROWSER_FACTS = { format: 'sdfm.scene-lights.browser-facts', version: 1 } as const
-export type LightFactJson = null | boolean | number | string | LightFactJson[] | { [key: string]: LightFactJson }
-export type SceneLightFactsBase<J extends SceneLightJob, O extends string> = typeof M4_BROWSER_FACTS & {
-  job: J
-  provenance: { attempt: string; revision: string; pageRef: string }
-  captures: { id: string; filename: string; observation: O }[]
-  observations: Record<O, LightSnapshot>
-}
-export type PointLightFacts = SceneLightFactsBase<'point', 'before' | 'added' | 'undo' | 'redo'> & { lightId: string }
-export type SpotLightFacts = SceneLightFactsBase<'spot', 'on' | 'off'> & { lightId: string }
-export type KindsLightFacts = SceneLightFactsBase<'kinds', 'directionalOn' | 'directionalOff' | 'areaSmall' | 'areaWide'> & { directionalId: string; areaId: string }
-export type OwnershipLightFacts = SceneLightFactsBase<'ownership', 'before' | 'moved' | 'rotated' | 'detached' | 'deleted'> & { lightId: string; ownerId: string }
-export type ManyLightFacts = SceneLightFactsBase<'many', 'many'>
-export type InvalidLightFacts = SceneLightFactsBase<'invalid', 'before' | 'after'> & {
-  lightId: string
-  attempted: { field: keyof DocumentLightParams | 'color'; value: LightFactJson }
-  inspectorError: string
-}
-export type SceneLightBrowserFacts = PointLightFacts | SpotLightFacts | KindsLightFacts | OwnershipLightFacts | ManyLightFacts | InvalidLightFacts
-```
-
-Snapshots observe canonical `serializeDocument` text, actual selection, uncapped `documentGameLights` projection and `documentLightState()`. Projection is authored/world data, not an inferred accepted engine descriptor. Canonical text preserves hidden parameters and optional inner-angle absence. `validateLightSnapshot` requires exact keys, canonical parse/serialize, unique existing selection ids, complete ordered projection, finite placement/normalized direction, unique document ids/handles and consistent readiness/error/statistics. Authored fields use canonical rounding; observed composed placement is not reconstructed from rounded saved text. Nullable asynchronous LightStats fields remain nullable. Ready snapshots require complete matching document handles; engine totals stay separate.
-
-`validateSceneLightBrowserFacts(value, expected?)` rejects unsupported versions, malformed variants, non-JSON/cyclic/nonfinite data, missing observations, duplicate/mismatched captures and externally mismatched attempt/revision/pageRef/job. Managed consumers supply expected provenance independently. Point retains before/add/undo/redo; spot on/off; kinds directional on/off and area dimensions; ownership before/move/rotate/detach/delete; many retains all twelve document-id/handle mappings; invalid retains before/after, attempted field/value and actual visible inspector error. Inspector rejection is distinct from originating Game engine errors. Comparisons require valid reconciliation and the actual functional transitions. Noncaptured comparisons add no required image. Core/topic fixtures pin all six variants, JSON round trips, omission, nullable stats, identities and negative cases.
-
-`SCENE_LIGHT_CAPTURES`, `validateSceneLightCaptures`, `selectSceneLightCaptures` and `sceneLightJobs` are the sole executable inventory/selection/grouping source. Stages are cumulative point → spot → kinds → ownership → limits; jobs are point, spot, kinds, ownership, many and invalid. The explicit `SCENE_LIGHT_IMPLEMENTED_STAGE` is now `limits`, delivered by card 7379; selection refuses missing/invalid declarations or stages beyond implementation, and `all` is available only at limits. No caller infers implementation from the last planned row. The following is the delivered inventory index; filenames, baselines and complete visual descriptions are consumed from that source, never a second selector:
-
-| Capture identity | Filename | Baseline |
-|---|---|---|
-| point-selected | `editor-point-added-selected-light-pool.png` | null |
-| point-undo | `editor-light-undo-node-and-illumination-removed.png` | point-selected |
-| point-redo | `editor-light-redo-node-and-illumination-restored.png` | point-undo |
-| spot-on | `editor-spot-inner-angle-soft-edge.png` | null |
-| spot-off | `editor-spot-disabled-pool-removed.png` | spot-on |
-| directional-on | `editor-directional-near-and-far-lit.png` | null |
-| directional-off | `editor-directional-disabled-receivers.png` | directional-on |
-| area-small | `editor-area-small-extents-illumination.png` | null |
-| area-wide | `editor-area-wide-extents-changed-illumination.png` | area-small |
-| owner-before | `editor-owned-spot-before-parent-move.png` | null |
-| owner-moved | `editor-parent-moved-light-pool-followed.png` | owner-before |
-| owner-rotated | `editor-parent-rotated-light-direction-followed.png` | owner-moved |
-| detached | `editor-light-detached-placement-preserved.png` | owner-rotated |
-| deleted | `editor-light-deleted-illumination-removed.png` | detached |
-| many | `editor-twelve-document-lights-in-game.png` | null |
-| invalid | `editor-invalid-light-input-prior-state-preserved.png` | spot-on |
-
-Functional visual criteria remain readable Layers/Properties and Game where requested, a distance-fading point pool, add/undo/redo removal/restoration, smooth spot cone and disabled contribution, directional near/far illumination without distance attenuation, changed area illumination with changed extents, parent-following movement/rotation, preserved detached placement and removed deleted illumination. The twelve-light scene and useful invalid-input error retain their stated criteria; invalid reproduces the declared spot-on baseline and preserves the prior valid scene. Numeric identity/counts, angles, calls, cleanup and no-truncation are facts/tests, never screenshot deductions. No decorative polish, exact marker colour, local-shadow, reference-image or additional performance criterion is added. S18–S20 and QB1/QB3/QB4/QB6/QB7 acceptance remain intact; S14's existing page contracts and earlier renderer criteria remain unchanged.
-
-The actual app scenario mounts the editor and uses real Layers/Properties add/select/edit/move/undo/redo handlers, including twelve additions and coupled-angle invalid input. It uses app test mode, opt-in UI-driver state readiness and bounded named waits/progress, not arbitrary sleeps or fabricated renderer flags. Each sequential managed job is at most 300 seconds. `src/node/gpu-client/job-client.ts` returns `reply.result` directly; no extra wrapper is accepted. Publish the current build to managed Windows Chrome on a hardware GPU, refusing missing configuration, fallback/software devices, page/GPU errors and device loss. No local browser, Computer Use, Playwright or Linux substitute is evidence.
+Owner: sdfm-light-evidence (`sdfm:src/core/scene-lights-evidence.ts`).
+- `M4_BROWSER_FACTS = { format: 'sdfm.scene-lights.browser-facts', version: 1 }`. `LightSnapshot = { document, selection, projection, game }`. `SceneLightFactsBase` adds `job`, `provenance { attempt, revision, pageRef }`, `captures [{ id, filename, observation }]` and the named `observations`.
+- Jobs and observations: point (before, added, undo, redo), spot (on, off), kinds (directionalOn, directionalOff, areaSmall, areaWide), ownership (before, moved, rotated, detached, deleted), many (many), invalid (before, after, with the attempted field, value and inspector error); each carries its light and owner ids.
+- Validation covers canonical document text, actual selection, the complete ordered projection, unique ids and handles, ready/error consistency, provenance and exact capture coverage. Counts, ownership and cleanup come from facts and tests, never from pixels.
+- `SCENE_LIGHT_CAPTURES` is the only selection source, with 16 identities: point-selected, point-undo, point-redo, spot-on, spot-off, directional-on, directional-off, area-small, area-wide, owner-before, owner-moved, owner-rotated, detached, deleted, many, invalid.
+- `SceneLightApp.capture` frames the real Properties section and calls `assertLightInspectorReadable` immediately before rasterization.
 
 ## S21. Node-side M4_EVIDENCE_RECORDS lifecycle
-Card 7365 supplies runtime verification, inventory-selection helpers and browser-facts v1. Card 7366 solely implemented/tested the node-side declarations, preparation/selection/current producers, bounded runner and freshness lifecycle in `sdfm:src/node/evidence/topics/scene-lights.ts` and its topic test. Card 7367 consumes them for judgments; card 7368 authors their command chain. Card 7383 documents them here. No missing node-side producer is assigned back to node 8/card 7365.
-
-The exact landed declarations below are the single node-side handoff, not an extension to M4_BROWSER_FACTS. `Stage = SceneLightStage | 'all'`; viewport types come from the existing viewport protocol:
-
-```ts
-export const M4_EVIDENCE_RECORDS = { schema: 1, milestone: 'm4' } as const
-
-export type RepoSource = { repo: 'mama' | 'raa' | 'sdfm'; revision: string; branch: string; dirty: boolean }
-export type FileStamp = { path: string; bytes: number; mtimeMs: number }
-export type BuiltFile = FileStamp & { repo: RepoSource['repo']; kind: 'js' | 'wasm' | 'types'; exports: string[] }
-export type RuntimeReceipt = { schema: 1; milestone: 'm4'; preparationId: string; repo: 'mama' | 'raa'; source: RepoSource;
-  builder: { program: string; args: string[]; cwd: string; exitCode: number }; startedAt: string; finishedAt: string;
-  files: BuiltFile[]; status: 'passed' | 'failed'; error: string | null }
-export type Selection = { schema: 1; milestone: 'm4'; selectionId: string; preparationId: string; stage: Stage;
-  sources: RepoSource[]; inputs: FileStamp[]; captures: SceneLightCapture[] }
-export type CurrentAttempt = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; attemptDir: string }
-export type BuildReceipt = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; buildId: string;
-  preparationId: string; sources: RepoSource[]; inputs: FileStamp[]; files: BuiltFile[]; createdAt: string }
-export type ManagedJobRecord = { schema: 1; selectionId: string; attemptId: string; buildId: string; job: SceneLightJob;
-  pageRef: string; jobId: string | null; clientId: string | null; request: ViewportJobInput; result: ViewportJobOutput | null;
-  status: 'passed' | 'failed'; error: string | null }
-export type ImageRecord = { id: string; filename: string; path: string; job: SceneLightJob; jobId: string; clientId: string; buildId: string }
-export type RunRecord = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; buildId: string; pageRef: string;
-  jobs: SceneLightJob[]; images: ImageRecord[]; status: 'running' | 'passed' | 'failed'; errors: string[] }
-export type FreshRecord = { schema: 1; selectionId: string; attemptId: string; buildId: string; imageIds: string[];
-  status: 'passed' | 'failed'; errors: string[] }
-export type JudgeImage = { id: string; filename: string; path: string; selectionId: string; attemptId: string; buildId: string;
-  jobId: string; clientId: string; description: string; aspect: 'functional'; minScore: 6; score: number | null;
-  exitCode: number | null; stdout: string; stderr: string; error: string | null; status: 'passed' | 'failed' | 'missing'; at: string }
-export type JudgeRecord = { schema: 1; milestone: 'm4'; selectionId: string; attemptId: string; buildId: string;
-  images: JudgeImage[]; complete: boolean; errors: string[] }
-```
-
-**Preparation and identities.** `verifySceneLightRuntime` verifies configured linked package paths/revisions and host preparation receipts, shipped root declarations, reachable browser imports, staged copies, usable WASM exports and functional runtime probes. A timestamp or source revision alone does not establish a usable runtime. `runtimeBuild('mama')` records verified prepared artifacts in `runtime-mama.json`; RAA verification follows and shares its random UUID preparationId in `runtime-raa.json`. These actions verify host-built outputs; their `builder` fields describe the verification invocation, not an invented upstream build. A failed receipt retains status/error and is never preparation success. Missing/stale siblings enter configured host recovery, never edits to read-only dependencies.
-
-Managed `select` validates prepared receipts against actual source and artifact observations, checks the implemented stage and complete canonical ordered capture rows (including descriptions, baselines and jobs), assigns a random UUID selectionId and atomically publishes root `out/solstice-m4/selection.json`. Selection binds preparationId/stage/sources/inputs/captures; the attempt is bound separately through CurrentAttempt and its immutable selection copy. Neither identity is a hash or a fabricated consumer upgrade of a legacy record. Consumers revalidate sources, tracked input stamps, actual runtime files, preparation receipts and canonical inventory, rather than trusting record claims.
-
-**Current means a pointer, not a pass.** In the landed implementation `clean()` validates selection and path containment, allocates a new UUID attempt under `attempts/<attemptId>`, writes its `selection.json`, then atomically publishes root `current.json` as CurrentAttempt. It publishes before rendering. It carries selectionId/attemptId/attemptDir; preparationId and stage are resolved through the matching selection, not duplicated fields. This exact public shape supersedes the forecast that current.json itself would be a post-render success envelope. Consumers must require `active()` linkage plus successful run/fresh records to establish validated current rendering. A pointer alone, including a pointer from a failed attempt, never satisfies evidence acceptance.
-
-Cleaning allocates isolation rather than deleting previous evidence: it preserves preparation/selection inputs, other attempts, previous milestones and recovery inputs. Root/path checks reject traversal, absolute paths, unsafe identities and symlink escapes. An attempt that already has run.json cannot rerun; normal retry allocates another attempt. This prevents old images/verdicts from satisfying the new selection without deleting recovery material. Writes of records use atomic replacement; no partial root JSON is exposed.
-
-`publishFiles()` records actual dist outputs in attempt `build.json` with a fresh buildId and includes that receipt as `scene-lights-build.json` in the published page after the evidence runner's rebuild. Requests echo selectionId/attemptId/buildId/job/captureIds/pageRef; browser-facts provenance uses attemptId, build.sources' SDFM revision and published pageRef. Separate browser metrics report actual userAgent/platform/adapter/hardware status and page/GPU errors. Run/job/image records retain real jobId/clientId and direct managed results; a stale terminal job id is never attributed to a timeout. Failure retains attributable diagnostics and recoverable images, stops submission for configured recovery, and cannot publish a passing run/fresh result.
-
-`fresh()` writes attempt `fresh.json` even for failed prerequisites when the attempt can be safely identified. It checks current selection/preparation/build/artifacts, exact job list, unique actual job identities, validated browser facts/provenance/hardware, exact required image identities/paths and complete coverage. PNG integrity and equality to the retained direct-result bytes protect artifact transport; this is not a reference-image, pixel-difference or hash acceptance test. Missing, stale, failed, duplicate, mismatched, partial or unexpected results fail; invalid-input facts must reproduce the spot-on canonical baseline. Successful `run()` also invokes freshness, and the explicit CLI freshness command revalidates it. No fallback to another attempt or milestone is permitted.
-
-`judge()` revalidates freshness and judges every required image against its inventory functional description using `python3 "$NMC_JUDGE_CLIENT" ... --min-score 6`, retaining all available verdicts before failing. Each JudgeImage binds selection/attempt/build/job/client/image identities and keeps score, exit status, stdout/stderr and error; credentials are redacted. Each image must score at least 6 and exit successfully. JudgeRecord.complete requires full coverage and every image passed, with no errors and no intervening selection/attempt change. Topic fixtures exercise producer-to-consumer linkage, standalone compatibility, contained cleanup, failure publication, real direct-result structure, missing/stale/duplicate records and all-image judgment. Browser observations, validated current rendering, all-image judgments and host completion are four distinct claims.
-
-**CLI compatibility.** The legacy invocations remain `node build-node/node/evidence/topics/scene-lights.js runtime-build <stage> <attempt> [mamaRevision] [raaRevision]` and `... select <stage> <attempt>`. Their exclusive-create attempt-local `runtime-build.json` and `select.json` retain their existing fields/meaning; standalone selection needs no managed preparation and cannot become current evidence. Legacy selection starts `{format:'sdfm.scene-lights.selection',version:1,stage,attempt,outDir,captures,jobs}`. Managed invocations use `runtime-build mama`, then `runtime-build raa`, `select` without positional attempt, `clean`, `fresh`, and `judge`, with optional `--out out/solstice-m4` confined to that root. `NMC_M4_STAGE` overrides managed selection stage; the default is the explicit implemented stage. Managed rendering uses `node scripts/gpu-evidence.mjs scene-lights`.
+Owner: sdfm-light-evidence (`sdfm:src/node/evidence/topics/scene-lights.ts`); records live under the ignored `out/solstice-m4/`.
+- `M4_EVIDENCE_RECORDS = { schema: 1, milestone: 'm4' }`; record types `RepoSource`, `FileStamp`, `BuiltFile`, `RuntimeReceipt`, `Selection`, `CurrentAttempt`, `BuildReceipt`, `ManagedJobRecord`, `ImageRecord`, `RunRecord`, `FreshRecord`, `JudgeImage`, `JudgeRecord`.
+- Runtime receipts (`runtime-build mama`, then `raa`) bind source, preparationId, observed files and status; a timestamp or revision alone is not a usable build.
+- `select` binds preparation, stage, sources, inputs and capture rows. `clean` allocates an isolated UUID attempt and publishes `current.json` `{ selectionId, attemptId, attemptDir }`, a pointer and never a pass; an attempt that has run cannot run again. Paths reject traversal and symlink escapes; records are replaced atomically.
+- `fresh` rejects stale, missing, partial, duplicate, mismatched, unexpected or failed jobs and images. `judge` judges every required image against its functional description with minimum 6 and keeps all verdicts.
+- The `m4-*` entries of `sdfm:.nmc/commands.json` are unchanged; managed rendering uses `node scripts/gpu-evidence.mjs scene-lights`.
 
 ## S22. Execution, verified recovery and host completion
-The closed-M3 starting revisions in M4_WORK_RULES remain historical baselines, not immutable expectations for later prepared linked targets. Preserve valid consolidation from card 7380 (`1928bac`), frame/layout consolidation and card 7382 (`09b4abb343`); card 7383 retains its dependencies on 7377, 7379 and 7382. Source correction `e360318da8d7` from 7376 replaces the stale hard-coded RAA expectation with configured linked-revision consistency. Execution 13445 expected historical `b38bca9090e0d3d665fd498746d831e4bea07b60` while the configured target was `09b4abb34370b6b689104b09dfee1e4cd876e6b7`. Do not pin that dependency backward or call the stale project assertion a proven host preparation defect. Actual configured path, package, source, build and shipped-artifact checks remain required.
+- Executable authority is the current `.nmc/commands.json` of each repository and the configured linked targets.
+- A visual milestone closes after its branch checks, its current managed render, fresh and all-image judge chain (S21, S26) and the host's archive of every passed image and fact, with the delivery receipt of the informational email, which is not an approval step.
+- Technical failures keep their originating error and enter the configured Doctor/Operator recovery; they are never waived. A delivery-only failure retries delivery without rendering again.
 
-**Delivered command dependencies.** The 14-command chain below is read from `sdfm@9613d52:.nmc/commands.json`. The four older `m4-recovery-*` entries remain unchanged and are not substitutes for this chain. Select all fourteen commands explicitly; `after` does not imply automatic selection. Host preparation builds/stages configured upstream targets in mama → raa → sdfm order before the receipt-verification actions. Retain configured target policy and branch checks. Each command is one program, and affected tests use anchored selectors and `--jobs 1`; independent work respects NMC_CPUS, default 1.
+## S23. Solstice adaptation and atmosphere/celestial data
+Source paths refer to the solstice revision of Conventions; raa-sky implements this section.
 
-| Command | Program | Explicit after |
-|---|---|---|
-| `m4-mama-build` | `node src/node/evidence/topics/scene-lights.ts runtime-build mama --out out/solstice-m4` |  |
-| `m4-raa-build` | `node src/node/evidence/topics/scene-lights.ts runtime-build raa --out out/solstice-m4` | `m4-mama-build` |
-| `m4-node-build` | `node node_modules/typescript/bin/tsc -p tsconfig.node.json` | `m4-raa-build` |
-| `m4-sdfm-build` | `npm run build` | `m4-node-build` |
-| `m4-functional` | `node scripts/proof/unit.mjs --only "^(core/scene-lights(-authoring\|-evidence)?\|app/paramesh/game-(light-sync\|display-lights)\|app/gpu-page/(ui-driver\|scene-lights-controls)\|node/evidence/topics/scene-lights)\.test\.js$" --jobs 1` | `m4-sdfm-build` |
-| `m4-typecheck` | `npm run typecheck` | `m4-functional` |
-| `m4-guard` | `npm run guard` | `m4-typecheck` |
-| `m4-command-check` | `nmc-boot-check --dist dist --wait 15` | `m4-guard` |
-| `m4-select` | `node build-node/node/evidence/topics/scene-lights.js select --out out/solstice-m4` | `m4-command-check` |
-| `m4-clean` | `node build-node/node/evidence/topics/scene-lights.js clean --out out/solstice-m4` | `m4-select` |
-| `m4-render-local` | `node scripts/proof/unit.mjs --only "^(core/scene-lights(-authoring\|-evidence)?\|app/paramesh/game-(light-sync\|display-lights)\|app/gpu-page/(ui-driver\|scene-lights-controls)\|node/evidence/topics/scene-lights)\.test\.js$" --jobs 1` | `m4-node-build` |
-| `m4-render` | `node scripts/gpu-evidence.mjs scene-lights` | `m4-clean`, `m4-render-local` |
-| `m4-fresh` | `node build-node/node/evidence/topics/scene-lights.js fresh --out out/solstice-m4` | `m4-render` |
-| `m4-judge` | `node build-node/node/evidence/topics/scene-lights.js judge --out out/solstice-m4` | `m4-fresh` |
+**Atmosphere** (`shaders/common/atmosphere.wgsl`, `shaders/sky/luts.wgsl`, `src/sky.rs`)
+- `atmospheric_radius_km(height_m) = 6360 + max(height_m, 1) * 0.001` is the only metres-to-kilometres conversion.
+- Ground radius 6360 km, top 6460 km. Rayleigh (5.802e-3, 13.558e-3, 33.1e-3) per km, scale height 8 km. Mie scattering 14e-3, absorption 4.40e-3, scale height 1.6 km, g 0.8. Ozone (0.650e-3, 1.881e-3, 0.085e-3), triangular profile centred at 25 km, half-width 15 km. Rayleigh and Cornette-Shanks phases.
+- Rgba16Float LUTs: transmittance 256x64 (40 steps), multiple scattering 32x32 (8x8 directions, 20 steps), per-view sky-view 256x144 (32 quadratically spaced steps). Ground albedo is authored (source 0.3). Static LUTs rebuild only on atmosphere parameter changes; the sky-view follows each view's height and the accepted light.
 
-The render entry allows the bounded jobs to run sequentially; its 2400-second chain timeout does not raise the 300-second per-job cap. Build precedes dist readers, selection precedes attempt allocation/render, and render precedes freshness and judgment. The managed boot check remains required. RAA documentation cards run `cargo check`; `bash scripts/check.sh` remains mandatory at milestone verification, as assigned in 7380. It is not displaced by documentation checks or by SDFM's chain.
+**Time and bodies** (`src/time_of_day.rs`)
+- Lunar month 29.53059 days, new-moon anchor day 6, obliquity 23.44 degrees, dominant-light step 0.05 degrees, moonlight 1/2500 of daylight, night glow 1.2e-4, moon radiance 0.03 by day and 0.0024 at night, starlight 0.002.
+- Solar declination = -obliquity * cos(2pi * (day + 10) / 365); hour angle = 2pi * (hours - 12) / 24. Moon age = fract((day + hours / 24 - 6) / 29.53059); lit fraction = 0.5 - 0.5 * cos(2pi * age); the moon's hour angle subtracts 2pi * age and its declination is the solar one times cos(2pi * age).
+- Sun twilight fade over altitudes [-10, -5] degrees, night fade [-14, -6], moon rise [-4, 6], hand-off to the moon below -10 degrees. Body directions point toward the body; a directional light stores the negated travel direction. The undimmed daylight baseline is stored apart from the dominant light.
 
-**Verified evidence as of 2026-11-10.** Retained `/refs/.runs/<command>/<execution>/files/out/solstice-m4/` records establish the following actual prepared/build/source bindings. Both runs prepared MAMA `c17b0c3cd02db25faa1519afd0ce07a3015823ca` and RAA `09b4abb34370b6b689104b09dfee1e4cd876e6b7`; both receipt sources are detached HEAD and clean, with 757 MAMA and 28 RAA built-file observations. Selection/build records retain 2724 input observations and 74 SDFM output files. These counts describe those executions, not new thresholds.
+**Sky bodies** (`shaders/sky/bodies.wgsl`, `milky_way.wgsl`)
+- Atmosphere-filtered sun and moon discs with limb darkening, procedural moon surface, phase and earthshine, temperature-coloured star layers occluded by the moon. Moon angular radius 0.0075; `sunDiscSize` and `sunDiscIntensity` drive the sun disc.
+- The Milky Way (square-root encoding over range 4) is baked once into an Rgba8Unorm 2048x1024 map. Moon, stars and Milky Way are part of `raa_sky_radiance`; there is no celestial fullscreen pass.
+- Not adopted: the combined solstice environment bind group, GI resources, `volume.wgsl`, the solstice aerial perspective.
 
-| Record | 7376 / execution 13448 | 7378 / execution 13451 |
-|---|---|---|
-| SDFM source/build revision | `b03cb9d80aece49b836de0a27d2fab398cd0f330` | `b7e517364e14cc5558b20df35c5c3c6bc051988b` |
-| Stage | kinds | ownership |
-| preparationId | `b9d67094-4d9b-4c78-9ac1-cdc2aff891e3` | `34abec1b-c7b9-4c44-b2c5-5315a2f3437b` |
-| selectionId | `fd030ef9-5068-4297-a2fd-e67d8ed3a943` | `ed33e308-f033-4be6-8d30-0411d1fc43d3` |
-| attemptId | `a0b92960-de1d-4f76-97a6-880442267bf6` | `bfb9a7b7-6dee-455f-bfa5-c2547a4bfbb8` |
-| buildId | `95eba9b9-3114-4822-8816-db6172d3bee2` | `8a70b176-ec8e-42be-8b7e-ad2942d3d7de` |
-| Current Windows Chrome rendering, fresh, judge | passed, 9 images | passed, 14 images including all five ownership captures |
+## S24. Public sky, time and weather API (m08)
+Declared in `packages/raa/types/m08-sky-ibl.d.ts`, documented in `docs/api/m08-sky-ibl.md`. Untyped members are numbers.
 
-These are representative real producer records, not illustrative invented identities: a 13451 CurrentAttempt is `{schema:1,milestone:'m4',selectionId:'ed33e308-f033-4be6-8d30-0411d1fc43d3',attemptId:'bfb9a7b7-6dee-455f-bfa5-c2547a4bfbb8',attemptDir:'attempts/bfb9a7b7-6dee-455f-bfa5-c2547a4bfbb8'}`. Its matching fresh.json records status passed, errors `[]` and the fourteen canonical ids through deleted; judge.json records complete true, errors `[]` and all fourteen verdicts. Scores include directional-on 7, owner-moved/owner-rotated 8 and the remaining eleven 10. Every image in both runs met 6; the host's verified handoff records all fourteen commands passed in each execution. A successful current result includes these linked records, not current.json alone.
+```ts
+type SkyModel = 'physical' | 'legacy'; type SkyPreset = 'day' | 'snow' | 'jungle' | 'night'; type SkyEnvUpdate = 'onChange' | 'everyFrame'
+type WeatherPreset = 'clear' | 'fair' | 'broken' | 'overcast' | 'storm' | 'cirrus'
+interface CloudsDesc { coverage?; density?; altitude?; scale?; wind?: [number, number]; color?: Vec3; silverLining? }
+interface SkyDesc { preset?; model?; zenith?: Vec3; horizon?: Vec3; ground?: Vec3; intensity?; horizonSoftness?; sunDiscSize?; sunDiscIntensity?; clouds?: CloudsDesc; envUpdate?; atmosphere?: { groundAlbedo?: Vec3; mieMultiplier? } }
+interface TimeOfDaySettings { day; hours; latitude; north; enabled: boolean; playing: boolean; speed }
+interface TimeOfDayState extends TimeOfDaySettings { currentDay; currentHours; sunDirection: Vec3; moonDirection: Vec3; moonLit; starPole: Vec3; starEquinox: Vec3; dominant: 'manual' | 'sun' | 'moon' }
+interface WeatherState { coverage; type; base; thickness; density; cirrus; wind: { speed; from }; evolution; rain }
+interface WeatherSettings { enabled: boolean; shadows: boolean; changing: boolean; seed; transitionSeconds; target: WeatherState }
+interface ResolvedWeather extends WeatherSettings { current: WeatherState; cyclePreset: WeatherPreset | null; text: string }
+```
+- Engine: `setSky(SkyDesc)`, `sky(): ResolvedSkyDesc` (every field resolved, `profile` instead of `preset`), `setEnvironmentLighting({ diffuse?, specular? })`, `setTimeOfDay(Partial<TimeOfDaySettings>)`, `timeOfDay()`, `setWeather(WeatherDesc)` (`preset?`, `text?`, the settings flags and every WeatherState field, all optional), `weather()`, `skyWeatherDiagnostics()` (the S25 diagnostics in camelCase, null when absent). Package root: `parseWeatherText(text): WeatherState`, `formatWeatherText(weather): string`.
+- Validation: finite numbers that stay finite as f32. Time, weather, model and atmosphere fields reject wrong types, null, unknown keys and out-of-domain values with `sky.invalid` and the field path. Undefined is omission; omitted fields merge over the authored settings; a preset applies before the overrides; nothing changes before validation completes. Getters return fresh objects. Earlier `setSky` fields keep their null compatibility and ranges.
 
-Actual programmatic recovery supersedes the earlier pending Windows verification: browser-free checks alone did not prove it, but 13448 and 13451 now do. Preserve the `b03cb9d8` scene-pane startup change without claiming it caused or explained the earlier disconnect: the Windows-to-WSL relay outage was independently confirmed. Successful recovery and causal attribution remain separate. Superseded failures are history, not commands to retry blindly. Earlier point/spot/common-inspector runs and M2 bis/M3 results remain earlier evidence; quota interruptions do not erase delivered work. None of these intermediate images closes M4 after the limits scenario changed the source.
+**Time.** `day` integer 1..365, `hours` [0, 24), `latitude` [-90, 90], `north` radians, `speed` >= 0 simulated seconds per second; defaults 172, 9, 38, 0, disabled, paused, 1. `enabled` gives the dominant light to sun and moon; `playing` advances the clock only while enabled, once per Engine invocation by the real delta. While enabled, `setLight` updates the stored daylight baseline and the astronomical direction wins; disabling restores the manual light. Editing `day` or `hours` resets the runtime cursor (`currentDay`, `currentHours`); pause and resume do not.
 
-**Final binding.** The host has bound `required_render_evidence.card_id = 7384` to a final-card-only snapshot of this complete fourteen-command chain, with `env NMC_M4_STAGE=all` on `m4-select`. Project-wide NMC_* variables are reserved; no project-wide override is required. Resolve filenames, images, descriptions, baselines and complete coverage from S20's producer inventory: all sixteen captures across all six jobs, `min_score = 6` for each image. The full current execution follows 7379 and 7383, using the final configured sources and actual prepared/shipped builds; 13451's fourteen-image success cannot substitute for it. Preserve the existing graph and configured recovery gate without a new card, dependency, API or acceptance waiver.
+**Weather.** Defaults: enabled, shadows, not changing, seed 1 (u32), transitionSeconds 0, target fair. Domains: coverage, type, cirrus, rain in [0, 1]; base >= 0 m; thickness >= 100 m; density, wind.speed (m/s), evolution, transitionSeconds >= 0; wind.from finite degrees.
 
-Closure requires 7384's latest successful complete execution, all fourteen commands passing, valid current provenance/coverage and all sixteen current images judged successfully. Host archive presence and informational email delivery receipts must cover every attachment to `kevin+solstice-p1-lights-in-objects@real3d.fr`; readable captures and judgments appear in card outputs as available. No final execution/archive/mail success is asserted here ahead of that host evidence. A DONE implementation, browser facts, fresh.json or complete judge.json alone is not host completion. The informational mail requires no approval reply and introduces no human-approval card.
+| preset | coverage | type | base | thickness | density | cirrus | wind speed / from | evolution | rain |
+|---|---|---|---|---|---|---|---|---|---|
+| fair | 0.3 | 0.9 | 1200 | 1600 | 1 | 0.15 | 7 / 250 | 1 | 0 |
+| clear | 0 | | | | | 0.05 | 5 / 250 | | |
+| broken | 0.62 | 0.95 | 1000 | 2600 | 1.15 | 0.3 | 10 / 240 | 1.3 | |
+| overcast | 0.97 | 0.12 | 600 | 900 | 1.3 | 0 | 8 / 220 | 0.6 | |
+| storm | 0.85 | 1 | 800 | 7000 | 2 | 0.6 | 16 / 230 | 2 | 1 |
+| cirrus | 0.04 | 0.9 | | | | 0.75 | 20 / 260 | | |
 
-Technical failures enter one configured Doctor/Operator flow with configured delegate defaults: preserve originating diagnostics, repair source and missing guard, expose repair status and rerun invalidated work. Reuse unchanged successful work only through guarded host recovery; release jobs promptly and avoid competing repairs/blind retries. Delivery-only failures retry delivery without rebuilding valid captures. Keep recovery inputs until archive and complete attachment delivery are verified. Host cleanup preserves unmerged work, earlier evidence and final artifacts; never modify or compact the WSL disk container. Captures/binaries stay in ignored output and managed capture storage, never committed.
+An empty cell is the fair value. `preset` with `text` rejects; either is the base under the structured overrides.
+- Changing weather: a seeded cycle dwells 120-300 s, then moves over 90 s along clear -> {fair, cirrus}, cirrus -> {fair, broken}, fair -> {broken, clear}, broken -> {overcast, fair}, overcast -> {storm, broken}, storm -> {broken, overcast}. An explicit preset names the cycle start (text starts at fair). It restarts on an explicit preset or text, a changed seed, or changing turning on. A manual target edit stops it unless the same patch sets `changing: true`.
+- `current` eases to the target by `1 - exp(-dt / transitionSeconds)` with shortest-turn wind. Cloud animation uses the invocation delta capped at 0.25 s; wind drift wraps at 252000 m, evolution at 7000 m (4 m/s at multiplier 1); wind is rotated by `north`.
+- Weather text: starts from fair, strips `#` comments, takes the last repeated value, accepts `wind` with omitted components, rejects unknown keys and malformed numbers with a one-based line message, and clamps to the domains where the structured API rejects. Output is the authored target, one setting per line (coverage, type, base, thickness, density, cirrus, wind, evolution, rain), final LF.
+
+**Model and presets.** `physical` is the atmosphere with volumetric clouds; `legacy` the gradient and planar layer, which approximates the authored weather. Physical rendering reads artistic colours and intensity relative to the profile's original values. `groundAlbedo` in [0, 1], `mieMultiplier` > 0.
+- An explicit physical `preset` sets sky, weather, day 172 and hour before the overrides and keeps place, enabled, playing and speed: day = fair, 9 h, albedo 0.3, mie 1; snow = overcast, 12 h, albedo 0.9, mie 1.5; jungle = broken, 15 h, albedo (0.18, 0.26, 0.14), mie 1.2; night = clear, 0 h, albedo 0.3, mie 1. A patch without `preset` resets nothing; a model-only switch keeps the weather.
+- In physical mode cloud coverage, density, altitude and wind write the weather target; scale, color and silverLining stay artistic.
+
+## S25. Sky backend, clouds, fog and editor integration
+**Feature** (raa-sky)
+- `SkyFeature::install(gpu, pipeline: &Rc<RefCell<Pipeline>>, lit: &mut LitRenderer, ibl: IblHandle) -> Result<SkyHandle, RaaError>` installs the S28 passes; one feature evaluates both models behind `raa_sky_radiance`.
+- `SkyHandle`: `set(SkyDesc)`, `set_transaction(SkyTransaction)`, `get`, `mark_dirty`, `set_time_of_day(TimeOfDaySettings)`, `time_of_day`, `set_manual_light(DirectionalLight)`, `advance_frame(invocation: u64, dt_seconds: f64) -> Result<DirectionalLight, RaaError>`, `set_weather(WeatherSettings)`, `set_weather_update(WeatherUpdate)`, `weather`, `set_view(view, camera, history_valid)`, `observe_submission(invocation, submitted_views: u8, complete)`, `remove_view`, `diagnostics`. Setters validate the whole candidate before mutation; a repeated invocation id returns the same snapshot; a steady frame does not allocate.
+- `SkyTransaction { desc, preset: Option<SkyPreset>, cloud_fields: LegacyCloudFields }` (COVERAGE 1, DENSITY 2, ALTITUDE 4, WIND 8) and `WeatherUpdate { settings, cycle_start: Option<WeatherPreset>, restart_cycle }` carry explicit intent; it is never inferred by comparing descriptors.
+
+**Engine wiring** (raa-js `engine.rs`, `state.rs`)
+- `EngineState.sky_invocation_id` starts at 0; `begin_scene_invocation` increments it once per `render` or `probeNonEmpty` (checked, `sky.invalid` on exhaustion), independently of frame and submission counters.
+- `EngineApp::update` calls `advance_sky_frame(input)` before `api::frame_all`: `advance_frame(id, dt_ms / 1000)` runs once and its light becomes `scene.light`. A validated `setLight` reaches `set_manual_light` first. Each view's camera reaches `set_view` before the lit view preparation; `finish_scene_invocation` forwards the acknowledged view mask to `observe_submission`.
+
+**Readiness**
+- New or reallocated atmosphere resources stay pending until an acknowledged submission; the Milky Way is ready only after a complete submitted invocation that carried its bake.
+- `SkyDiagnostics { invocation, submitted_invocation, weather_generation, atmosphere_generation, environment: IblPublication, views: [Option<SkyViewDiagnostics>; 4], readiness }`; a view reports size, invocations, sky-view generation, history validity, reset reasons (bits Resize 1, CameraDiscontinuity 2, Weather 4, Model 8, Enable 16, ViewRemoved 32) and both cloud validity flags. Readiness is pending, ready or failed at stage install, atmosphere, milkyWay, cloudLighting, cloudScreen, environment or submission; a failure keeps its message. Generation 0 means no accepted work.
+- raa-ibl: `IblPublication { requested_generation, published_generation: Option<u64>, pending }`, `IblHandle::publication()`, `publication_error()` (`ibl.readback`), `sh()`, and `invalidate(lighting)`, which clears the environment and every earlier request so a late callback cannot republish. `sky.env` invalidates on disable, model or source change and rejected source.
+- `envUpdate`: `onChange` republishes the IBL on accepted sky, time, weather or light changes, not on cloud drift; `everyFrame` republishes continuously. Views share time and weather and own their LUTs and histories.
+
+**Cloud seam** (raa-cloud-seam)
+- `CloudFrame { invocation, view, size, camera, previous_view_proj, history_valid, weather, sky, dominant, animation_seconds, wind_offset, wind_velocity, evolution, weather_enabled, cloud_shadows, physical }`; wind axes x = east, z = south, rotated by `Place.north`.
+- `CloudViews { panorama, screen, transmittance, screen_valid, panorama_valid }`: Rgba16Float, RGB cloud radiance and A transmittance, composed as `clear_sky * A + RGB`; screen alpha -1 marks an un-marched texel, which falls back to the panorama or the neutral (0, 0, 0, 1). `CloudInvalidation`: Resize, CameraDiscontinuity, Weather, Model, Enable, ViewRemoved.
+- Private trait `CloudRenderer`: `prepare`, `record_lighting`, `record_screen`, `views(view)`, `invalidate(view: Option<u32>, reason)`, `submitted(view, invocation)`. `build.rs` always registers `neutral` and registers `m2` (`clouds::create(gpu)`) when `src/clouds/mod.rs` exists. No backend owns the clock, the weather state or the lights.
+
+**Volumetric clouds** (raa-volumetric-weather; solstice `src/clouds/mod.rs`, `shaders/clouds/*`)
+- Rgba8Unorm noise: shape 128^3, detail 32^3, weather map 512^2; 256-bin coverage CDF; panorama 192x108; half-resolution ping-pong screen targets; Rgba16Float ground shadow 256^2 over 12000 m. Samples: screen 56 primary and 5 light, panorama 32 and 4, shadow 16.
+- Coverage-rank remapping, stratus to cumulus height profiles, Perlin-Worley erosion, curved-layer intersection, two HG lobes, four multiple-scattering octaves, Beer-powder, rain darkening, cirrus.
+- The screen march blends 0.12 of the new sample into cloud-only history reprojected with the previous view-projection; every `CloudInvalidation` resets it. Ground shadow: minimum transmittance 0.04, rain multiplier `1 - 0.3 * rain`; disabled clouds or shadows publish 1.
+
+**Fog.** raa-fog is the only scene aerial perspective; its height integral and Fog slot sample the published environment and call the S28 directional boundary once.
+
+**SDFM.** `RenderSettings` (key `sdfm.render-settings.v1`) adds `gameSky: Pick<Required<SkyDesc>, 'model' | 'preset'>`, `gameTime: TimeOfDaySettings`, `gameWeather: WeatherSettings`, validated strictly and atomically; the authored candidate is saved, never runtime playback. `GameDisplay.skyWeatherState(): { ready, error, sky, time, weather, submittedFrames }` reports the actual Engine and its submitted frames.
+
+## S26. Sky-weather page, inventory and evidence
+**Page** (`examples/sky-weather/`, built to `dist/sky-weather/` by `bash scripts/build-sky-weather.sh`)
+- The build runs `scripts/build-bricks.sh`, stages the page and scene modules, writes the sorted `scenes.json` `[{ id, milestone, file }]` and, last, the ready `build.json`. Stages `foundation`, `atmosphere`, `weather` are cumulative; a scene's `milestone` is its stage.
+- A scene keeps the S14 default export and adds `inventory`, `factNames` and `observe(engine, variant)`. A variant adds `selection { camera, subjects [{ name, min, max }] }` (metres) and optional `measurement { pair, state, preset, features }` and `controls`.
+- Inventory entry `{ id, criterionName, scenario, mode, filename, expectedVisibleBehavior, requiredFacts, pair }` is the only source of selection, filenames and judge descriptions.
+- `requiredFacts` selectors: `snapshot:sky|time|weather|diagnostics`, `runtime:passes|viewSizes|ready`, `assertion:<name>` (declared in `factNames`, exactly one, `passed === true`). `validateInventory(scenes, stage)` also checks that the subjects overlap the camera frustum; `validateRequiredFacts(row, facts, factNames)` throws on missing, null, duplicate or false evidence.
+- `window.nmcGpu.ops.run({ selectionId, attemptId, buildId, scenario, mode, width, height, remainingMs })` returns `{ provenance, browser, adapter, hardware, images [{ id, filename, mime, data, observation }], facts, measurements, errors { console, page, gpu } }`. `remainingMs` (at most 300000) becomes one local deadline for setup, waits, measurements and captures.
+- `facts` = the scene's `{ sky, time, weather, diagnostics, assertions [{ name, passed, detail }], edits [{ operation, accepted, error, before, after }] }` plus the runtime's `passes`, `viewSizes` and `readiness { status, stage, error }`. Unavailable values are null; nothing is inferred.
+- `FeatureMeasurement { pair, state, preset, features, width, height, warmup, frames, frameTimesMs, fps, p50Ms, p95Ms, p99Ms }` (PAIR_RUN): fps = 1000 / mean, nearest-rank percentiles `ceil(p * N) - 1`, a missing frame expires after min(10 s, remaining deadline). No pass threshold.
+
+**Records** (`node web/common/sky-weather-job.mjs <check|select|clean|render|fresh|judge> --page dist/sky-weather --out out/sky-weather/<stage> --stage <stage>`)
+- `build.json`: `{ buildId, preparationId, inputs, builtAt, page, files, status, error }`; `inputs` holds repository, revision, dependencies, source texts, toolchain, commands and criteria text.
+- Stage root: `selection.json` `{ selectionId, stage, buildId, preparationId, inputs, inventory }` and `current.json` `{ selectionId, attemptId, directory }`, a pointer and never a pass. `clean` allocates `attempts/<uuid>/` with frozen selection and build copies and deletes only image files of attempts of another build. An attempt that left `allocated` is never reused.
+- `run.json`: `{ selectionId, attemptId, buildId, preparationId, pageRef, jobs, images, kept, status, errors }`. `render` publishes at most once and runs one managed operation per (scenario, mode) group; a group of an earlier attempt of the same build (`buildKey` = receipt inputs without preparationId) is kept when its job passes every freshness check and its images are intact.
+- `fresh.json`: current inputs, identity linkage, exact image coverage, Windows Chrome physical-GPU provenance, readiness, requiredFacts, measurements and empty console, page and GPU errors, over kept and new images.
+- `judge.json`: one verdict `{ id, filename, description, minScore: 6, exit, score, output, judgedAt }` per selected image, from the inventory behaviour without a reference; a kept byte-identical image with the same description reuses its passed verdict.
+
+**Commands**
+- `raa:.nmc/commands.json`: `p2-sky-build` (1800 s), then per stage `p2-sky-<stage>-check`, `-select`, `-clean`, `-render` (900 s), `-fresh`, `-judge` (600 s), chained in that order with judge after render and fresh. The weather judge uses `--budget-s 1020` (timeout 1200 s); `p2-sky-weather-judge-local` runs the job, contract and weather `node --test` files.
+- `sdfm:.nmc/commands.json`: `p2-editor-mama-build`, `-raa-build`, `-node-build`, `-build`, `-check`, `-select`, `-clean`, `-render`, `-fresh`, `-judge`; records under `out/sky-weather-editor/`.
+
+**Coverage.** Atmosphere: clear day, twilight, night, a changed moment, the four presets, physical versus legacy, fog, IBL and flat-background pairs, invalid input, multi-view facts, and resize, camera-cut, model, weather and re-enable transitions. Weather: the six presets, drift and evolution, ground shadow and weather pairs, panorama and IBL publication, history resets. Editor: the Render settings panel beside the Game view, changed time and weather across reload, `.weather` import/export, pause/play, an invalid input with unchanged accepted state.
+
+## S27. Pinning tests of the sky and weather contracts
+- Sky: `crates/raa-sky/tests/{desc,variants,time_of_day,weather,lifecycle,backend_registry}.rs` and the inline tests of `desc.rs`, `state.rs`, `feature.rs`, `background.rs`, `env_pass.rs`; `variants.rs` pins `raa_sky_radiance`, the legacy and physical compositions and the cube orientation. Cloud backend: `crates/raa-sky/src/clouds/tests/`.
+- Shared layouts: `crates/raa-pipeline/src/lighting.rs` (group 1 bindings 0..13, 15, 16 and dummies), `tests/resources.rs`; `crates/raa-shader/src/lib.rs`, `src/gpu_constants.rs`, `tests/{compose,variants,user_fn}.rs`.
+- Composed budgets and directional consumers: `tests/variants.rs` of raa-lit, raa-oit, raa-fur, raa-shadow, raa-fog, raa-particles and raa-shafts.
+- Engine and package: `crates/raa-js/tests/{api_registry,frame_lifecycle,views,sky_weather}.rs`, `packages/raa/test/sky-weather.test.mjs`.
+- SDFM: `src/core/sky-weather-settings.test.ts`, `src/app/paramesh/game-sky-weather.test.ts`, `src/app/gpu-page/sky-weather-controls.test.ts`, `src/node/evidence/topics/sky-weather.test.ts`.
+
+## S28. Sky and weather GPU layouts, passes and directional boundary
+Completes S10-S12. FrameGpu, EnvGpu, instance records and feature ids are unchanged; ids 25 and 26 stay reserved.
+
+**Group 1** (FRAGMENT-only additions; binding 14 unallocated; no new storage buffer)
+- 15 `raa_cloud_transmittance: texture_2d_array<f32>`, Rgba16Float: layer 0 the 256x256 ground map, layer 1 texel (0, 0) its mean; disabled = 1x1 two-layer ones; sampled with binding 6.
+- 16 `raa_weather_lighting: WeatherLightingGpu` (64 B, UNIFORM | COPY_DST): `map` @0 (origin x, origin z, extent m, cloud enabled), `light` @16 (direction toward the dominant light, 0), `atmosphericTransmission` @32 (rgb, 1), `flags: vec4<u32>` @48 (physical enabled). Defaults (0, 0, 1, 0), (0, 1, 0, 0), ones, zeros. The CPU writes map, light and flags; the atmosphere compute result (16 B) is copied to offset 32 after dispatch and is never overwritten by a stale upload.
+- `LightingResources`: `set_cloud_transmittance(view, map, light) -> Result<(), RaaError>`, `clear_cloud_transmittance()`, `set_physical_atmosphere(enabled)`, `atmospheric_transmission_buffer()`.
+
+**Directional boundary** (raa-shader)
+- `WEATHER_LIGHTING_WGSL` declares the record, both bindings and `raa_directional_radiance(raw: vec3<f32>) -> vec3<f32>` (`raw`, times the transmission when physical is enabled); `PRELUDE_WGSL` includes it once. The Forward, Transparent and FurShell passes call Direct with `raa_directional_radiance(sun_color) * shadow`; lit particles, the fog slot's inscatter and the sun shafts use the same boundary. Local lights do not; atmosphere and cloud evaluation receive raw daylight.
+- `CLOUD_SHADOW_WGSL` defines `raa_cloud_shadow(world_pos) -> f32`: 1 when `map.w < 0.5`, otherwise the map sampled where the line to the dominant light meets the ground, fading to the mean across the edge band 0.75..1. The default Shadow slot returns it; the `csm` provider returns `vis * contact * raa_cloud_shadow`, or `contact * raa_cloud_shadow` when CSM is cleared.
+
+**Passes** (raa-sky): `sky.atmosphere` 5 (Milky Way bake, LUTs, directional transmission), `sky.cloud-lighting` 8 (panorama, ground transmittance), `sky.env` 10, `sky.cloud-screen` 55 (screen march), contributor `sky.background` 900. Required order: atmosphere < cloud-lighting < sky.env and prepass < cloud-screen < forward. Disabling `sky.cloud-lighting` invalidates the backend and publishes neutral transmittance; disabling `sky.env` clears the IBL and cancels pending publication; the flat background still writes `EnvGpu.background`.
+
+**Sky group 2** (env and background): 0 `PhysicalSkyGpu` (256 B), 1 transmittance LUT, 2 sky-view, 3 cloud panorama, 4 screen clouds, 5 Milky Way, 6 clamp sampler, 7 repeat-U sampler; unused textures are dummies. Compute modules use group 2 with empty groups 0 and 1.
+
+**PhysicalSkyGpu** (16 B lanes): `viewer` @0 (world xyz m, radius km); `sun` @16 (direction, moon lit); `moon` @32 (direction, radiance); `pole` @48 (xyz, star intensity); `equinox` @64 (xyz, night glow); `dominant` @80 (direction, raw intensity); `daylight` @96 (rgb, baseline intensity); `discs` @112 (sun radius, sun multiplier, moon radius, pixel angle); `ground_albedo` @128 (rgb, mie multiplier); `rayleigh` @144 (coefficients, scale height); `mie` @160 (scattering, absorption, scale height, g); `ozone` @176 (coefficients, rain); `planet` @192 (ground radius, top radius, animation seconds, 0); `flags: vec4<u32>` @208 (physical, cloud screen valid, cloud panorama valid, 0); zeros @224..256.
 
 ## Module ownership
 
@@ -939,19 +811,19 @@ Technical failures enter one configured Doctor/Operator flow with configured del
 | tooling | `scripts/check.sh`<br>`scripts/build-web.sh`<br>`scripts/check-no-assets.sh`<br>`scripts/hooks/pre-commit`<br>`scripts/gpu-capture.mjs`<br>`web/serve.mjs`<br>`web/common/nmc-gpu.js`<br>`web/common/run-loop.js`<br>`proofs/lib/proof.mjs` | workspace |
 | proof-m1 | `proofs/m1-boot.mjs`<br>`proofs/results/m1-boot.json`<br>`docs/dogfood/m1.md` | tooling, demo-m1-boot |
 | proof-m2 | `proofs/m2-scene.mjs`<br>`proofs/results/m2-scene.json`<br>`docs/dogfood/m2.md` | tooling, raa-bench, demo-m2-scene |
-| sdf-ref-tool | `tools/sdf-ref/gen-leaf-fixtures.mjs`<br>`tools/sdf-ref/README.md` | none |
+| sdf-ref-tool | `tools/sdf-ref/gen-leaf-fixtures.mjs`<br>`tools/sdf-ref/README.md` | raa-prims |
 | proof-m3 | `proofs/m3-prims.mjs`<br>`proofs/results/m3-prims.json`<br>`proofs/results/m3-prims-table.json`<br>`docs/dogfood/m3.md` | tooling, raa-prims, demo-m3-prims |
 | proof-m4 | `proofs/m4-loader.mjs`<br>`proofs/results/m4-asset.json`<br>`docs/dogfood/m4.md` | tooling, raa-loader, demo-m4-asset |
 | proof-m5 | `proofs/m5-booleans.mjs`<br>`proofs/results/m5-booleans.json`<br>`proofs/results/m5-csg-cases.json`<br>`docs/dogfood/m5.md` | tooling, raa-csg, demo-m5-booleans |
-| raa-js | `crates/raa-js/Cargo.toml`<br>`crates/raa-js/README.md`<br>`crates/raa-js/build.rs`<br>`crates/raa-js/src/lib.rs`<br>`crates/raa-js/src/engine.rs`<br>`crates/raa-js/src/convert.rs`<br>`crates/raa-js/src/state.rs`<br>`crates/raa-js/src/feature_map.rs`<br>`crates/raa-js/src/api/m07_meshes.rs`<br>`crates/raa-js/src/api/m07_pipeline.rs`<br>`crates/raa-js/tests/convert.rs`<br>`crates/raa-js/tests/api_registry.rs` | raa-core, raa-web, raa-math, raa-geom, raa-material, raa-scene, raa-prims, raa-loader, raa-csg, raa-mesh, raa-shader, raa-pipeline, raa-lit, raa-tonemap |
-| js-package | `scripts/build-package.sh`<br>`packages/raa/package.json`<br>`packages/raa/index.js`<br>`packages/raa/index.d.ts`<br>`packages/raa/README.md`<br>`packages/raa/LICENSE` | raa-js, api-m7 |
+| raa-js | `crates/raa-js/Cargo.toml`<br>`crates/raa-js/README.md`<br>`crates/raa-js/build.rs`<br>`crates/raa-js/src/lib.rs`<br>`crates/raa-js/src/engine.rs`<br>`crates/raa-js/src/convert.rs`<br>`crates/raa-js/src/state.rs`<br>`crates/raa-js/src/feature_map.rs`<br>`crates/raa-js/src/api/m07_meshes.rs`<br>`crates/raa-js/src/api/m07_pipeline.rs`<br>`crates/raa-js/tests/convert.rs`<br>`crates/raa-js/tests/api_registry.rs` | raa-core, raa-web, raa-math, raa-scene, raa-lit, raa-pipeline, raa-sky, raa-tonemap |
+| js-package | `scripts/build-package.sh`<br>`packages/raa/package.json`<br>`packages/raa/index.js`<br>`packages/raa/index.d.ts`<br>`packages/raa/README.md`<br>`packages/raa/LICENSE`<br>`scripts/build-bricks.sh`<br>`packages/raa/sky-weather.js`<br>`packages/raa/test/sky-weather.test.mjs`<br>`packages/raa/test/load-once.test.mjs` | raa-js, api-m8 |
 | project-docs | `README.md`<br>`docs/API.md`<br>`docs/ARCHITECTURE-notes.md` | js-package, raa-js |
 | proof-m6 | `proofs/m6-api.mjs`<br>`proofs/results/example-basic.json`<br>`proofs/results/m6-sizes.json`<br>`docs/dogfood/m6.md` | tooling, raa-ext-test, js-package, example-basic, project-docs |
-| api-m7 | `packages/raa/types/m07-meshes-hdr.d.ts`<br>`docs/api/m07-meshes-hdr.md` | raa-js |
+| api-m7 | `packages/raa/types/m07-meshes-hdr.d.ts`<br>`docs/api/m07-meshes-hdr.md`<br>`crates/raa-js/src/api/m07_meshes.rs`<br>`crates/raa-js/src/api/m07_pipeline.rs` | raa-js |
 | lookdev-page | `examples/lookdev/index.html`<br>`examples/lookdev/main.js`<br>`examples/lookdev/nmc.gpu.json`<br>`examples/lookdev/lib/geometry.js`<br>`examples/lookdev/lib/objects.js`<br>`examples/lookdev/lib/runner.js` | js-package, api-m7, tooling |
 | lookdev-tools | `scripts/build-lookdev.sh`<br>`scripts/lookdev-capture.mjs`<br>`proofs/lib/p2.mjs`<br>`proofs/lib/p2-smoke.mjs` | tooling, js-package, lookdev-page |
 | proof-m7 | `proofs/m7-meshes-hdr.mjs`<br>`examples/lookdev/scenes/m07-base.js`<br>`docs/dogfood/m7.md` | lookdev-tools, lookdev-page, raa-js |
-| api-m8 | `crates/raa-js/src/api/m08_sky_ibl.rs`<br>`packages/raa/types/m08-sky-ibl.d.ts`<br>`docs/api/m08-sky-ibl.md` | raa-js, raa-sky, raa-ibl |
+| api-m8 | `crates/raa-js/src/api/m08_sky_ibl.rs`<br>`packages/raa/types/m08-sky-ibl.d.ts`<br>`docs/api/m08-sky-ibl.md`<br>`crates/raa-js/tests/sky_weather.rs` | raa-js, raa-sky, raa-ibl |
 | proof-m8 | `proofs/m8-sky-ibl.mjs`<br>`examples/lookdev/scenes/m08-sky-ibl.js`<br>`docs/dogfood/m8.md` | lookdev-tools, api-m8 |
 | api-m9 | `crates/raa-js/src/api/m09_shadows_ao.rs`<br>`packages/raa/types/m09-shadows-ao.d.ts`<br>`docs/api/m09-shadows-ao.md` | raa-js, raa-shadow, raa-gtao, raa-contact |
 | proof-m9 | `proofs/m9-shadows-ao.mjs`<br>`examples/lookdev/scenes/m09-shadows-ao.js`<br>`docs/dogfood/m9.md` | lookdev-tools, api-m9 |
@@ -967,25 +839,29 @@ Technical failures enter one configured Doctor/Operator flow with configured del
 | proof-m14 | `proofs/m14-camera-effects.mjs`<br>`examples/lookdev/scenes/m14-camera-effects.js`<br>`docs/dogfood/m14.md` | lookdev-tools, api-m14 |
 | api-m15 | `crates/raa-js/src/api/m15_animation.rs`<br>`packages/raa/types/m15-animation.d.ts`<br>`docs/api/m15-animation.md` | raa-js, raa-deform |
 | api-m28 | `crates/raa-js/src/api/m28_lights.rs`<br>`packages/raa/types/m28-lights.d.ts`<br>`docs/api/m28-lights.md` | raa-lit |
-| raa-sdfm-pkg | `packages/raa-sdfm/**` | api-m28, mama-light-record, js-package, mama-light-transport |
 | mama-light-record | `mama:crates/procgen/src/nodes/game_markers.rs`<br>`mama:crates/procgen/src/passes/gameplay.rs`<br>`mama:crates/procgen/src/output.rs`<br>`mama:crates/procgen/SPEC.md`<br>`mama:src/procgen/output-types.ts` | none |
 | mama-light-transport | `mama:src/procgen/scene-file.ts`<br>`mama:src/procgen/scene-build.ts`<br>`mama:src/procgen/{scene-file,scene-build,runtime}.test.ts`<br>`mama:crates/procgen/src/ext/runtime/delta.rs`<br>`mama:crates/procgen/tests/runtime.rs` | mama-light-record |
-| sdfm-light-authoring | `sdfm:src/core/scene-lights.ts` and focused tests<br>`sdfm:src/plugins/ui/30-point-lights.ts`<br>`sdfm:src/components/editor/PointLightSection.vue`<br>`sdfm:src/node/schema/{docs,json-schema}.ts`<br>`sdfm:docs/schema/{sdfm-document.schema,tools}.json`<br>`sdfm:docs/llm/catalog.md` | mama-light-record |
-| sdfm-game-light-sync | `sdfm:src/app/paramesh/game-render-settings.ts`<br>`sdfm:src/app/paramesh/game-light-sync.ts` and its test<br>`sdfm:src/app/paramesh/game-display.ts` and game-display-lights.test.ts<br>`sdfm:tsconfig.node.json` (two named test includes only) | sdfm-light-authoring, api-m28, raa-sdfm-pkg, mama-light-record |
-| sdfm-light-evidence | `sdfm:src/core/scene-lights-evidence.ts` and its test<br>`sdfm:src/node/evidence/topics/scene-lights.ts` and its test<br>`sdfm:src/app/gpu-page/scenarios/{scene-lights-app,ui-driver}.ts`<br>`sdfm:src/app/gpu-page/ui-driver.test.ts`<br>`sdfm:src/node/evidence/run.ts`<br>`sdfm:.nmc/commands.json` | sdfm-light-authoring, sdfm-game-light-sync, raa-sdfm-pkg |
-| solstice-architecture-finalization | `raa:ARCHITECTURE.md` | mama-light-record, api-m28, raa-js, js-package, raa-lit, raa-pipeline, raa-sdfm-pkg, mama-light-transport, sdfm-light-authoring, sdfm-game-light-sync, sdfm-light-evidence |
+| sdfm-light-authoring | `sdfm:src/core/scene-lights.ts`<br>`sdfm:src/plugins/ui/30-point-lights.ts`<br>`sdfm:src/components/editor/PointLightSection.vue`<br>`sdfm:src/node/schema/{docs,json-schema}.ts`<br>`sdfm:docs/schema/{sdfm-document.schema,tools}.json`<br>`sdfm:docs/llm/catalog.md`<br>`sdfm:src/core/scene-lights.test.ts`<br>`sdfm:src/core/scene-lights-authoring.test.ts`<br>`sdfm:src/node/schema/docs.ts`<br>`sdfm:src/node/schema/json-schema.ts`<br>`sdfm:src/app/gpu-page/scene-lights-controls.test.ts` | mama-light-record |
+| sdfm-game-light-sync | `sdfm:src/app/paramesh/game-render-settings.ts`<br>`sdfm:src/app/paramesh/game-light-sync.ts`<br>`sdfm:src/app/paramesh/game-display.ts`<br>`sdfm:tsconfig.node.json`<br>`sdfm:src/app/paramesh/game-light-sync.test.ts`<br>`sdfm:src/app/paramesh/game-display-lights.test.ts` | sdfm-light-authoring, api-m28, raa-sdfm-pkg, sdfm-sky-weather-settings |
+| sdfm-light-evidence | `sdfm:src/core/scene-lights-evidence.ts`<br>`sdfm:src/node/evidence/topics/scene-lights.ts`<br>`sdfm:src/app/gpu-page/scenarios/{scene-lights-app,ui-driver}.ts`<br>`sdfm:src/app/gpu-page/ui-driver.test.ts`<br>`sdfm:src/node/evidence/run.ts`<br>`sdfm:.nmc/commands.json`<br>`sdfm:src/core/scene-lights-evidence.test.ts`<br>`sdfm:src/node/evidence/topics/scene-lights.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/scene-lights-app.ts`<br>`sdfm:src/app/gpu-page/scenarios/ui-driver.ts`<br>`sdfm:src/app/gpu-page/scene-lights-visibility.ts`<br>`sdfm:src/app/gpu-page/scene-lights-requests.ts` | sdfm-light-authoring, sdfm-game-light-sync, raa-sdfm-pkg |
+| solstice-architecture-finalization | `ARCHITECTURE.md` | api-m8, raa-sky, raa-volumetric-weather, sdfm-sky-weather-settings, sdfm-sky-weather-evidence |
 | proof-m15 | `proofs/m15-animation.mjs`<br>`examples/lookdev/scenes/m15-waddle.js`<br>`docs/dogfood/m15.md` | lookdev-tools, api-m15 |
+| raa-cel | `crates/raa-js/src/api/m27_cel.rs`<br>`packages/raa/types/m27-cel.d.ts`<br>`docs/api/m27-cel.md` | raa-shader, raa-pipeline, raa-lit |
+| p2-managed-transport | `web/common/lights-job.mjs`<br>`web/common/lights-job.test.mjs`<br>`web/common/gpu-job.mjs`<br>`web/common/gpu-job.test.mjs` | tooling |
+| sky-weather-page | `examples/sky-weather/index.html`<br>`examples/sky-weather/main.js`<br>`examples/sky-weather/nmc.gpu.json`<br>`examples/sky-weather/scenes/foundation.js`<br>`examples/sky-weather/contract.test.mjs`<br>`scripts/build-sky-weather.sh`<br>`.nmc/commands.json` | js-package, api-m7, lookdev-page, p2-managed-transport |
+| sky-atmosphere-scenes | `examples/sky-weather/scenes/atmosphere.js`<br>`examples/sky-weather/atmosphere.test.mjs` | api-m8, sky-weather-page, raa-fog |
+| sky-weather-scenes | `examples/sky-weather/scenes/weather.js`<br>`examples/sky-weather/weather.test.mjs` | raa-volumetric-weather, sky-weather-page, sky-atmosphere-scenes, api-m8 |
+| sdfm-sky-weather-settings | `sdfm:src/core/render-settings.ts`<br>`sdfm:src/core/sky-weather-settings.ts`<br>`sdfm:src/core/sky-weather-settings.test.ts`<br>`sdfm:src/app/render-settings.ts`<br>`sdfm:src/components/shell/RenderSettingsPanel.vue`<br>`sdfm:src/components/shell/SkyWeatherSettings.vue`<br>`sdfm:src/app/paramesh/game-render-settings.ts`<br>`sdfm:src/app/paramesh/game-sky-weather.test.ts`<br>`sdfm:src/node/ops/render-settings.ts`<br>`sdfm:docs/schema/sdfm-document.schema.json`<br>`sdfm:docs/schema/tools.json`<br>`sdfm:docs/llm/catalog.md`<br>`sdfm:tsconfig.node.json`<br>`sdfm:src/app/procedural/raytrace-display.ts`<br>`sdfm:src/plugins/ui/36-display.ts` | api-m8, js-package, raa-volumetric-weather |
+| sdfm-sky-weather-evidence | `sdfm:src/core/sky-weather-evidence.ts`<br>`sdfm:src/core/sky-weather-evidence.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/sky-weather-app.ts`<br>`sdfm:src/app/gpu-page/sky-weather-visibility.ts`<br>`sdfm:src/app/gpu-page/sky-weather-controls.test.ts`<br>`sdfm:src/node/evidence/topics/sky-weather.ts`<br>`sdfm:src/node/evidence/topics/sky-weather.test.ts`<br>`sdfm:.nmc/commands.json` | sdfm-sky-weather-settings, sdfm-game-light-sync, sdfm-light-evidence, sky-weather-scenes |
+| raa-cloud-seam | `crates/raa-sky/src/cloud_backend.rs`<br>`crates/raa-sky/tests/backend_registry.rs` | raa-sky, raa-pipeline, raa-scene, raa-math |
+| sky-weather-job-resume | `web/common/sky-weather-job.mjs`<br>`web/common/sky-weather-job.test.mjs` | sky-weather-page, p2-managed-transport |
 
 ## Module: workspace
 Files: `Cargo.toml`, `Cargo.lock`, `.gitignore`.
 
-- `[workspace] resolver = "2"`, `members = ["crates/*", "demos/*", "tests/*"]`.
-- `[workspace.package]`: version 0.1.0, edition 2024, license MIT, rust-version 1.96.0.
-- `[workspace.dependencies]`:
-  - the closed dependency list (Conventions), including `naga` (`wgsl-in`, default features off);
-  - the pre-P2 internal crates by path (raa-core, raa-web, raa-math, raa-geom, raa-material, raa-scene, raa-render, raa-alloc-count, raa-prims, raa-loader, raa-csg).
-- P2 crates reference each other through path dependencies.
-- `[profile.wasm-release]` follows Conventions. `Cargo.lock` is committed and is updated by any task that adds a member. `.gitignore` is unchanged.
+- `[workspace]` resolver 2, member globs; `[workspace.package]` version 0.5.0, edition 2024, license MIT, rust-version 1.96.0.
+- `[workspace.dependencies]`: the closed list (Conventions) and the v0 crates by path (raa-core, raa-web, raa-math, raa-geom, raa-material, raa-scene, raa-render, raa-alloc-count, raa-prims, raa-loader, raa-csg). Lit crates use path dependencies.
+- `.gitignore` blocks target/, node_modules/, dist/, release/, out/, .nmc/, pkg/, *.log and binary assets (*.glb, *.gltf, *.png, *.jpg, *.avif, *.ktx2, *.bin).
 
 ## Module: tooling
 Files: `scripts/check.sh`, `scripts/build-web.sh`, `scripts/check-no-assets.sh`, `scripts/hooks/pre-commit`, `scripts/gpu-capture.mjs`, `web/serve.mjs`, `web/common/nmc-gpu.js`, `web/common/run-loop.js`, `proofs/lib/proof.mjs`. Owner: M1.
@@ -1724,25 +1600,13 @@ The wasm-bindgen engine (cdylib + rlib). `#[wasm_bindgen(js_name = Engine)] pub 
 Tests: `convert.rs` (v0 conversions), `api_registry.rs` (build.rs output lists every api file, install/frame order).
 
 ## Module: js-package
-Files: `packages/raa/{package.json, index.js, index.d.ts, README.md, LICENSE}`, `scripts/build-package.sh`.
+Files: `packages/raa/{package.json, index.js, sky-weather.js, index.d.ts, README.md, LICENSE}`, `packages/raa/test/*.test.mjs`, `scripts/build-package.sh`, `scripts/build-bricks.sh`.
 
-**Package.** `@etcito/raa` 0.1.0 (a version bump is an owner decision), `"type": "module"`, `exports: { ".": { types: ./index.d.ts, default: ./index.js } }`. `files` lists index.js, index.d.ts, README.md, LICENSE and pkg/ (gitignored wasm-bindgen output of raa-js).
-
-**`index.js`** exports `async function loadRaa(options = {}) -> Promise<RaaModule>`. It initialises the wasm from `options.wasmUrl` or the packaged pkg URL. It has no module-level mutable state. `RaaModule = { version: '0.1.0', createEngine(canvas, options) }`.
-
-**`index.d.ts`** is hand-written API v0:
-- `Vec3`, `Quat`, `PrimKind`, `EngineOptions`, `MaterialDesc`, `CameraDesc`, `LightDesc`, `AmbientDesc`, `AdapterInfo`, `FrameStats`;
-- `AssetInfo` and `SpawnedAsset`;
-- `RaaError`, `Engine`, `RaaModule`, `loadRaa`.
-
-P2 additions live in `packages/raa/types/mNN-*.d.ts`, which repeat `export interface Engine` / `EngineOptions` declarations for TypeScript to merge.
-
-**`scripts/build-package.sh [--tag vX.Y.Z]`** runs offline. Steps:
-1. Builds raa-js with wasm-release and runs wasm-bindgen `--target web` into `packages/raa/pkg/`.
-2. Copies LICENSE and writes `dist/raa-sizes.json` (S7).
-3. Stages the package in `target/package-stage/raa/`. The shipped `index.d.ts` is `packages/raa/index.d.ts` followed by every `packages/raa/types/*.d.ts` in file-name order. The stage is also copied to `dist/package/raa/` for the P2 pages.
-4. Builds `dist/example-basic/`.
-5. Runs `npm pack` from the stage into `release/` with `SHA256SUMS`, and checks the tarball listing. The same tgz is written to `dist/etcito-raa-<version>.tgz`.
+- `@etcito/raa` 0.5.0, `type: module`, exports `.` (types `./index.d.ts`, default `./index.js`); `files` lists index.js, sky-weather.js, index.d.ts, README.md, LICENSE and pkg/.
+- `index.js`: `loadRaa(options = {}) -> Promise<RaaModule>` initialises the wasm from `options.wasmUrl` or the packaged URL. All calls share one instantiation; a failed one is forgotten so a later call retries. `RaaModule = { version, createEngine(canvas, options) }`. It re-exports `parseWeatherText` and `formatWeatherText` from `sky-weather.js` (S24, pure).
+- `index.d.ts` is hand-written API v0 (`Vec3`, `Quat`, `PrimKind`, `EngineOptions`, `MaterialDesc`, `CameraDesc`, `LightDesc`, `AmbientDesc`, `AdapterInfo`, `FrameStats`, `AssetInfo`, `SpawnedAsset`, `RaaError`, `Engine`, `RaaModule`, `loadRaa`). Additions live in `types/mNN-*.d.ts`, merged through repeated `export interface Engine` declarations.
+- `scripts/build-package.sh [--tag vX.Y.Z]`, offline: builds raa-js (wasm-release, wasm-bindgen `--target web`) into `packages/raa/pkg/`; writes `dist/raa-sizes.json` (S7); stages `target/package-stage/raa/` and `dist/package/raa/`, where the shipped `index.d.ts` is the root file followed by every `types/*.d.ts` in name order (`m27-cel.d.ts` is copied as a referenced module); builds `dist/example-basic/`; runs `npm pack` into `release/` with `SHA256SUMS`.
+- `scripts/build-bricks.sh [--out <dir>]` runs build-package.sh and stages `dist/bricks/{raa,raa-sdfm,raa-anim}` with `bricks.json`; SDFM and the sky-weather page read these bricks.
 
 ## Module: example-basic
 Files: `examples/basic/{index.html, main.js, nmc.gpu.json, gpu-input.json}`. Owner: M6.
@@ -2099,35 +1963,26 @@ Image-based lighting from the sky cube (S10 bindings 3-5). Depends on raa-core, 
 Tests: sh.rs, variants.rs, gpu_ibl.rs.
 
 ## Module: raa-sky
-Files: `crates/raa-sky/**`.
+Files: `crates/raa-sky/**`, except `src/clouds/**` (raa-volumetric-weather) and `src/cloud_backend.rs` with `tests/backend_registry.rs` (raa-cloud-seam).
 
-Procedural sky (S12 `sky.env`, `sky.background`). Depends on raa-core, raa-pipeline, raa-lit, raa-shader, raa-ibl.
+Physical and legacy sky, time of day, weather data and the sky passes (S23-S25, S28). Depends on raa-core, raa-math, raa-scene, raa-pipeline, raa-lit, raa-shader, raa-ibl.
 
-**Descriptions**
-- `CloudDesc { coverage, density, altitude_m (1500), scale_m (2500), wind_mps: [f32; 2], color, silver_lining }`.
-- `SkyDesc { zenith, horizon, ground, intensity, horizon_softness, sun_disc_angular_radius, sun_disc_intensity, clouds, env_update: EnvUpdate { OnChange, EveryFrame } }`.
-- `SkyDesc::preset("day"|"snow"|"jungle"|"night")`. `validate` gives `sky.invalid` naming the field.
+- `desc.rs`: `CloudDesc { coverage, density, altitude_m (1500), scale_m (2500), wind_mps, color, silver_lining }`, `AtmosphereDesc { ground_albedo, mie_multiplier }`, `EnvUpdate`, `SkyModel`, `SkyPreset`, `SkyDesc { model, profile, zenith, horizon, ground, intensity, horizon_softness, sun_disc_angular_radius, sun_disc_intensity, clouds, env_update, atmosphere }`, `SkyDesc::preset(name)`, `validate` (`sky.invalid` naming the field), `SkyTransaction`, `LegacyCloudFields`.
+- `time_of_day.rs`: `Place { latitude, north }`; `TimeOfDay { day: u16, hours: f64 }` with `validate`, `advance(hours)` (signed, wraps the year) and `sky(&place) -> CelestialSky { sun, moon, moon_lit, pole, equinox }`; `CelestialSky::celestial(right_ascension, declination)`; `TimeOfDaySettings { time, place, enabled, playing, speed }`; `TimeOfDayState { settings, current, sky, dominant }` with `DominantLight` Manual, Sun or Moon.
+- `weather.rs` (presets in `weather/*.weather`): `Weather { coverage, cloud_type, base, thickness, density, cirrus, wind_speed, wind_from, evolution, rain }` with `names`, `by_name`, `parse`, `to_text`, `validate`, `lerp`, `wind_velocity`, `observed(&Observation)`; `Observation { cover_low, cover_mid, cover_high, wind_kmh, wind_from, code, precipitation }` is a pure conversion from a weather report (nonfinite values become 0, an unknown WMO code uses the cover-derived branch); `WeatherPreset`, `WeatherSettings`, `ResolvedWeatherState { settings, current, cycle_preset }`, `WeatherUpdate`, `WeatherCycle::{new(start, seed), current, advance(seconds)}` with `DWELL = (120, 300)` and `TRANSITION = 90`.
+- `atmosphere.rs`, `shaders.rs`, `wgsl/`: `atmospheric_radius_km`, `PhysicalSkyGpu`, `AtmosphereResources` (LUTs, per-view sky-view, Milky Way bake, submission acknowledgement) and the WGSL module builders for the LUTs, the Milky Way bake, `raa_celestial_radiance`, and the physical and legacy env and background modules.
+- `SKY_WGSL`, the legacy `raa_sky_radiance(dir, env, sun_dir, sun_color, time)`: gradient with horizon blend pow(1 - max(dir.y, 0), softness), HG glow (g 0.76), limb-darkened sun disc, and a ray-plane cloud layer (5-octave domain-warped fbm, 4-step Beer-powder light march, HG silver lining, horizon fade).
+- `feature.rs`, `env_pass.rs`, `background.rs`, `state.rs`, `observations.rs`: `SkyFeature`, `SkyHandle`, the passes and the diagnostics records.
 
-**`SKY_WGSL`** defines `raa_sky_radiance(dir, env, sun_dir, sun_color, time)`:
-- a gradient with the horizon blend pow(1 - max(dir.y, 0), softness);
-- HG glow (g 0.76) and a limb-darkened sun disc;
-- a cloud layer by ray-plane intersection: 5-octave domain-warped fbm over the coverage threshold, a 4-step light march with Beer-powder, an HG silver lining and a horizon fade.
-
-**`SkyFeature::install(gpu, pipeline, lit, ibl) -> SkyHandle`**
-- FeaturePass `sky.env` renders the SKY_ENV cube and calls `ibl.filter`, on change or every frame per env_update. It calls `ibl.apply_pending` each frame. `set_enabled` writes the EnvGpu background mode and clears the env.
-- ForwardContributor `sky.background`: fullscreen at depth 1 with LessEqual.
-
-`SkyHandle`: `set`, `get`, `mark_dirty`.
-
-Tests: desc.rs, variants.rs.
+Tests: desc.rs, variants.rs, time_of_day.rs, weather.rs, lifecycle.rs.
 
 ## Module: api-m8
-Files: `crates/raa-js/src/api/m08_sky_ibl.rs`, `packages/raa/types/m08-sky-ibl.d.ts`, `docs/api/m08-sky-ibl.md`.
+Files: `crates/raa-js/src/api/m08_sky_ibl.rs`, `crates/raa-js/tests/sky_weather.rs`, `packages/raa/types/m08-sky-ibl.d.ts`, `docs/api/m08-sky-ibl.md`.
 
-`install` creates IblFeature, then SkyFeature, and stores the handles in the FeatureMap. `frame` marks the sky dirty when the scene light changed.
-- `setSky(desc)`: `{ preset?, zenith?, horizon?, ground?, intensity?, horizonSoftness?, sunDiscSize? (rad), sunDiscIntensity?, clouds?: { coverage?, density?, altitude?, scale?, wind?: [x, z], color?, silverLining? }, envUpdate?: 'onChange'|'everyFrame' }`. The preset applies first, then the overrides (`sky.invalid`).
-- `sky()` returns the resolved values.
-- `setEnvironmentLighting({ diffuse?, specular? })` (values >= 0).
+Implements S24. `install` creates IblFeature, then SkyFeature, and stores the handles in the FeatureMap. `frame` observes the snapshot advanced by `EngineApp::update` and marks the sky dirty on light changes; it never advances the clock.
+- `setSky` resolves the full descriptor and calls `set_transaction` once with the explicit preset and the mask of supplied cloud fields.
+- `setWeather` parses the patch into a complete `WeatherUpdate` without mutation (an unknown preset rejects) and calls `set_weather_update` once; `weather()` generates `text` from the authored target at call time.
+- `skyWeatherDiagnostics()` serializes `SkyDiagnostics` into fresh objects.
 
 ## Module: proof-m8
 Files: `proofs/m8-sky-ibl.mjs`, `examples/lookdev/scenes/m08-sky-ibl.js`, `proofs/results/lookdev/m08-*.json`, `docs/dogfood/m8.md`.
@@ -2518,29 +2373,17 @@ Files: `crates/raa-js/src/api/m28_lights.rs`, `packages/raa/types/m28-lights.d.t
 
 The existing filename-discovered API registration installs `light.tiles` at order 35 against the renderer-owned registry. The additive declarations and Engine methods implement S17 without overloading the sun. Existing parser/lifecycle tests are `crates/raa-js/tests/local_lights.rs` and `tests/api_registry.rs` in that crate; source pins distinguish property absence from explicit reset. The shipped root exports already include LocalLightDesc, LocalLightChanges and LightStats through package assembly; consumers import those owning declarations.
 
-## Module: mama-light-record
-Files: `mama:crates/procgen/src/nodes/game_markers.rs`, `mama:crates/procgen/src/passes/gameplay.rs`, `mama:crates/procgen/src/output.rs`, `mama:crates/procgen/SPEC.md`, `mama:src/procgen/output-types.ts`. Owner: landed M1. Consumes: nothing.
-
-Owns S16's generic Rust record emission/flattening and TypeScript ProcLight declaration, including optional inner-angle omission and unchanged defaults. Existing pinning tests include `mama:crates/procgen/tests/gameplay.rs` and `mama:src/procgen/gameplay-wire.test.ts`; retain their wire/spec/default checks. M4 consumes this closed implementation.
-
-## Module: mama-light-transport
-Files: `mama:src/procgen/scene-file.ts`, `mama:src/procgen/scene-build.ts`, `mama:src/procgen/{scene-file,scene-build,runtime}.test.ts`, `mama:crates/procgen/src/ext/runtime/delta.rs`, `mama:crates/procgen/tests/runtime.rs`. Owner: closed M3. Consumes: mama-light-record.
-
-Owns S16's optional scene section, canonical serialization, independently copied export plans and complete Runtime.step snapshot triggers. It precedes the RAA bridge in dependency order. No light-record redefinition, new runtime method or M4 MAMA implementation is assigned.
-
 ## Module: sdfm-light-authoring
-Owner: display M4, graph index 5. Files/consumers: Module ownership. Implements S18 through the existing registration, document projection, add command, inspector and generated schema/catalog. Focused tests are `src/core/scene-lights.test.ts`, `scene-lights-authoring.test.ts` and the narrowly authorized real component loader regression in `src/app/gpu-page/scene-lights-controls.test.ts`, all in sdfm. No MAMA type ownership transfers here.
+Implements S18 in sdfm: the registered `pointLight` kind, the document-light projection, the add command, `PointLightSection.vue` and the generated schema and catalog. Tests: `src/core/scene-lights.test.ts`, `src/core/scene-lights-authoring.test.ts`, `src/app/gpu-page/scene-lights-controls.test.ts`.
 
 ## Module: sdfm-game-light-sync
-Owner: display M4, graph index 5. Files/consumers: Module ownership. Implements S19's planning, stable document ownership and actual GameDisplay integration. `game-light-sync.test.ts` and `game-display-lights.test.ts` cover reconciliation and integration; tsconfig's grant includes only those two tests. Authoring precedes synchronization, which precedes evidence; there is no reverse dependency.
+Implements S19 in sdfm (`src/app/paramesh/game-light-sync.ts`, `game-display.ts` and their tests). GameDisplay also surfaces required sky, time and weather failures and exposes `skyWeatherState()` (S25) across Engine creation, recreation, submission and disposal, without touching light ownership. `game-render-settings.ts` belongs to sdfm-sky-weather-settings.
 
 ## Module: sdfm-light-evidence
-Owner: display M4, graph index 5. Files/consumers: Module ownership. Implements S20/S21 through the existing compiled-topic discovery in `src/node/evidence/run.ts`, `scripts/gpu-evidence.mjs`, and `registerViewportScenario` discovery for `scene-lights-app`. Card 7363 owns inventory; 7364 opt-in readiness; 7365 runtime verification/browser facts; 7366 node record lifecycle; 7367 retained judgments; 7368 commands. Scenario owners advance the explicit implemented stage only with real delivered jobs. The command producer remains sole writer of `.nmc/commands.json`; later programmatic cards execute those definitions. Host completion/cleanup remains S22, outside these implementation owners.
+Implements S20 and S21 in sdfm through the compiled-topic discovery of `src/node/evidence/run.ts` and the `scene-lights-app` viewport scenario, with the UI driver and the inspector readability check. `sdfm:.nmc/commands.json` is written by sdfm-sky-weather-evidence.
 
 ## Module: solstice-architecture-finalization
-Files: `raa:ARCHITECTURE.md`. Owner: display M4, graph index 5. Consumes: the linked modules listed in Module ownership.
-
-Consolidates the complete existing contract in place, preserving all unchanged sections, historical results and public contracts. The landed linked-conventions/S15–S17, frame/layout and S11/S12 shares remain intact; the S18–S22 share consolidates delivered editor ownership and evidence contracts without replacing earlier content. Documentation cards run `cargo check`; milestone verification retains `bash scripts/check.sh`.
+Files: `raa:ARCHITECTURE.md`, the single consolidated contract of the linked repositories.
 
 ## Module: sdfm-compare
 Files: `examples/sdfm-compare/**`, `scripts/build-sdfm-compare.sh`.
@@ -2763,3 +2606,65 @@ the remaining reserved bytes and total 256-byte ABI are unchanged.
 The JS module m27 installs cel disabled. `setCel` enables it and selects linear,
 zero-exposure tone mapping without display dither; `getCel` returns its controls.
 See `docs/api/m27-cel.md` for the exact API and phase-one limitations.
+
+## Module: p2-managed-transport
+Files: `web/common/{gpu-job,lights-job}.mjs` and their tests.
+
+`gpu-job.mjs` is the managed transport of the lights and sky-weather runners: `publishGpuPage(directory, { timeoutMs }) -> Promise<{ pageRef }>` and `runGpuPageOp(pageRef, op, input, { timeoutMs }) -> Promise<{ jobId, clientId, result }>`, which forwards the input unchanged and returns the complete `reply.result`. Work timeout is at most 300000 ms; queue availability waits `NMC_GPU_WAIT_S` (default 60 s) separately. Missing configuration, failed publication or job, timeout and malformed responses reject with attribution. `lights-job.mjs` keeps its exports on top of it.
+
+## Module: sky-weather-page
+Files: `examples/sky-weather/{index.html, main.js, nmc.gpu.json, lib/**, scenes/foundation.js, contract.test.mjs, page-attach.test.mjs}`, `scripts/build-sky-weather.sh`, `.nmc/commands.json`.
+
+The S26 page and the RAA commands.
+- `lib/inventory.js`: `validateInventory`, `validateRequiredFacts`. `lib/readiness.js`: `createReadiness(stage) -> { snapshot, pending, ready, fail }`.
+- `lib/runtime.js`: `createOperationBudget(remainingMs, clock)` and `createSkyPageRunner({ canvas, status, load, scenes, lib }) -> { run, engine, dispose }`; concurrent runs reject. `main.js` validates the scenes of `scenes.json` and attaches `run` to `window.nmcGpu.ops`.
+- `lib/capture.js`: `captureCurrent(canvas, status)` (base64 PNG with the displayed status or error). `lib/measure.js`: `collectFeatureMeasurement(render, settings, clock)`, `validateFeatureMeasurement`.
+- `lib/evidence.mjs`: `containedPath`, `readJsonRecord`, `writeJsonRecord` (atomic), `captureInputs(root, preparationId)`, `assertCurrentInputs(root, receipt)`.
+- `lib/scene.js`: `buildSkySample(engine, lib, camera)` (ground, matte reference, reflective sphere, distant forms) and `sampleSelection(camera)`. `scenes/foundation.js` captures `foundation-sky-ground-and-reflective-sphere.png`.
+
+## Module: sky-atmosphere-scenes
+Files: `examples/sky-weather/scenes/atmosphere.js`, `examples/sky-weather/atmosphere.test.mjs`.
+
+The atmosphere stage of S26, with time, place and playback controls. `observe` reads the public getters and diagnostics and waits for the publication generation each capture needs. Multi-view and transition rows require the assertion `cloud-flags-current` (both cloud validity flags true on every view). Pair metadata drives the measurement collector.
+
+## Module: raa-volumetric-weather
+Files: `crates/raa-sky/src/clouds/**`.
+
+The `m2` cloud backend of S25 (`clouds::create`).
+- `shaders.rs` builders and entries: `noise_module_wgsl` (`raa_cloud_noise_shape`, `_detail`, `_weather`), `coverage_module_wgsl` (`raa_cloud_coverage_histogram`, `_accumulate`), `cloud_volume_wgsl`, `shadow_module_wgsl` (`raa_cloud_shadow_main`), `shadow_mean_module_wgsl` (`raa_cloud_shadow_mean_main`), `panorama_module_wgsl` (`raa_cloud_panorama_main`), `screen_module_wgsl(multisampled_depth)` (`raa_cloud_screen_main`).
+- `wgsl/cloud_volume.wgsl`: `raa_cloud_density(xz, height, cheap)`, `raa_cloud_layer_span`, `raa_cloud_height_along`, `raa_cloud_layer_fraction`, `raa_cloud_weather_at`, `raa_cloud_along(direction, steps, light_samples, jitter) -> RaaCloudSample { radiance, transmittance, distance }`.
+- `CloudGpu` (192 B, `resources.rs`): `wind_offset` @0, `evolution` @8, `coverage` @12, `cloud_type` @16, `base` @20, `top` @24, `density` @28, `cirrus` @32, `rain` @36, `shadow_extent` @40, `enabled` @44, `shadow_origin` @48, `wind_direction` @56, `right` @64, `up` @80, `forward` @96 (w = history usable), `screen` @112 (half-resolution width, height, invocation & 255, 0), `previous_view_proj` @128.
+- March group 2: 0 `CloudGpu`, 1 `PhysicalSkyGpu`, 2 shape, 3 detail, 4 weather map, 5 transmittance LUT, 6 sky-view, 7 noise sampler, 8 LUT sampler, 9 coverage CDF `array<f32, 256>` (read-only storage), 10 Rgba16Float storage output; the screen module adds 11 history and 12 scene depth.
+- Validity: noise is ready after the acknowledged submission that carried its generation. The panorama flag is true from a marchable prepare (physical, weather enabled, sky-view present) until an invalidation; the screen flag only after an acknowledged submission of the view's march at its current size. History is view-local and commits on acknowledged submissions. Non-marchable frames and disabled shadows publish transmittance 1.
+
+Tests: `src/clouds/tests/`.
+
+## Module: sky-weather-scenes
+Files: `examples/sky-weather/scenes/weather.js`, `examples/sky-weather/weather.test.mjs`.
+
+The weather stage of S26, discovered by the page like every scene; it reuses the atmosphere scene's camera and helpers.
+
+## Module: sdfm-sky-weather-settings
+Files (sdfm): `src/core/{render-settings,sky-weather-settings}.ts`, `src/app/render-settings.ts`, `src/components/shell/{RenderSettingsPanel,SkyWeatherSettings}.vue`, `src/app/paramesh/game-render-settings.ts`, `src/node/ops/render-settings.ts`, `src/app/procedural/raytrace-display.ts`, `src/plugins/ui/36-display.ts`, the generated schema, tools and catalog docs, `tsconfig.node.json` and the S27 tests.
+
+- `resolveSkyWeatherSettings(current, patch): RenderSettings` validates the complete candidate without mutation; `authoredSkyWeather(settings)` returns copies of `gameSky`, `gameTime` and `gameWeather`.
+- The Render settings panel exposes model and preset, day, hours, latitude, north, automatic lighting, pause/play, speed, the weather preset and fields, clouds, shadows, changing, seed, transition and `.weather` import/export (parsed fully, then committed atomically), with units and a Game-only note. The `setRenderSettings`/reset and `render_settings_get/set` routes carry the fields.
+- `applySharedRenderSettings(engine, input, captureBackground, setToneMapping?): string[]` is the guarded earlier mapping (never throws; used by the Raytrace view). `applyGameRenderSettings` (same signature, GameDisplay only) adds the three records, manual daylight baseline first, and throws their failures.
+
+## Module: sdfm-sky-weather-evidence
+Files (sdfm): `src/core/sky-weather-evidence.ts`, `src/app/gpu-page/scenarios/sky-weather-app.ts`, `src/app/gpu-page/sky-weather-visibility.ts`, `src/node/evidence/topics/sky-weather.ts`, their tests, `.nmc/commands.json`.
+
+- Inventory: modes `authoring`, `reload`, `invalid`; entries extend the S26 shape with `heldConstant` and `producer`, scenario `sky-weather-app`. Images: `editor-time-weather-controls-beside-game.png`, `editor-changed-time-weather-reloaded.png`, `editor-invalid-weather-last-valid-state.png`.
+- `SkyWeatherEditorFacts { format: 'sdfm.sky-weather.editor-facts', version: 1, mode, provenance, captures, observations (authored, persisted, `GameSkyWeatherState`, engine serial), controls (field bounds and value), playback, weatherText, invalid }`, checked by `validateSkyWeatherEditorFacts`.
+- `assertSkyWeatherControlsReadable(host, fields, errorRequired)` checks bounds, clipping and occlusion of the panel, the Game canvas, each named field and the validation error immediately before capture. `SkyWeatherApp` drives the real panel (`openPanel`, `setField`, `typeField`, `observe`, `capture`, `reload`).
+- `SkyWeatherEvidence`: `runtimeBuild('mama' | 'raa')`, `select`, `clean`, `render`, `fresh`, `judge` over schema-1 records of milestone `p2-editor`. Jobs use `runGpuJob` with a 300 s limit and keep the direct result. The render is resumable: only entries without a valid image for the current build render again.
+
+## Module: raa-cloud-seam
+Files: `crates/raa-sky/src/cloud_backend.rs`, `crates/raa-sky/tests/backend_registry.rs`.
+
+The S25 seam: `CloudFrame`, `CloudViews`, `CloudInvalidation`, the `CloudRenderer` trait, `NeutralCloudRenderer` (1x1 neutral views, validity flags false), the backend registry and the passes `sky.cloud-lighting` and `sky.cloud-screen`. Public helpers: `cloud_backend_names(m2_source_present)`, `registered_cloud_backend_names()`, `M2_CLOUD_SOURCE_PRESENT`, `CLOUD_SCREEN_UNKNOWN_ALPHA`. `views` returns neutral views for an absent view; `prepare` and recording reject an invalid index with `sky.invalid`.
+
+## Module: sky-weather-job-resume
+Files: `web/common/sky-weather-job.mjs`, `web/common/sky-weather-job.test.mjs`.
+
+The node runner of the S26 records: `check`, `select`, `clean`, `render`, `fresh`, `judge`, `parseArgs`, `main`, with `STAGES`, `ACTIONS`, `RECORD_FIELDS`, `readBuildReceipt`, `loadScenes`, `verifyPage`, `storeRoot`, `attemptRecords` and `buildKey`. `render` gives each page operation a 270000 ms allowance inside the 300 s job cap. Judge calls run up to `JUDGE_CONCURRENCY` = 4 at a time and start only within the budget (`--budget-s`, default 480 s).
