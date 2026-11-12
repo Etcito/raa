@@ -756,6 +756,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-cluster"
+version = "0.5.0"
+dependencies = [
+ "raa-geom",
+ "raa-math",
+]
+
+[[package]]
 name = "raa-contact"
 version = "0.5.0"
 dependencies = [

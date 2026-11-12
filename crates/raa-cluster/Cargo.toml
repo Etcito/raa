@@ -1,0 +1,12 @@
+[package]
+name = "raa-cluster"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CPU cluster-DAG builder for virtualized geometry: packed records, sliced bake and cut."
+publish = false
+
+[dependencies]
+raa-math = { workspace = true }
+raa-geom = { workspace = true }

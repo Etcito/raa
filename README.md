@@ -8,6 +8,7 @@ Status: M6 — public API v0 frozen. Part of the Etcito open-source game stack (
 
 - `raa-alloc-count`: counting allocator for test, benchmark, and opted-in demo binaries.
 - `raa-bench`: frame preparation and allocation benchmarks.
+- `raa-cluster`: CPU cluster-DAG builder for virtualized geometry: packed records, sliced bake and cut.
 - `raa-core`: GPU context, resources, and frame graph.
 - `raa-csg`: mesh Boolean operations used by asset loading.
 - `raa-geom`: mesh data, geometry providers, registry, and analysis.
