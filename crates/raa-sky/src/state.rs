@@ -382,6 +382,13 @@ impl TimePlayback {
         } else {
             self.state.dominant = DominantLight::Manual;
             self.last_light = self.manual;
+            // The manual light is the only sun: the sky draws (and scatters, and lights its
+            // clouds from) the direction the scene is lit from, instead of a second astronomical
+            // sun at the authored day and hour.
+            let toward = (-self.manual.direction).normalize_or_zero();
+            if toward != Vec3::ZERO {
+                self.state.sky.sun = toward;
+            }
         }
         self.last_light
     }
@@ -658,6 +665,24 @@ mod tests {
         assert_eq!(s.weather.settings, WeatherSettings::default());
         assert_eq!(s.weather.current, Weather::default());
         assert_eq!(s.weather.resolved().cycle_preset, None);
+    }
+
+    #[test]
+    fn manual_light_is_the_only_sun_the_sky_draws() {
+        let mut playback = TimePlayback::default();
+        playback.state.settings.enabled = false;
+        playback.state.current = TimeOfDay {
+            day: 172,
+            hours: 9.0,
+        };
+        let manual = DirectionalLight {
+            direction: Vec3::new(0.3, -0.8, 0.5).normalize_or_zero(),
+            ..DirectionalLight::default()
+        };
+        playback.manual = manual;
+        playback.evaluate();
+        assert_eq!(playback.state.dominant, DominantLight::Manual);
+        assert!((playback.state.sky.sun - -manual.direction).length() < 1e-6);
     }
 
     #[test]
