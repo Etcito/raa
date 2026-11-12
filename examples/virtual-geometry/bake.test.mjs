@@ -12,6 +12,11 @@ const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
+// Exact extents of the seeded generators, measured once from the current highPolyMesh() and
+// foliagePatch() (the generators are not tuned to these numbers; they pin them).
+const HIGH_POLY_EXTENT = { min: [-1.005219, -1.010367, -1.027208], max: [1.005219, 1.010367, 1.027208] };
+const FOLIAGE_EXTENT = { min: [-2.012192, 0, -2.014094], max: [2.013464, 0.25, 2.009901] };
+
 // Undirected edge usage on the position-welded topology (S2): vertices at the same position
 // (hard edges duplicate them) share one id. Each edge counts its triangle uses and the net
 // direction (+1 per lo->hi use, -1 per hi->lo use). A closed, consistently wound mesh has
@@ -89,11 +94,15 @@ test('highPolyMesh has 81920 triangles, 40962 shared vertices and a closed displ
   assertUnitNormals(m);
   assertClosed(m);
   assertFacesAgreeWithNormals(m);
-  // Displacement is at most 6 %, so every axis stays inside the stated box.
-  const b = meshBounds(m);
-  for (let k = 0; k < 3; k++) {
-    assert.ok(b.min[k] >= -1.06 - 1e-3 && b.max[k] <= 1.06 + 1e-3, `axis ${k} leaves [-1.06, 1.06]`);
+  // Envelope: the displacement is at most 0.06 of the unit radius, so every vertex lies at radius
+  // between 1 - 0.06 and 1 + 0.06, and every coordinate stays inside [-1.06, 1.06].
+  for (let i = 0; i < m.positions.length; i += 3) {
+    const r = Math.hypot(m.positions[i], m.positions[i + 1], m.positions[i + 2]);
+    assert.ok(r >= 0.94 - 1e-6 && r <= 1.06 + 1e-6, `vertex ${i / 3} at radius ${r}`);
   }
+  assert.ok(m.positions.every((v) => Math.abs(v) <= 1.06 + 1e-6), 'a coordinate leaves [-1.06, 1.06]');
+  // Exact extents of the generator, within 1e-3.
+  assertBounds(m, HIGH_POLY_EXTENT.min, HIGH_POLY_EXTENT.max);
 });
 
 test('foliagePatch has 4096 blades of two triangles and four own vertices each', () => {
@@ -119,9 +128,13 @@ test('foliagePatch stands on y = 0 inside the 4 m square and its blades keep the
   const m = foliagePatch();
   const b = meshBounds(m);
   assert.ok(Math.abs(b.min[1]) <= 1e-3 && Math.abs(b.max[1] - 0.25) <= 1e-3, 'height range');
+  // Envelope: cell origins lie in [-2, 2) on x and z; a blade's corners add its half-width,
+  // BLADE_WIDTH / 2 = 0.015 m, so x and z stay within [-2.015, 2.015].
   for (const k of [0, 2]) {
-    assert.ok(b.min[k] >= -2.02 && b.max[k] <= 2.02, `axis ${k} leaves the 4 m square`);
+    assert.ok(b.min[k] >= -2.015 && b.max[k] <= 2.015, `axis ${k} leaves the 4 m square plus a half blade`);
   }
+  // Exact extents of the generator, within 1e-3.
+  assertBounds(m, FOLIAGE_EXTENT.min, FOLIAGE_EXTENT.max);
   for (let i = 0; i < m.normals.length; i += 3) {
     assert.ok(Math.abs(m.normals[i + 1]) <= 1e-6, 'blade normal is not horizontal');
   }
