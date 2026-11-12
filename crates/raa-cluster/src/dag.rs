@@ -4,13 +4,21 @@
 //! `crates/solstice-builder/src/dag.rs`, revision 7e465b5.
 
 use crate::bounds::Sphere;
+use crate::cut::ClusterMesh;
+use crate::error::{ClusterError, INVALID_DATA, NOT_FINISHED, TOO_LARGE};
 use crate::group::GroupState;
+use crate::hierarchy::{Hierarchy, Leaf};
 use crate::input::BuildOptions;
+use crate::packed::{
+    MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, PackedCluster, PackedVertex, ROOT_PARENT_ERROR,
+    pack_counts, pack_triangle,
+};
 use crate::partition::{ClusterLimits, partition_triangles};
 use crate::simplify::{Corner, Simplified, Triangle, simplify};
 use crate::thin::{NEW_POSITION, find_pieces, set_aside_wide_pieces, thin};
-use crate::weld::WeldedMesh;
+use crate::weld::{WeldedMesh, encode_octahedral};
 use raa_math::Vec3;
+use std::collections::BTreeMap;
 
 /// A cluster during the build. Its id is its index in the append-only cluster list.
 #[derive(Clone, Debug)]
@@ -490,9 +498,340 @@ impl LevelState {
     }
 }
 
+/// Whether a sets unit that has visited `visited` clusters takes `next` more; a unit always takes one set.
+fn fits_sets(visited: usize, next: usize) -> bool {
+    visited == 0 || visited + next <= LEVEL_BATCH_CLUSTERS
+}
+
+/// Most packed clusters: `cluster.too_large` beyond 2^24.
+const MAX_PACKED_CLUSTERS: usize = 1 << 24;
+/// Parentless clusters share one leaf per run of this many.
+const ROOT_RUN: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PackPhase {
+    Groups,
+    Roots,
+    Clusters,
+    Done,
+}
+
+/// The packing of the sibling sets and clusters: the children of each group form one set, then
+/// the parentless clusters form sets of [`ROOT_RUN`]. Each set is one leaf, and the clusters are
+/// packed in set order, so a leaf's clusters are consecutive packed clusters.
+pub struct PackState {
+    source_triangles: u64,
+    phase: PackPhase,
+    group: usize,
+    scan: usize,
+    run: Vec<u32>,
+    /// Build cluster ids in packed order: a packed index is a position here.
+    order: Vec<u32>,
+    leaves: Vec<Leaf>,
+    cursor: usize,
+    max_level: u32,
+    vertices: Vec<PackedVertex>,
+    triangles: Vec<u32>,
+    records: Vec<PackedCluster>,
+    progress: f32,
+}
+
+impl PackState {
+    /// A pack of a mesh whose welded triangle count is `source_triangles`.
+    pub fn new(source_triangles: u64) -> PackState {
+        PackState {
+            source_triangles,
+            phase: PackPhase::Groups,
+            group: 0,
+            scan: 0,
+            run: Vec::new(),
+            order: Vec::new(),
+            leaves: Vec::new(),
+            cursor: 0,
+            max_level: 0,
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            records: Vec::new(),
+            progress: 0.0,
+        }
+    }
+
+    /// Runs one unit of sibling sets (at most 1024 clusters) and returns `true` when every set
+    /// exists. The groups come first, then the parentless clusters in runs of [`ROOT_RUN`].
+    pub fn step_sets(&mut self, clusters: &[BuildCluster], groups: &[BuiltGroup]) -> bool {
+        match self.phase {
+            PackPhase::Groups => self.groups_into_sets(clusters, groups),
+            PackPhase::Roots => self.roots_into_sets(clusters),
+            PackPhase::Clusters | PackPhase::Done => {}
+        }
+        let fraction = match self.phase {
+            PackPhase::Groups => 0.25 * ratio(self.group, groups.len()),
+            PackPhase::Roots => 0.25 + 0.25 * ratio(self.scan, clusters.len()),
+            PackPhase::Clusters | PackPhase::Done => 0.5,
+        };
+        self.advance(fraction);
+        matches!(self.phase, PackPhase::Clusters | PackPhase::Done)
+    }
+
+    /// The leaves made so far, one per sibling set in packed order.
+    pub fn leaves(&self) -> &[Leaf] {
+        &self.leaves
+    }
+
+    /// Packs the next units of clusters (at most 1024 clusters and 4096 triangles) in packed order
+    /// and returns `true` when every cluster is packed. Refused until every set exists.
+    pub fn step_clusters(
+        &mut self,
+        welded: &WeldedMesh,
+        clusters: &[BuildCluster],
+    ) -> Result<bool, ClusterError> {
+        match self.phase {
+            PackPhase::Groups | PackPhase::Roots => {
+                return Err(ClusterError::new(
+                    NOT_FINISHED,
+                    "the sibling sets are not complete",
+                ));
+            }
+            PackPhase::Clusters => {}
+            PackPhase::Done => return Ok(true),
+        }
+        if self.order.len() > MAX_PACKED_CLUSTERS {
+            return Err(ClusterError::new(TOO_LARGE, "more than 2^24 clusters"));
+        }
+        let (mut visited, mut triangles) = (0, 0);
+        while let Some(&id) = self.order.get(self.cursor) {
+            let cluster = clusters.get(id as usize).ok_or_else(|| {
+                ClusterError::new(INVALID_DATA, "a sibling set names a missing cluster")
+            })?;
+            let count = cluster.triangles.len();
+            if !fits_unit(visited, triangles, count) {
+                break;
+            }
+            let record = pack_cluster(welded, cluster, &mut self.vertices, &mut self.triangles)?;
+            self.records.push(record);
+            self.max_level = self.max_level.max(cluster.level);
+            (visited, triangles, self.cursor) = (visited + 1, triangles + count, self.cursor + 1);
+        }
+        if self.cursor >= self.order.len() {
+            (self.phase, self.progress) = (PackPhase::Done, 1.0);
+            return Ok(true);
+        }
+        self.advance(0.5 + 0.5 * ratio(self.cursor, self.order.len()));
+        Ok(false)
+    }
+
+    /// The fraction packed, in `0..=1`; it never decreases and is 1 once done.
+    pub fn progress(&self) -> f32 {
+        self.progress
+    }
+
+    /// The finished mesh: the packed records and triangles, the hierarchy and the grid header of
+    /// `welded`. The bounds are the merge of the leaf bounds.
+    pub fn finish(self, welded: &WeldedMesh, hierarchy: Hierarchy) -> ClusterMesh {
+        let bounds = Sphere::merged_all(self.leaves.iter().map(|leaf| leaf.bounds));
+        ClusterMesh {
+            vertices: self.vertices,
+            triangles: self.triangles,
+            clusters: self.records,
+            nodes: hierarchy.nodes,
+            root_node: hierarchy.root,
+            hierarchy_depth: hierarchy.depth,
+            levels: self.max_level.saturating_add(1),
+            quant_origin: welded.origin.to_array(),
+            quant_step: welded.step,
+            uv_origin: welded.uv_origin,
+            uv_step: welded.uv_step,
+            bounds_center: bounds.center.to_array(),
+            bounds_radius: bounds.radius,
+            source_triangles: self.source_triangles,
+        }
+    }
+
+    fn advance(&mut self, fraction: f32) {
+        self.progress = self.progress.max(fraction.min(0.999));
+    }
+
+    fn groups_into_sets(&mut self, clusters: &[BuildCluster], groups: &[BuiltGroup]) {
+        let mut visited = 0;
+        while let Some(group) = groups.get(self.group) {
+            if !fits_sets(visited, group.children.len()) {
+                return;
+            }
+            self.push_set(clusters, &group.children, group.lod_bounds, group.error);
+            (visited, self.group) = (visited + group.children.len(), self.group + 1);
+        }
+        (self.phase, self.scan) = (PackPhase::Roots, 0);
+    }
+
+    fn roots_into_sets(&mut self, clusters: &[BuildCluster]) {
+        let mut visited = 0;
+        while self.scan < clusters.len() && visited < LEVEL_BATCH_CLUSTERS {
+            let id = self.scan;
+            (self.scan, visited) = (self.scan + 1, visited + 1);
+            if clusters.get(id).is_some_and(|c| !c.has_parent) {
+                self.run.push(index_u32(id));
+                if self.run.len() == ROOT_RUN {
+                    self.flush_run(clusters);
+                }
+            }
+        }
+        if self.scan >= clusters.len() {
+            self.flush_run(clusters);
+            self.phase = PackPhase::Clusters;
+        }
+    }
+
+    /// Turns the open run of parentless clusters into one set under `ROOT_PARENT_ERROR`.
+    fn flush_run(&mut self, clusters: &[BuildCluster]) {
+        let run = std::mem::take(&mut self.run);
+        let lod_bounds = Sphere::merged_all(
+            run.iter()
+                .filter_map(|&c| clusters.get(c as usize))
+                .map(|c| c.lod_bounds),
+        );
+        self.push_set(clusters, &run, lod_bounds, ROOT_PARENT_ERROR);
+    }
+
+    /// Appends a set of the members that name clusters: its leaf, and its members to the packed
+    /// order. A set without members gives no leaf.
+    fn push_set(
+        &mut self,
+        clusters: &[BuildCluster],
+        members: &[u32],
+        parent_bounds: Sphere,
+        parent_error: f32,
+    ) {
+        let valid: Vec<u32> = members
+            .iter()
+            .copied()
+            .filter(|&m| clusters.get(m as usize).is_some())
+            .collect();
+        let Some(first) = valid.first().and_then(|&m| clusters.get(m as usize)) else {
+            return;
+        };
+        let bounds = Sphere::merged_all(
+            valid
+                .iter()
+                .filter_map(|&m| clusters.get(m as usize))
+                .map(|c| c.bounds),
+        );
+        self.leaves.push(Leaf {
+            level: first.level,
+            first_cluster: index_u32(self.order.len()),
+            cluster_count: index_u32(valid.len()),
+            bounds,
+            parent_lod_bounds: parent_bounds,
+            parent_error,
+        });
+        self.order.extend(valid);
+    }
+}
+
+/// `part` of `whole` as a fraction in `0..=1`; an empty whole counts as one.
+fn ratio(part: usize, whole: usize) -> f32 {
+    (part as f32 / whole.max(1) as f32).min(1.0)
+}
+
+fn index_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Appends the packed vertices and triangles of one cluster and returns its record. Vertices
+/// take cluster-local indices in first-use order; a corner shared with another cluster packs to the
+/// same vertex data.
+fn pack_cluster(
+    welded: &WeldedMesh,
+    cluster: &BuildCluster,
+    vertices: &mut Vec<PackedVertex>,
+    triangles: &mut Vec<u32>,
+) -> Result<PackedCluster, ClusterError> {
+    if cluster.triangles.len() > MAX_CLUSTER_TRIANGLES {
+        return Err(ClusterError::new(
+            INVALID_DATA,
+            "cluster has more triangles than MAX_CLUSTER_TRIANGLES",
+        ));
+    }
+    let too_large = || ClusterError::new(TOO_LARGE, "packed offsets exceed u32");
+    let vertex_offset = u32::try_from(vertices.len()).map_err(|_| too_large())?;
+    let triangle_offset = u32::try_from(triangles.len()).map_err(|_| too_large())?;
+    let mut local: BTreeMap<Corner, u8> = BTreeMap::new();
+    for triangle in &cluster.triangles {
+        let mut indices = [0u8; 3];
+        for (index, &corner) in indices.iter_mut().zip(triangle) {
+            *index = match local.get(&corner) {
+                Some(&index) => index,
+                None => {
+                    let index = local_index(local.len())?;
+                    vertices.push(pack_vertex(welded, corner)?);
+                    local.insert(corner, index);
+                    index
+                }
+            };
+        }
+        triangles.push(pack_triangle(indices[0], indices[1], indices[2]));
+    }
+    Ok(PackedCluster {
+        center: cluster.bounds.center.to_array(),
+        radius: cluster.bounds.radius,
+        lod_center: cluster.lod_bounds.center.to_array(),
+        lod_radius: cluster.lod_bounds.radius,
+        lod_error: cluster.lod_error,
+        vertex_offset,
+        triangle_offset,
+        counts: pack_counts(
+            index_u32(local.len()),
+            index_u32(cluster.triangles.len()),
+            cluster.level,
+        ),
+    })
+}
+
+/// The 8-bit local index of the next vertex, refused beyond `MAX_CLUSTER_VERTICES`.
+fn local_index(count: usize) -> Result<u8, ClusterError> {
+    match u8::try_from(count) {
+        Ok(index) if count < MAX_CLUSTER_VERTICES => Ok(index),
+        _ => Err(ClusterError::new(
+            INVALID_DATA,
+            "cluster exceeds 8-bit vertex indexing",
+        )),
+    }
+}
+
+/// One packed vertex: the grid position, the octahedral normal, and the uv grid index (scene.rs).
+fn pack_vertex(welded: &WeldedMesh, corner: Corner) -> Result<PackedVertex, ClusterError> {
+    let missing = || ClusterError::new(INVALID_DATA, "a corner names a missing welded element");
+    let position = *welded
+        .positions
+        .get(corner.position as usize)
+        .ok_or_else(missing)?;
+    let attribute = welded
+        .attributes
+        .get(corner.attribute as usize)
+        .ok_or_else(missing)?;
+    let grid = welded.grid(position);
+    let normal = encode_octahedral(attribute.normal);
+    let uv = |axis: usize| {
+        let v = (attribute.uv[axis] - welded.uv_origin[axis]) / welded.uv_step[axis];
+        v.round().clamp(0.0, 65535.0) as u16
+    };
+    Ok(PackedVertex {
+        data: [
+            grid[0],
+            grid[1],
+            grid[2],
+            normal[0] as u16,
+            normal[1] as u16,
+            uv(0),
+            uv(1),
+            0,
+        ],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hierarchy::build_hierarchy;
     use crate::input::OwnedClusterInput;
     use crate::weld::WeldState;
     use raa_geom::MeshData;
@@ -767,5 +1106,172 @@ mod tests {
         let level = run_level(40, 20, &options);
         assert!(level.next.is_empty() && level.groups.is_empty());
         assert!(level.clusters.iter().all(|c| !c.has_parent && c.level == 0));
+    }
+
+    /// A packed level: the mesh from a copy of the leaves, the packed order and the leaves.
+    struct Packed {
+        mesh: ClusterMesh,
+        leaves: Vec<Leaf>,
+        order: Vec<u32>,
+        units: usize,
+        progress: Vec<f32>,
+    }
+
+    /// Packs `level` one unit per call, then finishes with the hierarchy of a copy of the leaves.
+    fn pack(level: &Level, source: u64) -> Packed {
+        let mut state = PackState::new(source);
+        let mut progress = vec![state.progress()];
+        let mut units = 0;
+        while !state.step_sets(&level.clusters, &level.groups) {
+            units += 1;
+            progress.push(state.progress());
+        }
+        while !state
+            .step_clusters(&level.mesh, &level.clusters)
+            .expect("sets exist")
+        {
+            units += 1;
+            progress.push(state.progress());
+        }
+        progress.push(state.progress());
+        let leaves = state.leaves().to_vec();
+        let order = state.order.clone();
+        let mesh = state.finish(&level.mesh, build_hierarchy(leaves.clone()));
+        Packed {
+            mesh,
+            leaves,
+            order,
+            units,
+            progress,
+        }
+    }
+
+    #[test]
+    fn packed_mesh_validates_and_keeps_the_given_source_count() {
+        let level = run_level(80, 40, &BuildOptions::default());
+        let packed = pack(&level, 12345);
+        assert_eq!(packed.mesh.validate(), Ok(()));
+        assert_eq!(packed.mesh.source_triangles, 12345);
+        assert_eq!(packed.mesh.clusters.len(), packed.order.len());
+        assert!(packed.units >= 2);
+        assert!(packed.progress.windows(2).all(|w| w[0] <= w[1]));
+        assert_eq!(packed.progress.last(), Some(&1.0));
+    }
+
+    #[test]
+    fn group_children_are_consecutive_under_a_leaf_with_the_group_error() {
+        let level = run_level(40, 20, &BuildOptions::default());
+        let packed = pack(&level, 0);
+        assert!(!level.groups.is_empty());
+        let mut first = 0u32;
+        for (group, leaf) in level.groups.iter().zip(&packed.leaves) {
+            assert_eq!(
+                (leaf.first_cluster, leaf.cluster_count),
+                (first, group.children.len() as u32)
+            );
+            assert_eq!(leaf.parent_error, group.error);
+            for (i, &child) in group.children.iter().enumerate() {
+                assert_eq!(packed.order[first as usize + i], child);
+            }
+            first += leaf.cluster_count;
+            assert!(packed.mesh.nodes.iter().any(|n| {
+                n.is_leaf == 1
+                    && n.first == leaf.first_cluster
+                    && n.count == leaf.cluster_count
+                    && n.max_parent_error == group.error
+            }));
+        }
+    }
+
+    #[test]
+    fn parentless_clusters_sit_in_runs_under_root_parent_error() {
+        let level = run_level(40, 20, &BuildOptions::default());
+        let packed = pack(&level, 0);
+        let roots: Vec<u32> = (0..level.clusters.len() as u32)
+            .filter(|&c| !level.clusters[c as usize].has_parent)
+            .collect();
+        assert!(!roots.is_empty());
+        let root_leaves: Vec<&Leaf> = packed
+            .leaves
+            .iter()
+            .filter(|l| l.parent_error == ROOT_PARENT_ERROR)
+            .collect();
+        assert_eq!(root_leaves.len(), roots.len().div_ceil(ROOT_RUN));
+        assert!(
+            root_leaves
+                .iter()
+                .all(|l| l.cluster_count as usize <= ROOT_RUN)
+        );
+        let mut packed_roots: Vec<u32> = root_leaves
+            .iter()
+            .flat_map(|l| l.first_cluster..l.first_cluster + l.cluster_count)
+            .map(|p| packed.order[p as usize])
+            .collect();
+        packed_roots.sort_unstable();
+        assert_eq!(packed_roots, roots);
+    }
+
+    #[test]
+    fn a_vertex_shared_by_two_clusters_packs_to_the_same_eight_words() {
+        let level = run_level(40, 20, &BuildOptions::default());
+        let packed = pack(&level, 0);
+        let mut seen: BTreeMap<Corner, [u16; 8]> = BTreeMap::new();
+        let mut shared = 0;
+        for (p, &id) in packed.order.iter().enumerate() {
+            let record = packed.mesh.clusters[p];
+            let mut local: Vec<Corner> = Vec::new();
+            for corner in level.clusters[id as usize].triangles.iter().flatten() {
+                if !local.contains(corner) {
+                    local.push(*corner);
+                }
+            }
+            for (i, corner) in local.iter().enumerate() {
+                let data = packed.mesh.vertices[record.vertex_offset as usize + i].data;
+                if let Some(old) = seen.insert(*corner, data) {
+                    shared += 1;
+                    assert_eq!(old, data);
+                }
+            }
+        }
+        assert!(shared > 0);
+    }
+
+    #[test]
+    fn levels_is_two_and_level_one_clusters_carry_level_one_in_counts() {
+        let level = run_level(40, 20, &BuildOptions::default());
+        let packed = pack(&level, 0);
+        assert_eq!(packed.mesh.levels, 2);
+        let mut level_one = 0;
+        for (p, &id) in packed.order.iter().enumerate() {
+            let built = level.clusters[id as usize].level;
+            assert_eq!(packed.mesh.clusters[p].level(), built);
+            level_one += usize::from(built == 1);
+        }
+        assert!(level_one > 0);
+    }
+
+    #[test]
+    fn packing_before_the_sets_is_refused() {
+        let level = run_level(8, 4, &BuildOptions::default());
+        let mut state = PackState::new(0);
+        let code = state
+            .step_clusters(&level.mesh, &level.clusters)
+            .map_err(|e| e.code());
+        assert_eq!(code, Err(NOT_FINISHED));
+    }
+
+    #[test]
+    fn stepping_one_unit_at_a_time_equals_stepping_to_the_end() {
+        let level = run_level(80, 40, &BuildOptions::default());
+        let stepped = pack(&level, 7);
+        let mut state = PackState::new(7);
+        while !state.step_sets(&level.clusters, &level.groups) {}
+        while !state
+            .step_clusters(&level.mesh, &level.clusters)
+            .expect("sets exist")
+        {}
+        let leaves = state.leaves().to_vec();
+        let mesh = state.finish(&level.mesh, build_hierarchy(leaves));
+        assert_eq!(mesh, stepped.mesh);
     }
 }
