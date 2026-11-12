@@ -1,185 +1,5 @@
 [
   {
-    "name": "m2-lights-build",
-    "command": "bash scripts/build-lights.sh",
-    "timeout_s": 1800
-  },
-  {
-    "name": "m2-lights-judge-local",
-    "command": "node --test web/common/lights-job.test.mjs examples/lights/*.test.mjs",
-    "timeout_s": 120,
-    "after": [
-      "m2-lights-build"
-    ]
-  },
-  {
-    "name": "m2-lights-functional",
-    "command": "node --test web/common/lights-job.test.mjs examples/lights/*.test.mjs",
-    "timeout_s": 120,
-    "after": [
-      "m2-lights-build"
-    ]
-  },
-  {
-    "name": "m2-lights-select",
-    "command": "node web/common/lights-job.mjs select --page dist/lights --out out/lights",
-    "timeout_s": 120,
-    "after": [
-      "m2-lights-build"
-    ]
-  },
-  {
-    "name": "m2-lights-clean",
-    "command": "node web/common/lights-job.mjs clean --page dist/lights --out out/lights",
-    "timeout_s": 60,
-    "after": [
-      "m2-lights-select"
-    ]
-  },
-  {
-    "name": "m2-lights-render",
-    "command": "node web/common/lights-job.mjs render --page dist/lights --out out/lights",
-    "timeout_s": 3600,
-    "after": [
-      "m2-lights-clean"
-    ]
-  },
-  {
-    "name": "m2-lights-fresh",
-    "command": "node web/common/lights-job.mjs fresh --page dist/lights --out out/lights",
-    "timeout_s": 120,
-    "after": [
-      "m2-lights-render"
-    ]
-  },
-  {
-    "name": "m2-lights-judge",
-    "command": "node web/common/lights-job.mjs judge --page dist/lights --out out/lights",
-    "timeout_s": 3600,
-    "after": [
-      "m2-lights-render",
-      "m2-lights-fresh"
-    ]
-  },
-  {
-    "name": "m2-lights-command-check",
-    "command": "nmc-commands-check",
-    "timeout_s": 60,
-    "after": [
-      "m2-lights-functional"
-    ]
-  },
-  {
-    "name": "m2-s20-cargo-check",
-    "command": "cargo check",
-    "timeout_s": 1800,
-    "after": [
-      "m2-lights-command-check"
-    ]
-  },
-  {
-    "name": "m2-s20-milestone-check",
-    "command": "bash scripts/check.sh",
-    "timeout_s": 3600,
-    "after": [
-      "m2-s20-cargo-check"
-    ]
-  },
-  {
-    "name": "m3-lights-build",
-    "command": "bash scripts/build-lights.sh",
-    "timeout_s": 1800
-  },
-  {
-    "name": "m3-lights-stage",
-    "command": "node examples/lights/mama-lights.test.mjs --stage dist/lights",
-    "timeout_s": 120,
-    "after": [
-      "m3-lights-build"
-    ]
-  },
-  {
-    "name": "m3-lights-functional",
-    "command": "node --test examples/lights/mama-lights.test.mjs web/common/lights-job.test.mjs packages/raa-sdfm/test/mama-bridge.test.js packages/raa-sdfm/test/mama-light-owner.test.js packages/raa-sdfm/test/procedural.test.js packages/raa-sdfm/test/procedural-runtime.test.js packages/raa-sdfm/test/procedural-trace.test.js",
-    "timeout_s": 300,
-    "after": [
-      "m3-lights-stage"
-    ]
-  },
-  {
-    "name": "m3-lights-command-check",
-    "command": "nmc-commands-check",
-    "timeout_s": 60,
-    "after": [
-      "m3-lights-functional"
-    ]
-  },
-  {
-    "name": "m3-lights-check",
-    "command": "node web/common/lights-job.mjs check --milestone m03 --page dist/lights --out out/lights-m3",
-    "timeout_s": 120,
-    "after": [
-      "m3-lights-command-check"
-    ]
-  },
-  {
-    "name": "m3-lights-select",
-    "command": "node web/common/lights-job.mjs select --milestone m03 --page dist/lights --out out/lights-m3",
-    "timeout_s": 120,
-    "after": [
-      "m3-lights-check"
-    ]
-  },
-  {
-    "name": "m3-lights-clean",
-    "command": "node web/common/lights-job.mjs clean --milestone m03 --page dist/lights --out out/lights-m3",
-    "timeout_s": 60,
-    "after": [
-      "m3-lights-select"
-    ]
-  },
-  {
-    "name": "m3-lights-render",
-    "command": "node web/common/lights-job.mjs render --milestone m03 --page dist/lights --out out/lights-m3",
-    "timeout_s": 3600,
-    "after": [
-      "m3-lights-clean"
-    ]
-  },
-  {
-    "name": "m3-lights-fresh",
-    "command": "node web/common/lights-job.mjs fresh --milestone m03 --page dist/lights --out out/lights-m3",
-    "timeout_s": 120,
-    "after": [
-      "m3-lights-render"
-    ]
-  },
-  {
-    "name": "m3-lights-judge",
-    "command": "node web/common/lights-job.mjs judge --milestone m03 --page dist/lights --out out/lights-m3",
-    "timeout_s": 3600,
-    "after": [
-      "m3-lights-render",
-      "m3-lights-fresh"
-    ]
-  },
-  {
-    "name": "m3-cargo-check",
-    "command": "cargo check",
-    "timeout_s": 1800,
-    "after": [
-      "m3-lights-command-check"
-    ]
-  },
-  {
-    "name": "m3-branch-check",
-    "command": "bash scripts/check.sh",
-    "timeout_s": 3600,
-    "after": [
-      "m3-cargo-check"
-    ]
-  },
-  {
     "name": "p2-sky-build",
     "command": "bash scripts/build-sky-weather.sh",
     "timeout_s": 1800
@@ -323,9 +143,17 @@
     ]
   },
   {
+    "name": "p2-sky-weather-judge-local",
+    "command": "node --test web/common/sky-weather-job.test.mjs examples/sky-weather/contract.test.mjs examples/sky-weather/weather.test.mjs",
+    "timeout_s": 120,
+    "after": [
+      "p2-sky-build"
+    ]
+  },
+  {
     "name": "p2-sky-weather-judge",
     "command": "node web/common/sky-weather-job.mjs judge --page dist/sky-weather --out out/sky-weather/weather --stage weather",
-    "timeout_s": 600,
+    "timeout_s": 1200,
     "after": [
       "p2-sky-weather-render",
       "p2-sky-weather-fresh"

@@ -1142,8 +1142,9 @@ test('judge reuses the passed verdict of a kept image and judges only new or pre
   assert.equal((await s.judge()).status, 'passed');
   const again = judgedLines(calls).slice(before + 1);
   assert.equal(again.length, 2);
-  assert.match(again[0], /atmosphere-clear-day\.png/);
-  assert.match(again[1], /foundation-sky-and-sphere\.png/);
+  // Judges run concurrently: both images are judged again, in whichever order the processes start.
+  assert.deepEqual(again.map((line) => path.basename(line.split(' ')[0])).sort(),
+    ['atmosphere-clear-day.png', 'foundation-sky-and-sphere.png']);
 });
 
 test('judge judges a kept image again when its description changed', async (t) => {
@@ -1169,4 +1170,30 @@ test('judge judges a kept image again when its description changed', async (t) =
     'The accepted sky state renders above the ground receiver.');
   assert.deepEqual(record.images.find((entry) => entry.id === `${GROUP_B}-image`),
     first.images.find((entry) => entry.id === `${GROUP_B}-image`));
+});
+
+test('judge runs captures concurrently, keeps inventory order and logs every verdict', async (t) => {
+  const s = await freshFixture(t, [foundation, atmosphere]);
+  let active = 0, peak = 0;
+  const finishOrder = [];
+  const lines = [];
+  const record = await s.judge({
+    concurrency: 2,
+    log: (line) => lines.push(line),
+    judge: async (capture) => {
+      active += 1; peak = Math.max(peak, active);
+      // The first inventory row finishes last, so completion order differs from inventory order.
+      await new Promise((resolve) => setTimeout(resolve, /foundation-sky-and-sphere/.test(capture) ? 40 : 5));
+      active -= 1; finishOrder.push(path.basename(capture));
+      return { exit: 0, score: 8, output: 'JUDGE PASS: 8/10' };
+    },
+  });
+  assert.equal(record.status, 'passed');
+  assert.equal(peak, 2, 'two judges ran at the same time');
+  const inventoryOrder = s.read(s.records.selection).inventory.map((row) => row.filename);
+  assert.deepEqual(record.images.map((entry) => entry.filename), inventoryOrder);
+  assert.equal(lines.length, inventoryOrder.length);
+  assert.match(lines.at(-1), new RegExp(`\\[${inventoryOrder.length}/${inventoryOrder.length}\\]`));
+  assert.deepEqual(s.read(s.records.judge), record);
+  await assert.rejects(s.judge({ concurrency: 0 }), /invalid judge concurrency/);
 });

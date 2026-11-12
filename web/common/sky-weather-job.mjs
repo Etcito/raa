@@ -940,6 +940,15 @@ function reusableVerdict(out, currentDirectory, key, row, capture) {
   return null;
 }
 
+/** Captures judged at once: SKY_WEATHER_JUDGE_CONCURRENCY (1..16) or 4. */
+export const JUDGE_CONCURRENCY = 4;
+function judgeConcurrency(requested) {
+  const raw = requested ?? process.env.SKY_WEATHER_JUDGE_CONCURRENCY ?? JUDGE_CONCURRENCY;
+  const value = Number(raw);
+  ensure(Number.isInteger(value) && value >= 1 && value <= 16, `invalid judge concurrency: ${raw}`);
+  return value;
+}
+
 /**
  * Judge every selected capture and retain every verdict before failing. A kept image reuses its
  * earlier passed verdict (reusableVerdict, judgedAt retained); new and previously failed images
@@ -965,18 +974,33 @@ export async function judge(page, out, stage, options = {}) {
   const images = new Map(verified.run.images.map((image) => [image.id, image]));
   const kept = new Set(verified.run.kept.map((entry) => entry.id));
   const key = buildKey(verified.build);
-  for (const row of verified.inventory) {
+  const log = options.log ?? ((line) => process.stdout.write(`${line}\n`));
+  const total = verified.inventory.length;
+  // Verdicts land in inventory order whatever order the judges finish in; only finished slots are written.
+  const slots = new Array(total).fill(null);
+  const errors = new Array(total).fill(null);
+  const settle = (index, entry, error, reusedVerdict = false) => {
+    slots[index] = entry;
+    errors[index] = error;
+    record.images = slots.filter(Boolean);
+    record.errors = errors.filter(Boolean);
+    write();
+    const done = record.images.length;
+    log(`sky-weather-job: judge ${stage}: [${done}/${total}] ${entry.filename}: `
+      + (error ? `FAIL ${error}` : `pass ${entry.score}${reusedVerdict ? ' (reused verdict)' : ''}`).split('\n')[0]);
+  };
+  const judgeRow = async (row, index) => {
     const capture = containedPath(out, verified.records.image(row.filename));
     const reused = kept.has(row.id) ? reusableVerdict(out, verified.pointer.directory, key, row, capture) : null;
     if (reused) {
-      record.images.push(reused);
-      write();
-      continue;
+      settle(index, reused, null, true);
+      return;
     }
     const entry = {
       id: row.id, filename: row.filename, description: row.expectedVisibleBehavior, minScore: 6,
       exit: -1, score: null, output: '', judgedAt: new Date().toISOString(),
     };
+    let failure = null;
     try {
       const image = images.get(row.id);
       ensure(image && image.filename === row.filename, `selected image ${row.id} is missing from the run`);
@@ -993,11 +1017,22 @@ export async function judge(page, out, stage, options = {}) {
       ensure(entry.score >= 6, `judge score ${entry.score} is below the minimum 6`);
     } catch (error) {
       if (!entry.output) entry.output = message(error);
-      record.errors.push(`${row.filename}: ${message(error)}`);
+      failure = `${row.filename}: ${message(error)}`;
     }
-    record.images.push(entry);
-    write();
-  }
+    settle(index, entry, failure);
+  };
+  // Each capture is judged by an independent process (several model votes each); judging the
+  // cumulative weather inventory one by one does not fit the judge entry's budget, so a bounded
+  // pool judges JUDGE_CONCURRENCY captures at a time.
+  const concurrency = judgeConcurrency(options.concurrency);
+  let next = 0;
+  const worker = async () => {
+    while (next < total) {
+      const index = next++;
+      await judgeRow(verified.inventory[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, total) }, worker));
   try {
     assertCurrentAttempt(verified, verified.run);
     ensure(record.images.length === verified.inventory.length,
