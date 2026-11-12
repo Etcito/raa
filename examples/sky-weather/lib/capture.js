@@ -89,6 +89,10 @@ export async function captureCurrent(canvas, status) {
     context.font = FONT;
     lines.forEach((line, index) => context.fillText(line, PADDING, height + PADDING + index * LINE_HEIGHT));
   }
+  // A lost 2D context encodes an all-transparent PNG (not even the opaque background survives).
+  if (typeof context.isContextLost === 'function' && context.isContextLost()) {
+    fail('the capture canvas lost its 2D context (browser GPU process reset); its PNG would be blank');
+  }
 
   const url = typeof output.toDataURL === 'function' ? output.toDataURL('image/png') : '';
   const prefix = 'data:image/png;base64,';

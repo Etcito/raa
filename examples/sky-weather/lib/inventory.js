@@ -134,7 +134,7 @@ export function validateRequiredFacts(row, facts, factNames) {
     selector(key, names, id);
     if (seen.has(key)) fail(`${id}: duplicate selector ${key}`);
     seen.add(key);
-    let valid = record(facts);
+    let valid = record(facts), detail = '';
     if (valid && key.startsWith('snapshot:')) {
       const field = key.slice(9);
       valid = ({ sky, time, weather, diagnostics })[field](facts[field]);
@@ -144,8 +144,10 @@ export function validateRequiredFacts(row, facts, factNames) {
     else if (valid && key.startsWith('assertion:')) {
       const matches = Array.isArray(facts.assertions) ? facts.assertions.filter(a => a?.name === key.slice(10)) : [];
       valid = matches.length === 1 && assertion(matches[0]) && matches[0].passed === true;
+      // The failed assertion's own evidence (e.g. [view, screen, panorama] per view) names what failed.
+      if (!valid) detail = matches.length === 1 ? `: ${String(matches[0]?.detail)}` : ` (${matches.length} reported)`;
     }
-    if (!valid) fail(`${id}: required ${key} is missing or invalid`);
+    if (!valid) fail(`${id}: required ${key} is missing or invalid${detail}`);
   }
   // Validate the observation envelope even when a particular nullable snapshot is not required.
   if (!record(facts) || !state(facts) || !nullable(diagnostics)(facts.diagnostics) || !Array.isArray(facts.assertions) || !facts.assertions.every(assertion) || !Array.isArray(facts.edits) || !facts.edits.every(edit)) fail(`${id}: invalid SceneObservation`);

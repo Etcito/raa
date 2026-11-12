@@ -219,6 +219,13 @@ export function createSkyPageRunner(options) {
             errors.gpu.push(error && error.message ? error.message : String(error));
           });
         }
+        // A lost device (GPU process reset) blanks every canvas; only an explicit dispose is expected.
+        if (device && device.lost && typeof device.lost.then === 'function') {
+          device.lost.then(info => {
+            if (info && info.reason === 'destroyed') return;
+            errors.gpu.push(`GPU device lost: ${info && info.reason ? info.reason : 'unknown'}: ${info && info.message ? info.message : ''}`.trim());
+          }, () => {});
+        }
         return device;
       };
       return adapter;
