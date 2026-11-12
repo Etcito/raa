@@ -9,7 +9,7 @@ import { pathToFileURL } from 'node:url';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
 import { createSkyPageRunner } from '../../examples/sky-weather/lib/runtime.js';
 import zlib from 'node:zlib';
-import { check, select, clean, render, fresh, judge, parseArgs, main, attemptRecords, RECORD_FIELDS } from './sky-weather-job.mjs';
+import { check, select, clean, render, fresh, judge, parseArgs, main, attemptRecords, RECORD_FIELDS, judgeCapture } from './sky-weather-job.mjs';
 
 // A card's sandbox exports the project store; these fixtures use their own stage roots unless a test sets one.
 delete process.env.NMC_CACHE_DIR;
@@ -1311,4 +1311,33 @@ test('judge stops starting judges when its budget ends, keeps the verdicts it wr
   assert.deepEqual(s.read(s.records.judge).images.map((entry) => entry.filename), [atmosphere.filename]);
   assert.equal((await s.judge({ judge: slow, log: () => {} })).status, 'passed');
   assert.deepEqual(judged, [atmosphere.filename, foundation.filename]);
+});
+
+test('a judge process still running at its kill time is killed and fails its image', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sky-judge-hang-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const client = path.join(dir, 'hang.py');
+  fs.writeFileSync(client, 'import time\nprint("judging", flush=True)\ntime.sleep(60)\n');
+  const previous = process.env.NMC_JUDGE_CLIENT;
+  process.env.NMC_JUDGE_CLIENT = client;
+  t.after(() => { if (previous === undefined) delete process.env.NMC_JUDGE_CLIENT; else process.env.NMC_JUDGE_CLIENT = previous; });
+  const started = Date.now();
+  const verdict = await judgeCapture(path.join(dir, 'x.png'), 'a sky', { killAt: Date.now() + 300 });
+  assert.ok(Date.now() - started < 10000, 'the hung judge was not killed');
+  assert.equal(verdict.exit, -1);
+  assert.equal(verdict.score, null);
+  assert.match(verdict.output, /judge killed: still running/);
+});
+
+test('judge passes each judge call a kill time after the end of its start window', async (t) => {
+  const s = await freshFixture(t, [foundation]);
+  const kills = [];
+  const before = Date.now();
+  const fast = async (_capture, _description, opts) => {
+    kills.push(opts?.killAt);
+    return { exit: 0, score: 8, output: 'JUDGE PASS: 8/10' };
+  };
+  assert.equal((await s.judge({ judge: fast, budgetMs: 1000, log: () => {} })).status, 'passed');
+  assert.equal(kills.length, 1);
+  assert.ok(Number.isFinite(kills[0]) && kills[0] >= before + 1000 + 150000);
 });

@@ -1041,20 +1041,40 @@ function judgeScore(text) {
 }
 
 /** One judge process on one capture; no reference image is ever passed. */
-export function judgeCapture(capture, description) {
+/**
+ * A judge process still running this long after the judge budget ended is killed, so one hung judge
+ * cannot hold the step until its command timeout (SKY_WEATHER_JUDGE_GRACE_MS or 150 s; the weather
+ * entry's 1020 s budget + 150 s stays under its 1200 s timeout).
+ */
+export const JUDGE_GRACE_MS = 150000;
+function judgeGraceMs() {
+  const raw = process.env.SKY_WEATHER_JUDGE_GRACE_MS ?? JUDGE_GRACE_MS;
+  const value = Number(raw);
+  ensure(Number.isFinite(value) && value >= 0, `invalid judge grace: ${raw}`);
+  return value;
+}
+
+export function judgeCapture(capture, description, { killAt } = {}) {
   const client = process.env.NMC_JUDGE_CLIENT;
   ensure(nonblank(client), 'NMC_JUDGE_CLIENT is missing');
   return new Promise((resolveVerdict, rejectVerdict) => {
     const child = spawn('python3', [client, capture, '--description', description, '--min-score', '6'],
       { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
+    let killed = false;
+    const timer = Number.isFinite(killAt) ? setTimeout(() => { killed = true; child.kill('SIGKILL'); },
+      Math.max(0, killAt - Date.now())) : null;
+    child.on('exit', () => { if (timer) clearTimeout(timer); });
     let stdout = '', stderr = '';
     child.stdout.on('data', (data) => { stdout += data; });
     child.stderr.on('data', (data) => { stderr += data; });
     child.on('error', (cause) => rejectVerdict(new Error(`judge process could not start: ${cause.message}`, { cause })));
     child.on('close', (code, signal) => {
       const output = [stdout, stderr].filter((text) => text.trim()).join('\n').trimEnd();
-      resolveVerdict({ exit: typeof code === 'number' ? code : -1, score: judgeScore(`${stdout}\n${stderr}`),
-        output: signal ? `${output}\njudge terminated by ${signal}`.trim() : output });
+      const ended = killed ? 'judge killed: still running when the judge budget and its grace ended'
+        : signal ? `judge terminated by ${signal}` : '';
+      resolveVerdict({ exit: typeof code === 'number' && !killed ? code : -1,
+        score: killed ? null : judgeScore(`${stdout}\n${stderr}`),
+        output: ended ? `${output}\n${ended}`.trim() : output });
     });
   });
 }
@@ -1193,7 +1213,7 @@ export async function judge(page, out, stage, options = {}) {
       const image = images.get(row.id);
       ensure(image && image.filename === row.filename, `selected image ${row.id} is missing from the run`);
       ensure(fs.existsSync(capture) && fs.lstatSync(capture).isFile(), `capture ${row.filename} is missing`);
-      const verdict = await runJudge(capture, row.expectedVisibleBehavior);
+      const verdict = await runJudge(capture, row.expectedVisibleBehavior, { killAt: deadline + judgeGraceMs() });
       ensure(isRecord(verdict), `judge returned no verdict for ${row.filename}`);
       ensure(Number.isInteger(verdict.exit), `judge verdict for ${row.filename} has no exit code`);
       ensure(typeof verdict.output === 'string', `judge verdict for ${row.filename} has no output`);
