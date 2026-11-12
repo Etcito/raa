@@ -34,9 +34,15 @@ pub fn find_pieces(triangles: &[Triangle], is_locked: &dyn Fn(u32) -> bool) -> P
             local.entry(corner.position).or_insert(next);
         }
     }
-    let ids: Vec<[u32; 3]> = triangles
+    let ids: Vec<Option<[u32; 3]>> = triangles
         .iter()
-        .map(|triangle| triangle.map(|corner| local[&corner.position]))
+        .map(|triangle| {
+            let mut ids = [0u32; 3];
+            for (slot, corner) in ids.iter_mut().zip(triangle) {
+                *slot = *local.get(&corner.position)?;
+            }
+            Some(ids)
+        })
         .collect();
     let mut parent: Vec<u32> = (0..local.len() as u32).collect();
     fn root(parent: &mut [u32], mut v: u32) -> u32 {
@@ -46,7 +52,7 @@ pub fn find_pieces(triangles: &[Triangle], is_locked: &dyn Fn(u32) -> bool) -> P
         }
         v
     }
-    for &[a, b, c] in &ids {
+    for &[a, b, c] in ids.iter().flatten() {
         let ra = root(&mut parent, a);
         for other in [b, c] {
             let ro = root(&mut parent, other);
@@ -54,11 +60,17 @@ pub fn find_pieces(triangles: &[Triangle], is_locked: &dyn Fn(u32) -> bool) -> P
         }
     }
 
-    // Components are numbered in the order of their first triangle.
+    // Components are numbered in the order of their first triangle. A triangle whose corner
+    // cannot be resolved joins the rest.
     let mut component: BTreeMap<u32, usize> = BTreeMap::new();
     let mut members: Vec<Vec<u32>> = Vec::new();
     let mut touches_lock: Vec<bool> = Vec::new();
+    let mut rest: Vec<u32> = Vec::new();
     for (index, (triangle, tri_ids)) in triangles.iter().zip(&ids).enumerate() {
+        let Some(tri_ids) = tri_ids else {
+            rest.push(index as u32);
+            continue;
+        };
         let id = root(&mut parent, tri_ids[0]);
         let slot = *component.entry(id).or_insert_with(|| {
             members.push(Vec::new());
@@ -73,7 +85,6 @@ pub fn find_pieces(triangles: &[Triangle], is_locked: &dyn Fn(u32) -> bool) -> P
 
     let largest = (triangles.len() as f32 * MAX_PIECE_SHARE).max(1.0) as usize;
     let mut pieces = Vec::new();
-    let mut rest = Vec::new();
     for (piece, locked) in members.into_iter().zip(touches_lock) {
         if !locked && piece.len() <= largest {
             pieces.push(piece);
@@ -96,15 +107,34 @@ pub struct Shape {
     pub width: f64,
 }
 
+/// The piece triangle `t`'s corners in f64, or `None` when the triangle id or one of its corner
+/// positions is out of range.
+fn triangle_corners(triangles: &[Triangle], positions: &[Vec3], t: u32) -> Option<[DVec3; 3]> {
+    let triangle = triangles.get(t as usize)?;
+    let mut corners = [DVec3::ZERO; 3];
+    for (slot, corner) in corners.iter_mut().zip(triangle) {
+        *slot = DVec3::from_vec3(*positions.get(corner.position as usize)?);
+    }
+    Some(corners)
+}
+
 /// The piece's centre, its length along the direction it is longest in, and its width across it
-/// within its own plane.
+/// within its own plane. With no resolvable point it returns a zero-length shape at the origin.
 pub fn shape(triangles: &[Triangle], piece: &[u32], positions: &[Vec3], points: &[DVec3]) -> Shape {
+    if points.is_empty() {
+        return Shape {
+            center: DVec3::ZERO,
+            across: DVec3::X,
+            length: 0.0,
+            width: 1.0e-9,
+        };
+    }
     let center = points.iter().copied().sum::<DVec3>() / points.len() as f64;
     let mut normal = DVec3::ZERO;
     for &t in piece {
-        let [a, b, c] = triangles[t as usize]
-            .map(|corner| DVec3::from_vec3(positions[corner.position as usize]));
-        normal += (b - a).cross(c - a);
+        if let Some([a, b, c]) = triangle_corners(triangles, positions, t) {
+            normal += (b - a).cross(c - a);
+        }
     }
     let normal = normal.normalize_or(DVec3::Y);
 
@@ -153,13 +183,15 @@ pub fn piece_points(
 ) -> (Vec<u32>, Vec<DVec3>) {
     let mut vertices: Vec<u32> = piece
         .iter()
-        .flat_map(|&t| triangles[t as usize].map(|c| c.position))
+        .filter_map(|&t| triangles.get(t as usize))
+        .flat_map(|triangle| triangle.map(|c| c.position))
+        .filter(|&v| positions.get(v as usize).is_some())
         .collect();
     vertices.sort_unstable();
     vertices.dedup();
     let points = vertices
         .iter()
-        .map(|&v| DVec3::from_vec3(positions[v as usize]))
+        .filter_map(|&v| positions.get(v as usize).copied().map(DVec3::from_vec3))
         .collect();
     (vertices, points)
 }
@@ -207,13 +239,15 @@ pub fn tube_radius(triangles: &[Triangle], piece: &[u32], positions: &[Vec3]) ->
     let mut area = 0.0;
     let (_, points) = piece_points(triangles, piece, positions);
     for &t in piece {
-        let [a, b, c] = triangles[t as usize]
-            .map(|corner| DVec3::from_vec3(positions[corner.position as usize]));
+        let [a, b, c] = triangle_corners(triangles, positions, t)?;
         let face = (b - a).cross(c - a);
         sum += face;
         area += face.length() * 0.5;
     }
     if sum.length() * 0.5 > area * 0.3 {
+        return None;
+    }
+    if points.is_empty() {
         return None;
     }
     // A tube's area is its circumference times its length.
@@ -382,5 +416,35 @@ mod tests {
         set_aside_wide_pieces(&mesh.triangles, &mut found, &mesh.positions);
         assert_eq!(found.pieces.len(), 20);
         assert_eq!(found.rest, vec![40, 41]);
+    }
+
+    #[test]
+    fn out_of_range_ids_do_not_panic() {
+        let mut mesh = Mesh::default();
+        mesh.quad(0.0, 1.0, 1.0);
+        let bad = Corner {
+            position: 999,
+            attribute: 0,
+        };
+        mesh.triangles.push([bad; 3]);
+        // Triangle 5 does not exist; triangle 2 references a missing position.
+        let piece = [0u32, 1, 2, 5];
+        let (ids, points) = piece_points(&mesh.triangles, &piece, &mesh.positions);
+        assert_eq!(ids.len(), 4);
+        assert_eq!(points.len(), 4);
+        assert_eq!(tube_radius(&mesh.triangles, &piece, &mesh.positions), None);
+        let s = shape(&mesh.triangles, &piece, &mesh.positions, &points);
+        assert!((s.length - 2.0_f64.sqrt()).abs() < 1e-6 || s.length >= 1.0);
+        let none = shape(&mesh.triangles, &[7], &mesh.positions, &[]);
+        assert_eq!(none.length, 0.0);
+        let mut found = Pieces {
+            pieces: vec![piece.to_vec()],
+            rest: Vec::new(),
+        };
+        set_aside_wide_pieces(&mesh.triangles, &mut found, &mesh.positions);
+        assert!(found.pieces.is_empty());
+        let all = find_pieces(&mesh.triangles, &|_| false);
+        assert!(all.pieces.is_empty());
+        assert_eq!(all.rest, vec![0, 1, 2]);
     }
 }
