@@ -69,7 +69,13 @@ fn raa_cloud_screen_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let direction = normalize(
         raa_cloud.forward.xyz + raa_cloud.right.xyz * ndc.x + raa_cloud.up.xyz * ndc.y,
     );
-    let jitter = raa_cloud_gradient_noise(vec2<f32>(id.xy), u32(raa_cloud.screen.z));
+    // A fixed per-pixel noise shifted by the golden ratio each frame: the offsets a pixel sees over
+    // successive frames cover 0..1 evenly, so the blended result converges without the frame-to-frame
+    // flicker of an unrelated random offset per frame.
+    let jitter = fract(
+        raa_cloud_gradient_noise(vec2<f32>(id.xy), 0u)
+            + 0.61803398875 * f32(u32(raa_cloud.screen.z) % 64u),
+    );
     let steps = clamp(i32(round(f32(RAA_CLOUD_SCREEN_STEPS) * raa_cloud.screen.w)), 8, 224);
     let here = raa_cloud_along(
         direction,
