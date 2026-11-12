@@ -4,6 +4,7 @@
 // big-endian u32 length and its bytes. Plain JS port of MAMA src/core/game/mesh-file.ts decodeMeshFile; it does not
 // import MAMA. Every refusal is an SdfmError `sdfm.scene_resolve`.
 import { SdfmError } from './errors.js';
+import { validateClusterSection } from './mesh-clusters.js';
 
 const ARRAY_TYPES = Object.freeze({
   Float32Array,
@@ -91,7 +92,7 @@ function partLabel(group, part, index) {
   return `${groupName}/${partName}`;
 }
 
-function meshArrays(mesh, where) {
+function meshArrays(mesh, where, index) {
   if (!(mesh.positions instanceof Float32Array)) fail(`mesh: part ${where} positions are not a Float32Array`);
   if (!(mesh.normals instanceof Float32Array)) fail(`mesh: part ${where} normals are not a Float32Array`);
   if (!(mesh.indices instanceof Uint32Array)) fail(`mesh: part ${where} indices are not a Uint32Array`);
@@ -102,7 +103,8 @@ function meshArrays(mesh, where) {
   for (let i = 0; i < mesh.indices.length; i++) {
     if (mesh.indices[i] >= vertices) fail(`mesh: part ${where} index ${i} is ${mesh.indices[i]}, not below ${vertices} vertices`);
   }
-  return { material: mesh.material, positions: mesh.positions, normals: mesh.normals, uvs: mesh.uvs, indices: mesh.indices };
+  const clusters = mesh.clusters === undefined ? null : validateClusterSection(mesh.clusters, `${where}#${index}`);
+  return { material: mesh.material, positions: mesh.positions, normals: mesh.normals, uvs: mesh.uvs, indices: mesh.indices, clusters };
 }
 
 /**
@@ -124,9 +126,9 @@ export function meshFilePayload(value) {
         || !part.frame.every(Number.isFinite) || !Array.isArray(part.meshes)) {
         fail(`mesh: part ${where} needs a finite 16-number frame and a meshes array`);
       }
-      const meshes = part.meshes.map((mesh) => {
+      const meshes = part.meshes.map((mesh, meshIndex) => {
         if (mesh === null || typeof mesh !== 'object') fail(`mesh: part ${where} has a mesh that is not an object`);
-        return meshArrays(mesh, where);
+        return meshArrays(mesh, where, meshIndex);
       });
       return { partId: part.partId, name: part.name, frame: part.frame, meshes };
     });
