@@ -8,6 +8,7 @@ use crate::packed::{
     MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, PACKED_CLUSTER_SIZE, PACKED_NODE_SIZE,
     PackedCluster, PackedNode, PackedVertex, unpack_triangle,
 };
+use crate::weld::decode_octahedral;
 
 /// The baked DAG of one mesh in the S29 packed records. A cluster index is its position in
 /// `clusters`; `vertex_offset` and `triangle_offset` are relative to `vertices` and `triangles`.
@@ -364,6 +365,132 @@ impl ClusterMesh {
             None => Ok(()),
         }
     }
+}
+
+/// The decoded cut of some clusters: three corner indices per triangle into `positions`, `normals`
+/// and `uvs`, and the cluster of each triangle. Each cluster owns its vertices.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CutMesh {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u32>,
+    pub cluster_of_triangle: Vec<u32>,
+}
+
+/// The uniform cut at `error_m` metres, as ascending cluster indices: the clusters whose
+/// `lod_error` is at most `error_m` under a leaf whose `max_parent_error` is above it. A negative
+/// or NaN threshold counts as 0. Each node is expanded once, so a cycle or a shared node in an
+/// unvalidated mesh cannot loop.
+pub fn select_cut(mesh: &ClusterMesh, error_m: f32) -> Vec<u32> {
+    let error_m = if error_m >= 0.0 { error_m } else { 0.0 };
+    let mut selected = vec![false; mesh.clusters.len()];
+    let mut visited = vec![false; mesh.nodes.len()];
+    let mut stack = vec![mesh.root_node as usize];
+    while let Some(index) = stack.pop() {
+        let Some(node) = mesh.nodes.get(index) else {
+            continue;
+        };
+        let Some(seen) = visited.get_mut(index) else {
+            continue;
+        };
+        if std::mem::replace(seen, true) {
+            continue;
+        }
+        let Some(range) = index_range(node.first, node.count) else {
+            continue;
+        };
+        if node.is_leaf != 1 {
+            if mesh.nodes.get(range.clone()).is_some() {
+                stack.extend(range);
+            }
+        } else if node.max_parent_error > error_m
+            && let Some(clusters) = mesh.clusters.get(range.clone())
+        {
+            for (cluster, data) in range.zip(clusters) {
+                if data.lod_error <= error_m
+                    && let Some(flag) = selected.get_mut(cluster)
+                {
+                    *flag = true;
+                }
+            }
+        }
+    }
+    selected
+        .iter()
+        .enumerate()
+        .filter_map(|(cluster, &flag)| flag.then_some(cluster as u32))
+        .collect()
+}
+
+/// Decodes the clusters `clusters`, in the given order, into one mesh. Each cluster's vertices are
+/// appended and never shared with another cluster. An index out of range is skipped, and so is a
+/// triangle with a corner outside its cluster's vertices.
+pub fn cut_triangles(mesh: &ClusterMesh, clusters: &[u32]) -> CutMesh {
+    let mut cut = CutMesh::default();
+    for &index in clusters {
+        if let Some(cluster) = mesh.clusters.get(index as usize) {
+            append_cluster(mesh, cluster, index, &mut cut);
+        }
+    }
+    cut
+}
+
+/// Appends the vertices and triangles of one cluster. A cluster whose ranges leave the mesh, or
+/// whose vertices would overflow the u32 corner indices, is skipped whole.
+fn append_cluster(mesh: &ClusterMesh, cluster: &PackedCluster, index: u32, cut: &mut CutMesh) {
+    let (Some(vertices), Some(triangles)) = (
+        span(
+            &mesh.vertices,
+            cluster.vertex_offset,
+            cluster.vertex_count(),
+        ),
+        span(
+            &mesh.triangles,
+            cluster.triangle_offset,
+            cluster.triangle_count(),
+        ),
+    ) else {
+        return;
+    };
+    if cut.positions.len().saturating_add(vertices.len()) > u32::MAX as usize {
+        return;
+    }
+    let base = cut.positions.len() as u32;
+    let ([ox, oy, oz], [ux, uy], [su, sv], step) = (
+        mesh.quant_origin,
+        mesh.uv_origin,
+        mesh.uv_step,
+        mesh.quant_step,
+    );
+    for vertex in vertices {
+        let [gx, gy, gz, nx, ny, u, v, _] = vertex.data;
+        cut.positions.push([
+            ox + f32::from(gx) * step,
+            oy + f32::from(gy) * step,
+            oz + f32::from(gz) * step,
+        ]);
+        cut.normals
+            .push(decode_octahedral([nx as i16, ny as i16]).to_array());
+        cut.uvs
+            .push([ux + f32::from(u) * su, uy + f32::from(v) * sv]);
+    }
+    let count = vertices.len();
+    for &packed in triangles {
+        let corners = unpack_triangle(packed);
+        if corners.iter().any(|&corner| usize::from(corner) >= count) {
+            continue;
+        }
+        cut.indices
+            .extend(corners.map(|corner| base + u32::from(corner)));
+        cut.cluster_of_triangle.push(index);
+    }
+}
+
+/// The index range `first..first + count`, or None when it overflows `usize`.
+fn index_range(first: u32, count: u32) -> Option<std::ops::Range<usize>> {
+    let start = first as usize;
+    Some(start..start.checked_add(count as usize)?)
 }
 
 fn refusal(path: impl Into<String>, message: impl Into<String>) -> ClusterError {
