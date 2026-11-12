@@ -891,7 +891,7 @@ test('judge refuses stale evidence and records the freshness failure', async (t)
   const s = await freshFixture(t);
   retamper(s, (run) => { run.jobs[0].result.facts.assertions[0].passed = false; });
   const calls = judgeStub(t, PASSING_JUDGE);
-  await assert.rejects(s.judge(), /assertion:sky-visible/);
+  await assert.rejects(s.judge(), /assertion:sky-visible is missing or invalid: The sky renders above the ground receiver\./);
   const record = s.read(s.records.judge);
   assert.equal(record.status, 'failed');
   assert.deepEqual(record.images, []);
@@ -1170,16 +1170,15 @@ test('judge reuses the passed verdict of a kept image and judges only new or pre
   assert.match(judged[0], /foundation-sky-and-sphere\.png/);
   assert.deepEqual(second.images.find((entry) => entry.id === `${GROUP_A}-image`), originalA);
 
-  // A kept image whose earlier verdict failed is judged again; the new image is judged in every run.
-  writeJsonRecord(containedPath(s.out, originRecords.judge), rewrite(s.read(originRecords.judge), (record) => {
-    for (const entry of record.images) if (entry.id === `${GROUP_A}-image`) Object.assign(entry, { exit: 1, score: 4 });
-  }));
+  // An image whose earlier verdicts failed is judged again; a passed verdict of the same bytes is kept.
+  for (const records of [originRecords, s.records]) {
+    writeJsonRecord(containedPath(s.out, records.judge), rewrite(s.read(records.judge), (record) => {
+      for (const entry of record.images) if (entry.id === `${GROUP_A}-image`) Object.assign(entry, { exit: 1, score: 4 });
+    }));
+  }
   assert.equal((await s.judge()).status, 'passed');
   const again = judgedLines(calls).slice(before + 1);
-  assert.equal(again.length, 2);
-  // Judges run concurrently: both images are judged again, in whichever order the processes start.
-  assert.deepEqual(again.map((line) => path.basename(line.split(' ')[0])).sort(),
-    ['atmosphere-clear-day.png', 'foundation-sky-and-sphere.png']);
+  assert.deepEqual(again.map((line) => path.basename(line.split(' ')[0])), ['atmosphere-clear-day.png']);
 });
 
 test('judge judges a kept image again when its description changed', async (t) => {
@@ -1296,4 +1295,20 @@ test('a blank capture fails the render before the next job is dispatched, the re
     /foundation-sky-and-sphere\.png \(foundation-scene\/default\): one flat colour rgb\(0, 0, 0\); paired-cloud-shadows-on\.png \(paired-scene\/on\): one flat colour rgb\(120, 170, 230\)/);
   assert.deepEqual(judgedLines(calls), []);
   assert.equal(s.read(s.records.judge).status, 'failed');
+});
+
+test('judge stops starting judges when its budget ends, keeps the verdicts it wrote, and the next run judges only the rest', async (t) => {
+  const s = await freshFixture(t, [foundation, atmosphere]);
+  const judged = [];
+  const slow = async (capture) => {
+    judged.push(path.basename(capture));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return { exit: 0, score: 8, output: 'JUDGE PASS: 8/10' };
+  };
+  await assert.rejects(s.judge({ judge: slow, concurrency: 1, budgetMs: 10, log: () => {} }),
+    /1 image\(s\) not judged within the 0\.01 s judge budget: foundation-sky-and-sphere\.png/);
+  assert.deepEqual(judged, [atmosphere.filename]);
+  assert.deepEqual(s.read(s.records.judge).images.map((entry) => entry.filename), [atmosphere.filename]);
+  assert.equal((await s.judge({ judge: slow, log: () => {} })).status, 'passed');
+  assert.deepEqual(judged, [atmosphere.filename, foundation.filename]);
 });

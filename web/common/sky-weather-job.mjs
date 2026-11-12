@@ -1093,9 +1093,22 @@ function judgeConcurrency(requested) {
 }
 
 /**
- * Judge every selected capture and retain every verdict before failing. A kept image reuses its
- * earlier passed verdict (reusableVerdict, judgedAt retained); new and previously failed images
- * are judged with the inventory behaviour and no reference image.
+ * Judge calls start only within this budget (--budget-s, SKY_WEATHER_JUDGE_BUDGET_MS or 480 s), so
+ * the step ends before its command timeout with every verdict it has written.
+ */
+export const JUDGE_BUDGET_MS = 480000;
+function judgeBudgetMs(requested) {
+  const raw = requested ?? process.env.SKY_WEATHER_JUDGE_BUDGET_MS ?? JUDGE_BUDGET_MS;
+  const value = Number(raw);
+  ensure(Number.isFinite(value) && value >= 0, `invalid judge budget: ${raw}`);
+  return value;
+}
+
+/**
+ * Judge every selected capture and retain every verdict before failing. An image reuses an earlier
+ * passed verdict of its identical bytes and description (its own attempt's, or reusableVerdict's,
+ * judgedAt retained); the others are judged with the inventory behaviour and no reference image.
+ * Images left when the budget ends are named, and the next run judges only those.
  */
 export async function judge(page, out, stage, options = {}) {
   const runJudge = options.judge ?? judgeCapture;
@@ -1105,6 +1118,9 @@ export async function judge(page, out, stage, options = {}) {
     selectionId: ctx.selection.selectionId, attemptId: ctx.attempt.attemptId, buildId: ctx.build.buildId,
     images: [], status: 'failed', errors: [],
   };
+  let earlier = [];
+  try { earlier = readJsonRecord(containedPath(out, ctx.records.judge)).images ?? []; } catch { /* first judgment */ }
+  if (!Array.isArray(earlier)) earlier = [];
   const store = storeRoot(out, stage);
   const saveVerdicts = () => {
     // P2-RESUMABLE-RENDER STORE: the verdicts and the judged images, for attempts in other worktrees.
@@ -1131,8 +1147,17 @@ export async function judge(page, out, stage, options = {}) {
     throw error;
   }
   const images = new Map(verified.run.images.map((image) => [image.id, image]));
-  const kept = new Set(verified.run.kept.map((entry) => entry.id));
   const roots = attemptRoots(out, stage);
+  const budgetMs = judgeBudgetMs(options.budgetMs);
+  const deadline = Date.now() + budgetMs;
+  const unjudged = [];
+  // A passed verdict this attempt already wrote is about its own immutable capture.
+  const ownVerdict = (row) => {
+    const entry = earlier.find((value) => value?.id === row.id);
+    return entry && entry.filename === row.filename && entry.description === row.expectedVisibleBehavior
+      && entry.minScore === 6 && entry.exit === 0 && typeof entry.score === 'number' && entry.score >= 6
+      ? { ...entry } : null;
+  };
   const log = options.log ?? ((line) => process.stdout.write(`${line}\n`));
   const total = verified.inventory.length;
   // Verdicts land in inventory order whatever order the judges finish in; only finished slots are written.
@@ -1150,9 +1175,13 @@ export async function judge(page, out, stage, options = {}) {
   };
   const judgeRow = async (row, index) => {
     const capture = containedPath(out, verified.records.image(row.filename));
-    const reused = kept.has(row.id) ? reusableVerdict(roots, verified.pointer.directory, row, capture) : null;
+    const reused = ownVerdict(row) ?? reusableVerdict(roots, verified.pointer.directory, row, capture);
     if (reused) {
       settle(index, reused, null, true);
+      return;
+    }
+    if (Date.now() >= deadline) {
+      unjudged.push(row.filename);
       return;
     }
     const entry = {
@@ -1192,6 +1221,10 @@ export async function judge(page, out, stage, options = {}) {
     }
   };
   await Promise.all(Array.from({ length: Math.min(concurrency, total) }, worker));
+  if (unjudged.length > 0) {
+    record.errors.push(`${unjudged.length} image(s) not judged within the ${budgetMs / 1000} s judge budget: `
+      + `${unjudged.join(', ')}; every verdict above is saved and the next judge run judges only the rest`);
+  }
   try {
     assertCurrentAttempt(verified, verified.run);
     ensure(record.images.length === verified.inventory.length,
@@ -1208,18 +1241,24 @@ export async function judge(page, out, stage, options = {}) {
 
 export function parseArgs(argv) {
   const { values, positionals } = parse({ args: argv, allowPositionals: true,
-    options: { page: { type: 'string' }, out: { type: 'string' }, stage: { type: 'string' } } });
+    options: { page: { type: 'string' }, out: { type: 'string' }, stage: { type: 'string' },
+      'budget-s': { type: 'string' } } });
   ensure(positionals.length === 1 && ACTIONS.includes(positionals[0]), USAGE);
   const action = positionals[0];
   ensure(nonblank(values.page), USAGE);
   ensure(STAGES.includes(values.stage), `invalid stage: ${values.stage ?? '<missing>'}`);
   if (action === 'check' && values.out === undefined) return { action, page: values.page, out: undefined, stage: values.stage };
   ensure(nonblank(values.out), USAGE);
-  return { action, page: values.page, out: values.out, stage: values.stage };
+  const parsed = { action, page: values.page, out: values.out, stage: values.stage };
+  if (values['budget-s'] !== undefined) {
+    ensure(action === 'judge', '--budget-s applies to judge only');
+    parsed.budgetMs = judgeBudgetMs(Number(values['budget-s']) * 1000);
+  }
+  return parsed;
 }
 
 export async function main(argv = process.argv.slice(2)) {
-  const { action, page, out, stage } = parseArgs(argv);
+  const { action, page, out, stage, budgetMs } = parseArgs(argv);
   if (action === 'check') {
     const inventory = await check(page, stage);
     process.stdout.write(`sky-weather-job: check ${stage}: ${inventory.length} image(s)\n`);
@@ -1233,7 +1272,7 @@ export async function main(argv = process.argv.slice(2)) {
     const record = await fresh(page, out, stage);
     process.stdout.write(`sky-weather-job: fresh ${stage}: attempt ${record.attemptId}: ${record.status}\n`);
   } else if (action === 'judge') {
-    const record = await judge(page, out, stage);
+    const record = await judge(page, out, stage, { budgetMs });
     process.stdout.write(`sky-weather-job: judge ${stage}: ${record.images.length} image(s): ${record.status}\n`);
   } else {
     const attempt = await clean(page, out, stage);

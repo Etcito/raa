@@ -152,7 +152,7 @@
   },
   {
     "name": "p2-sky-weather-judge",
-    "command": "node web/common/sky-weather-job.mjs judge --page dist/sky-weather --out out/sky-weather/weather --stage weather",
+    "command": "node web/common/sky-weather-job.mjs judge --page dist/sky-weather --out out/sky-weather/weather --stage weather --budget-s 1020",
     "timeout_s": 1200,
     "after": [
       "p2-sky-weather-render",
