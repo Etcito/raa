@@ -1245,7 +1245,10 @@ fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
     assert_eq!(kept.settings.cloud_scale, 0.5);
     let set = weather(
         &current,
-        &[("cloudSamples", Raw::Number(128.0)), ("cloudScale", Raw::Number(0.75))],
+        &[
+            ("cloudSamples", Raw::Number(128.0)),
+            ("cloudScale", Raw::Number(0.75)),
+        ],
     )
     .unwrap();
     assert_eq!(set.settings.cloud_samples, 128);
@@ -1262,8 +1265,14 @@ fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
             "cloudScale",
         );
     }
-    expect_weather_invalid(weather(&current, &[("cloudSamples", Raw::Null)]), "cloudSamples");
-    expect_weather_invalid(weather(&current, &[("cloudScale", Raw::Null)]), "cloudScale");
+    expect_weather_invalid(
+        weather(&current, &[("cloudSamples", Raw::Null)]),
+        "cloudSamples",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("cloudScale", Raw::Null)]),
+        "cloudScale",
+    );
     let state = ResolvedWeatherState {
         settings: set.settings,
         current: Weather::default(),
@@ -1274,7 +1283,10 @@ fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
     assert!(kept.settings.cloud_dither && kept.settings.cloud_noise_size == 1);
     let grain = weather(
         &current,
-        &[("cloudDither", Raw::Bool(false)), ("cloudNoiseSize", Raw::Number(4.0))],
+        &[
+            ("cloudDither", Raw::Bool(false)),
+            ("cloudNoiseSize", Raw::Number(4.0)),
+        ],
     )
     .unwrap();
     assert!(!grain.settings.cloud_dither);
@@ -1285,7 +1297,10 @@ fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
             "cloudNoiseSize",
         );
     }
-    expect_weather_invalid(weather(&current, &[("cloudDither", Raw::Number(1.0))]), "cloudDither");
+    expect_weather_invalid(
+        weather(&current, &[("cloudDither", Raw::Number(1.0))]),
+        "cloudDither",
+    );
     let view = serialize_weather(&ResolvedWeatherState {
         settings: grain.settings,
         current: Weather::default(),
@@ -1302,7 +1317,10 @@ fn weather_cloud_dome_patch_is_ranged_and_read_back() {
     assert_eq!(kept.settings.cloud_dome_size, 1024);
     let set = weather(
         &current,
-        &[("cloudDome", Raw::Bool(true)), ("cloudDomeSize", Raw::Number(512.0))],
+        &[
+            ("cloudDome", Raw::Bool(true)),
+            ("cloudDomeSize", Raw::Number(512.0)),
+        ],
     )
     .unwrap();
     assert!(set.settings.cloud_dome);
@@ -1317,8 +1335,14 @@ fn weather_cloud_dome_patch_is_ranged_and_read_back() {
             "cloudDomeSize",
         );
     }
-    expect_weather_invalid(weather(&current, &[("cloudDome", Raw::Number(1.0))]), "cloudDome");
-    expect_weather_invalid(weather(&current, &[("cloudDomeSize", Raw::Null)]), "cloudDomeSize");
+    expect_weather_invalid(
+        weather(&current, &[("cloudDome", Raw::Number(1.0))]),
+        "cloudDome",
+    );
+    expect_weather_invalid(
+        weather(&current, &[("cloudDomeSize", Raw::Null)]),
+        "cloudDomeSize",
+    );
     let view = serialize_weather(&ResolvedWeatherState {
         settings: set.settings,
         current: Weather::default(),
