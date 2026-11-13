@@ -15,10 +15,19 @@ pub const PASS_VIEW_WGSL: &str = include_str!("wgsl/pass_view.wgsl");
 
 const CULL_CONTROL_WGSL: &str = include_str!("wgsl/cull_control.wgsl");
 
+const CULL_WGSL: &str = include_str!("wgsl/cull.wgsl");
+
 /// The cull-control module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] + `cull_control.wgsl`,
 /// with entry points `advance`, `finish` and `begin_second_phase` at group 2.
 pub fn cull_control_module_wgsl() -> String {
     [raa_shader::DEPTH_WGSL, PASS_VIEW_WGSL, CULL_CONTROL_WGSL].concat()
+}
+
+/// The hierarchy-traversal module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] +
+/// `cull.wgsl`, with entry points `seed` and `process` (group 2 scene bindings 0-4, group 3
+/// work bindings 5-8).
+pub fn cull_module_wgsl() -> String {
+    [raa_shader::DEPTH_WGSL, PASS_VIEW_WGSL, CULL_WGSL].concat()
 }
 
 /// Bytes of one `PassView` record (zero padding included).

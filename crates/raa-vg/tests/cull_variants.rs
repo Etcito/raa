@@ -9,8 +9,8 @@ use raa_cluster::weld::{decode_octahedral, encode_octahedral};
 use raa_core::testing::{skip, software_gpu};
 use raa_core::wgpu;
 use raa_math::Vec3;
-use raa_shader::Composer;
-use raa_vg::culling::{PASS_VIEW_WGSL, cull_control_module_wgsl};
+use raa_shader::{Composer, DEPTH_WGSL};
+use raa_vg::culling::{PASS_VIEW_WGSL, cull_control_module_wgsl, cull_module_wgsl};
 use wgpu::naga;
 
 /// Every shared record gets one storage buffer so the naga front-end emits its type and the
@@ -202,6 +202,105 @@ fn depth_calls_lists_each_helper_once() {
         depth_calls("fn probe() { return raa_depth_key(0.5) + raa_depth_key(0.25); }"),
         ["raa_depth_key"]
     );
+}
+
+#[test]
+fn cull_module_validates_with_seed_and_process() {
+    let wgsl = cull_module_wgsl();
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
+    let module = parse(&wgsl);
+    let mut entry_points: Vec<&str> = module
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    entry_points.sort_unstable();
+    assert_eq!(entry_points, ["process", "seed"]);
+    for entry in &module.entry_points {
+        assert!(
+            storage_buffers_used(&module, entry) <= 8,
+            "entry point {} uses more than eight storage buffers",
+            entry.name
+        );
+    }
+}
+
+#[test]
+fn cull_scene_and_work_bindings_match_the_s32_groups() {
+    let module = parse(&cull_module_wgsl());
+    let mut bindings: Vec<(u32, u32)> = module
+        .global_variables
+        .iter()
+        .map(|(_, global)| {
+            let binding = global.binding.expect("every global is bound");
+            (binding.group, binding.binding)
+        })
+        .collect();
+    bindings.sort_unstable();
+    assert_eq!(
+        bindings,
+        [
+            (2, 0),
+            (2, 1),
+            (2, 2),
+            (2, 3),
+            (2, 4),
+            (3, 5),
+            (3, 6),
+            (3, 7),
+            (3, 8)
+        ]
+    );
+    for (_, global) in module.global_variables.iter() {
+        let binding = global.binding.expect("every global is bound");
+        match (binding.group, binding.binding) {
+            (2, 0) => assert!(matches!(global.space, naga::AddressSpace::Uniform)),
+            (2, 1..=3) => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access }
+                    if access == naga::StorageAccess::LOAD
+            )),
+            (2, 4) => assert!(matches!(global.space, naga::AddressSpace::Handle)),
+            _ => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access }
+                    if access.contains(naga::StorageAccess::LOAD | naga::StorageAccess::STORE)
+            )),
+        }
+    }
+}
+
+/// The helper declarations of `DEPTH_WGSL` name every depth helper; only the calls the cull
+/// body makes are pinned here. RAA's cull never uses the reverse-order key helpers.
+#[test]
+fn cull_calls_only_the_allowed_depth_helpers() {
+    let wgsl = cull_module_wgsl();
+    let body = wgsl
+        .strip_prefix(DEPTH_WGSL)
+        .expect("the cull module starts with the depth helper");
+    let calls = depth_calls(body);
+    let allowed = [
+        "raa_depth_nearer",
+        "raa_depth_nearest",
+        "raa_depth_farthest",
+        "raa_depth_is_far",
+    ];
+    for call in &calls {
+        assert!(
+            allowed.contains(call),
+            "{call} is not one of the standard-Z helpers the cull may call"
+        );
+    }
+    assert!(
+        calls.contains(&"raa_depth_nearer"),
+        "the occlusion test compares through raa_depth_nearer"
+    );
+    for forbidden in ["page_requests", "texture_info"] {
+        assert!(
+            !wgsl.contains(forbidden),
+            "the RAA cull never pages cluster data: {forbidden} is removed"
+        );
+    }
 }
 
 /// The body of `fn name(..)` in `src`, up to its closing brace at column 0.
