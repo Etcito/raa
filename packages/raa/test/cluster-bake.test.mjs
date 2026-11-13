@@ -8,6 +8,13 @@ import test from 'node:test';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wasmPath = join(here, '..', 'pkg', 'raa_js_bg.wasm');
+const sizesPath = join(here, '..', '..', '..', 'dist', 'raa-sizes.json');
+
+// Q2 is growth over the milestone-1 starting revision (aa2c1bf), not an absolute figure:
+// that revision already ships a 978602 B gzip wasm, below which no change can measure.
+// The cap is the recorded baseline plus WASM_GZIP_MAX (300000 B) of headroom.
+const WASM_GZIP_BASELINE = 978602;
+const WASM_GZIP_MAX = 300000;
 
 const SECTION_KEYS = [
   'version',
@@ -92,6 +99,18 @@ function raa() {
   );
   return loaded;
 }
+
+test('the packaged wasm stays within the baseline-relative gzip cap (Q2)', () => {
+  if (!existsSync(sizesPath)) {
+    throw new Error(`missing ${sizesPath}: build the package first with bash scripts/build-package.sh`);
+  }
+  const sizes = JSON.parse(readFileSync(sizesPath, 'utf8'));
+  const cap = WASM_GZIP_BASELINE + WASM_GZIP_MAX;
+  assert.ok(
+    sizes.gzip <= cap,
+    `gzip ${sizes.gzip} B exceeds the ${WASM_GZIP_BASELINE} B baseline + ${WASM_GZIP_MAX} B headroom (cap ${cap} B; raw ${sizes.raw} B)`,
+  );
+});
 
 test('the one-call bake returns the sixteen-key section and it validates', async () => {
   const module = await raa();
