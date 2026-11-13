@@ -5,6 +5,8 @@
 //! the forward path. The disabled state records no pass and allocates no resource.
 //! Adapted solstice parts name their source in their module docs; see README.md.
 
+mod frame_passes;
+
 pub mod culling;
 pub mod eligibility;
 pub mod error;
