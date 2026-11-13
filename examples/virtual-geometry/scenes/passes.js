@@ -215,6 +215,19 @@ async function settle(engine) {
 }
 const number = value => typeof value === 'number';
 
+// The occlusion debug view only shows magenta when the previous frame's depth pyramid was built
+// from a different view: with a still camera the pyramid is exact and the second phase correctly
+// recovers nothing. Render one frame from a view where the four far copies sit behind the nearest,
+// then orbit back to the capture view. `orbit` is not a camera cut, so the occlusion history is
+// kept and the captured frame meets that stale pyramid while it still shows all five copies.
+const PREVIOUS_VIEW = { target: [0, 1, -50], distance: Math.hypot(57, 1), yaw: 2.535, pitch: 0 };
+async function staleOcclusion(engine) {
+  const { target, distance, yaw, pitch } = PREVIOUS_VIEW;
+  engine.setOrbit(target, distance, yaw, pitch);
+  await frame(engine);
+  engine.orbit(-yaw, Math.atan2(1, 57) - pitch, 1);
+}
+
 const ASSERT = {
   'vg-active'(engine) {
     const stats = engine.virtualGeometryStats();
@@ -271,6 +284,9 @@ const ASSERT = {
 export async function observe(engine, variant, state) {
   const assertions = [];
   for (const name of ASSERTIONS[variant.id]) assertions.push(await ASSERT[name](engine, variant, state));
+  // The occlusion debug row is captured right after this observation: give its second phase a
+  // pyramid from a different view to recover from.
+  if (variant.id === 'debug-occlusion') await staleOcclusion(engine);
   return {
     meshes: state.meshes.map(({ name, mesh }) => ({ name, mesh, clusters: null, cuts: [], states: (state.samples ?? []).map(({ state: s, progress }) => ({ state: s, progress })) })),
     instances: state.instances,
