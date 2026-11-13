@@ -10,10 +10,12 @@
 //!
 //! The wasm32 part (`web`) inserts one shared `ClusterStore` and the bake budget in the feature
 //! map. Each Engine render invocation steps the baking meshes once, within the budget, on the
-//! clock of `globalThis.performance.now` (the js-sys date clock as fallback).
+//! clock of `globalThis.performance.now` (the js-sys date clock as fallback). The same module
+//! holds the JS conversions of the section and of the bake input (S30, S31) and the exports
+//! `bakeClusters`, `validateClusters`, `clusterCutMesh` and the sliced class `ClusterBake`.
 
-// The helpers of this share are consumed by the cards that follow it in this file (wasm32
-// only ever reaches `install`, `frame` and the budget type), so they are dead there.
+// Some helpers are reached only by the host tests or only by the Engine methods of a later card,
+// so they are dead in one of the two builds.
 #![allow(dead_code)]
 
 use raa_cluster::error::{EMPTY, TOO_LARGE};
@@ -420,16 +422,21 @@ pub(crate) use web::{frame, install};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
-    use super::DEFAULT_BAKE_BUDGET_MS;
+    use super::*;
     use crate::engine::InstallCtx;
     use crate::state::EngineState;
-    use js_sys::{Function, Reflect};
-    use raa_cluster::ClusterStore;
-    use raa_core::{GpuContext, RaaError};
-    use raa_web::FrameInput;
+    use js_sys::{
+        Array, Float32Array, Function, Object, Reflect, Uint8Array, Uint16Array, Uint32Array,
+    };
+    use raa_cluster::{
+        BakeProgress, BakeStatus, ClusterBake as SlicedBake, ClusterStore, WorkBudget,
+        cut_triangles, select_cut,
+    };
+    use raa_core::GpuContext;
+    use raa_web::{FrameInput, error_to_js};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
 
     /// Milliseconds of CPU per Engine render invocation for the runtime bake (S31).
     pub(crate) struct ClusterBakeBudget(pub f64);
@@ -480,5 +487,424 @@ mod web {
             return ms;
         }
         js_sys::Date::now()
+    }
+
+    /// The S30 keys in canonical order.
+    const SECTION_KEYS: [&str; 16] = [
+        "version",
+        "algorithm",
+        "vertices",
+        "triangles",
+        "clusters",
+        "nodes",
+        "rootNode",
+        "hierarchyDepth",
+        "levels",
+        "quantOrigin",
+        "quantStep",
+        "uvOrigin",
+        "uvStep",
+        "boundsCenter",
+        "boundsRadius",
+        "sourceTriangles",
+    ];
+
+    /// The keys of `ClusterBakeOptions` (S31).
+    const OPTION_KEYS: [&str; 4] = [
+        "maxClusterTriangles",
+        "maxClusterVertices",
+        "minReduction",
+        "targetRatio",
+    ];
+
+    /// The own property `key` of a JS value; undefined when it is absent.
+    fn prop(value: &JsValue, key: &str) -> JsValue {
+        Reflect::get(value, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
+    }
+
+    /// The own enumerable keys of a JS object, in order.
+    fn own_keys(value: &JsValue) -> Vec<String> {
+        Object::keys(value.unchecked_ref::<Object>())
+            .iter()
+            .filter_map(|key| key.as_string())
+            .collect()
+    }
+
+    /// An object that is not an array; a typed array is refused by its keys.
+    fn plain(value: &JsValue) -> bool {
+        value.is_object() && !Array::is_array(value)
+    }
+
+    /// The field prefix of a section value; `section` names the whole value.
+    fn subject(at: &str) -> &str {
+        if at.is_empty() {
+            "section"
+        } else {
+            at.trim_end_matches('.')
+        }
+    }
+
+    /// The own property `key` as a `T` (a typed array), or a refusal naming `<at><key>`.
+    fn typed<T: JsCast>(value: &JsValue, key: &str, at: &str, what: &str) -> Result<T, RaaError> {
+        prop(value, key)
+            .dyn_into::<T>()
+            .map_err(|_| wire_refusal(at, key, &format!("must be {what}")))
+    }
+
+    /// As [`typed`] for an optional key: undefined is absent.
+    fn optional<T: JsCast>(value: &JsValue, key: &str, what: &str) -> Result<Option<T>, RaaError> {
+        if prop(value, key).is_undefined() {
+            return Ok(None);
+        }
+        typed(value, key, "", what).map(Some)
+    }
+
+    /// A JS number, or a refusal naming `field`.
+    fn as_number(value: &JsValue, field: &str) -> Result<f64, RaaError> {
+        value
+            .as_f64()
+            .ok_or_else(|| vg_invalid(field, "must be a number"))
+    }
+
+    /// The number at `<at><key>`.
+    fn number(value: &JsValue, key: &str, at: &str) -> Result<f64, RaaError> {
+        as_number(&prop(value, key), &format!("{at}{key}"))
+    }
+
+    /// The array at `<at><key>` of exactly N numbers.
+    fn numbers<const N: usize>(value: &JsValue, key: &str, at: &str) -> Result<[f64; N], RaaError> {
+        let refusal = || wire_refusal(at, key, &format!("must be an array of {N} numbers"));
+        let array = prop(value, key)
+            .dyn_into::<Array>()
+            .ok()
+            .filter(|array| array.length() as usize == N)
+            .ok_or_else(refusal)?;
+        let mut out = [0.0; N];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = array.get(i as u32).as_f64().ok_or_else(refusal)?;
+        }
+        Ok(out)
+    }
+
+    /// Exactly the keys of `keys`: an extra key or a missing one is refused as `<at><key>`.
+    fn exact_keys(value: &JsValue, keys: &[&str], at: &str) -> Result<(), RaaError> {
+        let own = own_keys(value);
+        if let Some(extra) = own.iter().find(|key| !keys.contains(&key.as_str())) {
+            return Err(vg_invalid(
+                &format!("{at}{extra}"),
+                "is not a field of this object",
+            ));
+        }
+        match keys.iter().find(|&&key| !own.iter().any(|o| o == key)) {
+            Some(missing) => Err(vg_invalid(&format!("{at}{missing}"), "is missing")),
+            None => Ok(()),
+        }
+    }
+
+    /// The S30 section of a JS value: the plain object of rule 1 with its typed arrays, then the
+    /// wire rules and the complete validation of [`section_from_wire`]. Every refusal is
+    /// `vg.invalid` with its field prefixed by `at` (empty, or `sections[i].`).
+    pub(crate) fn section_from_js(value: &JsValue, at: &str) -> Result<ClusterMesh, RaaError> {
+        if !plain(value) {
+            return Err(vg_invalid(subject(at), "must be a ClusterSection object"));
+        }
+        exact_keys(value, &SECTION_KEYS, at)?;
+        let vertices = typed::<Uint16Array>(value, "vertices", at, "a Uint16Array")?.to_vec();
+        let triangles = typed::<Uint32Array>(value, "triangles", at, "a Uint32Array")?.to_vec();
+        let clusters = typed::<Uint8Array>(value, "clusters", at, "a Uint8Array")?.to_vec();
+        let nodes = typed::<Uint8Array>(value, "nodes", at, "a Uint8Array")?.to_vec();
+        let wire = SectionWire {
+            version: number(value, "version", at)?,
+            algorithm: number(value, "algorithm", at)?,
+            vertices: &vertices,
+            triangles: &triangles,
+            clusters: &clusters,
+            nodes: &nodes,
+            root_node: number(value, "rootNode", at)?,
+            hierarchy_depth: number(value, "hierarchyDepth", at)?,
+            levels: number(value, "levels", at)?,
+            quant_origin: numbers(value, "quantOrigin", at)?,
+            quant_step: number(value, "quantStep", at)?,
+            uv_origin: numbers(value, "uvOrigin", at)?,
+            uv_step: numbers(value, "uvStep", at)?,
+            bounds_center: numbers(value, "boundsCenter", at)?,
+            bounds_radius: number(value, "boundsRadius", at)?,
+            source_triangles: number(value, "sourceTriangles", at)?,
+        };
+        section_from_wire(&wire, at)
+    }
+
+    /// The S30 section object of a mesh, keys in canonical order; `clusters` and `nodes` are the
+    /// bytes of `ClusterMesh::to_section_bytes`.
+    pub(crate) fn section_to_js(mesh: &ClusterMesh) -> JsValue {
+        let (clusters, nodes) = mesh.to_section_bytes();
+        let vertices: Vec<u16> = mesh.vertices.iter().flat_map(|v| v.data).collect();
+        object(vec![
+            ("version", JsValue::from_f64(1.0)),
+            ("algorithm", JsValue::from_f64(1.0)),
+            ("vertices", Uint16Array::from(vertices.as_slice()).into()),
+            (
+                "triangles",
+                Uint32Array::from(mesh.triangles.as_slice()).into(),
+            ),
+            ("clusters", Uint8Array::from(clusters.as_slice()).into()),
+            ("nodes", Uint8Array::from(nodes.as_slice()).into()),
+            ("rootNode", JsValue::from_f64(f64::from(mesh.root_node))),
+            (
+                "hierarchyDepth",
+                JsValue::from_f64(f64::from(mesh.hierarchy_depth)),
+            ),
+            ("levels", JsValue::from_f64(f64::from(mesh.levels))),
+            ("quantOrigin", numbers_js(&mesh.quant_origin)),
+            ("quantStep", JsValue::from_f64(f64::from(mesh.quant_step))),
+            ("uvOrigin", numbers_js(&mesh.uv_origin)),
+            ("uvStep", numbers_js(&mesh.uv_step)),
+            ("boundsCenter", numbers_js(&mesh.bounds_center)),
+            (
+                "boundsRadius",
+                JsValue::from_f64(f64::from(mesh.bounds_radius)),
+            ),
+            (
+                "sourceTriangles",
+                JsValue::from_f64(mesh.source_triangles as f64),
+            ),
+        ])
+    }
+
+    /// A JS array of the f32 components.
+    fn numbers_js<const N: usize>(values: &[f32; N]) -> JsValue {
+        values
+            .iter()
+            .map(|&v| JsValue::from_f64(f64::from(v)))
+            .collect::<Array>()
+            .into()
+    }
+
+    /// The components of each `[f32; N]`, in order.
+    fn flat<const N: usize>(values: &[[f32; N]]) -> Vec<f32> {
+        values.iter().flatten().copied().collect()
+    }
+
+    /// A plain object of the entries, in order.
+    fn object(entries: Vec<(&str, JsValue)>) -> JsValue {
+        let out = Object::new();
+        for (key, value) in entries {
+            let _ = Reflect::set(&out, &JsValue::from_str(key), &value);
+        }
+        out.into()
+    }
+
+    /// The S31 progress object of a bake snapshot.
+    fn progress_js(progress: &BakeProgress) -> JsValue {
+        object(vec![
+            ("stage", JsValue::from_str(stage_name(progress.stage))),
+            ("level", JsValue::from_f64(f64::from(progress.level))),
+            ("fraction", JsValue::from_f64(f64::from(progress.fraction))),
+            (
+                "done",
+                JsValue::from_bool(progress.stage == BakeStage::Done),
+            ),
+        ])
+    }
+
+    /// The bake options and the arrays of a `ClusterBakeInput` (S31). Undefined `options` is an
+    /// empty patch; see [`read_options`].
+    fn read_input(value: &JsValue) -> Result<(OwnedClusterInput, BuildOptions), RaaError> {
+        if !plain(value) {
+            return Err(vg_invalid("input", "must be a ClusterBakeInput object"));
+        }
+        let positions = typed::<Float32Array>(value, "positions", "", "a Float32Array")?.to_vec();
+        let normals = typed::<Float32Array>(value, "normals", "", "a Float32Array")?.to_vec();
+        let uvs = optional::<Float32Array>(value, "uvs", "a Float32Array")?.map(|v| v.to_vec());
+        let indices = typed::<Uint32Array>(value, "indices", "", "a Uint32Array")?.to_vec();
+        let options = build_options(&read_options(&prop(value, "options"))?)?;
+        let input = bake_input(&positions, &normals, uvs.as_deref(), &indices)?;
+        Ok((input, options))
+    }
+
+    /// The options patch of `ClusterBakeOptions` (S31): undefined is empty; an unknown key, a null
+    /// or a value that is not a number is `vg.invalid` naming `options.<key>`.
+    pub(crate) fn read_options(value: &JsValue) -> Result<OptionsPatch, RaaError> {
+        if value.is_undefined() {
+            return Ok(OptionsPatch::default());
+        }
+        if !plain(value) {
+            return Err(vg_invalid("options", "must be an object"));
+        }
+        if let Some(key) = own_keys(value)
+            .iter()
+            .find(|key| !OPTION_KEYS.contains(&key.as_str()))
+        {
+            return Err(vg_invalid(&format!("options.{key}"), "is not an option"));
+        }
+        let read = |key: &str| match prop(value, key) {
+            v if v.is_undefined() => Ok(None),
+            v => as_number(&v, &format!("options.{key}")).map(Some),
+        };
+        Ok(OptionsPatch {
+            max_cluster_triangles: read("maxClusterTriangles")?,
+            max_cluster_vertices: read("maxClusterVertices")?,
+            min_reduction: read("minReduction")?,
+            target_ratio: read("targetRatio")?,
+        })
+    }
+
+    /// The `budgetMs` of `step`: undefined is the default; else finite and above zero.
+    fn budget_of(value: &JsValue) -> Result<f64, RaaError> {
+        let ms = if value.is_undefined() {
+            DEFAULT_BAKE_BUDGET_MS
+        } else {
+            as_number(value, "budgetMs")?
+        };
+        if ms.is_finite() && ms > 0.0 {
+            Ok(ms)
+        } else {
+            let reason = format!("must be finite and above zero, got {ms}");
+            Err(vg_invalid("budgetMs", reason))
+        }
+    }
+
+    /// A refusal as the JS `RaaError` (an `Error` named `RaaError` with its `code`).
+    fn to_js<T>(result: Result<T, RaaError>) -> Result<T, JsValue> {
+        result.map_err(|e| error_to_js(&e))
+    }
+
+    fn bake_section(input: &JsValue) -> Result<JsValue, RaaError> {
+        let (owned, options) = read_input(input)?;
+        let mesh = raa_cluster::bake(owned.as_input(), &options).map_err(|e| cluster_error(&e))?;
+        Ok(section_to_js(&mesh))
+    }
+
+    fn cut_object(section: &JsValue, error_metres: &JsValue) -> Result<JsValue, RaaError> {
+        let error = as_number(error_metres, "errorMetres")?;
+        if !(error.is_finite() && error >= 0.0) {
+            let reason = format!("must be finite and not negative, got {error}");
+            return Err(vg_invalid("errorMetres", reason));
+        }
+        let mesh = section_from_js(section, "")?;
+        let clusters = select_cut(&mesh, error as f32);
+        let cut = cut_triangles(&mesh, &clusters);
+        Ok(object(vec![
+            (
+                "positions",
+                Float32Array::from(flat(&cut.positions).as_slice()).into(),
+            ),
+            (
+                "normals",
+                Float32Array::from(flat(&cut.normals).as_slice()).into(),
+            ),
+            ("uvs", Float32Array::from(flat(&cut.uvs).as_slice()).into()),
+            ("indices", Uint32Array::from(cut.indices.as_slice()).into()),
+            (
+                "clusterOfTriangle",
+                Uint32Array::from(cut.cluster_of_triangle.as_slice()).into(),
+            ),
+            ("clusters", JsValue::from_f64(clusters.len() as f64)),
+            (
+                "triangles",
+                JsValue::from_f64((cut.indices.len() / 3) as f64),
+            ),
+        ]))
+    }
+
+    /// `bakeClusters(input)`: bakes one single-material mesh to the end (S31).
+    #[wasm_bindgen(js_name = bakeClusters)]
+    pub fn bake_clusters(input: JsValue) -> Result<JsValue, JsValue> {
+        to_js(bake_section(&input))
+    }
+
+    /// `validateClusters(section)`: the complete structural validation of an S30 section.
+    #[wasm_bindgen(js_name = validateClusters)]
+    pub fn validate_clusters(section: JsValue) -> Result<(), JsValue> {
+        to_js(section_from_js(&section, "").map(|_| ()))
+    }
+
+    /// `clusterCutMesh(section, errorMetres)`: the uniform cut at `errorMetres` >= 0 (S29, S31).
+    #[wasm_bindgen(js_name = clusterCutMesh)]
+    pub fn cluster_cut_mesh(section: JsValue, error_metres: JsValue) -> Result<JsValue, JsValue> {
+        to_js(cut_object(&section, &error_metres))
+    }
+
+    /// `new ClusterBake(input)` (S31): a sliced bake, stepped within time budgets.
+    #[wasm_bindgen]
+    pub struct ClusterBake {
+        bake: Option<SlicedBake>,
+        progress: BakeProgress,
+        outcome: Option<Result<ClusterMesh, ClusterError>>,
+    }
+
+    #[wasm_bindgen]
+    impl ClusterBake {
+        /// Copies and validates the input; the refusals are those of `bakeClusters`.
+        #[wasm_bindgen(constructor)]
+        pub fn new(input: JsValue) -> Result<ClusterBake, JsValue> {
+            to_js(ClusterBake::start(&input))
+        }
+
+        /// Unit steps until `budgetMs` (default 4) has passed or the bake is done; at least one
+        /// unit runs. A bake error is returned here and by [`ClusterBake::result`].
+        pub fn step(&mut self, budget_ms: JsValue) -> Result<JsValue, JsValue> {
+            let budget = budget_of(&budget_ms);
+            to_js(
+                budget
+                    .and_then(|ms| self.advance(ms))
+                    .map(|()| progress_js(&self.progress)),
+            )
+        }
+
+        /// The stage, level and fraction after the last step.
+        pub fn progress(&self) -> JsValue {
+            progress_js(&self.progress)
+        }
+
+        /// The baked section; `vg.invalid` 'the bake is not done' before done.
+        pub fn result(&self) -> Result<JsValue, JsValue> {
+            to_js(self.section())
+        }
+    }
+
+    impl ClusterBake {
+        fn start(input: &JsValue) -> Result<ClusterBake, RaaError> {
+            let (owned, options) = read_input(input)?;
+            let bake =
+                SlicedBake::new(owned.as_input(), &options).map_err(|e| cluster_error(&e))?;
+            Ok(ClusterBake {
+                progress: bake.progress(),
+                bake: Some(bake),
+                outcome: None,
+            })
+        }
+
+        /// Runs units while the clock is below the deadline; a finished bake is finished here
+        /// and its outcome kept. An error outcome is returned.
+        fn advance(&mut self, budget_ms: f64) -> Result<(), RaaError> {
+            if let Some(Err(e)) = &self.outcome {
+                return Err(cluster_error(e));
+            }
+            if let Some(bake) = self.bake.as_mut() {
+                let deadline = now_ms() + budget_ms;
+                while bake.step(WorkBudget { units: 1 }) == BakeStatus::Working
+                    && now_ms() < deadline
+                {}
+                self.progress = bake.progress();
+            }
+            if self.progress.stage == BakeStage::Done
+                && let Some(bake) = self.bake.take()
+            {
+                self.outcome = Some(bake.finish());
+            }
+            match &self.outcome {
+                Some(Err(e)) => Err(cluster_error(e)),
+                _ => Ok(()),
+            }
+        }
+
+        fn section(&self) -> Result<JsValue, RaaError> {
+            match &self.outcome {
+                Some(Ok(mesh)) => Ok(section_to_js(mesh)),
+                Some(Err(e)) => Err(cluster_error(e)),
+                None => Err(vg_invalid("result", "the bake is not done")),
+            }
+        }
     }
 }
