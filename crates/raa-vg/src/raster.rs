@@ -35,6 +35,12 @@ const RASTER_SW_WGSL: &str = include_str!("wgsl/raster_sw.wgsl");
 /// depth through `raa_depth_key` and a cascade depth variant can stamp it instead.
 pub const RASTER_SW_BODY_WGSL: &str = include_str!("wgsl/raster_sw_body.wgsl");
 
+const DEPTH_STAMP_WGSL: &str = include_str!("wgsl/depth_stamp.wgsl");
+
+const RASTER_SW_DEPTH_WGSL: &str = include_str!("wgsl/raster_sw_depth.wgsl");
+
+const SHADOW_MERGE_WGSL: &str = include_str!("wgsl/shadow_merge.wgsl");
+
 /// The hardware raster module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] +
 /// [`RASTER_COMMON_WGSL`] + [`VIS_WRITE_WGSL`] + `raster_hw.wgsl` + `raster_hw_fragment.wgsl`,
 /// with entry points `vs_visibility`, `vs_depth` (vertex) and `fs_visibility` (fragment) at
@@ -74,6 +80,88 @@ pub fn raster_sw_module_wgsl() -> String {
         RASTER_SW_BODY_WGSL,
     ]
     .concat()
+}
+
+/// The cascade software depth module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] +
+/// [`RASTER_COMMON_WGSL`] + `depth_stamp.wgsl` + `raster_sw_depth.wgsl` +
+/// [`RASTER_SW_BODY_WGSL`], with the compute entry point `main` over group 2 bindings 0-6 as
+/// the visibility software pass plus 7 `shadow_depth: array<atomic<u32>>`, which
+/// `atomicMax`es the stamped word of `view.stamp`.
+///
+/// Handoff: `raster_sw_depth_module_wgsl() -> String` (crates/raa-vg/src/raster.rs) is exposed
+/// to card 'raa-vg: cascade raster GPU path (DepthBuffer, RasterTarget::Cascade, software
+/// depth, merge)', which creates its compute pipeline (entry `main`) and dispatches it at
+/// `CullWork::software_args_offset()` with the view's group-2 bindings and its `DepthBuffer`
+/// at binding 7. State/keys: the `CullWork` software extent and the stamped words
+/// ([`DEPTH_STAMPS`]), which that card clears only when the stamps start a new round.
+pub fn raster_sw_depth_module_wgsl() -> String {
+    [
+        raa_shader::DEPTH_WGSL,
+        PASS_VIEW_WGSL,
+        RASTER_COMMON_WGSL,
+        DEPTH_STAMP_WGSL,
+        RASTER_SW_DEPTH_WGSL,
+        RASTER_SW_BODY_WGSL,
+    ]
+    .concat()
+}
+
+/// The cascade merge module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] +
+/// `depth_stamp.wgsl` + `shadow_merge.wgsl`, without [`RASTER_COMMON_WGSL`], so group 2 is 0
+/// `shadow_depth` read-only storage and 1 `PassView` uniform with a dynamic offset; `vs_main`
+/// (vertex) is the fullscreen triangle and `fs_main` (fragment) writes `frag_depth` from the
+/// words whose stamp is `view.stamp`, discarding the others.
+///
+/// Handoff: `shadow_merge_module_wgsl() -> String` (crates/raa-vg/src/raster.rs) is exposed to
+/// card 'raa-vg: cascade raster GPU path (DepthBuffer, RasterTarget::Cascade, software depth,
+/// merge)', whose `Rasterizer::merge_depth` creates the fullscreen pipeline over the cascade's
+/// existing depth attachment; card 'raa-vg: shadow.rs cascade views and cascade recording' then
+/// records it after the software depth pass. State/keys: `view.viewport` sizes the pixel index,
+/// `view.stamp` selects the words this drawing stamped, and `stamped_depth` restores their
+/// standard-Z depth.
+pub fn shadow_merge_module_wgsl() -> String {
+    [
+        raa_shader::DEPTH_WGSL,
+        PASS_VIEW_WGSL,
+        DEPTH_STAMP_WGSL,
+        SHADOW_MERGE_WGSL,
+    ]
+    .concat()
+}
+
+/// Where a drawing's stamp sits in a stamped cascade depth word: the top byte, above the top
+/// 24 bits of `raa_depth_key`. Twin of `DEPTH_STAMP_SHIFT` in `depth_stamp.wgsl`.
+pub const DEPTH_STAMP_SHIFT: u32 = 24;
+
+/// The mask of the 24-bit depth key a stamped word carries. Twin of `DEPTH_STAMP_RANGE` in
+/// `depth_stamp.wgsl`.
+pub const DEPTH_STAMP_RANGE: u32 = 16777215;
+
+/// Stamps a drawing can carry: a byte, with 0 meaning never drawn.
+///
+/// Handoff: `DEPTH_STAMPS` (crates/raa-vg/src/raster.rs) is exposed to card 'raa-vg: cascade
+/// raster GPU path (DepthBuffer, RasterTarget::Cascade, software depth, merge)', whose
+/// `DepthBuffer` allocates its stamped words and clears them only when the stamps wrap. State:
+/// [`DEPTH_STAMP_SHIFT`], [`DEPTH_STAMP_RANGE`] and the CPU twins [`stamped`], [`stamp_of`] and
+/// [`stamped_depth`] follow the same layout as `depth_stamp.wgsl`.
+pub const DEPTH_STAMPS: u32 = 255;
+
+/// A stamped cascade depth word: the stamp in the top byte over the top 24 bits of the
+/// standard-Z depth key, so a later stamp beats every earlier word and, under one stamp, a
+/// nearer depth is larger. Twin of `stamped` in `depth_stamp.wgsl`.
+pub fn stamped(stamp: u32, depth: f32) -> u32 {
+    let key = (1.0 - depth.clamp(0.0, 1.0)).to_bits();
+    (stamp << DEPTH_STAMP_SHIFT) | (key >> 8)
+}
+
+/// The drawing stamp a word carries. Twin of `stamp_of` in `depth_stamp.wgsl`.
+pub fn stamp_of(word: u32) -> u32 {
+    word >> DEPTH_STAMP_SHIFT
+}
+
+/// The standard-Z depth a stamped word holds. Twin of `stamped_depth` in `depth_stamp.wgsl`.
+pub fn stamped_depth(word: u32) -> f32 {
+    1.0 - f32::from_bits((word & DEPTH_STAMP_RANGE) << 8)
 }
 
 /// Format of the colour attachment that exists only to satisfy WebGPU's rule that a render

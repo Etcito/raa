@@ -1,15 +1,17 @@
 //! The S32 raster modules (`raster_common`, `vis_write`, `raster_hw`,
-//! `raster_hw_fragment`, `raster_sw` and `raster_sw_body`): naga validation of each module,
-//! its entry points and stages, the group-2 bindings 0-8, the per-stage storage-buffer
-//! budget, the flat integer varyings and the one depth helper their visibility write calls.
+//! `raster_hw_fragment`, `raster_sw`, `raster_sw_body`, `depth_stamp`, `raster_sw_depth` and
+//! `shadow_merge`): naga validation of each module, its entry points and stages, the group-2
+//! bindings, the per-stage storage-buffer budget, the flat integer varyings, the one depth
+//! helper their visibility write calls and the CPU twin of the stamped cascade depth words.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use raa_shader::{Composer, DEPTH_WGSL};
 use raa_vg::culling::PASS_VIEW_WGSL;
 use raa_vg::raster::{
-    RASTER_COMMON_WGSL, RASTER_SW_BODY_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl,
-    raster_sw_module_wgsl,
+    DEPTH_STAMP_RANGE, DEPTH_STAMP_SHIFT, DEPTH_STAMPS, RASTER_COMMON_WGSL, RASTER_SW_BODY_WGSL,
+    VIS_WRITE_WGSL, raster_hw_module_wgsl, raster_sw_depth_module_wgsl, raster_sw_module_wgsl,
+    shadow_merge_module_wgsl, stamp_of, stamped, stamped_depth,
 };
 use std::collections::BTreeSet;
 use wgpu::naga;
@@ -575,4 +577,194 @@ fn raster_sw_calls_only_the_depth_key_helper() {
         RASTER_SW_BODY_WGSL.contains("let visible_index = state.sw_base + item;"),
         "the software window starts at sw_base"
     );
+}
+
+/// The CPU twin of `depth_stamp.wgsl`: every listed stamp and depth round-trips within 1e-4
+/// and never reads back nearer, a nearer depth takes a larger word under one stamp, and a
+/// later stamp beats every word an earlier stamp left.
+#[test]
+fn stamped_words_round_trip_and_order_depths_and_stamps() {
+    assert_eq!(
+        (DEPTH_STAMP_SHIFT, DEPTH_STAMP_RANGE, DEPTH_STAMPS),
+        (24, 16777215, 255)
+    );
+    let depths = [0.0, 0.3, 0.9, 1.0];
+    for stamp in [1, 37, 255] {
+        let mut previous = u32::MAX;
+        for depth in depths {
+            let word = stamped(stamp, depth);
+            assert_eq!(stamp_of(word), stamp);
+            let back = stamped_depth(word);
+            assert!(
+                (back - depth).abs() <= 1e-4,
+                "stamp {stamp}: depth {depth} reads back as {back}"
+            );
+            assert!(
+                back >= depth - 1e-6,
+                "stamp {stamp}: depth {depth} reads back nearer at {back}"
+            );
+            assert!(
+                word < previous,
+                "stamp {stamp}: a nearer depth takes a larger word"
+            );
+            previous = word;
+        }
+    }
+    for earlier in 1..DEPTH_STAMPS {
+        assert!(
+            stamped(earlier + 1, 1.0) > stamped(earlier, 0.0),
+            "stamp {} beats every word of stamp {earlier}",
+            earlier + 1
+        );
+    }
+}
+
+/// The cascade depth modules: both validate, the software depth module is the compute `main`
+/// over group 2 bindings 0-7, the merge module is the fullscreen `vs_main`/`fs_main` over
+/// bindings 0-1 with `fs_main` returning `frag_depth`, each entry point stays within eight
+/// storage buffers, and each calls only `raa_depth_key` and `raa_depth_from_key`.
+#[test]
+fn cascade_depth_modules_validate_with_the_contract() {
+    let sw_depth = raster_sw_depth_module_wgsl();
+    let merge = shadow_merge_module_wgsl();
+    assert_eq!(Composer::validate(&sw_depth), Ok(()));
+    assert_eq!(Composer::validate(&merge), Ok(()));
+    assert!(
+        sw_depth.starts_with(&[DEPTH_WGSL, PASS_VIEW_WGSL, RASTER_COMMON_WGSL].concat()),
+        "the software depth builder starts with DEPTH_WGSL, PASS_VIEW_WGSL and raster_common"
+    );
+    assert!(
+        sw_depth.ends_with(RASTER_SW_BODY_WGSL),
+        "the shared body is the last section of the software depth module"
+    );
+    assert!(
+        merge.starts_with(&[DEPTH_WGSL, PASS_VIEW_WGSL].concat()),
+        "the merge builder starts with DEPTH_WGSL and PASS_VIEW_WGSL"
+    );
+    assert!(
+        !merge.contains(RASTER_COMMON_WGSL),
+        "the merge module does not include raster_common"
+    );
+
+    let module = parse(&sw_depth);
+    let entries: Vec<(&str, naga::ShaderStage)> = module
+        .entry_points
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.stage))
+        .collect();
+    assert_eq!(entries, [("main", naga::ShaderStage::Compute)]);
+    let main = &module.entry_points[0];
+    assert_eq!(
+        stage_storage(&module, main),
+        BTreeSet::from([1, 2, 3, 4, 5, 6, 7]),
+        "main reads the scene, the cull state and the stamped depth buffer"
+    );
+    let mut bindings: Vec<(u32, u32)> = module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| {
+            global
+                .binding
+                .map(|binding| (binding.group, binding.binding))
+        })
+        .collect();
+    bindings.sort_unstable();
+    assert_eq!(
+        bindings,
+        (0..=7).map(|binding| (2, binding)).collect::<Vec<_>>(),
+        "the software depth pass binds group 2 entries 0-7"
+    );
+    for (_, global) in module.global_variables.iter() {
+        let Some(binding) = global.binding else {
+            continue; // the workgroup memory of the body
+        };
+        assert_eq!(binding.group, 2, "no binding sits outside group 2");
+        match binding.binding {
+            0 => assert!(matches!(global.space, naga::AddressSpace::Uniform)),
+            1..=6 => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access } if access == naga::StorageAccess::LOAD
+            )),
+            _ => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access }
+                    if access.contains(naga::StorageAccess::LOAD | naga::StorageAccess::STORE)
+            )),
+        }
+    }
+
+    let module = parse(&merge);
+    let mut entries: Vec<(&str, naga::ShaderStage)> = module
+        .entry_points
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.stage))
+        .collect();
+    entries.sort_unstable();
+    assert_eq!(
+        entries,
+        [
+            ("fs_main", naga::ShaderStage::Fragment),
+            ("vs_main", naga::ShaderStage::Vertex),
+        ]
+    );
+    for entry in &module.entry_points {
+        assert!(
+            stage_storage(&module, entry).len() <= 8,
+            "entry point {} uses more than eight storage buffers",
+            entry.name
+        );
+    }
+    let fragment = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "fs_main")
+        .expect("fs_main is an entry point");
+    let result = fragment
+        .function
+        .result
+        .as_ref()
+        .expect("fs_main returns frag_depth");
+    assert!(
+        matches!(
+            result.binding,
+            Some(naga::Binding::BuiltIn(naga::BuiltIn::FragDepth))
+        ),
+        "fs_main writes frag_depth"
+    );
+    let mut bindings: Vec<(u32, u32)> = module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| {
+            global
+                .binding
+                .map(|binding| (binding.group, binding.binding))
+        })
+        .collect();
+    bindings.sort_unstable();
+    assert_eq!(bindings, [(2, 0), (2, 1)]);
+    for (_, global) in module.global_variables.iter() {
+        let binding = global.binding.expect("every merge global is bound");
+        match binding.binding {
+            0 => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access } if access == naga::StorageAccess::LOAD
+            )),
+            1 => assert!(matches!(global.space, naga::AddressSpace::Uniform)),
+            other => panic!("unexpected merge binding {other}"),
+        }
+    }
+
+    for wgsl in [&sw_depth, &merge] {
+        let body = wgsl
+            .strip_prefix(DEPTH_WGSL)
+            .expect("the cascade module starts with the depth helper");
+        let calls = depth_calls(body);
+        for call in &calls {
+            assert!(
+                ["raa_depth_key", "raa_depth_from_key"].contains(call),
+                "{call} is not one of the stamped depth helpers"
+            );
+        }
+        assert_eq!(calls, ["raa_depth_key", "raa_depth_from_key"]);
+    }
 }
