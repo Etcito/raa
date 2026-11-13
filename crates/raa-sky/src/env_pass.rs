@@ -1022,6 +1022,9 @@ mod tests {
             s.env_dirty = true;
         }
         frame(&mut graph); // invalidates before the older completion, then filters again
+        // An SH readback is staged one submit before it is mapped (raa-ibl `sh_staging`), so a completion is
+        // applied two frames after its request: without the invalidation the replaced one lands on the next frame.
+        frame(&mut graph);
         frame(&mut graph); // without the invalidation this applies the replaced completion
         assert!(
             ibl.sh().is_none(),
