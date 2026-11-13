@@ -333,3 +333,380 @@ impl ViewSlots {
         self.buffer.size()
     }
 }
+
+/// Bytes of one `CullState` record (`CullState` in `pass_view.wgsl`).
+const STATE_SIZE: u64 = 48;
+/// Bytes of one indirect-arguments record (`Args` in `cull_control.wgsl`).
+const ARGS_SIZE: u64 = 56;
+/// Offset of the software-rasterization dispatch arguments.
+const ARGS_SOFTWARE_OFFSET: u64 = 12;
+/// Offset of the hardware-rasterization draw arguments.
+const ARGS_DRAW_OFFSET: u64 = 24;
+/// Offset of the software-depth merge draw arguments.
+const ARGS_MERGE_OFFSET: u64 = 40;
+
+/// Which occlusion phase a cull runs.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CullPhase {
+    /// Tests the previous frame's depth and collects retries. Views without occlusion run
+    /// this phase alone.
+    First,
+    /// Re-tests the retries against this frame's depth.
+    Second,
+}
+
+/// One buffer with `size` bytes and `usage`, labelled with `label`.
+fn buffer(gpu: &GpuContext, label: &str, size: u64, usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size,
+        usage,
+        mapped_at_creation: false,
+    })
+}
+
+/// One compute-stage bind group layout entry.
+fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty,
+        count: None,
+    }
+}
+
+/// A read-only or read-write storage buffer binding.
+fn storage(read_only: bool) -> wgpu::BindingType {
+    wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Storage { read_only },
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    }
+}
+
+/// A bind group entry naming the whole of `buffer`.
+fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
+    }
+}
+
+/// A labelled compute pipeline over `layouts` for the module's `entry` point.
+fn compute(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layouts: &[Option<&wgpu::BindGroupLayout>],
+    entry: &str,
+) -> wgpu::ComputePipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(entry),
+        bind_group_layouts: layouts,
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(entry),
+        layout: Some(&pipeline_layout),
+        module,
+        entry_point: Some(entry),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    })
+}
+
+/// The compute pipelines and bind group layouts of culling, shared by every view. The
+/// placeholder buffer and pyramid stand in for a scene that does not exist yet.
+#[allow(dead_code)]
+pub struct CullPipelines {
+    pub(crate) scene_layout: wgpu::BindGroupLayout,
+    pub(crate) work_layout: wgpu::BindGroupLayout,
+    pub(crate) control_layout: wgpu::BindGroupLayout,
+    pub(crate) seed: wgpu::ComputePipeline,
+    pub(crate) process: wgpu::ComputePipeline,
+    pub(crate) advance: wgpu::ComputePipeline,
+    pub(crate) finish: wgpu::ComputePipeline,
+    pub(crate) begin_second_phase: wgpu::ComputePipeline,
+    pub(crate) placeholder: wgpu::Buffer,
+    pub(crate) placeholder_pyramid: wgpu::TextureView,
+}
+
+impl CullPipelines {
+    /// Builds the three layouts, the five compute pipelines and the 1x1 placeholders.
+    pub fn new(gpu: &GpuContext) -> CullPipelines {
+        let device = gpu.device();
+        let scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-vg cull scene"),
+            entries: &[
+                entry(
+                    0,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(PASS_VIEW_SIZE as u64),
+                    },
+                ),
+                entry(1, storage(true)),
+                entry(2, storage(true)),
+                entry(3, storage(true)),
+                entry(
+                    4,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+            ],
+        });
+        let work_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-vg cull work"),
+            entries: &[
+                entry(5, storage(false)),
+                entry(6, storage(false)),
+                entry(7, storage(false)),
+                entry(8, storage(false)),
+            ],
+        });
+        let control_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-vg cull control"),
+            entries: &[entry(0, storage(false)), entry(1, storage(false))],
+        });
+
+        let cull = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-vg cull module"),
+            source: wgpu::ShaderSource::Wgsl(cull_module_wgsl().into()),
+        });
+        let control = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-vg cull control module"),
+            source: wgpu::ShaderSource::Wgsl(cull_control_module_wgsl().into()),
+        });
+        let cull_layouts = [None, None, Some(&scene_layout), Some(&work_layout)];
+        let control_layouts = [None, None, Some(&control_layout)];
+
+        let placeholder = buffer(
+            gpu,
+            "raa-vg cull placeholder instances",
+            16,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        );
+        let pyramid = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-vg cull placeholder pyramid"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue().write_texture(
+            pyramid.as_image_copy(),
+            &1.0f32.to_le_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let placeholder_pyramid = pyramid.create_view(&wgpu::TextureViewDescriptor::default());
+
+        CullPipelines {
+            seed: compute(device, &cull, &cull_layouts, "seed"),
+            process: compute(device, &cull, &cull_layouts, "process"),
+            advance: compute(device, &control, &control_layouts, "advance"),
+            finish: compute(device, &control, &control_layouts, "finish"),
+            begin_second_phase: compute(device, &control, &control_layouts, "begin_second_phase"),
+            scene_layout,
+            work_layout,
+            control_layout,
+            placeholder,
+            placeholder_pyramid,
+        }
+    }
+
+    /// The GPU memory culling owns while no scene is bound: the placeholder buffer and texel.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.placeholder.size() + 4
+    }
+}
+
+/// The transient buffers of one culling run, with one bind group per occlusion phase.
+#[allow(dead_code)]
+pub struct CullWork {
+    state: wgpu::Buffer,
+    args: wgpu::Buffer,
+    visible: wgpu::Buffer,
+    queue_capacity: u64,
+    visible_capacity: u64,
+    first_phase: wgpu::BindGroup,
+    second_phase: wgpu::BindGroup,
+    control: wgpu::BindGroup,
+}
+
+impl CullWork {
+    /// One state buffer, two queues of `queue_capacity * 8` bytes, one visible list of
+    /// `visible_capacity * 8` bytes and the 56-byte arguments buffer. The first-phase bind
+    /// group reads queue A and retries into B; the second phase swaps them.
+    pub fn new(
+        gpu: &GpuContext,
+        pipelines: &CullPipelines,
+        label: &str,
+        queue_capacity: u64,
+        visible_capacity: u64,
+    ) -> CullWork {
+        let state = buffer(
+            gpu,
+            &format!("{label} cull state"),
+            STATE_SIZE,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let queue_a = buffer(
+            gpu,
+            &format!("{label} cull queue a"),
+            queue_capacity * 8,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let queue_b = buffer(
+            gpu,
+            &format!("{label} cull queue b"),
+            queue_capacity * 8,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let visible = buffer(
+            gpu,
+            &format!("{label} cull visible"),
+            visible_capacity * 8,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let args = buffer(
+            gpu,
+            &format!("{label} cull args"),
+            ARGS_SIZE,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_SRC,
+        );
+        let bind = |queue: &wgpu::Buffer, retry: &wgpu::Buffer| {
+            gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &pipelines.work_layout,
+                entries: &[
+                    bind_entry(5, &state),
+                    bind_entry(6, queue),
+                    bind_entry(7, retry),
+                    bind_entry(8, &visible),
+                ],
+            })
+        };
+        let first_phase = bind(&queue_a, &queue_b);
+        let second_phase = bind(&queue_b, &queue_a);
+        let control = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &pipelines.control_layout,
+            entries: &[bind_entry(0, &state), bind_entry(1, &args)],
+        });
+        CullWork {
+            state,
+            args,
+            visible,
+            queue_capacity,
+            visible_capacity,
+            first_phase,
+            second_phase,
+            control,
+        }
+    }
+
+    pub fn state(&self) -> &wgpu::Buffer {
+        &self.state
+    }
+
+    pub fn args(&self) -> &wgpu::Buffer {
+        &self.args
+    }
+
+    pub fn visible(&self) -> &wgpu::Buffer {
+        &self.visible
+    }
+
+    pub fn visible_capacity(&self) -> u64 {
+        self.visible_capacity
+    }
+
+    pub const fn software_args_offset() -> u64 {
+        ARGS_SOFTWARE_OFFSET
+    }
+
+    pub const fn draw_args_offset() -> u64 {
+        ARGS_DRAW_OFFSET
+    }
+
+    pub const fn merge_args_offset() -> u64 {
+        ARGS_MERGE_OFFSET
+    }
+
+    /// The GPU memory this run owns.
+    pub fn allocated_bytes(&self) -> u64 {
+        self.state.size() + self.args.size() + self.visible.size() + 2 * self.queue_capacity * 8
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn work_group(&self, phase: CullPhase) -> &wgpu::BindGroup {
+        match phase {
+            CullPhase::First => &self.first_phase,
+            CullPhase::Second => &self.second_phase,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn control_group(&self) -> &wgpu::BindGroup {
+        &self.control
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raa_core::testing::{block_on, skip, software_gpu};
+
+    #[test]
+    fn args_offsets_and_size() {
+        assert_eq!(CullWork::software_args_offset(), 12);
+        assert_eq!(CullWork::draw_args_offset(), 24);
+        assert_eq!(CullWork::merge_args_offset(), 40);
+        assert_eq!(ARGS_SIZE, 56);
+    }
+
+    #[test]
+    fn cull_pipelines_and_work_create_without_validation_error() {
+        let test = "cull_pipelines_and_work_create_without_validation_error";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipelines = CullPipelines::new(&gpu);
+        let work = CullWork::new(&gpu, &pipelines, "cull test", 1024, 1024);
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "cull pipeline validation: {error:?}");
+        assert_eq!(pipelines.allocated_bytes(), 20);
+        assert_eq!(work.allocated_bytes(), 48 + 2 * 8192 + 8192 + 56);
+        assert_eq!(work.visible_capacity(), 1024);
+        assert!(!std::ptr::eq(
+            work.work_group(CullPhase::First),
+            work.work_group(CullPhase::Second)
+        ));
+        let _ = work.control_group();
+    }
+}
