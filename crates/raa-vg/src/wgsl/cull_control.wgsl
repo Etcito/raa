@@ -30,7 +30,7 @@ SOFTWARE.
 // comparison or reduction lives here.
 
 // Must match the workgroup size of `process` in cull.wgsl.
-const PROCESS_GROUP_SIZE: u32 = 32u;
+const PROCESS_GROUP_SIZE: u32 = 64u;
 // The most workgroups one dispatch dimension may hold. Consumers of the software list take
 // one workgroup per cluster and stride over the rest when there are more.
 const MAX_GROUPS: u32 = 65535u;

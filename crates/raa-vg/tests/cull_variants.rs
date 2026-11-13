@@ -693,3 +693,35 @@ fn hzb_creates_without_validation_error() {
             .sum::<u64>();
     assert_eq!(hzb.allocated_bytes(), expected);
 }
+
+/// The control module's queue dispatch size is the `process` workgroup size, so the queue
+/// level never launches twice the workgroups the traversal needs.
+#[test]
+fn process_group_size_matches_the_process_workgroup() {
+    let cull_wgsl = cull_module_wgsl();
+    assert_eq!(Composer::validate(&cull_wgsl), Ok(()));
+    let cull = parse(&cull_wgsl);
+    let process = cull
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "process")
+        .expect("the cull module has a process entry point");
+    assert_eq!(process.stage, naga::ShaderStage::Compute);
+
+    let control = parse(&cull_control_module_wgsl());
+    let (_, constant) = control
+        .constants
+        .iter()
+        .find(|(_, constant)| constant.name.as_deref() == Some("PROCESS_GROUP_SIZE"))
+        .expect("the control module declares PROCESS_GROUP_SIZE");
+    let value = match &control.global_expressions[constant.init] {
+        naga::Expression::Literal(naga::Literal::U32(value)) => *value,
+        other => panic!("PROCESS_GROUP_SIZE is not a u32 literal: {other:?}"),
+    };
+
+    assert_eq!(
+        process.workgroup_size,
+        [value, 1, 1],
+        "PROCESS_GROUP_SIZE must equal the process workgroup size"
+    );
+}
