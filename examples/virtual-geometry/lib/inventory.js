@@ -21,6 +21,13 @@ const enumeration = values => value => values.includes(value);
 const list = test => value => Array.isArray(value) && value.every(test);
 const nonEmpty = test => value => Array.isArray(value) && value.length > 0 && value.every(test);
 function fail(message) { throw new Error(message); }
+// The last virtualGeometryStats() snapshot the page read, named by the fields the runtime reads.
+// The statistics wait gave up without one, so the failure says what the last read looked like.
+const STATS_FIELDS = ['statsFrameIndex', 'pending', 'drawnClusters', 'drawnTriangles'];
+function statisticsSnapshot(stats) {
+  if (!record(stats)) return 'none received';
+  return JSON.stringify(Object.fromEntries(STATS_FIELDS.map(field => [field, stats[field] ?? null])));
+}
 function registry(names, context) {
   if (!Array.isArray(names)) fail(`${context}: factNames must be an array`);
   const set = new Set();
@@ -138,6 +145,10 @@ export function validateRequiredFacts(row, facts, factNames) {
       valid = matches.length === 1 && assertion(matches[0]) && matches[0].passed === true;
       // The failed assertion's own detail names what was not drawn; a repeated report is refused.
       if (!valid) detail = matches.length === 1 ? `: ${String(matches[0]?.detail)}` : ` (${matches.length} reported)`;
+      // A statistics wait that gave up carries the last snapshot beside the assertion detail.
+      if (!valid && matches.length === 1 && String(matches[0]?.detail).includes('statistics not published')) {
+        detail += `; last statistics snapshot: ${statisticsSnapshot(facts.stats)}`;
+      }
     }
     if (!valid) fail(`${id}: required ${key} is missing or invalid${detail}`);
   }
