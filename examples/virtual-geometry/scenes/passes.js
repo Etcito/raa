@@ -8,8 +8,8 @@ const SETS = {
   field: ['ground plane', 'day sky preset', 'camera', 'same bumpy sphere material', 'sun direction and local lights'],
   lod: ['ground plane', 'day sky preset', 'camera', 'five copies of one bumpy sphere at fixed places', 'sun direction'],
   walls: ['ground plane', 'day sky preset', 'camera', 'wall placement and size', 'field of bumpy spheres behind the walls'],
-  shadows: ['ground plane', 'day sky preset', 'camera', 'sun direction', 'forward slab and wall placement'],
-  mixed: ['ground plane', 'day sky preset', 'camera', 'three local lights', 'order and placement of the seven objects'],
+  shadows: ['ground plane', 'day sky preset', 'camera', 'sun direction', 'forward slab placement (wide, left front, between the sun and the left sphere)', 'wall placement (wide, just behind both spheres)', 'shadow softness setting', 'page footer status text such as "ready: passes/shadows-off" (page chrome, not a shadow setting)'],
+  mixed: ['ground plane', 'day sky preset', 'camera', 'three local lights', 'order and placement of the seven objects: a squashed forward object stands in front of the second sphere and a red, tilted skinned forward object stands behind the third', 'colours of the objects'],
   bake: ['ground plane', 'day sky preset', 'camera', 'one bumpy sphere and its material', 'sun direction'],
 };
 const HELD = { 'dense-field': SETS.field, 'continuous-lod': SETS.lod, occlusion: SETS.walls, shadows: SETS.shadows, mixed: SETS.mixed, 'runtime-bake': SETS.bake, 'debug-views': SETS.lod };
@@ -50,6 +50,9 @@ const camera = (eye, target, fovYDeg = 50, far = 200) => ({ eye, target, fovYDeg
 const box = (name, min, max) => ({ name, min, max });
 const ball = (name, [x, y, z], r = 1.06) => box(name, [x - r, y - r, z - r], [x + r, y + r, z + r]);
 const SUN = [-.4, -.6, -.65];
+// Mixed row: three virtualized spheres, then the squashed object partly in front of sphere 2,
+// the skinned object partly behind sphere 3, the transparent and the furry object.
+const MIXED_PLACES = [[-7.5, 1.06, 0], [-4.5, 1.06, 0], [-1.5, 1.06, 0], [-3, 1.06, 2.2], [.2, 1.06, -2.4], [3.5, 1.06, 0], [6.5, 1.06, 0]];
 const SELECTION = {
   'dense-field': { camera: camera([0, 7, 24], [0, 0, -6]), subjects: [box('field', [-19, 0, -19], [19, 1, 19])] },
   'continuous-lod': {
@@ -61,9 +64,9 @@ const SELECTION = {
   occlusion: { camera: camera([0, 1.6, 14], [0, 1.2, -4]), subjects: [box('walls', [-9, 0, 3.85], [9, 3, 4.15]), box('hidden-field', [-12.5, 0, -15], [12.5, 1.1, -1.5]), box('front-row', [-4.5, 0, 7], [4.5, 1.1, 9])] },
   shadows: {
     camera: camera([0, 3.2, 9], [0, .9, -1]),
-    subjects: [ball('left-sphere', [-1.8, 1.06, 0]), ball('right-sphere', [1.8, 1.06, 0]), box('forward-slab', [-3.5, 0, 1.25], [-2.9, 3, 1.55]), box('forward-wall', [0, 0, -3.65], [3, 2.4, -3.35])],
+    subjects: [ball('left-sphere', [-1.8, 1.06, 0]), ball('right-sphere', [1.8, 1.06, 0]), box('forward-slab', [-4.1, 0, 1.25], [-2.3, 3, 1.55]), box('forward-wall', [-3, 0, -1.55], [3, 2.4, -1.25])],
   },
-  mixed: { camera: camera([1.5, 3, 16], [1.5, 1, 0]), subjects: [-7.5, -4.5, -1.5, 1.5, 4.5, 7.5, 10.5].map((x, i) => ball(`object-${i + 1}`, [x, 1.06, 0])) },
+  mixed: { camera: camera([-.5, 3, 16], [-.5, 1, 0]), subjects: MIXED_PLACES.map((p, i) => ball(`object-${i + 1}`, p)) },
   'runtime-bake': { camera: camera([0, 2, 6], [0, 1, 0]), subjects: [ball('sphere', [0, 1.06, 0])] },
 };
 const variants = ROWS.map(([id, scene, vg, pair, , , description]) => ({
@@ -158,29 +161,36 @@ const BUILDERS = {
     const wall = meshOf(engine, lib.content.occluderWall(), engine.addSurfaceMaterial({ color: [.6, .55, .5], roughness: .9 }));
     note(state, 'left-sphere', put(engine, mesh, [-1.8, 1.06, 0]));
     note(state, 'right-sphere', put(engine, mesh, [1.8, 1.06, 0]));
-    note(state, 'forward-slab', forward(engine, put(engine, wall, [-3.2, 0, 1.4], [.1, 1, 1])));
-    note(state, 'forward-wall', forward(engine, put(engine, wall, [1.5, 0, -3.5], [.5, .8, 1])));
+    engine.setShadows({ softness: 4 });
+    // The slab reaches x = -2.3 so the sun ([.45, -.6, -.65]) carries its shadow onto the left
+    // sphere; the wall stands just behind both spheres so their shadows reach it above the ground.
+    note(state, 'forward-slab', forward(engine, put(engine, wall, [-3.2, 0, 1.4], [.3, 1, 1])));
+    note(state, 'forward-wall', forward(engine, put(engine, wall, [0, 0, -1.4], [1, .8, 1])));
   },
   mixed(engine, lib, variant, state) {
     environment(engine, variant, { lights: [[-4, 3, 4], [3, 3, 4], [9, 3, 4]] });
     ground(engine, lib, state, [1, 1, 1]);
     const plain = engine.addSurfaceMaterial({ color: [.75, .7, .62], roughness: .6 });
     const mesh = sphereMesh(engine, lib, variant, state, plain);
-    [-7.5, -4.5, -1.5].forEach((x, i) => note(state, `virtual-${i + 1}`, put(engine, mesh, [x, 1.06, 0])));
+    const at = MIXED_PLACES;
+    [0, 1, 2].forEach(i => note(state, `virtual-${i + 1}`, put(engine, mesh, at[i])));
     const desc = lib.content.highPolyMesh(), count = desc.positions.length / 3;
+    const red = engine.addSurfaceMaterial({ color: [.8, .15, .12], roughness: .5 });
     const rig = new Uint16Array(4 * count), weights = new Float32Array(4 * count);
     for (let i = 0; i < count; i++) weights[4 * i] = 1;
-    const skinned = engine.addMesh({ ...desc, joints: rig, weights, subMeshes: [{ first: 0, count: desc.indices.length, material: plain }] });
-    const skin = put(engine, skinned, [1.5, 1.06, 0]);
-    engine.setSkinPose(skin, new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]));
+    const skinned = engine.addMesh({ ...desc, joints: rig, weights, subMeshes: [{ first: 0, count: desc.indices.length, material: red }] });
+    const skin = put(engine, skinned, at[4]);
+    // A tilted pose (25 degrees about Z) and a red material keep it apart from the cream spheres.
+    const c = Math.cos(.436), sn = Math.sin(.436);
+    engine.setSkinPose(skin, new Float32Array([c, sn, 0, 0, -sn, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]));
     note(state, 'skinned', skin);
-    const squash = put(engine, mesh, [4.5, 1.06, 0]);
+    const squash = put(engine, mesh, at[3]);
     engine.setSquash(squash, { amount: .25 });
     note(state, 'deformed', squash);
     const glass = engine.addSurfaceMaterial({ color: [.4, .7, .9], roughness: .2, blend: 'transparent', opacity: .5 });
-    note(state, 'transparent', put(engine, meshOf(engine, desc, glass), [7.5, 1.06, 0]));
+    note(state, 'transparent', put(engine, meshOf(engine, desc, glass), at[5]));
     const fur = engine.addSurfaceMaterial({ color: [.7, .5, .3], roughness: .9, furLength: .06, furShells: 16 });
-    note(state, 'fur', put(engine, meshOf(engine, desc, fur), [10.5, 1.06, 0]));
+    note(state, 'fur', put(engine, meshOf(engine, desc, fur), at[6]));
   },
   'runtime-bake'(engine, lib, variant, state) {
     environment(engine, variant);
