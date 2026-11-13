@@ -11,6 +11,7 @@ use raa_core::wgpu;
 use raa_math::Vec3;
 use raa_shader::{Composer, DEPTH_WGSL};
 use raa_vg::culling::{PASS_VIEW_WGSL, cull_control_module_wgsl, cull_module_wgsl};
+use raa_vg::hzb::{Hzb, hzb_down_module_wgsl, hzb_seed_module_wgsl, hzb_size};
 use wgpu::naga;
 
 /// Every shared record gets one storage buffer so the naga front-end emits its type and the
@@ -578,4 +579,117 @@ fn decode_helpers_round_trip_the_packed_vertex() {
             uv_out[1]
         );
     }
+}
+
+/// Every bound global of `module` as `(group, binding)`, sorted.
+fn bindings(module: &naga::Module) -> Vec<(u32, u32)> {
+    let mut bindings: Vec<(u32, u32)> = module
+        .global_variables
+        .iter()
+        .map(|(_, global)| {
+            let binding = global.binding.expect("every global is bound");
+            (binding.group, binding.binding)
+        })
+        .collect();
+    bindings.sort_unstable();
+    bindings
+}
+
+/// The hzb seed module validates with both seed entry points and its four declarations at
+/// group 0; the downsample module validates with `main` and its two group-0 bindings.
+#[test]
+fn hzb_modules_validate_with_their_group_zero_bindings() {
+    let seed = hzb_seed_module_wgsl();
+    assert_eq!(Composer::validate(&seed), Ok(()));
+    let module = parse(&seed);
+    let mut entry_points: Vec<&str> = module
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    entry_points.sort_unstable();
+    assert_eq!(entry_points, ["seed_from_depth", "seed_from_keys"]);
+    assert_eq!(bindings(&module), [(0, 0), (0, 1), (0, 2), (0, 3)]);
+    for (_, global) in module.global_variables.iter() {
+        let binding = global.binding.expect("every global is bound");
+        match binding.binding {
+            0 => assert!(matches!(global.space, naga::AddressSpace::Uniform)),
+            1 => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access } if access == naga::StorageAccess::LOAD
+            )),
+            _ => assert!(matches!(global.space, naga::AddressSpace::Handle)),
+        }
+    }
+
+    let down = hzb_down_module_wgsl();
+    assert_eq!(Composer::validate(&down), Ok(()));
+    let module = parse(&down);
+    let mut entry_points: Vec<&str> = module
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    entry_points.sort_unstable();
+    assert_eq!(entry_points, ["main"]);
+    assert_eq!(bindings(&module), [(0, 0), (0, 1)]);
+    for (_, global) in module.global_variables.iter() {
+        assert!(matches!(global.space, naga::AddressSpace::Handle));
+    }
+}
+
+/// Both hzb bodies reduce depth only through `raa_depth_farthest`, optionally converting a
+/// visibility key with `raa_depth_from_key`; the nearest start makes empty keys far.
+#[test]
+fn hzb_reduces_the_farthest_depth_through_the_allowed_helpers() {
+    let allowed = [
+        "raa_depth_farthest",
+        "raa_depth_from_key",
+        "raa_depth_is_far",
+    ];
+    for wgsl in [hzb_seed_module_wgsl(), hzb_down_module_wgsl()] {
+        let body = wgsl
+            .strip_prefix(DEPTH_WGSL)
+            .expect("every hzb module starts with the depth helper");
+        let calls = depth_calls(body);
+        for call in &calls {
+            assert!(
+                allowed.contains(call),
+                "{call} is not one of the depth helpers the hzb may call"
+            );
+        }
+        assert!(
+            calls.contains(&"raa_depth_farthest"),
+            "the hzb reduces toward the farthest depth"
+        );
+    }
+}
+
+/// The pyramid rounds each viewport axis down to its previous power of two.
+#[test]
+fn hzb_size_is_the_previous_power_of_two_of_each_axis() {
+    assert_eq!(hzb_size((1, 1)), (1, 1));
+    assert_eq!(hzb_size((1023, 1023)), (512, 512));
+    assert_eq!(hzb_size((1280, 720)), (1024, 512));
+}
+
+/// The pyramid allocates its texture and both pipelines without a validation error.
+#[test]
+fn hzb_creates_without_validation_error() {
+    let test = "hzb_creates_without_validation_error";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let hzb = Hzb::new(&gpu, (1280, 720));
+    let _ = gpu.device().poll(wgpu::PollType::wait_indefinitely());
+    let error = raa_core::testing::block_on(errors.pop());
+    assert!(error.is_none(), "hzb validation: {error:?}");
+    assert_eq!(hzb.size(), (1024, 512));
+    let expected: u64 = 16
+        + (0..11)
+            .map(|mip| u64::from((1024u32 >> mip).max(1)) * u64::from((512u32 >> mip).max(1)) * 4)
+            .sum::<u64>();
+    assert_eq!(hzb.allocated_bytes(), expected);
 }

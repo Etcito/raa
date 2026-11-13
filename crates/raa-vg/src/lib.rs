@@ -12,6 +12,7 @@ pub mod eligibility;
 pub mod error;
 pub mod feature;
 pub mod gbuffer;
+pub mod hzb;
 pub mod raster;
 pub mod resolve;
 pub mod scene;
@@ -24,6 +25,7 @@ pub use culling::{
 };
 pub use eligibility::{InstancePath, refusal_message};
 pub use feature::{VgFeature, VgHandle, VgStats, inactive_reason};
+pub use hzb::{Hzb, hzb_down_module_wgsl, hzb_seed_module_wgsl, hzb_size};
 pub use raster::{RASTER_COMMON_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl};
 pub use resolve::resolve_module_wgsl;
 pub use scene::{
