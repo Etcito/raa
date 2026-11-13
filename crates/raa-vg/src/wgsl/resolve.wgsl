@@ -111,11 +111,10 @@ fn projected_area(a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> f32 {
     return e0.x * e1.y - e0.y * e1.x;
 }
 
-// Cluster colours: the PCG hash of the cluster index (solstice resolve.wgsl:131-134).
-// Handoff to the task "raa-vg: lod, raster and occlusion debug colours": it extends the
-// `frame.flags.x` branch of `main` below with codes 2, 3 and 4, reusing this helper plus
-// `cluster_index`, `level`, `entry.cluster` and `material.base.rgb`, which are already in
-// scope there. No separate entry point; the debug word layout is the state it reads.
+// `hash_color` gives the per-cluster hash colour for debug code 1: the PCG hash of the
+// cluster index (solstice resolve.wgsl:131-134). The `frame.flags.x` debug branch of `main`
+// maps code 1 to `hash_color`, 2 to `lod_ramp`, 3 to `raster_color` and 4 to
+// `occlusion_color`, sRGB-encoded with a = 1.
 fn hash_color(value: u32) -> vec3<f32> {
     let h = pcg(value);
     return vec3<f32>(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0 * 0.8 + 0.2;
@@ -129,8 +128,8 @@ fn encode_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, x <= vec3<f32>(0.0031308));
 }
 
-// `VgFrame.flags.x` = 2 (rank table of `DebugView`): the DAG level as a ramp from blue at
-// level 0 through green at level 6 to red at level 12 and above, linear between the stops.
+// `lod_ramp` gives the DAG level as a colour ramp for debug code 2: blue at level 0 through
+// green at level 6 to red at level 12 and above, linear between the stops.
 fn lod_ramp(level: u32) -> vec3<f32> {
     let t = f32(min(level, 12u));
     let blue = vec3<f32>(0.1, 0.3, 1.0);
@@ -142,7 +141,8 @@ fn lod_ramp(level: u32) -> vec3<f32> {
     return mix(green, red, (t - 6.0) / 6.0);
 }
 
-// Code 3: hardware rasterisation is blue, software rasterisation is orange.
+// `raster_color` gives the debug colour for code 3: hardware rasterisation is blue and
+// software rasterisation is orange.
 fn raster_color(cluster_word: u32) -> vec3<f32> {
     return select(
         vec3<f32>(0.15, 0.55, 1.0),
@@ -151,7 +151,8 @@ fn raster_color(cluster_word: u32) -> vec3<f32> {
     );
 }
 
-// Code 4: the first occlusion phase is green, a cluster recovered by the second is magenta.
+// `occlusion_color` gives the debug colour for code 4: the first occlusion phase is green
+// and a cluster recovered by the second phase is magenta.
 fn occlusion_color(cluster_word: u32) -> vec3<f32> {
     return select(
         vec3<f32>(0.25, 0.8, 0.35),
