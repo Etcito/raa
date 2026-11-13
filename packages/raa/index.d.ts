@@ -394,10 +394,15 @@ export interface RaaModule {
 
 /**
  * Initialises the wasm module (idempotent) and returns a fresh, frozen {@link RaaModule}.
- * @param options `wasmUrl`: where to fetch the .wasm; default `pkg/raa_js_bg.wasm` next
- *   to index.js.
+ * @param options `wasm`: the module's bytes or a compiled `WebAssembly.Module`, used instead of
+ *   `wasmUrl` with nothing fetched (Node loads the package this way). `wasmUrl`: where to fetch
+ *   the .wasm; default `pkg/raa_js_bg.wasm` next to index.js. Calls share the first call's
+ *   instantiation, so these options apply only to the call that instantiates the module.
  */
-export function loadRaa(options?: { wasmUrl?: string | URL }): Promise<RaaModule>;
+export function loadRaa(options?: {
+  wasm?: BufferSource | WebAssembly.Module;
+  wasmUrl?: string | URL;
+}): Promise<RaaModule>;
 
 /** Editor display mode. Overrides are independent of selection. */
 export type WireframeMode = 'off' | 'overlay' | 'only';
