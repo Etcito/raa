@@ -1,10 +1,11 @@
 //! The S29 guarantees on generated inputs through the public bake and cut API: the displaced
 //! sphere keeps the cluster limits and its source count, errors and bounds grow toward the root,
 //! two bakes agree, the foliage patch keeps its covered area across levels, the single triangle
-//! sits on the grid within one step, the empty and out-of-range meshes are refused, and the
-//! build options bound every cluster.
+//! sits on the grid within one step, the empty and out-of-range meshes are refused, the build
+//! options bound every cluster, the open strip keeps its boundary at every cut and the seam mesh
+//! stays closed across its duplicated edges.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use raa_cluster::bake::bake;
 use raa_cluster::cut::{ClusterMesh, cut_triangles, select_cut};
@@ -12,6 +13,7 @@ use raa_cluster::error::{ClusterError, EMPTY, INVALID_MESH};
 use raa_cluster::input::{BuildOptions, ClusterInput, OwnedClusterInput};
 use raa_cluster::packed::{
     MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, PackedCluster, PackedNode, ROOT_PARENT_ERROR,
+    unpack_triangle,
 };
 use raa_geom::MeshData;
 
@@ -53,6 +55,118 @@ fn level_errors(mesh: &ClusterMesh) -> Vec<f32> {
         *entry = entry.min(cluster.lod_error);
     }
     levels.into_values().collect()
+}
+
+/// The numbers of the flat array under `key` in a fixture text, up to its closing bracket.
+fn fixture_array(text: &str, key: &str) -> Vec<f32> {
+    let start = text
+        .find(&format!("\"{key}\""))
+        .unwrap_or_else(|| panic!("the fixture has no {key} key"));
+    let rest = &text[start..];
+    let open = rest
+        .find('[')
+        .unwrap_or_else(|| panic!("{key} has no opening bracket"));
+    let close = rest[open..]
+        .find(']')
+        .unwrap_or_else(|| panic!("{key} has no closing bracket"));
+    rest[open + 1..open + close]
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .parse::<f32>()
+                .unwrap_or_else(|_| panic!("{key} has a bad number {token:?}"))
+        })
+        .collect()
+}
+
+/// Reads a fixture of flat `positions`, optional `uvs` and `indices` arrays and computes the
+/// vertex normals as the normalised area-weighted sums of the incident face normals.
+fn read_fixture(text: &str) -> OwnedClusterInput {
+    let positions = fixture_array(text, "positions");
+    let uvs = text.contains("\"uvs\"").then(|| fixture_array(text, "uvs"));
+    let indices = fixture_array(text, "indices");
+    let place = |i: usize| [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+    let mut normals = vec![[0.0f32; 3]; positions.len() / 3];
+    for triangle in indices.chunks_exact(3) {
+        let [a, b, c] = [
+            triangle[0] as usize,
+            triangle[1] as usize,
+            triangle[2] as usize,
+        ];
+        let (pa, pb, pc) = (place(a), place(b), place(c));
+        let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
+        let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
+        let face = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        for vertex in [a, b, c] {
+            for (component, value) in normals[vertex].iter_mut().zip(face) {
+                *component += value;
+            }
+        }
+    }
+    for normal in &mut normals {
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        *normal = if length > 0.0 {
+            normal.map(|component| component / length)
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+    }
+    OwnedClusterInput {
+        mesh: MeshData {
+            positions: positions
+                .chunks_exact(3)
+                .map(|p| [p[0], p[1], p[2]])
+                .collect(),
+            normals,
+            indices: indices.iter().map(|index| *index as u32).collect(),
+        },
+        uvs: uvs.map(|flat| flat.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
+    }
+}
+
+/// For each undirected grid edge of the uniform cut at `error_m`, keyed with its smaller end
+/// first, the number of triangles using it in each direction: the keyed one, then its reverse.
+fn cut_edge_uses(mesh: &ClusterMesh, error_m: f32) -> BTreeMap<([u16; 3], [u16; 3]), [u32; 2]> {
+    let mut uses: BTreeMap<([u16; 3], [u16; 3]), [u32; 2]> = BTreeMap::new();
+    for index in select_cut(mesh, error_m) {
+        let Some(cluster) = mesh.clusters.get(index as usize) else {
+            continue;
+        };
+        let first_vertex = cluster.vertex_offset as usize;
+        let vertex_end = first_vertex.saturating_add(cluster.vertex_count() as usize);
+        let Some(vertices) = mesh.vertices.get(first_vertex..vertex_end) else {
+            continue;
+        };
+        let first_triangle = cluster.triangle_offset as usize;
+        let triangle_end = first_triangle.saturating_add(cluster.triangle_count() as usize);
+        let Some(triangles) = mesh.triangles.get(first_triangle..triangle_end) else {
+            continue;
+        };
+        for &packed in triangles {
+            let corners = unpack_triangle(packed).map(|corner| {
+                vertices
+                    .get(corner as usize)
+                    .map(|vertex| [vertex.data[0], vertex.data[1], vertex.data[2]])
+            });
+            let [Some(a), Some(b), Some(c)] = corners else {
+                continue;
+            };
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                let (key, direction) = if from <= to {
+                    ((from, to), 0)
+                } else {
+                    ((to, from), 1)
+                };
+                uses.entry(key).or_insert([0, 0])[direction] += 1;
+            }
+        }
+    }
+    uses
 }
 
 /// Whether `(outer_center, outer_radius)` contains `(inner_center, inner_radius)`: the f32
@@ -292,5 +406,61 @@ fn options_bound_every_cluster() {
             "cluster {i} has {} vertices over 64",
             cluster.vertex_count()
         );
+    }
+}
+
+#[test]
+fn open_strip_keeps_its_boundary_at_every_threshold() {
+    let input = read_fixture(include_str!("fixtures/open-strip.json"));
+    assert_eq!(input.mesh.positions.len(), 153, "vertices");
+    assert_eq!(input.mesh.indices.len(), 256 * 3, "indices");
+    assert!(input.uvs.is_none(), "the open strip has no uvs");
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the strip bakes");
+    mesh.validate()
+        .unwrap_or_else(|error| panic!("the strip bake fails validation: {error}"));
+    let boundary = |uses: &BTreeMap<([u16; 3], [u16; 3]), [u32; 2]>| {
+        uses.iter()
+            .filter(|(_, counts)| counts[0] + counts[1] == 1)
+            .map(|(edge, _)| *edge)
+            .collect::<BTreeSet<_>>()
+    };
+    let finest = boundary(&cut_edge_uses(&mesh, 0.0));
+    assert!(!finest.is_empty(), "the finest cut has no boundary");
+    for error in [0.0, 0.01, 0.1, 1.0e29] {
+        let uses = cut_edge_uses(&mesh, error);
+        for (edge, counts) in &uses {
+            assert!(
+                counts[0] + counts[1] <= 2,
+                "at {error} edge {edge:?} is used by {counts:?}"
+            );
+        }
+        assert_eq!(boundary(&uses), finest, "the boundary changed at {error}");
+    }
+}
+
+#[test]
+fn seam_mesh_cuts_are_closed_on_the_grid() {
+    let input = read_fixture(include_str!("fixtures/seam-mesh.json"));
+    assert_eq!(input.mesh.positions.len(), 294, "vertices");
+    assert_eq!(input.mesh.indices.len(), 432 * 3, "indices");
+    assert_eq!(input.uvs.as_ref().map(Vec::len), Some(294), "uvs");
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the cube bakes");
+    mesh.validate()
+        .unwrap_or_else(|error| panic!("the cube bake fails validation: {error}"));
+    assert_eq!(
+        cut_triangles(&mesh, &select_cut(&mesh, 0.0)).indices.len() / 3,
+        432,
+        "the finest cut must hold every source triangle"
+    );
+    for error in [0.0, 0.01, 0.1, 1.0e29] {
+        let uses = cut_edge_uses(&mesh, error);
+        assert!(!uses.is_empty(), "the cut at {error} is empty");
+        for (edge, counts) in &uses {
+            assert_eq!(
+                counts,
+                &[1, 1],
+                "the cut at {error} leaves edge {edge:?} with uses {counts:?}"
+            );
+        }
     }
 }
