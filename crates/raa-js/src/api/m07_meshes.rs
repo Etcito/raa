@@ -226,10 +226,12 @@ impl Engine {
                 st.lit.handle().set_mesh_edges(lit, &mesh, &edges);
             }
             st.set_skin(lit, skin);
-            Ok(st.meshes.insert(MeshEntry {
+            let handle = st.meshes.insert(MeshEntry {
                 lit,
                 origin: MeshOrigin::M07,
-            }))
+            });
+            st.retain_mesh_source(handle, &mesh);
+            Ok(handle)
         })
     }
 
@@ -244,6 +246,7 @@ impl Engine {
             let skin = js::skin_desc(&desc)?.to_skin(&mesh)?;
             let edges = mesh_edges(&desc, &mesh)?;
             st.lit.update(gpu, entry.lit, &mesh)?;
+            st.retain_mesh_source(id, &mesh);
             if let Some(edges) = edges {
                 st.lit.handle().set_mesh_edges(entry.lit, &mesh, &edges);
             }
@@ -315,7 +318,11 @@ impl Engine {
     /// boolean. Throws `api.invalid_argument` (global `null`), `api.unknown_handle`,
     /// `scene.stale_instance`.
     #[wasm_bindgen(js_name = setSingleMaterial)]
-    pub fn set_single_material(&mut self, enabled: Option<bool>, instance: Option<u32>) -> Result<(), JsValue> {
+    pub fn set_single_material(
+        &mut self,
+        enabled: Option<bool>,
+        instance: Option<u32>,
+    ) -> Result<(), JsValue> {
         self.with_state(|_, st| match (instance, enabled) {
             (Some(h), on) => st.set_instance_single_material(h, on),
             (None, Some(on)) => st.set_single_material(on),
@@ -331,7 +338,11 @@ impl Engine {
     /// the most indices decides). Ignored while the option is off.
     /// Throws `api.unknown_handle` (instance or material), `scene.stale_instance`.
     #[wasm_bindgen(js_name = setInstanceMaterial)]
-    pub fn set_instance_material(&mut self, instance: u32, material: Option<u32>) -> Result<(), JsValue> {
+    pub fn set_instance_material(
+        &mut self,
+        instance: u32,
+        material: Option<u32>,
+    ) -> Result<(), JsValue> {
         self.with_state(|_, st| {
             let material = material.map(|m| st.material(m)).transpose()?;
             let group = st.instance_group_mut(instance)?;

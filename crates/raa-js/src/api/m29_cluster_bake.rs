@@ -424,7 +424,7 @@ pub(crate) use web::{frame, install};
 mod web {
     use super::*;
     use crate::engine::InstallCtx;
-    use crate::state::EngineState;
+    use crate::state::{EngineState, MeshSources};
     use js_sys::{
         Array, Float32Array, Function, Object, Reflect, Uint8Array, Uint16Array, Uint32Array,
     };
@@ -441,12 +441,14 @@ mod web {
     /// Milliseconds of CPU per Engine render invocation for the runtime bake (S31).
     pub(crate) struct ClusterBakeBudget(pub f64);
 
-    /// Inserts the shared cluster store and the default bake budget in the feature map.
+    /// Inserts the shared cluster store, the default bake budget and the mesh-source table
+    /// in the feature map.
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         ctx.features
             .insert(Rc::new(RefCell::new(ClusterStore::new())));
         ctx.features
             .insert(ClusterBakeBudget(DEFAULT_BAKE_BUDGET_MS));
+        ctx.features.insert(MeshSources::default());
         Ok(())
     }
 

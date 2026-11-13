@@ -106,12 +106,20 @@ impl EngineState {
     fn upload_scratch(&mut self, gpu: &GpuContext) -> Result<u32, RaaError> {
         let mesh = AttributedMesh::from_mesh(std::mem::take(&mut self.scratch));
         let uploaded = self.lit.upload(gpu, &mesh);
-        self.scratch = mesh.base;
-        let lit = uploaded?;
-        Ok(self.meshes.insert(MeshEntry {
+        let lit = match uploaded {
+            Ok(lit) => lit,
+            Err(e) => {
+                self.scratch = mesh.base;
+                return Err(e);
+            }
+        };
+        let handle = self.meshes.insert(MeshEntry {
             lit,
             origin: MeshOrigin::V0,
-        }))
+        });
+        self.retain_mesh_source(handle, &mesh);
+        self.scratch = mesh.base;
+        Ok(handle)
     }
 
     /// v0 `addInstance`: an instance group drawing every sub-mesh of `mesh` with

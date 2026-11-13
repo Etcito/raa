@@ -7,12 +7,14 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use raa_cluster::{ClusterError, ClusterStore, OwnedClusterInput};
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError, wgpu};
 use raa_csg::CsgResolver;
 use raa_geom::{GeometryRegistry, MeshData};
 use raa_lit::{LitMeshId, LitRenderer, LocalLights, RestMeshView};
 use raa_loader::LoaderRegistry;
 use raa_math::Mat4;
+use raa_mesh::AttributedMesh;
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, RecordCtx, SubmissionState};
 use raa_scene::{InstanceId, NodeId, OrbitController, RenderList, Scene, Transform};
 use raa_skin::{SKIN_ORDER, SKIN_PASS, SkinMesh, SkinPass, SkinVertexInputs, validate_pose};
@@ -98,6 +100,76 @@ pub(crate) enum MeshOrigin {
 pub(crate) struct MeshEntry {
     pub lit: LitMeshId,
     pub origin: MeshOrigin,
+}
+
+/// The CPU copy of the bake inputs of one JS mesh (S31): the lit renderer keeps only GPU
+/// buffers after upload, so the runtime cluster bake reads this. `submeshes` holds
+/// `(first index, index count)` in sub-mesh order; a mesh that declared none holds one
+/// entry over all indices.
+pub(crate) struct MeshSource {
+    pub mesh: MeshData,
+    pub uvs: Option<Vec<[f32; 2]>>,
+    pub submeshes: Vec<(u32, u32)>,
+    pub has_colors: bool,
+}
+
+impl MeshSource {
+    /// One bake input per sub-mesh, through [`OwnedClusterInput::from_index_range`].
+    pub(crate) fn cluster_inputs(&self) -> Result<Vec<OwnedClusterInput>, ClusterError> {
+        self.submeshes
+            .iter()
+            .map(|&(first, count)| {
+                OwnedClusterInput::from_index_range(
+                    &self.mesh,
+                    self.uvs.as_deref(),
+                    first as usize,
+                    count as usize,
+                )
+            })
+            .collect()
+    }
+}
+
+/// One retained [`MeshSource`] per JS mesh handle while the m29 feature is installed.
+#[derive(Default)]
+pub(crate) struct MeshSources {
+    entries: BTreeMap<u32, MeshSource>,
+}
+
+impl MeshSources {
+    /// Stores or replaces the bake inputs of `handle`; only the used geometry is kept.
+    pub(crate) fn retain(&mut self, handle: u32, mesh: &AttributedMesh) {
+        let submeshes = if mesh.submeshes.is_empty() {
+            vec![(
+                0,
+                u32::try_from(mesh.base.indices.len()).unwrap_or(u32::MAX),
+            )]
+        } else {
+            mesh.submeshes
+                .iter()
+                .map(|s| (s.first_index, s.index_count))
+                .collect()
+        };
+        self.entries.insert(
+            handle,
+            MeshSource {
+                mesh: mesh.base.clone(),
+                uvs: mesh.uvs.clone(),
+                submeshes,
+                has_colors: mesh.colors.is_some(),
+            },
+        );
+    }
+
+    /// Drops the retained source of `handle`, if any.
+    pub(crate) fn forget(&mut self, handle: u32) {
+        self.entries.remove(&handle);
+    }
+
+    /// The retained source of `handle`; an absent entry means no retained geometry.
+    pub(crate) fn get(&self, handle: u32) -> Option<&MeshSource> {
+        self.entries.get(&handle)
+    }
 }
 
 /// The S18 skin retained for one lit mesh: the validated typed joints (`u16x4`) and
@@ -715,6 +787,30 @@ impl EngineState {
         self.meshes.get(h)
     }
 
+    /// Retains the CPU bake inputs of JS mesh `handle` while the m29 feature is installed,
+    /// then clears the handle's cluster store entry (so an update drops its clusters and
+    /// cancels its bake). Without a [`MeshSources`] value this does nothing.
+    pub(crate) fn retain_mesh_source(&mut self, handle: u32, mesh: &AttributedMesh) {
+        if let Some(sources) = self.features.get_mut::<MeshSources>() {
+            sources.retain(handle, mesh);
+        } else {
+            return;
+        }
+        if let Some(store) = self.features.get::<Rc<RefCell<ClusterStore>>>() {
+            store.borrow_mut().clear(handle);
+        }
+    }
+
+    /// Drops the CPU bake inputs of JS mesh `handle` and clears its cluster store entry.
+    pub(crate) fn forget_mesh_source(&mut self, handle: u32) {
+        if let Some(sources) = self.features.get_mut::<MeshSources>() {
+            sources.forget(handle);
+        }
+        if let Some(store) = self.features.get::<Rc<RefCell<ClusterStore>>>() {
+            store.borrow_mut().clear(handle);
+        }
+    }
+
     /// Retains the S18 skin of `mesh`, replacing a previous one; `None` clears it.
     pub(crate) fn set_skin(&mut self, mesh: LitMeshId, skin: Option<SkinMesh>) {
         self.clear_skin(mesh);
@@ -997,6 +1093,7 @@ impl EngineState {
     /// Frees the mesh of JS handle `h` (any origin) and drops it from the dirty list.
     pub(crate) fn remove_mesh(&mut self, h: u32) -> Result<(), RaaError> {
         let mesh = self.meshes.remove(h)?;
+        self.forget_mesh_source(h);
         self.clear_skin(mesh.lit);
         if let Some(skin) = self.features.get::<SkinFeature>() {
             skin.forget_mesh(mesh.lit);
@@ -1428,5 +1525,77 @@ mod tests {
         }
         let e = skin_pose_ranges(&skins, &[f32::NAN; 80]).unwrap_err();
         assert_eq!(e.code(), "skin.pose_length");
+    }
+
+    /// An attributed mesh of `vertices` vertices (columns along X), `indices` and the given
+    /// S13 sub-mesh ranges; `colors` adds a linear colour stream.
+    fn attributed(
+        vertices: usize,
+        indices: &[u32],
+        submeshes: &[(u32, u32)],
+        colors: bool,
+    ) -> AttributedMesh {
+        let positions: Vec<f32> = (0..vertices).flat_map(|i| [i as f32, 0.0, 0.0]).collect();
+        let normals = [0.0, 0.0, 1.0].repeat(vertices);
+        let uvs: Vec<f32> = (0..vertices).flat_map(|i| [i as f32, 0.5]).collect();
+        let subs: Vec<raa_mesh::SubMesh> = submeshes
+            .iter()
+            .map(|&(first_index, index_count)| raa_mesh::SubMesh {
+                first_index,
+                index_count,
+                material: None,
+            })
+            .collect();
+        let colors = colors.then(|| [1.0, 1.0, 1.0, 1.0].repeat(vertices));
+        raa_mesh::from_js_arrays(
+            &positions,
+            &normals,
+            Some(&uvs),
+            None,
+            colors.as_deref().map(raa_mesh::Colors::Linear),
+            indices,
+            &subs,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mesh_source_keeps_the_submesh_ranges_and_only_the_used_vertices() {
+        let mesh = attributed(8, &[0, 1, 2, 3, 4, 5], &[(0, 3), (3, 3)], false);
+        let mut sources = MeshSources::default();
+        sources.retain(7, &mesh);
+        let source = sources.get(7).expect("retained");
+        assert_eq!(source.submeshes, [(0, 3), (3, 3)]);
+        assert!(!source.has_colors);
+        let inputs = source.cluster_inputs().unwrap();
+        assert_eq!(inputs.len(), 2);
+        for input in &inputs {
+            assert_eq!(input.mesh.triangle_count(), 1);
+            assert_eq!(input.mesh.positions.len(), 3);
+            assert_eq!(input.uvs.as_ref().map(Vec::len), Some(3));
+        }
+    }
+
+    #[test]
+    fn mesh_source_defaults_to_one_range_and_tracks_colors_replacement_and_forgetting() {
+        let mut sources = MeshSources::default();
+        sources.retain(9, &attributed(4, &[0, 1, 2, 0, 2, 3], &[], false));
+        let source = sources.get(9).unwrap();
+        assert_eq!(source.submeshes, [(0, 6)]);
+        assert!(!source.has_colors);
+        let inputs = source.cluster_inputs().unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].mesh.triangle_count(), 2);
+        assert_eq!(inputs[0].mesh.positions.len(), 4);
+
+        sources.retain(9, &attributed(3, &[0, 1, 2], &[(0, 3)], true));
+        let source = sources.get(9).unwrap();
+        assert!(source.has_colors);
+        assert_eq!(source.submeshes, [(0, 3)]);
+        assert_eq!(source.cluster_inputs().unwrap().len(), 1);
+
+        sources.forget(9);
+        assert!(sources.get(9).is_none());
+        assert!(sources.get(8).is_none());
     }
 }
