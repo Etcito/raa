@@ -1,7 +1,7 @@
 //! The frame state shared by the virtualized-geometry passes and the `vg.cull`, `vg.raster`
 //! and `vg.resolve` feature passes of the main view (S32, S12 orders 21-23). This share is the
-//! vertical slice's first phase: the main view, the first cull phase, no occlusion test and the
-//! hardware rasteriser only.
+//! vertical slice's first phase: the main view, the first cull phase, no occlusion test, and
+//! the hardware rasteriser plus the software rasteriser of the small clusters.
 //!
 //! The state owns the lit handle, the settings, the main camera and viewport, the scene pool,
 //! the GPU pipelines and the surface-sized resources. [`VgFrameState::ensure_resources`]
@@ -117,6 +117,17 @@ impl VgFrameState {
     /// The viewport with zero dimensions clamped to one, so no buffer or texture is empty.
     fn size(&self) -> (u32, u32) {
         (self.viewport.0.max(1), self.viewport.1.max(1))
+    }
+
+    /// True when every scene buffer the raster and resolve groups bind is uploaded. The
+    /// placeholder stand-ins keep the groups valid but a draw or dispatch bound to one fails
+    /// wgpu validation, so a pass skips until the scene is uploaded.
+    fn scene_ready(&self) -> bool {
+        self.scene.instances().is_some()
+            && self.scene.nodes().is_some()
+            && self.scene.clusters().is_some()
+            && self.scene.vertices().is_some()
+            && self.scene.triangles().is_some()
     }
 
     /// Creates the pipelines when absent, the surface-sized resources when absent or when the
@@ -318,7 +329,7 @@ impl FeaturePass for VgCullPass {
             state.settings.error_pixels,
         );
         view.occlusion_enabled = 0;
-        view.allow_software = 0;
+        view.allow_software = u32::from(state.settings.software_raster);
         resources.slots.write(ctx.gpu, MAIN_FIRST, &view);
         Ok(())
     }
@@ -333,7 +344,7 @@ impl FeaturePass for VgCullPass {
     /// crates/raa-vg/src/culling.rs, `settings.shadows`, the cascade `CullWork`s and feature id 36.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
-        if !state.active {
+        if !state.active || !state.scene_ready() {
             return Ok(());
         }
         let Some(resources) = state.resources.as_ref() else {
@@ -397,16 +408,15 @@ impl FeaturePass for VgRasterPass {
     /// `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings: &RasterBindings,
     /// work: &CullWork, target: RasterTarget<'_>) -> ()` and `raster_sw_module_wgsl() -> String`
     /// (crates/raa-vg/src/raster.rs), whose earlier-landed Handoff (raster.rs:60 and raster.rs:333)
-    /// this share read and follows: that card extends `Rasterizer::record` in raster.rs with the
-    /// software dispatch at `CullWork::software_args_offset()`. In this file it plugs into
-    /// `VgRasterPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`, where
-    /// `RasterTarget::Visibility` is the only target today, and into `VgCullPass::prepare`, where
-    /// `view.allow_software = 0` is fixed today. State/keys: `settings.software_raster`, the main
-    /// `CullWork` indirect arguments and the `VgResources` registry (visibility, main,
-    /// groups.raster).
+    /// this share read and follows: `Rasterizer::record` in raster.rs records the software
+    /// dispatch at `CullWork::software_args_offset()` after the hardware draw. In this file
+    /// `VgRasterPass::record` calls it with `RasterTarget::Visibility`, and `VgCullPass::prepare`
+    /// sets `view.allow_software` from `settings.software_raster`; a pass skips while a scene
+    /// buffer is not uploaded. State/keys: `settings.software_raster`, the main `CullWork`
+    /// indirect arguments and the `VgResources` registry (visibility, main, groups.raster).
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
-        if !state.active {
+        if !state.active || !state.scene_ready() {
             return Ok(());
         }
         let Some(resources) = state.resources.as_ref() else {
@@ -495,7 +505,7 @@ impl FeaturePass for VgResolvePass {
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
-        if !state.active {
+        if !state.active || !state.scene_ready() {
             return Ok(());
         }
         let size = state.size();
@@ -523,7 +533,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    use raa_core::testing::{skip, software_gpu};
+    use raa_core::testing::{block_on, skip, software_gpu};
     use raa_lit::{LitOptions, LitRenderer};
     use raa_pipeline::{LightingResources, Pipeline};
 
@@ -586,5 +596,71 @@ mod tests {
         shared.borrow_mut().release();
         assert_eq!(shared.borrow().allocated_bytes(), 0);
         let _ = encoder.finish();
+    }
+
+    /// An active frame with resources but an empty scene records nothing: every pass skips
+    /// while a scene buffer is missing, so the placeholder stand-ins never reach a draw or a
+    /// dispatch and the validation scope stays clean.
+    #[test]
+    fn active_state_without_a_scene_records_nothing_without_validation_error() {
+        let test = "active_state_without_a_scene_records_nothing_without_validation_error";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        let renderer = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit");
+        let shared: SharedVg = Rc::new(RefCell::new(VgFrameState::new(renderer.handle())));
+        {
+            let mut state = shared.borrow_mut();
+            state.active = true;
+            state.settings.software_raster = true;
+            state.viewport = (64, 64);
+            state.ensure_resources(&gpu);
+        }
+        assert!(shared.borrow().allocated_bytes() > 0);
+        let mut cull = VgCullPass::new(Rc::clone(&shared));
+        let mut raster = VgRasterPass::new(Rc::clone(&shared));
+        let mut resolve = VgResolvePass::new(Rc::clone(&shared));
+        let targets = Targets::new(&gpu, (64, 64));
+        let mut lighting = LightingResources::new(&gpu);
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        for pass in [&mut cull as &mut dyn FeaturePass, &mut raster, &mut resolve] {
+            let mut prepare = PrepareCtx {
+                gpu: &gpu,
+                size: (64, 64),
+                frame: 0,
+                time_s: 0.0,
+                dt_s: 0.0,
+                targets: &targets,
+                lighting: &mut lighting,
+            };
+            pass.prepare(&mut prepare).expect("prepare");
+            let mut record = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size: (64, 64),
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                backbuffer: targets.material(),
+                backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
+                surface_is_srgb: false,
+            };
+            pass.record(&mut record).expect("record");
+        }
+        gpu.queue().submit(Some(encoder.finish()));
+        let _ = gpu.device().poll(wgpu::PollType::wait_indefinitely());
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "empty-scene frame: {error:?}");
+        assert!(shared.borrow().recorded.is_empty());
     }
 }

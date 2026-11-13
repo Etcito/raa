@@ -184,19 +184,21 @@ pub enum RasterTarget<'a> {
     Visibility(&'a VisibilityBuffer),
 }
 
-/// The hardware visibility rasteriser: its group-2 layout, the `vs_visibility` +
-/// `fs_visibility` render pipeline and the 16-byte placeholder bound in place of a scene
-/// buffer that does not exist yet. It owns no frame state.
+/// The visibility rasterisers: their shared group-2 layout, the `vs_visibility` +
+/// `fs_visibility` render pipeline, the software compute pipeline (entry `main`) and the
+/// 16-byte placeholder bound in place of a scene buffer that does not exist yet. It owns no
+/// frame state.
 pub struct Rasterizer {
     layout: wgpu::BindGroupLayout,
     hardware: wgpu::RenderPipeline,
+    software: wgpu::ComputePipeline,
     placeholder: wgpu::Buffer,
 }
 
 impl Rasterizer {
     /// The group-2 layout (0-6 visible to vertex, fragment and compute; 7-8 read-write storage
-    /// visible to fragment and compute only), the hardware visibility pipeline and the
-    /// placeholder buffer.
+    /// visible to fragment and compute only), the hardware visibility pipeline, the software
+    /// compute pipeline over the same layout and the placeholder buffer.
     pub fn new(gpu: &GpuContext) -> Rasterizer {
         let device = gpu.device();
         let scene_stages = wgpu::ShaderStages::VERTEX_FRAGMENT.union(wgpu::ShaderStages::COMPUTE);
@@ -279,9 +281,23 @@ impl Rasterizer {
             cache: None,
         });
 
+        let software_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-vg software raster"),
+            source: wgpu::ShaderSource::Wgsl(raster_sw_module_wgsl().into()),
+        });
+        let software = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("raa-vg software raster"),
+            layout: Some(&pipeline_layout),
+            module: &software_module,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
         Rasterizer {
             layout,
             hardware,
+            software,
             placeholder: buffer(
                 gpu,
                 "raa-vg raster placeholder",
@@ -328,17 +344,19 @@ impl Rasterizer {
         RasterBindings { group, slot }
     }
 
-    /// Draws what the most recent cull of `work` selected into `target`.
+    /// Draws what the most recent cull of `work` selected into `target`: the hardware list as
+    /// one indirect draw, then the software rasteriser of the small clusters as one indirect
+    /// compute dispatch with the same group 2 at `CullWork::software_args_offset()`.
     ///
     /// Handoff: `Rasterizer::bindings(&self, gpu: &GpuContext, slots: &ViewSlots, slot: u32,
     /// scene: &VgScene, work: &CullWork, vis: &VisibilityBuffer) -> RasterBindings` and
     /// `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings: &RasterBindings,
-    /// work: &CullWork, target: RasterTarget<'_>)` (crates/raa-vg/src/raster.rs) are exposed to
-    /// card 'raa-vg: software rasterisation of small clusters in the frame', which attaches the
-    /// software dispatch by extending this method (same group-2 bindings, `CullWork::args()` at
-    /// `software_args_offset()`) and records the frame's raster passes from `frame_passes.rs`.
-    /// State: the group-2 `RasterBindings` bind group with its dynamic `PassView` slot and the
-    /// `CullWork` indirect arguments; no keys.
+    /// work: &CullWork, target: RasterTarget<'_>) -> ()` (crates/raa-vg/src/raster.rs) are
+    /// exposed to card 'raa-vg: software rasterisation of small clusters in the frame', whose
+    /// software dispatch this method now records behind the same group 2, and to
+    /// `frame_passes.rs`, which builds the bindings and calls `record`. State: the group-2
+    /// `RasterBindings` bind group with its dynamic `PassView` slot and the `CullWork` indirect
+    /// arguments; no keys.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -348,25 +366,34 @@ impl Rasterizer {
     ) {
         match target {
             RasterTarget::Visibility(vis) => {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("raa-vg hardware raster"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &vis.dummy_target,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Discard,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("raa-vg hardware raster"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &vis.dummy_target,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Discard,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&self.hardware);
+                    pass.set_bind_group(2, &bindings.group, &[ViewSlots::offset(bindings.slot)]);
+                    pass.draw_indirect(work.args(), CullWork::draw_args_offset());
+                }
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("raa-vg software raster"),
                     timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
                 });
-                pass.set_pipeline(&self.hardware);
+                pass.set_pipeline(&self.software);
                 pass.set_bind_group(2, &bindings.group, &[ViewSlots::offset(bindings.slot)]);
-                pass.draw_indirect(work.args(), CullWork::draw_args_offset());
+                pass.dispatch_workgroups_indirect(work.args(), CullWork::software_args_offset());
             }
         }
     }
@@ -404,6 +431,16 @@ mod tests {
         let _ = gpu.device().poll(wgpu::PollType::wait_indefinitely());
         let error = block_on(errors.pop());
         assert!(error.is_none(), "raster validation: {error:?}");
+        // `Rasterizer::new` created both pipelines in that scope: the hardware render pipeline
+        // and the software compute pipeline, whose modules carry these entry points.
+        let module = wgpu::naga::front::wgsl::parse_str(&raster_hw_module_wgsl())
+            .expect("hardware raster module");
+        for name in ["vs_visibility", "fs_visibility"] {
+            assert!(module.entry_points.iter().any(|entry| entry.name == name));
+        }
+        let module = wgpu::naga::front::wgsl::parse_str(&raster_sw_module_wgsl())
+            .expect("software raster module");
+        assert!(module.entry_points.iter().any(|entry| entry.name == "main"));
         assert_eq!(vis.size(), (64, 64));
         assert_eq!(vis.allocated_bytes(), 2 * 64 * 64 * 4 + 64 * 64);
         assert_eq!(rasterizer.allocated_bytes(), 16);
