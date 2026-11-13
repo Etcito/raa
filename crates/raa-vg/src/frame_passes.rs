@@ -36,10 +36,12 @@ use crate::settings::VgSettings;
 /// Handoff: `raa-vg: vg.gbuffer merge into depth and G-buffer` takes
 /// `pub(crate) type SharedVg = Rc<RefCell<VgFrameState>>` and
 /// `pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) -> ()` exported by
-/// crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg`, reading
-/// `resources.surface`, `resources.visibility`, `resources.main`, `scene` and `lit`, and
-/// installing its order-32 `FeaturePass` beside the three passes here; state/keys: the
-/// `VgResources` registry and the lit material storage (`material_fns`).
+/// crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg` and installing its
+/// order-32 `FeaturePass` beside `VgCullPass`, `VgRasterPass` and `VgResolvePass`. In this file
+/// it reads `VgFrameState::scene`, `VgFrameState::lit` and `VgFrameState::material_fns`, plus the
+/// resolve outputs in `VgResources::surface` (written by `VgResolvePass::record`) with
+/// `VgResources::visibility` and `VgResources::main`; state/keys: the `VgResources` registry and
+/// the lit material storage.
 pub(crate) type SharedVg = Rc<RefCell<VgFrameState>>;
 
 /// The builders and GPU objects of the three passes, created on the first active frame.
@@ -122,18 +124,21 @@ impl VgFrameState {
     /// group-2 bind groups when the scene or the lit storage generation changed.
     ///
     /// Handoff: `raa-vg: VgFeature::install and VgHandle (settings, instances, active state,
-    /// prepare_frame)` takes `pub(crate) fn new(lit: LitHandle) -> VgFrameState`,
-    /// `pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) -> ()`,
-    /// `pub(crate) fn release(&mut self) -> ()`,
-    /// `pub(crate) fn allocated_bytes(&self) -> u64` and
-    /// `pub(crate) fn new(state: SharedVg) -> VgCullPass` (with the raster and resolve passes)
-    /// exported by crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg`, writing
-    /// the state fields (active, camera, viewport, settings, previous_view_proj, scene) and
-    /// installing the three passes. `recorded` is cleared once per frame at the start of each
-    /// pass's `prepare` (`VgCullPass::prepare`, `VgRasterPass::prepare` and `VgResolvePass::prepare`
-    /// in this file) and again by `VgFrameState::release`, so `VgHandle::prepare_frame` reads the
-    /// names after the passes ran. State/keys: the `VgPipelines`/`VgResources`/`VgGroups` registry,
-    /// the `VgScene` pool and the lit storage generation.
+    /// prepare_frame)` takes `VgFrameState::new`, `VgFrameState::ensure_resources`,
+    /// `VgFrameState::release`, `VgFrameState::allocated_bytes` and the constructors
+    /// `VgCullPass::new(state: SharedVg)`, `VgRasterPass::new(state: SharedVg)` and
+    /// `VgResolvePass::new(state: SharedVg)` exported by crates/raa-vg/src/frame_passes.rs; it
+    /// attaches by holding a `SharedVg`, writing `VgFrameState::active`, `camera`, `viewport`,
+    /// `settings`, `previous_view_proj` and `scene`, and registering the three pass structs
+    /// `VgCullPass`, `VgRasterPass` and `VgResolvePass`. `recorded` is cleared only on ACTIVE
+    /// frames, by each pass's own `prepare`: `VgCullPass::prepare`, `VgRasterPass::prepare` and
+    /// `VgResolvePass::prepare`, up to three times per active frame. Each `prepare` returns early
+    /// on `!VgFrameState::active` before the clear, and raa-pipeline skips `prepare` for disabled
+    /// entries, so on an inactive frame the names from the last active frame stay until
+    /// `VgFrameState::release` clears them; the VgFeature card must check `VgFrameState::active`
+    /// (or rely on `release`) before reading `recorded`. State/keys: the
+    /// `VgPipelines`/`VgResources`/`VgGroups` registry, the `VgScene` pool and the lit storage
+    /// generation.
     pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) {
         if self.pipelines.is_none() {
             self.pipelines = Some(VgPipelines {
