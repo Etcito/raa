@@ -949,6 +949,7 @@ dependencies = [
  "raa-ssr",
  "raa-tonemap",
  "raa-transmission",
+ "raa-vg",
  "raa-web",
  "wasm-bindgen",
  "wasm-bindgen-futures",
