@@ -5,11 +5,16 @@
 //! the forward path. The disabled state records no pass and allocates no resource.
 //! Adapted solstice parts name their source in their module docs; see README.md.
 
+pub mod culling;
 pub mod eligibility;
 pub mod error;
 pub mod scene;
 pub mod settings;
 
+pub use culling::{
+    CASCADE_BASE, GI_BASE, GI_SLOTS, InstanceFilter, MAIN_FIRST, MAIN_SECOND, PASS_VIEW_SIZE,
+    PassView, SLOT_STRIDE, VG_VIEW_SLOTS, ViewSlots,
+};
 pub use eligibility::{InstancePath, refusal_message};
 pub use scene::{
     INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_MOVABLE, INSTANCE_PREVIOUS_VALID,
