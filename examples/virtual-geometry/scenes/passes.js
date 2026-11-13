@@ -54,7 +54,9 @@ const SELECTION = {
   'dense-field': { camera: camera([0, 7, 24], [0, 0, -6]), subjects: [box('field', [-19, 0, -19], [19, 1, 19])] },
   'continuous-lod': {
     camera: camera([0, 2, 7], [0, 1, -50], 50, 300),
-    subjects: [ball('copy-1', [-2.4, 1.06, 0]), ball('copy-2', [-1.2, 1.06, -10]), ball('copy-3', [0, 1.06, -24]), ball('copy-4', [1.2, 1.06, -45]), ball('copy-5', [2.4, 1.06, -80])],
+    // The copies fan out to the right with distance so that none hides behind a nearer one
+    // from this camera (their projected discs stay at least 27 px apart at 1280x720).
+    subjects: [ball('copy-1', [-3, 1.06, 0]), ball('copy-2', [-.5, 1.06, -10]), ball('copy-3', [4, 1.06, -24]), ball('copy-4', [12, 1.06, -45]), ball('copy-5', [26, 1.06, -80])],
   },
   occlusion: { camera: camera([0, 1.6, 14], [0, 1.2, -4]), subjects: [box('walls', [-9, 0, 3.85], [9, 3, 4.15]), box('hidden-field', [-12.5, 0, -15], [12.5, 1.1, -1.5]), box('front-row', [-4.5, 0, 7], [4.5, 1.1, 9])] },
   shadows: {

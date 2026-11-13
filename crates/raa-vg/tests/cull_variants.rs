@@ -725,3 +725,247 @@ fn process_group_size_matches_the_process_workgroup() {
         "PROCESS_GROUP_SIZE must equal the process workgroup size"
     );
 }
+
+/// A 1x1 R32Float occlusion pyramid holding `depth` (standard-Z: 0.0 nearest, 1.0 far).
+fn flat_pyramid(gpu: &raa_core::GpuContext, depth: f32) -> wgpu::TextureView {
+    let extent = wgpu::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("raa-vg cull variants pyramid"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        &depth.to_le_bytes(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        extent,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// Copies `size` bytes of `source` into a mapped staging buffer and returns them.
+fn read_buffer(gpu: &raa_core::GpuContext, source: &wgpu::Buffer, size: u64) -> Vec<u8> {
+    let device = gpu.device();
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-vg cull variants readback"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(source, 0, &staging, 0, size);
+    gpu.queue().submit(Some(encoder.finish()));
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    rx.recv().expect("map callback").expect("map");
+    let bytes = slice.get_mapped_range().expect("mapped range").to_vec();
+    staging.unmap();
+    bytes
+}
+
+/// Two-phase occlusion on the software adapter (SKIP line without one). Five instances of one
+/// baked fan (1 m radius) stand at x = -2..2 m, z = 0, seen from (0, 0, 6) looking down -Z
+/// (near 0.1, far 16): the camera and the instances lie inside a 16 m box. The stale pyramid
+/// of the first phase holds depth 0.0 (the nearest possible surface, as if last frame's depth
+/// hid everything), so phase 0 rejects every instance into the retry list; this frame's pyramid
+/// holds 1.0 (far: nothing drawn yet hides them), so phase 1 recovers all five. No raster or
+/// depth target is involved: the cull state and the visible list are read back directly.
+#[test]
+fn second_phase_recovers_instances_the_stale_pyramid_rejected() {
+    use raa_cluster::{BuildOptions, ClusterStore, OwnedClusterInput, bake};
+    use raa_core::MeshId;
+    use raa_core::testing::block_on;
+    use raa_math::Mat4;
+    use raa_vg::culling::{CullPhase, CullPipelines, CullWork, MAIN_FIRST, MAIN_SECOND};
+    use raa_vg::{
+        INSTANCE_CASTS_SHADOW, MeshKeys, PassView, VgInstanceRecord, VgScene, ViewSlots,
+        hierarchy_word,
+    };
+
+    let test = "second_phase_recovers_instances_the_stale_pyramid_rejected";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let device = gpu.device();
+
+    let mut input = OwnedClusterInput::single_triangle();
+    input.uvs = None;
+    let mut positions = vec![[0.0f32, 0.0, 0.0]];
+    let mut normals = vec![[0.0f32, 0.0, 1.0]];
+    let mut indices = Vec::new();
+    for corner in 0..8u32 {
+        let angle = corner as f32 / 8.0 * std::f32::consts::TAU;
+        positions.push([angle.cos(), angle.sin(), 0.0]);
+        normals.push([0.0, 0.0, 1.0]);
+        indices.extend_from_slice(&[0, 1 + corner, 1 + (corner + 1) % 8]);
+    }
+    input.mesh.positions = positions;
+    input.mesh.normals = normals;
+    input.mesh.indices = indices;
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the fan bakes");
+    let quant = [
+        mesh.quant_origin[0],
+        mesh.quant_origin[1],
+        mesh.quant_origin[2],
+        mesh.quant_step,
+    ];
+    let uv_quant = [
+        mesh.uv_origin[0],
+        mesh.uv_origin[1],
+        mesh.uv_step[0],
+        mesh.uv_step[1],
+    ];
+    let bounds = [
+        mesh.bounds_center[0],
+        mesh.bounds_center[1],
+        mesh.bounds_center[2],
+        mesh.bounds_radius,
+    ];
+
+    let mut store = ClusterStore::new();
+    store.attach(1, vec![mesh]);
+    let mut keys = MeshKeys::default();
+    keys.set(1, &[MeshId(0)]);
+    let mut scene = VgScene::new();
+    assert!(scene.upload_pool(&gpu, &store, &keys), "the pool uploads");
+    let range = scene.section_range(1, 0).expect("the section is packed");
+    let (_, depth, root) = scene.section_header(1, 0).expect("the section header");
+    const COUNT: u32 = 5;
+    let records: Vec<VgInstanceRecord> = (0..COUNT)
+        .map(|i| VgInstanceRecord {
+            model: Mat4::from_translation(Vec3::new(i as f32 - 2.0, 0.0, 0.0)),
+            previous_rows: [[0.0; 4]; 3],
+            quant,
+            uv_quant,
+            ranges: [
+                range.node_base,
+                range.cluster_base,
+                range.vertex_base,
+                range.triangle_base,
+            ],
+            ids: [i, 0, INSTANCE_CASTS_SHADOW, hierarchy_word(depth, root)],
+            bounds,
+        })
+        .collect();
+    scene.upload_instances(&gpu, &records);
+    assert_eq!(scene.instance_count(), COUNT);
+
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let proj = Mat4::perspective_rh_zo(60f32.to_radians(), 1.0, 0.1, 16.0);
+    let view_proj = proj * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+    let mut first = PassView::perspective(
+        view_proj,
+        view_proj,
+        eye,
+        [64.0, 64.0],
+        [proj.cols[0][0], proj.cols[1][1]],
+        0.1,
+        1.0,
+    );
+    first.occlusion_enabled = 1;
+    first.hzb_size = [1.0, 1.0];
+    let mut second = first;
+    second.phase = 1;
+    let slots = ViewSlots::new(&gpu);
+    slots.write(&gpu, MAIN_FIRST, &first);
+    slots.write(&gpu, MAIN_SECOND, &second);
+
+    let stale = flat_pyramid(&gpu, 0.0);
+    let current = flat_pyramid(&gpu, 1.0);
+    let pipelines = CullPipelines::new(&gpu);
+    let capacity = 1024u64;
+    let work = CullWork::new(&gpu, &pipelines, "raa-vg cull variants", capacity, capacity);
+    let stale_group = pipelines.scene_bind_group(&gpu, &slots, &scene, &stale);
+    let current_group = pipelines.scene_bind_group(&gpu, &slots, &scene, &current);
+
+    let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    pipelines.record(
+        &mut encoder,
+        &scene,
+        &stale_group,
+        MAIN_FIRST,
+        &work,
+        CullPhase::First,
+    );
+    pipelines.record(
+        &mut encoder,
+        &scene,
+        &current_group,
+        MAIN_SECOND,
+        &work,
+        CullPhase::Second,
+    );
+    gpu.queue().submit(Some(encoder.finish()));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    let error = block_on(errors.pop());
+    assert!(error.is_none(), "cull validation: {error:?}");
+
+    // CullStateRead words: 4 sw_count, 5 hw_count, 6 sw_base, 7 hw_base (the counts when the
+    // second phase began, so the first phase's selection), 9 dropped.
+    let state = read_buffer(&gpu, work.state(), 48);
+    let word = |bytes: &[u8], index: usize| {
+        u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().expect("4 bytes"))
+    };
+    let (sw_count, hw_count) = (word(&state, 4), word(&state, 5));
+    let (sw_base, hw_base) = (word(&state, 6), word(&state, 7));
+    let first_drawn = sw_base + hw_base;
+    let second_drawn = (sw_count - sw_base) + (hw_count - hw_base);
+    assert_eq!(word(&state, 9), 0, "no cluster is dropped");
+    assert_eq!(
+        first_drawn, 0,
+        "the stale pyramid rejects every cluster in phase 0"
+    );
+    assert!(
+        second_drawn > 0,
+        "phase 1 recovers clusters, drew {second_drawn}"
+    );
+
+    // Visible entries: software ones from the front, hardware ones from the back.
+    let visible = read_buffer(&gpu, work.visible(), capacity * 8);
+    let entry = |index: u64| {
+        (
+            word(&visible, index as usize * 2),
+            word(&visible, index as usize * 2 + 1),
+        )
+    };
+    let entries: Vec<(u32, u32)> = (0..u64::from(sw_count))
+        .map(entry)
+        .chain((0..u64::from(hw_count)).map(|i| entry(capacity - 1 - i)))
+        .collect();
+    let second_bit = 0x8000_0000u32;
+    assert!(
+        entries
+            .iter()
+            .all(|&(_, cluster)| cluster & second_bit != 0),
+        "every recovered cluster carries the second-phase bit: {entries:?}"
+    );
+    let drawn: std::collections::BTreeSet<u32> = entries.iter().map(|&(i, _)| i).collect();
+    assert_eq!(
+        drawn,
+        (0..COUNT).collect(),
+        "phase 1 draws all {COUNT} instances: {entries:?}"
+    );
+}

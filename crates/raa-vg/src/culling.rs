@@ -790,7 +790,8 @@ impl CullWork {
             gpu,
             &format!("{label} cull visible"),
             visible_capacity * 8,
-            wgpu::BufferUsages::STORAGE,
+            // COPY_SRC exists for test readback of the selected clusters.
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
         let args = buffer(
             gpu,
