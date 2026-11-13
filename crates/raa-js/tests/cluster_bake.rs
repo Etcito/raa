@@ -9,8 +9,8 @@ mod m29;
 
 use m29::{
     ClusterReport, MESH_EMPTY, MESH_TOO_LARGE, MESH_VERTEX_COLORS, OptionsPatch, SectionWire,
-    VG_INVALID, bake_input, build_options, check_budget_ms, cluster_error, cluster_report,
-    section_from_wire, stage_name, vg_code,
+    VG_INVALID, bake_input, build_options, check_bake_budget, check_budget_ms, check_vertex_colors,
+    cluster_error, cluster_report, plan_attach, section_from_wire, stage_name, vg_code,
 };
 use raa_cluster::error::{EMPTY, INVALID_MESH, TOO_LARGE};
 use raa_cluster::{
@@ -382,4 +382,51 @@ fn the_report_names_each_store_state() {
             None
         )
     );
+}
+
+#[test]
+fn an_attach_with_one_invalid_section_attaches_nothing() {
+    let good = baked(1).mesh;
+    let results = vec![
+        Ok(good.clone()),
+        Err(m29::vg_invalid("sections[1].version", "must be 1")),
+    ];
+    let err = plan_attach(2, results).unwrap_err();
+    assert_eq!(refusal(&err).0, VG_INVALID);
+    // Nothing is handed to the store: a full valid list is the only Ok outcome.
+    assert_eq!(
+        plan_attach(2, vec![Ok(good.clone()), Ok(good)])
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn an_attach_requires_one_section_per_sub_mesh() {
+    let err = plan_attach(2, vec![Ok(baked(1).mesh)]).unwrap_err();
+    let (code, message) = refusal(&err);
+    assert_eq!(code, VG_INVALID);
+    assert!(message.starts_with("sections: "), "{message}");
+}
+
+#[test]
+fn the_engine_budget_accepts_0_5_and_100_and_refuses_beyond() {
+    assert_eq!(check_bake_budget(0.5).unwrap(), 0.5);
+    assert_eq!(check_bake_budget(100.0).unwrap(), 100.0);
+    for ms in [0.4, 101.0, f64::NAN] {
+        let err = check_bake_budget(ms).unwrap_err();
+        let (code, message) = refusal(&err);
+        assert_eq!(code, VG_INVALID, "{ms}");
+        assert!(message.starts_with("ms: "), "{ms}: {message}");
+    }
+}
+
+#[test]
+fn a_colour_stream_is_refused_with_the_vertex_colour_code() {
+    let err = check_vertex_colors(true, "mesh").unwrap_err();
+    let (code, message) = refusal(&err);
+    assert_eq!(code, MESH_VERTEX_COLORS);
+    assert!(message.starts_with("mesh: "), "{message}");
+    assert!(check_vertex_colors(false, "mesh").is_ok());
 }

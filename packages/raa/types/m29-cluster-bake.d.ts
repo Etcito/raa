@@ -116,6 +116,67 @@ export interface ClusterCutMesh {
   triangles: number;
 }
 
+/**
+ * The cluster data of one mesh (S31), returned by {@link Engine.meshClusters}. `progress` is a
+ * fraction in [0, 1] (1 only when ready). The section, cluster, source-triangle and level
+ * counts are zero unless the state is `ready`.
+ */
+export interface MeshClusterState {
+  /** `none`, `baking` (a runtime bake is sliced over frames), `ready` or `refused`. */
+  state: 'none' | 'baking' | 'ready' | 'refused';
+  /** Fraction of the runtime bake, in [0, 1); 1 when ready, 0 otherwise. */
+  progress: number;
+  /** Where a ready set came from: `attached` or `runtime`; null when not ready. */
+  source: 'attached' | 'runtime' | null;
+  /** A refusal code (`vg.invalid`, `vg.mesh_empty`, `vg.mesh_too_large`, ...), else null. */
+  code: string | null;
+  /** The refusal message, else null. */
+  message: string | null;
+  /** Sections of a ready mesh (one per sub-mesh), else 0. */
+  sections: number;
+  /** Clusters of a ready mesh, summed over its sections, else 0. */
+  clusters: number;
+  /** Source triangles of a ready mesh, summed over its sections, else 0. */
+  sourceTriangles: number;
+  /** Largest DAG level of a ready mesh, else 0. */
+  levels: number;
+}
+
+/**
+ * The CPU-side cluster API of the Engine (S31). Every method throws `api.disposed` on a
+ * disposed Engine and `api.unknown_handle` for an unknown mesh handle; a refusal leaves the
+ * mesh's cluster state unchanged. `updateMesh` drops the clusters of the updated mesh and
+ * cancels its bake, and `removeMesh` and `dispose` free them.
+ */
+export interface Engine {
+  /**
+   * Attaches one section per sub-mesh of `mesh`, in sub-mesh order: all are validated
+   * completely before the mesh's clusters are replaced atomically (state `ready`, source
+   * `attached`). A mesh with a colour stream throws `vg.mesh_vertex_colors`; a wrong number of
+   * sections or an invalid section throws `vg.invalid`.
+   */
+  attachMeshClusters(mesh: number, sections: ClusterSection[]): void;
+  /**
+   * Starts a runtime bake of every sub-mesh of `mesh`, sliced over frames: each Engine render
+   * invocation spends at most `clusterBakeBudget()` milliseconds. The state is `baking` with
+   * `progress` in [0, 1), then `ready` with source `runtime`. An omitted `options` uses the S31
+   * defaults; a mesh without retained geometry, with a colour stream or an empty mesh throws
+   * (`vg.invalid`, `vg.mesh_vertex_colors`, `vg.mesh_empty` or `vg.mesh_too_large`).
+   */
+  bakeMeshClusters(mesh: number, options?: ClusterBakeOptions): void;
+  /** Cancels a bake and drops the clusters of `mesh`: state `none`. */
+  clearMeshClusters(mesh: number): void;
+  /** Returns a fresh {@link MeshClusterState} of `mesh`. */
+  meshClusters(mesh: number): MeshClusterState;
+  /**
+   * Sets the CPU budget of the runtime bake per Engine render invocation, in milliseconds:
+   * finite and inside [0.5, 100]; anything else throws `vg.invalid` naming `ms`.
+   */
+  setClusterBakeBudget(ms: number): void;
+  /** The current runtime bake budget in milliseconds per render invocation (default 4). */
+  clusterBakeBudget(): number;
+}
+
 /** The cluster-bake functions of the module (S31); they need no engine and run in Node. */
 export interface RaaModule {
   /**

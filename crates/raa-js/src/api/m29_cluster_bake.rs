@@ -37,6 +37,10 @@ pub(crate) const MESH_VERTEX_COLORS: &str = "vg.mesh_vertex_colors";
 
 /// The default bake budget of one Engine render invocation, in milliseconds (VG_BAKE_BUDGET).
 const DEFAULT_BAKE_BUDGET_MS: f64 = 4.0;
+/// The smallest accepted Engine bake budget, in milliseconds (VG_BAKE_BUDGET).
+const BAKE_BUDGET_MIN_MS: f64 = 0.5;
+/// The largest accepted Engine bake budget, in milliseconds (VG_BAKE_BUDGET).
+const BAKE_BUDGET_MAX_MS: f64 = 100.0;
 
 /// The `vg.invalid` refusal with the field path first: `<field>: <reason>`.
 pub(crate) fn vg_invalid(field: &str, reason: impl std::fmt::Display) -> RaaError {
@@ -417,13 +421,54 @@ pub(crate) fn cluster_report(
     report
 }
 
+/// The Engine bake budget (`setClusterBakeBudget`): finite and inside [0.5, 100] milliseconds
+/// per render invocation (VG_BAKE_BUDGET). A refusal is `vg.invalid` naming `ms`.
+pub(crate) fn check_bake_budget(ms: f64) -> Result<f64, RaaError> {
+    check_budget_ms(ms, BAKE_BUDGET_MIN_MS, BAKE_BUDGET_MAX_MS, "ms")
+}
+
+/// Refuses a mesh with a colour stream: its baked vertex cannot carry the four linear
+/// components, so the code is `vg.mesh_vertex_colors`. `field` names the argument.
+pub(crate) fn check_vertex_colors(has_colors: bool, field: &str) -> Result<(), RaaError> {
+    if has_colors {
+        Err(RaaError::FrameGraph {
+            code: MESH_VERTEX_COLORS,
+            message: format!(
+                "{field}: the mesh has a vertex colour stream, which the 16 B cluster vertex cannot carry"
+            ),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// Plans an atomic attach from already-converted section results: every entry must have
+/// converted, and there must be one section per sub-mesh (`sections` names a count refusal).
+/// An invalid entry refuses the whole list and returns nothing to attach.
+pub(crate) fn plan_attach(
+    expected: usize,
+    sections: impl IntoIterator<Item = Result<ClusterMesh, RaaError>>,
+) -> Result<Vec<ClusterMesh>, RaaError> {
+    let converted = sections.into_iter().collect::<Result<Vec<_>, _>>()?;
+    if converted.len() != expected {
+        return Err(vg_invalid(
+            "sections",
+            format!(
+                "must have one section per sub-mesh: expected {expected}, got {}",
+                converted.len()
+            ),
+        ));
+    }
+    Ok(converted)
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{frame, install};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::*;
-    use crate::engine::InstallCtx;
+    use crate::engine::{Engine, InstallCtx};
     use crate::state::{EngineState, MeshSources};
     use js_sys::{
         Array, Float32Array, Function, Object, Reflect, Uint8Array, Uint16Array, Uint32Array,
@@ -907,6 +952,164 @@ mod web {
                 Some(Err(e)) => Err(cluster_error(e)),
                 None => Err(vg_invalid("result", "the bake is not done")),
             }
+        }
+    }
+
+    /// The shared cluster store of the feature map.
+    fn cluster_store(st: &EngineState) -> Result<Rc<RefCell<ClusterStore>>, RaaError> {
+        st.features
+            .get::<Rc<RefCell<ClusterStore>>>()
+            .cloned()
+            .ok_or_else(|| vg_invalid("store", "the cluster store is not installed"))
+    }
+
+    /// The retained bake inputs of a handle: an absent entry is `vg.invalid` naming `mesh`
+    /// ('no retained geometry').
+    fn retained_source<'a>(
+        sources: Option<&'a MeshSources>,
+        mesh: u32,
+    ) -> Result<&'a crate::state::MeshSource, RaaError> {
+        sources
+            .and_then(|sources| sources.get(mesh))
+            .ok_or_else(|| vg_invalid("mesh", "no retained geometry"))
+    }
+
+    /// `attachMeshClusters(mesh, sections)`: one section per sub-mesh, all converted and
+    /// validated, then the mesh's clusters are replaced atomically (state ready, attached).
+    fn attach_mesh(st: &mut EngineState, mesh: u32, sections: &JsValue) -> Result<(), RaaError> {
+        st.mesh(mesh)?;
+        let (expected, has_colors) = {
+            let source = retained_source(st.features.get::<MeshSources>(), mesh)?;
+            (source.submeshes.len(), source.has_colors)
+        };
+        check_vertex_colors(has_colors, "mesh")?;
+        let array = sections
+            .dyn_ref::<Array>()
+            .ok_or_else(|| vg_invalid("sections", "must be an Array of ClusterSection objects"))?;
+        let results = (0..array.length())
+            .map(|i| section_from_js(&array.get(i), &format!("sections[{i}].")))
+            .collect::<Vec<_>>();
+        let sections = plan_attach(expected, results)?;
+        cluster_store(st)?.borrow_mut().attach(mesh, sections);
+        Ok(())
+    }
+
+    /// `bakeMeshClusters(mesh, options)`: starts the sliced runtime bake of every sub-mesh.
+    fn bake_mesh(st: &mut EngineState, mesh: u32, options: &JsValue) -> Result<(), RaaError> {
+        st.mesh(mesh)?;
+        let has_colors = retained_source(st.features.get::<MeshSources>(), mesh)?.has_colors;
+        check_vertex_colors(has_colors, "mesh")?;
+        let options = build_options(&read_options(options)?)?;
+        let inputs = retained_source(st.features.get::<MeshSources>(), mesh)?
+            .cluster_inputs()
+            .map_err(|e| cluster_error(&e))?;
+        cluster_store(st)?
+            .borrow_mut()
+            .start_bake(mesh, inputs, &options)
+            .map_err(|e| cluster_error(&e))
+    }
+
+    /// `clearMeshClusters(mesh)`: cancels a bake and drops the clusters of the mesh.
+    fn clear_mesh(st: &mut EngineState, mesh: u32) -> Result<(), RaaError> {
+        st.mesh(mesh)?;
+        cluster_store(st)?.borrow_mut().clear(mesh);
+        Ok(())
+    }
+
+    /// `meshClusters(mesh)`: the current state as a fresh `MeshClusterState` object.
+    fn mesh_state(st: &EngineState, mesh: u32) -> Result<JsValue, RaaError> {
+        st.mesh(mesh)?;
+        let store = cluster_store(st)?;
+        let store = store.borrow();
+        let status = store.state(mesh);
+        let report = cluster_report(&status, store.sections(mesh));
+        Ok(report_to_js(&report))
+    }
+
+    /// The `MeshClusterState` object: an absent source, code or message is `null`.
+    fn report_to_js(report: &ClusterReport) -> JsValue {
+        let optional = |value: Option<&str>| value.map_or(JsValue::NULL, JsValue::from_str);
+        object(vec![
+            ("state", JsValue::from_str(report.state)),
+            ("progress", JsValue::from_f64(f64::from(report.progress))),
+            ("source", optional(report.source)),
+            ("code", optional(report.code)),
+            ("message", optional(report.message.as_deref())),
+            ("sections", JsValue::from_f64(f64::from(report.sections))),
+            ("clusters", JsValue::from_f64(f64::from(report.clusters))),
+            (
+                "sourceTriangles",
+                JsValue::from_f64(report.source_triangles as f64),
+            ),
+            ("levels", JsValue::from_f64(f64::from(report.levels))),
+        ])
+    }
+
+    /// `setClusterBakeBudget(ms)`: finite and inside [0.5, 100] milliseconds.
+    fn set_budget(st: &mut EngineState, ms: &JsValue) -> Result<(), RaaError> {
+        let ms = check_bake_budget(as_number(ms, "ms")?)?;
+        if let Some(budget) = st.features.get_mut::<ClusterBakeBudget>() {
+            budget.0 = ms;
+        }
+        Ok(())
+    }
+
+    /// The current bake budget in milliseconds per Engine render invocation.
+    fn budget_ms(st: &EngineState) -> f64 {
+        st.features
+            .get::<ClusterBakeBudget>()
+            .map_or(DEFAULT_BAKE_BUDGET_MS, |budget| budget.0)
+    }
+
+    #[wasm_bindgen(js_class = Engine)]
+    impl Engine {
+        /// Attaches one cluster section per sub-mesh of `mesh`, in sub-mesh order. All sections
+        /// are validated before the mesh's clusters are replaced atomically (state ready,
+        /// source attached); a refusal leaves them unchanged. An unknown handle throws
+        /// `api.unknown_handle`, a colour-stream mesh `vg.mesh_vertex_colors` and a wrong
+        /// section count or content `vg.invalid`.
+        #[wasm_bindgen(js_name = attachMeshClusters)]
+        pub fn attach_mesh_clusters(
+            &mut self,
+            mesh: u32,
+            sections: JsValue,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| attach_mesh(st, mesh, &sections))
+        }
+
+        /// Starts a sliced runtime bake of every sub-mesh of `mesh`, spending at most
+        /// `clusterBakeBudget()` milliseconds per Engine render invocation. The state becomes
+        /// `baking` with `progress` in [0, 1), then `ready` with source runtime.
+        #[wasm_bindgen(js_name = bakeMeshClusters)]
+        pub fn bake_mesh_clusters(&mut self, mesh: u32, options: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| bake_mesh(st, mesh, &options))
+        }
+
+        /// Cancels a bake of `mesh` and drops its clusters: state none, source null.
+        #[wasm_bindgen(js_name = clearMeshClusters)]
+        pub fn clear_mesh_clusters(&mut self, mesh: u32) -> Result<(), JsValue> {
+            self.with_state(|_, st| clear_mesh(st, mesh))
+        }
+
+        /// Returns a fresh `MeshClusterState` of `mesh` (state, progress, source, code,
+        /// message and the ready section, cluster, source-triangle and level counts).
+        #[wasm_bindgen(js_name = meshClusters)]
+        pub fn mesh_clusters(&self, mesh: u32) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| mesh_state(st, mesh))
+        }
+
+        /// Sets the CPU budget of the runtime cluster bake per Engine render invocation, in
+        /// milliseconds: finite and inside [0.5, 100], else `vg.invalid` naming `ms`.
+        #[wasm_bindgen(js_name = setClusterBakeBudget)]
+        pub fn set_cluster_bake_budget(&mut self, ms: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| set_budget(st, &ms))
+        }
+
+        /// The runtime cluster-bake budget in milliseconds per Engine render invocation
+        /// (default 4).
+        #[wasm_bindgen(js_name = clusterBakeBudget)]
+        pub fn cluster_bake_budget(&self) -> Result<f64, JsValue> {
+            self.with_state(|_, st| Ok(budget_ms(st)))
         }
     }
 }
