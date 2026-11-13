@@ -585,6 +585,64 @@ fn each_inverted_sky_pair_is_refused_atomically() {
     assert_eq!(names(&lone.passes()), ["sky.env", "sky.atmosphere"]);
 }
 
+/// The P3 virtualized-geometry passes at their S12 orders 21, 22, 23 and 32, added out of order.
+fn add_vg_passes(config: &mut PipelineConfig, log: &Log) {
+    for (name, order) in [
+        ("vg.gbuffer", 32),
+        ("vg.raster", 22),
+        ("vg.cull", 21),
+        ("vg.resolve", 23),
+    ] {
+        config
+            .add(Mock::boxed(name, order, false, log))
+            .expect("added");
+    }
+}
+
+const VG_DEFAULT_ORDER: [&str; 10] = [
+    "shadow.csm",
+    "vg.cull",
+    "vg.raster",
+    "vg.resolve",
+    "prepass",
+    "vg.gbuffer",
+    "ao.gtao",
+    "forward",
+    "bloom",
+    "tonemap",
+];
+
+#[test]
+fn each_inverted_vg_pair_is_refused_atomically() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_passes(&mut config, &log);
+    add_vg_passes(&mut config, &log);
+    assert_eq!(names(&config.passes()), VG_DEFAULT_ORDER);
+
+    // the seven pairs whose passes this config holds; the `light.tiles` pair is in the inline tests
+    for (first, second) in [
+        ("vg.cull", "vg.raster"),
+        ("shadow.csm", "vg.raster"),
+        ("vg.raster", "vg.resolve"),
+        ("vg.resolve", "vg.gbuffer"),
+        ("prepass", "vg.gbuffer"),
+        ("vg.gbuffer", "ao.gtao"),
+        ("vg.gbuffer", "forward"),
+    ] {
+        let mut order = VG_DEFAULT_ORDER;
+        let a = order.iter().position(|n| *n == first).expect("present");
+        let b = order.iter().position(|n| *n == second).expect("present");
+        order.swap(a, b);
+        assert_refused(config.set_order(&order), "pipeline.required_order");
+        assert_eq!(
+            names(&config.passes()),
+            VG_DEFAULT_ORDER,
+            "the `{second}` before `{first}` override left the order unchanged"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu {
     use super::*;

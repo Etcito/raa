@@ -37,6 +37,21 @@ const SKY_DEPENDENCIES: [(&str, &str); 4] = [
     ("sky.cloud-screen", "forward"),
 ];
 
+/// S12 P3 virtualized-geometry dependencies: `vg.cull` and `shadow.csm` before `vg.raster`,
+/// `vg.raster` before `vg.resolve`, `vg.resolve` and `prepass` before `vg.gbuffer`, and
+/// `vg.gbuffer` before `light.tiles`, `ao.gtao` and `forward`. Every pair present in a
+/// sequence keeps this order; a missing pass removes only its own pairs.
+const VG_DEPENDENCIES: [(&str, &str); 8] = [
+    ("vg.cull", "vg.raster"),
+    ("shadow.csm", "vg.raster"),
+    ("vg.raster", "vg.resolve"),
+    ("vg.resolve", "vg.gbuffer"),
+    ("prepass", "vg.gbuffer"),
+    ("vg.gbuffer", "light.tiles"),
+    ("vg.gbuffer", "ao.gtao"),
+    ("vg.gbuffer", "forward"),
+];
+
 fn refusal(code: &'static str, message: String) -> RaaError {
     RaaError::FrameGraph { code, message }
 }
@@ -45,9 +60,15 @@ fn refusal(code: &'static str, message: String) -> RaaError {
 /// order, an HDR pass runs after `tonemap`, the order-35 `light.tiles` pass is not after
 /// `prepass` and before `ao.gtao`/`forward`, or the P2 sky passes break
 /// `sky.atmosphere` < `sky.cloud-lighting` < `sky.env` or
-/// `prepass` < `sky.cloud-screen` < `forward` (`pipeline.required_order`).
+/// `prepass` < `sky.cloud-screen` < `forward`, or any `VG_DEPENDENCIES` pair (`vg.cull` and
+/// `shadow.csm` before `vg.raster`, and so on up to `vg.gbuffer` before `forward`) is inverted
+/// (`pipeline.required_order`).
 fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
-    for (before, after) in TILE_DEPENDENCIES.into_iter().chain(SKY_DEPENDENCIES) {
+    for (before, after) in TILE_DEPENDENCIES
+        .into_iter()
+        .chain(SKY_DEPENDENCIES)
+        .chain(VG_DEPENDENCIES)
+    {
         let (Some(before_at), Some(after_at)) = (
             names.iter().position(|n| *n == before),
             names.iter().position(|n| *n == after),
@@ -989,6 +1010,65 @@ mod tests {
             let err = check_required_order(names).expect_err("refused");
             assert_eq!(err.code(), "pipeline.required_order", "{names:?}");
             assert!(!err.message().is_empty());
+        }
+    }
+
+    /// The S12 default sequence with every P3 virtualized-geometry pass present.
+    const VG_DEFAULT_SEQUENCE: [&str; 11] = [
+        "sky.env",
+        "shadow.csm",
+        "vg.cull",
+        "vg.raster",
+        "vg.resolve",
+        "prepass",
+        "vg.gbuffer",
+        "light.tiles",
+        "ao.gtao",
+        "forward",
+        "tonemap",
+    ];
+
+    #[test]
+    fn required_order_vg_accepts_the_default_sequence_and_partial_sets() {
+        assert!(check_required_order(&VG_DEFAULT_SEQUENCE).is_ok());
+        assert!(check_required_order(&["vg.cull", "vg.raster"]).is_ok());
+        assert!(check_required_order(&["vg.resolve", "prepass", "vg.gbuffer", "forward"]).is_ok());
+        assert!(
+            check_required_order(&[
+                "prepass",
+                "vg.gbuffer",
+                "light.tiles",
+                "ao.gtao",
+                "forward",
+                "tonemap",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn required_order_vg_refuses_each_inverted_pair_naming_the_after_pass() {
+        for (before, after) in [
+            ("vg.cull", "vg.raster"),
+            ("shadow.csm", "vg.raster"),
+            ("vg.raster", "vg.resolve"),
+            ("vg.resolve", "vg.gbuffer"),
+            ("prepass", "vg.gbuffer"),
+            ("vg.gbuffer", "light.tiles"),
+            ("vg.gbuffer", "ao.gtao"),
+            ("vg.gbuffer", "forward"),
+        ] {
+            let mut names = VG_DEFAULT_SEQUENCE;
+            let a = names.iter().position(|n| *n == before).expect("present");
+            let b = names.iter().position(|n| *n == after).expect("present");
+            names.swap(a, b);
+            let err = check_required_order(&names).expect_err("refused");
+            assert_eq!(err.code(), "pipeline.required_order", "{before} / {after}");
+            assert!(
+                err.message().contains(&format!("`{after}` must run after")),
+                "{before} / {after}: {}",
+                err.message()
+            );
         }
     }
 
