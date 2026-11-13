@@ -1,5 +1,6 @@
 //! Focused tests of the M2 cloud backend.
 
+mod dome;
 mod history;
 mod noise;
 mod passes;
@@ -31,6 +32,14 @@ fn test_frame(view: u32, invocation: u64, size: (u32, u32)) -> CloudFrame {
         evolution: 0.0,
         weather_enabled: true,
         cloud_shadows: true,
+        cloud_samples: 56,
+        cloud_scale: 0.5,
+        cloud_dither: true,
+        cloud_noise_size: 1,
+        cloud_dome: false,
+        cloud_dome_size: 1024,
+        animated: false,
+        signature: 0,
         physical: true,
     }
 }

@@ -59,6 +59,9 @@ struct PhysicalKey {
     size: (u32, u32),
     screen_valid: bool,
     panorama_valid: bool,
+    /// The cloud dome replaces the screen result at binding 4 (`flags.w` = 1); its edge in
+    /// texels, 0 while the screen result is bound.
+    dome_size: u32,
 }
 
 /// The accepted frame snapshot a physical bind-group prepare reads.
@@ -199,6 +202,7 @@ impl PhysicalSkyBinding {
         );
         parameters.flags[1] = u32::from(frame.views.screen_valid);
         parameters.flags[2] = u32::from(frame.views.panorama_valid);
+        parameters.flags[3] = u32::from(frame.views.dome_valid);
         let bytes = parameters.to_bytes();
         if self.bytes != Some(bytes) {
             gpu.queue().write_buffer(&self.uniform, 0, &bytes);
@@ -209,6 +213,11 @@ impl PhysicalSkyBinding {
             size: frame.size,
             screen_valid: frame.views.screen_valid,
             panorama_valid: frame.views.panorama_valid,
+            dome_size: if frame.views.dome_valid {
+                frame.views.dome.texture().width()
+            } else {
+                0
+            },
         };
         if self.key != Some(key) {
             self.group = Some(gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
@@ -235,7 +244,11 @@ impl PhysicalSkyBinding {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&frame.views.screen),
+                        resource: wgpu::BindingResource::TextureView(if frame.views.dome_valid {
+                            &frame.views.dome
+                        } else {
+                            &frame.views.screen
+                        }),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -524,7 +537,18 @@ impl FeaturePass for SkyEnvPass {
         // stay within the accepted identity and keep publishing asynchronously.
         let source = source_identity(&state);
         if source_replaced(self.prepared_source.as_ref(), &source) {
-            self.ibl.invalidate(ctx.lighting);
+            // An edit inside one model keeps the last published environment lighting the scene
+            // until the rebuilt one is published (no flash of the flat ambient term); a model
+            // switch has nothing valid to keep.
+            let same_model = self
+                .prepared_source
+                .as_ref()
+                .is_some_and(|previous| previous.desc.model == source.desc.model);
+            if same_model {
+                self.ibl.supersede();
+            } else {
+                self.ibl.invalidate(ctx.lighting);
+            }
         }
         self.prepared_source = Some(source);
         let bake_ready = self

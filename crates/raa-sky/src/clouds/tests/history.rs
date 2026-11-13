@@ -2,7 +2,7 @@
 
 use raa_math::Mat4;
 
-use super::super::history::CloudHistory;
+use super::super::history::{CloudHistory, Marked};
 use super::test_frame;
 use crate::cloud_backend::CloudInvalidation;
 
@@ -43,12 +43,15 @@ fn panorama_valid_follows_marchable_prepare_and_every_invalidation() {
             let mut h = committed(0);
             h.prepare(1, SIZE, 1, true, true);
             h.invalidate(target, reason);
-            assert_eq!(h.flags(0), (false, false), "{reason:?} {target:?}");
-            assert_eq!(h.history(0, true), None, "{reason:?} {target:?}");
+            // A weather edit keeps the committed screen march displayable (its changed
+            // signature restarts the count); every other reason clears it.
+            let kept = reason == CloudInvalidation::Weather;
+            assert_eq!(h.flags(0), (false, kept), "{reason:?} {target:?}");
+            assert_eq!(h.history(0, true), kept.then(matrix), "{reason:?} {target:?}");
             let other = target.is_some();
             assert_eq!(h.flags(1).0, other, "{reason:?} {target:?}");
             h.prepare(0, SIZE, 2, true, true);
-            assert_eq!(h.flags(0), (true, false), "{reason:?} {target:?}");
+            assert_eq!(h.flags(0), (true, kept), "{reason:?} {target:?}");
         }
     }
 }
@@ -107,7 +110,8 @@ fn history_is_unusable_after_invalidation_or_frame_history_false() {
     for reason in REASONS {
         let mut h = committed(0);
         h.invalidate(Some(0), reason);
-        assert_eq!(h.history(0, true), None, "{reason:?}");
+        let kept = reason == CloudInvalidation::Weather;
+        assert_eq!(h.history(0, true), kept.then(matrix), "{reason:?}");
     }
 }
 
@@ -234,8 +238,84 @@ fn committed_matrix_is_the_marched_camera_not_the_frame_previous() {
         history, stopped.previous_view_proj,
         "not the stale frame matrix"
     );
-    let record = CloudGpu::from_frame(&stopped, Some(history));
+    let accumulation = h
+        .accumulation(0, true, history, 0)
+        .expect("committed history");
+    let record = CloudGpu::from_frame(&stopped, Some(accumulation), false);
     assert_eq!(record.previous_view_proj, moved.camera.view_proj().cols);
     assert_eq!(record.forward[3], 1.0, "historyUsable");
     assert_eq!(h.history(0, false), None, "the frame refuses history");
+}
+
+/// One backend frame on `h`: the accumulation it gets, then its commit like `record_screen` does.
+fn frame_count(h: &mut CloudHistory, invocation: u64, matrix: Mat4, signature: u64) -> Option<u32> {
+    h.prepare(0, SIZE, invocation, true, true);
+    let accumulation = h.accumulation(0, true, matrix, signature);
+    h.record_screen(0, invocation, Some(matrix));
+    h.record_marked(
+        0,
+        invocation,
+        Marked { count: accumulation.map_or(1, |a| a.count), signature },
+    );
+    h.submitted(0, invocation);
+    accumulation.map(|a| a.count)
+}
+
+#[test]
+fn count_grows_only_while_camera_and_signature_hold() {
+    let mut h = CloudHistory::new();
+    let still = matrix();
+    let moved = Mat4::from_translation(raa_math::Vec3::new(0.0, 0.0, 1.0)) * still;
+    assert_eq!(frame_count(&mut h, 1, still, 7), None, "no history yet");
+    assert_eq!(frame_count(&mut h, 2, still, 7), Some(2));
+    assert_eq!(frame_count(&mut h, 3, still, 7), Some(3));
+    assert_eq!(frame_count(&mut h, 4, moved, 7), Some(1), "the camera moved");
+    assert_eq!(frame_count(&mut h, 5, moved, 7), Some(2));
+    assert_eq!(frame_count(&mut h, 6, moved, 8), Some(1), "the signature changed");
+    h.reset_screen(0);
+    assert_eq!(frame_count(&mut h, 7, moved, 8), None, "a recreated target has no history");
+}
+
+/// The engine frame sequence on a real `SkyHandle` (`advance_frame`, `set_view` with an
+/// identical camera and `history_valid` true, the backend prepare/record/commit, then
+/// `observe_submission` complete) with wind 0, evolution 0 and no playing time: the count
+/// reaches 64 and the view freezes.
+#[test]
+fn still_sky_with_an_identical_camera_accumulates_and_freezes() {
+    use super::super::{Freeze, VolumetricClouds};
+    use crate::{SkyHandle, Weather, WeatherSettings};
+
+    let handle = SkyHandle::for_tests();
+    let mut settings = WeatherSettings::default();
+    settings.target = Weather { wind_speed: 0.0, evolution: 0.0, ..Weather::default() };
+    handle.set_weather(settings).expect("weather");
+    let mut time = handle.time_of_day().settings;
+    time.playing = false;
+    handle.set_time_of_day(time).expect("time");
+
+    let camera = raa_scene::Camera::default();
+    let mut h = CloudHistory::new();
+    let mut last = None;
+    for n in 1..=80u64 {
+        handle.advance_frame(n, 1.0 / 60.0).expect("advance");
+        handle.set_view(0, &camera, true).expect("set_view");
+        let frame = handle.cloud_frame_for_tests(n, SIZE);
+        h.prepare(0, SIZE, n, true, true);
+        let accumulation =
+            h.accumulation(0, frame.history_valid, frame.camera.view_proj(), frame.signature);
+        let freeze = VolumetricClouds::freeze(&frame, accumulation);
+        h.record_screen(0, n, Some(frame.camera.view_proj()));
+        h.record_marked(
+            0,
+            n,
+            Marked { count: accumulation.map_or(1, |a| a.count), signature: frame.signature },
+        );
+        h.submitted(0, n);
+        handle.observe_submission(n, 1, true);
+        assert!(!frame.animated, "frame {n}: a still sky is not animated");
+        last = Some((accumulation.map_or(1, |a| a.count), freeze));
+    }
+    let (count, freeze) = last.expect("frames");
+    assert_eq!(count, 80, "the count grows every frame");
+    assert_ne!(freeze, Freeze::March, "the view froze");
 }

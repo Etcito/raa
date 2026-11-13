@@ -520,6 +520,12 @@ const WEATHER_FIELDS: &[&str] = &[
     "changing",
     "seed",
     "transitionSeconds",
+    "cloudSamples",
+    "cloudScale",
+    "cloudDither",
+    "cloudNoiseSize",
+    "cloudDome",
+    "cloudDomeSize",
     "coverage",
     "type",
     "base",
@@ -666,6 +672,49 @@ pub(crate) fn parse_weather_update(
         }
         transition_seconds = value;
     }
+    let mut cloud_samples = current.cloud_samples;
+    if let Some(value) = strict_f64(obj, "cloudSamples", "cloudSamples")? {
+        if value.fract() != 0.0 || !(8.0..=256.0).contains(&value) {
+            return Err(invalid(
+                "cloudSamples",
+                format!("must be an integer in [8, 256], got {value}"),
+            ));
+        }
+        cloud_samples = value as u32;
+    }
+    let mut cloud_scale = current.cloud_scale;
+    if let Some(value) = strict_number(obj, "cloudScale", "cloudScale")? {
+        if !(0.25..=1.0).contains(&value) {
+            return Err(invalid(
+                "cloudScale",
+                format!("must be finite and in [0.25, 1], got {value}"),
+            ));
+        }
+        cloud_scale = value;
+    }
+    let cloud_dither =
+        strict_bool(obj, "cloudDither", "cloudDither")?.unwrap_or(current.cloud_dither);
+    let mut cloud_noise_size = current.cloud_noise_size;
+    if let Some(value) = strict_f64(obj, "cloudNoiseSize", "cloudNoiseSize")? {
+        if value.fract() != 0.0 || !(1.0..=16.0).contains(&value) {
+            return Err(invalid(
+                "cloudNoiseSize",
+                format!("must be an integer in [1, 16], got {value}"),
+            ));
+        }
+        cloud_noise_size = value as u32;
+    }
+    let cloud_dome = strict_bool(obj, "cloudDome", "cloudDome")?.unwrap_or(current.cloud_dome);
+    let mut cloud_dome_size = current.cloud_dome_size;
+    if let Some(value) = strict_f64(obj, "cloudDomeSize", "cloudDomeSize")? {
+        if value.fract() != 0.0 || !(128.0..=2048.0).contains(&value) {
+            return Err(invalid(
+                "cloudDomeSize",
+                format!("must be an integer in [128, 2048], got {value}"),
+            ));
+        }
+        cloud_dome_size = value as u32;
+    }
 
     // A manual target edit stops an active cycle unless this same patch turns changing back
     // on; an explicit value always wins over the inferred stop.
@@ -681,6 +730,12 @@ pub(crate) fn parse_weather_update(
             changing,
             seed,
             transition_seconds,
+            cloud_samples,
+            cloud_scale,
+            cloud_dither,
+            cloud_noise_size,
+            cloud_dome,
+            cloud_dome_size,
             target,
         },
         cycle_start,
@@ -769,6 +824,12 @@ pub(crate) struct WeatherView {
     pub changing: bool,
     pub seed: u32,
     pub transition_seconds: f32,
+    pub cloud_samples: u32,
+    pub cloud_scale: f32,
+    pub cloud_dither: bool,
+    pub cloud_noise_size: u32,
+    pub cloud_dome: bool,
+    pub cloud_dome_size: u32,
     pub target: WeatherStateView,
     pub current: WeatherStateView,
     pub cycle_preset: Option<&'static str>,
@@ -800,6 +861,12 @@ pub(crate) fn serialize_weather(state: &raa_sky::ResolvedWeatherState) -> Weathe
         changing: s.changing,
         seed: s.seed,
         transition_seconds: s.transition_seconds,
+        cloud_samples: s.cloud_samples,
+        cloud_scale: s.cloud_scale,
+        cloud_dither: s.cloud_dither,
+        cloud_noise_size: s.cloud_noise_size,
+        cloud_dome: s.cloud_dome,
+        cloud_dome_size: s.cloud_dome_size,
         target: weather_state(&s.target),
         current: weather_state(&state.current),
         cycle_preset: state.cycle_preset.map(WeatherPreset::as_str),
@@ -833,6 +900,15 @@ pub(crate) struct SkyWeatherView {
     pub reset_reasons: Vec<&'static str>,
     pub cloud_screen_valid: bool,
     pub cloud_panorama_valid: bool,
+    pub cloud_count: u32,
+    pub cloud_animated: bool,
+    pub cloud_frozen: bool,
+    pub cloud_history_used: bool,
+    pub cloud_dome_active: bool,
+    pub cloud_dome_count: u32,
+    pub cloud_dome_frozen: bool,
+    pub cloud_burst_frames: u32,
+    pub cloud_dome_burst_frames: u32,
 }
 
 /// The serialized readiness record; `error` is null unless the status is failed.
@@ -890,6 +966,15 @@ pub(crate) fn serialize_diagnostics(d: &SkyDiagnostics) -> Result<SkyWeatherDiag
             reset_reasons: view.reset_reasons.names(),
             cloud_screen_valid: view.cloud_screen_valid,
             cloud_panorama_valid: view.cloud_panorama_valid,
+            cloud_count: view.cloud.count,
+            cloud_animated: view.cloud.animated,
+            cloud_frozen: view.cloud.frozen,
+            cloud_history_used: view.cloud.history_used,
+            cloud_dome_active: view.cloud.dome.active,
+            cloud_dome_count: view.cloud.dome.count,
+            cloud_dome_frozen: view.cloud.dome.frozen,
+            cloud_burst_frames: view.cloud.burst_frames,
+            cloud_dome_burst_frames: view.cloud.dome.burst_frames,
         });
     }
     Ok(SkyWeatherDiagnostics {
@@ -1183,6 +1268,12 @@ mod web {
             "transitionSeconds",
             &JsValue::from(v.transition_seconds),
         );
+        set(&o, "cloudSamples", &JsValue::from(v.cloud_samples));
+        set(&o, "cloudScale", &JsValue::from(v.cloud_scale));
+        set(&o, "cloudDither", &JsValue::from_bool(v.cloud_dither));
+        set(&o, "cloudNoiseSize", &JsValue::from(v.cloud_noise_size));
+        set(&o, "cloudDome", &JsValue::from_bool(v.cloud_dome));
+        set(&o, "cloudDomeSize", &JsValue::from(v.cloud_dome_size));
         set(&o, "target", &weather_state_to_js(&v.target));
         set(&o, "current", &weather_state_to_js(&v.current));
         set(
@@ -1222,6 +1313,19 @@ mod web {
             "cloudPanoramaValid",
             &JsValue::from_bool(v.cloud_panorama_valid),
         );
+        let cloud = Object::new();
+        set(&cloud, "count", &JsValue::from(v.cloud_count));
+        set(&cloud, "animated", &JsValue::from_bool(v.cloud_animated));
+        set(&cloud, "frozen", &JsValue::from_bool(v.cloud_frozen));
+        set(&cloud, "historyUsed", &JsValue::from_bool(v.cloud_history_used));
+        let dome = Object::new();
+        set(&dome, "active", &JsValue::from_bool(v.cloud_dome_active));
+        set(&dome, "count", &JsValue::from(v.cloud_dome_count));
+        set(&dome, "frozen", &JsValue::from_bool(v.cloud_dome_frozen));
+        set(&dome, "burstFrames", &JsValue::from(v.cloud_dome_burst_frames));
+        set(&cloud, "burstFrames", &JsValue::from(v.cloud_burst_frames));
+        set(&cloud, "dome", &dome.into());
+        set(&o, "cloud", &cloud.into());
         o.into()
     }
 

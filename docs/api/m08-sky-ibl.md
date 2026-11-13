@@ -16,7 +16,9 @@ per method; after `dispose` every method throws `api.disposed`.
 The sky is both a background image and the light source of the scene. From the current sky the
 engine builds an **environment cube** (256 px per face, `HDR_FORMAT`, 6 mips, `SKY_ENV`) and from
 it an **irradiance** signal (spherical harmonics, order 2) and **prefiltered specular**
-reflections with a BRDF LUT (`IBL`). Opaque objects are lit by the sun and by that environment;
+reflections with a BRDF LUT (`IBL`).  (default 1, finite in [0.25, 4]) scales the
+screen-cloud march step count (56 at 1, clamped to 8..224); it is not part of the  text.
+Opaque objects are lit by the sun and by that environment;
 glossy objects reflect it. The sky itself is drawn as the background behind everything else.
 
 Two rows of the pipeline take part (`S12`), both enabled by default:
@@ -313,7 +315,37 @@ scene boundary). `base + thickness` must stay finite. `WeatherSettings` is
 `false`, `1`, `0` and the fair target (coverage 0.3, type 0.9, base 1200, thickness 1600,
 density 1, cirrus 0.15, wind 7 from 250, evolution 1, rain 0). `seed` is an integer u32 and
 `transitionSeconds` a finite value >= 0 (0 is immediate; otherwise the state eases with
-`1 - exp(-dt / transitionSeconds)`). `WeatherDesc` is the flat patch: `preset`
+`1 - exp(-dt / transitionSeconds)`). `cloudSamples` (integer-valued number in [8, 256], default 56)
+is the screen-cloud march step count per ray and `cloudScale` (finite in [0.25, 1], default 0.5) the
+screen-cloud buffer scale: the buffer is `ceil(size * cloudScale)` texels, so 0.5 is half resolution
+and 1 is full resolution. `cloudDither` (boolean, default true) switches the per-pixel march-offset noise
+of the screen clouds; false uses a constant offset and no history blend, so the march is deterministic
+and a moving camera shows no crawling (fixed step banding may show: raise `cloudSamples`). `cloudNoiseSize`
+(integer in [1, 16], default 1) is the edge, in buffer texels, of the blocks that share one noise value
+(larger = coarser grain). Changing any of these restarts the accumulation; changing either of the first two restarts the screen-cloud accumulation (and a changed scale
+recreates the buffer, resetting its history); neither is part of the `.weather` text.
+`cloudDome` (boolean, default false) replaces the screen march by a WORLD-SPACE cloud dome: a
+persistent Rgba16Float texture of `cloudDomeSize`^2 texels (integer in [128, 2048], default 1024)
+indexed by world view direction with a hemi-octahedral mapping (no pole singularity; it reaches
+about 3 degrees below the horizon). Each texel marches one ray with `cloudSamples` steps (the same
+hash noise, `cloudDither` and `cloudNoiseSize` apply) and accumulates by count in the dome's own
+history: a still sky is a 1/n running mean, then the pass stops dispatching after 64 unchanged
+frames; an animated sky blends at max(1/n, 1/16) and never stops. The dome does not depend on the
+camera: moving or rotating it never resets or re-marches the dome (only the viewer height is used;
+parallax is ignored, the horizontal origin is 0). It is per sky, shared by views, and recreated and
+reset when `cloudDomeSize` changes; the background samples it bilinearly per pixel. No screen-space
+cloud march is dispatched while it is on; cloud shadows and the weather panorama are unchanged.
+When the sky signature changes (a slider moved, the first frame, a resize) the dome and the screen
+march run a convergence burst inside that frame: 16 marches with distinct golden-ratio jitter
+indices blended by a running mean, so the picture is slow rather than degraded; no burst when
+`cloudDither` is false (one deterministic march is final). `skyWeatherDiagnostics().views[i].cloud`
+reports `burstFrames` and `dome: {active, count, frozen, burstFrames}`. The screen
+clouds average successive frames: while the camera and the sky stand still the average converges
+(blend 1/(n + 6) after n unchanged frames), and when nothing is animated (no wind, no cloud boil, no
+weather transition or cycle, no playing time of day) after 64 unchanged frames the march stops
+entirely (a cheap refresh pass every 8th frame keeps newly uncovered sky filled). Texels that enter
+the view while the camera turns are marched with twice the steps.
+`WeatherDesc` is the flat patch: `preset`
 (`clear|fair|broken|overcast|storm|cirrus`), `text`, the settings fields and the state fields
 with a partial `wind`. These records mirror Rust `raa_sky::WeatherSettings` (`type` is
 `cloud_type`, `wind` is `wind_speed`/`wind_from`) and `raa_sky::ResolvedWeatherState`.
@@ -419,6 +451,16 @@ interface SkyViewDiagnostics {
   skyViewGeneration: number; historyValid: boolean;
   resetReasons: ('Resize' | 'CameraDiscontinuity' | 'Weather' | 'Model' | 'Enable' | 'ViewRemoved')[];
   cloudScreenValid: boolean; cloudPanoramaValid: boolean;
+  // Screen-cloud accumulation of the view (read-only): committed count n; the animated flag the
+  // freeze decision used; frozen = the last frame did not march (skip or refresh only);
+  // historyUsed = the last frame could reproject from the committed history.
+  cloud: {
+    count: number; animated: boolean; frozen: boolean; historyUsed: boolean;
+    burstFrames: number; // frames that ran the in-frame convergence burst (screen march)
+    // World-space cloud dome (shared by views): cloudDome on, committed count, last frame did not
+    // march it, frames that ran its convergence burst.
+    dome: { active: boolean; count: number; frozen: boolean; burstFrames: number };
+  };
 }
 interface SkyReadiness { status: 'pending' | 'ready' | 'failed'; stage: string; error: string | null }
 ```

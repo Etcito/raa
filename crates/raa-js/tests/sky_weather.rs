@@ -780,6 +780,12 @@ fn weather_omissions_merge_nested_wind() {
         changing: true,
         seed: 42,
         transition_seconds: 2.5,
+        cloud_samples: 56,
+        cloud_scale: 0.5,
+        cloud_dither: true,
+        cloud_noise_size: 1,
+        cloud_dome: false,
+        cloud_dome_size: 1024,
         target: Weather::by_name("broken").unwrap(),
     };
     let update = weather(&current, &[("wind", obj(&[("speed", Raw::Number(3.0))]))]).unwrap();
@@ -1035,6 +1041,7 @@ fn view(view: u32, reasons: CloudResetReasons) -> SkyViewDiagnostics {
         reset_reasons: reasons,
         cloud_screen_valid: false,
         cloud_panorama_valid: true,
+        cloud: Default::default(),
     }
 }
 
@@ -1228,4 +1235,94 @@ fn weather_getter_serializes_authored_current_and_cycle_with_target_text() {
         ..state
     };
     assert_eq!(serialize_weather(&idle).cycle_preset, None);
+}
+
+#[test]
+fn weather_cloud_samples_and_scale_patch_are_ranged_and_read_back() {
+    let current = WeatherSettings::default();
+    let kept = weather(&current, &[]).unwrap();
+    assert_eq!(kept.settings.cloud_samples, 56);
+    assert_eq!(kept.settings.cloud_scale, 0.5);
+    let set = weather(
+        &current,
+        &[("cloudSamples", Raw::Number(128.0)), ("cloudScale", Raw::Number(0.75))],
+    )
+    .unwrap();
+    assert_eq!(set.settings.cloud_samples, 128);
+    assert_eq!(set.settings.cloud_scale, 0.75);
+    for bad in [7.0, 257.0, 56.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudSamples", Raw::Number(bad))]),
+            "cloudSamples",
+        );
+    }
+    for bad in [0.2, 1.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudScale", Raw::Number(bad))]),
+            "cloudScale",
+        );
+    }
+    expect_weather_invalid(weather(&current, &[("cloudSamples", Raw::Null)]), "cloudSamples");
+    expect_weather_invalid(weather(&current, &[("cloudScale", Raw::Null)]), "cloudScale");
+    let state = ResolvedWeatherState {
+        settings: set.settings,
+        current: Weather::default(),
+        cycle_preset: None,
+    };
+    let view = serialize_weather(&state);
+    assert_eq!((view.cloud_samples, view.cloud_scale), (128, 0.75));
+    assert!(kept.settings.cloud_dither && kept.settings.cloud_noise_size == 1);
+    let grain = weather(
+        &current,
+        &[("cloudDither", Raw::Bool(false)), ("cloudNoiseSize", Raw::Number(4.0))],
+    )
+    .unwrap();
+    assert!(!grain.settings.cloud_dither);
+    assert_eq!(grain.settings.cloud_noise_size, 4);
+    for bad in [0.0, 17.0, 2.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudNoiseSize", Raw::Number(bad))]),
+            "cloudNoiseSize",
+        );
+    }
+    expect_weather_invalid(weather(&current, &[("cloudDither", Raw::Number(1.0))]), "cloudDither");
+    let view = serialize_weather(&ResolvedWeatherState {
+        settings: grain.settings,
+        current: Weather::default(),
+        cycle_preset: None,
+    });
+    assert!(!view.cloud_dither && view.cloud_noise_size == 4);
+}
+
+#[test]
+fn weather_cloud_dome_patch_is_ranged_and_read_back() {
+    let current = WeatherSettings::default();
+    let kept = weather(&current, &[]).unwrap();
+    assert!(!kept.settings.cloud_dome);
+    assert_eq!(kept.settings.cloud_dome_size, 1024);
+    let set = weather(
+        &current,
+        &[("cloudDome", Raw::Bool(true)), ("cloudDomeSize", Raw::Number(512.0))],
+    )
+    .unwrap();
+    assert!(set.settings.cloud_dome);
+    assert_eq!(set.settings.cloud_dome_size, 512);
+    for ok in [128.0, 2048.0] {
+        let edge = weather(&current, &[("cloudDomeSize", Raw::Number(ok))]).unwrap();
+        assert_eq!(edge.settings.cloud_dome_size, ok as u32);
+    }
+    for bad in [127.0, 2049.0, 512.5, f64::NAN] {
+        expect_weather_invalid(
+            weather(&current, &[("cloudDomeSize", Raw::Number(bad))]),
+            "cloudDomeSize",
+        );
+    }
+    expect_weather_invalid(weather(&current, &[("cloudDome", Raw::Number(1.0))]), "cloudDome");
+    expect_weather_invalid(weather(&current, &[("cloudDomeSize", Raw::Null)]), "cloudDomeSize");
+    let view = serialize_weather(&ResolvedWeatherState {
+        settings: set.settings,
+        current: Weather::default(),
+        cycle_preset: None,
+    });
+    assert!(view.cloud_dome && view.cloud_dome_size == 512);
 }

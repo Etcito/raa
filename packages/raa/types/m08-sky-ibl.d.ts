@@ -201,6 +201,21 @@ export interface SkyViewDiagnostics {
   resetReasons: SkyResetReason[];
   cloudScreenValid: boolean;
   cloudPanoramaValid: boolean;
+  /** Screen-cloud accumulation: committed count n, the animated flag the freeze decision used,
+   * whether the last frame skipped the march, and whether history was usable. */
+  cloud: {
+    count: number;
+    animated: boolean;
+    frozen: boolean;
+    historyUsed: boolean;
+    /** Frames that ran the in-frame convergence burst of the screen march (up to 16 marches
+     * in one frame after a sky change, so the picture shown is already converged). */
+    burstFrames: number;
+    /** The world-space cloud dome (shared by every view): `active` = cloudDome is on, `count`
+     * its committed accumulation count, `frozen` = the last frame did not march it,
+     * `burstFrames` = frames that ran its convergence burst. */
+    dome: { active: boolean; count: number; frozen: boolean; burstFrames: number };
+  };
 }
 
 /** Whether the sky pipeline is ready, pending or failed, with its stage and error. */
@@ -263,6 +278,18 @@ export interface WeatherSettings {
   seed: number;
   /** Exponential easing time towards a new target, finite and >= 0; 0 is immediate. */
   transitionSeconds: number;
+  /** Screen-cloud march steps per ray, an integer-valued number in [8, 256]. Default 56. */
+  cloudSamples: number;
+  /** Screen-cloud buffer scale in [0.25, 1]: the buffer is ceil(size * cloudScale). Default 0.5. */
+  cloudScale: number;
+  /** Per-pixel march-offset noise of the screen clouds. false = constant offset: no crawling while the camera moves (fixed step banding instead; raise cloudSamples). Default true. */
+  cloudDither: boolean;
+  /** Noise grain, an integer in [1, 16]: one noise value per cloudNoiseSize x cloudNoiseSize buffer texels; larger = coarser. Default 1. */
+  cloudNoiseSize: number;
+  /** World-space cloud dome: marches the clouds into a persistent 2D texture indexed by world view direction (hemi-octahedral), so a moving or rotating camera never re-marches them; no screen-space cloud march runs while on. Default false. */
+  cloudDome: boolean;
+  /** Edge of the dome texture in texels, an integer in [128, 2048]. Default 1024. */
+  cloudDomeSize: number;
   /** The authored target weather (not the runtime state). */
   target: WeatherState;
 }
@@ -281,6 +308,18 @@ export interface WeatherDesc {
   changing?: boolean;
   seed?: number;
   transitionSeconds?: number;
+  /** Screen-cloud march steps per ray, an integer-valued number in [8, 256]. Default 56. */
+  cloudSamples?: number;
+  /** Screen-cloud buffer scale in [0.25, 1]; 0.5 is half resolution. Default 0.5. */
+  cloudScale?: number;
+  /** See the `cloudDither` field of the weather read back by `weather()`. Default true. */
+  cloudDither?: boolean;
+  /** Integer in [1, 16]. Default 1. */
+  cloudNoiseSize?: number;
+  /** See the `cloudDome` field of the weather read back by `weather()`. Default false. */
+  cloudDome?: boolean;
+  /** Integer in [128, 2048]. Default 1024. */
+  cloudDomeSize?: number;
   coverage?: number;
   type?: number;
   base?: number;

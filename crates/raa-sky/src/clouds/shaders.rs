@@ -114,3 +114,17 @@ pub(super) fn screen_module_wgsl(multisampled_depth: bool) -> String {
         cloud_volume_wgsl()
     )
 }
+
+/// The world-space cloud dome march: one ray per dome texel, blended by count into the dome's
+/// own history.
+const DOME_SRC: &str = include_str!("wgsl/dome.wgsl");
+
+/// The dome module (entry `raa_cloud_dome_main`): the common cloud text, the output binding
+/// 10, the history binding 11 and the dome pass.
+pub(super) fn dome_module_wgsl() -> String {
+    format!(
+        "{}\n{CLOUD_OUTPUT}\n\
+         @group(2) @binding(11) var raa_cloud_history: texture_2d<f32>;\n{DOME_SRC}",
+        cloud_volume_wgsl()
+    )
+}

@@ -49,6 +49,37 @@ impl Default for SkyDiagnostics {
     }
 }
 
+/// The screen-cloud accumulation of one view, as the last recorded frame saw it. Read-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CloudAccumulationDiagnostics {
+    /// The committed accumulation count n (0 before any march is committed).
+    pub count: u32,
+    /// The flag the freeze decision used: the sky was animated (wind, evolution, weather or
+    /// time changing).
+    pub animated: bool,
+    /// The last frame did not march (skipped, or only the cheap refresh pass of a frozen view).
+    pub frozen: bool,
+    /// Whether the last frame could reproject from the committed history.
+    pub history_used: bool,
+    /// Frames that ran the in-frame convergence burst of the screen march.
+    pub burst_frames: u32,
+    /// The world-space cloud dome (shared by every view).
+    pub dome: CloudDomeDiagnostics,
+}
+
+/// The cloud dome accumulation, as the last recorded frame saw it. Read-only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CloudDomeDiagnostics {
+    /// `WeatherSettings.cloud_dome` was on for the last recorded frame of the view.
+    pub active: bool,
+    /// The committed accumulation count of the dome (0 before any march is committed).
+    pub count: u32,
+    /// The last recorded frame did not march the dome (frozen).
+    pub frozen: bool,
+    /// Frames that ran the in-frame convergence burst of the dome march.
+    pub burst_frames: u32,
+}
+
 /// One prepared view's lifecycle observation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SkyViewDiagnostics {
@@ -72,6 +103,8 @@ pub struct SkyViewDiagnostics {
     pub cloud_screen_valid: bool,
     /// True only when the backend's panorama holds completed volume work.
     pub cloud_panorama_valid: bool,
+    /// The view's screen-cloud accumulation state.
+    pub cloud: CloudAccumulationDiagnostics,
 }
 
 /// Whether the sky pipeline is ready, pending or failed, with its stage.

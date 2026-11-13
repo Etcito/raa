@@ -126,6 +126,26 @@ pub struct CloudFrame {
     pub weather_enabled: bool,
     /// The accepted `WeatherSettings.shadows` flag.
     pub cloud_shadows: bool,
+    /// The accepted `WeatherSettings.cloud_samples`: screen march steps per ray.
+    pub cloud_samples: u32,
+    /// The accepted `WeatherSettings.cloud_scale`: screen buffer scale (0.5 = half resolution).
+    pub cloud_scale: f32,
+    /// The accepted `WeatherSettings.cloud_dither`: false = constant march offset, no history.
+    pub cloud_dither: bool,
+    /// The accepted `WeatherSettings.cloud_noise_size`: noise block edge in buffer texels.
+    pub cloud_noise_size: u32,
+    /// The accepted `WeatherSettings.cloud_dome`: the clouds are marched into the world-space
+    /// dome texture instead of the screen buffer.
+    pub cloud_dome: bool,
+    /// The accepted `WeatherSettings.cloud_dome_size`: the dome texture's edge in texels.
+    pub cloud_dome_size: u32,
+    /// True while the sky changes by itself (wind drift, cloud boil, a weather transition or
+    /// cycle, a playing time of day); a static view may then never freeze.
+    pub animated: bool,
+    /// Hash of everything that, when it changes, restarts the screen-cloud accumulation:
+    /// the weather (unless it is changing), the light direction (unless time plays),
+    /// `cloud_samples`, `cloud_scale`, enabled/shadows/model.
+    pub signature: u64,
     /// True when the accepted sky model is `SkyModel::Physical`.
     pub physical: bool,
 }
@@ -148,6 +168,12 @@ pub struct CloudViews {
     pub screen_valid: bool,
     /// True only when `panorama` holds a completed march for this view.
     pub panorama_valid: bool,
+    /// Filterable D2 Rgba16Float world-space cloud dome (hemi-octahedral, see
+    /// `clouds/dome.rs`): RGB radiance, A transmittance.
+    pub dome: wgpu::TextureView,
+    /// True only when `dome` holds a committed march and the dome is on; the consumer then
+    /// samples it by world view direction instead of the screen result.
+    pub dome_valid: bool,
 }
 
 impl CloudViews {
@@ -158,9 +184,11 @@ impl CloudViews {
         Ok(CloudViews {
             panorama: neutral_radiance(gpu, "raa-sky.cloud.panorama")?,
             screen: neutral_radiance(gpu, "raa-sky.cloud.screen")?,
+            dome: neutral_radiance(gpu, "raa-sky.cloud.dome")?,
             transmittance: neutral_transmittance(gpu)?,
             screen_valid: false,
             panorama_valid: false,
+            dome_valid: false,
         })
     }
 }
@@ -220,10 +248,15 @@ pub(crate) trait CloudRenderer {
     fn invalidate(&mut self, view: Option<u32>, reason: CloudInvalidation);
 
     fn submitted(&mut self, view: u32, invocation: u64);
+
+    /// The view's screen-cloud accumulation as the last recorded frame saw it; read-only.
+    fn accumulation_observation(&self, _view: u32) -> crate::CloudAccumulationDiagnostics {
+        crate::CloudAccumulationDiagnostics::default()
+    }
 }
 
 /// The copied snapshot of the active view, or `sky.invalid` when it is not prepared.
-fn cloud_frame(
+pub(crate) fn cloud_frame(
     state: &SkyState,
     invocation: u64,
     view: u32,
@@ -237,6 +270,7 @@ fn cloud_frame(
         .ok_or_else(|| invalid(format!("cloud view {view} is not prepared")))?;
     let [east, south] = state.weather.current.wind_velocity();
     let (sin, cos) = state.time.state.settings.place.north.sin_cos();
+    let (animated, signature) = accumulation_state(state);
     Ok(CloudFrame {
         invocation,
         view,
@@ -253,8 +287,91 @@ fn cloud_frame(
         evolution: state.weather.evolution,
         weather_enabled: state.weather.settings.enabled,
         cloud_shadows: state.weather.settings.shadows,
+        cloud_samples: state.weather.settings.cloud_samples,
+        cloud_scale: state.weather.settings.cloud_scale,
+        cloud_dither: state.weather.settings.cloud_dither,
+        cloud_noise_size: state.weather.settings.cloud_noise_size,
+        cloud_dome: state.weather.settings.cloud_dome,
+        cloud_dome_size: state.weather.settings.cloud_dome_size,
+        animated,
+        signature,
         physical: state.desc.model == SkyModel::Physical,
     })
+}
+
+/// FNV-1a over 32-bit words.
+fn mix(hash: u64, word: u32) -> u64 {
+    (hash ^ u64::from(word)).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+/// `(animated, signature)` of the accepted sky: see [`CloudFrame::animated`] and
+/// [`CloudFrame::signature`]. The wind drift, the boil phase and the animation clock advance
+/// every frame while the sky is animated and are never part of the signature.
+fn accumulation_state(state: &SkyState) -> (bool, u64) {
+    let weather = &state.weather;
+    let time = &state.time.state.settings;
+    let time_plays = time.enabled && time.playing && time.speed != 0.0;
+    let weather_changes = weather.settings.changing
+        || weather.cycle.is_some()
+        || weather.current != weather.target;
+    let [east, south] = weather.current.wind_velocity();
+    let animated = time_plays
+        || weather_changes
+        || east != 0.0
+        || south != 0.0
+        || weather.current.evolution > 0.0;
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for word in [
+        weather.settings.cloud_samples,
+        weather.settings.cloud_scale.to_bits(),
+        u32::from(weather.settings.enabled) | u32::from(weather.settings.shadows) << 1,
+        u32::from(weather.settings.cloud_dither),
+        weather.settings.cloud_noise_size,
+        u32::from(weather.settings.cloud_dome),
+        weather.settings.cloud_dome_size,
+        u32::from(state.desc.model == SkyModel::Physical),
+    ] {
+        hash = mix(hash, word);
+    }
+    if !weather_changes {
+        let w = &weather.current;
+        for value in [
+            w.coverage,
+            w.cloud_type,
+            w.base,
+            w.thickness,
+            w.density,
+            w.cirrus,
+            w.wind_speed,
+            w.wind_from,
+            w.evolution,
+            w.rain,
+        ] {
+            hash = mix(hash, value.to_bits());
+        }
+    }
+    if !time_plays {
+        let sky = &state.time.state.sky;
+        let light = &state.time.last_light;
+        for value in [
+            sky.sun.x,
+            sky.sun.y,
+            sky.sun.z,
+            sky.moon.x,
+            sky.moon.y,
+            sky.moon.z,
+            light.direction.x,
+            light.direction.y,
+            light.direction.z,
+            light.intensity,
+            light.color[0],
+            light.color[1],
+            light.color[2],
+        ] {
+            hash = mix(hash, value.to_bits());
+        }
+    }
+    (animated, hash)
 }
 
 fn state_busy(name: &str) -> RaaError {
@@ -841,6 +958,14 @@ mod tests {
             evolution: 0.0,
             weather_enabled: true,
             cloud_shadows: true,
+            cloud_samples: 56,
+            cloud_scale: 0.5,
+            cloud_dither: true,
+            cloud_noise_size: 1,
+            cloud_dome: false,
+            cloud_dome_size: 1024,
+            animated: false,
+            signature: 0,
             physical: true,
         }
     }

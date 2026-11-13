@@ -14,6 +14,7 @@ use raa_core::{GpuContext, RaaError};
 use raa_math::{Mat4, Vec3};
 
 use super::super::{CloudFrame, MAX_VIEWS, invalid};
+use super::history::{Accumulation, BURST_FRAMES, BURST_STRIDE};
 use crate::atmosphere::{PhysicalSkyGpu, atmospheric_radius_km};
 
 /// Ground covered by the shadow map, in metres along each side.
@@ -57,9 +58,12 @@ pub(super) struct CloudGpu {
     pub(super) right: [f32; 4],
     /// @80: camera up * tan(fovY/2).
     pub(super) up: [f32; 4],
-    /// @96: camera forward, w = 1 when history is usable.
+    /// @96: camera forward, w = frames accumulated (0 = no usable history, 1 = the camera or
+    /// the sky just changed: blend 0.12, 2.. = unchanged frames, blend 1/(n + 6)).
     pub(super) forward: [f32; 4],
-    /// @112: half-resolution width, height, invocation & 255, 0.
+    /// @112: cloud_scale, flags (bit 0 refresh pass of a frozen view, bit 1 animated sky, bit 2
+    /// dither off, bits 3.. the noise block size 1..=16; see [`pack_screen_flags`]),
+    /// jitter index, cloud_samples.
     pub(super) screen: [f32; 4],
     /// @128: previous camera view-projection, column-major.
     pub(super) previous_view_proj: [[f32; 4]; 4],
@@ -92,12 +96,31 @@ fn camera_basis(frame: &CloudFrame) -> Basis {
     }
 }
 
+/// The `screen.y` flags lane: bit 0 refresh, bit 1 animated sky, bit 2 dither off, bits 3.. the
+/// noise block size (an exact small integer, 1..=16 once validated).
+pub(super) fn pack_screen_flags(
+    refresh: bool,
+    animated: bool,
+    dither: bool,
+    noise_size: u32,
+) -> f32 {
+    let bits = u32::from(refresh)
+        | u32::from(animated) << 1
+        | u32::from(!dither) << 2
+        | noise_size.clamp(1, 16) << 3;
+    bits as f32
+}
+
 impl CloudGpu {
     /// Size in bytes of the cloud uniform.
     pub(super) const SIZE: usize = 192;
 
     /// Builds the record from a validated frame and its committed history matrix.
-    pub(super) fn from_frame(frame: &CloudFrame, history: Option<Mat4>) -> CloudGpu {
+    pub(super) fn from_frame(
+        frame: &CloudFrame,
+        history: Option<Accumulation>,
+        refresh: bool,
+    ) -> CloudGpu {
         let weather = frame.weather;
         let texel = SHADOW_EXTENT / SHADOW_SIZE as f32;
         let snap = |v: f32| (v / texel).floor() * texel - SHADOW_EXTENT * 0.5;
@@ -136,15 +159,25 @@ impl CloudGpu {
                 basis.forward.x,
                 basis.forward.y,
                 basis.forward.z,
-                if history.is_some() { 1.0 } else { 0.0 },
+                history.map_or(0.0, |h| h.count as f32),
             ],
             screen: [
-                (frame.size.0 as f32 * 0.5).ceil(),
-                (frame.size.1 as f32 * 0.5).ceil(),
-                (frame.invocation & 255) as f32,
-                0.0,
+                frame.cloud_scale,
+                pack_screen_flags(
+                    refresh,
+                    frame.animated,
+                    frame.cloud_dither,
+                    frame.cloud_noise_size,
+                ),
+                // Unchanged frames walk the golden-ratio sequence by their count; a moving
+                // camera uses the invocation so the offsets still differ frame to frame.
+                match history {
+                    Some(h) if h.count >= 2 => (h.count & 255) as f32,
+                    _ => (frame.invocation & 255) as f32,
+                },
+                frame.cloud_samples as f32,
             ],
-            previous_view_proj: history.unwrap_or(Mat4::IDENTITY).cols,
+            previous_view_proj: history.map_or(Mat4::IDENTITY, |h| h.previous).cols,
         }
     }
 
@@ -173,6 +206,12 @@ impl CloudGpu {
         }
         out
     }
+}
+
+/// The cloud buffer size of a full-resolution `size`: `ceil(size * scale)`, at least 1.
+pub(super) fn screen_size(size: (u32, u32), scale: f32) -> (u32, u32) {
+    let along = |n: u32| ((n as f32 * scale).ceil() as u32).max(1);
+    (along(size.0), along(size.1))
 }
 
 /// The 256-byte S10 sky record of a cloud frame; every unspecified lane is the default.
@@ -263,8 +302,10 @@ pub(super) struct CloudTargets {
 /// which the next march reads. Identities never swap, so the handed-out texture stays the
 /// same across frames at one size.
 struct ScreenTargets {
-    /// Half-resolution size (ceil(w/2), ceil(h/2)).
+    /// Buffer size ceil(size * scale).
     size: (u32, u32),
+    /// The cloud scale the buffer was made for.
+    scale: f32,
     current: wgpu::TextureView,
     history: wgpu::TextureView,
 }
@@ -282,7 +323,13 @@ impl CloudTargets {
                 mapped_at_creation: false,
             })
         };
-        let params = std::array::from_fn(|_| uniform("raa-sky.cloud_params", CloudGpu::SIZE));
+        // BURST_FRAMES dynamic-offset slots: slot 0 is the frame's record, read by every pass.
+        let params = std::array::from_fn(|_| {
+            uniform(
+                "raa-sky.cloud_params",
+                (BURST_STRIDE * u64::from(BURST_FRAMES)) as usize,
+            )
+        });
         let sky = std::array::from_fn(|_| uniform("raa-sky.cloud_sky", PhysicalSkyGpu::SIZE));
         let noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-sky.cloud_noise_sampler"),
@@ -396,14 +443,15 @@ impl CloudTargets {
         &self.panorama
     }
 
-    /// Creates the screen pair of `view` (< 4) for a full-resolution `size`, or recreates
-    /// it when the half-resolution size changed; true when it created or recreated. A new
-    /// `history` holds alpha -1 (not marched) everywhere.
+    /// Creates the screen pair of `view` (< 4) for a full-resolution `size` and `scale`, or
+    /// recreates it when the buffer size `ceil(size * scale)` or the scale changed; true when
+    /// it created or recreated. A new `history` holds alpha -1 (not marched) everywhere.
     pub(super) fn ensure_screen(
         &mut self,
         gpu: &GpuContext,
         view: u32,
         size: (u32, u32),
+        scale: f32,
     ) -> Result<bool, RaaError> {
         gpu.ensure_live()?;
         let Some(slot) = self.screens.get_mut(view as usize) else {
@@ -411,8 +459,11 @@ impl CloudTargets {
                 "cloud view {view} is outside 0..{MAX_VIEWS}"
             )));
         };
-        let half = (size.0.div_ceil(2).max(1), size.1.div_ceil(2).max(1));
-        if slot.as_ref().is_some_and(|screen| screen.size == half) {
+        let half = screen_size(size, scale);
+        if slot
+            .as_ref()
+            .is_some_and(|screen| screen.size == half && screen.scale == scale)
+        {
             return Ok(false);
         }
         let extent = wgpu::Extent3d {
@@ -455,6 +506,7 @@ impl CloudTargets {
         );
         *slot = Some(ScreenTargets {
             size: half,
+            scale,
             current: current.create_view(&Default::default()),
             history: history.create_view(&Default::default()),
         });

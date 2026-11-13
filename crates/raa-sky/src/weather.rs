@@ -398,6 +398,23 @@ pub struct WeatherSettings {
     pub seed: u32,
     /// Easing time for authored target changes, in seconds.
     pub transition_seconds: f32,
+    /// Screen-cloud march steps per ray, an integer in `8..=256` (default 56).
+    pub cloud_samples: u32,
+    /// Screen-cloud buffer scale in `0.25..=1` (default 0.5 = half resolution); the buffer is
+    /// `ceil(size * cloud_scale)`.
+    pub cloud_scale: f32,
+    /// Per-pixel march-offset noise of the screen clouds (default on). Off = a constant offset,
+    /// a deterministic march with no crawling (fixed step banding instead).
+    pub cloud_dither: bool,
+    /// Edge, in cloud-buffer texels, of the blocks sharing one noise value, an integer in
+    /// `1..=16` (default 1); a larger size is a coarser grain.
+    pub cloud_noise_size: u32,
+    /// World-space cloud dome (default off): the clouds are marched into a persistent 2D
+    /// texture indexed by world view direction instead of in screen space, so a moving
+    /// camera never re-marches them.
+    pub cloud_dome: bool,
+    /// Edge of the cloud dome texture in texels, an integer in `128..=2048` (default 1024).
+    pub cloud_dome_size: u32,
     pub target: Weather,
 }
 
@@ -409,6 +426,12 @@ impl Default for WeatherSettings {
             changing: false,
             seed: 1,
             transition_seconds: 0.0,
+            cloud_samples: 56,
+            cloud_scale: 0.5,
+            cloud_dither: true,
+            cloud_noise_size: 1,
+            cloud_dome: false,
+            cloud_dome_size: 1024,
             target: Weather::default(),
         }
     }
@@ -421,6 +444,26 @@ impl WeatherSettings {
         if !self.transition_seconds.is_finite() || self.transition_seconds < 0.0 {
             return Err(invalid(
                 "transition_seconds must be finite and nonnegative".into(),
+            ));
+        }
+        if !(8..=256).contains(&self.cloud_samples) {
+            return Err(invalid(
+                "cloud_samples must be an integer within 8..=256".into(),
+            ));
+        }
+        if !self.cloud_scale.is_finite() || !(0.25..=1.0).contains(&self.cloud_scale) {
+            return Err(invalid(
+                "cloud_scale must be finite and within 0.25..=1".into(),
+            ));
+        }
+        if !(1..=16).contains(&self.cloud_noise_size) {
+            return Err(invalid(
+                "cloud_noise_size must be an integer within 1..=16".into(),
+            ));
+        }
+        if !(128..=2048).contains(&self.cloud_dome_size) {
+            return Err(invalid(
+                "cloud_dome_size must be an integer within 128..=2048".into(),
             ));
         }
         Ok(())

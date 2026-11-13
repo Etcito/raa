@@ -10,10 +10,14 @@
 use raa_core::{GpuContext, RaaError};
 
 use super::super::{MAX_VIEWS, invalid};
+use super::dome::DomeGpu;
+use super::history::BURST_STRIDE;
+use super::resources::CloudGpu;
 use super::noise::CloudNoise;
 use super::resources::{CloudTargets, PANORAMA_SIZE, SHADOW_SIZE};
 use super::shaders::{
-    panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
+    dome_module_wgsl, panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl,
+    shadow_module_wgsl,
 };
 use crate::atmosphere::AtmosphereResources;
 
@@ -31,6 +35,13 @@ struct ScreenGroup {
     current: wgpu::TextureView,
     depth: wgpu::TextureView,
     multisampled: bool,
+    group: wgpu::BindGroup,
+}
+
+/// The dome bind group with the resource identities it was built with.
+struct DomeGroup {
+    sky_view: wgpu::TextureView,
+    current: wgpu::TextureView,
     group: wgpu::BindGroup,
 }
 
@@ -52,6 +63,10 @@ pub(super) struct CloudPasses {
     screen: ScreenPipeline,
     /// The screen march for a multisampled depth target.
     screen_multisampled: ScreenPipeline,
+    /// The world-space dome march (group 2 bindings 0-11).
+    dome_layout: wgpu::BindGroupLayout,
+    dome: wgpu::ComputePipeline,
+    dome_group: Option<DomeGroup>,
     views: [Option<ViewGroups>; MAX_VIEWS],
     screens: [Option<ScreenGroup>; MAX_VIEWS],
 }
@@ -74,6 +89,27 @@ fn texture(binding: u32, view_dimension: wgpu::TextureViewDimension) -> wgpu::Bi
             multisampled: false,
         },
     )
+}
+
+/// Binding 0 of the screen and dome layouts: the burst records are addressed by dynamic offset.
+fn dynamic_params() -> wgpu::BindGroupLayoutEntry {
+    entry(
+        0,
+        wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: true,
+            min_binding_size: None,
+        },
+    )
+}
+
+/// The first `CloudGpu::SIZE` bytes of `buffer`, the window a dynamic offset slides.
+fn sized_binding(buffer: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer,
+        offset: 0,
+        size: std::num::NonZeroU64::new(CloudGpu::SIZE as u64),
+    })
 }
 
 fn buffer(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
@@ -124,7 +160,8 @@ fn screen_pipeline(
     multisampled: bool,
     empty: &wgpu::BindGroupLayout,
 ) -> Result<ScreenPipeline, RaaError> {
-    let [e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10] = march_entries();
+    let [_, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10] = march_entries();
+    let e0 = dynamic_params();
     let depth = entry(
         12,
         wgpu::BindingType::Texture {
@@ -232,6 +269,33 @@ impl CloudPasses {
         )?;
         let screen = screen_pipeline(gpu, false, &empty)?;
         let screen_multisampled = screen_pipeline(gpu, true, &empty)?;
+        let [_, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10] = march_entries();
+        let e0 = dynamic_params();
+        let dome_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-sky.cloud_dome"),
+            entries: &[
+                e0,
+                e1,
+                e2,
+                e3,
+                e4,
+                e5,
+                e6,
+                e7,
+                e8,
+                e9,
+                e10,
+                texture(11, D2),
+            ],
+        });
+        let dome = pipeline(
+            gpu,
+            "raa-sky.cloud_dome",
+            &dome_module_wgsl(),
+            "raa_cloud_dome_main",
+            &empty,
+            &dome_layout,
+        )?;
         Ok(CloudPasses {
             march_layout,
             mean_layout,
@@ -240,6 +304,9 @@ impl CloudPasses {
             panorama,
             screen,
             screen_multisampled,
+            dome_layout,
+            dome,
+            dome_group: None,
             views: std::array::from_fn(|_| None),
             screens: std::array::from_fn(|_| None),
         })
@@ -339,13 +406,34 @@ impl CloudPasses {
         atmosphere: &'a AtmosphereResources,
         output: &'a wgpu::TextureView,
     ) -> Result<Vec<wgpu::BindGroupEntry<'a>>, RaaError> {
+        Self::march_entries_with(
+            targets.params(view).as_entire_binding(),
+            targets.sky(view),
+            view,
+            noise,
+            targets,
+            atmosphere,
+            output,
+        )
+    }
+
+    /// The bind group entries 0-10 of a cloud march over the given uniform buffers.
+    fn march_entries_with<'a>(
+        params: wgpu::BindingResource<'a>,
+        sky: &'a wgpu::Buffer,
+        view: u32,
+        noise: &'a CloudNoise,
+        targets: &'a CloudTargets,
+        atmosphere: &'a AtmosphereResources,
+        output: &'a wgpu::TextureView,
+    ) -> Result<Vec<wgpu::BindGroupEntry<'a>>, RaaError> {
         let Some(sky_view) = atmosphere.sky_view(view) else {
             return Err(invalid(format!("cloud view {view} has no sky-view LUT")));
         };
         use wgpu::BindingResource::{Sampler, TextureView};
         let resources = [
-            targets.params(view).as_entire_binding(),
-            targets.sky(view).as_entire_binding(),
+            params,
+            sky.as_entire_binding(),
             TextureView(noise.shape()),
             TextureView(noise.detail()),
             TextureView(noise.weather_map()),
@@ -412,6 +500,7 @@ impl CloudPasses {
         targets: &CloudTargets,
         atmosphere: &AtmosphereResources,
         depth: &wgpu::TextureView,
+        iterations: u32,
     ) -> Result<(), RaaError> {
         let slot = view as usize;
         if slot >= MAX_VIEWS {
@@ -438,7 +527,15 @@ impl CloudPasses {
             } else {
                 &self.screen.layout
             };
-            let mut entries = Self::march_entries(view, noise, targets, atmosphere, current)?;
+            let mut entries = Self::march_entries_with(
+                sized_binding(targets.params(view)),
+                targets.sky(view),
+                view,
+                noise,
+                targets,
+                atmosphere,
+                current,
+            )?;
             entries.push(wgpu::BindGroupEntry {
                 binding: 11,
                 resource: wgpu::BindingResource::TextureView(history),
@@ -469,20 +566,102 @@ impl CloudPasses {
             &self.screen.pipeline
         };
         let texture = current.texture();
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("raa-sky.cloud_screen"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(2, &screen.group, &[]);
-            pass.dispatch_workgroups(texture.width().div_ceil(8), texture.height().div_ceil(8), 1);
+        // One march and its copy into the history; a convergence burst repeats the pair, each
+        // march reading its own burst record (dynamic offset) and the previous result.
+        for i in 0..iterations.max(1) {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("raa-sky.cloud_screen"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(2, &screen.group, &[i * BURST_STRIDE as u32]);
+                pass.dispatch_workgroups(
+                    texture.width().div_ceil(8),
+                    texture.height().div_ceil(8),
+                    1,
+                );
+            }
+            encoder.copy_texture_to_texture(
+                texture.as_image_copy(),
+                history.texture().as_image_copy(),
+                texture.size(),
+            );
         }
-        encoder.copy_texture_to_texture(
-            texture.as_image_copy(),
-            history.texture().as_image_copy(),
-            texture.size(),
-        );
+        Ok(())
+    }
+
+    /// Records the world-space dome march of `dome` from the sky-view LUT of `view`, then
+    /// copies its result into the dome's history. The bind group is rebuilt only when the
+    /// dome texture or the sky-view identity changed.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_dome(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        view: u32,
+        noise: &CloudNoise,
+        targets: &CloudTargets,
+        atmosphere: &AtmosphereResources,
+        dome: &DomeGpu,
+        iterations: u32,
+    ) -> Result<(), RaaError> {
+        let Some(sky_view) = atmosphere.sky_view(view) else {
+            return Err(invalid(format!("cloud view {view} has no sky-view LUT")));
+        };
+        let stale = self
+            .dome_group
+            .as_ref()
+            .is_none_or(|g| g.current != dome.current || g.sky_view != *sky_view);
+        if stale {
+            let mut entries = Self::march_entries_with(
+                sized_binding(&dome.params),
+                &dome.sky,
+                view,
+                noise,
+                targets,
+                atmosphere,
+                &dome.current,
+            )?;
+            entries.push(wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(&dome.history),
+            });
+            let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("raa-sky.cloud_dome"),
+                layout: &self.dome_layout,
+                entries: &entries,
+            });
+            self.dome_group = Some(DomeGroup {
+                sky_view: sky_view.clone(),
+                current: dome.current.clone(),
+                group,
+            });
+        }
+        let Some(group) = self.dome_group.as_ref() else {
+            return Ok(());
+        };
+        let texture = dome.current.texture();
+        for i in 0..iterations.max(1) {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("raa-sky.cloud_dome"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.dome);
+                pass.set_bind_group(2, &group.group, &[i * BURST_STRIDE as u32]);
+                pass.dispatch_workgroups(
+                    texture.width().div_ceil(8),
+                    texture.height().div_ceil(8),
+                    1,
+                );
+            }
+            encoder.copy_texture_to_texture(
+                texture.as_image_copy(),
+                dome.history.texture().as_image_copy(),
+                texture.size(),
+            );
+        }
         Ok(())
     }
 

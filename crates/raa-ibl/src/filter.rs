@@ -8,13 +8,26 @@
 //! source texture changes (cached for the last source). Readback: a successful `record`
 //! reserves a free staging buffer and tags it with its publication generation and the
 //! current invalidation epoch, copies into it (or, with every buffer busy, sets the retry
-//! flag), the caller submits, then `after_submit` maps it. The map callback first matches
+//! flag), the caller submits, then `after_submit` advances it. The map callback first matches
 //! and frees its original slot/sequence, then reports the tagged value to the
 //! [`PublicationGate`], which publishes only current-epoch, non-superseded completions. On
 //! wasm the browser drives map callbacks; native callers poll the device (`Device::poll`).
 //! The shared slot is an `Arc<Mutex<..>>` rather than an `Rc<RefCell<..>>` because wgpu
 //! requires a `Send` map callback on native; the gate is separate so invalidation never
 //! needs the `RefCell`-borrowed filter state.
+//!
+//! A slot written by `record` is never `map_async`'d on the very next `after_submit`: it is
+//! only staged then, and mapped on the `after_submit` *after* that. This extra step exists
+//! because `after_submit` runs from every pass's `prepare`, and a caller may run `prepare`
+//! (hence `after_submit`) more than once before it actually calls `queue.submit` once (for
+//! example, a capture path that runs the frame graph a second time into an offscreen target
+//! before submitting both command buffers together). Mapping on the very next `after_submit`
+//! would call `buffer.map_async` on a staging buffer whose writing `copy_buffer_to_buffer` is
+//! still sitting in an unsubmitted command buffer, which wgpu rejects once that command
+//! buffer is finally submitted (`<buffer> used in submit while pending map`). Staging first
+//! guarantees at least one real submit boundary between the copy and the map, as long as no
+//! caller runs more than two `prepare` cycles on freshly written slots before its own
+//! `queue.submit` (true of every caller today).
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -66,8 +79,11 @@ pub(crate) struct RequestTag {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
     Free,
-    /// A copy with this sequence number was recorded; mapped by the next `after_submit`.
+    /// A copy with this sequence number was recorded; staged by the next `after_submit`.
     Written(u64),
+    /// The copy was recorded at least one `after_submit` call ago, so it has crossed a real
+    /// submit boundary by now; mapped by the next `after_submit`.
+    Staged(u64),
     /// map_async is pending for this sequence number.
     Mapping(u64),
 }
@@ -144,14 +160,23 @@ impl Readback {
         None
     }
 
-    /// Marks every slot written since the last call as mapping; entry i is the sequence
-    /// number to map slot i with.
-    pub(crate) fn start_mapping(&mut self) -> [Option<u64>; STAGING_RING] {
+    /// One step of the readback pipeline, called every `after_submit`. A slot staged by an
+    /// earlier call starts mapping now (its copy crossed a real submit boundary since it was
+    /// staged); a slot merely written since the last call becomes staged, not mapped, this
+    /// time around (see the module docs for why). Entry i is the sequence number to map slot
+    /// i with this call (None when slot i has nothing new to map).
+    pub(crate) fn advance(&mut self) -> [Option<u64>; STAGING_RING] {
         let mut out = [None; STAGING_RING];
         for (slot, o) in self.slots.iter_mut().zip(out.iter_mut()) {
-            if let Slot::Written(seq) = *slot {
-                *slot = Slot::Mapping(seq);
-                *o = Some(seq);
+            match *slot {
+                Slot::Staged(seq) => {
+                    *slot = Slot::Mapping(seq);
+                    *o = Some(seq);
+                }
+                Slot::Written(seq) => {
+                    *slot = Slot::Staged(seq);
+                }
+                Slot::Free | Slot::Mapping(_) => {}
             }
         }
         out
@@ -848,13 +873,14 @@ impl Filter {
         Ok(())
     }
 
-    /// Call after submitting the encoder of `record`: maps the staging buffers written
-    /// since the last call. Each map callback first matches and frees its slot/sequence,
-    /// then reports the decoded coefficients to `gate`, which publishes only a current-epoch
-    /// completion newer than every earlier one. On wasm the browser drives the callbacks;
-    /// native callers poll the device.
+    /// Call after submitting the encoder of `record`: maps the staging buffers staged by an
+    /// earlier call (never the ones just written by this very frame's `record`, which only
+    /// become staged now — see the module docs). Each map callback first matches and frees
+    /// its slot/sequence, then reports the decoded coefficients to `gate`, which publishes
+    /// only a current-epoch completion newer than every earlier one. On wasm the browser
+    /// drives the callbacks; native callers poll the device.
     pub(crate) fn after_submit(&self, gate: &PublicationGate) {
-        let mapping = lock(&self.readback).start_mapping();
+        let mapping = lock(&self.readback).advance();
         for (slot, (seq, buffer)) in mapping.into_iter().zip(&self.staging).enumerate() {
             let Some(seq) = seq else {
                 continue;
@@ -939,8 +965,13 @@ mod tests {
             }
         }
 
+        /// Matures every staged-or-written slot to `Mapping` in one step, standing in for two
+        /// real `after_submit` calls separated by an actual submit (which this harness, built
+        /// around `Readback`/`PublicationGate` alone, has no encoder/queue to model). The
+        /// staging delay itself is exercised directly by the `Readback`-level tests below.
         fn mapping(&mut self) -> [Option<u64>; STAGING_RING] {
-            self.readback.start_mapping()
+            self.readback.advance();
+            self.readback.advance()
         }
 
         /// One map callback: the readback frees the slot, then the gate decides.
@@ -961,11 +992,16 @@ mod tests {
         assert!(r.take_retry());
         assert!(!r.take_retry(), "take_retry clears the flag");
         assert_eq!(
-            r.start_mapping(),
-            [Some(1), Some(2), Some(3)],
-            "slots carry increasing sequence numbers"
+            r.advance(),
+            [None; STAGING_RING],
+            "written slots are only staged on their first advance, not yet mapped"
         );
-        assert_eq!(r.start_mapping(), [None; STAGING_RING], "mapped once");
+        assert_eq!(
+            r.advance(),
+            [Some(1), Some(2), Some(3)],
+            "staged slots map on the next advance, carrying increasing sequence numbers"
+        );
+        assert_eq!(r.advance(), [None; STAGING_RING], "mapped once");
         assert_eq!(r.reserve(tag(4)), None, "mapping slots stay busy");
         assert_eq!(
             r.complete(1, 2, Some(uniform_sh(2.0))),
@@ -979,7 +1015,34 @@ mod tests {
             Some((1, 4)),
             "a completed slot is free again"
         );
-        assert_eq!(r.start_mapping(), [None, Some(4), None]);
+        assert_eq!(
+            r.advance(),
+            [None; STAGING_RING],
+            "the fresh write is only staged"
+        );
+        assert_eq!(r.advance(), [None, Some(4), None]);
+    }
+
+    /// Regression for the uncaptured `GPUValidationError` ("used in submit while pending
+    /// map") observed on the SH staging buffer: a caller that runs `prepare` (and so
+    /// `after_submit`/`advance`) twice before it actually submits once — e.g. a capture path
+    /// that records the frame graph a second time into an offscreen target before submitting
+    /// both command buffers together — must never see `advance` ask it to `map_async` a slot
+    /// whose writing copy is still sitting in one of those not-yet-submitted command buffers.
+    #[test]
+    fn a_slot_written_just_before_a_second_advance_is_not_mapped_until_a_third() {
+        let mut r = Readback::new();
+        // `record` (reserve) happens between the frame graph's first and second `prepare`.
+        assert_eq!(r.reserve(tag(1)), Some((0, 1)));
+        // Second `prepare` of the same not-yet-submitted batch: must not map slot 0 yet.
+        assert_eq!(
+            r.advance(),
+            [None; STAGING_RING],
+            "the copy has not crossed a real submit boundary yet"
+        );
+        // The caller's single `queue.submit` call now actually sends that copy to the GPU.
+        // Only the next logical frame's `prepare` may map it.
+        assert_eq!(r.advance(), [Some(1), None, None]);
     }
 
     #[test]
@@ -988,7 +1051,8 @@ mod tests {
         for generation in 1..=3 {
             r.reserve(tag(generation));
         }
-        r.start_mapping();
+        r.advance(); // stages the fresh writes
+        r.advance(); // matures them to mapping
         assert_eq!(
             r.complete(1, 2, Some(uniform_sh(2.0))),
             Completion::Accepted {
@@ -1006,7 +1070,7 @@ mod tests {
             Completion::Failed(tag(3)),
             "a failed map frees the slot without a value"
         );
-        assert_eq!(r.start_mapping(), [None; STAGING_RING]);
+        assert_eq!(r.advance(), [None; STAGING_RING]);
         assert_eq!(
             r.reserve(tag(4)),
             Some((0, 4)),
@@ -1299,6 +1363,19 @@ mod tests {
             "the recorded request is pending"
         );
         gpu.queue().submit([encoder.finish()]);
+        // The first `after_submit` only stages the slot this `record` just wrote (see the
+        // module docs: mapping it here, on the very next call, is exactly the pattern that
+        // caused the `used in submit while pending map` validation error on a caller that
+        // runs `prepare` twice before one submit). It maps on the call after that.
+        filter.after_submit(&gate);
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        assert_eq!(
+            gate.snapshot(),
+            snapshot(1, None, true),
+            "staged, not mapped yet"
+        );
         filter.after_submit(&gate);
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())

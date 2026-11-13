@@ -486,6 +486,28 @@ impl SkyHandle {
         }
     }
 
+    /// A device-free handle (no backend, no atmosphere) for the cloud lifecycle tests.
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> SkyHandle {
+        SkyHandle {
+            state: SkyState::shared(),
+            ibl: None,
+            cloud: None,
+            atmosphere: None,
+        }
+    }
+
+    /// The cloud frame the backend would see for the active view at `invocation`.
+    #[cfg(test)]
+    pub(crate) fn cloud_frame_for_tests(
+        &self,
+        invocation: u64,
+        size: (u32, u32),
+    ) -> crate::cloud_backend::CloudFrame {
+        let s = self.state.borrow();
+        crate::cloud_backend::cloud_frame(&s, invocation, 0, size, 0.0).expect("prepared view")
+    }
+
     /// The exact typed lifecycle observation; reading it changes no clock, resource or
     /// authored setting.
     pub fn diagnostics(&self) -> SkyDiagnostics {
@@ -504,7 +526,13 @@ impl SkyHandle {
                     .cloud_views(slot.view)
                     .map(|views| (views.screen_valid, views.panorama_valid))
                     .unwrap_or((false, false));
-                slot.diagnostics(screen, panorama)
+                let cloud = self
+                    .cloud
+                    .as_ref()
+                    .and_then(|cloud| cloud.try_borrow().ok())
+                    .map(|backend| backend.accumulation_observation(slot.view))
+                    .unwrap_or_default();
+                slot.diagnostics(screen, panorama, cloud)
             })
         });
         let mut readiness = state.readiness.clone();
