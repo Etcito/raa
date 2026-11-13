@@ -8,11 +8,15 @@
 mod m29;
 
 use m29::{
-    MESH_EMPTY, MESH_TOO_LARGE, MESH_VERTEX_COLORS, OptionsPatch, VG_INVALID, bake_input,
-    build_options, check_budget_ms, cluster_error, stage_name, vg_code,
+    ClusterReport, MESH_EMPTY, MESH_TOO_LARGE, MESH_VERTEX_COLORS, OptionsPatch, SectionWire,
+    VG_INVALID, bake_input, build_options, check_budget_ms, cluster_error, cluster_report,
+    section_from_wire, stage_name, vg_code,
 };
 use raa_cluster::error::{EMPTY, INVALID_MESH, TOO_LARGE};
-use raa_cluster::{BakeStage, BuildOptions, ClusterError};
+use raa_cluster::{
+    BakeStage, BuildOptions, ClusterError, ClusterMesh, ClusterSource, ClusterState, ClusterStore,
+    MeshClusterStatus, OwnedClusterInput,
+};
 use raa_core::RaaError;
 
 /// The code and the message of a refusal; any other error variant fails the test.
@@ -184,4 +188,198 @@ fn stage_names_are_the_six_s31_strings() {
     for (stage, name) in names {
         assert_eq!(stage_name(stage), name);
     }
+}
+
+/// A baked displaced sphere with its section arrays, as the JS side holds them.
+struct Baked {
+    mesh: ClusterMesh,
+    vertices: Vec<u16>,
+    clusters: Vec<u8>,
+    nodes: Vec<u8>,
+}
+
+fn baked(subdivisions: u32) -> Baked {
+    let input = OwnedClusterInput::displaced_sphere(subdivisions);
+    let mesh = raa_cluster::bake(input.as_input(), &BuildOptions::default()).unwrap();
+    let (clusters, nodes) = mesh.to_section_bytes();
+    let vertices = mesh.vertices.iter().flat_map(|v| v.data).collect();
+    Baked {
+        mesh,
+        vertices,
+        clusters,
+        nodes,
+    }
+}
+
+impl Baked {
+    fn wire(&self) -> SectionWire<'_> {
+        let m = &self.mesh;
+        SectionWire {
+            version: 1.0,
+            algorithm: 1.0,
+            vertices: &self.vertices,
+            triangles: &m.triangles,
+            clusters: &self.clusters,
+            nodes: &self.nodes,
+            root_node: m.root_node.into(),
+            hierarchy_depth: m.hierarchy_depth.into(),
+            levels: m.levels.into(),
+            quant_origin: m.quant_origin.map(f64::from),
+            quant_step: m.quant_step.into(),
+            uv_origin: m.uv_origin.map(f64::from),
+            uv_step: m.uv_step.map(f64::from),
+            bounds_center: m.bounds_center.map(f64::from),
+            bounds_radius: m.bounds_radius.into(),
+            source_triangles: m.source_triangles as f64,
+        }
+    }
+}
+
+/// The code and the message of a section refusal.
+fn section_refusal(w: &SectionWire<'_>, at: &str) -> (&'static str, String) {
+    let err = section_from_wire(w, at).unwrap_err();
+    let (code, message) = refusal(&err);
+    (code, message.to_string())
+}
+
+/// A refusal of `vg.invalid` whose message starts with the prefixed field name.
+fn assert_refused(w: &SectionWire<'_>, at: &str, field: &str) {
+    let (code, message) = section_refusal(w, at);
+    assert_eq!(code, VG_INVALID, "{field}");
+    assert!(
+        message.starts_with(&format!("{at}{field}: ")),
+        "{at}{field}: {message}"
+    );
+}
+
+#[test]
+fn a_baked_section_converts_back_to_an_equal_mesh() {
+    let b = baked(2);
+    assert_eq!(section_from_wire(&b.wire(), "").unwrap(), b.mesh);
+}
+
+#[test]
+fn each_wire_rule_refuses_with_its_field_named() {
+    let b = baked(2);
+    let mut w = b.wire();
+    w.version = 2.0;
+    assert_refused(&w, "", "version");
+    assert_refused(&w, "sections[1].", "version");
+
+    let mut w = b.wire();
+    w.triangles = &[];
+    assert_refused(&w, "sections[1].", "triangles");
+
+    let mut w = b.wire();
+    w.clusters = &b.clusters[..47];
+    assert_refused(&w, "", "clusters");
+    assert_refused(&w, "sections[1].", "clusters");
+
+    let mut w = b.wire();
+    w.root_node = 1e9;
+    assert_refused(&w, "", "rootNode");
+    assert_refused(&w, "sections[1].", "rootNode");
+
+    let mut w = b.wire();
+    w.levels = 0.0;
+    assert_refused(&w, "", "levels");
+    assert_refused(&w, "sections[1].", "levels");
+
+    let mut w = b.wire();
+    w.quant_step = f64::NAN;
+    assert_refused(&w, "", "quantStep");
+    assert_refused(&w, "sections[1].", "quantStep");
+
+    let mut w = b.wire();
+    w.bounds_radius = -1.0;
+    assert_refused(&w, "", "boundsRadius");
+    assert_refused(&w, "sections[1].", "boundsRadius");
+
+    // The complete validation: an index of 255 is outside every cluster (at most 255 vertices).
+    let mut triangles = b.mesh.triangles.clone();
+    triangles[0] |= 0xff;
+    let mut w = b.wire();
+    w.triangles = &triangles;
+    let (code, message) = section_refusal(&w, "sections[1].");
+    assert_eq!(code, VG_INVALID);
+    assert!(
+        message.starts_with("sections[1].clusters[") && message.contains(".triangle["),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_report_names_each_store_state() {
+    let empty = ClusterStore::new();
+    let none = cluster_report(&empty.state(1), empty.sections(1));
+    assert_eq!(
+        none,
+        ClusterReport {
+            state: "none",
+            progress: 0.0,
+            source: None,
+            code: None,
+            message: None,
+            sections: 0,
+            clusters: 0,
+            source_triangles: 0,
+            levels: 0,
+        }
+    );
+
+    let baking = MeshClusterStatus {
+        state: ClusterState::Baking,
+        progress: 0.25,
+        source: Some(ClusterSource::Runtime),
+        code: None,
+        message: None,
+    };
+    let r = cluster_report(&baking, None);
+    assert_eq!(
+        (r.state, r.progress, r.source),
+        ("baking", 0.25, Some("runtime"))
+    );
+    assert_eq!((r.sections, r.clusters, r.levels), (0, 0, 0));
+
+    let mut store = ClusterStore::new();
+    let sections = vec![baked(2).mesh, baked(1).mesh];
+    let clusters: u32 = sections.iter().map(|s| s.clusters.len() as u32).sum();
+    let triangles: u64 = sections.iter().map(|s| s.source_triangles).sum();
+    let levels = sections.iter().map(|s| s.levels).max().unwrap();
+    store.attach(2, sections);
+    let r = cluster_report(&store.state(2), store.sections(2));
+    assert_eq!(
+        (r.state, r.source, r.sections),
+        ("ready", Some("attached"), 2)
+    );
+    assert_eq!(
+        (r.clusters, r.source_triangles, r.levels),
+        (clusters, triangles, levels)
+    );
+
+    store
+        .start_bake(
+            3,
+            vec![OwnedClusterInput::single_triangle()],
+            &BuildOptions::default(),
+        )
+        .unwrap();
+    store.step_all(&mut || true);
+    let r = cluster_report(&store.state(3), store.sections(3));
+    assert_eq!(
+        (r.state, r.source, r.sections),
+        ("ready", Some("runtime"), 1)
+    );
+
+    store.refuse(4, EMPTY, "no triangle survives quantisation".to_string());
+    let r = cluster_report(&store.state(4), store.sections(4));
+    assert_eq!(
+        (r.state, r.code, r.message.as_deref(), r.source),
+        (
+            "refused",
+            Some(MESH_EMPTY),
+            Some("no triangle survives quantisation"),
+            None
+        )
+    );
 }

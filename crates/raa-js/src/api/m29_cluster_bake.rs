@@ -1,5 +1,6 @@
-//! m29 cluster bake, share 1: the pure helpers of the cluster-bake API (S31) and the wasm32
-//! runtime of the shared cluster store (`install`, `frame`).
+//! m29 cluster bake, shares 1 and 2: the pure helpers of the cluster-bake API (S31), the section
+//! wire validation (S30) and the state report, and the wasm32 runtime of the shared cluster store
+//! (`install`, `frame`).
 //!
 //! The helpers are plain Rust, so `tests/cluster_bake.rs` includes this file and exercises
 //! them natively: the refusal codes (`vg.invalid`, `vg.mesh_empty`, `vg.mesh_too_large`,
@@ -16,7 +17,10 @@
 #![allow(dead_code)]
 
 use raa_cluster::error::{EMPTY, TOO_LARGE};
-use raa_cluster::{BakeStage, BuildOptions, ClusterError, OwnedClusterInput};
+use raa_cluster::{
+    BakeStage, BuildOptions, ClusterError, ClusterMesh, ClusterSource, ClusterState,
+    MeshClusterStatus, OwnedClusterInput, PACKED_CLUSTER_SIZE, PACKED_NODE_SIZE, SectionHeader,
+};
 use raa_core::RaaError;
 use raa_geom::MeshData;
 
@@ -226,6 +230,189 @@ pub(crate) fn stage_name(stage: BakeStage) -> &'static str {
         BakeStage::Pack => "pack",
         BakeStage::Done => "done",
     }
+}
+
+/// The saved-mesh cluster section as the JS conversion reads it (S30): the arrays as they are and
+/// every number as f64. `version` and `algorithm` are the S30 literals 1.
+pub(crate) struct SectionWire<'a> {
+    pub version: f64,
+    pub algorithm: f64,
+    pub vertices: &'a [u16],
+    pub triangles: &'a [u32],
+    pub clusters: &'a [u8],
+    pub nodes: &'a [u8],
+    pub root_node: f64,
+    pub hierarchy_depth: f64,
+    pub levels: f64,
+    pub quant_origin: [f64; 3],
+    pub quant_step: f64,
+    pub uv_origin: [f64; 2],
+    pub uv_step: [f64; 2],
+    pub bounds_center: [f64; 3],
+    pub bounds_radius: f64,
+    pub source_triangles: f64,
+}
+
+/// A refusal of one section field: `vg.invalid` naming `<at><field>`.
+fn wire_refusal(at: &str, field: &str, reason: &str) -> RaaError {
+    vg_invalid(&format!("{at}{field}"), reason)
+}
+
+/// A whole number in the inclusive range, returned as u64 (the caller narrows it to its type).
+fn whole(at: &str, field: &str, value: f64, (min, max): (f64, f64)) -> Result<u64, RaaError> {
+    if value.is_finite() && value.fract() == 0.0 && (min..=max).contains(&value) {
+        Ok(value as u64)
+    } else {
+        let reason = format!("must be an integer in {min}..={max}, got {value}");
+        Err(wire_refusal(at, field, &reason))
+    }
+}
+
+/// Every value stays finite when narrowed to f32, the precision the section carries.
+fn finite32(values: &[f64]) -> bool {
+    values.iter().all(|&v| (v as f32).is_finite())
+}
+
+/// The S30 wire rules on the version, the array lengths and the scalars, then the complete
+/// `ClusterMesh::from_section_parts` validation. Every refusal is `vg.invalid` with the field
+/// named as `<at><camelCase field or ClusterError path>`; `at` is empty or `sections[i].`.
+pub(crate) fn section_from_wire(w: &SectionWire<'_>, at: &str) -> Result<ClusterMesh, RaaError> {
+    if w.version != 1.0 {
+        return Err(wire_refusal(at, "version", "must be 1"));
+    }
+    if w.algorithm != 1.0 {
+        return Err(wire_refusal(at, "algorithm", "must be 1"));
+    }
+    if w.vertices.is_empty() || !w.vertices.len().is_multiple_of(8) {
+        let reason = "must be a non-empty multiple of 8 u16";
+        return Err(wire_refusal(at, "vertices", reason));
+    }
+    if w.triangles.is_empty() {
+        return Err(wire_refusal(at, "triangles", "must not be empty"));
+    }
+    if w.clusters.is_empty() || !w.clusters.len().is_multiple_of(PACKED_CLUSTER_SIZE) {
+        let reason = "must be a non-empty multiple of 48 bytes";
+        return Err(wire_refusal(at, "clusters", reason));
+    }
+    if w.nodes.is_empty() || !w.nodes.len().is_multiple_of(PACKED_NODE_SIZE) {
+        let reason = "must be a non-empty multiple of 48 bytes";
+        return Err(wire_refusal(at, "nodes", reason));
+    }
+    let node_count = (w.nodes.len() / PACKED_NODE_SIZE) as u64;
+    let root = whole(at, "rootNode", w.root_node, (0.0, u32::MAX as f64))?;
+    if root >= node_count {
+        let reason = format!("must be below the node count {node_count}");
+        return Err(wire_refusal(at, "rootNode", &reason));
+    }
+    let depth = whole(at, "hierarchyDepth", w.hierarchy_depth, (1.0, 64.0))?;
+    let levels = whole(at, "levels", w.levels, (1.0, 256.0))?;
+    // The largest f64 below 2^64: every whole number of f64 under 2^64 is at most this.
+    let source = whole(
+        at,
+        "sourceTriangles",
+        w.source_triangles,
+        (0.0, 18446744073709549568.0),
+    )?;
+    if !finite32(&w.quant_origin) {
+        return Err(wire_refusal(at, "quantOrigin", "must be finite"));
+    }
+    if !(finite32(&[w.quant_step]) && w.quant_step > 0.0) {
+        return Err(wire_refusal(
+            at,
+            "quantStep",
+            "must be finite and above zero",
+        ));
+    }
+    if !finite32(&w.uv_origin) {
+        return Err(wire_refusal(at, "uvOrigin", "must be finite"));
+    }
+    if !(finite32(&w.uv_step) && w.uv_step.iter().all(|&v| v >= 0.0)) {
+        return Err(wire_refusal(
+            at,
+            "uvStep",
+            "must be finite and not negative",
+        ));
+    }
+    if !finite32(&w.bounds_center) {
+        return Err(wire_refusal(at, "boundsCenter", "must be finite"));
+    }
+    if !(finite32(&[w.bounds_radius]) && w.bounds_radius >= 0.0) {
+        return Err(wire_refusal(
+            at,
+            "boundsRadius",
+            "must be finite and not negative",
+        ));
+    }
+    let header = SectionHeader {
+        root_node: root as u32,
+        hierarchy_depth: depth as u32,
+        levels: levels as u32,
+        quant_origin: w.quant_origin.map(|v| v as f32),
+        quant_step: w.quant_step as f32,
+        uv_origin: w.uv_origin.map(|v| v as f32),
+        uv_step: w.uv_step.map(|v| v as f32),
+        bounds_center: w.bounds_center.map(|v| v as f32),
+        bounds_radius: w.bounds_radius as f32,
+        source_triangles: source,
+    };
+    ClusterMesh::from_section_parts(w.vertices, w.triangles, w.clusters, w.nodes, header)
+        .map_err(|e| vg_invalid(&format!("{at}{}", e.path), e.message))
+}
+
+/// The state of one mesh as the JS `meshClusters` reports it (S31).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClusterReport {
+    pub state: &'static str,
+    pub progress: f32,
+    pub source: Option<&'static str>,
+    pub code: Option<&'static str>,
+    pub message: Option<String>,
+    pub sections: u32,
+    pub clusters: u32,
+    pub source_triangles: u64,
+    pub levels: u32,
+}
+
+/// The report of a key: the store state with its code through [`vg_code`]. The section counts
+/// (summed clusters and source triangles, the maximum of the levels) are zero unless ready.
+pub(crate) fn cluster_report(
+    status: &MeshClusterStatus,
+    sections: Option<&[ClusterMesh]>,
+) -> ClusterReport {
+    let state = match status.state {
+        ClusterState::None => "none",
+        ClusterState::Baking => "baking",
+        ClusterState::Ready => "ready",
+        ClusterState::Refused => "refused",
+    };
+    let source = status.source.map(|source| match source {
+        ClusterSource::Attached => "attached",
+        ClusterSource::Runtime => "runtime",
+    });
+    let mut report = ClusterReport {
+        state,
+        progress: status.progress,
+        source,
+        code: status.code.map(vg_code),
+        message: status.message.clone(),
+        sections: 0,
+        clusters: 0,
+        source_triangles: 0,
+        levels: 0,
+    };
+    if let (ClusterState::Ready, Some(sections)) = (status.state, sections) {
+        report.sections = sections.len() as u32;
+        for section in sections {
+            report.clusters = report
+                .clusters
+                .saturating_add(section.clusters.len() as u32);
+            report.source_triangles = report
+                .source_triangles
+                .saturating_add(section.source_triangles);
+            report.levels = report.levels.max(section.levels);
+        }
+    }
+    report
 }
 
 #[cfg(target_arch = "wasm32")]
