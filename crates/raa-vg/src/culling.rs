@@ -6,6 +6,21 @@
 use raa_core::{GpuContext, wgpu};
 use raa_math::{Mat4, Vec3, Vec4};
 
+/// S32 `pass_view.wgsl`: the WGSL twin of [`PassView`], the cull state and its read view, the
+/// instance-filter and instance-flag constants, and the scene twins (`VgInstance`, `VgNode`,
+/// `VgCluster`, `PackedVertex`, `VisibleCluster`, `QueueEntry`) with their decode helpers. It
+/// declares no binding and no entry point; the cull, raster and resolve builders concatenate
+/// it after `raa_shader::DEPTH_WGSL`.
+pub const PASS_VIEW_WGSL: &str = include_str!("wgsl/pass_view.wgsl");
+
+const CULL_CONTROL_WGSL: &str = include_str!("wgsl/cull_control.wgsl");
+
+/// The cull-control module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] + `cull_control.wgsl`,
+/// with entry points `advance`, `finish` and `begin_second_phase` at group 2.
+pub fn cull_control_module_wgsl() -> String {
+    [raa_shader::DEPTH_WGSL, PASS_VIEW_WGSL, CULL_CONTROL_WGSL].concat()
+}
+
 /// Bytes of one `PassView` record (zero padding included).
 pub const PASS_VIEW_SIZE: usize = 432;
 /// Number of view slots in [`ViewSlots`].
