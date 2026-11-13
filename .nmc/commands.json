@@ -158,5 +158,108 @@
       "p2-sky-weather-render",
       "p2-sky-weather-fresh"
     ]
+  },
+  {
+    "name": "p3-vg-build",
+    "command": "bash scripts/build-virtual-geometry.sh",
+    "timeout_s": 1800
+  },
+  {
+    "name": "p3-vg-bake-check",
+    "command": "node web/common/vg-job.mjs check --page dist/virtual-geometry --out out/virtual-geometry/bake --stage bake",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-build"
+    ]
+  },
+  {
+    "name": "p3-vg-bake-select",
+    "command": "node web/common/vg-job.mjs select --page dist/virtual-geometry --out out/virtual-geometry/bake --stage bake",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-bake-check"
+    ]
+  },
+  {
+    "name": "p3-vg-bake-clean",
+    "command": "node web/common/vg-job.mjs clean --page dist/virtual-geometry --out out/virtual-geometry/bake --stage bake",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-bake-select"
+    ]
+  },
+  {
+    "name": "p3-vg-bake-render",
+    "command": "node web/common/vg-job.mjs render --page dist/virtual-geometry --out out/virtual-geometry/bake --stage bake",
+    "timeout_s": 3000,
+    "after": [
+      "p3-vg-bake-clean"
+    ]
+  },
+  {
+    "name": "p3-vg-bake-fresh",
+    "command": "node web/common/vg-job.mjs fresh --page dist/virtual-geometry --out out/virtual-geometry/bake --stage bake",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-bake-render"
+    ]
+  },
+  {
+    "name": "p3-vg-bake-judge",
+    "command": "node web/common/vg-job.mjs judge --page dist/virtual-geometry --out out/virtual-geometry/bake --stage bake --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p3-vg-bake-render",
+      "p3-vg-bake-fresh"
+    ]
+  },
+  {
+    "name": "p3-vg-passes-check",
+    "command": "node web/common/vg-job.mjs check --page dist/virtual-geometry --out out/virtual-geometry/passes --stage passes",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-build"
+    ]
+  },
+  {
+    "name": "p3-vg-passes-select",
+    "command": "node web/common/vg-job.mjs select --page dist/virtual-geometry --out out/virtual-geometry/passes --stage passes",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-passes-check"
+    ]
+  },
+  {
+    "name": "p3-vg-passes-clean",
+    "command": "node web/common/vg-job.mjs clean --page dist/virtual-geometry --out out/virtual-geometry/passes --stage passes",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-passes-select"
+    ]
+  },
+  {
+    "name": "p3-vg-passes-render",
+    "command": "node web/common/vg-job.mjs render --page dist/virtual-geometry --out out/virtual-geometry/passes --stage passes",
+    "timeout_s": 3000,
+    "after": [
+      "p3-vg-passes-clean"
+    ]
+  },
+  {
+    "name": "p3-vg-passes-fresh",
+    "command": "node web/common/vg-job.mjs fresh --page dist/virtual-geometry --out out/virtual-geometry/passes --stage passes",
+    "timeout_s": 60,
+    "after": [
+      "p3-vg-passes-render"
+    ]
+  },
+  {
+    "name": "p3-vg-passes-judge",
+    "command": "node web/common/vg-job.mjs judge --page dist/virtual-geometry --out out/virtual-geometry/passes --stage passes --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p3-vg-passes-render",
+      "p3-vg-passes-fresh"
+    ]
   }
 ]
