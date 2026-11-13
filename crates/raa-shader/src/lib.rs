@@ -66,6 +66,13 @@ pub const PASS_TRANSPARENT_WGSL: &str = include_str!("wgsl/pass_transparent.wgsl
 /// Fur shell entry points: `vs_main` extruding the shell named by the group-2 uniform and
 /// `fs_main` writing colour and strand coverage as alpha (alpha-to-coverage).
 pub const PASS_FURSHELL_WGSL: &str = include_str!("wgsl/pass_furshell.wgsl");
+/// Virtualized-geometry G-buffer entry points: a fullscreen `vs_main` with no vertex input
+/// and `fs_main` writing the S12 `normal`, `material` and `motion` targets plus
+/// `@builtin(frag_depth)` of the resolved surface.
+pub const PASS_VG_GBUFFER_WGSL: &str = include_str!("wgsl/pass_vg_gbuffer.wgsl");
+/// Virtualized-geometry shade entry points: a fullscreen `vs_main` with no vertex input and
+/// `fs_main` writing the S11 opaque final colour and `@builtin(frag_depth)`.
+pub const PASS_VG_SHADE_WGSL: &str = include_str!("wgsl/pass_vg_shade.wgsl");
 
 /// Post-material instance tint of a composed module (S23). `InstanceExtraGpu` keeps its
 /// 128-byte layout: `mat_instance_tint_set` reads the spare lane `reserved.x` (1 after

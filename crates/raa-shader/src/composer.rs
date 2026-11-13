@@ -8,8 +8,9 @@ use crate::error::ShaderError;
 use crate::ids::{PassKind, SlotId, VariantKey};
 use crate::registry::MaterialFnRegistry;
 use crate::{
-    CLOUD_SHADOW_WGSL, LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL, PASS_FURSHELL_WGSL,
-    PASS_PREPASS_WGSL, PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL, PRELUDE_WGSL,
+    CLOUD_SHADOW_WGSL, DEPTH_WGSL, LIB_WGSL, LOCAL_LIGHTING_WGSL, PASS_FORWARD_WGSL,
+    PASS_FURSHELL_WGSL, PASS_PREPASS_WGSL, PASS_SHADOW_WGSL, PASS_TRANSPARENT_WGSL,
+    PASS_VG_GBUFFER_WGSL, PASS_VG_SHADE_WGSL, PRELUDE_WGSL, VG_SURFACE_WGSL,
 };
 
 /// Inserted after the material function when it defines no `material_vertex`.
@@ -104,7 +105,9 @@ impl Composer {
     /// sampler, the material function, a passthrough `material_vertex` when the function
     /// defines none, the winner of each slot in [`SlotId::ALL`] order, shared local lighting,
     /// then the pass entry points preceded by the variant
-    /// constants `RAA_MSAA` and `RAA_VARIANT_FLAGS`. The cloud shadow sampler consumes the
+    /// constants `RAA_MSAA` and `RAA_VARIANT_FLAGS`. A [`PassKind::VG`] kind
+    /// inserts [`DEPTH_WGSL`] and [`VG_SURFACE_WGSL`] after the local lighting and before
+    /// its pass body. The cloud shadow sampler consumes the
     /// weather declarations already in PRELUDE and is available to every provider. Refuses `shader.unknown_fn` when the
     /// registry has no function `key.material_fn` and `shader.slot_missing` when a slot has
     /// no provider. The result is not validated (see [`Composer::validate`]).
@@ -161,6 +164,10 @@ impl Composer {
             section(&mut out, &title, &p.wgsl);
         }
         section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
+        if matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
+            section(&mut out, "depth", DEPTH_WGSL);
+            section(&mut out, "vg surface", VG_SURFACE_WGSL);
+        }
         let pass = format!(
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
             key.msaa,
@@ -374,6 +381,8 @@ fn pass_wgsl(pass: PassKind) -> &'static str {
         PassKind::Shadow => PASS_SHADOW_WGSL,
         PassKind::Transparent => PASS_TRANSPARENT_WGSL,
         PassKind::FurShell => PASS_FURSHELL_WGSL,
+        PassKind::VgGbuffer => PASS_VG_GBUFFER_WGSL,
+        PassKind::VgShade => PASS_VG_SHADE_WGSL,
     }
 }
 

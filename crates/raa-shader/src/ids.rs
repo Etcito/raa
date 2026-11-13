@@ -13,10 +13,17 @@ pub enum PassKind {
     Transparent,
     /// vs extruding shells + fs with alpha-to-coverage.
     FurShell,
+    /// Fullscreen vs (no vertex input); the fs writes the S12 normal, material and motion
+    /// targets and `@builtin(frag_depth)` from the resolved virtualized surface.
+    VgGbuffer,
+    /// Fullscreen vs (no vertex input); the fs writes the S11 opaque final colour and
+    /// `@builtin(frag_depth)`.
+    VgShade,
 }
 
 impl PassKind {
-    /// Every pass kind, in declaration order.
+    /// Every mesh pass kind, in declaration order; the virtualized-geometry fullscreen
+    /// kinds are in [`PassKind::VG`].
     pub const ALL: [PassKind; 5] = [
         PassKind::Prepass,
         PassKind::Forward,
@@ -24,6 +31,9 @@ impl PassKind {
         PassKind::Transparent,
         PassKind::FurShell,
     ];
+
+    /// The virtualized-geometry pass kinds, in declaration order.
+    pub const VG: [PassKind; 2] = [PassKind::VgGbuffer, PassKind::VgShade];
 }
 
 /// Function slot a provider fills; the composed module calls the slot function by name.

@@ -60,6 +60,9 @@ pub fn entry_points(pass: PassKind, posed: bool) -> String {
         PassKind::Shadow => raa_shader::PASS_SHADOW_WGSL,
         PassKind::Transparent => raa_shader::PASS_TRANSPARENT_WGSL,
         PassKind::FurShell => raa_shader::PASS_FURSHELL_WGSL,
+        // Fullscreen virtualized-geometry passes have no vertex input to pose.
+        PassKind::VgGbuffer => raa_shader::PASS_VG_GBUFFER_WGSL,
+        PassKind::VgShade => raa_shader::PASS_VG_SHADE_WGSL,
     };
     if !posed {
         return source.into();

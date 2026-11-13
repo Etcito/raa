@@ -430,6 +430,8 @@ fn fragment_targets_follow_the_pass() {
             // Writes only the OIT storage buffers.
             PassKind::Transparent => &[],
             PassKind::Shadow => unreachable!(),
+            // compose_all iterates ALL; the VG targets live in tests/vg_variants.rs.
+            PassKind::VgGbuffer | PassKind::VgShade => unreachable!(),
         };
         assert_eq!(targets, expected, "{pass:?}");
     }
@@ -459,6 +461,8 @@ fn group_two_bindings_are_private_to_their_pass() {
             // Caster view-projection / shell index.
             PassKind::Shadow | PassKind::FurShell => &[0],
             PassKind::Prepass | PassKind::Forward => &[],
+            // compose_all iterates ALL; the VG bindings live in tests/vg_variants.rs.
+            PassKind::VgGbuffer | PassKind::VgShade => unreachable!(),
         };
         assert_eq!(group_bindings(&module, 2), expected, "{pass:?}");
         assert!(group_bindings(&module, 3).is_empty(), "{pass:?}");
