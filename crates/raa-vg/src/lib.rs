@@ -9,6 +9,7 @@ pub mod culling;
 pub mod eligibility;
 pub mod error;
 pub mod raster;
+pub mod resolve;
 pub mod scene;
 pub mod settings;
 
@@ -18,6 +19,7 @@ pub use culling::{
 };
 pub use eligibility::{InstancePath, refusal_message};
 pub use raster::{RASTER_COMMON_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl};
+pub use resolve::resolve_module_wgsl;
 pub use scene::{
     INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_MOVABLE, INSTANCE_PREVIOUS_VALID,
     InstanceRequests, MeshKeys, SectionRange, VG_INSTANCE_SIZE, VgInstanceRecord, VgScene,
