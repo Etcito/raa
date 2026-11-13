@@ -285,7 +285,10 @@ fn piece_area(triangles: &[Triangle], piece: &[u32], positions: &[Vec3]) -> f64 
 /// Keeps pieces until at least `target_triangles` remain, and enlarges them to keep the total area.
 ///
 /// Which pieces survive depends only on where they are, so the choice is the same however the
-/// pieces happen to be listed. Triangles or vertices that do not resolve are skipped.
+/// pieces happen to be listed: survivors are spread over the group (each new one is the piece
+/// farthest from those already kept), so the enlarged survivors leave no gap. A survivor keeps
+/// its own plane and orientation; see [`enlargement`]. Triangles or vertices that do not resolve
+/// are skipped.
 pub fn thin(
     triangles: &[Triangle],
     pieces: &[Vec<u32>],
@@ -293,29 +296,7 @@ pub fn thin(
     attributes: &[Attribute],
     target_triangles: usize,
 ) -> Thinned {
-    let mut order: Vec<(u64, usize)> = pieces
-        .iter()
-        .enumerate()
-        .map(|(index, piece)| {
-            (
-                placement_hash(piece_centroid(triangles, piece, positions)),
-                index,
-            )
-        })
-        .collect();
-    order.sort_unstable();
-
-    let mut kept = Vec::new();
-    let mut kept_triangles = 0;
-    for &(_, index) in &order {
-        if kept_triangles >= target_triangles {
-            break;
-        }
-        if let Some(piece) = pieces.get(index) {
-            kept.push(piece);
-            kept_triangles += piece.len();
-        }
-    }
+    let kept = spread_survivors(triangles, pieces, positions, target_triangles);
 
     let total_area: f64 = pieces
         .iter()
@@ -332,7 +313,7 @@ pub fn thin(
     };
 
     let mut out = Thinned {
-        triangles: Vec::with_capacity(kept_triangles),
+        triangles: Vec::with_capacity(kept.iter().map(|p| p.len()).sum()),
         positions: Vec::new(),
         error: 0.0,
     };
@@ -381,6 +362,56 @@ pub fn thin(
     out
 }
 
+/// The pieces to keep, in the order they were chosen: the first is the one whose placement hash
+/// is smallest, every next one the piece farthest from all kept ones (ties by placement hash,
+/// then list position), until the kept pieces hold at least `target_triangles` triangles.
+fn spread_survivors<'a>(
+    triangles: &[Triangle],
+    pieces: &'a [Vec<u32>],
+    positions: &[Vec3],
+    target_triangles: usize,
+) -> Vec<&'a Vec<u32>> {
+    let centers: Vec<Vec3> = pieces
+        .iter()
+        .map(|piece| piece_centroid(triangles, piece, positions))
+        .collect();
+    let hashes: Vec<u64> = centers.iter().map(|&c| placement_hash(c)).collect();
+    // Squared distance to the nearest kept piece; infinite until the first piece is kept.
+    let mut nearest = vec![f64::INFINITY; pieces.len()];
+    let mut taken = vec![false; pieces.len()];
+    let mut kept = Vec::new();
+    let mut kept_triangles = 0;
+    while kept_triangles < target_triangles {
+        let mut best: Option<usize> = None;
+        for index in 0..pieces.len() {
+            if taken.get(index) != Some(&false) {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some(b) => {
+                    let (d, db) = (nearest[index], nearest[b]);
+                    d > db || (d == db && (hashes[index], index) < (hashes[b], b))
+                }
+            };
+            if better {
+                best = Some(index);
+            }
+        }
+        let Some(chosen) = best else { break };
+        taken[chosen] = true;
+        kept.push(&pieces[chosen]);
+        kept_triangles += pieces[chosen].len();
+        let at = DVec3::from_vec3(centers[chosen]);
+        for (index, near) in nearest.iter_mut().enumerate() {
+            if !taken[index] {
+                *near = near.min(DVec3::from_vec3(centers[index]).distance_squared(at));
+            }
+        }
+    }
+    kept
+}
+
 /// How to move a piece's vertices so its area grows by `growth`.
 fn enlargement(
     triangles: &[Triangle],
@@ -397,10 +428,46 @@ fn enlargement(
     } = shape(triangles, piece, positions, points);
     let widen = growth.min((length / width).max(1.0));
     let scale = (growth / widen).sqrt();
+    let anchor = anchor(triangles, piece, positions, points, center);
 
+    // A scaling about `anchor` inside the piece's own plane: the plane, so the orientation, is
+    // kept, and the piece grows away from its anchor.
     move |p: DVec3| {
-        let d = p - center;
-        center + (d + across * (d.dot(across) * (widen - 1.0))) * scale
+        let d = p - anchor;
+        anchor + (d + across * (d.dot(across) * (widen - 1.0))) * scale
+    }
+}
+
+/// The point a piece grows from: the middle of its lowest edge (along +Y) when the piece stands
+/// upright, so an enlarged blade stays rooted where it was, and its centre otherwise. Always a
+/// point of the piece's plane.
+fn anchor(
+    triangles: &[Triangle],
+    piece: &[u32],
+    positions: &[Vec3],
+    points: &[DVec3],
+    center: DVec3,
+) -> DVec3 {
+    let mut normal = DVec3::ZERO;
+    for &t in piece {
+        if let Some([a, b, c]) = triangle_corners(triangles, positions, t) {
+            normal += (b - a).cross(c - a);
+        }
+    }
+    let normal = normal.normalize_or_zero();
+    let up = DVec3::new(0.0, 1.0, 0.0);
+    if normal.dot(up).abs() > 0.5 {
+        return center;
+    }
+    let in_plane = (up - normal * normal.dot(up)).normalize_or_zero();
+    let lowest = points
+        .iter()
+        .map(|&p| (p - center).dot(in_plane))
+        .fold(f64::MAX, f64::min);
+    if lowest.is_finite() && lowest < f64::MAX {
+        center + in_plane * lowest
+    } else {
+        center
     }
 }
 

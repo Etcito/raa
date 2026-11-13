@@ -39,7 +39,7 @@ const variants = [
   variant('finest', { camera: camera([0, 0, 4], [0, 0, 0]), subjects: [{ name: 'sphere', ...box([-1.06, -1.06, -1.06], SPHERE) }] }),
   variant('three-cuts', { camera: camera([0, 0, 6.5], [0, 0, 0]), subjects: [copy('left-copy', -2.6), copy('middle-copy', 0), copy('right-copy', 2.6)] }),
   variant('foliage', {
-    camera: camera([0, 7, 8], [0, 0, 0], 50),
+    camera: camera([0, 3.4, 9.5], [0, .15, 0], 50),
     subjects: [{ name: 'left-patch', ...box([-4.5, 0, -2], [-.5, .25, 2]) }, { name: 'right-patch', ...box([.5, 0, -2], [4.5, .25, 2]) }],
   }),
   variant('sliced', { camera: camera([0, 0, 4], [0, 0, 0]), subjects: [{ name: 'sphere', ...box([-1.06, -1.06, -1.06], SPHERE) }] }),
@@ -82,7 +82,9 @@ const COPIES = {
     ['coarse-middle', smallestErrorAtLevel(section, Math.ceil(section.levels / 3)), 0],
     ['coarse-right', smallestErrorAtLevel(section, Math.ceil((2 * section.levels) / 3)), 2.6],
   ],
-  foliage: (section) => [['finest', 0, -2.5], ['coarse', smallestErrorAtLevel(section, Math.ceil(section.levels / 2)), 2.5]],
+  // The thinned copy is the level a third of the way up the DAG: a quarter of the blades, each
+  // widened about its base and still upright, so the right patch keeps its footprint covered.
+  foliage: (section) => [['finest', 0, -2.5], ['thinned', smallestErrorAtLevel(section, Math.ceil(section.levels / 3)), 2.5]],
 };
 
 function buildSliced(engine, lib, material, state) {
@@ -176,8 +178,14 @@ export default {
     const foliage = selected.id === 'foliage';
     state.section = lib.bakeSection(foliage ? 'foliage-patch' : 'high-poly', foliage ? lib.content.foliagePatch() : lib.content.highPolyMesh());
     // Each copy is a cut preview: the module's uniform cut with one colour per cluster (S33).
+    // The foliage patches are drawn in the white matte material the inventory holds constant, so
+    // their preview colours are dropped; every other row shows the clusters as colour patches.
+    const preview = (errorMetres) => {
+      const { colors, ...plain } = lib.cutPreviewMesh(lib.raa, state.section, errorMetres);
+      return foliage ? plain : { ...plain, colors };
+    };
     state.meshes = COPIES[selected.id](state.section).map(([name, errorMetres, x]) => ({
-      ...draw(engine, name, lib.cutPreviewMesh(lib.raa, state.section, errorMetres), material, x), errorMetres,
+      ...draw(engine, name, preview(errorMetres), material, x), errorMetres,
     }));
     return state;
   },

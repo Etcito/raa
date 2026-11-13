@@ -464,3 +464,139 @@ fn seam_mesh_cuts_are_closed_on_the_grid() {
         }
     }
 }
+
+/// The geometric unit normals of a decoded cut's triangles; degenerate triangles are skipped.
+fn cut_normals(mesh: &ClusterMesh, error_m: f32) -> Vec<[f64; 3]> {
+    let cut = cut_triangles(mesh, &select_cut(mesh, error_m));
+    let mut normals = Vec::new();
+    for triangle in cut.indices.chunks_exact(3) {
+        let corner = |i: usize| triangle.get(i).and_then(|&v| cut.positions.get(v as usize));
+        let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+            continue;
+        };
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]].map(f64::from);
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]].map(f64::from);
+        let n = [
+            u[1] * v[2] - u[2] * v[1],
+            u[2] * v[0] - u[0] * v[2],
+            u[0] * v[1] - u[1] * v[0],
+        ];
+        let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if length > 1.0e-12 {
+            normals.push(n.map(|x| x / length));
+        }
+    }
+    normals
+}
+
+/// How far a normal leans from the horizontal plane, in degrees: 0 for an upright blade's face.
+fn tilt_degrees(normal: [f64; 3]) -> f64 {
+    normal[1].abs().clamp(0.0, 1.0).asin().to_degrees()
+}
+
+/// The cells of a `cells` x `cells` grid over the square `[-half, half]` in x and z that the
+/// triangles of the cut touch when seen from above (an upright blade is a line there).
+fn covered_cells(
+    mesh: &ClusterMesh,
+    error_m: f32,
+    half: f64,
+    cells: usize,
+) -> BTreeSet<(usize, usize)> {
+    const STEPS: usize = 24;
+    let cut = cut_triangles(mesh, &select_cut(mesh, error_m));
+    let cell = |value: f64| -> Option<usize> {
+        let at = ((value + half) / (2.0 * half) * cells as f64).floor();
+        (at >= 0.0 && at < cells as f64).then_some(at as usize)
+    };
+    let mut covered = BTreeSet::new();
+    for triangle in cut.indices.chunks_exact(3) {
+        let corner = |i: usize| triangle.get(i).and_then(|&v| cut.positions.get(v as usize));
+        let (Some(a), Some(b), Some(c)) = (corner(0), corner(1), corner(2)) else {
+            continue;
+        };
+        for i in 0..=STEPS {
+            for j in 0..=(STEPS - i) {
+                let (s, t) = (i as f64 / STEPS as f64, j as f64 / STEPS as f64);
+                let at = |axis: usize| {
+                    f64::from(a[axis]) * (1.0 - s - t)
+                        + f64::from(b[axis]) * s
+                        + f64::from(c[axis]) * t
+                };
+                if let (Some(x), Some(z)) = (cell(at(0)), cell(at(2))) {
+                    covered.insert((x, z));
+                }
+            }
+        }
+    }
+    covered
+}
+
+#[test]
+fn thinned_foliage_stays_upright_and_covers_the_patch_footprint() {
+    // 4096 blades on a 0.05 * 64 = 3.2 m square centred at the origin.
+    let input = OwnedClusterInput::foliage_patch(4096);
+    let half = 1.6;
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the foliage bakes");
+    mesh.validate()
+        .unwrap_or_else(|error| panic!("the foliage bake fails validation: {error}"));
+    let levels = level_errors(&mesh);
+    assert!(
+        levels.len() >= 4,
+        "only {} DAG levels above 0",
+        levels.len()
+    );
+    // The thinned levels the page shows: a third and a half of the way up the DAG, each on a
+    // grid as fine as that level can still cover.
+    let third = levels
+        .get(levels.len().div_ceil(3) - 1)
+        .copied()
+        .expect("a third level");
+    let middle = levels
+        .get(levels.len().div_ceil(2) - 1)
+        .copied()
+        .expect("a middle level");
+
+    let finest_normals = cut_normals(&mesh, 0.0);
+    let finest_tilt = finest_normals
+        .iter()
+        .copied()
+        .map(tilt_degrees)
+        .fold(0.0, f64::max);
+    for error in [third, middle] {
+        let normals = cut_normals(&mesh, error);
+        assert!(
+            normals.len() < finest_normals.len(),
+            "the level at error {error} has {} triangles, the finest {}",
+            normals.len(),
+            finest_normals.len()
+        );
+        // The quantisation grid moves a normal by well under a degree; a re-oriented blade by far
+        // more.
+        let tilt = normals
+            .iter()
+            .copied()
+            .map(tilt_degrees)
+            .fold(0.0, f64::max);
+        assert!(
+            tilt <= finest_tilt + 2.0,
+            "blades at error {error} lean up to {tilt} degrees, the finest ones {finest_tilt}"
+        );
+    }
+
+    for (error, cells) in [(third, 16), (middle, 12)] {
+        let finest_cells = covered_cells(&mesh, 0.0, half, cells);
+        assert_eq!(
+            finest_cells.len(),
+            cells * cells,
+            "the finest level leaves cells of a {cells} x {cells} grid uncovered"
+        );
+        let thinned_cells = covered_cells(&mesh, error, half, cells);
+        let empty: Vec<_> = finest_cells.difference(&thinned_cells).collect();
+        assert!(
+            empty.is_empty(),
+            "the level at error {error} leaves {} of {} cells of a {cells} x {cells} grid empty: {empty:?}",
+            empty.len(),
+            finest_cells.len()
+        );
+    }
+}
