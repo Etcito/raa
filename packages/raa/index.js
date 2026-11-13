@@ -1,6 +1,7 @@
 // @etcito/raa entry point. The engine itself is the wasm-bindgen output of the raa-js
 // crate in ./pkg/ (built by scripts/build-package.sh). Types live in index.d.ts.
 import init, { Engine } from './pkg/raa_js.js';
+import * as glue from './pkg/raa_js.js';
 
 // Pure weather text parsing/formatting (no Engine, GPU or service); declared in types/m08-sky-ibl.d.ts.
 export { parseWeatherText, formatWeatherText } from './sky-weather.js';
@@ -35,12 +36,13 @@ let ready = null;
  * forgotten so a later call can try again. Each call returns a new, independent, frozen
  * RaaModule object.
  *
- * @param {{ wasmUrl?: string | URL }} [options]
+ * @param {{ wasm?: BufferSource | WebAssembly.Module, wasmUrl?: string | URL }} [options]
  * @returns {Promise<import('./index.d.ts').RaaModule>}
  */
 export async function loadRaa(options = {}) {
   ready ??= init({
-    module_or_path: options.wasmUrl ?? new URL('./pkg/raa_js_bg.wasm', import.meta.url),
+    module_or_path:
+      options.wasm ?? options.wasmUrl ?? new URL('./pkg/raa_js_bg.wasm', import.meta.url),
   }).catch((error) => {
     ready = null;
     throw error;
@@ -49,5 +51,46 @@ export async function loadRaa(options = {}) {
   return Object.freeze({
     version: VERSION,
     createEngine: (canvas, opts) => Engine.create(canvas, opts ?? {}),
+    bakeClusters: (input) => glue.bakeClusters(input),
+    createClusterBake: (input) => clusterBake(input),
+    validateClusters: (section) => glue.validateClusters(section),
+    clusterCutMesh: (section, errorMetres) => glue.clusterCutMesh(section, errorMetres),
   });
+}
+
+/** A freed bake refuses every call (S31): `vg.invalid` naming `bake`. */
+function freedError() {
+  const error = new Error('bake: the bake was freed');
+  error.name = 'RaaError';
+  error.code = 'vg.invalid';
+  return error;
+}
+
+// The wasm class is looked up when the bake is created, not when index.js is imported: the
+// load-once test replaces the glue with a stub that has no cluster exports.
+function clusterBake(input) {
+  const bake = new glue.ClusterBake(input);
+  let freed = false;
+  const live = () => {
+    if (freed) throw freedError();
+  };
+  return {
+    step: (budgetMs) => {
+      live();
+      return bake.step(budgetMs);
+    },
+    progress: () => {
+      live();
+      return bake.progress();
+    },
+    result: () => {
+      live();
+      return bake.result();
+    },
+    free: () => {
+      if (freed) return;
+      freed = true;
+      bake.free();
+    },
+  };
 }
