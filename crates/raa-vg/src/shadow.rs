@@ -46,9 +46,10 @@ fn slice_planes(camera: &Camera, near: f32, far: f32) -> [raa_math::Vec4; 6] {
 /// - sends small clusters to the software rasteriser exactly when `settings.software_raster`
 ///   is on (`allow_software` 1 else 0).
 ///
-/// The caller passes a camera whose `aspect` was set with `Camera::set_viewport`; the viewport
-/// height of the eye LOD scale is the cascade resolution, the only pixel size this function is
-/// given, and the projection is the camera's own at that aspect.
+/// The caller passes a camera whose `aspect` was set with `Camera::set_viewport`; `viewport_height`
+/// is the pixel height of the main view's viewport, and the eye LOD scale is
+/// `0.5 * viewport_height * camera.projection().cols[1][1]`, the same expression the main-view
+/// `PassView` uses, so every cascade selects the same cluster LOD as the main view.
 ///
 /// Handoff: `cascade_views`, `CascadeWork` and `record_cascades`
 /// (crates/raa-vg/src/shadow.rs) are exposed to card 'raa-vg: cascade integration into
@@ -65,6 +66,7 @@ fn slice_planes(camera: &Camera, near: f32, far: f32) -> [raa_math::Vec4; 6] {
 pub fn cascade_views(
     targets: &CascadeTargets,
     camera: &Camera,
+    viewport_height: f32,
     settings: &VgSettings,
 ) -> [Option<PassView>; 4] {
     let mut views = [None; 4];
@@ -74,7 +76,7 @@ pub fn cascade_views(
     let projection = camera.projection();
     let light = -targets.sun_dir;
     let resolution = targets.resolution as f32;
-    let eye_lod_scale = 0.5 * resolution * projection.cols[1][1];
+    let eye_lod_scale = 0.5 * viewport_height * projection.cols[1][1];
     let allow_software = u32::from(settings.software_raster);
     let count = (targets.count as usize).min(CASCADES);
     for (index, view) in views.iter_mut().enumerate().take(count) {

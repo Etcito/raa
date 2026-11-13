@@ -411,7 +411,7 @@ impl FeaturePass for VgCullPass {
                 .as_ref()
                 .and_then(|shadow| shadow.cascade_targets())
         {
-            let views = cascade_views(&targets, &state.camera, &state.settings);
+            let views = cascade_views(&targets, &state.camera, size.1 as f32, &state.settings);
             let resolution = targets.resolution;
             let stamps = {
                 let Some(pipelines) = state.pipelines.as_ref() else {

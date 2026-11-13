@@ -848,8 +848,9 @@ fn cascade_views_are_orthographic_and_keep_the_eye_and_sun() {
     };
     let settings = VgSettings::default();
 
-    let views = cascade_views(&targets, &camera, &settings);
+    let views = cascade_views(&targets, &camera, 720.0, &settings);
     let light = -sun_dir;
+    let expected_eye_lod_scale = 0.5 * 720.0 * camera.projection().cols[1][1];
     for (index, view) in views.iter().enumerate() {
         let view = view.unwrap_or_else(|| panic!("cascade {index} has a view"));
         assert_eq!(view.is_ortho, 1, "cascade {index} is orthographic");
@@ -878,6 +879,10 @@ fn cascade_views_are_orthographic_and_keep_the_eye_and_sun() {
             view.raster_view_proj, targets.view_proj[index],
             "cascade {index} draws with its own matrix"
         );
+        assert_eq!(
+            view.eye_lod_scale, expected_eye_lod_scale,
+            "cascade {index} uses the main viewport height for its eye LOD scale"
+        );
     }
 
     let no_shadows = VgSettings {
@@ -885,7 +890,7 @@ fn cascade_views_are_orthographic_and_keep_the_eye_and_sun() {
         ..settings
     };
     assert!(
-        cascade_views(&targets, &camera, &no_shadows)
+        cascade_views(&targets, &camera, 720.0, &no_shadows)
             .iter()
             .all(Option::is_none),
         "settings.shadows false builds no cascade view"
@@ -895,7 +900,7 @@ fn cascade_views_are_orthographic_and_keep_the_eye_and_sun() {
         software_raster: false,
         ..settings
     };
-    for (index, view) in cascade_views(&targets, &camera, &hardware_only)
+    for (index, view) in cascade_views(&targets, &camera, 720.0, &hardware_only)
         .iter()
         .enumerate()
     {
