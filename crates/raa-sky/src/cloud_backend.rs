@@ -311,9 +311,8 @@ fn accumulation_state(state: &SkyState) -> (bool, u64) {
     let weather = &state.weather;
     let time = &state.time.state.settings;
     let time_plays = time.enabled && time.playing && time.speed != 0.0;
-    let weather_changes = weather.settings.changing
-        || weather.cycle.is_some()
-        || weather.current != weather.target;
+    let weather_changes =
+        weather.settings.changing || weather.cycle.is_some() || weather.current != weather.target;
     let [east, south] = weather.current.wind_velocity();
     let animated = time_plays
         || weather_changes

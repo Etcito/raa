@@ -676,7 +676,11 @@ mod tests {
             hours: 9.0,
         };
         playback.evaluate();
-        let before = (playback.last_light, playback.state.sky, playback.state.dominant);
+        let before = (
+            playback.last_light,
+            playback.state.sky,
+            playback.state.dominant,
+        );
         for azimuth in [0.3_f32, 1.1, 2.9] {
             let turned = DirectionalLight {
                 direction: Vec3::new(azimuth.cos(), -0.8, azimuth.sin()).normalize_or_zero(),
@@ -684,7 +688,11 @@ mod tests {
             };
             assert!(!playback.apply_manual(turned), "azimuth {azimuth}");
             assert_eq!(
-                (playback.last_light, playback.state.sky, playback.state.dominant),
+                (
+                    playback.last_light,
+                    playback.state.sky,
+                    playback.state.dominant
+                ),
                 before
             );
         }

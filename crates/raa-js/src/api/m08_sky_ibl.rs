@@ -1317,12 +1317,20 @@ mod web {
         set(&cloud, "count", &JsValue::from(v.cloud_count));
         set(&cloud, "animated", &JsValue::from_bool(v.cloud_animated));
         set(&cloud, "frozen", &JsValue::from_bool(v.cloud_frozen));
-        set(&cloud, "historyUsed", &JsValue::from_bool(v.cloud_history_used));
+        set(
+            &cloud,
+            "historyUsed",
+            &JsValue::from_bool(v.cloud_history_used),
+        );
         let dome = Object::new();
         set(&dome, "active", &JsValue::from_bool(v.cloud_dome_active));
         set(&dome, "count", &JsValue::from(v.cloud_dome_count));
         set(&dome, "frozen", &JsValue::from_bool(v.cloud_dome_frozen));
-        set(&dome, "burstFrames", &JsValue::from(v.cloud_dome_burst_frames));
+        set(
+            &dome,
+            "burstFrames",
+            &JsValue::from(v.cloud_dome_burst_frames),
+        );
         set(&cloud, "burstFrames", &JsValue::from(v.cloud_burst_frames));
         set(&cloud, "dome", &dome.into());
         set(&o, "cloud", &cloud.into());
