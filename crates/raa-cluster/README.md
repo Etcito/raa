@@ -45,6 +45,57 @@ one hierarchy or packing batch of at most 1024 clusters), and `bake()` runs it t
 | `cut` | `ClusterMesh`, `SectionHeader`, section bytes, `validate()`, `select_cut`, `cut_triangles` |
 | `store` | `ClusterStore`, the CPU registry of sections per mesh key |
 
+## Usage
+
+One call bakes a mesh to the end:
+
+```rust
+let input = raa_cluster::ClusterInput { mesh: &mesh, uvs: None };
+let section = raa_cluster::bake(input, &raa_cluster::BuildOptions::default())?;
+section.validate()?;
+let (cluster_bytes, node_bytes) = section.to_section_bytes();
+```
+
+A sliced bake runs the same units in bounded steps. The result does not depend on the budgets:
+
+```rust
+let mut bake = raa_cluster::ClusterBake::new(input, &options)?;
+while bake.step(raa_cluster::WorkBudget { units: 1 }) == raa_cluster::BakeStatus::Working {
+    let fraction = bake.progress().fraction; // never decreases, below 1 until done
+}
+let section = bake.finish()?;
+```
+
+`select_cut(&section, error_m)` gives the uniform cut and `cut_triangles(&section, &clusters)`
+decodes it; `ClusterMesh::from_section_parts` reads a saved section back with full validation.
+
+## Store
+
+`ClusterStore` keys sections by the caller's mesh key. `attach` stores ready sections,
+`start_bake` queues one bake per input, and `step_all(&mut clock)` runs units while the clock
+allows, lowest key first. `state(key)` reports `None`, `Baking` with the mean progress,
+`Ready` (`Attached` or `Runtime`) or `Refused` with a code and message. `generation()` rises
+whenever a ready set appears, is replaced or is removed.
+
+## Unit rule
+
+No loop of one unit visits more than 4096 triangles or 1024 clusters. A whole-array sort of keys
+and the single piece search over the welded mesh are each one unit. One weld or partition batch
+is at most 4096 triangles, one group simplification or thinning at most 24 clusters, and one
+hierarchy or packing batch at most 1024 clusters.
+
+## Guarantees pinned by the tests
+
+The integration tests (`tests/packed.rs`, `tests/sliced.rs`, `tests/cuts.rs`, `tests/bake.rs`) and
+the unit tests of `store` check, on generated inputs (displaced sphere, foliage patch, single
+triangle) and on the JSON fixtures (`tests/fixtures/open-strip.json`, `seam-mesh.json`):
+
+- the finest cut is the welded source mesh, and every uniform cut of a closed source is closed,
+  with each undirected grid edge used by exactly two triangles in opposite directions;
+- `lod_error` and the bounds grow monotonically toward the root, and every section validates;
+- the output bytes are the same for unit budgets and for one unbounded step;
+- a mesh without triangle, a collapsed mesh and invalid options are refused with their codes.
+
 ## What is not ported
 
 Paging (`solstice-builder/src/paging.rs`, `solstice-asset/src/{file,paged}.rs`), texture

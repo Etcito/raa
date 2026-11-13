@@ -19,3 +19,15 @@ pub mod simplify;
 pub mod store;
 pub mod thin;
 pub mod weld;
+
+pub use bake::{BakeProgress, BakeStage, BakeStatus, ClusterBake, WorkBudget, bake};
+pub use bounds::Sphere;
+pub use cut::{ClusterMesh, CutMesh, SectionHeader, cut_triangles, select_cut};
+pub use error::ClusterError;
+pub use input::{BuildOptions, ClusterInput, InputBounds, OwnedClusterInput};
+pub use packed::{
+    CLUSTER_ALGORITHM, CLUSTER_SECTION_VERSION, MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES,
+    PACKED_CLUSTER_SIZE, PACKED_NODE_SIZE, PACKED_VERTEX_SIZE, PackedCluster, PackedNode,
+    PackedVertex, ROOT_PARENT_ERROR, pack_counts, pack_triangle, unpack_triangle,
+};
+pub use store::{ClusterSource, ClusterState, ClusterStore, MeshClusterStatus};
