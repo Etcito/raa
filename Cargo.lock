@@ -1196,6 +1196,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-vg"
+version = "0.5.0"
+dependencies = [
+ "raa-cluster",
+ "raa-core",
+ "raa-lit",
+ "raa-math",
+ "raa-pipeline",
+ "raa-scene",
+ "raa-shader",
+ "raa-shadow",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-web"
 version = "0.5.0"
 dependencies = [

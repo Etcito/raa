@@ -23,6 +23,7 @@ Status: M6 — public API v0 frozen. Part of the Etcito open-source game stack (
 - `raa-render`: forward renderer and CPU frame preparation.
 - `raa-shader`: WGSL composer, material functions and slot providers.
 - `raa-tonemap`: exposure, AgX/ACES tone mapping and the final canvas pass.
+- `raa-vg`: virtualized geometry: settings (S31), path eligibility and the CPU scene pool (S32).
 
 ## Lookdev
 

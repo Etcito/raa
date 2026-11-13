@@ -1,0 +1,19 @@
+[package]
+name = "raa-vg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Virtualized geometry of RAA: settings, path selection and the CPU scene pool (S31, S32)."
+publish = false
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-scene = { workspace = true }
+wgpu = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-lit = { path = "../raa-lit" }
+raa-shader = { path = "../raa-shader" }
+raa-shadow = { path = "../raa-shadow" }
+raa-cluster = { path = "../raa-cluster" }
