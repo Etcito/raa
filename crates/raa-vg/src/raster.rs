@@ -1,12 +1,14 @@
 //! The S32 raster module of RAA's virtualized geometry: the hardware and software rasterisers'
-//! WGSL constants and module builders, the per-pixel [`VisibilityBuffer`] and the hardware
-//! [`Rasterizer`] that draws a cull's output into it. The cascade depth path and the frame
-//! passes land with their own cards. Adapted from solstice (MIT), Copyright (c) 2026
-//! SamG-Coder: `crates/solstice-render/shaders/vg/raster_common.wgsl`, `raster_hw.wgsl`,
-//! `raster_hw_fragment.wgsl`, `raster_sw.wgsl`, `raster_sw_body.wgsl`, `vis_write.wgsl` and
-//! the hardware parts of `crates/solstice-render/src/vg/raster.rs:8-110` (the
-//! `VisibilityBuffer`, `new`, `bindings` and `record`), revision 7e465b5. The reversed-Z
-//! visibility write becomes the standard-Z `raa_depth_key` integer compare.
+//! WGSL constants and module builders, the per-pixel [`VisibilityBuffer`], the stamped
+//! [`DepthBuffer`] of the shadow cascades and the [`Rasterizer`] that draws a cull's output
+//! into either. The frame passes land with their own cards. Adapted from solstice (MIT),
+//! Copyright (c) 2026 SamG-Coder: `crates/solstice-render/shaders/vg/raster_common.wgsl`,
+//! `raster_hw.wgsl`, `raster_hw_fragment.wgsl`, `raster_sw.wgsl`, `raster_sw_body.wgsl`,
+//! `vis_write.wgsl` and `crates/solstice-render/src/vg/raster.rs:8-110` (the
+//! `VisibilityBuffer`, `new`, `bindings` and `record`) and `:14-24` and `:240-300` (the
+//! `DepthBuffer`, `DEPTH_STAMPS`, `depth_buffer`, `record_software_depth` and `merge_depth`),
+//! revision 7e465b5. The reversed-Z visibility write becomes the standard-Z `raa_depth_key`
+//! integer compare.
 
 use crate::culling::{CullWork, PASS_VIEW_WGSL, ViewSlots};
 use crate::scene::VgScene;
@@ -261,32 +263,88 @@ impl VisibilityBuffer {
     }
 }
 
+/// One cascade's worth of stamped software-rasterized depth: `resolution^2` u32 words, each
+/// `stamp << 24 | raa_depth_key(depth) >> 8`, so the nearest sample of the latest drawing wins
+/// and an earlier drawing's words lose to it. Unlike a [`VisibilityBuffer`] there is no id
+/// buffer, and the buffer is cleared only when the stamps start a new round.
+pub struct DepthBuffer {
+    buffer: wgpu::Buffer,
+    resolution: u32,
+}
+
+impl DepthBuffer {
+    /// A STORAGE | COPY_DST buffer of `resolution^2` u32 words.
+    pub fn new(gpu: &GpuContext, resolution: u32) -> DepthBuffer {
+        let bytes = u64::from(resolution) * u64::from(resolution) * 4;
+        DepthBuffer {
+            buffer: buffer(
+                gpu,
+                "raa-vg cascade depth",
+                bytes,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            ),
+            resolution,
+        }
+    }
+
+    pub fn resolution(&self) -> u32 {
+        self.resolution
+    }
+
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// Resets every pixel to "never drawn"; call it when the stamps start a new round.
+    pub fn clear(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.clear_buffer(&self.buffer, 0, None);
+    }
+
+    pub fn allocated_bytes(&self) -> u64 {
+        self.buffer.size()
+    }
+}
+
 /// One group-2 bind group of a raster, plus the `PassView` slot its dynamic offset selects.
 pub struct RasterBindings {
     group: wgpu::BindGroup,
     slot: u32,
 }
 
-/// What a hardware raster draws into. The `Cascade` variant lands with the cascade card.
+/// What a hardware raster draws into: a visibility buffer, or one layer of a cascade depth map
+/// whose software depth [`DepthBuffer`] carries `stamp`.
 pub enum RasterTarget<'a> {
     Visibility(&'a VisibilityBuffer),
+    Cascade {
+        layer: &'a wgpu::TextureView,
+        depth: &'a DepthBuffer,
+        stamp: u32,
+    },
 }
 
-/// The visibility rasterisers: their shared group-2 layout, the `vs_visibility` +
-/// `fs_visibility` render pipeline, the software compute pipeline (entry `main`) and the
+/// The rasterisers: the visibility pass (`vs_visibility` + `fs_visibility`), the software
+/// visibility compute pipeline (entry `main`), the depth-only cascade path (`vs_depth`, the
+/// software depth compute pipeline and the fullscreen `shadow_merge` merge pipeline) and the
 /// 16-byte placeholder bound in place of a scene buffer that does not exist yet. It owns no
 /// frame state.
 pub struct Rasterizer {
     layout: wgpu::BindGroupLayout,
+    depth_layout: wgpu::BindGroupLayout,
+    merge_layout: wgpu::BindGroupLayout,
     hardware: wgpu::RenderPipeline,
     software: wgpu::ComputePipeline,
+    hardware_depth: wgpu::RenderPipeline,
+    software_depth: wgpu::ComputePipeline,
+    merge: wgpu::RenderPipeline,
     placeholder: wgpu::Buffer,
 }
 
 impl Rasterizer {
-    /// The group-2 layout (0-6 visible to vertex, fragment and compute; 7-8 read-write storage
-    /// visible to fragment and compute only), the hardware visibility pipeline, the software
-    /// compute pipeline over the same layout and the placeholder buffer.
+    /// The visibility group-2 layout (0-6 visible to vertex, fragment and compute; 7-8
+    /// read-write storage visible to fragment and compute only), the shared depth layout
+    /// (0-6 as `raster_common` visible to vertex and compute, 7 the stamped depth write
+    /// visible to compute only), the merge layout (0 read-only stamped depth, 1 `PassView`),
+    /// the five pipelines and the placeholder buffer.
     pub fn new(gpu: &GpuContext) -> Rasterizer {
         let device = gpu.device();
         let scene_stages = wgpu::ShaderStages::VERTEX_FRAGMENT.union(wgpu::ShaderStages::COMPUTE);
@@ -382,10 +440,137 @@ impl Rasterizer {
             cache: None,
         });
 
+        // Cascades have no `VisibilityBuffer`, so their group 2 is the shared depth layout:
+        // the scene and cull bindings 0-6 plus the stamped depth buffer at 7. Only the
+        // software depth pass reads 7, and only a compute stage may write storage.
+        let cascade_stages = wgpu::ShaderStages::VERTEX.union(wgpu::ShaderStages::COMPUTE);
+        let pass_view = || wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: true,
+            min_binding_size: wgpu::BufferSize::new(crate::culling::PASS_VIEW_SIZE as u64),
+        };
+        let depth_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-vg cascade depth"),
+            entries: &[
+                entry(0, cascade_stages, pass_view()),
+                entry(1, cascade_stages, storage(true)),
+                entry(2, cascade_stages, storage(true)),
+                entry(3, cascade_stages, storage(true)),
+                entry(4, cascade_stages, storage(true)),
+                entry(5, cascade_stages, storage(true)),
+                entry(6, cascade_stages, storage(true)),
+                entry(7, wgpu::ShaderStages::COMPUTE, storage(false)),
+            ],
+        });
+        let merge_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-vg cascade merge"),
+            entries: &[
+                entry(0, wgpu::ShaderStages::FRAGMENT, storage(true)),
+                entry(1, wgpu::ShaderStages::FRAGMENT, pass_view()),
+            ],
+        });
+        let depth_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("raa-vg cascade depth"),
+                bind_group_layouts: &[None, None, Some(&depth_layout)],
+                immediate_size: 0,
+            });
+        let hardware_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raa-vg cascade hardware raster"),
+            layout: Some(&depth_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_depth"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                // Facing is decided per instance in `raster_hw.wgsl`, as for visibility.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            // No fragment: the depth is all a cascade needs from the hardware list.
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let software_depth_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-vg cascade software depth"),
+            source: wgpu::ShaderSource::Wgsl(raster_sw_depth_module_wgsl().into()),
+        });
+        let software_depth = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("raa-vg cascade software depth"),
+            layout: Some(&depth_pipeline_layout),
+            module: &software_depth_module,
+            entry_point: Some("main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        });
+
+        let merge_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-vg cascade merge"),
+            source: wgpu::ShaderSource::Wgsl(shadow_merge_module_wgsl().into()),
+        });
+        let merge_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("raa-vg cascade merge"),
+                bind_group_layouts: &[None, None, Some(&merge_layout)],
+                immediate_size: 0,
+            });
+        let merge = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("raa-vg cascade merge"),
+            layout: Some(&merge_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &merge_module,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            // The depth is the only output; the shader writes `frag_depth` per pixel.
+            fragment: Some(wgpu::FragmentState {
+                module: &merge_module,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Rasterizer {
             layout,
+            depth_layout,
+            merge_layout,
             hardware,
             software,
+            hardware_depth,
+            software_depth,
+            merge,
             placeholder: buffer(
                 gpu,
                 "raa-vg raster placeholder",
@@ -427,6 +612,76 @@ impl Rasterizer {
                 bind_entry(6, work.state()),
                 bind_entry(7, vis.depth()),
                 bind_entry(8, vis.ids()),
+            ],
+        });
+        RasterBindings { group, slot }
+    }
+
+    /// Binds a scene, a culling run's output and one cascade's stamped depth buffer at group 2
+    /// over the shared depth layout. A scene buffer that has not been uploaded is replaced by
+    /// the placeholder, so the group is always valid.
+    ///
+    /// Handoff: `Rasterizer::depth_bindings`, `Rasterizer::merge_bindings`,
+    /// `Rasterizer::record_software_depth`, `Rasterizer::merge_depth` and `DepthBuffer::new`
+    /// (crates/raa-vg/src/raster.rs) are exposed to card 'raa-vg: shadow.rs cascade views and
+    /// cascade recording', whose `CascadeWork` builds these two bind groups per cascade and
+    /// records the hardware depth draw, the software depth dispatch and the merge over the
+    /// cascade layer. State: the cascade `PassView` slot of [`ViewSlots`], the `CullWork`
+    /// indirect extents at `CullWork::draw_args_offset()`, `software_args_offset()` and
+    /// `merge_args_offset()`, and the [`DepthBuffer`] it binds at 7. The software depth module
+    /// itself is the upstream handoff at `raster_sw_depth_module_wgsl`; this method only
+    /// supplies its bind group.
+    pub fn depth_bindings(
+        &self,
+        gpu: &GpuContext,
+        slots: &ViewSlots,
+        slot: u32,
+        scene: &VgScene,
+        work: &CullWork,
+        depth: &DepthBuffer,
+    ) -> RasterBindings {
+        let instances = scene.instances().unwrap_or(&self.placeholder);
+        let clusters = scene.clusters().unwrap_or(&self.placeholder);
+        let vertices = scene.vertices().unwrap_or(&self.placeholder);
+        let triangles = scene.triangles().unwrap_or(&self.placeholder);
+        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-vg cascade depth"),
+            layout: &self.depth_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: slots.binding(),
+                },
+                bind_entry(1, instances),
+                bind_entry(2, clusters),
+                bind_entry(3, vertices),
+                bind_entry(4, triangles),
+                bind_entry(5, work.visible()),
+                bind_entry(6, work.state()),
+                bind_entry(7, depth.buffer()),
+            ],
+        });
+        RasterBindings { group, slot }
+    }
+
+    /// Binds one cascade's stamped depth buffer and `PassView` at group 2 over the merge
+    /// layout: 0 read-only depth, 1 the `PassView` uniform at `slot`.
+    pub fn merge_bindings(
+        &self,
+        gpu: &GpuContext,
+        slots: &ViewSlots,
+        slot: u32,
+        depth: &DepthBuffer,
+    ) -> RasterBindings {
+        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-vg cascade merge"),
+            layout: &self.merge_layout,
+            entries: &[
+                bind_entry(0, depth.buffer()),
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: slots.binding(),
+                },
             ],
         });
         RasterBindings { group, slot }
@@ -483,7 +738,73 @@ impl Rasterizer {
                 pass.set_bind_group(2, &bindings.group, &[ViewSlots::offset(bindings.slot)]);
                 pass.dispatch_workgroups_indirect(work.args(), CullWork::software_args_offset());
             }
+            RasterTarget::Cascade { layer, .. } => {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("raa-vg cascade raster"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: layer,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.hardware_depth);
+                pass.set_bind_group(2, &bindings.group, &[ViewSlots::offset(bindings.slot)]);
+                pass.draw_indirect(work.args(), CullWork::draw_args_offset());
+            }
         }
+    }
+
+    /// Rasterizes the clusters `work` sent to software as depth alone, under the view's stamp
+    /// in the bound [`DepthBuffer`], at `CullWork::software_args_offset()`.
+    pub fn record_software_depth(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bindings: &RasterBindings,
+        work: &CullWork,
+    ) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa-vg cascade software depth"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.software_depth);
+        pass.set_bind_group(2, &bindings.group, &[ViewSlots::offset(bindings.slot)]);
+        pass.dispatch_workgroups_indirect(work.args(), CullWork::software_args_offset());
+    }
+
+    /// Lays the bound [`DepthBuffer`]'s stamped words over one cascade `layer` as a fullscreen
+    /// draw, at `CullWork::merge_args_offset()`; the depth test keeps only the nearer samples.
+    pub fn merge_depth(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        bindings: &RasterBindings,
+        work: &CullWork,
+        layer: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("raa-vg cascade merge"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: layer,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.merge);
+        pass.set_bind_group(2, &bindings.group, &[ViewSlots::offset(bindings.slot)]);
+        pass.draw_indirect(work.args(), CullWork::merge_args_offset());
     }
 
     /// The GPU memory the rasteriser owns: the 16-byte placeholder buffer.
@@ -519,8 +840,8 @@ mod tests {
         let _ = gpu.device().poll(wgpu::PollType::wait_indefinitely());
         let error = block_on(errors.pop());
         assert!(error.is_none(), "raster validation: {error:?}");
-        // `Rasterizer::new` created both pipelines in that scope: the hardware render pipeline
-        // and the software compute pipeline, whose modules carry these entry points.
+        // `Rasterizer::new` created every pipeline in that scope, including the visibility
+        // pair whose modules carry these entry points.
         let module = wgpu::naga::front::wgsl::parse_str(&raster_hw_module_wgsl())
             .expect("hardware raster module");
         for name in ["vs_visibility", "fs_visibility"] {
@@ -539,5 +860,159 @@ mod tests {
             wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE
         );
         assert!(!VIS_STORAGE_STAGES.contains(wgpu::ShaderStages::VERTEX));
+    }
+
+    /// The cascade depth path on a software adapter: `Rasterizer::new` creates all five
+    /// pipelines without a validation error, a 256 [`DepthBuffer`] is `256 * 256 * 4` bytes,
+    /// and the hardware depth draw, the software depth dispatch and the merge record into one
+    /// layer of a 4-layer cascade map without a validation error.
+    ///
+    /// Inputs, all initialised here because no other pass of the frame exists: the cascade map
+    /// is a 4-layer 256x256 `Depth32Float` array and its target layer is cleared to 1.0 (far),
+    /// as `shadow.csm` leaves it; the software depth buffer is cleared to never-drawn; the bind
+    /// groups come from an uploaded one-triangle [`VgScene`], never from the 16-byte
+    /// placeholders; the cascade [`PassView`] sits at `CASCADE_BASE` with an orthographic
+    /// identity projection over the 256 m map. The [`CullWork`] is empty, so the indirect draws
+    /// and the software dispatch enqueue no work.
+    #[test]
+    fn cascade_depth_path_records_without_validation_error() {
+        use crate::culling::{CASCADE_BASE, PassView};
+        use crate::scene::{INSTANCE_CASTS_SHADOW, MeshKeys, VgInstanceRecord, hierarchy_word};
+        use raa_cluster::{BuildOptions, ClusterStore, OwnedClusterInput, bake};
+        use raa_core::MeshId;
+        use raa_math::{Mat4, Vec3};
+
+        let test = "cascade_depth_path_records_without_validation_error";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let device = gpu.device();
+
+        let input = OwnedClusterInput::single_triangle();
+        let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the triangle bakes");
+        let quant = [
+            mesh.quant_origin[0],
+            mesh.quant_origin[1],
+            mesh.quant_origin[2],
+            mesh.quant_step,
+        ];
+        let uv_quant = [
+            mesh.uv_origin[0],
+            mesh.uv_origin[1],
+            mesh.uv_step[0],
+            mesh.uv_step[1],
+        ];
+        let bounds = [
+            mesh.bounds_center[0],
+            mesh.bounds_center[1],
+            mesh.bounds_center[2],
+            mesh.bounds_radius,
+        ];
+        let mut store = ClusterStore::new();
+        store.attach(1, vec![mesh]);
+        let mut keys = MeshKeys::default();
+        keys.set(1, &[MeshId(0)]);
+        let mut scene = VgScene::new();
+        assert!(scene.upload_pool(&gpu, &store, &keys), "the pool uploads");
+        let range = scene.section_range(1, 0).expect("the section is packed");
+        let (_, hierarchy, root) = scene.section_header(1, 0).expect("the header exists");
+        scene.upload_instances(
+            &gpu,
+            &[VgInstanceRecord {
+                model: Mat4::IDENTITY,
+                previous_rows: [[0.0; 4]; 3],
+                quant,
+                uv_quant,
+                ranges: [
+                    range.node_base,
+                    range.cluster_base,
+                    range.vertex_base,
+                    range.triangle_base,
+                ],
+                ids: [0, 0, INSTANCE_CASTS_SHADOW, hierarchy_word(hierarchy, root)],
+                bounds,
+            }],
+        );
+        assert_eq!(scene.instance_count(), 1);
+
+        let slots = ViewSlots::new(&gpu);
+        let view = PassView::orthographic(Mat4::IDENTITY, Vec3::ZERO, [256.0, 256.0], 1.0, 1.0);
+        slots.write(&gpu, CASCADE_BASE, &view);
+
+        let map = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-vg cascade test map"),
+            size: wgpu::Extent3d {
+                width: 256,
+                height: 256,
+                depth_or_array_layers: 4,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let layer = map.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("raa-vg cascade test layer"),
+            format: None,
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            usage: None,
+            aspect: wgpu::TextureAspect::DepthOnly,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: 1,
+            array_layer_count: Some(1),
+        });
+
+        let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let rasterizer = Rasterizer::new(&gpu);
+        let depth = DepthBuffer::new(&gpu, 256);
+        assert_eq!(depth.resolution(), 256);
+        assert_eq!(depth.allocated_bytes(), 256 * 256 * 4);
+        let pipelines = CullPipelines::new(&gpu);
+        let work = CullWork::new(&gpu, &pipelines, "raa-vg cascade test", 1024, 1024);
+        let depth_bindings =
+            rasterizer.depth_bindings(&gpu, &slots, CASCADE_BASE, &scene, &work, &depth);
+        let merge_bindings = rasterizer.merge_bindings(&gpu, &slots, CASCADE_BASE, &depth);
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        depth.clear(&mut encoder);
+        {
+            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raa-vg cascade test clear"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &layer,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        rasterizer.record(
+            &mut encoder,
+            &depth_bindings,
+            &work,
+            RasterTarget::Cascade {
+                layer: &layer,
+                depth: &depth,
+                stamp: 1,
+            },
+        );
+        rasterizer.record_software_depth(&mut encoder, &depth_bindings, &work);
+        rasterizer.merge_depth(&mut encoder, &merge_bindings, &work, &layer);
+        gpu.queue().submit(Some(encoder.finish()));
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "cascade validation: {error:?}");
     }
 }
