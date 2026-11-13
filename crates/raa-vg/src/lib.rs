@@ -7,7 +7,13 @@
 
 pub mod eligibility;
 pub mod error;
+pub mod scene;
 pub mod settings;
 
 pub use eligibility::{InstancePath, refusal_message};
+pub use scene::{
+    INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_MOVABLE, INSTANCE_PREVIOUS_VALID,
+    InstanceRequests, MeshKeys, SectionRange, VG_INSTANCE_SIZE, VgInstanceRecord, VgScene,
+    hierarchy_word, write_instance,
+};
 pub use settings::{DebugView, VgSettings, VgSettingsPatch};
