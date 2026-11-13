@@ -3,8 +3,11 @@
 //! (MIT), Copyright (c) 2026 SamG-Coder: `crates/solstice-render/src/vg/culling.rs:11-199`,
 //! revision 7e465b5. The reversed-Z near/far roles are swapped for RAA's standard-Z convention.
 
+use crate::scene::VgScene;
 use raa_core::{GpuContext, wgpu};
 use raa_math::{Mat4, Vec3, Vec4};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// S32 `pass_view.wgsl`: the WGSL twin of [`PassView`], the cull state and its read view, the
 /// instance-filter and instance-flag constants, and the scene twins (`VgInstance`, `VgNode`,
@@ -537,6 +540,205 @@ impl CullPipelines {
     pub fn allocated_bytes(&self) -> u64 {
         self.placeholder.size() + 4
     }
+
+    /// Binds a scene and depth pyramid for culling at group 2. A pool buffer the scene has
+    /// not uploaded yet is replaced by the placeholder, so the group is always valid.
+    pub fn scene_bind_group(
+        &self,
+        gpu: &GpuContext,
+        slots: &ViewSlots,
+        scene: &VgScene,
+        pyramid: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        let instances = scene.instances().unwrap_or(&self.placeholder);
+        let nodes = scene.nodes().unwrap_or(&self.placeholder);
+        let clusters = scene.clusters().unwrap_or(&self.placeholder);
+        gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-vg cull scene"),
+            layout: &self.scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: slots.binding(),
+                },
+                bind_entry(1, instances),
+                bind_entry(2, nodes),
+                bind_entry(3, clusters),
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(pyramid),
+                },
+            ],
+        })
+    }
+
+    /// Records one culling run for `slot`. On return, `work` holds the indirect arguments of
+    /// what this phase selected. A scene without instances only clears the state.
+    pub fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: &VgScene,
+        group: &wgpu::BindGroup,
+        slot: u32,
+        work: &CullWork,
+        phase: CullPhase,
+    ) {
+        if phase == CullPhase::First {
+            encoder.clear_buffer(work.state(), 0, None);
+        }
+        if scene.instance_count() == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa-vg cull"),
+            timestamp_writes: None,
+        });
+        let offset = [ViewSlots::offset(slot)];
+        let work_group = work.work_group(phase);
+        let control = work.control_group();
+        match phase {
+            CullPhase::First => {
+                pass.set_pipeline(&self.seed);
+                pass.set_bind_group(2, group, &offset);
+                pass.set_bind_group(3, work_group, &[]);
+                pass.dispatch_workgroups(scene.instance_count().div_ceil(64), 1, 1);
+            }
+            CullPhase::Second => {
+                pass.set_pipeline(&self.begin_second_phase);
+                pass.set_bind_group(2, control, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+        }
+        for _ in 0..=scene.max_hierarchy_depth() {
+            pass.set_pipeline(&self.advance);
+            pass.set_bind_group(2, control, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+
+            pass.set_pipeline(&self.process);
+            pass.set_bind_group(2, group, &offset);
+            pass.set_bind_group(3, work_group, &[]);
+            pass.dispatch_workgroups_indirect(work.args(), 0);
+        }
+        pass.set_pipeline(&self.finish);
+        pass.set_bind_group(2, control, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+}
+
+/// Asynchronous readback of how much recent culling selected. A buffer can only map while
+/// no command uses it, so a capture cycle takes several frames: copy, map, wait for the
+/// callback, read, unmap. Numbers lag slightly, which is fine for statistics, and the render
+/// loop never blocks on them.
+pub struct CullStats {
+    staging: wgpu::Buffer,
+    shared: Arc<StatsShared>,
+}
+
+#[derive(Default)]
+struct StatsShared {
+    clusters: AtomicU32,
+    software_clusters: AtomicU32,
+    triangles: AtomicU32,
+    dropped: AtomicU32,
+    /// Set when a copy was recorded and still needs its map request.
+    copied: AtomicBool,
+    /// Set from the map request until the data has been consumed.
+    busy: AtomicBool,
+    /// Set by the map callback once the buffer is readable.
+    mapped: AtomicBool,
+}
+
+impl CullStats {
+    fn new(gpu: &GpuContext) -> CullStats {
+        let staging = buffer(
+            gpu,
+            "raa-vg cull stats",
+            STATE_SIZE,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
+        CullStats {
+            staging,
+            shared: Arc::default(),
+        }
+    }
+
+    fn capture(&self, encoder: &mut wgpu::CommandEncoder, state: &wgpu::Buffer) {
+        self.collect();
+        if !self.shared.busy.load(Ordering::Acquire) {
+            encoder.copy_buffer_to_buffer(state, 0, &self.staging, 0, STATE_SIZE);
+            self.shared.copied.store(true, Ordering::Release);
+        }
+    }
+
+    /// Reads the counters once the buffer has mapped, freeing it for the next capture.
+    fn collect(&self) {
+        if self.shared.mapped.swap(false, Ordering::AcqRel) {
+            self.consume_mapped_data();
+            self.shared.busy.store(false, Ordering::Release);
+        }
+    }
+
+    fn consume_mapped_data(&self) {
+        if let Ok(data) = self.staging.slice(..).get_mapped_range() {
+            let mut words = [0u32; 12];
+            let mut complete = true;
+            for (word, chunk) in words.iter_mut().zip(data.chunks_exact(4)) {
+                match <[u8; 4]>::try_from(chunk) {
+                    Ok(bytes) => *word = u32::from_le_bytes(bytes),
+                    Err(_) => complete = false,
+                }
+            }
+            drop(data);
+            if complete {
+                // Word positions follow `CullState` in `pass_view.wgsl`.
+                let (software, hardware, triangles, dropped) =
+                    (words[4], words[5], words[8], words[9]);
+                self.shared
+                    .clusters
+                    .store(software + hardware, Ordering::Release);
+                self.shared
+                    .software_clusters
+                    .store(software, Ordering::Release);
+                self.shared.triangles.store(triangles, Ordering::Release);
+                self.shared.dropped.store(dropped, Ordering::Release);
+            }
+        }
+        self.staging.unmap();
+    }
+
+    fn request_map(&self) {
+        if !self.shared.copied.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        self.shared.busy.store(true, Ordering::Release);
+        let shared = Arc::clone(&self.shared);
+        self.staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| match result {
+                Ok(()) => shared.mapped.store(true, Ordering::Release),
+                Err(_) => shared.busy.store(false, Ordering::Release),
+            });
+    }
+
+    /// Clusters selected in the most recently read-back frame.
+    pub fn clusters(&self) -> u32 {
+        self.shared.clusters.load(Ordering::Acquire)
+    }
+
+    /// Triangles selected in the most recently read-back frame.
+    pub fn triangles(&self) -> u32 {
+        self.shared.triangles.load(Ordering::Acquire)
+    }
+
+    /// Clusters sent to the software rasterizer in the most recently read-back frame.
+    pub fn software_clusters(&self) -> u32 {
+        self.shared.software_clusters.load(Ordering::Acquire)
+    }
+
+    /// Queue entries and clusters lost for want of room in the most recently read-back frame.
+    pub fn dropped(&self) -> u32 {
+        self.shared.dropped.load(Ordering::Acquire)
+    }
 }
 
 /// The transient buffers of one culling run, with one bind group per occlusion phase.
@@ -550,6 +752,7 @@ pub struct CullWork {
     first_phase: wgpu::BindGroup,
     second_phase: wgpu::BindGroup,
     control: wgpu::BindGroup,
+    stats: CullStats,
 }
 
 impl CullWork {
@@ -625,6 +828,7 @@ impl CullWork {
             first_phase,
             second_phase,
             control,
+            stats: CullStats::new(gpu),
         }
     }
 
@@ -659,6 +863,23 @@ impl CullWork {
     /// The GPU memory this run owns.
     pub fn allocated_bytes(&self) -> u64 {
         self.state.size() + self.args.size() + self.visible.size() + 2 * self.queue_capacity * 8
+    }
+
+    /// Queues a copy of the counters. Call at the end of a frame's encoding.
+    pub fn capture_stats(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.stats.capture(encoder, &self.state);
+    }
+
+    /// Takes in any counters that have arrived and starts reading back any captured this
+    /// frame. Call after submitting, every frame, even ones that captured nothing.
+    pub fn map_stats(&self) {
+        self.stats.collect();
+        self.stats.request_map();
+    }
+
+    /// The most recently arrived counters; zero before the first readback.
+    pub fn stats(&self) -> &CullStats {
+        &self.stats
     }
 
     #[allow(dead_code)]
@@ -708,5 +929,41 @@ mod tests {
             work.work_group(CullPhase::Second)
         ));
         let _ = work.control_group();
+    }
+
+    #[test]
+    fn empty_scene_record_clears_state_without_validation_error() {
+        let test = "empty_scene_record_clears_state_without_validation_error";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipelines = CullPipelines::new(&gpu);
+        let work = CullWork::new(&gpu, &pipelines, "cull empty scene", 1024, 1024);
+        let slots = ViewSlots::new(&gpu);
+        let scene = VgScene::new();
+        let group =
+            pipelines.scene_bind_group(&gpu, &slots, &scene, &pipelines.placeholder_pyramid);
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raa-vg cull empty scene"),
+            });
+        pipelines.record(
+            &mut encoder,
+            &scene,
+            &group,
+            MAIN_FIRST,
+            &work,
+            CullPhase::First,
+        );
+        work.capture_stats(&mut encoder);
+        gpu.queue().submit(Some(encoder.finish()));
+        let _ = gpu.device().poll(wgpu::PollType::wait_indefinitely());
+        work.map_stats();
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "empty scene cull validation: {error:?}");
+        assert_eq!(work.stats().clusters(), 0);
     }
 }
