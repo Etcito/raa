@@ -668,6 +668,29 @@ mod tests {
     }
 
     #[test]
+    fn manual_direction_never_changes_the_automatic_light_or_dirties_the_environment() {
+        let mut playback = TimePlayback::default();
+        playback.state.settings.enabled = true;
+        playback.state.current = TimeOfDay {
+            day: 172,
+            hours: 9.0,
+        };
+        playback.evaluate();
+        let before = (playback.last_light, playback.state.sky, playback.state.dominant);
+        for azimuth in [0.3_f32, 1.1, 2.9] {
+            let turned = DirectionalLight {
+                direction: Vec3::new(azimuth.cos(), -0.8, azimuth.sin()).normalize_or_zero(),
+                ..playback.manual
+            };
+            assert!(!playback.apply_manual(turned), "azimuth {azimuth}");
+            assert_eq!(
+                (playback.last_light, playback.state.sky, playback.state.dominant),
+                before
+            );
+        }
+    }
+
+    #[test]
     fn manual_light_is_the_only_sun_the_sky_draws() {
         let mut playback = TimePlayback::default();
         playback.state.settings.enabled = false;
