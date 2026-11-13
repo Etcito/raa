@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { foliagePatch, groundPlane, highPolyMesh, meshBounds, occluderWall } from './lib/content.js';
+import { clusterColor, cutPreviewMesh } from './lib/cluster-preview.js';
+import { collectVgFacts } from './lib/facts.js';
 
-// Content tests: the four preset meshes and meshBounds. Later cards append their own test(...)
-// blocks to this file (cluster-preview and facts). Node only; no engine, no WebGPU.
+// Content tests (the four preset meshes and meshBounds), then the cluster-preview and facts tests.
+// Node only; no engine, no WebGPU.
 
 const bytes = (a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength);
 const meshBytes = (m) => Buffer.concat(['positions', 'normals', 'uvs', 'indices'].map((k) => bytes(m[k])));
@@ -182,4 +184,96 @@ test('builders return fresh arrays: a mutated result does not change the next ca
 test('meshBounds gives the component-wise min and max of the positions', () => {
   const b = meshBounds({ positions: new Float32Array([1, -2, 3, -4, 5, -6]) });
   assert.deepEqual(b, { min: [-4, -2, -6], max: [1, 5, 3] });
+});
+
+// A hand-built cut of three clusters and seven triangles over twelve vertices: cluster 0 holds
+// triangles 0-1 on vertices 0-3, cluster 1 holds triangles 2-3 on vertices 4-7, cluster 2 holds
+// triangles 4-6 on vertices 8-11. Each cluster's vertices are its own.
+function handCut() {
+  return {
+    positions: Float32Array.from({ length: 36 }, (_, i) => i * 0.25),
+    normals: Float32Array.from({ length: 36 }, (_, i) => (i % 3 === 1 ? 1 : 0)),
+    uvs: Float32Array.from({ length: 24 }, (_, i) => i / 24),
+    indices: Uint32Array.from([0, 1, 2, 0, 2, 3, 4, 5, 6, 5, 7, 6, 8, 9, 10, 9, 11, 10, 10, 11, 8]),
+    clusterOfTriangle: Uint32Array.from([0, 0, 1, 1, 2, 2, 2]),
+    clusters: 3,
+    triangles: 7,
+  };
+}
+
+// A module double: its clusterCutMesh returns the cut and records its arguments.
+function raaDouble(cut, calls = []) {
+  return { clusterCutMesh: (section, errorMetres) => (calls.push([section, errorMetres]), cut) };
+}
+
+test('cutPreviewMesh keeps positions, normals, uvs and indices unchanged: every cut triangle once', () => {
+  const cut = handCut();
+  const calls = [];
+  const section = { algorithm: 1 };
+  const m = cutPreviewMesh(raaDouble(cut, calls), section, 0.5);
+  assert.deepEqual(calls, [[section, 0.5]]);
+  for (const k of ['positions', 'normals', 'uvs', 'indices']) {
+    assert.deepEqual(Array.from(m[k]), Array.from(cut[k]), k);
+  }
+  assert.equal(m.indices.length, 3 * cut.triangles);
+});
+
+test('cutPreviewMesh gives four colour floats per vertex: equal inside a cluster, distinct between clusters', () => {
+  const m = cutPreviewMesh(raaDouble(handCut()), {}, 0);
+  assert.equal(m.colors.length, 4 * 12);
+  assert.ok(m.colors.every((v) => Number.isFinite(v) && v >= 0 && v <= 1), 'a colour leaves [0, 1]');
+  const colourOf = (v) => Array.from(m.colors.subarray(4 * v, 4 * v + 3));
+  for (let v = 0; v < 12; v++) {
+    assert.equal(m.colors[4 * v + 3], 1, `vertex ${v} alpha`);
+    const c = Math.floor(v / 4);
+    assert.ok(colourOf(v).every((x, k) => Math.abs(x - clusterColor(c)[k]) <= 1e-6), `vertex ${v} colour`);
+  }
+  const first = [0, 4, 8].map((v) => colourOf(v).join(','));
+  assert.equal(new Set(first).size, 3, 'two clusters share a colour');
+});
+
+test('clusterColor is the same on two calls, distinct per index, and linear sRGB of the hue', () => {
+  for (let c = 0; c < 8; c++) assert.deepEqual(clusterColor(c), clusterColor(c));
+  const seen = new Set(Array.from({ length: 16 }, (_, c) => clusterColor(c).join(',')));
+  assert.equal(seen.size, 16);
+  // Index 0: hue 0, so HSV (0.9, 0.315, 0.315) in sRGB; the channels are converted to linear.
+  const lin = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+  const [r, g, b] = clusterColor(0);
+  assert.ok(Math.abs(r - lin(0.9)) <= 1e-12 && Math.abs(g - lin(0.315)) <= 1e-12 && Math.abs(b - lin(0.315)) <= 1e-12);
+});
+
+test('collectVgFacts reports null settings, stats and instance state for an engine without the getters', () => {
+  const engine = {
+    meshClusters: (mesh) => ({ state: mesh === 3 ? 'ready' : 'none', progress: 0, source: null, code: null, message: null, sections: 0, clusters: 0, sourceTriangles: 0, levels: 0 }),
+  };
+  const facts = collectVgFacts(
+    engine,
+    [{ name: 'high', mesh: 3, cuts: [{ errorMetres: 0.1, clusters: 5, triangles: 9 }], states: [{ state: 'ready', progress: 1 }] }, { name: 'none', mesh: null }],
+    [{ name: 'a', instance: 7 }],
+  );
+  assert.equal(facts.settings, null);
+  assert.equal(facts.stats, null);
+  assert.equal(facts.meshes[0].clusters.state, 'ready');
+  assert.equal(facts.meshes[1].clusters, null);
+  assert.deepEqual(facts.meshes[0].cuts, [{ errorMetres: 0.1, clusters: 5, triangles: 9 }]);
+  assert.deepEqual(facts.meshes[0].states, [{ state: 'ready', progress: 1 }]);
+  assert.deepEqual(facts.meshes[1].cuts, []);
+  assert.deepEqual(facts.meshes[1].states, []);
+  assert.deepEqual(facts.instances, [{ name: 'a', instance: 7, virtualGeometry: null }]);
+});
+
+test('collectVgFacts copies getter results into fresh objects and lets a throwing getter propagate', () => {
+  const settings = { enabled: true, errorPixels: 1 };
+  const engine = {
+    virtualGeometry: () => settings,
+    virtualGeometryStats: () => ({ active: true }),
+    instanceVirtualGeometry: () => ({ requested: null, path: 'virtual', pending: false, code: null, message: null }),
+  };
+  const facts = collectVgFacts(engine, [], [{ name: 'a', instance: 1 }]);
+  assert.deepEqual(facts.settings, settings);
+  assert.notEqual(facts.settings, settings);
+  assert.equal(facts.stats.active, true);
+  assert.equal(facts.instances[0].virtualGeometry.path, 'virtual');
+  const broken = { virtualGeometry() { throw new Error('getter failed'); } };
+  assert.throws(() => collectVgFacts(broken, [], []), /getter failed/);
 });
