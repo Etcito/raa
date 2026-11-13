@@ -1,0 +1,12 @@
+{
+  "name": "raa-tooling",
+  "private": true,
+  "description": "Repository tooling of raa (not published). The published packages live in packages/*.",
+  "type": "module",
+  "scripts": {
+    "typecheck:types": "node scripts/typecheck-types.mjs"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}
