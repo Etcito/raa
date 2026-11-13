@@ -253,3 +253,217 @@ fn raster_calls_only_the_depth_key_helper() {
         "write_visibility is declared before its callers"
     );
 }
+
+/// The S32 hardware raster on a software adapter: a baked triangle fan drawn through the real
+/// cull and `Rasterizer::record` into a 64x64 visibility buffer.
+///
+/// Inputs, all initialised here because no other pass of the frame exists in this test:
+/// the visibility depth is cleared to empty keys (0) before the passes; the fan is one baked
+/// mesh of 8 triangles with centre (0, 0, 0), radius 1 m, in the XY plane and counter-clockwise
+/// from +Z; the instance model is the identity with the CASTS_SHADOW flag; the camera sits at
+/// (0, 0, 4) looking at the origin, fov 60 degrees, near 0.1, far 16. Both the instance (radius
+/// 1 m at the origin) and the camera stay inside a 16 m box, so the view's extent encloses
+/// them. Only the visibility buffer is read back: no depth or HDR target.
+#[test]
+fn hardware_raster_writes_a_baked_fan() {
+    use raa_cluster::{BuildOptions, ClusterStore, OwnedClusterInput, bake};
+    use raa_core::MeshId;
+    use raa_core::testing::{block_on, skip, software_gpu};
+    use raa_math::{Mat4, Vec3};
+    use raa_vg::culling::{CullPhase, CullPipelines, CullWork, MAIN_FIRST};
+    use raa_vg::raster::{RasterTarget, Rasterizer, VisibilityBuffer};
+    use raa_vg::{
+        INSTANCE_CASTS_SHADOW, MeshKeys, PassView, VgInstanceRecord, VgScene, ViewSlots,
+        hierarchy_word,
+    };
+
+    let test = "hardware_raster_writes_a_baked_fan";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let device = gpu.device();
+
+    let mut input = OwnedClusterInput::single_triangle();
+    input.uvs = None;
+    let mut positions = vec![[0.0f32, 0.0, 0.0]];
+    let mut normals = vec![[0.0f32, 0.0, 1.0]];
+    let mut indices = Vec::new();
+    for corner in 0..8u32 {
+        let angle = corner as f32 / 8.0 * std::f32::consts::TAU;
+        positions.push([angle.cos(), angle.sin(), 0.0]);
+        normals.push([0.0, 0.0, 1.0]);
+    }
+    for corner in 0..8u32 {
+        indices.extend_from_slice(&[0, 1 + corner, 1 + (corner + 1) % 8]);
+    }
+    input.mesh.positions = positions;
+    input.mesh.normals = normals;
+    input.mesh.indices = indices;
+
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the fan bakes");
+    let quant = [
+        mesh.quant_origin[0],
+        mesh.quant_origin[1],
+        mesh.quant_origin[2],
+    ];
+    let quant_step = mesh.quant_step;
+    let uv = [mesh.uv_origin[0], mesh.uv_origin[1]];
+    let uv_step = mesh.uv_step;
+    let bounds = [
+        mesh.bounds_center[0],
+        mesh.bounds_center[1],
+        mesh.bounds_center[2],
+        mesh.bounds_radius,
+    ];
+    assert!(
+        mesh.bounds_radius > 0.5 && mesh.bounds_radius <= 1.5,
+        "the fan spans its 1 m radius, got {}",
+        mesh.bounds_radius
+    );
+
+    let mut store = ClusterStore::new();
+    store.attach(1, vec![mesh]);
+    let mut keys = MeshKeys::default();
+    keys.set(1, &[MeshId(0)]);
+
+    let mut scene = VgScene::new();
+    assert!(scene.upload_pool(&gpu, &store, &keys), "the pool uploads");
+    let range = scene.section_range(1, 0).expect("the section is packed");
+    let (_, depth, root) = scene
+        .section_header(1, 0)
+        .expect("the section header exists");
+    scene.upload_instances(
+        &gpu,
+        &[VgInstanceRecord {
+            model: Mat4::IDENTITY,
+            previous_rows: [[0.0; 4]; 3],
+            quant: [quant[0], quant[1], quant[2], quant_step],
+            uv_quant: [uv[0], uv[1], uv_step[0], uv_step[1]],
+            ranges: [
+                range.node_base,
+                range.cluster_base,
+                range.vertex_base,
+                range.triangle_base,
+            ],
+            ids: [0, 0, INSTANCE_CASTS_SHADOW, hierarchy_word(depth, root)],
+            bounds,
+        }],
+    );
+    assert_eq!(scene.instance_count(), 1, "one instance record is uploaded");
+
+    let eye = Vec3::new(0.0, 0.0, 4.0);
+    let proj = Mat4::perspective_rh_zo(60f32.to_radians(), 1.0, 0.1, 16.0);
+    let view_proj = proj * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+    let view = PassView::perspective(
+        view_proj,
+        view_proj,
+        eye,
+        [64.0, 64.0],
+        [proj.cols[0][0], proj.cols[1][1]],
+        0.1,
+        1.0,
+    );
+    let slots = ViewSlots::new(&gpu);
+    slots.write(&gpu, MAIN_FIRST, &view);
+
+    let pyramid = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("raa-vg raster variants pyramid"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R32Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue().write_texture(
+        pyramid.as_image_copy(),
+        &1.0f32.to_le_bytes(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let pyramid_view = pyramid.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let vis = VisibilityBuffer::new(&gpu, (64, 64));
+    let pipelines = CullPipelines::new(&gpu);
+    let work = CullWork::new(&gpu, &pipelines, "raa-vg raster variants", 1024, 1024);
+    let scene_group = pipelines.scene_bind_group(&gpu, &slots, &scene, &pyramid_view);
+    let rasterizer = Rasterizer::new(&gpu);
+    let bindings = rasterizer.bindings(&gpu, &slots, MAIN_FIRST, &scene, &work, &vis);
+
+    let bytes = 64 * 64 * 4;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-vg raster variants readback"),
+        size: bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    vis.clear(&mut encoder);
+    pipelines.record(
+        &mut encoder,
+        &scene,
+        &scene_group,
+        MAIN_FIRST,
+        &work,
+        CullPhase::First,
+    );
+    rasterizer.record(
+        &mut encoder,
+        &bindings,
+        &work,
+        RasterTarget::Visibility(&vis),
+    );
+    encoder.copy_buffer_to_buffer(vis.depth(), 0, &readback, 0, bytes);
+    gpu.queue().submit(Some(encoder.finish()));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    let error = block_on(errors.pop());
+    assert!(error.is_none(), "raster validation: {error:?}");
+
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    rx.recv().expect("map callback").expect("map");
+    let mapped = slice.get_mapped_range().expect("mapped range");
+    let word = |index: usize| {
+        u32::from_le_bytes(
+            mapped[index * 4..index * 4 + 4]
+                .try_into()
+                .expect("four bytes"),
+        )
+    };
+    let centre_key = word(32 * 64 + 32);
+    let corner_key = word(0);
+    drop(mapped);
+    readback.unmap();
+
+    assert_ne!(centre_key, 0, "the fan covers the centre pixel");
+    let centre_depth = 1.0 - f32::from_bits(centre_key);
+    assert!(
+        centre_depth > 0.0 && centre_depth < 1.0,
+        "the centre depth {centre_depth} lies between the near and far planes"
+    );
+    assert_eq!(corner_key, 0, "the corner pixel stays an empty key");
+}

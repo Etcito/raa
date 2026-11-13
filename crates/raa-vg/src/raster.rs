@@ -81,11 +81,14 @@ pub struct VisibilityBuffer {
 }
 
 impl VisibilityBuffer {
-    /// Two STORAGE | COPY_DST buffers of `w * h` u32 words, one for the depth key and one for
-    /// the id, and a `w` by `h` R8Unorm render target for the hardware pass.
+    /// Two STORAGE | COPY_DST | COPY_SRC buffers of `w * h` u32 words, one for the depth key
+    /// and one for the id, and a `w` by `h` R8Unorm render target for the hardware pass.
+    /// `COPY_SRC` exists so tests can read the buffers back.
     pub fn new(gpu: &GpuContext, size: (u32, u32)) -> VisibilityBuffer {
         let bytes = u64::from(size.0) * u64::from(size.1) * 4;
-        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let usage = wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
         let depth = buffer(gpu, "raa-vg visibility depth", bytes, usage);
         let ids = buffer(gpu, "raa-vg visibility ids", bytes, usage);
         let dummy_target = gpu
