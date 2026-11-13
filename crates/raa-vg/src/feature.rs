@@ -305,7 +305,10 @@ impl VgHandle {
             Err(_) => (false, false),
         };
         scene.update_world();
-        let plan = self.plan(scene, lit, &settings);
+        let mut plan = self.plan(scene, lit, &settings);
+        if !settings.enabled {
+            disabled_report(&mut plan.report);
+        }
         let reason = inactive_reason(
             settings.enabled,
             passes_enabled,
@@ -474,6 +477,32 @@ impl VgHandle {
     }
 }
 
+/// Rewrites the plan of a frame whose feature is disabled (`enabled` false) into what that frame
+/// submits: every instance draws on forward, so a `Virtual` path becomes a non-pending forward
+/// path, a pending one is no longer pending, and no runtime bake is requested. Refusal codes and
+/// `ineligible` are kept (`set_instance` still refuses an ineligible request). Without this the
+/// disabled engine reported `virtual` for every baked default-requested instance and kept
+/// starting runtime bakes it never drew (SDF Modeler's Game view, setting off, never ready).
+fn disabled_report(report: &mut VgSyncReport) {
+    for path in report.paths.values_mut() {
+        match path {
+            InstancePath::Virtual => {
+                *path = InstancePath::Forward {
+                    pending: false,
+                    code: None,
+                    message: None,
+                }
+            }
+            InstancePath::Forward { pending, .. } => *pending = false,
+        }
+    }
+    report.forward_instances += report.virtual_instances;
+    report.virtual_instances = 0;
+    report.virtual_ids.clear();
+    report.material_fns.clear();
+    report.bake_requests.clear();
+}
+
 /// Installs the five virtualized-geometry entries of S12 on a pipeline and its lit renderer:
 /// the four feature passes `vg.cull`, `vg.raster`, `vg.resolve` and `vg.gbuffer` and the
 /// forward contributor `vg.shade`, all left disabled.
@@ -577,5 +606,58 @@ mod tests {
                 "enabled={enabled} passes={passes} views={views} instances={instances}"
             );
         }
+    }
+
+    #[test]
+    fn a_disabled_frame_reports_every_instance_on_forward_and_requests_no_bake() {
+        use crate::scene::VgSyncReport;
+        let mut report = VgSyncReport {
+            virtual_instances: 1,
+            forward_instances: 2,
+            bake_requests: vec![4],
+            ..VgSyncReport::default()
+        };
+        report.paths.insert(1, InstancePath::Virtual);
+        report.paths.insert(
+            2,
+            InstancePath::Forward {
+                pending: true,
+                code: None,
+                message: None,
+            },
+        );
+        report.paths.insert(
+            3,
+            InstancePath::Forward {
+                pending: false,
+                code: Some("vg.skinned_unsupported"),
+                message: Some("skinned".to_string()),
+            },
+        );
+        disabled_report(&mut report);
+        let forward = InstancePath::Forward {
+            pending: false,
+            code: None,
+            message: None,
+        };
+        assert_eq!(
+            report.paths[&1], forward,
+            "a baked instance is not virtual while disabled"
+        );
+        assert_eq!(
+            report.paths[&2], forward,
+            "a disabled frame bakes nothing, so nothing is pending"
+        );
+        assert_eq!(
+            report.paths[&3],
+            InstancePath::Forward {
+                pending: false,
+                code: Some("vg.skinned_unsupported"),
+                message: Some("skinned".to_string()),
+            },
+            "a refusal keeps its code"
+        );
+        assert_eq!((report.virtual_instances, report.forward_instances), (0, 3));
+        assert!(report.bake_requests.is_empty() && report.virtual_ids.is_empty());
     }
 }
