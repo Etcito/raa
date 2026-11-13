@@ -124,19 +124,25 @@ fn raa_physical_sky_dome_uv(direction: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(p.x + p.y, p.x - p.y) * 0.5 + 0.5;
 }
 
+// The cloud dome sampled by world direction with the bilinear clamping sampler (binding 4 holds
+// the dome while `flags.w` is 1).
+fn raa_physical_sky_cloud_dome(direction: vec3<f32>) -> vec4<f32> {
+    let dome = textureSampleLevel(
+        raa_sky_cloud_screen,
+        raa_sky_clamp_sampler,
+        raa_physical_sky_dome_uv(direction),
+        0.0,
+    );
+    return vec4<f32>(max(dome.rgb, vec3<f32>(0.0)), clamp(dome.a, 0.0, 1.0));
+}
+
 // Screen clouds use viewport UV. Texels M2 did not march hold the reserved negative alpha;
 // they never enter composition, falling back to a valid panorama or the neutral result.
 // With the cloud dome on (`flags.w`), binding 4 holds the dome instead and is sampled by world
 // direction with the bilinear clamping sampler: the viewport UV is not used.
 fn raa_physical_sky_cloud_screen(direction: vec3<f32>, uv: vec2<f32>) -> vec4<f32> {
     if (raa_physical_sky.flags.w != 0u) {
-        let dome = textureSampleLevel(
-            raa_sky_cloud_screen,
-            raa_sky_clamp_sampler,
-            raa_physical_sky_dome_uv(direction),
-            0.0,
-        );
-        return vec4<f32>(max(dome.rgb, vec3<f32>(0.0)), clamp(dome.a, 0.0, 1.0));
+        return raa_physical_sky_cloud_dome(direction);
     }
     if (raa_physical_sky.flags.y != 0u) {
         let cloud = textureSampleLevel(raa_sky_cloud_screen, raa_sky_repeat_sampler, uv, 0.0);
@@ -151,11 +157,16 @@ fn raa_physical_sky_composite(clear: vec3<f32>, cloud: vec4<f32>) -> vec3<f32> {
     return max(clear * clamp(cloud.a, 0.0, 1.0) + max(cloud.rgb, vec3<f32>(0.0)), vec3<f32>(0.0));
 }
 
+// The environment (cube, reflections, image-based lighting): with the cloud dome on its clouds
+// come from the dome, not from the 192x108 panorama, which looked pixelated in reflections.
 fn raa_physical_sky_radiance(direction: vec3<f32>, env: EnvGpu) -> vec3<f32> {
-    return raa_physical_sky_composite(
-        raa_physical_sky_clear(direction, env),
-        raa_physical_sky_cloud_panorama(direction),
-    );
+    var cloud = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (raa_physical_sky.flags.w != 0u) {
+        cloud = raa_physical_sky_cloud_dome(direction);
+    } else {
+        cloud = raa_physical_sky_cloud_panorama(direction);
+    }
+    return raa_physical_sky_composite(raa_physical_sky_clear(direction, env), cloud);
 }
 
 fn raa_physical_sky_radiance_screen(direction: vec3<f32>, uv: vec2<f32>, env: EnvGpu) -> vec3<f32> {
