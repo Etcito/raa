@@ -246,10 +246,12 @@ fn decode_position(i: VgInstance, v: PackedVertex) -> vec3<f32> {
     return i.quant.xyz + grid * i.quant.w;
 }
 
-// Signed octahedral coordinates packed as two i16 words scaled by 32767 (S29 dag.rs).
+// Signed octahedral coordinates packed as two i16 words scaled by 32767 (S29 dag.rs:518-533).
+// `pack_vertex` puts normal x in the high half of `b` and normal y in the low half of `c`; both
+// are sign-extended. Reading x from the low half of `b` would decode the grid z instead.
 fn decode_normal(v: PackedVertex) -> vec3<f32> {
     let e = vec2<f32>(
-        f32(i32(v.b << 16u) >> 16u),
+        f32(i32(v.b) >> 16u),
         f32(i32(v.c << 16u) >> 16u),
     ) / 32767.0;
     var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
