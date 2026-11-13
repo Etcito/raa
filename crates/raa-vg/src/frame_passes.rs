@@ -258,12 +258,6 @@ impl VgFrameState {
     }
 }
 
-/// Drops the surface-sized resources of a pass after a resize; the pipelines stay.
-fn reset_surface(state: &mut VgFrameState) {
-    state.resources = None;
-    state.occlusion_history = false;
-}
-
 /// `vg.cull` (order 21): writes the main view's first-phase `PassView` and records
 /// [`CullPipelines::record`] with [`CullPhase::First`].
 pub(crate) struct VgCullPass {
@@ -288,9 +282,8 @@ impl FeaturePass for VgCullPass {
         Self::ORDER
     }
 
-    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
-        reset_surface(&mut self.state.borrow_mut());
-    }
+    /// Nothing to drop: VgFrameState::ensure_resources recreates the surface-sized resources (and clears the occlusion history) when the viewport or capacity changes.
+    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {}
 
     /// Handoff: `raa-vg: second occlusion phase` takes
     /// `VgCullPass::prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError>` and
@@ -389,9 +382,8 @@ impl FeaturePass for VgRasterPass {
         Self::ORDER
     }
 
-    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
-        reset_surface(&mut self.state.borrow_mut());
-    }
+    /// Nothing to drop: VgFrameState::ensure_resources recreates the surface-sized resources (and clears the occlusion history) when the viewport or capacity changes.
+    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {}
 
     fn prepare(&mut self, _ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
@@ -462,9 +454,8 @@ impl FeaturePass for VgResolvePass {
         Self::ORDER
     }
 
-    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
-        reset_surface(&mut self.state.borrow_mut());
-    }
+    /// Nothing to drop: VgFrameState::ensure_resources recreates the surface-sized resources (and clears the occlusion history) when the viewport or capacity changes.
+    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {}
 
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
