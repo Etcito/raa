@@ -348,15 +348,15 @@ impl Rasterizer {
     /// one indirect draw, then the software rasteriser of the small clusters as one indirect
     /// compute dispatch with the same group 2 at `CullWork::software_args_offset()`.
     ///
-    /// Handoff: `Rasterizer::bindings(&self, gpu: &GpuContext, slots: &ViewSlots, slot: u32,
-    /// scene: &VgScene, work: &CullWork, vis: &VisibilityBuffer) -> RasterBindings` and
-    /// `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings: &RasterBindings,
-    /// work: &CullWork, target: RasterTarget<'_>) -> ()` (crates/raa-vg/src/raster.rs) are
-    /// exposed to card 'raa-vg: software rasterisation of small clusters in the frame', whose
-    /// software dispatch this method now records behind the same group 2, and to
-    /// `frame_passes.rs`, which builds the bindings and calls `record`. State: the group-2
-    /// `RasterBindings` bind group with its dynamic `PassView` slot and the `CullWork` indirect
-    /// arguments; no keys.
+    /// Handoff: `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings:
+    /// &RasterBindings, work: &CullWork, target: RasterTarget<'_>) -> ()` and
+    /// `Rasterizer::bindings(&self, gpu: &GpuContext, slots: &ViewSlots, slot: u32, scene:
+    /// &VgScene, work: &CullWork, vis: &VisibilityBuffer) -> RasterBindings`
+    /// (crates/raa-vg/src/raster.rs) are exposed to card 'raa-vg: software rasterisation of small
+    /// clusters in the frame', whose software dispatch this method now records behind the same
+    /// group 2, and to `frame_passes.rs`, which builds the bindings and calls `record`. State:
+    /// the group-2 `RasterBindings` bind group with its dynamic `PassView` slot and the `CullWork`
+    /// indirect arguments; no keys.
     pub fn record(
         &self,
         encoder: &mut wgpu::CommandEncoder,

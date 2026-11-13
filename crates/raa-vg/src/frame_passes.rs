@@ -404,16 +404,18 @@ impl FeaturePass for VgRasterPass {
         Ok(())
     }
 
-    /// Handoff: `raa-vg: software rasterisation of small clusters in the frame` takes
+    /// Handoff: `VgRasterPass::record` is the share of card 'raa-vg: software rasterisation of
+    /// small clusters in the frame' in this file: it calls
     /// `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings: &RasterBindings,
     /// work: &CullWork, target: RasterTarget<'_>) -> ()` and `raster_sw_module_wgsl() -> String`
-    /// (crates/raa-vg/src/raster.rs), whose earlier-landed Handoff (raster.rs:60 and raster.rs:333)
-    /// this share read and follows: `Rasterizer::record` in raster.rs records the software
-    /// dispatch at `CullWork::software_args_offset()` after the hardware draw. In this file
-    /// `VgRasterPass::record` calls it with `RasterTarget::Visibility`, and `VgCullPass::prepare`
-    /// sets `view.allow_software` from `settings.software_raster`; a pass skips while a scene
-    /// buffer is not uploaded. State/keys: `settings.software_raster`, the main `CullWork`
-    /// indirect arguments and the `VgResources` registry (visibility, main, groups.raster).
+    /// (crates/raa-vg/src/raster.rs), whose earlier-landed Handoff (raster.rs:60, on
+    /// `raster_sw_module_wgsl`) this share read and follows: `Rasterizer::record` in raster.rs
+    /// records the software dispatch at `CullWork::software_args_offset()` after the hardware
+    /// draw. In this file `VgRasterPass::record` calls it with `RasterTarget::Visibility`, and
+    /// `VgCullPass::prepare` sets `view.allow_software` from `settings.software_raster`; a pass
+    /// skips while a scene buffer is not uploaded. State/keys: `settings.software_raster`, the
+    /// main `CullWork` indirect arguments and the `VgResources` registry (visibility, main,
+    /// groups.raster).
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         if !state.active || !state.scene_ready() {
