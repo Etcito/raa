@@ -9,58 +9,6 @@
 //! [`VgFrameState::release`] drops every vg buffer and texture so the disabled state owns
 //! nothing (P3-Q8, S32).
 //!
-//! Handoff: `raa-vg: VgFeature::install and VgHandle (settings, instances, active state,
-//! prepare_frame)` takes `pub(crate) fn new(lit: LitHandle) -> VgFrameState`,
-//! `pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) -> ()`,
-//! `pub(crate) fn release(&mut self) -> ()`,
-//! `pub(crate) fn allocated_bytes(&self) -> u64` and
-//! `pub(crate) fn new(state: SharedVg) -> VgCullPass` (with the raster and resolve passes)
-//! exported by crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg`, writing
-//! the state fields (active, camera, viewport, settings, previous_view_proj, scene) and
-//! installing the three passes. `recorded` is cleared once per frame at the start of each
-//! pass's `prepare` (`VgCullPass::prepare`, `VgRasterPass::prepare` and `VgResolvePass::prepare`
-//! in this file) and again by `VgFrameState::release`, so `VgHandle::prepare_frame` reads the
-//! names after the passes ran. State/keys: the `VgPipelines`/`VgResources`/`VgGroups` registry,
-//! the `VgScene` pool and the lit storage generation.
-//!
-//! Handoff: `raa-vg: vg.gbuffer merge into depth and G-buffer` takes
-//! `pub(crate) type SharedVg = Rc<RefCell<VgFrameState>>` and
-//! `pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) -> ()` exported by
-//! crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg`, reading
-//! `resources.surface`, `resources.visibility`, `resources.main`, `scene` and `lit`, and
-//! installing its order-32 `FeaturePass` beside the three passes here; state/keys: the
-//! `VgResources` registry and the lit material storage (`material_fns`).
-//!
-//! Handoff: `raa-vg: software rasterisation of small clusters in the frame` takes
-//! `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings: &RasterBindings,
-//! work: &CullWork, target: RasterTarget<'_>) -> ()` and `raster_sw_module_wgsl() -> String`
-//! (crates/raa-vg/src/raster.rs), whose earlier-landed Handoff (raster.rs:60 and raster.rs:333)
-//! this share read and follows: that card extends `Rasterizer::record` in raster.rs with the
-//! software dispatch at `CullWork::software_args_offset()`. In this file it plugs into
-//! `VgRasterPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`, where
-//! `RasterTarget::Visibility` is the only target today, and into `VgCullPass::prepare`, where
-//! `view.allow_software = 0` is fixed today. State/keys: `settings.software_raster`, the main
-//! `CullWork` indirect arguments and the `VgResources` registry (visibility, main,
-//! groups.raster).
-//!
-//! Handoff: `raa-vg: second occlusion phase` takes
-//! `VgCullPass::prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError>` and
-//! `VgCullPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`, the main
-//! `CullWork` (`VgResources::main`) and the `previous_view_proj`/`occlusion_history` fields from
-//! crates/raa-vg/src/frame_passes.rs; `PassView`, `ViewSlots` and `MAIN_SECOND` are imported
-//! from crates/raa-vg/src/culling.rs, not exported here. It attaches by extending those two
-//! methods in this file, where `CullPhase::First` is the only phase today, and by setting
-//! `view.occlusion_enabled` from `settings.occlusion`; state/keys: `previous_view_proj`,
-//! `occlusion_history`, `MAIN_SECOND` and the second-phase `CullPhase`.
-//!
-//! Handoff: `raa-vg: cascade integration into vg.cull and vg.raster, feature id 36` takes
-//! `VgCullPass::prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError>`,
-//! `VgCullPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`,
-//! `VgRasterPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>` and the
-//! `VgResources` registry exported by crates/raa-vg/src/frame_passes.rs; it attaches by adding
-//! the cascade `CullWork`s and bind groups to `VgResources` and recording them from those
-//! methods in this file. State/keys: the `CASCADE_BASE`..`PassView` slots and `CullPhase` from
-//! crates/raa-vg/src/culling.rs, `settings.shadows`, the cascade `CullWork`s and feature id 36.
 //!
 //! no handoff: raa-vg: vg.shade forward contributor and VgShadeGpu slots takes nothing from this card
 
@@ -84,6 +32,14 @@ use crate::scene::VgScene;
 use crate::settings::VgSettings;
 
 /// The frame state shared between the virtualized-geometry passes and their handle.
+///
+/// Handoff: `raa-vg: vg.gbuffer merge into depth and G-buffer` takes
+/// `pub(crate) type SharedVg = Rc<RefCell<VgFrameState>>` and
+/// `pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) -> ()` exported by
+/// crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg`, reading
+/// `resources.surface`, `resources.visibility`, `resources.main`, `scene` and `lit`, and
+/// installing its order-32 `FeaturePass` beside the three passes here; state/keys: the
+/// `VgResources` registry and the lit material storage (`material_fns`).
 pub(crate) type SharedVg = Rc<RefCell<VgFrameState>>;
 
 /// The builders and GPU objects of the three passes, created on the first active frame.
@@ -164,6 +120,20 @@ impl VgFrameState {
     /// Creates the pipelines when absent, the surface-sized resources when absent or when the
     /// viewport or `maxVisibleClusters` changed (clearing the occlusion history), and the
     /// group-2 bind groups when the scene or the lit storage generation changed.
+    ///
+    /// Handoff: `raa-vg: VgFeature::install and VgHandle (settings, instances, active state,
+    /// prepare_frame)` takes `pub(crate) fn new(lit: LitHandle) -> VgFrameState`,
+    /// `pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) -> ()`,
+    /// `pub(crate) fn release(&mut self) -> ()`,
+    /// `pub(crate) fn allocated_bytes(&self) -> u64` and
+    /// `pub(crate) fn new(state: SharedVg) -> VgCullPass` (with the raster and resolve passes)
+    /// exported by crates/raa-vg/src/frame_passes.rs; it attaches by holding a `SharedVg`, writing
+    /// the state fields (active, camera, viewport, settings, previous_view_proj, scene) and
+    /// installing the three passes. `recorded` is cleared once per frame at the start of each
+    /// pass's `prepare` (`VgCullPass::prepare`, `VgRasterPass::prepare` and `VgResolvePass::prepare`
+    /// in this file) and again by `VgFrameState::release`, so `VgHandle::prepare_frame` reads the
+    /// names after the passes ran. State/keys: the `VgPipelines`/`VgResources`/`VgGroups` registry,
+    /// the `VgScene` pool and the lit storage generation.
     pub(crate) fn ensure_resources(&mut self, gpu: &GpuContext) {
         if self.pipelines.is_none() {
             self.pipelines = Some(VgPipelines {
@@ -317,6 +287,15 @@ impl FeaturePass for VgCullPass {
         reset_surface(&mut self.state.borrow_mut());
     }
 
+    /// Handoff: `raa-vg: second occlusion phase` takes
+    /// `VgCullPass::prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError>` and
+    /// `VgCullPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`, the main
+    /// `CullWork` (`VgResources::main`) and the `previous_view_proj`/`occlusion_history` fields from
+    /// crates/raa-vg/src/frame_passes.rs; `PassView`, `ViewSlots` and `MAIN_SECOND` are imported
+    /// from crates/raa-vg/src/culling.rs, not exported here. It attaches by extending those two
+    /// methods in this file, where `CullPhase::First` is the only phase today, and by setting
+    /// `view.occlusion_enabled` from `settings.occlusion`; state/keys: `previous_view_proj`,
+    /// `occlusion_history`, `MAIN_SECOND` and the second-phase `CullPhase`.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         if !state.active {
@@ -346,6 +325,14 @@ impl FeaturePass for VgCullPass {
         Ok(())
     }
 
+    /// Handoff: `raa-vg: cascade integration into vg.cull and vg.raster, feature id 36` takes
+    /// `VgCullPass::prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError>`,
+    /// `VgCullPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`,
+    /// `VgRasterPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>` and the
+    /// `VgResources` registry exported by crates/raa-vg/src/frame_passes.rs; it attaches by adding
+    /// the cascade `CullWork`s and bind groups to `VgResources` and recording them from those
+    /// methods in this file. State/keys: the `CASCADE_BASE`..`PassView` slots and `CullPhase` from
+    /// crates/raa-vg/src/culling.rs, `settings.shadows`, the cascade `CullWork`s and feature id 36.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         if !state.active {
@@ -409,6 +396,17 @@ impl FeaturePass for VgRasterPass {
         Ok(())
     }
 
+    /// Handoff: `raa-vg: software rasterisation of small clusters in the frame` takes
+    /// `Rasterizer::record(&self, encoder: &mut wgpu::CommandEncoder, bindings: &RasterBindings,
+    /// work: &CullWork, target: RasterTarget<'_>) -> ()` and `raster_sw_module_wgsl() -> String`
+    /// (crates/raa-vg/src/raster.rs), whose earlier-landed Handoff (raster.rs:60 and raster.rs:333)
+    /// this share read and follows: that card extends `Rasterizer::record` in raster.rs with the
+    /// software dispatch at `CullWork::software_args_offset()`. In this file it plugs into
+    /// `VgRasterPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`, where
+    /// `RasterTarget::Visibility` is the only target today, and into `VgCullPass::prepare`, where
+    /// `view.allow_software = 0` is fixed today. State/keys: `settings.software_raster`, the main
+    /// `CullWork` indirect arguments and the `VgResources` registry (visibility, main,
+    /// groups.raster).
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         if !state.active {
