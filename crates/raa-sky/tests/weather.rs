@@ -676,28 +676,48 @@ fn cloud_samples_and_scale_default_and_are_validated() {
     assert_eq!(WeatherSettings::default().cloud_samples, 56);
     assert_eq!(WeatherSettings::default().cloud_scale, 0.5);
     for ok in [8_u32, 56, 256] {
-        let s = WeatherSettings { cloud_samples: ok, ..WeatherSettings::default() };
+        let s = WeatherSettings {
+            cloud_samples: ok,
+            ..WeatherSettings::default()
+        };
         s.validate().unwrap();
     }
     for bad in [0_u32, 7, 257, u32::MAX] {
-        let s = WeatherSettings { cloud_samples: bad, ..WeatherSettings::default() };
+        let s = WeatherSettings {
+            cloud_samples: bad,
+            ..WeatherSettings::default()
+        };
         refused(s.validate(), "cloud_samples");
     }
     for ok in [0.25_f32, 0.5, 1.0] {
-        let s = WeatherSettings { cloud_scale: ok, ..WeatherSettings::default() };
+        let s = WeatherSettings {
+            cloud_scale: ok,
+            ..WeatherSettings::default()
+        };
         s.validate().unwrap();
     }
     for bad in [0.0_f32, 0.24, 1.01, f32::NAN, f32::INFINITY] {
-        let s = WeatherSettings { cloud_scale: bad, ..WeatherSettings::default() };
+        let s = WeatherSettings {
+            cloud_scale: bad,
+            ..WeatherSettings::default()
+        };
         refused(s.validate(), "cloud_scale");
     }
     assert!(WeatherSettings::default().cloud_dither);
     assert_eq!(WeatherSettings::default().cloud_noise_size, 1);
     for ok in [1_u32, 8, 16] {
-        WeatherSettings { cloud_noise_size: ok, ..WeatherSettings::default() }.validate().unwrap();
+        WeatherSettings {
+            cloud_noise_size: ok,
+            ..WeatherSettings::default()
+        }
+        .validate()
+        .unwrap();
     }
     for bad in [0_u32, 17, u32::MAX] {
-        let s = WeatherSettings { cloud_noise_size: bad, ..WeatherSettings::default() };
+        let s = WeatherSettings {
+            cloud_noise_size: bad,
+            ..WeatherSettings::default()
+        };
         refused(s.validate(), "cloud_noise_size");
     }
 }

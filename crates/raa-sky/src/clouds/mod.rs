@@ -215,7 +215,7 @@ impl VolumetricClouds {
     fn freeze(frame: &CloudFrame, accumulation: Option<Accumulation>) -> Freeze {
         match accumulation {
             Some(a) if a.count >= FREEZE_FRAMES && !frame.animated => {
-                if frame.invocation % REFRESH_PERIOD == 0 {
+                if frame.invocation.is_multiple_of(REFRESH_PERIOD) {
                     Freeze::Refresh
                 } else {
                     Freeze::Skip

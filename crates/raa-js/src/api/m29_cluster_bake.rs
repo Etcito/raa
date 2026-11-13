@@ -965,10 +965,10 @@ mod web {
 
     /// The retained bake inputs of a handle: an absent entry is `vg.invalid` naming `mesh`
     /// ('no retained geometry').
-    fn retained_source<'a>(
-        sources: Option<&'a MeshSources>,
+    fn retained_source(
+        sources: Option<&MeshSources>,
         mesh: u32,
-    ) -> Result<&'a crate::state::MeshSource, RaaError> {
+    ) -> Result<&crate::state::MeshSource, RaaError> {
         sources
             .and_then(|sources| sources.get(mesh))
             .ok_or_else(|| vg_invalid("mesh", "no retained geometry"))

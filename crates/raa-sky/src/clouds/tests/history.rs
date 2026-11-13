@@ -286,8 +286,10 @@ fn still_sky_with_an_identical_camera_accumulates_and_freezes() {
     use crate::{SkyHandle, Weather, WeatherSettings};
 
     let handle = SkyHandle::for_tests();
-    let mut settings = WeatherSettings::default();
-    settings.target = Weather { wind_speed: 0.0, evolution: 0.0, ..Weather::default() };
+    let settings = WeatherSettings {
+        target: Weather { wind_speed: 0.0, evolution: 0.0, ..Weather::default() },
+        ..WeatherSettings::default()
+    };
     handle.set_weather(settings).expect("weather");
     let mut time = handle.time_of_day().settings;
     time.playing = false;

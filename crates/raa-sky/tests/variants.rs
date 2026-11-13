@@ -796,11 +796,8 @@ fn physical_consumers_attach_the_exact_s10_group_two_layout() {
             .map(|(binding, _)| *binding)
             .collect();
         used.sort_unstable();
-        let expected = if name == "sky.env" {
-            vec![0, 1, 2, 3, 5, 6, 7]
-        } else {
-            vec![0, 1, 2, 3, 4, 5, 6, 7]
-        };
+        // The env reads binding 4 through the cloud dome (`raa_physical_sky_cloud_dome`).
+        let expected = vec![0, 1, 2, 3, 4, 5, 6, 7];
         assert_eq!(used, expected, "{name}: group-2 use");
     }
 }
