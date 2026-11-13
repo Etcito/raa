@@ -915,6 +915,7 @@ dependencies = [
  "raa-bloom",
  "raa-brdf",
  "raa-cel",
+ "raa-cluster",
  "raa-contact",
  "raa-core",
  "raa-csg",
