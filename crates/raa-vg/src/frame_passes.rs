@@ -25,15 +25,17 @@ use raa_lit::{LitHandle, MaterialFnId};
 use raa_math::Mat4;
 use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx, Targets};
 use raa_scene::Camera;
+use raa_shadow::{CascadeTargets, ShadowHandle};
 
 use crate::culling::{
-    CullPhase, CullPipelines, CullWork, MAIN_FIRST, MAIN_SECOND, PassView, ViewSlots,
+    CASCADE_BASE, CullPhase, CullPipelines, CullWork, MAIN_FIRST, MAIN_SECOND, PassView, ViewSlots,
 };
 use crate::hzb::Hzb;
 use crate::raster::{RasterBindings, RasterTarget, Rasterizer, VisibilityBuffer};
 use crate::resolve::{Resolve, VG_FRAME_GPU_SIZE, VgFrameParams, VgSurface, write_vg_frame};
 use crate::scene::VgScene;
 use crate::settings::VgSettings;
+use crate::shadow::{CascadeWork, cascade_views, record_cascades};
 
 /// The frame state shared between the virtualized-geometry passes and their handle.
 ///
@@ -72,6 +74,10 @@ pub(crate) struct VgResources {
     pub(crate) cull_current: wgpu::BindGroup,
     pub(crate) surface: VgSurface,
     pub(crate) frame: wgpu::Buffer,
+    /// The per-cascade cull work and stamped depth, at `shadow.csm`'s cascade resolution.
+    pub(crate) cascades: Option<CascadeWork>,
+    /// The `VgScene` generation the cascade bind groups were built for.
+    pub(crate) cascade_bound: Option<u64>,
     pub(crate) groups: Option<VgGroups>,
     pub(crate) bound: (u64, u64),
 }
@@ -102,6 +108,15 @@ pub(crate) struct VgFrameState {
     pub(crate) material_fns: Vec<MaterialFnId>,
     pub(crate) pipelines: Option<VgPipelines>,
     pub(crate) resources: Option<VgResources>,
+    /// The `shadow.csm` handle the cascade views and layers come from; `None` when the feature
+    /// was installed without one.
+    pub(crate) shadow: Option<ShadowHandle>,
+    /// The cascade views `VgCullPass::prepare` wrote into `CASCADE_BASE..` this frame.
+    pub(crate) cascade_views: [Option<PassView>; 4],
+    /// The stamps `CascadeWork::next_stamps` handed out for this frame's cascade views.
+    pub(crate) cascade_stamps: [u32; 4],
+    /// The cascades `shadow.csm` prepared this frame; `None` when shadows are off or absent.
+    pub(crate) cascade_targets: Option<CascadeTargets>,
     pub(crate) recorded: Vec<&'static str>,
 }
 
@@ -121,6 +136,10 @@ impl VgFrameState {
             material_fns: Vec::new(),
             pipelines: None,
             resources: None,
+            shadow: None,
+            cascade_views: [None; 4],
+            cascade_stamps: [0; 4],
+            cascade_targets: None,
             recorded: Vec::new(),
         }
     }
@@ -214,6 +233,8 @@ impl VgFrameState {
                     usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
+                cascades: None,
+                cascade_bound: None,
                 groups: None,
                 bound: (u64::MAX, u64::MAX),
             });
@@ -280,6 +301,9 @@ impl VgFrameState {
         self.pipelines = None;
         self.scene.release();
         self.material_fns.clear();
+        self.cascade_views = [None; 4];
+        self.cascade_stamps = [0; 4];
+        self.cascade_targets = None;
         self.recorded.clear();
         self.occlusion_history = false;
     }
@@ -300,6 +324,9 @@ impl VgFrameState {
             total += resources.current.allocated_bytes();
             total += resources.surface.allocated_bytes();
             total += resources.frame.size();
+            if let Some(cascades) = &resources.cascades {
+                total += cascades.allocated_bytes();
+            }
         }
         total
     }
@@ -340,6 +367,7 @@ impl FeaturePass for VgCullPass {
         if !state.active {
             return Ok(());
         }
+        let state = &mut *state;
         state.ensure_resources(ctx.gpu);
         state.recorded.clear();
         let Some(resources) = state.resources.as_ref() else {
@@ -371,6 +399,81 @@ impl FeaturePass for VgCullPass {
         let current_size = resources.current.size();
         second.hzb_size = [current_size.0 as f32, current_size.1 as f32];
         resources.slots.write(ctx.gpu, MAIN_SECOND, &second);
+
+        // The cascade views of this frame, when `shadow.csm` (order 20, prepared before this
+        // pass) handed out its targets. Without shadows or targets no cascade work happens.
+        state.cascade_views = [None; 4];
+        state.cascade_stamps = [0; 4];
+        state.cascade_targets = None;
+        if state.settings.shadows
+            && let Some(targets) = state
+                .shadow
+                .as_ref()
+                .and_then(|shadow| shadow.cascade_targets())
+        {
+            let views = cascade_views(&targets, &state.camera, &state.settings);
+            let resolution = targets.resolution;
+            let stamps = {
+                let Some(pipelines) = state.pipelines.as_ref() else {
+                    return Ok(());
+                };
+                let Some(resources) = state.resources.as_mut() else {
+                    return Ok(());
+                };
+                if resources
+                    .cascades
+                    .as_ref()
+                    .is_none_or(|cascades| cascades.resolution() != resolution)
+                {
+                    resources.cascades = Some(CascadeWork::new(
+                        ctx.gpu,
+                        &pipelines.cull,
+                        &pipelines.raster,
+                        resolution,
+                        u64::from(resources.capacity),
+                    ));
+                    resources.cascade_bound = None;
+                }
+                let Some(cascades) = resources.cascades.as_mut() else {
+                    return Ok(());
+                };
+                cascades.next_stamps()
+            };
+            let Some(resources) = state.resources.as_ref() else {
+                return Ok(());
+            };
+            for (index, view) in views.iter().enumerate() {
+                if let Some(mut view) = *view {
+                    view.stamp = stamps[index];
+                    resources
+                        .slots
+                        .write(ctx.gpu, CASCADE_BASE + index as u32, &view);
+                }
+            }
+            let scene_generation = state.scene.generation();
+            let Some(pipelines) = state.pipelines.as_ref() else {
+                return Ok(());
+            };
+            let Some(resources) = state.resources.as_mut() else {
+                return Ok(());
+            };
+            if resources.cascade_bound != Some(scene_generation) {
+                let Some(cascades) = resources.cascades.as_mut() else {
+                    return Ok(());
+                };
+                cascades.rebind(
+                    ctx.gpu,
+                    &pipelines.cull,
+                    &pipelines.raster,
+                    &resources.slots,
+                    &state.scene,
+                );
+                resources.cascade_bound = Some(scene_generation);
+            }
+            state.cascade_targets = Some(targets);
+            state.cascade_views = views;
+            state.cascade_stamps = stamps;
+        }
         Ok(())
     }
 
@@ -387,6 +490,7 @@ impl FeaturePass for VgCullPass {
         if !state.active || !state.scene_ready() {
             return Ok(());
         }
+        let state = &mut *state;
         let Some(resources) = state.resources.as_ref() else {
             return Ok(());
         };
@@ -404,6 +508,17 @@ impl FeaturePass for VgCullPass {
             &resources.main,
             CullPhase::First,
         );
+        if let Some(cascades) = resources.cascades.as_ref()
+            && state.cascade_targets.is_some()
+        {
+            cascades.record_cull(
+                ctx.encoder,
+                &pipelines.cull,
+                &state.scene,
+                &groups.cull,
+                &state.cascade_views,
+            );
+        }
         state.recorded.push(Self::NAME);
         Ok(())
     }
@@ -464,6 +579,7 @@ impl FeaturePass for VgRasterPass {
         if !state.active || !state.scene_ready() {
             return Ok(());
         }
+        let state = &mut *state;
         let Some(resources) = state.resources.as_ref() else {
             return Ok(());
         };
@@ -497,6 +613,28 @@ impl FeaturePass for VgRasterPass {
                 &groups.raster,
                 &resources.main,
                 RasterTarget::Visibility(&resources.visibility),
+            );
+        }
+        if state.cascade_targets.is_some() {
+            let Some(pipelines) = state.pipelines.as_ref() else {
+                return Ok(());
+            };
+            let Some(resources) = state.resources.as_mut() else {
+                return Ok(());
+            };
+            let Some(cascades) = resources.cascades.as_mut() else {
+                return Ok(());
+            };
+            let Some(targets) = state.cascade_targets.as_ref() else {
+                return Ok(());
+            };
+            record_cascades(
+                ctx.encoder,
+                &pipelines.raster,
+                cascades,
+                targets,
+                &state.cascade_views,
+                state.cascade_stamps,
             );
         }
         state.recorded.push(Self::NAME);

@@ -5,7 +5,7 @@
 //!
 //! The handle shares one `SharedVg` frame state with every pass and contributor. An inactive
 //! frame releases the frame state, so no vg buffer or texture survives and feature ids 27, 28
-//! and 36 stay clear (P3-Q8, S32); feature id 36 is the cascade card's.
+//! and 36 stay clear (P3-Q8, S32); feature id 36 follows the cascade availability.
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -126,8 +126,6 @@ struct HandleState {
     submission: Cell<Option<u64>>,
     #[allow(dead_code, reason = "the asynchronous cull statistics card reads it")]
     complete: Cell<bool>,
-    #[allow(dead_code, reason = "the cascade integration card reads it")]
-    shadow: Option<ShadowHandle>,
 }
 
 /// The installed virtualized-geometry feature; clones share one state.
@@ -265,7 +263,8 @@ impl VgHandle {
     }
 
     /// Plans the frame's paths, switches the active state and updates the lit `VirtualSet` and
-    /// feature ids 27 and 28 (36 is the cascade card's). Active frames create the resources,
+    /// feature ids 27, 28 and 36 (36 only when shadows are on and `shadow.csm` is enabled).
+    /// Active frames create the resources,
     /// upload the plan and publish the material functions; inactive frames release every vg
     /// buffer and texture. The report is kept for `instance`, `stats` and `set_instance`.
     ///
@@ -283,25 +282,30 @@ impl VgHandle {
         scene: &mut Scene,
         lit: &mut LitRenderer,
     ) -> VgSyncReport {
-        let settings = self
+        let (settings, shadow_handle) = self
             .shared
             .vg
             .try_borrow()
-            .map(|state| state.settings)
+            .map(|state| (state.settings, state.shadow.is_some()))
             .unwrap_or_default();
         if let Ok(mut state) = self.shared.vg.try_borrow_mut() {
             state.recorded.clear();
         }
-        let passes_enabled = match self.shared.pipeline.try_borrow() {
+        let (passes_enabled, shadow_enabled) = match self.shared.pipeline.try_borrow() {
             Ok(pipeline) => {
                 let entries = pipeline.passes();
-                VG_ENTRIES.iter().all(|name| {
+                (
+                    VG_ENTRIES.iter().all(|name| {
+                        entries
+                            .iter()
+                            .any(|info| info.name == *name && info.enabled)
+                    }),
                     entries
                         .iter()
-                        .any(|info| info.name == *name && info.enabled)
-                })
+                        .any(|info| info.name == "shadow.csm" && info.enabled),
+                )
             }
-            Err(_) => false,
+            Err(_) => (false, false),
         };
         scene.update_world();
         let plan = self.plan(scene, lit, &settings);
@@ -331,9 +335,10 @@ impl VgHandle {
         }
         lit.set_frame_feature(27, active);
         lit.set_frame_feature(28, active);
-        if !active {
-            lit.set_frame_feature(36, false);
-        }
+        lit.set_frame_feature(
+            36,
+            active && settings.shadows && shadow_handle && shadow_enabled,
+        );
         if let Ok(mut latest) = self.shared.latest.try_borrow_mut() {
             latest.report = Some(plan.report.clone());
             latest.reason = reason;
@@ -447,7 +452,8 @@ pub struct VgFeature;
 
 impl VgFeature {
     /// Adds `vg.shade` through [`LitRenderer::add_contributor`](raa_lit::LitRenderer) and the
-    /// four passes through [`Pipeline::add`](raa_pipeline::Pipeline), then disables all five.
+    /// four passes through [`Pipeline::add`](raa_pipeline::Pipeline), stores the optional
+    /// `shadow.csm` handle in the shared frame state, then disables all five.
     /// Refusals leave nothing installed: `pipeline.busy` when the pipeline is borrowed,
     /// `pipeline.duplicate_pass` when one of the five names already exists.
     pub fn install(
@@ -468,6 +474,9 @@ impl VgFeature {
             }
         }
         let vg: SharedVg = Rc::new(RefCell::new(VgFrameState::new(lit.handle())));
+        if let Ok(mut state) = vg.try_borrow_mut() {
+            state.shadow = shadow.clone();
+        }
         lit.add_contributor(Box::new(VgShadeContributor::new(Rc::clone(&vg))))?;
         {
             let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
@@ -494,7 +503,6 @@ impl VgFeature {
                 submitted_views: Cell::new(1),
                 submission: Cell::new(None),
                 complete: Cell::new(false),
-                shadow,
             }),
         })
     }
