@@ -40,6 +40,14 @@ pub const LIB_WGSL: &str = include_str!("wgsl/lib.wgsl");
 /// consumes frame light counts, packed light indices and the binding-13 tile texture.
 pub const LOCAL_LIGHTING_WGSL: &str = include_str!("wgsl/local_lighting.wgsl");
 
+/// S32 standard-Z depth helper: `RAA_DEPTH_FAR`, `raa_depth_nearer`, `raa_depth_nearest`,
+/// `raa_depth_farthest`, `raa_depth_is_far`, `raa_depth_key` and `raa_depth_from_key`.
+/// RAA is standard-Z (clip depth 0..1, clear 1, `Less`) while solstice is reversed-Z, so
+/// every adapted comparison, reduction and atomic depth goes through these helpers. The
+/// module declares no binding, no entry point and depends on nothing else (not even
+/// [`PRELUDE_WGSL`]), so a pass-private module can include it alone.
+pub const DEPTH_WGSL: &str = include_str!("wgsl/depth.wgsl");
+
 /// Prepass entry points: `vs_main` and `fs_main` writing the S12 `normal` (location 0:
 /// view-space normal xyz, roughness) and `material` (location 1: F0 rgb sRGB-encoded,
 /// metallic) targets.
@@ -354,6 +362,53 @@ fn fs_main(@builtin(position) frag: vec4<f32>, @builtin(front_facing) ff: bool) 
                 .contains("textureLoad(raa_cloud_transmittance, vec2<i32>(0, 0), 1, 0)")
         );
         assert!(CLOUD_SHADOW_WGSL.contains("raa_linear_clamp"));
+    }
+
+    #[test]
+    fn depth_helper_is_standalone_and_declares_the_seven_items() {
+        assert_eq!(Composer::validate(DEPTH_WGSL), Ok(()));
+        for name in [
+            "RAA_DEPTH_FAR",
+            "raa_depth_nearer",
+            "raa_depth_nearest",
+            "raa_depth_farthest",
+            "raa_depth_is_far",
+            "raa_depth_key",
+            "raa_depth_from_key",
+        ] {
+            assert!(DEPTH_WGSL.contains(name), "depth helper declares {name}");
+        }
+        assert!(!DEPTH_WGSL.contains("@group"));
+        assert!(!DEPTH_WGSL.contains("@binding"));
+    }
+
+    #[test]
+    fn depth_helper_probe_validates() {
+        let probe = format!(
+            "{DEPTH_WGSL}\n\
+@group(0) @binding(0) var<storage, read_write> probe_out: array<u32>;
+
+@compute @workgroup_size(1)
+fn depth_probe() {{
+    probe_out[0] = raa_depth_key(0.25);
+    probe_out[1] = bitcast<u32>(raa_depth_from_key(probe_out[0]));
+    probe_out[2] = select(0u, 1u, raa_depth_nearer(0.25, 0.5));
+    probe_out[3] = bitcast<u32>(raa_depth_farthest(0.25, 0.5));
+}}"
+        );
+        if let Err(e) = Composer::validate(&probe) {
+            panic!("{}: {}", e.code, e.message);
+        }
+    }
+
+    #[test]
+    fn depth_key_orders_standard_z() {
+        let depths = [0.0f32, 0.25, 0.999, 1.0];
+        let keys: Vec<u32> = depths.iter().map(|d| (1.0 - d).to_bits()).collect();
+        for pair in keys.windows(2) {
+            assert!(pair[0] > pair[1], "nearer depth has a larger key");
+        }
+        assert_eq!(keys[3], 0, "depth 1.0 is far or empty");
     }
 
     fn stub_composer() -> Composer {
