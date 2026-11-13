@@ -602,6 +602,33 @@ export function createPageJob(config) {
     ensure(new Set(value.stages).size === value.stages.length, 'page job config: stages: must be distinct');
     ensure(typeof value.validators === 'function', 'page job config: validators: must be a function');
     ensure(typeof value.validateMeasurement === 'function', 'page job config: validateMeasurement: must be a function');
+    ensure(value.report === undefined || typeof value.report === 'function',
+      'page job config: report: must be a function');
+  }
+
+  /**
+   * The stdout lines of the default report: the six forms the sky-weather CLI printed before the
+   * report option existed. `result` is the value the action returned, `inventory` the stage's rows.
+   */
+  function defaultReport(action, stage, result) {
+    if (action === 'check') return [`${config.name}: check ${stage}: ${result.length} image(s)`];
+    if (action === 'select') {
+      return [`${config.name}: select ${stage}: ${result.inventory.length} image(s), selection ${result.selectionId}`];
+    }
+    if (action === 'render') return [`${config.name}: render ${stage}: attempt ${result.attemptId}: ${result.status}`];
+    if (action === 'fresh') return [`${config.name}: fresh ${stage}: attempt ${result.attemptId}: ${result.status}`];
+    if (action === 'judge') return [`${config.name}: judge ${stage}: ${result.images.length} image(s): ${result.status}`];
+    return [`${config.name}: clean ${stage}: attempt ${result.attemptId} at ${result.directory}`];
+  }
+
+  const report = config.report ?? defaultReport;
+
+  /** The inventory of `<out>/selection.json`, read after the action (check returns its own rows). */
+  function selectionInventory(out) {
+    const file = containedPath(path.resolve(out), 'selection.json');
+    const selection = readJsonRecord(file);
+    ensure(Array.isArray(selection.inventory), `${file}: inventory must be an array`);
+    return selection.inventory;
   }
 
   /** Import only modules listed by the delivered scenes.json. */
@@ -1353,31 +1380,41 @@ export function createPageJob(config) {
 
   async function main(argv = process.argv.slice(2)) {
     const { action, page, out, stage, budgetMs } = parseArgs(argv);
-    if (action === 'check') {
-      const inventory = await check(page, stage);
-      process.stdout.write(`${config.name}: check ${stage}: ${inventory.length} image(s)\n`);
-    } else if (action === 'select') {
-      const selection = await select(page, out, stage);
-      process.stdout.write(`${config.name}: select ${stage}: ${selection.inventory.length} image(s), selection ${selection.selectionId}\n`);
-    } else if (action === 'render') {
-      const run = await render(page, out, stage);
-      process.stdout.write(`${config.name}: render ${stage}: attempt ${run.attemptId}: ${run.status}\n`);
-    } else if (action === 'fresh') {
-      const record = await fresh(page, out, stage);
-      process.stdout.write(`${config.name}: fresh ${stage}: attempt ${record.attemptId}: ${record.status}\n`);
-    } else if (action === 'judge') {
-      const record = await judge(page, out, stage, { budgetMs });
-      process.stdout.write(`${config.name}: judge ${stage}: ${record.images.length} image(s): ${record.status}\n`);
-    } else {
-      const attempt = await clean(page, out, stage);
-      process.stdout.write(`${config.name}: clean ${stage}: attempt ${attempt.attemptId} at ${attempt.directory}\n`);
-    }
+    let result;
+    if (action === 'check') result = await check(page, stage);
+    else if (action === 'select') result = await select(page, out, stage);
+    else if (action === 'render') result = await render(page, out, stage);
+    else if (action === 'fresh') result = await fresh(page, out, stage);
+    else if (action === 'judge') result = await judge(page, out, stage, { budgetMs });
+    else result = await clean(page, out, stage);
+    const inventory = action === 'check' ? result : selectionInventory(out);
+    const lines = report(action, stage, result, inventory);
+    ensure(Array.isArray(lines) && lines.every((line) => typeof line === 'string'),
+      `${config.name}: report must return an array of lines`);
+    for (const line of lines) process.stdout.write(`${line}\n`);
   }
 
-  return {
+  const pageJob = {
     STAGES, ACTIONS, RECORD_FIELDS, USAGE, attemptRecords, repositoryRoot, readBuildReceipt, buildKey,
     loadScenes, verifyPage, check, select, storeRoot, clean, render, verifyFresh, fresh, judge,
     parseArgs, main,
   };
+  Object.defineProperty(pageJob, 'name', { value: config.name, enumerable: true });
+  return pageJob;
+}
+
+/**
+ * Entry guard of a page job CLI: when `process.argv[1]` resolves to the file of `metaUrl`, run the
+ * job's `main`; a rejection writes `<name>: <message>` to stderr and exits with code 1. Otherwise it
+ * does nothing. A thin configuration ends its file with `runCli(job, import.meta.url)`.
+ */
+export function runCli(job, metaUrl) {
+  const entry = process.argv[1];
+  if (!nonblank(entry)) return;
+  if (metaUrl !== pathToFileURL(path.resolve(entry)).href) return;
+  job.main().catch((error) => {
+    process.stderr.write(`${job.name}: ${message(error)}\n`);
+    process.exit(1);
+  });
 }
 

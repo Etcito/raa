@@ -6,8 +6,9 @@ import path from 'node:path';
 import childProcess from 'node:child_process';
 import zlib from 'node:zlib';
 import { randomUUID } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
-import { createPageJob, buildKey, attemptRecords } from './page-job.mjs';
+import { createPageJob, buildKey, attemptRecords, runCli } from './page-job.mjs';
 
 delete process.env.NMC_CACHE_DIR;
 delete process.env.TOY_RERENDER_ALL;
@@ -183,6 +184,7 @@ function createToyJob(overrides = {}) {
       measurementCalls.push(measurement);
       if (overrides.measureError) throw new Error(overrides.measureError);
     },
+    report: overrides.report,
   });
   return { job, validators, validatorsCalls, factCalls, measurementCalls };
 }
@@ -472,4 +474,96 @@ test('buildKey drops the preparation id and follows the source text', () => {
   });
   assert.notDeepEqual(key, changed);
   assert.deepEqual(key, buildKey({ inputs: { ...inputs, preparationId: randomUUID() } }));
+});
+
+test('the job exposes its read-only name', () => {
+  const { job } = createToyJob();
+  assert.equal(job.name, 'toy-job');
+  assert.throws(() => { job.name = 'other'; }, TypeError);
+  assert.equal(job.name, 'toy-job');
+});
+
+test('main prints the default report when no report is configured', async (t) => {
+  const state = fixture(t, { scenes: [ONE, TWO] });
+  const { job } = createToyJob();
+  const written = [];
+  t.mock.method(process.stdout, 'write', (chunk) => { written.push(String(chunk)); return true; });
+  await job.main(['check', '--page', state.page, '--stage', 'one']);
+  assert.deepEqual(written, ['toy-job: check one: 1 image(s)\n']);
+  written.length = 0;
+  await job.main(['check', '--page', state.page, '--stage', 'two']);
+  assert.deepEqual(written, ['toy-job: check two: 2 image(s)\n']);
+});
+
+test('a configured report prints exactly its lines for check and select', async (t) => {
+  const state = fixture(t, { scenes: [ONE] });
+  const out = path.join(state.root, 'out/toy/one');
+  const calls = [];
+  const report = (action, stage, result, inventory) => {
+    calls.push({ action, stage, result, inventory });
+    return action === 'check'
+      ? ['checked the toy page', 'and its fixture']
+      : [`selected ${result.selectionId}`, `stage ${stage}`, `rows ${inventory.length}`];
+  };
+  const { job } = createToyJob({ report });
+  const written = [];
+  t.mock.method(process.stdout, 'write', (chunk) => { written.push(String(chunk)); return true; });
+
+  await job.main(['check', '--page', state.page, '--stage', 'one']);
+  assert.deepEqual(written, ['checked the toy page\n', 'and its fixture\n']);
+  const checked = calls.at(-1);
+  assert.equal(checked.action, 'check');
+  assert.deepEqual(checked.result, checked.inventory);
+  assert.deepEqual(checked.inventory.map((row) => row.id), ['toy-one-scene-image']);
+
+  written.length = 0;
+  await job.main(['select', '--page', state.page, '--out', out, '--stage', 'one']);
+  const selection = readJsonRecord(containedPath(out, 'selection.json'));
+  assert.deepEqual(written, [`selected ${selection.selectionId}\n`, 'stage one\n', 'rows 1\n']);
+  const selected = calls.at(-1);
+  assert.equal(selected.action, 'select');
+  assert.deepEqual(selected.result, selection);
+  assert.deepEqual(selected.inventory, selection.inventory);
+  assert.deepEqual(selected.inventory.map((row) => row.id), ['toy-one-scene-image']);
+});
+
+test('a present non-function report is refused at creation', () => {
+  const base = {
+    name: 'toy-job', topic: 'toy', stages: ['one', 'two'], envPrefix: 'TOY',
+    validators: () => ({ validateInventory() { return []; }, validateRequiredFacts() {} }),
+    validateMeasurement() {},
+  };
+  for (const report of ['not a function', null, ['lines']]) {
+    assert.throws(() => createPageJob({ ...base, report }),
+      (error) => error.message.startsWith('page job config: report: '));
+  }
+});
+
+test('a report that does not return an array of lines rejects main', async (t) => {
+  const state = fixture(t, { scenes: [ONE] });
+  t.mock.method(process.stdout, 'write', () => true);
+  for (const lines of ['one line', ['a line', 7], {}]) {
+    const { job } = createToyJob({ report: () => lines });
+    await assert.rejects(job.main(['check', '--page', state.page, '--stage', 'one']),
+      (error) => error.message === 'toy-job: report must return an array of lines');
+  }
+});
+
+test('runCli acts only when the metaUrl is the entry point', async (t) => {
+  const entry = path.join(scratch(t), 'toy-job.mjs');
+  fs.writeFileSync(entry, '#!/usr/bin/env node\n');
+  const original = process.argv[1];
+  t.after(() => { process.argv[1] = original; });
+
+  let called = 0;
+  const job = { name: 'toy-job', main: async () => { called += 1; } };
+  process.argv[1] = entry;
+  const matching = pathToFileURL(path.resolve(entry)).href;
+  runCli(job, pathToFileURL(path.join(path.dirname(entry), 'other-job.mjs')).href);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(called, 0);
+
+  runCli(job, matching);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(called, 1);
 });
