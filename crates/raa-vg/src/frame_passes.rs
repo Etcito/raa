@@ -1,8 +1,10 @@
 //! The frame state shared by the virtualized-geometry passes and the `vg.cull`, `vg.raster`
 //! and `vg.resolve` feature passes of the main view (S32, S12 orders 21-23). The main view
 //! runs two occlusion phases: the first tests the previous frame's merged depth pyramid and
-//! the second re-tests the retries against this frame's visibility keys, then the hardware
-//! and software rasterisers fill the visibility buffer.
+//! the second re-tests the retries against this frame's visibility keys merged with the
+//! previous frame's forward depth while the camera is unchanged (forward occluders are drawn by
+//! `prepass` only after `vg.raster`), then the hardware and software rasterisers fill the
+//! visibility buffer.
 //!
 //! The state owns the lit handle, the settings, the main camera and viewport, the scene pool,
 //! the GPU pipelines and the surface-sized resources. [`VgFrameState::ensure_resources`]
@@ -56,6 +58,115 @@ pub(crate) struct VgPipelines {
     pub(crate) cull: CullPipelines,
     pub(crate) raster: Rasterizer,
     pub(crate) resolve: Resolve,
+    /// `merge_forward_occluders` of [`occluder_keys_module_wgsl`], run before the second phase.
+    pub(crate) occluders: wgpu::ComputePipeline,
+}
+
+/// Bytes of the `OccluderParams` uniform of [`occluder_keys_module_wgsl`].
+const OCCLUDER_PARAMS_SIZE: u64 = 16;
+
+/// The body of the second-phase occluder merge: per pixel, this frame's visibility key, or the
+/// nearer key of the previous frame's forward surface when `use_forward` is set. A previous
+/// pixel counts as forward where no virtualized surface was resolved (`ids.x == 0`) or where the
+/// merged depth is nearer than the resolved virtualized depth (`ids.w`), so a forward surface
+/// won the depth test of `vg.gbuffer`; where the virtualized surface won, the forward depth
+/// behind it is unknown and nothing is merged. Keys order like `raa_depth_key` (larger is
+/// nearer, 0 is far or empty), so `max` keeps the nearer one, as `vis_write.wgsl` does.
+const OCCLUDER_KEYS_WGSL: &str = r#"
+struct OccluderParams {
+    size: vec2u,
+    use_forward: u32,
+    _pad: u32,
+}
+
+@group(0) @binding(0) var<uniform> params: OccluderParams;
+@group(0) @binding(1) var<storage, read> vis_depth: array<u32>;
+@group(0) @binding(2) var<storage, read_write> occluder_keys: array<u32>;
+@group(0) @binding(3) var previous_depth: texture_depth_2d;
+@group(0) @binding(4) var previous_ids: texture_2d<u32>;
+
+@compute @workgroup_size(8, 8)
+fn merge_forward_occluders(@builtin(global_invocation_id) id: vec3u) {
+    if id.x >= params.size.x || id.y >= params.size.y {
+        return;
+    }
+    let index = id.y * params.size.x + id.x;
+    var key = vis_depth[index];
+    if params.use_forward != 0u {
+        let pixel = vec2i(id.xy);
+        let merged = textureLoad(previous_depth, pixel, 0);
+        let ids = textureLoad(previous_ids, pixel, 0);
+        if ids.x == 0u || raa_depth_nearer(merged, bitcast<f32>(ids.w)) {
+            key = max(key, raa_depth_key(merged));
+        }
+    }
+    occluder_keys[index] = key;
+}
+"#;
+
+/// The second-phase occluder merge module: `DEPTH_WGSL` and [`OCCLUDER_KEYS_WGSL`]. Its one
+/// group (0) is private to the pass, like the occlusion pyramid modules.
+pub(crate) fn occluder_keys_module_wgsl() -> String {
+    [raa_shader::DEPTH_WGSL, OCCLUDER_KEYS_WGSL].concat()
+}
+
+/// The labelled compute pipeline of [`occluder_keys_module_wgsl`], with its layout derived
+/// from the module.
+fn occluder_pipeline(gpu: &GpuContext) -> wgpu::ComputePipeline {
+    let module = gpu
+        .device()
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-vg occluder keys module"),
+            source: wgpu::ShaderSource::Wgsl(occluder_keys_module_wgsl().into()),
+        });
+    gpu.device()
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("raa-vg merge_forward_occluders"),
+            layout: None,
+            module: &module,
+            entry_point: Some("merge_forward_occluders"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        })
+}
+
+/// The occluder keys the second phase's pyramid is seeded from, sized by the viewport.
+pub(crate) struct OccluderKeys {
+    /// One key per pixel, written by `merge_forward_occluders`.
+    pub(crate) keys: wgpu::Buffer,
+    /// `OccluderParams`: the viewport and the `use_forward` flag.
+    pub(crate) params: wgpu::Buffer,
+    /// The `use_forward` flag last written into `params`.
+    pub(crate) use_forward: Option<bool>,
+    /// The bind group and the `Targets.depth` view it reads, rebuilt when the targets change.
+    pub(crate) group: Option<(wgpu::TextureView, wgpu::BindGroup)>,
+}
+
+impl OccluderKeys {
+    fn new(gpu: &GpuContext, size: (u32, u32)) -> OccluderKeys {
+        let keys = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-vg occluder keys"),
+            size: u64::from(size.0) * u64::from(size.1) * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let params = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-vg occluder params"),
+            size: OCCLUDER_PARAMS_SIZE,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        OccluderKeys {
+            keys,
+            params,
+            use_forward: None,
+            group: None,
+        }
+    }
+
+    fn allocated_bytes(&self) -> u64 {
+        self.keys.size() + self.params.size()
+    }
 }
 
 /// Everything sized by the viewport, recreated on a resize or a capacity change.
@@ -67,7 +178,7 @@ pub(crate) struct VgResources {
     pub(crate) visibility: VisibilityBuffer,
     /// The previous frame's merged depth, the first phase's occlusion source.
     pub(crate) history: Hzb,
-    /// This frame's visibility keys, the second phase's occlusion source.
+    /// This frame's visibility keys and forward occluders, the second phase's occlusion source.
     pub(crate) current: Hzb,
     /// The cull scene group bound by the first phase: `PassView` over `history`.
     pub(crate) cull_history: wgpu::BindGroup,
@@ -83,6 +194,8 @@ pub(crate) struct VgResources {
     pub(crate) bound: (u64, u64),
     /// The asynchronous cull counters of this frame path, captured by `vg.resolve`.
     pub(crate) stats: VgStatsReadback,
+    /// The keys `VgResources::current` is seeded from before the second phase.
+    pub(crate) occluders: OccluderKeys,
 }
 
 /// The group-2 bind groups of the three passes, rebuilt when the scene or lit storage changes.
@@ -192,6 +305,7 @@ impl VgFrameState {
                 cull: CullPipelines::new(gpu),
                 raster: Rasterizer::new(gpu),
                 resolve: Resolve::new(gpu),
+                occluders: occluder_pipeline(gpu),
             });
         }
         let size = self.size();
@@ -244,6 +358,7 @@ impl VgFrameState {
                 groups: None,
                 bound: (u64::MAX, u64::MAX),
                 stats: VgStatsReadback::new(gpu),
+                occluders: OccluderKeys::new(gpu, size),
             });
         }
         let bound = (self.scene.generation(), self.lit.storage_generation());
@@ -332,6 +447,7 @@ impl VgFrameState {
             total += resources.surface.allocated_bytes();
             total += resources.frame.size();
             total += resources.stats.allocated_bytes();
+            total += resources.occluders.allocated_bytes();
             if let Some(cascades) = &resources.cascades {
                 total += cascades.allocated_bytes();
             }
@@ -559,10 +675,72 @@ impl FeaturePass for VgRasterPass {
     /// Nothing to drop: VgFrameState::ensure_resources recreates the surface-sized resources (and clears the occlusion history) when the viewport or capacity changes.
     fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {}
 
-    fn prepare(&mut self, _ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+    /// Prepares the occluder merge of the second phase: the previous frame's forward depth
+    /// (`Targets.depth` before `prepass` clears it) is merged only while the camera is the one
+    /// that frame drew with and the targets have the viewport's size, because the depth is then
+    /// already in this frame's screen space. A forward occluder that moved since keeps
+    /// its previous depth for one frame; a moving camera merges nothing, so the second phase
+    /// then tests the virtualized keys alone.
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
-        if state.active {
-            state.recorded.clear();
+        if !state.active {
+            return Ok(());
+        }
+        state.recorded.clear();
+        let state = &mut *state;
+        let use_forward = state.previous_view_proj == Some(state.camera.view_proj());
+        let Some(pipelines) = state.pipelines.as_ref() else {
+            return Ok(());
+        };
+        let Some(resources) = state.resources.as_mut() else {
+            return Ok(());
+        };
+        let use_forward = use_forward && ctx.targets.size() == resources.size;
+        let depth = ctx.targets.depth();
+        let occluders = &mut resources.occluders;
+        if occluders.use_forward != Some(use_forward) {
+            let mut bytes = [0u8; OCCLUDER_PARAMS_SIZE as usize];
+            bytes[0..4].copy_from_slice(&resources.size.0.to_le_bytes());
+            bytes[4..8].copy_from_slice(&resources.size.1.to_le_bytes());
+            bytes[8..12].copy_from_slice(&u32::from(use_forward).to_le_bytes());
+            ctx.gpu.queue().write_buffer(&occluders.params, 0, &bytes);
+            occluders.use_forward = Some(use_forward);
+        }
+        if occluders
+            .group
+            .as_ref()
+            .is_none_or(|(view, _)| view != depth)
+        {
+            let group = ctx
+                .gpu
+                .device()
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("raa-vg occluder keys"),
+                    layout: &pipelines.occluders.get_bind_group_layout(0),
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: occluders.params.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: resources.visibility.depth().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: occluders.keys.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(resources.surface.ids()),
+                        },
+                    ],
+                });
+            occluders.group = Some((depth.clone(), group));
         }
         Ok(())
     }
@@ -577,8 +755,10 @@ impl FeaturePass for VgRasterPass {
     /// draw. In this file `VgRasterPass::record` calls it with `RasterTarget::Visibility`, and
     /// `VgCullPass::prepare` sets `view.allow_software` from `settings.software_raster`; a pass
     /// skips while a scene buffer is not uploaded. With `settings.occlusion` and
-    /// `VgFrameState::occlusion_history` it then seeds `VgResources::current` from the first
-    /// raster's visibility depth and records the second cull phase through
+    /// `VgFrameState::occlusion_history` it then seeds `VgResources::current` from
+    /// `VgResources::occluders` (the first raster's visibility depth, merged by
+    /// `merge_forward_occluders` with the previous frame's forward depth while the camera is
+    /// unchanged) and records the second cull phase through
     /// `VgResources::cull_current` before rasterising the recovered clusters again. State/keys:
     /// `settings.software_raster`, the main `CullWork` indirect arguments and the `VgResources`
     /// registry (visibility, main, history, current, groups.raster).
@@ -605,9 +785,33 @@ impl FeaturePass for VgRasterPass {
             RasterTarget::Visibility(&resources.visibility),
         );
         if state.settings.occlusion && state.occlusion_history {
-            resources
-                .current
-                .record_from_keys(ctx.encoder, resources.visibility.depth());
+            // This frame's pyramid: the visibility keys, plus the forward occluders that
+            // `prepass` (order 30) has not drawn yet this frame, taken from the previous
+            // frame's depth while the camera is unchanged. Without them the second phase
+            // recovered every cluster the first rejected behind forward geometry.
+            if let Some((_, group)) = resources.occluders.group.as_ref() {
+                let mut pass = ctx
+                    .encoder
+                    .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("raa-vg occluder keys"),
+                        timestamp_writes: None,
+                    });
+                pass.set_pipeline(&pipelines.occluders);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(
+                    resources.size.0.div_ceil(8),
+                    resources.size.1.div_ceil(8),
+                    1,
+                );
+                drop(pass);
+                resources
+                    .current
+                    .record_from_keys(ctx.encoder, &resources.occluders.keys);
+            } else {
+                resources
+                    .current
+                    .record_from_keys(ctx.encoder, resources.visibility.depth());
+            }
             pipelines.cull.record(
                 ctx.encoder,
                 &state.scene,
@@ -760,6 +964,26 @@ mod tests {
     use raa_pipeline::{LightingResources, Pipeline};
 
     use super::*;
+
+    /// The second-phase occluder merge composes into a valid module whose depth reasoning goes
+    /// through the standard-Z helpers only.
+    #[test]
+    fn occluder_keys_module_validates() {
+        let wgsl = occluder_keys_module_wgsl();
+        assert_eq!(raa_shader::Composer::validate(&wgsl), Ok(()));
+        assert!(OCCLUDER_KEYS_WGSL.contains("raa_depth_nearer(merged, bitcast<f32>(ids.w))"));
+        assert!(OCCLUDER_KEYS_WGSL.contains("raa_depth_key(merged)"));
+        for comparison in [" < ", " > ", "<=", ">=", "min("] {
+            let body = OCCLUDER_KEYS_WGSL
+                .lines()
+                .filter(|line| !line.contains("params.size"))
+                .collect::<String>();
+            assert!(
+                !body.contains(comparison),
+                "hand-written depth compare {comparison}"
+            );
+        }
+    }
 
     #[test]
     fn pass_names_and_orders() {
