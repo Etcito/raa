@@ -1,12 +1,12 @@
-//! The S32 raster module of RAA's virtualized geometry: the hardware rasteriser's WGSL
-//! constants and module builder, the per-pixel [`VisibilityBuffer`] and the hardware
-//! [`Rasterizer`] that draws a cull's output into it. The software rasteriser, the cascade
-//! depth path and their frame passes land with their own cards. Adapted from solstice (MIT),
-//! Copyright (c) 2026 SamG-Coder: `crates/solstice-render/shaders/vg/raster_common.wgsl`,
-//! `raster_hw.wgsl`, `raster_hw_fragment.wgsl`, `vis_write.wgsl` and the hardware parts of
-//! `crates/solstice-render/src/vg/raster.rs:8-110` (the `VisibilityBuffer`, `new`, `bindings`
-//! and `record`), revision 7e465b5. The reversed-Z visibility write becomes the standard-Z
-//! `raa_depth_key` integer compare.
+//! The S32 raster module of RAA's virtualized geometry: the hardware and software rasterisers'
+//! WGSL constants and module builders, the per-pixel [`VisibilityBuffer`] and the hardware
+//! [`Rasterizer`] that draws a cull's output into it. The cascade depth path and the frame
+//! passes land with their own cards. Adapted from solstice (MIT), Copyright (c) 2026
+//! SamG-Coder: `crates/solstice-render/shaders/vg/raster_common.wgsl`, `raster_hw.wgsl`,
+//! `raster_hw_fragment.wgsl`, `raster_sw.wgsl`, `raster_sw_body.wgsl`, `vis_write.wgsl` and
+//! the hardware parts of `crates/solstice-render/src/vg/raster.rs:8-110` (the
+//! `VisibilityBuffer`, `new`, `bindings` and `record`), revision 7e465b5. The reversed-Z
+//! visibility write becomes the standard-Z `raa_depth_key` integer compare.
 
 use crate::culling::{CullWork, PASS_VIEW_WGSL, ViewSlots};
 use crate::scene::VgScene;
@@ -27,6 +27,14 @@ const RASTER_HW_WGSL: &str = include_str!("wgsl/raster_hw.wgsl");
 
 const RASTER_HW_FRAGMENT_WGSL: &str = include_str!("wgsl/raster_hw_fragment.wgsl");
 
+const RASTER_SW_WGSL: &str = include_str!("wgsl/raster_sw.wgsl");
+
+/// S32 `raster_sw_body.wgsl`: the software rasteriser of one small cluster per workgroup. Its
+/// `GROUP_SIZE` is the workgroup size every module that includes it shares. The including
+/// module supplies `write_visibility` and `depth_bias`, so the visibility variant keys the
+/// depth through `raa_depth_key` and a cascade depth variant can stamp it instead.
+pub const RASTER_SW_BODY_WGSL: &str = include_str!("wgsl/raster_sw_body.wgsl");
+
 /// The hardware raster module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] +
 /// [`RASTER_COMMON_WGSL`] + [`VIS_WRITE_WGSL`] + `raster_hw.wgsl` + `raster_hw_fragment.wgsl`,
 /// with entry points `vs_visibility`, `vs_depth` (vertex) and `fs_visibility` (fragment) at
@@ -39,6 +47,31 @@ pub fn raster_hw_module_wgsl() -> String {
         VIS_WRITE_WGSL,
         RASTER_HW_WGSL,
         RASTER_HW_FRAGMENT_WGSL,
+    ]
+    .concat()
+}
+
+/// The software raster module: `raa_shader::DEPTH_WGSL` + [`PASS_VIEW_WGSL`] +
+/// [`RASTER_COMMON_WGSL`] + [`VIS_WRITE_WGSL`] + `raster_sw.wgsl` + [`RASTER_SW_BODY_WGSL`],
+/// with the compute entry point `main` over the same group-2 bindings 0-8 as the hardware pass
+/// (all nine in one compute stage). The cluster of workgroup `w` is
+/// `visible[state.sw_base + w]`, and back faces are dropped unless `instance_two_sided`.
+///
+/// Handoff: `raster_sw_module_wgsl() -> String` exported by crates/raa-vg/src/raster.rs is
+/// exposed to card 'raa-vg: software rasterisation of small clusters in the frame', which
+/// builds the compute pipeline (entry `main`) on [`Rasterizer`]'s group-2 layout and dispatches
+/// it at `CullWork::software_args_offset()` next to the hardware draw. State/keys: the
+/// `CullWork` indirect software extent and the `CullStateRead.sw_base`/`sw_count` window into
+/// `CullWork::visible()`, whose entries hold the cluster word; the per-pixel key is written by
+/// `write_visibility` (`raa_depth_key`), so no CPU-side key registry.
+pub fn raster_sw_module_wgsl() -> String {
+    [
+        raa_shader::DEPTH_WGSL,
+        PASS_VIEW_WGSL,
+        RASTER_COMMON_WGSL,
+        VIS_WRITE_WGSL,
+        RASTER_SW_WGSL,
+        RASTER_SW_BODY_WGSL,
     ]
     .concat()
 }

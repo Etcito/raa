@@ -1,13 +1,16 @@
-//! The S32 hardware raster module (`raster_common`, `vis_write`, `raster_hw` and
-//! `raster_hw_fragment`): naga validation of the module, its entry points and stages, the
-//! group-2 bindings 0-8, the per-stage storage-buffer budget, the flat integer varyings and
-//! the one depth helper its visibility write calls.
+//! The S32 raster modules (`raster_common`, `vis_write`, `raster_hw`,
+//! `raster_hw_fragment`, `raster_sw` and `raster_sw_body`): naga validation of each module,
+//! its entry points and stages, the group-2 bindings 0-8, the per-stage storage-buffer
+//! budget, the flat integer varyings and the one depth helper their visibility write calls.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use raa_shader::{Composer, DEPTH_WGSL};
 use raa_vg::culling::PASS_VIEW_WGSL;
-use raa_vg::raster::{RASTER_COMMON_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl};
+use raa_vg::raster::{
+    RASTER_COMMON_WGSL, RASTER_SW_BODY_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl,
+    raster_sw_module_wgsl,
+};
 use std::collections::BTreeSet;
 use wgpu::naga;
 
@@ -466,4 +469,110 @@ fn hardware_raster_writes_a_baked_fan() {
         "the centre depth {centre_depth} lies between the near and far planes"
     );
     assert_eq!(corner_key, 0, "the corner pixel stays an empty key");
+}
+
+#[test]
+fn raster_sw_module_validates_as_a_compute_main() {
+    let wgsl = raster_sw_module_wgsl();
+    assert_eq!(Composer::validate(&wgsl), Ok(()));
+    let module = parse(&wgsl);
+    let entry_points: Vec<(&str, naga::ShaderStage)> = module
+        .entry_points
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.stage))
+        .collect();
+    assert_eq!(entry_points, [("main", naga::ShaderStage::Compute)]);
+}
+
+#[test]
+fn raster_sw_binds_group_two_zero_to_eight() {
+    let module = parse(&raster_sw_module_wgsl());
+    let mut bindings: Vec<(u32, u32)> = module
+        .global_variables
+        .iter()
+        .filter_map(|(_, global)| {
+            global
+                .binding
+                .map(|binding| (binding.group, binding.binding))
+        })
+        .collect();
+    bindings.sort_unstable();
+    assert_eq!(
+        bindings,
+        (0..=8).map(|binding| (2, binding)).collect::<Vec<_>>(),
+        "the software pass binds the same nine group-2 entries as the hardware pass"
+    );
+    for (_, global) in module.global_variables.iter() {
+        let Some(binding) = global.binding else {
+            continue; // the workgroup memory of the body
+        };
+        assert_eq!(binding.group, 2, "no binding sits outside group 2");
+        match binding.binding {
+            0 => assert!(matches!(global.space, naga::AddressSpace::Uniform)),
+            1..=6 => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access } if access == naga::StorageAccess::LOAD
+            )),
+            _ => assert!(matches!(
+                global.space,
+                naga::AddressSpace::Storage { access }
+                    if access == naga::StorageAccess::LOAD | naga::StorageAccess::STORE
+            )),
+        }
+    }
+}
+
+#[test]
+fn raster_sw_stage_reads_at_most_eight_storage_buffers() {
+    let module = parse(&raster_sw_module_wgsl());
+    let entry = module
+        .entry_points
+        .iter()
+        .find(|entry| entry.name == "main")
+        .expect("main is an entry point");
+    let storage = stage_storage(&module, entry);
+    assert!(
+        storage.len() <= 8,
+        "the compute stage uses more than eight storage buffers"
+    );
+    assert_eq!(
+        storage,
+        BTreeSet::from([1, 2, 3, 4, 5, 6, 7, 8]),
+        "main reads the scene and cull-state buffers and writes the visibility buffers"
+    );
+}
+
+/// The software module's own WGSL calls exactly one depth helper, `raa_depth_key`, reached
+/// through `write_visibility`; the body adds no depth comparison of its own. One workgroup
+/// per software cluster strides over `sw_count - sw_base` and reads `visible[sw_base + item]`.
+#[test]
+fn raster_sw_calls_only_the_depth_key_helper() {
+    let wgsl = raster_sw_module_wgsl();
+    let order = [
+        DEPTH_WGSL,
+        PASS_VIEW_WGSL,
+        RASTER_COMMON_WGSL,
+        VIS_WRITE_WGSL,
+    ]
+    .concat();
+    assert!(
+        wgsl.starts_with(&order),
+        "the builder concatenates DEPTH_WGSL, PASS_VIEW_WGSL, RASTER_COMMON_WGSL and VIS_WRITE_WGSL in order"
+    );
+    assert!(
+        wgsl.ends_with(RASTER_SW_BODY_WGSL),
+        "the shared body is the last section of the module"
+    );
+    let body = wgsl
+        .strip_prefix(DEPTH_WGSL)
+        .expect("the raster module starts with the depth helper");
+    assert_eq!(depth_calls(body), ["raa_depth_key"]);
+    assert!(
+        RASTER_SW_BODY_WGSL.contains("const GROUP_SIZE: u32 = 128u;"),
+        "the body defines the workgroup size once for every module that includes it"
+    );
+    assert!(
+        RASTER_SW_BODY_WGSL.contains("let visible_index = state.sw_base + item;"),
+        "the software window starts at sw_base"
+    );
 }
