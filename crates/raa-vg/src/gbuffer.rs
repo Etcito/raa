@@ -154,16 +154,11 @@ impl FeaturePass for VgGbufferPass {
 
     /// One render pass loading the normal, material and motion targets and the depth, binding
     /// the lit frame group (0), the lighting group (1) and the surface group (2), and drawing
-    /// the fullscreen triangle of each function in ascending id order. Records nothing while
-    /// inactive or without resources.
-    ///
-    /// Handoff: `raa-vg: second occlusion phase` takes
-    /// `VgGbufferPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`
-    /// exported by crates/raa-vg/src/gbuffer.rs; this method currently ends after the
-    /// per-function draws by pushing `vg.gbuffer` onto `recorded`, and the card attaches the
-    /// pyramid seeding from `ctx.targets.depth()` after those draws. State/keys: the `SharedVg`
-    /// frame state (`VgFrameState::occlusion_history`) and the `VgResources` registry of
-    /// crates/raa-vg/src/frame_passes.rs.
+    /// the fullscreen triangle of each function in ascending id order. After those draws it
+    /// seeds `VgResources::history` from `ctx.targets.depth()` through
+    /// `Hzb::record_from_depth` and sets `VgFrameState::occlusion_history`, so the next frame's
+    /// first culling phase tests the merged depth. Records nothing while inactive or without
+    /// resources.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let frame = {
             let state = self.state.borrow();
@@ -206,7 +201,14 @@ impl FeaturePass for VgGbufferPass {
                 pass.draw(0..3, 0..1);
             }
         }
-        self.state.borrow_mut().recorded.push(Self::NAME);
+        let mut state = self.state.borrow_mut();
+        if let Some(resources) = state.resources.as_ref() {
+            resources
+                .history
+                .record_from_depth(ctx.encoder, ctx.targets.depth());
+        }
+        state.occlusion_history = true;
+        state.recorded.push(Self::NAME);
         Ok(())
     }
 }

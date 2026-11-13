@@ -1,7 +1,8 @@
 //! The frame state shared by the virtualized-geometry passes and the `vg.cull`, `vg.raster`
-//! and `vg.resolve` feature passes of the main view (S32, S12 orders 21-23). This share is the
-//! vertical slice's first phase: the main view, the first cull phase, no occlusion test, and
-//! the hardware rasteriser plus the software rasteriser of the small clusters.
+//! and `vg.resolve` feature passes of the main view (S32, S12 orders 21-23). The main view
+//! runs two occlusion phases: the first tests the previous frame's merged depth pyramid and
+//! the second re-tests the retries against this frame's visibility keys, then the hardware
+//! and software rasterisers fill the visibility buffer.
 //!
 //! The state owns the lit handle, the settings, the main camera and viewport, the scene pool,
 //! the GPU pipelines and the surface-sized resources. [`VgFrameState::ensure_resources`]
@@ -25,7 +26,10 @@ use raa_math::Mat4;
 use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx, Targets};
 use raa_scene::Camera;
 
-use crate::culling::{CullPhase, CullPipelines, CullWork, MAIN_FIRST, PassView, ViewSlots};
+use crate::culling::{
+    CullPhase, CullPipelines, CullWork, MAIN_FIRST, MAIN_SECOND, PassView, ViewSlots,
+};
+use crate::hzb::Hzb;
 use crate::raster::{RasterBindings, RasterTarget, Rasterizer, VisibilityBuffer};
 use crate::resolve::{Resolve, VG_FRAME_GPU_SIZE, VgFrameParams, VgSurface, write_vg_frame};
 use crate::scene::VgScene;
@@ -58,6 +62,14 @@ pub(crate) struct VgResources {
     pub(crate) slots: ViewSlots,
     pub(crate) main: CullWork,
     pub(crate) visibility: VisibilityBuffer,
+    /// The previous frame's merged depth, the first phase's occlusion source.
+    pub(crate) history: Hzb,
+    /// This frame's visibility keys, the second phase's occlusion source.
+    pub(crate) current: Hzb,
+    /// The cull scene group bound by the first phase: `PassView` over `history`.
+    pub(crate) cull_history: wgpu::BindGroup,
+    /// The cull scene group bound by the second phase: `PassView` over `current`.
+    pub(crate) cull_current: wgpu::BindGroup,
     pub(crate) surface: VgSurface,
     pub(crate) frame: wgpu::Buffer,
     pub(crate) groups: Option<VgGroups>,
@@ -79,7 +91,6 @@ pub(crate) struct VgFrameState {
     pub(crate) camera: Camera,
     pub(crate) viewport: (u32, u32),
     /// True while the previous frame's occlusion pyramid may be read.
-    #[allow(dead_code, reason = "the second occlusion-phase share reads it")]
     pub(crate) occlusion_history: bool,
     pub(crate) previous_view_proj: Option<Mat4>,
     pub(crate) scene: VgScene,
@@ -169,10 +180,21 @@ impl VgFrameState {
             let Some(pipelines) = self.pipelines.as_ref() else {
                 return;
             };
+            let slots = ViewSlots::new(gpu);
+            let history = Hzb::new(gpu, size);
+            let current = Hzb::new(gpu, size);
+            let cull_history =
+                pipelines
+                    .cull
+                    .scene_bind_group(gpu, &slots, &self.scene, history.view());
+            let cull_current =
+                pipelines
+                    .cull
+                    .scene_bind_group(gpu, &slots, &self.scene, current.view());
             self.resources = Some(VgResources {
                 size,
                 capacity,
-                slots: ViewSlots::new(gpu),
+                slots,
                 main: CullWork::new(
                     gpu,
                     &pipelines.cull,
@@ -181,6 +203,10 @@ impl VgFrameState {
                     u64::from(capacity),
                 ),
                 visibility: VisibilityBuffer::new(gpu, size),
+                history,
+                current,
+                cull_history,
+                cull_current,
                 surface: VgSurface::new(gpu, size),
                 frame: gpu.device().create_buffer(&wgpu::BufferDescriptor {
                     label: Some("raa-vg frame"),
@@ -207,11 +233,17 @@ impl VgFrameState {
         let Some(resources) = self.resources.as_mut() else {
             return;
         };
-        let cull = pipelines.cull.scene_bind_group(
+        let cull_history = pipelines.cull.scene_bind_group(
             gpu,
             &resources.slots,
             &self.scene,
-            &pipelines.cull.placeholder_pyramid,
+            resources.history.view(),
+        );
+        let cull_current = pipelines.cull.scene_bind_group(
+            gpu,
+            &resources.slots,
+            &self.scene,
+            resources.current.view(),
         );
         let raster = pipelines.raster.bindings(
             gpu,
@@ -231,10 +263,12 @@ impl VgFrameState {
             &resources.surface,
         );
         resources.groups = Some(VgGroups {
-            cull,
+            cull: cull_history.clone(),
             raster,
             resolve,
         });
+        resources.cull_history = cull_history;
+        resources.cull_current = cull_current;
         resources.bound = bound;
     }
 
@@ -262,6 +296,8 @@ impl VgFrameState {
             total += resources.slots.allocated_bytes();
             total += resources.main.allocated_bytes();
             total += resources.visibility.allocated_bytes();
+            total += resources.history.allocated_bytes();
+            total += resources.current.allocated_bytes();
             total += resources.surface.allocated_bytes();
             total += resources.frame.size();
         }
@@ -296,15 +332,9 @@ impl FeaturePass for VgCullPass {
     /// Nothing to drop: VgFrameState::ensure_resources recreates the surface-sized resources (and clears the occlusion history) when the viewport or capacity changes.
     fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {}
 
-    /// Handoff: `raa-vg: second occlusion phase` takes
-    /// `VgCullPass::prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError>` and
-    /// `VgCullPass::record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>`, the main
-    /// `CullWork` (`VgResources::main`) and the `previous_view_proj`/`occlusion_history` fields from
-    /// crates/raa-vg/src/frame_passes.rs; `PassView`, `ViewSlots` and `MAIN_SECOND` are imported
-    /// from crates/raa-vg/src/culling.rs, not exported here. It attaches by extending those two
-    /// methods in this file, where `CullPhase::First` is the only phase today, and by setting
-    /// `view.occlusion_enabled` from `settings.occlusion`; state/keys: `previous_view_proj`,
-    /// `occlusion_history`, `MAIN_SECOND` and the second-phase `CullPhase`.
+    /// Writes `MAIN_FIRST` (phase 0, occlusion tested against `VgResources::history` when
+    /// `settings.occlusion` and `VgFrameState::occlusion_history` hold, else disabled) and then
+    /// `MAIN_SECOND`, the same view at phase 1 tested against `VgResources::current`.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         if !state.active {
@@ -328,9 +358,19 @@ impl FeaturePass for VgCullPass {
             state.camera.near,
             state.settings.error_pixels,
         );
-        view.occlusion_enabled = 0;
+        let occlusion = state.settings.occlusion && state.occlusion_history;
+        view.occlusion_enabled = u32::from(occlusion);
         view.allow_software = u32::from(state.settings.software_raster);
+        let history_size = resources.history.size();
+        view.hzb_size = [history_size.0 as f32, history_size.1 as f32];
         resources.slots.write(ctx.gpu, MAIN_FIRST, &view);
+
+        let mut second = view;
+        second.phase = 1;
+        second.occlusion_view = view_proj;
+        let current_size = resources.current.size();
+        second.hzb_size = [current_size.0 as f32, current_size.1 as f32];
+        resources.slots.write(ctx.gpu, MAIN_SECOND, &second);
         Ok(())
     }
 
@@ -413,9 +453,12 @@ impl FeaturePass for VgRasterPass {
     /// records the software dispatch at `CullWork::software_args_offset()` after the hardware
     /// draw. In this file `VgRasterPass::record` calls it with `RasterTarget::Visibility`, and
     /// `VgCullPass::prepare` sets `view.allow_software` from `settings.software_raster`; a pass
-    /// skips while a scene buffer is not uploaded. State/keys: `settings.software_raster`, the
-    /// main `CullWork` indirect arguments and the `VgResources` registry (visibility, main,
-    /// groups.raster).
+    /// skips while a scene buffer is not uploaded. With `settings.occlusion` and
+    /// `VgFrameState::occlusion_history` it then seeds `VgResources::current` from the first
+    /// raster's visibility depth and records the second cull phase through
+    /// `VgResources::cull_current` before rasterising the recovered clusters again. State/keys:
+    /// `settings.software_raster`, the main `CullWork` indirect arguments and the `VgResources`
+    /// registry (visibility, main, history, current, groups.raster).
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         if !state.active || !state.scene_ready() {
@@ -437,6 +480,25 @@ impl FeaturePass for VgRasterPass {
             &resources.main,
             RasterTarget::Visibility(&resources.visibility),
         );
+        if state.settings.occlusion && state.occlusion_history {
+            resources
+                .current
+                .record_from_keys(ctx.encoder, resources.visibility.depth());
+            pipelines.cull.record(
+                ctx.encoder,
+                &state.scene,
+                &resources.cull_current,
+                MAIN_SECOND,
+                &resources.main,
+                CullPhase::Second,
+            );
+            pipelines.raster.record(
+                ctx.encoder,
+                &groups.raster,
+                &resources.main,
+                RasterTarget::Visibility(&resources.visibility),
+            );
+        }
         state.recorded.push(Self::NAME);
         Ok(())
     }
