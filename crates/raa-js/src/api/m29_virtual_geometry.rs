@@ -5,8 +5,10 @@
 //!
 //! The helpers are plain Rust, so `tests/virtual_geometry.rs` includes this file and exercises
 //! them natively: the patch refusals (`vg.invalid` with the key name), the defaults, the settings
-//! table in `SETTING_KEYS` order, the instance entries and the stats entries. This file writes no
-//! `#[wasm_bindgen]` method: the Engine methods are attached by the card named in the handoff.
+//! table in `SETTING_KEYS` order, the instance entries and the stats entries. The wasm32 part
+//! also holds the five S31 Engine methods (`setVirtualGeometry`, `virtualGeometry`,
+//! `setInstanceVirtualGeometry`, `instanceVirtualGeometry`, `virtualGeometryStats`), each run
+//! through `Engine::with_state`.
 //!
 //! The wasm32 part (`web`) runs after `m29_cluster_bake` (file-name order). `install` takes the
 //! shared cluster store and the m09 shadow handle from the feature map and inserts the `VgHandle`
@@ -265,9 +267,11 @@ mod web {
     use crate::api::m29_cluster_bake::{
         VG_INVALID, check_vertex_colors, cluster_error, vg_invalid,
     };
-    use crate::convert::HandleMap;
-    use crate::engine::InstallCtx;
+    use crate::convert::{HandleMap, INVALID_ARGUMENT, api_error};
+    use crate::engine::{Engine, InstallCtx};
+    use crate::feature_map::FEATURE_MISSING;
     use crate::state::{EngineState, InstanceGroup, MeshEntry, MeshSources};
+    use js_sys::{Array, Object, Reflect};
     use raa_cluster::{BuildOptions, ClusterStore};
     use raa_core::GpuContext;
     use raa_lit::LitRenderer;
@@ -276,6 +280,16 @@ mod web {
     use raa_web::FrameInput;
     use std::cell::RefCell;
     use std::rc::Rc;
+    use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
+
+    /// The five vg passes that `setVirtualGeometry({enabled})` toggles together.
+    const VG_PASSES: [&str; 5] = [
+        "vg.cull",
+        "vg.raster",
+        "vg.resolve",
+        "vg.gbuffer",
+        "vg.shade",
+    ];
 
     /// Installs the feature after `m29_cluster_bake` (file-name order). The shared cluster store
     /// (`vg.invalid` naming `store` when absent) and the m09 shadow handle when present go to
@@ -426,5 +440,201 @@ mod web {
             other => (VG_INVALID, other.to_string()),
         };
         store.borrow_mut().refuse(key, code, message);
+    }
+
+    /// The own enumerable keys of a JS object, in order.
+    fn own_keys(value: &JsValue) -> Vec<String> {
+        Object::keys(value.unchecked_ref::<Object>())
+            .iter()
+            .filter_map(|key| key.as_string())
+            .collect()
+    }
+
+    /// A wire value of a JS value: `undefined`, `null`, a boolean, a number, a string, or
+    /// `Other` for anything else.
+    fn wire(value: &JsValue) -> WireValue {
+        if value.is_undefined() {
+            WireValue::Undefined
+        } else if value.is_null() {
+            WireValue::Null
+        } else if let Some(b) = value.as_bool() {
+            WireValue::Bool(b)
+        } else if let Some(n) = value.as_f64() {
+            WireValue::Number(n)
+        } else if let Some(text) = value.as_string() {
+            WireValue::Text(text)
+        } else {
+            WireValue::Other
+        }
+    }
+
+    /// A JS value of an entry. `Other` never reaches JS: `stats_js` replaces `refused`.
+    fn wire_js(value: &WireValue) -> JsValue {
+        match value {
+            WireValue::Undefined => JsValue::UNDEFINED,
+            WireValue::Null | WireValue::Other => JsValue::NULL,
+            WireValue::Bool(b) => JsValue::from_bool(*b),
+            WireValue::Number(n) => JsValue::from_f64(*n),
+            WireValue::Text(text) => JsValue::from_str(text),
+        }
+    }
+
+    /// A fresh plain object of the entries, in order.
+    fn entries_js(entries: Vec<(&'static str, WireValue)>) -> JsValue {
+        let out = Object::new();
+        for (key, value) in entries {
+            let _ = Reflect::set(&out, &JsValue::from_str(key), &wire_js(&value));
+        }
+        out.into()
+    }
+
+    /// The virtual-geometry feature handle, or `api.feature_missing` when it is not installed.
+    fn vg_handle(st: &EngineState) -> Result<VgHandle, RaaError> {
+        st.features
+            .get::<VgHandle>()
+            .cloned()
+            .ok_or_else(|| api_error(FEATURE_MISSING, "virtual geometry is not installed"))
+    }
+
+    /// Reads a `setVirtualGeometry` argument: a plain object whose own keys are the patch. A
+    /// non-object is `vg.invalid` naming `settings`.
+    fn settings_patch(settings: &JsValue) -> Result<VgSettingsPatch, RaaError> {
+        if !settings.is_object() || Array::is_array(settings) {
+            return Err(vg_invalid("settings", "must be an object"));
+        }
+        let entries = own_keys(settings)
+            .into_iter()
+            .map(|key| {
+                let value = wire(
+                    &Reflect::get(settings, &JsValue::from_str(&key)).unwrap_or(JsValue::UNDEFINED),
+                );
+                (key, value)
+            })
+            .collect::<Vec<_>>();
+        parse_settings_patch(&entries)
+    }
+
+    /// `setVirtualGeometry(settings)`: the patch is parsed and applied to the handle first (a
+    /// refusal changes nothing); when it carried `enabled`, the five vg passes follow it.
+    fn set_settings(st: &mut EngineState, settings: &JsValue) -> Result<(), RaaError> {
+        let patch = settings_patch(settings)?;
+        let enabled = patch.enabled;
+        let vg = vg_handle(st)?;
+        let mut pipeline = st
+            .pipeline
+            .try_borrow_mut()
+            .map_err(|_| api_error("pipeline.busy", "the pipeline is borrowed"))?;
+        vg.set(patch)?;
+        if let Some(enabled) = enabled {
+            for name in VG_PASSES {
+                pipeline.set_enabled(name, enabled)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `virtualGeometry()`: the resolved settings as a fresh object.
+    fn settings_js(st: &EngineState) -> Result<JsValue, RaaError> {
+        Ok(entries_js(settings_entries(&vg_handle(st)?.get())))
+    }
+
+    /// `setInstanceVirtualGeometry(instance, enabled)`: `enabled` is true, false or null. The
+    /// group is checked first; the handle's copy is updated only when the handle accepts.
+    fn set_instance_request(
+        st: &mut EngineState,
+        instance: u32,
+        enabled: &JsValue,
+    ) -> Result<(), RaaError> {
+        st.instance_group(instance)?;
+        let request = if enabled.is_null() {
+            None
+        } else if let Some(b) = enabled.as_bool() {
+            Some(b)
+        } else {
+            return Err(api_error(
+                INVALID_ARGUMENT,
+                "enabled must be true, false or null",
+            ));
+        };
+        vg_handle(st)?.set_instance(instance, request)?;
+        let api = st
+            .features
+            .require_mut::<VgApiState>("virtual geometry api state")?;
+        match request {
+            Some(b) => api.requests.insert(instance, b),
+            None => api.requests.remove(&instance),
+        };
+        Ok(())
+    }
+
+    /// `instanceVirtualGeometry(instance)`: the path, request and state of a group as a fresh
+    /// object.
+    fn instance_js(st: &EngineState, instance: u32) -> Result<JsValue, RaaError> {
+        st.instance_group(instance)?;
+        let vg = vg_handle(st)?;
+        let entries = instance_entries(&vg.instance(instance), vg.request(instance));
+        Ok(entries_js(entries))
+    }
+
+    /// `virtualGeometryStats()`: a fresh object in the S31 key order, `refused` a fresh object
+    /// keyed by code.
+    fn stats_js(st: &EngineState) -> Result<JsValue, RaaError> {
+        let stats = vg_handle(st)?.stats();
+        let out = Object::new();
+        for (key, value) in stats_entries(&stats) {
+            let js = if key == "refused" {
+                let refused = Object::new();
+                for (code, count) in &stats.refused {
+                    let count = JsValue::from_f64(f64::from(*count));
+                    let _ = Reflect::set(&refused, &JsValue::from_str(code), &count);
+                }
+                refused.into()
+            } else {
+                wire_js(&value)
+            };
+            let _ = Reflect::set(&out, &JsValue::from_str(key), &js);
+        }
+        Ok(out.into())
+    }
+
+    #[wasm_bindgen(js_class = Engine)]
+    impl Engine {
+        /// Applies a `VirtualGeometrySettings` patch atomically: an unknown key, null, a wrong
+        /// type or an out-of-domain value throws `vg.invalid` naming the key, and nothing changes.
+        /// `enabled` also toggles the five vg passes; `enabled` true without msaa 1 is the handle's
+        /// refusal (`vg.invalid`, `msaa: virtualized geometry needs msaa 1`).
+        #[wasm_bindgen(js_name = setVirtualGeometry)]
+        pub fn set_virtual_geometry(&mut self, settings: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| set_settings(st, &settings))
+        }
+
+        /// The resolved settings (`ResolvedVirtualGeometry`), as a fresh object.
+        #[wasm_bindgen(js_name = virtualGeometry)]
+        pub fn virtual_geometry(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| settings_js(st))
+        }
+
+        /// Sets the explicit request of an instance group: true, false, or null to follow
+        /// `instanceDefault`. Explicit true on an ineligible group throws its instance code.
+        #[wasm_bindgen(js_name = setInstanceVirtualGeometry)]
+        pub fn set_instance_virtual_geometry(
+            &mut self,
+            instance: u32,
+            enabled: JsValue,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| set_instance_request(st, instance, &enabled))
+        }
+
+        /// The `InstanceVirtualGeometry` of an instance group, as a fresh object.
+        #[wasm_bindgen(js_name = instanceVirtualGeometry)]
+        pub fn instance_virtual_geometry(&self, instance: u32) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| instance_js(st, instance))
+        }
+
+        /// The `VirtualGeometryStats` of the latest published readback, as a fresh object.
+        #[wasm_bindgen(js_name = virtualGeometryStats)]
+        pub fn virtual_geometry_stats(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| stats_js(st))
+        }
     }
 }

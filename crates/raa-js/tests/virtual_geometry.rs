@@ -308,3 +308,33 @@ fn stats_entries_of_published_counters_carry_their_values() {
     assert_eq!(value("statsFrameIndex"), Some(WireValue::Number(7.0)));
     assert_eq!(value("hardwareClusters"), Some(WireValue::Null));
 }
+
+#[test]
+fn scene_invocation_reaches_vg_observe_submission_with_the_sky_invocation_id() {
+    let _: fn(&raa_vg::VgHandle, u64, bool) = raa_vg::VgHandle::observe_submission;
+    let engine = include_str!("../src/engine.rs");
+    let finish = &engine[engine.find("fn finish_scene_invocation(").unwrap()..];
+    let finish = &finish[..finish.find("\n    }\n").unwrap()];
+    let vg_call = "vg.observe_submission(s.sky_invocation_id(), complete)";
+    assert_eq!(
+        finish
+            .matches("s.features.get::<raa_vg::VgHandle>()")
+            .count(),
+        1
+    );
+    assert_eq!(finish.matches(vg_call).count(), 1);
+    let sky_call = "sky.observe_submission(s.sky_invocation_id(), acknowledge, complete)";
+    assert!(finish.find(sky_call).unwrap() < finish.find(vg_call).unwrap());
+    assert_eq!(engine.matches("vg.observe_submission(").count(), 1);
+    let m29 = include_str!("../src/api/m29_virtual_geometry.rs");
+    assert!(!m29.contains("observe_submission("));
+    assert!(!m29.contains("sky_invocation_id"));
+    let begin = &engine[engine.find("fn begin_scene_invocation(").unwrap()..];
+    let begin = &begin[..begin.find("\n    }\n").unwrap()];
+    assert_eq!(
+        begin
+            .matches("next_sky_invocation(&mut s.sky_invocation_id)")
+            .count(),
+        1
+    );
+}

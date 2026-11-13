@@ -451,6 +451,9 @@ impl Engine {
         if let Some(sky) = s.features.get::<raa_sky::SkyHandle>() {
             sky.observe_submission(s.sky_invocation_id(), acknowledge, complete);
         }
+        if let Some(vg) = s.features.get::<raa_vg::VgHandle>() {
+            vg.observe_submission(s.sky_invocation_id(), complete);
+        }
     }
 }
 
