@@ -537,7 +537,18 @@ impl FeaturePass for SkyEnvPass {
         // stay within the accepted identity and keep publishing asynchronously.
         let source = source_identity(&state);
         if source_replaced(self.prepared_source.as_ref(), &source) {
-            self.ibl.invalidate(ctx.lighting);
+            // An edit inside one model keeps the last published environment lighting the scene
+            // until the rebuilt one is published (no flash of the flat ambient term); a model
+            // switch has nothing valid to keep.
+            let same_model = self
+                .prepared_source
+                .as_ref()
+                .is_some_and(|previous| previous.desc.model == source.desc.model);
+            if same_model {
+                self.ibl.supersede();
+            } else {
+                self.ibl.invalidate(ctx.lighting);
+            }
         }
         self.prepared_source = Some(source);
         let bake_ready = self

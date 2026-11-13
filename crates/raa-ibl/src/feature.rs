@@ -211,6 +211,17 @@ impl IblHandle {
         self.gate.error()
     }
 
+    /// Cancels every in-flight request of the current epoch like [`IblFeature::invalidate`] but
+    /// leaves the lighting environment as it is: the last published environment keeps lighting
+    /// the scene until the replacing one is published, instead of falling back to the flat
+    /// ambient term while the new one is filtered over several frames.
+    pub fn supersede(&self) {
+        self.gate.invalidate();
+        if let Ok(mut st) = self.state.try_borrow_mut() {
+            st.changed = false;
+        }
+    }
+
     /// Invalidates the published environment and every in-flight request of the current
     /// epoch, then clears the lighting environment. Infallible and allocation-free; the
     /// gate is cancelled even when the filter state is borrowed, so a later callback can
