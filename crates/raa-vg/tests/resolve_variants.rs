@@ -5,9 +5,16 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use raa_core::testing::{block_on, skip, software_gpu};
+use raa_math::{Mat4, Vec3};
 use raa_shader::{Composer, DEPTH_WGSL};
-use raa_vg::culling::PASS_VIEW_WGSL;
-use raa_vg::resolve::resolve_module_wgsl;
+use raa_vg::culling::{CullPipelines, CullWork, PASS_VIEW_WGSL};
+use raa_vg::raster::VisibilityBuffer;
+use raa_vg::resolve::{
+    Resolve, VG_FRAME_GPU_SIZE, VgFrameParams, VgSurface, resolve_module_wgsl, surface_bind_group,
+    surface_layout, write_vg_frame,
+};
+use raa_vg::scene::VgScene;
 use std::collections::BTreeSet;
 use wgpu::naga;
 
@@ -240,4 +247,113 @@ fn vg_frame_is_320_bytes() {
     let mut layouter = naga::proc::Layouter::default();
     layouter.update(module.to_ctx()).expect("the types lay out");
     assert_eq!(layouter[handle].size, 320);
+}
+
+fn float_at(bytes: &[u8], at: usize) -> f32 {
+    f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+fn word_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+}
+
+fn assert_matrix(bytes: &[u8], at: usize, expected: &Mat4) {
+    for (k, value) in expected.to_cols_array().iter().enumerate() {
+        assert_eq!(float_at(bytes, at + 4 * k), *value);
+    }
+}
+
+#[test]
+fn write_vg_frame_fills_the_320_byte_record() {
+    let params = VgFrameParams {
+        view_proj: Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0)),
+        unjittered_view_proj: Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0)),
+        previous_view_proj: Mat4::from_translation(Vec3::new(7.0, 8.0, 9.0)),
+        inv_view_proj: Mat4::from_translation(Vec3::new(10.0, 11.0, 12.0)),
+        viewport: [64.0, 32.0, 1.0 / 64.0, 1.0 / 32.0],
+        camera_jitter: [0.5, -0.5, 0.25, -0.25],
+        camera_pos: [13.0, 14.0, 15.0, 16.0],
+        debug_view: 1,
+        history_valid: true,
+    };
+    let mut out = [0xAAu8; VG_FRAME_GPU_SIZE];
+    write_vg_frame(&mut out, &params);
+    assert_matrix(&out, 0, &params.view_proj);
+    assert_matrix(&out, 64, &params.unjittered_view_proj);
+    assert_matrix(&out, 128, &params.previous_view_proj);
+    assert_matrix(&out, 192, &params.inv_view_proj);
+    for (k, value) in params.viewport.iter().enumerate() {
+        assert_eq!(float_at(&out, 256 + 4 * k), *value);
+    }
+    for (k, value) in params.camera_jitter.iter().enumerate() {
+        assert_eq!(float_at(&out, 272 + 4 * k), *value);
+    }
+    for (k, value) in params.camera_pos.iter().enumerate() {
+        assert_eq!(float_at(&out, 288 + 4 * k), *value);
+    }
+    assert_eq!(word_at(&out, 304), params.debug_view);
+    assert_eq!(word_at(&out, 308), 1, "the history is valid");
+    assert_eq!(word_at(&out, 312), 0, "flags.z is reserved");
+    assert_eq!(word_at(&out, 316), 0, "flags.w is reserved");
+}
+
+#[test]
+fn resolve_and_surface_bind_groups_create_without_validation_error() {
+    let test = "resolve_and_surface_bind_groups_create_without_validation_error";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let device = gpu.device();
+    let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
+
+    let resolve = Resolve::new(&gpu);
+    let surface = VgSurface::new(&gpu, (64, 64));
+    let vis = VisibilityBuffer::new(&gpu, (64, 64));
+    let pipelines = CullPipelines::new(&gpu);
+    let work = CullWork::new(&gpu, &pipelines, "raa-vg resolve variants", 16, 16);
+    let scene = VgScene::new();
+
+    let frame = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-vg resolve variants frame"),
+        size: VG_FRAME_GPU_SIZE as u64,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let params = VgFrameParams {
+        viewport: [64.0, 64.0, 1.0 / 64.0, 1.0 / 64.0],
+        ..Default::default()
+    };
+    let mut bytes = [0u8; VG_FRAME_GPU_SIZE];
+    write_vg_frame(&mut bytes, &params);
+    gpu.queue().write_buffer(&frame, 0, &bytes);
+    let materials = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-vg resolve variants materials"),
+        size: 256,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let shade = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-vg resolve variants shade"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let group = resolve.bindings(&gpu, &frame, &vis, &work, &scene, &materials, &surface);
+    let layout = surface_layout(&gpu);
+    let _surface_group = surface_bind_group(&gpu, &layout, &surface, &shade);
+
+    let mut encoder = device.create_command_encoder(&Default::default());
+    vis.clear(&mut encoder);
+    resolve.record(&mut encoder, &group, surface.size());
+    gpu.queue().submit(Some(encoder.finish()));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    let error = block_on(errors.pop());
+    assert!(error.is_none(), "resolve validation: {error:?}");
+    assert_eq!(surface.size(), (64, 64));
+    assert_eq!(surface.allocated_bytes(), 64 * 64 * (16 + 8 + 16 + 4));
+    assert_eq!(resolve.allocated_bytes(), 16);
 }
