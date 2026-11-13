@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import childProcess from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { validateInventory, validateRequiredFacts } from './lib/inventory.js';
 import { createVgPageRunner } from './lib/runtime.js';
+import { captureInputs, containedPath, writeJsonRecord } from '../sky-weather/lib/evidence.mjs';
+import { readBuildReceipt } from '../../web/common/vg-job.mjs';
 
 // Synthetic scene namespaces only: no test imports a real scene, and every test builds its own.
 const camera = { eye: [0, 1, 5], target: [0, 1, 0], fovYDeg: 60, near: .1, far: 100 };
@@ -309,4 +316,88 @@ test('scenes/bake.js: the real module validates the four bake rows in order, no 
     for (const fixture of r.heldConstant) assert.ok(!r.expectedVisibleBehavior.includes(fixture), `${r.id} names ${fixture}`);
   }
   assert.equal(again.default.id, 'bake');
+});
+
+// Build receipt (contract 'vg-build-receipt'): the shared reader of web/common/vg-job.mjs.
+// The page must lie under a repository root and its inputs must be a current S26 receipt, so the
+// fixture builds a throwaway repository in the form of fixture() of sky-weather-job.test.mjs.
+function putFile(root, name, text) {
+  const file = path.join(root, name);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, text);
+}
+
+function receiptFixture(t) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'vg-receipt-'));
+  const root = path.join(parent, 'raa');
+  const page = path.join(root, 'dist/virtual-geometry');
+  const revision = '1'.repeat(40);
+  const manifest = {
+    'Cargo.toml': '[workspace]\n',
+    'Cargo.lock': 'version = 4\n',
+    'rust-toolchain.toml': '[toolchain]\nchannel = "1.96.0"\n',
+    '.nmc/commands.json': '[]\n',
+    'examples/sky-weather/lib/inventory.js': 'export const criteria = [];\n',
+  };
+  for (const [name, text] of Object.entries(manifest)) putFile(root, name, text);
+  putFile(root, '.git', 'gitdir: fixture\n');
+  const names = Object.keys(manifest);
+  t.mock.method(childProcess, 'execFileSync', (program, args, settings = {}) => {
+    if (program === 'cargo') {
+      assert.equal(settings.cwd, root);
+      return JSON.stringify({ workspace_root: root, packages: [{ dependencies: [] }] });
+    }
+    if (program === 'wasm-bindgen') return 'wasm-bindgen 0.2.129';
+    if (program === (process.env.RUSTC || 'rustc')) return 'rustc 1.96.0';
+    assert.equal(program, 'git');
+    assert.equal(settings.cwd, root);
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return root;
+    if (args[0] === 'rev-parse' && args[1] === '--verify' && args[2] === 'HEAD') return revision;
+    if (args[0] === 'status') return '';
+    if (args[0] === 'ls-files') return names.join('\0');
+    throw new Error(`unexpected git ${args.join(' ')}`);
+  });
+  fs.mkdirSync(path.join(page, 'scenes'), { recursive: true });
+  putFile(page, 'scenes.json', '[]\n');
+  const preparationId = randomUUID();
+  const build = {
+    buildId: randomUUID(), preparationId, inputs: captureInputs(root, preparationId),
+    builtAt: new Date().toISOString(), page, files: ['scenes.json'], status: 'ready', error: null,
+  };
+  const write = (value) => writeJsonRecord(containedPath(page, 'build.json'), value);
+  write(build);
+  return { page, build, write };
+}
+
+test('build receipt: readBuildReceipt accepts the eight-key ready receipt and refuses a missing key, an extra key and a failed status', (t) => {
+  const { page, build, write } = receiptFixture(t);
+  const accepted = readBuildReceipt(page);
+  assert.deepEqual(Object.keys(accepted).sort(), ['buildId', 'builtAt', 'error', 'files', 'inputs', 'page', 'preparationId', 'status']);
+  assert.equal(accepted.buildId, build.buildId);
+
+  const withoutFiles = JSON.parse(JSON.stringify(build));
+  delete withoutFiles.files;
+  write(withoutFiles);
+  assert.throws(() => readBuildReceipt(page), /fields must be exactly/);
+
+  const extra = JSON.parse(JSON.stringify(build));
+  extra.extra = true;
+  write(extra);
+  assert.throws(() => readBuildReceipt(page), /fields must be exactly/);
+
+  const failed = JSON.parse(JSON.stringify(build));
+  failed.status = 'failed';
+  failed.error = 'the build failed';
+  write(failed);
+  assert.throws(() => readBuildReceipt(page), /is failed/);
+});
+
+test('scripts/build-virtual-geometry.sh names the bricks script, shared, scenes.json and build.json in that order', () => {
+  const text = fs.readFileSync(new URL('../../scripts/build-virtual-geometry.sh', import.meta.url), 'utf8');
+  const positions = ['scripts/build-bricks.sh', 'shared', 'scenes.json', 'build.json']
+    .map((name) => text.indexOf(name));
+  positions.forEach((position, index) => {
+    assert.ok(position >= 0, `the script does not name ${['scripts/build-bricks.sh', 'shared', 'scenes.json', 'build.json'][index]}`);
+    if (index > 0) assert.ok(position > positions[index - 1], 'the names are not in the required order');
+  });
 });
