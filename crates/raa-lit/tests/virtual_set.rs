@@ -18,11 +18,14 @@ use raa_core::{GpuContext, MaterialId, MeshId, wgpu};
 use raa_geom::builtin::DebugCube;
 use raa_geom::{GeometryProvider, MeshData, ParamValue, Params, Quality};
 use raa_lit::{
-    AttributedMesh, DrawClass, FrameCounts, LitDraw, LitOptions, LitRenderer, VirtualSet,
+    AttributedMesh, DrawClass, FLAG_TRANSPARENT, FrameCounts, InstanceExtra, InstanceShape,
+    LitDraw, LitMeshId, LitOptions, LitRenderer, MaterialFnId, PipelineSpec, SurfaceMaterial,
+    SurfaceModel, VirtualSet,
 };
 use raa_math::{Mat4, Quat, Vec3};
 use raa_pipeline::Pipeline;
 use raa_scene::{Camera, InstanceId, NodeId, RenderList, Scene, Transform};
+use raa_shader::{PassKind, VariantKey};
 
 const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 /// Triangles of one DebugCube.
@@ -195,6 +198,7 @@ struct Rig {
     tags: Vec<u32>,
     slots: Vec<u32>,
     a: InstanceId,
+    mesh: MeshId,
     _pipeline: Rc<RefCell<Pipeline>>,
 }
 
@@ -218,6 +222,7 @@ impl Rig {
             tags: Vec::with_capacity(2),
             slots: Vec::with_capacity(2),
             a,
+            mesh,
             _pipeline: pipeline,
         }
     }
@@ -316,4 +321,157 @@ fn virtual_members_leave_the_draw_lists_and_the_cascades() {
     assert!(!subject.lit.frame_feature(64));
     subject.prepare(&gpu);
     assert!(subject.lit.frame_feature(27));
+}
+
+/// The S32 `vg.shade` group-2 layout: the ids texture (Uint), three unfilterable float
+/// textures and the 16-byte dynamic-offset `VgShadeGpu` uniform, all read by the fragment.
+fn vg_shade_extra_layout(gpu: &GpuContext) -> wgpu::BindGroupLayout {
+    let texture = |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type,
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let unfilterable = wgpu::TextureSampleType::Float { filterable: false };
+    gpu.device()
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("test.vg_shade.group2"),
+            entries: &[
+                texture(0, wgpu::TextureSampleType::Uint),
+                texture(1, unfilterable),
+                texture(2, unfilterable),
+                texture(3, unfilterable),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(16),
+                    },
+                    count: None,
+                },
+            ],
+        })
+}
+
+#[test]
+fn eligibility_accessors_and_the_fullscreen_vg_shade_pipeline() {
+    let test = "eligibility_accessors_and_the_fullscreen_vg_shade_pipeline";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let mut rig = Rig::new(&gpu);
+    let handle = rig.lit.handle();
+    let mesh = rig.mesh;
+
+    // The persistent slot of a live instance is its scene index; it has no committed
+    // previous row before the first submitted frame.
+    let slot = handle.instance_slot(rig.a).expect("live instance slot");
+    assert_eq!(slot, rig.a.to_bits() as u32);
+    assert_eq!(handle.previous_instance_row(slot), None);
+
+    // A default material on the uploaded cube: no pose, no deformation, opaque, no vertex
+    // function, no colour stream.
+    assert_eq!(
+        handle.instance_eligibility(0, mesh, MaterialId(0)),
+        InstanceShape {
+            skinned: false,
+            deformed: false,
+            class: DrawClass::Opaque,
+            vertex_fn: false,
+            has_colors: false,
+        }
+    );
+    assert_eq!(handle.material_fn_of(MaterialId(0)), MaterialFnId::STANDARD);
+
+    // A transparent material draws in the Transparent class.
+    let transparent = SurfaceMaterial {
+        flags: FLAG_TRANSPARENT,
+        ..SurfaceMaterial::default()
+    };
+    let transparent = rig.lit.materials_mut().add(transparent).expect("material");
+    assert_eq!(
+        handle.instance_eligibility(0, mesh, transparent).class,
+        DrawClass::Transparent
+    );
+
+    // A non-default squash extra marks its tag deformed; clearing restores it.
+    rig.lit.set_instance_extra(
+        7,
+        InstanceExtra {
+            squash: [0.0, 1.0, 0.0, 0.5],
+            ..InstanceExtra::default()
+        },
+    );
+    assert!(handle.instance_eligibility(7, mesh, MaterialId(0)).deformed);
+    assert!(!handle.instance_eligibility(8, mesh, MaterialId(0)).deformed);
+    rig.lit.clear_instance_extra(7);
+    assert!(!handle.instance_eligibility(7, mesh, MaterialId(0)).deformed);
+
+    // A mesh uploaded with a colour stream reports has_colors.
+    let mut coloured = cube();
+    coloured.colors = Some(vec![[1.0, 0.0, 0.0, 1.0]; coloured.vertex_count()]);
+    let coloured: LitMeshId = rig.lit.upload(&gpu, &coloured).expect("coloured upload");
+    let coloured_mesh = rig.lit.submesh_ids(coloured).expect("sub-meshes")[0];
+    assert!(
+        handle
+            .instance_eligibility(0, coloured_mesh, MaterialId(0))
+            .has_colors
+    );
+
+    // A function material reports its registered function id.
+    let source = "fn material_main(in: MaterialInput) -> MaterialOutput {
+        return raa_default_output(in);
+    }";
+    let function = rig
+        .lit
+        .register_user_fn("test.probe", source)
+        .expect("register function");
+    let material = SurfaceMaterial {
+        model: SurfaceModel::Function(function),
+        ..SurfaceMaterial::default()
+    };
+    let material = rig.lit.materials_mut().add(material).expect("material");
+    assert_eq!(handle.material_fn_of(material), function);
+
+    // One prepared frame (no pass recorded) commits a previous row for the live slot.
+    rig.prepare(&gpu);
+    assert!(handle.previous_instance_row(slot).is_some());
+
+    // The fullscreen VG shade pipeline composes, validates and builds against the S32
+    // group-2 layout without a validation error.
+    let spec = PipelineSpec {
+        color_targets: vec![Some(wgpu::ColorTargetState {
+            format: raa_pipeline::HDR_FORMAT,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })],
+        depth: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        cull: None,
+        alpha_to_coverage: false,
+        extra_layout: Some(vg_shade_extra_layout(&gpu)),
+    };
+    let key = VariantKey {
+        material_fn: MaterialFnId::STANDARD,
+        pass: PassKind::VgShade,
+        msaa: 1,
+        flags: 0,
+    };
+    let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let pipeline = handle.pipeline_for(&gpu, key, &spec);
+    let error = raa_core::testing::block_on(scope.pop());
+    assert!(error.is_none(), "VG shade pipeline validation: {error:?}");
+    pipeline.expect("VG shade pipeline");
 }

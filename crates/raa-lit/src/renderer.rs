@@ -478,6 +478,9 @@ impl LitRenderer {
     /// internal [`MeshId`] is assigned per sub-mesh ([`submesh_ids`](Self::submesh_ids)).
     pub fn upload(&mut self, gpu: &GpuContext, m: &AttributedMesh) -> Result<LitMeshId, RaaError> {
         let id = self.shared.borrow_mut().meshes.upload(gpu, m)?;
+        self.shared
+            .borrow_mut()
+            .set_mesh_colors(id, m.colors.is_some());
         self.refresh_submeshes(id);
         Ok(id)
     }
@@ -491,6 +494,9 @@ impl LitRenderer {
         m: &AttributedMesh,
     ) -> Result<(), RaaError> {
         self.shared.borrow_mut().meshes.update(gpu, id, m)?;
+        self.shared
+            .borrow_mut()
+            .set_mesh_colors(id, m.colors.is_some());
         self.refresh_submeshes(id);
         Ok(())
     }
@@ -498,6 +504,7 @@ impl LitRenderer {
     /// Frees mesh `id` and its sub-mesh ids (reused lowest first). Unknown ids are ignored.
     pub fn remove(&mut self, id: LitMeshId) {
         self.shared.borrow_mut().meshes.remove(id);
+        self.shared.borrow_mut().remove_mesh_colors(id);
         self.submeshes.remove(&id);
     }
 
@@ -648,6 +655,9 @@ impl LitRenderer {
 
     /// Sets the extras of every instance with scene tag `tag`.
     pub fn set_instance_extra(&mut self, tag: u32, x: InstanceExtra) {
+        self.shared
+            .borrow_mut()
+            .mirror_instance_extra(tag, Some(&x));
         self.extras.insert(tag, x);
     }
 
@@ -658,6 +668,7 @@ impl LitRenderer {
 
     /// Returns tag `tag` to the default extras.
     pub fn clear_instance_extra(&mut self, tag: u32) {
+        self.shared.borrow_mut().mirror_instance_extra(tag, None);
         self.extras.remove(&tag);
     }
 

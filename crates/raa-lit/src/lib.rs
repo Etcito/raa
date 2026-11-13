@@ -56,7 +56,7 @@ pub use skin_views::{
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_frame_gpu};
-pub use handle::{LitHandle, PipelineSpec};
+pub use handle::{InstanceShape, LitHandle, PipelineSpec};
 pub use instance_store::{InstanceStore, StoreKind, write_instance_record};
 pub use library::SurfaceLibrary;
 pub use light_stats::LocalLightStats;

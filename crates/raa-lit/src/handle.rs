@@ -20,14 +20,14 @@ use raa_shader::{
     SlotProvider, TintMode, VariantKey,
 };
 
-use crate::extras::INSTANCE_EXTRA_GPU_SIZE;
+use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
 use crate::lod::{LodParams, LodRegistry, shadow_level};
 use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::material_data::MaterialData;
-use crate::meshes::{INSTANCE_SLOT, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
+use crate::meshes::{INSTANCE_SLOT, LitMeshId, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
 use crate::prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 use crate::renderer::{InstanceFrameStats, NO_CAMERA_LEVEL};
 use crate::select::{IdPrep, SelectInput};
@@ -114,6 +114,22 @@ pub struct PipelineSpec {
     pub alpha_to_coverage: bool,
     /// Layout of group 2, private to the pass that binds it.
     pub extra_layout: Option<wgpu::BindGroupLayout>,
+}
+
+/// What decides whether a virtualized-geometry instance can leave the lit draw lists
+/// (S31/S32): its pose and deformation, draw class, vertex function and colour stream.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct InstanceShape {
+    /// The tag has a posed skin draw.
+    pub skinned: bool,
+    /// The tag's `InstanceExtra` squash or jiggle differ from the S10 defaults.
+    pub deformed: bool,
+    /// Class of the material.
+    pub class: DrawClass,
+    /// The material's function defines `material_vertex`.
+    pub vertex_fn: bool,
+    /// The sub-mesh's lit mesh was uploaded or updated with a colour stream.
+    pub has_colors: bool,
 }
 
 /// The vertex buffers of every lit pipeline, in slot order: S10 stream 0 at
@@ -400,6 +416,16 @@ pub(crate) struct LitShared {
     /// [`VirtualSet`](crate::VirtualSet) by `prepare`); they are left out of the camera and
     /// cascade caster selections.
     pub(crate) virtual_bits: Vec<u64>,
+    /// Tags whose `InstanceExtra` squash or jiggle differs from the S10 defaults, mirrored
+    /// on `set_instance_extra`/`clear_instance_extra` so eligibility is answerable before
+    /// the frame's prepare.
+    pub(crate) deformed_tags: HashMap<u32, bool>,
+    /// Whether each uploaded lit mesh carried a colour stream, mirrored on
+    /// `upload`/`update`/`remove` for [`LitHandle::instance_eligibility`].
+    pub(crate) mesh_colors: HashMap<LitMeshId, bool>,
+    /// Advances whenever the instance or material storage buffer is (re)created, so
+    /// callers rebuild their bind groups.
+    storage_generation: u64,
     /// Material classes the cascade selection validates against, rebuilt in place.
     pub(crate) caster_materials: Vec<MaterialClass>,
     /// Scratch of `SurfaceLibrary::write_gpu_all`, preallocated for `max_materials`.
@@ -537,6 +563,9 @@ impl LitShared {
             caster_slots: Vec::new(),
             caster_bits: Vec::new(),
             virtual_bits: Vec::new(),
+            deformed_tags: HashMap::new(),
+            mesh_colors: HashMap::new(),
+            storage_generation: 0,
             caster_materials: Vec::with_capacity(materials as usize),
             material_bytes: Vec::with_capacity(materials as usize * SURFACE_MATERIAL_GPU_SIZE),
             textures,
@@ -675,6 +704,30 @@ impl LitShared {
         self.textures.packer()
     }
 
+    /// Mirrors whether tag `tag` carries extras whose squash or jiggle differ from the S10
+    /// defaults; `None` clears it. [`LitHandle::instance_eligibility`] reads this.
+    pub(crate) fn mirror_instance_extra(&mut self, tag: u32, extra: Option<&InstanceExtra>) {
+        let deformed = extra.is_some_and(|x| {
+            let defaults = InstanceExtra::default();
+            x.squash != defaults.squash || x.jiggle != defaults.jiggle
+        });
+        if deformed {
+            self.deformed_tags.insert(tag, true);
+        } else {
+            self.deformed_tags.remove(&tag);
+        }
+    }
+
+    /// Mirrors whether the uploaded lit mesh `id` carried a colour stream.
+    pub(crate) fn set_mesh_colors(&mut self, id: LitMeshId, has_colors: bool) {
+        self.mesh_colors.insert(id, has_colors);
+    }
+
+    /// Forgets the colour stream of lit mesh `id`.
+    pub(crate) fn remove_mesh_colors(&mut self, id: LitMeshId) {
+        self.mesh_colors.remove(&id);
+    }
+
     /// Writes the frame's `FrameGpu`, the changed instance and extras pages, the compacted
     /// id stream and, when the library changed, every material record. A grown store
     /// re-creates its GPU buffers and the frame bind group first.
@@ -722,6 +775,7 @@ impl LitShared {
         }
         let storage = wgpu::BufferUsages::STORAGE;
         self.instance_storage = buffer(gpu, "raa.lit.instance_records", instances, storage);
+        self.storage_generation = self.storage_generation.wrapping_add(1);
         self.extras_buffer = buffer(gpu, "raa.lit.extras", extras, storage);
         self.frame_bind_group = create_frame_bind_group(
             gpu,
@@ -860,7 +914,8 @@ impl LitShared {
     /// Builds the render pipeline of `key` and `spec`: composes/validates its WGSL (shared
     /// by every spec of the variant), with the layouts [group 0, group 1 (lighting),
     /// `spec.extra_layout`]. Shadow variants leave group 1 empty: that pass renders the
-    /// shadow map group 1 samples and reads groups 0 and 2 only.
+    /// shadow map group 1 samples and reads groups 0 and 2 only. The fullscreen VG kinds
+    /// bind no vertex buffer (their `vs_main` reads `vertex_index`).
     fn build_pipeline(
         &self,
         gpu: &GpuContext,
@@ -888,7 +943,8 @@ impl LitShared {
         };
         drop(modules);
         let shadow = key.pass == PassKind::Shadow;
-        let posed = key.flags & crate::skin_draw::POSED != 0;
+        let fullscreen = matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade);
+        let posed = !fullscreen && key.flags & crate::skin_draw::POSED != 0;
         let mut groups = vec![
             Some(&self.frame_layout),
             (!shadow).then_some(&self.lighting_layout),
@@ -906,7 +962,9 @@ impl LitShared {
             bind_group_layouts: &groups,
             immediate_size: 0,
         });
-        let buffers = if posed {
+        let buffers = if fullscreen {
+            Vec::new()
+        } else if posed {
             posed_vertex_buffer_layouts().to_vec()
         } else {
             vertex_buffer_layouts().to_vec()
@@ -1268,6 +1326,94 @@ impl LitHandle {
         self.shared.borrow().id_buffer.clone()
     }
 
+    /// The persistent slot of `instance` (its scene index) while that slot is below the
+    /// instance store capacity; `None` past it.
+    pub fn instance_slot(&self, instance: raa_scene::InstanceId) -> Option<u32> {
+        let slot = instance.to_bits() as u32;
+        (slot < self.shared.borrow().store.capacity()).then_some(slot)
+    }
+
+    /// The persistent S1 instance records (S10 group-0 binding 7), one per scene slot.
+    pub fn instance_storage(&self) -> wgpu::Buffer {
+        self.shared.borrow().instance_storage.clone()
+    }
+
+    /// The `SurfaceMaterialGpu` array (S10 group-0 binding 1).
+    pub fn material_storage(&self) -> wgpu::Buffer {
+        self.shared.borrow().material_buffer.clone()
+    }
+
+    /// Advances whenever the instance or material storage buffer is (re)created, so a
+    /// caller holding a bind group over them knows when to rebuild it.
+    pub fn storage_generation(&self) -> u64 {
+        self.shared.borrow().storage_generation
+    }
+
+    /// Row 0..2 of slot's `RaaPreviousInstanceGpu` when its history is valid (the record's
+    /// `previous_valid` is 1); `None` otherwise or past the record range.
+    pub fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]> {
+        let s = self.shared.borrow();
+        let bytes = s.store.previous_bytes();
+        let start = (slot as usize).checked_mul(64)?;
+        let record = bytes.get(start..start + 64)?;
+        let valid = u32::from_le_bytes(record.get(48..52)?.try_into().ok()?);
+        if valid == 0 {
+            return None;
+        }
+        let mut rows = [[0.0f32; 4]; 3];
+        for (row, out) in rows.iter_mut().enumerate() {
+            for (col, value) in out.iter_mut().enumerate() {
+                let offset = row * 16 + col * 4;
+                *value = f32::from_le_bytes(record.get(offset..offset + 4)?.try_into().ok()?);
+            }
+        }
+        Some(rows)
+    }
+
+    /// The function of material `material`: its [`SurfaceModel::Function`] id, or
+    /// [`MaterialFnId::STANDARD`] for flat, standard and unknown ids.
+    pub fn material_fn_of(&self, material: MaterialId) -> MaterialFnId {
+        let s = self.shared.borrow();
+        s.materials
+            .get(material)
+            .map_or(MaterialFnId::STANDARD, |m| MaterialClass::of(m).material_fn)
+    }
+
+    /// Whether scene tag `tag` drawing sub-mesh `mesh` with `material` can stay on the
+    /// forward path (S31/S32). Answerable before the frame's prepare: the renderer mirrors
+    /// the deformation and colour-stream state into the shared state.
+    pub fn instance_eligibility(
+        &self,
+        tag: u32,
+        mesh: MeshId,
+        material: MaterialId,
+    ) -> InstanceShape {
+        let s = self.shared.borrow();
+        let class = s
+            .materials
+            .get(material)
+            .map_or(DrawClass::Opaque, |m| MaterialClass::of(m).class);
+        let material_fn = s
+            .materials
+            .get(material)
+            .map_or(MaterialFnId::STANDARD, |m| MaterialClass::of(m).material_fn);
+        let vertex_fn = s.fns.get(material_fn).is_some_and(|entry| entry.has_vertex);
+        let has_colors = s
+            .meshes
+            .submesh(mesh)
+            .and_then(|record| s.mesh_colors.get(&record.lit))
+            .copied()
+            .unwrap_or(false);
+        let skinned = s.palette_ready() && s.skin_source.draw(tag).is_some();
+        InstanceShape {
+            skinned,
+            deformed: s.deformed_tags.get(&tag).copied().unwrap_or(false),
+            class,
+            vertex_fn,
+            has_colors,
+        }
+    }
+
     /// The S10 group-0 layout: `FrameGpu` uniform (`FRAME_GPU_SIZE`), `array<SurfaceMaterialGpu>`,
     /// `array<InstanceExtraGpu>` and `array<RaaInstanceGpu>` read-only storage, then the
     /// material texture atlas (`texture_2d<f32>`), its filtering sampler and
@@ -1300,7 +1446,7 @@ impl LitHandle {
     ) -> Result<wgpu::RenderPipeline, RaaError> {
         let s = self.shared.borrow();
         let mut key = key;
-        if s.bound_skin.get() {
+        if s.bound_skin.get() && !matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
             key.flags |= crate::skin_draw::POSED;
         }
         s.pipeline_for(gpu, key, spec)
