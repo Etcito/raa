@@ -298,3 +298,15 @@ test('dispose is idempotent, disposes the Engine once and a run after dispose re
   assert.equal(h.engines[0].disposed, 1);
   await assert.rejects(h.runner.run(runInput('bake-scene')), /disposed/);
 });
+
+test('scenes/bake.js: the real module validates the four bake rows in order, no behaviour names a fixture, and importing it twice has no side effect', async () => {
+  const first = await import('./scenes/bake.js');
+  const again = await import('./scenes/bake.js?again');
+  const rows = validateInventory([first], 'bake');
+  assert.deepEqual(rows.map(r => r.filename), ['bake-finest-cut-cluster-colours.png', 'bake-three-cuts-coarser-left-to-right.png', 'bake-foliage-thinned-keeps-coverage.png', 'bake-sliced-progress-then-complete.png']);
+  for (const r of rows) {
+    assert.ok(r.expectedVisibleBehavior.length > 0);
+    for (const fixture of r.heldConstant) assert.ok(!r.expectedVisibleBehavior.includes(fixture), `${r.id} names ${fixture}`);
+  }
+  assert.equal(again.default.id, 'bake');
+});
