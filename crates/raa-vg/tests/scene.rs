@@ -200,3 +200,352 @@ fn upload_pool_builds_the_layout_and_release_drops_every_buffer() {
     assert!(scene.section_range(3, 0).is_none());
     assert!(scene.upload_pool(&gpu, &store, &keys), "release rebuilds");
 }
+
+mod plan {
+    use std::collections::BTreeMap;
+
+    use raa_cluster::{BuildOptions, ClusterMesh, ClusterStore, OwnedClusterInput, bake};
+    use raa_core::testing::{skip, software_gpu};
+    use raa_core::{MaterialId, MeshId};
+    use raa_lit::{DrawClass, InstanceShape, MaterialFnId};
+    use raa_scene::{InstanceId, Scene, Transform};
+    use raa_vg::scene::{ItemScratch, SyncSource, VgPlan, plan_sync};
+    use raa_vg::{
+        INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_MOVABLE, INSTANCE_PREVIOUS_VALID,
+        InstancePath, InstanceRequests, MeshKeys, VgInstanceRecord, VgScene, VgSettings,
+    };
+
+    const ELIGIBLE: InstanceShape = InstanceShape {
+        skinned: false,
+        deformed: false,
+        class: DrawClass::Opaque,
+        vertex_fn: false,
+        has_colors: false,
+    };
+
+    #[derive(Default)]
+    struct Double {
+        shapes: BTreeMap<u32, InstanceShape>,
+        functions: BTreeMap<u32, MaterialFnId>,
+        flags: BTreeMap<u32, u32>,
+        previous: BTreeMap<u32, [[f32; 4]; 3]>,
+    }
+
+    impl SyncSource for Double {
+        fn instance_eligibility(
+            &self,
+            tag: u32,
+            _mesh: MeshId,
+            _material: MaterialId,
+        ) -> InstanceShape {
+            self.shapes.get(&tag).copied().unwrap_or(ELIGIBLE)
+        }
+
+        fn material_fn_of(&self, material: MaterialId) -> MaterialFnId {
+            self.functions
+                .get(&material.0)
+                .copied()
+                .unwrap_or(MaterialFnId::STANDARD)
+        }
+
+        fn material_flags(&self, material: MaterialId) -> u32 {
+            self.flags.get(&material.0).copied().unwrap_or(0)
+        }
+
+        fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]> {
+            self.previous.get(&slot).copied()
+        }
+    }
+
+    fn scene_of(instances: &[(u32, u32, u32)]) -> (Scene, Vec<InstanceId>) {
+        let mut scene = Scene::new();
+        let node = scene.add_node(None, Transform::IDENTITY).expect("a node");
+        let mut ids = Vec::new();
+        for &(tag, mesh, material) in instances {
+            let id = scene
+                .add_instance(node, MeshId(mesh), MaterialId(material))
+                .expect("an instance");
+            scene.set_instance_tag(id, tag).expect("a tag");
+            ids.push(id);
+        }
+        scene.update_world();
+        (scene, ids)
+    }
+
+    fn baked() -> ClusterMesh {
+        let input = OwnedClusterInput::displaced_sphere(2);
+        bake(input.as_input(), &BuildOptions::default()).expect("the sphere bakes")
+    }
+
+    fn record_of(plan: &VgPlan, instance: InstanceId) -> &VgInstanceRecord {
+        plan.instances
+            .iter()
+            .find(|planned| planned.instance == instance)
+            .map(|planned| &planned.record)
+            .expect("the instance is planned")
+    }
+
+    #[test]
+    fn virtual_groups_report_functions_ids_and_record_flags() {
+        let section = baked();
+        let depth = section.hierarchy_depth;
+        let mut store = ClusterStore::new();
+        store.attach(1, vec![section]);
+        let mut keys = MeshKeys::default();
+        keys.set(1, &[MeshId(101)]);
+        let (scene, ids) = scene_of(&[(10, 101, 201), (17, 101, 202), (18, 101, 201)]);
+        let mut source = Double::default();
+        source.functions.insert(201, MaterialFnId(3));
+        source.functions.insert(202, MaterialFnId(1));
+        source.flags.insert(201, 8);
+        source.flags.insert(202, 16);
+        source.previous.insert(
+            0,
+            [
+                [2.0, 0.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0, 0.0],
+                [0.0, 0.0, 2.0, 0.0],
+            ],
+        );
+
+        let mut scratch = ItemScratch::default();
+        let items = scratch.fill(&scene);
+        let plan = plan_sync(
+            items,
+            &source,
+            &store,
+            &Default::default(),
+            &keys,
+            &VgSettings::default(),
+        );
+
+        assert_eq!(plan.report.virtual_instances, 3);
+        assert_eq!(plan.report.forward_instances, 0);
+        assert_eq!(plan.report.ready_meshes, 1);
+        assert_eq!(plan.report.baking_meshes, 0);
+        assert_eq!(
+            plan.report.material_fns,
+            vec![MaterialFnId(1), MaterialFnId(3)]
+        );
+        assert_eq!(plan.report.virtual_ids, ids);
+        for tag in [10, 17, 18] {
+            assert_eq!(plan.report.paths.get(&tag), Some(&InstancePath::Virtual));
+        }
+
+        let moving = record_of(&plan, ids[0]);
+        assert_eq!(moving.ranges, [0; 4]);
+        assert_eq!(moving.ids[0], 0);
+        assert_eq!(moving.ids[1], 201);
+        assert_eq!(moving.ids[3] & 0xff, depth);
+        assert_eq!(moving.ids[3] >> 8, 0, "the root is filled at upload");
+        assert_ne!(moving.ids[2] & INSTANCE_DOUBLE_SIDED, 0);
+        assert_ne!(moving.ids[2] & INSTANCE_CASTS_SHADOW, 0);
+        assert_ne!(moving.ids[2] & INSTANCE_PREVIOUS_VALID, 0);
+        assert_ne!(moving.ids[2] & INSTANCE_MOVABLE, 0);
+
+        let still = record_of(&plan, ids[1]);
+        assert_eq!(still.ids[1], 202);
+        assert_eq!(still.ids[2] & INSTANCE_DOUBLE_SIDED, 0);
+        assert_eq!(
+            still.ids[2] & INSTANCE_CASTS_SHADOW,
+            0,
+            "NO_SHADOW clears it"
+        );
+        assert_eq!(still.ids[2] & INSTANCE_PREVIOUS_VALID, 0);
+        assert_eq!(still.ids[2] & INSTANCE_MOVABLE, 0);
+
+        let double_sided = record_of(&plan, ids[2]);
+        assert_ne!(double_sided.ids[2] & INSTANCE_DOUBLE_SIDED, 0);
+        assert_ne!(double_sided.ids[2] & INSTANCE_CASTS_SHADOW, 0);
+    }
+
+    #[test]
+    fn ineligible_groups_are_refused_only_when_requested() {
+        let mut store = ClusterStore::new();
+        store.attach(1, vec![baked()]);
+        let mut keys = MeshKeys::default();
+        keys.set(1, &[MeshId(101)]);
+        let (scene, _) = scene_of(&[(11, 101, 201), (12, 101, 201)]);
+        let mut source = Double::default();
+        source.shapes.insert(
+            11,
+            InstanceShape {
+                skinned: true,
+                ..ELIGIBLE
+            },
+        );
+        source.shapes.insert(
+            12,
+            InstanceShape {
+                class: DrawClass::Transparent,
+                ..ELIGIBLE
+            },
+        );
+        let mut scratch = ItemScratch::default();
+        let items = scratch.fill(&scene);
+        let settings = VgSettings::default();
+        let mut requests = InstanceRequests::default();
+
+        let plan = plan_sync(items, &source, &store, &requests, &keys, &settings);
+        assert_eq!(plan.report.virtual_instances, 0);
+        assert_eq!(plan.report.forward_requested, 2);
+        assert_eq!(
+            plan.report.ineligible.get(&11),
+            Some(&"vg.skinned_unsupported")
+        );
+        assert_eq!(
+            plan.report.ineligible.get(&12),
+            Some(&"vg.transparent_material")
+        );
+        assert_eq!(plan.report.refused.get("vg.skinned_unsupported"), Some(&1));
+        assert_eq!(plan.report.refused.get("vg.transparent_material"), Some(&1));
+
+        requests.set(11, Some(false));
+        let plan = plan_sync(items, &source, &store, &requests, &keys, &settings);
+        assert_eq!(plan.report.forward_requested, 1);
+        assert_eq!(
+            plan.report.ineligible.get(&11),
+            Some(&"vg.skinned_unsupported"),
+            "reported whether requested or not"
+        );
+        assert_eq!(plan.report.refused.get("vg.skinned_unsupported"), None);
+        assert_eq!(plan.report.refused.get("vg.transparent_material"), Some(&1));
+        assert!(matches!(
+            plan.report.paths.get(&11),
+            Some(InstancePath::Forward {
+                pending: false,
+                code: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn pending_meshes_bake_only_when_selected() {
+        let mut store = ClusterStore::new();
+        store
+            .start_bake(
+                2,
+                vec![OwnedClusterInput::displaced_sphere(1)],
+                &BuildOptions::default(),
+            )
+            .expect("the bake starts");
+        let mut keys = MeshKeys::default();
+        keys.set(2, &[MeshId(102)]);
+        keys.set(3, &[MeshId(103)]);
+        let (scene, _) = scene_of(&[(13, 103, 201), (14, 102, 201)]);
+        let source = Double::default();
+        let mut scratch = ItemScratch::default();
+        let items = scratch.fill(&scene);
+        let mut settings = VgSettings::default();
+        let requests = InstanceRequests::default();
+
+        let plan = plan_sync(items, &source, &store, &requests, &keys, &settings);
+        assert_eq!(plan.report.baking_meshes, 1);
+        assert_eq!(plan.report.ready_meshes, 0);
+        assert_eq!(plan.report.bake_requests, vec![3]);
+        for tag in [13, 14] {
+            assert!(matches!(
+                plan.report.paths.get(&tag),
+                Some(InstancePath::Forward {
+                    pending: true,
+                    code: None,
+                    ..
+                })
+            ));
+        }
+
+        settings.runtime_bake = false;
+        let plan = plan_sync(items, &source, &store, &requests, &keys, &settings);
+        assert!(plan.report.bake_requests.is_empty());
+        assert!(matches!(
+            plan.report.paths.get(&13),
+            Some(InstancePath::Forward { pending: true, .. })
+        ));
+        assert!(matches!(
+            plan.report.paths.get(&14),
+            Some(InstancePath::Forward { pending: true, .. })
+        ));
+    }
+
+    #[test]
+    fn refused_meshes_map_their_codes_and_missing_sections_stay_forward() {
+        let mut store = ClusterStore::new();
+        store.refuse(4, "cluster.empty", "the mesh has no triangles".to_string());
+        store.attach(6, vec![baked()]);
+        let mut keys = MeshKeys::default();
+        keys.set(4, &[MeshId(105)]);
+        keys.set(6, &[MeshId(106), MeshId(107)]);
+        let (scene, _) = scene_of(&[(15, 105, 201), (16, 106, 201), (16, 107, 201)]);
+        let source = Double::default();
+        let mut scratch = ItemScratch::default();
+        let items = scratch.fill(&scene);
+        let plan = plan_sync(
+            items,
+            &source,
+            &store,
+            &Default::default(),
+            &keys,
+            &VgSettings::default(),
+        );
+
+        assert!(matches!(
+            plan.report.paths.get(&15),
+            Some(InstancePath::Forward {
+                pending: false,
+                code: Some("vg.mesh_empty"),
+                message: Some(message),
+            }) if message == "the mesh has no triangles"
+        ));
+        assert!(
+            plan.report.refused.is_empty(),
+            "mesh codes are not instance refusals"
+        );
+        assert!(matches!(
+            plan.report.paths.get(&16),
+            Some(InstancePath::Forward {
+                pending: false,
+                code: None,
+                ..
+            })
+        ));
+        assert!(plan.instances.is_empty());
+        assert_eq!(plan.report.forward_requested, 2);
+    }
+
+    #[test]
+    fn upload_plan_attaches_the_virtual_records() {
+        let test = "upload_plan_attaches_the_virtual_records";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mesh = baked();
+        let depth = mesh.hierarchy_depth;
+        let mut store = ClusterStore::new();
+        store.attach(1, vec![mesh]);
+        let mut keys = MeshKeys::default();
+        keys.set(1, &[MeshId(101)]);
+        let (scene, _) = scene_of(&[(10, 101, 201)]);
+        let source = Double::default();
+        let mut scratch = ItemScratch::default();
+        let items = scratch.fill(&scene);
+        let plan = plan_sync(
+            items,
+            &source,
+            &store,
+            &Default::default(),
+            &keys,
+            &VgSettings::default(),
+        );
+        assert_eq!(plan.report.virtual_instances, 1);
+
+        let mut vg = VgScene::new();
+        vg.upload_plan(&gpu, &store, &keys, &plan);
+        assert_eq!(vg.instance_count(), 1);
+        assert_eq!(vg.max_hierarchy_depth(), depth);
+        let (range, section_depth, _) = vg.section_header(1, 0).expect("the section is packed");
+        assert_eq!(range.node_base, 0);
+        assert_eq!(section_depth, depth);
+    }
+}

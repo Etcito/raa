@@ -5,11 +5,16 @@
 //! Adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder: `crates/solstice-render/src/vg`
 //! scene setup, revision 7e465b5.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use raa_cluster::ClusterStore;
-use raa_core::{GpuContext, MeshId, wgpu};
+use raa_cluster::{ClusterMesh, ClusterState, ClusterStore};
+use raa_core::{GpuContext, MaterialId, MeshId, wgpu};
+use raa_lit::{FLAG_DOUBLE_SIDED, FLAG_NO_SHADOW, InstanceShape, LitHandle, MaterialFnId};
 use raa_math::Mat4;
+use raa_scene::{InstanceId, RenderList, Scene};
+
+use crate::eligibility::{InstancePath, refusal, refusal_message};
+use crate::settings::VgSettings;
 
 /// Bytes of one `VgInstanceGpu` record.
 pub const VG_INSTANCE_SIZE: usize = 192;
@@ -177,6 +182,391 @@ impl InstanceRequests {
     }
 }
 
+/// The CPU questions path planning asks of the lit renderer; implemented for [`LitHandle`] and
+/// by tests with a table double.
+pub trait SyncSource {
+    fn instance_eligibility(&self, tag: u32, mesh: MeshId, material: MaterialId) -> InstanceShape;
+    fn material_fn_of(&self, material: MaterialId) -> MaterialFnId;
+    fn material_flags(&self, material: MaterialId) -> u32;
+    fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]>;
+}
+
+impl SyncSource for LitHandle {
+    fn instance_eligibility(&self, tag: u32, mesh: MeshId, material: MaterialId) -> InstanceShape {
+        LitHandle::instance_eligibility(self, tag, mesh, material)
+    }
+
+    fn material_fn_of(&self, material: MaterialId) -> MaterialFnId {
+        LitHandle::material_fn_of(self, material)
+    }
+
+    fn material_flags(&self, material: MaterialId) -> u32 {
+        self.material_record(material)
+            .map_or(0, |record| record.flags)
+    }
+
+    fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]> {
+        LitHandle::previous_instance_row(self, slot)
+    }
+}
+
+/// One listed scene instance: its identity, its JS tag and what to draw.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SyncItem {
+    pub instance: InstanceId,
+    pub slot: u32,
+    pub tag: u32,
+    pub mesh: MeshId,
+    pub material: MaterialId,
+    pub world: Mat4,
+}
+
+/// Reused render-list scratch: [`ItemScratch::fill`] allocates nothing once its capacity fits.
+#[derive(Default)]
+pub struct ItemScratch {
+    list: RenderList,
+    tags: Vec<u32>,
+    slots: Vec<u32>,
+    items: Vec<SyncItem>,
+}
+
+impl ItemScratch {
+    /// Fills the reused list and tags of `scene` and returns one item per visible instance.
+    pub fn fill(&mut self, scene: &Scene) -> &[SyncItem] {
+        scene.build_render_list_slots(&mut self.list, &mut self.tags, &mut self.slots);
+        self.items.clear();
+        self.items.reserve(self.list.items.len());
+        for (index, item) in self.list.items.iter().enumerate() {
+            let Some(slot) = self.slots.get(index).copied() else {
+                continue;
+            };
+            let Some(instance) = scene.instance_at_slot(slot) else {
+                continue;
+            };
+            self.items.push(SyncItem {
+                instance,
+                slot,
+                tag: self.tags.get(index).copied().unwrap_or(0),
+                mesh: item.mesh,
+                material: item.material,
+                world: item.world,
+            });
+        }
+        &self.items
+    }
+}
+
+/// The path-planning report of one [`plan_sync`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VgSyncReport {
+    pub virtual_instances: u32,
+    pub forward_instances: u32,
+    pub forward_requested: u32,
+    pub refused: BTreeMap<&'static str, u32>,
+    pub baking_meshes: u32,
+    pub ready_meshes: u32,
+    pub material_fns: Vec<MaterialFnId>,
+    pub bake_requests: Vec<u32>,
+    pub virtual_ids: Vec<InstanceId>,
+    pub paths: BTreeMap<u32, InstancePath>,
+    pub ineligible: BTreeMap<u32, &'static str>,
+}
+
+/// One instance the plan uploads: its section key and ordinal, and the record before the pool
+/// fills in the ranges and the hierarchy word's root.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlannedInstance {
+    pub instance: InstanceId,
+    pub key: u32,
+    pub ordinal: usize,
+    pub record: VgInstanceRecord,
+}
+
+/// The CPU plan: the report and the records [`VgScene::upload_plan`] writes.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VgPlan {
+    pub report: VgSyncReport,
+    pub instances: Vec<PlannedInstance>,
+}
+
+/// Plans one frame's virtualized paths on the CPU: one [`InstancePath`] per listed JS instance
+/// group (tag), the virtual records to upload and the report counts.
+pub fn plan_sync(
+    items: &[SyncItem],
+    source: &dyn SyncSource,
+    store: &ClusterStore,
+    requests: &InstanceRequests,
+    keys: &MeshKeys,
+    settings: &VgSettings,
+) -> VgPlan {
+    let mut plan = VgPlan::default();
+    let mut virtual_slots: Vec<(u32, InstanceId)> = Vec::new();
+
+    let mut baking = BTreeSet::new();
+    let mut ready = BTreeSet::new();
+    for item in items {
+        if let Some((key, _)) = keys.get(item.mesh) {
+            match store.state(key).state {
+                ClusterState::Baking => {
+                    baking.insert(key);
+                }
+                ClusterState::Ready => {
+                    ready.insert(key);
+                }
+                _ => {}
+            }
+        }
+    }
+    plan.report.baking_meshes = baking.len() as u32;
+    plan.report.ready_meshes = ready.len() as u32;
+
+    let mut groups: BTreeMap<u32, Vec<&SyncItem>> = BTreeMap::new();
+    for item in items {
+        groups.entry(item.tag).or_default().push(item);
+    }
+
+    for (tag, group) in groups {
+        let requested = requests.get(tag).unwrap_or(settings.instance_default);
+        let mut best: Option<(&'static str, String, u8)> = None;
+        for item in &group {
+            let shape = source.instance_eligibility(item.tag, item.mesh, item.material);
+            if let Some(code) = refusal(&shape) {
+                let rank = refusal_rank(code);
+                if best.as_ref().is_none_or(|(_, _, best)| rank < *best) {
+                    best = Some((code, refusal_message(&shape).unwrap_or_default(), rank));
+                }
+            }
+        }
+        if let Some((code, _, _)) = &best {
+            plan.report.ineligible.insert(tag, *code);
+        }
+        if !requested {
+            plan.report.forward_instances += 1;
+            plan.report.paths.insert(
+                tag,
+                InstancePath::Forward {
+                    pending: false,
+                    code: None,
+                    message: None,
+                },
+            );
+            continue;
+        }
+        if let Some((code, message, _)) = best {
+            plan.report.forward_instances += 1;
+            plan.report.forward_requested += 1;
+            *plan.report.refused.entry(code).or_insert(0) += 1;
+            plan.report.paths.insert(
+                tag,
+                InstancePath::Forward {
+                    pending: false,
+                    code: Some(code),
+                    message: Some(message),
+                },
+            );
+            continue;
+        }
+
+        let mut refused = None;
+        let mut absent = false;
+        let mut missing_section = false;
+        let mut pending = false;
+        let mut bake_keys: Vec<u32> = Vec::new();
+        let mut planned: Vec<PlannedInstance> = Vec::new();
+        for item in &group {
+            let Some((key, ordinal)) = keys.get(item.mesh) else {
+                absent = true;
+                continue;
+            };
+            let status = store.state(key);
+            match status.state {
+                ClusterState::Ready => {
+                    if let Some(section) = store.sections(key).and_then(|list| list.get(ordinal)) {
+                        planned.push(planned_instance(item, key, ordinal, section, source));
+                    } else {
+                        missing_section = true;
+                    }
+                }
+                ClusterState::None => {
+                    pending = true;
+                    if settings.runtime_bake {
+                        bake_keys.push(key);
+                    }
+                }
+                ClusterState::Baking => pending = true,
+                ClusterState::Refused => {
+                    refused = Some((
+                        store_refusal_code(status.code),
+                        status.message.unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+
+        if let Some((code, message)) = refused {
+            plan.report.forward_instances += 1;
+            plan.report.forward_requested += 1;
+            plan.report.paths.insert(
+                tag,
+                InstancePath::Forward {
+                    pending: false,
+                    code: Some(code),
+                    message: Some(message),
+                },
+            );
+        } else if absent || missing_section {
+            plan.report.forward_instances += 1;
+            plan.report.forward_requested += 1;
+            plan.report.paths.insert(
+                tag,
+                InstancePath::Forward {
+                    pending: false,
+                    code: None,
+                    message: None,
+                },
+            );
+        } else if pending {
+            plan.report.forward_instances += 1;
+            plan.report.forward_requested += 1;
+            for key in bake_keys {
+                if !plan.report.bake_requests.contains(&key) {
+                    plan.report.bake_requests.push(key);
+                }
+            }
+            plan.report.paths.insert(
+                tag,
+                InstancePath::Forward {
+                    pending: true,
+                    code: None,
+                    message: None,
+                },
+            );
+        } else {
+            plan.report.virtual_instances += 1;
+            plan.report.paths.insert(tag, InstancePath::Virtual);
+            for item in &group {
+                let function = source.material_fn_of(item.material);
+                if !plan.report.material_fns.contains(&function) {
+                    plan.report.material_fns.push(function);
+                }
+            }
+            for instance in planned {
+                virtual_slots.push((instance.record.ids[0], instance.instance));
+                plan.instances.push(instance);
+            }
+        }
+    }
+
+    virtual_slots.sort_by_key(|(slot, _)| *slot);
+    plan.report.virtual_ids = virtual_slots.into_iter().map(|(_, id)| id).collect();
+    plan.report.material_fns.sort();
+    plan.report.bake_requests.sort_unstable();
+    plan.report.bake_requests.dedup();
+    plan
+}
+
+fn refusal_rank(code: &'static str) -> u8 {
+    match code {
+        crate::error::SKINNED_UNSUPPORTED => 0,
+        crate::error::DEFORMED_UNSUPPORTED => 1,
+        _ => 2,
+    }
+}
+
+fn store_refusal_code(code: Option<&'static str>) -> &'static str {
+    match code {
+        Some(code) if code.starts_with("vg.") => code,
+        Some("cluster.empty") => "vg.mesh_empty",
+        Some("cluster.too_large") => "vg.mesh_too_large",
+        _ => "vg.invalid",
+    }
+}
+
+fn model_rows(model: &Mat4) -> [[f32; 4]; 3] {
+    [
+        [
+            model.cols[0][0],
+            model.cols[1][0],
+            model.cols[2][0],
+            model.cols[3][0],
+        ],
+        [
+            model.cols[0][1],
+            model.cols[1][1],
+            model.cols[2][1],
+            model.cols[3][1],
+        ],
+        [
+            model.cols[0][2],
+            model.cols[1][2],
+            model.cols[2][2],
+            model.cols[3][2],
+        ],
+    ]
+}
+
+fn planned_instance(
+    item: &SyncItem,
+    key: u32,
+    ordinal: usize,
+    section: &ClusterMesh,
+    source: &dyn SyncSource,
+) -> PlannedInstance {
+    let rows = model_rows(&item.world);
+    let mut flags = 0;
+    let previous_rows = match source.previous_instance_row(item.slot) {
+        Some(previous) => {
+            flags |= INSTANCE_PREVIOUS_VALID;
+            if previous != rows {
+                flags |= INSTANCE_MOVABLE;
+            }
+            previous
+        }
+        None => rows,
+    };
+    let material_flags = source.material_flags(item.material);
+    if material_flags & FLAG_DOUBLE_SIDED != 0 {
+        flags |= INSTANCE_DOUBLE_SIDED;
+    }
+    if material_flags & FLAG_NO_SHADOW == 0 {
+        flags |= INSTANCE_CASTS_SHADOW;
+    }
+    PlannedInstance {
+        instance: item.instance,
+        key,
+        ordinal,
+        record: VgInstanceRecord {
+            model: item.world,
+            previous_rows,
+            quant: [
+                section.quant_origin[0],
+                section.quant_origin[1],
+                section.quant_origin[2],
+                section.quant_step,
+            ],
+            uv_quant: [
+                section.uv_origin[0],
+                section.uv_origin[1],
+                section.uv_step[0],
+                section.uv_step[1],
+            ],
+            ranges: [0; 4],
+            ids: [
+                item.slot,
+                item.material.0,
+                flags,
+                hierarchy_word(section.hierarchy_depth, 0),
+            ],
+            bounds: [
+                section.bounds_center[0],
+                section.bounds_center[1],
+                section.bounds_center[2],
+                section.bounds_radius,
+            ],
+        },
+    }
+}
+
 #[derive(Default)]
 struct Pool {
     buffer: Option<wgpu::Buffer>,
@@ -240,6 +630,8 @@ pub struct VgScene {
     scratch: [Vec<u8>; 4],
     instance_scratch: Vec<u8>,
     last_instance_bytes: Vec<u8>,
+    scratch_items: ItemScratch,
+    plan_scratch: Vec<VgInstanceRecord>,
     instance_count: u32,
     max_hierarchy_depth: u32,
     generation: u64,
@@ -360,6 +752,57 @@ impl VgScene {
         self.sections
             .get(&(key, ordinal))
             .map(|info| (info.range, info.hierarchy_depth, info.root_node))
+    }
+
+    /// Rebuilds the pool when needed, then writes the plan's records in order with their
+    /// section ranges and the hierarchy word's root filled from [`VgScene::section_header`].
+    pub fn upload_plan(
+        &mut self,
+        gpu: &GpuContext,
+        store: &ClusterStore,
+        keys: &MeshKeys,
+        plan: &VgPlan,
+    ) {
+        self.upload_pool(gpu, store, keys);
+        self.plan_scratch.clear();
+        self.plan_scratch.reserve(plan.instances.len());
+        for planned in &plan.instances {
+            let mut record = planned.record;
+            if let Some((range, depth, root)) = self.section_header(planned.key, planned.ordinal) {
+                record.ranges = [
+                    range.node_base,
+                    range.cluster_base,
+                    range.vertex_base,
+                    range.triangle_base,
+                ];
+                record.ids[3] = hierarchy_word(depth, root);
+            }
+            self.plan_scratch.push(record);
+        }
+        let records = std::mem::take(&mut self.plan_scratch);
+        self.upload_instances(gpu, &records);
+        self.plan_scratch = records;
+    }
+
+    /// Plans and uploads one frame: [`ItemScratch::fill`] into [`plan_sync`], then
+    /// [`VgScene::upload_plan`]; returns the report.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sync(
+        &mut self,
+        gpu: &GpuContext,
+        store: &ClusterStore,
+        lit: &LitHandle,
+        requests: &InstanceRequests,
+        keys: &MeshKeys,
+        scene: &Scene,
+        settings: &VgSettings,
+    ) -> VgSyncReport {
+        let plan = {
+            let items = self.scratch_items.fill(scene);
+            plan_sync(items, lit, store, requests, keys, settings)
+        };
+        self.upload_plan(gpu, store, keys, &plan);
+        plan.report
     }
 
     /// Writes the records in order, growing the buffer in pages of 64; equal bytes write nothing.
