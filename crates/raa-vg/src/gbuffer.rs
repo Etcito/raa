@@ -22,15 +22,6 @@ use crate::shade::VgShadeSlots;
 
 /// `vg.gbuffer` (S12 order 32): merges the resolved virtualized surface into the depth,
 /// normal, material and motion targets with one fullscreen draw per material function.
-///
-/// Handoff: `raa-vg: VgFeature::install and VgHandle (settings, instances, active state,
-/// prepare_frame)` takes `VgGbufferPass::new(state: SharedVg) -> VgGbufferPass` exported by
-/// crates/raa-vg/src/gbuffer.rs; it attaches by registering the struct as the order-32
-/// `FeaturePass` beside `VgCullPass`, `VgRasterPass` and `VgResolvePass`, disabled until
-/// `VgFrameState::active`. State/keys: the `SharedVg` (`Rc<RefCell<VgFrameState>>`) with
-/// `VgFrameState::material_fns` (one slot and pipeline per function) and
-/// `VgFrameState::settings.debug_view` (the slot's debug code); the pass owns its
-/// `VgShadeSlots` and its group-2 bind group.
 pub(crate) struct VgGbufferPass {
     state: SharedVg,
     layout: Option<wgpu::BindGroupLayout>,
@@ -47,6 +38,14 @@ impl VgGbufferPass {
     pub(crate) const NAME: &'static str = "vg.gbuffer";
     pub(crate) const ORDER: u32 = 32;
 
+    /// Handoff: `raa-vg: VgFeature::install and VgHandle (settings, instances, active state,
+    /// prepare_frame)` takes `VgGbufferPass::new(state: SharedVg) -> VgGbufferPass` exported by
+    /// crates/raa-vg/src/gbuffer.rs; it attaches by registering the struct as the order-32
+    /// `FeaturePass` beside `VgCullPass`, `VgRasterPass` and `VgResolvePass`, disabled until
+    /// `VgFrameState::active`. State/keys: the `SharedVg` (`Rc<RefCell<VgFrameState>>`) with
+    /// `VgFrameState::material_fns` (one slot and pipeline per function) and
+    /// `VgFrameState::settings.debug_view` (the slot's debug code); the pass owns its
+    /// `VgShadeSlots` and its group-2 bind group.
     pub(crate) fn new(state: SharedVg) -> VgGbufferPass {
         VgGbufferPass {
             state,
