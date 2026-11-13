@@ -10,6 +10,7 @@ mod frame_passes;
 pub mod culling;
 pub mod eligibility;
 pub mod error;
+pub mod feature;
 pub mod gbuffer;
 pub mod raster;
 pub mod resolve;
@@ -22,6 +23,7 @@ pub use culling::{
     PassView, SLOT_STRIDE, VG_VIEW_SLOTS, ViewSlots,
 };
 pub use eligibility::{InstancePath, refusal_message};
+pub use feature::{VgFeature, VgHandle, VgStats, inactive_reason};
 pub use raster::{RASTER_COMMON_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl};
 pub use resolve::resolve_module_wgsl;
 pub use scene::{
