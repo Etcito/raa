@@ -128,14 +128,44 @@ function revisionAt(root) {
   return revision;
 }
 
-function inputFiles(root) {
+const PAGE_NAME = /^[a-z0-9][a-z0-9-]*$/;
+
+function inputFiles(root, page) {
   // Include untracked delivered sources, never generated package/WASM/dist outputs.
   const names = git(root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard', '--',
     'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'rustfmt.toml', 'package.json',
     'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.cargo/config', '.cargo/config.toml',
     'crates', 'demos', 'tests', 'packages', 'scripts', 'examples/sky-weather',
-    'examples/lookdev/lib', 'web/common').split('\0').filter(Boolean);
+    'examples/lookdev/lib', 'web/common', `examples/${page}`).split('\0').filter(Boolean);
   return [...new Set([...names, 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.nmc/commands.json'])].sort();
+}
+
+/** The scene inputs of one page: its inventory, its scenes and its GPU page description. */
+function pageCriteria(sources, page) {
+  const inventory = `examples/${page}/lib/inventory.js`;
+  const scenes = `examples/${page}/scenes/`;
+  const gpu = `examples/${page}/nmc.gpu.json`;
+  const criteria = sources.filter(source => source.path === inventory
+    || source.path.startsWith(scenes) || source.path === gpu);
+  ensure(criteria.some(source => source.path === inventory),
+    `missing ${page} inventory criteria: ${inventory}`);
+  return criteria;
+}
+
+/** The page a receipt was captured for, read from its recorded criteria. */
+function receiptPage(receipt) {
+  let criteria;
+  try { criteria = JSON.parse(receipt.criteriaText); }
+  catch (cause) { throw new Error('invalid input receipt criteria', { cause }); }
+  ensure(Array.isArray(criteria), 'invalid input receipt criteria');
+  const pages = new Set();
+  for (const source of criteria) {
+    const match = typeof source?.path === 'string'
+      ? /^examples\/([a-z0-9][a-z0-9-]*)\/lib\/inventory\.js$/.exec(source.path) : null;
+    if (match) pages.add(match[1]);
+  }
+  ensure(pages.size === 1, 'invalid input receipt criteria');
+  return [...pages][0];
 }
 
 function linkedPreparations(root, sources) {
@@ -177,21 +207,26 @@ function linkedPreparations(root, sources) {
 
 /**
  * Capture before staging; the builder supplies the identity of that preparation.
+ * `page` names the example page whose build the receipt records.
+ * Handoff: examples/virtual-geometry: passes stage scene module (seven presets) takes the page
+ * input collection from this card: `captureInputs` records every source under `examples/<page>`
+ * and takes the criteria from that page's `lib/inventory.js`, `scenes/` and `nmc.gpu.json`
+ * through `pageCriteria`.
  * @param {string} root
  * @param {string} preparationId
+ * @param {string} [page]
  * @returns {InputReceipt}
  */
-export function captureInputs(root, preparationId) {
+export function captureInputs(root, preparationId, page = 'sky-weather') {
   ensure(typeof preparationId === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(preparationId),
   'missing or invalid preparationId (expected builder preparation UUID)');
+  ensure(typeof page === 'string' && PAGE_NAME.test(page), 'invalid page name');
   root = path.dirname(containedPath(root, 'Cargo.toml'));
   const revision = revisionAt(root);
-  const sources = inputFiles(root).map(name => ({ path: name, text: readText(containedPath(root, name)) }));
+  const sources = inputFiles(root, page).map(name => ({ path: name, text: readText(containedPath(root, name)) }));
   const dependencies = linkedPreparations(root, sources);
-  const criteria = sources.filter(source => source.path === 'examples/sky-weather/lib/inventory.js'
-    || source.path.startsWith('examples/sky-weather/scenes/') || source.path === 'examples/sky-weather/nmc.gpu.json');
-  ensure(criteria.some(source => source.path.endsWith('/lib/inventory.js')), 'missing sky inventory criteria');
+  const criteria = pageCriteria(sources, page);
   return {
     repository: 'raa', revision, preparationId, dependencies, sources,
     toolchain: {
@@ -206,7 +241,7 @@ export function captureInputs(root, preparationId) {
 
 export function assertCurrentInputs(root, receipt) {
   ensure(receipt && typeof receipt === 'object' && receipt.repository === 'raa', 'invalid RAA input receipt');
-  const current = captureInputs(root, receipt.preparationId);
+  const current = captureInputs(root, receipt.preparationId, receiptPage(receipt));
   ensure(Array.isArray(receipt.sources), 'invalid input receipt sources');
   const oldSources = new Map(receipt.sources.map(source => [source?.path, source?.text]));
   ensure(oldSources.size === receipt.sources.length, 'duplicate input receipt sources');

@@ -152,7 +152,7 @@ function walk(directory, prefix = '') {
   return names;
 }
 const preparationId = randomUUID();
-const inputs = captureInputs(root, preparationId);
+const inputs = captureInputs(root, preparationId, 'virtual-geometry');
 const files = walk(out).sort();
 if (!files.includes('scenes.json')) throw new Error('scenes.json was not staged');
 const receipt = {

@@ -337,7 +337,7 @@ function receiptFixture(t) {
     'Cargo.lock': 'version = 4\n',
     'rust-toolchain.toml': '[toolchain]\nchannel = "1.96.0"\n',
     '.nmc/commands.json': '[]\n',
-    'examples/sky-weather/lib/inventory.js': 'export const criteria = [];\n',
+    'examples/virtual-geometry/lib/inventory.js': 'export const rows = [];\n',
   };
   for (const [name, text] of Object.entries(manifest)) putFile(root, name, text);
   putFile(root, '.git', 'gitdir: fixture\n');
@@ -361,7 +361,7 @@ function receiptFixture(t) {
   putFile(page, 'scenes.json', '[]\n');
   const preparationId = randomUUID();
   const build = {
-    buildId: randomUUID(), preparationId, inputs: captureInputs(root, preparationId),
+    buildId: randomUUID(), preparationId, inputs: captureInputs(root, preparationId, 'virtual-geometry'),
     builtAt: new Date().toISOString(), page, files: ['scenes.json'], status: 'ready', error: null,
   };
   const write = (value) => writeJsonRecord(containedPath(page, 'build.json'), value);

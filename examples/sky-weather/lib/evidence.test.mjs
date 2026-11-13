@@ -125,16 +125,15 @@ test('interrupted writes, sync and rename preserve prior diagnostics and remove 
   assert.throws(() => readJsonRecord(path.join(root, 'absent.json')), error => error.cause.code === 'ENOENT');
 });
 
-function repository(t) {
+function repository(t, files = {
+  'Cargo.toml': '[workspace]\n', 'Cargo.lock': 'version = 4\n',
+  'rust-toolchain.toml': '[toolchain]\nchannel = "1.96.0"\n',
+  '.nmc/commands.json': '[]\n', 'examples/sky-weather/lib/inventory.js': 'export const criteria = [];\n',
+  'examples/sky-weather/scenes/day.js': 'export const inventory = [];\n',
+  'crates/raa-sky/src/lib.rs': '// actual source\n', 'packages/raa/package.json': '{"name":"@etcito/raa"}\n',
+}) {
   const parent = scratch(t);
   const root = path.join(parent, 'raa');
-  const files = {
-    'Cargo.toml': '[workspace]\n', 'Cargo.lock': 'version = 4\n',
-    'rust-toolchain.toml': '[toolchain]\nchannel = "1.96.0"\n',
-    '.nmc/commands.json': '[]\n', 'examples/sky-weather/lib/inventory.js': 'export const criteria = [];\n',
-    'examples/sky-weather/scenes/day.js': 'export const inventory = [];\n',
-    'crates/raa-sky/src/lib.rs': '// actual source\n', 'packages/raa/package.json': '{"name":"@etcito/raa"}\n',
-  };
   for (const [name, text] of Object.entries(files)) put(root, name, text);
   const state = { root, parent, names: Object.keys(files), revision: '1'.repeat(40),
     dependencyRevision: '2'.repeat(40), targets: [], dirty: '', untracked: '', rustc: 'rustc 1.96.0', bindgen: 'wasm-bindgen 0.2.129' };
@@ -180,6 +179,50 @@ test('capture requires a preparation and retains the complete exact input receip
   assertCurrentInputs(fixture.root, JSON.parse(JSON.stringify(receipt)));
   assert.throws(() => assertCurrentInputs(fixture.root, { ...receipt, dependencies: undefined }), /dependencies/);
   assert.throws(() => assertCurrentInputs(fixture.root, { ...receipt, sources: [...receipt.sources, receipt.sources[0]] }), /duplicate/);
+});
+
+const VIRTUAL_GEOMETRY_FILES = {
+  'Cargo.toml': '[workspace]\n', 'Cargo.lock': 'version = 4\n',
+  'rust-toolchain.toml': '[toolchain]\nchannel = "1.96.0"\n',
+  '.nmc/commands.json': '[]\n',
+  'examples/virtual-geometry/lib/inventory.js': 'export const rows = [];\n',
+  'examples/virtual-geometry/scenes/bake.js': 'export default { id: "bake" };\n',
+  'examples/virtual-geometry/nmc.gpu.json': '{"page":"index.html","ops":["run"]}\n',
+};
+
+test('a virtual-geometry fixture captures its own inventory criteria and sources', t => {
+  const fixture = repository(t, VIRTUAL_GEOMETRY_FILES);
+  const receipt = captureInputs(fixture.root, randomUUID(), 'virtual-geometry');
+  assert.deepEqual(JSON.parse(receipt.criteriaText).map(source => source.path), [
+    'examples/virtual-geometry/lib/inventory.js', 'examples/virtual-geometry/nmc.gpu.json',
+    'examples/virtual-geometry/scenes/bake.js',
+  ]);
+  for (const name of Object.keys(VIRTUAL_GEOMETRY_FILES)) {
+    assert.ok(receipt.sources.some(source => source.path === name), name);
+  }
+  assert.equal(receipt.sources.some(source => source.path.startsWith('examples/sky-weather/')), false);
+  assertCurrentInputs(fixture.root, JSON.parse(JSON.stringify(receipt)));
+});
+
+test('a changed virtual-geometry scene invalidates the page receipt', t => {
+  const fixture = repository(t, VIRTUAL_GEOMETRY_FILES);
+  const receipt = captureInputs(fixture.root, randomUUID(), 'virtual-geometry');
+  put(fixture.root, 'examples/virtual-geometry/scenes/bake.js', 'export default { id: "bake", rows: [] };\n');
+  assert.throws(() => assertCurrentInputs(fixture.root, receipt),
+    /changed input.*examples\/virtual-geometry\/scenes/);
+});
+
+test('the default page refuses a fixture without a sky-weather inventory', t => {
+  const fixture = repository(t, VIRTUAL_GEOMETRY_FILES);
+  assert.throws(() => captureInputs(fixture.root, randomUUID()),
+    /missing sky-weather inventory criteria/);
+});
+
+test('an unsafe page name is refused before any input is read', t => {
+  const fixture = repository(t);
+  for (const page of ['', 'Virtual', '../escape', 'sky/weather', 'sky_weather']) {
+    assert.throws(() => captureInputs(fixture.root, randomUUID(), page), /invalid page name/);
+  }
 });
 
 test('source, manifests, locks, criteria, commands, toolchain and revision changes invalidate inputs', t => {
