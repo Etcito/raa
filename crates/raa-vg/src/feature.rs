@@ -85,8 +85,8 @@ pub fn inactive_reason(
     }
 }
 
-/// The counters of the S31 milestone-2 table. The cull counters stay `None` and `pending`
-/// false until the asynchronous cull statistics card publishes them.
+/// The counters of the S31 milestone-2 table. The cull counters are `None` until the first
+/// invocation is published; `pending` is true while a capture awaits its readback.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VgStats {
     pub active: bool,
@@ -122,10 +122,6 @@ struct HandleState {
     scratch: RefCell<ItemScratch>,
     latest: RefCell<Latest>,
     submitted_views: Cell<u8>,
-    #[allow(dead_code, reason = "the asynchronous cull statistics card reads it")]
-    submission: Cell<Option<u64>>,
-    #[allow(dead_code, reason = "the asynchronous cull statistics card reads it")]
-    complete: Cell<bool>,
 }
 
 /// The installed virtualized-geometry feature; clones share one state.
@@ -346,15 +342,29 @@ impl VgHandle {
         plan.report
     }
 
-    /// Stores the invocation and whether it was submitted completely (the asynchronous cull
-    /// statistics card publishes the counters of a complete invocation).
+    /// Forwards the invocation and whether it was submitted completely to the readback of the
+    /// frame path. The newest completely read invocation is copied to `VgFrameState::published`,
+    /// which outlives the resources. The invocation is the id `VgHandle` callers pass from
+    /// `finish_scene_invocation`; no vg pass numbers invocations itself.
     pub fn observe_submission(&self, invocation: u64, complete: bool) {
-        self.shared.submission.set(Some(invocation));
-        self.shared.complete.set(complete);
+        let Ok(mut state) = self.shared.vg.try_borrow_mut() else {
+            return;
+        };
+        if let Some(resources) = state.resources.as_mut() {
+            resources.stats.observe_submission(invocation, complete);
+        }
+        let latest = state.resources.as_ref().and_then(|r| r.stats.latest());
+        if let Some(latest) = latest
+            && state
+                .published
+                .is_none_or(|published| latest.invocation > published.invocation)
+        {
+            state.published = Some(latest);
+        }
     }
 
-    /// The registry counts and reason of the latest report. The cull counters are `None` and
-    /// `pending` false until the asynchronous cull statistics card publishes them.
+    /// The registry counts and reason of the latest report, and the cull counters of the newest
+    /// published invocation: `None` before the first publication and kept while inactive.
     pub fn stats(&self) -> VgStats {
         let (report, reason, known) = match self.shared.latest.try_borrow() {
             Ok(latest) => (
@@ -364,6 +374,19 @@ impl VgHandle {
             ),
             Err(_) => (None, None, false),
         };
+        let (pending, published) = self
+            .shared
+            .vg
+            .try_borrow()
+            .map(|state| {
+                let pending = state
+                    .resources
+                    .as_ref()
+                    .is_some_and(|resources| resources.stats.pending());
+                (pending, state.published)
+            })
+            .unwrap_or_default();
+        let main = published.map(|published| published.main);
         VgStats {
             active: known && reason.is_none(),
             inactive_reason: if known { reason } else { Some("disabled") },
@@ -375,14 +398,14 @@ impl VgHandle {
                 .unwrap_or_default(),
             baking_meshes: report.as_ref().map_or(0, |report| report.baking_meshes),
             ready_meshes: report.as_ref().map_or(0, |report| report.ready_meshes),
-            drawn_clusters: None,
-            drawn_triangles: None,
-            hardware_clusters: None,
-            software_clusters: None,
-            shadow_clusters: None,
-            dropped_clusters: None,
-            stats_frame_index: None,
-            pending: false,
+            drawn_clusters: main.map(|main| main.clusters),
+            drawn_triangles: main.map(|main| main.triangles),
+            hardware_clusters: main.map(|main| main.clusters.saturating_sub(main.software)),
+            software_clusters: main.map(|main| main.software),
+            shadow_clusters: published.map(|published| published.shadow_clusters),
+            dropped_clusters: published.map(|published| published.dropped),
+            stats_frame_index: published.map(|published| published.invocation),
+            pending,
         }
     }
 
@@ -501,8 +524,6 @@ impl VgFeature {
                 scratch: RefCell::new(ItemScratch::default()),
                 latest: RefCell::new(Latest::default()),
                 submitted_views: Cell::new(1),
-                submission: Cell::new(None),
-                complete: Cell::new(false),
             }),
         })
     }

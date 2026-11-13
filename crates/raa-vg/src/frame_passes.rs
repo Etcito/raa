@@ -36,6 +36,7 @@ use crate::resolve::{Resolve, VG_FRAME_GPU_SIZE, VgFrameParams, VgSurface, write
 use crate::scene::VgScene;
 use crate::settings::VgSettings;
 use crate::shadow::{CascadeWork, cascade_views, record_cascades};
+use crate::stats::{VgCullTotals, VgStatsReadback};
 
 /// The frame state shared between the virtualized-geometry passes and their handle.
 ///
@@ -80,6 +81,8 @@ pub(crate) struct VgResources {
     pub(crate) cascade_bound: Option<u64>,
     pub(crate) groups: Option<VgGroups>,
     pub(crate) bound: (u64, u64),
+    /// The asynchronous cull counters of this frame path, captured by `vg.resolve`.
+    pub(crate) stats: VgStatsReadback,
 }
 
 /// The group-2 bind groups of the three passes, rebuilt when the scene or lit storage changes.
@@ -118,6 +121,8 @@ pub(crate) struct VgFrameState {
     /// The cascades `shadow.csm` prepared this frame; `None` when shadows are off or absent.
     pub(crate) cascade_targets: Option<CascadeTargets>,
     pub(crate) recorded: Vec<&'static str>,
+    /// The newest published cull totals. Kept outside `VgResources`, so they survive a release.
+    pub(crate) published: Option<VgCullTotals>,
 }
 
 impl VgFrameState {
@@ -141,6 +146,7 @@ impl VgFrameState {
             cascade_stamps: [0; 4],
             cascade_targets: None,
             recorded: Vec::new(),
+            published: None,
         }
     }
 
@@ -237,6 +243,7 @@ impl VgFrameState {
                 cascade_bound: None,
                 groups: None,
                 bound: (u64::MAX, u64::MAX),
+                stats: VgStatsReadback::new(gpu),
             });
         }
         let bound = (self.scene.generation(), self.lit.storage_generation());
@@ -324,6 +331,7 @@ impl VgFrameState {
             total += resources.current.allocated_bytes();
             total += resources.surface.allocated_bytes();
             total += resources.frame.size();
+            total += resources.stats.allocated_bytes();
             if let Some(cascades) = &resources.cascades {
                 total += cascades.allocated_bytes();
             }
@@ -643,7 +651,8 @@ impl FeaturePass for VgRasterPass {
 }
 
 /// `vg.resolve` (order 23): writes the 320-byte `VgFrameGpu` record and records the resolve
-/// dispatch, then makes this frame's view the previous one.
+/// dispatch, captures the cull counters of this frame, then makes this frame's view the previous
+/// one.
 pub(crate) struct VgResolvePass {
     state: SharedVg,
 }
@@ -710,10 +719,11 @@ impl FeaturePass for VgResolvePass {
         if !state.active || !state.scene_ready() {
             return Ok(());
         }
+        let state = &mut *state;
         let size = state.size();
         let view_proj = state.camera.view_proj();
         {
-            let Some(resources) = state.resources.as_ref() else {
+            let Some(resources) = state.resources.as_mut() else {
                 return Ok(());
             };
             let Some(groups) = resources.groups.as_ref() else {
@@ -723,6 +733,16 @@ impl FeaturePass for VgResolvePass {
                 return Ok(());
             };
             pipelines.resolve.record(ctx.encoder, &groups.resolve, size);
+            // The cascade counters only when this frame recorded the cascades; their work
+            // otherwise holds an earlier frame's counters.
+            let cascades = if state.cascade_targets.is_some() {
+                resources.cascades.as_ref().map(CascadeWork::works)
+            } else {
+                None
+            };
+            resources
+                .stats
+                .capture(ctx.encoder, &resources.main, cascades);
         }
         state.recorded.push(Self::NAME);
         state.previous_view_proj = Some(view_proj);

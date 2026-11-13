@@ -19,6 +19,7 @@ pub mod scene;
 pub mod settings;
 pub mod shade;
 pub mod shadow;
+pub mod stats;
 
 pub use culling::{
     CASCADE_BASE, GI_BASE, GI_SLOTS, InstanceFilter, MAIN_FIRST, MAIN_SECOND, PASS_VIEW_SIZE,
