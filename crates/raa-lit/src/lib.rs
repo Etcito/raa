@@ -45,6 +45,7 @@ mod textures;
 #[cfg(test)]
 pub(crate) mod tile_selection;
 mod tiles;
+mod virtual_set;
 pub use skin_editor::{OverlayGeometry, REST_EDGE_STRIDE};
 pub use skin_views::{
     INSTANCE_PALETTE_OFFSET, PALETTE_BLOCK, PALETTE_MATRIX_BYTES, RestMeshView, SKIN_RECORD_STRIDE,
@@ -85,3 +86,4 @@ pub use textures::{
 };
 
 pub use tiles::{LIGHT_TILES_WGSL, install_local_lights, light_tiles_source};
+pub use virtual_set::VirtualSet;

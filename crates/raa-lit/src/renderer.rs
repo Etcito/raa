@@ -45,6 +45,7 @@ use crate::textures::{AtlasRect, TexelData};
 use crate::tiles::{
     LIGHT_TILES_NAME, TILING_FEATURE_ID, TileInputs, light_info, publish_local_lights,
 };
+use crate::virtual_set::{VirtualSet, slot_member};
 
 /// Limits and sample count of a [`LitRenderer`]; the frame buffers are sized from them.
 #[derive(Copy, Clone, Debug)]
@@ -387,6 +388,11 @@ pub struct LitRenderer {
     /// Reusable frustum query result (instance slots) and its per-slot bitset.
     visible_slots: Vec<u32>,
     visible_bits: Vec<u64>,
+    /// Virtualized scene instances, left out of the draw lists (P3-LIT-SEAM).
+    virtual_set: VirtualSet,
+    /// Logical `FrameGpu` feature ids set through [`LitRenderer::set_frame_feature`], one
+    /// bit each; id 24 (tiling) and ids >= 64 are never stored.
+    frame_features: u64,
 }
 
 impl LitRenderer {
@@ -443,6 +449,8 @@ impl LitRenderer {
             submeshes: HashMap::new(),
             visible_slots: Vec::new(),
             visible_bits: Vec::new(),
+            virtual_set: VirtualSet::new(),
+            frame_features: 0,
         };
         install_passes(pipeline, renderer.handle(), renderer.contributors())?;
         Ok(renderer)
@@ -811,6 +819,38 @@ impl LitRenderer {
         )
     }
 
+    // ---- virtualized instances and frame features (P3-LIT-SEAM) ----
+
+    /// The virtualized scene instances. Members keep their persistent records but are left
+    /// out of every draw list (prepass, forward, cascade casters) from the next `prepare`.
+    pub fn virtual_instances_mut(&mut self) -> &mut VirtualSet {
+        &mut self.virtual_set
+    }
+
+    /// The virtualized scene instances.
+    pub fn virtual_instances(&self) -> &VirtualSet {
+        &self.virtual_set
+    }
+
+    /// Sets logical `FrameGpu` feature `id` (S10) for every later `prepare`, after its own
+    /// tiling bit. Id 24 (tiling, owned by `prepare`) and ids >= 64 (no address) are ignored.
+    pub fn set_frame_feature(&mut self, id: u32, on: bool) {
+        if id == TILING_FEATURE_ID || id >= 64 {
+            return;
+        }
+        let bit = 1u64 << id;
+        if on {
+            self.frame_features |= bit;
+        } else {
+            self.frame_features &= !bit;
+        }
+    }
+
+    /// The stored value of feature `id`; false for ignored ids.
+    pub fn frame_feature(&self, id: u32) -> bool {
+        id < 64 && self.frame_features & (1u64 << id) != 0
+    }
+
     // ---- frame ----
 
     /// Opens scene invocation `index`; one index spans all of its viewports.
@@ -953,6 +993,11 @@ impl LitRenderer {
         s.store.sync(list, tags, slots, &self.extras, &|tag| {
             skinned(tag).map_or(0, |draw| draw.base)
         });
+        // Virtualized members are mirrored by live slot after every record is written, so
+        // the camera and cascade selections below see the same set.
+        let capacity_words = (s.store.capacity() as usize).div_ceil(64).max(1);
+        self.virtual_set
+            .mirror(scene, capacity_words, &mut s.virtual_bits);
         // A posed (deformed) instance cannot reconstruct its earlier geometry, so only
         // rigid previous models participate in the previous-instance commit.
         let recorded = &mut self.scene_frame.slots[self.scene_frame.current_view];
@@ -995,12 +1040,17 @@ impl LitRenderer {
             }
         }
         let bits = &self.visible_bits;
+        let virtual_bits = &s.virtual_bits;
         let vp = scene.camera.view_proj();
         let selected = |i: usize| -> bool {
             let Some(item) = list.items.get(i) else {
                 return false;
             };
             if s.lods.is_level(item.mesh) {
+                return false;
+            }
+            let slot = slots.get(i).copied().unwrap_or(u32::MAX) as usize;
+            if slot_member(virtual_bits, slot) {
                 return false;
             }
             let tag = tags.get(i).copied().unwrap_or(0);
@@ -1012,7 +1062,6 @@ impl LitRenderer {
                 let bounds = crate::skin_draw::instance_bounds(info.bounds, pose.is_some(), pose);
                 return crate::skin_bounds::visible(bounds, item.world, vp);
             }
-            let slot = slots.get(i).copied().unwrap_or(u32::MAX) as usize;
             bits.get(slot / 64)
                 .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)
         };
@@ -1079,6 +1128,9 @@ impl LitRenderer {
             ..FrameParams::default()
         };
         params.set_feature(TILING_FEATURE_ID, tiling);
+        for id in (0..64u32).filter(|&id| self.frame_features & (1u64 << id) != 0) {
+            params.set_feature(id, true);
+        }
         write_frame_gpu(&mut self.frame_bytes, scene, &params)?;
         // Publish the order-35 pass inputs before it prepares: the same frame snapshot,
         // the invocation/view identity and the current dense registry records (attachments

@@ -396,6 +396,10 @@ pub(crate) struct LitShared {
     /// Reusable cascade frustum result (instance slots) and its per-slot bitset.
     pub(crate) caster_slots: Vec<u32>,
     pub(crate) caster_bits: Vec<u64>,
+    /// The slots of the virtualized members that are live this frame (mirrored from
+    /// [`VirtualSet`](crate::VirtualSet) by `prepare`); they are left out of the camera and
+    /// cascade caster selections.
+    pub(crate) virtual_bits: Vec<u64>,
     /// Material classes the cascade selection validates against, rebuilt in place.
     pub(crate) caster_materials: Vec<MaterialClass>,
     /// Scratch of `SurfaceLibrary::write_gpu_all`, preallocated for `max_materials`.
@@ -532,6 +536,7 @@ impl LitShared {
             item_slots: Vec::new(),
             caster_slots: Vec::new(),
             caster_bits: Vec::new(),
+            virtual_bits: Vec::new(),
             caster_materials: Vec::with_capacity(materials as usize),
             material_bytes: Vec::with_capacity(materials as usize * SURFACE_MATERIAL_GPU_SIZE),
             textures,
@@ -1167,6 +1172,7 @@ impl LitHandle {
                 &skinned,
             );
             let bits = &s.caster_bits;
+            let virtual_bits = &s.virtual_bits;
             let selected = |i: usize| -> bool {
                 let Some(item) = s.items.items.get(i) else {
                     return false;
@@ -1174,11 +1180,14 @@ impl LitHandle {
                 if s.lods.is_level(item.mesh) {
                     return false;
                 }
+                let slot = s.item_slots.get(i).copied().unwrap_or(u32::MAX) as usize;
+                if crate::virtual_set::slot_member(virtual_bits, slot) {
+                    return false;
+                }
                 let tag = s.item_tags.get(i).copied().unwrap_or(0);
                 if skinned(tag).is_some() {
                     return true;
                 }
-                let slot = s.item_slots.get(i).copied().unwrap_or(u32::MAX) as usize;
                 bits.get(slot / 64)
                     .is_some_and(|word| word & (1u64 << (slot % 64)) != 0)
             };
