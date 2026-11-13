@@ -18,6 +18,7 @@ pub mod resolve;
 pub mod scene;
 pub mod settings;
 pub mod shade;
+pub mod shadow;
 
 pub use culling::{
     CASCADE_BASE, GI_BASE, GI_SLOTS, InstanceFilter, MAIN_FIRST, MAIN_SECOND, PASS_VIEW_SIZE,
@@ -34,3 +35,4 @@ pub use scene::{
     hierarchy_word, write_instance,
 };
 pub use settings::{DebugView, VgSettings, VgSettingsPatch};
+pub use shadow::{CascadeWork, cascade_views, record_cascades};

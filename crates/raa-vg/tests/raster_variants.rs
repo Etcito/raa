@@ -768,3 +768,141 @@ fn cascade_depth_modules_validate_with_the_contract() {
         assert_eq!(calls, ["raa_depth_key", "raa_depth_from_key"]);
     }
 }
+
+/// The S32 cascade views on a software adapter: [`cascade_views`] builds four orthographic
+/// views from the cascade targets `raa_shadow::cascade_frame` computes, each drawing the
+/// camera frustum slice of its cascade with the main camera's eye and the sun's direction.
+///
+/// Inputs, all initialised here because no other pass of the frame exists in this test: the
+/// cascade layers are single-layer views of one 4-layer 2048x2048 `Depth32Float` array (the
+/// `shadow.csm` layout), the matrices and splits come from `cascade_frame`, and the camera sits
+/// at (0, 2, 6) looking at the origin, fov 60 degrees, near 0.1, far 60, viewport 1280x720.
+#[test]
+fn cascade_views_are_orthographic_and_keep_the_eye_and_sun() {
+    use raa_core::testing::{skip, software_gpu};
+    use raa_math::Vec3;
+    use raa_scene::Camera;
+    use raa_shadow::{CascadeTargets, cascade_frame};
+    use raa_vg::VgSettings;
+    use raa_vg::cascade_views;
+
+    let test = "cascade_views_are_orthographic_and_keep_the_eye_and_sun";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let resolution = 2048;
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("raa-vg cascade views map"),
+        size: wgpu::Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: 4,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let layer_views: [wgpu::TextureView; 4] = std::array::from_fn(|layer| {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("raa-vg cascade views layer"),
+            format: None,
+            dimension: Some(wgpu::TextureViewDimension::D2),
+            usage: None,
+            aspect: wgpu::TextureAspect::DepthOnly,
+            base_mip_level: 0,
+            mip_level_count: Some(1),
+            base_array_layer: layer as u32,
+            array_layer_count: Some(1),
+        })
+    });
+
+    let mut camera = Camera {
+        eye: Vec3::new(0.0, 2.0, 6.0),
+        target: Vec3::ZERO,
+        far: 60.0,
+        ..Camera::default()
+    };
+    camera.set_viewport(1280, 720);
+    let sun_dir = Vec3::new(-0.4, -1.0, -0.3).normalize_or_zero();
+    let (view_proj, splits) = cascade_frame(
+        &camera.view(),
+        camera.fov_y_rad,
+        camera.aspect,
+        camera.near,
+        camera.far,
+        60.0,
+        sun_dir,
+        resolution,
+    );
+    let targets = CascadeTargets {
+        count: 4,
+        resolution,
+        view_proj,
+        splits,
+        layer_views,
+        sun_dir,
+    };
+    let settings = VgSettings::default();
+
+    let views = cascade_views(&targets, &camera, &settings);
+    let light = -sun_dir;
+    for (index, view) in views.iter().enumerate() {
+        let view = view.unwrap_or_else(|| panic!("cascade {index} has a view"));
+        assert_eq!(view.is_ortho, 1, "cascade {index} is orthographic");
+        assert_eq!(
+            view.instance_filter, 0,
+            "cascade {index} draws all instances"
+        );
+        assert_eq!(view.allow_software, 1, "cascade {index} allows software");
+        assert_eq!(
+            view.viewport,
+            [2048.0, 2048.0],
+            "cascade {index} covers the cascade map"
+        );
+        assert!(
+            (1..=6).contains(&view.receiver_plane_count),
+            "cascade {index} keeps 1..=6 receiver planes, got {}",
+            view.receiver_plane_count
+        );
+        assert_eq!(view.eye_position, camera.eye, "cascade {index} eye");
+        assert!(
+            (view.eye_light - light).length() < 1.0e-6,
+            "cascade {index} eye light {:?} points at the sun {light:?}",
+            view.eye_light
+        );
+        assert_eq!(
+            view.raster_view_proj, targets.view_proj[index],
+            "cascade {index} draws with its own matrix"
+        );
+    }
+
+    let no_shadows = VgSettings {
+        shadows: false,
+        ..settings
+    };
+    assert!(
+        cascade_views(&targets, &camera, &no_shadows)
+            .iter()
+            .all(Option::is_none),
+        "settings.shadows false builds no cascade view"
+    );
+
+    let hardware_only = VgSettings {
+        software_raster: false,
+        ..settings
+    };
+    for (index, view) in cascade_views(&targets, &camera, &hardware_only)
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            view.expect("a cascade view").allow_software,
+            0,
+            "cascade {index} sends nothing to software"
+        );
+    }
+}
