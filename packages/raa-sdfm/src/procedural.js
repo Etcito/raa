@@ -116,6 +116,7 @@ export async function loadProceduralScene(engine, loader, input, options = {}) {
               subMeshes: [{ first: 0, count: mesh.indices.length, ...(material !== undefined ? { material } : {}) }],
             });
             meshes.push(handle);
+            if (mesh.clusters != null) engine.attachMeshClusters(handle, [mesh.clusters]);
             return handle;
           });
           return { ...frameToTr(part.frame), meshes: handles };

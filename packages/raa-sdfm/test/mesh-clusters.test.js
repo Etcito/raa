@@ -1,8 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { readFile } from 'node:fs/promises';
+
 import { decodeMeshFile, meshFilePayload } from '../src/mesh-file.js';
 import { validateClusterSection } from '../src/mesh-clusters.js';
+import { loadProceduralScene } from '../src/procedural.js';
+import { createFakeEngine } from './fake-engine.js';
 
 // The S24 encoder of test/procedural.test.js (byte 0 = 1, big-endian header and buffer counts, {$buffer} / {$array}
 // markers in the JSON header, then the buffers), written again so this file stands alone.
@@ -163,3 +167,62 @@ for (const [index, [field, value]] of RULES.entries()) {
     assertRefused(bytes, `mesh: part root/1#0 clusters.${field}:`);
   });
 }
+
+// Loader: a mesh-refs scene whose file holds meshes with and without a section. The compiled material
+// is the procedural.test.js fixture, so the loader's material mapping runs as it does for real files.
+const compiled = JSON.parse(await readFile(new URL('./fixtures/compiled-basic.json', import.meta.url), 'utf8'));
+const mama = async () => ({ parseProceduralScene: (text) => JSON.parse(text) });
+const scene = {
+  format: 'sdfm.procedural-scene',
+  version: 1,
+  variant: 'mesh-refs',
+  name: 'clusters',
+  game: 'fixture',
+  generator: { document: 'fixture', node: 'scatter', seed: 1, params: {} },
+  sources: [{ kind: 'mesh', mesh: 'procedural/clusters/meshes/12345678.mesh', meshKey: '12345678', bounds: { min: [-1, -1, -1], max: [1, 1, 1] } }],
+  instances: [{ key: 1, source: 0, t: [0, 0, 0], r: [0, 0, 0, 1], s: [1, 1, 1], group: -1 }],
+  groups: [],
+  colliders: [],
+  visual: [],
+  runtime: null,
+};
+const loaderBytes = (meshes) => {
+  const value = meshFile(meshes.map((mesh) => ({ ...mesh, material: compiled.name })));
+  value.data.materials = [compiled];
+  return encodeMeshFile(value);
+};
+
+// The recording engine of procedural.test.js, plus the section and removal calls this file checks.
+function clusterEngine() {
+  const engine = createFakeEngine();
+  for (const name of ['attachMeshClusters', 'removeMesh', 'removeNode']) engine.calls[name] = [];
+  engine.attachMeshClusters = (...args) => engine.calls.attachMeshClusters.push(args);
+  engine.removeMesh = (...args) => engine.calls.removeMesh.push(args);
+  engine.removeNode = (...args) => engine.calls.removeNode.push(args);
+  return engine;
+}
+
+test('loading a mesh-refs scene attaches the section of its mesh exactly once, with the handle of that mesh', async () => {
+  const sent = section();
+  const engine = clusterEngine();
+  await loadProceduralScene(engine, null, scene, {
+    mama, resolveMesh: async () => loaderBytes([plainMesh({ clusters: sent }), plainMesh()]),
+  });
+  assert.equal(engine.calls.addMesh.length, 2);
+  assert.equal(engine.calls.attachMeshClusters.length, 1);
+  const [[handle, sections]] = engine.calls.attachMeshClusters;
+  assert.equal(handle, engine.calls.addMesh[0].id);
+  assert.equal(sections.length, 1);
+  assert.deepStrictEqual(sections[0], sent);
+});
+
+test('an attach refusal rejects the scene load with the same error and removes the meshes already added', async () => {
+  const refusal = Object.assign(new Error('vg.invalid: clusters.levels: refused by the engine'), { code: 'vg.invalid' });
+  const engine = clusterEngine();
+  engine.attachMeshClusters = () => { throw refusal; };
+  await assert.rejects(loadProceduralScene(engine, null, scene, {
+    mama, resolveMesh: async () => loaderBytes([plainMesh(), plainMesh({ clusters: section() })]),
+  }), (error) => error === refusal);
+  assert.equal(engine.calls.addMesh.length, 2);
+  assert.deepEqual(engine.calls.removeMesh, engine.calls.addMesh.map(({ id }) => [id]));
+});

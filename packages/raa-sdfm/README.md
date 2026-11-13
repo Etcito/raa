@@ -139,6 +139,7 @@ identify the landed changes, rather than attributing every API to that checkout'
 | `mama/core/material-graph/cpu-eval.js` | `cpuGraphOrNull` | compare page only (`examples/sdfm-compare/lib/mama-view.js`), not the bridge: `cpuGraphOrNull(def, doc).eval(p, p, n, masks, {})` per vertex, `p` and `n` in world space | `CpuGraph \| null`; the page reads `MaterialValues.baseColor` (linear) | `src/core/material-graph/cpu-eval.ts:482` @ 864ebc3 |
 | `mama/procgen/scene-build.js` | `planProceduralScene` | Export/demonstration only, not called by the adapter: `planProceduralScene(b, variant)` | `SceneFilePlan`; both variants copy evaluated lights, including with `runtime: null` | `src/procgen/scene-build.ts`; light export @ 4587eaadbf |
 | `mama/procgen/scene-file.js` | `serializeProceduralScene` | Export/demonstration only, not called by the adapter: `serializeProceduralScene(scene)` | canonical v1 scene text preserving absent/empty lights and optional-angle omission | `src/procgen/scene-file.ts`; light serialization @ 2195ac8f6d |
+| `mama/core/game/mesh-file.js` | `mesh.clusters` | not a call: the optional S30 section key of each saved mesh record, read by `decodeMeshFile` and validated before the loader attaches it | `ClusterSection \| null` (absent key gives `null`) | `src/core/game/mesh-clusters.ts` @ caa0af5 |
 
 Notes on the table:
 
@@ -272,8 +273,9 @@ Every exported name of `index.d.ts`:
 | `ProceduralSceneRuntime` | The MAMA runtime handle of a scene with `runtime`: `step(tick)` (resolves with `{ moved, remeshed, added, removed, ok, issues }`), `set(values)` and `dispose`. |
 | `ProceduralSceneOptions` | `{ resolveAsset?, resolveMesh?, parent?, mode?: 'mesh' \| 'trace', procgen?, placement?, mama? }`; `mode` defaults to `'mesh'` and `mama` to the bridge's `importProcedural`. |
 | `SdfmProceduralMama` | The MAMA functions `loadProceduralScene` calls: `parseProceduralScene`, `sceneSourceDocument` and `serializeDocument`, `Runtime` for a scene with `runtime`, plus `buildSceneTraceInput` and `packTrace` in trace mode. |
-| `decodeMeshFile` | Decodes an S24 saved `.mesh` file into its header and typed-array views. |
-| `meshFilePayload` | Validates a decoded S24 payload and wraps its groups, parts and materials. |
+| `decodeMeshFile` | Decodes an S24 saved `.mesh` file into its header and typed-array views, including the optional S30 clusters section of each mesh record. |
+| `meshFilePayload` | Validates a decoded S24 payload and wraps its groups, parts and materials; each mesh carries its validated S30 section or `null`. |
+| `validateClusterSection` | Validates the S30 clusters section of one saved mesh (six wire rules) and returns the same object; refusals are `sdfm.scene_resolve` naming the part and field. |
 | `INSTANCE_PARAM_SLOTS` | The first slot of each group of an instance's 16 parameter floats: `{ tint: 0, wind: 4, scale: 5, free: 6 }`. |
 | `instanceParams` | Converts procgen attributes into the 16 floats of `setInstanceParams`, or `null` without attributes. |
 | `LOD_LEVELS_DEFAULT` | Default number of coarser Paramesh meshes (2). |

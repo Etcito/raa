@@ -4,7 +4,7 @@
 // SdfmError with one of the S15 codes (plus S18 `sdfm.rig`). MAMA is reached only through
 // src/mama-bridge.js.
 
-import type { Engine, MeshDesc, SurfaceBlend } from '@etcito/raa';
+import type { ClusterSection, Engine, MeshDesc, SurfaceBlend } from '@etcito/raa';
 
 /**
  * Re-exported from `@etcito/raa`: the engine the loader uploads meshes and materials to, and the
@@ -12,6 +12,7 @@ import type { Engine, MeshDesc, SurfaceBlend } from '@etcito/raa';
  * Refusals: none (types only); the engine's own refusals are RaaError.
  */
 export type { Engine, SurfaceBlend };
+export type { ClusterSection };
 
 /**
  * A 3-component vector `[x, y, z]` (metres for positions, unitless for directions).
@@ -556,16 +557,35 @@ export function decodeMeshFile(bytes: Uint8Array): object;
 
 /**
  * Validates the `data` payload of a decoded S24 file with the saved-asset rules and wraps it with
- * its materials, naming the group and part of a bad record.
+ * its materials, naming the group and part of a bad record. Each mesh carries `clusters`: the
+ * validated S30 clusters section (the same object, see {@link validateClusterSection}) when the saved
+ * mesh has a `clusters` key, otherwise `null`. The loader attaches a non-null section with
+ * `Engine.attachMeshClusters`; a mesh without one is baked by the engine at runtime.
  * Refusals: `sdfm.scene_resolve` naming the group and part (a non-16-number frame, positions,
- * normals, uvs or indices of the wrong type or length, or an out-of-range index).
+ * normals, uvs or indices of the wrong type or length, an out-of-range index, or a malformed
+ * `clusters` section, which names the part, the mesh index and the field).
  */
 export function meshFilePayload(value: object): {
   groups: { group: string; parts: { partId: string; name: string; frame: Float64Array;
     meshes: { material: string | null; positions: Float32Array; normals: Float32Array;
-      uvs: Float32Array | null; indices: Uint32Array }[] }[] }[];
+      uvs: Float32Array | null; indices: Uint32Array; clusters: ClusterSection | null }[] }[] }[];
   materials: object[];
 };
+
+/**
+ * Validates the optional S30 clusters section of one saved mesh (the six wire rules: the keys and
+ * `version` 1 / `algorithm` 1; the array types and lengths, `vertices` a multiple of 8, `clusters` and
+ * `nodes` multiples of 48, each non-empty; `rootNode`, `hierarchyDepth` 1..64, `levels` 1..256 and
+ * `sourceTriangles` as safe non-negative integers with `rootNode` inside `nodes`; every number finite,
+ * `quantStep` > 0, `uvStep` >= 0, `boundsRadius` >= 0; each 48 B cluster record with 1..255 vertices,
+ * 1..128 triangles and both ranges inside its arrays; each 48 B node record with `count` >= 1, `isLeaf`
+ * 0 or 1 and `first + count` inside the clusters (leaf) or the nodes). The complete structural check
+ * (indices, reachability, monotonic error) is RAA's `validateClusters`, not this one.
+ * Returns the same object (no copy).
+ * Refusals: `sdfm.scene_resolve` with the message `mesh: part <where> clusters.<field>: <reason>`,
+ * where `where` is `<group>/<part>#<mesh index>`.
+ */
+export function validateClusterSection(value: unknown, where: string): ClusterSection;
 
 /**
  * Wraps a MAMA compiled material into an S11 `material_main` function: MAMA's MaterialFull and
