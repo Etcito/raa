@@ -4,6 +4,11 @@
 //! copies the counters into a free sample; `observe_submission` marks the captured samples with
 //! their invocation and maps them when the submission was complete; the map callback parses them
 //! and publishes the newest one. A full pool skips the capture: nothing grows and nothing waits.
+//!
+//! At most one submitted sample may be outstanding at a time: a capture is skipped while a map
+//! is still in flight. A page that changes the scene and waits for two newer published frames
+//! (the S33 `settle` rule) therefore never reads counters older than the change twice, and a
+//! still-mapped buffer only pauses new captures; it never stalls rendering or a later frame.
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -97,11 +102,6 @@ struct Shared {
 pub struct VgStatsReadback {
     shared: Arc<Mutex<Shared>>,
     staging: [wgpu::Buffer; POOL_SAMPLES],
-    #[cfg_attr(
-        target_arch = "wasm32",
-        allow(dead_code, reason = "native maps are advanced by polling the device")
-    )]
-    device: wgpu::Device,
 }
 
 impl VgStatsReadback {
@@ -117,7 +117,6 @@ impl VgStatsReadback {
                     mapped_at_creation: false,
                 })
             }),
-            device: gpu.device().clone(),
         }
     }
 
@@ -126,8 +125,8 @@ impl VgStatsReadback {
     }
 
     /// Copies the main view's counters, then the four cascades' (zeroed when `cascades` is
-    /// `None`), into a free sample awaiting submission. When every sample is busy the frame is
-    /// skipped: nothing grows and nothing waits.
+    /// `None`), into a free sample awaiting submission. A frame is skipped while an earlier map
+    /// is in flight or every sample is busy: nothing grows and nothing waits.
     pub fn capture(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -136,6 +135,11 @@ impl VgStatsReadback {
     ) {
         let slot = {
             let mut shared = self.lock();
+            // One submitted sample in flight at a time: the next capture waits for its map, so
+            // no page ever reads two readbacks older than a change it just made.
+            if shared.samples.contains(&Phase::Mapping) {
+                return;
+            }
             let Some(slot) = shared
                 .samples
                 .iter()
@@ -160,7 +164,9 @@ impl VgStatsReadback {
     }
 
     /// Gives every sample awaiting submission the id `invocation`. A complete submission maps
-    /// them; an incomplete one frees them, since their counters were never submitted.
+    /// them; an incomplete one frees them, since their counters were never submitted. The maps
+    /// are requested, not waited for: on the web the browser resolves them without a device
+    /// poll, and a buffer that is still mapped is never reused or waited on.
     pub fn observe_submission(&mut self, invocation: u64, complete: bool) {
         let mut mapped = 0u8;
         {
@@ -200,8 +206,6 @@ impl VgStatsReadback {
                 }
             });
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = self.device.poll(wgpu::PollType::Poll);
     }
 
     /// The newest fully read and completely submitted invocation.
@@ -209,7 +213,9 @@ impl VgStatsReadback {
         self.lock().latest
     }
 
-    /// True while a capture awaits its submission or a map has not called back.
+    /// True while a capture awaits its submission or its map has not called back. A capture is
+    /// only recorded when no other map is in flight, so a still-mapped buffer never holds more
+    /// than that one sample.
     pub fn pending(&self) -> bool {
         self.lock()
             .samples

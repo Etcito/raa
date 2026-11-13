@@ -86,7 +86,8 @@ pub fn inactive_reason(
 }
 
 /// The counters of the S31 milestone-2 table. The cull counters are `None` until the first
-/// invocation is published; `pending` is true while a capture awaits its readback.
+/// invocation is published; `pending` is true while a capture or its map is outstanding, and a
+/// still-mapped buffer is never reused or waited on.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VgStats {
     pub active: bool,
@@ -374,11 +375,25 @@ impl VgHandle {
             ),
             Err(_) => (None, None, false),
         };
+        // The map callbacks run in the browser's own time, so the newest resolved sample may
+        // have arrived since the last `observe_submission`. The getter moves it into the
+        // published totals itself and reports whether a capture or its map is still outstanding.
         let (pending, published) = self
             .shared
             .vg
-            .try_borrow()
-            .map(|state| {
+            .try_borrow_mut()
+            .map(|mut state| {
+                let latest = state
+                    .resources
+                    .as_ref()
+                    .and_then(|resources| resources.stats.latest());
+                if let Some(latest) = latest
+                    && state
+                        .published
+                        .is_none_or(|published| latest.invocation > published.invocation)
+                {
+                    state.published = Some(latest);
+                }
                 let pending = state
                     .resources
                     .as_ref()
