@@ -73,8 +73,6 @@ struct VgMaterial {
 
 // `SurfaceMaterialGpu.header.x`: a registered material function.
 const MATERIAL_MODEL_FUNCTION: u32 = 2u;
-// `VgFrame.flags.x`: the cluster debug colour of the rank table of `DebugView`.
-const DEBUG_CLUSTERS: u32 = 1u;
 
 fn pixel_to_ndc(pixel: vec2<f32>, viewport: vec2<f32>) -> vec2<f32> {
     let uv = pixel / viewport;
@@ -129,6 +127,37 @@ fn encode_srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = x * 12.92;
     let hi = 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
     return select(hi, lo, x <= vec3<f32>(0.0031308));
+}
+
+// `VgFrame.flags.x` = 2 (rank table of `DebugView`): the DAG level as a ramp from blue at
+// level 0 through green at level 6 to red at level 12 and above, linear between the stops.
+fn lod_ramp(level: u32) -> vec3<f32> {
+    let t = f32(min(level, 12u));
+    let blue = vec3<f32>(0.1, 0.3, 1.0);
+    let green = vec3<f32>(0.2, 0.9, 0.3);
+    let red = vec3<f32>(1.0, 0.2, 0.1);
+    if (t <= 6.0) {
+        return mix(blue, green, t / 6.0);
+    }
+    return mix(green, red, (t - 6.0) / 6.0);
+}
+
+// Code 3: hardware rasterisation is blue, software rasterisation is orange.
+fn raster_color(cluster_word: u32) -> vec3<f32> {
+    return select(
+        vec3<f32>(0.15, 0.55, 1.0),
+        vec3<f32>(1.0, 0.6, 0.1),
+        (cluster_word & VISIBLE_SOFTWARE) != 0u,
+    );
+}
+
+// Code 4: the first occlusion phase is green, a cluster recovered by the second is magenta.
+fn occlusion_color(cluster_word: u32) -> vec3<f32> {
+    return select(
+        vec3<f32>(0.25, 0.8, 0.35),
+        vec3<f32>(0.95, 0.2, 0.75),
+        (cluster_word & VISIBLE_SECOND) != 0u,
+    );
 }
 
 @compute @workgroup_size(8, 8)
@@ -222,11 +251,19 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         material_fn = material.header.y;
     }
 
-    // The base colour sRGB-encoded, or the debug colour when a debug view is active. Codes 2,
-    // 3 and 4 (lod, raster and occlusion) land with their own card and keep the base colour.
+    // The base colour sRGB-encoded, or the debug colour of the active view (rank table of
+    // `DebugView`): 1 cluster colours, 2 the DAG level ramp, 3 hardware versus software and
+    // 4 the first phase versus recovered by the second. Codes 2..4 are sRGB-encoded too.
+    let debug_view = frame.flags.x;
     var albedo = encode_srgb(material.base.rgb);
-    if (frame.flags.x == DEBUG_CLUSTERS) {
+    if (debug_view == 1u) {
         albedo = hash_color(cluster_index);
+    } else if (debug_view == 2u) {
+        albedo = encode_srgb(lod_ramp(level));
+    } else if (debug_view == 3u) {
+        albedo = encode_srgb(raster_color(entry.cluster));
+    } else if (debug_view == 4u) {
+        albedo = encode_srgb(occlusion_color(entry.cluster));
     }
 
     textureStore(

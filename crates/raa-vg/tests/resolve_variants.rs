@@ -39,6 +39,37 @@ fn parse(source: &str) -> naga::Module {
     naga::front::wgsl::parse_str(source).expect("the module parses")
 }
 
+/// The CPU twin of the WGSL `lod_ramp`: the DAG level through blue (0), green (6) and red
+/// (12), linear between the stops and clamped above 12.
+fn lod_ramp(level: u32) -> [f32; 3] {
+    const BLUE: [f32; 3] = [0.1, 0.3, 1.0];
+    const GREEN: [f32; 3] = [0.2, 0.9, 0.3];
+    const RED: [f32; 3] = [1.0, 0.2, 0.1];
+    let t = level.min(12) as f32;
+    if t <= 6.0 {
+        mix3(BLUE, GREEN, t / 6.0)
+    } else {
+        mix3(GREEN, RED, (t - 6.0) / 6.0)
+    }
+}
+
+fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+fn assert_rgb(actual: [f32; 3], expected: [f32; 3]) {
+    for (a, e) in actual.iter().zip(expected.iter()) {
+        assert!(
+            (a - e).abs() < 1e-6,
+            "expected {expected:?}, got {actual:?}"
+        );
+    }
+}
+
 /// Every `(group, binding)` the entry point reaches, following the functions it calls.
 fn used_bindings(module: &naga::Module, entry: &naga::EntryPoint) -> BTreeSet<(u32, u32)> {
     fn walk(
@@ -230,6 +261,31 @@ fn resolve_drops_the_wetness_waterline_and_tier_textures() {
             "the adapted resolve removes {removed}"
         );
     }
+}
+
+#[test]
+fn resolve_has_one_debug_branch_per_code_one_to_four() {
+    let wgsl = resolve_module_wgsl();
+    for code in 1..=4 {
+        let branch = format!("debug_view == {code}u");
+        assert!(
+            wgsl.contains(&branch),
+            "the resolve has a branch for debug code {code}"
+        );
+    }
+}
+
+#[test]
+fn lod_ramp_gives_blue_green_and_red_and_clamps_above_twelve() {
+    assert_rgb(lod_ramp(0), [0.1, 0.3, 1.0]);
+    assert_rgb(lod_ramp(6), [0.2, 0.9, 0.3]);
+    assert_rgb(lod_ramp(12), [1.0, 0.2, 0.1]);
+    assert_rgb(lod_ramp(3), [0.15, 0.6, 0.65]);
+    assert_eq!(
+        lod_ramp(64),
+        lod_ramp(12),
+        "levels above 12 clamp to the red stop"
+    );
 }
 
 #[test]
