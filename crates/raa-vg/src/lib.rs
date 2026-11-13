@@ -10,6 +10,7 @@ mod frame_passes;
 pub mod culling;
 pub mod eligibility;
 pub mod error;
+pub mod gbuffer;
 pub mod raster;
 pub mod resolve;
 pub mod scene;
