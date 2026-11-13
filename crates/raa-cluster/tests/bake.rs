@@ -600,3 +600,119 @@ fn thinned_foliage_stays_upright_and_covers_the_patch_footprint() {
         );
     }
 }
+
+/// The foliage patch of the virtual-geometry page (`examples/virtual-geometry/lib/content.js`,
+/// `foliagePatch()`), rebuilt here with the same numbers: 64 x 64 upright blades 0.03 m wide and
+/// 0.25 m high, one per cell of a 4 m square centred at the origin, offset and yawed by a
+/// 32-bit LCG seeded with 0x2f6e2b1 (x, z, yaw per cell in row-major order).
+fn page_foliage_patch() -> OwnedClusterInput {
+    const GRID: u32 = 64;
+    const EXTENT: f64 = 4.0;
+    let mut state = 0x02f6_e2b1_u32;
+    let mut next = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        f64::from(state) / 4_294_967_296.0
+    };
+    let cell = EXTENT / f64::from(GRID);
+    let (hw, height) = (0.015, 0.25);
+    let mut mesh = MeshData::new();
+    let mut uvs = Vec::new();
+    for j in 0..GRID {
+        for i in 0..GRID {
+            let bx = -EXTENT / 2.0 + (f64::from(i) + next()) * cell;
+            let bz = -EXTENT / 2.0 + (f64::from(j) + next()) * cell;
+            let (sin, cos) = (next() * std::f64::consts::TAU).sin_cos();
+            // right = (cos, 0, -sin) and the normal is right x up = (sin, 0, cos).
+            let normal = [sin, 0.0, cos];
+            let base = mesh.positions.len() as u32;
+            for (lx, ly, u, v) in [
+                (-hw, 0.0, 0.0, 0.0),
+                (hw, 0.0, 1.0, 0.0),
+                (hw, height, 1.0, 1.0),
+                (-hw, height, 0.0, 1.0),
+            ] {
+                mesh.positions
+                    .push([(bx + lx * cos) as f32, ly as f32, (bz - lx * sin) as f32]);
+                mesh.normals.push(normal.map(|x| x as f32));
+                uvs.push([u, v]);
+            }
+            mesh.indices
+                .extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    OwnedClusterInput {
+        mesh,
+        uvs: Some(uvs),
+    }
+}
+
+/// The smallest `lod_error` of the clusters at DAG level `level`, as the scene picks its cut.
+fn smallest_error_at_level(mesh: &ClusterMesh, level: u32) -> f32 {
+    mesh.clusters
+        .iter()
+        .filter(|cluster| cluster.level() == level)
+        .map(|cluster| cluster.lod_error)
+        .fold(f32::INFINITY, f32::min)
+}
+
+#[test]
+fn page_foliage_thinned_cut_stays_upright_and_covers_the_patch_footprint() {
+    let input = page_foliage_patch();
+    let half = 2.0;
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the foliage bakes");
+    mesh.validate()
+        .unwrap_or_else(|error| panic!("the foliage bake fails validation: {error}"));
+    // The scene's right patch: the level a third of the way up the DAG (scenes/bake.js).
+    let level = mesh.levels.div_ceil(3);
+    let error = smallest_error_at_level(&mesh, level);
+    assert!(error.is_finite(), "no cluster at DAG level {level}");
+
+    let finest_normals = cut_normals(&mesh, 0.0);
+    let thinned_normals = cut_normals(&mesh, error);
+    assert!(
+        thinned_normals.len() < finest_normals.len(),
+        "the thinned cut has {} triangles, the finest {}",
+        thinned_normals.len(),
+        finest_normals.len()
+    );
+    let finest_tilt = finest_normals
+        .iter()
+        .copied()
+        .map(tilt_degrees)
+        .fold(0.0, f64::max);
+    let tilt = thinned_normals
+        .iter()
+        .copied()
+        .map(tilt_degrees)
+        .fold(0.0, f64::max);
+    assert!(
+        tilt <= finest_tilt + 2.0,
+        "blades at error {error} lean up to {tilt} degrees, the finest ones {finest_tilt}"
+    );
+
+    // The scene's own fact `foliage-area-kept`: the summed area stays within 15 percent.
+    let (finest_area, thinned_area) = (cut_area(&mesh, 0.0), cut_area(&mesh, error));
+    println!("page foliage area: {thinned_area} thinned, {finest_area} finest m2");
+    assert!(
+        (thinned_area - finest_area).abs() <= 0.15 * finest_area,
+        "area {thinned_area} thinned against {finest_area} finest"
+    );
+
+    let cells = 16;
+    let finest_cells = covered_cells(&mesh, 0.0, half, cells);
+    let thinned_cells = covered_cells(&mesh, error, half, cells);
+    let empty: Vec<_> = finest_cells.difference(&thinned_cells).collect();
+    println!(
+        "page foliage: level {level}, error {error}, {} of {} triangles, {} of {} cells empty",
+        thinned_normals.len(),
+        finest_normals.len(),
+        empty.len(),
+        finest_cells.len()
+    );
+    assert!(
+        empty.is_empty(),
+        "the page's thinned cut at error {error} leaves {} of {} cells of a {cells} x {cells} grid empty: {empty:?}",
+        empty.len(),
+        finest_cells.len()
+    );
+}
