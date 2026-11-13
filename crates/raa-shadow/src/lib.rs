@@ -7,12 +7,14 @@
 //! view-projection matrices, the caster rendering into the cascade array and the
 //! `ShadowFeature` / `ShadowHandle` that install and drive the `shadow.csm` pass.
 
+mod cascade_access;
 mod cascades;
 mod caster;
 mod desc;
 mod feature;
 mod provider;
 
+pub use cascade_access::{CascadeTargets, cascade_frame};
 pub use cascades::{cascade_matrix, cascade_splits};
 pub use desc::ShadowDesc;
 pub use feature::{ShadowFeature, ShadowHandle};

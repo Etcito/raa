@@ -195,6 +195,11 @@ impl Casters {
         &self.array
     }
 
+    /// The four single-layer D2 views of the cascade array, in cascade order.
+    pub(crate) fn layer_views(&self) -> &[wgpu::TextureView; CASCADES] {
+        &self.layers
+    }
+
     /// Writes cascade `i`'s view-projection into slot `i` (offset 256 * i).
     pub(crate) fn write(&self, gpu: &GpuContext, matrices: &[Mat4; CASCADES]) {
         let mut bytes = [0u8; CASTER_GPU_SIZE as usize];

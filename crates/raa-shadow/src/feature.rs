@@ -22,6 +22,7 @@ use raa_lit::{LitHandle, LitRenderer};
 use raa_math::{Mat4, Vec3};
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
 
+use crate::cascade_access::CascadeTargets;
 use crate::caster::Casters;
 use crate::desc::ShadowDesc;
 use crate::provider::csm_provider;
@@ -40,8 +41,6 @@ const OFF_SPLITS: usize = 256;
 const OFF_PARAMS: usize = 272;
 /// Byte offset of `ShadowGpu.params2`.
 const OFF_PARAMS2: usize = 288;
-/// Practical split lambda (CSM).
-const SPLIT_LAMBDA: f32 = 0.75;
 /// Normal-offset receiver amount in shadow-map texels (CSM).
 const NORMAL_OFFSET_TEXELS: f32 = 1.5;
 /// Cascade blend band as a fraction of the cascade depth range (CSM 10%).
@@ -91,6 +90,14 @@ struct ShadowState {
     casters: Option<Casters>,
     /// The lighting holds the cascade array (false: it holds the dummy).
     bound: bool,
+    /// Cascade view-projections of the last prepare.
+    matrices: [Mat4; CASCADES],
+    /// View-space splits of the last prepare.
+    splits: [f32; CASCADES],
+    /// Sun travel direction of the last prepare.
+    sun_dir: Vec3,
+    /// Cascade resolution of the last prepare.
+    resolution: u32,
     /// Preallocated `ShadowGpu` bytes, rewritten every prepare.
     uniform: [u8; SHADOW_GPU_SIZE],
 }
@@ -179,21 +186,16 @@ impl FeaturePass for ShadowPass {
         {
             st.casters = Some(Casters::new(ctx.gpu, desc.resolution));
         }
-        let far = view.far.min(desc.distance_m);
-        let splits = crate::cascade_splits(view.near, far, SPLIT_LAMBDA, CASCADES);
-        let mut matrices = [Mat4::IDENTITY; CASCADES];
-        let mut previous = view.near;
-        for (i, matrix) in matrices.iter_mut().enumerate() {
-            *matrix = crate::cascade_matrix(
-                &view.view,
-                view.fov_y_rad,
-                view.aspect,
-                (previous, splits[i]),
-                view.sun_dir,
-                desc.resolution,
-            );
-            previous = splits[i];
-        }
+        let (matrices, splits) = crate::cascade_frame(
+            &view.view,
+            view.fov_y_rad,
+            view.aspect,
+            view.near,
+            view.far,
+            desc.distance_m,
+            view.sun_dir,
+            desc.resolution,
+        );
         // `LitRenderer::prepare` has already run this frame: `WebRuntime::update`
         // (crates/raa-js/src/engine.rs) prepares the lit frame before the frame graph runs
         // `raa.pipeline`, whose pass prepares include this one. The shared scene snapshot and
@@ -205,6 +207,10 @@ impl FeaturePass for ShadowPass {
         let array_view = casters.array_view().clone();
         pack_shadow(&mut st.uniform, &matrices, &splits, &desc);
         ctx.lighting.set_shadow(array_view, &st.uniform);
+        st.matrices = matrices;
+        st.splits = splits;
+        st.sun_dir = view.sun_dir;
+        st.resolution = desc.resolution;
         st.bound = true;
         Ok(())
     }
@@ -243,6 +249,10 @@ impl ShadowFeature {
             view: None,
             casters: None,
             bound: false,
+            matrices: [Mat4::IDENTITY; CASCADES],
+            splits: [0.0; CASCADES],
+            sun_dir: Vec3::ZERO,
+            resolution: 0,
             uniform: [0; SHADOW_GPU_SIZE],
         }));
         let pass = ShadowPass {
@@ -276,6 +286,25 @@ impl ShadowHandle {
             .try_borrow()
             .map(|st| st.desc)
             .unwrap_or_default()
+    }
+
+    /// The cascades the pass prepared this frame: `Some` only while the state is bound (the
+    /// pass ran with a view and `shadow.csm` is enabled). `None` when disabled (also before
+    /// any prepare), without a view, or on a re-entrant borrow.
+    pub fn cascade_targets(&self) -> Option<CascadeTargets> {
+        let st = self.state.try_borrow().ok()?;
+        if !st.bound {
+            return None;
+        }
+        let casters = st.casters.as_ref()?;
+        Some(CascadeTargets {
+            count: CASCADES as u32,
+            resolution: st.resolution,
+            view_proj: st.matrices,
+            splits: st.splits,
+            layer_views: casters.layer_views().clone(),
+            sun_dir: st.sun_dir,
+        })
     }
 
     /// The frame's camera and sun (called every frame): the view matrix, vertical field of
