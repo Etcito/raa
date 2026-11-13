@@ -8,7 +8,7 @@ import zlib from 'node:zlib';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { containedPath, readJsonRecord, writeJsonRecord, captureInputs } from '../../examples/sky-weather/lib/evidence.mjs';
-import { createPageJob, buildKey, attemptRecords, runCli } from './page-job.mjs';
+import { createPageJob, buildKey, attemptRecords, runCli, judgeCapture } from './page-job.mjs';
 
 delete process.env.NMC_CACHE_DIR;
 delete process.env.TOY_RERENDER_ALL;
@@ -86,6 +86,7 @@ function toyInventory(scene) {
     expectedVisibleBehavior: row.expectedVisibleBehavior ?? 'The toy page renders its fixture.',
     requiredFacts: row.requiredFacts ?? ['assertion:toy-visible'],
     pair: row.pair ?? null,
+    ...(row.heldConstant === undefined ? {} : { heldConstant: row.heldConstant }),
   }));
 }
 
@@ -185,6 +186,8 @@ function createToyJob(overrides = {}) {
       if (overrides.measureError) throw new Error(overrides.measureError);
     },
     report: overrides.report,
+    keepSameBuildOnly: overrides.keepSameBuildOnly,
+    judgeHeldConstant: overrides.judgeHeldConstant,
   });
   return { job, validators, validatorsCalls, factCalls, measurementCalls };
 }
@@ -252,6 +255,49 @@ async function renderToy(t, options = {}) {
   const { transport, calls } = fakeTransport(state);
   const run = await toy.job.render(state.page, out, state.stage, transport);
   return { ...toy, state, out, stage: state.stage, selection, attempt, run, transport, calls };
+}
+
+/** Select, clean and render again on the same stage; updates the selection the fake transport serves. */
+async function rerenderToy(job, state, out, stage, transport) {
+  const selection = await job.select(state.page, out, stage);
+  state.selection = selection;
+  await job.clean(state.page, out, stage);
+  return job.render(state.page, out, stage, transport);
+}
+
+/** A new build of the page: a fresh buildId and preparationId, optionally after a source text edit. */
+function rebuildPage(state, sourceText) {
+  if (sourceText !== undefined) put(state.root, 'examples/sky-weather/lib/inventory.js', sourceText);
+  const preparationId = randomUUID();
+  const build = {
+    buildId: randomUUID(), preparationId, inputs: captureInputs(state.root, preparationId),
+    builtAt: new Date().toISOString(), page: state.page, files: ['scenes.json', ...state.scenes.map((scene) => scene.file)],
+    status: 'ready', error: null,
+  };
+  writeJsonRecord(containedPath(state.page, 'build.json'), build);
+  state.build = build;
+  return build;
+}
+
+/** Rewrite one delivered scene module (and scenes.json) without touching the build inputs. */
+function rewriteScene(state, sceneId, changes) {
+  const scene = state.scenes.find((entry) => entry.id === sceneId);
+  Object.assign(scene, changes);
+  scene.inventory = toyInventory(scene);
+  scene.source = sceneModule(scene);
+  put(state.page, scene.file, scene.source);
+  if (!state.build.files.includes(scene.file)) state.build.files.push(scene.file);
+  writeJsonRecord(containedPath(state.page, 'build.json'), state.build);
+  put(state.page, 'scenes.json', `${JSON.stringify(state.scenes.map(({ id, milestone, file }) => ({ id, milestone, file }))
+    .sort((a, b) => a.id.localeCompare(b.id)), null, 2)}\n`);
+}
+
+/** A transport that refuses every call: used to prove a render kept everything. */
+function refusingTransport() {
+  return {
+    async publishGpuPage() { throw new Error('a kept render must not publish'); },
+    async runGpuPageOp() { throw new Error('a kept render must not run a job'); },
+  };
 }
 
 test('configuration refusals name the invalid field', () => {
@@ -566,4 +612,156 @@ test('runCli acts only when the metaUrl is the entry point', async (t) => {
   runCli(job, matching);
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(called, 1);
+});
+
+const HELD = {
+  id: 'toy-held-scene', milestone: 'one', file: 'scenes/held.mjs',
+  rows: [{
+    id: 'toy-held-image', mode: 'default', filename: 'toy-held-scene.png',
+    heldConstant: ['fixture-a', 'fixture-b'],
+  }],
+};
+
+test('keepSameBuildOnly and judgeHeldConstant are refused unless boolean', () => {
+  const base = {
+    name: 'toy-job', topic: 'toy', stages: ['one', 'two'], envPrefix: 'TOY',
+    validators: () => ({ validateInventory() { return []; }, validateRequiredFacts() {} }),
+    validateMeasurement() {},
+  };
+  for (const field of ['keepSameBuildOnly', 'judgeHeldConstant']) {
+    for (const value of ['true', 1, 0, null, {}, []]) {
+      assert.throws(() => createPageJob({ ...base, [field]: value }),
+        (error) => error.message === `page job config: ${field}: must be a boolean`);
+    }
+  }
+  assert.doesNotThrow(() => createPageJob({ ...base, keepSameBuildOnly: true, judgeHeldConstant: false }));
+});
+
+test('keepSameBuildOnly keeps an image only for an unchanged build key', async (t) => {
+  projectStore(t);
+  const toy = createToyJob({ keepSameBuildOnly: true });
+  const state = fixture(t, { scenes: [ONE] });
+  const stage = 'one';
+  const out = path.join(state.root, 'out/toy', stage);
+  const { transport, calls } = fakeTransport(state);
+  const first = await rerenderToy(toy.job, state, out, stage, transport);
+  assert.equal(calls.ops.length, 1);
+
+  // A new build of the same sources has the same build key and keeps the image.
+  rebuildPage(state);
+  const kept = await rerenderToy(toy.job, state, out, stage, refusingTransport());
+  assert.equal(kept.kept.length, 1);
+  assert.equal(kept.kept[0].attemptId, first.attemptId);
+  assert.equal(calls.ops.length, 1);
+
+  // A new build whose source text differs is rendered again.
+  rebuildPage(state, 'export const criteria = ["changed"];\n');
+  const changed = await rerenderToy(toy.job, state, out, stage, transport);
+  assert.deepEqual(changed.kept, []);
+  assert.equal(calls.ops.length, 2);
+
+  // A changed inventory row filename is rendered again even under the same build.
+  rewriteScene(state, ONE.id, { filename: 'toy-one-scene-renamed.png', file: 'scenes/one-renamed.mjs' });
+  const renamed = await rerenderToy(toy.job, state, out, stage, transport);
+  assert.deepEqual(renamed.kept, []);
+  assert.equal(calls.ops.length, 3);
+});
+
+test('keepSameBuildOnly false keeps an image across a changed build', async (t) => {
+  projectStore(t);
+  const toy = createToyJob({ keepSameBuildOnly: false });
+  const state = fixture(t, { scenes: [ONE] });
+  const stage = 'one';
+  const out = path.join(state.root, 'out/toy', stage);
+  const { transport, calls } = fakeTransport(state);
+  const first = await rerenderToy(toy.job, state, out, stage, transport);
+  rebuildPage(state, 'export const criteria = ["changed"];\n');
+  const kept = await rerenderToy(toy.job, state, out, stage, refusingTransport());
+  assert.equal(kept.kept.length, 1);
+  assert.equal(kept.kept[0].attemptId, first.attemptId);
+  assert.equal(calls.ops.length, 1);
+});
+
+test('fresh refuses a kept origin whose frozen build has another build key', async (t) => {
+  projectStore(t);
+  const rendered = await renderToy(t, { config: { keepSameBuildOnly: false } });
+  const { state, out, stage } = rendered;
+  rebuildPage(state, 'export const criteria = ["changed"];\n');
+  const kept = await rerenderToy(rendered.job, state, out, stage, rendered.transport);
+  assert.equal(kept.kept.length, 1);
+  const originId = kept.kept[0].attemptId;
+  const strict = createToyJob({ keepSameBuildOnly: true }).job;
+  const store = strict.storeRoot(out, stage);
+  for (const root of [out, store]) {
+    const file = path.join(root, 'attempts', originId, 'build.json');
+    if (!fs.existsSync(file)) continue;
+    const build = readJsonRecord(file);
+    build.inputs.revision = '2'.repeat(40);
+    writeJsonRecord(file, build);
+  }
+  await assert.rejects(strict.fresh(state.page, out, stage),
+    new RegExp(`kept origin attempt ${originId} was built from other sources`));
+});
+
+test('judgeHeldConstant passes the row constants to the judge', async (t) => {
+  const withOption = await renderToy(t, { config: { judgeHeldConstant: true }, scenes: [HELD] });
+  const seen = [];
+  const record = await withOption.job.judge(withOption.state.page, withOption.out, withOption.stage, {
+    judge: async (capture, description, options) => { seen.push({ capture, description, options }); return { exit: 0, score: 7, output: '' }; },
+    log: () => {},
+  });
+  assert.equal(record.status, 'passed');
+  assert.deepEqual(Object.keys(seen[0].options).sort(), ['heldConstant', 'killAt']);
+  assert.deepEqual(seen[0].options.heldConstant, ['fixture-a', 'fixture-b']);
+  assert.equal(seen[0].description, 'The toy page renders its fixture.');
+
+  const withoutOption = await renderToy(t, { scenes: [HELD] });
+  const plain = [];
+  await withoutOption.job.judge(withoutOption.state.page, withoutOption.out, withoutOption.stage, {
+    judge: async (capture, description, options) => { plain.push(options); return { exit: 0, score: 7, output: '' }; },
+    log: () => {},
+  });
+  assert.deepEqual(Object.keys(plain[0]), ['killAt']);
+});
+
+test('judgeCapture places the held constants between the description and the minimum score', async (t) => {
+  const directory = scratch(t);
+  const client = path.join(directory, 'toy-judge.py');
+  fs.writeFileSync(client, [
+    'import json, sys',
+    'print(json.dumps(sys.argv[1:]))',
+    'print("JUDGE PASS: 8/10")',
+    '',
+  ].join('\n'));
+  const capture = path.join(directory, 'toy-capture.png');
+  fs.writeFileSync(capture, 'toy capture');
+  const original = process.env.NMC_JUDGE_CLIENT;
+  t.after(() => {
+    if (original === undefined) delete process.env.NMC_JUDGE_CLIENT;
+    else process.env.NMC_JUDGE_CLIENT = original;
+  });
+  process.env.NMC_JUDGE_CLIENT = client;
+
+  const held = await judgeCapture(capture, 'the toy shows its fixture', { heldConstant: ['a', 'b'] });
+  assert.equal(held.exit, 0);
+  assert.equal(held.score, 8);
+  const heldArgs = JSON.parse(held.output.split('\n')[0]);
+  assert.equal(heldArgs[0], capture);
+  const heldDescription = heldArgs.indexOf('--description');
+  const heldMinimum = heldArgs.indexOf('--min-score');
+  assert.ok(heldDescription >= 0 && heldMinimum > heldDescription);
+  assert.deepEqual(heldArgs.slice(heldDescription + 2, heldMinimum),
+    ['--held-constant', 'a', '--held-constant', 'b']);
+
+  const plain = await judgeCapture(capture, 'the toy shows its fixture');
+  const plainArgs = JSON.parse(plain.output.split('\n')[0]);
+  const plainDescription = plainArgs.indexOf('--description');
+  const plainMinimum = plainArgs.indexOf('--min-score');
+  assert.deepEqual(plainArgs.slice(plainDescription + 2, plainMinimum), []);
+  assert.equal(plainArgs.includes('--held-constant'), false);
+
+  assert.throws(() => judgeCapture(capture, 'the toy shows its fixture', { heldConstant: 'a' }),
+    (error) => error.message === 'judge: heldConstant must be an array of fixture names');
+  assert.throws(() => judgeCapture(capture, 'the toy shows its fixture', { heldConstant: ['a', '  '] }),
+    (error) => error.message === 'judge: heldConstant must be an array of fixture names');
 });

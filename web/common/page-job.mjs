@@ -375,8 +375,8 @@ function keptCandidates(roots, currentDirectory) {
   for (const { root, directory } of earlierAttempts(roots, currentDirectory)) {
     try {
       const records = attemptRecords(directory);
-      readJsonRecord(containedPath(root, records.build));
-      candidates.push({ root, directory, records, selection: readJsonRecord(containedPath(root, records.selection)),
+      const build = readJsonRecord(containedPath(root, records.build));
+      candidates.push({ root, directory, records, build, selection: readJsonRecord(containedPath(root, records.selection)),
         run: readJsonRecord(containedPath(root, records.run)) });
     } catch { /* an unreadable attempt supplies nothing */ }
   }
@@ -522,11 +522,18 @@ export function judgeScore(text) {
 export const JUDGE_GRACE_MS = 150000;
 
 /** One judge process on one capture; no reference image is ever passed. */
-export function judgeCapture(capture, description, { killAt } = {}) {
+export function judgeCapture(capture, description, { killAt, heldConstant } = {}) {
   const client = process.env.NMC_JUDGE_CLIENT;
   ensure(nonblank(client), 'NMC_JUDGE_CLIENT is missing');
+  if (heldConstant !== undefined) {
+    ensure(Array.isArray(heldConstant) && heldConstant.every(nonblank),
+      'judge: heldConstant must be an array of fixture names');
+  }
+  const args = [client, capture, '--description', description];
+  for (const fixture of heldConstant ?? []) args.push('--held-constant', fixture);
+  args.push('--min-score', '6');
   return new Promise((resolveVerdict, rejectVerdict) => {
-    const child = spawn('python3', [client, capture, '--description', description, '--min-score', '6'],
+    const child = spawn('python3', args,
       { stdio: ['ignore', 'pipe', 'pipe'], shell: false });
     let killed = false;
     const timer = Number.isFinite(killAt) ? setTimeout(() => { killed = true; child.kill('SIGKILL'); },
@@ -604,6 +611,10 @@ export function createPageJob(config) {
     ensure(typeof value.validateMeasurement === 'function', 'page job config: validateMeasurement: must be a function');
     ensure(value.report === undefined || typeof value.report === 'function',
       'page job config: report: must be a function');
+    for (const field of ['keepSameBuildOnly', 'judgeHeldConstant']) {
+      ensure(value[field] === undefined || typeof value[field] === 'boolean',
+        `page job config: ${field}: must be a boolean`);
+    }
   }
 
   /**
@@ -622,6 +633,20 @@ export function createPageJob(config) {
   }
 
   const report = config.report ?? defaultReport;
+  // The two behaviours S33 asks of the virtual-geometry job; both are off for the sky-weather job.
+  const keepSameBuildOnly = config.keepSameBuildOnly === true;
+  const judgeHeldConstant = config.judgeHeldConstant === true;
+
+  /** The frozen build receipt of an earlier attempt, looked up in the stage root and then the store. */
+  function originBuild(roots, attemptId) {
+    const records = attemptRecords(`attempts/${attemptId}`);
+    for (const root of roots) {
+      const file = containedPath(root, records.build);
+      if (!fs.existsSync(file)) continue;
+      try { return readJsonRecord(file); } catch { return null; }
+    }
+    return null;
+  }
 
   /** The inventory of `<out>/selection.json`, read after the action (check returns its own rows). */
   function selectionInventory(out) {
@@ -740,8 +765,12 @@ export function createPageJob(config) {
     write(records.run, ctx.stored);
   }
 
-  /** KEPT GROUP: the first earlier attempt whose evidence of this group passes every check. */
-  function keptGroup(candidates, rows, namespaces, validators) {
+  /**
+   * KEPT GROUP: the first earlier attempt whose evidence of this group passes every check. With
+   * keepSameBuildOnly the attempt that produced the group must also hold the current build key; a
+   * candidate that only copied the group is compared through the origin its kept entries name.
+   */
+  function keptGroup(candidates, rows, namespaces, validators, options) {
     const { scenario, mode } = rows[0];
     const factNames = namespaces.find((entry) => entry.default?.id === scenario)?.factNames;
     for (const candidate of candidates) {
@@ -758,6 +787,11 @@ export function createPageJob(config) {
         ensure(listed.length === 0 || (listed.length === rows.length
           && listed.every((entry) => isDeepStrictEqual({ selectionId: entry.selectionId, attemptId: entry.attemptId,
             buildId: entry.buildId }, origin))), 'partial kept origin');
+        if (options.keepSameBuildOnly) {
+          const own = `attempts/${origin.attemptId}` === candidate.directory;
+          const build = own ? candidate.build : originBuild(options.roots, origin.attemptId);
+          ensure(build && isDeepStrictEqual(buildKey(build), buildKey(options.build)), 'other sources');
+        }
         const captures = checkJob(job, `${candidate.directory} job ${index}`, rows, origin, namespaces, factNames,
           new Map(), validators);
         const images = rows.map((row) => {
@@ -862,12 +896,14 @@ export function createPageJob(config) {
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(row);
       }
+      const roots = attemptRoots(out, stage);
       const candidates = process.env[`${config.envPrefix}_RERENDER_ALL`] === '1' ? []
-        : keptCandidates(attemptRoots(out, stage), pointer.directory);
+        : keptCandidates(roots, pointer.directory);
+      const keepOptions = { keepSameBuildOnly, build, roots };
       const pending = [];
       let firstKept = null;
       for (const rows of groups.values()) {
-        const kept = keptGroup(candidates, rows, namespaces, validators);
+        const kept = keptGroup(candidates, rows, namespaces, validators, keepOptions);
         if (!kept) {
           pending.push(rows);
           if (!failed.some((entry) => sameJob(entry, rows[0]))
@@ -1087,6 +1123,10 @@ export function createPageJob(config) {
     const build = read(records.build);
     ensure(build.buildId === origin.buildId,
       `${label}: kept origin attempt ${origin.attemptId} belongs to another build`);
+    if (keepSameBuildOnly) {
+      ensure(isDeepStrictEqual(buildKey(build), buildKey(ctx.build)),
+        `${label}: kept origin attempt ${origin.attemptId} was built from other sources`);
+    }
     const selection = read(records.selection);
     ensure(selection.selectionId === origin.selectionId
       && rows.every((row) => selection.inventory.some((entry) => sameRow(entry, row))),
@@ -1314,7 +1354,9 @@ export function createPageJob(config) {
         const image = images.get(row.id);
         ensure(image && image.filename === row.filename, `selected image ${row.id} is missing from the run`);
         ensure(fs.existsSync(capture) && fs.lstatSync(capture).isFile(), `capture ${row.filename} is missing`);
-        const verdict = await runJudge(capture, row.expectedVisibleBehavior, { killAt: deadline + judgeGraceMs() });
+        const killAt = deadline + judgeGraceMs();
+        const verdict = await runJudge(capture, row.expectedVisibleBehavior,
+          judgeHeldConstant ? { killAt, heldConstant: row.heldConstant ?? [] } : { killAt });
         ensure(isRecord(verdict), `judge returned no verdict for ${row.filename}`);
         ensure(Number.isInteger(verdict.exit), `judge verdict for ${row.filename} has no exit code`);
         ensure(typeof verdict.output === 'string', `judge verdict for ${row.filename} has no output`);
