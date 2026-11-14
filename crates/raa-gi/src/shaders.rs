@@ -1,6 +1,6 @@
-//! WGSL of the GI volume (shares 1, 2 and 3): the radiance codec, the view-independent voxelize
-//! kernel, the seed, jump-flood, forward-voxelize and atlas-write modules and the voxel-light
-//! module (contract `gi-shaders`, records of `gi-records`).
+//! WGSL of the GI volume (shares 1 to 4): the radiance codec, the view-independent voxelize
+//! kernel, the seed, jump-flood, forward-voxelize and atlas-write modules, the voxel-light
+//! module and the debug views (contract `gi-shaders`, records of `gi-records`).
 //!
 //! Split note: `no handoff: raa-gi: shaders share 3, voxel lighting takes nothing from this card`
 //! and `no handoff: raa-gi: shaders share 4, debug views takes nothing from this card`; each adds
@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use raa_shader::{CLOUD_SHADOW_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages, StorageTextureAccess,
-    TextureFormat, TextureViewDimension,
+    TextureFormat, TextureSampleType, TextureViewDimension,
 };
 
 /// Radiance codec (`raa_gi_encode_radiance`, `raa_gi_decode_radiance`, range 512).
@@ -32,6 +32,7 @@ const JUMP_FLOOD_WGSL: &str = include_str!("wgsl/jump_flood.wgsl");
 const VOXELIZE_FORWARD_WGSL: &str = include_str!("wgsl/voxelize_forward.wgsl");
 const VOLUME_WRITE_WGSL: &str = include_str!("wgsl/volume_write.wgsl");
 const VOXEL_LIGHT_WGSL: &str = include_str!("wgsl/voxel_light.wgsl");
+const DEBUG_VIEW_WGSL: &str = include_str!("wgsl/debug_view.wgsl");
 
 const FLOOD_RECORD_WGSL: &str = "struct GiFloodGpu {
     step: vec3<i32>,
@@ -212,6 +213,56 @@ pub fn write_group2_entries() -> [BindGroupLayoutEntry; 4] {
                 access: StorageTextureAccess::WriteOnly,
                 format: TextureFormat::Rgba16Float,
                 view_dimension: TextureViewDimension::D3,
+            },
+        ),
+    ]
+}
+
+/// `debug_view_module_wgsl` composes `PRELUDE_WGSL`, `GI_VOLUME_WGSL`, `GI_FRAME_RECORD_WGSL`
+/// and `debug_view.wgsl`, entry `raa_gi_debug_view` (8x8, one pixel per invocation); the upstream
+/// Handoff is crates/raa-gi/src/shaders.rs:52 GI_FRAME_RECORD_WGSL.
+///
+/// Handoff: card 'raa-gi: debug.rs debug-view recording' calls `debug_view_module_wgsl` and
+/// `debug_group2_entries` to build and bind the `gi.history` debug pass; today they return the
+/// module text and the five group-2 entries of contract 'gi-shaders'.
+///
+/// Split note: the debug module reads `raa_gi_volume_params`, the atlas and the voxel words of
+/// the shared contracts only, so
+/// `no handoff: raa-gi: shaders share 1, codec, voxelize kernel, seed and flood takes nothing from this card`,
+/// `no handoff: raa-gi: shaders share 2, forward voxelize and volume write takes nothing from this card`
+/// and `no handoff: raa-gi: shaders share 3, voxel lighting takes nothing from this card`.
+pub fn debug_view_module_wgsl() -> String {
+    format!("{PRELUDE_WGSL}{GI_VOLUME_WGSL}{GI_FRAME_RECORD_WGSL}{DEBUG_VIEW_WGSL}")
+}
+
+/// Debug-view group 2: the GiFrameGpu uniform, the depth texture, hdr.src, the voxels read and
+/// the Rgba16Float hdr.dst storage texture.
+pub fn debug_group2_entries() -> [BindGroupLayoutEntry; 5] {
+    [
+        uniform_entry(0, 432, false),
+        entry(
+            1,
+            BindingType::Texture {
+                sample_type: TextureSampleType::Depth,
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ),
+        entry(
+            2,
+            BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: false },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ),
+        storage_entry(3, true),
+        entry(
+            4,
+            BindingType::StorageTexture {
+                access: StorageTextureAccess::WriteOnly,
+                format: TextureFormat::Rgba16Float,
+                view_dimension: TextureViewDimension::D2,
             },
         ),
     ]
