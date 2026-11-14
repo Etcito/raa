@@ -108,6 +108,11 @@ pub(crate) struct GiCore {
     sun_color: [f32; 3],
     local_light_count: u32,
     history_valid: bool,
+    /// The copy of the previous lit HDR (HDR_FORMAT, surface-sized) and its view, present while
+    /// a part wants the history (S38 `gi.history`).
+    history: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// The size of the history copy recorded by the latest frame; the next prepare takes it.
+    history_copied: Option<(u32, u32)>,
     /// Frames prepared so far; 0 before the first frame.
     frame_index: u64,
     shared: GiShared,
@@ -153,6 +158,8 @@ impl GiCore {
             sun_color: [0.0; 3],
             local_light_count: 0,
             history_valid: false,
+            history: None,
+            history_copied: None,
             frame_index: 0,
             shared,
             volume: None,
@@ -275,6 +282,7 @@ impl GiHandle {
     pub fn invalidate_history(&self) {
         let mut core = self.core.borrow_mut();
         core.history_valid = false;
+        core.history_copied = None;
         for part in &core.parts {
             part.invalidate_history();
         }
@@ -313,7 +321,8 @@ impl GiHandle {
         self.stats().allocated_bytes
     }
 
-    /// The pass names recorded by the latest frame, in record order.
+    /// The core pass names (gi.volume, gi.history) recorded by the latest frame, in record order;
+    /// part passes such as gi.screen are not listed.
     pub fn recorded_passes(&self) -> Vec<&'static str> {
         self.core.borrow().recorded.clone()
     }
@@ -379,6 +388,9 @@ impl GiHandle {
             core.allocated_quality = None;
         }
 
+        let copied = core.history_copied.take();
+        core.history_valid = active && !allocated && copied == Some(core.viewport);
+
         let settings = core.settings;
         lit.set_frame_feature(29, active);
         lit.set_frame_feature(30, active && settings.local_light_shadows);
@@ -434,7 +446,10 @@ impl GiHandle {
             let volume = core.volume.as_ref().map_or(0, GiVolume::allocated_bytes);
             let drivers: u64 = core.drivers.iter().map(|d| d.allocated_bytes()).sum();
             let parts: u64 = core.parts.iter().map(|p| p.allocated_bytes()).sum();
-            volume + GiFrameGpu::SIZE as u64 + drivers + parts
+            let history = core.history.as_ref().map_or(0, |(texture, _)| {
+                u64::from(texture.width()) * u64::from(texture.height()) * 8
+            });
+            volume + GiFrameGpu::SIZE as u64 + drivers + parts + history
         } else {
             0
         };
@@ -462,6 +477,9 @@ impl GiHandle {
 /// Drops the volume and releases every driver and part (contract 'gi-frame-lifecycle').
 fn release_resources(core: &mut GiCore) {
     core.volume = None;
+    core.history = None;
+    core.history_copied = None;
+    core.shared.set_history(None);
     for driver in &core.drivers {
         driver.release();
     }
@@ -541,9 +559,11 @@ impl FeaturePass for GiVolumePass {
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let core = self.core.borrow();
         match core.volume.as_ref() {
-            Some(volume) => ctx
-                .lighting
-                .set_gi(None, volume.atlas_view(), &volume.params_bytes()),
+            Some(volume) => {
+                let screen = core.parts.iter().find_map(|part| part.screen_output());
+                ctx.lighting
+                    .set_gi(screen, volume.atlas_view(), &volume.params_bytes())
+            }
             None => {
                 ctx.lighting.clear_gi();
                 Ok(())
@@ -569,8 +589,63 @@ impl FeaturePass for GiVolumePass {
     }
 }
 
-/// The `gi.history` pass (order 64): with a debug view selected, records the debug view of the
-/// active frame. It records nothing while GI is inactive or the view is `none`.
+/// Copies the lit HDR of this frame (`hdr.src` after forward) into the history texture, which is
+/// recreated on a size change, and publishes its view for the next frame's screen traces.
+fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
+    let (width, height) = ctx.size;
+    let current = core
+        .history
+        .as_ref()
+        .is_some_and(|(texture, _)| (texture.width(), texture.height()) == (width, height));
+    if !current {
+        let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-gi.history"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: raa_pipeline::HDR_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        core.history = Some((texture, view));
+    }
+    let Some((history, view)) = core.history.as_ref() else {
+        return;
+    };
+    let extent = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    ctx.encoder.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: ctx.targets.hdr().src_texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: history,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        extent,
+    );
+    core.shared.set_history(Some(view.clone()));
+    core.history_copied = Some((width, height));
+}
+
+/// The `gi.history` pass (order 64). While GI is active, it copies the lit HDR into the history
+/// when a part wants it, and otherwise drops the history. With a debug view selected, it then
+/// records the debug view of the active frame. It records nothing while GI is inactive or the
+/// view is `none`; `HISTORY_PASS` is listed at most once per frame.
 pub(crate) struct GiHistoryPass {
     core: Rc<RefCell<GiCore>>,
 }
@@ -587,6 +662,15 @@ impl FeaturePass for GiHistoryPass {
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut guard = self.core.borrow_mut();
         let core = &mut *guard;
+        if core.shared.frame_buffer().is_some() {
+            if core.parts.iter().any(|part| part.wants_history()) {
+                copy_history(core, ctx);
+                core.recorded.push(HISTORY_PASS);
+            } else {
+                core.history = None;
+                core.shared.set_history(None);
+            }
+        }
         if core.settings.debug_view == DebugView::None {
             return Ok(());
         }
@@ -597,7 +681,9 @@ impl FeaturePass for GiHistoryPass {
             return Ok(());
         };
         core.debug.record(ctx, &frame, volume.voxels(), &group1);
-        core.recorded.push(HISTORY_PASS);
+        if !core.recorded.contains(&HISTORY_PASS) {
+            core.recorded.push(HISTORY_PASS);
+        }
         Ok(())
     }
 }
@@ -885,9 +971,69 @@ mod tests {
             "allocated {} < {BYTES_64_3}",
             stats.allocated_bytes
         );
-        assert_eq!(rig.handle.recorded_passes(), ["gi.volume"]);
+        assert_eq!(rig.handle.recorded_passes(), ["gi.volume", "gi.history"]);
         rig.handle.observe_submission(1, true);
         assert_eq!(rig.handle.stats().stats_frame_index, Some(1));
+    }
+
+    /// The history copy is the forward output of the frame: the rig's prepass clears depth to
+    /// 1.0 and no mesh pass writes the HDR before forward, so the copied HDR is what forward
+    /// wrote into the 64x64 offscreen frame. The camera and cube stay inside level 0.
+    #[test]
+    fn history_copy_is_valid_after_two_active_frames() {
+        let test = "history_copy_is_valid_after_two_active_frames";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        rig.frame(&gpu, 1);
+        assert!(
+            !rig.handle.core.borrow().history_valid,
+            "the first frame allocates, so no copy is valid yet"
+        );
+        rig.frame(&gpu, 1);
+        let core = rig.handle.core.borrow();
+        assert!(core.history_valid);
+        assert!(core.shared.history_view().is_some());
+    }
+
+    #[test]
+    fn invalidate_history_clears_validity_on_the_next_frame() {
+        let test = "invalidate_history_clears_validity_on_the_next_frame";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        rig.frame(&gpu, 1);
+        rig.frame(&gpu, 1);
+        assert!(rig.handle.core.borrow().history_valid);
+        rig.handle.invalidate_history();
+        rig.frame(&gpu, 1);
+        assert!(!rig.handle.core.borrow().history_valid);
+    }
+
+    #[test]
+    fn screen_traces_off_records_only_gi_volume() {
+        let test = "screen_traces_off_records_only_gi_volume";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        rig.handle
+            .set(GiSettingsPatch {
+                screen_traces: Some(false),
+                ..GiSettingsPatch::default()
+            })
+            .expect("screenTraces is a boolean");
+        assert!(rig.frame(&gpu, 1).active);
+        assert_eq!(rig.handle.recorded_passes(), ["gi.volume"]);
+        assert!(rig.handle.core.borrow().shared.history_view().is_none());
     }
 
     #[test]
