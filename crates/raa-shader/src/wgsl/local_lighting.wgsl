@@ -1,5 +1,8 @@
-// S11 shared local lighting. Local lights cast no shadows by default.
-// Point window/incidence adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder.
+// S11 shared local lighting. Point, spot and directional lights call Direct once each and
+// read the LocalVisibility slot; area lights shade U x V and layer three visibility tiers
+// in V: a hero PCSS shadow map weighted by the map-edge weight, the GI cone visibility of
+// the LocalVisibility slot, and the GI-only far fade of the direct term. Point window and
+// incidence adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder.
 // solstice@7e465b5, crates/solstice-render/shaders/lighting/deferred.wgsl:72-83.
 fn raa_local_falloff(distance: f32, range: f32) -> f32 {
     if distance >= range { return 0.0; }
@@ -71,6 +74,48 @@ fn raa_area_diffuse(light: LightGpu, s: MaterialOutput, c: ShadeCtx) -> vec3<f32
         * raa_area_form_factor(light, c.position, s.normal);
 }
 
+// Feature id 29 (set by raa-gi while GI is active): area lights apply the far-fade lane
+// w_direct and read the GI cone visibility tier.
+const RAA_GI_ACTIVE_FEATURE: u32 = 29u;
+
+// Hero area-light projection: 140 degrees vertical FOV on a square map (the tangent of the
+// half angle) and a 0.05 m near plane, matching contract area-shadow-settings.
+const RAA_AREA_HERO_TAN_HALF: f32 = 2.7474774;
+const RAA_AREA_HERO_NEAR: f32 = 0.05;
+
+// Hero visibility from one layer of raa_shadow_map, as (visibility, map weight). The
+// receiver is pushed along its normal by 1.5 texels of the light's own projection; the
+// blocker search and the PCF radius widen with the blocker-receiver gap, so the penumbra is
+// sharp at contact. The map weight fades the value out over the layer border. Only
+// textureLoad and explicit-level samples: this runs inside the nonuniform light loop.
+fn raa_area_hero_visibility(light: LightGpu, layer: i32, position: vec3<f32>,
+    normal: vec3<f32>, frag: vec4<f32>) -> vec2<f32> {
+    let m = raa_area_basis(light.direction_cos_outer.xyz);
+    let far = max(light.position_range.w, 2.0 * RAA_AREA_HERO_NEAR);
+    let res = 1.0 / raa_shadow.params.z;
+    var d = position - light.position_range.xyz;
+    let texel_r = 2.0 * dot(d, m[2]) * RAA_AREA_HERO_TAN_HALF / res;
+    d = position + normal * (1.5 * texel_r) - light.position_range.xyz;
+    let dz = dot(d, m[2]);
+    let ndc = vec2<f32>(-dot(d, m[0]), dot(d, m[1])) / (dz * RAA_AREA_HERO_TAN_HALF);
+    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    if dz <= 1.01 * RAA_AREA_HERO_NEAR || any(uv < vec2<f32>(0.0))
+        || any(uv > vec2<f32>(1.0)) {
+        return vec2<f32>(1.0, 0.0);
+    }
+    let w_map = smoothstep(0.0, 0.05, min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y)));
+    let depth = far * (dz - RAA_AREA_HERO_NEAR) / ((far - RAA_AREA_HERO_NEAR) * dz);
+    let size = 0.5 * (light.width + light.height);
+    let search_texels = clamp(size * res / (2.0 * RAA_AREA_HERO_TAN_HALF * dz), 1.0, 32.0);
+    let blockers = raa_shadow_blockers(layer, uv, depth, search_texels, res);
+    if blockers.y < 0.5 { return vec2<f32>(1.0, w_map); }
+    let blocker_depth = far * RAA_AREA_HERO_NEAR / (far - blockers.x * (far - RAA_AREA_HERO_NEAR));
+    let radius_texels = clamp(0.5 * size * (dz - blocker_depth) / max(blocker_depth, RAA_AREA_HERO_NEAR)
+        * res / (2.0 * RAA_AREA_HERO_TAN_HALF * dz), 1.0, 48.0);
+    return vec2<f32>(raa_shadow_pcf(layer, uv, depth, radius_texels, res,
+        raa_csm_rotation(frag.xy)), w_map);
+}
+
 // The caller passes the packed uniform index (not a stable CPU handle) to visibility.
 fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let light = raa_local_lights[index];
@@ -103,15 +148,32 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
         if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
         direction = to_light / distance;
         let window = raa_area_window(distance, light.position_range.w);
-        let area_visibility = clamp(raa_slot_local_visibility(index, c.position, s.normal,
-            direction, distance), 0.0, 1.0);
+        // Direct fade lane: only GI (feature 29) applies the per-light w_direct weight.
+        let w_direct = clamp(light.color_inv_range_sq.w, 0.0, 1.0);
+        let fade = select(1.0, w_direct, raa_feature_enabled(RAA_GI_ACTIVE_FEATURE));
+        if window * fade <= 0.0 { return vec3<f32>(0.0); }
+        // Visibility tiers: w_cone = 1 uses the GI cone alone; below 1 the hero map blends
+        // in by its own map weight. layer < 4 means no hero map was selected this frame.
+        let w_cone = clamp(light.cos_inner, 0.0, 1.0);
+        let layer = i32(round(light.direction_cos_outer.w));
+        var hero = vec2<f32>(1.0, 0.0);
+        if layer >= 4 && w_cone < 1.0 && raa_shadow.params.w > 0.5
+            && layer < i32(textureNumLayers(raa_shadow_map)) {
+            hero = raa_area_hero_visibility(light, layer, c.position, s.normal, c.frag);
+        }
+        var v_cone = 1.0;
+        if w_cone > 0.0 || hero.y < 1.0 {
+            v_cone = clamp(raa_slot_local_visibility(index, c.position, s.normal,
+                direction, distance), 0.0, 1.0);
+        }
+        let area_visibility = mix(mix(v_cone, hero.x, hero.y), v_cone, w_cone);
         var shading = vec3<f32>(0.0);
         if raa_feature_enabled(RAA_AREA_FORM_FACTOR_FEATURE) {
             shading = raa_area_diffuse(light, s, c);
         } else {
             shading = raa_area_ltc(light, s, c);
         }
-        return shading * (window * area_visibility);
+        return shading * (window * area_visibility * fade);
     } else if light.kind != 2u {
         // Directional ignores position and range; unknown kinds contribute nothing.
         return vec3<f32>(0.0);
@@ -128,8 +190,10 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
 // Handoff: Composer attaches LOCAL_LIGHTING_WGSL after the selected slot providers.
 // Forward/transparent/fur callers add raa_local_lighting(s, c) to their lit branch;
 // the separate sun call and Flat/UNLIT selection remain with each pass.
-// Point, spot and directional lights call Direct once each; area lights return
-// raa_area_ltc (or raa_area_diffuse under feature 39) x window x visibility instead.
+// Point, spot and directional lights call Direct once each. Area lights return
+// raa_area_ltc (or raa_area_diffuse under feature 39) x window x area_visibility x fade:
+// area_visibility blends V_hero (a true hero PCSS map, faded out over the layer border)
+// with V_cone (the LocalVisibility slot) by w_cone, and fade is the GI-only w_direct lane.
 // c.frag.xy is framebuffer position; light_info.x is the packed active count.
 // Binding 13 stores word w at layer w of tile (x, y); layer 0 is the count.
 // Providers reached here must use explicit LOD/gradients or textureLoad, no derivatives.
