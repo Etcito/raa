@@ -643,6 +643,134 @@ fn each_inverted_vg_pair_is_refused_atomically() {
     }
 }
 
+/// The P4 GI passes plus the VG and SSR passes their pairs name. `screen` and `vg` leave
+/// those optional passes out so an acceptance can exercise the missing-pass rule.
+fn add_gi_passes(config: &mut PipelineConfig, log: &Log, screen: bool, vg: bool) {
+    for (name, order, present) in [
+        ("ssr", 65, true),
+        ("gi.history", 64, true),
+        ("gi.screen", 42, screen),
+        ("vg.gbuffer", 32, vg),
+        ("gi.volume", 25, true),
+        ("vg.resolve", 23, vg),
+    ] {
+        if present {
+            config
+                .add(Mock::boxed(name, order, false, log))
+                .expect("added");
+        }
+    }
+}
+
+const GI_DEFAULT_ORDER: [&str; 12] = [
+    "shadow.csm",
+    "vg.resolve",
+    "gi.volume",
+    "prepass",
+    "vg.gbuffer",
+    "ao.gtao",
+    "gi.screen",
+    "forward",
+    "gi.history",
+    "ssr",
+    "bloom",
+    "tonemap",
+];
+
+#[test]
+fn each_inverted_gi_pair_is_refused_naming_the_after_pass() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_passes(&mut config, &log);
+    add_gi_passes(&mut config, &log, true, true);
+    assert_eq!(names(&config.passes()), GI_DEFAULT_ORDER);
+
+    for (before, after) in [
+        ("vg.resolve", "gi.volume"),
+        ("gi.volume", "gi.screen"),
+        ("prepass", "gi.screen"),
+        ("vg.gbuffer", "gi.screen"),
+        ("gi.screen", "forward"),
+        ("forward", "gi.history"),
+        ("gi.history", "ssr"),
+    ] {
+        let mut order = GI_DEFAULT_ORDER.to_vec();
+        let a = order.iter().position(|n| *n == before).expect("present");
+        let b = order.iter().position(|n| *n == after).expect("present");
+        let moved = order.remove(b);
+        order.insert(a, moved);
+        assert!(
+            order.iter().position(|n| *n == after) < order.iter().position(|n| *n == before),
+            "the `{after}` sequence puts it before `{before}`"
+        );
+        let err = config.set_order(&order).expect_err("refused");
+        assert_eq!(err.code(), "pipeline.required_order", "{before} / {after}");
+        assert!(
+            err.message().contains(&format!("`{after}` must run after")),
+            "{before} / {after}: {}",
+            err.message()
+        );
+        assert_eq!(
+            names(&config.passes()),
+            GI_DEFAULT_ORDER,
+            "the `{after}` before `{before}` override left the order unchanged"
+        );
+    }
+}
+
+#[test]
+fn gi_pairs_accept_the_s12_sequence_without_gi_screen() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_passes(&mut config, &log);
+    add_gi_passes(&mut config, &log, false, true);
+    let order = [
+        "shadow.csm",
+        "vg.resolve",
+        "gi.volume",
+        "prepass",
+        "vg.gbuffer",
+        "ao.gtao",
+        "forward",
+        "gi.history",
+        "ssr",
+        "bloom",
+        "tonemap",
+    ];
+    config
+        .set_order(&order)
+        .expect("the S12 sequence is accepted");
+    assert_eq!(names(&config.passes()), order);
+    let info = |name: &str| config.passes().into_iter().find(|p| p.name == name);
+    assert_eq!(info("gi.volume").map(|p| p.order), Some(25));
+    assert_eq!(info("gi.history").map(|p| p.order), Some(64));
+    assert!(info("gi.screen").is_none(), "gi.screen is absent");
+}
+
+#[test]
+fn gi_pairs_accept_a_sequence_without_any_vg_pass() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_passes(&mut config, &log);
+    add_gi_passes(&mut config, &log, true, false);
+    let order = [
+        "shadow.csm",
+        "gi.volume",
+        "prepass",
+        "ao.gtao",
+        "gi.screen",
+        "forward",
+        "gi.history",
+        "ssr",
+        "bloom",
+        "tonemap",
+    ];
+    config
+        .set_order(&order)
+        .expect("a sequence without any vg pass is accepted");
+    assert_eq!(names(&config.passes()), order);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu {
     use super::*;

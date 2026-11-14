@@ -52,6 +52,20 @@ const VG_DEPENDENCIES: [(&str, &str); 8] = [
     ("vg.gbuffer", "forward"),
 ];
 
+/// S38 global-illumination dependencies: `vg.resolve` before `gi.volume`;
+/// `gi.volume`, `prepass` and `vg.gbuffer` before `gi.screen`; `gi.screen` before
+/// `forward`; `forward` before `gi.history` before `ssr`. Every pair present in a
+/// sequence keeps this order; a missing pass removes only its own pairs.
+const GI_DEPENDENCIES: [(&str, &str); 7] = [
+    ("vg.resolve", "gi.volume"),
+    ("gi.volume", "gi.screen"),
+    ("prepass", "gi.screen"),
+    ("vg.gbuffer", "gi.screen"),
+    ("gi.screen", "forward"),
+    ("forward", "gi.history"),
+    ("gi.history", "ssr"),
+];
+
 fn refusal(code: &'static str, message: String) -> RaaError {
     RaaError::FrameGraph { code, message }
 }
@@ -61,13 +75,15 @@ fn refusal(code: &'static str, message: String) -> RaaError {
 /// `prepass` and before `ao.gtao`/`forward`, or the P2 sky passes break
 /// `sky.atmosphere` < `sky.cloud-lighting` < `sky.env` or
 /// `prepass` < `sky.cloud-screen` < `forward`, or any `VG_DEPENDENCIES` pair (`vg.cull` and
-/// `shadow.csm` before `vg.raster`, and so on up to `vg.gbuffer` before `forward`) is inverted
-/// (`pipeline.required_order`).
+/// `shadow.csm` before `vg.raster`, and so on up to `vg.gbuffer` before `forward`) or
+/// `GI_DEPENDENCIES` pair (`vg.resolve` before `gi.volume`, and so on up to `gi.history`
+/// before `ssr`) is inverted (`pipeline.required_order`).
 fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
     for (before, after) in TILE_DEPENDENCIES
         .into_iter()
         .chain(SKY_DEPENDENCIES)
         .chain(VG_DEPENDENCIES)
+        .chain(GI_DEPENDENCIES)
     {
         let (Some(before_at), Some(after_at)) = (
             names.iter().position(|n| *n == before),
