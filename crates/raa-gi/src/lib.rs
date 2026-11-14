@@ -6,7 +6,6 @@
 
 pub mod clipmap;
 pub mod cpu;
-#[allow(dead_code)]
 mod debug;
 pub mod error;
 pub mod feature;
@@ -17,7 +16,6 @@ pub mod parts;
 pub mod settings;
 pub mod shaders;
 pub mod stats;
-#[allow(dead_code)]
 mod volume;
 
 pub use stats::GiStats;
@@ -28,4 +26,4 @@ pub use settings::{
 
 pub use membership::{Driver, InstanceGi};
 
-pub use feature::{GiHandle, inactive_reason};
+pub use feature::{GiFeature, GiHandle, inactive_reason};

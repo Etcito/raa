@@ -46,7 +46,6 @@ impl<'a> PartsCtx<'a> {
     /// and atlas and publishes them through `set_frame`/`set_atlas` on an active allocating
     /// frame, and drops them through `clear` on an inactive frame; the shared state and its
     /// keys are contract 'gi-shared'.
-    #[allow(dead_code)]
     pub(crate) fn new(
         gpu: &'a GpuContext,
         pipeline: &'a Rc<RefCell<Pipeline>>,
@@ -78,7 +77,6 @@ impl<'a> PartsCtx<'a> {
     }
 
     /// The parts and drivers collected by `add_part` and `add_driver`, in insertion order.
-    #[allow(dead_code)]
     #[allow(clippy::type_complexity)]
     pub(crate) fn take(self) -> (Vec<Rc<dyn GiPart>>, Vec<Rc<dyn VoxelDriver>>) {
         (self.parts, self.drivers)
@@ -301,13 +299,11 @@ impl GiShared {
     }
 
     /// Publishes the `GiFrameGpu` uniform, or drops it with `None`.
-    #[allow(dead_code)]
     pub(crate) fn set_frame(&self, frame: Option<wgpu::Buffer>) {
         self.0.borrow_mut().frame = frame;
     }
 
     /// Publishes the atlas, advancing its generation and dropping the cached compute group.
-    #[allow(dead_code)]
     pub(crate) fn set_atlas(&self, atlas: Option<wgpu::TextureView>) {
         let mut shared = self.0.borrow_mut();
         shared.atlas = atlas;
@@ -316,25 +312,25 @@ impl GiShared {
     }
 
     /// Publishes the history view, or drops it with `None`.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "no caller until a later milestone's history part publishes the history view"
+    )]
     pub(crate) fn set_history(&self, history: Option<wgpu::TextureView>) {
         self.0.borrow_mut().history = history;
     }
 
     /// Publishes the quality.
-    #[allow(dead_code)]
     pub(crate) fn set_quality(&self, quality: GiQuality) {
         self.0.borrow_mut().quality = quality;
     }
 
     /// Publishes the settings.
-    #[allow(dead_code)]
     pub(crate) fn set_settings(&self, settings: GiSettings) {
         self.0.borrow_mut().settings = settings;
     }
 
     /// Drops the frame buffer, atlas, history view and cached compute group.
-    #[allow(dead_code)]
     pub(crate) fn clear(&self) {
         let mut shared = self.0.borrow_mut();
         shared.frame = None;

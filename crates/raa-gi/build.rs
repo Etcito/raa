@@ -78,9 +78,6 @@ fn registry_source(files: &[(String, PathBuf)]) -> String {
         let _ = writeln!(s, "#[path = {p:?}]\npub mod {stem};\n");
     }
 
-    // Transitional: nothing calls `install_parts` until the feature card installs parts. That
-    // card removes this allow by editing this generator.
-    s.push_str("#[allow(dead_code)]\n");
     s.push_str("pub(crate) fn install_parts(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {\n");
     if files.is_empty() {
         s.push_str("    let _ = ctx;\n");
