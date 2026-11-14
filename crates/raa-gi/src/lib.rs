@@ -4,6 +4,7 @@
 //! volume, the CPU twins, membership, stats, the part seam and the feature handle.
 //! Adapted solstice parts name their source in their module docs; see README.md.
 
+pub mod clipmap;
 pub mod error;
 pub mod settings;
 
