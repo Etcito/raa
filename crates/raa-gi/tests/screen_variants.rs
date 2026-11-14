@@ -348,3 +348,16 @@ fn only_local_visibility_ships_the_volume_trace() {
         assert!(!text.contains(token), "LocalVisibility contains {token}");
     }
 }
+
+#[test]
+fn local_visibility_cone_traces_area_lights_only() {
+    let text = local_visibility_provider().wgsl;
+    for pin in [
+        "fn raa_gi_cone_visibility(",
+        "light.kind == 3u",
+        "raa_gi_cone_visibility(origin, direction_to_light, voxel, max_t, 32u",
+        "raa_gi_visibility(origin, direction_to_light, voxel, max_t, 24u)",
+    ] {
+        assert!(text.contains(pin), "LocalVisibility misses {pin}");
+    }
+}

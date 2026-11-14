@@ -6,6 +6,11 @@
 // flow and in compute. With `level_count == 0` (the dummy) every lookup misses and the
 // visibility is 1.
 //
+// `raa_gi_cone_visibility` is RAA code: an adaptation of Inigo Quilez, "soft shadows in
+// raymarched SDFs" (res = min(res, k h / t)), with Sebastian Aaltonen's improvement (the
+// closest distance between two samples: y = h^2 / (2 ph), d = sqrt(h^2 - y^2)), run over the
+// clipmap distance field through the adapted solstice lookups below.
+//
 // Adapted from solstice@7e465b5,
 // crates/solstice-render/shaders/common/environment.wgsl:140-219. MIT License
 //
@@ -96,6 +101,47 @@ fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_s
 // 0 when the volume blocks the path along `dir`, else 1.
 fn raa_gi_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32) -> f32 {
     return select(1.0, 0.0, raa_gi_trace(origin, dir, start, max_t, max_steps, 0.85).hit);
+}
+
+// Soft visibility of a cone of half-angle tangent `tan_half` along `dir` (k = 1 / tan_half),
+// in [0, 1]: Quilez's min(k h / t) with Aaltonen's closest-distance estimate. Only a sample
+// closer than the previous one of the same level (or the first of a level) darkens, so a
+// plateau or a receding sample never self-shadows at grazing angles. A sample under half a
+// voxel while approaching blocks fully. With `level_count == 0` it returns 1.
+fn raa_gi_cone_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, tan_half: f32) -> f32 {
+    let count = raa_gi_volume_params.level_count;
+    var t = start;
+    var level = 0u;
+    var measured = count;
+    var ph = 1e20;
+    var res = 1.0;
+    for (var step = 0u; step < max_steps && t < max_t; step++) {
+        let p = origin + dir * t;
+        level = raa_gi_level_at(p, level);
+        if level >= count {
+            break;
+        }
+        let voxel = raa_gi_volume_params.levels[level].w;
+        let h = raa_gi_sample(p, level).a;
+        // Distances of different levels are not comparable: restart the estimate.
+        if level != measured {
+            ph = 1e20;
+        }
+        measured = level;
+        let approaching = ph >= 1e19 || h < ph;
+        if h < 0.5 * voxel && approaching {
+            return 0.0;
+        }
+        if approaching {
+            let y = select(0.0, h * h / (2.0 * ph), ph < 1e19 && h < 2.0 * ph);
+            let d = sqrt(max(h * h - y * y, 0.0));
+            res = min(res, d / (tan_half * max(t - y, 1e-4)));
+        }
+        ph = h;
+        t += clamp(h, 0.5 * voxel, 4.0 * voxel);
+    }
+    res = clamp(res, 0.0, 1.0);
+    return res * res * (3.0 - 2.0 * res);
 }
 
 // How far inside the outermost level's XZ footprint `p` is: 0 at its edge, 1 well inside.

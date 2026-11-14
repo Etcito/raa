@@ -1,6 +1,6 @@
 // The `gi` provider of the `LocalVisibility` slot (S11/S39): traces the GI volume toward a local
-// light so a wall stops the light. This is RAA code; it calls `raa_gi_level_at` and
-// `raa_gi_visibility` of `raa_shader::GI_VOLUME_WGSL`, which `local_visibility_provider`
+// light so a wall stops the light. This is RAA code; it calls `raa_gi_level_at`,
+// `raa_gi_visibility` and, for area lights (kind 3), the soft `raa_gi_cone_visibility` of `raa_shader::GI_VOLUME_WGSL`, which `local_visibility_provider`
 // prepends to this text. That library samples only with `textureSampleLevel`, so the slot is
 // safe inside the nonuniform light loop and this file uses no implicit derivative.
 //
@@ -41,5 +41,12 @@ fn raa_slot_local_visibility(
     );
     let origin = world_position + surface_normal * (1.5 * voxel);
     let max_t = select(max(light_distance - 3.0 * voxel, 0.0), 400.0, directional);
+    let light = raa_local_lights[min(light_index, MAX_LOCAL_LIGHTS - 1u)];
+    if light.kind == 3u {
+        // The cone angle is the rectangle's angular size seen from the shading point.
+        let size = sqrt(max(light.width, 0.0) * max(light.height, 0.0));
+        let tan_half = clamp(0.5 * size / max(light_distance, 1e-3), 0.01, 1.0);
+        return clamp(raa_gi_cone_visibility(origin, direction_to_light, voxel, max_t, 32u, tan_half), 0.0, 1.0);
+    }
     return clamp(raa_gi_visibility(origin, direction_to_light, voxel, max_t, 24u), 0.0, 1.0);
 }
