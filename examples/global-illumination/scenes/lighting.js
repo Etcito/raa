@@ -13,9 +13,11 @@ const VOLUME_BYTES = {
 };
 // Cornell box (S40 amendment, product-owner directive 2026-11-14). The data is canonical millimetres / 100,
 // so the 5.56 m room is 2.8 finest voxels wider than the canonical box would be at mm / 1000.
-// The light centre height: canonical 5.487, 1 mm under the 5.488 ceiling. The visible fixture stays at
-// CORNELL_FIXTURE_Y whatever the light height is.
-export const CORNELL_LIGHT_Y = 5.487;
+// The light centre height: 5.088, 0.4 m (two finest voxels) under the 5.488 ceiling, by the lowering rule.
+// At the canonical 5.487 (1 mm under the ceiling) the light sat inside the ceiling's voxel layer, so the
+// volume visibility of the GI-on row found the ceiling between the light and the upper walls and shaded
+// them in streaks. The visible fixture stays at CORNELL_FIXTURE_Y whatever the light height is.
+export const CORNELL_LIGHT_Y = 5.088;
 export const CORNELL_FIXTURE_Y = 5.4875;
 // The shared exposure (a linear multiplier, applied to the image as tone mapping exposureEv = log2 of it).
 // Derivation, measured on /refs/cornell-box-reference.png: the mean of the 40 x 40 px patch centred at (640, 230)
@@ -328,6 +330,13 @@ function roomWithObjects(engine, variant, state) {
   );
 }
 
+// The forward-content sun (travel direction). With the shared room sun the red wall was lit only by bounce
+// light, much dimmer than the sky through the open front and the white floor, so the light the objects beside it
+// received was neutral grey. This direction passes the 1.2 m ceiling opening (x -0.6..0.6, z -4.6..-3.4, 0.4 m
+// thick) and lands on the red wall's inner face (x -3) at y 0.4..1.0 m, z -5.7..-4.4 m, right behind the
+// skinned figure and between the squashed shape and the pane.
+const FORWARD_CONTENT_SUN = [-1.2, -1, -0.43];
+
 const BLOCK_START = [-2.0, 0.4, -7.0];
 const BLOCK_TARGET = [2.0, 0.4, -3.2];
 const BEND = Math.cos(Math.PI / 6);
@@ -408,14 +417,20 @@ function block(top, height) {
 }
 
 // The walls' backing: a 0.8 m slab outside the floor, ceiling, back, red and green walls. The front stays open,
-// so the slabs' front faces are unlit and read black. Every slab is white, like the surfaces it backs.
-const CORNELL_SLABS = [
-  [[2.78, -0.4, 2.796], [2.78, 0.4, 2.796]],
-  [[2.78, 5.888, 2.796], [2.78, 0.4, 2.796]],
-  [[2.78, 2.744, 5.992], [2.78, 2.744, 0.4]],
-  [[5.96, 2.744, 2.796], [0.4, 2.744, 2.796]],
-  [[-0.4, 2.744, 2.796], [0.4, 2.744, 2.796]],
-];
+// so the slabs' front faces are unlit and read black. Every slab has the colour of the surface it backs: a
+// slab's inner face is coplanar with that surface (the green wall at x 0 entirely, the red wall along its top
+// edge), so a white slab behind a coloured wall won the depth test there and shared its voxels, which showed
+// the green wall cream and removed its green bounce.
+const CORNELL_SLABS = {
+  white: [
+    [[2.78, -0.4, 2.796], [2.78, 0.4, 2.796]],
+    [[2.78, 5.888, 2.796], [2.78, 0.4, 2.796]],
+    [[2.78, 2.744, 5.992], [2.78, 2.744, 0.4]],
+  ],
+  red: [[[5.96, 2.744, 2.796], [0.4, 2.744, 2.796]]],
+  green: [[[-0.4, 2.744, 2.796], [0.4, 2.744, 2.796]]],
+};
+const slabsOf = colour => CORNELL_SLABS[colour].map(([center, half]) => box(center, half));
 
 // The Cornell box: the sky, sun and ambient are black, the only light is the ceiling area light, and an unlit
 // fixture of the light's rectangle at CORNELL_FIXTURE_Y shows it. The fixture is kept out of the GI volume.
@@ -434,7 +449,7 @@ function cornellBox(engine, variant, state) {
   const whiteParts = [
     quad(CORNELL.floor, CORNELL_CENTRE), quad(CORNELL.ceiling, CORNELL_CENTRE), quad(CORNELL.back, CORNELL_CENTRE),
     block(CORNELL.shortTop, 1.65), block(CORNELL.tallTop, 3.30),
-    ...CORNELL_SLABS.map(([center, half]) => box(center, half)),
+    ...slabsOf('white'),
   ];
   engine.addLight({
     kind: 'area', position: [CORNELL_LIGHT_X, CORNELL_LIGHT_Y, CORNELL_LIGHT_Z], direction: [0, -1, 0],
@@ -453,6 +468,8 @@ function cornellBox(engine, variant, state) {
     { name: 'cornell-red', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, quad(CORNELL.red, CORNELL_CENTRE), red)) },
     { name: 'cornell-green', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, quad(CORNELL.green, CORNELL_CENTRE), green)) },
     { name: 'fixture', instance: fixture },
+    { name: 'cornell-red-backing', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, joinMeshes(slabsOf('red')), red)) },
+    { name: 'cornell-green-backing', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, joinMeshes(slabsOf('green')), green)) },
   );
 }
 
@@ -508,6 +525,9 @@ const ARRANGEMENTS = {
   quality: roomWithObjects,
   'forward-content': (engine, variant, state) => {
     const white = roomScene(engine, state, { white: [0.85, 0.85, 0.82] });
+    // The sun of this arrangement shines through the ceiling opening onto the red wall behind the objects
+    // (FORWARD_CONTENT_SUN), so the wall has red light to bounce onto them.
+    engine.setLight({ direction: FORWARD_CONTENT_SUN, color: room.sun.color, intensity: room.sun.intensity });
     const skinned = engine.addMeshInstance(nodeAt(engine, [-2.4, 0, -4.6]), figureMesh(engine, white));
     engine.setSkinPose(skinned, SKIN_POSE);
     const deformed = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -3.6]), meshWith(engine, sphere(0.35, 24), white));

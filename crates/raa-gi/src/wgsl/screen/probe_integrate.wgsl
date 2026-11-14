@@ -100,6 +100,21 @@ fn raa_gi_screen_occlusion(pixel: vec2<f32>, world: vec3<f32>, normal: vec3<f32>
     return clamp(1.0 - occlusion / f32(RAA_GI_OCCLUSION_DIRECTIONS * 2u) * 1.6, 0.0, 1.0);
 }
 
+// How well a probe stands for the surface at `world` with `normal`: 0 for an empty tile or a
+// probe facing away by 90 degrees or more, else the cosine to the fourth times a falloff with
+// the probe's distance from the pixel's tangent plane.
+const RAA_GI_PROBE_MIN_WEIGHT: f32 = 1.0e-3;
+
+fn raa_gi_probe_match(probe: Probe, world: vec3<f32>, normal: vec3<f32>, plane_scale: f32) -> f32 {
+    if probe.position.w <= 0.0 {
+        return 0.0;
+    }
+    let facing = max(dot(probe.normal.xyz, normal), 0.0);
+    let facing2 = facing * facing;
+    let plane = abs(dot(probe.position.xyz - world, normal));
+    return facing2 * facing2 * exp(-plane * plane_scale);
+}
+
 // Handoff: card 'raa-gi screen: passes.rs module builders, group-2 layouts and pipelines'
 // builds the integrate compute pipeline on `raa_gi_probe_integrate`; today it maps the pixel
 // grid, weights the four nearest probes, evaluates `raa_gi_sh_irradiance`, adds
@@ -123,7 +138,12 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     let grid = raa_gi_probe_grid(raa_gi_frame.viewport.xy);
     let grid_i = vec2<i32>(grid);
 
-    // Bilinear over the four nearest tiles, down-weighting probes on other surfaces.
+    // Bilinear over the four nearest tiles, keeping only probes on this pixel's surface. When
+    // none of them lies on it (a silhouette or a face narrower than a tile), the 4 x 4 tiles
+    // around are searched without the bilinear weight; with no matching probe there the pixel
+    // gets no screen irradiance rather than the mean of probes on other surfaces. A floor
+    // weight on every probe used to average exactly those, so the faces just outside a lit
+    // room (a wall's outer side, the front of its backing) took the room's bounce light.
     let position = center / f32(RAA_GI_PROBE_SPACING) - vec2<f32>(0.5);
     let base = vec2<i32>(floor(position));
     let fraction = position - vec2<f32>(base);
@@ -136,21 +156,37 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
         for (var dx = 0; dx <= 1; dx++) {
             let tile = clamp(base + vec2<i32>(dx, dy), vec2<i32>(0), grid_i - vec2<i32>(1));
             let probe = raa_gi_probes[u32(tile.y) * grid.x + u32(tile.x)];
-            if probe.position.w <= 0.0 {
-                continue;
-            }
             let bilinear = select(1.0 - fraction.x, fraction.x, dx == 1)
                 * select(1.0 - fraction.y, fraction.y, dy == 1);
-            let plane = abs(dot(probe.position.xyz - world, normal));
-            let plane_weight = exp(-plane * plane_scale);
-            let normal_weight = pow(max(dot(probe.normal.xyz, normal) * 0.5 + 0.5, 0.0), 2.0);
-            let weight = max(bilinear, 0.001) * plane_weight * normal_weight + 1.0e-5;
-            irradiance += raa_gi_sh_irradiance(probe, normal) * weight;
-            total += weight;
+            let weight = max(bilinear, 0.001) * raa_gi_probe_match(probe, world, normal, plane_scale);
+            if weight > 0.0 {
+                irradiance += raa_gi_sh_irradiance(probe, normal) * weight;
+                total += weight;
+            }
         }
     }
-    if total > 0.0 {
+    if total < RAA_GI_PROBE_MIN_WEIGHT {
+        irradiance = vec3<f32>(0.0);
+        total = 0.0;
+        for (var dy = -1; dy <= 2; dy++) {
+            for (var dx = -1; dx <= 2; dx++) {
+                let tile = base + vec2<i32>(dx, dy);
+                if any(tile < vec2<i32>(0)) || any(tile >= grid_i) {
+                    continue;
+                }
+                let probe = raa_gi_probes[u32(tile.y) * grid.x + u32(tile.x)];
+                let weight = raa_gi_probe_match(probe, world, normal, plane_scale);
+                if weight > 0.0 {
+                    irradiance += raa_gi_sh_irradiance(probe, normal) * weight;
+                    total += weight;
+                }
+            }
+        }
+    }
+    if total >= RAA_GI_PROBE_MIN_WEIGHT {
         irradiance /= total;
+    } else {
+        irradiance = vec3<f32>(0.0);
     }
 
     let noise = raa_gi_probe_ign(vec2<f32>(id.xy), raa_gi_frame.counts.y);

@@ -370,8 +370,8 @@ test('Cornell rows: 21 rows, the pair gi-lighting-cornell-box, judgeReference on
   assert.deepEqual(variantOf('cornell-box-on').selection.camera, { eye: [2.78, 2.73, -8], target: [2.78, 2.73, 0], fovYDeg: 39.3, near: 0.05, far: 200 });
 });
 
-test('Cornell light and fixture: CORNELL_LIGHT_Y 5.487, the fixture at 5.4875 and excluded from GI', async () => {
-  assert.equal(lighting.CORNELL_LIGHT_Y, 5.487);
+test('Cornell light and fixture: CORNELL_LIGHT_Y 5.088, the fixture at 5.4875 and excluded from GI', async () => {
+  assert.equal(lighting.CORNELL_LIGHT_Y, 5.088);
   assert.equal(lighting.CORNELL_FIXTURE_Y, 5.4875);
   for (const id of ['cornell-box-on', 'cornell-box-off']) {
     const { calls, state } = await cornellCalls(id);
@@ -379,7 +379,7 @@ test('Cornell light and fixture: CORNELL_LIGHT_Y 5.487, the fixture at 5.4875 an
     assert.equal(lights.length, 1, 'the only light');
     const [light] = lights;
     assert.equal(light[0].kind, 'area');
-    assert.deepEqual(light[0].position, [2.78, 5.487, 2.795]);
+    assert.deepEqual(light[0].position, [2.78, 5.088, 2.795]);
     assert.deepEqual(light[0].direction, [0, -1, 0]);
     assert.deepEqual(light[0].size, [1.05, 1.3]);
     assert.equal(light[0].range, 30);
