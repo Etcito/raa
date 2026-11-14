@@ -213,6 +213,28 @@ fn voxel_light_composes_the_prelude_and_volume_library_once() {
 }
 
 #[test]
+fn voxel_light_area_uses_the_shared_form_factor() {
+    let source = include_str!("../src/wgsl/voxel_light.wgsl");
+    let branch = source
+        .split_once("light.kind == 3u")
+        .expect("the area branch")
+        .1;
+    for call in [
+        "raa_area_form_factor(light, origin, normal)",
+        "raa_area_radiance(light)",
+        "raa_area_window(distance, light.position_range.w)",
+        "raa_area_basis(",
+    ] {
+        assert!(branch.contains(call), "the area branch calls {call}");
+    }
+    assert!(!branch.contains("up0"), "the inline basis is gone");
+    assert!(
+        !branch.contains("max(distance * distance, 0.04)"),
+        "the Karis falloff is gone"
+    );
+}
+
+#[test]
 fn driver_a_group_two_holds_six_storage_buffers() {
     let storage = |e: &BindGroupLayoutEntry| {
         matches!(

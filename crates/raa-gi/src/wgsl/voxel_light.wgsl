@@ -99,8 +99,8 @@ fn raa_gi_cosine_sample(u: vec2<f32>, basis: mat3x3<f32>) -> vec3<f32> {
 }
 
 // S11 per-kind local-light irradiance at `origin` with surface `normal`: point window and
-// falloff, spot cone, area representative point and directional without attenuation, each
-// times the cosine and the volume visibility toward the light.
+// falloff and spot cone times the cosine, the area light's diffuse polygon form factor (the
+// direct light's energy), directional without attenuation, each with the volume visibility.
 fn raa_gi_local_light(light: LightGpu, origin: vec3<f32>, normal: vec3<f32>, voxel: f32) -> vec3<f32> {
     let travel = light.direction_cos_outer.xyz;
     var direction = -travel;
@@ -124,27 +124,25 @@ fn raa_gi_local_light(light: LightGpu, origin: vec3<f32>, normal: vec3<f32>, vox
             }
         }
     } else if light.kind == 3u {
-        // One-sided emission along +travel; the Karis representative point is on the rectangle.
+        // One-sided emission along +travel. The representative point uses the same
+        // `raa_area_basis` as the direct light, and the bounce uses the same diffuse polygon
+        // form factor, so it carries the energy of the direct light.
         if dot(origin - light.position_range.xyz, travel) <= 0.0 { return vec3<f32>(0.0); }
-        let up0 = select(
-            vec3<f32>(1.0, 0.0, 0.0),
-            vec3<f32>(0.0, 1.0, 0.0),
-            abs(dot(travel, vec3<f32>(0.0, 1.0, 0.0))) < 0.99,
-        );
-        let tangent = normalize(cross(up0, travel));
-        let bitangent = cross(travel, tangent);
+        let basis = raa_area_basis(travel);
         let offset = origin - light.position_range.xyz;
         let half_extent = vec2<f32>(max(light.width, 0.0), max(light.height, 0.0)) * 0.5;
         let representative = light.position_range.xyz
-            + tangent * clamp(dot(offset, tangent), -half_extent.x, half_extent.x)
-            + bitangent * clamp(dot(offset, bitangent), -half_extent.y, half_extent.y);
+            + basis[0] * clamp(dot(offset, basis[0]), -half_extent.x, half_extent.x)
+            + basis[1] * clamp(dot(offset, basis[1]), -half_extent.y, half_extent.y);
         let to_light = representative - origin;
         distance = length(to_light);
         if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
         direction = to_light / distance;
-        let q = distance / light.position_range.w;
-        let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
-        falloff = window * window / max(distance * distance, 0.04);
+        let open = raa_gi_visibility(origin, direction, voxel, max(distance - 3.0 * voxel, 0.0), 24u);
+        // Irradiance = pi x radiance x form factor: the direct light's diffuse energy, bounced.
+        return raa_area_radiance(light)
+            * (RAA_GI_PI * raa_area_form_factor(light, origin, normal)
+                * raa_area_window(distance, light.position_range.w) * open);
     } else if light.kind != 2u {
         return vec3<f32>(0.0);
     }
