@@ -6,6 +6,8 @@
 
 pub mod clipmap;
 pub mod cpu;
+#[allow(dead_code)]
+mod debug;
 pub mod error;
 pub mod forward_driver;
 pub mod layouts;
