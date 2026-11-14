@@ -13,6 +13,7 @@
 //! 60: the same draws into MSAA HDR colour and depth, then the enabled contributors,
 //! resolved into `hdr.dst()`).
 
+mod area_shadow;
 mod contributor;
 mod editor;
 pub use editor::WireframeMode;
@@ -53,6 +54,10 @@ pub use skin_views::{
     SkinViews, SkinnedView,
 };
 
+pub use area_shadow::{
+    AreaShadowSettings, AreaShadowTier, HERO_FOV_Y_RAD, HERO_LAYER_BASE, HERO_NEAR,
+    MAX_HERO_LIGHTS, hero_view_proj, rect_distance, tier_weights,
+};
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 pub use frame::{FRAME_GPU_SIZE, FrameParams, SUN_ANGULAR_RADIUS_DEFAULT, write_frame_gpu};
