@@ -69,7 +69,7 @@ impl SkyFeature {
                 Rc::clone(&state),
                 ibl.clone(),
                 lit.handle(),
-                p.lighting().layout(),
+                p.lighting().base_layout(),
                 Rc::clone(&atmosphere),
                 Rc::clone(&cloud),
             );

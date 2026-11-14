@@ -446,7 +446,8 @@ fn state_busy() -> RaaError {
 
 impl SkyEnvPass {
     /// Creates the source cube, its face views and both model pipelines over the lit frame
-    /// layout and the pipeline's lighting layout (`Pipeline::lighting().layout()`).
+    /// layout and the pipeline's base lighting layout (`Pipeline::lighting().base_layout()`),
+    /// so the fragment stage stays within the WebGPU sampled-texture limit (S38).
     pub(crate) fn new(
         gpu: &GpuContext,
         state: SharedSky,
@@ -636,7 +637,7 @@ impl FeaturePass for SkyEnvPass {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &frame, &[]);
-            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+            pass.set_bind_group(1, ctx.lighting.base_bind_group(), &[]);
             if physical && let Some(group) = self.physical.group() {
                 pass.set_bind_group(2, group, &[]);
             }
@@ -860,7 +861,7 @@ mod tests {
                 Rc::clone(&state),
                 ibl.clone(),
                 lit.handle(),
-                p.lighting().layout(),
+                p.lighting().base_layout(),
                 atmosphere,
                 cloud,
             )
@@ -981,7 +982,7 @@ mod tests {
                 Rc::clone(&state),
                 ibl.clone(),
                 lit.handle(),
-                p.lighting().layout(),
+                p.lighting().base_layout(),
                 atmosphere,
                 cloud,
             )
@@ -1095,7 +1096,7 @@ mod tests {
                 Rc::clone(&state),
                 ibl.clone(),
                 lit.handle(),
-                p.lighting().layout(),
+                p.lighting().base_layout(),
                 atmosphere,
                 cloud,
             )
@@ -1206,7 +1207,7 @@ mod tests {
                 Rc::clone(&state),
                 ibl.clone(),
                 lit.handle(),
-                p.lighting().layout(),
+                p.lighting().base_layout(),
                 atmosphere,
                 cloud,
             )

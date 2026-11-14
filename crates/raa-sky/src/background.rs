@@ -34,6 +34,9 @@ pub(crate) struct SkyBackground {
     physical: Option<(u32, wgpu::RenderPipeline)>,
     model: SkyModel,
     physical_ready: bool,
+    /// The pipeline's group-1 base bind group captured in `prepare`, because the forward
+    /// pass binds the full GI group and this pipeline's layout is the base one (S38).
+    base_group: Option<wgpu::BindGroup>,
 }
 
 impl SkyBackground {
@@ -47,6 +50,7 @@ impl SkyBackground {
             physical: None,
             model: SkyModel::Legacy,
             physical_ready: false,
+            base_group: None,
         }
     }
 
@@ -81,10 +85,10 @@ fn build_pipeline(
     let groups: Vec<Option<&wgpu::BindGroupLayout>> = match physical_layout {
         Some(physical) => vec![
             Some(&frame_layout),
-            Some(ctx.lighting.layout()),
+            Some(ctx.lighting.base_layout()),
             Some(physical),
         ],
-        None => vec![Some(&frame_layout), Some(ctx.lighting.layout())],
+        None => vec![Some(&frame_layout), Some(ctx.lighting.base_layout())],
     };
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("raa.sky.background.layout"),
@@ -146,6 +150,7 @@ impl ForwardContributor for SkyBackground {
     /// description changed and keeps the background mode at 1 (sky), so the S12 tonemap
     /// background rule leaves the sky alone. Only runs while the contributor is enabled.
     fn prepare(&mut self, lit: &LitHandle, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        self.base_group = Some(ctx.lighting.base_bind_group().clone());
         let msaa = lit.msaa();
         if self.binding.is_none() && self.atmosphere.is_some() && self.cloud.is_some() {
             self.binding = Some(PhysicalSkyBinding::new(ctx.gpu));
@@ -212,8 +217,9 @@ impl ForwardContributor for SkyBackground {
         Ok(())
     }
 
-    /// Draws the fullscreen triangle; groups 0 and 1 are bound by the forward pass and, for
-    /// the ready physical model, group 2 is its private sky-resource set.
+    /// Draws the fullscreen triangle; group 0 comes from the forward pass, group 1 is rebound
+    /// to the base set and, for the ready physical model, group 2 is its private sky-resource
+    /// set.
     fn record(&self, pass: &mut wgpu::RenderPass<'_>, _lit: &LitHandle) -> Result<(), RaaError> {
         let physical = self.model == SkyModel::Physical && self.physical_ready;
         let pipeline = if physical {
@@ -227,6 +233,9 @@ impl ForwardContributor for SkyBackground {
             )));
         };
         pass.set_pipeline(pipeline);
+        if let Some(group) = &self.base_group {
+            pass.set_bind_group(1, group, &[]);
+        }
         if physical && let Some(group) = self.binding.as_ref().and_then(PhysicalSkyBinding::group) {
             pass.set_bind_group(2, group, &[]);
         }
