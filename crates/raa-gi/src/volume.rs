@@ -27,12 +27,14 @@
 //! The GPU volume of the GI clipmap (S37, S38), crate-private: share 1, allocation and pipelines
 //! (contract 'gi-volume-internal'). Per-frame prepare and recording come in later shares.
 
+use std::rc::Rc;
+
 use raa_core::GpuContext;
 use raa_math::Vec3;
 
 use crate::clipmap::{self, RebuildRounds, RelightCursor};
 use crate::layouts::{GiFloodGpu, GiLightGpu, GiVolumeParamsGpu, GiVoxelizeGpu, GiWriteGpu};
-use crate::parts::LevelVoxelize;
+use crate::parts::{LevelVoxelize, VoxelDriver};
 use crate::settings::{GiQuality, GiSettings};
 use crate::shaders;
 
@@ -548,6 +550,148 @@ impl GiVolume {
             relight,
             voxelize,
         }
+    }
+
+    /// Records this frame's rebuilds and lighting update, in the order of solstice
+    /// `crates/solstice-render/src/gi/volume.rs:531-683` (`GiVolume::record`). A rebuilt level
+    /// clears its voxels, runs every driver, seeds, advances its flood passes, then copies flood
+    /// A into its seeds and writes the atlas on commit. The relit level is lit and written last.
+    /// Drivers replace solstice's cull and software dispatch; the light pass binds the given
+    /// compute group 1.
+    pub(crate) fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        work: &VolumeWork,
+        drivers: &[Rc<dyn VoxelDriver>],
+        group1: &wgpu::BindGroup,
+    ) {
+        let passes = clipmap::flood_pass_count();
+        if work.rebuild_all {
+            for level in 0..self.quality.levels as usize {
+                let slice = RebuildSlice {
+                    level,
+                    begin: true,
+                    passes: 0..passes,
+                    commit: true,
+                };
+                self.record_slice(encoder, work, &slice, drivers);
+            }
+        } else if let Some(slice) = &work.slice {
+            self.record_slice(encoder, work, slice, drivers);
+        }
+        let resolution = self.quality.resolution;
+        self.record_light(encoder, work.relight, group1, resolution);
+        self.record_write(encoder, work.relight, resolution);
+    }
+
+    /// Records one level's rebuild slice: the clear, drivers, seed and flood passes on begin, and
+    /// the flood-to-seed copy and atlas write on commit.
+    fn record_slice(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        work: &VolumeWork,
+        slice: &RebuildSlice,
+        drivers: &[Rc<dyn VoxelDriver>],
+    ) {
+        let resolution = self.quality.resolution;
+        let level_cells = u64::from(resolution).pow(3);
+        let level_offset = slice.level as u64 * level_cells;
+        if slice.begin {
+            encoder.clear_buffer(&self.voxels, level_offset * 12, Some(level_cells * 12));
+            if let Some(level) = work
+                .voxelize
+                .iter()
+                .find(|level| level.level as usize == slice.level)
+            {
+                for driver in drivers {
+                    driver.record_level(encoder, level, &self.voxels);
+                }
+            }
+            self.record_seed(encoder, slice.level, resolution);
+        }
+        self.record_flood(encoder, slice, resolution);
+        if slice.commit {
+            encoder.copy_buffer_to_buffer(
+                &self.flood_a,
+                0,
+                &self.seeds,
+                level_offset * 4,
+                level_cells * 4,
+            );
+            self.record_write(encoder, slice.level, resolution);
+        }
+    }
+
+    /// The seed dispatch of one level, at the flood parameter slot `18 + level`.
+    fn record_seed(&self, encoder: &mut wgpu::CommandEncoder, level: usize, resolution: u32) {
+        let groups = resolution.div_ceil(4);
+        let slot = clipmap::flood_pass_count() + level;
+        let offset = (slot as u64 * SLOT_BYTES) as u32;
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa.gi.seed"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.seed_pipeline);
+        pass.set_bind_group(2, &self.seed_bind, &[offset]);
+        pass.dispatch_workgroups(groups, groups, groups);
+    }
+
+    /// The flood passes of `slice`, alternating A to B on even pass indices and B to A on odd.
+    fn record_flood(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        slice: &RebuildSlice,
+        resolution: u32,
+    ) {
+        let groups = resolution.div_ceil(4);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa.gi.flood"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.flood_pipeline);
+        for index in slice.passes.clone() {
+            let offset = (index as u64 * SLOT_BYTES) as u32;
+            pass.set_bind_group(2, &self.flood_binds[index % 2], &[offset]);
+            pass.dispatch_workgroups(groups, groups, groups);
+        }
+    }
+
+    /// The atlas write of one level.
+    fn record_write(&self, encoder: &mut wgpu::CommandEncoder, level: usize, resolution: u32) {
+        let Some(bind) = self.write_binds.get(level) else {
+            return;
+        };
+        let groups = resolution.div_ceil(4);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa.gi.write"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.write_pipeline);
+        pass.set_bind_group(2, bind, &[]);
+        pass.dispatch_workgroups(groups, groups, groups);
+    }
+
+    /// The relight dispatch of one level: group 1 is the GI compute group 1 and group 2 the
+    /// level's light bind group.
+    fn record_light(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        level: usize,
+        group1: &wgpu::BindGroup,
+        resolution: u32,
+    ) {
+        let Some(bind) = self.light_binds.get(level) else {
+            return;
+        };
+        let groups = resolution.div_ceil(4);
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa.gi.light"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.light_pipeline);
+        pass.set_bind_group(1, group1, &[]);
+        pass.set_bind_group(2, bind, &[]);
+        pass.dispatch_workgroups(groups, groups, groups);
     }
 
     /// The `GiVolumeParamsGpu` bytes of the latest [`GiVolume::prepare`], passed to
