@@ -218,20 +218,23 @@ pub(crate) struct SsrPipelines {
     pub hiz_copy: wgpu::ComputePipeline,
     pub hiz_reduce: wgpu::ComputePipeline,
     pub downsample: wgpu::RenderPipeline,
-    /// Layout [group 0 = `ssr_layout`, group 1 = the lighting layout] for both.
+    /// Layout [group 0 = `trace_layout`, group 1 = the lighting layout] (fs_trace).
     pub trace: wgpu::RenderPipeline,
+    /// Layout [group 0 = `composite_layout`, group 1 = the lighting layout] (fs_composite).
     pub composite: wgpu::RenderPipeline,
     copy_layout: wgpu::BindGroupLayout,
     reduce_layout: wgpu::BindGroupLayout,
     down_layout: wgpu::BindGroupLayout,
-    ssr_layout: wgpu::BindGroupLayout,
+    /// Group 0 of fs_trace: bindings 0, 1, 2 and 4 (3 FRAGMENT sampled textures). fs_trace has
+    /// no binding 6, so no dummy texture is bound at it.
+    trace_layout: wgpu::BindGroupLayout,
+    /// Group 0 of fs_composite: bindings 0, 1, 2, 3, 5, 6 and 7 (5 FRAGMENT sampled textures
+    /// and one filtering sampler).
+    composite_layout: wgpu::BindGroupLayout,
     /// Linear clamp, for the HDR mip chain.
     linear: wgpu::Sampler,
     /// `SsrParams` (SSR_PARAMS_SIZE bytes), written each frame by the pass.
     pub params: wgpu::Buffer,
-    /// 1x1 TRACE_FORMAT texture bound at binding 6 while fs_trace renders the trace.
-    _dummy: wgpu::Texture,
-    dummy_view: wgpu::TextureView,
 }
 
 impl SsrPipelines {
@@ -276,30 +279,34 @@ impl SsrPipelines {
             "raa-ssr.downsample",
             &[entry(4, fs, texture_type(FLOAT)), entry(5, fs, FILTERING)],
         );
-        let ssr_layout = layout(
+        // Each entry point gets only the bindings it statically uses (ssr_trace.wgsl:35-44), so
+        // its FRAGMENT sampled-texture count stays within the 16-texture limit with the full
+        // group 1 (11 sampled textures): fs_trace 3 + 11 = 14, fs_composite 5 + 11 = 16.
+        let trace_layout = layout(
             device,
-            "raa-ssr.ssr",
+            "raa-ssr.trace",
+            &[
+                entry(0, fs, uniform_type(SSR_PARAMS_SIZE)),
+                entry(1, fs, texture_type(wgpu::TextureSampleType::Depth)),
+                entry(2, fs, texture_type(FLOAT)),
+                entry(4, fs, texture_type(UNFILTERABLE)),
+            ],
+        );
+        let composite_layout = layout(
+            device,
+            "raa-ssr.composite",
             &[
                 entry(0, fs, uniform_type(SSR_PARAMS_SIZE)),
                 entry(1, fs, texture_type(wgpu::TextureSampleType::Depth)),
                 entry(2, fs, texture_type(FLOAT)),
                 entry(3, fs, texture_type(FLOAT)),
-                entry(4, fs, texture_type(UNFILTERABLE)),
                 entry(5, fs, texture_type(FLOAT)),
                 entry(6, fs, texture_type(FLOAT)),
                 entry(7, fs, FILTERING),
             ],
         );
-        let ssr_layouts = [Some(&ssr_layout), Some(lighting)];
-        let dummy = texture(
-            device,
-            "raa-ssr.dummy",
-            (1, 1),
-            1,
-            TRACE_FORMAT,
-            wgpu::TextureUsages::TEXTURE_BINDING,
-        );
-        let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
+        let trace_layouts = [Some(&trace_layout), Some(lighting)];
+        let composite_layouts = [Some(&composite_layout), Some(lighting)];
         SsrPipelines {
             hiz_copy: compute(device, &hiz_module, &copy_layout, CS_HIZ_COPY),
             hiz_reduce: compute(device, &hiz_module, &reduce_layout, CS_HIZ_REDUCE),
@@ -310,18 +317,25 @@ impl SsrPipelines {
                 FS_DOWNSAMPLE,
                 HDR_FORMAT,
             ),
-            trace: render(device, &trace_module, &ssr_layouts, FS_TRACE, TRACE_FORMAT),
+            trace: render(
+                device,
+                &trace_module,
+                &trace_layouts,
+                FS_TRACE,
+                TRACE_FORMAT,
+            ),
             composite: render(
                 device,
                 &trace_module,
-                &ssr_layouts,
+                &composite_layouts,
                 FS_COMPOSITE,
                 HDR_FORMAT,
             ),
             copy_layout,
             reduce_layout,
             down_layout,
-            ssr_layout,
+            trace_layout,
+            composite_layout,
             linear: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("raa-ssr.linear_clamp"),
                 mag_filter: wgpu::FilterMode::Linear,
@@ -335,8 +349,6 @@ impl SsrPipelines {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
-            _dummy: dummy,
-            dummy_view,
         }
     }
 }
@@ -359,7 +371,8 @@ pub(crate) struct SsrTargets {
     pub down_groups: Vec<wgpu::BindGroup>,
     _trace: wgpu::Texture,
     pub trace_view: wgpu::TextureView,
-    /// Group 0 of fs_trace (dummy at binding 6) and of fs_composite (trace at 6).
+    /// Group 0 of fs_trace (`trace_layout`: bindings 0, 1, 2 and 4) and of fs_composite
+    /// (`composite_layout`: the trace view at binding 6).
     pub trace_group: wgpu::BindGroup,
     pub composite_group: wgpu::BindGroup,
 }
@@ -445,30 +458,38 @@ impl SsrTargets {
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let trace = texture(device, "raa-ssr.trace", size, 1, TRACE_FORMAT, usage);
         let trace_view = trace.create_view(&wgpu::TextureViewDescriptor::default());
-        let ssr_group = |label: &str, at6: &wgpu::TextureView| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &p.ssr_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: p.params.as_entire_binding(),
-                    },
-                    view_entry(1, targets.depth()),
-                    view_entry(2, targets.normal()),
-                    view_entry(3, targets.material()),
-                    view_entry(4, &hiz_full),
-                    view_entry(5, &hdr_full),
-                    view_entry(6, at6),
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(&p.linear),
-                    },
-                ],
-            })
-        };
-        let trace_group = ssr_group("raa-ssr.trace", &p.dummy_view);
-        let composite_group = ssr_group("raa-ssr.composite", &trace_view);
+        let trace_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-ssr.trace"),
+            layout: &p.trace_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: p.params.as_entire_binding(),
+                },
+                view_entry(1, targets.depth()),
+                view_entry(2, targets.normal()),
+                view_entry(4, &hiz_full),
+            ],
+        });
+        let composite_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-ssr.composite"),
+            layout: &p.composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: p.params.as_entire_binding(),
+                },
+                view_entry(1, targets.depth()),
+                view_entry(2, targets.normal()),
+                view_entry(3, targets.material()),
+                view_entry(5, &hdr_full),
+                view_entry(6, &trace_view),
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&p.linear),
+                },
+            ],
+        });
 
         SsrTargets {
             size,
