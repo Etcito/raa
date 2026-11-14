@@ -5,10 +5,13 @@
 
 #![allow(dead_code)]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use self::passes::{PROBE_BYTES, SCREEN_PARAMS_SIZE, ScreenPipelines, ScreenWork, pyramid_sizes};
-use super::PartsCtx;
+use super::{GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::Targets;
+use raa_pipeline::{FeaturePass, LightingResources, RecordCtx, Targets};
 
 #[path = "screen/cpu.rs"]
 pub mod cpu;
@@ -20,7 +23,33 @@ pub mod passes;
 /// replaces. Today `install` adds nothing to `ctx` and returns `Ok(())`; the generated
 /// `install_parts` of `parts.rs` calls it once per GI feature install, in file-name order.
 pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
-    let _ = ctx;
+    let pipelines = ScreenPipelines::new(ctx.gpu, &ctx.shared.compute_group1_layout());
+    let part = Rc::new(ScreenPart {
+        shared: ctx.shared.clone(),
+        state: RefCell::new(ScreenState {
+            pipelines,
+            resources: None,
+            key: None,
+            parity: 0,
+            active: false,
+            pass_enabled: true,
+            output_valid: false,
+            wants: false,
+        }),
+    });
+    {
+        let mut pipeline = ctx
+            .pipeline
+            .try_borrow_mut()
+            .map_err(|_| RaaError::FrameGraph {
+                code: "pipeline.busy",
+                message: "the pipeline is borrowed (called while a frame executes)".to_string(),
+            })?;
+        pipeline.add(Box::new(GiScreenPass {
+            part: Rc::clone(&part),
+        }))?;
+    }
+    ctx.add_part(part);
     Ok(())
 }
 
@@ -457,6 +486,199 @@ pub(crate) fn needs_reallocation(
     probe_rays: u32,
 ) -> bool {
     current != Some(((viewport.0.max(1), viewport.1.max(1)), probe_rays))
+}
+
+/// The GI part `screen`: the shared frame state and the per-frame state of the screen-probe
+/// resources.
+///
+/// Handoff: `ScreenPart` is taken over by card 'raa-gi feature: gi.history copy and binding-14
+/// screen output (M1 repair)', which calls `ScreenPart::screen_output` and
+/// `ScreenPart::wants_history` through `GiPart` to bind the output written this frame at group 1
+/// binding 14 and to copy the previous lit HDR into `GiShared::history_view`.
+/// `ScreenPart::screen_output` returns a clone of the output view of the current parity while the
+/// part is active, the pass is enabled and `ScreenResources` exist; `ScreenPart::wants_history`
+/// is true while the part is active with `screen_traces` requested.
+/// The other `GiPart` hooks of the part are `ScreenPart::prepare_frame`,
+/// `ScreenPart::invalidate_history`, `ScreenPart::release` and `ScreenPart::allocated_bytes`.
+/// It builds on the `ScreenResources` Handoff at crates/raa-gi/src/parts/screen.rs:68
+/// `ScreenResources` and the `ScreenPipelines` Handoff at
+/// crates/raa-gi/src/parts/screen/passes.rs:286 `ScreenPipelines`. LIFECYCLE:
+/// `ScreenPart::prepare_frame` (a GiPart hook, run by `GiHandle::prepare_frame` before the
+/// pipeline executes) creates ScreenResources on an active frame when needs_reallocation is
+/// true. `GiPart::release` (run by `release_resources` in crates/raa-gi/src/feature.rs on every
+/// inactive frame and before a reallocation) drops them. The bind groups that reference pipeline
+/// targets are created lazily by `work` from the gi.screen record and dropped by
+/// `invalidate_bindings` from the gi.screen resize hook. Per enabled pass in order, the pipeline
+/// calls `resize` (only when the targets generation changed) and then `prepare`
+/// (crates/raa-pipeline/src/pipeline.rs:881-887), then records every enabled pass in order
+/// (pipeline.rs:917-919).
+pub(crate) struct ScreenPart {
+    shared: GiShared,
+    state: RefCell<ScreenState>,
+}
+
+/// The mutable state of [`ScreenPart`]: the pipelines and the resources keyed by
+/// (viewport, probe_rays), the parity of the output written this frame, and the activity,
+/// enable, validity and history flags.
+struct ScreenState {
+    pipelines: ScreenPipelines,
+    resources: Option<ScreenResources>,
+    key: Option<((u32, u32), u32)>,
+    parity: usize,
+    active: bool,
+    pass_enabled: bool,
+    output_valid: bool,
+    wants: bool,
+}
+
+impl GiPart for ScreenPart {
+    fn name(&self) -> &'static str {
+        "screen"
+    }
+
+    /// Allocates `ScreenResources` on an active frame when the (viewport, probe_rays) key
+    /// changed, flips the output parity, writes the `GiScreenGpu` params and records whether the
+    /// part is active and wants the history.
+    fn prepare_frame(&self, gpu: &GpuContext, frame: &PartFrame<'_>) {
+        let mut state = self.state.borrow_mut();
+        let (width, height) = frame.viewport;
+        if !frame.active || width == 0 || height == 0 {
+            state.active = false;
+            state.wants = false;
+            return;
+        }
+        let rays = frame.quality.probe_rays;
+        if needs_reallocation(state.key, frame.viewport, rays) {
+            state.resources = Some(ScreenResources::new(gpu, frame.viewport, rays));
+            state.key = Some(((width.max(1), height.max(1)), rays));
+            state.output_valid = false;
+        }
+        state.parity ^= 1;
+        if let Some(resources) = &state.resources {
+            resources.write_params(
+                gpu,
+                state.output_valid,
+                frame.settings.screen_traces && frame.history_valid,
+                state.parity,
+            );
+        }
+        state.active = true;
+        state.wants = frame.settings.screen_traces;
+    }
+
+    /// A clone of the output view of the current parity while the part is active, the pass is
+    /// enabled and resources exist; otherwise `None`.
+    fn screen_output(&self) -> Option<wgpu::TextureView> {
+        let state = self.state.borrow();
+        if !state.active || !state.pass_enabled {
+            return None;
+        }
+        state
+            .resources
+            .as_ref()
+            .map(|resources| resources.output_view(state.parity))
+    }
+
+    /// True while the part is active with screen traces requested.
+    fn wants_history(&self) -> bool {
+        let state = self.state.borrow();
+        state.active && state.wants
+    }
+
+    /// Marks the parity output invalid, so the next integrate ignores it.
+    fn invalidate_history(&self) {
+        self.state.borrow_mut().output_valid = false;
+    }
+
+    /// Drops the resources and the key so the next active frame reallocates them.
+    fn release(&self) {
+        let mut state = self.state.borrow_mut();
+        state.resources = None;
+        state.key = None;
+        state.active = false;
+        state.output_valid = false;
+    }
+
+    /// The GPU bytes of the current resources, or 0 without them.
+    fn allocated_bytes(&self) -> u64 {
+        self.state
+            .borrow()
+            .resources
+            .as_ref()
+            .map_or(0, ScreenResources::allocated_bytes)
+    }
+}
+
+/// The `gi.screen` feature pass (order 42): records the screen-probe compute pass of one
+/// [`ScreenPart`].
+struct GiScreenPass {
+    part: Rc<ScreenPart>,
+}
+
+impl FeaturePass for GiScreenPass {
+    fn name(&self) -> &str {
+        "gi.screen"
+    }
+
+    fn order(&self) -> u32 {
+        42
+    }
+
+    /// Stores the enable flag and, on disable, invalidates the output and clears the group-1 GI
+    /// dummies (S38).
+    fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
+        let mut state = self.part.state.borrow_mut();
+        state.pass_enabled = enabled;
+        if !enabled {
+            state.output_valid = false;
+            lighting.clear_gi();
+        }
+    }
+
+    /// Drops the cached group-2 bind groups after the targets were recreated.
+    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
+        if let Some(resources) = self.part.state.borrow_mut().resources.as_mut() {
+            resources.invalidate_bindings();
+        }
+    }
+
+    /// Records the `raa-gi.screen` pass when the part is active, enabled and has resources;
+    /// marks the output valid when `ScreenPipelines::record` recorded it.
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let mut state = self.part.state.borrow_mut();
+        if !state.active || !state.pass_enabled {
+            return Ok(());
+        }
+        let ScreenState {
+            pipelines,
+            resources,
+            parity,
+            output_valid,
+            ..
+        } = &mut *state;
+        let Some(resources) = resources.as_mut() else {
+            return Ok(());
+        };
+        let Some(frame) = self.part.shared.frame_buffer() else {
+            return Ok(());
+        };
+        let Some(group1) = self.part.shared.compute_group1(ctx.lighting) else {
+            return Ok(());
+        };
+        let history = self.part.shared.history_view();
+        let work = resources.work(
+            ctx.gpu,
+            pipelines,
+            ctx.targets,
+            &frame,
+            history.as_ref(),
+            *parity,
+        );
+        if pipelines.record(ctx.encoder, &group1, &work) {
+            *output_valid = true;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
