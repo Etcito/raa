@@ -1,8 +1,8 @@
-// Lighting stage (S40) of the global-illumination page, rows 1-10: colour bleeding, interior
-// bounce, the emissive panel, local-light shadows and the sky overhang. Importing this module has
-// no side effects, so node and the page can read its metadata. Every row is an on/off pair on one
-// arrangement, built from lib/content.js builders; observe reports the evidence of contract
-// 'gi-lighting-rows'. Rows 11-19 are appended to ROWS and ARRANGEMENTS by the next share.
+// Lighting stage (S40) of the global-illumination page, rows 1-19: colour bleeding, interior bounce,
+// the emissive panel, local-light shadows, the sky overhang, glossy reflection, quality, forward
+// content and the moved block. Importing this module has no side effects. Every row is an on/off pair
+// on one arrangement, built from lib/content.js builders; observe reports the evidence of contract
+// 'gi-lighting-rows'. `ready` holds the moved-instance arrangement until its block has moved.
 import { box, panel, plane, roomShell, sphere, volumeRoom } from '../lib/content.js';
 
 const room = volumeRoom();
@@ -56,6 +56,26 @@ const ROWS = [
     criterionName: 'P4-Q5 sky ground kept and overhang bounce', producer: 'raa-gi-screen', extraFacts: [], measured: true },
   { mode: 'sky-overhang-off', arrangement: 'sky-overhang', filename: 'gi-sky-overhang-off.png',
     criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true },
+  { mode: 'glossy-reflection-on', arrangement: 'glossy-reflection', filename: 'gi-glossy-floor-reflects-offscreen-object.png',
+    criterionName: 'P4-Q5 glossy floor volume reflection', producer: 'raa-ssr-gi-fallback',
+    extraFacts: ['assertion:ssr-enabled'], measured: true },
+  { mode: 'glossy-reflection-off', arrangement: 'glossy-reflection', filename: 'gi-glossy-floor-off-env-only.png',
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: ['assertion:ssr-enabled'], measured: true },
+  { mode: 'quality-64-3-on', arrangement: 'quality', filename: 'gi-quality-64-3-room-lit.png',
+    criterionName: 'P4-Q6 quality 64/3', producer: 'raa-gi-screen', extraFacts: ['assertion:quality-applied'], measured: false },
+  { mode: 'quality-96-5-on', arrangement: 'quality', filename: 'gi-quality-96-5-room-lit.png',
+    criterionName: 'P4-Q6 quality 96/5', producer: 'raa-gi-screen', extraFacts: ['assertion:quality-applied'], measured: true },
+  { mode: 'quality-off', arrangement: 'quality', filename: 'gi-quality-off-room.png',
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true },
+  { mode: 'forward-content-on', arrangement: 'forward-content', filename: 'gi-skinned-deformed-transparent-fur-receive-bounce.png',
+    criterionName: 'P4-Q6 forward content receives GI', producer: 'raa-gi-screen',
+    extraFacts: ['assertion:forward-content'], measured: true },
+  { mode: 'forward-content-off', arrangement: 'forward-content', filename: 'gi-forward-content-off.png',
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: ['assertion:forward-content'], measured: true },
+  { mode: 'moved-instance-on', arrangement: 'moved-instance', filename: 'gi-moved-block-lights-new-place.png',
+    criterionName: 'P4-Q6 moved instance relit', producer: 'raa-gi-screen', extraFacts: ['assertion:block-moved'], measured: true },
+  { mode: 'moved-instance-off', arrangement: 'moved-instance', filename: 'gi-moved-block-off.png',
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: ['assertion:block-moved'], measured: true },
 ];
 
 // Judge-held fixtures per arrangement: the judge never scores them.
@@ -68,6 +88,11 @@ const HELD = {
   'local-light-shadow': ['floor', '0.6 m wall', 'point and spot light placement', 'night sky without sun', 'camera'],
   'sky-overhang': ['open ground', '3 m overhang on four pillars', 'white box under the overhang',
     'physical day sky and sun', 'camera'],
+  'glossy-reflection': ['glossy floor', 'orange glowing sphere above the frame', 'day sky', 'camera'],
+  quality: ROOM_HELD,
+  'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball',
+    'camera'],
+  'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
 };
 
 // Camera and subject bounds per arrangement, in metres (camera near 0.05, far 200).
@@ -103,10 +128,29 @@ const SELECTIONS = {
       { name: 'overhang', min: [-2.2, 0, -2.2], max: [2.2, 3.3, 2.2] },
     ],
   },
+  'glossy-reflection': {
+    camera: lens([0, 2, 2], [0, 0, -3], 70),
+    subjects: [{ name: 'floor', min: [-6, 0, -12], max: [6, 0, 1] }],
+  },
+  quality: { camera: room.camera, subjects: room.subjects },
+  'forward-content': {
+    camera: lens([0.8, 1.4, -2.2], [-2.6, 0.6, -5.2], 60),
+    subjects: [{ name: 'left-wall-area', min: [-3.2, 0, -7.2], max: [-1.8, 1.6, -3.0] }],
+  },
+  'moved-instance': {
+    camera: lens([0, 1.8, -0.5], [0, 0.6, -5.5], 70),
+    subjects: [
+      roomSubject,
+      { name: 'block-new', min: [1.6, 0, -3.6], max: [2.4, 0.8, -2.8] },
+      { name: 'block-old', min: [-2.4, 0, -7.4], max: [-1.6, 0.8, -6.6] },
+    ],
+  },
 };
 
 // Quality per mode; a mode without an entry uses DEFAULT_QUALITY.
-const QUALITY = {};
+const QUALITY = {
+  'quality-64-3-on': { resolution: 64, levels: 3, probeRays: 6 },
+};
 
 const BEHAVIOURS = {
   'color-bleed-on': 'The white box and the white floor beside the coloured walls take a visible red tint '
@@ -129,6 +173,25 @@ const BEHAVIOURS = {
     + 'box under the overhang receive visible soft bounce light and are clearly brighter than plain shadow.',
   'sky-overhang-off': 'The ground and the white box under the overhang sit in flat dark shadow lit only by the '
     + 'ambient light of the sky.',
+  'glossy-reflection-on': 'The glossy floor clearly reflects a bright orange glowing object that is itself outside the '
+    + 'picture, above its top edge.',
+  'glossy-reflection-off': 'The glossy floor reflects only the sky environment; no reflection of an orange glowing '
+    + 'object appears on it.',
+  'quality-64-3-on': 'The red-and-green room is lit by global illumination at the low quality: the walls, floor, box '
+    + 'and sphere away from the sunlit patch show soft bounce light tinted by the coloured walls.',
+  'quality-96-5-on': 'The red-and-green room is lit by global illumination at the high quality: the walls, floor, box '
+    + 'and sphere away from the sunlit patch show soft bounce light tinted by the coloured walls.',
+  'quality-off': 'The same red-and-green room without global illumination: the areas away from the sunlit patch are '
+    + 'dark and show no coloured bounce tint.',
+  'forward-content-on': 'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red '
+    + 'wall all show a reddish bounce tint and soft indirect light on their sides facing the wall, like the static '
+    + 'surfaces around them.',
+  'forward-content-off': 'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red '
+    + 'wall show no red bounce tint; their shadowed sides stay dark.',
+  'moved-instance-on': 'The bright orange block stands in its new place near the right wall, and the floor and wall '
+    + 'around it there glow orange from its bounce light; no orange glow remains at its old place in the far left corner.',
+  'moved-instance-off': 'The bright orange block stands in its new place near the right wall with no orange light '
+    + 'spilling onto the floor or wall around it.',
 };
 const DESCRIPTIONS = {
   'color-bleed-on': 'Global illumination on: the white box and floor take bounce light from the red and green walls.',
@@ -141,6 +204,15 @@ const DESCRIPTIONS = {
   'local-light-shadow-off': 'The same lights with global illumination disabled: they leak through the wall.',
   'sky-overhang-on': 'Global illumination on under the physical day sky: the overhang region gains soft bounce light.',
   'sky-overhang-off': 'The same sky and overhang with global illumination disabled: flat shadow under the overhang.',
+  'glossy-reflection-on': 'Global illumination on under the day sky: the glossy floor reflects the orange object through the volume.',
+  'glossy-reflection-off': 'The same glossy floor with global illumination disabled: it reflects the sky environment only.',
+  'quality-64-3-on': 'Global illumination on at the low quality: 64 resolution, 3 levels and 6 probe rays.',
+  'quality-96-5-on': 'Global illumination on at the high quality: 96 resolution, 5 levels and 8 probe rays.',
+  'quality-off': 'The same red-and-green room with global illumination disabled.',
+  'forward-content-on': 'Global illumination on: the skinned, deformed, transparent and fur instances beside the red wall receive bounce light.',
+  'forward-content-off': 'The same forward content with global illumination disabled: no bounce light reaches any of it.',
+  'moved-instance-on': 'Global illumination on after the orange block moves to a new place near the right wall.',
+  'moved-instance-off': 'The same moved block with global illumination disabled: no orange light spills from it.',
 };
 
 const nodeAt = (engine, position = [0, 0, 0]) => engine.addNode(null, position, [0, 0, 0, 1], [1, 1, 1]);
@@ -183,10 +255,10 @@ function environment(engine, night) {
  * right with materials white, white, white, red, green) on roomShell(room.room) and the 'room' instance.
  * Returns the white material for the objects placed in the room.
  */
-function roomScene(engine, state, { night = false } = {}) {
+function roomScene(engine, state, { night = false, white: whiteColor = room.colors.white } = {}) {
   environment(engine, night);
   const red = matte(engine, room.colors.red), green = matte(engine, room.colors.green);
-  const white = matte(engine, room.colors.white);
+  const white = matte(engine, whiteColor);
   const shell = roomShell(room.room);
   const wallMaterials = [white, white, white, red, green];
   const roomMesh = engine.addMesh({
@@ -204,6 +276,28 @@ function roomWithObjects(engine, variant, state) {
     { name: 'box', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, box(room.box.center, room.box.half), white)) },
     { name: 'sphere', instance: engine.addMeshInstance(nodeAt(engine, room.sphere.center), meshWith(engine, sphere(room.sphere.radius, room.sphere.segments), white)) },
   );
+}
+
+const BLOCK_START = [-2.0, 0.4, -7.0];
+const BLOCK_TARGET = [2.0, 0.4, -3.2];
+const BEND = Math.cos(Math.PI / 6);
+// Joint 1 is T(p) Rz(30 degrees) T(-p) with p = (0, 0.7, 0), column-major; joint 0 is the identity.
+const SKIN_POSE = new Float32Array([
+  1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+  BEND, 0.5, 0, 0, -0.5, BEND, 0, 0, 0, 0, 1, 0, 0.35, 0.7 * (1 - BEND), 0, 1,
+]);
+
+// Two boxes merged into one figure: joint 0 below y 0.7, joint 1 above it, weight 1 on the joint.
+function figureMesh(engine, white) {
+  const body = joinMeshes([box([0, 0.35, 0], [0.15, 0.35, 0.15]), box([0, 1.05, 0], [0.12, 0.35, 0.12])]);
+  const count = body.positions.length / 3;
+  const joints = new Uint16Array(count * 4);
+  const weights = new Float32Array(count * 4);
+  for (let v = 0; v < count; v++) {
+    joints[v * 4] = body.positions[v * 3 + 1] < 0.7 ? 0 : 1;
+    weights[v * 4] = 1;
+  }
+  return meshWith(engine, { ...body, joints, weights }, white);
 }
 
 // Each arrangement adds its content and pushes { name, instance } entries into state.instances.
@@ -242,6 +336,47 @@ const ARRANGEMENTS = {
       { name: 'overhang', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, overhang, white)) },
       { name: 'box', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, box([0.3, 0.4, 0.2], [0.4, 0.4, 0.4]), white)) },
     );
+  },
+  'glossy-reflection': (engine, variant, state) => {
+    engine.setSky({ preset: 'day' });
+    engine.setWeather({ preset: 'clear' });
+    engine.setLight({ direction: [-0.3, -1, -0.5], color: [1, 0.96, 0.9], intensity: 2 });
+    const floor = engine.addSurfaceMaterial({ color: [0.25, 0.25, 0.27], roughness: 0.1, metallic: 0.8 });
+    const orange = engine.addSurfaceMaterial({ color: [1, 0.5, 0.1], emissive: [12, 6, 1.5], roughness: 0.6 });
+    engine.setSsr({ intensity: 1, maxRoughness: 0.3 });
+    state.instances.push(
+      { name: 'floor', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, plane(40, 40), floor)) },
+      { name: 'orange', instance: engine.addMeshInstance(nodeAt(engine, [0, 6, -8]), meshWith(engine, sphere(1, 32), orange)) },
+    );
+  },
+  quality: roomWithObjects,
+  'forward-content': (engine, variant, state) => {
+    const white = roomScene(engine, state, { white: [0.85, 0.85, 0.82] });
+    const skinned = engine.addMeshInstance(nodeAt(engine, [-2.4, 0, -4.6]), figureMesh(engine, white));
+    engine.setSkinPose(skinned, SKIN_POSE);
+    const deformed = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -3.6]), meshWith(engine, sphere(0.35, 24), white));
+    engine.setSquash(deformed, { amount: 0.3 });
+    engine.setJiggle(deformed, { height: 0.7, amount: 0.5 });
+    const pane = engine.addSurfaceMaterial({ color: [0.85, 0.9, 0.95], roughness: 0.2, blend: 'transparent', opacity: 0.45, doubleSided: true });
+    const transparent = engine.addMeshInstance(
+      engine.addNode(null, [-2.3, 0.7, -5.6], [0, 0.7071068, 0, 0.7071068], [1, 1, 1]),
+      meshWith(engine, panel(0.9, 1.2), pane),
+    );
+    const furMaterial = engine.addSurfaceMaterial({ color: [0.9, 0.88, 0.84], roughness: 0.9, furLength: 0.05, furShells: 16 });
+    const fur = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -6.6]), meshWith(engine, sphere(0.35, 24), furMaterial));
+    state.instances.push(
+      { name: 'skinned', instance: skinned },
+      { name: 'deformed', instance: deformed },
+      { name: 'transparent', instance: transparent },
+      { name: 'fur', instance: fur },
+    );
+  },
+  'moved-instance': (engine, variant, state) => {
+    roomScene(engine, state);
+    const block = engine.addNode(null, BLOCK_START, [0, 0, 0, 1], [1, 1, 1]);
+    const orange = engine.addSurfaceMaterial({ color: [1, 0.45, 0.05], emissive: [3, 1.3, 0.15], roughness: 0.7 });
+    state.instances.push({ name: 'block', instance: engine.addMeshInstance(block, meshWith(engine, box([0, 0, 0], [0.4, 0.4, 0.4]), orange)) });
+    state.blockNode = block;
   },
 };
 
@@ -343,9 +478,29 @@ export async function observe(engine, variant, state) {
   return { instances: state.instances, assertions, edits: [] };
 }
 
-// Rows 1-10 have no moved block to wait for: every variant is ready as soon as build returns.
+/**
+ * Handoff: gi page: lighting.test.mjs and p4-gi-lighting commands calls `ready` as the default export's ready
+ * (this definition, examples/global-illumination/scenes/lighting.js:493 ready), and attaches `observe`
+ * as cited by examples/global-illumination/scenes/lighting.js:444 observe, the Handoff of gi page:
+ * scenes/lighting.js rows 1-10 (bleed, interior, emissive, local lights, sky overhang). Today `ready` returns
+ * { ready: true, stage: 'lighting' } for every arrangement except moved-instance. For moved-instance, while
+ * state.moved is false, it calls engine.setTransform(state.blockNode, [2.0, 0.4, -3.2], [0, 0, 0, 1], [1, 1, 1])
+ * once and sets state.moved when variant.giExpected is 'disabled', or when giStats() reads active, not
+ * pendingRebuild and framesSinceRebuild >= 1; it then returns { ready: state.moved, stage: 'lighting' }.
+ * State/keys: state.instances (names skinned, deformed, transparent, fur, block), state.moved and state.blockNode;
+ * the namespace keys inventory, factNames, default.variants and default.ready.
+ */
 function ready(engine, state, variant) {
-  return { ready: true, stage: 'lighting' };
+  if (variant.arrangement !== 'moved-instance') return { ready: true, stage: 'lighting' };
+  if (!state.moved) {
+    const stats = engine.giStats();
+    const built = stats.active === true && stats.pendingRebuild === false && stats.framesSinceRebuild >= 1;
+    if (variant.giExpected === 'disabled' || built) {
+      engine.setTransform(state.blockNode, BLOCK_TARGET, [0, 0, 0, 1], [1, 1, 1]);
+      state.moved = true;
+    }
+  }
+  return { ready: state.moved, stage: 'lighting' };
 }
 
 export default {
