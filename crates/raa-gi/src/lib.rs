@@ -13,6 +13,8 @@ pub mod parts;
 pub mod settings;
 pub mod shaders;
 pub mod stats;
+#[allow(dead_code)]
+mod volume;
 
 pub use stats::GiStats;
 
