@@ -868,6 +868,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-gi"
+version = "0.5.0"
+dependencies = [
+ "raa-core",
+ "raa-ibl",
+ "raa-lit",
+ "raa-loader",
+ "raa-math",
+ "raa-pipeline",
+ "raa-scene",
+ "raa-shader",
+ "raa-vg",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-grading"
 version = "0.5.0"
 dependencies = [

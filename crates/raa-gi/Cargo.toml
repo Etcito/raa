@@ -1,0 +1,22 @@
+[package]
+name = "raa-gi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Global illumination of RAA: voxel clipmap volume, drivers and screen probes (S36-S39)."
+publish = false
+
+[dependencies]
+raa-core = { workspace = true }
+raa-math = { workspace = true }
+raa-scene = { workspace = true }
+wgpu = { workspace = true }
+raa-shader = { path = "../raa-shader" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-lit = { path = "../raa-lit" }
+raa-vg = { path = "../raa-vg" }
+raa-ibl = { path = "../raa-ibl" }
+
+[dev-dependencies]
+raa-loader = { workspace = true }
