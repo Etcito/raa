@@ -168,26 +168,46 @@ pub fn distance_to_segment(point: DVec3, start: DVec3, end: DVec3) -> f64 {
     point.distance(start + along * t)
 }
 
-/// Picks the attribute nearest `wanted` among the wedges at the collapse target and the corner's
-/// `current` one. Wedges on the far side of a hard edge do not qualify; ties keep the first
-/// candidate in `wedges` order, then `current`.
+/// Picks the attribute a corner moving onto the collapse target takes: always one of the target's
+/// own `wedges`, so the corner never carries a normal or uv into a place the surface does not
+/// have them (raa change, 2026-11-14: solstice also offered `current`, the attribute of the vertex
+/// being removed. Across a UV seam or a normal change over 45 degrees that won, so a sphere's
+/// normal was drawn on the column under it; the sdfm part atlas has seams on a third of its
+/// positions). Among the wedges on the corner's side of a hard edge (normal within about 45
+/// degrees of `current`) the nearest uv to `wanted` wins; when none is on that side, the wedge whose
+/// normal is closest to `current`'s. Ties keep the first candidate in `wedges` order. `current` is
+/// kept only when no wedge names a known attribute.
 pub fn best_wedge(attributes: &[Attribute], current: u32, wedges: &[u32], wanted: DVec2) -> u32 {
-    let normal = attributes.get(current as usize).map(|a| a.normal);
-    let distance = |wedge: u32| match attributes.get(wedge as usize) {
-        Some(attribute) => DVec2::from_f32(attribute.uv).distance(wanted),
-        None => f64::INFINITY,
+    let Some(current_normal) = attributes.get(current as usize).map(|a| a.normal) else {
+        return wedges
+            .iter()
+            .copied()
+            .find(|&wedge| attributes.get(wedge as usize).is_some())
+            .unwrap_or(current);
     };
-    let qualifies = |wedge: u32| match (attributes.get(wedge as usize), normal) {
-        (Some(attribute), Some(current_normal)) => attribute.normal.dot(current_normal) > 0.7,
-        _ => false,
-    };
-    wedges
+    let known: Vec<(u32, &Attribute)> = wedges
         .iter()
-        .copied()
-        .filter(|&wedge| qualifies(wedge))
-        .chain(std::iter::once(current))
-        .min_by(|&a, &b| distance(a).total_cmp(&distance(b)))
-        .unwrap_or(current)
+        .filter_map(|&wedge| attributes.get(wedge as usize).map(|a| (wedge, a)))
+        .collect();
+    let distance = |attribute: &Attribute| DVec2::from_f32(attribute.uv).distance(wanted);
+    let same_side = known
+        .iter()
+        .filter(|(_, attribute)| attribute.normal.dot(current_normal) > 0.7)
+        .min_by(|a, b| distance(a.1).total_cmp(&distance(b.1)));
+    if let Some(&(wedge, _)) = same_side {
+        return wedge;
+    }
+    known
+        .iter()
+        .max_by(|a, b| {
+            let (da, db) = (
+                a.1.normal.dot(current_normal),
+                b.1.normal.dot(current_normal),
+            );
+            // max_by keeps the last of equal elements; compare reversed ids so the first wins.
+            da.total_cmp(&db).then_with(|| b.0.cmp(&a.0))
+        })
+        .map_or(current, |&(wedge, _)| wedge)
 }
 
 /// The collapse state of one group: welded local vertices (ids in first-use order, mapped back to
@@ -725,13 +745,34 @@ mod tests {
             best_wedge(&attributes, 0, &[1, 2, 3], DVec2::new(0.25, 0.0)),
             2
         );
-        assert_eq!(best_wedge(&attributes, 0, &[3], DVec2::new(0.1, 0.0)), 0);
+        assert_eq!(
+            best_wedge(&attributes, 0, &[3], DVec2::new(0.1, 0.0)),
+            3,
+            "a target with only a far-side wedge still gives its own attribute"
+        );
         assert_eq!(
             best_wedge(&attributes, 0, &[2, 4], DVec2::new(0.2, 0.0)),
             2,
             "a tie keeps the first candidate"
         );
         assert_eq!(best_wedge(&attributes, 0, &[99], DVec2::new(0.0, 0.0)), 0);
+    }
+
+    /// The removed vertex's attribute is never carried onto the target, even when its uv is the
+    /// nearest (a UV seam at the target) or every target wedge is past a hard edge.
+    #[test]
+    fn best_wedge_never_keeps_the_removed_vertex_attribute() {
+        let tilted = Vec3::new(0.0, 0.6, 0.8);
+        let attributes = [
+            attribute([0.5, 0.5], Vec3::Y),
+            attribute([0.9, 0.9], Vec3::Y),
+            attribute([0.0, 0.0], Vec3::X),
+            attribute([0.0, 0.0], tilted),
+        ];
+        // Seam: the only same-side wedge at the target is far in uv, `current` is at `wanted`.
+        assert_eq!(best_wedge(&attributes, 0, &[1], DVec2::new(0.5, 0.5)), 1);
+        // Every wedge past a hard edge: the closest normal wins.
+        assert_eq!(best_wedge(&attributes, 0, &[2, 3], DVec2::new(0.5, 0.5)), 3);
     }
 
     /// A 3x3 grid of 8 triangles. Position ids are numbered in first-use order (the centre is 2),

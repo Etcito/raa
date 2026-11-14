@@ -716,3 +716,73 @@ fn page_foliage_thinned_cut_stays_upright_and_covers_the_patch_footprint() {
         finest_cells.len()
     );
 }
+
+/// The sdfm monument (plinth, column, ball) with its own SDF normals and its part-atlas uvs, whose
+/// seams split a third of the positions. Every corner of every simplified cut must carry a normal
+/// the source has at that same grid position: a corner that kept the removed vertex's attribute
+/// drew the ball's normals down the column ("dripping" columns, sdfm card 7923, 2026-11-14).
+#[test]
+fn monument_cuts_keep_source_normals_at_every_corner() {
+    let text = include_str!("fixtures/monument-atlas.json");
+    let positions = fixture_array(text, "positions");
+    let normals = fixture_array(text, "normals");
+    let uvs = fixture_array(text, "uvs");
+    let indices = fixture_array(text, "indices");
+    let triple = |flat: &[f32]| -> Vec<[f32; 3]> {
+        flat.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect()
+    };
+    let input = OwnedClusterInput {
+        mesh: MeshData {
+            positions: triple(&positions),
+            normals: triple(&normals),
+            indices: indices.iter().map(|index| *index as u32).collect(),
+        },
+        uvs: Some(uvs.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
+    };
+    assert_eq!(input.mesh.indices.len(), 1294 * 3, "indices");
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the monument bakes");
+    mesh.validate()
+        .unwrap_or_else(|error| panic!("the monument bake fails validation: {error}"));
+    let cell = |p: [f32; 3]| -> [i64; 3] {
+        [0, 1, 2].map(|a| ((p[a] - mesh.quant_origin[a]) / mesh.quant_step).round() as i64)
+    };
+    let mut source: BTreeMap<[i64; 3], Vec<[f32; 3]>> = BTreeMap::new();
+    for (p, n) in input.mesh.positions.iter().zip(&input.mesh.normals) {
+        source.entry(cell(*p)).or_default().push(*n);
+    }
+    let finest = cut_triangles(&mesh, &select_cut(&mesh, 0.0)).indices.len() / 3;
+    assert_eq!(
+        finest, 1294,
+        "the finest cut must hold every source triangle"
+    );
+    let mut simplified_cuts = 0;
+    for error in [0.0, 0.003, 0.01, 0.03, 0.1, 1.0e29] {
+        let cut = cut_triangles(&mesh, &select_cut(&mesh, error));
+        if cut.indices.len() / 3 < finest {
+            simplified_cuts += 1;
+        }
+        let mut stray = Vec::new();
+        for (v, (p, n)) in cut.positions.iter().zip(&cut.normals).enumerate() {
+            let best = source.get(&cell(*p)).map_or(-2.0, |list| {
+                list.iter()
+                    .map(|s| s[0] * n[0] + s[1] * n[1] + s[2] * n[2])
+                    .fold(-2.0f32, f32::max)
+            });
+            if best < 0.999 {
+                stray.push((v, best));
+            }
+        }
+        assert!(
+            stray.is_empty(),
+            "the cut at {error} ({} triangles) has {} corners whose normal the source lacks at \
+             their position (vertex, best dot): {:?}",
+            cut.indices.len() / 3,
+            stray.len(),
+            &stray[..stray.len().min(8)]
+        );
+    }
+    assert!(
+        simplified_cuts >= 2,
+        "the monument must simplify at least twice"
+    );
+}
