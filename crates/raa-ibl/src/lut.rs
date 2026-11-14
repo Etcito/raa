@@ -12,6 +12,7 @@ use raa_core::GpuContext;
 pub(crate) const LUT_SIZE: u32 = 128;
 
 /// Texel format of the atlas: the BRDF region holds (A, B, 0, 0).
+#[cfg(test)]
 pub(crate) const LUT_FORMAT: wgpu::TextureFormat = raa_pipeline::BRDF_ATLAS_FORMAT;
 
 /// Workgroup edge of `cs_main` (`@workgroup_size(8, 8)`).
