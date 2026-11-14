@@ -1570,6 +1570,158 @@ mod tests {
         assert_eq!(f16_bits(0.18), 0x31C3);
     }
 
+    #[test]
+    fn set_gi_assigns_the_views_and_params_and_none_keeps_the_screen_dummy() {
+        let mut state = State::new(dummies());
+        state.set_gi(Some(20), 21, &[3; GI_VOLUME_PARAMS_SIZE]);
+        assert_eq!(
+            state.views,
+            Views {
+                gi_screen: 20,
+                gi_volume: 21,
+                ..dummies()
+            }
+        );
+        assert_eq!(state.gi_params, [3; GI_VOLUME_PARAMS_SIZE]);
+        state.set_gi(None, 22, &[4; GI_VOLUME_PARAMS_SIZE]);
+        assert_eq!(
+            state.views,
+            Views {
+                gi_screen: 8,
+                gi_volume: 22,
+                ..dummies()
+            },
+            "None keeps the binding-14 dummy"
+        );
+        assert_eq!(state.gi_params, [4; GI_VOLUME_PARAMS_SIZE]);
+    }
+
+    #[test]
+    fn take_pending_reports_the_bind_group_and_gi_params_once() {
+        let mut state = State::new(dummies());
+        state.set_gi(Some(20), 21, &[3; GI_VOLUME_PARAMS_SIZE]);
+        let changed = Pending {
+            gi_params: true,
+            ..ONLY_BIND
+        };
+        assert_eq!(state.take_pending(), changed);
+        assert_eq!(state.take_pending(), Pending::default());
+    }
+
+    #[test]
+    fn clear_gi_returns_the_dummies_and_zero_params() {
+        let mut state = State::new(dummies());
+        state.set_gi(Some(20), 21, &[3; GI_VOLUME_PARAMS_SIZE]);
+        state.take_pending();
+        state.clear_gi();
+        assert_eq!(state.views, dummies());
+        assert_eq!(state.gi_params, [0; GI_VOLUME_PARAMS_SIZE]);
+        let changed = Pending {
+            gi_params: true,
+            ..ONLY_BIND
+        };
+        assert_eq!(state.take_pending(), changed);
+        assert_eq!(state.take_pending(), Pending::default());
+    }
+
+    #[test]
+    fn views_generation_advances_only_when_the_bind_group_is_rebuilt() {
+        let mut state = State::new(dummies());
+        state.set_gi(Some(20), 21, &[3; GI_VOLUME_PARAMS_SIZE]);
+        assert_eq!(
+            state.take_pending(),
+            Pending {
+                gi_params: true,
+                ..ONLY_BIND
+            }
+        );
+        assert_eq!(state.views_generation, 1);
+        state.set_gi(Some(20), 21, &[5; GI_VOLUME_PARAMS_SIZE]);
+        let params_only = Pending {
+            gi_params: true,
+            ..Pending::default()
+        };
+        assert_eq!(state.take_pending(), params_only);
+        assert_eq!(
+            state.views_generation, 1,
+            "a params-only change does not rebuild"
+        );
+        state.set_gi(Some(20), 22, &[5; GI_VOLUME_PARAMS_SIZE]);
+        assert_eq!(state.take_pending(), ONLY_BIND);
+        assert_eq!(state.views_generation, 2);
+    }
+
+    #[test]
+    fn repeated_gi_calls_mark_nothing_and_keep_the_generation() {
+        let mut state = State::new(dummies());
+        let params = [3; GI_VOLUME_PARAMS_SIZE];
+        state.set_gi(Some(20), 21, &params);
+        state.take_pending();
+        let generation = state.views_generation;
+        state.set_gi(Some(20), 21, &params);
+        assert_eq!(state.take_pending(), Pending::default());
+        assert_eq!(state.views_generation, generation);
+        state.clear_gi();
+        state.take_pending();
+        let generation = state.views_generation;
+        state.clear_gi();
+        assert_eq!(state.take_pending(), Pending::default());
+        assert_eq!(state.views_generation, generation);
+    }
+
+    #[test]
+    fn base_layout_is_0_to_13_15_16_and_the_full_gi_bindings_are_fragment_only() {
+        let base: Vec<u32> = base_layout_entries()
+            .iter()
+            .map(|entry| entry.binding)
+            .collect();
+        assert_eq!(base, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16]);
+        let full = layout_entries();
+        let bindings: Vec<u32> = full.iter().map(|entry| entry.binding).collect();
+        assert_eq!(bindings, (0..=18).collect::<Vec<u32>>());
+        for binding in [14, 17, 18] {
+            let entry = full.iter().find(|entry| entry.binding == binding);
+            let visibility = entry.map(|entry| entry.visibility);
+            assert_eq!(
+                visibility,
+                Some(wgpu::ShaderStages::FRAGMENT),
+                "binding {binding}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_layout_fragment_counts_are_11_textures_2_samplers_and_6_uniforms() {
+        let fragment: Vec<wgpu::BindGroupLayoutEntry> = layout_entries()
+            .into_iter()
+            .filter(|entry| entry.visibility.contains(wgpu::ShaderStages::FRAGMENT))
+            .collect();
+        assert_eq!(fragment.len(), 19);
+        let textures: Vec<u32> = fragment
+            .iter()
+            .filter(|entry| matches!(entry.ty, wgpu::BindingType::Texture { .. }))
+            .map(|entry| entry.binding)
+            .collect();
+        assert_eq!(textures, [0, 3, 5, 7, 8, 9, 10, 13, 14, 15, 17]);
+        let samplers = fragment
+            .iter()
+            .filter(|entry| matches!(entry.ty, wgpu::BindingType::Sampler(_)))
+            .count();
+        let uniforms = fragment
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.ty,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!((samplers, uniforms), (2, 6));
+    }
+
     /// Real setters and `upload` on the software GPU: the bind group is rebuilt only when a
     /// view changed. The context is leaked like in tests/targets.rs (GL driver teardown).
     #[cfg(not(target_arch = "wasm32"))]

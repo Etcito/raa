@@ -174,6 +174,16 @@ struct WeatherLightingGpu {
 @group(1) @binding(13) var light_tiles: texture_2d_array<u32>;
 @group(1) @binding(15) var cloud_transmittance: texture_2d_array<f32>;
 @group(1) @binding(16) var<uniform> weather: WeatherLightingGpu;
+@group(1) @binding(14) var gi_screen: texture_2d<f32>;
+@group(1) @binding(17) var gi_volume: texture_3d<f32>;
+struct GiVolumeParams {
+    levels: array<vec4<f32>, 5>,
+    resolution: f32,
+    intensity: f32,
+    level_count: u32,
+    flags: u32,
+}
+@group(1) @binding(18) var<uniform> gi_params: GiVolumeParams;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -213,6 +223,27 @@ fn fs() -> Out {
     out.b = vec4<f32>(contact_shadow, depth, cube.r, env.background.r + zeros);
     out.c = vec4<f32>(weather.atmosphericTransmission.rgb, transmittance);
     out.d = vec4<f32>(weather.map.x, weather.map.w, weather.map.z, f32(weather.flags.x));
+    return out;
+}
+
+/// The GI bindings 14, 17 and 18 (`fs_gi`, its own render): the screen texel, the volume
+/// texel, and the params as (abs-sum of the levels, abs resolution + intensity, count, flags).
+struct GiOut {
+    @location(0) e: vec4<f32>,
+    @location(1) f: vec4<f32>,
+    @location(2) g: vec4<f32>,
+}
+
+@fragment
+fn fs_gi() -> GiOut {
+    let uv = vec2<f32>(0.5, 0.5);
+    let levels = abs(gi_params.levels[0]) + abs(gi_params.levels[1]) + abs(gi_params.levels[2])
+        + abs(gi_params.levels[3]) + abs(gi_params.levels[4]);
+    var out: GiOut;
+    out.e = textureSampleLevel(gi_screen, linear_clamp, uv, 0.0);
+    out.f = textureSampleLevel(gi_volume, linear_clamp, vec3<f32>(uv, 0.5), 0.0);
+    out.g = vec4<f32>(dot(levels, vec4<f32>(1.0)), abs(gi_params.resolution) + abs(gi_params.intensity),
+        f32(gi_params.level_count), f32(gi_params.flags));
     return out;
 }
 "#;
@@ -292,8 +323,14 @@ fn assert_near(got: [f32; 4], want: [f32; 4], what: &str) {
     }
 }
 
-/// Renders one pixel with `lighting.bind_group()` at group 1 and returns all four targets.
-fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 4] {
+/// Renders one pixel through fragment entry `entry`, with `group` bound at group 1 of a
+/// pipeline laid out as `group_layout`, and returns its `N` targets.
+fn render_entry<const N: usize>(
+    gpu: &GpuContext,
+    group_layout: &wgpu::BindGroupLayout,
+    group: &wgpu::BindGroup,
+    entry: &str,
+) -> [[f32; 4]; N] {
     let device = gpu.device();
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("resources test shader"),
@@ -310,7 +347,7 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("resources test layout"),
-        bind_group_layouts: &[Some(&empty), Some(lighting.layout())],
+        bind_group_layouts: &[Some(&empty), Some(group_layout)],
         immediate_size: 0,
     });
     let color = Some(wgpu::ColorTargetState {
@@ -318,6 +355,7 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
         blend: None,
         write_mask: wgpu::ColorWrites::ALL,
     });
+    let colors: [_; N] = std::array::from_fn(|_| color.clone());
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("resources test pipeline"),
         layout: Some(&layout),
@@ -332,15 +370,15 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &module,
-            entry_point: Some("fs"),
+            entry_point: Some(entry),
             compilation_options: Default::default(),
-            targets: &[color.clone(), color.clone(), color.clone(), color],
+            targets: &colors,
         }),
         multiview_mask: None,
         cache: None,
     });
 
-    let targets = [target(gpu), target(gpu), target(gpu), target(gpu)];
+    let targets: [wgpu::Texture; N] = std::array::from_fn(|_| target(gpu));
     let views = targets
         .each_ref()
         .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -367,11 +405,21 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
         });
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &empty_group, &[]);
-        pass.set_bind_group(1, lighting.bind_group(), &[]);
+        pass.set_bind_group(1, group, &[]);
         pass.draw(0..3, 0..1);
     }
     gpu.queue().submit([encoder.finish()]);
     targets.each_ref().map(|t| read_texel(gpu, t))
+}
+
+/// Renders one pixel with `lighting.bind_group()` at group 1 and returns all four targets.
+fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 4] {
+    render_entry(gpu, lighting.layout(), lighting.bind_group(), "fs")
+}
+
+/// Renders the GI reads (`fs_gi`) with `lighting.bind_group()` at group 1.
+fn render_gi_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 3] {
+    render_entry(gpu, lighting.layout(), lighting.bind_group(), "fs_gi")
 }
 
 fn dummies_bind_and_read_their_values(gpu: &GpuContext) {
@@ -384,10 +432,23 @@ fn dummies_bind_and_read_their_values(gpu: &GpuContext) {
         wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         "the S10 compute copies its result into this uniform, never a CPU storage write"
     );
-    let [a, b, c, d] = render_with_group_1(gpu, &lighting);
+    let outputs = render_with_group_1(gpu, &lighting);
+    let [e, f, g] = render_gi_with_group_1(gpu, &lighting);
     let error = block_on(scope.pop());
     assert!(error.is_none(), "validation error: {error:?}");
+    assert_dummy_reads(outputs);
+    // binding 14 (0, 0, 0, 1); binding 17 (0, 0, 0, 12.8) is stored as the nearest f16,
+    // 12.796875 (0.0031 below 12.8); binding 18 is 96 zero bytes
+    assert_near(e, [0.0, 0.0, 0.0, 1.0], "gi screen dummy");
+    assert!(
+        f[..3].iter().all(|v| *v == 0.0) && (f[3] - 12.8).abs() <= 0.01,
+        "gi volume dummy {f:?}"
+    );
+    assert_near(g, [0.0; 4], "gi params dummy");
+}
 
+/// The dummy values `SHADER` reads through group 1 (see `dummies_bind_and_read_their_values`).
+fn assert_dummy_reads([a, b, c, d]: [[f32; 4]; 4]) {
     // compare 0.5 <= depth 1 passes; LUT (1, 0); ao 1 x cloud transmittance dummy 1
     assert_near(a, [1.0, 1.0, 0.0, 1.0], "shadow, brdf lut, ao");
     // contact 1; opaque depth 1; cube = ambient red 0.6 x 0.3; background red 0.05
@@ -496,6 +557,91 @@ fn invalid_weather_resources_are_refused_before_publication(gpu: &GpuContext) {
     lighting.set_physical_atmosphere(false);
 }
 
+/// The 96 bytes of `RaaGiVolumeParams`; the crate root does not re-export `GI_VOLUME_PARAMS_SIZE`.
+const GI_PARAMS: [u8; 96] = [0; 96];
+
+/// A 4x4 candidate GI view (never written, so zero-initialised) of the given shape.
+fn gi_view(
+    gpu: &GpuContext,
+    dimension: wgpu::TextureDimension,
+    format: wgpu::TextureFormat,
+    depth: u32,
+    samples: u32,
+) -> wgpu::TextureView {
+    gpu.device()
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("resources test gi candidate"),
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: depth,
+            },
+            mip_level_count: 1,
+            sample_count: samples,
+            dimension,
+            format,
+            // wgpu requires RENDER_ATTACHMENT on multisampled textures
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
+}
+
+/// `set_gi` refuses a 2D volume, an Rgba8Unorm volume and a 4-sample screen with `core.resource`
+/// and leaves `views_generation` unchanged; a 4x4x4 Rgba16Float volume is accepted.
+fn set_gi_refuses_bad_views_and_accepts_a_volume(gpu: &GpuContext) {
+    use wgpu::TextureDimension::{D2, D3};
+    use wgpu::TextureFormat::{Rgba8Unorm, Rgba16Float};
+    let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut lighting = LightingResources::new(gpu);
+    let generation = lighting.views_generation();
+
+    let flat = gi_view(gpu, D2, Rgba16Float, 1, 1);
+    let error = lighting
+        .set_gi(None, flat, &GI_PARAMS)
+        .expect_err("2D volume");
+    assert_eq!(error.code(), "core.resource");
+    assert_eq!(lighting.views_generation(), generation);
+
+    let rgba8 = gi_view(gpu, D3, Rgba8Unorm, 4, 1);
+    let error = lighting
+        .set_gi(None, rgba8, &GI_PARAMS)
+        .expect_err("Rgba8Unorm volume");
+    assert_eq!(error.code(), "core.resource");
+    assert_eq!(lighting.views_generation(), generation);
+
+    let msaa = gi_view(gpu, D2, Rgba16Float, 1, 4);
+    let volume = gi_view(gpu, D3, Rgba16Float, 4, 1);
+    let error = lighting
+        .set_gi(Some(msaa), volume, &GI_PARAMS)
+        .expect_err("4-sample screen");
+    assert_eq!(error.code(), "core.resource");
+    assert_eq!(lighting.views_generation(), generation);
+
+    let screen = gi_view(gpu, D2, Rgba16Float, 1, 1);
+    let volume = gi_view(gpu, D3, Rgba16Float, 4, 1);
+    lighting
+        .set_gi(Some(screen), volume, &GI_PARAMS)
+        .expect("4x4x4 Rgba16Float volume");
+    let error = block_on(scope.pop());
+    assert!(error.is_none(), "validation error: {error:?}");
+}
+
+/// A pipeline laid out as `base_layout()` binds `base_bind_group()` and reads the dummies.
+fn base_layout_pipeline_binds_the_base_group(gpu: &GpuContext) {
+    let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let lighting = LightingResources::new(gpu);
+    let outputs: [[f32; 4]; 4] = render_entry(
+        gpu,
+        lighting.base_layout(),
+        lighting.base_bind_group(),
+        "fs",
+    );
+    let error = block_on(scope.pop());
+    assert!(error.is_none(), "validation error: {error:?}");
+    assert_dummy_reads(outputs);
+}
+
 fn cleared_features_still_bind(gpu: &GpuContext) {
     let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
     let mut lighting = LightingResources::new(gpu);
@@ -506,6 +652,7 @@ fn cleared_features_still_bind(gpu: &GpuContext) {
     lighting.clear_opaque_copy();
     lighting.clear_local_lights();
     lighting.clear_cloud_transmittance();
+    lighting.clear_gi();
     lighting.set_physical_atmosphere(false);
     lighting.env_mut().background = [0.25, 0.5, 1.0, 0.0];
     assert_eq!(lighting.env().background, [0.25, 0.5, 1.0, 0.0]);
@@ -528,5 +675,7 @@ fn lighting_resources_on_the_software_gpu() {
     dummies_bind_and_read_their_values(&gpu);
     cleared_features_still_bind(&gpu);
     invalid_weather_resources_are_refused_before_publication(&gpu);
+    set_gi_refuses_bad_views_and_accepts_a_volume(&gpu);
+    base_layout_pipeline_binds_the_base_group(&gpu);
     std::mem::forget(gpu);
 }
