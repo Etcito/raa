@@ -19,6 +19,9 @@ const LOCAL_LIGHTS_SIZE: usize = MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE;
 /// Byte offset of `WeatherLightingGpu.atmosphericTransmission` (S10 binding 16).
 const WEATHER_TRANSMISSION_OFFSET: u64 = 32;
 
+/// Size in bytes of the S38 `RaaGiVolumeParams` uniform (group 1 binding 18).
+pub const GI_VOLUME_PARAMS_SIZE: usize = 96;
+
 /// S10 `WeatherLightingGpu` (group 1 binding 16), a 64-byte `UNIFORM | COPY_DST` record
 /// separate from `FrameGpu` and `EnvGpu`.
 ///
@@ -138,7 +141,7 @@ fn uvec4_bytes(values: &[u32; 4]) -> [u8; 16] {
 /// x intensity 0.3), so a frame without an env reads the flat ambient.
 const DUMMY_ENV_COLOR: [f32; 3] = [0.6 * 0.3, 0.65 * 0.3, 0.75 * 0.3];
 
-/// The nine texture bindings of group 1.
+/// The eleven texture bindings of group 1.
 #[derive(Clone, Debug, PartialEq)]
 struct Views<V> {
     shadow_map: V,
@@ -150,6 +153,8 @@ struct Views<V> {
     opaque_depth: V,
     light_tiles: V,
     cloud_transmittance: V,
+    gi_screen: V,
+    gi_volume: V,
 }
 
 /// What `upload` has to do: rebuild the bind group and/or write each uniform.
@@ -161,6 +166,7 @@ struct Pending {
     env: bool,
     local_lights: bool,
     weather: bool,
+    gi_params: bool,
 }
 
 /// Device-free part of `LightingResources`: current views, uniform contents and the dirty
@@ -177,6 +183,9 @@ struct State<V> {
     env: EnvGpu,
     weather: WeatherLightingGpu,
     uploaded_weather: WeatherLightingGpu,
+    gi_params: [u8; GI_VOLUME_PARAMS_SIZE],
+    uploaded_gi_params: [u8; GI_VOLUME_PARAMS_SIZE],
+    views_generation: u64,
     pending: Pending,
 }
 
@@ -194,6 +203,9 @@ impl<V: Clone + PartialEq> State<V> {
             env: EnvGpu::default(),
             weather: WeatherLightingGpu::default(),
             uploaded_weather: WeatherLightingGpu::default(),
+            gi_params: [0; GI_VOLUME_PARAMS_SIZE],
+            uploaded_gi_params: [0; GI_VOLUME_PARAMS_SIZE],
+            views_generation: 0,
             pending: Pending::default(),
         }
     }
@@ -298,11 +310,30 @@ impl<V: Clone + PartialEq> State<V> {
         self.weather.flags[0] = u32::from(enabled);
     }
 
+    /// Assigns the S38 GI views and params only; `None` keeps the binding-14 dummy. It marks
+    /// nothing pending: `take_pending` compares the views and params with the uploaded ones.
+    fn set_gi(&mut self, screen: Option<V>, volume: V, params: &[u8; GI_VOLUME_PARAMS_SIZE]) {
+        self.views.gi_screen = match screen {
+            Some(screen) => screen,
+            None => self.dummies.gi_screen.clone(),
+        };
+        self.views.gi_volume = volume;
+        self.gi_params = *params;
+    }
+
+    /// Restores the GI dummies (binding 14, 17) and zero params without forcing a rebuild.
+    fn clear_gi(&mut self) {
+        self.views.gi_screen = self.dummies.gi_screen.clone();
+        self.views.gi_volume = self.dummies.gi_volume.clone();
+        self.gi_params = [0; GI_VOLUME_PARAMS_SIZE];
+    }
+
     /// Returns the pending work and marks everything clean.
     fn take_pending(&mut self) -> Pending {
         self.pending.bind_group = self.views != self.bound_views;
         if self.pending.bind_group {
             self.bound_views = self.views.clone();
+            self.views_generation += 1;
         }
         self.pending.local_lights = self.local_lights != self.uploaded_lights;
         if self.pending.local_lights {
@@ -313,6 +344,10 @@ impl<V: Clone + PartialEq> State<V> {
             self.uploaded_weather.map = self.weather.map;
             self.uploaded_weather.light = self.weather.light;
             self.uploaded_weather.flags = self.weather.flags;
+        }
+        self.pending.gi_params = self.gi_params != self.uploaded_gi_params;
+        if self.pending.gi_params {
+            self.uploaded_gi_params = self.gi_params;
         }
         std::mem::take(&mut self.pending)
     }
@@ -399,8 +434,34 @@ fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// The explicit S10 group-1 binding set: 0..=13, 15 and 16. Binding 14 stays reserved.
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 16] {
+/// The full S38 group-1 binding set, ascending: 0..=18. Bindings 14, 17 and 18 are the GI
+/// screen texture, the volume atlas and the 96 B volume params.
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 19] {
+    use wgpu::TextureSampleType as S;
+    use wgpu::TextureViewDimension as D;
+    let filterable = S::Float { filterable: true };
+    let fragment = wgpu::ShaderStages::FRAGMENT;
+    let base = base_layout_entries();
+    std::array::from_fn(|index| match index {
+        14 => wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..texture_entry(14, filterable, D::D2)
+        },
+        17 => wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..texture_entry(17, filterable, D::D3)
+        },
+        18 => wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..uniform_entry(18, GI_VOLUME_PARAMS_SIZE)
+        },
+        index if index < 14 => base[index],
+        index => base[index - 1],
+    })
+}
+
+/// The pre-P4 group-1 binding set, ascending: 0..=13, 15 and 16.
+fn base_layout_entries() -> [wgpu::BindGroupLayoutEntry; 16] {
     use wgpu::TextureSampleType as S;
     use wgpu::TextureViewDimension as D;
     let filterable = S::Float { filterable: true };
@@ -474,6 +535,36 @@ fn dummy_texture(
     texture
 }
 
+/// A 1x1x1 `Rgba16Float` 3D texture filled with `texel` (S38 binding 17).
+fn dummy_volume_texture(gpu: &GpuContext, label: &str, texel: &[u8]) -> wgpu::Texture {
+    let size = wgpu::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        texel,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        size,
+    );
+    texture
+}
+
 fn view_of(texture: &wgpu::Texture, dimension: wgpu::TextureViewDimension) -> wgpu::TextureView {
     texture.create_view(&wgpu::TextureViewDescriptor {
         dimension: Some(dimension),
@@ -486,7 +577,8 @@ fn view_of(texture: &wgpu::Texture, dimension: wgpu::TextureViewDimension) -> wg
 const DUMMY_SHADOW_LAYERS: u32 = 2;
 
 /// Creates the dummy views: depth 1 (2d array), env cube of DUMMY_ENV_COLOR, BRDF LUT
-/// (1, 0), ao/contact 1, opaque colour black, opaque depth 1. Depth32Float cannot be
+/// (1, 0), ao/contact 1, opaque colour black, opaque depth 1, GI screen (0, 0, 0, 1) and a
+/// 1x1x1 volume of (0, 0, 0, 12.8) (S38, no hit). Depth32Float cannot be
 /// written by a copy, so each shadow dummy layer is cleared to 1.0 by a render pass.
 fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
     use wgpu::TextureViewDimension as D;
@@ -587,6 +679,18 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         2,
         &f16_texel(&[1.0; 4]),
     );
+    let gi_screen = dummy_texture(
+        gpu,
+        "raa-pipeline.dummy.gi_screen",
+        HDR_FORMAT,
+        1,
+        &f16_texel(&[0.0, 0.0, 0.0, 1.0]),
+    );
+    let gi_volume = dummy_volume_texture(
+        gpu,
+        "raa-pipeline.dummy.gi_volume",
+        &f16_texel(&[0.0, 0.0, 0.0, 12.8]),
+    );
     Views {
         shadow_map: view_of(&shadow, D::D2Array),
         env_specular: view_of(&env, D::Cube),
@@ -597,6 +701,8 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         opaque_depth: view_of(&depth, D::D2),
         light_tiles: view_of(&tiles, D::D2Array),
         cloud_transmittance: view_of(&transmittance, D::D2Array),
+        gi_screen: view_of(&gi_screen, D::D2),
+        gi_volume: view_of(&gi_volume, D::D3),
     }
 }
 
@@ -617,6 +723,8 @@ fn uniform_buffer(gpu: &GpuContext, label: &str, contents: &[u8]) -> wgpu::Buffe
 pub struct LightingResources {
     layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
+    base_layout: wgpu::BindGroupLayout,
+    base_bind_group: wgpu::BindGroup,
     shadow_cmp: wgpu::Sampler,
     linear_clamp: wgpu::Sampler,
     shadow_buffer: wgpu::Buffer,
@@ -624,16 +732,21 @@ pub struct LightingResources {
     env_buffer: wgpu::Buffer,
     light_buffer: wgpu::Buffer,
     weather_buffer: wgpu::Buffer,
+    gi_params_buffer: wgpu::Buffer,
     state: State<wgpu::TextureView>,
 }
 
 impl LightingResources {
-    /// Creates the layout, samplers, uniforms and dummies, and a bind group over them.
+    /// Creates the full and base layouts, samplers, uniforms and dummies, and both bind groups.
     pub fn new(gpu: &GpuContext) -> LightingResources {
         let device = gpu.device();
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raa-pipeline.lighting"),
             entries: &layout_entries(),
+        });
+        let base_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-pipeline.lighting.base"),
+            entries: &base_layout_entries(),
         });
         let shadow_cmp = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-pipeline.shadow_cmp"),
@@ -659,6 +772,8 @@ impl LightingResources {
             "raa-pipeline.weather_lighting",
             &state.weather.to_bytes(),
         );
+        let gi_params_buffer =
+            uniform_buffer(gpu, "raa-pipeline.gi_volume_params", &state.gi_params);
         let bind_group = build_bind_group(
             gpu,
             &layout,
@@ -670,11 +785,30 @@ impl LightingResources {
                 &env_buffer,
                 &light_buffer,
                 &weather_buffer,
+                &gi_params_buffer,
             ],
+            true,
+        );
+        let base_bind_group = build_bind_group(
+            gpu,
+            &base_layout,
+            &state.views,
+            [&shadow_cmp, &linear_clamp],
+            [
+                &shadow_buffer,
+                &sh_buffer,
+                &env_buffer,
+                &light_buffer,
+                &weather_buffer,
+                &gi_params_buffer,
+            ],
+            false,
         );
         LightingResources {
             layout,
             bind_group,
+            base_layout,
+            base_bind_group,
             shadow_cmp,
             linear_clamp,
             shadow_buffer,
@@ -682,18 +816,30 @@ impl LightingResources {
             env_buffer,
             light_buffer,
             weather_buffer,
+            gi_params_buffer,
             state,
         }
     }
 
-    /// The S10 group-1 layout every lit pass uses at `@group(1)`.
+    /// The full S38 group-1 layout (bindings 0..=18) every lit pass uses at `@group(1)`.
     pub fn layout(&self) -> &wgpu::BindGroupLayout {
         &self.layout
     }
 
-    /// The current group-1 bind group (rebuilt by the pipeline's prepare when dirty).
+    /// The current full group-1 bind group (rebuilt by the pipeline's prepare when dirty).
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    /// The pre-P4 group-1 layout (bindings 0..=13, 15, 16) for pipelines whose fragment stage
+    /// would exceed the WebGPU sampled-texture limit with the full set.
+    pub fn base_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.base_layout
+    }
+
+    /// The current pre-P4 bind group over the same resources; rebuilt with the full group.
+    pub fn base_bind_group(&self) -> &wgpu::BindGroup {
+        &self.base_bind_group
     }
 
     /// Sets the cascaded shadow map (a `texture_depth_2d_array` view) and its 320 B
@@ -814,6 +960,96 @@ impl LightingResources {
         self.state.set_physical_atmosphere(enabled);
     }
 
+    /// Publishes the S38 GI group-1 resources: an optional Rgba16Float D2 screen texture
+    /// (`None` keeps the binding-14 dummy), the Rgba16Float D3 volume atlas and the 96 B
+    /// `RaaGiVolumeParams`. The volume must be D3 Rgba16Float with `TEXTURE_BINDING`; the
+    /// screen must be D2 Rgba16Float without MSAA. A refusal is `core.resource` and leaves
+    /// the previous resources bound; a refused call changes nothing.
+    ///
+    /// Handoff: the downstream card "raa-pipeline: GI lighting tests (inline state tests and
+    /// resources.rs)" drives `LightingResources::set_gi` and the module-private
+    /// `State::set_gi`, `State::clear_gi`, `layout_entries` and `base_layout_entries`; it
+    /// also reads `Views.gi_screen`, `Views.gi_volume`, `State.gi_params` and
+    /// `State.views_generation`. `State::set_gi` only assigns the views and params, so
+    /// `State::take_pending` decides `Pending.gi_params` and the bind-group rebuild by
+    /// comparing them with the uploaded bytes and the bound views
+    /// (lighting.rs:332 `State::take_pending`).
+    pub fn set_gi(
+        &mut self,
+        screen: Option<wgpu::TextureView>,
+        volume: wgpu::TextureView,
+        params: &[u8; GI_VOLUME_PARAMS_SIZE],
+    ) -> Result<(), RaaError> {
+        let texture = volume.texture();
+        if texture.dimension() != wgpu::TextureDimension::D3
+            || texture.format() != wgpu::TextureFormat::Rgba16Float
+            || !texture
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+        {
+            return Err(RaaError::Resource(format!(
+                "GI volume must be a 3D Rgba16Float texture with TEXTURE_BINDING, got {:?} \
+                 {:?}, usage {:?}",
+                texture.dimension(),
+                texture.format(),
+                texture.usage()
+            )));
+        }
+        if let Some(screen) = &screen {
+            let texture = screen.texture();
+            if texture.dimension() != wgpu::TextureDimension::D2
+                || texture.format() != wgpu::TextureFormat::Rgba16Float
+                || texture.sample_count() != 1
+            {
+                return Err(RaaError::Resource(format!(
+                    "GI screen must be a single-sample 2D Rgba16Float texture, got {:?} {:?}, \
+                     sample count {}",
+                    texture.dimension(),
+                    texture.format(),
+                    texture.sample_count()
+                )));
+            }
+        }
+        self.state.set_gi(screen, volume, params);
+        Ok(())
+    }
+
+    /// Restores the S38 GI dummies: binding 14 (0, 0, 0, 1), binding 17 (0, 0, 0, 12.8) and
+    /// zeros at binding 18.
+    pub fn clear_gi(&mut self) {
+        self.state.clear_gi();
+    }
+
+    /// The currently bound env cube (group 1 binding 3).
+    pub fn env_specular_view(&self) -> &wgpu::TextureView {
+        &self.state.views.env_specular
+    }
+
+    /// The linear clamp sampler (group 1 binding 6).
+    pub fn linear_clamp(&self) -> &wgpu::Sampler {
+        &self.linear_clamp
+    }
+
+    /// The 16384-byte local-lights uniform (group 1 binding 12).
+    pub fn local_lights_buffer(&self) -> &wgpu::Buffer {
+        &self.light_buffer
+    }
+
+    /// The currently bound two-layer cloud-transmittance view (group 1 binding 15).
+    pub fn cloud_transmittance_view(&self) -> &wgpu::TextureView {
+        &self.state.views.cloud_transmittance
+    }
+
+    /// The 96-byte `RaaGiVolumeParams` uniform (group 1 binding 18), `UNIFORM | COPY_DST`.
+    pub fn gi_volume_params_buffer(&self) -> &wgpu::Buffer {
+        &self.gi_params_buffer
+    }
+
+    /// Advances by one each time a bound view changed and both bind groups were rebuilt.
+    pub fn views_generation(&self) -> u64 {
+        self.state.views_generation
+    }
+
     /// The 64-byte `WeatherLightingGpu` uniform (S10 binding 16), `UNIFORM | COPY_DST`.
     /// The atmosphere compute copies its separate 16-byte result to byte offset 32 after
     /// its dispatch; the CPU upload writes only the map/light/flags ranges.
@@ -858,6 +1094,10 @@ impl LightingResources {
                     .write_buffer(&self.weather_buffer, offset, &bytes);
             }
         }
+        if pending.gi_params {
+            gpu.queue()
+                .write_buffer(&self.gi_params_buffer, 0, &self.state.gi_params);
+        }
         if pending.bind_group {
             self.bind_group = build_bind_group(
                 gpu,
@@ -870,24 +1110,42 @@ impl LightingResources {
                     &self.env_buffer,
                     &self.light_buffer,
                     &self.weather_buffer,
+                    &self.gi_params_buffer,
                 ],
+                true,
+            );
+            self.base_bind_group = build_bind_group(
+                gpu,
+                &self.base_layout,
+                &self.state.views,
+                [&self.shadow_cmp, &self.linear_clamp],
+                [
+                    &self.shadow_buffer,
+                    &self.sh_buffer,
+                    &self.env_buffer,
+                    &self.light_buffer,
+                    &self.weather_buffer,
+                    &self.gi_params_buffer,
+                ],
+                false,
             );
         }
     }
 }
 
 /// Bind group over `views`, the samplers (comparison, linear clamp) and the uniforms
-/// (ShadowGpu, EnvSh, EnvGpu, local lights, weather lighting) at their explicit S10
-/// bindings: 0..=13, 15 and 16. Binding 14 stays reserved.
+/// (ShadowGpu, EnvSh, EnvGpu, local lights, weather lighting, GI params). `full` binds the
+/// S38 additions 14, 17 and 18; without it the group is the pre-P4 set 0..=13, 15 and 16.
 fn build_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     views: &Views<wgpu::TextureView>,
     [shadow_cmp, linear_clamp]: [&wgpu::Sampler; 2],
-    [shadow, sh, env, lights, weather]: [&wgpu::Buffer; 5],
+    [shadow, sh, env, lights, weather, gi_params]: [&wgpu::Buffer; 6],
+    full: bool,
 ) -> wgpu::BindGroup {
     use wgpu::BindingResource as R;
-    let resources: [(u32, R<'_>); 16] = [
+    let mut resources: Vec<(u32, R<'_>)> = vec![
         (0, R::TextureView(&views.shadow_map)),
         (1, R::Sampler(shadow_cmp)),
         (2, shadow.as_entire_binding()),
@@ -905,6 +1163,12 @@ fn build_bind_group(
         (15, R::TextureView(&views.cloud_transmittance)),
         (16, weather.as_entire_binding()),
     ];
+    if full {
+        resources.push((14, R::TextureView(&views.gi_screen)));
+        resources.push((17, R::TextureView(&views.gi_volume)));
+        resources.push((18, gi_params.as_entire_binding()));
+        resources.sort_by_key(|(binding, _)| *binding);
+    }
     let entries: Vec<wgpu::BindGroupEntry> = resources
         .into_iter()
         .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
@@ -931,6 +1195,8 @@ mod tests {
             opaque_depth: 5,
             light_tiles: 6,
             cloud_transmittance: 7,
+            gi_screen: 8,
+            gi_volume: 9,
         }
     }
 
@@ -941,6 +1207,7 @@ mod tests {
         env: false,
         local_lights: false,
         weather: false,
+        gi_params: false,
     };
 
     #[test]
@@ -950,8 +1217,10 @@ mod tests {
         let bindings: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
         assert_eq!(
             bindings,
-            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16],
-            "explicit S10 set; 14 stays reserved"
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+            ],
+            "full S38 set"
         );
         for entry in &entries {
             assert_eq!(entry.count, None);
@@ -990,7 +1259,7 @@ mod tests {
             }
         );
         assert_eq!(
-            entries[14].ty,
+            entries[15].ty,
             wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -998,7 +1267,7 @@ mod tests {
             }
         );
         assert_eq!(
-            entries[15].ty,
+            entries[16].ty,
             wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
