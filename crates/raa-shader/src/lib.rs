@@ -50,6 +50,13 @@ pub const LOCAL_LIGHTING_WGSL: &str = include_str!("wgsl/local_lighting.wgsl");
 /// [`PRELUDE_WGSL`]), so a pass-private module can include it alone.
 pub const DEPTH_WGSL: &str = include_str!("wgsl/depth.wgsl");
 
+/// S37 GI volume tracing: `raa_gi_level_at`, `raa_gi_sample`, `RaaGiHit`, `raa_gi_trace`,
+/// `raa_gi_visibility`, `raa_gi_edge_fade` and `raa_gi_finest_voxel`. It declares no
+/// binding and samples only with `textureSampleLevel`; it must compose after
+/// [`PRELUDE_WGSL`], or after a module declaring `RaaGiVolumeParams` and group 1 bindings
+/// 6 (`raa_linear_clamp`), 17 (`raa_gi_volume`) and 18 (`raa_gi_volume_params`).
+pub const GI_VOLUME_WGSL: &str = include_str!("wgsl/gi_volume.wgsl");
+
 /// Prepass entry points: `vs_main` and `fs_main` writing the S12 `normal` (location 0:
 /// view-space normal xyz, roughness) and `material` (location 1: F0 rgb sRGB-encoded,
 /// metallic) targets.
