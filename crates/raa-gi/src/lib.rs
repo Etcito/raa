@@ -11,6 +11,7 @@ pub mod layouts;
 pub mod membership;
 pub mod parts;
 pub mod settings;
+pub mod shaders;
 pub mod stats;
 
 pub use stats::GiStats;
