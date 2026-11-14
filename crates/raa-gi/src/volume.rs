@@ -28,15 +28,26 @@
 //! (contract 'gi-volume-internal'). Per-frame prepare and recording come in later shares.
 
 use raa_core::GpuContext;
+use raa_math::Vec3;
 
-use crate::clipmap;
-use crate::layouts::{GiFloodGpu, GiLightGpu, GiVoxelizeGpu, GiWriteGpu};
+use crate::clipmap::{self, RebuildRounds, RelightCursor};
+use crate::layouts::{GiFloodGpu, GiLightGpu, GiVolumeParamsGpu, GiVoxelizeGpu, GiWriteGpu};
 use crate::parts::LevelVoxelize;
-use crate::settings::GiQuality;
+use crate::settings::{GiQuality, GiSettings};
 use crate::shaders;
 
 /// Byte stride of one flood parameter slot: the dynamic-offset alignment of the uniform.
 const SLOT_BYTES: u64 = 256;
+
+/// `RAA_GI_FLAG_VALID`: every level has been committed once (S38; `prelude.wgsl:164`).
+const FLAG_VALID: u32 = 1;
+
+/// `RAA_GI_FLAG_REFLECTIONS`: the volume is valid and reflections are on (S38;
+/// `prelude.wgsl:165`).
+const FLAG_REFLECTIONS: u32 = 2;
+
+/// `RAA_GI_FLAG_LOCAL_SHADOWS`: local-light shadows are on (S38; `prelude.wgsl:166`).
+const FLAG_LOCAL_SHADOWS: u32 = 4;
 
 /// One slice of a pending rebuild: its level, begin and commit flags and flood passes.
 #[derive(Clone, Debug)]
@@ -380,6 +391,179 @@ impl GiVolume {
             light_updates: vec![0; levels],
             params: [0; 96],
         }
+    }
+
+    /// Follows the camera and decides this frame's work (solstice `volume.rs:398-529`,
+    /// `GiVolume::prepare`). A first build rebuilds every level at its snapped origin in one
+    /// frame; afterwards one pending slice advances a rebuild by `FLOOD_PASSES_PER_FRAME` of the
+    /// 18 flood passes, storing the origin and completing the round on its last pass. Writes the
+    /// per-level `GiVoxelizeGpu`, `GiLightGpu` and `GiWriteGpu` uniforms, relights one committed
+    /// level (a level being rebuilt is never relit, solstice `volume.rs:454-466`) and stores the
+    /// `GiVolumeParamsGpu` bytes for [`GiVolume::params_bytes`].
+    pub(crate) fn prepare(
+        &mut self,
+        gpu: &GpuContext,
+        camera_position: Vec3,
+        rounds: &mut RebuildRounds,
+        cursor: &mut RelightCursor,
+        settings: &GiSettings,
+    ) -> VolumeWork {
+        rounds.start_waiting();
+        let resolution = self.quality.resolution;
+        let levels = self.quality.levels as usize;
+        let first_build = self.origins.first().copied().flatten().is_none();
+        let mut slice = None;
+        if first_build {
+            for level in 0..levels {
+                let voxel = clipmap::voxel_size(level as u32);
+                let origin = clipmap::snapped_origin(camera_position, voxel, resolution);
+                if let Some(slot) = self.origins.get_mut(level) {
+                    *slot = Some(origin);
+                }
+                rounds.complete(level);
+            }
+        } else {
+            if self.pending.is_none() {
+                self.pending = clipmap::choose_rebuild(&self.origins, camera_position, resolution)
+                    .map(|(level, origin)| (level, origin, 0))
+                    .or_else(|| {
+                        rounds.choose_outdated().and_then(|level| {
+                            let origin = self.origins.get(level).copied().flatten()?;
+                            Some((level, origin, 0))
+                        })
+                    });
+            }
+            if let Some((level, origin, next_pass)) = self.pending {
+                let passes = clipmap::flood_pass_count();
+                let end = (next_pass + clipmap::FLOOD_PASSES_PER_FRAME).min(passes);
+                let commit = end == passes;
+                slice = Some(RebuildSlice {
+                    level,
+                    begin: next_pass == 0,
+                    passes: next_pass..end,
+                    commit,
+                });
+                self.pending = Some((level, origin, end));
+                if commit {
+                    if let Some(slot) = self.origins.get_mut(level) {
+                        *slot = Some(origin);
+                    }
+                    rounds.complete(level);
+                }
+            }
+        }
+        let committed = slice.as_ref().is_some_and(|slice| slice.commit);
+        let being_rebuilt = if committed {
+            None
+        } else {
+            self.pending.map(|(level, _, _)| level)
+        };
+        let relight = cursor.next(self.quality.levels, being_rebuilt);
+        if let Some(updates) = self.light_updates.get_mut(relight) {
+            *updates = updates.wrapping_add(1);
+        }
+
+        let mut uniform = GiVolumeParamsGpu {
+            resolution: resolution as f32,
+            intensity: settings.intensity,
+            level_count: self.quality.levels,
+            ..Default::default()
+        };
+        let mut voxelize = Vec::new();
+        for level in 0..levels {
+            let origin = self.origins.get(level).copied().flatten().unwrap_or([0; 3]);
+            let voxel = clipmap::voxel_size(level as u32);
+            let voxelize_origin = self
+                .pending
+                .filter(|pending| pending.0 == level)
+                .map_or(origin, |pending| pending.1);
+            let level_offset = level as u32 * resolution * resolution * resolution;
+            let record = GiVoxelizeGpu {
+                origin: voxelize_origin.map(|c| c as f32 * voxel),
+                voxel_size: voxel,
+                resolution,
+                level_offset,
+            };
+            if let Some(params) = self.voxelize_params.get(level) {
+                gpu.queue().write_buffer(params, 0, &record.to_bytes());
+            }
+            let record = GiLightGpu {
+                wrap_origin: origin,
+                level: level as u32,
+                updates: self.light_updates.get(level).copied().unwrap_or(0),
+                resolution,
+            };
+            if let Some(params) = self.light_params.get(level) {
+                gpu.queue().write_buffer(params, 0, &record.to_bytes());
+            }
+            let record = GiWriteGpu {
+                wrap_origin: origin,
+                level: level as u32,
+                resolution,
+                voxel_size: voxel,
+            };
+            if let Some(params) = self.write_params.get(level) {
+                gpu.queue().write_buffer(params, 0, &record.to_bytes());
+            }
+            if let Some(slot) = uniform.levels.get_mut(level) {
+                *slot = [
+                    origin[0] as f32 * voxel,
+                    origin[1] as f32 * voxel,
+                    origin[2] as f32 * voxel,
+                    voxel,
+                ];
+            }
+            let begin = first_build || slice.as_ref().is_some_and(|s| s.begin && s.level == level);
+            if begin && let Some(params) = self.voxelize_params.get(level).cloned() {
+                voxelize.push(LevelVoxelize {
+                    level: level as u32,
+                    origin: voxelize_origin,
+                    voxel_size: voxel,
+                    resolution,
+                    level_offset,
+                    params,
+                });
+            }
+        }
+
+        let valid = self.all_committed();
+        let mut flags = 0;
+        if valid {
+            flags |= FLAG_VALID;
+            if settings.reflections {
+                flags |= FLAG_REFLECTIONS;
+            }
+        }
+        if settings.local_light_shadows {
+            flags |= FLAG_LOCAL_SHADOWS;
+        }
+        uniform.flags = flags;
+        self.params = uniform.to_bytes();
+        if committed {
+            self.pending = None;
+        }
+        VolumeWork {
+            rebuild_all: first_build,
+            slice,
+            relight,
+            voxelize,
+        }
+    }
+
+    /// The `GiVolumeParamsGpu` bytes of the latest [`GiVolume::prepare`], passed to
+    /// `LightingResources::set_gi`.
+    pub(crate) fn params_bytes(&self) -> [u8; 96] {
+        self.params
+    }
+
+    /// Whether a rebuild slice is pending, so stats report `pendingRebuild`.
+    pub(crate) fn pending_slice(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Whether every level has been committed at least once; the `VALID` flag condition.
+    pub(crate) fn all_committed(&self) -> bool {
+        self.origins.iter().all(|origin| origin.is_some())
     }
 
     /// The sampled D3 view of the whole atlas, created once by `GiVolume::new`. A clone of the
