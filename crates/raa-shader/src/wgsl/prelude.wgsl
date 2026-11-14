@@ -485,3 +485,97 @@ fn raa_ltc_uv(table: u32, roughness: f32, n_dot_v: f32) -> vec2<f32> {
         + vec2<f32>(0.5)) / vec2<f32>(128.0, 192.0);
 }
 // End of the S11 area form-factor section.
+
+// Shadow-map PCSS kernel shared by the csm Shadow provider and the hero area-light maps.
+
+// 32 fixed Poisson-disk positions in the unit disk; the blocker search uses the first 16.
+const RAA_CSM_POISSON: array<vec2<f32>, 32> = array<vec2<f32>, 32>(
+    vec2<f32>(0.000000, 0.000000),
+    vec2<f32>(0.245572, 0.025625),
+    vec2<f32>(0.395874, -0.069721),
+    vec2<f32>(0.233324, -0.288666),
+    vec2<f32>(-0.072749, -0.222033),
+    vec2<f32>(0.343213, 0.169892),
+    vec2<f32>(0.282429, 0.319118),
+    vec2<f32>(0.391256, -0.326816),
+    vec2<f32>(0.214275, 0.519212),
+    vec2<f32>(-0.041023, 0.441851),
+    vec2<f32>(0.149747, 0.189052),
+    vec2<f32>(0.528000, -0.535515),
+    vec2<f32>(0.579855, -0.197497),
+    vec2<f32>(0.590327, 0.103002),
+    vec2<f32>(-0.066529, 0.613064),
+    vec2<f32>(0.126337, -0.108697),
+    vec2<f32>(0.067175, -0.364676),
+    vec2<f32>(0.848151, -0.185183),
+    vec2<f32>(-0.239579, -0.077709),
+    vec2<f32>(0.081520, -0.668538),
+    vec2<f32>(-0.213674, 0.357494),
+    vec2<f32>(-0.193341, -0.509093),
+    vec2<f32>(0.513411, 0.310819),
+    vec2<f32>(-0.217035, 0.149110),
+    vec2<f32>(-0.009268, 0.246234),
+    vec2<f32>(0.295802, -0.527740),
+    vec2<f32>(0.775168, 0.373917),
+    vec2<f32>(0.104490, 0.636529),
+    vec2<f32>(0.642104, 0.522812),
+    vec2<f32>(-0.404827, 0.019434),
+    vec2<f32>(0.841166, 0.019880),
+    vec2<f32>(-0.418969, 0.395065)
+);
+
+// Interleaved gradient noise (Jimenez 2014) in [0, 2 pi): the per-pixel PCF rotation.
+fn raa_csm_rotation(p: vec2<f32>) -> f32 {
+    let g = fract(dot(p, vec2<f32>(0.06711056, 0.00583715)));
+    return fract(52.9829189 * g) * 6.28318530718;
+}
+
+fn raa_csm_rotate(v: vec2<f32>, a: f32) -> vec2<f32> {
+    let s = sin(a);
+    let c = cos(a);
+    return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Handoff: card "raa-shader: area-light visibility tiers in local_lighting.wgsl (hero PCSS,
+// cone, far fade)" calls `raa_shadow_blockers(layer: i32, uv: vec2<f32>, depth: f32,
+// search_texels: f32, res: f32) -> vec2<f32>` from this file, together with `raa_shadow_pcf`
+// and `raa_csm_rotation`, all defined here today. It averages the raw depths of the 16
+// Poisson taps in front of `depth` into `.x` and counts them in `.y`, or returns (0, 0)
+// without a tap. Sizes are shadow-map texels; `res` is the layer width (1 / raa_shadow.params.z).
+fn raa_shadow_blockers(layer: i32, uv: vec2<f32>, depth: f32, search_texels: f32, res: f32) -> vec2<f32> {
+    var blocker_sum = 0.0;
+    var blocker_count = 0.0;
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let offset = RAA_CSM_POISSON[i] * search_texels;
+        let coord = vec2<i32>(
+            clamp(uv * res + offset, vec2<f32>(0.0), vec2<f32>(res - 1.0))
+        );
+        let d = textureLoad(raa_shadow_map, coord, layer, 0);
+        if (d < depth) {
+            blocker_sum = blocker_sum + d;
+            blocker_count = blocker_count + 1.0;
+        }
+    }
+    if (blocker_count < 0.5) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    return vec2<f32>(blocker_sum / blocker_count, blocker_count);
+}
+
+// Mean of the rotated 32-tap Poisson PCF comparisons of `uv` at `depth`, in [0, 1].
+fn raa_shadow_pcf(layer: i32, uv: vec2<f32>, depth: f32, radius_texels: f32, res: f32, rotation: f32) -> f32 {
+    var pcf = 0.0;
+    for (var i = 0u; i < 32u; i = i + 1u) {
+        let offset = raa_csm_rotate(RAA_CSM_POISSON[i], rotation) * radius_texels;
+        let coord = clamp(uv + offset / res, vec2<f32>(0.0), vec2<f32>(1.0));
+        pcf = pcf + textureSampleCompareLevel(
+            raa_shadow_map,
+            raa_shadow_cmp,
+            coord,
+            layer,
+            depth
+        );
+    }
+    return pcf / 32.0;
+}
+// End of the shadow-map PCSS kernel section.
