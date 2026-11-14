@@ -158,7 +158,19 @@ fn raa_previous_model(r: RaaPreviousInstanceGpu) -> mat4x4<f32> {
 // Fragment-only shared resources; compute tiling uses its own layout and equivalent bytes.
 @group(1) @binding(12) var<uniform> raa_local_lights: array<LightGpu, MAX_LOCAL_LIGHTS>;
 @group(1) @binding(13) var raa_light_tiles: texture_2d_array<u32>;
-// Binding 14 remains reserved for GI. The generated prelude appends weather_lighting.wgsl
+// S38 GI declarations for fragment consumers; the GI compute passes bind their own group 1.
+struct RaaGiVolumeParams { levels: array<vec4<f32>, 5>, resolution: f32, intensity: f32, level_count: u32, flags: u32 }
+const RAA_GI_MAX_LEVELS: u32 = 5u;
+const RAA_GI_FLAG_VALID: u32 = 1u;
+const RAA_GI_FLAG_REFLECTIONS: u32 = 2u;
+const RAA_GI_FLAG_LOCAL_SHADOWS: u32 = 4u;
+// 14: screen irradiance and occlusion.
+@group(1) @binding(14) var raa_gi_screen: texture_2d<f32>;
+// 17: the volume atlas (rgb radiance, a distance in metres).
+@group(1) @binding(17) var raa_gi_volume: texture_3d<f32>;
+// 18: the 96-B params, level_count 0 = no volume.
+@group(1) @binding(18) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
+// The generated prelude appends weather_lighting.wgsl
 // exactly once for the fragment-only texture/uniform bindings 15/16; no added storage.
 
 // SurfaceMaterialGpu.header.x models and header.z flags.

@@ -169,6 +169,14 @@ fn cloud_shadow_is_attached_once_before_the_providers() {
             1,
             "{pass:?}"
         );
+        // The S38 GI declarations live once in the prelude, each at its own binding.
+        for pinned in [
+            "@group(1) @binding(14)",
+            "@group(1) @binding(17)",
+            "@group(1) @binding(18)",
+        ] {
+            assert_eq!(wgsl.matches(pinned).count(), 1, "{pass:?}: {pinned}");
+        }
         if let Err(e) = Composer::validate(&wgsl) {
             panic!("{pass:?}: {e}");
         }
