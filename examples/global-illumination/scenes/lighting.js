@@ -87,7 +87,8 @@ const ROWS = [
   { mode: 'interior-bounce-on', arrangement: 'interior-bounce', filename: 'gi-interior-bounce-lit-from-sunlit-patch.png',
     criterionName: 'P4-Q3 interior bounce', producer: 'raa-gi-screen', extraFacts: [], measured: true },
   { mode: 'interior-bounce-off', arrangement: 'interior-bounce', filename: 'gi-interior-bounce-off-dark-interior.png',
-    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true },
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true,
+    extraHeld: [NO_GI_AMBIENT] },
   { mode: 'emissive-panel-on', arrangement: 'emissive-panel', filename: 'gi-emissive-panel-lights-nearby-surfaces.png',
     criterionName: 'P4-Q3 emissive panel light', producer: 'raa-gi-screen', extraFacts: [], measured: true },
   { mode: 'emissive-panel-off', arrangement: 'emissive-panel', filename: 'gi-emissive-panel-off-no-spill.png',
@@ -153,7 +154,8 @@ export const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ce
 const AREA_GLOSSY_HELD = ['dark glossy floor', 'rectangular area light panel and its glowing fixture',
   'black sky without sun or ambient', 'camera'];
 const HELD = {
-  'color-bleed': ROOM_HELD,
+  'color-bleed': ['room shell with red left wall and green right wall, closed at the front behind the camera',
+    'white box and sphere', 'sun through the ceiling opening', 'camera'],
   'interior-bounce': ROOM_HELD,
   'emissive-panel': ['room shell', 'emissive panel', 'white box and sphere', 'night sky without sun', 'camera'],
   'local-light-shadow': ['floor', '0.6 m wall', 'point and spot light placement', 'night sky without sun', 'camera'],
@@ -252,8 +254,12 @@ const BEHAVIOURS = {
     + 'picked up from the coloured walls.',
   'interior-bounce-on': 'The walls, ceiling and objects away from the bright sunlit floor patch are lit by soft '
     + 'bounce light coming from that patch, so the shadowed interior is clearly visible.',
-  'interior-bounce-off': 'Away from the bright sunlit floor patch the interior stays dark, lit only by a faint '
-    + 'flat ambient term.',
+  // The GI-off frame is the P1-P3 frame (NO_GI_AMBIENT): raa-ibl's sky irradiance, unoccluded by the room, fills
+  // the interior evenly. Run 14675 scored 4/10 on "the interior stays dark, lit only by a faint flat ambient":
+  // no GI-off frame is dark, so the row judges what GI off removes (bounce from the patch, wall colour).
+  'interior-bounce-off': 'Away from the bright sunlit floor patch the interior is lit only by an even, flat fill '
+    + 'with no light spreading out from the patch: there is no brighter halo of bounce light around the patch on the '
+    + 'floor, walls or objects, and no red or green tint from the coloured walls on the floor, box or sphere.',
   'emissive-panel-on': 'The floor, the back wall and the white box and sphere next to the glowing panel are lit '
     + 'by warm light spilling from it, brightest close to the panel and fading with distance.',
   'emissive-panel-off': 'Only the panel itself glows; the floor, walls, box and sphere around it stay dark, with '
@@ -408,6 +414,18 @@ function roomWithObjects(engine, variant, state) {
     { name: 'box', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, box(room.box.center, room.box.half), white)) },
     { name: 'sphere', instance: engine.addMeshInstance(nodeAt(engine, room.sphere.center), meshWith(engine, sphere(room.sphere.radius, room.sphere.segments), white)) },
   );
+}
+
+// The colour-bleed room is closed at the front by a white slab behind the camera (z 0..0.4, the shell's 0.4 m wall
+// thickness; the camera at z -1.2 looks towards -z and never sees it). With the front open, the GI volume gathered
+// the day sky through the 6 x 3 m opening onto the box and the floor; that neutral blue fill was far brighter than
+// the second bounce from the coloured walls, and runs 14595-14675 all judged the box and floor neutral (3/10). Closed,
+// the interior is lit by the sunlit patch and its bounce, so the walls' red and green make up a visible share.
+function colorBleedRoom(engine, variant, state) {
+  roomWithObjects(engine, variant, state);
+  const white = matte(engine, room.colors.white);
+  const front = box([0, 1.5, 0.2], [3.4, 1.9, 0.2]);
+  state.instances.push({ name: 'front', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, front, white)) });
 }
 
 // The forward-content sun (travel direction). With the shared room sun the red wall was lit only by bounce
@@ -598,7 +616,7 @@ function areaGlossy(engine, variant, state, mode) {
 
 // Each arrangement adds its content and pushes { name, instance } entries into state.instances.
 const ARRANGEMENTS = {
-  'color-bleed': roomWithObjects,
+  'color-bleed': colorBleedRoom,
   'interior-bounce': roomWithObjects,
   'emissive-panel': (engine, variant, state) => {
     const white = roomScene(engine, state, { night: true });
@@ -623,7 +641,9 @@ const ARRANGEMENTS = {
   'sky-overhang': (engine, variant, state) => {
     engine.setSky({ model: 'physical', preset: 'day' });
     engine.setLight({ direction: [0.45, -1, 0.25], color: [1, 0.96, 0.9], intensity: 3 });
-    const ground = matte(engine, [0.42, 0.42, 0.4]);
+    // A light concrete ground (0.42 read as a dull mid-grey under full sun, run 14675: "the sunlit open ground is
+    // dull and low-contrast"); the brighter sunlit ground also bounces more light under the overhang.
+    const ground = matte(engine, [0.68, 0.68, 0.65]);
     const white = matte(engine, room.colors.white);
     const pillars = [[1.9, 1.9], [-1.9, 1.9], [1.9, -1.9], [-1.9, -1.9]].map(([x, z]) => box([x, 1.5, z], [0.15, 1.5, 0.15]));
     const overhang = joinMeshes([box([0, 3.15, 0], [2.2, 0.15, 2.2]), ...pillars]);

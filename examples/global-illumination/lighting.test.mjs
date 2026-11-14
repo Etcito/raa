@@ -17,7 +17,8 @@ const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ceiling a
 const AREA_HELD = ['dark glossy floor', 'rectangular area light panel and its glowing fixture',
   'black sky without sun or ambient', 'camera'];
 const HELD = {
-  'color-bleed': ROOM,
+  'color-bleed': ['room shell with red left wall and green right wall, closed at the front behind the camera',
+    'white box and sphere', 'sun through the ceiling opening', 'camera'],
   'interior-bounce': ROOM,
   quality: ROOM,
   'emissive-panel': ['room shell', 'emissive panel', 'white box and sphere', 'night sky without sun', 'camera'],
@@ -34,7 +35,8 @@ const HELD = {
 // The Cornell rows name their own fact lists (contract: snapshot:settings and snapshot:stats for the pair).
 const CORNELL_FACTS = ['snapshot:settings', 'snapshot:stats'];
 // Rows whose held constants extend their arrangement's: the GI-off frame's flat sky ambient (the no-GI baseline).
-const EXTRA_HELD = { 'quality-off': ['flat uncoloured sky ambient fill of the frame without global illumination'] };
+const NO_GI_AMBIENT = 'flat uncoloured sky ambient fill of the frame without global illumination';
+const EXTRA_HELD = { 'quality-off': [NO_GI_AMBIENT], 'interior-bounce-off': [NO_GI_AMBIENT] };
 // The 25 rows in contract order: [mode, arrangement, filename, criterionName, producer, extra fact, expectedVisibleBehavior].
 const TABLE = [
   ['color-bleed-on', 'color-bleed', 'gi-color-bleed-white-box-tinted-red-green.png', 'P4-Q3 colour bleeding', 'raa-gi-screen', null,
@@ -44,7 +46,7 @@ const TABLE = [
   ['interior-bounce-on', 'interior-bounce', 'gi-interior-bounce-lit-from-sunlit-patch.png', 'P4-Q3 interior bounce', 'raa-gi-screen', null,
     'The walls, ceiling and objects away from the bright sunlit floor patch are lit by soft bounce light coming from that patch, so the shadowed interior is clearly visible.'],
   ['interior-bounce-off', 'interior-bounce', 'gi-interior-bounce-off-dark-interior.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
-    'Away from the bright sunlit floor patch the interior stays dark, lit only by a faint flat ambient term.'],
+    'Away from the bright sunlit floor patch the interior is lit only by an even, flat fill with no light spreading out from the patch: there is no brighter halo of bounce light around the patch on the floor, walls or objects, and no red or green tint from the coloured walls on the floor, box or sphere.'],
   ['emissive-panel-on', 'emissive-panel', 'gi-emissive-panel-lights-nearby-surfaces.png', 'P4-Q3 emissive panel light', 'raa-gi-screen', null,
     'The floor, the back wall and the white box and sphere next to the glowing panel are lit by warm light spilling from it, brightest close to the panel and fading with distance.'],
   ['emissive-panel-off', 'emissive-panel', 'gi-emissive-panel-off-no-spill.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
