@@ -364,5 +364,59 @@
       "p4-gi-lighting-render",
       "p4-gi-lighting-fresh"
     ]
+  },
+  {
+    "name": "p4-gi-area-probe-check",
+    "command": "node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-area-probe-select",
+    "command": "node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-area-probe-check"
+    ]
+  },
+  {
+    "name": "p4-gi-area-probe-clean",
+    "command": "node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-area-probe-select"
+    ]
+  },
+  {
+    "name": "p4-gi-area-probe-render",
+    "command": "node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-area-probe-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-area-ratio-stored",
+    "command": "node scripts/gi-cornell-ratio.mjs --stored lighting --out out/global-illumination/area-probe --reference /refs/cornell-box-reference.png",
+    "timeout_s": 60
+  },
+  {
+    "name": "p4-gi-area-probe-ratio",
+    "command": "node scripts/gi-cornell-ratio.mjs --out out/global-illumination/area-probe --reference /refs/cornell-box-reference.png",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-area-probe-render",
+      "p4-gi-area-ratio-stored"
+    ]
+  },
+  {
+    "name": "p4-gi-lighting-ratio",
+    "command": "node scripts/gi-cornell-ratio.mjs --out out/global-illumination/lighting --reference /refs/cornell-box-reference.png",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-lighting-render"
+    ]
   }
 ]
