@@ -1,9 +1,18 @@
-//! WGSL of the GI volume (share 1): the radiance codec, the view-independent voxelize kernel
-//! and the seed and jump-flood modules (contract `gi-shaders`, records of `gi-records`).
+//! WGSL of the GI volume (shares 1 and 2): the radiance codec, the view-independent voxelize
+//! kernel and the seed, jump-flood, forward-voxelize and atlas-write modules (contract
+//! `gi-shaders`, records of `gi-records`).
+//!
+//! Split note: `no handoff: raa-gi: shaders share 3, voxel lighting takes nothing from this card`
+//! and `no handoff: raa-gi: shaders share 4, debug views takes nothing from this card`; each adds
+//! its own builders and group-2 entries beside these.
 
 use std::num::NonZeroU64;
 
-use wgpu::{BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages};
+use raa_shader::PRELUDE_WGSL;
+use wgpu::{
+    BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages, StorageTextureAccess,
+    TextureFormat, TextureViewDimension,
+};
 
 /// Radiance codec (`raa_gi_encode_radiance`, `raa_gi_decode_radiance`, range 512).
 pub const RADIANCE_CODEC_WGSL: &str = include_str!("wgsl/radiance_codec.wgsl");
@@ -20,6 +29,8 @@ pub const VOXELIZE_KERNEL_WGSL: &str = include_str!("wgsl/voxelize_kernel.wgsl")
 
 const SEED_WGSL: &str = include_str!("wgsl/seed.wgsl");
 const JUMP_FLOOD_WGSL: &str = include_str!("wgsl/jump_flood.wgsl");
+const VOXELIZE_FORWARD_WGSL: &str = include_str!("wgsl/voxelize_forward.wgsl");
+const VOLUME_WRITE_WGSL: &str = include_str!("wgsl/volume_write.wgsl");
 
 const FLOOD_RECORD_WGSL: &str = "struct GiFloodGpu {
     step: vec3<i32>,
@@ -44,6 +55,19 @@ pub fn seed_module_wgsl() -> String {
 /// Flood module: `FLOOD_RECORD_WGSL` + `jump_flood.wgsl`, entry `raa_gi_flood` (4x4x4).
 pub fn flood_module_wgsl() -> String {
     format!("{FLOOD_RECORD_WGSL}{JUMP_FLOOD_WGSL}")
+}
+
+/// Forward-voxelize module (driver A): `PRELUDE_WGSL` (for `RaaInstanceGpu`,
+/// `InstanceExtraGpu` and `SurfaceMaterialGpu`) + `VOXELIZE_KERNEL_WGSL` + `voxelize_forward.wgsl`,
+/// entry `raa_gi_voxelize_forward` (workgroup 64, one thread per triangle, grid-stride).
+pub fn voxelize_forward_module_wgsl() -> String {
+    format!("{PRELUDE_WGSL}{VOXELIZE_KERNEL_WGSL}{VOXELIZE_FORWARD_WGSL}")
+}
+
+/// Atlas-write module: `RADIANCE_CODEC_WGSL` + `volume_write.wgsl`, entry `raa_gi_volume_write`
+/// (4x4x4).
+pub fn volume_write_module_wgsl() -> String {
+    format!("{RADIANCE_CODEC_WGSL}{VOLUME_WRITE_WGSL}")
 }
 
 fn entry(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
@@ -83,4 +107,58 @@ pub fn seed_group2_entries() -> [BindGroupLayoutEntry; 3] {
 /// Flood group 2: GiFloodGpu (dynamic), flood in read, flood out write.
 pub fn flood_group2_entries() -> [BindGroupLayoutEntry; 3] {
     flood_entries(true)
+}
+
+fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+    entry(
+        binding,
+        BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+    )
+}
+
+fn uniform_entry(binding: u32, size: u64, has_dynamic_offset: bool) -> BindGroupLayoutEntry {
+    entry(
+        binding,
+        BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset,
+            min_binding_size: NonZeroU64::new(size),
+        },
+    )
+}
+
+/// Forward group 2: GiVoxelizeGpu, GiForwardWorkGpu (dynamic, 256-B slots), instances, extras,
+/// materials, stream 0, indices and the voxels buffer (six read storage buffers).
+pub fn forward_group2_entries() -> [BindGroupLayoutEntry; 8] {
+    [
+        uniform_entry(0, 32, false),
+        uniform_entry(1, 48, true),
+        storage_entry(2, true),
+        storage_entry(3, true),
+        storage_entry(4, true),
+        storage_entry(5, true),
+        storage_entry(6, true),
+        storage_entry(7, false),
+    ]
+}
+
+/// Atlas-write group 2: GiWriteGpu, seeds, radiance and the Rgba16Float atlas storage texture.
+pub fn write_group2_entries() -> [BindGroupLayoutEntry; 4] {
+    [
+        uniform_entry(0, 32, false),
+        storage_entry(1, true),
+        storage_entry(2, true),
+        entry(
+            3,
+            BindingType::StorageTexture {
+                access: StorageTextureAccess::WriteOnly,
+                format: TextureFormat::Rgba16Float,
+                view_dimension: TextureViewDimension::D3,
+            },
+        ),
+    ]
 }
