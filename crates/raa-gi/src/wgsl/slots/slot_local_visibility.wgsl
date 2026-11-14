@@ -39,10 +39,21 @@ fn raa_slot_local_visibility(
         raa_gi_volume_params.levels[near_level].w,
         raa_gi_volume_params.levels[far_level].w,
     );
-    let origin = world_position + surface_normal * (1.5 * voxel);
-    let max_t = select(max(light_distance - 3.0 * voxel, 0.0), 400.0, directional);
+    let push = 1.5 * voxel;
+    var origin = world_position + surface_normal * push;
+    var max_t = select(max(light_distance - 3.0 * voxel, 0.0), 400.0, directional);
     let light = raa_local_lights[min(light_index, MAX_LOCAL_LIGHTS - 1u)];
     if light.kind == 3u {
+        // The cone starts on the true path to the light: the push clears the own surface by
+        // moving along the ray (at most 4 voxels) and only the rest along the normal. A full
+        // normal push shifted the whole cone sideways by up to 1.5 voxels (0.6 m in level 1),
+        // into blocks standing beside the receiver, which drew hard block-shaped shadows on
+        // walls and floor that no ray from the surface point crosses.
+        let n_dot_l = dot(surface_normal, direction_to_light);
+        let along = select(0.0, min(push / max(n_dot_l, 1e-3), 4.0 * voxel), n_dot_l > 0.0);
+        origin = world_position + direction_to_light * along
+            + surface_normal * max(push - along * max(n_dot_l, 0.0), 0.0);
+        max_t = max(max_t - along, 0.0);
         // The cone angle is the rectangle's angular size seen from the shading point.
         let size = sqrt(max(light.width, 0.0) * max(light.height, 0.0));
         let tan_half = clamp(0.5 * size / max(light_distance, 1e-3), 0.01, 1.0);

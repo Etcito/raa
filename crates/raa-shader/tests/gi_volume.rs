@@ -70,6 +70,9 @@ fn text_keeps_contract_names_and_attribution() {
         assert!(GI_VOLUME_WGSL.contains(name), "missing {name}");
     }
     assert!(GI_VOLUME_WGSL.contains("1.0 / raa_gi_volume_params.resolution"));
+    // The cone keeps the CPU twin's field-resolution floor (raa-gi `CpuVolume::cone_visibility`).
+    assert!(GI_VOLUME_WGSL.contains("let radius = max(tan_half * max(t - y, 1e-4), voxel);"));
+    assert!(GI_VOLUME_WGSL.contains("if h < 0.25 * voxel && approaching {"));
     assert!(!GI_VOLUME_WGSL.contains("@binding"));
     assert!(!GI_VOLUME_WGSL.contains("textureSample("));
     assert!(!GI_VOLUME_WGSL.contains("inv_resolution:"));

@@ -106,8 +106,11 @@ fn raa_gi_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, 
 // Soft visibility of a cone of half-angle tangent `tan_half` along `dir` (k = 1 / tan_half),
 // in [0, 1]: Quilez's min(k h / t) with Aaltonen's closest-distance estimate. Only a sample
 // closer than the previous one of the same level (or the first of a level) darkens, so a
-// plateau or a receding sample never self-shadows at grazing angles. A sample under half a
-// voxel while approaching blocks fully. With `level_count == 0` it returns 1.
+// plateau or a receding sample never self-shadows at grazing angles. The distance field is
+// quantised to the voxel of its level, so the cone radius is never taken below one voxel and
+// an approaching sample fades from free at half a voxel to fully blocked at a quarter voxel
+// (where the walk stops): a hard cut at half a voxel followed the field's ragged voxel
+// contours and drew jagged black shapes. With `level_count == 0` it returns 1.
 fn raa_gi_cone_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, tan_half: f32) -> f32 {
     let count = raa_gi_volume_params.level_count;
     var t = start;
@@ -129,13 +132,14 @@ fn raa_gi_cone_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: 
         }
         measured = level;
         let approaching = ph >= 1e19 || h < ph;
-        if h < 0.5 * voxel && approaching {
+        if h < 0.25 * voxel && approaching {
             return 0.0;
         }
         if approaching {
             let y = select(0.0, h * h / (2.0 * ph), ph < 1e19 && h < 2.0 * ph);
             let d = sqrt(max(h * h - y * y, 0.0));
-            res = min(res, d / (tan_half * max(t - y, 1e-4)));
+            let radius = max(tan_half * max(t - y, 1e-4), voxel);
+            res = min(res, min(d / radius, (h - 0.25 * voxel) / (0.25 * voxel)));
         }
         ph = h;
         t += clamp(h, 0.5 * voxel, 4.0 * voxel);

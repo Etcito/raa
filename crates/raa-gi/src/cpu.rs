@@ -473,7 +473,8 @@ impl CpuVolume {
     /// step, hit and approach rules as `raa_gi_cone_visibility` in
     /// `crates/raa-shader/src/wgsl/gi_volume.wgsl`, which this is the CPU twin of. A sample that
     /// is not approaching never darkens, distances of different levels are never compared, and an
-    /// empty volume answers 1.
+    /// empty volume answers 1. The cone radius is never below one voxel of the sample's level,
+    /// and an approaching sample fades from free at half a voxel to blocked at a quarter voxel.
     pub fn cone_visibility(
         &self,
         origin: [f32; 3],
@@ -507,7 +508,7 @@ impl CpuVolume {
             }
             measured = level;
             let approaching = previous >= 1.0e19 || h < previous;
-            if h < 0.5 * voxel && approaching {
+            if h < 0.25 * voxel && approaching {
                 return 0.0;
             }
             if approaching {
@@ -518,7 +519,8 @@ impl CpuVolume {
                     0.0
                 };
                 let d = (h * h - y * y).max(0.0).sqrt();
-                res = res.min(d / (tan_half * (t - y).max(1.0e-4)));
+                let radius = (tan_half * (t - y).max(1.0e-4)).max(voxel);
+                res = res.min((d / radius).min((h - 0.25 * voxel) / (0.25 * voxel)));
             }
             previous = h;
             t += h.max(0.5 * voxel).min(4.0 * voxel);

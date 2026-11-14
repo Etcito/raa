@@ -405,3 +405,18 @@ fn cone_visibility_against_plane() {
         );
     }
 }
+
+/// The cone's field-resolution floor, walked by hand on the `cone.json` plane (h = |z - 2.125|,
+/// voxel 0.25 m). One sample at t 0.25 (z 2.025): h = 0.1 = 0.4 voxel, the first of its level,
+/// so approaching; 0.1 is not under the quarter-voxel cut 0.0625; y = 0, d = 0.1, the radius is
+/// max(0.5 x 0.25, 0.25) = 0.25, so d / radius = 0.4; the fade (0.1 - 0.0625) / 0.0625 = 0.6;
+/// res = 0.4. The step clamp(0.1, 0.125, 1.0) takes t to 0.375 > max_t 0.3. smoothstep(0.4) =
+/// 0.16 x 2.2 = 0.352. The same walk at z 2.075 (h = 0.05 < 0.0625) is blocked.
+#[test]
+fn cone_visibility_near_miss_stays_soft() {
+    let volume = plane_volume(&fixture("cone.json"));
+    let near = volume.cone_visibility([2.0, 2.0, 1.775], [0.0, 0.0, 1.0], 0.25, 0.3, 32, 0.5);
+    assert!((near - 0.352).abs() <= 1.0e-4, "near miss: got {near}");
+    let touch = volume.cone_visibility([2.0, 2.0, 1.825], [0.0, 0.0, 1.0], 0.25, 0.3, 32, 0.5);
+    assert_eq!(touch, 0.0);
+}
