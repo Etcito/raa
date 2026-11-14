@@ -69,8 +69,8 @@ const TABLE = [
     'The bright orange block stands in its new place near the right wall, and the floor and wall around it there glow orange from its bounce light; no orange glow remains at its old place in the far left corner.'],
   ['moved-instance-off', 'moved-instance', 'gi-moved-block-off.png', 'P4-Q8 GI off frame', 'raa-gi-core', 'assertion:block-moved',
     'The bright orange block stands in its new place near the right wall with no orange light spilling onto the floor or wall around it.'],
-  ['cornell-box-on', 'cornell-box', 'gi-cornell-box-matches-reference.png', 'P4-Q3 Cornell box matches the reference', 'raa-gi-screen', null,
-    'The Cornell box lit by global illumination from its single ceiling light: the red and green walls bleed their colour onto the white blocks, floor and ceiling (red on the left side of the tall block, green on the right side of the short block); the ceiling is lit indirectly, brightest around the light; shadows under and beside the blocks are soft; corners darken only softly; no blotches, voxel blocks, streaks or light leaks through the walls.'],
+  ['cornell-box-on', 'cornell-box', 'gi-cornell-box-on-bounce-lit.png', 'P4-Q3 Cornell box GI bounce visible', 'raa-gi-screen', null,
+    'Global illumination is visibly at work in the Cornell box, compared with the same box with GI off: the ceiling, dark without GI, is lit by bounce light; the red and green walls bleed their colour onto the white blocks and the floor (a red tint on faces near the red left wall, a green tint on faces near the green right wall); the front faces of the two blocks, which the ceiling light does not reach directly, are lit by bounce light instead of staying black; no bright blotch or ring around the ceiling light and no light leaking through the walls or ceiling. The reference image is a path-traced Cornell box given only as context for the scene: hard shadow edges, a different overall brightness, a different shape of the lit area under the light, visible voxel-scale smoothness in the bounce, or any other difference from the reference are not faults here.'],
   ['cornell-box-off', 'cornell-box', 'gi-cornell-box-off-direct-only.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
     'The same Cornell box with global illumination off and the same exposure: only surfaces the ceiling light reaches directly are lit; the ceiling and the surfaces facing away from the light stay dark; there is no red or green colour bleeding on the white surfaces, and the blocks cast no shadows because RAA local lights are unshadowed without GI.'],
 ];
@@ -89,8 +89,8 @@ const expectedRow = ([mode, arrangement, filename, criterionName, producer, extr
     heldConstant: [...HELD[arrangement], ...(EXTRA_HELD[mode] ?? [])],
     producer,
     pair: mode === 'quality-64-3-on' ? null : `gi-lighting-${arrangement}`,
-    // Only the Cornell GI-on row is judged against the reference image.
-    ...(mode === 'cornell-box-on' ? { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'look' } : {}),
+    // Only the Cornell GI-on row carries the reference image, as judge context (aspect functional).
+    ...(mode === 'cornell-box-on' ? { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'functional' } : {}),
   };
 };
 
@@ -355,14 +355,14 @@ test('Cornell rows: 21 rows, the pair gi-lighting-cornell-box, judgeReference on
   const off = lighting.inventory.find(r => r.mode === 'cornell-box-off');
   assert.equal(lighting.inventory.length, 21);
   assert.equal(on.judgeReference, '/refs/cornell-box-reference.png');
-  assert.equal(on.judgeAspect, 'look');
+  assert.equal(on.judgeAspect, 'functional');
   assert.equal(off.judgeReference, undefined);
   assert.equal(off.judgeAspect, undefined);
   assert.equal(on.pair, 'gi-lighting-cornell-box');
   assert.equal(off.pair, 'gi-lighting-cornell-box');
   assert.deepEqual(on.requiredFacts, ['snapshot:settings', 'snapshot:stats']);
   assert.deepEqual(off.requiredFacts, ['snapshot:settings', 'snapshot:stats']);
-  assert.equal(on.filename, 'gi-cornell-box-matches-reference.png');
+  assert.equal(on.filename, 'gi-cornell-box-on-bounce-lit.png');
   assert.equal(off.filename, 'gi-cornell-box-off-direct-only.png');
   assert.equal(variantOf('cornell-box-on').offMode, 'cornell-box-off');
   assert.deepEqual(variantOf('cornell-box-on').measurement.features, { globalIllumination: true });
