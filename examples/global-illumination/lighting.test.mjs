@@ -21,9 +21,12 @@ const HELD = {
   'local-light-shadow': ['floor', '0.6 m wall', 'point and spot light placement', 'night sky without sun', 'camera'],
   'sky-overhang': ['open ground', '3 m overhang on four pillars', 'white box under the overhang', 'physical day sky and sun', 'camera'],
   'glossy-reflection': ['glossy floor', 'orange glowing sphere above the frame', 'day sky', 'camera'],
-  'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball', 'camera'],
+  'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball', 'camera',
+    'sunlit patch on the red wall'],
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
 };
+// Rows whose held constants extend their arrangement's: the GI-off frame's flat sky ambient (the no-GI baseline).
+const EXTRA_HELD = { 'quality-off': ['flat uncoloured sky ambient fill of the frame without global illumination'] };
 // The 19 rows in contract order: [mode, arrangement, filename, criterionName, producer, extra fact, expectedVisibleBehavior].
 const TABLE = [
   ['color-bleed-on', 'color-bleed', 'gi-color-bleed-white-box-tinted-red-green.png', 'P4-Q3 colour bleeding', 'raa-gi-screen', null,
@@ -55,11 +58,11 @@ const TABLE = [
   ['quality-96-5-on', 'quality', 'gi-quality-96-5-room-lit.png', 'P4-Q6 quality 96/5', 'raa-gi-screen', 'assertion:quality-applied',
     'The red-and-green room is lit by global illumination at the high quality: the walls, floor, box and sphere away from the sunlit patch show soft bounce light tinted by the coloured walls.'],
   ['quality-off', 'quality', 'gi-quality-off-room.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
-    'The same red-and-green room without global illumination: the areas away from the sunlit patch are dark and show no coloured bounce tint.'],
+    'The same red-and-green room without global illumination: no coloured bounce tint appears anywhere; the box, the sphere and the floor beside the red and green walls stay neutral, lit away from the sunlit patch only by a flat, uncoloured ambient fill.'],
   ['forward-content-on', 'forward-content', 'gi-skinned-deformed-transparent-fur-receive-bounce.png', 'P4-Q6 forward content receives GI', 'raa-gi-screen', 'assertion:forward-content',
-    'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red wall all show a reddish bounce tint and soft indirect light on their sides facing the wall, like the static surfaces around them.'],
+    'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red wall all show a reddish bounce tint and soft indirect light coming from the sunlit red wall, like the static floor and walls around them.'],
   ['forward-content-off', 'forward-content', 'gi-forward-content-off.png', 'P4-Q8 GI off frame', 'raa-gi-core', 'assertion:forward-content',
-    'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red wall show no red bounce tint; their shadowed sides stay dark.'],
+    'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red wall show no red bounce tint; apart from the sunlit wall patch they are lit only by a flat, uncoloured ambient fill.'],
   ['moved-instance-on', 'moved-instance', 'gi-moved-block-lights-new-place.png', 'P4-Q6 moved instance relit', 'raa-gi-screen', 'assertion:block-moved',
     'The bright orange block stands in its new place near the right wall, and the floor and wall around it there glow orange from its bounce light; no orange glow remains at its old place in the far left corner.'],
   ['moved-instance-off', 'moved-instance', 'gi-moved-block-off.png', 'P4-Q8 GI off frame', 'raa-gi-core', 'assertion:block-moved',
@@ -77,7 +80,7 @@ const expectedRow = ([mode, arrangement, filename, criterionName, producer, extr
     scenario: 'lighting',
     expectedVisibleBehavior,
     requiredFacts: [...(on ? ON_FACTS : OFF_FACTS), ...(extra ? [extra] : [])],
-    heldConstant: HELD[arrangement],
+    heldConstant: [...HELD[arrangement], ...(EXTRA_HELD[mode] ?? [])],
     producer,
     pair: mode === 'quality-64-3-on' ? null : `gi-lighting-${arrangement}`,
   };
