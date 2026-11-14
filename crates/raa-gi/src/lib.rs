@@ -8,7 +8,11 @@ pub mod clipmap;
 pub mod cpu;
 pub mod error;
 pub mod membership;
+pub mod parts;
 pub mod settings;
+pub mod stats;
+
+pub use stats::GiStats;
 
 pub use settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
