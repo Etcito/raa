@@ -315,5 +315,54 @@
       "p4-gi-volume-render",
       "p4-gi-volume-fresh"
     ]
+  },
+  {
+    "name": "p4-gi-lighting-check",
+    "command": "node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-lighting-select",
+    "command": "node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-lighting-check"
+    ]
+  },
+  {
+    "name": "p4-gi-lighting-clean",
+    "command": "node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-lighting-select"
+    ]
+  },
+  {
+    "name": "p4-gi-lighting-render",
+    "command": "node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-lighting-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-lighting-fresh",
+    "command": "node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-lighting-render"
+    ]
+  },
+  {
+    "name": "p4-gi-lighting-judge",
+    "command": "node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/lighting --stage lighting --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-lighting-render",
+      "p4-gi-lighting-fresh"
+    ]
   }
 ]
