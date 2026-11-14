@@ -8,6 +8,7 @@ use raa_core::{GpuContext, RaaError};
 use raa_shader::{LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, TILE_WORDS};
 
 use crate::HDR_FORMAT;
+use crate::brdf_atlas::create_brdf_atlas;
 use crate::env::EnvGpu;
 
 /// Size in bytes of the `ShadowGpu` uniform (binding 2).
@@ -386,7 +387,7 @@ fn f16_bits(value: f32) -> u16 {
 }
 
 /// Little-endian f16 texel bytes.
-fn f16_texel(values: &[f32]) -> Vec<u8> {
+pub(crate) fn f16_texel(values: &[f32]) -> Vec<u8> {
     values
         .iter()
         .flat_map(|v| f16_bits(*v).to_le_bytes())
@@ -576,10 +577,11 @@ fn view_of(texture: &wgpu::Texture, dimension: wgpu::TextureViewDimension) -> wg
 /// D2 texture as TEXTURE_2D, and a `texture_depth_2d_array` view of it does not read back.
 const DUMMY_SHADOW_LAYERS: u32 = 2;
 
-/// Creates the dummy views: depth 1 (2d array), env cube of DUMMY_ENV_COLOR, BRDF LUT
-/// (1, 0), ao/contact 1, opaque colour black, opaque depth 1, GI screen (0, 0, 0, 1) and a
-/// 1x1x1 volume of (0, 0, 0, 12.8) (S38, no hit). Depth32Float cannot be
-/// written by a copy, so each shadow dummy layer is cleared to 1.0 by a render pass.
+/// Creates the dummy views: depth 1 (2d array), env cube of DUMMY_ENV_COLOR, the BRDF/LTC
+/// atlas with its BRDF region (1, 0), ao/contact 1, opaque colour black, opaque depth 1,
+/// GI screen (0, 0, 0, 1) and a 1x1x1 volume of (0, 0, 0, 12.8) (S38, no hit).
+/// Depth32Float cannot be written by a copy, so each shadow dummy layer is cleared to 1.0
+/// by a render pass.
 fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
     use wgpu::TextureViewDimension as D;
     let shadow = gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -633,13 +635,7 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         6,
         &f16_texel(&[r, g, b, 1.0]),
     );
-    let lut = dummy_texture(
-        gpu,
-        "raa-pipeline.dummy.brdf_lut",
-        wgpu::TextureFormat::Rg16Float,
-        1,
-        &f16_texel(&[1.0, 0.0]),
-    );
+    let lut = create_brdf_atlas(gpu, "raa-pipeline.dummy.brdf_lut", [1.0, 0.0]);
     let one = dummy_texture(
         gpu,
         "raa-pipeline.dummy.one",
@@ -864,7 +860,8 @@ impl LightingResources {
         self.state.clear_env();
     }
 
-    /// Sets the Rg16Float BRDF LUT (scale, bias).
+    /// Sets the Rgba16Float 128 x 192 BRDF/LTC atlas of contract brdf-ltc-atlas, whose
+    /// BRDF region holds (scale, bias).
     pub fn set_brdf_lut(&mut self, view: wgpu::TextureView) {
         self.state.set_brdf_lut(view);
     }

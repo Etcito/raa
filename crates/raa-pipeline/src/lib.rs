@@ -3,6 +3,7 @@
 //! resources (S10) the lit passes bind. `Pipeline` runs the enabled feature passes in order
 //! inside one raa-core frame graph pass, `raa.pipeline`.
 
+mod brdf_atlas;
 mod env;
 mod lighting;
 mod output;
@@ -10,6 +11,10 @@ mod pass;
 mod pipeline;
 mod targets;
 
+pub use brdf_atlas::{
+    BRDF_ATLAS_FORMAT, BRDF_ATLAS_HEIGHT, BRDF_ATLAS_WIDTH, BRDF_LUT_SIZE, LTC_TABLE_SIZE,
+    LTC1_ORIGIN, LTC2_ORIGIN, create_brdf_atlas, ltc_table_halfs,
+};
 pub use env::EnvGpu;
 pub use lighting::{LightingResources, WeatherLightingGpu};
 pub use pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
