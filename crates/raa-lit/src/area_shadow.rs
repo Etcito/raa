@@ -8,8 +8,11 @@
 
 use raa_core::RaaError;
 use raa_math::{Mat4, Vec3};
+use raa_shader::{LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS};
 
 use crate::light_math;
+use crate::local_light::{LightHandle, LocalLightKind};
+use crate::local_lights::LocalLights;
 
 /// Largest number of hero shadow-map lights in one frame.
 pub const MAX_HERO_LIGHTS: usize = 4;
@@ -192,6 +195,244 @@ pub fn hero_view_proj(position: Vec3, direction: Vec3, range: f32) -> Mat4 {
     let projection = Mat4::perspective_rh_zo(HERO_FOV_Y_RAD, 1.0, HERO_NEAR, far);
     let view = Mat4::look_at_rh(position, position + direction, bitangent);
     projection.mul(&view)
+}
+
+/// The camera that hero selection measures screen coverage from.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct AreaShadowCamera {
+    /// Eye position, metres.
+    pub eye: Vec3,
+    /// Unit view direction.
+    pub forward: Vec3,
+    /// Vertical field of view, radians.
+    pub fov_y_rad: f32,
+    /// Viewport width and height, pixels.
+    pub viewport: (u32, u32),
+}
+
+/// Fraction of the screen covered by a sphere of radius `range` at `position`, in `[0, 1]`.
+///
+/// A sphere that contains the eye covers the whole screen (1). One lying wholly behind the
+/// camera, beyond its range, covers nothing (0). Otherwise its projected radius is
+/// `r_px = focal * range / sqrt(dist^2 - range^2)` with `focal = h / (2 tan(fov_y / 2))`, and
+/// the coverage is `min(1, pi * r_px^2 / (w * h))`, where `w` and `h` are at least 1.
+pub fn screen_coverage(camera: &AreaShadowCamera, position: Vec3, range: f32) -> f32 {
+    let offset = position - camera.eye;
+    let dist = offset.length();
+    if dist <= range {
+        return 1.0;
+    }
+    if offset.dot(camera.forward) < -range {
+        return 0.0;
+    }
+    let width = camera.viewport.0.max(1) as f32;
+    let height = camera.viewport.1.max(1) as f32;
+    let focal = height / (2.0 * (camera.fov_y_rad * 0.5).tan());
+    let radius_px = focal * range / (dist * dist - range * range).sqrt();
+    (std::f32::consts::PI * radius_px * radius_px / (width * height)).min(1.0)
+}
+
+/// Coverage ratio a waiting light must exceed to replace the weakest hero.
+const HERO_SWAP_RATIO: f32 = 1.25;
+
+/// One area light that may hold a hero slot in the current call.
+#[derive(Copy, Clone, Debug)]
+struct Candidate {
+    handle: LightHandle,
+    coverage: f32,
+}
+
+/// Chooses which area lights hold the hero shadow slots and writes the area-light lanes.
+///
+/// Handoff: `HeroSelector` (`new`, `update`, `active_heroes`) in `crates/raa-lit/src/area_shadow.rs`
+/// is attached by card 'raa-lit: area-light shadow tiers wired into LitRenderer::prepare', which
+/// calls `HeroSelector::new`, `HeroSelector::update` and `HeroSelector::active_heroes`, and
+/// `LocalLights::world_lights` (`crates/raa-lit/src/local_lights.rs`) through them. Today `update`
+/// reads the settings, the camera and the registry, writes the three lanes of every area record
+/// and fills `heroes`; its only state is the slot handles and their coverages of the last call.
+#[derive(Debug)]
+pub struct HeroSelector {
+    slots: [Option<LightHandle>; MAX_HERO_LIGHTS],
+    coverages: [f32; MAX_HERO_LIGHTS],
+    candidates: Vec<Candidate>,
+}
+
+impl Default for HeroSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HeroSelector {
+    /// Creates an empty selector. The candidate scratch is allocated here, never in `update`.
+    pub fn new() -> HeroSelector {
+        HeroSelector {
+            slots: [None; MAX_HERO_LIGHTS],
+            coverages: [0.0; MAX_HERO_LIGHTS],
+            candidates: Vec::with_capacity(MAX_LOCAL_LIGHTS),
+        }
+    }
+
+    /// Number of hero slots occupied after the last [`HeroSelector::update`].
+    pub fn active_heroes(&self) -> u32 {
+        self.slots.iter().filter(|slot| slot.is_some()).count() as u32
+    }
+
+    /// Selects the hero lights of this call and writes the area-light lanes of `records`.
+    ///
+    /// `records` holds the `LocalLights::write_gpu` output of `lights`. Each area record gets
+    /// `w_direct` at offset 28, `hero_layer` at 44 and `w_cone` at 48, and `heroes[slot]` is the
+    /// hero view-projection of each occupied slot, `None` elsewhere. Returns whether any byte of
+    /// `records` changed. Allocates nothing.
+    pub fn update(
+        &mut self,
+        settings: &AreaShadowSettings,
+        camera: &AreaShadowCamera,
+        lights: &LocalLights,
+        records: &mut [u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE],
+        heroes: &mut [Option<Mat4>; MAX_HERO_LIGHTS],
+    ) -> bool {
+        let limit = (settings.hero_count as usize).min(MAX_HERO_LIGHTS);
+        self.candidates.clear();
+        for (_, handle, light) in lights.world_lights() {
+            if !matches!(light.kind, LocalLightKind::Area) {
+                continue;
+            }
+            let position = Vec3::from_array(light.position);
+            let coverage = screen_coverage(camera, position, light.range);
+            let distance = rect_distance(
+                camera.eye,
+                position,
+                Vec3::from_array(light.direction),
+                light.size,
+            );
+            let tier_ok = match settings.tier {
+                AreaShadowTier::Hero => true,
+                AreaShadowTier::Auto => distance < settings.hero_distance,
+                AreaShadowTier::Cone | AreaShadowTier::Fade => false,
+            };
+            if limit > 0 && coverage > 0.0 && tier_ok {
+                self.candidates.push(Candidate { handle, coverage });
+            }
+        }
+        self.candidates.sort_unstable_by(|a, b| {
+            b.coverage
+                .total_cmp(&a.coverage)
+                .then(a.handle.cmp(&b.handle))
+        });
+
+        // Release the slots whose light is no longer a candidate or whose index is past the count.
+        let candidates = &self.candidates;
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            let kept = index < limit
+                && slot.is_some_and(|handle| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.handle == handle)
+                });
+            if !kept {
+                *slot = None;
+            }
+        }
+
+        // Fill the free slots below the count, lowest index first, best candidate first.
+        for index in 0..limit {
+            if matches!(self.slots.get(index), Some(None))
+                && let Some(pick) = self.unheld()
+                && let Some(slot) = self.slots.get_mut(index)
+            {
+                *slot = Some(pick.handle);
+            }
+        }
+
+        // With every slot below the count taken, the best waiting light may replace the weakest
+        // hero, at most once per call and only when its coverage exceeds the hero's by the ratio.
+        for (slot, coverage) in self.slots.iter().zip(self.coverages.iter_mut()) {
+            *coverage = slot
+                .and_then(|handle| {
+                    self.candidates
+                        .iter()
+                        .find(|candidate| candidate.handle == handle)
+                })
+                .map_or(0.0, |candidate| candidate.coverage);
+        }
+        if let Some(challenger) = self.unheld()
+            && let Some((index, weakest)) = self.weakest(limit)
+            && challenger.coverage > HERO_SWAP_RATIO * weakest
+        {
+            if let Some(slot) = self.slots.get_mut(index) {
+                *slot = Some(challenger.handle);
+            }
+            if let Some(coverage) = self.coverages.get_mut(index) {
+                *coverage = challenger.coverage;
+            }
+        }
+
+        // Lanes of every area record, and the hero projection of every occupied slot.
+        heroes.fill(None);
+        let mut changed = false;
+        for (index, handle, light) in lights.world_lights() {
+            if !matches!(light.kind, LocalLightKind::Area) {
+                continue;
+            }
+            let position = Vec3::from_array(light.position);
+            let direction = Vec3::from_array(light.direction);
+            let distance = rect_distance(camera.eye, position, direction, light.size);
+            let slot = self.slots.iter().position(|held| *held == Some(handle));
+            let (hero_layer, (w_cone, w_direct)) = match slot {
+                Some(slot) => (
+                    HERO_LAYER_BASE as f32 + slot as f32,
+                    tier_weights(settings, true, distance),
+                ),
+                None => (-1.0, tier_weights(settings, false, distance)),
+            };
+            let base = index * LIGHT_GPU_SIZE;
+            changed |= write_lane(records, base + 28, w_direct);
+            changed |= write_lane(records, base + 44, hero_layer);
+            changed |= write_lane(records, base + 48, w_cone);
+            if let Some(slot) = slot
+                && let Some(entry) = heroes.get_mut(slot)
+            {
+                *entry = Some(hero_view_proj(position, direction, light.range));
+            }
+        }
+        changed
+    }
+
+    /// The best candidate that holds no slot, in coverage-descending then handle-ascending order.
+    fn unheld(&self) -> Option<Candidate> {
+        self.candidates
+            .iter()
+            .copied()
+            .find(|candidate| !self.slots.contains(&Some(candidate.handle)))
+    }
+
+    /// The occupied slot below `limit` with the lowest coverage; ties go to the higher handle.
+    fn weakest(&self, limit: usize) -> Option<(usize, f32)> {
+        self.slots
+            .iter()
+            .zip(self.coverages.iter())
+            .take(limit)
+            .enumerate()
+            .filter_map(|(index, (slot, coverage))| slot.map(|handle| (index, handle, *coverage)))
+            .min_by(|a, b| a.2.total_cmp(&b.2).then(b.1.cmp(&a.1)))
+            .map(|(index, _, coverage)| (index, coverage))
+    }
+}
+
+/// Writes one little-endian f32 lane at `offset`, returning whether its four bytes changed.
+fn write_lane(records: &mut [u8], offset: usize, value: f32) -> bool {
+    let Some(lane) = records.get_mut(offset..offset + 4) else {
+        return false;
+    };
+    let bytes = value.to_le_bytes();
+    if lane.iter().zip(bytes).all(|(dst, src)| *dst == src) {
+        return false;
+    }
+    for (dst, src) in lane.iter_mut().zip(bytes) {
+        *dst = src;
+    }
+    true
 }
 
 #[cfg(test)]

@@ -252,6 +252,16 @@ impl LocalLights {
         }
     }
 
+    /// Yields `(dense GPU record index, stable handle, world descriptor)` in the ascending-handle
+    /// order that [`LocalLights::write_gpu`] packs, so index `i` names record `i` of its output.
+    pub fn world_lights(&self) -> impl Iterator<Item = (usize, LightHandle, LocalLight)> + '_ {
+        self.entries[..self.len]
+            .iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, entry)| (index, entry.handle, world_desc(entry)))
+    }
+
     /// Whether a registry mutation requires its backing GPU data to be refreshed.
     pub fn is_dirty(&self) -> bool {
         self.dirty

@@ -55,8 +55,9 @@ pub use skin_views::{
 };
 
 pub use area_shadow::{
-    AreaShadowSettings, AreaShadowTier, HERO_FOV_Y_RAD, HERO_LAYER_BASE, HERO_NEAR,
-    MAX_HERO_LIGHTS, hero_view_proj, rect_distance, tier_weights,
+    AreaShadowCamera, AreaShadowSettings, AreaShadowTier, HERO_FOV_Y_RAD, HERO_LAYER_BASE,
+    HERO_NEAR, HeroSelector, MAX_HERO_LIGHTS, hero_view_proj, rect_distance, screen_coverage,
+    tier_weights,
 };
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
