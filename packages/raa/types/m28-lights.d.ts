@@ -47,6 +47,14 @@ export interface LightStats {
   pending: boolean;
 }
 
+/** Area-light shading mode: LTC, or the diffuse-only polygon form factor. */
+export type AreaLightShadingMode = 'ltc' | 'formFactor';
+
+/** Settings accepted by {@link Engine.setAreaLightShading}. */
+export interface AreaLightShadingDesc {
+  mode: AreaLightShadingMode;
+}
+
 export interface Engine {
   /** Adds a local light; capacity is 256. The sun remains configured through setLight. */
   addLight(desc: LocalLightDesc): LightHandle;
@@ -64,4 +72,14 @@ export interface Engine {
   detachLight(handle: LightHandle): void;
   /** Returns synchronous counts and the latest fully completed asynchronous stats. */
   lightStats(): LightStats;
+  /**
+   * Selects the engine-wide area-light shading mode: `'ltc'` integrates diffuse and GGX
+   * specular over the rectangle with the LTC tables, `'formFactor'` uses the diffuse polygon
+   * form factor only. The setting persists until changed and applies to every view; a new
+   * Engine starts at `'ltc'`. A non-object argument, a missing `mode` or any other value
+   * throws `api.invalid_argument` and changes nothing.
+   */
+  setAreaLightShading(settings: AreaLightShadingDesc): void;
+  /** Returns the current area-light shading mode as `{ mode }`. */
+  areaLightShading(): AreaLightShadingDesc;
 }

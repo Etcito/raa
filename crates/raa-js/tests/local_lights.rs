@@ -11,8 +11,9 @@ use raa_lit::{LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE, MAX_LOC
 mod m28;
 
 use m28::{
-    INVALID_ARGUMENT, INVALID_DESC, LocalLightPatch, Patch, Properties, Raw, add, handle_arg,
-    merge, parse, remove, srgb_to_linear, update,
+    AREA_FORM_FACTOR_FEATURE_ID, AreaLightShading, INVALID_ARGUMENT, INVALID_DESC, LocalLightPatch,
+    Patch, Properties, Raw, add, handle_arg, merge, parse, parse_area_shading, remove,
+    srgb_to_linear, update,
 };
 
 /// A native stand-in for a JS description object: a key is present exactly when it is
@@ -212,6 +213,52 @@ fn handles_are_positive_safe_integers_before_narrowing() {
             INVALID_ARGUMENT
         );
     }
+}
+
+// ---- area-light shading (contract `area-light-shading-api`) ----
+
+#[test]
+fn area_light_shading_parses_ltc_and_form_factor() {
+    let ltc = parse_area_shading(&Mock::new(&[("mode", Raw::String("ltc".into()))])).unwrap();
+    assert_eq!(ltc, AreaLightShading::Ltc);
+    let form_factor =
+        parse_area_shading(&Mock::new(&[("mode", Raw::String("formFactor".into()))])).unwrap();
+    assert_eq!(form_factor, AreaLightShading::FormFactor);
+}
+
+#[test]
+fn area_light_shading_refuses_every_other_value() {
+    let cases = [
+        Mock::empty(),
+        Mock::new(&[("mode", Raw::Undefined)]),
+        Mock::new(&[("mode", Raw::String("LTC".into()))]),
+        Mock::new(&[("mode", Raw::String("formfactor".into()))]),
+        Mock::new(&[("mode", Raw::Number(1.0))]),
+    ];
+    for mock in cases {
+        let err = parse_area_shading(&mock).unwrap_err();
+        assert_eq!(err.code(), INVALID_ARGUMENT);
+        assert_eq!(
+            err.message(),
+            "setAreaLightShading: 'mode' must be 'ltc' or 'formFactor'"
+        );
+    }
+}
+
+#[test]
+fn area_form_factor_feature_id_is_39() {
+    assert_eq!(AREA_FORM_FACTOR_FEATURE_ID, 39);
+}
+
+#[test]
+fn area_light_shading_as_str_round_trips() {
+    for mode in [AreaLightShading::Ltc, AreaLightShading::FormFactor] {
+        let parsed =
+            parse_area_shading(&Mock::new(&[("mode", Raw::String(mode.as_str().into()))])).unwrap();
+        assert_eq!(parsed, mode);
+    }
+    assert_eq!(AreaLightShading::Ltc.as_str(), "ltc");
+    assert_eq!(AreaLightShading::FormFactor.as_str(), "formFactor");
 }
 
 // ---- S17 add/update/remove against the renderer-owned registry ----

@@ -13,6 +13,8 @@ interface Engine {
               localOffset: [number, number, number]): void
   detachLight(handle: LightHandle): void
   lightStats(): LightStats
+  setAreaLightShading(settings: AreaLightShadingDesc): void
+  areaLightShading(): AreaLightShadingDesc
 }
 ```
 
@@ -32,6 +34,28 @@ inner angle is 80% of the outer angle. `size` contains positive full width and
 height values. All numeric values must be finite; colours must be in [0, 1].
 `radius` and `shadows` are retained authoring metadata only: radius does not
 control shadows, and local lights do not cast shadows.
+
+An area light emits radiance intensity / (width x height) per unit colour over its
+rectangle, so intensity is radiance x area.
+
+## Area-light shading
+
+`setAreaLightShading(settings)` selects how area lights are shaded. The setting is
+engine-wide (every view) and persists until changed; a new Engine starts at `'ltc'`.
+
+```ts
+type AreaLightShadingMode = 'ltc' | 'formFactor'
+interface AreaLightShadingDesc { mode: AreaLightShadingMode }
+```
+
+- `'ltc'` integrates diffuse and GGX specular over the rectangle with the LTC tables.
+- `'formFactor'` is the cheap far or low option: the diffuse polygon form factor
+  only, with no table and no specular.
+
+`areaLightShading()` returns the current `{ mode }`. A non-object argument, a missing
+`mode`, or any other value throws `api.invalid_argument` with the message
+`setAreaLightShading: 'mode' must be 'ltc' or 'formFactor'`; a refused call changes
+nothing.
 
 ## Lifecycle
 

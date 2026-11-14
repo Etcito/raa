@@ -221,6 +221,50 @@ pub(crate) fn parse(source: &impl Properties) -> Result<LocalLightPatch, RaaErro
     })
 }
 
+/// The logical `FrameGpu` feature id of the diffuse-only area-light form factor: id 39,
+/// which `raa-shader`'s generated mapping places in `flags` word 3, bit 7. Setting it makes
+/// the area-light branch of `local_lighting.wgsl` use the diffuse form factor instead of LTC.
+pub(crate) const AREA_FORM_FACTOR_FEATURE_ID: u32 = 39;
+
+/// `mode` values of the engine-wide area-light shading setting (contract
+/// `area-light-shading-api`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AreaLightShading {
+    /// Diffuse and GGX specular integrated over the rectangle with the LTC tables.
+    Ltc,
+    /// The diffuse polygon form factor only, without a table or specular.
+    FormFactor,
+}
+
+impl AreaLightShading {
+    /// The JS spelling of the mode.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            AreaLightShading::Ltc => "ltc",
+            AreaLightShading::FormFactor => "formFactor",
+        }
+    }
+}
+
+/// The exact `setAreaLightShading` refusal (contract `area-light-shading-api`).
+fn area_shading_invalid() -> RaaError {
+    RaaError::FrameGraph {
+        code: INVALID_ARGUMENT,
+        message: "setAreaLightShading: 'mode' must be 'ltc' or 'formFactor'".into(),
+    }
+}
+
+/// Parses the `mode` key of an area-light shading description. Only the strings `ltc` and
+/// `formFactor` are accepted; an absent, `undefined`, non-string or other string value is
+/// refused with `api.invalid_argument` and the contract message.
+pub(crate) fn parse_area_shading(source: &impl Properties) -> Result<AreaLightShading, RaaError> {
+    match source.read("mode")? {
+        Raw::String(mode) if mode == "ltc" => Ok(AreaLightShading::Ltc),
+        Raw::String(mode) if mode == "formFactor" => Ok(AreaLightShading::FormFactor),
+        _ => Err(area_shading_invalid()),
+    }
+}
+
 /// Merges a parsed patch onto `base`: `Keep` retains the base field, `Reset` restores the
 /// S17 default and `Set` replaces it. The colour is converted from sRGB to linear exactly
 /// once, and only when it was set, so a retained or default colour is never reconverted.
@@ -566,6 +610,48 @@ mod web {
         #[wasm_bindgen(js_name = lightStats)]
         pub fn light_stats(&mut self) -> Result<JsValue, JsValue> {
             self.with_state(|_, st| stats_value(st))
+        }
+
+        /// Selects the engine-wide area-light shading mode: `ltc` integrates diffuse and GGX
+        /// specular over the rectangle with the LTC tables, `formFactor` uses the diffuse
+        /// polygon form factor only. The setting persists until changed and applies to every
+        /// view. A non-object argument, a missing `mode` or any other value throws
+        /// `api.invalid_argument` and changes nothing.
+        #[wasm_bindgen(js_name = setAreaLightShading)]
+        pub fn set_area_light_shading(&mut self, settings: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                if !settings.is_object() || settings.is_null() || Array::is_array(&settings) {
+                    return Err(area_shading_invalid());
+                }
+                let mode = parse_area_shading(&ReflectSource(&settings))
+                    .map_err(|_| area_shading_invalid())?;
+                st.lit.set_frame_feature(
+                    AREA_FORM_FACTOR_FEATURE_ID,
+                    mode == AreaLightShading::FormFactor,
+                );
+                Ok(())
+            })
+        }
+
+        /// Returns the current area-light shading mode as `{ mode }`. A new Engine reports
+        /// `ltc` until `setAreaLightShading` changes it.
+        #[wasm_bindgen(js_name = areaLightShading)]
+        pub fn area_light_shading(&mut self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let mode = if st.lit.frame_feature(AREA_FORM_FACTOR_FEATURE_ID) {
+                    AreaLightShading::FormFactor
+                } else {
+                    AreaLightShading::Ltc
+                };
+                let out = Object::new();
+                Reflect::set(
+                    &out,
+                    &JsValue::from_str("mode"),
+                    &JsValue::from_str(mode.as_str()),
+                )
+                .map_err(|_| area_shading_invalid())?;
+                Ok(out.into())
+            })
         }
     }
 }
