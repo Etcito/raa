@@ -690,26 +690,17 @@ fn area_light_uses_s11_rectangle_basis_and_representative_point() {
     assert!(representative.contains("-half_extent.x, half_extent.x"));
     assert!(representative.contains("-half_extent.y, half_extent.y"));
     assert!(representative.contains("light.position_range.xyz + basis[0] * along_t"));
+    assert!(source.contains("max(light.width, 0.0)"));
+    assert!(source.contains("max(light.height, 0.0)"));
     let contribution = source
         .split("fn raa_local_contribution(")
         .nth(1)
         .expect("contribution");
-    // One-sided emission along +travel, checked before the representative point.
-    let emission = contribution
-        .find("dot(c.position - light.position_range.xyz, travel) <= 0.0")
-        .expect("emission side");
-    assert!(
-        emission
-            < contribution
-                .find("raa_area_representative(light, c.position)")
-                .unwrap()
-    );
-    // Direction and distance come from the representative point.
+    // Visibility direction and distance come from the representative point, with the
+    // coincidence and range guards before the division.
     let area = contribution
         .find("let to_light = representative - c.position;")
         .expect("area distance");
-    // Finite near-field: coincidence and range guards precede the area division, and the
-    // windowed inverse square keeps its near clamp.
     let branch = &contribution[area..];
     assert!(
         branch
@@ -717,10 +708,64 @@ fn area_light_uses_s11_rectangle_basis_and_representative_point() {
             .unwrap()
             < branch.find("direction = to_light / distance;").unwrap()
     );
-    assert!(source.contains("max(distance * distance, 0.04)"));
-    // A mathematical [0, 0] size degenerates to the point formula: representative == position.
-    assert!(source.contains("max(light.width, 0.0)"));
-    assert!(source.contains("max(light.height, 0.0)"));
+    assert!(branch.contains("direction, distance), 0.0, 1.0)"));
+}
+
+fn wgsl_fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let start = source
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("{name} missing"));
+    let rest = &source[start..];
+    let end = rest.find("\n}\n").expect("function end");
+    &rest[..end]
+}
+
+#[test]
+fn area_light_ltc_and_form_factor_mode() {
+    let source = raa_shader::LOCAL_LIGHTING_WGSL;
+    // (a) Feature 39 selects the diffuse-only form factor through the generated helper.
+    assert!(source.contains("const RAA_AREA_FORM_FACTOR_FEATURE: u32 = 39u;"));
+    assert!(source.contains("raa_feature_enabled(RAA_AREA_FORM_FACTOR_FEATURE)"));
+    assert!(raa_shader::PRELUDE_WGSL.contains("fn raa_feature_enabled(id: u32) -> bool"));
+    // (b) One-sided check, then the representative point, then the range window.
+    let contribution = wgsl_fn_body(source, "raa_local_contribution");
+    let emission = contribution
+        .find("dot(c.position - light.position_range.xyz, travel) <= 0.0")
+        .expect("emission side");
+    let representative = contribution
+        .find("raa_area_representative(light, c.position)")
+        .expect("representative");
+    let window = contribution
+        .find("raa_area_window(distance, light.position_range.w)")
+        .expect("area window");
+    assert!(emission < representative && representative < window);
+    // The area branch returns before the n.l early-out of the other kinds.
+    let area_branch = &contribution[window..];
+    assert!(
+        area_branch.find("raa_area_ltc(light, s, c)").unwrap()
+            < area_branch.find("dot(s.normal, direction) <= 0.0").unwrap()
+    );
+    // (c) Both LTC tables through explicit-LOD samples, three.js roughness clamp, right-handed t2.
+    let ltc = wgsl_fn_body(source, "raa_area_ltc");
+    for table in ["raa_ltc_uv(0u,", "raa_ltc_uv(1u,"] {
+        let at = ltc.find(table).unwrap_or_else(|| panic!("{table} missing"));
+        let sample = ltc[..at]
+            .rfind("textureSampleLevel(raa_brdf_lut, raa_linear_clamp,")
+            .expect("explicit LOD sample");
+        assert!(!ltc[sample..at].contains(';'), "{table} outside its sample");
+    }
+    assert!(ltc.contains("max(s.roughness, 0.0525)"));
+    assert!(ltc.contains("t2 = cross(n, t1)"));
+    // (d) The form-factor mode reads no texture.
+    assert!(!wgsl_fn_body(source, "raa_area_diffuse").contains("texture"));
+    // (e) No implicit-derivative sample; Direct is called once (point, spot, directional).
+    assert!(!source.contains("textureSample("));
+    assert_eq!(
+        source
+            .matches("raa_slot_direct(s, c, direction, radiance)")
+            .count(),
+        1
+    );
 }
 
 #[test]
