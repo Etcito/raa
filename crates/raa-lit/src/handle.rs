@@ -24,7 +24,7 @@ use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
-use crate::lod::{LodParams, LodRegistry, shadow_level};
+use crate::lod::{LodLevel, LodParams, LodRegistry, shadow_level};
 use crate::material::{DrawClass, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::material_data::MaterialData;
 use crate::meshes::{INSTANCE_SLOT, LitMeshId, MeshStore, STREAM0_SLOT, STREAM1_SLOT};
@@ -1123,6 +1123,23 @@ fn cascade_levels(
     }
 }
 
+/// The GPU buffers of one lit sub-mesh and the range it draws in the index buffer (S10).
+#[derive(Clone, Debug)]
+pub struct LitMeshStorage {
+    /// S10 stream 0 (24 B per vertex: position xyz, normal xyz), `VERTEX | STORAGE`.
+    pub stream0: wgpu::Buffer,
+    /// u32 triangle-list indices, `INDEX | STORAGE`.
+    pub index: wgpu::Buffer,
+    /// First index of the sub-mesh in `index`.
+    pub first_index: u32,
+    /// Index count of the sub-mesh.
+    pub index_count: u32,
+    /// Vertex count of the lit mesh.
+    pub vertex_count: u32,
+    /// Changes whenever the lit mesh's buffers are recreated by upload or update.
+    pub key: u64,
+}
+
 /// Shared view of the lit renderer for passes and contributors (an `Rc` to the renderer's
 /// state; clones share it). Every method borrows the state immutably.
 #[derive(Clone)]
@@ -1321,6 +1338,37 @@ impl LitHandle {
             .unwrap_or((0, 0))
     }
 
+    /// The buffers of sub-mesh `mesh` with its range and lit mesh vertex count; `None` for
+    /// an unknown or removed id. Resolves the given id itself, never the LOD selection.
+    /// The key changes whenever the lit mesh's buffers are recreated by upload or update.
+    pub fn mesh_storage(&self, mesh: MeshId) -> Option<LitMeshStorage> {
+        let s = self.shared.borrow();
+        let (g, first, count) = s.meshes.resolve(s.select.mesh_binding(mesh).0).ok()?;
+        Some(LitMeshStorage {
+            stream0: g.stream0.clone(),
+            index: g.index.clone(),
+            first_index: first,
+            index_count: count,
+            vertex_count: g.vertex_count(),
+            key: g.key(),
+        })
+    }
+
+    /// Clears `out` and copies the detail chain of `full` (the full mesh first at error 0,
+    /// then the coarser levels by increasing error), returning `true`. Without a chain
+    /// `out` stays empty and it returns `false`.
+    pub fn lod_chain_into(&self, full: MeshId, out: &mut Vec<LodLevel>) -> bool {
+        out.clear();
+        let s = self.shared.borrow();
+        match s.lods.chain(full) {
+            Some(chain) => {
+                out.extend_from_slice(chain);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// The compacted u32 instance id stream (4 B per id, camera section first).
     pub fn id_buffer(&self) -> wgpu::Buffer {
         self.shared.borrow().id_buffer.clone()
@@ -1341,6 +1389,11 @@ impl LitHandle {
     /// The `SurfaceMaterialGpu` array (S10 group-0 binding 1).
     pub fn material_storage(&self) -> wgpu::Buffer {
         self.shared.borrow().material_buffer.clone()
+    }
+
+    /// The slot-indexed `InstanceExtraGpu` array (S10 group-0 binding 2).
+    pub fn extras_storage(&self) -> wgpu::Buffer {
+        self.shared.borrow().extras_buffer.clone()
     }
 
     /// Advances whenever the instance or material storage buffer is (re)created, so a

@@ -203,13 +203,11 @@ impl GpuLitMesh {
     /// gi_access test" reads `GpuLitMesh::key` and `GpuLitMesh::vertex_count` through
     /// `MeshStore::resolve` to fill its `LitMeshStorage` record; `GpuLitMesh::key` changes on
     /// every `MeshStore` upload and update.
-    #[allow(dead_code, reason = "used by LitHandle::mesh_storage")]
     pub(crate) fn key(&self) -> u64 {
         self.key
     }
 
     /// The uploaded vertex count of this mesh (`LitMeshInfo.vertices`).
-    #[allow(dead_code, reason = "used by LitHandle::mesh_storage")]
     pub(crate) fn vertex_count(&self) -> u32 {
         self.info.vertices
     }
