@@ -5,6 +5,7 @@
 //! Adapted solstice parts name their source in their module docs; see README.md.
 
 pub mod clipmap;
+pub mod cpu;
 pub mod error;
 pub mod settings;
 
