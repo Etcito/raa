@@ -7,6 +7,7 @@
 pub mod clipmap;
 pub mod cpu;
 pub mod error;
+pub mod layouts;
 pub mod membership;
 pub mod parts;
 pub mod settings;
