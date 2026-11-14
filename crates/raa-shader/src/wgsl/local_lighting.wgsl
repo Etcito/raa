@@ -14,16 +14,6 @@ fn raa_local_spot(cosine: f32, outer: f32, inner: f32) -> f32 {
     return smoothstep(outer, inner, cosine);
 }
 
-// S11 rectangle basis: forward is the light's travel direction d; up0 is Y unless d is
-// within 0.99 of Y, then X; tangent = normalize(cross(up0, d)); bitangent = cross(d, tangent).
-// The rectangle is centred on the light and spans width along tangent, height along bitangent.
-fn raa_area_basis(travel: vec3<f32>) -> mat3x3<f32> {
-    let up0 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
-        abs(dot(travel, vec3<f32>(0.0, 1.0, 0.0))) < 0.99);
-    let tangent = normalize(cross(up0, travel));
-    return mat3x3<f32>(tangent, cross(travel, tangent), travel);
-}
-
 // Karis representative point over the oriented rectangle, evaluated from the shading
 // position. The rectangle emits along +travel only. Callers keep the extents positive;
 // a mathematical [0, 0] still degenerates to the point formula below.

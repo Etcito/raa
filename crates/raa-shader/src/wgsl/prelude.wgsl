@@ -148,6 +148,9 @@ fn raa_previous_model(r: RaaPreviousInstanceGpu) -> mat4x4<f32> {
 @group(1) @binding(2) var<uniform> raa_shadow: ShadowGpu;
 @group(1) @binding(3) var raa_env_specular: texture_cube<f32>;
 @group(1) @binding(4) var<uniform> raa_env_sh: EnvSh;
+// 5: the BRDF/LTC atlas (Rgba16Float, 128 x 192 texels): BRDF split-sum at x 0..127,
+// y 0..127, LTC1 at x 0..63, y 128..191 and LTC2 at x 64..127, y 128..191. Sampled with
+// raa_linear_clamp; raa_brdf_lut_uv and raa_ltc_uv (below) select its texels.
 @group(1) @binding(5) var raa_brdf_lut: texture_2d<f32>;
 @group(1) @binding(6) var raa_linear_clamp: sampler;
 @group(1) @binding(7) var raa_ao_tex: texture_2d<f32>;
@@ -368,3 +371,117 @@ fn raa_texture(id: u32, uv: vec2<f32>) -> vec4<f32> {
     let c = textureSampleLevel(raa_texture_atlas, raa_texture_sampler, q, 0.0);
     return select(vec4<f32>(0.0), c, r.z > 0.0);
 }
+
+// S11 area lights: shared rectangle form-factor maths and the BRDF/LTC atlas uv helpers.
+// Pure functions: no binding access, no texture sampling and no bitwise operator, so the
+// forward passes and every GI builder that starts with PRELUDE_WGSL can call them.
+// Adapted from three.js r180 src/renderers/shaders/ShaderChunk/lights_physical_pars_fragment.glsl.js (LTC_EdgeVectorFormFactor, LTC_ClippedSphereFormFactor, LTC_Uv), MIT licence, Copyright (c) 2010-2025 three.js authors; Heitz, Dupuy, Hill, Neubelt, SIGGRAPH 2016.
+
+// S11 rectangle basis: forward is the light's travel direction d; up0 is Y unless d is
+// within 0.99 of Y, then X; tangent = normalize(cross(up0, d)); bitangent = cross(d, tangent).
+// The rectangle is centred on the light and spans width along tangent, height along bitangent.
+fn raa_area_basis(travel: vec3<f32>) -> mat3x3<f32> {
+    let up0 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0),
+        abs(dot(travel, vec3<f32>(0.0, 1.0, 0.0))) < 0.99);
+    let tangent = normalize(cross(up0, travel));
+    return mat3x3<f32>(tangent, cross(travel, tangent), travel);
+}
+
+// The four rectangle corners around `origin`, relative to it: [p - T - B, p - T + B,
+// p + T + B, p + T - B] with p = light position - origin, T and B the half extents along the
+// basis tangent and bitangent. Counter-clockwise seen from the emitting side, so the vector
+// form factor at a receiver in front of the light points towards the light.
+fn raa_area_corners(light: LightGpu, origin: vec3<f32>) -> array<vec3<f32>, 4> {
+    let m = raa_area_basis(light.direction_cos_outer.xyz);
+    let t = m[0] * max(light.width, 0.0) * 0.5;
+    let b = m[1] * max(light.height, 0.0) * 0.5;
+    let p = light.position_range.xyz - origin;
+    return array<vec3<f32>, 4>(p - t - b, p - t + b, p + t + b, p + t - b);
+}
+
+// three.js r180 LTC_EdgeVectorFormFactor: one edge's contribution, theta / sin(theta) / 2PI
+// as the rational polynomial v, with the 0.5 / sin(theta) branch when the edge spans the
+// horizon (x <= 0).
+fn raa_area_edge(a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {
+    let x = dot(a, b);
+    let y = abs(x);
+    let v = (0.8543985 + (0.4965155 + 0.0145206 * y) * y)
+        / (3.4175940 + (4.1616724 + y) * y);
+    let theta_sintheta = select(0.5 * inverseSqrt(max(1.0 - x * x, 1e-7)) - v, v, x > 0.0);
+    return cross(a, b) * theta_sintheta;
+}
+
+// Sum of the four edge form factors over the unit directions of the corners transformed by
+// `m`: the polygon's vector form factor. `m` is the identity for the diffuse evaluation.
+fn raa_area_vector_form_factor(corners: array<vec3<f32>, 4>, m: mat3x3<f32>) -> vec3<f32> {
+    var u: array<vec3<f32>, 4>;
+    for (var i = 0; i < 4; i = i + 1) {
+        u[i] = normalize(m * corners[i]);
+    }
+    var result = vec3<f32>(0.0);
+    for (var i = 0; i < 4; i = i + 1) {
+        result += raa_area_edge(u[i], u[(i + 1) % 4]);
+    }
+    return result;
+}
+
+// three.js r180 LTC_ClippedSphereFormFactor: the horizon-clipped sphere form factor of the
+// vector form factor f, with `z` = dot(f, normal). Kept in [0, 1].
+fn raa_area_clipped(length_f: f32, z: f32) -> f32 {
+    return max((length_f * length_f + z) / (length_f + 1.0), 0.0);
+}
+
+// Handoff: card "raa-gi: voxel lighting of area lights by the diffuse form factor" takes
+// `raa_area_form_factor(light: LightGpu, origin: vec3<f32>, normal: vec3<f32>) -> f32` from
+// this file. It returns 0 behind the emitter; otherwise the horizon-clipped sphere form
+// factor of the rectangle in [0, 1] (irradiance = pi x radiance x form factor).
+fn raa_area_form_factor(light: LightGpu, origin: vec3<f32>, normal: vec3<f32>) -> f32 {
+    if dot(origin - light.position_range.xyz, light.direction_cos_outer.xyz) <= 0.0 {
+        return 0.0;
+    }
+    let f = raa_area_vector_form_factor(
+        raa_area_corners(light, origin),
+        mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, 0.0, 1.0)),
+    );
+    return raa_area_clipped(length(f), dot(f, normal));
+}
+
+// S17 area-light radiance: the intensity carried by color_inv_range_sq.rgb spread over the
+// rectangle's area (intensity / (width x height)), at least (1e-8, 1e-8).
+fn raa_area_radiance(light: LightGpu) -> vec3<f32> {
+    return light.color_inv_range_sq.rgb / max(max(light.width, 0.0) * max(light.height, 0.0), 1e-8);
+}
+
+// Range window without an inverse square: 0 at or beyond `range`, else
+// (clamp(1 - (distance / range)^4, 0, 1))^2.
+fn raa_area_window(distance: f32, range: f32) -> f32 {
+    if distance >= range { return 0.0; }
+    let q = distance / range;
+    let window = clamp(1.0 - q * q * q * q, 0.0, 1.0);
+    return window * window;
+}
+
+// The atlas region sizes of group 1 binding 5 in texels, (width, height).
+const RAA_BRDF_ATLAS_SIZE: vec2<f32> = vec2<f32>(128.0, 192.0);
+
+// Handoff: card "raa-ibl and raa-ssr: BRDF LUT written into and read from the atlas region"
+// takes `raa_brdf_lut_uv(n_dot_v: f32, roughness: f32) -> vec2<f32>` from this file. It maps
+// a BRDF split-sum lookup (x along n_dot_v, y along roughness) to the atlas region at
+// x 0..127, y 0..127, kept half a texel inside.
+fn raa_brdf_lut_uv(n_dot_v: f32, roughness: f32) -> vec2<f32> {
+    return clamp(vec2<f32>(n_dot_v, roughness) * 128.0, vec2<f32>(0.5), vec2<f32>(127.5))
+        / vec2<f32>(128.0, 192.0);
+}
+
+// Handoff: card "raa-shader: LTC area light shading in local_lighting.wgsl" takes
+// `raa_ltc_uv(table: u32, roughness: f32, n_dot_v: f32) -> vec2<f32>` from this file; it also
+// uses `raa_area_corners`, `raa_area_vector_form_factor`, `raa_area_clipped`,
+// `raa_area_form_factor`, `raa_area_radiance` and `raa_area_window`, all defined here today.
+// Table 0 is LTC1 at x 0..63 and table 1 LTC2 at x 64..127; roughness runs along x,
+// sqrt(1 - n_dot_v) along y (three.js r180 LTC_Uv, half a texel inside).
+fn raa_ltc_uv(table: u32, roughness: f32, n_dot_v: f32) -> vec2<f32> {
+    return (vec2<f32>(64.0 * f32(table), 128.0)
+        + vec2<f32>(clamp(roughness, 0.0, 1.0), sqrt(1.0 - clamp(n_dot_v, 0.0, 1.0))) * 63.0
+        + vec2<f32>(0.5)) / vec2<f32>(128.0, 192.0);
+}
+// End of the S11 area form-factor section.

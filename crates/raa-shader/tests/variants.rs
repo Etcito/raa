@@ -674,7 +674,7 @@ fn local_zero_count_and_coincidence_return_before_reads_or_division() {
 #[test]
 fn area_light_uses_s11_rectangle_basis_and_representative_point() {
     let source = raa_shader::LOCAL_LIGHTING_WGSL;
-    let basis = source
+    let basis = raa_shader::PRELUDE_WGSL
         .split("fn raa_area_basis(")
         .nth(1)
         .expect("area basis");
