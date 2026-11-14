@@ -73,6 +73,10 @@ struct IblState {
     _lut: BrdfLut,
     diffuse: f32,
     specular: f32,
+    /// Scale of the diffuse term, finite and in [0, 1]; published as diffuse x scale.
+    diffuse_scale: f32,
+    /// The `info` last given to `set_env` by `apply_pending`; None before the first one.
+    published_info: Option<[f32; 4]>,
     /// The intensities changed since the last `set_env`.
     changed: bool,
 }
@@ -102,6 +106,8 @@ impl IblFeature {
             _lut: lut,
             diffuse: 1.0,
             specular: 1.0,
+            diffuse_scale: 1.0,
+            published_info: None,
             changed: false,
         };
         Ok(IblHandle {
@@ -158,14 +164,16 @@ impl IblHandle {
         };
         st.filter.after_submit(&self.gate);
         if let Some((_, sh)) = self.gate.take_publication() {
-            let info = [st.specular, st.diffuse, MAX_MIP, 1.0];
+            let info = [st.specular, st.diffuse * st.diffuse_scale, MAX_MIP, 1.0];
             lighting.set_env(st.filter.output_view().clone(), sh, info);
+            st.published_info = Some(info);
             st.changed = false;
         } else if st.changed
             && let Some(sh) = self.gate.published_sh()
         {
-            let info = [st.specular, st.diffuse, MAX_MIP, 1.0];
+            let info = [st.specular, st.diffuse * st.diffuse_scale, MAX_MIP, 1.0];
             lighting.set_env(st.filter.output_view().clone(), sh, info);
+            st.published_info = Some(info);
             st.changed = false;
         }
         st.filter.take_retry()
@@ -187,6 +195,33 @@ impl IblHandle {
             st.specular = specular;
             st.changed = true;
         }
+    }
+
+    /// Sets the diffuse scale (default 1), applied as diffuse x scale at the next publication.
+    /// The value is stored when it is finite and in [0, 1] and ignored otherwise; a borrowed
+    /// state is ignored too, as for the intensity setter.
+    ///
+    /// Handoff: the card "raa-gi slots: Indirect, Ao and LocalVisibility providers and the IBL scale part" takes over this scale and calls `IblHandle::set_diffuse_scale` every time its target scale changes. Today the call only stores the value and marks the state changed; the next `apply_pending` republishes the environment with `info[1]` = the authored diffuse x the stored scale. No caller in `src/` exists yet.
+    pub fn set_diffuse_scale(&self, scale: f32) {
+        let Ok(mut st) = self.state.try_borrow_mut() else {
+            return;
+        };
+        if scale.is_finite() && (0.0..=1.0).contains(&scale) {
+            st.diffuse_scale = scale;
+            st.changed = true;
+        }
+    }
+
+    /// The diffuse scale last stored by the scale setter (1 by default).
+    pub fn diffuse_scale(&self) -> f32 {
+        self.state.borrow().diffuse_scale
+    }
+
+    /// The `info` last given to `LightingResources::set_env` by `apply_pending`
+    /// (`[specular, diffuse x diffuse scale, max mip, 1]`), None before the first publication.
+    /// A read accessor for tests and diagnostics; `invalidate` does not clear it.
+    pub fn published_info(&self) -> Option<[f32; 4]> {
+        self.state.borrow().published_info
     }
 
     /// The SH9 irradiance coefficients last applied by `apply_pending` (rgb, w = 0;
