@@ -4,16 +4,19 @@
 #![cfg(not(target_arch = "wasm32"))]
 
 use raa_core::RaaError;
-use raa_lit::{LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE, MAX_LOCAL_LIGHTS};
+use raa_lit::{
+    AreaShadowSettings, AreaShadowTier, LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE,
+    MAX_LOCAL_LIGHTS,
+};
 
 #[allow(dead_code)]
 #[path = "../src/api/m28_lights.rs"]
 mod m28;
 
 use m28::{
-    AREA_FORM_FACTOR_FEATURE_ID, AreaLightShading, INVALID_ARGUMENT, INVALID_DESC, LocalLightPatch,
-    Patch, Properties, Raw, add, handle_arg, merge, parse, parse_area_shading, remove,
-    srgb_to_linear, update,
+    AREA_FORM_FACTOR_FEATURE_ID, AreaLightShading, INVALID_AREA_SHADOWS, INVALID_ARGUMENT,
+    INVALID_DESC, LocalLightPatch, Patch, Properties, Raw, add, handle_arg, merge, parse,
+    parse_area_shading, parse_area_shadows, remove, srgb_to_linear, update,
 };
 
 /// A native stand-in for a JS description object: a key is present exactly when it is
@@ -393,4 +396,103 @@ fn refused_updates_leave_the_stored_light_unchanged() {
     let stored = *lights.get(handle).unwrap();
     assert_eq!((stored.angle_deg, stored.inner_angle_deg), (40.0, None));
     assert_eq!(stored.intensity, 3.0);
+}
+
+#[test]
+fn area_shadows_empty_desc_returns_the_base_unchanged() {
+    let base = AreaShadowSettings {
+        tier: AreaShadowTier::Cone,
+        hero_count: 3,
+        hero_distance: 30.0,
+        fade_distance: 90.0,
+        band: 4.0,
+    };
+    assert_eq!(parse_area_shadows(&Mock::empty(), base), Ok(base));
+    assert_eq!(
+        parse_area_shadows(&Mock::empty(), AreaShadowSettings::default()),
+        Ok(AreaShadowSettings::default())
+    );
+}
+
+#[test]
+fn area_shadows_present_keys_merge_onto_the_default() {
+    let desc = Mock::new(&[
+        ("tier", Raw::String("hero".into())),
+        ("heroCount", Raw::Number(2.0)),
+    ]);
+    let merged = parse_area_shadows(&desc, AreaShadowSettings::default()).unwrap();
+    assert_eq!(
+        merged,
+        AreaShadowSettings {
+            tier: AreaShadowTier::Hero,
+            hero_count: 2,
+            ..AreaShadowSettings::default()
+        }
+    );
+    // Both ends of the integer range [0, 4] are accepted.
+    for count in [0.0, 4.0] {
+        let edge = Mock::new(&[("heroCount", Raw::Number(count))]);
+        let merged = parse_area_shadows(&edge, AreaShadowSettings::default()).unwrap();
+        assert_eq!(merged.hero_count as f64, count);
+    }
+}
+
+#[test]
+fn area_shadows_refusals_carry_the_contract_message() {
+    let cases: [(Mock, &str); 7] = [
+        (
+            Mock::new(&[("tier", Raw::String("x".into()))]),
+            "tier: must be 'auto', 'hero', 'cone' or 'fade'",
+        ),
+        (
+            Mock::new(&[("heroCount", Raw::Number(1.5))]),
+            "heroCount: must be an integer in [0, 4] (got 1.5)",
+        ),
+        (
+            Mock::new(&[("heroCount", Raw::Number(5.0))]),
+            "heroCount: must be an integer in [0, 4] (got 5)",
+        ),
+        (
+            Mock::new(&[("heroDistance", Raw::String("25".into()))]),
+            "heroDistance: must be a number",
+        ),
+        (
+            Mock::new(&[("heroDistance", Raw::Undefined)]),
+            "heroDistance: must be a number",
+        ),
+        (
+            Mock::new(&[
+                ("fadeDistance", Raw::Number(10.0)),
+                ("heroDistance", Raw::Number(25.0)),
+            ]),
+            "fadeDistance: must be finite and > heroDistance (got 10)",
+        ),
+        (
+            Mock::new(&[("band", Raw::Number(0.0))]),
+            "band: must be finite, > 0 and <= heroDistance (got 0)",
+        ),
+    ];
+    for (desc, message) in cases {
+        let err = parse_area_shadows(&desc, AreaShadowSettings::default()).unwrap_err();
+        assert_eq!(code(&err), INVALID_AREA_SHADOWS);
+        assert_eq!(err.message(), message);
+    }
+}
+
+#[test]
+fn area_shadows_refusal_leaves_the_base_untouched() {
+    let base = AreaShadowSettings {
+        hero_count: 2,
+        ..AreaShadowSettings::default()
+    };
+    // The first key merges, the second is refused: the call returns only the error.
+    let refused = parse_area_shadows(
+        &Mock::new(&[("heroCount", Raw::Number(3.0)), ("band", Raw::Number(0.0))]),
+        base,
+    );
+    assert_eq!(code(&refused.unwrap_err()), INVALID_AREA_SHADOWS);
+    assert_eq!(base.hero_count, 2);
+    assert_eq!(base.band, AreaShadowSettings::default().band);
+    let kept = parse_area_shadows(&Mock::new(&[("band", Raw::Number(4.0))]), base).unwrap();
+    assert_eq!((kept.hero_count, kept.band), (2, 4.0));
 }

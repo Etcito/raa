@@ -15,6 +15,8 @@ interface Engine {
   lightStats(): LightStats
   setAreaLightShading(settings: AreaLightShadingDesc): void
   areaLightShading(): AreaLightShadingDesc
+  setAreaLightShadows(settings: AreaLightShadowsDesc): void
+  areaLightShadows(): AreaLightShadows
 }
 ```
 
@@ -56,6 +58,53 @@ interface AreaLightShadingDesc { mode: AreaLightShadingMode }
 `mode`, or any other value throws `api.invalid_argument` with the message
 `setAreaLightShading: 'mode' must be 'ltc' or 'formFactor'`; a refused call changes
 nothing.
+
+## Area-light soft shadows
+
+`setAreaLightShadows(settings)` selects how area lights are shadowed. The setting is
+engine-wide (every view), persists until changed, and applies to every view.
+
+```ts
+type AreaLightShadowTier = 'auto' | 'hero' | 'cone' | 'fade'
+interface AreaLightShadowsDesc {
+  tier?: AreaLightShadowTier     // default 'auto'
+  heroCount?: number             // integer 0..4, default 0 (no hero maps)
+  heroDistance?: number          // metres, > 0, default 25
+  fadeDistance?: number          // metres, > heroDistance, default 80
+  band?: number                  // metres, > 0 and <= heroDistance, default 5
+}
+interface AreaLightShadows {
+  tier: AreaLightShadowTier; heroCount: number; heroDistance: number
+  fadeDistance: number; band: number; activeHeroes: number
+}
+```
+
+Absent keys keep their current value. The merged settings are validated as a whole.
+The defaults are `{ tier: 'auto', heroCount: 0, heroDistance: 25, fadeDistance: 80,
+band: 5 }`; all distances are metres.
+
+- `'hero'`: perspective shadow maps of the `heroCount` area lights with the largest
+  screen coverage (hysteresis 1.25), filtered with PCSS whose light size is the
+  rectangle size. It works with GI off.
+- `'cone'`: soft visibility through the GI voxel distance field. Without GI the
+  visibility is 1.
+- `'fade'`: no direct term while GI is active, so the light reaches the scene
+  through the GI volume only.
+- `'auto'`: hero maps for the selected lights nearer than `heroDistance`, blended to
+  the cone over `band` metres; the direct term is faded out over `band` metres before
+  `fadeDistance` while GI is active.
+
+`activeHeroes` is the number of area lights that had a hero shadow map in the last
+prepared frame. It is 0 before the first frame.
+
+Refusals throw `light.invalid_area_shadows` and change nothing. A non-object argument
+(`null`, an array or a primitive) gives `settings: must be an object`. A present `tier`
+that is not one of the four strings gives `tier: must be 'auto', 'hero', 'cone' or
+'fade'`. A present `heroCount`, `heroDistance`, `fadeDistance` or `band` that is not a
+number (`undefined` and `null` included) gives `<key>: must be a number`. A `heroCount`
+number that is not an integer in [0, 4] gives `heroCount: must be an integer in [0, 4]
+(got <value>)`. A merged state that breaks the distance rules gives `<key>: <reason>`,
+for example `fadeDistance: must be finite and > heroDistance (got 10)`.
 
 ## Lifecycle
 

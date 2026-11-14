@@ -25,7 +25,10 @@
 //! `EngineState::instance_parent_world`; their submesh instance slots are never used.
 
 use raa_core::RaaError;
-use raa_lit::{LightHandle, LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE};
+use raa_lit::{
+    AreaShadowSettings, AreaShadowTier, LightHandle, LocalLight, LocalLightKind, LocalLights,
+    MAX_LIGHT_HANDLE,
+};
 
 /// The refusal code of every malformed local-light description (S17).
 pub(crate) const INVALID_DESC: &str = "light.invalid_desc";
@@ -263,6 +266,64 @@ pub(crate) fn parse_area_shading(source: &impl Properties) -> Result<AreaLightSh
         Raw::String(mode) if mode == "formFactor" => Ok(AreaLightShading::FormFactor),
         _ => Err(area_shading_invalid()),
     }
+}
+
+/// The refusal code of a malformed area-light shadow setting (contract
+/// `area-light-shadows-api`).
+pub(crate) const INVALID_AREA_SHADOWS: &str = "light.invalid_area_shadows";
+
+fn area_shadows_invalid(message: impl Into<String>) -> RaaError {
+    RaaError::FrameGraph {
+        code: INVALID_AREA_SHADOWS,
+        message: message.into(),
+    }
+}
+
+/// Reads one numeric key of an area-shadow setting: absent keeps the base (`None`), and any
+/// present value that is not a number, `undefined` and `null` included, is refused.
+fn area_number(source: &impl Properties, key: &str) -> Result<Option<f64>, RaaError> {
+    match source.read(key)? {
+        Raw::Absent => Ok(None),
+        Raw::Number(value) => Ok(Some(value)),
+        _ => Err(area_shadows_invalid(format!("{key}: must be a number"))),
+    }
+}
+
+/// Parses an `AreaLightShadowsDesc` onto `base` (contract `area-light-shadows-api`). Absent
+/// keys keep the base field; the merged state is validated as a whole by
+/// [`AreaShadowSettings::validate`]. `base` is passed by value and a refusal carries no
+/// partial settings, so the caller's stored settings stay unchanged.
+pub(crate) fn parse_area_shadows(
+    source: &impl Properties,
+    base: AreaShadowSettings,
+) -> Result<AreaShadowSettings, RaaError> {
+    let tier_refused = || area_shadows_invalid("tier: must be 'auto', 'hero', 'cone' or 'fade'");
+    let mut merged = base;
+    match source.read("tier")? {
+        Raw::Absent => {}
+        Raw::String(name) => {
+            merged.tier = AreaShadowTier::from_name(&name).ok_or_else(tier_refused)?;
+        }
+        _ => return Err(tier_refused()),
+    }
+    if let Some(value) = area_number(source, "heroCount")? {
+        if value.fract() != 0.0 || !(0.0..=4.0).contains(&value) {
+            return Err(area_shadows_invalid(format!(
+                "heroCount: must be an integer in [0, 4] (got {value})"
+            )));
+        }
+        merged.hero_count = value as u32;
+    }
+    if let Some(value) = area_number(source, "heroDistance")? {
+        merged.hero_distance = value as f32;
+    }
+    if let Some(value) = area_number(source, "fadeDistance")? {
+        merged.fade_distance = value as f32;
+    }
+    if let Some(value) = area_number(source, "band")? {
+        merged.band = value as f32;
+    }
+    merged.validate()
 }
 
 /// Merges a parsed patch onto `base`: `Keep` retains the base field, `Reset` restores the
@@ -650,6 +711,61 @@ mod web {
                     &JsValue::from_str(mode.as_str()),
                 )
                 .map_err(|_| area_shading_invalid())?;
+                Ok(out.into())
+            })
+        }
+
+        /// Sets the engine-wide area-light soft-shadow tiers (contract
+        /// `area-light-shadows-api`). `settings` is an `AreaLightShadowsDesc`: absent keys keep
+        /// the current value and the merged state is validated as a whole. A non-object throws
+        /// `light.invalid_area_shadows` with `settings: must be an object`; every refusal
+        /// changes nothing. The setting persists until changed and applies to every view.
+        #[wasm_bindgen(js_name = setAreaLightShadows)]
+        pub fn set_area_light_shadows(&mut self, settings: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                if !settings.is_object() || settings.is_null() || Array::is_array(&settings) {
+                    return Err(area_shadows_invalid("settings: must be an object"));
+                }
+                let merged = parse_area_shadows(&ReflectSource(&settings), st.lit.area_shadows())?;
+                st.lit.set_area_shadows(merged)
+            })
+        }
+
+        /// Returns the current area-light soft-shadow tiers as `AreaLightShadows`. `activeHeroes`
+        /// counts the area lights that had a hero shadow map in the last prepared frame and is
+        /// 0 before the first frame.
+        #[wasm_bindgen(js_name = areaLightShadows)]
+        pub fn area_light_shadows(&mut self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let settings = st.lit.area_shadows();
+                let entries = [
+                    ("tier", JsValue::from_str(settings.tier.as_str())),
+                    (
+                        "heroCount",
+                        JsValue::from_f64(f64::from(settings.hero_count)),
+                    ),
+                    (
+                        "heroDistance",
+                        JsValue::from_f64(f64::from(settings.hero_distance)),
+                    ),
+                    (
+                        "fadeDistance",
+                        JsValue::from_f64(f64::from(settings.fade_distance)),
+                    ),
+                    ("band", JsValue::from_f64(f64::from(settings.band))),
+                    (
+                        "activeHeroes",
+                        JsValue::from_f64(f64::from(st.lit.active_area_heroes())),
+                    ),
+                ];
+                let out = Object::new();
+                for (key, value) in entries {
+                    Reflect::set(&out, &JsValue::from_str(key), &value).map_err(|_| {
+                        area_shadows_invalid(format!(
+                            "could not construct areaLightShadows field '{key}'"
+                        ))
+                    })?;
+                }
                 Ok(out.into())
             })
         }

@@ -55,6 +55,52 @@ export interface AreaLightShadingDesc {
   mode: AreaLightShadingMode;
 }
 
+/**
+ * Area-light soft-shadow tier. `'auto'` (default): hero maps for the selected lights nearer
+ * than `heroDistance`, blended to the cone over `band` metres, and the direct term faded out
+ * over `band` metres before `fadeDistance` while GI is active. `'hero'`: perspective shadow
+ * maps of the `heroCount` area lights with the largest screen coverage, filtered with PCSS
+ * whose light size is the rectangle size; works with GI off. `'cone'`: soft visibility through
+ * the GI voxel distance field (visibility 1 without GI). `'fade'`: no direct term while GI is
+ * active, so the light reaches the scene through the GI volume only.
+ */
+export type AreaLightShadowTier = 'auto' | 'hero' | 'cone' | 'fade';
+
+/**
+ * Settings accepted by {@link Engine.setAreaLightShadows}. Absent keys keep the current value;
+ * the merged settings are validated as a whole. A refusal throws `light.invalid_area_shadows`
+ * with the message `<key>: <reason>` and changes nothing.
+ */
+export interface AreaLightShadowsDesc {
+  /** Visibility tier. Default `'auto'`. */
+  tier?: AreaLightShadowTier;
+  /** Integer in [0, 4]: hero shadow maps, 0 disables them. Default 0. */
+  heroCount?: number;
+  /** Metres, > 0: where the hero weight starts to fade. Default 25. */
+  heroDistance?: number;
+  /** Metres, > heroDistance: where the direct term has fully faded. Default 80. */
+  fadeDistance?: number;
+  /** Metres, > 0 and <= heroDistance: width of the blend and fade bands. Default 5. */
+  band?: number;
+}
+
+/**
+ * Current area-light soft-shadow tiers, returned by {@link Engine.areaLightShadows}. The
+ * setting is engine-wide: it persists until changed and applies to every view.
+ */
+export interface AreaLightShadows {
+  tier: AreaLightShadowTier;
+  heroCount: number;
+  heroDistance: number;
+  fadeDistance: number;
+  band: number;
+  /**
+   * Area lights that had a hero shadow map in the last prepared frame; 0 before the first
+   * frame.
+   */
+  activeHeroes: number;
+}
+
 export interface Engine {
   /** Adds a local light; capacity is 256. The sun remains configured through setLight. */
   addLight(desc: LocalLightDesc): LightHandle;
@@ -82,4 +128,14 @@ export interface Engine {
   setAreaLightShading(settings: AreaLightShadingDesc): void;
   /** Returns the current area-light shading mode as `{ mode }`. */
   areaLightShading(): AreaLightShadingDesc;
+  /**
+   * Sets the engine-wide area-light soft-shadow tiers (defaults `tier: 'auto'`, `heroCount: 0`,
+   * `heroDistance: 25`, `fadeDistance: 80`, `band: 5`). A non-object argument throws
+   * `light.invalid_area_shadows` with `settings: must be an object`; a present key that is not
+   * a number throws `<key>: must be a number`; a `heroCount` that is not an integer in [0, 4]
+   * throws `heroCount: must be an integer in [0, 4] (got <value>)`. Every refusal changes nothing.
+   */
+  setAreaLightShadows(settings: AreaLightShadowsDesc): void;
+  /** Returns the current area-light soft-shadow tiers and the active hero count. */
+  areaLightShadows(): AreaLightShadows;
 }
