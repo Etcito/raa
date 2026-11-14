@@ -655,3 +655,259 @@ impl GiFeature {
         Ok(GiHandle { core })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The S36 rank table as a pure table, and the lifecycle of contract 'gi-frame-lifecycle' on
+    //! a software GPU (SKIP without an adapter): GI off records nothing, a second install
+    //! refuses, enabling at quality 64/3 records `gi.volume` once, and disabling the pass drops
+    //! the volume.
+    //!
+    //! The rig follows `crates/raa-vg/tests/feature.rs`: one instance of a 1 m cube at the
+    //! origin, the camera at (0, 1, 4) looking at the origin with near 0.1 and far 16. At 64/3
+    //! level 0 spans x and y in [-6.4, 6.4] m and z in [-3.2, 9.6] m around the snapped origin,
+    //! so the cube and the camera lie inside the grid. The graph's prepass clears depth to 1.0,
+    //! and no mesh pass writes depth before `gi.volume`. `gi.volume` reads no depth or HDR target:
+    //! its frame record (sun, counts, camera) is written by `prepare_frame` itself, and the sun
+    //! is left at its default of no light.
+
+    use super::*;
+    use raa_core::testing::{skip, software_gpu};
+    use raa_core::{FrameGraph, MaterialId, OffscreenTarget};
+    use raa_lit::{AttributedMesh, LitOptions};
+    use raa_math::{Quat, Vec3};
+    use raa_scene::{RenderList, Transform};
+
+    const SIZE: (u32, u32) = (64, 64);
+    const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    /// The `GiVolume` allocation at 64/3 (GI_VOLUME_BYTES, S38 and S37).
+    const BYTES_64_3: u64 = 27_262_976;
+
+    #[test]
+    fn inactive_reason_follows_the_rank_table() {
+        assert_eq!(inactive_reason(false, true, 1, 3), Some("disabled"));
+        assert_eq!(inactive_reason(true, false, 1, 3), Some("passDisabled"));
+        assert_eq!(inactive_reason(true, true, 2, 3), Some("multiView"));
+        assert_eq!(inactive_reason(true, true, 1, 0), Some("noInstance"));
+        assert_eq!(inactive_reason(true, true, 1, 3), None);
+        assert_eq!(
+            inactive_reason(false, false, 2, 0),
+            Some("disabled"),
+            "the first match wins"
+        );
+    }
+
+    /// A 1 m cube centred at the origin: four vertices per face (hard edges, outward normals)
+    /// and 12 counter-clockwise triangles.
+    fn cube() -> AttributedMesh {
+        let mut mesh = AttributedMesh::from_mesh(Default::default());
+        for axis in 0..3 {
+            for sign in [-0.5_f32, 0.5] {
+                let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+                let mut normal = [0.0_f32; 3];
+                normal[axis] = sign.signum();
+                let first = mesh.base.positions.len() as u32;
+                for (a, b) in [(-0.5_f32, -0.5_f32), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+                    let mut p = [0.0_f32; 3];
+                    p[axis] = sign;
+                    p[u] = a;
+                    p[v] = b;
+                    mesh.base.positions.push(p);
+                    mesh.base.normals.push(normal);
+                }
+                let quad = if sign > 0.0 {
+                    [0u32, 1, 2, 0, 2, 3]
+                } else {
+                    [0u32, 2, 1, 0, 3, 2]
+                };
+                mesh.base.indices.extend(quad.map(|i| first + i));
+            }
+        }
+        mesh.submeshes[0].index_count = mesh.base.indices.len() as u32;
+        mesh
+    }
+
+    /// A pipeline with the feature installed, one cube instance and the graph of the pipeline.
+    struct Rig {
+        handle: GiHandle,
+        pipeline: Rc<RefCell<Pipeline>>,
+        lit: LitRenderer,
+        scene: Scene,
+        camera: Camera,
+        list: RenderList,
+        tags: Vec<u32>,
+        slots: Vec<u32>,
+        graph: FrameGraph,
+        backbuffer: OffscreenTarget,
+    }
+
+    impl Rig {
+        fn new(gpu: &GpuContext) -> Rig {
+            let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, SURFACE, false)));
+            let opts = LitOptions {
+                msaa: 4,
+                ..LitOptions::default()
+            };
+            let mut lit = LitRenderer::new(gpu, &pipeline, opts).expect("lit renderer");
+            let handle = GiFeature::install(gpu, &pipeline, &mut lit, None, None)
+                .expect("the feature installs");
+            let id = lit.upload(gpu, &cube()).expect("upload");
+            let submeshes = lit.submesh_ids(id).expect("sub-meshes").to_vec();
+            let mut scene = Scene::with_capacity(1, 1);
+            let node = scene
+                .add_node(
+                    None,
+                    Transform::from_trs(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
+                )
+                .expect("node");
+            scene
+                .add_instance(node, submeshes[0], MaterialId(0))
+                .expect("instance");
+            let camera = Camera {
+                eye: Vec3::new(0.0, 1.0, 4.0),
+                target: Vec3::ZERO,
+                near: 0.1,
+                far: 16.0,
+                ..Camera::default()
+            };
+            scene.camera = camera;
+            scene.camera.set_viewport(SIZE.0, SIZE.1);
+            let mut graph = FrameGraph::new(SURFACE);
+            Pipeline::install(&pipeline, &mut graph);
+            graph.compile().expect("compile");
+            Rig {
+                handle,
+                pipeline,
+                lit,
+                scene,
+                camera,
+                list: RenderList::with_capacity(1),
+                tags: Vec::with_capacity(1),
+                slots: Vec::with_capacity(1),
+                graph,
+                backbuffer: OffscreenTarget::new(gpu, SIZE.0, SIZE.1, SURFACE),
+            }
+        }
+
+        /// One frame in the contract's order: the view, `prepare_frame`, the lit prepare, then
+        /// the graph executed into the offscreen target and waited for. Returns the statistics
+        /// of `prepare_frame`.
+        fn frame(&mut self, gpu: &GpuContext, views: u8) -> GiStats {
+            self.handle.set_view(&self.camera, SIZE, views);
+            let stats = self
+                .handle
+                .prepare_frame(gpu, &mut self.scene, &mut self.lit);
+            self.lit
+                .prepare(
+                    gpu,
+                    &mut self.scene,
+                    &mut self.list,
+                    &mut self.tags,
+                    &mut self.slots,
+                )
+                .expect("prepare");
+            let commands = self
+                .graph
+                .execute(gpu, self.backbuffer.view(), SIZE)
+                .expect("execute");
+            gpu.queue().submit([commands]);
+            gpu.device()
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("device poll");
+            stats
+        }
+
+        /// Enables GI at quality 64/3 (the default settings keep it off).
+        fn enable_at_64_3(&self) {
+            self.handle
+                .set(GiSettingsPatch {
+                    enabled: Some(true),
+                    ..GiSettingsPatch::default()
+                })
+                .expect("enabled");
+            self.handle
+                .set_quality(GiQualityPatch {
+                    resolution: Some(64.0),
+                    levels: Some(3.0),
+                    ..GiQualityPatch::default()
+                })
+                .expect("64/3 is a listed quality");
+        }
+    }
+
+    #[test]
+    fn gi_off_records_nothing() {
+        let test = "gi_off_records_nothing";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        let stats = rig.frame(&gpu, 1);
+        assert!(!stats.active, "{stats:?}");
+        assert_eq!(stats.inactive_reason, Some("disabled"));
+        assert_eq!(stats.allocated_bytes, 0);
+        assert_eq!(rig.handle.allocated_bytes(), 0);
+        assert!(rig.handle.recorded_passes().is_empty());
+    }
+
+    #[test]
+    fn second_install_refuses_and_adds_nothing() {
+        let test = "second_install_refuses_and_adds_nothing";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        let before = rig.pipeline.borrow().passes().len();
+        let error = GiFeature::install(&gpu, &rig.pipeline, &mut rig.lit, None, None)
+            .err()
+            .expect("a second install refuses");
+        assert_eq!(error.code(), "pipeline.duplicate_pass");
+        assert_eq!(rig.pipeline.borrow().passes().len(), before);
+    }
+
+    #[test]
+    fn enabled_records_gi_volume_once_per_frame() {
+        let test = "enabled_records_gi_volume_once_per_frame";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        let stats = rig.frame(&gpu, 1);
+        assert!(stats.active, "{stats:?}");
+        assert_eq!(stats.inactive_reason, None);
+        assert_eq!(stats.voxelized_forward_instances, 1);
+        assert!(
+            stats.allocated_bytes >= BYTES_64_3,
+            "allocated {} < {BYTES_64_3}",
+            stats.allocated_bytes
+        );
+        assert_eq!(rig.handle.recorded_passes(), ["gi.volume"]);
+        rig.handle.observe_submission(1, true);
+        assert_eq!(rig.handle.stats().stats_frame_index, Some(1));
+    }
+
+    #[test]
+    fn disabling_gi_volume_drops_the_volume() {
+        let test = "disabling_gi_volume_drops_the_volume";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        assert!(rig.frame(&gpu, 1).active);
+        rig.pipeline
+            .borrow_mut()
+            .set_enabled("gi.volume", false)
+            .expect("gi.volume is installed");
+        let stats = rig.frame(&gpu, 1);
+        assert!(!stats.active, "{stats:?}");
+        assert_eq!(stats.inactive_reason, Some("passDisabled"));
+        assert_eq!(stats.allocated_bytes, 0);
+        assert!(rig.handle.recorded_passes().is_empty());
+    }
+}
