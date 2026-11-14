@@ -1,0 +1,44 @@
+{
+  "why": "One level, R 16, origin 0, voxel 0.25 m. Texels are filled analytically from a plane at z 2.0 m: a = |z_centre - 2.0| metres, rgb (1, 0.5, 0.25) where a <= 3 voxels, else 0. Ray hits are derived by hand from the step rule max(d - 0.5 voxel, 0.6 voxel) and the hit test d < 0.85 voxel while approaching.",
+  "resolution": 16,
+  "origin": [0.0, 0.0, 0.0],
+  "voxel": 0.25,
+  "plane_z": 2.0,
+  "band_voxels": 3,
+  "colour": [1.0, 0.5, 0.25],
+  "hit_voxels": 0.85,
+  "rays": [
+    {
+      "name": "toward the plane",
+      "origin": [2.0, 2.0, 0.5],
+      "dir": [0.0, 0.0, 1.0],
+      "start": 0.25,
+      "max_t": 10.0,
+      "max_steps": 64,
+      "hit": true,
+      "t_min": 1.25,
+      "t_max": 1.5,
+      "radiance": [1.0, 0.5, 0.25],
+      "visibility": 0.0,
+      "why": "t 0.25 samples d 1.25 (z 0.75, no approach yet) and steps 1.125 to t 1.375 (z 1.875), where d 0.125 < 0.2125 while approaching: the hit lies in [1.25, 1.5)"
+    },
+    {
+      "name": "away from the plane",
+      "origin": [2.0, 2.0, 0.5],
+      "dir": [0.0, 0.0, -1.0],
+      "start": 0.25,
+      "max_t": 10.0,
+      "max_steps": 64,
+      "hit": false,
+      "visibility": 1.0,
+      "why": "z 0.25 is local 1.0 voxel, outside the (1.5, R - 1.5) window, so the level lookup leaves the volume at once"
+    }
+  ],
+  "lookup": {
+    "inside": [2.0, 2.0, 2.0],
+    "inside_level": 0,
+    "edge": [0.25, 2.0, 2.0],
+    "edge_level": 1,
+    "why": "the edge point sits 1 voxel inside x = 0 (local 1.0 < 1.5), so it answers levels.len() = 1"
+  }
+}

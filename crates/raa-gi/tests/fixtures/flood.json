@@ -1,0 +1,17 @@
+{
+  "why": "Hand-derived from the jump-flood rule on an 8 cube with two occupied seeds. Squared cell-to-seed distances are counted in voxels by hand; metres are sqrt(squared) x 0.2 m. Only cells whose nearest seed is unique are listed, so the axis-separated flood must reach that seed exactly.",
+  "resolution": 8,
+  "steps": [4, 2, 1],
+  "voxel": 0.2,
+  "seeds": [[1, 1, 1], [6, 6, 6]],
+  "cells": [
+    { "cell": [1, 1, 1], "seed": [1, 1, 1], "metres": 0.0, "why": "a seed is its own nearest seed, distance 0" },
+    { "cell": [6, 6, 6], "seed": [6, 6, 6], "metres": 0.0, "why": "a seed is its own nearest seed, distance 0" },
+    { "cell": [0, 0, 0], "seed": [1, 1, 1], "metres": 0.3464, "why": "to A: (1,1,1) squared 3; to B: (6,6,6) squared 108; sqrt(3) x 0.2" },
+    { "cell": [7, 7, 7], "seed": [6, 6, 6], "metres": 0.3464, "why": "to B: (1,1,1) squared 3; to A: (6,6,6) squared 108; sqrt(3) x 0.2" },
+    { "cell": [2, 3, 1], "seed": [1, 1, 1], "metres": 0.4472, "why": "to A: (1,2,0) squared 5; to B: (-4,-3,-5) squared 50; sqrt(5) x 0.2" },
+    { "cell": [3, 1, 1], "seed": [1, 1, 1], "metres": 0.4, "why": "to A: (2,0,0) squared 4; to B: (-3,-5,-5) squared 59; 2 x 0.2" }
+  ],
+  "seed_distance": { "cell": [3, 1, 1], "seed": [1, 1, 1], "metres": 0.4, "why": "2 voxels of 0.2 m" },
+  "unseeded": { "cell": [3, 1, 1], "metres": 12.8, "why": "no seed: 64 x 0.2 m" }
+}
