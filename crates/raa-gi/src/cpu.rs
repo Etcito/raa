@@ -297,6 +297,27 @@ pub fn seed_distance(cell: [i32; 3], seed: Option<[i32; 3]>, voxel: f32) -> f32 
     }
 }
 
+/// Contour period of the distance debug view in metres (`RAA_GI_DEBUG_PERIOD` of
+/// `debug_view.wgsl`): two 0.2 m finest voxels.
+pub const DISTANCE_PERIOD_METRES: f32 = 0.4;
+
+/// How far along the surface normal the distance debug view samples the field
+/// (`RAA_GI_DEBUG_LIFT` of `debug_view.wgsl`): seven finest voxels.
+pub const DISTANCE_LIFT_METRES: f32 = 1.4;
+
+/// The distance debug view's grey level for a sampled distance `d` in metres:
+/// `0.5 + 0.5 cos(2 pi d / 0.4)` (S38), light at whole periods and dark half-way between.
+pub fn distance_band(d: f32) -> f32 {
+    0.5 + 0.5 * (2.0 * std::f32::consts::PI * d / DISTANCE_PERIOD_METRES).cos()
+}
+
+/// Where the distance debug view samples the field for a depth surface point with the unit
+/// `normal` facing the camera: `surface + normal * DISTANCE_LIFT_METRES`. There the field holds
+/// the distance to the other surfaces nearby, so the bands run parallel to them.
+pub fn distance_probe(surface: [f32; 3], normal: [f32; 3]) -> [f32; 3] {
+    [0, 1, 2].map(|i| surface[i] + normal[i] * DISTANCE_LIFT_METRES)
+}
+
 fn cell_index(cell: [i32; 3], r: i32) -> usize {
     (cell[0] + r * (cell[1] + r * cell[2])) as usize
 }

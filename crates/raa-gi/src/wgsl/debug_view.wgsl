@@ -1,6 +1,7 @@
 // GI volume debug views (share 4): one pixel of hdr.dst from the depth surface, the camera ray
 // through the inverse view-projection and the voxel field of the clipmap: the first occupied
-// 0.2 m voxel of level 0, the traced radiance, the distance contour or the level bands.
+// 0.2 m voxel of level 0, the traced radiance, the distance contours (sampled along the surface
+// normal) or the level bands.
 //
 // Adapted from solstice@7e465b5,
 // crates/solstice-render/shaders/lighting/deferred.wgsl:95-215 (pixel ray, voxel debug view). MIT License
@@ -34,6 +35,12 @@
 const RAA_GI_DEBUG_PI: f32 = 3.14159265359;
 // Two 0.2 m finest voxels make one contour period.
 const RAA_GI_DEBUG_PERIOD: f32 = 0.4;
+// The distance view samples the field this far along the surface normal (seven finest voxels),
+// so the sample holds the distance to the other surfaces nearby (the walls, floor, box and
+// sphere) up to 1.4 m: three and a half contour periods. A sample a fixed short way in front of
+// the surface only reads that surface's own distance, the same everywhere, and shows no bands.
+// Twin: `raa_gi::cpu::distance_probe` and `DISTANCE_LIFT_METRES`.
+const RAA_GI_DEBUG_LIFT: f32 = 1.4;
 const RAA_GI_DEBUG_FAR: f32 = 1.0e30;
 
 struct RaaGiDebugVoxel {
@@ -46,6 +53,42 @@ struct RaaGiDebugVoxel {
 fn raa_gi_debug_world(ndc: vec2<f32>, depth: f32) -> vec3<f32> {
     let clip = raa_gi_frame.inv_view_proj * vec4<f32>(ndc, depth, 1.0);
     return clip.xyz / clip.w;
+}
+
+// World position (xyz) and depth (w) of a pixel, clamped to the viewport.
+fn raa_gi_debug_surface(pixel: vec2<i32>) -> vec4<f32> {
+    let size = vec2<i32>(raa_gi_frame.viewport.xy);
+    let p = clamp(pixel, vec2<i32>(0), size - vec2<i32>(1));
+    let depth = textureLoad(raa_gi_depth, p, 0);
+    let uv = (vec2<f32>(p) + vec2<f32>(0.5)) / raa_gi_frame.viewport.xy;
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    return vec4<f32>(raa_gi_debug_world(ndc, depth), depth);
+}
+
+// Surface normal of the depth pixel from its neighbours: along each screen axis, the side whose
+// depth is closer to the centre (so silhouettes do not bend it), facing the camera.
+fn raa_gi_debug_normal(pixel: vec2<i32>, centre: vec4<f32>, camera: vec3<f32>) -> vec3<f32> {
+    let size = vec2<i32>(raa_gi_frame.viewport.xy);
+    let right = raa_gi_debug_surface(pixel + vec2<i32>(1, 0));
+    let left = raa_gi_debug_surface(pixel - vec2<i32>(1, 0));
+    let down = raa_gi_debug_surface(pixel + vec2<i32>(0, 1));
+    let up = raa_gi_debug_surface(pixel - vec2<i32>(0, 1));
+    let right_gap = select(RAA_GI_DEBUG_FAR, abs(right.w - centre.w), pixel.x + 1 < size.x);
+    let left_gap = select(RAA_GI_DEBUG_FAR, abs(centre.w - left.w), pixel.x > 0);
+    let down_gap = select(RAA_GI_DEBUG_FAR, abs(down.w - centre.w), pixel.y + 1 < size.y);
+    let up_gap = select(RAA_GI_DEBUG_FAR, abs(centre.w - up.w), pixel.y > 0);
+    let dx = select(centre.xyz - left.xyz, right.xyz - centre.xyz, right_gap < left_gap);
+    let dy = select(centre.xyz - up.xyz, down.xyz - centre.xyz, down_gap < up_gap);
+    let toward_camera = camera - centre.xyz;
+    var normal = cross(dx, dy);
+    if dot(normal, normal) <= 1.0e-20 {
+        normal = toward_camera;
+    }
+    if dot(normal, normal) <= 1.0e-20 {
+        return vec3<f32>(0.0, 1.0, 0.0);
+    }
+    normal = normalize(normal);
+    return select(normal, -normal, dot(normal, toward_camera) < 0.0);
 }
 
 fn raa_gi_debug_level_color(level: u32) -> vec3<f32> {
@@ -191,16 +234,15 @@ fn raa_gi_debug_view(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         case 3u: {
             if depth < 1.0 {
-                // Two finest voxels in front of the surface, so the field is sampled outside it.
-                var surface = raa_gi_debug_world(ndc, depth);
-                let toward_camera = origin - surface;
-                if dot(toward_camera, toward_camera) > 0.0 {
-                    surface += normalize(toward_camera) * (2.0 * raa_gi_finest_voxel());
-                }
-                let level = raa_gi_level_at(surface, 0u);
+                // The field RAA_GI_DEBUG_LIFT along the surface normal: the distance from there
+                // to the nearest other surface, so the bands run parallel to every surface around.
+                let centre = raa_gi_debug_surface(pixel);
+                let normal = raa_gi_debug_normal(pixel, centre, origin);
+                let probe = centre.xyz + normal * RAA_GI_DEBUG_LIFT;
+                let level = raa_gi_level_at(probe, 0u);
                 var d = 64.0 * raa_gi_finest_voxel();
                 if level < raa_gi_volume_params.level_count {
-                    d = raa_gi_sample(surface, level).a;
+                    d = raa_gi_sample(probe, level).a;
                 }
                 color = vec3<f32>(0.5 + 0.5 * cos(2.0 * RAA_GI_DEBUG_PI * d / RAA_GI_DEBUG_PERIOD));
             }
