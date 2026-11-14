@@ -9,6 +9,9 @@ use raa_core::RaaError;
 #[path = "screen/cpu.rs"]
 pub mod cpu;
 
+#[path = "screen/passes.rs"]
+pub mod passes;
+
 /// Handoff: `install` is the body that card 'raa-gi screen: ScreenPart, gi.screen pass and install'
 /// replaces. Today `install` adds nothing to `ctx` and returns `Ok(())`; the generated
 /// `install_parts` of `parts.rs` calls it once per GI feature install, in file-name order.
