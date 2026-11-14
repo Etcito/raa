@@ -1,0 +1,73 @@
+{
+  "why": "Every value is derived by hand from voxelize.wgsl's widened-edge rule: a cell is covered when its centre lies within 0.5 of the triangle's inside-positive edges, the dominant-axis scan runs over floor(min)..floor(max) of the projected box, and z spans floor(depth +/- spread). No value comes from a GPU run or from the code under test.",
+  "quad": {
+    "why": "R=8, normal +z, two triangles on w=2.25 spanning u [1,3] and v [1,2]. The x scan stays at floor(min)=1..floor(max)=3 and the y scan at floor(1)=1..floor(2)=2, because the widened span cannot undo the projected box's floor; every centre is within 0.5 of the outer edges, so the 3x2 cells are covered. depth 2.25 with spread 0 gives the single z cell floor(2.25)=2. Sorted by (x,y,z).",
+    "resolution": 8,
+    "triangles": [
+      [[1.0, 1.0, 2.25], [3.0, 1.0, 2.25], [3.0, 2.0, 2.25]],
+      [[1.0, 1.0, 2.25], [3.0, 2.0, 2.25], [1.0, 2.0, 2.25]]
+    ],
+    "expected": [
+      [1, 1, 2],
+      [1, 2, 2],
+      [2, 1, 2],
+      [2, 2, 2],
+      [3, 1, 2],
+      [3, 2, 2]
+    ]
+  },
+  "sliver": {
+    "why": "Thin triangle (1,4,3),(7,4,3),(7,4.2,3) along x. The y scan is the single row floor(4)=4..floor(4.2)=4; its centre 4.5 is within 0.5 of both long edges, so the row is covered. The x span is [1.5,7.5], giving cells 1..7 with no gap. Constant depth 3 gives z=3.",
+    "resolution": 8,
+    "triangles": [
+      [[1.0, 4.0, 3.0], [7.0, 4.0, 3.0], [7.0, 4.2, 3.0]]
+    ],
+    "expected": [
+      [1, 4, 3],
+      [2, 4, 3],
+      [3, 4, 3],
+      [4, 4, 3],
+      [5, 4, 3],
+      [6, 4, 3],
+      [7, 4, 3]
+    ]
+  },
+  "outside": {
+    "why": "x starts at 10, more than one voxel beyond R=8 (the skip limit is 8+1=9), so the projected box_min[0] check returns before any cell is emitted.",
+    "resolution": 8,
+    "triangles": [
+      [[10.0, 1.0, 1.0], [12.0, 1.0, 1.0], [12.0, 2.0, 1.0]]
+    ],
+    "expected": []
+  },
+  "clip_span": [
+    {
+      "why": "slope 0 with offset 2 >= 0 keeps the whole span",
+      "span": [0.5, 3.5],
+      "slope": 0.0,
+      "offset": 2.0,
+      "expected": [0.5, 3.5]
+    },
+    {
+      "why": "slope 0 with offset -0.25 < 0 empties the span to (1, 0)",
+      "span": [0.5, 3.5],
+      "slope": 0.0,
+      "offset": -0.25,
+      "expected": [1.0, 0.0]
+    },
+    {
+      "why": "slope 2 > 0 raises span.x to -offset/slope = 3/2 = 1.5",
+      "span": [0.5, 3.5],
+      "slope": 2.0,
+      "offset": -3.0,
+      "expected": [1.5, 3.5]
+    },
+    {
+      "why": "slope -2 < 0 lowers span.y to -offset/slope = 3/2 = 1.5",
+      "span": [0.5, 3.5],
+      "slope": -2.0,
+      "offset": 3.0,
+      "expected": [0.5, 1.5]
+    }
+  ]
+}

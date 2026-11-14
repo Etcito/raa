@@ -1,0 +1,72 @@
+{
+  "why": "Every expected word and bound is derived by hand from the WGSL pack/unpack definitions: pack4x8unorm and pack2x16unorm round half up (floor(0.5 + max*value)), the emissive code is RGBM over 128, the radiance code is square-root over 512 and the octahedral code is signed snorm. No value comes from a GPU run or from the code under test.",
+  "emissive": {
+    "why": "encode_emissive: peak = clamp(max(e)/128, 1e-6, 1); scale = ceil(255*peak)/255; d = 128*scale; each colour byte is floor(0.5 + 255*e/d) and the alpha byte is floor(0.5 + 255*scale). decode multiplies byte/255 by scale*128, so one byte of quantisation is d/255 and a round trip stays within that one step.",
+    "round_trips": [
+      {
+        "why": "zero encodes with the 1e-6 peak floor to a zero colour and decodes back to exactly zero",
+        "color": [0.0, 0.0, 0.0]
+      },
+      {
+        "why": "128 is the exact peak: scale 1 and a red byte of 255",
+        "color": [128.0, 0.0, 0.0]
+      },
+      {
+        "why": "peak 40/128 gives scale 80/255 and d = 10240/255 = 40.1569, so one step is d/255 = 0.15748",
+        "color": [10.0, 20.0, 40.0]
+      }
+    ],
+    "packed": [
+      {
+        "why": "scale 1, d 128: red floor(0.5+255)=255, green floor(0.5+127.5)=128, blue 0, alpha 255, low byte first, so 0xFF0080FF",
+        "color": [128.0, 64.0, 0.0],
+        "word": 4278223103
+      }
+    ]
+  },
+  "radiance": {
+    "why": "encode_radiance: e = sqrt(clamp(c/512, 0, 1)); each half is floor(0.5 + 65535*e) with x in the low half. A half-step in e maps to at most 512*(0.5/65535)*(2e + 0.5/65535) in c, which is the bound used for a round trip.",
+    "round_trips": [
+      {
+        "why": "zero encodes to two zero words and decodes back to zero",
+        "color": [0.0, 0.0, 0.0]
+      },
+      {
+        "why": "at the 512 range the square-root code is 1, so both words pack as all ones",
+        "color": [512.0, 512.0, 512.0]
+      },
+      {
+        "why": "2, 8 and 32 have exact roots 0.0625, 0.125 and 0.25, so the round trip only sees the 16-bit half-step",
+        "color": [2.0, 8.0, 32.0]
+      }
+    ],
+    "exact": [
+      {
+        "why": "both square-root components are 1: pack2x16unorm(1,1)=0xFFFFFFFF and pack2x16unorm(1,0)=0x0000FFFF",
+        "color": [512.0, 512.0, 512.0],
+        "words": [4294967295, 65535]
+      }
+    ]
+  },
+  "oct": {
+    "why": "oct_encode divides by the L1 norm, folds the negative-z hemisphere and packs with pack2x16snorm (floor(0.5 + 32767*value)); oct_decode unfolds and normalises. The decoded direction is compared with the normalised input, not with the raw input.",
+    "cases": [
+      {
+        "why": "+x: s=1, p=(1,0), e=(1,0) packs as (32767, 0) and decodes back to +x",
+        "normal": [1.0, 0.0, 0.0]
+      },
+      {
+        "why": "-y: p=(0,-1) packs as (0,-32767) and decodes back to -y",
+        "normal": [0.0, -1.0, 0.0]
+      },
+      {
+        "why": "+z: p=(0,0) packs to the zero word and decodes back to +z",
+        "normal": [0.0, 0.0, 1.0]
+      },
+      {
+        "why": "(1,1,1)/sqrt(3) has p=(1/3,1/3); 16-bit snorm quantisation keeps the decoded direction within 1e-3",
+        "normal": [0.5773502691896258, 0.5773502691896258, 0.5773502691896258]
+      }
+    ]
+  }
+}
