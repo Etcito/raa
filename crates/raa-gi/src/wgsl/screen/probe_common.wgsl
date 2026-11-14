@@ -4,8 +4,10 @@
 // and world normal from the S12 depth and normal targets.
 //
 // Adapted from solstice@7e465b5,
-// crates/solstice-render/shaders/gi/probe_common.wgsl:1-50 and
-// crates/solstice-render/shaders/common/math.wgsl:30-39, 61-70. MIT License
+// solstice:crates/solstice-render/shaders/gi/probe_common.wgsl:1-50 and
+// solstice:crates/solstice-render/shaders/common/math.wgsl:30-34 (pcg), :37-39
+// (hash_to_unit) and :61-70 (orthonormal_basis); the view and world positions follow
+// solstice:crates/solstice-render/shaders/common/frame.wgsl:69-73. MIT License
 //
 // Copyright (c) 2026 SamG-Coder
 //

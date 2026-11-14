@@ -6,7 +6,7 @@
 // to 1x1.
 //
 // Adapted from solstice@7e465b5,
-// crates/solstice-render/shaders/gi/depth_pyramid.wgsl:12-36. MIT License
+// solstice:crates/solstice-render/shaders/gi/depth_pyramid.wgsl:12-36. MIT License
 //
 // Copyright (c) 2026 SamG-Coder
 //
