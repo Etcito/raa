@@ -940,6 +940,7 @@ dependencies = [
  "raa-fog",
  "raa-fur",
  "raa-geom",
+ "raa-gi",
  "raa-grading",
  "raa-gtao",
  "raa-ibl",
