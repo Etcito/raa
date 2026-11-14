@@ -24,6 +24,9 @@ use raa_shader::{
     Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, SlotProvider,
 };
 
+use crate::area_shadow::{
+    AreaShadowCamera, AreaShadowSettings, AreaShadowTier, HeroSelector, MAX_HERO_LIGHTS,
+};
 use crate::contributor::ForwardContributor;
 use crate::extras::InstanceExtra;
 use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
@@ -393,6 +396,12 @@ pub struct LitRenderer {
     /// Logical `FrameGpu` feature ids set through [`LitRenderer::set_frame_feature`], one
     /// bit each; id 24 (tiling) and ids >= 64 are never stored.
     frame_features: u64,
+    /// Area-light soft-shadow settings; `AreaShadowSettings::default()` until set.
+    area_shadow_settings: AreaShadowSettings,
+    /// One hero selector per viewport, created once so prepare allocates nothing.
+    hero_selectors: [HeroSelector; MAX_VIEWS],
+    /// Heroes occupied by the most recently prepared view (0 before any prepare).
+    active_area_heroes: u32,
 }
 
 impl LitRenderer {
@@ -451,6 +460,9 @@ impl LitRenderer {
             visible_bits: Vec::new(),
             virtual_set: VirtualSet::new(),
             frame_features: 0,
+            area_shadow_settings: AreaShadowSettings::default(),
+            hero_selectors: std::array::from_fn(|_| HeroSelector::new()),
+            active_area_heroes: 0,
         };
         install_passes(pipeline, renderer.handle(), renderer.contributors())?;
         Ok(renderer)
@@ -830,6 +842,46 @@ impl LitRenderer {
         )
     }
 
+    // ---- area-light soft shadows (M4) ----
+
+    /// The accepted area-light soft-shadow settings, `AreaShadowSettings::default()` until a
+    /// [`LitRenderer::set_area_shadows`] call is accepted.
+    ///
+    /// Handoff: card 'raa-js: setAreaLightShadows and areaLightShadows on the m28 light API'
+    /// calls [`LitRenderer::area_shadows`], [`LitRenderer::set_area_shadows`] and
+    /// [`LitRenderer::active_area_heroes`]. LIFECYCLE: `LitRenderer::new` creates the four
+    /// per-view `HeroSelector`s and `LitShared` construction sets `area_heroes` to all `None`
+    /// and `area_hero_capacity` to 0; `LitRenderer::prepare` rewrites the kind-3 lanes,
+    /// `area_heroes` and `area_hero_capacity` on every prepare, after `publish_local_lights`
+    /// and before the frame graph runs (`ShadowPass::prepare`, order 20, reads them in the same
+    /// frame, followed by the order-35 `light.tiles` prepare, which uploads `inputs.lights`
+    /// when it is dirty). Nothing drops them while the renderer lives.
+    pub fn area_shadows(&self) -> AreaShadowSettings {
+        self.area_shadow_settings
+    }
+
+    /// Validates and stores `settings`; a refusal changes nothing.
+    ///
+    /// Handoff: card 'raa-shadow: hero shadow-map layers rendered by shadow.csm' calls
+    /// [`LitRenderer::set_area_shadows`] and [`LitRenderer::prepare`]; its hero targets come
+    /// from the `Handoff` at [`LitHandle::area_hero_targets`] in
+    /// `crates/raa-lit/src/handle.rs:1192`. LIFECYCLE: `LitRenderer::new` creates the four
+    /// per-view `HeroSelector`s and `LitShared` construction sets `area_heroes` to all `None`
+    /// and `area_hero_capacity` to 0; `LitRenderer::prepare` rewrites the kind-3 lanes,
+    /// `area_heroes` and `area_hero_capacity` on every prepare, after `publish_local_lights`
+    /// and before the frame graph runs (`ShadowPass::prepare`, order 20, reads them in the same
+    /// frame, followed by the order-35 `light.tiles` prepare, which uploads `inputs.lights`
+    /// when it is dirty). Nothing drops them while the renderer lives.
+    pub fn set_area_shadows(&mut self, settings: AreaShadowSettings) -> Result<(), RaaError> {
+        self.area_shadow_settings = settings.validate()?;
+        Ok(())
+    }
+
+    /// Heroes occupied by the most recently prepared view (0 before any prepare).
+    pub fn active_area_heroes(&self) -> u32 {
+        self.active_area_heroes
+    }
+
     // ---- virtualized instances and frame features (P3-LIT-SEAM) ----
 
     /// The virtualized scene instances. Members keep their persistent records but are left
@@ -1153,6 +1205,33 @@ impl LitRenderer {
             inputs.index = self.scene_frame.frame_index;
             inputs.view = self.scene_frame.current_view;
             publish_local_lights(&mut inputs, &mut self.local_lights);
+            // Area-light hero tiers: rewrite the kind-3 lanes, the hero targets and the
+            // capacity of this view before the shadow pass reads them.
+            let view = self.scene_frame.current_view.min(MAX_VIEWS - 1);
+            let settings = self.area_shadow_settings;
+            let camera = AreaShadowCamera {
+                eye: scene.camera.eye,
+                forward: (scene.camera.target - scene.camera.eye).normalize_or_zero(),
+                fov_y_rad: scene.camera.fov_y_rad,
+                viewport,
+            };
+            let mut heroes = [None; MAX_HERO_LIGHTS];
+            if let Some(selector) = self.hero_selectors.get_mut(view) {
+                let changed = selector.update(
+                    &settings,
+                    &camera,
+                    &self.local_lights,
+                    &mut inputs.lights,
+                    &mut heroes,
+                );
+                inputs.lights_dirty |= changed;
+                self.active_area_heroes = selector.active_heroes();
+            }
+            s.area_heroes = heroes;
+            s.area_hero_capacity = match settings.tier {
+                AreaShadowTier::Auto | AreaShadowTier::Hero => settings.hero_count,
+                AreaShadowTier::Cone | AreaShadowTier::Fade => 0,
+            };
         }
         if tiling {
             self.readback
