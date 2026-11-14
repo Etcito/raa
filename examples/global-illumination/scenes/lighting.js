@@ -1,6 +1,7 @@
-// Lighting stage (S40) of the global-illumination page, rows 1-21: colour bleeding, interior bounce,
+// Lighting stage (S40) of the global-illumination page, rows 1-23: colour bleeding, interior bounce,
 // the emissive panel, local-light shadows, the sky overhang, glossy reflection, quality, forward
-// content, the moved block and the Cornell box (ten times the canonical size, metres = mm / 100). Importing this module has no side effects. Every row is an on/off pair
+// content, the moved block and the Cornell box (ten times the canonical size, metres = mm / 100) with
+// its two linear-HDR probe rows. Importing this module has no side effects. Every row is an on/off pair
 // on one arrangement, built from lib/content.js builders; observe reports the evidence of contract
 // 'gi-lighting-rows'. `ready` holds the moved-instance arrangement until its block has moved.
 import { box, panel, plane, roomShell, sphere, volumeRoom } from '../lib/content.js';
@@ -28,6 +29,9 @@ export const CORNELL_FIXTURE_Y = 5.4875;
 // has direct luminance Y_d = 0.19819. exposure = Y_t / (1.35 Y_d) = 0.5797 / 0.26756 = 2.1666 (EV +1.1154).
 // It is derived for the light at 5.487 and stays fixed when CORNELL_LIGHT_Y changes.
 export const CORNELL_EXPOSURE = 2.1666;
+// The linear probe rows use a quarter of the Cornell exposure with the linear mapper and no dither, so the
+// capture stores sRGB-encoded scene-linear values that the ratio script can decode.
+export const CORNELL_LINEAR_EXPOSURE_SCALE = 0.25;
 const ON_FACTS = [
   'snapshot:settings', 'snapshot:quality', 'snapshot:stats', 'snapshot:instances',
   'runtime:passes', 'runtime:viewSizes', 'runtime:ready', 'assertion:gi-active',
@@ -44,8 +48,9 @@ export const factNames = [
 /**
  * `ROWS` lists the rows in table order (contract gi-lighting-rows). Each entry's `measured` flag
  * gives it a PAIR_RUN measurement, and its `extraFacts` are appended to ON_FACTS or OFF_FACTS.
- * Today ROWS holds rows 1-10 only, and `ready` (a member of the default export) returns
- * { ready: true, stage: 'lighting' } for every variant.
+ * Today ROWS holds rows 1-23 of the lighting stage, including the two unmeasured linear-HDR probe
+ * rows, and `ready` (a member of the default export) returns { ready: true, stage: 'lighting' }
+ * for every variant except moved-instance.
  * Handoff: gi page: scenes/lighting.js rows 11-19 (glossy, quality, forward content, moved block)
  * appends its rows to `ROWS` (examples/global-illumination/scenes/lighting.js:37), its arrangements
  * to `ARRANGEMENTS` and replaces the moved-block logic of `ready`; state/keys: today `build` returns
@@ -104,11 +109,20 @@ const ROWS = [
   { mode: 'cornell-box-off', arrangement: 'cornell-box', filename: 'gi-cornell-box-off-direct-only.png',
     criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true,
     facts: ['snapshot:settings', 'snapshot:stats'] },
+  // Linear-HDR probe rows: the same Cornell box at a quarter of the exposure with linear, undithered tone mapping,
+  // so the capture stores sRGB-encoded scene-linear values that the ratio script can decode. They are unmeasured.
+  { mode: 'cornell-box-linear-on', arrangement: 'cornell-box-linear', filename: 'gi-cornell-box-linear-on-hdr-ratio-probe.png',
+    criterionName: 'P4-Q3 Cornell linear HDR probe', producer: 'raa-gi-screen', extraFacts: [], measured: false,
+    facts: ['snapshot:settings', 'snapshot:stats'] },
+  { mode: 'cornell-box-linear-off', arrangement: 'cornell-box-linear', filename: 'gi-cornell-box-linear-off-hdr-ratio-probe.png',
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: false,
+    facts: ['snapshot:settings', 'snapshot:stats'] },
 ];
 
 // Judge-held fixtures per arrangement: the judge never scores them.
 const ROOM_HELD = ['room shell with red left wall and green right wall', 'white box and sphere',
   'sun through the ceiling opening', 'camera'];
+const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'];
 const HELD = {
   'color-bleed': ROOM_HELD,
   'interior-bounce': ROOM_HELD,
@@ -121,12 +135,20 @@ const HELD = {
   'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball',
     'camera'],
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
-  'cornell-box': ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'],
+  'cornell-box': CORNELL_HELD,
+  'cornell-box-linear': [...CORNELL_HELD, 'linear tone mapping without dither at a quarter of the Cornell exposure'],
 };
 
 // Camera and subject bounds per arrangement, in metres (camera near 0.05, far 200).
 const lens = (eye, target, fovYDeg) => ({ eye, target, fovYDeg, near: 0.05, far: 200 });
 const roomSubject = { name: 'room', min: [-3.4, -0.4, -8.4], max: [3.4, 3.4, 0] };
+const CORNELL_SELECTION = {
+  camera: lens([2.78, 2.73, -8.0], [2.78, 2.73, 0], 39.3),
+  subjects: [
+    { name: 'cornell-room', min: [0, 0, 0], max: [5.56, 5.488, 5.592] },
+    { name: 'light', min: [2.13, 5.4, 2.27], max: [3.43, 5.49, 3.32] },
+  ],
+};
 const SELECTIONS = {
   'color-bleed': {
     camera: lens([0, 1.4, -1.2], [0, 0.6, -5.4], 60),
@@ -174,13 +196,8 @@ const SELECTIONS = {
       { name: 'block-old', min: [-2.4, 0, -7.4], max: [-1.6, 0.8, -6.6] },
     ],
   },
-  'cornell-box': {
-    camera: lens([2.78, 2.73, -8.0], [2.78, 2.73, 0], 39.3),
-    subjects: [
-      { name: 'cornell-room', min: [0, 0, 0], max: [5.56, 5.488, 5.592] },
-      { name: 'light', min: [2.13, 5.4, 2.27], max: [3.43, 5.49, 3.32] },
-    ],
-  },
+  'cornell-box': CORNELL_SELECTION,
+  'cornell-box-linear': CORNELL_SELECTION,
 };
 
 // Quality per mode; a mode without an entry uses DEFAULT_QUALITY.
@@ -242,6 +259,14 @@ const BEHAVIOURS = {
     + 'light reaches directly are lit; the ceiling and the surfaces facing away from the light stay dark; there is no red '
     + 'or green colour bleeding on the white surfaces, and the blocks cast no shadows because RAA local lights are '
     + 'unshadowed without GI.',
+  'cornell-box-linear-on': 'Global illumination on, shown with linear tone mapping at a quarter of the usual exposure '
+    + '(a darker image with flat contrast): the floor under the ceiling light is the brightest surface, the back wall is '
+    + 'lit and darkens towards its top corners, the ceiling is lit only by bounce light, and the red and green walls tint '
+    + 'the nearby white surfaces; nothing is clipped to pure white except the light fixture itself.',
+  'cornell-box-linear-off': 'Global illumination off, shown with linear tone mapping at a quarter of the usual exposure: '
+    + 'only surfaces the ceiling light reaches directly are lit; the floor under the light is the brightest surface and '
+    + 'the back wall darkens towards its top corners; the ceiling stays black and there is no red or green colour '
+    + 'bleeding; nothing is clipped to pure white except the light fixture itself.',
 };
 const DESCRIPTIONS = {
   'color-bleed-on': 'Global illumination on: the white box and floor take bounce light from the red and green walls.',
@@ -265,6 +290,8 @@ const DESCRIPTIONS = {
   'moved-instance-off': 'The same moved block with global illumination disabled: no orange light spills from it.',
   'cornell-box-on': 'Global illumination on: the Cornell box is lit by bounce light from its red and green walls and its ceiling light.',
   'cornell-box-off': 'The same Cornell box with global illumination disabled: only the direct light of the ceiling light.',
+  'cornell-box-linear-on': 'Global illumination on, linear tone mapping at a quarter exposure: the Cornell box as scene-linear values.',
+  'cornell-box-linear-off': 'The same Cornell box with global illumination disabled, linear tone mapping at a quarter exposure.',
 };
 
 const nodeAt = (engine, position = [0, 0, 0]) => engine.addNode(null, position, [0, 0, 0, 1], [1, 1, 1]);
@@ -375,10 +402,10 @@ const CORNELL_ALBEDO = { white: [0.886, 0.699, 0.666], red: [0.570, 0.043, 0.044
 // Linear light colour and radiance ratio 18.4 : 11.0 : 2.75; the intensity is radiance x area (1.30 x 1.05 m).
 const CORNELL_LIGHT_COLOUR = [1, 0.598, 0.149];
 const CORNELL_LIGHT_INTENSITY = 18.4 * 1.365;
-const CORNELL_LIGHT_X = 2.78, CORNELL_LIGHT_Z = 2.795;
+export const CORNELL_LIGHT_X = 2.78, CORNELL_LIGHT_Z = 2.795;
 // The rectangle basis of a downward light puts size[0] along -z and size[1] along x, so [1.05, 1.30]
 // gives the specified 1.30 m along x and 1.05 m along z.
-const CORNELL_LIGHT_SIZE = [1.05, 1.30];
+export const CORNELL_LIGHT_SIZE = [1.05, 1.30];
 
 const srgbOf = v => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
 const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
@@ -473,6 +500,15 @@ function cornellBox(engine, variant, state) {
   );
 }
 
+// The linear-HDR probe rows: the same Cornell box, then linear tone mapping without dither at a quarter of the
+// Cornell exposure, so the capture stores sRGB-encoded scene-linear values that the ratio script can decode.
+function cornellLinear(engine, variant, state) {
+  cornellBox(engine, variant, state);
+  engine.setToneMapping({
+    mapper: 'linear', dither: false, exposureEv: Math.log2(CORNELL_EXPOSURE * CORNELL_LINEAR_EXPOSURE_SCALE),
+  });
+}
+
 // Each arrangement adds its content and pushes { name, instance } entries into state.instances.
 const ARRANGEMENTS = {
   'color-bleed': roomWithObjects,
@@ -548,6 +584,7 @@ const ARRANGEMENTS = {
     );
   },
   'cornell-box': cornellBox,
+  'cornell-box-linear': cornellLinear,
   'moved-instance': (engine, variant, state) => {
     roomScene(engine, state);
     const block = engine.addNode(null, BLOCK_START, [0, 0, 0, 1], [1, 1, 1]);
