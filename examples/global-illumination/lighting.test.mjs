@@ -23,10 +23,13 @@ const HELD = {
   'glossy-reflection': ['glossy floor', 'orange glowing sphere above the frame', 'day sky', 'camera'],
   'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball', 'camera'],
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
+  'cornell-box': ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'],
 };
+// The Cornell rows name their own fact lists (contract: snapshot:settings and snapshot:stats for the pair).
+const CORNELL_FACTS = ['snapshot:settings', 'snapshot:stats'];
 // Rows whose held constants extend their arrangement's: the GI-off frame's flat sky ambient (the no-GI baseline).
 const EXTRA_HELD = { 'quality-off': ['flat uncoloured sky ambient fill of the frame without global illumination'] };
-// The 19 rows in contract order: [mode, arrangement, filename, criterionName, producer, extra fact, expectedVisibleBehavior].
+// The 21 rows in contract order: [mode, arrangement, filename, criterionName, producer, extra fact, expectedVisibleBehavior].
 const TABLE = [
   ['color-bleed-on', 'color-bleed', 'gi-color-bleed-white-box-tinted-red-green.png', 'P4-Q3 colour bleeding', 'raa-gi-screen', null,
     'The white box and the white floor beside the coloured walls take a visible red tint on the side facing the red left wall and a green tint on the side facing the green right wall.'],
@@ -66,6 +69,10 @@ const TABLE = [
     'The bright orange block stands in its new place near the right wall, and the floor and wall around it there glow orange from its bounce light; no orange glow remains at its old place in the far left corner.'],
   ['moved-instance-off', 'moved-instance', 'gi-moved-block-off.png', 'P4-Q8 GI off frame', 'raa-gi-core', 'assertion:block-moved',
     'The bright orange block stands in its new place near the right wall with no orange light spilling onto the floor or wall around it.'],
+  ['cornell-box-on', 'cornell-box', 'gi-cornell-box-matches-reference.png', 'P4-Q3 Cornell box matches the reference', 'raa-gi-screen', null,
+    'The Cornell box lit by global illumination from its single ceiling light: the red and green walls bleed their colour onto the white blocks, floor and ceiling (red on the left side of the tall block, green on the right side of the short block); the ceiling is lit indirectly, brightest around the light; shadows under and beside the blocks are soft; corners darken only softly; no blotches, voxel blocks, streaks or light leaks through the walls.'],
+  ['cornell-box-off', 'cornell-box', 'gi-cornell-box-off-direct-only.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
+    'The same Cornell box with global illumination off and the same exposure: only surfaces the ceiling light reaches directly are lit; the ceiling and the surfaces facing away from the light stay dark; there is no red or green colour bleeding on the white surfaces, and the blocks cast no shadows because RAA local lights are unshadowed without GI.'],
 ];
 const MODES = TABLE.map(row => row[0]);
 const QUALITY_ON = ['quality-64-3-on', 'quality-96-5-on'];
@@ -78,14 +85,16 @@ const expectedRow = ([mode, arrangement, filename, criterionName, producer, extr
     criterionName,
     scenario: 'lighting',
     expectedVisibleBehavior,
-    requiredFacts: [...(on ? ON_FACTS : OFF_FACTS), ...(extra ? [extra] : [])],
+    requiredFacts: arrangement === 'cornell-box' ? CORNELL_FACTS : [...(on ? ON_FACTS : OFF_FACTS), ...(extra ? [extra] : [])],
     heldConstant: [...HELD[arrangement], ...(EXTRA_HELD[mode] ?? [])],
     producer,
     pair: mode === 'quality-64-3-on' ? null : `gi-lighting-${arrangement}`,
+    // Only the Cornell GI-on row is judged against the reference image.
+    ...(mode === 'cornell-box-on' ? { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'look' } : {}),
   };
 };
 
-test('exports: identity, factNames, functions and the 19 variant ids in order', () => {
+test('exports: identity, factNames, functions and the 21 variant ids in order', () => {
   assert.equal(lighting.default.id, 'lighting');
   assert.equal(lighting.default.milestone, 'lighting');
   assert.equal(lighting.default.title, 'GI lighting');
@@ -98,7 +107,7 @@ test('exports: identity, factNames, functions and the 19 variant ids in order', 
   assert.deepEqual(lighting.default.variants.map(v => v.id), MODES);
 });
 
-test('inventory rows: [id, mode, filename] equal the 19 contract rows in order', () => {
+test('inventory rows: [id, mode, filename] equal the 21 contract rows in order', () => {
   assert.deepEqual(lighting.inventory.map(r => [r.id, r.mode, r.filename]),
     TABLE.map(([mode, , filename]) => [`lighting-${mode}`, mode, filename]));
   for (const row of lighting.inventory) {
@@ -142,7 +151,7 @@ test('variants carry the contract gi patch, giExpected, quality, arrangement, of
 test('measured pairs: one -on and one -off variant on the same preset; quality-64-3-on has no pair', () => {
   const measured = lighting.default.variants.filter(v => v.measurement);
   const pairs = [...new Set(measured.map(v => v.measurement.pair))];
-  assert.equal(pairs.length, 9);
+  assert.equal(pairs.length, 10);
   for (const pair of pairs) {
     const members = measured.filter(v => v.measurement.pair === pair);
     assert.deepEqual(members.map(v => v.measurement.state).sort(), ['off', 'on']);
@@ -173,7 +182,7 @@ test('each off variant equals its on partner except id, gi.enabled, giExpected, 
   };
   const measurementCore = m => ({ pair: m.pair, preset: m.preset });
   const offs = lighting.default.variants.filter(v => v.id.endsWith('-off'));
-  assert.equal(offs.length, 9);
+  assert.equal(offs.length, 10);
   for (const off of offs) {
     const partner = variantOf(off.id === 'quality-off' ? 'quality-96-5-on' : off.id.replace(/-off$/, '-on'));
     assert.equal(partner.offMode, off.id);
@@ -191,7 +200,7 @@ test('each off variant equals its on partner except id, gi.enabled, giExpected, 
   }
 });
 
-test('validateInventory([volume, lighting], "lighting") returns the 8 volume ids then the 19 lighting ids', () => {
+test('validateInventory([volume, lighting], "lighting") returns the 8 volume ids then the 21 lighting ids', () => {
   const volumeIds = ['volume-voxels-on', 'volume-voxels-off', 'volume-radiance-on', 'volume-radiance-off',
     'volume-distance-on', 'volume-distance-off', 'volume-levels-on', 'volume-levels-off'];
   const rows = validateInventory([volume, lighting], 'lighting');
@@ -322,4 +331,130 @@ test('ready: other arrangements are ready at once and never move a block', () =>
   const result = lighting.default.ready(stub({ stats: DISABLED, calls }), stateOf(), variantOf('color-bleed-off'));
   assert.deepEqual(result, { ready: true, stage: 'lighting' });
   assert.equal(calls.length, 0);
+});
+
+// The Cornell box (S40 amendment): build against a recording engine, then check the calls it makes.
+function recordingEngine() {
+  const calls = [];
+  let next = 1;
+  const engine = new Proxy({}, {
+    get: (target, name) => (name === 'calls' ? calls : (...args) => { calls.push([name, ...args]); return next++; }),
+  });
+  return engine;
+}
+async function cornellCalls(id) {
+  const engine = recordingEngine();
+  const state = await lighting.build(engine, {}, variantOf(id));
+  return { calls: engine.calls, state };
+}
+const named = (calls, name) => calls.filter(call => call[0] === name).map(call => call.slice(1));
+const srgb = v => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
+
+test('Cornell rows: 21 rows, the pair gi-lighting-cornell-box, judgeReference on the on row only', () => {
+  const on = lighting.inventory.find(r => r.mode === 'cornell-box-on');
+  const off = lighting.inventory.find(r => r.mode === 'cornell-box-off');
+  assert.equal(lighting.inventory.length, 21);
+  assert.equal(on.judgeReference, '/refs/cornell-box-reference.png');
+  assert.equal(on.judgeAspect, 'look');
+  assert.equal(off.judgeReference, undefined);
+  assert.equal(off.judgeAspect, undefined);
+  assert.equal(on.pair, 'gi-lighting-cornell-box');
+  assert.equal(off.pair, 'gi-lighting-cornell-box');
+  assert.deepEqual(on.requiredFacts, ['snapshot:settings', 'snapshot:stats']);
+  assert.deepEqual(off.requiredFacts, ['snapshot:settings', 'snapshot:stats']);
+  assert.equal(on.filename, 'gi-cornell-box-matches-reference.png');
+  assert.equal(off.filename, 'gi-cornell-box-off-direct-only.png');
+  assert.equal(variantOf('cornell-box-on').offMode, 'cornell-box-off');
+  assert.deepEqual(variantOf('cornell-box-on').measurement.features, { globalIllumination: true });
+  assert.deepEqual(variantOf('cornell-box-off').measurement.features, { globalIllumination: false });
+  assert.deepEqual(variantOf('cornell-box-on').selection.camera, { eye: [2.78, 2.73, -8], target: [2.78, 2.73, 0], fovYDeg: 39.3, near: 0.05, far: 200 });
+});
+
+test('Cornell light and fixture: CORNELL_LIGHT_Y 5.487, the fixture at 5.4875 and excluded from GI', async () => {
+  assert.equal(lighting.CORNELL_LIGHT_Y, 5.487);
+  assert.equal(lighting.CORNELL_FIXTURE_Y, 5.4875);
+  for (const id of ['cornell-box-on', 'cornell-box-off']) {
+    const { calls, state } = await cornellCalls(id);
+    const lights = named(calls, 'addLight');
+    assert.equal(lights.length, 1, 'the only light');
+    const [light] = lights;
+    assert.equal(light[0].kind, 'area');
+    assert.deepEqual(light[0].position, [2.78, 5.487, 2.795]);
+    assert.deepEqual(light[0].direction, [0, -1, 0]);
+    assert.deepEqual(light[0].size, [1.05, 1.3]);
+    assert.equal(light[0].range, 30);
+    assert.ok(Math.abs(light[0].intensity - 18.4 * 1.365) < 1e-9);
+    assert.deepEqual(light[0].color, [1, 0.598, 0.149].map(srgb));
+    assert.deepEqual(named(calls, 'setLight'), [[{ direction: [0, -1, 0], color: [1, 1, 1], intensity: 0 }]]);
+    assert.deepEqual(named(calls, 'setAmbient'), [[{ color: [0, 0, 0], intensity: 0 }]]);
+    assert.deepEqual(named(calls, 'setEnvironmentLighting'), [[{ diffuse: 0, specular: 0 }]]);
+    // The fixture is the flat quad at CORNELL_FIXTURE_Y, excluded from GI, and the last instance of the scene.
+    const fixture = state.instances.find(item => item.name === 'fixture');
+    assert.ok(fixture, 'fixture instance');
+    assert.deepEqual(named(calls, 'setInstanceGlobalIllumination'), [[fixture.instance, false]]);
+    const meshes = named(calls, 'addMesh').map(([desc]) => desc);
+    const fixtureMesh = meshes.find(desc => desc.positions.every((v, i) => i % 3 !== 1 || Math.abs(v - 5.4875) < 1e-5));
+    assert.ok(fixtureMesh, 'a mesh at CORNELL_FIXTURE_Y');
+    assert.ok(fixtureMesh.normals.every((v, i) => Math.abs(v - (i % 3 === 1 ? -1 : 0)) < 1e-6), 'facing down');
+  }
+});
+
+test('Cornell tone mapping: the shared exposure is the derived constant, and the derivation holds', async () => {
+  assert.equal(lighting.CORNELL_EXPOSURE, 2.1666);
+  for (const id of ['cornell-box-on', 'cornell-box-off']) {
+    const { calls } = await cornellCalls(id);
+    assert.deepEqual(named(calls, 'setToneMapping'), [[{ exposureEv: Math.log2(2.1666) }]]);
+    // The fixture reads 4 after the exposure: its linear colour value is 4 / exposure.
+    const fixtureMaterial = named(calls, 'addMaterial').find(([desc]) => desc.model === 'flat');
+    assert.deepEqual(fixtureMaterial[0].emissive.map(v => Math.round(v * 1e6)), [4 / 2.1666, 4 / 2.1666, 4 / 2.1666].map(v => Math.round(v * 1e6)));
+    assert.equal(fixtureMaterial[0].color.every(v => v === 0), true);
+  }
+  // The back-wall centre under the S17 area formula (light at 5.487, representative point, Rec. 709 luminance)
+  // and the target luminance of the reference patch after inverting AgX (0.5797): exposure = Y_t / (1.35 Y_d).
+  const P = [2.78, 2.74, 5.592], L = [2.78, 5.487, 2.795];
+  const v = P.map((p, i) => p - L[i]);
+  const along = [0, 0, -1], across = [1, 0, 0];   // travel (0, -1, 0): tangent -z, bitangent +x
+  const at = Math.min(Math.max(v[2] * along[2], -0.525), 0.525);
+  const ab = Math.min(Math.max(v[0] * across[0], -0.65), 0.65);
+  const R = L.map((l, i) => l + along[i] * at + across[i] * ab);
+  const toLight = R.map((r, i) => r - P[i]);
+  const d2 = Math.max(toLight.reduce((sum, x) => sum + x * x, 0), 0.04);
+  // The white back wall's normal is (0, 0, -1), so n.l is -toLight.z over the distance.
+  const ndotl = Math.max(-toLight[2] / Math.sqrt(d2), 0);
+  const q = Math.sqrt(d2) / 30;
+  const window = Math.min(Math.max(1 - q ** 4, 0), 1) ** 2;
+  const direct = [0.886, 0.699, 0.666].map((a, i) => (a / Math.PI) * [1, 0.598, 0.149][i] * 18.4 * 1.365 * window / d2 * ndotl);
+  const luminance = direct[0] * 0.2126 + direct[1] * 0.7152 + direct[2] * 0.0722;
+  assert.ok(Math.abs(0.5797 / (1.35 * luminance) - lighting.CORNELL_EXPOSURE) < 5e-4, `derived ${0.5797 / (1.35 * luminance)}`);
+});
+
+test('Cornell geometry: wall normals point into the box, block tops face up, windings agree', async () => {
+  const { calls } = await cornellCalls('cornell-box-on');
+  // Meshes are recorded in creation order: the fixture, the white group, the red and the green wall.
+  const [, white, red, green] = named(calls, 'addMesh').map(([desc]) => desc);
+  // The red wall (x about 5.5) faces -x into the box and the green wall (x 0) faces +x; the red quad is not exactly
+  // planar, so its normal is only close to the axis.
+  for (let i = 0; i < red.normals.length; i += 3) assert.ok(red.normals[i] < -0.99);
+  for (let i = 0; i < green.normals.length; i += 3) assert.ok(Math.abs(green.normals[i] - 1) < 1e-6);
+  assert.equal(red.indices.length, 6);
+  assert.equal(green.indices.length, 6);
+  // The white mesh starts with the floor (vertices 0-3, +y), the ceiling (4-7, -y) and the back (8-11, -z);
+  // the short block's top follows (12-15, +y).
+  const normalOf = vertex => [0, 1, 2].map(k => white.normals[vertex * 3 + k]);
+  const near = (a, b) => a.every((x, k) => Math.abs(x - b[k]) < 1e-6);
+  assert.ok(near(normalOf(0), [0, 1, 0]), 'floor');
+  assert.ok(near(normalOf(4), [0, -1, 0]), 'ceiling');
+  assert.ok(near(normalOf(8), [0, 0, -1]), 'back');
+  assert.ok(near(normalOf(12), [0, 1, 0]), 'short block top');
+  // Every triangle's winding agrees with its vertex normal (counter-clockwise front faces).
+  for (const mesh of [white, red, green]) {
+    for (let t = 0; t < mesh.indices.length; t += 3) {
+      const corner = i => [0, 1, 2].map(k => mesh.positions[mesh.indices[t + i] * 3 + k]);
+      const [a, b, c] = [corner(0), corner(1), corner(2)];
+      const e1 = a.map((x, k) => b[k] - x), e2 = a.map((x, k) => c[k] - x);
+      const cross = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+      const n = [0, 1, 2].map(k => mesh.normals[mesh.indices[t] * 3 + k]);
+      assert.ok(cross[0] * n[0] + cross[1] * n[1] + cross[2] * n[2] > 0, `triangle ${t / 3} winding`);
+    }
+  }
 });

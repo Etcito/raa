@@ -521,16 +521,32 @@ export function judgeScore(text) {
  */
 export const JUDGE_GRACE_MS = 150000;
 
-/** One judge process on one capture; no reference image is ever passed. */
-export function judgeCapture(capture, description, { killAt, heldConstant } = {}) {
+/** The judge aspects a row's reference may be scored by (inventory `judgeAspect`). */
+export const JUDGE_ASPECTS = Object.freeze(['look', 'functional', 'design']);
+
+/**
+ * One judge process on one capture. A row without a reference passes no `--reference` or
+ * `--aspect`, as before. `reference` is an absolute .png path that must exist when the judge
+ * starts (`judge: reference <path> is missing` otherwise, and no process starts).
+ */
+export function judgeCapture(capture, description, { killAt, heldConstant, reference, aspect } = {}) {
   const client = process.env.NMC_JUDGE_CLIENT;
   ensure(nonblank(client), 'NMC_JUDGE_CLIENT is missing');
   if (heldConstant !== undefined) {
     ensure(Array.isArray(heldConstant) && heldConstant.every(nonblank),
       'judge: heldConstant must be an array of fixture names');
   }
+  if (reference !== undefined) {
+    ensure(nonblank(reference) && path.isAbsolute(reference) && reference.endsWith('.png'),
+      'judge: reference must be an absolute .png path');
+    ensure(referenceExists(reference), `judge: reference ${reference} is missing`);
+  }
+  ensure(aspect === undefined || JUDGE_ASPECTS.includes(aspect),
+    'judge: aspect must be look, functional or design');
   const args = [client, capture, '--description', description];
   for (const fixture of heldConstant ?? []) args.push('--held-constant', fixture);
+  if (reference !== undefined) args.push('--reference', reference);
+  if (aspect !== undefined) args.push('--aspect', aspect);
   args.push('--min-score', '6');
   return new Promise((resolveVerdict, rejectVerdict) => {
     const child = spawn('python3', args,
@@ -554,6 +570,11 @@ export function judgeCapture(capture, description, { killAt, heldConstant } = {}
   });
 }
 
+/** Whether a judge reference exists as a regular file. */
+function referenceExists(reference) {
+  try { return fs.lstatSync(reference).isFile(); } catch { return false; }
+}
+
 /** Captures judged at once: <envPrefix>_JUDGE_CONCURRENCY (1..16) or 4. */
 export const JUDGE_CONCURRENCY = 4;
 
@@ -562,6 +583,15 @@ export const JUDGE_CONCURRENCY = 4;
  * the step ends before its command timeout with every verdict it has written.
  */
 export const JUDGE_BUDGET_MS = 480000;
+
+/**
+ * Whether a verdict was judged with the row's reference and aspect. An entry written before the
+ * keys existed counts as null, so it only matches a row without a reference.
+ */
+function judgeSame(entry, row) {
+  return (entry.reference ?? null) === (row.judgeReference ?? null)
+    && (entry.aspect ?? null) === (row.judgeAspect ?? null);
+}
 
 /**
  * P2-RESUMABLE-RENDER JUDGE reuse: an earlier passed verdict of the byte-identical capture with the
@@ -579,7 +609,7 @@ function reusableVerdict(roots, currentDirectory, row, capture) {
       for (const entry of readJsonRecord(containedPath(root, records.judge)).images) {
         const passed = entry?.id === row.id && entry.filename === row.filename
           && entry.description === row.expectedVisibleBehavior && entry.minScore === 6
-          && entry.exit === 0 && typeof entry.score === 'number' && entry.score >= 6;
+          && judgeSame(entry, row) && entry.exit === 0 && typeof entry.score === 'number' && entry.score >= 6;
         if (passed && sameBytes(containedPath(root, records.image(row.filename)))) return { ...entry };
       }
     } catch { /* an unreadable attempt supplies no verdict */ }
@@ -1316,8 +1346,8 @@ export function createPageJob(config) {
     const ownVerdict = (row) => {
       const entry = earlier.find((value) => value?.id === row.id);
       return entry && entry.filename === row.filename && entry.description === row.expectedVisibleBehavior
-        && entry.minScore === 6 && entry.exit === 0 && typeof entry.score === 'number' && entry.score >= 6
-        ? { ...entry } : null;
+        && entry.minScore === 6 && judgeSame(entry, row) && entry.exit === 0
+        && typeof entry.score === 'number' && entry.score >= 6 ? { ...entry } : null;
     };
     const log = options.log ?? ((line) => process.stdout.write(`${line}\n`));
     const total = verified.inventory.length;
@@ -1347,6 +1377,7 @@ export function createPageJob(config) {
       }
       const entry = {
         id: row.id, filename: row.filename, description: row.expectedVisibleBehavior, minScore: 6,
+        reference: row.judgeReference ?? null, aspect: row.judgeAspect ?? null,
         exit: -1, score: null, output: '', judgedAt: new Date().toISOString(),
       };
       let failure = null;
@@ -1355,8 +1386,17 @@ export function createPageJob(config) {
         ensure(image && image.filename === row.filename, `selected image ${row.id} is missing from the run`);
         ensure(fs.existsSync(capture) && fs.lstatSync(capture).isFile(), `capture ${row.filename} is missing`);
         const killAt = deadline + judgeGraceMs();
-        const verdict = await runJudge(capture, row.expectedVisibleBehavior,
-          judgeHeldConstant ? { killAt, heldConstant: row.heldConstant ?? [] } : { killAt });
+        if (row.judgeReference !== undefined) {
+          // Checked before any judge process starts, whatever runner judges.
+          ensure(referenceExists(row.judgeReference), `judge: reference ${row.judgeReference} is missing`);
+        }
+        // Rows without the reference fields pass exactly the options they always passed.
+        const verdict = await runJudge(capture, row.expectedVisibleBehavior, {
+          killAt,
+          ...(judgeHeldConstant ? { heldConstant: row.heldConstant ?? [] } : {}),
+          ...(row.judgeReference === undefined ? {} : { reference: row.judgeReference }),
+          ...(row.judgeAspect === undefined ? {} : { aspect: row.judgeAspect }),
+        });
         ensure(isRecord(verdict), `judge returned no verdict for ${row.filename}`);
         ensure(Number.isInteger(verdict.exit), `judge verdict for ${row.filename} has no exit code`);
         ensure(typeof verdict.output === 'string', `judge verdict for ${row.filename} has no output`);

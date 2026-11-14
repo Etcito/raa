@@ -87,6 +87,8 @@ function toyInventory(scene) {
     requiredFacts: row.requiredFacts ?? ['assertion:toy-visible'],
     pair: row.pair ?? null,
     ...(row.heldConstant === undefined ? {} : { heldConstant: row.heldConstant }),
+    ...(row.judgeReference === undefined ? {} : { judgeReference: row.judgeReference }),
+    ...(row.judgeAspect === undefined ? {} : { judgeAspect: row.judgeAspect }),
   }));
 }
 
@@ -764,4 +766,124 @@ test('judgeCapture places the held constants between the description and the min
     (error) => error.message === 'judge: heldConstant must be an array of fixture names');
   assert.throws(() => judgeCapture(capture, 'the toy shows its fixture', { heldConstant: ['a', '  '] }),
     (error) => error.message === 'judge: heldConstant must be an array of fixture names');
+});
+
+/** A judge client that records its argv, and touches `started.txt` beside itself when it runs. */
+function recordingJudgeClient(directory) {
+  const client = path.join(directory, 'toy-judge.py');
+  fs.writeFileSync(client, [
+    'import json, os, sys',
+    "open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'started.txt'), 'w').close()",
+    'print(json.dumps(sys.argv[1:]))',
+    'print("JUDGE PASS: 8/10")',
+    '',
+  ].join('\n'));
+  return client;
+}
+
+function withJudgeClient(t, client) {
+  const original = process.env.NMC_JUDGE_CLIENT;
+  t.after(() => {
+    if (original === undefined) delete process.env.NMC_JUDGE_CLIENT;
+    else process.env.NMC_JUDGE_CLIENT = original;
+  });
+  process.env.NMC_JUDGE_CLIENT = client;
+}
+
+test('judgeCapture adds --reference and --aspect before the minimum score only for a row with a reference', async (t) => {
+  const directory = scratch(t);
+  const client = recordingJudgeClient(directory);
+  withJudgeClient(t, client);
+  const capture = path.join(directory, 'toy-capture.png');
+  fs.writeFileSync(capture, 'toy capture');
+  const reference = path.join(directory, 'toy-reference.png');
+  fs.writeFileSync(reference, 'toy reference');
+
+  const judged = await judgeCapture(capture, 'the toy shows its fixture', { reference, aspect: 'look' });
+  assert.equal(judged.exit, 0);
+  const args = JSON.parse(judged.output.split('\n')[0]);
+  const description = args.indexOf('--description');
+  const minimum = args.indexOf('--min-score');
+  assert.deepEqual(args.slice(description + 2, minimum), ['--reference', reference, '--aspect', 'look']);
+
+  const plain = await judgeCapture(capture, 'the toy shows its fixture');
+  const plainArgs = JSON.parse(plain.output.split('\n')[0]);
+  assert.equal(plainArgs.includes('--reference'), false);
+  assert.equal(plainArgs.includes('--aspect'), false);
+  assert.deepEqual(plainArgs.slice(plainArgs.indexOf('--description') + 2, plainArgs.indexOf('--min-score')), []);
+
+  const missing = path.join(directory, 'absent.png');
+  fs.rmSync(path.join(directory, 'started.txt'), { force: true });
+  assert.throws(() => judgeCapture(capture, 'the toy shows its fixture', { reference: missing, aspect: 'look' }),
+    (error) => error.message === `judge: reference ${missing} is missing`);
+  assert.throws(() => judgeCapture(capture, 'the toy shows its fixture', { reference, aspect: 'mood' }),
+    (error) => error.message === 'judge: aspect must be look, functional or design');
+  assert.throws(() => judgeCapture(capture, 'the toy shows its fixture', { reference: 'relative.png' }),
+    (error) => error.message === 'judge: reference must be an absolute .png path');
+  assert.equal(fs.existsSync(path.join(directory, 'started.txt')), false);
+});
+
+test('judge passes a row reference and aspect to the judge and records both in its verdict', async (t) => {
+  const directory = scratch(t);
+  const reference = path.join(directory, 'toy-reference.png');
+  fs.writeFileSync(reference, 'toy reference');
+  const rendered = await renderToy(t, {
+    scenes: [{ ...ONE, rows: [{ id: `${ONE.id}-image`, mode: 'default', filename: ONE.filename, judgeReference: reference, judgeAspect: 'look' }] }],
+  });
+  const seen = [];
+  const record = await rendered.job.judge(rendered.state.page, rendered.out, rendered.stage, {
+    judge: async (capture, description, options) => { seen.push(options); return { exit: 0, score: 7, output: '' }; },
+    log: () => {},
+  });
+  assert.equal(record.status, 'passed');
+  assert.deepEqual(Object.keys(seen[0]).sort(), ['aspect', 'killAt', 'reference']);
+  assert.equal(seen[0].reference, reference);
+  assert.equal(seen[0].aspect, 'look');
+  const saved = readJsonRecord(containedPath(rendered.out, attemptRecords(rendered.attempt.directory).judge)).images[0];
+  assert.equal(saved.reference, reference);
+  assert.equal(saved.aspect, 'look');
+});
+
+test('judge fails a row whose reference is missing and starts no judge process', async (t) => {
+  const directory = scratch(t);
+  const client = recordingJudgeClient(directory);
+  withJudgeClient(t, client);
+  const reference = path.join(directory, 'absent.png');
+  const rendered = await renderToy(t, {
+    scenes: [{ ...ONE, rows: [{ id: `${ONE.id}-image`, mode: 'default', filename: ONE.filename, judgeReference: reference, judgeAspect: 'look' }] }],
+  });
+  await assert.rejects(rendered.job.judge(rendered.state.page, rendered.out, rendered.stage, { log: () => {} }));
+  const saved = readJsonRecord(containedPath(rendered.out, attemptRecords(rendered.attempt.directory).judge));
+  assert.equal(saved.status, 'failed');
+  assert.ok(saved.errors.some((error) => error === `${ONE.filename}: judge: reference ${reference} is missing`), saved.errors.join('; '));
+  assert.equal(fs.existsSync(path.join(directory, 'started.txt')), false);
+});
+
+test('judge reuses an earlier verdict only when the reference and aspect match', async (t) => {
+  const directory = scratch(t);
+  const reference = path.join(directory, 'toy-reference.png');
+  fs.writeFileSync(reference, 'toy reference');
+  const rendered = await renderToy(t);
+  const calls = [];
+  const runner = async (capture, description, options) => { calls.push(options); return { exit: 0, score: 8, output: '' }; };
+  const judgeNow = () => rendered.job.judge(rendered.state.page, rendered.out, rendered.stage, { judge: runner, log: () => {} });
+
+  assert.equal((await judgeNow()).status, 'passed');
+  assert.equal(calls.length, 1);
+
+  // The same image judged against a reference: the earlier verdict without one is refused.
+  // A new file name: the page loader caches a module by its path (as the renamed-scene test does).
+  rewriteScene(rendered.state, ONE.id, {
+    file: 'scenes/one-reference.mjs',
+    rows: [{ id: `${ONE.id}-image`, mode: 'default', filename: ONE.filename, judgeReference: reference, judgeAspect: 'look' }],
+  });
+  await rerenderToy(rendered.job, rendered.state, rendered.out, rendered.stage, rendered.transport);
+  assert.equal((await judgeNow()).status, 'passed');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].reference, reference);
+
+  // The same reference and aspect reuse that verdict.
+  await rerenderToy(rendered.job, rendered.state, rendered.out, rendered.stage, rendered.transport);
+  assert.equal((await judgeNow()).status, 'passed');
+  assert.equal(calls.length, 2);
 });

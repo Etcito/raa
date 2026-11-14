@@ -69,11 +69,18 @@ const edit = value => fields(value, { operation: string, accepted: bool, error: 
 const pass = value => fields(value, { name: text, role: enumeration(['pass', 'contributor']), enabled: bool, order: finite, required: bool });
 const view = value => fields(value, { view: count, width: positive, height: positive });
 const readiness = value => fields(value, { status: enumeration(['pending', 'ready', 'failed']), stage: string, error: nullable(string) });
+// Optional judge reference (S40 amendment): an absolute /refs png, and an aspect only with one.
+const judgeReference = value => string(value) && /^\/refs\/[A-Za-z0-9._-]+\.png$/.test(value);
+const judgeAspects = ['look', 'functional', 'design'];
+const judgeFields = row => row.judgeReference === undefined ? row.judgeAspect === undefined
+  : judgeReference(row.judgeReference) && (row.judgeAspect === undefined || judgeAspects.includes(row.judgeAspect));
 
 /**
  * `validateInventory` validates the S40 inventories of the scenes up to the stage (cumulative: later stages are
- * skipped) and returns their rows. Today it throws `invalid stage or scenes: <stage>` for an unknown stage or a
- * non-array, and `stage <stage> is unavailable` when no scene has `stage` as its milestone.
+ * skipped) and returns their rows. An optional `judgeReference` (matching ^/refs/[A-Za-z0-9._-]+\.png$) and
+ * `judgeAspect` (look, functional or design, only with a reference) are refused when malformed. Today it throws
+ * `invalid stage or scenes: <stage>` for an unknown stage or a non-array, and `stage <stage> is unavailable` when
+ * no scene has `stage` as its milestone.
  * Handoff: gi-page: contract.test.mjs takes `validateInventory(scenes: object[], stage: string) -> object[]`
  * exported by examples/global-illumination/lib/inventory.js:87 validateInventory; the card calls it on the scenes/volume.js
  * namespace and on fixtures, and calls validateRequiredFacts on facts fixtures; state/keys: the scene namespaces
@@ -112,7 +119,7 @@ export function validateInventory(scenes, stage) {
       pairs.set(m.pair, [...(pairs.get(m.pair) ?? []), m]);
     }
     for (const row of ns.inventory) {
-      if (!fields(row, { id: v => text(v) && namePattern.test(v), criterionName: text, scenario: v => v === scene.id, mode: v => variants.has(v), filename: v => string(v) && filePattern.test(v), expectedVisibleBehavior: text, requiredFacts: list(string), pair: nullable(text), heldConstant: list(text), producer: text }) || images.has(row.id) || filenames.has(row.filename) || (variants.get(row.mode).measurement?.pair ?? null) !== row.pair) fail(`${scene.id}: invalid inventory row ${row?.id}`);
+      if (!fields(row, { id: v => text(v) && namePattern.test(v), criterionName: text, scenario: v => v === scene.id, mode: v => variants.has(v), filename: v => string(v) && filePattern.test(v), expectedVisibleBehavior: text, requiredFacts: list(string), pair: nullable(text), heldConstant: list(text), producer: text }) || !judgeFields(row) || images.has(row.id) || filenames.has(row.filename) || (variants.get(row.mode).measurement?.pair ?? null) !== row.pair) fail(`${scene.id}: invalid inventory row ${row?.id}`);
       row.requiredFacts.forEach(fact => selector(fact, names, row.id));
       if (new Set(row.requiredFacts).size !== row.requiredFacts.length) fail(`${row.id}: duplicate selector`);
       images.add(row.id); filenames.add(row.filename); rows.push(row);

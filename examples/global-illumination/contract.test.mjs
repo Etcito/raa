@@ -107,6 +107,32 @@ test('validateInventory validates the volume scene and refuses the absent lighti
   assert.throws(() => validateInventory([volume], 'lighting'), /unavailable/);
 });
 
+test('validateInventory accepts an optional judge reference and aspect and refuses malformed ones', () => {
+  // The first volume row with the optional fields set; every other field stays the scene's own.
+  const judged = extra => [{ ...volume, inventory: volume.inventory.map(row => row.id === ON_ROW.id ? { ...row, ...extra } : row) }];
+  const accepted = [
+    { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'look' },
+    { judgeReference: '/refs/a_b-1.2.png', judgeAspect: 'functional' },
+    { judgeReference: '/refs/design-sheet.png', judgeAspect: 'design' },
+    { judgeReference: '/refs/cornell-box-reference.png' },
+  ];
+  for (const extra of accepted) assert.equal(validateInventory(judged(extra), 'volume').length, 8, JSON.stringify(extra));
+  const refused = [
+    { judgeReference: 'refs/cornell-box-reference.png', judgeAspect: 'look' },
+    { judgeReference: '/refs/cornell-box-reference.jpg', judgeAspect: 'look' },
+    { judgeReference: '/refs/sub/cornell-box-reference.png', judgeAspect: 'look' },
+    { judgeReference: '/refs/cornell box.png', judgeAspect: 'look' },
+    { judgeReference: null },
+    { judgeReference: 3 },
+    { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'mood' },
+    { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: null },
+    { judgeAspect: 'look' },
+  ];
+  for (const extra of refused) {
+    assert.throws(() => validateInventory(judged(extra), 'volume'), new RegExp(`invalid inventory row ${ON_ROW.id}`), JSON.stringify(extra));
+  }
+});
+
 test('validateRequiredFacts accepts complete facts and refuses pending, false, repeated and null evidence', () => {
   validateRequiredFacts(ON_ROW, facts(), volume.factNames);
   assert.throws(() => validateRequiredFacts(ON_ROW, { ...facts(), readiness: { status: 'pending', stage: 'volume', error: null } }, volume.factNames), /required/);

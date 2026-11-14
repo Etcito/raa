@@ -1,6 +1,6 @@
-// Lighting stage (S40) of the global-illumination page, rows 1-19: colour bleeding, interior bounce,
+// Lighting stage (S40) of the global-illumination page, rows 1-21: colour bleeding, interior bounce,
 // the emissive panel, local-light shadows, the sky overhang, glossy reflection, quality, forward
-// content and the moved block. Importing this module has no side effects. Every row is an on/off pair
+// content, the moved block and the Cornell box (ten times the canonical size, metres = mm / 100). Importing this module has no side effects. Every row is an on/off pair
 // on one arrangement, built from lib/content.js builders; observe reports the evidence of contract
 // 'gi-lighting-rows'. `ready` holds the moved-instance arrangement until its block has moved.
 import { box, panel, plane, roomShell, sphere, volumeRoom } from '../lib/content.js';
@@ -11,6 +11,21 @@ const VOLUME_BYTES = {
   '96/5': 148635648, '96/4': 120324096, '96/3': 92012544,
   '64/5': 44040192, '64/4': 35651584, '64/3': 27262976,
 };
+// Cornell box (S40 amendment, product-owner directive 2026-11-14). The data is canonical millimetres / 100,
+// so the 5.56 m room is 2.8 finest voxels wider than the canonical box would be at mm / 1000.
+// The light centre height: canonical 5.487, 1 mm under the 5.488 ceiling. The visible fixture stays at
+// CORNELL_FIXTURE_Y whatever the light height is.
+export const CORNELL_LIGHT_Y = 5.487;
+export const CORNELL_FIXTURE_Y = 5.4875;
+// The shared exposure (a linear multiplier, applied to the image as tone mapping exposureEv = log2 of it).
+// Derivation, measured on /refs/cornell-box-reference.png: the mean of the 40 x 40 px patch centred at (640, 230)
+// is sRGB (221.4, 173.3, 71.2). Inverting the page's AgX tonemap (sRGB OETF, AgX sigmoid, 2.2 display decode)
+// and taking Rec. 709 luminance gives the target scene-linear value after exposure, Y_t = 0.5797. The back-wall
+// centre (2.78, 2.74, 5.592) under the S17 area formula, with the light at y 5.487, white albedo
+// (0.886, 0.699, 0.666), colour (1, 0.598, 0.149), intensity 18.4 x 1.365 and the Karis representative point,
+// has direct luminance Y_d = 0.19819. exposure = Y_t / (1.35 Y_d) = 0.5797 / 0.26756 = 2.1666 (EV +1.1154).
+// It is derived for the light at 5.487 and stays fixed when CORNELL_LIGHT_Y changes.
+export const CORNELL_EXPOSURE = 2.1666;
 const ON_FACTS = [
   'snapshot:settings', 'snapshot:quality', 'snapshot:stats', 'snapshot:instances',
   'runtime:passes', 'runtime:viewSizes', 'runtime:ready', 'assertion:gi-active',
@@ -80,6 +95,13 @@ const ROWS = [
     criterionName: 'P4-Q6 moved instance relit', producer: 'raa-gi-screen', extraFacts: ['assertion:block-moved'], measured: true },
   { mode: 'moved-instance-off', arrangement: 'moved-instance', filename: 'gi-moved-block-off.png',
     criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: ['assertion:block-moved'], measured: true },
+  // Cornell rows: `facts` replaces the on/off fact list; the on row judges against the reference image.
+  { mode: 'cornell-box-on', arrangement: 'cornell-box', filename: 'gi-cornell-box-matches-reference.png',
+    criterionName: 'P4-Q3 Cornell box matches the reference', producer: 'raa-gi-screen', extraFacts: [], measured: true,
+    facts: ['snapshot:settings', 'snapshot:stats'], judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'look' },
+  { mode: 'cornell-box-off', arrangement: 'cornell-box', filename: 'gi-cornell-box-off-direct-only.png',
+    criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true,
+    facts: ['snapshot:settings', 'snapshot:stats'] },
 ];
 
 // Judge-held fixtures per arrangement: the judge never scores them.
@@ -97,6 +119,7 @@ const HELD = {
   'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball',
     'camera'],
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
+  'cornell-box': ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'],
 };
 
 // Camera and subject bounds per arrangement, in metres (camera near 0.05, far 200).
@@ -149,6 +172,13 @@ const SELECTIONS = {
       { name: 'block-old', min: [-2.4, 0, -7.4], max: [-1.6, 0.8, -6.6] },
     ],
   },
+  'cornell-box': {
+    camera: lens([2.78, 2.73, -8.0], [2.78, 2.73, 0], 39.3),
+    subjects: [
+      { name: 'cornell-room', min: [0, 0, 0], max: [5.56, 5.488, 5.592] },
+      { name: 'light', min: [2.13, 5.4, 2.27], max: [3.43, 5.49, 3.32] },
+    ],
+  },
 };
 
 // Quality per mode; a mode without an entry uses DEFAULT_QUALITY.
@@ -197,6 +227,14 @@ const BEHAVIOURS = {
     + 'around it there glow orange from its bounce light; no orange glow remains at its old place in the far left corner.',
   'moved-instance-off': 'The bright orange block stands in its new place near the right wall with no orange light '
     + 'spilling onto the floor or wall around it.',
+  'cornell-box-on': 'The Cornell box lit by global illumination from its single ceiling light: the red and green walls '
+    + 'bleed their colour onto the white blocks, floor and ceiling (red on the left side of the tall block, green on the '
+    + 'right side of the short block); the ceiling is lit indirectly, brightest around the light; shadows under and beside '
+    + 'the blocks are soft; corners darken only softly; no blotches, voxel blocks, streaks or light leaks through the walls.',
+  'cornell-box-off': 'The same Cornell box with global illumination off and the same exposure: only surfaces the ceiling '
+    + 'light reaches directly are lit; the ceiling and the surfaces facing away from the light stay dark; there is no red '
+    + 'or green colour bleeding on the white surfaces, and the blocks cast no shadows because RAA local lights are '
+    + 'unshadowed without GI.',
 };
 const DESCRIPTIONS = {
   'color-bleed-on': 'Global illumination on: the white box and floor take bounce light from the red and green walls.',
@@ -218,6 +256,8 @@ const DESCRIPTIONS = {
   'forward-content-off': 'The same forward content with global illumination disabled: no bounce light reaches any of it.',
   'moved-instance-on': 'Global illumination on after the orange block moves to a new place near the right wall.',
   'moved-instance-off': 'The same moved block with global illumination disabled: no orange light spills from it.',
+  'cornell-box-on': 'Global illumination on: the Cornell box is lit by bounce light from its red and green walls and its ceiling light.',
+  'cornell-box-off': 'The same Cornell box with global illumination disabled: only the direct light of the ceiling light.',
 };
 
 const nodeAt = (engine, position = [0, 0, 0]) => engine.addNode(null, position, [0, 0, 0, 1], [1, 1, 1]);
@@ -305,6 +345,112 @@ function figureMesh(engine, white) {
   return meshWith(engine, { ...body, joints, weights }, white);
 }
 
+// Cornell box (metres): the canonical surfaces as the directive gives them, each quad as four corners in order.
+const CORNELL = {
+  floor: [[5.528, 0, 0], [0, 0, 0], [0, 0, 5.592], [5.496, 0, 5.592]],
+  ceiling: [[5.56, 5.488, 0], [5.56, 5.488, 5.592], [0, 5.488, 5.592], [0, 5.488, 0]],
+  back: [[5.496, 0, 5.592], [0, 0, 5.592], [0, 5.488, 5.592], [5.56, 5.488, 5.592]],
+  red: [[5.528, 0, 0], [5.496, 0, 5.592], [5.56, 5.488, 5.592], [5.56, 5.488, 0]],
+  green: [[0, 0, 5.592], [0, 0, 0], [0, 5.488, 0], [0, 5.488, 5.592]],
+  shortTop: [[1.30, 1.65, 0.65], [0.82, 1.65, 2.25], [2.40, 1.65, 2.72], [2.90, 1.65, 1.14]],
+  tallTop: [[4.23, 3.30, 2.47], [2.65, 3.30, 2.96], [3.14, 3.30, 4.56], [4.72, 3.30, 4.06]],
+};
+const CORNELL_CENTRE = [2.78, 2.744, 2.796];
+// Linear albedos (the engine takes sRGB colours, so they are converted by srgbOf below).
+const CORNELL_ALBEDO = { white: [0.886, 0.699, 0.666], red: [0.570, 0.043, 0.044], green: [0.105, 0.378, 0.076] };
+// Linear light colour and radiance ratio 18.4 : 11.0 : 2.75; the intensity is radiance x area (1.30 x 1.05 m).
+const CORNELL_LIGHT_COLOUR = [1, 0.598, 0.149];
+const CORNELL_LIGHT_INTENSITY = 18.4 * 1.365;
+const CORNELL_LIGHT_X = 2.78, CORNELL_LIGHT_Z = 2.795;
+// The rectangle basis of a downward light puts size[0] along -z and size[1] along x, so [1.05, 1.30]
+// gives the specified 1.30 m along x and 1.05 m along z.
+const CORNELL_LIGHT_SIZE = [1.05, 1.30];
+
+const srgbOf = v => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+// One quad as two triangles. The normal follows the winding of the first corners, and both are flipped
+// when that normal points away from `towards`, so every face points into the room or away from a block.
+function quad(corners, towards) {
+  const [a, b, c, d] = corners;
+  const mid = [0, 1, 2].map(i => (a[i] + b[i] + c[i] + d[i]) / 4);
+  let n = cross3(sub3(b, a), sub3(c, a));
+  const length = Math.hypot(...n);
+  n = n.map(v => v / length);
+  const flip = dot3(n, sub3(towards, mid)) < 0;
+  if (flip) n = n.map(v => -v);
+  return {
+    positions: new Float32Array([...a, ...b, ...c, ...d]),
+    normals: new Float32Array([...n, ...n, ...n, ...n]),
+    indices: new Uint32Array(flip ? [0, 2, 1, 0, 3, 2] : [0, 1, 2, 0, 2, 3]),
+  };
+}
+
+// A block: its top quad and four sides that drop each top edge to y 0 (the bottom is on the floor).
+function block(top, height) {
+  const cx = top.reduce((sum, p) => sum + p[0], 0) / 4;
+  const cz = top.reduce((sum, p) => sum + p[2], 0) / 4;
+  const raised = top.map(p => [p[0], height, p[2]]);
+  const parts = [quad(raised, [cx, height + 1, cz])];
+  for (let i = 0; i < 4; i++) {
+    const p = raised[i], q = raised[(i + 1) % 4];
+    const midX = (p[0] + q[0]) / 2, midZ = (p[2] + q[2]) / 2;
+    parts.push(quad([p, q, [q[0], 0, q[2]], [p[0], 0, p[2]]], [2 * midX - cx, height / 2, 2 * midZ - cz]));
+  }
+  return joinMeshes(parts);
+}
+
+// The walls' backing: a 0.8 m slab outside the floor, ceiling, back, red and green walls. The front stays open,
+// so the slabs' front faces are unlit and read black. Every slab is white, like the surfaces it backs.
+const CORNELL_SLABS = [
+  [[2.78, -0.4, 2.796], [2.78, 0.4, 2.796]],
+  [[2.78, 5.888, 2.796], [2.78, 0.4, 2.796]],
+  [[2.78, 2.744, 5.992], [2.78, 2.744, 0.4]],
+  [[5.96, 2.744, 2.796], [0.4, 2.744, 2.796]],
+  [[-0.4, 2.744, 2.796], [0.4, 2.744, 2.796]],
+];
+
+// The Cornell box: the sky, sun and ambient are black, the only light is the ceiling area light, and an unlit
+// fixture of the light's rectangle at CORNELL_FIXTURE_Y shows it. The fixture is kept out of the GI volume.
+function cornellBox(engine, variant, state) {
+  engine.setSky({ model: 'legacy', zenith: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], intensity: 0, sunDiscIntensity: 0 });
+  engine.setWeather({ preset: 'clear' });
+  engine.setEnvironmentLighting({ diffuse: 0, specular: 0 });
+  engine.setAmbient({ color: [0, 0, 0], intensity: 0 });
+  engine.setLight({ direction: [0, -1, 0], color: [1, 1, 1], intensity: 0 });
+  engine.setToneMapping({ exposureEv: Math.log2(CORNELL_EXPOSURE) });
+  engine.setGlobalIllumination({ localLightShadows: true, environmentDiffuse: 0, intensity: 1 });
+  const material = albedo => engine.addMaterial({ color: albedo.map(srgbOf), roughness: 1, metallic: 0 });
+  const white = material(CORNELL_ALBEDO.white);
+  const red = material(CORNELL_ALBEDO.red);
+  const green = material(CORNELL_ALBEDO.green);
+  const whiteParts = [
+    quad(CORNELL.floor, CORNELL_CENTRE), quad(CORNELL.ceiling, CORNELL_CENTRE), quad(CORNELL.back, CORNELL_CENTRE),
+    block(CORNELL.shortTop, 1.65), block(CORNELL.tallTop, 3.30),
+    ...CORNELL_SLABS.map(([center, half]) => box(center, half)),
+  ];
+  engine.addLight({
+    kind: 'area', position: [CORNELL_LIGHT_X, CORNELL_LIGHT_Y, CORNELL_LIGHT_Z], direction: [0, -1, 0],
+    color: CORNELL_LIGHT_COLOUR.map(srgbOf), intensity: CORNELL_LIGHT_INTENSITY, range: 30, size: CORNELL_LIGHT_SIZE,
+  });
+  // The fixture is the light's rectangle: x spans size[1], z spans size[0] (see CORNELL_LIGHT_SIZE).
+  const x0 = CORNELL_LIGHT_X - CORNELL_LIGHT_SIZE[1] / 2, x1 = CORNELL_LIGHT_X + CORNELL_LIGHT_SIZE[1] / 2;
+  const z0 = CORNELL_LIGHT_Z - CORNELL_LIGHT_SIZE[0] / 2, z1 = CORNELL_LIGHT_Z + CORNELL_LIGHT_SIZE[0] / 2;
+  const fixtureMaterial = engine.addMaterial({ color: [0, 0, 0], emissive: [4 / CORNELL_EXPOSURE, 4 / CORNELL_EXPOSURE, 4 / CORNELL_EXPOSURE], model: 'flat' });
+  const fixtureQuad = quad([[x0, CORNELL_FIXTURE_Y, z0], [x1, CORNELL_FIXTURE_Y, z0], [x1, CORNELL_FIXTURE_Y, z1], [x0, CORNELL_FIXTURE_Y, z1]],
+    [CORNELL_LIGHT_X, 0, CORNELL_LIGHT_Z]);
+  const fixture = engine.addMeshInstance(nodeAt(engine), meshWith(engine, fixtureQuad, fixtureMaterial));
+  engine.setInstanceGlobalIllumination(fixture, false);
+  state.instances.push(
+    { name: 'cornell-white', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, joinMeshes(whiteParts), white)) },
+    { name: 'cornell-red', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, quad(CORNELL.red, CORNELL_CENTRE), red)) },
+    { name: 'cornell-green', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, quad(CORNELL.green, CORNELL_CENTRE), green)) },
+    { name: 'fixture', instance: fixture },
+  );
+}
+
 // Each arrangement adds its content and pushes { name, instance } entries into state.instances.
 const ARRANGEMENTS = {
   'color-bleed': roomWithObjects,
@@ -376,6 +522,7 @@ const ARRANGEMENTS = {
       { name: 'fur', instance: fur },
     );
   },
+  'cornell-box': cornellBox,
   'moved-instance': (engine, variant, state) => {
     roomScene(engine, state);
     const block = engine.addNode(null, BLOCK_START, [0, 0, 0, 1], [1, 1, 1]);
@@ -410,10 +557,11 @@ export const inventory = ROWS.map(row => ({
   mode: row.mode,
   filename: row.filename,
   expectedVisibleBehavior: BEHAVIOURS[row.mode],
-  requiredFacts: [...(row.mode.endsWith('-on') ? ON_FACTS : OFF_FACTS), ...row.extraFacts],
+  requiredFacts: row.facts ?? [...(row.mode.endsWith('-on') ? ON_FACTS : OFF_FACTS), ...row.extraFacts],
   pair: pairOf(row),
   heldConstant: [...HELD[row.arrangement], ...(row.extraHeld ?? [])],
   producer: row.producer,
+  ...(row.judgeReference === undefined ? {} : { judgeReference: row.judgeReference, judgeAspect: row.judgeAspect }),
 }));
 
 /**

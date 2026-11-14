@@ -61,8 +61,19 @@ GPU errors. It never publishes or renders.
 **judge** judges every selected capture with `NMC_JUDGE_CLIENT` and writes
 `attempts/<uuid>/judge.json` (`RECORD_FIELDS.judge`). A byte-identical image with the same
 description reuses an earlier passed verdict (exit 0, score at least 6), including one from
-the store. New images are judged with the row's `expectedVisibleBehavior` and no reference
-image. Calls start only inside the budget; images left when it ends are named, and the next
+the store. New images are judged with the row's `expectedVisibleBehavior`. A row may carry two optional
+fields, passed to the judge and recorded in each verdict:
+
+- `judgeReference`: an absolute `.png` path. It must exist when the judge starts, or the row
+  fails with `judge: reference <path> is missing` and no judge process starts.
+- `judgeAspect`: `look`, `functional` or `design` (`JUDGE_ASPECTS`).
+
+`judgeCapture(capture, description, { killAt, heldConstant, reference, aspect })` then adds
+`--reference <reference>` and `--aspect <aspect>` before `--min-score 6`. A row without the
+fields passes exactly the argv and options it always did. Each verdict records `reference`
+and `aspect` (null when absent), and a verdict is reused (own attempt or earlier attempt)
+only when its reference and aspect also match; an entry without those keys counts as null.
+Calls start only inside the budget; images left when it ends are named, and the next
 run judges only those. A bounded pool of `JUDGE_CONCURRENCY` runs the calls, and each call
 is killed after the budget plus the grace. Verdicts are written in inventory order as they
 settle.
