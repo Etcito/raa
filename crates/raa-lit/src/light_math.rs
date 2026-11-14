@@ -1,6 +1,8 @@
-//! S11 CPU local-light mathematics: point window/falloff, spot cone and the directional
-//! no-distance rule. Descriptor validation keeps every input finite; `distance` is
-//! nonnegative, `range` positive and a cone cosine is a dot product of unit vectors.
+//! S11 CPU local-light mathematics: point window/falloff, spot cone, the directional
+//! no-distance rule, and the area light's rectangle basis, representative point, one-sided
+//! emission and vector form factor. Descriptor validation keeps every input finite;
+//! `distance` is nonnegative, `range` positive and a cone cosine is a dot product of unit
+//! vectors.
 //!
 //! Adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder:
 //! `crates/solstice-render/shaders/lighting/deferred.wgsl`, `fn local_light`, revision 7e465b5.
@@ -121,6 +123,78 @@ pub(crate) fn representative_point(
 /// same predicate with the light's normalized direction and no registry state or keys.
 pub(crate) fn area_light_emits(position: Vec3, direction: Vec3, surface: Vec3) -> bool {
     (surface - position).dot(direction.normalize_or_zero()) > 0.0
+}
+
+/// Corner offsets of an area light's oriented rectangle, relative to `surface`.
+///
+/// With `p = position - surface`, `(tangent, bitangent) = rectangle_basis(direction)`,
+/// `T = tangent * size[0] / 2` and `B = bitangent * size[1] / 2`, the corners are
+/// `[p - T - B, p - T + B, p + T + B, p + T - B]`. The order is counter-clockwise seen from
+/// the emitting `+direction` side, so `cross(c1 - c0, c3 - c0)` points against `direction`
+/// and the summed form factor at a receiver in front of the light points towards it.
+pub(crate) fn area_corners(
+    position: Vec3,
+    direction: Vec3,
+    size: [f32; 2],
+    surface: Vec3,
+) -> [Vec3; 4] {
+    let (tangent, bitangent) = rectangle_basis(direction);
+    let p = position - surface;
+    let t = tangent * (size[0] * 0.5);
+    let b = bitangent * (size[1] * 0.5);
+    [p - t - b, p - t + b, p + t + b, p + t - b]
+}
+
+/// Form factor of one rectangle edge between the unit vectors `a` and `b` to its corners.
+///
+/// The three.js r180 `LTC_EdgeVectorFormFactor` rational polynomial approximates
+/// `acos(dot(a, b)) / (2 pi) / sin(angle)`; `cross(a, b)` carries the direction, so the four
+/// edges summed by [`area_form_factor`] approximate the exact vector form factor.
+pub(crate) fn edge_vector_form_factor(a: Vec3, b: Vec3) -> Vec3 {
+    let x = a.dot(b);
+    let y = x.abs();
+    let v =
+        (0.854_398_5 + (0.496_515_5 + 0.014_520_6 * y) * y) / (3.417_594 + (4.161_672_4 + y) * y);
+    let theta_sin_theta = if x > 0.0 {
+        v
+    } else {
+        0.5 * (1.0 - x * x).max(1e-7).sqrt().recip() - v
+    };
+    a.cross(b) * theta_sin_theta
+}
+
+/// Horizon clipping of the three.js r180 `LTC_ClippedSphereFormFactor`.
+///
+/// `max((length^2 + z) / (length + 1), 0)` maps `z = dot(F, normal)` of a vector form factor
+/// `F` with `length = |F|` into [0, 1]; for an on-axis receiver (`z = length`) it is `length`.
+pub(crate) fn clipped_sphere_form_factor(length: f32, z: f32) -> f32 {
+    ((length * length + z) / (length + 1.0)).max(0.0)
+}
+
+/// S11 area-light form factor at `surface` for the rectangle at `position`.
+///
+/// Zero when [`area_light_emits`] is false, so only the emitting `+direction` side
+/// contributes. Otherwise each corner offset of [`area_corners`] is normalized, the four
+/// [`edge_vector_form_factor`] terms are summed into the vector form factor `F`, and
+/// [`clipped_sphere_form_factor`] maps `|F|` and `dot(F, normal)` into [0, 1].
+pub(crate) fn area_form_factor(
+    position: Vec3,
+    direction: Vec3,
+    size: [f32; 2],
+    surface: Vec3,
+    normal: Vec3,
+) -> f32 {
+    if !area_light_emits(position, direction, surface) {
+        return 0.0;
+    }
+    let corners = area_corners(position, direction, size, surface);
+    let mut form_factor = Vec3::ZERO;
+    for i in 0..4 {
+        let a = corners[i].normalize_or_zero();
+        let b = corners[(i + 1) % 4].normalize_or_zero();
+        form_factor += edge_vector_form_factor(a, b);
+    }
+    clipped_sphere_form_factor(form_factor.length(), form_factor.dot(normal))
 }
 
 #[cfg(test)]
@@ -396,5 +470,73 @@ mod tests {
             assert_eq!(light.validate().unwrap_err().code(), "light.invalid_desc");
         }
         assert!(LocalLight::default().validate().is_ok());
+    }
+
+    fn form_factor_case(line: &str) -> Option<(&str, Vec<f32>)> {
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("formfactor") {
+            return None;
+        }
+        let name = fields.next().unwrap();
+        let values = fields.map(|v| v.parse().unwrap()).collect();
+        Some((name, values))
+    }
+
+    #[test]
+    fn area_form_factor_matches_fixture() {
+        let mut cases = 0;
+        for line in F.lines() {
+            let Some((name, values)) = form_factor_case(line) else {
+                continue;
+            };
+            assert_eq!(values.len(), 15, "{name}: field count");
+            let position = Vec3::new(values[0], values[1], values[2]);
+            let direction = Vec3::new(values[3], values[4], values[5]);
+            let size = [values[6], values[7]];
+            let surface = Vec3::new(values[8], values[9], values[10]);
+            let normal = Vec3::new(values[11], values[12], values[13]);
+            let expected = values[14];
+            let actual = area_form_factor(position, direction, size, surface, normal);
+            assert!(
+                (actual - expected).abs() <= (expected.abs() * 5e-3).max(1e-6),
+                "{name}: {actual} != {expected}"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 8, "form factor fixture cases");
+    }
+
+    #[test]
+    fn area_corners_are_counter_clockwise_from_the_emitting_side() {
+        let mut cases = 0;
+        for line in F.lines() {
+            let Some((name, values)) = form_factor_case(line) else {
+                continue;
+            };
+            assert_eq!(values.len(), 15, "{name}: field count");
+            let position = Vec3::new(values[0], values[1], values[2]);
+            let direction = Vec3::new(values[3], values[4], values[5]);
+            let size = [values[6], values[7]];
+            let surface = Vec3::new(values[8], values[9], values[10]);
+            let corners = area_corners(position, direction, size, surface);
+            let turn = (corners[1] - corners[0]).cross(corners[3] - corners[0]);
+            assert!(
+                turn.dot(direction) < 0.0,
+                "{name}: corners are not counter-clockwise from the emitting side"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 8, "corner order fixture cases");
+    }
+
+    #[test]
+    fn clipped_sphere_is_exact_on_axis() {
+        for length in [0.01_f32, 0.3, 0.9] {
+            let clipped = clipped_sphere_form_factor(length, length);
+            assert!(
+                (clipped - length).abs() <= 1e-6,
+                "{length}: {clipped} != {length}"
+            );
+        }
     }
 }
