@@ -374,3 +374,34 @@ fn visibility_and_level_lookup() {
     );
     assert_eq!(volume.level_at(edge, 0), volume.levels.len());
 }
+
+#[test]
+fn cone_visibility_against_plane() {
+    let root = fixture("cone.json");
+    let volume = plane_volume(&root);
+    let empty = CpuVolume {
+        levels: Vec::new(),
+        resolution: volume.resolution,
+        texels: Vec::new(),
+    };
+    for case in array(field(&root, "cases")) {
+        let name = string(field(case, "name"));
+        let JsonValue::Bool(is_empty) = field(case, "empty") else {
+            panic!("{name}: empty must be a boolean");
+        };
+        let subject = if *is_empty { &empty } else { &volume };
+        let got = subject.cone_visibility(
+            floats::<3>(field(case, "origin")),
+            floats::<3>(field(case, "dir")),
+            number(field(case, "start")) as f32,
+            number(field(case, "max_t")) as f32,
+            number(field(case, "max_steps")) as u32,
+            number(field(case, "tan_half")) as f32,
+        );
+        let want = number(field(case, "visibility")) as f32;
+        assert!(
+            (got - want).abs() <= 1.0e-4,
+            "{name}: got {got}, want {want}"
+        );
+    }
+}

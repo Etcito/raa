@@ -467,6 +467,67 @@ impl CpuVolume {
         }
     }
 
+    /// Soft visibility of a cone toward a light: Quilez's soft shadow `min(k h / t)` with
+    /// `k = 1 / tan_half`, plus Aaltonen's closest-distance improvement, over the clipmap distance
+    /// field. Walks the field with [`CpuVolume::level_at`] and [`CpuVolume::sample`] under the same
+    /// step, hit and approach rules as `raa_gi_cone_visibility` in
+    /// `crates/raa-shader/src/wgsl/gi_volume.wgsl`, which this is the CPU twin of. A sample that
+    /// is not approaching never darkens, distances of different levels are never compared, and an
+    /// empty volume answers 1.
+    pub fn cone_visibility(
+        &self,
+        origin: [f32; 3],
+        dir: [f32; 3],
+        start: f32,
+        max_t: f32,
+        max_steps: u32,
+        tan_half: f32,
+    ) -> f32 {
+        let count = self.levels.len();
+        let mut t = start;
+        let mut level = 0;
+        let mut measured = count;
+        let mut previous = 1.0e20_f32;
+        let mut res = 1.0_f32;
+        let mut steps = 0;
+        while steps < max_steps && t < max_t {
+            let p = [
+                origin[0] + dir[0] * t,
+                origin[1] + dir[1] * t,
+                origin[2] + dir[2] * t,
+            ];
+            level = self.level_at(p, level);
+            if level >= count {
+                break;
+            }
+            let voxel = self.levels[level][3];
+            let h = self.sample(p, level)[3];
+            if level != measured {
+                previous = 1.0e20;
+            }
+            measured = level;
+            let approaching = previous >= 1.0e19 || h < previous;
+            if h < 0.5 * voxel && approaching {
+                return 0.0;
+            }
+            if approaching {
+                let known = previous < 1.0e19;
+                let y = if known && h < 2.0 * previous {
+                    h * h / (2.0 * previous)
+                } else {
+                    0.0
+                };
+                let d = (h * h - y * y).max(0.0).sqrt();
+                res = res.min(d / (tan_half * (t - y).max(1.0e-4)));
+            }
+            previous = h;
+            t += h.max(0.5 * voxel).min(4.0 * voxel);
+            steps += 1;
+        }
+        let r = res.clamp(0.0, 1.0);
+        r * r * (3.0 - 2.0 * r)
+    }
+
     fn texel(&self, x: i32, y: i32, z: i32) -> [f32; 4] {
         let r = self.resolution as i32;
         if r <= 0 || self.levels.is_empty() {
