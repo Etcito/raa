@@ -496,6 +496,7 @@ test('area-glossy rows: area-light shading, one area light, the floor and the GI
   for (const [id, mode] of [['area-glossy-ltc-off', 'ltc'], ['area-glossy-form-factor-off', 'formFactor']]) {
     const { calls, state } = await cornellCalls(id);
     assert.deepEqual(named(calls, 'setAreaLightShading'), [[{ mode }]]);
+    assert.deepEqual(named(calls, 'setSsr'), [[{ intensity: 0 }]]);
     const lights = named(calls, 'addLight');
     assert.equal(lights.length, 1, 'exactly one light');
     assert.deepEqual(lights[0][0], {

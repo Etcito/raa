@@ -578,6 +578,8 @@ function areaGlossy(engine, variant, state, mode) {
   engine.setAmbient({ color: [0, 0, 0], intensity: 0 });
   engine.setLight({ direction: [0, -1, 0], color: [1, 1, 1], intensity: 0 });
   engine.setAreaLightShading({ mode });
+  // The fixture is a visible stand-in for the light: its reflection belongs to the area-light term alone, so SSR is off in both glossy rows and the light's reflection is not counted twice.
+  engine.setSsr({ intensity: 0 });
   const floor = engine.addSurfaceMaterial({ color: [0.06, 0.06, 0.07], roughness: 0.2, metallic: 0 });
   state.instances.push({ name: 'floor', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, plane(20, 20), floor)) });
   engine.addLight({ ...AREA_LIGHT });

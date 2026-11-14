@@ -118,3 +118,104 @@ fn prelude_with_fragment_caller_validates() {
         panic!("prelude + area form-factor fragment caller: {e}");
     }
 }
+
+/// Body of WGSL function `name` in `source` (from `fn name(` to the closing `\n}\n`).
+fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let start = source
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("{name} missing"));
+    let rest = &source[start..];
+    &rest[..rest.find("\n}\n").expect("function end")]
+}
+
+/// Regression for the diffuse-only (formFactor, feature 39) mode across every visibility tier:
+/// the area branch has exactly one shading call per mode, the LTC (the only specular term) sits
+/// in the `else` of the feature-39 test, the diffuse function carries no specular, Fresnel or
+/// LTC term, and the tiers (hero PCSS map, GI cone / stratified LocalVisibility slot) only
+/// produce scalar visibilities that multiply the selected shading. A future tier that adds its
+/// own radiance or reflection term to the area branch fails here.
+#[test]
+fn form_factor_mode_has_no_specular_in_any_tier() {
+    let contribution = fn_body(LOCAL_LIGHTING_WGSL, "raa_local_contribution");
+    let area = contribution
+        .split("} else if light.kind == 3u {")
+        .nth(1)
+        .expect("area branch")
+        .split("} else if light.kind != 2u {")
+        .next()
+        .expect("area branch end");
+    // Code only: the branch's comments name what it must not call.
+    let area: String = area
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let area = area.as_str();
+    // One shading call per mode in the whole module (definition + this call each).
+    assert_eq!(LOCAL_LIGHTING_WGSL.matches("raa_area_ltc(").count(), 2);
+    assert_eq!(LOCAL_LIGHTING_WGSL.matches("raa_area_diffuse(").count(), 2);
+    assert_eq!(area.matches("raa_area_ltc(light, s, c)").count(), 1);
+    assert_eq!(area.matches("raa_area_diffuse(light, s, c)").count(), 1);
+    let gate = area
+        .find("if raa_feature_enabled(RAA_AREA_FORM_FACTOR_FEATURE) {")
+        .expect("feature 39 gate");
+    let diffuse = area.find("raa_area_diffuse(light, s, c)").unwrap();
+    let otherwise = area[gate..].find("} else {").expect("else of the gate") + gate;
+    let ltc = area.find("raa_area_ltc(light, s, c)").unwrap();
+    assert!(gate < diffuse && diffuse < otherwise && otherwise < ltc);
+    // The only returned colour is the selected shading times scalar weights.
+    assert_eq!(
+        area.matches("return ").count(),
+        4,
+        "area branch returns changed"
+    );
+    assert!(area.contains("return shading * (window * area_visibility * fade);"));
+    for forbidden in [
+        "raa_slot_direct",
+        "raa_area_radiance",
+        "fresnel",
+        "specular",
+        "raa_ltc_uv",
+    ] {
+        assert!(!area.contains(forbidden), "area branch adds `{forbidden}`");
+    }
+    // The diffuse function: Lambert x form factor, no specular, Fresnel or LTC term.
+    let ff = fn_body(LOCAL_LIGHTING_WGSL, "raa_area_diffuse");
+    for forbidden in [
+        "specular",
+        "fresnel",
+        "raa_ltc_uv",
+        "raa_area_vector_form_factor",
+        "raa_area_clipped",
+        "texture",
+        "raa_area_ltc",
+    ] {
+        assert!(
+            !ff.contains(forbidden),
+            "raa_area_diffuse holds `{forbidden}`"
+        );
+    }
+    assert!(ff.contains("raa_area_form_factor(light, c.position, s.normal)"));
+    // Tiers are scalar visibilities: hero PCSS returns (visibility, map weight), the
+    // LocalVisibility slot (GI cone trace / stratified rays, or the default) returns f32.
+    let hero = LOCAL_LIGHTING_WGSL
+        .split("fn raa_area_hero_visibility(")
+        .nth(1)
+        .expect("hero tier");
+    let hero = &hero[..hero.find("\n}\n").expect("hero end")];
+    assert!(hero.contains(") -> vec2<f32> {"));
+    for forbidden in ["raa_area_radiance", "raa_area_ltc", "fresnel", "specular"] {
+        assert!(!hero.contains(forbidden), "hero tier holds `{forbidden}`");
+    }
+    for slot in [
+        include_str!("../../raa-gi/src/wgsl/slots/slot_local_visibility.wgsl"),
+        include_str!("../../raa-lit/src/wgsl/slots_default.wgsl"),
+    ] {
+        let body = fn_body(slot, "raa_slot_local_visibility");
+        assert!(
+            body.contains(") -> f32 {"),
+            "LocalVisibility must stay scalar"
+        );
+        assert!(!body.contains("raa_area_ltc") && !body.contains("specular"));
+    }
+}
