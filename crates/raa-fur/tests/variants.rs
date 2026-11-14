@@ -4,8 +4,8 @@
 //! cloud-shadow boundary and raa-fog's `height` provider; the composed module declares the
 //! group-2 `raa_fur_shell` uniform with the 16-byte layout the contributor writes.
 //!
-//! naga reflection pins the S10 FurShell stage budgets (10 sampled textures / 3 samplers /
-//! 7 uniform buffers / 5 fragment storage buffers, six or seven vertex storage buffers) for
+//! naga reflection pins the S10 FurShell stage budgets (12 sampled textures / 3 samplers /
+//! 8 uniform buffers / 5 fragment storage buffers, six or seven vertex storage buffers) for
 //! the neutral (physical/cloud disabled) and the full physical/cloud composition, including
 //! the vertex-only history and posed palette resources and the four-group maximum.
 
@@ -227,7 +227,13 @@ fn weather_composition_reflects_stage_budgets() {
 /// and enabled sample the two-layer ground map. The CSM provider consumes the common cloud
 /// helper exactly once in each of its result paths.
 fn assert_weather_boundary(wgsl: &str, label: &str, csm: bool) {
-    for decl in ["@group(1) @binding(15)", "@group(1) @binding(16)"] {
+    for decl in [
+        "@group(1) @binding(14)",
+        "@group(1) @binding(15)",
+        "@group(1) @binding(16)",
+        "@group(1) @binding(17)",
+        "@group(1) @binding(18)",
+    ] {
         assert_eq!(wgsl.matches(decl).count(), 1, "{label}: {decl}");
     }
     assert_eq!(wgsl.matches("fn raa_cloud_shadow(").count(), 1, "{label}");
@@ -347,9 +353,9 @@ fn group2_uniform_matches_the_contributor_slots() {
 /// and fragment storage buffers, including the declared shared weather bindings.
 #[cfg(not(target_arch = "wasm32"))]
 const FURSHELL_FRAGMENT_BUDGET: Counts = Counts {
-    textures: 10,
+    textures: 12,
     samplers: 3,
-    uniforms: 7,
+    uniforms: 8,
     storages: 5,
     storage_textures: 0,
 };
@@ -443,7 +449,44 @@ fn check_resources(source: &str) {
                 history = Some(*handle);
                 assert_eq!(global.name.as_deref(), Some("raa_previous_instances"));
             }
-            (1, 14) => panic!("binding 14 stays reserved"),
+            (1, 14) => {
+                assert_eq!(global.name.as_deref(), Some("raa_gi_screen"));
+                assert_eq!(global.space, AddressSpace::Handle);
+                assert_eq!(
+                    module.types[global.ty].inner,
+                    TypeInner::Image {
+                        dim: ImageDimension::D2,
+                        arrayed: false,
+                        class: ImageClass::Sampled {
+                            kind: ScalarKind::Float,
+                            multi: false,
+                        },
+                    }
+                );
+            }
+            (1, 17) => {
+                assert_eq!(global.name.as_deref(), Some("raa_gi_volume"));
+                assert_eq!(global.space, AddressSpace::Handle);
+                assert_eq!(
+                    module.types[global.ty].inner,
+                    TypeInner::Image {
+                        dim: ImageDimension::D3,
+                        arrayed: false,
+                        class: ImageClass::Sampled {
+                            kind: ScalarKind::Float,
+                            multi: false,
+                        },
+                    }
+                );
+            }
+            (1, 18) => {
+                assert_eq!(global.name.as_deref(), Some("raa_gi_volume_params"));
+                assert_eq!(global.space, AddressSpace::Uniform);
+                let TypeInner::Struct { span, .. } = &module.types[global.ty].inner else {
+                    panic!("gi volume params record")
+                };
+                assert_eq!(*span as usize, 96, "RaaGiVolumeParams is 96 B");
+            }
             (1, 15) => {
                 cloud = Some(*handle);
                 assert_eq!(global.name.as_deref(), Some("raa_cloud_transmittance"));

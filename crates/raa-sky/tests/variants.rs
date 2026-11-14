@@ -642,6 +642,12 @@ fn celestial_evaluator_composes_with_canonical_resources() {
             assert!(info.get_entry_point(0)[handle].is_empty());
             continue;
         }
+        // S38: sky.env and sky.background bind LightingResources::base_layout(), which
+        // omits the FRAGMENT-only GI bindings 14, 17 and 18, so the conservative count
+        // skips them as it skips (0, 8); the limits stay [15, 5, 7, 5].
+        if binding.group == 1 && matches!(binding.binding, 14 | 17 | 18) {
+            continue;
+        }
         match module.types[global.ty].inner {
             TypeInner::Image { .. } => budget[0] += 1,
             TypeInner::Sampler { .. } => budget[1] += 1,
