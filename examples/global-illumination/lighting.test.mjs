@@ -14,6 +14,8 @@ const OFF_FACTS = ['snapshot:settings', 'snapshot:quality', 'snapshot:stats',
   'runtime:passes', 'runtime:viewSizes', 'runtime:ready', 'assertion:gi-off'];
 const ROOM = ['room shell with red left wall and green right wall', 'white box and sphere', 'sun through the ceiling opening', 'camera'];
 const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'];
+const AREA_HELD = ['dark glossy floor', 'rectangular area light panel and its glowing fixture',
+  'black sky without sun or ambient', 'camera'];
 const HELD = {
   'color-bleed': ROOM,
   'interior-bounce': ROOM,
@@ -26,12 +28,14 @@ const HELD = {
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
   'cornell-box': CORNELL_HELD,
   'cornell-box-linear': [...CORNELL_HELD, 'linear tone mapping without dither at a quarter of the Cornell exposure'],
+  'area-glossy-ltc': AREA_HELD,
+  'area-glossy-form-factor': AREA_HELD,
 };
 // The Cornell rows name their own fact lists (contract: snapshot:settings and snapshot:stats for the pair).
 const CORNELL_FACTS = ['snapshot:settings', 'snapshot:stats'];
 // Rows whose held constants extend their arrangement's: the GI-off frame's flat sky ambient (the no-GI baseline).
 const EXTRA_HELD = { 'quality-off': ['flat uncoloured sky ambient fill of the frame without global illumination'] };
-// The 23 rows in contract order: [mode, arrangement, filename, criterionName, producer, extra fact, expectedVisibleBehavior].
+// The 25 rows in contract order: [mode, arrangement, filename, criterionName, producer, extra fact, expectedVisibleBehavior].
 const TABLE = [
   ['color-bleed-on', 'color-bleed', 'gi-color-bleed-white-box-tinted-red-green.png', 'P4-Q3 colour bleeding', 'raa-gi-screen', null,
     'The white box and the white floor beside the coloured walls take a visible red tint on the side facing the red left wall and a green tint on the side facing the green right wall.'],
@@ -72,17 +76,26 @@ const TABLE = [
   ['moved-instance-off', 'moved-instance', 'gi-moved-block-off.png', 'P4-Q8 GI off frame', 'raa-gi-core', 'assertion:block-moved',
     'The bright orange block stands in its new place near the right wall with no orange light spilling onto the floor or wall around it.'],
   ['cornell-box-on', 'cornell-box', 'gi-cornell-box-on-bounce-lit.png', 'P4-Q3 Cornell box GI bounce visible', 'raa-gi-screen', null,
-    'Global illumination is visibly at work in the Cornell box, compared with the same box with GI off: the ceiling, dark without GI, is lit by bounce light; the red and green walls bleed their colour onto the white blocks and the floor (a red tint on faces near the red left wall, a green tint on faces near the green right wall); the front faces of the two blocks, which the ceiling light does not reach directly, are lit by bounce light instead of staying black; no bright blotch or ring around the ceiling light and no light leaking through the walls or ceiling. The reference image is a path-traced Cornell box given only as context for the scene: hard shadow edges, a different overall brightness, a different shape of the lit area under the light, visible voxel-scale smoothness in the bounce, or any other difference from the reference are not faults here.'],
+    'Global illumination is visibly at work in the Cornell box, compared with the same box with GI off: the ceiling, dark without GI, is lit by bounce light; the red and green walls bleed their colour onto the white blocks and the floor (a red tint on faces near the red left wall, a green tint on faces near the green right wall); the front faces of the two blocks, which the ceiling light does not reach directly, are lit by bounce light instead of staying black; no bright blotch or ring around the ceiling light and no light leaking through the walls or ceiling; the direct light is distributed like the reference: the floor under the ceiling light is the brightest region and the back wall falls off towards its top corners. The reference image is a path-traced Cornell box given as context for the scene and for that direct-light distribution: hard shadow edges, a different overall brightness, visible voxel-scale smoothness in the bounce, or any other difference from the reference except the direct-light distribution are not faults here.'],
   ['cornell-box-off', 'cornell-box', 'gi-cornell-box-off-direct-only.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
-    'The same Cornell box with global illumination off and the same exposure: only surfaces the ceiling light reaches directly are lit; the ceiling and the surfaces facing away from the light stay dark; there is no red or green colour bleeding on the white surfaces, and the blocks cast no shadows because RAA local lights are unshadowed without GI.'],
+    'The same Cornell box with global illumination off and the same exposure, compared with the reference only for the distribution of the direct light of the ceiling light: the floor under the light is the brightest region and stays well lit towards the front of the box, the back wall is evenly lit in its middle and falls off towards its top corners, and the tops of the two blocks are bright; the ceiling and the surfaces facing away from the light stay dark, there is no red or green colour bleeding, and the blocks cast no shadows because RAA local lights are unshadowed without GI. Differences from the path-traced reference in overall brightness, missing bounce light, missing shadows or missing colour bleeding are not faults here.'],
   ['cornell-box-linear-on', 'cornell-box-linear', 'gi-cornell-box-linear-on-hdr-ratio-probe.png', 'P4-Q3 Cornell linear HDR probe', 'raa-gi-screen', null,
     'Global illumination on, shown with linear tone mapping at a quarter of the usual exposure (a darker image with flat contrast): the floor under the ceiling light is the brightest surface, the back wall is lit and darkens towards its top corners, the ceiling is lit only by bounce light, and the red and green walls tint the nearby white surfaces; nothing is clipped to pure white except the light fixture itself.'],
   ['cornell-box-linear-off', 'cornell-box-linear', 'gi-cornell-box-linear-off-hdr-ratio-probe.png', 'P4-Q8 GI off frame', 'raa-gi-core', null,
     'Global illumination off, shown with linear tone mapping at a quarter of the usual exposure: only surfaces the ceiling light reaches directly are lit; the floor under the light is the brightest surface and the back wall darkens towards its top corners; the ceiling stays black and there is no red or green colour bleeding; nothing is clipped to pure white except the light fixture itself.'],
+  ['area-glossy-ltc-off', 'area-glossy-ltc', 'gi-area-light-glossy-floor-stretched-rectangle-reflection.png', 'M3 LTC area light: specular reflection is a stretched rectangle', 'raa-area-ltc', null,
+    'On the dark glossy floor in front of the glowing rectangular light panel, the reflection of the panel appears as a bright elongated rectangle, a streak as wide as the panel and stretched towards the camera, surrounded by a softer pool of diffuse light on the floor; the reflection is not a small round dot or point-like highlight.'],
+  ['area-glossy-form-factor-off', 'area-glossy-form-factor', 'gi-area-light-form-factor-mode-diffuse-pool-no-reflection.png', 'M3 area light diffuse-only form-factor mode', 'raa-area-ltc', null,
+    'The same dark glossy floor and glowing rectangular panel in the cheap diffuse-only area-light mode: the floor shows only a soft pool of diffuse light in front of the panel, brightest nearest to it and fading with distance; no bright reflection streak or highlight of the panel appears on the floor.'],
 ];
 const MODES = TABLE.map(row => row[0]);
 const QUALITY_ON = ['quality-64-3-on', 'quality-96-5-on'];
-const UNMEASURED = ['quality-64-3-on', 'cornell-box-linear-on', 'cornell-box-linear-off'];
+const UNMEASURED = ['quality-64-3-on', 'cornell-box-linear-on', 'cornell-box-linear-off',
+  'area-glossy-ltc-off', 'area-glossy-form-factor-off'];
+// The area-light rows are the only off rows without an on partner.
+const UNPAIRED_OFF = ['area-glossy-ltc-off', 'area-glossy-form-factor-off'];
+// Both Cornell rows carry the reference image as judge context, for the direct-light distribution.
+const REFERENCE_ROWS = ['cornell-box-on', 'cornell-box-off'];
 const pick = (object, keys) => Object.fromEntries(keys.map(key => [key, object[key]]));
 const variantOf = id => lighting.default.variants.find(v => v.id === id);
 
@@ -96,12 +109,12 @@ const expectedRow = ([mode, arrangement, filename, criterionName, producer, extr
     heldConstant: [...HELD[arrangement], ...(EXTRA_HELD[mode] ?? [])],
     producer,
     pair: UNMEASURED.includes(mode) ? null : `gi-lighting-${arrangement}`,
-    // Only the Cornell GI-on row carries the reference image, as judge context (aspect functional).
-    ...(mode === 'cornell-box-on' ? { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'functional' } : {}),
+    // Both Cornell rows carry the reference image, as judge context for the direct-light distribution.
+    ...(REFERENCE_ROWS.includes(mode) ? { judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'functional' } : {}),
   };
 };
 
-test('exports: identity, factNames, functions and the 23 variant ids in order', () => {
+test('exports: identity, factNames, functions and the 25 variant ids in order', () => {
   assert.equal(lighting.default.id, 'lighting');
   assert.equal(lighting.default.milestone, 'lighting');
   assert.equal(lighting.default.title, 'GI lighting');
@@ -114,7 +127,7 @@ test('exports: identity, factNames, functions and the 23 variant ids in order', 
   assert.deepEqual(lighting.default.variants.map(v => v.id), MODES);
 });
 
-test('inventory rows: [id, mode, filename] equal the 23 contract rows in order', () => {
+test('inventory rows: [id, mode, filename] equal the 25 contract rows in order', () => {
   assert.deepEqual(lighting.inventory.map(r => [r.id, r.mode, r.filename]),
     TABLE.map(([mode, , filename]) => [`lighting-${mode}`, mode, filename]));
   for (const row of lighting.inventory) {
@@ -188,7 +201,7 @@ test('each off variant equals its on partner except id, gi.enabled, giExpected, 
     return rest;
   };
   const measurementCore = m => ({ pair: m.pair, preset: m.preset });
-  const offs = lighting.default.variants.filter(v => v.id.endsWith('-off'));
+  const offs = lighting.default.variants.filter(v => v.id.endsWith('-off') && !UNPAIRED_OFF.includes(v.id));
   assert.equal(offs.length, 11);
   for (const off of offs) {
     const partner = variantOf(off.id === 'quality-off' ? 'quality-96-5-on' : off.id.replace(/-off$/, '-on'));
@@ -212,7 +225,7 @@ test('each off variant equals its on partner except id, gi.enabled, giExpected, 
   }
 });
 
-test('validateInventory([volume, lighting], "lighting") returns the 8 volume ids then the 23 lighting ids', () => {
+test('validateInventory([volume, lighting], "lighting") returns the 8 volume ids then the 25 lighting ids', () => {
   const volumeIds = ['volume-voxels-on', 'volume-voxels-off', 'volume-radiance-on', 'volume-radiance-off',
     'volume-distance-on', 'volume-distance-off', 'volume-levels-on', 'volume-levels-off'];
   const rows = validateInventory([volume, lighting], 'lighting');
@@ -362,14 +375,14 @@ async function cornellCalls(id) {
 const named = (calls, name) => calls.filter(call => call[0] === name).map(call => call.slice(1));
 const srgb = v => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
 
-test('Cornell rows: 23 rows, the pair gi-lighting-cornell-box, judgeReference on the on row only', () => {
+test('Cornell rows: 25 rows, the pair gi-lighting-cornell-box, the reference on both rows only', () => {
   const on = lighting.inventory.find(r => r.mode === 'cornell-box-on');
   const off = lighting.inventory.find(r => r.mode === 'cornell-box-off');
-  assert.equal(lighting.inventory.length, 23);
+  assert.equal(lighting.inventory.length, 25);
   assert.equal(on.judgeReference, '/refs/cornell-box-reference.png');
   assert.equal(on.judgeAspect, 'functional');
-  assert.equal(off.judgeReference, undefined);
-  assert.equal(off.judgeAspect, undefined);
+  assert.equal(off.judgeReference, '/refs/cornell-box-reference.png');
+  assert.equal(off.judgeAspect, 'functional');
   assert.equal(on.pair, 'gi-lighting-cornell-box');
   assert.equal(off.pair, 'gi-lighting-cornell-box');
   assert.deepEqual(on.requiredFacts, ['snapshot:settings', 'snapshot:stats']);
@@ -457,6 +470,47 @@ test('Cornell linear probe rows: quarter-exposure linear tone mapping over the c
   assert.equal(lighting.CORNELL_LIGHT_Z, 2.795);
   assert.deepEqual(lighting.CORNELL_LIGHT_SIZE, [1.05, 1.3]);
   assert.equal(lighting.CORNELL_LINEAR_EXPOSURE_SCALE, 0.25);
+});
+
+test('references: the linear and area rows carry no judgeReference or judgeAspect', () => {
+  for (const mode of ['cornell-box-linear-on', 'cornell-box-linear-off', 'area-glossy-ltc-off', 'area-glossy-form-factor-off']) {
+    const row = lighting.inventory.find(r => r.mode === mode);
+    assert.equal(row.judgeReference, undefined);
+    assert.equal(row.judgeAspect, undefined);
+  }
+});
+
+test('area-glossy rows: area-light shading, one area light, the floor and the GI-excluded fixture', async () => {
+  for (const [id, mode] of [['area-glossy-ltc-off', 'ltc'], ['area-glossy-form-factor-off', 'formFactor']]) {
+    const { calls, state } = await cornellCalls(id);
+    assert.deepEqual(named(calls, 'setAreaLightShading'), [[{ mode }]]);
+    const lights = named(calls, 'addLight');
+    assert.equal(lights.length, 1, 'exactly one light');
+    assert.deepEqual(lights[0][0], {
+      kind: 'area', position: [0, 1.2, -6], direction: [0, -0.5, 1], color: [1, 0.95, 0.88],
+      intensity: 24, range: 15, size: [2, 0.5],
+    });
+    assert.deepEqual(named(calls, 'setEnvironmentLighting'), [[{ diffuse: 0, specular: 0 }]]);
+    assert.deepEqual(named(calls, 'setAmbient'), [[{ color: [0, 0, 0], intensity: 0 }]]);
+    assert.deepEqual(named(calls, 'setToneMapping'), [], 'default tone mapping');
+    assert.deepEqual(state.instances.map(item => item.name), ['floor', 'fixture']);
+    const fixture = state.instances.find(item => item.name === 'fixture');
+    assert.deepEqual(named(calls, 'setInstanceGlobalIllumination'), [[fixture.instance, false]]);
+  }
+});
+
+test('area-glossy variants: GI off, expected disabled, unmeasured, no offMode and OFF_FACTS', () => {
+  for (const id of ['area-glossy-ltc-off', 'area-glossy-form-factor-off']) {
+    const variant = variantOf(id);
+    assert.deepEqual(variant.gi, { enabled: false, debugView: 'none' });
+    assert.equal(variant.giExpected, 'disabled');
+    assert.equal(variant.measurement, undefined);
+    assert.equal(variant.offMode, undefined);
+    const row = lighting.inventory.find(r => r.mode === id);
+    assert.deepEqual(row.requiredFacts, OFF_FACTS);
+    assert.equal(row.pair, null);
+    assert.deepEqual(row.heldConstant, AREA_HELD);
+  }
 });
 
 test('Cornell geometry: wall normals point into the box, block tops face up, windings agree', async () => {

@@ -1,9 +1,10 @@
-// Lighting stage (S40) of the global-illumination page, rows 1-23: colour bleeding, interior bounce,
+// Lighting stage (S40) of the global-illumination page, rows 1-25: colour bleeding, interior bounce,
 // the emissive panel, local-light shadows, the sky overhang, glossy reflection, quality, forward
-// content, the moved block and the Cornell box (ten times the canonical size, metres = mm / 100) with
-// its two linear-HDR probe rows. Importing this module has no side effects. Every row is an on/off pair
-// on one arrangement, built from lib/content.js builders; observe reports the evidence of contract
-// 'gi-lighting-rows'. `ready` holds the moved-instance arrangement until its block has moved.
+// content, the moved block, the Cornell box (ten times the canonical size, metres = mm / 100) with its
+// two linear-HDR probe rows, and the two glossy-floor area-light rows. Importing this module has no side
+// effects. Every on row pairs with an off row on one arrangement, built from lib/content.js builders;
+// the four probe and area-light rows are the unmeasured exception. observe reports the evidence of
+// contract 'gi-lighting-rows'. `ready` holds the moved-instance arrangement until its block has moved.
 import { box, panel, plane, roomShell, sphere, volumeRoom } from '../lib/content.js';
 
 const room = volumeRoom();
@@ -48,7 +49,7 @@ export const factNames = [
 /**
  * `ROWS` lists the rows in table order (contract gi-lighting-rows). Each entry's `measured` flag
  * gives it a PAIR_RUN measurement, and its `extraFacts` are appended to ON_FACTS or OFF_FACTS.
- * Today ROWS holds rows 1-23 of the lighting stage, including the two unmeasured linear-HDR probe
+ * Today ROWS holds rows 1-25 of the lighting stage, including the four unmeasured probe and area-light
  * rows, and `ready` (a member of the default export) returns { ready: true, stage: 'lighting' }
  * for every variant except moved-instance.
  * Handoff: gi page: scenes/lighting.js rows 11-19 (glossy, quality, forward content, moved block)
@@ -102,13 +103,14 @@ const ROWS = [
     criterionName: 'P4-Q6 moved instance relit', producer: 'raa-gi-screen', extraFacts: ['assertion:block-moved'], measured: true },
   { mode: 'moved-instance-off', arrangement: 'moved-instance', filename: 'gi-moved-block-off.png',
     criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: ['assertion:block-moved'], measured: true },
-  // Cornell rows: `facts` replaces the on/off fact list; the on row carries the reference image as judge context.
+  // Cornell rows: `facts` replaces the on/off fact list; both rows carry the reference image as judge
+  // context, and their direct-light distribution is judged against it.
   { mode: 'cornell-box-on', arrangement: 'cornell-box', filename: 'gi-cornell-box-on-bounce-lit.png',
     criterionName: 'P4-Q3 Cornell box GI bounce visible', producer: 'raa-gi-screen', extraFacts: [], measured: true,
     facts: ['snapshot:settings', 'snapshot:stats'], judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'functional' },
   { mode: 'cornell-box-off', arrangement: 'cornell-box', filename: 'gi-cornell-box-off-direct-only.png',
     criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: true,
-    facts: ['snapshot:settings', 'snapshot:stats'] },
+    facts: ['snapshot:settings', 'snapshot:stats'], judgeReference: '/refs/cornell-box-reference.png', judgeAspect: 'functional' },
   // Linear-HDR probe rows: the same Cornell box at a quarter of the exposure with linear, undithered tone mapping,
   // so the capture stores sRGB-encoded scene-linear values that the ratio script can decode. They are unmeasured.
   { mode: 'cornell-box-linear-on', arrangement: 'cornell-box-linear', filename: 'gi-cornell-box-linear-on-hdr-ratio-probe.png',
@@ -117,12 +119,20 @@ const ROWS = [
   { mode: 'cornell-box-linear-off', arrangement: 'cornell-box-linear', filename: 'gi-cornell-box-linear-off-hdr-ratio-probe.png',
     criterionName: 'P4-Q8 GI off frame', producer: 'raa-gi-core', extraFacts: [], measured: false,
     facts: ['snapshot:settings', 'snapshot:stats'] },
+  // Glossy-floor area-light rows: GI off and unmeasured, so no pair and no offMode. The LTC row shows the
+  // panel's stretched-rectangle reflection; the form-factor row shows the diffuse pool without it.
+  { mode: 'area-glossy-ltc-off', arrangement: 'area-glossy-ltc', filename: 'gi-area-light-glossy-floor-stretched-rectangle-reflection.png',
+    criterionName: 'M3 LTC area light: specular reflection is a stretched rectangle', producer: 'raa-area-ltc', extraFacts: [], measured: false },
+  { mode: 'area-glossy-form-factor-off', arrangement: 'area-glossy-form-factor', filename: 'gi-area-light-form-factor-mode-diffuse-pool-no-reflection.png',
+    criterionName: 'M3 area light diffuse-only form-factor mode', producer: 'raa-area-ltc', extraFacts: [], measured: false },
 ];
 
 // Judge-held fixtures per arrangement: the judge never scores them.
 const ROOM_HELD = ['room shell with red left wall and green right wall', 'white box and sphere',
   'sun through the ceiling opening', 'camera'];
 const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'];
+const AREA_GLOSSY_HELD = ['dark glossy floor', 'rectangular area light panel and its glowing fixture',
+  'black sky without sun or ambient', 'camera'];
 const HELD = {
   'color-bleed': ROOM_HELD,
   'interior-bounce': ROOM_HELD,
@@ -137,6 +147,8 @@ const HELD = {
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
   'cornell-box': CORNELL_HELD,
   'cornell-box-linear': [...CORNELL_HELD, 'linear tone mapping without dither at a quarter of the Cornell exposure'],
+  'area-glossy-ltc': AREA_GLOSSY_HELD,
+  'area-glossy-form-factor': AREA_GLOSSY_HELD,
 };
 
 // Camera and subject bounds per arrangement, in metres (camera near 0.05, far 200).
@@ -149,7 +161,15 @@ const CORNELL_SELECTION = {
     { name: 'light', min: [2.13, 5.4, 2.27], max: [3.43, 5.49, 3.32] },
   ],
 };
+const AREA_GLOSSY_SELECTION = {
+  camera: lens([0, 1.5, 2.5], [0, 0.3, -6], 55),
+  subjects: [
+    { name: 'floor', min: [-6, 0, -12], max: [6, 0, 2] },
+    { name: 'light', min: [-1.1, 0.9, -6.3], max: [1.1, 1.5, -5.7] },
+  ],
+};
 const SELECTIONS = {
+  'area-glossy-ltc': AREA_GLOSSY_SELECTION,
   'color-bleed': {
     camera: lens([0, 1.4, -1.2], [0, 0.6, -5.4], 60),
     subjects: [roomSubject, { name: 'box', min: [0.7, 0, -5.7], max: [1.7, 1, -4.7] }],
@@ -198,6 +218,7 @@ const SELECTIONS = {
   },
   'cornell-box': CORNELL_SELECTION,
   'cornell-box-linear': CORNELL_SELECTION,
+  'area-glossy-form-factor': AREA_GLOSSY_SELECTION,
 };
 
 // Quality per mode; a mode without an entry uses DEFAULT_QUALITY.
@@ -251,14 +272,18 @@ const BEHAVIOURS = {
     + 'white blocks and the floor (a red tint on faces near the red left wall, a green tint on faces near the '
     + 'green right wall); the front faces of the two blocks, which the ceiling light does not reach directly, '
     + 'are lit by bounce light instead of staying black; no bright blotch or ring around the ceiling light and '
-    + 'no light leaking through the walls or ceiling. The reference image is a path-traced Cornell box given '
-    + 'only as context for the scene: hard shadow edges, a different overall brightness, a different shape of '
-    + 'the lit area under the light, visible voxel-scale smoothness in the bounce, or any other difference from '
-    + 'the reference are not faults here.',
-  'cornell-box-off': 'The same Cornell box with global illumination off and the same exposure: only surfaces the ceiling '
-    + 'light reaches directly are lit; the ceiling and the surfaces facing away from the light stay dark; there is no red '
-    + 'or green colour bleeding on the white surfaces, and the blocks cast no shadows because RAA local lights are '
-    + 'unshadowed without GI.',
+    + 'no light leaking through the walls or ceiling; the direct light is distributed like the reference: the '
+    + 'floor under the ceiling light is the brightest region and the back wall falls off towards its top corners. '
+    + 'The reference image is a path-traced Cornell box given as context for the scene and for that direct-light '
+    + 'distribution: hard shadow edges, a different overall brightness, visible voxel-scale smoothness in the '
+    + 'bounce, or any other difference from the reference except the direct-light distribution are not faults here.',
+  'cornell-box-off': 'The same Cornell box with global illumination off and the same exposure, compared with the reference '
+    + 'only for the distribution of the direct light of the ceiling light: the floor under the light is the brightest '
+    + 'region and stays well lit towards the front of the box, the back wall is evenly lit in its middle and falls off '
+    + 'towards its top corners, and the tops of the two blocks are bright; the ceiling and the surfaces facing away '
+    + 'from the light stay dark, there is no red or green colour bleeding, and the blocks cast no shadows because RAA '
+    + 'local lights are unshadowed without GI. Differences from the path-traced reference in overall brightness, '
+    + 'missing bounce light, missing shadows or missing colour bleeding are not faults here.',
   'cornell-box-linear-on': 'Global illumination on, shown with linear tone mapping at a quarter of the usual exposure '
     + '(a darker image with flat contrast): the floor under the ceiling light is the brightest surface, the back wall is '
     + 'lit and darkens towards its top corners, the ceiling is lit only by bounce light, and the red and green walls tint '
@@ -267,6 +292,13 @@ const BEHAVIOURS = {
     + 'only surfaces the ceiling light reaches directly are lit; the floor under the light is the brightest surface and '
     + 'the back wall darkens towards its top corners; the ceiling stays black and there is no red or green colour '
     + 'bleeding; nothing is clipped to pure white except the light fixture itself.',
+  'area-glossy-ltc-off': 'On the dark glossy floor in front of the glowing rectangular light panel, the reflection of the '
+    + 'panel appears as a bright elongated rectangle, a streak as wide as the panel and stretched towards the camera, '
+    + 'surrounded by a softer pool of diffuse light on the floor; the reflection is not a small round dot or point-like '
+    + 'highlight.',
+  'area-glossy-form-factor-off': 'The same dark glossy floor and glowing rectangular panel in the cheap diffuse-only '
+    + 'area-light mode: the floor shows only a soft pool of diffuse light in front of the panel, brightest nearest to it '
+    + 'and fading with distance; no bright reflection streak or highlight of the panel appears on the floor.',
 };
 const DESCRIPTIONS = {
   'color-bleed-on': 'Global illumination on: the white box and floor take bounce light from the red and green walls.',
@@ -292,6 +324,8 @@ const DESCRIPTIONS = {
   'cornell-box-off': 'The same Cornell box with global illumination disabled: only the direct light of the ceiling light.',
   'cornell-box-linear-on': 'Global illumination on, linear tone mapping at a quarter exposure: the Cornell box as scene-linear values.',
   'cornell-box-linear-off': 'The same Cornell box with global illumination disabled, linear tone mapping at a quarter exposure.',
+  'area-glossy-ltc-off': 'A rectangular area light above a glossy floor, shaded with Linearly Transformed Cosines (diffuse and GGX specular).',
+  'area-glossy-form-factor-off': 'The same scene with the area light in the diffuse-only form-factor mode: no specular.',
 };
 
 const nodeAt = (engine, position = [0, 0, 0]) => engine.addNode(null, position, [0, 0, 0, 1], [1, 1, 1]);
@@ -509,6 +543,38 @@ function cornellLinear(engine, variant, state) {
   });
 }
 
+// The glossy-floor area-light rows (M3): one rectangular light over a dark glossy floor in the black Cornell
+// environment (no sky, sun, ambient or IBL). The S11 basis of the light's travel direction (0, -0.5, 1) puts
+// size[0] along +x and size[1] along AREA_BITANGENT. The visible fixture is the light's rectangle moved 0.01 m
+// against the travel direction and excluded from the GI volume.
+const AREA_LIGHT = {
+  kind: 'area', position: [0, 1.2, -6], direction: [0, -0.5, 1], color: [1, 0.95, 0.88],
+  intensity: 24, range: 15, size: [2.0, 0.5],
+};
+const AREA_BITANGENT = [0, 0.894, 0.447];
+// `mode` selects the engine-wide area-light shading: 'ltc' (diffuse and GGX specular) or 'formFactor'.
+function areaGlossy(engine, variant, state, mode) {
+  engine.setSky({ model: 'legacy', zenith: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], intensity: 0, sunDiscIntensity: 0 });
+  engine.setEnvironmentLighting({ diffuse: 0, specular: 0 });
+  engine.setAmbient({ color: [0, 0, 0], intensity: 0 });
+  engine.setLight({ direction: [0, -1, 0], color: [1, 1, 1], intensity: 0 });
+  engine.setAreaLightShading({ mode });
+  const floor = engine.addSurfaceMaterial({ color: [0.06, 0.06, 0.07], roughness: 0.2, metallic: 0 });
+  state.instances.push({ name: 'floor', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, plane(20, 20), floor)) });
+  engine.addLight({ ...AREA_LIGHT });
+  // The fixture rectangle: size[0] / 2 along x and size[1] / 2 along the bitangent around the moved centre.
+  const length = Math.hypot(...AREA_LIGHT.direction);
+  const travel = AREA_LIGHT.direction.map(v => v / length);
+  const centre = AREA_LIGHT.position.map((v, i) => v - 0.01 * travel[i]);
+  const at = (x, y) => [centre[0] + x, centre[1] + y * AREA_BITANGENT[1], centre[2] + y * AREA_BITANGENT[2]];
+  const corners = [at(-1.0, -0.25), at(1.0, -0.25), at(1.0, 0.25), at(-1.0, 0.25)];
+  const fixtureMaterial = engine.addMaterial({ color: [0, 0, 0], emissive: [4, 4, 4], model: 'flat' });
+  const fixture = engine.addMeshInstance(nodeAt(engine),
+    meshWith(engine, quad(corners, centre.map((v, i) => v + travel[i])), fixtureMaterial));
+  engine.setInstanceGlobalIllumination(fixture, false);
+  state.instances.push({ name: 'fixture', instance: fixture });
+}
+
 // Each arrangement adds its content and pushes { name, instance } entries into state.instances.
 const ARRANGEMENTS = {
   'color-bleed': roomWithObjects,
@@ -585,6 +651,8 @@ const ARRANGEMENTS = {
   },
   'cornell-box': cornellBox,
   'cornell-box-linear': cornellLinear,
+  'area-glossy-ltc': (engine, variant, state) => areaGlossy(engine, variant, state, 'ltc'),
+  'area-glossy-form-factor': (engine, variant, state) => areaGlossy(engine, variant, state, 'formFactor'),
   'moved-instance': (engine, variant, state) => {
     roomScene(engine, state);
     const block = engine.addNode(null, BLOCK_START, [0, 0, 0, 1], [1, 1, 1]);
