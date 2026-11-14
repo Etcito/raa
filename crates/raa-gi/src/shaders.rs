@@ -1,6 +1,6 @@
-//! WGSL of the GI volume (shares 1 and 2): the radiance codec, the view-independent voxelize
-//! kernel and the seed, jump-flood, forward-voxelize and atlas-write modules (contract
-//! `gi-shaders`, records of `gi-records`).
+//! WGSL of the GI volume (shares 1, 2 and 3): the radiance codec, the view-independent voxelize
+//! kernel, the seed, jump-flood, forward-voxelize and atlas-write modules and the voxel-light
+//! module (contract `gi-shaders`, records of `gi-records`).
 //!
 //! Split note: `no handoff: raa-gi: shaders share 3, voxel lighting takes nothing from this card`
 //! and `no handoff: raa-gi: shaders share 4, debug views takes nothing from this card`; each adds
@@ -8,7 +8,7 @@
 
 use std::num::NonZeroU64;
 
-use raa_shader::PRELUDE_WGSL;
+use raa_shader::{CLOUD_SHADOW_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, ShaderStages, StorageTextureAccess,
     TextureFormat, TextureViewDimension,
@@ -31,6 +31,7 @@ const SEED_WGSL: &str = include_str!("wgsl/seed.wgsl");
 const JUMP_FLOOD_WGSL: &str = include_str!("wgsl/jump_flood.wgsl");
 const VOXELIZE_FORWARD_WGSL: &str = include_str!("wgsl/voxelize_forward.wgsl");
 const VOLUME_WRITE_WGSL: &str = include_str!("wgsl/volume_write.wgsl");
+const VOXEL_LIGHT_WGSL: &str = include_str!("wgsl/voxel_light.wgsl");
 
 const FLOOD_RECORD_WGSL: &str = "struct GiFloodGpu {
     step: vec3<i32>,
@@ -39,6 +40,30 @@ const FLOOD_RECORD_WGSL: &str = "struct GiFloodGpu {
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
+}
+
+";
+
+/// `GI_FRAME_RECORD_WGSL` is the 432-byte `GiFrameGpu` struct text of contract 'gi-records',
+/// mirrored by [`crate::layouts::GiFrameGpu`]; `voxel_light_module_wgsl` composes it before
+/// `voxel_light.wgsl`.
+///
+/// Handoff: card 'raa-gi: shaders share 4, debug views' reuses `GI_FRAME_RECORD_WGSL` (this
+/// file) as the frame record of its debug module; today it holds the `struct GiFrameGpu` text
+/// at the S38 member offsets.
+const GI_FRAME_RECORD_WGSL: &str = "struct GiFrameGpu {
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    inv_proj: mat4x4<f32>,
+    inv_view: mat4x4<f32>,
+    previous_view_proj: mat4x4<f32>,
+    camera_position: vec4<f32>,
+    sun_direction: vec4<f32>,
+    sun_color: vec4<f32>,
+    viewport: vec4<f32>,
+    counts: vec4<u32>,
+    settings: vec4<f32>,
+    flags: vec4<u32>,
 }
 
 ";
@@ -68,6 +93,20 @@ pub fn voxelize_forward_module_wgsl() -> String {
 /// (4x4x4).
 pub fn volume_write_module_wgsl() -> String {
     format!("{RADIANCE_CODEC_WGSL}{VOLUME_WRITE_WGSL}")
+}
+
+/// Voxel-light module (share 3): `PRELUDE_WGSL` + `CLOUD_SHADOW_WGSL` + `GI_VOLUME_WGSL` +
+/// `RADIANCE_CODEC_WGSL` + `GI_FRAME_RECORD_WGSL` + `voxel_light.wgsl`, entry
+/// `raa_gi_voxel_light` (4x4x4, one relit level per frame).
+///
+/// Handoff: card 'raa-gi: variants test' calls `voxel_light_module_wgsl` and
+/// `light_group2_entries`; today they return the module text and the four group-2 entries of
+/// contract 'gi-shaders'.
+pub fn voxel_light_module_wgsl() -> String {
+    format!(
+        "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{RADIANCE_CODEC_WGSL}\
+         {GI_FRAME_RECORD_WGSL}{VOXEL_LIGHT_WGSL}"
+    )
 }
 
 fn entry(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
@@ -143,6 +182,21 @@ pub fn forward_group2_entries() -> [BindGroupLayoutEntry; 8] {
         storage_entry(5, true),
         storage_entry(6, true),
         storage_entry(7, false),
+    ]
+}
+
+/// Voxel-light group 2: GiLightGpu, voxels read, radiance read_write and the GiFrameGpu
+/// uniform.
+///
+/// Handoff: card 'raa-gi: volume.rs share 1, allocation and pipelines' calls
+/// `light_group2_entries` and `voxel_light_module_wgsl` to build the relight pipeline; today
+/// they return the four group-2 entries and the module text.
+pub fn light_group2_entries() -> [BindGroupLayoutEntry; 4] {
+    [
+        uniform_entry(0, 32, false),
+        storage_entry(1, true),
+        storage_entry(2, false),
+        uniform_entry(3, 432, false),
     ]
 }
 
