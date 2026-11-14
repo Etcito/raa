@@ -138,7 +138,7 @@ fn hiz_params_is_one_uvec4() {
 
 #[test]
 fn ssr_trace_module_validates() {
-    if let Err(e) = Composer::validate(shaders::SSR_TRACE_WGSL) {
+    if let Err(e) = Composer::validate(&shaders::ssr_trace_module_wgsl()) {
         panic!("ssr_trace: {e}");
     }
 }
@@ -162,9 +162,9 @@ fn trace_vertex_and_two_fragment_entries() {
 fn trace_groups_are_private_zero_and_lighting_one_only() {
     let wgsl = shaders::SSR_TRACE_WGSL;
     assert_eq!(bindings(wgsl, 0), [0, 1, 2, 3, 4, 5, 6, 7]);
-    assert_eq!(bindings(wgsl, 1), [3, 4, 5, 6]);
+    assert_eq!(bindings(wgsl, 1), [3, 4, 5, 6, 17, 18]);
     let groups = code_lines(wgsl).filter(|l| l.contains("@group(")).count();
-    assert_eq!(groups, 12, "only groups 0 and 1 are declared");
+    assert_eq!(groups, 14, "only groups 0 and 1 are declared");
     // No PRELUDE prepended: its group-0 frame bindings and helpers are absent.
     assert!(!wgsl.contains("raa_frame"), "PRELUDE prepended");
     assert!(!wgsl.contains("fn raa_"), "PRELUDE prepended");
@@ -176,10 +176,35 @@ fn trace_group_one_lines_occur_verbatim_in_prelude() {
     let ours: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL)
         .filter(|l| l.starts_with("@group(1)"))
         .collect();
-    assert_eq!(ours.len(), 4, "{ours:?}");
+    assert_eq!(ours.len(), 6, "{ours:?}");
     for l in ours {
         assert!(prelude.contains(&l), "not in PRELUDE_WGSL: {l}");
     }
+    let gi: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL)
+        .filter(|l| l.starts_with("struct RaaGiVolumeParams") || l.starts_with("const RAA_GI_"))
+        .collect();
+    assert_eq!(gi.len(), 5, "{gi:?}");
+    for l in gi {
+        assert!(prelude.contains(&l), "not in PRELUDE_WGSL: {l}");
+    }
+}
+
+#[test]
+fn flag_clear_path_keeps_the_early_return() {
+    let body: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL)
+        .skip_while(|l| !l.starts_with("fn fs_composite("))
+        .take_while(|l| !l.starts_with("@"))
+        .collect();
+    assert!(body.iter().any(|l| l.contains("RAA_GI_FLAG_REFLECTIONS")));
+    let i = body.iter().position(|l| *l == "if (weight <= 0.0) {");
+    let next = i.and_then(|i| body.get(i + 1));
+    assert_eq!(next, Some(&"return hdr;"), "{body:?}");
+    assert!(
+        body.iter()
+            .any(|l| l.contains("raa_gi_trace(") && l.contains(", 160.0, 48u, 0.5)")),
+        "{body:?}"
+    );
+    assert!(raa_shader::GI_VOLUME_WGSL.contains("fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, hit_voxels: f32) -> RaaGiHit"));
 }
 
 #[test]

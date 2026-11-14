@@ -18,7 +18,7 @@ use raa_pipeline::{HDR_FORMAT, Targets};
 use crate::hiz;
 use crate::shaders::{
     CS_HIZ_COPY, CS_HIZ_REDUCE, FS_COMPOSITE, FS_DOWNSAMPLE, FS_TRACE, HIZ_PARAMS_SIZE,
-    HIZ_WORKGROUP, SSR_HIZ_WGSL, SSR_PARAMS_SIZE, SSR_TRACE_WGSL, VS_FULLSCREEN,
+    HIZ_WORKGROUP, SSR_HIZ_WGSL, SSR_PARAMS_SIZE, VS_FULLSCREEN, ssr_trace_module_wgsl,
 };
 
 /// Byte stride of one level's `HizParams` (the largest min_uniform_buffer_offset_alignment
@@ -246,7 +246,7 @@ impl SsrPipelines {
         });
         let trace_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-ssr.trace"),
-            source: wgpu::ShaderSource::Wgsl(SSR_TRACE_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(ssr_trace_module_wgsl().into()),
         });
         let cs = wgpu::ShaderStages::COMPUTE;
         let fs = wgpu::ShaderStages::FRAGMENT;

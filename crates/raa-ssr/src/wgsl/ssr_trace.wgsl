@@ -47,6 +47,14 @@ struct EnvSh {
 @group(1) @binding(4) var<uniform> raa_env_sh: EnvSh;
 @group(1) @binding(5) var raa_brdf_lut: texture_2d<f32>;
 @group(1) @binding(6) var raa_linear_clamp: sampler;
+struct RaaGiVolumeParams { levels: array<vec4<f32>, 5>, resolution: f32, intensity: f32, level_count: u32, flags: u32 }
+const RAA_GI_MAX_LEVELS: u32 = 5u;
+const RAA_GI_FLAG_VALID: u32 = 1u;
+const RAA_GI_FLAG_REFLECTIONS: u32 = 2u;
+const RAA_GI_FLAG_LOCAL_SHADOWS: u32 = 4u;
+// S38 GI volume (fs_composite's S39 fallback); GI_VOLUME_WGSL is appended to this module.
+@group(1) @binding(17) var raa_gi_volume: texture_3d<f32>;
+@group(1) @binding(18) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
 
 const MAX_STEPS: u32 = 64u;
 const REFINE_STEPS: u32 = 8u;
@@ -265,27 +273,57 @@ fn env_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32) -> ve
 }
 
 // Full res, into hdr.dst(): hdr + (ssr - env_specular) x F(F0) x confidence x intensity, so
-// the reflection replaces the IBL specular it covers.
+// the reflection replaces the IBL specular it covers. With RAA_GI_FLAG_REFLECTIONS set (S39),
+// a glossy pixel blends the screen reflection over a GI volume trace (env on a miss).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(in.position.xy);
     let hdr = textureLoad(hdr_mips, px, 0);
     let trace = textureLoad(trace_tex, px, 0);
-    let weight = trace.z * ssr.params.x;
-    if (weight <= 0.0) {
-        return hdr;
+    if ((raa_gi_volume_params.flags & RAA_GI_FLAG_REFLECTIONS) == 0u) {
+        let weight = trace.z * ssr.params.x;
+        if (weight <= 0.0) {
+            return hdr;
+        }
+        let nr = textureLoad(normal_tex, px, 0);
+        let n = normalize(nr.xyz);
+        let roughness = clamp(nr.w, 0.0, 1.0);
+        let f0 = srgb_to_linear(textureLoad(material_tex, px, 0).rgb);
+        let p = view_pos(in.position.xy * ssr.viewport.zw, textureLoad(depth_tex, px, 0));
+        let v = normalize(-p);
+        let n_dot_v = saturate(dot(n, v));
+        let r = (ssr.inv_view * vec4<f32>(reflect(-v, n), 0.0)).xyz;
+        let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
+        let reflected = textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb;
+        let env = env_specular(r, roughness, f0, n_dot_v);
+        let rgb = hdr.rgb + (reflected - env) * fresnel_schlick(f0, n_dot_v) * weight;
+        return vec4<f32>(max(rgb, vec3<f32>(0.0)), hdr.a);
     }
     let nr = textureLoad(normal_tex, px, 0);
-    let n = normalize(nr.xyz);
     let roughness = clamp(nr.w, 0.0, 1.0);
+    let depth = textureLoad(depth_tex, px, 0);
+    if (roughness > ssr.params.y || depth >= 1.0) {
+        return hdr;
+    }
+    let n = normalize(nr.xyz);
     let f0 = srgb_to_linear(textureLoad(material_tex, px, 0).rgb);
-    let p = view_pos(in.position.xy * ssr.viewport.zw, textureLoad(depth_tex, px, 0));
+    let p = view_pos(in.position.xy * ssr.viewport.zw, depth);
     let v = normalize(-p);
     let n_dot_v = saturate(dot(n, v));
+    let p_w = (ssr.inv_view * vec4<f32>(p, 1.0)).xyz;
+    let n_w = (ssr.inv_view * vec4<f32>(n, 0.0)).xyz;
     let r = (ssr.inv_view * vec4<f32>(reflect(-v, n), 0.0)).xyz;
-    let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
-    let reflected = textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb;
     let env = env_specular(r, roughness, f0, n_dot_v);
-    let rgb = hdr.rgb + (reflected - env) * fresnel_schlick(f0, n_dot_v) * weight;
+    let v0 = raa_gi_finest_voxel();
+    let hit = raa_gi_trace(p_w + n_w * 1.5 * v0, r, v0, 160.0, 48u, 0.5);
+    let fallback = select(env, hit.radiance, hit.hit);
+    let confidence = trace.z;
+    var reflected = fallback;
+    if (confidence > 0.0) {
+        let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
+        reflected = textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb;
+    }
+    let spec = mix(fallback, reflected, confidence);
+    let rgb = hdr.rgb + (spec - env) * fresnel_schlick(f0, n_dot_v) * ssr.params.x;
     return vec4<f32>(max(rgb, vec3<f32>(0.0)), hdr.a);
 }

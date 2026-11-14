@@ -30,11 +30,17 @@ pub(crate) const HIZ_PARAMS_SIZE: u64 = 16;
 /// (texture_depth_2d), 2 `normal`, 3 `material` (both textureLoad), 4 the Hi-Z pyramid
 /// (r32float, all mips, unfilterable, textureLoad), 5 the HDR mip chain (HDR_FORMAT, all
 /// mips, mip 0 a copy of hdr.src(), which the composite reads as its hdr), 6 the trace result,
-/// 7 linear clamp sampler (filtering). `fs_trace` reads only 0, 1, 2 and 4, and renders into
-/// the trace texture, so its bind group puts a dummy at 6. Group 1: the lighting bindings 3
-/// (env_specular), 4 (`EnvSh`), 5 (brdf_lut) and 6 (linear_clamp) of
-/// `LightingResources::layout()`, so the pipeline layout is [group 0, that layout].
+/// 7 linear clamp sampler (filtering). `fs_trace` reads only 0, 1, 2 and 4 and has its own
+/// group-0 layout without binding 6 (no dummy); `fs_composite` binds 0-3 and 5-7. Group 1:
+/// the lighting bindings 3 (env_specular), 4 (`EnvSh`), 5 (brdf_lut), 6 (linear_clamp),
+/// 17 (GI volume) and 18 (`RaaGiVolumeParams`) of `LightingResources::layout()`, the second
+/// layout of both pipelines. This is the file text; the module is [`ssr_trace_module_wgsl`].
 pub(crate) const SSR_TRACE_WGSL: &str = include_str!("wgsl/ssr_trace.wgsl");
+
+/// The trace module source: [`SSR_TRACE_WGSL`] + `raa_shader::GI_VOLUME_WGSL` (S39 fallback).
+pub(crate) fn ssr_trace_module_wgsl() -> String {
+    format!("{SSR_TRACE_WGSL}{}", raa_shader::GI_VOLUME_WGSL)
+}
 
 /// Full res into an Rgba16Float target: hit uv, confidence, cone mip (0 when no reflection).
 pub(crate) const FS_TRACE: &str = "fs_trace";
