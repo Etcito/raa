@@ -86,7 +86,7 @@ pub struct IblFeature;
 
 impl IblFeature {
     /// Adds the `Ambient` slot provider `ibl` (priority 10) to `lit`, builds the BRDF LUT
-    /// once (128x128 Rg16Float split-sum scale and bias, multiscatter) and sets it on the
+    /// once (BRDF region of the 128 x 192 Rgba16Float atlas, split-sum scale and bias, multiscatter) and sets it on the
     /// pipeline's lighting, and creates the filter with its output cube and staging ring.
     /// The env stays cleared until `IblHandle::apply_pending` applies a first SH.
     ///

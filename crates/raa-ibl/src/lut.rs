@@ -1,21 +1,24 @@
-//! BRDF LUT (IBL value): 128x128 Rg16Float split-sum scale A and bias B of GGX with
-//! height-correlated Smith visibility, computed once on the GPU by `wgsl/brdf_lut.wgsl`.
-//! Core WebGPU has no Rg16Float storage texture, so the compute pass writes
-//! `pack2x16float(A, B)` into a u32 storage buffer that is copied into the texture.
+//! BRDF LUT (IBL value): 128x128 split-sum scale A and bias B of GGX with height-correlated
+//! Smith visibility, computed once on the GPU by `wgsl/brdf_lut.wgsl`. It lives in the BRDF
+//! region (x 0..127, y 0..127) of the 128 x 192 Rgba16Float atlas of contract
+//! `brdf-ltc-atlas` (`raa_pipeline::create_brdf_atlas`, which already holds the LTC tables).
+//! Core WebGPU has no Rgba16Float storage texture, so the compute pass writes
+//! `pack2x16float(A, B)` and a zero word per texel into a u32 storage buffer that is copied
+//! into the region.
 
 use raa_core::GpuContext;
 
 /// Width and height of the LUT in texels (x = n_dot_v, y = roughness, texel centres).
 pub(crate) const LUT_SIZE: u32 = 128;
 
-/// Texel format of the LUT: (A, B).
-pub(crate) const LUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+/// Texel format of the atlas: the BRDF region holds (A, B, 0, 0).
+pub(crate) const LUT_FORMAT: wgpu::TextureFormat = raa_pipeline::BRDF_ATLAS_FORMAT;
 
 /// Workgroup edge of `cs_main` (`@workgroup_size(8, 8)`).
 const WORKGROUP: u32 = 8;
 
-/// Bytes of one packed texel (pack2x16float) and of one LUT row (512, 256-aligned).
-const TEXEL_BYTES: u32 = 4;
+/// Bytes of one packed texel (pack2x16float) and of one LUT row (1024, 256-aligned).
+const TEXEL_BYTES: u32 = 8;
 const ROW_BYTES: u32 = LUT_SIZE * TEXEL_BYTES;
 
 /// Samples of the CPU reference integral.
@@ -24,7 +27,7 @@ pub(crate) const CPU_SAMPLES: u32 = 256;
 /// The compute shader filling the packed LUT buffer.
 pub(crate) const BRDF_LUT_WGSL: &str = include_str!("wgsl/brdf_lut.wgsl");
 
-/// The LUT texture (TEXTURE_BINDING | COPY_DST) and its D2 view.
+/// The atlas texture (TEXTURE_BINDING | COPY_DST) and its D2 view.
 #[allow(dead_code, reason = "used by IblFeature::install")]
 pub(crate) struct BrdfLut {
     pub(crate) texture: wgpu::Texture,
@@ -47,16 +50,7 @@ pub(crate) fn create_brdf_lut(gpu: &GpuContext) -> BrdfLut {
         height: LUT_SIZE,
         depth_or_array_layers: 1,
     };
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("raa-ibl.brdf_lut"),
-        size,
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: LUT_FORMAT,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
+    let texture = raa_pipeline::create_brdf_atlas(gpu, "raa-ibl.brdf_lut", [1.0, 0.0]);
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("raa-ibl.brdf_lut"),
         entries: &[wgpu::BindGroupLayoutEntry {
@@ -217,10 +211,7 @@ mod tests {
         let error = raa_core::testing::block_on(scope.pop());
         assert!(error.is_none(), "validation error: {error:?}");
         assert_eq!(lut.texture.format(), LUT_FORMAT);
-        assert_eq!(
-            (lut.texture.width(), lut.texture.height()),
-            (LUT_SIZE, LUT_SIZE)
-        );
+        assert_eq!((lut.texture.width(), lut.texture.height()), (128, 192));
         drop(lut);
         std::mem::forget(gpu);
     }

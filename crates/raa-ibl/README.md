@@ -7,10 +7,11 @@ Image-based lighting derived from the procedural sky cube (S10 group 1 bindings 
 `IblFeature::install` prepares a pipeline and its lit renderer for IBL; the returned
 `IblHandle` is driven every frame by the `sky.env` pass of raa-sky:
 
-- **BRDF LUT** (`src/lut.rs`, `src/wgsl/brdf_lut.wgsl`): 128x128 Rg16Float split-sum scale A
-  and bias B (GGX, height-correlated Smith), computed once on the GPU at install. Core WebGPU
-  has no Rg16Float storage texture, so the compute pass writes `pack2x16float(A, B)` into a
-  storage buffer copied into the texture. Set with `LightingResources::set_brdf_lut`.
+- **BRDF LUT** (`src/lut.rs`, `src/wgsl/brdf_lut.wgsl`): 128x128 split-sum scale A and bias B
+  (GGX, height-correlated Smith), computed once on the GPU at install into the BRDF region
+  (x 0..127, y 0..127) of the 128 x 192 Rgba16Float atlas of `raa_pipeline::create_brdf_atlas`
+  (LTC tables below it). Core WebGPU has no Rgba16Float storage texture, so the compute pass
+  writes `pack2x16float(A, B)` and `0u` per texel into a storage buffer copied into the region. Set with `LightingResources::set_brdf_lut`.
 - **Filter** (`src/filter.rs`): from the SKY_ENV source cube (256 px, Rgba16Float, 6 mips,
   usage TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC) it generates source mips 1..5 by box
   downsample, copies mip 0 into the IBL-owned output cube, computes output mips 1..5 by GGX

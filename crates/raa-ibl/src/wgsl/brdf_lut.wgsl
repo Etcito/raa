@@ -4,8 +4,9 @@
 // raa_ibl_dfg samples it at uv = (n_dot_v, roughness)); alpha = roughness^2. A is the scale
 // and B the bias of F0, A + B the single-scatter directional albedo that the Fdez-Aguera
 // multiscatter compensation of ambient.wgsl divides by.
-// Core WebGPU has no Rg16Float storage texture: each texel is written as
-// pack2x16float(A, B) into a u32 buffer, then copied into the Rg16Float texture.
+// Core WebGPU has no Rgba16Float storage texture: each texel is written as two words,
+// pack2x16float(A, B) and 0u, into a u32 buffer, then copied into the BRDF region
+// (x 0..127, y 0..127) of the Rgba16Float atlas of contract brdf-ltc-atlas.
 
 const RAA_LUT_SIZE: u32 = 128u;
 const RAA_LUT_SAMPLES: u32 = 1024u;
@@ -66,5 +67,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let n_dot_v = (f32(id.x) + 0.5) / f32(RAA_LUT_SIZE);
     let roughness = (f32(id.y) + 0.5) / f32(RAA_LUT_SIZE);
-    raa_lut_out[id.y * RAA_LUT_SIZE + id.x] = pack2x16float(raa_lut_integrate(n_dot_v, roughness));
+    let i = id.y * RAA_LUT_SIZE + id.x;
+    raa_lut_out[2u * i] = pack2x16float(raa_lut_integrate(n_dot_v, roughness));
+    raa_lut_out[2u * i + 1u] = 0u;
 }

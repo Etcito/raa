@@ -265,7 +265,8 @@ fn env_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32) -> ve
     if (raa_env_sh.info.w < 0.5) {
         return vec3<f32>(0.0);
     }
-    let lut_uv = vec2<f32>(n_dot_v, roughness);
+    // BRDF region of the 128 x 192 atlas (contract brdf-ltc-atlas), as raa_brdf_lut_uv.
+    let lut_uv = clamp(vec2<f32>(n_dot_v, roughness) * 128.0, vec2<f32>(0.5), vec2<f32>(127.5)) / vec2<f32>(128.0, 192.0);
     let lut = textureSampleLevel(raa_brdf_lut, raa_linear_clamp, lut_uv, 0.0).rg;
     let lod = roughness * raa_env_sh.info.z;
     let prefiltered = textureSampleLevel(raa_env_specular, raa_linear_clamp, r, lod).rgb;

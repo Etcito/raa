@@ -27,7 +27,7 @@ fn raa_ibl_specular(r: vec3<f32>, roughness: f32) -> vec3<f32> {
 
 // Split-sum DFG terms (A = scale, B = bias of F0) from the BRDF LUT at (n_dot_v, roughness).
 fn raa_ibl_dfg(n_dot_v: f32, roughness: f32) -> vec2<f32> {
-    let uv = vec2<f32>(clamp(n_dot_v, 0.0, 1.0), clamp(roughness, 0.0, 1.0));
+    let uv = raa_brdf_lut_uv(n_dot_v, roughness);
     return textureSampleLevel(raa_brdf_lut, raa_linear_clamp, uv, 0.0).rg;
 }
 
