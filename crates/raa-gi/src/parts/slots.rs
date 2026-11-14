@@ -23,7 +23,9 @@ const SLOT_LOCAL_VISIBILITY_WGSL: &str = include_str!("../wgsl/slots/slot_local_
 
 /// The `Indirect` slot provider `gi` (priority 10): `raa_slot_indirect` adds the screen-space GI
 /// irradiance `(1 - s.metallic) * s.base_color / PI * g.rgb * raa_gi_volume_params.intensity *
-/// min(s.ao, c.ao)`, with `g` the clamped `textureLoad` of `raa_gi_screen` at `c.frag`.
+/// s.ao`, with `g` the clamped `textureLoad` of `raa_gi_screen` at `c.frag`. Only the material
+/// ao applies: `g.rgb` is traced irradiance with its own visibility and `g.a` belongs to the
+/// same traces, so neither GTAO nor `g.a` is stacked on it.
 ///
 /// Handoff: `indirect_provider` is one of the three providers that card 'raa-gi screen:
 /// screen_variants.rs (modules, layouts, gi compositions)' composes with [`ao_provider`] and
@@ -42,8 +44,9 @@ pub fn indirect_provider() -> SlotProvider {
     }
 }
 
-/// The `Ao` slot provider `gi` (priority 20): `raa_slot_ao` returns the gtao texture times the
-/// GI screen occlusion, so it equals gtao while GI is inactive (the 1x1 dummy alpha is 1).
+/// The `Ao` slot provider `gi` (priority 20): `raa_slot_ao` returns the stronger (min) of the
+/// gtao texture and the GI screen occlusion, never their product, so it equals gtao while GI is
+/// inactive (the 1x1 dummy alpha is 1).
 pub fn ao_provider() -> SlotProvider {
     SlotProvider {
         slot: SlotId::Ao,

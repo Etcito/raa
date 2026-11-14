@@ -22,9 +22,10 @@ fn raa_slot_ao(frag: vec4<f32>) -> f32 {
 }
 
 // @slot ambient
-// S1 PbrLite ambient term: ambient x base x (1 - 0.5 metallic).
+// S1 PbrLite ambient term: ambient x base x (1 - 0.5 metallic), occluded once by the combined
+// material and screen AO the pass hands over in `c.ao`.
 fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
-    return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic);
+    return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
 }
 
 // @slot direct

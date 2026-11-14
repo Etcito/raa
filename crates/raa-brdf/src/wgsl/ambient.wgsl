@@ -69,7 +69,8 @@ fn raa_layered_ambient_dominant_dir(n: vec3<f32>, r: vec3<f32>, roughness: f32) 
     return normalize(mix(n, r, f));
 }
 
-// Without an environment (info.w < 0.5): the S1 PbrLite ambient term, as raa-ibl. Otherwise
+// Without an environment (info.w < 0.5): the S1 PbrLite ambient term, occluded once by
+// `c.ao`, as raa-ibl. Otherwise
 // raa-ibl's base terms (SH diffuse with multi-bounce AO, prefiltered specular with the
 // split-sum DFG, multiscatter compensation and specular occlusion), scaled by the sheen
 // albedo left to the base, plus the sheen indirect (SH irradiance x sheen colour x the sheen
@@ -80,7 +81,7 @@ fn raa_layered_ambient_dominant_dir(n: vec3<f32>, r: vec3<f32>, roughness: f32) 
 // slot receives no geometric normal).
 fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if raa_env_sh.info.w < 0.5 {
-        return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic);
+        return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
     }
     let n = s.normal;
     let v = c.view_dir;

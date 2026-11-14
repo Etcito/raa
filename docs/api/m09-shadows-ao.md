@@ -96,8 +96,8 @@ smooth the raw signal without bleeding across depth edges.
 | field | unit | default | valid range | meaning |
 |---|---|---|---|---|
 | `radius` | metres | `0.8` | > 0 and <= 10 | World-space sampling radius. |
-| `intensity` | - | `1` | `[0, 1]` | Strength of the AO darkening: 0 leaves the ambient light unchanged, 1 applies it fully. |
-| `power` | - | `1.5` | > 0 and <= 8 | Exponent shaping the AO falloff. |
+| `intensity` | - | `0.6` | `[0, 1]` | Strength of the AO darkening: 0 leaves the ambient light unchanged, 1 applies it fully. |
+| `power` | - | `1.0` | > 0 and <= 8 | Exponent shaping the AO falloff. |
 | `slices` | directions | `4` | whole, 1..8 | Sampling effort: slice directions per pixel. |
 | `steps` | samples | `8` | whole, 1..16 | Sampling effort: horizon samples per side of a slice. |
 

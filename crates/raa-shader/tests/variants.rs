@@ -507,7 +507,9 @@ fn local_lighting_composes_with_selected_providers() {
     // and the neutral indirect slot; emissive and the Flat/UNLIT selection stay.
     let forward = raa_shader::PASS_FORWARD_WGSL;
     assert!(forward.contains("raa_slot_direct(s, c, -raa_frame.sun_dir.xyz"));
-    assert!(forward.contains("raa_slot_ambient(s, c) * min(s.ao, ao)"));
+    assert!(forward.contains("c.ao = min(s.ao, ao);"));
+    assert!(forward.contains("raa_slot_ambient(s, c)"));
+    assert!(!forward.contains("raa_slot_ambient(s, c) *"));
     assert!(forward.contains("raa_slot_indirect(s, c)"));
     assert!(forward.contains("raa_local_lighting(s, c)"));
     assert!(forward.contains("raa_pass_unlit(in.record)"));

@@ -101,7 +101,7 @@ fn raa_pass_shade_ctx(s: MaterialOutput, in: MaterialInput, ao: f32, shadow: f32
     c.view_dir = in.view_dir;
     c.frag = in.frag_coord;
     c.n_dot_v = max(dot(s.normal, in.view_dir), 1e-4);
-    c.ao = ao;
+    c.ao = min(s.ao, ao);
     c.shadow = shadow;
     c.f0 = raa_pass_f0(s);
     return c;
@@ -120,7 +120,7 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @locati
     let lit = s.emissive
         + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
             raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)
-        + raa_slot_ambient(s, c) * min(s.ao, ao)
+        + raa_slot_ambient(s, c)
         + raa_slot_indirect(s, c)
         + raa_local_lighting(s, c);
     let color = select(lit, s.base_color + s.emissive, raa_pass_unlit(in.record));

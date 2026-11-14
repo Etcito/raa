@@ -200,7 +200,7 @@ fn fs_main(v: ParticlesVaryings) -> @location(0) vec4<f32> {
     let color = s.emissive
         + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
             raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)
-        + raa_slot_ambient(s, c) * ao;
+        + raa_slot_ambient(s, c);
     // Without multisampling there is no alpha-to-coverage: the snow mask cuts at 0.5.
     if (raa_frame.flags.y <= 1u && s.opacity < 0.5) {
         discard;

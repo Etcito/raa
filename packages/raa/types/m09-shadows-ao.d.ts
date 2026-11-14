@@ -36,11 +36,11 @@ export interface AoSettings {
   radius?: number;
   /**
    * Strength of the AO darkening, in [0, 1]: 0 leaves the ambient light unchanged, 1 applies it
-   * fully. Default 1.
+   * fully. Default 0.6.
    */
   intensity?: number;
   /**
-   * Exponent shaping the AO falloff; finite, > 0 and <= 8. Default 1.5.
+   * Exponent shaping the AO falloff; finite, > 0 and <= 8. Default 1.0.
    */
   power?: number;
   /**

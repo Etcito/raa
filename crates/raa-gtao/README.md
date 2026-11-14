@@ -23,8 +23,8 @@ provider `gtao`. The pass follows Jimenez 2016:
 
 ## Public items
 
-- `AoDesc` (S12): `radius_m: f32` (0.8; `(0, 10]`), `intensity: f32` (1; `[0, 1]`),
-  `power: f32` (1.5; `(0, 8]`); `Default`, and `validate` which refuses invalid values with
+- `AoDesc` (S12): `radius_m: f32` (0.8; `(0, 10]`), `intensity: f32` (0.6; `[0, 1]`),
+  `power: f32` (1.0; `(0, 8]`); `Default`, and `validate` which refuses invalid values with
   `RaaError::FrameGraph { code: "ao.invalid" }` and a message naming the field.
 - `GtaoFeature::install(gpu, pipeline, lit) -> Result<GtaoHandle, RaaError>`: adds the `Ao`
   slot provider `gtao` (priority 10) to `lit`, builds the `gtao`, `denoise_h` and `denoise_v`

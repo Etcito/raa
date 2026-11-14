@@ -16,12 +16,12 @@ fn raa_ibl_dominant_dir(n: vec3<f32>, r: vec3<f32>, roughness: f32) -> vec3<f32>
     return normalize(mix(n, r, f));
 }
 
-// Without an environment (info.w < 0.5): the S1 PbrLite ambient term. Otherwise SH
-// diffuse with multi-bounce AO plus prefiltered specular with the split-sum DFG,
-// Fdez-Aguera multiscatter energy compensation and specular occlusion.
+// Without an environment (info.w < 0.5): the S1 PbrLite ambient term, occluded once by
+// `c.ao`. Otherwise SH diffuse with multi-bounce AO plus prefiltered specular with the
+// split-sum DFG, Fdez-Aguera multiscatter energy compensation and specular occlusion.
 fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if raa_env_sh.info.w < 0.5 {
-        return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic);
+        return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
     }
     let n = s.normal;
     let v = c.view_dir;

@@ -81,11 +81,11 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     c.view_dir = v;
     c.frag = in.frag_coord;
     c.n_dot_v = max(dot(o.normal, v), 1e-4);
-    c.ao = raa_slot_ao(in.frag_coord);
+    c.ao = min(o.ao, raa_slot_ao(in.frag_coord));
     c.shadow = shadow;
     c.f0 = vec3<f32>(0.04);
     let lit = raa_slot_direct(o, c, l, raa_frame.sun_color.rgb * shadow)
-        + raa_slot_ambient(o, c) * min(o.ao, c.ao);
+        + raa_slot_ambient(o, c);
     o.emissive = o.emissive + highlight * radiance + scatter * lit;
     o.base_color = o.base_color * (1.0 - scatter);
     return o;

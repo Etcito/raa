@@ -19,12 +19,12 @@ pub struct AoDesc {
 }
 
 impl Default for AoDesc {
-    /// GTAO defaults: radius 0.8 m, intensity 1, power 1.5.
+    /// GTAO defaults: radius 0.8 m, intensity 0.6, power 1.0 (a soft, linear darkening).
     fn default() -> Self {
         AoDesc {
             radius_m: 0.8,
-            intensity: 1.0,
-            power: 1.5,
+            intensity: 0.6,
+            power: 1.0,
         }
     }
 }
@@ -152,8 +152,8 @@ mod tests {
             AoDesc::default(),
             AoDesc {
                 radius_m: 0.8,
-                intensity: 1.0,
-                power: 1.5,
+                intensity: 0.6,
+                power: 1.0,
             }
         );
     }
