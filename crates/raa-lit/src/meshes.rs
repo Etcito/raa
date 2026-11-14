@@ -191,9 +191,28 @@ pub(crate) struct GpuLitMesh {
     pub(crate) stream1: wgpu::Buffer,
     /// u32 triangle-list indices.
     pub(crate) index: wgpu::Buffer,
+    /// Per-recreation buffer key, fresh on every upload and update.
+    key: u64,
     info: LitMeshInfo,
     pub(crate) edge_bytes: Vec<u8>,
     pub(crate) edges: Option<wgpu::Buffer>,
+}
+
+impl GpuLitMesh {
+    /// Handoff: card "raa-lit: LitHandle mesh_storage, lod_chain_into, extras_storage and
+    /// gi_access test" reads `GpuLitMesh::key` and `GpuLitMesh::vertex_count` through
+    /// `MeshStore::resolve` to fill its `LitMeshStorage` record; `GpuLitMesh::key` changes on
+    /// every `MeshStore` upload and update.
+    #[allow(dead_code, reason = "used by LitHandle::mesh_storage")]
+    pub(crate) fn key(&self) -> u64 {
+        self.key
+    }
+
+    /// The uploaded vertex count of this mesh (`LitMeshInfo.vertices`).
+    #[allow(dead_code, reason = "used by LitHandle::mesh_storage")]
+    pub(crate) fn vertex_count(&self) -> u32 {
+        self.info.vertices
+    }
 }
 
 /// The lit renderer's meshes, behind `LitRenderer::{upload, update, remove, submesh_ids,
@@ -203,12 +222,21 @@ pub(crate) struct MeshStore {
     table: SubMeshTable,
     /// Indexed by `LitMeshId.0`; `None` for a free id.
     meshes: Vec<Option<GpuLitMesh>>,
+    /// Key handed to the next successful upload or update.
+    next_key: u64,
 }
 
 #[allow(dead_code, reason = "used by LitRenderer and LitHandle")]
 impl MeshStore {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Consumes the next per-recreation buffer key, wrapping at `u64::MAX`.
+    fn take_key(&mut self) -> u64 {
+        let key = self.next_key;
+        self.next_key = self.next_key.wrapping_add(1);
+        key
     }
 
     /// Validates `m` (`render.invalid_mesh` carrying the `mesh.*` code), generates missing
@@ -219,7 +247,8 @@ impl MeshStore {
         gpu: &GpuContext,
         m: &AttributedMesh,
     ) -> Result<LitMeshId, RaaError> {
-        let (gpu_mesh, subs) = build(gpu, m)?;
+        let (mut gpu_mesh, subs) = build(gpu, m)?;
+        gpu_mesh.key = self.take_key();
         let lit = self.table.insert(&subs)?;
         let index = lit.0 as usize;
         if index >= self.meshes.len() {
@@ -251,7 +280,8 @@ impl MeshStore {
         if !self.table.contains(id) {
             return Err(unknown_lit(id));
         }
-        let (gpu_mesh, subs) = build(gpu, m)?;
+        let (mut gpu_mesh, subs) = build(gpu, m)?;
+        gpu_mesh.key = self.take_key();
         self.table.replace(id, &subs)?;
         if let Some(slot) = self.meshes.get_mut(id.0 as usize) {
             *slot = Some(gpu_mesh);
@@ -366,13 +396,23 @@ fn build(gpu: &GpuContext, m: &AttributedMesh) -> Result<(GpuLitMesh, Vec<SubMes
 
     let mut bytes = Vec::new();
     mesh.write_stream0_bytes(&mut bytes);
-    let stream0 = buffer_with(gpu, "raa.lit.stream0", wgpu::BufferUsages::VERTEX, &bytes);
+    let stream0 = buffer_with(
+        gpu,
+        "raa.lit.stream0",
+        wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
+        &bytes,
+    );
     bytes.clear();
     mesh.write_stream1_bytes(&mut bytes);
     let stream1 = buffer_with(gpu, "raa.lit.stream1", wgpu::BufferUsages::VERTEX, &bytes);
     bytes.clear();
     mesh.write_index_bytes(&mut bytes);
-    let index = buffer_with(gpu, "raa.lit.indices", wgpu::BufferUsages::INDEX, &bytes);
+    let index = buffer_with(
+        gpu,
+        "raa.lit.indices",
+        wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE,
+        &bytes,
+    );
 
     let info = LitMeshInfo {
         vertices,
@@ -384,6 +424,7 @@ fn build(gpu: &GpuContext, m: &AttributedMesh) -> Result<(GpuLitMesh, Vec<SubMes
         stream0,
         stream1,
         index,
+        key: 0,
         info,
         edge_bytes: triangle_edge_bytes(m),
         edges: None,
