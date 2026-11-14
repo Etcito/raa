@@ -95,7 +95,7 @@ const HELD = {
   'glossy-reflection': ['glossy floor', 'orange glowing sphere above the frame', 'day sky', 'camera'],
   quality: ROOM_HELD,
   'forward-content': ['room shell with red left wall', 'skinned figure, squashed shape, transparent pane and fur ball',
-    'camera', 'sunlit patch on the red wall'],
+    'camera'],
   'moved-instance': ['room shell', 'orange block and its two positions', 'camera'],
 };
 
@@ -139,7 +139,7 @@ const SELECTIONS = {
   quality: { camera: room.camera, subjects: room.subjects },
   'forward-content': {
     camera: lens([0.8, 1.4, -2.2], [-2.6, 0.6, -5.2], 60),
-    subjects: [{ name: 'left-wall-area', min: [-3.2, 0, -7.4], max: [-1.8, 1.6, -2.6] }],
+    subjects: [{ name: 'left-wall-area', min: [-3.2, 0, -7.2], max: [-1.8, 1.6, -3.0] }],
   },
   'moved-instance': {
     camera: lens([0, 1.8, -0.5], [0, 0.6, -5.5], 70),
@@ -189,11 +189,10 @@ const BEHAVIOURS = {
     + 'the box, the sphere and the floor beside the red and green walls stay neutral, lit away from the sunlit patch '
     + 'only by a flat, uncoloured ambient fill.',
   'forward-content-on': 'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red '
-    + 'wall all show a reddish bounce tint and soft indirect light coming from the sunlit red wall, like the static '
-    + 'floor and walls around them.',
+    + 'wall all show a reddish bounce tint and soft indirect light on their sides facing the wall, like the static '
+    + 'surfaces around them.',
   'forward-content-off': 'The skinned figure, the squashed shape, the transparent pane and the fur ball beside the red '
-    + 'wall show no red bounce tint; apart from the sunlit wall patch they are lit only by a flat, uncoloured ambient '
-    + 'fill.',
+    + 'wall show no red bounce tint; their shadowed sides stay dark.',
   'moved-instance-on': 'The bright orange block stands in its new place near the right wall, and the floor and wall '
     + 'around it there glow orange from its bounce light; no orange glow remains at its old place in the far left corner.',
   'moved-instance-off': 'The bright orange block stands in its new place near the right wall with no orange light '
@@ -284,12 +283,6 @@ function roomWithObjects(engine, variant, state) {
   );
 }
 
-// Forward-content sun: through the 1.2 m ceiling opening (x and z in [-0.6, 0.6] and [-4.6, -3.4], slab y 3 to
-// 3.4) onto the red wall (x = -3) at y 0.34 to 0.96, z -4.6 to -3.4, with no floor patch. The beam stays
-// 0.47 m wide across the slanted opening, so the 0.2 m GI voxels see the patch too. Every primary light of the
-// room then lands on the red wall, so all indirect light is red bounce. The objects stand outside the beam,
-// which spans z -4.6 to -3.4 only (above y 0.85 at x = -2.4, above y 0.55 at x = -2.75).
-const FORWARD_SUN = { direction: [-1, -0.85, 0], color: [1, 0.96, 0.9], intensity: 6 };
 const BLOCK_START = [-2.0, 0.4, -7.0];
 const BLOCK_TARGET = [2.0, 0.4, -3.2];
 const BEND = Math.cos(Math.PI / 6);
@@ -364,19 +357,18 @@ const ARRANGEMENTS = {
   quality: roomWithObjects,
   'forward-content': (engine, variant, state) => {
     const white = roomScene(engine, state, { white: [0.85, 0.85, 0.82] });
-    engine.setLight(FORWARD_SUN);
-    const skinned = engine.addMeshInstance(nodeAt(engine, [-2.4, 0, -5.0]), figureMesh(engine, white));
+    const skinned = engine.addMeshInstance(nodeAt(engine, [-2.4, 0, -4.6]), figureMesh(engine, white));
     engine.setSkinPose(skinned, SKIN_POSE);
-    const deformed = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -3.0]), meshWith(engine, sphere(0.35, 24), white));
+    const deformed = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -3.6]), meshWith(engine, sphere(0.35, 24), white));
     engine.setSquash(deformed, { amount: 0.3 });
     engine.setJiggle(deformed, { height: 0.7, amount: 0.5 });
     const pane = engine.addSurfaceMaterial({ color: [0.85, 0.9, 0.95], roughness: 0.2, blend: 'transparent', opacity: 0.45, doubleSided: true });
     const transparent = engine.addMeshInstance(
-      engine.addNode(null, [-2.3, 0.7, -5.8], [0, 0.7071068, 0, 0.7071068], [1, 1, 1]),
+      engine.addNode(null, [-2.3, 0.7, -5.6], [0, 0.7071068, 0, 0.7071068], [1, 1, 1]),
       meshWith(engine, panel(0.9, 1.2), pane),
     );
     const furMaterial = engine.addSurfaceMaterial({ color: [0.9, 0.88, 0.84], roughness: 0.9, furLength: 0.05, furShells: 16 });
-    const fur = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -6.8]), meshWith(engine, sphere(0.35, 24), furMaterial));
+    const fur = engine.addMeshInstance(nodeAt(engine, [-2.4, 0.35, -6.6]), meshWith(engine, sphere(0.35, 24), furMaterial));
     state.instances.push(
       { name: 'skinned', instance: skinned },
       { name: 'deformed', instance: deformed },
