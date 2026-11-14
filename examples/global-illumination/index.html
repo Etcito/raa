@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RAA · Global illumination</title>
+<style>
+  :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #10151d; color: #e8edf4; }
+  body { margin: 0 auto; padding: 24px; max-width: 1440px; }
+  h1 { margin: 0; font-size: 26px; font-weight: 600; }
+  p { margin: 4px 0 20px; color: #abb9ca; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; margin: 16px 0; }
+  label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+  select, button { font: inherit; padding: 8px 12px; border: 1px solid #64758c; border-radius: 6px; background: #202d3e; color: #fff; }
+  button { cursor: pointer; background: #244d71; }
+  :focus-visible { outline: 2px solid #93d9ff; outline-offset: 3px; }
+  :disabled { opacity: .55; cursor: wait; }
+  .viewport { overflow: auto; border: 1px solid #41516a; border-radius: 8px; background: #0b0d12; }
+  canvas { display: block; width: 1280px; height: 720px; }
+  #status { white-space: pre-wrap; overflow-wrap: anywhere; min-height: 24px; padding: 12px; margin: 0; color: #f2f2f2; font: 14px/1.5 monospace; background: #0b0d12; }
+  small { color: #abb9ca; }
+</style>
+<header>
+  <h1>Global illumination</h1>
+  <p>Voxel clipmap volume, flood, voxel lighting and the volume debug views.</p>
+</header>
+<main>
+  <div class="toolbar">
+    <label>Scene<select id="scene" disabled aria-label="Scene"></select></label>
+    <label>Variant<select id="variant" disabled aria-label="Variant"></select></label>
+    <button id="run" type="button" disabled>Run / reset scene</button>
+  </div>
+  <div class="viewport" aria-label="Rendered global illumination">
+    <canvas id="c" width="1280" height="720" aria-label="Global illumination scene"></canvas>
+    <div id="status" role="status" aria-live="polite">pending: loading page modules</div>
+  </div>
+  <small>Choosing a scene or variant runs it locally at 1280 x 720. The managed operation is the same runner.</small>
+</main>
+<script type="module" src="./main.js"></script>
+</html>

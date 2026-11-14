@@ -261,5 +261,59 @@
       "p3-vg-passes-render",
       "p3-vg-passes-fresh"
     ]
+  },
+  {
+    "name": "p4-gi-build",
+    "command": "bash scripts/build-global-illumination.sh",
+    "timeout_s": 1800
+  },
+  {
+    "name": "p4-gi-volume-check",
+    "command": "node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/volume --stage volume",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-volume-select",
+    "command": "node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/volume --stage volume",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-volume-check"
+    ]
+  },
+  {
+    "name": "p4-gi-volume-clean",
+    "command": "node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/volume --stage volume",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-volume-select"
+    ]
+  },
+  {
+    "name": "p4-gi-volume-render",
+    "command": "node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/volume --stage volume",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-volume-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-volume-fresh",
+    "command": "node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/volume --stage volume",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-volume-render"
+    ]
+  },
+  {
+    "name": "p4-gi-volume-judge",
+    "command": "node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/volume --stage volume --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-volume-render",
+      "p4-gi-volume-fresh"
+    ]
   }
 ]
