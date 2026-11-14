@@ -9,6 +9,7 @@ pub mod cpu;
 #[allow(dead_code)]
 mod debug;
 pub mod error;
+pub mod feature;
 pub mod forward_driver;
 pub mod layouts;
 pub mod membership;
@@ -26,3 +27,5 @@ pub use settings::{
 };
 
 pub use membership::{Driver, InstanceGi};
+
+pub use feature::{GiHandle, inactive_reason};
