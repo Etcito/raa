@@ -3,13 +3,13 @@
 //!
 //! The pass and every handle clone share one [`ShadowState`]: the [`ShadowDesc`], the camera
 //! and sun last given to [`ShadowHandle::set_view`] (None until the first call), the caster
-//! array (created lazily at the description's resolution and recreated when it changes), the
-//! `bound` flag and the preallocated 320 B `ShadowGpu` uniform. The pass computes the
-//! practical cascade splits and their view-projections, renders the casters into the array
-//! ([`Casters::record`]) and gives the array view and uniform to the lighting
-//! (`LightingResources::set_shadow`). Without a view, or while disabled, the lighting keeps
-//! the dummy shadow (`clear_shadow`, enabled 0), so the `csm` `Shadow` provider returns the
-//! contact term alone.
+//! array (created lazily at the description's resolution and the renderer's hero capacity,
+//! recreated when either changes), the `bound` flag and the preallocated 320 B `ShadowGpu`
+//! uniform. The pass computes the practical cascade splits and their view-projections, renders
+//! the casters into the array ([`Casters::record`]) and gives the array view and uniform to the
+//! lighting (`LightingResources::set_shadow`). Without a view, or while disabled, the lighting
+//! keeps the dummy shadow (`clear_shadow`, enabled 0), so the `csm` `Shadow` provider returns
+//! the contact term alone.
 //!
 //! The shader takes the sun angular radius from `FrameGpu.sun_dir.w` (S10); `ShadowGpu.params.x`
 //! is the description's softness multiplier applied to it.
@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
-use raa_lit::{LitHandle, LitRenderer};
+use raa_lit::{LitHandle, LitRenderer, MAX_HERO_LIGHTS};
 use raa_math::{Mat4, Vec3};
 use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
 
@@ -92,6 +92,10 @@ struct ShadowState {
     bound: bool,
     /// Cascade view-projections of the last prepare.
     matrices: [Mat4; CASCADES],
+    /// Hero view-projections of the last prepare, `None` for empty slots.
+    heroes: [Option<Mat4>; MAX_HERO_LIGHTS],
+    /// Hero layers the last prepare will render (occupied slots below the capacity).
+    hero_layers: u32,
     /// View-space splits of the last prepare.
     splits: [f32; CASCADES],
     /// Sun travel direction of the last prepare.
@@ -155,13 +159,15 @@ impl FeaturePass for ShadowPass {
         ORDER
     }
 
-    /// Disabling clears the shadow map (dummy, enabled 0) and drops `bound`; enabling lets the
-    /// next prepare set it again when a view exists.
+    /// Disabling clears the shadow map (dummy, enabled 0), drops `bound` and resets the hero
+    /// layer count; enabling lets the next prepare set it again when a view exists.
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
         if !enabled {
             lighting.clear_shadow();
             if let Ok(mut st) = self.state.try_borrow_mut() {
                 st.bound = false;
+                st.heroes = [None; MAX_HERO_LIGHTS];
+                st.hero_layers = 0;
             }
         }
     }
@@ -179,12 +185,17 @@ impl FeaturePass for ShadowPass {
             return Ok(());
         };
         let desc = st.desc;
+        // `LitRenderer::prepare` wrote the area-light hero capacity and targets this frame
+        // (see the comment below); recreate the array when either the resolution or the
+        // number of hero layers it holds changes.
+        let hero_capacity = self.lit.area_hero_capacity().min(MAX_HERO_LIGHTS as u32);
+        let hero_targets = self.lit.area_hero_targets();
         if st
             .casters
             .as_ref()
-            .is_none_or(|c| c.resolution() != desc.resolution)
+            .is_none_or(|c| c.resolution() != desc.resolution || c.hero_layers() != hero_capacity)
         {
-            st.casters = Some(Casters::new(ctx.gpu, desc.resolution));
+            st.casters = Some(Casters::new(ctx.gpu, desc.resolution, hero_capacity));
         }
         let (matrices, splits) = crate::cascade_frame(
             &view.view,
@@ -196,18 +207,39 @@ impl FeaturePass for ShadowPass {
             view.sun_dir,
             desc.resolution,
         );
+        // Caster list `i` uses `all[i]`: the four cascades, then each hero target of a slot
+        // below the capacity (identity for an empty slot).
+        let mut all = [Mat4::IDENTITY; CASCADES + MAX_HERO_LIGHTS];
+        all[..CASCADES].copy_from_slice(&matrices);
+        let mut heroes = [None; MAX_HERO_LIGHTS];
+        for (h, target) in hero_targets.iter().take(hero_capacity as usize).enumerate() {
+            if let Some(matrix) = target {
+                all[CASCADES + h] = *matrix;
+                heroes[h] = *target;
+            }
+        }
         // `LitRenderer::prepare` has already run this frame: `WebRuntime::update`
         // (crates/raa-js/src/engine.rs) prepares the lit frame before the frame graph runs
         // `raa.pipeline`, whose pass prepares include this one. The shared scene snapshot and
-        // camera id section are therefore current when the cascades select their casters.
+        // camera id section are therefore current when the cascades select their casters, and
+        // the hero targets it wrote are the ones this prepare renders.
+        let occupied = heroes
+            .iter()
+            .rposition(Option::is_some)
+            .map_or(0, |slot| slot + 1);
+        let used = CASCADES + occupied;
         self.lit
-            .select_casters(ctx.gpu, &matrices, desc.resolution)?;
-        let casters = st.casters.as_ref().expect("casters created above");
-        casters.write(ctx.gpu, &matrices);
+            .select_casters(ctx.gpu, &all[..used], desc.resolution)?;
+        let Some(casters) = st.casters.as_ref() else {
+            return Ok(());
+        };
+        casters.write(ctx.gpu, &all);
         let array_view = casters.array_view().clone();
         pack_shadow(&mut st.uniform, &matrices, &splits, &desc);
         ctx.lighting.set_shadow(array_view, &st.uniform);
         st.matrices = matrices;
+        st.heroes = heroes;
+        st.hero_layers = heroes.iter().filter(|target| target.is_some()).count() as u32;
         st.splits = splits;
         st.sun_dir = view.sun_dir;
         st.resolution = desc.resolution;
@@ -215,13 +247,14 @@ impl FeaturePass for ShadowPass {
         Ok(())
     }
 
-    /// Renders the caster draws into the four cascade layers (nothing without a caster array).
+    /// Renders the caster draws into the four cascade layers and each occupied hero layer
+    /// (nothing without a caster array).
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let st = self.state.try_borrow().map_err(|_| state_busy())?;
         let Some(casters) = st.casters.as_ref() else {
             return Ok(());
         };
-        casters.record(ctx.gpu, ctx.encoder, &self.lit)
+        casters.record(ctx.gpu, ctx.encoder, &self.lit, &st.heroes)
     }
 }
 
@@ -233,6 +266,9 @@ impl ShadowFeature {
     /// `shadow.csm` (order 20) to `pipeline`. The pass creates its cascade array lazily at the
     /// description's resolution once a view is set; until then the lighting keeps the dummy
     /// shadow and the `csm` provider returns the contact term alone.
+    ///
+    /// Virtualized-geometry instances do not cast into hero layers: they are excluded from
+    /// the lit caster sections by `virtual_bits`, and raa-vg draws only into the 4 cascades.
     ///
     /// Refusals (nothing installed): `pipeline.busy` when the pipeline is borrowed, the
     /// `add_slot` refusal with its code (`shader.slot_conflict` when installed twice), and the
@@ -250,6 +286,8 @@ impl ShadowFeature {
             casters: None,
             bound: false,
             matrices: [Mat4::IDENTITY; CASCADES],
+            heroes: [None; MAX_HERO_LIGHTS],
+            hero_layers: 0,
             splits: [0.0; CASCADES],
             sun_dir: Vec3::ZERO,
             resolution: 0,
@@ -305,6 +343,16 @@ impl ShadowHandle {
             layer_views: casters.layer_views().clone(),
             sun_dir: st.sun_dir,
         })
+    }
+
+    /// Number of hero shadow-map layers the last prepare renders: the occupied hero slots
+    /// below the renderer's area-light hero capacity. `0` while unbound (no view, disabled, or
+    /// a re-entrant borrow). [`CascadeTargets`] is unchanged (4 cascades, 4 layer views).
+    pub fn hero_layers(&self) -> u32 {
+        let Ok(st) = self.state.try_borrow() else {
+            return 0;
+        };
+        if st.bound { st.hero_layers } else { 0 }
     }
 
     /// The frame's camera and sun (called every frame): the view matrix, vertical field of

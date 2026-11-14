@@ -1136,6 +1136,7 @@ dependencies = [
  "raa-lit",
  "raa-math",
  "raa-pipeline",
+ "raa-scene",
  "raa-shader",
  "wgpu",
 ]
