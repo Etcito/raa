@@ -22,14 +22,33 @@ const VOLUME_BYTES = {
 export const CORNELL_LIGHT_Y = 5.088;
 export const CORNELL_FIXTURE_Y = 5.4875;
 // The shared exposure (a linear multiplier, applied to the image as tone mapping exposureEv = log2 of it).
-// Derivation, measured on /refs/cornell-box-reference.png: the mean of the 40 x 40 px patch centred at (640, 230)
-// is sRGB (221.4, 173.3, 71.2). Inverting the page's AgX tonemap (sRGB OETF, AgX sigmoid, 2.2 display decode)
-// and taking Rec. 709 luminance gives the target scene-linear value after exposure, Y_t = 0.5797. The back-wall
-// centre (2.78, 2.74, 5.592) under the S17 area formula, with the light at y 5.487, white albedo
-// (0.886, 0.699, 0.666), colour (1, 0.598, 0.149), intensity 18.4 x 1.365 and the Karis representative point,
-// has direct luminance Y_d = 0.19819. exposure = Y_t / (1.35 Y_d) = 0.5797 / 0.26756 = 2.1666 (EV +1.1154).
-// It is derived for the light at 5.487 and stays fixed when CORNELL_LIGHT_Y changes.
-export const CORNELL_EXPOSURE = 2.1666;
+// Target, measured on /refs/cornell-box-reference.png: the mean of the 40 x 40 px patch centred at (640, 230) is
+// sRGB (221.4, 173.3, 71.2). Inverting the page's AgX tonemap (sRGB OETF, AgX sigmoid, 2.2 display decode) and
+// taking Rec. 709 luminance gives the target scene-linear value after exposure, Y_t = 0.5797.
+// Direct light (M3 form-factor model, S11 kind 3 = U x W x V): the back-wall centre (2.78, 2.74, 5.592), normal
+// (0, 0, -1), white albedo (0.886, 0.699, 0.666), under the 1.30 m (x) x 1.05 m (z) light at the canonical y 5.487
+// (CORNELL_LIGHT_Y stays 5.088), radiance 18.4 x colour (1, 0.598, 0.149) because the intensity 18.4 x 1.365 is
+// radiance x area. Diffuse = albedo x radiance x F x W: F = 0.013992 is the horizon-clipped form factor of contract
+// area-form-factor-wgsl (three.js rational edge polynomial; the exact polygon value is 0.013880) and W = 0.99960
+// the range window at the representative-point distance 3.5648 m. Y_d = 9.0985 x F x W = 0.127258, so
+// exposure = Y_t / (1.35 Y_d) = 0.5797 / 0.171798 = 3.3743 (EV +1.7546; 3.3730 without W). The 1.35 is the indirect
+// share. It stays fixed when CORNELL_LIGHT_Y changes. The M2 representative-point inverse square gave
+// Y_d = 0.19819 and 2.1666.
+// Cornell ratio diagnosis (card 'Cornell ratio cause fix', record cornell-ratio-stored.json of the M2 AgX images,
+// old model, light at 5.088): ratioClear agx-off Ra_off = 0.01899 (ratio 0.01597), agx-on Ra_on = 0.02869, reference
+// Rref = 0.5729, predicted karis Pk = 0.1951 and formFactor Pf = 0.8844; Lc_off = 0.01302, Lc_on = 0.02294. The
+// display ratio the old model should give through the M2 exposure 2.1666, AgX and the sRGB OETF is Pd = 0.4490.
+// - Rule 1 (shading) holds on the record, Ra_off / Pd = 0.042, but neither the M2 shading nor the LTC code is at
+//   fault: the captures are 1280 x 768, the 1280 x 720 canvas plus the page's 48 px status bar, and the script
+//   projects with height 768, so its floor patches centre on row 718, under the floor edge (row 704); hence
+//   ratio != ratioClear in a shadow-free GI-off image. Cropped to the canvas, Ra_off = 0.4679 (Ra_off / Pd = 1.042)
+//   and the old linear-off probe gives 0.1918 against Pk 0.1951. The LTC code keeps its extents (width = size[0]
+//   along the tangent), its right-handed basis, one window and radiance / area; its form factor reproduces Pf.
+// - Rule 2 (visibility) does not hold: Lc_on 0.02294 >= 0.95 Lc_off (cropped 0.4213 against 0.3292).
+// - Rule 3 (tone mapping): tm_agx equals curves.rs and the minimal AgX reference (inset, outset, log2 range,
+//   sigmoid, 2.2 decode). The gap from the cropped Ra_off to Rref is the representative-point model, whose missing
+//   emitter cosine (Pk against Pf) the LTC shading removes, plus this exposure.
+export const CORNELL_EXPOSURE = 3.3743;
 // The linear probe rows use a quarter of the Cornell exposure with the linear mapper and no dither, so the
 // capture stores sRGB-encoded scene-linear values that the ratio script can decode.
 export const CORNELL_LINEAR_EXPOSURE_SCALE = 0.25;

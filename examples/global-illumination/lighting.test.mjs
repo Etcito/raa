@@ -425,30 +425,42 @@ test('Cornell light and fixture: CORNELL_LIGHT_Y 5.088, the fixture at 5.4875 an
 });
 
 test('Cornell tone mapping: the shared exposure is the derived constant, and the derivation holds', async () => {
-  assert.equal(lighting.CORNELL_EXPOSURE, 2.1666);
+  assert.equal(lighting.CORNELL_EXPOSURE, 3.3743);
   for (const id of ['cornell-box-on', 'cornell-box-off']) {
     const { calls } = await cornellCalls(id);
-    assert.deepEqual(named(calls, 'setToneMapping'), [[{ exposureEv: Math.log2(2.1666) }]]);
+    assert.deepEqual(named(calls, 'setToneMapping'), [[{ exposureEv: Math.log2(3.3743) }]]);
     // The fixture reads 4 after the exposure: its linear colour value is 4 / exposure.
     const fixtureMaterial = named(calls, 'addMaterial').find(([desc]) => desc.model === 'flat');
-    assert.deepEqual(fixtureMaterial[0].emissive.map(v => Math.round(v * 1e6)), [4 / 2.1666, 4 / 2.1666, 4 / 2.1666].map(v => Math.round(v * 1e6)));
+    assert.deepEqual(fixtureMaterial[0].emissive.map(v => Math.round(v * 1e6)), [4 / 3.3743, 4 / 3.3743, 4 / 3.3743].map(v => Math.round(v * 1e6)));
     assert.equal(fixtureMaterial[0].color.every(v => v === 0), true);
   }
-  // The back-wall centre under the S17 area formula (light at 5.487, representative point, Rec. 709 luminance)
-  // and the target luminance of the reference patch after inverting AgX (0.5797): exposure = Y_t / (1.35 Y_d).
-  const P = [2.78, 2.74, 5.592], L = [2.78, 5.487, 2.795];
-  const v = P.map((p, i) => p - L[i]);
-  const along = [0, 0, -1], across = [1, 0, 0];   // travel (0, -1, 0): tangent -z, bitangent +x
-  const at = Math.min(Math.max(v[2] * along[2], -0.525), 0.525);
-  const ab = Math.min(Math.max(v[0] * across[0], -0.65), 0.65);
-  const R = L.map((l, i) => l + along[i] * at + across[i] * ab);
-  const toLight = R.map((r, i) => r - P[i]);
-  const d2 = Math.max(toLight.reduce((sum, x) => sum + x * x, 0), 0.04);
-  // The white back wall's normal is (0, 0, -1), so n.l is -toLight.z over the distance.
-  const ndotl = Math.max(-toLight[2] / Math.sqrt(d2), 0);
-  const q = Math.sqrt(d2) / 30;
-  const window = Math.min(Math.max(1 - q ** 4, 0), 1) ** 2;
-  const direct = [0.886, 0.699, 0.666].map((a, i) => (a / Math.PI) * [1, 0.598, 0.149][i] * 18.4 * 1.365 * window / d2 * ndotl);
+  // The back-wall centre under the M3 area model (light at 5.487): diffuse = albedo x radiance x F x W, with
+  // radiance 18.4 x colour, F the horizon-clipped form factor of contract area-form-factor-wgsl and W the range
+  // window at the representative point; the target luminance of the reference patch after inverting AgX is
+  // 0.5797, and exposure = Y_t / (1.35 Y_d).
+  const P = [2.78, 2.74, 5.592], L = [2.78, 5.487, 2.795], n = [0, 0, -1];
+  const T = [0, 0, -0.525], B = [0.65, 0, 0];   // travel (0, -1, 0): tangent -z (1.05 m), bitangent +x (1.30 m)
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const unit = v => v.map(x => x / Math.hypot(...v));
+  // three.js LTC_EdgeVectorFormFactor: the rational fit of theta / sin(theta), 0.5 / sin(theta) past the horizon.
+  const edge = (a, b) => {
+    const x = dot(a, b), y = Math.abs(x);
+    const v = (0.8543985 + (0.4965155 + 0.0145206 * y) * y) / (3.4175940 + (4.1616724 + y) * y);
+    const s = x > 0 ? v : 0.5 / Math.sqrt(Math.max(1 - x * x, 1e-7)) - v;
+    return cross(a, b).map(c => c * s);
+  };
+  // Corners p - T - B, p - T + B, p + T + B, p + T - B relative to the receiver (counter-clockwise from below).
+  const p = L.map((l, i) => l - P[i]);
+  const u = [[-1, -1], [-1, 1], [1, 1], [1, -1]].map(([st, sb]) => unit(p.map((x, i) => x + st * T[i] + sb * B[i])));
+  const f = u.reduce((sum, a, i) => edge(a, u[(i + 1) % 4]).map((x, k) => x + sum[k]), [0, 0, 0]);
+  const length = Math.hypot(...f);
+  const F = Math.max((length * length + dot(f, n)) / (length + 1), 0);
+  assert.ok(Math.abs(F - 0.013992) < 1e-6, `form factor ${F}`);
+  // The window W of the representative point (the light centre moved 0.525 m towards the wall along z).
+  const distance = Math.hypot(0, 5.487 - P[1], 3.32 - P[2]);
+  const window = Math.min(Math.max(1 - (distance / 30) ** 4, 0), 1) ** 2;
+  const direct = [0.886, 0.699, 0.666].map((a, i) => a * 18.4 * [1, 0.598, 0.149][i] * F * window);
   const luminance = direct[0] * 0.2126 + direct[1] * 0.7152 + direct[2] * 0.0722;
   assert.ok(Math.abs(0.5797 / (1.35 * luminance) - lighting.CORNELL_EXPOSURE) < 5e-4, `derived ${0.5797 / (1.35 * luminance)}`);
 });
