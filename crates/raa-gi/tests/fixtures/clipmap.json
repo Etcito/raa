@@ -1,0 +1,186 @@
+{
+  "snapped_origin": [
+    {
+      "position": [-0.1, 0.05, 5.1],
+      "voxel": 0.2,
+      "resolution": 96,
+      "expected": [-56, -48, -24],
+      "why": "x: -0.1/0.2 = -0.5 floors to -1, div_euclid 8 = -1, times 8 = -8, minus 48 = -56; y: 0.05/0.2 = 0.25 floors to 0, so -48; z: 5.1/0.2 = 25.5 floors to 25, div_euclid 8 = 3, times 8 = 24, minus 48 = -24"
+    },
+    {
+      "position": [-1.7, 3.3, -0.05],
+      "voxel": 0.4,
+      "resolution": 64,
+      "expected": [-40, -24, -40],
+      "why": "x: -1.7/0.4 = -4.25 floors to -5, div_euclid 8 = -1, times 8 = -8, minus 32 = -40; y: 3.3/0.4 = 8.25 floors to 8, div_euclid 8 = 1, times 8 = 8, minus 32 = -24; z: -0.05/0.4 = -0.125 floors to -1, div_euclid 8 = -1, times 8 = -8, minus 32 = -40"
+    }
+  ],
+  "choose_rebuild": [
+    {
+      "camera": [0.1, 0.1, 0.1],
+      "resolution": 96,
+      "origins": [[-56, -48, -48], [-56, -48, -48]],
+      "expected": { "level": 0, "origin": [-48, -48, -48] },
+      "why": "at 0.1 every level wants (floor(0.5) div 8) * 8 - 48 = -48; both levels sit 8 voxels away, so the tie goes to the finest level 0"
+    },
+    {
+      "camera": [0.1, 0.1, 0.1],
+      "resolution": 96,
+      "origins": [[-48, -48, -48], [-40, -48, -48]],
+      "expected": { "level": 1, "origin": [-48, -48, -48] },
+      "why": "level 0 already sits on its wanted -48 (offset 0), level 1 wants -48 but sits at -40 (offset 8); the larger offset wins"
+    },
+    {
+      "camera": [0.1, 0.1, 0.1],
+      "resolution": 96,
+      "origins": [[-48, -48, -48], [-48, -48, -48]],
+      "expected": null,
+      "why": "both levels already sit on their wanted origin, so the maximum offset is 0 and nothing is rebuilt"
+    },
+    {
+      "camera": [0.1, 0.1, 0.1],
+      "resolution": 96,
+      "origins": [null, null],
+      "expected": null,
+      "why": "a null origin counts as offset 0, so both levels are up to date and nothing is rebuilt"
+    }
+  ],
+  "rounds": [
+    {
+      "levels": 3,
+      "steps": [
+        { "op": "mark_stale" },
+        { "op": "choose_outdated", "expect": 2 },
+        { "op": "complete", "level": 2 },
+        { "op": "mark_stale" },
+        { "op": "start_waiting" },
+        { "op": "choose_outdated", "expect": 1 },
+        { "op": "complete", "level": 1 },
+        { "op": "complete", "level": 0 },
+        { "op": "pending", "expect": true },
+        { "op": "start_waiting" },
+        { "op": "choose_outdated", "expect": 2 },
+        { "op": "complete", "level": 0 },
+        { "op": "complete", "level": 1 },
+        { "op": "complete", "level": 2 },
+        { "op": "pending", "expect": false },
+        { "op": "choose_outdated", "expect": null }
+      ],
+      "why": "new(3) starts clean; mark_stale marks 0,1,2 so the coarsest is 2; complete(2) leaves 0,1; a mark_stale during the round only sets waiting, and start_waiting does nothing while 0,1 are outdated, so the coarsest is 1; once 1 and 0 complete the waiting round is pending; start_waiting then marks all three, so the coarsest is 2 and after all complete nothing waits or is pending"
+    }
+  ],
+  "relight": [
+    {
+      "levels": 5,
+      "calls": [null, null, null, null, null, null, null, null, null],
+      "expected": [0, 1, 0, 2, 0, 3, 0, 4, 0],
+      "why": "the five-level schedule is [0,1,0,2,0,3,0,4]; with no rebuild every call takes the next entry and wraps from 4 back to 0"
+    },
+    {
+      "levels": 5,
+      "calls": [0, null],
+      "expected": [1, 0],
+      "why": "a fresh cursor takes schedule entry 0, sees it being rebuilt, and takes entry 1 in the same call; the call after advances past 1 to 0"
+    }
+  ],
+  "light_schedule": [
+    {
+      "levels": 5,
+      "expected": [0, 1, 0, 2, 0, 3, 0, 4],
+      "why": "the five-level relight order alternates the finest level 0 with each coarser level in turn"
+    },
+    {
+      "levels": 4,
+      "expected": [0, 1, 0, 2, 0, 3],
+      "why": "four levels use the same alternating order without level 4"
+    },
+    {
+      "levels": 3,
+      "expected": [0, 1, 0, 2],
+      "why": "three levels use the same alternating order without levels 3 and 4"
+    }
+  ],
+  "flood_steps": [
+    {
+      "resolution": 96,
+      "expected": [48, 24, 12, 6, 3, 1],
+      "why": "each step halves the previous one from half the 96 grid: 96/2 = 48 then 24, 12, 6, 3, 1"
+    },
+    {
+      "resolution": 64,
+      "expected": [32, 16, 8, 4, 2, 1],
+      "why": "half of the 64 grid is 32, then halving gives 16, 8, 4, 2, 1"
+    }
+  ],
+  "flood_pass_count": {
+    "expected": 18,
+    "why": "six step lengths, one pass per axis (x, then y, then z), is 6 * 3 = 18 passes, an even count ending in buffer A"
+  },
+  "volume_bytes": [
+    {
+      "resolution": 96,
+      "levels": 5,
+      "probe_rays": 8,
+      "expected": 148635648,
+      "why": "R^3 = 884736; 32 * 884736 * 5 = 141557760 for the voxels and 8 * 884736 = 7077888 for seeds, radiance and atlas; the sum is 148635648"
+    },
+    {
+      "resolution": 96,
+      "levels": 4,
+      "probe_rays": 8,
+      "expected": 120324096,
+      "why": "32 * 884736 * 4 = 113246208 plus 7077888 = 120324096"
+    },
+    {
+      "resolution": 96,
+      "levels": 3,
+      "probe_rays": 8,
+      "expected": 92012544,
+      "why": "32 * 884736 * 3 = 84934656 plus 7077888 = 92012544"
+    },
+    {
+      "resolution": 64,
+      "levels": 5,
+      "probe_rays": 8,
+      "expected": 44040192,
+      "why": "R^3 = 262144; 32 * 262144 * 5 = 41943040 plus 8 * 262144 = 2097152 is 44040192"
+    },
+    {
+      "resolution": 64,
+      "levels": 4,
+      "probe_rays": 8,
+      "expected": 35651584,
+      "why": "32 * 262144 * 4 = 33554432 plus 2097152 = 35651584"
+    },
+    {
+      "resolution": 64,
+      "levels": 3,
+      "probe_rays": 8,
+      "expected": 27262976,
+      "why": "32 * 262144 * 3 = 25165824 plus 2097152 = 27262976"
+    }
+  ],
+  "forward_lod": [
+    {
+      "errors": [0.0, 0.04, 0.09, 0.3],
+      "world_scale": 2.0,
+      "voxel": 0.2,
+      "expected": 1,
+      "why": "half a 0.2 m voxel is 0.1 m; scaled errors are 0, 0.08, 0.18, 0.6, so the coarsest level within 0.1 is index 1"
+    },
+    {
+      "errors": [0.0, 0.04, 0.09, 0.3],
+      "world_scale": 1.0,
+      "voxel": 0.8,
+      "expected": 3,
+      "why": "half a 0.8 m voxel is 0.4 m; every error is within 0.4, so the coarsest level index 3 wins"
+    },
+    {
+      "errors": [],
+      "world_scale": 1.0,
+      "voxel": 0.2,
+      "expected": 0,
+      "why": "an empty chain has no LOD level, so the full mesh index 0 is used"
+    }
+  ]
+}
