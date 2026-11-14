@@ -723,22 +723,7 @@ fn page_foliage_thinned_cut_stays_upright_and_covers_the_patch_footprint() {
 /// drew the ball's normals down the column ("dripping" columns, sdfm card 7923, 2026-11-14).
 #[test]
 fn monument_cuts_keep_source_normals_at_every_corner() {
-    let text = include_str!("fixtures/monument-atlas.json");
-    let positions = fixture_array(text, "positions");
-    let normals = fixture_array(text, "normals");
-    let uvs = fixture_array(text, "uvs");
-    let indices = fixture_array(text, "indices");
-    let triple = |flat: &[f32]| -> Vec<[f32; 3]> {
-        flat.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect()
-    };
-    let input = OwnedClusterInput {
-        mesh: MeshData {
-            positions: triple(&positions),
-            normals: triple(&normals),
-            indices: indices.iter().map(|index| *index as u32).collect(),
-        },
-        uvs: Some(uvs.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
-    };
+    let input = monument_input();
     assert_eq!(input.mesh.indices.len(), 1294 * 3, "indices");
     let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the monument bakes");
     mesh.validate()
@@ -784,5 +769,209 @@ fn monument_cuts_keep_source_normals_at_every_corner() {
     assert!(
         simplified_cuts >= 2,
         "the monument must simplify at least twice"
+    );
+}
+
+/// The sdfm monument fixture as a cluster input: its positions, SDF normals and atlas uvs.
+fn monument_input() -> OwnedClusterInput {
+    let text = include_str!("fixtures/monument-atlas.json");
+    let positions = fixture_array(text, "positions");
+    let normals = fixture_array(text, "normals");
+    let uvs = fixture_array(text, "uvs");
+    let indices = fixture_array(text, "indices");
+    let triple = |flat: &[f32]| -> Vec<[f32; 3]> {
+        flat.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect()
+    };
+    OwnedClusterInput {
+        mesh: MeshData {
+            positions: triple(&positions),
+            normals: triple(&normals),
+            indices: indices.iter().map(|index| *index as u32).collect(),
+        },
+        uvs: Some(uvs.chunks_exact(2).map(|uv| [uv[0], uv[1]]).collect()),
+    }
+}
+
+type D3 = [f64; 3];
+
+fn d3(v: [f32; 3]) -> D3 {
+    v.map(f64::from)
+}
+
+fn d3_sub(a: D3, b: D3) -> D3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn d3_dot(a: D3, b: D3) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// `a * wa + b * wb + c * wc`.
+fn d3_mix(corners: [D3; 3], weights: [f64; 3]) -> D3 {
+    [0, 1, 2].map(|axis| (0..3).map(|i| corners[i][axis] * weights[i]).sum())
+}
+
+fn d3_unit(a: D3) -> D3 {
+    let length = d3_dot(a, a).sqrt();
+    if length > 0.0 {
+        a.map(|x| x / length)
+    } else {
+        a
+    }
+}
+
+fn d3_face(p: [D3; 3]) -> D3 {
+    let (u, v) = (d3_sub(p[1], p[0]), d3_sub(p[2], p[0]));
+    d3_unit([
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ])
+}
+
+/// The barycentric weights of the point of triangle `t` closest to `p` (Ericson, 5.1.5).
+fn closest_weights(p: D3, t: [D3; 3]) -> [f64; 3] {
+    let (ab, ac, ap) = (d3_sub(t[1], t[0]), d3_sub(t[2], t[0]), d3_sub(p, t[0]));
+    let (d1, d2) = (d3_dot(ab, ap), d3_dot(ac, ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return [1.0, 0.0, 0.0];
+    }
+    let bp = d3_sub(p, t[1]);
+    let (d3v, d4) = (d3_dot(ab, bp), d3_dot(ac, bp));
+    if d3v >= 0.0 && d4 <= d3v {
+        return [0.0, 1.0, 0.0];
+    }
+    let vc = d1 * d4 - d3v * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3v <= 0.0 {
+        let v = d1 / (d1 - d3v);
+        return [1.0 - v, v, 0.0];
+    }
+    let cp = d3_sub(p, t[2]);
+    let (d5, d6) = (d3_dot(ab, cp), d3_dot(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return [0.0, 0.0, 1.0];
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let w = d2 / (d2 - d6);
+        return [1.0 - w, 0.0, w];
+    }
+    let va = d3v * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3v >= 0.0 && d5 - d6 >= 0.0 {
+        let w = (d4 - d3v) / ((d4 - d3v) + (d5 - d6));
+        return [0.0, 1.0 - w, w];
+    }
+    let denominator = 1.0 / (va + vb + vc);
+    let (v, w) = (vb * denominator, vc * denominator);
+    [1.0 - v - w, v, w]
+}
+
+/// Every simplified cluster of the monument shades within what its `lod_error` claims. The shading
+/// error of a cluster triangle at a point is the chord between its interpolated normal and the
+/// source's interpolated normal at the nearest source point (on a face within 60 degrees of the
+/// triangle's), times the triangle's longest edge: metres, the unit of `NORMAL_ERROR_WEIGHT`.
+/// Bound, at 15 points of each triangle of each cluster above level 0: the 99th percentile is at
+/// most `lod_error` and every point at most 1.5 x `lod_error` (a normal change inherited from the
+/// level below counts again on the coarser level's longer triangles). A point whose interpolated
+/// normal is shorter than 0.5 before normalising has no shading direction and is skipped: the
+/// plinth's bottom face interpolates opposite corner normals in the source itself. Before the
+/// simplifier weighed shading, position-only quadrics let the level-1 clusters (the 646-triangle
+/// cut the Game view drew, sdfm 2026-11-14) reach 180 x their `lod_error` (normals 141 degrees off,
+/// 22 degrees at the 95th percentile) for 12.8 mm off the surface: the dripping columns.
+#[test]
+fn monument_clusters_shade_within_their_lod_error() {
+    let input = monument_input();
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the monument bakes");
+    let source_positions: Vec<D3> = input.mesh.positions.iter().map(|p| d3(*p)).collect();
+    let source_normals: Vec<D3> = input.mesh.normals.iter().map(|n| d3_unit(d3(*n))).collect();
+    // Each source triangle with its face normal and bounding sphere (centroid, radius).
+    let source: Vec<([usize; 3], D3, D3, f64)> = input
+        .mesh
+        .indices
+        .chunks_exact(3)
+        .map(|t| {
+            let corners = [t[0], t[1], t[2]].map(|i| i as usize);
+            let p = corners.map(|i| source_positions[i]);
+            let centre = d3_mix(p, [1.0 / 3.0; 3]);
+            let radius = p
+                .iter()
+                .map(|q| d3_dot(d3_sub(*q, centre), d3_sub(*q, centre)).sqrt())
+                .fold(0.0, f64::max);
+            (corners, d3_face(p), centre, radius)
+        })
+        .collect();
+    let source_normal_near = |point: D3, face: D3| -> Option<D3> {
+        let mut best: Option<(f64, D3)> = None;
+        for (corners, normal, centre, radius) in &source {
+            let reach = d3_dot(d3_sub(point, *centre), d3_sub(point, *centre)).sqrt() - radius;
+            if d3_dot(*normal, face) < 0.5 || best.is_some_and(|(d, _)| reach > d) {
+                continue;
+            }
+            let p = corners.map(|i| source_positions[i]);
+            let weights = closest_weights(point, p);
+            let offset = d3_sub(point, d3_mix(p, weights));
+            let distance = d3_dot(offset, offset).sqrt();
+            if best.is_none_or(|(d, _)| distance < d) {
+                best = Some((
+                    distance,
+                    d3_mix(corners.map(|i| source_normals[i]), weights),
+                ));
+            }
+        }
+        best.map(|(_, normal)| normal)
+    };
+
+    let mut checked = 0;
+    for (index, cluster) in mesh.clusters.iter().enumerate() {
+        if cluster.level() == 0 {
+            continue;
+        }
+        let cut = cut_triangles(&mesh, &[index as u32]);
+        let mut errors = Vec::new();
+        for triangle in cut.indices.chunks_exact(3) {
+            let corners = [triangle[0], triangle[1], triangle[2]].map(|i| i as usize);
+            let p = corners.map(|i| d3(cut.positions[i]));
+            let n = corners.map(|i| d3(cut.normals[i]));
+            let face = d3_face(p);
+            let longest = [(0, 1), (1, 2), (2, 0)]
+                .map(|(a, b)| d3_dot(d3_sub(p[a], p[b]), d3_sub(p[a], p[b])).sqrt())
+                .into_iter()
+                .fold(0.0, f64::max);
+            for i in 0..=4 {
+                for j in 0..=4 - i {
+                    let weights = [1.0 - (i + j) as f64 / 4.0, i as f64 / 4.0, j as f64 / 4.0];
+                    let drawn = d3_mix(n, weights);
+                    let Some(wanted) = source_normal_near(d3_mix(p, weights), face) else {
+                        continue;
+                    };
+                    if d3_dot(drawn, drawn) < 0.25 || d3_dot(wanted, wanted) < 0.25 {
+                        continue;
+                    }
+                    let chord = d3_sub(d3_unit(drawn), d3_unit(wanted));
+                    errors.push(d3_dot(chord, chord).sqrt() * longest);
+                }
+            }
+        }
+        errors.sort_by(f64::total_cmp);
+        let Some(&worst) = errors.last() else {
+            continue;
+        };
+        let p99 = errors[(errors.len() - 1) * 99 / 100];
+        let claimed = f64::from(cluster.lod_error);
+        println!(
+            "monument cluster {index}: level {}, lod_error {claimed:.4} m, shading p99 {p99:.4} m, max {worst:.4} m",
+            cluster.level()
+        );
+        assert!(
+            p99 <= claimed && worst <= 1.5 * claimed,
+            "monument cluster {index} (level {}) shades beyond its lod_error {claimed:.4} m: \
+             99th percentile {p99:.4} m, worst {worst:.4} m",
+            cluster.level()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 4,
+        "only {checked} simplified clusters were checked"
     );
 }

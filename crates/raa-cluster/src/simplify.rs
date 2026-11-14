@@ -27,7 +27,8 @@ pub type Triangle = [Corner; 3];
 /// Result of the simplification.
 pub struct Simplified {
     pub triangles: Vec<Triangle>,
-    /// Largest geometric deviation introduced, in metres.
+    /// Largest error introduced, in metres: the geometric deviation, the weighted texture slide
+    /// or the weighted shading change (`NORMAL_ERROR_WEIGHT`), whichever is largest.
     pub error: f32,
 }
 
@@ -53,6 +54,29 @@ pub const NORMAL_DIFFERENCE_WEIGHT: f64 = 0.02;
 pub const TEXTURE_ERROR_WEIGHT: f64 = 0.5;
 /// Largest distance outside a triangle, in triangle sizes, to which its texture mapping is trusted.
 pub const MAX_EXTRAPOLATION: f64 = 16.0;
+/// How much a shading change counts, in metres per metre of triangle and unit of normal change.
+/// A collapse that turns the interpolated normal at a point around the removed vertex by `d` (the
+/// chord between the unit normals, about the angle in radians) on a triangle whose longest edge is
+/// `L` costs and reports `NORMAL_ERROR_WEIGHT * d * L` metres, the height a surface tilted by that
+/// angle gains across the triangle. Position-only quadrics see none of it: collapsing a column's
+/// rows along its straight sides moves no surface, yet stretches the normals of its top ring down
+/// the whole column (the sdfm monument's level-1 cut, 2026-11-14: 12.8 mm off the surface for a
+/// 9.4 mm `lod_error`, normals off by 22 degrees at the 95th percentile and 141 at worst).
+pub const NORMAL_ERROR_WEIGHT: f64 = 1.0;
+/// Where `normal_error` compares the shading of a triangle around the removed vertex, as weights
+/// of (removed vertex, next corner, last corner): the vertex itself, points along its two edges
+/// (where the new edges cross the old ones) and two inner points.
+const NORMAL_SAMPLES: [[f64; 3]; 9] = [
+    [1.0, 0.0, 0.0],
+    [0.75, 0.25, 0.0],
+    [0.5, 0.5, 0.0],
+    [0.25, 0.75, 0.0],
+    [0.75, 0.0, 0.25],
+    [0.5, 0.0, 0.5],
+    [0.25, 0.0, 0.75],
+    [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
+    [0.5, 0.25, 0.25],
+];
 
 /// A symmetric 4x4 error quadric plus the accumulated area weight.
 #[derive(Clone, Copy, Default)]
@@ -168,6 +192,22 @@ pub fn distance_to_segment(point: DVec3, start: DVec3, end: DVec3) -> f64 {
     point.distance(start + along * t)
 }
 
+/// The barycentric weights of `point` projected onto the plane of `corners`, unclamped (a point
+/// outside the triangle has a negative weight); `None` for a degenerate triangle.
+pub fn barycentric(point: DVec3, corners: [DVec3; 3]) -> Option<[f64; 3]> {
+    let (edge_a, edge_b) = (corners[1] - corners[0], corners[2] - corners[0]);
+    let offset = point - corners[0];
+    let (aa, ab, bb) = (edge_a.dot(edge_a), edge_a.dot(edge_b), edge_b.dot(edge_b));
+    let determinant = aa * bb - ab * ab;
+    if determinant <= 1.0e-12 * aa * bb || determinant <= 0.0 {
+        return None;
+    }
+    let (pa, pb) = (offset.dot(edge_a), offset.dot(edge_b));
+    let v = (bb * pa - ab * pb) / determinant;
+    let w = (aa * pb - ab * pa) / determinant;
+    Some([1.0 - v - w, v, w])
+}
+
 /// Picks the attribute a corner moving onto the collapse target takes: always one of the target's
 /// own `wedges`, so the corner never carries a normal or uv into a place the surface does not
 /// have them (raa change, 2026-11-14: solstice also offered `current`, the attribute of the vertex
@@ -222,6 +262,9 @@ pub struct Simplifier<'a> {
     stamps: Vec<u32>,
     /// Texture displacement built up at each local vertex by earlier collapses, in world units.
     texture_errors: Vec<f64>,
+    /// Normal change (chord between unit normals) built up around each local vertex by earlier
+    /// collapses, against the group's input.
+    normal_errors: Vec<f64>,
     /// Triangles touching each local vertex.
     vertex_triangles: Vec<Vec<u32>>,
     /// Triangles whose corners' `position` holds local vertex ids.
@@ -315,6 +358,7 @@ impl<'a> Simplifier<'a> {
             quadrics,
             stamps: vec![0; vertex_count],
             texture_errors: vec![0.0; vertex_count],
+            normal_errors: vec![0.0; vertex_count],
             vertex_triangles,
             triangles,
             alive: vec![true; alive_count],
@@ -468,8 +512,10 @@ impl<'a> Simplifier<'a> {
         let target = self.positions[to as usize];
         let length_squared = self.positions[from as usize].distance_squared(target);
         let texture = self.texture_error(from, to) * TEXTURE_ERROR_WEIGHT;
+        let (shading, _) = self.normal_error(from, to);
         quadric.mean_squared_distance(target)
             + texture * texture
+            + shading * shading
             + length_squared
                 * (EDGE_LENGTH_WEIGHT + NORMAL_DIFFERENCE_WEIGHT * self.normal_difference(from, to))
     }
@@ -572,6 +618,93 @@ impl<'a> Simplifier<'a> {
         (chosen, moved * world_per_uv)
     }
 
+    /// How much the shading changes if `from` collapses into `to`, against the group's input: the
+    /// error in metres (`NORMAL_ERROR_WEIGHT`) and the largest normal change (chord). Points of
+    /// every triangle around `from` (`NORMAL_SAMPLES`: the removed vertex, points along its edges,
+    /// which the new edges cross, and inner points) are located in the moved triangle that best
+    /// covers them; there the new interpolated normal is compared with the old one. The chord
+    /// between them, plus what earlier collapses already turned at the old triangle's corners, is
+    /// scaled by that moved triangle's longest edge: a turned normal stretched over a longer
+    /// triangle shows over more of the screen.
+    fn normal_error(&self, from: u32, to: u32) -> (f64, f64) {
+        let wedges = self.wedges_at(to);
+        let normal_of = |attribute: u32| {
+            self.attributes
+                .get(attribute as usize)
+                .map_or(DVec3::Y, |a| DVec3::from_vec3(a.normal))
+                .normalize_or(DVec3::Y)
+        };
+        let interpolate = |normals: &[DVec3; 3], weights: [f64; 3]| {
+            (0..3)
+                .map(|i| normals[i] * weights[i])
+                .sum::<DVec3>()
+                .normalize_or(DVec3::Y)
+        };
+        // The moved triangles: corner positions, corner normals and longest edge.
+        let mut moved: Vec<([DVec3; 3], [DVec3; 3], f64)> = Vec::new();
+        let around = &self.vertex_triangles[from as usize];
+        for &t in around {
+            let triangle = self.triangles[t as usize];
+            if triangle.iter().any(|corner| corner.position == to) {
+                continue;
+            }
+            let (attribute, _) = self.moved_corner(&triangle, from, to, &wedges);
+            let corners = triangle.map(|corner| {
+                if corner.position == from {
+                    (self.positions[to as usize], attribute)
+                } else {
+                    (self.positions[corner.position as usize], corner.attribute)
+                }
+            });
+            let positions = corners.map(|c| c.0);
+            let longest = [(0, 1), (1, 2), (2, 0)]
+                .map(|(a, b)| positions[a].distance(positions[b]))
+                .into_iter()
+                .fold(0.0, f64::max);
+            moved.push((positions, corners.map(|c| normal_of(c.1)), longest));
+        }
+        let (mut worst, mut worst_chord) = (0.0f64, 0.0f64);
+        for &t in around {
+            let triangle = self.triangles[t as usize];
+            let Some(index) = triangle.iter().position(|corner| corner.position == from) else {
+                continue;
+            };
+            // Corners in the order removed vertex, next, last.
+            let order = [index, (index + 1) % 3, (index + 2) % 3];
+            let positions = order.map(|i| self.positions[triangle[i].position as usize]);
+            let normals = order.map(|i| normal_of(triangle[i].attribute));
+            // What earlier collapses already turned on this triangle, against the group's input.
+            let inherited = triangle
+                .iter()
+                .map(|corner| self.normal_errors[corner.position as usize])
+                .fold(0.0, f64::max);
+            for weights in NORMAL_SAMPLES {
+                let point = (0..3).map(|i| positions[i] * weights[i]).sum::<DVec3>();
+                let old = interpolate(&normals, weights);
+                // The moved triangle covering the point best: the largest smallest weight.
+                let mut best: Option<(f64, [f64; 3], usize)> = None;
+                for (m, (corners, _, _)) in moved.iter().enumerate() {
+                    let Some(local) = barycentric(point, *corners) else {
+                        continue;
+                    };
+                    let lowest = local.into_iter().fold(f64::INFINITY, f64::min);
+                    if best.is_none_or(|(b, _, _)| lowest > b) {
+                        best = Some((lowest, local, m));
+                    }
+                }
+                let Some((_, local, m)) = best else {
+                    continue;
+                };
+                let (_, new_normals, longest) = &moved[m];
+                let new = interpolate(new_normals, local.map(|w| w.clamp(0.0, 1.0)));
+                let chord = (new.distance(old) + inherited).min(2.0);
+                worst_chord = worst_chord.max(chord);
+                worst = worst.max(NORMAL_ERROR_WEIGHT * chord * longest);
+            }
+        }
+        (worst, worst_chord)
+    }
+
     /// How much the shading normals disagree between the two ends, in `0..=1`.
     fn normal_difference(&self, from: u32, to: u32) -> f64 {
         let normal_at = |v: u32| {
@@ -593,12 +726,15 @@ impl<'a> Simplifier<'a> {
         merged.add(&self.quadrics[from as usize]);
         let texture_error = self.texture_error(from, to);
         let weighted = texture_error * TEXTURE_ERROR_WEIGHT;
+        let (normal_error, normal_chord) = self.normal_error(from, to);
         self.max_error = self
             .max_error
             .max(merged.mean_squared_distance(target))
-            .max(weighted * weighted);
+            .max(weighted * weighted)
+            .max(normal_error * normal_error);
         self.quadrics[to as usize] = merged;
         self.texture_errors[to as usize] = self.texture_errors[to as usize].max(texture_error);
+        self.normal_errors[to as usize] = self.normal_errors[to as usize].max(normal_chord);
 
         let target_wedges = self.wedges_at(to);
         let from_triangles = std::mem::take(&mut self.vertex_triangles[from as usize]);

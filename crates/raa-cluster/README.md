@@ -88,11 +88,15 @@ hierarchy or packing batch at most 1024 clusters.
 
 The integration tests (`tests/packed.rs`, `tests/sliced.rs`, `tests/cuts.rs`, `tests/bake.rs`) and
 the unit tests of `store` check, on generated inputs (displaced sphere, foliage patch, single
-triangle) and on the JSON fixtures (`tests/fixtures/open-strip.json`, `seam-mesh.json`):
+triangle) and on the JSON fixtures (`tests/fixtures/open-strip.json`, `seam-mesh.json`,
+`monument-atlas.json`):
 
 - the finest cut is the welded source mesh, and every uniform cut of a closed source is closed,
   with each undirected grid edge used by exactly two triangles in opposite directions;
 - `lod_error` and the bounds grow monotonically toward the root, and every section validates;
+- `lod_error` covers the shading change as well as the geometric one: the simplifier weighs and
+  reports a turned interpolated normal as its chord times the triangle's longest edge
+  (`NORMAL_ERROR_WEIGHT`), and every simplified monument cluster shades within its `lod_error`;
 - the output bytes are the same for unit budgets and for one unbounded step;
 - a mesh without triangle, a collapsed mesh and invalid options are refused with their codes.
 
