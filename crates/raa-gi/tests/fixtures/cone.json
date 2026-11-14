@@ -1,9 +1,9 @@
 {
-  "why": "One level, R 16, origin 0, voxel 0.25 m, valid range [0.375, 3.625] m on each axis (local [1.5, 14.5] voxels). Texels are filled analytically from the plane z 2.0 m: a = |z_centre - 2.0| metres, rgb 0. Texel centres sit at 0.25 k + 0.125 m, so a trilinear sample at z between two centres on the same side of the plane is exactly 2.0 - z (h = |z - 2.0|), and between the centres 1.875 and 2.125 m it is the constant 0.125 m. Each ray is walked by the contract's rules: t from start, step clamp(h, 0.5 voxel, 4 voxel), hard hit only when h < 0.5 voxel while approaching, otherwise res = min(res, d / (tan_half max(t - y, 1e-4))) with y = h^2 / (2 ph) when ph < 1e19 and h < 2 ph, d = sqrt(h^2 - y^2); the final value is smoothstep(clamp(res, 0, 1)). max_steps is 32 throughout.",
+  "why": "One level, R 16, origin 0, voxel 0.25 m, valid range [0.375, 3.625] m on each axis (local [1.5, 14.5] voxels). Texels are filled analytically from the plane z 2.125 m: a = |z_centre - 2.125| metres, rgb 0. Texel centres sit at 0.25 k + 0.125 m, and k = 8 gives the centre 2.125 m exactly, so the plane lies on a layer of voxel centres. The texel values are a = 0.25 |k - 8|; a trilinear sample at z between two centres is the linear interpolation of those values, which on each side of the plane is exactly |z - 2.125| (h = |z - 2.125|, with no flat segment). So within the valid range the sample is h = |z - 2.125| at every point, and the nearest approach is h = 0 on the plane. Each ray is walked by the contract's rules: t from start, step clamp(h, 0.5 voxel, 4 voxel), hard hit only when h < 0.5 voxel (0.125 m) while approaching, otherwise res = min(res, d / (tan_half max(t - y, 1e-4))) with y = h^2 / (2 ph) when ph < 1e19 and h < 2 ph, d = sqrt(h^2 - y^2); a sample with h >= ph (plateau or receding) never darkens; the final value is smoothstep(clamp(res, 0, 1)). max_steps is 32 throughout.",
   "resolution": 16,
   "origin": [0.0, 0.0, 0.0],
   "voxel": 0.25,
-  "plane_z": 2.0,
+  "plane_z": 2.125,
   "band_voxels": 3,
   "colour": [0.0, 0.0, 0.0],
   "cases": [
@@ -17,7 +17,7 @@
       "max_steps": 32,
       "tan_half": 0.5,
       "visibility": 1.0,
-      "why": "The ray stays at y 2.0 and z 1.25, inside the valid range, so level_at returns 0 for every sample. Texel centres 1.125 and 1.375 m hold a = 0.875 and 0.625, so h = 0.75 at z 1.25 for every x. Sample 1 (t 0.25, x 1.25, ph 1e20): approaching; h < 0.125 is false; y = 0 because ph is not below 1e19; d = 0.75; res = min(1, 0.75 / (0.5 x 0.25)) = min(1, 6) = 1. Then ph = 0.75 and the step is clamp(0.75, 0.125, 1.0) = 0.75, so t = 1.0 (x 2.0). Sample 2: h = 0.75 equals ph, so it is not approaching and never darkens. The step of 0.75 takes t to 1.75, beyond max_t 1.5, so the loop ends. res = 1, and smoothstep(1) = 1."
+      "why": "Inputs unchanged; the plane moved from 2.0 to 2.125, so the derived h changes from 0.75 to 0.875. The ray stays at y 2.0 and z 1.25, inside the valid range, so level_at returns 0 for every sample, and h = |1.25 - 2.125| = 0.875 for every x. Sample 1 (t 0.25, x 1.25, ph 1e20): approaching; h < 0.125 is false; y = 0 because ph is not below 1e19; d = 0.875; res = min(1, 0.875 / (0.5 x 0.25)) = min(1, 7) = 1. Then ph = 0.875 and the step is clamp(0.875, 0.125, 1.0) = 0.875, so t = 1.125 (x 2.125, inside the range). Sample 2: h = 0.875 equals ph, so it is not approaching and never darkens. The step of 0.875 takes t to 2.0, beyond max_t 1.5, so the loop ends. res = 1, and smoothstep(1) = 1."
     },
     {
       "name": "toward the plane, blocked",
@@ -28,8 +28,8 @@
       "max_t": 3.0,
       "max_steps": 32,
       "tan_half": 0.5,
-      "visibility": 0.0725319,
-      "why": "Hand walk along +z, z = 0.5 + t. t 0.25 (z 0.75): h = 1.25, ph 1e20, y 0, d 1.25, res = min(1, 1.25 / 0.125) = 1; step clamp(1.25, 0.125, 1.0) = 1.0, t 1.25. t 1.25 (z 1.75): h = 0.25 < ph, y = 0.0625 / 2.5 = 0.025, d = sqrt(0.0625 - 0.000625) = 0.248747, res = min(1, 0.248747 / (0.5 x 1.225)) = 0.406117; step 0.25, t 1.5. t 1.5 (z 2.0): the samples at 1.875 and 2.125 are both 0.125 m, so h = 0.125; the hard hit needs h < 0.125, which is false, so no hit. Approaching (0.125 < 0.25): y = 0.015625 / 0.5 = 0.03125, d = sqrt(0.015625 - 0.00097656) = sqrt(15) / 32 = 0.121031, res = min(0.406117, 0.121031 / (0.5 x 1.46875)) = 2 sqrt(15) / 47 = 0.164808; step clamp(0.125, 0.125, 1.0) = 0.125, t 1.625. t 1.625 (z 2.125): h = 0.125 equals ph, not approaching. Beyond the plane every sample recedes (h 0.25, 0.5, 0.75 ...), so nothing else darkens. The hard hit never fires on this field because the nearest texel centres are 0.125 m from the plane, so the value is smoothstep(2 sqrt(15) / 47) = r^2 (3 - 2r) with r = 0.164808, which is 0.072532. The contract's 'blocked (0)' is not reachable with this field: see the handoff."
+      "visibility": 0.0,
+      "why": "Hand walk along +z, z = 0.5 + t, x = 2.0 and y = 2.0 (local 8 voxels; every sample z lies in [0.75, 2.125], inside the range [0.375, 3.625], so level 0 holds throughout). Sample 1 (t 0.25, z 0.75): h = |0.75 - 2.125| = 1.375; ph is 1e20, so it is approaching, y = 0 and d = 1.375; res = min(1, 1.375 / (0.5 x 0.25)) = 1. Step clamp(1.375, 0.125, 1.0) = 1.0, so t = 1.25. Sample 2 (t 1.25, z 1.75): h = 0.375 < ph = 1.375, so approaching; h < 0.125 is false; y = 0.140625 / 2.75 = 0.051136; d = sqrt(0.140625 - 0.002615) = 0.371497; res = min(1, 0.371497 / (0.5 x 1.198864)) = 0.619749. Step clamp(0.375, 0.125, 1.0) = 0.375, so t = 1.625. Sample 3 (t 1.625, z 2.125): the texel centre on the plane gives h = 0 exactly (trilinear weight 0 on a = 0). h < 0.5 voxel = 0.125 and 0 < ph = 0.375, so the ray is approaching and the hard-hit branch returns 0 at once. Visibility 0."
     },
     {
       "name": "grazing, approaches without reaching",
@@ -40,8 +40,8 @@
       "max_t": 2.5,
       "max_steps": 32,
       "tan_half": 0.5,
-      "visibility": 0.199193,
-      "why": "The direction is normalize(1, 0, 0.3), so z = 1.0 + 0.2873479 t and x runs from 0.74 to 2.71 m over the samples: level 0 holds throughout. Sample 1 (t 0.25, z 1.071837): h = 2 - z = 0.928163; ph is 1e20, so y = 0 and d = h; res = min(1, 0.928163 / (0.5 x 0.25)) = 1. Step clamp(0.928163, 0.125, 1.0) = 0.928163, so t = 1.178163. Sample 2 (z 1.338543): h = 0.661457 < ph = 0.928163, so approaching; y = h^2 / (2 ph) = 0.437522 / 1.856326 = 0.235693; d = sqrt(0.437522 - 0.055551) = 0.618040; res = min(1, 0.618040 / (0.5 x 0.942470)) = 1. Step 0.661457, so t = 1.839620. Sample 3 (z 1.528611): h = 0.471389 < 0.661457; y = 0.222208 / 1.322914 = 0.167968; d = sqrt(0.222208 - 0.028213) = 0.440448; res = min(1, 0.440448 / (0.5 x 1.671652)) = 0.526961. Step 0.471389, so t = 2.311009. Sample 4 (z 1.664064): h = 0.335936 < 0.471389; y = 0.112853 / 0.942778 = 0.119703; d = sqrt(0.112853 - 0.014329) = 0.313886; res = min(0.526961, 0.313886 / (0.5 x 2.191306)) = 0.286483. Step 0.335936 takes t to 2.646945, beyond max_t 2.5, so the loop ends. No sample comes near the plane (h never falls below 0.125). res = 0.286483 and smoothstep gives r^2 (3 - 2r) = 0.199193."
+      "visibility": 0.589503,
+      "why": "The direction is normalize(1, 0, 0.3), so z = 1.0 + 0.2873479 t and x runs from 0.74 to 2.43 m over the three samples: level 0 holds throughout. The plane is reached only at t = 1.125 / 0.2873479 = 3.92, beyond max_t 2.5, so no sample hits it. Sample 1 (t 0.25, z 1.071837): h = 2.125 - z = 1.053163; ph is 1e20, so y = 0 and d = h; res = min(1, 1.053163 / 0.125) = 1. Step clamp(1.053163, 0.125, 1.0) = 1.0, so t = 1.25. Sample 2 (t 1.25, z 1.359185): h = 0.765815 < ph = 1.053163, so approaching; h < 0.125 is false; y = h^2 / (2 ph) = 0.586473 / 2.106326 = 0.278434; d = sqrt(0.586473 - 0.077525) = 0.713405; res = min(1, 0.713405 / (0.5 x 0.971566)) = min(1, 1.468) = 1. Step clamp(0.765815) = 0.765815, so t = 2.015815. Sample 3 (t 2.015815, z 1.579240): h = 0.545760 < 0.765815, approaching; y = 0.297854 / 1.531630 = 0.194468; d = sqrt(0.297854 - 0.037818) = 0.509937; res = min(1, 0.509937 / (0.5 x 1.821347)) = 0.559956. Step clamp(0.545760) = 0.545760, so t = 2.561575, beyond max_t 2.5, and the loop ends. res = 0.559956 and smoothstep gives r^2 (3 - 2r) = 0.313551 x 1.880088 = 0.589503, strictly between 0 and 1."
     },
     {
       "name": "empty volume",
