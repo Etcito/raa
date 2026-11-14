@@ -7,8 +7,11 @@
 pub mod clipmap;
 pub mod cpu;
 pub mod error;
+pub mod membership;
 pub mod settings;
 
 pub use settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
 };
+
+pub use membership::{Driver, InstanceGi};
