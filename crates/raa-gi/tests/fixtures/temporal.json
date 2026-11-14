@@ -1,0 +1,11 @@
+{
+  "derivation": "Hand-derived, never run, from alpha = min(0.08 + 0.03 x moved, 0.5) for a valid history and alpha = 1 for an invalid one: moved 0 gives 0.08; moved 4 gives 0.08 + 0.12 = 0.2; moved 20 gives 0.08 + 0.6 = 0.68, capped to 0.5; an invalid history gives 1 whatever the motion.",
+  "tolerance": 0.000001,
+  "cases": [
+    {"moved": 0, "valid": true, "alpha": 0.08},
+    {"moved": 4, "valid": true, "alpha": 0.2},
+    {"moved": 20, "valid": true, "alpha": 0.5},
+    {"moved": 0, "valid": false, "alpha": 1},
+    {"moved": 20, "valid": false, "alpha": 1}
+  ]
+}

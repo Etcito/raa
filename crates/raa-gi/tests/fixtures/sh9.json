@@ -1,0 +1,19 @@
+{
+  "derivation": "Hand-derived, never run. constant: four unit directions (+-s,0,z) and (0,+-s,z) with s = sqrt(2/3) and z = 1/sqrt(3), so s^2 + z^2 = 1. N = 4, w = 2 pi / 4, and the mirror (x,y,-z) leaves the set unchanged. Band 0 is 4 pi x 0.282095 c. Bands 1 and 2 vanish exactly: the x, y and z sums cancel over the set, 3z^2 - 1 = 0, and x^2 - y^2 sums to 0 over the four directions. So the irradiance is e0 = c x 4 pi x 0.282095^2 x pi = pi c at every normal, since 0.282095^2 x 4 pi = 1; for c = [0.5, 1, 2] that is 0.5 pi, pi and 2 pi. lobe: one sample at +Z with radiance 1, N = 1, w = 2 pi, mean 1, and its mirror -Z. sh0 = 2 pi x 2 x 0.282095 = 3.5449103 and sh6 = 2 pi x 2 x 0.630784 = 7.9266655 (0.630784 = 2 x 0.315392 at z = 1). Every other coefficient is 0 because the sample and its mirror cancel. The irradiance at +Z and -Z is pi from band 0 plus sh6 x 2 x 0.315392 x pi/4 = 1.25 pi from band 2, so 2.25 pi = 7.0685835. At +X it is pi - 0.625 pi = 0.375 pi = 1.1780972, because 3z^2 - 1 = -1 there. Tolerance is relative 1e-4, since the SH constants carry 6 digits.",
+  "tolerance": 0.0001,
+  "constant": {
+    "directions": [[0.8164965809, 0, 0.5773502692], [0, 0.8164965809, 0.5773502692], [-0.8164965809, 0, 0.5773502692], [0, -0.8164965809, 0.5773502692]],
+    "radiance": [0.5, 1, 2],
+    "normals": [[0, 0, 1], [0, 0, -1], [1, 0, 0]],
+    "irradiance": [[1.5707963, 3.1415927, 6.2831853], [1.5707963, 3.1415927, 6.2831853], [1.5707963, 3.1415927, 6.2831853]]
+  },
+  "lobe": {
+    "direction": [0, 0, 1],
+    "radiance": [1, 1, 1],
+    "sh0": 3.5449103,
+    "sh6": 7.9266655,
+    "zero": [1, 2, 3, 4, 5, 7, 8],
+    "normals": [[0, 0, 1], [0, 0, -1], [1, 0, 0]],
+    "irradiance": [7.0685835, 7.0685835, 1.1780972]
+  }
+}

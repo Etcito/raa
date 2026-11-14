@@ -1,0 +1,30 @@
+{
+  "derivation": "Hand-derived integer and interval arithmetic, never run. grids: ceil(w/16) x ceil(h/16) gives 1280/16 = 80 and 720/16 = 45; 1281 -> 81 and 721 -> 46; 15 -> 1 and 17 -> 2; 16 -> 1; 1 -> 1. edge: the tile origin is 80 x 16 = 1280 and 45 x 16 = 720; the jitter lies in [0, 15] at every frame, and min(origin + jitter, viewport - 1) = origin for viewport 1281 x 721. tiles: pixel = min(16 tile + jitter, viewport - 1) with jitter in [0, 15], so each axis lies in [16 tile, min(16 tile + 15, size - 1)]; frames f and f + 16 share frame mod 16 and therefore the seed. rays: ray_uv divides ray + jitter, with jitter in [0, 1), by P, so uv.x lies in [x/P, (x+1)/P) and uv.y = fract(...) lies in [0, 1). hemisphere: uv.x = 0 gives cos = 1 and uv.x = 1 gives cos = 0. orthonormal_basis(+Z) has s = 1, a = -1/2, b = 0, so its columns are (1,0,0), (0,1,0) and (0,0,1); for -Z, s = -1, a = 1/2, b = 0 and column 0 is (1,0,0). So uv (0, 0.3) and (0, 0.7) give the normal, uv (1, 0) gives column 0, and uv (1, 0.25) gives column 1 (phi = pi/2). Every unit normal gives unit length and dot(dir, n) = cos >= 0.",
+  "grids": [
+    {"viewport": [1280, 720], "grid": [80, 45]},
+    {"viewport": [1281, 721], "grid": [81, 46]},
+    {"viewport": [15, 17], "grid": [1, 2]},
+    {"viewport": [16, 16], "grid": [1, 1]},
+    {"viewport": [1, 1], "grid": [1, 1]}
+  ],
+  "edge": {"viewport": [1281, 721], "tile": [80, 45], "pixel": [1280, 720]},
+  "tiles": [
+    {"viewport": [1281, 721], "tile": [0, 0]},
+    {"viewport": [1281, 721], "tile": [79, 44]},
+    {"viewport": [1281, 721], "tile": [80, 45]},
+    {"viewport": [15, 17], "tile": [0, 1]}
+  ],
+  "rays": [6, 8],
+  "uv_tiles": [[0, 0], [3, 7], [80, 45]],
+  "hemisphere": {
+    "tolerance": 0.00001,
+    "cases": [
+      {"uv": [0, 0.3], "normal": [0, 0, 1], "direction": [0, 0, 1]},
+      {"uv": [1, 0], "normal": [0, 0, 1], "direction": [1, 0, 0]},
+      {"uv": [1, 0.25], "normal": [0, 0, 1], "direction": [0, 1, 0]},
+      {"uv": [0, 0.7], "normal": [0, 0, -1], "direction": [0, 0, -1]},
+      {"uv": [1, 0], "normal": [0, 0, -1], "direction": [1, 0, 0]}
+    ],
+    "unit_normals": [[0, 0, 1], [0, 0, -1], [1, 0, 0], [0, 0.6, 0.8], [0.48, -0.6, -0.64]]
+  }
+}
