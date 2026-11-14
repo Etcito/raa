@@ -20,6 +20,7 @@ use raa_shader::{
     SlotProvider, TintMode, VariantKey,
 };
 
+use crate::area_shadow::MAX_HERO_LIGHTS;
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
@@ -46,8 +47,9 @@ const STREAM0_ATTRIBUTES: [wgpu::VertexAttribute; 2] =
 const ID_STRIDE: u64 = 4;
 const PREVIOUS_RECORD_BYTES: usize = 64;
 
-/// Shadow id sections after the camera: one per CSM cascade.
-pub(crate) const SHADOW_CASCADES: usize = 4;
+/// Shadow id sections after the camera: 4 CSM cascades plus [`MAX_HERO_LIGHTS`] hero layers.
+pub(crate) const SHADOW_SECTIONS: usize = 4 + MAX_HERO_LIGHTS;
+const _: () = assert!(SHADOW_SECTIONS == 8);
 
 /// The compacted instance id stream: one u32 slot per instance, read by
 /// `@builtin(instance_index)` and resolved with `raa_instance(id)`.
@@ -380,9 +382,14 @@ pub(crate) struct LitShared {
     pub(crate) shadow_lod_options: LodParams,
     /// Camera hysteresis by stable slot; NO_CAMERA_LEVEL means no previous selection.
     pub(crate) levels: Vec<u8>,
-    /// Shadow hysteresis by stable slot and cascade (`slot * 4 + cascade`);
+    /// Shadow hysteresis by stable slot and caster list (`slot * 8 + list`);
     /// NO_CAMERA_LEVEL means no previous selection.
     pub(crate) shadow_levels: Vec<u8>,
+    /// Hero shadow-map view-projections, slot `h` = shadow-array layer `4 + h`; all `None`
+    /// until the renderer's prepare writes them.
+    pub(crate) area_heroes: [Option<Mat4>; MAX_HERO_LIGHTS],
+    /// Number of hero shadow-map layers selected this frame (0 when none).
+    pub(crate) area_hero_capacity: u32,
     pub(crate) lod_bias: HashMap<u32, i8>,
     pub(crate) stats: InstanceFrameStats,
     pub(crate) materials: SurfaceLibrary,
@@ -392,7 +399,8 @@ pub(crate) struct LitShared {
     composer: Composer,
     /// `composer.slots_hash()`, updated by [`LitShared::add_slot`].
     slots_hash: u64,
-    /// Compacted u32 instance ids, 5 sections of `max_instances` (camera + cascades).
+    /// Compacted u32 instance ids, 9 sections of `max_instances` (camera + 4 cascades +
+    /// 4 hero layers).
     pub(crate) id_buffer: wgpu::Buffer,
     /// `FrameGpu`, `FRAME_GPU_SIZE` bytes.
     frame_buffer: wgpu::Buffer,
@@ -479,7 +487,7 @@ impl LitShared {
         let id_buffer = buffer(
             gpu,
             "raa.lit.ids",
-            instances * 5 * ID_STRIDE,
+            instances * 9 * ID_STRIDE,
             wgpu::BufferUsages::VERTEX,
         );
         let frame_buffer = buffer(
@@ -541,7 +549,9 @@ impl LitShared {
             lod_options: LodParams::default(),
             shadow_lod_options: LodParams::default(),
             levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize],
-            shadow_levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize * SHADOW_CASCADES],
+            shadow_levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize * SHADOW_SECTIONS],
+            area_heroes: [None; MAX_HERO_LIGHTS],
+            area_hero_capacity: 0,
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
             store,
@@ -1069,7 +1079,7 @@ fn cascade_mesh(
     slot: u32,
     mesh: MeshId,
 ) -> MeshId {
-    let index = slot as usize * SHADOW_CASCADES + cascade;
+    let index = slot as usize * SHADOW_SECTIONS + cascade;
     let level = levels.get(index).copied().unwrap_or(NO_CAMERA_LEVEL);
     lods.chain(mesh)
         .and_then(|chain| chain.get(level as usize))
@@ -1093,7 +1103,7 @@ fn cascade_levels(
     skinned: &dyn Fn(u32) -> Option<crate::skin_views::SkinDraw>,
 ) {
     for ((item, &tag), &slot) in list.items.iter().zip(tags).zip(slots) {
-        let Some(level) = levels.get_mut(slot as usize * SHADOW_CASCADES + cascade) else {
+        let Some(level) = levels.get_mut(slot as usize * SHADOW_SECTIONS + cascade) else {
             continue;
         };
         if skinned(tag).is_some() {
@@ -1166,23 +1176,52 @@ impl LitHandle {
         Ref::map(self.shared.borrow(), |s| s.select.draws(class))
     }
 
-    /// The caster draws of cascade `0..4` for `class` (empty for Transparent or a cascade
-    /// that was not selected this frame).
+    /// The caster draws of list `0..8` for `class`: lists 0 to 3 are the sun cascades and
+    /// lists 4 to 7 the hero layers. Empty for Transparent, a list `>= 8` or a list that
+    /// was not selected this frame.
     pub fn cascade_draws(&self, cascade: usize, class: DrawClass) -> Ref<'_, [LitDraw]> {
         Ref::map(self.shared.borrow(), |s| {
             s.select.cascade_draws(cascade, class)
         })
     }
 
-    /// Selects each shadow cascade's casters from the frame snapshot [`LitRenderer::prepare`]
-    /// left in the shared state, writes their compacted id sections after the camera section
-    /// and records each section's id count in the frame stats.
+    /// The hero shadow-map view-projections the renderer's prepare wrote: hero slot `h` is
+    /// shadow-array layer `4 + h`. `[None; MAX_HERO_LIGHTS]` while the shared state is busy
+    /// or before any prepare.
     ///
-    /// For cascade `i`, `matrices[i]` is its orthographic view-projection and `texel_world`
-    /// is `2 / (resolution * |matrices[i].cols[0][0]|)`. Casters are the rest instances
-    /// passing the cascade frustum without its near plane (a reusable query result and
-    /// bitset); posed instances are always selected. The level mesh comes from
-    /// [`shadow_level`] with the tag's bias.
+    /// Handoff: card 'raa-shadow: hero shadow-map layers rendered by shadow.csm' calls
+    /// [`LitHandle::area_hero_targets`], [`LitHandle::area_hero_capacity`] and
+    /// [`LitHandle::select_casters`] with `matrices` of up to 8 entries (the 4 sun cascades,
+    /// then up to 4 hero view-projections from [`hero_view_proj`](crate::hero_view_proj)).
+    /// Today these accessors copy `LitShared::area_heroes` and
+    /// `LitShared::area_hero_capacity`, which stay all-`None`/0 until the renderer's
+    /// prepare writes them, and `select_casters` fills caster lists 0 to 7 for the matrices
+    /// it receives.
+    pub fn area_hero_targets(&self) -> [Option<Mat4>; MAX_HERO_LIGHTS] {
+        self.shared
+            .try_borrow()
+            .map_or([None; MAX_HERO_LIGHTS], |s| s.area_heroes)
+    }
+
+    /// The number of hero shadow-map layers the renderer's prepare selected; 0 while the
+    /// shared state is busy or before any prepare.
+    pub fn area_hero_capacity(&self) -> u32 {
+        self.shared.try_borrow().map_or(0, |s| s.area_hero_capacity)
+    }
+
+    /// Selects the casters of up to 8 caster lists from the frame snapshot
+    /// [`LitRenderer::prepare`] left in the shared state, writes their compacted id sections
+    /// after the camera section and records the id counts of lists 0 to 3 in the frame
+    /// stats.
+    ///
+    /// Caster lists 0 to 3 come from the cascade matrices: `matrices[i]` is cascade `i`'s
+    /// orthographic view-projection. Caster lists 4 to 7 come from hero view-projections:
+    /// `matrices[4 + h]` is hero slot `h`'s perspective matrix
+    /// ([`hero_view_proj`](crate::hero_view_proj)), rendered to shadow-array layer `4 + h`.
+    /// For every list, `texel_world` is `2 / (resolution * |matrices[i].cols[0][0]|)`.
+    /// Casters are the rest instances passing that list's frustum without its near plane (a
+    /// reusable query result and bitset); posed instances are always selected. The level
+    /// mesh comes from [`shadow_level`] with the tag's bias.
     ///
     /// Called by the shadow feature's prepare, after [`LitRenderer::prepare`] and before the
     /// frame graph records, so the matrix list and the shared snapshot are one frame.
@@ -1205,7 +1244,7 @@ impl LitHandle {
 
         let capacity = s.store.capacity() as usize;
         s.shadow_levels
-            .resize(capacity * SHADOW_CASCADES, NO_CAMERA_LEVEL);
+            .resize(capacity * SHADOW_SECTIONS, NO_CAMERA_LEVEL);
         let words = capacity.div_ceil(64).max(1);
         if s.caster_bits.len() != words {
             s.caster_bits.resize(words, 0);
@@ -1219,7 +1258,7 @@ impl LitHandle {
         let known_mesh = |m: MeshId| meshes.submesh(m).is_some();
         let class_handled = |_: DrawClass| true;
 
-        for (cascade, matrix) in matrices.iter().take(SHADOW_CASCADES).enumerate() {
+        for (cascade, matrix) in matrices.iter().take(SHADOW_SECTIONS).enumerate() {
             let planes = cascade_planes(*matrix);
             s.index.query_frustum(&planes, &mut s.caster_slots);
             s.caster_bits.fill(0);
@@ -1283,7 +1322,9 @@ impl LitHandle {
             };
             let before = s.select.id_count();
             s.select.prepare_cascade(cascade, &input, &skinned)?;
-            s.stats.cascades[cascade] = s.select.id_count() - before;
+            if let Some(count) = s.stats.cascades.get_mut(cascade) {
+                *count = s.select.id_count() - before;
+            }
         }
 
         // The camera section is already uploaded at offset 0; write only the cascades.
@@ -2023,7 +2064,7 @@ mod tests {
         let shadow = LodParams::default();
         // One world unit per texel: the level's error (2 texels) is above the shadow
         // threshold (1 texel) but below the camera bias +3 threshold (8 texels).
-        let mut shadow_levels = vec![NO_CAMERA_LEVEL; SHADOW_CASCADES];
+        let mut shadow_levels = vec![NO_CAMERA_LEVEL; SHADOW_SECTIONS];
         cascade_levels(
             &list,
             &tags,

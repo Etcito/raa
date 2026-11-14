@@ -1,5 +1,5 @@
 //! Compacted id-list preparation: draw order, batch splitting by level mesh, the
-//! transparent sort, cascade sections and their frame reset, refusals, posed grouping and
+//! transparent sort, caster sections and their frame reset, refusals, posed grouping and
 //! capacity reuse.
 
 use std::cell::RefCell;
@@ -285,6 +285,58 @@ fn cascade_appends_after_camera_and_camera_clears_it() {
     );
 }
 
+#[test]
+fn hero_lists_copy_the_cascade_matrices() {
+    let f = Frame::new(&[
+        (0, 0, [0.0, 0.0, 0.0], 1),
+        (0, 0, [1.0, 0.0, 0.0], 2),
+        (1, 0, [2.0, 0.0, 0.0], 3),
+        (1, 2, [3.0, 0.0, 0.0], 4),
+    ]);
+    let mut ip = IdPrep::new(16, 8);
+    let selected = |_| true;
+    let level = |_: u32, mesh: MeshId| mesh;
+    let known = |_: MeshId| true;
+    let handled = |_: DrawClass| true;
+    let inp = input(&f, &selected, &level, &known, &handled);
+    ip.prepare_camera(&inp, &|_| None).unwrap();
+    ip.prepare_cascade(0, &inp, &|_| None).unwrap();
+    ip.prepare_cascade(7, &inp, &|_| None).unwrap();
+
+    let shapes_of = |cascade: usize| -> Vec<(u32, u32, u32)> {
+        ip.cascade_draws(cascade, DrawClass::Opaque)
+            .iter()
+            .map(|d| (d.mesh.0, d.material.0, d.instance_count))
+            .collect()
+    };
+    let cascade = shapes_of(0);
+    assert!(!cascade.is_empty());
+    assert_eq!(shapes_of(7), cascade, "hero list 7 mirrors cascade list 0");
+}
+
+#[test]
+fn lists_beyond_the_eighth_are_no_ops() {
+    let f = Frame::new(&[(0, 0, [0.0, 0.0, 0.0], 1)]);
+    let mut ip = IdPrep::new(16, 8);
+    let selected = |_| true;
+    let level = |_: u32, mesh: MeshId| mesh;
+    let known = |_: MeshId| true;
+    let handled = |_: DrawClass| true;
+    let inp = input(&f, &selected, &level, &known, &handled);
+    ip.prepare_camera(&inp, &|_| None).unwrap();
+    let count = ip.id_count();
+    assert!(ip.cascade_draws(8, DrawClass::Opaque).is_empty());
+    ip.prepare_cascade(8, &inp, &|_| None).unwrap();
+    assert_eq!(ip.id_count(), count);
+    assert!(ip.cascade_draws(8, DrawClass::Opaque).is_empty());
+}
+
+#[test]
+fn id_capacity_covers_camera_and_eight_caster_lists() {
+    let ip = IdPrep::new(12, 8);
+    assert!(ip.capacity().ids >= 9 * 12);
+}
+
 fn assert_refused(r: Result<(), RaaError>, code: &str, prep: &IdPrep) {
     let err = r.unwrap_err();
     assert_eq!(err.code(), code, "{err}");
@@ -395,7 +447,7 @@ fn frames_keep_their_preallocated_capacity() {
     let f = Frame::new(&specs);
     let mut ip = IdPrep::new(8, 8);
     let before = ip.capacity();
-    assert_eq!(before.ids, 40);
+    assert_eq!(before.ids, 9 * 8);
     assert!(before.draws >= 8);
     assert!(before.sort >= 8);
 

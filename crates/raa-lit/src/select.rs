@@ -4,7 +4,7 @@
 //! rest-then-posed grouping, and writes u32
 //! instance slots instead of the 128-byte S1 records (those live in
 //! [`InstanceStore`](crate::InstanceStore), addressed by the same slot). One camera
-//! section plus one section per shadow cascade make one contiguous id list; each
+//! section plus 4 cascade and 4 hero sections make one contiguous id list; each
 //! [`LitDraw`] indexes it with its instance range, so `@builtin(instance_index)` reads a
 //! slot id and every (level mesh, material) batch stays one draw.
 //!
@@ -20,8 +20,8 @@ use crate::material::DrawClass;
 use crate::prep::{LitDraw, MaterialClass};
 use crate::skin_views::SkinDraw;
 
-/// Number of shadow cascade sections after the camera.
-const CASCADES: usize = 4;
+/// Number of shadow caster sections after the camera: 4 cascades and 4 hero layers.
+const SHADOW_SECTIONS: usize = 8;
 
 /// The inputs of one [`IdPrep`] camera or cascade preparation.
 pub struct SelectInput<'a> {
@@ -85,9 +85,9 @@ pub struct IdPrep {
     ids: Vec<u8>,
     sort: Vec<SortKey>,
     camera: [Vec<LitDraw>; 3],
-    cascades: [[Vec<LitDraw>; 3]; CASCADES],
+    cascades: [[Vec<LitDraw>; 3]; SHADOW_SECTIONS],
     camera_count: u32,
-    prepared_cascade: [bool; CASCADES],
+    prepared_cascade: [bool; SHADOW_SECTIONS],
     bindings: HashMap<MeshId, (MeshId, u32)>,
     run: Vec<RunItem>,
 }
@@ -100,12 +100,12 @@ impl IdPrep {
         IdPrep {
             max_instances,
             max_materials,
-            ids: Vec::with_capacity(n * 5 * 4),
+            ids: Vec::with_capacity(n * 9 * 4),
             sort: Vec::with_capacity(n),
             camera: std::array::from_fn(|_| Vec::with_capacity(n)),
             cascades: std::array::from_fn(|_| std::array::from_fn(|_| Vec::with_capacity(n))),
             camera_count: 0,
-            prepared_cascade: [false; CASCADES],
+            prepared_cascade: [false; SHADOW_SECTIONS],
             bindings: HashMap::with_capacity(n),
             run: Vec::with_capacity(n),
         }
@@ -125,7 +125,7 @@ impl IdPrep {
             }
         }
         self.camera_count = 0;
-        self.prepared_cascade = [false; CASCADES];
+        self.prepared_cascade = [false; SHADOW_SECTIONS];
     }
 
     /// u32 LE instance slots of every section, camera first.
@@ -150,7 +150,7 @@ impl IdPrep {
 
     /// The cascade draws of `class`; empty for Transparent or a cascade not prepared.
     pub fn cascade_draws(&self, cascade: usize, class: DrawClass) -> &[LitDraw] {
-        if cascade >= CASCADES || class == DrawClass::Transparent {
+        if cascade >= SHADOW_SECTIONS || class == DrawClass::Transparent {
             return &[];
         }
         if !self.prepared_cascade[cascade] {
@@ -201,14 +201,14 @@ impl IdPrep {
     }
 
     /// Appends the Opaque and Fur caster draws of `cascade` after the existing sections;
-    /// call order is camera, then cascades 0..3.
+    /// call order is camera, then caster lists 0..8 (cascades 0..4, hero layers 4..8).
     pub fn prepare_cascade(
         &mut self,
         cascade: usize,
         input: &SelectInput<'_>,
         skinned: &dyn Fn(u32) -> Option<SkinDraw>,
     ) -> Result<(), RaaError> {
-        if cascade >= CASCADES {
+        if cascade >= SHADOW_SECTIONS {
             return Ok(());
         }
         let first = self.id_count();
