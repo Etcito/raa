@@ -8,8 +8,8 @@
 import { box, panel, plane, roomShell, sphere, volumeRoom } from '../lib/content.js';
 
 const room = volumeRoom();
-const DEFAULT_QUALITY = { resolution: 96, levels: 5, probeRays: 8 };
-const VOLUME_BYTES = {
+export const DEFAULT_QUALITY = { resolution: 96, levels: 5, probeRays: 8 };
+export const VOLUME_BYTES = {
   '96/5': 148635648, '96/4': 120324096, '96/3': 92012544,
   '64/5': 44040192, '64/4': 35651584, '64/3': 27262976,
 };
@@ -149,7 +149,7 @@ const ROWS = [
 // Judge-held fixtures per arrangement: the judge never scores them.
 const ROOM_HELD = ['room shell with red left wall and green right wall', 'white box and sphere',
   'sun through the ceiling opening', 'camera'];
-const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'];
+export const CORNELL_HELD = ['Cornell box geometry and wall colours', 'single ceiling area light and its fixture', 'camera', 'exposure'];
 const AREA_GLOSSY_HELD = ['dark glossy floor', 'rectangular area light panel and its glowing fixture',
   'black sky without sun or ambient', 'camera'];
 const HELD = {
@@ -173,7 +173,7 @@ const HELD = {
 // Camera and subject bounds per arrangement, in metres (camera near 0.05, far 200).
 const lens = (eye, target, fovYDeg) => ({ eye, target, fovYDeg, near: 0.05, far: 200 });
 const roomSubject = { name: 'room', min: [-3.4, -0.4, -8.4], max: [3.4, 3.4, 0] };
-const CORNELL_SELECTION = {
+export const CORNELL_SELECTION = {
   camera: lens([2.78, 2.73, -8.0], [2.78, 2.73, 0], 39.3),
   subjects: [
     { name: 'cornell-room', min: [0, 0, 0], max: [5.56, 5.488, 5.592] },
@@ -514,7 +514,7 @@ const slabsOf = colour => CORNELL_SLABS[colour].map(([center, half]) => box(cent
 
 // The Cornell box: the sky, sun and ambient are black, the only light is the ceiling area light, and an unlit
 // fixture of the light's rectangle at CORNELL_FIXTURE_Y shows it. The fixture is kept out of the GI volume.
-function cornellBox(engine, variant, state) {
+export function cornellBox(engine, variant, state) {
   engine.setSky({ model: 'legacy', zenith: [0, 0, 0], horizon: [0, 0, 0], ground: [0, 0, 0], intensity: 0, sunDiscIntensity: 0 });
   engine.setWeather({ preset: 'clear' });
   engine.setEnvironmentLighting({ diffuse: 0, specular: 0 });
