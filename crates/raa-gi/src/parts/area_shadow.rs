@@ -10,6 +10,9 @@ pub mod cpu;
 #[path = "area_shadow/passes.rs"]
 pub mod passes;
 
+#[path = "area_shadow/resources.rs"]
+mod resources;
+
 use super::PartsCtx;
 use raa_core::RaaError;
 
