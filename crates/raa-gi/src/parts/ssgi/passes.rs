@@ -5,18 +5,23 @@
 //! layout is [empty group 0, `GiShared::compute_group1_layout`, `ssgi_trace_group2_entries`];
 //! the entry statically uses group 1 binding 6 only (`raa_linear_clamp`, through
 //! `raa_gi_screen_hit_radiance`).
+// `SsgiPipelines` and `SsgiWork` have no caller until the SsgiResources and SsgiPart shares land.
 #![allow(dead_code)]
 
+use raa_core::GpuContext;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
+use raa_taa::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
 use wgpu::{BindGroupLayoutEntry, TextureFormat};
 
 use super::super::screen::passes::{
-    depth_entry, float_entry, storage_texture_entry, uniform_entry,
+    compute_pipeline, depth_entry, dispatch, float_entry, layout, module, storage_texture_entry,
+    uniform_entry,
 };
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
 const SSGI_TRACE_WGSL: &str = include_str!("../../wgsl/ssgi/trace.wgsl");
+const SSGI_RESOLVE_WGSL: &str = include_str!("../../wgsl/ssgi/resolve.wgsl");
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes.
 const FRAME_SIZE: u64 = 432;
@@ -60,4 +65,174 @@ pub fn ssgi_trace_group2_entries() -> [BindGroupLayoutEntry; 6] {
         storage_texture_entry(5, TextureFormat::Rgba16Float),
         uniform_entry(8, SSGI_PARAMS_SIZE),
     ]
+}
+
+/// Entry of the SSGI temporal resolve pipeline (`@workgroup_size(8, 8)`).
+pub const SSGI_RESOLVE_ENTRY: &str = "raa_gi_ssgi_resolve";
+
+/// `ssgi_resolve_module_wgsl` builds the resolve module of contract 'ssgi-resolve-wgsl':
+/// `raa_taa::REPROJECT_WGSL` then wgsl/ssgi/resolve.wgsl, whose entry `SSGI_RESOLVE_ENTRY`
+/// filters the raw trace, accumulates it in the history pair and writes the probe composite.
+pub fn ssgi_resolve_module_wgsl() -> String {
+    format!("{REPROJECT_WGSL}\n{SSGI_RESOLVE_WGSL}")
+}
+
+/// Resolve group 0, ascending: 0 `RaaTemporalFrame` (768 B, `LitHandle::frame_buffer`), 1 the
+/// S12 depth, 2 the S12 motion, 3 the raw trace, 4 the history read, 5 the probe output (or a
+/// 1x1 (0, 0, 0, 1) dummy), 6 the Rgba16Float history write, 7 the Rgba16Float SSGI output and
+/// 8 `SsgiParamsGpu` (`SSGI_PARAMS_SIZE`).
+pub fn ssgi_resolve_group0_entries() -> [BindGroupLayoutEntry; 9] {
+    [
+        uniform_entry(0, TEMPORAL_FRAME_SIZE),
+        depth_entry(1),
+        float_entry(2, false),
+        float_entry(3, false),
+        float_entry(4, false),
+        float_entry(5, false),
+        storage_texture_entry(6, TextureFormat::Rgba16Float),
+        storage_texture_entry(7, TextureFormat::Rgba16Float),
+        uniform_entry(8, SSGI_PARAMS_SIZE),
+    ]
+}
+
+/// The per-frame bind groups `SsgiPipelines::record` dispatches over: the trace group 2, the
+/// resolve group 0, and the viewport both cover.
+pub(crate) struct SsgiWork<'a> {
+    pub(crate) trace: &'a wgpu::BindGroup,
+    pub(crate) resolve: &'a wgpu::BindGroup,
+    pub(crate) viewport: (u32, u32),
+}
+
+/// `SsgiPipelines` holds the two compute pipelines of `gi.ssgi` and their private layouts: the
+/// trace over [empty group 0, the GI compute group 1, `trace_layout`] and the resolve over
+/// [`resolve_layout`]. It builds the trace pipeline from the entry points of the Handoff at
+/// crates/raa-gi/src/parts/ssgi/passes.rs:49 `ssgi_trace_module_wgsl` and does not restate it.
+///
+/// Handoff: card 'raa-gi ssgi: SsgiResources (raw, history pair, output, params, bind groups)'
+/// calls `SsgiPipelines::new` and reads `SsgiPipelines.trace_layout` and
+/// `SsgiPipelines.resolve_layout` to build the bind groups of `SsgiWork`; card 'raa-gi ssgi:
+/// SsgiPart, the gi.ssgi pass (order 44) and the binding-14 pick' calls `SsgiPipelines::record`,
+/// which today records the trace then the resolve in one "raa-gi.ssgi" compute pass.
+pub(crate) struct SsgiPipelines {
+    pub(crate) trace_layout: wgpu::BindGroupLayout,
+    pub(crate) resolve_layout: wgpu::BindGroupLayout,
+    trace: wgpu::ComputePipeline,
+    resolve: wgpu::ComputePipeline,
+}
+
+impl SsgiPipelines {
+    /// Builds both modules and pipelines: the trace over [empty, `group1`, `trace_layout`] and
+    /// the resolve over [`resolve_layout`].
+    pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> SsgiPipelines {
+        let device = gpu.device();
+        let empty = layout(device, "raa-gi.ssgi.empty", &[]);
+        let trace_layout = layout(device, "raa-gi.ssgi.trace", &ssgi_trace_group2_entries());
+        let resolve_layout = layout(
+            device,
+            "raa-gi.ssgi.resolve",
+            &ssgi_resolve_group0_entries(),
+        );
+        let trace_module = module(device, "raa-gi.ssgi.trace", &ssgi_trace_module_wgsl());
+        let resolve_module = module(device, "raa-gi.ssgi.resolve", &ssgi_resolve_module_wgsl());
+        let trace = compute_pipeline(
+            device,
+            "raa-gi.ssgi.trace",
+            &trace_module,
+            SSGI_TRACE_ENTRY,
+            &[Some(&empty), Some(group1), Some(&trace_layout)],
+            None,
+        );
+        let resolve = compute_pipeline(
+            device,
+            "raa-gi.ssgi.resolve",
+            &resolve_module,
+            SSGI_RESOLVE_ENTRY,
+            &[Some(&resolve_layout)],
+            None,
+        );
+        SsgiPipelines {
+            trace_layout,
+            resolve_layout,
+            trace,
+            resolve,
+        }
+    }
+
+    /// Records one "raa-gi.ssgi" compute pass: group 1 once, the trace over group 2, then the
+    /// resolve over group 0, each `groups_for(w) x groups_for(h) x 1`. Returns false and records
+    /// nothing when the viewport has a zero axis.
+    pub(crate) fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        group1: &wgpu::BindGroup,
+        work: &SsgiWork<'_>,
+    ) -> bool {
+        let (width, height) = work.viewport;
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa-gi.ssgi"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(1, group1, &[]);
+        pass.set_pipeline(&self.trace);
+        pass.set_bind_group(2, work.trace, &[]);
+        dispatch(&mut pass, width, height);
+        pass.set_pipeline(&self.resolve);
+        pass.set_bind_group(0, work.resolve, &[]);
+        dispatch(&mut pass, width, height);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parts::GiShared;
+    use raa_core::testing::{block_on, skip, software_gpu};
+
+    #[test]
+    fn pipelines_build_in_a_validation_scope_and_record_nothing_for_an_empty_viewport() {
+        let test = "pipelines_build_in_a_validation_scope_and_record_nothing_for_an_empty_viewport";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        assert_eq!(SSGI_TRACE_ENTRY, "raa_gi_ssgi_trace");
+        assert_eq!(SSGI_RESOLVE_ENTRY, "raa_gi_ssgi_resolve");
+        let shared = GiShared::new(&gpu);
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipelines = SsgiPipelines::new(&gpu, &shared.compute_group1_layout());
+        assert!(
+            block_on(scope.pop()).is_none(),
+            "the trace and resolve pipelines create without a validation error"
+        );
+
+        let empty = gpu
+            .device()
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raa-gi.ssgi.test.empty"),
+                entries: &[],
+            });
+        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gi.ssgi.test.empty"),
+            layout: &empty,
+            entries: &[],
+        });
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raa-gi.ssgi.test"),
+            });
+        let work = SsgiWork {
+            trace: &group,
+            resolve: &group,
+            viewport: (0, 64),
+        };
+        assert!(
+            !pipelines.record(&mut encoder, &group, &work),
+            "a zero-width viewport records nothing"
+        );
+    }
 }

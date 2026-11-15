@@ -8,8 +8,8 @@
 use naga::{AddressSpace, ImageClass, ShaderStage, TypeInner};
 use raa_core::wgpu::naga;
 use raa_gi::parts::ssgi::passes::{
-    SSGI_PARAMS_SIZE, SSGI_TRACE_ENTRY, WORKGROUP, ssgi_trace_group2_entries,
-    ssgi_trace_module_wgsl,
+    SSGI_PARAMS_SIZE, SSGI_RESOLVE_ENTRY, SSGI_TRACE_ENTRY, WORKGROUP, ssgi_resolve_group0_entries,
+    ssgi_resolve_module_wgsl, ssgi_trace_group2_entries, ssgi_trace_module_wgsl,
 };
 
 /// A validated WGSL module and its per-entry resource usage.
@@ -117,4 +117,23 @@ fn ssgi_params_struct_is_32_bytes() {
         .unwrap_or_else(|e| panic!("layout: {e}"));
     assert_eq!(u64::from(layouter[handle].size), SSGI_PARAMS_SIZE);
     assert_eq!(SSGI_PARAMS_SIZE, 32);
+}
+
+#[test]
+fn resolve_module_validates_with_its_bindings() {
+    let reflection = Reflection::new(&ssgi_resolve_module_wgsl());
+    let index = reflection.entry(SSGI_RESOLVE_ENTRY);
+    let entry = &reflection.module.entry_points[index];
+    assert_eq!(entry.stage, ShaderStage::Compute);
+    assert_eq!(entry.workgroup_size, [8, 8, 1]);
+
+    let numbers: Vec<u32> = ssgi_resolve_group0_entries()
+        .iter()
+        .map(|entry| entry.binding)
+        .collect();
+    assert_eq!(numbers, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(reflection.used(index, 0), numbers);
+    assert_eq!(reflection.storage_textures(index), 2);
+    assert!(reflection.used(index, 1).is_empty());
+    assert!(reflection.used(index, 2).is_empty());
 }
