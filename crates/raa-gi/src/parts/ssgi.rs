@@ -21,6 +21,8 @@ use raa_core::RaaError;
 pub mod cpu;
 #[path = "ssgi/passes.rs"]
 pub mod passes;
+#[path = "ssgi/resources.rs"]
+mod resources;
 
 /// The name of the compute pass `gi.ssgi` (S12 order 44).
 pub const SSGI_PASS: &str = "gi.ssgi";
