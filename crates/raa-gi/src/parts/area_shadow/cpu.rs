@@ -1,7 +1,7 @@
 //! CPU twins of the M6 area-shadow kernels (S44, contract `area-stochastic-cpu`): the stratum and
 //! R2 jitter of the stratified shadow rays, the rectangle point, the sample weight, the temporal
-//! and depth-consistency tests, the bilateral weight, the ratio estimator and the slot tables of
-//! the mask and history textures. Solstice has no area-shadow kernels, so these are RAA's own
+//! and depth-consistency tests, the bilateral weight, the ratio estimator, the slot tables of
+//! the mask and history textures and the self-shadow ray bias (`ray_view_depth`, `ray_origin`). Solstice has no area-shadow kernels, so these are RAA's own
 //! maths; the hash and the Gaussian come from `screen/cpu.rs` (`pcg`, `hash_to_unit`) and
 //! `crates/raa-gtao/src/wgsl/denoise.wgsl:25-27` (`BILATERAL_GAUSS`). The WGSL twins of later
 //! cards use the same names with an `raa_area_` prefix. These twins are tested on the CPU against
@@ -182,4 +182,28 @@ pub fn groups_for(limit: u32) -> u32 {
 /// The number of raw-visibility layers for a slot limit: the groups, and never fewer than two.
 pub fn raw_layers(limit: u32) -> u32 {
     groups_for(limit).max(2)
+}
+
+/// Constant part of the self-shadow ray bias of `raa_area_ray_visibility` (metres).
+pub const RAY_BIAS_BASE: f32 = 0.01;
+
+/// Per-metre-of-view-depth part of the self-shadow ray bias.
+pub const RAY_BIAS_PER_METRE: f32 = 0.002;
+
+/// View depth of a world point from the column-major `inv_view` (GiFrameGpu): the distance along
+/// the camera's forward (-z) axis, `-dot(inv_view[2].xyz, world - inv_view[3].xyz)`.
+pub fn ray_view_depth(inv_view: [[f32; 4]; 4], world: [f32; 3]) -> f32 {
+    let z = inv_view[2];
+    let c = inv_view[3];
+    -(z[0] * (world[0] - c[0]) + z[1] * (world[1] - c[1]) + z[2] * (world[2] - c[2]))
+}
+
+/// Biased ray origin: `world + normal * (RAY_BIAS_BASE + RAY_BIAS_PER_METRE * view_depth)`.
+pub fn ray_origin(world: [f32; 3], normal: [f32; 3], view_depth: f32) -> [f32; 3] {
+    let b = RAY_BIAS_BASE + RAY_BIAS_PER_METRE * view_depth;
+    [
+        world[0] + normal[0] * b,
+        world[1] + normal[1] * b,
+        world[2] + normal[2] * b,
+    ]
 }

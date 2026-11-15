@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 
 use raa_gi::parts::area_shadow::cpu::{
     R2_ALPHA, bilateral_weight, cell_side, depth_consistent, groups_for, history_slot, mask_slot,
-    r2_jitter, ratio_visibility, raw_layers, rect_point, sample_weight, stratum_cell, stratum_uv,
-    temporal_blend,
+    r2_jitter, ratio_visibility, raw_layers, ray_origin, ray_view_depth, rect_point, sample_weight,
+    stratum_cell, stratum_uv, temporal_blend,
 };
 use raa_gi::parts::area_shadow::restir_cpu::{
     REMAP_INVALID, RESTIR_SPATIAL_RADIUS, Reservoir, Surface, area_pdf, balance_weight,
@@ -633,4 +633,55 @@ fn sampled_rectangle_area_is_analytic() {
         (mean - 4.0).abs() <= 0.02 * 4.0,
         "mean sampled area {mean} is not within 2% of 4"
     );
+}
+
+const AREA_TRACE_WGSL: &str = include_str!("../src/wgsl/area_shadow/trace.wgsl");
+
+#[test]
+fn ray_bias_view_depth_identity_camera() {
+    let inv_view = [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 2.0, 5.0, 1.0],
+    ];
+    let world = [1.0, 1.0, -3.0];
+    let depth = ray_view_depth(inv_view, world);
+    assert!(close(depth, 8.0, 1e-5), "depth {depth}");
+    assert!(!close(depth, -2.0, 1e-5), "old formula value");
+    assert_close(
+        ray_origin(world, [0.0, 1.0, 0.0], 8.0),
+        [1.0, 1.026, -3.0],
+        1e-5,
+        "origin",
+    );
+}
+
+#[test]
+fn ray_bias_view_depth_rotated_camera() {
+    let inv_view = [
+        [0.0, 0.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0, 1.0],
+    ];
+    let world = [-4.0, 1.0, 3.0];
+    let depth = ray_view_depth(inv_view, world);
+    assert!(close(depth, 6.0, 1e-5), "depth {depth}");
+    let o = ray_origin(world, [0.0, 1.0, 0.0], depth);
+    assert!(
+        close(o[1] - world[1], 0.022, 1e-5),
+        "bias {}",
+        o[1] - world[1]
+    );
+}
+
+#[test]
+fn area_trace_wgsl_ray_bias_pin() {
+    assert!(!AREA_TRACE_WGSL.contains("inv_view * vec4<f32>(world, 1.0)"));
+    assert!(
+        AREA_TRACE_WGSL
+            .contains("-dot(raa_gi_frame.inv_view[2].xyz, world - raa_gi_frame.inv_view[3].xyz)")
+    );
+    assert!(AREA_TRACE_WGSL.contains("0.01 + 0.002 * view_depth"));
 }

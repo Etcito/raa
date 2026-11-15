@@ -225,7 +225,7 @@ fn raa_area_ray_visibility(world: vec3<f32>, normal: vec3<f32>, point: vec3<f32>
     let dir = to_point / distance;
     var occlusion = 0.0;
     if textureDimensions(raa_gi_pyramid).x > 1u {
-        let view_depth = -(raa_gi_frame.inv_view * vec4<f32>(world, 1.0)).z;
+        let view_depth = -dot(raa_gi_frame.inv_view[2].xyz, world - raa_gi_frame.inv_view[3].xyz);
         let origin = world + normal * (0.01 + 0.002 * view_depth);
         let hit = raa_gi_trace_screen(origin, dir, distance - 0.05, 48u, 0.15);
         if hit.hit {
