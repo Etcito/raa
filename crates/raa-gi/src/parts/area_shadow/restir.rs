@@ -3,7 +3,8 @@
 //! weights (Lin et al. 2022). This module holds the Rust builders of the three compute stages
 //! and the group-2 binding registry they share. Share 1 (this file today) builds the stage-less
 //! common module and the 17 group-2 entries; the stage builders, the pipelines and the resources
-//! are later shares of this module. The WGSL is RAA's own code; Bevy Solari is not supplied and
+//! are later shares of this module; the initial-candidates share adds `restir_initial_module_wgsl`
+//! and `RESTIR_INITIAL_ENTRY`. The WGSL is RAA's own code; Bevy Solari is not supplied and
 //! nothing is copied from it or from NVIDIA RTXDI.
 #![allow(dead_code)]
 
@@ -15,12 +16,18 @@ use wgpu::{
     TextureViewDimension,
 };
 
+use super::passes::trace_module_wgsl;
 use crate::parts::screen::passes::{
     depth_entry, entry, float_entry, storage_entry, storage_texture_entry, uniform_entry,
 };
 
 const RESTIR_COMMON_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_common.wgsl");
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
+const RESTIR_INITIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_initial.wgsl");
+
+/// Entry of the ReSTIR initial-candidates pipeline (`@compute @workgroup_size(8, 8)`), one
+/// invocation per viewport pixel.
+pub const RESTIR_INITIAL_ENTRY: &str = "raa_gi_area_restir_initial";
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes. The stage files declare
 /// the record and its group-2 binding 0; `probe_common.wgsl` declares both in the stage-less
@@ -81,6 +88,22 @@ pub fn restir_common_module_wgsl() -> String {
     format!(
         "{PRELUDE_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}{REPROJECT_WGSL}\
          {RESTIR_VALIDATION_BINDINGS_WGSL}{RESTIR_COMMON_WGSL}"
+    )
+}
+
+/// `restir_initial_module_wgsl` builds the initial-candidates module of contract
+/// 'area-restir-wgsl': the area-shadow trace module of `passes::trace_module_wgsl`
+/// (`PRELUDE_WGSL` + `CLOUD_SHADOW_WGSL` + `GI_VOLUME_WGSL` + `DEPTH_WGSL` + probe_common.wgsl +
+/// screen_trace.wgsl + trace.wgsl, which declare the `GiFrameGpu` record, the group-2 bindings
+/// 0-11 and `raa_area_ray_visibility`) + `raa_taa::REPROJECT_WGSL` + restir_common.wgsl +
+/// wgsl/area_shadow/restir_initial.wgsl. Its compute entries are `AREA_TRACE_ENTRY` and
+/// `RESTIR_INITIAL_ENTRY`; the latter draws the RIS candidates of a pixel, traces one
+/// visibility ray towards the kept sample and writes `raa_restir_current` and
+/// `raa_area_depth_out`, using only group-2 bindings of `restir_group2_entries`.
+pub fn restir_initial_module_wgsl() -> String {
+    format!(
+        "{}{REPROJECT_WGSL}{RESTIR_COMMON_WGSL}{RESTIR_INITIAL_WGSL}",
+        trace_module_wgsl()
     )
 }
 

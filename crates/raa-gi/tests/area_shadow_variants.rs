@@ -21,7 +21,8 @@ use raa_gi::parts::area_shadow::passes::{
     temporal_group0_entries, temporal_module_wgsl, trace_group2_entries, trace_module_wgsl,
 };
 use raa_gi::parts::area_shadow::restir::{
-    RESERVOIR_BYTES, RESTIR_PARAMS_SIZE, restir_common_module_wgsl, restir_group2_entries,
+    RESERVOIR_BYTES, RESTIR_INITIAL_ENTRY, RESTIR_PARAMS_SIZE, restir_common_module_wgsl,
+    restir_group2_entries, restir_initial_module_wgsl,
 };
 use raa_gi::parts::area_shadow::restir_cpu::ROUGHNESS_MIN;
 
@@ -820,4 +821,89 @@ fn restir_roughness_floor_matches_its_cpu_twin() {
         panic!("RAA_RESTIR_ROUGHNESS_MIN is an f32 literal");
     };
     assert_eq!(value, ROUGHNESS_MIN);
+}
+
+/// The ReSTIR initial-candidates module (contract 'area-restir-wgsl') composed by
+/// crates/raa-gi/src/parts/area_shadow/restir.rs `restir_initial_module_wgsl` over the trace
+/// module and the common module of the Handoff doc comment at restir.rs
+/// `restir_common_module_wgsl`.
+#[test]
+fn restir_initial_module_validates_and_holds_its_kernel() {
+    let source = restir_initial_module_wgsl();
+    let reflection = Reflection::new(&source);
+    let computes: Vec<&str> = reflection
+        .module
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(computes, [AREA_TRACE_ENTRY, RESTIR_INITIAL_ENTRY]);
+    let marker = format!("@compute @workgroup_size(8, 8)\nfn {RESTIR_INITIAL_ENTRY}(");
+    assert!(source.contains(&marker), "the entry follows its workgroup");
+    let index = reflection.entry(RESTIR_INITIAL_ENTRY);
+    let entry = &reflection.module.entry_points[index];
+    assert_eq!(entry.stage, ShaderStage::Compute);
+    assert_eq!(entry.workgroup_size, [WORKGROUP, WORKGROUP, 1]);
+    for name in [
+        "raa_restir_surface(",
+        "raa_restir_ltc_luminance(",
+        "raa_restir_sample_rect(",
+        "raa_restir_area_pdf(",
+        "raa_restir_target(",
+        "raa_restir_wrs_accept(",
+        "raa_restir_contribution_weight(",
+        "raa_area_ray_visibility(surface.position, surface.normal, point)",
+        "raa_restir_current[index] = raa_restir_pack(",
+    ] {
+        assert!(source.contains(name), "the initial module calls {name}");
+    }
+}
+
+#[test]
+fn restir_initial_bindings_match_the_restir_layout() {
+    let reflection = Reflection::new(&restir_initial_module_wgsl());
+    let index = reflection.entry(RESTIR_INITIAL_ENTRY);
+    let entries = restir_group2_entries();
+    assert_eq!(
+        reflection.used(index, 2),
+        [0, 1, 2, 4, 6, 8, 10, 11, 15, 16, 18, 19],
+        "group-2 bindings"
+    );
+    for (binding, global) in reflection.used_globals(index, 2) {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.binding == binding)
+            .unwrap_or_else(|| panic!("group 2 binding {binding} has an entry"));
+        assert_eq!(
+            naga_kind(&reflection.module, global),
+            entry_kind(entry),
+            "group 2 binding {binding} kind"
+        );
+        if let BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            min_binding_size,
+            ..
+        } = entry.ty
+        {
+            let TypeInner::Struct { span, .. } = &reflection.module.types[global.ty].inner else {
+                panic!("group 2 binding {binding} is not a struct");
+            };
+            assert_eq!(
+                min_binding_size.map(|size| size.get()),
+                Some(*span as u64),
+                "group 2 binding {binding} size"
+            );
+        }
+    }
+    let used1 = reflection.used(index, 1);
+    assert!(
+        used1
+            .iter()
+            .all(|binding| GI_COMPUTE_GROUP1.contains(binding)),
+        "group-1 bindings {used1:?}"
+    );
+    assert!(reflection.used(index, 0).is_empty(), "group 0 is unused");
+    let (textures, buffers) = reflection.storage(index);
+    assert!(textures <= 4, "{textures} storage textures");
+    assert!(buffers <= 8, "{buffers} storage buffers");
 }
