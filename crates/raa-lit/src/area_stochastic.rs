@@ -32,6 +32,42 @@ const PARAMS_AT: usize = 64;
 /// Packed light index of an empty slot.
 const EMPTY_SLOT: u32 = 0xFFFF_FFFF;
 
+/// The stochastic shadow mode: the M6 mid tier (`Stratified`) or the M7 ultra tier (`Restir`).
+///
+/// Handoff: [`StochasticMode`] is consumed by the downstream card 'raa-js: stochasticMode key of
+/// setAreaLightShadows and areaLightShadows (m28)', which parses the `stochasticMode` key with
+/// [`StochasticMode::from_name`] and reports it with [`StochasticMode::as_str`]. Today the type
+/// only names the two tiers: `Stratified` is the mid tier (one stratified ray per pixel and slot,
+/// the existing gi.area-shadow trace) and `Restir` the ultra tier (ReSTIR DI in the same pass).
+/// It holds no selection or GPU state, and the mode is never written into the 80-byte table.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum StochasticMode {
+    /// The M6 mid tier: one stratified ray per pixel and slot.
+    #[default]
+    Stratified,
+    /// The M7 ultra tier: ReSTIR DI in the same `gi.area-shadow` pass.
+    Restir,
+}
+
+impl StochasticMode {
+    /// The wire name of the mode: `"stratified"` or `"restir"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StochasticMode::Stratified => "stratified",
+            StochasticMode::Restir => "restir",
+        }
+    }
+
+    /// Parses `"stratified"` or `"restir"`; any other string is `None`.
+    pub fn from_name(name: &str) -> Option<StochasticMode> {
+        match name {
+            "stratified" => Some(StochasticMode::Stratified),
+            "restir" => Some(StochasticMode::Restir),
+            _ => None,
+        }
+    }
+}
+
 /// Mid-tier settings: how many area lights get stratified shadow rays, how far they reach and
 /// how many strata each light rectangle is split into.
 ///
@@ -47,6 +83,8 @@ pub struct StochasticShadowSettings {
     pub distance: f32,
     /// Strata of the light rectangle: 4 (2x2) or 9 (3x3).
     pub cells: u32,
+    /// The stochastic shadow mode: `Stratified` (mid tier) or `Restir` (ultra tier).
+    pub mode: StochasticMode,
 }
 
 impl Default for StochasticShadowSettings {
@@ -56,12 +94,13 @@ impl Default for StochasticShadowSettings {
 }
 
 impl StochasticShadowSettings {
-    /// The standard settings: 4 mid-tier lights, 40 m, 2x2 strata.
+    /// The standard settings: 4 mid-tier lights, 40 m, 2x2 strata, `Stratified`.
     pub fn standard() -> StochasticShadowSettings {
         StochasticShadowSettings {
             count: 4,
             distance: 40.0,
             cells: 4,
+            mode: StochasticMode::Stratified,
         }
     }
 
@@ -126,6 +165,8 @@ pub struct AreaStochasticFrame {
     pub generations: [u32; MAX_STOCHASTIC_LIGHTS],
     /// Number of occupied mid-tier slots.
     pub active: u32,
+    /// The mode the selector wrote this frame.
+    pub mode: StochasticMode,
 }
 
 impl Default for AreaStochasticFrame {
@@ -141,6 +182,7 @@ impl AreaStochasticFrame {
             table: [0; AREA_STOCHASTIC_GPU_SIZE],
             generations: [0; MAX_STOCHASTIC_LIGHTS],
             active: 0,
+            mode: StochasticMode::Stratified,
         }
     }
 }
@@ -319,6 +361,7 @@ impl StochasticSelector {
         write_table(&mut out.table, &slots, limit as u32, settings.cells);
         out.generations = self.generations;
         out.active = self.assigner.active();
+        out.mode = settings.mode;
     }
 }
 

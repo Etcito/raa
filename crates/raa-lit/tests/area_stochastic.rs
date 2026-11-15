@@ -5,8 +5,8 @@
 use raa_core::RaaError;
 use raa_lit::{
     AreaShadowCamera, AreaShadowSettings, AreaShadowTier, AreaStochasticFrame, LocalLight,
-    LocalLightKind, LocalLights, MAX_LOCAL_LIGHTS, StochasticSelector, StochasticShadowSettings,
-    stochastic_weight, table_cells, table_limit, table_slot, write_table,
+    LocalLightKind, LocalLights, MAX_LOCAL_LIGHTS, StochasticMode, StochasticSelector,
+    StochasticShadowSettings, stochastic_weight, table_cells, table_limit, table_slot, write_table,
 };
 use raa_math::Vec3;
 use raa_pipeline::{AREA_STOCHASTIC_GPU_SIZE, MAX_STOCHASTIC_LIGHTS};
@@ -17,6 +17,7 @@ fn settings(count: u32, distance: f32, cells: u32) -> StochasticShadowSettings {
         count,
         distance,
         cells,
+        mode: StochasticMode::Stratified,
     }
 }
 
@@ -407,4 +408,84 @@ fn point_lights_are_never_mid_tier_candidates() {
 
     assert_eq!(table_slot(&out.table, 0), Some((1, 1.0)));
     assert_eq!(out.active, 1);
+}
+
+#[test]
+fn stochastic_mode_names_round_trip_and_parse_exactly_two() {
+    assert_eq!(StochasticMode::Stratified.as_str(), "stratified");
+    assert_eq!(StochasticMode::Restir.as_str(), "restir");
+    assert_eq!(
+        StochasticMode::from_name("stratified"),
+        Some(StochasticMode::Stratified)
+    );
+    assert_eq!(
+        StochasticMode::from_name("restir"),
+        Some(StochasticMode::Restir)
+    );
+    assert_eq!(StochasticMode::from_name("ultra"), None);
+    assert_eq!(StochasticMode::from_name(""), None);
+}
+
+#[test]
+fn standard_settings_and_empty_frame_default_to_stratified() {
+    assert_eq!(
+        StochasticShadowSettings::standard().mode,
+        StochasticMode::Stratified
+    );
+    assert_eq!(
+        AreaStochasticFrame::empty().mode,
+        StochasticMode::Stratified
+    );
+}
+
+#[test]
+fn validate_accepts_the_restir_mode() {
+    let restir = StochasticShadowSettings {
+        mode: StochasticMode::Restir,
+        ..StochasticShadowSettings::standard()
+    };
+    assert_eq!(restir.validate().ok(), Some(restir));
+}
+
+#[test]
+fn mode_changes_the_frame_field_but_not_the_table() {
+    let lights = registry(&[
+        area_at(Vec3::new(0.0, 0.0, -10.0), 1.0),
+        area_at(Vec3::new(0.0, 0.0, -20.0), 1.0),
+    ]);
+    let records = records_of(&lights);
+    let stratified = one();
+    let restir = StochasticShadowSettings {
+        mode: StochasticMode::Restir,
+        ..one()
+    };
+
+    let mut stratified_selector = StochasticSelector::new();
+    let mut stratified_out = AreaStochasticFrame::empty();
+    stratified_selector.update(
+        &defaults(),
+        &stratified,
+        &camera(ORIGIN),
+        &lights,
+        &records,
+        &mut stratified_out,
+    );
+
+    let mut restir_selector = StochasticSelector::new();
+    let mut restir_out = AreaStochasticFrame::empty();
+    restir_selector.update(
+        &defaults(),
+        &restir,
+        &camera(ORIGIN),
+        &lights,
+        &records,
+        &mut restir_out,
+    );
+
+    assert_eq!(stratified_out.table, restir_out.table);
+    assert_eq!(stratified_out.generations, restir_out.generations);
+    assert_eq!(stratified_out.active, restir_out.active);
+    assert_eq!(stratified_out.active, 1);
+    assert_eq!(stratified_out.mode, StochasticMode::Stratified);
+    assert_eq!(restir_out.mode, StochasticMode::Restir);
 }
