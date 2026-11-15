@@ -21,8 +21,9 @@ use raa_gi::parts::area_shadow::passes::{
     temporal_group0_entries, temporal_module_wgsl, trace_group2_entries, trace_module_wgsl,
 };
 use raa_gi::parts::area_shadow::restir::{
-    RESERVOIR_BYTES, RESTIR_INITIAL_ENTRY, RESTIR_PARAMS_SIZE, restir_common_module_wgsl,
-    restir_group2_entries, restir_initial_module_wgsl,
+    RESERVOIR_BYTES, RESTIR_INITIAL_ENTRY, RESTIR_PARAMS_SIZE, RESTIR_TEMPORAL_ENTRY,
+    restir_common_module_wgsl, restir_group2_entries, restir_initial_module_wgsl,
+    restir_temporal_module_wgsl,
 };
 use raa_gi::parts::area_shadow::restir_cpu::ROUGHNESS_MIN;
 
@@ -869,6 +870,111 @@ fn restir_initial_bindings_match_the_restir_layout() {
         [0, 1, 2, 4, 6, 8, 10, 11, 15, 16, 18, 19],
         "group-2 bindings"
     );
+    for (binding, global) in reflection.used_globals(index, 2) {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.binding == binding)
+            .unwrap_or_else(|| panic!("group 2 binding {binding} has an entry"));
+        assert_eq!(
+            naga_kind(&reflection.module, global),
+            entry_kind(entry),
+            "group 2 binding {binding} kind"
+        );
+        if let BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            min_binding_size,
+            ..
+        } = entry.ty
+        {
+            let TypeInner::Struct { span, .. } = &reflection.module.types[global.ty].inner else {
+                panic!("group 2 binding {binding} is not a struct");
+            };
+            assert_eq!(
+                min_binding_size.map(|size| size.get()),
+                Some(*span as u64),
+                "group 2 binding {binding} size"
+            );
+        }
+    }
+    let used1 = reflection.used(index, 1);
+    assert!(
+        used1
+            .iter()
+            .all(|binding| GI_COMPUTE_GROUP1.contains(binding)),
+        "group-1 bindings {used1:?}"
+    );
+    assert!(reflection.used(index, 0).is_empty(), "group 0 is unused");
+    let (textures, buffers) = reflection.storage(index);
+    assert!(textures <= 4, "{textures} storage textures");
+    assert!(buffers <= 8, "{buffers} storage buffers");
+}
+
+/// The ReSTIR temporal-reuse module (contract 'area-restir-wgsl') composed by
+/// crates/raa-gi/src/parts/area_shadow/restir.rs `restir_temporal_module_wgsl`; its surface and
+/// target calls are the Handoff comment of share 2 at restir_common.wgsl:336
+/// `raa_restir_surface`.
+#[test]
+fn restir_temporal_module_validates_and_holds_its_kernel() {
+    let source = restir_temporal_module_wgsl();
+    let reflection = Reflection::new(&source);
+    let computes: Vec<&str> = reflection
+        .module
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(computes, [AREA_TRACE_ENTRY, RESTIR_TEMPORAL_ENTRY]);
+    let marker = format!("@compute @workgroup_size(8, 8)\nfn {RESTIR_TEMPORAL_ENTRY}(");
+    assert!(source.contains(&marker), "the entry follows its workgroup");
+    let index = reflection.entry(RESTIR_TEMPORAL_ENTRY);
+    let entry = &reflection.module.entry_points[index];
+    assert_eq!(entry.stage, ShaderStage::Compute);
+    assert_eq!(entry.workgroup_size, [WORKGROUP, WORKGROUP, 1]);
+    assert_eq!(
+        source.matches("workgroupBarrier();").count(),
+        2,
+        "two barriers"
+    );
+    let body = &source[source.find(&marker).unwrap_or(0)..];
+    assert!(
+        !body.contains("return"),
+        "every invocation reaches both barriers"
+    );
+    for name in [
+        "raa_restir_unpack(raa_restir_current[",
+        "raa_restir_surface(",
+        "raa_temporal_surface_uv(uv, textureLoad(raa_restir_motion,",
+        "raa_restir_history[raa_restir_index(",
+        "raa_restir_depth_similar(",
+        "raa_restir_params.normal_cos",
+        "raa_restir_remap(t.slot)",
+        "raa_restir_clamp_confidence(",
+        "raa_restir_target(",
+        "raa_restir_wrs_accept(",
+        "raa_restir_contribution_weight(",
+        "var<workgroup>",
+        "raa_restir_boiling_keep(",
+        "raa_restir_current[raa_restir_index(id.xy)] = raa_restir_pack(",
+    ] {
+        assert!(source.contains(name), "the temporal module calls {name}");
+    }
+}
+
+#[test]
+fn restir_temporal_bindings_match_the_restir_layout() {
+    let reflection = Reflection::new(&restir_temporal_module_wgsl());
+    let index = reflection.entry(RESTIR_TEMPORAL_ENTRY);
+    let entries = restir_group2_entries();
+    let used = reflection.used(index, 2);
+    for binding in [0, 1, 2, 8, 12, 13, 14, 15, 16, 17, 19] {
+        assert!(
+            used.contains(&binding),
+            "group 2 binding {binding} in {used:?}"
+        );
+    }
+    for binding in [5, 6] {
+        assert!(!used.contains(&binding), "group 2 binding {binding} unused");
+    }
     for (binding, global) in reflection.used_globals(index, 2) {
         let entry = entries
             .iter()

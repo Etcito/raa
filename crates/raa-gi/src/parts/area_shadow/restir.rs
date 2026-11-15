@@ -4,7 +4,8 @@
 //! and the group-2 binding registry they share. Share 1 (this file today) builds the stage-less
 //! common module and the 17 group-2 entries; the stage builders, the pipelines and the resources
 //! are later shares of this module; the initial-candidates share adds `restir_initial_module_wgsl`
-//! and `RESTIR_INITIAL_ENTRY`. The WGSL is RAA's own code; Bevy Solari is not supplied and
+//! and `RESTIR_INITIAL_ENTRY`, the temporal-reuse share `restir_temporal_module_wgsl` and
+//! `RESTIR_TEMPORAL_ENTRY`. The WGSL is RAA's own code; Bevy Solari is not supplied and
 //! nothing is copied from it or from NVIDIA RTXDI.
 #![allow(dead_code)]
 
@@ -24,10 +25,15 @@ use crate::parts::screen::passes::{
 const RESTIR_COMMON_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_common.wgsl");
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const RESTIR_INITIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_initial.wgsl");
+const RESTIR_TEMPORAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_temporal.wgsl");
 
 /// Entry of the ReSTIR initial-candidates pipeline (`@compute @workgroup_size(8, 8)`), one
 /// invocation per viewport pixel.
 pub const RESTIR_INITIAL_ENTRY: &str = "raa_gi_area_restir_initial";
+
+/// Entry of the ReSTIR temporal-reuse pipeline (`@compute @workgroup_size(8, 8)`), one
+/// invocation per viewport pixel.
+pub const RESTIR_TEMPORAL_ENTRY: &str = "raa_gi_area_restir_temporal";
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes. The stage files declare
 /// the record and its group-2 binding 0; `probe_common.wgsl` declares both in the stage-less
@@ -103,6 +109,21 @@ pub fn restir_common_module_wgsl() -> String {
 pub fn restir_initial_module_wgsl() -> String {
     format!(
         "{}{REPROJECT_WGSL}{RESTIR_COMMON_WGSL}{RESTIR_INITIAL_WGSL}",
+        trace_module_wgsl()
+    )
+}
+
+/// `restir_temporal_module_wgsl` builds the temporal-reuse module of contract
+/// 'area-restir-wgsl': the same trace module + `raa_taa::REPROJECT_WGSL` + restir_common.wgsl
+/// as `restir_initial_module_wgsl`, then wgsl/area_shadow/restir_temporal.wgsl. Its compute
+/// entries are `AREA_TRACE_ENTRY` and `RESTIR_TEMPORAL_ENTRY`; the latter reprojects the
+/// previous frame's reservoir of `raa_restir_history` through the S12 motion target, rejects
+/// it on depth, normal or slot remap, clamps its confidence, combines it with the pixel's
+/// `raa_restir_current` reservoir by GRIS, applies the workgroup boiling filter and writes
+/// `raa_restir_current` in place, using only group-2 bindings of `restir_group2_entries`.
+pub fn restir_temporal_module_wgsl() -> String {
+    format!(
+        "{}{REPROJECT_WGSL}{RESTIR_COMMON_WGSL}{RESTIR_TEMPORAL_WGSL}",
         trace_module_wgsl()
     )
 }
