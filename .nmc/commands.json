@@ -241,5 +241,60 @@
     "after": [
       "p4-gi-build"
     ]
+  },
+  {
+    "name": "p4-gi-ssgi-repo-check",
+    "command": "bash scripts/check.sh",
+    "timeout_s": 3600
+  },
+  {
+    "name": "p4-gi-ssgi-check",
+    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build",
+      "p4-gi-ssgi-repo-check"
+    ]
+  },
+  {
+    "name": "p4-gi-ssgi-select",
+    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-ssgi-check"
+    ]
+  },
+  {
+    "name": "p4-gi-ssgi-clean",
+    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-ssgi-select"
+    ]
+  },
+  {
+    "name": "p4-gi-ssgi-render",
+    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-ssgi-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-ssgi-fresh",
+    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-ssgi-render"
+    ]
+  },
+  {
+    "name": "p4-gi-ssgi-judge",
+    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-ssgi-render",
+      "p4-gi-ssgi-fresh"
+    ]
   }
 ]
