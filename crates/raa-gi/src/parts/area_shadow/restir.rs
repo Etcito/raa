@@ -10,6 +10,7 @@
 //! nothing is copied from it or from NVIDIA RTXDI.
 #![allow(dead_code)]
 
+use raa_core::GpuContext;
 use raa_pipeline::AREA_STOCHASTIC_GPU_SIZE;
 use raa_shader::{DEPTH_WGSL, PRELUDE_WGSL};
 use raa_taa::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
@@ -18,9 +19,10 @@ use wgpu::{
     TextureViewDimension,
 };
 
-use super::passes::trace_module_wgsl;
+use super::passes::{AreaShadowPipelines, AreaShadowWork, trace_module_wgsl};
 use crate::parts::screen::passes::{
-    depth_entry, entry, float_entry, storage_entry, storage_texture_entry, uniform_entry,
+    compute_pipeline, depth_entry, dispatch, entry, float_entry, layout, module, storage_entry,
+    storage_texture_entry, uniform_entry,
 };
 
 const RESTIR_COMMON_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_common.wgsl");
@@ -182,4 +184,141 @@ pub fn restir_group2_entries() -> [BindGroupLayoutEntry; 17] {
         float_entry(18, true),
         float_entry(19, false),
     ]
+}
+
+/// The three ReSTIR compute pipelines (initial, temporal, spatial) over [empty group 0, the GI
+/// compute group 1, `layout`], with `layout` built from `restir_group2_entries`.
+///
+/// Handoff: card 'raa-gi: RestirResources (reservoir buffers, params, LTC atlas, bind group)'
+/// builds its group-2 bind group over `RestirPipelines.layout`; card 'raa-gi: gi.area-shadow
+/// part runs the ReSTIR ultra tier on Restir frames' calls `RestirPipelines::new` and
+/// `RestirPipelines::record`. LIFECYCLE: RestirPipelines is created lazily by
+/// GiAreaShadowPass::prepare on the first Restir frame and kept for the part's lifetime; record
+/// runs in GiAreaShadowPass::record after gi.screen (order 42) published the pyramid. `record`
+/// calls `AreaShadowPipelines::record_denoise` (Handoff at passes.rs:336 `record_denoise`).
+pub(crate) struct RestirPipelines {
+    pub(crate) layout: wgpu::BindGroupLayout,
+    initial: wgpu::ComputePipeline,
+    temporal: wgpu::ComputePipeline,
+    spatial: wgpu::ComputePipeline,
+}
+
+impl RestirPipelines {
+    /// Builds one shader module per builder and the three pipelines over [empty group 0,
+    /// `group1`, `layout`].
+    pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> RestirPipelines {
+        let device = gpu.device();
+        let empty = layout(device, "raa-gi.area-restir.empty", &[]);
+        let group2 = layout(device, "raa-gi.area-restir", &restir_group2_entries());
+        let layouts = [Some(&empty), Some(group1), Some(&group2)];
+        let build = |label: &str, source: String, entry_point: &str| {
+            let shader = module(device, label, &source);
+            compute_pipeline(device, label, &shader, entry_point, &layouts, None)
+        };
+        let initial = build(
+            "raa-gi.area-restir.initial",
+            restir_initial_module_wgsl(),
+            RESTIR_INITIAL_ENTRY,
+        );
+        let temporal = build(
+            "raa-gi.area-restir.temporal",
+            restir_temporal_module_wgsl(),
+            RESTIR_TEMPORAL_ENTRY,
+        );
+        let spatial = build(
+            "raa-gi.area-restir.spatial",
+            restir_spatial_module_wgsl(),
+            RESTIR_SPATIAL_ENTRY,
+        );
+        RestirPipelines {
+            layout: group2,
+            initial,
+            temporal,
+            spatial,
+        }
+    }
+
+    /// Records one `raa-gi.area-shadow.restir` compute pass: group 1 and group 2 set once, the
+    /// initial, temporal and spatial dispatches over `work.viewport`
+    /// (`groups_for(width) x groups_for(height) x 1`), then `denoise.record_denoise`. Returns
+    /// false and records nothing when `work.temporal` is empty or a viewport axis is 0.
+    pub(crate) fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        group1: &wgpu::BindGroup,
+        group2: &wgpu::BindGroup,
+        denoise: &AreaShadowPipelines,
+        work: &AreaShadowWork<'_>,
+    ) -> bool {
+        let (width, height) = work.viewport;
+        if work.temporal.is_empty() || width == 0 || height == 0 {
+            return false;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa-gi.area-shadow.restir"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(1, group1, &[]);
+        pass.set_bind_group(2, group2, &[]);
+        for pipeline in [&self.initial, &self.temporal, &self.spatial] {
+            pass.set_pipeline(pipeline);
+            dispatch(&mut pass, width, height);
+        }
+        denoise.record_denoise(&mut pass, work);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parts::GiShared;
+    use raa_core::testing::{block_on, skip, software_gpu};
+
+    #[test]
+    fn restir_pipelines_build_in_a_validation_scope_and_record_nothing_without_history() {
+        let test =
+            "restir_pipelines_build_in_a_validation_scope_and_record_nothing_without_history";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        let group1_layout = shared.compute_group1_layout();
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let restir = RestirPipelines::new(&gpu, &group1_layout);
+        let denoise = AreaShadowPipelines::new(&gpu, &group1_layout);
+        assert!(
+            block_on(scope.pop()).is_none(),
+            "the three ReSTIR pipelines and the denoiser create without a validation error"
+        );
+
+        let empty = gpu
+            .device()
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raa-gi.area-restir.test.empty"),
+                entries: &[],
+            });
+        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gi.area-restir.test.empty"),
+            layout: &empty,
+            entries: &[],
+        });
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raa-gi.area-restir.test"),
+            });
+        let work = AreaShadowWork {
+            trace: &group,
+            temporal: &[],
+            spatial_h: &[],
+            spatial_v: &[],
+            viewport: (64, 64),
+        };
+        assert!(
+            !restir.record(&mut encoder, &group, &group, &denoise, &work),
+            "an empty temporal slice records nothing"
+        );
+    }
 }
