@@ -516,10 +516,10 @@ pub(crate) fn prepare_view(
         }
         // Consume the viewport's one-shot discontinuity mark before staging its camera.
         let discontinuity = st.scene_invocation.prepare(index);
-        if discontinuity {
-            if let Some(post) = st.features.get::<ViewPosts>().and_then(|p| p.0.get(index)) {
-                post.taa.invalidate();
-            }
+        if discontinuity
+            && let Some(post) = st.features.get::<ViewPosts>().and_then(|p| p.0.get(index))
+        {
+            post.taa.invalidate();
         }
         st.lit.prepare_scene_view(index, discontinuity);
         st.lit.prepare(
