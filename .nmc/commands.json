@@ -184,5 +184,54 @@
     "after": [
       "p4-taa-lookdev-check"
     ]
+  },
+  {
+    "name": "p4-gi-area-restir-check",
+    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-area-restir-select",
+    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-area-restir-check"
+    ]
+  },
+  {
+    "name": "p4-gi-area-restir-clean",
+    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-area-restir-select"
+    ]
+  },
+  {
+    "name": "p4-gi-area-restir-render",
+    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-area-restir-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-area-restir-fresh",
+    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-area-restir-render"
+    ]
+  },
+  {
+    "name": "p4-gi-area-restir-judge",
+    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-area-restir-render",
+      "p4-gi-area-restir-fresh"
+    ]
   }
 ]
