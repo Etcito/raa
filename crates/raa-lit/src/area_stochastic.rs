@@ -9,7 +9,16 @@
 //! allocates nothing and touches no GPU state.
 
 use raa_core::RaaError;
+use raa_math::Vec3;
 use raa_pipeline::{AREA_STOCHASTIC_GPU_SIZE, MAX_STOCHASTIC_LIGHTS};
+use raa_shader::{LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS};
+
+use crate::area_shadow::{
+    AreaShadowCamera, AreaShadowSettings, AreaShadowTier, Candidate, SlotAssigner, rect_distance,
+    screen_coverage,
+};
+use crate::local_light::{LightHandle, LocalLightKind};
+use crate::local_lights::LocalLights;
 
 /// Byte offset of the packed light index of slot 0 (`lights: array<vec4<u32>, 2>`).
 const LIGHTS_AT: usize = 0;
@@ -214,4 +223,115 @@ fn put(table: &mut [u8; AREA_STOCHASTIC_GPU_SIZE], at: usize, bytes: &[u8; 4]) {
 fn read_u32(table: &[u8; AREA_STOCHASTIC_GPU_SIZE], at: usize) -> Option<u32> {
     let bytes: [u8; 4] = table.get(at..at + 4)?.try_into().ok()?;
     Some(u32::from_le_bytes(bytes))
+}
+
+/// Chooses which area lights hold the mid-tier slots and writes the slot table.
+///
+/// Handoff: `StochasticSelector` (`new`, `update`, `active`) in `crates/raa-lit/src/area_stochastic.rs`
+/// is attached by card 'raa-lit: mid-tier selection wired into LitRenderer::prepare and published through LitHandle', which calls `StochasticSelector::new`, `StochasticSelector::update` and `StochasticSelector::active`. Today `update` reads the settings, the camera, the lights and the record lanes that `HeroSelector::update` wrote, assigns the eight slots through the shared `SlotAssigner` (`crates/raa-lit/src/area_shadow.rs:257 SlotAssigner`) and encodes them with `write_table` (`crates/raa-lit/src/area_stochastic.rs:159 write_table`). It writes no record, allocates nothing and keeps only the slot handles, the candidate scratch and the generations between calls.
+#[derive(Debug)]
+pub struct StochasticSelector {
+    assigner: SlotAssigner<MAX_STOCHASTIC_LIGHTS>,
+    candidates: Vec<Candidate>,
+    weights: Vec<(LightHandle, u32, f32)>,
+    previous: [Option<LightHandle>; MAX_STOCHASTIC_LIGHTS],
+    generations: [u32; MAX_STOCHASTIC_LIGHTS],
+}
+
+impl Default for StochasticSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StochasticSelector {
+    /// Creates an empty selector: no slot is held and every generation is 0. The candidate and
+    /// weight scratch are allocated here, never in `update`.
+    pub fn new() -> StochasticSelector {
+        StochasticSelector {
+            assigner: SlotAssigner::new(),
+            candidates: Vec::with_capacity(MAX_LOCAL_LIGHTS),
+            weights: Vec::with_capacity(MAX_LOCAL_LIGHTS),
+            previous: [None; MAX_STOCHASTIC_LIGHTS],
+            generations: [0; MAX_STOCHASTIC_LIGHTS],
+        }
+    }
+
+    /// Number of mid-tier slots occupied after the last [`StochasticSelector::update`].
+    pub fn active(&self) -> u32 {
+        self.assigner.active()
+    }
+
+    /// Selects the mid-tier lights of this call and writes `out` (table, generations, active).
+    ///
+    /// `records` is the `LocalLights::write_gpu` output carrying the lanes of the last
+    /// `HeroSelector::update`; it is only read. The limit is `settings.count` (at most 8) for the
+    /// `Auto` tier and 0 for every other tier. Allocates nothing.
+    pub fn update(
+        &mut self,
+        area: &AreaShadowSettings,
+        settings: &StochasticShadowSettings,
+        camera: &AreaShadowCamera,
+        lights: &LocalLights,
+        records: &[u8; MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE],
+        out: &mut AreaStochasticFrame,
+    ) {
+        let limit = match area.tier {
+            AreaShadowTier::Auto => (settings.count as usize).min(MAX_STOCHASTIC_LIGHTS),
+            _ => 0,
+        };
+        self.candidates.clear();
+        self.weights.clear();
+        for (index, handle, light) in lights.world_lights() {
+            if !matches!(light.kind, LocalLightKind::Area) {
+                continue;
+            }
+            let position = Vec3::from_array(light.position);
+            let direction = Vec3::from_array(light.direction);
+            let distance = rect_distance(camera.eye, position, direction, light.size);
+            let weight = stochastic_weight(settings, area.band, distance);
+            let coverage = screen_coverage(camera, position, light.range);
+            if limit == 0 || weight <= 0.0 || coverage <= 0.0 || hero_shadowed(records, index) {
+                continue;
+            }
+            self.candidates.push(Candidate { handle, coverage });
+            self.weights.push((handle, index as u32, weight));
+        }
+        self.candidates.sort_unstable_by(|a, b| {
+            b.coverage
+                .total_cmp(&a.coverage)
+                .then(a.handle.cmp(&b.handle))
+        });
+        self.assigner.assign(&self.candidates, limit);
+
+        for (slot, held) in self.assigner.slots().iter().enumerate() {
+            if *held != self.previous[slot] {
+                self.generations[slot] = self.generations[slot].wrapping_add(1);
+            }
+        }
+        self.previous = *self.assigner.slots();
+
+        let held = *self.assigner.slots();
+        let slots: [Option<(u32, f32)>; MAX_STOCHASTIC_LIGHTS] = held.map(|slot| {
+            slot.and_then(|handle| self.weights.iter().find(|entry| entry.0 == handle))
+                .map(|entry| (entry.1, entry.2))
+        });
+        write_table(&mut out.table, &slots, limit as u32, settings.cells);
+        out.generations = self.generations;
+        out.active = self.assigner.active();
+    }
+}
+
+/// Whether light record `index` is fully hero-shadowed: its hero layer lane (byte 44, f32) is at
+/// least 4 and its `w_cone` lane (byte 48) is at most 0. Such a light gets no mid-tier slot.
+fn hero_shadowed(records: &[u8], index: usize) -> bool {
+    let base = index * LIGHT_GPU_SIZE;
+    let lane = |offset: usize| -> Option<f32> {
+        let bytes: [u8; 4] = records
+            .get(base + offset..base + offset + 4)?
+            .try_into()
+            .ok()?;
+        Some(f32::from_le_bytes(bytes))
+    };
+    matches!((lane(44), lane(48)), (Some(layer), Some(w_cone)) if layer >= 4.0 && w_cone <= 0.0)
 }

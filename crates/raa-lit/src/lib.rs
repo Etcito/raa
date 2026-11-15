@@ -61,8 +61,8 @@ pub use area_shadow::{
     tier_weights,
 };
 pub use area_stochastic::{
-    AreaStochasticFrame, StochasticShadowSettings, stochastic_weight, table_cells, table_limit,
-    table_slot, write_table,
+    AreaStochasticFrame, StochasticSelector, StochasticShadowSettings, stochastic_weight,
+    table_cells, table_limit, table_slot, write_table,
 };
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};

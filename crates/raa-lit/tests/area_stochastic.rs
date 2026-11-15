@@ -4,10 +4,13 @@
 
 use raa_core::RaaError;
 use raa_lit::{
-    AreaStochasticFrame, StochasticShadowSettings, stochastic_weight, table_cells, table_limit,
-    table_slot, write_table,
+    AreaShadowCamera, AreaShadowSettings, AreaShadowTier, AreaStochasticFrame, LocalLight,
+    LocalLightKind, LocalLights, MAX_LOCAL_LIGHTS, StochasticSelector, StochasticShadowSettings,
+    stochastic_weight, table_cells, table_limit, table_slot, write_table,
 };
+use raa_math::Vec3;
 use raa_pipeline::{AREA_STOCHASTIC_GPU_SIZE, MAX_STOCHASTIC_LIGHTS};
+use raa_shader::LIGHT_GPU_SIZE;
 
 fn settings(count: u32, distance: f32, cells: u32) -> StochasticShadowSettings {
     StochasticShadowSettings {
@@ -140,4 +143,268 @@ fn empty_frame_has_an_all_zero_table() {
     assert_eq!(table_limit(&frame.table), 0);
     assert_eq!(table_slot(&frame.table, 0), None);
     assert_eq!(AreaStochasticFrame::default(), frame);
+}
+
+const RECORDS: usize = MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE;
+const ORIGIN: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+const DOWN_Z: Vec3 = Vec3::new(0.0, 0.0, -1.0);
+
+fn camera(eye: Vec3) -> AreaShadowCamera {
+    AreaShadowCamera {
+        eye,
+        forward: DOWN_Z,
+        fov_y_rad: std::f32::consts::FRAC_PI_3,
+        viewport: (1280, 720),
+    }
+}
+
+fn area_at(position: Vec3, range: f32) -> LocalLight {
+    LocalLight {
+        kind: LocalLightKind::Area,
+        position: position.to_array(),
+        direction: DOWN_Z.to_array(),
+        range,
+        size: [1.0, 1.0],
+        ..LocalLight::default()
+    }
+}
+
+fn registry(lights: &[LocalLight]) -> LocalLights {
+    let mut registry = LocalLights::new();
+    for light in lights {
+        registry.add(*light).unwrap();
+    }
+    registry
+}
+
+fn defaults() -> AreaShadowSettings {
+    AreaShadowSettings {
+        tier: AreaShadowTier::Auto,
+        hero_count: 0,
+        hero_distance: 25.0,
+        fade_distance: 80.0,
+        band: 5.0,
+    }
+}
+
+fn one() -> StochasticShadowSettings {
+    StochasticShadowSettings {
+        count: 1,
+        ..StochasticShadowSettings::standard()
+    }
+}
+
+fn records_of(lights: &LocalLights) -> [u8; RECORDS] {
+    let mut records = [0u8; RECORDS];
+    lights.write_gpu(&mut records);
+    records
+}
+
+fn set_lane(records: &mut [u8; RECORDS], record: usize, offset: usize, value: f32) {
+    let start = record * LIGHT_GPU_SIZE + offset;
+    records[start..start + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn select(
+    selector: &mut StochasticSelector,
+    area: AreaShadowSettings,
+    eye: Vec3,
+    lights: &LocalLights,
+    records: &[u8; RECORDS],
+    out: &mut AreaStochasticFrame,
+) {
+    selector.update(&area, &one(), &camera(eye), lights, records, out);
+}
+
+#[test]
+fn nearest_light_takes_slot_zero_with_count_one() {
+    let lights = registry(&[
+        area_at(Vec3::new(0.0, 0.0, -10.0), 1.0),
+        area_at(Vec3::new(0.0, 0.0, -20.0), 1.0),
+    ]);
+    let records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+
+    assert_eq!(table_slot(&out.table, 0), Some((0, 1.0)));
+    assert_eq!(out.active, 1);
+    assert_eq!(selector.active(), 1);
+    assert_eq!(table_limit(&out.table), 1);
+    assert_eq!(table_cells(&out.table), 4);
+    assert_eq!(out.generations[0], 1);
+}
+
+#[test]
+fn identical_second_update_leaves_the_frame_unchanged() {
+    let lights = registry(&[
+        area_at(Vec3::new(0.0, 0.0, -10.0), 1.0),
+        area_at(Vec3::new(0.0, 0.0, -20.0), 1.0),
+    ]);
+    let records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+    let before = out;
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+    assert_eq!(out, before);
+}
+
+#[test]
+fn light_beyond_the_stochastic_distance_gets_no_slot() {
+    let lights = registry(&[area_at(Vec3::new(0.0, 0.0, -60.0), 1.0)]);
+    let records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+
+    assert_eq!(table_slot(&out.table, 0), None);
+    assert_eq!(out.active, 0);
+    assert_eq!(out.generations[0], 0);
+}
+
+#[test]
+fn hero_shadowed_light_is_excluded_unless_it_keeps_a_cone_weight() {
+    let lights = registry(&[area_at(Vec3::new(0.0, 0.0, -10.0), 1.0)]);
+    let mut records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+
+    set_lane(&mut records, 0, 44, 4.0);
+    set_lane(&mut records, 0, 48, 0.0);
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+    assert_eq!(table_slot(&out.table, 0), None);
+    assert_eq!(out.active, 0);
+
+    set_lane(&mut records, 0, 48, 0.5);
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+    assert_eq!(table_slot(&out.table, 0), Some((0, 1.0)));
+    assert_eq!(out.active, 1);
+}
+
+#[test]
+fn stochastic_slot_swaps_only_past_the_hysteresis_ratio() {
+    let lights = registry(&[
+        area_at(Vec3::new(0.0, 0.0, -10.0), 1.0),
+        area_at(Vec3::new(5.0, 0.0, -10.0), 1.0),
+    ]);
+    let records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+    assert_eq!(table_slot(&out.table, 0), Some((0, 1.0)));
+
+    // Ratio 1.05x, not above 1.25x: the near light keeps slot 0.
+    let eye = Vec3::new(3.0, 0.0, 0.0);
+    select(&mut selector, defaults(), eye, &lights, &records, &mut out);
+    assert_eq!(table_slot(&out.table, 0), Some((0, 1.0)));
+    assert_eq!(out.generations[0], 1);
+
+    // Ratio 1.51x, above 1.25x: the side light (index 1) takes slot 0.
+    let eye = Vec3::new(8.0, 0.0, 0.0);
+    select(&mut selector, defaults(), eye, &lights, &records, &mut out);
+    assert_eq!(table_slot(&out.table, 0), Some((1, 1.0)));
+    assert_eq!(out.generations[0], 2);
+}
+
+#[test]
+fn cone_tier_releases_the_slot_and_bumps_its_generation() {
+    let lights = registry(&[area_at(Vec3::new(0.0, 0.0, -10.0), 1.0)]);
+    let records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+    assert_eq!(out.generations[0], 1);
+
+    let cone = AreaShadowSettings {
+        tier: AreaShadowTier::Cone,
+        ..defaults()
+    };
+    select(&mut selector, cone, ORIGIN, &lights, &records, &mut out);
+    assert_eq!(table_limit(&out.table), 0);
+    assert_eq!(out.active, 0);
+    assert_eq!(table_slot(&out.table, 0), None);
+    assert_eq!(out.generations[0], 2);
+}
+
+#[test]
+fn point_lights_are_never_mid_tier_candidates() {
+    let point = LocalLight {
+        kind: LocalLightKind::Point,
+        position: [0.0, 0.0, -10.0],
+        range: 1.0,
+        ..LocalLight::default()
+    };
+    let lights = registry(&[point, area_at(Vec3::new(0.0, 0.0, -20.0), 1.0)]);
+    let records = records_of(&lights);
+    let mut selector = StochasticSelector::new();
+    let mut out = AreaStochasticFrame::empty();
+    select(
+        &mut selector,
+        defaults(),
+        ORIGIN,
+        &lights,
+        &records,
+        &mut out,
+    );
+
+    assert_eq!(table_slot(&out.table, 0), Some((1, 1.0)));
+    assert_eq!(out.active, 1);
 }
