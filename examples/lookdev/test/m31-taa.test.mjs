@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
+import { VALUES } from '../../../proofs/lib/proof.mjs';
 import scene from '../scenes/m31-taa.js';
 import * as geometry from '../lib/geometry.js';
 
@@ -100,13 +102,20 @@ test('posts, rails, plank and the ball travel box stay in view over the sway', (
 });
 
 const dist = process.env.LOOKDEV_DIST;
-test('the staged build lists the scene and stays within the wasm size limit', { skip: !dist }, async () => {
+test('the staged build lists the scene, keeps the budgeted brick wasm within WASM_GZIP_MAX and records the engine wasm', { skip: !dist }, async (t) => {
   const list = JSON.parse(readFileSync(`${dist}/scenes.json`, 'utf8'));
   const entries = list.filter(e => e.id === 'm31-taa');
   assert.equal(entries.length, 1);
   assert.deepEqual(entries[0], { id: 'm31-taa', milestone: 'm31', file: 'scenes/m31-taa.js' });
   const staged = (await import(new URL(`${dist}/scenes/m31-taa.js`, `file://${process.cwd()}/`))).default;
   assert.deepEqual(staged.variants.map(v => v.id), ['taa-off', 'taa-on']);
-  const { gzip } = JSON.parse(readFileSync(`${dist}/sizes.json`, 'utf8'));
-  assert.ok(Number.isInteger(gzip) && gzip <= 300000, `wasm gzip is ${gzip}, limit 300000`);
+  const { wasm, raw, gzip } = JSON.parse(readFileSync(`${dist}/sizes.json`, 'utf8'));
+  assert.equal(wasm, 'raa/pkg/raa_js_bg.wasm');
+  assert.ok(Number.isInteger(raw) && raw > 0, `engine wasm raw is ${raw}`);
+  assert.ok(Number.isInteger(gzip) && gzip > 0 && gzip <= raw, `engine wasm gzip is ${gzip}`);
+  t.diagnostic(`engine wasm (unbudgeted, docs/bricks.md) raw ${raw} B, gzip ${gzip} B`);
+  const buf = readFileSync(`${dist}/anim/pkg/raa_anim_js_bg.wasm`);
+  const g = gzipSync(buf, { level: 9 }).length;
+  assert.ok(g > 0 && g <= VALUES.WASM_GZIP_MAX, `anim brick wasm gzip is ${g}, limit ${VALUES.WASM_GZIP_MAX}`);
+  t.diagnostic(`anim brick wasm gzip ${g} B`);
 });
