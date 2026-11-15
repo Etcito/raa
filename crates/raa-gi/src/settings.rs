@@ -1,10 +1,12 @@
 //! The global-illumination settings of the S36 table (module m30): the [`GiSettings`] record with
 //! its defaults and domains, the optional [`GiSettingsPatch`] merged over it, the [`GiQuality`]
-//! volume size, the [`GiQualityPatch`] merged over it and the [`DebugView`] modes with their GPU
-//! codes and JS names.
+//! volume size, the [`GiQualityPatch`] merged over it, the [`DebugView`] modes with their GPU
+//! codes and JS names and the [`SsgiQuality`] screen-space trace table with its JS names and
+//! per-side slice and step counts.
 //!
 //! A patch is applied atomically: the merged fields are validated in key order and the base value
-//! is never changed. A refusal is `gi.invalid` and names the S36 field.
+//! is never changed. A refusal is `gi.invalid` and names the S36 field. `screenSpace` and
+//! `screenSpaceQuality` have no domain check, so they never refuse.
 
 use raa_core::RaaError;
 
@@ -70,6 +72,69 @@ impl DebugView {
     }
 }
 
+/// Handoff: `SsgiQuality` is taken over by the downstream cards
+/// `raa-js m30: screenSpace and screenSpaceQuality keys, typings and docs` and
+/// `raa-gi ssgi: SsgiPart, the gi.ssgi pass (order 44) and the binding-14 pick`, which call its
+/// methods `SsgiQuality::parse`, `SsgiQuality::as_str`, `SsgiQuality::slices` and
+/// `SsgiQuality::steps`. Today `parse` maps exactly `low`, `medium` and `high` to the variants
+/// and returns `None` for any other text, `as_str` returns those names, and `slices` and `steps`
+/// return the rank-table counts of the variant.
+///
+/// The screen-space GI quality (`screenSpaceQuality`): the horizon slice and step counts per side
+/// of the screen-space trace, with its JS name. [`Default`] is `Medium`, the GTAO default.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SsgiQuality {
+    /// 2 slices of 6 steps per side (`low`).
+    Low,
+    /// 4 slices of 8 steps per side (`medium`), the GTAO default of `gtao.wgsl`.
+    #[default]
+    Medium,
+    /// 6 slices of 12 steps per side (`high`).
+    High,
+}
+
+impl SsgiQuality {
+    /// The default quality, `Medium`.
+    pub const DEFAULT: SsgiQuality = SsgiQuality::Medium;
+
+    /// The horizon slices per side: Low 2, Medium 4, High 6.
+    pub fn slices(self) -> u32 {
+        match self {
+            SsgiQuality::Low => 2,
+            SsgiQuality::Medium => 4,
+            SsgiQuality::High => 6,
+        }
+    }
+
+    /// The steps per slice side: Low 6, Medium 8, High 12.
+    pub fn steps(self) -> u32 {
+        match self {
+            SsgiQuality::Low => 6,
+            SsgiQuality::Medium => 8,
+            SsgiQuality::High => 12,
+        }
+    }
+
+    /// The JS name of the quality: `low`, `medium` or `high`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SsgiQuality::Low => "low",
+            SsgiQuality::Medium => "medium",
+            SsgiQuality::High => "high",
+        }
+    }
+
+    /// The quality named `text` (exactly `low`, `medium` or `high`), or `None` for any other text.
+    pub fn parse(text: &str) -> Option<SsgiQuality> {
+        match text {
+            "low" => Some(SsgiQuality::Low),
+            "medium" => Some(SsgiQuality::Medium),
+            "high" => Some(SsgiQuality::High),
+            _ => None,
+        }
+    }
+}
+
 /// The global-illumination settings (S36). [`Default`] is the S36 table.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct GiSettings {
@@ -88,19 +153,31 @@ pub struct GiSettings {
     pub screen_traces: bool,
     /// `debugView`: the debug view (default none).
     pub debug_view: DebugView,
+    /// `screenSpace`: the screen-space GI pass is requested (default false).
+    pub screen_space: bool,
+    /// `screenSpaceQuality`: the screen-space trace quality (default medium).
+    pub screen_space_quality: SsgiQuality,
+}
+
+impl GiSettings {
+    /// The S36 table: GI off, intensity 1, environmentDiffuse 0, local-light shadows, reflections
+    /// and screen traces on, debugView none, screenSpace off at quality medium.
+    pub const DEFAULT: GiSettings = GiSettings {
+        enabled: false,
+        intensity: 1.0,
+        environment_diffuse: 0.0,
+        local_light_shadows: true,
+        reflections: true,
+        screen_traces: true,
+        debug_view: DebugView::None,
+        screen_space: false,
+        screen_space_quality: SsgiQuality::Medium,
+    };
 }
 
 impl Default for GiSettings {
     fn default() -> Self {
-        GiSettings {
-            enabled: false,
-            intensity: 1.0,
-            environment_diffuse: 0.0,
-            local_light_shadows: true,
-            reflections: true,
-            screen_traces: true,
-            debug_view: DebugView::None,
-        }
+        GiSettings::DEFAULT
     }
 }
 
@@ -115,11 +192,15 @@ pub struct GiSettingsPatch {
     pub reflections: Option<bool>,
     pub screen_traces: Option<bool>,
     pub debug_view: Option<DebugView>,
+    pub screen_space: Option<bool>,
+    pub screen_space_quality: Option<SsgiQuality>,
 }
 
 impl GiSettingsPatch {
     /// Handoff: `raa-gi: settings tests` calls `GiSettingsPatch::apply` (here), [`GiQualityPatch::apply`],
     /// [`DebugView::parse`], [`DebugView::as_str`], [`DebugView::code`] and [`crate::error::invalid`].
+    /// [`SsgiQuality::parse`], [`SsgiQuality::as_str`], [`SsgiQuality::slices`] and
+    /// [`SsgiQuality::steps`] are new.
     /// This method merges the `Some` fields over `current` in S36 key order and returns the new
     /// [`GiSettings`]; a refused `intensity` or `environmentDiffuse` is `gi.invalid` with its key
     /// message and changes nothing.
@@ -152,6 +233,10 @@ impl GiSettingsPatch {
             reflections: self.reflections.unwrap_or(current.reflections),
             screen_traces: self.screen_traces.unwrap_or(current.screen_traces),
             debug_view: self.debug_view.unwrap_or(current.debug_view),
+            screen_space: self.screen_space.unwrap_or(current.screen_space),
+            screen_space_quality: self
+                .screen_space_quality
+                .unwrap_or(current.screen_space_quality),
         })
     }
 }

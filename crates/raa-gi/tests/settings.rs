@@ -5,6 +5,7 @@ use raa_core::RaaError;
 use raa_gi::error::{GI_INVALID, invalid};
 use raa_gi::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
+    SsgiQuality,
 };
 
 const INTENSITY_MESSAGE: &str = "intensity: must be finite and in [0, 16]";
@@ -25,6 +26,8 @@ fn settings_default_is_the_s36_table() {
     assert!(settings.reflections);
     assert!(settings.screen_traces);
     assert_eq!(settings.debug_view, DebugView::None);
+    assert!(!settings.screen_space);
+    assert_eq!(settings.screen_space_quality, SsgiQuality::Medium);
 }
 
 #[test]
@@ -59,6 +62,28 @@ fn debug_view_table_round_trips() {
 }
 
 #[test]
+fn ssgi_quality_table_round_trips() {
+    let rows = [
+        (SsgiQuality::Low, "low", 2, 6),
+        (SsgiQuality::Medium, "medium", 4, 8),
+        (SsgiQuality::High, "high", 6, 12),
+    ];
+    for (quality, name, slices, steps) in rows {
+        assert_eq!(quality.as_str(), name);
+        assert_eq!(quality.slices(), slices);
+        assert_eq!(quality.steps(), steps);
+        assert_eq!(SsgiQuality::parse(name), Some(quality));
+    }
+    assert_eq!(SsgiQuality::parse("x"), None);
+    assert_eq!(SsgiQuality::default(), SsgiQuality::Medium);
+    assert_eq!(SsgiQuality::DEFAULT, SsgiQuality::Medium);
+    assert_eq!(
+        GiSettings::DEFAULT.screen_space_quality,
+        SsgiQuality::Medium
+    );
+}
+
+#[test]
 fn settings_patch_merges_omitted_fields() {
     let current = GiSettings {
         enabled: true,
@@ -68,6 +93,8 @@ fn settings_patch_merges_omitted_fields() {
         reflections: false,
         screen_traces: false,
         debug_view: DebugView::Distance,
+        screen_space: true,
+        screen_space_quality: SsgiQuality::High,
     };
     let merged = GiSettingsPatch {
         reflections: Some(true),
@@ -83,6 +110,34 @@ fn settings_patch_merges_omitted_fields() {
     assert!(merged.reflections);
     assert!(!merged.screen_traces);
     assert_eq!(merged.debug_view, DebugView::Levels);
+    assert!(merged.screen_space);
+    assert_eq!(merged.screen_space_quality, SsgiQuality::High);
+}
+
+#[test]
+fn screen_space_patch_merges() {
+    let patch = GiSettingsPatch {
+        enabled: None,
+        intensity: None,
+        environment_diffuse: None,
+        local_light_shadows: None,
+        reflections: None,
+        screen_traces: None,
+        debug_view: None,
+        screen_space: Some(true),
+        screen_space_quality: Some(SsgiQuality::High),
+    };
+    let merged = patch.apply(&GiSettings::DEFAULT).expect("valid patch");
+    assert!(merged.screen_space);
+    assert_eq!(merged.screen_space_quality, SsgiQuality::High);
+    assert_eq!(
+        merged,
+        GiSettings {
+            screen_space: true,
+            screen_space_quality: SsgiQuality::High,
+            ..GiSettings::DEFAULT
+        }
+    );
 }
 
 #[test]
@@ -136,6 +191,8 @@ fn refused_apply_leaves_the_input_unchanged() {
         reflections: false,
         screen_traces: true,
         debug_view: DebugView::Radiance,
+        screen_space: false,
+        screen_space_quality: SsgiQuality::Low,
     };
     let before = current;
     let patch = GiSettingsPatch {

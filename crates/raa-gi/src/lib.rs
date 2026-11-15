@@ -22,6 +22,7 @@ pub use stats::GiStats;
 
 pub use settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
+    SsgiQuality,
 };
 
 pub use membership::{Driver, InstanceGi};
