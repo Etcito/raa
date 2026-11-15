@@ -42,6 +42,20 @@ struct AreaShadowBindings {
     temporal: Vec<wgpu::BindGroup>,
     spatial_h: Vec<wgpu::BindGroup>,
     spatial_v: Vec<wgpu::BindGroup>,
+    spatial_v_broadcast: Vec<wgpu::BindGroup>,
+}
+
+/// The shared views the ReSTIR tier writes and binds: the D2Array raw history view, the R32Float
+/// depth pair's write and read views, the 1x1 pyramid, 1x1x1 SDF-field and 64-B SDF-uniform
+/// dummies, and `parity`, the depth pair's `state().write_index()`.
+pub(crate) struct AreaSharedViews<'a> {
+    pub(crate) raw: &'a wgpu::TextureView,
+    pub(crate) depth_write: &'a wgpu::TextureView,
+    pub(crate) depth_read: &'a wgpu::TextureView,
+    pub(crate) dummy_pyramid: &'a wgpu::TextureView,
+    pub(crate) dummy_sdf_field: &'a wgpu::TextureView,
+    pub(crate) dummy_sdf_uniform: &'a wgpu::Buffer,
+    pub(crate) parity: usize,
 }
 
 /// A create-texture helper of the resource set: one mip, one sample, `layers` array layers (or
@@ -362,6 +376,77 @@ impl AreaShadowResources {
         inputs: &AreaShadowInputs<'_>,
         limit: u32,
     ) -> AreaShadowWork<'a> {
+        self.refresh(gpu, pipelines, targets, inputs);
+        let bindings = self.bindings.as_ref().expect("bindings built by refresh");
+        let groups = cpu::groups_for(limit).min(self.groups) as usize;
+        let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v.len());
+        AreaShadowWork {
+            trace: &bindings.trace,
+            temporal: &bindings.temporal[..groups],
+            spatial_h: &bindings.spatial_h[..groups],
+            spatial_v: &bindings.spatial_v[..layers],
+            viewport: self.viewport,
+        }
+    }
+
+    /// The `AreaShadowWork` of the ReSTIR tier, under the cache rules of `work`: the trace group,
+    /// `temporal[..1]`, `spatial_h[..1]`, the broadcast vertical groups
+    /// `[..limit.min(8).div_ceil(4)]` (none when `limit` is 0) and the viewport. Broadcast group
+    /// l binds raw layer 0 at 3 and 4, mask layer l at 5 and dispatch[l] at 7, so the vertical
+    /// spatial pass writes the ratio of history group 0 into every channel of mask layer l. It
+    /// is meant for allocations with groups = 1.
+    ///
+    /// Handoff: card 'raa-gi: gi.area-shadow part runs the ReSTIR ultra tier on Restir frames'
+    /// takes over `AreaShadowResources::work_restir`: it calls `AreaShadowResources::work_restir`
+    /// and `AreaShadowResources::shared_views` on Restir frames, and card 'raa-gi:
+    /// RestirResources (reservoir buffers, params, LTC atlas, bind group)' reads
+    /// `AreaSharedViews` from `AreaShadowResources::shared_views` to bind the raw layer, the
+    /// depth pair and the dummies; today both return the views and groups described above. It
+    /// cites the Handoffs at crates/raa-gi/src/parts/area_shadow/passes.rs:200
+    /// `AreaShadowPipelines` and crates/raa-gi/src/parts/area_shadow/resources.rs:169
+    /// `AreaShadowResources` and does not restate them.
+    pub(crate) fn work_restir<'a>(
+        &'a mut self,
+        gpu: &GpuContext,
+        pipelines: &AreaShadowPipelines,
+        targets: &Targets,
+        inputs: &AreaShadowInputs<'_>,
+        limit: u32,
+    ) -> AreaShadowWork<'a> {
+        self.refresh(gpu, pipelines, targets, inputs);
+        let bindings = self.bindings.as_ref().expect("bindings built by refresh");
+        let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v_broadcast.len());
+        AreaShadowWork {
+            trace: &bindings.trace,
+            temporal: &bindings.temporal[..1],
+            spatial_h: &bindings.spatial_h[..1],
+            spatial_v: &bindings.spatial_v_broadcast[..layers],
+            viewport: self.viewport,
+        }
+    }
+
+    /// The shared views of `AreaSharedViews`; `parity` is the depth pair's write index.
+    pub(crate) fn shared_views(&self) -> AreaSharedViews<'_> {
+        AreaSharedViews {
+            raw: &self.raw_view,
+            depth_write: self.depth.write_view(),
+            depth_read: self.depth.read_view(),
+            dummy_pyramid: &self.dummy_pyramid,
+            dummy_sdf_field: &self.dummy_sdf_field,
+            dummy_sdf_uniform: &self.dummy_sdf_uniform,
+            parity: self.depth.state().write_index(),
+        }
+    }
+
+    /// Rebuilds the cached bind groups after `invalidate_bindings`, a parity change or a changed
+    /// input buffer or view.
+    fn refresh(
+        &mut self,
+        gpu: &GpuContext,
+        pipelines: &AreaShadowPipelines,
+        targets: &Targets,
+        inputs: &AreaShadowInputs<'_>,
+    ) {
         let parity = self.depth.state().write_index();
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.parity != parity
@@ -375,16 +460,6 @@ impl AreaShadowResources {
         });
         if stale {
             self.bindings = Some(self.build_bindings(gpu, pipelines, targets, inputs, parity));
-        }
-        let bindings = self.bindings.as_ref().expect("bindings built above");
-        let groups = cpu::groups_for(limit).min(self.groups) as usize;
-        let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v.len());
-        AreaShadowWork {
-            trace: &bindings.trace,
-            temporal: &bindings.temporal[..groups],
-            spatial_h: &bindings.spatial_h[..groups],
-            spatial_v: &bindings.spatial_v[..layers],
-            viewport: self.viewport,
         }
     }
 
@@ -500,6 +575,26 @@ impl AreaShadowResources {
                 )
             })
             .collect();
+        let spatial_v_broadcast = self
+            .mask_layers
+            .iter()
+            .enumerate()
+            .map(|(layer, mask)| {
+                group(
+                    device,
+                    "raa-gi.area-shadow.spatial-v-broadcast",
+                    &pipelines.spatial_layout,
+                    &[
+                        (1, texture_resource(self.depth.write_view())),
+                        (2, texture_resource(targets.normal())),
+                        (3, texture_resource(&self.raw_layers[0])),
+                        (4, texture_resource(&self.raw_layers[0])),
+                        (5, texture_resource(mask)),
+                        (7, self.dispatch[layer].as_entire_binding()),
+                    ],
+                )
+            })
+            .collect();
         AreaShadowBindings {
             gi_frame: inputs.gi_frame.clone(),
             lit_frame: inputs.lit_frame.clone(),
@@ -513,6 +608,7 @@ impl AreaShadowResources {
             temporal,
             spatial_h,
             spatial_v,
+            spatial_v_broadcast,
         }
     }
 }
@@ -621,5 +717,57 @@ mod tests {
         assert_eq!(resources.history_mask(), 0b11);
         resources.invalidate_group(1);
         assert_eq!(resources.history_mask(), 0b01);
+    }
+
+    #[test]
+    fn work_restir_slices_the_broadcast_groups_in_a_validation_scope() {
+        let test = "work_restir_slices_the_broadcast_groups_in_a_validation_scope";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        let pipelines = AreaShadowPipelines::new(&gpu, &shared.compute_group1_layout());
+        let targets = Targets::new(&gpu, (64, 32));
+        let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
+        let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
+        let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
+        let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raa-gi.area-shadow.test.sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let inputs = AreaShadowInputs {
+            gi_frame: &gi_frame,
+            lit_frame: &lit_frame,
+            table: &table,
+            sampler: &sampler,
+            pyramid: None,
+            sdf: None,
+        };
+
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut resources = AreaShadowResources::new(&gpu, (64, 32), 1);
+        let work = resources.work_restir(&gpu, &pipelines, &targets, &inputs, 8);
+        assert_eq!(work.temporal.len(), 1);
+        assert_eq!(work.spatial_h.len(), 1);
+        assert_eq!(work.spatial_v.len(), 2);
+        assert_eq!(work.viewport, (64, 32));
+        let work = resources.work_restir(&gpu, &pipelines, &targets, &inputs, 3);
+        assert_eq!(work.spatial_v.len(), 1);
+        let work = resources.work_restir(&gpu, &pipelines, &targets, &inputs, 0);
+        assert_eq!(work.spatial_v.len(), 0);
+        assert!(
+            block_on(scope.pop()).is_none(),
+            "the broadcast bind groups create without a validation error"
+        );
+
+        let before = resources.shared_views().parity;
+        assert_eq!(before, resources.depth.state().write_index());
+        resources.commit();
+        let after = resources.shared_views().parity;
+        assert_eq!(after, resources.depth.state().write_index());
+        assert_ne!(before, after);
     }
 }

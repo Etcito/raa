@@ -316,24 +316,46 @@ impl AreaShadowPipelines {
         pass.set_bind_group(2, work.trace, &[]);
         dispatch(&mut pass, width, height);
 
+        self.record_denoise(&mut pass, work);
+        true
+    }
+
+    /// Records the denoise of `work` into an open pass: the temporal pipeline over every
+    /// `work.temporal` group, then spatial_h over every `work.spatial_h` group, then spatial_v
+    /// over every `work.spatial_v` group, each bound at group 0 and dispatched
+    /// `groups_for(width) x groups_for(height) x 1` of `work.viewport`. It neither begins a pass
+    /// nor sets group 1 or 2.
+    ///
+    /// Handoff: card 'raa-gi: RestirPipelines and the ReSTIR compute pass record' takes over
+    /// `AreaShadowPipelines::record_denoise`: it calls it inside its own compute pass after the
+    /// ReSTIR resolve wrote (S, U~, S, U~) into raw layer 0 and the linear depth into the depth
+    /// pair, with the `AreaShadowWork` of `AreaShadowResources::work_restir`; today
+    /// `AreaShadowPipelines::record` calls it after the trace dispatch. It cites the Handoff at
+    /// crates/raa-gi/src/parts/area_shadow/passes.rs:200 `AreaShadowPipelines` and does not
+    /// restate it.
+    pub(crate) fn record_denoise(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        work: &AreaShadowWork<'_>,
+    ) {
+        let (width, height) = work.viewport;
         pass.set_pipeline(&self.temporal);
         for group in work.temporal {
             pass.set_bind_group(0, group, &[]);
-            dispatch(&mut pass, width, height);
+            dispatch(pass, width, height);
         }
 
         pass.set_pipeline(&self.spatial_h);
         for group in work.spatial_h {
             pass.set_bind_group(0, group, &[]);
-            dispatch(&mut pass, width, height);
+            dispatch(pass, width, height);
         }
 
         pass.set_pipeline(&self.spatial_v);
         for group in work.spatial_v {
             pass.set_bind_group(0, group, &[]);
-            dispatch(&mut pass, width, height);
+            dispatch(pass, width, height);
         }
-        true
     }
 }
 
