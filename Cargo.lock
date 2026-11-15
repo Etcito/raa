@@ -964,6 +964,7 @@ dependencies = [
  "raa-skin",
  "raa-sky",
  "raa-ssr",
+ "raa-taa",
  "raa-tonemap",
  "raa-transmission",
  "raa-vg",

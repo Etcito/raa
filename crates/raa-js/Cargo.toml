@@ -50,6 +50,7 @@ raa-cel = { path = "../raa-cel" }
 raa-cluster = { path = "../raa-cluster" }
 raa-vg = { path = "../raa-vg" }
 raa-gi = { path = "../raa-gi" }
+raa-taa = { path = "../raa-taa" }
 raa-grading = { path = "../raa-grading" }
 raa-deform = { path = "../raa-deform" }
 raa-sdf-trace = { path = "../raa-sdf-trace" }

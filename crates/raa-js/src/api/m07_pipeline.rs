@@ -368,7 +368,8 @@ impl Engine {
     }
 }
 
-/// Each post pass owns private scratch textures and (DOF) autofocus history.
+/// Each post pass owns private scratch textures and (DOF) autofocus history; each
+/// viewport also owns its TAA history.
 struct ViewPost {
     ssr: raa_ssr::SsrHandle,
     dof: raa_dof::DofHandle,
@@ -376,6 +377,7 @@ struct ViewPost {
     bloom: raa_bloom::BloomHandle,
     grading: raa_grading::GradingHandle,
     cel: raa_cel::CelHandle,
+    taa: raa_taa::TaaHandle,
 }
 #[derive(Default)]
 struct ViewPosts(Vec<ViewPost>);
@@ -407,6 +409,7 @@ fn configure_views(
             [x, y, right.saturating_sub(x), bottom.saturating_sub(y)]
         })
         .collect();
+    let frame = st.lit.handle().frame_buffer();
     let mut p = st.pipeline.borrow_mut();
     p.set_view_rects(&rects);
     if st.features.get::<ViewPosts>().is_none() {
@@ -427,6 +430,7 @@ fn configure_views(
             bloom: raa_bloom::BloomFeature::install(gpu, &temp)?,
             grading: raa_grading::GradingFeature::install(gpu, &temp)?,
             cel: raa_cel::CelFeature::install(gpu, &temp)?,
+            taa: raa_taa::TaaFeature::install(gpu, &temp, &frame)?,
         };
         p.set_view_passes(posts.0.len(), &mut temp.borrow_mut());
         posts.0.push(post);
@@ -512,6 +516,11 @@ pub(crate) fn prepare_view(
         }
         // Consume the viewport's one-shot discontinuity mark before staging its camera.
         let discontinuity = st.scene_invocation.prepare(index);
+        if discontinuity {
+            if let Some(post) = st.features.get::<ViewPosts>().and_then(|p| p.0.get(index)) {
+                post.taa.invalidate();
+            }
+        }
         st.lit.prepare_scene_view(index, discontinuity);
         st.lit.prepare(
             gpu,
