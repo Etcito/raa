@@ -645,7 +645,7 @@ pub(crate) fn needs_reallocation(
 mod tests {
     use super::*;
     use crate::parts::GiShared;
-    use raa_core::testing::{block_on, skip, software_gpu};
+    use raa_core::testing::{block_on, skip};
 
     #[test]
     fn resource_bytes_matches_the_hand_derivation() {
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn resources_allocate_and_bind_in_a_validation_scope() {
         let test = "resources_allocate_and_bind_in_a_validation_scope";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn work_restir_slices_the_broadcast_groups_in_a_validation_scope() {
         let test = "work_restir_slices_the_broadcast_groups_in_a_validation_scope";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };

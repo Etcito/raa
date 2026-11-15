@@ -243,7 +243,7 @@ mod tests {
     use super::super::resources::AreaShadowResources;
     use super::*;
     use crate::parts::GiShared;
-    use raa_core::testing::{block_on, skip, software_gpu};
+    use raa_core::testing::{block_on, skip};
 
     fn uniform(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
         gpu.device().create_buffer(&wgpu::BufferDescriptor {
@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn restir_resources_allocate_and_bind_in_a_validation_scope() {
         let test = "restir_resources_allocate_and_bind_in_a_validation_scope";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };

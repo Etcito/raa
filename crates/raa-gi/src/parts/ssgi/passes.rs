@@ -190,12 +190,12 @@ impl SsgiPipelines {
 mod tests {
     use super::*;
     use crate::parts::GiShared;
-    use raa_core::testing::{block_on, skip, software_gpu};
+    use raa_core::testing::{block_on, skip};
 
     #[test]
     fn pipelines_build_in_a_validation_scope_and_record_nothing_for_an_empty_viewport() {
         let test = "pipelines_build_in_a_validation_scope_and_record_nothing_for_an_empty_viewport";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };

@@ -460,10 +460,49 @@ fn uniform_entry(binding: u32, size: u64) -> wgpu::BindGroupLayoutEntry {
 
 include!(concat!(env!("OUT_DIR"), "/gi_parts.rs"));
 
+/// The software device of one raa-gi unit test, held under the serial GPU lock of this test
+/// binary.
+///
+/// Mesa lavapipe (llvmpipe 26.0.3, LLVM 21) segfaults when one thread destroys its device while
+/// another thread of the same process creates compute pipelines on another lavapipe device;
+/// `cargo test -p raa-gi --lib` hit it with `parts::tests` beside
+/// `area_shadow::resources::tests` running in parallel. Every GPU unit test of the crate takes
+/// its device here instead of `raa_core::testing::software_gpu`: the lock is held from before
+/// the device exists until after it is dropped (`gpu` is declared before `_serial`, so it drops
+/// first), and the CPU tests still run in parallel. The lock is a const-initialised test-only
+/// `Mutex`, not a lazy global, and a poisoned lock (a failed GPU test) is taken over.
+#[cfg(test)]
+pub(crate) struct SerialGpu {
+    gpu: GpuContext,
+    _serial: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for SerialGpu {
+    type Target = GpuContext;
+
+    fn deref(&self) -> &GpuContext {
+        &self.gpu
+    }
+}
+
+/// `raa_core::testing::software_gpu` under the serial GPU lock (see [`SerialGpu`]).
+#[cfg(test)]
+pub(crate) fn serial_software_gpu() -> Option<SerialGpu> {
+    static GPU_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let serial = GPU_TESTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    raa_core::testing::software_gpu().map(|gpu| SerialGpu {
+        gpu,
+        _serial: serial,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raa_core::testing::{skip, software_gpu};
+    use raa_core::testing::skip;
 
     fn one_pixel_view(gpu: &GpuContext) -> wgpu::TextureView {
         let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -486,7 +525,7 @@ mod tests {
     #[test]
     fn pyramid_and_trace_follow_their_setters_and_clear() {
         let test = "pyramid_and_trace_follow_their_setters_and_clear";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -513,7 +552,7 @@ mod tests {
     #[test]
     fn probe_output_follows_its_setter_and_clear() {
         let test = "probe_output_follows_its_setter_and_clear";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };

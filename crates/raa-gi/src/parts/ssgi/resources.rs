@@ -353,12 +353,12 @@ fn params_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raa_core::testing::{skip, software_gpu};
+    use raa_core::testing::skip;
 
     #[test]
     fn allocated_bytes_matches_ssgi_bytes() {
         let test = "allocated_bytes_matches_ssgi_bytes";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };

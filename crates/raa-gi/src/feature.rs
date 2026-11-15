@@ -776,7 +776,7 @@ mod tests {
     //! is left at its default of no light.
 
     use super::*;
-    use raa_core::testing::{skip, software_gpu};
+    use raa_core::testing::skip;
     use raa_core::{FrameGraph, MaterialId, OffscreenTarget};
     use raa_lit::{AttributedMesh, LitOptions};
     use raa_math::{Quat, Vec3};
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn gi_off_records_nothing() {
         let test = "gi_off_records_nothing";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -958,7 +958,7 @@ mod tests {
     #[test]
     fn second_install_refuses_and_adds_nothing() {
         let test = "second_install_refuses_and_adds_nothing";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn enabled_records_gi_volume_once_per_frame() {
         let test = "enabled_records_gi_volume_once_per_frame";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -1000,7 +1000,7 @@ mod tests {
     #[test]
     fn history_copy_is_valid_after_two_active_frames() {
         let test = "history_copy_is_valid_after_two_active_frames";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -1020,7 +1020,7 @@ mod tests {
     #[test]
     fn invalidate_history_clears_validity_on_the_next_frame() {
         let test = "invalidate_history_clears_validity_on_the_next_frame";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -1037,7 +1037,7 @@ mod tests {
     #[test]
     fn screen_traces_off_records_only_gi_volume() {
         let test = "screen_traces_off_records_only_gi_volume";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn disabling_gi_volume_drops_the_volume() {
         let test = "disabling_gi_volume_drops_the_volume";
-        let Some(gpu) = software_gpu() else {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
             skip(test, "software_gpu returned None");
             return;
         };
