@@ -27,9 +27,11 @@ use std::rc::Rc;
 
 use self::passes::{AreaShadowPipelines, AreaShadowWork};
 use self::resources::{AreaShadowInputs, AreaShadowResources, needs_reallocation, resource_bytes};
+use self::restir::RestirPipelines;
+use self::restir_resources::{RestirResources, needs_restir_reallocation, restir_resource_bytes};
 use super::{GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
-use raa_lit::{LitHandle, table_limit};
+use raa_lit::{LitHandle, StochasticMode, table_limit};
 use raa_pipeline::{
     FeaturePass, LightingResources, MAX_STOCHASTIC_LIGHTS, PrepareCtx, RecordCtx, Targets,
 };
@@ -46,6 +48,12 @@ pub fn area_shadow_bytes(viewport: (u32, u32), groups: u32) -> u64 {
     resource_bytes(viewport, groups)
 }
 
+/// The GPU bytes of the ReSTIR ultra tier at `viewport`: one `AreaShadowResources` of 1 history
+/// group plus one `RestirResources` (`restir_resource_bytes`): `81_297_621` for 1280x720.
+pub fn area_restir_bytes(viewport: (u32, u32)) -> u64 {
+    resource_bytes(viewport, 1) + restir_resource_bytes(viewport)
+}
+
 /// Handoff: card 'raa-gi: AreaShadowPart and the gi.area-shadow feature pass (order 43) publishing
 /// the mask' replaces this body. Today `install` adds nothing to `ctx` and returns `Ok(())`; the
 /// generated `install_parts` of `parts.rs` calls it once per GI feature install, in file-name order.
@@ -57,6 +65,9 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
         state: RefCell::new(AreaShadowState {
             pipelines,
             resources: None,
+            restir: None,
+            restir_pipelines: None,
+            mode: StochasticMode::Stratified,
             key: None,
             generations: [0; MAX_STOCHASTIC_LIGHTS],
             sdf: None,
@@ -99,12 +110,21 @@ struct AreaShadowPart {
 }
 
 /// The mutable state of [`AreaShadowPart`]: the pipelines, the resources keyed by
-/// (viewport, groups), the slot generations seen last frame, the SDF inputs fetched in prepare,
+/// (viewport, groups), the ReSTIR resources and lazily built ReSTIR pipelines, the mode of the
+/// last prepared frame, the slot generations seen last frame, the SDF inputs fetched in prepare,
 /// the slot limit and frame counter, and the activity, enable, pending-invalidate and recordable
 /// flags.
+///
+/// The ReSTIR tier calls `RestirResources` (Handoff at restir_resources.rs:62
+/// `RestirResources`), `RestirPipelines` (Handoff at restir.rs:199 `RestirPipelines`),
+/// `AreaShadowResources::work_restir` and `shared_views` (Handoff at resources.rs:408
+/// `work_restir`) and `restir_cpu::remap_table` (Handoff at restir_cpu.rs:299 `remap_table`).
 struct AreaShadowState {
     pipelines: AreaShadowPipelines,
     resources: Option<AreaShadowResources>,
+    restir: Option<RestirResources>,
+    restir_pipelines: Option<RestirPipelines>,
+    mode: StochasticMode,
     key: Option<((u32, u32), u32)>,
     generations: [u32; MAX_STOCHASTIC_LIGHTS],
     sdf: Option<(wgpu::TextureView, wgpu::Buffer)>,
@@ -131,15 +151,21 @@ impl GiPart for AreaShadowPart {
         self.state.borrow_mut().active = active;
     }
 
-    /// Sets the pending flag, applied as `invalidate_all` in the next pass prepare.
+    /// Sets the pending flag, applied as `invalidate_all` in the next pass prepare, and
+    /// invalidates the reservoir history.
     fn invalidate_history(&self) {
-        self.state.borrow_mut().pending = true;
+        let mut state = self.state.borrow_mut();
+        state.pending = true;
+        if let Some(restir) = state.restir.as_mut() {
+            restir.invalidate();
+        }
     }
 
-    /// Drops the resources, the key, the SDF inputs and the activity.
+    /// Drops the resources (the pipelines are kept), the key, the SDF inputs and the activity.
     fn release(&self) {
         let mut state = self.state.borrow_mut();
         state.resources = None;
+        state.restir = None;
         state.key = None;
         state.sdf = None;
         state.limit = 0;
@@ -147,13 +173,18 @@ impl GiPart for AreaShadowPart {
         state.recordable = false;
     }
 
-    /// The GPU bytes of the current resources, or 0 without them.
+    /// The GPU bytes of the current resources and ReSTIR resources, or 0 without them.
     fn allocated_bytes(&self) -> u64 {
-        self.state
-            .borrow()
+        let state = self.state.borrow();
+        let shadow = state
             .resources
             .as_ref()
-            .map_or(0, AreaShadowResources::allocated_bytes)
+            .map_or(0, AreaShadowResources::allocated_bytes);
+        let restir = state
+            .restir
+            .as_ref()
+            .map_or(0, RestirResources::allocated_bytes);
+        shadow + restir
     }
 }
 
@@ -190,8 +221,9 @@ impl FeaturePass for GiAreaShadowPass {
         }
     }
 
-    /// Allocates or reallocates the resources, invalidates changed history groups, writes the
-    /// params, fetches the optional SDF inputs and publishes the mask and slot table.
+    /// Allocates or reallocates the resources (and the ReSTIR resources on Restir frames),
+    /// invalidates changed history groups, writes the params, fetches the optional SDF inputs and
+    /// publishes the mask and slot table.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let frame = self.part.lit.area_stochastic();
         let limit = table_limit(&frame.table).min(8);
@@ -200,18 +232,38 @@ impl FeaturePass for GiAreaShadowPass {
         let missing_frame = self.part.shared.frame_buffer().is_none();
         if !state.active || !state.pass_enabled || limit == 0 || missing_frame {
             state.resources = None;
+            state.restir = None;
             state.key = None;
             state.sdf = None;
             state.limit = 0;
             ctx.lighting.clear_area_shadow();
             return Ok(());
         }
-        let groups = cpu::groups_for(limit);
+        let restir_mode = frame.mode == StochasticMode::Restir;
+        let groups = if restir_mode {
+            1
+        } else {
+            cpu::groups_for(limit)
+        };
         if needs_reallocation(state.key, ctx.size, groups) {
             state.resources = Some(AreaShadowResources::new(ctx.gpu, ctx.size, groups));
             state.key = Some(((ctx.size.0.max(1), ctx.size.1.max(1)), groups));
             state.generations = [0; MAX_STOCHASTIC_LIGHTS];
         }
+        if restir_mode {
+            if state.restir_pipelines.is_none() {
+                let layout = self.part.shared.compute_group1_layout();
+                state.restir_pipelines = Some(RestirPipelines::new(ctx.gpu, &layout));
+            }
+            let current = state.restir.as_ref().map(RestirResources::viewport);
+            if needs_restir_reallocation(current, ctx.size) {
+                state.restir = Some(RestirResources::new(ctx.gpu, ctx.size));
+            }
+        } else {
+            state.restir = None;
+        }
+        let mode_changed = state.mode != frame.mode;
+        state.mode = frame.mode;
         let pending = std::mem::take(&mut state.pending);
         let sdf = self.part.shared.trace().and_then(|handle| {
             let mut scene = handle.try_borrow_mut().ok()?;
@@ -220,6 +272,7 @@ impl FeaturePass for GiAreaShadowPass {
         });
         let AreaShadowState {
             resources,
+            restir,
             generations,
             sdf: sdf_slot,
             frame_index,
@@ -230,8 +283,28 @@ impl FeaturePass for GiAreaShadowPass {
         let Some(resources) = resources.as_mut() else {
             return Ok(());
         };
-        if pending {
+        if pending || mode_changed {
             resources.invalidate_all();
+        }
+        if let Some(restir) = restir.as_mut() {
+            if mode_changed {
+                restir.invalidate();
+            }
+            let remap =
+                restir_cpu::remap_table(generations, &frame.generations, restir.history_valid());
+            if *generations != frame.generations {
+                resources.invalidate_group(0);
+            }
+            *generations = frame.generations;
+            *frame_index = frame_index.wrapping_add(1);
+            resources.write_params(ctx.gpu, *frame_index, limit);
+            restir.write_params(ctx.gpu, *frame_index, &remap);
+            *sdf_slot = sdf;
+            ctx.lighting
+                .set_area_shadow(resources.mask_view(), &frame.table)?;
+            *limit_slot = limit;
+            *recordable = true;
+            return Ok(());
         }
         for group in 0..groups {
             let first = 2 * group as usize;
@@ -283,11 +356,29 @@ impl FeaturePass for GiAreaShadowPass {
         let AreaShadowState {
             pipelines,
             resources,
+            restir,
+            restir_pipelines,
             ..
         } = state;
         let Some(resources) = resources.as_mut() else {
             return Ok(());
         };
+        if let (Some(restir), Some(restir_pipelines)) = (restir.as_mut(), restir_pipelines.as_ref())
+        {
+            let shared = resources.shared_views();
+            let group2 = restir
+                .bind_group(ctx.gpu, restir_pipelines, ctx.targets, &inputs, &shared)
+                .clone();
+            let recorded = {
+                let work = resources.work_restir(ctx.gpu, pipelines, ctx.targets, &inputs, limit);
+                restir_pipelines.record(ctx.encoder, &group1, &group2, pipelines, &work)
+            };
+            if recorded {
+                resources.commit();
+                restir.commit();
+            }
+            return Ok(());
+        }
         let recorded = {
             let work: AreaShadowWork<'_> =
                 resources.work(ctx.gpu, pipelines, ctx.targets, &inputs, limit);
@@ -313,5 +404,11 @@ mod tests {
     #[test]
     fn area_shadow_bytes_matches_the_hand_derivation() {
         assert_eq!(area_shadow_bytes((1280, 720), 2), 66_355_349);
+    }
+
+    #[test]
+    fn area_restir_bytes_matches_the_contract() {
+        assert_eq!(area_restir_bytes((1280, 720)), 81_297_621);
+        assert_eq!(area_restir_bytes((320, 180)), 5_265_621);
     }
 }

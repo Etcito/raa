@@ -35,11 +35,13 @@ use std::rc::Rc;
 
 use raa_core::testing::{block_on, skip, software_gpu};
 use raa_core::{FrameGraph, GpuContext, OffscreenTarget};
-use raa_gi::parts::area_shadow::{AREA_SHADOW_ORDER, AREA_SHADOW_PASS, area_shadow_bytes};
+use raa_gi::parts::area_shadow::{
+    AREA_SHADOW_ORDER, AREA_SHADOW_PASS, area_restir_bytes, area_shadow_bytes,
+};
 use raa_gi::{GiFeature, GiHandle, GiSettingsPatch, GiStats};
 use raa_lit::{
-    AttributedMesh, LitOptions, LitRenderer, LocalLight, LocalLightKind, StochasticShadowSettings,
-    SurfaceMaterial, install_local_lights, table_limit,
+    AttributedMesh, LitOptions, LitRenderer, LocalLight, LocalLightKind, StochasticMode,
+    StochasticShadowSettings, SurfaceMaterial, install_local_lights, table_limit,
 };
 use raa_math::{Quat, Vec3};
 use raa_pipeline::Pipeline;
@@ -322,4 +324,62 @@ fn disabled_gi_allocates_nothing_and_records_no_validation_error() {
         0,
         "a further 2 frames allocate nothing"
     );
+}
+
+/// The ReSTIR ultra tier on the same rig and inputs as the file header states: 8 Restir frames
+/// stay valid, the lit frame publishes mode Restir with one occupied slot, the Restir resources
+/// add exactly `area_restir_bytes(SIZE)` over `count 0`, and the standard (Stratified) settings
+/// add exactly `area_shadow_bytes(SIZE, 2)` over it.
+#[test]
+fn restir_mode_publishes_the_mask_and_allocates_its_resources() {
+    let test = "restir_mode_publishes_the_mask_and_allocates_its_resources";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut rig = Rig::new(&gpu, true);
+    let restir = StochasticShadowSettings {
+        mode: StochasticMode::Restir,
+        ..StochasticShadowSettings::standard()
+    };
+    rig.lit
+        .set_area_stochastic(restir)
+        .expect("the Restir mode is a valid setting");
+    for _ in 0..8 {
+        rig.frame(&gpu);
+    }
+    let frame = rig.lit.handle().area_stochastic();
+    assert_eq!(frame.mode, StochasticMode::Restir, "the published mode");
+    assert_eq!(frame.active, 1, "one occupied mid-tier slot");
+    let with_restir = rig.stats().allocated_bytes;
+
+    rig.lit
+        .set_area_stochastic(StochasticShadowSettings { count: 0, ..restir })
+        .expect("zero mid-tier lights is a valid setting");
+    for _ in 0..2 {
+        rig.frame(&gpu);
+    }
+    let without = rig.stats().allocated_bytes;
+    assert_eq!(
+        with_restir.checked_sub(without),
+        Some(area_restir_bytes(SIZE)),
+        "the ReSTIR bytes of {SIZE:?}: {with_restir} against {without}"
+    );
+    assert_eq!(area_restir_bytes(SIZE), 5_265_621);
+
+    rig.lit
+        .set_area_stochastic(StochasticShadowSettings::standard())
+        .expect("the standard settings are valid");
+    for _ in 0..2 {
+        rig.frame(&gpu);
+    }
+    let stratified = rig.stats().allocated_bytes;
+    assert_eq!(
+        stratified.checked_sub(without),
+        Some(area_shadow_bytes(SIZE, 2)),
+        "the stratified bytes of {SIZE:?} and 2 groups: {stratified} against {without}"
+    );
+    let error = block_on(errors.pop());
+    assert!(error.is_none(), "GPU validation error: {error:?}");
 }
