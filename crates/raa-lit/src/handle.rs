@@ -21,6 +21,7 @@ use raa_shader::{
 };
 
 use crate::area_shadow::MAX_HERO_LIGHTS;
+use crate::area_stochastic::AreaStochasticFrame;
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
@@ -390,6 +391,8 @@ pub(crate) struct LitShared {
     pub(crate) area_heroes: [Option<Mat4>; MAX_HERO_LIGHTS],
     /// Number of hero shadow-map layers selected this frame (0 when none).
     pub(crate) area_hero_capacity: u32,
+    /// Mid-tier stochastic shadow frame written by the renderer's prepare (empty until then).
+    pub(crate) area_stochastic: AreaStochasticFrame,
     pub(crate) lod_bias: HashMap<u32, i8>,
     pub(crate) stats: InstanceFrameStats,
     /// True when the latest `LitRenderer::prepare` saw the enabled pipeline entry `taa`
@@ -562,6 +565,7 @@ impl LitShared {
             shadow_levels: vec![NO_CAMERA_LEVEL; store.capacity() as usize * SHADOW_SECTIONS],
             area_heroes: [None; MAX_HERO_LIGHTS],
             area_hero_capacity: 0,
+            area_stochastic: AreaStochasticFrame::empty(),
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
             temporal_consumer: false,
@@ -1222,6 +1226,18 @@ impl LitHandle {
     /// shared state is busy or before any prepare.
     pub fn area_hero_capacity(&self) -> u32 {
         self.shared.try_borrow().map_or(0, |s| s.area_hero_capacity)
+    }
+
+    /// The mid-tier area-stochastic frame the renderer's prepare wrote for the prepared view;
+    /// [`AreaStochasticFrame::empty`] while the shared state is busy or before any prepare.
+    ///
+    /// Handoff: card 'raa-gi: AreaShadowPart and the gi.area-shadow feature pass (order 43) publishing the mask' calls [`LitHandle::area_stochastic`]; today it returns a copy of
+    /// `LitShared.area_stochastic` (the 80-byte slot table, its per-slot generations and the
+    /// occupied slot count), or the empty frame when the shared state is borrowed.
+    pub fn area_stochastic(&self) -> AreaStochasticFrame {
+        self.shared
+            .try_borrow()
+            .map_or(AreaStochasticFrame::empty(), |s| s.area_stochastic)
     }
 
     /// Selects the casters of up to 8 caster lists from the frame snapshot

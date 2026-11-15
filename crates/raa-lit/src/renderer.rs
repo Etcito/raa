@@ -27,6 +27,7 @@ use raa_shader::{
 use crate::area_shadow::{
     AreaShadowCamera, AreaShadowSettings, AreaShadowTier, HeroSelector, MAX_HERO_LIGHTS,
 };
+use crate::area_stochastic::{AreaStochasticFrame, StochasticSelector, StochasticShadowSettings};
 use crate::contributor::ForwardContributor;
 use crate::extras::InstanceExtra;
 use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
@@ -408,6 +409,12 @@ pub struct LitRenderer {
     hero_selectors: [HeroSelector; MAX_VIEWS],
     /// Heroes occupied by the most recently prepared view (0 before any prepare).
     active_area_heroes: u32,
+    /// Mid-tier stochastic shadow settings; `StochasticShadowSettings::standard()` until set.
+    area_stochastic_settings: StochasticShadowSettings,
+    /// One stochastic selector per viewport, created once so prepare allocates nothing.
+    stochastic_selectors: [StochasticSelector; MAX_VIEWS],
+    /// Mid-tier slots occupied by the most recently prepared view (0 before any prepare).
+    active_area_stochastic: u32,
 }
 
 impl LitRenderer {
@@ -470,6 +477,9 @@ impl LitRenderer {
             area_shadow_settings: AreaShadowSettings::default(),
             hero_selectors: std::array::from_fn(|_| HeroSelector::new()),
             active_area_heroes: 0,
+            area_stochastic_settings: StochasticShadowSettings::default(),
+            stochastic_selectors: std::array::from_fn(|_| StochasticSelector::new()),
+            active_area_stochastic: 0,
         };
         install_passes(pipeline, renderer.handle(), renderer.contributors())?;
         Ok(renderer)
@@ -889,6 +899,36 @@ impl LitRenderer {
         self.active_area_heroes
     }
 
+    // ---- area-light stochastic shadows (M6) ----
+
+    /// Validates and stores `settings`; a refusal changes nothing.
+    ///
+    /// Handoff: card 'raa-js: stochastic keys of setAreaLightShadows/areaLightShadows, docs and typings, and the GI trace-scene wiring' calls [`LitRenderer::set_area_stochastic`],
+    /// [`LitRenderer::area_stochastic`] and [`LitRenderer::active_area_stochastic`]. Today
+    /// `set_area_stochastic` stores `settings.validate()?` and leaves the current settings in
+    /// place on refusal, `area_stochastic` returns [`StochasticShadowSettings::standard`]
+    /// until the first accepted call, and `active_area_stochastic` returns the occupied
+    /// mid-tier slots of the most recently prepared view (0 before any prepare).
+    pub fn set_area_stochastic(
+        &mut self,
+        settings: StochasticShadowSettings,
+    ) -> Result<(), RaaError> {
+        self.area_stochastic_settings = settings.validate()?;
+        Ok(())
+    }
+
+    /// The accepted mid-tier stochastic shadow settings,
+    /// [`StochasticShadowSettings::standard`] until a [`LitRenderer::set_area_stochastic`] call
+    /// is accepted.
+    pub fn area_stochastic(&self) -> StochasticShadowSettings {
+        self.area_stochastic_settings
+    }
+
+    /// Mid-tier slots occupied by the most recently prepared view (0 before any prepare).
+    pub fn active_area_stochastic(&self) -> u32 {
+        self.active_area_stochastic
+    }
+
     // ---- virtualized instances and frame features (P3-LIT-SEAM) ----
 
     /// The virtualized scene instances. Members keep their persistent records but are left
@@ -1242,6 +1282,20 @@ impl LitRenderer {
                 AreaShadowTier::Auto | AreaShadowTier::Hero => settings.hero_count,
                 AreaShadowTier::Cone | AreaShadowTier::Fade => 0,
             };
+            // Mid-tier slots follow the hero lanes in the same light records.
+            let mut stochastic = AreaStochasticFrame::empty();
+            if let Some(selector) = self.stochastic_selectors.get_mut(view) {
+                selector.update(
+                    &settings,
+                    &self.area_stochastic_settings,
+                    &camera,
+                    &self.local_lights,
+                    &inputs.lights,
+                    &mut stochastic,
+                );
+                self.active_area_stochastic = selector.active();
+            }
+            s.area_stochastic = stochastic;
         }
         if tiling {
             self.readback
