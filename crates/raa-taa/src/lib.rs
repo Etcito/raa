@@ -9,7 +9,10 @@ mod history;
 mod shaders;
 
 pub use history::{HistoryPair, HistoryState};
-pub use shaders::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
+pub use shaders::{
+    REPROJECT_WGSL, TAA_ENTRY, TAA_PARAMS_SIZE, TAA_WGSL, TAA_WORKGROUP, TEMPORAL_FRAME_SIZE,
+    taa_module_source,
+};
 
 /// S12 name of the pass.
 pub const TAA_PASS_NAME: &str = "taa";
