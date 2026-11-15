@@ -13,9 +13,10 @@ use raa_gi::parts::area_shadow::cpu::{
     temporal_blend,
 };
 use raa_gi::parts::area_shadow::restir_cpu::{
-    REMAP_INVALID, RESTIR_SPATIAL_RADIUS, Reservoir, balance_weight, boiling_keep,
-    clamp_confidence, contribution_weight, depth_similar, oct_decode, oct_encode, pack_reservoir,
-    pack2x16float, remap_slot, remap_table, spatial_offset, unpack_reservoir, unpack2x16float,
+    REMAP_INVALID, RESTIR_SPATIAL_RADIUS, Reservoir, Surface, area_pdf, balance_weight,
+    boiling_keep, clamp_confidence, contribution_weight, depth_similar, luminance, oct_decode,
+    oct_encode, pack_reservoir, pack2x16float, rect_solid_angle, remap_slot, remap_table,
+    sample_rect, spatial_offset, srgb_decode, target_luminance, unpack_reservoir, unpack2x16float,
     wrs_accept,
 };
 use raa_loader::json::{JsonValue, parse};
@@ -479,4 +480,157 @@ fn spatial_offsets_stay_in_the_disk_and_reach_both_signs() {
     }
     assert_eq!(x_signs, BTreeSet::from([-1, 1]), "x axis signs");
     assert_eq!(y_signs, BTreeSet::from([-1, 1]), "y axis signs");
+}
+
+#[test]
+fn spherical_rectangle_tables() {
+    let root = restir_fixture();
+    let tol = number(field(&root, "tolerance"));
+    for case in items(field(&root, "rect_solid_angle")) {
+        let got = rect_solid_angle(
+            floats::<3>(field(case, "origin")),
+            floats::<3>(field(case, "corner")),
+            floats::<3>(field(case, "edge_x")),
+            floats::<3>(field(case, "edge_y")),
+        );
+        assert!(
+            close(got, number(field(case, "solid_angle")), tol),
+            "rect_solid_angle ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "sample_rect")) {
+        let (uv, solid) = sample_rect(
+            floats::<3>(field(case, "origin")),
+            floats::<3>(field(case, "corner")),
+            floats::<3>(field(case, "edge_x")),
+            floats::<3>(field(case, "edge_y")),
+            floats::<2>(field(case, "xi")),
+        );
+        assert_close(uv, floats::<2>(field(case, "uv")), tol, "sample_rect uv");
+        assert!(
+            close(solid, number(field(case, "solid_angle")), tol),
+            "sample_rect solid angle ({})",
+            text(field(case, "note"))
+        );
+    }
+    let origin = [0.0, 0.0, 0.0];
+    let corner = [-1.0, -1.0, 1.0];
+    let edge_y = [0.0, 2.0, 0.0];
+    assert_eq!(
+        sample_rect(origin, corner, [0.0; 3], edge_y, [0.5, 0.5]),
+        ([0.5, 0.5], 0.0),
+        "a degenerate rectangle falls back to the centre"
+    );
+    assert_eq!(
+        sample_rect([0.0, 0.0, 1.0], corner, [2.0, 0.0, 0.0], edge_y, [0.5, 0.5]),
+        ([0.5, 0.5], 0.0),
+        "an origin in the rectangle's plane falls back to the centre"
+    );
+    assert_eq!(
+        rect_solid_angle(origin, corner, [0.0; 3], edge_y),
+        0.0,
+        "a degenerate rectangle has no solid angle"
+    );
+}
+
+#[test]
+fn area_pdf_srgb_and_luminance_tables() {
+    let root = restir_fixture();
+    let tol = number(field(&root, "tolerance"));
+    for case in items(field(&root, "area_pdf")) {
+        let got = area_pdf(
+            number(field(case, "solid_angle")),
+            number(field(case, "cos_light")),
+            number(field(case, "distance")),
+        );
+        assert!(
+            close(got, number(field(case, "pdf")), tol),
+            "area_pdf ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "srgb_decode")) {
+        let got = srgb_decode(number(field(case, "c")));
+        assert!(
+            close(got, number(field(case, "linear")), tol),
+            "srgb_decode ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "luminance")) {
+        let got = luminance(floats::<3>(field(case, "c")));
+        assert!(
+            close(got, number(field(case, "value")), tol),
+            "luminance ({})",
+            text(field(case, "note"))
+        );
+    }
+}
+
+#[test]
+fn target_luminance_table() {
+    let root = restir_fixture();
+    let tol = number(field(&root, "tolerance"));
+    for case in items(field(&root, "target_luminance")) {
+        let surface = Surface {
+            position: floats::<3>(field(case, "position")),
+            normal: floats::<3>(field(case, "normal")),
+            view: floats::<3>(field(case, "view")),
+            roughness: number(field(case, "roughness")),
+            f0: floats::<3>(field(case, "f0")),
+            metallic: number(field(case, "metallic")),
+        };
+        let got = target_luminance(
+            &surface,
+            floats::<3>(field(case, "point")),
+            floats::<3>(field(case, "travel")),
+            floats::<3>(field(case, "radiance")),
+            number(field(case, "window")),
+        );
+        assert!(
+            close(got, number(field(case, "value")), tol),
+            "target_luminance ({})",
+            text(field(case, "note"))
+        );
+    }
+}
+
+#[test]
+fn sampled_rectangle_area_is_analytic() {
+    let origin = [0.0, 0.0, 0.0];
+    let corner = [-1.0, -1.0, 1.0];
+    let edge_x = [2.0, 0.0, 0.0];
+    let edge_y = [0.0, 2.0, 0.0];
+    let normal = [0.0, 0.0, 1.0];
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    for i in 0..16u32 {
+        for j in 0..16u32 {
+            let xi = [(i as f32 + 0.5) / 16.0, (j as f32 + 0.5) / 16.0];
+            let (uv, solid) = sample_rect(origin, corner, edge_x, edge_y, xi);
+            let point = [
+                corner[0] + uv[0] * edge_x[0] + uv[1] * edge_y[0],
+                corner[1] + uv[0] * edge_x[1] + uv[1] * edge_y[1],
+                corner[2] + uv[0] * edge_x[2] + uv[1] * edge_y[2],
+            ];
+            let d = [
+                point[0] - origin[0],
+                point[1] - origin[1],
+                point[2] - origin[2],
+            ];
+            let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let cos_light =
+                (normal[0] * d[0] + normal[1] * d[1] + normal[2] * d[2]).abs() / distance;
+            let pdf = area_pdf(solid, cos_light, distance);
+            assert!(pdf > 0.0, "sample {i},{j} has zero pdf");
+            sum += 1.0 / pdf;
+            count += 1.0;
+        }
+    }
+    let mean = sum / count;
+    assert!(
+        (mean - 4.0).abs() <= 0.02 * 4.0,
+        "mean sampled area {mean} is not within 2% of 4"
+    );
 }

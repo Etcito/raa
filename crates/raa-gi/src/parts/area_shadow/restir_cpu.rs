@@ -9,7 +9,9 @@
 //!
 //! Share 2 adds the reservoir reuse maths: the weighted reservoir sampling acceptance, the
 //! contribution weight, the confidence clamp, the generalized balance heuristic, the slot remap,
-//! the boiling filter, the depth test and the hashed spatial offsets.
+//! the boiling filter, the depth test and the hashed spatial offsets. Share 3 adds the
+//! spherical-rectangle solid angle and sampling (Urena et al. EGSR 2013), the area PDF, the sRGB
+//! decode, luminance and the Lambert + GGX target.
 
 use std::f32::consts::PI;
 
@@ -329,4 +331,268 @@ pub fn spatial_offset(pixel: [u32; 2], frame: u32, k: u32, radius: f32) -> [i32;
     let r = radius * hash_to_unit(seed).sqrt();
     let a = 2.0 * PI * hash_to_unit(seed.wrapping_add(1));
     [(r * a.cos()).round() as i32, (r * a.sin()).round() as i32]
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross3(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn len3(a: [f32; 3]) -> f32 {
+    dot3(a, a).sqrt()
+}
+
+/// Normalises `a`, or returns the zero vector when it has no finite length (no NaN escapes).
+fn normalized(a: [f32; 3]) -> [f32; 3] {
+    let len = len3(a);
+    if len > 0.0 && len.is_finite() {
+        [a[0] / len, a[1] / len, a[2] / len]
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+/// `num / den`, or 0 when `den` is not positive and finite.
+fn ratio(num: f32, den: f32) -> f32 {
+    if den > 0.0 && den.is_finite() {
+        num / den
+    } else {
+        0.0
+    }
+}
+
+/// The local frame of a spherical rectangle (Urena et al. EGSR 2013): the edge lengths and the
+/// corner coordinates in the rectangle's `(x, y, z)` frame, the two `z` components of the edge
+/// normals and the angles that give the solid angle.
+struct RectFrame {
+    exl: f32,
+    eyl: f32,
+    z0: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    b0: f32,
+    b1: f32,
+    k: f32,
+    solid_angle: f32,
+}
+
+/// Builds the rectangle frame; `None` for a degenerate rectangle, a non-finite input or an origin
+/// in the rectangle's plane (`z0 == 0`).
+fn rect_frame(
+    origin: [f32; 3],
+    corner: [f32; 3],
+    edge_x: [f32; 3],
+    edge_y: [f32; 3],
+) -> Option<RectFrame> {
+    let exl = len3(edge_x);
+    let eyl = len3(edge_y);
+    if !exl.is_finite() || !eyl.is_finite() || exl <= 0.0 || eyl <= 0.0 {
+        return None;
+    }
+    let x = [edge_x[0] / exl, edge_x[1] / exl, edge_x[2] / exl];
+    let y = [edge_y[0] / eyl, edge_y[1] / eyl, edge_y[2] / eyl];
+    let z = cross3(x, y);
+    let d = sub(corner, origin);
+    let mut z0 = dot3(d, z);
+    if !z0.is_finite() {
+        return None;
+    }
+    if z0 > 0.0 {
+        z0 = -z0;
+    }
+    if z0 == 0.0 {
+        return None;
+    }
+    let x0 = dot3(d, x);
+    let y0 = dot3(d, y);
+    let x1 = x0 + exl;
+    let y1 = y0 + eyl;
+    let n0 = normalized(cross3([x0, y0, z0], [x1, y0, z0]));
+    let n1 = normalized(cross3([x1, y0, z0], [x1, y1, z0]));
+    let n2 = normalized(cross3([x1, y1, z0], [x0, y1, z0]));
+    let n3 = normalized(cross3([x0, y1, z0], [x0, y0, z0]));
+    let angle = |a: [f32; 3], b: [f32; 3]| (-dot3(a, b)).clamp(-1.0, 1.0).acos();
+    let g0 = angle(n0, n1);
+    let g1 = angle(n1, n2);
+    let g2 = angle(n2, n3);
+    let g3 = angle(n3, n0);
+    let k = 2.0 * PI - g2 - g3;
+    let solid_angle = g0 + g1 - k;
+    if !solid_angle.is_finite() || solid_angle <= 0.0 {
+        return None;
+    }
+    Some(RectFrame {
+        exl,
+        eyl,
+        z0,
+        x0,
+        y0,
+        x1,
+        y1,
+        b0: n0[2],
+        b1: n2[2],
+        k,
+        solid_angle,
+    })
+}
+
+/// The solid angle of the rectangle `corner + [0, 1] edge_x + [0, 1] edge_y` seen from `origin`,
+/// in steradians. 0 for a degenerate rectangle or an origin in its plane.
+pub fn rect_solid_angle(
+    origin: [f32; 3],
+    corner: [f32; 3],
+    edge_x: [f32; 3],
+    edge_y: [f32; 3],
+) -> f32 {
+    rect_frame(origin, corner, edge_x, edge_y).map_or(0.0, |frame| frame.solid_angle)
+}
+
+/// The area-preserving spherical-rectangle sample of `xi` (Urena et al. EGSR 2013): the unit-square
+/// `uv` from `corner` along `edge_x` and `edge_y`, and the rectangle's solid angle. A degenerate
+/// rectangle or an origin in its plane returns `([0.5, 0.5], 0)`.
+pub fn sample_rect(
+    origin: [f32; 3],
+    corner: [f32; 3],
+    edge_x: [f32; 3],
+    edge_y: [f32; 3],
+    xi: [f32; 2],
+) -> ([f32; 2], f32) {
+    let Some(frame) = rect_frame(origin, corner, edge_x, edge_y) else {
+        return ([0.5, 0.5], 0.0);
+    };
+    let u = xi[0].clamp(0.0, 1.0);
+    let v = xi[1].clamp(0.0, 1.0);
+    let au = u * frame.solid_angle + frame.k;
+    let mut sin_au = au.sin();
+    if sin_au.abs() < 1e-9 {
+        sin_au = if sin_au < 0.0 { -1e-9 } else { 1e-9 };
+    }
+    let fu = (au.cos() * frame.b0 - frame.b1) / sin_au;
+    let cu = (sign_one(fu) / (fu * fu + frame.b0 * frame.b0).sqrt()).clamp(-1.0, 1.0);
+    let root = (1.0 - cu * cu).max(0.0).sqrt();
+    let xu = if root > 0.0 {
+        -(cu * frame.z0) / root
+    } else if cu >= 0.0 {
+        frame.x1
+    } else {
+        frame.x0
+    };
+    let xu = xu.clamp(frame.x0, frame.x1);
+    let dd = (xu * xu + frame.z0 * frame.z0).sqrt();
+    let h0 = ratio(frame.y0, (dd * dd + frame.y0 * frame.y0).sqrt());
+    let h1 = ratio(frame.y1, (dd * dd + frame.y1 * frame.y1).sqrt());
+    let hv = h0 + v * (h1 - h0);
+    let yv = if hv * hv < 1.0 - 1e-6 {
+        hv * dd / (1.0 - hv * hv).sqrt()
+    } else {
+        frame.y1
+    };
+    let uv = [
+        ((xu - frame.x0) / frame.exl).clamp(0.0, 1.0),
+        ((yv - frame.y0) / frame.eyl).clamp(0.0, 1.0),
+    ];
+    (uv, frame.solid_angle)
+}
+
+/// The area PDF of a point on a light: `cos_light / (distance^2 * solid_angle)`. 0 when any
+/// input is not positive.
+pub fn area_pdf(solid_angle: f32, cos_light: f32, distance: f32) -> f32 {
+    if solid_angle <= 0.0 || cos_light <= 0.0 || distance <= 0.0 {
+        return 0.0;
+    }
+    let pdf = cos_light / (distance * distance * solid_angle);
+    if pdf.is_finite() { pdf.max(0.0) } else { 0.0 }
+}
+
+/// The sRGB transfer function's inverse (encoded to linear), with the exact 0.04045 knee.
+pub fn srgb_decode(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The linear luminance of an RGB colour: the dot product with [`LUMINANCE`].
+pub fn luminance(c: [f32; 3]) -> f32 {
+    dot3(c, LUMINANCE)
+}
+
+/// The shading inputs of one receiver, as the prepass publishes them. `view` is the unit vector
+/// to the camera.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Surface {
+    /// The receiver's position in metres.
+    pub position: [f32; 3],
+    /// The receiver's unit normal.
+    pub normal: [f32; 3],
+    /// The unit vector from the receiver to the camera.
+    pub view: [f32; 3],
+    /// The material roughness.
+    pub roughness: f32,
+    /// The material's normal-incidence reflectance per channel.
+    pub f0: [f32; 3],
+    /// The material metallicness.
+    pub metallic: f32,
+}
+
+/// The ReSTIR target luminance of a light sample: Lambert diffuse plus a GGX specular lobe (white
+/// Lambert, because the prepass stores no albedo and the visibility ratio cancels it), times the
+/// light cosine, the receiver cosine, the inverse-square distance and `window`. 0 for a
+/// coincident point or a light facing away.
+pub fn target_luminance(
+    surface: &Surface,
+    point: [f32; 3],
+    travel: [f32; 3],
+    radiance: [f32; 3],
+    window: f32,
+) -> f32 {
+    let d = sub(point, surface.position);
+    let r = len3(d);
+    if r == 0.0 || !r.is_finite() {
+        return 0.0;
+    }
+    let l = [d[0] / r, d[1] / r, d[2] / r];
+    let nl = dot3(surface.normal, l);
+    let cos_y = dot3(travel, [-l[0], -l[1], -l[2]]);
+    if nl <= 0.0 || cos_y <= 0.0 {
+        return 0.0;
+    }
+    let nv = dot3(surface.normal, surface.view).max(1e-4);
+    let h = normalized(add(l, surface.view));
+    let nh = dot3(surface.normal, h).max(0.0);
+    let vh = dot3(surface.view, h).max(0.0);
+    let alpha = surface.roughness.max(ROUGHNESS_MIN).powi(2);
+    let alpha2 = alpha * alpha;
+    let spec_den = PI * (nh * nh * (alpha2 - 1.0) + 1.0).powi(2);
+    let distribution = ratio(alpha2, spec_den);
+    let vis_den = nl * (nv * nv * (1.0 - alpha2) + alpha2).sqrt()
+        + nv * (nl * nl * (1.0 - alpha2) + alpha2).sqrt();
+    let visibility = ratio(0.5, vis_den);
+    let diffuse = (1.0 - surface.metallic) / PI;
+    let fresnel = (1.0 - vh).powi(5);
+    let scaled = std::array::from_fn(|i| {
+        let f0 = surface.f0[i];
+        let spec = distribution * visibility * (f0 + (1.0 - f0) * fresnel);
+        radiance[i] * (diffuse + spec)
+    });
+    let value = luminance(scaled) * nl * cos_y / (r * r) * window;
+    if value.is_finite() { value } else { 0.0 }
 }
