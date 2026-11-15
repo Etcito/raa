@@ -449,6 +449,10 @@ pub(crate) struct LitShared {
     frame_bind_group: wgpu::BindGroup,
     /// The group-1 layout of `raa_pipeline::LightingResources`.
     lighting_layout: wgpu::BindGroupLayout,
+    /// The S44 opaque group-1 layout: the full set without the opaque colour and depth (9, 10).
+    /// The fullscreen VG kinds lay out group 1 with it so their fragment stage keeps 15
+    /// sampled textures (S38/S44).
+    opaque_lighting_layout: wgpu::BindGroupLayout,
     pipelines: RefCell<PipelineCache<wgpu::RenderPipeline>>,
     /// Composed WGSL by canonical variant; cleared with the pipeline cache.
     composed: RefCell<HashMap<VariantKey, String>>,
@@ -468,10 +472,13 @@ impl LitShared {
     /// one record each), the group-0 layout and bind group, an empty mesh store and draw
     /// lists, the registry with `raa.standard` and a composer with the default slot
     /// providers (S11, priority 0). `lighting_layout` is the group-1 layout of the pipeline's
-    /// `LightingResources`. Refuses `render.invalid_msaa` unless `msaa` is 1 or 4.
+    /// `LightingResources`; `opaque_lighting_layout` is its S44 opaque set (without bindings
+    /// 9 and 10), which the fullscreen VG kinds use. Refuses `render.invalid_msaa` unless
+    /// `msaa` is 1 or 4.
     pub(crate) fn new(
         gpu: &GpuContext,
         lighting_layout: &wgpu::BindGroupLayout,
+        opaque_lighting_layout: &wgpu::BindGroupLayout,
         max_instances: u32,
         max_materials: u32,
         msaa: u32,
@@ -587,6 +594,7 @@ impl LitShared {
             frame_layout,
             frame_bind_group,
             lighting_layout: lighting_layout.clone(),
+            opaque_lighting_layout: opaque_lighting_layout.clone(),
             pipelines: RefCell::new(PipelineCache::new()),
             composed: RefCell::new(HashMap::new()),
             canonical_fns: RefCell::new(HashMap::new()),
@@ -927,9 +935,10 @@ impl LitShared {
 
     /// Builds the render pipeline of `key` and `spec`: composes/validates its WGSL (shared
     /// by every spec of the variant), with the layouts [group 0, group 1 (lighting),
-    /// `spec.extra_layout`]. Shadow variants leave group 1 empty: that pass renders the
-    /// shadow map group 1 samples and reads groups 0 and 2 only. The fullscreen VG kinds
-    /// bind no vertex buffer (their `vs_main` reads `vertex_index`).
+    /// `spec.extra_layout`]. The fullscreen VG kinds use the S44 opaque group-1 layout
+    /// (`opaque_lighting_layout`) instead of the full one. Shadow variants leave group 1
+    /// empty: that pass renders the shadow map group 1 samples and reads groups 0 and 2 only.
+    /// The fullscreen VG kinds bind no vertex buffer (their `vs_main` reads `vertex_index`).
     fn build_pipeline(
         &self,
         gpu: &GpuContext,
@@ -959,10 +968,12 @@ impl LitShared {
         let shadow = key.pass == PassKind::Shadow;
         let fullscreen = matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade);
         let posed = !fullscreen && key.flags & crate::skin_draw::POSED != 0;
-        let mut groups = vec![
-            Some(&self.frame_layout),
-            (!shadow).then_some(&self.lighting_layout),
-        ];
+        let lighting = if fullscreen {
+            &self.opaque_lighting_layout
+        } else {
+            &self.lighting_layout
+        };
+        let mut groups = vec![Some(&self.frame_layout), (!shadow).then_some(lighting)];
         if let Some(extra) = &spec.extra_layout {
             groups.push(Some(extra));
         } else if posed {
@@ -1791,7 +1802,8 @@ mod tests {
             return;
         };
         let lighting = raa_pipeline::LightingResources::new(&gpu);
-        let mut shared = LitShared::new(&gpu, lighting.layout(), 1, 1, 4).unwrap();
+        let mut shared =
+            LitShared::new(&gpu, lighting.layout(), lighting.opaque_layout(), 1, 1, 4).unwrap();
         let source = shared.fns.get(MaterialFnId::STANDARD).unwrap().wgsl.clone()
             + "\nfn probe_unused() -> f32 { return 1.0; }\n";
         let a = shared.register_user_fn("first", &source).unwrap();
@@ -2115,5 +2127,70 @@ mod tests {
             1,
             "the camera options would pick the coarser level"
         );
+    }
+
+    /// The S32 `vg.shade` group-2 layout, reproduced from
+    /// crates/raa-lit/tests/virtual_set.rs: four FRAGMENT textures and the 16-byte dynamic
+    /// uniform.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn vg_shade_extra_layout(gpu: &GpuContext) -> wgpu::BindGroupLayout {
+        let texture =
+            |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            };
+        let unfilterable = wgpu::TextureSampleType::Float { filterable: false };
+        gpu.device()
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("test.vg_shade.group2"),
+                entries: &[
+                    texture(0, wgpu::TextureSampleType::Uint),
+                    texture(1, unfilterable),
+                    texture(2, unfilterable),
+                    texture(3, unfilterable),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(16),
+                        },
+                        count: None,
+                    },
+                ],
+            })
+    }
+
+    /// S44: the fullscreen `VgShade` pipeline is laid out with the opaque group-1 set (10
+    /// sampled textures, 2 samplers, 7 uniforms) plus its four group-2 textures, so it stays
+    /// within the WebGPU limit and builds with no validation error.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn fullscreen_vg_shade_pipeline_uses_the_opaque_lighting_layout() {
+        let test = "fullscreen_vg_shade_pipeline_uses_the_opaque_lighting_layout";
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(test, "software_gpu returned None");
+            return;
+        };
+        let lighting = raa_pipeline::LightingResources::new(&gpu);
+        let shared = LitShared::new(&gpu, lighting.layout(), lighting.opaque_layout(), 1, 1, 4)
+            .expect("LitShared");
+        let spec = PipelineSpec {
+            cull: None,
+            extra_layout: Some(vg_shade_extra_layout(&gpu)),
+            ..forward_spec()
+        };
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipeline = shared.pipeline_for(&gpu, key(PassKind::VgShade, 4), &spec);
+        let error = raa_core::testing::block_on(scope.pop());
+        assert!(error.is_none(), "VG shade pipeline validation: {error:?}");
+        pipeline.expect("VG shade pipeline");
     }
 }

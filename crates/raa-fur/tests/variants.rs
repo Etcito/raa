@@ -4,8 +4,8 @@
 //! cloud-shadow boundary and raa-fog's `height` provider; the composed module declares the
 //! group-2 `raa_fur_shell` uniform with the 16-byte layout the contributor writes.
 //!
-//! naga reflection pins the S10 FurShell stage budgets (12 sampled textures / 3 samplers /
-//! 8 uniform buffers / 5 fragment storage buffers, six or seven vertex storage buffers) for
+//! naga reflection pins the S10 FurShell stage budgets (13 sampled textures / 3 samplers /
+//! 9 uniform buffers / 5 fragment storage buffers, six or seven vertex storage buffers) for
 //! the neutral (physical/cloud disabled) and the full physical/cloud composition, including
 //! the vertex-only history and posed palette resources and the four-group maximum.
 
@@ -350,12 +350,13 @@ fn group2_uniform_matches_the_contributor_slots() {
 }
 
 /// S10 FurShell conservative fragment budget: sampled textures, samplers, uniform buffers
-/// and fragment storage buffers, including the declared shared weather bindings.
+/// and fragment storage buffers, including the declared shared weather and area stochastic
+/// bindings 19 and 20.
 #[cfg(not(target_arch = "wasm32"))]
 const FURSHELL_FRAGMENT_BUDGET: Counts = Counts {
-    textures: 12,
+    textures: 13,
     samplers: 3,
-    uniforms: 8,
+    uniforms: 9,
     storages: 5,
     storage_textures: 0,
 };

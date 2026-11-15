@@ -441,10 +441,10 @@ fn group_two_bindings_are_private_to_their_pass() {
             "{pass:?}"
         );
         // Lighting, local lights, light tiles, the GI screen, volume and params (14, 17, 18),
-        // and the weather texture/uniform (15, 16).
+        // the weather texture/uniform (15, 16) and the area stochastic table/mask (19, 20).
         assert_eq!(
             group_bindings(&module, 1),
-            (0..=18).collect::<Vec<u32>>(),
+            (0..=20).collect::<Vec<u32>>(),
             "{pass:?}"
         );
         let expected: &[u32] = match pass {

@@ -3,7 +3,7 @@
 //!
 //! The composed neutral (physical/cloud disabled) and physical/cloud variants over the
 //! default, ibl, CSM cloud-shadow and height-fog providers keep the S10 Transparent stage
-//! budget (12 sampled textures / 3 samplers / 8 uniform buffers / 8 fragment storage
+//! budget (13 sampled textures / 3 samplers / 9 uniform buffers / 8 fragment storage
 //! buffers), the four-group maximum, the vertex-only history/palette resources, the
 //! unchanged 16-byte `OitNode` and exactly three OIT fragment storage allocations.
 
@@ -265,12 +265,13 @@ fn shared_lighting_preserves_transmission_fog_and_oit() {
 }
 
 /// S10 Transparent conservative fragment budget: sampled textures, samplers, uniform buffers
-/// and fragment storage buffers, including the declared shared weather bindings.
+/// and fragment storage buffers, including the declared shared weather and area stochastic
+/// bindings 19 and 20.
 #[cfg(not(target_arch = "wasm32"))]
 const TRANSPARENT_FRAGMENT_BUDGET: Counts = Counts {
-    textures: 12,
+    textures: 13,
     samplers: 3,
-    uniforms: 8,
+    uniforms: 9,
     storages: 8,
     storage_textures: 0,
 };

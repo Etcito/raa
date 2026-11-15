@@ -3,7 +3,8 @@
 //! the GI-only far fade into V, while U and the point/spot/directional paths stay unchanged.
 
 use raa_shader::{
-    Composer, LOCAL_LIGHTING_WGSL, MaterialFnId, MaterialFnRegistry, PassKind, VariantKey,
+    Composer, LOCAL_LIGHTING_WGSL, MaterialFnId, MaterialFnRegistry, PRELUDE_WGSL, PassKind,
+    VariantKey,
 };
 
 /// One default provider per slot (priority 0, the S11 defaults), as raa-lit installs them.
@@ -188,4 +189,90 @@ fn area_visibility_tier_pins_are_present() {
     ] {
         assert!(hero.contains(call), "hero visibility missing `{call}`");
     }
+}
+
+/// S44 contract `area-stochastic-gpu`: bindings 19 and 20 declare the 80-B mid-tier slot
+/// table and the two-layer mask once, the area branch reads the mid-tier V through them,
+/// and the composed Forward module reflects the table layout and the arrayed float image.
+#[test]
+fn stochastic_mask_tier_pins_and_bindings() {
+    for declaration in [
+        "struct RaaAreaStochasticGpu { lights: array<vec4<u32>, 2>, weights: array<vec4<f32>, 2>, params: vec4<u32> }",
+        "@group(1) @binding(19) var<uniform> raa_area_stochastic: RaaAreaStochasticGpu;",
+        "@group(1) @binding(20) var raa_area_shadow_mask: texture_2d_array<f32>;",
+    ] {
+        assert_eq!(
+            PRELUDE_WGSL.matches(declaration).count(),
+            1,
+            "`{declaration}` is not declared exactly once"
+        );
+    }
+    assert!(LOCAL_LIGHTING_WGSL.contains("fn raa_area_stochastic_visibility("));
+    let stochastic = wgsl_fn_body(LOCAL_LIGHTING_WGSL, "raa_area_stochastic_visibility");
+    for pin in [
+        "raa_area_stochastic.params.x",
+        "textureDimensions(raa_area_shadow_mask)",
+        "textureLoad(raa_area_shadow_mask",
+    ] {
+        assert!(
+            stochastic.contains(pin),
+            "stochastic visibility missing `{pin}`"
+        );
+    }
+    let contribution = wgsl_fn_body(LOCAL_LIGHTING_WGSL, "raa_local_contribution");
+    assert!(contribution.contains("mix(v_cone, stochastic.x, stochastic.y)"));
+
+    let reg = MaterialFnRegistry::new();
+    let composer = default_composer();
+    let key = VariantKey {
+        material_fn: MaterialFnId::STANDARD,
+        pass: PassKind::Forward,
+        msaa: 4,
+        flags: 0,
+    };
+    let wgsl = composer
+        .compose(&reg, &key)
+        .unwrap_or_else(|e| panic!("{key:?}: {e}"));
+    let module = naga::front::wgsl::parse_str(&wgsl).unwrap_or_else(|e| panic!("{key:?}: {e}"));
+    let global = |group: u32, binding: u32| {
+        module
+            .global_variables
+            .iter()
+            .find(|(_, global)| global.binding == Some(naga::ResourceBinding { group, binding }))
+            .map(|(_, global)| global)
+            .unwrap_or_else(|| panic!("group {group} binding {binding} missing"))
+    };
+
+    let table = global(1, 19);
+    assert_eq!(table.name.as_deref(), Some("raa_area_stochastic"));
+    assert_eq!(table.space, naga::AddressSpace::Uniform);
+    let naga::TypeInner::Struct { members, span } = &module.types[table.ty].inner else {
+        panic!("raa_area_stochastic is not a struct");
+    };
+    assert_eq!(*span, 80, "RaaAreaStochasticGpu span");
+    assert_eq!(
+        members
+            .iter()
+            .map(|member| member.offset)
+            .collect::<Vec<_>>(),
+        [0, 32, 64],
+        "RaaAreaStochasticGpu member offsets"
+    );
+
+    let mask = global(1, 20);
+    assert_eq!(mask.name.as_deref(), Some("raa_area_shadow_mask"));
+    assert!(
+        matches!(
+            module.types[mask.ty].inner,
+            naga::TypeInner::Image {
+                dim: naga::ImageDimension::D2,
+                arrayed: true,
+                class: naga::ImageClass::Sampled {
+                    kind: naga::ScalarKind::Float,
+                    multi: false,
+                },
+            }
+        ),
+        "raa_area_shadow_mask is not a sampled D2 array float image"
+    );
 }

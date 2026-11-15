@@ -231,7 +231,7 @@ impl FeaturePass for SsrPass {
         for (target, group) in t.hdr_views.iter().skip(1).zip(&t.down_groups) {
             draw(encoder, target, &p.downsample, group, None);
         }
-        let lighting = ctx.lighting.bind_group();
+        let lighting = ctx.lighting.opaque_bind_group();
         draw(
             encoder,
             &t.trace_view,
@@ -276,7 +276,7 @@ impl SsrFeature {
             desc: SsrDesc::default(),
             camera: None,
         }));
-        let pipelines = SsrPipelines::new(gpu, p.lighting().layout());
+        let pipelines = SsrPipelines::new(gpu, p.lighting().opaque_layout());
         p.add(Box::new(SsrPass {
             state: state.clone(),
             pipelines,

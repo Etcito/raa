@@ -431,6 +431,9 @@ impl FeaturePass for ForwardPass {
                 .map_err(|_| pipeline_busy())?;
             for slot in slots.iter().filter(|s| s.enabled.get()) {
                 slot.contributor.record(&mut pass, &self.lit)?;
+                // A fullscreen contributor may have replaced group 1 with the opaque set;
+                // later contributors (fur.shells) see the full group again.
+                pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
             }
         }
         hdr.swap();

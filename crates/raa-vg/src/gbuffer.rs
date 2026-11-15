@@ -194,7 +194,7 @@ impl FeaturePass for VgGbufferPass {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &frame, &[]);
-            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+            pass.set_bind_group(1, ctx.lighting.opaque_bind_group(), &[]);
             for (i, pipeline) in self.pipelines.iter().enumerate() {
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(2, group, &[slots.offset(i)]);

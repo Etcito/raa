@@ -436,7 +436,7 @@ impl FeaturePass for ShaftsPass {
                 "sunshafts: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
         };
-        let lighting = ctx.lighting.bind_group();
+        let lighting = ctx.lighting.opaque_bind_group();
         let encoder = &mut *ctx.encoder;
         draw(
             encoder,
@@ -473,7 +473,7 @@ impl ShaftsFeature {
             ));
         }
         let state = Rc::new(RefCell::new(ShaftsState::default()));
-        let pass = ShaftsPass::new(gpu, p.lighting().layout(), state.clone());
+        let pass = ShaftsPass::new(gpu, p.lighting().opaque_layout(), state.clone());
         p.add(Box::new(pass))?;
         Ok(ShaftsHandle { state })
     }

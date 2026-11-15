@@ -173,6 +173,12 @@ const RAA_GI_FLAG_LOCAL_SHADOWS: u32 = 4u;
 @group(1) @binding(17) var raa_gi_volume: texture_3d<f32>;
 // 18: the 96-B params, level_count 0 = no volume.
 @group(1) @binding(18) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
+// S44 area-light stochastic shadows: the 80-B mid-tier slot table of the shadow mask.
+struct RaaAreaStochasticGpu { lights: array<vec4<u32>, 2>, weights: array<vec4<f32>, 2>, params: vec4<u32> }
+// 19: the slot table (packed light index or 0xFFFFFFFF, w_stoch per slot; params.x limit).
+@group(1) @binding(19) var<uniform> raa_area_stochastic: RaaAreaStochasticGpu;
+// 20: the Rgba16Float viewport mask; slot s is layer s / 4, channel s % 4.
+@group(1) @binding(20) var raa_area_shadow_mask: texture_2d_array<f32>;
 // The generated prelude appends weather_lighting.wgsl
 // exactly once for the fragment-only texture/uniform bindings 15/16; no added storage.
 

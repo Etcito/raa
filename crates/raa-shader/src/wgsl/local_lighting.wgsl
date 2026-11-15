@@ -1,8 +1,9 @@
 // S11 shared local lighting. Point, spot and directional lights call Direct once each and
-// read the LocalVisibility slot; area lights shade U x V and layer three visibility tiers
-// in V: a hero PCSS shadow map weighted by the map-edge weight, the GI cone visibility of
-// the LocalVisibility slot, and the GI-only far fade of the direct term. Point window and
-// incidence adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder.
+// read the LocalVisibility slot; area lights shade U x V and layer the visibility tiers in
+// V: a hero PCSS shadow map weighted by the map-edge weight, the mid tier's stochastic
+// shadow mask blended by w_stoch over the distance band, and the GI cone visibility of the
+// LocalVisibility slot; the GI-only far fade of the direct term applies outside V. Point
+// window and incidence adapted from solstice (MIT), Copyright (c) 2026 SamG-Coder.
 // solstice@7e465b5, crates/solstice-render/shaders/lighting/deferred.wgsl:72-83.
 fn raa_local_falloff(distance: f32, range: f32) -> f32 {
     if distance >= range { return 0.0; }
@@ -116,6 +117,27 @@ fn raa_area_hero_visibility(light: LightGpu, layer: i32, position: vec3<f32>,
         raa_csm_rotation(frag.xy)), w_map);
 }
 
+// Mid-tier V (S44): the GI-owned stochastic shadow mask, blended by w_stoch over the band.
+// The slot table maps slot s to a packed light index; the mask stores V in layer s / 4,
+// channel s % 4, and w_stoch sits beside it in the table. A light without a slot returns
+// (1, 0), so V_far keeps the cone and hero tiers unchanged. The bound view is 1x1 with
+// (1, 1, 1, 1) while the mask is cleared, and the pixel clamps to its texels like
+// slot_indirect.wgsl. Only textureLoad: this runs inside the nonuniform light loop.
+fn raa_area_stochastic_visibility(index: u32, frag: vec4<f32>) -> vec2<f32> {
+    let size = vec2<i32>(textureDimensions(raa_area_shadow_mask));
+    let pixel = clamp(vec2<i32>(frag.xy), vec2<i32>(0), size - vec2<i32>(1));
+    for (var s = 0u; s < min(raa_area_stochastic.params.x, 8u); s += 1u) {
+        let lane = s % 4u;
+        if raa_area_stochastic.lights[s / 4u][lane] == index {
+            let visibility = clamp(textureLoad(raa_area_shadow_mask, pixel,
+                i32(s / 4u), 0)[lane], 0.0, 1.0);
+            return vec2<f32>(visibility,
+                clamp(raa_area_stochastic.weights[s / 4u][lane], 0.0, 1.0));
+        }
+    }
+    return vec2<f32>(1.0, 0.0);
+}
+
 // The caller passes the packed uniform index (not a stable CPU handle) to visibility.
 fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let light = raa_local_lights[index];
@@ -152,8 +174,9 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
         let w_direct = clamp(light.color_inv_range_sq.w, 0.0, 1.0);
         let fade = select(1.0, w_direct, raa_feature_enabled(RAA_GI_ACTIVE_FEATURE));
         if window * fade <= 0.0 { return vec3<f32>(0.0); }
-        // Visibility tiers: w_cone = 1 uses the GI cone alone; below 1 the hero map blends
-        // in by its own map weight. layer < 4 means no hero map was selected this frame.
+        // Visibility tiers: V_far blends the mid-tier mask V by its w_stoch; w_cone = 1 uses
+        // V_far alone, while below 1 the hero map blends in by its own map weight. layer < 4
+        // means no hero map was selected this frame.
         let w_cone = clamp(light.cos_inner, 0.0, 1.0);
         let layer = i32(round(light.direction_cos_outer.w));
         var hero = vec2<f32>(1.0, 0.0);
@@ -161,12 +184,14 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
             && layer < i32(textureNumLayers(raa_shadow_map)) {
             hero = raa_area_hero_visibility(light, layer, c.position, s.normal, c.frag);
         }
+        let stochastic = raa_area_stochastic_visibility(index, c.frag);
         var v_cone = 1.0;
-        if w_cone > 0.0 || hero.y < 1.0 {
+        if (w_cone > 0.0 || hero.y < 1.0) && stochastic.y < 1.0 {
             v_cone = clamp(raa_slot_local_visibility(index, c.position, s.normal,
                 direction, distance), 0.0, 1.0);
         }
-        let area_visibility = mix(mix(v_cone, hero.x, hero.y), v_cone, w_cone);
+        let v_far = mix(v_cone, stochastic.x, stochastic.y);
+        let area_visibility = mix(mix(v_far, hero.x, hero.y), v_far, w_cone);
         var shading = vec3<f32>(0.0);
         if raa_feature_enabled(RAA_AREA_FORM_FACTOR_FEATURE) {
             shading = raa_area_diffuse(light, s, c);

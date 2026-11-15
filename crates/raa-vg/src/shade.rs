@@ -146,6 +146,7 @@ pub(crate) struct VgShadeContributor {
     group: Option<wgpu::BindGroup>,
     group_generation: u64,
     surface: Option<wgpu::Texture>,
+    lighting: Option<wgpu::BindGroup>,
 }
 
 impl VgShadeContributor {
@@ -164,6 +165,7 @@ impl VgShadeContributor {
             group: None,
             group_generation: 0,
             surface: None,
+            lighting: None,
         }
     }
 }
@@ -179,8 +181,9 @@ impl ForwardContributor for VgShadeContributor {
 
     /// While the path is active with resources, writes the slots for `material_fns` (the debug
     /// view code comes from the settings) and fetches one `VgShade` pipeline per function with
-    /// the group-2 surface layout. Inactive or without resources it drops its slots and bind
-    /// group, so no vg resource exists while the path is off.
+    /// the group-2 surface layout, and keeps the opaque group-1 bind group. Inactive or without
+    /// resources it drops its slots, bind group and lighting group, so no vg resource exists
+    /// while the path is off.
     fn prepare(&mut self, lit: &LitHandle, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let state = self.state.borrow_mut();
         if !state.active || state.resources.is_none() {
@@ -191,8 +194,12 @@ impl ForwardContributor for VgShadeContributor {
             self.slots = None;
             self.group = None;
             self.surface = None;
+            self.lighting = None;
             return Ok(());
         }
+        // The clone is the group built by the last upload before this prepare (S44 opaque
+        // set), the same one-frame latency as sky.background's base group.
+        self.lighting = Some(ctx.lighting.opaque_bind_group().clone());
         let debug = state.settings.debug_view.code();
         self.entries.clear();
         self.entries
@@ -262,10 +269,14 @@ impl ForwardContributor for VgShadeContributor {
         Ok(())
     }
 
-    /// Sets each function's pipeline, binds the group-2 surface with the slot's dynamic offset
-    /// (groups 0 and 1 are bound by the forward pass) and draws its fullscreen triangle. Records
-    /// nothing while inactive or without resources; pushes `vg.shade` onto `recorded` when it
-    /// draws, borrowing the frame state mutably for that push only.
+    /// Sets group 1 to the S44 opaque lighting bind group cloned by the last prepare: the
+    /// group built at the upload before that prepare (crates/raa-pipeline/src/pipeline.rs:869;
+    /// the upload at :889 comes after the prepare), the one-frame latency of sky.background's
+    /// base group. Sets each function's pipeline, binds the group-2 surface
+    /// with the slot's dynamic offset (group 0 is bound by the forward pass) and draws its
+    /// fullscreen triangle. Records nothing while inactive, without resources or without a
+    /// lighting group; pushes `vg.shade` onto `recorded` when it draws, borrowing the frame
+    /// state mutably for that push only.
     fn record(&self, pass: &mut wgpu::RenderPass<'_>, _lit: &LitHandle) -> Result<(), RaaError> {
         let ready = {
             let state = self.state.borrow();
@@ -274,9 +285,14 @@ impl ForwardContributor for VgShadeContributor {
         if !ready {
             return Ok(());
         }
-        let (Some(group), Some(slots)) = (self.group.as_ref(), self.slots.as_ref()) else {
+        let (Some(group), Some(slots), Some(lighting)) = (
+            self.group.as_ref(),
+            self.slots.as_ref(),
+            self.lighting.as_ref(),
+        ) else {
             return Ok(());
         };
+        pass.set_bind_group(1, lighting, &[]);
         for (i, pipeline) in self.pipelines.iter().enumerate() {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(2, group, &[slots.offset(i)]);

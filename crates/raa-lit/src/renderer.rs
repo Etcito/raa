@@ -427,6 +427,7 @@ impl LitRenderer {
             LitShared::new(
                 gpu,
                 p.lighting().layout(),
+                p.lighting().opaque_layout(),
                 opts.max_instances,
                 opts.max_materials,
                 opts.msaa,

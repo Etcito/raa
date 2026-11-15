@@ -642,10 +642,11 @@ fn celestial_evaluator_composes_with_canonical_resources() {
             assert!(info.get_entry_point(0)[handle].is_empty());
             continue;
         }
-        // S38: sky.env and sky.background bind LightingResources::base_layout(), which
-        // omits the FRAGMENT-only GI bindings 14, 17 and 18, so the conservative count
-        // skips them as it skips (0, 8); the limits stay [15, 5, 7, 5].
-        if binding.group == 1 && matches!(binding.binding, 14 | 17 | 18) {
+        // S38/S44: sky.env and sky.background bind LightingResources::base_layout(), which
+        // omits the FRAGMENT-only GI bindings 14, 17 and 18 and the area-light stochastic
+        // bindings 19 and 20, so the conservative count skips them as it skips (0, 8);
+        // the limits stay [15, 5, 7, 5].
+        if binding.group == 1 && matches!(binding.binding, 14 | 17 | 18 | 19 | 20) {
             continue;
         }
         match module.types[global.ty].inner {
