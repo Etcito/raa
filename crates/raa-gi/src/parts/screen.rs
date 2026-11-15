@@ -596,7 +596,7 @@ impl GiPart for ScreenPart {
     }
 
     /// Drops the resources and the key so the next active frame reallocates them, and drops the
-    /// published depth-pyramid view.
+    /// published depth-pyramid and probe-output views.
     fn release(&self) {
         let mut state = self.state.borrow_mut();
         state.resources = None;
@@ -604,6 +604,7 @@ impl GiPart for ScreenPart {
         state.active = false;
         state.output_valid = false;
         self.shared.set_pyramid(None);
+        self.shared.set_probe_output(None);
     }
 
     /// The GPU bytes of the current resources, or 0 without them.
@@ -632,13 +633,14 @@ impl FeaturePass for GiScreenPass {
     }
 
     /// Stores the enable flag and, on disable, invalidates the output, drops the published
-    /// depth-pyramid view and clears the group-1 GI dummies (S38).
+    /// depth-pyramid and probe-output views and clears the group-1 GI dummies (S38).
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
         let mut state = self.part.state.borrow_mut();
         state.pass_enabled = enabled;
         if !enabled {
             state.output_valid = false;
             self.part.shared.set_pyramid(None);
+            self.part.shared.set_probe_output(None);
             lighting.clear_gi();
         }
     }
@@ -650,11 +652,13 @@ impl FeaturePass for GiScreenPass {
         }
     }
 
-    /// Records the `raa-gi.screen` pass when the part is active, enabled and has resources;
-    /// publishes the pyramid view for this frame when `ScreenPipelines::record` recorded the pass
-    /// and marks the output valid.
+    /// Drops the published pyramid and probe-output views first. Then records the `raa-gi.screen`
+    /// pass when the part is active, enabled and has resources; when `ScreenPipelines::record`
+    /// recorded the pass, publishes the pyramid view and the probe-output view of this frame's
+    /// parity and marks the output valid.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         self.part.shared.set_pyramid(None);
+        self.part.shared.set_probe_output(None);
         let mut state = self.part.state.borrow_mut();
         if !state.active || !state.pass_enabled {
             return Ok(());
@@ -688,6 +692,9 @@ impl FeaturePass for GiScreenPass {
             *output_valid = true;
             let pyramid = resources.pyramid_view();
             self.part.shared.set_pyramid(Some(pyramid));
+            self.part
+                .shared
+                .set_probe_output(Some(resources.output_view(*parity)));
         }
         Ok(())
     }

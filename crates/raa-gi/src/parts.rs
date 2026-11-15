@@ -184,6 +184,7 @@ struct SharedFrame {
     atlas_generation: u64,
     history: Option<wgpu::TextureView>,
     pyramid: Option<wgpu::TextureView>,
+    probe_output: Option<wgpu::TextureView>,
     trace: Option<raa_sdf_trace::TraceHandle>,
     group1_layout: wgpu::BindGroupLayout,
     group1: Option<(u64, u64, wgpu::BindGroup)>,
@@ -207,6 +208,7 @@ impl GiShared {
             atlas_generation: 0,
             history: None,
             pyramid: None,
+            probe_output: None,
             trace: None,
             group1_layout,
             group1: None,
@@ -239,6 +241,25 @@ impl GiShared {
     /// `trace` returns the handle `GiShared::set_trace` stored, which `clear` keeps.
     pub fn pyramid_view(&self) -> Option<wgpu::TextureView> {
         self.0.borrow().pyramid.clone()
+    }
+
+    /// The Rgba16Float screen-probe output that the gi.screen pass recorded in the current frame:
+    /// rgb is the probe irradiance and alpha the probe occlusion. It is None when gi.screen did
+    /// not record this frame.
+    ///
+    /// Handoff: the card
+    /// "raa-gi ssgi: SsgiPart, the gi.ssgi pass (order 44) and the binding-14 pick" calls
+    /// `GiShared::probe_output_view`. Today it returns the view that
+    /// `GiShared::set_probe_output` stored, and `clear` drops it. LIFECYCLE:
+    /// `GiScreenPass::record` (crates/raa-gi/src/parts/screen.rs) clears the view at its start, in
+    /// the same place where it clears the pyramid view. When `ScreenPipelines::record` returns
+    /// true, it stores the output view of the current parity, the one written this frame, taken
+    /// from `ScreenResources::output_view`. `GiScreenPass::set_enabled` with false and
+    /// `ScreenPart::release` drop the view. The pipeline records passes in order
+    /// (crates/raa-pipeline/src/pipeline.rs:917-919), so any pass of order > 42 reads this
+    /// frame's view.
+    pub fn probe_output_view(&self) -> Option<wgpu::TextureView> {
+        self.0.borrow().probe_output.clone()
     }
 
     /// The SDF trace scene attached by `GiHandle::set_trace_scene`, or `None` by default.
@@ -345,6 +366,11 @@ impl GiShared {
         self.0.borrow_mut().pyramid = pyramid;
     }
 
+    /// Publishes the gi.screen probe-output view for this frame, or drops it with `None`.
+    pub(crate) fn set_probe_output(&self, view: Option<wgpu::TextureView>) {
+        self.0.borrow_mut().probe_output = view;
+    }
+
     /// Attaches the SDF trace scene, or detaches it with `None`.
     pub(crate) fn set_trace(&self, trace: Option<raa_sdf_trace::TraceHandle>) {
         self.0.borrow_mut().trace = trace;
@@ -360,14 +386,15 @@ impl GiShared {
         self.0.borrow_mut().settings = settings;
     }
 
-    /// Drops the frame buffer, atlas, history and pyramid views and the cached compute group;
-    /// the attached trace scene stays.
+    /// Drops the frame buffer, atlas, history, pyramid and probe-output views and the cached
+    /// compute group; the attached trace scene stays.
     pub(crate) fn clear(&self) {
         let mut shared = self.0.borrow_mut();
         shared.frame = None;
         shared.atlas = None;
         shared.history = None;
         shared.pyramid = None;
+        shared.probe_output = None;
         shared.group1 = None;
     }
 }
@@ -481,5 +508,26 @@ mod tests {
 
         shared.set_trace(None);
         assert!(shared.trace().is_none());
+    }
+
+    #[test]
+    fn probe_output_follows_its_setter_and_clear() {
+        let test = "probe_output_follows_its_setter_and_clear";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        assert!(shared.probe_output_view().is_none());
+
+        shared.set_probe_output(Some(one_pixel_view(&gpu)));
+        assert!(shared.probe_output_view().is_some());
+
+        shared.clear();
+        assert!(shared.probe_output_view().is_none());
+
+        shared.set_probe_output(Some(one_pixel_view(&gpu)));
+        shared.set_probe_output(None);
+        assert!(shared.probe_output_view().is_none());
     }
 }
