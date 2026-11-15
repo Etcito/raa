@@ -7,9 +7,11 @@
 //! `AreaShadowParamsGpu` and the group-2 storage outputs live in trace.wgsl;
 //! `AreaDispatchGpu` and the denoiser bindings live in temporal.wgsl and spatial.wgsl.
 //!
-//! The pipelines, the resources and the part are later shares of this module, so nothing in
-//! this crate builds a pipeline from these builders yet.
+//! `AreaShadowPipelines` builds the four compute pipelines from these builders and records the
+//! pass's one compute pass; the resources and the part are later shares of this module.
+#![allow(dead_code)]
 
+use raa_core::GpuContext;
 use raa_pipeline::AREA_STOCHASTIC_GPU_SIZE;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use raa_taa::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
@@ -19,7 +21,8 @@ use wgpu::{
 };
 
 use super::super::screen::passes::{
-    depth_entry, entry, float_entry, storage_texture_entry, uniform_entry,
+    compute_pipeline, depth_entry, dispatch, entry, float_entry, layout, module,
+    storage_texture_entry, uniform_entry,
 };
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
@@ -177,4 +180,210 @@ pub fn spatial_group0_entries() -> [BindGroupLayoutEntry; 6] {
         storage_texture_entry(5, TextureFormat::Rgba16Float),
         uniform_entry(7, AREA_DISPATCH_SIZE),
     ]
+}
+
+/// `AreaShadowPipelines` holds the four compute pipelines of the `raa-gi.area-shadow` pass and
+/// the private group layouts of their three stages: the trace over [empty group 0, the GI
+/// compute group 1, `trace_layout`], and the temporal and the two spatial entries over their
+/// group-0 layouts, one shader module per builder.
+///
+/// Handoff: card 'raa-gi: AreaShadowResources (raw, histories, mask, params, dummies, bind
+/// groups)' takes over `AreaShadowPipelines`: it calls `AreaShadowPipelines::new`, which builds
+/// the four pipelines over `AreaShadowPipelines.trace_layout`,
+/// `AreaShadowPipelines.temporal_layout` and `AreaShadowPipelines.spatial_layout` today, reads
+/// those layouts to build the trace, per-history-group temporal, horizontal spatial and
+/// per-mask-layer vertical spatial bind groups of `AreaShadowWork`, and the part card records
+/// them through `AreaShadowPipelines::record` in one `raa-gi.area-shadow` pass. It extends the
+/// Handoff at crates/raa-gi/src/parts/area_shadow/passes.rs:79 `trace_module_wgsl` and
+/// crates/raa-gi/src/parts/area_shadow/passes.rs:141 `temporal_module_wgsl` and does not
+/// restate them.
+pub(crate) struct AreaShadowPipelines {
+    pub(crate) trace_layout: wgpu::BindGroupLayout,
+    pub(crate) temporal_layout: wgpu::BindGroupLayout,
+    pub(crate) spatial_layout: wgpu::BindGroupLayout,
+    trace: wgpu::ComputePipeline,
+    temporal: wgpu::ComputePipeline,
+    spatial_h: wgpu::ComputePipeline,
+    spatial_v: wgpu::ComputePipeline,
+}
+
+/// The per-frame bind groups and viewport `AreaShadowPipelines::record` dispatches over: the
+/// trace group 2, one temporal and one horizontal spatial group per history group
+/// (`cpu::groups_for(limit)`), one vertical spatial group per mask layer in use
+/// (`limit.min(8).div_ceil(4)`), and the viewport the trace and every filter cover.
+pub(crate) struct AreaShadowWork<'a> {
+    pub(crate) trace: &'a wgpu::BindGroup,
+    pub(crate) temporal: &'a [wgpu::BindGroup],
+    pub(crate) spatial_h: &'a [wgpu::BindGroup],
+    pub(crate) spatial_v: &'a [wgpu::BindGroup],
+    pub(crate) viewport: (u32, u32),
+}
+
+impl AreaShadowPipelines {
+    /// Builds one shader module per builder and the four pipelines: the trace over [empty group
+    /// 0, `group1`, its trace group-2 layout], the temporal over its group-0 layout and the two
+    /// spatial entries over their shared group-0 layout.
+    pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> AreaShadowPipelines {
+        let device = gpu.device();
+        let empty = layout(device, "raa-gi.area-shadow.empty", &[]);
+        let trace_layout = layout(device, "raa-gi.area-shadow.trace", &trace_group2_entries());
+        let temporal_layout = layout(
+            device,
+            "raa-gi.area-shadow.temporal",
+            &temporal_group0_entries(),
+        );
+        let spatial_layout = layout(
+            device,
+            "raa-gi.area-shadow.spatial",
+            &spatial_group0_entries(),
+        );
+
+        let trace_module = module(device, "raa-gi.area-shadow.trace", &trace_module_wgsl());
+        let temporal_module = module(
+            device,
+            "raa-gi.area-shadow.temporal",
+            &temporal_module_wgsl(),
+        );
+        let spatial_module = module(device, "raa-gi.area-shadow.spatial", &spatial_module_wgsl());
+
+        let trace = compute_pipeline(
+            device,
+            "raa-gi.area-shadow.trace",
+            &trace_module,
+            AREA_TRACE_ENTRY,
+            &[Some(&empty), Some(group1), Some(&trace_layout)],
+            None,
+        );
+        let temporal = compute_pipeline(
+            device,
+            "raa-gi.area-shadow.temporal",
+            &temporal_module,
+            AREA_TEMPORAL_ENTRY,
+            &[Some(&temporal_layout)],
+            None,
+        );
+        let spatial_h = compute_pipeline(
+            device,
+            "raa-gi.area-shadow.spatial-h",
+            &spatial_module,
+            AREA_SPATIAL_H_ENTRY,
+            &[Some(&spatial_layout)],
+            None,
+        );
+        let spatial_v = compute_pipeline(
+            device,
+            "raa-gi.area-shadow.spatial-v",
+            &spatial_module,
+            AREA_SPATIAL_V_ENTRY,
+            &[Some(&spatial_layout)],
+            None,
+        );
+
+        AreaShadowPipelines {
+            trace_layout,
+            temporal_layout,
+            spatial_layout,
+            trace,
+            temporal,
+            spatial_h,
+            spatial_v,
+        }
+    }
+
+    /// Records one `raa-gi.area-shadow` compute pass: group 1 set once, then the trace over its
+    /// group 2, then every history group's temporal and horizontal spatial pass over group 0,
+    /// then every mask layer's vertical spatial pass over group 0. Every dispatch is
+    /// `groups_for(width) x groups_for(height) x 1`. Returns false and records nothing when
+    /// `work.temporal` is empty or the viewport has a zero axis; otherwise it returns true.
+    pub(crate) fn record(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        group1: &wgpu::BindGroup,
+        work: &AreaShadowWork<'_>,
+    ) -> bool {
+        let (width, height) = work.viewport;
+        if work.temporal.is_empty() || width == 0 || height == 0 {
+            return false;
+        }
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("raa-gi.area-shadow"),
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(1, group1, &[]);
+
+        pass.set_pipeline(&self.trace);
+        pass.set_bind_group(2, work.trace, &[]);
+        dispatch(&mut pass, width, height);
+
+        pass.set_pipeline(&self.temporal);
+        for group in work.temporal {
+            pass.set_bind_group(0, group, &[]);
+            dispatch(&mut pass, width, height);
+        }
+
+        pass.set_pipeline(&self.spatial_h);
+        for group in work.spatial_h {
+            pass.set_bind_group(0, group, &[]);
+            dispatch(&mut pass, width, height);
+        }
+
+        pass.set_pipeline(&self.spatial_v);
+        for group in work.spatial_v {
+            pass.set_bind_group(0, group, &[]);
+            dispatch(&mut pass, width, height);
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parts::GiShared;
+    use raa_core::testing::{block_on, skip, software_gpu};
+
+    #[test]
+    fn pipelines_build_in_a_validation_scope_and_record_nothing_without_history() {
+        let test = "pipelines_build_in_a_validation_scope_and_record_nothing_without_history";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let pipelines = AreaShadowPipelines::new(&gpu, &shared.compute_group1_layout());
+        assert!(
+            block_on(scope.pop()).is_none(),
+            "the four pipelines create without a validation error"
+        );
+
+        let layout = gpu
+            .device()
+            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raa-gi.area-shadow.test.empty"),
+                entries: &[],
+            });
+        let group = gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gi.area-shadow.test.empty"),
+            layout: &layout,
+            entries: &[],
+        });
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raa-gi.area-shadow.test"),
+            });
+        let work = AreaShadowWork {
+            trace: &group,
+            temporal: &[],
+            spatial_h: &[],
+            spatial_v: &[],
+            viewport: (64, 64),
+        };
+        assert!(
+            !pipelines.record(&mut encoder, &group, &work),
+            "an empty temporal slice records nothing"
+        );
+    }
 }
