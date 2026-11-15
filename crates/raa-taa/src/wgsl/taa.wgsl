@@ -138,7 +138,10 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
             second_moment += ycocg * ycocg;
 
             // A Gaussian centred on this output pixel, using where the sample really landed.
-            let sample_position = vec2<f32>(p) + vec2<f32>(0.5) + jitter_pixels;
+            // raa-lit's jittered projection adds camera_jitter.xy to the NDC, so the scene
+            // pixel p shows the unjittered point at its centre minus the jitter (solstice adds
+            // it here, which moves the filter away from the true sample and softens edges).
+            let sample_position = vec2<f32>(p) + vec2<f32>(0.5) - jitter_pixels;
             let delta = sample_position - scene_position;
             let weight = exp(-2.3 * dot(delta, delta));
             filtered += color * weight;

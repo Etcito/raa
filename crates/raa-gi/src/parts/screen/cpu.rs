@@ -194,6 +194,12 @@ pub fn sh9_irradiance(sh: &[[f32; 3]; 9], normal: [f32; 3]) -> [f32; 3] {
 
 /// The temporal blend weight of a screen probe pixel (S39): 1 when the history is invalid, else
 /// `min(0.08 + 0.03 * moved_pixels, 0.5)`. `moved_pixels` is the screen-space motion in pixels.
+///
+/// `probe_integrate.wgsl` passes `history_valid = false` (alpha 1, the current value unblended)
+/// when the pixel's own S43 motion reject flag (z) is set, when a non-far cross tap at +-4 / +-8
+/// px (clamped to the viewport) has its reject flag set or a motion differing from the pixel's
+/// own by more than `RAA_GI_HISTORY_MOTION_TOLERANCE_PX` = 0.5 px, when the history flag is
+/// clear, or when the previous uv lies outside the viewport.
 pub fn temporal_alpha(moved_pixels: f32, history_valid: bool) -> f32 {
     if history_valid {
         (0.08 + 0.03 * moved_pixels).min(0.5)

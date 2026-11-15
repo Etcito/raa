@@ -115,6 +115,36 @@ fn raa_gi_probe_match(probe: Probe, world: vec3<f32>, normal: vec3<f32>, plane_s
     return facing2 * facing2 * exp(-plane * plane_scale);
 }
 
+// Largest pixel-space difference between a cross tap's motion and the pixel's own for which
+// the history stays usable (S43 cross-fix, card 'TAA: stop the ghost trail ...').
+const RAA_GI_HISTORY_MOTION_TOLERANCE_PX: f32 = 0.5;
+
+// True when the 8 cross taps at (+-4, 0), (+-8, 0), (0, +-4), (0, +-8) around `pixel` agree
+// with its own motion: each tap, clamped to the viewport and skipped at far depth, has its
+// S43 reject flag clear (z <= 0.5) and a pixel-space motion within
+// RAA_GI_HISTORY_MOTION_TOLERANCE_PX of `own_px`. Pixels beside a moving silhouette or a
+// depth edge under camera motion fail it, so they do not keep the irradiance of what moved.
+fn raa_gi_history_neighbours_agree(pixel: vec2<i32>, own_px: vec2<f32>) -> bool {
+    let size = vec2<i32>(raa_gi_frame.viewport.xy);
+    let taps = array<vec2<i32>, 8>(
+        vec2<i32>(4, 0), vec2<i32>(-4, 0), vec2<i32>(8, 0), vec2<i32>(-8, 0),
+        vec2<i32>(0, 4), vec2<i32>(0, -4), vec2<i32>(0, 8), vec2<i32>(0, -8),
+    );
+    for (var i = 0u; i < 8u; i++) {
+        let tap = clamp(pixel + taps[i], vec2<i32>(0), size - vec2<i32>(1));
+        if raa_depth_is_far(textureLoad(raa_gi_depth, tap, 0)) {
+            continue;
+        }
+        let m = textureLoad(raa_gi_motion, tap, 0);
+        if m.z > 0.5
+            || length(m.xy * raa_gi_frame.viewport.xy - own_px) > RAA_GI_HISTORY_MOTION_TOLERANCE_PX
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Handoff: card 'raa-gi screen: passes.rs module builders, group-2 layouts and pipelines'
 // builds the integrate compute pipeline on `raa_gi_probe_integrate`; today it maps the pixel
 // grid, weights the four nearest probes, evaluates `raa_gi_sh_irradiance`, adds
@@ -193,15 +223,23 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     let occlusion = raa_gi_screen_occlusion(center, world, normal, noise);
     var current = vec4<f32>(irradiance, occlusion);
 
-    // Temporal blend with RAA's motion convention (previous uv = uv - motion). Without usable
-    // history alpha is 1; otherwise the S39 alpha grows with the motion in pixels.
-    let motion = textureLoad(raa_gi_motion, pixel, 0).xy;
+    // Temporal blend with RAA's motion convention (previous uv = uv - motion). History is
+    // usable only when (a) the pixel's S43 reject flag is clear (m.z <= 0.5), (b) every non-far
+    // cross tap at +-4 / +-8 px has its flag clear and a motion within
+    // RAA_GI_HISTORY_MOTION_TOLERANCE_PX of the pixel's own, and (c) history_valid is set and
+    // the previous uv lies inside the viewport. Without usable history the current value is
+    // stored (alpha 1); otherwise the S39 alpha grows with the motion in pixels.
+    let m = textureLoad(raa_gi_motion, pixel, 0);
+    let motion = m.xy;
+    let own_px = motion * raa_gi_frame.viewport.xy;
     let previous_uv = center * raa_gi_frame.viewport.zw - motion;
-    if raa_gi_screen_params.history_valid != 0u
+    if m.z <= 0.5
+        && raa_gi_screen_params.history_valid != 0u
         && all(previous_uv > vec2<f32>(0.0))
         && all(previous_uv < vec2<f32>(1.0))
+        && raa_gi_history_neighbours_agree(pixel, own_px)
     {
-        let moved = length(motion * raa_gi_frame.viewport.xy);
+        let moved = length(own_px);
         let alpha = min(0.08 + 0.03 * moved, 0.5);
         let previous_pixel = vec2<i32>(previous_uv * raa_gi_frame.viewport.xy);
         let history = textureLoad(raa_gi_previous, previous_pixel, 0);

@@ -363,3 +363,32 @@ fn local_visibility_cone_traces_area_lights_only() {
         assert!(text.contains(pin), "LocalVisibility misses {pin}");
     }
 }
+
+/// S43 cross-fix: the integrate blend reads the motion reject flag, holds the 0.5 px motion
+/// tolerance and tests the eight cross taps at +-4 and +-8 px before it uses its history.
+#[test]
+fn integrate_history_honours_the_reject_flag_and_cross_taps() {
+    let wgsl = probe_integrate_module_wgsl();
+    assert!(
+        wgsl.contains("const RAA_GI_HISTORY_MOTION_TOLERANCE_PX: f32 = 0.5;"),
+        "tolerance constant"
+    );
+    assert!(wgsl.contains("m.z <= 0.5"), "the pixel's own reject flag");
+    assert!(wgsl.contains("m.z > 0.5"), "a tap's reject flag");
+    for tap in [
+        "vec2<i32>(4, 0)",
+        "vec2<i32>(-4, 0)",
+        "vec2<i32>(8, 0)",
+        "vec2<i32>(-8, 0)",
+        "vec2<i32>(0, 4)",
+        "vec2<i32>(0, -4)",
+        "vec2<i32>(0, 8)",
+        "vec2<i32>(0, -8)",
+    ] {
+        assert!(wgsl.contains(tap), "cross tap {tap}");
+    }
+    assert!(
+        wgsl.contains("raa_gi_history_neighbours_agree(pixel, own_px)"),
+        "the blend requires the cross taps to agree"
+    );
+}
