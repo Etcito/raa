@@ -80,10 +80,29 @@ pub fn trace_module_wgsl() -> String {
     )
 }
 
+/// Size of `RaaAreaSdfVolume`: the frozen `TraceVolume` ABI of raa-sdf-trace (`origin`,
+/// `shape`, `encoding` and `build` at 16-B offsets).
+pub const SDF_VOLUME_SIZE: u64 = 64;
+
+/// The raa-sdf-trace SDF field: an unfilterable sampled `texture_3d<f32>` (R8Snorm, five
+/// mips, or a 1x1x1 dummy); the screen helpers build only `D2` entries.
+fn sdf_field_entry(binding: u32) -> BindGroupLayoutEntry {
+    entry(
+        binding,
+        BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: TextureViewDimension::D3,
+            multisampled: false,
+        },
+    )
+}
+
 /// Trace group 2, ascending: 0 `GiFrameGpu` (432 B), 1 the S12 depth, 2 the S12 normal, 4 the
 /// depth pyramid (all mips), 5 the Rgba16Float raw history array, 6 the R32Float depth output,
-/// 8 the `RaaAreaStochasticGpu` slot table (80 B) and 9 `AreaShadowParamsGpu` (16 B).
-pub fn trace_group2_entries() -> [BindGroupLayoutEntry; 8] {
+/// 8 the `RaaAreaStochasticGpu` slot table (80 B), 9 `AreaShadowParamsGpu` (16 B), 10 the
+/// raa-sdf-trace SDF field (`TraceVolume.view`) and 11 its `RaaAreaSdfVolume` uniform (64 B,
+/// `TraceVolume.uniform`).
+pub fn trace_group2_entries() -> [BindGroupLayoutEntry; 10] {
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
@@ -93,6 +112,8 @@ pub fn trace_group2_entries() -> [BindGroupLayoutEntry; 8] {
         storage_texture_entry(6, TextureFormat::R32Float),
         uniform_entry(8, AREA_STOCHASTIC_GPU_SIZE as u64),
         uniform_entry(9, AREA_PARAMS_SIZE),
+        sdf_field_entry(10),
+        uniform_entry(11, SDF_VOLUME_SIZE),
     ]
 }
 

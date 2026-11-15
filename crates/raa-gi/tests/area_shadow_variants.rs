@@ -1,11 +1,11 @@
 //! P4-Q1/S44: the area-shadow trace, temporal and spatial modules naga-validate, their entries
 //! follow the 8x8 compute workgroup, their group-0 or group-2 bindings match the layout entries
 //! and resource kinds, group 1 stays unused or inside the GI compute set, their records match
-//! contract 'area-stochastic-gpu', contract 'area-shadow-trace-wgsl' and contract
-//! 'area-shadow-denoise-wgsl'.
+//! contract 'area-stochastic-gpu', contract 'area-shadow-trace-wgsl', contract
+//! 'area-shadow-sdf-wgsl' and contract 'area-shadow-denoise-wgsl'.
 //!
 //! The builders, entry constants and entry arrays come from the Handoff doc comment at
-//! crates/raa-gi/src/parts/area_shadow/passes.rs:117 `temporal_module_wgsl`.
+//! crates/raa-gi/src/parts/area_shadow/passes.rs:138 `temporal_module_wgsl`.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -208,6 +208,9 @@ fn trace_module_validates_and_holds_its_kernel() {
         "fn raa_area_stratum_uv(",
         "fn raa_area_sample_weight(",
         "fn raa_area_volume_visibility(",
+        "fn raa_area_sdf_ready(",
+        "fn raa_area_sdf_distance(",
+        "fn raa_area_sdf_visibility(",
         "fn raa_area_ray_visibility(",
     ] {
         assert!(source.contains(name), "the trace module holds {name}");
@@ -239,7 +242,7 @@ fn entry_bindings_match_the_trace_layout() {
     let reflection = Reflection::new(&trace_module_wgsl());
     let index = reflection.entry(AREA_TRACE_ENTRY);
     let entries = trace_group2_entries();
-    assert_eq!(numbers(&entries), [0, 1, 2, 4, 5, 6, 8, 9]);
+    assert_eq!(numbers(&entries), [0, 1, 2, 4, 5, 6, 8, 9, 10, 11]);
     assert_eq!(
         reflection.used(index, 2),
         numbers(&entries),
@@ -291,6 +294,13 @@ fn records_match_contract_area_stochastic_gpu() {
     let params = [("frame_index", 0), ("pad0", 4), ("pad1", 8), ("pad2", 12)];
     check_struct(&reflection.module, "AreaShadowParamsGpu", 16, &params);
     assert_eq!(AREA_PARAMS_SIZE, 16);
+    let sdf = [
+        ("origin", 0),
+        ("shape", 16),
+        ("encoding", 32),
+        ("build", 48),
+    ];
+    check_struct(&reflection.module, "RaaAreaSdfVolume", 64, &sdf);
 }
 
 #[test]

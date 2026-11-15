@@ -1,7 +1,8 @@
 // S44 mid-tier area-light shadows: the trace kernel of `gi.area-shadow`. One invocation per
 // viewport pixel traces one stratified shadow ray towards every mid-tier area light of the
 // slot table (contract 'area-stochastic-gpu'): first through the depth pyramid `gi.screen`
-// published this frame, then through the GI volume. It writes the weighted visibility S and
+// published this frame, then through the GI volume, then through the attached raa-sdf-trace
+// volume. It writes the weighted visibility S and
 // the weight U of each slot into the raw history layers, plus the pixel's linear view depth.
 //
 // This is RAA's own code; it adapts no solstice source. The estimator it feeds is the ratio
@@ -14,8 +15,9 @@
 //
 // Group-2 binding registry (binding number to resource):
 // 0 raa_gi_frame, 1 raa_gi_depth, 2 raa_gi_normal, 4 raa_gi_pyramid, 5 raa_area_raw_out,
-// 6 raa_area_depth_out, 8 raa_area_table, 9 raa_area_params. Bindings 3 and 7 stay declared
-// by the composed screen files and are unused here.
+// 6 raa_area_depth_out, 8 raa_area_table, 9 raa_area_params, 10 raa_area_sdf_field,
+// 11 raa_area_sdf_volume. Bindings 3 and 7 stay declared by the composed screen files and are
+// unused here.
 
 // The per-frame trace parameters (16 B), contract 'area-shadow-trace-wgsl'.
 struct AreaShadowParamsGpu {
@@ -33,6 +35,24 @@ struct AreaShadowParamsGpu {
 @group(2) @binding(8) var<uniform> raa_area_table: RaaAreaStochasticGpu;
 // The frame counter of this trace.
 @group(2) @binding(9) var<uniform> raa_area_params: AreaShadowParamsGpu;
+
+// The frozen 64-byte ABI of raa-sdf-trace's TraceVolume
+// (crates/raa-sdf-trace/src/wgsl/volume_wgsl.wgsl:75-100, the accessors below): origin.xyz is
+// the world origin and origin.w the voxel size in metres, shape.xyz the base dimensions and
+// shape.w the published revision, encoding.x the distance range and encoding.y the roundoff,
+// build.z the revision of the stamped mips.
+struct RaaAreaSdfVolume {
+    origin: vec4<f32>,
+    shape: vec4<u32>,
+    encoding: vec4<f32>,
+    build: vec4<u32>,
+}
+
+// The R8Snorm SDF field with five mips, or a 1x1x1 dummy whose zero uniform is never ready.
+@group(2) @binding(10) var raa_area_sdf_field: texture_3d<f32>;
+// The published revision and metric of the SDF field (raa_sdf_trace::TraceVolume.uniform), or
+// 64 zero bytes.
+@group(2) @binding(11) var<uniform> raa_area_sdf_volume: RaaAreaSdfVolume;
 
 // Per-axis R2 sequence constants of the per-frame jitter, as in `cpu::R2_ALPHA`.
 const RAA_AREA_R2_ALPHA: vec2<f32> = vec2<f32>(0.7548777, 0.5698403);
@@ -100,9 +120,24 @@ fn raa_area_sample_weight(
     return cos_surface * cos_light / max(r * r, 1e-4);
 }
 
+// The coarser of the GI voxels at the two ends of the ray, in metres (0 without a volume).
+fn raa_area_volume_voxel(world: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32 {
+    let count = raa_gi_volume_params.level_count;
+    if count == 0u {
+        return 0.0;
+    }
+    let near_level = min(raa_gi_level_at(world, 0u), count - 1u);
+    let light_position = world + dir * distance;
+    let far_level = min(raa_gi_level_at(light_position, near_level), count - 1u);
+    return max(
+        raa_gi_volume_params.levels[near_level].w,
+        raa_gi_volume_params.levels[far_level].w,
+    );
+}
+
 // The hard-ray volume path of the LocalVisibility provider: 1 with no volume; otherwise the
-// near and far levels at both ends pick the coarser voxel, the origin clears the own surface
-// by 1.5 voxels and the walk stops 3 voxels short of the light.
+// coarser GI voxel of the two ends, the origin clears the own surface by 1.5 voxels and the
+// walk stops 3 voxels short of the light.
 fn raa_area_volume_visibility(
     world: vec3<f32>,
     normal: vec3<f32>,
@@ -113,21 +148,74 @@ fn raa_area_volume_visibility(
     if count == 0u {
         return 1.0;
     }
-    let near_level = min(raa_gi_level_at(world, 0u), count - 1u);
-    let light_position = world + dir * distance;
-    let far_level = min(raa_gi_level_at(light_position, near_level), count - 1u);
-    let voxel = max(
-        raa_gi_volume_params.levels[near_level].w,
-        raa_gi_volume_params.levels[far_level].w,
-    );
+    let voxel = raa_area_volume_voxel(world, dir, distance);
     let origin = world + normal * (1.5 * voxel);
     let max_t = max(distance - 3.0 * voxel, 0.0);
     return raa_gi_visibility(origin, dir, voxel, max_t, 24u);
 }
 
+// Whether the attached SDF volume is published: the mirrored shape and five mips, a stamped
+// build revision equal to the published one and finite metrics, the condition of
+// trace_volume_ready (crates/raa-sdf-trace/src/wgsl/volume_wgsl.wgsl:92-100).
+fn raa_area_sdf_ready() -> bool {
+    return raa_area_sdf_volume.shape.w > 0u && raa_area_sdf_volume.shape.w < 16777216u &&
+        raa_area_sdf_volume.build.z == raa_area_sdf_volume.shape.w &&
+        all(raa_area_sdf_volume.shape.xyz == textureDimensions(raa_area_sdf_field, 0)) &&
+        textureNumLevels(raa_area_sdf_field) == 5u &&
+        raa_area_sdf_volume.origin.w > 0.0 && raa_area_sdf_volume.origin.w < 1e30 &&
+        raa_area_sdf_volume.encoding.x > 0.0 && raa_area_sdf_volume.encoding.x < 1e30 &&
+        raa_area_sdf_volume.encoding.y >= 0.0 && raa_area_sdf_volume.encoding.y < 1e30;
+}
+
+// The distance from `p` to the nearest SDF surface in metres at the finest mip, the level-0
+// case of trace_volume_distance (crates/raa-sdf-trace/src/wgsl/volume_wgsl.wgsl:75-85).
+fn raa_area_sdf_distance(p: vec3<f32>) -> f32 {
+    let local = (p - raa_area_sdf_volume.origin.xyz) / raa_area_sdf_volume.origin.w;
+    let size = vec3<f32>(raa_area_sdf_volume.shape.xyz);
+    if any(local < vec3<f32>(0.0)) || any(local >= size) {
+        return max(
+            0.0,
+            length(max(max(-local, local - size), vec3<f32>(0.0))) * raa_area_sdf_volume.origin.w
+                - raa_area_sdf_volume.encoding.y,
+        );
+    }
+    let cell = min(
+        vec3<u32>(local),
+        textureDimensions(raa_area_sdf_field, 0) - vec3<u32>(1u),
+    );
+    return max(
+        0.0,
+        textureLoad(raa_area_sdf_field, vec3<i32>(cell), 0).x * raa_area_sdf_volume.encoding.x
+            - raa_area_sdf_volume.encoding.x / 127.0
+            - raa_area_sdf_volume.encoding.y,
+    );
+}
+
+// The SDF visibility of the segment from `origin` along `dir` up to `max_t`: 1 while the
+// volume is not published; otherwise a 64-step sphere trace that returns 0 as soon as the
+// field is within 0.02 m and steps by the distance clamped to half a voxel.
+fn raa_area_sdf_visibility(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> f32 {
+    if !raa_area_sdf_ready() {
+        return 1.0;
+    }
+    var t = 0.0;
+    for (var step = 0u; step < 64u; step = step + 1u) {
+        let d = raa_area_sdf_distance(origin + dir * t);
+        if d <= 0.02 {
+            return 0.0;
+        }
+        t = t + max(d, 0.5 * raa_area_sdf_volume.origin.w);
+        if t >= max_t {
+            return 1.0;
+        }
+    }
+    return 1.0;
+}
+
 // The visibility of the shadow ray from `world` to `point` in [0, 1]: the depth pyramid first
-// (when the pass published one), then the GI volume. A screen hit that covers the ray
-// completely is a full shadow; otherwise the volume modifies the remaining visibility.
+// (when the pass published one), then the GI volume, then the attached raa-sdf-trace volume. A
+// screen hit that covers the ray completely is a full shadow; otherwise the volume phases
+// scale the remaining visibility.
 fn raa_area_ray_visibility(world: vec3<f32>, normal: vec3<f32>, point: vec3<f32>) -> f32 {
     let to_point = point - world;
     let distance = length(to_point);
@@ -148,7 +236,9 @@ fn raa_area_ray_visibility(world: vec3<f32>, normal: vec3<f32>, point: vec3<f32>
         return 0.0;
     }
     let volume = raa_area_volume_visibility(world, normal, dir, distance);
-    return min(1.0 - occlusion, volume);
+    let voxel = raa_area_volume_voxel(world, dir, distance);
+    let sdf = raa_area_sdf_visibility(world + normal * (1.5 * voxel), dir, distance - 0.05);
+    return min(1.0 - occlusion, volume) * sdf;
 }
 
 // One invocation per viewport pixel: fill one stratum sample per mid-tier slot and write the
