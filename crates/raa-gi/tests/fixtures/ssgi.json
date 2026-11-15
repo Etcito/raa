@@ -1,0 +1,41 @@
+{
+  "derivation": "Hand-derived, never run, from the ssgi-cpu contract. update_sectors: start = min(floor(min_u x 32), 31), count = min(ceil((max_u - min_u) x 32), 32 - start), mask = (2^count - 1) << start, and 0 when count is 0. sector_u: (sin(clamp(theta - gamma, -PI/2, PI/2)) + 1) / 2 with PI/2 = 1.5707963, PI/6 = 0.5235988 and PI = 3.1415927. sample_bits: back = delta - view x thickness; each face gives side x acos(dot(normalize(p), view)) and a sector coordinate, and the mask spans both. accumulate: new = bits & ~mask, irradiance += radiance x popcount(new) / 32, and it returns mask | bits. resolve: E = PI x mean(sum), V = mean(1 - popcount(mask) / 32), and ([0, 0, 0], 1) for no slices. compose: (E + V x probe.rgb, min(V, probe.a)). temporal_alpha: min(0.1 + 0.03 x moved, 0.5). Masks compare exactly; floats within 1e-5.",
+  "update_sectors": [
+    {"min_u": 0.5, "max_u": 1.0, "mask": 4294901760, "derivation": "start = floor(0.5 x 32) = 16; count = ceil((1.0 - 0.5) x 32) = 16, capped at 32 - 16 = 16; mask = (2^16 - 1) << 16 = 0xFFFF0000 = 4294901760."},
+    {"min_u": 0.0, "max_u": 0.25, "mask": 255, "derivation": "start = floor(0) = 0; count = ceil(0.25 x 32) = 8; mask = (2^8 - 1) << 0 = 255."},
+    {"min_u": 0.3, "max_u": 0.3, "mask": 0, "derivation": "count = ceil((0.3 - 0.3) x 32) = ceil(0) = 0, so the mask is 0."},
+    {"min_u": 0.99, "max_u": 1.0, "mask": 2147483648, "derivation": "start = floor(0.99 x 32) = floor(31.68) = 31; count = ceil((1.0 - 0.99) x 32) = ceil(0.32) = 1, capped at 32 - 31 = 1; mask = 1 << 31 = 2147483648."},
+    {"min_u": 0.0, "max_u": 1.0, "mask": 4294967295, "derivation": "start = 0; count = ceil(1.0 x 32) = 32; mask = 2^32 - 1 = 4294967295, every sector."},
+    {"min_u": 1.0, "max_u": 1.0, "mask": 0, "derivation": "start = min(floor(32), 31) = 31; count = ceil(0) = 0, so the mask is 0."}
+  ],
+  "sector_u": [
+    {"theta": 0, "gamma": 0, "u": 0.5, "derivation": "clamp(0 - 0) = 0; (sin 0 + 1) / 2 = 0.5."},
+    {"theta": 1.5707963, "gamma": 0, "u": 1, "derivation": "theta - gamma = PI/2, on the clamp bound; (sin(PI/2) + 1) / 2 = (1 + 1) / 2 = 1."},
+    {"theta": -1.5707963, "gamma": 0, "u": 0, "derivation": "theta - gamma = -PI/2, on the clamp bound; (sin(-PI/2) + 1) / 2 = (-1 + 1) / 2 = 0."},
+    {"theta": 0.5235988, "gamma": 0, "u": 0.75, "derivation": "sin(PI/6) = 0.5; (0.5 + 1) / 2 = 0.75."},
+    {"theta": 0, "gamma": 0.5235988, "u": 0.25, "derivation": "theta - gamma = -PI/6; sin(-PI/6) = -0.5; (-0.5 + 1) / 2 = 0.25."},
+    {"theta": 3.1415927, "gamma": 0, "u": 1, "derivation": "theta - gamma = PI is clamped to PI/2; (sin(PI/2) + 1) / 2 = 1."}
+  ],
+  "sample_bits": [
+    {"delta": [1, 0, 1], "view": [0, 0, 1], "thickness": 0.5, "side": 1, "gamma": 0, "mask": 939524096, "derivation": "theta_f = acos(1/sqrt2) = PI/4 = 0.7853982, u_f = (sin(PI/4) + 1)/2 = (0.7071068 + 1)/2 = 0.853553; back = (1,0,0.5), theta_b = acos(0.5/sqrt1.25) = acos(0.447214) = 1.107149, u_b = (sin(theta_b) + 1)/2 = (0.894427 + 1)/2 = 0.947214; start = floor(u_f x 32) = floor(27.31) = 27; count = ceil((u_b - u_f) x 32) = ceil(2.997) = 3; bits = 7 << 27 = 939524096."},
+    {"delta": [-1, 0, 1], "view": [0, 0, 1], "thickness": 0.5, "side": -1, "gamma": 0, "mask": 14, "derivation": "theta_f = -acos(1/sqrt2) = -PI/4, u_f = (sin(-PI/4) + 1)/2 = 0.146447; back = (-1,0,0.5), theta_b = -acos(0.447214) = -1.107149, u_b = (1 - 0.894427)/2 = 0.052786; start = floor(u_b x 32) = floor(1.689) = 1; count = ceil((u_f - u_b) x 32) = ceil(2.997) = 3; bits = 7 << 1 = 14."}
+  ],
+  "accumulate": [
+    {"mask": 65535, "bits": 16776960, "radiance": [1, 0, 0], "facing": true, "irradiance": [0, 0, 0], "want_mask": 16777215, "want_irradiance": [0.25, 0, 0], "derivation": "bits 16776960 = 0xFFFF00 and mask 65535 = 0xFFFF: new = bits & ~mask = 0xFF0000, popcount 8, so irradiance += (1,0,0) x 8 / 32 = (0.25,0,0); mask | bits = 0xFFFFFF = 16777215."},
+    {"mask": 65535, "bits": 16776960, "radiance": [1, 0, 0], "facing": false, "irradiance": [0, 0, 0], "want_mask": 16777215, "want_irradiance": [0, 0, 0], "derivation": "The same new sectors open, but facing is false, so nothing is added; mask | bits = 16777215."}
+  ],
+  "resolve": [
+    {"slices": [{"irradiance": [1, 1, 1], "mask": 4294967295}], "want_irradiance": [3.141593, 3.141593, 3.141593], "want_visibility": 0, "derivation": "One slice: sum (1,1,1) and mask 4294967295 has popcount 32, so V = 1 - 32/32 = 0; E = PI x (1,1,1) / 1 = 3.141593 in each channel: a fully covered uniform radiance L gives PI L."},
+    {"slices": [{"irradiance": [0, 0, 0], "mask": 0}, {"irradiance": [0.5, 0, 0], "mask": 4294901760}], "want_irradiance": [0.785398, 0, 0], "want_visibility": 0.75, "derivation": "Slice 1 has mask 0, open 1 - 0/32 = 1; slice 2 has mask 0xFFFF0000 with popcount 16, open 1 - 16/32 = 0.5; V = (1 + 0.5) / 2 = 0.75. Sum (0.5,0,0), mean (0.25,0,0), E = PI x 0.25 = 0.785398."},
+    {"slices": [], "want_irradiance": [0, 0, 0], "want_visibility": 1, "derivation": "No slices: nothing is occluded, so ([0,0,0], 1)."}
+  ],
+  "compose": [
+    {"screen": [0.2, 0.1, 0, 0.5], "probe": [1, 1, 1, 0.8], "want": [0.7, 0.6, 0.5, 0.5], "derivation": "rgb = (0.2 + 0.5 x 1, 0.1 + 0.5 x 1, 0 + 0.5 x 1) = (0.7, 0.6, 0.5); alpha = min(0.5, 0.8) = 0.5."},
+    {"screen": [0, 0, 0, 1], "probe": [0.3, 0.4, 0.5, 0.9], "want": [0.3, 0.4, 0.5, 0.9], "derivation": "Open surface: E = 0 and V = 1, so rgb = probe.rgb exactly and alpha = min(1, 0.9) = 0.9: the probe passes through unchanged."}
+  ],
+  "temporal_alpha": [
+    {"moved_px": 0, "alpha": 0.1, "derivation": "min(0.1 + 0.03 x 0, 0.5) = 0.1."},
+    {"moved_px": 5, "alpha": 0.25, "derivation": "min(0.1 + 0.03 x 5, 0.5) = min(0.25, 0.5) = 0.25."},
+    {"moved_px": 20, "alpha": 0.5, "derivation": "min(0.1 + 0.03 x 20, 0.5) = min(0.7, 0.5) = 0.5, capped."}
+  ]
+}
