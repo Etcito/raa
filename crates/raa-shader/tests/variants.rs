@@ -398,10 +398,6 @@ fn fragment_targets_follow_the_pass() {
         size: naga::VectorSize::Quad,
         scalar: naga::Scalar::F32,
     };
-    let vec2_f32 = naga::TypeInner::Vector {
-        size: naga::VectorSize::Bi,
-        scalar: naga::Scalar::F32,
-    };
     for (pass, module) in compose_all(&reg, MaterialFnId::STANDARD) {
         let Some(fs) = entry(&module, "fs_main") else {
             assert_eq!(pass, PassKind::Shadow);
@@ -411,19 +407,14 @@ fn fragment_targets_follow_the_pass() {
             Some(result) => result_locations(&module, result)
                 .into_iter()
                 .map(|(location, ty, _)| {
-                    if pass == PassKind::Prepass && location == 2 {
-                        // S12 motion target Rg16Float: two components.
-                        assert_eq!(module.types[ty].inner, vec2_f32, "{pass:?}");
-                    } else {
-                        assert_eq!(module.types[ty].inner, vec4_f32, "{pass:?}");
-                    }
+                    assert_eq!(module.types[ty].inner, vec4_f32, "{pass:?}");
                     location
                 })
                 .collect(),
             None => Vec::new(),
         };
         let expected: &[u32] = match pass {
-            // S12 normal, material and motion targets.
+            // S12 normal, material and motion targets (motion is Rgba16Float).
             PassKind::Prepass => &[0, 1, 2],
             // HDR colour (alpha = coverage for the fur shells).
             PassKind::Forward | PassKind::FurShell => &[0],

@@ -99,7 +99,7 @@ impl FeaturePass for VgGbufferPass {
                 color_targets: vec![
                     Some(color_target(wgpu::TextureFormat::Rgba16Float)),
                     Some(color_target(wgpu::TextureFormat::Rgba8Unorm)),
-                    Some(color_target(wgpu::TextureFormat::Rg16Float)),
+                    Some(color_target(wgpu::TextureFormat::Rgba16Float)),
                 ],
                 depth: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,

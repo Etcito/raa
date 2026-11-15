@@ -1,11 +1,11 @@
 //! S12 motion from the prepass. The CPU half mirrors the WGSL formula against
 //! `tests/fixtures/motion.txt`; the software-GPU half drives the public renderer and
-//! pipeline and reads the Rg16Float motion target back through a compute copy.
+//! pipeline and reads the Rgba16Float motion target back through a compute copy.
 
 use raa_shader::PASS_PREPASS_WGSL;
 
 /// One fixture case: jittered clip positions and validity inputs plus the expected UV
-/// displacement.
+/// displacement and history reject flag.
 struct Case {
     name: String,
     current_clip: [f32; 3],
@@ -15,6 +15,7 @@ struct Case {
     history_valid: bool,
     instance_valid: bool,
     expected: [f32; 2],
+    expected_reject: f32,
 }
 
 fn number(token: &str, line: &str) -> f32 {
@@ -25,7 +26,7 @@ fn number(token: &str, line: &str) -> f32 {
 
 fn parse_case(line: &str) -> Case {
     let tokens: Vec<&str> = line.split_whitespace().collect();
-    assert_eq!(tokens.len(), 15, "fixture columns in `{line}`");
+    assert_eq!(tokens.len(), 16, "fixture columns in `{line}`");
     let f = |i: usize| number(tokens[i], line);
     Case {
         name: tokens[0].to_string(),
@@ -36,6 +37,7 @@ fn parse_case(line: &str) -> Case {
         history_valid: f(11) != 0.0,
         instance_valid: f(12) != 0.0,
         expected: [f(13), f(14)],
+        expected_reject: f(15),
     }
 }
 
@@ -45,16 +47,16 @@ fn finite(v: f32) -> bool {
 }
 
 /// CPU twin of `raa_pass_motion`: remove both jitters, then encode the NDC delta as a UV
-/// displacement with positive X right and positive Y down.
-fn motion(case: &Case) -> [f32; 2] {
-    if !case.history_valid || !case.instance_valid {
-        return [0.0; 2];
+/// displacement with positive X right and positive Y down, plus the history reject flag.
+fn motion(case: &Case) -> [f32; 3] {
+    if !case.history_valid {
+        return [0.0, 0.0, 1.0];
     }
     let (cw, pw) = (case.current_clip[2], case.previous_clip[2]);
     if cw.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater)
         || pw.partial_cmp(&0.0) != Some(core::cmp::Ordering::Greater)
     {
-        return [0.0; 2];
+        return [0.0, 0.0, 1.0];
     }
     let current = [
         case.current_clip[0] / cw - case.current_jitter[0],
@@ -65,11 +67,13 @@ fn motion(case: &Case) -> [f32; 2] {
         case.previous_clip[1] / pw - case.previous_jitter[1],
     ];
     if !current.iter().chain(previous.iter()).all(|&v| finite(v)) {
-        return [0.0; 2];
+        return [0.0, 0.0, 1.0];
     }
+    let reject = if case.instance_valid { 0.0 } else { 1.0 };
     [
         (current[0] - previous[0]) * 0.5,
         (previous[1] - current[1]) * 0.5,
+        reject,
     ]
 }
 
@@ -85,10 +89,13 @@ fn fixture_right_down_camera_and_invalid_cases() {
         let case = parse_case(line);
         let got = motion(&case);
         assert!(
-            (got[0] - case.expected[0]).abs() <= 1e-6 && (got[1] - case.expected[1]).abs() <= 1e-6,
-            "{}: got {got:?}, expected {:?}",
+            (got[0] - case.expected[0]).abs() <= 1e-6
+                && (got[1] - case.expected[1]).abs() <= 1e-6
+                && (got[2] - case.expected_reject).abs() <= 1e-6,
+            "{}: got {got:?}, expected {:?} reject {}",
             case.name,
-            case.expected
+            case.expected,
+            case.expected_reject
         );
         names.push(case.name);
     }
@@ -115,8 +122,9 @@ fn prepass_source_writes_location_two_after_normal_and_material() {
     for text in [
         "@location(0) normal: vec4<f32>",
         "@location(1) material: vec4<f32>",
-        "@location(2) motion: vec2<f32>",
+        "@location(2) motion: vec4<f32>",
         "out.motion = raa_pass_motion(v);",
+        "select(1.0, 0.0, v.motion_valid != 0u)",
         "raa_frame.unjittered_view_proj",
         "raa_frame.previous_view_proj",
         "raa_frame.camera_jitter.zw",
@@ -155,7 +163,7 @@ mod software_gpu_motion {
     /// copy source.
     const READBACK: &str = "
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<storage, read_write> out: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
 
 @compute @workgroup_size(8, 8, 1)
 fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -163,12 +171,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     if (id.x >= size.x || id.y >= size.y) {
         return;
     }
-    out[id.y * size.x + id.x] = textureLoad(src, vec2<i32>(i32(id.x), i32(id.y)), 0).xy;
+    out[id.y * size.x + id.x] = textureLoad(src, vec2<i32>(i32(id.x), i32(id.y)), 0);
 }
 ";
 
-    /// Reads an Rg16Float texture as two f32 lanes per texel, top row first.
-    fn read_motion(gpu: &GpuContext, texture: &wgpu::Texture) -> Vec<[f32; 2]> {
+    /// Reads an Rgba16Float texture as four f32 lanes per texel, top row first.
+    fn read_motion(gpu: &GpuContext, texture: &wgpu::Texture) -> Vec<[f32; 4]> {
         let device = gpu.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("motion.readback"),
@@ -183,7 +191,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
             cache: None,
         });
         let layout = pipeline.get_bind_group_layout(0);
-        let bytes = u64::from(SIZE.0) * u64::from(SIZE.1) * 8;
+        let bytes = u64::from(SIZE.0) * u64::from(SIZE.1) * 16;
         let storage = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("motion.readback.storage"),
             size: bytes,
@@ -236,11 +244,13 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         rx.recv().expect("map callback").expect("map");
         let mapped = slice.get_mapped_range().expect("mapped range");
         let texels = mapped
-            .chunks_exact(8)
+            .chunks_exact(16)
             .map(|px| {
                 [
                     f32::from_le_bytes([px[0], px[1], px[2], px[3]]),
                     f32::from_le_bytes([px[4], px[5], px[6], px[7]]),
+                    f32::from_le_bytes([px[8], px[9], px[10], px[11]]),
+                    f32::from_le_bytes([px[12], px[13], px[14], px[15]]),
                 ]
             })
             .collect();
@@ -337,7 +347,7 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 .expect("device poll");
         }
 
-        fn motion(&self, gpu: &GpuContext) -> Vec<[f32; 2]> {
+        fn motion(&self, gpu: &GpuContext) -> Vec<[f32; 4]> {
             let p = self.pipeline.borrow();
             let targets = p.targets().expect("targets after a frame");
             assert_eq!(targets.size(), SIZE);
@@ -345,7 +355,13 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    fn all_zero(motion: &[[f32; 2]]) -> bool {
+    /// Every lane of every texel is zero.
+    fn all_zero(motion: &[[f32; 4]]) -> bool {
+        motion.iter().all(|m| m.iter().all(|v| v.abs() <= EPS))
+    }
+
+    /// Every x/y lane is zero (the camera is still).
+    fn all_xy_zero(motion: &[[f32; 4]]) -> bool {
         motion
             .iter()
             .all(|m| m[0].abs() <= EPS && m[1].abs() <= EPS)
@@ -361,14 +377,24 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
         let mut rig = Rig::new(&gpu);
 
-        // No geometry: the prepass clears motion to zero.
+        // No geometry: the prepass clears motion to (0, 0, 0, 0).
         rig.frame(&gpu);
         assert!(all_zero(&rig.motion(&gpu)), "empty scene");
 
-        // A newly introduced instance has no submitted history: zero motion.
+        // A newly introduced instance has no submitted history: the camera is still, so it
+        // gets zero displacement and the reject flag; the cleared background stays zero.
         rig.add_cube();
         rig.frame(&gpu);
-        assert!(all_zero(&rig.motion(&gpu)), "new instance");
+        let new_instance = rig.motion(&gpu);
+        assert!(all_xy_zero(&new_instance), "new instance xy");
+        assert!(
+            new_instance.iter().any(|m| m[2] > 0.5),
+            "the cube rejects its history"
+        );
+        assert!(
+            new_instance.iter().any(|m| m[2] == 0.0),
+            "the background keeps history"
+        );
 
         // A settled frame is zero once history exists.
         rig.frame(&gpu);
@@ -384,6 +410,10 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
             moving.iter().all(|m| m[1].abs() <= 0.01),
             "no vertical motion"
         );
+        assert!(
+            moving.iter().all(|m| m[2].abs() <= EPS),
+            "the moving cube has usable history"
+        );
 
         // The camera moves +X instead: the cube shifts left (negative motion.x).
         rig.scene.camera.eye = Vec3::new(0.5, 2.0, 6.0);
@@ -392,6 +422,10 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let camera = rig.motion(&gpu);
         let min_x = camera.iter().map(|m| m[0]).fold(f32::MAX, f32::min);
         assert!(min_x < -0.01, "camera motion {min_x}");
+        assert!(
+            camera.iter().all(|m| m[2].abs() <= EPS),
+            "camera motion uses history"
+        );
 
         // Camera and geometry both settle: zero again.
         rig.frame(&gpu);

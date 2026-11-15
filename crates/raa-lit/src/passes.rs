@@ -3,7 +3,7 @@
 //!
 //! - `prepass` (order 30, required): the Opaque and Fur draws, single sample, with the
 //!   `Prepass` shader variants into the pipeline targets `depth` (Depth32Float, Less,
-//!   cleared to 1.0), `normal`, `material` and `motion` (Rg16Float, cleared to zero).
+//!   cleared to 1.0), `normal`, `material` and `motion` (Rgba16Float, cleared to zero).
 //! - `forward` (order 60, required): the Opaque and Fur draws with the `Forward` variants
 //!   into an MSAA HDR_FORMAT colour target and an MSAA Depth32Float target (Less, cleared to
 //!   1.0) of `LitOptions::msaa` samples, created on resize, then the enabled forward
@@ -44,8 +44,8 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// S12 `material` target: F0 rgb sRGB-encoded, metallic.
 const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// S12 `motion` target: signed UV displacement, Rg16Float.
-const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+/// S12 `motion` target: signed UV displacement xy, history reject z, Rgba16Float.
+const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The classes both passes draw, in order: opaque, then fur (drawn as opaque base).
 const DRAWN_CLASSES: [DrawClass; 2] = [DrawClass::Opaque, DrawClass::Fur];
@@ -471,7 +471,7 @@ mod tests {
             [
                 Some(wgpu::TextureFormat::Rgba16Float),
                 Some(wgpu::TextureFormat::Rgba8Unorm),
-                Some(wgpu::TextureFormat::Rg16Float)
+                Some(wgpu::TextureFormat::Rgba16Float)
             ]
         );
     }

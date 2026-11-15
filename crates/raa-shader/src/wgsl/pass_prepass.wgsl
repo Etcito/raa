@@ -52,7 +52,8 @@ fn vs_main(
     out.instance_index = raa_instance_id;
     // S12 motion only carries rigid previous models: a vertex function deforms geometry in
     // a way this record cannot reconstruct, and a slot without submitted history is new,
-    // re-used or posed, so both write zero in the fragment stage.
+    // re-used or posed. Both keep the current world position as the previous one, so the
+    // fragment stage reports camera-only motion and rejects the history (z = 1).
     let previous = raa_previous_instances[raa_instance_id];
     let has_vertex_fn = (raa_materials[inst.material_index].header.z & RAA_FLAG_VERTEX_FN) != 0u;
     let motion_valid = previous.previous_valid != 0u && !has_vertex_fn;
@@ -109,27 +110,32 @@ fn raa_pass_finite(v: f32) -> bool {
 }
 
 // S12 motion: current unjittered NDC minus previous unjittered NDC as a UV displacement
-// (positive X right, positive Y down). Both jitters are removed: current by using the
-// unjittered view-projection, previous by subtracting camera_jitter.zw from its NDC.
-// Invalid history or projection, new/re-used instances and unsupported deformation zero.
-fn raa_pass_motion(v: RaaVaryings) -> vec2<f32> {
-    if (v.motion_valid == 0u || raa_frame.temporal.z == 0u) {
-        return vec2<f32>(0.0);
+// (positive X right, positive Y down) plus the history reject flag in z. Both jitters are
+// removed: current by using the unjittered view-projection, previous by subtracting
+// camera_jitter.zw from its NDC. No camera history, an unusable projection or a non-finite
+// NDC gives zero displacement with z = 1; an instance without usable history keeps the
+// camera-only displacement the vertex stage prepared, with z = 1.
+fn raa_pass_motion(v: RaaVaryings) -> vec4<f32> {
+    if (raa_frame.temporal.z == 0u) {
+        return vec4<f32>(0.0, 0.0, 1.0, 0.0);
     }
     let current_clip = raa_frame.unjittered_view_proj * vec4<f32>(v.world_position, 1.0);
     let previous_clip = raa_frame.previous_view_proj * vec4<f32>(v.motion_previous_world, 1.0);
     if (current_clip.w <= 0.0 || previous_clip.w <= 0.0) {
-        return vec2<f32>(0.0);
+        return vec4<f32>(0.0, 0.0, 1.0, 0.0);
     }
     let current_ndc = current_clip.xy / current_clip.w;
     let previous_ndc = previous_clip.xy / previous_clip.w - raa_frame.camera_jitter.zw;
     if (!raa_pass_finite(current_ndc.x) || !raa_pass_finite(current_ndc.y)
         || !raa_pass_finite(previous_ndc.x) || !raa_pass_finite(previous_ndc.y)) {
-        return vec2<f32>(0.0);
+        return vec4<f32>(0.0, 0.0, 1.0, 0.0);
     }
-    return vec2<f32>(
+    let reject = select(1.0, 0.0, v.motion_valid != 0u);
+    return vec4<f32>(
         (current_ndc.x - previous_ndc.x) * 0.5,
         (previous_ndc.y - current_ndc.y) * 0.5,
+        reject,
+        0.0,
     );
 }
 
@@ -138,8 +144,8 @@ struct RaaPrepassTargets {
     @location(0) normal: vec4<f32>,
     // S12 `material` (Rgba8Unorm): F0 rgb sRGB-encoded, metallic.
     @location(1) material: vec4<f32>,
-    // S12 `motion` (Rg16Float): signed UV displacement, positive X right and Y down.
-    @location(2) motion: vec2<f32>,
+    // S12 `motion` (Rgba16Float): signed UV displacement xy, history reject z, w 0.
+    @location(2) motion: vec4<f32>,
 }
 
 // Piecewise sRGB OETF of a value in [0, 1].

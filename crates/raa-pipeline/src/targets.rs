@@ -1,5 +1,5 @@
-//! Surface-sized pipeline targets (S12): depth, normal, material, motion and the HDR A/B
-//! chain.
+//! Surface-sized pipeline targets (S12): depth, normal, material, motion (Rgba16Float: UV
+//! displacement and history reject) and the HDR A/B chain.
 
 use std::cell::Cell;
 
@@ -10,7 +10,7 @@ use crate::HDR_FORMAT;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const MATERIAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Float;
+const MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 const GBUFFER_USAGE: wgpu::TextureUsages =
     wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING);
@@ -222,7 +222,8 @@ impl Targets {
         &self.material.view
     }
 
-    /// Rg16Float signed UV motion written by the prepass (location 2).
+    /// Rgba16Float signed UV motion xy with the history reject flag in z, written by the
+    /// prepass (location 2).
     pub fn motion(&self) -> &wgpu::TextureView {
         &self.motion.view
     }
@@ -265,7 +266,7 @@ mod tests {
 
     #[test]
     fn motion_uses_the_s12_format_and_attachment_usage() {
-        assert_eq!(MOTION_FORMAT, wgpu::TextureFormat::Rg16Float);
+        assert_eq!(MOTION_FORMAT, wgpu::TextureFormat::Rgba16Float);
         assert!(GBUFFER_USAGE.contains(wgpu::TextureUsages::RENDER_ATTACHMENT));
         assert!(GBUFFER_USAGE.contains(wgpu::TextureUsages::TEXTURE_BINDING));
     }

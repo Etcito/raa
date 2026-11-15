@@ -43,7 +43,7 @@ fn targets_have_s12_sizes_formats_and_usages(gpu: &GpuContext) {
     check(
         targets.motion_texture(),
         (64, 48),
-        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::Rgba16Float,
     );
     assert_eq!(targets.motion_texture().usage(), GBUFFER);
 
@@ -90,7 +90,7 @@ fn ensure_recreates_only_when_the_size_changes(gpu: &GpuContext) {
     check(
         targets.motion_texture(),
         (40, 24),
-        wgpu::TextureFormat::Rg16Float,
+        wgpu::TextureFormat::Rgba16Float,
     );
 
     assert!(targets.ensure(gpu, (0, 0)));

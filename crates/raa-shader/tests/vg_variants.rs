@@ -246,10 +246,6 @@ fn both_vg_kinds_compose_validate_and_stay_within_budget() {
         size: naga::VectorSize::Quad,
         scalar: naga::Scalar::F32,
     };
-    let vec2_f32 = naga::TypeInner::Vector {
-        size: naga::VectorSize::Bi,
-        scalar: naga::Scalar::F32,
-    };
     for material_fn in ids {
         for pass in PassKind::VG {
             let k = key(material_fn, pass);
@@ -287,11 +283,11 @@ fn both_vg_kinds_compose_validate_and_stay_within_budget() {
             let locations: Vec<u32> = targets.iter().map(|(at, _, _)| *at).collect();
             match pass {
                 PassKind::VgGbuffer => {
-                    // S12 normal, material and motion targets.
+                    // S12 normal, material and motion targets (motion is Rgba16Float).
                     assert_eq!(locations, [0, 1, 2], "{k:?}");
                     assert_eq!(module.types[targets[0].1].inner, vec4_f32, "{k:?}");
                     assert_eq!(module.types[targets[1].1].inner, vec4_f32, "{k:?}");
-                    assert_eq!(module.types[targets[2].1].inner, vec2_f32, "{k:?}");
+                    assert_eq!(module.types[targets[2].1].inner, vec4_f32, "{k:?}");
                 }
                 PassKind::VgShade => {
                     assert_eq!(locations, [0], "{k:?}");
