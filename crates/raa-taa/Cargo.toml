@@ -13,3 +13,7 @@ raa-pipeline = { path = "../raa-pipeline" }
 [dev-dependencies]
 raa-shader = { path = "../raa-shader" }
 naga = { workspace = true }
+raa-lit = { path = "../raa-lit" }
+raa-scene = { path = "../raa-scene" }
+raa-geom = { path = "../raa-geom" }
+raa-math = { path = "../raa-math" }
