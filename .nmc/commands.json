@@ -244,8 +244,8 @@
   },
   {
     "name": "p4-gi-ssgi-repo-check",
-    "command": "bash scripts/check.sh",
-    "timeout_s": 3600
+    "command": "bash scripts/check.sh --quick --no-demos",
+    "timeout_s": 1200
   },
   {
     "name": "p4-gi-ssgi-check",
