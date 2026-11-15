@@ -296,5 +296,103 @@
       "p4-gi-ssgi-render",
       "p4-gi-ssgi-fresh"
     ]
+  },
+  {
+    "name": "p4-gi-quality-check",
+    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-select",
+    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-quality-check"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-clean",
+    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-quality-select"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-render",
+    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-quality-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-fresh",
+    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-quality-render"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-judge",
+    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-quality-render",
+      "p4-gi-quality-fresh"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-lighting-check",
+    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-lighting-select",
+    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-quality-lighting-check"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-lighting-clean",
+    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-quality-lighting-select"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-lighting-render",
+    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-quality-lighting-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-lighting-fresh",
+    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-quality-lighting-render"
+    ]
+  },
+  {
+    "name": "p4-gi-quality-lighting-judge",
+    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-quality-lighting-render",
+      "p4-gi-quality-lighting-fresh"
+    ]
   }
 ]
