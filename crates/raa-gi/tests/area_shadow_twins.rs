@@ -12,6 +12,10 @@ use raa_gi::parts::area_shadow::cpu::{
     r2_jitter, ratio_visibility, raw_layers, rect_point, sample_weight, stratum_cell, stratum_uv,
     temporal_blend,
 };
+use raa_gi::parts::area_shadow::restir_cpu::{
+    Reservoir, oct_decode, oct_encode, pack_reservoir, pack2x16float, unpack_reservoir,
+    unpack2x16float,
+};
 use raa_loader::json::{JsonValue, parse};
 
 fn fixture() -> JsonValue {
@@ -55,6 +59,37 @@ fn floats<const N: usize>(value: &JsonValue) -> [f32; N] {
 
 fn rows<const N: usize>(value: &JsonValue) -> Vec<[f32; N]> {
     items(value).iter().map(floats::<N>).collect()
+}
+
+fn restir_fixture() -> JsonValue {
+    let path = format!(
+        "{}/tests/fixtures/area_restir.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    parse(&text).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+fn word(value: &JsonValue) -> u32 {
+    let JsonValue::Number(n) = value else {
+        panic!("expected a number");
+    };
+    *n as u32
+}
+
+/// A JSON number, or the string `"nan"` for a NaN input (JSON has no NaN literal).
+fn text(value: &JsonValue) -> &str {
+    let JsonValue::String(s) = value else {
+        panic!("expected a string");
+    };
+    s
+}
+
+fn scalar(value: &JsonValue) -> f32 {
+    match value {
+        JsonValue::String(s) if s == "nan" => f32::NAN,
+        _ => number(value),
+    }
 }
 
 /// Relative tolerance, with an absolute floor of `tol` for expected values below 1.
@@ -204,4 +239,88 @@ fn r2_jitter_stays_in_unit_square_and_steps_by_alpha() {
             );
         }
     }
+}
+
+#[test]
+fn half_float_pair_codec_table() {
+    let root = restir_fixture();
+    for case in items(field(&root, "pack2x16float")) {
+        let v = [scalar(field(case, "x")), scalar(field(case, "y"))];
+        assert_eq!(
+            pack2x16float(v),
+            word(field(case, "bits")),
+            "pack {v:?} ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "unpack2x16float")) {
+        let got = unpack2x16float(word(field(case, "bits")));
+        assert_close(got, floats::<2>(field(case, "v")), 0.0, "unpack");
+    }
+}
+
+#[test]
+fn octahedral_codec_table() {
+    let root = restir_fixture();
+    for case in items(field(&root, "oct_encode")) {
+        let got = oct_encode(floats::<3>(field(case, "n")));
+        assert_close(got, floats::<2>(field(case, "e")), 0.000001, "oct_encode");
+    }
+    for case in items(field(&root, "oct_roundtrip")) {
+        let n = floats::<3>(field(case, "n"));
+        assert_close(oct_decode(oct_encode(n)), n, 0.001, "oct_roundtrip");
+    }
+}
+
+#[test]
+fn reservoir_record_table() {
+    let root = restir_fixture();
+    for case in items(field(&root, "pack_reservoir")) {
+        let r = Reservoir {
+            slot: word(field(case, "slot")),
+            uv: floats::<2>(field(case, "uv")),
+            weight: number(field(case, "weight")),
+            confidence: number(field(case, "confidence")),
+            normal_oct: floats::<2>(field(case, "normal_oct")),
+        };
+        let got = pack_reservoir(&r);
+        let want: Vec<u32> = items(field(case, "words")).iter().map(word).collect();
+        assert_eq!(
+            got.to_vec(),
+            want,
+            "pack {r:?} ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "unpack_reservoir")) {
+        let words: [u32; 4] = std::array::from_fn(|i| word(&items(field(case, "words"))[i]));
+        let got = unpack_reservoir(words);
+        assert_eq!(got.slot, word(field(case, "slot")), "unpack slot");
+        assert_close(got.uv, floats::<2>(field(case, "uv")), 0.001, "unpack uv");
+        assert_close(
+            [got.weight, got.confidence],
+            floats::<2>(field(case, "weight_confidence")),
+            0.001,
+            "unpack weight and confidence",
+        );
+        assert_close(
+            got.normal_oct,
+            floats::<2>(field(case, "normal_oct")),
+            0.001,
+            "unpack normal",
+        );
+    }
+}
+
+#[test]
+fn empty_and_saturated_reservoir_words() {
+    let root = restir_fixture();
+    let empty: Vec<u32> = items(field(&root, "empty")).iter().map(word).collect();
+    assert_eq!(pack_reservoir(&Reservoir::EMPTY).to_vec(), empty);
+    assert_eq!(pack_reservoir(&Reservoir::EMPTY), [0xFF, 0, 0, 0]);
+    let heavy = Reservoir {
+        weight: 1e6,
+        ..Reservoir::EMPTY
+    };
+    assert_eq!(pack_reservoir(&heavy)[2] & 0xFFFF, 0x7BFF);
 }

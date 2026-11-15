@@ -1,0 +1,109 @@
+{
+  "derivation": "Hand-derived, never run. pack2x16float packs IEEE binary16 round to nearest even: 1.0 = 0x3C00, -2.0 = 0xC000, 0.5 = 0x3800, 65504 = 0x7BFF (the largest finite half); 1e6 saturates to 65504 and NaN packs 0. unpack2x16float reads the low half first. oct_encode divides by |x|+|y|+|z| and folds the lower hemisphere with (1 - |p.yx|) sign(p.xy); oct_decode inverts it and normalises, so the round trip returns the input within 1e-3. pack_reservoir: x = slot & 0xFF; uv [0.5, 0.25] gives low 0x3800 and high 0x3400; [2, 20] gives low 0x4000 and high 0x4D00; a zero normal gives 0. EMPTY is slot 0xFF with every other field zero.",
+  "pack2x16float": [
+    {
+      "x": 1.0,
+      "y": -2.0,
+      "bits": 3221240832,
+      "note": "1.0 is 0x3C00 in bits 0-15, -2.0 is 0xC000 in bits 16-31"
+    },
+    {
+      "x": 0.5,
+      "y": 65504.0,
+      "bits": 2080323584,
+      "note": "0.5 is 0x3800 in bits 0-15, 65504 (HALF_MAX) is 0x7BFF in bits 16-31"
+    },
+    {
+      "x": 1000000.0,
+      "y": "nan",
+      "bits": 31743,
+      "note": "1e6 saturates to HALF_MAX 0x7BFF in bits 0-15, NaN packs 0"
+    }
+  ],
+  "unpack2x16float": [
+    {
+      "bits": 1006682112,
+      "v": [-2.0, 1.0],
+      "note": "low half 0xC000 is -2.0, high half 0x3C00 is 1.0"
+    }
+  ],
+  "oct_encode": [
+    {
+      "n": [0.0, 0.0, 1.0],
+      "e": [0.0, 0.0],
+      "note": "p = [0, 0], z > 0 so no fold"
+    },
+    {
+      "n": [1.0, 0.0, 0.0],
+      "e": [1.0, 0.0],
+      "note": "p = [1, 0], z = 0 so no fold"
+    },
+    {
+      "n": [0.0, 0.0, -1.0],
+      "e": [1.0, 1.0],
+      "note": "p = [0, 0], z < 0 folds to (1 - 0) * sign(0) = 1 per axis"
+    },
+    {
+      "n": [0.0, 0.0, 0.0],
+      "e": [0.0, 0.0],
+      "note": "the zero vector encodes [0, 0]"
+    }
+  ],
+  "oct_roundtrip": [
+    {
+      "n": [0.6, 0.0, 0.8],
+      "note": "p = [0.428571, 0], decode renormalises to [0.6, 0, 0.8]"
+    },
+    {
+      "n": [0.0, -0.6, -0.8],
+      "note": "z < 0 folds xy to [0.571429, -1], decode folds back to [0, -0.6, -0.8]"
+    }
+  ],
+  "pack_reservoir": [
+    {
+      "slot": 3,
+      "uv": [0.5, 0.25],
+      "weight": 2.0,
+      "confidence": 20.0,
+      "normal_oct": [0.0, 0.0],
+      "words": [3, 872429568, 1291862016, 0],
+      "note": "x = 3; y = 0x34003800; z = 0x4D004000; w = 0"
+    },
+    {
+      "slot": 3,
+      "uv": [0.0, 0.0],
+      "weight": 1000000.0,
+      "confidence": 0.0,
+      "normal_oct": [0.0, 0.0],
+      "words": [3, 0, 31743, 0],
+      "note": "weight 1e6 clamps to HALF_MAX, z low half 0x7BFF and high half 0"
+    }
+  ],
+  "unpack_reservoir": [
+    {
+      "words": [3, 872429568, 1291862016, 0],
+      "slot": 3,
+      "uv": [0.5, 0.25],
+      "weight_confidence": [2.0, 20.0],
+      "normal_oct": [0.0, 0.0],
+      "note": "inverts the packed case above"
+    },
+    {
+      "words": [3, 0, 31743, 0],
+      "slot": 3,
+      "uv": [0.0, 0.0],
+      "weight_confidence": [65504.0, 0.0],
+      "normal_oct": [0.0, 0.0],
+      "note": "the saturated weight unpacks as HALF_MAX"
+    },
+    {
+      "words": [255, 0, 0, 0],
+      "slot": 255,
+      "uv": [0.0, 0.0],
+      "weight_confidence": [0.0, 0.0],
+      "normal_oct": [0.0, 0.0],
+      "note": "the EMPTY reservoir keeps slot 0xFF and zero elsewhere"
+    }
+  ],
+  "empty": [255, 0, 0, 0]
+}
