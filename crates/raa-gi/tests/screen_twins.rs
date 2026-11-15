@@ -4,8 +4,8 @@
 //! derived by hand or analytically; nothing is taken from running the code under test.
 
 use raa_gi::parts::screen::cpu::{
-    PROBE_SPACING, hemisphere_direction, probe_grid, probe_pixel, ray_uv, sh9_irradiance,
-    sh9_project, temporal_alpha,
+    PROBE_SPACING, hemisphere_direction, integrate_blend, probe_grid, probe_pixel, ray_uv,
+    sh9_irradiance, sh9_project, temporal_alpha,
 };
 use raa_loader::json::{JsonValue, parse};
 
@@ -251,4 +251,24 @@ fn temporal_alpha_cases() {
             "moved {moved} valid {valid}: got {got}, want {want}"
         );
     }
+}
+
+/// Hand-derived from the WGSL blend: history + 0.25 * (current - history) lane by lane, and an
+/// unmatched pixel keeps the history's rgb while only its alpha (screen occlusion) blends.
+#[test]
+fn integrate_blend_holds_the_history_without_a_probe_match() {
+    let history = [1.0, 2.0, 3.0, 0.5];
+    assert_eq!(
+        integrate_blend(history, [3.0, 4.0, 5.0, 1.0], true, 0.25),
+        [1.5, 2.5, 3.5, 0.625]
+    );
+    assert_eq!(
+        integrate_blend(history, [0.0, 0.0, 0.0, 1.0], false, 0.25),
+        [1.0, 2.0, 3.0, 0.625]
+    );
+    assert_eq!(
+        integrate_blend(history, [3.0, 4.0, 5.0, 1.0], true, 1.0),
+        [3.0, 4.0, 5.0, 1.0],
+        "an unusable history stores the current value"
+    );
 }

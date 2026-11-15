@@ -213,7 +213,8 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    if total >= RAA_GI_PROBE_MIN_WEIGHT {
+    let matched = total >= RAA_GI_PROBE_MIN_WEIGHT;
+    if matched {
         irradiance /= total;
     } else {
         irradiance = vec3<f32>(0.0);
@@ -228,7 +229,11 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     // cross tap at +-4 / +-8 px has its flag clear and a motion within
     // RAA_GI_HISTORY_MOTION_TOLERANCE_PX of the pixel's own, and (c) history_valid is set and
     // the previous uv lies inside the viewport. Without usable history the current value is
-    // stored (alpha 1); otherwise the S39 alpha grows with the motion in pixels.
+    // stored (alpha 1, rgb 0 when unmatched). A matched pixel blends its irradiance and screen
+    // occlusion into the history under the S39 alpha. An unmatched one (no probe on its
+    // surface this frame) holds the history's irradiance and blends only the screen occlusion:
+    // probes jitter inside their tile every frame, so a narrow face or silhouette matches in
+    // some frames only, and fading a zero into the history would converge it towards black.
     let m = textureLoad(raa_gi_motion, pixel, 0);
     let motion = m.xy;
     let own_px = motion * raa_gi_frame.viewport.xy;
@@ -243,7 +248,11 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
         let alpha = min(0.08 + 0.03 * moved, 0.5);
         let previous_pixel = vec2<i32>(previous_uv * raa_gi_frame.viewport.xy);
         let history = textureLoad(raa_gi_previous, previous_pixel, 0);
-        current = mix(history, current, alpha);
+        if matched {
+            current = mix(history, current, alpha);
+        } else {
+            current = vec4<f32>(history.rgb, mix(history.a, current.a, alpha));
+        }
     }
     textureStore(raa_gi_output, pixel, current);
 }

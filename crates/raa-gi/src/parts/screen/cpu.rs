@@ -207,3 +207,32 @@ pub fn temporal_alpha(moved_pixels: f32, history_valid: bool) -> f32 {
         1.0
     }
 }
+
+/// The temporal blend of one screen-probe pixel, `raa_gi_probe_integrate` of
+/// `crates/raa-gi/src/wgsl/screen/probe_integrate.wgsl` at :247-255 (with `matched` from :216):
+/// `alpha` is `temporal_alpha`, so 1 means the history is unusable and `current` is stored
+/// unchanged (rgb 0 when unmatched). Otherwise a matched pixel (a probe on its surface this frame)
+/// mixes all four lanes towards `history`, while an unmatched one keeps `history`'s irradiance
+/// (rgb) and mixes only the screen occlusion (a), so a face that only some frames' jittering
+/// probes match keeps its irradiance instead of converging to zero.
+pub fn integrate_blend(
+    history: [f32; 4],
+    current: [f32; 4],
+    matched: bool,
+    alpha: f32,
+) -> [f32; 4] {
+    if alpha >= 1.0 {
+        return current;
+    }
+    let blend = |old: f32, new: f32| old + (new - old) * alpha;
+    if matched {
+        std::array::from_fn(|i| blend(history[i], current[i]))
+    } else {
+        [
+            history[0],
+            history[1],
+            history[2],
+            blend(history[3], current[3]),
+        ]
+    }
+}
