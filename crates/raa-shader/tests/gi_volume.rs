@@ -12,8 +12,9 @@ fn fs_main(@location(0) p: vec3<f32>, @location(1) d: vec3<f32>) -> @location(0)
     let hit = raa_gi_trace(p, d, v0, 320.0, 32u, 0.85);
     let vis = raa_gi_visibility(p, d, v0, 400.0, 24u);
     let cone = raa_gi_cone_visibility(p, d, v0, 400.0, 32u, 0.1);
+    let start = raa_gi_ray_origin(p, vec3<f32>(0.0, 1.0, 0.0), d, 0.6, 1.6);
     let fade = raa_gi_edge_fade(p);
-    return vec4<f32>(hit.radiance * vis * cone * fade, select(0.0, hit.t, hit.hit));
+    return vec4<f32>((hit.radiance * vis * cone * fade) + start.xyz * start.w, select(0.0, hit.t, hit.hit));
 }
 ";
 
@@ -34,8 +35,9 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let hit = raa_gi_trace(p, d, v0, 320.0, 32u, 0.85);
     let vis = raa_gi_visibility(p, d, v0, 400.0, 48u);
     let cone = raa_gi_cone_visibility(p, d, v0, 400.0, 32u, 0.1);
+    let start = raa_gi_ray_origin(p, vec3<f32>(0.0, 1.0, 0.0), d, 0.6, 1.6);
     let level = raa_gi_level_at(p, 0u);
-    out_values[id.x] = vec4<f32>(hit.radiance * vis * cone, raa_gi_edge_fade(p) + f32(level));
+    out_values[id.x] = vec4<f32>((hit.radiance * vis * cone) + start.xyz * start.w, raa_gi_edge_fade(p) + f32(level));
 }
 ";
 
@@ -63,6 +65,7 @@ fn text_keeps_contract_names_and_attribution() {
         "struct RaaGiHit",
         "fn raa_gi_trace(",
         "fn raa_gi_visibility(",
+        "fn raa_gi_ray_origin(",
         "fn raa_gi_cone_visibility(",
         "fn raa_gi_edge_fade(",
         "fn raa_gi_finest_voxel(",
@@ -71,8 +74,9 @@ fn text_keeps_contract_names_and_attribution() {
     }
     assert!(GI_VOLUME_WGSL.contains("1.0 / raa_gi_volume_params.resolution"));
     // The cone keeps the CPU twin's field-resolution floor (raa-gi `CpuVolume::cone_visibility`).
-    assert!(GI_VOLUME_WGSL.contains("let radius = max(tan_half * max(t - y, 1e-4), voxel);"));
-    assert!(GI_VOLUME_WGSL.contains("if h < 0.25 * voxel && approaching {"));
+    assert!(GI_VOLUME_WGSL.contains("let radius = max(tan_half * max(t - y, 1e-4), 0.5 * voxel);"));
+    assert!(GI_VOLUME_WGSL.contains("res = max(res, -1.0);"));
+    assert!(GI_VOLUME_WGSL.contains("return 0.25 * (1.0 + res) * (1.0 + res) * (2.0 - res);"));
     assert!(!GI_VOLUME_WGSL.contains("@binding"));
     assert!(!GI_VOLUME_WGSL.contains("textureSample("));
     assert!(!GI_VOLUME_WGSL.contains("inv_resolution:"));

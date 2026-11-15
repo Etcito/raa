@@ -357,8 +357,8 @@ fn local_visibility_cone_traces_area_lights_only() {
         "light.kind == 3u",
         "raa_gi_cone_visibility(origin, direction_to_light, voxel, max_t, 32u",
         "raa_gi_visibility(origin, direction_to_light, voxel, max_t, 24u)",
-        "origin = world_position + direction_to_light * along",
-        "max_t = max(max_t - along, 0.0);",
+        "raa_gi_ray_origin(world_position, surface_normal, direction_to_light, push, 4.0 * voxel)",
+        "max_t = max(max_t - start.w, 0.0);",
     ] {
         assert!(text.contains(pin), "LocalVisibility misses {pin}");
     }

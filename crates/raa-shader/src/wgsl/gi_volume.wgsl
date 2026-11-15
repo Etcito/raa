@@ -6,10 +6,12 @@
 // flow and in compute. With `level_count == 0` (the dummy) every lookup misses and the
 // visibility is 1.
 //
-// `raa_gi_cone_visibility` is RAA code: an adaptation of Inigo Quilez, "soft shadows in
-// raymarched SDFs" (res = min(res, k h / t)), with Sebastian Aaltonen's improvement (the
-// closest distance between two samples: y = h^2 / (2 ph), d = sqrt(h^2 - y^2)), run over the
-// clipmap distance field through the adapted solstice lookups below.
+// `raa_gi_ray_origin` starts a ray toward a light that clears its own surface by moving along the
+// ray first and only the rest along the normal. `raa_gi_cone_visibility` is RAA code: an
+// adaptation of Inigo Quilez, "soft shadows in raymarched SDFs" with negative distances
+// (res = min(res, dd / radius), 0.25 (1 + res)^2 (2 - res)), with Sebastian Aaltonen's
+// improvement (the closest distance between two samples: y = h^2 / (2 ph), d = sqrt(h^2 - y^2)),
+// run over the clipmap distance field through the adapted solstice lookups below.
 //
 // Adapted from solstice@7e465b5,
 // crates/solstice-render/shaders/common/environment.wgsl:140-219. MIT License
@@ -103,14 +105,32 @@ fn raa_gi_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, 
     return select(1.0, 0.0, raa_gi_trace(origin, dir, start, max_t, max_steps, 0.85).hit);
 }
 
-// Soft visibility of a cone of half-angle tangent `tan_half` along `dir` (k = 1 / tan_half),
-// in [0, 1]: Quilez's min(k h / t) with Aaltonen's closest-distance estimate. Only a sample
-// closer than the previous one of the same level (or the first of a level) darkens, so a
-// plateau or a receding sample never self-shadows at grazing angles. The distance field is
-// quantised to the voxel of its level, so the cone radius is never taken below one voxel and
-// an approaching sample fades from free at half a voxel to fully blocked at a quarter voxel
-// (where the walk stops): a hard cut at half a voxel followed the field's ragged voxel
-// contours and drew jagged black shapes. With `level_count == 0` it returns 1.
+// The start of a ray from `world` toward a light that clears its own surface by moving along the
+// ray first, at most `max_along`, and only the rest along the normal. Returns the world-space
+// start in xyz and the distance moved along `dir` in w, which the caller subtracts from max_t.
+//
+// Handoff: 'Volume gather counts exhausted rays as hits; area-light injection matches the direct light'
+// calls `raa_gi_ray_origin` and `raa_gi_cone_visibility` from its `voxel_light.wgsl`; today the
+// vec4 holds the ray start in xyz (world metres) and the along-ray distance in w (metres).
+// Handoff: 'Area-light ray tiers start their volume and SDF rays on the light path' calls
+// `raa_gi_ray_origin` from its `area_shadow/trace.wgsl` for the same start and along distance.
+fn raa_gi_ray_origin(world: vec3<f32>, normal: vec3<f32>, dir: vec3<f32>, push: f32, max_along: f32) -> vec4<f32> {
+    let n_dot_l = dot(normal, dir);
+    let along = select(0.0, min(push / max(n_dot_l, 1e-3), max_along), n_dot_l > 0.0);
+    let rest = max(push - along * max(n_dot_l, 0.0), 0.0);
+    return vec4<f32>(world + dir * along + normal * rest, along);
+}
+
+// Soft visibility of a cone of half-angle tangent `tan_half` along `dir`, in [0, 1]: Quilez's
+// soft shadow with negative distances, min(dd / radius). Aaltonen's closest-distance estimate
+// y = h^2 / (2 ph) removes the stretch already travelled and dd = sqrt(h^2 - y^2) - 0.5 voxel is
+// the distance from the ray to the field's surface iso-level, half a voxel inside the sampled
+// voxel centres. The radius is the cone's tan_half * (t - y), floored at half a voxel so the
+// penumbra comes from the cone and never from the field's voxel quantisation. Only a sample
+// closer than the previous one of the same level (or the first of a level) darkens, so a plateau
+// or a receding sample never self-shadows at grazing angles. The walk stops at res < -1, res is
+// floored at -1 and the return is Quilez's 0.25 (1 + res)^2 (2 - res): 1 at res 1, 0.5 at res 0
+// and 0 at res -1. With `level_count == 0` it returns 1.
 fn raa_gi_cone_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, tan_half: f32) -> f32 {
     let count = raa_gi_volume_params.level_count;
     var t = start;
@@ -132,20 +152,20 @@ fn raa_gi_cone_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: 
         }
         measured = level;
         let approaching = ph >= 1e19 || h < ph;
-        if h < 0.25 * voxel && approaching {
-            return 0.0;
-        }
         if approaching {
             let y = select(0.0, h * h / (2.0 * ph), ph < 1e19 && h < 2.0 * ph);
-            let d = sqrt(max(h * h - y * y, 0.0));
-            let radius = max(tan_half * max(t - y, 1e-4), voxel);
-            res = min(res, min(d / radius, (h - 0.25 * voxel) / (0.25 * voxel)));
+            let dd = sqrt(max(h * h - y * y, 0.0)) - 0.5 * voxel;
+            let radius = max(tan_half * max(t - y, 1e-4), 0.5 * voxel);
+            res = min(res, dd / radius);
+            if res < -1.0 {
+                break;
+            }
         }
         ph = h;
         t += clamp(h, 0.5 * voxel, 4.0 * voxel);
     }
-    res = clamp(res, 0.0, 1.0);
-    return res * res * (3.0 - 2.0 * res);
+    res = max(res, -1.0);
+    return 0.25 * (1.0 + res) * (1.0 + res) * (2.0 - res);
 }
 
 // How far inside the outermost level's XZ footprint `p` is: 0 at its edge, 1 well inside.

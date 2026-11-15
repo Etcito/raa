@@ -327,6 +327,39 @@ fn squared(a: [i32; 3], b: [i32; 3]) -> f32 {
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) as f32
 }
 
+/// The start of a ray toward a light that clears its own surface by moving along the ray first, at
+/// most `max_along`, and only the rest along the normal. Returns the origin and the distance moved
+/// along `dir`. CPU twin of `raa_gi_ray_origin` in `crates/raa-shader/src/wgsl/gi_volume.wgsl`.
+pub fn ray_origin(
+    world: [f32; 3],
+    normal: [f32; 3],
+    dir: [f32; 3],
+    push: f32,
+    max_along: f32,
+) -> ([f32; 3], f32) {
+    let n_dot_l = normal[0] * dir[0] + normal[1] * dir[1] + normal[2] * dir[2];
+    let along = if n_dot_l > 0.0 {
+        (push / n_dot_l.max(1.0e-3)).min(max_along)
+    } else {
+        0.0
+    };
+    let rest = (push - along * n_dot_l.max(0.0)).max(0.0);
+    let origin = [
+        world[0] + dir[0] * along + normal[0] * rest,
+        world[1] + dir[1] * along + normal[1] * rest,
+        world[2] + dir[2] * along + normal[2] * rest,
+    ];
+    (origin, along)
+}
+
+/// Quilez's soft-shadow response `0.25 (1 + r)^2 (2 - r)` for `r = clamp(res, -1, 1)`: 1 at
+/// res 1, 0.5 at res 0 and 0 at res -1. CPU twin of the return of `raa_gi_cone_visibility` in
+/// `crates/raa-shader/src/wgsl/gi_volume.wgsl`.
+pub fn cone_smooth(res: f32) -> f32 {
+    let r = res.clamp(-1.0, 1.0);
+    0.25 * (1.0 + r) * (1.0 + r) * (2.0 - r)
+}
+
 /// CPU view of the sampled atlas. `levels` are (origin metres xyz, voxel size w); `texels` form
 /// the R x R x (R * L) atlas at `x + R * (y + R * z_atlas)`, with level i in the z slab
 /// `[i * R, (i + 1) * R)`.
@@ -467,14 +500,16 @@ impl CpuVolume {
         }
     }
 
-    /// Soft visibility of a cone toward a light: Quilez's soft shadow `min(k h / t)` with
-    /// `k = 1 / tan_half`, plus Aaltonen's closest-distance improvement, over the clipmap distance
+    /// Soft visibility of a cone toward a light: Quilez's soft shadow with negative distances,
+    /// `min(dd / radius)`, plus Aaltonen's closest-distance improvement, over the clipmap distance
     /// field. Walks the field with [`CpuVolume::level_at`] and [`CpuVolume::sample`] under the same
-    /// step, hit and approach rules as `raa_gi_cone_visibility` in
-    /// `crates/raa-shader/src/wgsl/gi_volume.wgsl`, which this is the CPU twin of. A sample that
-    /// is not approaching never darkens, distances of different levels are never compared, and an
-    /// empty volume answers 1. The cone radius is never below one voxel of the sample's level,
-    /// and an approaching sample fades from free at half a voxel to blocked at a quarter voxel.
+    /// step, stop and approach rules as `raa_gi_cone_visibility` in
+    /// `crates/raa-shader/src/wgsl/gi_volume.wgsl`, which this is the CPU twin of. `dd` is the
+    /// closest distance minus half a voxel (the field's surface iso-level) and the radius is the
+    /// cone's `tan_half * (t - y)`, floored at half a voxel, so the penumbra comes from the cone.
+    /// A sample that is not approaching never darkens, distances of different levels are never
+    /// compared, the walk stops at res < -1, and an empty volume answers 1. The result goes through
+    /// [`cone_smooth`].
     pub fn cone_visibility(
         &self,
         origin: [f32; 3],
@@ -508,9 +543,6 @@ impl CpuVolume {
             }
             measured = level;
             let approaching = previous >= 1.0e19 || h < previous;
-            if h < 0.25 * voxel && approaching {
-                return 0.0;
-            }
             if approaching {
                 let known = previous < 1.0e19;
                 let y = if known && h < 2.0 * previous {
@@ -518,16 +550,18 @@ impl CpuVolume {
                 } else {
                     0.0
                 };
-                let d = (h * h - y * y).max(0.0).sqrt();
-                let radius = (tan_half * (t - y).max(1.0e-4)).max(voxel);
-                res = res.min((d / radius).min((h - 0.25 * voxel) / (0.25 * voxel)));
+                let dd = (h * h - y * y).max(0.0).sqrt() - 0.5 * voxel;
+                let radius = (tan_half * (t - y).max(1.0e-4)).max(0.5 * voxel);
+                res = res.min(dd / radius);
+                if res < -1.0 {
+                    break;
+                }
             }
             previous = h;
             t += h.max(0.5 * voxel).min(4.0 * voxel);
             steps += 1;
         }
-        let r = res.clamp(0.0, 1.0);
-        r * r * (3.0 - 2.0 * r)
+        cone_smooth(res)
     }
 
     fn texel(&self, x: i32, y: i32, z: i32) -> [f32; 4] {

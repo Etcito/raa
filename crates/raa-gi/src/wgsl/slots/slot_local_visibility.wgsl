@@ -1,6 +1,7 @@
 // The `gi` provider of the `LocalVisibility` slot (S11/S39): traces the GI volume toward a local
 // light so a wall stops the light. This is RAA code; it calls `raa_gi_level_at`,
-// `raa_gi_visibility` and, for area lights (kind 3), the soft `raa_gi_cone_visibility` of `raa_shader::GI_VOLUME_WGSL`, which `local_visibility_provider`
+// `raa_gi_ray_origin`, `raa_gi_visibility` and, for area lights (kind 3), the soft
+// `raa_gi_cone_visibility` of `raa_shader::GI_VOLUME_WGSL`, which `local_visibility_provider`
 // prepends to this text. That library samples only with `textureSampleLevel`, so the slot is
 // safe inside the nonuniform light loop and this file uses no implicit derivative.
 //
@@ -49,11 +50,9 @@ fn raa_slot_local_visibility(
         // normal push shifted the whole cone sideways by up to 1.5 voxels (0.6 m in level 1),
         // into blocks standing beside the receiver, which drew hard block-shaped shadows on
         // walls and floor that no ray from the surface point crosses.
-        let n_dot_l = dot(surface_normal, direction_to_light);
-        let along = select(0.0, min(push / max(n_dot_l, 1e-3), 4.0 * voxel), n_dot_l > 0.0);
-        origin = world_position + direction_to_light * along
-            + surface_normal * max(push - along * max(n_dot_l, 0.0), 0.0);
-        max_t = max(max_t - along, 0.0);
+        let start = raa_gi_ray_origin(world_position, surface_normal, direction_to_light, push, 4.0 * voxel);
+        origin = start.xyz;
+        max_t = max(max_t - start.w, 0.0);
         // The cone angle is the rectangle's angular size seen from the shading point.
         let size = sqrt(max(light.width, 0.0) * max(light.height, 0.0));
         let tan_half = clamp(0.5 * size / max(light_distance, 1e-3), 0.01, 1.0);

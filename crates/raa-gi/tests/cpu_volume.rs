@@ -3,8 +3,9 @@
 //! from the widened-edge rule and the WGSL pack/unpack definitions, never from a GPU run.
 
 use raa_gi::cpu::{
-    CpuGrid, CpuHit, CpuVolume, clip_span, decode_emissive, decode_radiance, encode_emissive,
-    encode_radiance, jump_flood, oct_decode, oct_encode, seed_distance, voxelize_triangle,
+    CpuGrid, CpuHit, CpuVolume, clip_span, cone_smooth, decode_emissive, decode_radiance,
+    encode_emissive, encode_radiance, jump_flood, oct_decode, oct_encode, ray_origin,
+    seed_distance, voxelize_triangle,
 };
 use raa_loader::json::{JsonValue, parse};
 
@@ -406,17 +407,131 @@ fn cone_visibility_against_plane() {
     }
 }
 
-/// The cone's field-resolution floor, walked by hand on the `cone.json` plane (h = |z - 2.125|,
-/// voxel 0.25 m). One sample at t 0.25 (z 2.025): h = 0.1 = 0.4 voxel, the first of its level,
-/// so approaching; 0.1 is not under the quarter-voxel cut 0.0625; y = 0, d = 0.1, the radius is
-/// max(0.5 x 0.25, 0.25) = 0.25, so d / radius = 0.4; the fade (0.1 - 0.0625) / 0.0625 = 0.6;
-/// res = 0.4. The step clamp(0.1, 0.125, 1.0) takes t to 0.375 > max_t 0.3. smoothstep(0.4) =
-/// 0.16 x 2.2 = 0.352. The same walk at z 2.075 (h = 0.05 < 0.0625) is blocked.
+/// The cone under the revised rule, walked by hand on the `cone.json` plane (h = |z - 2.125|,
+/// voxel 0.25 m, so dd = h - 0.125 m and the radius floor is 0.125 m). A near miss: the one
+/// sample at t 0.25 (z 2.025, h = 0.1 = 0.4 voxel) is the first of its level, so approaching;
+/// y = 0, dd = 0.1 - 0.125 = -0.025, radius = max(0.5 x 0.25, 0.125) = 0.125, res = -0.2. The
+/// step clamp(0.1, 0.125, 1.0) takes t to 0.375 > max_t 0.3, and 0.25 x (0.8)^2 x (2.2) = 0.352.
+/// On the plane at t 0.25 (z 2.125, h = 0): dd = -0.125, radius = 0.125, res = -1, so 0.
 #[test]
 fn cone_visibility_near_miss_stays_soft() {
     let volume = plane_volume(&fixture("cone.json"));
     let near = volume.cone_visibility([2.0, 2.0, 1.775], [0.0, 0.0, 1.0], 0.25, 0.3, 32, 0.5);
     assert!((near - 0.352).abs() <= 1.0e-4, "near miss: got {near}");
-    let touch = volume.cone_visibility([2.0, 2.0, 1.825], [0.0, 0.0, 1.0], 0.25, 0.3, 32, 0.5);
+    let touch = volume.cone_visibility([2.0, 2.0, 1.875], [0.0, 0.0, 1.0], 0.25, 0.3, 32, 0.5);
     assert_eq!(touch, 0.0);
+}
+
+/// `cone_smooth` is Quilez's 0.25 (1 + r)^2 (2 - r) for r = clamp(res, -1, 1), derived by hand:
+/// 1 -> 0.25 x 4 x 1 = 1; 0.5 -> 0.25 x 2.25 x 1.5 = 0.84375; 0 -> 0.25 x 1 x 2 = 0.5;
+/// -0.5 -> 0.25 x 0.25 x 2.5 = 0.15625; -1 -> 0 and -3 clamps to -1 -> 0.
+#[test]
+fn cone_smooth_values() {
+    for (res, want) in [
+        (1.0, 1.0),
+        (0.5, 0.84375),
+        (0.0, 0.5),
+        (-0.5, 0.15625),
+        (-1.0, 0.0),
+        (-3.0, 0.0),
+    ] {
+        let got = cone_smooth(res);
+        assert!(
+            (got - want).abs() <= 1.0e-6,
+            "cone_smooth({res}) = {got}, want {want}"
+        );
+    }
+}
+
+fn assert_close3(got: [f32; 3], want: [f32; 3]) {
+    for i in 0..3 {
+        assert!((got[i] - want[i]).abs() <= 1.0e-5, "{got:?}, want {want:?}");
+    }
+}
+
+/// `ray_origin` with normal (0, 1, 0), push 0.6 and max_along 1.6, derived by hand. dir
+/// (0, 1, 0): n_dot_l = 1, along = min(0.6 / 1, 1.6) = 0.6, rest = 0.6 - 0.6 x 1 = 0, so the
+/// origin is world + (0, 0.6, 0). dir (1, 0, 0): n_dot_l = 0, along = 0, rest = 0.6, so the
+/// origin is world + (0, 0.6, 0). dir (cos 30, sin 30, 0): n_dot_l = 0.5, along =
+/// min(0.6 / 0.5, 1.6) = 1.2, rest = 0.6 - 1.2 x 0.5 = 0, so the origin is world + 1.2 dir.
+#[test]
+fn ray_origin_clears_the_surface_along_the_ray() {
+    let world = [1.0, 2.0, 3.0];
+    let normal = [0.0, 1.0, 0.0];
+
+    let (origin, along) = ray_origin(world, normal, [0.0, 1.0, 0.0], 0.6, 1.6);
+    assert_close3(origin, [1.0, 2.6, 3.0]);
+    assert!((along - 0.6).abs() <= 1.0e-6, "along {along}");
+
+    let (origin, along) = ray_origin(world, normal, [1.0, 0.0, 0.0], 0.6, 1.6);
+    assert_close3(origin, [1.0, 2.6, 3.0]);
+    assert_eq!(along, 0.0);
+
+    let cos30 = 3.0_f32.sqrt() * 0.5;
+    let dir = [cos30, 0.5, 0.0];
+    let (origin, along) = ray_origin(world, normal, dir, 0.6, 1.6);
+    assert_close3(
+        origin,
+        [
+            world[0] + 1.2 * dir[0],
+            world[1] + 1.2 * dir[1],
+            world[2] + 1.2 * dir[2],
+        ],
+    );
+    assert!((along - 1.2).abs() <= 1.0e-6, "along {along}");
+}
+
+/// The revised cone on the `cone.json` plane, walked by hand (voxel 0.25 m, dd = h - 0.125 m,
+/// radius = max(tan_half (t - y), 0.125 m)). A parallel ray 1.25 m from the plane with start
+/// 2.0: y = 0, dd = 1.125, radius = max(0.5 x 2.0, 0.125) = 1.0, res = 1 (1.125 >= 1), so 1.0.
+/// A ray from z 1.75 along +z with start 0.25, tan_half 0.25: sample 1 (z 2.0, h 0.125) has
+/// dd = 0, radius = max(0.25 x 0.25, 0.125) = 0.125, res = 0; sample 2 (t 0.375, z 2.125, h 0)
+/// has dd = -0.125, radius = max(0.25 x 0.375, 0.125) = 0.125, res = -1, so 0.0. A sweep of
+/// parallel rays (origin y 0, start 2.0, tan_half 0.5) whose offsets from the plane step down
+/// by a quarter voxel, h = 0.25, 0.1875, 0.125, 0.0625 and 0 m: the first sample has y = 0,
+/// dd = h - 0.125 and radius = max(0.5 x 2.0, 0.125) = 1.0, so res = h - 0.125 and the values
+/// are 0.593262, 0.546814, 0.5, 0.453186 and 0.406738 (hand-evaluated 0.25 (1 + r)^2 (2 - r));
+/// each step down is at most 0.047 < 0.25 and never upward.
+#[test]
+fn cone_visibility_soft_rule_on_plane() {
+    let volume = plane_volume(&fixture("cone.json"));
+
+    let parallel = volume.cone_visibility([2.0, 0.5, 0.875], [0.0, 1.0, 0.0], 2.0, 4.0, 32, 0.5);
+    assert!((parallel - 1.0).abs() <= 1.0e-4, "parallel: {parallel}");
+
+    let crossing = volume.cone_visibility([2.0, 2.0, 1.75], [0.0, 0.0, 1.0], 0.25, 1.0, 32, 0.25);
+    assert!((crossing - 0.0).abs() <= 1.0e-4, "crossing: {crossing}");
+
+    let mut previous: Option<f32> = None;
+    for (offset, want) in [
+        (0.25, 0.593262),
+        (0.1875, 0.546814),
+        (0.125, 0.5),
+        (0.0625, 0.453186),
+        (0.0, 0.406738),
+    ] {
+        let got = volume.cone_visibility(
+            [2.0, 0.0, 2.125 - offset],
+            [0.0, 1.0, 0.0],
+            2.0,
+            4.0,
+            32,
+            0.5,
+        );
+        assert!(
+            (got - want).abs() <= 1.0e-4,
+            "offset {offset}: got {got}, want {want}"
+        );
+        if let Some(previous) = previous {
+            assert!(
+                got <= previous + 1.0e-6,
+                "offset {offset}: {got} rose above {previous}"
+            );
+            assert!(
+                (previous - got).abs() <= 0.25,
+                "offset {offset}: jumped from {previous} to {got}"
+            );
+        }
+        previous = Some(got);
+    }
 }
