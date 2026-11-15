@@ -1,5 +1,9 @@
 // RAA prepass (S11, S12): depth plus the normal, material and motion targets.
 
+// S43: the prepass variant that evaluates the deform slot again at `time - dt` for the
+// previous world position. Only this pass sets the bit (`VARIANT_FLAG_MOTION_DEFORM`).
+const RAA_VARIANT_MOTION_DEFORM: u32 = 0x20000000u;
+
 struct RaaVaryings {
     @builtin(position) clip: vec4<f32>,
     @location(0) world_position: vec3<f32>,
@@ -37,6 +41,12 @@ fn vs_main(
     vin.record = raa_materials[inst.material_index];
     let mv = material_vertex(vin);
     let d = raa_slot_deform(mv.local_position, mv.normal, x, time);
+    // S43: a deformed instance's previous local position re-evaluates the deform slot at
+    // `time - dt` (FrameGpu `clip.w`); only the prepass variant sets this bit.
+    var previous_local = d.local_position;
+    if ((RAA_VARIANT_FLAGS & RAA_VARIANT_MOTION_DEFORM) != 0u) {
+        previous_local = raa_slot_deform(mv.local_position, mv.normal, x, time - raa_frame.clip.w).local_position;
+    }
     let model = mat4x4<f32>(inst.model0, inst.model1, inst.model2, inst.model3);
     let normal_matrix = mat3x3<f32>(inst.normal0.xyz, inst.normal1.xyz, inst.normal2.xyz);
     let world = model * vec4<f32>(d.local_position, 1.0);
@@ -57,7 +67,7 @@ fn vs_main(
     let previous = raa_previous_instances[raa_instance_id];
     let has_vertex_fn = (raa_materials[inst.material_index].header.z & RAA_FLAG_VERTEX_FN) != 0u;
     let motion_valid = previous.previous_valid != 0u && !has_vertex_fn;
-    let previous_world = raa_previous_model(previous) * vec4<f32>(d.local_position, 1.0);
+    let previous_world = raa_previous_model(previous) * vec4<f32>(previous_local, 1.0);
     out.motion_previous_world = select(world.xyz, previous_world.xyz, motion_valid);
     out.motion_valid = select(0u, 1u, motion_valid);
     return out;

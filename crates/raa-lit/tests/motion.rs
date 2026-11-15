@@ -146,12 +146,12 @@ mod software_gpu_motion {
     use std::rc::Rc;
 
     use raa_core::testing::{block_on, skip, software_gpu};
-    use raa_core::{FrameGraph, GpuContext, MaterialId, MeshId, OffscreenTarget, wgpu};
+    use raa_core::{FrameGraph, GpuContext, MaterialId, MeshId, OffscreenTarget, RaaError, wgpu};
     use raa_geom::builtin::DebugCube;
     use raa_geom::{GeometryProvider, MeshData, ParamValue, Params, Quality};
     use raa_lit::{AttributedMesh, LitOptions, LitRenderer};
     use raa_math::{Quat, Vec3};
-    use raa_pipeline::Pipeline;
+    use raa_pipeline::{FeaturePass, Pipeline, RecordCtx};
     use raa_scene::{NodeId, RenderList, Scene, Transform};
 
     const SIZE: (u32, u32) = (64, 64);
@@ -365,6 +365,78 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         motion
             .iter()
             .all(|m| m[0].abs() <= EPS && m[1].abs() <= EPS)
+    }
+
+    /// A feature pass that draws nothing: only its presence at name `taa` and its enabled
+    /// state reach the lit renderer's jitter consumer, not a resolve.
+    struct TaaStub;
+
+    impl FeaturePass for TaaStub {
+        fn name(&self) -> &str {
+            "taa"
+        }
+
+        fn order(&self) -> u32 {
+            100
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn taa_consumer_keeps_settled_motion_zero() {
+        let test = "taa_consumer_keeps_settled_motion_zero";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut rig = Rig::new(&gpu);
+        rig.pipeline
+            .borrow_mut()
+            .add(Box::new(TaaStub))
+            .expect("taa entry");
+        rig.add_cube();
+        // The enabled entry makes every frame a temporal consumer: the camera gets the S10
+        // jitter, which the motion target removes again. A still camera therefore settles
+        // to zero displacement with usable history.
+        for _ in 0..3 {
+            rig.frame(&gpu);
+        }
+        let settled = rig.motion(&gpu);
+        assert!(
+            settled
+                .iter()
+                .all(|m| m[0].abs() <= 1e-3 && m[1].abs() <= 1e-3),
+            "taa jitter must not reach motion.xy"
+        );
+        assert!(
+            settled.iter().all(|m| m[2] == 0.0),
+            "the settled frame keeps its history"
+        );
+
+        // Disabling the entry drops the jitter and the accumulation. The consumer change
+        // invalidates the next frame's camera history, so the second frame revalidates it.
+        rig.pipeline
+            .borrow_mut()
+            .set_enabled("taa", false)
+            .expect("disable the taa entry");
+        rig.frame(&gpu);
+        rig.frame(&gpu);
+        let off = rig.motion(&gpu);
+        assert!(
+            off.iter().all(|m| m[0].abs() <= 1e-3 && m[1].abs() <= 1e-3),
+            "without a consumer the jitter is zero"
+        );
+        assert!(
+            off.iter().all(|m| m[2] == 0.0),
+            "the camera history revalidates after the consumer change"
+        );
+
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "GPU validation error: {error:?}");
     }
 
     #[test]

@@ -392,6 +392,9 @@ pub(crate) struct LitShared {
     pub(crate) area_hero_capacity: u32,
     pub(crate) lod_bias: HashMap<u32, i8>,
     pub(crate) stats: InstanceFrameStats,
+    /// True when the latest `LitRenderer::prepare` saw the enabled pipeline entry `taa`
+    /// (S43): the prepass then carries `VARIANT_FLAG_MOTION_DEFORM` and the frame is jittered.
+    pub(crate) temporal_consumer: bool,
     pub(crate) materials: SurfaceLibrary,
     pub(crate) fns: MaterialFnRegistry,
     /// S23 tint mode per material; a material absent from the map is `multiply`.
@@ -554,6 +557,7 @@ impl LitShared {
             area_hero_capacity: 0,
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
+            temporal_consumer: false,
             store,
             materials: SurfaceLibrary::new(),
             fns: MaterialFnRegistry::new(),
@@ -1514,6 +1518,28 @@ impl LitHandle {
     /// `array<vec4<f32>>` rects, and the material data words.
     pub fn frame_layout(&self) -> wgpu::BindGroupLayout {
         self.shared.borrow().frame_layout.clone()
+    }
+
+    /// A clone of the renderer's S10 `FrameGpu` uniform buffer: `FRAME_GPU_SIZE` (768) bytes,
+    /// usage UNIFORM | COPY_DST. It is created once in `LitShared::new`, rewritten by every
+    /// [`LitRenderer::prepare`] (one per viewport, before that viewport's submission) and
+    /// never replaced, so a binding to it always sees the latest frame's `camera_jitter`
+    /// and `temporal` lanes (S43).
+    ///
+    /// Handoff: card 'raa-js: install TAA (m31) and give each viewport its own TAA history'
+    /// takes `LitHandle::frame_buffer`, which today returns a clone of that live 768-byte
+    /// `FrameGpu` uniform buffer; the card passes it to `raa_taa::TaaFeature::install`.
+    /// Handoff: card 'raa-taa: software-GPU frame test with the lit renderer' takes
+    /// `LitHandle::frame_buffer` for the same `raa_taa::TaaFeature::install`; today it
+    /// returns that same live `FrameGpu` uniform buffer after the last prepare.
+    pub fn frame_buffer(&self) -> wgpu::Buffer {
+        self.shared.borrow().frame_buffer.clone()
+    }
+
+    /// True when the latest [`LitRenderer::prepare`] saw the enabled pipeline entry `taa`
+    /// (S43); the prepass then adds `raa_shader::VARIANT_FLAG_MOTION_DEFORM` to its keys.
+    pub(crate) fn temporal_consumer(&self) -> bool {
+        self.shared.borrow().temporal_consumer
     }
 
     /// The group-0 bind group over the renderer's frame, material and extras buffers and the

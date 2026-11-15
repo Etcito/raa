@@ -125,6 +125,14 @@ impl TintMode {
 /// exactly the module of [`Composer::compose`].
 pub const VARIANT_FLAG_TINT_GRAPH: u32 = 1 << 30;
 
+/// [`VariantKey::flags`] bit of the prepass variant that evaluates the S11 deform slot a
+/// second time at `time - dt` (`FrameGpu.clip.w`) for the previous world position (S43).
+/// Only [`PassKind::Prepass`] sets it: forward, shadow, transparent and fur keys never
+/// carry it. It is distinct from [`VARIANT_FLAG_TINT_GRAPH`] and raa-lit's posed-skin bit
+/// (`1 << 31`); the composer emits [`Composer::compose`]'s `RAA_VARIANT_FLAGS` before the
+/// pass section, and `pass_prepass.wgsl` tests it as `RAA_VARIANT_MOTION_DEFORM`.
+pub const VARIANT_FLAG_MOTION_DEFORM: u32 = 1 << 29;
+
 impl TintMode {
     /// The [`VariantKey::flags`] bit of this mode: [`VARIANT_FLAG_TINT_GRAPH`] or 0.
     pub fn variant_flag(self) -> u32 {
@@ -517,6 +525,27 @@ fn depth_probe() {{
                 }
             }
         }
+    }
+
+    #[test]
+    fn motion_deform_flag_composes_a_valid_prepass() {
+        assert_eq!(VARIANT_FLAG_MOTION_DEFORM, 0x2000_0000);
+        assert_eq!(
+            VARIANT_FLAG_MOTION_DEFORM & (VARIANT_FLAG_TINT_GRAPH | 1 << 31),
+            0,
+            "the prepass bit is distinct from the tint and posed bits"
+        );
+        let composer = stub_composer();
+        let reg = MaterialFnRegistry::new();
+        let k = VariantKey {
+            flags: VARIANT_FLAG_MOTION_DEFORM,
+            ..key(MaterialFnId::STANDARD, PassKind::Prepass)
+        };
+        let wgsl = composer.compose(&reg, &k).expect("compose");
+        assert!(wgsl.contains("const RAA_VARIANT_FLAGS: u32 = 536870912u;"));
+        Composer::validate(&wgsl).expect("the flagged prepass validates");
+        assert!(PASS_PREPASS_WGSL.contains("const RAA_VARIANT_MOTION_DEFORM: u32 = 0x20000000u;"));
+        assert!(PASS_PREPASS_WGSL.contains("time - raa_frame.clip.w"));
     }
 
     #[test]

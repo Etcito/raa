@@ -146,6 +146,7 @@ fn draw_lit(
     kind: PassKind,
     msaa: u32,
     specs: &Specs,
+    extra_flags: u32,
 ) -> Result<(), RaaError> {
     for class in DRAWN_CLASSES {
         let draws = lit.camera_draws(class);
@@ -162,7 +163,7 @@ fn draw_lit(
                 material_fn: d.material_fn,
                 pass: kind,
                 msaa,
-                flags: flags | lit.material_variant_flags(d.material),
+                flags: flags | lit.material_variant_flags(d.material) | extra_flags,
             };
             let pipeline = lit.pipeline_for_draw(gpu, d.mesh, key, specs.get(flags))?;
             pass.set_pipeline(&pipeline);
@@ -257,6 +258,11 @@ impl FeaturePass for Prepass {
         });
         pass.set_bind_group(0, &frame, &[]);
         pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        let extra_flags = if self.lit.temporal_consumer() {
+            raa_shader::VARIANT_FLAG_MOTION_DEFORM
+        } else {
+            0
+        };
         draw_lit(
             ctx.gpu,
             &mut pass,
@@ -264,6 +270,7 @@ impl FeaturePass for Prepass {
             PassKind::Prepass,
             1,
             &self.specs,
+            extra_flags,
         )
     }
 }
@@ -416,6 +423,7 @@ impl FeaturePass for ForwardPass {
                 PassKind::Forward,
                 self.msaa,
                 &self.specs,
+                0,
             )?;
             let slots = self
                 .contributors

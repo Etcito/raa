@@ -109,9 +109,15 @@ pub struct InstanceFrameStats {
 
 pub(crate) const NO_CAMERA_LEVEL: u8 = u8::MAX;
 
-/// No temporal-accumulation consumer exists in this milestone (S10), so every viewport
-/// reports zero current and previous jitter.
-const JITTER_CONSUMER: bool = false;
+/// Name of the TAA pass in the pipeline (S12): its enabled entry makes the frame a
+/// temporal consumer, so the viewport gets the S10 jitter and accumulation (S43).
+pub(crate) const TAA_PASS_NAME: &str = "taa";
+
+/// True only when the pipeline's `taa` entry exists and is enabled; a missing or disabled
+/// entry leaves every viewport with zero current and previous jitter and no accumulation.
+fn jitter_consumer(taa_enabled: Option<bool>) -> bool {
+    taa_enabled == Some(true)
+}
 
 struct CameraLodInput<'a> {
     list: &'a RenderList,
@@ -976,12 +982,13 @@ impl LitRenderer {
         if let Some((index, observation, submitted)) = self.pending_resolve.take() {
             ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
         }
-        let (viewport, encode_srgb, tiling) = {
+        let (viewport, encode_srgb, tiling, consumer) = {
             let p = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             (
                 p.targets().map_or((1, 1), |t| t.size()),
                 !p.surface_is_srgb(),
                 p.entry_enabled(LIGHT_TILES_NAME).unwrap_or(false),
+                jitter_consumer(p.entry_enabled(TAA_PASS_NAME)),
             )
         };
         // Direct native callers keep the bounded single-view lifecycle: one invocation per
@@ -991,9 +998,10 @@ impl LitRenderer {
             let index = self.scene_frame.frame_index;
             self.scene_frame.begin(index);
         }
-        let camera = self.scene_frame.prepare(scene, viewport, JITTER_CONSUMER);
+        let camera = self.scene_frame.prepare(scene, viewport, consumer);
         let mut guard = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
         let s: &mut LitShared = &mut guard;
+        s.temporal_consumer = consumer;
         // Commit the previous invocation before this one stages its records.
         self.scene_frame.flush(&mut s.store);
 
@@ -1183,6 +1191,7 @@ impl LitRenderer {
             previous_jitter_ndc: camera.previous_jitter,
             previous_view_proj: camera.previous_view_proj,
             history_valid: camera.history_valid,
+            accumulation_enabled: consumer,
             frame_parity: (camera.frame_index & 1) as u32,
             active_lights,
             tile_columns,
@@ -1484,6 +1493,14 @@ mod tests {
     }
 
     #[test]
+    fn jitter_consumer_needs_an_enabled_taa_entry() {
+        assert_eq!(TAA_PASS_NAME, "taa");
+        assert!(!jitter_consumer(None), "no taa entry");
+        assert!(!jitter_consumer(Some(false)), "a disabled taa entry");
+        assert!(jitter_consumer(Some(true)), "an enabled taa entry");
+    }
+
+    #[test]
     fn options_default_to_the_contract_limits() {
         let o = LitOptions::default();
         assert_eq!((o.max_instances, o.max_materials, o.msaa), (16384, 256, 4));
@@ -1599,7 +1616,7 @@ mod tests {
 
         fn prepare(&mut self, scene: &Scene, view: usize, discontinuity: bool) -> CameraHistory {
             self.lifecycle.selected = Some((view % MAX_VIEWS, discontinuity));
-            let history = self.lifecycle.prepare(scene, LIFE_SIZE, JITTER_CONSUMER);
+            let history = self.lifecycle.prepare(scene, LIFE_SIZE, false);
             self.store
                 .sync(&self.list, &self.tags, &self.slots, &HashMap::new(), &|_| 0);
             let recorded = &mut self.lifecycle.slots[view % MAX_VIEWS];
