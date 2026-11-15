@@ -23,6 +23,7 @@ use raa_gi::parts::area_shadow::passes::{
 use raa_gi::parts::area_shadow::restir::{
     RESERVOIR_BYTES, RESTIR_PARAMS_SIZE, restir_common_module_wgsl, restir_group2_entries,
 };
+use raa_gi::parts::area_shadow::restir_cpu::ROUGHNESS_MIN;
 
 fn numbers(entries: &[BindGroupLayoutEntry]) -> Vec<u32> {
     entries.iter().map(|entry| entry.binding).collect()
@@ -605,4 +606,218 @@ fn restir_group2_entries_match_the_registry() {
             }
         ));
     }
+}
+
+/// Share 2 of contract 'area-restir-wgsl' (the surface, spherical-rectangle sampling, target and
+/// LTC luminance functions of restir_common.wgsl), composed by the Handoff doc comment at
+/// crates/raa-gi/src/parts/area_shadow/restir.rs:80 `restir_common_module_wgsl`.
+const RESTIR_SHARE2_NAMES: [&str; 10] = [
+    "fn raa_restir_surface(",
+    "fn raa_restir_slot_light(",
+    "fn raa_restir_light_point(",
+    "fn raa_restir_representative(",
+    "fn raa_restir_sample_rect(",
+    "fn raa_restir_area_pdf(",
+    "fn raa_restir_target(",
+    "fn raa_restir_ltc_luminance(",
+    "struct RaaRestirSurface",
+    "struct RaaRestirRectSample",
+];
+
+/// The GI compute group 1 (`GiShared::compute_group1_layout`).
+const GI_COMPUTE_GROUP1: [u32; 7] = [3, 6, 12, 15, 16, 17, 18];
+
+/// A test-only compute caller of every share-2 function, appended to the stage-less common
+/// module so naga checks the functions in the compute stage the ReSTIR entries run in.
+const RESTIR_SHARE2_CALLER: &str = "
+@compute @workgroup_size(8, 8)
+fn raa_restir_share2_caller(@builtin(global_invocation_id) id: vec3<u32>) {
+    let surface = raa_restir_surface(vec2<i32>(id.xy));
+    let index = raa_restir_slot_light(id.z % 8u);
+    if index == 0xFFFFFFFFu {
+        return;
+    }
+    let light = raa_local_lights[index];
+    let rect = raa_restir_sample_rect(light, surface.position, vec2<f32>(0.25, 0.75));
+    let point = raa_restir_light_point(light, rect.uv);
+    let to_point = point - surface.position;
+    let cos_light = dot(light.direction_cos_outer.xyz, -normalize(to_point));
+    let pdf = raa_restir_area_pdf(rect.solid_angle, cos_light, length(to_point));
+    let value = raa_restir_target(surface, light, rect.uv) * pdf
+        + raa_restir_ltc_luminance(surface, light);
+    raa_restir_current[raa_restir_index(id.xy)] = vec4<u32>(bitcast<u32>(value));
+}
+";
+
+fn function_handle(module: &naga::Module, name: &str) -> naga::Handle<naga::Function> {
+    module
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_deref() == Some(name))
+        .map(|(handle, _)| handle)
+        .unwrap_or_else(|| panic!("fn {name} is declared"))
+}
+
+/// The `group` bindings function `name` uses (its own and its callees'), ascending.
+fn function_bindings(reflection: &Reflection, name: &str, group: u32) -> Vec<u32> {
+    let usage = &reflection.info[function_handle(&reflection.module, name)];
+    let mut out: Vec<u32> = reflection
+        .module
+        .global_variables
+        .iter()
+        .filter(|(handle, _)| !usage[*handle].is_empty())
+        .filter_map(|(_, global)| global.binding.as_ref())
+        .filter(|binding| binding.group == group)
+        .map(|binding| binding.binding)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+#[test]
+fn restir_common_share2_validates_and_holds_its_functions() {
+    let source = restir_common_module_wgsl();
+    let reflection = Reflection::new(&source);
+    assert!(
+        reflection.module.entry_points.is_empty(),
+        "the stage-less common module has no entry point"
+    );
+    for name in RESTIR_SHARE2_NAMES {
+        assert!(source.contains(name), "the common share holds {name}");
+    }
+    let members = |name: &str| -> Vec<String> {
+        let (_, ty) = reflection
+            .module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("{name} is declared"));
+        let TypeInner::Struct { members, .. } = &ty.inner else {
+            panic!("{name} is a struct");
+        };
+        members
+            .iter()
+            .map(|member| member.name.clone().unwrap_or_default())
+            .collect()
+    };
+    assert_eq!(
+        members("RaaRestirSurface"),
+        [
+            "position",
+            "normal",
+            "view",
+            "roughness",
+            "f0",
+            "metallic",
+            "view_depth",
+            "valid"
+        ]
+    );
+    assert_eq!(members("RaaRestirRectSample"), ["uv", "solid_angle"]);
+    assert!(
+        source.contains("textureSampleLevel(raa_restir_ltc, raa_linear_clamp,"),
+        "the LTC tables are read from binding 18 with the clamp sampler at an explicit level"
+    );
+}
+
+#[test]
+fn restir_common_functions_never_read_group_0() {
+    let reflection = Reflection::new(&restir_common_module_wgsl());
+    for (_, function) in reflection.module.functions.iter() {
+        let Some(name) = function.name.as_deref() else {
+            continue;
+        };
+        if !name.starts_with("raa_restir_") {
+            continue;
+        }
+        assert!(
+            function_bindings(&reflection, name, 0).is_empty(),
+            "fn {name} reads group 0"
+        );
+        let group1 = function_bindings(&reflection, name, 1);
+        assert!(
+            group1
+                .iter()
+                .all(|binding| GI_COMPUTE_GROUP1.contains(binding)),
+            "fn {name} group-1 bindings {group1:?}"
+        );
+    }
+    assert_eq!(
+        function_bindings(&reflection, "raa_restir_ltc_luminance", 1),
+        [6],
+        "the LTC luminance samples with raa_linear_clamp"
+    );
+    assert_eq!(
+        function_bindings(&reflection, "raa_restir_ltc_luminance", 2),
+        [18],
+        "the LTC luminance reads the part's own atlas"
+    );
+    assert_eq!(
+        function_bindings(&reflection, "raa_restir_slot_light", 1),
+        [12]
+    );
+    assert_eq!(
+        function_bindings(&reflection, "raa_restir_slot_light", 2),
+        [8]
+    );
+    assert_eq!(
+        function_bindings(&reflection, "raa_restir_surface", 2),
+        [0, 1, 2, 19],
+        "the surface reads GiFrameGpu, the S12 depth, normal and material"
+    );
+    for name in [
+        "raa_restir_light_point",
+        "raa_restir_representative",
+        "raa_restir_sample_rect",
+        "raa_restir_area_pdf",
+        "raa_restir_target",
+    ] {
+        for group in 0..3 {
+            assert!(
+                function_bindings(&reflection, name, group).is_empty(),
+                "fn {name} is pure (group {group})"
+            );
+        }
+    }
+}
+
+#[test]
+fn restir_share2_compute_caller_stays_inside_its_groups() {
+    let source = format!("{}{RESTIR_SHARE2_CALLER}", restir_common_module_wgsl());
+    let reflection = Reflection::new(&source);
+    let index = reflection.entry("raa_restir_share2_caller");
+    let entry = &reflection.module.entry_points[index];
+    assert_eq!(entry.stage, ShaderStage::Compute);
+    assert_eq!(entry.workgroup_size, [WORKGROUP, WORKGROUP, 1]);
+    assert!(reflection.used(index, 0).is_empty(), "group 0 is unused");
+    assert_eq!(reflection.used(index, 1), [6, 12], "group-1 bindings");
+    assert_eq!(
+        reflection.used(index, 2),
+        [0, 1, 2, 8, 16, 18, 19],
+        "group-2 bindings"
+    );
+    let registry = numbers(&restir_group2_entries());
+    for binding in reflection.used(index, 2) {
+        assert!(registry.contains(&binding), "group 2 binding {binding}");
+    }
+    let (textures, buffers) = reflection.storage(index);
+    assert!(textures <= 4, "{textures} storage textures");
+    assert!(buffers <= 8, "{buffers} storage buffers");
+}
+
+#[test]
+fn restir_roughness_floor_matches_its_cpu_twin() {
+    let reflection = Reflection::new(&restir_common_module_wgsl());
+    let (_, constant) = reflection
+        .module
+        .constants
+        .iter()
+        .find(|(_, constant)| constant.name.as_deref() == Some("RAA_RESTIR_ROUGHNESS_MIN"))
+        .expect("RAA_RESTIR_ROUGHNESS_MIN is declared");
+    let naga::Expression::Literal(naga::Literal::F32(value)) =
+        reflection.module.global_expressions[constant.init]
+    else {
+        panic!("RAA_RESTIR_ROUGHNESS_MIN is an f32 literal");
+    };
+    assert_eq!(value, ROUGHNESS_MIN);
 }
