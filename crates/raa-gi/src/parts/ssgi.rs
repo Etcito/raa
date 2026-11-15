@@ -12,10 +12,22 @@
 //! space replaces the probe and volume irradiance in the sectors it found occluded, so that
 //! irradiance is never added a second time.
 //!
-//! This root holds the pass name, its order and the byte budget. The CPU twins live in `cpu`.
+//! This root holds the pass name, its order, the byte budget and the part `ssgi` with its pass
+//! `gi.ssgi` (`install`, `SsgiPart`, `GiSsgiPass`). The CPU twins live in `cpu`, the kernels and
+//! pipelines in `passes` and the GPU resources in `resources`.
+//!
+//! `crates/raa-gi/src/lib.rs`: out of scope for this share: consumers use the module path.
+//! `crates/raa-gi/src/parts.rs`: out of scope for this share: consumers use the module path.
 
-use super::PartsCtx;
-use raa_core::RaaError;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use self::passes::SsgiPipelines;
+use self::resources::{SsgiInputs, SsgiResources};
+use super::{GiPart, GiShared, PartFrame, PartsCtx};
+use raa_core::{GpuContext, RaaError};
+use raa_lit::LitHandle;
+use raa_pipeline::{FeaturePass, LightingResources, RecordCtx, Targets};
 
 #[path = "ssgi/cpu.rs"]
 pub mod cpu;
@@ -43,13 +55,235 @@ pub fn ssgi_bytes(viewport: (u32, u32)) -> u64 {
         .saturating_add(48)
 }
 
-/// Handoff: `install` is the body that card
-/// 'raa-gi ssgi: SsgiPart, the gi.ssgi pass (order 44) and the binding-14 pick' replaces. Today
-/// `install` adds nothing to `ctx` and returns `Ok(())`; the generated `install_parts` of
-/// `parts.rs` calls it once per GI install, in file-name order.
+/// Builds the part `ssgi` and its pass `gi.ssgi` and attaches them. `SsgiPipelines::new` builds the
+/// trace and resolve pipelines on the GI compute group-1 layout. `GiSsgiPass` is added to the
+/// pipeline with `Pipeline::add`, enabled (a busy pipeline refuses with `pipeline.busy`, a repeated
+/// name with `pipeline.duplicate_pass`), and `SsgiPart` is added with `PartsCtx::add_part`. Nothing
+/// is allocated here: `SsgiPart::prepare_frame` allocates the resources on the first active frame.
 pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
-    let _ = ctx;
+    let pipelines = SsgiPipelines::new(ctx.gpu, &ctx.shared.compute_group1_layout());
+    let part = Rc::new(SsgiPart {
+        shared: ctx.shared.clone(),
+        lit: ctx.lit.handle(),
+        state: RefCell::new(SsgiState {
+            pipelines,
+            resources: None,
+            key: None,
+            frame_index: 0,
+            active: false,
+            pass_enabled: true,
+            pending: false,
+        }),
+    });
+    {
+        let mut pipeline = ctx
+            .pipeline
+            .try_borrow_mut()
+            .map_err(|_| RaaError::FrameGraph {
+                code: "pipeline.busy",
+                message: "the pipeline is borrowed (called while a frame executes)".to_string(),
+            })?;
+        pipeline.add(Box::new(GiSsgiPass {
+            part: Rc::clone(&part),
+        }))?;
+    }
+    ctx.add_part(part);
     Ok(())
+}
+
+/// Handoff: `SsgiPart` is taken over by card 'raa-gi ssgi: software-GPU frame test of gi.ssgi',
+/// which drives the pass `gi.ssgi` (`SSGI_PASS`, parts/ssgi.rs:40) and checks the bytes of
+/// `ssgi_bytes` (parts/ssgi.rs:49). Today `install` (parts/ssgi.rs:63) attaches this part and
+/// `GiSsgiPass`, and the generated `install_parts` calls `install` from `GiFeature::install`
+/// (feature.rs:725). The state it is driven by is the key registry of `GiSettingsPatch`
+/// (settings.rs:187), applied by `GiHandle::set` (feature.rs:195): `screen_space` true makes the
+/// part active and allocates `ssgi_bytes`; `screen_space_quality` sets the slices and steps with no
+/// allocation change; `Pipeline::set_enabled("gi.ssgi", false)` drops the bytes on the next
+/// prepared frame. LIFECYCLE: SsgiPart::prepare_frame (a GiPart hook run by
+/// `GiHandle::prepare_frame`, feature.rs:345, before the pipeline executes) creates SsgiResources
+/// on an active frame whose viewport key changed, and drops them on an inactive frame.
+/// GiPart::release, through `release_resources` (feature.rs:489), drops them. The bind groups are
+/// built lazily by `SsgiResources::work` (parts/ssgi/resources.rs:244) from the gi.ssgi record and
+/// dropped by `SsgiResources::invalidate_bindings` (parts/ssgi/resources.rs:234) from the gi.ssgi
+/// resize hook. Per enabled pass in order, the pipeline calls resize (only when the targets
+/// generation changed) and then prepare (`prepare_single`,
+/// crates/raa-pipeline/src/pipeline.rs:881-887), then records every enabled pass in order
+/// (`record_single`, pipeline.rs:917-919). So gi.volume (25) prepares binding 14, gi.screen (42)
+/// records the probe output and gi.ssgi (44) records after it.
+struct SsgiPart {
+    shared: GiShared,
+    lit: LitHandle,
+    state: RefCell<SsgiState>,
+}
+
+/// The mutable state of [`SsgiPart`]: the pipelines, the resources of the viewport `key`, the
+/// frame counter written to `SsgiParamsGpu.frame`, and the activity, enable and
+/// pending-invalidation flags.
+struct SsgiState {
+    pipelines: SsgiPipelines,
+    resources: Option<SsgiResources>,
+    key: Option<(u32, u32)>,
+    frame_index: u32,
+    active: bool,
+    pass_enabled: bool,
+    pending: bool,
+}
+
+/// The activity rule of [`SsgiPart`]: `screenSpace` on, the pass enabled, GI active and both
+/// viewport axes non-empty.
+fn is_active(active: bool, screen_space: bool, pass_enabled: bool, viewport: (u32, u32)) -> bool {
+    active && screen_space && pass_enabled && viewport.0 > 0 && viewport.1 > 0
+}
+
+impl GiPart for SsgiPart {
+    fn name(&self) -> &'static str {
+        "ssgi"
+    }
+
+    /// Sets the activity. An inactive frame drops the resources. An active frame reallocates them
+    /// when the viewport key changed, applies a pending invalidation, advances the frame counter
+    /// and writes the params of `screen_space_quality`.
+    fn prepare_frame(&self, gpu: &GpuContext, frame: &PartFrame<'_>) {
+        let mut guard = self.state.borrow_mut();
+        let state = &mut *guard;
+        let (width, height) = frame.viewport;
+        state.active = is_active(
+            frame.active,
+            frame.settings.screen_space,
+            state.pass_enabled,
+            frame.viewport,
+        );
+        if !state.active {
+            state.resources = None;
+            state.key = None;
+            return;
+        }
+        if state.key != Some((width, height)) {
+            state.resources = Some(SsgiResources::new(gpu, (width, height)));
+            state.key = Some((width, height));
+        }
+        let pending = std::mem::take(&mut state.pending);
+        state.frame_index = state.frame_index.wrapping_add(1);
+        let quality = frame.settings.screen_space_quality;
+        let Some(resources) = state.resources.as_mut() else {
+            return;
+        };
+        if pending {
+            resources.invalidate();
+        }
+        resources.write_params(
+            gpu,
+            quality.slices(),
+            quality.steps(),
+            frame.history_valid,
+            state.frame_index,
+        );
+    }
+
+    /// The composite output of this frame while the part is active with its pass enabled.
+    fn screen_output(&self) -> Option<wgpu::TextureView> {
+        let state = self.state.borrow();
+        if !(state.active && state.pass_enabled) {
+            return None;
+        }
+        state.resources.as_ref().map(SsgiResources::output_view)
+    }
+
+    /// True while the part is active with its pass enabled.
+    fn wants_history(&self) -> bool {
+        let state = self.state.borrow();
+        state.active && state.pass_enabled
+    }
+
+    /// Sets the pending invalidation, applied by the next active `prepare_frame`.
+    fn invalidate_history(&self) {
+        self.state.borrow_mut().pending = true;
+    }
+
+    /// Drops the resources and the key, and clears the activity.
+    fn release(&self) {
+        let mut state = self.state.borrow_mut();
+        state.resources = None;
+        state.key = None;
+        state.active = false;
+    }
+
+    /// The GPU bytes of the current resources, or 0 without them.
+    fn allocated_bytes(&self) -> u64 {
+        self.state
+            .borrow()
+            .resources
+            .as_ref()
+            .map_or(0, SsgiResources::allocated_bytes)
+    }
+}
+
+/// The `gi.ssgi` feature pass (order 44): records the trace and the resolve of one [`SsgiPart`]
+/// over the frame's buffers, the previous lit HDR and the probe output of gi.screen.
+struct GiSsgiPass {
+    part: Rc<SsgiPart>,
+}
+
+impl FeaturePass for GiSsgiPass {
+    fn name(&self) -> &str {
+        SSGI_PASS
+    }
+
+    fn order(&self) -> u32 {
+        SSGI_ORDER
+    }
+
+    /// Stores the enable flag and, on disable, sets the pending invalidation.
+    fn set_enabled(&mut self, enabled: bool, _lighting: &mut LightingResources) {
+        let mut state = self.part.state.borrow_mut();
+        state.pass_enabled = enabled;
+        if !enabled {
+            state.pending = true;
+        }
+    }
+
+    /// Drops the cached bind groups after the targets were recreated.
+    fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
+        if let Some(resources) = self.part.state.borrow_mut().resources.as_mut() {
+            resources.invalidate_bindings();
+        }
+    }
+
+    /// Records `raa-gi.ssgi` while the part is active with resources and the frame buffer and
+    /// group 1 exist. A recorded pass commits the history pair.
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let mut guard = self.part.state.borrow_mut();
+        let state = &mut *guard;
+        if !(state.active && state.pass_enabled) {
+            return Ok(());
+        }
+        let Some(resources) = state.resources.as_mut() else {
+            return Ok(());
+        };
+        let Some(frame) = self.part.shared.frame_buffer() else {
+            return Ok(());
+        };
+        let Some(group1) = self.part.shared.compute_group1(ctx.lighting) else {
+            return Ok(());
+        };
+        let lit_frame = self.part.lit.frame_buffer();
+        let history = self.part.shared.history_view();
+        let probe = self.part.shared.probe_output_view();
+        let inputs = SsgiInputs {
+            gi_frame: &frame,
+            lit_frame: &lit_frame,
+            history: history.as_ref(),
+            probe: probe.as_ref(),
+        };
+        let recorded = {
+            let work = resources.work(ctx.gpu, &state.pipelines, ctx.targets, &inputs);
+            state.pipelines.record(ctx.encoder, &group1, &work)
+        };
+        if recorded {
+            resources.commit();
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +301,15 @@ mod tests {
         assert_eq!(ssgi_bytes((1280, 720)), 29_491_248);
         assert_eq!(ssgi_bytes((320, 180)), 1_843_248);
         assert_eq!(ssgi_bytes((0, 0)), 80);
+    }
+
+    #[test]
+    fn activity_needs_screen_space_the_pass_gi_and_a_viewport() {
+        assert!(is_active(true, true, true, (1280, 720)));
+        assert!(!is_active(false, true, true, (1280, 720)));
+        assert!(!is_active(true, false, true, (1280, 720)));
+        assert!(!is_active(true, true, false, (1280, 720)));
+        assert!(!is_active(true, true, true, (0, 720)));
+        assert!(!is_active(true, true, true, (1280, 0)));
     }
 }

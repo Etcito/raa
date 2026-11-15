@@ -571,7 +571,14 @@ impl FeaturePass for GiVolumePass {
         let core = self.core.borrow();
         match core.volume.as_ref() {
             Some(volume) => {
-                let screen = core.parts.iter().find_map(|part| part.screen_output());
+                // Part order rank (generated file-name order): area_shadow = 0, screen = 1,
+                // slots = 2, ssgi = 3. The LAST part with a screen output is bound at binding 14,
+                // so the SSGI composite replaces the probe output while gi.ssgi is active.
+                let screen = core
+                    .parts
+                    .iter()
+                    .rev()
+                    .find_map(|part| part.screen_output());
                 ctx.lighting
                     .set_gi(screen, volume.atlas_view(), &volume.params_bytes())
             }
