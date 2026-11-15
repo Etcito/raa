@@ -13,8 +13,10 @@ use raa_gi::parts::area_shadow::cpu::{
     temporal_blend,
 };
 use raa_gi::parts::area_shadow::restir_cpu::{
-    Reservoir, oct_decode, oct_encode, pack_reservoir, pack2x16float, unpack_reservoir,
-    unpack2x16float,
+    REMAP_INVALID, RESTIR_SPATIAL_RADIUS, Reservoir, balance_weight, boiling_keep,
+    clamp_confidence, contribution_weight, depth_similar, oct_decode, oct_encode, pack_reservoir,
+    pack2x16float, remap_slot, remap_table, spatial_offset, unpack_reservoir, unpack2x16float,
+    wrs_accept,
 };
 use raa_loader::json::{JsonValue, parse};
 
@@ -83,6 +85,21 @@ fn text(value: &JsonValue) -> &str {
         panic!("expected a string");
     };
     s
+}
+
+fn boolean(value: &JsonValue) -> bool {
+    let JsonValue::Bool(flag) = value else {
+        panic!("expected a boolean");
+    };
+    *flag
+}
+
+/// A JSON number, or null, as an optional u32 (the remap fixture's `mapped` lane).
+fn optional_word(value: &JsonValue) -> Option<u32> {
+    match value {
+        JsonValue::Null => None,
+        _ => Some(word(value)),
+    }
 }
 
 fn scalar(value: &JsonValue) -> f32 {
@@ -323,4 +340,143 @@ fn empty_and_saturated_reservoir_words() {
         ..Reservoir::EMPTY
     };
     assert_eq!(pack_reservoir(&heavy)[2] & 0xFFFF, 0x7BFF);
+}
+
+#[test]
+fn reservoir_acceptance_and_weight_tables() {
+    let root = restir_fixture();
+    for case in items(field(&root, "wrs_accept")) {
+        let got = wrs_accept(
+            number(field(case, "w_sum")),
+            number(field(case, "w")),
+            number(field(case, "xi")),
+        );
+        assert_eq!(
+            got,
+            boolean(field(case, "accept")),
+            "wrs_accept ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "contribution_weight")) {
+        let got = contribution_weight(number(field(case, "w_sum")), number(field(case, "target")));
+        assert!(
+            close(got, number(field(case, "weight")), 1e-6),
+            "contribution_weight ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "clamp_confidence")) {
+        let got = clamp_confidence(
+            number(field(case, "previous")),
+            number(field(case, "current")),
+            number(field(case, "cap")),
+        );
+        assert!(
+            close(got, number(field(case, "confidence")), 1e-6),
+            "clamp_confidence ({})",
+            text(field(case, "note"))
+        );
+    }
+}
+
+#[test]
+fn balance_weight_table() {
+    let root = restir_fixture();
+    for case in items(field(&root, "balance_weight")) {
+        let terms: Vec<(f32, f32)> = items(field(case, "terms"))
+            .iter()
+            .map(|row| {
+                let [m, target] = floats::<2>(row);
+                (m, target)
+            })
+            .collect();
+        let got = balance_weight(&terms, word(field(case, "index")) as usize);
+        assert!(
+            close(got, number(field(case, "weight")), 1e-6),
+            "balance_weight ({})",
+            text(field(case, "note"))
+        );
+    }
+}
+
+#[test]
+fn slot_remap_tables() {
+    let root = restir_fixture();
+    for case in items(field(&root, "remap_slot")) {
+        let remap: [u32; 8] = std::array::from_fn(|i| word(&items(field(case, "remap"))[i]));
+        let got = remap_slot(&remap, word(field(case, "slot")));
+        assert_eq!(
+            got,
+            optional_word(field(case, "mapped")),
+            "remap_slot ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "remap_table")) {
+        let previous: [u32; 8] = std::array::from_fn(|i| word(&items(field(case, "previous"))[i]));
+        let current: [u32; 8] = std::array::from_fn(|i| word(&items(field(case, "current"))[i]));
+        let got = remap_table(&previous, &current, boolean(field(case, "history_valid")));
+        let want: [u32; 8] = std::array::from_fn(|i| word(&items(field(case, "lanes"))[i]));
+        assert_eq!(got, want, "remap_table ({})", text(field(case, "note")));
+    }
+    assert_eq!(
+        remap_slot(&[0, REMAP_INVALID, 2, 3, 4, 5, 6, 7], 2),
+        Some(2)
+    );
+}
+
+#[test]
+fn boiling_and_depth_tables() {
+    let root = restir_fixture();
+    for case in items(field(&root, "boiling_keep")) {
+        let got = boiling_keep(
+            number(field(case, "weight")),
+            number(field(case, "mean")),
+            number(field(case, "factor")),
+        );
+        assert_eq!(
+            got,
+            boolean(field(case, "keep")),
+            "boiling_keep ({})",
+            text(field(case, "note"))
+        );
+    }
+    for case in items(field(&root, "depth_similar")) {
+        let got = depth_similar(
+            number(field(case, "neighbour")),
+            number(field(case, "centre")),
+        );
+        assert_eq!(
+            got,
+            boolean(field(case, "similar")),
+            "depth_similar ({})",
+            text(field(case, "note"))
+        );
+    }
+}
+
+#[test]
+fn spatial_offsets_stay_in_the_disk_and_reach_both_signs() {
+    let radius = RESTIR_SPATIAL_RADIUS;
+    let mut x_signs = BTreeSet::new();
+    let mut y_signs = BTreeSet::new();
+    for frame in 0..4u32 {
+        for k in 0..64u32 {
+            let offset = spatial_offset([17, 9], frame, k, radius);
+            let [x, y] = offset.map(f64::from);
+            assert!(
+                (x * x + y * y).sqrt() <= f64::from(radius) + 1.0,
+                "frame {frame} k {k}: {offset:?}"
+            );
+            if x != 0.0 {
+                x_signs.insert(x.signum() as i32);
+            }
+            if y != 0.0 {
+                y_signs.insert(y.signum() as i32);
+            }
+        }
+    }
+    assert_eq!(x_signs, BTreeSet::from([-1, 1]), "x axis signs");
+    assert_eq!(y_signs, BTreeSet::from([-1, 1]), "y axis signs");
 }

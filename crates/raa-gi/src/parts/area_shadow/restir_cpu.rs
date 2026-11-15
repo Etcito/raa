@@ -6,6 +6,14 @@
 //! same names with an `raa_restir_` prefix. These twins are tested on the CPU against hand-derived
 //! fixtures and are never run against the GPU. Every function is pure and nothing panics; u32
 //! arithmetic wraps as in WGSL.
+//!
+//! Share 2 adds the reservoir reuse maths: the weighted reservoir sampling acceptance, the
+//! contribution weight, the confidence clamp, the generalized balance heuristic, the slot remap,
+//! the boiling filter, the depth test and the hashed spatial offsets.
+
+use std::f32::consts::PI;
+
+use super::super::screen::cpu::hash_to_unit;
 
 /// Initial candidates per pixel of the ReSTIR pass.
 pub const RESTIR_CANDIDATES: u32 = 8;
@@ -224,4 +232,101 @@ pub fn unpack_reservoir(words: [u32; 4]) -> Reservoir {
         confidence: weight_confidence[1],
         normal_oct: unpack2x16float(words[3]),
     }
+}
+
+/// Weighted reservoir sampling (Bitterli et al. 2020): accepts a candidate of weight `w` when
+/// `w_sum` (which already includes it) is positive and `xi * w_sum < w`, `xi` in `[0, 1)`.
+pub fn wrs_accept(w_sum: f32, w: f32, xi: f32) -> bool {
+    w_sum > 0.0 && xi * w_sum < w
+}
+
+/// The unbiased contribution weight `w_sum / target`; 0 when `target <= 0` or the quotient is
+/// not finite.
+pub fn contribution_weight(w_sum: f32, target: f32) -> f32 {
+    if target <= 0.0 {
+        return 0.0;
+    }
+    let weight = w_sum / target;
+    if weight.is_finite() { weight } else { 0.0 }
+}
+
+/// Clamps the previous candidate count against `cap * current`, never below 0:
+/// `max(min(previous, cap * current), 0)`.
+pub fn clamp_confidence(previous: f32, current: f32, cap: f32) -> f32 {
+    previous.min(cap * current).max(0.0)
+}
+
+/// The generalized balance heuristic (Lin et al. 2022) of term `i`: terms are
+/// `(M_j, target_j)`, and the result is `M_i * target_i / sum_j M_j * target_j`. 0 when the sum
+/// is not positive or `i` is out of range.
+pub fn balance_weight(terms: &[(f32, f32)], i: usize) -> f32 {
+    if i >= terms.len() {
+        return 0.0;
+    }
+    let sum: f32 = terms.iter().map(|&(m, target)| m * target).sum();
+    if sum <= 0.0 {
+        return 0.0;
+    }
+    let (m, target) = terms[i];
+    m * target / sum
+}
+
+/// Maps a reservoir's stable area-stochastic slot through a [`remap_table`] row: `None` for
+/// `slot >= 8` or a lane equal to [`REMAP_INVALID`].
+pub fn remap_slot(remap: &[u32; 8], slot: u32) -> Option<u32> {
+    if slot >= 8 {
+        return None;
+    }
+    let lane = remap[slot as usize];
+    if lane == REMAP_INVALID {
+        None
+    } else {
+        Some(lane)
+    }
+}
+
+/// Slot remap from the per-slot occupant generations of `AreaStochasticFrame`: lane `s` is `s`
+/// when `history_valid` and `previous[s] == current[s]`, else [`REMAP_INVALID`]. RAA repacks
+/// packed light indices every frame, so a reservoir stores the stable slot and reads this
+/// frame's packed index from the slot table.
+///
+/// Handoff: card 'raa-gi: gi.area-shadow part runs the ReSTIR ultra tier on Restir frames'
+/// calls `remap_table` with the previous and current `AreaStochasticFrame.generations` and the
+/// reservoir history validity. Today `remap_table` compares the two generations lane by lane
+/// and returns this frame's slot or [`REMAP_INVALID`].
+pub fn remap_table(previous: &[u32; 8], current: &[u32; 8], history_valid: bool) -> [u32; 8] {
+    std::array::from_fn(|s| {
+        if history_valid && previous[s] == current[s] {
+            s as u32
+        } else {
+            REMAP_INVALID
+        }
+    })
+}
+
+/// The boiling filter: keeps a reservoir when `mean` is not positive or `weight <= factor *
+/// mean`, so a reservoir far above the running mean is dropped instead of boiling.
+pub fn boiling_keep(weight: f32, mean: f32, factor: f32) -> bool {
+    mean <= 0.0 || weight <= factor * mean
+}
+
+/// The temporal depth rejection: both depths are positive and the neighbour is within
+/// [`RESTIR_DEPTH_TOLERANCE`] (relative) of the centre.
+pub fn depth_similar(neighbour: f32, centre: f32) -> bool {
+    centre > 0.0 && neighbour > 0.0 && (neighbour - centre).abs() <= RESTIR_DEPTH_TOLERANCE * centre
+}
+
+/// The hashed disk offset of spatial-reuse sample `k`: the seed is
+/// `pixel.x * 7919 + pixel.y * 104729 + frame * 31337 + k * 977` (wrapping), radius
+/// `r = radius * sqrt(hash_to_unit(seed))` and angle `a = 2 pi hash_to_unit(seed + 1)`,
+/// returning `[round(r cos a), round(r sin a)]`.
+pub fn spatial_offset(pixel: [u32; 2], frame: u32, k: u32, radius: f32) -> [i32; 2] {
+    let seed = pixel[0]
+        .wrapping_mul(7919)
+        .wrapping_add(pixel[1].wrapping_mul(104_729))
+        .wrapping_add(frame.wrapping_mul(31_337))
+        .wrapping_add(k.wrapping_mul(977));
+    let r = radius * hash_to_unit(seed).sqrt();
+    let a = 2.0 * PI * hash_to_unit(seed.wrapping_add(1));
+    [(r * a.cos()).round() as i32, (r * a.sin()).round() as i32]
 }
