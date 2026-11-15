@@ -150,7 +150,7 @@ pub fn pyramid_sizes(viewport: (u32, u32)) -> Vec<(u32, u32)> {
     sizes
 }
 
-fn entry(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
+pub(crate) fn entry(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
         visibility: ShaderStages::COMPUTE,
@@ -159,7 +159,7 @@ fn entry(binding: u32, ty: BindingType) -> BindGroupLayoutEntry {
     }
 }
 
-fn texture_entry(binding: u32, sample_type: TextureSampleType) -> BindGroupLayoutEntry {
+pub(crate) fn texture_entry(binding: u32, sample_type: TextureSampleType) -> BindGroupLayoutEntry {
     entry(
         binding,
         BindingType::Texture {
@@ -170,15 +170,15 @@ fn texture_entry(binding: u32, sample_type: TextureSampleType) -> BindGroupLayou
     )
 }
 
-fn depth_entry(binding: u32) -> BindGroupLayoutEntry {
+pub(crate) fn depth_entry(binding: u32) -> BindGroupLayoutEntry {
     texture_entry(binding, TextureSampleType::Depth)
 }
 
-fn float_entry(binding: u32, filterable: bool) -> BindGroupLayoutEntry {
+pub(crate) fn float_entry(binding: u32, filterable: bool) -> BindGroupLayoutEntry {
     texture_entry(binding, TextureSampleType::Float { filterable })
 }
 
-fn storage_texture_entry(binding: u32, format: TextureFormat) -> BindGroupLayoutEntry {
+pub(crate) fn storage_texture_entry(binding: u32, format: TextureFormat) -> BindGroupLayoutEntry {
     entry(
         binding,
         BindingType::StorageTexture {
@@ -189,7 +189,7 @@ fn storage_texture_entry(binding: u32, format: TextureFormat) -> BindGroupLayout
     )
 }
 
-fn uniform_entry(binding: u32, size: u64) -> BindGroupLayoutEntry {
+pub(crate) fn uniform_entry(binding: u32, size: u64) -> BindGroupLayoutEntry {
     entry(
         binding,
         BindingType::Buffer {
@@ -200,7 +200,7 @@ fn uniform_entry(binding: u32, size: u64) -> BindGroupLayoutEntry {
     )
 }
 
-fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+pub(crate) fn storage_entry(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
     entry(
         binding,
         BindingType::Buffer {
@@ -321,7 +321,7 @@ pub(crate) struct ScreenWork<'a> {
     pub(crate) viewport: (u32, u32),
 }
 
-fn layout(
+pub(crate) fn layout(
     device: &wgpu::Device,
     label: &str,
     entries: &[BindGroupLayoutEntry],
@@ -332,7 +332,7 @@ fn layout(
     })
 }
 
-fn module(device: &wgpu::Device, label: &str, source: &str) -> ShaderModule {
+pub(crate) fn module(device: &wgpu::Device, label: &str, source: &str) -> ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(source.into()),
@@ -341,7 +341,7 @@ fn module(device: &wgpu::Device, label: &str, source: &str) -> ShaderModule {
 
 /// A compute pipeline of `module`'s `entry` over the bind group layouts `groups`; when
 /// `probe_rays` is given, `PROBE_RAYS` is set to it through `compilation_options.constants`.
-fn compute_pipeline(
+pub(crate) fn compute_pipeline(
     device: &wgpu::Device,
     label: &str,
     module: &ShaderModule,
@@ -372,11 +372,11 @@ fn compute_pipeline(
     })
 }
 
-fn groups_for(n: u32) -> u32 {
+pub(crate) fn groups_for(n: u32) -> u32 {
     n.div_ceil(WORKGROUP)
 }
 
-fn dispatch(pass: &mut wgpu::ComputePass<'_>, width: u32, height: u32) {
+pub(crate) fn dispatch(pass: &mut wgpu::ComputePass<'_>, width: u32, height: u32) {
     pass.dispatch_workgroups(groups_for(width), groups_for(height), 1);
 }
 

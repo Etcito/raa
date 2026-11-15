@@ -278,6 +278,17 @@ impl GiHandle {
         self.core.borrow_mut().local_light_count = count;
     }
 
+    /// Attaches the engine's SDF trace scene, or detaches it with `None`, through
+    /// [`GiShared::set_trace`].
+    ///
+    /// Handoff: the card "raa-js: stochastic keys of setAreaLightShadows/areaLightShadows, docs
+    /// and typings, and the GI trace-scene wiring" calls `GiHandle::set_trace_scene` once at
+    /// install with the engine's trace handle. Today it stores the handle on the shared frame
+    /// state, where `GiShared::trace` reads it until it is replaced.
+    pub fn set_trace_scene(&self, trace: Option<raa_sdf_trace::TraceHandle>) {
+        self.core.borrow().shared.set_trace(trace);
+    }
+
     /// Marks the frame history invalid and drops the history of every part.
     pub fn invalidate_history(&self) {
         let mut core = self.core.borrow_mut();

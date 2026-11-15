@@ -17,6 +17,8 @@ raa-pipeline = { path = "../raa-pipeline" }
 raa-lit = { path = "../raa-lit" }
 raa-vg = { path = "../raa-vg" }
 raa-ibl = { path = "../raa-ibl" }
+raa-taa = { path = "../raa-taa" }
+raa-sdf-trace = { path = "../raa-sdf-trace" }
 
 [dev-dependencies]
 raa-loader = { workspace = true }

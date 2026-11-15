@@ -298,6 +298,11 @@ impl ScreenResources {
         self.output_views[parity & 1].clone()
     }
 
+    /// A clone of the all-mip R32Float depth-pyramid view.
+    pub(crate) fn pyramid_view(&self) -> wgpu::TextureView {
+        self.pyramid_view.clone()
+    }
+
     /// Writes the 16 B of `GiScreenGpu` as little-endian u32: (history_valid, screen_traces,
     /// parity & 1, 0).
     pub(crate) fn write_params(
@@ -590,13 +595,15 @@ impl GiPart for ScreenPart {
         self.state.borrow_mut().output_valid = false;
     }
 
-    /// Drops the resources and the key so the next active frame reallocates them.
+    /// Drops the resources and the key so the next active frame reallocates them, and drops the
+    /// published depth-pyramid view.
     fn release(&self) {
         let mut state = self.state.borrow_mut();
         state.resources = None;
         state.key = None;
         state.active = false;
         state.output_valid = false;
+        self.shared.set_pyramid(None);
     }
 
     /// The GPU bytes of the current resources, or 0 without them.
@@ -624,13 +631,14 @@ impl FeaturePass for GiScreenPass {
         42
     }
 
-    /// Stores the enable flag and, on disable, invalidates the output and clears the group-1 GI
-    /// dummies (S38).
+    /// Stores the enable flag and, on disable, invalidates the output, drops the published
+    /// depth-pyramid view and clears the group-1 GI dummies (S38).
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
         let mut state = self.part.state.borrow_mut();
         state.pass_enabled = enabled;
         if !enabled {
             state.output_valid = false;
+            self.part.shared.set_pyramid(None);
             lighting.clear_gi();
         }
     }
@@ -643,8 +651,10 @@ impl FeaturePass for GiScreenPass {
     }
 
     /// Records the `raa-gi.screen` pass when the part is active, enabled and has resources;
-    /// marks the output valid when `ScreenPipelines::record` recorded it.
+    /// publishes the pyramid view for this frame when `ScreenPipelines::record` recorded the pass
+    /// and marks the output valid.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        self.part.shared.set_pyramid(None);
         let mut state = self.part.state.borrow_mut();
         if !state.active || !state.pass_enabled {
             return Ok(());
@@ -676,6 +686,8 @@ impl FeaturePass for GiScreenPass {
         );
         if pipelines.record(ctx.encoder, &group1, &work) {
             *output_valid = true;
+            let pyramid = resources.pyramid_view();
+            self.part.shared.set_pyramid(Some(pyramid));
         }
         Ok(())
     }

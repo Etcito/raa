@@ -183,6 +183,8 @@ struct SharedFrame {
     atlas: Option<wgpu::TextureView>,
     atlas_generation: u64,
     history: Option<wgpu::TextureView>,
+    pyramid: Option<wgpu::TextureView>,
+    trace: Option<raa_sdf_trace::TraceHandle>,
     group1_layout: wgpu::BindGroupLayout,
     group1: Option<(u64, u64, wgpu::BindGroup)>,
     quality: GiQuality,
@@ -204,6 +206,8 @@ impl GiShared {
             atlas: None,
             atlas_generation: 0,
             history: None,
+            pyramid: None,
+            trace: None,
             group1_layout,
             group1: None,
             quality: GiQuality::default(),
@@ -224,6 +228,22 @@ impl GiShared {
     /// The GI history view, or `None` before the history pass created it.
     pub fn history_view(&self) -> Option<wgpu::TextureView> {
         self.0.borrow().history.clone()
+    }
+
+    /// The all-mip R32Float closest-depth pyramid view that the gi.screen pass recorded in the
+    /// current frame, or `None` when it did not record this frame and after `clear`.
+    ///
+    /// Handoff: the card "raa-gi: AreaShadowPart and the gi.area-shadow feature pass (order 43)
+    /// publishing the mask" calls `GiShared::pyramid_view` and `GiShared::trace`. Today
+    /// `pyramid_view` returns the view `GiShared::set_pyramid` stored, `clear` drops it, and
+    /// `trace` returns the handle `GiShared::set_trace` stored, which `clear` keeps.
+    pub fn pyramid_view(&self) -> Option<wgpu::TextureView> {
+        self.0.borrow().pyramid.clone()
+    }
+
+    /// The SDF trace scene attached by `GiHandle::set_trace_scene`, or `None` by default.
+    pub fn trace(&self) -> Option<raa_sdf_trace::TraceHandle> {
+        self.0.borrow().trace.clone()
     }
 
     /// The COMPUTE-visible group-1 layout of the GI compute modules.
@@ -320,6 +340,16 @@ impl GiShared {
         self.0.borrow_mut().history = history;
     }
 
+    /// Publishes the gi.screen depth-pyramid view for this frame, or drops it with `None`.
+    pub(crate) fn set_pyramid(&self, pyramid: Option<wgpu::TextureView>) {
+        self.0.borrow_mut().pyramid = pyramid;
+    }
+
+    /// Attaches the SDF trace scene, or detaches it with `None`.
+    pub(crate) fn set_trace(&self, trace: Option<raa_sdf_trace::TraceHandle>) {
+        self.0.borrow_mut().trace = trace;
+    }
+
     /// Publishes the quality.
     pub(crate) fn set_quality(&self, quality: GiQuality) {
         self.0.borrow_mut().quality = quality;
@@ -330,12 +360,14 @@ impl GiShared {
         self.0.borrow_mut().settings = settings;
     }
 
-    /// Drops the frame buffer, atlas, history view and cached compute group.
+    /// Drops the frame buffer, atlas, history and pyramid views and the cached compute group;
+    /// the attached trace scene stays.
     pub(crate) fn clear(&self) {
         let mut shared = self.0.borrow_mut();
         shared.frame = None;
         shared.atlas = None;
         shared.history = None;
+        shared.pyramid = None;
         shared.group1 = None;
     }
 }
@@ -400,3 +432,54 @@ fn uniform_entry(binding: u32, size: u64) -> wgpu::BindGroupLayoutEntry {
 }
 
 include!(concat!(env!("OUT_DIR"), "/gi_parts.rs"));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raa_core::testing::{skip, software_gpu};
+
+    fn one_pixel_view(gpu: &GpuContext) -> wgpu::TextureView {
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-gi pyramid test"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    #[test]
+    fn pyramid_and_trace_follow_their_setters_and_clear() {
+        let test = "pyramid_and_trace_follow_their_setters_and_clear";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        assert!(shared.pyramid_view().is_none());
+        assert!(shared.trace().is_none());
+
+        shared.set_pyramid(Some(one_pixel_view(&gpu)));
+        assert!(shared.pyramid_view().is_some());
+
+        let scene = Rc::new(RefCell::new(raa_sdf_trace::TraceScene::default()));
+        shared.set_trace(Some(Rc::clone(&scene)));
+        let trace = shared.trace().expect("the trace is attached");
+        assert!(Rc::ptr_eq(&trace, &scene));
+
+        shared.clear();
+        assert!(shared.pyramid_view().is_none());
+        assert!(shared.trace().is_some());
+
+        shared.set_trace(None);
+        assert!(shared.trace().is_none());
+    }
+}

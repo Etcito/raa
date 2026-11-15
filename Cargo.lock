@@ -878,7 +878,9 @@ dependencies = [
  "raa-math",
  "raa-pipeline",
  "raa-scene",
+ "raa-sdf-trace",
  "raa-shader",
+ "raa-taa",
  "raa-vg",
  "wgpu",
 ]
