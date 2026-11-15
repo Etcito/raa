@@ -1110,3 +1110,169 @@ fn restir_spatial_bindings_match_the_restir_layout() {
     assert!(textures <= 4, "{textures} storage textures");
     assert!(buffers <= 8, "{buffers} storage buffers");
 }
+
+/// The value of every float literal in `source` (WGSL comments stripped), in source order:
+/// decimal literals (`1.5`, `.5`, `2e-3`, `1f`) and hex floats (`0x1.fffffep+127f`). Integer
+/// literals (no fraction, exponent or `f`/`h` suffix) are skipped.
+fn wgsl_float_literals(source: &str) -> Vec<(String, f64)> {
+    let mut code = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut depth = 0u32;
+    while let Some(c) = chars.next() {
+        let next = chars.peek().copied();
+        if depth == 0 && c == '/' && next == Some('/') {
+            for skipped in chars.by_ref() {
+                if skipped == '\n' {
+                    break;
+                }
+            }
+            code.push('\n');
+        } else if c == '/' && next == Some('*') {
+            chars.next();
+            depth += 1;
+        } else if depth > 0 && c == '*' && next == Some('/') {
+            chars.next();
+            depth -= 1;
+            code.push(' ');
+        } else if depth == 0 {
+            code.push(c);
+        }
+    }
+
+    let bytes = code.as_bytes();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let digits = |from: usize, hex: bool| {
+        let mut end = from;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_digit() || (hex && bytes[end].is_ascii_hexdigit()))
+        {
+            end += 1;
+        }
+        end
+    };
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let starts = bytes[at].is_ascii_digit()
+            || (bytes[at] == b'.' && bytes.get(at + 1).is_some_and(u8::is_ascii_digit));
+        if !starts || (at > 0 && ident(bytes[at - 1])) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        let hex = bytes[at] == b'0' && matches!(bytes.get(at + 1), Some(b'x' | b'X'));
+        let body = if hex { at + 2 } else { at };
+        let mut end = digits(body, hex);
+        let whole_end = end;
+        let mut fraction = None;
+        if bytes.get(end) == Some(&b'.') {
+            let fraction_end = digits(end + 1, hex);
+            fraction = Some((end + 1, fraction_end));
+            end = fraction_end;
+        }
+        let marker: &[u8] = if hex { b"pP" } else { b"eE" };
+        let mut exponent = None;
+        if bytes.get(end).is_some_and(|b| marker.contains(b)) {
+            let sign = end + 1 + usize::from(matches!(bytes.get(end + 1), Some(b'+' | b'-')));
+            let exponent_end = digits(sign, false);
+            if exponent_end > sign {
+                exponent = Some((end + 1, exponent_end));
+                end = exponent_end;
+            }
+        }
+        let suffix = bytes.get(end).copied();
+        let float_suffix = matches!(suffix, Some(b'f' | b'h'));
+        if matches!(suffix, Some(b'f' | b'h' | b'i' | b'u')) {
+            end += 1;
+        }
+        if fraction.is_some() || exponent.is_some() || float_suffix {
+            let text = &code[start..end];
+            let value = if hex {
+                let mut mantissa = 0.0f64;
+                let mut scale = 0i32;
+                let fraction_digits = fraction.map_or(body..body, |(from, to)| from..to);
+                for index in (body..whole_end).chain(fraction_digits.clone()) {
+                    let digit = (bytes[index] as char).to_digit(16).unwrap_or(0);
+                    mantissa = mantissa * 16.0 + f64::from(digit);
+                }
+                scale -= 4 * fraction_digits.len() as i32;
+                if let Some((from, to)) = exponent {
+                    scale += code[from..to].parse::<i32>().unwrap_or(0);
+                }
+                mantissa * 2f64.powi(scale)
+            } else {
+                let number = if float_suffix {
+                    &text[..text.len() - 1]
+                } else {
+                    text
+                };
+                number
+                    .parse::<f64>()
+                    .unwrap_or_else(|e| panic!("float literal {text}: {e}"))
+            };
+            found.push((text.to_string(), value));
+        }
+        at = end.max(at + 1);
+    }
+    found
+}
+
+/// Regression of run 14797 (p4-gi-area-restir-render): Chrome's Tint refused
+/// `const RAA_RESTIR_F32_MAX: f32 = 3.40282347e38;` ("cannot be represented as 'f32'": the
+/// decimal lies above the largest finite f32, which naga silently rounds down), so the three
+/// ReSTIR shader modules, their pipelines and every frame's command buffer were invalid and
+/// the frame stayed black. Every float literal of the composed ReSTIR modules (the exact text
+/// the page compiles) lies inside the finite f32 range Tint accepts, and naga evaluates
+/// RAA_RESTIR_F32_MAX (written as the exact hex float) to f32::MAX.
+#[test]
+fn restir_float_literals_stay_inside_the_f32_range_tint_accepts() {
+    let modules = [
+        ("restir_common", restir_common_module_wgsl()),
+        ("restir_initial", restir_initial_module_wgsl()),
+        ("restir_temporal", restir_temporal_module_wgsl()),
+        ("restir_spatial", restir_spatial_module_wgsl()),
+    ];
+    let limit = f64::from(f32::MAX);
+    for (name, source) in &modules {
+        let literals = wgsl_float_literals(source);
+        assert!(literals.len() > 10, "{name}: float literals are found");
+        let outside: Vec<&(String, f64)> = literals
+            .iter()
+            .filter(|(_, value)| !value.is_finite() || value.abs() > limit)
+            .collect();
+        assert!(
+            outside.is_empty(),
+            "{name}: float literals outside the finite f32 range (Tint refuses them): {outside:?}"
+        );
+        assert!(
+            literals
+                .iter()
+                .any(|(text, value)| text == "0x1.fffffep+127f" && *value == limit),
+            "{name}: RAA_RESTIR_F32_MAX is the exact hex float of f32::MAX"
+        );
+    }
+    assert_eq!(
+        wgsl_float_literals("// 9e99\nlet a = vec3(3.40282347e38, .5, 2e-3f) + 7u + x2e5;"),
+        [
+            ("3.40282347e38".to_string(), 3.40282347e38),
+            (".5".to_string(), 0.5),
+            ("2e-3f".to_string(), 2e-3),
+        ],
+        "the scanner reads decimal literals, skips comments, integers and identifiers"
+    );
+
+    let reflection = Reflection::new(&restir_common_module_wgsl());
+    let (_, constant) = reflection
+        .module
+        .constants
+        .iter()
+        .find(|(_, constant)| constant.name.as_deref() == Some("RAA_RESTIR_F32_MAX"))
+        .unwrap_or_else(|| panic!("RAA_RESTIR_F32_MAX is declared"));
+    assert!(
+        matches!(
+            reflection.module.global_expressions[constant.init],
+            naga::Expression::Literal(naga::Literal::F32(value)) if value == f32::MAX
+        ),
+        "RAA_RESTIR_F32_MAX evaluates to f32::MAX"
+    );
+}

@@ -261,8 +261,10 @@ fn raa_restir_srgb_decode(c: vec3<f32>) -> vec3<f32> {
 // infinity is produced.
 
 const RAA_RESTIR_PI: f32 = 3.14159265359;
-// The largest finite f32: `x <= RAA_RESTIR_F32_MAX` is false for +infinity and NaN.
-const RAA_RESTIR_F32_MAX: f32 = 3.40282347e38;
+// The largest finite f32: `x <= RAA_RESTIR_F32_MAX` is false for +infinity and NaN. Written
+// exactly as a hex float: the decimal 3.40282347e38 lies above it, which naga rounds down but
+// Tint (Chrome) refuses ("cannot be represented as 'f32'"), invalidating every ReSTIR module.
+const RAA_RESTIR_F32_MAX: f32 = 0x1.fffffep+127f;
 // The GGX roughness floor of the target, ROUGHNESS_MIN of contract 'area-restir-cpu'.
 const RAA_RESTIR_ROUGHNESS_MIN: f32 = 0.0525;
 
