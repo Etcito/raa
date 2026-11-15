@@ -19,6 +19,9 @@ pub mod passes;
 #[path = "area_shadow/resources.rs"]
 mod resources;
 
+#[path = "area_shadow/restir_resources.rs"]
+mod restir_resources;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
