@@ -58,11 +58,16 @@ export interface AreaLightShadingDesc {
 /**
  * Area-light soft-shadow tier. `'auto'` (default): hero maps for the selected lights nearer
  * than `heroDistance`, blended to the cone over `band` metres, and the direct term faded out
- * over `band` metres before `fadeDistance` while GI is active. `'hero'`: perspective shadow
- * maps of the `heroCount` area lights with the largest screen coverage, filtered with PCSS
- * whose light size is the rectangle size; works with GI off. `'cone'`: soft visibility through
- * the GI voxel distance field (visibility 1 without GI). `'fade'`: no direct term while GI is
- * active, so the light reaches the scene through the GI volume only.
+ * over `band` metres before `fadeDistance` while GI is active. While GI is active, `'auto'`
+ * also uses the mid tier: one stratified shadow ray per pixel and light toward a 2x2 or 3x3
+ * cell of the rectangle, traced against the screen depth pyramid, the GI distance field and
+ * SDF trace content, combined with the analytic light by the ratio estimator and denoised
+ * spatially and temporally, for up to `stochasticCount` lights nearer than
+ * `stochasticDistance`, blended to the cone tier over `band` metres. `'hero'`: perspective
+ * shadow maps of the `heroCount` area lights with the largest screen coverage, filtered with
+ * PCSS whose light size is the rectangle size; works with GI off. `'cone'`: soft visibility
+ * through the GI voxel distance field (visibility 1 without GI). `'fade'`: no direct term
+ * while GI is active, so the light reaches the scene through the GI volume only.
  */
 export type AreaLightShadowTier = 'auto' | 'hero' | 'cone' | 'fade';
 
@@ -82,6 +87,17 @@ export interface AreaLightShadowsDesc {
   fadeDistance?: number;
   /** Metres, > 0 and <= heroDistance: width of the blend and fade bands. Default 5. */
   band?: number;
+  /**
+   * Integer in [0, 8]: area lights that get the mid tier while GI is active; 0 disables the
+   * tier. Default 4.
+   */
+  stochasticCount?: number;
+  /**
+   * Metres, > 0: beyond it, after the `band`, lights use the cone tier. Default 40.
+   */
+  stochasticDistance?: number;
+  /** Strata of the light rectangle: 4 (2x2) or 9 (3x3). Default 4. */
+  stochasticCells?: 4 | 9;
 }
 
 /**
@@ -99,6 +115,14 @@ export interface AreaLightShadows {
    * frame.
    */
   activeHeroes: number;
+  stochasticCount: number;
+  stochasticDistance: number;
+  stochasticCells: number;
+  /**
+   * Area lights that held a mid-tier slot in the last prepared frame; 0 before the first
+   * frame.
+   */
+  activeStochastic: number;
 }
 
 export interface Engine {
@@ -129,13 +153,21 @@ export interface Engine {
   /** Returns the current area-light shading mode as `{ mode }`. */
   areaLightShading(): AreaLightShadingDesc;
   /**
-   * Sets the engine-wide area-light soft-shadow tiers (defaults `tier: 'auto'`, `heroCount: 0`,
-   * `heroDistance: 25`, `fadeDistance: 80`, `band: 5`). A non-object argument throws
-   * `light.invalid_area_shadows` with `settings: must be an object`; a present key that is not
-   * a number throws `<key>: must be a number`; a `heroCount` that is not an integer in [0, 4]
-   * throws `heroCount: must be an integer in [0, 4] (got <value>)`. Every refusal changes nothing.
+   * Sets the engine-wide area-light soft-shadow tiers and the M6 stochastic mid tier (defaults
+   * `tier: 'auto'`, `heroCount: 0`, `heroDistance: 25`, `fadeDistance: 80`, `band: 5`,
+   * `stochasticCount: 4`, `stochasticDistance: 40`, `stochasticCells: 4`). A non-object
+   * argument throws `light.invalid_area_shadows` with `settings: must be an object`; a present
+   * key that is not a number throws `<key>: must be a number`; a `heroCount` that is not an
+   * integer in [0, 4] throws `heroCount: must be an integer in [0, 4] (got <value>)`; a
+   * `stochasticCount` that is not an integer in [0, 8] throws `stochasticCount: must be an
+   * integer in [0, 8] (got <value>)`; a `stochasticCells` other than 4 or 9 throws
+   * `stochasticCells: must be 4 or 9 (got <value>)`; a `stochasticDistance` that is not finite
+   * or not > 0 throws `stochasticDistance: must be finite and > 0 (got <value>)`. Every refusal
+   * changes nothing.
    */
   setAreaLightShadows(settings: AreaLightShadowsDesc): void;
-  /** Returns the current area-light soft-shadow tiers and the active hero count. */
+  /**
+   * Returns the current area-light soft-shadow tiers, the active hero and mid-tier slot counts.
+   */
   areaLightShadows(): AreaLightShadows;
 }

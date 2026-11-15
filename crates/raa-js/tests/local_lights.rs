@@ -6,7 +6,7 @@
 use raa_core::RaaError;
 use raa_lit::{
     AreaShadowSettings, AreaShadowTier, LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE,
-    MAX_LOCAL_LIGHTS,
+    MAX_LOCAL_LIGHTS, StochasticShadowSettings,
 };
 
 #[allow(dead_code)]
@@ -16,7 +16,8 @@ mod m28;
 use m28::{
     AREA_FORM_FACTOR_FEATURE_ID, AreaLightShading, INVALID_AREA_SHADOWS, INVALID_ARGUMENT,
     INVALID_DESC, LocalLightPatch, Patch, Properties, Raw, add, handle_arg, merge, parse,
-    parse_area_shading, parse_area_shadows, remove, srgb_to_linear, update,
+    parse_area_shading, parse_area_shadows, parse_stochastic_shadows, remove, srgb_to_linear,
+    update,
 };
 
 /// A native stand-in for a JS description object: a key is present exactly when it is
@@ -495,4 +496,82 @@ fn area_shadows_refusal_leaves_the_base_untouched() {
     assert_eq!(base.band, AreaShadowSettings::default().band);
     let kept = parse_area_shadows(&Mock::new(&[("band", Raw::Number(4.0))]), base).unwrap();
     assert_eq!((kept.hero_count, kept.band), (2, 4.0));
+}
+
+#[test]
+fn stochastic_shadows_empty_desc_returns_the_base_unchanged() {
+    let base = StochasticShadowSettings {
+        count: 2,
+        distance: 12.0,
+        cells: 9,
+    };
+    assert_eq!(parse_stochastic_shadows(&Mock::empty(), base), Ok(base));
+    assert_eq!(
+        parse_stochastic_shadows(&Mock::empty(), StochasticShadowSettings::standard()),
+        Ok(StochasticShadowSettings::standard())
+    );
+}
+
+#[test]
+fn stochastic_shadows_present_keys_merge_onto_the_default() {
+    let desc = Mock::new(&[
+        ("stochasticCount", Raw::Number(2.0)),
+        ("stochasticDistance", Raw::Number(12.5)),
+        ("stochasticCells", Raw::Number(9.0)),
+    ]);
+    let merged = parse_stochastic_shadows(&desc, StochasticShadowSettings::standard()).unwrap();
+    assert_eq!(
+        merged,
+        StochasticShadowSettings {
+            count: 2,
+            distance: 12.5,
+            cells: 9,
+        }
+    );
+}
+
+#[test]
+fn stochastic_shadows_refusals_carry_the_contract_message() {
+    let cases: [(Mock, &str); 5] = [
+        (
+            Mock::new(&[("stochasticCount", Raw::String("4".into()))]),
+            "stochasticCount: must be a number",
+        ),
+        (
+            Mock::new(&[("stochasticCount", Raw::Number(2.5))]),
+            "stochasticCount: must be an integer in [0, 8] (got 2.5)",
+        ),
+        (
+            Mock::new(&[("stochasticCount", Raw::Number(9.0))]),
+            "stochasticCount: must be an integer in [0, 8] (got 9)",
+        ),
+        (
+            Mock::new(&[("stochasticCells", Raw::Number(6.0))]),
+            "stochasticCells: must be 4 or 9 (got 6)",
+        ),
+        (
+            Mock::new(&[("stochasticDistance", Raw::Number(-1.0))]),
+            "stochasticDistance: must be finite and > 0 (got -1)",
+        ),
+    ];
+    for (desc, message) in cases {
+        let err =
+            parse_stochastic_shadows(&desc, StochasticShadowSettings::standard()).unwrap_err();
+        assert_eq!(code(&err), INVALID_AREA_SHADOWS);
+        assert_eq!(err.message(), message);
+    }
+}
+
+#[test]
+fn stochastic_shadows_accept_the_range_edges() {
+    for count in [0.0, 8.0] {
+        let desc = Mock::new(&[("stochasticCount", Raw::Number(count))]);
+        let merged = parse_stochastic_shadows(&desc, StochasticShadowSettings::standard()).unwrap();
+        assert_eq!(merged.count as f64, count);
+    }
+    for cells in [4.0, 9.0] {
+        let desc = Mock::new(&[("stochasticCells", Raw::Number(cells))]);
+        let merged = parse_stochastic_shadows(&desc, StochasticShadowSettings::standard()).unwrap();
+        assert_eq!(merged.cells as f64, cells);
+    }
 }

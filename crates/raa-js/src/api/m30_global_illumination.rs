@@ -263,11 +263,20 @@ mod web {
 
     /// Installs the feature after `m08_sky_ibl` and `m29_virtual_geometry` (file-name order). The
     /// m29 `VgHandle` and the m08 `IblHandle` are passed when present; `GiFeature::install`
-    /// returns the `GiHandle`, which is inserted with a default `GiApiState`.
+    /// returns the `GiHandle`, which is inserted with a default `GiApiState`. The engine's SDF
+    /// trace handle, inserted before `api::install_all`, is attached so the mid-tier rays also
+    /// see SDF content.
+    ///
+    /// Handoff: card 'raa-gi: GiShared depth-pyramid and trace-scene seams, screen pass publishes
+    /// its pyramid, raa-taa and raa-sdf-trace dependencies' supplies
+    /// [`GiHandle::set_trace_scene`] in `crates/raa-gi/src/feature.rs:288`.
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         let vg = ctx.features.get::<VgHandle>().cloned();
         let ibl = ctx.features.get::<IblHandle>().cloned();
         let handle = GiFeature::install(ctx.gpu, ctx.pipeline, ctx.lit, vg, ibl)?;
+        if let Some(trace) = ctx.features.get::<raa_sdf_trace::TraceHandle>().cloned() {
+            handle.set_trace_scene(Some(trace));
+        }
         ctx.features.insert(handle);
         ctx.features.insert(GiApiState::default());
         Ok(())

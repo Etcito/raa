@@ -27,7 +27,7 @@
 use raa_core::RaaError;
 use raa_lit::{
     AreaShadowSettings, AreaShadowTier, LightHandle, LocalLight, LocalLightKind, LocalLights,
-    MAX_LIGHT_HANDLE,
+    MAX_LIGHT_HANDLE, StochasticShadowSettings,
 };
 
 /// The refusal code of every malformed local-light description (S17).
@@ -322,6 +322,37 @@ pub(crate) fn parse_area_shadows(
     }
     if let Some(value) = area_number(source, "band")? {
         merged.band = value as f32;
+    }
+    merged.validate()
+}
+
+/// Parses the M6 stochastic mid-tier keys of an `AreaLightShadowsDesc` onto `base` (contract
+/// `area-light-shadows-stochastic-keys`). Absent keys keep the base field; the merged settings
+/// are validated as a whole by [`StochasticShadowSettings::validate`], so a refusal carries no
+/// partial settings and the caller's stored settings stay unchanged.
+pub(crate) fn parse_stochastic_shadows(
+    source: &impl Properties,
+    base: StochasticShadowSettings,
+) -> Result<StochasticShadowSettings, RaaError> {
+    let mut merged = base;
+    if let Some(value) = area_number(source, "stochasticCount")? {
+        if value.fract() != 0.0 || !(0.0..=8.0).contains(&value) {
+            return Err(area_shadows_invalid(format!(
+                "stochasticCount: must be an integer in [0, 8] (got {value})"
+            )));
+        }
+        merged.count = value as u32;
+    }
+    if let Some(value) = area_number(source, "stochasticDistance")? {
+        merged.distance = value as f32;
+    }
+    if let Some(value) = area_number(source, "stochasticCells")? {
+        if value != 4.0 && value != 9.0 {
+            return Err(area_shadows_invalid(format!(
+                "stochasticCells: must be 4 or 9 (got {value})"
+            )));
+        }
+        merged.cells = value as u32;
     }
     merged.validate()
 }
@@ -715,29 +746,44 @@ mod web {
             })
         }
 
-        /// Sets the engine-wide area-light soft-shadow tiers (contract
-        /// `area-light-shadows-api`). `settings` is an `AreaLightShadowsDesc`: absent keys keep
-        /// the current value and the merged state is validated as a whole. A non-object throws
-        /// `light.invalid_area_shadows` with `settings: must be an object`; every refusal
-        /// changes nothing. The setting persists until changed and applies to every view.
+        /// Sets the engine-wide area-light soft-shadow tiers and the M6 stochastic mid tier
+        /// (contracts `area-light-shadows-api` and `area-light-shadows-stochastic-keys`).
+        /// `settings` is an `AreaLightShadowsDesc`: absent keys keep the current value and the
+        /// merged state is validated as a whole before either setting changes. A non-object
+        /// throws `light.invalid_area_shadows` with `settings: must be an object`; a present key
+        /// that is not a number throws `<key>: must be a number`; `stochasticCount` must be an
+        /// integer in [0, 8], `stochasticCells` must be 4 or 9 and `stochasticDistance` must be
+        /// finite and > 0. Every refusal changes nothing. The setting persists until changed and
+        /// applies to every view.
+        ///
+        /// Handoff: card 'raa-lit: mid-tier selection wired into LitRenderer::prepare and
+        /// published through LitHandle' supplies [`LitRenderer::set_area_stochastic`],
+        /// [`LitRenderer::area_stochastic`] and [`LitRenderer::active_area_stochastic`] in
+        /// `crates/raa-lit/src/renderer.rs:912`.
         #[wasm_bindgen(js_name = setAreaLightShadows)]
         pub fn set_area_light_shadows(&mut self, settings: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| {
                 if !settings.is_object() || settings.is_null() || Array::is_array(&settings) {
                     return Err(area_shadows_invalid("settings: must be an object"));
                 }
-                let merged = parse_area_shadows(&ReflectSource(&settings), st.lit.area_shadows())?;
-                st.lit.set_area_shadows(merged)
+                let area = parse_area_shadows(&ReflectSource(&settings), st.lit.area_shadows())?;
+                let stochastic =
+                    parse_stochastic_shadows(&ReflectSource(&settings), st.lit.area_stochastic())?;
+                st.lit.set_area_shadows(area)?;
+                st.lit.set_area_stochastic(stochastic)?;
+                Ok(())
             })
         }
 
-        /// Returns the current area-light soft-shadow tiers as `AreaLightShadows`. `activeHeroes`
-        /// counts the area lights that had a hero shadow map in the last prepared frame and is
-        /// 0 before the first frame.
+        /// Returns the current area-light soft-shadow tiers and the M6 stochastic mid-tier
+        /// settings as `AreaLightShadows`. `activeHeroes` counts the area lights that had a hero
+        /// shadow map in the last prepared frame and `activeStochastic` the area lights holding a
+        /// mid-tier slot; both are 0 before the first frame.
         #[wasm_bindgen(js_name = areaLightShadows)]
         pub fn area_light_shadows(&mut self) -> Result<JsValue, JsValue> {
             self.with_state(|_, st| {
                 let settings = st.lit.area_shadows();
+                let stochastic = st.lit.area_stochastic();
                 let entries = [
                     ("tier", JsValue::from_str(settings.tier.as_str())),
                     (
@@ -756,6 +802,22 @@ mod web {
                     (
                         "activeHeroes",
                         JsValue::from_f64(f64::from(st.lit.active_area_heroes())),
+                    ),
+                    (
+                        "stochasticCount",
+                        JsValue::from_f64(f64::from(stochastic.count)),
+                    ),
+                    (
+                        "stochasticDistance",
+                        JsValue::from_f64(f64::from(stochastic.distance)),
+                    ),
+                    (
+                        "stochasticCells",
+                        JsValue::from_f64(f64::from(stochastic.cells)),
+                    ),
+                    (
+                        "activeStochastic",
+                        JsValue::from_f64(f64::from(st.lit.active_area_stochastic())),
                     ),
                 ];
                 let out = Object::new();

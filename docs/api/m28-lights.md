@@ -72,16 +72,22 @@ interface AreaLightShadowsDesc {
   heroDistance?: number          // metres, > 0, default 25
   fadeDistance?: number          // metres, > heroDistance, default 80
   band?: number                  // metres, > 0 and <= heroDistance, default 5
+  stochasticCount?: number       // integer 0..8, default 4 (0 disables the mid tier)
+  stochasticDistance?: number    // metres, > 0, default 40
+  stochasticCells?: 4 | 9        // strata of the light rectangle, default 4
 }
 interface AreaLightShadows {
   tier: AreaLightShadowTier; heroCount: number; heroDistance: number
   fadeDistance: number; band: number; activeHeroes: number
+  stochasticCount: number; stochasticDistance: number; stochasticCells: number
+  activeStochastic: number
 }
 ```
 
 Absent keys keep their current value. The merged settings are validated as a whole.
 The defaults are `{ tier: 'auto', heroCount: 0, heroDistance: 25, fadeDistance: 80,
-band: 5 }`; all distances are metres.
+band: 5, stochasticCount: 4, stochasticDistance: 40, stochasticCells: 4 }`; all
+distances are metres.
 
 - `'hero'`: perspective shadow maps of the `heroCount` area lights with the largest
   screen coverage (hysteresis 1.25), filtered with PCSS whose light size is the
@@ -92,19 +98,37 @@ band: 5 }`; all distances are metres.
   through the GI volume only.
 - `'auto'`: hero maps for the selected lights nearer than `heroDistance`, blended to
   the cone over `band` metres; the direct term is faded out over `band` metres before
-  `fadeDistance` while GI is active.
+  `fadeDistance` while GI is active. While GI is active with `localLightShadows` on,
+  `'auto'` also uses the mid tier: one stratified shadow ray per pixel and light toward
+  a 2x2 or 3x3 cell of the rectangle, traced against the screen depth pyramid, the GI
+  distance field and SDF trace content, combined with the analytic light by the ratio
+  estimator and denoised spatially and temporally, for up to `stochasticCount` lights
+  nearer than `stochasticDistance`, blended to the cone tier over `band` metres.
+
+`stochasticCount` is the number of area lights per view that get the mid tier; 0
+disables the tier. Beyond `stochasticDistance`, after the `band`, lights use the cone
+tier. `stochasticCells` is the strata of the light rectangle, 4 (2x2) or 9 (3x3). The
+mid tier requires GI active with `localLightShadows` on; without it the tier falls back
+to the cone.
 
 `activeHeroes` is the number of area lights that had a hero shadow map in the last
-prepared frame. It is 0 before the first frame.
+prepared frame. `activeStochastic` is the number of area lights that held a mid-tier
+slot in the last prepared frame. Both are 0 before the first frame.
 
 Refusals throw `light.invalid_area_shadows` and change nothing. A non-object argument
 (`null`, an array or a primitive) gives `settings: must be an object`. A present `tier`
 that is not one of the four strings gives `tier: must be 'auto', 'hero', 'cone' or
-'fade'`. A present `heroCount`, `heroDistance`, `fadeDistance` or `band` that is not a
-number (`undefined` and `null` included) gives `<key>: must be a number`. A `heroCount`
+'fade'`. A present `heroCount`, `heroDistance`, `fadeDistance`, `band`,
+`stochasticCount`, `stochasticDistance` or `stochasticCells` that is not a number
+(`undefined` and `null` included) gives `<key>: must be a number`. A `heroCount`
 number that is not an integer in [0, 4] gives `heroCount: must be an integer in [0, 4]
-(got <value>)`. A merged state that breaks the distance rules gives `<key>: <reason>`,
-for example `fadeDistance: must be finite and > heroDistance (got 10)`.
+(got <value>)`. A `stochasticCount` number that is not an integer in [0, 8] gives
+`stochasticCount: must be an integer in [0, 8] (got <value>)`. A `stochasticCells`
+number other than 4 or 9 gives `stochasticCells: must be 4 or 9 (got <value>)`, and a
+`stochasticDistance` that is not finite or not > 0 gives
+`stochasticDistance: must be finite and > 0 (got <value>)`. A merged state that breaks
+the distance rules gives `<key>: <reason>`, for example
+`fadeDistance: must be finite and > heroDistance (got 10)`.
 
 ## Lifecycle
 
