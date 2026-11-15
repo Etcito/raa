@@ -6,6 +6,7 @@
 //! M7 reservoir histories.
 
 mod history;
+mod resources;
 mod shaders;
 
 pub use history::{HistoryPair, HistoryState};
