@@ -11,13 +11,13 @@ const ORBIT_TARGET = [2.78, 2.73, 0];
 const ORBIT_DISTANCE = 8.0;
 const YAW_STEP = 0.002;
 const AREA_SHADOW_ORDER = 43;
-const SDF_SUBJECTS = [
+export const SDF_SUBJECTS = [
   { name: 'sdf-sphere', min: [3.65, 0, 0.65], max: [4.75, 1.1, 1.75] },
   { name: 'sdf-box', min: [0.75, 0, 3.85], max: [1.65, 1.0, 4.75] },
 ];
 // The SDF occluders passed to programBytes of examples/trace-first-pixel/scene.js: a sphere at the front
 // right and a box at the back left of the Cornell floor, each with its own flat colour.
-const SDF_SCENE = {
+export const SDF_SCENE = {
   box: { center: [1.2, 0.5, 4.3], halfExtents: [0.45, 0.5, 0.45], color: [0.8, 0.8, 0.8] },
   sphere: { center: [4.2, 0.55, 1.2], radius: 0.55, color: [0.8, 0.8, 0.8] },
 };
@@ -49,13 +49,17 @@ const BASE_FACTS = ['snapshot:settings', 'snapshot:stats', 'runtime:ready', 'ass
 const SDF_FACTS = [...BASE_FACTS, 'assertion:sdf-content'];
 export const factNames = ['gi-active', 'area-stochastic', 'area-shadow-pass', 'sdf-content'];
 
-const selectionOf = row => row.sdf
-  ? { camera: CORNELL_SELECTION.camera, subjects: [...CORNELL_SELECTION.subjects, ...SDF_SUBJECTS] }
-  : CORNELL_SELECTION;
+export function selectionOf(row) {
+  return row.sdf
+    ? { camera: CORNELL_SELECTION.camera, subjects: [...CORNELL_SELECTION.subjects, ...SDF_SUBJECTS] }
+    : CORNELL_SELECTION;
+}
+export const MOVING_HELD = 'camera swaying by at most 0.02 rad about the box centre';
+export const SDF_HELD = 'an SDF sphere at the front right and an SDF box at the back left, drawn by the SDF trace pass with their own shading';
 const heldOf = row => {
   const held = [...CORNELL_HELD, `area-light shadow tier auto with stochasticCount 1 and stochasticCells ${row.cells}`];
-  if (row.motion) held.push('camera swaying by at most 0.02 rad about the box centre');
-  if (row.sdf) held.push('an SDF sphere at the front right and an SDF box at the back left, drawn by the SDF trace pass with their own shading');
+  if (row.motion) held.push(MOVING_HELD);
+  if (row.sdf) held.push(SDF_HELD);
   return held;
 };
 const variants = ROWS.map(row => ({
@@ -118,28 +122,32 @@ export function frame(engine, timeMs, variant, state) {
 
 const check = (name, passed, detail) => ({ name, passed: passed === true, detail });
 
-// `observe` reports the four assertions of factNames, in order: gi-active with the rules of lighting.js (the
-// volume at 96/5), area-stochastic from areaLightShadows() against the variant, area-shadow-pass from the
-// gi.area-shadow pass row and sdf-content from traceStats().
-export async function observe(engine, variant, state) {
+/**
+ * `areaAssertions(engine, variant, tierCheck)` returns the four assertions of factNames in order: gi-active
+ * with the rules of lighting.js (the volume at 96/5), `tierCheck` with its passed coerced to
+ * `passed === true`, area-shadow-pass from the gi.area-shadow pass row and sdf-content from traceStats().
+ * Today it reads giStats(), passes() and traceStats(), and `variant.sdf` selects the expected trace
+ * instance count.
+ * Handoff: gi page: area-restir scene rows of the ReSTIR ultra tier on the Cornell box calls
+ * `areaAssertions(engine: object, variant: object, tierCheck: { name: string, passed: boolean, detail: string })
+ * -> Array<{ name: string, passed: boolean, detail: string }>` exported by
+ * examples/global-illumination/scenes/area-stochastic.js:138 areaAssertions, and `selectionOf(row: object)`,
+ * `build(engine, lib, variant)` and `frame(engine, timeMs, variant, state)`; it reads the exported constants
+ * `SDF_SUBJECTS`, `MOVING_HELD` and `SDF_HELD`.
+ */
+export function areaAssertions(engine, variant, tierCheck) {
   const stats = engine.giStats();
-  const area = engine.areaLightShadows();
-  const wanted = variant.areaShadows;
   const rows = engine.passes().filter(pass => pass.name === 'gi.area-shadow');
   const row = rows[0];
   const trace = engine.traceStats();
   const bytes = VOLUME_BYTES['96/5'];
-  const assertions = [
+  return [
     check('gi-active',
       stats.active === true && stats.pendingRebuild === false && stats.framesSinceRebuild >= 240
         && stats.allocatedBytes >= bytes && stats.voxelizedForwardInstances >= 1,
       `active ${stats.active}, pendingRebuild ${stats.pendingRebuild}, framesSinceRebuild ${stats.framesSinceRebuild}, `
         + `allocatedBytes ${stats.allocatedBytes} (expected at least ${bytes}), voxelizedForwardInstances ${stats.voxelizedForwardInstances}`),
-    check('area-stochastic',
-      area.tier === 'auto' && area.heroCount === 0 && area.stochasticCount === 1
-        && area.stochasticCells === wanted.stochasticCells && area.activeStochastic === 1,
-      `tier ${area.tier} (expected auto), heroCount ${area.heroCount} (expected 0), stochasticCount ${area.stochasticCount} (expected 1), `
-        + `stochasticCells ${area.stochasticCells} (expected ${wanted.stochasticCells}), activeStochastic ${area.activeStochastic} (expected 1)`),
+    check(tierCheck.name, tierCheck.passed, tierCheck.detail),
     check('area-shadow-pass',
       rows.length === 1 && row.enabled === true && row.order === AREA_SHADOW_ORDER && row.role === 'pass',
       `gi.area-shadow rows ${rows.length} (expected 1), enabled ${row?.enabled} (expected true), `
@@ -147,7 +155,19 @@ export async function observe(engine, variant, state) {
     check('sdf-content', trace.instances === (variant.sdf ? 2 : 0),
       `trace instances ${trace.instances} (expected ${variant.sdf ? 2 : 0})`),
   ];
-  return { instances: state.instances, assertions, edits: [] };
+}
+
+// `observe` reports the four assertions of factNames in order, built with areaAssertions; its own
+// area-stochastic assertion comes from areaLightShadows() against the variant.
+export async function observe(engine, variant, state) {
+  const area = engine.areaLightShadows();
+  const wanted = variant.areaShadows;
+  const tierCheck = check('area-stochastic',
+    area.tier === 'auto' && area.heroCount === 0 && area.stochasticCount === 1
+      && area.stochasticCells === wanted.stochasticCells && area.activeStochastic === 1,
+    `tier ${area.tier} (expected auto), heroCount ${area.heroCount} (expected 0), stochasticCount ${area.stochasticCount} (expected 1), `
+      + `stochasticCells ${area.stochasticCells} (expected ${wanted.stochasticCells}), activeStochastic ${area.activeStochastic} (expected 1)`);
+  return { instances: state.instances, assertions: areaAssertions(engine, variant, tierCheck), edits: [] };
 }
 
 // Nothing to wait for in this stage: the GI settle gate of the runtime waits for giStats() on GI rows.
