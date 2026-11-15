@@ -14,6 +14,7 @@
 //! resolved into `hdr.dst()`).
 
 mod area_shadow;
+mod area_stochastic;
 mod contributor;
 mod editor;
 pub use editor::WireframeMode;
@@ -58,6 +59,10 @@ pub use area_shadow::{
     AreaShadowCamera, AreaShadowSettings, AreaShadowTier, HERO_FOV_Y_RAD, HERO_LAYER_BASE,
     HERO_NEAR, HeroSelector, MAX_HERO_LIGHTS, hero_view_proj, rect_distance, screen_coverage,
     tier_weights,
+};
+pub use area_stochastic::{
+    AreaStochasticFrame, StochasticShadowSettings, stochastic_weight, table_cells, table_limit,
+    table_slot, write_table,
 };
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
