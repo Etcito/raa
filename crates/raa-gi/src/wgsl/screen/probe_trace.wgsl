@@ -90,14 +90,15 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         }
     }
 
-    // The volume is coarse near its surfaces, so start clear of the local voxel.
+    // The volume is coarse near its surfaces, so start clear of the local voxel. A ray that runs
+    // out of steps next to a surface takes its radiance; only a miss keeps the sky.
     var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, 0.0).rgb;
     var t = RAA_GI_PROBE_MISS_DISTANCE;
     let level_count = raa_gi_volume_params.level_count;
     if level_count > 0u {
         let level = min(raa_gi_level_at(world, 0u), level_count - 1u);
         let voxel = raa_gi_volume_params.levels[level].w;
-        let hit = raa_gi_trace(
+        let hit = raa_gi_gather(
             world + normal * voxel * 1.5,
             direction,
             voxel * 0.5,

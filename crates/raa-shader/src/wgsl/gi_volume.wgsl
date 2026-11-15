@@ -105,6 +105,31 @@ fn raa_gi_visibility(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, 
     return select(1.0, 0.0, raa_gi_trace(origin, dir, start, max_t, max_steps, 0.85).hit);
 }
 
+// `raa_gi_trace` for gathering light: a ray that ran out of steps next to a surface takes that
+// surface's radiance instead of the sky. When the trace misses before `max_t` at a point still in
+// the volume whose sampled distance is at most 3 voxels of its level (raa-gi volume_write.wgsl's
+// COLOR_BAND, where a texel holds its nearest surface's radiance), the result is a hit there at
+// the trace's t; a ray leaving the volume or reaching `max_t` stays a miss. Inside a closed room
+// grazing and corner rays exhaust the budget (the steps shrink to 0.6 voxel near walls), and
+// taking the sky for them lost part of every bounce. Visibility keeps `raa_gi_trace`: an
+// exhausted shadow ray must not darken.
+fn raa_gi_gather(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, hit_voxels: f32) -> RaaGiHit {
+    let hit = raa_gi_trace(origin, dir, start, max_t, max_steps, hit_voxels);
+    if hit.hit || hit.t >= max_t {
+        return hit;
+    }
+    let p = origin + dir * hit.t;
+    let level = raa_gi_level_at(p, 0u);
+    if level >= raa_gi_volume_params.level_count {
+        return hit;
+    }
+    let s = raa_gi_sample(p, level);
+    if s.a <= 3.0 * raa_gi_volume_params.levels[level].w {
+        return RaaGiHit(true, hit.t, s.rgb);
+    }
+    return hit;
+}
+
 // The start of a ray from `world` toward a light that clears its own surface by moving along the
 // ray first, at most `max_along`, and only the rest along the normal. Returns the world-space
 // start in xyz and the distance moved along `dir` in w, which the caller subtracts from max_t.

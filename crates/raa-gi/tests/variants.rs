@@ -217,16 +217,26 @@ fn voxel_light_area_uses_the_shared_form_factor() {
     let source = include_str!("../src/wgsl/voxel_light.wgsl");
     let branch = source
         .split_once("light.kind == 3u")
+        .and_then(|(_, rest)| rest.split_once("light.kind != 2u"))
         .expect("the area branch")
-        .1;
+        .0;
+    // The bounce source is the forward direct light U x V_far: the form factor at the voxel
+    // centre and the forward cone started on the light path.
     for call in [
-        "raa_area_form_factor(light, origin, normal)",
+        "raa_area_form_factor(light, center, normal)",
         "raa_area_radiance(light)",
         "raa_area_window(distance, light.position_range.w)",
         "raa_area_basis(",
+        "raa_gi_cone_visibility(",
+        "raa_gi_ray_origin(",
     ] {
         assert!(branch.contains(call), "the area branch calls {call}");
     }
+    assert!(
+        !branch.contains("raa_gi_visibility("),
+        "the binary ray is gone"
+    );
+    assert!(source.contains("raa_gi_gather("), "the indirect gather");
     assert!(!branch.contains("up0"), "the inline basis is gone");
     assert!(
         !branch.contains("max(distance * distance, 0.04)"),

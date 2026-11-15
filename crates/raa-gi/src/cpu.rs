@@ -483,6 +483,42 @@ impl CpuVolume {
         CpuHit { hit, t, radiance }
     }
 
+    /// [`CpuVolume::trace`] for gathering light: a miss before `max_t` whose end point is still in
+    /// the volume ([`CpuVolume::level_at`] from level 0) with a sampled distance of at most 3
+    /// voxels of that level (`COLOR_BAND` of `volume_write.wgsl`) is a hit at the trace's `t`
+    /// with the sampled radiance, so a ray that ran out of steps next to a surface takes that
+    /// surface's radiance instead of the sky. A hit, a ray leaving the volume or one reaching
+    /// `max_t` is returned as traced. CPU twin of `raa_gi_gather` in
+    /// `crates/raa-shader/src/wgsl/gi_volume.wgsl`.
+    pub fn gather(
+        &self,
+        origin: [f32; 3],
+        dir: [f32; 3],
+        start: f32,
+        max_t: f32,
+        max_steps: u32,
+        hit_voxels: f32,
+    ) -> CpuHit {
+        let hit = self.trace(origin, dir, start, max_t, max_steps, hit_voxels);
+        if hit.hit || hit.t >= max_t {
+            return hit;
+        }
+        let p = [0, 1, 2].map(|i| origin[i] + dir[i] * hit.t);
+        let level = self.level_at(p, 0);
+        if level >= self.levels.len() {
+            return hit;
+        }
+        let s = self.sample(p, level);
+        if s[3] <= 3.0 * self.levels[level][3] {
+            return CpuHit {
+                hit: true,
+                t: hit.t,
+                radiance: [s[0], s[1], s[2]],
+            };
+        }
+        hit
+    }
+
     /// 0 on a [`CpuVolume::trace`] hit with `hit_voxels` 0.85, otherwise 1. An empty volume always
     /// answers 1. Port of `environment.wgsl:216-219`.
     pub fn visibility(
@@ -578,7 +614,8 @@ impl CpuVolume {
     }
 }
 
-/// Result of [`CpuVolume::trace`]: whether a surface was hit at `t`, and its radiance.
+/// Result of [`CpuVolume::trace`] and [`CpuVolume::gather`]: whether a surface was hit at `t`,
+/// and its radiance.
 pub struct CpuHit {
     pub hit: bool,
     pub t: f32,

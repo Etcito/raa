@@ -1,6 +1,9 @@
 // Voxel lighting of the GI volume (share 3): one relit clipmap level per frame. Direct light is
-// shadowed through the volume itself, indirect light gathers three cosine rays per voxel and the
-// result blends into the radiance stored by earlier updates.
+// shadowed through the volume itself (an area light by the forward pass's form factor at the voxel
+// centre and its soft cone, so the bounce source equals the direct light), indirect light gathers
+// three cosine rays per voxel with `raa_gi_gather` (a ray that runs out of steps next to a surface
+// takes that surface's radiance, not the sky) and the result blends into the radiance stored by
+// earlier updates.
 //
 // Adapted from solstice@7e465b5, crates/solstice-render/shaders/gi/voxel_light.wgsl:12-107 and
 // crates/solstice-render/shaders/common/math.wgsl:7-77. MIT License
@@ -98,10 +101,12 @@ fn raa_gi_cosine_sample(u: vec2<f32>, basis: mat3x3<f32>) -> vec3<f32> {
     return basis * vec3<f32>(r * cos(phi), r * sin(phi), sqrt(max(0.0, 1.0 - u.x)));
 }
 
-// S11 per-kind local-light irradiance at `origin` with surface `normal`: point window and
-// falloff and spot cone times the cosine, the area light's diffuse polygon form factor (the
-// direct light's energy), directional without attenuation, each with the volume visibility.
-fn raa_gi_local_light(light: LightGpu, origin: vec3<f32>, normal: vec3<f32>, voxel: f32) -> vec3<f32> {
+// S11 per-kind local-light irradiance of the voxel at `center` with surface `normal`: point window
+// and falloff and spot cone times the cosine and directional without attenuation, each evaluated
+// 1.5 voxels along the normal with the volume visibility; the area light's diffuse polygon form
+// factor at `center` with the forward cone's soft visibility.
+fn raa_gi_local_light(light: LightGpu, center: vec3<f32>, normal: vec3<f32>, voxel: f32) -> vec3<f32> {
+    let origin = center + normal * voxel * 1.5;
     let travel = light.direction_cos_outer.xyz;
     var direction = -travel;
     var distance = 0.0;
@@ -124,24 +129,32 @@ fn raa_gi_local_light(light: LightGpu, origin: vec3<f32>, normal: vec3<f32>, vox
             }
         }
     } else if light.kind == 3u {
-        // One-sided emission along +travel. The representative point uses the same
-        // `raa_area_basis` as the direct light, and the bounce uses the same diffuse polygon
-        // form factor, so it carries the energy of the direct light.
-        if dot(origin - light.position_range.xyz, travel) <= 0.0 { return vec3<f32>(0.0); }
+        // One-sided emission along +travel. The one-sided test, the representative point (the
+        // direct light's `raa_area_basis`), the distance, the diffuse polygon form factor and the
+        // window are taken at the voxel centre, the surface the forward pass shades: from the
+        // ray origin 1.5 voxels (0.6 m at level 1) off it they missed the direct light's energy.
+        if dot(center - light.position_range.xyz, travel) <= 0.0 { return vec3<f32>(0.0); }
         let basis = raa_area_basis(travel);
-        let offset = origin - light.position_range.xyz;
+        let offset = center - light.position_range.xyz;
         let half_extent = vec2<f32>(max(light.width, 0.0), max(light.height, 0.0)) * 0.5;
         let representative = light.position_range.xyz
             + basis[0] * clamp(dot(offset, basis[0]), -half_extent.x, half_extent.x)
             + basis[1] * clamp(dot(offset, basis[1]), -half_extent.y, half_extent.y);
-        let to_light = representative - origin;
+        let to_light = representative - center;
         distance = length(to_light);
         if distance == 0.0 || distance >= light.position_range.w { return vec3<f32>(0.0); }
         direction = to_light / distance;
-        let open = raa_gi_visibility(origin, direction, voxel, max(distance - 3.0 * voxel, 0.0), 24u);
+        // The forward cone of `raa_slot_local_visibility`: it starts on the path to the light
+        // (clearing the own surface along the ray, never shifted sideways into a neighbouring
+        // block) with the rectangle's angular size, so the injection is U x V_far.
+        let start = raa_gi_ray_origin(center, normal, direction, 1.5 * voxel, 4.0 * voxel);
+        let size = sqrt(max(light.width, 0.0) * max(light.height, 0.0));
+        let tan_half = clamp(0.5 * size / max(distance, 1e-3), 0.01, 1.0);
+        let max_t = max(distance - 3.0 * voxel - start.w, 0.0);
+        let open = raa_gi_cone_visibility(start.xyz, direction, voxel, max_t, 24u, tan_half);
         // Irradiance = pi x radiance x form factor: the direct light's diffuse energy, bounced.
         return raa_area_radiance(light)
-            * (RAA_GI_PI * raa_area_form_factor(light, origin, normal)
+            * (RAA_GI_PI * raa_area_form_factor(light, center, normal)
                 * raa_area_window(distance, light.position_range.w) * open);
     } else if light.kind != 2u {
         return vec3<f32>(0.0);
@@ -194,10 +207,11 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
     // Local lights, with visibility so that walls contain them.
     let light_count = min(raa_gi_frame.counts.x, MAX_LOCAL_LIGHTS);
     for (var i = 0u; i < light_count; i++) {
-        irradiance += raa_gi_local_light(raa_local_lights[i], origin, normal, voxel);
+        irradiance += raa_gi_local_light(raa_local_lights[i], center, normal, voxel);
     }
 
-    // Indirect: light from other surfaces and the sky, three cosine rays from the R2 sequence.
+    // Indirect: light from other surfaces and the sky, three cosine rays from the R2 sequence. A
+    // ray that runs out of steps next to a surface takes its radiance; only a miss takes the sky.
     let basis = raa_gi_orthonormal_basis(normal);
     let seed = vec2<f32>(
         raa_gi_hash_to_unit(local_index * 7u + level),
@@ -209,7 +223,7 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
             raa_gi_r2_sequence(raa_gi_light.updates * RAA_GI_INDIRECT_RAYS + r, seed),
             basis,
         );
-        let hit = raa_gi_trace(origin, direction, voxel, 320.0, 32u, 0.85);
+        let hit = raa_gi_gather(origin, direction, voxel, 320.0, 32u, 0.85);
         let env = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, 0.0).rgb;
         gathered += select(env, hit.radiance, hit.hit);
     }

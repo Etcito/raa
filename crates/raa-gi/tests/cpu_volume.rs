@@ -535,3 +535,53 @@ fn cone_visibility_soft_rule_on_plane() {
         previous = Some(got);
     }
 }
+
+/// `gather` on the `trace.json` plane (z 2.0 m, voxel 0.25 m, texel a = |z_centre - 2.0| with
+/// centres at 0.25 k + 0.125 m, colour (1, 0.5, 0.25) where a <= 3 voxels), walked by hand under
+/// the trace rule (step max(d - 0.125, 0.15), hit d < 0.2125 while approaching) and the gather
+/// band d <= 3 voxels = 0.75 m at the point where the trace stopped.
+/// - Toward the plane from z 0.5 along +z, start 0.25, max_steps 1: the one sample (t 0.25,
+///   z 0.75, d = mix(1.375, 1.125, 0.5) = 1.25) is the first of its level, so not approaching,
+///   and steps 1.125 to t 1.375, where the budget ends: `trace` misses at t 1.375. z 1.875 is
+///   the texel centre k = 7 (local 7.5 voxels, inside the level) with d 0.125 <= 0.75 and the
+///   band colour, so `gather` hits at t 1.375 with (1, 0.5, 0.25).
+/// - Parallel to the plane at z 0.75 from x 0.5 along +x, max_steps 1: the same d 1.25 and step
+///   stop it at t 1.375 (x 1.875, inside) 5 voxels from the plane, so `gather` misses.
+/// - Parallel at z 1.5 from x 3.0 along +x, max_steps 64: the sample at x 3.25 (local 13,
+///   d = mix(0.625, 0.375, 0.5) = 0.5, not approaching) steps 0.375 to t 0.625, x 3.625 =
+///   local 14.5, outside (1.5, 14.5), so the ray leaves the volume; d 0.5 there lies inside the
+///   band, yet `gather` misses at t 0.625.
+/// - Toward the plane with max_steps 64: the second sample (t 1.375, d 0.125 <= 1.25 and
+///   < 0.2125) is a trace hit, and `gather` returns it unchanged.
+#[test]
+fn gather_counts_exhausted_rays_near_a_surface_as_hits() {
+    let volume = plane_volume(&fixture("trace.json"));
+    let colour = [1.0, 0.5, 0.25];
+    let (origin, dir) = ([2.0, 2.0, 0.5], [0.0, 0.0, 1.0]);
+
+    let traced = volume.trace(origin, dir, 0.25, 10.0, 1, 0.85);
+    assert!(!traced.hit, "the step budget ends before the plane");
+    assert_eq!(traced.t, 1.375);
+    let gathered = volume.gather(origin, dir, 0.25, 10.0, 1, 0.85);
+    assert!(
+        gathered.hit,
+        "an exhausted ray beside the plane takes its radiance"
+    );
+    assert_eq!(gathered.t, traced.t);
+    assert_close3(gathered.radiance, colour);
+
+    let far = volume.gather([0.5, 2.0, 0.75], [1.0, 0.0, 0.0], 0.25, 10.0, 1, 0.85);
+    assert!(!far.hit, "stopped 5 voxels from the plane");
+    assert_eq!(far.t, 1.375);
+
+    let leaving = volume.gather([3.0, 2.0, 1.5], [1.0, 0.0, 0.0], 0.25, 10.0, 64, 0.85);
+    assert!(!leaving.hit, "left the volume inside the band");
+    assert_eq!(leaving.t, 0.625);
+
+    let traced = volume.trace(origin, dir, 0.25, 10.0, 64, 0.85);
+    let gathered = volume.gather(origin, dir, 0.25, 10.0, 64, 0.85);
+    assert!(traced.hit && gathered.hit, "a normal hit");
+    assert_eq!(gathered.t, traced.t);
+    assert_eq!(gathered.radiance, traced.radiance);
+    assert_close3(gathered.radiance, colour);
+}
