@@ -163,5 +163,26 @@
     "after": [
       "p4-gi-lighting-render"
     ]
+  },
+  {
+    "name": "p4-taa-lookdev-build",
+    "command": "bash scripts/build-lookdev.sh",
+    "timeout_s": 1800
+  },
+  {
+    "name": "p4-taa-lookdev-check",
+    "command": "env LOOKDEV_DIST=dist/lookdev node --test examples/lookdev/test/m31-taa.test.mjs",
+    "timeout_s": 120,
+    "after": [
+      "p4-taa-lookdev-build"
+    ]
+  },
+  {
+    "name": "p4-taa-lookdev-render",
+    "command": "node scripts/lookdev-capture.mjs --milestone m31 --judge --ref-prefix /refs/",
+    "timeout_s": 1800,
+    "after": [
+      "p4-taa-lookdev-check"
+    ]
   }
 ]
