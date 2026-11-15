@@ -235,11 +235,133 @@ pub fn screen_coverage(camera: &AreaShadowCamera, position: Vec3, range: f32) ->
 /// Coverage ratio a waiting light must exceed to replace the weakest hero.
 const HERO_SWAP_RATIO: f32 = 1.25;
 
-/// One area light that may hold a hero slot in the current call.
+/// One area light that may hold a slot in the current call.
 #[derive(Copy, Clone, Debug)]
-struct Candidate {
-    handle: LightHandle,
-    coverage: f32,
+pub(crate) struct Candidate {
+    pub(crate) handle: LightHandle,
+    pub(crate) coverage: f32,
+}
+
+/// Slot assignment shared by the hero selector and the mid-tier stochastic selector.
+///
+/// Handoff: `SlotAssigner` in `crates/raa-lit/src/area_shadow.rs` is attached by card
+/// 'raa-lit: StochasticSelector picks the mid-tier area lights and writes the slot table', which
+/// calls `SlotAssigner::new`, `SlotAssigner::assign`, `SlotAssigner::slots` and
+/// `SlotAssigner::active` with `Candidate` values. Today `assign` takes candidates already
+/// sorted by coverage descending then handle ascending, releases every slot past the clamped
+/// `limit` or whose handle is no longer a candidate, fills the lowest free index below the limit
+/// with the best unheld candidate, and performs at most one swap when the best unheld
+/// candidate's coverage exceeds the weakest held slot's by more than `HERO_SWAP_RATIO`; it
+/// allocates nothing.
+#[derive(Debug)]
+pub(crate) struct SlotAssigner<const N: usize> {
+    slots: [Option<LightHandle>; N],
+    coverages: [f32; N],
+}
+
+impl<const N: usize> SlotAssigner<N> {
+    /// Creates an empty assigner: every slot is `None` and every coverage is 0.0.
+    pub(crate) fn new() -> SlotAssigner<N> {
+        SlotAssigner {
+            slots: [None; N],
+            coverages: [0.0; N],
+        }
+    }
+
+    /// Number of occupied slots after the last [`SlotAssigner::assign`].
+    pub(crate) fn active(&self) -> u32 {
+        self.slots.iter().filter(|slot| slot.is_some()).count() as u32
+    }
+
+    /// The slot handles of the last [`SlotAssigner::assign`].
+    pub(crate) fn slots(&self) -> &[Option<LightHandle>; N] {
+        &self.slots
+    }
+
+    /// The index of the slot holding `handle`, or `None` when it holds no slot.
+    pub(crate) fn slot_of(&self, handle: LightHandle) -> Option<usize> {
+        self.slots().iter().position(|held| *held == Some(handle))
+    }
+
+    /// Assigns the slots of one call.
+    ///
+    /// `candidates` are already sorted by the caller, coverage descending then handle
+    /// ascending; `limit` is clamped to `N`. The call releases the slots whose light is no
+    /// longer a candidate or whose index is past the limit, fills the free slots below the limit
+    /// with the best unheld candidates, and performs at most one swap when the best unheld
+    /// candidate's coverage exceeds the weakest held slot's by more than [`HERO_SWAP_RATIO`].
+    /// Allocates nothing.
+    pub(crate) fn assign(&mut self, candidates: &[Candidate], limit: usize) {
+        let limit = limit.min(N);
+
+        // Release the slots whose light is no longer a candidate or whose index is past the limit.
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            let kept = index < limit
+                && slot.is_some_and(|handle| {
+                    candidates
+                        .iter()
+                        .any(|candidate| candidate.handle == handle)
+                });
+            if !kept {
+                *slot = None;
+            }
+        }
+
+        // Fill the free slots below the limit, lowest index first, best candidate first.
+        for index in 0..limit {
+            if matches!(self.slots.get(index), Some(None))
+                && let Some(pick) = self.unheld(candidates)
+                && let Some(slot) = self.slots.get_mut(index)
+            {
+                *slot = Some(pick.handle);
+            }
+        }
+
+        // Refresh the coverages from the candidates of this call.
+        for (slot, coverage) in self.slots.iter().zip(self.coverages.iter_mut()) {
+            *coverage = slot
+                .and_then(|handle| {
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.handle == handle)
+                })
+                .map_or(0.0, |candidate| candidate.coverage);
+        }
+
+        // With every slot below the limit taken, the best waiting light may replace the weakest
+        // hero, at most once per call and only when its coverage exceeds the hero's by the ratio.
+        if let Some(challenger) = self.unheld(candidates)
+            && let Some((index, weakest)) = self.weakest(limit)
+            && challenger.coverage > HERO_SWAP_RATIO * weakest
+        {
+            if let Some(slot) = self.slots.get_mut(index) {
+                *slot = Some(challenger.handle);
+            }
+            if let Some(coverage) = self.coverages.get_mut(index) {
+                *coverage = challenger.coverage;
+            }
+        }
+    }
+
+    /// The best candidate that holds no slot, in coverage-descending then handle-ascending order.
+    fn unheld(&self, candidates: &[Candidate]) -> Option<Candidate> {
+        candidates
+            .iter()
+            .copied()
+            .find(|candidate| !self.slots.contains(&Some(candidate.handle)))
+    }
+
+    /// The occupied slot below `limit` with the lowest coverage; ties go to the higher handle.
+    fn weakest(&self, limit: usize) -> Option<(usize, f32)> {
+        self.slots
+            .iter()
+            .zip(self.coverages.iter())
+            .take(limit)
+            .enumerate()
+            .filter_map(|(index, (slot, coverage))| slot.map(|handle| (index, handle, *coverage)))
+            .min_by(|a, b| a.2.total_cmp(&b.2).then(b.1.cmp(&a.1)))
+            .map(|(index, _, coverage)| (index, coverage))
+    }
 }
 
 /// Chooses which area lights hold the hero shadow slots and writes the area-light lanes.
@@ -252,8 +374,7 @@ struct Candidate {
 /// and fills `heroes`; its only state is the slot handles and their coverages of the last call.
 #[derive(Debug)]
 pub struct HeroSelector {
-    slots: [Option<LightHandle>; MAX_HERO_LIGHTS],
-    coverages: [f32; MAX_HERO_LIGHTS],
+    assigner: SlotAssigner<MAX_HERO_LIGHTS>,
     candidates: Vec<Candidate>,
 }
 
@@ -267,15 +388,14 @@ impl HeroSelector {
     /// Creates an empty selector. The candidate scratch is allocated here, never in `update`.
     pub fn new() -> HeroSelector {
         HeroSelector {
-            slots: [None; MAX_HERO_LIGHTS],
-            coverages: [0.0; MAX_HERO_LIGHTS],
+            assigner: SlotAssigner::new(),
             candidates: Vec::with_capacity(MAX_LOCAL_LIGHTS),
         }
     }
 
     /// Number of hero slots occupied after the last [`HeroSelector::update`].
     pub fn active_heroes(&self) -> u32 {
-        self.slots.iter().filter(|slot| slot.is_some()).count() as u32
+        self.assigner.active()
     }
 
     /// Selects the hero lights of this call and writes the area-light lanes of `records`.
@@ -321,52 +441,7 @@ impl HeroSelector {
                 .then(a.handle.cmp(&b.handle))
         });
 
-        // Release the slots whose light is no longer a candidate or whose index is past the count.
-        let candidates = &self.candidates;
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            let kept = index < limit
-                && slot.is_some_and(|handle| {
-                    candidates
-                        .iter()
-                        .any(|candidate| candidate.handle == handle)
-                });
-            if !kept {
-                *slot = None;
-            }
-        }
-
-        // Fill the free slots below the count, lowest index first, best candidate first.
-        for index in 0..limit {
-            if matches!(self.slots.get(index), Some(None))
-                && let Some(pick) = self.unheld()
-                && let Some(slot) = self.slots.get_mut(index)
-            {
-                *slot = Some(pick.handle);
-            }
-        }
-
-        // With every slot below the count taken, the best waiting light may replace the weakest
-        // hero, at most once per call and only when its coverage exceeds the hero's by the ratio.
-        for (slot, coverage) in self.slots.iter().zip(self.coverages.iter_mut()) {
-            *coverage = slot
-                .and_then(|handle| {
-                    self.candidates
-                        .iter()
-                        .find(|candidate| candidate.handle == handle)
-                })
-                .map_or(0.0, |candidate| candidate.coverage);
-        }
-        if let Some(challenger) = self.unheld()
-            && let Some((index, weakest)) = self.weakest(limit)
-            && challenger.coverage > HERO_SWAP_RATIO * weakest
-        {
-            if let Some(slot) = self.slots.get_mut(index) {
-                *slot = Some(challenger.handle);
-            }
-            if let Some(coverage) = self.coverages.get_mut(index) {
-                *coverage = challenger.coverage;
-            }
-        }
+        self.assigner.assign(&self.candidates, limit);
 
         // Lanes of every area record, and the hero projection of every occupied slot.
         heroes.fill(None);
@@ -378,7 +453,7 @@ impl HeroSelector {
             let position = Vec3::from_array(light.position);
             let direction = Vec3::from_array(light.direction);
             let distance = rect_distance(camera.eye, position, direction, light.size);
-            let slot = self.slots.iter().position(|held| *held == Some(handle));
+            let slot = self.assigner.slot_of(handle);
             let (hero_layer, (w_cone, w_direct)) = match slot {
                 Some(slot) => (
                     HERO_LAYER_BASE as f32 + slot as f32,
@@ -397,26 +472,6 @@ impl HeroSelector {
             }
         }
         changed
-    }
-
-    /// The best candidate that holds no slot, in coverage-descending then handle-ascending order.
-    fn unheld(&self) -> Option<Candidate> {
-        self.candidates
-            .iter()
-            .copied()
-            .find(|candidate| !self.slots.contains(&Some(candidate.handle)))
-    }
-
-    /// The occupied slot below `limit` with the lowest coverage; ties go to the higher handle.
-    fn weakest(&self, limit: usize) -> Option<(usize, f32)> {
-        self.slots
-            .iter()
-            .zip(self.coverages.iter())
-            .take(limit)
-            .enumerate()
-            .filter_map(|(index, (slot, coverage))| slot.map(|handle| (index, handle, *coverage)))
-            .min_by(|a, b| a.2.total_cmp(&b.2).then(b.1.cmp(&a.1)))
-            .map(|(index, _, coverage)| (index, coverage))
     }
 }
 
@@ -450,5 +505,67 @@ mod tests {
         };
         assert_eq!(AreaShadowSettings::default(), expected);
         assert_eq!(AreaShadowSettings::default().validate(), Ok(expected));
+    }
+
+    fn candidate(handle: LightHandle, coverage: f32) -> Candidate {
+        Candidate { handle, coverage }
+    }
+
+    #[test]
+    fn slot_assigner_fills_the_lowest_free_index_with_the_best_candidate() {
+        let mut assigner = SlotAssigner::<2>::new();
+        assigner.assign(&[candidate(1, 0.9), candidate(2, 0.5)], 2);
+        assert_eq!(assigner.slots(), &[Some(1), Some(2)]);
+        // Handle 1 leaves: slot 0 is released while slot 1 keeps 2, and the best unheld
+        // candidate fills the lowest free index.
+        assigner.assign(&[candidate(3, 0.7), candidate(2, 0.5)], 2);
+        assert_eq!(assigner.slots(), &[Some(3), Some(2)]);
+        assert_eq!(assigner.slot_of(3), Some(0));
+        assert_eq!(assigner.active(), 2);
+    }
+
+    #[test]
+    fn slot_assigner_keeps_a_held_light_below_the_swap_ratio() {
+        let mut assigner = SlotAssigner::<2>::new();
+        assigner.assign(&[candidate(1, 0.5)], 1);
+        assert_eq!(assigner.slots(), &[Some(1), None]);
+        // 0.5 / 0.45 = 1.11x, below 1.25x: the held light keeps its slot.
+        assigner.assign(&[candidate(2, 0.5), candidate(1, 0.45)], 1);
+        assert_eq!(assigner.slots(), &[Some(1), None]);
+        assert_eq!(assigner.slot_of(2), None);
+        assert_eq!(assigner.active(), 1);
+    }
+
+    #[test]
+    fn slot_assigner_releases_a_slot_at_or_past_the_limit() {
+        let mut assigner = SlotAssigner::<2>::new();
+        assigner.assign(&[candidate(1, 0.9), candidate(2, 0.8)], 2);
+        assert_eq!(assigner.slots(), &[Some(1), Some(2)]);
+        // The limit drops to 1: index 1 is released even though handle 2 is still a candidate.
+        assigner.assign(&[candidate(1, 0.9), candidate(2, 0.8)], 1);
+        assert_eq!(assigner.slots(), &[Some(1), None]);
+        assert_eq!(assigner.slot_of(2), None);
+        assert_eq!(assigner.active(), 1);
+    }
+
+    #[test]
+    fn slot_assigner_swaps_at_most_once_past_the_ratio() {
+        let mut assigner = SlotAssigner::<2>::new();
+        assigner.assign(&[candidate(1, 0.2), candidate(2, 0.2)], 2);
+        assert_eq!(assigner.slots(), &[Some(1), Some(2)]);
+        // Both challengers clear 1.25x over the 0.2 held coverage, but only one swap happens:
+        // the weakest held slot (the tie goes to the higher handle, 2) takes the best challenger.
+        assigner.assign(
+            &[
+                candidate(3, 0.5),
+                candidate(4, 0.45),
+                candidate(1, 0.2),
+                candidate(2, 0.2),
+            ],
+            2,
+        );
+        assert_eq!(assigner.slots(), &[Some(1), Some(3)]);
+        assert_eq!(assigner.slot_of(4), None);
+        assert_eq!(assigner.active(), 2);
     }
 }
