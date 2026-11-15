@@ -1,0 +1,73 @@
+{
+  "scene": "m31-taa",
+  "variant": "taa-on",
+  "milestone": "m31",
+  "capturedAt": "2026-11-15T06:04:11.897Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.atmosphere",
+    "sky.cloud-lighting",
+    "sky.env",
+    "skin",
+    "shadow.csm",
+    "gi.volume",
+    "prepass",
+    "light.tiles",
+    "ao.gtao",
+    "gi.screen",
+    "shadow.contact",
+    "particles.sim",
+    "trace.sdf",
+    "sky.cloud-screen",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "gi.history",
+    "ssr",
+    "fog",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "taa",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap",
+    "editor",
+    "overlay",
+    "trace.composite"
+  ],
+  "instances": 16,
+  "triangles": 3828,
+  "firstFrameMs": 14767.5,
+  "wasm": {
+    "raw": 3880273,
+    "gzip": 1298625,
+    "sha256": "31ecf1d5bf1e3fe4cab827788d03a8b9e79e67f5745c7a28943aa91e3576cd24"
+  },
+  "capture": "proofs/captures/lookdev/m31-taa--taa-on.png",
+  "captureSha256": "a671fab1f268413410b72df111c98f5961a1a18c77279c9d61619ec9fa6988ab",
+  "judge": {
+    "description": "Temporal anti-aliasing is on: the thin dark fence posts and rails, the slanted white plank and the red ball have smooth anti-aliased outlines without stair steps; the thin posts stay continuous with no broken segments; the red ball is crisp with no smeared trail or doubled ghost copy behind it; the image is not blurred overall.",
+    "references": [],
+    "minScore": 6,
+    "exit": 0,
+    "score": 8,
+    "output": "JUDGE PASS: 8.0/10 (minimum 6.0) on proofs/captures/lookdev/m31-taa--taa-on.png by claude-opus-5-5 (median of [8.0, 8.0, 8.0])\nexpected: Temporal anti-aliasing is on: the thin dark fence posts and rails, the slanted white plank and the red ball have smooth anti-aliased outlines without stair steps; the thin posts stay continuous with no broken segments; the red ball is crisp with no smeared trail or doubled ghost copy behind it; the image is not blurred overall.\nseen: The image shows a cloudy blue sky over a grey wall and floor. In front stands a dark fence with eleven posts and two rails. A slanted white plank leans across it, a red ball sits in front with a soft shadow, and a faint reflection shows on the floor. The posts are continuous with no breaks, and the slanted plank's edge is smooth with no visible stair steps. The ball is crisp with no trail or ghost copy. Overall sharpness is good, though the image is slightly soft, as is typical of TAA.",
+    "at": "2026-11-15T06:04:34.965Z"
+  }
+}

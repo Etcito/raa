@@ -1,0 +1,72 @@
+{
+  "scene": "m31-taa",
+  "variant": "taa-off",
+  "milestone": "m31",
+  "capturedAt": "2026-11-15T06:03:56.600Z",
+  "adapter": {
+    "vendor": "",
+    "architecture": "",
+    "device": "",
+    "description": "",
+    "isFallbackAdapter": false
+  },
+  "hardware": true,
+  "canvas": [
+    1280,
+    720
+  ],
+  "nonEmpty": true,
+  "passes": [
+    "sky.atmosphere",
+    "sky.cloud-lighting",
+    "sky.env",
+    "skin",
+    "shadow.csm",
+    "gi.volume",
+    "prepass",
+    "light.tiles",
+    "ao.gtao",
+    "gi.screen",
+    "shadow.contact",
+    "particles.sim",
+    "trace.sdf",
+    "sky.cloud-screen",
+    "forward",
+    "fur.shells",
+    "particles.opaque",
+    "sky.background",
+    "gi.history",
+    "ssr",
+    "fog",
+    "sunshafts",
+    "opaque.copy",
+    "transparent.oit",
+    "particles.blend",
+    "dof",
+    "bloom",
+    "grading",
+    "tonemap",
+    "editor",
+    "overlay",
+    "trace.composite"
+  ],
+  "instances": 16,
+  "triangles": 3828,
+  "firstFrameMs": 14627.5,
+  "wasm": {
+    "raw": 3880273,
+    "gzip": 1298625,
+    "sha256": "31ecf1d5bf1e3fe4cab827788d03a8b9e79e67f5745c7a28943aa91e3576cd24"
+  },
+  "capture": "proofs/captures/lookdev/m31-taa--taa-off.png",
+  "captureSha256": "18033a584ee99840ae1a61b992df36f9258b9b16d201654d49ad408a048e16a0",
+  "judge": {
+    "description": "Temporal anti-aliasing is off with no multisampling: the thin dark fence posts and rails against the bright sky and ground, the slanted white plank and the red ball show jagged stair-stepped pixel edges along their outlines.",
+    "references": [],
+    "minScore": 6,
+    "exit": 1,
+    "score": 5,
+    "output": "JUDGE FAIL: 5.0/10 (minimum 6.0) on proofs/captures/lookdev/m31-taa--taa-off.png by claude-opus-5-5 (median of [4.0, 5.0, 5.0])\nexpected: Temporal anti-aliasing is off with no multisampling: the thin dark fence posts and rails against the bright sky and ground, the slanted white plank and the red ball show jagged stair-stepped pixel edges along their outlines.\nseen: The image shows a dark grid fence of vertical posts and two horizontal rails on a grey ground under a blue sky with clouds. A white plank slants across the middle, a red ball sits in front of it, and there are shadows and faint reflections on the floor. At this viewing size the plank's diagonal edge and the ball's outline look slightly rough, and the shadow edges look a bit stepped, but the fence posts and rails look fairly soft. The stair-stepping is not clearly visible, so the criterion is only partly shown.",
+    "at": "2026-11-15T06:04:22.707Z"
+  }
+}
