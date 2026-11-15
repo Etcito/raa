@@ -11,9 +11,11 @@
 #   lib/      examples/global-illumination/lib/*  (content, facts, inventory, runtime)
 #   scenes/   every delivered .js scene module; imported for metadata only, never built
 #   shared/   the reusable sky-weather helpers plus --shared examples/virtual-geometry/lib/content.js
+#             and --shared examples/trace-first-pixel/scene.js
 #
 # The volume stage shares the virtual-geometry content module (box, plane, sphere,
-# roomShell, volumeRoom) as shared/content.js.
+# roomShell, volumeRoom) as shared/content.js. The lighting stage's area-stochastic rows share
+# the first-pixel SDF program builder (programBytes) as shared/scene.js.
 #
 # Every earlier page root (and with it any earlier ready receipt) is removed before the
 # bricks build, so a failed build never leaves a usable old receipt.
@@ -41,6 +43,6 @@ bash "$ROOT/scripts/build-bricks.sh"
 
 echo "== $OUT"
 "$NODE" "$ROOT/scripts/build-page.mjs" global-illumination --stages volume,lighting,virtual \
-  --shared examples/virtual-geometry/lib/content.js
+  --shared examples/virtual-geometry/lib/content.js --shared examples/trace-first-pixel/scene.js
 
 echo "build-global-illumination.sh: ok ($OUT/scenes.json, $OUT/build.json)"

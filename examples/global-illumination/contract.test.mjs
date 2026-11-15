@@ -36,6 +36,7 @@ function fixtureRoot(t) {
   for (const file of [
     'examples/global-illumination/index.html', 'examples/global-illumination/main.js',
     'examples/global-illumination/nmc.gpu.json', 'examples/virtual-geometry/lib/content.js',
+    'examples/trace-first-pixel/scene.js',
     'examples/sky-weather/lib/capture.js', 'examples/sky-weather/lib/measure.js',
     'examples/sky-weather/lib/readiness.js', 'examples/sky-weather/lib/evidence.mjs',
   ]) copyFile(root, file);
@@ -51,7 +52,7 @@ test('build-page stages the page, its scene, shared and common files, scenes.jso
     root,
     topic: 'global-illumination',
     stages: ['volume', 'lighting', 'virtual'],
-    shared: ['examples/virtual-geometry/lib/content.js'],
+    shared: ['examples/virtual-geometry/lib/content.js', 'examples/trace-first-pixel/scene.js'],
     captureInputs: () => ({ stub: true }),
   });
   assert.equal(out, path.join(root, 'dist/global-illumination'));
@@ -59,7 +60,7 @@ test('build-page stages the page, its scene, shared and common files, scenes.jso
     'raa/index.js', 'common/page-runner.js', 'lib/runtime.js',
     'scenes/volume.js', 'shared/content.js', 'shared/evidence.mjs',
   ]) assert.ok(fs.existsSync(path.join(out, relative)), `missing ${relative}`);
-  assert.deepEqual(scenes, [{ id: 'area-shadows', milestone: 'lighting', file: 'scenes/area-shadows.js' }, { id: 'lighting', milestone: 'lighting', file: 'scenes/lighting.js' }, { id: 'temporal', milestone: 'lighting', file: 'scenes/temporal.js' }, { id: 'volume', milestone: 'volume', file: 'scenes/volume.js' }]);
+  assert.deepEqual(scenes, [{ id: 'area-shadows', milestone: 'lighting', file: 'scenes/area-shadows.js' }, { id: 'area-stochastic', milestone: 'lighting', file: 'scenes/area-stochastic.js' }, { id: 'lighting', milestone: 'lighting', file: 'scenes/lighting.js' }, { id: 'temporal', milestone: 'lighting', file: 'scenes/temporal.js' }, { id: 'volume', milestone: 'volume', file: 'scenes/volume.js' }]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, 'scenes.json'), 'utf8')), scenes);
   assert.match(fs.readFileSync(path.join(out, 'lib/runtime.js'), 'utf8'), /from '\.\.\/common\/page-runner\.js'/);
   const build = JSON.parse(fs.readFileSync(path.join(out, 'build.json'), 'utf8'));
