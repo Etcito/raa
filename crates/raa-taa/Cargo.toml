@@ -1,0 +1,15 @@
+[package]
+name = "raa-taa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Temporal anti-aliasing (S12 pass `taa`, order 100) and reusable ping-pong histories."
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+
+[dev-dependencies]
+raa-shader = { path = "../raa-shader" }
+naga = { workspace = true }
