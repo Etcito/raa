@@ -13,6 +13,7 @@ import { createPageJob, buildKey, attemptRecords, runCli, judgeCapture } from '.
 delete process.env.NMC_CACHE_DIR;
 delete process.env.TOY_RERENDER_ALL;
 delete process.env.SKY_WEATHER_RERENDER_ALL;
+delete process.env.TOY_SCENARIO;
 
 /** Base64 of an 8-bit RGB PNG whose pixel (x, y) is pixel(x, y). */
 function png(width, height, pixel) {
@@ -381,6 +382,39 @@ test('check awaits validators with the resolved page and returns the stage rows'
 
   const unknown = fixture(t, { scenes: [{ ...ONE, milestone: 'foundation' }] });
   await assert.rejects(toy.job.check(unknown.page, 'one'), /unknown milestone foundation/);
+});
+
+test('a scenario filter keeps only the rows of the named scenario', async (t) => {
+  const state = fixture(t, { scenes: [ONE, TWO] });
+  const toy = createToyJob();
+  t.after(() => { delete process.env.TOY_SCENARIO; });
+  process.env.TOY_SCENARIO = TWO.id;
+  const rows = await toy.job.check(state.page, 'two');
+  assert.deepEqual(rows.map((row) => row.id), ['toy-two-scene-image']);
+  assert.deepEqual(rows, state.scenes.find((scene) => scene.id === TWO.id).inventory);
+});
+
+test('a scenario filter naming no row of the stage refuses with the exact message', async (t) => {
+  const state = fixture(t, { scenes: [ONE, TWO] });
+  const toy = createToyJob();
+  t.after(() => { delete process.env.TOY_SCENARIO; });
+  process.env.TOY_SCENARIO = 'no-such-scene';
+  await assert.rejects(toy.job.check(state.page, 'two'),
+    { message: 'toy-job: TOY_SCENARIO=no-such-scene selects no row of stage two' });
+  await assert.rejects(toy.job.select(state.page, path.join(state.root, 'out/toy/two'), 'two'),
+    { message: 'toy-job: TOY_SCENARIO=no-such-scene selects no row of stage two' });
+});
+
+test('a blank or unset scenario filter returns every row of the stage', async (t) => {
+  const state = fixture(t, { scenes: [ONE, TWO] });
+  const toy = createToyJob();
+  t.after(() => { delete process.env.TOY_SCENARIO; });
+  delete process.env.TOY_SCENARIO;
+  const unset = await toy.job.check(state.page, 'two');
+  assert.deepEqual(unset.map((row) => row.id), ['toy-one-scene-image', 'toy-two-scene-image']);
+  process.env.TOY_SCENARIO = '   ';
+  const blank = await toy.job.check(state.page, 'two');
+  assert.deepEqual(blank, unset);
 });
 
 test('select, clean and render write the stage records and save the passed job in the store', async (t) => {

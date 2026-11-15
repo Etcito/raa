@@ -93,7 +93,7 @@ refused before any work.
 | `name` | nonblank string | required | File stem and stdout prefix; used in the usage text and the commands of the page. |
 | `topic` | nonblank string | required | `dist/<topic>` in the usage text and the store directory `$NMC_CACHE_DIR/<topic>/<stage>`. |
 | `stages` | non-empty array of distinct nonblank strings | required | Allowed `--stage` values and the cumulative inventory stages; every `scenes.json` `milestone` must be one of them. |
-| `envPrefix` | nonblank string | required | Prefix of `_RERENDER_ALL`, `_JUDGE_GRACE_MS`, `_JUDGE_CONCURRENCY` and `_JUDGE_BUDGET_MS`. |
+| `envPrefix` | nonblank string | required | Prefix of `_RERENDER_ALL`, `_SCENARIO`, `_JUDGE_GRACE_MS`, `_JUDGE_CONCURRENCY` and `_JUDGE_BUDGET_MS`. |
 | `validators` | function, possibly async | required | Called with the resolved page; returns `{ validateInventory, validateRequiredFacts }`, used by `check`/`select` and every per-job check. |
 | `validateMeasurement` | function | required | Validates each measurement record returned by a job and its match with the variant declaration. |
 | `keepSameBuildOnly` | boolean | `false` | When true, a kept group must come from an attempt whose `buildKey` equals the current build's, so a changed source rebuilds it. |
@@ -104,8 +104,23 @@ refused before any work.
 
 - `NMC_CACHE_DIR`: the shared store root. When non-blank the store is
   `$NMC_CACHE_DIR/<topic>/<stage>`; unset or blank, it is the resolved `--out` directory.
+  `<topic>` is the configuration's `topic` and `<stage>` the `--stage` argument; neither
+  carries an extension. With `NMC_CACHE_DIR=/cache`, the `gi-job` configuration
+  (`topic` `global-illumination`) and `--stage lighting`, the store is
+  `/cache/global-illumination/lighting`; with `NMC_CACHE_DIR` unset it is the resolved
+  `--out` directory, e.g. `out/global-illumination/lighting`.
 - `NMC_JUDGE_CLIENT`: path of the judge client, required by `judge`; there is no default
   and a missing value fails with `NMC_JUDGE_CLIENT is missing`.
+- `<envPrefix>_SCENARIO`: a non-blank value narrows the stage inventory to the rows whose
+  `scenario` equals it, in their order. Every action goes through `verify`, so all six
+  commands of one chain share it, and a selection made under another value is refused by
+  the existing `inventory changed; select again` check. A value that selects no row of the
+  stage fails with
+  `<name>: <envPrefix>_SCENARIO=<value> selects no row of stage <stage>` (example:
+  `gi-job: GI_SCENARIO=area-restir selects no row of stage lighting`). Unset or blank
+  leaves every row selected. For example `GI_SCENARIO=area-restir` renders and judges only
+  the area-restir rows of the lighting stage, leaving the owner-accepted captures of the
+  other rows alone.
 - `<envPrefix>_RERENDER_ALL`: the value `1` keeps nothing, so every group renders again;
   unset keeps resumable images.
 - `<envPrefix>_JUDGE_GRACE_MS`: milliseconds added after the judge budget end before a

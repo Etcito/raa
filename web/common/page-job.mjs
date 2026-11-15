@@ -109,6 +109,11 @@ import { containedPath, readJsonRecord, writeJsonRecord, assertCurrentInputs } f
  * P2-RESUMABLE-RENDER JUDGE: a kept image reuses an earlier passed verdict of the byte-identical
  * image with the identical description (exit 0, score >= 6), keeping its judgedAt; every other image
  * is judged, and every verdict is written before failing.
+ * <envPrefix>_SCENARIO: a non-blank value narrows the stage inventory to the rows whose scenario
+ * equals it, in their order; every action goes through verify, so one chain shares the value and a
+ * selection made under another value is refused by the unchanged-inventory check. A value that
+ * selects no row of the stage fails check with
+ * `<name>: <envPrefix>_SCENARIO=<value> selects no row of stage <stage>`.
  */
 export const RECORD_FIELDS = Object.freeze({
   buildReceipt: Object.freeze(['buildId', 'preparationId', 'inputs', 'builtAt', 'page', 'files', 'status', 'error']),
@@ -720,7 +725,12 @@ export function createPageJob(config) {
     const build = readBuildReceipt(page);
     const namespaces = await loadScenes(page, build);
     const validators = await config.validators(page);
-    const inventory = validators.validateInventory(namespaces, stage);
+    const rows = validators.validateInventory(namespaces, stage);
+    const scenario = process.env[`${config.envPrefix}_SCENARIO`];
+    if (scenario === undefined || scenario.trim() === '') return { page, build, namespaces, inventory: rows, validators };
+    const inventory = rows.filter((row) => row.scenario === scenario);
+    ensure(inventory.length > 0,
+      `${config.name}: ${config.envPrefix}_SCENARIO=${scenario} selects no row of stage ${stage}`);
     return { page, build, namespaces, inventory, validators };
   }
 
