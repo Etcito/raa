@@ -10,6 +10,9 @@ pub mod cpu;
 #[path = "area_shadow/restir_cpu.rs"]
 pub mod restir_cpu;
 
+#[path = "area_shadow/restir.rs"]
+pub mod restir;
+
 #[path = "area_shadow/passes.rs"]
 pub mod passes;
 

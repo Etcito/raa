@@ -11,11 +11,17 @@
 
 use naga::{AddressSpace, ImageClass, ShaderStage, TypeInner};
 use raa_core::wgpu::naga;
-use raa_core::wgpu::{BindGroupLayoutEntry, BindingType, BufferBindingType, TextureSampleType};
+use raa_core::wgpu::{
+    BindGroupLayoutEntry, BindingType, BufferBindingType, StorageTextureAccess, TextureFormat,
+    TextureSampleType, TextureViewDimension,
+};
 use raa_gi::parts::area_shadow::passes::{
     AREA_DISPATCH_SIZE, AREA_PARAMS_SIZE, AREA_SPATIAL_H_ENTRY, AREA_SPATIAL_V_ENTRY,
     AREA_TEMPORAL_ENTRY, AREA_TRACE_ENTRY, WORKGROUP, spatial_group0_entries, spatial_module_wgsl,
     temporal_group0_entries, temporal_module_wgsl, trace_group2_entries, trace_module_wgsl,
+};
+use raa_gi::parts::area_shadow::restir::{
+    RESERVOIR_BYTES, RESTIR_PARAMS_SIZE, restir_common_module_wgsl, restir_group2_entries,
 };
 
 fn numbers(entries: &[BindGroupLayoutEntry]) -> Vec<u32> {
@@ -454,4 +460,149 @@ fn records_match_contract_area_shadow_denoise_wgsl() {
     assert_eq!(AREA_DISPATCH_SIZE, 16);
     let spatial = Reflection::new(&spatial_module_wgsl());
     check_struct(&spatial.module, "AreaDispatchGpu", 16, &dispatch);
+}
+
+#[test]
+fn restir_common_module_validates_and_holds_its_helpers() {
+    let source = restir_common_module_wgsl();
+    let reflection = Reflection::new(&source);
+    assert!(
+        reflection.module.entry_points.is_empty(),
+        "the stage-less common share has no entry point"
+    );
+    for name in [
+        "struct RestirParamsGpu",
+        "struct RaaRestirReservoir",
+        "fn raa_restir_empty(",
+        "fn raa_restir_pack(",
+        "fn raa_restir_unpack(",
+        "fn raa_restir_oct_encode(",
+        "fn raa_restir_oct_decode(",
+        "fn raa_restir_index(",
+        "fn raa_restir_wrs_accept(",
+        "fn raa_restir_contribution_weight(",
+        "fn raa_restir_clamp_confidence(",
+        "fn raa_restir_remap(",
+        "fn raa_restir_boiling_keep(",
+        "fn raa_restir_depth_similar(",
+        "fn raa_restir_spatial_offset(",
+        "fn raa_restir_random(",
+        "fn raa_restir_luminance(",
+        "fn raa_restir_srgb_decode(",
+    ] {
+        assert!(source.contains(name), "the common share holds {name}");
+    }
+}
+
+#[test]
+fn restir_params_record_matches_contract_area_restir_wgsl() {
+    let reflection = Reflection::new(&restir_common_module_wgsl());
+    let params = [
+        ("frame_index", 0),
+        ("history_usable", 4),
+        ("candidates", 8),
+        ("spatial_samples", 12),
+        ("remap", 16),
+        ("spatial_radius", 48),
+        ("m_cap", 52),
+        ("boiling_factor", 56),
+        ("normal_cos", 60),
+    ];
+    check_struct(&reflection.module, "RestirParamsGpu", 64, &params);
+    assert_eq!(RESTIR_PARAMS_SIZE, 64);
+    assert_eq!(RESERVOIR_BYTES, 16);
+    let reservoir = [
+        ("slot", 0),
+        ("uv", 8),
+        ("weight", 16),
+        ("confidence", 20),
+        ("normal_oct", 24),
+    ];
+    check_struct(&reflection.module, "RaaRestirReservoir", 32, &reservoir);
+}
+
+#[test]
+fn restir_group2_entries_match_the_registry() {
+    let entries = restir_group2_entries();
+    assert_eq!(
+        numbers(&entries),
+        [0, 1, 2, 4, 5, 6, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    );
+    let reflection = Reflection::new(&restir_common_module_wgsl());
+    let mut declared = Vec::new();
+    for (_, global) in reflection.module.global_variables.iter() {
+        let Some(binding) = &global.binding else {
+            continue;
+        };
+        if binding.group == 2 {
+            declared.push((binding.binding, global));
+        }
+    }
+    declared.sort_by_key(|(binding, _)| *binding);
+    assert_eq!(
+        declared
+            .iter()
+            .map(|(binding, _)| *binding)
+            .collect::<Vec<_>>(),
+        [0, 1, 2, 7, 8, 12, 13, 14, 15, 16, 17, 18, 19],
+        "the probe-common helpers (0, 1, 2, 7), the slot table and 12-19"
+    );
+    for (binding, global) in declared {
+        let Some(entry) = entries.iter().find(|entry| entry.binding == binding) else {
+            continue;
+        };
+        assert_eq!(
+            naga_kind(&reflection.module, global),
+            entry_kind(entry),
+            "group 2 binding {binding} kind"
+        );
+        if let BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            min_binding_size,
+            ..
+        } = entry.ty
+        {
+            let TypeInner::Struct { span, .. } = &reflection.module.types[global.ty].inner else {
+                panic!("group 2 binding {binding} is not a struct");
+            };
+            assert_eq!(
+                min_binding_size.map(|size| size.get()),
+                Some(*span as u64),
+                "group 2 binding {binding} size"
+            );
+        }
+    }
+    assert!(matches!(
+        entries[4].ty,
+        BindingType::StorageTexture {
+            access: StorageTextureAccess::WriteOnly,
+            format: TextureFormat::Rgba16Float,
+            view_dimension: TextureViewDimension::D2Array,
+        }
+    ));
+    assert!(matches!(
+        entries[7].ty,
+        BindingType::Texture {
+            sample_type: TextureSampleType::Float { filterable: false },
+            view_dimension: TextureViewDimension::D3,
+            multisampled: false,
+        }
+    ));
+    assert!(matches!(
+        entries[15].ty,
+        BindingType::Texture {
+            sample_type: TextureSampleType::Float { filterable: true },
+            view_dimension: TextureViewDimension::D2,
+            multisampled: false,
+        }
+    ));
+    for index in [13usize, 14] {
+        assert!(matches!(
+            entries[index].ty,
+            BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                ..
+            }
+        ));
+    }
 }
