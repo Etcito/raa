@@ -66,6 +66,7 @@ engine-wide (every view), persists until changed, and applies to every view.
 
 ```ts
 type AreaLightShadowTier = 'auto' | 'hero' | 'cone' | 'fade'
+type AreaLightStochasticMode = 'stratified' | 'restir'
 interface AreaLightShadowsDesc {
   tier?: AreaLightShadowTier     // default 'auto'
   heroCount?: number             // integer 0..4, default 0 (no hero maps)
@@ -75,19 +76,21 @@ interface AreaLightShadowsDesc {
   stochasticCount?: number       // integer 0..8, default 4 (0 disables the mid tier)
   stochasticDistance?: number    // metres, > 0, default 40
   stochasticCells?: 4 | 9        // strata of the light rectangle, default 4
+  stochasticMode?: AreaLightStochasticMode  // default 'stratified'
 }
 interface AreaLightShadows {
   tier: AreaLightShadowTier; heroCount: number; heroDistance: number
   fadeDistance: number; band: number; activeHeroes: number
   stochasticCount: number; stochasticDistance: number; stochasticCells: number
+  stochasticMode: AreaLightStochasticMode
   activeStochastic: number
 }
 ```
 
 Absent keys keep their current value. The merged settings are validated as a whole.
 The defaults are `{ tier: 'auto', heroCount: 0, heroDistance: 25, fadeDistance: 80,
-band: 5, stochasticCount: 4, stochasticDistance: 40, stochasticCells: 4 }`; all
-distances are metres.
+band: 5, stochasticCount: 4, stochasticDistance: 40, stochasticCells: 4,
+stochasticMode: 'stratified' }`; all distances are metres.
 
 - `'hero'`: perspective shadow maps of the `heroCount` area lights with the largest
   screen coverage (hysteresis 1.25), filtered with PCSS whose light size is the
@@ -107,9 +110,14 @@ distances are metres.
 
 `stochasticCount` is the number of area lights per view that get the mid tier; 0
 disables the tier. Beyond `stochasticDistance`, after the `band`, lights use the cone
-tier. `stochasticCells` is the strata of the light rectangle, 4 (2x2) or 9 (3x3). The
-mid tier requires GI active with `localLightShadows` on; without it the tier falls back
-to the cone.
+tier. `stochasticCells` is the strata of the light rectangle, 4 (2x2) or 9 (3x3).
+`stochasticMode` selects the stochastic tier: `'stratified'` (default) is the M6 mid
+tier, and `'restir'` is the ultra tier, ReSTIR DI with compute-traced visibility in the
+same `gi.area-shadow` pass. The mid tier requires GI active with `localLightShadows` on;
+without it the tier falls back to the cone.
+
+`areaLightShadows()` reports `stochasticMode` between `stochasticCells` and
+`activeStochastic`.
 
 `activeHeroes` is the number of area lights that had a hero shadow map in the last
 prepared frame. `activeStochastic` is the number of area lights that held a mid-tier
@@ -126,7 +134,9 @@ number that is not an integer in [0, 4] gives `heroCount: must be an integer in 
 `stochasticCount: must be an integer in [0, 8] (got <value>)`. A `stochasticCells`
 number other than 4 or 9 gives `stochasticCells: must be 4 or 9 (got <value>)`, and a
 `stochasticDistance` that is not finite or not > 0 gives
-`stochasticDistance: must be finite and > 0 (got <value>)`. A merged state that breaks
+`stochasticDistance: must be finite and > 0 (got <value>)`. A `stochasticMode` string
+other than `'stratified'` or `'restir'`, or any non-string, gives
+`stochasticMode: must be 'stratified' or 'restir'`. A merged state that breaks
 the distance rules gives `<key>: <reason>`, for example
 `fadeDistance: must be finite and > heroDistance (got 10)`.
 

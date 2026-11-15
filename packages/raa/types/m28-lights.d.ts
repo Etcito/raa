@@ -72,6 +72,13 @@ export interface AreaLightShadingDesc {
 export type AreaLightShadowTier = 'auto' | 'hero' | 'cone' | 'fade';
 
 /**
+ * Stochastic shadow mode. `'stratified'` (default) is the M6 mid tier: one stratified shadow
+ * ray per pixel and light toward a cell of the rectangle. `'restir'` is the M7 ultra tier:
+ * ReSTIR DI with compute-traced visibility in the same `gi.area-shadow` pass.
+ */
+export type AreaLightStochasticMode = 'stratified' | 'restir';
+
+/**
  * Settings accepted by {@link Engine.setAreaLightShadows}. Absent keys keep the current value;
  * the merged settings are validated as a whole. A refusal throws `light.invalid_area_shadows`
  * with the message `<key>: <reason>` and changes nothing.
@@ -98,6 +105,11 @@ export interface AreaLightShadowsDesc {
   stochasticDistance?: number;
   /** Strata of the light rectangle: 4 (2x2) or 9 (3x3). Default 4. */
   stochasticCells?: 4 | 9;
+  /**
+   * Stochastic shadow mode: `'stratified'` (default) is the M6 mid tier; `'restir'` is the
+   * ultra tier, ReSTIR DI with compute-traced visibility.
+   */
+  stochasticMode?: AreaLightStochasticMode;
 }
 
 /**
@@ -118,6 +130,7 @@ export interface AreaLightShadows {
   stochasticCount: number;
   stochasticDistance: number;
   stochasticCells: number;
+  stochasticMode: AreaLightStochasticMode;
   /**
    * Area lights that held a mid-tier slot in the last prepared frame; 0 before the first
    * frame.
@@ -153,21 +166,24 @@ export interface Engine {
   /** Returns the current area-light shading mode as `{ mode }`. */
   areaLightShading(): AreaLightShadingDesc;
   /**
-   * Sets the engine-wide area-light soft-shadow tiers and the M6 stochastic mid tier (defaults
-   * `tier: 'auto'`, `heroCount: 0`, `heroDistance: 25`, `fadeDistance: 80`, `band: 5`,
-   * `stochasticCount: 4`, `stochasticDistance: 40`, `stochasticCells: 4`). A non-object
+   * Sets the engine-wide area-light soft-shadow tiers and the M6/M7 stochastic mid and ultra
+   * tiers (defaults `tier: 'auto'`, `heroCount: 0`, `heroDistance: 25`, `fadeDistance: 80`,
+   * `band: 5`, `stochasticCount: 4`, `stochasticDistance: 40`, `stochasticCells: 4`,
+   * `stochasticMode: 'stratified'`). A non-object
    * argument throws `light.invalid_area_shadows` with `settings: must be an object`; a present
    * key that is not a number throws `<key>: must be a number`; a `heroCount` that is not an
    * integer in [0, 4] throws `heroCount: must be an integer in [0, 4] (got <value>)`; a
    * `stochasticCount` that is not an integer in [0, 8] throws `stochasticCount: must be an
    * integer in [0, 8] (got <value>)`; a `stochasticCells` other than 4 or 9 throws
    * `stochasticCells: must be 4 or 9 (got <value>)`; a `stochasticDistance` that is not finite
-   * or not > 0 throws `stochasticDistance: must be finite and > 0 (got <value>)`. Every refusal
-   * changes nothing.
+   * or not > 0 throws `stochasticDistance: must be finite and > 0 (got <value>)`; a
+   * `stochasticMode` other than `'stratified'` or `'restir'`, or a non-string, throws
+   * `stochasticMode: must be 'stratified' or 'restir'`. Every refusal changes nothing.
    */
   setAreaLightShadows(settings: AreaLightShadowsDesc): void;
   /**
-   * Returns the current area-light soft-shadow tiers, the active hero and mid-tier slot counts.
+   * Returns the current area-light soft-shadow tiers, the active hero and mid-tier slot counts
+   * and the stochastic mode.
    */
   areaLightShadows(): AreaLightShadows;
 }

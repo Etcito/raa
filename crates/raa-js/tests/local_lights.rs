@@ -6,7 +6,7 @@
 use raa_core::RaaError;
 use raa_lit::{
     AreaShadowSettings, AreaShadowTier, LocalLight, LocalLightKind, LocalLights, MAX_LIGHT_HANDLE,
-    MAX_LOCAL_LIGHTS, StochasticShadowSettings,
+    MAX_LOCAL_LIGHTS, StochasticMode, StochasticShadowSettings,
 };
 
 #[allow(dead_code)]
@@ -504,6 +504,7 @@ fn stochastic_shadows_empty_desc_returns_the_base_unchanged() {
         count: 2,
         distance: 12.0,
         cells: 9,
+        mode: StochasticMode::Stratified,
     };
     assert_eq!(parse_stochastic_shadows(&Mock::empty(), base), Ok(base));
     assert_eq!(
@@ -526,6 +527,7 @@ fn stochastic_shadows_present_keys_merge_onto_the_default() {
             count: 2,
             distance: 12.5,
             cells: 9,
+            mode: StochasticMode::Stratified,
         }
     );
 }
@@ -574,4 +576,54 @@ fn stochastic_shadows_accept_the_range_edges() {
         let merged = parse_stochastic_shadows(&desc, StochasticShadowSettings::standard()).unwrap();
         assert_eq!(merged.cells as f64, cells);
     }
+}
+
+#[test]
+fn stochastic_mode_merges_onto_the_standard_settings() {
+    let restir = Mock::new(&[("stochasticMode", Raw::String("restir".into()))]);
+    let merged = parse_stochastic_shadows(&restir, StochasticShadowSettings::standard()).unwrap();
+    assert_eq!(merged.mode, StochasticMode::Restir);
+    let standard = StochasticShadowSettings::standard();
+    assert_eq!(
+        (merged.count, merged.distance, merged.cells),
+        (standard.count, standard.distance, standard.cells)
+    );
+
+    let stratified = Mock::new(&[("stochasticMode", Raw::String("stratified".into()))]);
+    let merged =
+        parse_stochastic_shadows(&stratified, StochasticShadowSettings::standard()).unwrap();
+    assert_eq!(merged.mode, StochasticMode::Stratified);
+}
+
+#[test]
+fn stochastic_mode_refusals_carry_the_contract_message() {
+    let cases = [Raw::String("ultra".into()), Raw::Number(1.0)];
+    for value in cases {
+        let desc = Mock::new(&[("stochasticMode", value)]);
+        let err =
+            parse_stochastic_shadows(&desc, StochasticShadowSettings::standard()).unwrap_err();
+        assert_eq!(code(&err), INVALID_AREA_SHADOWS);
+        assert_eq!(
+            err.message(),
+            "stochasticMode: must be 'stratified' or 'restir'"
+        );
+    }
+}
+
+#[test]
+fn stochastic_mode_refusal_leaves_the_base_untouched() {
+    let base = StochasticShadowSettings {
+        count: 2,
+        distance: 12.0,
+        cells: 9,
+        mode: StochasticMode::Restir,
+    };
+    let desc = Mock::new(&[
+        ("stochasticCount", Raw::Number(5.0)),
+        ("stochasticMode", Raw::String("ultra".into())),
+    ]);
+    let refused = parse_stochastic_shadows(&desc, base);
+    assert_eq!(code(&refused.unwrap_err()), INVALID_AREA_SHADOWS);
+    assert_eq!(base.count, 2);
+    assert_eq!(base.mode, StochasticMode::Restir);
 }

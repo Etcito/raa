@@ -27,7 +27,7 @@
 use raa_core::RaaError;
 use raa_lit::{
     AreaShadowSettings, AreaShadowTier, LightHandle, LocalLight, LocalLightKind, LocalLights,
-    MAX_LIGHT_HANDLE, StochasticShadowSettings,
+    MAX_LIGHT_HANDLE, StochasticMode, StochasticShadowSettings,
 };
 
 /// The refusal code of every malformed local-light description (S17).
@@ -326,15 +326,24 @@ pub(crate) fn parse_area_shadows(
     merged.validate()
 }
 
-/// Parses the M6 stochastic mid-tier keys of an `AreaLightShadowsDesc` onto `base` (contract
-/// `area-light-shadows-stochastic-keys`). Absent keys keep the base field; the merged settings
-/// are validated as a whole by [`StochasticShadowSettings::validate`], so a refusal carries no
-/// partial settings and the caller's stored settings stay unchanged.
+/// Parses the M6/M7 stochastic keys of an `AreaLightShadowsDesc` onto `base` (contracts
+/// `area-light-shadows-stochastic-keys` and `area-light-shadows-mode-key`). Absent keys keep
+/// the base field; the merged settings are validated as a whole by
+/// [`StochasticShadowSettings::validate`], so a refusal carries no partial settings and the
+/// caller's stored settings stay unchanged.
 pub(crate) fn parse_stochastic_shadows(
     source: &impl Properties,
     base: StochasticShadowSettings,
 ) -> Result<StochasticShadowSettings, RaaError> {
+    let mode_refused = || area_shadows_invalid("stochasticMode: must be 'stratified' or 'restir'");
     let mut merged = base;
+    match source.read("stochasticMode")? {
+        Raw::Absent => {}
+        Raw::String(name) => {
+            merged.mode = StochasticMode::from_name(&name).ok_or_else(mode_refused)?;
+        }
+        _ => return Err(mode_refused()),
+    }
     if let Some(value) = area_number(source, "stochasticCount")? {
         if value.fract() != 0.0 || !(0.0..=8.0).contains(&value) {
             return Err(area_shadows_invalid(format!(
@@ -746,15 +755,17 @@ mod web {
             })
         }
 
-        /// Sets the engine-wide area-light soft-shadow tiers and the M6 stochastic mid tier
-        /// (contracts `area-light-shadows-api` and `area-light-shadows-stochastic-keys`).
+        /// Sets the engine-wide area-light soft-shadow tiers and the M6/M7 stochastic mid and
+        /// ultra tiers (contracts `area-light-shadows-api`, `area-light-shadows-stochastic-keys`
+        /// and `area-light-shadows-mode-key`).
         /// `settings` is an `AreaLightShadowsDesc`: absent keys keep the current value and the
         /// merged state is validated as a whole before either setting changes. A non-object
         /// throws `light.invalid_area_shadows` with `settings: must be an object`; a present key
         /// that is not a number throws `<key>: must be a number`; `stochasticCount` must be an
-        /// integer in [0, 8], `stochasticCells` must be 4 or 9 and `stochasticDistance` must be
-        /// finite and > 0. Every refusal changes nothing. The setting persists until changed and
-        /// applies to every view.
+        /// integer in [0, 8], `stochasticCells` must be 4 or 9, `stochasticDistance` must be
+        /// finite and > 0, and `stochasticMode` must be `'stratified'` or `'restir'`, else it
+        /// throws `stochasticMode: must be 'stratified' or 'restir'`. Every refusal changes
+        /// nothing. The setting persists until changed and applies to every view.
         ///
         /// Handoff: card 'raa-lit: mid-tier selection wired into LitRenderer::prepare and
         /// published through LitHandle' supplies [`LitRenderer::set_area_stochastic`],
@@ -775,10 +786,11 @@ mod web {
             })
         }
 
-        /// Returns the current area-light soft-shadow tiers and the M6 stochastic mid-tier
-        /// settings as `AreaLightShadows`. `activeHeroes` counts the area lights that had a hero
-        /// shadow map in the last prepared frame and `activeStochastic` the area lights holding a
-        /// mid-tier slot; both are 0 before the first frame.
+        /// Returns the current area-light soft-shadow tiers and the M6/M7 stochastic mid and
+        /// ultra tiers as `AreaLightShadows`. `activeHeroes` counts the area lights that had a
+        /// hero shadow map in the last prepared frame and `activeStochastic` the area lights
+        /// holding a mid-tier slot; both are 0 before the first frame. `stochasticMode` is the
+        /// mode name, `'stratified'` or `'restir'`.
         #[wasm_bindgen(js_name = areaLightShadows)]
         pub fn area_light_shadows(&mut self) -> Result<JsValue, JsValue> {
             self.with_state(|_, st| {
@@ -814,6 +826,10 @@ mod web {
                     (
                         "stochasticCells",
                         JsValue::from_f64(f64::from(stochastic.cells)),
+                    ),
+                    (
+                        "stochasticMode",
+                        JsValue::from_str(stochastic.mode.as_str()),
                     ),
                     (
                         "activeStochastic",
