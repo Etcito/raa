@@ -6,8 +6,10 @@
 //! M7 reservoir histories.
 
 mod history;
+mod shaders;
 
 pub use history::{HistoryPair, HistoryState};
+pub use shaders::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
 
 /// S12 name of the pass.
 pub const TAA_PASS_NAME: &str = "taa";
