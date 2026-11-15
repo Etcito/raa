@@ -21,9 +21,9 @@ use raa_gi::parts::area_shadow::passes::{
     temporal_group0_entries, temporal_module_wgsl, trace_group2_entries, trace_module_wgsl,
 };
 use raa_gi::parts::area_shadow::restir::{
-    RESERVOIR_BYTES, RESTIR_INITIAL_ENTRY, RESTIR_PARAMS_SIZE, RESTIR_TEMPORAL_ENTRY,
-    restir_common_module_wgsl, restir_group2_entries, restir_initial_module_wgsl,
-    restir_temporal_module_wgsl,
+    RESERVOIR_BYTES, RESTIR_INITIAL_ENTRY, RESTIR_PARAMS_SIZE, RESTIR_SPATIAL_ENTRY,
+    RESTIR_TEMPORAL_ENTRY, restir_common_module_wgsl, restir_group2_entries,
+    restir_initial_module_wgsl, restir_spatial_module_wgsl, restir_temporal_module_wgsl,
 };
 use raa_gi::parts::area_shadow::restir_cpu::ROUGHNESS_MIN;
 
@@ -973,6 +973,103 @@ fn restir_temporal_bindings_match_the_restir_layout() {
         );
     }
     for binding in [5, 6] {
+        assert!(!used.contains(&binding), "group 2 binding {binding} unused");
+    }
+    for (binding, global) in reflection.used_globals(index, 2) {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.binding == binding)
+            .unwrap_or_else(|| panic!("group 2 binding {binding} has an entry"));
+        assert_eq!(
+            naga_kind(&reflection.module, global),
+            entry_kind(entry),
+            "group 2 binding {binding} kind"
+        );
+        if let BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            min_binding_size,
+            ..
+        } = entry.ty
+        {
+            let TypeInner::Struct { span, .. } = &reflection.module.types[global.ty].inner else {
+                panic!("group 2 binding {binding} is not a struct");
+            };
+            assert_eq!(
+                min_binding_size.map(|size| size.get()),
+                Some(*span as u64),
+                "group 2 binding {binding} size"
+            );
+        }
+    }
+    let used1 = reflection.used(index, 1);
+    assert!(
+        used1
+            .iter()
+            .all(|binding| GI_COMPUTE_GROUP1.contains(binding)),
+        "group-1 bindings {used1:?}"
+    );
+    assert!(reflection.used(index, 0).is_empty(), "group 0 is unused");
+    let (textures, buffers) = reflection.storage(index);
+    assert!(textures <= 4, "{textures} storage textures");
+    assert!(buffers <= 8, "{buffers} storage buffers");
+}
+
+/// The ReSTIR spatial-reuse and resolve module (contract 'area-restir-wgsl') composed by
+/// crates/raa-gi/src/parts/area_shadow/restir.rs `restir_spatial_module_wgsl`; its light point,
+/// slot lookup, target and LTC luminance calls are the Handoff comment of share 2 at
+/// restir_common.wgsl:391 `raa_restir_light_point` (`raa_restir_ltc_luminance` at :586).
+#[test]
+fn restir_spatial_module_validates_and_holds_its_kernel() {
+    let source = restir_spatial_module_wgsl();
+    let reflection = Reflection::new(&source);
+    let computes: Vec<&str> = reflection
+        .module
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(computes, [AREA_TRACE_ENTRY, RESTIR_SPATIAL_ENTRY]);
+    let marker = format!("@compute @workgroup_size(8, 8)\nfn {RESTIR_SPATIAL_ENTRY}(");
+    assert!(source.contains(&marker), "the entry follows its workgroup");
+    let index = reflection.entry(RESTIR_SPATIAL_ENTRY);
+    let entry = &reflection.module.entry_points[index];
+    assert_eq!(entry.stage, ShaderStage::Compute);
+    assert_eq!(entry.workgroup_size, [WORKGROUP, WORKGROUP, 1]);
+    for name in [
+        "raa_restir_unpack(raa_restir_current[index])",
+        "raa_restir_spatial_offset(pixel, frame, k, raa_restir_params.spatial_radius)",
+        "raa_restir_depth_similar(surface_q.view_depth, surface_p.view_depth)",
+        "raa_restir_params.normal_cos",
+        "raa_restir_target(surfaces[j], light, r.uv)",
+        "raa_restir_wrs_accept(",
+        "raa_restir_contribution_weight(w_sum, kept_target)",
+        "raa_restir_history[index] = raa_restir_pack(merged)",
+        "raa_restir_light_point(",
+        "raa_area_ray_visibility(surface_p.position, surface_p.normal, point)",
+        "s = kept_target * merged.weight * v",
+        "vec4<f32>(s, u_tilde, s, u_tilde)",
+    ] {
+        assert!(source.contains(name), "the spatial module calls {name}");
+    }
+    assert!(
+        source.contains("raa_restir_ltc_luminance(surface_p, raa_local_lights["),
+        "the resolve sums the unshadowed LTC luminance U~"
+    );
+}
+
+#[test]
+fn restir_spatial_bindings_match_the_restir_layout() {
+    let reflection = Reflection::new(&restir_spatial_module_wgsl());
+    let index = reflection.entry(RESTIR_SPATIAL_ENTRY);
+    let entries = restir_group2_entries();
+    let used = reflection.used(index, 2);
+    for binding in [0, 1, 2, 5, 8, 15, 16, 17, 18, 19] {
+        assert!(
+            used.contains(&binding),
+            "group 2 binding {binding} in {used:?}"
+        );
+    }
+    for binding in [6, 14] {
         assert!(!used.contains(&binding), "group 2 binding {binding} unused");
     }
     for (binding, global) in reflection.used_globals(index, 2) {
