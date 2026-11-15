@@ -2,15 +2,20 @@
 # Workspace gate (Quality bar Q1). Prints `== <step>` per step and exits non-zero on the
 # first failure. Never assumes a member crate exists: on a workspace with zero packages
 # the cargo steps are skipped (with a message) and only the non-cargo guards run.
-# Usage: scripts/check.sh [--quick]   (--quick skips `cargo test`)
+# Usage: scripts/check.sh [--quick] [--no-demos]
+#   --quick skips `cargo test`; --no-demos skips the demo wasm release builds (a milestone gate whose
+#   pages are rendered by their own GPU job does not rebuild every unrelated demo).
 set -euo pipefail
 
 quick=0
-case "${1:-}" in
-  "") ;;
-  --quick) quick=1 ;;
-  *) echo "usage: scripts/check.sh [--quick]" >&2; exit 2 ;;
-esac
+demos_on=1
+for arg in "$@"; do
+  case "$arg" in
+    --quick) quick=1 ;;
+    --no-demos) demos_on=0 ;;
+    *) echo "usage: scripts/check.sh [--quick] [--no-demos]" >&2; exit 2 ;;
+  esac
+done
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 shopt -s nullglob
@@ -69,6 +74,7 @@ if ((has_members)); then
     cargo test --workspace || fail "cargo test"
   fi
 
+  if ((demos_on)); then
   step "demo wasm builds"
   demos=(demos/*/)
   if ((${#demos[@]} == 0)); then
@@ -81,6 +87,9 @@ if ((has_members)); then
     echo "-- $d"
     scripts/build-web.sh "$d" || fail "build-web $d"
   done
+  else
+    step "demo wasm builds (skipped by --no-demos)"
+  fi
 fi
 
 step "asset guard"
