@@ -6,6 +6,12 @@
 export type GiDebugView = 'none' | 'voxels' | 'radiance' | 'distance' | 'levels';
 
 /**
+ * The screen-space GI quality (`screenSpaceQuality`): horizon slices x steps per side of the
+ * screen-space trace. `low` 2 slices x 6 steps, `medium` 4 x 8, `high` 6 x 12.
+ */
+export type GiScreenSpaceQuality = 'low' | 'medium' | 'high';
+
+/**
  * The engine-wide global-illumination settings, returned by {@link Engine.globalIllumination}.
  * Every key is present; the record is a fresh object.
  */
@@ -27,6 +33,14 @@ export interface GlobalIlluminationSettings {
   screenTraces: boolean;
   /** The debug view of the frame. Default 'none'. */
   debugView: GiDebugView;
+  /**
+   * Screen-space indirect diffuse with a visibility bitmask adds the near-field bounce and contact
+   * detail of the 2 m around each pixel on top of the volume and screen probes; what it finds
+   * replaces the probe irradiance there, never adds to it. Default false.
+   */
+  screenSpace: boolean;
+  /** The screen-space trace quality, see {@link GiScreenSpaceQuality}. Default 'medium'. */
+  screenSpaceQuality: GiScreenSpaceQuality;
 }
 
 /**

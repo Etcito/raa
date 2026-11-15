@@ -9,7 +9,8 @@ land in milestones 2 and 3 and are configured through these same settings (see
 
 ```ts
 type GiDebugView = 'none' | 'voxels' | 'radiance' | 'distance' | 'levels'
-interface GlobalIlluminationSettings { enabled: boolean; intensity: number; environmentDiffuse: number; localLightShadows: boolean; reflections: boolean; screenTraces: boolean; debugView: GiDebugView }
+type GiScreenSpaceQuality = 'low' | 'medium' | 'high'
+interface GlobalIlluminationSettings { enabled: boolean; intensity: number; environmentDiffuse: number; localLightShadows: boolean; reflections: boolean; screenTraces: boolean; debugView: GiDebugView; screenSpace: boolean; screenSpaceQuality: GiScreenSpaceQuality }
 type GlobalIlluminationPatch = Partial<GlobalIlluminationSettings>
 interface GiQuality { resolution: 64 | 96; levels: 3 | 4 | 5; probeRays: 6 | 8 }
 type GiQualityPatch = Partial<GiQuality>
@@ -50,7 +51,8 @@ interface Engine {
 
 ## Settings
 
-Defaults and domains, in the key order of `globalIllumination()`:
+Defaults and domains. The screen-space pair sits beside `screenTraces` here; in
+`globalIllumination()` it is the last two keys:
 
 | key | type | default | domain | meaning |
 |---|---|---|---|---|
@@ -60,7 +62,26 @@ Defaults and domains, in the key order of `globalIllumination()`:
 | `localLightShadows` | boolean | `true` | | local lights are shadowed by the volume (feature 30) |
 | `reflections` | boolean | `true` | | SSR misses fall back to a volume trace (feature 37) |
 | `screenTraces` | boolean | `true` | | screen probes first trace the previous lit frame |
+| `screenSpace` | boolean | `false` | | screen-space indirect diffuse, pass `gi.ssgi`, see [Screen-space GI](#screen-space-gi) |
+| `screenSpaceQuality` | `GiScreenSpaceQuality` | `'medium'` | `'low'`, `'medium'` or `'high'` | horizon slices x steps per side: low 2 x 6, medium 4 x 8, high 6 x 12 |
 | `debugView` | `GiDebugView` | `'none'` | one of five | the volume debug view, see [Debug views](#debug-views) |
+
+## Screen-space GI
+
+`screenSpace` turns on the pass `gi.ssgi`, the screen-space indirect diffuse. The pass runs at
+order 44, after `gi.area-shadow` (43) and before `shadow.contact` (45). Its switch is the existing
+`setPassEnabled('gi.ssgi', on)`. It records only while GI is active and `screenSpace` is true.
+
+- It adds the near-field bounce and contact detail of the 2 m around each pixel, traced with a
+  visibility bitmask. What it finds replaces the probe irradiance there; it never adds to it.
+- `screenSpaceQuality` sets the horizon slices and steps per side of that trace. `medium` is the
+  default, the GTAO default of 4 slices x 8 steps.
+- With `screenSpace` false the frame is unchanged: the pass does not record, and the output is
+  the frame from before screen-space GI.
+- `screenSpace` takes a boolean and `screenSpaceQuality` takes one of the three names. Any other
+  value is refused with `gi.invalid`, for example `screenSpaceQuality: expected one of low,
+  medium, high` for `'ultra'` or for a number, and `screenSpace: expected a boolean` for a
+  number. The patch is atomic: nothing changes.
 
 ## Quality
 

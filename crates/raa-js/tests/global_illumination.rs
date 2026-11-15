@@ -16,7 +16,7 @@ use raa_core::RaaError;
 use raa_gi::membership::refusal_message;
 use raa_gi::{
     DebugView, Driver, FINEST_VOXEL_METRES, GiQuality, GiSettings, GiSettingsPatch, GiStats,
-    InstanceGi,
+    InstanceGi, SsgiQuality,
 };
 
 /// The wire entries of a patch, as the wasm boundary builds them.
@@ -72,6 +72,8 @@ fn settings_defaults_follow_the_s36_key_order() {
             ("reflections", GiWire::Bool(true)),
             ("screenTraces", GiWire::Bool(true)),
             ("debugView", text("none")),
+            ("screenSpace", GiWire::Bool(false)),
+            ("screenSpaceQuality", text("medium")),
         ]
     );
 }
@@ -109,6 +111,18 @@ fn settings_refusals_name_the_key_and_reason() {
     assert_eq!(
         settings_refusal(&[("debugView", text("x"))]),
         "debugView: expected one of none, voxels, radiance, distance, levels"
+    );
+    assert_eq!(
+        settings_refusal(&[("screenSpaceQuality", text("ultra"))]),
+        "screenSpaceQuality: expected one of low, medium, high"
+    );
+    assert_eq!(
+        settings_refusal(&[("screenSpaceQuality", GiWire::Number(1.0))]),
+        "screenSpaceQuality: expected one of low, medium, high"
+    );
+    assert_eq!(
+        settings_refusal(&[("screenSpace", GiWire::Number(1.0))]),
+        "screenSpace: expected a boolean"
     );
 }
 
@@ -178,6 +192,18 @@ fn omitted_fields_merge_and_undefined_entries_are_ignored() {
             .unwrap()
             .debug_view,
         DebugView::Levels
+    );
+    assert_eq!(
+        applied_settings(&[
+            ("screenSpace", GiWire::Bool(true)),
+            ("screenSpaceQuality", text("high")),
+        ])
+        .unwrap(),
+        GiSettings {
+            screen_space: true,
+            screen_space_quality: SsgiQuality::High,
+            ..GiSettings::default()
+        }
     );
     assert_eq!(
         applied_quality(&[

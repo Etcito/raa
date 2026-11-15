@@ -10,9 +10,11 @@
 //!
 //! crates/raa-js/src/lib.rs: out of scope for this share: consumers use the module path.
 //!
-//! `SETTING_KEYS` and `QUALITY_KEYS` are the S36 key orders. Every refusal is `gi.invalid` with
-//! the message `<key>: <reason>`; ranges and domains are left to `GiSettingsPatch::apply` and
-//! `GiQualityPatch::apply`, which validate the merged record atomically.
+//! `SETTING_KEYS` and `QUALITY_KEYS` are the S36 key orders. The screen-space keys `screenSpace`
+//! and `screenSpaceQuality` (`gi.ssgi`, `SsgiQuality`) are the last two settings. Every refusal is
+//! `gi.invalid` with the message `<key>: <reason>`; ranges and domains are left to
+//! `GiSettingsPatch::apply` and `GiQualityPatch::apply`, which validate the merged record
+//! atomically. `screenSpaceQuality` is refused unless it names `low`, `medium` or `high`.
 
 // Some helpers are reached only by the host tests or only by the wasm32 runtime of a later card,
 // so they are dead in one of the two builds.
@@ -24,10 +26,11 @@ use raa_core::RaaError;
 use raa_gi::error::invalid;
 use raa_gi::{
     DebugView, Driver, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch, GiStats, InstanceGi,
+    SsgiQuality,
 };
 
 /// The S36 settings keys in their key order: the `GlobalIlluminationSettings` names of the JS API.
-pub(crate) const SETTING_KEYS: [&str; 7] = [
+pub(crate) const SETTING_KEYS: [&str; 9] = [
     "enabled",
     "intensity",
     "environmentDiffuse",
@@ -35,6 +38,8 @@ pub(crate) const SETTING_KEYS: [&str; 7] = [
     "reflections",
     "screenTraces",
     "debugView",
+    "screenSpace",
+    "screenSpaceQuality",
 ];
 
 /// The S36 quality keys in their key order: the `GiQuality` names of the JS API.
@@ -87,8 +92,10 @@ pub(crate) fn parse_settings_patch(
             "localLightShadows" => patch.local_light_shadows = Some(boolean(key, value)?),
             "reflections" => patch.reflections = Some(boolean(key, value)?),
             "screenTraces" => patch.screen_traces = Some(boolean(key, value)?),
-            // `debugView`, the last key of SETTING_KEYS.
-            _ => patch.debug_view = Some(debug_view(value)?),
+            "debugView" => patch.debug_view = Some(debug_view(value)?),
+            "screenSpace" => patch.screen_space = Some(boolean(key, value)?),
+            // `screenSpaceQuality`, the last key of SETTING_KEYS.
+            _ => patch.screen_space_quality = Some(screen_space_quality(value)?),
         }
     }
     Ok(patch)
@@ -150,6 +157,17 @@ fn debug_view(value: &GiWire) -> Result<DebugView, RaaError> {
     }
 }
 
+/// The `screenSpaceQuality` name: exactly `low`, `medium` or `high`. Any other value, or a value
+/// that is not text, is refused with the same reason.
+fn screen_space_quality(value: &GiWire) -> Result<SsgiQuality, RaaError> {
+    const REASON: &str = "expected one of low, medium, high";
+    let parsed = match value {
+        GiWire::Text(name) => SsgiQuality::parse(name),
+        _ => None,
+    };
+    parsed.ok_or_else(|| invalid("screenSpaceQuality", REASON))
+}
+
 /// The resolved settings as `GlobalIlluminationSettings` entries, in [`SETTING_KEYS`] order.
 pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
     vec![
@@ -163,6 +181,11 @@ pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
         ("reflections", GiWire::Bool(s.reflections)),
         ("screenTraces", GiWire::Bool(s.screen_traces)),
         ("debugView", GiWire::Text(s.debug_view.as_str().to_string())),
+        ("screenSpace", GiWire::Bool(s.screen_space)),
+        (
+            "screenSpaceQuality",
+            GiWire::Text(s.screen_space_quality.as_str().to_string()),
+        ),
     ]
 }
 
