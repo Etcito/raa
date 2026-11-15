@@ -668,7 +668,7 @@ struct LightLayoutProbe { records: array<LightGpu, MAX_LOCAL_LIGHTS>, }
             ("RaaInstanceGpu", 128),
             ("RaaPreviousInstanceGpu", 64),
             ("ShadowGpu", 320),
-            ("EnvSh", 160),
+            ("EnvSh", 176),
             ("EnvGpu", 256),
             ("WeatherLightingGpu", WEATHER_LIGHTING_GPU_SIZE as u32),
         ] {

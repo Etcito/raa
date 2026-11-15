@@ -25,6 +25,7 @@ struct SsrParams {
 struct EnvSh {
     sh: array<vec4<f32>, 9>,
     info: vec4<f32>,
+    gi: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> ssr: SsrParams;

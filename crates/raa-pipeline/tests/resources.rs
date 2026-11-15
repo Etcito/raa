@@ -135,6 +135,7 @@ struct ShadowGpu {
 struct EnvSh {
     sh: array<vec4<f32>, 9>,
     info: vec4<f32>,
+    gi: vec4<f32>,
 }
 struct EnvGpu {
     sun_disc: vec4<f32>,

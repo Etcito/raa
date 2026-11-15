@@ -14,7 +14,7 @@ use crate::env::EnvGpu;
 /// Size in bytes of the `ShadowGpu` uniform (binding 2).
 const SHADOW_GPU_SIZE: usize = 320;
 /// Size in bytes of the `EnvSh` uniform (binding 4).
-const ENV_SH_SIZE: usize = 160;
+const ENV_SH_SIZE: usize = 176;
 const LOCAL_LIGHTS_SIZE: usize = MAX_LOCAL_LIGHTS * LIGHT_GPU_SIZE;
 
 /// Byte offset of `WeatherLightingGpu.atmosphericTransmission` (S10 binding 16).
@@ -204,6 +204,7 @@ struct State<V> {
     shadow: [u8; SHADOW_GPU_SIZE],
     sh: [[f32; 4]; 9],
     sh_info: [f32; 4],
+    sh_gi: [f32; 4],
     env: EnvGpu,
     weather: WeatherLightingGpu,
     uploaded_weather: WeatherLightingGpu,
@@ -226,6 +227,7 @@ impl<V: Clone + PartialEq> State<V> {
             shadow: [0; SHADOW_GPU_SIZE],
             sh: [[0.0; 4]; 9],
             sh_info: [0.0; 4],
+            sh_gi: [0.0; 4],
             env: EnvGpu::default(),
             weather: WeatherLightingGpu::default(),
             uploaded_weather: WeatherLightingGpu::default(),
@@ -266,6 +268,14 @@ impl<V: Clone + PartialEq> State<V> {
         self.sh_info = [0.0; 4];
         self.pending.bind_group = true;
         self.pending.env_sh = true;
+    }
+
+    /// Stores `EnvSh.gi` and marks the `EnvSh` uniform for upload only when it differs.
+    fn set_env_gi(&mut self, gi: [f32; 4]) {
+        if self.sh_gi != gi {
+            self.sh_gi = gi;
+            self.pending.env_sh = true;
+        }
     }
 
     fn set_brdf_lut(&mut self, view: V) {
@@ -397,10 +407,14 @@ impl<V: Clone + PartialEq> State<V> {
         std::mem::take(&mut self.pending)
     }
 
-    /// Little-endian `EnvSh` bytes: 9 SH coefficients @0, `info` @144.
+    /// Little-endian `EnvSh` bytes: 9 SH coefficients @0, `info` @144, `gi` @160.
     fn sh_bytes(&self) -> [u8; ENV_SH_SIZE] {
         let mut out = [0u8; ENV_SH_SIZE];
-        let values = self.sh.iter().chain([&self.sh_info]).flat_map(|v| v.iter());
+        let values = self
+            .sh
+            .iter()
+            .chain([&self.sh_info, &self.sh_gi])
+            .flat_map(|v| v.iter());
         for (chunk, value) in out.chunks_exact_mut(4).zip(values) {
             chunk.copy_from_slice(&value.to_le_bytes());
         }
@@ -964,6 +978,23 @@ impl LightingResources {
     /// Returns to the dummy ambient-colour cube and a zero `EnvSh` (enabled 0).
     pub fn clear_env(&mut self) {
         self.state.clear_env();
+    }
+
+    /// Sets `EnvSh.gi` (bytes 160..176): x the GI specular weight `w_gi`, y/z/w 0 and
+    /// reserved. The value is stored and marks the `EnvSh` uniform for upload only when it
+    /// differs from the stored one; `set_env` and `clear_env` leave it untouched.
+    ///
+    /// Handoff: the downstream card "IBL specular replaced by the GI irradiance estimate
+    /// while GI is active" calls `LightingResources::set_env_gi` from
+    /// `IblHandle::apply_pending`; today it stores the four floats and marks the `EnvSh`
+    /// uniform for upload.
+    pub fn set_env_gi(&mut self, gi: [f32; 4]) {
+        self.state.set_env_gi(gi);
+    }
+
+    /// Returns the stored `EnvSh.gi` value (zeros by default).
+    pub fn env_gi(&self) -> [f32; 4] {
+        self.state.sh_gi
     }
 
     /// Sets the Rgba16Float 128 x 192 BRDF/LTC atlas of contract brdf-ltc-atlas, whose
@@ -1751,6 +1782,35 @@ mod tests {
             assert_eq!(at(i * 16), i as f32);
         }
         assert_eq!([at(144), at(148), at(152), at(156)], [2.0, 3.0, 5.0, 1.0]);
+    }
+
+    #[test]
+    fn sh_bytes_put_gi_at_160_and_the_default_is_zero() {
+        let mut state = State::new(dummies());
+        let bytes = state.sh_bytes();
+        assert!(bytes[160..176].iter().all(|b| *b == 0));
+        state.set_env_gi([1.0, 0.25, 0.0, 0.0]);
+        let bytes = state.sh_bytes();
+        assert_eq!(&bytes[160..164], &1.0f32.to_le_bytes());
+        assert_eq!(&bytes[164..168], &0.25f32.to_le_bytes());
+    }
+
+    #[test]
+    fn set_env_gi_marks_env_sh_only_on_change_and_env_setters_keep_it() {
+        let mut state = State::new(dummies());
+        state.set_env_gi([1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            state.take_pending(),
+            Pending {
+                env_sh: true,
+                ..Pending::default()
+            }
+        );
+        state.set_env_gi([1.0, 0.0, 0.0, 0.0]);
+        assert!(!state.take_pending().env_sh);
+        state.set_env(11, [[0.5; 4]; 9], [1.0; 4]);
+        state.clear_env();
+        assert_eq!(state.sh_gi, [1.0, 0.0, 0.0, 0.0]);
     }
 
     #[test]
