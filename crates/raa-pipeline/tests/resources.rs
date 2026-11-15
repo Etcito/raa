@@ -8,7 +8,7 @@
 
 use raa_core::testing::{block_on, skip, software_gpu};
 use raa_core::{CLEAR_COLOR, GpuContext, wgpu};
-use raa_pipeline::{EnvGpu, LightingResources, WeatherLightingGpu};
+use raa_pipeline::{AREA_SHADOW_MASK_LAYERS, EnvGpu, LightingResources, WeatherLightingGpu};
 
 #[test]
 fn weather_lighting_gpu_is_the_neutral_s10_record_at_exact_offsets() {
@@ -184,6 +184,13 @@ struct GiVolumeParams {
     flags: u32,
 }
 @group(1) @binding(18) var<uniform> gi_params: GiVolumeParams;
+struct RaaAreaStochasticGpu {
+    lights: array<vec4<u32>, 2>,
+    weights: array<vec4<f32>, 2>,
+    params: vec4<u32>,
+}
+@group(1) @binding(19) var<uniform> raa_area_stochastic: RaaAreaStochasticGpu;
+@group(1) @binding(20) var raa_area_shadow_mask: texture_2d_array<f32>;
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -244,6 +251,21 @@ fn fs_gi() -> GiOut {
     out.f = textureSampleLevel(gi_volume, linear_clamp, vec3<f32>(uv, 0.5), 0.0);
     out.g = vec4<f32>(dot(levels, vec4<f32>(1.0)), abs(gi_params.resolution) + abs(gi_params.intensity),
         f32(gi_params.level_count), f32(gi_params.flags));
+    return out;
+}
+
+/// The S44 area reads (`fs_area`): mask layer 1 at texel (0, 0) as the first target, and the
+/// table's `limit` (params.x) in the first lane of the second.
+struct AreaOut {
+    @location(0) a: vec4<f32>,
+    @location(1) b: vec4<f32>,
+}
+
+@fragment
+fn fs_area() -> AreaOut {
+    var out: AreaOut;
+    out.a = textureLoad(raa_area_shadow_mask, vec2<i32>(0), 1, 0);
+    out.b = vec4<f32>(f32(raa_area_stochastic.params.x), 0.0, 0.0, 0.0);
     return out;
 }
 "#;
@@ -420,6 +442,50 @@ fn render_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32;
 /// Renders the GI reads (`fs_gi`) with `lighting.bind_group()` at group 1.
 fn render_gi_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 3] {
     render_entry(gpu, lighting.layout(), lighting.bind_group(), "fs_gi")
+}
+
+/// Renders the S44 area reads (`fs_area`) with `lighting.bind_group()` at group 1.
+fn render_area_with_group_1(gpu: &GpuContext, lighting: &LightingResources) -> [[f32; 4]; 2] {
+    render_entry(gpu, lighting.layout(), lighting.bind_group(), "fs_area")
+}
+
+/// A 1x1 texture of `layers` layers in `format` with `texel` in every texel, viewed as a
+/// `texture_2d_array` (the S44 area shadow mask candidates).
+fn mask_view(
+    gpu: &GpuContext,
+    layers: u32,
+    format: wgpu::TextureFormat,
+    texel: &[u8],
+) -> wgpu::TextureView {
+    let size = wgpu::Extent3d {
+        width: 1,
+        height: 1,
+        depth_or_array_layers: layers,
+    };
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("resources test area shadow mask"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        &texel.repeat(layers as usize),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(texel.len() as u32),
+            rows_per_image: Some(1),
+        },
+        size,
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    })
 }
 
 fn dummies_bind_and_read_their_values(gpu: &GpuContext) {
@@ -642,6 +708,83 @@ fn base_layout_pipeline_binds_the_base_group(gpu: &GpuContext) {
     assert_dummy_reads(outputs);
 }
 
+/// `set_area_shadow` publishes a 2-layer Rgba16Float mask of 0.25 and a table with limit 3,
+/// read by `fs_area` after the next upload. Before it, the dummies read (1, 1, 1, 1) and 0.
+/// A single-layer and an Rgba8Unorm mask are refused with `core.resource`, and the read
+/// after the refusals still gives 0.25 and 3.
+fn area_shadow_mask_is_published_and_refused_as_specified(gpu: &GpuContext) {
+    let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut lighting = LightingResources::new(gpu);
+    let [mask, table] = render_area_with_group_1(gpu, &lighting);
+    assert_near(mask, [1.0; 4], "dummy area shadow mask");
+    assert_near(table, [0.0; 4], "dummy slot table");
+
+    // 0.25 as f16 bits 0x3400, little-endian, in each of the four channels
+    let quarter: Vec<u8> = [0x3400u16; 4]
+        .iter()
+        .flat_map(|bits| bits.to_le_bytes())
+        .collect();
+    let mut bytes = [0u8; 80];
+    bytes[64..68].copy_from_slice(&3u32.to_le_bytes());
+    let mask = mask_view(
+        gpu,
+        AREA_SHADOW_MASK_LAYERS,
+        wgpu::TextureFormat::Rgba16Float,
+        &quarter,
+    );
+    lighting
+        .set_area_shadow(mask, &bytes)
+        .expect("2-layer Rgba16Float mask");
+    lighting.upload(gpu);
+    let [mask, table] = render_area_with_group_1(gpu, &lighting);
+    assert_near(mask, [0.25; 4], "published area shadow mask");
+    assert_near(table, [3.0, 0.0, 0.0, 0.0], "published slot table");
+
+    let single = mask_view(gpu, 1, wgpu::TextureFormat::Rgba16Float, &quarter);
+    let error = lighting
+        .set_area_shadow(single, &[0; 80])
+        .expect_err("single-layer mask");
+    assert_eq!(error.code(), "core.resource");
+    let rgba8 = mask_view(gpu, 2, wgpu::TextureFormat::Rgba8Unorm, &[0; 4]);
+    let error = lighting
+        .set_area_shadow(rgba8, &[0; 80])
+        .expect_err("Rgba8Unorm mask");
+    assert_eq!(error.code(), "core.resource");
+    lighting.upload(gpu);
+    let [mask, table] = render_area_with_group_1(gpu, &lighting);
+    assert_near(mask, [0.25; 4], "refused masks change nothing");
+    assert_near(table, [3.0, 0.0, 0.0, 0.0], "refused tables change nothing");
+
+    let error = block_on(scope.pop());
+    assert!(error.is_none(), "validation error: {error:?}");
+}
+
+/// A pipeline laid out as `opaque_layout()` binds `opaque_bind_group()`: `fs_gi` reads the
+/// same dummy values as through the full group, and `fs_area` reads the area dummies. Neither
+/// entry reads the opaque colour or depth (9 and 10), which the opaque layout does not have.
+fn opaque_layout_pipeline_binds_the_opaque_group(gpu: &GpuContext) {
+    let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let lighting = LightingResources::new(gpu);
+    let full_gi = render_gi_with_group_1(gpu, &lighting);
+    let opaque_gi: [[f32; 4]; 3] = render_entry(
+        gpu,
+        lighting.opaque_layout(),
+        lighting.opaque_bind_group(),
+        "fs_gi",
+    );
+    let [mask, table] = render_entry(
+        gpu,
+        lighting.opaque_layout(),
+        lighting.opaque_bind_group(),
+        "fs_area",
+    );
+    let error = block_on(scope.pop());
+    assert!(error.is_none(), "validation error: {error:?}");
+    assert_eq!(opaque_gi, full_gi, "fs_gi through the opaque group");
+    assert_near(mask, [1.0; 4], "dummy area shadow mask");
+    assert_near(table, [0.0; 4], "dummy slot table");
+}
+
 fn cleared_features_still_bind(gpu: &GpuContext) {
     let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
     let mut lighting = LightingResources::new(gpu);
@@ -677,5 +820,7 @@ fn lighting_resources_on_the_software_gpu() {
     invalid_weather_resources_are_refused_before_publication(&gpu);
     set_gi_refuses_bad_views_and_accepts_a_volume(&gpu);
     base_layout_pipeline_binds_the_base_group(&gpu);
+    opaque_layout_pipeline_binds_the_opaque_group(&gpu);
+    area_shadow_mask_is_published_and_refused_as_specified(&gpu);
     std::mem::forget(gpu);
 }

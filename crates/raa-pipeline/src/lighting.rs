@@ -23,6 +23,18 @@ const WEATHER_TRANSMISSION_OFFSET: u64 = 32;
 /// Size in bytes of the S38 `RaaGiVolumeParams` uniform (group 1 binding 18).
 pub const GI_VOLUME_PARAMS_SIZE: usize = 96;
 
+/// Size in bytes of the S44 `RaaAreaStochasticGpu` uniform (group 1 binding 19): the packed
+/// mid-tier light indices, their weights and the `limit` and `cells` parameters.
+pub const AREA_STOCHASTIC_GPU_SIZE: usize = 80;
+
+/// Mid-tier slots of the S44 area stochastic table (slot s is the lane s of `lights` and
+/// `weights`); readers visit slots 0..min(limit, 8) only.
+pub const MAX_STOCHASTIC_LIGHTS: usize = 8;
+
+/// Array layers of the S44 area shadow mask (group 1 binding 20): slot s is layer s / 4,
+/// channel s % 4.
+pub const AREA_SHADOW_MASK_LAYERS: u32 = 2;
+
 /// S10 `WeatherLightingGpu` (group 1 binding 16), a 64-byte `UNIFORM | COPY_DST` record
 /// separate from `FrameGpu` and `EnvGpu`.
 ///
@@ -142,7 +154,7 @@ fn uvec4_bytes(values: &[u32; 4]) -> [u8; 16] {
 /// x intensity 0.3), so a frame without an env reads the flat ambient.
 const DUMMY_ENV_COLOR: [f32; 3] = [0.6 * 0.3, 0.65 * 0.3, 0.75 * 0.3];
 
-/// The eleven texture bindings of group 1.
+/// The twelve texture bindings of group 1.
 #[derive(Clone, Debug, PartialEq)]
 struct Views<V> {
     shadow_map: V,
@@ -156,6 +168,16 @@ struct Views<V> {
     cloud_transmittance: V,
     gi_screen: V,
     gi_volume: V,
+    area_shadow_mask: V,
+}
+
+/// Which group-1 binding set a bind group is built over: the pre-P4 base set (S38), the
+/// full set 0..=20, or the full set without the opaque copy 9 and 10 (S44).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupSet {
+    Base,
+    Opaque,
+    Full,
 }
 
 /// What `upload` has to do: rebuild the bind group and/or write each uniform.
@@ -168,6 +190,7 @@ struct Pending {
     local_lights: bool,
     weather: bool,
     gi_params: bool,
+    area_table: bool,
 }
 
 /// Device-free part of `LightingResources`: current views, uniform contents and the dirty
@@ -186,6 +209,8 @@ struct State<V> {
     uploaded_weather: WeatherLightingGpu,
     gi_params: [u8; GI_VOLUME_PARAMS_SIZE],
     uploaded_gi_params: [u8; GI_VOLUME_PARAMS_SIZE],
+    area_table: [u8; AREA_STOCHASTIC_GPU_SIZE],
+    uploaded_area_table: [u8; AREA_STOCHASTIC_GPU_SIZE],
     views_generation: u64,
     pending: Pending,
 }
@@ -206,6 +231,8 @@ impl<V: Clone + PartialEq> State<V> {
             uploaded_weather: WeatherLightingGpu::default(),
             gi_params: [0; GI_VOLUME_PARAMS_SIZE],
             uploaded_gi_params: [0; GI_VOLUME_PARAMS_SIZE],
+            area_table: [0; AREA_STOCHASTIC_GPU_SIZE],
+            uploaded_area_table: [0; AREA_STOCHASTIC_GPU_SIZE],
             views_generation: 0,
             pending: Pending::default(),
         }
@@ -329,6 +356,19 @@ impl<V: Clone + PartialEq> State<V> {
         self.gi_params = [0; GI_VOLUME_PARAMS_SIZE];
     }
 
+    /// Assigns the S44 area shadow mask view and slot table bytes only. It marks nothing
+    /// pending: `take_pending` compares the view and the bytes with the bound and uploaded ones.
+    fn set_area_shadow(&mut self, view: V, table: &[u8; AREA_STOCHASTIC_GPU_SIZE]) {
+        self.views.area_shadow_mask = view;
+        self.area_table = *table;
+    }
+
+    /// Restores the dummy mask (ones in every layer) and the all-zero table, marking nothing.
+    fn clear_area_shadow(&mut self) {
+        self.views.area_shadow_mask = self.dummies.area_shadow_mask.clone();
+        self.area_table = [0; AREA_STOCHASTIC_GPU_SIZE];
+    }
+
     /// Returns the pending work and marks everything clean.
     fn take_pending(&mut self) -> Pending {
         self.pending.bind_group = self.views != self.bound_views;
@@ -349,6 +389,10 @@ impl<V: Clone + PartialEq> State<V> {
         self.pending.gi_params = self.gi_params != self.uploaded_gi_params;
         if self.pending.gi_params {
             self.uploaded_gi_params = self.gi_params;
+        }
+        self.pending.area_table = self.area_table != self.uploaded_area_table;
+        if self.pending.area_table {
+            self.uploaded_area_table = self.area_table;
         }
         std::mem::take(&mut self.pending)
     }
@@ -435,9 +479,10 @@ fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// The full S38 group-1 binding set, ascending: 0..=18. Bindings 14, 17 and 18 are the GI
-/// screen texture, the volume atlas and the 96 B volume params.
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 19] {
+/// The full S44 group-1 binding set, ascending: 0..=20. Bindings 14, 17 and 18 are the GI
+/// screen texture, the volume atlas and the 96 B volume params; 19 and 20 are the 80 B area
+/// stochastic table and the two-layer area shadow mask.
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 21] {
     use wgpu::TextureSampleType as S;
     use wgpu::TextureViewDimension as D;
     let filterable = S::Float { filterable: true };
@@ -456,9 +501,26 @@ fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 19] {
             visibility: fragment,
             ..uniform_entry(18, GI_VOLUME_PARAMS_SIZE)
         },
+        19 => wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..uniform_entry(19, AREA_STOCHASTIC_GPU_SIZE)
+        },
+        20 => wgpu::BindGroupLayoutEntry {
+            visibility: fragment,
+            ..texture_entry(20, filterable, D::D2Array)
+        },
         index if index < 14 => base[index],
         index => base[index - 1],
     })
+}
+
+/// The S44 opaque group-1 binding set: the full set without 9 and 10 (the opaque colour and
+/// depth), ascending: 0..=8 and 11..=20. Each entry is the full set's entry with its number.
+fn opaque_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
+    layout_entries()
+        .into_iter()
+        .filter(|entry| entry.binding != 9 && entry.binding != 10)
+        .collect()
 }
 
 /// The pre-P4 group-1 binding set, ascending: 0..=13, 15 and 16.
@@ -579,7 +641,8 @@ const DUMMY_SHADOW_LAYERS: u32 = 2;
 
 /// Creates the dummy views: depth 1 (2d array), env cube of DUMMY_ENV_COLOR, the BRDF/LTC
 /// atlas with its BRDF region (1, 0), ao/contact 1, opaque colour black, opaque depth 1,
-/// GI screen (0, 0, 0, 1) and a 1x1x1 volume of (0, 0, 0, 12.8) (S38, no hit).
+/// GI screen (0, 0, 0, 1), a 1x1x1 volume of (0, 0, 0, 12.8) (S38, no hit) and the S44 area
+/// shadow mask of ones in every layer.
 /// Depth32Float cannot be written by a copy, so each shadow dummy layer is cleared to 1.0
 /// by a render pass.
 fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
@@ -687,6 +750,13 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         "raa-pipeline.dummy.gi_volume",
         &f16_texel(&[0.0, 0.0, 0.0, 12.8]),
     );
+    let area_mask = dummy_texture(
+        gpu,
+        "raa-pipeline.dummy.area_shadow_mask",
+        HDR_FORMAT,
+        AREA_SHADOW_MASK_LAYERS,
+        &f16_texel(&[1.0; 4]),
+    );
     Views {
         shadow_map: view_of(&shadow, D::D2Array),
         env_specular: view_of(&env, D::Cube),
@@ -699,6 +769,7 @@ fn create_dummies(gpu: &GpuContext) -> Views<wgpu::TextureView> {
         cloud_transmittance: view_of(&transmittance, D::D2Array),
         gi_screen: view_of(&gi_screen, D::D2),
         gi_volume: view_of(&gi_volume, D::D3),
+        area_shadow_mask: view_of(&area_mask, D::D2Array),
     }
 }
 
@@ -721,6 +792,8 @@ pub struct LightingResources {
     bind_group: wgpu::BindGroup,
     base_layout: wgpu::BindGroupLayout,
     base_bind_group: wgpu::BindGroup,
+    opaque_layout: wgpu::BindGroupLayout,
+    opaque_bind_group: wgpu::BindGroup,
     shadow_cmp: wgpu::Sampler,
     linear_clamp: wgpu::Sampler,
     shadow_buffer: wgpu::Buffer,
@@ -729,6 +802,7 @@ pub struct LightingResources {
     light_buffer: wgpu::Buffer,
     weather_buffer: wgpu::Buffer,
     gi_params_buffer: wgpu::Buffer,
+    area_table_buffer: wgpu::Buffer,
     state: State<wgpu::TextureView>,
 }
 
@@ -770,41 +844,53 @@ impl LightingResources {
         );
         let gi_params_buffer =
             uniform_buffer(gpu, "raa-pipeline.gi_volume_params", &state.gi_params);
+        let area_table_buffer =
+            uniform_buffer(gpu, "raa-pipeline.area_stochastic", &state.area_table);
+        let opaque_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-pipeline.lighting.opaque"),
+            entries: &opaque_layout_entries(),
+        });
+        let uniforms = [
+            &shadow_buffer,
+            &sh_buffer,
+            &env_buffer,
+            &light_buffer,
+            &weather_buffer,
+            &gi_params_buffer,
+            &area_table_buffer,
+        ];
+        let samplers = [&shadow_cmp, &linear_clamp];
         let bind_group = build_bind_group(
             gpu,
             &layout,
             &state.views,
-            [&shadow_cmp, &linear_clamp],
-            [
-                &shadow_buffer,
-                &sh_buffer,
-                &env_buffer,
-                &light_buffer,
-                &weather_buffer,
-                &gi_params_buffer,
-            ],
-            true,
+            samplers,
+            uniforms,
+            GroupSet::Full,
         );
         let base_bind_group = build_bind_group(
             gpu,
             &base_layout,
             &state.views,
-            [&shadow_cmp, &linear_clamp],
-            [
-                &shadow_buffer,
-                &sh_buffer,
-                &env_buffer,
-                &light_buffer,
-                &weather_buffer,
-                &gi_params_buffer,
-            ],
-            false,
+            samplers,
+            uniforms,
+            GroupSet::Base,
+        );
+        let opaque_bind_group = build_bind_group(
+            gpu,
+            &opaque_layout,
+            &state.views,
+            samplers,
+            uniforms,
+            GroupSet::Opaque,
         );
         LightingResources {
             layout,
             bind_group,
             base_layout,
             base_bind_group,
+            opaque_layout,
+            opaque_bind_group,
             shadow_cmp,
             linear_clamp,
             shadow_buffer,
@@ -813,6 +899,7 @@ impl LightingResources {
             light_buffer,
             weather_buffer,
             gi_params_buffer,
+            area_table_buffer,
             state,
         }
     }
@@ -836,6 +923,25 @@ impl LightingResources {
     /// The current pre-P4 bind group over the same resources; rebuilt with the full group.
     pub fn base_bind_group(&self) -> &wgpu::BindGroup {
         &self.base_bind_group
+    }
+
+    /// The S44 opaque group-1 layout: the full set 0..=20 without the opaque colour and depth
+    /// (9 and 10), with 10 sampled textures, 2 samplers and 7 uniforms. Consumers: vg.gbuffer,
+    /// vg.shade, raa-ssr (fs_trace and fs_composite) and raa-shafts, which never read 9 or 10.
+    ///
+    /// Handoff: the downstream card "raa-shader: forward area-light branch reads the stochastic
+    /// shadow mask (bindings 19/20) and blends it over the band" calls
+    /// `LightingResources::opaque_layout` and `LightingResources::opaque_bind_group`. Today both
+    /// are built in `LightingResources::new` from the module-private `opaque_layout_entries`
+    /// (`layout_entries` without 9 and 10) and rebuilt in `LightingResources::upload` with the
+    /// full group, over the same views and uniforms; the layout has no binding 9 or 10.
+    pub fn opaque_layout(&self) -> &wgpu::BindGroupLayout {
+        &self.opaque_layout
+    }
+
+    /// The current S44 opaque bind group (see `opaque_layout`); rebuilt with the full group.
+    pub fn opaque_bind_group(&self) -> &wgpu::BindGroup {
+        &self.opaque_bind_group
     }
 
     /// Sets the cascaded shadow map (a `texture_depth_2d_array` view) and its 320 B
@@ -1017,6 +1123,59 @@ impl LightingResources {
         self.state.clear_gi();
     }
 
+    /// Publishes the S44 area shadow mask (binding 20) and its 80-byte slot table (binding 19).
+    /// The mask must be a D2 Rgba16Float texture, single-sampled, with at least
+    /// `AREA_SHADOW_MASK_LAYERS` array layers and `TEXTURE_BINDING`; otherwise this is refused
+    /// with `core.resource` and nothing changes. An accepted call only assigns the view and the
+    /// bytes; the next `upload` writes the buffer and rebuilds the groups when they changed.
+    ///
+    /// Handoff: the downstream card "raa-gi: AreaShadowPart and the gi.area-shadow feature pass
+    /// (order 43) publishing the mask" calls `LightingResources::set_area_shadow`,
+    /// `LightingResources::clear_area_shadow` and `LightingResources::area_stochastic_buffer`.
+    /// Today nothing in the crate calls `set_area_shadow` yet: the group-1 dummies stay bound
+    /// until a caller publishes a mask, and `LightingResources::upload` then writes binding 19
+    /// from `State::area_table` when it differs from `State::uploaded_area_table`.
+    pub fn set_area_shadow(
+        &mut self,
+        mask: wgpu::TextureView,
+        table: &[u8; AREA_STOCHASTIC_GPU_SIZE],
+    ) -> Result<(), RaaError> {
+        let texture = mask.texture();
+        if texture.dimension() != wgpu::TextureDimension::D2
+            || texture.format() != wgpu::TextureFormat::Rgba16Float
+            || texture.depth_or_array_layers() < AREA_SHADOW_MASK_LAYERS
+            || texture.sample_count() != 1
+            || !texture
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+        {
+            return Err(RaaError::Resource(format!(
+                "area shadow mask must be a 2D Rgba16Float texture with at least {} array layers, \
+                 sampled without MSAA and with TEXTURE_BINDING, got {:?} {:?} with {} layers, \
+                 sample count {} and usage {:?}",
+                AREA_SHADOW_MASK_LAYERS,
+                texture.dimension(),
+                texture.format(),
+                texture.depth_or_array_layers(),
+                texture.sample_count(),
+                texture.usage()
+            )));
+        }
+        self.state.set_area_shadow(mask, table);
+        Ok(())
+    }
+
+    /// Restores the S44 dummies: the 1x1 mask of ones in every array layer and the all-zero
+    /// slot table (no mid tier). Nothing is written here; the next `upload` publishes it.
+    pub fn clear_area_shadow(&mut self) {
+        self.state.clear_area_shadow();
+    }
+
+    /// The 80-byte `RaaAreaStochasticGpu` uniform (group 1 binding 19), `UNIFORM | COPY_DST`.
+    pub fn area_stochastic_buffer(&self) -> &wgpu::Buffer {
+        &self.area_table_buffer
+    }
+
     /// The currently bound env cube (group 1 binding 3).
     pub fn env_specular_view(&self) -> &wgpu::TextureView {
         &self.state.views.env_specular
@@ -1064,10 +1223,10 @@ impl LightingResources {
         self.state.env_mut()
     }
 
-    /// Writes the changed uniforms and rebuilds the bind group when a view changed.
-    // called by the pipeline's prepare (Pipeline::install)
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn upload(&mut self, gpu: &GpuContext) {
+    /// Writes the changed uniforms and rebuilds the bind groups when a view changed. The
+    /// pipeline's prepare calls it after the targets ensure and again after the feature
+    /// prepares, so a frame's records bind what the prepares published.
+    pub fn upload(&mut self, gpu: &GpuContext) {
         let pending = self.state.take_pending();
         if pending.shadow {
             gpu.queue()
@@ -1095,51 +1254,60 @@ impl LightingResources {
             gpu.queue()
                 .write_buffer(&self.gi_params_buffer, 0, &self.state.gi_params);
         }
+        if pending.area_table {
+            gpu.queue()
+                .write_buffer(&self.area_table_buffer, 0, &self.state.area_table);
+        }
         if pending.bind_group {
+            let uniforms = [
+                &self.shadow_buffer,
+                &self.sh_buffer,
+                &self.env_buffer,
+                &self.light_buffer,
+                &self.weather_buffer,
+                &self.gi_params_buffer,
+                &self.area_table_buffer,
+            ];
+            let samplers = [&self.shadow_cmp, &self.linear_clamp];
             self.bind_group = build_bind_group(
                 gpu,
                 &self.layout,
                 &self.state.views,
-                [&self.shadow_cmp, &self.linear_clamp],
-                [
-                    &self.shadow_buffer,
-                    &self.sh_buffer,
-                    &self.env_buffer,
-                    &self.light_buffer,
-                    &self.weather_buffer,
-                    &self.gi_params_buffer,
-                ],
-                true,
+                samplers,
+                uniforms,
+                GroupSet::Full,
             );
             self.base_bind_group = build_bind_group(
                 gpu,
                 &self.base_layout,
                 &self.state.views,
-                [&self.shadow_cmp, &self.linear_clamp],
-                [
-                    &self.shadow_buffer,
-                    &self.sh_buffer,
-                    &self.env_buffer,
-                    &self.light_buffer,
-                    &self.weather_buffer,
-                    &self.gi_params_buffer,
-                ],
-                false,
+                samplers,
+                uniforms,
+                GroupSet::Base,
+            );
+            self.opaque_bind_group = build_bind_group(
+                gpu,
+                &self.opaque_layout,
+                &self.state.views,
+                samplers,
+                uniforms,
+                GroupSet::Opaque,
             );
         }
     }
 }
 
 /// Bind group over `views`, the samplers (comparison, linear clamp) and the uniforms
-/// (ShadowGpu, EnvSh, EnvGpu, local lights, weather lighting, GI params). `full` binds the
-/// S38 additions 14, 17 and 18; without it the group is the pre-P4 set 0..=13, 15 and 16.
+/// (ShadowGpu, EnvSh, EnvGpu, local lights, weather lighting, GI params, area table). `set`
+/// selects the binding set: `Base` is the pre-P4 set 0..=13, 15 and 16; `Full` adds 14, 17,
+/// 18, 19 and 20; `Opaque` is `Full` without the opaque copy 9 and 10.
 fn build_bind_group(
     gpu: &GpuContext,
     layout: &wgpu::BindGroupLayout,
     views: &Views<wgpu::TextureView>,
     [shadow_cmp, linear_clamp]: [&wgpu::Sampler; 2],
-    [shadow, sh, env, lights, weather, gi_params]: [&wgpu::Buffer; 6],
-    full: bool,
+    [shadow, sh, env, lights, weather, gi_params, area]: [&wgpu::Buffer; 7],
+    set: GroupSet,
 ) -> wgpu::BindGroup {
     use wgpu::BindingResource as R;
     let mut resources: Vec<(u32, R<'_>)> = vec![
@@ -1160,11 +1328,16 @@ fn build_bind_group(
         (15, R::TextureView(&views.cloud_transmittance)),
         (16, weather.as_entire_binding()),
     ];
-    if full {
+    if set != GroupSet::Base {
         resources.push((14, R::TextureView(&views.gi_screen)));
         resources.push((17, R::TextureView(&views.gi_volume)));
         resources.push((18, gi_params.as_entire_binding()));
+        resources.push((19, area.as_entire_binding()));
+        resources.push((20, R::TextureView(&views.area_shadow_mask)));
         resources.sort_by_key(|(binding, _)| *binding);
+    }
+    if set == GroupSet::Opaque {
+        resources.retain(|(binding, _)| !matches!(*binding, 9 | 10));
     }
     let entries: Vec<wgpu::BindGroupEntry> = resources
         .into_iter()
@@ -1194,6 +1367,7 @@ mod tests {
             cloud_transmittance: 7,
             gi_screen: 8,
             gi_volume: 9,
+            area_shadow_mask: 10,
         }
     }
 
@@ -1205,20 +1379,45 @@ mod tests {
         local_lights: false,
         weather: false,
         gi_params: false,
+        area_table: false,
     };
+
+    /// Fragment-stage texture bindings, sampler count and uniform count of a binding set.
+    fn fragment_counts(entries: &[wgpu::BindGroupLayoutEntry]) -> (Vec<u32>, usize, usize) {
+        let fragment: Vec<&wgpu::BindGroupLayoutEntry> = entries
+            .iter()
+            .filter(|entry| entry.visibility.contains(wgpu::ShaderStages::FRAGMENT))
+            .collect();
+        let textures = fragment
+            .iter()
+            .filter(|entry| matches!(entry.ty, wgpu::BindingType::Texture { .. }))
+            .map(|entry| entry.binding)
+            .collect();
+        let samplers = fragment
+            .iter()
+            .filter(|entry| matches!(entry.ty, wgpu::BindingType::Sampler(_)))
+            .count();
+        let uniforms = fragment
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.ty,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        ..
+                    }
+                )
+            })
+            .count();
+        (textures, samplers, uniforms)
+    }
 
     #[test]
     fn local_light_layout_is_fragment_only_without_storage_or_sampler() {
         let entries = layout_entries();
         assert_eq!(LOCAL_LIGHTS_SIZE, 16384);
         let bindings: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
-        assert_eq!(
-            bindings,
-            vec![
-                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
-            ],
-            "full S38 set"
-        );
+        assert_eq!(bindings, (0..=20).collect::<Vec<u32>>(), "full S44 set");
         for entry in &entries {
             assert_eq!(entry.count, None);
             assert_eq!(
@@ -1675,8 +1874,8 @@ mod tests {
         assert_eq!(base, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16]);
         let full = layout_entries();
         let bindings: Vec<u32> = full.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=18).collect::<Vec<u32>>());
-        for binding in [14, 17, 18] {
+        assert_eq!(bindings, (0..=20).collect::<Vec<u32>>());
+        for binding in [14, 17, 18, 19, 20] {
             let entry = full.iter().find(|entry| entry.binding == binding);
             let visibility = entry.map(|entry| entry.visibility);
             assert_eq!(
@@ -1688,35 +1887,80 @@ mod tests {
     }
 
     #[test]
-    fn full_layout_fragment_counts_are_11_textures_2_samplers_and_6_uniforms() {
-        let fragment: Vec<wgpu::BindGroupLayoutEntry> = layout_entries()
-            .into_iter()
-            .filter(|entry| entry.visibility.contains(wgpu::ShaderStages::FRAGMENT))
-            .collect();
-        assert_eq!(fragment.len(), 19);
-        let textures: Vec<u32> = fragment
-            .iter()
-            .filter(|entry| matches!(entry.ty, wgpu::BindingType::Texture { .. }))
-            .map(|entry| entry.binding)
-            .collect();
-        assert_eq!(textures, [0, 3, 5, 7, 8, 9, 10, 13, 14, 15, 17]);
-        let samplers = fragment
-            .iter()
-            .filter(|entry| matches!(entry.ty, wgpu::BindingType::Sampler(_)))
-            .count();
-        let uniforms = fragment
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.ty,
-                    wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!((samplers, uniforms), (2, 6));
+    fn full_layout_fragment_counts_are_12_textures_2_samplers_and_7_uniforms() {
+        let (textures, samplers, uniforms) = fragment_counts(&layout_entries());
+        assert_eq!(
+            textures,
+            [0, 3, 5, 7, 8, 9, 10, 13, 14, 15, 17, 20],
+            "sampled textures"
+        );
+        assert_eq!((samplers, uniforms), (2, 7));
+    }
+
+    #[test]
+    fn opaque_layout_is_the_full_set_without_9_and_10() {
+        let full = layout_entries();
+        let opaque = opaque_layout_entries();
+        let bindings: Vec<u32> = opaque.iter().map(|entry| entry.binding).collect();
+        assert_eq!(bindings, (0..=8).chain(11..=20).collect::<Vec<u32>>());
+        for entry in &opaque {
+            let same = full.iter().find(|other| other.binding == entry.binding);
+            assert_eq!(Some(entry), same, "binding {}", entry.binding);
+        }
+    }
+
+    #[test]
+    fn opaque_layout_fragment_counts_are_10_textures_2_samplers_and_7_uniforms() {
+        let (textures, samplers, uniforms) = fragment_counts(&opaque_layout_entries());
+        assert_eq!(
+            textures,
+            [0, 3, 5, 7, 8, 13, 14, 15, 17, 20],
+            "sampled textures"
+        );
+        assert_eq!((samplers, uniforms), (2, 7));
+    }
+
+    #[test]
+    fn set_area_shadow_assigns_the_view_and_table_and_reports_once() {
+        let mut state = State::new(dummies());
+        let table = [3; AREA_STOCHASTIC_GPU_SIZE];
+        state.set_area_shadow(20, &table);
+        assert_eq!(state.views.area_shadow_mask, 20);
+        assert_eq!(state.area_table, table);
+        let changed = Pending {
+            area_table: true,
+            ..ONLY_BIND
+        };
+        assert_eq!(state.take_pending(), changed);
+        assert_eq!(state.take_pending(), Pending::default());
+    }
+
+    #[test]
+    fn clear_area_shadow_restores_the_dummies_and_zero_bytes() {
+        let mut state = State::new(dummies());
+        state.set_area_shadow(20, &[3; AREA_STOCHASTIC_GPU_SIZE]);
+        state.take_pending();
+        state.clear_area_shadow();
+        assert_eq!(state.views, dummies());
+        assert_eq!(state.area_table, [0; AREA_STOCHASTIC_GPU_SIZE]);
+        let changed = Pending {
+            area_table: true,
+            ..ONLY_BIND
+        };
+        assert_eq!(state.take_pending(), changed);
+        assert_eq!(state.take_pending(), Pending::default());
+    }
+
+    #[test]
+    fn repeated_area_shadow_calls_mark_nothing_and_keep_the_generation() {
+        let mut state = State::new(dummies());
+        let table = [3; AREA_STOCHASTIC_GPU_SIZE];
+        state.set_area_shadow(20, &table);
+        state.take_pending();
+        let generation = state.views_generation;
+        state.set_area_shadow(20, &table);
+        assert_eq!(state.take_pending(), Pending::default());
+        assert_eq!(state.views_generation, generation);
     }
 
     /// Real setters and `upload` on the software GPU: the bind group is rebuilt only when a
