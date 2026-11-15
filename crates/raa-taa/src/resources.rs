@@ -6,7 +6,6 @@
 //! storage textures. The resolve reads hdr.src() and the history, so there is one group per
 //! HDR orientation (A and B) and per history parity; record picks the one matching
 //! `hdr.src_texture()` and the write index.
-#![allow(dead_code)] // Staged before the feature share lands: card "raa-taa: taa feature pass, install and handle".
 
 use std::num::NonZeroU64;
 

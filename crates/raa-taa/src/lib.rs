@@ -5,10 +5,12 @@
 //! [`HistoryState`] and [`HistoryPair`] ping-pong are also reused by the M6 shadow-mask and
 //! M7 reservoir histories.
 
+mod feature;
 mod history;
 mod resources;
 mod shaders;
 
+pub use feature::{TaaFeature, TaaHandle};
 pub use history::{HistoryPair, HistoryState};
 pub use shaders::{
     REPROJECT_WGSL, TAA_ENTRY, TAA_PARAMS_SIZE, TAA_WGSL, TAA_WORKGROUP, TEMPORAL_FRAME_SIZE,

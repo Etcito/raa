@@ -22,13 +22,26 @@ then swapping.
 `HistoryPair` and `HistoryState` are reused by the M6 shadow-mask history and the M7
 reservoir history. Their GPU textures are view-local; only submitted work commits them.
 
-## Pass
+## Usage
 
-Later shares add the S12 compute pass `taa` (order 100, after `particles.blend` 85 and before
-`dof` 110), installed disabled. It is enabled from JS with
-`setPassEnabled('taa', true)`; resize, `set_enabled(false)` and `TaaHandle::invalidate`
-invalidate its history. The TAA resolve shader is adapted from solstice (MIT, Copyright (c)
-2026 SamG-Coder).
+`TaaFeature::install` adds the S12 compute pass `taa` (order 100, after `particles.blend` 85
+and before `dof` 110) already disabled. It reads the lit renderer's live 768-byte FrameGpu
+uniform:
+
+```rust
+let taa = TaaFeature::install(gpu, &pipeline, &lit.handle().frame_buffer())?;
+```
+
+Enable it from Rust with `pipeline.borrow_mut().set_enabled("taa", true)?` or from JS with
+`setPassEnabled('taa', true)`. A second install is refused with `pipeline.duplicate_pass`.
+
+`TaaHandle` clones share the pass's state: `accumulated_frames()` and `history_valid()`
+report the frames since the last invalidation, and `invalidate()` drops them to 0 at once.
+
+The history is invalidated on every resize (the pair is recreated when the size changes), on
+`set_enabled(false)` and on `TaaHandle::invalidate` (a viewport camera cut). The pass uses it
+only when its own `HistoryState` is valid and FrameGpu `temporal.y`/`temporal.z` are set; the
+resolve shader is adapted from solstice (MIT, Copyright (c) 2026 SamG-Coder).
 
 ## Test
 
