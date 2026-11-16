@@ -426,6 +426,6 @@ fn resolve_and_surface_bind_groups_create_without_validation_error() {
     let error = block_on(errors.pop());
     assert!(error.is_none(), "resolve validation: {error:?}");
     assert_eq!(surface.size(), (64, 64));
-    assert_eq!(surface.allocated_bytes(), 64 * 64 * (16 + 8 + 16 + 4));
+    assert_eq!(surface.allocated_bytes(), 64 * 64 * (16 + 8 + 16 + 16));
     assert_eq!(resolve.allocated_bytes(), 16);
 }

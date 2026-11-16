@@ -69,22 +69,49 @@ struct VgMaterial {
 @group(2) @binding(9) var out_ids: texture_storage_2d<rgba32uint, write>;
 @group(2) @binding(10) var out_normal: texture_storage_2d<rgba16float, write>;
 @group(2) @binding(11) var out_uv_motion: texture_storage_2d<rgba32float, write>;
-@group(2) @binding(12) var out_albedo: texture_storage_2d<rgba8unorm, write>;
-// RAA addition (not in solstice): the per-vertex colour of every pool vertex, one
-// `pack4x8unorm` word per texel, VG_COLOR_WIDTH texels per row (`VgScene::colors`). A vertex
-// outside the texture (the 1x1 white placeholder) is white.
+@group(2) @binding(12) var out_albedo: texture_storage_2d<rgba32float, write>;
+// RAA addition (not in solstice): the per-vertex attributes of every pool vertex, two
+// `rgba32uint` texels per vertex, VG_COLOR_WIDTH texels per row (`VgScene::colors`): the
+// linear rgba colour as f32 bits, then the shading uv (u bits, v bits, flag, 0). A vertex
+// outside the texture (the 1x1 white placeholder) is white and keeps its cluster uv.
 @group(2) @binding(13) var vertex_colors: texture_2d<u32>;
 
 // `VG_COLOR_WIDTH` of vg/scene.rs.
 const VG_COLOR_WIDTH: u32 = 4096u;
 
-fn vertex_color(index: u32) -> vec3<f32> {
+// The attribute texel `slot` (0 colour, 1 uv) of pool vertex `index`, or `fallback` outside
+// the texture.
+fn vertex_texel(index: u32, slot: u32, fallback: vec4<u32>) -> vec4<u32> {
     let dims = textureDimensions(vertex_colors);
-    let texel = vec2<u32>(index % VG_COLOR_WIDTH, index / VG_COLOR_WIDTH);
+    let flat = index * 2u + slot;
+    let texel = vec2<u32>(flat % VG_COLOR_WIDTH, flat / VG_COLOR_WIDTH);
     if (texel.x >= dims.x || texel.y >= dims.y) {
-        return vec3<f32>(1.0);
+        return fallback;
     }
-    return unpack4x8unorm(textureLoad(vertex_colors, texel, 0).x).rgb;
+    return textureLoad(vertex_colors, texel, 0);
+}
+
+fn vertex_color(index: u32) -> vec4<f32> {
+    return bitcast<vec4<f32>>(vertex_texel(index, 0u, vec4<u32>(0x3f800000u)));
+}
+
+// The shading uv in xy and 1 in z when the vertex has one, else z = 0.
+fn vertex_uv(index: u32) -> vec3<f32> {
+    let t = vertex_texel(index, 1u, vec4<u32>(0u));
+    return vec3<f32>(bitcast<f32>(t.x), bitcast<f32>(t.y), select(0.0, 1.0, t.z != 0u));
+}
+
+fn interp4(b: vec3<f32>, a0: vec4<f32>, a1: vec4<f32>, a2: vec4<f32>) -> vec4<f32> {
+    return a0 * b.x + a1 * b.y + a2 * b.z;
+}
+
+// Piecewise sRGB EOTF: a debug colour picked in sRGB written as the linear colour it shows.
+fn decode_srgb(c: vec3<f32>) -> vec3<f32> {
+    return select(
+        pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
+        c / 12.92,
+        c <= vec3<f32>(0.04045),
+    );
 }
 
 // `SurfaceMaterialGpu.header.x`: a registered material function.
@@ -241,7 +268,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         transform_normal(instance, decode_normal(v1)),
         transform_normal(instance, decode_normal(v2)),
     ));
-    let uv = interp2(b, decode_uv(instance, v0), decode_uv(instance, v1), decode_uv(instance, v2));
+    // A section with shading attributes hands its material their uv (VgScene::set_cluster_shading).
+    var uv = interp2(b, decode_uv(instance, v0), decode_uv(instance, v1), decode_uv(instance, v2));
+    let suv0 = vertex_uv(i0);
+    let suv1 = vertex_uv(i1);
+    let suv2 = vertex_uv(i2);
+    if (suv0.z * suv1.z * suv2.z > 0.0) {
+        uv = interp2(b, suv0.xy, suv1.xy, suv2.xy);
+    }
 
     // S12 UV motion: current unjittered NDC minus previous, positive X right and Y down.
     var motion = vec2<f32>(0.0);
@@ -271,14 +305,15 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         material_fn = material.header.y;
     }
 
-    // RAA: with no debug view the albedo holds the interpolated per-vertex colour
-    // sRGB-encoded (white without a stream); `raa_vg_material_input` hands it to the material
-    // as `MaterialInput.color`, so the base colour x vertex colour matches the forward path.
-    // A debug view writes its colour (rank table of `DebugView`): 1 cluster colours, 2 the DAG
-    // level ramp, 3 hardware versus software, 4 the first phase versus recovered by the second
-    // and 5 one colour per instance. Codes 2..4 are sRGB-encoded too.
+    // RAA: with no debug view the albedo holds the interpolated per-vertex colour, linear rgba
+    // at f32 and unclamped (white without a stream); `raa_vg_material_input` hands it to the
+    // material as `MaterialInput.color`, exactly the forward path's colour varying. A debug
+    // view writes its colour (rank table of `DebugView`): 1 cluster colours, 2 the DAG level
+    // ramp, 3 hardware versus software, 4 the first phase versus recovered by the second and
+    // 5 one colour per instance, picked sRGB-encoded and written linear.
     let debug_view = frame.flags.x;
-    var albedo = encode_srgb(interp3(b, vertex_color(i0), vertex_color(i1), vertex_color(i2)));
+    let vertex_rgba = interp4(b, vertex_color(i0), vertex_color(i1), vertex_color(i2));
+    var albedo = vec3<f32>(0.0);
     if (debug_view == 1u) {
         albedo = hash_color(cluster_index);
     } else if (debug_view == 2u) {
@@ -291,6 +326,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // One hash colour per scene instance (its slot), so neighbouring instances differ.
         albedo = hash_color(instance.ids.x ^ 0x9e3779b9u);
     }
+    var albedo_out = vec4<f32>(decode_srgb(albedo), 1.0);
+    if (debug_view == 0u) {
+        albedo_out = vertex_rgba;
+    }
 
     textureStore(
         out_ids,
@@ -299,5 +338,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     );
     textureStore(out_normal, pixel, vec4<f32>(normal, face_sign));
     textureStore(out_uv_motion, pixel, vec4<f32>(uv, motion));
-    textureStore(out_albedo, pixel, vec4<f32>(albedo, 1.0));
+    textureStore(out_albedo, pixel, albedo_out);
 }

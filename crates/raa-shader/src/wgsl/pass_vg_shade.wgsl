@@ -63,7 +63,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> RaaVgShadeTargets {
     let in = raa_vg_surface.input;
     var s = raa_pass_material(in, raa_vg_surface.slot);
     if (raa_vg_shade.debug_view != 0u) {
-        s.base_color = raa_srgb_to_linear(textureLoad(raa_vg_albedo, vec2<i32>(frag.xy), 0).rgb);
+        s.base_color = textureLoad(raa_vg_albedo, vec2<i32>(frag.xy), 0).rgb;
     }
     let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
     let ao = raa_slot_ao(in.frag_coord);

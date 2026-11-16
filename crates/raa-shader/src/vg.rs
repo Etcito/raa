@@ -54,6 +54,29 @@ fn raa_vg_default_tangent(n: vec3<f32>) -> vec4<f32> {
     );
 }
 
+// Clusters carry no tangent stream. A virtualized pixel's tangent is the one a linear tangent
+// stream cross(RAA_VG_TANGENT_AXIS, n) of the mesh normals interpolates to, moved by the model
+// as the forward vertex stage moves its tangent: model * cross(axis, n_local), w = +1, where
+// n_local is the world normal brought back to mesh space (the model's transpose undoes the
+// inverse-transpose). The axis is raa-sdfm's REST_TANGENT_AXIS, (1, 2, 3) / sqrt(14)
+// (packages/raa-sdfm/src/field-shading.js): its field shading rebuilds the rest frame from
+// this tangent, so both paths turn the SDF gradient the same way. At the axis itself the
+// Frisvad tangent of the normal stands in.
+const RAA_VG_TANGENT_AXIS = vec3<f32>(0.267261242, 0.534522484, 0.801783726);
+
+fn raa_vg_tangent(model: mat3x3<f32>, world_normal: vec3<f32>) -> vec4<f32> {
+    let raa_vg_local = transpose(model) * world_normal;
+    let raa_vg_len = length(raa_vg_local);
+    if (!(raa_vg_len > 0.0) || raa_vg_len > 1.0e30) {
+        return raa_vg_default_tangent(world_normal);
+    }
+    let raa_vg_t = cross(RAA_VG_TANGENT_AXIS, raa_vg_local / raa_vg_len);
+    if (dot(raa_vg_t, raa_vg_t) < 1.0e-12) {
+        return raa_vg_default_tangent(world_normal);
+    }
+    return vec4<f32>(model * raa_vg_t, 1.0);
+}
+
 fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
     var raa_vg_out: RaaVgSurface;
     let raa_vg_pixel = vec2<i32>(frag.xy);
@@ -91,6 +114,13 @@ fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
     let raa_vg_local_position =
         transpose(raa_vg_basis) * (raa_vg_position - raa_vg_inst.model3.xyz);
     var raa_vg_normal = normalize(raa_vg_normal_word.xyz);
+    let raa_vg_model = mat3x3<f32>(
+        raa_vg_inst.model0.xyz,
+        raa_vg_inst.model1.xyz,
+        raa_vg_inst.model2.xyz,
+    );
+    // The tangent follows the stored (unflipped) normal, as the forward tangent stream does.
+    let raa_vg_tangent_value = raa_vg_tangent(raa_vg_model, raa_vg_normal);
     let raa_vg_front_facing = raa_vg_normal_word.w > 0.0;
     if (!raa_vg_front_facing && (raa_vg_record.header.z & RAA_FLAG_DOUBLE_SIDED) != 0u) {
         raa_vg_normal = -raa_vg_normal;
@@ -99,18 +129,14 @@ fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
     raa_vg_input.position = raa_vg_position;
     raa_vg_input.local_position = raa_vg_local_position;
     raa_vg_input.normal = raa_vg_normal;
-    raa_vg_input.tangent = raa_vg_default_tangent(raa_vg_normal);
+    raa_vg_input.tangent = raa_vg_tangent_value;
     raa_vg_input.uv = raa_vg_uv_motion_word.xy;
-    // The resolved albedo holds the sRGB-encoded per-vertex colour (white without a stream)
-    // unless a debug view replaced it; the material multiplies its base colour by it.
+    // The resolved albedo holds the interpolated per-vertex colour, linear rgba at f32 (white
+    // without a stream; the section's shading colour when it has one), unless a debug view
+    // replaced it: exactly the forward path's colour varying.
     var raa_vg_color = vec4<f32>(1.0);
     if (raa_vg_shade.debug_view == 0u) {
-        let raa_vg_srgb = textureLoad(raa_vg_albedo, raa_vg_pixel, 0).rgb;
-        raa_vg_color = vec4<f32>(select(
-            pow((raa_vg_srgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
-            raa_vg_srgb / 12.92,
-            raa_vg_srgb <= vec3<f32>(0.04045),
-        ), 1.0);
+        raa_vg_color = textureLoad(raa_vg_albedo, raa_vg_pixel, 0);
     }
     raa_vg_input.color = raa_vg_color;
     raa_vg_input.view_dir = normalize(raa_frame.camera_pos.xyz - raa_vg_position);

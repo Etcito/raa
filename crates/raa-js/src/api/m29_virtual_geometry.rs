@@ -648,5 +648,42 @@ mod web {
         pub fn virtual_geometry_stats(&self) -> Result<JsValue, JsValue> {
             self.with_state(|_, st| stats_js(st))
         }
+
+        /// Registers (Float32Array) or removes (both null/undefined) the shading attributes of
+        /// section `ordinal` of the mesh's cluster store: `colors` rgba (4 floats) and `uvs`
+        /// (2 floats) per `ClusterMesh` vertex, which a virtualized pixel hands its material as
+        /// `MaterialInput.color` and `.uv` in place of the vertex colour and the cluster uv
+        /// (unclamped f32, as the forward path's streams). A material that keeps data in its
+        /// colour and uv streams (the rest point and rest normal of a field-shaded part) then
+        /// reads the same data on both paths. Global illumination keeps the vertex colours.
+        #[wasm_bindgen(js_name = setMeshClusterShading)]
+        pub fn set_mesh_cluster_shading(
+            &mut self,
+            mesh: u32,
+            ordinal: u32,
+            colors: JsValue,
+            uvs: JsValue,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                st.mesh(mesh)?;
+                let floats = |key: &str, value: &JsValue| -> Result<Option<Vec<f32>>, RaaError> {
+                    if value.is_null() || value.is_undefined() {
+                        return Ok(None);
+                    }
+                    value
+                        .dyn_ref::<js_sys::Float32Array>()
+                        .map(|f| Some(f.to_vec()))
+                        .ok_or_else(|| invalid(key, "must be a Float32Array or null"))
+                };
+                let colors = floats("colors", &colors)?;
+                let uvs = floats("uvs", &uvs)?;
+                vg_handle(st)?.set_cluster_shading(
+                    mesh,
+                    ordinal as usize,
+                    colors.as_deref(),
+                    uvs.as_deref(),
+                )
+            })
+        }
     }
 }

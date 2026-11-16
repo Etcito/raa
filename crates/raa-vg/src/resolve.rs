@@ -76,7 +76,9 @@ fn put_u32(out: &mut [u8], at: usize, value: u32) {
 const IDS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const UV_MOTION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
-const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+// Linear rgba at f32: the vertex colour reaches the material unclamped (raa-sdfm keeps the
+// rest point in it), as the forward path's f32 colour varying does.
+const ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
 /// One storage texture of `format` with a texture view, at least one texel per axis.
 fn surface_view(
@@ -146,10 +148,10 @@ impl VgSurface {
         self.size
     }
 
-    /// The four textures: 16 B of ids, 8 B of normal, 16 B of uv/motion and 4 B of albedo per
+    /// The four textures: 16 B of ids, 8 B of normal, 16 B of uv/motion and 16 B of colour per
     /// pixel.
     pub fn allocated_bytes(&self) -> u64 {
-        u64::from(self.size.0) * u64::from(self.size.1) * (16 + 8 + 16 + 4)
+        u64::from(self.size.0) * u64::from(self.size.1) * (16 + 8 + 16 + 16)
     }
 }
 
@@ -178,14 +180,14 @@ fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 
 /// The resolve compute pipeline and its group-2 layout, which matches bindings 0-12 of
 /// `resolve_module_wgsl`: 0 `VgFrame` uniform, 1-8 read-only storage buffers, 9-12 write
-/// storage textures and 13 the `R32Uint` pool vertex-colour texture (a 1x1 white one while
-/// the scene has none). The 16-byte placeholder stands in for a scene buffer the scene has not
+/// storage textures and 13 the `Rgba32Uint` pool vertex-attribute texture (a 1x1 white one
+/// while the scene has none). The 16-byte placeholder stands in for a scene buffer the scene has not
 /// uploaded, so the group is always valid.
 pub struct Resolve {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     placeholder: wgpu::Buffer,
-    /// The 1x1 white `R32Uint` colour texture bound while the scene has no colour stream.
+    /// The 1x1 white `Rgba32Uint` attribute texture bound while the scene has no stream.
     white: wgpu::TextureView,
 }
 
@@ -274,7 +276,7 @@ impl Resolve {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Uint,
+            format: wgpu::TextureFormat::Rgba32Uint,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -285,10 +287,13 @@ impl Resolve {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &crate::scene::VG_WHITE.to_le_bytes(),
+            &crate::scene::VG_WHITE
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect::<Vec<u8>>(),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4),
+                bytes_per_row: Some(16),
                 rows_per_image: Some(1),
             },
             wgpu::Extent3d {

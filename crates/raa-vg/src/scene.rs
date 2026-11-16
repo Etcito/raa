@@ -38,16 +38,23 @@ const NODE_PAGE: u32 = 64;
 const CLUSTER_PAGE: u32 = 64;
 const VERTEX_PAGE: u32 = 256;
 const TRIANGLE_PAGE: u32 = 256;
-/// Width in texels of the pool vertex-colour texture; the WGSL `VG_COLOR_WIDTH` of resolve.wgsl.
+/// Width in texels of the pool vertex-attribute texture; the WGSL `VG_COLOR_WIDTH` of resolve.wgsl.
 pub const VG_COLOR_WIDTH: u32 = 4096;
-/// Largest row count of the pool vertex-colour texture (the WebGPU default 2D dimension).
+/// Largest row count of the pool vertex-attribute texture (the WebGPU default 2D dimension).
 pub const VG_COLOR_MAX_ROWS: u32 = 8192;
-/// A packed white colour (`pack4x8unorm(1, 1, 1, 1)`): the colour of a vertex without a stream.
-pub const VG_WHITE: u32 = 0xFFFF_FFFF;
+/// Texels of the pool vertex-attribute texture per vertex: the colour, then the shading uv.
+pub const VG_ATTRIBUTE_TEXELS: u32 = 2;
+/// The colour texel of a vertex without a stream: white, rgba 1.0 as f32 bits.
+pub const VG_WHITE: [u32; 4] = [0x3F80_0000; 4];
+/// The uv texel of a vertex without a shading uv: the flag word (z) is 0, so the resolve keeps
+/// the cluster's own uv.
+pub const VG_NO_UV: [u32; 4] = [0; 4];
 
-/// Packs linear rgba floats (4 per vertex) into `pack4x8unorm` words; a length that is not a
-/// multiple of 4 or a non-finite component is refused with its reason.
-pub fn pack_vertex_colors(colors: &[f32]) -> Result<Vec<u32>, String> {
+/// Checks linear rgba floats (4 per vertex) and returns them per vertex, unclamped: a vertex
+/// colour may carry data a material reads at full precision (a rest position, a normal
+/// component), as the forward path's f32 colour stream does. A length that is not a multiple
+/// of 4 or a non-finite component is refused with its reason.
+pub fn pack_vertex_colors(colors: &[f32]) -> Result<Vec<[f32; 4]>, String> {
     if !colors.len().is_multiple_of(4) {
         return Err(format!(
             "{} floats are not rgba per vertex (a multiple of 4)",
@@ -59,32 +66,89 @@ pub fn pack_vertex_colors(colors: &[f32]) -> Result<Vec<u32>, String> {
     }
     Ok(colors
         .chunks_exact(4)
-        .map(|c| {
-            let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-            byte(c[0]) | byte(c[1]) << 8 | byte(c[2]) << 16 | byte(c[3]) << 24
-        })
+        .map(|c| [c[0], c[1], c[2], c[3]])
         .collect())
 }
 
-/// The pool texels of the registered colour streams: `vertex_count` white words with each
-/// stream written at the vertex base of its section; a stream whose length differs from its
-/// section's vertex count, or of a section the pool does not hold, stays white.
+/// As [`pack_vertex_colors`] for uvs (2 floats per vertex).
+pub fn pack_vertex_uvs(uvs: &[f32]) -> Result<Vec<[f32; 2]>, String> {
+    if !uvs.len().is_multiple_of(2) {
+        return Err(format!(
+            "{} floats are not uv per vertex (a multiple of 2)",
+            uvs.len()
+        ));
+    }
+    if uvs.iter().any(|c| !c.is_finite()) {
+        return Err("uvs must be finite".to_string());
+    }
+    Ok(uvs.chunks_exact(2).map(|c| [c[0], c[1]]).collect())
+}
+
+/// The shading attributes of one section (`VgScene::set_cluster_shading`): the colour and uv
+/// a virtualized pixel hands its material in place of the vertex colour and the cluster uv, one
+/// per `ClusterMesh` vertex. The forward path draws the same mesh with its own colour and uv
+/// streams; a material that keeps data in them (raa-sdfm's field shading: the rest point and
+/// the rest normal) reads the same values on both paths.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VgShading {
+    pub colors: Option<Vec<[f32; 4]>>,
+    pub uvs: Option<Vec<[f32; 2]>>,
+}
+
+/// The pool texels of the registered streams, [`VG_ATTRIBUTE_TEXELS`] per vertex: the colour
+/// (f32 bits; the shading colour, else the vertex colour, else [`VG_WHITE`]) then the uv
+/// (u bits, v bits, 1, 0; [`VG_NO_UV`] without a shading uv), each stream written at the
+/// vertex base of its section. A stream whose length differs from its section's vertex count,
+/// or of a section the pool does not hold, is ignored.
 pub fn pool_color_texels(
     vertex_count: u32,
     sections: &BTreeMap<(u32, usize), (u32, u32)>,
-    colors: &BTreeMap<(u32, usize), Vec<u32>>,
-) -> Vec<u32> {
-    let mut out = vec![VG_WHITE; vertex_count as usize];
-    for (id, packed) in colors {
+    colors: &BTreeMap<(u32, usize), Vec<[f32; 4]>>,
+    shading: &BTreeMap<(u32, usize), VgShading>,
+) -> Vec<[u32; 4]> {
+    let mut out = Vec::with_capacity(vertex_count as usize * 2);
+    for _ in 0..vertex_count {
+        out.push(VG_WHITE);
+        out.push(VG_NO_UV);
+    }
+    let bits = |c: &[f32; 4]| {
+        [
+            c[0].to_bits(),
+            c[1].to_bits(),
+            c[2].to_bits(),
+            c[3].to_bits(),
+        ]
+    };
+    let write_colors = |id: &(u32, usize), stream: &[[f32; 4]], out: &mut Vec<[u32; 4]>| {
         let Some(&(base, count)) = sections.get(id) else {
+            return;
+        };
+        if stream.len() != count as usize {
+            return;
+        }
+        for (k, c) in stream.iter().enumerate() {
+            if let Some(texel) = out.get_mut(2 * (base as usize + k)) {
+                *texel = bits(c);
+            }
+        }
+    };
+    for (id, stream) in colors {
+        write_colors(id, stream, &mut out);
+    }
+    for (id, entry) in shading {
+        if let Some(stream) = &entry.colors {
+            write_colors(id, stream, &mut out);
+        }
+        let (Some(uvs), Some(&(base, count))) = (&entry.uvs, sections.get(id)) else {
             continue;
         };
-        if packed.len() != count as usize {
+        if uvs.len() != count as usize {
             continue;
         }
-        let base = base as usize;
-        if let Some(slot) = out.get_mut(base..base + packed.len()) {
-            slot.copy_from_slice(packed);
+        for (k, uv) in uvs.iter().enumerate() {
+            if let Some(texel) = out.get_mut(2 * (base as usize + k) + 1) {
+                *texel = [uv[0].to_bits(), uv[1].to_bits(), 1, 0];
+            }
         }
     }
     out
@@ -737,15 +801,18 @@ pub struct VgScene {
     generation: u64,
     store_generation: Option<u64>,
     keys_generation: Option<u64>,
-    /// The per-vertex colour streams by (key, ordinal), `pack4x8unorm` words in the order of
+    /// The per-vertex colour streams by (key, ordinal), linear rgba in the order of
     /// `ClusterMesh::vertices`: the colours a virtualized pixel multiplies its base colour by.
-    colors: BTreeMap<(u32, usize), Vec<u32>>,
+    colors: BTreeMap<(u32, usize), Vec<[f32; 4]>>,
+    /// The shading attributes by (key, ordinal), which take precedence over `colors`.
+    shading: BTreeMap<(u32, usize), VgShading>,
     color_generation: u64,
     /// (vertex base, vertex count) of every section of the last pool upload.
     section_vertices: BTreeMap<(u32, usize), (u32, u32)>,
     vertex_count: u32,
     layout_serial: u64,
-    /// The `R32Uint` pool colour texture and the (layout serial, colour generation) it holds.
+    /// The `Rgba32Uint` pool attribute texture and the (layout serial, colour generation) it
+    /// holds.
     color_texture: Option<(wgpu::Texture, wgpu::TextureView)>,
     color_key: Option<(u64, u64)>,
 }
@@ -881,7 +948,32 @@ impl VgScene {
         Ok(())
     }
 
-    /// Rebuilds the pool colour texture when the pool layout or the streams changed: none when
+    /// Registers or removes (both `None`) the shading attributes of section `ordinal` of key
+    /// `key` ([`VgShading`]): rgba colours (4 floats per vertex) and uvs (2 per vertex) the
+    /// material of a virtualized pixel reads in place of the vertex colour and the cluster uv.
+    /// A refusal (length, non-finite) changes nothing.
+    pub fn set_cluster_shading(
+        &mut self,
+        key: u32,
+        ordinal: usize,
+        colors: Option<&[f32]>,
+        uvs: Option<&[f32]>,
+    ) -> Result<(), String> {
+        let colors = colors.map(pack_vertex_colors).transpose()?;
+        let uvs = uvs.map(pack_vertex_uvs).transpose()?;
+        let changed = if colors.is_none() && uvs.is_none() {
+            self.shading.remove(&(key, ordinal)).is_some()
+        } else {
+            let entry = VgShading { colors, uvs };
+            self.shading.insert((key, ordinal), entry.clone()) != Some(entry)
+        };
+        if changed {
+            self.color_generation += 1;
+        }
+        Ok(())
+    }
+
+    /// Rebuilds the pool attribute texture when the pool layout or the streams changed: none when
     /// no stream is registered or the pool is past `VG_COLOR_WIDTH x VG_COLOR_MAX_ROWS` texels
     /// (every vertex reads white then). A created or dropped texture advances the generation.
     pub fn upload_colors(&mut self, gpu: &GpuContext) {
@@ -890,15 +982,25 @@ impl VgScene {
             return;
         }
         self.color_key = Some(key);
-        let rows = self.vertex_count.div_ceil(VG_COLOR_WIDTH).max(1);
-        if self.colors.is_empty() || self.vertex_count == 0 || rows > VG_COLOR_MAX_ROWS {
+        let rows = (self.vertex_count * VG_ATTRIBUTE_TEXELS)
+            .div_ceil(VG_COLOR_WIDTH)
+            .max(1);
+        if (self.colors.is_empty() && self.shading.is_empty())
+            || self.vertex_count == 0
+            || rows > VG_COLOR_MAX_ROWS
+        {
             if self.color_texture.take().is_some() {
                 self.generation += 1;
             }
             return;
         }
-        let mut texels = pool_color_texels(self.vertex_count, &self.section_vertices, &self.colors);
-        texels.resize((rows * VG_COLOR_WIDTH) as usize, VG_WHITE);
+        let mut texels = pool_color_texels(
+            self.vertex_count,
+            &self.section_vertices,
+            &self.colors,
+            &self.shading,
+        );
+        texels.resize((rows * VG_COLOR_WIDTH) as usize, VG_NO_UV);
         let size = wgpu::Extent3d {
             width: VG_COLOR_WIDTH,
             height: rows,
@@ -910,11 +1012,14 @@ impl VgScene {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Uint,
+            format: wgpu::TextureFormat::Rgba32Uint,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        let bytes: Vec<u8> = texels.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let bytes: Vec<u8> = texels
+            .iter()
+            .flat_map(|t| t.iter().flat_map(|w| w.to_le_bytes()))
+            .collect();
         gpu.queue().write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -925,7 +1030,7 @@ impl VgScene {
             &bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(VG_COLOR_WIDTH * 4),
+                bytes_per_row: Some(VG_COLOR_WIDTH * 16),
                 rows_per_image: Some(rows),
             },
             size,
@@ -935,8 +1040,8 @@ impl VgScene {
         self.generation += 1;
     }
 
-    /// The pool colour texture (`R32Uint`, `VG_COLOR_WIDTH` wide), or `None` when every vertex
-    /// is white.
+    /// The pool attribute texture (`Rgba32Uint`, `VG_COLOR_WIDTH` wide, [`VG_ATTRIBUTE_TEXELS`]
+    /// per vertex), or `None` when every vertex is white with its cluster uv.
     pub fn colors(&self) -> Option<&wgpu::TextureView> {
         self.color_texture.as_ref().map(|(_, view)| view)
     }
@@ -1079,9 +1184,12 @@ impl VgScene {
             + self.vertices.bytes()
             + self.triangles.bytes()
             + self.color_texture.as_ref().map_or(0, |_| {
-                u64::from(self.vertex_count.div_ceil(VG_COLOR_WIDTH).max(1))
-                    * u64::from(VG_COLOR_WIDTH)
-                    * 4
+                u64::from(
+                    (self.vertex_count * VG_ATTRIBUTE_TEXELS)
+                        .div_ceil(VG_COLOR_WIDTH)
+                        .max(1),
+                ) * u64::from(VG_COLOR_WIDTH)
+                    * 16
             })
     }
 

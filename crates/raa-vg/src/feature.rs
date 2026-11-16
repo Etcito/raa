@@ -298,6 +298,30 @@ impl VgHandle {
             .map_err(|reason| invalid("clusterVertexColors", reason))
     }
 
+    /// Registers or removes (both `None`) the shading attributes of section `ordinal` of
+    /// cluster-store key `key`: rgba colours (4 floats) and uvs (2 floats) per `ClusterMesh`
+    /// vertex, which a virtualized pixel hands its material as `MaterialInput.color` and `.uv`
+    /// in place of the vertex colour and the cluster uv, so a material that keeps data in its
+    /// colour and uv streams (raa-sdfm's field shading) reads it on the virtualized path too.
+    /// A wrong length or a non-finite value is `vg.invalid`; a busy pipeline is `pipeline.busy`.
+    pub fn set_cluster_shading(
+        &self,
+        key: u32,
+        ordinal: usize,
+        colors: Option<&[f32]>,
+        uvs: Option<&[f32]>,
+    ) -> Result<(), RaaError> {
+        let mut state = self
+            .shared
+            .vg
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?;
+        state
+            .scene
+            .set_cluster_shading(key, ordinal, colors, uvs)
+            .map_err(|reason| invalid("clusterShading", reason))
+    }
+
     /// Removes the mesh-key mapping of `key`.
     pub fn remove_mesh_key(&self, key: u32) {
         if let Ok(mut keys) = self.shared.keys.try_borrow_mut() {

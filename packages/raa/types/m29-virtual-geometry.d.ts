@@ -152,4 +152,17 @@ export interface Engine {
   instanceVirtualGeometry(instance: number): InstanceVirtualGeometry;
   /** The latest published counters, a fresh {@link VirtualGeometryStats}. */
   virtualGeometryStats(): VirtualGeometryStats;
+  /**
+   * The shading attributes of section `ordinal` of the mesh's cluster store: `colors` rgba (4
+   * floats) and `uvs` (2 floats) per cluster vertex, handed to the material of a virtualized
+   * pixel as `MaterialInput.color` and `.uv` in place of the vertex colour and the cluster uv
+   * (unclamped f32, like the forward path's streams). Both null removes them. Global
+   * illumination keeps the vertex colours of {@link Engine.setMeshClusterVertexColors}.
+   */
+  setMeshClusterShading(
+    mesh: number,
+    ordinal: number,
+    colors: Float32Array | null | undefined,
+    uvs: Float32Array | null | undefined,
+  ): void;
 }
