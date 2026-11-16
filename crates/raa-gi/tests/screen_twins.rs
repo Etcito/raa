@@ -245,7 +245,7 @@ fn temporal_alpha_cases() {
         let moved = number(field(case, "moved"));
         let valid = matches!(field(case, "valid"), JsonValue::Bool(true));
         let want = number(field(case, "alpha"));
-        let got = temporal_alpha(moved, valid);
+        let got = temporal_alpha(valid);
         assert!(
             (got - want).abs() <= tol,
             "moved {moved} valid {valid}: got {got}, want {want}"

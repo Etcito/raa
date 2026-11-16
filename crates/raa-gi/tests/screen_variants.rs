@@ -365,7 +365,8 @@ fn local_visibility_cone_traces_area_lights_only() {
 }
 
 /// S43 cross-fix: the integrate blend reads the motion reject flag, holds the 0.5 px motion
-/// tolerance and tests the eight cross taps at +-4 and +-8 px before it uses its history.
+/// tolerance and tests the cross pairs at +-4 and +-8 px (their motion second difference) before
+/// it uses its history, which it reads bilinear and blends under a motion-independent alpha.
 #[test]
 fn integrate_history_honours_the_reject_flag_and_cross_taps() {
     let wgsl = probe_integrate_module_wgsl();
@@ -374,19 +375,29 @@ fn integrate_history_honours_the_reject_flag_and_cross_taps() {
         "tolerance constant"
     );
     assert!(wgsl.contains("m.z <= 0.5"), "the pixel's own reject flag");
-    assert!(wgsl.contains("m.z > 0.5"), "a tap's reject flag");
+    assert!(wgsl.contains("ma.z > 0.5") && wgsl.contains("mb.z > 0.5"), "a tap's reject flag");
     for tap in [
         "vec2<i32>(4, 0)",
-        "vec2<i32>(-4, 0)",
         "vec2<i32>(8, 0)",
-        "vec2<i32>(-8, 0)",
         "vec2<i32>(0, 4)",
-        "vec2<i32>(0, -4)",
         "vec2<i32>(0, 8)",
-        "vec2<i32>(0, -8)",
+        "pixel + pairs[i]",
+        "pixel - pairs[i]",
     ] {
         assert!(wgsl.contains(tap), "cross tap {tap}");
     }
+    assert!(
+        wgsl.contains("(ma.xy + mb.xy) * raa_gi_frame.viewport.xy - 2.0 * own_px"),
+        "a pair is tested by its motion second difference, not against the pixel's own motion"
+    );
+    assert!(
+        wgsl.contains("const RAA_GI_TEMPORAL_ALPHA: f32 = 0.08;") && !wgsl.contains("0.03 * moved"),
+        "the blend weight does not rise with the motion"
+    );
+    assert!(
+        wgsl.contains("raa_gi_history_bilinear(previous_uv)"),
+        "the history is read bilinear"
+    );
     assert!(
         wgsl.contains("raa_gi_history_neighbours_agree(pixel, own_px)"),
         "the blend requires the cross taps to agree"
