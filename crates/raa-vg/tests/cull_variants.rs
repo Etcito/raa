@@ -315,6 +315,48 @@ fn function_body<'a>(src: &'a str, name: &str) -> &'a str {
     &rest[..end]
 }
 
+/// The Gi filter draws exactly the GI voxel members: `case INSTANCES_GI` returns the
+/// `GI_MEMBER` bit test and no longer asks whether the instance can move.
+#[test]
+fn gi_filter_draws_exactly_gi_members() {
+    let wgsl = cull_module_wgsl();
+    let body = function_body(&wgsl, "view_draws");
+    const CASE: &str = "case INSTANCES_GI";
+    let start = body.find(CASE).expect("the Gi case is declared") + CASE.len();
+    let rest = &body[start..];
+    let end = rest
+        .find("case ")
+        .into_iter()
+        .chain(rest.find("default"))
+        .min()
+        .unwrap_or(rest.len());
+    let gi = &rest[..end];
+    assert!(
+        gi.contains("return (instance.ids.z & GI_MEMBER) != 0u;"),
+        "the Gi case returns the GI_MEMBER bit test"
+    );
+    assert!(
+        !gi.contains("instance_movable"),
+        "the Gi case never asks whether an instance can move"
+    );
+}
+
+/// `GI_MEMBER` is the WGSL twin of `raa_vg::INSTANCE_GI`: a voxel member is `ids.z` bit 16.
+#[test]
+fn gi_member_twins_instance_gi() {
+    let module = parse(&cull_module_wgsl());
+    let (_, constant) = module
+        .constants
+        .iter()
+        .find(|(_, constant)| constant.name.as_deref() == Some("GI_MEMBER"))
+        .expect("the cull module declares GI_MEMBER");
+    let value = match &module.global_expressions[constant.init] {
+        naga::Expression::Literal(naga::Literal::U32(value)) => *value,
+        other => panic!("GI_MEMBER is not a u32 literal: {other:?}"),
+    };
+    assert_eq!(value, raa_vg::INSTANCE_GI);
+}
+
 /// `pack_vertex` (crates/raa-cluster/src/dag.rs:801-828) writes the eight u16 halves
 /// `[grid x, grid y, grid z, oct x, oct y, u, v, 0]`, so its little-endian u32 words are
 /// `a = grid x | grid y << 16`, `b = grid z | oct x << 16`, `c = oct y | u << 16`, `d = v`.

@@ -256,9 +256,7 @@ fn view_draws(instance: VgInstance) -> bool {
             return instance_movable(instance);
         }
         case INSTANCES_GI: {
-            // P4 adds the flag for movable instances that stay in the voxels; until it
-            // exists, a GI view draws only what cannot move.
-            return !instance_movable(instance);
+            return (instance.ids.z & GI_MEMBER) != 0u;
         }
         default: {
             return true;

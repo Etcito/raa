@@ -43,7 +43,7 @@ pub const MAIN_FIRST: u32 = 0;
 pub const MAIN_SECOND: u32 = 1;
 /// The first shadow cascade's slot (cascades 0..3 at 2..5).
 pub const CASCADE_BASE: u32 = 2;
-/// The first GI slot (6..10, reserved and never written by P3).
+/// The first GI slot (6..10, written by raa-gi driver B, one level per slot).
 pub const GI_BASE: u32 = 6;
 /// The number of GI slots.
 pub const GI_SLOTS: u32 = 5;
@@ -281,6 +281,8 @@ pub enum InstanceFilter {
     All = 0,
     Static = 1,
     Movable = 2,
+    /// The GI voxel views of raa-gi driver B: draws exactly the instances whose `ids.z`
+    /// carries `INSTANCE_GI` (scene.rs), movable or not.
     Gi = 3,
 }
 

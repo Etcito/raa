@@ -73,7 +73,7 @@ const INSTANCES_ALL: u32 = 0u;
 // Views kept from frame to frame leave out what may move, or they would keep it where it was.
 const INSTANCES_STATIC: u32 = 1u;
 const INSTANCES_MOVABLE: u32 = 2u;
-// The GI voxels: static instances, and movable ones that stay in them.
+// The GI voxels: exactly the instances flagged GI_MEMBER, movable or not.
 const INSTANCES_GI: u32 = 3u;
 
 // Twins of the INSTANCE_ flags in vg/scene.rs, held in `VgInstance.ids.z`.
@@ -81,6 +81,8 @@ const PREVIOUS_VALID: u32 = 1u;
 const DOUBLE_SIDED: u32 = 2u;
 const CASTS_SHADOW: u32 = 4u;
 const MOVABLE: u32 = 8u;
+// Twin of INSTANCE_GI in vg/scene.rs: a raa-gi voxel member.
+const GI_MEMBER: u32 = 16u;
 
 // Written by the cull passes. Atomic view of `CullStateRead`.
 struct CullState {
