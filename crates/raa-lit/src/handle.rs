@@ -1318,6 +1318,10 @@ impl LitHandle {
             );
             let bits = &s.caster_bits;
             let virtual_bits = &s.virtual_bits;
+            // raa-vg draws its members into the cascade layers only: a hero layer (list 4 and
+            // up) has no virtualized caster pass, so its list keeps the members, or a
+            // virtualized instance never casts an area-light hero shadow.
+            let virtual_drawn_elsewhere = (cascade as u32) < crate::HERO_LAYER_BASE;
             let selected = |i: usize| -> bool {
                 let Some(item) = s.items.items.get(i) else {
                     return false;
@@ -1326,7 +1330,7 @@ impl LitHandle {
                     return false;
                 }
                 let slot = s.item_slots.get(i).copied().unwrap_or(u32::MAX) as usize;
-                if crate::virtual_set::slot_member(virtual_bits, slot) {
+                if virtual_drawn_elsewhere && crate::virtual_set::slot_member(virtual_bits, slot) {
                     return false;
                 }
                 let tag = s.item_tags.get(i).copied().unwrap_or(0);

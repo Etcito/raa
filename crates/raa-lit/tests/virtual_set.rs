@@ -299,8 +299,9 @@ fn virtual_members_leave_the_draw_lists_and_the_cascades() {
     assert_eq!(with_member.triangles, base.triangles - CUBE_TRIANGLES);
     assert_eq!(subject.opaque_instances(), reference.opaque_instances() - 1);
 
-    // Cascade casters: the member is left out of cascade 0; the box covers both instances.
-    let matrices = [cascade_box(); 4];
+    // Cascade casters: the member is left out of cascade 0 (raa-vg draws it there) but kept
+    // in hero list 4, which has no virtualized caster pass; the box covers both instances.
+    let matrices = [cascade_box(); 5];
     reference
         .lit
         .handle()
@@ -313,6 +314,8 @@ fn virtual_members_leave_the_draw_lists_and_the_cascades() {
         .expect("subject casters");
     assert_eq!(reference.cascade_instances(0), 2);
     assert_eq!(subject.cascade_instances(0), 1);
+    assert_eq!(reference.cascade_instances(4), 2);
+    assert_eq!(subject.cascade_instances(4), 2, "a hero layer keeps the member");
 
     // Frame feature bits: stored by id; 24 (tiling) and ids >= 64 are ignored.
     subject.lit.set_frame_feature(27, true);
