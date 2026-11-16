@@ -31,4 +31,11 @@ pub struct GiStats {
     pub stats_frame_index: Option<u64>,
     /// A prepared frame whose submission is not yet observed.
     pub pending: bool,
+    /// The mean history length of the screen accumulation (frames), read back from the GPU a few
+    /// frames late over one pixel in 16; `None` until a readback completed.
+    pub history_length_mean: Option<f32>,
+    /// The share of those pixels whose history was rejected (disocclusion), in percent.
+    pub rejected_percent: Option<f32>,
+    /// The share of those pixels whose history the neighbourhood clamp moved, in percent.
+    pub clamped_percent: Option<f32>,
 }

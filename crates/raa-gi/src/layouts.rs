@@ -141,19 +141,23 @@ pub struct GiLightGpu {
     pub updates: u32,
     /// Voxels per axis (offset 20).
     pub resolution: u32,
+    /// 1 relights every voxel of the level, 0 a checkerboard half (offset 24,
+    /// `voxelFullRelight`).
+    pub full: u32,
 }
 
 impl GiLightGpu {
     /// Byte size of the record (S38).
     pub const SIZE: usize = 32;
 
-    /// Serialises the record; bytes 24..32 are zero padding.
+    /// Serialises the record; bytes 28..32 are zero padding.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut out = [0u8; Self::SIZE];
         put(&mut out, 0, self.wrap_origin.map(i32::to_le_bytes));
         put(&mut out, 12, [self.level.to_le_bytes()]);
         put(&mut out, 16, [self.updates.to_le_bytes()]);
         put(&mut out, 20, [self.resolution.to_le_bytes()]);
+        put(&mut out, 24, [self.full.to_le_bytes()]);
         out
     }
 }

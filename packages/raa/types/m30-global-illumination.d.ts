@@ -1,9 +1,33 @@
 /**
  * The global-illumination debug views (S36). `none` draws the frame as shaded; the others replace
  * the shading with one diagnostic: the voxel cubes, the voxel radiance, the distance contours or
- * the nested clipmap levels.
+ * the nested clipmap levels; and for the screen irradiance: `probes` (where this frame's screen
+ * probes sit, magenta), `hitType` (what the rays hit: red screen, green voxels, blue sky),
+ * `history` (green history kept, yellow clamped, red rejected, blue no irradiance yet),
+ * `historyLength` (black 0 to white `historyMax` frames), `reservoirs` (ReSTIR GI confidence M,
+ * black 0 to white `restirMCap`) and `rawDenoised` (this frame's raw irradiance on the left half,
+ * the denoised one on the right).
  */
-export type GiDebugView = 'none' | 'voxels' | 'radiance' | 'distance' | 'levels';
+export type GiDebugView =
+  | 'none'
+  | 'voxels'
+  | 'radiance'
+  | 'distance'
+  | 'levels'
+  | 'probes'
+  | 'hitType'
+  | 'history'
+  | 'historyLength'
+  | 'reservoirs'
+  | 'rawDenoised';
+
+/**
+ * A GI preset of {@link Engine.setGiPreset}: `performance` (6 probe rays, 32 frames of history,
+ * clamp 2, 2 a-trous passes, M cap 10), `balanced` (8 rays, 64 frames, clamp 2.5, 3 passes, M cap
+ * 20: the defaults) or `quality` (8 rays, 128 frames, clamp 3, 4 passes, M cap 30, full voxel
+ * relight).
+ */
+export type GiPreset = 'performance' | 'balanced' | 'quality';
 
 /**
  * The screen-space GI quality (`screenSpaceQuality`): horizon slices x steps per side of the
@@ -51,6 +75,24 @@ export interface GlobalIlluminationSettings {
   screenSpaceQuality: GiScreenSpaceQuality;
   /** The source of the screen irradiance, see {@link GiIndirectMode}. Default 'probes'. */
   indirect: GiIndirectMode;
+  /**
+   * The most frames the screen irradiance averages, an integer in [1, 256]. Each pixel blends at
+   * max(1 / n, 1 / historyMax), n its history length: a still view keeps sharpening until
+   * historyMax frames; a disoccluded pixel starts again at n = 1. Default 64.
+   */
+  historyMax: number;
+  /**
+   * Width of the history clamp in standard deviations (the current neighbourhood's spread plus
+   * the history's temporal spread), finite in [0.5, 10]: lower follows lighting changes faster,
+   * higher keeps more history. Default 2.5.
+   */
+  clampGamma: number;
+  /** Variance-guided a-trous passes over the accumulated irradiance, an integer in [0, 5]. Default 3. */
+  spatialPasses: number;
+  /** Confidence cap M of the ReSTIR GI reservoirs, finite in [1, 64]. Default 20. */
+  restirMCap: number;
+  /** Relight every voxel of the relit level each update instead of a checkerboard half. Default false. */
+  voxelFullRelight: boolean;
 }
 
 /**
@@ -119,7 +161,8 @@ export interface InstanceGlobalIllumination {
 
 /**
  * Counters of global illumination, returned by {@link Engine.giStats}. The record is fresh. The
- * counters come from CPU state published on complete submission; there is no GPU readback.
+ * counters come from CPU state published on complete submission, except the three screen
+ * accumulation figures, read back from the GPU a few frames late over one pixel in 16.
  */
 export interface GiStats {
   active: boolean;
@@ -146,6 +189,12 @@ export interface GiStats {
   statsFrameIndex: number | null;
   /** True while a prepared frame's submission is not yet observed. */
   pending: boolean;
+  /** Mean history length of the screen irradiance in frames, or `null` before a readback. */
+  historyLengthMean: number | null;
+  /** Share of pixels whose history was rejected this frame (disocclusion), percent, or `null`. */
+  rejectedPercent: number | null;
+  /** Share of pixels whose history the neighbourhood clamp moved, percent, or `null`. */
+  clampedPercent: number | null;
 }
 
 /**
@@ -165,6 +214,12 @@ export interface Engine {
   setGiQuality(patch: GiQualityPatch): void;
   /** The current quality, a fresh {@link GiQuality}. */
   giQuality(): GiQuality;
+  /**
+   * Applies a {@link GiPreset}: sets `historyMax`, `clampGamma`, `spatialPasses`, `restirMCap`,
+   * `voxelFullRelight` and the probe rays, and leaves every other setting as it is. Another name
+   * throws `gi.invalid` with `preset: expected one of performance, balanced, quality`.
+   */
+  setGiPreset(name: GiPreset): void;
   /**
    * Sets the membership request of one live instance group: `true` records an explicit default
    * request, `false` opts the group out of the voxels (it still receives GI), `null` clears the

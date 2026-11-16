@@ -494,6 +494,7 @@ impl GiVolume {
                 level: level as u32,
                 updates: self.light_updates.get(level).copied().unwrap_or(0),
                 resolution,
+                full: u32::from(settings.voxel_full_relight),
             };
             if let Some(params) = self.light_params.get(level) {
                 gpu.queue().write_buffer(params, 0, &record.to_bytes());

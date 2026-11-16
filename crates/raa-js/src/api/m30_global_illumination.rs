@@ -25,12 +25,12 @@ use std::collections::BTreeMap;
 use raa_core::RaaError;
 use raa_gi::error::invalid;
 use raa_gi::{
-    DebugView, Driver, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch, GiStats,
+    DebugView, Driver, GiPreset, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch, GiStats,
     IndirectMode, InstanceGi, SsgiQuality,
 };
 
 /// The S36 settings keys in their key order: the `GlobalIlluminationSettings` names of the JS API.
-pub(crate) const SETTING_KEYS: [&str; 10] = [
+pub(crate) const SETTING_KEYS: [&str; 15] = [
     "enabled",
     "intensity",
     "environmentDiffuse",
@@ -41,6 +41,11 @@ pub(crate) const SETTING_KEYS: [&str; 10] = [
     "screenSpace",
     "screenSpaceQuality",
     "indirect",
+    "historyMax",
+    "clampGamma",
+    "spatialPasses",
+    "restirMCap",
+    "voxelFullRelight",
 ];
 
 /// Expands a per-vertex colour buffer of `components` floats per vertex (3 = rgb, 4 = rgba) to the
@@ -152,8 +157,13 @@ pub(crate) fn parse_settings_patch(
             "debugView" => patch.debug_view = Some(debug_view(value)?),
             "screenSpace" => patch.screen_space = Some(boolean(key, value)?),
             "screenSpaceQuality" => patch.screen_space_quality = Some(screen_space_quality(value)?),
-            // `indirect`, the last key of SETTING_KEYS.
-            _ => patch.indirect = Some(indirect_mode(value)?),
+            "indirect" => patch.indirect = Some(indirect_mode(value)?),
+            "historyMax" => patch.history_max = Some(number(key, value)?),
+            "clampGamma" => patch.clamp_gamma = Some(number(key, value)?),
+            "spatialPasses" => patch.spatial_passes = Some(number(key, value)?),
+            "restirMCap" => patch.restir_m_cap = Some(number(key, value)?),
+            // `voxelFullRelight`, the last key of SETTING_KEYS.
+            _ => patch.voxel_full_relight = Some(boolean(key, value)?),
         }
     }
     Ok(patch)
@@ -208,7 +218,8 @@ fn number(key: &str, value: &GiWire) -> Result<f64, RaaError> {
 }
 
 fn debug_view(value: &GiWire) -> Result<DebugView, RaaError> {
-    const REASON: &str = "expected one of none, voxels, radiance, distance, levels";
+    const REASON: &str = "expected one of none, voxels, radiance, distance, levels, probes, \
+                          hitType, history, historyLength, reservoirs, rawDenoised";
     match value {
         GiWire::Text(name) => DebugView::parse(name).ok_or_else(|| invalid("debugView", REASON)),
         _ => Err(invalid("debugView", REASON)),
@@ -236,6 +247,16 @@ fn indirect_mode(value: &GiWire) -> Result<IndirectMode, RaaError> {
     parsed.ok_or_else(|| invalid("indirect", REASON))
 }
 
+/// The `setGiPreset` name: exactly `performance`, `balanced` or `quality`.
+pub(crate) fn preset(value: &GiWire) -> Result<GiPreset, RaaError> {
+    const REASON: &str = "expected one of performance, balanced, quality";
+    let parsed = match value {
+        GiWire::Text(name) => GiPreset::parse(name),
+        _ => None,
+    };
+    parsed.ok_or_else(|| invalid("preset", REASON))
+}
+
 /// The resolved settings as `GlobalIlluminationSettings` entries, in [`SETTING_KEYS`] order.
 pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
     vec![
@@ -255,6 +276,11 @@ pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
             GiWire::Text(s.screen_space_quality.as_str().to_string()),
         ),
         ("indirect", GiWire::Text(s.indirect.as_str().to_string())),
+        ("historyMax", GiWire::Number(f64::from(s.history_max))),
+        ("clampGamma", GiWire::Number(f64::from(s.clamp_gamma))),
+        ("spatialPasses", GiWire::Number(f64::from(s.spatial_passes))),
+        ("restirMCap", GiWire::Number(f64::from(s.restir_m_cap))),
+        ("voxelFullRelight", GiWire::Bool(s.voxel_full_relight)),
     ]
 }
 
@@ -316,6 +342,18 @@ pub(crate) fn stats_entries(s: &GiStats) -> Vec<(&'static str, GiWire)> {
             number_or_null(s.stats_frame_index.map(|index| index as f64)),
         ),
         ("pending", GiWire::Bool(s.pending)),
+        (
+            "historyLengthMean",
+            number_or_null(s.history_length_mean.map(f64::from)),
+        ),
+        (
+            "rejectedPercent",
+            number_or_null(s.rejected_percent.map(f64::from)),
+        ),
+        (
+            "clampedPercent",
+            number_or_null(s.clamped_percent.map(f64::from)),
+        ),
     ]
 }
 
@@ -532,6 +570,15 @@ mod web {
         gi_handle(st)?.set_quality(parsed)
     }
 
+    /// `setGiPreset(name)`: the preset's settings and quality patches, applied in that order;
+    /// an unknown name changes nothing.
+    fn set_preset(st: &mut EngineState, name: &JsValue) -> Result<(), RaaError> {
+        let chosen = preset(&wire(name))?;
+        let gi = gi_handle(st)?;
+        gi.set(chosen.settings_patch())?;
+        gi.set_quality(chosen.quality_patch())
+    }
+
     /// `setInstanceGlobalIllumination(instance, value)`: the group is checked first
     /// (`api.unknown_handle`), then `value` (true, false or null); the handle and the api state
     /// are updated together.
@@ -642,6 +689,14 @@ mod web {
         #[wasm_bindgen(js_name = setGiQuality)]
         pub fn set_gi_quality(&mut self, patch: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| set_quality_patch(st, &patch))
+        }
+
+        /// Applies a GI preset (`performance`, `balanced`, `quality`): it sets `historyMax`,
+        /// `clampGamma`, `spatialPasses`, `restirMCap`, `voxelFullRelight` and the probe rays,
+        /// and leaves every other setting as it is. Another name throws `gi.invalid`.
+        #[wasm_bindgen(js_name = setGiPreset)]
+        pub fn set_gi_preset(&mut self, name: JsValue) -> Result<(), JsValue> {
+            self.with_state(|_, st| set_preset(st, &name))
         }
 
         /// The current `GiQuality`, as a fresh object.

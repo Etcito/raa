@@ -237,9 +237,10 @@ pub fn debug_view_module_wgsl() -> String {
     format!("{PRELUDE_WGSL}{GI_VOLUME_WGSL}{GI_FRAME_RECORD_WGSL}{DEBUG_VIEW_WGSL}")
 }
 
-/// Debug-view group 2: the GiFrameGpu uniform, the depth texture, hdr.src, the voxels read and
-/// the Rgba16Float hdr.dst storage texture.
-pub fn debug_group2_entries() -> [BindGroupLayoutEntry; 5] {
+/// Debug-view group 2: the GiFrameGpu uniform, the depth texture, hdr.src, the voxels read, the
+/// Rgba16Float hdr.dst storage texture, the gi.screen debug record (Rgba32Uint) and the screen
+/// output (Rgba16Float).
+pub fn debug_group2_entries() -> [BindGroupLayoutEntry; 7] {
     [
         uniform_entry(0, 432, false),
         entry(
@@ -265,6 +266,22 @@ pub fn debug_group2_entries() -> [BindGroupLayoutEntry; 5] {
                 access: StorageTextureAccess::WriteOnly,
                 format: TextureFormat::Rgba16Float,
                 view_dimension: TextureViewDimension::D2,
+            },
+        ),
+        entry(
+            5,
+            BindingType::Texture {
+                sample_type: TextureSampleType::Uint,
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+        ),
+        entry(
+            6,
+            BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: false },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
             },
         ),
     ]

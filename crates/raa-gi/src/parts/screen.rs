@@ -1,20 +1,37 @@
 //! The milestone-2 part `screen` of the GI volume (S39 screen probes): the module root of the
-//! part, registered by the generated registry in `parts.rs`. Its CPU twins live in `screen/cpu.rs`.
+//! part, registered by the generated registry in `parts.rs`. Its CPU twins live in `screen/cpu.rs`
+//! and `screen/accumulate_cpu.rs`.
 //! Adapted from solstice@7e465b5 `crates/solstice-render/src/gi/screen.rs` and
 //! `crates/solstice-render/src/gi/depth_pyramid.rs`. MIT licence, Copyright (c) 2026 SamG-Coder.
+//!
+//! Each frame the part computes one irradiance per pixel (screen probes or ReSTIR GI), then the
+//! shared temporal accumulation (`wgsl/screen/accumulate.wgsl`: disocclusion test, clamp,
+//! alpha = max(1 / n, 1 / historyMax)) writes the history of this parity, and `spatialPasses`
+//! variance-guided a-trous passes (`wgsl/screen/atrous.wgsl`) write the screen output that
+//! `raa_slot_indirect` reads. A debug record per pixel and four statistics counters (read back
+//! a few frames later) feed the screen debug views and `GiStats`.
 
 #![allow(dead_code)]
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use self::passes::{PROBE_BYTES, SCREEN_PARAMS_SIZE, ScreenPipelines, ScreenWork, pyramid_sizes};
+use self::passes::{
+    ATROUS_MAX_PASSES, ATROUS_SLOT_BYTES, PROBE_BYTES, SCREEN_PARAMS_SIZE, ScreenPipelines,
+    ScreenWork, atrous_record, pyramid_sizes,
+};
 use super::{GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, LightingResources, RecordCtx, Targets};
+use raa_lit::LitHandle;
+use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx, Targets};
 
 #[path = "screen/cpu.rs"]
 pub mod cpu;
+
+#[path = "screen/accumulate_cpu.rs"]
+pub mod accumulate_cpu;
 
 #[path = "screen/passes.rs"]
 pub mod passes;
@@ -26,15 +43,22 @@ pub mod restir_gi;
 pub mod restir_gi_cpu;
 
 use self::restir_gi::{RestirGiInputs, RestirGiPipelines, RestirGiResources};
-use crate::settings::IndirectMode;
+use crate::settings::{GiSettings, IndirectMode};
+
+/// Byte offsets of the two `GiFrameGpu` lanes that carry the TAA jitter (sun_direction.w and
+/// sun_color.w, otherwise unused): probe_common.wgsl `raa_gi_view_position` reads them.
+const FRAME_JITTER_X_OFFSET: u64 = 348;
+const FRAME_JITTER_Y_OFFSET: u64 = 364;
 
 /// Handoff: `install` is the body that card 'raa-gi screen: ScreenPart, gi.screen pass and install'
-/// replaces. Today `install` adds nothing to `ctx` and returns `Ok(())`; the generated
-/// `install_parts` of `parts.rs` calls it once per GI feature install, in file-name order.
+/// replaces. The generated `install_parts` of `parts.rs` calls it once per GI feature install, in
+/// file-name order. It builds the pipelines, the part (with the lit handle whose jitter the pass
+/// writes into the frame record) and the `gi.screen` pass.
 pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
     let pipelines = ScreenPipelines::new(ctx.gpu, &ctx.shared.compute_group1_layout());
     let part = Rc::new(ScreenPart {
         shared: ctx.shared.clone(),
+        lit: ctx.lit.handle(),
         state: RefCell::new(ScreenState {
             pipelines,
             resources: None,
@@ -45,10 +69,12 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             output_valid: false,
             wants: false,
             mode: IndirectMode::Probes,
+            settings: GiSettings::DEFAULT,
             restir_pipelines: None,
             restir: None,
             restir_valid: false,
             restir_frame: 0,
+            stats: None,
         }),
     });
     {
@@ -77,6 +103,39 @@ struct ScreenBindings {
     project: wgpu::BindGroup,
     filter: wgpu::BindGroup,
     integrate: [wgpu::BindGroup; 2],
+    /// Per parity, `2 * ATROUS_MAX_PASSES` groups: index `2 i` for pass i into the other filter
+    /// texture, `2 i + 1` for pass i into the screen output.
+    atrous: [Vec<wgpu::BindGroup>; 2],
+}
+
+/// The readback states of the statistics counters.
+const READBACK_IDLE: u8 = 0;
+const READBACK_COPIED: u8 = 1;
+const READBACK_MAPPING: u8 = 2;
+const READBACK_MAPPED: u8 = 3;
+
+/// The statistics of one read-back frame: the mean history length and the rejected share in
+/// percent, over one pixel in 16 of the geometry.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct ScreenStats {
+    pub history_length_mean: f32,
+    pub rejected_percent: f32,
+    pub clamped_percent: f32,
+}
+
+/// The `ScreenStats` of the four counters (sum of history lengths, rejected, counted, clamped);
+/// `None` when no pixel was counted.
+pub fn screen_stats(counters: [u32; 4]) -> Option<ScreenStats> {
+    let [lengths, rejected, counted, clamped] = counters;
+    if counted == 0 {
+        return None;
+    }
+    let counted = counted as f32;
+    Some(ScreenStats {
+        history_length_mean: lengths as f32 / counted,
+        rejected_percent: 100.0 * rejected as f32 / counted,
+        clamped_percent: 100.0 * clamped as f32 / counted,
+    })
 }
 
 /// Handoff: card 'raa-gi screen: ScreenPart, gi.screen pass and install' takes over
@@ -84,20 +143,15 @@ struct ScreenBindings {
 /// `ScreenResources::work` per frame to obtain the `ScreenWork` it records through
 /// `ScreenPipelines::record`, `ScreenResources::write_params`, `ScreenResources::output_view`
 /// for the group-1 screen output, `ScreenResources::invalidate_bindings` on the gi.screen resize
-/// hook and `ScreenResources::allocated_bytes` for the stats. Today `ScreenResources` allocates
-/// the depth pyramid, the ray atlas, the two probe buffers, the two parity outputs, the
-/// `GiScreenGpu` uniform and the dummy history, and caches the group-2 bind groups of contract
-/// 'gi-screen-wgsl' until the frame, the history or `invalidate_bindings` changes them. It
-/// extends the `ScreenPipelines` Handoff at crates/raa-gi/src/parts/screen/passes.rs:286
-/// `ScreenPipelines`. LIFECYCLE: `ScreenPart::prepare_frame` (a GiPart hook, run by
-/// `GiHandle::prepare_frame` before the pipeline executes) creates ScreenResources on an active
-/// frame when needs_reallocation is true. `GiPart::release` (run by `release_resources` in
-/// crates/raa-gi/src/feature.rs on every inactive frame and before a reallocation) drops them.
-/// The bind groups that reference pipeline targets are created lazily by `work` from the
-/// gi.screen record and dropped by `invalidate_bindings` from the gi.screen resize hook. Per
-/// enabled pass in order, the pipeline calls `resize` (only when the targets generation
-/// changed) and then `prepare` (crates/raa-pipeline/src/pipeline.rs:881-887), then records every
-/// enabled pass in order (pipeline.rs:917-919).
+/// hook and `ScreenResources::allocated_bytes` for the stats. `ScreenResources` allocates the
+/// depth pyramid, the ray atlas, the two probe buffers, the two parity histories and moments,
+/// the two a-trous textures, the screen output, the debug record, the statistics counters and
+/// their readback, the `GiScreenGpu` uniform, the a-trous records and the dummy history, and
+/// caches the group-2 bind groups of contract 'gi-screen-wgsl' until the frame, the history or
+/// `invalidate_bindings` changes them. LIFECYCLE: `ScreenPart::prepare_frame` (a GiPart hook, run
+/// by `GiHandle::prepare_frame` before the pipeline executes) creates ScreenResources on an
+/// active frame when needs_reallocation is true. `GiPart::release` (run by `release_resources`
+/// in crates/raa-gi/src/feature.rs on every inactive frame and before a reallocation) drops them.
 pub(crate) struct ScreenResources {
     viewport: (u32, u32),
     probe_rays: u32,
@@ -108,8 +162,21 @@ pub(crate) struct ScreenResources {
     atlas_view: wgpu::TextureView,
     probes_raw: wgpu::Buffer,
     probes_filtered: wgpu::Buffer,
+    /// The accumulated irradiance (rgb) and occlusion (a), one per parity.
     output_views: [wgpu::TextureView; 2],
+    /// The moments records (Rgba32Uint), one per parity.
+    meta_views: [wgpu::TextureView; 2],
+    /// The a-trous ping-pong textures (irradiance rgb, variance a).
+    filter_views: [wgpu::TextureView; 2],
+    /// The a-trous result: what binding 14 reads while `spatialPasses` > 0.
+    display_view: wgpu::TextureView,
+    /// The per-pixel debug record (Rgba32Uint).
+    debug_view: wgpu::TextureView,
+    counters: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    readback_state: Arc<AtomicU8>,
     params: wgpu::Buffer,
+    atrous_params: wgpu::Buffer,
     dummy_view: wgpu::TextureView,
     bindings: Option<ScreenBindings>,
 }
@@ -184,11 +251,34 @@ fn group(
     })
 }
 
+/// The 32 B of `GiScreenGpu`, little-endian: history_valid, screen_traces, parity & 1,
+/// debug_view, history_max, clamp_gamma, m_cap, 0.
+pub(crate) fn screen_params_bytes(
+    history_valid: bool,
+    screen_traces: bool,
+    parity: usize,
+    settings: &GiSettings,
+) -> [u8; SCREEN_PARAMS_SIZE as usize] {
+    let words = [
+        u32::from(history_valid),
+        u32::from(screen_traces),
+        (parity & 1) as u32,
+        settings.debug_view.code(),
+        (settings.history_max.max(1) as f32).to_bits(),
+        settings.clamp_gamma.to_bits(),
+        settings.restir_m_cap.to_bits(),
+        0,
+    ];
+    let mut bytes = [0u8; SCREEN_PARAMS_SIZE as usize];
+    for (index, value) in words.into_iter().enumerate() {
+        bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
 impl ScreenResources {
-    /// Allocates the viewport-sized resources of one (viewport, probe_rays): the pyramid with
-    /// one single-mip view per mip and one all-mip view, the ray atlas, the raw and filtered
-    /// probe buffers, the two parity outputs, the `GiScreenGpu` uniform and the 1x1 dummy history
-    /// written to (0, 0, 0, 1). The viewport axes are clamped to at least 1.
+    /// Allocates the viewport-sized resources of one (viewport, probe_rays). The viewport axes
+    /// are clamped to at least 1.
     pub(crate) fn new(gpu: &GpuContext, viewport: (u32, u32), probe_rays: u32) -> ScreenResources {
         let viewport = (viewport.0.max(1), viewport.1.max(1));
         let found = cpu::probe_grid([viewport.0, viewport.1]);
@@ -224,25 +314,45 @@ impl ScreenResources {
         let probes_raw = buffer(gpu, "raa-gi.screen.probes", probe_bytes, storage);
         let probes_filtered = buffer(gpu, "raa-gi.screen.probes-filtered", probe_bytes, storage);
 
-        let outputs = [
-            texture(
-                gpu,
-                "raa-gi.screen.output-a",
-                viewport,
-                1,
-                wgpu::TextureFormat::Rgba16Float,
-                textured,
-            ),
-            texture(
-                gpu,
-                "raa-gi.screen.output-b",
-                viewport,
-                1,
-                wgpu::TextureFormat::Rgba16Float,
-                textured,
-            ),
-        ];
-        let output_views = [full_view(&outputs[0]), full_view(&outputs[1])];
+        let pair = |label: &str, format: wgpu::TextureFormat| -> [wgpu::TextureView; 2] {
+            [
+                full_view(&texture(gpu, label, viewport, 1, format, textured)),
+                full_view(&texture(gpu, label, viewport, 1, format, textured)),
+            ]
+        };
+        let half = wgpu::TextureFormat::Rgba16Float;
+        let words = wgpu::TextureFormat::Rgba32Uint;
+        let output_views = pair("raa-gi.screen.history", half);
+        let meta_views = pair("raa-gi.screen.moments", words);
+        let filter_views = pair("raa-gi.screen.atrous", half);
+        let display_view = full_view(&texture(
+            gpu,
+            "raa-gi.screen.output",
+            viewport,
+            1,
+            half,
+            textured,
+        ));
+        let debug_view = full_view(&texture(
+            gpu,
+            "raa-gi.screen.debug",
+            viewport,
+            1,
+            words,
+            textured,
+        ));
+        let counters = buffer(
+            gpu,
+            "raa-gi.screen.counters",
+            16,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        );
+        let readback = buffer(
+            gpu,
+            "raa-gi.screen.counters-readback",
+            16,
+            wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        );
 
         let params = buffer(
             gpu,
@@ -250,6 +360,22 @@ impl ScreenResources {
             SCREEN_PARAMS_SIZE,
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
+        let atrous_params = buffer(
+            gpu,
+            "raa-gi.screen.atrous-params",
+            ATROUS_SLOT_BYTES * u64::from(2 * ATROUS_MAX_PASSES),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        for index in 0..ATROUS_MAX_PASSES {
+            for last in [false, true] {
+                let slot = u64::from(index * 2 + u32::from(last));
+                gpu.queue().write_buffer(
+                    &atrous_params,
+                    slot * ATROUS_SLOT_BYTES,
+                    &atrous_record(index, last),
+                );
+            }
+        }
 
         let dummy = texture(
             gpu,
@@ -286,7 +412,15 @@ impl ScreenResources {
             probes_raw,
             probes_filtered,
             output_views,
+            meta_views,
+            filter_views,
+            display_view,
+            debug_view,
+            counters,
+            readback,
+            readback_state: Arc::new(AtomicU8::new(READBACK_IDLE)),
             params,
+            atrous_params,
             dummy_view,
             bindings: None,
         }
@@ -307,9 +441,24 @@ impl ScreenResources {
         self.grid
     }
 
-    /// A clone of the view of output `parity & 1`, the texture written this frame.
+    /// A clone of the history view of `parity & 1`, the texture accumulated this frame.
     pub(crate) fn output_view(&self, parity: usize) -> wgpu::TextureView {
         self.output_views[parity & 1].clone()
+    }
+
+    /// The screen output of this frame: the a-trous result when `passes` > 0, else the history
+    /// of `parity`.
+    pub(crate) fn screen_view(&self, parity: usize, passes: u32) -> wgpu::TextureView {
+        if passes > 0 {
+            self.display_view.clone()
+        } else {
+            self.output_view(parity)
+        }
+    }
+
+    /// A clone of the debug-record view.
+    pub(crate) fn debug_view(&self) -> wgpu::TextureView {
+        self.debug_view.clone()
     }
 
     /// A clone of the all-mip R32Float depth-pyramid view.
@@ -317,25 +466,16 @@ impl ScreenResources {
         self.pyramid_view.clone()
     }
 
-    /// Writes the 16 B of `GiScreenGpu` as little-endian u32: (history_valid, screen_traces,
-    /// parity & 1, 0).
+    /// Writes the 32 B of `GiScreenGpu` (`screen_params_bytes`).
     pub(crate) fn write_params(
         &self,
         gpu: &GpuContext,
         history_valid: bool,
         screen_traces: bool,
         parity: usize,
+        settings: &GiSettings,
     ) {
-        let values = [
-            history_valid as u32,
-            screen_traces as u32,
-            (parity & 1) as u32,
-            0,
-        ];
-        let mut bytes = [0u8; SCREEN_PARAMS_SIZE as usize];
-        for (index, value) in values.into_iter().enumerate() {
-            bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
-        }
+        let bytes = screen_params_bytes(history_valid, screen_traces, parity, settings);
         gpu.queue().write_buffer(&self.params, 0, &bytes);
     }
 
@@ -344,10 +484,53 @@ impl ScreenResources {
         resource_bytes(self.viewport, self.probe_rays)
     }
 
+    /// Clears the counters before the pass that accumulates into them.
+    pub(crate) fn clear_counters(&self, encoder: &mut wgpu::CommandEncoder) {
+        encoder.clear_buffer(&self.counters, 0, None);
+    }
+
+    /// Copies the counters into the readback buffer when it is free.
+    pub(crate) fn copy_counters(&self, encoder: &mut wgpu::CommandEncoder) {
+        if self.readback_state.load(Ordering::Acquire) == READBACK_IDLE {
+            encoder.copy_buffer_to_buffer(&self.counters, 0, &self.readback, 0, 16);
+            self.readback_state.store(READBACK_COPIED, Ordering::Release);
+        }
+    }
+
+    /// After the submission that copied the counters: starts mapping the readback buffer.
+    pub(crate) fn map_counters(&self) {
+        if self.readback_state.load(Ordering::Acquire) != READBACK_COPIED {
+            return;
+        }
+        self.readback_state.store(READBACK_MAPPING, Ordering::Release);
+        let state = Arc::clone(&self.readback_state);
+        self.readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let next = if result.is_ok() { READBACK_MAPPED } else { READBACK_IDLE };
+                state.store(next, Ordering::Release);
+            });
+    }
+
+    /// The counters once mapped (then unmapped, so the next copy can go), else `None`.
+    pub(crate) fn take_counters(&self) -> Option<[u32; 4]> {
+        if self.readback_state.load(Ordering::Acquire) != READBACK_MAPPED {
+            return None;
+        }
+        let counters = match self.readback.slice(..).get_mapped_range() {
+            Ok(view) => std::array::from_fn(|i| {
+                u32::from_le_bytes(view[i * 4..i * 4 + 4].try_into().unwrap_or([0; 4]))
+            }),
+            Err(_) => [0; 4],
+        };
+        self.readback.unmap();
+        self.readback_state.store(READBACK_IDLE, Ordering::Release);
+        Some(counters)
+    }
+
     /// Builds the group-2 bind groups of contract 'gi-screen-wgsl' on first use and caches them;
     /// rebuilds them after `invalidate_bindings` or when `frame` or `history` differs from the
-    /// cached one. The returned `ScreenWork` carries this set's pyramid sizes, grid, viewport and
-    /// probe rays and the integrate group of `parity`.
+    /// cached one.
     pub(crate) fn work<'a>(
         &'a mut self,
         gpu: &GpuContext,
@@ -356,6 +539,7 @@ impl ScreenResources {
         frame: &wgpu::Buffer,
         history: Option<&wgpu::TextureView>,
         parity: usize,
+        atrous_passes: u32,
     ) -> ScreenWork<'a> {
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.frame != *frame || bindings.history.as_ref() != history
@@ -371,6 +555,8 @@ impl ScreenResources {
             project: &bindings.project,
             filter: &bindings.filter,
             integrate: &bindings.integrate[parity & 1],
+            atrous: &bindings.atrous[parity & 1],
+            atrous_passes: atrous_passes.min(ATROUS_MAX_PASSES),
             probe_rays: self.probe_rays,
             grid: self.grid,
             viewport: self.viewport,
@@ -453,21 +639,55 @@ impl ScreenResources {
             ],
         );
         let integrate = std::array::from_fn(|parity| {
+            let mut entries = vec![
+                (0, frame.as_entire_binding()),
+                (1, texture_resource(targets.depth())),
+                (2, texture_resource(targets.normal())),
+                (5, self.probes_filtered.as_entire_binding()),
+            ];
+            entries.extend(self.accumulate_entries(targets, parity));
             group(
                 device,
                 "raa-gi.screen.integrate",
                 &pipelines.integrate_layout,
-                &[
-                    (0, frame.as_entire_binding()),
-                    (1, texture_resource(targets.depth())),
-                    (2, texture_resource(targets.normal())),
-                    (3, texture_resource(targets.motion())),
-                    (4, texture_resource(&self.output_views[1 - parity])),
-                    (5, self.probes_filtered.as_entire_binding()),
-                    (6, texture_resource(&self.output_views[parity])),
-                    (7, self.params.as_entire_binding()),
-                ],
+                &entries,
             )
+        });
+        let atrous = std::array::from_fn(|parity| {
+            let mut groups = Vec::with_capacity(2 * ATROUS_MAX_PASSES as usize);
+            for index in 0..ATROUS_MAX_PASSES {
+                for last in [false, true] {
+                    let input = &self.filter_views[(index % 2) as usize];
+                    let output = if last {
+                        &self.display_view
+                    } else {
+                        &self.filter_views[((index + 1) % 2) as usize]
+                    };
+                    let slot = u64::from(index * 2 + u32::from(last));
+                    groups.push(group(
+                        device,
+                        "raa-gi.screen.atrous",
+                        &pipelines.atrous_layout,
+                        &[
+                            (0, frame.as_entire_binding()),
+                            (1, texture_resource(targets.depth())),
+                            (2, texture_resource(targets.normal())),
+                            (15, texture_resource(input)),
+                            (16, texture_resource(output)),
+                            (17, texture_resource(&self.output_views[parity])),
+                            (
+                                18,
+                                wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.atrous_params,
+                                    offset: slot * ATROUS_SLOT_BYTES,
+                                    size: wgpu::BufferSize::new(passes::ATROUS_PARAMS_SIZE),
+                                }),
+                            ),
+                        ],
+                    ));
+                }
+            }
+            groups
         });
         ScreenBindings {
             frame: frame.clone(),
@@ -477,13 +697,57 @@ impl ScreenResources {
             project,
             filter,
             integrate,
+            atrous,
         }
+    }
+
+    /// Clones of the accumulation views and buffers, for the ReSTIR GI denoise groups.
+    pub(crate) fn accumulate_views(&self) -> AccumulateViews {
+        AccumulateViews {
+            outputs: self.output_views.clone(),
+            metas: self.meta_views.clone(),
+            filter: self.filter_views[0].clone(),
+            debug: self.debug_view.clone(),
+            counters: self.counters.clone(),
+        }
+    }
+
+    /// The accumulation bindings 3, 4, 6 to 12 of `parity` (accumulate.wgsl): this parity's
+    /// history and moments are written, the other parity's read.
+    pub(crate) fn accumulate_entries<'a>(
+        &'a self,
+        targets: &'a Targets,
+        parity: usize,
+    ) -> Vec<(u32, wgpu::BindingResource<'a>)> {
+        let parity = parity & 1;
+        vec![
+            (3, texture_resource(targets.motion())),
+            (4, texture_resource(&self.output_views[1 - parity])),
+            (6, texture_resource(&self.output_views[parity])),
+            (7, self.params.as_entire_binding()),
+            (8, texture_resource(&self.meta_views[1 - parity])),
+            (9, texture_resource(&self.meta_views[parity])),
+            (10, texture_resource(&self.filter_views[0])),
+            (11, texture_resource(&self.debug_view)),
+            (12, self.counters.as_entire_binding()),
+        ]
     }
 }
 
+/// The accumulation targets of one `ScreenResources` the ReSTIR GI denoise binds (clones).
+pub(crate) struct AccumulateViews {
+    pub(crate) outputs: [wgpu::TextureView; 2],
+    pub(crate) metas: [wgpu::TextureView; 2],
+    pub(crate) filter: wgpu::TextureView,
+    pub(crate) debug: wgpu::TextureView,
+    pub(crate) counters: wgpu::Buffer,
+}
+
 /// The GPU bytes of one `ScreenResources` of `viewport` and `probe_rays`: the pyramid mips at
-/// 4 B per texel, the atlas at 8 B per texel, the two probe buffers, the two outputs at 8 B per
-/// texel each, the 16-B params and the 8-B dummy. For 1280x720 with 8 rays it is 22,771,076.
+/// 4 B per texel, the atlas at 8 B per texel, the two probe buffers, per pixel the two
+/// histories (8 B), the two moments records (16 B), the two a-trous textures (8 B), the output
+/// (8 B) and the debug record (16 B), then the 16-B counters and readback, the 32-B params, the
+/// a-trous records and the 8-B dummy.
 pub(crate) fn resource_bytes(viewport: (u32, u32), probe_rays: u32) -> u64 {
     let viewport = (viewport.0.max(1), viewport.1.max(1));
     let pyramid: u64 = pyramid_sizes(viewport)
@@ -493,8 +757,10 @@ pub(crate) fn resource_bytes(viewport: (u32, u32), probe_rays: u32) -> u64 {
     let found = cpu::probe_grid([viewport.0, viewport.1]);
     let atlas = u64::from(found[0] * probe_rays) * u64::from(found[1] * probe_rays) * 8;
     let probes = 2 * PROBE_BYTES * u64::from(found[0]) * u64::from(found[1]);
-    let outputs = 2 * u64::from(viewport.0) * u64::from(viewport.1) * 8;
-    pyramid + atlas + probes + outputs + SCREEN_PARAMS_SIZE + 8
+    let pixels = u64::from(viewport.0) * u64::from(viewport.1);
+    let per_pixel = 2 * 8 + 2 * 16 + 2 * 8 + 8 + 16;
+    let atrous = ATROUS_SLOT_BYTES * u64::from(2 * ATROUS_MAX_PASSES);
+    pyramid + atlas + probes + pixels * per_pixel + 16 + 16 + SCREEN_PARAMS_SIZE + atrous + 8
 }
 
 /// True when `current` is absent or is not (viewport, probe_rays); the viewport axes are
@@ -507,38 +773,24 @@ pub(crate) fn needs_reallocation(
     current != Some(((viewport.0.max(1), viewport.1.max(1)), probe_rays))
 }
 
-/// The GI part `screen`: the shared frame state and the per-frame state of the screen-probe
-/// resources.
+/// The GI part `screen`: the shared frame state, the lit handle (for the TAA jitter) and the
+/// per-frame state of the screen resources.
 ///
 /// Handoff: `ScreenPart` is taken over by card 'raa-gi feature: gi.history copy and binding-14
 /// screen output (M1 repair)', which calls `ScreenPart::screen_output` and
-/// `ScreenPart::wants_history` through `GiPart` to bind the output written this frame at group 1
-/// binding 14 and to copy the previous lit HDR into `GiShared::history_view`.
-/// `ScreenPart::screen_output` returns a clone of the output view of the current parity while the
-/// part is active, the pass is enabled and `ScreenResources` exist; `ScreenPart::wants_history`
-/// is true while the part is active with `screen_traces` requested.
-/// The other `GiPart` hooks of the part are `ScreenPart::prepare_frame`,
-/// `ScreenPart::invalidate_history`, `ScreenPart::release` and `ScreenPart::allocated_bytes`.
-/// It builds on the `ScreenResources` Handoff at crates/raa-gi/src/parts/screen.rs:68
-/// `ScreenResources` and the `ScreenPipelines` Handoff at
-/// crates/raa-gi/src/parts/screen/passes.rs:286 `ScreenPipelines`. LIFECYCLE:
-/// `ScreenPart::prepare_frame` (a GiPart hook, run by `GiHandle::prepare_frame` before the
-/// pipeline executes) creates ScreenResources on an active frame when needs_reallocation is
-/// true. `GiPart::release` (run by `release_resources` in crates/raa-gi/src/feature.rs on every
-/// inactive frame and before a reallocation) drops them. The bind groups that reference pipeline
-/// targets are created lazily by `work` from the gi.screen record and dropped by
-/// `invalidate_bindings` from the gi.screen resize hook. Per enabled pass in order, the pipeline
-/// calls `resize` (only when the targets generation changed) and then `prepare`
-/// (crates/raa-pipeline/src/pipeline.rs:881-887), then records every enabled pass in order
-/// (pipeline.rs:917-919).
+/// `ScreenPart::wants_history` through `GiPart`. `ScreenPart::screen_output` returns the screen
+/// output of this frame while the part is active, the pass is enabled and `ScreenResources`
+/// exist; `ScreenPart::wants_history` is true while the part is active with `screen_traces`
+/// requested. The other `GiPart` hooks of the part are `ScreenPart::prepare_frame`,
+/// `ScreenPart::invalidate_history`, `ScreenPart::release`, `ScreenPart::allocated_bytes`,
+/// `ScreenPart::observe_submission` and `ScreenPart::screen_stats`.
 pub(crate) struct ScreenPart {
     shared: GiShared,
+    lit: LitHandle,
     state: RefCell<ScreenState>,
 }
 
-/// The mutable state of [`ScreenPart`]: the pipelines and the resources keyed by
-/// (viewport, probe_rays), the parity of the output written this frame, and the activity,
-/// enable, validity and history flags.
+/// The mutable state of [`ScreenPart`].
 struct ScreenState {
     pipelines: ScreenPipelines,
     resources: Option<ScreenResources>,
@@ -550,13 +802,17 @@ struct ScreenState {
     wants: bool,
     /// The irradiance source of this frame (`GiSettings::indirect`).
     mode: IndirectMode,
+    /// The settings of this frame.
+    settings: GiSettings,
     /// The ReSTIR GI pipelines, built on the first `restir` frame.
     restir_pipelines: Option<RestirGiPipelines>,
     /// The ReSTIR GI resources of the current viewport, while the mode is `restir`.
     restir: Option<RestirGiResources>,
-    /// True when the reservoirs of the previous parity hold the previous frame's stage 1.
+    /// True when the reservoirs of the previous parity hold the previous frame's reuse.
     restir_valid: bool,
     restir_frame: u32,
+    /// The latest statistics read back.
+    stats: Option<ScreenStats>,
 }
 
 impl GiPart for ScreenPart {
@@ -566,9 +822,14 @@ impl GiPart for ScreenPart {
 
     /// Allocates `ScreenResources` on an active frame when the (viewport, probe_rays) key
     /// changed, flips the output parity, writes the `GiScreenGpu` params and records whether the
-    /// part is active and wants the history.
+    /// part is active and wants the history. The history is usable only when this part's other
+    /// parity holds the previous frame and the camera is continuous (`camera_valid`), whether or
+    /// not screen traces copy the lit HDR.
     fn prepare_frame(&self, gpu: &GpuContext, frame: &PartFrame<'_>) {
         let mut state = self.state.borrow_mut();
+        if let Some(counters) = state.resources.as_ref().and_then(ScreenResources::take_counters) {
+            state.stats = screen_stats(counters);
+        }
         let (width, height) = frame.viewport;
         if !frame.active || width == 0 || height == 0 {
             state.active = false;
@@ -582,12 +843,15 @@ impl GiPart for ScreenPart {
             state.output_valid = false;
         }
         state.parity ^= 1;
+        state.settings = frame.settings;
+        let history_valid = state.output_valid && frame.camera_valid;
         if let Some(resources) = &state.resources {
             resources.write_params(
                 gpu,
-                state.output_valid,
+                history_valid,
                 frame.settings.screen_traces && frame.history_valid,
                 state.parity,
+                &frame.settings,
             );
         }
         state.mode = frame.settings.indirect;
@@ -602,13 +866,14 @@ impl GiPart for ScreenPart {
                 state.restir_valid = false;
             }
             state.restir_frame = state.restir_frame.wrapping_add(1);
-            let usable = state.restir_valid && frame.history_valid;
+            let usable = state.restir_valid && frame.camera_valid;
             if let Some(restir) = &state.restir {
                 restir.write_params(
                     gpu,
                     state.restir_frame,
                     usable,
                     frame.settings.screen_traces && frame.history_valid,
+                    frame.settings.restir_m_cap,
                 );
             }
         } else {
@@ -619,8 +884,8 @@ impl GiPart for ScreenPart {
         state.wants = frame.settings.screen_traces;
     }
 
-    /// A clone of the output view of the current parity while the part is active, the pass is
-    /// enabled and resources exist; otherwise `None`.
+    /// The screen output of the current frame while the part is active, the pass is enabled and
+    /// resources exist; otherwise `None`.
     fn screen_output(&self) -> Option<wgpu::TextureView> {
         let state = self.state.borrow();
         if !state.active || !state.pass_enabled {
@@ -629,7 +894,7 @@ impl GiPart for ScreenPart {
         state
             .resources
             .as_ref()
-            .map(|resources| resources.output_view(state.parity))
+            .map(|resources| resources.screen_view(state.parity, state.settings.spatial_passes))
     }
 
     /// True while the part is active with screen traces requested.
@@ -646,7 +911,7 @@ impl GiPart for ScreenPart {
     }
 
     /// Drops the resources and the key so the next active frame reallocates them, and drops the
-    /// published depth-pyramid and probe-output views.
+    /// published depth-pyramid, probe-output and debug views.
     fn release(&self) {
         let mut state = self.state.borrow_mut();
         state.resources = None;
@@ -655,8 +920,10 @@ impl GiPart for ScreenPart {
         state.output_valid = false;
         state.restir = None;
         state.restir_valid = false;
+        state.stats = None;
         self.shared.set_pyramid(None);
         self.shared.set_probe_output(None);
+        self.shared.set_screen_debug(None);
     }
 
     /// The GPU bytes of the current resources, or 0 without them.
@@ -671,9 +938,22 @@ impl GiPart for ScreenPart {
                 .as_ref()
                 .map_or(0, RestirGiResources::allocated_bytes)
     }
+
+    /// Starts mapping the counters a completed submission copied.
+    fn observe_submission(&self) {
+        if let Some(resources) = self.state.borrow().resources.as_ref() {
+            resources.map_counters();
+        }
+    }
+
+    /// The latest statistics read back, while the part is active.
+    fn screen_stats(&self) -> Option<ScreenStats> {
+        let state = self.state.borrow();
+        if state.active { state.stats } else { None }
+    }
 }
 
-/// The `gi.screen` feature pass (order 42): records the screen-probe compute pass of one
+/// The `gi.screen` feature pass (order 42): records the screen compute pass of one
 /// [`ScreenPart`].
 struct GiScreenPass {
     part: Rc<ScreenPart>,
@@ -689,7 +969,7 @@ impl FeaturePass for GiScreenPass {
     }
 
     /// Stores the enable flag and, on disable, invalidates the output, drops the published
-    /// depth-pyramid and probe-output views and clears the group-1 GI dummies (S38).
+    /// views and clears the group-1 GI dummies (S38).
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
         let mut state = self.part.state.borrow_mut();
         state.pass_enabled = enabled;
@@ -697,6 +977,7 @@ impl FeaturePass for GiScreenPass {
             state.output_valid = false;
             self.part.shared.set_pyramid(None);
             self.part.shared.set_probe_output(None);
+            self.part.shared.set_screen_debug(None);
             lighting.clear_gi();
         }
     }
@@ -712,13 +993,32 @@ impl FeaturePass for GiScreenPass {
         }
     }
 
-    /// Drops the published pyramid and probe-output views first. Then records the `raa-gi.screen`
-    /// pass when the part is active, enabled and has resources; when `ScreenPipelines::record`
-    /// recorded the pass, publishes the pyramid view and the probe-output view of this frame's
-    /// parity and marks the output valid.
+    /// Writes this frame's TAA jitter (known once the lit renderer prepared the frame) into the
+    /// two spare lanes of the GI frame record, after `GiHandle::prepare_frame` wrote the record.
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let state = self.part.state.borrow();
+        if !state.active || !state.pass_enabled {
+            return Ok(());
+        }
+        if let Some(frame) = self.part.shared.frame_buffer() {
+            let [x, y] = self.part.lit.camera_jitter_ndc();
+            ctx.gpu
+                .queue()
+                .write_buffer(&frame, FRAME_JITTER_X_OFFSET, &x.to_le_bytes());
+            ctx.gpu
+                .queue()
+                .write_buffer(&frame, FRAME_JITTER_Y_OFFSET, &y.to_le_bytes());
+        }
+        Ok(())
+    }
+
+    /// Drops the published views first. Then records the `raa-gi.screen` pass when the part is
+    /// active, enabled and has resources; when it recorded, publishes the pyramid, the screen
+    /// output and the debug record of this frame and marks the history valid.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         self.part.shared.set_pyramid(None);
         self.part.shared.set_probe_output(None);
+        self.part.shared.set_screen_debug(None);
         let mut state = self.part.state.borrow_mut();
         if !state.active || !state.pass_enabled {
             return Ok(());
@@ -729,6 +1029,7 @@ impl FeaturePass for GiScreenPass {
             parity,
             output_valid,
             mode,
+            settings,
             restir_pipelines,
             restir,
             restir_valid,
@@ -743,56 +1044,66 @@ impl FeaturePass for GiScreenPass {
         let Some(group1) = self.part.shared.compute_group1(ctx.lighting) else {
             return Ok(());
         };
+        let passes = settings.spatial_passes.min(ATROUS_MAX_PASSES);
         let history = self.part.shared.history_view();
-        if *mode == IndirectMode::Restir
+        resources.clear_counters(ctx.encoder);
+        let recorded = if *mode == IndirectMode::Restir
             && let (Some(restir_pipelines), Some(restir)) = (restir_pipelines.as_ref(), restir.as_mut())
         {
-            // ReSTIR GI: the pyramid, then the three ReSTIR stages into this parity's output.
+            // ReSTIR GI: the pyramid, the three ReSTIR stages (the third accumulates into this
+            // parity's history), then the a-trous passes.
             let history_view = history.clone().unwrap_or_else(|| resources.dummy_view.clone());
             let pyramid = resources.pyramid_view.clone();
-            let outputs = [resources.output_views[0].clone(), resources.output_views[1].clone()];
             let screen_params = resources.params.clone();
-            let work = resources.work(ctx.gpu, pipelines, ctx.targets, &frame, history.as_ref(), *parity);
             let inputs = RestirGiInputs {
                 frame: &frame,
                 history: &history_view,
                 pyramid: &pyramid,
-                outputs: [&outputs[0], &outputs[1]],
                 screen_params: &screen_params,
+                accumulate: resources.accumulate_views(),
             };
             let restir_work = restir.work(ctx.gpu, restir_pipelines, ctx.targets, &inputs, *parity);
+            let work = resources.work(
+                ctx.gpu,
+                pipelines,
+                ctx.targets,
+                &frame,
+                history.as_ref(),
+                *parity,
+                passes,
+            );
             let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("raa-gi.screen.restir-gi"),
                 timestamp_writes: None,
             });
             pass.set_bind_group(1, &group1, &[]);
-            if pipelines.record_pyramid(&mut pass, &work) {
+            let recorded = pipelines.record_pyramid(&mut pass, &work);
+            if recorded {
                 restir_pipelines.record(&mut pass, &restir_work);
-                drop(pass);
-                *output_valid = true;
+                pipelines.record_atrous(&mut pass, &work);
                 *restir_valid = true;
-                self.part.shared.set_pyramid(Some(pyramid));
-                self.part
-                    .shared
-                    .set_probe_output(Some(outputs[*parity & 1].clone()));
             }
-            return Ok(());
-        }
-        let work = resources.work(
-            ctx.gpu,
-            pipelines,
-            ctx.targets,
-            &frame,
-            history.as_ref(),
-            *parity,
-        );
-        if pipelines.record(ctx.encoder, &group1, &work) {
+            recorded
+        } else {
+            let work = resources.work(
+                ctx.gpu,
+                pipelines,
+                ctx.targets,
+                &frame,
+                history.as_ref(),
+                *parity,
+                passes,
+            );
+            pipelines.record(ctx.encoder, &group1, &work)
+        };
+        if recorded {
+            resources.copy_counters(ctx.encoder);
             *output_valid = true;
-            let pyramid = resources.pyramid_view();
-            self.part.shared.set_pyramid(Some(pyramid));
+            self.part.shared.set_pyramid(Some(resources.pyramid_view()));
             self.part
                 .shared
-                .set_probe_output(Some(resources.output_view(*parity)));
+                .set_probe_output(Some(resources.screen_view(*parity, passes)));
+            self.part.shared.set_screen_debug(Some(resources.debug_view()));
         }
         Ok(())
     }
@@ -804,7 +1115,19 @@ mod tests {
 
     #[test]
     fn resource_bytes_matches_the_hand_derivation() {
-        assert_eq!(resource_bytes((1280, 720), 8), 22_771_076);
+        // 1280 x 720, 8 rays. Pyramid: sum over the 11 mips of w x h x 4 = 4,915,052 (the S39
+        // figure before the accumulation records); atlas 80 x 8 by 45 x 8 texels x 8 B =
+        // 1,843,200; probes 2 x 176 x 80 x 45 = 1,267,200. Per pixel 2 x 8 + 2 x 16 + 2 x 8 + 8
+        // + 16 = 88 B over 921,600 pixels = 81,100,800. Then 16 + 16 + 32 + 10 x 256 + 8 = 2,632.
+        let pyramid: u64 = pyramid_sizes((1280, 720))
+            .into_iter()
+            .map(|(w, h)| u64::from(w) * u64::from(h) * 4)
+            .sum();
+        assert_eq!(pyramid, 4_915_052);
+        assert_eq!(
+            resource_bytes((1280, 720), 8),
+            4_915_052 + 1_843_200 + 1_267_200 + 81_100_800 + 2_632
+        );
     }
 
     #[test]
@@ -814,5 +1137,32 @@ mod tests {
         assert!(!needs_reallocation(current, (1280, 720), 8));
         assert!(needs_reallocation(current, (1920, 1080), 8));
         assert!(needs_reallocation(current, (1280, 720), 6));
+    }
+
+    #[test]
+    fn screen_stats_average_the_counted_pixels() {
+        // 50 pixels counted with history lengths summing to 1600 (mean 32), 5 rejected (10 %),
+        // 2 clamped (4 %).
+        let stats = screen_stats([1600, 5, 50, 2]).expect("pixels were counted");
+        assert_eq!(stats.history_length_mean, 32.0);
+        assert_eq!(stats.rejected_percent, 10.0);
+        assert_eq!(stats.clamped_percent, 4.0);
+        assert_eq!(screen_stats([0, 0, 0, 0]), None);
+    }
+
+    #[test]
+    fn screen_params_follow_the_wgsl_record() {
+        let settings = GiSettings {
+            history_max: 128,
+            clamp_gamma: 3.0,
+            restir_m_cap: 30.0,
+            ..GiSettings::DEFAULT
+        };
+        let bytes = screen_params_bytes(true, false, 3, &settings);
+        let word = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        assert_eq!([word(0), word(1), word(2), word(3)], [1, 0, 1, 0]);
+        assert_eq!(f32::from_bits(word(4)), 128.0);
+        assert_eq!(f32::from_bits(word(5)), 3.0);
+        assert_eq!(f32::from_bits(word(6)), 30.0);
     }
 }

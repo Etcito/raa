@@ -75,6 +75,11 @@ fn settings_defaults_follow_the_s36_key_order() {
             ("screenSpace", GiWire::Bool(false)),
             ("screenSpaceQuality", text("medium")),
             ("indirect", text("probes")),
+            ("historyMax", GiWire::Number(64.0)),
+            ("clampGamma", GiWire::Number(2.5)),
+            ("spatialPasses", GiWire::Number(3.0)),
+            ("restirMCap", GiWire::Number(20.0)),
+            ("voxelFullRelight", GiWire::Bool(false)),
         ]
     );
 }
@@ -129,7 +134,8 @@ fn settings_refusals_name_the_key_and_reason() {
     );
     assert_eq!(
         settings_refusal(&[("debugView", text("x"))]),
-        "debugView: expected one of none, voxels, radiance, distance, levels"
+        "debugView: expected one of none, voxels, radiance, distance, levels, probes, hitType, \
+         history, historyLength, reservoirs, rawDenoised"
     );
     assert_eq!(
         settings_refusal(&[("screenSpaceQuality", text("ultra"))]),
@@ -340,6 +346,9 @@ fn stats_entries_follow_the_key_order_with_a_null_frame_index() {
             ("allocatedBytes", GiWire::Number(0.0)),
             ("statsFrameIndex", GiWire::Null),
             ("pending", GiWire::Bool(false)),
+            ("historyLengthMean", GiWire::Null),
+            ("rejectedPercent", GiWire::Null),
+            ("clampedPercent", GiWire::Null),
         ]
     );
     assert_eq!(

@@ -282,9 +282,13 @@ fn trace_records_match_contract_gi_screen_wgsl() {
         ("history_valid", 0),
         ("screen_traces", 4),
         ("parity", 8),
-        ("pad", 12),
+        ("debug_view", 12),
+        ("history_max", 16),
+        ("clamp_gamma", 20),
+        ("m_cap", 24),
+        ("pad", 28),
     ];
-    check_struct(&reflection.module, "GiScreenGpu", 16, &screen);
+    check_struct(&reflection.module, "GiScreenGpu", 32, &screen);
 }
 
 fn composer() -> Composer {
@@ -364,45 +368,22 @@ fn local_visibility_cone_traces_area_lights_only() {
     }
 }
 
-/// S43 cross-fix: the integrate blend reads the motion reject flag, holds the 0.5 px motion
-/// tolerance and tests the cross pairs at +-4 and +-8 px (their motion second difference) before
-/// it uses its history, which it reads bilinear and blends under a motion-independent alpha.
+/// The integrate hands its irradiance to the shared accumulation, which keeps the S43 reject
+/// flag, tests every bilinear history tap's stored depth and normal against the pixel's surface
+/// (the disocclusion test that replaced the motion cross taps) and blends at 1 / n.
 #[test]
-fn integrate_history_honours_the_reject_flag_and_cross_taps() {
+fn integrate_history_rejects_disocclusions_and_blends_one_over_n() {
     let wgsl = probe_integrate_module_wgsl();
+    assert!(wgsl.contains("m.z > 0.5"), "the pixel's own reject flag");
     assert!(
-        wgsl.contains("const RAA_GI_HISTORY_MOTION_TOLERANCE_PX: f32 = 0.5;"),
-        "tolerance constant"
-    );
-    assert!(wgsl.contains("m.z <= 0.5"), "the pixel's own reject flag");
-    assert!(
-        wgsl.contains("ma.z > 0.5") && wgsl.contains("mb.z > 0.5"),
-        "a tap's reject flag"
-    );
-    for tap in [
-        "vec2<i32>(4, 0)",
-        "vec2<i32>(8, 0)",
-        "vec2<i32>(0, 4)",
-        "vec2<i32>(0, 8)",
-        "pixel + pairs[i]",
-        "pixel - pairs[i]",
-    ] {
-        assert!(wgsl.contains(tap), "cross tap {tap}");
-    }
-    assert!(
-        wgsl.contains("(ma.xy + mb.xy) * raa_gi_frame.viewport.xy - 2.0 * own_px"),
-        "a pair is tested by its motion second difference, not against the pixel's own motion"
+        wgsl.contains("raa_gi_acc_tap_matches(stored.depth, expected, in.depth, stored.normal, in.normal)"),
+        "each history tap is tested against the pixel's surface"
     );
     assert!(
-        wgsl.contains("const RAA_GI_TEMPORAL_ALPHA: f32 = 0.08;") && !wgsl.contains("0.03 * moved"),
-        "the blend weight does not rise with the motion"
+        wgsl.contains("raa_gi_frame.previous_view_proj * vec4<f32>(in.world, 1.0)"),
+        "the expected depth is the surface's depth in the previous view"
     );
-    assert!(
-        wgsl.contains("raa_gi_history_bilinear(previous_uv)"),
-        "the history is read bilinear"
-    );
-    assert!(
-        wgsl.contains("raa_gi_history_neighbours_agree(pixel, own_px)"),
-        "the blend requires the cross taps to agree"
-    );
+    assert!(wgsl.contains("return 1.0 / max(min(n, n_max), 1.0);"), "alpha = max(1 / n, 1 / n_max)");
+    assert!(wgsl.contains("raa_gi_acc_resolve(RaaGiAccInput("), "the integrate accumulates");
+    assert!(!wgsl.contains("raa_gi_history_neighbours_agree"), "the cross taps are gone");
 }

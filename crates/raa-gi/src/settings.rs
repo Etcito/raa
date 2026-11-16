@@ -34,6 +34,21 @@ pub enum DebugView {
     Distance,
     /// The finest level containing the depth surface (code 4).
     Levels,
+    /// The screen part: where this frame's screen probes sit (code 5).
+    Probes,
+    /// The screen part: what the rays hit, red screen, green voxels, blue sky (code 6).
+    HitType,
+    /// The screen part: green where the history was kept, red where it was rejected, yellow
+    /// where the neighbourhood clamp moved it (code 7).
+    History,
+    /// The screen part: the history length per pixel, black 0 to white `historyMax` (code 8).
+    HistoryLength,
+    /// The screen part (`restir`): the confidence M of the kept reservoir, black 0 to white
+    /// `restirMCap` (code 9).
+    Reservoirs,
+    /// The screen part: this frame's raw irradiance on the left half, the denoised one on the
+    /// right (code 10).
+    RawDenoised,
 }
 
 impl DebugView {
@@ -45,10 +60,37 @@ impl DebugView {
             DebugView::Radiance => 2,
             DebugView::Distance => 3,
             DebugView::Levels => 4,
+            DebugView::Probes => 5,
+            DebugView::HitType => 6,
+            DebugView::History => 7,
+            DebugView::HistoryLength => 8,
+            DebugView::Reservoirs => 9,
+            DebugView::RawDenoised => 10,
         }
     }
 
-    /// The JS name of the view: `none`, `voxels`, `radiance`, `distance` or `levels`.
+    /// Every view, in code order.
+    pub const ALL: [DebugView; 11] = [
+        DebugView::None,
+        DebugView::Voxels,
+        DebugView::Radiance,
+        DebugView::Distance,
+        DebugView::Levels,
+        DebugView::Probes,
+        DebugView::HitType,
+        DebugView::History,
+        DebugView::HistoryLength,
+        DebugView::Reservoirs,
+        DebugView::RawDenoised,
+    ];
+
+    /// True for the views the screen part draws (codes 5 to 10).
+    pub fn is_screen(self) -> bool {
+        self.code() >= 5
+    }
+
+    /// The JS name of the view: `none`, `voxels`, `radiance`, `distance`, `levels`, `probes`,
+    /// `hitType`, `history`, `historyLength`, `reservoirs` or `rawDenoised`.
     pub fn as_str(self) -> &'static str {
         match self {
             DebugView::None => "none",
@@ -56,6 +98,12 @@ impl DebugView {
             DebugView::Radiance => "radiance",
             DebugView::Distance => "distance",
             DebugView::Levels => "levels",
+            DebugView::Probes => "probes",
+            DebugView::HitType => "hitType",
+            DebugView::History => "history",
+            DebugView::HistoryLength => "historyLength",
+            DebugView::Reservoirs => "reservoirs",
+            DebugView::RawDenoised => "rawDenoised",
         }
     }
 
@@ -67,6 +115,12 @@ impl DebugView {
             "radiance" => Some(DebugView::Radiance),
             "distance" => Some(DebugView::Distance),
             "levels" => Some(DebugView::Levels),
+            "probes" => Some(DebugView::Probes),
+            "hitType" => Some(DebugView::HitType),
+            "history" => Some(DebugView::History),
+            "historyLength" => Some(DebugView::HistoryLength),
+            "reservoirs" => Some(DebugView::Reservoirs),
+            "rawDenoised" => Some(DebugView::RawDenoised),
             _ => None,
         }
     }
@@ -190,6 +244,86 @@ pub struct GiSettings {
     pub screen_space_quality: SsgiQuality,
     /// `indirect`: the source of the screen irradiance (default probes).
     pub indirect: IndirectMode,
+    /// `historyMax`: the most frames the screen accumulation averages, an integer in [1, 256]
+    /// (default 64). The blend weight is max(1 / n, 1 / historyMax), n the pixel's history length.
+    pub history_max: u32,
+    /// `clampGamma`: the width of the history clamp in standard deviations, finite in [0.5, 10]
+    /// (default 2.5).
+    pub clamp_gamma: f32,
+    /// `spatialPasses`: the a-trous passes of the screen denoiser, an integer in [0, 5]
+    /// (default 3).
+    pub spatial_passes: u32,
+    /// `restirMCap`: the confidence cap of the ReSTIR GI reservoirs, finite in [1, 64]
+    /// (default 20).
+    pub restir_m_cap: f32,
+    /// `voxelFullRelight`: every voxel of the relit level is relit each update instead of a
+    /// checkerboard half (default false).
+    pub voxel_full_relight: bool,
+}
+
+/// The GI presets of `setGiPreset` (`performance`, `balanced`, `quality`): each sets the probe
+/// rays, `historyMax`, `clampGamma`, `spatialPasses`, `restirMCap` and `voxelFullRelight`, and
+/// leaves every other setting as it is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GiPreset {
+    /// 6 probe rays, 32 frames of history, clamp 2, 2 a-trous passes, M cap 10, checkerboard
+    /// relight.
+    Performance,
+    /// 8 probe rays, 64 frames, clamp 2.5, 3 passes, M cap 20, checkerboard relight (the
+    /// defaults).
+    Balanced,
+    /// 8 probe rays, 128 frames, clamp 3, 4 passes, M cap 30, full relight.
+    Quality,
+}
+
+impl GiPreset {
+    /// The JS name: `performance`, `balanced` or `quality`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GiPreset::Performance => "performance",
+            GiPreset::Balanced => "balanced",
+            GiPreset::Quality => "quality",
+        }
+    }
+
+    /// The preset named `text`, or `None`.
+    pub fn parse(text: &str) -> Option<GiPreset> {
+        match text {
+            "performance" => Some(GiPreset::Performance),
+            "balanced" => Some(GiPreset::Balanced),
+            "quality" => Some(GiPreset::Quality),
+            _ => None,
+        }
+    }
+
+    /// The settings patch of the preset.
+    pub fn settings_patch(self) -> GiSettingsPatch {
+        let (history_max, clamp_gamma, spatial_passes, m_cap, full) = match self {
+            GiPreset::Performance => (32.0, 2.0, 2.0, 10.0, false),
+            GiPreset::Balanced => (64.0, 2.5, 3.0, 20.0, false),
+            GiPreset::Quality => (128.0, 3.0, 4.0, 30.0, true),
+        };
+        GiSettingsPatch {
+            history_max: Some(history_max),
+            clamp_gamma: Some(clamp_gamma),
+            spatial_passes: Some(spatial_passes),
+            restir_m_cap: Some(m_cap),
+            voxel_full_relight: Some(full),
+            ..GiSettingsPatch::default()
+        }
+    }
+
+    /// The quality patch of the preset: its probe rays per side (6 or 8).
+    pub fn quality_patch(self) -> GiQualityPatch {
+        let rays = match self {
+            GiPreset::Performance => 6.0,
+            GiPreset::Balanced | GiPreset::Quality => 8.0,
+        };
+        GiQualityPatch {
+            probe_rays: Some(rays),
+            ..GiQualityPatch::default()
+        }
+    }
 }
 
 impl GiSettings {
@@ -206,6 +340,11 @@ impl GiSettings {
         screen_space: false,
         screen_space_quality: SsgiQuality::Medium,
         indirect: IndirectMode::Probes,
+        history_max: 64,
+        clamp_gamma: 2.5,
+        spatial_passes: 3,
+        restir_m_cap: 20.0,
+        voxel_full_relight: false,
     };
 }
 
@@ -229,6 +368,11 @@ pub struct GiSettingsPatch {
     pub screen_space: Option<bool>,
     pub screen_space_quality: Option<SsgiQuality>,
     pub indirect: Option<IndirectMode>,
+    pub history_max: Option<f64>,
+    pub clamp_gamma: Option<f64>,
+    pub spatial_passes: Option<f64>,
+    pub restir_m_cap: Option<f64>,
+    pub voxel_full_relight: Option<bool>,
 }
 
 impl GiSettingsPatch {
@@ -258,6 +402,28 @@ impl GiSettingsPatch {
             )?,
             None => current.environment_diffuse,
         };
+        let history_max = match self.history_max {
+            Some(value) => integer("historyMax", value, 1, 256, "must be an integer in [1, 256]")?,
+            None => current.history_max,
+        };
+        let clamp_gamma = match self.clamp_gamma {
+            Some(value) => between(
+                "clampGamma",
+                value,
+                0.5,
+                10.0,
+                "must be finite and in [0.5, 10]",
+            )?,
+            None => current.clamp_gamma,
+        };
+        let spatial_passes = match self.spatial_passes {
+            Some(value) => integer("spatialPasses", value, 0, 5, "must be an integer in [0, 5]")?,
+            None => current.spatial_passes,
+        };
+        let restir_m_cap = match self.restir_m_cap {
+            Some(value) => between("restirMCap", value, 1.0, 64.0, "must be finite and in [1, 64]")?,
+            None => current.restir_m_cap,
+        };
         Ok(GiSettings {
             enabled: self.enabled.unwrap_or(current.enabled),
             intensity,
@@ -273,6 +439,13 @@ impl GiSettingsPatch {
                 .screen_space_quality
                 .unwrap_or(current.screen_space_quality),
             indirect: self.indirect.unwrap_or(current.indirect),
+            history_max,
+            clamp_gamma,
+            spatial_passes,
+            restir_m_cap,
+            voxel_full_relight: self
+                .voxel_full_relight
+                .unwrap_or(current.voxel_full_relight),
         })
     }
 }
@@ -340,6 +513,26 @@ fn within(key: &str, value: f64, max: f64, message: &str) -> Result<f32, RaaErro
         if stored.is_finite() {
             return Ok(stored);
         }
+    }
+    Err(invalid(key, message))
+}
+
+/// A finite `f64` in `[min, max]`, stored as `f32`; anything else is the `gi.invalid` `message`.
+fn between(key: &str, value: f64, min: f64, max: f64, message: &str) -> Result<f32, RaaError> {
+    if value.is_finite() && (min..=max).contains(&value) {
+        return Ok(value as f32);
+    }
+    Err(invalid(key, message))
+}
+
+/// An integral `f64` in `[min, max]`, stored as `u32`; anything else is the `gi.invalid`
+/// `message`.
+fn integer(key: &str, value: f64, min: u32, max: u32, message: &str) -> Result<u32, RaaError> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && (f64::from(min)..=f64::from(max)).contains(&value)
+    {
+        return Ok(value as u32);
     }
     Err(invalid(key, message))
 }

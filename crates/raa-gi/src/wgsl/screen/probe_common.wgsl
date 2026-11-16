@@ -53,13 +53,19 @@ struct GiFrameGpu {
     flags: vec4<u32>,
 }
 
-// The screen-pass state (16 B). history_valid is 1 when the other parity output holds the
-// previous integrate result; screen_traces is 1 when screen traces are on and binding 3 holds
-// the previous frame's lit HDR; parity is the index (0 or 1) of the output written this frame.
+// The screen-pass state (32 B). history_valid is 1 when the other parity history holds the
+// previous frame's accumulation and the camera is continuous; screen_traces is 1 when screen
+// traces are on and binding 3 holds the previous frame's lit HDR; parity is the index (0 or 1)
+// of the history written this frame; debug_view the GI debug code; history_max, clamp_gamma
+// and m_cap the `historyMax`, `clampGamma` and `restirMCap` settings.
 struct GiScreenGpu {
     history_valid: u32,
     screen_traces: u32,
     parity: u32,
+    debug_view: u32,
+    history_max: f32,
+    clamp_gamma: f32,
+    m_cap: f32,
     pad: u32,
 }
 
@@ -150,11 +156,15 @@ fn raa_gi_probe_ray_direction(
 }
 
 // The view position of a pixel-centre coordinate at standard-Z clip depth `depth`: inv_proj
-// of its NDC point, divided by w.
+// of its NDC point, divided by w. The depth target was drawn with the TAA-jittered projection
+// (NDC shifted by the jitter, which the gi.screen pass writes into sun_direction.w and
+// sun_color.w), so the jitter is taken off before the unjittered inverse: otherwise every
+// reconstructed position moves by up to half a pixel each frame.
 fn raa_gi_view_position(pixel: vec2<f32>, depth: f32) -> vec3<f32> {
+    let jitter = vec2<f32>(raa_gi_frame.sun_direction.w, raa_gi_frame.sun_color.w);
     let ndc = vec4<f32>(
-        2.0 * pixel.x * raa_gi_frame.viewport.z - 1.0,
-        1.0 - 2.0 * pixel.y * raa_gi_frame.viewport.w,
+        2.0 * pixel.x * raa_gi_frame.viewport.z - 1.0 - jitter.x,
+        1.0 - 2.0 * pixel.y * raa_gi_frame.viewport.w - jitter.y,
         depth,
         1.0,
     );

@@ -41,7 +41,9 @@ const RAA_GI_PROBE_VOLUME_HIT_VOXELS: f32 = 0.85;
 // The hit distance stored for a ray that found neither the screen nor the volume.
 const RAA_GI_PROBE_MISS_DISTANCE: f32 = 1000.0;
 
-// The ray atlas: one texel per probe ray, rgb radiance and a the hit distance in metres.
+// The ray atlas: one texel per probe ray, rgb radiance and a what the ray hit: 0 the sky, 1 the
+// voxels, 2 the screen, 3 the screen blended with the voxels near the screen edge, -1 a far
+// probe (probe_project.wgsl turns it into the probe's hit code).
 @group(2) @binding(5) var raa_gi_rays_out: texture_storage_2d<rgba16float, write>;
 
 // Handoff: card 'raa-gi screen: passes.rs module builders, group-2 layouts and pipelines'
@@ -85,15 +87,19 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             );
         }
         if screen.hit && screen.weight >= 1.0 && screen_radiance.a == 1.0 {
-            textureStore(raa_gi_rays_out, id.xy, vec4<f32>(screen_radiance.rgb, screen.t));
+            textureStore(raa_gi_rays_out, id.xy, vec4<f32>(screen_radiance.rgb, 2.0));
             return;
         }
     }
 
     // The volume is coarse near its surfaces, so start clear of the local voxel. A ray that runs
-    // out of steps next to a surface takes its radiance; only a miss keeps the sky.
-    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, 0.0).rgb;
+    // out of steps next to a surface takes its radiance; only a miss keeps the sky, read from the
+    // most filtered mip: one ray stands for a whole cone of the hemisphere, and the sharp mip 0
+    // made each probe flicker with the sky's detail.
+    let sky_lod = f32(textureNumLevels(raa_env_specular) - 1u);
+    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, sky_lod).rgb;
     var t = RAA_GI_PROBE_MISS_DISTANCE;
+    var kind = 0.0;
     let level_count = raa_gi_volume_params.level_count;
     if level_count > 0u {
         let level = min(raa_gi_level_at(world, 0u), level_count - 1u);
@@ -109,12 +115,14 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         if hit.hit {
             radiance = hit.radiance;
             t = hit.t;
+            kind = 1.0;
         }
     }
     if screen.hit && screen_radiance.a == 1.0 {
         // Near the screen edge, blend towards the volume so probes do not pop.
         radiance = mix(radiance, screen_radiance.rgb, screen.weight);
         t = mix(t, screen.t, screen.weight);
+        kind = 3.0;
     }
-    textureStore(raa_gi_rays_out, id.xy, vec4<f32>(radiance, t));
+    textureStore(raa_gi_rays_out, id.xy, vec4<f32>(radiance, kind));
 }

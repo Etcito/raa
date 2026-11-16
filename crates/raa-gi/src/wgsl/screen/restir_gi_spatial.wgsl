@@ -5,33 +5,22 @@
 // by the shift Jacobian (raa_rgi_jacobian), and it counts only when x_s is visible from x_r
 // through the GI voxel field. The confidence normaliser Z sums the M of every merged reservoir
 // whose surface sees the kept sample with a positive target (Ouyang et al. 2021, Algorithm 4).
-// The output is the irradiance estimate E = L cos W at binding 13; the spatial result is not
-// written back, so next frame's temporal reuse reads stage-1 reservoirs only. RAA's own code.
+// The output is the irradiance estimate E = L cos W at binding 13 (alpha: the kept M, plus 256
+// for a sky sample, for the debug views). The merged reservoir, its M capped at m_cap, is written
+// back at binding 15: next frame's temporal reuse starts from the spatially resampled
+// reservoirs, as ReSTIR GI's reuse chain does, instead of from stage 1 alone. Binding 11 holds
+// stage 1's reservoirs, so no invocation reads what another writes. RAA's own code.
 
 @group(2) @binding(13) var raa_rgi_raw: texture_storage_2d<rgba16float, write>;
+@group(2) @binding(15) var<storage, read_write> raa_rgi_spatial_out: array<vec4<u32>>;
 
 const RAA_RGI_SALT_SPATIAL: u32 = 0x1B56C4E9u;
 const RAA_RGI_MAX_NEIGHBOURS: u32 = 8u;
-const RAA_RGI_VISIBILITY_STEPS: u32 = 32u;
-const RAA_RGI_VISIBILITY_DISTANCE: f32 = 320.0;
 
-// True when the sample point is visible from the receiver through the GI voxel field: the ray
-// leaves 1.5 finest voxels along the receiver normal and stops two voxels short of x_s.
-fn raa_rgi_visible(s: RaaRgiSurface, x_s: vec3<f32>) -> bool {
-    let count = raa_gi_volume_params.level_count;
-    if count == 0u {
-        return true;
-    }
-    let level = min(raa_gi_level_at(s.position, 0u), count - 1u);
-    let voxel = raa_gi_volume_params.levels[level].w;
-    let origin = s.position + s.normal * voxel * 1.5;
-    let d = x_s - origin;
-    let len = length(d);
-    let max_t = min(len - 2.0 * voxel, RAA_RGI_VISIBILITY_DISTANCE);
-    if max_t <= voxel {
-        return true;
-    }
-    return raa_gi_visibility(origin, d / len, voxel * 0.5, max_t, RAA_RGI_VISIBILITY_STEPS) > 0.5;
+fn raa_rgi_store_spatial(pixel: vec2<u32>, r: RaaRgiReservoir) {
+    let i = raa_rgi_index(pixel);
+    raa_rgi_spatial_out[i] = raa_rgi_pack_a(r);
+    raa_rgi_spatial_out[i + 1u] = raa_rgi_pack_b(r);
 }
 
 @compute @workgroup_size(8, 8)
@@ -43,7 +32,8 @@ fn raa_gi_restir_gi_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = id.xy;
     let s = raa_rgi_surface(vec2<i32>(pixel));
     if !s.valid {
-        textureStore(raa_rgi_raw, pixel, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        textureStore(raa_rgi_raw, pixel, vec4<f32>(0.0, 0.0, 0.0, 0.0));
+        raa_rgi_store_spatial(pixel, raa_rgi_empty());
         return;
     }
     let frame = raa_rgi_params.frame_index;
@@ -106,5 +96,12 @@ fn raa_gi_restir_gi_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     let cos_v = max(dot(s.normal, d / max(length(d), 1.0e-6)), 0.0);
     let irradiance = z.radiance * cos_v * weight;
     let safe = select(vec3<f32>(0.0), irradiance, all(irradiance == irradiance) && all(irradiance < vec3<f32>(65504.0)));
-    textureStore(raa_rgi_raw, pixel, vec4<f32>(safe, 1.0));
+    var kept = z;
+    kept.weight = weight;
+    kept.confidence = min(merge.confidence, raa_rgi_params.m_cap);
+    kept.owner_normal = s.normal;
+    kept.owner_depth = s.depth;
+    raa_rgi_store_spatial(pixel, kept);
+    let sky = length(d) >= 0.5 * RAA_RGI_SKY_DISTANCE;
+    textureStore(raa_rgi_raw, pixel, vec4<f32>(safe, kept.confidence + select(0.0, 256.0, sky)));
 }

@@ -63,7 +63,7 @@ fn raa_rgi_initial(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReservoir {
 
     var x_s = s.position + dir * RAA_RGI_SKY_DISTANCE;
     var n_s = -dir;
-    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, 0.0).rgb;
+    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, raa_rgi_sky_lod()).rgb;
     var found = false;
     if raa_rgi_params.screen_traces == 1u {
         let origin = s.position + s.normal * 0.03;
@@ -108,6 +108,38 @@ fn raa_rgi_initial(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReservoir {
     return r;
 }
 
+// A reused sample keeps its point x_s (it is anchored in space, not in the screen) but its light
+// is read again where it is today: a sky sample from the filtered environment along its
+// direction, any other from the GI voxel radiance half a voxel off its surface, and black when
+// the voxel field now hides x_s from the receiver. A reservoir kept up to m_cap frames then
+// follows a moved light or an occluder instead of replaying the light of the frame it was traced.
+fn raa_rgi_refresh(t: RaaRgiReservoir, s: RaaRgiSurface) -> RaaRgiReservoir {
+    var r = t;
+    let d = t.position - s.position;
+    let len = length(d);
+    if !(len > 0.0) {
+        return r;
+    }
+    if len >= 0.5 * RAA_RGI_SKY_DISTANCE {
+        r.radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, d / len, raa_rgi_sky_lod()).rgb;
+        return r;
+    }
+    if !raa_rgi_visible(s, t.position) {
+        r.radiance = vec3<f32>(0.0);
+        return r;
+    }
+    let count = raa_gi_volume_params.level_count;
+    if count > 0u {
+        let level = min(raa_gi_level_at(t.position, 0u), count - 1u);
+        let p = t.position + t.normal * raa_gi_volume_params.levels[level].w * 0.5;
+        let at = raa_gi_level_at(p, 0u);
+        if at < count {
+            r.radiance = raa_gi_sample(p, at).rgb;
+        }
+    }
+    return r;
+}
+
 // The previous frame's reservoir of the reprojected pixel, or an empty one (M = 0) when the
 // history, the reprojection, the depth or the normal does not hold. Motion follows RAA's S12
 // convention: previous uv = uv - motion, z > 0.5 flags a rejected pixel.
@@ -132,7 +164,7 @@ fn raa_rgi_temporal_candidate(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReser
         || !(dot(t.owner_normal, s.normal) >= raa_rgi_params.normal_cos) {
         return empty;
     }
-    return t;
+    return raa_rgi_refresh(t, s);
 }
 
 struct RaaRgiStage1 {

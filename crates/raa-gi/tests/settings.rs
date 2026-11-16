@@ -51,6 +51,12 @@ fn debug_view_table_round_trips() {
         (DebugView::Radiance, "radiance", 2),
         (DebugView::Distance, "distance", 3),
         (DebugView::Levels, "levels", 4),
+        (DebugView::Probes, "probes", 5),
+        (DebugView::HitType, "hitType", 6),
+        (DebugView::History, "history", 7),
+        (DebugView::HistoryLength, "historyLength", 8),
+        (DebugView::Reservoirs, "reservoirs", 9),
+        (DebugView::RawDenoised, "rawDenoised", 10),
     ];
     for (view, name, code) in views {
         assert_eq!(view.as_str(), name);
@@ -96,6 +102,7 @@ fn settings_patch_merges_omitted_fields() {
         screen_space: true,
         screen_space_quality: SsgiQuality::High,
         indirect: IndirectMode::Restir,
+        ..GiSettings::DEFAULT
     };
     let merged = GiSettingsPatch {
         reflections: Some(true),
@@ -145,6 +152,7 @@ fn screen_space_patch_merges() {
         screen_space: Some(true),
         screen_space_quality: Some(SsgiQuality::High),
         indirect: None,
+        ..GiSettingsPatch::default()
     };
     let merged = patch.apply(&GiSettings::DEFAULT).expect("valid patch");
     assert!(merged.screen_space);
@@ -213,6 +221,7 @@ fn refused_apply_leaves_the_input_unchanged() {
         screen_space: false,
         screen_space_quality: SsgiQuality::Low,
         indirect: IndirectMode::Probes,
+        ..GiSettings::DEFAULT
     };
     let before = current;
     let patch = GiSettingsPatch {
@@ -294,4 +303,61 @@ fn invalid_helper_formats_key_then_reason() {
     let err = invalid("k", "r");
     assert_eq!(err.code(), GI_INVALID);
     assert!(err.to_string().contains("k: r"), "display was {err}");
+}
+
+#[test]
+fn presets_set_the_filter_keys_and_the_probe_rays() {
+    use raa_gi::GiPreset;
+    let quality = GiPreset::Quality
+        .settings_patch()
+        .apply(&GiSettings::DEFAULT)
+        .expect("a preset is valid");
+    assert_eq!(quality.history_max, 128);
+    assert_eq!(quality.clamp_gamma, 3.0);
+    assert_eq!(quality.spatial_passes, 4);
+    assert_eq!(quality.restir_m_cap, 30.0);
+    assert!(quality.voxel_full_relight);
+    let rays = GiPreset::Performance
+        .quality_patch()
+        .apply(&GiQuality::default())
+        .expect("6 rays is listed");
+    assert_eq!(rays.probe_rays, 6);
+    // The balanced preset is the default record.
+    let balanced = GiPreset::Balanced
+        .settings_patch()
+        .apply(&GiSettings::DEFAULT)
+        .expect("valid");
+    assert_eq!(balanced, GiSettings::DEFAULT);
+    for preset in [GiPreset::Performance, GiPreset::Balanced, GiPreset::Quality] {
+        assert_eq!(GiPreset::parse(preset.as_str()), Some(preset));
+    }
+    assert_eq!(GiPreset::parse("ultra"), None);
+}
+
+#[test]
+fn filter_keys_refuse_out_of_domain_values() {
+    let refuse = |patch: GiSettingsPatch, message: &str| {
+        let err = patch.apply(&GiSettings::DEFAULT).expect_err("refused");
+        refused(&err, message);
+    };
+    refuse(
+        GiSettingsPatch { history_max: Some(0.0), ..GiSettingsPatch::default() },
+        "historyMax: must be an integer in [1, 256]",
+    );
+    refuse(
+        GiSettingsPatch { history_max: Some(32.5), ..GiSettingsPatch::default() },
+        "historyMax: must be an integer in [1, 256]",
+    );
+    refuse(
+        GiSettingsPatch { spatial_passes: Some(6.0), ..GiSettingsPatch::default() },
+        "spatialPasses: must be an integer in [0, 5]",
+    );
+    refuse(
+        GiSettingsPatch { clamp_gamma: Some(0.25), ..GiSettingsPatch::default() },
+        "clampGamma: must be finite and in [0.5, 10]",
+    );
+    refuse(
+        GiSettingsPatch { restir_m_cap: Some(f64::NAN), ..GiSettingsPatch::default() },
+        "restirMCap: must be finite and in [1, 64]",
+    );
 }

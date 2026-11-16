@@ -108,6 +108,9 @@ pub(crate) struct GiCore {
     sun_color: [f32; 3],
     local_light_count: u32,
     history_valid: bool,
+    /// The viewport of the previous prepared frame when it was active; `None` after an inactive
+    /// frame, a reallocation or a camera cut.
+    last_active_viewport: Option<(u32, u32)>,
     /// The copy of the previous lit HDR (HDR_FORMAT, surface-sized) and its view, present while
     /// a part wants the history (S38 `gi.history`).
     history: Option<(wgpu::Texture, wgpu::TextureView)>,
@@ -159,6 +162,7 @@ impl GiCore {
             sun_color: [0.0; 3],
             local_light_count: 0,
             history_valid: false,
+            last_active_viewport: None,
             history: None,
             history_copied: None,
             frame_index: 0,
@@ -329,6 +333,7 @@ impl GiHandle {
         let mut core = self.core.borrow_mut();
         core.history_valid = false;
         core.history_copied = None;
+        core.last_active_viewport = None;
         for part in &core.parts {
             part.invalidate_history();
         }
@@ -339,6 +344,9 @@ impl GiHandle {
     pub fn observe_submission(&self, invocation: u64, complete: bool) {
         let mut core = self.core.borrow_mut();
         core.pending = false;
+        for part in &core.parts {
+            part.observe_submission();
+        }
         if complete {
             let mut published = core.prepared.clone();
             published.stats_frame_index = Some(invocation);
@@ -359,6 +367,10 @@ impl GiHandle {
             },
         };
         stats.pending = core.pending;
+        let screen = core.parts.iter().find_map(|part| part.screen_stats());
+        stats.history_length_mean = screen.map(|s| s.history_length_mean);
+        stats.rejected_percent = screen.map(|s| s.rejected_percent);
+        stats.clamped_percent = screen.map(|s| s.clamped_percent);
         stats
     }
 
@@ -409,8 +421,11 @@ impl GiHandle {
         let quality = core.quality;
 
         let mut allocated = false;
+        // The volume depends on the resolution and the levels only: a probe-ray change (a GI
+        // preset) reallocates the screen part, not the voxels.
+        let volume_key = |q: GiQuality| (q.resolution, q.levels);
         if active {
-            if core.volume.is_none() || core.allocated_quality != Some(quality) {
+            if core.volume.is_none() || core.allocated_quality.map(volume_key) != Some(volume_key(quality)) {
                 release_resources(core);
                 let frame = gpu.device().create_buffer(&wgpu::BufferDescriptor {
                     label: Some("raa-gi frame"),
@@ -436,6 +451,9 @@ impl GiHandle {
 
         let copied = core.history_copied.take();
         core.history_valid = active && !allocated && copied == Some(core.viewport);
+        let camera_valid =
+            active && !allocated && core.last_active_viewport == Some(core.viewport);
+        core.last_active_viewport = active.then_some(core.viewport);
 
         let settings = core.settings;
         lit.set_frame_feature(29, active);
@@ -477,6 +495,7 @@ impl GiHandle {
             viewport: core.viewport,
             members: &core.report.members,
             history_valid: core.history_valid,
+            camera_valid,
         };
         for part in &core.parts {
             part.prepare_frame(gpu, &frame);
@@ -514,6 +533,9 @@ impl GiHandle {
             allocated_bytes,
             stats_frame_index: None,
             pending: true,
+            history_length_mean: None,
+            rejected_percent: None,
+            clamped_percent: None,
         };
         core.prepared = prepared.clone();
         core.pending = true;
@@ -736,7 +758,16 @@ impl FeaturePass for GiHistoryPass {
         let Some(group1) = core.shared.compute_group1(ctx.lighting) else {
             return Ok(());
         };
-        core.debug.record(ctx, &frame, volume.voxels(), &group1);
+        let screen_debug = core.shared.screen_debug_view();
+        let screen_output = core.shared.probe_output_view();
+        core.debug.record(
+            ctx,
+            &frame,
+            volume.voxels(),
+            &group1,
+            screen_debug.as_ref(),
+            screen_output.as_ref(),
+        );
         if !core.recorded.contains(&HISTORY_PASS) {
             core.recorded.push(HISTORY_PASS);
         }

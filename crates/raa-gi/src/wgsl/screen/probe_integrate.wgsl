@@ -1,8 +1,8 @@
 // S39 screen integration: per-pixel indirect diffuse and ambient occlusion. It weights the
 // four nearest grid probes bilinearly, down-weighting probes on other surfaces, evaluates
 // their cosine-convolved SH irradiance towards the pixel's world normal, adds a horizon
-// search in screen space for detail below the probe grid, and blends the result into the
-// previous parity output with the S39 temporal alpha.
+// search in screen space for detail below the probe grid, and hands the result to the shared
+// temporal accumulation of accumulate.wgsl (disocclusion test, clamp, 1 / n blend).
 //
 // Adapted from solstice@7e465b5,
 // crates/solstice-render/shaders/gi/probe_integrate.wgsl:15-135. MIT License
@@ -29,15 +29,13 @@
 //
 // Group-2 binding registry of contract 'gi-screen-wgsl' (binding number to resource):
 // integrate {0 raa_gi_frame, 1 raa_gi_depth, 2 raa_gi_normal, 3 raa_gi_motion,
-// 4 raa_gi_previous, 5 raa_gi_probes, 6 raa_gi_output, 7 raa_gi_screen_params}.
+// 4 raa_gi_previous, 5 raa_gi_probes, 6 raa_gi_output, 7 raa_gi_screen_params,
+// 8 raa_gi_meta_previous, 9 raa_gi_meta_out, 10 raa_gi_filter_out, 11 raa_gi_debug_out,
+// 12 raa_gi_counters}. Composed after accumulate.wgsl, which declares 3, 4, 6 and 8 to 12 and
+// holds the temporal accumulation, the occlusion search and its noise.
 
-// The S12 motion (previous uv = uv - motion).
-@group(2) @binding(3) var raa_gi_motion: texture_2d<f32>;
-// The other parity output: the previous integrate result.
-@group(2) @binding(4) var raa_gi_previous: texture_2d<f32>;
 // The filtered probes of `probe_project.wgsl`.
 @group(2) @binding(5) var<storage, read> raa_gi_probes: array<Probe>;
-@group(2) @binding(6) var raa_gi_output: texture_storage_2d<rgba16float, write>;
 
 // Irradiance from harmonics towards `n`: radiance convolved with the cosine lobe. A constant
 // radiance c gives pi c.
@@ -55,51 +53,6 @@ fn raa_gi_sh_irradiance(probe: Probe, n: vec3<f32>) -> vec3<f32> {
     return max(e, vec3<f32>(0.0));
 }
 
-// Interleaved gradient noise (solstice `common/math.wgsl:42-45`), seeded with the frame
-// index `raa_gi_frame.counts.y`, so it rotates each probe's occlusion search over time.
-fn raa_gi_probe_ign(pixel: vec2<f32>, frame: u32) -> f32 {
-    let p = pixel + 5.588238 * f32(frame % 64u);
-    return fract(52.9829189 * fract(dot(p, vec2<f32>(0.06711056, 0.00583715))));
-}
-
-// Ground-truth-style occlusion in a horizon search along a few screen-space directions.
-fn raa_gi_screen_occlusion(pixel: vec2<f32>, world: vec3<f32>, normal: vec3<f32>, noise: f32) -> f32 {
-    const RAA_GI_OCCLUSION_DIRECTIONS: u32 = 3u;
-    const RAA_GI_OCCLUSION_STEPS: u32 = 4u;
-    const RAA_GI_OCCLUSION_RADIUS: f32 = 0.9;
-    let distance = length(world - raa_gi_frame.camera_position.xyz);
-    let pixel_radius =
-        clamp(RAA_GI_OCCLUSION_RADIUS / distance * raa_gi_frame.viewport.y * 0.8, 4.0, 90.0);
-    let size = vec2<i32>(raa_gi_frame.viewport.xy);
-
-    var occlusion = 0.0;
-    for (var d = 0u; d < RAA_GI_OCCLUSION_DIRECTIONS; d++) {
-        let angle = (f32(d) + noise) / f32(RAA_GI_OCCLUSION_DIRECTIONS) * RAA_GI_PROBE_PI;
-        let direction = vec2<f32>(cos(angle), sin(angle));
-        for (var side = -1.0; side <= 1.0; side += 2.0) {
-            var horizon = 0.0;
-            for (var s = 1u; s <= RAA_GI_OCCLUSION_STEPS; s++) {
-                let step_fraction = f32(s) - 0.5 + noise * 0.5;
-                let offset =
-                    direction * side * pixel_radius * step_fraction / f32(RAA_GI_OCCLUSION_STEPS);
-                let sample_pixel = clamp(vec2<i32>(pixel + offset), vec2<i32>(0), size - vec2<i32>(1));
-                let depth = textureLoad(raa_gi_depth, sample_pixel, 0);
-                if raa_depth_is_far(depth) {
-                    continue;
-                }
-                let p = raa_gi_world_position(vec2<f32>(sample_pixel) + vec2<f32>(0.5), depth);
-                let delta = p - world;
-                let length_delta = length(delta);
-                let elevation = dot(delta, normal) / max(length_delta, 1.0e-4);
-                let falloff = clamp(1.0 - length_delta / RAA_GI_OCCLUSION_RADIUS, 0.0, 1.0);
-                horizon = max(horizon, elevation * falloff);
-            }
-            occlusion += horizon;
-        }
-    }
-    return clamp(1.0 - occlusion / f32(RAA_GI_OCCLUSION_DIRECTIONS * 2u) * 1.6, 0.0, 1.0);
-}
-
 // How well a probe stands for the surface at `world` with `normal`: 0 for an empty tile or a
 // probe facing away by 90 degrees or more, else the cosine to the fourth times a falloff with
 // the probe's distance from the pixel's tangent plane.
@@ -115,82 +68,29 @@ fn raa_gi_probe_match(probe: Probe, world: vec3<f32>, normal: vec3<f32>, plane_s
     return facing2 * facing2 * exp(-plane * plane_scale);
 }
 
-// Largest second difference, in pixels per 4 px of tap distance, of the motion across a cross
-// tap pair for which the history stays usable (S43 cross-fix, card 'TAA: stop the ghost trail').
-const RAA_GI_HISTORY_MOTION_TOLERANCE_PX: f32 = 0.5;
-
-// The temporal blend weight of a pixel with usable history (S39). It does not rise with the
-// motion: under a moving camera the reprojected history is as good as under a still one, and
-// a motion-scaled weight kept the GI at a few frames of history, so it never converged while
-// the camera moved.
-const RAA_GI_TEMPORAL_ALPHA: f32 = 0.08;
-
-// True when the motion around `pixel` belongs to one surface. Along each axis the cross pairs
-// at +-4 and +-8 px (clamped to the viewport) are read: no tap on geometry may have its S43
-// reject flag set (z > 0.5), and where both taps of a pair lie on geometry the pair must extend
-// the pixel's own motion linearly, the second difference m(+k) + m(-k) - 2 own staying within
-// RAA_GI_HISTORY_MOTION_TOLERANCE_PX x k / 4. A moving camera gives a smooth motion field over a
-// surface (the parallax of its depth gradient), which passes; a moving silhouette or a depth edge
-// breaks the field and fails, so those pixels do not keep the irradiance of what moved. The old
-// test compared each tap's motion with the pixel's own directly, which any camera move whose
-// parallax differs by 0.5 px over 8 px failed: the whole frame dropped its history every frame.
-// A pair with a far tap is skipped: the sky holds no irradiance to ghost.
-fn raa_gi_history_neighbours_agree(pixel: vec2<i32>, own_px: vec2<f32>) -> bool {
-    let size = vec2<i32>(raa_gi_frame.viewport.xy);
-    let pairs = array<vec2<i32>, 4>(
-        vec2<i32>(4, 0), vec2<i32>(8, 0), vec2<i32>(0, 4), vec2<i32>(0, 8),
-    );
-    for (var i = 0u; i < 4u; i++) {
-        let a = clamp(pixel + pairs[i], vec2<i32>(0), size - vec2<i32>(1));
-        let b = clamp(pixel - pairs[i], vec2<i32>(0), size - vec2<i32>(1));
-        let far_a = raa_depth_is_far(textureLoad(raa_gi_depth, a, 0));
-        let far_b = raa_depth_is_far(textureLoad(raa_gi_depth, b, 0));
-        let ma = textureLoad(raa_gi_motion, a, 0);
-        let mb = textureLoad(raa_gi_motion, b, 0);
-        if (!far_a && ma.z > 0.5) || (!far_b && mb.z > 0.5) {
-            return false;
-        }
-        if far_a || far_b {
-            continue;
-        }
-        let k = f32(max(pairs[i].x, pairs[i].y));
-        let second = (ma.xy + mb.xy) * raa_gi_frame.viewport.xy - 2.0 * own_px;
-        if length(second) > RAA_GI_HISTORY_MOTION_TOLERANCE_PX * k / 4.0 {
-            return false;
-        }
-    }
-    return true;
+// Running weighted sums of the probe irradiances a pixel blends: their total, the irradiance and
+// the luminance moments, for the clamp's spatial statistics.
+struct RaaGiProbeSum {
+    irradiance: vec3<f32>,
+    total: f32,
+    l1: f32,
+    l2: f32,
 }
 
-// The previous output at `uv`, bilinear over its four nearest pixels (clamped to the viewport).
-// A nearest-pixel read moves the history by up to half a pixel each frame under camera motion,
-// which made the accumulated irradiance swim.
-fn raa_gi_history_bilinear(uv: vec2<f32>) -> vec4<f32> {
-    let size = raa_gi_frame.viewport.xy;
-    let last = vec2<i32>(size) - vec2<i32>(1);
-    let p = uv * size - vec2<f32>(0.5);
-    let base = floor(p);
-    let f = p - base;
-    let i0 = clamp(vec2<i32>(base), vec2<i32>(0), last);
-    let i1 = clamp(vec2<i32>(base) + vec2<i32>(1), vec2<i32>(0), last);
-    let top = mix(
-        textureLoad(raa_gi_previous, vec2<i32>(i0.x, i0.y), 0),
-        textureLoad(raa_gi_previous, vec2<i32>(i1.x, i0.y), 0),
-        f.x,
-    );
-    let bottom = mix(
-        textureLoad(raa_gi_previous, vec2<i32>(i0.x, i1.y), 0),
-        textureLoad(raa_gi_previous, vec2<i32>(i1.x, i1.y), 0),
-        f.x,
-    );
-    return mix(top, bottom, f.y);
+fn raa_gi_probe_add(sum: ptr<function, RaaGiProbeSum>, probe: Probe, normal: vec3<f32>, weight: f32) {
+    let e = raa_gi_sh_irradiance(probe, normal);
+    let l = raa_gi_acc_luminance(e);
+    (*sum).irradiance += e * weight;
+    (*sum).total += weight;
+    (*sum).l1 += l * weight;
+    (*sum).l2 += l * l * weight;
 }
 
 // Handoff: card 'raa-gi screen: passes.rs module builders, group-2 layouts and pipelines'
-// builds the integrate compute pipeline on `raa_gi_probe_integrate`; today it maps the pixel
-// grid, weights the four nearest probes, evaluates `raa_gi_sh_irradiance`, adds
-// `raa_gi_screen_occlusion` and blends into the previous parity output under the group-2
-// registry above.
+// builds the integrate compute pipeline on `raa_gi_probe_integrate`; it maps the pixel grid,
+// weights the four nearest probes, evaluates `raa_gi_sh_irradiance`, adds
+// `raa_gi_screen_occlusion` and hands the result to the shared accumulation
+// (`raa_gi_acc_resolve`) under the group-2 registry above.
 @compute @workgroup_size(8, 8)
 fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = vec2<u32>(raa_gi_frame.viewport.xy);
@@ -200,29 +100,27 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = vec2<i32>(id.xy);
     let depth = textureLoad(raa_gi_depth, pixel, 0);
     if raa_depth_is_far(depth) {
-        textureStore(raa_gi_output, pixel, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+        raa_gi_acc_store_far(pixel);
         return;
     }
     let center = vec2<f32>(id.xy) + vec2<f32>(0.5);
     let normal = raa_gi_world_normal(pixel);
     let world = raa_gi_world_position(center, depth);
+    let view_depth = -raa_gi_view_position(center, depth).z;
     let grid = raa_gi_probe_grid(raa_gi_frame.viewport.xy);
     let grid_i = vec2<i32>(grid);
 
     // Bilinear over the four nearest tiles, keeping only probes on this pixel's surface. When
     // none of them lies on it (a silhouette or a face narrower than a tile), the 4 x 4 tiles
     // around are searched without the bilinear weight; with no matching probe there the pixel
-    // gets no screen irradiance rather than the mean of probes on other surfaces. A floor
-    // weight on every probe used to average exactly those, so the faces just outside a lit
-    // room (a wall's outer side, the front of its backing) took the room's bounce light.
+    // gets no irradiance this frame and holds its history.
     let position = center / f32(RAA_GI_PROBE_SPACING) - vec2<f32>(0.5);
     let base = vec2<i32>(floor(position));
     let fraction = position - vec2<f32>(base);
     // Linear view distance: RAA's standard-Z projection replaces solstice's near / depth.
-    let plane_scale = 6.0 / max(-raa_gi_view_position(center, depth).z, 1.0);
+    let plane_scale = 6.0 / max(view_depth, 1.0);
 
-    var irradiance = vec3<f32>(0.0);
-    var total = 0.0;
+    var sum = RaaGiProbeSum(vec3<f32>(0.0), 0.0, 0.0, 0.0);
     for (var dy = 0; dy <= 1; dy++) {
         for (var dx = 0; dx <= 1; dx++) {
             let tile = clamp(base + vec2<i32>(dx, dy), vec2<i32>(0), grid_i - vec2<i32>(1));
@@ -231,14 +129,12 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
                 * select(1.0 - fraction.y, fraction.y, dy == 1);
             let weight = max(bilinear, 0.001) * raa_gi_probe_match(probe, world, normal, plane_scale);
             if weight > 0.0 {
-                irradiance += raa_gi_sh_irradiance(probe, normal) * weight;
-                total += weight;
+                raa_gi_probe_add(&sum, probe, normal, weight);
             }
         }
     }
-    if total < RAA_GI_PROBE_MIN_WEIGHT {
-        irradiance = vec3<f32>(0.0);
-        total = 0.0;
+    if sum.total < RAA_GI_PROBE_MIN_WEIGHT {
+        sum = RaaGiProbeSum(vec3<f32>(0.0), 0.0, 0.0, 0.0);
         for (var dy = -1; dy <= 2; dy++) {
             for (var dx = -1; dx <= 2; dx++) {
                 let tile = base + vec2<i32>(dx, dy);
@@ -248,49 +144,45 @@ fn raa_gi_probe_integrate(@builtin(global_invocation_id) id: vec3<u32>) {
                 let probe = raa_gi_probes[u32(tile.y) * grid.x + u32(tile.x)];
                 let weight = raa_gi_probe_match(probe, world, normal, plane_scale);
                 if weight > 0.0 {
-                    irradiance += raa_gi_sh_irradiance(probe, normal) * weight;
-                    total += weight;
+                    raa_gi_probe_add(&sum, probe, normal, weight);
                 }
             }
         }
     }
-    let matched = total >= RAA_GI_PROBE_MIN_WEIGHT;
+    let matched = sum.total >= RAA_GI_PROBE_MIN_WEIGHT;
+    var irradiance = vec3<f32>(0.0);
+    var mean = 0.0;
+    var spread = 0.0;
     if matched {
-        irradiance /= total;
-    } else {
-        irradiance = vec3<f32>(0.0);
+        irradiance = sum.irradiance / sum.total;
+        mean = sum.l1 / sum.total;
+        spread = max(sum.l2 / sum.total - mean * mean, 0.0);
     }
 
     let noise = raa_gi_probe_ign(vec2<f32>(id.xy), raa_gi_frame.counts.y);
     let occlusion = raa_gi_screen_occlusion(center, world, normal, noise);
-    var current = vec4<f32>(irradiance, occlusion);
 
-    // Temporal blend with RAA's motion convention (previous uv = uv - motion). History is
-    // usable only when (a) the pixel's S43 reject flag is clear (m.z <= 0.5), (b) the cross
-    // pairs at +-4 / +-8 px pass raa_gi_history_neighbours_agree, and (c) history_valid is set
-    // and the previous uv lies inside the viewport. The history is read bilinear at the previous
-    // uv. Without usable history the current value is stored (alpha 1, rgb 0 when unmatched).
-    // A matched pixel blends its irradiance and screen occlusion into the history under
-    // RAA_GI_TEMPORAL_ALPHA. An unmatched one (no probe on its
-    // surface this frame) holds the history's irradiance and blends only the screen occlusion:
-    // probes jitter inside their tile every frame, so a narrow face or silhouette matches in
-    // some frames only, and fading a zero into the history would converge it towards black.
-    let m = textureLoad(raa_gi_motion, pixel, 0);
-    let motion = m.xy;
-    let own_px = motion * raa_gi_frame.viewport.xy;
-    let previous_uv = center * raa_gi_frame.viewport.zw - motion;
-    if m.z <= 0.5
-        && raa_gi_screen_params.history_valid != 0u
-        && all(previous_uv > vec2<f32>(0.0))
-        && all(previous_uv < vec2<f32>(1.0))
-        && raa_gi_history_neighbours_agree(pixel, own_px)
-    {
-        let history = raa_gi_history_bilinear(previous_uv);
-        if matched {
-            current = mix(history, current, RAA_GI_TEMPORAL_ALPHA);
-        } else {
-            current = vec4<f32>(history.rgb, mix(history.a, current.a, RAA_GI_TEMPORAL_ALPHA));
-        }
+    // Debug: the hit code of the pixel's own tile probe (probe_project.wgsl stores it in
+    // normal.w) and bit 16 on the pixels next to where that probe sits this frame.
+    let own_tile = clamp(vec2<i32>(id.xy) / i32(RAA_GI_PROBE_SPACING), vec2<i32>(0), grid_i - vec2<i32>(1));
+    let own_probe = raa_gi_probes[u32(own_tile.y) * grid.x + u32(own_tile.x)];
+    var hit_code = u32(max(own_probe.normal.w, 0.0));
+    let probe_pixel = raa_gi_probe_pixel(vec2<u32>(own_tile), raa_gi_frame.viewport.xy, raa_gi_frame.counts.y);
+    let away = abs(vec2<i32>(probe_pixel) - pixel);
+    if max(away.x, away.y) <= 1 {
+        hit_code |= 0x10000u;
     }
-    textureStore(raa_gi_output, pixel, current);
+
+    raa_gi_acc_resolve(RaaGiAccInput(
+        pixel,
+        world,
+        normal,
+        view_depth,
+        vec4<f32>(irradiance, occlusion),
+        matched,
+        mean,
+        spread,
+        hit_code,
+        0.0,
+    ));
 }

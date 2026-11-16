@@ -213,6 +213,33 @@ fn raa_rgi_merge(state: ptr<function, RaaRgiMerge>, r: RaaRgiReservoir, target_v
     }
 }
 
+// The most filtered mip of the environment: what one sky sample stands for.
+fn raa_rgi_sky_lod() -> f32 {
+    return f32(textureNumLevels(raa_env_specular) - 1u);
+}
+
+// True when the sample point is visible from the receiver through the GI voxel field: the ray
+// leaves 1.5 finest voxels along the receiver normal and stops two voxels short of x_s.
+const RAA_RGI_VISIBILITY_STEPS: u32 = 32u;
+const RAA_RGI_VISIBILITY_DISTANCE: f32 = 320.0;
+
+fn raa_rgi_visible(s: RaaRgiSurface, x_s: vec3<f32>) -> bool {
+    let count = raa_gi_volume_params.level_count;
+    if count == 0u {
+        return true;
+    }
+    let level = min(raa_gi_level_at(s.position, 0u), count - 1u);
+    let voxel = raa_gi_volume_params.levels[level].w;
+    let origin = s.position + s.normal * voxel * 1.5;
+    let d = x_s - origin;
+    let len = length(d);
+    let max_t = min(len - 2.0 * voxel, RAA_RGI_VISIBILITY_DISTANCE);
+    if max_t <= voxel {
+        return true;
+    }
+    return raa_gi_visibility(origin, d / len, voxel * 0.5, max_t, RAA_RGI_VISIBILITY_STEPS) > 0.5;
+}
+
 // The cosine-weighted direction of uv in [0, 1)^2 around `n`: cos theta = sqrt(1 - u), pdf
 // cos theta / pi.
 fn raa_rgi_cosine_direction(uv: vec2<f32>, n: vec3<f32>) -> vec3<f32> {

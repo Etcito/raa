@@ -31,6 +31,75 @@
 @group(2) @binding(2) var raa_gi_hdr_src: texture_2d<f32>;
 @group(2) @binding(3) var<storage, read> raa_gi_voxels_read: array<u32>;
 @group(2) @binding(4) var raa_gi_hdr_dst: texture_storage_2d<rgba16float, write>;
+// The screen views (codes 5 to 10): the gi.screen debug record (raw irradiance rg, raw b and
+// history length / historyMax, accumulation state and confidence / restirMCap, hit code) and the
+// screen output of this frame. 1 x 1 dummies when gi.screen did not record.
+@group(2) @binding(5) var raa_gi_screen_debug: texture_2d<u32>;
+@group(2) @binding(6) var raa_gi_screen_out: texture_2d<f32>;
+
+// The colour of one screen debug view at `pixel` (codes 5 to 10), `src` the shaded frame.
+fn raa_gi_debug_screen(code: u32, pixel: vec2<i32>, src: vec3<f32>, depth: f32) -> vec3<f32> {
+    let luma = dot(src, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if depth >= 1.0 {
+        return vec3<f32>(luma * 0.15);
+    }
+    let size = vec2<i32>(textureDimensions(raa_gi_screen_debug));
+    let p = clamp(pixel, vec2<i32>(0), size - vec2<i32>(1));
+    let record = textureLoad(raa_gi_screen_debug, p, 0);
+    let rg = unpack2x16float(record.x);
+    let bn = unpack2x16float(record.y);
+    let state_m = unpack2x16float(record.z);
+    let grey = vec3<f32>(luma * 0.25);
+    switch code {
+        case 5u: {
+            // Probe positions: magenta where this frame's probe sits.
+            if (record.w & 0x10000u) != 0u {
+                return vec3<f32>(1.0, 0.1, 0.9);
+            }
+            return grey;
+        }
+        case 6u: {
+            // What the rays hit: red screen, green voxels, blue sky.
+            let hits = vec3<f32>(f32((record.w >> 8u) & 15u), f32((record.w >> 4u) & 15u),
+                f32(record.w & 15u)) / 15.0;
+            return mix(grey, hits, 0.85);
+        }
+        case 7u: {
+            // History: green kept, yellow clamped, red rejected, blue no irradiance yet.
+            let state = u32(state_m.x + 0.5);
+            var tint = vec3<f32>(1.0, 0.1, 0.05);
+            if state == 1u {
+                tint = vec3<f32>(0.1, 0.9, 0.2);
+            } else if state == 2u {
+                tint = vec3<f32>(1.0, 0.85, 0.1);
+            } else if state == 3u {
+                tint = vec3<f32>(0.1, 0.3, 1.0);
+            }
+            return mix(grey, tint, 0.75);
+        }
+        case 8u: {
+            // History length: black 0 to white historyMax.
+            return vec3<f32>(clamp(bn.y, 0.0, 1.0));
+        }
+        case 9u: {
+            // Reservoir confidence: black 0 to white restirMCap (black in probe mode).
+            let m = clamp(state_m.y, 0.0, 1.0);
+            return vec3<f32>(m, m, m * 0.6 + 0.4 * f32(m > 0.0));
+        }
+        default: {
+            // Raw irradiance on the left half, the screen output on the right, a white seam.
+            let half = size.x / 2;
+            if abs(pixel.x - half) <= 1 {
+                return vec3<f32>(4.0);
+            }
+            if pixel.x < half {
+                return vec3<f32>(rg, bn.x);
+            }
+            let out_size = vec2<i32>(textureDimensions(raa_gi_screen_out));
+            return textureLoad(raa_gi_screen_out, clamp(pixel, vec2<i32>(0), out_size - vec2<i32>(1)), 0).rgb;
+        }
+    }
+}
 
 const RAA_GI_DEBUG_PI: f32 = 3.14159265359;
 // Two 0.2 m finest voxels make one contour period.
@@ -257,7 +326,11 @@ fn raa_gi_debug_view(@builtin(global_invocation_id) id: vec3<u32>) {
                 }
             }
         }
-        default: {}
+        default: {
+            if raa_gi_frame.counts.z >= 5u {
+                color = raa_gi_debug_screen(raa_gi_frame.counts.z, pixel, src, depth);
+            }
+        }
     }
     textureStore(raa_gi_hdr_dst, pixel, vec4<f32>(color, 1.0));
 }

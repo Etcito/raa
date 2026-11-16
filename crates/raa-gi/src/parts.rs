@@ -115,6 +115,15 @@ pub trait GiPart {
     fn allocated_bytes(&self) -> u64 {
         0
     }
+
+    /// Runs after a submission completed (`GiHandle::observe_submission`): a part with a GPU
+    /// readback starts mapping it here.
+    fn observe_submission(&self) {}
+
+    /// The screen accumulation statistics the part read back, if it has any.
+    fn screen_stats(&self) -> Option<crate::parts::screen::ScreenStats> {
+        None
+    }
 }
 
 /// The frame record handed to [`GiPart::prepare_frame`].
@@ -124,7 +133,12 @@ pub struct PartFrame<'a> {
     pub quality: GiQuality,
     pub viewport: (u32, u32),
     pub members: &'a [Member],
+    /// The previous frame's lit HDR was copied (`gi.history`) at this viewport.
     pub history_valid: bool,
+    /// The previous frame was active at this viewport with no camera cut or reallocation in
+    /// between: a part's own history of last frame may be reprojected, with or without the lit
+    /// HDR copy.
+    pub camera_valid: bool,
 }
 
 /// A voxel driver: writes voxelized members into the one shared voxel buffer (driver A forward,
@@ -186,6 +200,7 @@ struct SharedFrame {
     history: Option<wgpu::TextureView>,
     pyramid: Option<wgpu::TextureView>,
     probe_output: Option<wgpu::TextureView>,
+    screen_debug: Option<wgpu::TextureView>,
     trace: Option<raa_sdf_trace::TraceHandle>,
     group1_layout: wgpu::BindGroupLayout,
     group1: Option<(u64, u64, wgpu::BindGroup)>,
@@ -211,6 +226,7 @@ impl GiShared {
             history: None,
             pyramid: None,
             probe_output: None,
+            screen_debug: None,
             trace: None,
             group1_layout,
             group1: None,
@@ -379,6 +395,17 @@ impl GiShared {
         self.0.borrow_mut().probe_output = view;
     }
 
+    /// The Rgba32Uint per-pixel debug record the gi.screen pass wrote this frame (raw irradiance,
+    /// history length, accumulation state, reservoir confidence, hit code), or `None`.
+    pub fn screen_debug_view(&self) -> Option<wgpu::TextureView> {
+        self.0.borrow().screen_debug.clone()
+    }
+
+    /// Publishes the gi.screen debug record for this frame, or drops it with `None`.
+    pub(crate) fn set_screen_debug(&self, view: Option<wgpu::TextureView>) {
+        self.0.borrow_mut().screen_debug = view;
+    }
+
     /// Attaches the SDF trace scene, or detaches it with `None`.
     pub(crate) fn set_trace(&self, trace: Option<raa_sdf_trace::TraceHandle>) {
         self.0.borrow_mut().trace = trace;
@@ -403,6 +430,7 @@ impl GiShared {
         shared.history = None;
         shared.pyramid = None;
         shared.probe_output = None;
+        shared.screen_debug = None;
         shared.group1 = None;
     }
 }

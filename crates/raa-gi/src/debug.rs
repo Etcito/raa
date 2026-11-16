@@ -15,6 +15,28 @@ use crate::shaders;
 pub(crate) struct DebugRenderer {
     pipeline: wgpu::ComputePipeline,
     group2_layout: wgpu::BindGroupLayout,
+    /// 1 x 1 stand-ins for the screen debug record and the screen output.
+    debug_dummy: wgpu::TextureView,
+    output_dummy: wgpu::TextureView,
+}
+
+fn dummy(gpu: &GpuContext, label: &str, format: wgpu::TextureFormat) -> wgpu::TextureView {
+    gpu.device()
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 impl DebugRenderer {
@@ -54,18 +76,23 @@ impl DebugRenderer {
         DebugRenderer {
             pipeline,
             group2_layout,
+            debug_dummy: dummy(gpu, "raa-gi.debug.screen-dummy", wgpu::TextureFormat::Rgba32Uint),
+            output_dummy: dummy(gpu, "raa-gi.debug.output-dummy", wgpu::TextureFormat::Rgba16Float),
         }
     }
 
     /// Records the debug view of this frame: group 2 is 0 `frame`, 1 `ctx.targets.depth()`,
     /// 2 `ctx.targets.hdr().src()`, 3 `voxels`, 4 `ctx.targets.hdr().dst()`, since the HDR chain
-    /// swaps every pass. One 8x8 thread per pixel of `ctx.size`; then the chain swaps.
+    /// swaps every pass, 5 the gi.screen debug record and 6 the screen output (dummies when
+    /// absent). One 8x8 thread per pixel of `ctx.size`; then the chain swaps.
     pub(crate) fn record(
         &self,
         ctx: &mut RecordCtx<'_>,
         frame: &wgpu::Buffer,
         voxels: &wgpu::Buffer,
         group1: &wgpu::BindGroup,
+        screen_debug: Option<&wgpu::TextureView>,
+        screen_output: Option<&wgpu::TextureView>,
     ) {
         let targets = ctx.targets;
         let bind = ctx
@@ -94,6 +121,18 @@ impl DebugRenderer {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(targets.hdr().dst()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(
+                            screen_debug.unwrap_or(&self.debug_dummy),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(
+                            screen_output.unwrap_or(&self.output_dummy),
+                        ),
                     },
                 ],
             });

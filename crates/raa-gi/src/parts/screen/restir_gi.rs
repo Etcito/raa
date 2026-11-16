@@ -2,10 +2,13 @@
 //! after Ouyang et al., "ReSTIR GI: Path Resampling for Real-Time Path Tracing", HPG 2021: the
 //! three composed WGSL modules, their group-2 layouts and pipelines, the reservoir resources and
 //! the record. The gi.screen pass builds the depth pyramid, then runs stage 1 (one secondary ray
-//! per pixel + temporal reuse), stage 2 (spatial reuse with the reconnection Jacobian and a
-//! voxel visibility test, resolved to irradiance) and stage 3 (bilateral + temporal denoise)
-//! into the same parity output the probes write, so `raa_slot_indirect` and the ssgi composite
-//! read it unchanged. The reservoir codec, WRS, GRIS weight, confidence clamp and boiling test
+//! per pixel + temporal reuse of last frame's final reservoirs, whose light and visibility are
+//! re-read where their points are today), stage 2 (spatial reuse with the reconnection Jacobian
+//! and a voxel visibility test, resolved to irradiance, its merged reservoir written back as next
+//! frame's temporal input) and stage 3 (bilateral + the screen part's temporal accumulation)
+//! into the same parity history the probes write; the a-trous passes follow, so
+//! `raa_slot_indirect` and the ssgi composite read it unchanged. Stage 1 writes a scratch buffer
+//! that stage 2 reads, so stage 2 can write the final reservoirs without a race. The reservoir codec, WRS, GRIS weight, confidence clamp and boiling test
 //! come from the ReSTIR core shared with the area-light ReSTIR DI (`restir_core.wgsl`). RAA's own
 //! code; CPU twins in `restir_gi_cpu`.
 
@@ -14,18 +17,18 @@ use raa_pipeline::Targets;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use wgpu::TextureFormat;
 
+use super::AccumulateViews;
 use super::passes::{
-    SCREEN_PARAMS_SIZE, compute_pipeline, depth_entry, dispatch, float_entry, layout, module,
-    storage_entry, storage_texture_entry, uniform_entry,
+    accumulate_group2_entries, accumulate_wgsl, compute_pipeline, depth_entry, dispatch,
+    float_entry, layout, module, storage_entry, storage_texture_entry, uniform_entry,
 };
 use super::restir_gi_cpu::{
-    RESTIR_GI_BOILING_FACTOR, RESTIR_GI_M_CAP, RESTIR_GI_NORMAL_COS, RESTIR_GI_SPATIAL_RADIUS,
+    RESTIR_GI_BOILING_FACTOR, RESTIR_GI_NORMAL_COS, RESTIR_GI_SPATIAL_RADIUS,
     RESTIR_GI_SPATIAL_SAMPLES,
 };
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
-const PROBE_INTEGRATE_WGSL: &str = include_str!("../../wgsl/screen/probe_integrate.wgsl");
 const RESTIR_CORE_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_core.wgsl");
 const RESTIR_GI_COMMON_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_common.wgsl");
 const RESTIR_GI_MAIN_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_main.wgsl");
@@ -64,17 +67,19 @@ pub fn restir_gi_spatial_module_wgsl() -> String {
     )
 }
 
-/// Stage 3: PRELUDE + CLOUD_SHADOW + GI_VOLUME + DEPTH + probe_common + probe_integrate (the
-/// history test, bilinear history read and screen occlusion) + restir_gi_denoise.
+/// Stage 3: PRELUDE + CLOUD_SHADOW + GI_VOLUME + DEPTH + probe_common + accumulate (the shared
+/// temporal accumulation and the screen occlusion) + restir_gi_denoise.
 pub fn restir_gi_denoise_module_wgsl() -> String {
+    let accumulate = accumulate_wgsl();
     format!(
         "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}\
-         {PROBE_INTEGRATE_WGSL}{RESTIR_GI_DENOISE_WGSL}"
+         {accumulate}{RESTIR_GI_DENOISE_WGSL}"
     )
 }
 
 /// Stage 1 group 2: 0 frame, 1 depth, 2 normal, 3 filterable lit history, 4 pyramid, 7 screen
-/// params, 8 motion, 10 previous reservoirs (read), 11 reservoirs (read_write), 12 params.
+/// params, 8 motion, 10 previous final reservoirs (read), 11 the scratch reservoirs
+/// (read_write), 12 params.
 pub fn main_group2_entries() -> [wgpu::BindGroupLayoutEntry; 10] {
     [
         uniform_entry(0, FRAME_SIZE),
@@ -82,7 +87,7 @@ pub fn main_group2_entries() -> [wgpu::BindGroupLayoutEntry; 10] {
         float_entry(2, false),
         float_entry(3, true),
         float_entry(4, false),
-        uniform_entry(7, SCREEN_PARAMS_SIZE),
+        uniform_entry(7, super::passes::SCREEN_PARAMS_SIZE),
         float_entry(8, false),
         storage_entry(10, true),
         storage_entry(11, false),
@@ -90,9 +95,9 @@ pub fn main_group2_entries() -> [wgpu::BindGroupLayoutEntry; 10] {
     ]
 }
 
-/// Stage 2 group 2: 0 frame, 1 depth, 2 normal, 11 reservoirs, 12 params, 13 the Rgba16Float raw
-/// irradiance.
-pub fn spatial_group2_entries() -> [wgpu::BindGroupLayoutEntry; 6] {
+/// Stage 2 group 2: 0 frame, 1 depth, 2 normal, 11 the scratch reservoirs, 12 params, 13 the
+/// Rgba16Float raw irradiance, 15 the final reservoirs (written).
+pub fn spatial_group2_entries() -> [wgpu::BindGroupLayoutEntry; 7] {
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
@@ -100,20 +105,27 @@ pub fn spatial_group2_entries() -> [wgpu::BindGroupLayoutEntry; 6] {
         storage_entry(11, false),
         uniform_entry(12, RESTIR_GI_PARAMS_SIZE),
         storage_texture_entry(13, TextureFormat::Rgba16Float),
+        storage_entry(15, false),
     ]
 }
 
-/// Stage 3 group 2: 0 frame, 1 depth, 2 normal, 3 motion, 4 the other parity output, 6 the
-/// Rgba16Float output, 7 screen params, 14 the raw irradiance.
-pub fn denoise_group2_entries() -> [wgpu::BindGroupLayoutEntry; 8] {
+/// Stage 3 group 2: 0 frame, 1 depth, 2 normal, the accumulation bindings 3 4 6 7 8 9 10 11 12
+/// of `accumulate_group2_entries` and 14 the raw irradiance.
+pub fn denoise_group2_entries() -> [wgpu::BindGroupLayoutEntry; 13] {
+    let shared = accumulate_group2_entries();
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
         float_entry(2, false),
-        float_entry(3, false),
-        float_entry(4, false),
-        storage_texture_entry(6, TextureFormat::Rgba16Float),
-        uniform_entry(7, SCREEN_PARAMS_SIZE),
+        shared[0],
+        shared[1],
+        shared[2],
+        shared[3],
+        shared[4],
+        shared[5],
+        shared[6],
+        shared[7],
+        shared[8],
         float_entry(14, false),
     ]
 }
@@ -205,50 +217,58 @@ pub(crate) struct RestirGiWork<'a> {
 }
 
 /// Views of the screen part the ReSTIR groups bind: the frame record, the lit history (or the
-/// dummy), the pyramid, the two parity outputs and the screen params.
+/// dummy), the pyramid, the screen params and the accumulation targets.
 pub(crate) struct RestirGiInputs<'a> {
     pub(crate) frame: &'a wgpu::Buffer,
     pub(crate) history: &'a wgpu::TextureView,
     pub(crate) pyramid: &'a wgpu::TextureView,
-    pub(crate) outputs: [&'a wgpu::TextureView; 2],
     pub(crate) screen_params: &'a wgpu::Buffer,
+    pub(crate) accumulate: AccumulateViews,
 }
 
 struct RestirGiBindings {
     frame: wgpu::Buffer,
     history: wgpu::TextureView,
+    outputs: wgpu::TextureView,
     main: [wgpu::BindGroup; 2],
     spatial: [wgpu::BindGroup; 2],
     denoise: [wgpu::BindGroup; 2],
 }
 
-/// The viewport-sized ReSTIR GI resources: two reservoir buffers (ping-pong by parity), the raw
-/// irradiance texture and the params uniform; bind groups cached until the frame buffer or the
-/// history changes or `invalidate_bindings` runs.
+/// The viewport-sized ReSTIR GI resources: two final reservoir buffers (ping-pong by parity), the
+/// stage-1 scratch reservoirs, the raw irradiance texture and the params uniform; bind groups
+/// cached until the frame buffer, the history or the screen resources change or
+/// `invalidate_bindings` runs.
 pub(crate) struct RestirGiResources {
     viewport: (u32, u32),
     reservoirs: [wgpu::Buffer; 2],
+    scratch: wgpu::Buffer,
     raw_view: wgpu::TextureView,
     params: wgpu::Buffer,
     bindings: Option<RestirGiBindings>,
 }
 
-/// GPU bytes of the resources of `viewport`: two reservoir buffers of 32 B per pixel, the raw
-/// Rgba16Float texture (8 B per pixel) and the 32-B params. 1280x720: 66,355,232.
+/// GPU bytes of the resources of `viewport`: three reservoir buffers (two final, one scratch) of
+/// 32 B per pixel, the raw Rgba16Float texture (8 B per pixel) and the 32-B params.
 pub(crate) fn restir_gi_bytes(viewport: (u32, u32)) -> u64 {
     let pixels = u64::from(viewport.0.max(1)) * u64::from(viewport.1.max(1));
-    2 * RESTIR_GI_RESERVOIR_BYTES * pixels + 8 * pixels + RESTIR_GI_PARAMS_SIZE
+    3 * RESTIR_GI_RESERVOIR_BYTES * pixels + 8 * pixels + RESTIR_GI_PARAMS_SIZE
 }
 
-/// The 32 B of `RestirGiParamsGpu`, little-endian.
-pub(crate) fn params_bytes(frame_index: u32, history_usable: bool, screen_traces: bool) -> [u8; 32] {
+/// The 32 B of `RestirGiParamsGpu`, little-endian; `m_cap` is the `restirMCap` setting.
+pub(crate) fn params_bytes(
+    frame_index: u32,
+    history_usable: bool,
+    screen_traces: bool,
+    m_cap: f32,
+) -> [u8; 32] {
     let words: [u32; 8] = [
         frame_index,
         u32::from(history_usable),
         RESTIR_GI_SPATIAL_SAMPLES,
         u32::from(screen_traces),
         RESTIR_GI_SPATIAL_RADIUS.to_bits(),
-        RESTIR_GI_M_CAP.to_bits(),
+        m_cap.to_bits(),
         RESTIR_GI_BOILING_FACTOR.to_bits(),
         RESTIR_GI_NORMAL_COS.to_bits(),
     ];
@@ -276,6 +296,7 @@ impl RestirGiResources {
             reservoir("raa-gi.restir-gi.reservoirs-a"),
             reservoir("raa-gi.restir-gi.reservoirs-b"),
         ];
+        let scratch = reservoir("raa-gi.restir-gi.reservoirs-stage1");
         let raw = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("raa-gi.restir-gi.raw"),
             size: wgpu::Extent3d {
@@ -300,6 +321,7 @@ impl RestirGiResources {
         RestirGiResources {
             viewport,
             reservoirs,
+            scratch,
             raw_view,
             params,
             bindings: None,
@@ -320,11 +342,12 @@ impl RestirGiResources {
         frame_index: u32,
         history_usable: bool,
         screen_traces: bool,
+        m_cap: f32,
     ) {
         gpu.queue().write_buffer(
             &self.params,
             0,
-            &params_bytes(frame_index, history_usable, screen_traces),
+            &params_bytes(frame_index, history_usable, screen_traces, m_cap),
         );
     }
 
@@ -332,8 +355,9 @@ impl RestirGiResources {
         self.bindings = None;
     }
 
-    /// The groups of `parity`: stage 1 reads reservoirs[1 - parity] and writes reservoirs[parity],
-    /// stage 3 reads outputs[1 - parity] and writes outputs[parity].
+    /// The groups of `parity`: stage 1 reads reservoirs[1 - parity] and writes the scratch, stage
+    /// 2 reads the scratch and writes reservoirs[parity], stage 3 accumulates into the screen
+    /// history of `parity`.
     pub(crate) fn work<'a>(
         &'a mut self,
         gpu: &GpuContext,
@@ -343,7 +367,9 @@ impl RestirGiResources {
         parity: usize,
     ) -> RestirGiWork<'a> {
         let stale = self.bindings.as_ref().is_none_or(|b| {
-            b.frame != *inputs.frame || b.history != *inputs.history
+            b.frame != *inputs.frame
+                || b.history != *inputs.history
+                || b.outputs != inputs.accumulate.outputs[0]
         });
         if stale {
             self.bindings = Some(self.build(gpu, pipelines, targets, inputs));
@@ -393,7 +419,7 @@ impl RestirGiResources {
                     (7, inputs.screen_params.as_entire_binding()),
                     (8, tex(targets.motion())),
                     (10, self.reservoirs[1 - parity].as_entire_binding()),
-                    (11, self.reservoirs[parity].as_entire_binding()),
+                    (11, self.scratch.as_entire_binding()),
                     (12, self.params.as_entire_binding()),
                 ],
             )
@@ -406,13 +432,15 @@ impl RestirGiResources {
                     (0, inputs.frame.as_entire_binding()),
                     (1, tex(targets.depth())),
                     (2, tex(targets.normal())),
-                    (11, self.reservoirs[parity].as_entire_binding()),
+                    (11, self.scratch.as_entire_binding()),
                     (12, self.params.as_entire_binding()),
                     (13, tex(&self.raw_view)),
+                    (15, self.reservoirs[parity].as_entire_binding()),
                 ],
             )
         });
-        let denoise = std::array::from_fn(|parity| {
+        let acc = &inputs.accumulate;
+        let denoise = std::array::from_fn(|parity: usize| {
             group(
                 "raa-gi.restir-gi.denoise",
                 &pipelines.denoise_layout,
@@ -421,9 +449,14 @@ impl RestirGiResources {
                     (1, tex(targets.depth())),
                     (2, tex(targets.normal())),
                     (3, tex(targets.motion())),
-                    (4, tex(inputs.outputs[1 - parity])),
-                    (6, tex(inputs.outputs[parity])),
+                    (4, tex(&acc.outputs[1 - parity])),
+                    (6, tex(&acc.outputs[parity])),
                     (7, inputs.screen_params.as_entire_binding()),
+                    (8, tex(&acc.metas[1 - parity])),
+                    (9, tex(&acc.metas[parity])),
+                    (10, tex(&acc.filter)),
+                    (11, tex(&acc.debug)),
+                    (12, acc.counters.as_entire_binding()),
                     (14, tex(&self.raw_view)),
                 ],
             )
@@ -431,6 +464,7 @@ impl RestirGiResources {
         RestirGiBindings {
             frame: inputs.frame.clone(),
             history: inputs.history.clone(),
+            outputs: acc.outputs[0].clone(),
             main,
             spatial,
             denoise,
@@ -458,12 +492,12 @@ mod tests {
 
     #[test]
     fn params_and_bytes_follow_the_layout() {
-        let bytes = params_bytes(7, true, false);
+        let bytes = params_bytes(7, true, false, 30.0);
         assert_eq!(&bytes[0..4], &7u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &0u32.to_le_bytes());
-        assert_eq!(&bytes[20..24], &RESTIR_GI_M_CAP.to_le_bytes());
-        // 1280 x 720 = 921,600 px: 2 x 32 + 8 = 72 B per pixel, plus 32.
-        assert_eq!(restir_gi_bytes((1280, 720)), 921_600 * 72 + 32);
+        assert_eq!(&bytes[20..24], &30.0f32.to_le_bytes());
+        // 1280 x 720 = 921,600 px: 3 x 32 + 8 = 104 B per pixel, plus 32.
+        assert_eq!(restir_gi_bytes((1280, 720)), 921_600 * 104 + 32);
     }
 }

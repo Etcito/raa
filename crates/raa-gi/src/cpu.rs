@@ -148,6 +148,38 @@ pub fn decode_radiance(packed: [u32; 2]) -> [f32; 3] {
 }
 
 /// Signed octahedral encoding packed with `pack2x16snorm`. Port of `math.wgsl:18-24`.
+/// `RAA_GI_LIGHT_MAX_COUNT` of voxel_light.wgsl: the update count where the blend weight stops
+/// falling.
+pub const VOXEL_MAX_COUNT: u32 = 8;
+/// `RAA_GI_LIGHT_CHANGE`: the relative luminance change that restarts a voxel's count.
+pub const VOXEL_CHANGE: f32 = 0.5;
+
+/// The wrap epoch of a world voxel coordinate in a level of `n` voxels per axis
+/// (`raa_gi_light_epoch`): floor(world / n) per axis, two bits each (x, y << 2, z << 4).
+pub fn voxel_epoch(world: [i32; 3], n: u32) -> u32 {
+    let e = world.map(|c| (c.div_euclid(n as i32) as u32) & 3);
+    e[0] | (e[1] << 2) | (e[2] << 4)
+}
+
+/// One voxel relight: the stored count and epoch, the stored and new luminances. Returns the new
+/// count and the blend weight 1 / count of voxel_light.wgsl: a cell from another epoch (it
+/// scrolled in) restarts at count 0, a luminance change beyond `VOXEL_CHANGE` at 1, and the count
+/// never exceeds `VOXEL_MAX_COUNT`.
+pub fn voxel_blend(
+    stored_count: u32,
+    stored_epoch: u32,
+    epoch: u32,
+    lum_previous: f32,
+    lum_target: f32,
+) -> (u32, f32) {
+    let mut count = if stored_epoch == epoch { stored_count } else { 0 };
+    if count > 2 && (lum_target - lum_previous).abs() > VOXEL_CHANGE * lum_previous.max(1.0e-3) {
+        count = 1;
+    }
+    let count = (count + 1).min(VOXEL_MAX_COUNT);
+    (count, 1.0 / count as f32)
+}
+
 pub fn oct_encode(n: [f32; 3]) -> u32 {
     let s = n[0].abs() + n[1].abs() + n[2].abs();
     let p = [n[0] / s, n[1] / s];
@@ -629,4 +661,39 @@ fn mix4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
         a[2] + (b[2] - a[2]) * t,
         a[3] + (b[3] - a[3]) * t,
     ]
+}
+
+#[cfg(test)]
+mod voxel_blend_tests {
+    use super::*;
+
+    #[test]
+    fn epoch_wraps_every_resolution() {
+        // n = 64: world x 70 is in wrap 1, y -1 in wrap -1 (two bits 3), z 130 in wrap 2.
+        assert_eq!(voxel_epoch([70, -1, 130], 64), 1 | (3 << 2) | (2 << 4));
+        assert_eq!(voxel_epoch([0, 63, 0], 64), 0);
+    }
+
+    #[test]
+    fn blend_counts_up_and_restarts() {
+        // A fresh voxel takes its first update whole (count 1, weight 1); the third 1 / 3.
+        assert_eq!(voxel_blend(0, 0, 0, 0.0, 1.0), (1, 1.0));
+        assert_eq!(voxel_blend(2, 0, 0, 1.0, 1.1), (3, 1.0 / 3.0));
+        // Capped at 8: weight 1 / 8 = 0.125.
+        assert_eq!(voxel_blend(8, 0, 0, 1.0, 1.1), (8, 0.125));
+        // Scrolled in from another epoch: the stored count is dropped, weight 1.
+        assert_eq!(voxel_blend(8, 1, 2, 1.0, 1.0), (1, 1.0));
+        // A light that moved (luminance 1 -> 2, +100 % > 50 %): count 2, weight 1 / 2.
+        assert_eq!(voxel_blend(8, 0, 0, 1.0, 2.0), (2, 0.5));
+        // Steady-state average of a constant target after the cap: an 8-update exponential
+        // average reaches 1 - (7/8)^8 = 0.656 of a step; checked against the closed form.
+        let mut value = 0.0f32;
+        let mut count = 8;
+        for _ in 0..8 {
+            let (c, w) = voxel_blend(count, 0, 0, 1.0, 1.0);
+            count = c;
+            value += (1.0 - value) * w;
+        }
+        assert!((value - (1.0 - (7.0f32 / 8.0).powi(8))).abs() < 1e-5);
+    }
 }

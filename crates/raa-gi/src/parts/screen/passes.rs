@@ -48,6 +48,8 @@ const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgs
 const PROBE_TRACE_WGSL: &str = include_str!("../../wgsl/screen/probe_trace.wgsl");
 const PROBE_PROJECT_WGSL: &str = include_str!("../../wgsl/screen/probe_project.wgsl");
 const PROBE_INTEGRATE_WGSL: &str = include_str!("../../wgsl/screen/probe_integrate.wgsl");
+const ACCUMULATE_WGSL: &str = include_str!("../../wgsl/screen/accumulate.wgsl");
+const ATROUS_WGSL: &str = include_str!("../../wgsl/screen/atrous.wgsl");
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes.
 const FRAME_SIZE: u64 = 432;
@@ -59,8 +61,31 @@ pub const PROBE_RAY_OPTIONS: [u32; 2] = [6, 8];
 /// Size of `Probe` in `probe_common.wgsl`: nine SH vectors, position and normal.
 pub const PROBE_BYTES: u64 = 176;
 
-/// Size of `GiScreenGpu`: `history_valid`, `screen_traces`, `parity` and one pad lane.
-pub const SCREEN_PARAMS_SIZE: u64 = 16;
+/// Size of `GiScreenGpu`: `history_valid`, `screen_traces`, `parity`, `debug_view`,
+/// `history_max`, `clamp_gamma`, `m_cap` and one pad lane.
+pub const SCREEN_PARAMS_SIZE: u64 = 32;
+
+/// The most a-trous passes (`spatialPasses`), steps 1, 2, 4, 8 and 16 pixels.
+pub const ATROUS_MAX_PASSES: u32 = 5;
+
+/// Bytes between two a-trous pass records in their uniform buffer (the uniform offset
+/// alignment).
+pub const ATROUS_SLOT_BYTES: u64 = 256;
+
+/// Size of one `RaaGiAtrousGpu` record: step, last flag and two pad lanes.
+pub const ATROUS_PARAMS_SIZE: u64 = 16;
+
+/// Entry of the a-trous pipeline.
+pub const ATROUS_ENTRY: &str = "raa_gi_atrous_pass";
+
+/// The 16 B of the a-trous record of pass `index` (step 2^index), `last` when it writes the
+/// screen output.
+pub fn atrous_record(index: u32, last: bool) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[0..4].copy_from_slice(&(1i32 << index.min(ATROUS_MAX_PASSES - 1)).to_le_bytes());
+    out[4..8].copy_from_slice(&u32::from(last).to_le_bytes());
+    out
+}
 
 /// Side of every screen compute workgroup (8x8 threads).
 pub const WORKGROUP: u32 = 8;
@@ -126,12 +151,24 @@ pub fn probe_project_module_wgsl() -> String {
 
 /// `probe_integrate_module_wgsl` builds the integrate module of contract 'gi-screen-wgsl':
 /// `PRELUDE_WGSL` + `CLOUD_SHADOW_WGSL` + `GI_VOLUME_WGSL` + `DEPTH_WGSL` + probe_common.wgsl +
-/// probe_integrate.wgsl. The upstream card's report at
-/// crates/raa-gi/src/wgsl/screen/probe_integrate.wgsl:103 `raa_gi_probe_integrate` states what
-/// the entry does today.
+/// accumulate.wgsl (the shared temporal accumulation) + probe_integrate.wgsl.
 pub fn probe_integrate_module_wgsl() -> String {
     format!(
-        "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}{PROBE_INTEGRATE_WGSL}"
+        "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}\
+         {ACCUMULATE_WGSL}{PROBE_INTEGRATE_WGSL}"
+    )
+}
+
+/// The temporal-accumulation text the ReSTIR GI denoise module composes after probe_common.
+pub(crate) fn accumulate_wgsl() -> &'static str {
+    ACCUMULATE_WGSL
+}
+
+/// `atrous_module_wgsl` builds the a-trous module: `PRELUDE_WGSL` + `CLOUD_SHADOW_WGSL` +
+/// `GI_VOLUME_WGSL` + `DEPTH_WGSL` + probe_common.wgsl + atrous.wgsl.
+pub fn atrous_module_wgsl() -> String {
+    format!(
+        "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}{ATROUS_WGSL}"
     )
 }
 
@@ -176,6 +213,10 @@ pub(crate) fn depth_entry(binding: u32) -> BindGroupLayoutEntry {
 
 pub(crate) fn float_entry(binding: u32, filterable: bool) -> BindGroupLayoutEntry {
     texture_entry(binding, TextureSampleType::Float { filterable })
+}
+
+pub(crate) fn uint_entry(binding: u32) -> BindGroupLayoutEntry {
+    texture_entry(binding, TextureSampleType::Uint)
 }
 
 pub(crate) fn storage_texture_entry(binding: u32, format: TextureFormat) -> BindGroupLayoutEntry {
@@ -262,18 +303,56 @@ pub fn filter_group2_entries() -> [BindGroupLayoutEntry; 3] {
     ]
 }
 
-/// Integrate group 2: 0 `GiFrameGpu` (432 B), 1 depth, 2 normal, 3 the S12 motion, 4 the other
-/// parity output, 5 the probes read, 6 the Rgba16Float output and 7 `GiScreenGpu` (16 B).
-pub fn integrate_group2_entries() -> [BindGroupLayoutEntry; 8] {
+/// The accumulation bindings shared by the integrate and the ReSTIR GI denoise (accumulate.wgsl):
+/// 3 the S12 motion, 4 the other parity history, 6 the Rgba16Float history, 7 `GiScreenGpu`,
+/// 8 the other parity moments, 9 the Rgba32Uint moments, 10 the Rgba16Float a-trous input,
+/// 11 the Rgba32Uint debug record and 12 the statistics counters.
+pub fn accumulate_group2_entries() -> [BindGroupLayoutEntry; 9] {
+    [
+        float_entry(3, false),
+        float_entry(4, false),
+        storage_texture_entry(6, TextureFormat::Rgba16Float),
+        uniform_entry(7, SCREEN_PARAMS_SIZE),
+        uint_entry(8),
+        storage_texture_entry(9, TextureFormat::Rgba32Uint),
+        storage_texture_entry(10, TextureFormat::Rgba16Float),
+        storage_texture_entry(11, TextureFormat::Rgba32Uint),
+        storage_entry(12, false),
+    ]
+}
+
+/// Integrate group 2: 0 `GiFrameGpu` (432 B), 1 depth, 2 normal, 5 the probes read and the
+/// accumulation bindings of [`accumulate_group2_entries`].
+pub fn integrate_group2_entries() -> [BindGroupLayoutEntry; 13] {
+    let shared = accumulate_group2_entries();
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
         float_entry(2, false),
-        float_entry(3, false),
-        float_entry(4, false),
+        shared[0],
+        shared[1],
         storage_entry(5, true),
-        storage_texture_entry(6, TextureFormat::Rgba16Float),
-        uniform_entry(7, SCREEN_PARAMS_SIZE),
+        shared[2],
+        shared[3],
+        shared[4],
+        shared[5],
+        shared[6],
+        shared[7],
+        shared[8],
+    ]
+}
+
+/// A-trous group 2: 0 `GiFrameGpu`, 1 depth, 2 normal, 15 the input (rgb, variance), 16 the
+/// Rgba16Float output, 17 the history (occlusion) and 18 the 16-B pass record.
+pub fn atrous_group2_entries() -> [BindGroupLayoutEntry; 7] {
+    [
+        uniform_entry(0, FRAME_SIZE),
+        depth_entry(1),
+        float_entry(2, false),
+        float_entry(15, false),
+        storage_texture_entry(16, TextureFormat::Rgba16Float),
+        float_entry(17, false),
+        uniform_entry(18, ATROUS_PARAMS_SIZE),
     ]
 }
 
@@ -298,12 +377,14 @@ pub(crate) struct ScreenPipelines {
     pub(crate) project_layout: wgpu::BindGroupLayout,
     pub(crate) filter_layout: wgpu::BindGroupLayout,
     pub(crate) integrate_layout: wgpu::BindGroupLayout,
+    pub(crate) atrous_layout: wgpu::BindGroupLayout,
     copy: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     trace: [wgpu::ComputePipeline; 2],
     project: [wgpu::ComputePipeline; 2],
     filter: wgpu::ComputePipeline,
     integrate: wgpu::ComputePipeline,
+    atrous: wgpu::ComputePipeline,
 }
 
 /// The per-frame bind groups and sizes `ScreenPipelines::record` dispatches over: one pyramid
@@ -316,6 +397,11 @@ pub(crate) struct ScreenWork<'a> {
     pub(crate) project: &'a wgpu::BindGroup,
     pub(crate) filter: &'a wgpu::BindGroup,
     pub(crate) integrate: &'a wgpu::BindGroup,
+    /// The a-trous groups of this parity: index `2 i + 1` for pass i writing the screen output,
+    /// `2 i` for pass i writing the other filter texture.
+    pub(crate) atrous: &'a [wgpu::BindGroup],
+    /// The a-trous passes to record (`spatialPasses`).
+    pub(crate) atrous_passes: u32,
     pub(crate) probe_rays: u32,
     pub(crate) grid: (u32, u32),
     pub(crate) viewport: (u32, u32),
@@ -401,6 +487,7 @@ impl ScreenPipelines {
             "raa-gi.screen.integrate",
             &integrate_group2_entries(),
         );
+        let atrous_layout = layout(device, "raa-gi.screen.atrous", &atrous_group2_entries());
 
         let pyramid_module = module(
             device,
@@ -418,6 +505,7 @@ impl ScreenPipelines {
             "raa-gi.screen.integrate",
             &probe_integrate_module_wgsl(),
         );
+        let atrous_module = module(device, "raa-gi.screen.atrous", &atrous_module_wgsl());
 
         let copy = compute_pipeline(
             device,
@@ -471,6 +559,14 @@ impl ScreenPipelines {
             &[Some(&empty), Some(group1), Some(&integrate_layout)],
             None,
         );
+        let atrous = compute_pipeline(
+            device,
+            "raa-gi.screen.atrous",
+            &atrous_module,
+            ATROUS_ENTRY,
+            &[Some(&empty), Some(group1), Some(&atrous_layout)],
+            None,
+        );
 
         ScreenPipelines {
             copy_layout,
@@ -479,12 +575,14 @@ impl ScreenPipelines {
             project_layout,
             filter_layout,
             integrate_layout,
+            atrous_layout,
             copy,
             reduce,
             trace,
             project,
             filter,
             integrate,
+            atrous,
         }
     }
 
@@ -534,7 +632,23 @@ impl ScreenPipelines {
         pass.set_pipeline(&self.integrate);
         pass.set_bind_group(2, work.integrate, &[]);
         dispatch(&mut pass, work.viewport.0, work.viewport.1);
+        self.record_atrous(&mut pass, work);
         true
+    }
+
+    /// Records the `work.atrous_passes` a-trous passes (group 1 already set): pass i reads one
+    /// filter texture and writes the other, the last one writes the screen output.
+    pub(crate) fn record_atrous(&self, pass: &mut wgpu::ComputePass<'_>, work: &ScreenWork<'_>) {
+        let passes = work.atrous_passes.min(ATROUS_MAX_PASSES);
+        for index in 0..passes {
+            let last = index + 1 == passes;
+            let Some(group) = work.atrous.get((index * 2 + u32::from(last)) as usize) else {
+                return;
+            };
+            pass.set_pipeline(&self.atrous);
+            pass.set_bind_group(2, group, &[]);
+            dispatch(pass, work.viewport.0, work.viewport.1);
+        }
     }
 
     /// Records the depth-pyramid copy of mip 0 and the reduce of every later mip into `pass`
@@ -587,5 +701,30 @@ mod tests {
         assert!(project.contains(PROBE_FILTER_ENTRY));
         let integrate = probe_integrate_module_wgsl();
         assert!(integrate.contains(PROBE_INTEGRATE_ENTRY));
+        assert!(atrous_module_wgsl().contains(ATROUS_ENTRY));
+    }
+
+    #[test]
+    fn modules_validate() {
+        for (label, source) in [
+            ("integrate", probe_integrate_module_wgsl()),
+            ("atrous", atrous_module_wgsl()),
+            ("trace", probe_trace_module_wgsl()),
+            ("project", probe_project_module_wgsl()),
+        ] {
+            if let Err(e) = raa_shader::Composer::validate(&source) {
+                panic!("{label}: {}: {}", e.code, e.message);
+            }
+        }
+    }
+
+    #[test]
+    fn atrous_records_double_the_step() {
+        // Pass i spreads its taps 2^i pixels: 1, 2, 4, 8, 16.
+        for (index, step) in [(0u32, 1i32), (1, 2), (2, 4), (3, 8), (4, 16)] {
+            let bytes = atrous_record(index, index == 4);
+            assert_eq!(i32::from_le_bytes(bytes[0..4].try_into().unwrap()), step);
+            assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), u32::from(index == 4));
+        }
     }
 }

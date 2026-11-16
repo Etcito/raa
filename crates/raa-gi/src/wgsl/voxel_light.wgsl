@@ -28,13 +28,14 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// S38 record order: wrap_origin @0, level @12, updates @16, resolution @20, zero @24..32.
+// S38 record order: wrap_origin @0, level @12, updates @16, resolution @20, full @24 (1 relights
+// every voxel instead of a checkerboard half, `voxelFullRelight`), zero @28.
 struct GiLightGpu {
     wrap_origin: vec3<i32>,
     level: u32,
     updates: u32,
     resolution: u32,
-    _pad0: u32,
+    full: u32,
     _pad1: u32,
 }
 
@@ -47,7 +48,22 @@ const RAA_GI_PI: f32 = 3.14159265359;
 const RAA_GI_TAU: f32 = 6.28318530718;
 const RAA_GI_EMISSIVE_RANGE: f32 = 128.0;
 const RAA_GI_INDIRECT_RAYS: u32 = 3u;
-const RAA_GI_LIGHT_BLEND: f32 = 0.22;
+// The radiance blends at 1 / n, n the voxel's update count, never below 1 / RAA_GI_LIGHT_MAX_COUNT
+// (`cpu::voxel_blend`): a fresh voxel takes its first update whole and the noise of the three
+// rays then averages over eight updates.
+const RAA_GI_LIGHT_MAX_COUNT: u32 = 8u;
+// An update whose luminance differs from the stored one by more than this fraction restarts the
+// count at 2, so a light that moved is followed within two updates.
+const RAA_GI_LIGHT_CHANGE: f32 = 0.5;
+
+// The radiance record keeps 16 spare bits after blue: the update count (bits 0-7) and the wrap
+// epoch of the cell (bits 8-13, two bits per axis of floor(world voxel / resolution)). A cell
+// whose epoch differs from where the level now stands scrolled in from the far side of the
+// grid: its stored radiance belongs to another place and is dropped.
+fn raa_gi_light_epoch(world: vec3<i32>, n: u32) -> u32 {
+    let e = vec3<u32>(vec3<i32>(floor(vec3<f32>(world) / f32(n)))) & vec3<u32>(3u);
+    return e.x | (e.y << 2u) | (e.z << 4u);
+}
 
 // Signed octahedral coordinates in [-1, 1]^2 to a unit vector.
 fn raa_gi_oct_decode(e: vec2<f32>) -> vec3<f32> {
@@ -172,8 +188,8 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id >= vec3<u32>(n)) {
         return;
     }
-    // Refresh half of the voxels each update, in a checkerboard.
-    if ((id.x + id.y + id.z + raa_gi_light.updates) & 1u) != 0u {
+    // Refresh half of the voxels each update, in a checkerboard, unless the full relight is on.
+    if raa_gi_light.full == 0u && ((id.x + id.y + id.z + raa_gi_light.updates) & 1u) != 0u {
         return;
     }
     let level = raa_gi_light.level;
@@ -224,7 +240,8 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
             basis,
         );
         let hit = raa_gi_gather(origin, direction, voxel, 320.0, 32u, 0.85);
-        let env = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, 0.0).rgb;
+        let env = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction,
+            f32(textureNumLevels(raa_env_specular) - 1u)).rgb;
         gathered += select(env, hit.radiance, hit.hit);
     }
     // With cosine-weighted rays, irradiance is pi times the mean radiance.
@@ -237,6 +254,18 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
     let world = vec3<i32>(id) + raa_gi_light.wrap_origin;
     let wrapped = vec3<u32>((world % i32(n) + vec3<i32>(i32(n))) % i32(n));
     let slot = level_offset + wrapped.z * n * n + wrapped.y * n + wrapped.x;
-    let previous = raa_gi_decode_radiance(raa_gi_radiance[slot]);
-    raa_gi_radiance[slot] = raa_gi_encode_radiance(mix(previous, target_radiance, RAA_GI_LIGHT_BLEND));
+    let stored = raa_gi_radiance[slot];
+    let previous = raa_gi_decode_radiance(stored);
+    let packed_meta = stored.y >> 16u;
+    let epoch = raa_gi_light_epoch(world, n);
+    var count = select(0u, packed_meta & 0xFFu, ((packed_meta >> 8u) & 0x3Fu) == epoch);
+    let lum_previous = dot(previous, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let lum_target = dot(target_radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if count > 2u && abs(lum_target - lum_previous) > RAA_GI_LIGHT_CHANGE * max(lum_previous, 1.0e-3) {
+        count = 1u;
+    }
+    count = min(count + 1u, RAA_GI_LIGHT_MAX_COUNT);
+    let blended = mix(previous, target_radiance, 1.0 / f32(count));
+    let packed = raa_gi_encode_radiance(blended);
+    raa_gi_radiance[slot] = vec2<u32>(packed.x, (packed.y & 0xFFFFu) | ((count | (epoch << 8u)) << 16u));
 }
