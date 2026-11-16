@@ -770,9 +770,15 @@ fn process_group_size_matches_the_process_workgroup() {
 
 /// A 1x1 R32Float occlusion pyramid holding `depth` (standard-Z: 0.0 nearest, 1.0 far).
 fn flat_pyramid(gpu: &raa_core::GpuContext, depth: f32) -> wgpu::TextureView {
+    row_pyramid(gpu, &[depth])
+}
+
+/// A one-level R32Float occlusion pyramid one texel wide, holding `rows[y]` in row `y` (row 0
+/// is the top of the screen, as in the visibility buffer the real pyramid is seeded from).
+fn row_pyramid(gpu: &raa_core::GpuContext, rows: &[f32]) -> wgpu::TextureView {
     let extent = wgpu::Extent3d {
         width: 1,
-        height: 1,
+        height: rows.len() as u32,
         depth_or_array_layers: 1,
     };
     let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -785,13 +791,14 @@ fn flat_pyramid(gpu: &raa_core::GpuContext, depth: f32) -> wgpu::TextureView {
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    let bytes: Vec<u8> = rows.iter().flat_map(|depth| depth.to_le_bytes()).collect();
     gpu.queue().write_texture(
         texture.as_image_copy(),
-        &depth.to_le_bytes(),
+        &bytes,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(4),
-            rows_per_image: Some(1),
+            rows_per_image: Some(rows.len() as u32),
         },
         extent,
     );
@@ -833,15 +840,10 @@ fn read_buffer(gpu: &raa_core::GpuContext, source: &wgpu::Buffer, size: u64) -> 
 /// depth target is involved: the cull state and the visible list are read back directly.
 #[test]
 fn second_phase_recovers_instances_the_stale_pyramid_rejected() {
-    use raa_cluster::{BuildOptions, ClusterStore, OwnedClusterInput, bake};
-    use raa_core::MeshId;
     use raa_core::testing::block_on;
     use raa_math::Mat4;
     use raa_vg::culling::{CullPhase, CullPipelines, CullWork, MAIN_FIRST, MAIN_SECOND};
-    use raa_vg::{
-        INSTANCE_CASTS_SHADOW, MeshKeys, PassView, VgInstanceRecord, VgScene, ViewSlots,
-        hierarchy_word,
-    };
+    use raa_vg::{PassView, ViewSlots};
 
     let test = "second_phase_recovers_instances_the_stale_pyramid_rejected";
     let Some(gpu) = software_gpu() else {
@@ -850,67 +852,11 @@ fn second_phase_recovers_instances_the_stale_pyramid_rejected() {
     };
     let device = gpu.device();
 
-    let mut input = OwnedClusterInput::single_triangle();
-    input.uvs = None;
-    let mut positions = vec![[0.0f32, 0.0, 0.0]];
-    let mut normals = vec![[0.0f32, 0.0, 1.0]];
-    let mut indices = Vec::new();
-    for corner in 0..8u32 {
-        let angle = corner as f32 / 8.0 * std::f32::consts::TAU;
-        positions.push([angle.cos(), angle.sin(), 0.0]);
-        normals.push([0.0, 0.0, 1.0]);
-        indices.extend_from_slice(&[0, 1 + corner, 1 + (corner + 1) % 8]);
-    }
-    input.mesh.positions = positions;
-    input.mesh.normals = normals;
-    input.mesh.indices = indices;
-    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the fan bakes");
-    let quant = [
-        mesh.quant_origin[0],
-        mesh.quant_origin[1],
-        mesh.quant_origin[2],
-        mesh.quant_step,
-    ];
-    let uv_quant = [
-        mesh.uv_origin[0],
-        mesh.uv_origin[1],
-        mesh.uv_step[0],
-        mesh.uv_step[1],
-    ];
-    let bounds = [
-        mesh.bounds_center[0],
-        mesh.bounds_center[1],
-        mesh.bounds_center[2],
-        mesh.bounds_radius,
-    ];
-
-    let mut store = ClusterStore::new();
-    store.attach(1, vec![mesh]);
-    let mut keys = MeshKeys::default();
-    keys.set(1, &[MeshId(0)]);
-    let mut scene = VgScene::new();
-    assert!(scene.upload_pool(&gpu, &store, &keys), "the pool uploads");
-    let range = scene.section_range(1, 0).expect("the section is packed");
-    let (_, depth, root) = scene.section_header(1, 0).expect("the section header");
     const COUNT: u32 = 5;
-    let records: Vec<VgInstanceRecord> = (0..COUNT)
-        .map(|i| VgInstanceRecord {
-            model: Mat4::from_translation(Vec3::new(i as f32 - 2.0, 0.0, 0.0)),
-            previous_rows: [[0.0; 4]; 3],
-            quant,
-            uv_quant,
-            ranges: [
-                range.node_base,
-                range.cluster_base,
-                range.vertex_base,
-                range.triangle_base,
-            ],
-            ids: [i, 0, INSTANCE_CASTS_SHADOW, hierarchy_word(depth, root)],
-            bounds,
-        })
+    let positions: Vec<Vec3> = (0..COUNT)
+        .map(|i| Vec3::new(i as f32 - 2.0, 0.0, 0.0))
         .collect();
-    scene.upload_instances(&gpu, &records);
-    assert_eq!(scene.instance_count(), COUNT);
+    let scene = fan_scene(&gpu, &positions);
 
     let eye = Vec3::new(0.0, 0.0, 6.0);
     let proj = Mat4::perspective_rh_zo(60f32.to_radians(), 1.0, 0.1, 16.0);
@@ -1009,5 +955,165 @@ fn second_phase_recovers_instances_the_stale_pyramid_rejected() {
         drawn,
         (0..COUNT).collect(),
         "phase 1 draws all {COUNT} instances: {entries:?}"
+    );
+}
+
+/// A scene of one baked fan (1 m radius, facing +Z) per position, each instance translated to
+/// its position: the cull tests' instances.
+fn fan_scene(gpu: &raa_core::GpuContext, positions: &[Vec3]) -> raa_vg::VgScene {
+    use raa_cluster::{BuildOptions, ClusterStore, OwnedClusterInput, bake};
+    use raa_core::MeshId;
+    use raa_math::Mat4;
+    use raa_vg::{INSTANCE_CASTS_SHADOW, MeshKeys, VgInstanceRecord, VgScene, hierarchy_word};
+
+    let mut input = OwnedClusterInput::single_triangle();
+    input.uvs = None;
+    let mut fan = vec![[0.0f32, 0.0, 0.0]];
+    let mut normals = vec![[0.0f32, 0.0, 1.0]];
+    let mut indices = Vec::new();
+    for corner in 0..8u32 {
+        let angle = corner as f32 / 8.0 * std::f32::consts::TAU;
+        fan.push([angle.cos(), angle.sin(), 0.0]);
+        normals.push([0.0, 0.0, 1.0]);
+        indices.extend_from_slice(&[0, 1 + corner, 1 + (corner + 1) % 8]);
+    }
+    input.mesh.positions = fan;
+    input.mesh.normals = normals;
+    input.mesh.indices = indices;
+    let mesh = bake(input.as_input(), &BuildOptions::default()).expect("the fan bakes");
+    let quant = [
+        mesh.quant_origin[0],
+        mesh.quant_origin[1],
+        mesh.quant_origin[2],
+        mesh.quant_step,
+    ];
+    let uv_quant = [
+        mesh.uv_origin[0],
+        mesh.uv_origin[1],
+        mesh.uv_step[0],
+        mesh.uv_step[1],
+    ];
+    let bounds = [
+        mesh.bounds_center[0],
+        mesh.bounds_center[1],
+        mesh.bounds_center[2],
+        mesh.bounds_radius,
+    ];
+
+    let mut store = ClusterStore::new();
+    store.attach(1, vec![mesh]);
+    let mut keys = MeshKeys::default();
+    keys.set(1, &[MeshId(0)]);
+    let mut scene = VgScene::new();
+    assert!(scene.upload_pool(gpu, &store, &keys), "the pool uploads");
+    let range = scene.section_range(1, 0).expect("the section is packed");
+    let (_, depth, root) = scene.section_header(1, 0).expect("the section header");
+    let records: Vec<VgInstanceRecord> = (0u32..)
+        .zip(positions)
+        .map(|(i, &position)| VgInstanceRecord {
+            model: Mat4::from_translation(position),
+            previous_rows: [[0.0; 4]; 3],
+            quant,
+            uv_quant,
+            ranges: [
+                range.node_base,
+                range.cluster_base,
+                range.vertex_base,
+                range.triangle_base,
+            ],
+            ids: [i, 0, INSTANCE_CASTS_SHADOW, hierarchy_word(depth, root)],
+            bounds,
+        })
+        .collect();
+    scene.upload_instances(gpu, &records);
+    assert_eq!(scene.instance_count() as usize, positions.len());
+    scene
+}
+
+/// The occlusion test against a two-row pyramid on the software adapter (SKIP line without
+/// one). Two fans (1 m radius) stand at y = +1.5 m (top of the screen) and y = -1.5 m (bottom),
+/// z = 0, seen from (0, 0, 6) looking down -Z. The pyramid's top row holds the depth of the
+/// z = 0 plane, the surface the fans stand on: the top fan's sphere reaches nearer than it, so
+/// the fan passes. Its bottom row holds 0.0, the nearest depth: the bottom fan is hidden. A
+/// test that read the pyramid upside down, or took the sphere's farthest point for its nearest,
+/// rejects the top fan.
+#[test]
+fn occlusion_reads_the_pyramid_row_under_the_sphere_and_its_nearest_point() {
+    use raa_core::testing::block_on;
+    use raa_math::Mat4;
+    use raa_vg::culling::{CullPhase, CullPipelines, CullWork, MAIN_FIRST};
+    use raa_vg::{PassView, ViewSlots};
+
+    let test = "occlusion_reads_the_pyramid_row_under_the_sphere_and_its_nearest_point";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let device = gpu.device();
+    let scene = fan_scene(&gpu, &[Vec3::new(0.0, 1.5, 0.0), Vec3::new(0.0, -1.5, 0.0)]);
+
+    let eye = Vec3::new(0.0, 0.0, 6.0);
+    let proj = Mat4::perspective_rh_zo(60f32.to_radians(), 1.0, 0.1, 16.0);
+    let view_proj = proj * Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+    // The standard-Z depth of the origin, the fans' plane: clip = the fourth column.
+    let plane_depth = view_proj.cols[3][2] / view_proj.cols[3][3];
+    assert!(
+        plane_depth > 0.0 && plane_depth < 1.0,
+        "the fans' plane lies inside the depth range: {plane_depth}"
+    );
+    let mut view = PassView::perspective(
+        view_proj,
+        view_proj,
+        eye,
+        [64.0, 64.0],
+        [proj.cols[0][0], proj.cols[1][1]],
+        0.1,
+        1.0,
+    );
+    view.occlusion_enabled = 1;
+    view.hzb_size = [1.0, 2.0];
+    let slots = ViewSlots::new(&gpu);
+    slots.write(&gpu, MAIN_FIRST, &view);
+
+    let pyramid = row_pyramid(&gpu, &[plane_depth, 0.0]);
+    let pipelines = CullPipelines::new(&gpu);
+    let capacity = 1024u64;
+    let work = CullWork::new(&gpu, &pipelines, "raa-vg cull variants", capacity, capacity);
+    let group = pipelines.scene_bind_group(&gpu, &slots, &scene, &pyramid);
+
+    let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    pipelines.record(
+        &mut encoder,
+        &scene,
+        &group,
+        MAIN_FIRST,
+        &work,
+        CullPhase::First,
+    );
+    gpu.queue().submit(Some(encoder.finish()));
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    let error = block_on(errors.pop());
+    assert!(error.is_none(), "cull validation: {error:?}");
+
+    // CullStateRead words: 4 sw_count, 5 hw_count, 9 dropped.
+    let state = read_buffer(&gpu, work.state(), 48);
+    let word = |bytes: &[u8], index: usize| {
+        u32::from_le_bytes(bytes[index * 4..index * 4 + 4].try_into().expect("4 bytes"))
+    };
+    let (sw_count, hw_count) = (word(&state, 4), word(&state, 5));
+    assert_eq!(word(&state, 9), 0, "no cluster is dropped");
+    let visible = read_buffer(&gpu, work.visible(), capacity * 8);
+    let drawn: std::collections::BTreeSet<u32> = (0..u64::from(sw_count))
+        .chain((0..u64::from(hw_count)).map(|i| capacity - 1 - i))
+        .map(|index| word(&visible, index as usize * 2))
+        .collect();
+    assert_eq!(
+        drawn,
+        [0u32].into_iter().collect(),
+        "only the top fan (instance 0) passes: it reaches nearer than the top row's surface, \
+         and the bottom row's nearest depth hides the bottom fan"
     );
 }

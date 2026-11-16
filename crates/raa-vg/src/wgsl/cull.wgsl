@@ -158,29 +158,33 @@ fn passes_occlusion(center: vec3<f32>, radius: f32) -> bool {
     }
     // The sphere's nearest point lies one radius towards the camera along the view axis: the
     // projection's depth depends on that view distance alone, so this point has the smallest
-    // depth. The axis is the world direction in the projection's fourth row; without one
-    // (an orthographic or plain view matrix) there is nothing safe to test.
+    // depth. The projection's fourth row computes that distance (clip w), so its xyz is the
+    // world forward axis, pointing away from the camera: the nearest point is one radius
+    // against it. Without one (an orthographic or plain view matrix) there is nothing safe to
+    // test.
     let w_row = vec4<f32>(
         view.occlusion_view[0][3],
         view.occlusion_view[1][3],
         view.occlusion_view[2][3],
         view.occlusion_view[3][3],
     );
-    let backward = w_row.xyz;
-    if dot(backward, backward) < 1.0e-12 {
+    let forward = w_row.xyz;
+    if dot(forward, forward) < 1.0e-12 {
         return true;
     }
-    let nearest_point = center + normalize(backward) * radius;
+    let nearest_point = center - normalize(forward) * radius;
     let nearest_clip = view.occlusion_view * vec4<f32>(nearest_point, 1.0);
     let nearest = nearest_clip.z / nearest_clip.w;
 
     // Tight projected bounds of a sphere (Mara & McGuire 2013), from its distance along the
-    // view axis and the projection's scale.
+    // view axis and the projection's scale. The pyramid is laid out like the screen, row 0 at
+    // the top, while NDC y points up: v flips y, as the viewport transform does.
     let center_ndc = center_clip.xy / distance;
+    let center_uv = vec2<f32>(center_ndc.x * 0.5 + 0.5, 0.5 - center_ndc.y * 0.5);
     let tan_half_angle = radius / sqrt(distance * distance - radius * radius);
     let half = view.proj_scale * tan_half_angle * 0.5;
-    let uv_min = clamp(center_ndc * 0.5 + 0.5 - half, vec2<f32>(0.0), vec2<f32>(1.0));
-    let uv_max = clamp(center_ndc * 0.5 + 0.5 + half, vec2<f32>(0.0), vec2<f32>(1.0));
+    let uv_min = clamp(center_uv - half, vec2<f32>(0.0), vec2<f32>(1.0));
+    let uv_max = clamp(center_uv + half, vec2<f32>(0.0), vec2<f32>(1.0));
 
     let extent = (uv_max - uv_min) * view.hzb_size;
     let last_level = f32(textureNumLevels(hzb) - 1u);
