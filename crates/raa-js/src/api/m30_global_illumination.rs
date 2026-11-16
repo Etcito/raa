@@ -25,12 +25,12 @@ use std::collections::BTreeMap;
 use raa_core::RaaError;
 use raa_gi::error::invalid;
 use raa_gi::{
-    DebugView, Driver, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch, GiStats, InstanceGi,
-    SsgiQuality,
+    DebugView, Driver, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch, GiStats,
+    IndirectMode, InstanceGi, SsgiQuality,
 };
 
 /// The S36 settings keys in their key order: the `GlobalIlluminationSettings` names of the JS API.
-pub(crate) const SETTING_KEYS: [&str; 9] = [
+pub(crate) const SETTING_KEYS: [&str; 10] = [
     "enabled",
     "intensity",
     "environmentDiffuse",
@@ -40,6 +40,7 @@ pub(crate) const SETTING_KEYS: [&str; 9] = [
     "debugView",
     "screenSpace",
     "screenSpaceQuality",
+    "indirect",
 ];
 
 /// Expands a per-vertex colour buffer of `components` floats per vertex (3 = rgb, 4 = rgba) to the
@@ -150,8 +151,9 @@ pub(crate) fn parse_settings_patch(
             "screenTraces" => patch.screen_traces = Some(boolean(key, value)?),
             "debugView" => patch.debug_view = Some(debug_view(value)?),
             "screenSpace" => patch.screen_space = Some(boolean(key, value)?),
-            // `screenSpaceQuality`, the last key of SETTING_KEYS.
-            _ => patch.screen_space_quality = Some(screen_space_quality(value)?),
+            "screenSpaceQuality" => patch.screen_space_quality = Some(screen_space_quality(value)?),
+            // `indirect`, the last key of SETTING_KEYS.
+            _ => patch.indirect = Some(indirect_mode(value)?),
         }
     }
     Ok(patch)
@@ -224,6 +226,16 @@ fn screen_space_quality(value: &GiWire) -> Result<SsgiQuality, RaaError> {
     parsed.ok_or_else(|| invalid("screenSpaceQuality", REASON))
 }
 
+/// The `indirect` name: exactly `probes` or `restir`.
+fn indirect_mode(value: &GiWire) -> Result<IndirectMode, RaaError> {
+    const REASON: &str = "expected one of probes, restir";
+    let parsed = match value {
+        GiWire::Text(name) => IndirectMode::parse(name),
+        _ => None,
+    };
+    parsed.ok_or_else(|| invalid("indirect", REASON))
+}
+
 /// The resolved settings as `GlobalIlluminationSettings` entries, in [`SETTING_KEYS`] order.
 pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
     vec![
@@ -242,6 +254,7 @@ pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
             "screenSpaceQuality",
             GiWire::Text(s.screen_space_quality.as_str().to_string()),
         ),
+        ("indirect", GiWire::Text(s.indirect.as_str().to_string())),
     ]
 }
 

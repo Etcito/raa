@@ -25,7 +25,7 @@ pub use vertex_colors::GiVertexColors;
 
 pub use settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
-    SsgiQuality,
+    IndirectMode, SsgiQuality,
 };
 
 pub use membership::{Driver, InstanceGi};

@@ -74,7 +74,26 @@ fn settings_defaults_follow_the_s36_key_order() {
             ("debugView", text("none")),
             ("screenSpace", GiWire::Bool(false)),
             ("screenSpaceQuality", text("medium")),
+            ("indirect", text("probes")),
         ]
+    );
+}
+
+#[test]
+fn indirect_names_the_irradiance_source() {
+    assert_eq!(
+        applied_settings(&[("indirect", text("restir"))])
+            .unwrap()
+            .indirect,
+        raa_gi::IndirectMode::Restir
+    );
+    assert_eq!(
+        settings_refusal(&[("indirect", text("voxels"))]),
+        "indirect: expected one of probes, restir"
+    );
+    assert_eq!(
+        settings_refusal(&[("indirect", GiWire::Bool(true))]),
+        "indirect: expected one of probes, restir"
     );
 }
 

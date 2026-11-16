@@ -505,29 +505,15 @@ impl ScreenPipelines {
         else {
             return false;
         };
-        let Some((first, rest)) = work.pyramid.split_first() else {
+        if work.pyramid.is_empty() {
             return false;
-        };
-        let (width, height) = work.pyramid_sizes.first().copied().unwrap_or(work.viewport);
-
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("raa-gi.screen"),
             timestamp_writes: None,
         });
         pass.set_bind_group(1, group1, &[]);
-
-        pass.set_pipeline(&self.copy);
-        pass.set_bind_group(2, first, &[]);
-        dispatch(&mut pass, width, height);
-
-        for (index, bind) in rest.iter().enumerate() {
-            let Some(&(width, height)) = work.pyramid_sizes.get(index + 1) else {
-                break;
-            };
-            pass.set_pipeline(&self.reduce);
-            pass.set_bind_group(2, bind, &[]);
-            dispatch(&mut pass, width, height);
-        }
+        self.record_pyramid(&mut pass, work);
 
         pass.set_pipeline(&self.trace[variant]);
         pass.set_bind_group(2, work.trace, &[]);
@@ -548,6 +534,28 @@ impl ScreenPipelines {
         pass.set_pipeline(&self.integrate);
         pass.set_bind_group(2, work.integrate, &[]);
         dispatch(&mut pass, work.viewport.0, work.viewport.1);
+        true
+    }
+
+    /// Records the depth-pyramid copy of mip 0 and the reduce of every later mip into `pass`
+    /// (group 1 already set); false when the pyramid is empty. The probe record and the ReSTIR GI
+    /// record both start with it.
+    pub(crate) fn record_pyramid(&self, pass: &mut wgpu::ComputePass<'_>, work: &ScreenWork<'_>) -> bool {
+        let Some((first, rest)) = work.pyramid.split_first() else {
+            return false;
+        };
+        let (width, height) = work.pyramid_sizes.first().copied().unwrap_or(work.viewport);
+        pass.set_pipeline(&self.copy);
+        pass.set_bind_group(2, first, &[]);
+        dispatch(pass, width, height);
+        for (index, bind) in rest.iter().enumerate() {
+            let Some(&(width, height)) = work.pyramid_sizes.get(index + 1) else {
+                break;
+            };
+            pass.set_pipeline(&self.reduce);
+            pass.set_bind_group(2, bind, &[]);
+            dispatch(pass, width, height);
+        }
         true
     }
 }

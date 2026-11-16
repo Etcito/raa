@@ -19,6 +19,15 @@ pub mod cpu;
 #[path = "screen/passes.rs"]
 pub mod passes;
 
+#[path = "screen/restir_gi.rs"]
+pub mod restir_gi;
+
+#[path = "screen/restir_gi_cpu.rs"]
+pub mod restir_gi_cpu;
+
+use self::restir_gi::{RestirGiInputs, RestirGiPipelines, RestirGiResources};
+use crate::settings::IndirectMode;
+
 /// Handoff: `install` is the body that card 'raa-gi screen: ScreenPart, gi.screen pass and install'
 /// replaces. Today `install` adds nothing to `ctx` and returns `Ok(())`; the generated
 /// `install_parts` of `parts.rs` calls it once per GI feature install, in file-name order.
@@ -35,6 +44,11 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             pass_enabled: true,
             output_valid: false,
             wants: false,
+            mode: IndirectMode::Probes,
+            restir_pipelines: None,
+            restir: None,
+            restir_valid: false,
+            restir_frame: 0,
         }),
     });
     {
@@ -534,6 +548,15 @@ struct ScreenState {
     pass_enabled: bool,
     output_valid: bool,
     wants: bool,
+    /// The irradiance source of this frame (`GiSettings::indirect`).
+    mode: IndirectMode,
+    /// The ReSTIR GI pipelines, built on the first `restir` frame.
+    restir_pipelines: Option<RestirGiPipelines>,
+    /// The ReSTIR GI resources of the current viewport, while the mode is `restir`.
+    restir: Option<RestirGiResources>,
+    /// True when the reservoirs of the previous parity hold the previous frame's stage 1.
+    restir_valid: bool,
+    restir_frame: u32,
 }
 
 impl GiPart for ScreenPart {
@@ -567,6 +590,31 @@ impl GiPart for ScreenPart {
                 state.parity,
             );
         }
+        state.mode = frame.settings.indirect;
+        if state.mode == IndirectMode::Restir {
+            if state.restir_pipelines.is_none() {
+                let group1 = self.shared.compute_group1_layout();
+                state.restir_pipelines = Some(RestirGiPipelines::new(gpu, &group1));
+            }
+            let viewport = (width.max(1), height.max(1));
+            if state.restir.as_ref().is_none_or(|r| r.viewport() != viewport) {
+                state.restir = Some(RestirGiResources::new(gpu, viewport));
+                state.restir_valid = false;
+            }
+            state.restir_frame = state.restir_frame.wrapping_add(1);
+            let usable = state.restir_valid && frame.history_valid;
+            if let Some(restir) = &state.restir {
+                restir.write_params(
+                    gpu,
+                    state.restir_frame,
+                    usable,
+                    frame.settings.screen_traces && frame.history_valid,
+                );
+            }
+        } else {
+            state.restir = None;
+            state.restir_valid = false;
+        }
         state.active = true;
         state.wants = frame.settings.screen_traces;
     }
@@ -592,7 +640,9 @@ impl GiPart for ScreenPart {
 
     /// Marks the parity output invalid, so the next integrate ignores it.
     fn invalidate_history(&self) {
-        self.state.borrow_mut().output_valid = false;
+        let mut state = self.state.borrow_mut();
+        state.output_valid = false;
+        state.restir_valid = false;
     }
 
     /// Drops the resources and the key so the next active frame reallocates them, and drops the
@@ -603,17 +653,23 @@ impl GiPart for ScreenPart {
         state.key = None;
         state.active = false;
         state.output_valid = false;
+        state.restir = None;
+        state.restir_valid = false;
         self.shared.set_pyramid(None);
         self.shared.set_probe_output(None);
     }
 
     /// The GPU bytes of the current resources, or 0 without them.
     fn allocated_bytes(&self) -> u64 {
-        self.state
-            .borrow()
+        let state = self.state.borrow();
+        state
             .resources
             .as_ref()
             .map_or(0, ScreenResources::allocated_bytes)
+            + state
+                .restir
+                .as_ref()
+                .map_or(0, RestirGiResources::allocated_bytes)
     }
 }
 
@@ -647,8 +703,12 @@ impl FeaturePass for GiScreenPass {
 
     /// Drops the cached group-2 bind groups after the targets were recreated.
     fn resize(&mut self, _gpu: &GpuContext, _targets: &Targets) {
-        if let Some(resources) = self.part.state.borrow_mut().resources.as_mut() {
+        let mut state = self.part.state.borrow_mut();
+        if let Some(resources) = state.resources.as_mut() {
             resources.invalidate_bindings();
+        }
+        if let Some(restir) = state.restir.as_mut() {
+            restir.invalidate_bindings();
         }
     }
 
@@ -668,6 +728,10 @@ impl FeaturePass for GiScreenPass {
             resources,
             parity,
             output_valid,
+            mode,
+            restir_pipelines,
+            restir,
+            restir_valid,
             ..
         } = &mut *state;
         let Some(resources) = resources.as_mut() else {
@@ -680,6 +744,40 @@ impl FeaturePass for GiScreenPass {
             return Ok(());
         };
         let history = self.part.shared.history_view();
+        if *mode == IndirectMode::Restir
+            && let (Some(restir_pipelines), Some(restir)) = (restir_pipelines.as_ref(), restir.as_mut())
+        {
+            // ReSTIR GI: the pyramid, then the three ReSTIR stages into this parity's output.
+            let history_view = history.clone().unwrap_or_else(|| resources.dummy_view.clone());
+            let pyramid = resources.pyramid_view.clone();
+            let outputs = [resources.output_views[0].clone(), resources.output_views[1].clone()];
+            let screen_params = resources.params.clone();
+            let work = resources.work(ctx.gpu, pipelines, ctx.targets, &frame, history.as_ref(), *parity);
+            let inputs = RestirGiInputs {
+                frame: &frame,
+                history: &history_view,
+                pyramid: &pyramid,
+                outputs: [&outputs[0], &outputs[1]],
+                screen_params: &screen_params,
+            };
+            let restir_work = restir.work(ctx.gpu, restir_pipelines, ctx.targets, &inputs, *parity);
+            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("raa-gi.screen.restir-gi"),
+                timestamp_writes: None,
+            });
+            pass.set_bind_group(1, &group1, &[]);
+            if pipelines.record_pyramid(&mut pass, &work) {
+                restir_pipelines.record(&mut pass, &restir_work);
+                drop(pass);
+                *output_valid = true;
+                *restir_valid = true;
+                self.part.shared.set_pyramid(Some(pyramid));
+                self.part
+                    .shared
+                    .set_probe_output(Some(outputs[*parity & 1].clone()));
+            }
+            return Ok(());
+        }
         let work = resources.work(
             ctx.gpu,
             pipelines,

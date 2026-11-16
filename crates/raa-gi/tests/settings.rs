@@ -5,7 +5,7 @@ use raa_core::RaaError;
 use raa_gi::error::{GI_INVALID, invalid};
 use raa_gi::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
-    SsgiQuality,
+    IndirectMode, SsgiQuality,
 };
 
 const INTENSITY_MESSAGE: &str = "intensity: must be finite and in [0, 16]";
@@ -95,6 +95,7 @@ fn settings_patch_merges_omitted_fields() {
         debug_view: DebugView::Distance,
         screen_space: true,
         screen_space_quality: SsgiQuality::High,
+        indirect: IndirectMode::Restir,
     };
     let merged = GiSettingsPatch {
         reflections: Some(true),
@@ -112,6 +113,23 @@ fn settings_patch_merges_omitted_fields() {
     assert_eq!(merged.debug_view, DebugView::Levels);
     assert!(merged.screen_space);
     assert_eq!(merged.screen_space_quality, SsgiQuality::High);
+    assert_eq!(merged.indirect, IndirectMode::Restir);
+}
+
+#[test]
+fn indirect_mode_defaults_to_probes_and_parses_its_two_names() {
+    assert_eq!(GiSettings::DEFAULT.indirect, IndirectMode::Probes);
+    assert_eq!(IndirectMode::parse("restir"), Some(IndirectMode::Restir));
+    assert_eq!(IndirectMode::parse("probes"), Some(IndirectMode::Probes));
+    assert_eq!(IndirectMode::parse("ReSTIR"), None);
+    assert_eq!(IndirectMode::Restir.as_str(), "restir");
+    let merged = GiSettingsPatch {
+        indirect: Some(IndirectMode::Restir),
+        ..GiSettingsPatch::default()
+    }
+    .apply(&GiSettings::DEFAULT)
+    .expect("valid patch");
+    assert_eq!(merged.indirect, IndirectMode::Restir);
 }
 
 #[test]
@@ -126,6 +144,7 @@ fn screen_space_patch_merges() {
         debug_view: None,
         screen_space: Some(true),
         screen_space_quality: Some(SsgiQuality::High),
+        indirect: None,
     };
     let merged = patch.apply(&GiSettings::DEFAULT).expect("valid patch");
     assert!(merged.screen_space);
@@ -193,6 +212,7 @@ fn refused_apply_leaves_the_input_unchanged() {
         debug_view: DebugView::Radiance,
         screen_space: false,
         screen_space_quality: SsgiQuality::Low,
+        indirect: IndirectMode::Probes,
     };
     let before = current;
     let patch = GiSettingsPatch {

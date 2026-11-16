@@ -12,6 +12,14 @@ export type GiDebugView = 'none' | 'voxels' | 'radiance' | 'distance' | 'levels'
 export type GiScreenSpaceQuality = 'low' | 'medium' | 'high';
 
 /**
+ * The source of the screen irradiance (`indirect`): `probes`, one SH9 probe per 16-pixel tile
+ * integrated per pixel, or `restir`, ReSTIR GI (Ouyang et al. 2021): one secondary sample per
+ * pixel traced through the depth pyramid and the voxel volume, resampled over frames and
+ * neighbouring pixels, then denoised. Screen-space GI (`screenSpace`) composes over either.
+ */
+export type GiIndirectMode = 'probes' | 'restir';
+
+/**
  * The engine-wide global-illumination settings, returned by {@link Engine.globalIllumination}.
  * Every key is present; the record is a fresh object.
  */
@@ -41,6 +49,8 @@ export interface GlobalIlluminationSettings {
   screenSpace: boolean;
   /** The screen-space trace quality, see {@link GiScreenSpaceQuality}. Default 'medium'. */
   screenSpaceQuality: GiScreenSpaceQuality;
+  /** The source of the screen irradiance, see {@link GiIndirectMode}. Default 'probes'. */
+  indirect: GiIndirectMode;
 }
 
 /**

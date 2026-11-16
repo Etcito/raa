@@ -135,6 +135,37 @@ impl SsgiQuality {
     }
 }
 
+/// Where the screen irradiance (the `Indirect` slot, S39 binding 14) comes from (`indirect`).
+/// [`Default`] is `Probes`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum IndirectMode {
+    /// Screen probes (one per 16-pixel tile, SH9, integrated per pixel): `probes`.
+    #[default]
+    Probes,
+    /// ReSTIR GI (Ouyang et al. 2021): one secondary sample per pixel resampled across frames and
+    /// neighbours, then denoised: `restir`.
+    Restir,
+}
+
+impl IndirectMode {
+    /// The JS name: `probes` or `restir`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IndirectMode::Probes => "probes",
+            IndirectMode::Restir => "restir",
+        }
+    }
+
+    /// The mode named `text` (exactly `probes` or `restir`), or `None`.
+    pub fn parse(text: &str) -> Option<IndirectMode> {
+        match text {
+            "probes" => Some(IndirectMode::Probes),
+            "restir" => Some(IndirectMode::Restir),
+            _ => None,
+        }
+    }
+}
+
 /// The global-illumination settings (S36). [`Default`] is the S36 table.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct GiSettings {
@@ -157,6 +188,8 @@ pub struct GiSettings {
     pub screen_space: bool,
     /// `screenSpaceQuality`: the screen-space trace quality (default medium).
     pub screen_space_quality: SsgiQuality,
+    /// `indirect`: the source of the screen irradiance (default probes).
+    pub indirect: IndirectMode,
 }
 
 impl GiSettings {
@@ -172,6 +205,7 @@ impl GiSettings {
         debug_view: DebugView::None,
         screen_space: false,
         screen_space_quality: SsgiQuality::Medium,
+        indirect: IndirectMode::Probes,
     };
 }
 
@@ -194,6 +228,7 @@ pub struct GiSettingsPatch {
     pub debug_view: Option<DebugView>,
     pub screen_space: Option<bool>,
     pub screen_space_quality: Option<SsgiQuality>,
+    pub indirect: Option<IndirectMode>,
 }
 
 impl GiSettingsPatch {
@@ -237,6 +272,7 @@ impl GiSettingsPatch {
             screen_space_quality: self
                 .screen_space_quality
                 .unwrap_or(current.screen_space_quality),
+            indirect: self.indirect.unwrap_or(current.indirect),
         })
     }
 }

@@ -25,7 +25,12 @@ use crate::parts::screen::passes::{
     storage_texture_entry, uniform_entry,
 };
 
-const RESTIR_COMMON_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_common.wgsl");
+/// The binding-free ReSTIR core (codec, random numbers, WRS, GRIS weight, boiling test), shared
+/// with the indirect-diffuse ReSTIR GI of the screen part, then the DI bindings and helpers.
+const RESTIR_COMMON_WGSL: &str = concat!(
+    include_str!("../../wgsl/area_shadow/restir_core.wgsl"),
+    include_str!("../../wgsl/area_shadow/restir_common.wgsl")
+);
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const RESTIR_INITIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_initial.wgsl");
 const RESTIR_TEMPORAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_temporal.wgsl");

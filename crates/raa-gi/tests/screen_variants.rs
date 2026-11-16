@@ -375,7 +375,10 @@ fn integrate_history_honours_the_reject_flag_and_cross_taps() {
         "tolerance constant"
     );
     assert!(wgsl.contains("m.z <= 0.5"), "the pixel's own reject flag");
-    assert!(wgsl.contains("ma.z > 0.5") && wgsl.contains("mb.z > 0.5"), "a tap's reject flag");
+    assert!(
+        wgsl.contains("ma.z > 0.5") && wgsl.contains("mb.z > 0.5"),
+        "a tap's reject flag"
+    );
     for tap in [
         "vec2<i32>(4, 0)",
         "vec2<i32>(8, 0)",
