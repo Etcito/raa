@@ -178,3 +178,43 @@ fn published_info_carries_the_diffuse_scale() {
     std::mem::forget(cube);
     std::mem::forget(gpu);
 }
+
+/// S45: the GI specular weight is published through `set_env_gi` by `apply_pending`. No filter
+/// runs: the weight is published independently of the SH, so only install is needed.
+#[test]
+fn apply_pending_publishes_the_gi_specular_weight() {
+    let test = "apply_pending_publishes_the_gi_specular_weight";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, SURFACE, false)));
+    let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit renderer");
+    let handle = IblFeature::install(&gpu, &pipeline, &mut lit).expect("install");
+    let publish = || {
+        let mut p = pipeline.borrow_mut();
+        handle.apply_pending(p.lighting_mut());
+        p.lighting_mut().env_gi()
+    };
+    assert_eq!(publish(), [0.0; 4], "the first apply_pending publishes 0");
+    assert_eq!(handle.gi_specular(), 0.0, "default weight");
+
+    handle.set_gi_specular(1.0);
+    assert_eq!(publish(), [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(handle.gi_specular(), 1.0);
+
+    for invalid in [1.5, f32::NAN] {
+        handle.set_gi_specular(invalid);
+        assert_eq!(publish(), [1.0, 0.0, 0.0, 0.0], "{invalid} changes nothing");
+        assert_eq!(handle.gi_specular(), 1.0, "{invalid} is ignored");
+    }
+
+    handle.set_gi_specular(0.0);
+    assert_eq!(publish(), [0.0; 4], "weight 0 returns to zeros");
+
+    // Leaked like the other GPU tests (see published_info_carries_the_diffuse_scale).
+    std::mem::forget(handle);
+    std::mem::forget(lit);
+    std::mem::forget(pipeline);
+    std::mem::forget(gpu);
+}

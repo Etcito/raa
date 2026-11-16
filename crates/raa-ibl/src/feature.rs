@@ -79,6 +79,10 @@ struct IblState {
     published_info: Option<[f32; 4]>,
     /// The intensities changed since the last `set_env`.
     changed: bool,
+    /// GI specular weight `w_gi`, finite and in [0, 1] (S45 `EnvSh.gi.x`); 0 by default.
+    gi_specular: f32,
+    /// The weight last given to `set_env_gi` by `apply_pending`; None before the first one.
+    published_gi: Option<f32>,
 }
 
 /// Installs image-based lighting on a pipeline and its lit renderer.
@@ -109,6 +113,8 @@ impl IblFeature {
             diffuse_scale: 1.0,
             published_info: None,
             changed: false,
+            gi_specular: 0.0,
+            published_gi: None,
         };
         Ok(IblHandle {
             state: Rc::new(RefCell::new(state)),
@@ -155,13 +161,20 @@ impl IblHandle {
     /// `filter` calls (their encoders were submitted since), and when a completed accepted
     /// SH arrived or the intensities changed, calls
     /// `set_env(output cube, sh, [specular, diffuse, 5, 1])` and records that request's
-    /// generation. Returns true when a readback was skipped because every staging buffer was
-    /// busy, so the caller filters again. Native callers poll the device for the map
-    /// callbacks; on wasm the browser drives them.
+    /// generation. Before that, independently of the SH, it calls
+    /// `set_env_gi([w, 0, 0, 0])` whenever the stored GI specular weight `w` differs from the
+    /// last one it published (the first call after install publishes 0). Returns true when a
+    /// readback was skipped because every staging buffer was busy, so the caller filters
+    /// again. Native callers poll the device for the map callbacks; on wasm the browser
+    /// drives them.
     pub fn apply_pending(&self, lighting: &mut LightingResources) -> bool {
         let Ok(mut st) = self.state.try_borrow_mut() else {
             return false;
         };
+        if st.published_gi != Some(st.gi_specular) {
+            lighting.set_env_gi([st.gi_specular, 0.0, 0.0, 0.0]);
+            st.published_gi = Some(st.gi_specular);
+        }
         st.filter.after_submit(&self.gate);
         if let Some((_, sh)) = self.gate.take_publication() {
             let info = [st.specular, st.diffuse * st.diffuse_scale, MAX_MIP, 1.0];
@@ -215,6 +228,24 @@ impl IblHandle {
     /// The diffuse scale last stored by the scale setter (1 by default).
     pub fn diffuse_scale(&self) -> f32 {
         self.state.borrow().diffuse_scale
+    }
+
+    /// Sets the GI specular weight `w_gi` (S45 `EnvSh.gi.x`, default 0), published by the next
+    /// `apply_pending`: the ambient specular becomes mix(sky, GI irradiance / pi, w). The value
+    /// is stored when it is finite and in [0, 1] and ignored otherwise; a borrowed state is
+    /// ignored too, as for the diffuse scale setter.
+    pub fn set_gi_specular(&self, weight: f32) {
+        let Ok(mut st) = self.state.try_borrow_mut() else {
+            return;
+        };
+        if weight.is_finite() && (0.0..=1.0).contains(&weight) {
+            st.gi_specular = weight;
+        }
+    }
+
+    /// The GI specular weight last stored by `set_gi_specular` (0 by default).
+    pub fn gi_specular(&self) -> f32 {
+        self.state.borrow().gi_specular
     }
 
     /// The `info` last given to `LightingResources::set_env` by `apply_pending`
@@ -279,5 +310,29 @@ mod tests {
     #[test]
     fn max_mip_is_the_last_sky_env_mip() {
         assert_eq!(MAX_MIP, 5.0);
+    }
+
+    /// CPU twin of the ambient WGSL mix: sky + (E / pi - sky) x clamp(weight, 0, 1).
+    fn incoming(sky: [f32; 3], gi_irradiance: [f32; 3], weight: f32) -> [f32; 3] {
+        let w = weight.clamp(0.0, 1.0);
+        std::array::from_fn(|i| sky[i] + (gi_irradiance[i] / std::f32::consts::PI - sky[i]) * w)
+    }
+
+    #[test]
+    fn gi_specular_mix_matches_hand_values() {
+        use std::f32::consts::PI;
+        let sky = [1.0, 1.0, 1.0];
+        let e = [PI, 2.0 * PI, 0.0];
+        for (weight, want) in [
+            (0.0, [1.0, 1.0, 1.0]),
+            (1.0, [1.0, 2.0, 0.0]),
+            (0.5, [1.0, 1.5, 0.5]),
+            (2.0, [1.0, 2.0, 0.0]),
+        ] {
+            let got = incoming(sky, e, weight);
+            for (g, w) in got.iter().zip(want) {
+                assert!((g - w).abs() <= 1e-6, "w {weight}: {got:?}");
+            }
+        }
     }
 }

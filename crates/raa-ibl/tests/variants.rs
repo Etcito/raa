@@ -99,6 +99,9 @@ fn provider_defines_the_slot_and_prefixed_helpers() {
         p.wgsl
             .contains("raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic)")
     );
+    // S45: the env specular mixes toward the GI screen irradiance by EnvSh.gi.x.
+    assert!(p.wgsl.contains("raa_env_sh.gi.x"));
+    assert!(p.wgsl.contains("raa_gi_screen"));
 }
 
 #[test]

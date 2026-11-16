@@ -96,3 +96,11 @@ fn particles_plush_and_gi_slots_apply_ao_once() {
     assert!(SLOT_INDIRECT.contains("s.ao"));
     assert!(!SLOT_INDIRECT.contains("c.ao"));
 }
+
+#[test]
+fn ambient_providers_mix_the_env_specular_toward_the_gi_irradiance() {
+    for (name, source) in [("ibl", IBL_AMBIENT), ("brdf", BRDF_AMBIENT)] {
+        assert!(source.contains("raa_env_sh.gi.x"), "{name}");
+        assert!(source.contains("raa_gi_screen"), "{name}");
+    }
+}

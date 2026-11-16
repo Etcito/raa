@@ -69,6 +69,16 @@ fn raa_layered_ambient_dominant_dir(n: vec3<f32>, r: vec3<f32>, roughness: f32) 
     return normalize(mix(n, r, f));
 }
 
+const RAA_LAYERED_AMBIENT_PI: f32 = 3.14159265;
+
+// The GI screen irradiance E at the fragment (`raa_gi_screen`, binding 14, read with the
+// pixel clamped to its size) x the GI intensity; the 1x1 dummy is black while GI is inactive.
+fn raa_layered_ambient_gi_irradiance(frag: vec4<f32>) -> vec3<f32> {
+    let size = vec2<i32>(textureDimensions(raa_gi_screen));
+    let pixel = clamp(vec2<i32>(frag.xy), vec2<i32>(0), size - vec2<i32>(1));
+    return textureLoad(raa_gi_screen, pixel, 0).rgb * raa_gi_volume_params.intensity;
+}
+
 // Without an environment (info.w < 0.5): the S1 PbrLite ambient term, occluded once by
 // `c.ao`, as raa-ibl. Otherwise
 // raa-ibl's base terms (SH diffuse with multi-bounce AO, prefiltered specular with the
@@ -78,7 +88,8 @@ fn raa_layered_ambient_dominant_dir(n: vec3<f32>, r: vec3<f32>, roughness: f32) 
 // attenuated by 1 - clearcoat Fc(n.v) as in direct, plus the clearcoat reflection
 // (prefiltered at the clearcoat roughness along its dominant direction, split-sum DFG with
 // F0 0.04, specular occlusion). Like the direct slot, the coat uses the shading normal (the
-// slot receives no geometric normal).
+// slot receives no geometric normal). The base and coat incoming specular is mix(sky x
+// info.x, GI irradiance / pi, EnvSh.gi.x), as raa-ibl (S45).
 fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if raa_env_sh.info.w < 0.5 {
         return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
@@ -94,8 +105,11 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let diffuse = irradiance * s.base_color * (1.0 - metallic) * energy
         * raa_layered_ambient_multi_bounce_ao(c.ao, s.base_color) * raa_env_sh.info.y;
     let r = raa_layered_ambient_dominant_dir(n, reflect(-v, n), roughness);
-    let specular = raa_ibl_specular(r, roughness) * (f0 * dfg.x + vec3<f32>(dfg.y)) * energy
-        * raa_specular_occlusion(c.n_dot_v, c.ao, roughness) * raa_env_sh.info.x;
+    let w_gi = clamp(raa_env_sh.gi.x, 0.0, 1.0);
+    let gi_specular = raa_layered_ambient_gi_irradiance(c.frag) / RAA_LAYERED_AMBIENT_PI;
+    let incoming = mix(raa_ibl_specular(r, roughness) * raa_env_sh.info.x, gi_specular, w_gi);
+    let specular = incoming * (f0 * dfg.x + vec3<f32>(dfg.y)) * energy
+        * raa_specular_occlusion(c.n_dot_v, c.ao, roughness);
 
     let sr = clamp(s.sheen_roughness, RAA_LAYERED_AMBIENT_MIN_SHEEN_ROUGHNESS, 1.0);
     let e_sheen = min(raa_layered_ambient_sheen_albedo_fit(c.n_dot_v, sr), 1.0);
@@ -110,7 +124,8 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let atten = 1.0 - k * raa_layered_ambient_schlick(RAA_LAYERED_AMBIENT_CLEARCOAT_F0, n_dot_v_c);
     let dfg_c = raa_ibl_dfg(n_dot_v_c, cr);
     let r_c = raa_layered_ambient_dominant_dir(n_c, reflect(-v, n_c), cr);
-    let coat = k * raa_ibl_specular(r_c, cr) * (RAA_LAYERED_AMBIENT_CLEARCOAT_F0 * dfg_c.x + dfg_c.y)
-        * raa_specular_occlusion(n_dot_v_c, c.ao, cr) * raa_env_sh.info.x;
+    let incoming_c = mix(raa_ibl_specular(r_c, cr) * raa_env_sh.info.x, gi_specular, w_gi);
+    let coat = k * incoming_c * (RAA_LAYERED_AMBIENT_CLEARCOAT_F0 * dfg_c.x + dfg_c.y)
+        * raa_specular_occlusion(n_dot_v_c, c.ao, cr);
     return ((diffuse + specular) * scale + sheen) * atten + coat;
 }

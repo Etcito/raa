@@ -79,6 +79,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
     let part = SlotsPart {
         ibl: ctx.ibl.clone(),
         applied: Cell::new(None),
+        applied_specular: Cell::new(None),
     };
     ctx.add_part(Rc::new(part));
     Ok(())
@@ -88,6 +89,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
 struct SlotsPart {
     ibl: Option<IblHandle>,
     applied: Cell<Option<f32>>,
+    applied_specular: Cell<Option<f32>>,
 }
 
 impl GiPart for SlotsPart {
@@ -96,9 +98,11 @@ impl GiPart for SlotsPart {
     }
 
     /// Sets the IBL diffuse scale to `environment_diffuse` on an active frame and to 1 otherwise,
-    /// only when the target changed. Without an `IblHandle` it does nothing. `IblHandle`'s
+    /// and the IBL GI specular weight (`IblHandle::set_gi_specular`, S45) to 1 on an active frame
+    /// and to 0 otherwise, each only when its target changed; a GI-off frame thus keeps the
+    /// sky specular exactly. Without an `IblHandle` it does nothing. `IblHandle`'s
     /// `apply_pending` runs in `sky.env` during pipeline execution, after
-    /// `GiHandle::prepare_frame`, so the scale applies in the same frame.
+    /// `GiHandle::prepare_frame`, so the scale and the weight apply in the same frame.
     fn prepare_frame(&self, _gpu: &GpuContext, frame: &PartFrame<'_>) {
         let Some(ibl) = &self.ibl else {
             return;
@@ -111,6 +115,11 @@ impl GiPart for SlotsPart {
         if self.applied.get() != Some(target) {
             ibl.set_diffuse_scale(target);
             self.applied.set(Some(target));
+        }
+        let specular = if frame.active { 1.0 } else { 0.0 };
+        if self.applied_specular.get() != Some(specular) {
+            ibl.set_gi_specular(specular);
+            self.applied_specular.set(Some(specular));
         }
     }
 
