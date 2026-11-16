@@ -36,10 +36,12 @@ pub enum DebugView {
     Raster,
     /// Occlusion (code 4).
     Occlusion,
+    /// One hash colour per scene instance (code 5).
+    Instances,
 }
 
 impl DebugView {
-    /// The GPU code of the view (the rank table: None 0, Clusters 1, Lod 2, Raster 3, Occlusion 4).
+    /// The GPU code of the view (the rank table: None 0, Clusters 1, Lod 2, Raster 3, Occlusion 4, Instances 5).
     pub fn code(self) -> u32 {
         match self {
             DebugView::None => 0,
@@ -47,10 +49,11 @@ impl DebugView {
             DebugView::Lod => 2,
             DebugView::Raster => 3,
             DebugView::Occlusion => 4,
+            DebugView::Instances => 5,
         }
     }
 
-    /// The JS name of the view: `none`, `clusters`, `lod`, `raster` or `occlusion`.
+    /// The JS name of the view: `none`, `clusters`, `lod`, `raster`, `occlusion` or `instances`.
     pub fn name(self) -> &'static str {
         match self {
             DebugView::None => "none",
@@ -58,6 +61,7 @@ impl DebugView {
             DebugView::Lod => "lod",
             DebugView::Raster => "raster",
             DebugView::Occlusion => "occlusion",
+            DebugView::Instances => "instances",
         }
     }
 
@@ -69,6 +73,7 @@ impl DebugView {
             "lod" => Some(DebugView::Lod),
             "raster" => Some(DebugView::Raster),
             "occlusion" => Some(DebugView::Occlusion),
+            "instances" => Some(DebugView::Instances),
             _ => None,
         }
     }

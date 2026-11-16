@@ -137,7 +137,7 @@ fn debug_view(value: &WireValue) -> Result<DebugView, RaaError> {
         WireValue::Text(name) => DebugView::from_name(name).ok_or_else(|| {
             invalid(
                 "debugView",
-                format!("must be none, clusters, lod, raster or occlusion, got {name}"),
+                format!("must be none, clusters, lod, raster, occlusion or instances, got {name}"),
             )
         }),
         _ => Err(scalar_refusal("debugView", value, "string")),

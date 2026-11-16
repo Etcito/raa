@@ -157,6 +157,7 @@ fn debug_view_codes_and_names_round_trip() {
         (DebugView::Lod, 2, "lod"),
         (DebugView::Raster, 3, "raster"),
         (DebugView::Occlusion, 4, "occlusion"),
+        (DebugView::Instances, 5, "instances"),
     ];
     for (view, code, name) in table {
         assert_eq!(view.code(), code);

@@ -3,7 +3,7 @@
  * replace the shading with one diagnostic: cluster colours, level of detail, hardware or
  * software raster, or occlusion.
  */
-export type VirtualGeometryDebugView = 'none' | 'clusters' | 'lod' | 'raster' | 'occlusion';
+export type VirtualGeometryDebugView = 'none' | 'clusters' | 'lod' | 'raster' | 'occlusion' | 'instances';
 
 /**
  * A patch of the engine-wide virtualized-geometry settings, accepted by

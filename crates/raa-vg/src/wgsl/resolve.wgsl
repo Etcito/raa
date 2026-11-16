@@ -275,8 +275,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     // sRGB-encoded (white without a stream); `raa_vg_material_input` hands it to the material
     // as `MaterialInput.color`, so the base colour x vertex colour matches the forward path.
     // A debug view writes its colour (rank table of `DebugView`): 1 cluster colours, 2 the DAG
-    // level ramp, 3 hardware versus software and 4 the first phase versus recovered by the
-    // second. Codes 2..4 are sRGB-encoded too.
+    // level ramp, 3 hardware versus software, 4 the first phase versus recovered by the second
+    // and 5 one colour per instance. Codes 2..4 are sRGB-encoded too.
     let debug_view = frame.flags.x;
     var albedo = encode_srgb(interp3(b, vertex_color(i0), vertex_color(i1), vertex_color(i2)));
     if (debug_view == 1u) {
@@ -287,6 +287,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         albedo = encode_srgb(raster_color(entry.cluster));
     } else if (debug_view == 4u) {
         albedo = encode_srgb(occlusion_color(entry.cluster));
+    } else if (debug_view == 5u) {
+        // One hash colour per scene instance (its slot), so neighbouring instances differ.
+        albedo = hash_color(instance.ids.x ^ 0x9e3779b9u);
     }
 
     textureStore(
