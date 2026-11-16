@@ -7,6 +7,11 @@
 // no solstice source. Light comes from the previous lit HDR (binding 3), reprojected through
 // previous_view_proj by `raa_gi_screen_hit_radiance` of screen_trace.wgsl.
 //
+// Per slice, `mask` holds every occluded sector (a farther sample never lights a sector a nearer
+// one hides) and `lit` only the sectors a facing sample with available radiance claimed
+// (`cpu::lit_mask`). Only `lit` leaves the probe term: V = mean(1 - popcount(lit) / 32), so a
+// sector hidden by a back face or a sample without radiance keeps the probe irradiance.
+//
 // Group-2 binding registry (binding number to resource): 0 raa_gi_frame, 1 raa_gi_depth,
 // 2 raa_gi_normal, 3 raa_gi_history, 5 raa_gi_ssgi_raw, 8 raa_gi_ssgi_params. Bindings 4 and 7
 // stay declared by the composed screen files and are unused here.
@@ -117,6 +122,7 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         let nv = dot(n, v);
         let no = dot(n, omega);
         var mask = 0u;
+        var lit = 0u;
         var sum = vec3<f32>(0.0);
         if sqrt(nv * nv + no * no) >= 1e-4 {
             let gamma = atan2(no, nv);
@@ -144,18 +150,20 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
                     if fresh != 0u {
                         let world = (raa_gi_frame.inv_view * vec4<f32>(q, 1.0)).xyz;
                         let hit = raa_gi_screen_hit_radiance(world);
-                        let light = select(vec3<f32>(0.0), hit.rgb, hit.a > 0.0);
                         let sample_n = normalize(textureLoad(raa_gi_normal, sp, 0).xyz);
                         let facing = dot(sample_n, -delta / len) > 0.0;
-                        let share = f32(countOneBits(fresh)) / f32(RAA_GI_SSGI_SECTORS);
-                        sum += select(vec3<f32>(0.0), light, facing) * share;
+                        if facing && hit.a > 0.0 {
+                            let share = f32(countOneBits(fresh)) / f32(RAA_GI_SSGI_SECTORS);
+                            sum += hit.rgb * share;
+                            lit |= fresh;
+                        }
                     }
                     mask |= bits;
                 }
             }
         }
         total += sum;
-        open += 1.0 - f32(countOneBits(mask)) / f32(RAA_GI_SSGI_SECTORS);
+        open += 1.0 - f32(countOneBits(lit)) / f32(RAA_GI_SSGI_SECTORS);
     }
     let e_ss = RAA_GI_SSGI_PI * total / f32(slices);
     textureStore(raa_gi_ssgi_raw, pixel, vec4<f32>(e_ss, open / f32(slices)));

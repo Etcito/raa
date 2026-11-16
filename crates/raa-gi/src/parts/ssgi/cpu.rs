@@ -74,10 +74,23 @@ pub fn accumulate(
     mask | bits
 }
 
+/// Updates one slice's lit mask for one sample: `lit | (bits & !mask)` when `lit_sample` (the
+/// sample faces the pixel and its radiance is available), otherwise `lit` unchanged. `mask` is the
+/// slice's occlusion mask before this sample, so a sector a nearer sample hides is never claimed.
+/// Only lit sectors leave the probe term: a sector hidden by a back face or a sample without
+/// radiance stays in `V` and keeps the probe irradiance.
+pub fn lit_mask(lit: u32, mask: u32, bits: u32, lit_sample: bool) -> u32 {
+    if lit_sample {
+        lit | (bits & !mask)
+    } else {
+        lit
+    }
+}
+
 /// Resolves the slices of one pixel. Each entry is a slice's accumulated irradiance sum and its
-/// final mask. It returns `E_ss = PI x mean(sum)` and the visibility
-/// `V = mean(1 - popcount(mask) / 32)`, both over the slices. With no slices nothing is occluded:
-/// `([0, 0, 0], 1)`.
+/// final lit mask ([`lit_mask`], not the occlusion mask). It returns `E_ss = PI x mean(sum)` and
+/// the visibility `V = mean(1 - popcount(lit) / 32)`, both over the slices. With no slices
+/// nothing is occluded: `([0, 0, 0], 1)`.
 pub fn resolve(slices: &[([f32; 3], u32)]) -> ([f32; 3], f32) {
     if slices.is_empty() {
         return ([0.0; 3], 1.0);

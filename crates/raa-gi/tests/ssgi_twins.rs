@@ -5,7 +5,7 @@
 //! taken from running the code under test.
 
 use raa_gi::parts::ssgi::cpu::{
-    accumulate, compose, resolve, sample_bits, sector_u, temporal_alpha, update_sectors,
+    accumulate, compose, lit_mask, resolve, sample_bits, sector_u, temporal_alpha, update_sectors,
 };
 use raa_loader::json::{JsonValue, parse};
 
@@ -181,4 +181,49 @@ fn temporal_alpha_matches_the_fixture() {
         let got = temporal_alpha(number(field(case, "moved_px")));
         assert_close([got], [number(field(case, "alpha"))], "temporal_alpha");
     }
+}
+
+/// Hand-derived: a back-facing sample over bits 0x0000_00FF of an empty slice occludes them
+/// (mask 0xFF) but claims none (lit 0), so the resolve keeps V 1 with E_ss 0 and the composite is
+/// the probe exactly: hidden sectors keep the probe irradiance.
+#[test]
+fn hidden_back_face_keeps_the_probe() {
+    let bits = 0x0000_00FF;
+    let mut irradiance = [0.0; 3];
+    let mask = accumulate(0, bits, [1.0, 0.0, 0.0], false, &mut irradiance);
+    let lit = lit_mask(0, 0, bits, false);
+    assert_eq!((mask, lit), (bits, 0));
+    let (e_ss, visibility) = resolve(&[(irradiance, lit)]);
+    assert_eq!((e_ss, visibility), ([0.0; 3], 1.0));
+    let probe = [0.2, 0.3, 0.4, 1.0];
+    let [r, g, b] = e_ss;
+    assert_eq!(compose([r, g, b, visibility], probe), probe);
+}
+
+/// Hand-derived: a facing sample with radiance (1, 0, 0) on the same 8 bits claims them
+/// (lit 0xFF): V = 1 - 8/32 = 0.75 and E_ss red = PI x 8/32 (0.785398).
+#[test]
+fn facing_lit_sample_claims_its_sectors() {
+    let bits = 0x0000_00FF;
+    let mut irradiance = [0.0; 3];
+    accumulate(0, bits, [1.0, 0.0, 0.0], true, &mut irradiance);
+    let lit = lit_mask(0, 0, bits, true);
+    assert_eq!(lit, bits);
+    let (e_ss, visibility) = resolve(&[(irradiance, lit)]);
+    assert_close(e_ss, [std::f32::consts::PI * 8.0 / 32.0, 0.0, 0.0], "E_ss");
+    assert_close([visibility], [0.75], "V");
+}
+
+/// Hand-derived: a facing sample behind a hidden one on the same bits finds no fresh sector
+/// (`bits & !mask` = 0), so it neither lights nor claims: E_ss 0, lit 0, V 1.
+#[test]
+fn facing_sample_behind_a_hidden_one_adds_nothing() {
+    let bits = 0x0000_00FF;
+    let mut irradiance = [0.0; 3];
+    let mut mask = accumulate(0, bits, [0.0; 3], false, &mut irradiance);
+    let mut lit = lit_mask(0, 0, bits, false);
+    lit = lit_mask(lit, mask, bits, true);
+    mask = accumulate(mask, bits, [1.0, 0.0, 0.0], true, &mut irradiance);
+    assert_eq!((mask, lit), (bits, 0));
+    assert_eq!(resolve(&[(irradiance, lit)]), ([0.0; 3], 1.0));
 }
