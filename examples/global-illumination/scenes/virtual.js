@@ -1,7 +1,8 @@
 // Virtual stage (S40, contract 'gi-virtual-rows') of the global-illumination page: driver B
 // virtualized geometry voxelized through P3 culling into the shared GI grid. Importing this
 // module has no side effects. A ground plane, a red wall on the left, sixteen bumpy high-poly
-// spheres from one clustered mesh and, on the shared-grid variants, two forward boxes. The
+// spheres from one clustered mesh (driver B) and, on the shared-grid variants, two boxes opted
+// out of virtualized geometry (driver A), both drivers filling the one GI grid. The
 // sphere mesh comes from the shared virtual-geometry content; the rest from '../lib/content.js'.
 import { highPolyMesh } from '../../virtual-geometry/lib/content.js';
 import { box, plane, volumeRoom } from '../lib/content.js';
@@ -129,7 +130,9 @@ const meshWith = (engine, desc, material) => engine.addMesh({
  * Today it sets the day sky, clear weather, the stage sun and the low ambient, creates the
  * ground, red-wall and white materials, adds the ground plane at y 0, the red wall at x -6,
  * the one bumpy sphere mesh with its baked clusters attached, the sixteen field instances and,
- * for content 'shared-grid', the two forward boxes without clusters; it then sets the variant
+ * for content 'shared-grid', the two boxes without clusters, each opted out of virtualized
+ * geometry with `setInstanceVirtualGeometry(box, false)` so that they stay on the forward path
+ * and GI driver A voxelizes them beside the driver B spheres; it then sets the variant
  * camera, enables virtualized geometry and starts global illumination disabled.
  */
 export async function build(engine, lib, variant) {
@@ -162,6 +165,9 @@ export async function build(engine, lib, variant) {
     for (const [name, z] of [['box-a', -2.5], ['box-b', 2.5]]) {
       const instance = engine.addMeshInstance(nodeAt(engine),
         meshWith(engine, box([-4.2, 0.6, z], [0.6, 0.6, 0.6]), white));
+      // Driver A content: the box is opted out of virtualized geometry, so the runtime bake
+      // (instanceDefault true) never moves it to the virtual path and GI voxelizes it forward.
+      engine.setInstanceVirtualGeometry(instance, false);
       instances.push({ name, instance });
       boxInstances.push(instance);
     }

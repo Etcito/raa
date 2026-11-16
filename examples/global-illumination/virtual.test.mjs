@@ -194,3 +194,50 @@ test('ready: a refused cluster bake throws and never reports ready', () => {
     /virtual: cluster bake refused: cluster\.empty/);
   assert.deepEqual(engine.calls, []);
 });
+
+test('observe fails forward-voxelized when the boxes report driver virtual (run 14887)', async () => {
+  const drivers = { [BOXES[0]]: 'virtual', [BOXES[1]]: 'virtual' };
+  const result = await observed(stub({ drivers }), 'shared-grid-on');
+  assert.equal(outcome(result)['forward-voxelized'], false);
+  assert.match(result.assertions.find(a => a.name === 'forward-voxelized').detail, /box drivers virtual,virtual/);
+});
+
+// A recording engine for build: ids count up, and every VG request is kept per instance.
+function buildEngine() {
+  let next = 0;
+  const vgRequests = new Map();
+  const clustered = new Set();
+  const meshOf = new Map();
+  const id = () => next++;
+  return {
+    vgRequests, clustered, meshOf,
+    setSky() {}, setWeather() {}, setLight() {}, setAmbient() {}, setCamera() {},
+    setVirtualGeometry() {}, setGlobalIllumination() {},
+    addMaterial: id, addNode: id, addMesh: id,
+    attachMeshClusters(mesh) { clustered.add(mesh); },
+    addMeshInstance(node, mesh) { const instance = id(); meshOf.set(instance, mesh); return instance; },
+    setInstanceVirtualGeometry(instance, enabled) { vgRequests.set(instance, enabled); },
+  };
+}
+const LIB = { raa: { bakeClusters: () => ({}) }, content: {} };
+
+test('build: each shared-grid row places forward boxes (VG opted out) beside the clustered virtual field', async () => {
+  for (const id of ['shared-grid-on', 'shared-grid-off', 'shared-grid-voxels']) {
+    const engine = buildEngine();
+    const state = await virtual.build(engine, LIB, variantOf(id));
+    // Driver A: two boxes, each explicitly kept off the virtual path, with no clusters.
+    assert.equal(state.boxInstances.length, 2, id);
+    for (const box of state.boxInstances) {
+      assert.equal(engine.vgRequests.get(box), false, `${id}: box ${box} not opted out of VG`);
+      assert.equal(engine.clustered.has(engine.meshOf.get(box)), false, id);
+    }
+    // Driver B: sixteen field instances of the clustered mesh, never opted out.
+    assert.equal(state.fieldInstances.length, 16, id);
+    for (const instance of state.fieldInstances) {
+      assert.equal(engine.vgRequests.has(instance), false, id);
+      assert.ok(state.clustered.includes(engine.meshOf.get(instance)), id);
+    }
+  }
+  const field = await virtual.build(buildEngine(), LIB, variantOf('field-on'));
+  assert.deepEqual(field.boxInstances, []);
+});
