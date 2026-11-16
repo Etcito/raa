@@ -13,7 +13,7 @@ mod light;
 mod render_list;
 mod transform;
 
-pub use camera::{Camera, OrbitController};
+pub use camera::{CAMERA_CUT_ANGLE_RAD, CAMERA_CUT_DISTANCE_RATIO, Camera, OrbitController};
 pub use graph::Scene;
 pub use instance_index::{InstanceIndex, frustum_planes};
 pub use light::{Ambient, DirectionalLight};

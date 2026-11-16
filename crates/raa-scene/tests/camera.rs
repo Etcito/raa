@@ -138,3 +138,36 @@ fn orthographic_span_depth_and_resize_are_exact() {
     cam.set_viewport(400, 400);
     assert!((cam.view_proj().transform_point(Vec3::new(2.0, 0.0, 0.0)).x - 1.0).abs() < 1e-6);
 }
+
+fn camera_at(eye: Vec3, target: Vec3) -> Camera {
+    Camera {
+        eye,
+        target,
+        ..Camera::default()
+    }
+}
+
+/// A camera moving a step per frame is never a cut; a jump is: a view direction turned past 30
+/// degrees, an eye moved past half the eye-target distance, a switch to orthographic or a field of
+/// view changed by more than a quarter.
+#[test]
+fn only_a_jump_is_a_camera_cut() {
+    let before = camera_at(Vec3::new(0.0, 2.0, 10.0), Vec3::ZERO);
+    assert!(!before.is_cut_from(&before), "an equal camera");
+    let step = camera_at(Vec3::new(0.3, 2.0, 9.9), Vec3::new(0.05, 0.0, 0.0));
+    assert!(!step.is_cut_from(&before), "one orbit step");
+    let mut near_far = before;
+    near_far.near = 0.5;
+    near_far.far = 900.0;
+    assert!(!near_far.is_cut_from(&before), "near and far");
+    let turned = camera_at(before.eye, Vec3::new(10.0, 2.0, 10.0));
+    assert!(turned.is_cut_from(&before), "turned by 90 degrees");
+    let moved = camera_at(Vec3::new(0.0, 2.0, 3.0), Vec3::new(0.0, 0.0, -7.0));
+    assert!(moved.is_cut_from(&before), "moved 7 m with a 10 m reach");
+    let mut ortho = before;
+    ortho.ortho_height = Some(5.0);
+    assert!(ortho.is_cut_from(&before), "perspective to orthographic");
+    let mut zoomed = before;
+    zoomed.fov_y_rad = before.fov_y_rad * 1.5;
+    assert!(zoomed.is_cut_from(&before), "field of view x 1.5");
+}

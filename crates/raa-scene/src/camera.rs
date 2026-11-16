@@ -6,6 +6,14 @@ use raa_math::{Mat4, Vec3};
 /// along the up axis (where `look_at` degenerates).
 const MAX_PITCH_RAD: f32 = 89.0 * std::f32::consts::PI / 180.0;
 
+/// The largest change of view direction, in radians, that one camera step may make before
+/// [`Camera::is_cut_from`] calls it a cut (30 degrees).
+pub const CAMERA_CUT_ANGLE_RAD: f32 = std::f32::consts::FRAC_PI_6;
+
+/// The largest eye move of one camera step, as a fraction of the previous eye-target distance,
+/// before [`Camera::is_cut_from`] calls it a cut.
+pub const CAMERA_CUT_DISTANCE_RATIO: f32 = 0.5;
+
 /// A right-handed perspective camera looking from `eye` at `target`.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Camera {
@@ -72,6 +80,42 @@ impl Camera {
 
     /// Sets the aspect from a viewport size in pixels. Zero sizes count as 1, so the
     /// aspect stays finite and positive.
+    /// Whether going from `previous` to this camera is a cut (a jump that no history can be
+    /// reprojected across), rather than one step of a moving camera. A cut is a switch between
+    /// perspective and orthographic, a view direction turned by more than
+    /// [`CAMERA_CUT_ANGLE_RAD`], an eye moved by more than [`CAMERA_CUT_DISTANCE_RATIO`] of the
+    /// previous eye-target distance, or a field of view (or orthographic span) changed by more
+    /// than a quarter. Near, far, aspect and up changes, and every smaller step, keep the
+    /// temporal history (TAA, GI, clouds, occlusion), which reprojects through the previous
+    /// view-projection: a camera moving every frame is never a cut.
+    pub fn is_cut_from(&self, previous: &Camera) -> bool {
+        if self.ortho_height.is_some() != previous.ortho_height.is_some() {
+            return true;
+        }
+        let forward = (self.target - self.eye).normalize_or_zero();
+        let previous_forward = (previous.target - previous.eye).normalize_or_zero();
+        if forward.dot(previous_forward) < CAMERA_CUT_ANGLE_RAD.cos() {
+            return true;
+        }
+        let reach = (previous.target - previous.eye)
+            .length()
+            .max(previous.near.max(1e-3));
+        if (self.eye - previous.eye).length() > CAMERA_CUT_DISTANCE_RATIO * reach {
+            return true;
+        }
+        let ratio = |a: f32, b: f32| {
+            if a.min(b) > 0.0 {
+                a.max(b) / a.min(b)
+            } else {
+                f32::INFINITY
+            }
+        };
+        match (self.ortho_height, previous.ortho_height) {
+            (Some(a), Some(b)) => ratio(a, b) > 1.25,
+            _ => ratio(self.fov_y_rad, previous.fov_y_rad) > 1.25,
+        }
+    }
+
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.aspect = width.max(1) as f32 / height.max(1) as f32;
     }

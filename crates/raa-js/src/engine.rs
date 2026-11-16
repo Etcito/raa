@@ -694,8 +694,9 @@ impl Engine {
             cam.ortho_height = d.ortho_height;
             cam.near = d.near;
             cam.far = d.far;
-            // Re-setting the camera to equal values is not a cut: history (clouds, TAA) stays.
-            if s.scene.camera != before {
+            // Only a jump is a cut: a camera that moves a step per frame keeps its history
+            // (clouds, TAA, GI, motion vectors), which reprojects through the previous view.
+            if s.scene.camera.is_cut_from(&before) {
                 s.scene_invocation.discontinuity(0);
             }
             Ok(())
@@ -746,7 +747,7 @@ impl Engine {
             orbit.rotate(yaw, pitch);
             s.orbit = orbit;
             s.orbit.apply(&mut s.scene.camera);
-            if s.scene.camera != before {
+            if s.scene.camera.is_cut_from(&before) {
                 s.scene_invocation.discontinuity(0);
             }
             Ok(())
