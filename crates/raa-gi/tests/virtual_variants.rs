@@ -1,12 +1,17 @@
 //! Contract `gi-virtual-kernel`: the driver B module validates with its one entry point, its
 //! group 2 holds eight storage buffers and one uniform, the material twin is 256 bytes and the
 //! level view selects the GI members. Follows tests/variants.rs. Consumes the Handoff of
-//! `voxelize_virtual_module_wgsl` (crates/raa-gi/src/parts/virtual_driver.rs:42).
+//! `voxelize_virtual_module_wgsl` (crates/raa-gi/src/parts/virtual_driver.rs:42). The last test
+//! pins the voxel row of the GI page's virtual stage inside level 0, the level the voxel debug
+//! view draws.
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use raa_gi::clipmap::level_view;
+use raa_gi::clipmap::{level_view, snapped_origin};
 use raa_gi::parts::virtual_driver::{virtual_group2_entries, voxelize_virtual_module_wgsl};
+use raa_gi::settings::FINEST_VOXEL_METRES;
+use raa_gi::shaders::debug_view_module_wgsl;
+use raa_math::Vec3;
 use raa_shader::Composer;
 use wgpu::naga::{self, valid};
 use wgpu::{BindingType, BufferBindingType, ShaderStages};
@@ -129,5 +134,78 @@ fn level_view_selects_gi_members_with_software_lists() {
     }
     for p in [[0.0, 8.0, 9.7], [9.7, 8.0, 0.0], [0.0, 17.7, 0.0]] {
         assert!(!inside(p), "{p:?} is outside");
+    }
+}
+
+/// The GI page's virtual stage, read as text: the voxel row's camera must stay where the test
+/// below finds its subjects in level 0.
+const VIRTUAL_SCENE_JS: &str =
+    include_str!("../../../examples/global-illumination/scenes/virtual.js");
+
+/// The three numbers of `const <name> = { eye: [x, y, z]` in `VIRTUAL_SCENE_JS`.
+fn scene_eye(name: &str) -> Vec3 {
+    let head = format!("const {name} = {{ eye: [");
+    let start = VIRTUAL_SCENE_JS
+        .find(&head)
+        .map(|at| at + head.len())
+        .unwrap_or_else(|| panic!("scenes/virtual.js declares {head}"));
+    let end = start
+        + VIRTUAL_SCENE_JS[start..]
+            .find(']')
+            .expect("the eye array closes");
+    let v: Vec<f32> = VIRTUAL_SCENE_JS[start..end]
+        .split(',')
+        .map(|c| c.trim().parse().expect("an eye coordinate is a number"))
+        .collect();
+    assert_eq!(v.len(), 3, "{name} eye has three coordinates");
+    Vec3::new(v[0], v[1], v[2])
+}
+
+/// Level 0 of the default 96 quality around `eye`: its world min and max corners.
+fn level_zero(eye: Vec3) -> ([f32; 3], [f32; 3]) {
+    let origin = snapped_origin(eye, FINEST_VOXEL_METRES, 96);
+    let min = origin.map(|c| c as f32 * FINEST_VOXEL_METRES);
+    (min, min.map(|c| c + 96.0 * FINEST_VOXEL_METRES))
+}
+
+fn holds(level: &([f32; 3], [f32; 3]), min: [f32; 3], max: [f32; 3]) -> bool {
+    (0..3).all(|a| level.0[a] < min[a] && max[a] < level.1[a])
+}
+
+// Subjects of the shared-grid rows (scenes/virtual.js): the wall box at x -6, the sixteen spheres
+// (radius 1.06 with their bumps) at x -1.5..6, y 1.1, z -3.75..3.75, and the two boxes.
+const WALL: ([f32; 3], [f32; 3]) = ([-6.25, 0.0, -6.0], [-5.75, 4.0, 6.0]);
+const FIELD: ([f32; 3], [f32; 3]) = ([-2.56, 0.04, -4.81], [7.06, 2.16, 4.81]);
+const BOXES: ([f32; 3], [f32; 3]) = ([-4.8, 0.0, -3.1], [-3.6, 1.2, 3.1]);
+
+#[test]
+fn voxel_row_camera_keeps_its_subjects_in_level_zero() {
+    // The voxel debug view walks level 0 only: a surface outside it shows smooth (run 14892).
+    let debug = debug_view_module_wgsl();
+    assert!(debug.contains("let grid = raa_gi_volume_params.levels[0];"));
+
+    // From the shared-grid camera (z 15), level 0 spans z 4.8..24: the field, the boxes and the
+    // wall lie in level 1, which is what the failed voxel image showed.
+    let lit = level_zero(scene_eye("CAMERA"));
+    assert!(
+        (lit.0[2] - 4.8).abs() < 1.0e-4,
+        "level 0 of CAMERA starts at z {}",
+        lit.0[2]
+    );
+    for (min, max) in [FIELD, BOXES, WALL] {
+        assert!(
+            !holds(&lit, min, max),
+            "{min:?}..{max:?} is outside level 0 of CAMERA"
+        );
+    }
+
+    // The voxel row's camera: eye (1.8, 8.4, 4.5) snaps to (1.6, 8.0, 3.2), so level 0 spans
+    // x -8..11.2, y -1.6..17.6 and z -6.4..12.8 and holds every subject whole.
+    let voxels = level_zero(scene_eye("VOXEL_CAMERA"));
+    for (min, max) in [FIELD, BOXES, WALL] {
+        assert!(
+            holds(&voxels, min, max),
+            "{min:?}..{max:?} is inside level 0 of VOXEL_CAMERA, {voxels:?}"
+        );
     }
 }

@@ -16,9 +16,19 @@ const SUBJECTS = [
   { name: 'field', min: [-2.6, 0, -4.85], max: [7.1, 2.2, 4.85] },
 ];
 const BOX_SUBJECT = { name: 'boxes', min: [-4.8, 0, -3.1], max: [-3.6, 1.2, 3.1] };
+// The voxel debug view draws the first occupied voxel of clipmap level 0 only: the 0.2 m level,
+// 96 voxels = 19.2 m wide, centred on the camera snapped to 1.6 m (raa-gi `clipmap::snapped_origin`,
+// `debug_view.wgsl`). From CAMERA (z 15) level 0 spans z 4.8..24, so the field, the boxes and the
+// wall lie in level 1 and the view showed them smooth. The voxel row looks down on the stage
+// from inside level 0 instead: from this eye it spans x -8..11.2, y -1.6..17.6 and z -6.4..12.8,
+// so the wall, the boxes and every sphere lie whole inside it, framed in the 1280x720 view.
+// Pinned by crates/raa-gi/tests/virtual_variants.rs (voxel row camera keeps its subjects in level 0).
+const VOXEL_CAMERA = { eye: [1.8, 8.4, 4.5], target: [1.8, 0, 0.5], fovYDeg: 60, near: 0.1, far: 200 };
 const SELECTIONS = {
   field: { camera: CAMERA, subjects: SUBJECTS },
   'shared-grid': { camera: CAMERA, subjects: [...SUBJECTS, BOX_SUBJECT] },
+  // Keyed by variant id: it wins over the content's selection.
+  'shared-grid-voxels': { camera: VOXEL_CAMERA, subjects: [...SUBJECTS, BOX_SUBJECT] },
 };
 const FIELD_HELD = ['ground plane', 'red wall panel on the left',
   'sixteen bumpy high-poly spheres in a 4 x 4 grid', 'day sky preset', 'sun direction', 'camera'];
@@ -78,7 +88,7 @@ const variant = ([id, content, state, debugView, pair]) => ({
   content,
   gi: { enabled: state === 'on', debugView },
   giExpected: state === 'on' ? 'active' : 'disabled',
-  selection: SELECTIONS[content],
+  selection: SELECTIONS[id] ?? SELECTIONS[content],
   ...(pair === null ? {} : {
     measurement: {
       pair, state, preset: pair,
