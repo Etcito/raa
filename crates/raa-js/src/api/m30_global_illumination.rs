@@ -30,7 +30,7 @@ use raa_gi::{
 };
 
 /// The S36 settings keys in their key order: the `GlobalIlluminationSettings` names of the JS API.
-pub(crate) const SETTING_KEYS: [&str; 15] = [
+pub(crate) const SETTING_KEYS: [&str; 18] = [
     "enabled",
     "intensity",
     "environmentDiffuse",
@@ -46,6 +46,9 @@ pub(crate) const SETTING_KEYS: [&str; 15] = [
     "spatialPasses",
     "restirMCap",
     "voxelFullRelight",
+    "historyMin",
+    "voxelHistoryMax",
+    "voxelRays",
 ];
 
 /// Expands a per-vertex colour buffer of `components` floats per vertex (3 = rgb, 4 = rgba) to the
@@ -162,8 +165,11 @@ pub(crate) fn parse_settings_patch(
             "clampGamma" => patch.clamp_gamma = Some(number(key, value)?),
             "spatialPasses" => patch.spatial_passes = Some(number(key, value)?),
             "restirMCap" => patch.restir_m_cap = Some(number(key, value)?),
-            // `voxelFullRelight`, the last key of SETTING_KEYS.
-            _ => patch.voxel_full_relight = Some(boolean(key, value)?),
+            "voxelFullRelight" => patch.voxel_full_relight = Some(boolean(key, value)?),
+            "historyMin" => patch.history_min = Some(number(key, value)?),
+            "voxelHistoryMax" => patch.voxel_history_max = Some(number(key, value)?),
+            // `voxelRays`, the last key of SETTING_KEYS.
+            _ => patch.voxel_rays = Some(number(key, value)?),
         }
     }
     Ok(patch)
@@ -281,6 +287,12 @@ pub(crate) fn settings_entries(s: &GiSettings) -> Vec<(&'static str, GiWire)> {
         ("spatialPasses", GiWire::Number(f64::from(s.spatial_passes))),
         ("restirMCap", GiWire::Number(f64::from(s.restir_m_cap))),
         ("voxelFullRelight", GiWire::Bool(s.voxel_full_relight)),
+        ("historyMin", GiWire::Number(f64::from(s.history_min))),
+        (
+            "voxelHistoryMax",
+            GiWire::Number(f64::from(s.voxel_history_max)),
+        ),
+        ("voxelRays", GiWire::Number(f64::from(s.voxel_rays))),
     ]
 }
 

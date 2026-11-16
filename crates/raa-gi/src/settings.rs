@@ -247,8 +247,9 @@ pub struct GiSettings {
     /// `historyMax`: the most frames the screen accumulation averages, an integer in [1, 256]
     /// (default 64). The blend weight is max(1 / n, 1 / historyMax), n the pixel's history length.
     pub history_max: u32,
-    /// `clampGamma`: the width of the history clamp in standard deviations, finite in [0.5, 10]
-    /// (default 2.5).
+    /// `clampGamma`: the width of the history change test in standard deviations of the current
+    /// frame's noise, finite in [0.5, 10] (default 2.5). A history further than gamma sigma from
+    /// the current light loses length linearly, all of it at 2 gamma (a lighting change).
     pub clamp_gamma: f32,
     /// `spatialPasses`: the a-trous passes of the screen denoiser, an integer in [0, 5]
     /// (default 3).
@@ -259,6 +260,16 @@ pub struct GiSettings {
     /// `voxelFullRelight`: every voxel of the relit level is relit each update instead of a
     /// checkerboard half (default false).
     pub voxel_full_relight: bool,
+    /// `historyMin`: the history length a pixel keeps at most after a lighting change, an integer
+    /// in [1, 256] (default 1: the change is taken whole the next frame).
+    pub history_min: u32,
+    /// `voxelHistoryMax`: the most updates a voxel's radiance averages, an integer in [1, 255]
+    /// (default 32). The blend weight is 1 / n, so a still scene's volume converges; a lighting
+    /// change, a changed direct light or a scrolled-in cell restarts n at 1.
+    pub voxel_history_max: u32,
+    /// `voxelRays`: cosine gather rays per voxel update, an integer in [1, 15] (default 3); the
+    /// first update after a restart takes at least 8.
+    pub voxel_rays: u32,
 }
 
 /// The GI presets of `setGiPreset` (`performance`, `balanced`, `quality`): each sets the probe
@@ -298,10 +309,10 @@ impl GiPreset {
 
     /// The settings patch of the preset.
     pub fn settings_patch(self) -> GiSettingsPatch {
-        let (history_max, clamp_gamma, spatial_passes, m_cap, full) = match self {
-            GiPreset::Performance => (32.0, 2.0, 2.0, 10.0, false),
-            GiPreset::Balanced => (64.0, 2.5, 3.0, 20.0, false),
-            GiPreset::Quality => (128.0, 3.0, 4.0, 30.0, true),
+        let (history_max, clamp_gamma, spatial_passes, m_cap, full, voxel_history) = match self {
+            GiPreset::Performance => (32.0, 2.0, 2.0, 10.0, false, 16.0),
+            GiPreset::Balanced => (64.0, 2.5, 3.0, 20.0, false, 32.0),
+            GiPreset::Quality => (128.0, 3.0, 4.0, 30.0, true, 64.0),
         };
         GiSettingsPatch {
             history_max: Some(history_max),
@@ -309,6 +320,7 @@ impl GiPreset {
             spatial_passes: Some(spatial_passes),
             restir_m_cap: Some(m_cap),
             voxel_full_relight: Some(full),
+            voxel_history_max: Some(voxel_history),
             ..GiSettingsPatch::default()
         }
     }
@@ -345,6 +357,9 @@ impl GiSettings {
         spatial_passes: 3,
         restir_m_cap: 20.0,
         voxel_full_relight: false,
+        history_min: 1,
+        voxel_history_max: 32,
+        voxel_rays: 3,
     };
 }
 
@@ -373,6 +388,9 @@ pub struct GiSettingsPatch {
     pub spatial_passes: Option<f64>,
     pub restir_m_cap: Option<f64>,
     pub voxel_full_relight: Option<bool>,
+    pub history_min: Option<f64>,
+    pub voxel_history_max: Option<f64>,
+    pub voxel_rays: Option<f64>,
 }
 
 impl GiSettingsPatch {
@@ -403,7 +421,13 @@ impl GiSettingsPatch {
             None => current.environment_diffuse,
         };
         let history_max = match self.history_max {
-            Some(value) => integer("historyMax", value, 1, 256, "must be an integer in [1, 256]")?,
+            Some(value) => integer(
+                "historyMax",
+                value,
+                1,
+                256,
+                "must be an integer in [1, 256]",
+            )?,
             None => current.history_max,
         };
         let clamp_gamma = match self.clamp_gamma {
@@ -421,8 +445,38 @@ impl GiSettingsPatch {
             None => current.spatial_passes,
         };
         let restir_m_cap = match self.restir_m_cap {
-            Some(value) => between("restirMCap", value, 1.0, 64.0, "must be finite and in [1, 64]")?,
+            Some(value) => between(
+                "restirMCap",
+                value,
+                1.0,
+                64.0,
+                "must be finite and in [1, 64]",
+            )?,
             None => current.restir_m_cap,
+        };
+        let history_min = match self.history_min {
+            Some(value) => integer(
+                "historyMin",
+                value,
+                1,
+                256,
+                "must be an integer in [1, 256]",
+            )?,
+            None => current.history_min,
+        };
+        let voxel_history_max = match self.voxel_history_max {
+            Some(value) => integer(
+                "voxelHistoryMax",
+                value,
+                1,
+                255,
+                "must be an integer in [1, 255]",
+            )?,
+            None => current.voxel_history_max,
+        };
+        let voxel_rays = match self.voxel_rays {
+            Some(value) => integer("voxelRays", value, 1, 15, "must be an integer in [1, 15]")?,
+            None => current.voxel_rays,
         };
         Ok(GiSettings {
             enabled: self.enabled.unwrap_or(current.enabled),
@@ -446,6 +500,9 @@ impl GiSettingsPatch {
             voxel_full_relight: self
                 .voxel_full_relight
                 .unwrap_or(current.voxel_full_relight),
+            history_min,
+            voxel_history_max,
+            voxel_rays,
         })
     }
 }

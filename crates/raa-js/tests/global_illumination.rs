@@ -80,6 +80,9 @@ fn settings_defaults_follow_the_s36_key_order() {
             ("spatialPasses", GiWire::Number(3.0)),
             ("restirMCap", GiWire::Number(20.0)),
             ("voxelFullRelight", GiWire::Bool(false)),
+            ("historyMin", GiWire::Number(1.0)),
+            ("voxelHistoryMax", GiWire::Number(32.0)),
+            ("voxelRays", GiWire::Number(3.0)),
         ]
     );
 }

@@ -341,23 +341,87 @@ fn filter_keys_refuse_out_of_domain_values() {
         refused(&err, message);
     };
     refuse(
-        GiSettingsPatch { history_max: Some(0.0), ..GiSettingsPatch::default() },
+        GiSettingsPatch {
+            history_max: Some(0.0),
+            ..GiSettingsPatch::default()
+        },
         "historyMax: must be an integer in [1, 256]",
     );
     refuse(
-        GiSettingsPatch { history_max: Some(32.5), ..GiSettingsPatch::default() },
+        GiSettingsPatch {
+            history_max: Some(32.5),
+            ..GiSettingsPatch::default()
+        },
         "historyMax: must be an integer in [1, 256]",
     );
     refuse(
-        GiSettingsPatch { spatial_passes: Some(6.0), ..GiSettingsPatch::default() },
+        GiSettingsPatch {
+            spatial_passes: Some(6.0),
+            ..GiSettingsPatch::default()
+        },
         "spatialPasses: must be an integer in [0, 5]",
     );
     refuse(
-        GiSettingsPatch { clamp_gamma: Some(0.25), ..GiSettingsPatch::default() },
+        GiSettingsPatch {
+            clamp_gamma: Some(0.25),
+            ..GiSettingsPatch::default()
+        },
         "clampGamma: must be finite and in [0.5, 10]",
     );
     refuse(
-        GiSettingsPatch { restir_m_cap: Some(f64::NAN), ..GiSettingsPatch::default() },
+        GiSettingsPatch {
+            restir_m_cap: Some(f64::NAN),
+            ..GiSettingsPatch::default()
+        },
         "restirMCap: must be finite and in [1, 64]",
+    );
+}
+
+#[test]
+fn history_min_and_voxel_keys_check_their_domains() {
+    let apply = |patch: GiSettingsPatch| patch.apply(&GiSettings::default());
+    let refusal =
+        |patch: GiSettingsPatch, message: &str| refused(&apply(patch).unwrap_err(), message);
+    refusal(
+        GiSettingsPatch {
+            history_min: Some(0.0),
+            ..GiSettingsPatch::default()
+        },
+        "historyMin: must be an integer in [1, 256]",
+    );
+    refusal(
+        GiSettingsPatch {
+            voxel_history_max: Some(256.0),
+            ..GiSettingsPatch::default()
+        },
+        "voxelHistoryMax: must be an integer in [1, 255]",
+    );
+    refusal(
+        GiSettingsPatch {
+            voxel_rays: Some(16.0),
+            ..GiSettingsPatch::default()
+        },
+        "voxelRays: must be an integer in [1, 15]",
+    );
+    let merged = apply(GiSettingsPatch {
+        history_min: Some(4.0),
+        voxel_history_max: Some(255.0),
+        voxel_rays: Some(15.0),
+        ..GiSettingsPatch::default()
+    })
+    .unwrap();
+    assert_eq!(
+        (
+            merged.history_min,
+            merged.voxel_history_max,
+            merged.voxel_rays
+        ),
+        (4, 255, 15)
+    );
+    // The defaults: the change taken whole, 32 voxel updates, 3 rays.
+    let d = GiSettings::default();
+    assert_eq!(
+        (d.history_min, d.voxel_history_max, d.voxel_rays),
+        (1, 32, 3)
     );
 }

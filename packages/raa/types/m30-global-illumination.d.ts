@@ -82,9 +82,10 @@ export interface GlobalIlluminationSettings {
    */
   historyMax: number;
   /**
-   * Width of the history clamp in standard deviations (the current neighbourhood's spread plus
-   * the history's temporal spread), finite in [0.5, 10]: lower follows lighting changes faster,
-   * higher keeps more history. Default 2.5.
+   * Width of the history change test in standard deviations of the current frame's noise, finite
+   * in [0.5, 10]: a history further than clampGamma sigma from the current light loses length
+   * linearly, all of it at twice that (a lighting change is taken at once). Lower follows
+   * lighting changes faster, higher keeps more history. Default 2.5.
    */
   clampGamma: number;
   /** Variance-guided a-trous passes over the accumulated irradiance, an integer in [0, 5]. Default 3. */
@@ -93,6 +94,19 @@ export interface GlobalIlluminationSettings {
   restirMCap: number;
   /** Relight every voxel of the relit level each update instead of a checkerboard half. Default false. */
   voxelFullRelight: boolean;
+  /**
+   * The history length a pixel keeps at most after a lighting change, an integer in [1, 256]:
+   * 1 takes the new light whole the next frame. Default 1.
+   */
+  historyMin: number;
+  /**
+   * The most updates a voxel's radiance averages (weight 1 / n), an integer in [1, 255]: a still
+   * scene's light volume converges over this many updates; a changed light, a changed direct
+   * light on the voxel or a scrolled-in cell restarts it. Default 32.
+   */
+  voxelHistoryMax: number;
+  /** Cosine gather rays per voxel update, an integer in [1, 15]; a restarted voxel takes at least 8. Default 3. */
+  voxelRays: number;
 }
 
 /**
