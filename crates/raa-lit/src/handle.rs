@@ -398,6 +398,9 @@ pub(crate) struct LitShared {
     /// True when the latest `LitRenderer::prepare` saw the enabled pipeline entry `taa`
     /// (S43): the prepass then carries `VARIANT_FLAG_MOTION_DEFORM` and the frame is jittered.
     pub(crate) temporal_consumer: bool,
+    /// The S10 NDC jitter of viewport 0 in the latest `LitRenderer::prepare` ([0, 0] without a
+    /// temporal consumer).
+    pub(crate) camera_jitter: [f32; 2],
     pub(crate) materials: SurfaceLibrary,
     pub(crate) fns: MaterialFnRegistry,
     /// S23 tint mode per material; a material absent from the map is `multiply`.
@@ -569,6 +572,7 @@ impl LitShared {
             lod_bias: HashMap::new(),
             stats: InstanceFrameStats::default(),
             temporal_consumer: false,
+            camera_jitter: [0.0; 2],
             store,
             materials: SurfaceLibrary::new(),
             fns: MaterialFnRegistry::new(),
@@ -1571,6 +1575,13 @@ impl LitHandle {
     /// (S43); the prepass then adds `raa_shader::VARIANT_FLAG_MOTION_DEFORM` to its keys.
     pub(crate) fn temporal_consumer(&self) -> bool {
         self.shared.borrow().temporal_consumer
+    }
+
+    /// The S10 NDC jitter the latest [`LitRenderer::prepare`] gave the projection of the frame
+    /// ([0, 0] when no temporal consumer is enabled): screen passes that rebuild positions from
+    /// the depth target take it off before the unjittered inverse projection.
+    pub fn camera_jitter_ndc(&self) -> [f32; 2] {
+        self.shared.try_borrow().map_or([0.0; 2], |s| s.camera_jitter)
     }
 
     /// The group-0 bind group over the renderer's frame, material and extras buffers and the

@@ -1043,6 +1043,7 @@ impl LitRenderer {
         let mut guard = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
         let s: &mut LitShared = &mut guard;
         s.temporal_consumer = consumer;
+        s.camera_jitter = camera.current_jitter;
         // Commit the previous invocation before this one stages its records.
         self.scene_frame.flush(&mut s.store);
 
