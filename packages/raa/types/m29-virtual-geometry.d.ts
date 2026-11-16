@@ -76,7 +76,7 @@ export interface InstanceVirtualGeometry {
   pending: boolean;
   /**
    * An instance code (`vg.skinned_unsupported`, `vg.deformed_unsupported`,
-   * `vg.transparent_material`) or a mesh code (`vg.mesh_vertex_colors`, `vg.mesh_empty`,
+   * `vg.transparent_material`) or a mesh code (`vg.mesh_empty`,
    * `vg.mesh_too_large`, `vg.invalid`). `null` when pending, virtual or not requested.
    */
   code: string | null;

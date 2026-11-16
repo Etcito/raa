@@ -100,7 +100,7 @@ The three instance codes:
 - Skinned, deformed, transparent and fur instances stay on forward beside virtualized
   instances, correctly depth-sorted with them.
 
-The mesh codes `vg.mesh_vertex_colors`, `vg.mesh_empty`, `vg.mesh_too_large` and `vg.invalid`
+The mesh codes `vg.mesh_empty`, `vg.mesh_too_large` and `vg.invalid`
 come from the bake of a mesh's clusters. An automatic runtime bake (`runtimeBake` on) records
 the code in `meshClusters(mesh)`; each instance that uses the mesh reports it in its `code` and
 `message`, and is not drawn virtually. Mesh codes are not counted in `refused`. An explicit
@@ -128,8 +128,9 @@ every instance on the forward path, and the stats report `inactiveReason` `multi
 The virtual path reads the 16 B packed vertex of the cluster section. Therefore:
 
 - there is no tangent: material functions receive the S10 default tangent of the normal;
-- there are no vertex colours: a mesh with a colour stream is refused with
-  `vg.mesh_vertex_colors`.
+- there are no vertex colours in the clusters: a mesh with a colour stream is baked and drawn
+  virtualized without them (surface colour is the material's). Global illumination takes the
+  colours through its own per-vertex stream (`GiHandle::set_cluster_vertex_colors`).
 
 ## Stats
 

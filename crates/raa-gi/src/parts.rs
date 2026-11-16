@@ -20,6 +20,7 @@ use raa_vg::{VgHandle, scene::SyncItem};
 
 use crate::membership::Member;
 use crate::settings::{GiQuality, GiSettings};
+use crate::vertex_colors::GiVertexColors;
 
 /// The install context of [`install_parts`]: the frame's GPU objects, the pipeline and lit
 /// renderer, the optional virtual-geometry and image-based-lighting handles, the shared GI frame
@@ -188,6 +189,7 @@ struct SharedFrame {
     trace: Option<raa_sdf_trace::TraceHandle>,
     group1_layout: wgpu::BindGroupLayout,
     group1: Option<(u64, u64, wgpu::BindGroup)>,
+    colors: GiVertexColors,
     quality: GiQuality,
     settings: GiSettings,
 }
@@ -212,9 +214,15 @@ impl GiShared {
             trace: None,
             group1_layout,
             group1: None,
+            colors: GiVertexColors::default(),
             quality: GiQuality::default(),
             settings: GiSettings::default(),
         })))
+    }
+
+    /// The optional per-vertex colour streams both voxelizers read (clones share them).
+    pub fn vertex_colors(&self) -> GiVertexColors {
+        self.0.borrow().colors.clone()
     }
 
     /// The `GiFrameGpu` uniform, or `None` while GI is inactive.

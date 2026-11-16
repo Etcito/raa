@@ -8,9 +8,9 @@
 mod m29;
 
 use m29::{
-    ClusterReport, MESH_EMPTY, MESH_TOO_LARGE, MESH_VERTEX_COLORS, OptionsPatch, SectionWire,
-    VG_INVALID, bake_input, build_options, check_bake_budget, check_budget_ms, check_vertex_colors,
-    cluster_error, cluster_report, plan_attach, section_from_wire, stage_name, vg_code,
+    ClusterReport, MESH_EMPTY, MESH_TOO_LARGE, OptionsPatch, SectionWire, VG_INVALID, bake_input,
+    build_options, check_bake_budget, check_budget_ms, cluster_error, cluster_report, plan_attach,
+    section_from_wire, stage_name, vg_code,
 };
 use raa_cluster::error::{EMPTY, INVALID_MESH, TOO_LARGE};
 use raa_cluster::{
@@ -123,7 +123,6 @@ fn cluster_errors_map_to_their_vg_codes_and_keep_the_path() {
 fn stored_codes_map_like_cluster_errors() {
     assert_eq!(vg_code(EMPTY), MESH_EMPTY);
     assert_eq!(vg_code(TOO_LARGE), MESH_TOO_LARGE);
-    assert_eq!(vg_code(MESH_VERTEX_COLORS), MESH_VERTEX_COLORS);
     assert_eq!(vg_code(INVALID_MESH), VG_INVALID);
     assert_eq!(vg_code("cluster.unknown"), VG_INVALID);
 }
@@ -420,13 +419,4 @@ fn the_engine_budget_accepts_0_5_and_100_and_refuses_beyond() {
         assert_eq!(code, VG_INVALID, "{ms}");
         assert!(message.starts_with("ms: "), "{ms}: {message}");
     }
-}
-
-#[test]
-fn a_colour_stream_is_refused_with_the_vertex_colour_code() {
-    let err = check_vertex_colors(true, "mesh").unwrap_err();
-    let (code, message) = refusal(&err);
-    assert_eq!(code, MESH_VERTEX_COLORS);
-    assert!(message.starts_with("mesh: "), "{message}");
-    assert!(check_vertex_colors(false, "mesh").is_ok());
 }

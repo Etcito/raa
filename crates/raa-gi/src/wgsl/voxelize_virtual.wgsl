@@ -44,6 +44,21 @@ struct RaaGiVgMaterial {
 // Three words per voxel: albedo with occupancy flag, octahedral normal, emissive RGBM.
 @group(2) @binding(8) var<storage, read_write> raa_gi_voxels: array<atomic<u32>>;
 @group(2) @binding(9) var<uniform> raa_gi_voxelize: GiVoxelizeGpu;
+// Optional vertex colours, an Rgba8Unorm texture 4096 texels wide laid out parallel to the
+// `vertices` pool (texel i is pool vertex i). No eighth-plus storage buffer fits, so it is a
+// texture; a texel outside it reads white, and a scene without colours binds one white texel.
+@group(2) @binding(10) var raa_gi_vg_colors: texture_2d<f32>;
+const RAA_GI_VG_COLOR_WIDTH: u32 = 4096u;
+
+fn raa_gi_vg_vertex_color(vertex: u32) -> vec3<f32> {
+    let dims = textureDimensions(raa_gi_vg_colors);
+    let x = vertex % RAA_GI_VG_COLOR_WIDTH;
+    let y = vertex / RAA_GI_VG_COLOR_WIDTH;
+    if x < dims.x && y < dims.y {
+        return textureLoad(raa_gi_vg_colors, vec2<u32>(x, y), 0).rgb;
+    }
+    return vec3<f32>(1.0);
+}
 
 // One workgroup per selected cluster, striding over the rest; one lane per triangle. The
 // software clusters fill `visible[state.sw_base .. state.sw_count)` from the front.
@@ -69,9 +84,13 @@ fn raa_gi_voxelize_cluster_triangle(entry_index: u32, t: u32) {
     let material = raa_gi_vg_materials[instance.ids.y];
 
     let packed = triangles[instance.ranges.w + cluster.triangle_offset + t];
-    let v0 = vertices[instance.ranges.z + cluster.vertex_offset + (packed & 0xffu)];
-    let v1 = vertices[instance.ranges.z + cluster.vertex_offset + ((packed >> 8u) & 0xffu)];
-    let v2 = vertices[instance.ranges.z + cluster.vertex_offset + ((packed >> 16u) & 0xffu)];
+    let vertex_base = instance.ranges.z + cluster.vertex_offset;
+    let i0 = vertex_base + (packed & 0xffu);
+    let i1 = vertex_base + ((packed >> 8u) & 0xffu);
+    let i2 = vertex_base + ((packed >> 16u) & 0xffu);
+    let v0 = vertices[i0];
+    let v1 = vertices[i1];
+    let v2 = vertices[i2];
     let world0 = transform_point(instance, decode_position(instance, v0));
     let world1 = transform_point(instance, decode_position(instance, v1));
     let world2 = transform_point(instance, decode_position(instance, v2));
@@ -81,9 +100,13 @@ fn raa_gi_voxelize_cluster_triangle(entry_index: u32, t: u32) {
     if face_length <= 0.0 {
         return;
     }
-    // No instance tint: the 8-storage-buffer limit leaves no slot for the extras buffer.
+    // No instance tint: the 8-storage-buffer limit leaves no slot for the extras buffer. The
+    // albedo is the base colour x the mean vertex colour of the triangle.
+    let albedo = material.base.rgb
+        * ((raa_gi_vg_vertex_color(i0) + raa_gi_vg_vertex_color(i1) + raa_gi_vg_vertex_color(i2))
+            / 3.0);
     let data = RaaGiVoxelData(
-        pack4x8unorm(vec4<f32>(material.base.rgb, 1.0)),
+        pack4x8unorm(vec4<f32>(albedo, 1.0)),
         pack2x16snorm(raa_gi_oct_encode(face / face_length)),
         raa_gi_encode_emissive(material.emissive.rgb),
     );

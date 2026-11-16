@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, MeshId, RaaError};
 use raa_ibl::IblHandle;
 use raa_lit::LitRenderer;
 use raa_math::Mat4;
@@ -126,6 +126,7 @@ pub(crate) struct GiCore {
     scratch: ItemScratch,
     report: MembershipReport,
     signature: Option<u64>,
+    colors_revision: u64,
     frames_since_rebuild: u32,
     prepared: GiStats,
     published: Option<GiStats>,
@@ -172,6 +173,7 @@ impl GiCore {
             scratch: ItemScratch::default(),
             report: MembershipReport::default(),
             signature: None,
+            colors_revision: 0,
             frames_since_rebuild: 0,
             prepared: initial_stats(GiQuality::default()),
             published: None,
@@ -252,6 +254,39 @@ impl GiHandle {
             code: latest.code,
             message: latest.message,
         }
+    }
+
+    /// Registers (`Some`) or removes (`None`) the driver A vertex colours of the lit mesh that
+    /// sub-mesh `mesh` belongs to: linear rgba, four floats per vertex of the whole uploaded
+    /// vertex array. The voxelizer multiplies the albedo of each triangle (base colour x
+    /// instance tint) by the mean of its three vertex colours; a mesh without a stream, or one
+    /// whose vertex count differs, keeps white. The next prepared frame rebuilds the voxels. A
+    /// length that is not a multiple of 4 or a non-finite value is `gi.invalid` and changes
+    /// nothing.
+    pub fn set_vertex_colors(&self, mesh: MeshId, colors: Option<&[f32]>) -> Result<(), RaaError> {
+        self.core
+            .borrow()
+            .shared
+            .vertex_colors()
+            .set_mesh(mesh, colors)
+    }
+
+    /// Registers (`Some`) or removes (`None`) the driver B (virtualized geometry) vertex colours
+    /// of section `ordinal` of cluster-store key `key`: linear rgba, four floats per vertex of
+    /// `ClusterMesh::vertices`, in that order. The albedo of a clustered triangle is the base
+    /// colour times the mean of its three vertex colours (driver B has no instance tint). Refusals
+    /// as for [`set_vertex_colors`](Self::set_vertex_colors).
+    pub fn set_cluster_vertex_colors(
+        &self,
+        key: u32,
+        ordinal: usize,
+        colors: Option<&[f32]>,
+    ) -> Result<(), RaaError> {
+        self.core
+            .borrow()
+            .shared
+            .vertex_colors()
+            .set_cluster(key, ordinal, colors)
     }
 
     /// Stores the camera with its aspect set from `viewport`, the viewport and the number of
@@ -409,7 +444,10 @@ impl GiHandle {
 
         let changed = core.signature != Some(core.report.signature)
             || previous_members != core.report.members.len();
-        if active && !allocated && changed {
+        let colors_revision = core.shared.vertex_colors().revision();
+        let colors_changed = core.colors_revision != colors_revision;
+        core.colors_revision = colors_revision;
+        if active && !allocated && (changed || colors_changed) {
             core.rounds.mark_stale();
         }
         core.signature = Some(core.report.signature);
@@ -739,7 +777,11 @@ impl GiFeature {
             }
         }
         let shared = GiShared::new(gpu);
-        let builtin = Rc::new(ForwardDriver::new(gpu, lit.handle()));
+        let builtin = Rc::new(ForwardDriver::new(
+            gpu,
+            lit.handle(),
+            shared.vertex_colors(),
+        ));
         let mut ctx = PartsCtx::new(gpu, pipeline, lit, vg, ibl, shared.clone());
         ctx.add_driver(builtin);
         crate::parts::install_parts(&mut ctx)?;

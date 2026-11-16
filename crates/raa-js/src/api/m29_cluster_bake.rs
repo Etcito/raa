@@ -3,8 +3,8 @@
 //! (`install`, `frame`).
 //!
 //! The helpers are plain Rust, so `tests/cluster_bake.rs` includes this file and exercises
-//! them natively: the refusal codes (`vg.invalid`, `vg.mesh_empty`, `vg.mesh_too_large`,
-//! `vg.mesh_vertex_colors`), the option patch and its S31 domains, the bake input of the flat
+//! them natively: the refusal codes (`vg.invalid`, `vg.mesh_empty`, `vg.mesh_too_large`),
+//! the option patch and its S31 domains, the bake input of the flat
 //! JS arrays (S13 lengths), the budget domain and the stage names. Errors are
 //! `RaaError::FrameGraph` values, because the included file cannot name `crate::convert`.
 //!
@@ -32,8 +32,6 @@ pub(crate) const VG_INVALID: &str = "vg.invalid";
 pub(crate) const MESH_EMPTY: &str = "vg.mesh_empty";
 /// The mesh exceeds the S29 limits (S31).
 pub(crate) const MESH_TOO_LARGE: &str = "vg.mesh_too_large";
-/// The mesh has a colour stream, which the 16 B cluster vertex cannot carry (S31).
-pub(crate) const MESH_VERTEX_COLORS: &str = "vg.mesh_vertex_colors";
 
 /// The default bake budget of one Engine render invocation, in milliseconds (VG_BAKE_BUDGET).
 const DEFAULT_BAKE_BUDGET_MS: f64 = 4.0;
@@ -425,21 +423,6 @@ pub(crate) fn cluster_report(
 /// per render invocation (VG_BAKE_BUDGET). A refusal is `vg.invalid` naming `ms`.
 pub(crate) fn check_bake_budget(ms: f64) -> Result<f64, RaaError> {
     check_budget_ms(ms, BAKE_BUDGET_MIN_MS, BAKE_BUDGET_MAX_MS, "ms")
-}
-
-/// Refuses a mesh with a colour stream: its baked vertex cannot carry the four linear
-/// components, so the code is `vg.mesh_vertex_colors`. `field` names the argument.
-pub(crate) fn check_vertex_colors(has_colors: bool, field: &str) -> Result<(), RaaError> {
-    if has_colors {
-        Err(RaaError::FrameGraph {
-            code: MESH_VERTEX_COLORS,
-            message: format!(
-                "{field}: the mesh has a vertex colour stream, which the 16 B cluster vertex cannot carry"
-            ),
-        })
-    } else {
-        Ok(())
-    }
 }
 
 /// Plans an atomic attach from already-converted section results: every entry must have
@@ -978,11 +961,11 @@ mod web {
     /// validated, then the mesh's clusters are replaced atomically (state ready, attached).
     fn attach_mesh(st: &mut EngineState, mesh: u32, sections: &JsValue) -> Result<(), RaaError> {
         st.mesh(mesh)?;
-        let (expected, has_colors) = {
-            let source = retained_source(st.features.get::<MeshSources>(), mesh)?;
-            (source.submeshes.len(), source.has_colors)
-        };
-        check_vertex_colors(has_colors, "mesh")?;
+        // A colour stream is not refused: the clusters carry no colour, and GI takes the
+        // colours through `GiHandle::set_cluster_vertex_colors`.
+        let expected = retained_source(st.features.get::<MeshSources>(), mesh)?
+            .submeshes
+            .len();
         let array = sections
             .dyn_ref::<Array>()
             .ok_or_else(|| vg_invalid("sections", "must be an Array of ClusterSection objects"))?;
@@ -997,8 +980,6 @@ mod web {
     /// `bakeMeshClusters(mesh, options)`: starts the sliced runtime bake of every sub-mesh.
     fn bake_mesh(st: &mut EngineState, mesh: u32, options: &JsValue) -> Result<(), RaaError> {
         st.mesh(mesh)?;
-        let has_colors = retained_source(st.features.get::<MeshSources>(), mesh)?.has_colors;
-        check_vertex_colors(has_colors, "mesh")?;
         let options = build_options(&read_options(options)?)?;
         let inputs = retained_source(st.features.get::<MeshSources>(), mesh)?
             .cluster_inputs()

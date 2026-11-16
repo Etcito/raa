@@ -22,6 +22,7 @@ use crate::layouts::{GI_WORK_STRIDE, GiForwardWorkGpu};
 use crate::membership::{Driver, Member};
 use crate::parts::{LevelVoxelize, VoxelDriver};
 use crate::shaders;
+use crate::vertex_colors::{GiVertexColors, WHITE_TEXEL};
 
 /// Work-uniform slots allocated on first use.
 const INITIAL_SLOTS: usize = 64;
@@ -35,10 +36,13 @@ struct WorkItem {
     level: u32,
     record: GiForwardWorkGpu,
     storage: LitMeshStorage,
+    /// The mesh's vertex colour buffer and its version, `None` for white.
+    colors: Option<(wgpu::Buffer, u64)>,
 }
 
-/// Bind-group cache key: (`LitMeshStorage::key`, lit storage generation, level).
-type CacheKey = (u64, u64, u32);
+/// Bind-group cache key: (`LitMeshStorage::key`, lit storage generation, level, colour version;
+/// 0 for the white dummy).
+type CacheKey = (u64, u64, u32, u64);
 
 /// The built-in forward voxel driver (driver A).
 pub struct ForwardDriver {
@@ -50,12 +54,15 @@ pub struct ForwardDriver {
     uniform: RefCell<Option<(wgpu::Buffer, usize)>>,
     scratch: RefCell<Vec<LodLevel>>,
     cache: RefCell<HashMap<CacheKey, wgpu::BindGroup>>,
+    colors: GiVertexColors,
+    /// One white colour word, bound for every mesh without a stream.
+    white: wgpu::Buffer,
 }
 
 impl ForwardDriver {
     /// Creates the `raa_gi_voxelize_forward` pipeline (layout [None, None, group 2], contract
     /// 'gi-shaders'); buffers are created on the first `prepare_frame`.
-    pub fn new(gpu: &GpuContext, lit: LitHandle) -> ForwardDriver {
+    pub fn new(gpu: &GpuContext, lit: LitHandle, colors: GiVertexColors) -> ForwardDriver {
         let device = gpu.device().clone();
         let group2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gi.forward.group2"),
@@ -78,6 +85,14 @@ impl ForwardDriver {
             compilation_options: Default::default(),
             cache: None,
         });
+        let white = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gi.forward.white"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        gpu.queue()
+            .write_buffer(&white, 0, &WHITE_TEXEL.to_le_bytes());
         ForwardDriver {
             device,
             lit,
@@ -87,6 +102,8 @@ impl ForwardDriver {
             uniform: RefCell::new(None),
             scratch: RefCell::new(Vec::new()),
             cache: RefCell::new(HashMap::new()),
+            colors,
+            white,
         }
     }
 
@@ -145,6 +162,7 @@ impl VoxelDriver for ForwardDriver {
                 let Some(storage) = self.lit.mesh_storage(mesh) else {
                     continue;
                 };
+                let colors = self.colors.mesh_buffer(gpu, mesh, storage.vertex_count);
                 work.push(WorkItem {
                     level: level.level,
                     record: GiForwardWorkGpu {
@@ -154,6 +172,7 @@ impl VoxelDriver for ForwardDriver {
                         level: level.level,
                     },
                     storage,
+                    colors,
                 });
             }
         }
@@ -197,7 +216,12 @@ impl VoxelDriver for ForwardDriver {
             if item.level != level.level {
                 continue;
             }
-            let key = (item.storage.key, generation, level.level);
+            let key = (
+                item.storage.key,
+                generation,
+                level.level,
+                item.colors.as_ref().map_or(0, |(_, version)| *version),
+            );
             let group = cache.entry(key).or_insert_with(|| {
                 let instances = self.lit.instance_storage();
                 let extras = self.lit.extras_storage();
@@ -215,6 +239,10 @@ impl VoxelDriver for ForwardDriver {
                     item.storage.stream0.as_entire_binding(),
                     item.storage.index.as_entire_binding(),
                     voxels.as_entire_binding(),
+                    item.colors
+                        .as_ref()
+                        .map_or(&self.white, |(buffer, _)| buffer)
+                        .as_entire_binding(),
                 ];
                 let entries: Vec<wgpu::BindGroupEntry> = resources
                     .into_iter()
@@ -250,6 +278,7 @@ impl VoxelDriver for ForwardDriver {
     fn release(&self) {
         self.work.borrow_mut().clear();
         self.cache.borrow_mut().clear();
+        self.colors.release();
         *self.uniform.borrow_mut() = None;
     }
 

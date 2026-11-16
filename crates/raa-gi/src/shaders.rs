@@ -172,8 +172,9 @@ fn uniform_entry(binding: u32, size: u64, has_dynamic_offset: bool) -> BindGroup
 }
 
 /// Forward group 2: GiVoxelizeGpu, GiForwardWorkGpu (dynamic, 256-B slots), instances, extras,
-/// materials, stream 0, indices and the voxels buffer (six read storage buffers).
-pub fn forward_group2_entries() -> [BindGroupLayoutEntry; 8] {
+/// materials, stream 0, indices, the voxels buffer and the optional vertex colours at binding 8
+/// (seven read storage buffers and the voxels).
+pub fn forward_group2_entries() -> [BindGroupLayoutEntry; 9] {
     [
         uniform_entry(0, 32, false),
         uniform_entry(1, 48, true),
@@ -183,6 +184,7 @@ pub fn forward_group2_entries() -> [BindGroupLayoutEntry; 8] {
         storage_entry(5, true),
         storage_entry(6, true),
         storage_entry(7, false),
+        storage_entry(8, true),
     ]
 }
 

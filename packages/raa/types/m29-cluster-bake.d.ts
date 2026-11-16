@@ -152,7 +152,7 @@ export interface Engine {
   /**
    * Attaches one section per sub-mesh of `mesh`, in sub-mesh order: all are validated
    * completely before the mesh's clusters are replaced atomically (state `ready`, source
-   * `attached`). A mesh with a colour stream throws `vg.mesh_vertex_colors`; a wrong number of
+   * `attached`). A colour stream is accepted (the clusters carry no colour); a wrong number of
    * sections or an invalid section throws `vg.invalid`.
    */
   attachMeshClusters(mesh: number, sections: ClusterSection[]): void;
@@ -160,8 +160,8 @@ export interface Engine {
    * Starts a runtime bake of every sub-mesh of `mesh`, sliced over frames: each Engine render
    * invocation spends at most `clusterBakeBudget()` milliseconds. The state is `baking` with
    * `progress` in [0, 1), then `ready` with source `runtime`. An omitted `options` uses the S31
-   * defaults; a mesh without retained geometry, with a colour stream or an empty mesh throws
-   * (`vg.invalid`, `vg.mesh_vertex_colors`, `vg.mesh_empty` or `vg.mesh_too_large`).
+   * defaults; a mesh without retained geometry or an empty mesh throws
+   * (`vg.invalid`, `vg.mesh_empty` or `vg.mesh_too_large`).
    */
   bakeMeshClusters(mesh: number, options?: ClusterBakeOptions): void;
   /** Cancels a bake and drops the clusters of `mesh`: state `none`. */

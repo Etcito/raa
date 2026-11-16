@@ -22,6 +22,16 @@ struct GiForwardWorkGpu {
 @group(2) @binding(5) var<storage, read> raa_gi_stream0: array<f32>;
 @group(2) @binding(6) var<storage, read> raa_gi_indices: array<u32>;
 @group(2) @binding(7) var<storage, read_write> raa_gi_voxels: array<atomic<u32>>;
+// Optional vertex colours, one pack4x8unorm word (linear rgba) per vertex of the lit mesh. A
+// mesh without a stream binds one white word, so an index past the end reads white.
+@group(2) @binding(8) var<storage, read> raa_gi_colors: array<u32>;
+
+fn raa_gi_vertex_color(vertex: u32) -> vec3<f32> {
+    if vertex < arrayLength(&raa_gi_colors) {
+        return unpack4x8unorm(raa_gi_colors[vertex]).rgb;
+    }
+    return vec3<f32>(1.0);
+}
 
 @compute @workgroup_size(64)
 fn raa_gi_voxelize_forward(
@@ -63,8 +73,12 @@ fn raa_gi_voxelize_forward(
         if dot(face, face) < 1.0e-16 {
             continue;
         }
+        // Albedo = base colour x instance tint x the mean vertex colour of the triangle.
+        let tri_albedo = albedo
+            * ((raa_gi_vertex_color(i0) + raa_gi_vertex_color(i1) + raa_gi_vertex_color(i2))
+                / 3.0);
         let data = RaaGiVoxelData(
-            pack4x8unorm(vec4<f32>(albedo, 1.0)),
+            pack4x8unorm(vec4<f32>(tri_albedo, 1.0)),
             pack2x16snorm(raa_gi_oct_encode(normalize(face))),
             raa_gi_encode_emissive(emissive),
         );

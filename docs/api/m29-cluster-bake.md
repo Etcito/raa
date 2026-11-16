@@ -137,14 +137,14 @@ mesh handle. Refusals leave the mesh's state unchanged.
   Every section is validated completely; only when all pass are the mesh's clusters
   replaced, atomically. The state becomes `ready` with source `attached`. A `sections` value
   that is not an array, or whose length differs from the sub-mesh count, is `vg.invalid`
-  naming `sections`. A mesh with a colour stream is `vg.mesh_vertex_colors`.
+  naming `sections`.
 - `bakeMeshClusters(mesh, options?)` starts a runtime bake of every sub-mesh from the
   geometry the Engine retained for the mesh. The bake is sliced over frames: each Engine
   render invocation spends at most `clusterBakeBudget()` milliseconds on it. The state reads
   `baking` with `progress` in [0, 1), then `ready` with source `runtime`. A new bake replaces
   the previous data of the mesh. The options follow the rules above. A refusal at start
   throws: `vg.invalid` (options, or `mesh` with "no retained geometry"),
-  `vg.mesh_vertex_colors`, `vg.mesh_empty` or `vg.mesh_too_large`. A refusal found while the
+  `vg.mesh_empty` or `vg.mesh_too_large`. A refusal found while the
   bake runs is not thrown: the state becomes `refused` with its code and message.
 - `clearMeshClusters(mesh)` cancels a bake and drops the data: the state becomes `none`.
 - `meshClusters(mesh)` returns a fresh `MeshClusterState`:
@@ -187,7 +187,6 @@ bake that does not finish within the budget continues on the next invocation.
 | code | thrown by | meaning |
 |---|---|---|
 | `vg.invalid` | every function and method | a malformed or out-of-domain value; the message is `<field>: <reason>` |
-| `vg.mesh_vertex_colors` | `attachMeshClusters`, `bakeMeshClusters` | the mesh has a colour stream, which the 16 B cluster vertex cannot carry |
 | `vg.mesh_empty` | `bakeClusters`, `createClusterBake`, `bakeMeshClusters` | no triangle, or none survives quantisation |
 | `vg.mesh_too_large` | `bakeClusters`, `createClusterBake`, `bakeMeshClusters` | beyond the S29 limits (2^24 clusters, 2^32 - 1 packed vertices or triangles) |
 | `api.unknown_handle` | Engine mesh methods | the mesh handle is unknown or removed |

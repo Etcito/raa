@@ -10,7 +10,7 @@
 //!
 //! The contract 'gi-virtual-kernel' builders live here because `shaders.rs` belongs to
 //! raa-gi-volume: `voxelize_virtual_module_wgsl` assembles the module sources and
-//! `virtual_group2_entries` the nine group-2 entries.
+//! `virtual_group2_entries` the ten group-2 entries.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -28,11 +28,16 @@ use crate::clipmap;
 use crate::membership::{Driver, Member};
 use crate::parts::{GiPart, LevelVoxelize, PartFrame, PartsCtx, VoxelDriver};
 use crate::shaders;
+use crate::vertex_colors::{GiVertexColors, POOL_COLOR_WIDTH, WHITE_TEXEL, pool_rows};
 
 const VOXELIZE_VIRTUAL_WGSL: &str = include_str!("../wgsl/voxelize_virtual.wgsl");
 
 /// Bind-group cache key: (`VgScene::generation`, `LitHandle::storage_generation`, level).
 type CacheKey = (u64, u64, u32);
+
+/// The state the pool colour texture was built from: (scene generation, colour generation, pool
+/// vertex capacity).
+type PoolKey = (u64, u64, u64);
 
 /// The virtual-voxelize module (driver B): `raa_shader::DEPTH_WGSL` + `PASS_VIEW_WGSL` +
 /// `raa_vg::RASTER_COMMON_WGSL` + `VOXELIZE_KERNEL_WGSL` + `voxelize_virtual.wgsl`, entry
@@ -43,9 +48,9 @@ type CacheKey = (u64, u64, u32);
 /// card 'raa-gi: tests/virtual_variants.rs for the driver B kernel, group and level view', which
 /// calls both from crates/raa-gi/tests/virtual_variants.rs through the generated module
 /// `raa_gi::parts::virtual_driver`. Today the builder returns exactly that concatenation and its
-/// only entry point is `raa_gi_voxelize_virtual`, and `virtual_group2_entries` returns the nine
+/// only entry point is `raa_gi_voxelize_virtual`, and `virtual_group2_entries` returns the ten
 /// COMPUTE entries of contract 'gi-virtual-kernel' (bindings 1-8 storage, binding 9 the 32-B
-/// `GiVoxelizeGpu`). The state they carry is the group-2 binding table and the entry-point name.
+/// `GiVoxelizeGpu`, binding 10 the optional vertex colour texture). The state they carry is the group-2 binding table and the entry-point name.
 pub fn voxelize_virtual_module_wgsl() -> String {
     [
         raa_shader::DEPTH_WGSL,
@@ -60,9 +65,11 @@ pub fn voxelize_virtual_module_wgsl() -> String {
 /// Group 2 of `raa_gi_voxelize_virtual`: bindings 1-6 as `RASTER_COMMON_WGSL` declares them
 /// (instances, clusters, vertices, triangles, the cull `visible` list and its `state`), 7 the
 /// `RaaGiVgMaterial` array of `LitHandle::material_storage`, 8 the voxels read-write and 9 the
-/// `GiVoxelizeGpu` uniform of the level. Binding 0 (`view`) is declared but unused, so it has no
+/// `GiVoxelizeGpu` uniform of the level, 10 the optional vertex colours as a non-filterable
+/// `Rgba8Unorm` 2D texture parallel to the vertex pool (a texture, because the eight storage
+/// buffers of the stage are all taken). Binding 0 (`view`) is declared but unused, so it has no
 /// entry.
-pub fn virtual_group2_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
+pub fn virtual_group2_entries() -> [wgpu::BindGroupLayoutEntry; 10] {
     [
         storage_entry(1, true),
         storage_entry(2, true),
@@ -79,6 +86,16 @@ pub fn virtual_group2_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
                 min_binding_size: NonZeroU64::new(32),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 10,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
             },
             count: None,
         },
@@ -112,13 +129,24 @@ pub struct VirtualDriver {
     cache: RefCell<HashMap<CacheKey, wgpu::BindGroup>>,
     slots: RefCell<Vec<u32>>,
     tags: RefCell<Vec<u32>>,
+    colors: GiVertexColors,
+    /// The pool-parallel colour texture of the registered streams and the state it was built
+    /// from: (scene generation, colour generation, pool vertex capacity).
+    pool_colors: RefCell<Option<(wgpu::TextureView, PoolKey)>>,
+    /// One white texel, bound while no stream is registered.
+    white: wgpu::TextureView,
 }
 
 impl VirtualDriver {
     /// Creates the `raa_gi_voxelize_virtual` pipeline (layout `[None, None, group 2]`, contract
     /// 'gi-virtual-kernel'); the `CullWork` is created on the first prepared frame inside
     /// contract 'vg-gi-frame'.
-    fn new(gpu: &GpuContext, lit: LitHandle, vg: VgHandle) -> VirtualDriver {
+    fn new(
+        gpu: &GpuContext,
+        lit: LitHandle,
+        vg: VgHandle,
+        colors: GiVertexColors,
+    ) -> VirtualDriver {
         let device = gpu.device().clone();
         let group2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("gi.virtual.group2"),
@@ -141,6 +169,7 @@ impl VirtualDriver {
             compilation_options: Default::default(),
             cache: None,
         });
+        let white = color_texture(gpu, 1, 1, &[WHITE_TEXEL]).create_view(&Default::default());
         VirtualDriver {
             device,
             vg,
@@ -153,8 +182,67 @@ impl VirtualDriver {
             cache: RefCell::new(HashMap::new()),
             slots: RefCell::new(Vec::new()),
             tags: RefCell::new(Vec::new()),
+            colors,
+            pool_colors: RefCell::new(None),
+            white,
         }
     }
+
+    /// Keeps the pool colour texture in step with the registered streams and the scene pool:
+    /// rebuilt when the streams or the pool changed, dropped (white dummy) with no stream.
+    fn sync_pool_colors(&self, gpu: &GpuContext, scene: &raa_vg::scene::VgScene) {
+        let mut pool = self.pool_colors.borrow_mut();
+        let capacity = scene.vertices().map_or(0, |b| b.size() / 16);
+        let rows = pool_rows(capacity);
+        let wanted = self.colors.has_clusters() && capacity > 0 && rows.is_some();
+        if !wanted {
+            if pool.take().is_some() {
+                self.cache.borrow_mut().clear();
+            }
+            return;
+        }
+        let key = (scene.generation(), self.colors.cluster_generation(), capacity);
+        if pool.as_ref().is_some_and(|(_, built)| *built == key) {
+            return;
+        }
+        let rows = rows.unwrap_or(1);
+        let mut texels = vec![WHITE_TEXEL; (POOL_COLOR_WIDTH * rows) as usize];
+        self.colors.fill_pool(scene, &mut texels);
+        let view = color_texture(gpu, POOL_COLOR_WIDTH, rows, &texels).create_view(&Default::default());
+        *pool = Some((view, key));
+        self.cache.borrow_mut().clear();
+    }
+}
+
+/// An `Rgba8Unorm` texture of `width` x `height` packed colour words.
+fn color_texture(gpu: &GpuContext, width: u32, height: u32, texels: &[u32]) -> wgpu::Texture {
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("gi.virtual.colors"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let bytes: Vec<u8> = texels.iter().flat_map(|t| t.to_le_bytes()).collect();
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        &bytes,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    texture
 }
 
 impl VoxelDriver for VirtualDriver {
@@ -191,6 +279,7 @@ impl VoxelDriver for VirtualDriver {
                 self.capacity.set(Some(capacity));
                 self.cache.borrow_mut().clear();
             }
+            self.sync_pool_colors(gpu, frame.scene);
             for level in levels {
                 let view = clipmap::level_view(level.origin, level.voxel_size, level.resolution);
                 frame.slots.write(gpu, GI_BASE + level.level, &view);
@@ -237,8 +326,10 @@ impl VoxelDriver for VirtualDriver {
                 level.level,
             );
             let mut cache = self.cache.borrow_mut();
+            let pool_colors = self.pool_colors.borrow();
             let group = cache.entry(key).or_insert_with(|| {
                 let materials = self.lit.material_storage();
+                let colors = pool_colors.as_ref().map_or(&self.white, |(view, _)| view);
                 let entries = [
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -276,6 +367,10 @@ impl VoxelDriver for VirtualDriver {
                         binding: 9,
                         resource: level.params.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(colors),
+                    },
                 ];
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("gi.virtual.group2"),
@@ -301,6 +396,7 @@ impl VoxelDriver for VirtualDriver {
         *self.work.borrow_mut() = None;
         self.capacity.set(None);
         self.claimed.set(0);
+        *self.pool_colors.borrow_mut() = None;
         self.cache.borrow_mut().clear();
     }
 
@@ -344,7 +440,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
     let Some(vg) = ctx.vg.clone() else {
         return Ok(());
     };
-    let driver = Rc::new(VirtualDriver::new(ctx.gpu, ctx.lit.handle(), vg));
+    let driver = Rc::new(VirtualDriver::new(ctx.gpu, ctx.lit.handle(), vg, ctx.shared.vertex_colors()));
     ctx.add_driver(Rc::clone(&driver) as Rc<dyn VoxelDriver>);
     ctx.add_part(driver);
     Ok(())

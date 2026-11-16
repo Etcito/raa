@@ -264,9 +264,7 @@ pub(crate) use web::{frame, install};
 mod web {
     use super::*;
     use crate::api::ViewsState;
-    use crate::api::m29_cluster_bake::{
-        VG_INVALID, check_vertex_colors, cluster_error, vg_invalid,
-    };
+    use crate::api::m29_cluster_bake::{VG_INVALID, cluster_error, vg_invalid};
     use crate::convert::{HandleMap, INVALID_ARGUMENT, api_error};
     use crate::engine::{Engine, InstallCtx};
     use crate::feature_map::FEATURE_MISSING;
@@ -409,7 +407,7 @@ mod web {
     }
 
     /// Starts the runtime bake of mesh `key` or records why it cannot: no retained geometry is
-    /// `vg.invalid`, a colour stream `vg.mesh_vertex_colors`, and a cluster error its vg code.
+    /// `vg.invalid`, a colour stream is not refused, and a cluster error its vg code.
     fn start_runtime_bake(st: &EngineState, store: &RefCell<ClusterStore>, key: u32) {
         let Some(source) = st
             .features
@@ -421,13 +419,15 @@ mod web {
                 .refuse(key, VG_INVALID, "no retained geometry".to_string());
             return;
         };
-        let started = check_vertex_colors(source.has_colors, "mesh").and_then(|()| {
-            let inputs = source.cluster_inputs().map_err(|e| cluster_error(&e))?;
-            store
-                .borrow_mut()
-                .start_bake(key, inputs, &BuildOptions::default())
-                .map_err(|e| cluster_error(&e))
-        });
+        let started = source
+            .cluster_inputs()
+            .map_err(|e| cluster_error(&e))
+            .and_then(|inputs| {
+                store
+                    .borrow_mut()
+                    .start_bake(key, inputs, &BuildOptions::default())
+                    .map_err(|e| cluster_error(&e))
+            });
         if let Err(error) = started {
             record_refusal(store, key, error);
         }

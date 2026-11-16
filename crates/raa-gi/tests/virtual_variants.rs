@@ -14,7 +14,7 @@ use raa_gi::shaders::debug_view_module_wgsl;
 use raa_math::Vec3;
 use raa_shader::Composer;
 use wgpu::naga::{self, valid};
-use wgpu::{BindingType, BufferBindingType, ShaderStages};
+use wgpu::{BindingType, BufferBindingType, ShaderStages, TextureSampleType, TextureViewDimension};
 
 fn analyse(wgsl: &str) -> (naga::Module, valid::ModuleInfo) {
     let module = naga::front::wgsl::parse_str(wgsl).expect("the module parses");
@@ -39,7 +39,7 @@ fn virtual_module_validates_with_one_entry() {
 }
 
 #[test]
-fn virtual_group_holds_eight_storage_buffers_and_one_uniform() {
+fn virtual_group_holds_eight_storage_buffers_one_uniform_and_the_colour_texture() {
     let (module, info) = analyse(&voxelize_virtual_module_wgsl());
     let usage = info.get_entry_point(0);
     let mut bound: Vec<(u32, u32, naga::AddressSpace)> = module
@@ -50,7 +50,7 @@ fn virtual_group_holds_eight_storage_buffers_and_one_uniform() {
         .collect();
     bound.sort_by_key(|b| (b.0, b.1));
     let slots: Vec<(u32, u32)> = bound.iter().map(|b| (b.0, b.1)).collect();
-    assert_eq!(slots, (1..=9).map(|b| (2, b)).collect::<Vec<_>>());
+    assert_eq!(slots, (1..=10).map(|b| (2, b)).collect::<Vec<_>>());
     for (_, binding, space) in &bound {
         let expected = match binding {
             1..=7 => naga::AddressSpace::Storage {
@@ -59,15 +59,16 @@ fn virtual_group_holds_eight_storage_buffers_and_one_uniform() {
             8 => naga::AddressSpace::Storage {
                 access: naga::StorageAccess::LOAD | naga::StorageAccess::STORE,
             },
-            _ => naga::AddressSpace::Uniform,
+            9 => naga::AddressSpace::Uniform,
+            _ => naga::AddressSpace::Handle,
         };
         assert_eq!(*space, expected, "binding {binding}");
     }
 
     let entries = virtual_group2_entries();
     let bindings: Vec<u32> = entries.iter().map(|e| e.binding).collect();
-    assert_eq!(bindings, [1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    let (mut storage, mut uniform) = (0, 0);
+    assert_eq!(bindings, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let (mut storage, mut uniform, mut texture) = (0, 0, 0);
     for e in &entries {
         assert_eq!(e.visibility, ShaderStages::COMPUTE);
         match e.ty {
@@ -88,10 +89,20 @@ fn virtual_group_holds_eight_storage_buffers_and_one_uniform() {
                 assert_eq!(min_binding_size.map(|s| s.get()), Some(32));
                 uniform += 1;
             }
+            // The vertex colours of the pool: not a storage buffer, because the stage's eight are
+            // taken.
+            BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: false },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            } => {
+                assert_eq!(e.binding, 10);
+                texture += 1;
+            }
             ref other => panic!("binding {}: {other:?}", e.binding),
         }
     }
-    assert_eq!((storage, uniform), (8, 1));
+    assert_eq!((storage, uniform, texture), (8, 1, 1));
 }
 
 #[test]

@@ -245,7 +245,7 @@ fn voxel_light_area_uses_the_shared_form_factor() {
 }
 
 #[test]
-fn driver_a_group_two_holds_six_storage_buffers() {
+fn driver_a_group_two_holds_seven_storage_buffers() {
     let storage = |e: &BindGroupLayoutEntry| {
         matches!(
             e.ty,
@@ -260,7 +260,7 @@ fn driver_a_group_two_holds_six_storage_buffers() {
             .iter()
             .filter(|e| storage(e))
             .count(),
-        6
+        7
     );
     let (module, info) = analyse(&voxelize_forward_module_wgsl());
     let count = used(&module, &info)
@@ -272,7 +272,7 @@ fn driver_a_group_two_holds_six_storage_buffers() {
             )
         })
         .count();
-    assert_eq!(count, 6);
+    assert_eq!(count, 7);
 }
 
 #[test]

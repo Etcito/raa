@@ -16,9 +16,12 @@ pub mod parts;
 pub mod settings;
 pub mod shaders;
 pub mod stats;
+pub mod vertex_colors;
 mod volume;
 
 pub use stats::GiStats;
+
+pub use vertex_colors::GiVertexColors;
 
 pub use settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
