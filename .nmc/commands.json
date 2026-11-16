@@ -167,7 +167,10 @@
   {
     "name": "p4-taa-lookdev-build",
     "command": "bash scripts/build-lookdev.sh",
-    "timeout_s": 1800
+    "timeout_s": 1800,
+    "after": [
+      "p4-gi-build"
+    ]
   },
   {
     "name": "p4-taa-lookdev-check",
