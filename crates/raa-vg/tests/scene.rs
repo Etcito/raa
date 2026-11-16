@@ -202,14 +202,14 @@ fn upload_pool_builds_the_layout_and_release_drops_every_buffer() {
 }
 
 mod plan {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use raa_cluster::{BuildOptions, ClusterMesh, ClusterStore, OwnedClusterInput, bake};
     use raa_core::testing::{skip, software_gpu};
     use raa_core::{MaterialId, MeshId};
     use raa_lit::{DrawClass, InstanceShape, MaterialFnId};
     use raa_scene::{InstanceId, Scene, Transform};
-    use raa_vg::scene::{ItemScratch, SyncSource, VgPlan, plan_sync};
+    use raa_vg::scene::{ItemScratch, SyncSource, VgPlan, WithGiMembers, plan_sync};
     use raa_vg::{
         INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_MOVABLE, INSTANCE_PREVIOUS_VALID,
         InstancePath, InstanceRequests, MeshKeys, VgInstanceRecord, VgScene, VgSettings,
@@ -357,6 +357,81 @@ mod plan {
         let double_sided = record_of(&plan, ids[2]);
         assert_ne!(double_sided.ids[2] & INSTANCE_DOUBLE_SIDED, 0);
         assert_ne!(double_sided.ids[2] & INSTANCE_CASTS_SHADOW, 0);
+    }
+
+    #[test]
+    fn gi_flag_follows_member_tags_movable_or_not() {
+        let mut store = ClusterStore::new();
+        store.attach(1, vec![baked()]);
+        let mut keys = MeshKeys::default();
+        keys.set(1, &[MeshId(101)]);
+        let (scene, ids) = scene_of(&[(20, 101, 201), (21, 101, 201)]);
+        let mut scratch = ItemScratch::default();
+        let items = scratch.fill(&scene);
+        let settings = VgSettings::default();
+        let moved = [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0, 0.0],
+        ];
+        let mut members = BTreeSet::new();
+        members.insert(20);
+
+        let still = Double::default();
+        let plan = plan_sync(
+            items,
+            &WithGiMembers::new(&still, &members),
+            &store,
+            &Default::default(),
+            &keys,
+            &settings,
+        );
+        assert_ne!(record_of(&plan, ids[0]).ids[2] & raa_vg::INSTANCE_GI, 0);
+        assert_eq!(record_of(&plan, ids[1]).ids[2] & raa_vg::INSTANCE_GI, 0);
+
+        let mut moving = Double::default();
+        moving.previous.insert(0, moved);
+        let plan = plan_sync(
+            items,
+            &WithGiMembers::new(&moving, &members),
+            &store,
+            &Default::default(),
+            &keys,
+            &settings,
+        );
+        let member = record_of(&plan, ids[0]);
+        assert_ne!(member.ids[2] & INSTANCE_MOVABLE, 0);
+        assert_ne!(member.ids[2] & raa_vg::INSTANCE_GI, 0);
+
+        moving.previous.clear();
+        moving.previous.insert(1, moved);
+        let plan = plan_sync(
+            items,
+            &WithGiMembers::new(&moving, &members),
+            &store,
+            &Default::default(),
+            &keys,
+            &settings,
+        );
+        let non_member = record_of(&plan, ids[1]);
+        assert_ne!(non_member.ids[2] & INSTANCE_MOVABLE, 0);
+        assert_eq!(non_member.ids[2] & raa_vg::INSTANCE_GI, 0);
+
+        let plan = plan_sync(
+            items,
+            &moving,
+            &store,
+            &Default::default(),
+            &keys,
+            &settings,
+        );
+        assert!(
+            plan.instances
+                .iter()
+                .all(|planned| planned.record.ids[2] & raa_vg::INSTANCE_GI == 0)
+        );
+
+        assert_eq!(raa_vg::INSTANCE_GI, 16);
     }
 
     #[test]

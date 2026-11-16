@@ -26,6 +26,8 @@ pub const INSTANCE_DOUBLE_SIDED: u32 = 2;
 pub const INSTANCE_CASTS_SHADOW: u32 = 4;
 /// `ids.z` bit: the instance may move.
 pub const INSTANCE_MOVABLE: u32 = 8;
+/// `ids.z` bit: a raa-gi voxel member; the GI cull filter (InstanceFilter::Gi) draws exactly these.
+pub const INSTANCE_GI: u32 = 16;
 
 const NODE_SIZE: u64 = 48;
 const CLUSTER_SIZE: u64 = 48;
@@ -189,6 +191,11 @@ pub trait SyncSource {
     fn material_fn_of(&self, material: MaterialId) -> MaterialFnId;
     fn material_flags(&self, material: MaterialId) -> u32;
     fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]>;
+
+    fn gi_member(&self, tag: u32) -> bool {
+        let _ = tag;
+        false
+    }
 }
 
 impl SyncSource for LitHandle {
@@ -207,6 +214,45 @@ impl SyncSource for LitHandle {
 
     fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]> {
         LitHandle::previous_instance_row(self, slot)
+    }
+}
+
+/// A [`SyncSource`] view that delegates every question to a wrapped source but answers
+/// [`SyncSource::gi_member`] from a set of tags.
+pub struct WithGiMembers<'a> {
+    source: &'a dyn SyncSource,
+    gi_members: &'a BTreeSet<u32>,
+}
+
+impl<'a> WithGiMembers<'a> {
+    /// `WithGiMembers::new` wraps a source so planning marks `INSTANCE_GI` for exactly the tags
+    /// in `gi_members`; every other `SyncSource` question delegates to the wrapped source. The
+    /// downstream card 'raa-vg: VgHandle::with_gi_frame and VgHandle::set_gi_members' calls it
+    /// from `VgHandle::plan` in crates/raa-vg/src/feature.rs.
+    pub fn new(source: &'a dyn SyncSource, gi_members: &'a BTreeSet<u32>) -> WithGiMembers<'a> {
+        WithGiMembers { source, gi_members }
+    }
+}
+
+impl SyncSource for WithGiMembers<'_> {
+    fn instance_eligibility(&self, tag: u32, mesh: MeshId, material: MaterialId) -> InstanceShape {
+        self.source.instance_eligibility(tag, mesh, material)
+    }
+
+    fn material_fn_of(&self, material: MaterialId) -> MaterialFnId {
+        self.source.material_fn_of(material)
+    }
+
+    fn material_flags(&self, material: MaterialId) -> u32 {
+        self.source.material_flags(material)
+    }
+
+    fn previous_instance_row(&self, slot: u32) -> Option<[[f32; 4]; 3]> {
+        self.source.previous_instance_row(slot)
+    }
+
+    fn gi_member(&self, tag: u32) -> bool {
+        self.gi_members.contains(&tag)
     }
 }
 
@@ -530,6 +576,9 @@ fn planned_instance(
     }
     if material_flags & FLAG_NO_SHADOW == 0 {
         flags |= INSTANCE_CASTS_SHADOW;
+    }
+    if source.gi_member(item.tag) {
+        flags |= INSTANCE_GI;
     }
     PlannedInstance {
         instance: item.instance,

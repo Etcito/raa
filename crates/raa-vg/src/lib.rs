@@ -31,9 +31,9 @@ pub use hzb::{Hzb, hzb_down_module_wgsl, hzb_seed_module_wgsl, hzb_size};
 pub use raster::{RASTER_COMMON_WGSL, VIS_WRITE_WGSL, raster_hw_module_wgsl};
 pub use resolve::resolve_module_wgsl;
 pub use scene::{
-    INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_MOVABLE, INSTANCE_PREVIOUS_VALID,
-    InstanceRequests, MeshKeys, SectionRange, VG_INSTANCE_SIZE, VgInstanceRecord, VgScene,
-    hierarchy_word, write_instance,
+    INSTANCE_CASTS_SHADOW, INSTANCE_DOUBLE_SIDED, INSTANCE_GI, INSTANCE_MOVABLE,
+    INSTANCE_PREVIOUS_VALID, InstanceRequests, MeshKeys, SectionRange, VG_INSTANCE_SIZE,
+    VgInstanceRecord, VgScene, hierarchy_word, write_instance,
 };
 pub use settings::{DebugView, VgSettings, VgSettingsPatch};
 pub use shadow::{CascadeWork, cascade_views, record_cascades};
