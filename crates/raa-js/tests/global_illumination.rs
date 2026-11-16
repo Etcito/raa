@@ -9,8 +9,8 @@
 mod m30gi;
 
 use m30gi::{
-    GiWire, QUALITY_KEYS, instance_entries, parse_quality_patch, parse_settings_patch,
-    quality_entries, settings_entries, stats_entries,
+    GiWire, QUALITY_KEYS, colors_to_rgba, instance_entries, parse_quality_patch,
+    parse_settings_patch, quality_entries, settings_entries, stats_entries,
 };
 use raa_core::RaaError;
 use raa_gi::membership::refusal_message;
@@ -327,4 +327,16 @@ fn stats_entries_follow_the_key_order_with_a_null_frame_index() {
         stats_entries(&stats_at(Some(7)))[9],
         ("statsFrameIndex", GiWire::Number(7.0))
     );
+}
+
+#[test]
+fn vertex_colour_buffers_expand_to_rgba_or_refuse() {
+    // coloured rgb buffer gains alpha 1; rgba passes through; an omitted buffer is not expanded here.
+    assert_eq!(
+        colors_to_rgba(&[1.0, 0.0, 0.0, 0.0, 1.0, 0.0], 3).unwrap(),
+        vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+    );
+    assert_eq!(colors_to_rgba(&[0.5; 8], 4).unwrap(), vec![0.5; 8]);
+    assert!(refusal(colors_to_rgba(&[0.5; 4], 3)).starts_with("colors: "));
+    assert!(refusal(colors_to_rgba(&[0.5; 4], 2)).starts_with("components: "));
 }

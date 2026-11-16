@@ -42,6 +42,30 @@ pub(crate) const SETTING_KEYS: [&str; 9] = [
     "screenSpaceQuality",
 ];
 
+/// Expands a per-vertex colour buffer of `components` floats per vertex (3 = rgb, 4 = rgba) to the
+/// four-floats-per-vertex rgba stream `GiHandle::set_vertex_colors` takes; rgb gets alpha 1.
+/// `components` other than 3 or 4, or a length that is not a multiple of it, is `gi.invalid`.
+/// Finiteness is checked by raa-gi.
+pub(crate) fn colors_to_rgba(values: &[f32], components: u32) -> Result<Vec<f32>, RaaError> {
+    if components != 3 && components != 4 {
+        return Err(invalid("components", "must be 3 or 4"));
+    }
+    let n = components as usize;
+    if !values.len().is_multiple_of(n) {
+        return Err(invalid(
+            "colors",
+            &format!("length must be a multiple of {components}"),
+        ));
+    }
+    if n == 4 {
+        return Ok(values.to_vec());
+    }
+    Ok(values
+        .chunks_exact(3)
+        .flat_map(|c| [c[0], c[1], c[2], 1.0])
+        .collect())
+}
+
 /// The S36 quality keys in their key order: the `GiQuality` names of the JS API.
 pub(crate) const QUALITY_KEYS: [&str; 3] = ["resolution", "levels", "probeRays"];
 
@@ -272,7 +296,7 @@ pub(crate) use web::{frame, install};
 mod web {
     use super::*;
     use crate::api::ViewsState;
-    use crate::convert::api_error;
+    use crate::convert::{UNKNOWN_HANDLE, api_error};
     use crate::engine::{Engine, InstallCtx};
     use crate::feature_map::FEATURE_MISSING;
     use crate::state::EngineState;
@@ -515,6 +539,52 @@ mod web {
         Ok(out.into())
     }
 
+    /// The optional colour buffer of a setter: `None` for null or undefined (the stream is
+    /// removed), otherwise rgba floats. A `Float32Array` is read as is, a `Uint8Array` is
+    /// normalised by 1/255; anything else is `gi.invalid`.
+    fn colors_arg(value: &JsValue, components: Option<u32>) -> Result<Option<Vec<f32>>, RaaError> {
+        if value.is_null() || value.is_undefined() {
+            return Ok(None);
+        }
+        let n = components.unwrap_or(4);
+        let raw: Vec<f32> = if let Some(f) = value.dyn_ref::<js_sys::Float32Array>() {
+            f.to_vec()
+        } else if let Some(u) = value.dyn_ref::<js_sys::Uint8Array>() {
+            u.to_vec()
+                .into_iter()
+                .map(|b| f32::from(b) / 255.0)
+                .collect()
+        } else {
+            return Err(invalid(
+                "colors",
+                "must be a Float32Array, a Uint8Array or null",
+            ));
+        };
+        colors_to_rgba(&raw, n).map(Some)
+    }
+
+    /// `setMeshVertexColors(mesh, colors, components?)`: forwards to `GiHandle::set_vertex_colors`
+    /// for every sub-mesh of the JS mesh handle.
+    fn set_mesh_colors(
+        st: &mut EngineState,
+        mesh: u32,
+        colors: &JsValue,
+        components: Option<u32>,
+    ) -> Result<(), RaaError> {
+        let lit = st.mesh(mesh)?.lit;
+        let ids = st
+            .lit
+            .submesh_ids(lit)
+            .map(|ids| ids.to_vec())
+            .ok_or_else(|| api_error(UNKNOWN_HANDLE, format!("mesh {mesh} does not exist")))?;
+        let data = colors_arg(colors, components)?;
+        let gi = gi_handle(st)?;
+        for id in ids {
+            gi.set_vertex_colors(id, data.as_deref())?;
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_class = Engine)]
     impl Engine {
         /// Applies a `GlobalIlluminationPatch` atomically: an unknown key, null, a wrong type or an
@@ -563,6 +633,35 @@ mod web {
         #[wasm_bindgen(js_name = giStats)]
         pub fn gi_stats(&self) -> Result<JsValue, JsValue> {
             self.with_state(|_, st| stats_js(st))
+        }
+        /// Registers (Float32Array rgb(a) or Uint8Array rgb(a)) or removes (null/undefined) the
+        /// per-vertex colour stream of a mesh for the forward GI voxelizer. `components` is 3 or
+        /// 4 (default 4).
+        #[wasm_bindgen(js_name = setMeshVertexColors)]
+        pub fn set_mesh_vertex_colors(
+            &mut self,
+            mesh: u32,
+            colors: JsValue,
+            components: Option<u32>,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| set_mesh_colors(st, mesh, &colors, components))
+        }
+
+        /// As `setMeshVertexColors`, for the virtualized-geometry voxelizer: section `ordinal` of
+        /// the mesh's cluster store, one colour per `ClusterMesh` vertex.
+        #[wasm_bindgen(js_name = setMeshClusterVertexColors)]
+        pub fn set_mesh_cluster_vertex_colors(
+            &mut self,
+            mesh: u32,
+            ordinal: u32,
+            colors: JsValue,
+            components: Option<u32>,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                st.mesh(mesh)?;
+                let data = colors_arg(&colors, components)?;
+                gi_handle(st)?.set_cluster_vertex_colors(mesh, ordinal as usize, data.as_deref())
+            })
         }
     }
 }

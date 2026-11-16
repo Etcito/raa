@@ -165,4 +165,25 @@ export interface Engine {
   instanceGlobalIllumination(instance: number): InstanceGlobalIllumination;
   /** The latest published counters, a fresh {@link GiStats}. */
   giStats(): GiStats;
+  /**
+   * Registers or removes (`null`/`undefined`) per-vertex colours of a mesh for the GI voxelizer:
+   * a Float32Array (linear) or Uint8Array (normalised by 255) of `components` (3 = rgb, 4 =
+   * rgba, default 4) values per vertex, matching the mesh's vertex count. Omitted keeps the
+   * albedo (base colour x instance tint). Bad buffers throw `gi.invalid`.
+   */
+  setMeshVertexColors(
+    mesh: number,
+    colors: Float32Array | Uint8Array | null | undefined,
+    components?: 3 | 4,
+  ): void;
+  /**
+   * As {@link Engine.setMeshVertexColors} for virtualized geometry: one colour per vertex of
+   * section `ordinal` of the mesh's cluster store.
+   */
+  setMeshClusterVertexColors(
+    mesh: number,
+    ordinal: number,
+    colors: Float32Array | Uint8Array | null | undefined,
+    components?: 3 | 4,
+  ): void;
 }

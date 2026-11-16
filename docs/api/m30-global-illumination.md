@@ -268,3 +268,14 @@ stored and read back, and they change the output only when their part lands.
 - Material functions are not evaluated for voxel albedo; driver A uses base colour times tint and driver B base colour only. Vertex colours are not voxelized.
 - Budgets stay nearly exhausted: fragment storage 8 of 8 in OIT variants, compute storage 8 of 8 in driver B, sampled textures 16 of 16 in vg.shade, and feature words z and w.
 - Glossy GI reflections are not provided; SSR misses fall back to a volume trace.
+
+## Per-vertex colours (GI colour bleeding)
+
+`engine.setMeshVertexColors(mesh, colors, components?)` forwards to `GiHandle::set_vertex_colors` for
+every sub-mesh of the mesh handle (forward voxelizer); `engine.setMeshClusterVertexColors(mesh,
+ordinal, colors, components?)` forwards to `GiHandle::set_cluster_vertex_colors` (cluster store key =
+the mesh handle, section `ordinal`). `colors` is a `Float32Array` (linear) or `Uint8Array`
+(divided by 255) with `components` (3 or 4, default 4) values per vertex, matching the vertex count;
+`null`/`undefined` removes the stream, keeping the albedo base colour x instance tint. Other types,
+a bad `components` or a length not divisible by it throw `gi.invalid`; an unknown mesh throws
+`api.unknown_handle`.
