@@ -49,8 +49,10 @@ use crate::feature_map::FeatureMap;
 use crate::state::{AssetEntry, EngineState, MeshEntry, MeshOrigin, SceneInvocation, SkinFeature};
 
 /// WEBGPU_OPTIONAL: device features requested when the adapter has them, never required.
-const WEBGPU_OPTIONAL: wgpu::Features =
-    wgpu::Features::FLOAT32_FILTERABLE.union(wgpu::Features::RG11B10UFLOAT_RENDERABLE);
+/// `timestamp-query` lets a profiler measure the GPU time of each pass (nothing in RAA needs it).
+const WEBGPU_OPTIONAL: wgpu::Features = wgpu::Features::FLOAT32_FILTERABLE
+    .union(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+    .union(wgpu::Features::TIMESTAMP_QUERY);
 
 /// What an api file's `install` receives at init, once the M1 passes (`prepass`,
 /// `forward`, `tonemap`) are in the pipeline and before `raa.pipeline` joins the graph.
