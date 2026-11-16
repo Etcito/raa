@@ -270,6 +270,28 @@ impl VgHandle {
         }
     }
 
+    /// Registers (`Some`) or removes (`None`) the per-vertex colours of section `ordinal` of
+    /// cluster-store key `key` (linear rgba, 4 floats per `ClusterMesh` vertex): a virtualized
+    /// pixel's base colour is multiplied by them, as the forward path multiplies by its vertex
+    /// colours. A stream whose length differs from the section's vertex count draws white. A
+    /// wrong length or a non-finite value is `vg.invalid`; a busy pipeline is `pipeline.busy`.
+    pub fn set_cluster_vertex_colors(
+        &self,
+        key: u32,
+        ordinal: usize,
+        colors: Option<&[f32]>,
+    ) -> Result<(), RaaError> {
+        let mut state = self
+            .shared
+            .vg
+            .try_borrow_mut()
+            .map_err(|_| pipeline_busy())?;
+        state
+            .scene
+            .set_cluster_colors(key, ordinal, colors)
+            .map_err(|reason| invalid("clusterVertexColors", reason))
+    }
+
     /// Removes the mesh-key mapping of `key`.
     pub fn remove_mesh_key(&self, key: u32) {
         if let Ok(mut keys) = self.shared.keys.try_borrow_mut() {

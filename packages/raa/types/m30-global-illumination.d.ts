@@ -178,7 +178,10 @@ export interface Engine {
   ): void;
   /**
    * As {@link Engine.setMeshVertexColors} for virtualized geometry: one colour per vertex of
-   * section `ordinal` of the mesh's cluster store.
+   * section `ordinal` of the mesh's cluster store. The virtualized-geometry raster draws the
+   * section with base colour x these colours (as the forward path draws its vertex colours) and
+   * the virtualized GI voxelizer reads them; each installed feature of the two receives them.
+   * With neither installed it throws `feature.missing`.
    */
   setMeshClusterVertexColors(
     mesh: number,

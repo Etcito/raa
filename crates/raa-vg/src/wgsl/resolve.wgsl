@@ -70,6 +70,22 @@ struct VgMaterial {
 @group(2) @binding(10) var out_normal: texture_storage_2d<rgba16float, write>;
 @group(2) @binding(11) var out_uv_motion: texture_storage_2d<rgba32float, write>;
 @group(2) @binding(12) var out_albedo: texture_storage_2d<rgba8unorm, write>;
+// RAA addition (not in solstice): the per-vertex colour of every pool vertex, one
+// `pack4x8unorm` word per texel, VG_COLOR_WIDTH texels per row (`VgScene::colors`). A vertex
+// outside the texture (the 1x1 white placeholder) is white.
+@group(2) @binding(13) var vertex_colors: texture_2d<u32>;
+
+// `VG_COLOR_WIDTH` of vg/scene.rs.
+const VG_COLOR_WIDTH: u32 = 4096u;
+
+fn vertex_color(index: u32) -> vec3<f32> {
+    let dims = textureDimensions(vertex_colors);
+    let texel = vec2<u32>(index % VG_COLOR_WIDTH, index / VG_COLOR_WIDTH);
+    if (texel.x >= dims.x || texel.y >= dims.y) {
+        return vec3<f32>(1.0);
+    }
+    return unpack4x8unorm(textureLoad(vertex_colors, texel, 0).x).rgb;
+}
 
 // `SurfaceMaterialGpu.header.x`: a registered material function.
 const MATERIAL_MODEL_FUNCTION: u32 = 2u;
@@ -189,9 +205,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let material = materials[instance.ids.y];
 
     let packed = triangles[instance.ranges.w + cluster.triangle_offset + triangle_index];
-    let v0 = vertices[instance.ranges.z + cluster.vertex_offset + (packed & 0xffu)];
-    let v1 = vertices[instance.ranges.z + cluster.vertex_offset + ((packed >> 8u) & 0xffu)];
-    let v2 = vertices[instance.ranges.z + cluster.vertex_offset + ((packed >> 16u) & 0xffu)];
+    let i0 = instance.ranges.z + cluster.vertex_offset + (packed & 0xffu);
+    let i1 = instance.ranges.z + cluster.vertex_offset + ((packed >> 8u) & 0xffu);
+    let i2 = instance.ranges.z + cluster.vertex_offset + ((packed >> 16u) & 0xffu);
+    let v0 = vertices[i0];
+    let v1 = vertices[i1];
+    let v2 = vertices[i2];
 
     let local0 = decode_position(instance, v0);
     let local1 = decode_position(instance, v1);
@@ -252,11 +271,14 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         material_fn = material.header.y;
     }
 
-    // The base colour sRGB-encoded, or the debug colour of the active view (rank table of
-    // `DebugView`): 1 cluster colours, 2 the DAG level ramp, 3 hardware versus software and
-    // 4 the first phase versus recovered by the second. Codes 2..4 are sRGB-encoded too.
+    // RAA: with no debug view the albedo holds the interpolated per-vertex colour
+    // sRGB-encoded (white without a stream); `raa_vg_material_input` hands it to the material
+    // as `MaterialInput.color`, so the base colour x vertex colour matches the forward path.
+    // A debug view writes its colour (rank table of `DebugView`): 1 cluster colours, 2 the DAG
+    // level ramp, 3 hardware versus software and 4 the first phase versus recovered by the
+    // second. Codes 2..4 are sRGB-encoded too.
     let debug_view = frame.flags.x;
-    var albedo = encode_srgb(material.base.rgb);
+    var albedo = encode_srgb(interp3(b, vertex_color(i0), vertex_color(i1), vertex_color(i2)));
     if (debug_view == 1u) {
         albedo = hash_color(cluster_index);
     } else if (debug_view == 2u) {

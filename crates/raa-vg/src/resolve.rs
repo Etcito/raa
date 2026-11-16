@@ -177,13 +177,16 @@ fn bind_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
 }
 
 /// The resolve compute pipeline and its group-2 layout, which matches bindings 0-12 of
-/// `resolve_module_wgsl`: 0 `VgFrame` uniform, 1-8 read-only storage buffers and 9-12 write
-/// storage textures. The 16-byte placeholder stands in for a scene buffer the scene has not
+/// `resolve_module_wgsl`: 0 `VgFrame` uniform, 1-8 read-only storage buffers, 9-12 write
+/// storage textures and 13 the `R32Uint` pool vertex-colour texture (a 1x1 white one while
+/// the scene has none). The 16-byte placeholder stands in for a scene buffer the scene has not
 /// uploaded, so the group is always valid.
 pub struct Resolve {
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     placeholder: wgpu::Buffer,
+    /// The 1x1 white `R32Uint` colour texture bound while the scene has no colour stream.
+    white: wgpu::TextureView,
 }
 
 impl Resolve {
@@ -233,6 +236,14 @@ impl Resolve {
                 texture(10, NORMAL_FORMAT),
                 texture(11, UV_MOTION_FORMAT),
                 texture(12, ALBEDO_FORMAT),
+                entry(
+                    13,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
             ],
         });
 
@@ -253,9 +264,44 @@ impl Resolve {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
+        let white_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-vg resolve white colours"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue().write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &white_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &crate::scene::VG_WHITE.to_le_bytes(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let white = white_texture.create_view(&wgpu::TextureViewDescriptor::default());
         Resolve {
             layout,
             pipeline,
+            white,
             placeholder: buffer(
                 gpu,
                 "raa-vg resolve placeholder",
@@ -294,6 +340,7 @@ impl Resolve {
         let clusters = scene.clusters().unwrap_or(materials);
         let vertices = scene.vertices().unwrap_or(placeholder);
         let triangles = scene.triangles().unwrap_or(placeholder);
+        let colors = scene.colors().unwrap_or(&self.white);
         gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("raa-vg resolve"),
             layout: &self.layout,
@@ -322,6 +369,10 @@ impl Resolve {
                 wgpu::BindGroupEntry {
                     binding: 12,
                     resource: wgpu::BindingResource::TextureView(surface.albedo()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: wgpu::BindingResource::TextureView(colors),
                 },
             ],
         })

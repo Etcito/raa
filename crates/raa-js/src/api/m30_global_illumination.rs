@@ -671,8 +671,11 @@ mod web {
             self.with_state(|_, st| set_mesh_colors(st, mesh, &colors, components))
         }
 
-        /// As `setMeshVertexColors`, for the virtualized-geometry voxelizer: section `ordinal` of
-        /// the mesh's cluster store, one colour per `ClusterMesh` vertex.
+        /// As `setMeshVertexColors`, for section `ordinal` of the mesh's cluster store, one colour
+        /// per `ClusterMesh` vertex: the virtualized-geometry raster draws the section with them
+        /// (base colour x vertex colour, as the forward path) and the virtualized-geometry GI
+        /// voxelizer reads them. Each installed feature of the two receives the stream; with
+        /// neither installed it is `feature.missing` (global illumination).
         #[wasm_bindgen(js_name = setMeshClusterVertexColors)]
         pub fn set_mesh_cluster_vertex_colors(
             &mut self,
@@ -684,7 +687,18 @@ mod web {
             self.with_state(|_, st| {
                 st.mesh(mesh)?;
                 let data = colors_arg(&colors, components)?;
-                gi_handle(st)?.set_cluster_vertex_colors(mesh, ordinal as usize, data.as_deref())
+                let vg = st.features.get::<VgHandle>().cloned();
+                let gi = st.features.get::<GiHandle>().cloned();
+                if vg.is_none() && gi.is_none() {
+                    gi_handle(st)?;
+                }
+                if let Some(vg) = vg {
+                    vg.set_cluster_vertex_colors(mesh, ordinal as usize, data.as_deref())?;
+                }
+                if let Some(gi) = gi {
+                    gi.set_cluster_vertex_colors(mesh, ordinal as usize, data.as_deref())?;
+                }
+                Ok(())
             })
         }
     }

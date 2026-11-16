@@ -273,8 +273,11 @@ stored and read back, and they change the output only when their part lands.
 
 `engine.setMeshVertexColors(mesh, colors, components?)` forwards to `GiHandle::set_vertex_colors` for
 every sub-mesh of the mesh handle (forward voxelizer); `engine.setMeshClusterVertexColors(mesh,
-ordinal, colors, components?)` forwards to `GiHandle::set_cluster_vertex_colors` (cluster store key =
-the mesh handle, section `ordinal`). `colors` is a `Float32Array` (linear) or `Uint8Array`
+ordinal, colors, components?)` forwards to `VgHandle::set_cluster_vertex_colors` (the
+virtualized-geometry resolve multiplies the base colour by them, so a virtualized section draws its
+colours as the forward path does) and to `GiHandle::set_cluster_vertex_colors`, each when installed
+(cluster store key = the mesh handle, section `ordinal`); with neither installed it throws
+`feature.missing`. `colors` is a `Float32Array` (linear) or `Uint8Array`
 (divided by 255) with `components` (3 or 4, default 4) values per vertex, matching the vertex count;
 `null`/`undefined` removes the stream, keeping the albedo base colour x instance tint. Other types,
 a bad `components` or a length not divisible by it throw `gi.invalid`; an unknown mesh throws

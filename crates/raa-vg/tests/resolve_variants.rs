@@ -138,7 +138,7 @@ fn resolve_module_validates_with_the_main_compute_entry_point() {
 }
 
 #[test]
-fn resolve_binds_group_two_zero_to_twelve() {
+fn resolve_binds_group_two_zero_to_thirteen() {
     let module = parse(&resolve_module_wgsl());
     let mut bindings: Vec<(u32, u32)> = module
         .global_variables
@@ -151,7 +151,7 @@ fn resolve_binds_group_two_zero_to_twelve() {
     bindings.sort_unstable();
     assert_eq!(
         bindings,
-        (0..=12).map(|binding| (2, binding)).collect::<Vec<_>>()
+        (0..=13).map(|binding| (2, binding)).collect::<Vec<_>>()
     );
     for (_, global) in module.global_variables.iter() {
         assert_eq!(
@@ -188,6 +188,22 @@ fn resolve_binds_group_two_zero_to_twelve() {
             "binding {binding} is a write-only storage texture"
         );
     }
+    let colors = global(&module, 2, 13);
+    assert_eq!(colors.space, naga::AddressSpace::Handle);
+    assert!(
+        matches!(
+            module.types[colors.ty].inner,
+            naga::TypeInner::Image {
+                class: naga::ImageClass::Sampled {
+                    kind: naga::ScalarKind::Uint,
+                    multi: false
+                },
+                dim: naga::ImageDimension::D2,
+                arrayed: false,
+            }
+        ),
+        "binding 13 is the sampled u32 vertex-colour texture"
+    );
 }
 
 #[test]
@@ -197,7 +213,7 @@ fn resolve_stage_uses_eight_storage_buffers_and_four_storage_textures() {
     let used = used_bindings(&module, entry);
     assert_eq!(
         used,
-        (0..=12)
+        (0..=13)
             .map(|binding| (2, binding))
             .collect::<BTreeSet<_>>(),
         "the stage reaches every declared binding"

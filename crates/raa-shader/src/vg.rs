@@ -101,7 +101,18 @@ fn raa_vg_material_input(frag: vec4<f32>) -> RaaVgSurface {
     raa_vg_input.normal = raa_vg_normal;
     raa_vg_input.tangent = raa_vg_default_tangent(raa_vg_normal);
     raa_vg_input.uv = raa_vg_uv_motion_word.xy;
-    raa_vg_input.color = vec4<f32>(1.0);
+    // The resolved albedo holds the sRGB-encoded per-vertex colour (white without a stream)
+    // unless a debug view replaced it; the material multiplies its base colour by it.
+    var raa_vg_color = vec4<f32>(1.0);
+    if (raa_vg_shade.debug_view == 0u) {
+        let raa_vg_srgb = textureLoad(raa_vg_albedo, raa_vg_pixel, 0).rgb;
+        raa_vg_color = vec4<f32>(select(
+            pow((raa_vg_srgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)),
+            raa_vg_srgb / 12.92,
+            raa_vg_srgb <= vec3<f32>(0.04045),
+        ), 1.0);
+    }
+    raa_vg_input.color = raa_vg_color;
     raa_vg_input.view_dir = normalize(raa_frame.camera_pos.xyz - raa_vg_position);
     raa_vg_input.time = raa_frame.camera_pos.w;
     raa_vg_input.front_facing = raa_vg_front_facing;
