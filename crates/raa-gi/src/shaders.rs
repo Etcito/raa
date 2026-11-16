@@ -194,17 +194,18 @@ pub fn forward_group2_entries() -> [BindGroupLayoutEntry; 9] {
 /// Handoff: card 'raa-gi: volume.rs share 1, allocation and pipelines' calls
 /// `light_group2_entries` and `voxel_light_module_wgsl` to build the relight pipeline; today
 /// they return the four group-2 entries and the module text.
-pub fn light_group2_entries() -> [BindGroupLayoutEntry; 4] {
+pub fn light_group2_entries() -> [BindGroupLayoutEntry; 5] {
     [
         uniform_entry(0, 32, false),
         storage_entry(1, true),
         storage_entry(2, false),
         uniform_entry(3, 432, false),
+        storage_entry(4, false),
     ]
 }
 
 /// Atlas-write group 2: GiWriteGpu, seeds, radiance and the Rgba16Float atlas storage texture.
-pub fn write_group2_entries() -> [BindGroupLayoutEntry; 4] {
+pub fn write_group2_entries() -> [BindGroupLayoutEntry; 5] {
     [
         uniform_entry(0, 32, false),
         storage_entry(1, true),
@@ -217,6 +218,7 @@ pub fn write_group2_entries() -> [BindGroupLayoutEntry; 4] {
                 view_dimension: TextureViewDimension::D3,
             },
         ),
+        storage_entry(4, true),
     ]
 }
 

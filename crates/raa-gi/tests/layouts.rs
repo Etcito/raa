@@ -181,14 +181,17 @@ fn light_record_matches_its_wgsl_struct() {
         updates: 41,
         resolution: 64,
         full: 1,
+        // History 32, lighting epoch 6 (stored as 6 & 3 = 2), 3 rays: 32 + 2 * 256 + 3 * 1024.
+        control: GiLightGpu::control_word(32, 6, 3),
     };
+    assert_eq!(r.control, 3616);
     let members: Vec<Member> = vec![
         ("wrap_origin", 0, r.wrap_origin.map(|v| v as u32).to_vec()),
         ("level", 12, vec![3]),
         ("updates", 16, vec![41]),
         ("resolution", 20, vec![64]),
         ("full", 24, vec![1]),
-        ("_pad1", 28, vec![0]),
+        ("control", 28, vec![3616]),
     ];
     let wgsl = voxel_light_module_wgsl();
     check(

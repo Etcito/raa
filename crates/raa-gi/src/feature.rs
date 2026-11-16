@@ -131,6 +131,16 @@ pub(crate) struct GiCore {
     signature: Option<u64>,
     colors_revision: u64,
     frames_since_rebuild: u32,
+    /// The world-space local-light records of the latest frame (upload layout), hashed into
+    /// `light_signature`.
+    light_scratch: Box<[u8; raa_shader::MAX_LOCAL_LIGHTS * raa_shader::LIGHT_GPU_SIZE]>,
+    /// The FNV-1a of the sun and the local lights of the latest frame.
+    light_signature: Option<u64>,
+    /// Bumped when `light_signature` changes: every voxel restarts its radiance average at its
+    /// next update (voxel_light.wgsl), so a moved, dimmed or removed light leaves no stale bounce.
+    light_epoch: u32,
+    /// Frames left of full relight after a lighting change (`HOT_RELIGHT_FRAMES`).
+    hot_relight: u32,
     prepared: GiStats,
     published: Option<GiStats>,
     pending: bool,
@@ -178,6 +188,10 @@ impl GiCore {
             report: MembershipReport::default(),
             signature: None,
             colors_revision: 0,
+            light_scratch: Box::new([0; raa_shader::MAX_LOCAL_LIGHTS * raa_shader::LIGHT_GPU_SIZE]),
+            light_signature: None,
+            light_epoch: 0,
+            hot_relight: 0,
             frames_since_rebuild: 0,
             prepared: initial_stats(GiQuality::default()),
             published: None,
@@ -425,7 +439,9 @@ impl GiHandle {
         // preset) reallocates the screen part, not the voxels.
         let volume_key = |q: GiQuality| (q.resolution, q.levels);
         if active {
-            if core.volume.is_none() || core.allocated_quality.map(volume_key) != Some(volume_key(quality)) {
+            if core.volume.is_none()
+                || core.allocated_quality.map(volume_key) != Some(volume_key(quality))
+            {
                 release_resources(core);
                 let frame = gpu.device().create_buffer(&wgpu::BufferDescriptor {
                     label: Some("raa-gi frame"),
@@ -451,8 +467,7 @@ impl GiHandle {
 
         let copied = core.history_copied.take();
         core.history_valid = active && !allocated && copied == Some(core.viewport);
-        let camera_valid =
-            active && !allocated && core.last_active_viewport == Some(core.viewport);
+        let camera_valid = active && !allocated && core.last_active_viewport == Some(core.viewport);
         core.last_active_viewport = active.then_some(core.viewport);
 
         let settings = core.settings;
@@ -474,6 +489,22 @@ impl GiHandle {
             let record = frame_record(core);
             gpu.queue().write_buffer(&frame, 0, &record.to_bytes());
         }
+        let light_signature = lighting_signature(
+            lit,
+            core.sun_direction,
+            core.sun_color,
+            &mut core.light_scratch,
+        );
+        if core
+            .light_signature
+            .is_some_and(|previous| previous != light_signature)
+        {
+            core.light_epoch = core.light_epoch.wrapping_add(1);
+            core.hot_relight = HOT_RELIGHT_FRAMES;
+        }
+        core.light_signature = Some(light_signature);
+        let full_relight = core.hot_relight > 0;
+        core.hot_relight = core.hot_relight.saturating_sub(1);
         if active && let Some(volume) = core.volume.as_mut() {
             let work = volume.prepare(
                 gpu,
@@ -481,6 +512,8 @@ impl GiHandle {
                 &mut core.rounds,
                 &mut core.cursor,
                 &core.settings,
+                core.light_epoch,
+                full_relight,
             );
             for driver in &core.drivers {
                 driver.prepare_frame(gpu, &core.report.members, &work.voxelize);
@@ -543,6 +576,35 @@ impl GiHandle {
         core.frame_index += 1;
         prepared
     }
+}
+
+/// Frames of full voxel relight (every voxel of the relit level, not a checkerboard half) after a
+/// lighting change: two passes of the five-level relight schedule, so every level is relit whole
+/// at least twice while the volume follows the change.
+const HOT_RELIGHT_FRAMES: u32 = 16;
+
+/// An order-stable FNV-1a 64 of the sun (direction, colour) and the world-space records of the
+/// active local lights, as uploaded: a change detector for the voxel lighting epoch.
+fn lighting_signature(
+    lit: &LitRenderer,
+    sun_direction: [f32; 3],
+    sun_color: [f32; 3],
+    scratch: &mut [u8; raa_shader::MAX_LOCAL_LIGHTS * raa_shader::LIGHT_GPU_SIZE],
+) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let lights = lit.local_lights();
+    lights.write_gpu(scratch);
+    let used = (lights.active_count() as usize).min(raa_shader::MAX_LOCAL_LIGHTS)
+        * raa_shader::LIGHT_GPU_SIZE;
+    let sun = sun_direction
+        .into_iter()
+        .chain(sun_color)
+        .flat_map(f32::to_le_bytes);
+    sun.chain(scratch[..used].iter().copied())
+        .fold(FNV_OFFSET, |h, byte| {
+            (h ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+        })
 }
 
 /// Drops the volume and releases every driver and part (contract 'gi-frame-lifecycle').

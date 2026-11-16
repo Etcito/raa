@@ -76,8 +76,16 @@ impl DebugRenderer {
         DebugRenderer {
             pipeline,
             group2_layout,
-            debug_dummy: dummy(gpu, "raa-gi.debug.screen-dummy", wgpu::TextureFormat::Rgba32Uint),
-            output_dummy: dummy(gpu, "raa-gi.debug.output-dummy", wgpu::TextureFormat::Rgba16Float),
+            debug_dummy: dummy(
+                gpu,
+                "raa-gi.debug.screen-dummy",
+                wgpu::TextureFormat::Rgba32Uint,
+            ),
+            output_dummy: dummy(
+                gpu,
+                "raa-gi.debug.output-dummy",
+                wgpu::TextureFormat::Rgba16Float,
+            ),
         }
     }
 

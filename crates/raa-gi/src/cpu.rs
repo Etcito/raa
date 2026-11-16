@@ -148,11 +148,26 @@ pub fn decode_radiance(packed: [u32; 2]) -> [f32; 3] {
 }
 
 /// Signed octahedral encoding packed with `pack2x16snorm`. Port of `math.wgsl:18-24`.
-/// `RAA_GI_LIGHT_MAX_COUNT` of voxel_light.wgsl: the update count where the blend weight stops
-/// falling.
-pub const VOXEL_MAX_COUNT: u32 = 8;
-/// `RAA_GI_LIGHT_CHANGE`: the relative luminance change that restarts a voxel's count.
-pub const VOXEL_CHANGE: f32 = 0.5;
+/// `RAA_GI_HIT_PULL` of raa-shader gi_volume.wgsl: a hit samples its radiance this many voxels
+/// back along the ray.
+pub const HIT_PULL: f32 = 0.5;
+
+/// `RAA_GI_BEHIND` of volume_write.wgsl: empty voxels further behind their seed's surface plane
+/// (in voxels) take no radiance.
+pub const BAND_BEHIND: f32 = 0.5;
+
+/// Whether an empty voxel `offset` voxels from its seed takes the seed's radiance: at most
+/// `BAND_BEHIND` behind the plane through the seed with the seed's unit `normal`
+/// (`raa_gi_in_front_of_seed`).
+pub fn in_front_of_seed(offset: [f32; 3], normal: [f32; 3]) -> bool {
+    offset[0] * normal[0] + offset[1] * normal[1] + offset[2] * normal[2] >= -BAND_BEHIND
+}
+
+/// `RAA_GI_DIRECT_CHANGE` of voxel_light.wgsl: the relative change of a voxel's direct luminance
+/// that restarts its count.
+pub const VOXEL_DIRECT_CHANGE: f32 = 0.05;
+/// `RAA_GI_DIRECT_FLOOR`: the absolute slack of that test.
+pub const VOXEL_DIRECT_FLOOR: f32 = 1.0e-4;
 
 /// The wrap epoch of a world voxel coordinate in a level of `n` voxels per axis
 /// (`raa_gi_light_epoch`): floor(world / n) per axis, two bits each (x, y << 2, z << 4).
@@ -161,22 +176,28 @@ pub fn voxel_epoch(world: [i32; 3], n: u32) -> u32 {
     e[0] | (e[1] << 2) | (e[2] << 4)
 }
 
-/// One voxel relight: the stored count and epoch, the stored and new luminances. Returns the new
-/// count and the blend weight 1 / count of voxel_light.wgsl: a cell from another epoch (it
-/// scrolled in) restarts at count 0, a luminance change beyond `VOXEL_CHANGE` at 1, and the count
-/// never exceeds `VOXEL_MAX_COUNT`.
+/// One voxel relight (`raa_gi_voxel_blend` of voxel_light.wgsl): the stored count, whether the
+/// cell is the same one (its wrap epoch matches) and lit under the same lighting epoch, the
+/// direct luminance stored at its last update and the current one, and the history cap. Returns
+/// the new count and the blend weight 1 / count: the count restarts at 1 (the update is taken
+/// whole) for a scrolled-in cell, a new lighting epoch or a direct change beyond
+/// `VOXEL_DIRECT_CHANGE` of the larger value plus `VOXEL_DIRECT_FLOOR`; otherwise it grows by one
+/// up to `history_max`. The gathered (noisy) light never restarts a count.
 pub fn voxel_blend(
     stored_count: u32,
-    stored_epoch: u32,
-    epoch: u32,
-    lum_previous: f32,
-    lum_target: f32,
+    same_cell: bool,
+    same_light: bool,
+    direct_before: f32,
+    direct_now: f32,
+    history_max: u32,
 ) -> (u32, f32) {
-    let mut count = if stored_epoch == epoch { stored_count } else { 0 };
-    if count > 2 && (lum_target - lum_previous).abs() > VOXEL_CHANGE * lum_previous.max(1.0e-3) {
-        count = 1;
-    }
-    let count = (count + 1).min(VOXEL_MAX_COUNT);
+    let tolerance = VOXEL_DIRECT_CHANGE * direct_before.max(direct_now) + VOXEL_DIRECT_FLOOR;
+    let changed = !same_cell || !same_light || (direct_now - direct_before).abs() > tolerance;
+    let count = if changed {
+        1
+    } else {
+        (stored_count + 1).min(history_max.max(1))
+    };
     (count, 1.0 / count as f32)
 }
 
@@ -506,7 +527,15 @@ impl CpuVolume {
             previous_distance = s[3];
             if s[3] < voxel * hit_voxels && approaching {
                 hit = true;
-                radiance = [s[0], s[1], s[2]];
+                // `RAA_GI_HIT_PULL`: the radiance half a voxel back toward the origin.
+                let back = [0, 1, 2].map(|i| p[i] - dir[i] * HIT_PULL * voxel);
+                let back_level = self.level_at(back, level);
+                radiance = if back_level < self.levels.len() {
+                    let b = self.sample(back, back_level);
+                    [b[0], b[1], b[2]]
+                } else {
+                    [s[0], s[1], s[2]]
+                };
                 break;
             }
             t += (s[3] - voxel * 0.5).max(voxel * 0.6);
@@ -676,24 +705,45 @@ mod voxel_blend_tests {
 
     #[test]
     fn blend_counts_up_and_restarts() {
-        // A fresh voxel takes its first update whole (count 1, weight 1); the third 1 / 3.
-        assert_eq!(voxel_blend(0, 0, 0, 0.0, 1.0), (1, 1.0));
-        assert_eq!(voxel_blend(2, 0, 0, 1.0, 1.1), (3, 1.0 / 3.0));
-        // Capped at 8: weight 1 / 8 = 0.125.
-        assert_eq!(voxel_blend(8, 0, 0, 1.0, 1.1), (8, 0.125));
-        // Scrolled in from another epoch: the stored count is dropped, weight 1.
-        assert_eq!(voxel_blend(8, 1, 2, 1.0, 1.0), (1, 1.0));
-        // A light that moved (luminance 1 -> 2, +100 % > 50 %): count 2, weight 1 / 2.
-        assert_eq!(voxel_blend(8, 0, 0, 1.0, 2.0), (2, 0.5));
-        // Steady-state average of a constant target after the cap: an 8-update exponential
-        // average reaches 1 - (7/8)^8 = 0.656 of a step; checked against the closed form.
-        let mut value = 0.0f32;
-        let mut count = 8;
-        for _ in 0..8 {
-            let (c, w) = voxel_blend(count, 0, 0, 1.0, 1.0);
+        // A fresh cell takes its first update whole (count 1, weight 1); the third weighs 1 / 3.
+        assert_eq!(voxel_blend(0, false, true, 0.0, 0.0, 32), (1, 1.0));
+        assert_eq!(voxel_blend(2, true, true, 1.0, 1.0, 32), (3, 1.0 / 3.0));
+        // Capped at the history: weight 1 / 32 = 0.03125.
+        assert_eq!(voxel_blend(32, true, true, 1.0, 1.0, 32), (32, 0.03125));
+        // A new lighting epoch restarts the count whatever the direct light did.
+        assert_eq!(voxel_blend(32, true, false, 1.0, 1.0, 32), (1, 1.0));
+        // Direct 1 -> 1.04: within 5 % of 1.04 (+1e-4), kept; 1 -> 0.9 (an occluder): restarted.
+        assert_eq!(voxel_blend(5, true, true, 1.0, 1.04, 32), (6, 1.0 / 6.0));
+        assert_eq!(voxel_blend(5, true, true, 1.0, 0.9, 32), (1, 1.0));
+        // A light that went out (direct 2 -> 0): restarted, so the next update holds no stale light.
+        assert_eq!(voxel_blend(32, true, true, 2.0, 0.0, 32), (1, 1.0));
+    }
+
+    #[test]
+    fn band_is_one_sided() {
+        // Seed normal +x: the voxel one ahead (+1, 0, 0) and one beside (0, 1, 0) take its light;
+        // one behind (-1, 0, 0) is 1 voxel behind the plane (> 0.5) and does not. Normal
+        // (0.6, 0.8, 0): offset (-1, 0.5, 0) is -0.6 + 0.4 = -0.2 voxels, in front; (-1, 0, 0) is
+        // -0.6, behind.
+        assert!(in_front_of_seed([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert!(in_front_of_seed([0.0, 1.0, 0.0], [1.0, 0.0, 0.0]));
+        assert!(!in_front_of_seed([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+        assert!(in_front_of_seed([-1.0, 0.5, 0.0], [0.6, 0.8, 0.0]));
+        assert!(!in_front_of_seed([-1.0, 0.0, 0.0], [0.6, 0.8, 0.0]));
+    }
+
+    #[test]
+    fn blend_is_the_running_mean_while_still() {
+        // Blending samples 2, 4, 6, 8, 10 with the returned weights from a fresh cell gives their
+        // arithmetic mean, (2 + 4 + 6 + 8 + 10) / 5 = 6: the volume converges to the average of
+        // its gather rays instead of an exponential average that keeps moving with each update.
+        let (mut count, mut value) = (0, 0.0f32);
+        for (i, sample) in [2.0f32, 4.0, 6.0, 8.0, 10.0].into_iter().enumerate() {
+            let (c, w) = voxel_blend(count, i > 0, true, 0.5, 0.5, 32);
             count = c;
-            value += (1.0 - value) * w;
+            value += (sample - value) * w;
         }
-        assert!((value - (1.0 - (7.0f32 / 8.0).powi(8))).abs() < 1e-5);
+        assert_eq!(count, 5);
+        assert!((value - 6.0).abs() < 1e-6);
     }
 }

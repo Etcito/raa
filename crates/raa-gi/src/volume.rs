@@ -85,6 +85,7 @@ pub(crate) struct GiVolume {
     voxels: wgpu::Buffer,
     seeds: wgpu::Buffer,
     _radiance: wgpu::Buffer,
+    _direct: wgpu::Buffer,
     flood_a: wgpu::Buffer,
     _flood_b: wgpu::Buffer,
     flood_params: wgpu::Buffer,
@@ -218,6 +219,14 @@ impl GiVolume {
             8 * volume_cells,
             wgpu::BufferUsages::STORAGE,
         );
+        // The direct luminance of each voxel's last update (voxel_light.wgsl binding 4): the
+        // relight restarts a voxel whose direct light changed.
+        let direct = buffer(
+            device,
+            "raa-gi.direct",
+            4 * volume_cells,
+            wgpu::BufferUsages::STORAGE,
+        );
         let flood_a = buffer(device, "raa-gi.flood-a", 4 * cells, flood);
         let flood_b = buffer(device, "raa-gi.flood-b", 4 * cells, flood);
         let atlas = device.create_texture(&wgpu::TextureDescriptor {
@@ -347,6 +356,7 @@ impl GiVolume {
                         voxels.as_entire_binding(),
                         radiance.as_entire_binding(),
                         frame.as_entire_binding(),
+                        direct.as_entire_binding(),
                     ],
                 )
             })
@@ -363,6 +373,7 @@ impl GiVolume {
                         seeds.as_entire_binding(),
                         radiance.as_entire_binding(),
                         wgpu::BindingResource::TextureView(&atlas_view),
+                        voxels.as_entire_binding(),
                     ],
                 )
             })
@@ -373,6 +384,7 @@ impl GiVolume {
             voxels,
             seeds,
             _radiance: radiance,
+            _direct: direct,
             flood_a,
             _flood_b: flood_b,
             flood_params,
@@ -409,6 +421,8 @@ impl GiVolume {
         rounds: &mut RebuildRounds,
         cursor: &mut RelightCursor,
         settings: &GiSettings,
+        light_epoch: u32,
+        full_relight: bool,
     ) -> VolumeWork {
         rounds.start_waiting();
         let resolution = self.quality.resolution;
@@ -494,7 +508,12 @@ impl GiVolume {
                 level: level as u32,
                 updates: self.light_updates.get(level).copied().unwrap_or(0),
                 resolution,
-                full: u32::from(settings.voxel_full_relight),
+                full: u32::from(settings.voxel_full_relight || full_relight),
+                control: GiLightGpu::control_word(
+                    settings.voxel_history_max,
+                    light_epoch,
+                    settings.voxel_rays,
+                ),
             };
             if let Some(params) = self.light_params.get(level) {
                 gpu.queue().write_buffer(params, 0, &record.to_bytes());
@@ -734,6 +753,9 @@ impl GiVolume {
             .chain(&self.write_params)
             .map(wgpu::Buffer::size)
             .sum();
-        clipmap::volume_bytes(self.quality) + uniforms + self.flood_params.size()
+        clipmap::volume_bytes(self.quality)
+            + uniforms
+            + self.flood_params.size()
+            + self._direct.size()
     }
 }

@@ -72,7 +72,12 @@ struct RaaGiHit {
 }
 
 // Sphere traces the volume from t = start. `hit_voxels` is how close counts as a hit, in
-// voxels of the level at the sample.
+// voxels of the level at the sample. A hit's radiance is sampled RAA_GI_HIT_PULL voxels back
+// along the ray, on the ray's own side of the surface: raa-gi writes the radiance band one-sided
+// (in front of each surface only), so a ray reaching a thin wall from its unlit side reads that
+// side's black instead of blending in the light of the far side.
+const RAA_GI_HIT_PULL: f32 = 0.5;
+
 fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, hit_voxels: f32) -> RaaGiHit {
     let count = raa_gi_volume_params.level_count;
     var t = start;
@@ -93,6 +98,11 @@ fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_s
         measured_level = level;
         previous_distance = s.a;
         if s.a < voxel * hit_voxels && approaching {
+            let back = p - dir * (RAA_GI_HIT_PULL * voxel);
+            let back_level = raa_gi_level_at(back, level);
+            if back_level < count {
+                return RaaGiHit(true, t, raa_gi_sample(back, back_level).rgb);
+            }
             return RaaGiHit(true, t, s.rgb);
         }
         t += max(s.a - voxel * 0.5, voxel * 0.6);

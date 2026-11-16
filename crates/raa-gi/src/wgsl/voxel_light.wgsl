@@ -29,37 +29,47 @@
 // SOFTWARE.
 
 // S38 record order: wrap_origin @0, level @12, updates @16, resolution @20, full @24 (1 relights
-// every voxel instead of a checkerboard half, `voxelFullRelight`), zero @28.
+// every voxel instead of a checkerboard half, `voxelFullRelight`), control @28: bits 0-7 the
+// voxel history cap (`voxelHistoryMax`), bits 8-9 the lighting epoch (raa-gi bumps it when a
+// light or the sun changes), bits 10-13 the gather rays (`voxelRays`).
 struct GiLightGpu {
     wrap_origin: vec3<i32>,
     level: u32,
     updates: u32,
     resolution: u32,
     full: u32,
-    _pad1: u32,
+    control: u32,
 }
 
 @group(2) @binding(0) var<uniform> raa_gi_light: GiLightGpu;
 @group(2) @binding(1) var<storage, read> raa_gi_voxels_read: array<u32>;
 @group(2) @binding(2) var<storage, read_write> raa_gi_radiance: array<vec2<u32>>;
 @group(2) @binding(3) var<uniform> raa_gi_frame: GiFrameGpu;
+// The luminance of each voxel's direct radiance at its last update (same slot as the radiance).
+@group(2) @binding(4) var<storage, read_write> raa_gi_direct_store: array<f32>;
 
 const RAA_GI_PI: f32 = 3.14159265359;
 const RAA_GI_TAU: f32 = 6.28318530718;
 const RAA_GI_EMISSIVE_RANGE: f32 = 128.0;
-const RAA_GI_INDIRECT_RAYS: u32 = 3u;
-// The radiance blends at 1 / n, n the voxel's update count, never below 1 / RAA_GI_LIGHT_MAX_COUNT
-// (`cpu::voxel_blend`): a fresh voxel takes its first update whole and the noise of the three
-// rays then averages over eight updates.
-const RAA_GI_LIGHT_MAX_COUNT: u32 = 8u;
-// An update whose luminance differs from the stored one by more than this fraction restarts the
-// count at 2, so a light that moved is followed within two updates.
-const RAA_GI_LIGHT_CHANGE: f32 = 0.5;
+// Rays of the first update after a reset (at least): the voxel takes that update whole, so it is
+// gathered with more rays to start from a less noisy value. The R2 sequence advances by
+// RAA_GI_RAY_STRIDE per update, the most rays an update can take.
+const RAA_GI_RESET_RAYS: u32 = 8u;
+const RAA_GI_RAY_STRIDE: u32 = 16u;
+// The radiance blends at 1 / n, n the voxel's update count, capped at the control word's history
+// (`cpu::voxel_blend`): a still scene averages its gather rays over n updates, so the volume
+// converges instead of fluctuating with every update. The count restarts (the update is taken
+// whole) when the cell scrolled in, the lighting epoch changed (a light or the sun changed), or
+// the voxel's own direct light changed by more than RAA_GI_DIRECT_CHANGE (an occluder moved, a
+// light was hidden): stale light then leaves the volume at the voxel's next update.
+const RAA_GI_DIRECT_CHANGE: f32 = 0.05;
+const RAA_GI_DIRECT_FLOOR: f32 = 1.0e-4;
 
-// The radiance record keeps 16 spare bits after blue: the update count (bits 0-7) and the wrap
-// epoch of the cell (bits 8-13, two bits per axis of floor(world voxel / resolution)). A cell
-// whose epoch differs from where the level now stands scrolled in from the far side of the
-// grid: its stored radiance belongs to another place and is dropped.
+// The radiance record keeps 16 spare bits after blue: the update count (bits 0-7), the wrap
+// epoch of the cell (bits 8-13, two bits per axis of floor(world voxel / resolution)) and the
+// lighting epoch of its last update (bits 14-15). A cell whose wrap epoch differs from where the
+// level now stands scrolled in from the far side of the grid: its stored radiance belongs to
+// another place and is dropped.
 fn raa_gi_light_epoch(world: vec3<i32>, n: u32) -> u32 {
     let e = vec3<u32>(vec3<i32>(floor(vec3<f32>(world) / f32(n)))) & vec3<u32>(3u);
     return e.x | (e.y << 2u) | (e.z << 4u);
@@ -209,6 +219,13 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
     let center = grid.xyz + (vec3<f32>(id) + vec3<f32>(0.5)) * voxel;
     let origin = center + normal * voxel * 1.5;
 
+    // Radiance is stored by world position, wrapped around the grid, so it survives the
+    // clipmap following the camera.
+    let world = vec3<i32>(id) + raa_gi_light.wrap_origin;
+    let wrapped = vec3<u32>((world % i32(n) + vec3<i32>(i32(n))) % i32(n));
+    let slot = level_offset + wrapped.z * n * n + wrapped.y * n + wrapped.x;
+    let stored = raa_gi_radiance[slot];
+
     // Sun, through the clouds and the volume.
     var irradiance = vec3<f32>(0.0);
     let sun = raa_gi_frame.sun_direction.xyz;
@@ -226,17 +243,31 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
         irradiance += raa_gi_local_light(raa_local_lights[i], center, normal, voxel);
     }
 
-    // Indirect: light from other surfaces and the sky, three cosine rays from the R2 sequence. A
-    // ray that runs out of steps next to a surface takes its radiance; only a miss takes the sky.
+    // The reset decision (`cpu::voxel_blend`), from the deterministic direct light alone: the
+    // noisy gather never restarts a count, so a still scene keeps converging.
+    let packed_meta = stored.y >> 16u;
+    let epoch = raa_gi_light_epoch(world, n);
+    let light_epoch = (raa_gi_light.control >> 8u) & 0x3u;
+    let history_max = max(raa_gi_light.control & 0xFFu, 1u);
+    let lum_direct = dot(albedo / RAA_GI_PI * irradiance, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let blend = raa_gi_voxel_blend(packed_meta & 0xFFu, ((packed_meta >> 8u) & 0x3Fu) == epoch,
+        ((packed_meta >> 14u) & 0x3u) == light_epoch, raa_gi_direct_store[slot], lum_direct,
+        history_max);
+    let count = blend.count;
+    let steady_rays = clamp((raa_gi_light.control >> 10u) & 0xFu, 1u, 15u);
+    let rays = select(steady_rays, max(steady_rays, RAA_GI_RESET_RAYS), count == 1u);
+
+    // Indirect: light from other surfaces and the sky, cosine rays from the R2 sequence. A ray
+    // that runs out of steps next to a surface takes its radiance; only a miss takes the sky.
     let basis = raa_gi_orthonormal_basis(normal);
     let seed = vec2<f32>(
         raa_gi_hash_to_unit(local_index * 7u + level),
         raa_gi_hash_to_unit(local_index * 13u + 5u),
     );
     var gathered = vec3<f32>(0.0);
-    for (var r = 0u; r < RAA_GI_INDIRECT_RAYS; r++) {
+    for (var r = 0u; r < rays; r++) {
         let direction = raa_gi_cosine_sample(
-            raa_gi_r2_sequence(raa_gi_light.updates * RAA_GI_INDIRECT_RAYS + r, seed),
+            raa_gi_r2_sequence(raa_gi_light.updates * RAA_GI_RAY_STRIDE + r, seed),
             basis,
         );
         let hit = raa_gi_gather(origin, direction, voxel, 320.0, 32u, 0.85);
@@ -245,27 +276,30 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
         gathered += select(env, hit.radiance, hit.hit);
     }
     // With cosine-weighted rays, irradiance is pi times the mean radiance.
-    irradiance += gathered / f32(RAA_GI_INDIRECT_RAYS) * RAA_GI_PI;
+    irradiance += gathered / f32(rays) * RAA_GI_PI;
 
     let target_radiance = albedo / RAA_GI_PI * irradiance + emissive;
-
-    // Radiance is stored by world position, wrapped around the grid, so it survives the
-    // clipmap following the camera.
-    let world = vec3<i32>(id) + raa_gi_light.wrap_origin;
-    let wrapped = vec3<u32>((world % i32(n) + vec3<i32>(i32(n))) % i32(n));
-    let slot = level_offset + wrapped.z * n * n + wrapped.y * n + wrapped.x;
-    let stored = raa_gi_radiance[slot];
     let previous = raa_gi_decode_radiance(stored);
-    let packed_meta = stored.y >> 16u;
-    let epoch = raa_gi_light_epoch(world, n);
-    var count = select(0u, packed_meta & 0xFFu, ((packed_meta >> 8u) & 0x3Fu) == epoch);
-    let lum_previous = dot(previous, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let lum_target = dot(target_radiance, vec3<f32>(0.2126, 0.7152, 0.0722));
-    if count > 2u && abs(lum_target - lum_previous) > RAA_GI_LIGHT_CHANGE * max(lum_previous, 1.0e-3) {
-        count = 1u;
-    }
-    count = min(count + 1u, RAA_GI_LIGHT_MAX_COUNT);
-    let blended = mix(previous, target_radiance, 1.0 / f32(count));
+    let blended = mix(previous, target_radiance, blend.weight);
     let packed = raa_gi_encode_radiance(blended);
-    raa_gi_radiance[slot] = vec2<u32>(packed.x, (packed.y & 0xFFFFu) | ((count | (epoch << 8u)) << 16u));
+    raa_gi_radiance[slot] = vec2<u32>(packed.x,
+        (packed.y & 0xFFFFu) | ((count | (epoch << 8u) | (light_epoch << 14u)) << 16u));
+    raa_gi_direct_store[slot] = lum_direct;
+}
+
+struct RaaGiVoxelBlend {
+    count: u32,
+    weight: f32,
+}
+
+// The next update count of a voxel and its blend weight 1 / count (`cpu::voxel_blend`). The count
+// restarts at 1 (the update is taken whole) when the cell scrolled in (`same_cell` false), the
+// lighting epoch changed (`same_light` false) or the direct luminance moved by more than
+// RAA_GI_DIRECT_CHANGE of the larger of the two; otherwise it grows by one up to `history_max`.
+fn raa_gi_voxel_blend(count: u32, same_cell: bool, same_light: bool, direct_before: f32,
+    direct_now: f32, history_max: u32) -> RaaGiVoxelBlend {
+    let tolerance = RAA_GI_DIRECT_CHANGE * max(direct_before, direct_now) + RAA_GI_DIRECT_FLOOR;
+    let changed = !same_cell || !same_light || abs(direct_now - direct_before) > tolerance;
+    let next = select(min(count + 1u, max(history_max, 1u)), 1u, changed);
+    return RaaGiVoxelBlend(next, 1.0 / f32(next));
 }

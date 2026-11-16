@@ -144,13 +144,16 @@ pub struct GiLightGpu {
     /// 1 relights every voxel of the level, 0 a checkerboard half (offset 24,
     /// `voxelFullRelight`).
     pub full: u32,
+    /// Offset 28: bits 0-7 the voxel history cap (`voxelHistoryMax`), bits 8-9 the lighting
+    /// epoch, bits 10-13 the gather rays (`voxelRays`); see [`GiLightGpu::control_word`].
+    pub control: u32,
 }
 
 impl GiLightGpu {
     /// Byte size of the record (S38).
     pub const SIZE: usize = 32;
 
-    /// Serialises the record; bytes 28..32 are zero padding.
+    /// Serialises the record.
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
         let mut out = [0u8; Self::SIZE];
         put(&mut out, 0, self.wrap_origin.map(i32::to_le_bytes));
@@ -158,7 +161,14 @@ impl GiLightGpu {
         put(&mut out, 16, [self.updates.to_le_bytes()]);
         put(&mut out, 20, [self.resolution.to_le_bytes()]);
         put(&mut out, 24, [self.full.to_le_bytes()]);
+        put(&mut out, 28, [self.control.to_le_bytes()]);
         out
+    }
+
+    /// The control word: `history` (clamped to [1, 255]) in bits 0-7, `light_epoch & 3` in bits
+    /// 8-9 and `rays` (clamped to [1, 15]) in bits 10-13.
+    pub fn control_word(history: u32, light_epoch: u32, rays: u32) -> u32 {
+        history.clamp(1, 255) | ((light_epoch & 3) << 8) | (rays.clamp(1, 15) << 10)
     }
 }
 
