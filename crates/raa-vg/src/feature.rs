@@ -8,23 +8,27 @@
 //! and 36 stay clear (P3-Q8, S32); feature id 36 follows the cascade availability.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use raa_cluster::ClusterStore;
-use raa_core::{GpuContext, MeshId, RaaError};
+use raa_core::{GpuContext, MeshId, RaaError, wgpu};
 use raa_lit::LitRenderer;
 use raa_pipeline::Pipeline;
 use raa_scene::{Camera, Scene};
 use raa_shadow::ShadowHandle;
 
+use crate::culling::{CullPipelines, ViewSlots};
 use crate::eligibility::InstancePath;
 use crate::error::{
     DEFORMED_UNSUPPORTED, SKINNED_UNSUPPORTED, TRANSPARENT_MATERIAL, invalid, refusal,
 };
 use crate::frame_passes::{SharedVg, VgCullPass, VgFrameState, VgRasterPass, VgResolvePass};
 use crate::gbuffer::VgGbufferPass;
-use crate::scene::{InstanceRequests, ItemScratch, MeshKeys, VgPlan, VgSyncReport, plan_sync};
+use crate::scene::{
+    InstanceRequests, ItemScratch, MeshKeys, VgPlan, VgScene, VgSyncReport, WithGiMembers,
+    plan_sync,
+};
 use crate::settings::{VgSettings, VgSettingsPatch};
 use crate::shade::VgShadeContributor;
 
@@ -107,6 +111,18 @@ pub struct VgStats {
     pub pending: bool,
 }
 
+/// The current frame's virtualized-geometry state lent by [`VgHandle::with_gi_frame`]: the
+/// scene pool, the cull pipelines, the `PassView` slots and the cull scene group.
+pub struct VgGiFrame<'a> {
+    pub scene: &'a VgScene,
+    pub cull: &'a CullPipelines,
+    pub slots: &'a ViewSlots,
+    /// `VgResources::cull_history`: the cull scene group with the `PassView` slots at binding 0,
+    /// the scene instances, nodes and clusters at 1-3, and the previous-frame HZB at 4. The HZB
+    /// is never read by an orthographic view, because its `occlusion_enabled` is 0.
+    pub cull_scene: &'a wgpu::BindGroup,
+}
+
 #[derive(Default)]
 struct Latest {
     report: Option<VgSyncReport>,
@@ -123,6 +139,8 @@ struct HandleState {
     scratch: RefCell<ItemScratch>,
     latest: RefCell<Latest>,
     submitted_views: Cell<u8>,
+    /// The GI member tags, sorted and deduplicated; empty until `set_gi_members` changes it.
+    gi_members: RefCell<BTreeSet<u32>>,
 }
 
 /// The installed virtualized-geometry feature; clones share one state.
@@ -257,6 +275,65 @@ impl VgHandle {
         if let Ok(mut keys) = self.shared.keys.try_borrow_mut() {
             keys.remove(key);
         }
+    }
+
+    /// Lends the current frame's virtualized-geometry state to `f` for the duration of the
+    /// closure only.
+    ///
+    /// The closure gets `None` while: VG is inactive (the frame state's `active` is false); the
+    /// pipelines or `VgResources` are released; the scene is not uploaded (`scene_ready` is
+    /// false); or the frame state is already borrowed (`try_borrow` fails). It never creates,
+    /// recreates or drops state.
+    ///
+    /// LIFECYCLE: [`VgHandle::prepare_frame`] runs from the m29 api frame.
+    /// crates/raa-js/build.rs:99-107 `frame_all` calls the api files in file-name order, so
+    /// m29_virtual_geometry.rs runs before m30_global_illumination.rs. On an active frame it
+    /// creates the pipelines and `VgResources` through `VgFrameState::ensure_resources`. On an
+    /// inactive frame it drops them through `VgFrameState::release`. `GiHandle::prepare_frame`
+    /// runs after it in the same invocation. `gi.volume` (order 25) records after `vg.resolve`
+    /// (order 23), because the pipeline records passes in order, so a `with_gi_frame` call from
+    /// either place sees this frame's resources.
+    ///
+    /// Handoff: `raa-gi: driver B part virtual_driver and the voxelize_virtual kernel` calls
+    /// `VgHandle::with_gi_frame` and `VgHandle::set_gi_members` exported by
+    /// crates/raa-vg/src/feature.rs to borrow this frame's `VgGiFrame` and drive the `Gi` cull
+    /// filter from the member set. The `INSTANCE_GI` flag itself comes from
+    /// `WithGiMembers::new` (crates/raa-vg/src/scene.rs:232), whose Handoff names this card.
+    pub fn with_gi_frame<R>(&self, f: impl FnOnce(Option<VgGiFrame<'_>>) -> R) -> R {
+        let Ok(state) = self.shared.vg.try_borrow() else {
+            return f(None);
+        };
+        let (Some(pipelines), Some(resources)) =
+            (state.pipelines.as_ref(), state.resources.as_ref())
+        else {
+            return f(None);
+        };
+        if !state.active || !state.scene_ready() {
+            return f(None);
+        }
+        f(Some(VgGiFrame {
+            scene: &state.scene,
+            cull: &pipelines.cull,
+            slots: &resources.slots,
+            cull_scene: &resources.cull_history,
+        }))
+    }
+
+    /// Replaces the GI member set with `tags`, held as a sorted, deduplicated
+    /// `BTreeSet<u32>` in the handle state. An unchanged set is a no-op; otherwise the next
+    /// [`VgHandle::prepare_frame`] plans with
+    /// [`WithGiMembers::new`](crate::scene::WithGiMembers::new), so `ids.z & INSTANCE_GI` of
+    /// each uploaded `VgInstanceRecord` follows the set from that frame on.
+    /// `VgScene::upload_instances` writes only changed bytes. A busy handle state is skipped.
+    pub fn set_gi_members(&self, tags: &[u32]) {
+        let members: BTreeSet<u32> = tags.iter().copied().collect();
+        let Ok(mut gi_members) = self.shared.gi_members.try_borrow_mut() else {
+            return;
+        };
+        if *gi_members == members {
+            return;
+        }
+        *gi_members = members;
     }
 
     /// Plans the frame's paths, switches the active state and updates the lit `VirtualSet` and
@@ -458,8 +535,13 @@ impl VgHandle {
         let Ok(keys) = self.shared.keys.try_borrow() else {
             return VgPlan::default();
         };
+        let Ok(members) = self.shared.gi_members.try_borrow() else {
+            return VgPlan::default();
+        };
         let items = scratch.fill(scene);
-        plan_sync(items, &lit.handle(), &store, &requests, &keys, settings)
+        let lit_handle = lit.handle();
+        let source = WithGiMembers::new(&lit_handle, &members);
+        plan_sync(items, &source, &store, &requests, &keys, settings)
     }
 
     fn upload(&self, gpu: &GpuContext, plan: &VgPlan) {
@@ -568,6 +650,7 @@ impl VgFeature {
                 scratch: RefCell::new(ItemScratch::default()),
                 latest: RefCell::new(Latest::default()),
                 submitted_views: Cell::new(1),
+                gi_members: RefCell::new(BTreeSet::new()),
             }),
         })
     }

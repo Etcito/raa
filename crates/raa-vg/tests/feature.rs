@@ -22,7 +22,8 @@ use raa_lit::{AttributedMesh, LitOptions, LitRenderer};
 use raa_math::{Quat, Vec3};
 use raa_pipeline::Pipeline;
 use raa_scene::{Camera, RenderList, Scene, Transform};
-use raa_vg::{VgFeature, VgHandle, VgSettingsPatch};
+use raa_vg::culling::{CullPhase, CullWork};
+use raa_vg::{GI_BASE, InstanceFilter, PassView, VgFeature, VgHandle, VgSettingsPatch};
 
 const SIZE: (u32, u32) = (64, 64);
 const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -246,4 +247,162 @@ fn two_views_fall_back() {
     assert_eq!(stats.inactive_reason, Some("multiView"));
     assert_eq!(rig.vg.allocated_bytes(), 0);
     assert!(rig.vg.recorded_passes().is_empty());
+}
+
+/// The GI cull view of the one baked instance: an orthographic box centred on `center` with a
+/// 16 m span (half-size 8 m), 80 px square and a 0.5 m error threshold, drawing exactly the
+/// `INSTANCE_GI` instances and forcing the software path. The near plane is 0 and far 16, so
+/// the eye at `center + Z * 8` sees the whole box; `occlusion_enabled` stays 0.
+fn gi_view(center: Vec3) -> PassView {
+    let mut view = PassView::orthographic(
+        Camera {
+            eye: center + Vec3::Z * 8.0,
+            target: center,
+            up: Vec3::Y,
+            fov_y_rad: 1.0,
+            near: 0.0,
+            far: 16.0,
+            aspect: 1.0,
+            ortho_height: Some(16.0),
+        }
+        .view_proj(),
+        center,
+        [80.0, 80.0],
+        5.0,
+        0.5,
+    )
+    .drawing(InstanceFilter::Gi);
+    view.allow_software = 2;
+    view
+}
+
+/// Copies `size` bytes of `source` into a mapped staging buffer and returns them.
+fn read_buffer(gpu: &GpuContext, source: &wgpu::Buffer, size: u64) -> Vec<u8> {
+    let device = gpu.device();
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa-vg feature readback"),
+        size,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(source, 0, &staging, 0, size);
+    gpu.queue().submit(Some(encoder.finish()));
+    let slice = staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = tx.send(result);
+    });
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+    rx.recv().expect("map callback").expect("map");
+    let bytes = slice.get_mapped_range().expect("mapped range").to_vec();
+    staging.unmap();
+    bytes
+}
+
+/// Records one first-phase GI cull of `view` over the frame lent by `with_gi_frame` and reads
+/// back the software cluster count (word 4 of the 48-byte cull state). Nothing is rasterised,
+/// so no depth is written and an orthographic view never reads the HZB at binding 4.
+fn gi_sw_count(gpu: &GpuContext, rig: &Rig, view: &PassView) -> u32 {
+    rig.vg.with_gi_frame(|frame| {
+        let frame = frame.expect("an active frame lends its state");
+        frame.slots.write(gpu, GI_BASE, view);
+        let work = CullWork::new(gpu, frame.cull, "gi test", 4096, 4096);
+        let mut encoder = gpu.device().create_command_encoder(&Default::default());
+        frame.cull.record(
+            &mut encoder,
+            frame.scene,
+            frame.cull_scene,
+            GI_BASE,
+            &work,
+            CullPhase::First,
+        );
+        gpu.queue().submit(Some(encoder.finish()));
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll");
+        let state = read_buffer(gpu, work.state(), 48);
+        u32::from_le_bytes(state[16..20].try_into().expect("4 bytes"))
+    })
+}
+
+#[test]
+fn with_gi_frame_is_none_while_inactive() {
+    let test = "with_gi_frame_is_none_while_inactive";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let mut rig = Rig::new(&gpu, 1);
+    rig.prepare(&gpu, 1);
+    assert!(
+        rig.vg.with_gi_frame(|frame| frame.is_none()),
+        "an installed feature that was never enabled lends no frame"
+    );
+
+    rig.vg
+        .set(VgSettingsPatch {
+            enabled: Some(true),
+            ..VgSettingsPatch::default()
+        })
+        .expect("msaa 1 accepts enabled");
+    rig.set_passes(true);
+    rig.frame(&gpu, 1);
+    assert!(
+        rig.vg.with_gi_frame(|frame| frame.is_some()),
+        "an active single-view frame lends its state"
+    );
+
+    rig.frame(&gpu, 2);
+    assert!(
+        rig.vg.with_gi_frame(|frame| frame.is_none()),
+        "two submitted views fall back to forward, so no frame is lent"
+    );
+}
+
+#[test]
+fn gi_members_replan_drives_the_gi_cull_filter() {
+    let test = "gi_members_replan_drives_the_gi_cull_filter";
+    let Some(gpu) = software_gpu() else {
+        skip(test, "software_gpu returned None");
+        return;
+    };
+    let mut rig = Rig::new(&gpu, 1);
+    rig.prepare(&gpu, 1);
+    let tag = rig.tags[0];
+    rig.vg
+        .set(VgSettingsPatch {
+            enabled: Some(true),
+            ..VgSettingsPatch::default()
+        })
+        .expect("msaa 1 accepts enabled");
+    rig.set_passes(true);
+    // The first active prepare creates the scene pool buffers after the cull scene group was
+    // built; the second one rebuilds that group against them, as a pass `prepare` does.
+    rig.prepare(&gpu, 1);
+    rig.prepare(&gpu, 1);
+    assert!(rig.vg.stats().active, "the one baked instance activates VG");
+    let view = gi_view(Vec3::ZERO);
+    assert_eq!(
+        gi_sw_count(&gpu, &rig, &view),
+        0,
+        "no GI member yet, so the Gi filter draws no instance"
+    );
+
+    rig.vg.set_gi_members(&[tag]);
+    rig.prepare(&gpu, 1);
+    assert!(
+        gi_sw_count(&gpu, &rig, &view) > 0,
+        "the new member is drawn by the Gi filter after the re-plan"
+    );
+
+    rig.vg.set_gi_members(&[]);
+    rig.prepare(&gpu, 1);
+    assert_eq!(
+        gi_sw_count(&gpu, &rig, &view),
+        0,
+        "dropping the member empties the Gi filter again"
+    );
 }

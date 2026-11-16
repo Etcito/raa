@@ -271,7 +271,7 @@ impl VgFrameState {
     /// True when every scene buffer the raster and resolve groups bind is uploaded. The
     /// placeholder stand-ins keep the groups valid but a draw or dispatch bound to one fails
     /// wgpu validation, so a pass skips until the scene is uploaded.
-    fn scene_ready(&self) -> bool {
+    pub(crate) fn scene_ready(&self) -> bool {
         self.scene.instances().is_some()
             && self.scene.nodes().is_some()
             && self.scene.clusters().is_some()
