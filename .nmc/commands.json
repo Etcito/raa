@@ -397,5 +397,54 @@
       "p4-gi-quality-lighting-render",
       "p4-gi-quality-lighting-fresh"
     ]
+  },
+  {
+    "name": "p4-gi-virtual-check",
+    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-build"
+    ]
+  },
+  {
+    "name": "p4-gi-virtual-select",
+    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-virtual-check"
+    ]
+  },
+  {
+    "name": "p4-gi-virtual-clean",
+    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-virtual-select"
+    ]
+  },
+  {
+    "name": "p4-gi-virtual-render",
+    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
+    "timeout_s": 3000,
+    "after": [
+      "p4-gi-virtual-clean"
+    ]
+  },
+  {
+    "name": "p4-gi-virtual-fresh",
+    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
+    "timeout_s": 60,
+    "after": [
+      "p4-gi-virtual-render"
+    ]
+  },
+  {
+    "name": "p4-gi-virtual-judge",
+    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/virtual --stage virtual --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p4-gi-virtual-render",
+      "p4-gi-virtual-fresh"
+    ]
   }
 ]
