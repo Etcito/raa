@@ -66,6 +66,38 @@ pub(crate) fn colors_to_rgba(values: &[f32], components: u32) -> Result<Vec<f32>
         .collect())
 }
 
+/// The native-testable body of the colour setters: `None` (no buffer) stays `None`, meaning the
+/// albedo is the material base colour x instance tint; a `Float32Array` is read as is and a
+/// `Uint8Array` is normalised by 1/255. `components` is 3 or 4 (default 4).
+pub(crate) fn colour_data(
+    floats: Option<&[f32]>,
+    bytes: Option<&[u8]>,
+    components: Option<u32>,
+) -> Result<Option<Vec<f32>>, RaaError> {
+    let n = components.unwrap_or(4);
+    match (floats, bytes) {
+        (Some(f), _) => colors_to_rgba(f, n).map(Some),
+        (None, Some(b)) => {
+            let raw: Vec<f32> = b.iter().map(|&v| f32::from(v) / 255.0).collect();
+            colors_to_rgba(&raw, n).map(Some)
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+/// Forwards one colour stream (or `None`) to every id through `sink`, which is
+/// `GiHandle::set_vertex_colors` in the wasm method.
+pub(crate) fn forward_colors<I: Copy>(
+    ids: &[I],
+    data: Option<&[f32]>,
+    mut sink: impl FnMut(I, Option<&[f32]>) -> Result<(), RaaError>,
+) -> Result<(), RaaError> {
+    for &id in ids {
+        sink(id, data)?;
+    }
+    Ok(())
+}
+
 /// The S36 quality keys in their key order: the `GiQuality` names of the JS API.
 pub(crate) const QUALITY_KEYS: [&str; 3] = ["resolution", "levels", "probeRays"];
 
@@ -546,21 +578,16 @@ mod web {
         if value.is_null() || value.is_undefined() {
             return Ok(None);
         }
-        let n = components.unwrap_or(4);
-        let raw: Vec<f32> = if let Some(f) = value.dyn_ref::<js_sys::Float32Array>() {
-            f.to_vec()
+        if let Some(f) = value.dyn_ref::<js_sys::Float32Array>() {
+            colour_data(Some(&f.to_vec()), None, components)
         } else if let Some(u) = value.dyn_ref::<js_sys::Uint8Array>() {
-            u.to_vec()
-                .into_iter()
-                .map(|b| f32::from(b) / 255.0)
-                .collect()
+            colour_data(None, Some(&u.to_vec()), components)
         } else {
-            return Err(invalid(
+            Err(invalid(
                 "colors",
                 "must be a Float32Array, a Uint8Array or null",
-            ));
-        };
-        colors_to_rgba(&raw, n).map(Some)
+            ))
+        }
     }
 
     /// `setMeshVertexColors(mesh, colors, components?)`: forwards to `GiHandle::set_vertex_colors`
@@ -579,10 +606,7 @@ mod web {
             .ok_or_else(|| api_error(UNKNOWN_HANDLE, format!("mesh {mesh} does not exist")))?;
         let data = colors_arg(colors, components)?;
         let gi = gi_handle(st)?;
-        for id in ids {
-            gi.set_vertex_colors(id, data.as_deref())?;
-        }
-        Ok(())
+        forward_colors(&ids, data.as_deref(), |id, c| gi.set_vertex_colors(id, c))
     }
 
     #[wasm_bindgen(js_class = Engine)]

@@ -9,8 +9,8 @@
 mod m30gi;
 
 use m30gi::{
-    GiWire, QUALITY_KEYS, colors_to_rgba, instance_entries, parse_quality_patch,
-    parse_settings_patch, quality_entries, settings_entries, stats_entries,
+    GiWire, QUALITY_KEYS, colors_to_rgba, colour_data, forward_colors, instance_entries,
+    parse_quality_patch, parse_settings_patch, quality_entries, settings_entries, stats_entries,
 };
 use raa_core::RaaError;
 use raa_gi::membership::refusal_message;
@@ -339,4 +339,40 @@ fn vertex_colour_buffers_expand_to_rgba_or_refuse() {
     assert_eq!(colors_to_rgba(&[0.5; 8], 4).unwrap(), vec![0.5; 8]);
     assert!(refusal(colors_to_rgba(&[0.5; 4], 3)).starts_with("colors: "));
     assert!(refusal(colors_to_rgba(&[0.5; 4], 2)).starts_with("components: "));
+}
+
+#[test]
+fn colour_setters_forward_coloured_float_byte_and_absent_buffers() {
+    // three vertices, rgb floats: forwarded as rgba with alpha 1 to every sub-mesh id
+    let rgb = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let data = colour_data(Some(&rgb), None, Some(3)).unwrap();
+    let mut seen: Vec<(u32, Option<Vec<f32>>)> = Vec::new();
+    forward_colors(&[7u32, 9], data.as_deref(), |id, c| {
+        seen.push((id, c.map(<[f32]>::to_vec)));
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0].1.as_ref().unwrap().len(), 12);
+    assert_eq!(seen[1].0, 9);
+
+    // Uint8Array rgba is divided by 255
+    let bytes = [255u8, 0, 0, 255, 0, 255, 0, 255];
+    let data = colour_data(None, Some(&bytes), None).unwrap().unwrap();
+    assert_eq!(data, vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+
+    // no buffer: forwarded as no colour (albedo unchanged)
+    let none = colour_data(None, None, Some(3)).unwrap();
+    assert!(none.is_none());
+    let mut calls = 0;
+    forward_colors(&[1u32], none.as_deref(), |_, c| {
+        assert!(c.is_none());
+        calls += 1;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+
+    // a bad buffer is refused
+    assert!(colour_data(Some(&[0.5; 4]), None, Some(3)).is_err());
 }
