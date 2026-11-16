@@ -141,6 +141,8 @@ struct Rig {
     slots: Vec<u32>,
     graph: FrameGraph,
     backbuffer: OffscreenTarget,
+    /// The cube's scene instance.
+    instance: raa_scene::InstanceId,
 }
 
 impl Rig {
@@ -158,7 +160,7 @@ impl Rig {
         let node = scene
             .add_node(None, Transform::from_trs(Vec3::ZERO, rotation, Vec3::ONE))
             .expect("node");
-        scene
+        let instance = scene
             .add_instance(node, mesh, MaterialId(0))
             .expect("instance");
         scene.camera.set_viewport(SIZE.0, SIZE.1);
@@ -174,11 +176,21 @@ impl Rig {
             slots: Vec::with_capacity(1),
             graph,
             backbuffer: OffscreenTarget::new(gpu, SIZE.0, SIZE.1, SURFACE),
+            instance,
         }
     }
 
     /// Prepares and renders one frame, then waits for the GPU.
     fn frame(&mut self, gpu: &GpuContext) {
+        let counts = self.render(gpu);
+        assert_eq!(
+            (counts.instances, counts.draw_calls, counts.triangles),
+            (1, 1, 12)
+        );
+    }
+
+    /// Prepares and renders one frame, waits for the GPU and returns the prepare counts.
+    fn render(&mut self, gpu: &GpuContext) -> raa_lit::FrameCounts {
         let counts = self
             .lit
             .prepare(
@@ -189,10 +201,6 @@ impl Rig {
                 &mut self.slots,
             )
             .expect("prepare");
-        assert_eq!(
-            (counts.instances, counts.draw_calls, counts.triangles),
-            (1, 1, 12)
-        );
         let commands = self
             .graph
             .execute(gpu, self.backbuffer.view(), SIZE)
@@ -201,6 +209,7 @@ impl Rig {
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");
+        counts
     }
 
     /// The HDR chain source (what the next pass after forward reads).
@@ -392,6 +401,65 @@ fn editor_overlays_render_and_turn_off_without_changing_baseline() {
         hdr_baseline,
         "off restores original rendering exactly"
     );
+    let error = raa_core::testing::block_on(errors.pop());
+    assert!(error.is_none(), "GPU validation error: {error:?}");
+}
+
+/// A virtualized member leaves the camera draw lists (its surface is drawn by raa-vg, absent
+/// from this rig), yet its selection outline is still drawn: with the cube a member, setting
+/// its outline changes the display, and clearing it restores the frame.
+#[test]
+fn editor_outlines_a_virtualized_member() {
+    let Some(gpu) = software_gpu() else {
+        skip(
+            "editor_outlines_a_virtualized_member",
+            "software_gpu returned None",
+        );
+        return;
+    };
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut rig = Rig::new(&gpu, 1);
+    let instance = rig.instance;
+    rig.lit.virtual_instances_mut().set(instance, true);
+    let clear = |rig: &Rig| {
+        let mut e = gpu.device().create_command_encoder(&Default::default());
+        {
+            let _p = e.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: rig.backbuffer.view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        gpu.queue().submit([e.finish()]);
+    };
+    clear(&rig);
+    let counts = rig.render(&gpu);
+    assert_eq!(
+        counts.draw_calls, 0,
+        "the member leaves the camera draw lists"
+    );
+    let baseline = rig.backbuffer.read_rgba8(&gpu).unwrap();
+    let handle = rig.lit.handle();
+    handle.set_outline(0, Some([1.0, 0.5, 0.0]));
+    clear(&rig);
+    rig.render(&gpu);
+    let outlined = rig.backbuffer.read_rgba8(&gpu).unwrap();
+    assert_ne!(outlined, baseline, "the member's outline is drawn");
+    handle.set_outline(0, None);
+    clear(&rig);
+    rig.render(&gpu);
+    assert_eq!(rig.backbuffer.read_rgba8(&gpu).unwrap(), baseline);
     let error = raa_core::testing::block_on(errors.pop());
     assert!(error.is_none(), "GPU validation error: {error:?}");
 }

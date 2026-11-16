@@ -1,7 +1,7 @@
 //! Optional editor overlays. No textures, buffers, uploads or commands while inactive.
 use crate::handle::LitShared;
 use crate::{DrawClass, LitHandle, LitMeshId};
-use raa_core::RaaError;
+use raa_core::{MaterialId, MeshId, RaaError};
 use raa_pipeline::{FeaturePass, RecordCtx};
 use std::collections::HashMap;
 
@@ -108,9 +108,14 @@ pub(crate) struct EditorPass {
     lit: LitHandle,
     resources: Option<Resources>,
     bytes: Vec<u8>,
-    /// The 128 B instance records of the camera ids, in id order.
+    /// The 128 B instance records of the camera ids, in id order, then those of
+    /// `virtual_outlines`.
     records: Vec<u8>,
     record_buffer: Option<wgpu::Buffer>,
+    /// The outlined virtualized members of this frame (mesh, material), drawn into the mask
+    /// after the camera ids: the virtualized set leaves them out of the camera draw lists, so
+    /// the selection's draws never hold them.
+    virtual_outlines: Vec<(MeshId, MaterialId)>,
 }
 struct Resources {
     size: (u32, u32),
@@ -136,6 +141,7 @@ impl EditorPass {
             bytes: Vec::new(),
             records: Vec::new(),
             record_buffer: None,
+            virtual_outlines: Vec::new(),
         }
     }
 }
@@ -467,6 +473,43 @@ impl FeaturePass for EditorPass {
                 self.bytes.extend_from_slice(&f.to_le_bytes());
             }
         }
+        // A virtualized member is drawn by raa-vg, not by the camera draw lists, so its outline
+        // mask is drawn from the frame's item snapshot: its persistent record and settings follow
+        // the camera ids, at instance index `camera_count + k`.
+        self.virtual_outlines.clear();
+        if outlined {
+            let background = ctx.lighting.env().background;
+            for (index, item) in s.items.items.iter().enumerate() {
+                let Some(&slot) = s.item_slots.get(index) else {
+                    continue;
+                };
+                if !crate::virtual_set::slot_member(&s.virtual_bits, slot as usize)
+                    || s.lods.is_level(item.mesh)
+                {
+                    continue;
+                }
+                let tag = s.item_tags.get(index).copied().unwrap_or(0);
+                let (Some(color), Some(record)) =
+                    (s.editor.outlines.get(&tag).copied(), s.store.record(slot))
+                else {
+                    continue;
+                };
+                self.records.extend_from_slice(record);
+                for f in [
+                    background[0],
+                    background[1],
+                    background[2],
+                    0.0,
+                    color[0],
+                    color[1],
+                    color[2],
+                    1.0,
+                ] {
+                    self.bytes.extend_from_slice(&f.to_le_bytes());
+                }
+                self.virtual_outlines.push((item.mesh, item.material));
+            }
+        }
         drop(s);
         let needed = (self.records.len() as u64).max(128);
         if self
@@ -557,6 +600,26 @@ impl FeaturePass for EditorPass {
                         }
                     }
                 }
+            }
+            // Virtualized members are rigid (never skinned), so their rest stream is drawn.
+            let base = s.select.camera_count();
+            for (k, &(source_mesh, material)) in self.virtual_outlines.iter().enumerate() {
+                let Ok((mesh, first, count)) = s.meshes.resolve(source_mesh) else {
+                    continue;
+                };
+                let double_sided = s
+                    .materials
+                    .get(material)
+                    .is_some_and(|m| m.flags & crate::FLAG_DOUBLE_SIDED != 0);
+                pass.set_pipeline(if double_sided {
+                    &r.silhouette_double
+                } else {
+                    &r.silhouette
+                });
+                pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, mesh.stream0.slice(..));
+                let i = base + k as u32;
+                pass.draw_indexed(first..first + count, 0, i..i + 1);
             }
         }
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
