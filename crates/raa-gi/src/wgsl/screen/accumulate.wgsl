@@ -2,11 +2,19 @@
 // integrate and the ReSTIR GI denoise). Per pixel it reprojects the previous frame's history and
 // its moments through the S12 motion target, keeps each of the four bilinear history taps only
 // when its stored linear depth and normal describe this pixel's surface (a disocclusion test),
-// clamps the kept history's luminance to the current neighbourhood widened by the temporal
-// standard deviation, and blends with the weight alpha = max(1 / n, 1 / historyMax), n the
-// pixel's history length: the average of the last n frames, so a still view keeps converging
-// until historyMax and a moving one keeps the history that stays valid. A rejected pixel starts
-// again at n = 1. It writes the history (irradiance rgb, occlusion a), the moments record, the
+// tests the kept history against this frame's light (a lighting change test, below) and blends
+// with the weight alpha = max(1 / n, 1 / historyMax), n the pixel's history length: the average
+// of the last n frames, so a still view keeps converging until historyMax and a moving one keeps
+// the history that stays valid. A rejected pixel starts again at n = 1.
+//
+// The change test never moves the history's colour: z = |current mean - history| / (sigma +
+// slack), sigma^2 the larger of the current frame's spatial variance and the history's per-frame
+// (temporal) variance, i.e. the noise one frame has. Up to z = clampGamma the history is kept
+// whole; beyond, its length falls linearly to nothing at 2 clampGamma (then at most historyMin -
+// 1 frames stay, so the change is taken at once). Noise alone almost never reaches the test, so
+// a still view converges monotonically instead of being pulled around and reset by a clamp, and a
+// light that went out or moved leaves the image the next frame instead of fading over historyMax
+// frames. It writes the history (irradiance rgb, occlusion a), the moments record, the
 // a-trous input (irradiance rgb, variance of the mean a), the debug record and the statistics.
 //
 // RAA's own code. The moments, the variance of the mean and the variance-guided a-trous that
@@ -35,10 +43,11 @@ const RAA_GI_ACC_DEPTH_TOLERANCE: f32 = 0.04;
 const RAA_GI_ACC_NORMAL_COS: f32 = 0.9;
 // Below this bilinear weight of kept taps the history is rejected.
 const RAA_GI_ACC_MIN_WEIGHT: f32 = 0.05;
-// The history length kept after the clamp moved the history (`accumulate_cpu::CLAMPED_LENGTH`).
-const RAA_GI_ACC_CLAMPED_LENGTH: f32 = 4.0;
-// A clamp that changes the luminance by less than this fraction does not count as one.
-const RAA_GI_ACC_CLAMP_SLACK: f32 = 0.02;
+// The relative slack of the change test, so a nearly noiseless signal does not trip it on
+// rounding (`accumulate_cpu::CHANGE_SLACK`).
+const RAA_GI_ACC_CHANGE_SLACK: f32 = 0.05;
+// The shortest history the change test applies to (`accumulate_cpu::CHANGE_MIN`).
+const RAA_GI_ACC_CHANGE_MIN: f32 = 4.0;
 // The f16 ceiling of the stored values.
 const RAA_GI_ACC_HALF_MAX: f32 = 65000.0;
 
@@ -132,11 +141,21 @@ fn raa_gi_acc_tap_matches(
     return (moved || still) && dot(stored_normal, normal) >= RAA_GI_ACC_NORMAL_COS;
 }
 
-// The history luminance clamped to mean +- gamma sigma, sigma^2 the spatial variance of the
-// current neighbourhood plus the temporal variance of the history.
-fn raa_gi_acc_clamp_luminance(history: f32, mean: f32, spatial_var: f32, temporal_var: f32, gamma: f32) -> f32 {
-    let sigma = sqrt(max(spatial_var, 0.0) + max(temporal_var, 0.0));
-    return clamp(history, mean - gamma * sigma, mean + gamma * sigma);
+// The share of the history length the change test keeps, in [0, 1] (`accumulate_cpu::change_keep`):
+// 1 up to z = gamma, 0 from z = 2 gamma, linear between, z = |mean - history| / (sigma + slack),
+// sigma^2 = max(spatial_var, temporal_var).
+fn raa_gi_acc_change_keep(history: f32, mean: f32, spatial_var: f32, temporal_var: f32, gamma: f32) -> f32 {
+    let sigma = sqrt(max(max(spatial_var, temporal_var), 0.0));
+    let slack = RAA_GI_ACC_CHANGE_SLACK * max(abs(history), abs(mean)) + 1.0e-4;
+    let z = abs(mean - history) / (sigma + slack);
+    return clamp(2.0 - z / max(gamma, 1.0e-3), 0.0, 1.0);
+}
+
+// The history length kept: floor(n keep), and never more than historyMin - 1 frames after a full
+// change (`accumulate_cpu::kept_length`).
+fn raa_gi_acc_kept_length(n: f32, keep: f32, history_min: f32) -> f32 {
+    let floor_after_change = min(n, max(history_min - 1.0, 0.0));
+    return max(floor(n * keep), select(0.0, floor_after_change, keep < 1.0));
 }
 
 // The variance the a-trous passes steer by: the variance of the accumulated mean, var / n, once
@@ -289,20 +308,13 @@ fn raa_gi_acc_resolve(in: RaaGiAccInput) {
         if in.matched {
             let lum_h = raa_gi_acc_luminance(history.color.rgb);
             let temporal_var = max(history.m2 - history.m1 * history.m1, 0.0);
-            let clamped = raa_gi_acc_clamp_luminance(lum_h, in.spatial_mean, in.spatial_var,
+            let keep = raa_gi_acc_change_keep(lum_h, in.spatial_mean, in.spatial_var,
                 temporal_var, raa_gi_screen_params.clamp_gamma);
-            if abs(clamped - lum_h) > RAA_GI_ACC_CLAMP_SLACK * max(lum_h, 1.0e-3) {
-                let lum_c = raa_gi_acc_luminance(in.current.rgb);
-                if lum_h > 1.0e-6 {
-                    history.color = vec4<f32>(history.color.rgb * (clamped / lum_h), history.color.a);
-                } else if lum_c > 1.0e-6 {
-                    history.color = vec4<f32>(in.current.rgb * (clamped / lum_c), history.color.a);
-                }
-                // The moments follow the moved history so the variance does not explode.
-                let shift = clamped - lum_h;
-                history.m2 = max(history.m2 + 2.0 * history.m1 * shift + shift * shift, 0.0);
-                history.m1 = history.m1 + shift;
-                history.n = min(history.n, RAA_GI_ACC_CLAMPED_LENGTH);
+            // A history shorter than RAA_GI_ACC_CHANGE_MIN frames has no noise estimate yet (its
+            // moments hold too few frames) and follows the light within those frames anyway.
+            if keep < 1.0 && history.n >= RAA_GI_ACC_CHANGE_MIN {
+                history.n = raa_gi_acc_kept_length(history.n, keep,
+                    f32(raa_gi_screen_params.history_min));
                 state = RAA_GI_ACC_CLAMPED;
             }
         }

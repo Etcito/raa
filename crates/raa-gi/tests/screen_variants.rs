@@ -286,7 +286,7 @@ fn trace_records_match_contract_gi_screen_wgsl() {
         ("history_max", 16),
         ("clamp_gamma", 20),
         ("m_cap", 24),
-        ("pad", 28),
+        ("history_min", 28),
     ];
     check_struct(&reflection.module, "GiScreenGpu", 32, &screen);
 }
@@ -376,14 +376,25 @@ fn integrate_history_rejects_disocclusions_and_blends_one_over_n() {
     let wgsl = probe_integrate_module_wgsl();
     assert!(wgsl.contains("m.z > 0.5"), "the pixel's own reject flag");
     assert!(
-        wgsl.contains("raa_gi_acc_tap_matches(stored.depth, expected, in.depth, stored.normal, in.normal)"),
+        wgsl.contains(
+            "raa_gi_acc_tap_matches(stored.depth, expected, in.depth, stored.normal, in.normal)"
+        ),
         "each history tap is tested against the pixel's surface"
     );
     assert!(
         wgsl.contains("raa_gi_frame.previous_view_proj * vec4<f32>(in.world, 1.0)"),
         "the expected depth is the surface's depth in the previous view"
     );
-    assert!(wgsl.contains("return 1.0 / max(min(n, n_max), 1.0);"), "alpha = max(1 / n, 1 / n_max)");
-    assert!(wgsl.contains("raa_gi_acc_resolve(RaaGiAccInput("), "the integrate accumulates");
-    assert!(!wgsl.contains("raa_gi_history_neighbours_agree"), "the cross taps are gone");
+    assert!(
+        wgsl.contains("return 1.0 / max(min(n, n_max), 1.0);"),
+        "alpha = max(1 / n, 1 / n_max)"
+    );
+    assert!(
+        wgsl.contains("raa_gi_acc_resolve(RaaGiAccInput("),
+        "the integrate accumulates"
+    );
+    assert!(
+        !wgsl.contains("raa_gi_history_neighbours_agree"),
+        "the cross taps are gone"
+    );
 }

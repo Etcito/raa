@@ -56,8 +56,8 @@ struct GiFrameGpu {
 // The screen-pass state (32 B). history_valid is 1 when the other parity history holds the
 // previous frame's accumulation and the camera is continuous; screen_traces is 1 when screen
 // traces are on and binding 3 holds the previous frame's lit HDR; parity is the index (0 or 1)
-// of the history written this frame; debug_view the GI debug code; history_max, clamp_gamma
-// and m_cap the `historyMax`, `clampGamma` and `restirMCap` settings.
+// of the history written this frame; debug_view the GI debug code; history_max, clamp_gamma,
+// m_cap and history_min the `historyMax`, `clampGamma`, `restirMCap` and `historyMin` settings.
 struct GiScreenGpu {
     history_valid: u32,
     screen_traces: u32,
@@ -66,7 +66,7 @@ struct GiScreenGpu {
     history_max: f32,
     clamp_gamma: f32,
     m_cap: f32,
-    pad: u32,
+    history_min: u32,
 }
 
 // One grid probe (176 B): SH9 with rgb in xyz, the world position (w = 1 on geometry, 0 on a

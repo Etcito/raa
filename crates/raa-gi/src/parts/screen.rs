@@ -252,7 +252,7 @@ fn group(
 }
 
 /// The 32 B of `GiScreenGpu`, little-endian: history_valid, screen_traces, parity & 1,
-/// debug_view, history_max, clamp_gamma, m_cap, 0.
+/// debug_view, history_max, clamp_gamma, m_cap, history_min.
 pub(crate) fn screen_params_bytes(
     history_valid: bool,
     screen_traces: bool,
@@ -267,7 +267,7 @@ pub(crate) fn screen_params_bytes(
         (settings.history_max.max(1) as f32).to_bits(),
         settings.clamp_gamma.to_bits(),
         settings.restir_m_cap.to_bits(),
-        0,
+        settings.history_min.max(1),
     ];
     let mut bytes = [0u8; SCREEN_PARAMS_SIZE as usize];
     for (index, value) in words.into_iter().enumerate() {

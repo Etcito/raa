@@ -10,8 +10,10 @@
 pub const DEPTH_TOLERANCE: f32 = 0.04;
 /// `RAA_GI_ACC_NORMAL_COS`: the cosine a kept history tap's normal must reach.
 pub const NORMAL_COS: f32 = 0.9;
-/// `RAA_GI_ACC_CLAMPED_LENGTH`: the history length kept after the clamp moved the history.
-pub const CLAMPED_LENGTH: f32 = 4.0;
+/// `RAA_GI_ACC_CHANGE_SLACK`: the relative slack of the change test.
+pub const CHANGE_SLACK: f32 = 0.05;
+/// `RAA_GI_ACC_CHANGE_MIN`: the shortest history the change test applies to.
+pub const CHANGE_MIN: f32 = 4.0;
 /// `RAA_GI_ATROUS_KERNEL`: the 1D B3-spline (1, 4, 6, 4, 1) / 16.
 pub const ATROUS_KERNEL: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
 /// `RAA_GI_ATROUS_SIGMA_LUMINANCE`.
@@ -66,16 +68,21 @@ pub fn tap_matches(
     (moved || still) && normal_cos >= NORMAL_COS
 }
 
-/// The history luminance clamped to mean +- gamma sqrt(spatial_var + temporal_var).
-pub fn clamp_luminance(
-    history: f32,
-    mean: f32,
-    spatial_var: f32,
-    temporal_var: f32,
-    gamma: f32,
-) -> f32 {
-    let sigma = (spatial_var.max(0.0) + temporal_var.max(0.0)).sqrt();
-    history.clamp(mean - gamma * sigma, mean + gamma * sigma)
+/// The share of the history length the lighting change test keeps (`raa_gi_acc_change_keep`):
+/// z = |mean - history| / (sigma + slack), sigma^2 = max(spatial_var, temporal_var), slack =
+/// CHANGE_SLACK max(|history|, |mean|) + 1e-4; 1 up to z = gamma, 0 from 2 gamma, linear between.
+pub fn change_keep(history: f32, mean: f32, spatial_var: f32, temporal_var: f32, gamma: f32) -> f32 {
+    let sigma = spatial_var.max(temporal_var).max(0.0).sqrt();
+    let slack = CHANGE_SLACK * history.abs().max(mean.abs()) + 1.0e-4;
+    let z = (mean - history).abs() / (sigma + slack);
+    (2.0 - z / gamma.max(1.0e-3)).clamp(0.0, 1.0)
+}
+
+/// The history length kept after the change test (`raa_gi_acc_kept_length`): floor(n keep), at
+/// least min(n, history_min - 1) when the test cut anything.
+pub fn kept_length(n: f32, keep: f32, history_min: f32) -> f32 {
+    let floor_after_change = n.min((history_min - 1.0).max(0.0));
+    (n * keep).floor().max(if keep < 1.0 { floor_after_change } else { 0.0 })
 }
 
 /// The variance the a-trous passes steer by: var / n from four frames on, else the larger of the

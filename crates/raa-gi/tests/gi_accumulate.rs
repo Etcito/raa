@@ -5,8 +5,8 @@
 //! the SVGF variance propagation sum(w^2 var) / (sum w)^2 of the B3-spline kernel.
 
 use raa_gi::parts::screen::accumulate_cpu::{
-    ATROUS_KERNEL, accumulate, alpha, atrous_filter, atrous_weight, clamp_luminance,
-    filter_variance, tap_matches, variance,
+    ATROUS_KERNEL, accumulate, alpha, atrous_filter, atrous_weight, change_keep, filter_variance,
+    kept_length, tap_matches, variance,
 };
 
 fn close(got: f32, want: f32, tol: f32) {
@@ -64,11 +64,39 @@ fn disocclusion_test_keeps_the_same_surface_only() {
 }
 
 #[test]
-fn clamp_box_is_mean_plus_gamma_combined_sigma() {
-    // sigma = sqrt(0.25 + 0.75) = 1, gamma 2: the box is [0, 4].
-    assert_eq!(clamp_luminance(5.0, 2.0, 0.25, 0.75, 2.0), 4.0);
-    assert_eq!(clamp_luminance(-1.0, 2.0, 0.25, 0.75, 2.0), 0.0);
-    assert_eq!(clamp_luminance(3.0, 2.0, 0.25, 0.75, 2.0), 3.0);
+fn change_test_keeps_noise_and_cuts_a_lighting_change() {
+    // History 10, current mean 11, spatial variance 1, temporal 4: sigma = 2, slack = 0.05 * 11 +
+    // 1e-4 = 0.5501, z = 1 / 2.5501 = 0.392 < gamma 2.5: kept whole.
+    assert_eq!(change_keep(10.0, 11.0, 1.0, 4.0, 2.5), 1.0);
+    // The light went out: history 10, mean 0, sigma 2, slack 0.5001, z = 10 / 2.5001 = 4.0
+    // (between 2.5 and 5): keep = 2 - 4.0 / 2.5 = 0.4 (to 1e-3).
+    assert!((change_keep(10.0, 0.0, 1.0, 4.0, 2.5) - (2.0 - 10.0 / 2.5001 / 2.5)).abs() < 1e-5);
+    // A larger jump (history 10, mean 0, noise sigma 1): z = 10 / 1.5001 = 6.67 > 5: nothing kept.
+    assert_eq!(change_keep(10.0, 0.0, 1.0, 0.0, 2.5), 0.0);
+    // 64 frames at keep 0.4: 25 frames stay; a full change keeps historyMin - 1 = 0 frames, so
+    // the next frame (n = 1, weight 1) is the new light alone; historyMin 4 keeps 3.
+    assert_eq!(kept_length(64.0, 0.4, 1.0), 25.0);
+    assert_eq!(kept_length(64.0, 0.0, 1.0), 0.0);
+    assert_eq!(kept_length(64.0, 0.0, 4.0), 3.0);
+    assert_eq!(kept_length(64.0, 1.0, 1.0), 64.0);
+}
+
+#[test]
+fn a_still_noisy_signal_converges_without_resets() {
+    // A still pixel whose frames alternate 9 and 11 (mean 10, per-frame sigma 1): with the change
+    // test at gamma 2.5 no frame from the fourth on is ever cut, the history length grows to n_max = 32, and once the
+    // history holds an even number of frames it is exactly their mean, 10.
+    let (mut n, mut value, mut m1, mut m2) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    for frame in 0..32 {
+        let x = if frame % 2 == 0 { 9.0 } else { 11.0 };
+        if n >= 4.0 {
+            let keep = change_keep(value, x, 0.0, (m2 - m1 * m1).max(0.0), 2.5);
+            assert_eq!(keep, 1.0, "frame {frame} was cut");
+        }
+        (n, value, m1, m2) = accumulate((n, value, m1, m2), x, 32.0);
+    }
+    assert_eq!(n, 32.0);
+    assert!((value - 10.0).abs() < 1e-4);
 }
 
 #[test]
@@ -102,7 +130,11 @@ fn atrous_variance_propagates_through_squared_weights() {
 fn atrous_weight_edge_terms() {
     let kernel = 0.375 * 0.375;
     // Same plane, same normal, same luminance: the kernel weight 0.140625.
-    close(atrous_weight(kernel, 0.0, 10.0, 1.0, 0.0, 0.5), 0.140625, 1e-7);
+    close(
+        atrous_weight(kernel, 0.0, 10.0, 1.0, 0.0, 0.5),
+        0.140625,
+        1e-7,
+    );
     // A luminance step of sigma_l x sigma = 4 x 0.5 = 2: weight kernel x e^-1 (the 1e-4 guard
     // changes the exponent by 5e-5).
     close(
@@ -112,7 +144,15 @@ fn atrous_weight_edge_terms() {
     );
     // A tap 0.1 m off the tangent plane at 10 m (scale 0.01 x 10 + 0.001 = 0.101): e^(-0.1 /
     // 0.101) = e^-0.990099 = e^-0.99 x e^-0.000099 = 0.371577 x 0.999901 = 0.371540.
-    close(atrous_weight(1.0, 0.1, 10.0, 1.0, 0.0, 0.5), 0.371_540, 1e-5);
+    close(
+        atrous_weight(1.0, 0.1, 10.0, 1.0, 0.0, 0.5),
+        0.371_540,
+        1e-5,
+    );
     // A normal at cos 0.9: 0.9^32 = 0.034337.
-    close(atrous_weight(1.0, 0.0, 10.0, 0.9, 0.0, 0.5), 0.034_337, 1e-5);
+    close(
+        atrous_weight(1.0, 0.0, 10.0, 0.9, 0.0, 0.5),
+        0.034_337,
+        1e-5,
+    );
 }
