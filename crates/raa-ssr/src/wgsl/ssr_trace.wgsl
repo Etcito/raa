@@ -53,7 +53,9 @@ const RAA_GI_MAX_LEVELS: u32 = 5u;
 const RAA_GI_FLAG_VALID: u32 = 1u;
 const RAA_GI_FLAG_REFLECTIONS: u32 = 2u;
 const RAA_GI_FLAG_LOCAL_SHADOWS: u32 = 4u;
-// S38 GI volume (fs_composite's S39 fallback); GI_VOLUME_WGSL is appended to this module.
+// S38 GI screen irradiance (binding 14) and volume (fs_composite's S39 fallback);
+// GI_VOLUME_WGSL is appended to this module.
+@group(1) @binding(14) var raa_gi_screen: texture_2d<f32>;
 @group(1) @binding(17) var raa_gi_volume: texture_3d<f32>;
 @group(1) @binding(18) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
 
@@ -259,10 +261,10 @@ fn fresnel_schlick(f0: vec3<f32>, n_dot_v: f32) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - n_dot_v, 5.0);
 }
 
-// The IBL specular of the forward pass along the world reflection `r`: prefiltered cube at
-// roughness x max mip times the split-sum DFG of the BRDF LUT, at the specular intensity;
-// 0 without an environment (info.w < 0.5).
-fn env_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32) -> vec3<f32> {
+// The open-sky IBL specular of the forward pass along the world reflection `r`: prefiltered
+// cube at roughness x max mip times the split-sum DFG of the BRDF LUT, at the specular
+// intensity; 0 without an environment (info.w < 0.5).
+fn sky_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32) -> vec3<f32> {
     if (raa_env_sh.info.w < 0.5) {
         return vec3<f32>(0.0);
     }
@@ -274,9 +276,26 @@ fn env_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32) -> ve
     return prefiltered * (f0 * lut.x + vec3<f32>(lut.y)) * raa_env_sh.info.x;
 }
 
+// The specular the forward ambient adds along `r`: the open sky blended toward the GI
+// irradiance estimate E_gi / pi by EnvSh.gi.x (S45), at the pixel `px`; 0 without an
+// environment (info.w < 0.5).
+fn env_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32, px: vec2<i32>) -> vec3<f32> {
+    if (raa_env_sh.info.w < 0.5) {
+        return vec3<f32>(0.0);
+    }
+    let lut_uv = clamp(vec2<f32>(n_dot_v, roughness) * 128.0, vec2<f32>(0.5), vec2<f32>(127.5)) / vec2<f32>(128.0, 192.0);
+    let lut = textureSampleLevel(raa_brdf_lut, raa_linear_clamp, lut_uv, 0.0).rg;
+    let size = vec2<i32>(textureDimensions(raa_gi_screen));
+    let pixel = clamp(px, vec2<i32>(0), size - vec2<i32>(1));
+    let e_gi = textureLoad(raa_gi_screen, pixel, 0).rgb * raa_gi_volume_params.intensity;
+    let gi = e_gi * (1.0 / 3.14159265) * (f0 * lut.x + vec3<f32>(lut.y));
+    return mix(sky_specular(r, roughness, f0, n_dot_v), gi, clamp(raa_env_sh.gi.x, 0.0, 1.0));
+}
+
 // Full res, into hdr.dst(): hdr + (ssr - env_specular) x F(F0) x confidence x intensity, so
-// the reflection replaces the IBL specular it covers. With RAA_GI_FLAG_REFLECTIONS set (S39),
-// a glossy pixel blends the screen reflection over a GI volume trace (env on a miss).
+// the reflection replaces the specular the forward ambient added. With RAA_GI_FLAG_REFLECTIONS
+// set (S39), a glossy pixel blends the screen reflection over a GI volume trace (open sky on a
+// miss).
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     let px = vec2<i32>(in.position.xy);
@@ -297,7 +316,7 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         let r = (ssr.inv_view * vec4<f32>(reflect(-v, n), 0.0)).xyz;
         let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
         let reflected = textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb;
-        let env = env_specular(r, roughness, f0, n_dot_v);
+        let env = env_specular(r, roughness, f0, n_dot_v, px);
         let rgb = hdr.rgb + (reflected - env) * fresnel_schlick(f0, n_dot_v) * weight;
         return vec4<f32>(max(rgb, vec3<f32>(0.0)), hdr.a);
     }
@@ -315,10 +334,10 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     let p_w = (ssr.inv_view * vec4<f32>(p, 1.0)).xyz;
     let n_w = (ssr.inv_view * vec4<f32>(n, 0.0)).xyz;
     let r = (ssr.inv_view * vec4<f32>(reflect(-v, n), 0.0)).xyz;
-    let env = env_specular(r, roughness, f0, n_dot_v);
+    let env = env_specular(r, roughness, f0, n_dot_v, px);
     let v0 = raa_gi_finest_voxel();
     let hit = raa_gi_trace(p_w + n_w * 1.5 * v0, r, v0, 160.0, 48u, 0.5);
-    let fallback = select(env, hit.radiance, hit.hit);
+    let fallback = select(sky_specular(r, roughness, f0, n_dot_v), hit.radiance, hit.hit);
     let confidence = trace.z;
     var reflected = fallback;
     if (confidence > 0.0) {

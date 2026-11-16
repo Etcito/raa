@@ -3,8 +3,9 @@
 //! `shaders.rs`, binds only group 0 (no PRELUDE), and its storage texture is r32float with
 //! write access. The trace / composite module validates, defines the fullscreen vertex entry
 //! plus `fs_trace` and `fs_composite`, declares the private group-0 bindings plus the
-//! group-1 lighting bindings 3-6 copied verbatim from `raa_shader::PRELUDE_WGSL` (with its
-//! `EnvSh` members), and `SsrParams` has the field order and size of `SSR_PARAMS_SIZE`.
+//! group-1 lighting bindings 3-6, 14, 17 and 18 copied verbatim from
+//! `raa_shader::PRELUDE_WGSL` (with its `EnvSh` members), and `SsrParams` has the field order
+//! and size of `SSR_PARAMS_SIZE`.
 
 // The shader module is crate-private; the test compiles its file.
 #[path = "../src/shaders.rs"]
@@ -162,9 +163,9 @@ fn trace_vertex_and_two_fragment_entries() {
 fn trace_groups_are_private_zero_and_lighting_one_only() {
     let wgsl = shaders::SSR_TRACE_WGSL;
     assert_eq!(bindings(wgsl, 0), [0, 1, 2, 3, 4, 5, 6, 7]);
-    assert_eq!(bindings(wgsl, 1), [3, 4, 5, 6, 17, 18]);
+    assert_eq!(bindings(wgsl, 1), [3, 4, 5, 6, 14, 17, 18]);
     let groups = code_lines(wgsl).filter(|l| l.contains("@group(")).count();
-    assert_eq!(groups, 14, "only groups 0 and 1 are declared");
+    assert_eq!(groups, 15, "only groups 0 and 1 are declared");
     // No PRELUDE prepended: its group-0 frame bindings and helpers are absent.
     assert!(!wgsl.contains("raa_frame"), "PRELUDE prepended");
     assert!(!wgsl.contains("fn raa_"), "PRELUDE prepended");
@@ -176,7 +177,7 @@ fn trace_group_one_lines_occur_verbatim_in_prelude() {
     let ours: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL)
         .filter(|l| l.starts_with("@group(1)"))
         .collect();
-    assert_eq!(ours.len(), 6, "{ours:?}");
+    assert_eq!(ours.len(), 7, "{ours:?}");
     for l in ours {
         assert!(prelude.contains(&l), "not in PRELUDE_WGSL: {l}");
     }
@@ -205,6 +206,29 @@ fn flag_clear_path_keeps_the_early_return() {
         "{body:?}"
     );
     assert!(raa_shader::GI_VOLUME_WGSL.contains("fn raa_gi_trace(origin: vec3<f32>, dir: vec3<f32>, start: f32, max_t: f32, max_steps: u32, hit_voxels: f32) -> RaaGiHit"));
+}
+
+#[test]
+fn composite_subtracts_the_gi_occluded_specular() {
+    let lines: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL).collect();
+    let env: Vec<&str> = lines
+        .iter()
+        .skip_while(|l| !l.starts_with("fn env_specular("))
+        .take_while(|l| !l.starts_with("fn ") || l.starts_with("fn env_specular("))
+        .copied()
+        .collect();
+    assert!(env.iter().any(|l| l.contains("raa_env_sh.gi.x")), "{env:?}");
+    let composite: Vec<&str> = lines
+        .iter()
+        .skip_while(|l| !l.starts_with("fn fs_composite("))
+        .copied()
+        .collect();
+    assert!(
+        composite
+            .iter()
+            .any(|l| l.contains("select(sky_specular(") && l.contains("hit.hit")),
+        "{composite:?}"
+    );
 }
 
 #[test]

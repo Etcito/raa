@@ -33,8 +33,9 @@ pub(crate) const HIZ_PARAMS_SIZE: u64 = 16;
 /// 7 linear clamp sampler (filtering). `fs_trace` reads only 0, 1, 2 and 4 and has its own
 /// group-0 layout without binding 6 (no dummy); `fs_composite` binds 0-3 and 5-7. Group 1:
 /// the lighting bindings 3 (env_specular), 4 (`EnvSh`), 5 (brdf_lut), 6 (linear_clamp),
-/// 17 (GI volume) and 18 (`RaaGiVolumeParams`) of `LightingResources::layout()`, the second
-/// layout of both pipelines. This is the file text; the module is [`ssr_trace_module_wgsl`].
+/// 14 (GI screen irradiance), 17 (GI volume) and 18 (`RaaGiVolumeParams`) of
+/// `LightingResources::layout()`, the second layout of both pipelines. This is the file text;
+/// the module is [`ssr_trace_module_wgsl`].
 pub(crate) const SSR_TRACE_WGSL: &str = include_str!("wgsl/ssr_trace.wgsl");
 
 /// The trace module source: [`SSR_TRACE_WGSL`] + `raa_shader::GI_VOLUME_WGSL` (S39 fallback).
