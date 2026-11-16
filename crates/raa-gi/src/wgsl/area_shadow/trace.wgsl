@@ -139,7 +139,13 @@ fn raa_area_volume_voxel(world: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32
 // coarser GI voxel of the two ends. The ray starts on the light path: raa_gi_ray_origin clears
 // the own surface by 1.5 voxels moving along the ray first (at most 4 voxels), so a full normal
 // push never shifts it sideways into a block beside the receiver; the walk stops 3 voxels short
-// of the light, less the stretch already moved along the ray.
+// of the light, less the stretch already moved along the ray. A hit is a sample closer than half
+// a voxel to the occupied voxel centres, the field's surface iso-level (the 0.5-voxel inset of
+// raa_gi_cone_visibility, the far tier this one blends with), not raa_gi_visibility's 0.85: on
+// the light path, a ray that clears a block's edge by under 0.85 voxel (0.34 m at 0.4 m) would
+// shadow a receiver the light reaches unobstructed (raa-gi tests/thin_wall_bleed.rs, the floor
+// beside the tall block). A layer of occupied voxels still stops the ray: the 0.6-voxel minimum
+// step of raa_gi_trace lands one sample inside its 1-voxel-wide band.
 fn raa_area_volume_visibility(
     world: vec3<f32>,
     normal: vec3<f32>,
@@ -152,7 +158,8 @@ fn raa_area_volume_visibility(
     }
     let voxel = raa_area_volume_voxel(world, dir, distance);
     let start = raa_gi_ray_origin(world, normal, dir, 1.5 * voxel, 4.0 * voxel);
-    return raa_gi_visibility(start.xyz, dir, voxel, max(distance - 3.0 * voxel - start.w, 0.0), 24u);
+    let max_t = max(distance - 3.0 * voxel - start.w, 0.0);
+    return select(1.0, 0.0, raa_gi_trace(start.xyz, dir, voxel, max_t, 24u, 0.5).hit);
 }
 
 // Whether the attached SDF volume is published: the mirrored shape and five mips, a stamped

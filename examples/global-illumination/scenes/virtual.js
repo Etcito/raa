@@ -16,23 +16,28 @@ const SUBJECTS = [
   { name: 'field', min: [-2.6, 0, -4.85], max: [7.1, 2.2, 4.85] },
 ];
 const BOX_SUBJECT = { name: 'boxes', min: [-4.8, 0, -3.1], max: [-3.6, 1.2, 3.1] };
-// The voxel debug view draws the first occupied voxel of clipmap level 0 only: the 0.2 m level,
-// 96 voxels = 19.2 m wide, centred on the camera snapped to 1.6 m (raa-gi `clipmap::snapped_origin`,
-// `debug_view.wgsl`). From CAMERA (z 15) level 0 spans z 4.8..24, so the field, the boxes and the
-// wall lie in level 1 and the view showed them smooth. The voxel row looks down on the stage
-// from inside level 0 instead: from this eye it spans x -8..11.2, y -1.6..17.6 and z -6.4..12.8,
-// so the wall, the boxes and every sphere lie whole inside it, framed in the 1280x720 view.
-// Pinned by crates/raa-gi/tests/virtual_variants.rs (voxel row camera keeps its subjects in level 0).
-const VOXEL_CAMERA = { eye: [1.8, 8.4, 4.5], target: [1.8, 0, 0.5], fovYDeg: 60, near: 0.1, far: 200 };
+// GI clipmap level 0 is the 0.2 m level: 96 voxels = 19.2 m wide, centred on the camera snapped
+// to 1.6 m (raa-gi `clipmap::snapped_origin`), and a point within 1.5 voxels of its faces is
+// traced in level 1 (`raa_gi_level_at`). From CAMERA (z 15) level 0 spans z 4.8..24: the wall,
+// the boxes and every sphere lie in the 0.4 m level 1. The voxel debug view walks level 0 only
+// (`debug_view.wgsl`), so it showed them smooth, and the lit row's bounce came from 0.4 m voxels
+// only. Every shared-grid row (lit, off and voxels; the on/off pair keeps one camera) looks down
+// on the stage from GRID_CAMERA instead: its eye snaps to (0, 8, 3.2), so level 0 spans
+// x -9.6..9.6, y -1.6..17.6 and z -6.4..12.8 and holds the wall, the boxes and the sixteen
+// spheres whole; the spheres, the boxes and the wall's half next to them are framed in the
+// 1280x720 view. Level 0 can hold the 12 m wall only while the eye stays at z < 4.8, hence the
+// high, steep view. Pinned by crates/raa-gi/tests/virtual_variants.rs.
+const GRID_CAMERA = { eye: [0.4, 9, 4.5], target: [0.8, 0.5, -0.5], fovYDeg: 72, near: 0.1, far: 200 };
 const SELECTIONS = {
   field: { camera: CAMERA, subjects: SUBJECTS },
-  'shared-grid': { camera: CAMERA, subjects: [...SUBJECTS, BOX_SUBJECT] },
-  // Keyed by variant id: it wins over the content's selection.
-  'shared-grid-voxels': { camera: VOXEL_CAMERA, subjects: [...SUBJECTS, BOX_SUBJECT] },
+  'shared-grid': { camera: GRID_CAMERA, subjects: [...SUBJECTS, BOX_SUBJECT] },
 };
-const FIELD_HELD = ['ground plane', 'red wall panel on the left',
-  'sixteen bumpy high-poly spheres in a 4 x 4 grid', 'day sky preset', 'sun direction', 'camera'];
-const GRID_HELD = [...FIELD_HELD, 'two white forward boxes beside the wall'];
+const FIELD_FIXTURES = ['ground plane', 'red wall panel on the left',
+  'sixteen bumpy high-poly spheres in a 4 x 4 grid', 'day sky preset', 'sun direction'];
+const FIELD_HELD = [...FIELD_FIXTURES, 'camera'];
+const GRID_HELD = [...FIELD_FIXTURES,
+  'high camera looking steeply down on the stage from above the front row',
+  'two white forward boxes beside the wall'];
 const FIELD_X = [-1.5, 1, 3.5, 6];
 const FIELD_Z = [-3.75, -1.25, 1.25, 3.75];
 
@@ -88,7 +93,7 @@ const variant = ([id, content, state, debugView, pair]) => ({
   content,
   gi: { enabled: state === 'on', debugView },
   giExpected: state === 'on' ? 'active' : 'disabled',
-  selection: SELECTIONS[id] ?? SELECTIONS[content],
+  selection: SELECTIONS[content],
   ...(pair === null ? {} : {
     measurement: {
       pair, state, preset: pair,

@@ -2,8 +2,8 @@
 //! group 2 holds eight storage buffers and one uniform, the material twin is 256 bytes and the
 //! level view selects the GI members. Follows tests/variants.rs. Consumes the Handoff of
 //! `voxelize_virtual_module_wgsl` (crates/raa-gi/src/parts/virtual_driver.rs:42). The last test
-//! pins the voxel row of the GI page's virtual stage inside level 0, the level the voxel debug
-//! view draws.
+//! pins the shared-grid rows of the GI page's virtual stage (lit, off and voxels) inside level 0,
+//! the level the voxel debug view draws and the finest one the bounce is traced in.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -137,7 +137,7 @@ fn level_view_selects_gi_members_with_software_lists() {
     }
 }
 
-/// The GI page's virtual stage, read as text: the voxel row's camera must stay where the test
+/// The GI page's virtual stage, read as text: the shared-grid camera must stay where the test
 /// below finds its subjects in level 0.
 const VIRTUAL_SCENE_JS: &str =
     include_str!("../../../examples/global-illumination/scenes/virtual.js");
@@ -168,8 +168,11 @@ fn level_zero(eye: Vec3) -> ([f32; 3], [f32; 3]) {
     (min, min.map(|c| c + 96.0 * FINEST_VOXEL_METRES))
 }
 
+/// Whether the box `min..max` is traced in `level`: `raa_gi_level_at` (raa-shader
+/// gi_volume.wgsl) keeps a point in a level only more than 1.5 voxels inside its faces.
 fn holds(level: &([f32; 3], [f32; 3]), min: [f32; 3], max: [f32; 3]) -> bool {
-    (0..3).all(|a| level.0[a] < min[a] && max[a] < level.1[a])
+    let margin = 1.5 * FINEST_VOXEL_METRES;
+    (0..3).all(|a| level.0[a] + margin < min[a] && max[a] < level.1[a] - margin)
 }
 
 // Subjects of the shared-grid rows (scenes/virtual.js): the wall box at x -6, the sixteen spheres
@@ -179,33 +182,45 @@ const FIELD: ([f32; 3], [f32; 3]) = ([-2.56, 0.04, -4.81], [7.06, 2.16, 4.81]);
 const BOXES: ([f32; 3], [f32; 3]) = ([-4.8, 0.0, -3.1], [-3.6, 1.2, 3.1]);
 
 #[test]
-fn voxel_row_camera_keeps_its_subjects_in_level_zero() {
+fn shared_grid_camera_keeps_its_subjects_in_level_zero() {
     // The voxel debug view walks level 0 only: a surface outside it shows smooth (run 14892).
     let debug = debug_view_module_wgsl();
     assert!(debug.contains("let grid = raa_gi_volume_params.levels[0];"));
 
-    // From the shared-grid camera (z 15), level 0 spans z 4.8..24: the field, the boxes and the
-    // wall lie in level 1, which is what the failed voxel image showed.
-    let lit = level_zero(scene_eye("CAMERA"));
+    // From the field camera (z 15), level 0 spans z 4.8..24: the field, the boxes and the wall
+    // lie in level 1, which is what the failed shared-grid images (voxels and lit) were taken in.
+    let far = level_zero(scene_eye("CAMERA"));
     assert!(
-        (lit.0[2] - 4.8).abs() < 1.0e-4,
+        (far.0[2] - 4.8).abs() < 1.0e-4,
         "level 0 of CAMERA starts at z {}",
-        lit.0[2]
+        far.0[2]
     );
     for (min, max) in [FIELD, BOXES, WALL] {
         assert!(
-            !holds(&lit, min, max),
+            !holds(&far, min, max),
             "{min:?}..{max:?} is outside level 0 of CAMERA"
         );
     }
 
-    // The voxel row's camera: eye (1.8, 8.4, 4.5) snaps to (1.6, 8.0, 3.2), so level 0 spans
-    // x -8..11.2, y -1.6..17.6 and z -6.4..12.8 and holds every subject whole.
-    let voxels = level_zero(scene_eye("VOXEL_CAMERA"));
+    // Every shared-grid row (lit, off and voxels) takes the content's one selection.
+    assert!(VIRTUAL_SCENE_JS.contains("'shared-grid': { camera: GRID_CAMERA,"));
+    assert!(VIRTUAL_SCENE_JS.contains("selection: SELECTIONS[content],"));
+
+    // GRID_CAMERA: eye (0.4, 9, 4.5) snaps to (0, 8, 3.2), so level 0 spans x -9.6..9.6,
+    // y -1.6..17.6 and z -6.4..12.8 and holds every subject whole, 1.5 voxels inside.
+    let grid = level_zero(scene_eye("GRID_CAMERA"));
+    let expected = ([-9.6, -1.6, -6.4], [9.6, 17.6, 12.8]);
+    for a in 0..3 {
+        assert!(
+            (grid.0[a] - expected.0[a]).abs() < 1.0e-4
+                && (grid.1[a] - expected.1[a]).abs() < 1.0e-4,
+            "level 0 of GRID_CAMERA is {grid:?}"
+        );
+    }
     for (min, max) in [FIELD, BOXES, WALL] {
         assert!(
-            holds(&voxels, min, max),
-            "{min:?}..{max:?} is inside level 0 of VOXEL_CAMERA, {voxels:?}"
+            holds(&grid, min, max),
+            "{min:?}..{max:?} is inside level 0 of GRID_CAMERA, {grid:?}"
         );
     }
 }
