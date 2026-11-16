@@ -218,6 +218,7 @@ fn try_emit(entry: QueueEntry, cluster_index: u32, instance: VgInstance) {
     let center = transform_point(instance, cluster.center);
     let radius = cluster.radius * scale;
     if !in_frustum(center, radius) {
+        atomicAdd(&state.frustum_culled, 1u);
         return;
     }
     if !passes_occlusion(center, radius) {
@@ -279,6 +280,8 @@ fn seed(@builtin(global_invocation_id) id: vec3<u32>) {
             let radius = instance.bounds.w * instance_max_scale(instance);
             if in_frustum(center, radius) {
                 push_queue(QueueEntry(id.x, instance_root(instance)));
+            } else {
+                atomicAdd(&state.frustum_culled, 1u);
             }
         }
     }
@@ -315,6 +318,7 @@ fn process(@builtin(global_invocation_id) id: vec3<u32>) {
     let center = transform_point(instance, node.center);
     let radius = node.radius * instance_max_scale(instance);
     if !in_frustum(center, radius) {
+        atomicAdd(&state.frustum_culled, 1u);
         return;
     }
     if !passes_occlusion(center, radius) {

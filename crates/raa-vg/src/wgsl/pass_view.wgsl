@@ -100,7 +100,14 @@ struct CullState {
     dropped: atomic<u32>,
     // Entries of the visible list claimed so far, from both ends together.
     reserved: atomic<u32>,
+    // Hierarchy entries (instance roots, nodes and clusters) the frustum and receiver planes
+    // rejected, over both phases.
+    frustum_culled: atomic<u32>,
+    // Entries the first phase rejected against the previous frame's pyramid (its retry list).
+    occlusion_rejected: u32,
     _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
 }
 
 // Read by the raster passes, after culling has finished.
@@ -116,7 +123,11 @@ struct CullStateRead {
     triangle_count: u32,
     dropped: u32,
     reserved: u32,
+    frustum_culled: u32,
+    occlusion_rejected: u32,
     _pad2: u32,
+    _pad3: u32,
+    _pad4: u32,
 }
 
 // One virtualized scene instance, 192 bytes (S32). Twin of `VgInstanceRecord` in vg/scene.rs:

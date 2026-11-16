@@ -242,6 +242,18 @@ pub(crate) fn stats_entries(stats: &VgStats) -> Vec<(&'static str, WireValue)> {
             number_or_null(stats.dropped_clusters.map(f64::from)),
         ),
         (
+            "frustumCulled",
+            number_or_null(stats.frustum_culled.map(f64::from)),
+        ),
+        (
+            "occlusionRejected",
+            number_or_null(stats.occlusion_rejected.map(f64::from)),
+        ),
+        (
+            "occlusionRecovered",
+            number_or_null(stats.occlusion_recovered.map(f64::from)),
+        ),
+        (
             "statsFrameIndex",
             number_or_null(stats.stats_frame_index.map(|i| i as f64)),
         ),

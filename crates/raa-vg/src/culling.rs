@@ -340,7 +340,7 @@ impl ViewSlots {
 }
 
 /// Bytes of one `CullState` record (`CullState` in `pass_view.wgsl`).
-const STATE_SIZE: u64 = 48;
+const STATE_SIZE: u64 = 64;
 /// Bytes of one indirect-arguments record (`Args` in `cull_control.wgsl`).
 const ARGS_SIZE: u64 = 56;
 /// Offset of the software-rasterization dispatch arguments.
@@ -925,7 +925,7 @@ mod tests {
         let error = block_on(errors.pop());
         assert!(error.is_none(), "cull pipeline validation: {error:?}");
         assert_eq!(pipelines.allocated_bytes(), 20);
-        assert_eq!(work.allocated_bytes(), 48 + 2 * 8192 + 8192 + 56);
+        assert_eq!(work.allocated_bytes(), 64 + 2 * 8192 + 8192 + 56);
         assert_eq!(work.visible_capacity(), 1024);
         assert!(!std::ptr::eq(
             work.work_group(CullPhase::First),

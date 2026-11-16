@@ -97,6 +97,7 @@ fn finish() {
 @compute @workgroup_size(1)
 fn begin_second_phase() {
     let retried = atomicLoad(&state.retry_count);
+    state.occlusion_rejected = retried;
     state.read_begin = 0u;
     state.read_end = 0u;
     atomicStore(&state.write_head, retried);

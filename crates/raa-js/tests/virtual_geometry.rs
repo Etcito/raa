@@ -263,6 +263,9 @@ fn stats_entries_keep_the_s31_keys_in_order_with_null_counters() {
             "softwareClusters",
             "shadowClusters",
             "droppedClusters",
+            "frustumCulled",
+            "occlusionRejected",
+            "occlusionRecovered",
             "statsFrameIndex",
             "pending",
         ]
@@ -278,6 +281,8 @@ fn stats_entries_keep_the_s31_keys_in_order_with_null_counters() {
     assert_eq!(value("refused"), Some(WireValue::Other));
     assert_eq!(value("drawnClusters"), Some(WireValue::Null));
     assert_eq!(value("droppedClusters"), Some(WireValue::Null));
+    assert_eq!(value("frustumCulled"), Some(WireValue::Null));
+    assert_eq!(value("occlusionRecovered"), Some(WireValue::Null));
     assert_eq!(value("statsFrameIndex"), Some(WireValue::Null));
     assert_eq!(value("pending"), Some(WireValue::Bool(false)));
 }
@@ -289,6 +294,9 @@ fn stats_entries_of_published_counters_carry_their_values() {
         inactive_reason: Some("noInstance"),
         drawn_clusters: Some(12),
         drawn_triangles: Some(1536),
+        frustum_culled: Some(30),
+        occlusion_rejected: Some(6),
+        occlusion_recovered: Some(3),
         stats_frame_index: Some(7),
         ..VgStats::default()
     };
@@ -305,6 +313,9 @@ fn stats_entries_of_published_counters_carry_their_values() {
     );
     assert_eq!(value("drawnClusters"), Some(WireValue::Number(12.0)));
     assert_eq!(value("drawnTriangles"), Some(WireValue::Number(1536.0)));
+    assert_eq!(value("frustumCulled"), Some(WireValue::Number(30.0)));
+    assert_eq!(value("occlusionRejected"), Some(WireValue::Number(6.0)));
+    assert_eq!(value("occlusionRecovered"), Some(WireValue::Number(3.0)));
     assert_eq!(value("statsFrameIndex"), Some(WireValue::Number(7.0)));
     assert_eq!(value("hardwareClusters"), Some(WireValue::Null));
 }

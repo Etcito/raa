@@ -121,6 +121,12 @@ export interface VirtualGeometryStats {
   shadowClusters: number | null;
   /** Clusters dropped at `maxVisibleClusters`, main view and cascades. */
   droppedClusters: number | null;
+  /** Main-view hierarchy entries (instance roots, nodes, clusters) the frustum rejected. */
+  frustumCulled: number | null;
+  /** Main-view entries the first occlusion phase rejected against the previous frame's pyramid. */
+  occlusionRejected: number | null;
+  /** Main-view clusters the second occlusion phase recovered from those (drawn after all). */
+  occlusionRecovered: number | null;
   /** The Engine render invocation the counters come from. */
   statsFrameIndex: number | null;
   /** True while a readback is outstanding. */

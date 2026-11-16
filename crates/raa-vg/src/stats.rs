@@ -21,7 +21,7 @@ const POOL_SAMPLES: usize = 3;
 /// Views per sample: the main view, then the four cascades.
 const VIEWS: usize = 5;
 /// Bytes of one `CullState` (`pass_view.wgsl`).
-const STATE_SIZE: u64 = 48;
+const STATE_SIZE: u64 = 64;
 /// Bytes of one staging sample: one `CullState` per view.
 const SAMPLE_SIZE: u64 = STATE_SIZE * VIEWS as u64;
 
@@ -32,6 +32,12 @@ pub struct CullSample {
     pub triangles: u32,
     pub software: u32,
     pub dropped: u32,
+    /// Hierarchy entries (instance roots, nodes, clusters) the frustum rejected.
+    pub frustum_culled: u32,
+    /// Entries the first phase rejected against the previous frame's pyramid.
+    pub occlusion_rejected: u32,
+    /// Clusters the second phase recovered from those (drawn after all).
+    pub occlusion_recovered: u32,
 }
 
 /// The counters of one completely submitted invocation. `shadow_clusters` sums the four
@@ -44,19 +50,41 @@ pub struct VgCullTotals {
     pub dropped: u32,
 }
 
-/// Reads the counters of one 48-byte `CullState` (`CullStateRead` in `pass_view.wgsl`): the
-/// clusters are the software plus the hardware count, then triangles and dropped entries.
-pub fn parse_state(bytes: &[u8; 48]) -> CullSample {
-    let mut words = [0u32; 12];
+/// Reads the counters of one 64-byte `CullState` (`CullStateRead` in `pass_view.wgsl`): the
+/// clusters are the software plus the hardware count, then triangles, dropped entries, the
+/// frustum and first-phase occlusion rejections, and the clusters the second phase drew (the
+/// counts past `sw_base` / `hw_base`).
+pub fn parse_state(bytes: &[u8; 64]) -> CullSample {
+    let mut words = [0u32; 16];
     for (word, chunk) in words.iter_mut().zip(bytes.chunks_exact(4)) {
         *word = u32::from_le_bytes(chunk.try_into().unwrap_or([0; 4]));
     }
-    let [_, _, _, _, software, hardware, _, _, triangles, dropped, ..] = words;
+    let [
+        _,
+        _,
+        _,
+        _,
+        software,
+        hardware,
+        sw_base,
+        hw_base,
+        triangles,
+        dropped,
+        _,
+        frustum_culled,
+        occlusion_rejected,
+        ..,
+    ] = words;
     CullSample {
         clusters: software.saturating_add(hardware),
         triangles,
         software,
         dropped,
+        frustum_culled,
+        occlusion_rejected,
+        occlusion_recovered: software
+            .saturating_sub(sw_base)
+            .saturating_add(hardware.saturating_sub(hw_base)),
     }
 }
 
@@ -65,7 +93,7 @@ fn read_totals(bytes: &[u8], invocation: u64) -> Option<VgCullTotals> {
     let mut views = [CullSample::default(); VIEWS];
     for (index, view) in views.iter_mut().enumerate() {
         let start = index * STATE_SIZE as usize;
-        let chunk: &[u8; 48] = bytes.get(start..start + 48)?.try_into().ok()?;
+        let chunk: &[u8; 64] = bytes.get(start..start + 64)?.try_into().ok()?;
         *view = parse_state(chunk);
     }
     let [main, cascades @ ..] = views;
@@ -244,18 +272,29 @@ mod tests {
     use crate::culling::CullPipelines;
     use raa_core::testing::{skip, software_gpu};
 
-    /// A 48-byte `CullState` with the four counters the readback reads.
-    fn state_bytes(software: u32, hardware: u32, triangles: u32, dropped: u32) -> [u8; 48] {
-        let mut bytes = [0u8; 48];
-        for (word, value) in [(4, software), (5, hardware), (8, triangles), (9, dropped)] {
+    /// A 64-byte `CullState` with the given words set (index, value) and the rest 0.
+    fn state_bytes(words: &[(usize, u32)]) -> [u8; 64] {
+        let mut bytes = [0u8; 64];
+        for &(word, value) in words {
             bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         bytes
     }
 
+    /// Words: 4 sw_count, 5 hw_count, 6 sw_base, 7 hw_base, 8 triangles, 9 dropped,
+    /// 11 frustum_culled, 12 occlusion_rejected.
     #[test]
     fn parse_state_reads_the_counters() {
-        let sample = parse_state(&state_bytes(5, 7, 900, 2));
+        let sample = parse_state(&state_bytes(&[
+            (4, 5),
+            (5, 7),
+            (6, 4),
+            (7, 5),
+            (8, 900),
+            (9, 2),
+            (11, 30),
+            (12, 6),
+        ]));
         assert_eq!(
             sample,
             CullSample {
@@ -263,6 +302,9 @@ mod tests {
                 triangles: 900,
                 software: 5,
                 dropped: 2,
+                frustum_culled: 30,
+                occlusion_rejected: 6,
+                occlusion_recovered: 3,
             }
         );
     }

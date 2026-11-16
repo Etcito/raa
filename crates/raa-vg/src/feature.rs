@@ -107,6 +107,12 @@ pub struct VgStats {
     pub software_clusters: Option<u32>,
     pub shadow_clusters: Option<u32>,
     pub dropped_clusters: Option<u32>,
+    /// Main-view hierarchy entries the frustum rejected (instance roots, nodes, clusters).
+    pub frustum_culled: Option<u32>,
+    /// Main-view entries the first occlusion phase rejected against the previous pyramid.
+    pub occlusion_rejected: Option<u32>,
+    /// Main-view clusters the second occlusion phase recovered (drawn after all).
+    pub occlusion_recovered: Option<u32>,
     pub stats_frame_index: Option<u64>,
     pub pending: bool,
 }
@@ -521,6 +527,9 @@ impl VgHandle {
             software_clusters: main.map(|main| main.software),
             shadow_clusters: published.map(|published| published.shadow_clusters),
             dropped_clusters: published.map(|published| published.dropped),
+            frustum_culled: main.map(|main| main.frustum_culled),
+            occlusion_rejected: main.map(|main| main.occlusion_rejected),
+            occlusion_recovered: main.map(|main| main.occlusion_recovered),
             stats_frame_index: published.map(|published| published.invocation),
             pending,
         }
