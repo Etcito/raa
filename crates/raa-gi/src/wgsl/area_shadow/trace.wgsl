@@ -136,8 +136,10 @@ fn raa_area_volume_voxel(world: vec3<f32>, dir: vec3<f32>, distance: f32) -> f32
 }
 
 // The hard-ray volume path of the LocalVisibility provider: 1 with no volume; otherwise the
-// coarser GI voxel of the two ends, the origin clears the own surface by 1.5 voxels and the
-// walk stops 3 voxels short of the light.
+// coarser GI voxel of the two ends. The ray starts on the light path: raa_gi_ray_origin clears
+// the own surface by 1.5 voxels moving along the ray first (at most 4 voxels), so a full normal
+// push never shifts it sideways into a block beside the receiver; the walk stops 3 voxels short
+// of the light, less the stretch already moved along the ray.
 fn raa_area_volume_visibility(
     world: vec3<f32>,
     normal: vec3<f32>,
@@ -149,9 +151,8 @@ fn raa_area_volume_visibility(
         return 1.0;
     }
     let voxel = raa_area_volume_voxel(world, dir, distance);
-    let origin = world + normal * (1.5 * voxel);
-    let max_t = max(distance - 3.0 * voxel, 0.0);
-    return raa_gi_visibility(origin, dir, voxel, max_t, 24u);
+    let start = raa_gi_ray_origin(world, normal, dir, 1.5 * voxel, 4.0 * voxel);
+    return raa_gi_visibility(start.xyz, dir, voxel, max(distance - 3.0 * voxel - start.w, 0.0), 24u);
 }
 
 // Whether the attached SDF volume is published: the mirrored shape and five mips, a stamped
@@ -215,7 +216,8 @@ fn raa_area_sdf_visibility(origin: vec3<f32>, dir: vec3<f32>, max_t: f32) -> f32
 // The visibility of the shadow ray from `world` to `point` in [0, 1]: the depth pyramid first
 // (when the pass published one), then the GI volume, then the attached raa-sdf-trace volume. A
 // screen hit that covers the ray completely is a full shadow; otherwise the volume phases
-// scale the remaining visibility.
+// scale the remaining visibility. The SDF ray starts at the same raa_gi_ray_origin point as the
+// volume ray (on the light path, never a full normal push) and stops 0.05 m short of the light.
 fn raa_area_ray_visibility(world: vec3<f32>, normal: vec3<f32>, point: vec3<f32>) -> f32 {
     let to_point = point - world;
     let distance = length(to_point);
@@ -237,7 +239,8 @@ fn raa_area_ray_visibility(world: vec3<f32>, normal: vec3<f32>, point: vec3<f32>
     }
     let volume = raa_area_volume_visibility(world, normal, dir, distance);
     let voxel = raa_area_volume_voxel(world, dir, distance);
-    let sdf = raa_area_sdf_visibility(world + normal * (1.5 * voxel), dir, distance - 0.05);
+    let start = raa_gi_ray_origin(world, normal, dir, 1.5 * voxel, 4.0 * voxel);
+    let sdf = raa_area_sdf_visibility(start.xyz, dir, max(distance - 0.05 - start.w, 0.0));
     return min(1.0 - occlusion, volume) * sdf;
 }
 

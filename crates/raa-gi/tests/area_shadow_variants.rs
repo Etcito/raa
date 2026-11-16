@@ -234,6 +234,26 @@ fn trace_module_validates_and_holds_its_kernel() {
 }
 
 #[test]
+fn area_rays_start_on_the_light_path() {
+    let source = trace_module_wgsl();
+    for name in ["raa_area_volume_visibility", "raa_area_ray_visibility"] {
+        let start = source
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("the trace module holds {name}"));
+        let body = &source[start..];
+        let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+        assert!(
+            body.contains("raa_gi_ray_origin("),
+            "{name} starts its rays at raa_gi_ray_origin"
+        );
+    }
+    assert!(
+        !source.contains("world + normal * (1.5 * voxel)"),
+        "no area ray starts at a full normal push"
+    );
+}
+
+#[test]
 fn entry_follows_the_compute_workgroup() {
     let source = trace_module_wgsl();
     let marker = format!("@compute @workgroup_size(8, 8)\nfn {AREA_TRACE_ENTRY}(");
