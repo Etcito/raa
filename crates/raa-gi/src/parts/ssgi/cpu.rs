@@ -117,10 +117,12 @@ pub fn compose(screen: [f32; 4], probe: [f32; 4]) -> [f32; 4] {
     [er + v * pr, eg + v * pg, eb + v * pb, v.min(pa)]
 }
 
-/// The weight the new frame takes in the history blend of a pixel that moved `moved_px` pixels:
-/// `min(0.1 + 0.03 x moved_px, 0.5)`. A still pixel takes 0.1 of the new frame; the cap is 0.5.
-pub fn temporal_alpha(moved_px: f32) -> f32 {
-    (0.1 + 0.03 * moved_px).min(0.5)
+/// The weight the new frame takes in the history blend of a pixel whose reprojected history is
+/// usable: 0.1, whatever the pixel moved (`_moved_px`). A weight that rose with the motion kept
+/// the screen-space GI at two or three frames of history under a moving camera, so it never
+/// converged while the camera moved; rejecting unusable history is the reprojection's job.
+pub fn temporal_alpha(_moved_px: f32) -> f32 {
+    0.1
 }
 
 /// `side x acos(clamp(dot(normalize(p), view), -1, 1))`. A zero `p` has no direction: its angle is

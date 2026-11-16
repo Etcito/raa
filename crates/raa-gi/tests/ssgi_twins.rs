@@ -173,7 +173,7 @@ fn compose_keeps_the_probe_on_an_open_surface_and_matches_the_fixture() {
     assert_eq!(compose([0.0, 0.0, 0.0, 1.0], probe), probe);
 }
 
-/// Checks `temporal_alpha` against its doc comment: `min(0.1 + 0.03 x moved_px, 0.5)`.
+/// Checks `temporal_alpha` against its doc comment: 0.1 whatever the motion.
 #[test]
 fn temporal_alpha_matches_the_fixture() {
     let root = fixture();

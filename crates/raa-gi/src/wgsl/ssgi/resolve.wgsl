@@ -76,9 +76,8 @@ fn raa_gi_ssgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     if r.z == 1.0 && raa_ssgi_params.temporal_valid != 0u && raa_ssgi_frame.temporal.z != 0u {
         let hp = clamp(vec2<i32>(r.xy * size), vec2<i32>(0), last);
         let prev = textureLoad(raa_ssgi_history, hp, 0);
-        // cpu::temporal_alpha
-        let alpha = min(0.1 + 0.03 * length(motion.xy * size), 0.5);
-        acc = mix(prev, current, alpha);
+        // cpu::temporal_alpha: a fixed weight, so a moving camera keeps converging.
+        acc = mix(prev, current, 0.1);
     }
 
     textureStore(raa_ssgi_history_out, p, acc);
