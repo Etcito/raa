@@ -1,0 +1,249 @@
+// Page runtime of the render-graph page (contract rg-page-runtime, module render-graph-page).
+// createRgPageRunner wraps createPageRunner of the page kit: its settle phase runs RG_RUN for every
+// half of the variant (one 'single' half, or the pair's 'left' and 'right'), copies the GPU canvas
+// right after frame 240, composes the half images and keeps the base64 PNG for the capture option.
+// No top-level side effect: importing this module touches no DOM, canvas or engine.
+import { createPageRunner } from '../../../web/common/page-runner.js';
+// Consumed upstream, not re-implemented here: createPageRunner (web/common/page-runner.js:265, its
+// Handoff doc comment at :256), applyCamera (examples/render-graph/lib/scene.js:62) and cameraAt
+// (:56) from the Handoff doc comment at examples/render-graph/lib/scene.js:31, and
+// validateRequiredFacts (examples/render-graph/lib/inventory.js:137).
+import { RG_CAPTURE_T_S, RG_DT_MS, RG_WARMUP_FRAMES, applyCamera } from './scene.js';
+import { validateRequiredFacts } from './inventory.js';
+
+const CAPTURE_WIDTH = 1280;
+const CAPTURE_HEIGHT = 720;
+const PAIR_WIDTH = CAPTURE_WIDTH * 2;
+const LABEL_BAND = 28;
+const LABEL_FONT = 'bold 16px monospace';
+const PADDING = 8;
+const LINE_HEIGHT = 18;
+const FONT = '14px monospace';
+const BACKGROUND = '#0b0d12';
+const FOREGROUND = '#f2f2f2';
+const LABEL_COLOR = '#ffffff';
+
+function fail(message) { throw new Error(`render-graph runtime: ${message}`); }
+
+// The camera time of frame f: f x RG_DT_MS / 1000 s. The captured frame is RG_CAPTURE_T_S itself,
+// the exact second the rg-room-scene constant states.
+function frameTimeSeconds(f) {
+  return f === RG_WARMUP_FRAMES ? RG_CAPTURE_T_S : f * RG_DT_MS / 1000;
+}
+
+/** The 241 camera times of RG_RUN: frame f is at {@link frameTimeSeconds}. */
+export function halfFrameTimes() {
+  return Array.from({ length: RG_WARMUP_FRAMES + 1 }, (_, f) => frameTimeSeconds(f));
+}
+
+/**
+ * Handoff: render-graph page 3/5: interpreter scene and its test calls `captionText(issue) -> string`
+ * exported by examples/render-graph/lib/runtime.js, attaching it by ES import in
+ * examples/render-graph/scenes/interpreter.js for the caption of its refused row; state/keys: a
+ * RenderGraphIssue of contract rg-page-facts, read for code, nodeId, param and message. Today it
+ * returns `refused: <code> on node <nodeId>[ (param <param>)]: <message>`.
+ */
+export function captionText(issue) {
+  const { code, nodeId, param, message } = issue ?? {};
+  const parameter = param == null ? '' : ` (param ${param})`;
+  return `refused: ${code} on node ${nodeId}${parameter}: ${message}`;
+}
+
+/**
+ * `collectRgFacts(engine, observation, variant)` builds the render-graph facts of contract
+ * rg-page-facts from the observation: `renderGraphActive`, `graph`, `issues`, `assertions` and
+ * `edits`, each null when the observation does not provide it. The page runner adds `passes`,
+ * `viewSizes` and `readiness`. The engine and variant are not read.
+ */
+export function collectRgFacts(engine, observation, variant) {
+  const source = observation !== null && typeof observation === 'object' ? observation : {};
+  const field = key => Object.hasOwn(source, key) ? source[key] ?? null : null;
+  return {
+    renderGraphActive: field('renderGraphActive'),
+    graph: field('graph'),
+    issues: field('issues'),
+    assertions: field('assertions'),
+    edits: field('edits'),
+  };
+}
+
+function measure(context, text) {
+  if (typeof context.measureText === 'function') return context.measureText(text).width;
+  return text.length * 8;
+}
+
+// The wrapping of examples/sky-weather/lib/capture.js wrapLines, which is not exported there.
+function wrapLines(context, text, maxWidth) {
+  const source = text.replace(/\r\n?/g, '\n').trim();
+  if (!source) return [];
+  const lines = [];
+  for (const paragraph of source.split('\n')) {
+    const words = paragraph.split(/\s+/).filter(Boolean);
+    if (words.length === 0) { lines.push(''); continue; }
+    let line = '';
+    for (const word of words) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && measure(context, candidate) > maxWidth) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    if (line) lines.push(line);
+  }
+  return lines;
+}
+
+function createCanvas(source) {
+  const document = source && source.ownerDocument ? source.ownerDocument
+    : (typeof globalThis.document === 'object' ? globalThis.document : null);
+  if (!document || typeof document.createElement !== 'function') fail('a document is required to compose the capture');
+  const output = document.createElement('canvas');
+  if (!output || typeof output.getContext !== 'function') fail('cannot create the capture canvas');
+  return output;
+}
+
+// A 1280x720 copy of the GPU canvas, drawn in the same task as the frame-240 render.
+function copyFrame(source) {
+  const output = createCanvas(source);
+  output.width = CAPTURE_WIDTH;
+  output.height = CAPTURE_HEIGHT;
+  const context = output.getContext('2d', { alpha: false, willReadFrequently: true });
+  if (!context) fail('2D canvas context is unavailable');
+  try {
+    context.drawImage(source, 0, 0, CAPTURE_WIDTH, CAPTURE_HEIGHT);
+  } catch (error) {
+    fail(`cannot copy the GPU canvas: ${error && error.message ? error.message : String(error)}`);
+  }
+  return output;
+}
+
+// The single 1280x720 image, or the 2560x720 pair (left at x 0, right at x 1280) with its labels,
+// plus the optional caption strip; returns the base64 PNG and its 2D context.
+function composeCapture(copies, pair, caption) {
+  const first = copies.get(pair ? 'left' : 'single');
+  if (!first) fail(pair ? 'the RG_RUN did not copy the left half' : 'the RG_RUN did not copy the single half');
+  const second = pair ? copies.get('right') : null;
+  if (pair && !second) fail('the RG_RUN did not copy the right half');
+  const width = pair ? PAIR_WIDTH : CAPTURE_WIDTH;
+  const output = createCanvas(first);
+  const measureContext = output.getContext('2d', { alpha: false, willReadFrequently: true });
+  if (!measureContext) fail('2D canvas context is unavailable');
+  measureContext.font = FONT;
+  const lines = typeof caption === 'string' ? wrapLines(measureContext, caption, Math.max(1, width - PADDING * 2)) : [];
+  const captionHeight = lines.length > 0 ? lines.length * LINE_HEIGHT + PADDING * 2 : 0;
+  output.width = width;
+  output.height = CAPTURE_HEIGHT + captionHeight;
+  const context = output.getContext('2d', { alpha: false, willReadFrequently: true });
+  if (!context) fail('2D canvas context is unavailable');
+  context.fillStyle = BACKGROUND;
+  context.fillRect(0, 0, output.width, output.height);
+  context.drawImage(first, 0, 0);
+  if (second) context.drawImage(second, CAPTURE_WIDTH, 0);
+  if (pair) {
+    context.font = LABEL_FONT;
+    context.fillStyle = BACKGROUND;
+    context.fillRect(0, 0, output.width, LABEL_BAND);
+    context.fillStyle = LABEL_COLOR;
+    context.textBaseline = 'middle';
+    context.fillText(String(pair.left), PADDING, LABEL_BAND / 2);
+    context.fillText(String(pair.right), CAPTURE_WIDTH + PADDING, LABEL_BAND / 2);
+  }
+  if (captionHeight > 0) {
+    context.fillStyle = FOREGROUND;
+    context.textBaseline = 'top';
+    context.font = FONT;
+    lines.forEach((line, index) => context.fillText(line, PADDING, CAPTURE_HEIGHT + PADDING + index * LINE_HEIGHT));
+  }
+  const url = typeof output.toDataURL === 'function' ? output.toDataURL('image/png') : '';
+  const prefix = 'data:image/png;base64,';
+  if (typeof url !== 'string' || !url.startsWith(prefix) || url.length === prefix.length) {
+    fail('the composed canvas did not produce a PNG data URL');
+  }
+  return { data: url.slice(prefix.length), context };
+}
+
+/**
+ * Handoff: render-graph page 4/5: page entry and build script calls
+ * `createRgPageRunner(options) -> { run(input), engine(), dispose() }` exported by
+ * examples/render-graph/lib/runtime.js; the page entry attaches it with an ES import and passes its
+ * canvas, status, load, scenes map and lib helpers. State/keys: the rg-page-facts shape of the
+ * settle's observation and the RG_DT_MS, RG_WARMUP_FRAMES and RG_CAPTURE_T_S constants. Today it
+ * returns createPageRunner's runner with topic 'render-graph', collectRgFacts, the inventory
+ * validateRequiredFacts, the RG_RUN settle phase and this file's composed-image capture.
+ */
+export function createRgPageRunner(options) {
+  const canvas = options?.canvas;
+  const lib = options?.lib;
+  let composed = null;
+  let composedContext = null;
+
+  function capture() {
+    if (composed === null) fail('no composed image exists for this run');
+    if (composedContext && typeof composedContext.isContextLost === 'function' && composedContext.isContextLost()) {
+      fail('the capture canvas lost its 2D context (browser GPU process reset); its PNG would be blank');
+    }
+    return composed;
+  }
+
+  async function settle(engine, { budget, scene, variant, state }) {
+    if (typeof scene?.prepareHalf !== 'function') fail('scene.prepareHalf must be a function');
+    composed = null;
+    composedContext = null;
+    const pair = variant?.pair ?? null;
+    if (pair && !Array.isArray(pair.order)) fail('variant.pair.order must list the halves');
+    const halves = pair ? pair.order : ['single'];
+    const copies = new Map();
+    let timeMs = 0;
+
+    // The render and whatever runs after it share one animation frame callback (the frame-240 copy).
+    const nextFrame = render => new Promise((resolve, reject) => {
+      if (typeof globalThis.requestAnimationFrame !== 'function') fail('requestAnimationFrame is unavailable');
+      globalThis.requestAnimationFrame(() => {
+        try { render(); resolve(); } catch (error) { reject(error); }
+      });
+    });
+
+    const renderFrames = async count => {
+      if (!Number.isSafeInteger(count) || count < 0) fail('renderFrames(n) must take a non-negative integer');
+      for (let index = 0; index < count; index++) {
+        await nextFrame(() => {
+          if (budget.remainingMs() <= 0) fail(`operation deadline expired before the prepareHalf frames (${index})`);
+          engine.render(timeMs);
+          timeMs += RG_DT_MS;
+        });
+      }
+    };
+
+    for (const half of halves) {
+      await scene.prepareHalf(engine, lib, variant, state, half, { renderFrames });
+      for (let f = 0; f <= RG_WARMUP_FRAMES; f++) {
+        await nextFrame(() => {
+          if (budget.remainingMs() <= 0) {
+            fail(`operation deadline expired before the RG_RUN frames (${half}, frame ${f})`);
+          }
+          applyCamera(engine, frameTimeSeconds(f));
+          engine.render(timeMs);
+          timeMs += RG_DT_MS;
+          if (f === RG_WARMUP_FRAMES) copies.set(half, copyFrame(canvas));
+        });
+      }
+    }
+
+    const caption = typeof scene.caption === 'function' ? scene.caption(engine, state, variant) : null;
+    const result = composeCapture(copies, pair, typeof caption === 'string' ? caption : null);
+    composed = result.data;
+    composedContext = result.context;
+    return { status: 'ready' };
+  }
+
+  return createPageRunner({
+    ...options,
+    topic: 'render-graph',
+    collectFacts: collectRgFacts,
+    validateRequiredFacts,
+    settle,
+    capture,
+  });
+}

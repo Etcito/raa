@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RG_CAPTURE_T_S, ROOM_SUBJECTS, cameraAt, selectionAt } from './lib/scene.js';
 import { validateInventory, validateRequiredFacts } from './lib/inventory.js';
+import { captionText, collectRgFacts, halfFrameTimes } from './lib/runtime.js';
 
 // Browser-free contract checks of the render-graph page share (contracts rg-room-scene and
 // rg-page-facts): the RG_CAMERA_PATH formula, the room subjects in the capture view, the
@@ -96,4 +97,36 @@ test('validateRequiredFacts accepts valid facts and refuses a false assertion', 
   assert.throws(() => validateRequiredFacts(ROW, failed, ['room-visible']),
     error => /required assertion:room-visible is missing or invalid/.test(error.message)
       && error.message.includes('back wall outside the view'));
+});
+
+test('halfFrameTimes() is the 241 RG_RUN camera times from 0 to RG_CAPTURE_T_S', () => {
+  const times = halfFrameTimes();
+  assert.equal(times.length, 241);
+  assert.equal(times[0], 0);
+  assert.equal(times.at(-1), RG_CAPTURE_T_S);
+  assert.ok(times.every((time, frame) => frame === 0 || time > times[frame - 1]));
+});
+
+test('captionText names the refused code, node and parameter', () => {
+  assert.equal(
+    captionText({ code: 'graph.param_range', nodeId: 'aoGtao', param: 'radius', message: 'm', severity: 'error', fix: 'f' }),
+    'refused: graph.param_range on node aoGtao (param radius): m');
+  assert.equal(
+    captionText({ code: 'graph.cycle', nodeId: 'forward', message: 'link cycle', severity: 'error', fix: 'f' }),
+    'refused: graph.cycle on node forward: link cycle');
+});
+
+test('collectRgFacts maps an observation and yields nulls for absent fields', () => {
+  const observation = {
+    renderGraphActive: true,
+    graph: 'Simple forward',
+    issues: [{ code: 'graph.param_range', severity: 'error', nodeId: 'aoGtao', param: 'radius', message: 'm', fix: 'f' }],
+    assertions: [{ name: 'room-visible', passed: true, detail: 'eight subjects inside the view volume' }],
+    edits: [{ operation: 'setRenderGraph', accepted: true, error: null }],
+  };
+  assert.deepEqual(collectRgFacts(null, observation, null), observation);
+  assert.deepEqual(collectRgFacts(null, {}, null),
+    { renderGraphActive: null, graph: null, issues: null, assertions: null, edits: null });
+  assert.deepEqual(collectRgFacts(null, null, null),
+    { renderGraphActive: null, graph: null, issues: null, assertions: null, edits: null });
 });
