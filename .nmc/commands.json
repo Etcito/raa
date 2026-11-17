@@ -446,5 +446,59 @@
       "p4-gi-virtual-render",
       "p4-gi-virtual-fresh"
     ]
+  },
+  {
+    "name": "rg-build",
+    "command": "bash scripts/build-render-graph.sh",
+    "timeout_s": 1800
+  },
+  {
+    "name": "rg-interpreter-check",
+    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "timeout_s": 60,
+    "after": [
+      "rg-build"
+    ]
+  },
+  {
+    "name": "rg-interpreter-select",
+    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "timeout_s": 60,
+    "after": [
+      "rg-interpreter-check"
+    ]
+  },
+  {
+    "name": "rg-interpreter-clean",
+    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "timeout_s": 60,
+    "after": [
+      "rg-interpreter-select"
+    ]
+  },
+  {
+    "name": "rg-interpreter-render",
+    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "timeout_s": 1500,
+    "after": [
+      "rg-interpreter-clean"
+    ]
+  },
+  {
+    "name": "rg-interpreter-fresh",
+    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "timeout_s": 120,
+    "after": [
+      "rg-interpreter-render"
+    ]
+  },
+  {
+    "name": "rg-interpreter-judge",
+    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/interpreter --stage interpreter --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "rg-interpreter-render",
+      "rg-interpreter-fresh"
+    ]
   }
 ]
