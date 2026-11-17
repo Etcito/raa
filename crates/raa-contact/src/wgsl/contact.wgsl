@@ -20,7 +20,7 @@ struct ContactParams {
 @group(0) @binding(1) var<uniform> cp: ContactParams;
 @group(0) @binding(2) var out_tex: texture_storage_2d<rgba16float, write>;
 
-const STEPS: u32 = 24u;
+override STEPS: u32 = 24u;
 
 // Interleaved gradient noise (Jimenez 2014), shifted per frame.
 fn ign(pixel: vec2<f32>, frame: f32) -> f32 {

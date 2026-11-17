@@ -10,6 +10,8 @@
 mod desc;
 mod feature;
 mod shaders;
+mod tunables;
 
 pub use desc::ContactDesc;
 pub use feature::{ContactFeature, ContactHandle};
+pub use tunables::tunables;

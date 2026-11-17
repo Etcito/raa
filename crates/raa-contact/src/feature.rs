@@ -19,6 +19,7 @@ use raa_pipeline::{
 
 use crate::desc::ContactDesc;
 use crate::shaders::{CONTACT_WGSL, PARAMS_SIZE};
+use crate::tunables::TUNABLES;
 
 /// S12 name of the pass.
 const NAME: &str = "shadow.contact";
@@ -42,6 +43,11 @@ fn refusal(code: &'static str, message: &str) -> RaaError {
         code,
         message: message.to_string(),
     }
+}
+
+/// `shadow.invalid` (the code of `ContactDesc::validate`) for a refused tunable.
+fn invalid(message: String) -> RaaError {
+    refusal("shadow.invalid", &message)
 }
 
 /// Same refusal as raa-lit's for a pipeline borrowed while a frame executes.
@@ -76,6 +82,10 @@ struct ContactState {
     camera: Option<ContactCamera>,
     /// Frames prepared with a camera (jitter seed).
     frame: u64,
+    /// Tunable `steps` (override STEPS of contact.wgsl).
+    steps: u32,
+    /// Incremented by `set_tunable` when a value changed.
+    tunable_generation: u64,
 }
 
 type SharedContact = Rc<RefCell<ContactState>>;
@@ -139,6 +149,9 @@ struct ContactPass {
     state: SharedContact,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    pipeline_layout: wgpu::PipelineLayout,
+    /// `ContactState::tunable_generation` the pipeline was built with.
+    built_generation: u64,
     uniform: wgpu::Buffer,
     bytes: [u8; PARAMS_LEN],
     output: Option<Output>,
@@ -151,19 +164,51 @@ struct ContactPass {
 impl ContactPass {
     fn new(gpu: &GpuContext, state: SharedContact) -> Self {
         let device = gpu.device();
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raa-contact.contact"),
-            source: wgpu::ShaderSource::Wgsl(CONTACT_WGSL.into()),
+        let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty,
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("raa-contact.layout"),
+            entries: &[
+                entry(
+                    0,
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                ),
+                entry(
+                    1,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(PARAMS_SIZE),
+                    },
+                ),
+                entry(
+                    2,
+                    wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+            ],
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raa-contact.contact"),
-            layout: None,
-            module: &module,
-            entry_point: Some("contact"),
-            compilation_options: Default::default(),
-            cache: None,
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raa-contact.pipeline_layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
         });
-        let layout = pipeline.get_bind_group_layout(0);
+        let (steps, built_generation) = state
+            .try_borrow()
+            .map(|st| (st.steps, st.tunable_generation))
+            .unwrap_or((DEFAULT_STEPS, 0));
+        let pipeline = build_pipeline(gpu, &pipeline_layout, steps);
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-contact.params"),
             size: PARAMS_SIZE,
@@ -174,6 +219,8 @@ impl ContactPass {
             state,
             pipeline,
             layout,
+            pipeline_layout,
+            built_generation,
             uniform,
             bytes: [0; PARAMS_LEN],
             output: None,
@@ -181,6 +228,34 @@ impl ContactPass {
             bound: false,
         }
     }
+}
+
+/// Default of the `steps` tunable (contact.wgsl `override STEPS`).
+const DEFAULT_STEPS: u32 = 24;
+
+/// The `contact` compute pipeline with the override `STEPS` = `steps`.
+fn build_pipeline(
+    gpu: &GpuContext,
+    layout: &wgpu::PipelineLayout,
+    steps: u32,
+) -> wgpu::ComputePipeline {
+    let device = gpu.device();
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raa-contact.contact"),
+        source: wgpu::ShaderSource::Wgsl(CONTACT_WGSL.into()),
+    });
+    let constants = [("STEPS", f64::from(steps))];
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("raa-contact.contact"),
+        layout: Some(layout),
+        module: &module,
+        entry_point: Some("contact"),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: &constants,
+            ..Default::default()
+        },
+        cache: None,
+    })
 }
 
 impl FeaturePass for ContactPass {
@@ -257,6 +332,10 @@ impl FeaturePass for ContactPass {
     /// `ContactParams` and, when needed, sets the output view on the lighting.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        if st.tunable_generation != self.built_generation {
+            self.pipeline = build_pipeline(ctx.gpu, &self.pipeline_layout, st.steps);
+            self.built_generation = st.tunable_generation;
+        }
         if let Some(o) = self.output.as_ref() {
             let desc = ImageDesc::new(
                 ImageDim::D2,
@@ -337,6 +416,8 @@ impl ContactFeature {
             desc: ContactDesc::default(),
             camera: None,
             frame: 0,
+            steps: DEFAULT_STEPS,
+            tunable_generation: 0,
         }));
         p.add(Box::new(ContactPass::new(gpu, state.clone())))?;
         Ok(ContactHandle { state })
@@ -366,6 +447,28 @@ impl ContactHandle {
             .unwrap_or_default()
     }
 
+    /// Handoff: card 'Executor extension: apply Tunable bindings' calls
+    /// `ContactHandle::set_tunable` through `HandleSet.contact` (crates/raa-graph/src/exec.rs)
+    /// with a catalog key and its value as f64. Today it validates with
+    /// `raa_pipeline::validate_tunable` against `crate::tunables()`, refuses with
+    /// `shadow.invalid` without changing anything, and otherwise stores the value (integral
+    /// for `steps`) in the state shared with the pass, bumping a generation when it changed so
+    /// the pass rebuilds its pipeline at its next prepare. `pipeline.busy` on a re-entrant call.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let spec = raa_pipeline::validate_tunable(TUNABLES, key, value).map_err(invalid)?;
+        let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        if spec.key == "steps" {
+            let Ok(steps) = u32::try_from(value as i64) else {
+                return Err(invalid(format!("`steps` out of u32 range, got {value}")));
+            };
+            if st.steps != steps {
+                st.steps = steps;
+                st.tunable_generation = st.tunable_generation.wrapping_add(1);
+            }
+        }
+        Ok(())
+    }
+
     /// The frame's camera (called every frame): `view` and `proj` of the scene camera,
     /// `inv_proj` the inverse of `proj`, and `sun_dir` the world travel direction of the sun.
     /// The pass marches toward normalize(-(view * (sun_dir, 0)).xyz). Ignored on a re-entrant
@@ -392,6 +495,38 @@ mod tests {
             bytes[offset + 2],
             bytes[offset + 3],
         ])
+    }
+
+    fn handle() -> ContactHandle {
+        ContactHandle {
+            state: Rc::new(RefCell::new(ContactState {
+                desc: ContactDesc::default(),
+                camera: None,
+                frame: 0,
+                steps: DEFAULT_STEPS,
+                tunable_generation: 0,
+            })),
+        }
+    }
+
+    #[test]
+    fn set_tunable_refusals_change_nothing() {
+        let h = handle();
+        for (key, value) in [("nope", 8.0), ("steps", f64::NAN), ("steps", 8.5)] {
+            let e = h.set_tunable(key, value).unwrap_err();
+            assert_eq!(e.code(), "shadow.invalid");
+        }
+        let st = h.state.borrow();
+        assert_eq!((st.steps, st.tunable_generation), (24, 0));
+    }
+
+    #[test]
+    fn set_tunable_stores_and_bumps_generation_once() {
+        let h = handle();
+        h.set_tunable("steps", 12.0).unwrap();
+        h.set_tunable("steps", 12.0).unwrap();
+        let st = h.state.borrow();
+        assert_eq!((st.steps, st.tunable_generation), (12, 1));
     }
 
     #[test]
