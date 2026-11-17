@@ -78,6 +78,9 @@ test('queue: one run bakes what a scene queued, writes the texture ids, reports 
   for (const p of parts) {
     const words = e.calls.data.get(p.data);
     assert.deepEqual([words[1], words[2], words[3]], [p.textures[0], p.textures[1], BAKED_NO_TEXTURE]);
+    // The colour is sRGB; the normal goes up linear, with no srgb key of its own.
+    assert.equal(e.calls.textures.get(p.textures[1]).srgb, true);
+    assert.equal(Object.hasOwn(e.calls.textures.get(p.textures[0]), 'srgb'), false);
   }
   const st = s.stats();
   assert.equal(st.parts, 3);
