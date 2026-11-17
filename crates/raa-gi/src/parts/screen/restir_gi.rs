@@ -19,13 +19,15 @@ use wgpu::TextureFormat;
 
 use super::AccumulateViews;
 use super::passes::{
-    accumulate_group2_entries, accumulate_wgsl, compute_pipeline, depth_entry, dispatch,
-    float_entry, layout, module, storage_entry, storage_texture_entry, uniform_entry,
+    accumulate_group2_entries, accumulate_wgsl, depth_entry, dispatch, float_entry, layout, module,
+    storage_entry, storage_texture_entry, uniform_entry,
 };
 use super::restir_gi_cpu::{
     RESTIR_GI_BOILING_FACTOR, RESTIR_GI_NORMAL_COS, RESTIR_GI_SPATIAL_RADIUS,
     RESTIR_GI_SPATIAL_SAMPLES,
 };
+use crate::parts::GiShared;
+use crate::tunables::GiTunables;
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
@@ -34,6 +36,36 @@ const RESTIR_GI_COMMON_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_co
 const RESTIR_GI_MAIN_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_main.wgsl");
 const RESTIR_GI_SPATIAL_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_spatial.wgsl");
 const RESTIR_GI_DENOISE_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_denoise.wgsl");
+
+/// The (override, tunable key) pairs of restir_gi_common.wgsl, composed into stages 1 and 2.
+const COMMON_OVERRIDES: [(&str, &str); 3] = [
+    ("RAA_RGI_JACOBIAN_MAX", "restirJacobianMax"),
+    ("RAA_RGI_VISIBILITY_STEPS", "restirVisibilitySteps"),
+    ("RAA_RGI_VISIBILITY_DISTANCE", "restirVisibilityDistance"),
+];
+/// The (override, tunable key) pairs of stage 1: restir_gi_common.wgsl and restir_gi_main.wgsl.
+const MAIN_OVERRIDES: [(&str, &str); 9] = [
+    COMMON_OVERRIDES[0],
+    COMMON_OVERRIDES[1],
+    COMMON_OVERRIDES[2],
+    ("RAA_RGI_SCREEN_DISTANCE", "restirScreenDistance"),
+    ("RAA_RGI_SCREEN_STEPS", "restirScreenSteps"),
+    ("RAA_RGI_SCREEN_THICKNESS", "restirScreenThickness"),
+    ("RAA_RGI_VOLUME_DISTANCE", "restirVolumeDistance"),
+    ("RAA_RGI_VOLUME_STEPS", "restirVolumeSteps"),
+    ("RAA_RGI_VOLUME_HIT_VOXELS", "restirVolumeHitVoxels"),
+];
+/// The (override, tunable key) pairs of stage 3: the accumulate.wgsl overrides it composes.
+const DENOISE_OVERRIDES: [(&str, &str); 8] = [
+    ("RAA_GI_ACC_DEPTH_TOLERANCE", "accDepthTolerance"),
+    ("RAA_GI_ACC_NORMAL_COS", "accNormalCos"),
+    ("RAA_GI_ACC_MIN_WEIGHT", "accMinWeight"),
+    ("RAA_GI_ACC_CHANGE_SLACK", "accChangeSlack"),
+    ("RAA_GI_ACC_CHANGE_MIN", "accChangeMin"),
+    ("RAA_GI_OCCLUSION_DIRECTIONS", "occlusionDirections"),
+    ("RAA_GI_OCCLUSION_STEPS", "occlusionSteps"),
+    ("RAA_GI_OCCLUSION_RADIUS", "occlusionRadius"),
+];
 
 /// Entry of stage 1 (initial sample + temporal reuse).
 pub const RESTIR_GI_MAIN_ENTRY: &str = "raa_gi_restir_gi_main";
@@ -131,66 +163,168 @@ pub fn denoise_group2_entries() -> [wgpu::BindGroupLayoutEntry; 13] {
 }
 
 /// The three ReSTIR GI pipelines and their group-2 layouts, over [empty, GI compute group 1,
-/// group 2].
+/// group 2]. The pipelines take the overrides of the GI tunables (`GiTunables::constants`, see
+/// the Handoff of `GiTunables` in crates/raa-gi/src/tunables.rs) and are rebuilt by
+/// [`RestirGiPipelines::refresh`] when the published generation changes; the layouts stay.
 pub(crate) struct RestirGiPipelines {
+    empty: wgpu::BindGroupLayout,
+    group1: wgpu::BindGroupLayout,
     main_layout: wgpu::BindGroupLayout,
     spatial_layout: wgpu::BindGroupLayout,
     denoise_layout: wgpu::BindGroupLayout,
+    modules: [wgpu::ShaderModule; 3],
     main: wgpu::ComputePipeline,
     spatial: wgpu::ComputePipeline,
     denoise: wgpu::ComputePipeline,
+    generation: u64,
+}
+
+/// A compute pipeline of `module` over [empty, `group1`, `group2`] with the override `constants`.
+fn tuned_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+    groups: [&wgpu::BindGroupLayout; 3],
+    constants: &[(&'static str, f64)],
+) -> wgpu::ComputePipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(groups[0]), Some(groups[1]), Some(groups[2])],
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        module,
+        entry_point: Some(entry),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants,
+            ..Default::default()
+        },
+        cache: None,
+    })
 }
 
 impl RestirGiPipelines {
-    pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> RestirGiPipelines {
+    /// Builds the layouts, the modules and the pipelines with the tunables `shared` publishes.
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        group1: &wgpu::BindGroupLayout,
+        shared: &GiShared,
+    ) -> RestirGiPipelines {
         let device = gpu.device();
         let empty = layout(device, "raa-gi.restir-gi.empty", &[]);
         let main_layout = layout(device, "raa-gi.restir-gi.main", &main_group2_entries());
-        let spatial_layout = layout(device, "raa-gi.restir-gi.spatial", &spatial_group2_entries());
-        let denoise_layout = layout(device, "raa-gi.restir-gi.denoise", &denoise_group2_entries());
-        let main_module = module(device, "raa-gi.restir-gi.main", &restir_gi_main_module_wgsl());
-        let spatial_module = module(
+        let spatial_layout = layout(
             device,
             "raa-gi.restir-gi.spatial",
-            &restir_gi_spatial_module_wgsl(),
+            &spatial_group2_entries(),
         );
-        let denoise_module = module(
+        let denoise_layout = layout(
             device,
             "raa-gi.restir-gi.denoise",
-            &restir_gi_denoise_module_wgsl(),
+            &denoise_group2_entries(),
         );
-        let main = compute_pipeline(
+        let modules = [
+            module(
+                device,
+                "raa-gi.restir-gi.main",
+                &restir_gi_main_module_wgsl(),
+            ),
+            module(
+                device,
+                "raa-gi.restir-gi.spatial",
+                &restir_gi_spatial_module_wgsl(),
+            ),
+            module(
+                device,
+                "raa-gi.restir-gi.denoise",
+                &restir_gi_denoise_module_wgsl(),
+            ),
+        ];
+        let tunables = shared.tunables();
+        let [main, spatial, denoise] = Self::build(
             device,
-            "raa-gi.restir-gi.main",
-            &main_module,
-            RESTIR_GI_MAIN_ENTRY,
-            &[Some(&empty), Some(group1), Some(&main_layout)],
-            None,
-        );
-        let spatial = compute_pipeline(
-            device,
-            "raa-gi.restir-gi.spatial",
-            &spatial_module,
-            RESTIR_GI_SPATIAL_ENTRY,
-            &[Some(&empty), Some(group1), Some(&spatial_layout)],
-            None,
-        );
-        let denoise = compute_pipeline(
-            device,
-            "raa-gi.restir-gi.denoise",
-            &denoise_module,
-            RESTIR_GI_DENOISE_ENTRY,
-            &[Some(&empty), Some(group1), Some(&denoise_layout)],
-            None,
+            &modules,
+            [&empty, group1],
+            [&main_layout, &spatial_layout, &denoise_layout],
+            &tunables,
         );
         RestirGiPipelines {
+            empty,
+            group1: group1.clone(),
             main_layout,
             spatial_layout,
             denoise_layout,
+            modules,
             main,
             spatial,
             denoise,
+            generation: tunables.generation(),
         }
+    }
+
+    /// The three pipelines with the overrides of `tunables`.
+    fn build(
+        device: &wgpu::Device,
+        modules: &[wgpu::ShaderModule; 3],
+        shared: [&wgpu::BindGroupLayout; 2],
+        group2: [&wgpu::BindGroupLayout; 3],
+        tunables: &GiTunables,
+    ) -> [wgpu::ComputePipeline; 3] {
+        let stages = [
+            (
+                "raa-gi.restir-gi.main",
+                RESTIR_GI_MAIN_ENTRY,
+                &MAIN_OVERRIDES[..],
+            ),
+            (
+                "raa-gi.restir-gi.spatial",
+                RESTIR_GI_SPATIAL_ENTRY,
+                &COMMON_OVERRIDES[..],
+            ),
+            (
+                "raa-gi.restir-gi.denoise",
+                RESTIR_GI_DENOISE_ENTRY,
+                &DENOISE_OVERRIDES[..],
+            ),
+        ];
+        std::array::from_fn(|i| {
+            let (label, entry, overrides) = stages[i];
+            tuned_pipeline(
+                device,
+                label,
+                &modules[i],
+                entry,
+                [shared[0], shared[1], group2[i]],
+                &tunables.constants(overrides),
+            )
+        })
+    }
+
+    /// Rebuilds the three pipelines when the generation `shared` publishes differs from the one
+    /// they were built with; the read is allocation-free when it does not.
+    pub(crate) fn refresh(&mut self, gpu: &GpuContext, shared: &GiShared) {
+        if shared.tunables_generation() == self.generation {
+            return;
+        }
+        let tunables = shared.tunables();
+        let [main, spatial, denoise] = Self::build(
+            gpu.device(),
+            &self.modules,
+            [&self.empty, &self.group1],
+            [
+                &self.main_layout,
+                &self.spatial_layout,
+                &self.denoise_layout,
+            ],
+            &tunables,
+        );
+        self.main = main;
+        self.spatial = spatial;
+        self.denoise = denoise;
+        self.generation = tunables.generation();
     }
 
     /// Records the three stages in `pass` (group 1 already set) with the groups of `work`.
@@ -255,22 +389,60 @@ pub(crate) fn restir_gi_bytes(viewport: (u32, u32)) -> u64 {
     3 * RESTIR_GI_RESERVOIR_BYTES * pixels + 8 * pixels + RESTIR_GI_PARAMS_SIZE
 }
 
-/// The 32 B of `RestirGiParamsGpu`, little-endian; `m_cap` is the `restirMCap` setting.
+/// The params-uniform tunables of `RestirGiParamsGpu`: spatial samples, spatial radius, boiling
+/// factor and normal cosine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RestirGiTuned {
+    pub(crate) spatial_samples: u32,
+    pub(crate) spatial_radius: f32,
+    pub(crate) boiling_factor: f32,
+    pub(crate) normal_cos: f32,
+}
+
+impl RestirGiTuned {
+    /// The defaults: the constants of `restir_gi_cpu`.
+    pub(crate) const DEFAULT: RestirGiTuned = RestirGiTuned {
+        spatial_samples: RESTIR_GI_SPATIAL_SAMPLES,
+        spatial_radius: RESTIR_GI_SPATIAL_RADIUS,
+        boiling_factor: RESTIR_GI_BOILING_FACTOR,
+        normal_cos: RESTIR_GI_NORMAL_COS,
+    };
+
+    /// The current values `shared` publishes (allocation-free), a default for an absent key.
+    pub(crate) fn read(shared: &GiShared) -> RestirGiTuned {
+        let d = RestirGiTuned::DEFAULT;
+        let f = |key: &str, default: f32| shared.tunable_value(key).map_or(default, |v| v as f32);
+        RestirGiTuned {
+            spatial_samples: shared
+                .tunable_value("restirSpatialSamples")
+                .map_or(d.spatial_samples, |v| {
+                    v.clamp(0.0, f64::from(u32::MAX)) as u32
+                }),
+            spatial_radius: f("restirSpatialRadius", d.spatial_radius),
+            boiling_factor: f("restirBoilingFactor", d.boiling_factor),
+            normal_cos: f("restirNormalCos", d.normal_cos),
+        }
+    }
+}
+
+/// The 32 B of `RestirGiParamsGpu`, little-endian; `m_cap` is the `restirMCap` setting and
+/// `tuned` the params-uniform tunables.
 pub(crate) fn params_bytes(
     frame_index: u32,
     history_usable: bool,
     screen_traces: bool,
     m_cap: f32,
+    tuned: RestirGiTuned,
 ) -> [u8; 32] {
     let words: [u32; 8] = [
         frame_index,
         u32::from(history_usable),
-        RESTIR_GI_SPATIAL_SAMPLES,
+        tuned.spatial_samples,
         u32::from(screen_traces),
-        RESTIR_GI_SPATIAL_RADIUS.to_bits(),
+        tuned.spatial_radius.to_bits(),
         m_cap.to_bits(),
-        RESTIR_GI_BOILING_FACTOR.to_bits(),
-        RESTIR_GI_NORMAL_COS.to_bits(),
+        tuned.boiling_factor.to_bits(),
+        tuned.normal_cos.to_bits(),
     ];
     let mut out = [0u8; 32];
     for (i, w) in words.iter().enumerate() {
@@ -343,11 +515,13 @@ impl RestirGiResources {
         history_usable: bool,
         screen_traces: bool,
         m_cap: f32,
+        shared: &GiShared,
     ) {
+        let tuned = RestirGiTuned::read(shared);
         gpu.queue().write_buffer(
             &self.params,
             0,
-            &params_bytes(frame_index, history_usable, screen_traces, m_cap),
+            &params_bytes(frame_index, history_usable, screen_traces, m_cap, tuned),
         );
     }
 
@@ -392,7 +566,9 @@ impl RestirGiResources {
     ) -> RestirGiBindings {
         let device = gpu.device();
         let tex = wgpu::BindingResource::TextureView;
-        let group = |label: &str, layout: &wgpu::BindGroupLayout, entries: &[(u32, wgpu::BindingResource<'_>)]| {
+        let group = |label: &str,
+                     layout: &wgpu::BindGroupLayout,
+                     entries: &[(u32, wgpu::BindingResource<'_>)]| {
             let entries: Vec<wgpu::BindGroupEntry<'_>> = entries
                 .iter()
                 .map(|(binding, resource)| wgpu::BindGroupEntry {
@@ -492,11 +668,26 @@ mod tests {
 
     #[test]
     fn params_and_bytes_follow_the_layout() {
-        let bytes = params_bytes(7, true, false, 30.0);
+        let bytes = params_bytes(7, true, false, 30.0, RestirGiTuned::DEFAULT);
         assert_eq!(&bytes[0..4], &7u32.to_le_bytes());
         assert_eq!(&bytes[4..8], &1u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &4u32.to_le_bytes());
         assert_eq!(&bytes[12..16], &0u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &24.0f32.to_le_bytes());
         assert_eq!(&bytes[20..24], &30.0f32.to_le_bytes());
+        assert_eq!(&bytes[24..28], &20.0f32.to_le_bytes());
+        assert_eq!(&bytes[28..32], &0.9f32.to_le_bytes());
+        let tuned = RestirGiTuned {
+            spatial_samples: 6,
+            spatial_radius: 12.0,
+            boiling_factor: 5.0,
+            normal_cos: 0.5,
+        };
+        let bytes = params_bytes(7, true, false, 30.0, tuned);
+        assert_eq!(&bytes[8..12], &6u32.to_le_bytes());
+        assert_eq!(&bytes[16..20], &12.0f32.to_le_bytes());
+        assert_eq!(&bytes[24..28], &5.0f32.to_le_bytes());
+        assert_eq!(&bytes[28..32], &0.5f32.to_le_bytes());
         // 1280 x 720 = 921,600 px: 3 x 32 + 8 = 104 B per pixel, plus 32.
         assert_eq!(restir_gi_bytes((1280, 720)), 921_600 * 104 + 32);
     }

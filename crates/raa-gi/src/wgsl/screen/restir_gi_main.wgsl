@@ -11,12 +11,12 @@
 // Composed after restir_gi_common.wgsl and screen_trace.wgsl (raa_gi_trace_screen,
 // raa_gi_screen_hit_radiance: bindings 3 history, 4 pyramid). RAA's own code.
 
-const RAA_RGI_SCREEN_DISTANCE: f32 = 8.0;
-const RAA_RGI_SCREEN_STEPS: u32 = 32u;
-const RAA_RGI_SCREEN_THICKNESS: f32 = 0.15;
-const RAA_RGI_VOLUME_DISTANCE: f32 = 320.0;
-const RAA_RGI_VOLUME_STEPS: u32 = 40u;
-const RAA_RGI_VOLUME_HIT_VOXELS: f32 = 0.85;
+override RAA_RGI_SCREEN_DISTANCE: f32 = 8.0;
+override RAA_RGI_SCREEN_STEPS: u32 = 32u;
+override RAA_RGI_SCREEN_THICKNESS: f32 = 0.15;
+override RAA_RGI_VOLUME_DISTANCE: f32 = 320.0;
+override RAA_RGI_VOLUME_STEPS: u32 = 40u;
+override RAA_RGI_VOLUME_HIT_VOXELS: f32 = 0.85;
 const RAA_RGI_SALT_INITIAL: u32 = 0x68E31DA4u;
 const RAA_RGI_SALT_TEMPORAL: u32 = 0xB5297A4Du;
 

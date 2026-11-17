@@ -14,6 +14,9 @@ use crate::error::invalid;
 /// `pipeline`). The eighteen `pass.gi.screen` rows follow: the accumulation and occlusion values of
 /// screen/accumulate.wgsl, the a-trous weights of screen/atrous.wgsl, the probe trace values of
 /// screen/probe_trace.wgsl and `screenEdgeFade` of screen/screen_trace.wgsl, each an `override`.
+/// The thirteen ReSTIR GI rows of `pass.gi.screen` follow: nine `override`s of
+/// screen/restir_gi_common.wgsl and screen/restir_gi_main.wgsl, then the four params-uniform values
+/// of parts/screen/restir_gi_cpu.rs (rebuild `none`), written each prepare.
 /// The table states no range for any of them, so none is given.
 pub const GI_TUNABLES: &[TunableSpec] = &[
     TunableSpec {
@@ -204,6 +207,123 @@ pub const GI_TUNABLES: &[TunableSpec] = &[
         integer: false,
         rebuild: "pipeline",
         source: "crates/raa-gi/src/wgsl/screen/screen_trace.wgsl:34",
+    },
+    TunableSpec {
+        key: "restirJacobianMax",
+        default: 10.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_common.wgsl:63",
+    },
+    TunableSpec {
+        key: "restirVisibilitySteps",
+        default: 32.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_common.wgsl:223",
+    },
+    TunableSpec {
+        key: "restirVisibilityDistance",
+        default: 320.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_common.wgsl:224",
+    },
+    TunableSpec {
+        key: "restirScreenDistance",
+        default: 8.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_main.wgsl:14",
+    },
+    TunableSpec {
+        key: "restirScreenSteps",
+        default: 32.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_main.wgsl:15",
+    },
+    TunableSpec {
+        key: "restirScreenThickness",
+        default: 0.15,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_main.wgsl:16",
+    },
+    TunableSpec {
+        key: "restirVolumeDistance",
+        default: 320.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_main.wgsl:17",
+    },
+    TunableSpec {
+        key: "restirVolumeSteps",
+        default: 40.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_main.wgsl:18",
+    },
+    TunableSpec {
+        key: "restirVolumeHitVoxels",
+        default: 0.85,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/screen/restir_gi_main.wgsl:19",
+    },
+    TunableSpec {
+        key: "restirSpatialSamples",
+        default: 4.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/screen/restir_gi_cpu.rs:13",
+    },
+    TunableSpec {
+        key: "restirSpatialRadius",
+        default: 24.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/screen/restir_gi_cpu.rs:15",
+    },
+    TunableSpec {
+        key: "restirBoilingFactor",
+        default: 20.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/screen/restir_gi_cpu.rs:19",
+    },
+    TunableSpec {
+        key: "restirNormalCos",
+        default: 0.9,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/screen/restir_gi_cpu.rs:21",
     },
 ];
 

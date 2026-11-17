@@ -939,7 +939,10 @@ impl GiPart for ScreenPart {
         if state.mode == IndirectMode::Restir {
             if state.restir_pipelines.is_none() {
                 let group1 = self.shared.compute_group1_layout();
-                state.restir_pipelines = Some(RestirGiPipelines::new(gpu, &group1));
+                state.restir_pipelines = Some(RestirGiPipelines::new(gpu, &group1, &self.shared));
+            }
+            if let Some(pipelines) = state.restir_pipelines.as_mut() {
+                pipelines.refresh(gpu, &self.shared);
             }
             let viewport = (width.max(1), height.max(1));
             if state
@@ -959,6 +962,7 @@ impl GiPart for ScreenPart {
                     usable,
                     frame.settings.screen_traces && frame.history_valid,
                     frame.settings.restir_m_cap,
+                    &self.shared,
                 );
             }
         } else {

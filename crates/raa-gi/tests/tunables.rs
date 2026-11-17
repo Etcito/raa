@@ -132,3 +132,72 @@ fn probe_screen_steps_is_integer_and_refuses_a_fraction() {
     assert!(store.set("probeScreenSteps", 16.0).expect("an integer"));
     assert_eq!(store.value("probeScreenSteps"), Some(16.0));
 }
+
+/// The ReSTIR GI rows of `pass.gi.screen` that card 3/5 adds, in table order: key, default,
+/// whether the row is integer and its rebuild.
+const RESTIR_ROWS: [(&str, f64, bool, &str); 13] = [
+    ("restirJacobianMax", 10.0, false, "pipeline"),
+    ("restirVisibilitySteps", 32.0, true, "pipeline"),
+    ("restirVisibilityDistance", 320.0, false, "pipeline"),
+    ("restirScreenDistance", 8.0, false, "pipeline"),
+    ("restirScreenSteps", 32.0, true, "pipeline"),
+    ("restirScreenThickness", 0.15, false, "pipeline"),
+    ("restirVolumeDistance", 320.0, false, "pipeline"),
+    ("restirVolumeSteps", 40.0, true, "pipeline"),
+    ("restirVolumeHitVoxels", 0.85, false, "pipeline"),
+    ("restirSpatialSamples", 4.0, true, "none"),
+    ("restirSpatialRadius", 24.0, false, "none"),
+    ("restirBoilingFactor", 20.0, false, "none"),
+    ("restirNormalCos", 0.9, false, "none"),
+];
+
+#[test]
+fn restir_keys_and_defaults_follow_the_table() {
+    let specs = tunables();
+    let start = 3 + SCREEN_ROWS.len();
+    assert!(specs.len() >= start + RESTIR_ROWS.len());
+    let store = GiTunables::new();
+    for (spec, (key, default, integer, rebuild)) in specs[start..].iter().zip(RESTIR_ROWS) {
+        assert_eq!(spec.key, key);
+        assert_eq!(spec.default, default, "default of {key}");
+        assert_eq!(spec.integer, integer, "integer of {key}");
+        assert_eq!((spec.min, spec.max), (None, None), "{key} states no range");
+        assert_eq!(spec.rebuild, rebuild, "{key}");
+        assert_eq!(store.value(key), Some(default), "{key}");
+    }
+}
+
+#[test]
+fn restir_steps_and_spatial_samples_refuse_a_fraction() {
+    let mut store = GiTunables::new();
+    let before = store.clone();
+    for key in [
+        "restirVisibilitySteps",
+        "restirScreenSteps",
+        "restirVolumeSteps",
+        "restirSpatialSamples",
+    ] {
+        let fraction = store.set(key, 2.5).expect_err("an integer row");
+        assert_eq!(fraction.code(), "gi.invalid", "{key}");
+        assert_eq!(store, before, "{key}");
+    }
+    assert!(store.set("restirSpatialSamples", 6.0).expect("an integer"));
+    assert_eq!(store.value("restirSpatialSamples"), Some(6.0));
+}
+
+#[test]
+fn restir_constants_pair_the_overrides_with_the_current_values() {
+    let mut store = GiTunables::new();
+    assert!(store.set("restirJacobianMax", 5.0).expect("a finite value"));
+    let constants = store.constants(&[
+        ("RAA_RGI_JACOBIAN_MAX", "restirJacobianMax"),
+        ("RAA_RGI_SCREEN_STEPS", "restirScreenSteps"),
+    ]);
+    assert_eq!(
+        constants,
+        [
+            ("RAA_RGI_JACOBIAN_MAX", 5.0),
+            ("RAA_RGI_SCREEN_STEPS", 32.0)
+        ]
+    );
+}

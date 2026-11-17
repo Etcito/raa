@@ -60,7 +60,7 @@ struct RaaRgiSurface {
 // Largest Jacobian a spatial neighbour may carry before it is rejected (and its inverse the
 // smallest): beyond it the shift sits at a grazing angle or folds distances by more than an
 // order of magnitude, and the reused sample turns into a firefly.
-const RAA_RGI_JACOBIAN_MAX: f32 = 10.0;
+override RAA_RGI_JACOBIAN_MAX: f32 = 10.0;
 // Where a sky sample is placed along its direction, in metres: far enough that every reuse
 // within the screen sees it along the same direction (its Jacobian tends to 1).
 const RAA_RGI_SKY_DISTANCE: f32 = 1000.0;
@@ -220,8 +220,8 @@ fn raa_rgi_sky_lod() -> f32 {
 
 // True when the sample point is visible from the receiver through the GI voxel field: the ray
 // leaves 1.5 finest voxels along the receiver normal and stops two voxels short of x_s.
-const RAA_RGI_VISIBILITY_STEPS: u32 = 32u;
-const RAA_RGI_VISIBILITY_DISTANCE: f32 = 320.0;
+override RAA_RGI_VISIBILITY_STEPS: u32 = 32u;
+override RAA_RGI_VISIBILITY_DISTANCE: f32 = 320.0;
 
 fn raa_rgi_visible(s: RaaRgiSurface, x_s: vec3<f32>) -> bool {
     let count = raa_gi_volume_params.level_count;
