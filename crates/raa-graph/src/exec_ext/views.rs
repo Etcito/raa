@@ -296,6 +296,35 @@ pub(crate) fn check_plan(plan: &GraphPlan, catalog: &Catalog) -> Vec<Issue> {
     issues
 }
 
+/// Returns the `view.compare` module (crates/raa-graph/src/wgsl/view_compare.wgsl) unchanged.
+/// Handoff: `view_compare_source`, `view_grid_source` and `pack_label` are called by card
+/// 'View nodes 4/6: ViewPass compositor FeaturePass'.
+#[allow(dead_code)] // called by the compositor and the tests
+pub(crate) fn view_compare_source() -> String {
+    include_str!("../wgsl/view_compare.wgsl").to_string()
+}
+
+/// Returns the `view.grid` module (crates/raa-graph/src/wgsl/view_grid.wgsl) unchanged.
+#[allow(dead_code)] // called by the compositor and the tests
+pub(crate) fn view_grid_source() -> String {
+    include_str!("../wgsl/view_grid.wgsl").to_string()
+}
+
+/// Packs the first 32 bytes of `text` into `out`, 4 bytes per word little-endian, zero after the
+/// end; a char outside ASCII 32..=126 becomes one `?`.
+#[allow(dead_code)] // called by the compositor and the tests
+pub(crate) fn pack_label(text: &str, out: &mut [u32; 8]) {
+    *out = [0; 8];
+    for (i, c) in text.chars().take(32).enumerate() {
+        let byte = if (' '..='~').contains(&c) {
+            c as u32
+        } else {
+            u32::from(b'?')
+        };
+        out[i / 4] |= byte << ((i % 4) * 8);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use raa_loader::json::{JsonValue, parse, write_pretty};
@@ -424,5 +453,55 @@ mod tests {
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].code, "graph.input_missing");
         assert_eq!(issues[0].port.as_deref(), Some("src"));
+    }
+
+    #[test]
+    fn compare_and_grid_sources_validate() {
+        Composer::validate(&view_compare_source()).unwrap_or_else(|e| panic!("compare: {e}"));
+        Composer::validate(&view_grid_source()).unwrap_or_else(|e| panic!("grid: {e}"));
+    }
+
+    #[test]
+    fn labels_pack_little_endian_and_truncate() {
+        let mut out = [7u32; 8];
+        pack_label("ao", &mut out);
+        assert_eq!(out, [0x6f61, 0, 0, 0, 0, 0, 0, 0]);
+        let long: String = (0..40u8).map(|i| char::from(b'A' + i % 26)).collect();
+        pack_label(&long, &mut out);
+        assert_eq!(out[7] >> 24, u32::from(long.as_bytes()[31]));
+        assert_eq!(out[0], u32::from_le_bytes([b'A', b'B', b'C', b'D']));
+        pack_label("\u{e9}", &mut out);
+        assert_eq!(out, [0x3f, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    fn font_glyphs() -> Vec<u64> {
+        let source = view_grid_source();
+        let start = source.find("const VIEW_FONT").expect("VIEW_FONT");
+        let mut glyphs = Vec::new();
+        for line in source[start..].lines().skip(1) {
+            let Some(rest) = line.trim().strip_prefix("vec2<u32>(") else {
+                break;
+            };
+            let inner = &rest[..rest.find(')').expect("closing parenthesis")];
+            let lanes: Vec<u64> = inner
+                .split(',')
+                .map(|n| {
+                    let hex = n.trim().trim_start_matches("0x").trim_end_matches('u');
+                    u64::from_str_radix(hex, 16).expect("hex lane")
+                })
+                .collect();
+            glyphs.push(lanes[0] | (lanes[1] << 32));
+        }
+        glyphs
+    }
+
+    #[test]
+    fn font_has_blank_space_and_visible_digits_and_capitals() {
+        let glyphs = font_glyphs();
+        assert_eq!(glyphs.len(), 95);
+        assert_eq!(glyphs[0], 0);
+        for c in ('0'..='9').chain('A'..='Z') {
+            assert_ne!(glyphs[c as usize - 32], 0, "glyph {c}");
+        }
     }
 }
