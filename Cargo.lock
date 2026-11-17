@@ -972,6 +972,7 @@ dependencies = [
  "raa-geom",
  "raa-gi",
  "raa-grading",
+ "raa-graph",
  "raa-gtao",
  "raa-ibl",
  "raa-liquid",

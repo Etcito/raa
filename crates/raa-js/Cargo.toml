@@ -22,6 +22,7 @@ raa-render = { workspace = true }
 raa-prims = { workspace = true }
 raa-loader = { workspace = true }
 raa-csg = { workspace = true }
+raa-graph = { path = "../raa-graph" }
 wgpu = { workspace = true }
 raa-mesh = { path = "../raa-mesh" }
 raa-skin = { path = "../raa-skin" }
