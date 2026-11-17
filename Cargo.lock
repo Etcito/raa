@@ -821,6 +821,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-exposure"
+version = "0.5.0"
+dependencies = [
+ "raa-core",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-ext-test"
 version = "0.5.0"
 dependencies = [
