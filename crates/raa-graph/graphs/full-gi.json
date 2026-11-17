@@ -53,7 +53,9 @@
       "params": {
         "radius": 0.800000011920929,
         "intensity": 0.6000000238418579,
-        "power": 1
+        "power": 1,
+        "slices": 4,
+        "steps": 8
       }
     },
     {
@@ -99,7 +101,8 @@
       "params": {
         "distance": 0.3499999940395355,
         "thickness": 0.05000000074505806,
-        "intensity": 1
+        "intensity": 1,
+        "steps": 24
       }
     },
     {
@@ -128,7 +131,10 @@
       "params": {
         "intensity": 1,
         "maxRoughness": 0.6000000238418579,
-        "thickness": 0.15000000596046448
+        "thickness": 0.15000000596046448,
+        "maxSteps": 64,
+        "refineSteps": 8,
+        "edgeFade": 0.1
       }
     },
     {
@@ -151,7 +157,15 @@
     },
     {
       "id": "taa",
-      "type": "pass.taa"
+      "type": "pass.taa",
+      "params": {
+        "filterSharpness": 2.3,
+        "clipTolerance": 1.25,
+        "blendBase": 0.06,
+        "blendMotionGain": 0.012,
+        "blendMin": 0.04,
+        "blendMax": 0.3
+      }
     },
     {
       "id": "bloom",
