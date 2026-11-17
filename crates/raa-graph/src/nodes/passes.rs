@@ -2641,7 +2641,8 @@ mod tests {
         assert!(node("pass.forward").required_in_graph);
         assert!(node("pass.sky.atmosphere").side_effect);
         assert!(node("pass.sky.cloud-screen").side_effect);
-        assert!(!node("pass.prepass").side_effect);
+        // The view family marks the required passes as side-effect nodes.
+        assert!(node("pass.prepass").side_effect);
         let msaa = node("pass.forward")
             .params
             .iter()
@@ -2719,7 +2720,8 @@ mod tests {
             "pass.cel.resolve.color"
         );
         assert!(tonemap.required_in_graph);
-        assert!(!tonemap.side_effect);
+        // The view family marks the required passes as side-effect nodes.
+        assert!(tonemap.side_effect);
         assert!(catalog.node("pass.overlay").unwrap().side_effect);
     }
 }
