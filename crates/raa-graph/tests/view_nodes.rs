@@ -1,12 +1,15 @@
 //! The view nodes (contract 'view-family', `crates/raa-graph/src/nodes/view.rs`): their catalog
 //! types, the required passes they mark as side-effect nodes, and a Simple forward graph whose
-//! display reads a view.
+//! display reads a view. The Debug starter's plan feeds every view node into its grid, and the
+//! taps table `docs/render-graph/taps.md` names every catalog output port of a pass.
+
+use std::collections::BTreeSet;
 
 use raa_graph::catalog::{
     Catalog, Category, GraphFormat, NodeTypeSpec, ParamKind, ParamValue, PortType,
 };
 use raa_graph::format::{LinkDoc, NodeDoc, PortRef, parse_graph, write_graph};
-use raa_graph::plan::{PlanPortRef, plan_from_json};
+use raa_graph::plan::{InputSource, PlanPortRef, plan_from_json};
 use raa_graph::registry;
 
 const NONE: &[&str] = &[];
@@ -199,4 +202,144 @@ fn link(from_node: &str, from_port: &str, to_node: &str, to_port: &str) -> LinkD
         },
         history: false,
     }
+}
+
+#[test]
+fn debug_starter_plans_every_view_node_into_the_grid() {
+    let (_, _, json) = registry::STARTERS
+        .iter()
+        .find(|&&(_, stem, _)| stem == "debug")
+        .expect("the Debug starter");
+    let plan = plan_from_json(json).unwrap_or_else(|issues| panic!("{issues:?}"));
+
+    let ids: Vec<&str> = plan.nodes.iter().map(|n| n.id.as_str()).collect();
+    for id in [
+        "vDepth",
+        "vNormal",
+        "vMotion",
+        "vAo",
+        "vAreaMask",
+        "giRawVsDenoised",
+        "vHistory",
+        "vFinal",
+        "grid",
+    ] {
+        assert!(ids.contains(&id), "{id} is not planned: {ids:?}");
+    }
+    let grid_color = PlanPortRef {
+        node: "grid".into(),
+        port: "color".into(),
+    };
+    assert_eq!(plan.output, grid_color);
+
+    // t0..t7 read the colour of these eight view nodes in order; t8..t15 are unlinked.
+    let fed = [
+        "vDepth",
+        "vNormal",
+        "vMotion",
+        "vAo",
+        "vAreaMask",
+        "giRawVsDenoised",
+        "vHistory",
+        "vFinal",
+    ];
+    let expected: Vec<(String, InputSource)> = (0..16)
+        .map(|index| {
+            let source = match fed.get(index) {
+                Some(&node) => InputSource::Link {
+                    node: node.into(),
+                    port: "color".into(),
+                    history: false,
+                },
+                None => InputSource::Absent,
+            };
+            (format!("t{index}"), source)
+        })
+        .collect();
+    let grid = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == "grid")
+        .expect("the grid is planned");
+    let inputs: Vec<(String, InputSource)> = grid
+        .inputs
+        .iter()
+        .map(|input| (input.port.clone(), input.source.clone()))
+        .collect();
+    assert_eq!(inputs, expected);
+}
+
+/// The taps table of `docs/render-graph/taps.md`, the text its rows are read from.
+const TAPS: &str = include_str!("../../../docs/render-graph/taps.md");
+
+/// The line that opens the taps table; its rows follow it.
+const TAPS_HEADER: &str = "| pass | port | field | file |";
+
+/// The `(pass, port)` of every row of the taps table, in file order. A row is a line after the
+/// header that starts with `| `; the `|---|` separator starts with `|-` and is not a row.
+fn tap_rows() -> Vec<(String, String)> {
+    let mut rows = Vec::new();
+    let mut in_table = false;
+    for line in TAPS.lines() {
+        if line == TAPS_HEADER {
+            in_table = true;
+        } else if in_table && line.starts_with("| ") {
+            let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+            let [_, pass, port, ..] = cells.as_slice() else {
+                panic!("a taps row names no pass and port: {line}");
+            };
+            rows.push((pass.to_string(), port.to_string()));
+        }
+    }
+    assert!(
+        in_table,
+        "docs/render-graph/taps.md has no `{TAPS_HEADER}` header"
+    );
+    rows
+}
+
+/// A `(pass, port)` pair as the failure messages name it.
+fn pair_label((pass, port): &(String, String)) -> String {
+    format!("({pass}, {port})")
+}
+
+#[test]
+fn every_catalog_output_port_has_a_taps_row() {
+    let catalog = Catalog::build();
+    let published: BTreeSet<(String, String)> = catalog
+        .nodes
+        .iter()
+        .filter_map(|spec| spec.pass.map(|entry| (entry, spec)))
+        .flat_map(|(entry, spec)| {
+            spec.outputs
+                .iter()
+                .map(move |port| (entry.to_string(), port.key.to_string()))
+        })
+        .collect();
+    let rows = tap_rows();
+    let listed: BTreeSet<(String, String)> = rows.iter().cloned().collect();
+
+    let missing: Vec<String> = published.difference(&listed).map(pair_label).collect();
+    assert!(
+        missing.is_empty(),
+        "docs/render-graph/taps.md has no row for {}",
+        missing.join(", ")
+    );
+    let stale: Vec<String> = listed.difference(&published).map(pair_label).collect();
+    assert!(
+        stale.is_empty(),
+        "docs/render-graph/taps.md has rows naming no catalog output port: {}",
+        stale.join(", ")
+    );
+    let mut seen = BTreeSet::new();
+    let repeated: Vec<String> = rows
+        .iter()
+        .filter(|row| !seen.insert(*row))
+        .map(pair_label)
+        .collect();
+    assert!(
+        repeated.is_empty(),
+        "docs/render-graph/taps.md has more than one row for {}",
+        repeated.join(", ")
+    );
 }
