@@ -142,6 +142,7 @@ fn render(
     layouts: &[Option<&wgpu::BindGroupLayout>],
     entry: &str,
     format: wgpu::TextureFormat,
+    constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(entry),
@@ -154,7 +155,10 @@ fn render(
         vertex: wgpu::VertexState {
             module,
             entry_point: Some(VS_FULLSCREEN),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState::default(),
@@ -163,7 +167,10 @@ fn render(
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some(entry),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: None,
@@ -233,12 +240,20 @@ pub(crate) struct SsrPipelines {
     composite_layout: wgpu::BindGroupLayout,
     /// Linear clamp, for the HDR mip chain.
     linear: wgpu::Sampler,
+    /// The trace module and the lighting layout, kept to rebuild `trace` and `composite`.
+    trace_module: wgpu::ShaderModule,
+    lighting: wgpu::BindGroupLayout,
     /// `SsrParams` (SSR_PARAMS_SIZE bytes), written each frame by the pass.
     pub params: wgpu::Buffer,
 }
 
 impl SsrPipelines {
-    pub(crate) fn new(gpu: &GpuContext, lighting: &wgpu::BindGroupLayout) -> SsrPipelines {
+    /// `constants`: the trace module's overrides (`tunables::OVERRIDE_NAMES` with values).
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        lighting: &wgpu::BindGroupLayout,
+        constants: &[(&str, f64)],
+    ) -> SsrPipelines {
         let device = gpu.device();
         let hiz_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-ssr.hiz"),
@@ -305,8 +320,12 @@ impl SsrPipelines {
                 entry(7, fs, FILTERING),
             ],
         );
-        let trace_layouts = [Some(&trace_layout), Some(lighting)];
-        let composite_layouts = [Some(&composite_layout), Some(lighting)];
+        let (trace, composite) = trace_pipelines(
+            device,
+            &trace_module,
+            [&trace_layout, &composite_layout, lighting],
+            constants,
+        );
         SsrPipelines {
             hiz_copy: compute(device, &hiz_module, &copy_layout, CS_HIZ_COPY),
             hiz_reduce: compute(device, &hiz_module, &reduce_layout, CS_HIZ_REDUCE),
@@ -316,21 +335,12 @@ impl SsrPipelines {
                 &[Some(&down_layout)],
                 FS_DOWNSAMPLE,
                 HDR_FORMAT,
+                &[],
             ),
-            trace: render(
-                device,
-                &trace_module,
-                &trace_layouts,
-                FS_TRACE,
-                TRACE_FORMAT,
-            ),
-            composite: render(
-                device,
-                &trace_module,
-                &composite_layouts,
-                FS_COMPOSITE,
-                HDR_FORMAT,
-            ),
+            trace,
+            composite,
+            trace_module,
+            lighting: lighting.clone(),
             copy_layout,
             reduce_layout,
             down_layout,
@@ -351,6 +361,44 @@ impl SsrPipelines {
             }),
         }
     }
+}
+
+impl SsrPipelines {
+    /// Rebuilds `trace` and `composite` (the pipelines of the trace module) with `constants`.
+    pub(crate) fn rebuild_trace(&mut self, device: &wgpu::Device, constants: &[(&str, f64)]) {
+        let layouts = [&self.trace_layout, &self.composite_layout, &self.lighting];
+        let (trace, composite) = trace_pipelines(device, &self.trace_module, layouts, constants);
+        self.trace = trace;
+        self.composite = composite;
+    }
+}
+
+/// `fs_trace` and `fs_composite` pipelines; `layouts` = trace, composite, lighting.
+fn trace_pipelines(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layouts: [&wgpu::BindGroupLayout; 3],
+    constants: &[(&str, f64)],
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    let [trace, composite, lighting] = layouts;
+    (
+        render(
+            device,
+            module,
+            &[Some(trace), Some(lighting)],
+            FS_TRACE,
+            TRACE_FORMAT,
+            constants,
+        ),
+        render(
+            device,
+            module,
+            &[Some(composite), Some(lighting)],
+            FS_COMPOSITE,
+            HDR_FORMAT,
+            constants,
+        ),
+    )
 }
 
 /// Surface-sized textures, views and bind groups of the pass, recreated on resize.

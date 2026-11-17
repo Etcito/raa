@@ -269,7 +269,7 @@ fn ssr_params_field_order_matches_size() {
 #[test]
 fn trace_marches_64_steps_then_8_refinements() {
     let lines: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL).collect();
-    assert!(lines.contains(&"const MAX_STEPS: u32 = 64u;"));
-    assert!(lines.contains(&"const REFINE_STEPS: u32 = 8u;"));
-    assert!(lines.contains(&"const EDGE_FADE: f32 = 0.1;"));
+    assert!(lines.contains(&"override MAX_STEPS: u32 = 64u;"));
+    assert!(lines.contains(&"override REFINE_STEPS: u32 = 8u;"));
+    assert!(lines.contains(&"override EDGE_FADE: f32 = 0.1;"));
 }

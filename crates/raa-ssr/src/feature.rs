@@ -22,6 +22,7 @@ use raa_pipeline::{
 use crate::desc::SsrDesc;
 use crate::resources::{SsrPipelines, SsrTargets, TRACE_FORMAT};
 use crate::shaders::SSR_PARAMS_SIZE;
+use crate::tunables::{self, tunables};
 
 /// S12 name of the pass.
 const NAME: &str = "ssr";
@@ -84,6 +85,25 @@ impl SsrCamera {
 struct SsrState {
     desc: SsrDesc,
     camera: Option<SsrCamera>,
+    /// Current tunable values, in `tunables()` order; `generation` counts changes.
+    tunables: [f64; 3],
+    generation: u64,
+}
+
+impl SsrState {
+    fn new() -> SsrState {
+        SsrState {
+            desc: SsrDesc::default(),
+            camera: None,
+            tunables: tunables::defaults(),
+            generation: 0,
+        }
+    }
+}
+
+/// The trace module's pipeline constants for `values`.
+fn constants(values: &[f64; 3]) -> [(&'static str, f64); 3] {
+    std::array::from_fn(|i| (tunables::OVERRIDE_NAMES[i], values[i]))
 }
 
 type SharedSsr = Rc<RefCell<SsrState>>;
@@ -161,6 +181,8 @@ struct SsrPass {
     pipelines: SsrPipelines,
     targets: Option<SsrTargets>,
     bytes: [u8; PARAMS_LEN],
+    /// `SsrState::generation` the trace pipelines were built with.
+    built_generation: u64,
 }
 
 impl FeaturePass for SsrPass {
@@ -179,10 +201,15 @@ impl FeaturePass for SsrPass {
 
     /// Writes `SsrParams` from the handle's description and camera (in place).
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let (desc, camera) = {
+        let (desc, camera, values, generation) = {
             let st = self.state.try_borrow().map_err(|_| state_busy())?;
-            (st.desc, st.camera)
+            (st.desc, st.camera, st.tunables, st.generation)
         };
+        if generation != self.built_generation {
+            self.pipelines
+                .rebuild_trace(ctx.gpu.device(), &constants(&values));
+            self.built_generation = generation;
+        }
         let Some(t) = self.targets.as_ref() else {
             return Ok(());
         };
@@ -289,16 +316,15 @@ impl SsrFeature {
                 "the pass `ssr` is already installed",
             ));
         }
-        let state = Rc::new(RefCell::new(SsrState {
-            desc: SsrDesc::default(),
-            camera: None,
-        }));
-        let pipelines = SsrPipelines::new(gpu, p.lighting().opaque_layout());
+        let state = Rc::new(RefCell::new(SsrState::new()));
+        let defaults = constants(&tunables::defaults());
+        let pipelines = SsrPipelines::new(gpu, p.lighting().opaque_layout(), &defaults);
         p.add(Box::new(SsrPass {
             state: state.clone(),
             pipelines,
             targets: None,
             bytes: [0; PARAMS_LEN],
+            built_generation: 0,
         }))?;
         Ok(SsrHandle { state })
     }
@@ -327,6 +353,34 @@ impl SsrHandle {
             .unwrap_or_default()
     }
 
+    /// Sets one S56 tunable of [`tunables`] by key.
+    ///
+    /// Handoff: card 'Executor extension: apply Tunable bindings' calls
+    /// `SsrHandle::set_tunable` through HandleSet.ssr (crates/raa-graph/src/exec.rs) with a
+    /// catalog key and its value as f64. Today it validates with
+    /// `raa_pipeline::validate_tunable`, refuses with `post.invalid` (the code of
+    /// crates/raa-ssr/src/desc.rs) without changing anything, and otherwise stores the value
+    /// (shared by every clone and the pass) so the trace pipelines are rebuilt at the pass's
+    /// next prepare. `pipeline.busy` on a re-entrant call.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let specs = tunables();
+        let spec = raa_pipeline::validate_tunable(specs, key, value)
+            .map_err(|m| refusal("post.invalid", &m))?;
+        let index = specs.iter().position(|s| s.key == spec.key).unwrap_or(0);
+        let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        if st.tunables[index] != value {
+            st.tunables[index] = value;
+            st.generation += 1;
+        }
+        Ok(())
+    }
+
+    /// The current value of a tunable, `None` for an unknown key.
+    pub fn tunable(&self, key: &str) -> Option<f64> {
+        let index = tunables().iter().position(|s| s.key == key)?;
+        self.state.try_borrow().ok().map(|st| st.tunables[index])
+    }
+
     /// Sets the scene camera (world -> view, view -> clip) used from the next frame. A
     /// singular matrix keeps the previous camera.
     pub fn set_camera(&self, view: &Mat4, proj: &Mat4) {
@@ -350,11 +404,29 @@ mod tests {
 
     fn handle() -> SsrHandle {
         SsrHandle {
-            state: Rc::new(RefCell::new(SsrState {
-                desc: SsrDesc::default(),
-                camera: None,
-            })),
+            state: Rc::new(RefCell::new(SsrState::new())),
         }
+    }
+
+    #[test]
+    fn set_tunable_refuses_with_post_invalid_and_keeps_state() {
+        let h = handle();
+        for (key, value) in [
+            ("nope", 1.0),
+            ("maxSteps", f64::NAN),
+            ("maxSteps", 32.5),
+            ("edgeFade", f64::INFINITY),
+        ] {
+            let err = h.set_tunable(key, value).unwrap_err();
+            assert_eq!(err.code(), "post.invalid", "{key} = {value}");
+        }
+        assert_eq!(h.state.borrow().generation, 0);
+        assert_eq!(h.tunable("maxSteps"), Some(64.0));
+        h.set_tunable("maxSteps", 64.0).unwrap();
+        assert_eq!(h.state.borrow().generation, 0);
+        h.clone().set_tunable("maxSteps", 32.0).unwrap();
+        assert_eq!(h.tunable("maxSteps"), Some(32.0));
+        assert_eq!(h.state.borrow().generation, 1);
     }
 
     #[test]

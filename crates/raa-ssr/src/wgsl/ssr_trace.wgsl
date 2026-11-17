@@ -59,10 +59,10 @@ const RAA_GI_FLAG_LOCAL_SHADOWS: u32 = 4u;
 @group(1) @binding(17) var raa_gi_volume: texture_3d<f32>;
 @group(1) @binding(18) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
 
-const MAX_STEPS: u32 = 64u;
-const REFINE_STEPS: u32 = 8u;
+override MAX_STEPS: u32 = 64u;
+override REFINE_STEPS: u32 = 8u;
 // Width of the screen border over which the confidence fades to 0, in uv.
-const EDGE_FADE: f32 = 0.1;
+override EDGE_FADE: f32 = 0.1;
 // Step past a cell boundary, in pixels, so the next cell lookup lands in the next cell.
 const CELL_EPS: f32 = 0.01;
 const NO_T: f32 = 3.4e38;

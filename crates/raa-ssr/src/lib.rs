@@ -6,6 +6,8 @@ mod feature;
 pub mod hiz;
 mod resources;
 mod shaders;
+mod tunables;
 
 pub use desc::SsrDesc;
 pub use feature::{SsrFeature, SsrHandle};
+pub use tunables::tunables;
