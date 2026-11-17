@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { RG_CAPTURE_T_S, ROOM_SUBJECTS, cameraAt, selectionAt } from './lib/scene.js';
 import { validateInventory, validateRequiredFacts } from './lib/inventory.js';
 import { captionText, collectRgFacts, halfFrameTimes } from './lib/runtime.js';
+import * as interpreter from './scenes/interpreter.js';
 
 // Browser-free contract checks of the render-graph page share (contracts rg-room-scene and
 // rg-page-facts): the RG_CAMERA_PATH formula, the room subjects in the capture view, the
@@ -129,4 +130,27 @@ test('collectRgFacts maps an observation and yields nulls for absent fields', ()
     { renderGraphActive: null, graph: null, issues: null, assertions: null, edits: null });
   assert.deepEqual(collectRgFacts(null, null, null),
     { renderGraphActive: null, graph: null, issues: null, assertions: null, edits: null });
+});
+
+// Contract rg-interpreter-inventory: the interpreter scene is the stage 'interpreter' (rank 0).
+test('validateInventory returns the four interpreter rows of stage interpreter', () => {
+  const rows = validateInventory([interpreter], 'interpreter');
+  assert.equal(rows.length, 4);
+  assert.deepEqual(rows.map(row => row.id),
+    ['interpreter-simple-forward', 'interpreter-full-gi-pair', 'interpreter-null-pair', 'interpreter-refused']);
+  assert.equal(new Set(rows.map(row => row.filename)).size, 4);
+  assert.ok(rows.every(row => row.filename.startsWith('interpreter-') && row.scenario === 'render-graph-interpreter'));
+  assert.equal(interpreter.default.id, 'render-graph-interpreter');
+  assert.equal(interpreter.default.milestone, 'interpreter');
+  // The interpreter scene provides stage interpreter only: no later stage is available from it.
+  assert.throws(() => validateInventory([interpreter], 'views'), /stage views is unavailable/);
+});
+
+test('every ROOM_SUBJECTS box lies in the RG_CAPTURE_T_S view of the interpreter rows', () => {
+  for (const subject of ROOM_SUBJECTS) {
+    const selection = { ...selectionAt(RG_CAPTURE_T_S), subjects: [subject] };
+    const variants = interpreter.default.variants.map(variant => ({ ...variant, selection }));
+    const scene = { ...interpreter, default: { ...interpreter.default, variants } };
+    assert.equal(validateInventory([scene], 'interpreter').length, 4, subject.name);
+  }
 });
