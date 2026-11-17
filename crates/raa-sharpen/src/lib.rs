@@ -4,9 +4,11 @@
 
 mod desc;
 mod kernel;
+mod shaders;
 
 pub use desc::SharpenDesc;
 pub use kernel::{compress, expand, sharpen_texel};
+pub use shaders::{FS_SHARPEN, SHARPEN_WGSL, VS_MAIN};
 
 /// Name of the feature pass.
 pub const SHARPEN_PASS_NAME: &str = "sharpen";
