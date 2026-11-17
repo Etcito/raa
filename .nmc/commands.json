@@ -500,5 +500,54 @@
       "p5-exposure-render",
       "p5-exposure-fresh"
     ]
+  },
+  {
+    "name": "p5-sharpen-check",
+    "command": "node web/common/post-job.mjs check --page dist/post --out out/post/sharpen --stage sharpen",
+    "timeout_s": 60,
+    "after": [
+      "p5-post-build"
+    ]
+  },
+  {
+    "name": "p5-sharpen-select",
+    "command": "node web/common/post-job.mjs select --page dist/post --out out/post/sharpen --stage sharpen",
+    "timeout_s": 60,
+    "after": [
+      "p5-sharpen-check"
+    ]
+  },
+  {
+    "name": "p5-sharpen-clean",
+    "command": "node web/common/post-job.mjs clean --page dist/post --out out/post/sharpen --stage sharpen",
+    "timeout_s": 60,
+    "after": [
+      "p5-sharpen-select"
+    ]
+  },
+  {
+    "name": "p5-sharpen-render",
+    "command": "node web/common/post-job.mjs render --page dist/post --out out/post/sharpen --stage sharpen",
+    "timeout_s": 1800,
+    "after": [
+      "p5-sharpen-clean"
+    ]
+  },
+  {
+    "name": "p5-sharpen-fresh",
+    "command": "node web/common/post-job.mjs fresh --page dist/post --out out/post/sharpen --stage sharpen",
+    "timeout_s": 120,
+    "after": [
+      "p5-sharpen-render"
+    ]
+  },
+  {
+    "name": "p5-sharpen-judge",
+    "command": "node web/common/post-job.mjs judge --page dist/post --out out/post/sharpen --stage sharpen --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p5-sharpen-render",
+      "p5-sharpen-fresh"
+    ]
   }
 ]
