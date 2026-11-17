@@ -28,7 +28,7 @@
 // `raa_cloud.shadow_origin + (ij + 0.5) / size * raa_cloud.shadow_extent` (metres);
 // R is the scalar transmission, G and B repeat it and A is 1.
 
-const RAA_CLOUD_SHADOW_SAMPLES: i32 = 16;
+override RAA_CLOUD_SHADOW_SAMPLES: i32 = 16;
 
 @compute @workgroup_size(8, 8)
 fn raa_cloud_shadow_main(@builtin(global_invocation_id) id: vec3<u32>) {

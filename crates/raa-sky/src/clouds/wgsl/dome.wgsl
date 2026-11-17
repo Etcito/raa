@@ -17,12 +17,12 @@
 // with the flags of `screen.wgsl` (bit 1 animated sky, bit 2 dither off, bits 3.. noise block
 // size); the camera lanes are unused. RGB is linear HDR cloud radiance, A the transmittance.
 
-const RAA_CLOUD_DOME_BELOW: f32 = 0.05;
-const RAA_CLOUD_DOME_LIGHT_SAMPLES: i32 = 5;
+override RAA_CLOUD_DOME_BELOW: f32 = 0.05;
+override RAA_CLOUD_DOME_LIGHT_SAMPLES: i32 = 5;
 // The smallest share of a new frame while the sky is animated.
-const RAA_CLOUD_DOME_ANIMATED_FLOOR: f32 = 0.0625;
+override RAA_CLOUD_DOME_ANIMATED_FLOOR: f32 = 0.0625;
 // A texel without history marches this many times the steps.
-const RAA_CLOUD_DOME_BURST: i32 = 2;
+override RAA_CLOUD_DOME_BURST: i32 = 2;
 
 // Integer hash (PCG) of the texel block and a sequence index, uniform in [0, 1).
 fn raa_cloud_dome_hash(pixel: vec2<u32>, sequence: u32) -> f32 {

@@ -97,3 +97,58 @@ fn cloud_albedo_defaults_to_0_98_and_is_settable() {
     let spec = raa_pipeline::validate_tunable(raa_sky::tunables(), "cloudAlbedo", 0.3);
     assert_eq!(spec.map(|s| s.default), Ok(0.98));
 }
+
+#[test]
+fn dome_screen_and_shadow_keys_and_defaults_follow_the_table() {
+    let expected = [
+        ("cloudDomeBelow", 0.05, false, "dome"),
+        ("cloudDomeLightSamples", 5.0, true, "dome"),
+        ("cloudDomeAnimatedFloor", 0.0625, false, "dome"),
+        ("cloudDomeBurst", 2.0, true, "dome"),
+        ("cloudScreenLightSamples", 5.0, true, "screen"),
+        ("cloudScreenMovingBlend", 0.12, false, "screen"),
+        ("cloudScreenPrior", 6.0, false, "screen"),
+        ("cloudScreenAnimatedFloor", 0.0625, false, "screen"),
+        ("cloudScreenBurst", 2.0, true, "screen"),
+        ("cloudShadowSamples", 16.0, true, "shadow"),
+    ];
+    let specs = raa_sky::tunables();
+    assert_eq!(specs.len(), 10 + expected.len());
+    for (spec, (key, default, integer, file)) in specs[10..].iter().zip(expected) {
+        assert_eq!(
+            (spec.key, spec.default, spec.integer),
+            (key, default, integer)
+        );
+        assert_eq!(spec.rebuild, "pipeline", "{key}");
+        assert_eq!((spec.min, spec.max), (None, None), "{key}: unstated range");
+        let (path, line) = spec.source.rsplit_once(':').unwrap();
+        assert!(path.ends_with(&format!("clouds/wgsl/{file}.wgsl")), "{key}");
+        let text = match file {
+            "dome" => include_str!("../src/clouds/wgsl/dome.wgsl"),
+            "screen" => include_str!("../src/clouds/wgsl/screen.wgsl"),
+            _ => include_str!("../src/clouds/wgsl/shadow.wgsl"),
+        };
+        let line = text
+            .lines()
+            .nth(line.parse::<usize>().unwrap() - 1)
+            .unwrap();
+        assert!(line.starts_with("override RAA_CLOUD_"), "{key}: {line}");
+        let copy = raa_sky::CloudTunables::default().value(key);
+        assert!((copy.unwrap() - default).abs() < 1e-6, "{key}");
+    }
+}
+
+#[test]
+fn one_value_per_cloud_module_is_accepted() {
+    for (key, value) in [
+        ("cloudDomeLightSamples", 8.0),
+        ("cloudScreenMovingBlend", 0.2),
+        ("cloudShadowSamples", 24.0),
+    ] {
+        let spec = raa_pipeline::validate_tunable(raa_sky::tunables(), key, value);
+        assert_eq!(spec.map(|s| s.key), Ok(key));
+    }
+    assert!(
+        raa_pipeline::validate_tunable(raa_sky::tunables(), "cloudShadowSamples", 2.5).is_err()
+    );
+}

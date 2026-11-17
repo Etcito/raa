@@ -186,7 +186,8 @@ fn screen_layout(gpu: &GpuContext, multisampled: bool) -> wgpu::BindGroupLayout 
         })
 }
 
-/// Validates `source` on the CPU, then builds its pipeline over groups (empty, empty, `layout`).
+/// Validates `source` on the CPU, then builds its pipeline over groups (empty, empty, `layout`)
+/// with the `constants` whose override `source` declares (wgpu refuses an undeclared one).
 fn pipeline(
     gpu: &GpuContext,
     label: &str,
@@ -198,6 +199,11 @@ fn pipeline(
 ) -> Result<wgpu::ComputePipeline, RaaError> {
     raa_shader::Composer::validate(source)
         .map_err(|error| RaaError::Gpu(format!("{label} shader: {error}")))?;
+    let constants: Vec<(&str, f64)> = constants
+        .iter()
+        .filter(|(name, _)| source.contains(&format!("override {name}:")))
+        .copied()
+        .collect();
     let device = gpu.device();
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
@@ -215,7 +221,7 @@ fn pipeline(
             module: &module,
             entry_point: Some(entry_point),
             compilation_options: wgpu::PipelineCompilationOptions {
-                constants,
+                constants: &constants,
                 ..Default::default()
             },
             cache: None,

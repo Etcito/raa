@@ -49,15 +49,15 @@
 // (textureLoad), never bilinearly: repeated blends of a bilinear read at a tiny offset diffuse
 // the converged image into a blur. A texel's full-resolution pixel is floor((texel + 0.5) / cloud_scale).
 
-const RAA_CLOUD_SCREEN_LIGHT_SAMPLES: i32 = 5;
+override RAA_CLOUD_SCREEN_LIGHT_SAMPLES: i32 = 5;
 // The share of each new frame while the camera or the sky changes (n = 1).
-const RAA_CLOUD_SCREEN_MOVING_BLEND: f32 = 0.12;
+override RAA_CLOUD_SCREEN_MOVING_BLEND: f32 = 0.12;
 // The running mean continues the moving blend: 1 / (n + 6) is 0.125 at n = 2.
-const RAA_CLOUD_SCREEN_PRIOR: f32 = 6.0;
+override RAA_CLOUD_SCREEN_PRIOR: f32 = 6.0;
 // The smallest share of a new frame while the sky is animated.
-const RAA_CLOUD_SCREEN_ANIMATED_FLOOR: f32 = 0.0625;
+override RAA_CLOUD_SCREEN_ANIMATED_FLOOR: f32 = 0.0625;
 // Texels without usable history march this many times the steps.
-const RAA_CLOUD_SCREEN_BURST: i32 = 2;
+override RAA_CLOUD_SCREEN_BURST: i32 = 2;
 // Transmittance stored by texels that were not marched (CLOUD_SCREEN_UNKNOWN_ALPHA).
 const RAA_CLOUD_SCREEN_UNKNOWN: f32 = -1.0;
 

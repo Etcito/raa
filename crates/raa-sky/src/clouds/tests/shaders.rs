@@ -10,8 +10,9 @@ use wgpu::naga::{
 
 use super::super::resources::CloudGpu;
 use super::super::shaders::{
-    COVERAGE_ENTRIES, NOISE_ENTRIES, cloud_volume_wgsl, coverage_module_wgsl, noise_module_wgsl,
-    dome_module_wgsl, panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl, shadow_module_wgsl,
+    COVERAGE_ENTRIES, NOISE_ENTRIES, cloud_volume_wgsl, coverage_module_wgsl, dome_module_wgsl,
+    noise_module_wgsl, panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl,
+    shadow_module_wgsl,
 };
 
 #[test]

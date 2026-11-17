@@ -101,6 +101,96 @@ pub const SKY_TUNABLES: &[TunableSpec] = &[
         rebuild: "pipeline",
         source: "crates/raa-sky/src/clouds/wgsl/cloud_volume.wgsl:69",
     },
+    TunableSpec {
+        key: "cloudDomeBelow",
+        default: 0.05,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/dome.wgsl:20",
+    },
+    TunableSpec {
+        key: "cloudDomeLightSamples",
+        default: 5.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/dome.wgsl:21",
+    },
+    TunableSpec {
+        key: "cloudDomeAnimatedFloor",
+        default: 0.0625,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/dome.wgsl:23",
+    },
+    TunableSpec {
+        key: "cloudDomeBurst",
+        default: 2.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/dome.wgsl:25",
+    },
+    TunableSpec {
+        key: "cloudScreenLightSamples",
+        default: 5.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/screen.wgsl:52",
+    },
+    TunableSpec {
+        key: "cloudScreenMovingBlend",
+        default: 0.12,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/screen.wgsl:54",
+    },
+    TunableSpec {
+        key: "cloudScreenPrior",
+        default: 6.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/screen.wgsl:56",
+    },
+    TunableSpec {
+        key: "cloudScreenAnimatedFloor",
+        default: 0.0625,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/screen.wgsl:58",
+    },
+    TunableSpec {
+        key: "cloudScreenBurst",
+        default: 2.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/screen.wgsl:60",
+    },
+    TunableSpec {
+        key: "cloudShadowSamples",
+        default: 16.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-sky/src/clouds/wgsl/shadow.wgsl:31",
+    },
 ];
 
 /// The number of atmosphere rows, the first entries of [`SKY_TUNABLES`].
@@ -111,6 +201,13 @@ const ATMOSPHERE_OVERRIDES: [&str; ATMOSPHERE_ROWS] =
     ["RAA_SKY_VIEW_STEPS", "raa_atmosphere_horizon_fade"];
 
 /// The static list of raa-sky tunables.
+///
+/// Handoff: Catalog family tunables_sky. `tunables` returns SKY_TUNABLES today: the atmosphere
+/// rows, then every cloud row (cloud_volume.wgsl, dome.wgsl, screen.wgsl, shadow.wgsl), in the
+/// order of docs/render-graph/tunables.md. The key registry is key -> TunableSpec; that card
+/// attaches each spec by key to a ParamSpec of pass.sky.atmosphere, pass.sky.cloud-lighting or
+/// pass.sky.cloud-screen with ParamBinding::Tunable { feature: FeatureId::Sky, key }. The cloud
+/// rows reach the pipelines as in the Handoff at tunables.rs `CloudTunables`.
 pub fn tunables() -> &'static [TunableSpec] {
     SKY_TUNABLES
 }
@@ -182,7 +279,8 @@ impl Default for SkyTunables {
 /// The number of cloud rows, the entries of [`SKY_TUNABLES`] after the atmosphere rows.
 const CLOUD_ROWS: usize = SKY_TUNABLES.len() - ATMOSPHERE_ROWS;
 
-/// The WGSL override names of the cloud rows (clouds/wgsl/cloud_volume.wgsl), in table order.
+/// The WGSL override names of the cloud rows (clouds/wgsl/cloud_volume.wgsl, dome.wgsl,
+/// screen.wgsl and shadow.wgsl), in table order.
 const CLOUD_OVERRIDES: [&str; CLOUD_ROWS] = [
     "RAA_CLOUD_WEATHER_TILE",
     "RAA_CLOUD_SHAPE_TILE",
@@ -192,6 +290,16 @@ const CLOUD_OVERRIDES: [&str; CLOUD_ROWS] = [
     "RAA_CLOUD_CIRRUS_HEIGHT",
     "RAA_CLOUD_MAX_DISTANCE",
     "RAA_CLOUD_MAX_PATH",
+    "RAA_CLOUD_DOME_BELOW",
+    "RAA_CLOUD_DOME_LIGHT_SAMPLES",
+    "RAA_CLOUD_DOME_ANIMATED_FLOOR",
+    "RAA_CLOUD_DOME_BURST",
+    "RAA_CLOUD_SCREEN_LIGHT_SAMPLES",
+    "RAA_CLOUD_SCREEN_MOVING_BLEND",
+    "RAA_CLOUD_SCREEN_PRIOR",
+    "RAA_CLOUD_SCREEN_ANIMATED_FLOOR",
+    "RAA_CLOUD_SCREEN_BURST",
+    "RAA_CLOUD_SHADOW_SAMPLES",
 ];
 
 /// A per-frame copy of the cloud rows of [`SKY_TUNABLES`], in table order; never a store.
@@ -246,7 +354,8 @@ impl CloudTunables {
         self.values.map(f32::to_bits)
     }
 
-    /// The pipeline constants of the cloud-volume overrides at these values.
+    /// The pipeline constants of every cloud override at these values; clouds/passes.rs passes
+    /// each module only the ones it declares.
     pub(crate) fn constants(&self) -> [(&'static str, f64); CLOUD_ROWS] {
         std::array::from_fn(|i| (CLOUD_OVERRIDES[i], f64::from(self.values[i])))
     }

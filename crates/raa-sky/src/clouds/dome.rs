@@ -40,7 +40,9 @@ pub(super) fn dome_direction(uv: [f32; 2]) -> [f32; 3] {
     let b = DOME_BELOW;
     let t = b * u[1] + (b * b * u[1] * u[1] - b * b + 1.0).max(0.0).sqrt();
     let d = [u[0] * t, u[1] * t - b, u[2] * t];
-    let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1.0e-12);
+    let n = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+        .sqrt()
+        .max(1.0e-12);
     [d[0] / n, d[1] / n, d[2] / n]
 }
 
@@ -253,7 +255,10 @@ impl DomeGpu {
             "raa-sky.cloud_dome",
             U::STORAGE_BINDING | U::TEXTURE_BINDING | U::COPY_SRC,
         );
-        let history = create("raa-sky.cloud_dome_history", U::TEXTURE_BINDING | U::COPY_DST);
+        let history = create(
+            "raa-sky.cloud_dome_history",
+            U::TEXTURE_BINDING | U::COPY_DST,
+        );
         // f16 -1.0 is 0xBC00: (0, 0, 0, -1) marks every texel as not marched.
         let unknown = [0u8, 0, 0, 0, 0, 0, 0x00, 0xBC].repeat((size * size) as usize);
         gpu.queue().write_texture(
