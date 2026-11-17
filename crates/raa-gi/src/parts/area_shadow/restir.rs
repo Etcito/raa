@@ -19,9 +19,11 @@ use wgpu::{
     TextureViewDimension,
 };
 
-use super::passes::{AreaShadowPipelines, AreaShadowWork, trace_module_wgsl};
+use crate::tunables::GiTunables;
+
+use super::passes::{AreaShadowPipelines, AreaShadowWork, trace_module_wgsl, tuned_pipeline};
 use crate::parts::screen::passes::{
-    compute_pipeline, depth_entry, dispatch, entry, float_entry, layout, module, storage_entry,
+    depth_entry, dispatch, entry, float_entry, layout, module, storage_entry,
     storage_texture_entry, uniform_entry,
 };
 
@@ -35,6 +37,11 @@ const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgs
 const RESTIR_INITIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_initial.wgsl");
 const RESTIR_TEMPORAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_temporal.wgsl");
 const RESTIR_SPATIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_spatial.wgsl");
+
+/// The (override, GI tunable key) pair of restir_core.wgsl, which every stage module composes.
+/// The ReSTIR GI modules of the screen part compose restir_core.wgsl too and keep its default.
+pub(crate) const AREA_RESTIR_OVERRIDES: &[(&str, &str)] =
+    &[("RAA_RESTIR_DEPTH_TOLERANCE", "restirDepthTolerance")];
 
 /// Entry of the ReSTIR initial-candidates pipeline (`@compute @workgroup_size(8, 8)`), one
 /// invocation per viewport pixel.
@@ -206,41 +213,93 @@ pub(crate) struct RestirPipelines {
     initial: wgpu::ComputePipeline,
     temporal: wgpu::ComputePipeline,
     spatial: wgpu::ComputePipeline,
+    empty: wgpu::BindGroupLayout,
+    group1: wgpu::BindGroupLayout,
+    modules: [wgpu::ShaderModule; 3],
+    constants: Vec<(&'static str, f64)>,
 }
+
+/// Label and entry of the initial, temporal and spatial stages.
+const STAGES: [(&str, &str); 3] = [
+    ("raa-gi.area-restir.initial", RESTIR_INITIAL_ENTRY),
+    ("raa-gi.area-restir.temporal", RESTIR_TEMPORAL_ENTRY),
+    ("raa-gi.area-restir.spatial", RESTIR_SPATIAL_ENTRY),
+];
 
 impl RestirPipelines {
     /// Builds one shader module per builder and the three pipelines over [empty group 0,
-    /// `group1`, `layout`].
+    /// `group1`, `layout`], at the GI tunable defaults of `AREA_RESTIR_OVERRIDES`.
     pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> RestirPipelines {
+        RestirPipelines::tuned(gpu, group1, &GiTunables::new())
+    }
+
+    /// [`RestirPipelines::new`] with the override constants of `tunables`.
+    pub(crate) fn tuned(
+        gpu: &GpuContext,
+        group1: &wgpu::BindGroupLayout,
+        tunables: &GiTunables,
+    ) -> RestirPipelines {
         let device = gpu.device();
         let empty = layout(device, "raa-gi.area-restir.empty", &[]);
         let group2 = layout(device, "raa-gi.area-restir", &restir_group2_entries());
-        let layouts = [Some(&empty), Some(group1), Some(&group2)];
-        let build = |label: &str, source: String, entry_point: &str| {
-            let shader = module(device, label, &source);
-            compute_pipeline(device, label, &shader, entry_point, &layouts, None)
-        };
-        let initial = build(
-            "raa-gi.area-restir.initial",
+        let sources = [
             restir_initial_module_wgsl(),
-            RESTIR_INITIAL_ENTRY,
-        );
-        let temporal = build(
-            "raa-gi.area-restir.temporal",
             restir_temporal_module_wgsl(),
-            RESTIR_TEMPORAL_ENTRY,
-        );
-        let spatial = build(
-            "raa-gi.area-restir.spatial",
             restir_spatial_module_wgsl(),
-            RESTIR_SPATIAL_ENTRY,
-        );
+        ];
+        let mut stage = 0;
+        let modules = sources.map(|source| {
+            stage += 1;
+            module(device, STAGES[stage - 1].0, &source)
+        });
+        let constants = tunables.constants(AREA_RESTIR_OVERRIDES);
+        let [initial, temporal, spatial] =
+            Self::build(device, &modules, [&empty, group1, &group2], &constants);
         RestirPipelines {
             layout: group2,
             initial,
             temporal,
             spatial,
+            empty,
+            group1: group1.clone(),
+            modules,
+            constants,
         }
+    }
+
+    /// The three stage pipelines of `modules` over `groups` with `constants`.
+    fn build(
+        device: &wgpu::Device,
+        modules: &[wgpu::ShaderModule; 3],
+        groups: [&wgpu::BindGroupLayout; 3],
+        constants: &[(&'static str, f64)],
+    ) -> [wgpu::ComputePipeline; 3] {
+        let layouts = groups.map(Some);
+        let mut index = 0;
+        STAGES.map(|(label, entry_point)| {
+            index += 1;
+            tuned_pipeline(
+                device,
+                label,
+                &modules[index - 1],
+                entry_point,
+                &layouts,
+                constants,
+            )
+        })
+    }
+
+    /// Rebuilds the three pipelines when the constants of `tunables` for
+    /// `AREA_RESTIR_OVERRIDES` differ from the ones they were built with; the layouts stay.
+    pub(crate) fn refresh(&mut self, gpu: &GpuContext, tunables: &GiTunables) {
+        let constants = tunables.constants(AREA_RESTIR_OVERRIDES);
+        if constants == self.constants {
+            return;
+        }
+        let groups = [&self.empty, &self.group1, &self.layout];
+        [self.initial, self.temporal, self.spatial] =
+            Self::build(gpu.device(), &self.modules, groups, &constants);
+        self.constants = constants;
     }
 
     /// Records one `raa-gi.area-shadow.restir` compute pass: group 1 and group 2 set once, the
@@ -291,8 +350,14 @@ mod tests {
         let shared = GiShared::new(&gpu);
         let group1_layout = shared.compute_group1_layout();
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
-        let restir = RestirPipelines::new(&gpu, &group1_layout);
-        let denoise = AreaShadowPipelines::new(&gpu, &group1_layout);
+        let mut tunables = shared.tunables();
+        let mut restir = RestirPipelines::tuned(&gpu, &group1_layout, &tunables);
+        let denoise = AreaShadowPipelines::tuned(&gpu, &group1_layout, &tunables);
+        assert!(matches!(
+            tunables.set("restirDepthTolerance", 0.2),
+            Ok(true)
+        ));
+        restir.refresh(&gpu, &tunables);
         assert!(
             block_on(scope.pop()).is_none(),
             "the three ReSTIR pipelines and the denoiser create without a validation error"

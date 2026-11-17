@@ -41,10 +41,10 @@ const RAA_AREA_BILATERAL_GAUSS: array<f32, 7> = array<f32, 7>(
 );
 
 // Distance in pixels between two taps, `cpu::SPATIAL_STRIDE` (2).
-const RAA_AREA_SPATIAL_STRIDE: i32 = 2;
+override RAA_AREA_SPATIAL_STRIDE: i32 = 2;
 
 // Exponent of the normal term, `cpu::NORMAL_POWER` (8).
-const RAA_AREA_NORMAL_POWER: i32 = 8;
+override RAA_AREA_NORMAL_POWER: i32 = 8;
 
 // Below this weight sum the ratio estimator reports full visibility, `cpu::RATIO_EPSILON`.
 const RAA_AREA_RATIO_EPSILON: f32 = 1e-6;

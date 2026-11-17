@@ -7,6 +7,8 @@ use raa_core::GpuContext;
 use raa_pipeline::Targets;
 use raa_taa::HistoryState;
 
+use crate::parts::GiShared;
+
 use super::resources::{AreaShadowInputs, AreaSharedViews};
 use super::restir::{RESERVOIR_BYTES, RESTIR_PARAMS_SIZE, RestirPipelines};
 use super::restir_cpu::{
@@ -115,22 +117,31 @@ impl RestirResources {
     }
 
     /// Writes the 64-B `RestirParamsGpu` little-endian by offset.
-    pub(crate) fn write_params(&self, gpu: &GpuContext, frame_index: u32, remap: &[u32; 8]) {
+    pub(crate) fn write_params(
+        &self,
+        gpu: &GpuContext,
+        frame_index: u32,
+        remap: &[u32; 8],
+        shared: &GiShared,
+    ) {
+        let int = |key: &str, default: u32| shared.tunable_value(key).map_or(default, |v| v as u32);
+        let float =
+            |key: &str, default: f32| shared.tunable_value(key).map_or(default, |v| v as f32);
         let mut bytes = [0u8; RESTIR_PARAMS_SIZE as usize];
         let words = [
             frame_index,
             u32::from(self.history_valid()),
-            RESTIR_CANDIDATES,
-            RESTIR_SPATIAL_SAMPLES,
+            int("areaRestirCandidates", RESTIR_CANDIDATES),
+            int("areaRestirSpatialSamples", RESTIR_SPATIAL_SAMPLES),
         ];
         for (lane, value) in words.iter().chain(remap.iter()).enumerate() {
             bytes[lane * 4..lane * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         let floats = [
-            RESTIR_SPATIAL_RADIUS,
-            RESTIR_M_CAP,
-            RESTIR_BOILING_FACTOR,
-            RESTIR_NORMAL_COS,
+            float("areaRestirSpatialRadius", RESTIR_SPATIAL_RADIUS),
+            float("areaRestirMCap", RESTIR_M_CAP),
+            float("areaRestirBoilingFactor", RESTIR_BOILING_FACTOR),
+            float("areaRestirNormalCos", RESTIR_NORMAL_COS),
         ];
         for (lane, value) in floats.iter().enumerate() {
             bytes[48 + lane * 4..52 + lane * 4].copy_from_slice(&value.to_le_bytes());
@@ -307,7 +318,7 @@ mod tests {
 
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
         let mut resources = RestirResources::new(&gpu, (64, 32));
-        resources.write_params(&gpu, 1, &[0, 1, 2, 3, 4, 5, 6, 7]);
+        resources.write_params(&gpu, 1, &[0, 1, 2, 3, 4, 5, 6, 7], &shared);
         resources.bind_group(&gpu, &pipelines, &targets, &inputs, &area.shared_views());
         assert!(
             block_on(scope.pop()).is_none(),

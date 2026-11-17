@@ -59,7 +59,9 @@ pub fn area_restir_bytes(viewport: (u32, u32)) -> u64 {
 /// the mask' replaces this body. Today `install` adds nothing to `ctx` and returns `Ok(())`; the
 /// generated `install_parts` of `parts.rs` calls it once per GI feature install, in file-name order.
 pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
-    let pipelines = AreaShadowPipelines::new(ctx.gpu, &ctx.shared.compute_group1_layout());
+    let tunables = ctx.shared.tunables();
+    let pipelines =
+        AreaShadowPipelines::tuned(ctx.gpu, &ctx.shared.compute_group1_layout(), &tunables);
     let part = Rc::new(AreaShadowPart {
         shared: ctx.shared.clone(),
         lit: ctx.lit.handle(),
@@ -68,6 +70,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             resources: None,
             restir: None,
             restir_pipelines: None,
+            tuned: tunables.generation(),
             mode: StochasticMode::Stratified,
             key: None,
             generations: [0; MAX_STOCHASTIC_LIGHTS],
@@ -125,6 +128,8 @@ struct AreaShadowState {
     resources: Option<AreaShadowResources>,
     restir: Option<RestirResources>,
     restir_pipelines: Option<RestirPipelines>,
+    /// The GI tunables generation the pipelines were last refreshed with.
+    tuned: u64,
     mode: StochasticMode,
     key: Option<((u32, u32), u32)>,
     generations: [u32; MAX_STOCHASTIC_LIGHTS],
@@ -274,6 +279,15 @@ impl FeaturePass for GiAreaShadowPass {
             ctx.lighting.clear_area_shadow();
             return Ok(());
         }
+        let generation = self.part.shared.tunables_generation();
+        if generation != state.tuned {
+            let tunables = self.part.shared.tunables();
+            state.pipelines.refresh(ctx.gpu, &tunables);
+            if let Some(restir) = state.restir_pipelines.as_mut() {
+                restir.refresh(ctx.gpu, &tunables);
+            }
+            state.tuned = generation;
+        }
         let restir_mode = frame.mode == StochasticMode::Restir;
         let groups = if restir_mode {
             1
@@ -288,7 +302,9 @@ impl FeaturePass for GiAreaShadowPass {
         if restir_mode {
             if state.restir_pipelines.is_none() {
                 let layout = self.part.shared.compute_group1_layout();
-                state.restir_pipelines = Some(RestirPipelines::new(ctx.gpu, &layout));
+                let tunables = self.part.shared.tunables();
+                let pipelines = RestirPipelines::tuned(ctx.gpu, &layout, &tunables);
+                state.restir_pipelines = Some(pipelines);
             }
             let current = state.restir.as_ref().map(RestirResources::viewport);
             if needs_restir_reallocation(current, ctx.size) {
@@ -333,7 +349,7 @@ impl FeaturePass for GiAreaShadowPass {
             *generations = frame.generations;
             *frame_index = frame_index.wrapping_add(1);
             resources.write_params(ctx.gpu, *frame_index, limit);
-            restir.write_params(ctx.gpu, *frame_index, &remap);
+            restir.write_params(ctx.gpu, *frame_index, &remap, &self.part.shared);
             *sdf_slot = sdf;
             ctx.lighting
                 .set_area_shadow(resources.mask_view(), &frame.table)?;

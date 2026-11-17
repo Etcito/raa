@@ -38,10 +38,10 @@ struct AreaDispatchGpu {
 @group(0) @binding(8) var raa_area_linear: sampler;
 
 // Blend weight of a usable history sample, `cpu::TEMPORAL_ALPHA` (0.1).
-const RAA_AREA_TEMPORAL_ALPHA: f32 = 0.1;
+override RAA_AREA_TEMPORAL_ALPHA: f32 = 0.1;
 
 // Relative depth tolerance of the reprojected history test, `cpu::DEPTH_TOLERANCE` (0.05).
-const RAA_AREA_DEPTH_TOLERANCE: f32 = 0.05;
+override RAA_AREA_DEPTH_TOLERANCE: f32 = 0.05;
 
 // One channel's reprojected history blended towards the current sample, or the current value
 // when the history is not usable.

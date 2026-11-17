@@ -20,9 +20,10 @@ use wgpu::{
     TextureViewDimension,
 };
 
+use crate::tunables::GiTunables;
+
 use super::super::screen::passes::{
-    compute_pipeline, depth_entry, dispatch, entry, float_entry, layout, module,
-    storage_texture_entry, uniform_entry,
+    depth_entry, dispatch, entry, float_entry, layout, module, storage_texture_entry, uniform_entry,
 };
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
@@ -30,6 +31,46 @@ const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgs
 const AREA_TRACE_WGSL: &str = include_str!("../../wgsl/area_shadow/trace.wgsl");
 const AREA_TEMPORAL_WGSL: &str = include_str!("../../wgsl/area_shadow/temporal.wgsl");
 const AREA_SPATIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/spatial.wgsl");
+
+/// The (override, GI tunable key) pairs of temporal.wgsl.
+pub(crate) const AREA_TEMPORAL_OVERRIDES: &[(&str, &str)] = &[
+    ("RAA_AREA_TEMPORAL_ALPHA", "temporalAlpha"),
+    ("RAA_AREA_DEPTH_TOLERANCE", "depthTolerance"),
+];
+
+/// The (override, GI tunable key) pairs of spatial.wgsl.
+pub(crate) const AREA_SPATIAL_OVERRIDES: &[(&str, &str)] = &[
+    ("RAA_AREA_SPATIAL_STRIDE", "spatialStride"),
+    ("RAA_AREA_NORMAL_POWER", "normalPower"),
+];
+
+/// A compute pipeline of `module`'s `entry` over `groups` with the override `constants` passed
+/// as `compilation_options.constants`.
+pub(crate) fn tuned_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+    groups: &[Option<&wgpu::BindGroupLayout>],
+    constants: &[(&'static str, f64)],
+) -> wgpu::ComputePipeline {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: groups,
+        immediate_size: 0,
+    });
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        module,
+        entry_point: Some(entry),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants,
+            ..Default::default()
+        },
+        cache: None,
+    })
+}
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes.
 const FRAME_SIZE: u64 = 432;
@@ -205,6 +246,43 @@ pub(crate) struct AreaShadowPipelines {
     temporal: wgpu::ComputePipeline,
     spatial_h: wgpu::ComputePipeline,
     spatial_v: wgpu::ComputePipeline,
+    temporal_module: wgpu::ShaderModule,
+    spatial_module: wgpu::ShaderModule,
+    temporal_constants: Vec<(&'static str, f64)>,
+    spatial_constants: Vec<(&'static str, f64)>,
+}
+
+/// The temporal pipeline over `layout` with `constants`.
+fn temporal_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&'static str, f64)],
+) -> wgpu::ComputePipeline {
+    let label = "raa-gi.area-shadow.temporal";
+    tuned_pipeline(
+        device,
+        label,
+        module,
+        AREA_TEMPORAL_ENTRY,
+        &[Some(layout)],
+        constants,
+    )
+}
+
+/// The horizontal and vertical spatial pipelines over `layout` with `constants`.
+fn spatial_pipelines(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&'static str, f64)],
+) -> [wgpu::ComputePipeline; 2] {
+    let groups = [Some(layout)];
+    [
+        ("raa-gi.area-shadow.spatial-h", AREA_SPATIAL_H_ENTRY),
+        ("raa-gi.area-shadow.spatial-v", AREA_SPATIAL_V_ENTRY),
+    ]
+    .map(|(label, entry)| tuned_pipeline(device, label, module, entry, &groups, constants))
 }
 
 /// The per-frame bind groups and viewport `AreaShadowPipelines::record` dispatches over: the
@@ -222,8 +300,18 @@ pub(crate) struct AreaShadowWork<'a> {
 impl AreaShadowPipelines {
     /// Builds one shader module per builder and the four pipelines: the trace over [empty group
     /// 0, `group1`, its trace group-2 layout], the temporal over its group-0 layout and the two
-    /// spatial entries over their shared group-0 layout.
+    /// spatial entries over their shared group-0 layout, at the GI tunable defaults. The tuned
+    /// form passes the constants for `AREA_TEMPORAL_OVERRIDES` and `AREA_SPATIAL_OVERRIDES`.
     pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> AreaShadowPipelines {
+        AreaShadowPipelines::tuned(gpu, group1, &GiTunables::new())
+    }
+
+    /// [`AreaShadowPipelines::new`] with the override constants of `tunables`.
+    pub(crate) fn tuned(
+        gpu: &GpuContext,
+        group1: &wgpu::BindGroupLayout,
+        tunables: &GiTunables,
+    ) -> AreaShadowPipelines {
         let device = gpu.device();
         let empty = layout(device, "raa-gi.area-shadow.empty", &[]);
         let trace_layout = layout(device, "raa-gi.area-shadow.trace", &trace_group2_entries());
@@ -246,38 +334,24 @@ impl AreaShadowPipelines {
         );
         let spatial_module = module(device, "raa-gi.area-shadow.spatial", &spatial_module_wgsl());
 
-        let trace = compute_pipeline(
+        let trace = tuned_pipeline(
             device,
             "raa-gi.area-shadow.trace",
             &trace_module,
             AREA_TRACE_ENTRY,
             &[Some(&empty), Some(group1), Some(&trace_layout)],
-            None,
+            &[],
         );
-        let temporal = compute_pipeline(
+        let temporal_constants = tunables.constants(AREA_TEMPORAL_OVERRIDES);
+        let spatial_constants = tunables.constants(AREA_SPATIAL_OVERRIDES);
+        let temporal = temporal_pipeline(
             device,
-            "raa-gi.area-shadow.temporal",
             &temporal_module,
-            AREA_TEMPORAL_ENTRY,
-            &[Some(&temporal_layout)],
-            None,
+            &temporal_layout,
+            &temporal_constants,
         );
-        let spatial_h = compute_pipeline(
-            device,
-            "raa-gi.area-shadow.spatial-h",
-            &spatial_module,
-            AREA_SPATIAL_H_ENTRY,
-            &[Some(&spatial_layout)],
-            None,
-        );
-        let spatial_v = compute_pipeline(
-            device,
-            "raa-gi.area-shadow.spatial-v",
-            &spatial_module,
-            AREA_SPATIAL_V_ENTRY,
-            &[Some(&spatial_layout)],
-            None,
-        );
+        let [spatial_h, spatial_v] =
+            spatial_pipelines(device, &spatial_module, &spatial_layout, &spatial_constants);
 
         AreaShadowPipelines {
             trace_layout,
@@ -287,6 +361,33 @@ impl AreaShadowPipelines {
             temporal,
             spatial_h,
             spatial_v,
+            temporal_module,
+            spatial_module,
+            temporal_constants,
+            spatial_constants,
+        }
+    }
+
+    /// Rebuilds the temporal pipeline, the spatial pipelines or both when the constants of
+    /// `tunables` for their overrides differ from the ones they were built with. The layouts and
+    /// the trace pipeline stay.
+    pub(crate) fn refresh(&mut self, gpu: &GpuContext, tunables: &GiTunables) {
+        let device = gpu.device();
+        let temporal = tunables.constants(AREA_TEMPORAL_OVERRIDES);
+        if temporal != self.temporal_constants {
+            self.temporal = temporal_pipeline(
+                device,
+                &self.temporal_module,
+                &self.temporal_layout,
+                &temporal,
+            );
+            self.temporal_constants = temporal;
+        }
+        let spatial = tunables.constants(AREA_SPATIAL_OVERRIDES);
+        if spatial != self.spatial_constants {
+            [self.spatial_h, self.spatial_v] =
+                spatial_pipelines(device, &self.spatial_module, &self.spatial_layout, &spatial);
+            self.spatial_constants = spatial;
         }
     }
 
@@ -374,7 +475,12 @@ mod tests {
         };
         let shared = GiShared::new(&gpu);
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
-        let pipelines = AreaShadowPipelines::new(&gpu, &shared.compute_group1_layout());
+        let mut tunables = shared.tunables();
+        let mut pipelines =
+            AreaShadowPipelines::tuned(&gpu, &shared.compute_group1_layout(), &tunables);
+        assert!(matches!(tunables.set("spatialStride", 3.0), Ok(true)));
+        assert!(matches!(tunables.set("temporalAlpha", 0.5), Ok(true)));
+        pipelines.refresh(&gpu, &tunables);
         assert!(
             block_on(scope.pop()).is_none(),
             "the four pipelines create without a validation error"

@@ -17,6 +17,9 @@ use crate::error::invalid;
 /// The thirteen ReSTIR GI rows of `pass.gi.screen` follow: nine `override`s of
 /// screen/restir_gi_common.wgsl and screen/restir_gi_main.wgsl, then the four params-uniform values
 /// of parts/screen/restir_gi_cpu.rs (rebuild `none`), written each prepare.
+/// The five `pass.gi.area-shadow` override rows follow: `restirDepthTolerance` of
+/// area_shadow/restir_core.wgsl, `spatialStride` and `normalPower` of area_shadow/spatial.wgsl,
+/// `temporalAlpha` and `depthTolerance` of area_shadow/temporal.wgsl.
 /// The table states no range for any of them, so none is given.
 pub const GI_TUNABLES: &[TunableSpec] = &[
     TunableSpec {
@@ -324,6 +327,105 @@ pub const GI_TUNABLES: &[TunableSpec] = &[
         integer: false,
         rebuild: "none",
         source: "crates/raa-gi/src/parts/screen/restir_gi_cpu.rs:21",
+    },
+    TunableSpec {
+        key: "restirDepthTolerance",
+        default: 0.1,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/area_shadow/restir_core.wgsl:12",
+    },
+    TunableSpec {
+        key: "spatialStride",
+        default: 2.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/area_shadow/spatial.wgsl:44",
+    },
+    TunableSpec {
+        key: "normalPower",
+        default: 8.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/area_shadow/spatial.wgsl:47",
+    },
+    TunableSpec {
+        key: "temporalAlpha",
+        default: 0.1,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/area_shadow/temporal.wgsl:41",
+    },
+    TunableSpec {
+        key: "depthTolerance",
+        default: 0.05,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/area_shadow/temporal.wgsl:44",
+    },
+    TunableSpec {
+        key: "areaRestirCandidates",
+        default: 8.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:21",
+    },
+    TunableSpec {
+        key: "areaRestirSpatialSamples",
+        default: 4.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:24",
+    },
+    TunableSpec {
+        key: "areaRestirSpatialRadius",
+        default: 30.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:27",
+    },
+    TunableSpec {
+        key: "areaRestirMCap",
+        default: 20.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:30",
+    },
+    TunableSpec {
+        key: "areaRestirBoilingFactor",
+        default: 8.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:33",
+    },
+    TunableSpec {
+        key: "areaRestirNormalCos",
+        default: 0.9,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "none",
+        source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:36",
     },
 ];
 

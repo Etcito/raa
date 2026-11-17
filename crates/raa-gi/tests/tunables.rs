@@ -201,3 +201,101 @@ fn restir_constants_pair_the_overrides_with_the_current_values() {
         ]
     );
 }
+
+/// The `pass.gi.area-shadow` override rows that card 4/5 adds, in table order: key, default and
+/// whether the row is integer. Each rebuilds the area-shadow pipelines.
+const AREA_ROWS: [(&str, f64, bool); 5] = [
+    ("restirDepthTolerance", 0.1, false),
+    ("spatialStride", 2.0, true),
+    ("normalPower", 8.0, true),
+    ("temporalAlpha", 0.1, false),
+    ("depthTolerance", 0.05, false),
+];
+
+#[test]
+fn area_shadow_keys_and_defaults_follow_the_table() {
+    let specs = tunables();
+    let start = 3 + SCREEN_ROWS.len() + RESTIR_ROWS.len();
+    assert!(specs.len() >= start + AREA_ROWS.len());
+    let store = GiTunables::new();
+    for (spec, (key, default, integer)) in specs[start..].iter().zip(AREA_ROWS) {
+        assert_eq!(spec.key, key);
+        assert_eq!(spec.default, default, "default of {key}");
+        assert_eq!(spec.integer, integer, "integer of {key}");
+        assert_eq!((spec.min, spec.max), (None, None), "{key} states no range");
+        assert_eq!(spec.rebuild, "pipeline", "{key}");
+        assert_eq!(store.value(key), Some(default), "{key}");
+    }
+    assert_eq!(store.value("temporalAlpha"), Some(0.1));
+}
+
+#[test]
+fn area_shadow_temporal_alpha_accepts_one_and_strides_refuse_a_fraction() {
+    let mut store = GiTunables::new();
+    assert!(
+        store
+            .set("temporalAlpha", 1.0)
+            .expect("the range is unstated")
+    );
+    assert_eq!(store.value("temporalAlpha"), Some(1.0));
+    let before = store.clone();
+    for key in ["spatialStride", "normalPower"] {
+        let fraction = store.set(key, 2.5).expect_err("an integer row");
+        assert_eq!(fraction.code(), "gi.invalid", "{key}");
+        assert_eq!(store, before, "{key}");
+    }
+    let constants = store.constants(&[
+        ("RAA_AREA_TEMPORAL_ALPHA", "temporalAlpha"),
+        ("RAA_AREA_DEPTH_TOLERANCE", "depthTolerance"),
+    ]);
+    assert_eq!(
+        constants,
+        [
+            ("RAA_AREA_TEMPORAL_ALPHA", 1.0),
+            ("RAA_AREA_DEPTH_TOLERANCE", 0.05)
+        ]
+    );
+}
+
+/// The six `pass.gi.area-shadow` uniform rows (store keys with the `area` prefix), in table
+/// order after the override rows: key, default and whether the row is integer.
+const AREA_UNIFORM_ROWS: [(&str, f64, bool); 6] = [
+    ("areaRestirCandidates", 8.0, true),
+    ("areaRestirSpatialSamples", 4.0, true),
+    ("areaRestirSpatialRadius", 30.0, false),
+    ("areaRestirMCap", 20.0, false),
+    ("areaRestirBoilingFactor", 8.0, false),
+    ("areaRestirNormalCos", 0.9, false),
+];
+
+#[test]
+fn area_shadow_uniform_keys_and_defaults_follow_the_table() {
+    let specs = tunables();
+    let start = 3 + SCREEN_ROWS.len() + RESTIR_ROWS.len() + AREA_ROWS.len();
+    assert!(specs.len() >= start + AREA_UNIFORM_ROWS.len());
+    for (spec, (key, default, integer)) in specs[start..].iter().zip(AREA_UNIFORM_ROWS) {
+        assert_eq!(spec.key, key);
+        assert_eq!(spec.default, default, "default of {key}");
+        assert_eq!(spec.integer, integer, "integer of {key}");
+        assert_eq!((spec.min, spec.max), (None, None), "{key} states no range");
+        assert_eq!(spec.rebuild, "none", "{key}");
+    }
+}
+
+#[test]
+fn area_shadow_uniform_rows_are_separate_from_the_restir_gi_rows() {
+    let mut store = GiTunables::new();
+    let before = store.clone();
+    let fraction = store
+        .set("areaRestirCandidates", 2.5)
+        .expect_err("an integer row");
+    assert_eq!(fraction.code(), "gi.invalid");
+    assert_eq!(store, before);
+    assert!(
+        store
+            .set("areaRestirSpatialRadius", 12.0)
+            .expect("unstated range")
+    );
+    assert_eq!(store.value("areaRestirSpatialRadius"), Some(12.0));
+    assert_eq!(store.value("restirSpatialRadius"), Some(24.0));
+}

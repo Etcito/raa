@@ -9,7 +9,7 @@
 // Lin et al. 2022 (GRIS).
 
 // Relative depth tolerance of the reservoir depth rejection.
-const RAA_RESTIR_DEPTH_TOLERANCE: f32 = 0.1;
+override RAA_RESTIR_DEPTH_TOLERANCE: f32 = 0.1;
 
 const RAA_RESTIR_TAU: f32 = 6.28318530718;
 
