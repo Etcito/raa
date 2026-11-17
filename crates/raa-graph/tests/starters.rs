@@ -220,3 +220,40 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
     assert_eq!(names, ["Full GI", "Simple forward"]);
     assert_eq!(stems, ["full-gi", "simple-forward"]);
 }
+
+/// P5-Q2: the Simple forward starter is exactly the contracted node list (S50 example, module
+/// raa-graph-starters) and links the cascades into `forward`. It has no `shadow.contact`: the
+/// `csm` Shadow slot (crates/raa-shadow/src/wgsl/csm.wgsl `raa_slot_shadow`) clamps its contact
+/// load, so the 1x1 dummy contact texture reads 1 at every pixel and the sun stays lit.
+#[test]
+fn simple_forward_runs_and_wires_the_sun_shadow_into_forward() {
+    let doc = parse_graph(starter("simple-forward")).expect("the Simple forward starter parses");
+    let (plan, _) = with_ctx(|ctx| plan_from_doc(&doc, ctx)).expect("Simple forward plans");
+    let mut nodes: Vec<_> = plan.nodes.iter().collect();
+    nodes.sort_by_key(|node| node.order_index);
+    let order: Vec<&str> = nodes.iter().map(|node| node.type_id.as_str()).collect();
+    assert_eq!(
+        order,
+        [
+            "pass.shadow.csm",
+            "pass.prepass",
+            "pass.light.tiles",
+            "pass.forward",
+            "pass.sky.background",
+            "pass.tonemap",
+            "output.display",
+        ]
+    );
+    let link = |from: &str, to: &str| {
+        plan.links.iter().any(|link| {
+            format!("{}.{}", link.from.node, link.from.port) == from
+                && format!("{}.{}", link.to.node, link.to.port) == to
+                && !link.history
+        })
+    };
+    assert!(link("prepass.depth", "lightTiles.depth"));
+    assert!(link("shadowCsm.shadowMap", "forward.shadowMap"));
+    assert!(link("lightTiles.lightTiles", "forward.lightTiles"));
+    assert!(link("forward.color", "tonemap.color"));
+    assert!(link("tonemap.color", "out.color"));
+}

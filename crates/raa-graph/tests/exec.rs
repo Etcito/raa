@@ -471,3 +471,98 @@ fn owned_setters_has_the_twenty_s54_setters_starting_with_set_pass_enabled() {
     assert_eq!(setters.len(), 20);
     assert_eq!(setters.first().copied(), Some("setPassEnabled"));
 }
+
+/// The value of `key` of `feature` in `targets`.
+fn target(targets: &SettingsSnapshot, feature: &FeatureId, key: &str) -> ParamValue {
+    targets
+        .values
+        .iter()
+        .find(|(candidate, _)| candidate == feature)
+        .and_then(|(_, values)| values.iter().find(|(name, _)| name == key))
+        .map(|(_, value)| value.clone())
+        .unwrap_or_else(|| panic!("no {feature:?} value {key}"))
+}
+
+/// P5-Q2: applying the Simple forward starter enables the cascade shadow pass and sends the shadow
+/// node's parameters to the Shadow feature (the defaults, and a written value in place of its
+/// default); the absent `shadow.contact` and `ao.gtao` passes are disabled and the Contact feature
+/// keeps its values.
+#[test]
+fn simple_forward_apply_enables_the_sun_shadow_and_forwards_its_parameters() {
+    let catalog = Catalog::build();
+    let (_, _, json) = raa_graph::registry::STARTERS
+        .iter()
+        .find(|&&(_, stem, _)| stem == "simple-forward")
+        .expect("the Simple forward starter");
+    let passes = [
+        "shadow.csm",
+        "prepass",
+        "light.tiles",
+        "ao.gtao",
+        "shadow.contact",
+        "forward",
+        "tonemap",
+    ];
+    let mut before = SettingsSnapshot {
+        passes: passes
+            .iter()
+            .map(|name| (name.to_string(), false))
+            .collect(),
+        order: passes.iter().map(|name| name.to_string()).collect(),
+        values: vec![
+            (FeatureId::Shadow, default_values(&FeatureId::Shadow)),
+            (FeatureId::Contact, default_values(&FeatureId::Contact)),
+        ],
+    };
+    before.passes.push(("sky.background".to_owned(), false));
+    let plan = plan_from_json(json).expect("Simple forward plans");
+    let targets = settings_targets(&plan, &catalog, &before).expect("the targets resolve");
+    for name in ["shadow.csm", "forward", "sky.background"] {
+        assert!(
+            targets.passes.contains(&(name.to_owned(), true)),
+            "{name} enabled: {:?}",
+            targets.passes
+        );
+    }
+    for name in ["ao.gtao", "shadow.contact"] {
+        assert!(
+            targets.passes.contains(&(name.to_owned(), false)),
+            "{name} disabled: {:?}",
+            targets.passes
+        );
+    }
+    for feature in [FeatureId::Shadow, FeatureId::Contact] {
+        for (key, default) in default_values(&feature) {
+            assert_eq!(
+                target(&targets, &feature, &key),
+                default,
+                "{feature:?} {key}"
+            );
+        }
+    }
+
+    // A written shadow parameter reaches the Shadow feature in place of its default.
+    let mut plan = plan;
+    for node in plan
+        .nodes
+        .iter_mut()
+        .filter(|node| node.type_id == "pass.shadow.csm")
+    {
+        for (key, value) in &mut node.params {
+            match key.as_str() {
+                "distance" => *value = ParamValue::Number(25.0),
+                "softness" => *value = ParamValue::Number(0.5),
+                _ => {}
+            }
+        }
+    }
+    let targets = settings_targets(&plan, &catalog, &before).expect("the targets resolve");
+    assert_eq!(
+        target(&targets, &FeatureId::Shadow, "distance"),
+        ParamValue::Number(25.0)
+    );
+    assert_eq!(
+        target(&targets, &FeatureId::Shadow, "softness"),
+        ParamValue::Number(0.5)
+    );
+}

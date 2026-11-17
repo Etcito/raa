@@ -54,7 +54,10 @@ fn raa_csm_cascade(
 // shadow (blended across the 10% band, faded to 1 past the shadow distance) x contact,
 // times the shared cloud-shadow visibility. Disabled clouds return 1 from the helper.
 fn raa_slot_shadow(world_pos: vec3<f32>, n: vec3<f32>, frag: vec4<f32>) -> f32 {
-    let contact = textureLoad(raa_contact_tex, vec2<i32>(frag.xy), 0).r;
+    // Clamped like crates/raa-gi/src/wgsl/slots/slot_ao.wgsl:9-27: the 1x1 dummy reads 1, never out of bounds.
+    let contact_size = vec2<i32>(textureDimensions(raa_contact_tex));
+    let contact_px = clamp(vec2<i32>(frag.xy), vec2<i32>(0), contact_size - vec2<i32>(1));
+    let contact = textureLoad(raa_contact_tex, contact_px, 0).r;
     if (raa_shadow.params.w < 0.5) {
         return contact * raa_cloud_shadow(world_pos);
     }
