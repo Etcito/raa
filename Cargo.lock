@@ -895,6 +895,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-graph"
+version = "0.5.0"
+dependencies = [
+ "raa-bloom",
+ "raa-cel",
+ "raa-contact",
+ "raa-core",
+ "raa-dof",
+ "raa-fog",
+ "raa-gi",
+ "raa-grading",
+ "raa-gtao",
+ "raa-lit",
+ "raa-loader",
+ "raa-oit",
+ "raa-pipeline",
+ "raa-shader",
+ "raa-shadow",
+ "raa-shafts",
+ "raa-sky",
+ "raa-ssr",
+ "raa-taa",
+ "raa-tonemap",
+ "raa-vg",
+ "wgpu",
+]
+
+[[package]]
 name = "raa-gtao"
 version = "0.5.0"
 dependencies = [

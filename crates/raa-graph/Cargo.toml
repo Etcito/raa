@@ -1,0 +1,34 @@
+[package]
+name = "raa-graph"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+rust-version.workspace = true
+description = "Render graph: document format, node catalog, validation, planning and the executor."
+
+[lib]
+name = "raa_graph"
+
+[dependencies]
+raa-core = { workspace = true }
+raa-loader = { workspace = true }
+wgpu = { workspace = true }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }
+raa-shadow = { path = "../raa-shadow" }
+raa-gtao = { path = "../raa-gtao" }
+raa-contact = { path = "../raa-contact" }
+raa-bloom = { path = "../raa-bloom" }
+raa-ssr = { path = "../raa-ssr" }
+raa-dof = { path = "../raa-dof" }
+raa-fog = { path = "../raa-fog" }
+raa-shafts = { path = "../raa-shafts" }
+raa-grading = { path = "../raa-grading" }
+raa-cel = { path = "../raa-cel" }
+raa-tonemap = { path = "../raa-tonemap" }
+raa-oit = { path = "../raa-oit" }
+raa-vg = { path = "../raa-vg" }
+raa-gi = { path = "../raa-gi" }
+raa-taa = { path = "../raa-taa" }
+raa-lit = { path = "../raa-lit" }
+raa-sky = { path = "../raa-sky" }
