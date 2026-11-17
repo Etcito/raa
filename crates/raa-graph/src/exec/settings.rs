@@ -1,21 +1,34 @@
 //! Settings accessors of the executor (contract `rg-settings-accessors`). For each feature the
 //! graph configures this file holds its Setting keys (the members of its setter's input interface
 //! in `packages/raa/types/*.d.ts`), the descriptor those keys read and write, and the handle call
-//! that applies it. Pipeline, Taa, Other and the eight post features answer empty values here.
+//! that applies it. Pipeline, Taa and Other answer empty values here. The post features (Ssr to
+//! Cel) read and write their keys in `settings_post.rs`, which this file dispatches to.
 
+use raa_bloom::{BloomDesc, BloomHandle};
+use raa_cel::{CelHandle, CelSettings};
 use raa_contact::{ContactDesc, ContactHandle};
 use raa_core::RaaError;
+use raa_dof::{DofDesc, DofHandle};
+use raa_fog::{FogDesc, FogHandle};
 use raa_gi::{
     DebugView as GiDebugView, GiHandle, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
     IndirectMode, SsgiQuality,
 };
+use raa_grading::{GradingDesc, GradingHandle};
 use raa_gtao::{AoDesc, GtaoHandle};
 use raa_lit::{AreaShadowSettings, AreaShadowTier, StochasticMode, StochasticShadowSettings};
+use raa_oit::{OitHandle, OitSettings};
 use raa_shadow::{ShadowDesc, ShadowHandle};
+use raa_shafts::{ShaftsDesc, ShaftsHandle};
+use raa_ssr::{SsrDesc, SsrHandle};
 use raa_tonemap::{Look, ToneMapper, ToneMapping, TonemapControl};
 use raa_vg::{DebugView as VgDebugView, VgHandle, VgSettings, VgSettingsPatch};
 
 use super::FeatureHandles;
+use super::settings_post::{
+    get_bloom, get_cel, get_dof, get_fog, get_grading, get_oit, get_shafts, get_ssr, oit_validate,
+    set_bloom, set_cel, set_dof, set_fog, set_grading, set_oit, set_shafts, set_ssr,
+};
 use crate::catalog::{FeatureId, ParamValue};
 
 /// The `FrameGpu` feature id that selects the diffuse form factor for area lights: the
@@ -83,6 +96,57 @@ pub fn setting_keys(feature: &FeatureId) -> &'static [&'static str] {
         FeatureId::AreaShading => &["mode"],
         FeatureId::Gtao => &["radius", "intensity", "power"],
         FeatureId::Contact => &["distance", "thickness", "intensity"],
+        FeatureId::Ssr => &["intensity", "maxRoughness", "thickness"],
+        FeatureId::Fog => &[
+            "density",
+            "heightFalloff",
+            "baseHeight",
+            "start",
+            "color",
+            "inscatter",
+            "aerialStrength",
+            "aerialDistance",
+        ],
+        FeatureId::Shafts => &["intensity", "density", "maxDistance"],
+        FeatureId::Oit => &["maxFragments", "poolFactor"],
+        // `autofocus` (packages/raa/types/m14-camera-effects.d.ts:29) is not a key: no ParamValue
+        // holds null, so write_values keeps its live value (see settings_post.rs).
+        FeatureId::Dof => &["focusDistance", "fStop", "focalLength", "maxCoc"],
+        FeatureId::Bloom => &["strength", "radius"],
+        FeatureId::Grading => &[
+            "temperature",
+            "tint",
+            "exposure",
+            "contrast",
+            "saturation",
+            "vibrance",
+            "lift",
+            "gamma",
+            "gain",
+            "shadowsTint",
+            "highlightsTint",
+            "splitBalance",
+            "vignette",
+        ],
+        FeatureId::Cel => &[
+            "bands",
+            "hues",
+            "chroma",
+            "dither",
+            "ditherAmount",
+            "outlineWidth",
+            "outlineSharpness",
+            "interiorEdges",
+            "edgeRetention",
+            "worldSpace",
+            "worldScale",
+            "softness",
+            "specular",
+            "toon",
+            "palette",
+            "outlines",
+            "ditherOutlines",
+        ],
         _ => &[],
     }
 }
@@ -238,6 +302,14 @@ enum Desc {
     AreaShading(bool),
     Gtao(AoDesc),
     Contact(ContactDesc),
+    Ssr(SsrDesc),
+    Fog(FogDesc),
+    Shafts(ShaftsDesc),
+    Oit(OitSettings),
+    Dof(DofDesc),
+    Bloom(BloomDesc),
+    Grading(GradingDesc),
+    Cel(CelSettings),
 }
 
 /// The default descriptor of `feature`; `None` for a feature without keys.
@@ -255,6 +327,14 @@ fn default_desc(feature: &FeatureId) -> Option<Desc> {
         FeatureId::AreaShading => Desc::AreaShading(false),
         FeatureId::Gtao => Desc::Gtao(AoDesc::default()),
         FeatureId::Contact => Desc::Contact(ContactDesc::default()),
+        FeatureId::Ssr => Desc::Ssr(SsrDesc::default()),
+        FeatureId::Fog => Desc::Fog(FogDesc::default()),
+        FeatureId::Shafts => Desc::Shafts(ShaftsDesc::default()),
+        FeatureId::Oit => Desc::Oit(OitSettings::default()),
+        FeatureId::Dof => Desc::Dof(DofDesc::default()),
+        FeatureId::Bloom => Desc::Bloom(BloomDesc::default()),
+        FeatureId::Grading => Desc::Grading(GradingDesc::default()),
+        FeatureId::Cel => Desc::Cel(CelSettings::default()),
         _ => return None,
     })
 }
@@ -271,6 +351,14 @@ fn desc_of(applied: &AppliedDescs, feature: &FeatureId) -> Option<Desc> {
         FeatureId::AreaShading => Desc::AreaShading(applied.area_shading?),
         FeatureId::Gtao => Desc::Gtao(applied.gtao?),
         FeatureId::Contact => Desc::Contact(applied.contact?),
+        FeatureId::Ssr => Desc::Ssr(applied.ssr?),
+        FeatureId::Fog => Desc::Fog(applied.fog?),
+        FeatureId::Shafts => Desc::Shafts(applied.shafts?),
+        FeatureId::Oit => Desc::Oit(applied.oit?),
+        FeatureId::Dof => Desc::Dof(applied.dof?),
+        FeatureId::Bloom => Desc::Bloom(applied.bloom?),
+        FeatureId::Grading => Desc::Grading(applied.grading?),
+        FeatureId::Cel => Desc::Cel(applied.cel?),
         _ => return None,
     })
 }
@@ -287,6 +375,14 @@ fn desc_get(desc: &Desc, key: &str) -> Option<ParamValue> {
         Desc::AreaShading(on) => get_area_shading(*on, key),
         Desc::Gtao(d) => get_gtao(d, key),
         Desc::Contact(d) => get_contact(d, key),
+        Desc::Ssr(d) => get_ssr(d, key),
+        Desc::Fog(d) => get_fog(d, key),
+        Desc::Shafts(d) => get_shafts(d, key),
+        Desc::Oit(d) => get_oit(d, key),
+        Desc::Dof(d) => get_dof(d, key),
+        Desc::Bloom(d) => get_bloom(d, key),
+        Desc::Grading(d) => get_grading(d, key),
+        Desc::Cel(d) => get_cel(d, key),
     }
 }
 
@@ -303,6 +399,14 @@ fn desc_set(desc: &mut Desc, key: &str, value: &ParamValue) -> Result<(), String
         Desc::AreaShading(on) => set_area_shading(on, key, value),
         Desc::Gtao(d) => set_gtao(d, key, value),
         Desc::Contact(d) => set_contact(d, key, value),
+        Desc::Ssr(d) => set_ssr(d, key, value),
+        Desc::Fog(d) => set_fog(d, key, value),
+        Desc::Shafts(d) => set_shafts(d, key, value),
+        Desc::Oit(d) => set_oit(d, key, value),
+        Desc::Dof(d) => set_dof(d, key, value),
+        Desc::Bloom(d) => set_bloom(d, key, value),
+        Desc::Grading(d) => set_grading(d, key, value),
+        Desc::Cel(d) => set_cel(d, key, value),
     }
 }
 
@@ -322,6 +426,14 @@ fn desc_check(desc: &Desc) -> Result<(), RaaError> {
         Desc::AreaShading(_) => Ok(()),
         Desc::Gtao(d) => d.validate(),
         Desc::Contact(d) => d.validate(),
+        Desc::Ssr(d) => d.validate(),
+        Desc::Fog(d) => d.validate(),
+        Desc::Shafts(d) => d.validate(),
+        Desc::Oit(d) => oit_validate(d),
+        Desc::Dof(d) => d.validate(),
+        Desc::Bloom(d) => d.validate(),
+        Desc::Grading(d) => d.validate(),
+        Desc::Cel(d) => d.validate(),
     }
 }
 
@@ -353,6 +465,14 @@ fn desc_apply(h: &mut FeatureHandles<'_>, desc: &Desc) -> Result<(), RaaError> {
         }
         Desc::Gtao(d) => if_installed(h.handles.gtao.as_ref(), |g| g.set(*d)),
         Desc::Contact(d) => if_installed(h.handles.contact.as_ref(), |c| c.set(*d)),
+        Desc::Ssr(d) => if_installed(h.handles.ssr.as_ref(), |s| s.set(*d)),
+        Desc::Fog(d) => if_installed(h.handles.fog.as_ref(), |f| f.set(*d)),
+        Desc::Shafts(d) => if_installed(h.handles.shafts.as_ref(), |s| s.set(*d)),
+        Desc::Oit(d) => if_installed(h.handles.oit.as_ref(), |o| o.set(*d)),
+        Desc::Dof(d) => if_installed(h.handles.dof.as_ref(), |f| f.set(*d)),
+        Desc::Bloom(d) => if_installed(h.handles.bloom.as_ref(), |b| b.set(*d)),
+        Desc::Grading(d) => if_installed(h.handles.grading.as_ref(), |g| g.set(*d)),
+        Desc::Cel(d) => if_installed(h.handles.cel.as_ref(), |c| c.set(*d)),
     }
 }
 
@@ -428,6 +548,14 @@ pub struct AppliedDescs {
     pub area_shading: Option<bool>,
     pub gtao: Option<AoDesc>,
     pub contact: Option<ContactDesc>,
+    pub ssr: Option<SsrDesc>,
+    pub fog: Option<FogDesc>,
+    pub shafts: Option<ShaftsDesc>,
+    pub oit: Option<OitSettings>,
+    pub dof: Option<DofDesc>,
+    pub bloom: Option<BloomDesc>,
+    pub grading: Option<GradingDesc>,
+    pub cel: Option<CelSettings>,
 }
 
 impl AppliedDescs {
@@ -449,6 +577,14 @@ impl AppliedDescs {
                 .map(|lit| lit.frame_feature(AREA_FORM_FACTOR_FEATURE_ID)),
             gtao: h.handles.gtao.as_ref().map(GtaoHandle::get),
             contact: h.handles.contact.as_ref().map(ContactHandle::get),
+            ssr: h.handles.ssr.as_ref().map(SsrHandle::get),
+            fog: h.handles.fog.as_ref().map(FogHandle::get),
+            shafts: h.handles.shafts.as_ref().map(ShaftsHandle::get),
+            oit: h.handles.oit.as_ref().map(OitHandle::get),
+            dof: h.handles.dof.as_ref().map(DofHandle::get),
+            bloom: h.handles.bloom.as_ref().map(BloomHandle::get),
+            grading: h.handles.grading.as_ref().map(GradingHandle::get),
+            cel: h.handles.cel.as_ref().map(CelHandle::get),
         }
     }
 
@@ -482,6 +618,30 @@ impl AppliedDescs {
         }
         if self.contact != live.contact {
             out.push(FeatureId::Contact);
+        }
+        if self.ssr != live.ssr {
+            out.push(FeatureId::Ssr);
+        }
+        if self.fog != live.fog {
+            out.push(FeatureId::Fog);
+        }
+        if self.shafts != live.shafts {
+            out.push(FeatureId::Shafts);
+        }
+        if self.oit != live.oit {
+            out.push(FeatureId::Oit);
+        }
+        if self.dof != live.dof {
+            out.push(FeatureId::Dof);
+        }
+        if self.bloom != live.bloom {
+            out.push(FeatureId::Bloom);
+        }
+        if self.grading != live.grading {
+            out.push(FeatureId::Grading);
+        }
+        if self.cel != live.cel {
+            out.push(FeatureId::Cel);
         }
     }
 }
@@ -714,15 +874,15 @@ fn set_contact(d: &mut ContactDesc, key: &str, value: &ParamValue) -> Result<(),
     Ok(())
 }
 
-fn f32_value(value: f32) -> ParamValue {
+pub(super) fn f32_value(value: f32) -> ParamValue {
     ParamValue::Number(f64::from(value))
 }
 
-fn u32_value(value: u32) -> ParamValue {
+pub(super) fn u32_value(value: u32) -> ParamValue {
     ParamValue::Int(i64::from(value))
 }
 
-fn named(name: &str) -> ParamValue {
+pub(super) fn named(name: &str) -> ParamValue {
     ParamValue::Enum(name.to_owned())
 }
 
@@ -742,14 +902,14 @@ fn lookup<T: Copy>(table: &[(&'static str, T)], text: &str) -> Option<T> {
         .map(|(_, value)| *value)
 }
 
-fn float(key: &str, value: &ParamValue) -> Result<f32, String> {
+pub(super) fn float(key: &str, value: &ParamValue) -> Result<f32, String> {
     match value {
         ParamValue::Number(number) => Ok(*number as f32),
         other => Err(expected(key, "a number", other)),
     }
 }
 
-fn count(key: &str, value: &ParamValue) -> Result<u32, String> {
+pub(super) fn count(key: &str, value: &ParamValue) -> Result<u32, String> {
     match value {
         ParamValue::Int(int) => u32::try_from(*int)
             .map_err(|_| format!("{key}: {int} is not an unsigned 32-bit integer")),
@@ -757,7 +917,7 @@ fn count(key: &str, value: &ParamValue) -> Result<u32, String> {
     }
 }
 
-fn flag(key: &str, value: &ParamValue) -> Result<bool, String> {
+pub(super) fn flag(key: &str, value: &ParamValue) -> Result<bool, String> {
     match value {
         ParamValue::Bool(flag) => Ok(*flag),
         other => Err(expected(key, "a boolean", other)),
@@ -765,7 +925,7 @@ fn flag(key: &str, value: &ParamValue) -> Result<bool, String> {
 }
 
 /// The enum value `parse` reads from the name in `value`.
-fn choice<T>(
+pub(super) fn choice<T>(
     key: &str,
     value: &ParamValue,
     parse: impl Fn(&str) -> Option<T>,
@@ -778,11 +938,11 @@ fn choice<T>(
     }
 }
 
-fn expected(key: &str, what: &str, value: &ParamValue) -> String {
+pub(super) fn expected(key: &str, what: &str, value: &ParamValue) -> String {
     format!("{key}: expected {what}, got {value:?}")
 }
 
-fn unknown(key: &str) -> String {
+pub(super) fn unknown(key: &str) -> String {
     format!("{key}: not a setting of this feature")
 }
 
