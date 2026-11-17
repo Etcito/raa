@@ -7,6 +7,15 @@
 //! Rect `id` of the storage buffer is (x, y, width, height) / [`ATLAS_SIZE`]; the shader
 //! clamps the sampled point half a texel inside it, so linear filtering never reads a
 //! neighbour. Id 0 is never allocated: its rect stays zero and samples (0, 0, 0, 0).
+//!
+//! Mip chain (S48): the atlas has [`ATLAS_MIP_LEVELS`] (5) levels. Every texture reserves
+//! `round_up(side, ATLAS_ALIGN)` (16) texels per side, so its mip texels (origin `x >> k`)
+//! belong to it alone; the alignment lowers the capacity by up to 15 texels per side per
+//! texture. Memory: 64 MiB for level 0, about 85 MiB with the chain.
+//!
+//! Rect encoding (binding 5, 16 B): `(x, y, w, h) / ATLAS_SIZE`; a negative `w` marks a
+//! texture added with `mips: false`, sampled at level 0 only; the shader uses `abs(w)`.
+//! Id 0 and removed ids stay all zero.
 
 use raa_core::{GpuContext, RaaError};
 
@@ -18,6 +27,72 @@ pub const MAX_TEXTURES: u32 = 1024;
 pub const TEXTURE_RECT_SIZE: usize = 16;
 /// Format of the atlas texture.
 pub const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// Mip levels of the atlas texture (levels 0..=4).
+pub const ATLAS_MIP_LEVELS: u32 = 5;
+/// Texel alignment of rect origins and reserved extents.
+pub const ATLAS_ALIGN: u32 = 16;
+
+/// Mip levels of a `width` x `height` texture: `min(5, 1 + floor(log2(min side)))`; a zero
+/// side returns 1.
+pub fn texture_levels(width: u32, height: u32) -> u32 {
+    let m = width.min(height);
+    if m == 0 {
+        return 1;
+    }
+    (32 - m.leading_zeros()).min(ATLAS_MIP_LEVELS)
+}
+
+/// `size` halved `level` times, each step `(s + 1) / 2`.
+pub fn level_size(size: u32, level: u32) -> u32 {
+    (0..level).fold(size, |s, _| s.div_ceil(2))
+}
+
+/// CPU twin of the prelude's lod: `clamp(0.5 * log2(max(rho2, 1e-12)), 0, levels - 1)`
+/// with `rho2` the larger squared length of `duv_dx * size` and `duv_dy * size`.
+pub fn texture_lod(size_texels: [f32; 2], duv_dx: [f32; 2], duv_dy: [f32; 2], levels: u32) -> f32 {
+    let len2 = |d: [f32; 2]| {
+        let (x, y) = (d[0] * size_texels[0], d[1] * size_texels[1]);
+        x * x + y * y
+    };
+    let rho2 = len2(duv_dx).max(len2(duv_dy));
+    let top = levels.max(1) - 1;
+    (0.5 * rho2.max(1e-12).log2()).clamp(0.0, top as f32)
+}
+
+/// CPU twin of the prelude's inset: `0.5 * exp2(ceil(lod)) / atlas_size`.
+pub fn level_inset(lod: f32, atlas_size: f32) -> f32 {
+    0.5 * lod.ceil().exp2() / atlas_size
+}
+
+/// Options of an added texture.
+///
+/// Handoff: "raa-lit: 5-level atlas upload, mipmap sampler and LitRenderer::add_texture_with"
+/// uses `TextureOptions`, `texture_levels(width: u32, height: u32) -> u32`,
+/// `level_size(size: u32, level: u32) -> u32`, `ATLAS_MIP_LEVELS` and
+/// `AtlasRect::gpu_bytes_with(&self, mips: bool) -> [u8; 16]` from this file to create the
+/// 5-level atlas and upload levels 1..texture_levels-1; today they are defined here and
+/// nothing in this file calls them yet. "raa-js m22: addTexture mips/srgb options, docs and
+/// typings" builds `TextureOptions` through the raa_lit root re-export.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct TextureOptions {
+    /// Generate mip levels (false: level 0 only).
+    pub mips: bool,
+    /// Average colour in linear light when downsampling.
+    pub srgb: bool,
+}
+
+impl Default for TextureOptions {
+    fn default() -> Self {
+        TextureOptions {
+            mips: true,
+            srgb: false,
+        }
+    }
+}
+
+fn round_up_align(side: u32) -> u32 {
+    side.div_ceil(ATLAS_ALIGN).saturating_mul(ATLAS_ALIGN)
+}
 
 /// Texel data of [`TextureAtlas::add`]: rgba8 bytes, or rgba floats clamped to [0, 1] and
 /// quantized to 8 bits (`round(x * 255)`, NaN as 0). Rows top first, 4 values per texel.
@@ -68,8 +143,16 @@ pub struct AtlasRect {
 impl AtlasRect {
     /// The storage-buffer rect: (x, y, width, height) / [`ATLAS_SIZE`].
     pub fn gpu_bytes(&self) -> [u8; TEXTURE_RECT_SIZE] {
+        self.gpu_bytes_with(true)
+    }
+
+    /// Like [`AtlasRect::gpu_bytes`], with the width negated when `mips` is false.
+    pub fn gpu_bytes_with(&self, mips: bool) -> [u8; TEXTURE_RECT_SIZE] {
         let s = ATLAS_SIZE as f32;
-        let v = [self.x, self.y, self.width, self.height].map(|t| t as f32 / s);
+        let mut v = [self.x, self.y, self.width, self.height].map(|t| t as f32 / s);
+        if !mips {
+            v[2] = -v[2];
+        }
         let mut out = [0; TEXTURE_RECT_SIZE];
         for (i, x) in v.iter().enumerate() {
             out[i * 4..i * 4 + 4].copy_from_slice(&x.to_le_bytes());
@@ -139,16 +222,17 @@ impl ShelfPacker {
             ));
         };
         let size = self.size;
+        let (rw, rh) = (round_up_align(width), round_up_align(height));
         let shelf = self
             .shelves
             .iter_mut()
-            .filter(|s| s.height >= height && s.x + width <= size)
+            .filter(|s| s.height >= rh && s.x.saturating_add(rw) <= size)
             .min_by_key(|s| s.height);
         let shelf = match shelf {
             Some(s) => s,
             None => {
                 let top = self.shelves.last().map_or(0, |s| s.y + s.height);
-                if top + height > size {
+                if top.saturating_add(rh) > size {
                     return Err(texture_error(
                         "texture.atlas_full",
                         format!(
@@ -160,7 +244,7 @@ impl ShelfPacker {
                 }
                 self.shelves.push(Shelf {
                     y: top,
-                    height,
+                    height: rh,
                     x: 0,
                     live: 0,
                 });
@@ -173,7 +257,7 @@ impl ShelfPacker {
             width,
             height,
         };
-        shelf.x += width;
+        shelf.x += rw;
         shelf.live += 1;
         self.rects[id] = Some(rect);
         Ok((id as u32, rect))

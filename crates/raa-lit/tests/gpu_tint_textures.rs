@@ -239,7 +239,7 @@ fn uploaded_texture_is_sampled_through_raa_texture() {
         2
     );
     let rect = rig.lit.texture_rect(2).expect("rect");
-    assert_eq!((rect.x, rect.y, rect.width, rect.height), (3, 0, 2, 1));
+    assert_eq!((rect.x, rect.y, rect.width, rect.height), (16, 0, 2, 1));
     // left + 0.5 * right.b: (0, 128/255, 0.5); the unknown id samples zero.
     assert_rgb(test, rig.centre(&gpu), [0.0, 128.0 / 255.0, 0.5]);
     let bad = rig

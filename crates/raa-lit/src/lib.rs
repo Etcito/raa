@@ -94,8 +94,9 @@ pub use raa_shader::{MaterialFnId, TintMode};
 pub use renderer::{FrameCounts, InstanceFrameStats, LitOptions, LitRenderer};
 pub use select::{IdPrep, SelectCapacity, SelectInput};
 pub use textures::{
-    ATLAS_FORMAT, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker, TEXTURE_RECT_SIZE, TexelData,
-    quantize,
+    ATLAS_ALIGN, ATLAS_FORMAT, ATLAS_MIP_LEVELS, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker,
+    TEXTURE_RECT_SIZE, TexelData, TextureOptions, level_inset, level_size, quantize,
+    texture_levels, texture_lod,
 };
 
 pub use tiles::{LIGHT_TILES_WGSL, install_local_lights, light_tiles_source};
