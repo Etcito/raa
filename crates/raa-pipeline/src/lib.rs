@@ -9,6 +9,7 @@ mod lighting;
 mod output;
 mod pass;
 mod pipeline;
+mod resource_table;
 mod targets;
 
 pub use brdf_atlas::{
@@ -22,6 +23,9 @@ pub use lighting::{
 };
 pub use pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
 pub use pipeline::{Pipeline, PipelineConfig, SubmissionState};
+pub use resource_table::{
+    ImageDesc, ImageDim, PublishedImage, ResourceTable, SampleKind, sample_kind_for,
+};
 pub use targets::{HdrChain, Targets};
 
 /// Format of the HDR chain, the opaque copy, bloom and the env cube (HDR_FORMAT).
