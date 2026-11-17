@@ -34,7 +34,7 @@ use crate::prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 use crate::renderer::{InstanceFrameStats, NO_CAMERA_LEVEL};
 use crate::select::{IdPrep, SelectInput};
 use crate::slots::default_slot_providers;
-use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas};
+use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas, TextureOptions};
 
 /// Stride of S10 vertex stream 0 (S1 Vertex: position, normal).
 const STREAM0_STRIDE: u64 = 24;
@@ -656,8 +656,9 @@ impl LitShared {
         width: u32,
         height: u32,
         data: TexelData<'_>,
+        options: TextureOptions,
     ) -> Result<u32, RaaError> {
-        let (id, created) = self.textures.add(gpu, width, height, data)?;
+        let (id, created) = self.textures.add(gpu, width, height, data, options)?;
         if created {
             self.frame_bind_group = create_frame_bind_group(
                 gpu,

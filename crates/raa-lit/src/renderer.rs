@@ -45,7 +45,7 @@ use crate::passes::install_passes;
 use crate::prep::MaterialClass;
 use crate::select::SelectInput;
 use crate::skin_views::SkinDraw;
-use crate::textures::{AtlasRect, TexelData};
+use crate::textures::{AtlasRect, TexelData, TextureOptions};
 use crate::tiles::{
     LIGHT_TILES_NAME, TILING_FEATURE_ID, TileInputs, light_info, publish_local_lights,
 };
@@ -714,8 +714,34 @@ impl LitRenderer {
         height: u32,
         data: TexelData<'_>,
     ) -> Result<u32, RaaError> {
+        self.add_texture_with(gpu, width, height, data, TextureOptions::default())
+    }
+
+    /// [`LitRenderer::add_texture`] with explicit [`TextureOptions`]: same id rule and
+    /// refusals (`texture.invalid`, `texture.atlas_full`, `pipeline.busy`; nothing changes).
+    /// With `options.mips` it uploads levels 1..`texture_levels(w, h)` made by
+    /// `downsample_rgba8(.., options.srgb)`; with `mips: false` only level 0, and the rect
+    /// width is negated so the shader samples level 0 only.
+    ///
+    /// Handoff: "raa-js m22: addTexture mips/srgb options, docs and typings" calls
+    /// `LitRenderer::add_texture_with(&mut self, gpu: &GpuContext, width: u32, height: u32,
+    /// data: TexelData<'_>, options: TextureOptions) -> Result<u32, RaaError>` from
+    /// `addTexture`, passing the options it read from JS (it builds `TextureOptions` per the
+    /// handoff at textures.rs `TextureOptions`). The 5-level atlas texture is created by the
+    /// first `TextureAtlas::add` (the placeholder before it has 1 level). No later call
+    /// replaces or drops it; it drops with the TextureAtlas. The handle's `add_texture`
+    /// rebuilds the group-0 bind group when `add` returns created = true. No pass resize or
+    /// prepare hook touches the atlas, which is reached only through the frame bind group.
+    pub fn add_texture_with(
+        &mut self,
+        gpu: &GpuContext,
+        width: u32,
+        height: u32,
+        data: TexelData<'_>,
+        options: TextureOptions,
+    ) -> Result<u32, RaaError> {
         let mut s = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        s.add_texture(gpu, width, height, data)
+        s.add_texture(gpu, width, height, data, options)
     }
 
     /// Removes texture `id`; its id then samples (0, 0, 0, 0). Idempotent: an unknown or

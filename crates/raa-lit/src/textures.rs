@@ -11,7 +11,9 @@
 //! Mip chain (S48): the atlas has [`ATLAS_MIP_LEVELS`] (5) levels. Every texture reserves
 //! `round_up(side, ATLAS_ALIGN)` (16) texels per side, so its mip texels (origin `x >> k`)
 //! belong to it alone; the alignment lowers the capacity by up to 15 texels per side per
-//! texture. Memory: 64 MiB for level 0, about 85 MiB with the chain.
+//! texture. Memory: 64 MiB for level 0, about 85 MiB with the chain. The first add creates
+//! the 5-level atlas; with `TextureOptions::mips` each add uploads levels
+//! 1..`texture_levels(w, h)`, each made from the previous level by `downsample_rgba8`.
 //!
 //! Rect encoding (binding 5, 16 B): `(x, y, w, h) / ATLAS_SIZE`; a negative `w` marks a
 //! texture added with `mips: false`, sampled at level 0 only; the shader uses `abs(w)`.
@@ -295,7 +297,7 @@ pub(crate) struct TextureAtlas {
     rects: wgpu::Buffer,
 }
 
-fn create_texture(gpu: &GpuContext, size: u32) -> wgpu::Texture {
+fn create_texture(gpu: &GpuContext, size: u32, levels: u32) -> wgpu::Texture {
     gpu.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("raa.lit.texture_atlas"),
         size: wgpu::Extent3d {
@@ -303,7 +305,7 @@ fn create_texture(gpu: &GpuContext, size: u32) -> wgpu::Texture {
             height: size,
             depth_or_array_layers: 1,
         },
-        mip_level_count: 1,
+        mip_level_count: levels,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: ATLAS_FORMAT,
@@ -314,7 +316,7 @@ fn create_texture(gpu: &GpuContext, size: u32) -> wgpu::Texture {
 
 impl TextureAtlas {
     pub(crate) fn new(gpu: &GpuContext) -> Self {
-        let texture = create_texture(gpu, 1);
+        let texture = create_texture(gpu, 1, 1);
         let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa.lit.texture_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -322,6 +324,7 @@ impl TextureAtlas {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
         // Zero-initialised: every rect is (0, 0, 0, 0) until its texture is added.
@@ -367,12 +370,16 @@ impl TextureAtlas {
     /// boolean is true when the atlas texture was created by this call (group 0 must be
     /// bound again). Refusals (nothing changes): `texture.invalid` (a zero or oversized
     /// side, `data` length not width * height * 4), `texture.atlas_full`.
+    /// Level 0 is always uploaded; with `options.mips` levels 1..`texture_levels(w, h)` are
+    /// made from the previous level by `downsample_rgba8(.., options.srgb)` and written at
+    /// `(x >> k, y >> k)`. The rect is written with `gpu_bytes_with(options.mips)`.
     pub(crate) fn add(
         &mut self,
         gpu: &GpuContext,
         width: u32,
         height: u32,
         data: TexelData<'_>,
+        options: TextureOptions,
     ) -> Result<(u32, bool), RaaError> {
         let want = u64::from(width) * u64::from(height) * 4;
         if data.len() as u64 != want {
@@ -387,11 +394,12 @@ impl TextureAtlas {
         let (id, rect) = self.packer.alloc(width, height)?;
         let created = !self.allocated;
         if created {
-            self.texture = create_texture(gpu, ATLAS_SIZE);
+            self.texture = create_texture(gpu, ATLAS_SIZE, ATLAS_MIP_LEVELS);
             self.view = self.texture.create_view(&Default::default());
             self.allocated = true;
         }
         let queue = gpu.queue();
+        let mut level = data.to_rgba8();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -403,7 +411,7 @@ impl TextureAtlas {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &data.to_rgba8(),
+            &level,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 4),
@@ -415,8 +423,39 @@ impl TextureAtlas {
                 depth_or_array_layers: 1,
             },
         );
+        if options.mips {
+            let (mut pw, mut ph) = (width, height);
+            for k in 1..texture_levels(width, height) {
+                let (next, _, _) = crate::mipgen::downsample_rgba8(&level, pw, ph, options.srgb);
+                let (lw, lh) = (level_size(width, k), level_size(height, k));
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &self.texture,
+                        mip_level: k,
+                        origin: wgpu::Origin3d {
+                            x: rect.x >> k,
+                            y: rect.y >> k,
+                            z: 0,
+                        },
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &next,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(lw * 4),
+                        rows_per_image: Some(lh),
+                    },
+                    wgpu::Extent3d {
+                        width: lw,
+                        height: lh,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                (level, pw, ph) = (next, lw, lh);
+            }
+        }
         let offset = u64::from(id) * TEXTURE_RECT_SIZE as u64;
-        queue.write_buffer(&self.rects, offset, &rect.gpu_bytes());
+        queue.write_buffer(&self.rects, offset, &rect.gpu_bytes_with(options.mips));
         Ok((id, created))
     }
 
