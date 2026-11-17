@@ -3,8 +3,10 @@
 //! Later shares of this crate add the maths, the shaders, the readback and the feature.
 
 mod desc;
+mod maths;
 
 pub use desc::AutoExposureDesc;
+pub use maths::{adapt, band_average, bin_index, exposure_from_average, luminance, settled};
 
 /// Name of the feature pass.
 pub const AUTO_EXPOSURE_PASS_NAME: &str = "exposure.auto";
