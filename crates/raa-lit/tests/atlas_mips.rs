@@ -215,8 +215,9 @@ fn lod_and_inset_match_hand_values() {
     let lod = |dx: [f32; 2], dy: [f32; 2], n| texture_lod(size, dx, dy, n);
     let one = 1.0 / 256.0;
     assert_eq!(lod([one, 0.0], [0.0, one], 5), 0.0);
-    assert_eq!(lod([4.0 / 256.0, 0.0], [0.0, 0.0], 5), 2.0);
-    assert_eq!(lod([1.0 / 16.0, 0.0], [0.0, 0.0], 5), 4.0);
+    assert_eq!(lod([4.0 / 256.0, 0.0], [0.0, 0.0], 5), 0.0);
+    assert_eq!(lod([4.0 / 256.0, 0.0], [0.0, 4.0 / 256.0], 5), 2.0);
+    assert_eq!(lod([1.0 / 16.0, 0.0], [0.0, 0.0], 5), 2.0);
     assert_eq!(lod([1.0, 0.0], [0.0, 0.0], 5), 4.0);
     assert_eq!(lod([1.0, 0.0], [0.0, 0.0], 1), 0.0);
     assert_eq!(level_inset(0.0, 4096.0), 0.5 / 4096.0);
@@ -246,5 +247,22 @@ fn texture_options_default() {
             mips: true,
             srgb: false
         }
+    );
+}
+
+// Regression (mips-on ground over-blurred close up): a 1:1 texel-to-pixel footprint, even
+// stretched 2.3:1 along the view at a grazing near ground, samples level 0; a far grazing
+// footprint (many texels per pixel on both axes) gets a coarse level.
+#[test]
+fn near_footprint_is_level_0_and_far_grazing_is_coarse() {
+    let size = [1024.0, 1024.0];
+    let px = 1.0 / 1024.0;
+    assert_eq!(texture_lod(size, [px, 0.0], [0.0, px], 5), 0.0);
+    assert_eq!(texture_lod(size, [0.86 * px, 0.0], [0.0, 2.0 * px], 5), 0.0);
+    let far = texture_lod(size, [6.0 * px, 0.0], [0.0, 60.0 * px], 5);
+    assert!(far >= 2.5, "far grazing lod {far}");
+    assert_eq!(
+        texture_lod(size, [40.0 * px, 0.0], [0.0, 400.0 * px], 5),
+        4.0
     );
 }

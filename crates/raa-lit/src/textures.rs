@@ -49,14 +49,19 @@ pub fn level_size(size: u32, level: u32) -> u32 {
     (0..level).fold(size, |s, _| s.div_ceil(2))
 }
 
+/// Footprint stretch covered by the prelude's 4 taps along the major axis (`RAA_ATLAS_MAX_ANISO`).
+pub const ATLAS_MAX_ANISO: f32 = 4.0;
+
 /// CPU twin of the prelude's lod: `clamp(0.5 * log2(max(rho2, 1e-12)), 0, levels - 1)`
-/// with `rho2` the larger squared length of `duv_dx * size` and `duv_dy * size`.
+/// with `rho2 = max(minor2, major2 / 16)`, minor2/major2 the smaller/larger squared length of
+/// `duv_dx * size` and `duv_dy * size` (the minor axis picks the level, 4 taps cover the major).
 pub fn texture_lod(size_texels: [f32; 2], duv_dx: [f32; 2], duv_dy: [f32; 2], levels: u32) -> f32 {
     let len2 = |d: [f32; 2]| {
         let (x, y) = (d[0] * size_texels[0], d[1] * size_texels[1]);
         x * x + y * y
     };
-    let rho2 = len2(duv_dx).max(len2(duv_dy));
+    let (a, b) = (len2(duv_dx), len2(duv_dy));
+    let rho2 = a.min(b).max(a.max(b) / (ATLAS_MAX_ANISO * ATLAS_MAX_ANISO));
     let top = levels.max(1) - 1;
     (0.5 * rho2.max(1e-12).log2()).clamp(0.0, top as f32)
 }

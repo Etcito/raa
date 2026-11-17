@@ -397,6 +397,9 @@ fn raa_texture(id: u32, uv: vec2<f32>) -> vec4<f32> {
 // "raa-sdfm: baked material samples raa_texture_grad; colour bake added with srgb" and
 // "post page: mips-ground scene and its test" call raa_texture_grad(id, uv, duv_dx, duv_dy)
 // from their material WGSL with derivatives taken at the top of `material_main`.
+// Largest footprint stretch the 4 taps of raa_texture_grad cover before the lod rises.
+const RAA_ATLAS_MAX_ANISO: f32 = 4.0;
+
 fn raa_texture_grad(id: u32, uv: vec2<f32>, duv_dx: vec2<f32>, duv_dy: vec2<f32>) -> vec4<f32> {
     let r = raa_texture_rects[min(id, arrayLength(&raa_texture_rects) - 1u)];
     let e = abs(r.zw);
@@ -409,15 +412,26 @@ fn raa_texture_grad(id: u32, uv: vec2<f32>, duv_dx: vec2<f32>, duv_dy: vec2<f32>
     );
     let gx = duv_dx * size;
     let gy = duv_dy * size;
-    let rho2 = max(dot(gx, gx), dot(gy, gy));
+    // Anisotropic footprint: the lod follows the minor axis (or the major axis / 4 when the
+    // footprint is stretched more than 4:1) and 4 taps spread along the major axis cover the
+    // rest, so a grazing near ground stays at level 0 instead of the major axis' coarse level.
+    let lx = dot(gx, gx);
+    let ly = dot(gy, gy);
+    let major2 = max(lx, ly);
+    let minor2 = min(lx, ly);
+    let rho2 = max(minor2, major2 / (RAA_ATLAS_MAX_ANISO * RAA_ATLAS_MAX_ANISO));
     let lod = clamp(0.5 * log2(max(rho2, 1e-12)), 0.0, levels - 1.0);
+    let axis = select(duv_dy, duv_dx, lx >= ly) * e;
     let inset = 0.5 * exp2(ceil(lod)) / atlas;
-    let q = clamp(
-        r.xy + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * e,
-        r.xy + inset,
-        max(r.xy + e - inset, r.xy + inset),
-    );
-    let c = textureSampleLevel(raa_texture_atlas, raa_texture_sampler, q, lod);
+    let lo = r.xy + inset;
+    let hi = max(r.xy + e - inset, lo);
+    let p = r.xy + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * e;
+    var c = vec4<f32>(0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let t = (f32(i) - 1.5) * 0.25;
+        let q = clamp(p + axis * t, lo, hi);
+        c = c + 0.25 * textureSampleLevel(raa_texture_atlas, raa_texture_sampler, q, lod);
+    }
     return select(vec4<f32>(0.0), c, r.z != 0.0);
 }
 
