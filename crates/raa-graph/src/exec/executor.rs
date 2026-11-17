@@ -424,11 +424,12 @@ fn snapshot(h: &FeatureHandles<'_>) -> SettingsSnapshot {
     let installed = h.pipeline.borrow().passes();
     let passes = installed
         .iter()
+        .filter(|info| !owned(&info.name))
         .map(|info| (info.name.clone(), info.enabled))
         .collect();
     let order = installed
         .iter()
-        .filter(|info| info.role == PassRole::Pass)
+        .filter(|info| info.role == PassRole::Pass && !owned(&info.name))
         .map(|info| info.name.clone())
         .collect();
     let values = RANK
@@ -482,7 +483,7 @@ fn apply_pipeline(
     h: &FeatureHandles<'_>,
     progress: &mut Progress,
 ) -> Result<(), Vec<Issue>> {
-    let installed = h.pipeline.borrow().passes();
+    let installed = unowned(h.pipeline.borrow().passes());
     let instructions = pipeline_instructions(plan, catalog, &installed);
     progress.pipeline = true;
     let mut pipeline = h.pipeline.borrow_mut();
@@ -571,14 +572,53 @@ fn restore_pipeline(snapshot: &SettingsSnapshot, h: &FeatureHandles<'_>) -> Resu
     set_order(&mut pipeline, &snapshot.order)
 }
 
+/// Sets the pass order `order` with every owned pass-role entry of the live pipeline put back.
 fn set_order(pipeline: &mut Pipeline, order: &[String]) -> Result<(), RaaError> {
-    let names: Vec<&str> = order.iter().map(String::as_str).collect();
+    let live: Vec<(String, bool)> = pipeline
+        .passes()
+        .into_iter()
+        .map(|info| (info.name, info.role == PassRole::Pass))
+        .collect();
+    let names = merge_owned(order, &live);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
     pipeline.set_order(&names)
 }
 
+/// Whether the pipeline entry `name` is owned by the extension that installed it: a name with `#`
+/// (`view#<nodeId>`). The executor leaves owned entries out of its pipeline state.
+fn owned(name: &str) -> bool {
+    name.contains('#')
+}
+
+/// The installed entries without the owned ones.
+fn unowned(installed: Vec<PassInfo>) -> Vec<PassInfo> {
+    installed
+        .into_iter()
+        .filter(|info| !owned(&info.name))
+        .collect()
+}
+
+/// The pass order to set: `order`, with each owned pass-role entry of `live` (name, pass role, in
+/// live order) inserted right after the nearest pass-role entry before it, or at the front when none
+/// precedes it. Other entries are never merged, and without an owned entry the result is `order`.
+fn merge_owned(order: &[String], live: &[(String, bool)]) -> Vec<String> {
+    let mut merged = order.to_vec();
+    let mut previous: Option<&str> = None;
+    for (name, _) in live.iter().filter(|(_, is_pass)| *is_pass) {
+        if owned(name) {
+            let at = previous
+                .and_then(|before| merged.iter().position(|known| known == before))
+                .map_or(0, |index| index + 1);
+            merged.insert(at, name.clone());
+        }
+        previous = Some(name.as_str());
+    }
+    merged
+}
+
 /// Whether the live pipeline differs from `applied`: an applied entry's enabled flag, read through
-/// `Pipeline::entry_enabled` without allocation, or the order of the pass-role entries, read through
-/// `Pipeline::passes`.
+/// `Pipeline::entry_enabled` without allocation, or the order of the unowned pass-role entries, read
+/// through `Pipeline::passes`.
 fn pipeline_moved(applied: &SettingsSnapshot, h: &FeatureHandles<'_>) -> bool {
     let pipeline = h.pipeline.borrow();
     if applied
@@ -591,7 +631,7 @@ fn pipeline_moved(applied: &SettingsSnapshot, h: &FeatureHandles<'_>) -> bool {
     let installed = pipeline.passes();
     !installed
         .iter()
-        .filter(|info| info.role == PassRole::Pass)
+        .filter(|info| info.role == PassRole::Pass && !owned(&info.name))
         .map(|info| info.name.as_str())
         .eq(applied.order.iter().map(String::as_str))
 }
@@ -602,7 +642,7 @@ fn reapply_pipeline(
     plan: &GraphPlan,
     h: &FeatureHandles<'_>,
 ) -> Result<(), RaaError> {
-    let installed = h.pipeline.borrow().passes();
+    let installed = unowned(h.pipeline.borrow().passes());
     let instructions = pipeline_instructions(plan, catalog, &installed);
     let mut pipeline = h.pipeline.borrow_mut();
     for (name, enabled) in &instructions.enable {
@@ -619,7 +659,7 @@ fn adopt_pipeline(
     applied: &SettingsSnapshot,
     observed: &[PassInfo],
 ) {
-    for info in observed {
+    for info in observed.iter().filter(|info| !owned(&info.name)) {
         let applied_on = applied
             .passes
             .iter()
@@ -631,7 +671,7 @@ fn adopt_pipeline(
     }
     let order: Vec<String> = observed
         .iter()
-        .filter(|info| info.role == PassRole::Pass)
+        .filter(|info| info.role == PassRole::Pass && !owned(&info.name))
         .map(|info| info.name.clone())
         .collect();
     if order != applied.order {
@@ -854,5 +894,61 @@ fn pipeline_issue(error: &RaaError) -> Issue {
         link: None,
         message: error.message().to_owned(),
         fix: "reorder the graph's passes, or remove the pass the pipeline refused".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_owned;
+
+    /// Owned names of string slices.
+    fn names(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// Owned `(name, is_pass)` pairs of string slices.
+    fn pairs(entries: &[(&str, bool)]) -> Vec<(String, bool)> {
+        entries
+            .iter()
+            .map(|(name, is_pass)| ((*name).to_owned(), *is_pass))
+            .collect()
+    }
+
+    #[test]
+    fn an_owned_pass_keeps_its_place_after_its_neighbour() {
+        let order = names(&["prepass", "forward", "tonemap"]);
+        let live = pairs(&[
+            ("prepass", true),
+            ("view#a", true),
+            ("forward", true),
+            ("tonemap", true),
+            ("view#b", true),
+        ]);
+        assert_eq!(
+            merge_owned(&order, &live),
+            names(&["prepass", "view#a", "forward", "tonemap", "view#b"])
+        );
+    }
+
+    #[test]
+    fn an_owned_pass_first_in_live_order_comes_first() {
+        let order = names(&["prepass", "forward"]);
+        let live = pairs(&[("view#a", true), ("prepass", true), ("forward", true)]);
+        assert_eq!(
+            merge_owned(&order, &live),
+            names(&["view#a", "prepass", "forward"])
+        );
+    }
+
+    #[test]
+    fn an_owned_contributor_is_not_merged() {
+        let order = names(&["prepass", "forward", "tonemap"]);
+        let live = pairs(&[
+            ("prepass", true),
+            ("forward", true),
+            ("view#c", false),
+            ("tonemap", true),
+        ]);
+        assert_eq!(merge_owned(&order, &live), order);
     }
 }

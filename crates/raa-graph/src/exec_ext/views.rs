@@ -1,13 +1,16 @@
 //! Executor extension `views` (S55): the sixteen `view.image` shader variants, the node input
-//! checks the views share applies, and the compositor `ViewPass` each executed view node runs.
+//! checks the views share applies, the compositor `ViewPass` each executed view node runs, the
+//! `views` graph frame that binds their inputs, and the statistics of view and pass nodes.
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx, SampleKind};
+use raa_pipeline::{
+    FeaturePass, GraphFrame, ImageDesc, ImageDim, PrepareCtx, RecordCtx, SampleKind,
+};
 
-use crate::catalog::{Catalog, GraphFormat, PortSpec, PortType};
+use crate::catalog::{Catalog, GraphFormat, NodeTypeSpec, ParamValue, PortSpec, PortType};
 use crate::error::{Issue, Severity, Stage};
-use crate::exec::{ExecExtension, FeatureHandles};
-use crate::plan::{GraphPlan, InputSource, PlanInput};
+use crate::exec::{ExecExtension, FeatureHandles, NodeStats, ResourceStat};
+use crate::plan::{GraphPlan, InputSource, PlanInput, PlanNode};
 
 #[allow(dead_code)] // the compositor card and the tests call these; this share installs nothing
 /// The sixteen (dimension, sample kind) pairs `view.image` has a shader for, in this order.
@@ -129,14 +132,69 @@ pub(crate) fn view_image_source(dim: ImageDim, sample: SampleKind) -> Option<Str
 /// State: the extension's own `Catalog`, built once in `ViewsExtension::new()`.
 pub(crate) struct ViewsExtension {
     catalog: Catalog,
+    /// The view passes this extension installed; the next apply or clear removes them.
+    installed: Vec<String>,
+    /// The table entries of the latest frame, captured by `frame` for `stats`.
+    images: Vec<(String, String, ImageDesc)>,
+    buffers: Vec<(String, String, u64)>,
 }
 
 impl ViewsExtension {
-    /// The extension with its own catalog.
+    /// The extension with its own catalog and nothing installed.
     pub(crate) fn new() -> ViewsExtension {
         ViewsExtension {
             catalog: Catalog::build(),
+            installed: Vec::new(),
+            images: Vec::new(),
+            buffers: Vec::new(),
         }
+    }
+
+    /// Removes the view passes this extension installed and the `views` graph frame.
+    fn uninstall(&mut self, h: &mut FeatureHandles<'_>) {
+        let mut pipeline = h.pipeline.borrow_mut();
+        for name in self.installed.drain(..) {
+            let _ = pipeline.remove(&name);
+        }
+        let _ = pipeline.remove_graph_frame(VIEWS_FRAME);
+    }
+
+    /// Installs the view passes of `plan` and the `views` graph frame. A refusal removes what this
+    /// call installed and returns its `graph.order` issue.
+    fn install(&mut self, plan: &GraphPlan, h: &mut FeatureHandles<'_>) -> Result<(), Vec<Issue>> {
+        if !plan
+            .nodes
+            .iter()
+            .any(|node| node.type_id.starts_with("view."))
+        {
+            return Ok(());
+        }
+        let mut bindings = Vec::new();
+        for Placement {
+            node,
+            spec,
+            bindings: inputs,
+        } in placements(plan, &self.catalog)
+        {
+            let name = spec.name.clone();
+            let added = h.pipeline.borrow_mut().add(Box::new(ViewPass::new(spec)));
+            if let Err(error) = added {
+                self.uninstall(h);
+                return Err(vec![order_issue(Some(node.as_str()), &error)]);
+            }
+            self.installed.push(name);
+            bindings.extend(inputs);
+        }
+        let frame = ViewsFrame { bindings };
+        let added = h
+            .pipeline
+            .borrow_mut()
+            .add_graph_frame(VIEWS_FRAME, Box::new(frame));
+        if let Err(error) = added {
+            self.uninstall(h);
+            return Err(vec![order_issue(None, &error)]);
+        }
+        Ok(())
     }
 }
 
@@ -153,18 +211,113 @@ impl ExecExtension for ViewsExtension {
     fn apply(
         &mut self,
         plan: &GraphPlan,
-        _previous: Option<&GraphPlan>,
-        _h: &mut FeatureHandles<'_>,
+        previous: Option<&GraphPlan>,
+        h: &mut FeatureHandles<'_>,
     ) -> Result<(), Vec<Issue>> {
         let issues = check_plan(plan, &self.catalog);
-        if issues.is_empty() {
-            Ok(())
-        } else {
-            Err(issues)
+        if !issues.is_empty() {
+            return Err(issues);
         }
+        self.uninstall(h);
+        let Err(issues) = self.install(plan, h) else {
+            return Ok(());
+        };
+        // The executor does not undo a refused extension, so the previous views are restored here.
+        if let Some(before) = previous {
+            let _ = self.install(before, h);
+        }
+        Err(issues)
     }
 
-    fn clear(&mut self, _h: &mut FeatureHandles<'_>) {}
+    fn clear(&mut self, h: &mut FeatureHandles<'_>) {
+        self.uninstall(h);
+        self.images.clear();
+        self.buffers.clear();
+    }
+
+    fn frame(&mut self, h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
+        let pipeline = h.pipeline.borrow();
+        let table = pipeline.resources();
+        self.images = table.entries();
+        self.buffers = table.buffer_entries();
+        Ok(())
+    }
+
+    fn stats(&self, out: &mut Vec<NodeStats>) {
+        for node in out.iter_mut() {
+            if node.type_id.starts_with("view.") {
+                let pass = format!("{VIEW_PREFIX}{}", node.node);
+                let colour = self
+                    .images
+                    .iter()
+                    .find(|(name, port, _)| *name == pass && port == "color");
+                node.ran = colour.is_some();
+                node.resources = colour
+                    .map(|(_, port, desc)| resource_stat(port, desc))
+                    .into_iter()
+                    .collect();
+            } else if let Some(pass) = self.catalog.node(&node.type_id).and_then(|spec| spec.pass) {
+                let images = self
+                    .images
+                    .iter()
+                    .filter(|(name, _, _)| name == pass)
+                    .map(|(_, port, desc)| resource_stat(port, desc));
+                let buffers = self
+                    .buffers
+                    .iter()
+                    .filter(|(name, _, _)| name == pass)
+                    .map(|(_, port, size)| buffer_stat(port, *size));
+                node.resources = images.chain(buffers).collect();
+            }
+        }
+    }
+}
+
+/// The name prefix of every view pass: `view#<nodeId>`.
+const VIEW_PREFIX: &str = "view#";
+/// The graph frame that binds the view passes' inputs.
+const VIEWS_FRAME: &str = "views";
+
+/// One bound input of a view pass: `(view pass name, input port, source pass, source port)`.
+type Binding = (String, &'static str, String, String);
+
+/// The `views` graph frame (S55): before a view pass records, each of its linked inputs is bound to
+/// the image its source pass published in this frame, when one was published. Every other pass
+/// is ignored, and the other hooks keep their defaults.
+struct ViewsFrame {
+    bindings: Vec<Binding>,
+}
+
+impl GraphFrame for ViewsFrame {
+    fn before_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        if !pass.starts_with(VIEW_PREFIX) {
+            return Ok(());
+        }
+        for (view, port, source, source_port) in &self.bindings {
+            if view == pass
+                && let Some(image) = ctx.resources.get(source, source_port)
+            {
+                ctx.resources.bind_input(view, port, image);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `graph.order` issue of a view pass the pipeline refused, on `node` when it has one.
+fn order_issue(node: Option<&str>, error: &RaaError) -> Issue {
+    Issue {
+        code: "graph.order",
+        severity: Severity::Error,
+        stage: Stage::Apply,
+        node: node.map(str::to_owned),
+        port: None,
+        param: None,
+        link: None,
+        message: error.message().to_owned(),
+        fix: "Unlink the view node, or link it to a pass the pipeline's order can place."
+            .to_owned(),
+    }
 }
 
 /// One apply-stage error of `node` on `port`.
@@ -379,7 +532,6 @@ pub(crate) struct ImageParams {
 }
 
 /// What a view pass shows (contract 'view-pass').
-#[allow(dead_code)] // the views graph frame (View nodes 5/6) builds these; until then the tests do
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ViewKind {
     /// One image of `view.image`, drawn with its codes.
@@ -396,7 +548,6 @@ pub(crate) enum ViewKind {
 
 /// The spec of one view pass: its pass name `view#<nodeId>`, its order, whether it is an output
 /// overlay after tone mapping, whether it draws its colour onto the backbuffer, and what it shows.
-#[allow(dead_code)] // the views graph frame (View nodes 5/6) builds these; until then the tests do
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ViewPassSpec {
     pub(crate) name: String,
@@ -433,7 +584,6 @@ struct Colour {
 /// colour texture and the uniform buffer on first use and publishes `(name, "color")`; `record`
 /// reads the inputs bound in the resource table, and an unbound image or compare input clears the
 /// colour to grey without drawing.
-#[allow(dead_code)] // the views graph frame (View nodes 5/6) builds this; until then the tests do
 pub(crate) struct ViewPass {
     spec: ViewPassSpec,
     colour: Option<Colour>,
@@ -447,7 +597,6 @@ pub(crate) struct ViewPass {
 
 impl ViewPass {
     /// The pass of `spec`. No GPU work happens here: `prepare` and `record` create what they use.
-    #[allow(dead_code)] // the views graph frame (View nodes 5/6) calls this; until then the tests do
     pub(crate) fn new(spec: ViewPassSpec) -> ViewPass {
         ViewPass {
             spec,
@@ -930,12 +1079,343 @@ fn nearest_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     })
 }
 
+/// The compare inputs of `view.compare`.
+const COMPARE_PORTS: [&str; 2] = ["a", "b"];
+/// The tile inputs of `view.grid`, in port order.
+const TILE_PORTS: [&str; 16] = [
+    "t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13", "t14",
+    "t15",
+];
+/// Every format a `GraphFormat` names; a published texture format takes the name of the first one
+/// that maps to it.
+const GRAPH_FORMATS: [GraphFormat; 17] = [
+    GraphFormat::R8Unorm,
+    GraphFormat::Rg8Unorm,
+    GraphFormat::Rgba8Unorm,
+    GraphFormat::Rgba8UnormSrgb,
+    GraphFormat::Bgra8Unorm,
+    GraphFormat::R16Float,
+    GraphFormat::Rg16Float,
+    GraphFormat::Rgba16Float,
+    GraphFormat::R32Float,
+    GraphFormat::Rg32Float,
+    GraphFormat::Rgba32Float,
+    GraphFormat::R32Uint,
+    GraphFormat::Rg32Uint,
+    GraphFormat::Rgba32Uint,
+    GraphFormat::Rgb10a2Unorm,
+    GraphFormat::Rg11b10Ufloat,
+    GraphFormat::Depth32Float,
+];
+
+/// The placement of one view node: its pass, and the bindings its graph frame keeps.
+struct Placement {
+    node: String,
+    spec: ViewPassSpec,
+    bindings: Vec<Binding>,
+}
+
+/// A linked input of a view node, with what its placement reads from the source node.
+struct Source {
+    port: &'static str,
+    pass: String,
+    source_port: String,
+    /// The source node's plan order index.
+    index: u32,
+    /// The source pass's default order, or the placed order of a source view.
+    order: u32,
+    /// The source is a tonemap or overlay colour, or a display-space view.
+    display_space: bool,
+    /// The grid label: the `label` of a `view.image` source, else its node id.
+    label: String,
+}
+
+/// The parameters of a planned node: the values the plan wrote, or the catalog default.
+struct Params<'a> {
+    node: &'a PlanNode,
+    spec: &'a NodeTypeSpec,
+}
+
+impl<'a> Params<'a> {
+    fn get(&self, key: &str) -> Option<&'a ParamValue> {
+        let (node, spec) = (self.node, self.spec);
+        node.params
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+            .or_else(|| {
+                spec.params
+                    .iter()
+                    .find(|param| param.key == key)
+                    .map(|param| &param.default)
+            })
+    }
+
+    fn number(&self, key: &str) -> f32 {
+        match self.get(key) {
+            Some(ParamValue::Number(value)) => *value as f32,
+            _ => 0.0,
+        }
+    }
+
+    fn int(&self, key: &str) -> u32 {
+        match self.get(key) {
+            Some(ParamValue::Int(value)) => u32::try_from(*value).unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    fn flag(&self, key: &str) -> bool {
+        matches!(self.get(key), Some(ParamValue::Bool(true)))
+    }
+
+    /// The index of an enum value among its declared options: the code the shaders read.
+    fn code(&self, key: &str) -> u32 {
+        let declared = self.spec.params.iter().find(|param| param.key == key);
+        match (self.get(key), declared) {
+            (Some(ParamValue::Enum(choice)), Some(param)) => param
+                .options
+                .iter()
+                .position(|option| *option == choice.as_str())
+                .map_or(0, |index| index as u32),
+            _ => 0,
+        }
+    }
+
+    fn text(&self, key: &str) -> &'a str {
+        match self.get(key) {
+            Some(ParamValue::String(text)) => text.as_str(),
+            _ => "",
+        }
+    }
+}
+
+/// The static name of a view node's input port, `None` for any other port.
+fn static_port(port: &str) -> Option<&'static str> {
+    IMAGE_PORTS
+        .iter()
+        .chain(&COMPARE_PORTS)
+        .chain(&TILE_PORTS)
+        .find(|known| **known == port)
+        .copied()
+}
+
+/// The source of a linked input of a view node; `None` for an input that is not linked or whose
+/// source node is not placed.
+fn source_of(
+    plan: &GraphPlan,
+    catalog: &Catalog,
+    placed: &[Placement],
+    input: &PlanInput,
+) -> Option<Source> {
+    let InputSource::Link {
+        node: from,
+        port: from_port,
+        ..
+    } = &input.source
+    else {
+        return None;
+    };
+    let port = static_port(&input.port)?;
+    let node = plan.nodes.iter().find(|candidate| candidate.id == *from)?;
+    let spec = catalog.node(&node.type_id)?;
+    let (pass, order, view_display) = if node.type_id.starts_with("view.") {
+        let name = format!("{VIEW_PREFIX}{}", node.id);
+        let view = placed.iter().find(|view| view.spec.name == name)?;
+        (name, view.spec.order, view.spec.overlay)
+    } else {
+        let pass = spec
+            .pass
+            .map_or_else(|| node.type_id.clone(), str::to_owned);
+        (pass, spec.default_order, false)
+    };
+    let colour = matches!(pass.as_str(), "tonemap" | "overlay") && from_port == "color";
+    let text = Params { node, spec }.text("label");
+    let label = if node.type_id == "view.image" && !text.is_empty() {
+        text.to_owned()
+    } else {
+        node.id.clone()
+    };
+    Some(Source {
+        port,
+        pass,
+        source_port: from_port.clone(),
+        index: node.order_index,
+        order,
+        display_space: colour || view_display,
+        label,
+    })
+}
+
+/// The kind a view node's pass shows, from its parameters and linked inputs (grid tiles in port order).
+fn view_kind(params: &Params<'_>, sources: &[Source]) -> ViewKind {
+    match params.spec.id {
+        "view.compare" => ViewKind::Compare {
+            mode: params.code("mode"),
+            position: params.number("position"),
+        },
+        "view.grid" => ViewKind::Grid {
+            columns: params.int("columns"),
+            labels: params.flag("labels"),
+            tiles: TILE_PORTS
+                .iter()
+                .filter_map(|port| {
+                    sources
+                        .iter()
+                        .find(|source| source.port == *port)
+                        .map(|source| (*port, source.label.clone()))
+                })
+                .collect(),
+        },
+        _ => ViewKind::Image(ImageParams {
+            channels: params.code("channels"),
+            linearize: params.flag("linearizeDepth"),
+            layer: params.int("layer"),
+            slice: params.int("slice"),
+            mip: params.int("mip"),
+            decode: params.code("decode"),
+            range_min: params.number("rangeMin"),
+            range_max: params.number("rangeMax"),
+            exposure_ev: params.number("exposureEv"),
+        }),
+    }
+}
+
+/// The placement of every view node of `plan`, in plan order. A display-space node (on the display,
+/// or reading a tonemap or overlay colour or a display-space view) runs as an output overlay at
+/// `1000 + order_index`. Any other node takes the default order of its latest pass source, so the
+/// pipeline puts it right after that pass; a source view contributes its own order.
+fn placements(plan: &GraphPlan, catalog: &Catalog) -> Vec<Placement> {
+    let mut placed: Vec<Placement> = Vec::new();
+    for node in plan
+        .nodes
+        .iter()
+        .filter(|node| node.type_id.starts_with("view."))
+    {
+        let Some(spec) = catalog.node(&node.type_id) else {
+            continue;
+        };
+        let sources: Vec<Source> = node
+            .inputs
+            .iter()
+            .filter_map(|input| source_of(plan, catalog, &placed, input))
+            .collect();
+        let display = plan.output.node == node.id;
+        let display_space = display || sources.iter().any(|source| source.display_space);
+        let order = if display_space {
+            1000 + node.order_index
+        } else {
+            sources
+                .iter()
+                .max_by_key(|source| source.index)
+                .map_or(spec.default_order, |source| source.order)
+        };
+        let name = format!("{VIEW_PREFIX}{}", node.id);
+        let bindings = sources
+            .iter()
+            .map(|source| {
+                (
+                    name.clone(),
+                    source.port,
+                    source.pass.clone(),
+                    source.source_port.clone(),
+                )
+            })
+            .collect();
+        let kind = view_kind(&Params { node, spec }, &sources);
+        placed.push(Placement {
+            node: node.id.clone(),
+            spec: ViewPassSpec {
+                name,
+                order,
+                overlay: display_space,
+                display,
+                kind,
+            },
+            bindings,
+        });
+    }
+    placed
+}
+
+/// The pass name, order, overlay and display flag of every view pass `plan` installs, in plan order.
+#[cfg_attr(not(test), allow(dead_code))] // the placement tests pin the rule through this
+pub(crate) fn placement(plan: &GraphPlan, catalog: &Catalog) -> Vec<(String, u32, bool, bool)> {
+    placements(plan, catalog)
+        .into_iter()
+        .map(|placed| {
+            (
+                placed.spec.name,
+                placed.spec.order,
+                placed.spec.overlay,
+                placed.spec.display,
+            )
+        })
+        .collect()
+}
+
+/// The lowercase WebGPU name of `format`: the first `GraphFormat` that maps to it, else its Debug name.
+fn format_name(format: wgpu::TextureFormat) -> String {
+    GRAPH_FORMATS
+        .iter()
+        .find(|graph| graph.to_wgpu(format) == format)
+        .map_or_else(
+            || format!("{format:?}").to_lowercase(),
+            |graph| graph.name().to_owned(),
+        )
+}
+
+/// The statistics of one published image (S53 `ResourceStat`): its extent and format, and the bytes
+/// of its mip chain over its layers. A depth format counts its depth aspect; a format without a
+/// copy size counts 0 bytes.
+pub(crate) fn resource_stat(port: &str, desc: &ImageDesc) -> ResourceStat {
+    let aspect = desc
+        .format
+        .has_depth_aspect()
+        .then_some(wgpu::TextureAspect::DepthOnly);
+    let texel = desc.format.block_copy_size(aspect).unwrap_or(0);
+    let bytes = (0..desc.mips)
+        .map(|mip| {
+            let width = u64::from(desc.width.checked_shr(mip).unwrap_or(0).max(1));
+            let height = u64::from(desc.height.checked_shr(mip).unwrap_or(0).max(1));
+            width * height * u64::from(desc.layers) * u64::from(texel)
+        })
+        .sum();
+    ResourceStat {
+        port: port.to_owned(),
+        width: desc.width,
+        height: desc.height,
+        layers: desc.layers,
+        mips: desc.mips,
+        format: format_name(desc.format),
+        bytes,
+    }
+}
+
+/// The statistics of one published buffer: no extent, one layer and one mip, its size in bytes.
+fn buffer_stat(port: &str, size: u64) -> ResourceStat {
+    ResourceStat {
+        port: port.to_owned(),
+        width: 0,
+        height: 0,
+        layers: 1,
+        mips: 1,
+        format: "buffer".to_owned(),
+        bytes: size,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use raa_core::testing::{block_on, skip, software_gpu};
     use raa_loader::json::{JsonValue, parse, write_pretty};
-    use raa_pipeline::{LightingResources, PublishedImage, ResourceTable, Targets};
+    use raa_pipeline::{LightingResources, Pipeline, PublishedImage, ResourceTable, Targets};
     use raa_shader::Composer;
+
+    use crate::exec::HandleSet;
 
     use super::*;
 
@@ -993,33 +1473,48 @@ mod tests {
         ])
     }
 
-    /// A Simple forward plan with a `view` node of `view_type` displayed in place of `tonemap`,
-    /// reading `inputs`.
-    fn plan_with(view_type: &str, inputs: &[(&str, &str)]) -> GraphPlan {
+    /// A Simple forward plan with the nodes `nodes` (id, type) and the links `links` (from, to) added,
+    /// and `output.display` reading `display` in place of `tonemap`.
+    fn plan_of(nodes: &[(&str, &str)], links: &[(&str, &str)], display: &str) -> GraphPlan {
         let mut doc = starter();
-        let links = array(&mut doc, "links");
-        let display = links
+        let doc_links = array(&mut doc, "links");
+        let into_display = doc_links
             .iter()
             .position(|link| text_field(link, "to") == "out.color")
             .expect("the starter links into out.color");
-        let JsonValue::Object(fields) = &mut links[display] else {
+        let JsonValue::Object(fields) = &mut doc_links[into_display] else {
             panic!("a link is a JSON object")
         };
         let from = fields
             .iter_mut()
             .find(|(name, _)| name == "from")
             .expect("a link names its source");
-        from.1 = JsonValue::String("view1.color".to_string());
-        for (source, port) in inputs {
-            links.push(link(source, port));
-        }
-        array(&mut doc, "nodes").push(JsonValue::Object(vec![
-            ("id".to_string(), JsonValue::String("view1".to_string())),
-            ("type".to_string(), JsonValue::String(view_type.to_string())),
-        ]));
+        from.1 = JsonValue::String(display.to_string());
+        doc_links.extend(links.iter().map(|(from, to)| link(from, to)));
+        array(&mut doc, "nodes").extend(nodes.iter().map(|(id, node_type)| {
+            JsonValue::Object(vec![
+                ("id".to_string(), JsonValue::String(id.to_string())),
+                ("type".to_string(), JsonValue::String(node_type.to_string())),
+            ])
+        }));
         let mut text = String::new();
         write_pretty(&doc, &mut text);
         crate::plan::plan_from_json(&text).expect("the test document plans")
+    }
+
+    /// A Simple forward plan with a `view` node of `view_type` displayed in place of `tonemap`,
+    /// reading `inputs`.
+    fn plan_with(view_type: &str, inputs: &[(&str, &str)]) -> GraphPlan {
+        plan_of(&[("view1", view_type)], inputs, "view1.color")
+    }
+
+    /// The order index of the plan node `id`.
+    fn order_index(plan: &GraphPlan, id: &str) -> u32 {
+        plan.nodes
+            .iter()
+            .find(|node| node.id == id)
+            .expect("the node is planned")
+            .order_index
     }
 
     #[test]
@@ -1230,6 +1725,154 @@ mod tests {
         assert!(
             entries.contains(&("view#t".to_string(), "color".to_string(), colour_desc)),
             "{entries:?}"
+        );
+    }
+
+    #[test]
+    fn a_colour_mip_chain_sums_its_texels_by_hand() {
+        let desc = ImageDesc::new(ImageDim::D2, wgpu::TextureFormat::Rgba16Float, 4, 2, 1, 3);
+        let stat = resource_stat("color", &desc);
+        // Mips 4x2, 2x1 and 1x1 hold 8 + 2 + 1 texels of 8 bytes each.
+        assert_eq!(stat.bytes, 88);
+        assert_eq!(stat.format, "rgba16float");
+        assert_eq!(
+            (stat.width, stat.height, stat.layers, stat.mips),
+            (4, 2, 1, 3)
+        );
+    }
+
+    #[test]
+    fn a_depth_image_counts_its_depth_aspect_over_its_layers() {
+        let desc = ImageDesc::new(
+            ImageDim::D2Array,
+            wgpu::TextureFormat::Depth32Float,
+            2,
+            2,
+            4,
+            1,
+        );
+        // 2x2 texels of 4 bytes in each of 4 layers.
+        let stat = resource_stat("depth", &desc);
+        assert_eq!(stat.bytes, 64);
+        assert_eq!(stat.format, "depth32float");
+    }
+
+    #[test]
+    fn a_view_on_the_display_runs_as_an_overlay_after_tonemap() {
+        let plan = plan_of(
+            &[("show", "view.image")],
+            &[("prepass.depth", "show.srcDepth")],
+            "show.color",
+        );
+        let order = 1000 + order_index(&plan, "show");
+        assert_eq!(
+            placement(&plan, &Catalog::build()),
+            vec![("view#show".to_string(), order, true, true)]
+        );
+    }
+
+    #[test]
+    fn a_view_off_the_display_runs_right_after_its_source_pass() {
+        let plan = plan_of(
+            &[("depth", "view.image"), ("grid", "view.grid")],
+            &[
+                ("prepass.depth", "depth.srcDepth"),
+                ("depth.color", "grid.t0"),
+            ],
+            "grid.color",
+        );
+        let placed = placement(&plan, &Catalog::build());
+        // prepass runs at order 30; the view takes that order and sits right after it.
+        assert!(
+            placed.contains(&("view#depth".to_string(), 30, false, false)),
+            "{placed:?}"
+        );
+        let grid = 1000 + order_index(&plan, "grid");
+        assert!(
+            placed.contains(&("view#grid".to_string(), grid, true, true)),
+            "{placed:?}"
+        );
+    }
+
+    /// A stand-in pass: the pipeline needs only its name and order to place it.
+    struct Stand(&'static str, u32);
+
+    impl FeaturePass for Stand {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn order(&self) -> u32 {
+            self.1
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_refused_plan_restores_the_previous_views_and_clear_removes_them() {
+        let test = "a_refused_plan_restores_the_previous_views_and_clear_removes_them";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        {
+            // A foreign entry named like the late view makes the pipeline refuse that view's pass.
+            let mut pipeline = pipeline.borrow_mut();
+            pipeline
+                .add(Box::new(Stand("tonemap", 200)))
+                .expect("tonemap is added");
+            pipeline
+                .add(Box::new(Stand("view#late", 30)))
+                .expect("the foreign entry is added");
+        }
+        let mut handles = HandleSet::default();
+        let mut h = FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: None,
+        };
+        let mut views = ViewsExtension::new();
+        let shown = plan_of(
+            &[("show", "view.image")],
+            &[("prepass.depth", "show.srcDepth")],
+            "show.color",
+        );
+        views
+            .apply(&shown, None, &mut h)
+            .expect("the display view installs");
+        let late = plan_of(
+            &[("late", "view.image")],
+            &[("prepass.depth", "late.srcDepth")],
+            "late.color",
+        );
+        let issues = views
+            .apply(&late, Some(&shown), &mut h)
+            .expect_err("the foreign entry refuses the late view");
+        assert_eq!(
+            (issues[0].code, issues[0].node.as_deref()),
+            ("graph.order", Some("late"))
+        );
+        // The refusal changes nothing: the previous view is installed again, the foreign entry stays.
+        assert_eq!(pipeline.borrow().entry_enabled("view#show"), Some(true));
+        assert_eq!(pipeline.borrow().entry_enabled("view#late"), Some(true));
+        views.clear(&mut h);
+        assert_eq!(pipeline.borrow().entry_enabled("view#show"), None);
+        assert!(
+            pipeline
+                .borrow_mut()
+                .remove_graph_frame(VIEWS_FRAME)
+                .is_none()
         );
     }
 }
