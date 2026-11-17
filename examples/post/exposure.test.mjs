@@ -153,6 +153,15 @@ test('settle holds exactly on the -on variants; every variant sets exposureEv 1 
   }
 });
 
+test('each row holds the fixed exposure in its held-constant text, the value every variant sets', () => {
+  for (const row of exposure.inventory) {
+    assert.ok(row.heldConstant.includes(`tone mapping exposureEv ${exposure.FIXED_EXPOSURE_EV}`), row.id);
+  }
+  for (const v of exposure.default.variants) {
+    assert.equal(v.settings.toneMapping.exposureEv, exposure.FIXED_EXPOSURE_EV, v.id);
+  }
+});
+
 // Consumes assertSubjectsInView (web/common/view-check.mjs:80) on each variant's selection: both cameras.
 test('assertSubjectsInView passes for the interior and the exterior camera', () => {
   for (const v of exposure.default.variants) {
@@ -173,7 +182,7 @@ test('observe passes all three assertions on interior-on; interior-off fails exp
   assert.deepEqual(off.assertions.map((a) => [a.name, a.passed]), [['exposure-settled', true], ['exposure-ev', false], ['exposure-enabled', false]]);
 });
 
-test('build sets the environment lighting and the camera, and sets neither tone mapping nor automatic exposure', async () => {
+test('build sets the environment lighting, bloom and the camera, and sets neither tone mapping nor automatic exposure', async () => {
   const calls = [];
   let handle = 0;
   const engine = new Proxy({}, {
@@ -186,6 +195,7 @@ test('build sets the environment lighting and the camera, and sets neither tone 
   const { instances } = await exposure.default.build(engine, {}, variant);
   const named = (method) => calls.filter(([name]) => name === method);
   assert.deepEqual(named('setEnvironmentLighting'), [['setEnvironmentLighting', exposure.ENV_LIGHTING]]);
+  assert.deepEqual(named('setBloom'), [['setBloom', exposure.BLOOM]]);
   assert.deepEqual(named('setCamera'), [['setCamera', variant.selection.camera]]);
   assert.equal(named('setToneMapping').length, 0);
   assert.equal(named('setAutoExposure').length, 0);

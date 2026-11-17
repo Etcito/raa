@@ -6,27 +6,39 @@
 // (its doc comment, lines 90-103, lists the builders), with tiledGround, facadeCourses, box and plane.
 import { box, facadeCourses, plane, roomWithOpening, tiledGround } from '../lib/content.js';
 
-// Hand estimates behind the values below (linear, AgX, mid grey 0.18):
-//  - sunlit facade: albedo 0.6 * 14 * cos 46 deg ~ 5.8, times 2^1 at the fixed exposure ~ 11.6,
-//    so it clips with auto exposure off;
-//  - interior away from the sun patch: 0.6 * (0.01 + 0.02) ~ 0.02, times 2 ~ 0.04, very dark;
-//  - auto exposure, 1.2 * 0.18 / average: interior average ~ 0.015 gives ~ 2^3.85 (within maxEv 6);
-//    exterior average ~ 4 gives ~ 2^-4.2 (within minEv -6).
+// Estimates behind the values below. Scene-linear radiance of a sunlit diffuse surface is
+// albedo x sun x cos / pi; the fixed exposure multiplies it by 2 (EV 1), then AgX maps it to display.
+// The direct term was calibrated on the exterior-off capture at intensity 14: facade red ~1.7 and
+// ground ~0.6 before the fixed exposure, matching albedo x sun x cos / pi within about 10 percent.
+//  - sunlit ground tile (albedo 0.21, cos 0.63) and facade (albedo 0.52, cos 0.69) at intensity 70:
+//    ~3 and ~8 before the fixed exposure, display ~245 and ~255: clipped to flat white;
+//  - the floor patch the sun throws through the opening (red albedo 0.033, cos 0.63): ~0.5 before the
+//    fixed exposure, display ~204, the warm patch of the first version;
+//  - the room away from the patch gets only the sky (ENV_LIGHTING) and bloom is off (BLOOM):
+//    about 0.01 or less before the fixed exposure, very dark;
+//  - auto exposure, 1.2 * 0.18 / average: exterior average ~ 1 gives EV ~ -2.2 (within minEv -6);
+//    interior average ~ 0.006 gives EV ~ 5 (within maxEv 6).
 
 // Tone mapping exposureEv shared by all four variants: the fixed exposure of the -off rows.
 export const FIXED_EXPOSURE_EV = 1;
-// The sun stands on +X: it travels towards -X, -Y and +Z (estimates above).
-export const SUN = { direction: [-0.6, -0.55, 0.3], color: [1, 0.97, 0.92], intensity: 14 };
+// The sun stands on +X: it travels towards -X, -Y and +Z (estimates above). Intensity 70 clips the
+// sunlit ground and facade at the fixed exposure; the room's floor patch stays below white (COLORS).
+export const SUN = { direction: [-0.6, -0.55, 0.3], color: [1, 0.97, 0.92], intensity: 70 };
 // Low ambient, so the interior is dark away from the sun patch (estimates above).
 export const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.01 };
 // Low sky lighting: the closed room is not occluded from IBL, so the interior must stay dark.
 export const ENV_LIGHTING = { diffuse: 0.02, specular: 0.05 };
+// Bloom is off: its composite mixes 4 % of the blurred frame into every pixel (raa-bloom's default
+// strength 0.04, crates/raa-bloom/src/desc.rs:17-24), which would lift the dark room and its shadows
+// with the sun. setBloom merges over the default, so only the strength is set.
+export const BLOOM = { strength: 0 };
 
 // The room: interior x in [-3, 3], y in [0, 3], z in [-6, 0]; the opening is in the east wall.
 const ROOM = { width: 6, height: 3, depth: 6, wall: 0.3, opening: { zMin: -4, zMax: -2, yMin: 0.3, yMax: 2.5 } };
-// sRGB base colours; every material has roughness 0.85.
+// sRGB base colours; every material has roughness 0.85. The floor is dark (about a fifth of the linear
+// albedo of its first version), so the sun patch on it stays about as bright as before the sun was raised.
 const COLORS = {
-  walls: [0.8, 0.78, 0.72], floor: [0.45, 0.3, 0.18], table: [0.5, 0.35, 0.2], couch: [0.3, 0.35, 0.5],
+  walls: [0.8, 0.78, 0.72], floor: [0.2, 0.12, 0.07], table: [0.5, 0.35, 0.2], couch: [0.3, 0.35, 0.5],
   red: [0.8, 0.1, 0.08], green: [0.15, 0.6, 0.15], blue: [0.15, 0.25, 0.75],
   tileEven: [0.5, 0.5, 0.47], tileOdd: [0.36, 0.36, 0.34], base: [0.42, 0.42, 0.4],
   courseEven: [0.75, 0.55, 0.42], courseOdd: [0.65, 0.47, 0.36], pole: [0.2, 0.2, 0.22],
@@ -113,8 +125,8 @@ function addPart(engine, desc, materials, at) {
 
 /**
  * `build(engine, lib, variant)` builds the room, its interior objects and the exterior, and sets the
- * variant camera. Today it sets the day sky, clear weather, SUN, AMBIENT and ENV_LIGHTING, enables
- * shadow.csm, and adds each part with its material; it sets no tone mapping and no automatic
+ * variant camera. Today it sets the day sky, clear weather, SUN, AMBIENT, ENV_LIGHTING and BLOOM,
+ * enables shadow.csm, and adds each part with its material; it sets no tone mapping and no automatic
  * exposure, which the runtime applies from variant.settings. It returns one named instance per part.
  */
 export async function build(engine, lib, variant) {
@@ -123,6 +135,7 @@ export async function build(engine, lib, variant) {
   engine.setLight(SUN);
   engine.setAmbient(AMBIENT);
   engine.setEnvironmentLighting(ENV_LIGHTING);
+  engine.setBloom(BLOOM);
   engine.setPassEnabled('shadow.csm', true);
   const m = Object.fromEntries(Object.entries(COLORS).map(([name, color]) => [name, engine.addMaterial({ color, roughness: 0.85 })]));
   const instances = [];
