@@ -270,3 +270,32 @@ test('createPostPageRunner applies the settings after the build, then settles on
   assert.equal(settle.length, 600);
   assert.ok(settle.every((timeMs, k) => Math.abs(timeMs - (1000 + (k + 1) * SETTLE_FRAME_MS)) < 1e-9));
 });
+
+// Page entry (main.js) discovery and the managed-page declaration.
+const { discoverScenes } = await import('./main.js');
+const exposureScene = await import('./scenes/exposure.js');
+const indexOf = rows => () => Promise.resolve({ ok: true, json: () => Promise.resolve(rows) });
+const exposureRow = { id: 'exposure-room', milestone: 'exposure', file: 'scenes/exposure.js' };
+
+test('discoverScenes keys the real exposure scene by its id', async () => {
+  const scenes = await discoverScenes({ fetchIndex: indexOf([exposureRow]), importScene: async () => exposureScene });
+  assert.deepEqual([...scenes.keys()], ['exposure-room']);
+});
+
+test('discoverScenes refuses an unknown milestone and unsorted ids', async () => {
+  const importScene = async () => exposureScene;
+  await assert.rejects(discoverScenes({ fetchIndex: indexOf([{ ...exposureRow, milestone: 'blur' }]), importScene }), /invalid/);
+  const pair = [exposureRow, { ...exposureRow, id: 'a-room' }];
+  await assert.rejects(discoverScenes({ fetchIndex: indexOf(pair), importScene }), /unsorted/);
+});
+
+test('discoverScenes refuses a namespace whose default.id differs', async () => {
+  const importScene = async () => ({ ...exposureScene, default: { ...exposureScene.default, id: 'other-room' } });
+  await assert.rejects(discoverScenes({ fetchIndex: indexOf([exposureRow]), importScene }), /namespace identity mismatch/);
+});
+
+test('nmc.gpu.json declares the run op of index.html', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const text = await readFile(new URL('./nmc.gpu.json', import.meta.url), 'utf8');
+  assert.deepEqual(JSON.parse(text), { page: 'index.html', ops: ['run'] });
+});
