@@ -32,6 +32,7 @@ mod lod;
 mod material;
 mod material_data;
 mod meshes;
+mod mipgen;
 mod motion_display;
 mod passes;
 mod prep;
@@ -84,6 +85,7 @@ pub use material_data::{
     DataAllocator, MATERIAL_DATA_INITIAL_WORDS, MATERIAL_DATA_RESERVED_WORDS, MaterialDataStats,
 };
 pub use meshes::{LitMeshId, LitMeshInfo};
+pub use mipgen::downsample_rgba8;
 pub use motion_display::install_motion_display;
 pub use prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 pub use raa_core::{MaterialId, MeshId};
