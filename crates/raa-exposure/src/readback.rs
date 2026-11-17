@@ -1,5 +1,4 @@
 //! Readback pool and exposure state of the `exposure.auto` pass (S46), following light_stats.rs.
-#![allow(dead_code)] // Staged until feature.rs calls it; see Handoff.
 
 use crate::maths::settled;
 use crate::shaders::{ExposureResult, read_result};

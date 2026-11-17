@@ -3,11 +3,13 @@
 //! Later shares of this crate add the maths, the shaders, the readback and the feature.
 
 mod desc;
+mod feature;
 mod maths;
 mod readback;
 mod shaders;
 
 pub use desc::AutoExposureDesc;
+pub use feature::{AutoExposureFeature, AutoExposureHandle};
 pub use maths::{adapt, band_average, bin_index, exposure_from_average, luminance, settled};
 pub use readback::AutoExposureState;
 pub use shaders::{

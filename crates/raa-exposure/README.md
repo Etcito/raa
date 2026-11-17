@@ -4,8 +4,9 @@ Automatic exposure from a luminance histogram: the pass `exposure.auto` (S46, or
 by default). It measures the log luminance of the HDR chain on the GPU, adapts an exposure over
 frames and multiplies the HDR colour by it, after `bloom` and before `grading`.
 
-This share holds the constants and the settings. The maths twins, the WGSL shaders, the readback
-pool and the feature land in the later shares of this crate.
+The crate holds the constants, the settings, the maths twins, the WGSL shaders, the readback pool
+and the feature: `AutoExposureFeature::install` adds the pass, and its `AutoExposureHandle` reads
+and changes it.
 
 ## Constants (`src/lib.rs`)
 
@@ -31,7 +32,7 @@ and y), `HISTOGRAM_WORKGROUP` = 16 (16 x 16), `LUMINANCE_FLOOR` = 1e-5, `MIDDLE_
 `RaaError::FrameGraph { code: "post.invalid", message }`, where the message is
 ``"`<jsKey>` must be <rule>, got <value>"``. The low/high order failure names `lowPercent`.
 
-## Pass and readback (design, built by the later shares)
+## Pass and readback
 
 The pass runs at order 125 and is disabled by default. Its record dispatches a 128-bin histogram
 over the HDR source, resolves the band average into an `ExposureState` (16 B) and applies the
@@ -41,6 +42,18 @@ The readback has `READBACK_SLOTS` (3) MAP_READ buffers of 16 B. A slot copied in
 in the next prepare of the same pass; its callback stores the decoded result and returns the slot.
 There is no synchronous wait and no growth, a slot is never mapped twice, and results older than
 the latest snap are ignored.
+
+## Handle (`src/feature.rs`)
+
+`AutoExposureFeature::install(gpu, pipeline)` builds the two compute pipelines, the apply render
+pipeline, the params, histogram and state buffers and the readback pool, then adds the pass
+`exposure.auto` at order 125 and installs it disabled, so a page that never calls the setters
+renders as before. A borrowed pipeline (`pipeline.busy`) or a second install
+(`pipeline.duplicate_pass`) refuses with nothing installed. The returned `AutoExposureHandle`
+shares its state with the pass and its clones: `get` and `set` read and replace the
+`AutoExposureDesc` (`set` validates first, so a refusal changes nothing), `set_enabled_flag`
+mirrors the pipeline flag without validation, `invalidate` makes the next prepared frame snap, and
+`state` reports the tracker's state for that flag.
 
 ## Attribution
 
