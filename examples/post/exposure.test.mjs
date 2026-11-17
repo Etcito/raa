@@ -162,6 +162,49 @@ test('each row holds the fixed exposure in its held-constant text, the value eve
   }
 });
 
+// The paired intent of the -off rows, both judged at one fixed exposure: the room's own light (sky fill
+// and ambient) sits far below the direct sun, so the interior stays dark while the sunlit exterior clips.
+// The bound is a ratio between the scene's own constants: each fill value is at most FILL_TO_SUN_MAX of the
+// sun intensity, which leaves the walls more than three decades below the sunlit facade (an estimate).
+const FILL_TO_SUN_MAX = 1e-4;
+test('the room fill (sky diffuse, sky specular, ambient) sits far below the direct sun', () => {
+  const { SUN, ENV_LIGHTING, AMBIENT } = exposure;
+  const fills = { 'sky diffuse': ENV_LIGHTING.diffuse, 'sky specular': ENV_LIGHTING.specular, ambient: AMBIENT.intensity };
+  for (const [name, value] of Object.entries(fills)) {
+    assert.ok(value <= FILL_TO_SUN_MAX * SUN.intensity, `${name} ${value} is not far below the sun ${SUN.intensity}`);
+  }
+});
+
+// Stops above middle grey (0.18) of a sunlit diffuse surface at the fixed exposure: the luminance of its
+// sRGB colour, times the sun, times cos / pi, times 2^exposureEv.
+const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const luminance = ([r, g, b]) => 0.2126 * srgbToLinear(r) + 0.7152 * srgbToLinear(g) + 0.0722 * srgbToLinear(b);
+const sunlitStops = (sRgb, cos) => Math.log2(
+  luminance(sRgb) * exposure.SUN.intensity * cos / Math.PI * 2 ** exposure.FIXED_EXPOSURE_EV / 0.18,
+);
+test('the sun clips the sunlit ground and facade at the fixed exposure: both sit past 5.5 stops above middle grey', () => {
+  const { SUN, COLORS } = exposure;
+  const length = Math.hypot(...SUN.direction);
+  const cosOnGround = -SUN.direction[1] / length;
+  const cosOnFacade = -SUN.direction[0] / length;
+  // The darker tile of the ground and the darker course of the facade; 5.1 stops was the brighter tile at intensity 70.
+  assert.ok(sunlitStops(COLORS.tileOdd, cosOnGround) > 5.5, `ground tile at ${sunlitStops(COLORS.tileOdd, cosOnGround)} stops`);
+  assert.ok(sunlitStops(COLORS.courseOdd, cosOnFacade) > 5.5, `facade course at ${sunlitStops(COLORS.courseOdd, cosOnFacade)} stops`);
+});
+
+test('the two -off rows share one fixed exposureEv; each -on row differs from its -off partner only in the auto exposure switch', () => {
+  const offs = exposure.default.variants.filter((v) => v.id.endsWith('-off'));
+  assert.equal(offs.length, 2);
+  assert.deepEqual([...new Set(offs.map((v) => v.settings.toneMapping.exposureEv))], [exposure.FIXED_EXPOSURE_EV]);
+  for (const on of exposure.default.variants.filter((v) => v.id.endsWith('-on'))) {
+    const off = variantOf(on.id.replace(/-on$/, '-off'));
+    assert.deepEqual({ ...on.settings, autoExposure: null }, { ...off.settings, autoExposure: null }, on.id);
+    assert.deepEqual(on.selection, off.selection, on.id);
+    assert.equal(on.settings.autoExposure.enabled, true, on.id);
+    assert.equal(off.settings.autoExposure.enabled, false, off.id);
+  }
+});
+
 // Consumes assertSubjectsInView (web/common/view-check.mjs:80) on each variant's selection: both cameras.
 test('assertSubjectsInView passes for the interior and the exterior camera', () => {
   for (const v of exposure.default.variants) {

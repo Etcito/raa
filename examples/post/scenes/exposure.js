@@ -6,28 +6,37 @@
 // (its doc comment, lines 90-103, lists the builders), with tiledGround, facadeCourses, box and plane.
 import { box, facadeCourses, plane, roomWithOpening, tiledGround } from '../lib/content.js';
 
-// Estimates behind the values below. Scene-linear radiance of a sunlit diffuse surface is
-// albedo x sun x cos / pi; the fixed exposure multiplies it by 2 (EV 1), then AgX maps it to display.
-// The direct term was calibrated on the exterior-off capture at intensity 14: facade red ~1.7 and
-// ground ~0.6 before the fixed exposure, matching albedo x sun x cos / pi within about 10 percent.
-//  - sunlit ground tile (albedo 0.21, cos 0.63) and facade (albedo 0.52, cos 0.69) at intensity 70:
-//    ~3 and ~8 before the fixed exposure, display ~245 and ~255: clipped to flat white;
-//  - the floor patch the sun throws through the opening (red albedo 0.033, cos 0.63): ~0.5 before the
-//    fixed exposure, display ~204, the warm patch of the first version;
-//  - the room away from the patch gets only the sky (ENV_LIGHTING) and bloom is off (BLOOM):
-//    about 0.01 or less before the fixed exposure, very dark;
-//  - auto exposure, 1.2 * 0.18 / average: exterior average ~ 1 gives EV ~ -2.2 (within minEv -6);
-//    interior average ~ 0.006 gives EV ~ 5 (within maxEv 6).
+// Estimates behind the values below; they are not measured (the judge rows measure them). Scene-linear
+// radiance of a sunlit diffuse surface is albedo x sun x cos / pi; the fixed exposure multiplies it by 2
+// (EV 1), then AgX maps it to display. The direct term was calibrated on the exterior-off capture at
+// intensity 14: facade red ~1.7 and ground ~0.6 before the fixed exposure, matching albedo x sun x cos / pi
+// within about 10 percent.
+//  - sunlit ground at intensity 70 (tile albedo 0.21 and 0.11, cos 0.63): ~3 and ~1.5 before the fixed
+//    exposure, 5 and 4 stops above middle grey 0.18 at EV 1: the chequer still reads, as the judge saw it;
+//  - at intensity 280: ~12 and ~6 before the fixed exposure, 7 and 6 stops; the facade (albedo 0.52,
+//    cos 0.69) ~32 before it, 8.5 stops. AgX is near white from about +5.5 stops and reaches its end at +6.5, so the
+//    ground and facade clip to flat white;
+//  - the sun patch the floor takes through the opening (red albedo 0.033, cos 0.63): ~1.9 before the
+//    fixed exposure, bright like the opening; the sun through the opening is the room's only direct light;
+//  - the rest of the room gets only the sky fill (ENV_LIGHTING, unoccluded by the walls): the first values
+//    (diffuse 0.02, specular 0.05) left walls at ~0.03 before the fixed exposure, mid grey in the judged
+//    capture. At a sixth of that, walls are ~0.005 before it (~0.01 at EV 1): dark, the target;
+//  - auto exposure, 1.2 * 0.18 / average, is clamped to maxEv 6 (a factor 64, 128 with EV 1). The interior
+//    average (~0.002) hits the clamp, so the walls come up to ~0.3 and stay readable. The exterior average
+//    (sunlit, ~4) gives EV ~ -4, within minEv -6, so the sunlit surfaces keep their look at any sun.
 
 // Tone mapping exposureEv shared by all four variants: the fixed exposure of the -off rows.
 export const FIXED_EXPOSURE_EV = 1;
-// The sun stands on +X: it travels towards -X, -Y and +Z (estimates above). Intensity 70 clips the
-// sunlit ground and facade at the fixed exposure; the room's floor patch stays below white (COLORS).
-export const SUN = { direction: [-0.6, -0.55, 0.3], color: [1, 0.97, 0.92], intensity: 70 };
-// Low ambient, so the interior is dark away from the sun patch (estimates above).
-export const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.01 };
-// Low sky lighting: the closed room is not occluded from IBL, so the interior must stay dark.
-export const ENV_LIGHTING = { diffuse: 0.02, specular: 0.05 };
+// The sun stands on +X: it travels towards -X, -Y and +Z (estimates above). Intensity 280 clips the
+// sunlit ground and facade at the fixed exposure (four times the first 70); the floor patch is bright.
+export const SUN = { direction: [-0.6, -0.55, 0.3], color: [1, 0.97, 0.92], intensity: 280 };
+// Ambient, scaled down with the sky fill. With a sky environment on, the ambient slot takes its light from
+// the sky and does not read this value (crates/raa-ibl/src/wgsl/ambient.wgsl:36-37); it is small for the case without one.
+export const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.0015 };
+// Sky fill, the room's light besides the sun patch: the diffuse term (ambient.wgsl:46-47) has no
+// occlusion, so these two intensities set how dark the interior is at the fixed exposure. About a sixth of
+// the first values (0.02 and 0.05); auto exposure lifts the interior in the -on rows.
+export const ENV_LIGHTING = { diffuse: 0.003, specular: 0.008 };
 // Bloom is off: its composite mixes 4 % of the blurred frame into every pixel (raa-bloom's default
 // strength 0.04, crates/raa-bloom/src/desc.rs:17-24), which would lift the dark room and its shadows
 // with the sun. setBloom merges over the default, so only the strength is set.
@@ -36,8 +45,8 @@ export const BLOOM = { strength: 0 };
 // The room: interior x in [-3, 3], y in [0, 3], z in [-6, 0]; the opening is in the east wall.
 const ROOM = { width: 6, height: 3, depth: 6, wall: 0.3, opening: { zMin: -4, zMax: -2, yMin: 0.3, yMax: 2.5 } };
 // sRGB base colours; every material has roughness 0.85. The floor is dark (about a fifth of the linear
-// albedo of its first version), so the sun patch on it stays about as bright as before the sun was raised.
-const COLORS = {
+// albedo of its first version), which keeps the sun patch on it near the opening's brightness at intensity 280.
+export const COLORS = {
   walls: [0.8, 0.78, 0.72], floor: [0.2, 0.12, 0.07], table: [0.5, 0.35, 0.2], couch: [0.3, 0.35, 0.5],
   red: [0.8, 0.1, 0.08], green: [0.15, 0.6, 0.15], blue: [0.15, 0.25, 0.75],
   tileEven: [0.5, 0.5, 0.47], tileOdd: [0.36, 0.36, 0.34], base: [0.42, 0.42, 0.4],
