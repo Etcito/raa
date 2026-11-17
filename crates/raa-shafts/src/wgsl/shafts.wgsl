@@ -63,8 +63,8 @@ struct EnvGpu {
 @group(1) @binding(2) var<uniform> raa_shadow: ShadowGpu;
 @group(1) @binding(11) var<uniform> raa_env: EnvGpu;
 
-const STEPS: u32 = 32u;
-const HG_G: f32 = 0.7;
+override STEPS: u32 = 32u;
+override HG_G: f32 = 0.7;
 const PI: f32 = 3.14159265359;
 // Largest finite binary16 value, exactly representable in the march alpha. Clamp
 // geometry in both passes too, so distant surfaces and sky compare in the same range.

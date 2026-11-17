@@ -67,6 +67,10 @@ struct ShaftsState {
     sun_dir: Vec3,
     /// Linear colour x intensity.
     sun_color: [f32; 3],
+    /// Current tunable values, in the order of `crate::tunables()`.
+    tunables: [f64; 2],
+    /// Incremented by each `set_tunable` that changed a value.
+    generation: u64,
 }
 
 impl Default for ShaftsState {
@@ -79,6 +83,8 @@ impl Default for ShaftsState {
             camera_pos: Vec3::new(0.0, 0.0, 0.0),
             sun_dir: Vec3::new(0.0, -1.0, 0.0),
             sun_color: [1.0; 3],
+            tunables: [32.0, 0.7],
+            generation: 0,
         }
     }
 }
@@ -171,6 +177,21 @@ fn create_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
+/// The march and composite pipelines of the shafts module with the current tunables.
+fn create_pipelines(
+    device: &wgpu::Device,
+    layouts: [&wgpu::BindGroupLayout; 2],
+    tunables: [f64; 2],
+) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raa-shafts.shafts"),
+        source: wgpu::ShaderSource::Wgsl(shafts_module_wgsl().into()),
+    });
+    let march = create_pipeline(device, &module, layouts, FS_MARCH, MARCH_FORMAT, tunables);
+    let composite = create_pipeline(device, &module, layouts, FS_COMPOSITE, HDR_FORMAT, tunables);
+    (march, composite)
+}
+
 /// A fullscreen pipeline with layout [private group 0, lighting layout].
 fn create_pipeline(
     device: &wgpu::Device,
@@ -178,7 +199,13 @@ fn create_pipeline(
     layouts: [&wgpu::BindGroupLayout; 2],
     entry: &str,
     format: wgpu::TextureFormat,
+    tunables: [f64; 2],
 ) -> wgpu::RenderPipeline {
+    let constants = [("STEPS", tunables[0]), ("HG_G", tunables[1])];
+    let options = || wgpu::PipelineCompilationOptions {
+        constants: &constants,
+        ..Default::default()
+    };
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(entry),
         bind_group_layouts: &[Some(layouts[0]), Some(layouts[1])],
@@ -190,7 +217,7 @@ fn create_pipeline(
         vertex: wgpu::VertexState {
             module,
             entry_point: Some(VS_MAIN),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: options(),
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState::default(),
@@ -199,7 +226,7 @@ fn create_pipeline(
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some(entry),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: options(),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: None,
@@ -255,6 +282,9 @@ struct Chain {
 struct ShaftsPass {
     state: SharedShafts,
     layout: wgpu::BindGroupLayout,
+    lighting_layout: wgpu::BindGroupLayout,
+    /// `ShaftsState::generation` the pipelines were built with.
+    built_generation: u64,
     march: wgpu::RenderPipeline,
     composite: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
@@ -268,14 +298,9 @@ struct ShaftsPass {
 impl ShaftsPass {
     fn new(gpu: &GpuContext, lighting_layout: &wgpu::BindGroupLayout, state: SharedShafts) -> Self {
         let device = gpu.device();
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raa-shafts.shafts"),
-            source: wgpu::ShaderSource::Wgsl(shafts_module_wgsl().into()),
-        });
         let layout = create_layout(device);
-        let layouts = [&layout, lighting_layout];
-        let march = create_pipeline(device, &module, layouts, FS_MARCH, MARCH_FORMAT);
-        let composite = create_pipeline(device, &module, layouts, FS_COMPOSITE, HDR_FORMAT);
+        let tunables = state.borrow().tunables;
+        let (march, composite) = create_pipelines(device, [&layout, lighting_layout], tunables);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-shafts.linear_clamp"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -298,6 +323,8 @@ impl ShaftsPass {
         ShaftsPass {
             state,
             layout,
+            lighting_layout: lighting_layout.clone(),
+            built_generation: 0,
             march,
             composite,
             sampler,
@@ -416,6 +443,11 @@ impl FeaturePass for ShaftsPass {
     /// Packs `ShaftsParams` from the shared state (in place) and uploads it.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let st = self.state.try_borrow().map_err(|_| state_busy())?;
+        if st.generation != self.built_generation {
+            let layouts = [&self.layout, &self.lighting_layout];
+            (self.march, self.composite) = create_pipelines(ctx.gpu.device(), layouts, st.tunables);
+            self.built_generation = st.generation;
+        }
         let Some(chain) = self.chain.as_ref() else {
             return Ok(());
         };
@@ -500,6 +532,29 @@ impl ShaftsHandle {
     pub fn set(&self, d: ShaftsDesc) -> Result<(), RaaError> {
         d.validate()?;
         self.state.try_borrow_mut().map_err(|_| state_busy())?.desc = d;
+        Ok(())
+    }
+
+    /// Handoff: card 'Executor extension: apply Tunable bindings' calls
+    /// `ShaftsHandle::set_tunable` through `HandleSet.shafts` (crates/raa-graph/src/exec.rs)
+    /// with a catalog key of `crate::tunables()` and its value as f64. Today it validates with
+    /// `raa_pipeline::validate_tunable`, refuses with `post.invalid` without changing anything,
+    /// and otherwise stores the value (integer rows as the integral value) in the shared state
+    /// and bumps a generation when it changed, so the pass rebuilds its pipelines at the next
+    /// prepare. `pipeline.busy` on a re-entrant call.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let specs = crate::tunables();
+        let spec = raa_pipeline::validate_tunable(specs, key, value)
+            .map_err(|message| refusal("post.invalid", &message))?;
+        let index = specs.iter().position(|s| s.key == spec.key).unwrap_or(0);
+        let value = if spec.integer { value.trunc() } else { value };
+        let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        if let Some(slot) = st.tunables.get_mut(index)
+            && *slot != value
+        {
+            *slot = value;
+            st.generation += 1;
+        }
         Ok(())
     }
 
@@ -592,6 +647,24 @@ mod tests {
         assert_eq!([144, 148, 152].map(|o| read(&out, o)), [0.0, -1.0, 0.0]);
         assert_eq!([160, 164, 168].map(|o| read(&out, o)), [3.0, 2.0, 1.0]);
         assert_eq!(read(&out, 64 + 48), -1.0);
+    }
+
+    #[test]
+    fn set_tunable_refusals_keep_state() {
+        let h = ShaftsHandle {
+            state: Rc::new(RefCell::new(ShaftsState::default())),
+        };
+        for (key, value) in [("nope", 1.0), ("hgG", f64::NAN), ("steps", 2.5)] {
+            let e = h.set_tunable(key, value).unwrap_err();
+            assert_eq!(e.code(), "post.invalid", "{key} {value}");
+        }
+        assert_eq!(h.state.borrow().generation, 0);
+        assert_eq!(h.state.borrow().tunables, [32.0, 0.7]);
+        h.set_tunable("steps", 32.0).unwrap();
+        assert_eq!(h.state.borrow().generation, 0);
+        h.set_tunable("steps", 16.0).unwrap();
+        assert_eq!(h.state.borrow().generation, 1);
+        assert_eq!(h.state.borrow().tunables, [16.0, 0.7]);
     }
 
     #[test]

@@ -4,6 +4,8 @@
 mod desc;
 mod feature;
 mod shaders;
+mod tunables;
 
 pub use desc::ShaftsDesc;
 pub use feature::{ShaftsFeature, ShaftsHandle};
+pub use tunables::tunables;
