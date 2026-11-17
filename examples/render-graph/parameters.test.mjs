@@ -58,7 +58,7 @@ const CATALOG_NODES = [
 ];
 
 // The nodes each added family adds to the starter, at the fixture's catalog defaults.
-const ADDS = { dof: ['dof'], shafts: ['sunshafts'], grading: ['grading'], oit: ['opaqueCopy', 'transparentOit'] };
+const ADDS = { dof: ['dof'], shafts: ['sunshafts'], grading: ['grading'], oit: ['transparentOit'] };
 const ADDED_EXPECTED = {
   dof: { id: 'dof', type: 'pass.dof', params: { focusDistance: 10, fStop: 2.8, focalLength: 50, maxCoc: 24 } },
   sunshafts: { id: 'sunshafts', type: 'pass.sunshafts', params: { intensity: 1, density: 0.02, maxDistance: 60 } },
@@ -70,7 +70,6 @@ const ADDED_EXPECTED = {
       splitBalance: 0, vignette: 0,
     },
   },
-  opaqueCopy: { id: 'opaqueCopy', type: 'pass.opaque.copy', params: {} },
   transparentOit: { id: 'transparentOit', type: 'pass.transparent.oit', params: { maxFragments: 16, poolFactor: 8 } },
 };
 // The colour chain of each family: the starter's chain with the added nodes in place.
@@ -79,7 +78,7 @@ const CHAIN_OF = {
   shafts: ['forward', 'giHistory', 'ssr', 'fog', 'sunshafts', 'taa', 'bloom', 'tonemap', 'out'],
   dof: ['forward', 'giHistory', 'ssr', 'fog', 'taa', 'dof', 'bloom', 'tonemap', 'out'],
   grading: ['forward', 'giHistory', 'ssr', 'fog', 'taa', 'bloom', 'grading', 'tonemap', 'out'],
-  oit: ['forward', 'giHistory', 'ssr', 'fog', 'opaqueCopy', 'transparentOit', 'taa', 'bloom', 'tonemap', 'out'],
+  oit: ['forward', 'giHistory', 'ssr', 'fog', 'transparentOit', 'taa', 'bloom', 'tonemap', 'out'],
 };
 
 // The engine double: a catalog, the starter, and the documents each setRenderGraph was given.
@@ -217,3 +216,14 @@ for (const change of PARAMETER_CHANGES) {
     assert.deepEqual(restored, left);
   });
 }
+
+// pass.forward's opaqueColor/opaqueDepth inputs default to pass.opaque.copy (crates/raa-graph/src/nodes/passes.rs),
+// which reads forward's colour chain: adding that node makes the engine refuse the graph with graph.cycle
+// (run 15402: the oit row's both halves were refused and renderGraph() showed the no-graph value).
+test('no family row adds pass.opaque.copy, which would close a graph.cycle through forward', async () => {
+  for (const change of PARAMETER_CHANGES) {
+    const engine = engineDouble();
+    await prepare(engine, change.family, ['left', 'right']);
+    for (const doc of engine.documents) assert.ok(!doc.nodes.some(node => node.type === 'pass.opaque.copy'), change.family);
+  }
+});

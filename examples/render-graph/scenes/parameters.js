@@ -75,8 +75,8 @@ const DEFAULTS_EXPECTED = 'Two halves of the same view of the room, labelled sta
 
 // The nodes each family row adds to the starter, by id, and the setting a row writes into the
 // starter in both halves before its change (the gi-restir row's ReSTIR indirect path).
-const ADDED = { dof: 'pass.dof', sunshafts: 'pass.sunshafts', grading: 'pass.grading', opaqueCopy: 'pass.opaque.copy', transparentOit: 'pass.transparent.oit' };
-const ADD_ONS = { dof: ['dof'], shafts: ['sunshafts'], grading: ['grading'], oit: ['opaqueCopy', 'transparentOit'] };
+const ADDED = { dof: 'pass.dof', sunshafts: 'pass.sunshafts', grading: 'pass.grading', transparentOit: 'pass.transparent.oit' };
+const ADD_ONS = { dof: ['dof'], shafts: ['sunshafts'], grading: ['grading'], oit: ['transparentOit'] };
 const SETUP = { 'gi-restir': { nodeId: 'giScreen', key: 'indirect', value: 'restir' } };
 
 const row = (id, mode, filename, criterionName, requiredFacts, producer, expectedVisibleBehavior, heldConstant = HELD_CONSTANT) => ({
