@@ -1,11 +1,12 @@
-//! The validation context and the device limits validation reads (S52, S53), and the
-//! structure stage of the render graph validator: `validate` and `canonical_doc`.
+//! The validation context and the device limits validation reads (S52, S53), and the render
+//! graph validator: `validate` (the structure and budget stages) and `canonical_doc`.
 //!
 //! `crates/raa-graph/src/lib.rs`: out of scope for this share: consumers use the module
 //! path (`raa_graph::validate::{validate, canonical_doc}`).
 
 use crate::catalog::{
     Catalog, GraphFormat, NodeTypeSpec, ParamKind, ParamSpec, ParamValue, PortSpec, PortType,
+    ShaderStage,
 };
 use crate::error::{Issue, Severity, Stage, sort_issues};
 use crate::format::{GraphDoc, LinkDoc, NodeDoc, PortRef};
@@ -46,10 +47,10 @@ const REQUIRED_TYPES: [&str; 3] = ["pass.prepass", "pass.forward", "pass.tonemap
 /// The display output node type (`graph.output`).
 const OUTPUT_TYPE: &str = "output.display";
 
-/// `validate` checks the structure of `doc` against `ctx` (S52, first half of the structure
-/// stage): node ids, node types and versions, parameters, links, history links, the output
-/// node, the required nodes and the single-instance types. The issues come back sorted by
-/// `sort_issues`.
+/// `validate` checks `doc` against `ctx` (S52): the structure stage (node ids, types, versions,
+/// parameters, links, history links, inputs, cycles, wiring, availability, the output node, the
+/// required and single-instance nodes, and the family hooks), then the budget stage, which runs
+/// only when the structure stage has no error. The issues come back sorted by `sort_issues`.
 ///
 /// Handoff: `validate` returns the structure issues this file collects today, sorted by
 /// `sort_issues`. Card 'raa-graph validate 2/2: inputs, cycles, wiring, availability and
@@ -79,6 +80,14 @@ pub fn validate(doc: &GraphDoc, ctx: &ValidateCtx<'_>) -> Vec<Issue> {
     }
     check_instances(doc, ctx, &mut issues);
     check_links(doc, ctx, &mut issues);
+    check_inputs(doc, ctx, &mut issues);
+    check_cycles(doc, ctx, &mut issues);
+    check_availability(doc, ctx, &mut issues);
+    family_hooks(doc, ctx, &mut issues);
+    // The S52 stage stop: a structure error ends validation before the budget stage.
+    if !structure_failed(&issues) {
+        check_budgets(doc, ctx, &mut issues);
+    }
     sort_issues(&mut issues, Some(doc));
     issues
 }
@@ -448,7 +457,7 @@ fn check_instances(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue
 }
 
 /// The link checks, link by link in document order: `graph.port_unknown`, `graph.link_type`,
-/// `graph.input_taken` and `graph.history`.
+/// `graph.input_taken`, `graph.fixed_wiring` and `graph.history`.
 fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
     for (index, link) in doc.links.iter().enumerate() {
         let at = u32::try_from(index).unwrap_or(u32::MAX);
@@ -471,6 +480,9 @@ fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
                     format!("Link `{}.{}` from {fix}.", link.to.node, link.to.port),
                 )
             });
+        }
+        if let (Some(_), Some(to)) = (from, to) {
+            fixed_wiring(doc, link, at, to, issues);
         }
         if let Some(first) = doc.links[..index]
             .iter()
@@ -644,4 +656,332 @@ fn type_name(ty: &PortType) -> &'static str {
         PortType::Depth2dArray => "depth2dArray",
         PortType::Buffer => "buffer",
     }
+}
+
+/// `graph.fixed_wiring` (amended (d)): a link into an input with `generic` false must come from
+/// the first `default_source` entry the graph holds, since this version fixes the wiring.
+fn fixed_wiring(doc: &GraphDoc, link: &LinkDoc, at: u32, to: &PortSpec, issues: &mut Vec<Issue>) {
+    let Some(source) = doc.nodes.iter().find(|node| node.id == link.from.node) else {
+        return;
+    };
+    let given = (source.type_id.as_str(), link.from.port.as_str());
+    let expected = first_present_source(doc, to);
+    if to.generic || expected == Some(given) {
+        return;
+    }
+    let target = format!("{}.{}", link.to.node, link.to.port);
+    let (problem, fix) = match expected {
+        Some((node_type, key)) => (
+            format!("takes only its default source `{node_type}.{key}`"),
+            format!("Link `{target}` from `{node_type}.{key}`, or delete link {at}."),
+        ),
+        None => (
+            "has no default source in the graph".to_string(),
+            match to.default_source.first() {
+                Some(entry) => format!("Delete link {at}, or add a node for `{entry}`."),
+                None => format!("Delete link {at}: this version takes no link into `{target}`."),
+            },
+        ),
+    };
+    issues.push(Issue {
+        node: Some(link.to.node.clone()),
+        port: Some(link.to.port.clone()),
+        link: Some(at),
+        ..structure(
+            "graph.fixed_wiring",
+            Severity::Error,
+            format!(
+                "fixed wiring in this version: link {at} from `{}.{}` into `{target}` {problem}",
+                link.from.node, link.from.port
+            ),
+            fix,
+        )
+    });
+}
+
+/// Whether a link takes input `port` of `node`.
+fn is_linked(doc: &GraphDoc, node: &NodeDoc, port: &str) -> bool {
+    doc.links
+        .iter()
+        .any(|link| link.to.node == node.id && link.to.port == port)
+}
+
+/// The first `default_source` entry of `port` whose node type a node of the graph has, as its
+/// node type and port key, split at the last `.`. An entry with no `.` is skipped.
+fn first_present_source(doc: &GraphDoc, port: &PortSpec) -> Option<(&'static str, &'static str)> {
+    port.default_source.iter().copied().find_map(|entry| {
+        let (node_type, key) = entry.rsplit_once('.')?;
+        doc.nodes
+            .iter()
+            .any(|node| node.type_id == node_type)
+            .then_some((node_type, key))
+    })
+}
+
+/// The default sources of `port` for a message, or `none`.
+fn sources_text(port: &PortSpec) -> String {
+    if port.default_source.is_empty() {
+        "none".to_string()
+    } else {
+        port.default_source.join(", ")
+    }
+}
+
+/// `graph.input_missing`: an input no link takes that is `required`, or whose default sources
+/// are all absent from the graph while `absent_ok` is false.
+fn check_inputs(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
+    for node in &doc.nodes {
+        let Some(spec) = ctx.catalog.node(&node.type_id) else {
+            continue;
+        };
+        for port in &spec.inputs {
+            if is_linked(doc, node, port.key) {
+                continue;
+            }
+            let problem = if port.required {
+                format!(
+                    "input `{}.{}` is required, and no link takes it",
+                    node.id, port.key
+                )
+            } else if !port.absent_ok && first_present_source(doc, port).is_none() {
+                format!(
+                    "input `{}.{}` has no link, and none of its default sources ({}) is in the graph",
+                    node.id,
+                    port.key,
+                    sources_text(port)
+                )
+            } else {
+                continue;
+            };
+            let fix = format!(
+                "Link an output of type {} into `{}.{}`.",
+                type_name(&port.ty),
+                node.id,
+                port.key
+            );
+            issues.push(Issue {
+                port: Some(port.key.to_string()),
+                ..node_issue(node, "graph.input_missing", Severity::Error, problem, fix)
+            });
+        }
+    }
+}
+
+/// `graph.cycle`: nodes that read each other, over non-history links and the default source of
+/// each input no link takes. Each cyclic group of nodes is reported once, on its first node in
+/// document order.
+fn check_cycles(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
+    let reads = read_edges(doc, ctx.catalog);
+    let reach: Vec<Vec<bool>> = (0..reads.len())
+        .map(|start| reached_from(&reads, start))
+        .collect();
+    // Two nodes share a cycle when each reaches the other.
+    let mutual = |a: usize, b: usize| reach[a][b] && reach[b][a];
+    for first in 0..reads.len() {
+        let group: Vec<usize> = (0..reads.len())
+            .filter(|&other| mutual(first, other))
+            .collect();
+        // A node in no cycle has an empty group, so only the group's first node reports it.
+        if group.first() != Some(&first) {
+            continue;
+        }
+        let names: Vec<&str> = group
+            .iter()
+            .filter_map(|&index| doc.nodes.get(index))
+            .map(|node| node.id.as_str())
+            .collect();
+        let problem = match names.as_slice() {
+            [only] => format!("node `{only}` reads itself, and no history link breaks that cycle"),
+            _ => format!(
+                "nodes {} read each other, and no history link breaks that cycle",
+                quoted(&names)
+            ),
+        };
+        if let Some(node) = doc.nodes.get(first) {
+            let fix = "Set `history` on one link inside the cycle, or link one of its inputs from a node outside it.";
+            issues.push(node_issue(
+                node,
+                "graph.cycle",
+                Severity::Error,
+                problem,
+                fix.to_string(),
+            ));
+        }
+    }
+}
+
+/// The nodes each node reads, by node index: the source of each non-history link, and the first
+/// node of the first present default-source type for each input no link takes.
+fn read_edges(doc: &GraphDoc, catalog: &Catalog) -> Vec<Vec<usize>> {
+    let position = |id: &str| doc.nodes.iter().position(|node| node.id == id);
+    let mut reads = vec![Vec::new(); doc.nodes.len()];
+    for link in doc.links.iter().filter(|link| !link.history) {
+        if let (Some(from), Some(to)) = (position(&link.from.node), position(&link.to.node))
+            && let Some(list) = reads.get_mut(to)
+        {
+            list.push(from);
+        }
+    }
+    for (to, node) in doc.nodes.iter().enumerate() {
+        let Some(spec) = catalog.node(&node.type_id) else {
+            continue;
+        };
+        for port in spec
+            .inputs
+            .iter()
+            .filter(|port| !is_linked(doc, node, port.key))
+        {
+            let source = first_present_source(doc, port).and_then(|(node_type, _)| {
+                doc.nodes
+                    .iter()
+                    .position(|known| known.type_id == node_type)
+            });
+            if let (Some(from), Some(list)) = (source, reads.get_mut(to)) {
+                list.push(from);
+            }
+        }
+    }
+    reads
+}
+
+/// Flags the nodes reachable from `start` through one or more `reads` edges.
+fn reached_from(reads: &[Vec<usize>], start: usize) -> Vec<bool> {
+    let mut reached = vec![false; reads.len()];
+    let mut stack = Vec::new();
+    stack.extend(reads.get(start).into_iter().flatten().copied());
+    while let Some(next) = stack.pop() {
+        if let Some(flag) = reached.get_mut(next).filter(|flag| !**flag) {
+            *flag = true;
+            stack.extend(reads.get(next).into_iter().flatten().copied());
+        }
+    }
+    reached
+}
+
+/// The names as backquoted ids, separated by commas.
+fn quoted(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `graph.unavailable` for each node whose pass the engine does not install, and
+/// `graph.multi_view` when the engine has more than one viewport.
+fn check_availability(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
+    for node in &doc.nodes {
+        let Some(pass) = ctx.catalog.node(&node.type_id).and_then(|spec| spec.pass) else {
+            continue;
+        };
+        if !(ctx.installed)(pass) {
+            let problem = format!(
+                "node `{}` runs pass `{pass}`, which this engine does not install",
+                node.id
+            );
+            let fix = format!(
+                "Delete node `{}`, or run this graph on an engine that installs `{pass}`.",
+                node.id
+            );
+            issues.push(node_issue(
+                node,
+                "graph.unavailable",
+                Severity::Error,
+                problem,
+                fix,
+            ));
+        }
+    }
+    if ctx.viewports > 1 {
+        issues.push(structure(
+            "graph.multi_view",
+            Severity::Error,
+            format!(
+                "the engine has {} viewports, and a render graph drives one view",
+                ctx.viewports
+            ),
+            "Turn off the extra viewports, or clear the render graph.".to_string(),
+        ));
+    }
+}
+
+/// Runs the `validate_node` hook of every node family, in registry order, on each node of a known
+/// type in document order (S51).
+fn family_hooks(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
+    for family in crate::registry::families_all() {
+        for node in &doc.nodes {
+            if let Some(spec) = ctx.catalog.node(&node.type_id) {
+                family.validate_node(node, spec, ctx, issues);
+            }
+        }
+    }
+}
+
+/// `graph.budget` (the budget stage): each node's own `budgets` entry, one shader stage at a
+/// time, against `ctx.limits`. Counts are never summed over nodes or stages.
+fn check_budgets(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
+    let limits = ctx.limits;
+    for node in &doc.nodes {
+        let Some(spec) = ctx.catalog.node(&node.type_id) else {
+            continue;
+        };
+        for budget in &spec.budgets {
+            let stage = stage_name(&budget.stage);
+            let kinds = [
+                (
+                    "sampled textures",
+                    budget.sampled_textures,
+                    limits.sampled_textures,
+                ),
+                ("samplers", budget.samplers, limits.samplers),
+                (
+                    "storage textures",
+                    budget.storage_textures,
+                    limits.storage_textures,
+                ),
+                (
+                    "storage buffers",
+                    budget.storage_buffers,
+                    limits.storage_buffers,
+                ),
+                (
+                    "uniform buffers",
+                    budget.uniform_buffers,
+                    limits.uniform_buffers,
+                ),
+            ];
+            for (kind, count, limit) in kinds {
+                if count > limit {
+                    let problem = format!(
+                        "node `{}` binds {count} {kind} in its {stage} stage, and the limit is {limit}",
+                        node.id
+                    );
+                    let fix = format!(
+                        "Reduce the {kind} of node `{}` in its {stage} stage to {limit} or fewer.",
+                        node.id
+                    );
+                    issues.push(Issue {
+                        stage: Stage::Budget,
+                        ..node_issue(node, "graph.budget", Severity::Error, problem, fix)
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// The message name of a shader stage.
+fn stage_name(stage: &ShaderStage) -> &'static str {
+    match stage {
+        ShaderStage::Vertex => "vertex",
+        ShaderStage::Fragment => "fragment",
+        ShaderStage::Compute => "compute",
+    }
+}
+
+/// Whether the structure stage has an error; warnings do not count (S52).
+fn structure_failed(issues: &[Issue]) -> bool {
+    issues
+        .iter()
+        .any(|issue| issue.stage == Stage::Structure && issue.severity == Severity::Error)
 }

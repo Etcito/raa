@@ -1,8 +1,9 @@
-//! Structure-stage tests of the render graph validator (S52) and of `canonical_doc` (S50).
+//! Structure- and budget-stage tests of the render graph validator (S52) and of `canonical_doc`
+//! (S50).
 
 use raa_graph::catalog::{
     Catalog, Category, GraphFormat, NodeTypeSpec, ParamBinding, ParamKind, ParamSpec, ParamValue,
-    PortSpec, PortType, Rebuild, SizeSpec,
+    PortSpec, PortType, Rebuild, ShaderStage, SizeSpec, StageBudget,
 };
 use raa_graph::error::{Issue, Severity, Stage};
 use raa_graph::format::{GraphDoc, parse_graph};
@@ -81,6 +82,18 @@ fn keep(_from: u32, _params: &mut Vec<(String, ParamValue)>) -> Result<(), Strin
     Ok(())
 }
 
+/// A stage budget that binds `count` sampled textures in `stage` and nothing else.
+fn sampled(stage: ShaderStage, count: u32) -> StageBudget {
+    StageBudget {
+        stage,
+        sampled_textures: count,
+        samplers: 0,
+        storage_textures: 0,
+        storage_buffers: 0,
+        uniform_buffers: 0,
+    }
+}
+
 /// `fx.blur` v2 converts v1 radii (pixels) to metres by halving them. A negative v1 radius
 /// has no conversion, so the step fails.
 #[allow(
@@ -135,7 +148,10 @@ fn catalog() -> Catalog {
             "pass.forward",
             1,
             vec![
-                port("depth", PortType::Depth2d),
+                PortSpec {
+                    default_source: &["pass.prepass.depth"],
+                    ..port("depth", PortType::Depth2d)
+                },
                 port("lightTiles", PortType::Image2dArray),
                 port("ao", PortType::Image2d),
             ],
@@ -149,16 +165,23 @@ fn catalog() -> Catalog {
             "pass.tonemap",
             1,
             vec![PortSpec {
+                required: true,
+                default_source: &["pass.forward.color"],
                 format: Some(GraphFormat::Rgba16Float),
                 ..port("color", PortType::Image2d)
             }],
             vec![port("color", PortType::Image2d)],
         )
     };
+    // The overlay takes the colour when a graph holds one; this catalog has none, so the
+    // tonemap is the first present source.
     let output = node_type(
         "output.display",
         1,
-        vec![port("color", PortType::Image2d)],
+        vec![PortSpec {
+            default_source: &["pass.overlay.color", "pass.tonemap.color"],
+            ..port("color", PortType::Image2d)
+        }],
         Vec::new(),
     );
     let blur = NodeTypeSpec {
@@ -187,6 +210,7 @@ fn catalog() -> Catalog {
             "fx.blur",
             2,
             vec![PortSpec {
+                generic: true,
                 format: Some(GraphFormat::Rgba16Float),
                 ..port("color", PortType::Image2d)
             }],
@@ -208,8 +232,44 @@ fn catalog() -> Catalog {
         }],
         Vec::new(),
     );
+    // Its colour reads itself by default, so an unlinked echo is a cycle of one; its normal
+    // comes from the prepass, which it needs (`absent_ok` false).
+    let echo = NodeTypeSpec {
+        multi_instance: true,
+        ..node_type(
+            "fx.echo",
+            1,
+            vec![
+                PortSpec {
+                    history: true,
+                    default_source: &["fx.echo.color"],
+                    ..port("color", PortType::Image2d)
+                },
+                PortSpec {
+                    absent_ok: false,
+                    default_source: &["pass.prepass.normal"],
+                    ..port("normal", PortType::Image2d)
+                },
+            ],
+            vec![port("color", PortType::Image2d)],
+        )
+    };
+    let wide = NodeTypeSpec {
+        budgets: vec![sampled(ShaderStage::Fragment, 17)],
+        ..node_type("fx.wide", 1, Vec::new(), Vec::new())
+    };
+    let half = NodeTypeSpec {
+        multi_instance: true,
+        budgets: vec![
+            sampled(ShaderStage::Vertex, 9),
+            sampled(ShaderStage::Fragment, 9),
+        ],
+        ..node_type("fx.half", 1, Vec::new(), Vec::new())
+    };
     Catalog {
-        nodes: vec![prepass, forward, tonemap, output, blur, cull, gather],
+        nodes: vec![
+            prepass, forward, tonemap, output, blur, cull, gather, echo, wide, half,
+        ],
         starters: Vec::new(),
         presets: Vec::new(),
         frozen: Vec::new(),
@@ -218,13 +278,18 @@ fn catalog() -> Catalog {
 
 /// Validates `text` against the test catalog with the core limits and one viewport.
 fn run(text: &str) -> Vec<Issue> {
+    run_with(text, 1, &|_: &str| true)
+}
+
+/// Validates `text` against the test catalog with the core limits, `viewports` viewports and
+/// the passes `installed` answers for.
+fn run_with(text: &str, viewports: u32, installed: &dyn Fn(&str) -> bool) -> Vec<Issue> {
     let catalog = catalog();
-    let installed = |_: &str| true;
     let ctx = ValidateCtx {
         catalog: &catalog,
         limits: GraphLimits::CORE,
-        installed: &installed,
-        viewports: 1,
+        installed,
+        viewports,
         engine_options: &[],
     };
     validate(&parse_graph(text).expect("the fixture parses"), &ctx)
@@ -259,6 +324,10 @@ const BLUR: &str = r#"{"id":"blur","type":"fx.blur"}"#;
 const DEPTH: &str = r#"{"from":"prepass.depth","to":"forward.depth"}"#;
 const COLOR: &str = r#"{"from":"forward.color","to":"tonemap.color"}"#;
 const TO_OUT: &str = r#"{"from":"tonemap.color","to":"out.color"}"#;
+const ECHO: &str = r#"{"id":"echo","type":"fx.echo"}"#;
+const E1: &str = r#"{"id":"e1","type":"fx.echo"}"#;
+const E2: &str = r#"{"id":"e2","type":"fx.echo"}"#;
+const WIDE: &str = r#"{"id":"wide","type":"fx.wide"}"#;
 
 /// The four required nodes linked the way every graph links them: no issue at all.
 fn valid() -> String {
@@ -690,4 +759,186 @@ fn validate_sorts_node_less_issues_first_then_nodes_in_document_order() {
             ("graph.port_unknown", Some("ghost"), Some(3)),
         ]
     );
+}
+
+#[test]
+fn input_missing_names_a_required_input_no_link_takes() {
+    let issues = run(&doc(&[PREPASS, FORWARD, TONEMAP, OUT], &[DEPTH, TO_OUT]));
+    let issue = one(&issues, "graph.input_missing");
+    assert_eq!(
+        (issue.node.as_deref(), issue.port.as_deref()),
+        (Some("tonemap"), Some("color"))
+    );
+    assert_eq!(issue.stage, Stage::Structure);
+    assert!(issue.message.contains("required"), "{}", issue.message);
+}
+
+#[test]
+fn input_missing_names_an_input_whose_default_sources_are_all_absent() {
+    let issues = run(&doc(&[FORWARD, TONEMAP, OUT, ECHO], &[COLOR, TO_OUT]));
+    let issue = one(&issues, "graph.input_missing");
+    assert_eq!(
+        (issue.node.as_deref(), issue.port.as_deref()),
+        (Some("echo"), Some("normal"))
+    );
+    assert!(
+        issue.message.contains("pass.prepass.normal"),
+        "{}",
+        issue.message
+    );
+    // The prepass is the default source once the graph holds one.
+    let issues = run(&doc(
+        &[PREPASS, FORWARD, TONEMAP, OUT, ECHO],
+        &[DEPTH, COLOR, TO_OUT],
+    ));
+    assert!(of(&issues, "graph.input_missing").is_empty(), "{issues:#?}");
+}
+
+#[test]
+fn cycle_reports_a_node_that_reads_its_own_default_source() {
+    let issues = run(&doc(
+        &[PREPASS, FORWARD, TONEMAP, OUT, ECHO],
+        &[DEPTH, COLOR, TO_OUT],
+    ));
+    let issue = one(&issues, "graph.cycle");
+    assert_eq!(
+        (issue.node.as_deref(), issue.stage),
+        (Some("echo"), Stage::Structure)
+    );
+    assert!(
+        issue.message.contains("`echo` reads itself"),
+        "{}",
+        issue.message
+    );
+}
+
+#[test]
+fn cycle_reports_the_first_node_of_a_ring_and_a_history_link_breaks_it() {
+    let nodes = [PREPASS, FORWARD, TONEMAP, OUT, E1, E2];
+    let back = r#"{"from":"e2.color","to":"e1.color"}"#;
+    let forth = r#"{"from":"e1.color","to":"e2.color"}"#;
+    let issues = run(&doc(&nodes, &[DEPTH, COLOR, TO_OUT, back, forth]));
+    let issue = one(&issues, "graph.cycle");
+    assert_eq!(issue.node.as_deref(), Some("e1"));
+    assert!(issue.message.contains("`e1`, `e2`"), "{}", issue.message);
+
+    // A history link into `e1.color` leaves the ring nothing to close it.
+    let history = r#"{"from":"e2.color","to":"e1.color","history":true}"#;
+    let issues = run(&doc(&nodes, &[DEPTH, COLOR, TO_OUT, history, forth]));
+    assert!(of(&issues, "graph.cycle").is_empty(), "{issues:#?}");
+}
+
+#[test]
+fn fixed_wiring_refuses_a_link_from_a_source_other_than_the_default() {
+    let from_forward = r#"{"from":"forward.color","to":"out.color"}"#;
+    let issues = run(&doc(
+        &[PREPASS, FORWARD, TONEMAP, OUT],
+        &[DEPTH, COLOR, from_forward],
+    ));
+    let issue = one(&issues, "graph.fixed_wiring");
+    assert_eq!(
+        (issue.node.as_deref(), issue.port.as_deref(), issue.link),
+        (Some("out"), Some("color"), Some(2))
+    );
+    assert!(
+        issue.message.contains("fixed wiring in this version"),
+        "{}",
+        issue.message
+    );
+    assert!(issue.fix.contains("`pass.tonemap.color`"), "{}", issue.fix);
+}
+
+#[test]
+fn unavailable_names_a_node_whose_pass_the_engine_does_not_install() {
+    let issues = run_with(&valid(), 1, &|pass: &str| pass != "forward");
+    let issue = one(&issues, "graph.unavailable");
+    assert_eq!(issue.node.as_deref(), Some("forward"));
+    assert_eq!(issue.severity, Severity::Error);
+    assert!(
+        issue.message.contains("pass `forward`"),
+        "{}",
+        issue.message
+    );
+}
+
+#[test]
+fn multi_view_refuses_more_than_one_viewport_without_naming_a_node() {
+    let issues = run_with(&valid(), 2, &|_: &str| true);
+    let issue = one(&issues, "graph.multi_view");
+    assert_eq!(
+        (issue.node.as_deref(), issue.stage),
+        (None, Stage::Structure)
+    );
+    assert!(issue.message.contains("2 viewports"), "{}", issue.message);
+}
+
+#[test]
+fn budget_refuses_a_stage_over_its_limit_and_names_stage_kind_count_and_limit() {
+    let issues = run(&doc(
+        &[PREPASS, FORWARD, TONEMAP, OUT, WIDE],
+        &[DEPTH, COLOR, TO_OUT],
+    ));
+    let issue = one(&issues, "graph.budget");
+    assert_eq!(
+        (issue.node.as_deref(), issue.stage, issue.severity),
+        (Some("wide"), Stage::Budget, Severity::Error)
+    );
+    for part in ["fragment", "sampled textures", "17", "16"] {
+        assert!(
+            issue.message.contains(part),
+            "`{part}` is not in {}",
+            issue.message
+        );
+    }
+}
+
+#[test]
+fn budget_counts_each_node_and_each_stage_on_its_own() {
+    let nodes = [
+        PREPASS,
+        FORWARD,
+        TONEMAP,
+        OUT,
+        r#"{"id":"half1","type":"fx.half"}"#,
+        r#"{"id":"half2","type":"fx.half"}"#,
+    ];
+    // Each node binds 9 sampled textures in each of two stages. Summing over nodes gives 18
+    // per stage and would refuse; the counts stay apart, so nothing is refused.
+    let issues = run(&doc(&nodes, &[DEPTH, COLOR, TO_OUT]));
+    assert!(of(&issues, "graph.budget").is_empty(), "{issues:#?}");
+}
+
+#[test]
+fn a_structure_error_hides_the_budget_stage() {
+    let ghost = r#"{"id":"ghost","type":"fx.ghost"}"#;
+    let issues = run(&doc(
+        &[PREPASS, FORWARD, TONEMAP, OUT, WIDE, ghost],
+        &[DEPTH, COLOR, TO_OUT],
+    ));
+    one(&issues, "graph.node_type");
+    assert!(of(&issues, "graph.budget").is_empty(), "{issues:#?}");
+    assert!(
+        issues.iter().all(|issue| issue.stage == Stage::Structure),
+        "{issues:#?}"
+    );
+}
+
+#[test]
+fn warnings_alone_do_not_stop_the_budget_stage() {
+    let old = r#"{"id":"old","type":"fx.blur","v":1}"#;
+    let issues = run(&doc(
+        &[PREPASS, FORWARD, TONEMAP, OUT, WIDE, old],
+        &[DEPTH, COLOR, TO_OUT],
+    ));
+    assert_eq!(
+        one(&issues, "graph.node_upgraded").severity,
+        Severity::Warning
+    );
+    one(&issues, "graph.budget");
+    // The structure warning sorts before the budget error.
+    assert_eq!(
+        issues.first().map(|issue| issue.stage),
+        Some(Stage::Structure)
+    );
+    assert_eq!(issues.last().map(|issue| issue.stage), Some(Stage::Budget));
 }
