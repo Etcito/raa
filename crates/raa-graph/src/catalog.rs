@@ -217,6 +217,21 @@ pub struct NodeTypeSpec {
     pub family: &'static str,
 }
 
+/// A family of node types the catalog is built from, with validation hooks (S51).
+pub trait NodeFamily {
+    fn name(&self) -> &'static str;
+    fn node_types(&self) -> Vec<NodeTypeSpec>;
+    fn extend_types(&self, _types: &mut Vec<NodeTypeSpec>) {}
+    fn validate_node(
+        &self,
+        _node: &crate::format::NodeDoc,
+        _spec: &NodeTypeSpec,
+        _ctx: &crate::validate::ValidateCtx<'_>,
+        _issues: &mut Vec<crate::error::Issue>,
+    ) {
+    }
+}
+
 /// The static catalog plus the starter graphs, presets and frozen pipelines.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Catalog {
