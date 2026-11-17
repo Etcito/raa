@@ -315,7 +315,11 @@ fn virtual_members_leave_the_draw_lists_and_the_cascades() {
     assert_eq!(reference.cascade_instances(0), 2);
     assert_eq!(subject.cascade_instances(0), 1);
     assert_eq!(reference.cascade_instances(4), 2);
-    assert_eq!(subject.cascade_instances(4), 2, "a hero layer keeps the member");
+    assert_eq!(
+        subject.cascade_instances(4),
+        2,
+        "a hero layer keeps the member"
+    );
 
     // Frame feature bits: stored by id; 24 (tiling) and ids >= 64 are ignored.
     subject.lit.set_frame_feature(27, true);
