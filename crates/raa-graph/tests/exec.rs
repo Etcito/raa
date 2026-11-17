@@ -1,9 +1,14 @@
 //! Pipeline instructions of a plan (S53 level 1): the enabled entries and the pass order, from a
-//! hand-built plan and installed list. The catalog is the baseline one (`Catalog::build`).
+//! hand-built plan and installed list. The catalog is the baseline one (`Catalog::build`). The
+//! device-free executor helpers, `settings_targets` and `external_changes`, are tested at the end.
 
-use raa_graph::catalog::Catalog;
-use raa_graph::exec::{PipelineInstructions, pipeline_instructions};
-use raa_graph::plan::{GraphPlan, PlanNode, PlanPortRef};
+use raa_graph::catalog::{Catalog, FeatureId, ParamValue};
+use raa_graph::error::Stage;
+use raa_graph::exec::{
+    PipelineInstructions, SettingsSnapshot, default_values, external_changes,
+    pipeline_instructions, settings_targets,
+};
+use raa_graph::plan::{GraphPlan, PlanNode, PlanPortRef, plan_from_json};
 use raa_pipeline::{PassInfo, PassRole};
 
 /// A plan whose nodes have the given types, in plan order.
@@ -172,5 +177,106 @@ fn an_all_present_plan_keeps_the_plan_order_even_when_it_differs_from_the_defaul
     assert_eq!(
         instructions.order,
         ["prepass", "light.tiles", "forward", "fog", "ssr", "tonemap"]
+    );
+}
+
+/// A valid graph: the required passes, the colour chain and one GTAO node whose parameters are the
+/// JSON object `ao_params`.
+fn graph_text(ao_params: &str) -> String {
+    format!(
+        r#"{{"format":"raa.render-graph","version":1,"name":"exec test","nodes":[
+{{"id":"prepass","type":"pass.prepass"}},
+{{"id":"ao","type":"pass.ao.gtao","params":{ao_params}}},
+{{"id":"forward","type":"pass.forward"}},
+{{"id":"tonemap","type":"pass.tonemap"}},
+{{"id":"out","type":"output.display"}}],
+"links":[{{"from":"forward.color","to":"tonemap.color"}},{{"from":"tonemap.color","to":"out.color"}}]}}"#
+    )
+}
+
+/// The configuration before a graph: four passes enabled in default order, and the Gtao defaults.
+fn before_graph() -> SettingsSnapshot {
+    let passes = ["prepass", "ao.gtao", "forward", "tonemap"];
+    SettingsSnapshot {
+        passes: passes.iter().map(|name| (name.to_string(), true)).collect(),
+        order: passes.iter().map(|name| name.to_string()).collect(),
+        values: vec![(FeatureId::Gtao, default_values(&FeatureId::Gtao))],
+    }
+}
+
+/// The Gtao value of `key` in `targets`.
+fn gtao(targets: &SettingsSnapshot, key: &str) -> ParamValue {
+    let (_, values) = targets
+        .values
+        .iter()
+        .find(|(feature, _)| *feature == FeatureId::Gtao)
+        .expect("Gtao values");
+    values
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.clone())
+        .expect("Gtao key")
+}
+
+#[test]
+fn settings_targets_fills_absent_params_with_defaults_and_keeps_written_ones() {
+    let catalog = Catalog::build();
+    let plan = plan_from_json(&graph_text(r#"{"intensity":0.5}"#)).expect("the graph plans");
+    let targets = settings_targets(&plan, &catalog, &before_graph()).expect("the targets resolve");
+    assert_eq!(gtao(&targets, "intensity"), ParamValue::Number(0.5));
+    for (key, default) in default_values(&FeatureId::Gtao) {
+        if key != "intensity" {
+            assert_eq!(gtao(&targets, &key), default, "default of {key}");
+        }
+    }
+    assert!(targets.passes.contains(&("ao.gtao".to_owned(), true)));
+}
+
+#[test]
+fn a_refused_gtao_radius_is_a_param_range_issue_on_its_node() {
+    let catalog = Catalog::build();
+    // The catalog bounds the radius, so the plan is built with it and the feature refuses it.
+    let mut plan = plan_from_json(&graph_text("{}")).expect("the graph plans");
+    for node in plan
+        .nodes
+        .iter_mut()
+        .filter(|node| node.type_id == "pass.ao.gtao")
+    {
+        for (key, value) in &mut node.params {
+            if key.as_str() == "radius" {
+                *value = ParamValue::Number(25.0);
+            }
+        }
+    }
+    let issues = settings_targets(&plan, &catalog, &before_graph())
+        .expect_err("a radius of 25 is outside (0, 10]");
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].code, "graph.param_range");
+    assert_eq!(issues[0].stage, Stage::Apply);
+    assert_eq!(issues[0].node.as_deref(), Some("ao"));
+    assert_eq!(issues[0].param.as_deref(), Some("radius"));
+}
+
+#[test]
+fn external_changes_names_the_pipeline_and_the_changed_feature() {
+    let catalog = Catalog::build();
+    let plan = plan_from_json(&graph_text("{}")).expect("the graph plans");
+    let applied = settings_targets(&plan, &catalog, &before_graph()).expect("the targets resolve");
+    assert!(external_changes(&applied, &applied).is_empty());
+
+    let mut observed = applied.clone();
+    observed.order.swap(0, 1);
+    for (feature, values) in &mut observed.values {
+        if *feature == FeatureId::Gtao {
+            for (key, value) in values.iter_mut() {
+                if key.as_str() == "radius" {
+                    *value = ParamValue::Number(2.0);
+                }
+            }
+        }
+    }
+    assert_eq!(
+        external_changes(&applied, &observed),
+        vec![FeatureId::Pipeline, FeatureId::Gtao]
     );
 }
