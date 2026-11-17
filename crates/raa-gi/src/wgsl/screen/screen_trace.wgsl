@@ -31,7 +31,7 @@
 // SOFTWARE.
 
 // Fades to zero towards the screen edges, where the screen's data runs out.
-const RAA_GI_SCREEN_EDGE_FADE: f32 = 0.08;
+override RAA_GI_SCREEN_EDGE_FADE: f32 = 0.08;
 
 // The previous frame's lit HDR (Rgba16Float), sampled at lod 0.
 @group(2) @binding(3) var raa_gi_history: texture_2d<f32>;

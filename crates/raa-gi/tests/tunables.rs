@@ -11,7 +11,7 @@ const VOLUME_ROWS: [(&str, f64); 3] = [("behind", 0.5), ("resetRays", 8.0), ("di
 fn volume_keys_and_defaults_follow_the_table() {
     let specs = tunables();
     let keys: Vec<&str> = specs.iter().map(|spec| spec.key).collect();
-    assert_eq!(keys, ["behind", "resetRays", "directChange"]);
+    assert_eq!(keys[..3], ["behind", "resetRays", "directChange"]);
     for (spec, (key, default)) in specs.iter().zip(VOLUME_ROWS) {
         assert_eq!(spec.key, key);
         assert_eq!(spec.default, default, "default of {key}");
@@ -20,7 +20,7 @@ fn volume_keys_and_defaults_follow_the_table() {
         assert_eq!(spec.rebuild, "pipeline", "{key}");
     }
     let integer: Vec<bool> = specs.iter().map(|spec| spec.integer).collect();
-    assert_eq!(integer, [false, true, false]);
+    assert_eq!(integer[..3], [false, true, false]);
 }
 
 #[test]
@@ -74,4 +74,61 @@ fn constants_pair_each_override_with_its_current_value() {
         ]),
         vec![("RAA_GI_BEHIND", 0.5), ("RAA_GI_RESET_RAYS", 8.0)]
     );
+}
+
+/// The `pass.gi.screen` rows of docs/render-graph/tunables.md that card 2/5 adds, in table order:
+/// key, default and whether the row is integer.
+const SCREEN_ROWS: [(&str, f64, bool); 18] = [
+    ("accDepthTolerance", 0.04, false),
+    ("accNormalCos", 0.9, false),
+    ("accMinWeight", 0.05, false),
+    ("accChangeSlack", 0.05, false),
+    ("accChangeMin", 4.0, false),
+    ("occlusionDirections", 3.0, true),
+    ("occlusionSteps", 4.0, true),
+    ("occlusionRadius", 0.9, false),
+    ("atrousSigmaLuminance", 4.0, false),
+    ("atrousNormalPower", 32.0, false),
+    ("atrousPlane", 0.01, false),
+    ("probeScreenDistance", 8.0, false),
+    ("probeScreenSteps", 32.0, true),
+    ("probeScreenThickness", 0.15, false),
+    ("probeVolumeDistance", 320.0, false),
+    ("probeVolumeSteps", 40.0, true),
+    ("probeVolumeHitVoxels", 0.85, false),
+    ("screenEdgeFade", 0.08, false),
+];
+
+#[test]
+fn screen_keys_and_defaults_follow_the_table() {
+    let specs = tunables();
+    assert!(specs.len() >= 3 + SCREEN_ROWS.len());
+    for (spec, (key, default, integer)) in specs[3..].iter().zip(SCREEN_ROWS) {
+        assert_eq!(spec.key, key);
+        assert_eq!(spec.default, default, "default of {key}");
+        assert_eq!(spec.integer, integer, "integer of {key}");
+        assert_eq!((spec.min, spec.max), (None, None), "{key} states no range");
+        assert_eq!(spec.rebuild, "pipeline", "{key}");
+    }
+    let store = GiTunables::new();
+    assert_eq!(store.value("probeScreenDistance"), Some(8.0));
+    assert_eq!(store.value("probeScreenSteps"), Some(32.0));
+    assert_eq!(store.value("probeScreenThickness"), Some(0.15));
+}
+
+#[test]
+fn probe_screen_steps_is_integer_and_refuses_a_fraction() {
+    let mut store = GiTunables::new();
+    let before = store.clone();
+    let spec = tunables()
+        .iter()
+        .find(|spec| spec.key == "probeScreenSteps");
+    assert!(spec.is_some_and(|spec| spec.integer));
+    let fraction = store
+        .set("probeScreenSteps", 2.5)
+        .expect_err("an integer row");
+    assert_eq!(fraction.code(), "gi.invalid");
+    assert_eq!(store, before);
+    assert!(store.set("probeScreenSteps", 16.0).expect("an integer"));
+    assert_eq!(store.value("probeScreenSteps"), Some(16.0));
 }

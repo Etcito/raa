@@ -41,18 +41,22 @@
 
 // A history tap is kept when its linear depth is within this fraction of the depth expected for
 // this pixel's surface (`accumulate_cpu::DEPTH_TOLERANCE`).
-const RAA_GI_ACC_DEPTH_TOLERANCE: f32 = 0.04;
+override RAA_GI_ACC_DEPTH_TOLERANCE: f32 = 0.04;
 // ... and its normal within this cosine of this pixel's normal (`accumulate_cpu::NORMAL_COS`).
-const RAA_GI_ACC_NORMAL_COS: f32 = 0.9;
+override RAA_GI_ACC_NORMAL_COS: f32 = 0.9;
 // Below this bilinear weight of kept taps the history is rejected.
-const RAA_GI_ACC_MIN_WEIGHT: f32 = 0.05;
+override RAA_GI_ACC_MIN_WEIGHT: f32 = 0.05;
 // The relative slack of the change test, so a nearly noiseless signal does not trip it on
 // rounding (`accumulate_cpu::CHANGE_SLACK`).
-const RAA_GI_ACC_CHANGE_SLACK: f32 = 0.05;
+override RAA_GI_ACC_CHANGE_SLACK: f32 = 0.05;
 // The shortest history the change test applies to (`accumulate_cpu::CHANGE_MIN`).
-const RAA_GI_ACC_CHANGE_MIN: f32 = 4.0;
+override RAA_GI_ACC_CHANGE_MIN: f32 = 4.0;
 // The f16 ceiling of the stored values.
 const RAA_GI_ACC_HALF_MAX: f32 = 65000.0;
+// The horizon search of `raa_gi_screen_occlusion`: directions, steps per side and radius (m).
+override RAA_GI_OCCLUSION_DIRECTIONS: u32 = 3u;
+override RAA_GI_OCCLUSION_STEPS: u32 = 4u;
+override RAA_GI_OCCLUSION_RADIUS: f32 = 0.9;
 
 // Debug states of a pixel (`raa_gi_debug_out` z.x).
 const RAA_GI_ACC_REJECTED: u32 = 0u;
@@ -185,9 +189,6 @@ fn raa_gi_probe_ign(pixel: vec2<f32>, frame: u32) -> f32 {
 // Ground-truth-style occlusion in a horizon search along a few screen-space directions (S39,
 // moved here from probe_integrate.wgsl).
 fn raa_gi_screen_occlusion(pixel: vec2<f32>, world: vec3<f32>, normal: vec3<f32>, noise: f32) -> f32 {
-    const RAA_GI_OCCLUSION_DIRECTIONS: u32 = 3u;
-    const RAA_GI_OCCLUSION_STEPS: u32 = 4u;
-    const RAA_GI_OCCLUSION_RADIUS: f32 = 0.9;
     let distance = length(world - raa_gi_frame.camera_position.xyz);
     let pixel_radius =
         clamp(RAA_GI_OCCLUSION_RADIUS / distance * raa_gi_frame.viewport.y * 0.8, 4.0, 90.0);

@@ -37,6 +37,8 @@ use raa_core::GpuContext;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use std::num::NonZeroU64;
 
+use crate::tunables::GiTunables;
+
 use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, ComputePipeline, ShaderModule,
     ShaderStages, StorageTextureAccess, TextureFormat, TextureSampleType, TextureViewDimension,
@@ -50,6 +52,34 @@ const PROBE_PROJECT_WGSL: &str = include_str!("../../wgsl/screen/probe_project.w
 const PROBE_INTEGRATE_WGSL: &str = include_str!("../../wgsl/screen/probe_integrate.wgsl");
 const ACCUMULATE_WGSL: &str = include_str!("../../wgsl/screen/accumulate.wgsl");
 const ATROUS_WGSL: &str = include_str!("../../wgsl/screen/atrous.wgsl");
+
+/// The (override, tunable key) pairs of the trace module: probe_trace.wgsl and screen_trace.wgsl.
+const TRACE_OVERRIDES: &[(&str, &str)] = &[
+    ("RAA_GI_PROBE_SCREEN_DISTANCE", "probeScreenDistance"),
+    ("RAA_GI_PROBE_SCREEN_STEPS", "probeScreenSteps"),
+    ("RAA_GI_PROBE_SCREEN_THICKNESS", "probeScreenThickness"),
+    ("RAA_GI_PROBE_VOLUME_DISTANCE", "probeVolumeDistance"),
+    ("RAA_GI_PROBE_VOLUME_STEPS", "probeVolumeSteps"),
+    ("RAA_GI_PROBE_VOLUME_HIT_VOXELS", "probeVolumeHitVoxels"),
+    ("RAA_GI_SCREEN_EDGE_FADE", "screenEdgeFade"),
+];
+/// The (override, tunable key) pairs of the integrate module: accumulate.wgsl.
+const INTEGRATE_OVERRIDES: &[(&str, &str)] = &[
+    ("RAA_GI_ACC_DEPTH_TOLERANCE", "accDepthTolerance"),
+    ("RAA_GI_ACC_NORMAL_COS", "accNormalCos"),
+    ("RAA_GI_ACC_MIN_WEIGHT", "accMinWeight"),
+    ("RAA_GI_ACC_CHANGE_SLACK", "accChangeSlack"),
+    ("RAA_GI_ACC_CHANGE_MIN", "accChangeMin"),
+    ("RAA_GI_OCCLUSION_DIRECTIONS", "occlusionDirections"),
+    ("RAA_GI_OCCLUSION_STEPS", "occlusionSteps"),
+    ("RAA_GI_OCCLUSION_RADIUS", "occlusionRadius"),
+];
+/// The (override, tunable key) pairs of the a-trous module: atrous.wgsl.
+const ATROUS_OVERRIDES: &[(&str, &str)] = &[
+    ("RAA_GI_ATROUS_SIGMA_LUMINANCE", "atrousSigmaLuminance"),
+    ("RAA_GI_ATROUS_NORMAL_POWER", "atrousNormalPower"),
+    ("RAA_GI_ATROUS_PLANE", "atrousPlane"),
+];
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes.
 const FRAME_SIZE: u64 = 432;
@@ -385,6 +415,63 @@ pub(crate) struct ScreenPipelines {
     filter: wgpu::ComputePipeline,
     integrate: wgpu::ComputePipeline,
     atrous: wgpu::ComputePipeline,
+    /// What the trace, integrate and a-trous pipelines are rebuilt from when a tunable changes.
+    tuned: TunedSources,
+    /// The tunables generation the trace, integrate and a-trous pipelines were built with.
+    tunables_generation: u64,
+}
+
+/// The layouts and modules of the pipelines whose modules declare gi.screen overrides.
+struct TunedSources {
+    empty: wgpu::BindGroupLayout,
+    group1: wgpu::BindGroupLayout,
+    trace_module: ShaderModule,
+    integrate_module: ShaderModule,
+    atrous_module: ShaderModule,
+}
+
+/// The trace (one per `PROBE_RAY_OPTIONS` entry), integrate and a-trous pipelines with the
+/// overrides of their modules set from `tunables` (contract 'gi-tunables-store').
+fn tuned_pipelines(
+    device: &wgpu::Device,
+    sources: &TunedSources,
+    trace_layout: &wgpu::BindGroupLayout,
+    integrate_layout: &wgpu::BindGroupLayout,
+    atrous_layout: &wgpu::BindGroupLayout,
+    tunables: &GiTunables,
+) -> ([ComputePipeline; 2], ComputePipeline, ComputePipeline) {
+    let (empty, group1) = (&sources.empty, &sources.group1);
+    let trace_constants = tunables.constants(TRACE_OVERRIDES);
+    let trace = PROBE_RAY_OPTIONS.map(|rays| {
+        tuned_compute_pipeline(
+            device,
+            "raa-gi.screen.trace",
+            &sources.trace_module,
+            PROBE_TRACE_ENTRY,
+            &[Some(empty), Some(group1), Some(trace_layout)],
+            Some(rays),
+            &trace_constants,
+        )
+    });
+    let integrate = tuned_compute_pipeline(
+        device,
+        "raa-gi.screen.integrate",
+        &sources.integrate_module,
+        PROBE_INTEGRATE_ENTRY,
+        &[Some(empty), Some(group1), Some(integrate_layout)],
+        None,
+        &tunables.constants(INTEGRATE_OVERRIDES),
+    );
+    let atrous = tuned_compute_pipeline(
+        device,
+        "raa-gi.screen.atrous",
+        &sources.atrous_module,
+        ATROUS_ENTRY,
+        &[Some(empty), Some(group1), Some(atrous_layout)],
+        None,
+        &tunables.constants(ATROUS_OVERRIDES),
+    );
+    (trace, integrate, atrous)
 }
 
 /// The per-frame bind groups and sizes `ScreenPipelines::record` dispatches over: one pyramid
@@ -435,18 +522,31 @@ pub(crate) fn compute_pipeline(
     groups: &[Option<&wgpu::BindGroupLayout>],
     probe_rays: Option<u32>,
 ) -> ComputePipeline {
+    tuned_compute_pipeline(device, label, module, entry, groups, probe_rays, &[])
+}
+
+/// [`compute_pipeline`] with the override constants `tuned` passed before `PROBE_RAYS`.
+fn tuned_compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &ShaderModule,
+    entry: &str,
+    groups: &[Option<&wgpu::BindGroupLayout>],
+    probe_rays: Option<u32>,
+    tuned: &[(&'static str, f64)],
+) -> ComputePipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: groups,
         immediate_size: 0,
     });
-    let constants = [("PROBE_RAYS", probe_rays.map_or(0.0, f64::from))];
-    let compilation_options = match probe_rays {
-        Some(_) => wgpu::PipelineCompilationOptions {
-            constants: &constants,
-            ..Default::default()
-        },
-        None => Default::default(),
+    let mut constants = tuned.to_vec();
+    if let Some(rays) = probe_rays {
+        constants.push(("PROBE_RAYS", f64::from(rays)));
+    }
+    let compilation_options = wgpu::PipelineCompilationOptions {
+        constants: &constants,
+        ..Default::default()
     };
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
@@ -470,7 +570,12 @@ impl ScreenPipelines {
     /// Builds one shader module per builder and the nine pipelines over the layout [empty group
     /// 0, `group1`, their group-2 layout]; trace and project are built once per
     /// `PROBE_RAY_OPTIONS` entry with `PROBE_RAYS` set to that value.
-    pub(crate) fn new(gpu: &GpuContext, group1: &wgpu::BindGroupLayout) -> ScreenPipelines {
+    /// The trace, integrate and a-trous pipelines take the gi.screen overrides from `tunables`.
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        group1: &wgpu::BindGroupLayout,
+        tunables: &GiTunables,
+    ) -> ScreenPipelines {
         let device = gpu.device();
         let empty = layout(device, "raa-gi.screen.empty", &[]);
         let copy_layout = layout(device, "raa-gi.screen.copy", &pyramid_copy_group2_entries());
@@ -523,16 +628,6 @@ impl ScreenPipelines {
             &[Some(&empty), Some(group1), Some(&reduce_layout)],
             None,
         );
-        let trace = PROBE_RAY_OPTIONS.map(|rays| {
-            compute_pipeline(
-                device,
-                "raa-gi.screen.trace",
-                &trace_module,
-                PROBE_TRACE_ENTRY,
-                &[Some(&empty), Some(group1), Some(&trace_layout)],
-                Some(rays),
-            )
-        });
         let project = PROBE_RAY_OPTIONS.map(|rays| {
             compute_pipeline(
                 device,
@@ -551,21 +646,20 @@ impl ScreenPipelines {
             &[Some(&empty), Some(group1), Some(&filter_layout)],
             None,
         );
-        let integrate = compute_pipeline(
+        let tuned = TunedSources {
+            empty,
+            group1: group1.clone(),
+            trace_module,
+            integrate_module,
+            atrous_module,
+        };
+        let (trace, integrate, atrous) = tuned_pipelines(
             device,
-            "raa-gi.screen.integrate",
-            &integrate_module,
-            PROBE_INTEGRATE_ENTRY,
-            &[Some(&empty), Some(group1), Some(&integrate_layout)],
-            None,
-        );
-        let atrous = compute_pipeline(
-            device,
-            "raa-gi.screen.atrous",
-            &atrous_module,
-            ATROUS_ENTRY,
-            &[Some(&empty), Some(group1), Some(&atrous_layout)],
-            None,
+            &tuned,
+            &trace_layout,
+            &integrate_layout,
+            &atrous_layout,
+            tunables,
         );
 
         ScreenPipelines {
@@ -583,7 +677,31 @@ impl ScreenPipelines {
             filter,
             integrate,
             atrous,
+            tuned,
+            tunables_generation: tunables.generation(),
         }
+    }
+
+    /// The tunables generation the trace, integrate and a-trous pipelines were built with.
+    pub(crate) fn tunables_generation(&self) -> u64 {
+        self.tunables_generation
+    }
+
+    /// Rebuilds the trace, integrate and a-trous pipelines with the overrides of `tunables`. The
+    /// bind group layouts are kept, so the bind groups built over them stay valid.
+    pub(crate) fn rebuild_tuned(&mut self, gpu: &GpuContext, tunables: &GiTunables) {
+        let (trace, integrate, atrous) = tuned_pipelines(
+            gpu.device(),
+            &self.tuned,
+            &self.trace_layout,
+            &self.integrate_layout,
+            &self.atrous_layout,
+            tunables,
+        );
+        self.trace = trace;
+        self.integrate = integrate;
+        self.atrous = atrous;
+        self.tunables_generation = tunables.generation();
     }
 
     /// Records one `raa-gi.screen` compute pass: the pyramid copy of `work.pyramid[0]` over mip
@@ -654,7 +772,11 @@ impl ScreenPipelines {
     /// Records the depth-pyramid copy of mip 0 and the reduce of every later mip into `pass`
     /// (group 1 already set); false when the pyramid is empty. The probe record and the ReSTIR GI
     /// record both start with it.
-    pub(crate) fn record_pyramid(&self, pass: &mut wgpu::ComputePass<'_>, work: &ScreenWork<'_>) -> bool {
+    pub(crate) fn record_pyramid(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        work: &ScreenWork<'_>,
+    ) -> bool {
         let Some((first, rest)) = work.pyramid.split_first() else {
             return false;
         };
@@ -724,7 +846,10 @@ mod tests {
         for (index, step) in [(0u32, 1i32), (1, 2), (2, 4), (3, 8), (4, 16)] {
             let bytes = atrous_record(index, index == 4);
             assert_eq!(i32::from_le_bytes(bytes[0..4].try_into().unwrap()), step);
-            assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), u32::from(index == 4));
+            assert_eq!(
+                u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+                u32::from(index == 4)
+            );
         }
     }
 }

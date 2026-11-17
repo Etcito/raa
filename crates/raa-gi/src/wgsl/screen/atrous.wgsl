@@ -28,11 +28,11 @@ struct RaaGiAtrousGpu {
 // The 1D B3-spline kernel (1, 4, 6, 4, 1) / 16 (`accumulate_cpu::ATROUS_KERNEL`).
 const RAA_GI_ATROUS_KERNEL: array<f32, 5> = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
 // Luminance edge-stopping: sigma_l of SVGF eq. 3 (`accumulate_cpu::ATROUS_SIGMA_LUMINANCE`).
-const RAA_GI_ATROUS_SIGMA_LUMINANCE: f32 = 4.0;
+override RAA_GI_ATROUS_SIGMA_LUMINANCE: f32 = 4.0;
 // Normal edge-stopping exponent (`accumulate_cpu::ATROUS_NORMAL_POWER`).
-const RAA_GI_ATROUS_NORMAL_POWER: f32 = 32.0;
+override RAA_GI_ATROUS_NORMAL_POWER: f32 = 32.0;
 // Plane edge-stopping: a tap this fraction of the view depth off the tangent plane weighs 1 / e.
-const RAA_GI_ATROUS_PLANE: f32 = 0.01;
+override RAA_GI_ATROUS_PLANE: f32 = 0.01;
 
 // The weight of one tap from its kernel weight and its three edge terms.
 fn raa_gi_atrous_weight(

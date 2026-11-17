@@ -58,7 +58,11 @@ const FRAME_JITTER_Y_OFFSET: u64 = 364;
 /// file-name order. It builds the pipelines, the part (with the lit handle whose jitter the pass
 /// writes into the frame record) and the `gi.screen` pass.
 pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
-    let pipelines = ScreenPipelines::new(ctx.gpu, &ctx.shared.compute_group1_layout());
+    let pipelines = ScreenPipelines::new(
+        ctx.gpu,
+        &ctx.shared.compute_group1_layout(),
+        &ctx.shared.tunables(),
+    );
     let part = Rc::new(ScreenPart {
         shared: ctx.shared.clone(),
         lit: ctx.lit.handle(),
@@ -908,6 +912,10 @@ impl GiPart for ScreenPart {
             state.active = false;
             state.wants = false;
             return;
+        }
+        if state.pipelines.tunables_generation() != self.shared.tunables_generation() {
+            let tunables = self.shared.tunables();
+            state.pipelines.rebuild_tuned(gpu, &tunables);
         }
         let rays = frame.quality.probe_rays;
         if needs_reallocation(state.key, frame.viewport, rays) {

@@ -32,12 +32,12 @@
 
 // Probe rays only need the screen near their origin: farther lighting comes from the volume,
 // which is stable, while long screen rays flicker as surfaces enter and leave the view.
-const RAA_GI_PROBE_SCREEN_DISTANCE: f32 = 8.0;
-const RAA_GI_PROBE_SCREEN_STEPS: u32 = 32u;
-const RAA_GI_PROBE_SCREEN_THICKNESS: f32 = 0.15;
-const RAA_GI_PROBE_VOLUME_DISTANCE: f32 = 320.0;
-const RAA_GI_PROBE_VOLUME_STEPS: u32 = 40u;
-const RAA_GI_PROBE_VOLUME_HIT_VOXELS: f32 = 0.85;
+override RAA_GI_PROBE_SCREEN_DISTANCE: f32 = 8.0;
+override RAA_GI_PROBE_SCREEN_STEPS: u32 = 32u;
+override RAA_GI_PROBE_SCREEN_THICKNESS: f32 = 0.15;
+override RAA_GI_PROBE_VOLUME_DISTANCE: f32 = 320.0;
+override RAA_GI_PROBE_VOLUME_STEPS: u32 = 40u;
+override RAA_GI_PROBE_VOLUME_HIT_VOXELS: f32 = 0.85;
 // The hit distance stored for a ray that found neither the screen nor the volume.
 const RAA_GI_PROBE_MISS_DISTANCE: f32 = 1000.0;
 
