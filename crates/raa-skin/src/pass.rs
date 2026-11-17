@@ -208,6 +208,11 @@ impl FeaturePass for SkinPass {
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         self.encode(ctx.gpu, ctx.encoder);
+        if let Some(palette) = self.views.palette_buffer() {
+            let size = palette.size();
+            ctx.resources
+                .publish_buffer(SKIN_PASS, "skinned", &palette, size);
+        }
         Ok(())
     }
 }

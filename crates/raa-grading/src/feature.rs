@@ -14,7 +14,9 @@ use std::rc::Rc;
 
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::GradingDesc;
 use crate::shaders::{FS_GRADING, GRADING_WGSL, PARAMS_SIZE, VS_MAIN};
@@ -285,6 +287,9 @@ impl FeaturePass for GradingPass {
         pass.draw(0..3, 0..1);
         drop(pass);
         hdr.swap();
+        let (w, h) = ctx.targets.size();
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
+        ctx.resources.publish(NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -443,7 +448,9 @@ mod tests {
 
         use raa_core::testing::{skip, software_gpu};
         use raa_core::{FrameGraph, OffscreenTarget, wgpu};
-        use raa_pipeline::{FeaturePass, Pipeline, RecordCtx};
+        use raa_pipeline::{
+            FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx, ResourceTable,
+        };
 
         use super::super::*;
 
@@ -583,6 +590,68 @@ mod tests {
                     "neutral grade of 0.18 gave {v} (channel {ch})"
                 );
             }
+        }
+
+        #[test]
+        fn publishes_the_color_tap_in_record() {
+            let test = "publishes_the_color_tap_in_record";
+            let Some(gpu) = software_gpu() else {
+                skip(
+                    test,
+                    "software_gpu returned None; see the software_gpu line above",
+                );
+                return;
+            };
+            let targets = Targets::new(&gpu, (8, 8));
+            let resources = ResourceTable::new();
+            let mut lighting = LightingResources::new(&gpu);
+            let state = Rc::new(RefCell::new(GradingState {
+                desc: GradingDesc::default(),
+                amount: 1.0,
+            }));
+            let mut pass = GradingPass::new(&gpu, state);
+            pass.resize(&gpu, &targets);
+            let mut prepare = PrepareCtx {
+                gpu: &gpu,
+                size: (8, 8),
+                frame: 0,
+                time_s: 0.0,
+                dt_s: 0.0,
+                targets: &targets,
+                lighting: &mut lighting,
+                resources: &resources,
+            };
+            pass.prepare(&mut prepare).expect("prepare");
+            let mut encoder = gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let mut record = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size: (8, 8),
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                resources: &resources,
+                backbuffer: targets.normal(),
+                backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
+                surface_is_srgb: false,
+            };
+            pass.record(&mut record).expect("record");
+            let _ = encoder.finish();
+            let entries = resources.entries();
+            let (pass_name, port, desc) = entries
+                .iter()
+                .find(|(p, q, _)| p == "grading" && q == "color")
+                .expect("grading publishes its color tap");
+            assert_eq!((pass_name.as_str(), port.as_str()), ("grading", "color"));
+            assert_eq!(desc.format, HDR_FORMAT);
+            assert_eq!(desc.dim, ImageDim::D2);
+            assert_eq!(
+                (desc.width, desc.height, desc.layers, desc.mips),
+                (8, 8, 1, 1)
+            );
         }
     }
 }

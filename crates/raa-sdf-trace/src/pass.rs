@@ -6,7 +6,7 @@ use std::rc::Rc;
 use raa_core::GpuContext;
 use raa_core::RaaError;
 use raa_core::wgpu;
-use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets};
 
 use crate::bvh::{self, Bvh};
 use crate::program::{INSTANCE_COUNT, INSTANCE_WORDS, Instance, TraceError, TraceProgram, parse};
@@ -943,6 +943,18 @@ impl FeaturePass for TracePass {
                 ctx.gpu, pipelines, buffers, frame, targets, volume,
             ));
             self.groups_for = key;
+        }
+        if let Some(targets) = scene.targets.as_ref() {
+            let desc = ImageDesc::new(
+                ImageDim::D2,
+                COLOR_FORMAT,
+                targets.size.0,
+                targets.size.1,
+                1,
+                1,
+            );
+            ctx.resources
+                .publish(TRACE_NAME, "trace", &targets.color_view, desc);
         }
         Ok(())
     }

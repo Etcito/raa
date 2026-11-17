@@ -4,7 +4,9 @@ use std::rc::Rc;
 
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::CelSettings;
 use crate::shaders::{CEL_WGSL, FS_CEL, PARAMS_SIZE, VS_MAIN};
@@ -301,6 +303,9 @@ impl FeaturePass for CelPass {
         pass.draw(0..3, 0..1);
         drop(pass);
         hdr.swap();
+        let (w, h) = ctx.targets.size();
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
+        ctx.resources.publish(NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }
