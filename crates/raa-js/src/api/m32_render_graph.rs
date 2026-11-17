@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use raa_graph::catalog::Catalog;
-use raa_graph::error::Issue;
+use raa_graph::error::{Issue, Severity, Stage};
 use raa_graph::exec::{GraphExecutor, NodeStats, ResourceStat, SetResult};
 use raa_loader::json::JsonValue;
 
@@ -22,6 +22,28 @@ use raa_loader::json::JsonValue;
 pub(crate) struct RenderGraphState {
     pub(crate) executor: GraphExecutor,
     pub(crate) catalog: Catalog,
+    /// The issues of the latest `setRenderGraph` that did not throw: a parse refusal, the executor's
+    /// `SetResult.issues`, or empty after `null`.
+    pub(crate) last_set_issues: Vec<Issue>,
+}
+
+/// The `graph.multi_view` warning `renderGraphIssues` appends while a graph is active and more than
+/// one viewport is on: the graph is single view, so the extra views keep the engine's own post passes.
+pub fn multi_view_warning(viewports: u32) -> Issue {
+    Issue {
+        code: "graph.multi_view",
+        severity: Severity::Warning,
+        stage: Stage::Structure,
+        node: None,
+        port: None,
+        param: None,
+        link: None,
+        message: format!(
+            "{viewports} viewports are active while a render graph is set: the graph is single view, so each view keeps the engine's own post passes"
+        ),
+        fix: "turn the extra viewports off with setViewports, or clear the graph with setRenderGraph(null)"
+            .to_string(),
+    }
 }
 
 /// The S52 issues as a JSON array of `Issue::to_json` values.
@@ -89,7 +111,8 @@ pub(crate) mod web {
     use super::*;
     use crate::api::ViewsState;
     use crate::convert::{INVALID_ARGUMENT, api_error};
-    use crate::engine::InstallCtx;
+    use crate::engine::{Engine, InstallCtx};
+    use crate::feature_map::FEATURE_MISSING;
     use crate::state::EngineState;
     use raa_bloom::BloomHandle;
     use raa_cel::CelHandle;
@@ -99,7 +122,10 @@ pub(crate) mod web {
     use raa_fog::FogHandle;
     use raa_gi::GiHandle;
     use raa_grading::GradingHandle;
+    use raa_graph::catalog::{NodeTypeSpec, ParamValue};
     use raa_graph::exec::{FeatureHandles, HandleSet};
+    use raa_graph::format::{GraphDoc, graph_from_json_value, graph_to_json_value, parse_graph};
+    use raa_graph::validate::{GraphLimits, ValidateCtx};
     use raa_gtao::GtaoHandle;
     use raa_oit::OitHandle;
     use raa_shadow::ShadowHandle;
@@ -109,6 +135,7 @@ pub(crate) mod web {
     use raa_vg::VgHandle;
     use raa_web::FrameInput;
     use wasm_bindgen::JsValue;
+    use wasm_bindgen::prelude::wasm_bindgen;
 
     /// Installs the render graph state. It runs last in `install_all`, so every feature handle
     /// the executor wants already exists.
@@ -116,6 +143,7 @@ pub(crate) mod web {
         ctx.features.insert(RenderGraphState {
             executor: GraphExecutor::new(),
             catalog: Catalog::build(),
+            last_set_issues: Vec::new(),
         });
         Ok(())
     }
@@ -171,7 +199,9 @@ pub(crate) mod web {
         let state = st
             .features
             .require_mut::<RenderGraphState>("render graph")?;
-        let RenderGraphState { executor, catalog } = state;
+        let RenderGraphState {
+            executor, catalog, ..
+        } = state;
         let mut handles = FeatureHandles {
             gpu,
             pipeline: &pipeline,
@@ -206,5 +236,203 @@ pub(crate) mod web {
             .ok_or_else(|| api_error(INVALID_ARGUMENT, "value is not JSON-serialisable"))?;
         raa_loader::json::parse(&text)
             .map_err(|e| api_error(INVALID_ARGUMENT, format!("invalid JSON value: {e}")))
+    }
+
+    /// The render graph state of the FeatureMap, read-only; `api.feature_missing` when absent.
+    fn graph_state(st: &EngineState) -> Result<&RenderGraphState, RaaError> {
+        st.features.get::<RenderGraphState>().ok_or_else(|| {
+            api_error(
+                FEATURE_MISSING,
+                "feature `render graph` is not installed in this engine",
+            )
+        })
+    }
+
+    /// The pipeline's entry names in execution order: the names a pass node must find installed.
+    fn entry_names(st: &EngineState) -> Result<Vec<String>, RaaError> {
+        let pipeline = st.pipeline.try_borrow().map_err(|_| {
+            api_error(
+                "pipeline.busy",
+                "the pipeline is borrowed (called while a frame executes)",
+            )
+        })?;
+        Ok(pipeline
+            .passes()
+            .into_iter()
+            .map(|pass| pass.name)
+            .collect())
+    }
+
+    /// The device limits that bound each stage's bindings of a graph (RG_LIMITS).
+    fn graph_limits(gpu: &GpuContext) -> GraphLimits {
+        let limits = gpu.device().limits();
+        GraphLimits {
+            sampled_textures: limits.max_sampled_textures_per_shader_stage,
+            samplers: limits.max_samplers_per_shader_stage,
+            storage_textures: limits.max_storage_textures_per_shader_stage,
+            storage_buffers: limits.max_storage_buffers_per_shader_stage,
+            uniform_buffers: limits.max_uniform_buffers_per_shader_stage,
+        }
+    }
+
+    /// What a `setRenderGraph` argument holds once read.
+    enum GraphArgument {
+        /// Null or undefined: the graph is cleared.
+        Clear,
+        /// A document the parser accepted.
+        Document(GraphDoc),
+        /// Text or an object the parser refused, with its S52 issues.
+        Refused(Vec<Issue>),
+    }
+
+    /// Reads a `setRenderGraph` argument: a string is JSON text, an object goes through `js_to_json`
+    /// and `graph_from_json_value`; any other value throws `api.invalid_argument`.
+    fn graph_argument(graph: &JsValue) -> Result<GraphArgument, RaaError> {
+        if graph.is_null() || graph.is_undefined() {
+            return Ok(GraphArgument::Clear);
+        }
+        let parsed = if let Some(text) = graph.as_string() {
+            parse_graph(&text)
+        } else if graph.is_object() {
+            graph_from_json_value(&js_to_json(graph)?)
+        } else {
+            return Err(api_error(
+                INVALID_ARGUMENT,
+                "setRenderGraph takes a render graph object, its JSON text, or null",
+            ));
+        };
+        Ok(match parsed {
+            Ok(doc) => GraphArgument::Document(doc),
+            Err(issues) => GraphArgument::Refused(issues),
+        })
+    }
+
+    /// `setRenderGraph`: clears, refuses or applies the argument and returns its `RenderGraphResult`.
+    /// The call replaces `last_set_issues` once it returns; a throw leaves it unchanged.
+    fn apply_render_graph(
+        gpu: &GpuContext,
+        st: &mut EngineState,
+        graph: &JsValue,
+    ) -> Result<JsValue, RaaError> {
+        let result = match graph_argument(graph)? {
+            GraphArgument::Clear => {
+                with_handles(st, gpu, |executor, _, h, _| executor.clear_graph(h))??;
+                SetResult {
+                    ok: true,
+                    issues: Vec::new(),
+                    rebuilt: 0,
+                }
+            }
+            GraphArgument::Refused(issues) => SetResult {
+                ok: false,
+                issues,
+                rebuilt: 0,
+            },
+            GraphArgument::Document(doc) => {
+                let names = entry_names(st)?;
+                let limits = graph_limits(gpu);
+                with_handles(st, gpu, |executor, catalog, h, viewports| {
+                    let installed = |name: &str| names.iter().any(|entry| entry == name);
+                    let engine_options = [("msaa", ParamValue::Int(i64::from(h.msaa)))];
+                    let ctx = ValidateCtx {
+                        catalog,
+                        limits,
+                        installed: &installed,
+                        viewports,
+                        engine_options: &engine_options,
+                    };
+                    executor.set_graph(doc, &ctx, h)
+                })?
+            }
+        };
+        let json = result_to_json(&result);
+        st.features
+            .require_mut::<RenderGraphState>("render graph")?
+            .last_set_issues = result.issues;
+        Ok(json_to_js(&json))
+    }
+
+    #[wasm_bindgen(js_class = Engine)]
+    impl Engine {
+        /// The render graph catalog (S51) as a fresh object. A pass node whose pipeline entry is not
+        /// installed in this engine reports `available: false`.
+        #[wasm_bindgen(js_name = renderGraphCatalog)]
+        pub fn render_graph_catalog(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let installed = entry_names(st)?;
+                let state = graph_state(st)?;
+                let available = |spec: &NodeTypeSpec| {
+                    spec.pass
+                        .is_none_or(|entry| installed.iter().any(|name| name == entry))
+                };
+                Ok(json_to_js(&state.catalog.to_json(&available)))
+            })
+        }
+
+        /// Validates and applies a render graph (a document object, its JSON text, or null for the
+        /// no-graph configuration). An invalid graph returns `{ ok: false, issues }` and changes
+        /// nothing; any other value throws `api.invalid_argument`.
+        #[wasm_bindgen(js_name = setRenderGraph)]
+        pub fn set_render_graph(&mut self, graph: JsValue) -> Result<JsValue, JsValue> {
+            self.with_state(|gpu, st| apply_render_graph(gpu, st, &graph))
+        }
+
+        /// The active graph's canonical document, or with no graph the export of today's
+        /// configuration.
+        #[wasm_bindgen(js_name = renderGraph)]
+        pub fn render_graph(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|gpu, st| {
+                with_handles(st, gpu, |executor, catalog, h, _| {
+                    let json = match executor.active_doc() {
+                        Some(doc) => graph_to_json_value(doc),
+                        None => graph_to_json_value(&GraphExecutor::export_current(catalog, h)),
+                    };
+                    json_to_js(&json)
+                })
+            })
+        }
+
+        /// Whether a graph is active.
+        #[wasm_bindgen(js_name = renderGraphActive)]
+        pub fn render_graph_active(&self) -> Result<bool, JsValue> {
+            self.with_state(|_, st| Ok(graph_state(st)?.executor.active_doc().is_some()))
+        }
+
+        /// The issues of the latest `setRenderGraph`, plus `graph.multi_view` while a graph is active
+        /// and more than one viewport is on.
+        #[wasm_bindgen(js_name = renderGraphIssues)]
+        pub fn render_graph_issues(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let viewports = viewport_count(st);
+                let state = graph_state(st)?;
+                let mut issues = state.last_set_issues.clone();
+                if state.executor.active_doc().is_some() && viewports > 1 {
+                    issues.push(multi_view_warning(viewports));
+                }
+                Ok(json_to_js(&json_to_issue_entries(&issues)))
+            })
+        }
+
+        /// The statistics of the latest frame of the active graph (`frameIndex` null before one).
+        #[wasm_bindgen(js_name = renderGraphStats)]
+        pub fn render_graph_stats(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let state = graph_state(st)?;
+                let stats = stats_to_json(state.executor.frame_index(), &state.executor.stats());
+                Ok(json_to_js(&stats))
+            })
+        }
+
+        /// The setters the graph owns while it is active, in S54 order, as a string array.
+        #[wasm_bindgen(js_name = renderGraphOwnedSetters)]
+        pub fn render_graph_owned_setters(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, _| {
+                let names = owned_setters()
+                    .into_iter()
+                    .map(|name| JsonValue::String(name.to_string()))
+                    .collect();
+                Ok(json_to_js(&JsonValue::Array(names)))
+            })
+        }
     }
 }
