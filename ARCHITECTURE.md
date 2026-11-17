@@ -5,21 +5,21 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 ## Conventions
 
 ### Repositories, toolchain, layout
-- Writable: `raa`, `mama`, `sdfm`, merged in the order mama, raa, sdfm; `raa:`, `mama:`, `sdfm:` qualify paths, unqualified paths are RAA's. MAMA owns procedural scene data and the saved mesh format. Solstice (`7e465b599c13da165948ebaa44df824c36c3ae07`) is read-only; adapted files keep the MIT notice and `Copyright (c) 2026 SamG-Coder`. Kong resolves linked packages; host `dist/` and abandoned branches are never inputs. MAMA never imports RAA, nothing under `crates/` names MAMA; `packages/raa-sdfm` is the passage.
-- One owner module per file; an explicit file or narrower directory wins over a glob. A task writes one repository, only its milestone's module files, in one unpushed commit; repairing an earlier owner needs the lead. A `Cargo.lock` refresh for a new crate or dependency, one api path-dependency line in `crates/raa-js/Cargo.toml` and appended `.nmc/commands.json` entries are not ownership changes.
+- Writable in P4: `raa` and `sdfm`, merged raa then sdfm (earlier projects also wrote `mama`, merged first). `raa:`, `mama:`, `sdfm:` qualify paths; unqualified paths are RAA's. MAMA (`1c4ad64c5195a01b42576716fb7391c22489b298`) owns procedural scene data and the saved mesh format; in P4 it is a read-only sibling built with `npm run build` before sdfm reads it. Solstice (`7e465b599c13da165948ebaa44df824c36c3ae07`) is read-only; adapted files keep the MIT notice and `Copyright (c) 2026 SamG-Coder`. royal-fiesta and haa are read-only, never tested in. Kong resolves linked packages; host `dist/` and abandoned branches are never inputs. MAMA never imports RAA, nothing under `crates/` names MAMA; `packages/raa-sdfm` is the passage.
+- One owner module per file; an explicit file or narrower directory wins over a glob. A task writes one repository, only its milestone's module files, in one unpushed commit; repairing an earlier owner needs the lead. A `Cargo.lock` refresh, one api path-dependency line in `crates/raa-js/Cargo.toml` and appended `.nmc/commands.json` entries are not ownership changes.
 - Workspace: edition 2024, rust-version 1.96.0, version 0.5.0, resolver 2, members `crates/*`, `demos/*`, `tests/*`, `Cargo.lock` committed.
 - Closed dependencies: `wgpu` 30.0.1 (no default features, `wgsl`; `webgpu` on wasm32, `vulkan`, `gl` native), `naga` 30.0.1 (`wgsl-in`, validation), `wasm-bindgen` =0.2.129, `wasm-bindgen-futures` =0.4.79, `js-sys`/`web-sys` =0.3.106, `pollster` 1.0.1. No serde, glam, nalgebra, bytemuck, rayon, rustc-hash, log framework, network service or threads.
-- Every crate builds for host and `wasm32-unknown-unknown`; `[profile.wasm-release]`: opt-level z, LTO, one codegen unit, panic abort, strip. raa-pipeline, raa-shader, raa-lit, raa-mesh, raa-sky, raa-oit, raa-fog, raa-cluster and raa-vg are sibling `path` dependencies.
-- Layout: `crates/<name>/{Cargo.toml, README.md, src/lib.rs, tests/<topic>.rs}`, `demos/<mN-name>/`, `tests/<name>/`, `proofs/`, `scripts/`, `web/`, `tools/`, `packages/raa/` (`@etcito/raa`), `packages/raa-sdfm/`, `examples/{basic,lookdev,sdfm-compare,sky-weather,virtual-geometry}/`.
+- Every crate builds for host and `wasm32-unknown-unknown`; `[profile.wasm-release]`: opt-level z, LTO, one codegen unit, panic abort, strip. raa-pipeline, raa-shader, raa-lit, raa-mesh, raa-sky, raa-oit, raa-fog, raa-cluster, raa-vg, raa-gi and raa-taa are sibling `path` dependencies.
+- Layout: `crates/<name>/{Cargo.toml, README.md, src/lib.rs, tests/<topic>.rs}`, `demos/<mN-name>/`, `tests/<name>/`, `proofs/`, `scripts/`, `web/`, `tools/`, `packages/raa/` (`@etcito/raa`), `packages/raa-sdfm/`, `examples/{basic,lookdev,sdfm-compare,sky-weather,virtual-geometry,global-illumination}/`.
 - Tools: `node` (`${NODE:-node}`), `wasm-bindgen` CLI, `python3` (judge), repository-local TypeScript; no fetching `npx`.
 
 ### Coordinates, units, colour
-- Right-handed, +Y up, camera forward -Z, metres; CCW front faces, outward normals; column-major f32 matrices, column vectors; quaternions `[x, y, z, w]`. Clip depth [0, 1], `Depth32Float`, `Less`, clear 1; the sky draws at depth 1 with `LessEqual`. RAA is standard-Z, solstice reversed-Z: adapted depth code uses the S32 depth helper, never hand-flipped comparisons.
+- Right-handed, +Y up, camera forward -Z, metres; CCW front faces, outward normals; column-major f32 matrices, column vectors; quaternions `[x, y, z, w]`. Clip depth [0, 1], `Depth32Float`, `Less`, clear 1; the sky draws at depth 1 with `LessEqual`. RAA is standard-Z, solstice reversed-Z: adapted depth code uses the S32 depth helper.
 - Rust and GPU colours are linear; asset and JS colours sRGB unless stated (sky colours and `setLight` linear, S17 lights sRGB). MAMA `ProcLight.color` is linear and gets the adapter's OETF before S17; document lights never do.
-- Kilometres only behind S23's conversion. Latitude degrees north; `north` radians about +Y (north = -Z, east = +X at zero); wind = compass direction FROM, degrees. Cluster error is object-space metres; the LOD threshold is pixels of screen-space error.
+- Kilometres only behind S23's conversion. Latitude degrees north; `north` radians about +Y (north = -Z, east = +X at zero); wind = compass direction FROM, degrees. Cluster error is object-space metres; the LOD threshold is pixels. GI voxel sizes are metres.
 
 ### Errors, state, allocation
-- One error type per crate, stable `code()` `<area>.<snake_case>`; lit crates return `raa_core::RaaError`. Refusals are typed, never NaN, panic or skip; a refused setter changes nothing. Sky edits reject atomically with `sky.invalid`, virtualized-geometry edits with `vg.invalid` and a field message; a disposed Engine answers `api.disposed`. S17 light operations are atomic; `setTransforms` keeps entries applied before a failure.
+- One error type per crate, stable `code()` `<area>.<snake_case>`; lit crates return `raa_core::RaaError`. Refusals are typed, never NaN, panic or skip; a refused setter changes nothing. Sky, virtualized-geometry and GI edits reject atomically with `sky.invalid`, `vg.invalid`, `gi.invalid` and `<key>: <reason>`; a disposed Engine answers `api.disposed`. S17 light operations are atomic; `setTransforms` keeps entries applied before a failure.
 - Shader setters validate with naga synchronously; WebGPU errors arrive asynchronously. No `unwrap`, `expect` or indexing panic on public-data paths.
 - No `static mut`, `thread_local!` or lazy globals in libraries except `raa-alloc-count`'s `#[global_allocator]`; features share `Rc<RefCell<..>>` with their handle. The v0 frame path allocates nothing after warm-up; lit crates reuse scratch.
 - One Engine invocation advances playback once for all views; GPU histories are view-local and commit only for submitted work.
@@ -27,16 +27,16 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 
 ### Testing and checks
 - Unit tests in `#[cfg(test)] mod tests`, integration in `crates/<c>/tests/<topic>.rs`, text fixtures only. Native GPU tests use `raa_core::testing::software_gpu()` and print `SKIP <test name>: no software adapter (<reason>)`. Every composed variant is naga-validated.
-- Sky, weather and virtualized geometry use no reference image, pixel metric, output hash or CPU/GPU parity: CPU tests cover their data, parsers, state, layouts and variants; GPU results are judged renders. A card's tests cover its subject, at most three files.
+- Sky, weather, virtualized geometry and GI use no reference image, pixel metric, output hash or CPU/GPU parity: CPU tests cover data, parsers, state, layouts and variants; CPU twins of adapted kernels run on the CPU only against hand-derived or analytic JSON fixtures; GPU results are judged renders. A card's tests cover its subject, at most three files.
 - Branch checks: RAA `cargo check`, affected `node --test`, `npm run typecheck:types` when shipped declarations or `packages/raa/index.js` change, `bash scripts/check.sh` at milestone verification; MAMA `npm run typecheck`, `npm run build`, `node scripts/test.mjs --only <selector>`; SDFM `npm run typecheck`, `npm run build`, `npm run guard`, `node scripts/proof/unit.mjs --only <anchored selector> --jobs 1` after `node node_modules/typescript/bin/tsc -p tsconfig.node.json`, and the managed Chrome boot check. Readers of dist, package or WASM have a build predecessor; host work respects `NMC_CPUS` (default 1).
-- rustfmt on changed files; clippy per changed crate `--no-deps -- -D warnings`. Asserted shader, API or binding text changes with its pinning tests (S27, S35).
+- rustfmt on changed files; clippy per changed crate `--all-targets --no-deps -- -D warnings`. Asserted shader, API or binding text changes with its pinning tests (S27, S35, the P4 tests named in S36-S45).
 
 ### Builds, browser runs, judge, commands
 - `scripts/build-web.sh <crate-dir> [--features <list>]`: `wasm-release`, `wasm-bindgen --target web` into `dist/<dir>/pkg`, copies `<crate-dir>/web/*` and `web/common/*`, writes `sizes.json` (S7). `node web/serve.mjs <dir> [--port N]` serves 127.0.0.1 with `Cache-Control: no-store`.
 - Browser rendering is a page published to managed Windows Chrome on a physical GPU through nomorechat's GPU client; nothing substitutes, a missing client is a visible failure (S22). Credentials are never printed.
 - `hardware = !isFallbackAdapter && none of /swiftshader|llvmpipe|lavapipe|software|basic render/i matches vendor, architecture, device or description`; records name the adapter. `firstFrameMs` = navigation-relative time when `onSubmittedWorkDone` of frame 0 resolves; `cpuMs` = delta around one frame call.
-- Judge: `python3 $NMC_JUDGE_CLIENT <capture.png> --description <text> [--reference <png> ...] --min-score 6`, pass = exit 0, output redacted within 4000 characters. Only lookdev (S14) passes references. Lookdev renders at a fixed time with dt 0; jiggle scenes write `setInstanceExtras` floats 8..11.
-- Captures and binaries are never committed (`scripts/check-no-assets.sh`): `proofs/captures/`, `out/sky-weather/`, `out/sky-weather-editor/`, `out/virtual-geometry/`, `out/virtual-geometry-editor/` are ignored; preset content is generated at page load. Virtualized-geometry captures use one viewport.
+- Judge: `python3 $NMC_JUDGE_CLIENT <capture.png> --description <text> [--reference <png> ...] [--aspect <a>] --min-score 6`, pass = exit 0, output redacted within 4000 characters. References come only from lookdev (S14) and rows with `judgeReference` (S40). Lookdev renders at a fixed time with dt 0; jiggle scenes write `setInstanceExtras` floats 8..11.
+- Captures and binaries are never committed (`scripts/check-no-assets.sh`); `proofs/captures/` and `out/` (sky-weather, virtual-geometry, global-illumination and their `-editor` stores) are ignored; preset content is generated at page load. VG and GI captures use exactly one viewport.
 - `.nmc/commands.json`: appended single-program entries `{name, command, timeout_s, cwd?, after?}` validated by `nmc-commands-check`; a run names its ordered selection. Builds, GPU jobs (<= 300 s) and judge chains run programmatically; model cards never run GPU commands, programmatic cards never write code.
 
 ### Values
@@ -64,26 +64,32 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 | LOOKDEV_CAPTURE | 1280x720, 30 warm-up + 1 frame at `timeMs` (default 1000) |
 | JUDGE_MIN_SCORE | 6 of 10 |
 | PAIR_RUN | on/off pairs: 30 warm-up + 300 measured rAF intervals, 1280x720, dpr 1, no threshold (S26) |
-| VG_PAIR_RUN | PAIR_RUN per vg preset pair on the same GPU, plus drawn clusters and triangles (S33) |
+| VG_PAIR_RUN | PAIR_RUN plus drawn clusters and triangles (S33) |
 | VG_CLUSTER | <= 128 triangles, 255 vertices; 16 B vertex, 48 B cluster and node (S29) |
 | VG_ERROR_PIXELS | 1 px, [0.25, 64] |
 | VG_BAKE_BUDGET | 4 ms per render invocation, [0.5, 100] |
 | VG_MSAA | virtualized geometry needs msaa 1 |
 | VG_VIEW_SLOTS | 11 slots of 512 B: main 0-1, cascades 2-5, GI 6-10 |
 | VG_HIGH_POLY | displaced icosphere, subdivision 6, 81920 triangles |
+| GI_FINEST_VOXEL | 0.2 m; level i voxel = 0.2 x 2^i m |
+| GI_QUALITY_DEFAULT | resolution 96, levels 5, probeRays 8 (64 or 96; 3-5; 6 or 8) |
+| GI_VOLUME_BYTES | 32 R^3 L + 8 R^3 (148,635,648 at 96/5; 27,262,976 at 64/3) |
+| GI_SETTLE_FRAMES | 240 frames after the last rebuild round |
+| GI_PROBE_SPACING | 16 px |
+| GI_PAIR_RUN | PAIR_RUN plus GI quality and `allocatedBytes` (S40) |
 
 ### Proofs and scope
-- Proofs: `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]` on `proofs/lib/proof.mjs` (`p2.mjs` for lookdev), <= 5 checks printing `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`; lookdev checks `unit`, `wasm-check`, `api-doc`, `captures`, `judge`. Sky, weather and virtualized geometry add no proof script or threshold. Dogfood notes: `docs/dogfood/mN.md`.
+- Proofs: `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]` on `proofs/lib/proof.mjs` (`p2.mjs` for lookdev), <= 5 checks printing `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`; lookdev checks `unit`, `wasm-check`, `api-doc`, `captures`, `judge`. Sky, weather, VG and GI add no proof script or threshold. Dogfood notes: `docs/dogfood/mN.md`.
 - Neutrality: `scripts/check.sh` rejects `royal|fiesta|monster|racer` (case-insensitive, comments included) in crates/, demos/, tests/, packages/, examples/ and docs/API.md.
-- The JS API grows through `packages/raa/types/mNN-*.d.ts` and `docs/api/mNN-*.md`; `index.d.ts` and `docs/API.md` stay v0. Virtualized geometry is m29.
-- Not provided: local-light shadows, TAA or scene history, upscaling, GI, precipitation particles, a second distance fog, virtualized skinned, deformed, transparent or fur instances, cluster streaming or paging.
+- The JS API grows through `packages/raa/types/mNN-*.d.ts` and `docs/api/mNN-*.md`; `index.d.ts` and `docs/API.md` stay v0. VG is m29, GI m30, TAA m31 (`docs/api/m31-taa.md`, no `.d.ts`).
+- Not provided: upscaling, render scale + CAS, histogram exposure, sharpening, atlas mips, precipitation particles, a second distance fog, virtualized skinned, deformed, transparent or fur instances, cluster streaming or paging, glossy GI reflections. Local-light shadows exist only through GI (S39) and the area-light tiers (S44).
 
 ### Quality bar
-- **Q1** `scripts/check.sh` exits 0. **Q2** shipped .wasm gzip <= WASM_GZIP_MAX. **Q3** `firstFrameMs` <= FIRST_FRAME_MAX_MS, 1000-instance `cpuMsMedian` <= CPU_MS_MEDIAN_MAX on hardware. **Q4** `raa-bench frame-allocs` reports 0 over ALLOC_RUN. **Q5** the 8 primitive kinds at LOW, LOD0, HIGH are closed, satisfy NORMAL_RULE, hash identically and match the reference within SDF_REF_TOL. **Q6** prims v0 round-trips byte-identical; invalid cases are refused. **Q7** supported CSG cases are watertight within CSG_EPS, others refuse. **Q8** raa-ext-test extends RAA without editing other crates; every JS export is documented. **Q9** records name the adapter and state `hardware`. **Q10** every lookdev variant has an S14 record, `nonEmpty` and `hardware` true, no GPU errors. **Q11** judged variants exit 0. **Q15** every toggleable feature has `-on`/`-off` variants and stays valid when disabled.
-- **R1-R6, R12** (owner review): centred triangle; 1000 lit instances; crack-free primitives; assets matching composition; clean boolean cuts; example page through `@etcito/raa`; sdfm-compare beside SDF Modeler.
-- **QB1-QB9** (local lights): earlier sun, ambient and material paths unchanged; lights per S11, no local shadows; move, rotate, detach, delete and reattach keep ownership; four bind groups and stage storage limits hold; overflow is reported.
-- **P2-Q1** blue day sky with warm horizon, continuous twilight, dark night with moon phase, stars, Milky Way. **P2-Q2** background, reflections, IBL and fog share the accepted sky state. **P2-Q3** the weather presets differ; wind and evolution move clouds; cloud shadows move and vanish when disabled while CSM and contact stay. **P2-Q4** resize, camera cut, model or weather change and re-enable leave no stale history. **P2-Q5** readable Game time, place and weather controls with units, pause/play, validation, kept across reload. **P2-Q6** invalid edits keep the last valid state. **P2-Q7** shared layouts, stage limits and single attenuation hold in every variant. **P2-Q8** every required image is current and judged >= 6.
-- **P3** (virtualized geometry; command where stated, else judged): **P3-Q1** (command) raa-cluster cuts watertight, error monotonic to the root, finest cut = welded source, output independent of step budget. **P3-Q2** a dense static high-poly field renders virtualized with sky, fog, cascades, local lights and post on it. **P3-Q3** one mesh at several distances without crack or popping, fewer triangles farther away. **P3-Q4** occluders lower drawn clusters with occlusion on, same content. **P3-Q5** casts and receives cascade shadows with forward content. **P3-Q6** skinned, deformed, transparent and fur content stays forward, depth-sorted and lit alike, refusals reported with codes. **P3-Q7** a mesh without clusters shows on forward while baking, then virtualized. **P3-Q8** (command + judge) all vg passes off records and allocates nothing; presets have `-on`/`-off`; debug views are distinguishable. **P3-Q9** (command + judge) SDF Modeler exports valid sections for static meshes; the Game-view setting is labelled, off for old settings, kept across reload; animated parts stay forward silently; required failures are shown. **P3-Q10** (command) every required image current, judged >= 6, pairs carry VG_PAIR_RUN.
+- **Q1** `scripts/check.sh` exits 0. **Q2** shipped .wasm gzip <= WASM_GZIP_MAX. **Q3** `firstFrameMs` <= FIRST_FRAME_MAX_MS, 1000-instance `cpuMsMedian` <= CPU_MS_MEDIAN_MAX on hardware. **Q4** `raa-bench frame-allocs` reports 0 over ALLOC_RUN. **Q5** the 8 primitive kinds at LOW, LOD0, HIGH are closed, satisfy NORMAL_RULE, hash identically and match the reference within SDF_REF_TOL. **Q6** prims v0 round-trips byte-identical; invalid cases refuse. **Q7** supported CSG cases are watertight within CSG_EPS, others refuse. **Q8** raa-ext-test extends RAA without editing other crates; every JS export is documented. **Q9** records name the adapter and state `hardware`. **Q10** every lookdev variant has an S14 record, `nonEmpty` and `hardware` true, no GPU errors. **Q11** judged variants exit 0. **Q15** every toggleable feature has `-on`/`-off` variants and stays valid when disabled.
+- **R1-R6, R12** (owner review): centred triangle; 1000 lit instances; crack-free primitives; assets matching composition; clean boolean cuts; example page through `@etcito/raa`; sdfm-compare beside SDF Modeler. **QB1-QB9** (local lights): earlier paths unchanged; lights per S11; ownership kept through move, rotate, detach, delete, reattach; bind-group and storage limits hold; overflow reported.
+- **P2-Q1..Q8** (sky): day, twilight and night skies; background, reflections, IBL and fog share the sky state; presets differ and clouds and their shadows move; transitions leave no stale history; readable Game controls kept across reload; invalid edits keep the last valid state; layouts and limits hold; every image current and judged >= 6.
+- **P3-Q1..Q10** (VG): (command) watertight monotonic cuts independent of step budget; a dense field virtualized with every feature; no cracks or popping with distance; occlusion lowers drawn clusters; cascade shadows both ways; animated and transparent content stays forward with coded refusals; forward while baking; (command + judge) passes off allocate nothing, `-on`/`-off` presets, distinct debug views; SDF Modeler export and setting; (command) images current, judged, pairs with VG_PAIR_RUN.
+- **P4-Q1..Q10** (GI): (command) twins pass fixtures, entry points validate, layout twins match, check green; debug views show voxels, radiance, contours and levels; colour bleed, interior bounce and emissive light; point and spot light stop at a wall; open ground keeps brightness, overhang gains bounce, glossy floor reflects through the volume; both qualities lit, animated and transparent content receives GI, a moved instance relights; (msaa 1) VG field voxelized in one grid with forward; (command + judge) disabled GI records nothing, 0 bytes, dummies bound, `-off` = the earlier frame; SDF Modeler setting labelled, persistent, renderer kept, refusals prefixed; (command) images current, judged, pairs with GI_PAIR_RUN.
 
 ## S1. GPU layouts
 All layouts are little-endian, written with `to_le_bytes`, with no unsafe code. These are the v0 forward renderer layouts (raa-render). The lit renderer extends them in S10 and keeps the Vertex and Instance layouts.
@@ -257,32 +263,32 @@ Page op contract:
 `[{"id", "op", "host": {kind, params, transform}, "tools": [{op, kind, params, transform, hasChildren}], "status": "ok"|"refused", "triangles", "watertight", "volume", "volumeIdentityRelErr"|null, "code"|null, "message"|null, "expected": "ok"|<code>}]`
 
 ## S10. P2 GPU layouts (lit pipeline)
-Little-endian `to_le_bytes`, byte offsets, ranges exclude the upper end, matrix columns 16 B apart. Owners: raa-mesh (streams), raa-lit (frame, instance, light writers), raa-pipeline (lighting resources), raa-shader (declarations, constants).
+Little-endian `to_le_bytes`, byte offsets, ranges exclude the upper end, matrix columns 16 B apart. Owners: raa-mesh (streams), raa-lit (frame, instance, light writers), raa-pipeline (lighting resources), raa-shader (declarations).
 
-**Streams**: 0 = S1 Vertex (24 B, locations 0-1); 1 (40 B) = `uv` @0 (loc 10), `tangent: f32x4` @8 (loc 11, w ±1), `color` @24 (loc 12, linear); defaults (0, 0), `default_tangent(normal)`, white. The lit path replaces the S1 Instance stream with a compacted `u32` scene-instance slot at location 2; `raa_instance(id)` reads binding 7, so draw order never moves records. `RaaInstanceGpu` (128 B): model columns @0-48, inverse-transpose normal columns @64-96 (w 0), `material_index` @112, `tag` @116, `palette_base` @120, 0 @124. Posed variants read a 64 B rest-skin record from vertex slot 3 (position @0, normal @12, tangent @24 loc 11, joints u16x4 @40 loc 13, weights @48 loc 14). Each scene instance (one per sub-mesh of a JS group) owns one slot for bindings 2, 7, 8; the tag selects the group's extras.
+**Streams**: 0 = S1 Vertex (24 B, locations 0-1); 1 (40 B) = `uv` @0 (loc 10), `tangent: f32x4` @8 (loc 11, w ±1), `color` @24 (loc 12, linear); defaults (0, 0), `default_tangent(normal)`, white. Stream 0 and indices also have STORAGE usage. The lit path replaces the S1 Instance stream with a `u32` scene-instance slot at location 2; `raa_instance(id)` reads binding 7. `RaaInstanceGpu` (128 B): model columns @0-48, inverse-transpose normal columns @64-96, `material_index` @112, `tag` @116, `palette_base` @120. Posed variants read a 64 B rest-skin record from vertex slot 3 (position @0, normal @12, tangent @24 loc 11, joints u16x4 @40 loc 13, weights @48 loc 14). Each scene instance owns one slot for bindings 2, 7, 8; the tag selects the group's extras.
 
-**Group 0** (0-7 VERTEX|FRAGMENT, 8 VERTEX; read-only storage): 0 `FrameGpu` (768 B); 1 `array<SurfaceMaterialGpu>` (256 B); 2 `array<InstanceExtraGpu>` (128 B); 3 material atlas, 4 its sampler, 5 atlas rects (16 B (x, y, w, h); id 0 and removed ids zero); 6 `array<u32>` material data (`raa_material_word`, `raa_material_f32`, `raa_material_data_base`; words 0-3 zero); 7 `array<RaaInstanceGpu>`; 8 `array<RaaPreviousInstanceGpu>`.
+**Group 0** (0-7 VERTEX|FRAGMENT, 8 VERTEX; read-only storage): 0 `FrameGpu` (768 B); 1 `array<SurfaceMaterialGpu>` (256 B); 2 `array<InstanceExtraGpu>` (128 B); 3 material atlas, 4 its sampler, 5 atlas rects (16 B (x, y, w, h)); 6 `array<u32>` material data (`raa_material_word`, `raa_material_f32`, `raa_material_data_base`); 7 `array<RaaInstanceGpu>`; 8 `array<RaaPreviousInstanceGpu>`.
 
-**FrameGpu** (`FRAME_GPU_SIZE` 768): `view_proj` @0, `view` @64, `proj` @128, `inv_proj` @192, `inv_view` @256, `camera_pos` @320 (w time s), `sun_dir` @336 (travel, w angular radius 0.0047), `sun_color` @352, `ambient` @368, `viewport` @384 (w, h, 1/w, 1/h), `clip` @400 (near, far, frame index, dt), `flags: vec4<u32>` @416 (sRGB encode, msaa, feature words z and w), `exposure` @432 (ev, 2^ev, mapper agx 0 / aces 1 / linear 2, look none 0 / punchy 1 / golden 2), 0 @448-512, `previous_view_proj` @512, `unjittered_view_proj` @576, `camera_jitter` @640 (current, previous NDC), `light_info: vec4<u32>` @656 (lights, tile columns, rows, stride 128), `temporal: vec4<u32>` @672 (parity, accumulation, history valid, 0), 0 @688-768. `view`/`proj` are unjittered; jitter is opt-in (Halton 2/3 samples 1-8 minus 0.5, pixels to NDC (2dx/w, -2dy/h)) and zero without a consumer (none enabled). Creation, resize, camera discontinuity and jitter changes invalidate camera history; one render invocation advances one frame for all views, camera history commits per submitted view, partial submission invalidates history.
+**FrameGpu** (768): `view_proj` @0, `view` @64, `proj` @128, `inv_proj` @192, `inv_view` @256, `camera_pos` @320 (w time s), `sun_dir` @336 (travel, w angular radius 0.0047), `sun_color` @352, `ambient` @368, `viewport` @384 (w, h, 1/w, 1/h), `clip` @400 (near, far, frame index, dt), `flags: vec4<u32>` @416 (sRGB encode, msaa, feature words z and w), `exposure` @432 (ev, 2^ev, mapper agx 0 / aces 1 / linear 2, look none 0 / punchy 1 / golden 2), `previous_view_proj` @512, `unjittered_view_proj` @576, `camera_jitter` @640 (current, previous NDC), `light_info: vec4<u32>` @656 (lights, tile columns, rows, stride 128), `temporal: vec4<u32>` @672 (parity, accumulation, camera history valid, 0); other bytes 0. `view`/`proj` are unjittered; the Halton 2/3 jitter (samples 1-8 minus 0.5, (2dx/w, -2dy/h)) applies to `view_proj` and `inv_proj` only while `taa` is enabled, with `temporal.y` 1 (S43). Creation, resize, camera discontinuity and jitter-consumer changes invalidate camera history; history commits per submitted view.
 
-**Feature ids**: `raa-shader/build.rs` generates `feature_address(id)` and WGSL `raa_feature_enabled(id)`: ids 0-31 flags.z bit id, 32-63 flags.w bit id-32. Assigned: 24 light tiling; 27 virtualized geometry, 28 visibility shading, 36 vg extension (set by raa-vg while active, S32). Reserved only: 25 weather, 26 day/night, 29 GI, 30 volume visibility, 31 TAA, 32 histogram exposure, 33 sharpening, 34 atlas mips, 35 temporal reconstruction, 37 GI extension, 38 post extension.
+**Feature ids** (`raa_feature_enabled(id)`: 0-31 flags.z, 32-63 flags.w): 24 light tiling; 27, 28, 36 raa-vg (S32); 29 GI active, 30 GI local-light visibility, 37 GI reflections (S37); 39 area form-factor mode (S44). Reserved: 25, 26, 31 (TAA sets no bit), 32-35, 38.
 
-**RaaPreviousInstanceGpu** (64 B): affine rows @0, 16, 32 ([M0x, Tx] ...), `previous_valid` @48, 0 @52-60. New, reused or re-posed slots and removals clear validity (zero motion); only submitted slots commit rigid history; 32-record pages keep slot identity; a settled frame uploads nothing.
+**RaaPreviousInstanceGpu** (64 B): affine rows @0, 16, 32, `previous_valid` @48. New, reused or re-posed slots and removals clear validity; only submitted slots commit; a settled frame uploads nothing.
 
-**SurfaceMaterialGpu** (256 B): `base` @0 (linear rgb, opacity), `emissive` @16, `surface` @32 (roughness [0.03, 1], metallic, clearcoat, clearcoat roughness), `sheen` @48, `transmission` @64 (amount, ior, thickness m), `attenuation` @80 (rgb, distance m), `header: vec4<u32>` @96 (model flat 0 / standard 1 / function 2, function id, flags, data base word), `p[8]` @112, `fur` @240 (length m, density per cm², droop, shells). Flags 1 TRANSPARENT, 2 TRANSMISSIVE, 4 FUR, 8 DOUBLE_SIDED, 16 NO_SHADOW, 32 VERTEX_FN, 64 UNLIT, 128 CEL. v0 materials map to model 0 or 1.
+**SurfaceMaterialGpu** (256 B): `base` @0 (linear rgb, opacity), `emissive` @16, `surface` @32 (roughness [0.03, 1], metallic, clearcoat, clearcoat roughness), `sheen` @48, `transmission` @64 (amount, ior, thickness m), `attenuation` @80 (rgb, distance m), `header: vec4<u32>` @96 (model flat 0 / standard 1 / function 2, function id, flags, data base word), `p[8]` @112, `fur` @240 (length m, density per cm², droop, shells). Flags 1 TRANSPARENT, 2 TRANSMISSIVE, 4 FUR, 8 DOUBLE_SIDED, 16 NO_SHADOW, 32 VERTEX_FN, 64 UNLIT, 128 CEL.
 
-**InstanceExtraGpu** (128 B): `tint` @0 (1), `squash` @16 (axis, amount; (0, 1, 0, 0)), `jiggle` @32 (offset m, height m), `params[4]` @48, `reserved` @112 (x `tint_set`). Keyed by tag, copied to each slot of the group.
+**InstanceExtraGpu** (128 B): `tint` @0 (1), `squash` @16 ((0, 1, 0, 0)), `jiggle` @32 (offset m, height m), `params[4]` @48, `reserved` @112 (x `tint_set`); keyed by tag.
 
-**Group 1 (lighting)**, `LightingResources` with 1x1 dummies; 0-11 VERTEX|FRAGMENT, 12-13 FRAGMENT (S28 adds 15-16): 0 `shadow_map` depth array (1); 1 `shadow_cmp` (LessEqual); 2 `ShadowGpu` (320 B: `cascade_view_proj[4]` @0, `splits` @256, `params` @272 (penumbra, normal offset texels, texel size, enabled), `params2` @288 (light size, blend band)); 3 `env_specular` cube; 4 `EnvSh` (160 B: SH9 @0-128, `info` @144 (specular, diffuse, max mip, enabled)); 5 `brdf_lut` Rg16Float (dummy (1, 0)); 6 `linear_clamp`; 7 `ao` (1); 8 `contact` (1); 9 `opaque_color` (HDR, mips); 10 `opaque_depth` R32Float (1); 11 `EnvGpu` (256 B: `sun_disc` @0, `zenith` @16, `horizon` @32, `ground` @48, `sky_params` @64 (intensity, softness, background mode 0 constant / 1 sky), `background` @80, `clouds` @96 (coverage, density, altitude, scale), `clouds2` @112 (wind x, z, silver lining), `cloud_color` @128, `fog` @144 (density, falloff, base, start), `fog_color` @160 (rgb, inscatter), `aerial` @176, `cel` @192 (enabled, softness, specular), 0 @208-256); 12 `raa_local_lights: array<LightGpu, 256>` uniform (16384 B, zero past the active count); 13 `raa_light_tiles` R32Uint `texture_2d_array`, ceil(w/16) x ceil(h/16) x 128 layers (count, then indices), `textureLoad` only, written by the order-35 compute pass through its group 2 (0 depth, 1 lights, 2 storage texture, 3 dropped-reference atomic).
+**Group 1 (lighting)**, `LightingResources` with dummies; 0-11 VERTEX|FRAGMENT, 12-20 FRAGMENT: 0 `shadow_map` depth array (cascades 0-3, hero layers 4-7); 1 `shadow_cmp`; 2 `ShadowGpu` (320 B: `cascade_view_proj[4]` @0, `splits` @256, `params` @272 (penumbra, normal offset, texel size, enabled), `params2` @288 (light size, blend band)); 3 `env_specular` cube; 4 `EnvSh` (176 B, S45); 5 `raa_brdf_lut` Rgba16Float 128x192 atlas: split-sum at x, y 0..127, three.js LTC_MAT_1 at x 0..63 and LTC_MAT_2 at x 64..127 over y 128..191 (`create_brdf_atlas`, dummy fill (1, 0)); 6 `linear_clamp`; 7 `ao`; 8 `contact`; 9 `opaque_color`; 10 `opaque_depth` R32Float; 11 `EnvGpu` (256 B: `sun_disc` @0, `zenith` @16, `horizon` @32, `ground` @48, `sky_params` @64, `background` @80, `clouds` @96, `clouds2` @112, `cloud_color` @128, `fog` @144, `fog_color` @160, `aerial` @176, `cel` @192); 12 `raa_local_lights: array<LightGpu, 256>` uniform; 13 `raa_light_tiles` R32Uint array (ceil(w/16) x ceil(h/16) x 128 layers, written by `light.tiles`); 14 `raa_gi_screen` (dummy (0, 0, 0, 1)); 15, 16 (S28); 17 `raa_gi_volume` texture_3d (dummy (0, 0, 0, 12.8)); 18 `RaaGiVolumeParams` (96 B, S38); 19 `RaaAreaStochasticGpu` (80 B: `lights: array<vec4<u32>, 2>` @0 = packed light index of slot s at byte 4s or 0xFFFFFFFF, `weights` @32 = w_stoch, `params: vec4<u32>` @64 = limit 0..8, cells 4|9); 20 `raa_area_shadow_mask` Rgba16Float array, 2 layers, viewport-sized (slot s = layer s/4, channel s%4; dummy ones).
+- Layouts: full `layout()` 0..=20; `opaque_layout()` without 9, 10 (vg.gbuffer, vg.shade, ssr, shafts); `base_layout()` 0..=13, 15, 16 (sky.env, sky.background). Setters `set_shadow`, `set_env`, `set_env_gi`, `set_brdf_lut`, `set_ao`, `set_contact`, `set_opaque_copy`, `set_cloud_transmittance`, `set_gi`, `set_area_shadow` (bad view `core.resource`) and clears restoring dummies; values set in prepare bind the same frame.
+- Fragment budgets: full 12 textures, 2 samplers, 7 uniforms; opaque 10/2/7; lit Forward, Transparent, FurShell 13/3/8-9; every other consumer <= 16 textures. GI compute group 1 = 3, 6, 12, 15, 16, 17, 18.
 
-**LightGpu** (64 B): `position_range` @0, `color_inv_range_sq` @16 (linear rgb x intensity, 1/range²), `direction_cos_outer` @32, `cos_inner` @48, `kind` @52 (point 0, spot 1, directional 2, area 3), `width` @56, `height` @60. `LocalLights::write_gpu` packs active lights in handle order.
+**LightGpu** (64 B): `position_range` @0, `color_inv_range_sq` @16, `direction_cos_outer` @32, `cos_inner` @48, `kind` @52 (point 0, spot 1, directional 2, area 3), `width` @56, `height` @60; for kind 3 lanes @28 (w_direct), @44 (hero layer, -1 none), @48 (w_cone) carry S44 weights.
 
-**Group 2** is pass-private; **group 3** is the posed skin palette (VERTEX storage of mat4, 64 B, from `palette_base`). Group 0 has five fragment storage buffers, OIT adds three (limit eight); light bindings are not storage; vertex storage is six (seven posed). Pinned by raa-lit `src/{frame,previous_instances,instance_store,handle,local_lights}.rs`, raa-shader `src/{gpu_constants,lib}.rs`, raa-pipeline `src/lighting.rs`, `tests/resources.rs` and the `tests/variants.rs` of raa-lit, raa-oit, raa-fur.
+**Group 2** is pass-private; **group 3** is the posed skin palette (64 B mat4 from `palette_base`). Group 0 has five fragment storage buffers, OIT adds three (limit eight); vertex storage six (seven posed); no fifth group. Pins: raa-lit `src/{frame,previous_instances,instance_store,handle,local_lights}.rs`, raa-shader `src/{gpu_constants,lib}.rs`, raa-pipeline `src/lighting.rs`, `tests/resources.rs`, `tests/variants.rs` of raa-lit, raa-oit, raa-fur, raa-sky.
 
 ## S11. Shader and material function contract (raa-shader)
-Result id: RAA-SHARED-SHADING, owner raa-shader in milestone 2.
-
-A composed module = `PRELUDE` (S10 structs, groups 0-1) + `LIB` + one material function + the winning provider of each slot + `LOCAL_LIGHTING_WGSL` + the pass entry points. Variant key = (material fn id, pass kind, msaa, flags, slots hash).
+A composed module = `PRELUDE` + `LIB` + one material function + the winning provider of each slot + `LOCAL_LIGHTING_WGSL` + the pass entry points. Variant key = (material fn id, pass kind, msaa, flags, slots hash).
 ```wgsl
 struct MaterialInput { position: vec3<f32>, local_position: vec3<f32>, normal: vec3<f32>, tangent: vec4<f32>, uv: vec2<f32>, color: vec4<f32>, view_dir: vec3<f32>, time: f32, front_facing: bool, frag_coord: vec4<f32>, instance_params: array<vec4<f32>, 4>, record: SurfaceMaterialGpu }
 struct MaterialOutput { base_color: vec3<f32>, metallic: f32, roughness: f32, emissive: vec3<f32>, normal: vec3<f32>, ao: f32, opacity: f32, clearcoat: f32, clearcoat_roughness: f32, sheen_color: vec3<f32>, sheen_roughness: f32, transmission: f32, ior: f32, thickness: f32, attenuation_color: vec3<f32>, attenuation_distance: f32 }
@@ -291,54 +297,19 @@ struct VertexMaterialOutput { local_position: vec3<f32>, normal: vec3<f32> }
 fn material_main(in: MaterialInput) -> MaterialOutput            // required
 fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional (sets VERTEX_FN)
 ```
-**Material functions**
-- Positions and normals are in world space. `in.normal` is the interpolated geometric normal, flipped when back-facing and DOUBLE_SIDED. `MaterialOutput.normal` is the unit shading normal.
-- `raa_default_output(in)` fills every field from `in.record`; the `standard` built-in is this alone. The prelude applies the tint after `material_main`.
-- User rules (`material.fn_invalid` with the reason; naga messages with line:col):
-  - defines `material_main` with that signature;
-  - no `@group`, `@binding`, `@vertex`, `@fragment`, `@compute`, `var<storage`, `var<uniform`, `var<workgroup`, `enable` or `override`;
-  - no identifier starting `raa_`;
-  - <= 65536 bytes;
-  - the composed Forward variant validates.
-  A duplicate name gives `material.fn_duplicate`.
-- LIB helpers: `raa_hash3`, `raa_noise3`, `raa_fbm3(p, octaves)`, `raa_voronoi3(p) -> vec2`, `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`.
+- World-space positions and normals; `in.normal` is flipped when back-facing and DOUBLE_SIDED; `raa_default_output(in)` is the `standard` built-in; the tint applies after `material_main`.
+- User rules (`material.fn_invalid`, naga line:col): defines `material_main`; no `@group`, `@binding`, `@vertex`, `@fragment`, `@compute`, `var<storage`, `var<uniform`, `var<workgroup`, `enable`, `override` or `raa_` identifier; <= 65536 bytes; the Forward variant validates. Duplicates give `material.fn_duplicate`. LIB: `raa_hash3`, `raa_noise3`, `raa_fbm3`, `raa_voronoi3`, `raa_triplanar_weights`, `raa_perturb_normal`, `raa_luma`, `raa_srgb_to_linear`.
 
-**Slots.** The default providers (priority 0) live in raa-lit. The highest priority wins; equal priority on one slot gives `shader.slot_conflict`.
-- `Deform`: `raa_slot_deform(p, n, x: InstanceExtraGpu, t) -> VertexMaterialOutput` (local space, after material_vertex; default identity).
-- `Shadow`: `raa_slot_shadow(world_pos, n, frag) -> f32` (sun visibility including contact; default 1).
-- `Ao`: `raa_slot_ao(frag) -> f32` (default 1).
-- `Ambient`: `raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3` (default = the S1 ambient term).
-- `Direct`: `raa_slot_direct(s: MaterialOutput, c: ShadeCtx, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32>` (default = S1 GGX + Lambert; existing providers retain this signature).
-- `LocalVisibility`: `raa_slot_local_visibility(light_index: u32, world_position: vec3<f32>, surface_normal: vec3<f32>, direction_to_light: vec3<f32>, light_distance: f32) -> f32` (default 1, clamped to [0,1]; index is the packed light index, not the stable CPU handle). It does not consume sun/contact-shadow visibility.
-- `Indirect`: `raa_slot_indirect(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>` (default black, additive to existing ambient/environment lighting).
-- `Transmission`: `raa_slot_transmission(s, c) -> vec3` (default 0; reached only by TRANSMISSIVE materials).
-- `Fog`: `raa_slot_fog(color, world_pos, c) -> vec3` (transparent, fur and blended particles; default identity).
-- `ShadeCtx { position, view_dir, frag, n_dot_v, ao, shadow, f0 }`.
+**Slots** (defaults priority 0 in raa-lit; highest wins; ties `shader.slot_conflict`): `Deform` `raa_slot_deform(p, n, x, t)`; `Shadow` `raa_slot_shadow(world_pos, n, frag)` (sun incl. contact and cloud); `Ao` `raa_slot_ao(frag)`; `Ambient` `raa_slot_ambient(s, c)` (applies `c.ao` once: default ambient x base x (1 - 0.5 metallic) x c.ao; IBL/BRDF multi-bounce AO on diffuse, specular occlusion); `Direct` `raa_slot_direct(s, c, l, radiance)`; `LocalVisibility` `raa_slot_local_visibility(index, position, normal, dir, distance)` (default 1); `Indirect` `raa_slot_indirect(s, c)` (default 0); `Transmission`; `Fog`. `ShadeCtx { material_flags, position, view_dir, frag, n_dot_v, ao, shadow, f0 }`.
 
-**Final colour**
-- Opaque: `emissive + raa_slot_direct(s, c, -sun_dir, sun_color * shadow) + raa_slot_ambient(s, c) * min(s.ao, ao) + raa_local_lighting(s, c) + raa_slot_indirect(s, c)`.
-- Transparent passes use the same local/indirect terms, add `raa_slot_transmission` and apply `raa_slot_fog`. Fur shells use the same helper and indirect slot with their existing root factor `mix(0.35, 1.0, shell_height)` on lighting, then fog and strand coverage. Their tile selection is the S12 prepass approximation. Particle shaders retain their own material contract; this does not claim slot integration for particles.
-- Flat or UNLIT returns `base + emissive`.
+**Final colour**: lit passes set `c.ao = min(s.ao, raa_slot_ao(frag))`; opaque = `emissive + raa_slot_direct(s, c, -sun_dir, raa_directional_radiance(sun_color) * shadow) + raa_slot_ambient(s, c) + raa_local_lighting(s, c) + raa_slot_indirect(s, c)`. AO darkens only ambient, once; direct and local light never (`tests/ao_once.rs`). Transparent adds transmission and fog; fur multiplies by `mix(0.35, 1.0, shell_height)`; flat or UNLIT = base + emissive.
 
-**Shared local lighting**
-- `crates/raa-shader/src/wgsl/local_lighting.wgsl` exports `raa_local_lighting(s: MaterialOutput, c: ShadeCtx) -> vec3<f32>` through the additive public `LOCAL_LIGHTING_WGSL` constant. Composer includes it after selected providers. `PRELUDE_WGSL` contains layouts/bindings but no slot-calling helper, so sky, fog and material-registration parsing can still compose the prelude alone. Future shading compositions include the helper with their own providers.
-- The helper reads the current pixel's tile, evaluates its packed light indices, multiplies incident radiance by clamped local visibility and calls Direct once per contributing local light. The sun remains a separate call. Local lights cast no shadows yet; retained shadow metadata does not change this neutral visibility contract.
-- Point: zero at coincidence, at/beyond range, or when `dot(s.normal, direction_to_light) <= 0`. Otherwise, with `q = distance/range`, `window = clamp(1 - q^4, 0, 1)` and falloff `window^2 / max(distance^2, 0.04)`. The window/incidence formula retains the MIT attribution to solstice@7e465b5, `crates/solstice-render/shaders/lighting/deferred.wgsl`, `local_light`.
-- Spot: point falloff times `smoothstep(cosOuter, cosInner, dot(travelDirection, directionFromLight))`. Equal cone angles use a hard boundary, avoiding division by zero. Absent `innerAngleDeg` means inner half-angle is 0.8 times outer half-angle; authored angles are full cone angles.
-- Directional: direction to light is `-travelDirection`, with no distance attenuation; position/range are ignored and visibility receives distance zero.
-- Area: Karis representative-point approximation on a rectangle centred at the light. For unit travel direction `d`, choose `up0 = Y` if `abs(dot(d,Y)) < 0.99`, otherwise X; `t = normalize(cross(up0,d))`, `b = cross(d,t)`. For `v = surfacePosition - lightPosition`, the representative point is `lightPosition + t*clamp(dot(v,t), -width/2, width/2) + b*clamp(dot(v,b), -height/2, height/2)`. Evaluate direction, distance and the point window from that point. Emission is one-sided along +d (`dot(v,d) <= 0` gives zero), with finite near-field behavior. Roll is derived, not authored. Mathematical zero extents degenerate to the point formula on the emitting side; the public API requires positive extents.
-- Providers reached inside the nonuniform light loop must use explicit `textureSampleLevel`, `textureSampleGrad` with gradients established before divergence, or `textureLoad`; implicit derivatives and derivative-dependent control flow are forbidden there. Default, cel, matfn and user-material compositions retain variant validation.
-- Existing CPU text fixtures in `crates/raa-lit/tests/fixtures/local-light-math.txt` cover the formulas and rectangle basis/representative point. Existing shader layout/every-entry-point validation and the browser bitwise-parenthesis guard retain their attribution; these are not CPU/GPU comparisons or a new acceptance mechanism.
+**Local lighting** (`raa_local_lighting`, tile lights; the sun is separate): point zero at/beyond range or facing away, `window = clamp(1 - (d/range)^4, 0, 1)`, falloff `window^2 / max(d^2, 0.04)` (solstice `deferred.wgsl`); spot x `smoothstep(cosOuter, cosInner, ...)`, absent inner = 0.8 x outer; directional unattenuated. These call Direct with clamped LocalVisibility. Area (kind 3) = U x W x V: basis `t = normalize(cross(up0, d))` (up0 Y unless |d.Y| >= 0.99, then X), `b = cross(d, t)`, one-sided along +d; the Karis representative point gives the visibility direction, distance and window `raa_area_window`; U = `raa_area_ltc` (LTC atlas) or `raa_area_diffuse` with feature 39, radiance = intensity / (w x h); never Direct; V per S44. Loop providers avoid implicit derivatives. Fixtures: `crates/raa-lit/tests/fixtures/local-light-math.txt`.
 
-**Pass kinds**
-- `Prepass`: vs + fs writing the S12 normal, material and motion targets.
-- `Forward`: vs + fs to HDR, MSAA.
-- `Shadow`: vs only, with material_vertex and deform.
-- `Transparent`: vs + fs appending to the OIT list.
-- `FurShell`: vs extruding shells + fs with alpha-to-coverage.
+**Pass kinds**: Prepass, Forward, Shadow, Transparent, FurShell; VgGbuffer, VgShade (S32).
 
 ## S12. Pipeline passes and targets (raa-pipeline)
-- The raa-core RenderPass `raa.pipeline` (writes BACKBUFFER) runs enabled feature passes by `order`, overridable from JS. Required passes cannot be disabled; `prepass` < `forward` < `tonemap`, tonemap last among HDR passes. Passes with `FeaturePass::output_overlay() == true` follow tone mapping. Sky passes are in S28.
+- The RenderPass `raa.pipeline` runs enabled feature passes by `order`, overridable from JS; `Pipeline::entry_enabled(name)` reads an entry. Required passes cannot be disabled; `prepass` < `forward` < `tonemap`, tonemap last among HDR passes; `output_overlay()` passes follow it. Sky passes: S28.
 
 | order | name | role | crate |
 |---|---|---|---|
@@ -347,10 +318,14 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 | 21 | vg.cull | pass | raa-vg |
 | 22 | vg.raster | pass | raa-vg |
 | 23 | vg.resolve | pass | raa-vg |
+| 25 | gi.volume | pass | raa-gi |
 | 30 | prepass | pass, required | raa-lit |
 | 32 | vg.gbuffer | pass | raa-vg |
 | 35 | light.tiles | pass | raa-lit |
 | 40 | ao.gtao | pass | raa-gtao |
+| 42 | gi.screen | pass (compute) | raa-gi |
+| 43 | gi.area-shadow | pass (compute) | raa-gi |
+| 44 | gi.ssgi | pass (compute) | raa-gi |
 | 45 | shadow.contact | pass | raa-contact |
 | 50 | particles.sim | pass | raa-particles |
 | 60 | forward | pass, required | raa-lit |
@@ -358,27 +333,25 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 | 500 | fur.shells | contributor of forward | raa-fur |
 | 600 | particles.opaque | contributor of forward | raa-particles |
 | 900 | sky.background | contributor of forward | raa-sky |
+| 64 | gi.history | pass | raa-gi |
 | 65 | ssr | pass | raa-ssr |
 | 68 | fog | pass | raa-fog |
 | 69 | sunshafts | pass | raa-shafts |
 | 70 | opaque.copy | pass | raa-transmission |
 | 80 | transparent.oit | pass | raa-oit |
 | 85 | particles.blend | pass | raa-particles |
+| 100 | taa | pass (compute), installed disabled | raa-taa |
 | 110 | dof | pass | raa-dof |
 | 120 | bloom | pass | raa-bloom |
 | 130 | grading | pass | raa-grading |
 | 190 | cel.resolve | pass | raa-cel |
 | 200 | tonemap | pass, required | raa-tonemap |
 
-- Contributor orders are positions in the forward MSAA pass after opaque draws. Feature bits follow S10 ids. `pipeline.required_order` also refuses prepass < light.tiles < {ao.gtao, forward} inverted, the S28 sky pairs and the S32 vg pairs.
-- Targets (surface-sized): `depth` Depth32Float single-sample (prepass, RENDER_ATTACHMENT | TEXTURE_BINDING); `normal` Rgba16Float (view normal, roughness); `material` Rgba8Unorm (F0 sRGB, metallic); `motion` Rg16Float (prepass location 2, cleared 0); `hdr` chain A/B (HDR_FORMAT, RENDER_ATTACHMENT | TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC | COPY_DST). `forward` resolves into `hdr.dst()` and swaps; later passes read src, write dst, swap; tonemap reads src.
-- Disabling calls `set_enabled(false, lighting)`, resetting group-1 resources to dummies. With EnvGpu background mode 0, tonemap writes `background` where depth == 1: an empty scene equals CLEAR_COLOR and `probeNonEmpty` keeps its v0 meaning.
+- `pipeline.required_order` refuses inverted prepass < light.tiles < {ao.gtao, forward} and the S28, S32 and S38 pairs; a missing pass drops only its own pairs.
+- Targets: `depth` Depth32Float; `normal` Rgba16Float (view normal, roughness); `material` Rgba8Unorm (F0, metallic); `motion` Rgba16Float (location 2 of prepass and vg.gbuffer, cleared 0, lanes S43); `hdr` A/B chain (HDR_FORMAT, render, texture, storage, copy). Forward resolves into `hdr.dst()` and swaps; later passes read src, write dst, swap.
+- Disabling calls `set_enabled(false, lighting)` (dummies back). With background mode 0 tonemap writes `background` where depth == 1, so `probeNonEmpty` keeps its v0 meaning.
 
-**Motion**: current unjittered NDC minus previous (minus `camera_jitter.zw`) as UV `(dx/2, -dy/2)`. Zero when frame history or the slot's `previous_valid` is invalid, for vertex functions, unsupported deformation, w <= 0 or non-finite values; the sky leaves 0.
-
-**Tiling**: 16x16 px tiles of 128 words (count + 127 indices) in S10 binding 13; fragment tile = floor(pixel/16) for any MSAA. Standard-Z reduction over prepass depth in [0, 1); spheres test the tile's four sides and two depth planes, area lights use range + hypot(w, h)/2, directionals every tile (port of solstice@7e465b5 `light_tiles*.wgsl`). Coverage is the opaque/fur-base prepass: transparent fragments and shells reuse the nearest opaque selection. 256 lights maximum (`lights.invalid`); each tile keeps the exact strongest 127 (fixed bitonic network) scored by `crates/raa-lit/README.md` **M2-TILE-SELECTION** (`tests/fixtures/tile-selection.txt`, `src/tile_selection.rs`), ties by ascending handle. `droppedLightReferences` sums excluded light/tile references over tiles and submitted views.
-
-**Readback** (`raa-lit/src/light_stats.rs`): a three-sample asynchronous pool for up to four views, no growth or synchronous wait. `lightStats()` publishes the latest invocation whose submitted views all completed (`statsFrameIndex`, grid of viewport 0); null before a result, `pending` while outstanding; never a GPU fence.
+**Tiling**: 16x16 px tiles of 128 words in binding 13, tile = floor(pixel/16); standard-Z reduction over prepass depth; spheres test sides and depth planes, area lights range + hypot(w, h)/2, directionals every tile (solstice `light_tiles*.wgsl`). 256 lights max (`lights.invalid`); each tile keeps the strongest 127 per **M2-TILE-SELECTION** (`crates/raa-lit/README.md`, `tests/fixtures/tile-selection.txt`), ties by handle; `droppedLightReferences` sums exclusions. Readback (`light_stats.rs`): three-sample async pool, `lightStats()` publishes the latest fully completed invocation, never a fence.
 
 ## S13. Mesh API data (JS `addMesh`, raa-mesh)
 `MeshDesc { positions: Float32Array (3n), normals: Float32Array (3n), uvs?: Float32Array (2n), tangents?: Float32Array (4n), colors?: Float32Array (4n linear) | Uint8Array (4n sRGB rgba8), indices: Uint32Array (3m), subMeshes?: [{ first (index offset, multiple of 3), count (multiple of 3, > 0), material?: number }] }`.
@@ -414,35 +387,11 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 `dist/lookdev/scenes.json` and `dist/sdfm-compare/scenes.json`: `[{ id, milestone, file }]` sorted by id.
 
 ## S15. sdfm adapter shapes (`@etcito/raa-sdfm`)
-The adapter reads the shared `sdfm.game-asset` v1 file.
-- Fields: format, version 1, game, id, name, category, world, mesher, document, collision, anchors, bounds, hash.
-- Rules: canonical key order, document <= 2 MB, finite numbers, id `^[a-z][a-z0-9]*(\\.[a-z0-9-]+)+$`.
-
-RAA uses only:
-- `document`, meshed by MAMA in workers;
-- `mesher`, passed to MAMA unchanged;
-- `anchors` and `bounds`;
-- `hash`, the cache key: the recomputed sha256 of the UTF-8 bytes of MAMA `serializeDocument(document)` must match.
-
-`collision` is passed through untouched and never used for rendering. MAMA's typed mesher refusals surface as `sdfm.mesher_refused`, with MAMA's message naming the group.
-
-Codes: `sdfm.format`, `sdfm.version`, `sdfm.schema` (JSON pointer), `sdfm.not_finite`, `sdfm.id`, `sdfm.cap_document`, `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`.
-
-**Closed-M3 procedural entrypoints.** Inspected at raa `b38bca9090e0d3d665fd498746d831e4bea07b60`; detailed options and refusals remain in `packages/raa-sdfm/index.d.ts` and its owning implementations. Asset loading above remains unchanged, including the format's hash data and cache validation.
-- Package-root exports include `createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader` and `loadProceduralScene(engine: Engine, loader: SdfmLoader, scene: string | object, options?: ProceduralSceneOptions): Promise<ProceduralSceneHandle>`. Preserve every other existing root export in `packages/raa-sdfm/index.js`.
-- `SdfmLoaderOptions.mama` is an accessor returning `Promise<string | URL | SdfmMamaModule>`; it resolves once per loader. A URL selects workers; an object meshes in-process. Existing worker options, LODs, rigs, clips, material mapping and asset return shapes remain.
-- `ProceduralSceneOptions` carries `resolveAsset?`, `resolveMesh?`, `parent?`, `mode?: 'mesh' | 'trace'` (default mesh), `procgen?`, trace-only `placement?: Vec3` and `mama?: () => Promise<SdfmProceduralMama>`. MAMA parses both text and object input; mesh mode supports both S16 variants, trace mode only sdf-refs. No alternate loader or hierarchy is introduced.
-- `ProceduralSceneHandle` exposes `root`, `instanceCount`, `sourceCount`, `setVisible(visible)`, `stats()`, `runtime(procgen)` and `dispose()`. Existing stats remain `{ instances, meshes, pending }` (mesh implementation may also report `attributed`); no light registry/count is added. Each mesh scene instance keeps its own node under root; trace mode retains the existing shared engine trace slot.
-- `ProceduralSceneRuntime` exposes `step(tick): Promise<{ moved, remeshed, added, removed, ok, issues }>`, `set(values: Record<string, ProceduralRuntimeValue>): void` and `dispose(): void`; `ProceduralRuntimeValue` is `number | boolean | Vec3`. Preserve existing implementation result extensions and instance lifecycle callbacks.
-- Internal module exports are not additional package-root APIs: `src/mama-bridge.js` exports `importMama(base, options = {})`, `importProcedural(base)`, `createBrowserPool(mama, options)`, `meshDocument(mama, document, options)`, `toMamaMaterial(mama, built)` and `toMamaLight(light)`; `src/procedural-runtime.js` exports `createProceduralRuntime(options = {})`; `src/procedural-trace.js` exports `loadProceduralTrace(engine, loader, scene, mama, options)`. MAMA imports stay centralized in the bridge; Rust crates never name or depend on MAMA.
-
-**Light mapping and resource ownership.** `toMamaLight` copies the S16 record into an S17 `LocalLightDesc`: position from `t`, travel direction from normalized `R(r) * S(s) * [0,0,-1]`, with quaternion `[x,y,z,w]`. Range and full area extents stay in metres independent of scale. It preserves kind, intensity, range, shadows and applicable spot angles/area size; an omitted inner angle stays absent. It converts linear RGB to sRGB for the engine boundary exactly as specified in Conventions, without mutating evaluator arrays.
-- `src/mama-light-owner.js`'s internal `createMamaLightOwner(engine, placement = [0,0,0])` gives each loaded scene one private full-evaluator-id-to-handle registry, independent of geometry keys. Both static loaders pass this same owner to their runtime adapters; accessing runtime never duplicates static lights. These are world-space lights: parenting the scene root does not implicitly attach them to an engine instance. Document-owned Game handles are a separate ownership domain.
-- Static optional lights work with `runtime: null` and zero geometry. Trace placement is a copied finite translation added once to copied `t` for every static/runtime snapshot; it never accumulates or changes direction, range or size. Mesh mode uses zero placement.
-- Preparation validates/maps all records before allocation, stages new lights without illumination, and commits after the external scene application succeeds. Surviving ids retain handles, removed ids release them, and replacement never leaves duplicates. Failed light updates restore previous descriptors and release staged additions; failed loads release their own resources without disturbing other published scene handles. Engine refusals propagate unchanged.
-- A complete snapshot resets removed optional `angleDeg`, `innerAngleDeg` and `size` fields explicitly before merging its descriptor. This differs from an ordinary partial S17 update: a removed authored inner angle must not linger. Missing `delta.output` leaves the published set unchanged; a successful complete output with omitted lights or `[]` clears it. Failed evaluation preserves the previous set, including on the first geometry-baseline step.
-- `setVisible` suppresses illumination through intensity zero while retaining authored descriptors/identities; show restores them. Failed light visibility updates restore prior light state. Scene/runtime disposal aborts pending preparation and removes owned lights; pending steps cannot recreate disposed resources. Cleanup is idempotent and does not remove another scene's lights; reload after disposal leaves no stale illumination.
-- Malformed/duplicate records, degenerate direction and invalid placement use `sdfm.scene_format` with useful paths. Resolve/decode/trace-pack failures use `sdfm.scene_resolve`, imports use `sdfm.worker`, disposed owners use `sdfm.disposed`. Transport-valid values outside engine domains or capacity are refused by S17, never silently skipped or clamped. Existing asset, mesher and material errors remain unchanged.
+- Reads `sdfm.game-asset` v1 (format, version, game, id, name, category, world, mesher, document, collision, anchors, bounds, hash; canonical key order, document <= 2 MB, finite, id `^[a-z][a-z0-9]*(\.[a-z0-9-]+)+$`). RAA uses `document` (MAMA-meshed in workers), `mesher` (unchanged), `anchors`, `bounds`, `hash` (sha256 of MAMA `serializeDocument(document)` must match); `collision` passes through.
+- Codes: `sdfm.format`, `sdfm.version`, `sdfm.schema`, `sdfm.not_finite`, `sdfm.id`, `sdfm.cap_document`, `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`, `sdfm.scene_format`, `sdfm.scene_resolve`.
+- `createSdfmLoader(options)` (`mama` accessor resolving once to a URL for workers or a module) and `loadProceduralScene(engine, loader, scene, { resolveAsset?, resolveMesh?, parent?, mode?: 'mesh'|'trace', procgen?, placement?, mama? })` returning `{ root, instanceCount, sourceCount, setVisible, stats(), runtime(procgen), dispose() }`; runtime `{ step(tick), set(values), dispose() }`. MAMA imports live only in `src/mama-bridge.js`.
+- `toMamaLight` maps S16 to S17 (position `t`, direction `R(r) * S(s) * [0,0,-1]`, metres unscaled, absent inner kept absent, linear to sRGB). `createMamaLightOwner` keeps one world-space id-to-handle registry per scene for static and runtime adapters; trace placement adds once.
+- Lights are validated before allocation, staged unlit, committed after the scene applies; failures restore and release; engine refusals propagate. Complete snapshots reset removed optional fields; missing `delta.output` keeps the set, `[]` clears it. `setVisible` hides through intensity 0; disposal removes only owned lights.
 
 ## S16. Procedural light interchange
 Owners: mama-light-record and mama-light-transport; consumers raa-sdfm-pkg, sdfm-light-authoring.
@@ -473,20 +422,10 @@ Owner: sdfm-game-light-sync.
 - The sky observation `skyWeatherState()` (S25) is separate and leaves this hand-off unchanged.
 
 ## S20. M4 browser facts and the single capture inventory
-Owner: sdfm-light-evidence (`sdfm:src/core/scene-lights-evidence.ts`).
-- `M4_BROWSER_FACTS = { format: 'sdfm.scene-lights.browser-facts', version: 1 }`. `LightSnapshot = { document, selection, projection, game }`. `SceneLightFactsBase` adds `job`, `provenance { attempt, revision, pageRef }`, `captures [{ id, filename, observation }]` and the named `observations`.
-- Jobs and observations: point (before, added, undo, redo), spot (on, off), kinds (directionalOn, directionalOff, areaSmall, areaWide), ownership (before, moved, rotated, detached, deleted), many (many), invalid (before, after, with the attempted field, value and inspector error); each carries its light and owner ids.
-- Validation covers canonical document text, actual selection, the complete ordered projection, unique ids and handles, ready/error consistency, provenance and exact capture coverage. Counts, ownership and cleanup come from facts and tests, never from pixels.
-- `SCENE_LIGHT_CAPTURES` is the only selection source, with 16 identities: point-selected, point-undo, point-redo, spot-on, spot-off, directional-on, directional-off, area-small, area-wide, owner-before, owner-moved, owner-rotated, detached, deleted, many, invalid.
-- `SceneLightApp.capture` frames the real Properties section and calls `assertLightInspectorReadable` immediately before rasterization.
+Owner: sdfm-light-evidence (`sdfm:src/core/scene-lights-evidence.ts`). `M4_BROWSER_FACTS = { format: 'sdfm.scene-lights.browser-facts', version: 1 }`: `LightSnapshot { document, selection, projection, game }`, `job`, `provenance`, `captures` and the observations of jobs point, spot, kinds, ownership, many, invalid; validated for canonical text, projection, unique ids, provenance and exact coverage (facts, never pixels). `SCENE_LIGHT_CAPTURES` (16 identities) is the only selection source; `assertLightInspectorReadable` runs right before capture.
 
 ## S21. Node-side M4_EVIDENCE_RECORDS lifecycle
-Owner: sdfm-light-evidence (`sdfm:src/node/evidence/topics/scene-lights.ts`); records live under the ignored `out/solstice-m4/`.
-- `M4_EVIDENCE_RECORDS = { schema: 1, milestone: 'm4' }`; record types `RepoSource`, `FileStamp`, `BuiltFile`, `RuntimeReceipt`, `Selection`, `CurrentAttempt`, `BuildReceipt`, `ManagedJobRecord`, `ImageRecord`, `RunRecord`, `FreshRecord`, `JudgeImage`, `JudgeRecord`.
-- Runtime receipts (`runtime-build mama`, then `raa`) bind source, preparationId, observed files and status; a timestamp or revision alone is not a usable build.
-- `select` binds preparation, stage, sources, inputs and capture rows. `clean` allocates an isolated UUID attempt and publishes `current.json` `{ selectionId, attemptId, attemptDir }`, a pointer and never a pass; an attempt that has run cannot run again. Paths reject traversal and symlink escapes; records are replaced atomically.
-- `fresh` rejects stale, missing, partial, duplicate, mismatched, unexpected or failed jobs and images. `judge` judges every required image against its functional description with minimum 6 and keeps all verdicts.
-- The `m4-*` entries of `sdfm:.nmc/commands.json` are unchanged; managed rendering uses `node scripts/gpu-evidence.mjs scene-lights`.
+Owner: sdfm-light-evidence (`topics/scene-lights.ts`), records under ignored `out/solstice-m4/`, `M4_EVIDENCE_RECORDS = { schema: 1, milestone: 'm4' }`. Runtime receipts (mama, then raa), `select`, `clean` (isolated UUID attempt, `current.json` pointer, never rerun), `fresh` (rejects stale, partial or failed jobs and images) and `judge` (minimum 6, all verdicts kept) follow the S26 pattern; rendering uses `node scripts/gpu-evidence.mjs scene-lights`.
 
 ## S22. Execution, verified recovery and host completion
 - Executable authority is the current `.nmc/commands.json` of each repository and the configured linked targets.
@@ -666,6 +605,52 @@ Adapted from solstice `src/vg/*` and `shaders/vg/*`, assembled by Rust builders.
 ## S35. Pinning tests of the virtualized-geometry contracts
 raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-shadow `cascade_access.rs`, raa-pipeline `config.rs`, raa-js `{cluster_bake,virtual_geometry}.rs`, `examples/virtual-geometry/*.test.mjs`, `web/common/{page-job,vg-job}.test.mjs`, MAMA and SDFM mesh-clusters and virtual-geometry tests.
 
+## S36. Global-illumination API (m30)
+`types/m30-global-illumination.d.ts`, `docs/api/m30-global-illumination.md`, raa-js `m30_global_illumination.rs`.
+- `setGlobalIllumination(patch)` / `globalIllumination()`: `enabled` false, `intensity` 1 [0, 16], `environmentDiffuse` 0 [0, 1], `localLightShadows`, `reflections`, `screenTraces` true, `debugView` none/voxels/radiance/distance/levels, `screenSpace` false, `screenSpaceQuality` low/medium/high (medium). `setGiQuality` / `giQuality()`: resolution 64|96, levels 3-5, probeRays 6|8; a change reallocates and rebuilds. Patches merge in key order; bad keys or values throw `gi.invalid` `<key>: <reason>`, nothing changes.
+- `setInstanceGlobalIllumination(instance, boolean | null)`, `instanceGlobalIllumination(instance)` `{ requested, voxelized, driver, code, message }` (`api.unknown_handle`).
+- `giStats()` `{ active, inactiveReason (disabled, passDisabled, multiView, noInstance), quality, finestVoxelMetres, voxelizedForwardInstances, voxelizedVirtualInstances, pendingRebuild, framesSinceRebuild, allocatedBytes, statsFrameIndex, pending }`, published on complete submission.
+- `setMeshVertexColors(mesh, colors, components?)`, `setMeshClusterVertexColors(mesh, ordinal, colors, components?)`: GI albedo = base x tint x vertex colour.
+- `frame` feeds camera, sun and light count, invalidates history on cuts and calls `prepare_frame`; `finish_scene_invocation` calls `observe_submission`.
+
+## S37. GI clipmap volume, membership and voxel drivers (raa-gi)
+Adapted from solstice `src/gi/*` and `shaders/gi/*`; CPU twins in `clipmap.rs`, `cpu.rs` and part `cpu` modules.
+- L levels of R^3 voxels around the camera, origins snapped by 8 voxels; `choose_rebuild` picks the level furthest behind (ties finest); a rebuild clears, voxelizes through every driver, seeds, jump-floods (18 passes, 6 per frame), commits and writes the Rgba16Float atlas R x R x (R x L) (rgb radiance, a distance). One level relit per frame (`light_schedule`). Memory = GI_VOLUME_BYTES, only while active.
+- Membership: every item receives GI; voxelized unless rank 0 `gi.opted_out`, 1 `gi.skinned_instance`, 2 `gi.deformed_instance`, 3 `gi.non_opaque_material`, 4 `gi.no_shadow_material`. A signature change marks rebuild rounds stale.
+- Driver A: coarsest raa-lit LOD within half a voxel, one dispatch per item over `LitHandle::mesh_storage`. Driver B (part `virtual_driver`, with VG): claims virtual instances, sets raa-vg `INSTANCE_GI`, culls each level's view (slot 6 + level) in `VgHandle::with_gi_frame` and voxelizes clusters; one shared grid.
+- `GiFeature::install` registers `gi.volume` (25), `gi.history` (64), driver A and the parts of `src/parts/*.rs`; inactive frames release everything and set no feature ids (29, 30, 37 while active).
+
+## S38. GI GPU records and passes
+Twins in `crates/raa-gi/src/layouts.rs`. `GiFrameGpu` 432 B: matrices view_proj, inv_view_proj, inv_proj, inv_view, previous_view_proj @0-320, camera_position @320, sun_direction @336, sun_color @352, viewport @368, counts u32x4 @384 (lights, frame, debug view, levels), settings @400 (intensity, environment diffuse, near, far), flags @416 (history, screen traces, local shadows, reflections). 32 B `GiVoxelizeGpu`, `GiFloodGpu`, `GiLightGpu`, `GiWriteGpu`; `GiForwardWorkGpu` 48 B in 256 B slots. `RaaGiVolumeParams` 96 B: `levels[5]` (origin, voxel size) @0, resolution @80, intensity @84, level_count @88, flags @92 (1 valid, 2 reflections, 4 local shadows).
+- `GI_VOLUME_WGSL` (raa-shader): `raa_gi_level_at`, `raa_gi_sample`, `raa_gi_trace`, `raa_gi_visibility`, `raa_gi_cone_visibility`, `raa_gi_edge_fade`, `raa_gi_finest_voxel`; no binding, `textureSampleLevel` only.
+- Compute modules (voxelize, seed, flood, write, voxel light, debug view) use the GI compute group 1 and a private group 2 (<= 8 storage buffers). `gi.volume` calls `set_gi`; `gi.history` copies lit HDR and draws debug views. Pairs: vg.resolve < gi.volume < gi.screen; prepass, vg.gbuffer < gi.screen < forward < gi.history < ssr.
+
+## S39. GI screen probes, slots and reflection fallback
+- `gi.screen` (42): depth pyramid (`GiShared::pyramid_view`), one probe per 16 px tile, P x P rays through the previous frame then the volume, SH9 probes, integrated into Rgba16Float (rgb irradiance, a occlusion; `probe_output_view`); history needs a valid, on-screen, unrejected motion neighbourhood.
+- `gi.ssgi` (44, `screenSpace`): visibility-bitmask indirect diffuse (32 sectors, 2 m, 0.5 m thickness), temporally accumulated, output (E_ss + V x E_probe, min(V, a)); off allocates nothing. Binding 14 is the last part screen output.
+- Slots `gi`: Indirect = (1 - metallic) x base / pi x g.rgb x intensity x s.ao; Ao = min(GTAO, g.a); LocalVisibility = volume (cone for area) visibility. The part also sets IBL diffuse scale and GI specular (S45).
+- SSR with flag 2 falls back to a volume trace on a screen miss.
+
+## S40. Global-illumination page, inventory and evidence
+`bash scripts/build-global-illumination.sh` (bricks, then `build-page.mjs global-illumination --stages volume,lighting,virtual --shared examples/virtual-geometry/lib/content.js --shared examples/trace-first-pixel/scene.js`). Runner topic `gi` with GI facts, readiness active + settled 240 frames (disabled: inactive, 0 bytes), extras `quality`, `allocatedBytes`. Rows add `heldConstant`, `producer`, optional `judgeReference` (`/refs/*.png`) and `judgeAspect`. Scenes: volume, lighting, area-shadows, area-stochastic, area-restir, temporal, ssgi, gi-quality, virtual (msaa 1); Cornell rows (millimetres / 100) judged against `/refs/cornell-box-reference.png`. Records: `node web/common/gi-job.mjs <action> --page dist/global-illumination --out out/global-illumination/<stage> --stage <stage>`; commands `p4-gi-*`.
+
+## S41. SDF Modeler global-illumination integration
+`RenderSettings.gameGlobalIllumination` (false) and `gameGiQuality` (high; low 64/3/6, medium 96/4/8, high 96/5/8), labelled `Global illumination (Game view)` and `Global illumination quality`. `applyGameGlobalIllumination` applies on change only; refusals `Game global illumination refused: ` under status `global-illumination`; the engine and msaa are kept. `GameDisplay.globalIlluminationState()` is ready when active, settled and voxelized. Saved meshes may carry linear vertex `colors`. Game lighting controls (area tiers, TAA, screen-space GI) apply through `applyGameLighting` (`Game lighting refused: `). Evidence: scenario `global-illumination-app`, milestone `p4-editor`, commands `p4-editor-*`.
+
+## S43. Temporal anti-aliasing and the motion target
+- `taa` (100, installed disabled; `setPassEnabled('taa', on)`): Catmull-Rom history, YCoCg clip, standard-Z, own `HistoryPair` per viewport; uses history only with `temporal.y` and `temporal.z` and no invalidation (resize, disable, camera cut). Enabling it turns on the FrameGpu jitter.
+- Motion: xy = UV displacement current minus previous; z = 1 rejects (no previous model or vertex function: camera-only xy; no camera history or bad clip: xy 0); vg.gbuffer z 0; sky 0. Deformed instances re-evaluate deform at `t - dt` (`VARIANT_FLAG_MOTION_DEFORM`).
+- `HistoryPair` and `REPROJECT_WGSL` also serve area-shadow, ReSTIR and SSGI histories. Evidence: GI `temporal`, lookdev `m31-taa`.
+
+## S44. Area-light shading and soft-shadow tiers
+- `setAreaLightShading({ mode: 'ltc' | 'formFactor' })` (feature 39). `setAreaLightShadows` / `areaLightShadows()`: `tier` auto|hero|cone|fade, `heroCount` 0..4 (0), `heroDistance` 25, `fadeDistance` 80, `band` 5, `stochasticCount` 0..8 (4), `stochasticDistance` 40, `stochasticCells` 4|9, `stochasticMode` stratified|restir; plus `activeHeroes`, `activeStochastic`.
+- Cone: GI cone visibility; fade: direct term fades on GI frames; hero: 140 degree maps in shadow layers 4-7 with the shared PCSS kernel (opt-in).
+- Mid tier (GI active, `localLightShadows`): `gi.area-shadow` (43) traces one stratified ray per pixel and slot (pyramid, volume, SDF trace scene), reprojects S and U, filters bilaterally and writes V = S / U into binding 20. ReSTIR tier: same pass with ReSTIR DI reservoirs.
+- Blend: `V_far = mix(V_cone, V_mask, w_stoch)`, `V = mix(mix(V_far, V_hero, map weight), V_far, w_cone)`.
+
+## S45. GI-occluded environment specular
+`EnvSh` is 176 B: `sh[9]` @0, `info` @144 (specular, diffuse x scale, max mip, enabled), `gi` @160 (x = w_gi). `set_env_gi` stores it; raa-gi sets 1 while active through `IblHandle::set_gi_specular`. Ambient IBL specular and the SSR-subtracted specular are mix(L_sky, E_gi / pi, w) x (f0 dfg.x + dfg.y).
+
 ## Module ownership
 
 | Module | Files | Consumes |
@@ -678,7 +663,7 @@ raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-
 | proof-m3 | `proofs/m3-prims.mjs`<br>`proofs/results/m3-prims.json`<br>`proofs/results/m3-prims-table.json`<br>`docs/dogfood/m3.md` | tooling |
 | proof-m4 | `proofs/m4-loader.mjs`<br>`proofs/results/m4-asset.json`<br>`docs/dogfood/m4.md` | tooling |
 | proof-m5 | `proofs/m5-booleans.mjs`<br>`proofs/results/m5-booleans.json`<br>`proofs/results/m5-csg-cases.json`<br>`docs/dogfood/m5.md` | tooling |
-| raa-js | `crates/raa-js/Cargo.toml`<br>`crates/raa-js/README.md`<br>`crates/raa-js/build.rs`<br>`crates/raa-js/src/lib.rs`<br>`crates/raa-js/src/engine.rs`<br>`crates/raa-js/src/convert.rs`<br>`crates/raa-js/src/state.rs`<br>`crates/raa-js/src/feature_map.rs`<br>`crates/raa-js/tests/convert.rs`<br>`crates/raa-js/tests/api_registry.rs` | raa-core, raa-web, raa-math, raa-scene, raa-lit, raa-pipeline, raa-sky, raa-tonemap |
+| raa-js | `crates/raa-js/Cargo.toml`<br>`crates/raa-js/README.md`<br>`crates/raa-js/build.rs`<br>`crates/raa-js/src/lib.rs`<br>`crates/raa-js/src/engine.rs`<br>`crates/raa-js/src/convert.rs`<br>`crates/raa-js/src/state.rs`<br>`crates/raa-js/src/feature_map.rs`<br>`crates/raa-js/tests/convert.rs`<br>`crates/raa-js/tests/api_registry.rs` | raa-gi-core |
 | js-package | `scripts/build-package.sh`<br>`packages/raa/package.json`<br>`packages/raa/index.js`<br>`packages/raa/index.d.ts`<br>`packages/raa/README.md`<br>`packages/raa/LICENSE`<br>`scripts/build-bricks.sh`<br>`packages/raa/sky-weather.js`<br>`packages/raa/test/sky-weather.test.mjs`<br>`packages/raa/test/load-once.test.mjs` | raa-js, api-m8, api-m29-bake |
 | project-docs | `README.md`<br>`docs/API.md`<br>`docs/ARCHITECTURE-notes.md` | js-package, raa-js |
 | proof-m6 | `proofs/m6-api.mjs`<br>`proofs/results/example-basic.json`<br>`proofs/results/m6-sizes.json`<br>`docs/dogfood/m6.md` | tooling, js-package, project-docs |
@@ -705,7 +690,7 @@ raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-
 | mama-light-record | `mama:crates/procgen/src/nodes/game_markers.rs`<br>`mama:crates/procgen/src/passes/gameplay.rs`<br>`mama:crates/procgen/src/output.rs`<br>`mama:crates/procgen/SPEC.md`<br>`mama:src/procgen/output-types.ts` | none |
 | mama-light-transport | `mama:src/procgen/scene-file.ts`<br>`mama:src/procgen/scene-build.ts`<br>`mama:src/procgen/{scene-file,scene-build,runtime}.test.ts`<br>`mama:crates/procgen/src/ext/runtime/delta.rs`<br>`mama:crates/procgen/tests/runtime.rs`<br>`mama:src/procgen/scene-file.test.ts`<br>`mama:src/procgen/scene-build.test.ts`<br>`mama:src/procgen/runtime.test.ts` | mama-light-record |
 | sdfm-light-authoring | `sdfm:src/core/scene-lights.ts`<br>`sdfm:src/plugins/ui/30-point-lights.ts`<br>`sdfm:src/components/editor/PointLightSection.vue`<br>`sdfm:src/node/schema/{docs,json-schema}.ts`<br>`sdfm:docs/schema/{sdfm-document.schema,tools}.json`<br>`sdfm:src/core/scene-lights.test.ts`<br>`sdfm:src/core/scene-lights-authoring.test.ts`<br>`sdfm:src/node/schema/docs.ts`<br>`sdfm:src/node/schema/json-schema.ts`<br>`sdfm:src/app/gpu-page/scene-lights-controls.test.ts` | mama-light-record |
-| sdfm-game-light-sync | `sdfm:src/app/paramesh/game-light-sync.ts`<br>`sdfm:src/app/paramesh/game-display.ts`<br>`sdfm:src/app/paramesh/game-light-sync.test.ts`<br>`sdfm:src/app/paramesh/game-display-lights.test.ts` | sdfm-light-authoring, api-m28, sdfm-sky-weather-settings, sdfm-vg-settings, api-m29-bake, api-m29-vg, mama-mesh-clusters |
+| sdfm-game-light-sync | `sdfm:src/app/paramesh/game-light-sync.ts`<br>`sdfm:src/app/paramesh/game-display.ts`<br>`sdfm:src/app/paramesh/game-light-sync.test.ts`<br>`sdfm:src/app/paramesh/game-display-lights.test.ts` | sdfm-light-authoring, api-m28, sdfm-sky-weather-settings, sdfm-vg-settings, api-m29-bake, api-m29-vg, mama-mesh-clusters, sdfm-gi-settings, api-m30 |
 | sdfm-light-evidence | `sdfm:src/core/scene-lights-evidence.ts`<br>`sdfm:src/node/evidence/topics/scene-lights.ts`<br>`sdfm:src/app/gpu-page/scenarios/{scene-lights-app,ui-driver}.ts`<br>`sdfm:src/app/gpu-page/ui-driver.test.ts`<br>`sdfm:src/node/evidence/run.ts`<br>`sdfm:.nmc/commands.json`<br>`sdfm:src/core/scene-lights-evidence.test.ts`<br>`sdfm:src/node/evidence/topics/scene-lights.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/scene-lights-app.ts`<br>`sdfm:src/app/gpu-page/scenarios/ui-driver.ts`<br>`sdfm:src/app/gpu-page/scene-lights-visibility.ts`<br>`sdfm:src/app/gpu-page/scene-lights-requests.ts` | sdfm-light-authoring, sdfm-game-light-sync |
 | solstice-architecture-finalization | `ARCHITECTURE.md` | api-m8, sdfm-sky-weather-settings, sdfm-sky-weather-evidence |
 | proof-m15 | `proofs/m15-animation.mjs`<br>`examples/lookdev/scenes/m15-waddle.js`<br>`docs/dogfood/m15.md` | lookdev-tools, api-m15 |
@@ -714,7 +699,7 @@ raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-
 | sky-weather-page | `examples/sky-weather/index.html`<br>`examples/sky-weather/main.js`<br>`examples/sky-weather/nmc.gpu.json`<br>`examples/sky-weather/scenes/foundation.js`<br>`examples/sky-weather/contract.test.mjs`<br>`scripts/build-sky-weather.sh`<br>`.nmc/commands.json` | js-package, api-m7, lookdev-page, p2-managed-transport |
 | sky-atmosphere-scenes | `examples/sky-weather/scenes/atmosphere.js`<br>`examples/sky-weather/atmosphere.test.mjs` | api-m8, sky-weather-page |
 | sky-weather-scenes | `examples/sky-weather/scenes/weather.js`<br>`examples/sky-weather/weather.test.mjs` | sky-weather-page, sky-atmosphere-scenes, api-m8 |
-| sdfm-sky-weather-settings | `sdfm:src/core/render-settings.ts`<br>`sdfm:src/core/sky-weather-settings.ts`<br>`sdfm:src/core/sky-weather-settings.test.ts`<br>`sdfm:src/app/render-settings.ts`<br>`sdfm:src/components/shell/RenderSettingsPanel.vue`<br>`sdfm:src/components/shell/SkyWeatherSettings.vue`<br>`sdfm:src/app/paramesh/game-sky-weather.test.ts`<br>`sdfm:src/node/ops/render-settings.ts`<br>`sdfm:docs/schema/sdfm-document.schema.json`<br>`sdfm:docs/schema/tools.json`<br>`sdfm:src/app/procedural/raytrace-display.ts`<br>`sdfm:src/plugins/ui/36-display.ts`<br>`sdfm:src/app/paramesh/game-render-settings.ts`<br>`sdfm:docs/llm/catalog.md`<br>`sdfm:tsconfig.node.json` | api-m8, js-package, api-m29-vg, sdfm-vg-settings |
+| sdfm-sky-weather-settings | `sdfm:src/core/render-settings.ts`<br>`sdfm:src/core/sky-weather-settings.ts`<br>`sdfm:src/core/sky-weather-settings.test.ts`<br>`sdfm:src/app/render-settings.ts`<br>`sdfm:src/components/shell/RenderSettingsPanel.vue`<br>`sdfm:src/components/shell/SkyWeatherSettings.vue`<br>`sdfm:src/app/paramesh/game-sky-weather.test.ts`<br>`sdfm:src/node/ops/render-settings.ts`<br>`sdfm:docs/schema/sdfm-document.schema.json`<br>`sdfm:docs/schema/tools.json`<br>`sdfm:src/app/procedural/raytrace-display.ts`<br>`sdfm:src/plugins/ui/36-display.ts`<br>`sdfm:src/app/paramesh/game-render-settings.ts`<br>`sdfm:docs/llm/catalog.md`<br>`sdfm:tsconfig.node.json` | api-m8, js-package, api-m29-vg, sdfm-vg-settings, sdfm-gi-settings, api-m30 |
 | sdfm-sky-weather-evidence | `sdfm:src/core/sky-weather-evidence.ts`<br>`sdfm:src/core/sky-weather-evidence.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/sky-weather-app.ts`<br>`sdfm:src/app/gpu-page/sky-weather-visibility.ts`<br>`sdfm:src/app/gpu-page/sky-weather-controls.test.ts`<br>`sdfm:src/node/evidence/topics/sky-weather.ts`<br>`sdfm:src/node/evidence/topics/sky-weather.test.ts` | sdfm-sky-weather-settings, sdfm-game-light-sync, sdfm-light-evidence, sky-weather-scenes, sdfm-editor-evidence |
 | raa-cloud-seam | `crates/raa-sky/src/cloud_backend.rs`<br>`crates/raa-sky/tests/backend_registry.rs` | raa-sky, raa-pipeline, raa-scene, raa-math |
 | sky-weather-job-resume | `web/common/sky-weather-job.mjs`<br>`web/common/sky-weather-job.test.mjs` | sky-weather-page, p2-managed-transport |
@@ -722,11 +707,11 @@ raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-
 | api-m29-bake | `crates/raa-js/src/api/m29_cluster_bake.rs`<br>`crates/raa-js/tests/cluster_bake.rs`<br>`packages/raa/types/m29-cluster-bake.d.ts`<br>`docs/api/m29-cluster-bake.md`<br>`packages/raa/test/cluster-bake.test.mjs` | raa-js, raa-cluster |
 | mama-mesh-clusters | `mama:src/core/game/mesh-clusters.ts`<br>`mama:src/core/game/mesh-clusters.test.ts`<br>`mama:src/core/game/mesh-file.ts`<br>`mama:src/core/game/mesh-file.test.ts`<br>`mama:docs/mesh-clusters.md` | — |
 | raa-sdfm-clusters | `packages/raa-sdfm/src/mesh-clusters.js`<br>`packages/raa-sdfm/test/mesh-clusters.test.js`<br>`packages/raa-sdfm/src/mesh-file.js`<br>`packages/raa-sdfm/src/procedural.js`<br>`packages/raa-sdfm/index.js`<br>`packages/raa-sdfm/index.d.ts`<br>`packages/raa-sdfm/README.md` | api-m29-bake |
-| vg-page | `examples/virtual-geometry/index.html`<br>`examples/virtual-geometry/main.js`<br>`examples/virtual-geometry/nmc.gpu.json`<br>`examples/virtual-geometry/lib/inventory.js`<br>`examples/virtual-geometry/lib/runtime.js`<br>`examples/virtual-geometry/lib/content.js`<br>`examples/virtual-geometry/lib/cluster-preview.js`<br>`examples/virtual-geometry/lib/facts.js`<br>`examples/virtual-geometry/scenes/bake.js`<br>`examples/virtual-geometry/contract.test.mjs`<br>`examples/virtual-geometry/bake.test.mjs`<br>`scripts/build-virtual-geometry.sh` | js-package, api-m29-bake, lookdev-page, sky-weather-page, p2-managed-transport, vg-job |
+| vg-page | `examples/virtual-geometry/index.html`<br>`examples/virtual-geometry/main.js`<br>`examples/virtual-geometry/nmc.gpu.json`<br>`examples/virtual-geometry/lib/inventory.js`<br>`examples/virtual-geometry/lib/runtime.js`<br>`examples/virtual-geometry/lib/content.js`<br>`examples/virtual-geometry/lib/cluster-preview.js`<br>`examples/virtual-geometry/lib/facts.js`<br>`examples/virtual-geometry/scenes/bake.js`<br>`examples/virtual-geometry/contract.test.mjs`<br>`examples/virtual-geometry/bake.test.mjs`<br>`scripts/build-virtual-geometry.sh` | js-package, api-m29-bake, lookdev-page, sky-weather-page, p2-managed-transport, vg-job, page-kit |
 | vg-job | `web/common/vg-job.mjs`<br>`web/common/vg-job.test.mjs` | page-job, sky-weather-page |
-| raa-shader-vg | `crates/raa-shader/src/wgsl/depth.wgsl`<br>`crates/raa-shader/src/wgsl/pass_vg_gbuffer.wgsl`<br>`crates/raa-shader/src/wgsl/pass_vg_shade.wgsl`<br>`crates/raa-shader/src/vg.rs`<br>`crates/raa-shader/tests/vg_variants.rs`<br>`crates/raa-shader/src/ids.rs`<br>`crates/raa-shader/src/composer.rs`<br>`crates/raa-shader/src/lib.rs` | — |
+| raa-shader-vg | `crates/raa-shader/src/wgsl/depth.wgsl`<br>`crates/raa-shader/src/wgsl/pass_vg_gbuffer.wgsl`<br>`crates/raa-shader/src/wgsl/pass_vg_shade.wgsl`<br>`crates/raa-shader/src/vg.rs`<br>`crates/raa-shader/tests/vg_variants.rs`<br>`crates/raa-shader/src/ids.rs`<br>`crates/raa-shader/src/composer.rs`<br>`crates/raa-shader/src/lib.rs` | raa-shader-gi |
 | raa-pipeline-vg-order | `crates/raa-pipeline/src/pipeline.rs`<br>`crates/raa-pipeline/tests/config.rs`<br>`crates/raa-pipeline/README.md` | — |
-| raa-lit-vg-seam | `crates/raa-lit/src/virtual_set.rs`<br>`crates/raa-lit/tests/virtual_set.rs`<br>`crates/raa-lit/src/prep.rs`<br>`crates/raa-lit/src/renderer.rs`<br>`crates/raa-lit/src/handle.rs`<br>`crates/raa-lit/src/lib.rs` | — |
+| raa-lit-vg-seam | `crates/raa-lit/src/virtual_set.rs`<br>`crates/raa-lit/tests/virtual_set.rs`<br>`crates/raa-lit/src/prep.rs`<br>`crates/raa-lit/src/renderer.rs`<br>`crates/raa-lit/src/handle.rs`<br>`crates/raa-lit/src/lib.rs` | raa-lit-gi-seam |
 | raa-shadow-vg-seam | `crates/raa-shadow/src/cascade_access.rs`<br>`crates/raa-shadow/src/feature.rs`<br>`crates/raa-shadow/src/caster.rs`<br>`crates/raa-shadow/src/lib.rs`<br>`crates/raa-shadow/tests/cascade_access.rs` | — |
 | raa-vg-scene | `crates/raa-vg/Cargo.toml`<br>`crates/raa-vg/README.md`<br>`crates/raa-vg/src/lib.rs`<br>`crates/raa-vg/src/error.rs`<br>`crates/raa-vg/src/settings.rs`<br>`crates/raa-vg/src/scene.rs`<br>`crates/raa-vg/src/eligibility.rs`<br>`crates/raa-vg/tests/scene.rs`<br>`crates/raa-vg/tests/settings.rs` | raa-cluster, raa-lit-vg-seam |
 | raa-vg-cull | `crates/raa-vg/src/culling.rs`<br>`crates/raa-vg/src/hzb.rs`<br>`crates/raa-vg/src/wgsl/pass_view.wgsl`<br>`crates/raa-vg/src/wgsl/cull.wgsl`<br>`crates/raa-vg/src/wgsl/cull_control.wgsl`<br>`crates/raa-vg/src/wgsl/hzb_seed.wgsl`<br>`crates/raa-vg/src/wgsl/hzb_down.wgsl`<br>`crates/raa-vg/tests/pass_view.rs`<br>`crates/raa-vg/tests/cull_variants.rs` | raa-vg-scene, raa-shader-vg |
@@ -739,6 +724,44 @@ raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-
 | sdfm-vg-evidence | `sdfm:src/core/virtual-geometry-evidence.ts`<br>`sdfm:src/core/virtual-geometry-evidence.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/virtual-geometry-app.ts`<br>`sdfm:src/app/gpu-page/virtual-geometry-visibility.ts`<br>`sdfm:src/app/gpu-page/virtual-geometry-controls.test.ts`<br>`sdfm:src/node/evidence/topics/virtual-geometry.ts`<br>`sdfm:src/node/evidence/topics/virtual-geometry.test.ts` | sdfm-vg-export, sdfm-vg-settings, sdfm-game-light-sync, sdfm-sky-weather-settings, sdfm-sky-weather-evidence, sdfm-light-evidence, sdfm-editor-evidence, mama-mesh-clusters, api-m29-bake, api-m29-vg |
 | page-job | `web/common/page-job.mjs`<br>`web/common/page-job.test.mjs`<br>`docs/page-job.md` | p2-managed-transport, sky-weather-page |
 | sdfm-editor-evidence | `sdfm:src/node/evidence/editor-evidence.ts`<br>`sdfm:src/node/evidence/editor-evidence.test.ts` | sdfm-light-evidence |
+| page-kit | `web/common/page-runner.js`<br>`web/common/page-runner.test.mjs`<br>`scripts/build-page.mjs`<br>`scripts/build-page.test.mjs` | p2-managed-transport, page-job, sky-weather-page |
+| raa-shader-gi | `crates/raa-shader/src/wgsl/prelude.wgsl`<br>`crates/raa-shader/src/wgsl/gi_volume.wgsl`<br>`crates/raa-shader/tests/gi_volume.rs`<br>`crates/raa-shader/tests/variants.rs`<br>`crates/raa-shader/tests/compose.rs` | raa-shader-vg |
+| raa-pipeline-gi | `crates/raa-pipeline/src/lighting.rs`<br>`crates/raa-pipeline/tests/resources.rs` | raa-shader-gi |
+| raa-sky-gi-budget | `crates/raa-sky/src/env_pass.rs`<br>`crates/raa-sky/src/background.rs`<br>`crates/raa-sky/src/feature.rs` | raa-pipeline-gi |
+| raa-group1-pins | `crates/raa-oit/tests/variants.rs`<br>`crates/raa-fur/tests/variants.rs`<br>`crates/raa-sky/tests/variants.rs` | raa-shader-gi, raa-pipeline-gi |
+| raa-lit-gi-seam | `crates/raa-lit/src/meshes.rs`<br>`crates/raa-lit/tests/gi_access.rs` | raa-lit-vg-seam |
+| raa-gi-core | `crates/raa-gi/Cargo.toml`<br>`crates/raa-gi/README.md`<br>`crates/raa-gi/build.rs`<br>`crates/raa-gi/src/lib.rs`<br>`crates/raa-gi/src/error.rs`<br>`crates/raa-gi/src/settings.rs`<br>`crates/raa-gi/src/clipmap.rs`<br>`crates/raa-gi/src/cpu.rs`<br>`crates/raa-gi/src/membership.rs`<br>`crates/raa-gi/src/stats.rs`<br>`crates/raa-gi/src/parts.rs`<br>`crates/raa-gi/src/feature.rs`<br>`crates/raa-gi/tests/settings.rs`<br>`crates/raa-gi/tests/clipmap.rs`<br>`crates/raa-gi/tests/cpu_volume.rs`<br>`crates/raa-gi/tests/membership.rs`<br>`crates/raa-gi/tests/fixtures/voxelize.json`<br>`crates/raa-gi/tests/fixtures/flood.json`<br>`crates/raa-gi/tests/fixtures/codecs.json`<br>`crates/raa-gi/tests/fixtures/clipmap.json`<br>`crates/raa-gi/tests/fixtures/trace.json` | raa-pipeline-gi, raa-shader-gi, raa-lit-gi-seam, raa-lit-vg-seam, raa-pipeline-vg-order, raa-vg-scene, raa-vg-cull, raa-gi-volume, raa-taa |
+| raa-gi-volume | `crates/raa-gi/src/layouts.rs`<br>`crates/raa-gi/src/shaders.rs`<br>`crates/raa-gi/src/volume.rs`<br>`crates/raa-gi/src/forward_driver.rs`<br>`crates/raa-gi/src/debug.rs`<br>`crates/raa-gi/src/wgsl/voxelize_kernel.wgsl`<br>`crates/raa-gi/src/wgsl/voxelize_forward.wgsl`<br>`crates/raa-gi/src/wgsl/radiance_codec.wgsl`<br>`crates/raa-gi/src/wgsl/seed.wgsl`<br>`crates/raa-gi/src/wgsl/jump_flood.wgsl`<br>`crates/raa-gi/src/wgsl/volume_write.wgsl`<br>`crates/raa-gi/src/wgsl/voxel_light.wgsl`<br>`crates/raa-gi/src/wgsl/debug_view.wgsl`<br>`crates/raa-gi/tests/layouts.rs`<br>`crates/raa-gi/tests/variants.rs` | raa-gi-core, raa-shader-gi, raa-pipeline-gi, raa-lit-vg-seam, raa-lit-gi-seam |
+| api-m30 | `crates/raa-js/src/api/m30_global_illumination.rs`<br>`crates/raa-js/tests/global_illumination.rs`<br>`packages/raa/types/m30-global-illumination.d.ts`<br>`docs/api/m30-global-illumination.md` | raa-js, raa-gi-core, api-m29-vg, api-m8 |
+| gi-page | `examples/global-illumination/index.html`<br>`examples/global-illumination/main.js`<br>`examples/global-illumination/nmc.gpu.json`<br>`examples/global-illumination/lib/content.js`<br>`examples/global-illumination/lib/facts.js`<br>`examples/global-illumination/lib/inventory.js`<br>`examples/global-illumination/lib/runtime.js`<br>`examples/global-illumination/scenes/volume.js`<br>`examples/global-illumination/contract.test.mjs`<br>`examples/global-illumination/volume.test.mjs`<br>`scripts/build-global-illumination.sh`<br>`web/common/gi-job.mjs`<br>`web/common/gi-job.test.mjs` | page-kit, page-job, js-package, api-m30, vg-page, sky-weather-page, p2-managed-transport |
+| raa-gi-screen | `crates/raa-gi/src/parts/screen.rs`<br>`crates/raa-gi/src/parts/screen/cpu.rs`<br>`crates/raa-gi/src/parts/screen/passes.rs`<br>`crates/raa-gi/src/parts/slots.rs`<br>`crates/raa-gi/src/wgsl/screen/depth_pyramid.wgsl`<br>`crates/raa-gi/src/wgsl/screen/probe_common.wgsl`<br>`crates/raa-gi/src/wgsl/screen/screen_trace.wgsl`<br>`crates/raa-gi/src/wgsl/screen/probe_trace.wgsl`<br>`crates/raa-gi/src/wgsl/screen/probe_project.wgsl`<br>`crates/raa-gi/src/wgsl/screen/probe_integrate.wgsl`<br>`crates/raa-gi/src/wgsl/slots/slot_indirect.wgsl`<br>`crates/raa-gi/src/wgsl/slots/slot_ao.wgsl`<br>`crates/raa-gi/src/wgsl/slots/slot_local_visibility.wgsl`<br>`crates/raa-gi/tests/screen_twins.rs`<br>`crates/raa-gi/tests/screen_variants.rs`<br>`crates/raa-gi/tests/fixtures/sh9.json`<br>`crates/raa-gi/tests/fixtures/probes.json`<br>`crates/raa-gi/tests/fixtures/temporal.json` | raa-gi-core, raa-gi-volume, raa-shader-gi, raa-pipeline-gi, raa-ibl-gi-seam |
+| raa-ibl-gi-seam | `crates/raa-ibl/src/feature.rs`<br>`crates/raa-ibl/tests/diffuse_scale.rs` | raa-pipeline-gi |
+| raa-ssr-gi-fallback | `crates/raa-ssr/src/wgsl/ssr_trace.wgsl`<br>`crates/raa-ssr/src/shaders.rs`<br>`crates/raa-ssr/tests/variants.rs` | raa-shader-gi, raa-pipeline-gi |
+| gi-lighting-scenes | `examples/global-illumination/scenes/lighting.js`<br>`examples/global-illumination/lighting.test.mjs` | gi-page, page-kit, api-m30, api-m28, api-m8, api-m10, api-m11, api-m15, api-m14 |
+| raa-gi-virtual | `crates/raa-gi/src/parts/virtual_driver.rs`<br>`crates/raa-gi/src/wgsl/voxelize_virtual.wgsl`<br>`crates/raa-gi/tests/virtual_variants.rs` | raa-gi-core, raa-gi-volume, raa-vg-resolve, raa-vg-scene, raa-vg-cull |
+| gi-virtual-scenes | `examples/global-illumination/scenes/virtual.js`<br>`examples/global-illumination/virtual.test.mjs` | gi-page, page-kit, api-m30, api-m29-vg, api-m29-bake, vg-page |
+| sdfm-gi-settings | `sdfm:src/core/global-illumination-settings.ts`<br>`sdfm:src/core/global-illumination-settings.test.ts`<br>`sdfm:src/components/shell/GlobalIlluminationSetting.vue`<br>`sdfm:src/app/paramesh/game-global-illumination.ts`<br>`sdfm:src/app/paramesh/game-global-illumination.test.ts` | api-m30, js-package |
+| sdfm-gi-evidence | `sdfm:src/core/global-illumination-evidence.ts`<br>`sdfm:src/core/global-illumination-evidence.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/global-illumination-app.ts`<br>`sdfm:src/app/gpu-page/global-illumination-visibility.ts`<br>`sdfm:src/app/gpu-page/global-illumination-controls.test.ts`<br>`sdfm:src/app/gpu-page/editor-capture.ts`<br>`sdfm:src/node/evidence/topics/global-illumination.ts`<br>`sdfm:src/node/evidence/topics/global-illumination.test.ts` | sdfm-gi-settings, sdfm-sky-weather-settings, sdfm-game-light-sync, sdfm-editor-evidence, sdfm-vg-evidence, sdfm-vg-export, sdfm-light-evidence, sdfm-sky-weather-evidence, mama-mesh-clusters, api-m30, api-m29-vg, api-m29-bake |
+| raa-ssr-gi-budget | `crates/raa-ssr/src/resources.rs` | raa-pipeline-gi |
+| raa-ao-once | `crates/raa-shader/src/wgsl/pass_forward.wgsl`<br>`crates/raa-shader/src/wgsl/pass_transparent.wgsl`<br>`crates/raa-shader/src/wgsl/pass_furshell.wgsl`<br>`crates/raa-particles/src/wgsl/particles_opaque.wgsl`<br>`crates/raa-matfn/src/wgsl/plush.wgsl`<br>`crates/raa-lit/src/wgsl/slots_default.wgsl`<br>`crates/raa-ibl/src/wgsl/ambient.wgsl`<br>`crates/raa-brdf/src/wgsl/ambient.wgsl`<br>`crates/raa-gtao/src/desc.rs`<br>`crates/raa-gtao/README.md`<br>`crates/raa-gtao/tests/desc.rs`<br>`crates/raa-shader/tests/ao_once.rs` | raa-shader-gi, raa-shader-vg, raa-gi-screen, api-m9, raa-pipeline-gi |
+| raa-area-ltc | `crates/raa-shader/src/wgsl/local_lighting.wgsl`<br>`crates/raa-shader/tests/area_form_factor.rs`<br>`crates/raa-pipeline/src/brdf_atlas.rs`<br>`crates/raa-pipeline/src/ltc_tables.txt`<br>`crates/raa-pipeline/src/lib.rs`<br>`crates/raa-ibl/src/lut.rs`<br>`crates/raa-ibl/src/wgsl/brdf_lut.wgsl`<br>`crates/raa-ibl/src/wgsl/ibl_lib.wgsl`<br>`crates/raa-ibl/README.md`<br>`crates/raa-lit/src/light_math.rs`<br>`crates/raa-lit/tests/fixtures/local-light-math.txt`<br>`crates/raa-js/tests/local_lights.rs`<br>`scripts/gi-cornell-ratio.mjs`<br>`scripts/gi-cornell-ratio.test.mjs`<br>`crates/raa-tonemap/src/tonemap.wgsl`<br>`crates/raa-tonemap/src/curves.rs`<br>`crates/raa-tonemap/tests/curves.rs`<br>`crates/raa-tonemap/tests/variants.rs` | raa-shader-gi, raa-pipeline-gi, raa-gi-volume, raa-gi-screen, raa-ssr-gi-fallback, raa-ibl-gi-seam, api-m28, gi-lighting-scenes, gi-page |
+| raa-area-shadow | `crates/raa-lit/src/area_shadow.rs`<br>`crates/raa-lit/tests/area_shadow.rs`<br>`crates/raa-lit/tests/area_shadow_frame.rs`<br>`crates/raa-lit/src/local_lights.rs`<br>`crates/raa-lit/src/select.rs`<br>`crates/raa-lit/tests/select.rs`<br>`crates/raa-shadow/tests/hero_layers.rs`<br>`crates/raa-shadow/Cargo.toml` | raa-lit-vg-seam, raa-area-ltc, raa-shadow-vg-seam |
+| raa-area-shadow-shading | `crates/raa-shadow/src/wgsl/csm.wgsl`<br>`crates/raa-shadow/tests/pcss_shared.rs`<br>`crates/raa-shader/tests/shadow_pcss.rs`<br>`crates/raa-shader/tests/area_shadow_tiers.rs`<br>`crates/raa-gi/tests/fixtures/cone.json` | raa-shader-gi, raa-area-ltc, raa-gi-screen, raa-gi-core, raa-area-shadow |
+| gi-area-shadow-scenes | `examples/global-illumination/scenes/area-shadows.js`<br>`examples/global-illumination/area-shadows.test.mjs` | gi-page, gi-lighting-scenes, api-m28 |
+| raa-taa | `crates/raa-taa/Cargo.toml`<br>`crates/raa-taa/README.md`<br>`crates/raa-taa/src/lib.rs`<br>`crates/raa-taa/src/history.rs`<br>`crates/raa-taa/src/shaders.rs`<br>`crates/raa-taa/src/resources.rs`<br>`crates/raa-taa/src/feature.rs`<br>`crates/raa-taa/src/wgsl/reproject.wgsl`<br>`crates/raa-taa/src/wgsl/taa.wgsl`<br>`crates/raa-taa/tests/history.rs`<br>`crates/raa-taa/tests/reproject.rs`<br>`crates/raa-taa/tests/variants.rs`<br>`crates/raa-taa/tests/frame.rs` | raa-pipeline-vg-order, raa-lit-vg-seam |
+| api-m31-taa | `crates/raa-js/src/api/m31_taa.rs`<br>`crates/raa-js/tests/taa.rs`<br>`docs/api/m31-taa.md` | raa-taa, api-m7, raa-lit-vg-seam, raa-js |
+| gi-taa-scenes | `examples/global-illumination/scenes/temporal.js`<br>`examples/global-illumination/temporal.test.mjs` | gi-page, gi-lighting-scenes, page-kit, api-m31-taa |
+| lookdev-taa-scene | `examples/lookdev/scenes/m31-taa.js`<br>`examples/lookdev/test/m31-taa.test.mjs` | lookdev-page, lookdev-tools, api-m31-taa |
+| raa-motion-v2 | `crates/raa-pipeline/src/targets.rs`<br>`crates/raa-pipeline/tests/targets.rs`<br>`crates/raa-lit/src/passes.rs`<br>`crates/raa-shader/src/wgsl/pass_prepass.wgsl`<br>`crates/raa-lit/tests/motion.rs`<br>`crates/raa-lit/tests/fixtures/motion.txt` | raa-lit-vg-seam, raa-shader-vg, raa-pipeline-vg-order |
+| raa-area-stochastic | `crates/raa-lit/src/area_stochastic.rs`<br>`crates/raa-lit/tests/area_stochastic.rs`<br>`crates/raa-lit/tests/area_stochastic_frame.rs` | raa-area-shadow, raa-pipeline-gi, raa-lit-vg-seam |
+| raa-gi-area-stochastic | `crates/raa-gi/src/parts/area_shadow.rs`<br>`crates/raa-gi/src/parts/area_shadow/cpu.rs`<br>`crates/raa-gi/src/parts/area_shadow/passes.rs`<br>`crates/raa-gi/src/parts/area_shadow/resources.rs`<br>`crates/raa-gi/src/wgsl/area_shadow/trace.wgsl`<br>`crates/raa-gi/src/wgsl/area_shadow/temporal.wgsl`<br>`crates/raa-gi/src/wgsl/area_shadow/spatial.wgsl`<br>`crates/raa-gi/tests/area_shadow_twins.rs`<br>`crates/raa-gi/tests/area_shadow_variants.rs`<br>`crates/raa-gi/tests/area_shadow_frame.rs`<br>`crates/raa-gi/tests/fixtures/area_stochastic.json` | raa-gi-core, raa-gi-screen, raa-taa, raa-area-stochastic, raa-pipeline-gi, raa-shader-gi, raa-lit-vg-seam |
+| gi-area-stochastic-scenes | `examples/global-illumination/scenes/area-stochastic.js`<br>`examples/global-illumination/area-stochastic.test.mjs` | gi-page, gi-lighting-scenes, gi-area-shadow-scenes, api-m28 |
+| raa-gi-area-restir | `crates/raa-gi/src/parts/area_shadow/restir_cpu.rs`<br>`crates/raa-gi/src/parts/area_shadow/restir.rs`<br>`crates/raa-gi/src/parts/area_shadow/restir_resources.rs`<br>`crates/raa-gi/src/wgsl/area_shadow/restir_common.wgsl`<br>`crates/raa-gi/src/wgsl/area_shadow/restir_initial.wgsl`<br>`crates/raa-gi/src/wgsl/area_shadow/restir_temporal.wgsl`<br>`crates/raa-gi/src/wgsl/area_shadow/restir_spatial.wgsl`<br>`crates/raa-gi/tests/fixtures/area_restir.json` | raa-gi-area-stochastic, raa-area-stochastic, raa-taa, raa-pipeline-gi, raa-shader-gi, raa-area-ltc, raa-gi-screen, raa-gi-core |
+| gi-area-restir-scenes | `examples/global-illumination/scenes/area-restir.js`<br>`examples/global-illumination/area-restir.test.mjs` | gi-area-stochastic-scenes, gi-lighting-scenes, gi-page, api-m28, page-job |
+| raa-gi-ssgi | `crates/raa-gi/src/parts/ssgi.rs`<br>`crates/raa-gi/src/parts/ssgi/cpu.rs`<br>`crates/raa-gi/src/parts/ssgi/passes.rs`<br>`crates/raa-gi/src/parts/ssgi/resources.rs`<br>`crates/raa-gi/src/wgsl/ssgi/trace.wgsl`<br>`crates/raa-gi/src/wgsl/ssgi/resolve.wgsl`<br>`crates/raa-gi/tests/ssgi_twins.rs`<br>`crates/raa-gi/tests/ssgi_variants.rs`<br>`crates/raa-gi/tests/ssgi_frame.rs`<br>`crates/raa-gi/tests/fixtures/ssgi.json` | raa-gi-core, raa-gi-screen, raa-taa, raa-shader-gi, raa-motion-v2, raa-lit-vg-seam |
+| gi-ssgi-scenes | `examples/global-illumination/scenes/ssgi.js`<br>`examples/global-illumination/ssgi.test.mjs` | gi-page, gi-lighting-scenes, gi-area-stochastic-scenes |
+| gi-quality-scenes | `examples/global-illumination/scenes/gi-quality.js`<br>`examples/global-illumination/gi-quality.test.mjs` | gi-lighting-scenes, gi-area-stochastic-scenes, gi-page, api-m28, api-m30 |
+| sdfm-game-lighting-settings | `sdfm:src/core/game-lighting-settings.ts`<br>`sdfm:src/core/game-lighting-settings.test.ts`<br>`sdfm:src/app/paramesh/game-lighting.ts`<br>`sdfm:src/app/paramesh/game-lighting.test.ts` | api-m28, api-m30, api-m31-taa, sdfm-sky-weather-settings |
 
 ## Module: workspace
 Files: `Cargo.toml`, `Cargo.lock`, `.gitignore`.
@@ -748,51 +771,12 @@ Files: `Cargo.toml`, `Cargo.lock`, `.gitignore`.
 - `.gitignore` blocks target/, node_modules/, dist/, release/, out/, .nmc/, pkg/, *.log and binary assets (*.glb, *.gltf, *.png, *.jpg, *.avif, *.ktx2, *.bin).
 
 ## Module: tooling
-Files: `scripts/check.sh`, `scripts/build-web.sh`, `scripts/check-no-assets.sh`, `scripts/hooks/pre-commit`, `scripts/gpu-capture.mjs`, `web/serve.mjs`, `web/common/nmc-gpu.js`, `web/common/run-loop.js`, `proofs/lib/proof.mjs`. Owner: M1.
-
-**Declaration typecheck (`npm run typecheck:types`, i.e. `node scripts/typecheck-types.mjs`)** checks the shipped `@etcito/raa` types against what `packages/raa/index.js` accepts. Files: root `package.json` (private repository tooling, never published; its only entry is the `typescript` devDependency, resolved by kong: `kong rules && kong use`), `scripts/typecheck-types.mjs`, `tools/types-check/tsconfig.json`, `tools/types-check/consumer.ts`. The script stages `target/types-check/raa` exactly as `scripts/build-package.sh` stages the package (`index.d.ts` = `packages/raa/index.d.ts` followed by every `packages/raa/types/*.d.ts` in C-locale order except `m27-cel.d.ts`, which is copied to `types/`), then runs strict `tsc` on the staged `index.d.ts` plus the consumer fixture, which calls `loadRaa()` with every v0 option (`wasm` as bytes or a `WebAssembly.Module`, `wasmUrl` as string or URL) without casts and expects a misspelt option name and a numeric `wasmUrl` to be refused. A string for `wasm` is not a negative case: `WebAssembly.Module` is an empty interface in lib.dom. A change to the staging in `build-package.sh` changes the script with it. Declaration rule: an option or member that already exists in the v0 API of `index.js` (such as `loadRaa`'s `wasm`) is declared in `packages/raa/index.d.ts`; new API goes in a `packages/raa/types/mNN-<topic>.d.ts` file. `packages/raa/package.json` gains no dependency from this tooling. Run it with `cargo check` on a branch that touches `packages/raa/index.d.ts`, `packages/raa/types/` or `packages/raa/index.js`.
-
-**`scripts/check.sh [--quick]`** is bash with `set -euo pipefail`. It prints `== <step>` per step and exits non-zero on the first failure. Steps:
-1. `cargo fmt --all --check`.
-2. `cargo clippy --workspace --all-targets -- -D warnings`.
-3. `cargo clippy --workspace --lib --target wasm32-unknown-unknown -- -D warnings`.
-4. `cargo test --workspace` (skipped by `--quick`).
-5. `scripts/build-web.sh` for every directory in `demos/*`. The directories are discovered, never listed.
-6. `scripts/check-no-assets.sh`.
-7. SAFETY guard: every Rust line under crates/, demos/ and tests/ containing the token `unsafe` has `// SAFETY: ... (test: NAME)` directly above, and `fn NAME` exists in the workspace.
-8. Neutrality guard: no case-insensitive match of `royal|fiesta|monster|racer` in crates/, demos/, tests/, packages/, examples/ or docs/API.md.
-
-Before step 1, the script runs `cargo metadata --no-deps --format-version 1`. With zero packages, it prints `check.sh: workspace has no member crates yet; skipping cargo fmt/check/clippy/test`, runs the non-cargo checks and exits 0. Otherwise every cargo step is fatal. A missing rustfmt or clippy component is a failure that names the component.
-
-**`scripts/build-web.sh <crate-dir> [--features <list>]`** follows Conventions. Output goes to `dist/<basename>/`, including `sizes.json` (S7).
-
-**`scripts/check-no-assets.sh`** fails when `git ls-files` contains a blocked extension or a file larger than 1 MB, and prints each offender. With `--staged` it checks staged files. Blocked extensions: glb, gltf, png, jpg, jpeg, avif, ktx2, bin, wasm, hdr, exr. `scripts/hooks/pre-commit` runs it with `--staged`. Install the hook with `git config core.hooksPath scripts/hooks`.
-
-**`scripts/gpu-capture.mjs <name> [--input <path>] [--milestone mN]`** follows Conventions (Browser captures).
-- The default input is `demos/<name>/gpu-input.json`. The script reads `dist/<name>/sizes.json`.
-- It writes `proofs/results/<name>.json` (S6) and `proofs/captures/<name>.png`.
-- When `NMC_GPU_CLIENT` is unset or the client fails, it exits non-zero with a message and never fakes a result.
-
-**`web/serve.mjs <dir> [--port N]`** is a static server per Conventions. It accepts `GET` only and allows no traversal outside `<dir>`.
-
-**`web/common/nmc-gpu.js`** exports `registerNmcGpu({ run })`. It sets `window.nmcGpu = { ops: { run } }` and `window.nmcGpu.ready = true`.
-
-**`web/common/run-loop.js`** exports `async function runMeasured(demo, canvas, args)`. It does the following:
-1. Sets the canvas to `args.width` x `args.height` at dpr 1.
-2. Runs `args.warmup + args.frames` frames through `requestAnimationFrame`, calling `demo.frame(now)` and measuring cpuMs.
-3. Performs the CAPTURE resize cycle when `args.resize` is set.
-4. Calls `demo.probe_non_empty(now)`.
-5. Returns the merged S6 page fields, with `demo.stats()` supplying adapter, hardware, firstFrameMs, instances, drawCalls, triangles and allocsPerFrameTotal.
-
-**`proofs/lib/proof.mjs`** exports:
-- `parseArgs(argv) -> { quick, full, only: RegExp|null }`.
-- `async check(label, fn)`: `fn` returns `{ measured, threshold, ok }`. It prints the CHECK line, skips when `only` does not match and exits 1 on failure.
-- `run(cmd, args, opts?) -> { code, stdout, stderr }`: spawnSync with no shell and the inherited environment.
-- `async pool(items, worker)`: concurrency `NMC_CPUS`, default 1.
-- `readJson(path)`.
-- `gzipSize(path)`: zlib level 9.
-- `browserResultCheck(name, { requireHardware, maxCpuMs, instances })`: validates S6, meaning nonEmpty, adapter present, hardware stated and firstFrameMs <= FIRST_FRAME_MAX_MS, plus the optional speed rule.
-- `VALUES`: the Values table numbers.
+Files: `scripts/check.sh`, `scripts/build-web.sh`, `scripts/check-no-assets.sh`, `scripts/hooks/pre-commit`, `scripts/gpu-capture.mjs`, `web/serve.mjs`, `web/common/nmc-gpu.js`, `web/common/run-loop.js`, `proofs/lib/proof.mjs`.
+- `npm run typecheck:types` (`scripts/typecheck-types.mjs`, `tools/types-check/`) stages the package declarations as `build-package.sh` does and runs strict `tsc` with a consumer fixture of every v0 `loadRaa` option. Existing v0 options are declared in `index.d.ts`; new API in `types/mNN-*.d.ts`.
+- `scripts/check.sh [--quick]`: `== <step>`, stops on failure: fmt, clippy (host, wasm32 lib), tests (not quick), `build-web.sh` per discovered demo, `check-no-assets.sh`, the SAFETY guard and the neutrality guard; with no member crates it skips cargo steps.
+- `check-no-assets.sh [--staged]` refuses blocked extensions (glb, gltf, png, jpg, jpeg, avif, ktx2, bin, wasm, hdr, exr) and files > 1 MB; the pre-commit hook runs it (`git config core.hooksPath scripts/hooks`).
+- `gpu-capture.mjs <name>` writes `proofs/results/<name>.json` (S6) and the capture, never faking a result. `serve.mjs` is GET-only without traversal. `nmc-gpu.js` exports `registerNmcGpu({ run })`; `run-loop.js` `runMeasured(demo, canvas, args)` returns the S6 fields.
+- `proof.mjs`: `parseArgs`, `check`, `run`, `pool` (NMC_CPUS), `readJson`, `gzipSize`, `browserResultCheck`, `VALUES`.
 
 ## Module: raa-core
 Files: `crates/raa-core/**`.
@@ -1430,60 +1414,15 @@ The committed `m5-csg-cases.json` is the S9 table produced by the same command.
 `m5-booleans.json` is captured with the streaming demo. Its instances, drawCalls and triangles are those of the full 11-case grid, because streaming ends inside warm-up. The result is never edited or re-run selectively. `docs/dogfood/m5.md` records that cases stream in after frame 0.
 
 ## Module: raa-js
-Files: `crates/raa-js/{Cargo.toml, README.md, build.rs}`, `src/{lib, engine, convert, state, feature_map}.rs`, `src/api/*.rs`, `tests/{convert, api_registry}.rs`.
+Files: `crates/raa-js/{Cargo.toml, README.md, build.rs}`, `src/{lib, engine, convert, state, feature_map}.rs`, `tests/{convert, api_registry}.rs`; `src/api/*.rs` belong to their api modules.
 
-The wasm-bindgen engine (cdylib + rlib). `#[wasm_bindgen(js_name = Engine)] pub struct Engine` is a WebApp inside a WebRuntime.
-- The runtime is created with `WebRuntime::new_with` and `DeviceRequest { optional_features: WEBGPU_OPTIONAL, adapter_limits: true }`.
-- `EngineApp::init` creates `raa_pipeline::Pipeline`, `raa_lit::LitRenderer` and `raa_tonemap::TonemapPass`, runs `install_all`, then installs `raa.pipeline` in the runtime graph.
-- The CsgResolver and the 8 prims are registered, with strict kinds.
-- JS handles are monotonically increasing u32 values, never reused. Errors are thrown through `raa_web::error_to_js`.
+The wasm-bindgen `Engine` (WebApp in a WebRuntime with `DeviceRequest { optional_features: WEBGPU_OPTIONAL, adapter_limits: true }`). Init creates `Pipeline`, `LitRenderer`, `TonemapPass`, runs `install_all`, installs `raa.pipeline`; CsgResolver and the 8 prims use strict kinds. Handles are never-reused u32; errors via `raa_web::error_to_js`. `finish_scene_invocation` forwards submissions to `VgHandle` and `GiHandle`.
 
-**API v0** (unchanged names, arguments, defaults, results and codes):
-- Lifecycle:
-  - `static create(canvas, options)`. Options: maxInstances 16384, maxMaterials 256, powerPreference, and `msaa?: 1|4`, `toneMapper?: 'agx'|'aces'|'linear'`, `exposureEv?` (finite). Other values throw `api.invalid_argument`.
-  - `resize`, `render(nowMs)`, `stats()`, `probeNonEmpty(nowMs)`, `dispose()`.
-- Materials: `addMaterial(desc)`, `setMaterial(id, desc)`. Both map through `SurfaceMaterial::from_v0`.
-- Meshes:
-  - `primitiveMesh(kind, params, segments?)` and `loadPrimsAsset(json, segments?)`, uploaded as `AttributedMesh` with S10 default attributes;
-  - `removeMesh(id)` (any mesh handle);
-  - `spawnAsset(asset, parent?)`.
-- Nodes: `addNode`, `setTransform`, `removeNode`, `setTransforms(nodes, trs)` (10 floats per node, `api.length_mismatch`).
-- Instances:
-  - `addInstance(node, mesh, material)` draws every sub-mesh with `material`;
-  - each JS instance is an instance group: one scene instance per sub-mesh, tag = the JS handle;
-  - `removeInstance` and `setVisible` act on the whole group.
-- Camera and light: `setCamera`, `orbit`, `setOrbit`, `setLight`, `setAmbient`.
-- `stats` and `probeNonEmpty` keep their meaning (S12 background rule).
+**API v0** (unchanged): `create(canvas, options)` (maxInstances 16384, maxMaterials 256, powerPreference, msaa 1|4, toneMapper, exposureEv), `resize`, `render`, `stats`, `probeNonEmpty`, `dispose`; `addMaterial`, `setMaterial`; `primitiveMesh`, `loadPrimsAsset`, `removeMesh`, `spawnAsset`; `addNode`, `setTransform`, `removeNode`, `setTransforms` (10 floats per node); `addInstance` (instance group, tag = handle), `removeInstance`, `setVisible`; `setCamera`, `orbit`, `setOrbit`, `setLight`, `setAmbient`.
 
-**State**
-- `src/state.rs`: `pub(crate) struct EngineState` holds the scene, list, tags, orbit, geometry, loaders, booleans, scratch, `lit: LitRenderer`, `pipeline: Rc<RefCell<Pipeline>>`, `tonemap: TonemapControl`, `features: FeatureMap` and the handle maps (meshes, materials, nodes, instance groups, assets). Helpers: `node(h)`, `material(h)`, `mesh(h)`, `instance_group(h)`.
-- `src/feature_map.rs`: `FeatureMap`, type-keyed, with `insert<T>`, `get<T>`, `get_mut<T>` and `require_mut<T>(what)` (`api.feature_missing`).
+`EngineState` holds scene, lit, pipeline, tonemap, `FeatureMap` (type-keyed, `api.feature_missing`) and handle maps. `build.rs` registers `src/api/*.rs` by file name (`install_all`, `frame_all` before `lit.prepare`).
 
-**API files**
-- `build.rs` lists `src/api/*.rs` sorted by file name and writes `$OUT_DIR/api_registry.rs`, with:
-  - `#[path] mod <stem>;` per file;
-  - `install_all(ctx: &mut InstallCtx)` and `frame_all(st, gpu, input)`, calling each file's `install` and `frame` in that order.
-  - It emits `cargo:rerun-if-changed=src/api`.
-- Each api file defines `pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError>`, `pub(crate) fn frame(st: &mut EngineState, gpu: &GpuContext, input: &FrameInput) -> Result<(), RaaError>` and `#[wasm_bindgen(js_class = Engine)] impl Engine` blocks using `Engine::with_state(&self, f)`.
-- `InstallCtx { gpu, surface_format, pipeline, lit, features }`.
-- `install_all` runs at init after `prepass`, `forward` and `tonemap` exist. `frame_all` runs in `update` before `lit.prepare`.
-- Files: `m07_meshes`, `m07_pipeline` (api-m7), `m08_sky_ibl` (api-m8), `m09_shadows_ao`, `m10_materials`, `m11_transmission`, `m13_liquids_particles`, `m14_camera_effects`, `m15_animation`.
-
-**`m07_meshes`**
-- `addMesh(desc: MeshDesc) -> u32` (S13).
-- `updateMesh(id, desc)`: instance groups of that mesh are rebuilt at the next frame, keeping node, visibility and tag.
-- `meshInfo(id) -> {vertices, triangles, subMeshes: [{first, count, material|null}], bounds: {min, max}}`.
-- `addMeshInstance(node, mesh) -> u32`: each sub-mesh with its own material, or the default material.
-
-**`m07_pipeline`**
-- `passes() -> PassInfo[]` (`{name, role: 'pass'|'contributor', enabled, order, required}` in execution order).
-- `setPassEnabled(name, enabled)` (`pipeline.unknown_pass`, `pipeline.required_pass`).
-- `setPassOrder(names)`: every pass-role name exactly once (`pipeline.order_incomplete`, `pipeline.unknown_pass`, `pipeline.required_order`).
-- `setToneMapping({mapper?, exposureEv?, look?: 'none'|'punchy'|'golden', dither?})`.
-- `setBackground(color)`: display-referred linear, finite, >= 0.
-- `capabilities() -> {coreWebGpu: true, features: string[], msaa, hdrFormat: 'rgba16float', maxStorageBufferBindingSize}`.
-
-Tests: `convert.rs` (v0 conversions), `api_registry.rs` (build.rs output lists every api file, install/frame order).
+`m07_meshes`: `addMesh` (S13), `updateMesh`, `meshInfo`, `addMeshInstance`. `m07_pipeline`: `passes`, `setPassEnabled`, `setPassOrder` (`pipeline.*` codes), `setToneMapping`, `setBackground`, `capabilities`.
 
 ## Module: js-package
 Files: `packages/raa/{package.json, index.js, sky-weather.js, index.d.ts, README.md, LICENSE}`, `packages/raa/test/{sky-weather,load-once}.test.mjs`, `scripts/build-package.sh`, `scripts/build-bricks.sh`.
@@ -1904,19 +1843,9 @@ Cascaded soft sun shadows (S12 `shadow.csm`). Depends on raa-core, raa-math, raa
 Tests: cascades.rs, variants.rs.
 
 ## Module: raa-gtao
-Files: `crates/raa-gtao/**`.
+Files: `crates/raa-gtao/**` except raa-ao-once's files.
 
-Ground-truth ambient occlusion (S12 `ao.gtao`). Depends on raa-core, raa-math, raa-pipeline, raa-lit, raa-shader.
-
-- `AoDesc { radius_m (0.8; (0, 10]), intensity (1; [0, 1]), power (1.5; (0, 8]) }`. `validate` gives `ao.invalid`.
-- `GtaoFeature::install(gpu, pipeline, lit) -> GtaoHandle`. FeaturePass `ao.gtao` (order 40) runs these compute steps at full resolution:
-  1. Jimenez 2016 from `depth` and `normal`: 4 slice directions rotated by 4x4 noise, 8 horizon steps per side, cosine-weighted visibility with a thickness heuristic; out = 1 - intensity x (1 - vis^power), into R32Float.
-  2. Two separable 7-tap bilateral passes, weight exp(-|dz| / (0.02 z)). The final texture is Rgba16Float with AO in .r.
-  3. `set_ao`; no camera or disabled gives `clear_ao`.
-- `Ao` slot `gtao` (priority 10): textureLoad of binding 7 .r.
-- `GtaoHandle`: `set`, `get`, `set_camera(proj, inv_proj)` (every frame, api-m9).
-
-Tests: desc.rs, variants.rs.
+GTAO (S12 `ao.gtao`, order 40): `AoDesc { radius_m 0.8, intensity 0.6, power 1.0 }` (`ao.invalid`); Jimenez 2016 horizon search, two bilateral passes, `set_ao`/`clear_ao`; `Ao` slot `gtao` (10). It darkens only ambient, once (S11). `GtaoHandle`: `set`, `get`, `set_camera`.
 
 ## Module: raa-contact
 Files: `crates/raa-contact/**`.
@@ -1936,11 +1865,7 @@ Tests: variants.rs.
 ## Module: api-m9
 Files: `crates/raa-js/src/api/m09_shadows_ao.rs`, `packages/raa/types/m09-shadows-ao.d.ts`, `docs/api/m09-shadows-ao.md`.
 
-- `setShadows({ softness?, distance?, resolution?: 1024|2048|4096 })`.
-- `setAo({ radius?, intensity?, power? })`.
-- `setContactShadows({ distance?, thickness?, intensity? })`.
-
-Each call is validated with its code. Enabling and disabling go through `setPassEnabled('shadow.csm'|'ao.gtao'|'shadow.contact', on)`. `frame` feeds the camera and sun to the three handles.
+`setShadows({ softness?, distance?, resolution? })`, `setAo({ radius?, intensity?, power? })` (0.8, 0.6, 1.0), `setContactShadows({ distance?, thickness?, intensity? })`; toggles through `setPassEnabled`.
 
 ## Module: proof-m9
 Files: `proofs/m9-shadows-ao.mjs`, `examples/lookdev/scenes/m09-shadows-ao.js`, `proofs/results/lookdev/m09-*.json`, `docs/dogfood/m9.md`.
@@ -2217,7 +2142,7 @@ The existing filename-discovered API registration installs `light.tiles` at orde
 Implements S18 in sdfm: the registered `pointLight` kind, the document-light projection, the add command, `PointLightSection.vue` and the generated schema and catalog. Tests: `src/core/scene-lights.test.ts`, `src/core/scene-lights-authoring.test.ts`, `src/app/gpu-page/scene-lights-controls.test.ts`.
 
 ## Module: sdfm-game-light-sync
-Implements S19 in sdfm (`src/app/paramesh/game-light-sync.ts`, `game-display.ts` and their tests). GameDisplay also surfaces required sky, time and weather failures and exposes `skyWeatherState()` (S25) across Engine creation, recreation, submission and disposal, without touching light ownership. `game-render-settings.ts` belongs to sdfm-sky-weather-settings.
+Implements S19 (`game-light-sync.ts`, `game-display.ts`); GameDisplay also reports sky (S25), GI (S41) and game-lighting state and refusals and passes vertex colours to m30.
 
 ## Module: sdfm-light-evidence
 Implements S20 and S21 in sdfm through the compiled-topic discovery of `src/node/evidence/run.ts` and the `scene-lights-app` viewport scenario, with the UI driver and the inspector readability check. `sdfm:.nmc/commands.json` is written by sdfm-sky-weather-evidence.
@@ -2427,11 +2352,6 @@ Each milestone's proof, run from the repository root at its final commit.
 - M8 Effects II: SSR on glossy floors, depth of field, height fog and aerial perspective, sun shafts, colour grading, environ: `node proofs/m14-camera-effects.mjs` — timeout_s 3600
 - M9 Animation hooks: rigid part hierarchies from JS, squash-and-stretch and jiggle in the vertex stage, per-instance tint an: `node proofs/m15-animation.mjs` — timeout_s 3600
 
-## Editor display API
-
-See [docs/editor-features.md](docs/editor-features.md) for the mesh edge list,
-wireframe modes, selection masks, orthographic camera, disabled cost and proof.
-
 ## Module: raa-cel
 
 `crates/raa-cel` owns the `cel.resolve` HDR pass at order 190 (after grading,
@@ -2470,14 +2390,7 @@ The atmosphere stage of S26, with time, place and playback controls. `observe` r
 ## Module: raa-volumetric-weather
 Files: `crates/raa-sky/src/clouds/**`.
 
-The `m2` cloud backend of S25 (`clouds::create`).
-- `shaders.rs` builders and entries: `noise_module_wgsl` (`raa_cloud_noise_shape`, `_detail`, `_weather`), `coverage_module_wgsl` (`raa_cloud_coverage_histogram`, `_accumulate`), `cloud_volume_wgsl`, `shadow_module_wgsl` (`raa_cloud_shadow_main`), `shadow_mean_module_wgsl` (`raa_cloud_shadow_mean_main`), `panorama_module_wgsl` (`raa_cloud_panorama_main`), `screen_module_wgsl(multisampled_depth)` (`raa_cloud_screen_main`).
-- `wgsl/cloud_volume.wgsl`: `raa_cloud_density(xz, height, cheap)`, `raa_cloud_layer_span`, `raa_cloud_height_along`, `raa_cloud_layer_fraction`, `raa_cloud_weather_at`, `raa_cloud_along(direction, steps, light_samples, jitter) -> RaaCloudSample { radiance, transmittance, distance }`.
-- `CloudGpu` (192 B, `resources.rs`): `wind_offset` @0, `evolution` @8, `coverage` @12, `cloud_type` @16, `base` @20, `top` @24, `density` @28, `cirrus` @32, `rain` @36, `shadow_extent` @40, `enabled` @44, `shadow_origin` @48, `wind_direction` @56, `right` @64, `up` @80, `forward` @96 (w = history usable), `screen` @112 (half-resolution width, height, invocation & 255, 0), `previous_view_proj` @128.
-- March group 2: 0 `CloudGpu`, 1 `PhysicalSkyGpu`, 2 shape, 3 detail, 4 weather map, 5 transmittance LUT, 6 sky-view, 7 noise sampler, 8 LUT sampler, 9 coverage CDF `array<f32, 256>` (read-only storage), 10 Rgba16Float storage output; the screen module adds 11 history and 12 scene depth.
-- Validity: noise is ready after the acknowledged submission that carried its generation. The panorama flag is true from a marchable prepare (physical, weather enabled, sky-view present) until an invalidation; the screen flag only after an acknowledged submission of the view's march at its current size. History is view-local and commits on acknowledged submissions. Non-marchable frames and disabled shadows publish transmittance 1.
-
-Tests: `src/clouds/tests/`.
+The `m2` cloud backend of S25 (`clouds::create`): noise, coverage, volume, shadow, panorama and screen modules (`shaders.rs`), `CloudGpu` (192 B, `resources.rs`) and the march group 2 (0 `CloudGpu`, 1 `PhysicalSkyGpu`, 2-4 noise and weather textures, 5-6 LUTs, 7-8 samplers, 9 coverage CDF, 10 output; screen adds 11 history, 12 depth). Validity flags follow acknowledged submissions; history is view-local. Tests: `src/clouds/tests/`.
 
 ## Module: sky-weather-scenes
 Files: `examples/sky-weather/scenes/weather.js`, `examples/sky-weather/weather.test.mjs`.
@@ -2485,11 +2398,7 @@ Files: `examples/sky-weather/scenes/weather.js`, `examples/sky-weather/weather.t
 The weather stage of S26, discovered by the page like every scene; it reuses the atmosphere scene's camera and helpers.
 
 ## Module: sdfm-sky-weather-settings
-Files (sdfm): `src/core/{render-settings,sky-weather-settings}.ts`, `src/app/render-settings.ts`, `src/components/shell/{RenderSettingsPanel,SkyWeatherSettings}.vue`, `src/app/paramesh/game-render-settings.ts`, `src/node/ops/render-settings.ts`, `src/app/procedural/raytrace-display.ts`, `src/plugins/ui/36-display.ts`, the generated schema, tools and catalog docs, `tsconfig.node.json` and the S27 tests.
-
-- `resolveSkyWeatherSettings(current, patch): RenderSettings` validates the complete candidate without mutation; `authoredSkyWeather(settings)` returns copies of `gameSky`, `gameTime` and `gameWeather`.
-- The Render settings panel exposes model and preset, day, hours, latitude, north, automatic lighting, pause/play, speed, the weather preset and fields, clouds, shadows, changing, seed, transition and `.weather` import/export (parsed fully, then committed atomically), with units and a Game-only note. The `setRenderSettings`/reset and `render_settings_get/set` routes carry the fields.
-- `applySharedRenderSettings(engine, input, captureBackground, setToneMapping?): string[]` is the guarded earlier mapping (never throws; used by the Raytrace view). `applyGameRenderSettings` (same signature, GameDisplay only) adds the three records, manual daylight baseline first, and throws their failures.
+Files (sdfm): render settings core, app and node routes, panels, `game-render-settings.ts`, raytrace display, schema and catalog docs, `tsconfig.node.json`. `resolveSkyWeatherSettings`, `authoredSkyWeather`, the Render settings panel (sky, time, weather, VG, GI, game lighting) and `applyGameRenderSettings` (sky, then VG, GI and game lighting; throws failures); `applySharedRenderSettings` never throws.
 
 ## Module: sdfm-sky-weather-evidence
 Files (sdfm): `src/core/sky-weather-evidence.ts`, `src/app/gpu-page/scenarios/sky-weather-app.ts`, `src/app/gpu-page/sky-weather-visibility.ts`, `src/node/evidence/topics/sky-weather.ts`, their tests, `.nmc/commands.json`.
@@ -2522,28 +2431,28 @@ MAMA's S30 validator (`src/core/game/mesh-clusters.ts`).
 The S30 reader of `@etcito/raa-sdfm`.
 
 ## Module: page-job
-`web/common/page-job.mjs`: `createPageJob`, the shared S26 job.
+`createPageJob` (S26 actions, verdict reuse, `judgeReference`/`judgeAspect`, `<envPrefix>_SCENARIO`), configured by vg-job and gi-job.
 
 ## Module: vg-job
 The S33 page-job configuration.
 
 ## Module: vg-page
-The S33 page, `bake` stage and build.
+The S33 page on page-kit (`build-page.mjs virtual-geometry --stages bake,passes`).
 
 ## Module: raa-shader-vg
-S32 shader parts in raa-shader.
+S32 shader parts; also `GI_VOLUME_WGSL` and `VARIANT_FLAG_MOTION_DEFORM` exports.
 
 ## Module: raa-pipeline-vg-order
 The S32 order pairs.
 
 ## Module: raa-lit-vg-seam
-`VirtualSet` and the `LitHandle` accessors of S32.
+`VirtualSet` and `LitHandle` accessors (S32, S37), the TAA jitter consumer and `frame_buffer()`.
 
 ## Module: raa-shadow-vg-seam
 `ShadowHandle::cascade_targets`.
 
 ## Module: raa-vg-scene
-raa-vg settings, eligibility and the scene pool.
+raa-vg settings, eligibility, scene pool and `INSTANCE_GI`.
 
 ## Module: raa-vg-cull
 raa-vg culling and the occlusion pyramid.
@@ -2552,7 +2461,7 @@ raa-vg culling and the occlusion pyramid.
 raa-vg rasterisers and cascade casters.
 
 ## Module: raa-vg-resolve
-raa-vg resolve, gbuffer, shade, stats and `VgFeature`.
+raa-vg resolve, gbuffer, shade, stats, `VgFeature`, `with_gi_frame`, `set_gi_members`.
 
 ## Module: api-m29-vg
 The settings half of S31 (`m29_virtual_geometry.rs`).
@@ -2570,4 +2479,118 @@ The S34 setting helpers.
 The S34 editor evidence.
 
 ## Module: sdfm-editor-evidence
-`EditorEvidenceStore`, the shared editor-evidence store.
+`EditorEvidenceStore` and `exportEditorAssets`.
+
+## Module: page-kit
+`createPageRunner` and `scripts/build-page.mjs`.
+
+## Module: raa-shader-gi
+S10/S38 prelude and `gi_volume.wgsl`.
+
+## Module: raa-pipeline-gi
+S10 group-1 layouts and setters.
+
+## Module: raa-sky-gi-budget
+Sky base layout (S10).
+
+## Module: raa-group1-pins
+S10 variant pins.
+
+## Module: raa-lit-gi-seam
+STORAGE mesh buffers (S10).
+
+## Module: raa-gi-core
+S36, S37.
+
+## Module: raa-gi-volume
+S37, S38.
+
+## Module: api-m30
+S36.
+
+## Module: gi-page
+S40.
+
+## Module: raa-gi-screen
+S39.
+
+## Module: raa-ibl-gi-seam
+S39, S45.
+
+## Module: raa-ssr-gi-fallback
+S39, S45.
+
+## Module: raa-ssr-gi-budget
+SSR split group 0 (S10).
+
+## Module: gi-lighting-scenes
+S40 lighting.
+
+## Module: raa-gi-virtual
+S37 driver B.
+
+## Module: gi-virtual-scenes
+S40 virtual.
+
+## Module: sdfm-gi-settings
+S41.
+
+## Module: sdfm-gi-evidence
+S41.
+
+## Module: raa-ao-once
+S11 AO rule.
+
+## Module: raa-area-ltc
+S11, S44.
+
+## Module: raa-area-shadow
+S44.
+
+## Module: raa-area-shadow-shading
+S44.
+
+## Module: gi-area-shadow-scenes
+S40.
+
+## Module: raa-taa
+S43.
+
+## Module: api-m31-taa
+S43.
+
+## Module: gi-taa-scenes
+S40.
+
+## Module: lookdev-taa-scene
+S43.
+
+## Module: raa-motion-v2
+S43.
+
+## Module: raa-area-stochastic
+S44.
+
+## Module: raa-gi-area-stochastic
+S44.
+
+## Module: gi-area-stochastic-scenes
+S40.
+
+## Module: raa-gi-area-restir
+S44.
+
+## Module: gi-area-restir-scenes
+S40.
+
+## Module: raa-gi-ssgi
+S39.
+
+## Module: gi-ssgi-scenes
+S40.
+
+## Module: gi-quality-scenes
+S40.
+
+## Module: sdfm-game-lighting-settings
+S41.
