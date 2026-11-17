@@ -61,7 +61,7 @@ use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
 use raa_math::Vec3;
-use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx};
+use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx, ResourceTable};
 use raa_scene::Camera;
 
 use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage};
@@ -1001,6 +1001,27 @@ fn state_busy() -> RaaError {
     RaaError::Resource(format!("{ATMOSPHERE_NAME}: sky state is busy"))
 }
 
+/// Publishes the atmosphere's S55 outputs: the two static LUTs and the sky view of `view`.
+/// Every one is a 2D Rgba16Float texture with one layer and one mip, at its creation size.
+fn publish_outputs(atmosphere: &AtmosphereResources, view: u32, resources: &ResourceTable) {
+    let lut = |size: (u32, u32)| ImageDesc::new(ImageDim::D2, LUT_FORMAT, size.0, size.1, 1, 1);
+    resources.publish(
+        ATMOSPHERE_NAME,
+        "transmittanceLut",
+        atmosphere.transmittance(),
+        lut(TRANSMITTANCE_SIZE),
+    );
+    resources.publish(
+        ATMOSPHERE_NAME,
+        "multiScatteringLut",
+        atmosphere.multiple_scattering(),
+        lut(MULTI_SCATTER_SIZE),
+    );
+    if let Some(sky_view) = atmosphere.sky_view(view) {
+        resources.publish(ATMOSPHERE_NAME, "skyView", sky_view, lut(SKY_VIEW_SIZE));
+    }
+}
+
 impl FeaturePass for SkyAtmospherePass {
     fn name(&self) -> &str {
         ATMOSPHERE_NAME
@@ -1042,6 +1063,9 @@ impl FeaturePass for SkyAtmospherePass {
             .prepare_view(ctx.gpu, view, ctx.size, &parameters);
         match prepared {
             Ok(()) => {
+                if let Ok(atmosphere) = self.resources.try_borrow() {
+                    publish_outputs(&atmosphere, view, ctx.resources);
+                }
                 let mut s = self.state.try_borrow_mut().map_err(|_| state_busy())?;
                 if let Some(slot) = s.views.get_mut(view as usize).and_then(Option::as_mut) {
                     if slot.size != (0, 0) && slot.size != ctx.size {

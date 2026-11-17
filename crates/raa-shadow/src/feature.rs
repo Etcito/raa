@@ -20,7 +20,9 @@ use std::rc::Rc;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{LitHandle, LitRenderer, MAX_HERO_LIGHTS};
 use raa_math::{Mat4, Vec3};
-use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx, RecordCtx,
+};
 
 use crate::cascade_access::CascadeTargets;
 use crate::caster::Casters;
@@ -235,6 +237,19 @@ impl FeaturePass for ShadowPass {
         };
         casters.write(ctx.gpu, &all);
         let array_view = casters.array_view().clone();
+        // S55 `shadowMap`: the array as allocated, its cascades plus the hero layers it holds.
+        let size = casters.resolution();
+        let layers = CASCADES as u32 + casters.hero_layers();
+        let map_desc = ImageDesc::new(
+            ImageDim::D2Array,
+            wgpu::TextureFormat::Depth32Float,
+            size,
+            size,
+            layers,
+            1,
+        );
+        ctx.resources
+            .publish(NAME, "shadowMap", &array_view, map_desc);
         pack_shadow(&mut st.uniform, &matrices, &splits, &desc);
         ctx.lighting.set_shadow(array_view, &st.uniform);
         st.matrices = matrices;

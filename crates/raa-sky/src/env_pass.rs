@@ -19,7 +19,9 @@
 use raa_core::{GpuContext, RaaError};
 use raa_ibl::IblHandle;
 use raa_lit::LitHandle;
-use raa_pipeline::{FeaturePass, HDR_FORMAT, LightingResources, PrepareCtx, RecordCtx};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, PrepareCtx, RecordCtx,
+};
 use raa_scene::DirectionalLight;
 
 use crate::atmosphere::{AtmosphereResources, PhysicalSkyGpu, SharedAtmosphere};
@@ -330,6 +332,8 @@ pub(crate) struct SkyEnvPass {
     cloud: SharedCloud,
     /// The SKY_ENV source cube (mip 0 rendered here, mips 1..5 written by the filter).
     cube: wgpu::Texture,
+    /// Cube view over the six faces and every mip, published as `envSpecular`.
+    cube_view: wgpu::TextureView,
     /// Mip-0 views of the six faces in wgpu order +X, -X, +Y, -Y, +Z, -Z.
     faces: [wgpu::TextureView; 6],
     legacy_pipeline: wgpu::RenderPipeline,
@@ -380,6 +384,15 @@ fn face_view(cube: &wgpu::Texture, face: u32) -> wgpu::TextureView {
         mip_level_count: Some(1),
         base_array_layer: face,
         array_layer_count: Some(1),
+        ..Default::default()
+    })
+}
+
+/// Cube view over all six faces and every mip of the source cube.
+fn cube_view(cube: &wgpu::Texture) -> wgpu::TextureView {
+    cube.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("raa.sky.env.cube_view"),
+        dimension: Some(wgpu::TextureViewDimension::Cube),
         ..Default::default()
     })
 }
@@ -458,6 +471,7 @@ impl SkyEnvPass {
         cloud: SharedCloud,
     ) -> Self {
         let cube = create_cube(gpu);
+        let cube_view = cube_view(&cube);
         let faces = std::array::from_fn(|face| face_view(&cube, face as u32));
         let physical = PhysicalSkyBinding::new(gpu);
         let frame_layout = lit.frame_layout();
@@ -477,6 +491,7 @@ impl SkyEnvPass {
             atmosphere,
             cloud,
             cube,
+            cube_view,
             faces,
             legacy_pipeline,
             physical_pipeline,
@@ -595,6 +610,10 @@ impl FeaturePass for SkyEnvPass {
                 );
             }
         }
+        // S55 `envSpecular`: the source cube, whose mips the IBL filter writes.
+        let cube = ImageDesc::new(ImageDim::Cube, HDR_FORMAT, ENV_SIZE, ENV_SIZE, 6, ENV_MIPS);
+        ctx.resources
+            .publish(ENV_NAME, "envSpecular", &self.cube_view, cube);
         Ok(())
     }
 

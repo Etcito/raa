@@ -27,7 +27,9 @@ use crate::local_lights::LocalLights;
 use crate::renderer::{LitRenderer, pipeline_busy};
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 use raa_shader::{
     Composer, FRAME_GPU_SIZE, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, TILE_SIZE, TILE_WORDS,
 };
@@ -308,6 +310,18 @@ impl LightTiles {
         ctx.lighting
             .set_local_lights(&inputs.lights, self.views[index].fragment.clone());
         self.current = index;
+        // S55 `lightTiles`: the viewport's tile array at its grid size and layer count.
+        let view = &self.views[index];
+        let desc = ImageDesc::new(
+            ImageDim::D2Array,
+            wgpu::TextureFormat::R32Uint,
+            view.grid.0,
+            view.grid.1,
+            TILE_WORDS,
+            1,
+        );
+        ctx.resources
+            .publish(LIGHT_TILES_NAME, "lightTiles", &view.fragment, desc);
         Ok(())
     }
 
@@ -457,5 +471,48 @@ mod tests {
             assert!(tiles.views.len() <= MAX_VIEWS, "stale views are disposed");
         }
         assert_eq!(tiles.views.last().map(|v| v.grid), Some((1, 1)));
+    }
+
+    /// `prepare` publishes the tile array under (`light.tiles`, `lightTiles`) at its grid
+    /// size with `TILE_WORDS` layers. The shared inputs are the zeroed `inputs()` of this
+    /// module (frame and light records, a fresh readback); no mesh pass runs first, and
+    /// prepare reads no depth values.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn prepare_publishes_the_tile_array() {
+        use raa_pipeline::ResourceTable;
+
+        let test = "prepare_publishes_the_tile_array";
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut tiles = LightTiles::new(&gpu, Rc::new(RefCell::new(inputs()))).expect("tiles");
+        let targets = Targets::new(&gpu, (8, 8));
+        let table = ResourceTable::new();
+        let mut lighting = LightingResources::new(&gpu);
+        let mut ctx = PrepareCtx {
+            gpu: &gpu,
+            size: (8, 8),
+            frame: 0,
+            time_s: 0.0,
+            dt_s: 0.0,
+            targets: &targets,
+            lighting: &mut lighting,
+            resources: &table,
+        };
+        tiles.prepare(&mut ctx).expect("prepare");
+        let entries = table.entries();
+        let keys: Vec<_> = entries
+            .iter()
+            .map(|(pass, port, _)| (pass.as_str(), port.as_str()))
+            .collect();
+        assert_eq!(keys, [("light.tiles", "lightTiles")]);
+        let desc = entries[0].2;
+        assert_eq!(desc.format, wgpu::TextureFormat::R32Uint);
+        assert_eq!(
+            (desc.dim, desc.width, desc.height, desc.layers, desc.mips),
+            (ImageDim::D2Array, 1, 1, TILE_WORDS, 1)
+        );
     }
 }

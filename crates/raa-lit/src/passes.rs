@@ -23,7 +23,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 use raa_shader::{PassKind, VariantKey};
 
 use crate::handle::{LitHandle, PipelineSpec};
@@ -241,6 +243,24 @@ impl FeaturePass for Prepass {
         true
     }
 
+    /// Publishes the four G-buffer targets under their S55 ports (`depth`, `normal`,
+    /// `material`, `motion`) at the frame's size; the prepass writes them in `record`.
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let targets = ctx.targets;
+        let (width, height) = targets.size();
+        let rows = [
+            ("depth", targets.depth(), DEPTH_FORMAT),
+            ("normal", targets.normal(), NORMAL_FORMAT),
+            ("material", targets.material(), MATERIAL_FORMAT),
+            ("motion", targets.motion(), MOTION_FORMAT),
+        ];
+        for (port, view, format) in rows {
+            let desc = ImageDesc::new(ImageDim::D2, format, width, height, 1, 1);
+            ctx.resources.publish(PREPASS_NAME, port, view, desc);
+        }
+        Ok(())
+    }
+
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let targets = ctx.targets;
         let frame = self.lit.frame_bind_group();
@@ -437,6 +457,11 @@ impl FeaturePass for ForwardPass {
             }
         }
         hdr.swap();
+        // S55 `color`: the chain view this pass wrote, published after the swap.
+        let (width, height) = ctx.targets.size();
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1);
+        ctx.resources
+            .publish(FORWARD_NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }

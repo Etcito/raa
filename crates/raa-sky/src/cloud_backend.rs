@@ -53,7 +53,9 @@ use std::rc::Rc;
 
 use raa_core::{GpuContext, RaaError};
 use raa_math::Mat4;
-use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, PrepareCtx, RecordCtx, ResourceTable,
+};
 use raa_scene::{Camera, DirectionalLight};
 
 use crate::atmosphere::{AtmosphereResources, SharedAtmosphere};
@@ -381,6 +383,27 @@ fn resources_busy(name: &str) -> RaaError {
     RaaError::Resource(format!("{name}: resources are borrowed"))
 }
 
+/// Publishes one cloud view under (`pass`, `port`). The format, size, layers and mips are
+/// those of the view's texture: the neutral and the marched views differ in size.
+fn publish_cloud(
+    resources: &ResourceTable,
+    pass: &str,
+    port: &'static str,
+    view: &wgpu::TextureView,
+    dim: ImageDim,
+) {
+    let texture = view.texture();
+    let desc = ImageDesc::new(
+        dim,
+        texture.format(),
+        texture.width(),
+        texture.height(),
+        texture.depth_or_array_layers(),
+        texture.mip_level_count(),
+    );
+    resources.publish(pass, port, view, desc);
+}
+
 /// The `sky.cloud-lighting` pass (S12 order 8): prepares the backend for the active view and
 /// records its panorama/transmittance work after the atmosphere LUTs are available.
 pub(crate) struct SkyCloudLightingPass {
@@ -464,6 +487,23 @@ impl FeaturePass for SkyCloudLightingPass {
             backend.invalidate(Some(frame.view), CloudInvalidation::Resize);
         }
         let prepared = backend.prepare(ctx.gpu, &frame, &atmosphere, ctx.lighting);
+        if prepared.is_ok() {
+            let views = backend.views(frame.view);
+            publish_cloud(
+                ctx.resources,
+                CLOUD_LIGHTING_NAME,
+                "cloudPanorama",
+                &views.panorama,
+                ImageDim::D2,
+            );
+            publish_cloud(
+                ctx.resources,
+                CLOUD_LIGHTING_NAME,
+                "cloudTransmittance",
+                &views.transmittance,
+                ImageDim::D2Array,
+            );
+        }
         drop(backend);
         drop(atmosphere);
         match prepared {
@@ -547,6 +587,34 @@ impl FeaturePass for SkyCloudScreenPass {
 
     fn order(&self) -> u32 {
         CLOUD_SCREEN_ORDER
+    }
+
+    /// Publishes the active view's screen march target (S55 `cloudScreen`). The lighting pass
+    /// (order 8) prepared the backend earlier this frame, so the target it allocates is current.
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let view = {
+            let s = self
+                .state
+                .try_borrow()
+                .map_err(|_| state_busy(CLOUD_SCREEN_NAME))?;
+            let Some(view) = s.active_view else {
+                return Ok(());
+            };
+            view
+        };
+        let backend = self
+            .cloud
+            .try_borrow()
+            .map_err(|_| resources_busy(CLOUD_SCREEN_NAME))?;
+        let views = backend.views(view);
+        publish_cloud(
+            ctx.resources,
+            CLOUD_SCREEN_NAME,
+            "cloudScreen",
+            &views.screen,
+            ImageDim::D2,
+        );
+        Ok(())
     }
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
