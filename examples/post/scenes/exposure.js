@@ -1,0 +1,176 @@
+// The exposure-room scene (S49, post page): a closed 6 x 3 x 6 m room whose only opening is in
+// its east wall, facing a sunlit exterior with a facade, a tiled ground, three poles and two cubes.
+// Two views, interior and exterior; each has an -off variant at the fixed exposure and an -on variant
+// with automatic exposure, which the runner draws until it settles. Importing this module has no side
+// effects. Geometry comes from '../lib/content.js': roomWithOpening at examples/post/lib/content.js:104
+// (its doc comment, lines 90-103, lists the builders), with tiledGround, facadeCourses, box and plane.
+import { box, facadeCourses, plane, roomWithOpening, tiledGround } from '../lib/content.js';
+
+// Hand estimates behind the values below (linear, AgX, mid grey 0.18):
+//  - sunlit facade: albedo 0.6 * 14 * cos 46 deg ~ 5.8, times 2^1 at the fixed exposure ~ 11.6,
+//    so it clips with auto exposure off;
+//  - interior away from the sun patch: 0.6 * (0.01 + 0.02) ~ 0.02, times 2 ~ 0.04, very dark;
+//  - auto exposure, 1.2 * 0.18 / average: interior average ~ 0.015 gives ~ 2^3.85 (within maxEv 6);
+//    exterior average ~ 4 gives ~ 2^-4.2 (within minEv -6).
+
+// Tone mapping exposureEv shared by all four variants: the fixed exposure of the -off rows.
+export const FIXED_EXPOSURE_EV = 1;
+// The sun stands on +X: it travels towards -X, -Y and +Z (estimates above).
+export const SUN = { direction: [-0.6, -0.55, 0.3], color: [1, 0.97, 0.92], intensity: 14 };
+// Low ambient, so the interior is dark away from the sun patch (estimates above).
+export const AMBIENT = { color: [0.55, 0.6, 0.7], intensity: 0.01 };
+// Low sky lighting: the closed room is not occluded from IBL, so the interior must stay dark.
+export const ENV_LIGHTING = { diffuse: 0.02, specular: 0.05 };
+
+// The room: interior x in [-3, 3], y in [0, 3], z in [-6, 0]; the opening is in the east wall.
+const ROOM = { width: 6, height: 3, depth: 6, wall: 0.3, opening: { zMin: -4, zMax: -2, yMin: 0.3, yMax: 2.5 } };
+// sRGB base colours; every material has roughness 0.85.
+const COLORS = {
+  walls: [0.8, 0.78, 0.72], floor: [0.45, 0.3, 0.18], table: [0.5, 0.35, 0.2], couch: [0.3, 0.35, 0.5],
+  red: [0.8, 0.1, 0.08], green: [0.15, 0.6, 0.15], blue: [0.15, 0.25, 0.75],
+  tileEven: [0.5, 0.5, 0.47], tileOdd: [0.36, 0.36, 0.34], base: [0.42, 0.42, 0.4],
+  courseEven: [0.75, 0.55, 0.42], courseOdd: [0.65, 0.47, 0.36], pole: [0.2, 0.2, 0.22],
+  yellow: [0.85, 0.7, 0.15], teal: [0.15, 0.6, 0.6],
+};
+
+// Camera and subjects of each view. The interior camera stands in the room and looks across it with
+// the opening at the right of the frame; the exterior camera faces the sunlit facade and the ground.
+const OPENING = { name: 'opening', min: [3, 0.3, -4], max: [3.3, 2.5, -2] };
+const VIEWS = {
+  interior: {
+    camera: { eye: [-2.2, 1.6, -0.6], target: [0.8, 1, -5.5], fovYDeg: 70, near: 0.05, far: 200 },
+    subjects: [
+      { name: 'room-interior', min: [-3, 0, -6], max: [3, 3, 0] },
+      OPENING,
+      { name: 'table', min: [-1.3, 0, -4], max: [0.3, 0.79, -3] },
+      { name: 'cubes', min: [0.55, 0, -5.45], max: [1.75, 1, -4.95] },
+    ],
+  },
+  exterior: {
+    camera: { eye: [14, 2.2, 4], target: [3.3, 1.4, -3], fovYDeg: 60, near: 0.1, far: 300 },
+    subjects: [
+      { name: 'facade', min: [3.3, 0, -6.3], max: [3.32, 3.3, 0.3] },
+      OPENING,
+      { name: 'ground', min: [3.3, 0, -16], max: [23.3, 0, 10] },
+      { name: 'poles', min: [5.94, 0, -5.06], max: [12.06, 3, 2.06] },
+    ],
+  },
+};
+
+// One variant per view and state. -on sets settle (the runner draws until settled); -off has no settle key.
+function variantOf(view, state) {
+  const on = state === 'on';
+  return {
+    id: `${view}-${state}`,
+    selection: VIEWS[view],
+    ...(on ? { settle: true } : {}),
+    settings: { toneMapping: { exposureEv: FIXED_EXPOSURE_EV }, autoExposure: { enabled: on } },
+    measurement: { pair: `exposure-${view}`, state, preset: `exposure-room-${view}`, features: { autoExposure: on } },
+  };
+}
+const variants = ['interior', 'exterior'].flatMap(view => ['on', 'off'].map(state => variantOf(view, state)));
+
+const REQUIRED_FACTS = [
+  'runtime:passes', 'runtime:viewSizes', 'runtime:ready', 'fact:exposure-settled', 'fact:exposure-ev',
+  'assertion:exposure-settled', 'assertion:exposure-ev', 'assertion:exposure-enabled',
+];
+const HELD_CONSTANT = {
+  interior: ['room geometry with the east wall opening', 'sky, sun, ambient and environment lighting',
+    'interior table, couch and cubes', 'tone mapping exposureEv 1', 'interior camera'],
+  exterior: ['room geometry with the east wall opening', 'sky, sun, ambient and environment lighting',
+    'tiled ground, facade courses, poles and cubes', 'tone mapping exposureEv 1', 'exterior camera'],
+};
+const row = (view, state, filename, expectedVisibleBehavior) => ({
+  id: `exposure-${view}-${state}`,
+  criterionName: `P5-Q2 exposure ${view} ${state}`,
+  scenario: 'exposure-room',
+  mode: `${view}-${state}`,
+  filename,
+  expectedVisibleBehavior,
+  requiredFacts: REQUIRED_FACTS,
+  pair: `exposure-${view}`,
+  heldConstant: HELD_CONSTANT[view],
+  producer: state === 'on' ? 'raa-exposure' : 'post-page',
+});
+
+export const inventory = [
+  row('interior', 'on', 'exposure-interior-on-room-readable.png', 'Inside a room lit only through a wall opening onto a sunlit exterior: the room\'s walls, floor and objects are clearly visible with readable shading; the opening is bright but the interior is not black.'),
+  row('interior', 'off', 'exposure-interior-off-room-too-dark.png', 'The same interior view at the fixed exposure: the room is very dark, walls and objects inside are hard to make out, only the opening is bright.'),
+  row('exterior', 'on', 'exposure-exterior-on-sunlit-facade-readable.png', 'Outside the same building in direct sun: the facade, the opening and the ground keep visible detail and texture; nothing large is clipped to white.'),
+  row('exterior', 'off', 'exposure-exterior-off-sunlit-facade-blown-out.png', 'The same exterior view at the fixed exposure: large areas of the sunlit ground and facade are clipped to flat white with little detail.'),
+];
+
+export const factNames = ['exposure-settled', 'exposure-ev', 'exposure-enabled'];
+
+// Adds one mesh whose sub-meshes take `materials` (one per sub-mesh, or one for all of them) and one
+// instance of it at `at`; returns the instance handle.
+function addPart(engine, desc, materials, at) {
+  const list = Array.isArray(materials) ? materials : [materials];
+  const parts = desc.subMeshes ?? [{ first: 0, count: desc.indices.length }];
+  const mesh = engine.addMesh({ ...desc, subMeshes: parts.map((part, i) => ({ ...part, material: list[i] ?? list[0] })) });
+  return engine.addMeshInstance(engine.addNode(null, at, [0, 0, 0, 1], [1, 1, 1]), mesh);
+}
+
+/**
+ * `build(engine, lib, variant)` builds the room, its interior objects and the exterior, and sets the
+ * variant camera. Today it sets the day sky, clear weather, SUN, AMBIENT and ENV_LIGHTING, enables
+ * shadow.csm, and adds each part with its material; it sets no tone mapping and no automatic
+ * exposure, which the runtime applies from variant.settings. It returns one named instance per part.
+ */
+export async function build(engine, lib, variant) {
+  engine.setSky({ preset: 'day' });
+  engine.setWeather({ preset: 'clear' });
+  engine.setLight(SUN);
+  engine.setAmbient(AMBIENT);
+  engine.setEnvironmentLighting(ENV_LIGHTING);
+  engine.setPassEnabled('shadow.csm', true);
+  const m = Object.fromEntries(Object.entries(COLORS).map(([name, color]) => [name, engine.addMaterial({ color, roughness: 0.85 })]));
+  const instances = [];
+  const place = (name, desc, materials, at = [0, 0, 0]) => instances.push({ name, instance: addPart(engine, desc, materials, at) });
+  const cube = (center, half) => box(center, [half, half, half]);
+  place('room', roomWithOpening(ROOM), [m.floor, m.walls, m.walls]);
+  place('table-top', box([-0.5, 0.75, -3.5], [0.8, 0.04, 0.5]), m.table);
+  [[-1.2, -3.9], [0.2, -3.9], [-1.2, -3.1], [0.2, -3.1]].forEach(([x, z], i) => place(`table-leg-${i}`, box([x, 0.355, z], [0.04, 0.355, 0.04]), m.table));
+  place('couch', box([-2.3, 0.4, -3], [0.5, 0.4, 1]), m.couch);
+  place('cube-red', cube([0.8, 0.25, -5.2], 0.25), m.red);
+  place('cube-green', cube([1.5, 0.25, -5.2], 0.25), m.green);
+  place('cube-blue', cube([1.15, 0.75, -5.2], 0.25), m.blue);
+  place('ground-tiles', tiledGround({ x0: 3.3, z0: -16, columns: 20, rows: 26, size: 1 }), [m.tileEven, m.tileOdd]);
+  place('ground-base', plane(160, 160), m.base, [0, -0.01, 0]);
+  place('facade', facadeCourses({ x: 3.3, zMin: -6.3, zMax: 0.3, yMin: 0, yMax: 3.3, course: 0.25, depth: 0.02, skip: ROOM.opening }), [m.courseEven, m.courseOdd]);
+  [[6, -1], [9, -5], [12, 2]].forEach(([x, z], i) => place(`pole-${i}`, box([x, 1.5, z], [0.06, 1.5, 0.06]), m.pole));
+  place('cube-yellow', cube([7, 0.4, -7], 0.4), m.yellow);
+  place('cube-teal', cube([10, 0.4, 1], 0.4), m.teal);
+  engine.setCamera(variant.selection.camera);
+  return { instances };
+}
+
+/**
+ * `observe(engine, variant, state)` reads the automatic exposure state of viewport 0 and the pass
+ * settings, and returns the three assertions of the rows: settled; the exposure EV, a finite number
+ * with an -on variant and null with an -off variant; and the enabled flag the variant names. Each
+ * detail names every value it read.
+ */
+export async function observe(engine, variant, state) {
+  const s = engine.autoExposureState();
+  const a = engine.autoExposure();
+  const on = variant.settings.autoExposure.enabled;
+  const read = `settled ${s.settled}, pending ${s.pending}, exposureEv ${s.exposureEv}, `
+    + `averageLuminance ${s.averageLuminance}, enabled ${a.enabled}`;
+  return {
+    values: { 'exposure-settled': s.settled, 'exposure-ev': s.exposureEv },
+    assertions: [
+      { name: 'exposure-settled', passed: s.settled === true, detail: read },
+      { name: 'exposure-ev', passed: on ? Number.isFinite(s.exposureEv) : s.exposureEv === null, detail: `${read}; expected ${on ? 'a finite exposureEv' : 'exposureEv null'}` },
+      { name: 'exposure-enabled', passed: a.enabled === on, detail: `${read}; expected enabled ${on}` },
+    ],
+  };
+}
+
+export default {
+  id: 'exposure-room',
+  milestone: 'exposure',
+  title: 'Automatic exposure: room with a sunlit opening',
+  variants,
+  build,
+};

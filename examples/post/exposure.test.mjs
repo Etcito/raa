@@ -1,4 +1,4 @@
-// Exposure scene and its room geometry: content builders.
+// Exposure scene and its room geometry: content builders, then the exposure-room scene rows and hooks.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
@@ -10,6 +10,9 @@ import {
   stripes,
   tiledGround,
 } from './lib/content.js';
+import { validateInventory } from './lib/inventory.js';
+import * as exposure from './scenes/exposure.js';
+import { assertSubjectsInView } from '../../web/common/view-check.mjs';
 
 test('box has 24 vertices, 36 indices and unit normals', () => {
   const m = box([1, 2, 3], [0.5, 1, 1.5]);
@@ -106,4 +109,85 @@ test('stripes(8, 1) throws', () => {
     () => stripes(8, 1),
     /content: stripes needs an integer size > 0 and an integer period >= 2/,
   );
+});
+
+const variantOf = (id) => exposure.default.variants.find((v) => v.id === id);
+
+// Consumes validateInventory (examples/post/lib/inventory.js:120; its doc comment is at lines 107-119),
+// given this scene's namespace and stage 'exposure'.
+test('validateInventory returns the four exposure-room rows in order, with their ids and filenames', () => {
+  const rows = validateInventory([exposure], 'exposure');
+  assert.deepEqual(rows.map((row) => row.id), [
+    'exposure-interior-on',
+    'exposure-interior-off',
+    'exposure-exterior-on',
+    'exposure-exterior-off',
+  ]);
+  assert.deepEqual(rows.map((row) => row.filename), [
+    'exposure-interior-on-room-readable.png',
+    'exposure-interior-off-room-too-dark.png',
+    'exposure-exterior-on-sunlit-facade-readable.png',
+    'exposure-exterior-off-sunlit-facade-blown-out.png',
+  ]);
+});
+
+test('each row names the pair of its mode; the two variants of a pair share a preset', () => {
+  for (const row of exposure.inventory) {
+    assert.equal(row.pair, variantOf(row.mode).measurement.pair);
+  }
+  for (const pair of ['exposure-interior', 'exposure-exterior']) {
+    const members = exposure.default.variants.filter((v) => v.measurement.pair === pair);
+    assert.deepEqual(members.map((v) => v.measurement.state).sort(), ['off', 'on']);
+    assert.equal(members[0].measurement.preset, members[1].measurement.preset);
+  }
+});
+
+test('settle holds exactly on the -on variants; every variant sets exposureEv 1 and matches its autoExposure state', () => {
+  assert.equal(exposure.default.variants.length, 4);
+  for (const v of exposure.default.variants) {
+    const on = v.id.endsWith('-on');
+    if (on) assert.equal(v.settle, true, v.id);
+    else assert.equal(Object.hasOwn(v, 'settle'), false, v.id);
+    assert.equal(v.settings.toneMapping.exposureEv, 1, v.id);
+    assert.equal(v.settings.autoExposure.enabled, on, v.id);
+  }
+});
+
+// Consumes assertSubjectsInView (web/common/view-check.mjs:80) on each variant's selection: both cameras.
+test('assertSubjectsInView passes for the interior and the exterior camera', () => {
+  for (const v of exposure.default.variants) {
+    assertSubjectsInView(v.selection, `${exposure.default.id}/${v.id}`);
+  }
+});
+
+const engineStub = {
+  autoExposureState: () => ({ exposureEv: 2.5, averageLuminance: 0.02, settled: true, pending: false }),
+  autoExposure: () => ({ enabled: true, compensationEv: 0.263, lowPercent: 0.2, highPercent: 0.7, speedUp: 2.4, speedDown: 1.1, minEv: -6, maxEv: 6 }),
+};
+
+test('observe passes all three assertions on interior-on; interior-off fails exposure-ev and exposure-enabled', async () => {
+  const on = await exposure.observe(engineStub, variantOf('interior-on'), {});
+  assert.deepEqual(on.assertions.map((a) => [a.name, a.passed]), [['exposure-settled', true], ['exposure-ev', true], ['exposure-enabled', true]]);
+  assert.deepEqual(on.values, { 'exposure-settled': true, 'exposure-ev': 2.5 });
+  const off = await exposure.observe(engineStub, variantOf('interior-off'), {});
+  assert.deepEqual(off.assertions.map((a) => [a.name, a.passed]), [['exposure-settled', true], ['exposure-ev', false], ['exposure-enabled', false]]);
+});
+
+test('build sets the environment lighting and the camera, and sets neither tone mapping nor automatic exposure', async () => {
+  const calls = [];
+  let handle = 0;
+  const engine = new Proxy({}, {
+    get: (_, method) => (...args) => {
+      calls.push([method, ...args]);
+      return handle++;
+    },
+  });
+  const variant = variantOf('exterior-on');
+  const { instances } = await exposure.default.build(engine, {}, variant);
+  const named = (method) => calls.filter(([name]) => name === method);
+  assert.deepEqual(named('setEnvironmentLighting'), [['setEnvironmentLighting', exposure.ENV_LIGHTING]]);
+  assert.deepEqual(named('setCamera'), [['setCamera', variant.selection.camera]]);
+  assert.equal(named('setToneMapping').length, 0);
+  assert.equal(named('setAutoExposure').length, 0);
+  assert.ok(instances.length > 0);
 });
