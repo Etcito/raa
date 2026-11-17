@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SdfmError } from '../src/errors.js';
 import {
-  FIELD_DATA_HEADER, FIELD_FLAG_DEBUG, FIELD_FLAG_SINGLE, FIELD_FRAME_WGSL, FIELD_OPERAND_WORDS, REST_TANGENT_AXIS, checkPartShading,
-  fieldPartShading, fieldSurfaceAttributes, restTangent,
+  FIELD_DATA_HEADER, FIELD_DATA_VERSION, FIELD_FLAG_DEBUG, FIELD_FLAG_RELIEF, FIELD_FLAG_SINGLE, FIELD_FRAME_WGSL, FIELD_OPERAND_WORDS,
+  INTERIOR_NO_TEXTURE, INTERIOR_WORDS, MATERIAL_FUNCTION_MAX_BYTES, RELIEF_MODULE_WORDS, REST_TANGENT_AXIS, checkPartShading, fieldPartShading, fieldSurfaceAttributes,
+  restTangent,
 } from '../src/field-shading.js';
+import { forbiddenToken } from '../src/map-material.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/${name}.json`, import.meta.url), 'utf8'));
 /** The shape of MAMA's evaluator (field-program-wgsl.ts FIELD_PROGRAM_WGSL): PmfSample and pmf_eval over pmf_f. */
@@ -31,7 +33,8 @@ test('fieldPartShading: one fixed interpreter, the part is data words', () => {
   assert.equal(wgsl.match(/\bfn\s+material_main\s*\(/g).length, 1);
   assert.ok(wgsl.includes('fn pmf_f(i: u32) -> f32 { return raa_material_f32(i); }'), 'the evaluator reads the material data words');
   assert.ok(wgsl.includes('let base = raa_material_data_base(in.record);'));
-  assert.ok(wgsl.includes('let s = pmf_eval(base + sdff_w(base + 2u), in.color.xyz);'), 'the field is read at the rest point');
+  assert.ok(wgsl.includes('let q0 = in.color.xyz;') && wgsl.includes('var pm = q0;') && wgsl.includes('s = pmf_eval(prog, pm);'), 'the field is read at the rest point');
+  assert.equal(wgsl.match(/pmf_eval\(/g).length, 2, 'one call site (and its definition): the relief march through a module reuses it');
   assert.ok(wgsl.includes('fn sdfm_graph_0('), 'one graph per distinct body');
   assert.ok(!/extra_words|SDFM_K/.test(wgsl), 'constants are data, not text');
   assert.ok(/sdff_w\(b \+ \d+u\)/.test(wgsl), 'the graph reads its constants from the block');
@@ -108,6 +111,75 @@ test('checkPartShading refuses malformed records; the evaluator and the WGSL siz
   assert.throws(() => fieldPartShading(shading(), [], { field: 'fn other() {}' }), (e) => e instanceof SdfmError && e.code === 'sdfm.schema');
   assert.throws(() => fieldPartShading(shading(), [fixture('compiled-unmappable')], { field: FIELD + '\n//' + 'x'.repeat(70000) }),
     (e) => e instanceof SdfmError && e.code === 'sdfm.material_unmappable' && /RAA limit 65536/.test(e.message));
+});
+
+const MODULE = { program: [1, 0, 8, 0.1, 0, 0, 0, 0], rows: [0.5, 0, 0, 1, 0, 0.5, 0, 2, 0, 0, 0.5, 3], count: 2, depth: 0.25, box: [-1, -1, -0.5, 1, 1, 0.5] };
+const RELIEF = { depth: 0.25, modules: [MODULE], copies: [0, 0, 0, 0, -1, -1] };
+const THREE = [{ color: [1, 0, 0], material: 'paint', toNode: ROWS, constant: CONSTANT }, { color: [0, 1, 0], material: null, toNode: ROWS },
+  { color: [0, 0, 1], material: null, toNode: ROWS }];
+
+test('relief: the flag, the depth, the per-operand module table and the module records are data', () => {
+  const plain = fieldPartShading(shading({ operands: THREE }), [], { field: FIELD });
+  const relief = fieldPartShading(shading({ relief: RELIEF, operands: THREE }), [], { field: FIELD });
+  const u = relief.words, f = new Float32Array(u.buffer);
+  const list = u[6];
+  assert.ok(list >= FIELD_DATA_HEADER + PROGRAM.length + 3 * FIELD_OPERAND_WORDS, 'the copy list follows the operands');
+  const at = u[list + 1];
+  assert.deepEqual([u[list], u[list + 2]], [1, 0], 'one copy (operands 0 and 1), starting at operand 0');
+  assert.deepEqual(Array.from(f.subarray(at + 16, at + 22)), MODULE.box, 'the module box');
+  assert.equal(u[at], at + RELIEF_MODULE_WORDS, 'the module program follows its record');
+  assert.deepEqual([u[at + 1], f[at + 2]], [2, 0.25], 'operand count and depth');
+  assert.deepEqual(Array.from(f.subarray(at + 4, at + 16)), MODULE.rows, 'node -> module rows');
+  assert.deepEqual(Array.from(f.subarray(u[at], u[at] + MODULE.program.length)), MODULE.program.map(Math.fround), 'the module program');
+  assert.equal(u.length, u[at] + MODULE.program.length, 'the block ends with the last module');
+  assert.throws(() => checkPartShading(shading({ relief: { ...RELIEF, copies: [0, 0] }, operands: THREE })), (e) => e instanceof SdfmError && e.code === 'sdfm.schema');
+  assert.throws(() => checkPartShading(shading({ relief: { ...RELIEF, modules: [{ ...MODULE, rows: [1] }] }, operands: THREE })), (e) => e instanceof SdfmError && e.code === 'sdfm.schema');
+  assert.equal(plain.wgsl, relief.wgsl, 'the same text: relief is a flag');
+  assert.equal(plain.words[0], 1, 'version 1 block');
+  assert.equal(plain.words[1] & FIELD_FLAG_RELIEF, 0);
+  assert.equal(new Float32Array(plain.words.buffer)[5], 0);
+  assert.equal(plain.words.length, FIELD_DATA_HEADER + PROGRAM.length + 3 * FIELD_OPERAND_WORDS, 'no extra words');
+  assert.equal(plain.words[6], 0, 'no relief copies');
+  assert.deepEqual(plain.interiors, []);
+  assert.equal(relief.words[0], FIELD_DATA_VERSION);
+  assert.equal(relief.words[1], FIELD_FLAG_RELIEF);
+  assert.equal(new Float32Array(relief.words.buffer)[5], 0.25, 'the relief depth in header word 5');
+  assert.ok(relief.wgsl.includes(`(flags & ${FIELD_FLAG_RELIEF}u) != 0u`) && relief.wgsl.includes('fn sdfm_rest_dir('));
+  assert.throws(() => checkPartShading(shading({ relief: { depth: 0 } })), (e) => e instanceof SdfmError && e.code === 'sdfm.schema');
+});
+
+test('interiors: a pane operand gets its record, the tile id slots are listed, an unknown set shows glass only', () => {
+  const pane = { color: [0.02, 0.03, 0.04], material: 'glass', toNode: ROWS, constant: CONSTANT,
+    interior: { set: 'shop', depth: 0, width: 0, height: 0, glass: 0.4, half: [1.475, 2.1, 0.07] } };
+  const lost = { ...pane, interior: { ...pane.interior, set: 'hotel' } };
+  const interiors = { sets: { shop: { tiles: 3, depth: 7 }, office: { tiles: 4, depth: 5 } }, lightsOn: 0.5, blinds: 0.25, unlitLevel: 0.1 };
+  const r = fieldPartShading(shading({ operands: [{ color: [1, 1, 1], material: null, toNode: ROWS }, pane, lost] }), [], { field: FIELD, interiors });
+  const { u, f } = words(r);
+  assert.equal(u[0], FIELD_DATA_VERSION);
+  const op = (i) => u[3] + FIELD_OPERAND_WORDS * i;
+  assert.equal(u[op(0) + 11], 0, 'operand 0 is not a pane');
+  const at = u[op(1) + 11];
+  assert.ok(at >= op(3), 'the record follows the operand table');
+  assert.deepEqual(Array.from(f.subarray(at, at + 3)), [1.475, 2.1, 0.07].map(Math.fround), 'the pane half size');
+  assert.deepEqual([f[at + 3], f[at + 4], f[at + 5], f[at + 6], u[at + 7]], [0, 0, 7, Math.fround(0.4), 3], 'cell size, the set depth, glass, 3 tiles');
+  assert.deepEqual([f[at + 8], f[at + 9], f[at + 10], f[at + 11]], [0.5, 0.25, Math.fround(0.1), 1], 'lights on, blinds, unlit level, emissive');
+  assert.deepEqual(Array.from(u.subarray(at + INTERIOR_WORDS, at + INTERIOR_WORDS + 9)).map((w, k) => (k % 3 === 2 ? f[at + INTERIOR_WORDS + k] : w)),
+    [0, 1, 2].flatMap(() => [INTERIOR_NO_TEXTURE, INTERIOR_NO_TEXTURE, 0.5]), 'no picture yet, back fraction 0.5');
+  const lostAt = u[op(2) + 11];
+  assert.equal(u[lostAt + 7], 0, 'an unknown set: no tile, glass only');
+  assert.deepEqual(r.interiors, [{ operand: 1, set: 'shop', at: at + INTERIOR_WORDS, tiles: 3 }, { operand: 2, set: 'hotel', at: lostAt + INTERIOR_WORDS, tiles: 0 }]);
+  assert.equal(r.words.length, lostAt + INTERIOR_WORDS, 'the block ends with the last record');
+  const noPanes = fieldPartShading(shading({ operands: [{ color: [1, 1, 1], material: null, toNode: ROWS }] }), [], { field: FIELD });
+  assert.equal(r.wgsl, noPanes.wgsl, 'panes are data: the same text');
+  assert.ok(r.wgsl.includes('fn sdff_interior(') && r.wgsl.includes('raa_texture(id, uv)'));
+  assert.throws(() => checkPartShading(shading({ operands: [{ ...pane, interior: { set: 'shop', half: [1, 1] } }] })), (e) => e instanceof SdfmError && e.code === 'sdfm.schema');
+});
+
+test('the interpreter text holds no S11-forbidden token and stays under the RAA size limit with the real evaluator size', () => {
+  const r = fieldPartShading(shading({ relief: { ...RELIEF, copies: [0, 0, 0, 0] } }), [fixture('compiled-unmappable')], { field: FIELD + '\n//' + 'x'.repeat(30000) });
+  assert.equal(forbiddenToken(r.wgsl), null);
+  const bytes = new TextEncoder().encode(r.wgsl).length;
+  assert.ok(bytes < MATERIAL_FUNCTION_MAX_BYTES, `${bytes} bytes`);
 });
 
 test('the rest frame is linear in the rest normal and the WGSL axis is REST_TANGENT_AXIS', () => {
