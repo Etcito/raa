@@ -16,9 +16,15 @@ fn dome_mapping_round_trips_every_texel_and_reaches_below_the_horizon() {
     let mut highest = f32::MIN;
     for j in 0..size {
         for i in 0..size {
-            let uv = [(i as f32 + 0.5) / size as f32, (j as f32 + 0.5) / size as f32];
+            let uv = [
+                (i as f32 + 0.5) / size as f32,
+                (j as f32 + 0.5) / size as f32,
+            ];
             let d = dome_direction(uv);
-            assert!((length(d) - 1.0).abs() < 1.0e-5, "unit direction at {i},{j}");
+            assert!(
+                (length(d) - 1.0).abs() < 1.0e-5,
+                "unit direction at {i},{j}"
+            );
             assert!(d[1] >= -DOME_BELOW - 1.0e-5);
             lowest = lowest.min(d[1]);
             highest = highest.max(d[1]);
@@ -29,14 +35,20 @@ fn dome_mapping_round_trips_every_texel_and_reaches_below_the_horizon() {
             );
         }
     }
-    assert!(lowest < -0.03, "the dome reaches below the horizon: {lowest}");
+    assert!(
+        lowest < -0.03,
+        "the dome reaches below the horizon: {lowest}"
+    );
     assert!(highest > 0.999, "the zenith has a texel: {highest}");
     // The zenith is the centre of the map; a direction below the dome clamps inside [0, 1].
     let up = dome_uv([0.0, 1.0, 0.0]);
     assert!((up[0] - 0.5).abs() < 1.0e-6 && (up[1] - 0.5).abs() < 1.0e-6);
     for d in [[0.0, -1.0, 0.0], [1.0, -0.5, 0.0], [0.0, -0.2, 1.0]] {
         let uv = dome_uv(d);
-        assert!((0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]), "{d:?} {uv:?}");
+        assert!(
+            (0.0..=1.0).contains(&uv[0]) && (0.0..=1.0).contains(&uv[1]),
+            "{d:?} {uv:?}"
+        );
     }
 }
 
@@ -61,7 +73,10 @@ fn dome_accumulates_by_count_and_freezes_after_a_still_sky_without_a_camera() {
     assert_eq!(dome.observation(), (FREEZE_FRAMES + 2, true, 0));
     // An animated sky never freezes; a changed signature restarts the count.
     assert!(!dome.claim(900, 0, 7, true, false).expect("claimed").frozen);
-    assert_eq!(dome.claim(901, 0, 8, false, false).expect("claimed").count, 1);
+    assert_eq!(
+        dome.claim(901, 0, 8, false, false).expect("claimed").count,
+        1
+    );
     dome.reset();
     assert!(!dome.has_committed() && dome.observation() == (0, false, 0));
 }
@@ -73,7 +88,11 @@ fn dome_record_ignores_the_camera_and_carries_count_flags_and_samples() {
     let bytes = dome_record(&frame, &plan, 0);
     let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     assert_eq!(f(108), 5.0, "forward.w is the dome count");
-    assert_eq!([f(112), f(116), f(124)], [1.0, 8.0, 56.0], "scale 1, noise size 1, samples");
+    assert_eq!(
+        [f(112), f(116), f(124)],
+        [1.0, 8.0, 56.0],
+        "scale 1, noise size 1, samples"
+    );
     assert_eq!(f(120), 5.0, "a still dome walks the sequence by its count");
     let moved = crate::cloud_backend::CloudFrame {
         camera: raa_scene::Camera {
@@ -82,7 +101,11 @@ fn dome_record_ignores_the_camera_and_carries_count_flags_and_samples() {
         },
         ..frame
     };
-    assert_eq!(dome_record(&moved, &plan, 0), bytes, "the record never sees the camera");
+    assert_eq!(
+        dome_record(&moved, &plan, 0),
+        bytes,
+        "the record never sees the camera"
+    );
 }
 
 fn dome_still_plan(
@@ -105,13 +128,24 @@ fn cloud_dome_settings_default_off_and_are_ranged() {
     assert!(!defaults.cloud_dome);
     assert_eq!(defaults.cloud_dome_size, 1024);
     for ok in [128_u32, 1024, 2048] {
-        WeatherSettings { cloud_dome_size: ok, ..defaults }.validate().unwrap();
+        WeatherSettings {
+            cloud_dome_size: ok,
+            ..defaults
+        }
+        .validate()
+        .unwrap();
     }
     for bad in [0_u32, 127, 2049, u32::MAX] {
-        let error = WeatherSettings { cloud_dome_size: bad, ..defaults }
-            .validate()
-            .expect_err("out of range");
-        assert!(format!("{error:?}").contains("cloud_dome_size"), "{error:?}");
+        let error = WeatherSettings {
+            cloud_dome_size: bad,
+            ..defaults
+        }
+        .validate()
+        .expect_err("out of range");
+        assert!(
+            format!("{error:?}").contains("cloud_dome_size"),
+            "{error:?}"
+        );
     }
 }
 
@@ -124,9 +158,16 @@ fn a_changed_sky_converges_inside_the_frame_with_a_bounded_burst() {
     assert_eq!((plan.burst, plan.count), (BURST_FRAMES, BURST_FRAMES));
     // Slot k of the burst is march k + 1 of a restarted mean, ending at the plan count.
     let count_at = |slot: u32| {
-        f32::from_le_bytes(dome_record(&frame, &plan, slot)[108..112].try_into().unwrap())
+        f32::from_le_bytes(
+            dome_record(&frame, &plan, slot)[108..112]
+                .try_into()
+                .unwrap(),
+        )
     };
-    assert_eq!([count_at(0), count_at(1), count_at(BURST_FRAMES - 1)], [1.0, 2.0, BURST_FRAMES as f32]);
+    assert_eq!(
+        [count_at(0), count_at(1), count_at(BURST_FRAMES - 1)],
+        [1.0, 2.0, BURST_FRAMES as f32]
+    );
     dome.record(1, 0);
     dome.submitted(0, 1);
     assert_eq!(dome.observation(), (BURST_FRAMES, false, 1));

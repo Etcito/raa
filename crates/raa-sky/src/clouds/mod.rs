@@ -50,6 +50,7 @@ use raa_pipeline::LightingResources;
 
 use super::{CloudFrame, CloudInvalidation, CloudRenderer, CloudViews, MAX_VIEWS, invalid};
 use crate::atmosphere::AtmosphereResources;
+use crate::tunables::CloudTunables;
 use dome::{DomeGpu, DomeState, dome_record, dome_sky};
 use history::{
     Accumulation, BURST_FRAMES, BURST_STRIDE, CloudHistory, FREEZE_FRAMES, FrameNote, Marked,
@@ -143,6 +144,8 @@ struct VolumetricClouds {
     screen_burst: [u32; MAX_VIEWS],
     /// Frames that ran a screen convergence burst, per view.
     screen_burst_frames: [u32; MAX_VIEWS],
+    /// The cloud tunables the march pipelines were built with.
+    tunables: CloudTunables,
 }
 
 impl VolumetricClouds {
@@ -153,7 +156,7 @@ impl VolumetricClouds {
             history: CloudHistory::new(),
             noise: CloudNoise::new(gpu)?,
             targets: CloudTargets::new(gpu)?,
-            passes: CloudPasses::new(gpu)?,
+            passes: CloudPasses::new(gpu, &CloudTunables::default())?,
             published: None,
             dome: None,
             dome_state: DomeState::default(),
@@ -161,6 +164,7 @@ impl VolumetricClouds {
             dome_signature: 0,
             screen_burst: [1; MAX_VIEWS],
             screen_burst_frames: [0; MAX_VIEWS],
+            tunables: CloudTunables::default(),
         })
     }
 
@@ -250,6 +254,10 @@ impl CloudRenderer for VolumetricClouds {
     ) -> Result<(), RaaError> {
         gpu.ensure_live()?;
         Self::validate(frame)?;
+        if frame.tunables != self.tunables {
+            self.passes.rebuild(gpu, &frame.tunables)?;
+            self.tunables = frame.tunables;
+        }
         let marchable = marchable(frame, atmosphere.sky_view(frame.view).is_some());
         self.history
             .prepare(frame.view, frame.size, frame.invocation, marchable, true);
@@ -270,17 +278,12 @@ impl CloudRenderer for VolumetricClouds {
                 }
                 self.accumulation(frame)
             };
-            let refresh = matches!(
-                Self::freeze(frame, accumulation),
-                Freeze::Refresh
-            );
+            let refresh = matches!(Self::freeze(frame, accumulation), Freeze::Refresh);
             // A changed signature or no history at all: converge inside this frame (see
             // `BURST_FRAMES`); a still dither-off march is final after one.
             let burst = if !frame.cloud_dome
                 && frame.cloud_dither
-                && self
-                    .history
-                    .signature_changed(frame.view, frame.signature)
+                && self.history.signature_changed(frame.view, frame.signature)
             {
                 BURST_FRAMES
             } else {

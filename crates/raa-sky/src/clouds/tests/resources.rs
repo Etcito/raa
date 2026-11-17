@@ -105,7 +105,10 @@ fn history_none_serializes_identity_and_flag_zero() {
     assert_eq!(none.forward[3], 0.0);
 
     let committed = Mat4::from_translation(Vec3::new(3.0, 4.0, 5.0));
-    let accumulation = Accumulation { previous: committed, count: 1 };
+    let accumulation = Accumulation {
+        previous: committed,
+        count: 1,
+    };
     let some = CloudGpu::from_frame(&frame, Some(accumulation), false);
     assert_eq!(some.previous_view_proj, committed.cols);
     assert_eq!(some.forward[3], 1.0);
@@ -114,27 +117,68 @@ fn history_none_serializes_identity_and_flag_zero() {
 #[test]
 fn forward_w_carries_the_accumulated_frame_count() {
     let frame = test_frame(0, 300, (640, 360));
-    let accumulation = Accumulation { previous: Mat4::IDENTITY, count: 37 };
+    let accumulation = Accumulation {
+        previous: Mat4::IDENTITY,
+        count: 37,
+    };
     let gpu = CloudGpu::from_frame(&frame, Some(accumulation), false);
     assert_eq!(gpu.forward[3], 37.0);
-    assert_eq!(gpu.screen[2], 37.0, "an unchanged view walks the sequence by its count");
-    let moving = Accumulation { previous: Mat4::IDENTITY, count: 1 };
+    assert_eq!(
+        gpu.screen[2], 37.0,
+        "an unchanged view walks the sequence by its count"
+    );
+    let moving = Accumulation {
+        previous: Mat4::IDENTITY,
+        count: 1,
+    };
     let gpu = CloudGpu::from_frame(&frame, Some(moving), false);
-    assert_eq!(gpu.screen[2], 44.0, "a moving view keeps the invocation (300 & 255)");
+    assert_eq!(
+        gpu.screen[2], 44.0,
+        "a moving view keeps the invocation (300 & 255)"
+    );
 }
 
 #[test]
 fn screen_lane_holds_scale_flags_jitter_and_samples() {
-    let frame = CloudFrame { cloud_scale: 0.75, cloud_samples: 120, ..test_frame(0, 9, (1281, 721)) };
-    assert_eq!(CloudGpu::from_frame(&frame, None, false).screen, [0.75, 8.0, 9.0, 120.0]);
-    let animated = CloudFrame { animated: true, ..frame };
+    let frame = CloudFrame {
+        cloud_scale: 0.75,
+        cloud_samples: 120,
+        ..test_frame(0, 9, (1281, 721))
+    };
+    assert_eq!(
+        CloudGpu::from_frame(&frame, None, false).screen,
+        [0.75, 8.0, 9.0, 120.0]
+    );
+    let animated = CloudFrame {
+        animated: true,
+        ..frame
+    };
     assert_eq!(CloudGpu::from_frame(&animated, None, true).screen[1], 11.0);
-    let off = CloudFrame { cloud_dither: false, cloud_noise_size: 16, ..frame };
-    assert_eq!(CloudGpu::from_frame(&off, None, false).screen[1], 4.0 + 128.0);
-    assert_eq!(CloudGpu::from_frame(&off, None, true).screen[1], 5.0 + 128.0);
-    assert_eq!(super::super::resources::screen_size((1281, 721), 0.5), (641, 361));
-    assert_eq!(super::super::resources::screen_size((1281, 721), 1.0), (1281, 721));
-    assert_eq!(super::super::resources::screen_size((100, 3), 0.25), (25, 1));
+    let off = CloudFrame {
+        cloud_dither: false,
+        cloud_noise_size: 16,
+        ..frame
+    };
+    assert_eq!(
+        CloudGpu::from_frame(&off, None, false).screen[1],
+        4.0 + 128.0
+    );
+    assert_eq!(
+        CloudGpu::from_frame(&off, None, true).screen[1],
+        5.0 + 128.0
+    );
+    assert_eq!(
+        super::super::resources::screen_size((1281, 721), 0.5),
+        (641, 361)
+    );
+    assert_eq!(
+        super::super::resources::screen_size((1281, 721), 1.0),
+        (1281, 721)
+    );
+    assert_eq!(
+        super::super::resources::screen_size((100, 3), 0.25),
+        (25, 1)
+    );
 }
 
 #[test]
@@ -150,4 +194,3 @@ fn cloud_sky_parameters_convert_the_viewer_height_once() {
     assert_eq!(sky.viewer[1], 2000.0);
     assert_eq!(sky.viewer[3], 6362.0);
 }
-

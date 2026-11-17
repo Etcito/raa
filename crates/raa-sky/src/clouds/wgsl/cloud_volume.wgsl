@@ -54,19 +54,19 @@ struct CloudGpu {
 
 const RAA_CLOUD_PLANET_RADIUS: f32 = 6360000.0;
 // Metres covered by one repeat of the weather map, the shape noise and the detail noise.
-const RAA_CLOUD_WEATHER_TILE: f32 = 36000.0;
-const RAA_CLOUD_SHAPE_TILE: f32 = 7000.0;
-const RAA_CLOUD_DETAIL_TILE: f32 = 700.0;
+override RAA_CLOUD_WEATHER_TILE: f32 = 36000.0;
+override RAA_CLOUD_SHAPE_TILE: f32 = 7000.0;
+override RAA_CLOUD_DETAIL_TILE: f32 = 700.0;
 // Extinction per metre of cloud at density 1. Real cumulus is around 0.05: a little over 50 m
 // of it hides the sun.
-const RAA_CLOUD_EXTINCTION: f32 = 0.05;
+override RAA_CLOUD_EXTINCTION: f32 = 0.05;
 // Cloud droplets scatter nearly all the light they meet.
-const RAA_CLOUD_ALBEDO: f32 = 0.98;
-const RAA_CLOUD_CIRRUS_HEIGHT: f32 = 9000.0;
+override RAA_CLOUD_ALBEDO: f32 = 0.98;
+override RAA_CLOUD_CIRRUS_HEIGHT: f32 = 9000.0;
 // Beyond this, clouds are lost in the haze.
-const RAA_CLOUD_MAX_DISTANCE: f32 = 90000.0;
+override RAA_CLOUD_MAX_DISTANCE: f32 = 90000.0;
 // The longest stretch of the layer one ray marches through.
-const RAA_CLOUD_MAX_PATH: f32 = 40000.0;
+override RAA_CLOUD_MAX_PATH: f32 = 40000.0;
 
 fn raa_cloud_remap(x: f32, low: f32, high: f32, new_low: f32, new_high: f32) -> f32 {
     return new_low + (x - low) / (high - low) * (new_high - new_low);

@@ -12,14 +12,15 @@ use raa_core::{GpuContext, RaaError};
 use super::super::{MAX_VIEWS, invalid};
 use super::dome::DomeGpu;
 use super::history::BURST_STRIDE;
-use super::resources::CloudGpu;
 use super::noise::CloudNoise;
+use super::resources::CloudGpu;
 use super::resources::{CloudTargets, PANORAMA_SIZE, SHADOW_SIZE};
 use super::shaders::{
     dome_module_wgsl, panorama_module_wgsl, screen_module_wgsl, shadow_mean_module_wgsl,
     shadow_module_wgsl,
 };
 use crate::atmosphere::AtmosphereResources;
+use crate::tunables::CloudTunables;
 
 /// Bind groups of one view, valid for the sky-view LUT they were built with.
 struct ViewGroups {
@@ -66,6 +67,8 @@ pub(super) struct CloudPasses {
     /// The world-space dome march (group 2 bindings 0-11).
     dome_layout: wgpu::BindGroupLayout,
     dome: wgpu::ComputePipeline,
+    /// The empty layout of groups 0 and 1.
+    empty: wgpu::BindGroupLayout,
     dome_group: Option<DomeGroup>,
     views: [Option<ViewGroups>; MAX_VIEWS],
     screens: [Option<ScreenGroup>; MAX_VIEWS],
@@ -154,12 +157,17 @@ fn march_entries() -> [wgpu::BindGroupLayoutEntry; 11] {
     ]
 }
 
-/// The screen layout (bindings 0-12) and its pipeline from `screen_module_wgsl`.
-fn screen_pipeline(
-    gpu: &GpuContext,
-    multisampled: bool,
-    empty: &wgpu::BindGroupLayout,
-) -> Result<ScreenPipeline, RaaError> {
+/// The label of the screen march for one depth sample count.
+fn screen_label(multisampled: bool) -> &'static str {
+    if multisampled {
+        "raa-sky.cloud_screen_multisampled"
+    } else {
+        "raa-sky.cloud_screen"
+    }
+}
+
+/// The screen layout (bindings 0-12) for one depth sample count.
+fn screen_layout(gpu: &GpuContext, multisampled: bool) -> wgpu::BindGroupLayout {
     let [_, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10] = march_entries();
     let e0 = dynamic_params();
     let depth = entry(
@@ -171,26 +179,11 @@ fn screen_pipeline(
         },
     );
     let history = texture(11, wgpu::TextureViewDimension::D2);
-    let label = if multisampled {
-        "raa-sky.cloud_screen_multisampled"
-    } else {
-        "raa-sky.cloud_screen"
-    };
-    let layout = gpu
-        .device()
+    gpu.device()
         .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some(label),
+            label: Some(screen_label(multisampled)),
             entries: &[e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, history, depth],
-        });
-    let pipeline = pipeline(
-        gpu,
-        label,
-        &screen_module_wgsl(multisampled),
-        "raa_cloud_screen_main",
-        empty,
-        &layout,
-    )?;
-    Ok(ScreenPipeline { layout, pipeline })
+        })
 }
 
 /// Validates `source` on the CPU, then builds its pipeline over groups (empty, empty, `layout`).
@@ -201,6 +194,7 @@ fn pipeline(
     entry_point: &str,
     empty: &wgpu::BindGroupLayout,
     layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
 ) -> Result<wgpu::ComputePipeline, RaaError> {
     raa_shader::Composer::validate(source)
         .map_err(|error| RaaError::Gpu(format!("{label} shader: {error}")))?;
@@ -220,15 +214,103 @@ fn pipeline(
             layout: Some(&pipeline_layout),
             module: &module,
             entry_point: Some(entry_point),
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             cache: None,
         }),
     )
 }
 
+/// The shadow, panorama, screen (one and several samples) and dome pipelines: every module
+/// that composes cloud_volume.wgsl, built with its override constants from `tunables`.
+fn march_pipelines(
+    gpu: &GpuContext,
+    empty: &wgpu::BindGroupLayout,
+    layouts: [&wgpu::BindGroupLayout; 5],
+    tunables: &CloudTunables,
+) -> Result<[wgpu::ComputePipeline; 5], RaaError> {
+    let constants = tunables.constants();
+    let [shadow, panorama, screen, screen_ms, dome] = layouts;
+    Ok([
+        pipeline(
+            gpu,
+            "raa-sky.cloud_shadow",
+            &shadow_module_wgsl(),
+            "raa_cloud_shadow_main",
+            empty,
+            shadow,
+            &constants,
+        )?,
+        pipeline(
+            gpu,
+            "raa-sky.cloud_panorama",
+            &panorama_module_wgsl(),
+            "raa_cloud_panorama_main",
+            empty,
+            panorama,
+            &constants,
+        )?,
+        pipeline(
+            gpu,
+            screen_label(false),
+            &screen_module_wgsl(false),
+            "raa_cloud_screen_main",
+            empty,
+            screen,
+            &constants,
+        )?,
+        pipeline(
+            gpu,
+            screen_label(true),
+            &screen_module_wgsl(true),
+            "raa_cloud_screen_main",
+            empty,
+            screen_ms,
+            &constants,
+        )?,
+        pipeline(
+            gpu,
+            "raa-sky.cloud_dome",
+            &dome_module_wgsl(),
+            "raa_cloud_dome_main",
+            empty,
+            dome,
+            &constants,
+        )?,
+    ])
+}
+
 impl CloudPasses {
-    /// Creates the layouts and the shadow and mean pipelines.
-    pub(super) fn new(gpu: &GpuContext) -> Result<CloudPasses, RaaError> {
+    /// Rebuilds the march pipelines with `tunables`; layouts and bind groups are kept.
+    pub(super) fn rebuild(
+        &mut self,
+        gpu: &GpuContext,
+        tunables: &CloudTunables,
+    ) -> Result<(), RaaError> {
+        let [shadow, panorama, screen, screen_multisampled, dome] = march_pipelines(
+            gpu,
+            &self.empty,
+            [
+                &self.march_layout,
+                &self.march_layout,
+                &self.screen.layout,
+                &self.screen_multisampled.layout,
+                &self.dome_layout,
+            ],
+            tunables,
+        )?;
+        self.shadow = shadow;
+        self.panorama = panorama;
+        self.screen.pipeline = screen;
+        self.screen_multisampled.pipeline = screen_multisampled;
+        self.dome = dome;
+        Ok(())
+    }
+
+    /// Creates the layouts and every pipeline, the march ones with `tunables`.
+    pub(super) fn new(gpu: &GpuContext, tunables: &CloudTunables) -> Result<CloudPasses, RaaError> {
         use wgpu::TextureViewDimension::D2;
         let device = gpu.device();
         let march_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -243,14 +325,6 @@ impl CloudPasses {
             label: Some("raa-sky.cloud_empty"),
             entries: &[],
         });
-        let shadow = pipeline(
-            gpu,
-            "raa-sky.cloud_shadow",
-            &shadow_module_wgsl(),
-            "raa_cloud_shadow_main",
-            &empty,
-            &march_layout,
-        )?;
         let mean = pipeline(
             gpu,
             "raa-sky.cloud_shadow_mean",
@@ -258,43 +332,27 @@ impl CloudPasses {
             "raa_cloud_shadow_mean_main",
             &empty,
             &mean_layout,
+            &[],
         )?;
-        let panorama = pipeline(
-            gpu,
-            "raa-sky.cloud_panorama",
-            &panorama_module_wgsl(),
-            "raa_cloud_panorama_main",
-            &empty,
-            &march_layout,
-        )?;
-        let screen = screen_pipeline(gpu, false, &empty)?;
-        let screen_multisampled = screen_pipeline(gpu, true, &empty)?;
+        let screen_one = screen_layout(gpu, false);
+        let screen_many = screen_layout(gpu, true);
         let [_, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10] = march_entries();
         let e0 = dynamic_params();
         let dome_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("raa-sky.cloud_dome"),
-            entries: &[
-                e0,
-                e1,
-                e2,
-                e3,
-                e4,
-                e5,
-                e6,
-                e7,
-                e8,
-                e9,
-                e10,
-                texture(11, D2),
-            ],
+            entries: &[e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, texture(11, D2)],
         });
-        let dome = pipeline(
+        let [shadow, panorama, screen, screen_multisampled, dome] = march_pipelines(
             gpu,
-            "raa-sky.cloud_dome",
-            &dome_module_wgsl(),
-            "raa_cloud_dome_main",
             &empty,
-            &dome_layout,
+            [
+                &march_layout,
+                &march_layout,
+                &screen_one,
+                &screen_many,
+                &dome_layout,
+            ],
+            tunables,
         )?;
         Ok(CloudPasses {
             march_layout,
@@ -302,9 +360,16 @@ impl CloudPasses {
             shadow,
             mean,
             panorama,
-            screen,
-            screen_multisampled,
+            screen: ScreenPipeline {
+                layout: screen_one,
+                pipeline: screen,
+            },
+            screen_multisampled: ScreenPipeline {
+                layout: screen_many,
+                pipeline: screen_multisampled,
+            },
             dome_layout,
+            empty,
             dome,
             dome_group: None,
             views: std::array::from_fn(|_| None),

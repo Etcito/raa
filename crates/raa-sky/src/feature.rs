@@ -713,6 +713,17 @@ mod tests {
     }
 
     #[test]
+    fn set_tunable_accepts_a_cloud_key_without_an_atmosphere_bake() {
+        let h = handle();
+        h.set_tunable("cloudAlbedo", 0.3).expect("accepted");
+        let s = h.state.borrow();
+        assert_eq!(s.tunables.value("cloudAlbedo"), Some(0.3));
+        assert_eq!(s.tunables.atmosphere_generation(), 0);
+        let copy = crate::tunables::CloudTunables::from_sky(&s.tunables);
+        assert!((copy.value("cloudAlbedo").unwrap() - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
     fn transactions_preserve_presence_and_are_atomic() {
         let h = handle();
         for (preset, weather, hours) in [

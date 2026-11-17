@@ -47,7 +47,11 @@ fn panorama_valid_follows_marchable_prepare_and_every_invalidation() {
             // signature restarts the count); every other reason clears it.
             let kept = reason == CloudInvalidation::Weather;
             assert_eq!(h.flags(0), (false, kept), "{reason:?} {target:?}");
-            assert_eq!(h.history(0, true), kept.then(matrix), "{reason:?} {target:?}");
+            assert_eq!(
+                h.history(0, true),
+                kept.then(matrix),
+                "{reason:?} {target:?}"
+            );
             let other = target.is_some();
             assert_eq!(h.flags(1).0, other, "{reason:?} {target:?}");
             h.prepare(0, SIZE, 2, true, true);
@@ -255,7 +259,10 @@ fn frame_count(h: &mut CloudHistory, invocation: u64, matrix: Mat4, signature: u
     h.record_marked(
         0,
         invocation,
-        Marked { count: accumulation.map_or(1, |a| a.count), signature },
+        Marked {
+            count: accumulation.map_or(1, |a| a.count),
+            signature,
+        },
     );
     h.submitted(0, invocation);
     accumulation.map(|a| a.count)
@@ -269,11 +276,23 @@ fn count_grows_only_while_camera_and_signature_hold() {
     assert_eq!(frame_count(&mut h, 1, still, 7), None, "no history yet");
     assert_eq!(frame_count(&mut h, 2, still, 7), Some(2));
     assert_eq!(frame_count(&mut h, 3, still, 7), Some(3));
-    assert_eq!(frame_count(&mut h, 4, moved, 7), Some(1), "the camera moved");
+    assert_eq!(
+        frame_count(&mut h, 4, moved, 7),
+        Some(1),
+        "the camera moved"
+    );
     assert_eq!(frame_count(&mut h, 5, moved, 7), Some(2));
-    assert_eq!(frame_count(&mut h, 6, moved, 8), Some(1), "the signature changed");
+    assert_eq!(
+        frame_count(&mut h, 6, moved, 8),
+        Some(1),
+        "the signature changed"
+    );
     h.reset_screen(0);
-    assert_eq!(frame_count(&mut h, 7, moved, 8), None, "a recreated target has no history");
+    assert_eq!(
+        frame_count(&mut h, 7, moved, 8),
+        None,
+        "a recreated target has no history"
+    );
 }
 
 /// The engine frame sequence on a real `SkyHandle` (`advance_frame`, `set_view` with an
@@ -287,7 +306,11 @@ fn still_sky_with_an_identical_camera_accumulates_and_freezes() {
 
     let handle = SkyHandle::for_tests();
     let settings = WeatherSettings {
-        target: Weather { wind_speed: 0.0, evolution: 0.0, ..Weather::default() },
+        target: Weather {
+            wind_speed: 0.0,
+            evolution: 0.0,
+            ..Weather::default()
+        },
         ..WeatherSettings::default()
     };
     handle.set_weather(settings).expect("weather");
@@ -303,14 +326,21 @@ fn still_sky_with_an_identical_camera_accumulates_and_freezes() {
         handle.set_view(0, &camera, true).expect("set_view");
         let frame = handle.cloud_frame_for_tests(n, SIZE);
         h.prepare(0, SIZE, n, true, true);
-        let accumulation =
-            h.accumulation(0, frame.history_valid, frame.camera.view_proj(), frame.signature);
+        let accumulation = h.accumulation(
+            0,
+            frame.history_valid,
+            frame.camera.view_proj(),
+            frame.signature,
+        );
         let freeze = VolumetricClouds::freeze(&frame, accumulation);
         h.record_screen(0, n, Some(frame.camera.view_proj()));
         h.record_marked(
             0,
             n,
-            Marked { count: accumulation.map_or(1, |a| a.count), signature: frame.signature },
+            Marked {
+                count: accumulation.map_or(1, |a| a.count),
+                signature: frame.signature,
+            },
         );
         h.submitted(0, n);
         handle.observe_submission(n, 1, true);

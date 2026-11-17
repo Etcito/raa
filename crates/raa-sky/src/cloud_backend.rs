@@ -63,6 +63,7 @@ use crate::desc::SkyModel;
 use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage};
 use crate::state::{SharedSky, SkyState};
 use crate::time_of_day::CelestialSky;
+use crate::tunables::CloudTunables;
 use crate::weather::Weather;
 
 /// The shared backend handle (the feature and both cloud passes share one backend).
@@ -150,6 +151,8 @@ pub struct CloudFrame {
     pub signature: u64,
     /// True when the accepted sky model is `SkyModel::Physical`.
     pub physical: bool,
+    /// The cloud tunables (S56) copied from SkyState's store; part of `signature`.
+    pub tunables: CloudTunables,
 }
 
 /// The panorama, screen and transmittance views a cloud backend exposes.
@@ -298,6 +301,7 @@ pub(crate) fn cloud_frame(
         animated,
         signature,
         physical: state.desc.model == SkyModel::Physical,
+        tunables: CloudTunables::from_sky(&state.tunables),
     })
 }
 
@@ -332,6 +336,9 @@ fn accumulation_state(state: &SkyState) -> (bool, u64) {
         weather.settings.cloud_dome_size,
         u32::from(state.desc.model == SkyModel::Physical),
     ] {
+        hash = mix(hash, word);
+    }
+    for word in CloudTunables::from_sky(&state.tunables).bits() {
         hash = mix(hash, word);
     }
     if !weather_changes {
@@ -1034,6 +1041,7 @@ mod tests {
             animated: false,
             signature: 0,
             physical: true,
+            tunables: CloudTunables::default(),
         }
     }
 

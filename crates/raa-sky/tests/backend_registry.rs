@@ -7,8 +7,9 @@
 use raa_math::Mat4;
 use raa_scene::{Camera, DirectionalLight};
 use raa_sky::{
-    CLOUD_SCREEN_UNKNOWN_ALPHA, CloudFrame, CloudInvalidation, CloudViews, M2_CLOUD_SOURCE_PRESENT,
-    TimeOfDayState, Weather, cloud_backend_names, registered_cloud_backend_names,
+    CLOUD_SCREEN_UNKNOWN_ALPHA, CloudFrame, CloudInvalidation, CloudTunables, CloudViews,
+    M2_CLOUD_SOURCE_PRESENT, TimeOfDayState, Weather, cloud_backend_names,
+    registered_cloud_backend_names,
 };
 
 /// The declared M2 producer file, relative to this package.
@@ -62,6 +63,7 @@ fn cloud_frame_carries_the_copied_snapshot() {
         animated: false,
         signature: 0,
         physical: true,
+        tunables: CloudTunables::default(),
     };
     assert_eq!(frame.invocation, 9);
     assert_eq!(frame.view, 2);

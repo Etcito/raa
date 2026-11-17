@@ -53,7 +53,7 @@ pub use desc::{
 pub use feature::{SkyFeature, SkyHandle};
 pub use observations::*;
 pub use time_of_day::*;
-pub use tunables::{SKY_TUNABLES, tunables};
+pub use tunables::{CloudTunables, SKY_TUNABLES, tunables};
 pub use weather::*;
 
 /// WGSL of the procedural sky: defines

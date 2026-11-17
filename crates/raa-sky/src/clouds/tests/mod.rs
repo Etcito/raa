@@ -12,6 +12,7 @@ use raa_scene::{Camera, DirectionalLight};
 
 use super::super::CloudFrame;
 use crate::time_of_day::TimeOfDayState;
+use crate::tunables::CloudTunables;
 use crate::weather::Weather;
 
 /// A marchable-looking frame; tests change single fields with struct update syntax.
@@ -41,5 +42,6 @@ fn test_frame(view: u32, invocation: u64, size: (u32, u32)) -> CloudFrame {
         animated: false,
         signature: 0,
         physical: true,
+        tunables: CloudTunables::default(),
     }
 }

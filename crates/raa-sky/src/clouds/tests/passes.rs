@@ -59,8 +59,8 @@ fn shadows_off_weather_off_and_legacy_publish_the_neutral_map() {
             cloud_shadows: false,
             cloud_samples: 56,
             cloud_scale: 0.5,
-        cloud_dither: true,
-        cloud_noise_size: 1,
+            cloud_dither: true,
+            cloud_noise_size: 1,
             animated: false,
             signature: 0,
             ..on
@@ -467,7 +467,11 @@ fn every_invalidation_and_resize_resets_screen_validity_and_history() {
         // A weather edit keeps the committed march displayable; every other reason clears it.
         let kept = reason == CloudInvalidation::Weather;
         assert_eq!(s.screen(0).0, kept, "{reason:?}");
-        assert_eq!(s.backend.history.history(0, true).is_some(), kept, "{reason:?}");
+        assert_eq!(
+            s.backend.history.history(0, true).is_some(),
+            kept,
+            "{reason:?}"
+        );
     }
     assert_eq!(
         s.screen(0).1,
