@@ -8,6 +8,12 @@ pub const EXPOSURE_COMPUTE_WGSL: &str = include_str!("wgsl/exposure_compute.wgsl
 pub const BUILD_HISTOGRAM: &str = "build_histogram";
 /// Compute entry resolving the band average and the adapted exposure.
 pub const RESOLVE: &str = "resolve";
+/// The fullscreen apply module.
+pub const EXPOSURE_APPLY_WGSL: &str = include_str!("wgsl/exposure_apply.wgsl");
+/// Vertex entry of the fullscreen triangle.
+pub const VS_MAIN: &str = "vs_main";
+/// Fragment entry multiplying the HDR source by the exposure.
+pub const FS_APPLY: &str = "fs_apply";
 
 /// Writes the S46 `ExposureParams` uniform, little-endian, into `out`.
 ///

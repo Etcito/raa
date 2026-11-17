@@ -3,8 +3,8 @@
 //! `RESULT_SIZE`; `pack_params` and `read_result` follow the S46 layouts.
 
 use raa_exposure::{
-    AutoExposureDesc, BUILD_HISTOGRAM, EXPOSURE_COMPUTE_WGSL, ExposureResult, PARAMS_SIZE, RESOLVE,
-    RESULT_SIZE, pack_params, read_result,
+    AutoExposureDesc, BUILD_HISTOGRAM, EXPOSURE_APPLY_WGSL, EXPOSURE_COMPUTE_WGSL, ExposureResult,
+    FS_APPLY, PARAMS_SIZE, RESOLVE, RESULT_SIZE, VS_MAIN, pack_params, read_result,
 };
 use raa_shader::Composer;
 
@@ -171,4 +171,81 @@ fn read_result_layout() {
             ..want
         }
     );
+}
+
+/// `(binding, declaration)` of every group-0 binding; panics on another group.
+fn bindings(wgsl: &str) -> Vec<(u32, &str)> {
+    code_lines(wgsl)
+        .filter_map(|l| l.strip_prefix("@group("))
+        .map(|rest| {
+            let rest = rest
+                .strip_prefix("0) @binding(")
+                .unwrap_or_else(|| panic!("group other than 0: {rest}"));
+            let (b, decl) = rest.split_once(')').unwrap_or_else(|| panic!("{rest}"));
+            (b.parse().unwrap_or_else(|_| panic!("{rest}")), decl.trim())
+        })
+        .collect()
+}
+
+#[test]
+fn apply_module_validates() {
+    if let Err(e) = Composer::validate(EXPOSURE_APPLY_WGSL) {
+        panic!("exposure apply: {e}");
+    }
+}
+
+#[test]
+fn apply_entries_vertex_and_fragment() {
+    assert_eq!(
+        entry_points(EXPOSURE_APPLY_WGSL),
+        [("@vertex", VS_MAIN), ("@fragment", FS_APPLY)]
+    );
+    assert_eq!(EXPOSURE_APPLY_WGSL.matches("@compute").count(), 0);
+    let mut all: Vec<&str> = entry_points(EXPOSURE_COMPUTE_WGSL)
+        .into_iter()
+        .chain(entry_points(EXPOSURE_APPLY_WGSL))
+        .map(|(_, n)| n)
+        .collect();
+    all.sort_unstable();
+    assert_eq!(all, ["build_histogram", "fs_apply", "resolve", "vs_main"]);
+}
+
+#[test]
+fn apply_bindings_and_no_prelude() {
+    for l in code_lines(EXPOSURE_APPLY_WGSL) {
+        assert!(!l.contains("raa_"), "PRELUDE identifier: {l}");
+    }
+    let b = bindings(EXPOSURE_APPLY_WGSL);
+    let indices: Vec<u32> = b.iter().map(|(i, _)| *i).collect();
+    assert_eq!(indices, [0, 1, 2]);
+    assert!(
+        b[0].1.starts_with("var<uniform> params: ExposureParams"),
+        "{}",
+        b[0].1
+    );
+    assert!(b[1].1.contains("texture_2d<f32>"), "{}", b[1].1);
+    assert!(
+        b[2].1
+            .starts_with("var<storage, read> state: ExposureState"),
+        "{}",
+        b[2].1
+    );
+}
+
+#[test]
+fn apply_structs_equal_compute_structs() {
+    for name in ["ExposureParams", "ExposureState"] {
+        let apply = fields(EXPOSURE_APPLY_WGSL, name);
+        assert!(!apply.is_empty(), "{name} missing");
+        assert_eq!(apply, fields(EXPOSURE_COMPUTE_WGSL, name), "{name}");
+    }
+}
+
+#[test]
+fn apply_attribution_line_present() {
+    assert_eq!(
+        EXPOSURE_APPLY_WGSL.lines().next(),
+        EXPOSURE_COMPUTE_WGSL.lines().next()
+    );
+    assert!(EXPOSURE_APPLY_WGSL.starts_with("// Adapted from solstice@7e465b5 "));
 }
