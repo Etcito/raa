@@ -4,9 +4,13 @@
 
 mod desc;
 mod maths;
+mod shaders;
 
 pub use desc::AutoExposureDesc;
 pub use maths::{adapt, band_average, bin_index, exposure_from_average, luminance, settled};
+pub use shaders::{
+    BUILD_HISTOGRAM, EXPOSURE_COMPUTE_WGSL, ExposureResult, RESOLVE, pack_params, read_result,
+};
 
 /// Name of the feature pass.
 pub const AUTO_EXPOSURE_PASS_NAME: &str = "exposure.auto";
