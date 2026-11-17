@@ -1,8 +1,9 @@
-// Contract checks of the post page (S49, module post-page): the inventory and fact validators on fixtures.
-// The real exposure scene namespace is checked by examples/post/exposure.test.mjs.
+// Contract checks of the post page (S49, module post-page): the inventory and fact validators on fixtures, and the
+// runtime (lib/runtime.js) on stub engines. The real exposure scene namespace is checked by examples/post/exposure.test.mjs.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { SETTING_ORDER, validateInventory, validateRequiredFacts } from './lib/inventory.js';
+import { SETTLE_FRAME_MS, advancingRender, applyVariantSettings, captureDisplayed, createPostPageRunner, waitExposureSettled } from './lib/runtime.js';
 
 // A camera at the origin looking down -Z, and a 1 m box five metres in front of it (inside the frustum).
 const camera = { eye: [0, 0, 0], target: [0, 0, -1], fovYDeg: 60, near: 0.1, far: 50 };
@@ -127,4 +128,145 @@ test('validateRequiredFacts refuses a facts object without values', () => {
   const noValues = { ...facts };
   delete noValues.values;
   assert.throws(() => validateRequiredFacts(onRow, noValues, names), { message: 'fixture-room-demo-on: invalid PostObservation' });
+});
+
+// Readiness gate (waitExposureSettled) on an engine double: autoExposureState answers the given states in turn (the
+// last one repeats), and each render is counted.
+const PENDING = { pending: true, settled: false, exposureEv: null, averageLuminance: null };
+const UNSETTLED = { pending: false, settled: false, exposureEv: 0.5, averageLuminance: 0.2 };
+const SETTLED = { pending: false, settled: true, exposureEv: 1, averageLuminance: 0.18 };
+const budgetOf = remainingMs => ({ remainingMs: () => remainingMs });
+function exposureDouble(states) {
+  const double = { renders: 0, reads: 0 };
+  double.render = async () => { double.renders += 1; };
+  double.engine = {
+    autoExposureState() {
+      const state = states[Math.min(double.reads, states.length - 1)];
+      double.reads += 1;
+      if (state instanceof Error) throw state;
+      return state;
+    },
+  };
+  return double;
+}
+
+test('waitExposureSettled is ready on the second settled read, after exactly 6 renders', async () => {
+  const double = exposureDouble([PENDING, UNSETTLED, SETTLED, UNSETTLED, SETTLED, SETTLED]);
+  const verdict = await waitExposureSettled(double.engine, double.render, budgetOf(Infinity));
+  assert.deepEqual(verdict, { status: 'ready', state: SETTLED, frames: 6, error: null });
+  assert.equal(double.renders, 6);
+});
+
+test('a never-settled exposure fails after 600 renders and never reports ready', async () => {
+  const double = exposureDouble([UNSETTLED]);
+  const verdict = await waitExposureSettled(double.engine, double.render, budgetOf(Infinity));
+  assert.deepEqual(verdict, { status: 'failed', state: UNSETTLED, frames: 600, error: 'exposure did not settle in 600 frames' });
+  assert.equal(double.renders, 600);
+});
+
+test('a pending exposure keeps rendering and is not ready until a settled pair arrives', async () => {
+  const stuck = exposureDouble([PENDING]);
+  const failed = await waitExposureSettled(stuck.engine, stuck.render, budgetOf(Infinity), 25);
+  assert.deepEqual([failed.status, failed.error, stuck.renders], ['failed', 'exposure did not settle in 25 frames', 25]);
+  const late = exposureDouble([PENDING, PENDING, PENDING, PENDING, PENDING, SETTLED, SETTLED]);
+  const verdict = await waitExposureSettled(late.engine, late.render, budgetOf(Infinity));
+  assert.deepEqual([verdict.status, verdict.frames, late.renders], ['ready', 7, 7]);
+});
+
+test('a throwing autoExposureState fails with the described error', async () => {
+  const broken = exposureDouble([new Error('device lost')]);
+  const verdict = await waitExposureSettled(broken.engine, broken.render, budgetOf(Infinity));
+  assert.deepEqual([verdict.status, verdict.error], ['failed', 'device lost']);
+});
+
+test('a budget with no time left fails before the first render', async () => {
+  const double = exposureDouble([SETTLED]);
+  const verdict = await waitExposureSettled(double.engine, double.render, budgetOf(0));
+  assert.deepEqual([verdict.status, verdict.error, double.renders], ['failed', 'exposure: not settled before the operation deadline', 0]);
+});
+
+test('applyVariantSettings applies the keys in SETTING_ORDER and refuses an unknown key or a missing method', () => {
+  const calls = [];
+  const engine = {
+    setToneMapping: value => calls.push(['setToneMapping', value]),
+    setPassEnabled: (name, enabled) => calls.push(['setPassEnabled', name, enabled]),
+    setAutoExposure: value => calls.push(['setAutoExposure', value]),
+  };
+  applyVariantSettings(engine, { autoExposure: { enabled: true }, toneMapping: { exposureEv: 1 }, passes: { taa: true } });
+  assert.deepEqual(calls, [
+    ['setToneMapping', { exposureEv: 1 }],
+    ['setPassEnabled', 'taa', true],
+    ['setAutoExposure', { enabled: true }],
+  ]);
+  assert.throws(() => applyVariantSettings(engine, { toneMapping: { exposureEv: 2 }, blur: 1 }), { message: 'post runtime: unknown setting blur' });
+  assert.throws(() => applyVariantSettings(engine, { sharpening: { enabled: true } }), { message: 'post runtime: engine has no setSharpening' });
+  assert.equal(calls.length, 3);
+});
+
+test('captureDisplayed captures a 1280 x 720 canvas as it is, and a smaller one through a 1280 x 720 proxy', async () => {
+  const captured = [];
+  const capture = async (canvas, status) => { captured.push([canvas, status]); return 'PNG'; };
+  const status = { textContent: '' };
+  const full = { width: 1280, height: 720 };
+  assert.equal(await captureDisplayed(full, status, { capture }), 'PNG');
+  assert.equal(captured[0][0], full);
+  const draws = [];
+  const context = { imageSmoothingEnabled: false, drawImage: (...args) => draws.push([args, context.imageSmoothingEnabled]) };
+  const proxy = { width: 0, height: 0, getContext: kind => (kind === '2d' ? context : null) };
+  const small = { width: 858, height: 482, ownerDocument: { createElement: tag => (tag === 'canvas' ? proxy : null) } };
+  await captureDisplayed(small, status, { capture });
+  assert.deepEqual(draws, [[[small, 0, 0, 1280, 720], true]]);
+  assert.equal(captured[1][0], proxy);
+  assert.deepEqual([proxy.width, proxy.height], [1280, 720]);
+});
+
+test('createPostPageRunner refuses a missing canvas before any clock is read', () => {
+  assert.throws(() => createPostPageRunner({ status: { textContent: '' }, load: async () => ({}), scenes: new Map(), lib: {} }), { message: 'post runtime: options.canvas is required' });
+});
+
+test('advancingRender renders settle frame k at the variant time plus (k + 1) frame steps, after scene.frame', async () => {
+  const calls = [];
+  const clock = { now: () => 0, requestFrame: callback => { callback(0); return 1; }, cancelFrame() {} };
+  const engine = { render: timeMs => calls.push(['render', timeMs]) };
+  const scene = { frame: (target, timeMs) => calls.push(['frame', timeMs]) };
+  const render = advancingRender({ engine, scene, variant: { id: 'on', timeMs: 1000 }, state: {}, clock });
+  for (const k of [0, 1, 2]) await render(k);
+  assert.deepEqual(calls.map(([kind]) => kind), ['frame', 'render', 'frame', 'render', 'frame', 'render']);
+  const times = calls.filter(([kind]) => kind === 'render').map(([, timeMs]) => timeMs);
+  [1, 2, 3].forEach((steps, i) => assert.ok(Math.abs(times[i] - (1000 + steps * (1000 / 60))) < 1e-9));
+  assert.ok(1000 < times[0] && times[0] < times[1] && times[1] < times[2]);
+});
+
+test('createPostPageRunner applies the settings after the build, then settles on advancing frames', async () => {
+  const log = [];
+  const times = [];
+  const clock = { now: () => 0, requestFrame: callback => { queueMicrotask(() => callback(0)); return 1; }, cancelFrame() {} };
+  const engine = {
+    setToneMapping: value => log.push(['setToneMapping', value.exposureEv]),
+    setAutoExposure: value => log.push(['setAutoExposure', value.enabled]),
+    autoExposureState: () => ({ ...UNSETTLED }),
+    render: timeMs => times.push(timeMs),
+    resize() {},
+    stats: () => ({ hardware: false, adapter: {} }),
+    passes: () => [],
+    dispose() {},
+  };
+  const scene = {
+    id: 'probe',
+    milestone: 'exposure',
+    title: 'Probe',
+    variants: [{ id: 'on', settle: true, settings: { toneMapping: { exposureEv: 1 }, autoExposure: { enabled: true } } }],
+    build: async () => { log.push(['build']); return {}; },
+  };
+  const row = { id: 'probe-on', scenario: 'probe', mode: 'on', filename: 'probe-on.png', expectedVisibleBehavior: 'Probe.', requiredFacts: [], heldConstant: [] };
+  const scenes = new Map([['probe', { default: scene, inventory: [row], factNames: [], observe: async () => ({ values: {}, assertions: [] }) }]]);
+  const runner = createPostPageRunner({ canvas: { width: 0, height: 0 }, status: { textContent: '' }, load: async () => ({ createEngine: async () => engine }), scenes, lib: {}, clock });
+  const input = { selectionId: 's-1', attemptId: 'a-1', buildId: 'b-1', scenario: 'probe', mode: 'on', width: 1280, height: 720, remainingMs: 300000 };
+  await assert.rejects(runner.run(input), { message: 'post runtime: readiness: exposure did not settle in 600 frames' });
+  runner.dispose();
+  assert.deepEqual(log, [['build'], ['setToneMapping', 1], ['setAutoExposure', true]]);
+  assert.ok(times.slice(0, 30).every(timeMs => timeMs === 1000));
+  const settle = times.slice(30);
+  assert.equal(settle.length, 600);
+  assert.ok(settle.every((timeMs, k) => Math.abs(timeMs - (1000 + (k + 1) * SETTLE_FRAME_MS)) < 1e-9));
 });
