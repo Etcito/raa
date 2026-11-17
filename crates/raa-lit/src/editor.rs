@@ -109,13 +109,21 @@ pub(crate) struct EditorPass {
     resources: Option<Resources>,
     bytes: Vec<u8>,
     /// The 128 B instance records of the camera ids, in id order, then those of
-    /// `virtual_outlines`.
+    /// `virtual_members`.
     records: Vec<u8>,
     record_buffer: Option<wgpu::Buffer>,
-    /// The outlined virtualized members of this frame (mesh, material), drawn into the mask
+    /// The virtualized members of this frame that are outlined or have a wireframe, drawn
     /// after the camera ids: the virtualized set leaves them out of the camera draw lists, so
-    /// the selection's draws never hold them.
-    virtual_outlines: Vec<(MeshId, MaterialId)>,
+    /// neither the selection's mask nor the wire overlay would ever see them.
+    virtual_members: Vec<VirtualMember>,
+}
+/// A virtualized (raa-vg) member drawn by the editor overlays from the frame's item snapshot.
+#[derive(Clone, Copy)]
+struct VirtualMember {
+    mesh: MeshId,
+    material: MaterialId,
+    mode: WireframeMode,
+    outlined: bool,
 }
 struct Resources {
     size: (u32, u32),
@@ -141,7 +149,7 @@ impl EditorPass {
             bytes: Vec::new(),
             records: Vec::new(),
             record_buffer: None,
-            virtual_outlines: Vec::new(),
+            virtual_members: Vec::new(),
         }
     }
 }
@@ -411,6 +419,14 @@ impl Resources {
         }
     }
 }
+/// The wireframe mode as the overlay settings record carries it.
+fn wire_value(mode: WireframeMode) -> f32 {
+    match mode {
+        WireframeMode::Off => 0.0,
+        WireframeMode::Overlay => 1.0,
+        WireframeMode::Only => 2.0,
+    }
+}
 fn attachment(
     view: &wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
@@ -452,11 +468,7 @@ impl FeaturePass for EditorPass {
             let tag = tag(&s, i);
             self.records
                 .extend_from_slice(record(&s, i).unwrap_or(&[0u8; 128]));
-            let mode = match s.editor.mode(tag) {
-                WireframeMode::Off => 0.0_f32,
-                WireframeMode::Overlay => 1.0,
-                WireframeMode::Only => 2.0,
-            };
+            let mode = wire_value(s.editor.mode(tag));
             let color = s.editor.outlines.get(&tag);
             let c = color.copied().unwrap_or([0.0; 3]);
             let background = ctx.lighting.env().background;
@@ -474,10 +486,10 @@ impl FeaturePass for EditorPass {
             }
         }
         // A virtualized member is drawn by raa-vg, not by the camera draw lists, so its outline
-        // mask is drawn from the frame's item snapshot: its persistent record and settings follow
-        // the camera ids, at instance index `camera_count + k`.
-        self.virtual_outlines.clear();
-        if outlined {
+        // mask and its wireframe are drawn from the frame's item snapshot: its persistent record
+        // and settings follow the camera ids, at instance index `camera_count + k`.
+        self.virtual_members.clear();
+        if outlined || wire {
             let background = ctx.lighting.env().background;
             for (index, item) in s.items.items.iter().enumerate() {
                 let Some(&slot) = s.item_slots.get(index) else {
@@ -489,25 +501,34 @@ impl FeaturePass for EditorPass {
                     continue;
                 }
                 let tag = s.item_tags.get(index).copied().unwrap_or(0);
-                let (Some(color), Some(record)) =
-                    (s.editor.outlines.get(&tag).copied(), s.store.record(slot))
-                else {
+                let color = s.editor.outlines.get(&tag).copied();
+                let mode = s.editor.mode(tag);
+                if color.is_none() && mode == WireframeMode::Off {
+                    continue;
+                }
+                let Some(record) = s.store.record(slot) else {
                     continue;
                 };
                 self.records.extend_from_slice(record);
+                let c = color.unwrap_or([0.0; 3]);
                 for f in [
                     background[0],
                     background[1],
                     background[2],
-                    0.0,
-                    color[0],
-                    color[1],
-                    color[2],
-                    1.0,
+                    wire_value(mode),
+                    c[0],
+                    c[1],
+                    c[2],
+                    if color.is_some() { 1.0 } else { 0.0 },
                 ] {
                     self.bytes.extend_from_slice(&f.to_le_bytes());
                 }
-                self.virtual_outlines.push((item.mesh, item.material));
+                self.virtual_members.push(VirtualMember {
+                    mesh: item.mesh,
+                    material: item.material,
+                    mode,
+                    outlined: color.is_some(),
+                });
             }
         }
         drop(s);
@@ -603,7 +624,11 @@ impl FeaturePass for EditorPass {
             }
             // Virtualized members are rigid (never skinned), so their rest stream is drawn.
             let base = s.select.camera_count();
-            for (k, &(source_mesh, material)) in self.virtual_outlines.iter().enumerate() {
+            for (k, member) in self.virtual_members.iter().enumerate() {
+                if !member.outlined {
+                    continue;
+                }
+                let (source_mesh, material) = (member.mesh, member.material);
                 let Ok((mesh, first, count)) = s.meshes.resolve(source_mesh) else {
                     continue;
                 };
@@ -713,6 +738,57 @@ impl FeaturePass for EditorPass {
                         pass.draw(0..6, 0..geometry.edge_count());
                     }
                 }
+            }
+            // Virtualized members are rigid (never skinned): their rest stream and rest edges.
+            let base = s.select.camera_count();
+            for (k, member) in self.virtual_members.iter().enumerate() {
+                if member.mode == WireframeMode::Off {
+                    continue;
+                }
+                let i = base + k as u32;
+                if member.mode == WireframeMode::Only {
+                    let Ok((mesh, first, count)) = s.meshes.resolve(member.mesh) else {
+                        continue;
+                    };
+                    let double_sided = s
+                        .materials
+                        .get(member.material)
+                        .is_some_and(|m| m.flags & crate::FLAG_DOUBLE_SIDED != 0);
+                    pass.set_pipeline(if double_sided {
+                        &r.only_double
+                    } else {
+                        &r.only
+                    });
+                    if let Some(buffer) = &records {
+                        pass.set_vertex_buffer(1, buffer.slice(..));
+                    }
+                    pass.set_vertex_buffer(2, r.settings.slice(..));
+                    pass.set_index_buffer(mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.set_vertex_buffer(0, mesh.stream0.slice(..));
+                    pass.draw_indexed(first..first + count, 0, i..i + 1);
+                }
+                // One draw of the edges per lit mesh: its first submesh carries them.
+                let Some(sub) = s.meshes.submesh(member.mesh) else {
+                    continue;
+                };
+                if s.meshes.submesh_ids(sub.lit).and_then(|ids| ids.first()) != Some(&member.mesh) {
+                    continue;
+                }
+                let Ok((mesh, _, _)) = s.meshes.resolve(member.mesh) else {
+                    continue;
+                };
+                let Some(edges) = mesh.edges.as_ref() else {
+                    continue;
+                };
+                let count = (edges.size() / crate::REST_EDGE_STRIDE) as u32;
+                pass.set_pipeline(&r.wire);
+                pass.set_vertex_buffer(0, edges.slice(..));
+                let start = i as u64 * 128;
+                if let Some(buffer) = &records {
+                    pass.set_vertex_buffer(1, buffer.slice(start..start + 128));
+                }
+                pass.set_vertex_buffer(2, r.settings.slice(i as u64 * 32..i as u64 * 32 + 32));
+                pass.draw(0..6, 0..count);
             }
         }
         if outlined {

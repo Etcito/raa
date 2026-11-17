@@ -143,6 +143,8 @@ struct Rig {
     backbuffer: OffscreenTarget,
     /// The cube's scene instance.
     instance: raa_scene::InstanceId,
+    /// The cube's lit mesh.
+    lit_mesh: raa_lit::LitMeshId,
 }
 
 impl Rig {
@@ -177,6 +179,7 @@ impl Rig {
             graph,
             backbuffer: OffscreenTarget::new(gpu, SIZE.0, SIZE.1, SURFACE),
             instance,
+            lit_mesh: id,
         }
     }
 
@@ -457,6 +460,72 @@ fn editor_outlines_a_virtualized_member() {
     let outlined = rig.backbuffer.read_rgba8(&gpu).unwrap();
     assert_ne!(outlined, baseline, "the member's outline is drawn");
     handle.set_outline(0, None);
+    clear(&rig);
+    rig.render(&gpu);
+    assert_eq!(rig.backbuffer.read_rgba8(&gpu).unwrap(), baseline);
+    let error = raa_core::testing::block_on(errors.pop());
+    assert!(error.is_none(), "GPU validation error: {error:?}");
+}
+
+/// A virtualized member's wireframe is drawn like its outline: the overlay reads the member
+/// from the frame's item snapshot (the camera draw lists never hold it), so turning the global
+/// wireframe on changes the display, and turning it off restores the frame.
+#[test]
+fn editor_wires_a_virtualized_member() {
+    let Some(gpu) = software_gpu() else {
+        skip(
+            "editor_wires_a_virtualized_member",
+            "software_gpu returned None",
+        );
+        return;
+    };
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut rig = Rig::new(&gpu, 1);
+    let instance = rig.instance;
+    rig.lit.virtual_instances_mut().set(instance, true);
+    let handle = rig.lit.handle();
+    // The cube's 12 edges over its 24 vertices: each face's four sides.
+    let mut edges = Vec::new();
+    for face in 0..6u32 {
+        let b = face * 4;
+        edges.extend_from_slice(&[b, b + 1, b + 1, b + 2, b + 2, b + 3, b + 3, b]);
+    }
+    handle.set_mesh_edges(rig.lit_mesh, &cube(), &edges);
+    let clear = |rig: &Rig| {
+        let mut e = gpu.device().create_command_encoder(&Default::default());
+        {
+            let _p = e.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: rig.backbuffer.view(),
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+        gpu.queue().submit([e.finish()]);
+    };
+    clear(&rig);
+    let counts = rig.render(&gpu);
+    assert_eq!(
+        counts.draw_calls, 0,
+        "the member leaves the camera draw lists"
+    );
+    let baseline = rig.backbuffer.read_rgba8(&gpu).unwrap();
+    handle.set_wireframe(raa_lit::WireframeMode::Overlay, None);
+    clear(&rig);
+    rig.render(&gpu);
+    let wired = rig.backbuffer.read_rgba8(&gpu).unwrap();
+    assert_ne!(wired, baseline, "the member's wireframe is drawn");
+    handle.set_wireframe(raa_lit::WireframeMode::Off, None);
     clear(&rig);
     rig.render(&gpu);
     assert_eq!(rig.backbuffer.read_rgba8(&gpu).unwrap(), baseline);
