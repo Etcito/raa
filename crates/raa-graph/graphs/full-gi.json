@@ -51,7 +51,10 @@
         "localLightShadows": true,
         "voxelFullRelight": true,
         "voxelHistoryMax": 64,
-        "voxelRays": 3
+        "voxelRays": 3,
+        "behind": 0.5,
+        "resetRays": 8,
+        "directChange": 0.05
       }
     },
     {
@@ -85,7 +88,38 @@
         "clampGamma": 3,
         "spatialPasses": 4,
         "restirMCap": 30,
-        "debugView": "none"
+        "debugView": "none",
+        "accDepthTolerance": 0.04,
+        "accNormalCos": 0.9,
+        "accMinWeight": 0.05,
+        "accChangeSlack": 0.05,
+        "accChangeMin": 4,
+        "occlusionDirections": 3,
+        "occlusionSteps": 4,
+        "occlusionRadius": 0.9,
+        "atrousSigmaLuminance": 4,
+        "atrousNormalPower": 32,
+        "atrousPlane": 0.01,
+        "probeScreenDistance": 8,
+        "probeScreenSteps": 32,
+        "probeScreenThickness": 0.15,
+        "probeVolumeDistance": 320,
+        "probeVolumeSteps": 40,
+        "probeVolumeHitVoxels": 0.85,
+        "restirJacobianMax": 10,
+        "restirVisibilitySteps": 32,
+        "restirVisibilityDistance": 320,
+        "restirScreenDistance": 8,
+        "restirScreenSteps": 32,
+        "restirScreenThickness": 0.15,
+        "restirVolumeDistance": 320,
+        "restirVolumeSteps": 40,
+        "restirVolumeHitVoxels": 0.85,
+        "screenEdgeFade": 0.08,
+        "restirSpatialSamples": 4,
+        "restirSpatialRadius": 24,
+        "restirBoilingFactor": 20,
+        "restirNormalCos": 0.9
       }
     },
     {
@@ -100,14 +134,32 @@
         "stochasticCount": 4,
         "stochasticDistance": 40,
         "stochasticCells": 4,
-        "stochasticMode": "stratified"
+        "stochasticMode": "stratified",
+        "restirDepthTolerance": 0.1,
+        "spatialStride": 2,
+        "normalPower": 8,
+        "temporalAlpha": 0.1,
+        "depthTolerance": 0.05,
+        "restirCandidates": 8,
+        "restirSpatialSamples": 4,
+        "restirSpatialRadius": 30,
+        "restirMCap": 20,
+        "restirBoilingFactor": 8,
+        "restirNormalCos": 0.9
       }
     },
     {
       "id": "giSsgi",
       "type": "pass.gi.ssgi",
       "params": {
-        "screenSpaceQuality": "medium"
+        "screenSpaceQuality": "medium",
+        "changeSigma": 3,
+        "slicesLow": 2,
+        "slicesMedium": 4,
+        "slicesHigh": 6,
+        "stepsLow": 6,
+        "stepsMedium": 8,
+        "stepsHigh": 12
       }
     },
     {
