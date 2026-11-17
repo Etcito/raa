@@ -461,6 +461,24 @@ impl GtaoHandle {
         Ok(())
     }
 
+    /// Sets one S56 tunable. Today it validates through `raa_pipeline::validate_tunable`
+    /// against [`crate::tunables`], refuses with `ao.invalid` without changing anything, and
+    /// writes `slices`/`steps` through [`GtaoHandle::set_quality`] (a uniform written each
+    /// prepare; raa-gtao has no WGSL row to store for the next prepare).
+    ///
+    /// Handoff: card 'Executor extension: apply Tunable bindings' calls it through
+    /// `HandleSet.gtao` (crates/raa-graph/src/exec.rs) with a catalog key and its value as f64.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let spec = raa_pipeline::validate_tunable(crate::tunables(), key, value)
+            .map_err(|m| refusal("ao.invalid", &m))?;
+        let mut q = self.quality();
+        match spec.key {
+            "slices" => q.slices = value as u32,
+            _ => q.steps = value as u32,
+        }
+        self.set_quality(q)
+    }
+
     /// The current sampling effort (4 x 8 until set).
     pub fn quality(&self) -> AoQuality {
         self.state
@@ -485,6 +503,32 @@ impl GtaoHandle {
 mod tests {
     use super::*;
     use raa_math::Vec3;
+
+    #[test]
+    fn set_tunable_writes_quality_and_refusals_change_nothing() {
+        let h = GtaoHandle {
+            state: Rc::new(RefCell::new(GtaoState {
+                desc: AoDesc::default(),
+                quality: AoQuality::default(),
+                camera: None,
+            })),
+        };
+        h.set_tunable("slices", 6.0).unwrap();
+        h.set_tunable("steps", 12.0).unwrap();
+        let q = h.quality();
+        for (k, v) in [
+            ("slices", 9.0),
+            ("steps", 0.0),
+            ("steps", 2.5),
+            ("slices", f64::NAN),
+            ("x", 1.0),
+        ] {
+            let e = h.set_tunable(k, v).unwrap_err();
+            assert_eq!(e.code(), "ao.invalid");
+            assert_eq!(h.quality(), q);
+        }
+        assert_eq!((q.slices, q.steps), (6, 12));
+    }
 
     fn f32_at(bytes: &[u8], offset: usize) -> f32 {
         f32::from_le_bytes([

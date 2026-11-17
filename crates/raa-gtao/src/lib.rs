@@ -21,6 +21,8 @@
 mod desc;
 mod feature;
 mod shaders;
+mod tunables;
 
 pub use desc::{AoDesc, AoQuality};
 pub use feature::{GtaoFeature, GtaoHandle};
+pub use tunables::tunables;
