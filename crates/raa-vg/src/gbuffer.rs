@@ -13,7 +13,7 @@
 
 use raa_core::{RaaError, wgpu};
 use raa_lit::{MaterialFnId, PipelineSpec};
-use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx};
+use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx};
 use raa_shader::{PassKind, VariantKey};
 
 use crate::frame_passes::SharedVg;
@@ -85,6 +85,32 @@ impl FeaturePass for VgGbufferPass {
             self.group = None;
             self.surface = None;
             return Ok(());
+        }
+        let (width, height) = ctx.targets.size();
+        for (port, view, format) in [
+            (
+                "depth",
+                ctx.targets.depth(),
+                wgpu::TextureFormat::Depth32Float,
+            ),
+            (
+                "normal",
+                ctx.targets.normal(),
+                wgpu::TextureFormat::Rgba16Float,
+            ),
+            (
+                "material",
+                ctx.targets.material(),
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
+            (
+                "motion",
+                ctx.targets.motion(),
+                wgpu::TextureFormat::Rg16Float,
+            ),
+        ] {
+            let desc = ImageDesc::new(ImageDim::D2, format, width, height, 1, 1);
+            ctx.resources.publish("vg.gbuffer", port, view, desc);
         }
         let debug = state.settings.debug_view.code();
         self.entries.clear();

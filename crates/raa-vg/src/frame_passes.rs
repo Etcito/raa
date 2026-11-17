@@ -22,10 +22,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, RaaError, wgpu};
 use raa_lit::{LitHandle, MaterialFnId};
 use raa_math::Mat4;
-use raa_pipeline::{FeaturePass, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx, Targets};
 use raa_scene::Camera;
 use raa_shadow::{CascadeTargets, ShadowHandle};
 
@@ -497,6 +497,9 @@ impl FeaturePass for VgCullPass {
         let Some(resources) = state.resources.as_ref() else {
             return Ok(());
         };
+        let cull_list = resources.main.visible();
+        ctx.resources
+            .publish_buffer("vg.cull", "cullList", cull_list, cull_list.size());
         let view_proj = state.camera.view_proj();
         let previous = state.previous_view_proj.unwrap_or(view_proj);
         let projection = state.camera.projection();
@@ -696,6 +699,25 @@ impl FeaturePass for VgRasterPass {
             return Ok(());
         };
         let use_forward = use_forward && ctx.targets.size() == resources.size;
+        let visibility = resources.visibility.depth();
+        ctx.resources
+            .publish_buffer("vg.raster", "visibility", visibility, visibility.size());
+        let hzb = &resources.current;
+        let (hzb_w, hzb_h) = hzb.size();
+        let hzb_mips = 32 - hzb_w.max(hzb_h).leading_zeros();
+        ctx.resources.publish(
+            "vg.raster",
+            "hzb",
+            hzb.view(),
+            ImageDesc::new(
+                ImageDim::D2,
+                wgpu::TextureFormat::R32Float,
+                hzb_w,
+                hzb_h,
+                1,
+                hzb_mips,
+            ),
+        );
         let depth = ctx.targets.depth();
         let occluders = &mut resources.occluders;
         if occluders.use_forward != Some(use_forward) {
@@ -891,6 +913,29 @@ impl FeaturePass for VgResolvePass {
         let Some(resources) = state.resources.as_ref() else {
             return Ok(());
         };
+        let (width, height) = resources.surface.size();
+        let surface = &resources.surface;
+        for (port, view, format) in [
+            ("surfaceIds", surface.ids(), wgpu::TextureFormat::Rgba32Uint),
+            (
+                "surfaceNormal",
+                surface.normal(),
+                wgpu::TextureFormat::Rgba16Float,
+            ),
+            (
+                "surfaceUvMotion",
+                surface.uv_motion(),
+                wgpu::TextureFormat::Rgba32Float,
+            ),
+            (
+                "surfaceAlbedo",
+                surface.albedo(),
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
+        ] {
+            let desc = ImageDesc::new(ImageDim::D2, format, width, height, 1, 1);
+            ctx.resources.publish("vg.resolve", port, view, desc);
+        }
         let view_proj = state.camera.view_proj();
         let previous = state.previous_view_proj.unwrap_or(view_proj);
         let size = state.size();
@@ -1080,8 +1125,8 @@ mod tests {
         let mut encoder = gpu
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let resources = raa_pipeline::ResourceTable::new();
         for pass in [&mut cull as &mut dyn FeaturePass, &mut raster, &mut resolve] {
-            let resources = raa_pipeline::ResourceTable::new();
             let mut prepare = PrepareCtx {
                 gpu: &gpu,
                 size: (64, 64),
@@ -1113,5 +1158,34 @@ mod tests {
         let error = block_on(errors.pop());
         assert!(error.is_none(), "empty-scene frame: {error:?}");
         assert!(shared.borrow().recorded.is_empty());
+        let images = resources.entries();
+        for port in [
+            "surfaceIds",
+            "surfaceNormal",
+            "surfaceUvMotion",
+            "surfaceAlbedo",
+        ] {
+            assert!(
+                images
+                    .iter()
+                    .any(|(p, k, _)| p == "vg.resolve" && k == port)
+            );
+        }
+        assert!(
+            images
+                .iter()
+                .any(|(p, k, d)| p == "vg.raster" && k == "hzb" && d.mips > 1)
+        );
+        let buffers = resources.buffer_entries();
+        assert!(
+            buffers
+                .iter()
+                .any(|(p, k, _)| p == "vg.cull" && k == "cullList")
+        );
+        assert!(
+            buffers
+                .iter()
+                .any(|(p, k, _)| p == "vg.raster" && k == "visibility")
+        );
     }
 }
