@@ -5,8 +5,8 @@
 //! the SVGF variance propagation sum(w^2 var) / (sum w)^2 of the B3-spline kernel.
 
 use raa_gi::parts::screen::accumulate_cpu::{
-    ATROUS_KERNEL, accumulate, alpha, atrous_filter, atrous_weight, change_keep, filter_variance,
-    kept_length, tap_matches, variance,
+    ATROUS_KERNEL, accumulate, alpha, atrous_filter, atrous_weight, change_action, change_keep,
+    cut_length, cut_moments, filter_variance, tap_matches, variance,
 };
 
 fn close(got: f32, want: f32, tol: f32) {
@@ -73,12 +73,14 @@ fn change_test_keeps_noise_and_cuts_a_lighting_change() {
     assert!((change_keep(10.0, 0.0, 1.0, 4.0, 2.5) - (2.0 - 10.0 / 2.5001 / 2.5)).abs() < 1e-5);
     // A larger jump (history 10, mean 0, noise sigma 1): z = 10 / 1.5001 = 6.67 > 5: nothing kept.
     assert_eq!(change_keep(10.0, 0.0, 1.0, 0.0, 2.5), 0.0);
-    // 64 frames at keep 0.4: 25 frames stay; a full change keeps historyMin - 1 = 0 frames, so
-    // the next frame (n = 1, weight 1) is the new light alone; historyMin 4 keeps 3.
-    assert_eq!(kept_length(64.0, 0.4, 1.0), 25.0);
-    assert_eq!(kept_length(64.0, 0.0, 1.0), 0.0);
-    assert_eq!(kept_length(64.0, 0.0, 4.0), 3.0);
-    assert_eq!(kept_length(64.0, 1.0, 1.0), 64.0);
+    // Inside: nothing. Certain (keep 0): cut. In the band: mark first, cut when marked already.
+    assert_eq!(change_action(1.0, true), (false, false));
+    assert_eq!(change_action(0.0, false), (true, false));
+    assert_eq!(change_action(0.4, false), (false, true));
+    assert_eq!(change_action(0.4, true), (true, false));
+    // A cut keeps historyMin - 1 frames: 0 (the next frame, n = 1, is the new light alone), or 3.
+    assert_eq!(cut_length(64.0, 1.0), 0.0);
+    assert_eq!(cut_length(64.0, 4.0), 3.0);
 }
 
 #[test]
@@ -155,4 +157,43 @@ fn atrous_weight_edge_terms() {
         0.034_337,
         1e-5,
     );
+}
+
+/// One accumulation frame with the change test (accumulate.wgsl raa_gi_acc_resolve, matched
+/// pixel, kept history): state (n, value, m1, m2), this frame's value x and spatial variance.
+fn frame_with_test(
+    state: (f32, f32, f32, f32, bool),
+    x: f32,
+    spatial_var: f32,
+) -> (f32, f32, f32, f32, bool) {
+    let (mut n, value, mut m1, mut m2, marked) = state;
+    let keep = change_keep(value, x, spatial_var, (m2 - m1 * m1).max(0.0), 2.5);
+    let (cut, mark) = change_action(keep, marked);
+    if cut && n >= 4.0 {
+        n = cut_length(n, 1.0);
+        (m1, m2) = cut_moments(x, spatial_var);
+    }
+    let (n, value, m1, m2) = accumulate((n, value, m1, m2), x, 64.0);
+    (n, value, m1, m2, mark && n >= 4.0)
+}
+
+#[test]
+fn a_light_that_goes_out_leaves_the_history_at_once() {
+    // Converged at 10 with per-frame noise sigma 1 (m2 = 101), 64 frames. The light goes out:
+    // this frame reads 0 with spatial sigma 1. z = 10 / (1 + 0.5001) = 6.67 > 2 x 2.5: nothing
+    // kept, so the next history is this frame alone, exactly 0.
+    let state = frame_with_test((64.0, 10.0, 10.0, 101.0, false), 0.0, 1.0);
+    assert_eq!((state.0, state.1), (1.0, 0.0));
+    // A partial change, 10 -> 5.5 (z = 4.5 / 1.5001 = 3.0, in the band): the first frame only
+    // marks the pixel (history 10 - 4.5 / 64 = 9.9296875), the second, out again (z = 2.7),
+    // cuts it: the history is the new light, 5.5, after two frames.
+    let first = frame_with_test((63.0, 10.0, 10.0, 101.0, false), 5.5, 1.0);
+    assert_eq!((first.0, first.4), (64.0, true));
+    assert!((first.1 - 9.929_687_5).abs() < 1e-5);
+    let second = frame_with_test(first, 5.5, 1.0);
+    assert_eq!((second.0, second.1), (1.0, 5.5));
+    // One noisy frame in the band (5.5) between in-band frames (10): marked, then cleared, kept.
+    let noisy = frame_with_test((63.0, 10.0, 10.0, 101.0, false), 5.5, 1.0);
+    let back = frame_with_test(noisy, 10.0, 1.0);
+    assert_eq!((back.0, back.4), (64.0, false));
 }

@@ -578,10 +578,11 @@ impl GiHandle {
     }
 }
 
-/// Frames of full voxel relight (every voxel of the relit level, not a checkerboard half) after a
-/// lighting change: two passes of the five-level relight schedule, so every level is relit whole
-/// at least twice while the volume follows the change.
-const HOT_RELIGHT_FRAMES: u32 = 16;
+/// Frames of full voxel relight (every voxel of the relit level, not a checkerboard half, each
+/// update replacing the radiance instead of averaging it) after a lighting change: four passes of
+/// the five-level relight schedule, so every level is relit whole at least four times and the
+/// bounce of the old lighting has died out before the volume averages again.
+const HOT_RELIGHT_FRAMES: u32 = 32;
 
 /// An order-stable FNV-1a 64 of the sun (direction, colour) and the world-space records of the
 /// active local lights, as uploaded: a change detector for the voxel lighting epoch.

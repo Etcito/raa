@@ -509,8 +509,15 @@ impl GiVolume {
                 updates: self.light_updates.get(level).copied().unwrap_or(0),
                 resolution,
                 full: u32::from(settings.voxel_full_relight || full_relight),
+                // While the volume follows a lighting change, every update replaces the radiance
+                // (history 1): a running mean would keep the transient of the change (the stale
+                // bounce of the first updates) for as many updates as it averages.
                 control: GiLightGpu::control_word(
-                    settings.voxel_history_max,
+                    if full_relight {
+                        1
+                    } else {
+                        settings.voxel_history_max
+                    },
                     light_epoch,
                     settings.voxel_rays,
                 ),

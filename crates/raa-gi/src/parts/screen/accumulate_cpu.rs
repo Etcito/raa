@@ -78,11 +78,28 @@ pub fn change_keep(history: f32, mean: f32, spatial_var: f32, temporal_var: f32,
     (2.0 - z / gamma.max(1.0e-3)).clamp(0.0, 1.0)
 }
 
-/// The history length kept after the change test (`raa_gi_acc_kept_length`): floor(n keep), at
-/// least min(n, history_min - 1) when the test cut anything.
-pub fn kept_length(n: f32, keep: f32, history_min: f32) -> f32 {
-    let floor_after_change = n.min((history_min - 1.0).max(0.0));
-    (n * keep).floor().max(if keep < 1.0 { floor_after_change } else { 0.0 })
+/// The moments after a cut by the change test (accumulate.wgsl): this frame's neighbourhood mean
+/// and its spatial variance, (mean, mean^2 + spatial_var).
+pub fn cut_moments(mean: f32, spatial_var: f32) -> (f32, f32) {
+    (mean, mean * mean + spatial_var.max(0.0))
+}
+
+/// The change test's action (`raa_gi_acc_change_action`): (cut, mark). Inside the band (keep 1)
+/// neither; a certain change (keep 0) cuts; between, a pixel marked last frame is cut and an
+/// unmarked one is marked.
+pub fn change_action(keep: f32, marked: bool) -> (bool, bool) {
+    if keep >= 1.0 {
+        (false, false)
+    } else if keep <= 0.0 {
+        (true, false)
+    } else {
+        (marked, !marked)
+    }
+}
+
+/// The history length after a cut: at most history_min - 1 frames.
+pub fn cut_length(n: f32, history_min: f32) -> f32 {
+    n.min((history_min - 1.0).max(0.0))
 }
 
 /// The variance the a-trous passes steer by: var / n from four frames on, else the larger of the
