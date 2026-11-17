@@ -21,6 +21,7 @@ impl NodeFamily for PassesFamily {
     fn node_types(&self) -> Vec<NodeTypeSpec> {
         let mut types = geometry_lighting_types();
         types.extend(shadow_gi_types());
+        types.extend(post_types());
         types
     }
 }
@@ -1601,6 +1602,1028 @@ fn shadow_gi_types() -> Vec<NodeTypeSpec> {
     ]
 }
 
+/// A Vec3 Setting in linear RGB (unit `linear-rgb`); `min` bounds each component.
+fn colour(
+    feature: FeatureId,
+    group: &'static str,
+    key: &'static str,
+    label: &'static str,
+    default: [f32; 3],
+    min: Option<f64>,
+    source: &'static str,
+) -> ParamSpec {
+    setting(
+        feature,
+        key,
+        label,
+        group,
+        ParamKind::Vec3,
+        ParamValue::Vec3(default.map(f64::from)),
+        min,
+        None,
+        None,
+        &[],
+        "linear-rgb",
+        Rebuild::None,
+        source,
+    )
+}
+
+/// `spec` with its unit set.
+fn with_unit(spec: ParamSpec, unit: &'static str) -> ParamSpec {
+    ParamSpec { unit, ..spec }
+}
+
+/// The post, tonemap and output pass node types of S51, appended last by
+/// `PassesFamily::node_types`. The colour chain and the helpers follow the Handoff doc comment
+/// on `geometry_lighting_types` (passes.rs:614). A budget counts the declared layout entries
+/// visible to its stage, with the lit groups where the pass's pipeline layout holds them.
+fn post_types() -> Vec<NodeTypeSpec> {
+    use Category::{Output, Post};
+    use FeatureId as Fid;
+    use raa_tonemap::{Look, ToneMapper};
+    /// Upper bound of a surface-sized mip chain: the levels of an 8192 px side, the WebGPU
+    /// default maximum dimension (`raa_ssr::hiz::mip_count` gives 14 there).
+    const SURFACE_MIPS: u32 = 14;
+    let ssr = raa_ssr::SsrDesc::default();
+    let fog = raa_fog::FogDesc::default();
+    let shafts = raa_shafts::ShaftsDesc::default();
+    let oit = raa_oit::OitSettings::default();
+    let dof = raa_dof::DofDesc::default();
+    let bloom = raa_bloom::BloomDesc::default();
+    let grading = raa_grading::GradingDesc::default();
+    let cel = raa_cel::CelSettings::default();
+    let tone = raa_tonemap::TonemapControl::default().get();
+    let ssr_p = |key, label, default, range, source| {
+        value(
+            Fid::Ssr,
+            key,
+            label,
+            "Reflections",
+            default,
+            range,
+            &[],
+            source,
+        )
+    };
+    let fog_p = |key, label, default, range, source| {
+        value(Fid::Fog, key, label, "Fog", default, range, &[], source)
+    };
+    let shafts_p = |key, label, default, range, source| {
+        value(
+            Fid::Shafts,
+            key,
+            label,
+            "Sun shafts",
+            default,
+            range,
+            &[],
+            source,
+        )
+    };
+    let dof_p = |key, label, default, range, source| {
+        value(
+            Fid::Dof,
+            key,
+            label,
+            "Depth of field",
+            default,
+            range,
+            &[],
+            source,
+        )
+    };
+    let bloom_p = |key, label, default, range, source| {
+        value(Fid::Bloom, key, label, "Bloom", default, range, &[], source)
+    };
+    let grading_p = |key, label, default, range, source| {
+        value(
+            Fid::Grading,
+            key,
+            label,
+            "Colour grading",
+            default,
+            range,
+            &[],
+            source,
+        )
+    };
+    let cel_p = |key, label, default, range, options, source| {
+        value(
+            Fid::Cel,
+            key,
+            label,
+            "Cel shading",
+            default,
+            range,
+            options,
+            source,
+        )
+    };
+    let tone_p = |key, label, default, range, options, source| {
+        value(
+            Fid::Tonemap,
+            key,
+            label,
+            "Tone mapping",
+            default,
+            range,
+            options,
+            source,
+        )
+    };
+    let mapper = match tone.mapper {
+        ToneMapper::Agx => "agx",
+        ToneMapper::Aces => "aces",
+        ToneMapper::Linear => "linear",
+    };
+    let look = match tone.look {
+        Look::None => "none",
+        Look::Punchy => "punchy",
+        Look::Golden => "golden",
+    };
+    vec![
+        pass_type(
+            "pass.ssr",
+            Post,
+            "Screen-space reflections",
+            "Screen-space reflections composited over the colour chain; also publishes the Hi-Z pyramid and the trace.",
+            "ssr",
+            65,
+            vec![
+                color_input(65),
+                gbuffer_input("depth"),
+                gbuffer_input("normal"),
+                gbuffer_input("material"),
+            ],
+            vec![
+                color_output(),
+                output(
+                    "hiz",
+                    "Hi-Z pyramid",
+                    P::Image2d,
+                    Some(F::R32Float),
+                    SizeSpec::Scale(1.0),
+                    SURFACE_MIPS,
+                    1,
+                ),
+                output(
+                    "trace",
+                    "Trace",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(1.0),
+                    1,
+                    1,
+                ),
+            ],
+            vec![
+                ssr_p(
+                    "intensity",
+                    "Intensity",
+                    num(ssr.intensity),
+                    ranged(0.0, 2.0),
+                    "crates/raa-ssr/src/desc.rs:19",
+                ),
+                ssr_p(
+                    "maxRoughness",
+                    "Max roughness",
+                    num(ssr.max_roughness),
+                    ranged(0.0, 1.0),
+                    "crates/raa-ssr/src/desc.rs:20",
+                ),
+                with_unit(
+                    ssr_p(
+                        "thickness",
+                        "Thickness",
+                        num(ssr.thickness_m),
+                        ranged(0.0, 10.0),
+                        "crates/raa-ssr/src/desc.rs:21",
+                    ),
+                    "m",
+                ),
+            ],
+            vec![
+                // Hi-Z copy and reduce: depth or unfilterable texture, storage, params uniform
+                // (raa-ssr/src/resources.rs:259-276).
+                budget(Compute, 1, 0, 1, 0, 1),
+                // VS_FULLSCREEN: the opaque group 1 entries visible to the vertex stage.
+                budget(Vertex, 5, 2, 0, 0, 3),
+                // fs_composite: composite_layout (resources.rs:295-307: 5 textures, 1 sampler,
+                // 1 uniform) with the opaque group 1 (`LightingResources::opaque_layout`,
+                // raa-pipeline/src/lighting.rs:952). The 16 textures are as resources.rs:283-284
+                // states; the opaque layout's 10 textures would give 15, for the owner to confirm.
+                budget(Fragment, 16, 3, 0, 0, 8),
+            ],
+        ),
+        pass_type(
+            "pass.fog",
+            Post,
+            "Height fog",
+            "Exponential height fog and aerial perspective over the colour chain.",
+            "fog",
+            68,
+            vec![color_input(68), gbuffer_input("depth")],
+            vec![color_output()],
+            vec![
+                fog_p(
+                    "density",
+                    "Density",
+                    num(fog.density),
+                    ranged(0.0, 1.0),
+                    "crates/raa-fog/src/desc.rs:32",
+                ),
+                with_unit(
+                    fog_p(
+                        "heightFalloff",
+                        "Height falloff",
+                        num(fog.height_falloff),
+                        ranged(0.0, 10.0),
+                        "crates/raa-fog/src/desc.rs:33",
+                    ),
+                    "1/m",
+                ),
+                with_unit(
+                    fog_p(
+                        "baseHeight",
+                        "Base height",
+                        num(fog.base_height_m),
+                        OPEN,
+                        "crates/raa-fog/src/desc.rs:34",
+                    ),
+                    "m",
+                ),
+                with_unit(
+                    fog_p(
+                        "start",
+                        "Start",
+                        num(fog.start_m),
+                        (Some(0.0), None),
+                        "crates/raa-fog/src/desc.rs:35",
+                    ),
+                    "m",
+                ),
+                colour(
+                    Fid::Fog,
+                    "Fog",
+                    "color",
+                    "Colour",
+                    fog.color,
+                    Some(0.0),
+                    "crates/raa-fog/src/desc.rs:36",
+                ),
+                fog_p(
+                    "inscatter",
+                    "Inscatter",
+                    num(fog.inscatter),
+                    ranged(0.0, 4.0),
+                    "crates/raa-fog/src/desc.rs:37",
+                ),
+                fog_p(
+                    "aerialStrength",
+                    "Aerial strength",
+                    num(fog.aerial_strength),
+                    ranged(0.0, 2.0),
+                    "crates/raa-fog/src/desc.rs:38",
+                ),
+                with_unit(
+                    fog_p(
+                        "aerialDistance",
+                        "Aerial distance",
+                        num(fog.aerial_distance_m),
+                        POSITIVE,
+                        "crates/raa-fog/src/desc.rs:39",
+                    ),
+                    "m",
+                ),
+            ],
+            vec![
+                // Group 0 frame (LitHandle, as forward), the base group 1 (`base_layout`,
+                // lighting.rs:933) and the private depth, colour and sampler (feature.rs:113).
+                budget(Vertex, 8, 3, 0, 6, 4),
+                budget(Fragment, 12, 4, 0, 5, 6),
+            ],
+        ),
+        pass_type(
+            "pass.sunshafts",
+            Post,
+            "Sun shafts",
+            "Light shafts marched towards the sun over the colour chain.",
+            "sunshafts",
+            69,
+            vec![color_input(69), gbuffer_input("depth")],
+            vec![color_output()],
+            vec![
+                shafts_p(
+                    "intensity",
+                    "Intensity",
+                    num(shafts.intensity),
+                    ranged(0.0, 8.0),
+                    "crates/raa-shafts/src/desc.rs:14",
+                ),
+                shafts_p(
+                    "density",
+                    "Density",
+                    num(shafts.density),
+                    ranged(0.0, 1.0),
+                    "crates/raa-shafts/src/desc.rs:15",
+                ),
+                with_unit(
+                    shafts_p(
+                        "maxDistance",
+                        "Max distance",
+                        num(shafts.max_distance_m),
+                        ranged(0.0, 1000.0),
+                        "crates/raa-shafts/src/desc.rs:16",
+                    ),
+                    "m",
+                ),
+            ],
+            vec![
+                // Group 1 is the opaque layout (lighting.rs:952); the private group 0 (depth,
+                // two colour textures, sampler, uniform) is fragment-only (feature.rs:148).
+                budget(Vertex, 5, 2, 0, 0, 3),
+                budget(Fragment, 13, 3, 0, 0, 8),
+            ],
+        ),
+        pass_type(
+            "pass.opaque.copy",
+            Post,
+            "Opaque copy",
+            "Copies the opaque colour with its mips and the opaque depth for transmission.",
+            "opaque.copy",
+            70,
+            vec![color_input(70), gbuffer_input("depth")],
+            vec![
+                color_output(),
+                output(
+                    "opaqueColor",
+                    "Opaque colour",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(1.0),
+                    SURFACE_MIPS,
+                    1,
+                ),
+                output(
+                    "opaqueDepth",
+                    "Opaque depth",
+                    P::Image2d,
+                    Some(F::R32Float),
+                    SizeSpec::Scale(1.0),
+                    1,
+                    1,
+                ),
+            ],
+            Vec::new(),
+            // The down pass (filterable texture, sampler) and the depth pass (texture), each with
+            // its own layout (raa-transmission/src/copy.rs:178 and :191).
+            vec![budget(Fragment, 1, 1, 0, 0, 0)],
+        ),
+        pass_type(
+            "pass.transparent.oit",
+            Post,
+            "Transparency (OIT)",
+            "Order-independent transparency: the linked-list fragments resolve over the colour chain.",
+            "transparent.oit",
+            80,
+            vec![
+                color_input(80),
+                gbuffer_input("depth"),
+                // Optional: without the copy the dummy binds (absent_ok).
+                input(
+                    "opaqueColor",
+                    "Opaque colour",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    &["pass.opaque.copy.opaqueColor"],
+                    true,
+                    None,
+                ),
+                input(
+                    "opaqueDepth",
+                    "Opaque depth",
+                    P::Image2d,
+                    Some(F::R32Float),
+                    &["pass.opaque.copy.opaqueDepth"],
+                    true,
+                    None,
+                ),
+            ],
+            vec![color_output()],
+            vec![
+                rebuilds(
+                    value(
+                        Fid::Oit,
+                        "maxFragments",
+                        "Max fragments",
+                        "Transparency",
+                        int(oit.max_fragments),
+                        ranged(4.0, 32.0),
+                        &[],
+                        "crates/raa-oit/src/feature.rs:54",
+                    ),
+                    Rebuild::Resources,
+                ),
+                rebuilds(
+                    value(
+                        Fid::Oit,
+                        "poolFactor",
+                        "Pool factor",
+                        "Transparency",
+                        int(oit.pool_factor),
+                        ranged(2.0, 32.0),
+                        &[],
+                        "crates/raa-oit/src/feature.rs:55",
+                    ),
+                    Rebuild::Resources,
+                ),
+            ],
+            vec![
+                // The clear (compute: 2 storage buffers, 1 uniform) and resolve (fragment: 1
+                // texture, 2 storage buffers, 1 uniform) layouts (raa-oit/src/buffers.rs:276, :285).
+                budget(Compute, 0, 0, 0, 2, 1),
+                budget(Fragment, 1, 0, 0, 2, 1),
+            ],
+        ),
+        pass_type(
+            "pass.particles.blend",
+            Post,
+            "Particles (blend)",
+            "Blended particles drawn over the colour chain.",
+            "particles.blend",
+            85,
+            vec![
+                color_input(85),
+                gbuffer_input("depth"),
+                input(
+                    "particles",
+                    "Particles",
+                    P::Buffer,
+                    None,
+                    &["pass.particles.sim.particles"],
+                    false,
+                    None,
+                ),
+            ],
+            vec![color_output()],
+            Vec::new(),
+            // The frame group 0 (LitHandle), the full group 1 (`LightingResources::layout`,
+            // lighting.rs:922) and the group 2 particle storage (vertex) and depth (fragment)
+            // (raa-particles/src/blend.rs:96, :192).
+            vec![
+                budget(Vertex, 8, 3, 0, 8, 4),
+                budget(Fragment, 14, 3, 0, 5, 8),
+            ],
+        ),
+        pass_type(
+            "pass.taa",
+            Post,
+            "TAA",
+            "Temporal anti-aliasing over the colour chain, with its history output.",
+            "taa",
+            100,
+            vec![
+                color_input(100),
+                gbuffer_input("depth"),
+                gbuffer_input("motion"),
+            ],
+            vec![
+                color_output(),
+                output(
+                    "history",
+                    "History",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(1.0),
+                    1,
+                    1,
+                ),
+            ],
+            Vec::new(),
+            // The resolve compute group 0 (raa-taa/src/resources.rs:84-96).
+            vec![budget(Compute, 4, 1, 2, 0, 2)],
+        ),
+        pass_type(
+            "pass.dof",
+            Post,
+            "Depth of field",
+            "Thin-lens depth of field over the colour chain; also publishes its scratch textures.",
+            "dof",
+            110,
+            vec![color_input(110), gbuffer_input("depth")],
+            vec![
+                color_output(),
+                output(
+                    "coc",
+                    "CoC",
+                    P::Image2d,
+                    Some(F::R32Float),
+                    SizeSpec::Scale(1.0),
+                    1,
+                    1,
+                ),
+                // Tiles are 16 px (raa-dof/src/shaders.rs:25), so 1/16 of the surface.
+                output(
+                    "tiles",
+                    "Tiles",
+                    P::Image2d,
+                    Some(F::Rg32Float),
+                    SizeSpec::Scale(0.0625),
+                    1,
+                    1,
+                ),
+                output(
+                    "dilated",
+                    "Dilated tiles",
+                    P::Image2d,
+                    Some(F::Rg32Float),
+                    SizeSpec::Scale(0.0625),
+                    1,
+                    1,
+                ),
+                // The half-size prefilter and gather layers (raa-dof/src/resources.rs:389-393).
+                output(
+                    "nearPrefilter",
+                    "Near prefilter",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(0.5),
+                    1,
+                    1,
+                ),
+                output(
+                    "farPrefilter",
+                    "Far prefilter",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(0.5),
+                    1,
+                    1,
+                ),
+                output(
+                    "nearGather",
+                    "Near gather",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(0.5),
+                    1,
+                    1,
+                ),
+                output(
+                    "farGather",
+                    "Far gather",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(0.5),
+                    1,
+                    1,
+                ),
+            ],
+            vec![
+                with_unit(
+                    dof_p(
+                        "focusDistance",
+                        "Focus distance",
+                        num(dof.focus_distance_m),
+                        POSITIVE,
+                        "crates/raa-dof/src/desc.rs:35",
+                    ),
+                    "m",
+                ),
+                dof_p(
+                    "fStop",
+                    "Aperture",
+                    num(dof.f_stop),
+                    ranged(0.7, 64.0),
+                    "crates/raa-dof/src/desc.rs:36",
+                ),
+                with_unit(
+                    dof_p(
+                        "focalLength",
+                        "Focal length",
+                        num(dof.focal_length_mm),
+                        ranged(8.0, 600.0),
+                        "crates/raa-dof/src/desc.rs:37",
+                    ),
+                    "mm",
+                ),
+                with_unit(
+                    dof_p(
+                        "maxCoc",
+                        "Max circle of confusion",
+                        num(dof.max_coc_px),
+                        ranged(0.0, 64.0),
+                        "crates/raa-dof/src/desc.rs:39",
+                    ),
+                    "px",
+                ),
+            ],
+            vec![
+                // Compute: autofocus, CoC, tiles and dilate (raa-dof/src/resources.rs:238-270).
+                budget(Compute, 1, 0, 1, 1, 1),
+                // Fragment: composite (raa-dof/src/resources.rs:292-305).
+                budget(Fragment, 5, 0, 0, 0, 1),
+            ],
+        ),
+        pass_type(
+            "pass.bloom",
+            Post,
+            "Bloom",
+            "Bloom over the colour chain; also publishes the bloom chain levels.",
+            "bloom",
+            120,
+            vec![color_input(120)],
+            vec![
+                color_output(),
+                output(
+                    "chain",
+                    "Bloom chain",
+                    P::Image2d,
+                    Some(F::Rgba16Float),
+                    SizeSpec::Scale(0.5),
+                    raa_bloom::MAX_MIPS as u32,
+                    1,
+                ),
+            ],
+            vec![
+                bloom_p(
+                    "strength",
+                    "Strength",
+                    num(bloom.strength),
+                    ranged(0.0, 1.0),
+                    "crates/raa-bloom/src/desc.rs:20",
+                ),
+                bloom_p(
+                    "radius",
+                    "Radius",
+                    num(bloom.radius),
+                    ranged(0.0, 1.0),
+                    "crates/raa-bloom/src/desc.rs:21",
+                ),
+            ],
+            // The composite layout (raa-bloom/src/feature.rs:129): 2 textures, 1 sampler, 1 uniform.
+            vec![budget(Fragment, 2, 1, 0, 0, 1)],
+        ),
+        pass_type(
+            "pass.grading",
+            Post,
+            "Colour grading",
+            "White balance, exposure, contrast, saturation and split toning over the colour chain.",
+            "grading",
+            130,
+            vec![color_input(130)],
+            vec![color_output()],
+            vec![
+                with_unit(
+                    grading_p(
+                        "temperature",
+                        "Temperature",
+                        num(grading.temperature_k),
+                        ranged(1500.0, 15000.0),
+                        "crates/raa-grading/src/desc.rs:40",
+                    ),
+                    "K",
+                ),
+                grading_p(
+                    "tint",
+                    "Tint",
+                    num(grading.tint),
+                    ranged(-1.0, 1.0),
+                    "crates/raa-grading/src/desc.rs:41",
+                ),
+                with_unit(
+                    grading_p(
+                        "exposure",
+                        "Exposure",
+                        num(grading.exposure_ev),
+                        ranged(-10.0, 10.0),
+                        "crates/raa-grading/src/desc.rs:42",
+                    ),
+                    "EV",
+                ),
+                grading_p(
+                    "contrast",
+                    "Contrast",
+                    num(grading.contrast),
+                    ranged(0.0, 4.0),
+                    "crates/raa-grading/src/desc.rs:43",
+                ),
+                grading_p(
+                    "saturation",
+                    "Saturation",
+                    num(grading.saturation),
+                    ranged(0.0, 4.0),
+                    "crates/raa-grading/src/desc.rs:44",
+                ),
+                grading_p(
+                    "vibrance",
+                    "Vibrance",
+                    num(grading.vibrance),
+                    ranged(-1.0, 1.0),
+                    "crates/raa-grading/src/desc.rs:45",
+                ),
+                colour(
+                    Fid::Grading,
+                    "Colour grading",
+                    "lift",
+                    "Lift",
+                    grading.lift,
+                    None,
+                    "crates/raa-grading/src/desc.rs:46",
+                ),
+                colour(
+                    Fid::Grading,
+                    "Colour grading",
+                    "gamma",
+                    "Gamma",
+                    grading.gamma,
+                    Some(0.0),
+                    "crates/raa-grading/src/desc.rs:47",
+                ),
+                colour(
+                    Fid::Grading,
+                    "Colour grading",
+                    "gain",
+                    "Gain",
+                    grading.gain,
+                    Some(0.0),
+                    "crates/raa-grading/src/desc.rs:48",
+                ),
+                colour(
+                    Fid::Grading,
+                    "Colour grading",
+                    "shadowsTint",
+                    "Shadows tint",
+                    grading.shadows_tint,
+                    Some(0.0),
+                    "crates/raa-grading/src/desc.rs:49",
+                ),
+                colour(
+                    Fid::Grading,
+                    "Colour grading",
+                    "highlightsTint",
+                    "Highlights tint",
+                    grading.highlights_tint,
+                    Some(0.0),
+                    "crates/raa-grading/src/desc.rs:50",
+                ),
+                grading_p(
+                    "splitBalance",
+                    "Split balance",
+                    num(grading.split_balance),
+                    ranged(-1.0, 1.0),
+                    "crates/raa-grading/src/desc.rs:51",
+                ),
+                grading_p(
+                    "vignette",
+                    "Vignette",
+                    num(grading.vignette),
+                    ranged(0.0, 1.0),
+                    "crates/raa-grading/src/desc.rs:52",
+                ),
+            ],
+            // The grading layout (raa-grading/src/feature.rs:101): uniform, texture, sampler.
+            vec![budget(Fragment, 1, 1, 0, 0, 1)],
+        ),
+        pass_type(
+            "pass.cel.resolve",
+            Post,
+            "Cel shading",
+            "Toon bands and ink outlines resolved from colour, depth and normal.",
+            "cel.resolve",
+            190,
+            vec![
+                color_input(190),
+                gbuffer_input("depth"),
+                gbuffer_input("normal"),
+            ],
+            vec![color_output()],
+            vec![
+                cel_p(
+                    "bands",
+                    "Bands",
+                    int(cel.bands),
+                    ranged(2.0, 32.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:63",
+                ),
+                cel_p(
+                    "hues",
+                    "Hues",
+                    int(cel.hues),
+                    ranged(4.0, 32.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:64",
+                ),
+                cel_p(
+                    "chroma",
+                    "Chroma",
+                    int(cel.chroma),
+                    ranged(2.0, 12.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:65",
+                ),
+                cel_p(
+                    "dither",
+                    "Dither",
+                    name(cel.dither.name()),
+                    OPEN,
+                    &[
+                        "bayer2", "bayer4", "bayer8", "bayer16", "ign", "white", "blue",
+                    ],
+                    "crates/raa-cel/src/desc.rs:66",
+                ),
+                cel_p(
+                    "ditherAmount",
+                    "Dither amount",
+                    num(cel.dither_amount),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:67",
+                ),
+                with_unit(
+                    cel_p(
+                        "outlineWidth",
+                        "Outline width",
+                        num(cel.outline_width),
+                        ranged(0.5, 6.0),
+                        &[],
+                        "crates/raa-cel/src/desc.rs:68",
+                    ),
+                    "px",
+                ),
+                cel_p(
+                    "outlineSharpness",
+                    "Outline sharpness",
+                    num(cel.outline_sharpness),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:69",
+                ),
+                cel_p(
+                    "interiorEdges",
+                    "Interior edges",
+                    ParamValue::Bool(cel.interior_edges),
+                    OPEN,
+                    &[],
+                    "crates/raa-cel/src/desc.rs:70",
+                ),
+                cel_p(
+                    "edgeRetention",
+                    "Edge retention",
+                    num(cel.edge_retention),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:71",
+                ),
+                cel_p(
+                    "worldSpace",
+                    "World space",
+                    ParamValue::Bool(cel.world_space),
+                    OPEN,
+                    &[],
+                    "crates/raa-cel/src/desc.rs:72",
+                ),
+                with_unit(
+                    cel_p(
+                        "worldScale",
+                        "World scale",
+                        num(cel.world_scale),
+                        ranged(1.0, 512.0),
+                        &[],
+                        "crates/raa-cel/src/desc.rs:73",
+                    ),
+                    "1/m",
+                ),
+                cel_p(
+                    "softness",
+                    "Softness",
+                    num(cel.softness),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:74",
+                ),
+                cel_p(
+                    "specular",
+                    "Specular",
+                    num(cel.specular),
+                    ranged(0.0, 2.0),
+                    &[],
+                    "crates/raa-cel/src/desc.rs:75",
+                ),
+                cel_p(
+                    "toon",
+                    "Toon",
+                    ParamValue::Bool(cel.toon),
+                    OPEN,
+                    &[],
+                    "crates/raa-cel/src/desc.rs:76",
+                ),
+                cel_p(
+                    "palette",
+                    "Palette",
+                    ParamValue::Bool(cel.palette),
+                    OPEN,
+                    &[],
+                    "crates/raa-cel/src/desc.rs:77",
+                ),
+                cel_p(
+                    "outlines",
+                    "Outlines",
+                    ParamValue::Bool(cel.outlines),
+                    OPEN,
+                    &[],
+                    "crates/raa-cel/src/desc.rs:78",
+                ),
+                cel_p(
+                    "ditherOutlines",
+                    "Dither outlines",
+                    ParamValue::Bool(cel.dither_outlines),
+                    OPEN,
+                    &[],
+                    "crates/raa-cel/src/desc.rs:79",
+                ),
+            ],
+            // The cel layout (raa-cel/src/feature.rs:61): 3 textures and 2 uniforms.
+            vec![budget(Fragment, 3, 0, 0, 0, 2)],
+        ),
+        pass_type(
+            "pass.tonemap",
+            Post,
+            "Tone mapping",
+            "Tone mapping to the surface format; a required node of every graph.",
+            "tonemap",
+            200,
+            vec![color_input(200), gbuffer_input("depth")],
+            vec![output(
+                "color",
+                "Color",
+                P::Image2d,
+                Some(F::Surface),
+                SizeSpec::Scale(1.0),
+                1,
+                1,
+            )],
+            vec![
+                tone_p(
+                    "mapper",
+                    "Mapper",
+                    name(mapper),
+                    OPEN,
+                    &["agx", "aces", "linear"],
+                    "crates/raa-tonemap/src/lib.rs:75",
+                ),
+                with_unit(
+                    tone_p(
+                        "exposureEv",
+                        "Exposure",
+                        num(tone.exposure_ev),
+                        OPEN,
+                        &[],
+                        "crates/raa-tonemap/src/lib.rs:76",
+                    ),
+                    "EV",
+                ),
+                tone_p(
+                    "look",
+                    "Look",
+                    name(look),
+                    OPEN,
+                    &["none", "punchy", "golden"],
+                    "crates/raa-tonemap/src/lib.rs:77",
+                ),
+                tone_p(
+                    "dither",
+                    "Dither",
+                    ParamValue::Bool(tone.dither),
+                    OPEN,
+                    &[],
+                    "crates/raa-tonemap/src/lib.rs:78",
+                ),
+            ],
+            // The tone-mapping layout (raa-tonemap/src/pass.rs:90): 2 textures and 2 uniforms.
+            vec![budget(Fragment, 2, 0, 0, 0, 2)],
+        ),
+        side_effect(pass_type(
+            "pass.overlay",
+            Output,
+            "Overlay",
+            "Line overlay drawn onto the tone-mapped output; a side-effect node.",
+            "overlay",
+            220,
+            vec![color_input(220)],
+            vec![color_output()],
+            Vec::new(),
+            // The lit frame group 0 that the overlay lines bind (raa-js/src/api/m07_pipeline.rs:65).
+            vec![
+                budget(Vertex, 1, 1, 0, 6, 1),
+                budget(Fragment, 1, 1, 0, 5, 1),
+            ],
+        )),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1667,5 +2690,36 @@ mod tests {
             gbuffer_input("depth").default_source[1],
             "pass.vg.gbuffer.depth"
         );
+    }
+
+    #[test]
+    fn catalog_holds_post_share() {
+        let catalog = Catalog::build();
+        for id in [
+            "pass.ssr",
+            "pass.fog",
+            "pass.sunshafts",
+            "pass.opaque.copy",
+            "pass.transparent.oit",
+            "pass.particles.blend",
+            "pass.taa",
+            "pass.dof",
+            "pass.bloom",
+            "pass.grading",
+            "pass.cel.resolve",
+            "pass.tonemap",
+            "pass.overlay",
+        ] {
+            assert!(catalog.node(id).is_some(), "{id}");
+        }
+        let tonemap = catalog.node("pass.tonemap").unwrap();
+        assert_eq!(tonemap.outputs[0].format, Some(GraphFormat::Surface));
+        assert_eq!(
+            tonemap.inputs[0].default_source[0],
+            "pass.cel.resolve.color"
+        );
+        assert!(tonemap.required_in_graph);
+        assert!(!tonemap.side_effect);
+        assert!(catalog.node("pass.overlay").unwrap().side_effect);
     }
 }
