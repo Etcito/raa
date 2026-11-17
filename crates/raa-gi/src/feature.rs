@@ -13,7 +13,9 @@ use raa_core::{GpuContext, MeshId, RaaError};
 use raa_ibl::IblHandle;
 use raa_lit::LitRenderer;
 use raa_math::Mat4;
-use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx, RecordCtx,
+};
 use raa_scene::{Camera, DirectionalLight, Scene};
 use raa_vg::VgHandle;
 use raa_vg::scene::{ItemScratch, SyncItem};
@@ -757,8 +759,20 @@ impl FeaturePass for GiVolumePass {
                     .iter()
                     .rev()
                     .find_map(|part| part.screen_output());
-                ctx.lighting
-                    .set_gi(screen, volume.atlas_view(), &volume.params_bytes())
+                let atlas = volume.atlas_view();
+                let quality = core.allocated_quality.unwrap_or(core.quality);
+                let resolution = quality.resolution;
+                let desc = ImageDesc::new(
+                    ImageDim::D3,
+                    wgpu::TextureFormat::Rgba16Float,
+                    resolution,
+                    resolution,
+                    resolution * quality.levels,
+                    1,
+                );
+                ctx.resources
+                    .publish(VOLUME_PASS, "volumeAtlas", &atlas, desc);
+                ctx.lighting.set_gi(screen, atlas, &volume.params_bytes())
             }
             None => {
                 ctx.lighting.clear_gi();
@@ -856,6 +870,23 @@ impl FeaturePass for GiHistoryPass {
     }
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let result = self.record_history(ctx);
+        let size = ctx.size;
+        let hdr = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, size.0, size.1, 1, 1);
+        ctx.resources
+            .publish(HISTORY_PASS, "color", ctx.targets.hdr().src(), hdr);
+        if let Some((texture, view)) = self.core.borrow().history.as_ref() {
+            let (w, h) = (texture.width(), texture.height());
+            let desc = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, w, h, 1, 1);
+            ctx.resources.publish(HISTORY_PASS, "history", view, desc);
+        }
+        result
+    }
+}
+
+impl GiHistoryPass {
+    /// The copy and debug record of the pass; `record` publishes the taps after it.
+    fn record_history(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut guard = self.core.borrow_mut();
         let core = &mut *guard;
         if core.shared.frame_buffer().is_some() {
@@ -1225,6 +1256,79 @@ mod tests {
         rig.handle.invalidate_history();
         rig.frame(&gpu, 1);
         assert!(!rig.handle.core.borrow().history_valid);
+    }
+
+    /// Runs `gi.volume`'s `prepare` and `gi.history`'s `record` against an 8x8 `Targets` and a
+    /// fresh `ResourceTable` before GI allocated its resources (no tap but the chain colour), then
+    /// after an enabled 64/3 frame (every tap with its descriptor).
+    #[test]
+    fn taps_publish_volume_and_history_ports() {
+        let test = "taps_publish_volume_and_history_ports";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        let core = Rc::clone(&rig.handle.core);
+        let targets = raa_pipeline::Targets::new(&gpu, (8, 8));
+        let mut lighting = LightingResources::new(&gpu);
+        let backbuffer = OffscreenTarget::new(&gpu, 8, 8, SURFACE);
+        let mut run = |table: &raa_pipeline::ResourceTable| {
+            let mut prepare = PrepareCtx {
+                gpu: &gpu,
+                size: (8, 8),
+                frame: 0,
+                time_s: 0.0,
+                dt_s: 0.0,
+                targets: &targets,
+                lighting: &mut lighting,
+                resources: table,
+            };
+            let mut volume = GiVolumePass {
+                core: Rc::clone(&core),
+            };
+            volume.prepare(&mut prepare).expect("prepare");
+            let mut encoder = gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let mut record = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size: (8, 8),
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                resources: table,
+                backbuffer: backbuffer.view(),
+                backbuffer_format: SURFACE,
+                surface_is_srgb: false,
+            };
+            let mut history = GiHistoryPass {
+                core: Rc::clone(&core),
+            };
+            history.record(&mut record).expect("record");
+        };
+        let hdr = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, 8, 8, 1, 1);
+        let before = raa_pipeline::ResourceTable::new();
+        run(&before);
+        let color = ("gi.history".to_string(), "color".to_string(), hdr);
+        assert_eq!(before.entries(), std::slice::from_ref(&color));
+        rig.enable_at_64_3();
+        rig.frame(&gpu, 1);
+        let table = raa_pipeline::ResourceTable::new();
+        run(&table);
+        let d3 = ImageDesc::new(
+            ImageDim::D3,
+            wgpu::TextureFormat::Rgba16Float,
+            64,
+            64,
+            64 * 3,
+            1,
+        );
+        let history = ("gi.history".to_string(), "history".to_string(), hdr);
+        let volume = ("gi.volume".to_string(), "volumeAtlas".to_string(), d3);
+        assert_eq!(table.entries(), [volume, color, history]);
     }
 
     #[test]

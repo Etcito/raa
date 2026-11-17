@@ -25,7 +25,10 @@ use self::passes::{
 use super::{GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitHandle;
-use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, PrepareCtx, RecordCtx, ResourceTable,
+    Targets,
+};
 
 #[path = "screen/cpu.rs"]
 pub mod cpu;
@@ -353,7 +356,9 @@ impl ScreenResources {
             gpu,
             "raa-gi.screen.counters",
             16,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
         );
         let readback = buffer(
             gpu,
@@ -474,6 +479,56 @@ impl ScreenResources {
         self.pyramid_view.clone()
     }
 
+    /// Publishes the `gi.screen` ports of the taps table into `table`: the screen output the
+    /// forward pass samples, the internals, and the current parity half of each pair.
+    pub(crate) fn publish(&self, table: &ResourceTable, parity: usize, passes: u32) {
+        let (w, h) = self.viewport;
+        let parity = parity & 1;
+        let half = wgpu::TextureFormat::Rgba16Float;
+        let words = wgpu::TextureFormat::Rgba32Uint;
+        let screen = if passes > 0 {
+            &self.display_view
+        } else {
+            &self.output_views[parity]
+        };
+        let image = |format, w, h, mips| ImageDesc::new(ImageDim::D2, format, w, h, 1, mips);
+        let atlas = (self.grid.0 * self.probe_rays, self.grid.1 * self.probe_rays);
+        let pass = "gi.screen";
+        table.publish(pass, "gi", screen, image(half, w, h, 1));
+        let mips = self.pyramid_sizes.len() as u32;
+        let r32 = wgpu::TextureFormat::R32Float;
+        table.publish(pass, "pyramid", &self.pyramid_view, image(r32, w, h, mips));
+        table.publish(
+            pass,
+            "atlas",
+            &self.atlas_view,
+            image(half, atlas.0, atlas.1, 1),
+        );
+        table.publish_buffer(pass, "probesRaw", &self.probes_raw, self.probes_raw.size());
+        let filtered = &self.probes_filtered;
+        table.publish_buffer(pass, "probesFiltered", filtered, filtered.size());
+        table.publish(
+            pass,
+            "output",
+            &self.output_views[parity],
+            image(half, w, h, 1),
+        );
+        table.publish(
+            pass,
+            "meta",
+            &self.meta_views[parity],
+            image(words, w, h, 1),
+        );
+        table.publish(
+            pass,
+            "filter",
+            &self.filter_views[parity],
+            image(half, w, h, 1),
+        );
+        table.publish(pass, "display", &self.display_view, image(half, w, h, 1));
+        table.publish(pass, "debug", &self.debug_view, image(words, w, h, 1));
+    }
+
     /// Writes the 32 B of `GiScreenGpu` (`screen_params_bytes`).
     pub(crate) fn write_params(
         &self,
@@ -501,7 +556,8 @@ impl ScreenResources {
     pub(crate) fn copy_counters(&self, encoder: &mut wgpu::CommandEncoder) {
         if self.readback_state.load(Ordering::Acquire) == READBACK_IDLE {
             encoder.copy_buffer_to_buffer(&self.counters, 0, &self.readback, 0, 16);
-            self.readback_state.store(READBACK_COPIED, Ordering::Release);
+            self.readback_state
+                .store(READBACK_COPIED, Ordering::Release);
         }
     }
 
@@ -510,12 +566,17 @@ impl ScreenResources {
         if self.readback_state.load(Ordering::Acquire) != READBACK_COPIED {
             return;
         }
-        self.readback_state.store(READBACK_MAPPING, Ordering::Release);
+        self.readback_state
+            .store(READBACK_MAPPING, Ordering::Release);
         let state = Arc::clone(&self.readback_state);
         self.readback
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
-                let next = if result.is_ok() { READBACK_MAPPED } else { READBACK_IDLE };
+                let next = if result.is_ok() {
+                    READBACK_MAPPED
+                } else {
+                    READBACK_IDLE
+                };
                 state.store(next, Ordering::Release);
             });
     }
@@ -835,7 +896,11 @@ impl GiPart for ScreenPart {
     /// not screen traces copy the lit HDR.
     fn prepare_frame(&self, gpu: &GpuContext, frame: &PartFrame<'_>) {
         let mut state = self.state.borrow_mut();
-        if let Some(counters) = state.resources.as_ref().and_then(ScreenResources::take_counters) {
+        if let Some(counters) = state
+            .resources
+            .as_ref()
+            .and_then(ScreenResources::take_counters)
+        {
             state.stats = screen_stats(counters);
         }
         let (width, height) = frame.viewport;
@@ -869,7 +934,11 @@ impl GiPart for ScreenPart {
                 state.restir_pipelines = Some(RestirGiPipelines::new(gpu, &group1));
             }
             let viewport = (width.max(1), height.max(1));
-            if state.restir.as_ref().is_none_or(|r| r.viewport() != viewport) {
+            if state
+                .restir
+                .as_ref()
+                .is_none_or(|r| r.viewport() != viewport)
+            {
                 state.restir = Some(RestirGiResources::new(gpu, viewport));
                 state.restir_valid = false;
             }
@@ -1017,6 +1086,10 @@ impl FeaturePass for GiScreenPass {
                 .queue()
                 .write_buffer(&frame, FRAME_JITTER_Y_OFFSET, &y.to_le_bytes());
         }
+        if let Some(resources) = state.resources.as_ref() {
+            let passes = state.settings.spatial_passes.min(ATROUS_MAX_PASSES);
+            resources.publish(ctx.resources, state.parity, passes);
+        }
         Ok(())
     }
 
@@ -1056,11 +1129,14 @@ impl FeaturePass for GiScreenPass {
         let history = self.part.shared.history_view();
         resources.clear_counters(ctx.encoder);
         let recorded = if *mode == IndirectMode::Restir
-            && let (Some(restir_pipelines), Some(restir)) = (restir_pipelines.as_ref(), restir.as_mut())
+            && let (Some(restir_pipelines), Some(restir)) =
+                (restir_pipelines.as_ref(), restir.as_mut())
         {
             // ReSTIR GI: the pyramid, the three ReSTIR stages (the third accumulates into this
             // parity's history), then the a-trous passes.
-            let history_view = history.clone().unwrap_or_else(|| resources.dummy_view.clone());
+            let history_view = history
+                .clone()
+                .unwrap_or_else(|| resources.dummy_view.clone());
             let pyramid = resources.pyramid_view.clone();
             let screen_params = resources.params.clone();
             let inputs = RestirGiInputs {
@@ -1082,10 +1158,12 @@ impl FeaturePass for GiScreenPass {
                 *parity,
                 passes,
             );
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("raa-gi.screen.restir-gi"),
-                timestamp_writes: None,
-            });
+            let mut pass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("raa-gi.screen.restir-gi"),
+                    timestamp_writes: None,
+                });
             pass.set_bind_group(1, &group1, &[]);
             let recorded = pipelines.record_pyramid(&mut pass, &work);
             if recorded {
@@ -1115,7 +1193,9 @@ impl FeaturePass for GiScreenPass {
             self.part
                 .shared
                 .set_probe_output(Some(resources.screen_view(*parity, passes)));
-            self.part.shared.set_screen_debug(Some(resources.debug_view()));
+            self.part
+                .shared
+                .set_screen_debug(Some(resources.debug_view()));
         }
         Ok(())
     }
@@ -1176,5 +1256,91 @@ mod tests {
         assert_eq!(f32::from_bits(word(4)), 128.0);
         assert_eq!(f32::from_bits(word(5)), 3.0);
         assert_eq!(f32::from_bits(word(6)), 30.0);
+    }
+
+    /// Builds `gi.screen` through `install` (the pipeline hands the pass back through
+    /// `Pipeline::remove`), runs its `resize` then `prepare` against an 8x8 `Targets` and a fresh
+    /// `ResourceTable` before and after the part allocated its resources, and checks every tap.
+    #[test]
+    fn taps_publish_the_screen_ports() {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            println!("SKIP taps_publish_the_screen_ports: software_gpu returned None");
+            return;
+        };
+        let surface = wgpu::TextureFormat::Rgba8Unorm;
+        let pipeline = Rc::new(RefCell::new(raa_pipeline::Pipeline::new(
+            &gpu, surface, false,
+        )));
+        let opts = raa_lit::LitOptions::default();
+        let mut lit = raa_lit::LitRenderer::new(&gpu, &pipeline, opts).expect("lit renderer");
+        let shared = GiShared::new(&gpu);
+        let mut ctx = PartsCtx::new(&gpu, &pipeline, &mut lit, None, None, shared);
+        install(&mut ctx).expect("install");
+        let (parts, _) = ctx.take();
+        let mut pass = pipeline
+            .borrow_mut()
+            .remove("gi.screen")
+            .expect("gi.screen");
+        let targets = Targets::new(&gpu, (8, 8));
+        let mut lighting = LightingResources::new(&gpu);
+        pass.set_enabled(true, &mut lighting);
+        let mut run = |table: &ResourceTable| {
+            pass.resize(&gpu, &targets);
+            let mut prepare = PrepareCtx {
+                gpu: &gpu,
+                size: (8, 8),
+                frame: 0,
+                time_s: 0.0,
+                dt_s: 0.0,
+                targets: &targets,
+                lighting: &mut lighting,
+                resources: table,
+            };
+            pass.prepare(&mut prepare).expect("prepare");
+        };
+        let before = ResourceTable::new();
+        run(&before);
+        assert!(before.entries().is_empty() && before.buffer_entries().is_empty());
+        let quality = crate::settings::GiQuality::default();
+        let frame = PartFrame {
+            active: true,
+            settings: GiSettings::DEFAULT,
+            quality,
+            viewport: (8, 8),
+            members: &[],
+            history_valid: false,
+            camera_valid: false,
+        };
+        parts[0].prepare_frame(&gpu, &frame);
+        let table = ResourceTable::new();
+        run(&table);
+        let half = wgpu::TextureFormat::Rgba16Float;
+        let words = wgpu::TextureFormat::Rgba32Uint;
+        let image = |format, w, h, mips| ImageDesc::new(ImageDim::D2, format, w, h, 1, mips);
+        let [gx, gy] = cpu::probe_grid([8, 8]);
+        let rays = quality.probe_rays;
+        let mips = pyramid_sizes((8, 8)).len() as u32;
+        assert!(mips > 1, "the pyramid has mips");
+        let expected = [
+            ("gi", image(half, 8, 8, 1)),
+            ("pyramid", image(wgpu::TextureFormat::R32Float, 8, 8, mips)),
+            ("atlas", image(half, gx * rays, gy * rays, 1)),
+            ("output", image(half, 8, 8, 1)),
+            ("meta", image(words, 8, 8, 1)),
+            ("filter", image(half, 8, 8, 1)),
+            ("display", image(half, 8, 8, 1)),
+            ("debug", image(words, 8, 8, 1)),
+        ];
+        for (port, desc) in expected {
+            let found = table.get("gi.screen", port).map(|image| image.desc);
+            assert_eq!(found, Some(desc), "{port}");
+        }
+        assert_eq!(table.entries().len(), expected.len());
+        let probe_bytes = PROBE_BYTES * u64::from(gx) * u64::from(gy);
+        for port in ["probesRaw", "probesFiltered"] {
+            let size = table.buffer("gi.screen", port).map(|(_, size)| size);
+            assert_eq!(size, Some(probe_bytes), "{port}");
+        }
+        assert_eq!(table.buffer_entries().len(), 2);
     }
 }
