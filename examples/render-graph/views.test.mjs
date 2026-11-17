@@ -26,10 +26,17 @@ const PASS_NODES = [{ id: 'tonemap', type: 'pass.tonemap', ran: true, resources:
 
 function engineDouble(nodes = []) {
   const documents = [];
+  const sceneCalls = [];
   let active = null;
   return {
     documents,
     nodes,
+    sceneCalls,
+    setLight: desc => sceneCalls.push(['setLight', desc]),
+    addNode: (parent, position) => (sceneCalls.push(['addNode', position]), 1),
+    addMaterial: desc => (sceneCalls.push(['addMaterial', desc]), 2),
+    primitiveMesh: (kind, params) => (sceneCalls.push(['primitiveMesh', kind, params]), 3),
+    addInstance: (node, mesh, material) => sceneCalls.push(['addInstance', node, mesh, material]),
     renderGraphCatalog: () => ({
       starters: [{ name: 'Debug', file: 'debug.json', json: DEBUG_TEXT }, { name: 'Full GI', file: 'full-gi.json', json: FULL_GI_TEXT }],
     }),
@@ -49,7 +56,7 @@ function engineDouble(nodes = []) {
 const variant = id => views.default.variants.find(entry => entry.id === id);
 async function run(engine, mode, halves = ['left']) {
   const lib = { scene: { buildRoom: async () => ({ subjects: [] }) } };
-  const state = await views.default.build(engine, lib);
+  const state = await views.default.build(engine, lib, variant(mode));
   const frames = [];
   for (const half of halves) {
     await views.default.prepareHalf(engine, lib, variant(mode), state, half, { renderFrames: async n => frames.push(n) });
@@ -129,4 +136,25 @@ test('final-pair-accepted fails when the right half graph is refused', async () 
   const { state } = await run(engine, 'final-direct-pair', ['left', 'right']);
   assert.equal(state.assertions[0].passed, false);
   assert.match(state.assertions[0].detail, /direct light only ok false/);
+});
+
+test('final-direct-pair aims the sun at the red wall and adds a light box beside it; the other rows keep the room', async () => {
+  const engine = engineDouble();
+  await run(engine, 'final-direct-pair', ['left', 'right']);
+  const calls = Object.fromEntries(engine.sceneCalls.map(([name, ...rest]) => [name, rest]));
+  const [sun] = calls.setLight;
+  // The sun travels toward -x (lighting the +x-facing inner face of the red wall at x = -5) and +z.
+  assert.ok(sun.direction[0] < -0.7 && sun.direction[2] > 0 && sun.direction[1] < 0);
+  assert.equal(sun.intensity, 3);
+  assert.deepEqual(views.BOUNCE_SUN, { elevationDeg: 35, azimuthDeg: 110, color: [1, 0.96, 0.9], intensity: 3 });
+  assert.deepEqual(calls.addNode[0], [-3.9, 0.6, 0.6]);
+  assert.deepEqual(calls.primitiveMesh, ['box', { halfExtents: [0.6, 0.6, 0.6] }]);
+  assert.deepEqual(calls.addMaterial[0], { color: [0.9, 0.9, 0.88], roughness: 0.8 });
+  assert.ok(variant('final-direct-pair').selection.subjects.some(subject => subject.name === 'bounce-box'));
+  for (const mode of ['debug-grid', 'show-in-view-ao']) {
+    const other = engineDouble();
+    await run(other, mode);
+    assert.deepEqual(other.sceneCalls, []);
+    assert.ok(!variant(mode).selection.subjects.some(subject => subject.name === 'bounce-box'));
+  }
 });

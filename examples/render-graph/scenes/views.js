@@ -42,8 +42,38 @@ export const inventory = [
     'Two halves of the same view. The left half, labelled final, shows the room with indirect bounce light: a red tint from the red left wall on the floor and the nearby boxes, and shadowed areas that are not black. The right half, labelled direct light only, shows the same sunlit areas and shadow shapes but darker shadowed areas and no red bounce tint.'),
 ];
 
-function makeVariant(id, description, pair = null) {
-  return { id, description, references: [], judge: true, pair, selection: selectionAt(RG_CAPTURE_T_S) };
+// The final / direct light pair only (the other two rows keep the plain room): the sun comes from
+// +x and slightly -z at the room's 35 degrees elevation, so it lights the inner face of the red
+// left wall and the floor beside it, and a light box stands 0.4 m from that wall in the camera
+// view. The box's +z face (seen by the camera) and its floor shadow, which falls toward the red
+// wall, receive no sun: there only the computed bounce off the sunlit red wall lights them. Both
+// halves render this same scene; only the graph differs.
+export const BOUNCE_SUN = { elevationDeg: 35, azimuthDeg: 110, color: [1, 0.96, 0.9], intensity: 3 };
+const BOUNCE_CENTER = [-3.9, 0.6, 0.6], BOUNCE_HALF = 0.6;
+export const BOUNCE_BOX = {
+  name: 'bounce-box',
+  min: BOUNCE_CENTER.map(value => value - BOUNCE_HALF),
+  max: BOUNCE_CENTER.map(value => value + BOUNCE_HALF),
+};
+export const BOUNCE_BOX_COLOR = [0.9, 0.9, 0.88];
+
+/** The sun travel direction of BOUNCE_SUN (azimuth 0 = +Z, as lib/scene.js buildRoom). */
+export function bounceSunDirection() {
+  const elevation = BOUNCE_SUN.elevationDeg * Math.PI / 180, azimuth = BOUNCE_SUN.azimuthDeg * Math.PI / 180;
+  return [-Math.sin(azimuth) * Math.cos(elevation), -Math.sin(elevation), -Math.cos(azimuth) * Math.cos(elevation)];
+}
+
+function addBounceSetup(engine) {
+  engine.setLight({ direction: bounceSunDirection(), color: BOUNCE_SUN.color, intensity: BOUNCE_SUN.intensity });
+  const node = engine.addNode(null, BOUNCE_CENTER, [0, 0, 0, 1], [1, 1, 1]);
+  const material = engine.addMaterial({ color: BOUNCE_BOX_COLOR, roughness: 0.8 });
+  engine.addInstance(node, engine.primitiveMesh('box', { halfExtents: [BOUNCE_HALF, BOUNCE_HALF, BOUNCE_HALF] }), material);
+}
+
+function makeVariant(id, description, pair = null, extraSubjects = []) {
+  const selection = selectionAt(RG_CAPTURE_T_S);
+  selection.subjects = [...selection.subjects, ...extraSubjects];
+  return { id, description, references: [], judge: true, pair, selection };
 }
 
 // The starter graph text with this name, from the engine catalog.
@@ -156,10 +186,11 @@ export default {
     makeVariant('debug-grid', 'Debug starter graph: the view grid of the taps'),
     makeVariant('show-in-view-ao', 'Full GI with the AO tap shown in the view'),
     makeVariant('final-direct-pair', 'Full GI final frame (left) beside Full GI without indirect light (right)',
-      { left: 'final', right: 'direct light only', order: ['left', 'right'] }),
+      { left: 'final', right: 'direct light only', order: ['left', 'right'] }, [BOUNCE_BOX]),
   ],
-  async build(engine, lib) {
+  async build(engine, lib, variant) {
     await lib.scene.buildRoom(engine);
+    if (variant?.id === 'final-direct-pair') addBounceSetup(engine);
     return { starters: engine.renderGraphCatalog().starters, assertions: [], edits: [], finalOk: null };
   },
   prepareHalf,
