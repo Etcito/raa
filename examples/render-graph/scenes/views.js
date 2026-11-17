@@ -47,7 +47,8 @@ export const inventory = [
 // left wall and the floor beside it, and a light box stands 0.4 m from that wall in the camera
 // view. The box's +z face (seen by the camera) and its floor shadow, which falls toward the red
 // wall, receive no sun: there only the computed bounce off the sunlit red wall lights them. Both
-// halves render this same scene; only the graph differs.
+// halves render this same scene; the graph differs, and the direct light only half also turns off
+// the indirect diffuse light (setIndirectDiffuse).
 export const BOUNCE_SUN = { elevationDeg: 35, azimuthDeg: 110, color: [1, 0.96, 0.9], intensity: 3 };
 const BOUNCE_CENTER = [-3.9, 0.6, 0.6], BOUNCE_HALF = 0.6;
 export const BOUNCE_BOX = {
@@ -147,7 +148,20 @@ function directOnly(text) {
   return doc;
 }
 
+// The room's flat ambient term and sky lighting (lib/scene.js buildRoom sets the same ambient).
+const ROOM_AMBIENT = { color: [0.55, 0.62, 0.75], intensity: 0.05 };
+
+// Indirect diffuse light is what the direct light only half must not have: the flat ambient term
+// and the sky's diffuse irradiance (the IBL diffuse term, scaled by setEnvironmentLighting) are
+// turned off there. The sun, the local lights, the emissive surfaces and the sky reflections stay on. The
+// final half sets the room's values back, so the pair does not depend on which half ran first.
+function setIndirectDiffuse(engine, on) {
+  engine.setAmbient(on ? ROOM_AMBIENT : { color: ROOM_AMBIENT.color, intensity: 0 });
+  engine.setEnvironmentLighting({ diffuse: on ? 1 : 0, specular: 1 });
+}
+
 function finalDirect(engine, state, half) {
+  setIndirectDiffuse(engine, half === 'left');
   if (half === 'left') {
     state.finalOk = setGraph(engine, state, starter(state, FULL_GI)).ok === true;
     return;

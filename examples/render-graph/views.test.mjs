@@ -33,6 +33,8 @@ function engineDouble(nodes = []) {
     nodes,
     sceneCalls,
     setLight: desc => sceneCalls.push(['setLight', desc]),
+    setAmbient: desc => sceneCalls.push(['setAmbient', desc]),
+    setEnvironmentLighting: desc => sceneCalls.push(['setEnvironmentLighting', desc]),
     addNode: (parent, position) => (sceneCalls.push(['addNode', position]), 1),
     addMaterial: desc => (sceneCalls.push(['addMaterial', desc]), 2),
     primitiveMesh: (kind, params) => (sceneCalls.push(['primitiveMesh', kind, params]), 3),
@@ -110,6 +112,18 @@ test('final-direct-pair sets Full GI, then GI intensity 0 without the SSGI node'
   assert.ok(!right.nodes.some(node => node.id === 'giSsgi'));
   assert.ok(!right.links.some(link => link.from.startsWith('giSsgi.') || link.to.startsWith('giSsgi.')));
   assert.deepEqual(state.assertions.map(a => [a.name, a.passed]), [['final-pair-accepted', true]]);
+});
+
+test('final-direct-pair keeps the indirect diffuse light on for the left half and turns it off for the right half', async () => {
+  const engine = engineDouble();
+  await run(engine, 'final-direct-pair', ['left', 'right']);
+  const toggles = engine.sceneCalls.filter(([name]) => name === 'setAmbient' || name === 'setEnvironmentLighting');
+  assert.deepEqual(toggles, [
+    ['setAmbient', { color: [0.55, 0.62, 0.75], intensity: 0.05 }],
+    ['setEnvironmentLighting', { diffuse: 1, specular: 1 }],
+    ['setAmbient', { color: [0.55, 0.62, 0.75], intensity: 0 }],
+    ['setEnvironmentLighting', { diffuse: 0, specular: 1 }],
+  ]);
 });
 
 test('debug-views-ran passes when the nine views ran with a resource and fails naming a view that did not', async () => {
