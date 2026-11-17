@@ -19,7 +19,9 @@ impl NodeFamily for PassesFamily {
     }
 
     fn node_types(&self) -> Vec<NodeTypeSpec> {
-        geometry_lighting_types()
+        let mut types = geometry_lighting_types();
+        types.extend(shadow_gi_types());
+        types
     }
 }
 
@@ -967,6 +969,638 @@ fn geometry_lighting_types() -> Vec<NodeTypeSpec> {
     ]
 }
 
+/// A Number, Int, Bool or Enum Setting of `feature` with no unit and `Rebuild::None`.
+#[allow(clippy::too_many_arguments)]
+fn value(
+    feature: FeatureId,
+    key: &'static str,
+    label: &'static str,
+    group: &'static str,
+    default: ParamValue,
+    range: (Option<f64>, Option<f64>),
+    options: &'static [&'static str],
+    source: &'static str,
+) -> ParamSpec {
+    let kind = match default {
+        ParamValue::Number(_) => ParamKind::Number,
+        ParamValue::Int(_) => ParamKind::Int,
+        ParamValue::Bool(_) => ParamKind::Bool,
+        _ => ParamKind::Enum,
+    };
+    let (min, max) = range;
+    let step = (kind == ParamKind::Int && options.is_empty()).then_some(1.0);
+    setting(
+        feature,
+        key,
+        label,
+        group,
+        kind,
+        default,
+        min,
+        max,
+        step,
+        options,
+        "",
+        Rebuild::None,
+        source,
+    )
+}
+
+fn num(v: f32) -> ParamValue {
+    ParamValue::Number(f64::from(v))
+}
+
+fn int(v: u32) -> ParamValue {
+    ParamValue::Int(i64::from(v))
+}
+
+fn name(v: &str) -> ParamValue {
+    ParamValue::Enum(v.to_string())
+}
+
+/// `spec` with `rebuild` set.
+fn rebuilds(spec: ParamSpec, rebuild: Rebuild) -> ParamSpec {
+    ParamSpec { rebuild, ..spec }
+}
+
+fn ranged(min: f64, max: f64) -> (Option<f64>, Option<f64>) {
+    (Some(min), Some(max))
+}
+
+const OPEN: (Option<f64>, Option<f64>) = (None, None);
+const POSITIVE: (Option<f64>, Option<f64>) = (Some(0.0), None);
+
+/// The shadow, AO and GI pass node types of S51; `PassesFamily::node_types` appends them after
+/// `geometry_lighting_types` (helpers per its Handoff doc comment, passes.rs:606).
+fn shadow_gi_types() -> Vec<NodeTypeSpec> {
+    use Category::{Gi, Lighting, Shadows};
+    use FeatureId as Fid;
+    let shadow = raa_shadow::ShadowDesc::default();
+    let ao = raa_gtao::AoDesc::default();
+    let contact = raa_contact::ContactDesc::default();
+    let gi = raa_gi::GiSettings::default();
+    let q = raa_gi::GiQuality::default();
+    let area = raa_lit::AreaShadowSettings::default();
+    let st = raa_lit::StochasticShadowSettings::standard();
+    let g = |key, label, default, range, options, line| {
+        value(Fid::Gi, key, label, "GI", default, range, options, line)
+    };
+    let gq = |key, label, v: u32, options, line| {
+        let spec = value(
+            Fid::GiQuality,
+            key,
+            label,
+            "GI quality",
+            int(v),
+            OPEN,
+            options,
+            line,
+        );
+        rebuilds(spec, Rebuild::Resources)
+    };
+    let a = |key, label, default, range, options, line| {
+        value(
+            Fid::AreaShadows,
+            key,
+            label,
+            "Area shadows",
+            default,
+            range,
+            options,
+            line,
+        )
+    };
+    let image3d = |key, label| {
+        output(
+            key,
+            label,
+            P::Image3d,
+            Some(F::Rgba16Float),
+            SizeSpec::Scale(1.0),
+            1,
+            1,
+        )
+    };
+    let array = |key, label, format, layers| {
+        output(
+            key,
+            label,
+            P::Image2dArray,
+            Some(format),
+            SizeSpec::Scale(1.0),
+            1,
+            layers,
+        )
+    };
+    vec![
+        pass_type(
+            "pass.shadow.csm",
+            Shadows,
+            "Cascaded shadows",
+            "Four sun shadow cascades.",
+            "shadow.csm",
+            20,
+            Vec::new(),
+            vec![output(
+                "shadowMap",
+                "Shadow map",
+                P::Depth2dArray,
+                Some(F::Depth32Float),
+                SizeSpec::FromParam("resolution"),
+                1,
+                4,
+            )],
+            vec![
+                value(
+                    Fid::Shadow,
+                    "softness",
+                    "Softness",
+                    "Shadows",
+                    num(shadow.softness),
+                    ranged(0.0, 16.0),
+                    &[],
+                    "raa-shadow/src/desc.rs:19",
+                ),
+                value(
+                    Fid::Shadow,
+                    "distance",
+                    "Distance",
+                    "Shadows",
+                    num(shadow.distance_m),
+                    POSITIVE,
+                    &[],
+                    "raa-shadow/src/desc.rs:20",
+                ),
+                rebuilds(
+                    value(
+                        Fid::Shadow,
+                        "resolution",
+                        "Resolution",
+                        "Shadows",
+                        int(shadow.resolution),
+                        OPEN,
+                        &["1024", "2048", "4096"],
+                        "raa-shadow/src/desc.rs:21",
+                    ),
+                    Rebuild::Resources,
+                ),
+            ],
+            // raa-shadow/src/caster.rs:177 (group 2 uniform) over the lit group 0 vertex
+            // bindings (raa-lit/src/handle.rs:207: atlas, sampler, 6 storage + palette, frame).
+            vec![budget(Vertex, 1, 1, 0, 7, 2)],
+        ),
+        side_effect(pass_type(
+            "pass.gi.volume",
+            Gi,
+            "GI volume",
+            "Voxel clipmap volume of the global illumination.",
+            "gi.volume",
+            25,
+            vec![input(
+                "surfaceIds",
+                "Surface ids",
+                P::Image2d,
+                Some(F::Rgba32Uint),
+                &["pass.vg.resolve.surfaceIds"],
+                true,
+                None,
+            )],
+            vec![image3d("volumeAtlas", "Volume atlas")],
+            vec![
+                gq(
+                    "resolution",
+                    "Resolution",
+                    q.resolution,
+                    &["64", "96"],
+                    "raa-gi/src/settings.rs:525",
+                ),
+                gq(
+                    "levels",
+                    "Levels",
+                    q.levels,
+                    &["3", "4", "5"],
+                    "raa-gi/src/settings.rs:526",
+                ),
+                gq(
+                    "probeRays",
+                    "Probe rays",
+                    q.probe_rays,
+                    &["6", "8"],
+                    "raa-gi/src/settings.rs:527",
+                ),
+                g(
+                    "intensity",
+                    "Intensity",
+                    num(gi.intensity),
+                    ranged(0.0, 16.0),
+                    &[],
+                    "raa-gi/src/settings.rs:346",
+                ),
+                g(
+                    "environmentDiffuse",
+                    "Environment diffuse",
+                    num(gi.environment_diffuse),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "raa-gi/src/settings.rs:347",
+                ),
+                g(
+                    "localLightShadows",
+                    "Local light shadows",
+                    ParamValue::Bool(gi.local_light_shadows),
+                    OPEN,
+                    &[],
+                    "raa-gi/src/settings.rs:348",
+                ),
+                g(
+                    "voxelFullRelight",
+                    "Full voxel relight",
+                    ParamValue::Bool(gi.voxel_full_relight),
+                    OPEN,
+                    &[],
+                    "raa-gi/src/settings.rs:359",
+                ),
+                g(
+                    "voxelHistoryMax",
+                    "Voxel history",
+                    int(gi.voxel_history_max),
+                    ranged(1.0, 255.0),
+                    &[],
+                    "raa-gi/src/settings.rs:361",
+                ),
+                g(
+                    "voxelRays",
+                    "Voxel rays",
+                    int(gi.voxel_rays),
+                    ranged(1.0, 15.0),
+                    &[],
+                    "raa-gi/src/settings.rs:362",
+                ),
+            ],
+            // raa-gi/src/wgsl/volume_write.wgsl:51-56 and voxel_light.wgsl:44-49 (group 2).
+            vec![budget(Compute, 0, 0, 1, 3, 2)],
+        )),
+        pass_type(
+            "pass.ao.gtao",
+            Lighting,
+            "GTAO",
+            "Horizon-based ambient occlusion.",
+            "ao.gtao",
+            40,
+            vec![gbuffer_input("depth"), gbuffer_input("normal")],
+            vec![
+                image("ao", "AO", F::R8Unorm),
+                image("raw", "Raw AO", F::R32Float),
+                image("blur", "Blurred AO", F::R32Float),
+            ],
+            vec![
+                value(
+                    Fid::Gtao,
+                    "radius",
+                    "Radius",
+                    "AO",
+                    num(ao.radius_m),
+                    ranged(0.0, 10.0),
+                    &[],
+                    "raa-gtao/src/desc.rs:25",
+                ),
+                value(
+                    Fid::Gtao,
+                    "intensity",
+                    "Intensity",
+                    "AO",
+                    num(ao.intensity),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "raa-gtao/src/desc.rs:26",
+                ),
+                value(
+                    Fid::Gtao,
+                    "power",
+                    "Power",
+                    "AO",
+                    num(ao.power),
+                    ranged(0.0, 8.0),
+                    &[],
+                    "raa-gtao/src/desc.rs:27",
+                ),
+            ],
+            // raa-gtao/src/wgsl/gtao.wgsl:27-30 and denoise.wgsl:17-21 (group 0).
+            vec![budget(Compute, 2, 0, 2, 0, 1)],
+        ),
+        pass_type(
+            "pass.gi.screen",
+            Gi,
+            "GI screen",
+            "Screen probes, ReSTIR GI and the denoised screen irradiance.",
+            "gi.screen",
+            42,
+            vec![
+                gbuffer_input("depth"),
+                gbuffer_input("normal"),
+                gbuffer_input("material"),
+                gbuffer_input("motion"),
+                input(
+                    "volumeAtlas",
+                    "Volume atlas",
+                    P::Image3d,
+                    Some(F::Rgba16Float),
+                    &["pass.gi.volume.volumeAtlas"],
+                    true,
+                    None,
+                ),
+            ],
+            vec![
+                image("gi", "GI", F::Rgba16Float),
+                image("pyramid", "Depth pyramid", F::R32Float),
+                image("atlas", "Probe atlas", F::Rgba16Float),
+                buffer("probesRaw", "Raw probes"),
+                buffer("probesFiltered", "Filtered probes"),
+                image("output", "Accumulated", F::Rgba16Float),
+                image("meta", "Moments", F::Rgba32Uint),
+                image("filter", "A-trous", F::Rgba16Float),
+                image("display", "Denoised", F::Rgba16Float),
+                image("debug", "Debug record", F::Rgba32Uint),
+            ],
+            vec![
+                g(
+                    "indirect",
+                    "Indirect",
+                    name(gi.indirect.as_str()),
+                    OPEN,
+                    &["probes", "restir"],
+                    "raa-gi/src/settings.rs:354",
+                ),
+                g(
+                    "screenTraces",
+                    "Screen traces",
+                    ParamValue::Bool(gi.screen_traces),
+                    OPEN,
+                    &[],
+                    "raa-gi/src/settings.rs:350",
+                ),
+                g(
+                    "reflections",
+                    "Reflections",
+                    ParamValue::Bool(gi.reflections),
+                    OPEN,
+                    &[],
+                    "raa-gi/src/settings.rs:349",
+                ),
+                g(
+                    "historyMax",
+                    "History",
+                    int(gi.history_max),
+                    ranged(1.0, 256.0),
+                    &[],
+                    "raa-gi/src/settings.rs:355",
+                ),
+                g(
+                    "historyMin",
+                    "History after change",
+                    int(gi.history_min),
+                    ranged(1.0, 256.0),
+                    &[],
+                    "raa-gi/src/settings.rs:360",
+                ),
+                g(
+                    "clampGamma",
+                    "Clamp gamma",
+                    num(gi.clamp_gamma),
+                    ranged(0.5, 10.0),
+                    &[],
+                    "raa-gi/src/settings.rs:356",
+                ),
+                g(
+                    "spatialPasses",
+                    "Spatial passes",
+                    int(gi.spatial_passes),
+                    ranged(0.0, 5.0),
+                    &[],
+                    "raa-gi/src/settings.rs:357",
+                ),
+                g(
+                    "restirMCap",
+                    "ReSTIR M cap",
+                    num(gi.restir_m_cap),
+                    ranged(1.0, 64.0),
+                    &[],
+                    "raa-gi/src/settings.rs:358",
+                ),
+                g(
+                    "debugView",
+                    "Debug view",
+                    name(gi.debug_view.as_str()),
+                    OPEN,
+                    &[
+                        "none",
+                        "voxels",
+                        "radiance",
+                        "distance",
+                        "levels",
+                        "probes",
+                        "hitType",
+                        "history",
+                        "historyLength",
+                        "reservoirs",
+                        "rawDenoised",
+                    ],
+                    "raa-gi/src/settings.rs:351",
+                ),
+            ],
+            // raa-gi/src/parts/screen/restir_gi.rs:83,114 and screen/passes.rs:310 (group 2,
+            // per-field maximum over the entries).
+            vec![budget(Compute, 6, 0, 4, 2, 3)],
+        ),
+        pass_type(
+            "pass.gi.area-shadow",
+            Shadows,
+            "Area shadows",
+            "Stochastic and ReSTIR soft shadows of area lights.",
+            "gi.area-shadow",
+            43,
+            vec![
+                gbuffer_input("depth"),
+                gbuffer_input("normal"),
+                gbuffer_input("motion"),
+            ],
+            vec![
+                array("areaShadow", "Area shadow", F::Rgba16Float, 2),
+                array("raw", "Raw", F::Rgba16Float, 2),
+                image("depthHistory", "Depth history", F::R32Float),
+                array("mask", "Mask", F::Rgba16Float, 2),
+                image("restirAtlas", "ReSTIR atlas", F::Rgba16Float),
+            ],
+            vec![
+                a(
+                    "tier",
+                    "Tier",
+                    name(area.tier.as_str()),
+                    OPEN,
+                    &["auto", "hero", "cone", "fade"],
+                    "raa-lit/src/area_shadow.rs:88",
+                ),
+                a(
+                    "heroCount",
+                    "Hero count",
+                    int(area.hero_count),
+                    ranged(0.0, 4.0),
+                    &[],
+                    "raa-lit/src/area_shadow.rs:89",
+                ),
+                a(
+                    "heroDistance",
+                    "Hero distance",
+                    num(area.hero_distance),
+                    POSITIVE,
+                    &[],
+                    "raa-lit/src/area_shadow.rs:90",
+                ),
+                // `> heroDistance`: no fixed bound.
+                a(
+                    "fadeDistance",
+                    "Fade distance",
+                    num(area.fade_distance),
+                    OPEN,
+                    &[],
+                    "raa-lit/src/area_shadow.rs:91",
+                ),
+                a(
+                    "band",
+                    "Band",
+                    num(area.band),
+                    POSITIVE,
+                    &[],
+                    "raa-lit/src/area_shadow.rs:92",
+                ),
+                a(
+                    "stochasticCount",
+                    "Stochastic count",
+                    int(st.count),
+                    ranged(0.0, 8.0),
+                    &[],
+                    "raa-lit/src/area_stochastic.rs:100",
+                ),
+                a(
+                    "stochasticDistance",
+                    "Stochastic distance",
+                    num(st.distance),
+                    POSITIVE,
+                    &[],
+                    "raa-lit/src/area_stochastic.rs:101",
+                ),
+                a(
+                    "stochasticCells",
+                    "Stochastic cells",
+                    int(st.cells),
+                    OPEN,
+                    &["4", "9"],
+                    "raa-lit/src/area_stochastic.rs:102",
+                ),
+                a(
+                    "stochasticMode",
+                    "Stochastic mode",
+                    name(st.mode.as_str()),
+                    OPEN,
+                    &["stratified", "restir"],
+                    "raa-lit/src/area_stochastic.rs:103",
+                ),
+            ],
+            // raa-gi/src/parts/area_shadow/passes.rs:14,55 (per-field maximum).
+            vec![budget(Compute, 5, 1, 2, 0, 4)],
+        ),
+        side_effect(pass_type(
+            "pass.gi.ssgi",
+            Gi,
+            "SSGI",
+            "Screen-space indirect diffuse with a visibility bitmask.",
+            "gi.ssgi",
+            44,
+            vec![
+                gbuffer_input("depth"),
+                gbuffer_input("normal"),
+                gbuffer_input("motion"),
+            ],
+            vec![
+                image("ssgi", "SSGI", F::Rgba16Float),
+                image("raw", "Raw", F::Rgba16Float),
+                image("history", "History", F::Rgba16Float),
+                image("output", "Output", F::Rgba16Float),
+            ],
+            vec![g(
+                "screenSpaceQuality",
+                "Quality",
+                name(gi.screen_space_quality.as_str()),
+                OPEN,
+                &["low", "medium", "high"],
+                "raa-gi/src/settings.rs:353",
+            )],
+            // raa-gi/src/parts/ssgi/passes.rs:59,84 (per-field maximum).
+            vec![budget(Compute, 5, 0, 2, 0, 2)],
+        )),
+        pass_type(
+            "pass.shadow.contact",
+            Shadows,
+            "Contact shadows",
+            "Screen-space contact shadows.",
+            "shadow.contact",
+            45,
+            vec![gbuffer_input("depth")],
+            vec![
+                image("contact", "Contact", F::R8Unorm),
+                image("output", "Output", F::Rgba16Float),
+            ],
+            vec![
+                value(
+                    Fid::Contact,
+                    "distance",
+                    "Distance",
+                    "Contact shadows",
+                    num(contact.distance_m),
+                    ranged(0.0, 5.0),
+                    &[],
+                    "raa-contact/src/desc.rs:20",
+                ),
+                value(
+                    Fid::Contact,
+                    "thickness",
+                    "Thickness",
+                    "Contact shadows",
+                    num(contact.thickness_m),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "raa-contact/src/desc.rs:21",
+                ),
+                value(
+                    Fid::Contact,
+                    "intensity",
+                    "Intensity",
+                    "Contact shadows",
+                    num(contact.intensity),
+                    ranged(0.0, 1.0),
+                    &[],
+                    "raa-contact/src/desc.rs:22",
+                ),
+            ],
+            // raa-contact/src/wgsl/contact.wgsl:19-21 (group 0).
+            vec![budget(Compute, 1, 0, 1, 0, 1)],
+        ),
+        pass_type(
+            "pass.gi.history",
+            Gi,
+            "GI history",
+            "Copy of the lit frame for the next frame's screen traces.",
+            "gi.history",
+            64,
+            vec![color_input(64)],
+            vec![color_output(), image("history", "History", F::Rgba16Float)],
+            Vec::new(),
+            // raa-gi/src/feature.rs:118: a texture copy, no bind group.
+            Vec::new(),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1625,34 @@ mod tests {
             .find(|p| p.key == "msaa")
             .unwrap();
         assert_eq!(msaa.binding, ParamBinding::Engine { option: "msaa" });
+    }
+
+    #[test]
+    fn catalog_holds_shadow_gi_share() {
+        let catalog = Catalog::build();
+        for id in [
+            "pass.shadow.csm",
+            "pass.gi.volume",
+            "pass.ao.gtao",
+            "pass.gi.screen",
+            "pass.gi.area-shadow",
+            "pass.gi.ssgi",
+            "pass.shadow.contact",
+            "pass.gi.history",
+        ] {
+            assert!(catalog.node(id).is_some(), "{id}");
+        }
+        let node = |id| catalog.node(id).unwrap();
+        let radius = node("pass.ao.gtao")
+            .params
+            .iter()
+            .find(|p| p.key == "radius")
+            .unwrap();
+        let expected = f64::from(raa_gtao::AoDesc::default().radius_m);
+        assert_eq!(radius.default, ParamValue::Number(expected));
+        assert!(node("pass.gi.ssgi").side_effect);
+        assert!(node("pass.gi.volume").side_effect);
+        assert!(!node("pass.gi.screen").side_effect);
     }
 
     #[test]
