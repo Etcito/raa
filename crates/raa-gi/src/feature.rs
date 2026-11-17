@@ -141,6 +141,8 @@ pub(crate) struct GiCore {
     light_epoch: u32,
     /// Frames left of full relight after a lighting change (`HOT_RELIGHT_FRAMES`).
     hot_relight: u32,
+    /// The emitted-power proxy of the latest frame ([`lighting_power`]).
+    light_power: Option<f32>,
     prepared: GiStats,
     published: Option<GiStats>,
     pending: bool,
@@ -192,6 +194,7 @@ impl GiCore {
             light_signature: None,
             light_epoch: 0,
             hot_relight: 0,
+            light_power: None,
             frames_since_rebuild: 0,
             prepared: initial_stats(GiQuality::default()),
             published: None,
@@ -503,6 +506,16 @@ impl GiHandle {
             core.hot_relight = HOT_RELIGHT_FRAMES;
         }
         core.light_signature = Some(light_signature);
+        // A changed scene (an object moved, appeared or left) changes the light paths too: the
+        // volume replaces its radiance while it follows.
+        if changed {
+            core.hot_relight = HOT_RELIGHT_FRAMES;
+        }
+        let power = lighting_power(lit, core.sun_color);
+        let clear_radiance = core
+            .light_power
+            .is_some_and(|previous| power < DARKER * previous);
+        core.light_power = Some(power);
         let full_relight = core.hot_relight > 0;
         core.hot_relight = core.hot_relight.saturating_sub(1);
         if active && let Some(volume) = core.volume.as_mut() {
@@ -514,6 +527,7 @@ impl GiHandle {
                 &core.settings,
                 core.light_epoch,
                 full_relight,
+                clear_radiance,
             );
             for driver in &core.drivers {
                 driver.prepare_frame(gpu, &core.report.members, &work.voxelize);
@@ -583,6 +597,30 @@ impl GiHandle {
 /// the five-level relight schedule, so every level is relit whole at least four times and the
 /// bounce of the old lighting has died out before the volume averages again.
 const HOT_RELIGHT_FRAMES: u32 = 32;
+
+/// The share of the previous frame's emitted power below which the volume is cleared: a light
+/// removed, switched off or dimmed by more than 2 %.
+const DARKER: f32 = 0.98;
+
+/// A proxy of the emitted power of the sun and the active local lights: each light's colour
+/// luminance times its intensity, an area light's also times its rectangle area. It only has to
+/// fall when a light is removed, switched off or dimmed.
+pub(crate) fn lighting_power(lit: &LitRenderer, sun_color: [f32; 3]) -> f32 {
+    let luminance = |c: [f32; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let lights: f32 = lit
+        .local_lights()
+        .world_lights()
+        .map(|(_, _, light)| {
+            let area = if light.kind == raa_lit::LocalLightKind::Area {
+                (light.size[0] * light.size[1]).max(0.0)
+            } else {
+                1.0
+            };
+            luminance(light.color) * light.intensity.max(0.0) * area
+        })
+        .sum();
+    luminance(sun_color) + lights
+}
 
 /// An order-stable FNV-1a 64 of the sun (direction, colour) and the world-space records of the
 /// active local lights, as uploaded: a change detector for the voxel lighting epoch.

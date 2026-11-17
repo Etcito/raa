@@ -66,7 +66,15 @@ pub(crate) struct VolumeWork {
     pub rebuild_all: bool,
     pub slice: Option<RebuildSlice>,
     pub relight: usize,
+    /// Every other committed level also relit this frame (the hot window after a lighting
+    /// change): each relight is one more bounce, so the volume settles in a few frames instead of
+    /// waiting for the schedule to come back to a coarse level every eight frames.
+    pub extra_relights: Vec<usize>,
     pub voxelize: Vec<LevelVoxelize>,
+    /// The scene got darker (a light was removed, switched off or dimmed): the stored radiance
+    /// of every level is cleared and every committed level's atlas rewritten, so no bounce of the
+    /// old light survives; the bounce of the remaining light builds up again over the relights.
+    pub clear_radiance: bool,
 }
 
 /// The GPU volume of the GI clipmap (S37, S38): the six volume resources, the per-level
@@ -217,7 +225,7 @@ impl GiVolume {
             device,
             "raa-gi.radiance",
             8 * volume_cells,
-            wgpu::BufferUsages::STORAGE,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         );
         // The direct luminance of each voxel's last update (voxel_light.wgsl binding 4): the
         // relight restarts a voxel whose direct light changed.
@@ -423,6 +431,7 @@ impl GiVolume {
         settings: &GiSettings,
         light_epoch: u32,
         full_relight: bool,
+        clear_radiance: bool,
     ) -> VolumeWork {
         rounds.start_waiting();
         let resolution = self.quality.resolution;
@@ -475,8 +484,21 @@ impl GiVolume {
             self.pending.map(|(level, _, _)| level)
         };
         let relight = cursor.next(self.quality.levels, being_rebuilt);
-        if let Some(updates) = self.light_updates.get_mut(relight) {
-            *updates = updates.wrapping_add(1);
+        let extra_relights: Vec<usize> = if full_relight {
+            (0..levels)
+                .filter(|&level| {
+                    level != relight
+                        && Some(level) != being_rebuilt
+                        && self.origins.get(level).copied().flatten().is_some()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for &level in std::iter::once(&relight).chain(&extra_relights) {
+            if let Some(updates) = self.light_updates.get_mut(level) {
+                *updates = updates.wrapping_add(1);
+            }
         }
 
         let mut uniform = GiVolumeParamsGpu {
@@ -575,7 +597,9 @@ impl GiVolume {
             rebuild_all: first_build,
             slice,
             relight,
+            extra_relights,
             voxelize,
+            clear_radiance,
         }
     }
 
@@ -593,6 +617,9 @@ impl GiVolume {
         group1: &wgpu::BindGroup,
     ) {
         let passes = clipmap::flood_pass_count();
+        if work.clear_radiance {
+            encoder.clear_buffer(&self._radiance, 0, None);
+        }
         if work.rebuild_all {
             for level in 0..self.quality.levels as usize {
                 let slice = RebuildSlice {
@@ -607,8 +634,23 @@ impl GiVolume {
             self.record_slice(encoder, work, slice, drivers);
         }
         let resolution = self.quality.resolution;
+        if work.clear_radiance {
+            // Every committed level's atlas still holds the cleared radiance: rewrite them all
+            // before any relight gathers from them (a level whose rebuild is in progress is
+            // written on its commit).
+            let rebuilding = work.slice.as_ref().filter(|s| !s.commit).map(|s| s.level);
+            for level in 0..self.quality.levels as usize {
+                if Some(level) != rebuilding {
+                    self.record_write(encoder, level, resolution);
+                }
+            }
+        }
         self.record_light(encoder, work.relight, group1, resolution);
         self.record_write(encoder, work.relight, resolution);
+        for &level in &work.extra_relights {
+            self.record_light(encoder, level, group1, resolution);
+            self.record_write(encoder, level, resolution);
+        }
     }
 
     /// Records one level's rebuild slice: the clear, drivers, seed and flood passes on begin, and
