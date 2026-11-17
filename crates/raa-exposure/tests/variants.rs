@@ -249,3 +249,38 @@ fn apply_attribution_line_present() {
     );
     assert!(EXPOSURE_APPLY_WGSL.starts_with("// Adapted from solstice@7e465b5 "));
 }
+
+#[test]
+fn fs_apply_uses_group_zero_binding_zero() {
+    use raa_core::wgpu::naga;
+    let module = match naga::front::wgsl::parse_str(EXPOSURE_APPLY_WGSL) {
+        Ok(m) => m,
+        Err(e) => panic!("parse: {e}"),
+    };
+    let info = match naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    {
+        Ok(i) => i,
+        Err(e) => panic!("validate: {e}"),
+    };
+    let Some(index) = module.entry_points.iter().position(|e| e.name == FS_APPLY) else {
+        panic!("no {FS_APPLY} entry");
+    };
+    let fs = info.get_entry_point(index);
+    let used: Vec<u32> = module
+        .global_variables
+        .iter()
+        .filter(|(h, _)| !fs[*h].is_empty())
+        .filter_map(|(_, g)| g.binding.as_ref())
+        .filter(|b| b.group == 0)
+        .map(|b| b.binding)
+        .collect();
+    assert!(
+        used.contains(&0),
+        "fs_apply does not use binding 0: {used:?}"
+    );
+    assert_eq!(used.len(), 3, "fs_apply bindings: {used:?}");
+}
