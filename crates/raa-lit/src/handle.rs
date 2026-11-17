@@ -1581,7 +1581,9 @@ impl LitHandle {
     /// ([0, 0] when no temporal consumer is enabled): screen passes that rebuild positions from
     /// the depth target take it off before the unjittered inverse projection.
     pub fn camera_jitter_ndc(&self) -> [f32; 2] {
-        self.shared.try_borrow().map_or([0.0; 2], |s| s.camera_jitter)
+        self.shared
+            .try_borrow()
+            .map_or([0.0; 2], |s| s.camera_jitter)
     }
 
     /// The group-0 bind group over the renderer's frame, material and extras buffers and the
