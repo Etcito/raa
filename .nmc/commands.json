@@ -500,5 +500,54 @@
       "rg-interpreter-render",
       "rg-interpreter-fresh"
     ]
+  },
+  {
+    "name": "rg-views-check",
+    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/views --stage views",
+    "timeout_s": 60,
+    "after": [
+      "rg-build"
+    ]
+  },
+  {
+    "name": "rg-views-select",
+    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/views --stage views",
+    "timeout_s": 60,
+    "after": [
+      "rg-views-check"
+    ]
+  },
+  {
+    "name": "rg-views-clean",
+    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/views --stage views",
+    "timeout_s": 60,
+    "after": [
+      "rg-views-select"
+    ]
+  },
+  {
+    "name": "rg-views-render",
+    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/views --stage views",
+    "timeout_s": 1500,
+    "after": [
+      "rg-views-clean"
+    ]
+  },
+  {
+    "name": "rg-views-fresh",
+    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/views --stage views",
+    "timeout_s": 120,
+    "after": [
+      "rg-views-render"
+    ]
+  },
+  {
+    "name": "rg-views-judge",
+    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/views --stage views --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "rg-views-render",
+      "rg-views-fresh"
+    ]
   }
 ]
