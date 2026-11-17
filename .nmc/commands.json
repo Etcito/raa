@@ -549,5 +549,54 @@
       "p5-sharpen-render",
       "p5-sharpen-fresh"
     ]
+  },
+  {
+    "name": "p5-mips-check",
+    "command": "node web/common/post-job.mjs check --page dist/post --out out/post/mips --stage mips",
+    "timeout_s": 60,
+    "after": [
+      "p5-post-build"
+    ]
+  },
+  {
+    "name": "p5-mips-select",
+    "command": "node web/common/post-job.mjs select --page dist/post --out out/post/mips --stage mips",
+    "timeout_s": 60,
+    "after": [
+      "p5-mips-check"
+    ]
+  },
+  {
+    "name": "p5-mips-clean",
+    "command": "node web/common/post-job.mjs clean --page dist/post --out out/post/mips --stage mips",
+    "timeout_s": 60,
+    "after": [
+      "p5-mips-select"
+    ]
+  },
+  {
+    "name": "p5-mips-render",
+    "command": "node web/common/post-job.mjs render --page dist/post --out out/post/mips --stage mips",
+    "timeout_s": 1800,
+    "after": [
+      "p5-mips-clean"
+    ]
+  },
+  {
+    "name": "p5-mips-fresh",
+    "command": "node web/common/post-job.mjs fresh --page dist/post --out out/post/mips --stage mips",
+    "timeout_s": 120,
+    "after": [
+      "p5-mips-render"
+    ]
+  },
+  {
+    "name": "p5-mips-judge",
+    "command": "node web/common/post-job.mjs judge --page dist/post --out out/post/mips --stage mips --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "p5-mips-render",
+      "p5-mips-fresh"
+    ]
   }
 ]
