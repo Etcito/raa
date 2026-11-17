@@ -9,6 +9,9 @@ description = "Render graph: document format, node catalog, validation, planning
 [lib]
 name = "raa_graph"
 
+[build-dependencies]
+raa-loader = { path = "../raa-loader" }
+
 [dependencies]
 raa-core = { workspace = true }
 raa-loader = { workspace = true }
