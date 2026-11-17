@@ -1,7 +1,8 @@
-//! Executor extension `views` (S55): the sixteen `view.image` shader variants and the node input
-//! checks the views share applies. The compositor passes that draw the views are later cards' work.
+//! Executor extension `views` (S55): the sixteen `view.image` shader variants, the node input
+//! checks the views share applies, and the compositor `ViewPass` each executed view node runs.
 
-use raa_pipeline::{ImageDim, SampleKind};
+use raa_core::{GpuContext, RaaError};
+use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx, SampleKind};
 
 use crate::catalog::{Catalog, GraphFormat, PortSpec, PortType};
 use crate::error::{Issue, Severity, Stage};
@@ -325,9 +326,615 @@ pub(crate) fn pack_label(text: &str, out: &mut [u32; 8]) {
     }
 }
 
+/// The colour format of a view pass's published `color`.
+const COLOUR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// The colour a view pass clears to when it has no input to draw.
+const GREY: wgpu::Color = wgpu::Color {
+    r: 0.1,
+    g: 0.1,
+    b: 0.1,
+    a: 1.0,
+};
+/// Uniform block sizes: ViewParams, CompareParams, and GridParams (a 16 B header, then 16 tiles of
+/// 32 B label words).
+const IMAGE_BYTES: usize = 48;
+const COMPARE_BYTES: usize = 16;
+const GRID_BYTES: usize = 528;
+/// The tiles a `view.grid` shows.
+const GRID_TILES: usize = 16;
+/// The image inputs of a `view.image` node, in the order the first bound one is read.
+const IMAGE_PORTS: [&str; 6] = [
+    "src",
+    "srcDepth",
+    "srcArray",
+    "srcDepthArray",
+    "src3d",
+    "srcCube",
+];
+/// The parameters of the backbuffer draw: rgb, range 0..1, no exposure.
+const IDENTITY: ImageParams = ImageParams {
+    channels: 0,
+    linearize: false,
+    layer: 0,
+    slice: 0,
+    mip: 0,
+    decode: 0,
+    range_min: 0.0,
+    range_max: 1.0,
+    exposure_ev: 0.0,
+};
+
+/// The codes of a `view.image` node (contract 'view-shader-image', ViewParams).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ImageParams {
+    pub(crate) channels: u32,
+    pub(crate) linearize: bool,
+    pub(crate) layer: u32,
+    pub(crate) slice: u32,
+    pub(crate) mip: u32,
+    pub(crate) decode: u32,
+    pub(crate) range_min: f32,
+    pub(crate) range_max: f32,
+    pub(crate) exposure_ev: f32,
+}
+
+/// What a view pass shows (contract 'view-pass').
+#[allow(dead_code)] // the views graph frame (View nodes 5/6) builds these; until then the tests do
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ViewKind {
+    /// One image of `view.image`, drawn with its codes.
+    Image(ImageParams),
+    /// `view.compare`: mode 0 split, 1 side by side, 2 difference, and the split position.
+    Compare { mode: u32, position: f32 },
+    /// `view.grid`: the linked tiles in port order with their labels, at most 16.
+    Grid {
+        columns: u32,
+        labels: bool,
+        tiles: Vec<(&'static str, String)>,
+    },
+}
+
+/// The spec of one view pass: its pass name `view#<nodeId>`, its order, whether it is an output
+/// overlay after tone mapping, whether it draws its colour onto the backbuffer, and what it shows.
+#[allow(dead_code)] // the views graph frame (View nodes 5/6) builds these; until then the tests do
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ViewPassSpec {
+    pub(crate) name: String,
+    pub(crate) order: u32,
+    pub(crate) overlay: bool,
+    pub(crate) display: bool,
+    pub(crate) kind: ViewKind,
+}
+
+/// A shader program of the views; its cache key is the variant or the fixed compare and grid module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Program {
+    Image(ImageDim, SampleKind),
+    Compare,
+    Grid,
+}
+
+/// The module and bind group layout of one program, fragment stage only.
+struct Shader {
+    module: wgpu::ShaderModule,
+    layout: wgpu::BindGroupLayout,
+}
+
+/// The colour target of a view pass, recreated when the frame size changes.
+struct Colour {
+    size: (u32, u32),
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+/// Handoff: `ViewPass` is the compositor FeaturePass of one executed view node. Card 'View nodes
+/// 5/6: views graph frame, pass installation and node stats' builds it with `ViewPass::new(spec:
+/// ViewPassSpec) -> ViewPass` and attaches it with `Pipeline::add`. Today `prepare` creates the
+/// colour texture and the uniform buffer on first use and publishes `(name, "color")`; `record`
+/// reads the inputs bound in the resource table, and an unbound image or compare input clears the
+/// colour to grey without drawing.
+#[allow(dead_code)] // the views graph frame (View nodes 5/6) builds this; until then the tests do
+pub(crate) struct ViewPass {
+    spec: ViewPassSpec,
+    colour: Option<Colour>,
+    params: Option<wgpu::Buffer>,
+    identity: Option<wgpu::Buffer>,
+    sampler: Option<wgpu::Sampler>,
+    dummy: Option<wgpu::TextureView>,
+    shaders: Vec<(Program, Shader)>,
+    pipelines: Vec<((Program, wgpu::TextureFormat), wgpu::RenderPipeline)>,
+}
+
+impl ViewPass {
+    /// The pass of `spec`. No GPU work happens here: `prepare` and `record` create what they use.
+    #[allow(dead_code)] // the views graph frame (View nodes 5/6) calls this; until then the tests do
+    pub(crate) fn new(spec: ViewPassSpec) -> ViewPass {
+        ViewPass {
+            spec,
+            colour: None,
+            params: None,
+            identity: None,
+            sampler: None,
+            dummy: None,
+            shaders: Vec::new(),
+            pipelines: Vec::new(),
+        }
+    }
+}
+
+impl Colour {
+    fn new(gpu: &GpuContext, size: (u32, u32)) -> Colour {
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa.views.colour"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOUR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Colour {
+            size,
+            _texture: texture,
+            view,
+        }
+    }
+}
+
+impl FeaturePass for ViewPass {
+    fn name(&self) -> &str {
+        &self.spec.name
+    }
+
+    fn order(&self) -> u32 {
+        self.spec.order
+    }
+
+    fn output_overlay(&self) -> bool {
+        self.spec.overlay
+    }
+
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let gpu = ctx.gpu;
+        let size = ctx.size;
+        let colour = match self.colour.take() {
+            Some(colour) if colour.size == size => colour,
+            _ => Colour::new(gpu, size),
+        };
+        let desc = ImageDesc::new(ImageDim::D2, COLOUR_FORMAT, size.0, size.1, 1, 1);
+        ctx.resources
+            .publish(&self.spec.name, "color", &colour.view, desc);
+        self.colour = Some(colour);
+        let buffer = self
+            .params
+            .get_or_insert_with(|| uniform_buffer(gpu.device(), kind_bytes(&self.spec.kind)));
+        write_params(gpu.queue(), buffer, &self.spec.kind);
+        Ok(())
+    }
+
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let gpu = ctx.gpu;
+        let device = gpu.device();
+        let name = self.spec.name.as_str();
+        let (Some(colour), Some(params)) = (self.colour.as_ref(), self.params.as_ref()) else {
+            return Err(RaaError::Resource(format!(
+                "view pass `{name}` was recorded before its prepare"
+            )));
+        };
+        let sampler: &wgpu::Sampler = self.sampler.get_or_insert_with(|| nearest_sampler(device));
+        let inputs: Option<(Program, Vec<wgpu::TextureView>)> = match &self.spec.kind {
+            ViewKind::Image(_) => IMAGE_PORTS
+                .iter()
+                .find_map(|port| ctx.resources.input(name, port))
+                .map(|image| {
+                    (
+                        Program::Image(image.desc.dim, image.desc.sample),
+                        vec![image.view],
+                    )
+                }),
+            ViewKind::Compare { .. } => {
+                match (
+                    ctx.resources.input(name, "a"),
+                    ctx.resources.input(name, "b"),
+                ) {
+                    (Some(a), Some(b)) => Some((Program::Compare, vec![a.view, b.view])),
+                    _ => None,
+                }
+            }
+            ViewKind::Grid { tiles, .. } => {
+                let dummy = self.dummy.get_or_insert_with(|| dummy_view(gpu));
+                let views = (0..GRID_TILES)
+                    .map(|slot| {
+                        tiles
+                            .get(slot)
+                            .and_then(|(port, _)| ctx.resources.input(name, port))
+                            .map_or_else(|| dummy.clone(), |image| image.view)
+                    })
+                    .collect();
+                Some((Program::Grid, views))
+            }
+        };
+        let target = &colour.view;
+        match inputs {
+            Some((program, views)) => {
+                let shader = cached(&mut self.shaders, program, || build_shader(device, program))?;
+                let pipeline = cached(&mut self.pipelines, (program, COLOUR_FORMAT), || {
+                    Ok(build_pipeline(device, shader, COLOUR_FORMAT))
+                })?;
+                let refs: Vec<&wgpu::TextureView> = views.iter().collect();
+                let bound_sampler = matches!(program, Program::Image(..)).then_some(sampler);
+                let group = bind_group(device, shader, params, &refs, bound_sampler);
+                let clear = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
+                draw_pass(ctx.encoder, target, clear, Some((pipeline, &group)));
+            }
+            None => draw_pass(ctx.encoder, target, wgpu::LoadOp::Clear(GREY), None),
+        }
+        if self.spec.display {
+            let program = Program::Image(ImageDim::D2, SampleKind::Float);
+            let format = ctx.backbuffer_format;
+            let shader = cached(&mut self.shaders, program, || build_shader(device, program))?;
+            let pipeline = cached(&mut self.pipelines, (program, format), || {
+                Ok(build_pipeline(device, shader, format))
+            })?;
+            let identity = self.identity.get_or_insert_with(|| {
+                let buffer = uniform_buffer(device, IMAGE_BYTES as u64);
+                gpu.queue()
+                    .write_buffer(&buffer, 0, &image_bytes(&IDENTITY));
+                buffer
+            });
+            let group = bind_group(device, shader, identity, &[&colour.view], Some(sampler));
+            let load = wgpu::LoadOp::Load;
+            draw_pass(ctx.encoder, ctx.backbuffer, load, Some((pipeline, &group)));
+        }
+        Ok(())
+    }
+}
+
+/// The entry of `cache` under `key`, built by `make` on first use.
+fn cached<K: PartialEq, V>(
+    cache: &mut Vec<(K, V)>,
+    key: K,
+    make: impl FnOnce() -> Result<V, RaaError>,
+) -> Result<&V, RaaError> {
+    let index = match cache.iter().position(|(known, _)| *known == key) {
+        Some(index) => index,
+        None => {
+            let value = make()?;
+            cache.push((key, value));
+            cache.len() - 1
+        }
+    };
+    Ok(&cache[index].1)
+}
+
+/// The WGSL of `program` and its bind group layout: a `view.image` variant (its binding 1 texture,
+/// 2 the sampler), or the compare or grid module with float textures from binding 1.
+fn build_shader(device: &wgpu::Device, program: Program) -> Result<Shader, RaaError> {
+    let uniform = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let (source, entries) = match program {
+        Program::Image(dim, sample) => {
+            let source = view_image_source(dim, sample).ok_or_else(|| RaaError::FrameGraph {
+                code: "graph.view_variant",
+                message: format!("no view.image shader for {dim:?} {sample:?}"),
+            })?;
+            let view_dimension = match dim {
+                ImageDim::D2 => wgpu::TextureViewDimension::D2,
+                ImageDim::D2Array => wgpu::TextureViewDimension::D2Array,
+                ImageDim::D3 => wgpu::TextureViewDimension::D3,
+                ImageDim::Cube => wgpu::TextureViewDimension::Cube,
+            };
+            let sample_type = match sample {
+                SampleKind::Float => wgpu::TextureSampleType::Float { filterable: true },
+                SampleKind::UnfilterableFloat => {
+                    wgpu::TextureSampleType::Float { filterable: false }
+                }
+                SampleKind::Depth => wgpu::TextureSampleType::Depth,
+                SampleKind::Uint => wgpu::TextureSampleType::Uint,
+                SampleKind::Sint => wgpu::TextureSampleType::Sint,
+            };
+            let texture = wgpu::BindingType::Texture {
+                sample_type,
+                view_dimension,
+                multisampled: false,
+            };
+            let sampler = wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering);
+            let entries = vec![
+                layout_entry(0, uniform),
+                layout_entry(1, texture),
+                layout_entry(2, sampler),
+            ];
+            (source, entries)
+        }
+        Program::Compare => {
+            let entries = vec![layout_entry(0, uniform), float_layout(1), float_layout(2)];
+            (view_compare_source(), entries)
+        }
+        Program::Grid => {
+            let uniform = layout_entry(0, uniform);
+            let tiles = (1..=GRID_TILES as u32).map(float_layout);
+            (
+                view_grid_source(),
+                std::iter::once(uniform).chain(tiles).collect(),
+            )
+        }
+    };
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raa.views.shader"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("raa.views.layout"),
+        entries: &entries,
+    });
+    Ok(Shader { module, layout })
+}
+
+/// A fragment-stage bind group layout entry.
+fn layout_entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty,
+        count: None,
+    }
+}
+
+/// A non-multisampled 2D float texture the compare and grid modules load with `textureLoad`.
+fn float_layout(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    layout_entry(
+        binding,
+        wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+    )
+}
+
+/// The pipeline of `shader` drawing to one `format`: stages `vs` and `fs`, no vertex buffers.
+fn build_pipeline(
+    device: &wgpu::Device,
+    shader: &Shader,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("raa.views.pipeline_layout"),
+        bind_group_layouts: &[Some(&shader.layout)],
+        immediate_size: 0,
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("raa.views"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader.module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader.module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// The bind group of a program: `buffer` at binding 0, `views` from 1, the sampler after them.
+fn bind_group(
+    device: &wgpu::Device,
+    shader: &Shader,
+    buffer: &wgpu::Buffer,
+    views: &[&wgpu::TextureView],
+    sampler: Option<&wgpu::Sampler>,
+) -> wgpu::BindGroup {
+    let mut entries = vec![wgpu::BindGroupEntry {
+        binding: 0,
+        resource: buffer.as_entire_binding(),
+    }];
+    for (binding, view) in (1..).zip(views) {
+        entries.push(wgpu::BindGroupEntry {
+            binding,
+            resource: wgpu::BindingResource::TextureView(view),
+        });
+    }
+    if let Some(sampler) = sampler {
+        entries.push(wgpu::BindGroupEntry {
+            binding: views.len() as u32 + 1,
+            resource: wgpu::BindingResource::Sampler(sampler),
+        });
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa.views.group"),
+        layout: &shader.layout,
+        entries: &entries,
+    })
+}
+
+/// Records one render pass onto `target` that clears or loads it and, when `draw` is given, draws
+/// the full-screen triangle with its pipeline and bind group.
+fn draw_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    load: wgpu::LoadOp<wgpu::Color>,
+    draw: Option<(&wgpu::RenderPipeline, &wgpu::BindGroup)>,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("raa.views"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    if let Some((pipeline, group)) = draw {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, group, &[]);
+        pass.draw(0..3, 0..1);
+    }
+}
+
+/// A uniform buffer of `size` bytes that the pass rewrites each frame.
+fn uniform_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("raa.views.params"),
+        size,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// The uniform block size of a pass kind.
+fn kind_bytes(kind: &ViewKind) -> u64 {
+    match kind {
+        ViewKind::Image(_) => IMAGE_BYTES as u64,
+        ViewKind::Compare { .. } => COMPARE_BYTES as u64,
+        ViewKind::Grid { .. } => GRID_BYTES as u64,
+    }
+}
+
+/// Writes the uniform block of `kind` into `buffer`.
+fn write_params(queue: &wgpu::Queue, buffer: &wgpu::Buffer, kind: &ViewKind) {
+    match kind {
+        ViewKind::Image(params) => queue.write_buffer(buffer, 0, &image_bytes(params)),
+        ViewKind::Compare { mode, position } => {
+            queue.write_buffer(buffer, 0, &compare_bytes(*mode, *position));
+        }
+        ViewKind::Grid {
+            columns,
+            labels,
+            tiles,
+        } => queue.write_buffer(buffer, 0, &grid_bytes(*columns, *labels, tiles)),
+    }
+}
+
+/// Writes `words` into `out` from its start, four little-endian bytes each.
+fn put_words(out: &mut [u8], words: &[u32]) {
+    for (chunk, word) in out.chunks_exact_mut(4).zip(words) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+}
+
+/// ViewParams: channels, linearize, layer, slice, mip, decode, range min, range max, exposure, then
+/// three zero words.
+fn image_bytes(params: &ImageParams) -> [u8; IMAGE_BYTES] {
+    let mut out = [0; IMAGE_BYTES];
+    put_words(
+        &mut out,
+        &[
+            params.channels,
+            u32::from(params.linearize),
+            params.layer,
+            params.slice,
+            params.mip,
+            params.decode,
+            params.range_min.to_bits(),
+            params.range_max.to_bits(),
+            params.exposure_ev.to_bits(),
+            0,
+            0,
+            0,
+        ],
+    );
+    out
+}
+
+/// CompareParams: mode, split position, two zero words.
+fn compare_bytes(mode: u32, position: f32) -> [u8; COMPARE_BYTES] {
+    let mut out = [0; COMPARE_BYTES];
+    put_words(&mut out, &[mode, position.to_bits(), 0, 0]);
+    out
+}
+
+/// GridParams: columns, tile count, labels flag, a zero word, then 16 tiles of 8 label words each
+/// (`pack_label`).
+fn grid_bytes(columns: u32, labels: bool, tiles: &[(&'static str, String)]) -> [u8; GRID_BYTES] {
+    let mut out = [0; GRID_BYTES];
+    let count = tiles.len().min(GRID_TILES) as u32;
+    put_words(&mut out, &[columns, count, u32::from(labels), 0]);
+    for (slot, (_, label)) in tiles.iter().take(GRID_TILES).enumerate() {
+        let mut words = [0; 8];
+        pack_label(label, &mut words);
+        put_words(&mut out[16 + 32 * slot..], &words);
+    }
+    out
+}
+
+/// The 1x1 tile of an unbound grid slot: grey 0.1 (binary16 0x2E66 per colour channel), alpha 1.
+fn dummy_view(gpu: &GpuContext) -> wgpu::TextureView {
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("raa.views.dummy"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: COLOUR_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        &[0x66, 0x2e, 0x66, 0x2e, 0x66, 0x2e, 0x00, 0x3c],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
+/// The nearest, clamped sampler of the `view.image` variants (NonFiltering).
+fn nearest_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("raa.views.sampler"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use raa_core::testing::{block_on, skip, software_gpu};
     use raa_loader::json::{JsonValue, parse, write_pretty};
+    use raa_pipeline::{LightingResources, PublishedImage, ResourceTable, Targets};
     use raa_shader::Composer;
 
     use super::*;
@@ -503,5 +1110,126 @@ mod tests {
         for c in ('0'..='9').chain('A'..='Z') {
             assert_ne!(glyphs[c as usize - 32], 0, "glyph {c}");
         }
+    }
+
+    #[test]
+    fn view_pass_draws_an_image_and_publishes_its_colour() {
+        let test = "view_pass_draws_an_image_and_publishes_its_colour";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let size = (8, 8);
+        let targets = Targets::new(&gpu, size);
+        let mut lighting = LightingResources::new(&gpu);
+        let resources = ResourceTable::new();
+        let backbuffer = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("view test backbuffer"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let backbuffer_view = backbuffer.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut image = ViewPass::new(ViewPassSpec {
+            name: "view#t".to_string(),
+            order: 1,
+            overlay: false,
+            display: true,
+            kind: ViewKind::Image(IDENTITY),
+        });
+        let mut grid = ViewPass::new(ViewPassSpec {
+            name: "view#grid".to_string(),
+            order: 2,
+            overlay: false,
+            display: false,
+            kind: ViewKind::Grid {
+                columns: 2,
+                labels: true,
+                tiles: vec![("t0", "depth".to_string()), ("t1", "colour".to_string())],
+            },
+        });
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        // No mesh pass writes depth in this test, so clear it to 1.0 (far) before the image reads it.
+        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("view test depth clear"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: targets.depth(),
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        }));
+        {
+            let mut prepare = PrepareCtx {
+                gpu: &gpu,
+                size,
+                frame: 0,
+                time_s: 0.0,
+                dt_s: 0.0,
+                targets: &targets,
+                lighting: &mut lighting,
+                resources: &resources,
+            };
+            image
+                .prepare(&mut prepare)
+                .expect("the image pass prepares");
+            grid.prepare(&mut prepare).expect("the grid pass prepares");
+        }
+        // The views graph frame binds the inputs before each record: the depth target to the image,
+        // and the image's published colour to both grid tiles.
+        let depth = PublishedImage {
+            view: targets.depth().clone(),
+            desc: ImageDesc::new(ImageDim::D2, wgpu::TextureFormat::Depth32Float, 8, 8, 1, 1),
+        };
+        resources.bind_input("view#t", "srcDepth", depth);
+        let colour = resources
+            .get("view#t", "color")
+            .expect("the image pass publishes its colour");
+        resources.bind_input("view#grid", "t0", colour.clone());
+        resources.bind_input("view#grid", "t1", colour);
+        {
+            let mut record = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size,
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                resources: &resources,
+                backbuffer: &backbuffer_view,
+                backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
+                surface_is_srgb: false,
+            };
+            image.record(&mut record).expect("the image pass records");
+            grid.record(&mut record).expect("the grid pass records");
+        }
+        gpu.queue().submit(Some(encoder.finish()));
+        let _ = gpu.device().poll(wgpu::PollType::wait_indefinitely());
+        let error = block_on(errors.pop());
+        assert!(error.is_none(), "view frame: {error:?}");
+        let colour_desc = ImageDesc::new(ImageDim::D2, COLOUR_FORMAT, 8, 8, 1, 1);
+        let entries = resources.entries();
+        assert!(
+            entries.contains(&("view#t".to_string(), "color".to_string(), colour_desc)),
+            "{entries:?}"
+        );
     }
 }
