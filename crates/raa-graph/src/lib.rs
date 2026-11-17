@@ -19,6 +19,7 @@ pub use catalog::Catalog;
 pub use error::Issue;
 pub use format::GraphDoc;
 pub use plan::GraphPlan;
+pub use plan::plan_from_json;
 
 /// The frozen pipelines discovered by the build, in registry order.
 pub fn frozen_names() -> Vec<&'static str> {
