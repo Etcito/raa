@@ -63,7 +63,9 @@ fn raa_rgi_initial(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReservoir {
 
     var x_s = s.position + dir * RAA_RGI_SKY_DISTANCE;
     var n_s = -dir;
-    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, raa_rgi_sky_lod()).rgb;
+    // At the environment's diffuse intensity (sun_color.w), as the IBL ambient.
+    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, dir, raa_rgi_sky_lod()).rgb
+        * raa_gi_frame.sun_color.w;
     var found = false;
     if raa_rgi_params.screen_traces == 1u {
         let origin = s.position + s.normal * 0.03;
@@ -121,7 +123,8 @@ fn raa_rgi_refresh(t: RaaRgiReservoir, s: RaaRgiSurface) -> RaaRgiReservoir {
         return r;
     }
     if len >= 0.5 * RAA_RGI_SKY_DISTANCE {
-        r.radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, d / len, raa_rgi_sky_lod()).rgb;
+        r.radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, d / len, raa_rgi_sky_lod()).rgb
+            * raa_gi_frame.sun_color.w;
         return r;
     }
     if !raa_rgi_visible(s, t.position) {

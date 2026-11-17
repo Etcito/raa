@@ -42,7 +42,8 @@ pub struct GiFrameGpu {
     pub camera_position: [f32; 4],
     /// Direction toward the sun, w 0 (offset 336).
     pub sun_direction: [f32; 4],
-    /// Linear rgb times intensity, w 0 (offset 352).
+    /// Linear rgb times intensity; w the radiance scale of the rays that reach the sky, the
+    /// authored raa-ibl diffuse intensity (1 without raa-ibl) (offset 352).
     pub sun_color: [f32; 4],
     /// Width, height, 1/width, 1/height (offset 368).
     pub viewport: [f32; 4],

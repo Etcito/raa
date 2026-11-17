@@ -106,6 +106,8 @@ pub(crate) struct GiCore {
     submitted_views: u8,
     sun_direction: [f32; 3],
     sun_color: [f32; 3],
+    /// raa-ibl, read each frame for the sky radiance scale ([`sky_scale`]).
+    ibl: Option<IblHandle>,
     local_light_count: u32,
     history_valid: bool,
     /// The viewport of the previous prepared frame when it was active; `None` after an inactive
@@ -172,6 +174,7 @@ impl GiCore {
             submitted_views: 1,
             sun_direction: [0.0, 1.0, 0.0],
             sun_color: [0.0; 3],
+            ibl: None,
             local_light_count: 0,
             history_valid: false,
             last_active_viewport: None,
@@ -492,10 +495,12 @@ impl GiHandle {
             let record = frame_record(core);
             gpu.queue().write_buffer(&frame, 0, &record.to_bytes());
         }
+        let sky = sky_scale(core);
         let light_signature = lighting_signature(
             lit,
             core.sun_direction,
             core.sun_color,
+            sky,
             &mut core.light_scratch,
         );
         if core
@@ -511,7 +516,7 @@ impl GiHandle {
         if changed {
             core.hot_relight = HOT_RELIGHT_FRAMES;
         }
-        let power = lighting_power(lit, core.sun_color);
+        let power = lighting_power(lit, core.sun_color) + sky;
         let clear_radiance = core
             .light_power
             .is_some_and(|previous| power < DARKER * previous);
@@ -622,12 +627,21 @@ pub(crate) fn lighting_power(lit: &LitRenderer, sun_color: [f32; 3]) -> f32 {
     luminance(sun_color) + lights
 }
 
-/// An order-stable FNV-1a 64 of the sun (direction, colour) and the world-space records of the
-/// active local lights, as uploaded: a change detector for the voxel lighting epoch.
+/// The radiance scale of the GI rays that reach the sky: the environment's authored diffuse
+/// intensity (raa-ibl `setEnvironmentLighting`), so the sky lights a surface with the same
+/// strength whether GI or the IBL ambient term carries it; 1 without raa-ibl.
+fn sky_scale(core: &GiCore) -> f32 {
+    core.ibl.as_ref().map_or(1.0, IblHandle::diffuse)
+}
+
+/// An order-stable FNV-1a 64 of the sun (direction, colour), the sky radiance scale and the
+/// world-space records of the active local lights, as uploaded: a change detector for the voxel
+/// lighting epoch.
 fn lighting_signature(
     lit: &LitRenderer,
     sun_direction: [f32; 3],
     sun_color: [f32; 3],
+    sky: f32,
     scratch: &mut [u8; raa_shader::MAX_LOCAL_LIGHTS * raa_shader::LIGHT_GPU_SIZE],
 ) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -639,6 +653,7 @@ fn lighting_signature(
     let sun = sun_direction
         .into_iter()
         .chain(sun_color)
+        .chain([sky])
         .flat_map(f32::to_le_bytes);
     sun.chain(scratch[..used].iter().copied())
         .fold(FNV_OFFSET, |h, byte| {
@@ -684,7 +699,7 @@ fn frame_record(core: &mut GiCore) -> GiFrameGpu {
         previous_view_proj,
         camera_position: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
         sun_direction: [sx, sy, sz, 0.0],
-        sun_color: [cr, cg, cb, 0.0],
+        sun_color: [cr, cg, cb, sky_scale(core)],
         viewport: [w, h, reciprocal(w), reciprocal(h)],
         counts: [
             core.local_light_count,
@@ -914,12 +929,14 @@ impl GiFeature {
             lit.handle(),
             shared.vertex_colors(),
         ));
+        let sky_ibl = ibl.clone();
         let mut ctx = PartsCtx::new(gpu, pipeline, lit, vg, ibl, shared.clone());
         ctx.add_driver(builtin);
         crate::parts::install_parts(&mut ctx)?;
         let (parts, drivers) = ctx.take();
         let debug = DebugRenderer::new(gpu, &shared.compute_group1_layout());
-        let core = GiCore::new(gpu, Rc::clone(pipeline), shared, drivers, parts, debug);
+        let mut core = GiCore::new(gpu, Rc::clone(pipeline), shared, drivers, parts, debug);
+        core.ibl = sky_ibl;
         let core = Rc::new(RefCell::new(core));
         {
             let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;

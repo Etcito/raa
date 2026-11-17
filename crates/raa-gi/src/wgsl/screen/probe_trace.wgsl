@@ -97,7 +97,9 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     // most filtered mip: one ray stands for a whole cone of the hemisphere, and the sharp mip 0
     // made each probe flicker with the sky's detail.
     let sky_lod = f32(textureNumLevels(raa_env_specular) - 1u);
-    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, sky_lod).rgb;
+    // At the environment's diffuse intensity (sun_color.w), as the IBL ambient.
+    var radiance = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction, sky_lod).rgb
+        * raa_gi_frame.sun_color.w;
     var t = RAA_GI_PROBE_MISS_DISTANCE;
     var kind = 0.0;
     let level_count = raa_gi_volume_params.level_count;

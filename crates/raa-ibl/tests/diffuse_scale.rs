@@ -143,6 +143,12 @@ fn published_info_carries_the_diffuse_scale() {
     let scaled = handle.published_info().expect("published");
     assert!(near(scaled[1], 0.2), "diffuse x scale: {scaled:?}");
     assert!(near(scaled[0], 1.0), "specular: {scaled:?}");
+    // The authored diffuse (what GI scales the sky by) ignores the GI diffuse scale.
+    assert!(
+        near(handle.diffuse(), 0.8),
+        "authored diffuse: {}",
+        handle.diffuse()
+    );
 
     // Out-of-range and non-finite scales are ignored: the stored scale and the published
     // info stay as they were.

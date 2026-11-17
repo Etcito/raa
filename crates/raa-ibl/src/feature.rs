@@ -225,6 +225,13 @@ impl IblHandle {
         }
     }
 
+    /// The authored diffuse intensity of the environment (`setEnvironmentLighting` diffuse,
+    /// default 1), without the GI diffuse scale: the one strength of the sky's diffuse light
+    /// that every consumer (the lit ambient term, the GI rays that reach the sky) follows.
+    pub fn diffuse(&self) -> f32 {
+        self.state.try_borrow().map_or(1.0, |st| st.diffuse)
+    }
+
     /// The diffuse scale last stored by the scale setter (1 by default).
     pub fn diffuse_scale(&self) -> f32 {
         self.state.borrow().diffuse_scale

@@ -271,8 +271,9 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
             basis,
         );
         let hit = raa_gi_gather(origin, direction, voxel, 320.0, 32u, 0.85);
+        // The sky at the environment's diffuse intensity (sun_color.w), as the IBL ambient.
         let env = textureSampleLevel(raa_env_specular, raa_linear_clamp, direction,
-            f32(textureNumLevels(raa_env_specular) - 1u)).rgb;
+            f32(textureNumLevels(raa_env_specular) - 1u)).rgb * raa_gi_frame.sun_color.w;
         gathered += select(env, hit.radiance, hit.hit);
     }
     // With cosine-weighted rays, irradiance is pi times the mean radiance.
