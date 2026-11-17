@@ -272,7 +272,7 @@ fn atmosphere_luts_preserve_source_steps_and_authorable_ground() {
         "const STEPS: i32 = 40;",
         "const SQRT_DIRECTIONS: u32 = 8u;",
         "const STEPS: i32 = 20;",
-        "const STEPS: i32 = 32;",
+        "override RAA_SKY_VIEW_STEPS: i32 = 32;",
         "let t = f * f * t_max;",
         "fn raa_atmosphere_lut_optical_depth_to_top(",
         "fn raa_atmosphere_lut_integrate(",
@@ -314,7 +314,7 @@ fn directional_transmission_pins_the_horizon_source() {
     // Adapted from Solstice `shaders/common/environment.wgsl:98-113`: the horizon dip blocks a
     // light below it and the 0.006 half-width fades the cut; the result is (rgb, 1).
     for text in [
-        "const raa_atmosphere_horizon_fade: f32 = 0.006;",
+        "override raa_atmosphere_horizon_fade: f32 = 0.006;",
         "fn raa_atmosphere_above_horizon(",
         "let dip = -sqrt(max(1.0 - ratio * ratio, 0.0));",
         "smoothstep(dip - raa_atmosphere_horizon_fade, dip + raa_atmosphere_horizon_fade, mu)",

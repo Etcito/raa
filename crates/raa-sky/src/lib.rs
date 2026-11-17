@@ -39,6 +39,7 @@ mod observations;
 mod shaders;
 mod state;
 mod time_of_day;
+mod tunables;
 mod weather;
 
 pub use cloud_backend::{
@@ -52,6 +53,7 @@ pub use desc::{
 pub use feature::{SkyFeature, SkyHandle};
 pub use observations::*;
 pub use time_of_day::*;
+pub use tunables::{SKY_TUNABLES, tunables};
 pub use weather::*;
 
 /// WGSL of the procedural sky: defines

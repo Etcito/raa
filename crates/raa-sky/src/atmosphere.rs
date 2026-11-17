@@ -70,6 +70,7 @@ use crate::shaders::{
     milky_way_bake_module_wgsl,
 };
 use crate::state::{SharedSky, SkyState};
+use crate::tunables::SkyTunables;
 
 /// The shared opaque atmosphere resource set (LUTs plus the Milky Way map).
 pub(crate) type SharedAtmosphere = Rc<RefCell<AtmosphereResources>>;
@@ -673,9 +674,33 @@ pub(crate) struct AtmosphereResources {
     milky_way_bake: MilkyWayBake,
     views: [Option<ViewGpu>; MAX_VIEWS],
     lifecycle: Lifecycle,
+    /// The `SkyTunables::atmosphere_generation` the LUT pipelines were built with.
+    built_generation: u64,
 }
 
 impl AtmosphereResources {
+    /// Rebuilds the four LUT pipelines with `constants` when `generation` differs from the
+    /// one they were built with, and marks the static tables and every sky view pending.
+    pub(crate) fn apply_tunables(
+        &mut self,
+        gpu: &GpuContext,
+        generation: u64,
+        constants: &[(&str, f64)],
+    ) {
+        if generation == self.built_generation {
+            return;
+        }
+        let (pipelines, directional) =
+            atmosphere_pipelines(gpu, &self.layout, &self.directional_layout, constants);
+        self.pipelines = pipelines;
+        self.directional_pipeline = directional;
+        self.built_generation = generation;
+        self.lifecycle.static_tables_pending = true;
+        for slot in self.lifecycle.views.iter_mut().flatten() {
+            slot.sky_view_pending = true;
+        }
+    }
+
     /// Creates the LUT targets, placeholder, sampler, directional result and explicit
     /// group-2 compute pipelines, plus the initialized shared Milky Way bake target.
     pub(crate) fn new(gpu: &GpuContext) -> Result<Self, RaaError> {
@@ -710,8 +735,12 @@ impl AtmosphereResources {
         let static_uniform = uniform_buffer(gpu, "raa-sky.atmosphere.static");
         gpu.queue()
             .write_buffer(&static_uniform, 0, &PhysicalSkyGpu::default().to_bytes());
-        let (pipelines, directional_pipeline) =
-            atmosphere_pipelines(gpu, &layout, &directional_layout);
+        let (pipelines, directional_pipeline) = atmosphere_pipelines(
+            gpu,
+            &layout,
+            &directional_layout,
+            &SkyTunables::new().atmosphere_constants(),
+        );
         let transmission_result = gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-sky.atmosphere.transmission"),
             size: TRANSMISSION_SIZE,
@@ -755,6 +784,7 @@ impl AtmosphereResources {
             milky_way_bake: MilkyWayBake::default(),
             views: std::array::from_fn(|_| None),
             lifecycle: Lifecycle::new(),
+            built_generation: 0,
         })
     }
 
@@ -1040,6 +1070,11 @@ impl FeaturePass for SkyAtmospherePass {
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let (view, parameters) = {
             let s = self.state.try_borrow().map_err(|_| state_busy())?;
+            let generation = s.tunables.atmosphere_generation();
+            self.resources
+                .try_borrow_mut()
+                .map_err(|_| RaaError::Resource("sky.atmosphere: resources are borrowed".into()))?
+                .apply_tunables(ctx.gpu, generation, &s.tunables.atmosphere_constants());
             let Some(view) = s.active_view else {
                 return Ok(());
             };
@@ -1370,6 +1405,7 @@ fn atmosphere_pipelines(
     gpu: &GpuContext,
     lut_layout: &wgpu::BindGroupLayout,
     directional_layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
 ) -> ([wgpu::ComputePipeline; 3], wgpu::ComputePipeline) {
     let device = gpu.device();
     let empty = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1391,7 +1427,10 @@ fn atmosphere_pipelines(
             layout: Some(&pipeline_layout),
             module: &module,
             entry_point: Some(entry),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             cache: None,
         })
     };

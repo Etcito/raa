@@ -244,6 +244,9 @@ fn raa_atmosphere_build_multi_scatter(@builtin(global_invocation_id) id: vec3<u3
 
 // Dynamic sky-view LUT: single and multiple scattering along the sky-view direction with 32
 // quadratically spaced steps that cluster near the viewer, where most in-scatter happens.
+// The sky-view march count (S23: 32 quadratically spaced steps), a pipeline constant.
+override RAA_SKY_VIEW_STEPS: i32 = 32;
+
 @compute @workgroup_size(8, 8)
 fn raa_atmosphere_build_sky_view(@builtin(global_invocation_id) id: vec3<u32>) {
     let size = textureDimensions(raa_atmosphere_lut_output);
@@ -268,15 +271,14 @@ fn raa_atmosphere_build_sky_view(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
 
-    const STEPS: i32 = 32;
     let cos_theta = clamp(dot(direction, sun), -1.0, 1.0);
     let phase_r = raa_atmosphere_rayleigh_phase(cos_theta);
     let phase_m = raa_atmosphere_mie_phase(cos_theta, sky.mie.w);
     var through = vec3<f32>(1.0);
     var radiance = vec3<f32>(0.0);
     var previous_t = 0.0;
-    for (var i = 0; i < STEPS; i++) {
-        let f = (f32(i) + 0.5) / f32(STEPS);
+    for (var i = 0; i < RAA_SKY_VIEW_STEPS; i++) {
+        let f = (f32(i) + 0.5) / f32(RAA_SKY_VIEW_STEPS);
         let t = f * f * t_max;
         let dt = t - previous_t;
         previous_t = t;
@@ -309,7 +311,7 @@ fn raa_atmosphere_build_sky_view(@builtin(global_invocation_id) id: vec3<u32>) {
 // `shaders/common/environment.wgsl:98-113`: the transmittance table does not know the ground
 // is there, so a light below the horizon dip is blocked. The 0.006 half-width fades the cut
 // across the light's angular size; the authored ground radius replaces the source constant.
-const raa_atmosphere_horizon_fade: f32 = 0.006;
+override raa_atmosphere_horizon_fade: f32 = 0.006;
 
 fn raa_atmosphere_above_horizon(radius_km: f32, mu: f32, ground_km: f32) -> f32 {
     let ratio = clamp(ground_km / max(radius_km, raa_atmosphere_min_radius_km), 0.0, 1.0);

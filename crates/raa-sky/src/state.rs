@@ -40,6 +40,7 @@ use crate::observations::{CloudResetReasons, SkyReadiness, SkyReadinessStage, Sk
 use crate::time_of_day::{
     CelestialSky, DominantLight, TimeOfDay, TimeOfDaySettings, TimeOfDayState,
 };
+use crate::tunables::SkyTunables;
 use crate::weather::{
     ResolvedWeatherState, Weather, WeatherCycle, WeatherPreset, WeatherSettings, WeatherUpdate,
 };
@@ -91,6 +92,8 @@ pub(crate) struct SkyState {
     pub pending_atmosphere: bool,
     /// The Milky Way bake was recorded and awaits an actual submission.
     pub milky_way_pending: bool,
+    /// The one store of every S56 sky tunable value.
+    pub tunables: SkyTunables,
 }
 
 impl SkyState {
@@ -123,6 +126,7 @@ impl Default for SkyState {
             active_view: None,
             pending_atmosphere: false,
             milky_way_pending: false,
+            tunables: SkyTunables::new(),
         }
     }
 }

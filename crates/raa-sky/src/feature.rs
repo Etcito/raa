@@ -24,6 +24,7 @@ use crate::observations::{
 };
 use crate::state::{SharedSky, SkyState, VIEW_COUNT, ViewSlot, invalid};
 use crate::time_of_day::{TimeOfDaySettings, TimeOfDayState};
+use crate::tunables::{ATMOSPHERE_ROWS, SKY_TUNABLES};
 use crate::weather::{ResolvedWeatherState, WeatherPreset, WeatherSettings, WeatherUpdate};
 
 /// `pipeline.busy`: the pipeline or the sky state is borrowed (called while a frame executes).
@@ -213,6 +214,25 @@ impl SkyHandle {
     }
 
     /// The sun changed: re-render (and re-filter) the env cube at the next frame.
+    /// Handoff: Executor extension: apply Tunable bindings. `SkyHandle::set_tunable` validates
+    /// `key` and `value` over `SKY_TUNABLES`, refuses with `sky.invalid` without changing
+    /// anything, and otherwise stores the value in SkyState's `SkyTunables` and, for an
+    /// atmosphere row, marks the atmosphere LUTs dirty: the atmosphere pass rebuilds its LUT
+    /// pipelines and re-bakes the static LUTs at its next prepare. The executor reaches it
+    /// through `HandleSet.sky` (crates/raa-graph/src/exec.rs) with a catalog key and its
+    /// value as f64. `pipeline.busy` when called while a frame executes.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let mut s = self.state.try_borrow_mut().map_err(|_| busy("sky state"))?;
+        let changed = s.tunables.set(key, value)?;
+        let atmosphere = SKY_TUNABLES[..ATMOSPHERE_ROWS]
+            .iter()
+            .any(|spec| spec.key == key);
+        if changed && atmosphere {
+            s.env_dirty = true;
+        }
+        Ok(())
+    }
+
     pub fn mark_dirty(&self) {
         if let Ok(mut s) = self.state.try_borrow_mut() {
             s.env_dirty = true;
@@ -661,6 +681,35 @@ mod tests {
             cloud: None,
             atmosphere: None,
         }
+    }
+
+    #[test]
+    fn set_tunable_refuses_atomically_and_bumps_the_atmosphere_generation() {
+        let h = handle();
+        let before = h.state.borrow().tunables.clone();
+        for (key, value) in [
+            ("unknown", 1.0),
+            ("skyViewSteps", f64::NAN),
+            ("skyViewSteps", 32.5),
+            ("horizonFade", f64::INFINITY),
+        ] {
+            let err = h.set_tunable(key, value).expect_err("refused");
+            assert_eq!(err.code(), "sky.invalid", "{key} = {value}");
+            assert_eq!(
+                h.state.borrow().tunables,
+                before,
+                "a refusal changes nothing"
+            );
+        }
+        h.state.borrow_mut().env_dirty = false;
+        h.set_tunable("skyViewSteps", 48.0).expect("valid");
+        let s = h.state.borrow();
+        assert_eq!(s.tunables.value("skyViewSteps"), Some(48.0));
+        assert_eq!(s.tunables.atmosphere_generation(), 1);
+        assert!(s.env_dirty, "an atmosphere change marks the sky dirty");
+        drop(s);
+        h.set_tunable("skyViewSteps", 48.0).expect("unchanged");
+        assert_eq!(h.state.borrow().tunables.atmosphere_generation(), 1);
     }
 
     #[test]
