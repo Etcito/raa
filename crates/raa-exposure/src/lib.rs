@@ -4,10 +4,12 @@
 
 mod desc;
 mod maths;
+mod readback;
 mod shaders;
 
 pub use desc::AutoExposureDesc;
 pub use maths::{adapt, band_average, bin_index, exposure_from_average, luminance, settled};
+pub use readback::AutoExposureState;
 pub use shaders::{
     BUILD_HISTOGRAM, EXPOSURE_APPLY_WGSL, EXPOSURE_COMPUTE_WGSL, ExposureResult, FS_APPLY, RESOLVE,
     VS_MAIN, pack_params, read_result,
