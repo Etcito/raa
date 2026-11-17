@@ -357,6 +357,7 @@ Everything above is API v0 and stays valid. Later additions never change it: the
 
 Automatic exposure: the [m33 API](api/m33-auto-exposure.md) and [declarations](../packages/raa/types/m33-auto-exposure.d.ts) add `setAutoExposure`, `autoExposure` and `autoExposureState` (pass `exposure.auto`, off by default).
 Sharpening: the [m34 API](api/m34-sharpening.md) and [declarations](../packages/raa/types/m34-sharpening.d.ts) add `setSharpening` and `sharpening` (pass `sharpen`, off by default).
+Material texture mips: the [m22 API](api/m22-textures.md) `addTexture` takes `mips` (default true) and `srgb` (default false); WGSL `raa_texture_grad` samples the atlas mip chain (`raa_texture` stays level 0).
 
 Rust extension points added after v0:
 

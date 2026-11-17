@@ -432,10 +432,12 @@ export interface Engine {
   setSkinPoses(instances: Uint32Array, matrices: Float32Array): void;
   /**
    * Uploads an rgba image into the material texture atlas and returns its id, sampled in
-   * material WGSL by `raa_texture(id, uv)`. Ids are reused once removed. See
-   * docs/api/m22-textures.md.
+   * material WGSL by `raa_texture(id, uv)` (level 0) or `raa_texture_grad(id, uv, duv_dx,
+   * duv_dy)` (the mip chain). `mips` (default true) and `srgb` (default false) choose the
+   * chain. Ids are reused once removed. See docs/api/m22-textures.md.
    * @throws RaaError `texture.invalid` (data length is not width * height * 4, or a side is 0
-   *   or over 4096), `texture.atlas_full` (no room left), `api.invalid_argument`.
+   *   or over 4096), `texture.atlas_full` (no room left), `api.invalid_argument` (a `mips` or
+   *   `srgb` that is not a boolean).
    */
   addTexture(desc: TextureData): number;
   /** Frees a texture; it then samples (0, 0, 0, 0). An unknown or removed id does nothing. */
@@ -467,6 +469,10 @@ export interface TextureData {
   width: number;
   height: number;
   data: Uint8Array | Uint8ClampedArray | Float32Array;
+  /** Upload the mip chain (levels 1..4) for raa_texture_grad. Default true; false: level 0 only. */
+  mips?: boolean;
+  /** Average the chain in linear light (sRGB colour images). Default false. */
+  srgb?: boolean;
 }
 
 export interface Engine {

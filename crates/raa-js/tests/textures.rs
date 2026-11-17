@@ -10,7 +10,7 @@ use raa_lit::TexelData;
 #[path = "../src/api/m22_textures.rs"]
 mod m22;
 
-use m22::{Texels, texture_side};
+use m22::{Texels, texture_options, texture_side};
 
 #[test]
 fn registry_exports_add_texture_and_remove_texture() {
@@ -53,4 +53,36 @@ fn texels_keep_their_kind() {
     }
     assert_eq!(raa_lit::quantize(2.0), 255);
     assert_eq!(raa_lit::quantize(-1.0), 0);
+}
+
+#[test]
+fn texture_options_default_to_mips_on_and_srgb_off() {
+    assert_eq!(
+        texture_options(None, None),
+        raa_lit::TextureOptions {
+            mips: true,
+            srgb: false
+        }
+    );
+    assert_eq!(
+        texture_options(Some(false), None),
+        raa_lit::TextureOptions {
+            mips: false,
+            srgb: false
+        }
+    );
+    assert_eq!(
+        texture_options(None, Some(true)),
+        raa_lit::TextureOptions {
+            mips: true,
+            srgb: true
+        }
+    );
+    assert_eq!(
+        texture_options(Some(false), Some(true)),
+        raa_lit::TextureOptions {
+            mips: false,
+            srgb: true
+        }
+    );
 }
