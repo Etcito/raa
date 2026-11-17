@@ -27,7 +27,8 @@ use crate::plan::GraphPlan;
 /// The live handle of each feature the graph configures, `None` while the feature is not
 /// installed. Each field is the handle type that its api file inserts into the Engine's feature
 /// map (`crates/raa-js/src/api/`: m07, m09, m10, m11, m14, m27, m29, m30, m31). Area shading has
-/// no field: it goes through [`FeatureHandles::lit`].
+/// no field: it goes through [`FeatureHandles::lit`]. The sky handle is read only by the
+/// tunables extension, and Sky is never an owned setter (scene content, S54).
 #[derive(Default)]
 pub struct HandleSet {
     pub tonemap: Option<raa_tonemap::TonemapControl>,
@@ -45,6 +46,7 @@ pub struct HandleSet {
     pub vg: Option<raa_vg::VgHandle>,
     pub gi: Option<raa_gi::GiHandle>,
     pub taa: Option<raa_taa::TaaHandle>,
+    pub sky: Option<raa_sky::SkyHandle>,
 }
 
 /// What one executor call works with: the device, the pipeline, the handles, the Engine's view

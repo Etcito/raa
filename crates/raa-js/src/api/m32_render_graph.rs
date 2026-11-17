@@ -169,7 +169,8 @@ pub(crate) mod web {
     /// `FeatureHandles` built from the FeatureMap today and the viewport count as the last
     /// argument. State/keys: `RenderGraphState.executor`, `RenderGraphState.catalog`,
     /// `EngineState.tonemap`, `EngineState.pipeline`, `EngineState.lit`, the cloned feature
-    /// handles and `ViewsState`. The msaa is the lit renderer's.
+    /// handles (among them `raa_sky::SkyHandle` as `HandleSet.sky`) and `ViewsState`. The msaa is
+    /// the lit renderer's.
     pub(crate) fn with_handles<R>(
         st: &mut EngineState,
         gpu: &GpuContext,
@@ -193,6 +194,7 @@ pub(crate) mod web {
             vg: st.features.get::<VgHandle>().cloned(),
             gi: st.features.get::<GiHandle>().cloned(),
             taa: st.features.get::<TaaHandle>().cloned(),
+            sky: st.features.get::<raa_sky::SkyHandle>().cloned(),
         };
         let pipeline = st.pipeline.clone();
         let lit = &mut st.lit;
