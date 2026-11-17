@@ -5,11 +5,26 @@
   "nodes": [
     {
       "id": "skyAtmosphere",
-      "type": "pass.sky.atmosphere"
+      "type": "pass.sky.atmosphere",
+      "params": {
+        "skyViewSteps": 32,
+        "horizonFade": 0.006
+      }
     },
     {
       "id": "skyCloudLighting",
-      "type": "pass.sky.cloud-lighting"
+      "type": "pass.sky.cloud-lighting",
+      "params": {
+        "cloudWeatherTile": 36000,
+        "cloudShapeTile": 7000,
+        "cloudDetailTile": 700,
+        "cloudExtinction": 0.05,
+        "cloudAlbedo": 0.98,
+        "cloudCirrusHeight": 9000,
+        "cloudMaxDistance": 90000,
+        "cloudMaxPath": 40000,
+        "cloudShadowSamples": 16
+      }
     },
     {
       "id": "skyEnv",
@@ -107,7 +122,18 @@
     },
     {
       "id": "skyCloudScreen",
-      "type": "pass.sky.cloud-screen"
+      "type": "pass.sky.cloud-screen",
+      "params": {
+        "cloudDomeBelow": 0.05,
+        "cloudDomeLightSamples": 5,
+        "cloudDomeAnimatedFloor": 0.0625,
+        "cloudDomeBurst": 2,
+        "cloudScreenLightSamples": 5,
+        "cloudScreenMovingBlend": 0.12,
+        "cloudScreenPrior": 6,
+        "cloudScreenAnimatedFloor": 0.0625,
+        "cloudScreenBurst": 2
+      }
     },
     {
       "id": "forward",
