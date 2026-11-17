@@ -138,24 +138,6 @@ pub fn change_alpha(history: f32, mean: f32, variance: f32) -> f32 {
     0.1 + (1.0 - 0.1) * cut
 }
 
-#[cfg(test)]
-mod change_alpha_tests {
-    use super::change_alpha;
-
-    #[test]
-    fn noise_keeps_the_blend_and_a_light_change_replaces_the_history() {
-        // History 1.0, taps mean 1.2 with variance 0.04 (sigma 0.2): slack 0.06 + 1e-4, z = 0.2 /
-        // 0.2601 = 0.77 < 3: the fixed 0.1.
-        assert!((change_alpha(1.0, 1.2, 0.04) - 0.1).abs() < 1e-6);
-        // The light went out: history 1.0, mean 0, sigma 0.05: z = 1 / 0.1001 = 9.99 > 6: weight 1.
-        assert_eq!(change_alpha(1.0, 0.0, 0.0025), 1.0);
-        // Between: history 1.0, mean 0.5, sigma 0.1: z = 0.5 / 0.1501 = 3.331, cut = 0.110,
-        // weight 0.1 + 0.9 x 0.110 = 0.199.
-        let z = 0.5f32 / 0.1501;
-        assert!((change_alpha(1.0, 0.5, 0.01) - (0.1 + 0.9 * (z / 3.0 - 1.0))).abs() < 1e-5);
-    }
-}
-
 /// `side x acos(clamp(dot(normalize(p), view), -1, 1))`. A zero `p` has no direction: its angle is
 /// NaN, and `sample_bits` then yields no bits, because `min` and `max` keep only the other face.
 fn view_angle(p: [f32; 3], view: [f32; 3], side: f32) -> f32 {
@@ -175,4 +157,22 @@ fn sub_scaled(a: [f32; 3], b: [f32; 3], s: f32) -> [f32; 3] {
     let [ax, ay, az] = a;
     let [bx, by, bz] = b;
     [ax - bx * s, ay - by * s, az - bz * s]
+}
+
+#[cfg(test)]
+mod change_alpha_tests {
+    use super::change_alpha;
+
+    #[test]
+    fn noise_keeps_the_blend_and_a_light_change_replaces_the_history() {
+        // History 1.0, taps mean 1.2 with variance 0.04 (sigma 0.2): slack 0.06 + 1e-4, z = 0.2 /
+        // 0.2601 = 0.77 < 3: the fixed 0.1.
+        assert!((change_alpha(1.0, 1.2, 0.04) - 0.1).abs() < 1e-6);
+        // The light went out: history 1.0, mean 0, sigma 0.05: z = 1 / 0.1001 = 9.99 > 6: weight 1.
+        assert_eq!(change_alpha(1.0, 0.0, 0.0025), 1.0);
+        // Between: history 1.0, mean 0.5, sigma 0.1: z = 0.5 / 0.1501 = 3.331, cut = 0.110,
+        // weight 0.1 + 0.9 x 0.110 = 0.199.
+        let z = 0.5f32 / 0.1501;
+        assert!((change_alpha(1.0, 0.5, 0.01) - (0.1 + 0.9 * (z / 3.0 - 1.0))).abs() < 1e-5);
+    }
 }

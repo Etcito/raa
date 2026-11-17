@@ -28,7 +28,7 @@ use crate::settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
 };
 use crate::stats::GiStats;
-use crate::volume::{GiVolume, VolumeWork};
+use crate::volume::{GiVolume, LightFrame, VolumeWork};
 
 /// The pass names and orders of S12 (`gi.volume` 25, `gi.history` 64).
 const VOLUME_PASS: &str = "gi.volume";
@@ -530,9 +530,11 @@ impl GiHandle {
                 &mut core.rounds,
                 &mut core.cursor,
                 &core.settings,
-                core.light_epoch,
-                full_relight,
-                clear_radiance,
+                LightFrame {
+                    epoch: core.light_epoch,
+                    full_relight,
+                    clear_radiance,
+                },
             );
             for driver in &core.drivers {
                 driver.prepare_frame(gpu, &core.report.members, &work.voxelize);
