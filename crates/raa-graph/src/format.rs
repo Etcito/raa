@@ -720,6 +720,8 @@ fn link_value(link: &LinkDoc) -> JsonValue {
 /// `write_graph(doc: &GraphDoc) -> String` applied to the result of
 /// `canonical_doc(doc: &GraphDoc, catalog: &Catalog) -> GraphDoc`
 /// (`crates/raa-graph/src/validate.rs`) gives the S50 canonical text.
+///
+/// crates/raa-graph/src/lib.rs: out of scope for this share: consumers use the module path
 pub fn graph_to_json_value(doc: &GraphDoc) -> JsonValue {
     let mut fields = vec![
         ("format".to_string(), JsonValue::String(FORMAT.to_string())),
