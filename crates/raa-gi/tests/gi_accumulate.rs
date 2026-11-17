@@ -125,7 +125,7 @@ fn atrous_variance_propagates_through_squared_weights() {
     }
     let (value, var) = atrous_filter(&taps);
     close(value, 3.0, 1e-6);
-    close(var, 0.074_768_066, 1e-7);
+    close(var, 0.074_768_07, 1e-7);
 }
 
 #[test]

@@ -51,6 +51,17 @@ const FLAG_REFLECTIONS: u32 = 2;
 /// `RAA_GI_FLAG_LOCAL_SHADOWS`: local-light shadows are on (S38; `prelude.wgsl:166`).
 const FLAG_LOCAL_SHADOWS: u32 = 4;
 
+/// The lighting of one frame as the volume sees it. `epoch` advances whenever the light changes
+/// and is packed into each level's light record; `full_relight` relights every committed level
+/// this frame (the hot window after a change); `clear_radiance` clears the stored radiance (the
+/// scene got darker).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LightFrame {
+    pub(crate) epoch: u32,
+    pub(crate) full_relight: bool,
+    pub(crate) clear_radiance: bool,
+}
+
 /// One slice of a pending rebuild: its level, begin and commit flags and flood passes.
 #[derive(Clone, Debug)]
 pub(crate) struct RebuildSlice {
@@ -429,10 +440,13 @@ impl GiVolume {
         rounds: &mut RebuildRounds,
         cursor: &mut RelightCursor,
         settings: &GiSettings,
-        light_epoch: u32,
-        full_relight: bool,
-        clear_radiance: bool,
+        light: LightFrame,
     ) -> VolumeWork {
+        let LightFrame {
+            epoch: light_epoch,
+            full_relight,
+            clear_radiance,
+        } = light;
         rounds.start_waiting();
         let resolution = self.quality.resolution;
         let levels = self.quality.levels as usize;

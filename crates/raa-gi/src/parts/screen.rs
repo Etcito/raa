@@ -108,6 +108,14 @@ struct ScreenBindings {
     atrous: [Vec<wgpu::BindGroup>; 2],
 }
 
+/// The per-frame views the screen groups bind: the frame record and the lit history, or none
+/// before the first frame. [`ScreenResources::work`] rebuilds its cached groups when either
+/// changes.
+pub(crate) struct ScreenInputs<'a> {
+    pub(crate) frame: &'a wgpu::Buffer,
+    pub(crate) history: Option<&'a wgpu::TextureView>,
+}
+
 /// The readback states of the statistics counters.
 const READBACK_IDLE: u8 = 0;
 const READBACK_COPIED: u8 = 1;
@@ -536,11 +544,11 @@ impl ScreenResources {
         gpu: &GpuContext,
         pipelines: &ScreenPipelines,
         targets: &Targets,
-        frame: &wgpu::Buffer,
-        history: Option<&wgpu::TextureView>,
+        inputs: ScreenInputs<'_>,
         parity: usize,
         atrous_passes: u32,
     ) -> ScreenWork<'a> {
+        let ScreenInputs { frame, history } = inputs;
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.frame != *frame || bindings.history.as_ref() != history
         });
@@ -1067,8 +1075,10 @@ impl FeaturePass for GiScreenPass {
                 ctx.gpu,
                 pipelines,
                 ctx.targets,
-                &frame,
-                history.as_ref(),
+                ScreenInputs {
+                    frame: &frame,
+                    history: history.as_ref(),
+                },
                 *parity,
                 passes,
             );
@@ -1089,8 +1099,10 @@ impl FeaturePass for GiScreenPass {
                 ctx.gpu,
                 pipelines,
                 ctx.targets,
-                &frame,
-                history.as_ref(),
+                ScreenInputs {
+                    frame: &frame,
+                    history: history.as_ref(),
+                },
                 *parity,
                 passes,
             );
