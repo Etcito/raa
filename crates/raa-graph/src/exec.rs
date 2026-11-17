@@ -2,6 +2,13 @@
 //! executor works on, the pipeline instructions of a plan, the extension trait and the stats.
 //! `GraphExecutor` lives in `exec/executor.rs`.
 
+mod settings;
+
+pub use settings::{
+    AppliedDescs, default_values, merge_values, read_values, setting_keys, snapshot_keys,
+    write_values,
+};
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
