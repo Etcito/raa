@@ -41,7 +41,8 @@ use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{LitHandle, LitRenderer};
 use raa_pipeline::{
-    FeaturePass, HDR_FORMAT, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets,
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx,
+    RecordCtx, Targets,
 };
 use raa_shader::Composer;
 
@@ -296,6 +297,17 @@ impl BlendPass {
     fn has_draws(&self) -> bool {
         !self.splash_draws.is_empty() || !self.sparkle_draws.is_empty()
     }
+
+    /// Publishes the chain `color` port with the HDR source the pass leaves as `src()`.
+    fn publish_color(&self, ctx: &RecordCtx<'_>) {
+        let (width, height) = ctx.targets.size();
+        ctx.resources.publish(
+            NAME,
+            "color",
+            ctx.targets.hdr().src(),
+            ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
+        );
+    }
 }
 
 /// One blended particle pipeline (`vs_<entry>`, `fs_<entry>`): no vertex buffers, one
@@ -383,6 +395,7 @@ impl FeaturePass for BlendPass {
     /// swaps. Nothing without splash or sparkles emitters.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         if !self.has_draws() {
+            self.publish_color(ctx);
             return Ok(());
         }
         let Some((_, group)) = self.group.as_ref() else {
@@ -432,6 +445,7 @@ impl FeaturePass for BlendPass {
             }
         }
         hdr.swap();
+        self.publish_color(ctx);
         Ok(())
     }
 }

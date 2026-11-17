@@ -17,7 +17,9 @@ use std::rc::Rc;
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_math::{Mat4, Vec3};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::ShaftsDesc;
 use crate::shaders::{FS_COMPOSITE, FS_MARCH, PARAMS_SIZE, VS_MAIN, shafts_module_wgsl};
@@ -447,6 +449,13 @@ impl FeaturePass for ShaftsPass {
         );
         draw(encoder, hdr.dst(), &self.composite, &groups.group, lighting);
         hdr.swap();
+        let (width, height) = ctx.targets.size();
+        ctx.resources.publish(
+            NAME,
+            "color",
+            ctx.targets.hdr().src(),
+            ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
+        );
         Ok(())
     }
 }

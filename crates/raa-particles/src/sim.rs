@@ -412,6 +412,15 @@ impl FeaturePass for SimPass {
         if grown {
             self.grow(ctx.gpu, capacity)?;
         }
+        {
+            let buffers = self.buffers.try_borrow().map_err(|_| state_busy())?;
+            ctx.resources.publish_buffer(
+                NAME,
+                "particles",
+                &buffers.particles,
+                buffers.particles.size(),
+            );
+        }
         let queue = ctx.gpu.queue();
         if table.take_gpu_dirty() || grown {
             let buffers = self.buffers.try_borrow().map_err(|_| state_busy())?;
@@ -513,9 +522,14 @@ mod tests {
     }
 
     /// Runs one prepare + record of `pass` at `time_s` into a fresh encoder and submits it.
-    fn frame(gpu: &GpuContext, pass: &mut SimPass, lighting: &mut LightingResources, time_s: f32) {
+    fn frame(
+        gpu: &GpuContext,
+        pass: &mut SimPass,
+        lighting: &mut LightingResources,
+        time_s: f32,
+        resources: &raa_pipeline::ResourceTable,
+    ) {
         let targets = Targets::new(gpu, (8, 8));
-        let resources = raa_pipeline::ResourceTable::new();
         let mut prepare = PrepareCtx {
             gpu,
             size: (8, 8),
@@ -524,7 +538,7 @@ mod tests {
             dt_s: 0.0,
             targets: &targets,
             lighting,
-            resources: &resources,
+            resources,
         };
         pass.prepare(&mut prepare).unwrap_or_else(|e| panic!("{e}"));
         let backbuffer = gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -553,7 +567,7 @@ mod tests {
             time_s,
             targets: &targets,
             lighting,
-            resources: &resources,
+            resources,
             backbuffer: &view,
             backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
             surface_is_srgb: false,
@@ -591,8 +605,19 @@ mod tests {
             .add(desc)
             .unwrap_or_else(|e| panic!("{e}"));
         let mut lighting = LightingResources::new(&gpu);
-        frame(&gpu, &mut pass, &mut lighting, 1.0);
+        let resources = raa_pipeline::ResourceTable::new();
+        frame(&gpu, &mut pass, &mut lighting, 1.0, &resources);
         assert_eq!(pass.steps, 60, "the first frame simulates from 0 to 1 s");
+        let expected = pass.particle_buffer().size();
+        assert!(
+            resources
+                .buffer_entries()
+                .iter()
+                .any(|(name, port, size)| name == "particles.sim"
+                    && port == "particles"
+                    && *size == expected),
+            "particles.sim publishes its particle buffer"
+        );
         assert_eq!(pass.emitter_count, 1);
         assert_eq!(shared.borrow().capacity(), max);
         assert_eq!(shared.borrow().generation(), 1);
@@ -604,16 +629,16 @@ mod tests {
         assert!(emitters.borrow().count() > 0);
 
         // The same time again: no step, nothing recorded, no regrowth.
-        frame(&gpu, &mut pass, &mut lighting, 1.0);
+        frame(&gpu, &mut pass, &mut lighting, 1.0, &resources);
         assert_eq!(pass.steps, 0);
         assert_eq!(shared.borrow().generation(), 1);
 
         // Disabled: the clock is frozen.
         pass.set_enabled(false, &mut lighting);
-        frame(&gpu, &mut pass, &mut lighting, 2.0);
+        frame(&gpu, &mut pass, &mut lighting, 2.0, &resources);
         assert!((emitters.borrow().sim_time_s() - 1.0).abs() < 1e-6);
         pass.set_enabled(true, &mut lighting);
-        frame(&gpu, &mut pass, &mut lighting, 1.5);
+        frame(&gpu, &mut pass, &mut lighting, 1.5, &resources);
         assert_eq!(pass.steps, 30);
 
         let error = block_on(scope.pop());

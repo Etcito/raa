@@ -26,7 +26,8 @@ use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{LitHandle, LitRenderer};
 use raa_pipeline::{
-    EnvGpu, FeaturePass, HDR_FORMAT, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets,
+    EnvGpu, FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx,
+    RecordCtx, Targets,
 };
 
 use crate::desc::FogDesc;
@@ -297,6 +298,13 @@ impl FeaturePass for FogPass {
         pass.draw(0..3, 0..1);
         drop(pass);
         hdr.swap();
+        let (width, height) = ctx.targets.size();
+        ctx.resources.publish(
+            NAME,
+            "color",
+            ctx.targets.hdr().src(),
+            ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
+        );
         Ok(())
     }
 }

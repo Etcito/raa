@@ -21,7 +21,10 @@ use std::rc::Rc;
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{DrawClass, FLAG_DOUBLE_SIDED, LitHandle, LitRenderer, PipelineSpec};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, HdrChain, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, HdrChain, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx,
+    Targets,
+};
 use raa_shader::{PassKind, VariantKey};
 
 use crate::buffers::{OitBuffers, OitLayouts};
@@ -355,6 +358,17 @@ impl OitPass {
         }
         Ok(())
     }
+
+    /// Publishes the chain `color` port with the HDR source the pass leaves as `src()`.
+    fn publish_color(&self, ctx: &RecordCtx<'_>) {
+        let (width, height) = ctx.targets.size();
+        ctx.resources.publish(
+            NAME,
+            "color",
+            ctx.targets.hdr().src(),
+            ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
+        );
+    }
 }
 
 impl FeaturePass for OitPass {
@@ -401,6 +415,7 @@ impl FeaturePass for OitPass {
             .iter()
             .any(|d| d.instance_count > 0);
         if !any {
+            self.publish_color(ctx);
             return Ok(());
         }
         let Some(resolve) = self.sized.resolve.as_ref() else {
@@ -475,6 +490,7 @@ impl FeaturePass for OitPass {
             pass.draw(0..3, 0..1);
         }
         hdr.swap();
+        self.publish_color(ctx);
         Ok(())
     }
 }

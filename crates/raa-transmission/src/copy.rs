@@ -13,7 +13,9 @@
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{DrawClass, LitHandle};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, LightingResources, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, PrepareCtx, RecordCtx, Targets,
+};
 
 /// S12 name of the pass.
 pub(crate) const NAME: &str = "opaque.copy";
@@ -215,6 +217,17 @@ impl OpaqueCopyPass {
             stale: false,
         }
     }
+
+    /// Publishes the chain `color` port with the HDR source the pass leaves as `src()`.
+    fn publish_color(&self, ctx: &RecordCtx<'_>) {
+        let (width, height) = ctx.targets.size();
+        ctx.resources.publish(
+            NAME,
+            "color",
+            ctx.targets.hdr().src(),
+            ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
+        );
+    }
 }
 
 fn texture(
@@ -353,6 +366,22 @@ impl FeaturePass for OpaqueCopyPass {
             }
             _ => {}
         }
+        if let Some(c) = self.copies.as_ref() {
+            let (width, height) = c.size;
+            let mips = c.mip_views.len() as u32;
+            ctx.resources.publish(
+                NAME,
+                "opaqueColor",
+                &c.color_view,
+                ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, mips),
+            );
+            ctx.resources.publish(
+                NAME,
+                "opaqueDepth",
+                &c.depth_view,
+                ImageDesc::new(ImageDim::D2, DEPTH_COPY_FORMAT, width, height, 1, 1),
+            );
+        }
         Ok(())
     }
 
@@ -360,6 +389,7 @@ impl FeaturePass for OpaqueCopyPass {
     /// previous one and writes the prepass depth into `opaque_depth`. No HDR swap.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         if !self.installed {
+            self.publish_color(ctx);
             return Ok(());
         }
         let Some(c) = self.copies.as_ref() else {
@@ -387,6 +417,7 @@ impl FeaturePass for OpaqueCopyPass {
             draw(encoder, target, &self.down, group);
         }
         draw(encoder, &c.depth_view, &self.depth, &c.depth_group);
+        self.publish_color(ctx);
         Ok(())
     }
 }
