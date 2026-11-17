@@ -34,9 +34,10 @@ use raa_math::Vec3;
 
 use crate::clipmap::{self, RebuildRounds, RelightCursor};
 use crate::layouts::{GiFloodGpu, GiLightGpu, GiVolumeParamsGpu, GiVoxelizeGpu, GiWriteGpu};
-use crate::parts::{LevelVoxelize, VoxelDriver};
+use crate::parts::{GiShared, LevelVoxelize, VoxelDriver};
 use crate::settings::{GiQuality, GiSettings};
 use crate::shaders;
+use crate::tunables::GiTunables;
 
 /// Byte stride of one flood parameter slot: the dynamic-offset alignment of the uniform.
 const SLOT_BYTES: u64 = 256;
@@ -116,6 +117,11 @@ pub(crate) struct GiVolume {
     flood_pipeline: wgpu::ComputePipeline,
     light_pipeline: wgpu::ComputePipeline,
     write_pipeline: wgpu::ComputePipeline,
+    /// The layouts the light and write pipelines were created over, kept for a rebuild.
+    light_layout: wgpu::PipelineLayout,
+    write_layout: wgpu::PipelineLayout,
+    /// The tunables generation the light and write pipelines were built with.
+    tunables_generation: u64,
     seed_bind: wgpu::BindGroup,
     flood_binds: [wgpu::BindGroup; 2],
     light_binds: Vec<wgpu::BindGroup>,
@@ -151,31 +157,77 @@ fn layout(
     })
 }
 
-/// A compute pipeline of `source`'s entry point over the bind group layouts `groups`.
+/// The pipeline layout over the bind group layouts `groups`.
+fn pipeline_layout(
+    device: &wgpu::Device,
+    label: &str,
+    groups: &[Option<&wgpu::BindGroupLayout>],
+) -> wgpu::PipelineLayout {
+    device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: groups,
+        immediate_size: 0,
+    })
+}
+
+/// A compute pipeline of `source`'s entry point over `layout`, with `constants` set as its
+/// pipeline overrides.
 fn compute_pipeline(
     device: &wgpu::Device,
     label: &str,
     source: &str,
     entry: &str,
-    groups: &[Option<&wgpu::BindGroupLayout>],
+    layout: &wgpu::PipelineLayout,
+    constants: &[(&str, f64)],
 ) -> wgpu::ComputePipeline {
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(label),
-        bind_group_layouts: groups,
-        immediate_size: 0,
-    });
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
-        layout: Some(&layout),
+        layout: Some(layout),
         module: &module,
         entry_point: Some(entry),
-        compilation_options: Default::default(),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants,
+            ..Default::default()
+        },
         cache: None,
     })
+}
+
+/// The voxel-light and volume-write pipelines over their layouts. `RAA_GI_RESET_RAYS`,
+/// `RAA_GI_DIRECT_CHANGE` and `RAA_GI_BEHIND` take their values from `tunables` (contract
+/// 'gi-tunables-store').
+fn build_relight_pipelines(
+    device: &wgpu::Device,
+    light: &wgpu::PipelineLayout,
+    write: &wgpu::PipelineLayout,
+    tunables: &GiTunables,
+) -> (wgpu::ComputePipeline, wgpu::ComputePipeline) {
+    let light_constants = tunables.constants(&[
+        ("RAA_GI_RESET_RAYS", "resetRays"),
+        ("RAA_GI_DIRECT_CHANGE", "directChange"),
+    ]);
+    let write_constants = tunables.constants(&[("RAA_GI_BEHIND", "behind")]);
+    let light_pipeline = compute_pipeline(
+        device,
+        "raa-gi.light",
+        &shaders::voxel_light_module_wgsl(),
+        "raa_gi_voxel_light",
+        light,
+        &light_constants,
+    );
+    let write_pipeline = compute_pipeline(
+        device,
+        "raa-gi.write",
+        &shaders::volume_write_module_wgsl(),
+        "raa_gi_volume_write",
+        write,
+        &write_constants,
+    );
+    (light_pipeline, write_pipeline)
 }
 
 /// Group-2 bind group whose entries are `resources` in binding order.
@@ -208,14 +260,15 @@ fn flood_slot(params: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
 }
 
 impl GiVolume {
-    /// Allocates the volume for `quality` (`GI_VOLUME_BYTES`) and builds its pipelines. `frame`
-    /// is the 432-B `GiFrameGpu` buffer; `group1_layout` is the compute group 1 layout, taken by
-    /// the voxel-light pipeline. Every origin starts as `None`.
+    /// Allocates the volume for `quality` (`GI_VOLUME_BYTES`) and builds its pipelines with the
+    /// values of `tunables`. `frame` is the 432-B `GiFrameGpu` buffer; `group1_layout` is the
+    /// compute group 1 layout, taken by the voxel-light pipeline. Every origin starts as `None`.
     pub(crate) fn new(
         gpu: &GpuContext,
         quality: GiQuality,
         frame: &wgpu::Buffer,
         group1_layout: &wgpu::BindGroupLayout,
+        tunables: &GiTunables,
     ) -> GiVolume {
         let device = gpu.device();
         let queue = gpu.queue();
@@ -306,36 +359,44 @@ impl GiVolume {
         let empty = layout(device, "raa-gi.empty", &[]);
         let seed_layout = layout(device, "raa-gi.seed", &shaders::seed_group2_entries());
         let flood_layout = layout(device, "raa-gi.flood", &shaders::flood_group2_entries());
-        let light_layout = layout(device, "raa-gi.light", &shaders::light_group2_entries());
-        let write_layout = layout(device, "raa-gi.write", &shaders::write_group2_entries());
+        let light_bgl = layout(device, "raa-gi.light", &shaders::light_group2_entries());
+        let write_bgl = layout(device, "raa-gi.write", &shaders::write_group2_entries());
         let seed_pipeline = compute_pipeline(
             device,
             "raa-gi.seed",
             &shaders::seed_module_wgsl(),
             "raa_gi_seed",
-            &[Some(&empty), Some(&empty), Some(&seed_layout)],
+            &pipeline_layout(
+                device,
+                "raa-gi.seed",
+                &[Some(&empty), Some(&empty), Some(&seed_layout)],
+            ),
+            &[],
         );
         let flood_pipeline = compute_pipeline(
             device,
             "raa-gi.flood",
             &shaders::flood_module_wgsl(),
             "raa_gi_flood",
-            &[Some(&empty), Some(&empty), Some(&flood_layout)],
+            &pipeline_layout(
+                device,
+                "raa-gi.flood",
+                &[Some(&empty), Some(&empty), Some(&flood_layout)],
+            ),
+            &[],
         );
-        let light_pipeline = compute_pipeline(
+        let light_layout = pipeline_layout(
             device,
             "raa-gi.light",
-            &shaders::voxel_light_module_wgsl(),
-            "raa_gi_voxel_light",
-            &[Some(&empty), Some(group1_layout), Some(&light_layout)],
+            &[Some(&empty), Some(group1_layout), Some(&light_bgl)],
         );
-        let write_pipeline = compute_pipeline(
+        let write_layout = pipeline_layout(
             device,
             "raa-gi.write",
-            &shaders::volume_write_module_wgsl(),
-            "raa_gi_volume_write",
-            &[Some(&empty), Some(&empty), Some(&write_layout)],
+            &[Some(&empty), Some(&empty), Some(&write_bgl)],
         );
+        let (light_pipeline, write_pipeline) =
+            build_relight_pipelines(device, &light_layout, &write_layout, tunables);
 
         let seed_bind = bind_group(
             device,
@@ -369,7 +430,7 @@ impl GiVolume {
                 bind_group(
                     device,
                     "raa-gi.light",
-                    &light_layout,
+                    &light_bgl,
                     vec![
                         params.as_entire_binding(),
                         voxels.as_entire_binding(),
@@ -386,7 +447,7 @@ impl GiVolume {
                 bind_group(
                     device,
                     "raa-gi.write",
-                    &write_layout,
+                    &write_bgl,
                     vec![
                         params.as_entire_binding(),
                         seeds.as_entire_binding(),
@@ -415,6 +476,9 @@ impl GiVolume {
             flood_pipeline,
             light_pipeline,
             write_pipeline,
+            light_layout,
+            write_layout,
+            tunables_generation: tunables.generation(),
             seed_bind,
             flood_binds,
             light_binds,
@@ -424,6 +488,25 @@ impl GiVolume {
             light_updates: vec![0; levels],
             params: [0; 96],
         }
+    }
+
+    /// The tunables generation the voxel-light and volume-write pipelines were built with.
+    #[cfg(test)]
+    pub(crate) fn built_tunables_generation(&self) -> u64 {
+        self.tunables_generation
+    }
+
+    /// Rebuilds the voxel-light and volume-write pipelines when the published tunables changed
+    /// since they were built (contract 'gi-tunables-store'). The store is cloned only then.
+    pub(crate) fn sync_tunables(&mut self, gpu: &GpuContext, shared: &GiShared) {
+        if shared.tunables_generation() == self.tunables_generation {
+            return;
+        }
+        let tunables = shared.tunables();
+        let device = gpu.device();
+        (self.light_pipeline, self.write_pipeline) =
+            build_relight_pipelines(device, &self.light_layout, &self.write_layout, &tunables);
+        self.tunables_generation = tunables.generation();
     }
 
     /// Follows the camera and decides this frame's work (solstice `volume.rs:398-529`,

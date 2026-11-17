@@ -30,6 +30,7 @@ use crate::settings::{
     DebugView, FINEST_VOXEL_METRES, GiQuality, GiQualityPatch, GiSettings, GiSettingsPatch,
 };
 use crate::stats::GiStats;
+use crate::tunables::GiTunables;
 use crate::volume::{GiVolume, LightFrame, VolumeWork};
 
 /// The pass names and orders of S12 (`gi.volume` 25, `gi.history` 64).
@@ -100,6 +101,9 @@ fn initial_stats(quality: GiQuality) -> GiStats {
 pub(crate) struct GiCore {
     settings: GiSettings,
     quality: GiQuality,
+    /// The authoritative tunable values; every change is published to `shared` by
+    /// [`GiHandle::set_tunable`].
+    tunables: GiTunables,
     allocated_quality: Option<GiQuality>,
     requests: BTreeMap<u32, bool>,
     camera: Camera,
@@ -168,6 +172,7 @@ impl GiCore {
         GiCore {
             settings: GiSettings::default(),
             quality: GiQuality::default(),
+            tunables: GiTunables::new(),
             allocated_quality: None,
             requests: BTreeMap::new(),
             camera: Camera::default(),
@@ -246,6 +251,18 @@ impl GiHandle {
     /// The current quality.
     pub fn quality(&self) -> GiQuality {
         self.core.borrow().quality
+    }
+
+    /// Handoff: card 'Executor extension: apply Tunable bindings' calls `GiHandle::set_tunable`
+    /// through `HandleSet.gi` (crates/raa-graph/src/exec.rs) with a catalog key of any GI node type
+    /// and its value as f64. Today it changes the `GiCore` copy of `GiTunables` through
+    /// `GiTunables::set` (`gi.invalid` on refusal, nothing changed) and publishes the result with
+    /// `GiShared::set_tunables`.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let mut core = self.core.borrow_mut();
+        core.tunables.set(key, value)?;
+        core.shared.set_tunables(core.tunables.clone());
+        Ok(())
     }
 
     /// Stores the request of `tag`; `None` removes it, so the group takes the default membership.
@@ -458,7 +475,7 @@ impl GiHandle {
                     mapped_at_creation: false,
                 });
                 let layout = core.shared.compute_group1_layout();
-                let volume = GiVolume::new(gpu, quality, &frame, &layout);
+                let volume = GiVolume::new(gpu, quality, &frame, &layout, &core.tunables);
                 core.shared.set_atlas(Some(volume.atlas_view()));
                 core.shared.set_frame(Some(frame));
                 core.volume = Some(volume);
@@ -726,8 +743,9 @@ fn frame_record(core: &mut GiCore) -> GiFrameGpu {
     }
 }
 
-/// The `gi.volume` pass (order 25): uploads the volume's atlas and parameters in `prepare`, and
-/// records the frame's rebuild and relight from the stored [`VolumeWork`] (once per frame).
+/// The `gi.volume` pass (order 25): rebuilds its pipelines when the tunables changed, uploads the
+/// volume's atlas and parameters in `prepare`, and records the frame's rebuild and relight from
+/// the stored [`VolumeWork`] (once per frame).
 pub(crate) struct GiVolumePass {
     core: Rc<RefCell<GiCore>>,
 }
@@ -748,7 +766,11 @@ impl FeaturePass for GiVolumePass {
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let core = self.core.borrow();
+        let mut guard = self.core.borrow_mut();
+        let core = &mut *guard;
+        if let Some(volume) = core.volume.as_mut() {
+            volume.sync_tunables(ctx.gpu, &core.shared);
+        }
         match core.volume.as_ref() {
             Some(volume) => {
                 // Part order rank (generated file-name order): area_shadow = 0, screen = 1,
@@ -1370,5 +1392,39 @@ mod tests {
         assert_eq!(stats.inactive_reason, Some("passDisabled"));
         assert_eq!(stats.allocated_bytes, 0);
         assert!(rig.handle.recorded_passes().is_empty());
+    }
+
+    #[test]
+    fn set_tunable_publishes_each_change_and_refuses_without_one() {
+        let test = "set_tunable_publishes_each_change_and_refuses_without_one";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        assert!(rig.frame(&gpu, 1).active);
+        let shared = rig.handle.core.borrow().shared.clone();
+        let built = |rig: &Rig| {
+            rig.handle
+                .core
+                .borrow()
+                .volume
+                .as_ref()
+                .map(GiVolume::built_tunables_generation)
+        };
+        assert_eq!(built(&rig), Some(0));
+        rig.handle
+            .set_tunable("directChange", 0.1)
+            .expect("a finite change");
+        assert_eq!(shared.tunables_generation(), 1);
+        assert_eq!(shared.tunable_value("directChange"), Some(0.1));
+        assert!(rig.handle.set_tunable("resetRays", 2.5).is_err());
+        assert!(rig.handle.set_tunable("nope", 1.0).is_err());
+        assert_eq!(shared.tunables_generation(), 1);
+        // The next frame rebuilds the voxel-light and volume-write pipelines once.
+        assert!(rig.frame(&gpu, 1).active);
+        assert_eq!(built(&rig), Some(1));
+        assert!(rig.handle.recorded_passes().contains(&"gi.volume"));
     }
 }

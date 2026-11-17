@@ -20,6 +20,7 @@ use raa_vg::{VgHandle, scene::SyncItem};
 
 use crate::membership::Member;
 use crate::settings::{GiQuality, GiSettings};
+use crate::tunables::GiTunables;
 use crate::vertex_colors::GiVertexColors;
 
 /// The install context of [`install_parts`]: the frame's GPU objects, the pipeline and lit
@@ -207,10 +208,12 @@ struct SharedFrame {
     colors: GiVertexColors,
     quality: GiQuality,
     settings: GiSettings,
+    tunables: GiTunables,
 }
 
 impl GiShared {
-    /// A handle with no frame, atlas or history yet, and the default quality and settings.
+    /// A handle with no frame, atlas or history yet, and the default quality, settings and
+    /// tunables.
     pub fn new(gpu: &GpuContext) -> GiShared {
         let group1_layout =
             gpu.device()
@@ -233,6 +236,7 @@ impl GiShared {
             colors: GiVertexColors::default(),
             quality: GiQuality::default(),
             settings: GiSettings::default(),
+            tunables: GiTunables::new(),
         })))
     }
 
@@ -419,6 +423,29 @@ impl GiShared {
     /// Publishes the settings.
     pub(crate) fn set_settings(&self, settings: GiSettings) {
         self.0.borrow_mut().settings = settings;
+    }
+
+    /// The value of tunable `key` in the published store, or `None` for an unknown key. It does
+    /// not allocate, so a pass may read it every frame.
+    pub fn tunable_value(&self, key: &str) -> Option<f64> {
+        self.0.borrow().tunables.value(key)
+    }
+
+    /// The generation of the published store: it advances on every change. It does not allocate.
+    pub fn tunables_generation(&self) -> u64 {
+        self.0.borrow().tunables.generation()
+    }
+
+    /// A clone of the published store. The clone allocates, so a pass calls this only when
+    /// [`GiShared::tunables_generation`] differs from the generation its pipelines were built with.
+    pub fn tunables(&self) -> GiTunables {
+        self.0.borrow().tunables.clone()
+    }
+
+    /// Publishes `tunables`, replacing the store: `GiHandle::set_tunable` calls it after its core
+    /// copy changed.
+    pub fn set_tunables(&self, tunables: GiTunables) {
+        self.0.borrow_mut().tunables = tunables;
     }
 
     /// Drops the frame buffer, atlas, history, pyramid and probe-output views and the cached

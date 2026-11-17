@@ -16,10 +16,13 @@ pub mod parts;
 pub mod settings;
 pub mod shaders;
 pub mod stats;
+mod tunables;
 pub mod vertex_colors;
 mod volume;
 
 pub use stats::GiStats;
+
+pub use tunables::{GiTunables, tunables};
 
 pub use vertex_colors::GiVertexColors;
 

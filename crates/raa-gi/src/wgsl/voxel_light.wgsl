@@ -54,7 +54,7 @@ const RAA_GI_EMISSIVE_RANGE: f32 = 128.0;
 // Rays of the first update after a reset (at least): the voxel takes that update whole, so it is
 // gathered with more rays to start from a less noisy value. The R2 sequence advances by
 // RAA_GI_RAY_STRIDE per update, the most rays an update can take.
-const RAA_GI_RESET_RAYS: u32 = 8u;
+override RAA_GI_RESET_RAYS: u32 = 8u;
 const RAA_GI_RAY_STRIDE: u32 = 16u;
 // The radiance blends at 1 / n, n the voxel's update count, capped at the control word's history
 // (`cpu::voxel_blend`): a still scene averages its gather rays over n updates, so the volume
@@ -62,7 +62,7 @@ const RAA_GI_RAY_STRIDE: u32 = 16u;
 // whole) when the cell scrolled in, the lighting epoch changed (a light or the sun changed), or
 // the voxel's own direct light changed by more than RAA_GI_DIRECT_CHANGE (an occluder moved, a
 // light was hidden): stale light then leaves the volume at the voxel's next update.
-const RAA_GI_DIRECT_CHANGE: f32 = 0.05;
+override RAA_GI_DIRECT_CHANGE: f32 = 0.05;
 const RAA_GI_DIRECT_FLOOR: f32 = 1.0e-4;
 
 // The radiance record keeps 16 spare bits after blue: the update count (bits 0-7), the wrap

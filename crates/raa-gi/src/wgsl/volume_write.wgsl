@@ -56,7 +56,7 @@ const FAR_DISTANCE_VOXELS: f32 = 64.0;
 @group(2) @binding(4) var<storage, read> raa_gi_write_voxels: array<u32>;
 
 // Empty voxels further than this behind the seed's surface plane (in voxels) take no radiance.
-const RAA_GI_BEHIND: f32 = 0.5;
+override RAA_GI_BEHIND: f32 = 0.5;
 
 // Signed octahedral coordinates in [-1, 1]^2 to a unit vector.
 fn raa_gi_write_oct_decode(e: vec2<f32>) -> vec3<f32> {
