@@ -239,7 +239,7 @@ fn gather_vertex_and_four_fragment_entries() {
     // fs_prefilter writes the near and far layers (MRT 2 targets)
     assert!(wgsl.contains("@location(0) near: vec4<f32>,"));
     assert!(wgsl.contains("@location(1) far: vec4<f32>,"));
-    assert!(wgsl.contains("const TAPS: u32 = 48u;"));
+    assert!(wgsl.contains("override TAPS: u32 = 48u;"));
 }
 
 #[test]

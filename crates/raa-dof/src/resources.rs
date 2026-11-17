@@ -134,6 +134,7 @@ fn render(
     layout: &wgpu::BindGroupLayout,
     entry: &str,
     targets: usize,
+    constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(entry),
@@ -152,7 +153,10 @@ fn render(
         vertex: wgpu::VertexState {
             module,
             entry_point: Some(VS_MAIN),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             buffers: &[],
         },
         primitive: wgpu::PrimitiveState::default(),
@@ -161,7 +165,10 @@ fn render(
         fragment: Some(wgpu::FragmentState {
             module,
             entry_point: Some(entry),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants,
+                ..Default::default()
+            },
             targets: &color_targets,
         }),
         multiview_mask: None,
@@ -214,6 +221,8 @@ pub(crate) struct DofPipelines {
     /// Shared by both gathers.
     gather_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
+    /// The gather module (declares the `TAPS` and `RADIUS_PER_COC` overrides).
+    gather_module: wgpu::ShaderModule,
     /// Linear clamp (the shaders currently use textureLoad only).
     pub linear: wgpu::Sampler,
     /// `DofParams` (PARAMS_SIZE bytes), written each frame by the pass.
@@ -223,7 +232,7 @@ pub(crate) struct DofPipelines {
 }
 
 impl DofPipelines {
-    pub(crate) fn new(gpu: &GpuContext) -> DofPipelines {
+    pub(crate) fn new(gpu: &GpuContext, constants: &[(&str, f64)]) -> DofPipelines {
         let device = gpu.device();
         let coc_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-dof.coc"),
@@ -314,10 +323,38 @@ impl DofPipelines {
             coc: compute(device, &coc_module, &coc_layout, CS_COC),
             tiles: compute(device, &coc_module, &tiles_layout, CS_TILES),
             dilate: compute(device, &coc_module, &dilate_layout, CS_DILATE),
-            prefilter: render(device, &gather_module, &prefilter_layout, FS_PREFILTER, 2),
-            gather_near: render(device, &gather_module, &gather_layout, FS_GATHER_NEAR, 1),
-            gather_far: render(device, &gather_module, &gather_layout, FS_GATHER_FAR, 1),
-            composite: render(device, &gather_module, &composite_layout, FS_COMPOSITE, 1),
+            prefilter: render(
+                device,
+                &gather_module,
+                &prefilter_layout,
+                FS_PREFILTER,
+                2,
+                constants,
+            ),
+            gather_near: render(
+                device,
+                &gather_module,
+                &gather_layout,
+                FS_GATHER_NEAR,
+                1,
+                constants,
+            ),
+            gather_far: render(
+                device,
+                &gather_module,
+                &gather_layout,
+                FS_GATHER_FAR,
+                1,
+                constants,
+            ),
+            composite: render(
+                device,
+                &gather_module,
+                &composite_layout,
+                FS_COMPOSITE,
+                1,
+                constants,
+            ),
             autofocus_layout,
             coc_layout,
             tiles_layout,
@@ -325,6 +362,7 @@ impl DofPipelines {
             prefilter_layout,
             gather_layout,
             composite_layout,
+            gather_module,
             linear: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("raa-dof.linear_clamp"),
                 mag_filter: wgpu::FilterMode::Linear,
@@ -339,6 +377,17 @@ impl DofPipelines {
             }),
             focus,
         }
+    }
+
+    /// Rebuilds the four render pipelines of the gather module with `constants` (the
+    /// override values); layouts, bind groups and buffers are unchanged.
+    pub(crate) fn rebuild_gather(&mut self, gpu: &GpuContext, constants: &[(&str, f64)]) {
+        let d = gpu.device();
+        let m = &self.gather_module;
+        self.prefilter = render(d, m, &self.prefilter_layout, FS_PREFILTER, 2, constants);
+        self.gather_near = render(d, m, &self.gather_layout, FS_GATHER_NEAR, 1, constants);
+        self.gather_far = render(d, m, &self.gather_layout, FS_GATHER_FAR, 1, constants);
+        self.composite = render(d, m, &self.composite_layout, FS_COMPOSITE, 1, constants);
     }
 }
 

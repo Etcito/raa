@@ -21,9 +21,10 @@ use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
 };
 
-use crate::desc::{DofDesc, REFERENCE_VIEWPORT_H};
+use crate::desc::{DofDesc, POST_INVALID, REFERENCE_VIEWPORT_H};
 use crate::resources::{DofPipelines, DofTargets};
 use crate::shaders::{COC_WORKGROUP, PARAMS_LENS2_OFFSET, PARAMS_SIZE, aperture_term_px};
+use crate::tunables::{TUNABLES, constants};
 
 /// S12 name of the pass.
 const NAME: &str = "dof";
@@ -70,6 +71,21 @@ struct DofState {
     desc: DofDesc,
     /// None until the first `set_camera`.
     camera: Option<DofCamera>,
+    /// Current tunable values, indexed like `crate::tunables::TUNABLES`.
+    tunables: [f64; 2],
+    /// Incremented by each `set_tunable` that changes a value.
+    generation: u64,
+}
+
+impl DofState {
+    fn new() -> DofState {
+        DofState {
+            desc: DofDesc::default(),
+            camera: None,
+            tunables: TUNABLES.map(|t| t.default),
+            generation: 0,
+        }
+    }
 }
 
 type SharedDof = Rc<RefCell<DofState>>;
@@ -143,6 +159,8 @@ struct DofPass {
     autofocus: bool,
     /// A camera is set this frame.
     has_camera: bool,
+    /// `DofState.generation` the gather pipelines were built with.
+    built_generation: u64,
 }
 
 /// A render pass of one draw of the fullscreen triangle into `targets` (cleared first).
@@ -215,10 +233,14 @@ impl FeaturePass for DofPass {
 
     /// Writes `DofParams` from the handle's description and camera (in place).
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let (desc, camera) = {
+        let (desc, camera, values, generation) = {
             let st = self.state.try_borrow().map_err(|_| state_busy())?;
-            (st.desc, st.camera)
+            (st.desc, st.camera, st.tunables, st.generation)
         };
+        if generation != self.built_generation {
+            self.pipelines.rebuild_gather(ctx.gpu, &constants(&values));
+            self.built_generation = generation;
+        }
         let Some(targets) = self.targets.as_ref() else {
             return Ok(());
         };
@@ -383,18 +405,17 @@ impl DofFeature {
                 "the pass `dof` is already installed",
             ));
         }
-        let state = Rc::new(RefCell::new(DofState {
-            desc: DofDesc::default(),
-            camera: None,
-        }));
+        let state = Rc::new(RefCell::new(DofState::new()));
+        let values = TUNABLES.map(|t| t.default);
         p.add(Box::new(DofPass {
             state: state.clone(),
-            pipelines: DofPipelines::new(gpu),
+            pipelines: DofPipelines::new(gpu, &constants(&values)),
             targets: None,
             bytes: [0; PARAMS_LEN],
             snap: true,
             autofocus: false,
             has_camera: false,
+            built_generation: 0,
         }))?;
         Ok(DofHandle { state })
     }
@@ -421,6 +442,35 @@ impl DofHandle {
             .try_borrow()
             .map(|st| st.desc)
             .unwrap_or_default()
+    }
+
+    /// Sets one S56 tunable of [`crate::tunables()`] (`taps`, `radiusPerCoc`).
+    ///
+    /// Handoff: card 'Executor extension: apply Tunable bindings' calls
+    /// `DofHandle::set_tunable` through `HandleSet.dof` (crates/raa-graph/src/exec.rs) with a
+    /// catalog key and its value as f64. Today it validates with
+    /// `raa_pipeline::validate_tunable`, refuses with `post.invalid` (the code of
+    /// crates/raa-dof/src/desc.rs `DofDesc::validate`) without changing anything, and
+    /// otherwise stores the value (integer rows as the integral value) in the state shared
+    /// by every clone and the pass, so the gather pipelines are rebuilt at the next prepare.
+    /// `pipeline.busy` on a re-entrant call.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let spec = raa_pipeline::validate_tunable(&TUNABLES, key, value)
+            .map_err(|m| refusal(POST_INVALID, &m))?;
+        let i = TUNABLES.iter().position(|t| t.key == spec.key).unwrap_or(0);
+        let v = if spec.integer { value.trunc() } else { value };
+        let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        if st.tunables[i] != v {
+            st.tunables[i] = v;
+            st.generation = st.generation.wrapping_add(1);
+        }
+        Ok(())
+    }
+
+    /// The current value of tunable `key` (None for an unknown key).
+    pub fn tunable(&self, key: &str) -> Option<f64> {
+        let i = TUNABLES.iter().position(|t| t.key == key)?;
+        self.state.try_borrow().ok().map(|st| st.tunables[i])
     }
 
     /// The frame's camera (called every frame by api-m14). The inverse projection is
@@ -461,10 +511,7 @@ mod tests {
 
     fn handle() -> DofHandle {
         DofHandle {
-            state: Rc::new(RefCell::new(DofState {
-                desc: DofDesc::default(),
-                camera: None,
-            })),
+            state: Rc::new(RefCell::new(DofState::new())),
         }
     }
 
@@ -506,6 +553,22 @@ mod tests {
         let mut id = [0u8; 64];
         Mat4::IDENTITY.write_le_bytes(&mut id);
         assert_eq!(&out[0..64], &id[..]);
+    }
+
+    #[test]
+    fn set_tunable_refuses_with_post_invalid_and_changes_nothing() {
+        let h = handle();
+        for (key, v) in [("nope", 1.0), ("taps", f64::NAN), ("taps", 4.5)] {
+            let err = h.set_tunable(key, v).unwrap_err();
+            assert_eq!(err.code(), "post.invalid");
+        }
+        assert_eq!(h.tunable("taps"), Some(48.0));
+        assert_eq!(h.state.borrow().generation, 0);
+        h.set_tunable("taps", 48.0).unwrap();
+        assert_eq!(h.state.borrow().generation, 0);
+        h.clone().set_tunable("radiusPerCoc", 0.75).unwrap();
+        assert_eq!(h.tunable("radiusPerCoc"), Some(0.75));
+        assert_eq!(h.state.borrow().generation, 1);
     }
 
     #[test]

@@ -34,11 +34,11 @@ struct DofParams {
 // fs_gather_far: the prefiltered far layer; fs_composite: the gathered far layer.
 @group(0) @binding(6) var far_tex: texture_2d<f32>;
 
-const TAPS: u32 = 48u;
+override TAPS: u32 = 48u;
 // pi * (3 - sqrt(5)): round bokeh from a golden-angle (Vogel) spiral, no polygon.
 const GOLDEN_ANGLE: f32 = 2.39996323;
 // The CoC is a diameter.
-const RADIUS_PER_COC: f32 = 0.5;
+override RADIUS_PER_COC: f32 = 0.5;
 const TILE: i32 = 16;
 const EPS: f32 = 1.0e-4;
 // Depth used for sky and invalid pixels in the bilateral weights (m).

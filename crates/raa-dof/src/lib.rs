@@ -5,6 +5,8 @@ mod desc;
 mod feature;
 mod resources;
 mod shaders;
+mod tunables;
 
 pub use desc::{DofDesc, POST_INVALID, REFERENCE_VIEWPORT_H, SENSOR_WIDTH_MM, coc_px};
 pub use feature::{DofFeature, DofHandle};
+pub use tunables::tunables;
