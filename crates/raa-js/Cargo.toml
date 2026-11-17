@@ -52,6 +52,7 @@ raa-vg = { path = "../raa-vg" }
 raa-gi = { path = "../raa-gi" }
 raa-taa = { path = "../raa-taa" }
 raa-grading = { path = "../raa-grading" }
+raa-exposure = { path = "../raa-exposure" }
 raa-deform = { path = "../raa-deform" }
 raa-sdf-trace = { path = "../raa-sdf-trace" }
 

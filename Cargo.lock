@@ -948,6 +948,7 @@ dependencies = [
  "raa-csg",
  "raa-deform",
  "raa-dof",
+ "raa-exposure",
  "raa-fog",
  "raa-fur",
  "raa-geom",

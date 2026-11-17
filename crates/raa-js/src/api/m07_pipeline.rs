@@ -378,6 +378,7 @@ struct ViewPost {
     grading: raa_grading::GradingHandle,
     cel: raa_cel::CelHandle,
     taa: raa_taa::TaaHandle,
+    exposure: raa_exposure::AutoExposureHandle,
 }
 #[derive(Default)]
 struct ViewPosts(Vec<ViewPost>);
@@ -431,11 +432,21 @@ fn configure_views(
             grading: raa_grading::GradingFeature::install(gpu, &temp)?,
             cel: raa_cel::CelFeature::install(gpu, &temp)?,
             taa: raa_taa::TaaFeature::install(gpu, &temp, &frame)?,
+            exposure: raa_exposure::AutoExposureFeature::install(gpu, &temp)?,
         };
         p.set_view_passes(posts.0.len(), &mut temp.borrow_mut());
         posts.0.push(post);
     }
     Ok(())
+}
+
+/// A clone of the auto-exposure handle of viewport `index`; None without viewports.
+pub(crate) fn view_auto_exposure(
+    st: &EngineState,
+    index: usize,
+) -> Option<raa_exposure::AutoExposureHandle> {
+    let posts = st.features.get::<ViewPosts>()?;
+    posts.0.get(index).map(|post| post.exposure.clone())
 }
 
 /// Runs only camera-dependent updates. Simulation and animation still advance once.
@@ -502,6 +513,9 @@ pub(crate) fn prepare_view(
             }
             if let Some(h) = st.features.get::<raa_grading::GradingHandle>() {
                 post.grading.set(h.get())?;
+            }
+            if let Some(h) = st.features.get::<raa_exposure::AutoExposureHandle>() {
+                post.exposure.set(h.get())?;
             }
             if let Some(h) = st.features.get::<raa_cel::CelHandle>() {
                 post.cel.set(h.get())?;
