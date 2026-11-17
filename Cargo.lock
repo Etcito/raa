@@ -1166,6 +1166,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-sharpen"
+version = "0.5.0"
+dependencies = [
+ "raa-core",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-skin"
 version = "0.5.0"
 dependencies = [
