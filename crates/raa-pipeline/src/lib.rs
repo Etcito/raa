@@ -12,6 +12,7 @@ mod pass;
 mod pipeline;
 mod resource_table;
 mod targets;
+mod tunable;
 
 pub use brdf_atlas::{
     BRDF_ATLAS_FORMAT, BRDF_ATLAS_HEIGHT, BRDF_ATLAS_WIDTH, BRDF_LUT_SIZE, LTC_TABLE_SIZE,
@@ -29,6 +30,7 @@ pub use resource_table::{
     ImageDesc, ImageDim, PublishedImage, ResourceTable, SampleKind, sample_kind_for,
 };
 pub use targets::{HdrChain, Targets};
+pub use tunable::{TunableSpec, find_tunable, validate_tunable};
 
 /// Format of the HDR chain, the opaque copy, bloom and the env cube (HDR_FORMAT).
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
