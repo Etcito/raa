@@ -2,7 +2,7 @@
 //! docs/render-graph/tunables.md, the defaults of `GiTunables::new`, the refusals of
 //! `GiTunables::set` and the overrides that `GiTunables::constants` returns.
 
-use raa_gi::{GiTunables, tunables};
+use raa_gi::{GiTunables, SsgiQuality, ssgi_counts, tunables};
 
 /// The `pass.gi.volume` rows of docs/render-graph/tunables.md in table order: key and default.
 const VOLUME_ROWS: [(&str, f64); 3] = [("behind", 0.5), ("resetRays", 8.0), ("directChange", 0.05)];
@@ -298,4 +298,41 @@ fn area_shadow_uniform_rows_are_separate_from_the_restir_gi_rows() {
     );
     assert_eq!(store.value("areaRestirSpatialRadius"), Some(12.0));
     assert_eq!(store.value("restirSpatialRadius"), Some(24.0));
+}
+
+/// The `pass.gi.ssgi` rows in table order: changeSigma (override), then the six per-quality
+/// uniform rows of the SSGI table.
+const SSGI_ROWS: [(&str, f64, bool, &str); 7] = [
+    ("changeSigma", 3.0, false, "pipeline"),
+    ("slicesLow", 2.0, true, "none"),
+    ("slicesMedium", 4.0, true, "none"),
+    ("slicesHigh", 6.0, true, "none"),
+    ("stepsLow", 6.0, true, "none"),
+    ("stepsMedium", 8.0, true, "none"),
+    ("stepsHigh", 12.0, true, "none"),
+];
+
+#[test]
+fn ssgi_keys_and_defaults_follow_the_table() {
+    let specs = tunables();
+    let start = 3 + SCREEN_ROWS.len() + RESTIR_ROWS.len() + AREA_ROWS.len() + 6;
+    assert_eq!(specs.len(), start + SSGI_ROWS.len());
+    for (spec, (key, default, integer, rebuild)) in specs[start..].iter().zip(SSGI_ROWS) {
+        assert_eq!(spec.key, key);
+        assert_eq!(spec.default, default, "default of {key}");
+        assert_eq!(spec.integer, integer, "integer of {key}");
+        assert_eq!((spec.min, spec.max), (None, None), "{key} states no range");
+        assert_eq!(spec.rebuild, rebuild, "{key}");
+    }
+}
+
+#[test]
+fn ssgi_counts_read_the_quality_rows() {
+    let mut store = GiTunables::new();
+    assert_eq!(ssgi_counts(SsgiQuality::Low, &store), (2, 6));
+    assert_eq!(ssgi_counts(SsgiQuality::Medium, &store), (4, 8));
+    assert_eq!(ssgi_counts(SsgiQuality::High, &store), (6, 12));
+    assert!(store.set("stepsMedium", 1.0).expect("an integer value"));
+    assert_eq!(ssgi_counts(SsgiQuality::Medium, &store), (4, 1));
+    assert_eq!(ssgi_counts(SsgiQuality::High, &store), (6, 12));
 }

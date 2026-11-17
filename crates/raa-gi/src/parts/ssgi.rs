@@ -25,6 +25,8 @@ use std::rc::Rc;
 use self::passes::SsgiPipelines;
 use self::resources::{SsgiInputs, SsgiResources};
 use super::{GiPart, GiShared, PartFrame, PartsCtx};
+use crate::settings::SsgiQuality;
+use crate::tunables::GiTunables;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitHandle;
 use raa_pipeline::{
@@ -55,6 +57,24 @@ pub fn ssgi_bytes(viewport: (u32, u32)) -> u64 {
         .saturating_mul(width)
         .saturating_mul(height)
         .saturating_add(48)
+}
+
+/// The (slices, steps) of `quality` read from `tunables` (contract 'ssgi-counts'): Low gives
+/// (slicesLow, stepsLow), Medium (slicesMedium, stepsMedium), High (slicesHigh, stepsHigh). A
+/// missing key falls back to `SsgiQuality::slices` or `SsgiQuality::steps`, so a store at its
+/// defaults returns the pair those methods return.
+pub fn ssgi_counts(quality: SsgiQuality, tunables: &GiTunables) -> (u32, u32) {
+    let (slices, steps) = match quality {
+        SsgiQuality::Low => ("slicesLow", "stepsLow"),
+        SsgiQuality::Medium => ("slicesMedium", "stepsMedium"),
+        SsgiQuality::High => ("slicesHigh", "stepsHigh"),
+    };
+    (
+        tunables
+            .value(slices)
+            .map_or(quality.slices(), |v| v as u32),
+        tunables.value(steps).map_or(quality.steps(), |v| v as u32),
+    )
 }
 
 /// Builds the part `ssgi` and its pass `gi.ssgi` and attaches them. `SsgiPipelines::new` builds the
@@ -166,20 +186,16 @@ impl GiPart for SsgiPart {
         }
         let pending = std::mem::take(&mut state.pending);
         state.frame_index = state.frame_index.wrapping_add(1);
+        state.pipelines.refresh(gpu, &self.shared);
         let quality = frame.settings.screen_space_quality;
+        let (slices, steps) = ssgi_counts(quality, &state.pipelines.tunables);
         let Some(resources) = state.resources.as_mut() else {
             return;
         };
         if pending {
             resources.invalidate();
         }
-        resources.write_params(
-            gpu,
-            quality.slices(),
-            quality.steps(),
-            frame.history_valid,
-            state.frame_index,
-        );
+        resources.write_params(gpu, slices, steps, frame.history_valid, state.frame_index);
     }
 
     /// The composite output of this frame while the part is active with its pass enabled.

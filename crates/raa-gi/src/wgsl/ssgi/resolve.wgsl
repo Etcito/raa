@@ -32,7 +32,7 @@ struct SsgiParamsGpu {
 @group(0) @binding(8) var<uniform> raa_ssgi_params: SsgiParamsGpu;
 
 // The width of the change test in standard deviations of the filtered taps (`cpu::CHANGE_SIGMA`).
-const RAA_SSGI_CHANGE_SIGMA: f32 = 3.0;
+override RAA_SSGI_CHANGE_SIGMA: f32 = 3.0;
 
 // The history weight of the temporal blend (`cpu::change_alpha`): 0.1 while the history's
 // luminance lies within RAA_SSGI_CHANGE_SIGMA sigma (+5 % slack) of the taps' mean, rising

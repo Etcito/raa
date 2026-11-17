@@ -8,11 +8,14 @@
 // `SsgiPipelines` and `SsgiWork` have no caller until the SsgiResources and SsgiPart shares land.
 #![allow(dead_code)]
 
+use crate::parts::GiShared;
+use crate::tunables::GiTunables;
 use raa_core::GpuContext;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use raa_taa::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
 use wgpu::{BindGroupLayoutEntry, TextureFormat};
 
+use super::super::area_shadow::passes::tuned_pipeline;
 use super::super::screen::passes::{
     compute_pipeline, depth_entry, dispatch, float_entry, layout, module, storage_texture_entry,
     uniform_entry,
@@ -22,6 +25,10 @@ const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgs
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
 const SSGI_TRACE_WGSL: &str = include_str!("../../wgsl/ssgi/trace.wgsl");
 const SSGI_RESOLVE_WGSL: &str = include_str!("../../wgsl/ssgi/resolve.wgsl");
+
+/// The (override name, tunable key) pairs of resolve.wgsl, passed through `GiTunables::constants`.
+pub(crate) const SSGI_RESOLVE_OVERRIDES: &[(&str, &str)] =
+    &[("RAA_SSGI_CHANGE_SIGMA", "changeSigma")];
 
 /// `GiFrameGpu` bytes (S38): five matrices, then the seven 16-B lanes.
 const FRAME_SIZE: u64 = 432;
@@ -118,6 +125,9 @@ pub(crate) struct SsgiPipelines {
     pub(crate) resolve_layout: wgpu::BindGroupLayout,
     trace: wgpu::ComputePipeline,
     resolve: wgpu::ComputePipeline,
+    resolve_module: wgpu::ShaderModule,
+    /// The GI tunables the resolve pipeline was built with, refreshed by `refresh`.
+    pub(crate) tunables: GiTunables,
 }
 
 impl SsgiPipelines {
@@ -142,20 +152,32 @@ impl SsgiPipelines {
             &[Some(&empty), Some(group1), Some(&trace_layout)],
             None,
         );
-        let resolve = compute_pipeline(
-            device,
-            "raa-gi.ssgi.resolve",
-            &resolve_module,
-            SSGI_RESOLVE_ENTRY,
-            &[Some(&resolve_layout)],
-            None,
-        );
+        let tunables = GiTunables::new();
+        let resolve = resolve_pipeline(device, &resolve_module, &resolve_layout, &tunables);
         SsgiPipelines {
             trace_layout,
             resolve_layout,
             trace,
             resolve,
+            resolve_module,
+            tunables,
         }
+    }
+
+    /// When `GiShared::tunables_generation` differs from the cached copy's generation, clones
+    /// `GiShared::tunables` once and rebuilds the resolve pipeline with its constants. Otherwise
+    /// does nothing and allocates nothing.
+    pub(crate) fn refresh(&mut self, gpu: &GpuContext, shared: &GiShared) {
+        if shared.tunables_generation() == self.tunables.generation() {
+            return;
+        }
+        self.tunables = shared.tunables();
+        self.resolve = resolve_pipeline(
+            gpu.device(),
+            &self.resolve_module,
+            &self.resolve_layout,
+            &self.tunables,
+        );
     }
 
     /// Records one "raa-gi.ssgi" compute pass: group 1 once, the trace over group 2, then the
@@ -184,6 +206,23 @@ impl SsgiPipelines {
         dispatch(&mut pass, width, height);
         true
     }
+}
+
+/// The resolve pipeline over [`resolve_layout`] with the `SSGI_RESOLVE_OVERRIDES` constants.
+fn resolve_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    resolve_layout: &wgpu::BindGroupLayout,
+    tunables: &GiTunables,
+) -> wgpu::ComputePipeline {
+    tuned_pipeline(
+        device,
+        "raa-gi.ssgi.resolve",
+        module,
+        SSGI_RESOLVE_ENTRY,
+        &[Some(resolve_layout)],
+        &tunables.constants(SSGI_RESOLVE_OVERRIDES),
+    )
 }
 
 #[cfg(test)]

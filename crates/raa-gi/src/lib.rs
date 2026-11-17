@@ -24,6 +24,8 @@ pub use stats::GiStats;
 
 pub use tunables::{GiTunables, tunables};
 
+pub use parts::ssgi::ssgi_counts;
+
 pub use vertex_colors::GiVertexColors;
 
 pub use settings::{

@@ -427,9 +427,80 @@ pub const GI_TUNABLES: &[TunableSpec] = &[
         rebuild: "none",
         source: "crates/raa-gi/src/parts/area_shadow/restir_cpu.rs:36",
     },
+    TunableSpec {
+        key: "changeSigma",
+        default: 3.0,
+        min: None,
+        max: None,
+        integer: false,
+        rebuild: "pipeline",
+        source: "crates/raa-gi/src/wgsl/ssgi/resolve.wgsl:35",
+    },
+    TunableSpec {
+        key: "slicesLow",
+        default: 2.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/settings.rs:157",
+    },
+    TunableSpec {
+        key: "slicesMedium",
+        default: 4.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/settings.rs:158",
+    },
+    TunableSpec {
+        key: "slicesHigh",
+        default: 6.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/settings.rs:159",
+    },
+    TunableSpec {
+        key: "stepsLow",
+        default: 6.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/settings.rs:166",
+    },
+    TunableSpec {
+        key: "stepsMedium",
+        default: 8.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/settings.rs:167",
+    },
+    TunableSpec {
+        key: "stepsHigh",
+        default: 12.0,
+        min: None,
+        max: None,
+        integer: true,
+        rebuild: "none",
+        source: "crates/raa-gi/src/settings.rs:168",
+    },
 ];
 
 /// The specs of [`GI_TUNABLES`], as the crate root re-exports them.
+///
+/// Handoff: `tunables` is called by card 'Catalog family tunables_gi'. Today it returns
+/// `GI_TUNABLES` with every raa-gi row in table order (gi.volume, gi.screen, ReSTIR GI,
+/// area-shadow, then the SSGI rows changeSigma, slicesLow..High and stepsLow..High). The key
+/// registry is key -> `TunableSpec`; that card attaches each spec by key to a ParamSpec of
+/// pass.gi.volume, pass.gi.screen, pass.gi.area-shadow or pass.gi.ssgi with
+/// `ParamBinding::Tunable { feature: FeatureId::Gi, key }`. The store lifecycle is the one stated
+/// at the Handoff doc comment of `GiTunables` (this file) and is not restated here.
 pub fn tunables() -> &'static [TunableSpec] {
     GI_TUNABLES
 }
