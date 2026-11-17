@@ -4,7 +4,7 @@ use raa_graph::catalog::{GraphFormat, PortType, SizeSpec};
 use raa_graph::error::{Issue, Severity, Stage};
 use raa_graph::format::{
     ComputeDecl, ComputePortDecl, GraphDoc, LinkDoc, NodeDoc, PortRef, graph_from_json_value,
-    parse_graph,
+    graph_to_json_value, parse_graph, write_graph,
 };
 use raa_loader::json::JsonValue;
 
@@ -204,4 +204,193 @@ fn graph_from_json_value_matches_parse_graph() {
             editor: None,
         })
     );
+}
+
+const CANONICAL: &str = r#"{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Canonical",
+  "nodes": [
+    {
+      "id": "a",
+      "type": "pass.forward",
+      "v": 2,
+      "params": {
+        "msaa": 4,
+        "label": "main",
+        "enabled": true,
+        "radius": 0.25
+      }
+    },
+    {
+      "id": "blur",
+      "type": "compute.wgsl",
+      "params": {
+        "gain": 0.5,
+        "count": 3
+      },
+      "inputs": [
+        {
+          "key": "src",
+          "type": "image2d",
+          "format": "rgba16float"
+        }
+      ],
+      "outputs": [
+        {
+          "key": "dst",
+          "type": "image2d",
+          "format": "rgba16float",
+          "size": {
+            "width": 640,
+            "height": 360
+          }
+        }
+      ],
+      "math": {
+        "nodes": [],
+        "note": "stored as given"
+      },
+      "wgsl": "fn rg_main() {}"
+    }
+  ],
+  "links": [
+    {
+      "from": "a.color",
+      "to": "blur.src",
+      "history": true
+    },
+    {
+      "from": "blur.dst",
+      "to": "a.color"
+    }
+  ],
+  "editor": {
+    "positions": {
+      "a": [
+        1,
+        2
+      ]
+    },
+    "comments": []
+  }
+}
+"#;
+
+#[test]
+fn canonical_document_round_trips_byte_identical() {
+    let doc = parse_graph(CANONICAL).expect("canonical document");
+    assert_eq!(write_graph(&doc), CANONICAL);
+    let JsonValue::Object(fields) = graph_to_json_value(&doc) else {
+        panic!("graph_to_json_value must return an object");
+    };
+    let keys: Vec<&str> = fields.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["format", "version", "name", "nodes", "links", "editor"]
+    );
+}
+
+const NON_CANONICAL: &str = r#"
+{
+    "links":   [
+        { "to": "blur.src", "history": false, "from": "a.color" },
+        { "to": "a.color",   "from": "blur.dst" }
+    ],
+    "name": "Loose",
+    "nodes": [
+        { "type": "compute.wgsl", "wgsl": "fn rg_main() {}", "math": {},
+          "outputs": [], "inputs": [], "params": { "gain": 2 }, "id": "blur" },
+        { "type": "pass.forward", "id": "a" }
+    ],
+    "version": 1,
+    "format": "raa.render-graph"
+}
+"#;
+
+#[test]
+fn non_canonical_text_is_canonicalised_idempotently() {
+    let once = write_graph(&parse_graph(NON_CANONICAL).expect("non-canonical document"));
+    assert_ne!(once, NON_CANONICAL);
+    assert!(
+        once.starts_with(
+            "{\n  \"format\": \"raa.render-graph\",\n  \"version\": 1,\n  \"name\": \"Loose\",\n  \"nodes\": [\n"
+        ),
+        "canonical text: {once}"
+    );
+    assert!(!once.contains("\"history\""), "canonical text: {once}");
+    assert!(once.ends_with("}\n"), "canonical text: {once}");
+    assert_eq!(
+        write_graph(&parse_graph(&once).expect("canonical text parses")),
+        once
+    );
+}
+
+const SIMPLE_FORWARD: &str = r#"{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Simple forward",
+  "nodes": [
+    {
+      "id": "shadowCsm",
+      "type": "pass.shadow.csm"
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "forward",
+      "type": "pass.forward"
+    },
+    {
+      "id": "skyBackground",
+      "type": "pass.sky.background"
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap",
+      "params": {
+        "mapper": "agx",
+        "exposureEv": 0
+      }
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
+  ],
+  "links": [
+    {
+      "from": "prepass.depth",
+      "to": "lightTiles.depth"
+    },
+    {
+      "from": "shadowCsm.shadowMap",
+      "to": "forward.shadowMap"
+    },
+    {
+      "from": "lightTiles.lightTiles",
+      "to": "forward.lightTiles"
+    },
+    {
+      "from": "forward.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "out.color"
+    }
+  ]
+}
+"#;
+
+#[test]
+fn s50_simple_forward_example_round_trips() {
+    let doc = parse_graph(SIMPLE_FORWARD).expect("simple forward document");
+    assert_eq!(write_graph(&doc), SIMPLE_FORWARD);
 }

@@ -587,3 +587,164 @@ fn parse_port_ref(value: Option<&JsonValue>, at: &str, issues: &mut Vec<Issue>) 
         }
     }
 }
+
+/// The JSON name of a [`GraphFormat`] (S51): the WebGPU format name, `surface` for the canvas.
+fn graph_format_name(format: &GraphFormat) -> &'static str {
+    match format {
+        GraphFormat::R8Unorm => "r8unorm",
+        GraphFormat::Rg8Unorm => "rg8unorm",
+        GraphFormat::Rgba8Unorm => "rgba8unorm",
+        GraphFormat::Rgba8UnormSrgb => "rgba8unorm-srgb",
+        GraphFormat::Bgra8Unorm => "bgra8unorm",
+        GraphFormat::R16Float => "r16float",
+        GraphFormat::Rg16Float => "rg16float",
+        GraphFormat::Rgba16Float => "rgba16float",
+        GraphFormat::R32Float => "r32float",
+        GraphFormat::Rg32Float => "rg32float",
+        GraphFormat::Rgba32Float => "rgba32float",
+        GraphFormat::R32Uint => "r32uint",
+        GraphFormat::Rg32Uint => "rg32uint",
+        GraphFormat::Rgba32Uint => "rgba32uint",
+        GraphFormat::Rgb10a2Unorm => "rgb10a2unorm",
+        GraphFormat::Rg11b10Ufloat => "rg11b10ufloat",
+        GraphFormat::Depth32Float => "depth32float",
+        GraphFormat::Surface => "surface",
+    }
+}
+
+/// The JSON name of a [`PortType`] (S51).
+fn port_type_name(ty: &PortType) -> &'static str {
+    match ty {
+        PortType::Image2d => "image2d",
+        PortType::Image2dArray => "image2dArray",
+        PortType::Image3d => "image3d",
+        PortType::ImageCube => "imageCube",
+        PortType::Depth2d => "depth2d",
+        PortType::Depth2dArray => "depth2dArray",
+        PortType::Buffer => "buffer",
+    }
+}
+
+fn size_value(size: &SizeSpec) -> JsonValue {
+    match size {
+        SizeSpec::Scale(scale) => JsonValue::Object(vec![(
+            "scale".to_string(),
+            JsonValue::Number(f64::from(*scale)),
+        )]),
+        SizeSpec::Fixed { width, height } => JsonValue::Object(vec![
+            ("width".to_string(), JsonValue::Number(f64::from(*width))),
+            ("height".to_string(), JsonValue::Number(f64::from(*height))),
+        ]),
+        SizeSpec::FromParam(key) => JsonValue::Object(vec![(
+            "param".to_string(),
+            JsonValue::String((*key).to_string()),
+        )]),
+        SizeSpec::Input(key) => JsonValue::Object(vec![(
+            "input".to_string(),
+            JsonValue::String((*key).to_string()),
+        )]),
+    }
+}
+
+/// `key`, `type`, `format` (when present), `size` (when present).
+fn port_value(port: &ComputePortDecl) -> JsonValue {
+    let mut fields = vec![
+        ("key".to_string(), JsonValue::String(port.key.clone())),
+        (
+            "type".to_string(),
+            JsonValue::String(port_type_name(&port.ty).to_string()),
+        ),
+    ];
+    if let Some(format) = &port.format {
+        fields.push((
+            "format".to_string(),
+            JsonValue::String(graph_format_name(format).to_string()),
+        ));
+    }
+    if let Some(size) = &port.size {
+        fields.push(("size".to_string(), size_value(size)));
+    }
+    JsonValue::Object(fields)
+}
+
+/// `id`, `type`, `v` (when present), `params` (when non-empty), then the compute keys.
+fn node_value(node: &NodeDoc) -> JsonValue {
+    let mut fields = vec![
+        ("id".to_string(), JsonValue::String(node.id.clone())),
+        ("type".to_string(), JsonValue::String(node.type_id.clone())),
+    ];
+    if let Some(version) = node.version {
+        fields.push(("v".to_string(), JsonValue::Number(f64::from(version))));
+    }
+    if !node.params.is_empty() {
+        fields.push(("params".to_string(), JsonValue::Object(node.params.clone())));
+    }
+    if let Some(compute) = &node.compute {
+        fields.push((
+            "inputs".to_string(),
+            JsonValue::Array(compute.inputs.iter().map(port_value).collect()),
+        ));
+        fields.push((
+            "outputs".to_string(),
+            JsonValue::Array(compute.outputs.iter().map(port_value).collect()),
+        ));
+        fields.push(("math".to_string(), compute.math.clone()));
+        fields.push(("wgsl".to_string(), JsonValue::String(compute.wgsl.clone())));
+    }
+    JsonValue::Object(fields)
+}
+
+fn port_ref_text(port: &PortRef) -> String {
+    format!("{}.{}", port.node, port.port)
+}
+
+/// `from`, `to`, `history` (only when true).
+fn link_value(link: &LinkDoc) -> JsonValue {
+    let mut fields = vec![
+        (
+            "from".to_string(),
+            JsonValue::String(port_ref_text(&link.from)),
+        ),
+        ("to".to_string(), JsonValue::String(port_ref_text(&link.to))),
+    ];
+    if link.history {
+        fields.push(("history".to_string(), JsonValue::Bool(true)));
+    }
+    JsonValue::Object(fields)
+}
+
+/// The JSON value of `doc` with the S50 canonical key order.
+///
+/// The top level is `format`, `version`, `name`, `nodes`, `links`, then `editor` when
+/// present; node params keep the order [`GraphDoc`] holds them in, so
+/// `write_graph(doc: &GraphDoc) -> String` applied to the result of
+/// `canonical_doc(doc: &GraphDoc, catalog: &Catalog) -> GraphDoc`
+/// (`crates/raa-graph/src/validate.rs`) gives the S50 canonical text.
+pub fn graph_to_json_value(doc: &GraphDoc) -> JsonValue {
+    let mut fields = vec![
+        ("format".to_string(), JsonValue::String(FORMAT.to_string())),
+        ("version".to_string(), JsonValue::Number(f64::from(VERSION))),
+        ("name".to_string(), JsonValue::String(doc.name.clone())),
+        (
+            "nodes".to_string(),
+            JsonValue::Array(doc.nodes.iter().map(node_value).collect()),
+        ),
+        (
+            "links".to_string(),
+            JsonValue::Array(doc.links.iter().map(link_value).collect()),
+        ),
+    ];
+    if let Some(editor) = &doc.editor {
+        fields.push(("editor".to_string(), editor.clone()));
+    }
+    JsonValue::Object(fields)
+}
+
+/// The canonical document text (S50): `raa_loader::json::write_pretty` of
+/// [`graph_to_json_value`] plus a final LF.
+pub fn write_graph(doc: &GraphDoc) -> String {
+    let mut text = String::new();
+    raa_loader::json::write_pretty(&graph_to_json_value(doc), &mut text);
+    text.push('\n');
+    text
+}
