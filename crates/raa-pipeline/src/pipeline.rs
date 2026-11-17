@@ -11,7 +11,7 @@ use raa_core::{
 };
 
 use crate::pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
-use crate::{LightingResources, Targets};
+use crate::{LightingResources, ResourceTable, Targets};
 
 /// Name of the frame graph pass `Pipeline::install` adds.
 const PASS_NAME: &str = "raa.pipeline";
@@ -549,6 +549,7 @@ pub struct Pipeline {
     view_generations: Vec<u64>,
     submission: ViewSubmission,
     output: Option<crate::output::Output>,
+    resources: ResourceTable,
 }
 
 impl Pipeline {
@@ -574,7 +575,13 @@ impl Pipeline {
             view_generations: Vec::new(),
             submission: ViewSubmission::default(),
             output: None,
+            resources: ResourceTable::new(),
         }
+    }
+
+    /// The resource table of the latest frame.
+    pub fn resources(&self) -> &ResourceTable {
+        &self.resources
     }
 
     /// Clears the submission observation before one scene invocation's record. The engine
@@ -866,6 +873,7 @@ impl Pipeline {
             }
         };
         targets.hdr().reset();
+        self.resources.clear();
         self.lighting.upload(gpu);
 
         let generation = self.targets_generation;
@@ -877,6 +885,7 @@ impl Pipeline {
             dt_s: self.clock.dt_s,
             targets,
             lighting: &mut self.lighting,
+            resources: &self.resources,
         };
         for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
             if entry.sized_for != generation {
@@ -906,6 +915,7 @@ impl Pipeline {
             time_s: self.clock.time_s,
             targets,
             lighting: &self.lighting,
+            resources: &self.resources,
             backbuffer: if local {
                 targets.output().expect("view output created")
             } else {
@@ -1102,6 +1112,72 @@ mod tests {
         fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
             Ok(())
         }
+    }
+
+    /// Publishes ('mock', 'color') in its prepare.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct PublishMock;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl FeaturePass for PublishMock {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn order(&self) -> u32 {
+            60
+        }
+
+        fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+            let desc = crate::ImageDesc::new(
+                crate::ImageDim::D2,
+                wgpu::TextureFormat::Rgba16Float,
+                ctx.size.0,
+                ctx.size.1,
+                1,
+                1,
+            );
+            ctx.resources
+                .publish("mock", "color", ctx.targets.normal(), desc);
+            Ok(())
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn resources_are_cleared_at_frame_begin() {
+        with_software_gpu("resources_are_cleared_at_frame_begin", |gpu| {
+            let mut pipeline = Pipeline::new(gpu, SUBMISSION_FORMAT, false);
+            pipeline.add(Box::new(PublishMock)).expect("added");
+            let pipeline = Rc::new(RefCell::new(pipeline));
+            let desc = crate::ImageDesc::new(
+                crate::ImageDim::D2,
+                wgpu::TextureFormat::Rgba16Float,
+                32,
+                16,
+                1,
+                1,
+            );
+            let expected = vec![("mock".to_string(), "color".to_string(), desc)];
+            execute_scene(&pipeline, gpu).expect("first frame runs");
+            assert_eq!(pipeline.borrow().resources().entries(), expected);
+            {
+                let pipeline = pipeline.borrow();
+                let view = pipeline
+                    .resources()
+                    .get("mock", "color")
+                    .expect("published");
+                pipeline
+                    .resources()
+                    .publish("extra", "color", &view.view, desc);
+                assert_eq!(pipeline.resources().entries().len(), 2);
+            }
+            execute_scene(&pipeline, gpu).expect("second frame runs");
+            assert_eq!(pipeline.borrow().resources().entries(), expected);
+        });
     }
 
     fn order_names(config: &PipelineConfig) -> Vec<String> {

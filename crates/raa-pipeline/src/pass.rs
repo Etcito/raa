@@ -3,7 +3,7 @@
 
 use raa_core::{GpuContext, RaaError};
 
-use crate::{LightingResources, Targets};
+use crate::{LightingResources, ResourceTable, Targets};
 
 /// One feature pass of the lit pipeline (sky, shadows, prepass, forward, bloom, tonemap...).
 /// The pipeline runs the enabled passes in order inside its one `raa.pipeline` graph pass:
@@ -60,6 +60,9 @@ pub struct PrepareCtx<'a> {
     pub targets: &'a Targets,
     /// Group-1 lighting resources; changes made here are bound in the same frame.
     pub lighting: &'a mut LightingResources,
+    /// The frame's resource table, cleared at frame begin; passes publish their catalog
+    /// output ports into it.
+    pub resources: &'a ResourceTable,
 }
 
 /// What [`FeaturePass::record`] receives: the frame's shared encoder and the backbuffer.
@@ -78,6 +81,9 @@ pub struct RecordCtx<'a> {
     pub targets: &'a Targets,
     /// Group-1 lighting resources, uploaded for this frame.
     pub lighting: &'a LightingResources,
+    /// The frame's resource table, cleared at frame begin; passes publish their catalog
+    /// output ports into it.
+    pub resources: &'a ResourceTable,
     /// View of the frame's backbuffer (the canvas texture or an offscreen target).
     pub backbuffer: &'a wgpu::TextureView,
     /// Format of `backbuffer`.

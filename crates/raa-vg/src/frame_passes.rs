@@ -1022,6 +1022,7 @@ mod tests {
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         for pass in [&mut cull as &mut dyn FeaturePass, &mut raster, &mut resolve] {
+            let resources = raa_pipeline::ResourceTable::new();
             let mut ctx = RecordCtx {
                 gpu: &gpu,
                 encoder: &mut encoder,
@@ -1030,6 +1031,7 @@ mod tests {
                 time_s: 0.0,
                 targets: &targets,
                 lighting: &lighting,
+                resources: &resources,
                 backbuffer: targets.material(),
                 backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
                 surface_is_srgb: false,
@@ -1079,6 +1081,7 @@ mod tests {
             .device()
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         for pass in [&mut cull as &mut dyn FeaturePass, &mut raster, &mut resolve] {
+            let resources = raa_pipeline::ResourceTable::new();
             let mut prepare = PrepareCtx {
                 gpu: &gpu,
                 size: (64, 64),
@@ -1087,6 +1090,7 @@ mod tests {
                 dt_s: 0.0,
                 targets: &targets,
                 lighting: &mut lighting,
+                resources: &resources,
             };
             pass.prepare(&mut prepare).expect("prepare");
             let mut record = RecordCtx {
@@ -1097,6 +1101,7 @@ mod tests {
                 time_s: 0.0,
                 targets: &targets,
                 lighting: &lighting,
+                resources: &resources,
                 backbuffer: targets.material(),
                 backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
                 surface_is_srgb: false,

@@ -450,6 +450,7 @@ mod tests {
         let handle = lit.handle();
         let targets = Targets::new(&gpu, (8, 8));
         let mut lighting = LightingResources::new(&gpu);
+        let resources = raa_pipeline::ResourceTable::new();
         let mut ctx = PrepareCtx {
             gpu: &gpu,
             size: (8, 8),
@@ -458,6 +459,7 @@ mod tests {
             dt_s: 0.0,
             targets: &targets,
             lighting: &mut lighting,
+            resources: &resources,
         };
         sim.prepare(&mut ctx).unwrap_or_else(|e| panic!("{e}"));
         c.prepare(&handle, &mut ctx)

@@ -498,6 +498,7 @@ mod tests {
         lighting: &mut LightingResources,
     ) -> bool {
         targets.hdr().reset();
+        let resources = raa_pipeline::ResourceTable::new();
         let mut prepare = PrepareCtx {
             gpu,
             size: (8, 8),
@@ -506,6 +507,7 @@ mod tests {
             dt_s: 0.0,
             targets,
             lighting,
+            resources: &resources,
         };
         sim.prepare(&mut prepare).unwrap_or_else(|e| panic!("{e}"));
         blend
@@ -538,6 +540,7 @@ mod tests {
             time_s: 1.0,
             targets,
             lighting,
+            resources: &resources,
             backbuffer: &view,
             backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
             surface_is_srgb: false,

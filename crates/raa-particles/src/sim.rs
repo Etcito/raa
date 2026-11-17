@@ -515,6 +515,7 @@ mod tests {
     /// Runs one prepare + record of `pass` at `time_s` into a fresh encoder and submits it.
     fn frame(gpu: &GpuContext, pass: &mut SimPass, lighting: &mut LightingResources, time_s: f32) {
         let targets = Targets::new(gpu, (8, 8));
+        let resources = raa_pipeline::ResourceTable::new();
         let mut prepare = PrepareCtx {
             gpu,
             size: (8, 8),
@@ -523,6 +524,7 @@ mod tests {
             dt_s: 0.0,
             targets: &targets,
             lighting,
+            resources: &resources,
         };
         pass.prepare(&mut prepare).unwrap_or_else(|e| panic!("{e}"));
         let backbuffer = gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -551,6 +553,7 @@ mod tests {
             time_s,
             targets: &targets,
             lighting,
+            resources: &resources,
             backbuffer: &view,
             backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
             surface_is_srgb: false,
