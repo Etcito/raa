@@ -7,14 +7,18 @@ use raa_core::RaaError;
 use raa_pipeline::{PassInfo, PassRole, Pipeline};
 
 use super::{
-    AppliedDescs, ExecExtension, FeatureHandles, SetResult, SettingsSnapshot, merge_values,
-    pipeline_instructions, read_values, snapshot_keys, write_values,
+    AppliedDescs, ExecExtension, FeatureHandles, NodeStats, SetResult, SettingsSnapshot,
+    export_snapshot, merge_values, pipeline_instructions, read_values, snapshot_keys, write_values,
 };
 use crate::catalog::{Catalog, FeatureId, ParamBinding, ParamSpec, ParamValue, Rebuild};
 use crate::error::{Issue, Severity, Stage};
 use crate::format::GraphDoc;
 use crate::plan::{GraphPlan, plan_from_doc};
 use crate::validate::{ValidateCtx, canonical_doc};
+
+/// The pipeline entry that the contributors follow, and the entry that `output.display` follows.
+const HOST_ENTRY: &str = "forward";
+const LAST_CHAIN_ENTRY: &str = "tonemap";
 
 /// The features in S53 rank order. The pipeline (rank 0) is applied apart from them.
 const RANK: [FeatureId; 18] = [
@@ -47,14 +51,15 @@ pub struct GraphExecutor {
     plan: Option<GraphPlan>,
     /// The configuration before the first graph: taken on first activation, dropped by `clear_graph`.
     no_graph: Option<SettingsSnapshot>,
-    // The per-frame hook of 'raa-graph exec 5/5: frame ownership, stats and export' reads these
-    // three fields; until it lands they are written and never read.
-    #[allow(dead_code)]
+    /// The configuration the graph applied: captured after each activation and each restore of an
+    /// external change. `frame` compares the live state with it.
     applied: Option<SettingsSnapshot>,
-    #[allow(dead_code)]
+    /// The descriptors the graph applied, compared by `frame` through `AppliedDescs::changed`.
     applied_descs: AppliedDescs,
-    #[allow(dead_code)]
-    frame: u64,
+    /// The features `frame` found changed; kept between frames so a steady frame allocates nothing.
+    scratch: Vec<FeatureId>,
+    /// The index of the latest frame of the active graph; `None` before one.
+    frame: Option<u64>,
     last_issues: Vec<Issue>,
 }
 
@@ -76,7 +81,8 @@ impl GraphExecutor {
             no_graph: None,
             applied: None,
             applied_descs: AppliedDescs::default(),
-            frame: 0,
+            scratch: Vec::new(),
+            frame: None,
             last_issues: Vec::new(),
         }
     }
@@ -138,7 +144,7 @@ impl GraphExecutor {
         self.plan = None;
         self.applied = None;
         self.applied_descs = AppliedDescs::default();
-        self.frame = 0;
+        self.frame = None;
         self.last_issues.clear();
         Ok(())
     }
@@ -156,6 +162,139 @@ impl GraphExecutor {
     /// The issues of the latest `set_graph` or `set_plan`; `clear_graph` empties them.
     pub fn last_issues(&self) -> &[Issue] {
         &self.last_issues
+    }
+
+    /// The index of the latest frame of the active graph; `None` before its first frame.
+    pub fn frame_index(&self) -> Option<u64> {
+        self.frame
+    }
+
+    /// The per-frame hook (S53, S54). With no graph it returns at once. With a graph it finds the
+    /// external setter calls since the last frame and restores the graph's values (`restore_external`),
+    /// then runs each extension's `frame`, and counts the frame. Every extension runs; the first
+    /// refusal is returned.
+    pub fn frame(&mut self, h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
+        if self.plan.is_none() {
+            return Ok(());
+        }
+        let restored = self.restore_external(h);
+        let mut ran: Result<(), RaaError> = Ok(());
+        for extension in &mut self.extensions {
+            ran = ran.and(extension.frame(h));
+        }
+        self.frame = Some(self.frame.map_or(0, |index| index + 1));
+        restored.and(ran)
+    }
+
+    /// One statistics entry per plan node, in plan order, then each extension's entries. `ran` is
+    /// whether the node's pipeline entry is enabled in the applied configuration: `output.display`
+    /// follows `tonemap`, a contributor follows `forward`. `resources` is empty until the resource
+    /// table lands (M3). Empty without a graph.
+    pub fn stats(&self) -> Vec<NodeStats> {
+        let Some(plan) = self.plan.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<NodeStats> = plan
+            .nodes
+            .iter()
+            .map(|node| NodeStats {
+                node: node.id.clone(),
+                type_id: node.type_id.clone(),
+                ran: self.node_ran(&node.type_id),
+                resources: Vec::new(),
+            })
+            .collect();
+        for extension in &self.extensions {
+            extension.stats(&mut out);
+        }
+        out
+    }
+
+    /// The no-graph export of the configuration the handles hold: `export_snapshot` of the snapshot
+    /// read from `h`, with `h.msaa` (S54).
+    pub fn export_current(catalog: &Catalog, h: &FeatureHandles<'_>) -> GraphDoc {
+        export_snapshot(catalog, &snapshot(h), h.msaa)
+    }
+
+    /// The setters the graph owns while it is active, in S54 order.
+    pub fn owned_setters() -> &'static [&'static str] {
+        &[
+            "setPassEnabled",
+            "setPassOrder",
+            "setToneMapping",
+            "setShadows",
+            "setAo",
+            "setContactShadows",
+            "setBloom",
+            "setTransparency",
+            "setSsr",
+            "setDof",
+            "setFog",
+            "setSunShafts",
+            "setGrading",
+            "applyEnvironment",
+            "setCel",
+            "setVirtualGeometry",
+            "setAreaLightShading",
+            "setAreaLightShadows",
+            "setGlobalIllumination",
+            "setGiQuality",
+        ]
+    }
+
+    /// Whether the pipeline entry of a node of the plan ran in the applied configuration.
+    fn node_ran(&self, type_id: &str) -> bool {
+        let Some(spec) = self.catalog.node(type_id) else {
+            return false;
+        };
+        let entry = match type_id {
+            "output.display" => LAST_CHAIN_ENTRY,
+            _ if spec.contributor => HOST_ENTRY,
+            _ => match spec.pass {
+                Some(entry) => entry,
+                None => return false,
+            },
+        };
+        self.applied
+            .as_ref()
+            .is_some_and(|applied| applied.passes.iter().any(|(name, on)| name == entry && *on))
+    }
+
+    /// Finds the external setter calls since the last frame and undoes them for the graph (S54): each
+    /// difference is recorded in the no-graph snapshot, the graph's values are applied again, and the
+    /// applied state is captured anew. Nothing is allocated unless a difference is found; the order
+    /// read through `Pipeline::passes` is the one allocation of the check.
+    fn restore_external(&mut self, h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
+        let (Some(plan), Some(applied), Some(no_graph)) = (
+            self.plan.as_ref(),
+            self.applied.as_ref(),
+            self.no_graph.as_mut(),
+        ) else {
+            return Ok(());
+        };
+        let pipeline_moved = pipeline_moved(applied, h);
+        self.scratch.clear();
+        self.applied_descs.changed(h, &mut self.scratch);
+        if !pipeline_moved && self.scratch.is_empty() {
+            return Ok(());
+        }
+        if pipeline_moved {
+            let observed = h.pipeline.borrow().passes();
+            adopt_pipeline(no_graph, applied, &observed);
+            reapply_pipeline(&self.catalog, plan, h)?;
+        }
+        for feature in &self.scratch {
+            let applied_values = values_for(applied, feature);
+            if let Some(observed) = read_values(h, feature) {
+                adopt_values(no_graph, feature, applied_values, &observed);
+            }
+            if let Some(target) = applied_values {
+                write_values(h, feature, target)?;
+            }
+        }
+        self.applied = Some(snapshot(h));
+        self.applied_descs = AppliedDescs::capture(h);
+        Ok(())
     }
 
     fn activate(
@@ -193,7 +332,7 @@ impl GraphExecutor {
                 self.no_graph = Some(no_graph);
                 self.applied = Some(snapshot(h));
                 self.applied_descs = AppliedDescs::capture(h);
-                self.frame = 0;
+                self.frame = None;
                 SetResult {
                     ok: true,
                     issues: Vec::new(),
@@ -435,6 +574,103 @@ fn restore_pipeline(snapshot: &SettingsSnapshot, h: &FeatureHandles<'_>) -> Resu
 fn set_order(pipeline: &mut Pipeline, order: &[String]) -> Result<(), RaaError> {
     let names: Vec<&str> = order.iter().map(String::as_str).collect();
     pipeline.set_order(&names)
+}
+
+/// Whether the live pipeline differs from `applied`: an applied entry's enabled flag, read through
+/// `Pipeline::entry_enabled` without allocation, or the order of the pass-role entries, read through
+/// `Pipeline::passes`.
+fn pipeline_moved(applied: &SettingsSnapshot, h: &FeatureHandles<'_>) -> bool {
+    let pipeline = h.pipeline.borrow();
+    if applied
+        .passes
+        .iter()
+        .any(|(name, on)| pipeline.entry_enabled(name) != Some(*on))
+    {
+        return true;
+    }
+    let installed = pipeline.passes();
+    !installed
+        .iter()
+        .filter(|info| info.role == PassRole::Pass)
+        .map(|info| info.name.as_str())
+        .eq(applied.order.iter().map(String::as_str))
+}
+
+/// Applies the pipeline instructions of `plan` again: each entry's enabled flag, then the order.
+fn reapply_pipeline(
+    catalog: &Catalog,
+    plan: &GraphPlan,
+    h: &FeatureHandles<'_>,
+) -> Result<(), RaaError> {
+    let installed = h.pipeline.borrow().passes();
+    let instructions = pipeline_instructions(plan, catalog, &installed);
+    let mut pipeline = h.pipeline.borrow_mut();
+    for (name, enabled) in &instructions.enable {
+        pipeline.set_enabled(name, *enabled)?;
+    }
+    set_order(&mut pipeline, &instructions.order)
+}
+
+/// Records the observed pipeline in the no-graph snapshot: each entry whose enabled flag differs from
+/// the applied one takes the observed flag, and an order that differs from the applied one is taken
+/// whole.
+fn adopt_pipeline(
+    no_graph: &mut SettingsSnapshot,
+    applied: &SettingsSnapshot,
+    observed: &[PassInfo],
+) {
+    for info in observed {
+        let applied_on = applied
+            .passes
+            .iter()
+            .find(|(name, _)| *name == info.name)
+            .map(|(_, on)| *on);
+        if applied_on != Some(info.enabled) {
+            set_entry(&mut no_graph.passes, &info.name, info.enabled);
+        }
+    }
+    let order: Vec<String> = observed
+        .iter()
+        .filter(|info| info.role == PassRole::Pass)
+        .map(|info| info.name.clone())
+        .collect();
+    if order != applied.order {
+        no_graph.order = order;
+    }
+}
+
+/// Records the observed values of `feature` that differ from the applied ones in the no-graph
+/// snapshot. A feature the no-graph snapshot lacks takes all of its observed values.
+fn adopt_values(
+    no_graph: &mut SettingsSnapshot,
+    feature: &FeatureId,
+    applied: Option<&[(String, ParamValue)]>,
+    observed: &[(String, ParamValue)],
+) {
+    let Some(index) = no_graph
+        .values
+        .iter()
+        .position(|(candidate, _)| candidate == feature)
+    else {
+        no_graph.values.push((feature.clone(), observed.to_vec()));
+        return;
+    };
+    for (key, value) in observed {
+        let applied_value = applied
+            .and_then(|values| values.iter().find(|(name, _)| name == key))
+            .map(|(_, value)| value);
+        if applied_value != Some(value) {
+            set_entry(&mut no_graph.values[index].1, key, value.clone());
+        }
+    }
+}
+
+/// Sets `key` to `value` in `entries`, appending the entry when the list does not hold it.
+fn set_entry<T>(entries: &mut Vec<(String, T)>, key: &str, value: T) {
+    match entries.iter_mut().find(|(name, _)| name == key) {
+        Some(entry) => entry.1 = value,
+        None => entries.push((key.to_owned(), value)),
+    }
 }
 
 /// The changed values of `feature` whose catalog setting needs a rebuild.

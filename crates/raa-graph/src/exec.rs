@@ -3,10 +3,12 @@
 //! `GraphExecutor` lives in `exec/executor.rs`.
 
 mod executor;
+mod export;
 mod settings;
 mod settings_post;
 
 pub use executor::{GraphExecutor, external_changes, settings_targets};
+pub use export::export_snapshot;
 pub use settings::{
     AppliedDescs, default_values, merge_values, read_values, setting_keys, snapshot_keys,
     write_values,

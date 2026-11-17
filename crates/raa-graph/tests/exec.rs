@@ -5,9 +5,10 @@
 use raa_graph::catalog::{Catalog, FeatureId, ParamValue};
 use raa_graph::error::Stage;
 use raa_graph::exec::{
-    PipelineInstructions, SettingsSnapshot, default_values, external_changes,
-    pipeline_instructions, settings_targets,
+    GraphExecutor, PipelineInstructions, SettingsSnapshot, default_values, export_snapshot,
+    external_changes, pipeline_instructions, settings_targets,
 };
+use raa_graph::format::{parse_graph, write_graph};
 use raa_graph::plan::{GraphPlan, PlanNode, PlanPortRef, plan_from_json};
 use raa_pipeline::{PassInfo, PassRole};
 
@@ -279,4 +280,194 @@ fn external_changes_names_the_pipeline_and_the_changed_feature() {
         external_changes(&applied, &observed),
         vec![FeatureId::Pipeline, FeatureId::Gtao]
     );
+}
+
+/// Sets the value of `key` in one feature's values, which `default_values` gives for every key.
+fn set_value(values: &mut [(String, ParamValue)], key: &str, value: ParamValue) {
+    let (_, slot) = values
+        .iter_mut()
+        .find(|(name, _)| name == key)
+        .expect("a snapshot key");
+    *slot = value;
+}
+
+/// The Setting values of the export tests: the defaults of every feature with keys, with the AO
+/// radius at 1.5. `full` removes Fog's values and turns Gi's presence keys on (Gi's volume and SSGI
+/// passes are enabled).
+fn round_trip_values(full: bool) -> Vec<(FeatureId, Vec<(String, ParamValue)>)> {
+    let features = [
+        FeatureId::Tonemap,
+        FeatureId::Shadow,
+        FeatureId::Vg,
+        FeatureId::GiQuality,
+        FeatureId::Gi,
+        FeatureId::AreaShadows,
+        FeatureId::AreaShading,
+        FeatureId::Gtao,
+        FeatureId::Contact,
+        FeatureId::Ssr,
+        FeatureId::Fog,
+        FeatureId::Shafts,
+        FeatureId::Oit,
+        FeatureId::Dof,
+        FeatureId::Bloom,
+        FeatureId::Grading,
+        FeatureId::Cel,
+    ];
+    let mut values = Vec::new();
+    for feature in features {
+        if full && feature == FeatureId::Fog {
+            continue;
+        }
+        let mut entry = default_values(&feature);
+        match feature {
+            FeatureId::Gtao => set_value(&mut entry, "radius", ParamValue::Number(1.5)),
+            FeatureId::Gi if full => {
+                set_value(&mut entry, "enabled", ParamValue::Bool(true));
+                set_value(&mut entry, "screenSpace", ParamValue::Bool(true));
+            }
+            _ => {}
+        }
+        values.push((feature, entry));
+    }
+    values
+}
+
+/// An all-enabled snapshot in default order. `full` adds the side-effect entries `sky.atmosphere`,
+/// `sky.cloud-screen`, `gi.volume` and `gi.ssgi`, and `fog`; `sky.background` is a contributor.
+fn round_trip_snapshot(full: bool) -> SettingsSnapshot {
+    let order: Vec<&str> = if full {
+        vec![
+            "sky.atmosphere",
+            "shadow.csm",
+            "gi.volume",
+            "prepass",
+            "light.tiles",
+            "gi.ssgi",
+            "sky.cloud-screen",
+            "forward",
+            "ssr",
+            "fog",
+            "tonemap",
+        ]
+    } else {
+        vec![
+            "shadow.csm",
+            "prepass",
+            "light.tiles",
+            "forward",
+            "ssr",
+            "tonemap",
+        ]
+    };
+    let mut passes: Vec<(String, bool)> =
+        order.iter().map(|name| (name.to_string(), true)).collect();
+    passes.push(("sky.background".to_owned(), true));
+    SettingsSnapshot {
+        passes,
+        order: order.iter().map(|name| name.to_string()).collect(),
+        values: round_trip_values(full),
+    }
+}
+
+#[test]
+fn the_export_writes_parses_and_plans() {
+    let doc = export_snapshot(&Catalog::build(), &round_trip_snapshot(false), 4);
+    let text = write_graph(&doc);
+    parse_graph(&text).expect("the export parses");
+    plan_from_json(&text).expect("the export plans");
+}
+
+#[test]
+fn settings_targets_of_the_exported_plan_is_the_snapshot() {
+    let catalog = Catalog::build();
+    let snapshot = round_trip_snapshot(false);
+    let doc = export_snapshot(&catalog, &snapshot, 4);
+    let plan = plan_from_json(&write_graph(&doc)).expect("the export plans");
+    let targets = settings_targets(&plan, &catalog, &snapshot).expect("the targets resolve");
+    assert_eq!(targets, snapshot);
+}
+
+#[test]
+fn side_effect_passes_round_trip_and_an_absent_feature_keeps_its_catalog_defaults() {
+    let catalog = Catalog::build();
+    let snapshot = round_trip_snapshot(true);
+    let doc = export_snapshot(&catalog, &snapshot, 4);
+    let fog = doc
+        .nodes
+        .iter()
+        .find(|node| node.id == "fog")
+        .expect("fog is enabled");
+    for param in &catalog.node("pass.fog").expect("pass.fog").params {
+        let written = fog
+            .params
+            .iter()
+            .find(|(key, _)| key == param.key)
+            .map(|(_, value)| value);
+        assert_eq!(written, Some(&param.default.to_json()), "{}", param.key);
+    }
+
+    let plan = plan_from_json(&write_graph(&doc)).expect("the export plans");
+    for id in ["skyAtmosphere", "skyCloudScreen", "giSsgi"] {
+        assert!(
+            plan.nodes.iter().any(|node| node.id == id),
+            "{id} is planned"
+        );
+    }
+    for type_id in [
+        "pass.sky.atmosphere",
+        "pass.sky.cloud-screen",
+        "pass.gi.ssgi",
+    ] {
+        assert!(
+            catalog.node(type_id).is_some_and(|spec| spec.side_effect),
+            "{type_id} is a side-effect pass"
+        );
+    }
+    let targets = settings_targets(&plan, &catalog, &snapshot).expect("the targets resolve");
+    assert_eq!(targets, snapshot);
+}
+
+#[test]
+fn node_ids_are_lower_camel_case_and_the_colour_chain_runs_forward_to_out() {
+    let doc = export_snapshot(&Catalog::build(), &round_trip_snapshot(false), 4);
+    let ids: Vec<&str> = doc.nodes.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "shadowCsm",
+            "prepass",
+            "lightTiles",
+            "forward",
+            "skyBackground",
+            "ssr",
+            "tonemap",
+            "out",
+        ]
+    );
+    let links: Vec<String> = doc
+        .links
+        .iter()
+        .map(|link| {
+            format!(
+                "{}.{} -> {}.{}",
+                link.from.node, link.from.port, link.to.node, link.to.port
+            )
+        })
+        .collect();
+    assert_eq!(
+        links,
+        [
+            "forward.color -> ssr.color",
+            "ssr.color -> tonemap.color",
+            "tonemap.color -> out.color",
+        ]
+    );
+}
+
+#[test]
+fn owned_setters_has_the_twenty_s54_setters_starting_with_set_pass_enabled() {
+    let setters = GraphExecutor::owned_setters();
+    assert_eq!(setters.len(), 20);
+    assert_eq!(setters.first().copied(), Some("setPassEnabled"));
 }
