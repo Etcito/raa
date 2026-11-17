@@ -27,6 +27,13 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+override RAA_TAA_FILTER_SHARPNESS: f32 = 2.3;
+override RAA_TAA_CLIP_TOLERANCE: f32 = 1.25;
+override RAA_TAA_BLEND_BASE: f32 = 0.06;
+override RAA_TAA_BLEND_MOTION_GAIN: f32 = 0.012;
+override RAA_TAA_BLEND_MIN: f32 = 0.04;
+override RAA_TAA_BLEND_MAX: f32 = 0.3;
+
 @group(0) @binding(0) var<uniform> raa_taa_frame: RaaTemporalFrame;
 @group(0) @binding(1) var<uniform> raa_taa_params: RaaTaaParams;
 @group(0) @binding(2) var raa_taa_scene: texture_2d<f32>;
@@ -143,7 +150,7 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
             // it here, which moves the filter away from the true sample and softens edges).
             let sample_position = vec2<f32>(p) + vec2<f32>(0.5) - jitter_pixels;
             let delta = sample_position - scene_position;
-            let weight = exp(-2.3 * dot(delta, delta));
+            let weight = exp(-RAA_TAA_FILTER_SHARPNESS * dot(delta, delta));
             filtered += color * weight;
             filter_total += weight;
 
@@ -184,7 +191,7 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
 
         // Clip history against the current neighbourhood's colour distribution: anything far
         // outside it is a disocclusion or lighting change, not a useful earlier sample.
-        let tolerance = 1.25;
+        let tolerance = RAA_TAA_CLIP_TOLERANCE;
         let low = mean - deviation * tolerance;
         let high = mean + deviation * tolerance;
         let y = to_ycocg(previous);
@@ -197,7 +204,7 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
         // More weight on the current frame when the scene is moving, since resampled
         // history gets softer with distance. The render ratio is 1 (no upscaling).
         let moved = length((previous_uv - uv) * raa_taa_frame.viewport.xy);
-        let blend = clamp(0.06 + moved * 0.012, 0.04, 0.3);
+        let blend = clamp(RAA_TAA_BLEND_BASE + moved * RAA_TAA_BLEND_MOTION_GAIN, RAA_TAA_BLEND_MIN, RAA_TAA_BLEND_MAX);
         result = mix(from_ycocg(clipped), current, blend);
     }
     let color = decompress(max(result, vec3<f32>(0.0)));

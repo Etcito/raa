@@ -17,6 +17,7 @@ use crate::history::HistoryPair;
 use crate::shaders::{
     TAA_ENTRY, TAA_PARAMS_SIZE, TAA_WORKGROUP, TEMPORAL_FRAME_SIZE, taa_module_source,
 };
+use crate::tunables::taa_constants;
 
 fn entry(
     binding: u32,
@@ -101,13 +102,39 @@ pub(crate) fn taa_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
 pub(crate) struct TaaPipelines {
     pub(crate) layout: wgpu::BindGroupLayout,
     pub(crate) pipeline: wgpu::ComputePipeline,
+    module: wgpu::ShaderModule,
+    pipeline_layout: wgpu::PipelineLayout,
     pub(crate) sampler: wgpu::Sampler,
     /// `RaaTaaParams` (TAA_PARAMS_SIZE bytes), written each frame by the pass.
     pub(crate) params: wgpu::Buffer,
 }
 
+fn build_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    values: &[f64; 6],
+) -> wgpu::ComputePipeline {
+    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("raa-taa"),
+        layout: Some(layout),
+        module,
+        entry_point: Some(TAA_ENTRY),
+        compilation_options: wgpu::PipelineCompilationOptions {
+            constants: &taa_constants(values),
+            ..Default::default()
+        },
+        cache: None,
+    })
+}
+
 impl TaaPipelines {
-    pub(crate) fn new(gpu: &GpuContext) -> TaaPipelines {
+    /// Rebuilds `pipeline` alone with the override constants of `values`.
+    pub(crate) fn rebuild(&mut self, gpu: &GpuContext, values: &[f64; 6]) {
+        self.pipeline = build_pipeline(gpu.device(), &self.pipeline_layout, &self.module, values);
+    }
+
+    pub(crate) fn new(gpu: &GpuContext, values: &[f64; 6]) -> TaaPipelines {
         let device = gpu.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-taa"),
@@ -119,17 +146,12 @@ impl TaaPipelines {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raa-taa"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some(TAA_ENTRY),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        let pipeline = build_pipeline(device, &pipeline_layout, &module, values);
         TaaPipelines {
             layout,
             pipeline,
+            module,
+            pipeline_layout,
             sampler: device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("raa-taa.sampler"),
                 mag_filter: wgpu::FilterMode::Linear,

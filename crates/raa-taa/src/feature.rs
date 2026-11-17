@@ -12,7 +12,7 @@ use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx,
-    RecordCtx, Targets,
+    RecordCtx, Targets, validate_tunable,
 };
 
 use crate::TAA_ORDER;
@@ -49,6 +49,9 @@ fn pack_params(history_usable: bool) -> [u8; PARAMS_LEN] {
 struct TaaPass {
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
+    tunables: Rc<Cell<[f64; 6]>>,
+    generation: Rc<Cell<u64>>,
+    built_generation: u64,
     pipelines: TaaPipelines,
     frame: wgpu::Buffer,
     history: Option<HistoryPair>,
@@ -107,6 +110,10 @@ impl FeaturePass for TaaPass {
 
     /// Applies a pending invalidate, then writes `RaaTaaParams` from the history validity.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        if self.generation.get() != self.built_generation {
+            self.built_generation = self.generation.get();
+            self.pipelines.rebuild(ctx.gpu, &self.tunables.get());
+        }
         if self.pending_invalidate.replace(false) {
             if let Some(history) = self.history.as_mut() {
                 history.state_mut().invalidate();
@@ -208,10 +215,15 @@ impl TaaFeature {
         }
         let accumulated = Rc::new(Cell::new(0));
         let pending_invalidate = Rc::new(Cell::new(false));
+        let tunables = Rc::new(Cell::new(crate::tunables::defaults()));
+        let generation = Rc::new(Cell::new(0));
         p.add(Box::new(TaaPass {
             accumulated: accumulated.clone(),
             pending_invalidate: pending_invalidate.clone(),
-            pipelines: TaaPipelines::new(gpu),
+            tunables: tunables.clone(),
+            generation: generation.clone(),
+            built_generation: 0,
+            pipelines: TaaPipelines::new(gpu, &tunables.get()),
             frame: frame.clone(),
             history: None,
             targets: None,
@@ -220,6 +232,8 @@ impl TaaFeature {
         Ok(TaaHandle {
             accumulated,
             pending_invalidate,
+            tunables,
+            generation,
         })
     }
 }
@@ -229,9 +243,31 @@ impl TaaFeature {
 pub struct TaaHandle {
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
+    tunables: Rc<Cell<[f64; 6]>>,
+    generation: Rc<Cell<u64>>,
 }
 
 impl TaaHandle {
+    /// Sets one tunable of `crate::tunables()`. Today it validates through
+    /// `raa_pipeline::validate_tunable`, refuses with `post.invalid` without changing
+    /// anything, and otherwise stores the value so the pass rebuilds its pipeline at its
+    /// next prepare. The executor reaches the handle through `HandleSet.taa` and passes a
+    /// catalog key of pass.taa and its value as f64.
+    pub fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        let specs = crate::tunables::tunables();
+        validate_tunable(specs, key, value).map_err(|message| refusal("post.invalid", &message))?;
+        let Some(index) = specs.iter().position(|s| s.key == key) else {
+            return Err(refusal("post.invalid", "unknown tunable"));
+        };
+        let mut values = self.tunables.get();
+        if values[index] != value {
+            values[index] = value;
+            self.tunables.set(values);
+            self.generation.set(self.generation.get() + 1);
+        }
+        Ok(())
+    }
+
     /// Frames the pass recorded since its last invalidation (0 at install, after a resize,
     /// after disabling and after `invalidate`).
     pub fn accumulated_frames(&self) -> u32 {
@@ -269,6 +305,8 @@ mod tests {
         let handle = TaaHandle {
             accumulated: Rc::new(Cell::new(0)),
             pending_invalidate: Rc::new(Cell::new(false)),
+            tunables: Rc::new(Cell::new(crate::tunables::defaults())),
+            generation: Rc::new(Cell::new(0)),
         };
         assert_eq!(handle.accumulated_frames(), 0);
         assert!(!handle.history_valid());
