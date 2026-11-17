@@ -21,6 +21,7 @@ struct Mock {
     name: &'static str,
     order: u32,
     required: bool,
+    overlay: bool,
     log: Log,
 }
 
@@ -30,8 +31,16 @@ impl Mock {
             name,
             order,
             required,
+            overlay: false,
             log: Rc::clone(log),
         })
+    }
+
+    /// A display overlay (`output_overlay`), which follows tone mapping.
+    fn boxed_overlay(name: &'static str, order: u32, log: &Log) -> Box<Mock> {
+        let mut mock = Mock::boxed(name, order, false, log);
+        mock.overlay = true;
+        mock
     }
 
     fn push(&self, entry: String) {
@@ -50,6 +59,10 @@ impl FeaturePass for Mock {
 
     fn required(&self) -> bool {
         self.required
+    }
+
+    fn output_overlay(&self) -> bool {
+        self.overlay
     }
 
     fn resize(&mut self, _gpu: &raa_core::GpuContext, targets: &Targets) {
@@ -771,6 +784,103 @@ fn gi_pairs_accept_a_sequence_without_any_vg_pass() {
     assert_eq!(names(&config.passes()), order);
 }
 
+/// The S12 tile sequence added out of order: `light.tiles` (order 35) sits between `prepass`
+/// and `ao.gtao`.
+fn add_tile_passes(config: &mut PipelineConfig, log: &Log) {
+    for (name, order, required) in [
+        ("tonemap", 200, true),
+        ("forward", 60, true),
+        ("light.tiles", 35, false),
+        ("ao.gtao", 40, false),
+        ("prepass", 30, true),
+    ] {
+        config
+            .add(Mock::boxed(name, order, required, log))
+            .expect("added");
+    }
+}
+
+/// The execution order of every entry, contributors included.
+fn order_of(config: &PipelineConfig) -> Vec<String> {
+    config.passes().into_iter().map(|p| p.name).collect()
+}
+
+#[test]
+fn set_order_links_accepts_the_tile_order_that_set_order_refuses() {
+    let log = new_log();
+    let mut config = PipelineConfig::new();
+    add_tile_passes(&mut config, &log);
+    let order = ["prepass", "ao.gtao", "light.tiles", "forward", "tonemap"];
+    assert_refused(config.set_order(&order), "pipeline.required_order");
+    config
+        .set_order_links(&order)
+        .expect("the TILE pairs are not checked");
+    assert_eq!(names(&config.passes()), order);
+}
+
+#[test]
+fn set_order_links_keeps_the_required_order_and_the_overlay_rule() {
+    let log = new_log();
+    let (mut config, _flags) = full_config(&log);
+    config
+        .add(Mock::boxed_overlay("selection", 220, &log))
+        .expect("added");
+    let before = order_of(&config);
+    let valid = [
+        "shadow.csm",
+        "prepass",
+        "ao.gtao",
+        "forward",
+        "bloom",
+        "tonemap",
+        "selection",
+    ];
+    // prepass after forward; tonemap before bloom; an overlay before tonemap
+    for (a, b) in [(1, 3), (4, 5), (5, 6)] {
+        let mut order = valid;
+        order.swap(a, b);
+        assert_refused(config.set_order_links(&order), "pipeline.required_order");
+        assert_eq!(order_of(&config), before, "{order:?} changed nothing");
+    }
+    config
+        .set_order_links(&valid)
+        .expect("the overlay follows tonemap");
+}
+
+#[test]
+fn set_order_links_refuses_unknown_repeated_and_missing_names_unchanged() {
+    let log = new_log();
+    let (mut config, _flags) = full_config(&log);
+    let refused: [(&[&str], &str); 4] = [
+        (&["prepass", "ssr", "tonemap"], "pipeline.unknown_pass"),
+        (&["prepass", "sky.background"], "pipeline.unknown_pass"),
+        (&["prepass", "bloom", "bloom"], "pipeline.duplicate_pass"),
+        (&["prepass", "bloom"], "pipeline.order_incomplete"),
+    ];
+    for (order, code) in refused {
+        assert_refused(config.set_order_links(order), code);
+    }
+    assert_eq!(names(&config.passes()), DEFAULT_ORDER, "nothing changed");
+}
+
+#[test]
+fn remove_refuses_unknown_contributor_and_required_passes_and_returns_the_pass() {
+    let log = new_log();
+    let (mut config, _flags) = full_config(&log);
+    assert_refused(config.remove("ssr"), "pipeline.unknown_pass");
+    assert_refused(config.remove("sky.background"), "pipeline.unknown_pass");
+    for name in ["prepass", "forward", "tonemap"] {
+        assert_refused(config.remove(name), "pipeline.required_pass");
+    }
+    assert_eq!(names(&config.passes()), DEFAULT_ORDER, "nothing changed");
+
+    let bloom = config.remove("bloom").expect("removed");
+    assert_eq!(bloom.name(), "bloom");
+    assert!(!names(&config.passes()).contains(&"bloom"));
+    config.add(bloom).expect("added again");
+    assert_eq!(names(&config.passes()), DEFAULT_ORDER);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod gpu {
     use super::*;
@@ -891,6 +1001,7 @@ mod gpu {
             name,
             order,
             required: false,
+            overlay: false,
             log: Rc::clone(log),
         }
     }
@@ -991,6 +1102,27 @@ mod gpu {
                 ("tonemap", true),
             ]
         );
+    }
+
+    fn order_links_and_remove_go_through_the_pipeline(gpu: &GpuContext) {
+        let log = new_log();
+        let (pipeline, _sky) = pipeline_with_mocks(gpu, &log);
+        let mut p = pipeline.borrow_mut();
+        assert_refused(
+            p.set_order_links(&["forward", "prepass", "ao.gtao", "bloom", "tonemap"]),
+            "pipeline.required_order",
+        );
+        p.set_order_links(&["prepass", "ao.gtao", "forward", "bloom", "tonemap"])
+            .expect("the order is accepted");
+        assert!(take(&log).is_empty(), "order changes call no pass");
+
+        assert_refused(p.remove("forward"), "pipeline.required_pass");
+        assert_refused(p.remove("sky.background"), "pipeline.unknown_pass");
+        assert!(take(&log).is_empty(), "refusals call no pass");
+        let bloom = p.remove("bloom").expect("removed");
+        assert_eq!(bloom.name(), "bloom");
+        assert_eq!(take(&log), ["set_enabled bloom false"]);
+        p.add(bloom).expect("added again");
     }
 
     fn graph_pass_runs_the_enabled_passes_in_order(gpu: &GpuContext) {
@@ -1140,6 +1272,7 @@ mod gpu {
             return;
         };
         configuration_goes_through_the_pipeline(&gpu);
+        order_links_and_remove_go_through_the_pipeline(&gpu);
         graph_pass_runs_the_enabled_passes_in_order(&gpu);
         a_failing_pass_fails_the_frame(&gpu);
         std::mem::forget(gpu);

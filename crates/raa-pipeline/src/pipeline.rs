@@ -71,20 +71,24 @@ fn refusal(code: &'static str, message: String) -> RaaError {
 }
 
 /// Refuses a sequence where `prepass`, `forward` and `tonemap` (those present) are out of
-/// order, an HDR pass runs after `tonemap`, the order-35 `light.tiles` pass is not after
-/// `prepass` and before `ao.gtao`/`forward`, or the P2 sky passes break
-/// `sky.atmosphere` < `sky.cloud-lighting` < `sky.env` or
-/// `prepass` < `sky.cloud-screen` < `forward`, or any `VG_DEPENDENCIES` pair (`vg.cull` and
-/// `shadow.csm` before `vg.raster`, and so on up to `vg.gbuffer` before `forward`) or
-/// `GI_DEPENDENCIES` pair (`vg.resolve` before `gi.volume`, and so on up to `gi.history`
-/// before `ssr`) is inverted (`pipeline.required_order`).
-fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
-    for (before, after) in TILE_DEPENDENCIES
-        .into_iter()
-        .chain(SKY_DEPENDENCIES)
-        .chain(VG_DEPENDENCIES)
-        .chain(GI_DEPENDENCIES)
-    {
+/// order or an HDR pass runs after `tonemap` (`pipeline.required_order`). With `dependencies`,
+/// it also refuses an inverted pair of the `TILE_DEPENDENCIES`, `SKY_DEPENDENCIES`,
+/// `VG_DEPENDENCIES` or `GI_DEPENDENCIES` tables with the same code: the order-35
+/// `light.tiles` pass before `ao.gtao` and `forward`, the P2 sky passes, `vg.cull` and
+/// `shadow.csm` before `vg.raster` (and so on), `vg.resolve` before `gi.volume` (and so on up
+/// to `gi.history` before `ssr`). `set_order_links` passes `false`: those pairs are not checked.
+fn check_required_order(names: &[&str], dependencies: bool) -> Result<(), RaaError> {
+    let tables: &[&[(&str, &str)]] = if dependencies {
+        &[
+            &TILE_DEPENDENCIES,
+            &SKY_DEPENDENCIES,
+            &VG_DEPENDENCIES,
+            &GI_DEPENDENCIES,
+        ]
+    } else {
+        &[]
+    };
+    for &(before, after) in tables.iter().copied().flatten() {
         let (Some(before_at), Some(after_at)) = (
             names.iter().position(|n| *n == before),
             names.iter().position(|n| *n == after),
@@ -135,14 +139,19 @@ fn check_required_order(names: &[&str]) -> Result<(), RaaError> {
     Ok(())
 }
 
-/// Tone mapping ends the HDR sequence; display overlays follow that sequence.
-fn check_overlay_order(names: &[&str], overlays: &[&str]) -> Result<(), RaaError> {
+/// Tone mapping ends the HDR sequence; display overlays follow that sequence. `dependencies`
+/// is passed on to `check_required_order`.
+fn check_overlay_order(
+    names: &[&str],
+    overlays: &[&str],
+    dependencies: bool,
+) -> Result<(), RaaError> {
     let regular: Vec<&str> = names
         .iter()
         .copied()
         .filter(|n| !overlays.contains(n))
         .collect();
-    check_required_order(&regular)?;
+    check_required_order(&regular, dependencies)?;
     let first_overlay = names.iter().position(|n| overlays.contains(n));
     if let Some(at) = first_overlay
         && names[at..].iter().any(|n| !overlays.contains(n))
@@ -267,7 +276,7 @@ impl PipelineConfig {
         if pass.output_overlay() {
             overlays.push(&name);
         }
-        check_overlay_order(&names, &overlays)?;
+        check_overlay_order(&names, &overlays, true)?;
         let required = pass.required();
         self.passes.insert(
             at,
@@ -377,9 +386,27 @@ impl PipelineConfig {
     /// contributors, which keep their order inside their host) exactly once. Refusals, in
     /// order: an unknown or contributor name (`pipeline.unknown_pass`), a name listed twice
     /// (`pipeline.duplicate_pass`), a missing pass (`pipeline.order_incomplete`), prepass,
-    /// forward and tonemap out of order, or an HDR pass after tonemap (`pipeline.required_order`).
+    /// forward and tonemap out of order, an HDR pass after tonemap, or an inverted pair of the
+    /// TILE, SKY, VG or GI dependency tables (`pipeline.required_order`).
     /// A refused order leaves the current one unchanged.
     pub fn set_order(&mut self, names: &[&str]) -> Result<(), RaaError> {
+        self.check_order_names(names)?;
+        self.apply_order(names, true)
+    }
+
+    /// Replaces the execution order like [`PipelineConfig::set_order`], without the TILE, SKY,
+    /// VG and GI dependency pairs: the caller states every link. The name checks, the
+    /// prepass/forward/tonemap order, the tonemap-last rule and the display overlay rule keep
+    /// their codes; a refused order leaves the current one unchanged.
+    pub fn set_order_links(&mut self, names: &[&str]) -> Result<(), RaaError> {
+        self.check_order_names(names)?;
+        self.apply_order(names, false)
+    }
+
+    /// The name checks shared by `set_order` and `set_order_links`, in their order: an unknown
+    /// or contributor name (`pipeline.unknown_pass`), a name listed twice
+    /// (`pipeline.duplicate_pass`), a missing pass (`pipeline.order_incomplete`).
+    fn check_order_names(&self, names: &[&str]) -> Result<(), RaaError> {
         for (i, name) in names.iter().enumerate() {
             if self.contributors.iter().any(|c| c.name == *name) {
                 return Err(refusal(
@@ -419,17 +446,53 @@ impl PipelineConfig {
                 ),
             ));
         }
+        Ok(())
+    }
+
+    /// The order checks after `check_order_names`, then the reordering. `dependencies` selects
+    /// the TILE, SKY, VG and GI pairs (see `check_required_order`).
+    fn apply_order(&mut self, names: &[&str], dependencies: bool) -> Result<(), RaaError> {
         let overlays: Vec<&str> = self
             .passes
             .iter()
             .filter(|p| p.pass.output_overlay())
             .map(|p| p.name.as_str())
             .collect();
-        check_overlay_order(names, &overlays)?;
-        // every pass name is in `names` exactly once (checked above)
+        check_overlay_order(names, &overlays, dependencies)?;
+        // every pass name is in `names` exactly once (checked by `check_order_names`)
         self.passes
             .sort_unstable_by_key(|p| names.iter().position(|n| *n == p.name));
         Ok(())
+    }
+
+    /// Removes the pass `name` from the order and returns it. Refusals, changing nothing:
+    /// `pipeline.unknown_pass` for a name that is no pass (a contributor keeps its entry inside
+    /// its host and cannot be removed) and `pipeline.required_pass` for a required pass.
+    pub fn remove(&mut self, name: &str) -> Result<Box<dyn FeaturePass>, RaaError> {
+        if self.contributors.iter().any(|c| c.name == name) {
+            return Err(refusal(
+                "pipeline.unknown_pass",
+                format!(
+                    "`{name}` is a contributor of `{HOST}`: contributors keep their entry inside \
+                     their host and cannot be removed"
+                ),
+            ));
+        }
+        let Some(at) = self.passes.iter().position(|p| p.name == name) else {
+            let known = self.entry_names();
+            return Err(refusal(
+                "pipeline.unknown_pass",
+                format!("no pass or contributor named `{name}` (entries: {known})"),
+            ));
+        };
+        // invariant: `at` comes from position over self.passes
+        if self.passes[at].required {
+            return Err(refusal(
+                "pipeline.required_pass",
+                format!("`{name}` is a required pass and cannot be removed"),
+            ));
+        }
+        Ok(self.passes.remove(at).pass)
     }
 }
 
@@ -688,6 +751,21 @@ impl Pipeline {
     /// Overrides the execution order of the passes (see [`PipelineConfig::set_order`]).
     pub fn set_order(&mut self, names: &[&str]) -> Result<(), RaaError> {
         self.config.set_order(names)
+    }
+
+    /// Overrides the execution order without the dependency pairs (see
+    /// [`PipelineConfig::set_order_links`]).
+    pub fn set_order_links(&mut self, names: &[&str]) -> Result<(), RaaError> {
+        self.config.set_order_links(names)
+    }
+
+    /// Removes a pass from the order and returns it (see [`PipelineConfig::remove`]). The pass
+    /// gets `set_enabled(false, lighting)` before it is returned, so its group-1 resources
+    /// return to the dummies. Refusals: `pipeline.unknown_pass`, `pipeline.required_pass`.
+    pub fn remove(&mut self, name: &str) -> Result<Box<dyn FeaturePass>, RaaError> {
+        let mut pass = self.config.remove(name)?;
+        pass.set_enabled(false, &mut self.lighting);
+        Ok(pass)
     }
 
     /// Sets the frame time in milliseconds: `time_s = now_ms / 1000`, `dt_s` = seconds since
@@ -1006,19 +1084,24 @@ mod tests {
 
     #[test]
     fn required_order_accepts_partial_sets_and_refuses_inversions() {
-        assert!(check_required_order(&[]).is_ok());
-        assert!(check_required_order(&["a", "prepass", "b", "forward", "tonemap"]).is_ok());
-        assert!(check_required_order(&["forward", "x"]).is_ok());
-        assert!(check_required_order(&["prepass", "light.tiles", "ao.gtao", "forward"]).is_ok());
+        assert!(check_required_order(&[], true).is_ok());
+        assert!(check_required_order(&["a", "prepass", "b", "forward", "tonemap"], true).is_ok());
+        assert!(check_required_order(&["forward", "x"], true).is_ok());
         assert!(
-            check_required_order(&[
-                "sky.atmosphere",
-                "sky.cloud-lighting",
-                "sky.env",
-                "prepass",
-                "sky.cloud-screen",
-                "forward",
-            ])
+            check_required_order(&["prepass", "light.tiles", "ao.gtao", "forward"], true).is_ok()
+        );
+        assert!(
+            check_required_order(
+                &[
+                    "sky.atmosphere",
+                    "sky.cloud-lighting",
+                    "sky.env",
+                    "prepass",
+                    "sky.cloud-screen",
+                    "forward",
+                ],
+                true
+            )
             .is_ok()
         );
         for names in [
@@ -1033,7 +1116,7 @@ mod tests {
             &["sky.cloud-screen", "prepass"][..],
             &["forward", "sky.cloud-screen"][..],
         ] {
-            let err = check_required_order(names).expect_err("refused");
+            let err = check_required_order(names, true).expect_err("refused");
             assert_eq!(err.code(), "pipeline.required_order", "{names:?}");
             assert!(!err.message().is_empty());
         }
@@ -1056,18 +1139,23 @@ mod tests {
 
     #[test]
     fn required_order_vg_accepts_the_default_sequence_and_partial_sets() {
-        assert!(check_required_order(&VG_DEFAULT_SEQUENCE).is_ok());
-        assert!(check_required_order(&["vg.cull", "vg.raster"]).is_ok());
-        assert!(check_required_order(&["vg.resolve", "prepass", "vg.gbuffer", "forward"]).is_ok());
+        assert!(check_required_order(&VG_DEFAULT_SEQUENCE, true).is_ok());
+        assert!(check_required_order(&["vg.cull", "vg.raster"], true).is_ok());
         assert!(
-            check_required_order(&[
-                "prepass",
-                "vg.gbuffer",
-                "light.tiles",
-                "ao.gtao",
-                "forward",
-                "tonemap",
-            ])
+            check_required_order(&["vg.resolve", "prepass", "vg.gbuffer", "forward"], true).is_ok()
+        );
+        assert!(
+            check_required_order(
+                &[
+                    "prepass",
+                    "vg.gbuffer",
+                    "light.tiles",
+                    "ao.gtao",
+                    "forward",
+                    "tonemap",
+                ],
+                true
+            )
             .is_ok()
         );
     }
@@ -1088,7 +1176,7 @@ mod tests {
             let a = names.iter().position(|n| *n == before).expect("present");
             let b = names.iter().position(|n| *n == after).expect("present");
             names.swap(a, b);
-            let err = check_required_order(&names).expect_err("refused");
+            let err = check_required_order(&names, true).expect_err("refused");
             assert_eq!(err.code(), "pipeline.required_order", "{before} / {after}");
             assert!(
                 err.message().contains(&format!("`{after}` must run after")),
@@ -1401,18 +1489,24 @@ mod tests {
         assert!(
             check_overlay_order(
                 &["prepass", "forward", "tonemap", "selection"],
-                &["selection"]
+                &["selection"],
+                true
             )
             .is_ok()
         );
         assert!(
             check_overlay_order(
                 &["prepass", "forward", "selection", "tonemap"],
-                &["selection"]
+                &["selection"],
+                true
             )
             .is_err()
         );
-        assert!(check_overlay_order(&["prepass", "forward", "tonemap", "bloom"], &[]).is_err());
-        assert!(check_overlay_order(&["forward", "selection", "bloom"], &["selection"]).is_err());
+        assert!(
+            check_overlay_order(&["prepass", "forward", "tonemap", "bloom"], &[], true).is_err()
+        );
+        assert!(
+            check_overlay_order(&["forward", "selection", "bloom"], &["selection"], true).is_err()
+        );
     }
 }
