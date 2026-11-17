@@ -11,7 +11,8 @@ use std::rc::Rc;
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{
-    FeaturePass, HDR_FORMAT, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets,
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx,
+    RecordCtx, Targets,
 };
 
 use crate::TAA_ORDER;
@@ -19,6 +20,7 @@ use crate::history::HistoryPair;
 use crate::resources::{TaaPipelines, TaaTargets, dispatch_size};
 use crate::shaders::TAA_PARAMS_SIZE;
 
+const NAME: &str = "taa";
 const HISTORY_LABEL: &str = "raa-taa.history";
 const PARAMS_LEN: usize = TAA_PARAMS_SIZE as usize;
 
@@ -118,6 +120,12 @@ impl FeaturePass for TaaPass {
         ctx.gpu
             .queue()
             .write_buffer(&self.pipelines.params, 0, &pack_params(usable));
+        if let Some(history) = self.history.as_ref() {
+            let (w, h) = history.state().size();
+            let desc = ImageDesc::new(ImageDim::D2, history.format(), w, h, 1, 1);
+            ctx.resources
+                .publish(NAME, "history", history.write_view(), desc);
+        }
         Ok(())
     }
 
@@ -160,6 +168,9 @@ impl FeaturePass for TaaPass {
             history.state_mut().commit();
             self.accumulated.set(history.state().accumulated_frames());
         }
+        let (w, h) = targets.size();
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
+        ctx.resources.publish(NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }

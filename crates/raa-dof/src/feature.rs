@@ -17,7 +17,9 @@ use std::rc::Rc;
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_math::{Mat4, Vec4};
-use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::{DofDesc, REFERENCE_VIEWPORT_H};
 use crate::resources::{DofPipelines, DofTargets};
@@ -240,6 +242,45 @@ impl FeaturePass for DofPass {
         ctx.gpu
             .queue()
             .write_buffer(&self.pipelines.params, 0, &self.bytes);
+        let s = targets.sizes;
+        let taps = [
+            (
+                "coc",
+                &targets.coc_view,
+                wgpu::TextureFormat::R32Float,
+                s.full,
+            ),
+            (
+                "tiles",
+                &targets.tiles_view,
+                wgpu::TextureFormat::Rg32Float,
+                s.tiles,
+            ),
+            (
+                "dilated",
+                &targets.dilated_view,
+                wgpu::TextureFormat::Rg32Float,
+                s.tiles,
+            ),
+            (
+                "nearPrefilter",
+                &targets.near_prefilter_view,
+                HDR_FORMAT,
+                s.half,
+            ),
+            (
+                "farPrefilter",
+                &targets.far_prefilter_view,
+                HDR_FORMAT,
+                s.half,
+            ),
+            ("nearGather", &targets.near_gather_view, HDR_FORMAT, s.half),
+            ("farGather", &targets.far_gather_view, HDR_FORMAT, s.half),
+        ];
+        for (port, view, format, (w, h)) in taps {
+            let desc = ImageDesc::new(ImageDim::D2, format, w, h, 1, 1);
+            ctx.resources.publish(NAME, port, view, desc);
+        }
         Ok(())
     }
 
@@ -316,6 +357,8 @@ impl FeaturePass for DofPass {
             &groups.composite,
         );
         hdr.swap();
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, full.0, full.1, 1, 1);
+        ctx.resources.publish(NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }

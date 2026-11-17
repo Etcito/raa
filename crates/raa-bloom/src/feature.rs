@@ -17,7 +17,9 @@ use std::rc::Rc;
 
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::{BloomDesc, MAX_MIPS, mip_sizes};
 use crate::shaders::{
@@ -207,6 +209,8 @@ struct Chain {
     _texture: Option<wgpu::Texture>,
     /// One single-mip view per level.
     views: Vec<wgpu::TextureView>,
+    /// View of every level, published as the `chain` tap (None without levels).
+    all_view: Option<wgpu::TextureView>,
     /// Group k reads level k (downsample into level k + 1).
     down_groups: Vec<wgpu::BindGroup>,
     /// Group k reads level k + 1 (upsample into level k).
@@ -456,6 +460,9 @@ impl FeaturePass for BloomPass {
                 })
             })
             .collect();
+        let all_view = texture
+            .as_ref()
+            .map(|t| t.create_view(&wgpu::TextureViewDescriptor::default()));
         let down_groups = views
             .iter()
             .take(levels.saturating_sub(1))
@@ -478,6 +485,7 @@ impl FeaturePass for BloomPass {
             sizes,
             _texture: texture,
             views,
+            all_view,
             down_groups,
             up_groups,
             hdr: groups,
@@ -497,6 +505,10 @@ impl FeaturePass for BloomPass {
         let levels = chain.views.len();
         pack_params(&mut self.bytes, chain.hdr_size, &chain.sizes, levels, &desc);
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
+        if let (Some(view), Some(&(w, h))) = (chain.all_view.as_ref(), chain.sizes.first()) {
+            let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, levels as u32);
+            ctx.resources.publish(NAME, "chain", view, desc);
+        }
         Ok(())
     }
 
@@ -528,6 +540,9 @@ impl FeaturePass for BloomPass {
         }
         draw(encoder, hdr.dst(), false, &p.composite, &groups.composite);
         hdr.swap();
+        let (w, h) = chain.hdr_size;
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
+        ctx.resources.publish(NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -701,7 +716,7 @@ mod tests {
 
         use raa_core::testing::{skip, software_gpu};
         use raa_core::{FrameGraph, GpuContext, OffscreenTarget, wgpu};
-        use raa_pipeline::{FeaturePass, Pipeline, RecordCtx};
+        use raa_pipeline::{FeaturePass, LightingResources, Pipeline, RecordCtx, ResourceTable};
 
         use super::super::*;
 
@@ -850,6 +865,62 @@ mod tests {
             // 12 px: no level, pass-through composite
             let v = run(&gpu, 12, None, true);
             assert!((v - 2.0).abs() < 1e-3, "bloom without levels gave {v}");
+        }
+        #[test]
+        fn prepare_publishes_chain_and_record_publishes_color() {
+            let name = "prepare_publishes_chain_and_record_publishes_color";
+            let Some(gpu) = software_gpu() else {
+                skip(name, "software_gpu returned None");
+                return;
+            };
+            // 32 px (mip_sizes(8, 8) has no level); the HDR chain starts cleared
+            let state = Rc::new(RefCell::new(BloomState {
+                desc: BloomDesc::default(),
+                scale: 1.0,
+            }));
+            let mut pass = BloomPass::new(&gpu, state);
+            let targets = Targets::new(&gpu, (32, 32));
+            pass.resize(&gpu, &targets);
+            let table = ResourceTable::new();
+            let mut lighting = LightingResources::new(&gpu);
+            let mut ctx = PrepareCtx {
+                gpu: &gpu,
+                size: (32, 32),
+                frame: 0,
+                time_s: 0.0,
+                dt_s: 0.0,
+                targets: &targets,
+                lighting: &mut lighting,
+                resources: &table,
+            };
+            pass.prepare(&mut ctx).unwrap();
+            let find = |port: &str| {
+                let entries = table.entries();
+                entries
+                    .into_iter()
+                    .find(|e| e.0 == "bloom" && e.1 == port)
+                    .map(|e| e.2)
+            };
+            assert!(find("chain").is_some_and(|d| d.mips > 1));
+            let backbuffer = OffscreenTarget::new(&gpu, 32, 32, FORMAT);
+            let mut encoder = gpu
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let mut ctx = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size: (32, 32),
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                resources: &table,
+                backbuffer: backbuffer.view(),
+                backbuffer_format: FORMAT,
+                surface_is_srgb: false,
+            };
+            pass.record(&mut ctx).unwrap();
+            assert_eq!(find("color").map(|d| d.format), Some(HDR_FORMAT));
         }
     }
 }
