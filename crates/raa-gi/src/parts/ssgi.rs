@@ -27,7 +27,9 @@ use self::resources::{SsgiInputs, SsgiResources};
 use super::{GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitHandle;
-use raa_pipeline::{FeaturePass, LightingResources, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, PrepareCtx, RecordCtx, Targets,
+};
 
 #[path = "ssgi/cpu.rs"]
 pub mod cpu;
@@ -249,6 +251,29 @@ impl FeaturePass for GiSsgiPass {
         }
     }
 
+    /// Publishes the taps `ssgi`, `raw`, `history` and `output` (docs/render-graph/taps.md) while
+    /// the part is active with its pass enabled and the resources exist.
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let state = self.part.state.borrow();
+        if !(state.active && state.pass_enabled) {
+            return Ok(());
+        }
+        let Some(resources) = state.resources.as_ref() else {
+            return Ok(());
+        };
+        let (width, height) = resources.viewport();
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let desc = ImageDesc::new(ImageDim::D2, format, width, height, 1, 1);
+        let output = resources.output_view();
+        ctx.resources.publish(SSGI_PASS, "ssgi", &output, desc);
+        ctx.resources
+            .publish(SSGI_PASS, "raw", resources.raw_view(), desc);
+        ctx.resources
+            .publish(SSGI_PASS, "history", resources.history_write_view(), desc);
+        ctx.resources.publish(SSGI_PASS, "output", &output, desc);
+        Ok(())
+    }
+
     /// Records `raa-gi.ssgi` while the part is active with resources and the frame buffer and
     /// group 1 exist. A recorded pass commits the history pair.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
@@ -289,6 +314,64 @@ impl FeaturePass for GiSsgiPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_core::testing::skip;
+    use raa_lit::{LitOptions, LitRenderer};
+    use raa_pipeline::{Pipeline, ResourceTable};
+
+    /// Builds the part and pass as `install` does (without adding the pass to a pipeline), makes
+    /// the part active with 8x8 resources and runs the pass's `prepare` with an 8x8 `Targets`
+    /// and a fresh table. The pass reads no shared input in `prepare`, so none is initialised.
+    #[test]
+    fn prepare_publishes_the_four_ssgi_ports() {
+        let test = "prepare_publishes_the_four_ssgi_ports";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        let lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).expect("lit renderer");
+        let shared = GiShared::new(&gpu);
+        let part = Rc::new(SsgiPart {
+            lit: lit.handle(),
+            state: RefCell::new(SsgiState {
+                pipelines: SsgiPipelines::new(&gpu, &shared.compute_group1_layout()),
+                resources: Some(SsgiResources::new(&gpu, (8, 8))),
+                key: Some((8, 8)),
+                frame_index: 0,
+                active: true,
+                pass_enabled: true,
+                pending: false,
+            }),
+            shared,
+        });
+        let mut pass = GiSsgiPass { part };
+        let targets = Targets::new(&gpu, (8, 8));
+        let table = ResourceTable::new();
+        let mut lighting = LightingResources::new(&gpu);
+        let mut ctx = PrepareCtx {
+            gpu: &gpu,
+            size: (8, 8),
+            frame: 0,
+            time_s: 0.0,
+            dt_s: 0.0,
+            targets: &targets,
+            lighting: &mut lighting,
+            resources: &table,
+        };
+        pass.prepare(&mut ctx).expect("prepare");
+        let entries = table.entries();
+        for port in ["ssgi", "raw", "history", "output"] {
+            let found = entries.iter().find(|e| e.0 == SSGI_PASS && e.1 == port);
+            let desc = found.unwrap_or_else(|| panic!("missing {port}")).2;
+            assert_eq!(desc.format, wgpu::TextureFormat::Rgba16Float, "{port}");
+            assert_eq!((desc.width, desc.height, desc.dim), (8, 8, ImageDim::D2));
+        }
+        assert_eq!(entries.len(), 4);
+    }
 
     #[test]
     fn ssgi_constants_match_the_s12_row() {

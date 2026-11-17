@@ -201,6 +201,16 @@ impl SsgiResources {
         self.output.clone()
     }
 
+    /// The raw trace view the gi.ssgi tap `raw` publishes.
+    pub(crate) fn raw_view(&self) -> &wgpu::TextureView {
+        &self.raw
+    }
+
+    /// The history half this frame's pass writes: the pair's current write view.
+    pub(crate) fn history_write_view(&self) -> &wgpu::TextureView {
+        self.history.write_view()
+    }
+
     /// Writes the 32 B of `SsgiParamsGpu` for this frame; `temporal_valid` is read from the pair.
     pub(crate) fn write_params(
         &self,

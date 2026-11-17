@@ -33,7 +33,8 @@ use super::{GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{LitHandle, StochasticMode, table_limit};
 use raa_pipeline::{
-    FeaturePass, LightingResources, MAX_STOCHASTIC_LIGHTS, PrepareCtx, RecordCtx, Targets,
+    FeaturePass, ImageDesc, ImageDim, LightingResources, MAX_STOCHASTIC_LIGHTS, PrepareCtx,
+    RecordCtx, ResourceTable, Targets,
 };
 
 /// The S12 name of the pass.
@@ -188,6 +189,40 @@ impl GiPart for AreaShadowPart {
     }
 }
 
+/// Publishes the taps of `gi.area-shadow` (docs/render-graph/taps.md): the two-layer mask under
+/// `areaShadow` and `mask`, the raw array, the depth history write half and, on ReSTIR frames,
+/// the LTC atlas.
+fn publish_taps(
+    table: &ResourceTable,
+    resources: &AreaShadowResources,
+    restir: Option<&RestirResources>,
+) {
+    let (width, height) = resources.viewport();
+    let mask = resources.mask_view();
+    let shared = resources.shared_views();
+    let float = wgpu::TextureFormat::Rgba16Float;
+    let masks = ImageDesc::new(ImageDim::D2Array, float, width, height, 2, 1);
+    let raw_layers = resources.groups().max(2);
+    let raw = ImageDesc::new(ImageDim::D2Array, float, width, height, raw_layers, 1);
+    let depth = wgpu::TextureFormat::R32Float;
+    table.publish(AREA_SHADOW_PASS, "areaShadow", &mask, masks);
+    table.publish(AREA_SHADOW_PASS, "raw", shared.raw, raw);
+    let depth = ImageDesc::new(ImageDim::D2, depth, width, height, 1, 1);
+    table.publish(AREA_SHADOW_PASS, "depthHistory", shared.depth_write, depth);
+    table.publish(AREA_SHADOW_PASS, "mask", &mask, masks);
+    if let Some(restir) = restir {
+        let atlas = ImageDesc::new(
+            ImageDim::D2,
+            raa_pipeline::BRDF_ATLAS_FORMAT,
+            raa_pipeline::BRDF_ATLAS_WIDTH,
+            raa_pipeline::BRDF_ATLAS_HEIGHT,
+            1,
+            1,
+        );
+        table.publish(AREA_SHADOW_PASS, "restirAtlas", restir.atlas_view(), atlas);
+    }
+}
+
 /// The `gi.area-shadow` feature pass (order 43): prepares the mask publication and records the
 /// trace, temporal and spatial dispatches of one [`AreaShadowPart`].
 struct GiAreaShadowPass {
@@ -302,6 +337,7 @@ impl FeaturePass for GiAreaShadowPass {
             *sdf_slot = sdf;
             ctx.lighting
                 .set_area_shadow(resources.mask_view(), &frame.table)?;
+            publish_taps(ctx.resources, resources, Some(&*restir));
             *limit_slot = limit;
             *recordable = true;
             return Ok(());
@@ -322,6 +358,7 @@ impl FeaturePass for GiAreaShadowPass {
         *sdf_slot = sdf;
         ctx.lighting
             .set_area_shadow(resources.mask_view(), &frame.table)?;
+        publish_taps(ctx.resources, resources, None);
         *limit_slot = limit;
         *recordable = true;
         Ok(())
@@ -394,6 +431,36 @@ impl FeaturePass for GiAreaShadowPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_core::testing::skip;
+
+    /// Allocates 8x8 resources for 2 groups plus the ReSTIR set and publishes into a fresh table:
+    /// the helper `prepare` calls after (re)allocation. No shared input is read.
+    #[test]
+    fn taps_publish_the_array_ports_and_the_atlas() {
+        let test = "taps_publish_the_array_ports_and_the_atlas";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let resources = AreaShadowResources::new(&gpu, (8, 8), 2);
+        let restir = RestirResources::new(&gpu, (8, 8));
+        let table = ResourceTable::new();
+        publish_taps(&table, &resources, Some(&restir));
+        let entries = table.entries();
+        let desc = |port: &str| {
+            let found = entries
+                .iter()
+                .find(|e| e.0 == AREA_SHADOW_PASS && e.1 == port);
+            found.unwrap_or_else(|| panic!("missing {port}")).2
+        };
+        for port in ["areaShadow", "mask", "raw"] {
+            assert_eq!(desc(port).dim, ImageDim::D2Array, "{port}");
+            assert_eq!(desc(port).layers, 2, "{port}");
+        }
+        assert_eq!(desc("depthHistory").format, wgpu::TextureFormat::R32Float);
+        assert_eq!(desc("restirAtlas").format, wgpu::TextureFormat::Rgba16Float);
+        assert_eq!(entries.len(), 5);
+    }
 
     #[test]
     fn constants_match_the_s12_table() {

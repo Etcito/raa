@@ -9,7 +9,7 @@ Each row names the Rust field or accessor that holds the view or buffer a pass p
 - `tonemap` and `overlay` `color` are published by the pipeline, with the display target `Targets::output`, only while at least one graph frame is added.
 - `skin`'s `skinned` is published in `record`, because the raa-js wrapper `SkinPipelinePass` forwards only `set_enabled` and `record`.
 - When a field holds a texture rather than a view (`Textures::_raw`, `DofTargets::_coc`, `SsrTargets::_hiz`), the publisher creates the view from it.
-- Where two ports name one texture (`gi.ssgi` `ssgi` and `output`, `shadow.contact` `contact` and `output`), both rows name it. For `gi.area-shadow`, `areaShadow` is the full mask array and `mask` its per-layer views.
+- Where two ports name one texture (`gi.ssgi` `ssgi` and `output`, `shadow.contact` `contact` and `output`), both rows name it. For `gi.area-shadow`, `areaShadow` and `mask` both name the two-layer mask array.
 - The parity pairs of `gi.screen` (`output`, `meta`, `filter`) name the half of the current parity. `gi` is the screen output the forward pass reads.
 - `sky.env` `envSpecular` names the SKY_ENV source cube, whose mips the IBL filter writes. The lighting's `env_specular` is the IBL filter output (`crates/raa-ibl/src/filter.rs`), which this table does not name.
 
@@ -56,13 +56,13 @@ Each row names the Rust field or accessor that holds the view or buffer a pass p
 | gi.screen | display | ScreenResources::display_view | crates/raa-gi/src/parts/screen.rs |
 | gi.screen | debug | ScreenResources::debug_view | crates/raa-gi/src/parts/screen.rs |
 | gi.area-shadow | areaShadow | AreaShadowResources::mask_view | crates/raa-gi/src/parts/area_shadow/resources.rs |
-| gi.area-shadow | raw | AreaShadowResources::raw_view | crates/raa-gi/src/parts/area_shadow/resources.rs |
-| gi.area-shadow | depthHistory | AreaShadowResources::depth (write view) | crates/raa-gi/src/parts/area_shadow/resources.rs |
-| gi.area-shadow | mask | AreaShadowResources::mask_layers | crates/raa-gi/src/parts/area_shadow/resources.rs |
+| gi.area-shadow | raw | AreaShadowResources::shared_views (raw) | crates/raa-gi/src/parts/area_shadow/resources.rs |
+| gi.area-shadow | depthHistory | AreaShadowResources::shared_views (depth_write) | crates/raa-gi/src/parts/area_shadow/resources.rs |
+| gi.area-shadow | mask | AreaShadowResources::mask_view | crates/raa-gi/src/parts/area_shadow/resources.rs |
 | gi.area-shadow | restirAtlas | RestirResources::atlas_view | crates/raa-gi/src/parts/area_shadow/restir_resources.rs |
 | gi.ssgi | ssgi | SsgiResources::output_view | crates/raa-gi/src/parts/ssgi/resources.rs |
-| gi.ssgi | raw | SsgiResources::raw | crates/raa-gi/src/parts/ssgi/resources.rs |
-| gi.ssgi | history | SsgiResources::history (write view) | crates/raa-gi/src/parts/ssgi/resources.rs |
+| gi.ssgi | raw | SsgiResources::raw_view | crates/raa-gi/src/parts/ssgi/resources.rs |
+| gi.ssgi | history | SsgiResources::history_write_view | crates/raa-gi/src/parts/ssgi/resources.rs |
 | gi.ssgi | output | SsgiResources::output | crates/raa-gi/src/parts/ssgi/resources.rs |
 | shadow.contact | contact | Output::view | crates/raa-contact/src/feature.rs |
 | shadow.contact | output | Output::view | crates/raa-contact/src/feature.rs |

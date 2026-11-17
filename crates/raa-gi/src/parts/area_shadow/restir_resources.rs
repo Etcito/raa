@@ -220,6 +220,11 @@ impl RestirResources {
         })
     }
 
+    /// The LTC atlas view the gi.area-shadow tap `restirAtlas` publishes.
+    pub(crate) fn atlas_view(&self) -> &wgpu::TextureView {
+        &self.atlas_view
+    }
+
     /// The GPU bytes this set owns: `restir_resource_bytes(viewport)`.
     pub(crate) fn allocated_bytes(&self) -> u64 {
         restir_resource_bytes(self.viewport)
