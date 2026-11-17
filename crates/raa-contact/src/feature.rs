@@ -13,7 +13,9 @@ use std::rc::Rc;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitRenderer;
 use raa_math::{Mat4, Vec3, Vec4};
-use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::ContactDesc;
 use crate::shaders::{CONTACT_WGSL, PARAMS_SIZE};
@@ -255,6 +257,18 @@ impl FeaturePass for ContactPass {
     /// `ContactParams` and, when needed, sets the output view on the lighting.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut st = self.state.try_borrow_mut().map_err(|_| state_busy())?;
+        if let Some(o) = self.output.as_ref() {
+            let desc = ImageDesc::new(
+                ImageDim::D2,
+                wgpu::TextureFormat::Rgba16Float,
+                o.size.0,
+                o.size.1,
+                1,
+                1,
+            );
+            ctx.resources.publish(NAME, "contact", &o.view, desc);
+            ctx.resources.publish(NAME, "output", &o.view, desc);
+        }
         let (Some(camera), Some(output)) = (st.camera, self.output.as_ref()) else {
             if self.bound {
                 ctx.lighting.clear_contact();

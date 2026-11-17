@@ -15,10 +15,12 @@ use std::rc::Rc;
 use raa_core::wgpu;
 use raa_core::{GpuContext, RaaError};
 use raa_math::Mat4;
-use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::SsrDesc;
-use crate::resources::{SsrPipelines, SsrTargets};
+use crate::resources::{SsrPipelines, SsrTargets, TRACE_FORMAT};
 use crate::shaders::SSR_PARAMS_SIZE;
 
 /// S12 name of the pass.
@@ -194,6 +196,18 @@ impl FeaturePass for SsrPass {
         ctx.gpu
             .queue()
             .write_buffer(&self.pipelines.params, 0, &self.bytes);
+        let desc = ImageDesc::new(ImageDim::D2, TRACE_FORMAT, t.size.0, t.size.1, 1, 1);
+        ctx.resources.publish(NAME, "trace", &t.trace_view, desc);
+        let (w, h) = t.size;
+        let hiz = ImageDesc::new(
+            ImageDim::D2,
+            wgpu::TextureFormat::R32Float,
+            w.max(1),
+            h.max(1),
+            1,
+            t.mip_count(),
+        );
+        ctx.resources.publish(NAME, "hiz", &t.hiz_view, hiz);
         Ok(())
     }
 
@@ -247,6 +261,9 @@ impl FeaturePass for SsrPass {
             Some(lighting),
         );
         hdr.swap();
+        let (w, h) = t.size;
+        let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
+        ctx.resources.publish(NAME, "color", hdr.src(), desc);
         Ok(())
     }
 }

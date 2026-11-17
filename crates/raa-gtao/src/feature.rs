@@ -14,7 +14,9 @@ use std::rc::Rc;
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitRenderer;
 use raa_math::Mat4;
-use raa_pipeline::{FeaturePass, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx, RecordCtx, Targets,
+};
 
 use crate::desc::{AoDesc, AoQuality};
 use crate::shaders::{DENOISE_WGSL, GTAO_WGSL, PARAMS_SIZE, ao_provider};
@@ -118,7 +120,9 @@ struct Textures {
     size: (u32, u32),
     /// Kept alive for the views bound below.
     _raw: wgpu::Texture,
+    raw_view: wgpu::TextureView,
     _blur: wgpu::Texture,
+    blur_view: wgpu::TextureView,
     _out: wgpu::Texture,
     out_view: wgpu::TextureView,
     gtao_group: wgpu::BindGroup,
@@ -291,7 +295,9 @@ impl FeaturePass for GtaoPass {
         self.textures = Some(Textures {
             size,
             _raw: raw,
+            raw_view,
             _blur: blur,
+            blur_view,
             _out: out,
             out_view,
             gtao_group,
@@ -317,6 +323,17 @@ impl FeaturePass for GtaoPass {
     /// and, when needed, sets the output view on the lighting.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let st = self.state.try_borrow().map_err(|_| state_busy())?;
+        if let Some(t) = self.textures.as_ref() {
+            let (w, h) = t.size;
+            for (port, view, format) in [
+                ("ao", &t.out_view, wgpu::TextureFormat::Rgba16Float),
+                ("raw", &t.raw_view, wgpu::TextureFormat::R32Float),
+                ("blur", &t.blur_view, wgpu::TextureFormat::R32Float),
+            ] {
+                let desc = ImageDesc::new(ImageDim::D2, format, w, h, 1, 1);
+                ctx.resources.publish(NAME, port, view, desc);
+            }
+        }
         let (Some(camera), Some(textures)) = (st.camera, self.textures.as_ref()) else {
             if self.bound {
                 ctx.lighting.clear_ao();
@@ -539,5 +556,42 @@ mod tests {
         handle.set_quality(low).unwrap();
         assert_eq!(handle.clone().quality(), low);
         assert_eq!(handle.get(), good);
+    }
+
+    #[test]
+    fn prepare_publishes_ao_raw_and_blur() {
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip("prepare_publishes_ao_raw_and_blur", "software_gpu is None");
+            return;
+        };
+        let state = Rc::new(RefCell::new(GtaoState {
+            desc: AoDesc::default(),
+            quality: AoQuality::default(),
+            camera: None,
+        }));
+        let mut pass = GtaoPass::new(&gpu, state);
+        let targets = Targets::new(&gpu, (8, 8));
+        pass.resize(&gpu, &targets);
+        let table = raa_pipeline::ResourceTable::new();
+        let mut lighting = LightingResources::new(&gpu);
+        let mut ctx = PrepareCtx {
+            gpu: &gpu,
+            size: (8, 8),
+            frame: 0,
+            time_s: 0.0,
+            dt_s: 0.0,
+            targets: &targets,
+            lighting: &mut lighting,
+            resources: &table,
+        };
+        pass.prepare(&mut ctx).unwrap();
+        let entries = table.entries();
+        let format_of = |port: &str| {
+            let found = entries.iter().find(|e| e.0 == "ao.gtao" && e.1 == port);
+            found.map(|e| e.2.format)
+        };
+        assert_eq!(format_of("ao"), Some(wgpu::TextureFormat::Rgba16Float));
+        assert_eq!(format_of("raw"), Some(wgpu::TextureFormat::R32Float));
+        assert_eq!(format_of("blur"), Some(wgpu::TextureFormat::R32Float));
     }
 }

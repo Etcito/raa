@@ -360,6 +360,8 @@ pub(crate) struct SsrTargets {
     pub hiz_levels: Vec<HizLevel>,
     pub hiz_groups: Vec<wgpu::BindGroup>,
     _hiz: wgpu::Texture,
+    /// Full-mip view of the Hi-Z texture, published as the `hiz` tap.
+    pub hiz_view: wgpu::TextureView,
     _hiz_views: Vec<wgpu::TextureView>,
     /// `HizParams` of level k at `k * SLOT_STRIDE`.
     _hiz_params: wgpu::Buffer,
@@ -496,6 +498,7 @@ impl SsrTargets {
             hiz_levels: levels,
             hiz_groups,
             _hiz: hiz_tex,
+            hiz_view: hiz_full,
             _hiz_views: hiz_views,
             _hiz_params: hiz_params,
             hdr_mips,
