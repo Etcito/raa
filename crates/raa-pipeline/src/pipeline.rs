@@ -11,7 +11,7 @@ use raa_core::{
 };
 
 use crate::pass::{FeaturePass, PassInfo, PassRole, PrepareCtx, RecordCtx};
-use crate::{LightingResources, ResourceTable, Targets};
+use crate::{GraphFrame, ImageDesc, ImageDim, LightingResources, ResourceTable, Targets};
 
 /// Name of the frame graph pass `Pipeline::install` adds.
 const PASS_NAME: &str = "raa.pipeline";
@@ -613,6 +613,8 @@ pub struct Pipeline {
     submission: ViewSubmission,
     output: Option<crate::output::Output>,
     resources: ResourceTable,
+    /// Graph frames (S55) in insertion order, each under its name.
+    graph_frames: Vec<(String, Box<dyn GraphFrame>)>,
 }
 
 impl Pipeline {
@@ -639,12 +641,37 @@ impl Pipeline {
             submission: ViewSubmission::default(),
             output: None,
             resources: ResourceTable::new(),
+            graph_frames: Vec::new(),
         }
     }
 
     /// The resource table of the latest frame.
     pub fn resources(&self) -> &ResourceTable {
         &self.resources
+    }
+
+    /// Adds a graph frame under `name`, after the frames already added; its hooks run around
+    /// every enabled pass (the frame loop of `prepare_single` and `record_single`). Refuses a
+    /// name a graph frame already uses (`pipeline.duplicate_pass`), changing nothing.
+    pub fn add_graph_frame(
+        &mut self,
+        name: &str,
+        frame: Box<dyn GraphFrame>,
+    ) -> Result<(), RaaError> {
+        if self.graph_frames.iter().any(|(n, _)| n == name) {
+            return Err(refusal(
+                "pipeline.duplicate_pass",
+                format!("a graph frame named `{name}` is already added"),
+            ));
+        }
+        self.graph_frames.push((name.to_owned(), frame));
+        Ok(())
+    }
+
+    /// Removes the graph frame `name` and returns it; `None` when no such frame is added.
+    pub fn remove_graph_frame(&mut self, name: &str) -> Option<Box<dyn GraphFrame>> {
+        let at = self.graph_frames.iter().position(|(n, _)| n == name)?;
+        Some(self.graph_frames.remove(at).1)
     }
 
     /// Clears the submission observation before one scene invocation's record. The engine
@@ -836,7 +863,11 @@ impl Pipeline {
     ) -> Result<(), RaaError> {
         if this.borrow().view_rects.is_empty() {
             let mut pipeline = this.borrow_mut();
-            pipeline.record_single(ctx, false)?;
+            if pipeline.graph_frames.is_empty() {
+                pipeline.record_single(ctx, false)?;
+            } else {
+                pipeline.record_display_target(ctx)?;
+            }
             pipeline.submission.recorded(0);
             return Ok(());
         }
@@ -952,6 +983,9 @@ impl Pipeline {
         };
         targets.hdr().reset();
         self.resources.clear();
+        for (_, frame) in &mut self.graph_frames {
+            frame.begin(&self.resources);
+        }
         self.lighting.upload(gpu);
 
         let generation = self.targets_generation;
@@ -970,10 +1004,43 @@ impl Pipeline {
                 entry.pass.resize(gpu, targets);
                 entry.sized_for = generation;
             }
+            for (_, frame) in &mut self.graph_frames {
+                frame.before_prepare(&entry.name, &mut prepare)?;
+            }
             entry.pass.prepare(&mut prepare)?;
         }
         // resources a pass set in its prepare are bound in this frame's records
         self.lighting.upload(gpu);
+        Ok(())
+    }
+
+    /// The single-view record while graph frames are added: records the frame into the
+    /// surface-sized display target (`record_single` with `local`), then copies that target
+    /// onto the backbuffer with `Output` over the whole target.
+    fn record_display_target(&mut self, ctx: &mut RecordContext<'_>) -> Result<(), RaaError> {
+        let missing =
+            || RaaError::Resource(format!("{PASS_NAME}: the display target was not created"));
+        let format = ctx.format(BACKBUFFER);
+        let backbuffer = ctx.view(BACKBUFFER)?;
+        self.targets
+            .as_mut()
+            .ok_or_else(missing)?
+            .ensure_output(ctx.gpu, format);
+        self.record_single(ctx, true)?;
+        if self.output.as_ref().is_none_or(|o| o.format() != format) {
+            self.output = Some(crate::output::Output::new(ctx.gpu, format));
+        }
+        let targets = self.targets.as_ref().ok_or_else(missing)?;
+        let source = targets.output().ok_or_else(missing)?;
+        let output = self.output.as_ref().ok_or_else(missing)?;
+        let (width, height) = targets.size();
+        output.record(
+            ctx.gpu,
+            ctx.encoder,
+            source,
+            backbuffer,
+            [0, 0, width, height],
+        );
         Ok(())
     }
 
@@ -985,6 +1052,17 @@ impl Pipeline {
                 "{PASS_NAME}: record ran before a prepare created the targets"
             )));
         };
+        // Tonemap and the overlays write the backbuffer, which nothing can sample: while graph
+        // frames run they write the display target, published here for later readers.
+        if local && !self.graph_frames.is_empty() {
+            let (width, height) = targets.size();
+            let desc = ImageDesc::new(ImageDim::D2, backbuffer_format, width, height, 1, 1);
+            let view = targets.output().ok_or_else(|| {
+                RaaError::Resource(format!("{PASS_NAME}: the display target was not created"))
+            })?;
+            self.resources.publish("tonemap", "color", view, desc);
+            self.resources.publish("overlay", "color", view, desc);
+        }
         let mut record = RecordCtx {
             gpu: ctx.gpu,
             encoder: &mut *ctx.encoder,
@@ -1003,7 +1081,16 @@ impl Pipeline {
             surface_is_srgb: self.surface_is_srgb,
         };
         for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
+            for (_, frame) in &mut self.graph_frames {
+                frame.before_record(&entry.name, &mut record)?;
+            }
             entry.pass.record(&mut record)?;
+            for (_, frame) in &mut self.graph_frames {
+                frame.after_record(&entry.name, &mut record)?;
+            }
+        }
+        for (_, frame) in &mut self.graph_frames {
+            frame.end(&self.resources);
         }
         Ok(())
     }
@@ -1507,6 +1594,201 @@ mod tests {
         );
         assert!(
             check_overlay_order(&["forward", "selection", "bloom"], &["selection"], true).is_err()
+        );
+    }
+
+    /// A graph frame that appends each hook call to its log; `fail_before_record` names the
+    /// pass whose `before_record` returns an error.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct HookLog {
+        log: Rc<RefCell<Vec<String>>>,
+        fail_before_record: Option<&'static str>,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl HookLog {
+        fn note(&self, entry: String) {
+            self.log.borrow_mut().push(entry);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl GraphFrame for HookLog {
+        fn begin(&mut self, _table: &ResourceTable) {
+            self.note("begin".into());
+        }
+
+        fn before_prepare(
+            &mut self,
+            pass: &str,
+            _ctx: &mut PrepareCtx<'_>,
+        ) -> Result<(), RaaError> {
+            self.note(format!("before_prepare {pass}"));
+            Ok(())
+        }
+
+        fn before_record(&mut self, pass: &str, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            self.note(format!("before_record {pass}"));
+            if self.fail_before_record.is_some_and(|fail| fail == pass) {
+                return Err(RaaError::Gpu("mock hook failure".into()));
+            }
+            Ok(())
+        }
+
+        fn after_record(&mut self, pass: &str, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            self.note(format!("after_record {pass}"));
+            Ok(())
+        }
+
+        fn end(&mut self, _table: &ResourceTable) {
+            self.note("end".into());
+        }
+    }
+
+    /// A pass that appends its record call to a shared log.
+    #[cfg(not(target_arch = "wasm32"))]
+    struct RecordLog(&'static str, u32, Rc<RefCell<Vec<String>>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl FeaturePass for RecordLog {
+        fn name(&self) -> &str {
+            self.0
+        }
+
+        fn order(&self) -> u32 {
+            self.1
+        }
+
+        fn record(&mut self, _ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+            self.2.borrow_mut().push(format!("record {}", self.0));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn graph_frames_wrap_every_enabled_pass_in_order() {
+        with_software_gpu("graph_frames_wrap_every_enabled_pass_in_order", |gpu| {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let mut pipeline = Pipeline::new(gpu, SUBMISSION_FORMAT, false);
+            pipeline.add(Box::new(OrderMock("a", 10))).expect("added");
+            pipeline.add(Box::new(OrderMock("b", 20))).expect("added");
+            let frame = HookLog {
+                log: Rc::clone(&log),
+                fail_before_record: None,
+            };
+            pipeline
+                .add_graph_frame("hooks", Box::new(frame))
+                .expect("added");
+            let pipeline = Rc::new(RefCell::new(pipeline));
+            execute_scene(&pipeline, gpu).expect("the frame runs");
+            assert_eq!(
+                *log.borrow(),
+                [
+                    "begin",
+                    "before_prepare a",
+                    "before_prepare b",
+                    "before_record a",
+                    "after_record a",
+                    "before_record b",
+                    "after_record b",
+                    "end",
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn graph_frame_names_are_unique_and_removable() {
+        with_software_gpu("graph_frame_names_are_unique_and_removable", |gpu| {
+            let mut pipeline = Pipeline::new(gpu, SUBMISSION_FORMAT, false);
+            let frame = || HookLog {
+                log: Rc::new(RefCell::new(Vec::new())),
+                fail_before_record: None,
+            };
+            pipeline
+                .add_graph_frame("hooks", Box::new(frame()))
+                .expect("added");
+            let error = pipeline
+                .add_graph_frame("hooks", Box::new(frame()))
+                .expect_err("a repeated name is refused");
+            assert_eq!(error.code(), "pipeline.duplicate_pass");
+            assert!(error.message().contains("`hooks`"), "{}", error.message());
+            assert!(pipeline.remove_graph_frame("hooks").is_some());
+            assert!(pipeline.remove_graph_frame("hooks").is_none());
+        });
+    }
+
+    #[test]
+    fn graph_frame_record_error_aborts_the_frame() {
+        with_software_gpu("graph_frame_record_error_aborts_the_frame", |gpu| {
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let mut pipeline = Pipeline::new(gpu, SUBMISSION_FORMAT, false);
+            pipeline
+                .add(Box::new(RecordLog("a", 10, Rc::clone(&log))))
+                .expect("added");
+            pipeline
+                .add(Box::new(RecordLog("b", 20, Rc::clone(&log))))
+                .expect("added");
+            let frame = HookLog {
+                log: Rc::clone(&log),
+                fail_before_record: Some("a"),
+            };
+            pipeline
+                .add_graph_frame("hooks", Box::new(frame))
+                .expect("added");
+            let pipeline = Rc::new(RefCell::new(pipeline));
+            let error = execute_scene(&pipeline, gpu).expect_err("the hook error ends the frame");
+            assert_eq!(error.message(), "mock hook failure");
+            assert_eq!(
+                *log.borrow(),
+                [
+                    "begin",
+                    "before_prepare a",
+                    "before_prepare b",
+                    "before_record a",
+                ],
+                "pass a is not recorded and pass b is never reached"
+            );
+        });
+    }
+
+    #[test]
+    fn display_target_is_published_only_while_graph_frames_are_added() {
+        with_software_gpu(
+            "display_target_is_published_only_while_graph_frames_are_added",
+            |gpu| {
+                let plain = Rc::new(RefCell::new(Pipeline::new(gpu, SUBMISSION_FORMAT, false)));
+                execute_scene(&plain, gpu).expect("the frame runs");
+                let entries = plain.borrow().resources().entries();
+                assert!(
+                    !entries
+                        .iter()
+                        .any(|(p, port, _)| p == "tonemap" && port == "color")
+                );
+
+                let mut hooked = Pipeline::new(gpu, SUBMISSION_FORMAT, false);
+                let frame = HookLog {
+                    log: Rc::new(RefCell::new(Vec::new())),
+                    fail_before_record: None,
+                };
+                hooked
+                    .add_graph_frame("hooks", Box::new(frame))
+                    .expect("added");
+                let hooked = Rc::new(RefCell::new(hooked));
+                execute_scene(&hooked, gpu).expect("the frame runs");
+                let entries = hooked.borrow().resources().entries();
+                let (_, _, desc) = entries
+                    .iter()
+                    .find(|(p, port, _)| p == "tonemap" && port == "color")
+                    .expect("the display target is published as tonemap color");
+                assert_eq!(desc.format, SUBMISSION_FORMAT);
+                assert_eq!((desc.width, desc.height), (32, 16));
+                assert!(
+                    entries
+                        .iter()
+                        .any(|(p, port, _)| p == "overlay" && port == "color")
+                );
+            },
         );
     }
 }
