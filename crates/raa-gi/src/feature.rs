@@ -22,7 +22,7 @@ use raa_vg::scene::{ItemScratch, SyncItem};
 
 use crate::clipmap::{RebuildRounds, RelightCursor};
 use crate::debug::DebugRenderer;
-use crate::emissive::{EmissiveSources, emission_signature};
+use crate::emissive::{EmissiveSources, emission_power, emission_signature};
 use crate::forward_driver::ForwardDriver;
 use crate::layouts::GiFrameGpu;
 use crate::membership::{InstanceGi, MembershipReport, plan_members};
@@ -157,6 +157,9 @@ pub(crate) struct GiCore {
     emission_signature: Option<u64>,
     /// The emitted-power proxy of the latest frame ([`lighting_power`]).
     light_power: Option<f32>,
+    /// The [`emission_power`] of the latest frame: a fall (a source switched off, an emission
+    /// dimmed or removed) clears the stored radiance like a darker light.
+    emission_power: Option<f32>,
     prepared: GiStats,
     published: Option<GiStats>,
     pending: bool,
@@ -213,6 +216,7 @@ impl GiCore {
             emissive_sources: EmissiveSources::ALL,
             emission_signature: None,
             light_power: None,
+            emission_power: None,
             frames_since_rebuild: 0,
             prepared: initial_stats(GiQuality::default()),
             published: None,
@@ -274,13 +278,18 @@ impl GiHandle {
     }
 
     /// Stores `sources` in the core and publishes them to `GiShared`; never refuses, and a value
-    /// equal to the stored one changes nothing. The volume relights and rebuilds its voxel-light
-    /// pipeline at the next frame when `sources.volume` changed.
+    /// equal to the stored one changes nothing. A change drops every history that holds light of
+    /// the previous sources (the lit HDR copy, the screen-probe history, the ReSTIR GI
+    /// reservoirs and the SSGI history), as [`GiHandle::invalidate_history`] does, so the next
+    /// frame starts from the new sources. The volume relights and rebuilds its voxel-light
+    /// pipeline at the next frame when `sources.volume` changed, and clears its stored radiance
+    /// when that switched the volume emission off.
     pub fn set_emissive_sources(&self, sources: EmissiveSources) {
         let mut core = self.core.borrow_mut();
         if core.emissive_sources != sources {
             core.emissive_sources = sources;
             core.shared.set_emissive_sources(sources);
+            drop_histories(&mut core);
         }
     }
 
@@ -393,13 +402,7 @@ impl GiHandle {
 
     /// Marks the frame history invalid and drops the history of every part.
     pub fn invalidate_history(&self) {
-        let mut core = self.core.borrow_mut();
-        core.history_valid = false;
-        core.history_copied = None;
-        core.last_active_viewport = None;
-        for part in &core.parts {
-            part.invalidate_history();
-        }
+        drop_histories(&mut self.core.borrow_mut());
     }
 
     /// Records the outcome of submission `invocation`: nothing is pending any more, and a
@@ -573,15 +576,30 @@ impl GiHandle {
             core.hot_relight = HOT_RELIGHT_FRAMES;
         }
         core.emission_signature = Some(emission);
+        // A fall of the emission the volume injects clears the stored radiance: a restarted
+        // average alone still gathers the old emitted bounce from the neighbouring voxels.
+        let injected = emission_power(
+            core.report.members.iter().map(|member| {
+                source
+                    .material_record(member.item.material)
+                    .map_or([0.0; 3], |record| record.emissive)
+            }),
+            core.emissive_sources.volume,
+        );
+        let emission_darker = core
+            .emission_power
+            .is_some_and(|previous| injected < DARKER * previous);
+        core.emission_power = Some(injected);
         // A changed scene (an object moved, appeared or left) changes the light paths too: the
         // volume replaces its radiance while it follows.
         if changed {
             core.hot_relight = HOT_RELIGHT_FRAMES;
         }
         let power = lighting_power(lit, core.sun_color) + sky;
-        let clear_radiance = core
-            .light_power
-            .is_some_and(|previous| power < DARKER * previous);
+        let clear_radiance = emission_darker
+            || core
+                .light_power
+                .is_some_and(|previous| power < DARKER * previous);
         core.light_power = Some(power);
         let full_relight = core.hot_relight > 0;
         core.hot_relight = core.hot_relight.saturating_sub(1);
@@ -689,6 +707,17 @@ pub(crate) fn lighting_power(lit: &LitRenderer, sun_color: [f32; 3]) -> f32 {
         })
         .sum();
     luminance(sun_color) + lights
+}
+
+/// Marks the frame history invalid (the lit HDR copy and the camera continuity) and drops the
+/// history of every part.
+fn drop_histories(core: &mut GiCore) {
+    core.history_valid = false;
+    core.history_copied = None;
+    core.last_active_viewport = None;
+    for part in &core.parts {
+        part.invalidate_history();
+    }
 }
 
 /// The radiance scale of the GI rays that reach the sky: the environment's authored diffuse
@@ -1186,10 +1215,20 @@ mod tests {
         /// the graph executed into the offscreen target and waited for. Returns the statistics
         /// of `prepare_frame`.
         fn frame(&mut self, gpu: &GpuContext, views: u8) -> GiStats {
+            let stats = self.prepare(gpu, views);
+            self.execute(gpu);
+            stats
+        }
+
+        /// The first half of [`Rig::frame`]: the view and `prepare_frame`.
+        fn prepare(&mut self, gpu: &GpuContext, views: u8) -> GiStats {
             self.handle.set_view(&self.camera, SIZE, views);
-            let stats = self
-                .handle
-                .prepare_frame(gpu, &mut self.scene, &mut self.lit);
+            self.handle
+                .prepare_frame(gpu, &mut self.scene, &mut self.lit)
+        }
+
+        /// The second half of [`Rig::frame`]: the lit prepare, the graph and the wait.
+        fn execute(&mut self, gpu: &GpuContext) {
             self.lit
                 .prepare(
                     gpu,
@@ -1207,7 +1246,6 @@ mod tests {
             gpu.device()
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("device poll");
-            stats
         }
 
         /// Enables GI at quality 64/3 (the default settings keep it off).
@@ -1503,5 +1541,81 @@ mod tests {
             .map(GiVolume::built_emissive_generation);
         assert_eq!(built, Some(1));
         assert_ne!(core.light_epoch, epoch);
+    }
+
+    /// The defect of render-graph run 15510: a graph that switches emission off after it was on
+    /// kept the emitted light. Turning every source off after emissive frames drops the
+    /// histories before the next frame (no screen-probe, ReSTIR GI, SSGI or lit-HDR reuse), and
+    /// that frame restarts the voxel epoch, clears the stored radiance and builds the voxel-light
+    /// pipeline with the off gate (`RAA_GI_EMISSIVE` and `RAA_GI_SCREEN_EMISSIVE` 0).
+    #[test]
+    fn emissive_off_after_on_drops_histories_and_clears_the_radiance() {
+        let test = "emissive_off_after_on_drops_histories_and_clears_the_radiance";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.lit
+            .materials_mut()
+            .set(
+                MaterialId(0),
+                raa_lit::SurfaceMaterial {
+                    emissive: [0.7, 1.4, 4.0],
+                    ..raa_lit::SurfaceMaterial::default()
+                },
+            )
+            .expect("emissive material");
+        rig.enable_at_64_3();
+        for _ in 0..3 {
+            assert!(rig.frame(&gpu, 1).active);
+        }
+        {
+            let core = rig.handle.core.borrow();
+            assert!(core.history_valid, "three active frames copy the lit HDR");
+            assert!(core.emission_power.is_some_and(|power| power > 0.0));
+        }
+        let epoch = rig.handle.core.borrow().light_epoch;
+        let off = EmissiveSources {
+            volume: false,
+            screen: false,
+            ssgi: false,
+        };
+        rig.handle.set_emissive_sources(off);
+        {
+            let core = rig.handle.core.borrow();
+            assert!(!core.history_valid);
+            assert_eq!(core.history_copied, None);
+            assert_eq!(
+                core.last_active_viewport, None,
+                "the next frame is a camera cut"
+            );
+        }
+        assert!(rig.prepare(&gpu, 1).active);
+        let core = rig.handle.core.borrow();
+        assert!(
+            !core.history_valid,
+            "no lit HDR of the emissive frames is read"
+        );
+        assert_ne!(core.light_epoch, epoch);
+        assert_eq!(core.emission_power, Some(0.0));
+        let work = core.work.as_ref().expect("an active frame has volume work");
+        assert!(work.clear_radiance, "the emitted bounce leaves the volume");
+        drop(core);
+        rig.execute(&gpu);
+        let core = rig.handle.core.borrow();
+        let built = core
+            .volume
+            .as_ref()
+            .map(GiVolume::built_emissive_generation);
+        assert_eq!(built, Some(core.shared.emissive_generation()));
+        assert_eq!(core.shared.emissive_sources(), off);
+        assert_eq!(crate::emissive::override_value(off.volume), 0.0);
+        assert_eq!(crate::emissive::override_value(off.screen), 0.0);
+        drop(core);
+        // The radiance is cleared once: a steady off frame keeps averaging.
+        assert!(rig.prepare(&gpu, 1).active);
+        let core = rig.handle.core.borrow();
+        assert!(core.work.as_ref().is_some_and(|work| !work.clear_radiance));
     }
 }

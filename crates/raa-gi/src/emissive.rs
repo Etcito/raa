@@ -60,6 +60,20 @@ pub fn emission_signature(emissive: impl IntoIterator<Item = [f32; 3]>, volume: 
     fold(hash, u8::from(volume))
 }
 
+/// A proxy of the power the record emission injects into the volume: the sum of the Rec. 709
+/// luminance of every emission when `volume` is on, 0 when it is off. It only has to fall when
+/// an emissive source is switched off, dimmed or removed: the volume then clears its stored
+/// radiance, so no bounce of the old emission survives in the voxel gather.
+pub fn emission_power(emissive: impl IntoIterator<Item = [f32; 3]>, volume: bool) -> f32 {
+    if !volume {
+        return 0.0;
+    }
+    emissive
+        .into_iter()
+        .map(|e| (0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2]).max(0.0))
+        .sum()
+}
+
 /// The 8 voxel cells around `p` for a trilinear read of a level whose grid starts at `origin`
 /// with cells of `voxel` metres: base = floor((p - origin) / voxel - 0.5) per axis, item
 /// `dx + 2 dy + 4 dz` = base + (dx, dy, dz).
@@ -105,5 +119,29 @@ mod tests {
     #[test]
     fn default_is_all() {
         assert_eq!(EmissiveSources::default(), EmissiveSources::ALL);
+    }
+
+    /// On, then off: the volume's injected power falls to 0 (the volume clears its radiance),
+    /// the signature changes (the voxel epoch restarts) and a screen hit loses the emission of
+    /// the surface it hit. Expected numbers by hand: luminance of (1, 2, 4) = 0.2126 + 1.4304 +
+    /// 0.2888 = 1.9318.
+    #[test]
+    fn turning_emission_off_after_on_injects_no_emission() {
+        let emission = [[1.0, 2.0, 4.0], [0.0, 0.0, 0.0]];
+        let on = emission_power(emission, true);
+        assert!((on - 1.9318).abs() < 1.0e-5, "{on}");
+        assert_eq!(emission_power(emission, false), 0.0);
+        assert_ne!(
+            emission_signature(emission, true),
+            emission_signature(emission, false)
+        );
+        assert_eq!(override_value(false), 0.0);
+        let hit = [1.5, 2.5, 4.25];
+        assert_eq!(without_emission(hit, emission[0], true), hit);
+        assert_eq!(without_emission(hit, emission[0], false), [0.5, 0.5, 0.25]);
+        assert_eq!(
+            without_emission([0.5, 0.5, 0.5], emission[0], false),
+            [0.0; 3]
+        );
     }
 }
