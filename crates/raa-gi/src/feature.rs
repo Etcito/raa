@@ -965,6 +965,20 @@ impl FeaturePass for GiHistoryPass {
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let result = self.record_history(ctx);
+        let hdr_chain = ctx.targets.hdr();
+        if hdr_chain.is_bound() && !matches!(result, Ok(true)) {
+            // Pass-through of a bound chain: the dst texture is written by the copy.
+            let extent = wgpu::Extent3d {
+                width: ctx.size.0,
+                height: ctx.size.1,
+                depth_or_array_layers: 1,
+            };
+            ctx.encoder.copy_texture_to_texture(
+                hdr_chain.src_texture().as_image_copy(),
+                hdr_chain.dst_texture().as_image_copy(),
+                extent,
+            );
+        }
         let size = ctx.size;
         let hdr = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, size.0, size.1, 1, 1);
         ctx.resources
@@ -974,13 +988,14 @@ impl FeaturePass for GiHistoryPass {
             let desc = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, w, h, 1, 1);
             ctx.resources.publish(HISTORY_PASS, "history", view, desc);
         }
-        result
+        result.map(|_| ())
     }
 }
 
 impl GiHistoryPass {
-    /// The copy and debug record of the pass; `record` publishes the taps after it.
-    fn record_history(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+    /// The copy and debug record of the pass; `record` publishes the taps after it. Returns true
+    /// when the debug view recorded (it wrote the chain destination).
+    fn record_history(&mut self, ctx: &mut RecordCtx<'_>) -> Result<bool, RaaError> {
         let mut guard = self.core.borrow_mut();
         let core = &mut *guard;
         if core.shared.frame_buffer().is_some() {
@@ -993,13 +1008,13 @@ impl GiHistoryPass {
             }
         }
         if core.settings.debug_view == DebugView::None {
-            return Ok(());
+            return Ok(false);
         }
         let (Some(frame), Some(volume)) = (core.shared.frame_buffer(), core.volume.as_ref()) else {
-            return Ok(());
+            return Ok(false);
         };
         let Some(group1) = core.shared.compute_group1(ctx.lighting) else {
-            return Ok(());
+            return Ok(false);
         };
         let screen_debug = core.shared.screen_debug_view();
         let screen_output = core.shared.probe_output_view();
@@ -1014,7 +1029,7 @@ impl GiHistoryPass {
         if !core.recorded.contains(&HISTORY_PASS) {
             core.recorded.push(HISTORY_PASS);
         }
-        Ok(())
+        Ok(true)
     }
 }
 
