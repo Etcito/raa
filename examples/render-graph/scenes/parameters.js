@@ -20,8 +20,10 @@ const PANE_SPACING_M = 0.25;
 // Without the fan the panes hid exactly behind one another and read as one square (run 15631).
 export const PANE_FAN_M = { side: 0.09, up: 0.05 };
 const PANE_COLOURS = [
-  [0.9, 0.2, 0.2], [0.95, 0.5, 0.15], [0.95, 0.85, 0.2], [0.2, 0.8, 0.3],
-  [0.2, 0.75, 0.9], [0.2, 0.35, 0.95], [0.6, 0.25, 0.9], [0.85, 0.85, 0.85],
+  { color: [0.95, 0.85, 0.2], opacity: 0.15 }, { color: [0.95, 0.5, 0.15], opacity: 0.15 },
+  { color: [0.9, 0.2, 0.2], opacity: 0.15 }, { color: [0.9, 0.3, 0.6], opacity: 0.15 },
+  { color: [0.2, 0.8, 0.3], opacity: 0.4 }, { color: [0.2, 0.75, 0.9], opacity: 0.4 },
+  { color: [0.2, 0.35, 0.95], opacity: 0.4 }, { color: [0.6, 0.25, 0.9], opacity: 0.4 },
 ];
 
 export const factNames = ['defaults-accepted', 'parameter-changed'];
@@ -111,12 +113,12 @@ export function paneLayout() {
   const length = Math.hypot(...toward);
   const yaw = Math.atan2(eye[0], eye[2]);
   const side = [toward[2] / Math.hypot(toward[0], toward[2]), 0, -toward[0] / Math.hypot(toward[0], toward[2])];
-  return PANE_COLOURS.map((color, index) => {
+  return PANE_COLOURS.map(({ color, opacity }, index) => {
     const step = index - (PANE_COLOURS.length - 1) / 2;
     const offset = step * PANE_SPACING_M;
     const centre = PANE_TARGET.map((value, axis) => value + toward[axis] / length * offset
       + side[axis] * step * PANE_FAN_M.side + (axis === 1 ? step * PANE_FAN_M.up : 0));
-    return { name: `oit-pane-${index}`, color, centre, yaw };
+    return { name: `oit-pane-${index}`, color, opacity, centre, yaw };
   });
 }
 
@@ -127,7 +129,7 @@ const paneSubjects = () => paneLayout().map(({ name, centre }) => ({
 function addPanes(engine) {
   for (const pane of paneLayout()) {
     const node = engine.addNode(null, pane.centre, [0, Math.sin(pane.yaw / 2), 0, Math.cos(pane.yaw / 2)], [1, 1, 1]);
-    const material = engine.addSurfaceMaterial({ color: pane.color, roughness: 0.5, blend: 'transparent', opacity: 0.35 });
+    const material = engine.addSurfaceMaterial({ color: pane.color, roughness: 0.5, blend: 'transparent', opacity: pane.opacity });
     engine.addInstance(node, engine.primitiveMesh('box', { halfExtents: [0.5, 0.5, 0.01] }), material);
   }
 }

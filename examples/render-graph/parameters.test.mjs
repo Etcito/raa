@@ -253,3 +253,25 @@ test('the oit panes fan out across the view and keep a common core of all eight'
   const spreadPitch = Math.max(...angles.map(a => a.pitch)) - Math.min(...angles.map(a => a.pitch));
   assert.ok(spreadYaw * nearest < 0.8 && spreadPitch * nearest < 0.8, 'the eight panes keep no common core');
 });
+
+test('capping the oit row at 4 fragments visibly changes the common core', () => {
+  const panes = parameters.paneLayout();
+  assert.ok(panes.length >= 6, 'the common core needs at least six panes');
+  const colourKeys = panes.map(({ color }) => color.join(','));
+  assert.equal(new Set(colourKeys).size, panes.length, 'pane colours must all be distinct');
+
+  // raa-oit uses back-face culling for ordinary transparent materials, so each thin box writes
+  // one fragment per pixel in the core (crates/raa-oit/src/feature.rs:204).
+  const fragmentsPerPane = 1;
+  // Pane colours enter the JS API as sRGB and are blended in linear space by the GPU.
+  const srgbToLinear = channel => channel <= 0.04045
+    ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  const fragments = panes.flatMap(({ color, opacity }) =>
+    Array.from({ length: fragmentsPerPane }, () => ({ color: color.map(srgbToLinear), opacity })));
+  const blendFarToNear = source => source.slice().reverse().reduce((dst, { color, opacity }) =>
+    color.map((channel, index) => channel * opacity + dst[index] * (1 - opacity)), [0.5, 0.5, 0.5]);
+  const allFragments = blendFarToNear(fragments);
+  const nearestFour = blendFarToNear(fragments.slice(0, 4));
+  const maxDifference = Math.max(...allFragments.map((channel, index) => Math.abs(channel - nearestFour[index])));
+  assert.ok(maxDifference >= 0.12, `max channel difference ${maxDifference} is below 0.12`);
+});
