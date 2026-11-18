@@ -12,6 +12,21 @@ const MULTI_PRODUCER = 'Wiring 4/5: multi-instance post passes';
 const DEFAULT_FACTS = ['snapshot:renderGraphActive', 'snapshot:issues', 'runtime:passes', 'runtime:ready'];
 const PAIR_FACTS = ['snapshot:renderGraphActive', 'runtime:passes', 'runtime:ready', 'assertion:bloom-before-dof-order'];
 const DOF = { id: 'dof', type: 'pass.dof', params: { focusDistance: 2, fStop: 0.7, focalLength: 85, maxCoc: 48 } };
+const BLOOM = { strength: 0.35, radius: 1 };
+// The bloom has no threshold and the DOF blurs by depth only: both are linear in colour, so on the
+// flat back wall the two orders give the same image. The order shows on small, very bright warm
+// emitters at the panel's corners, all beyond the 2 m focus: the bloom's first (Karis) downsample
+// damps a sharp small emitter (bloom before dof: a faint patch, then blurred), while a dof-blurred
+// emitter keeps its whole glow (dof before bloom: a brighter halo around the blurred panel).
+export const PAIR_EMITTERS = {
+  radius: 0.08,
+  emissive: [120, 90, 45],
+  positions: [[1.6, 3.0, -4.75], [3.6, 3.0, -4.75], [1.6, 1.8, -4.75], [3.6, 1.8, -4.75]],
+};
+// The second TAA instance: no history blending and a nearest-sample resolve, on a single-sample
+// forward (msaa 4 would anti-alias the edges before any TAA, so neither half could show steps).
+const TAA_B = { blendBase: 1, blendMin: 1, blendMax: 1, filterSharpness: 8 };
+const TWO_TAA_ENGINE = { msaa: 1 };
 
 export const factNames = ['simple-forward-wired', 'full-gi-wired', 'debug-wired', 'bloom-before-dof-order', 'two-taa-instances-ran'];
 
@@ -42,8 +57,18 @@ export const inventory = [
     'One view of the room split by a thin vertical line in the middle. Left of the line (the default TAA instance) the edges of the boxes, walls and sphere are smooth; right of the line (the second TAA instance with no history blending) the same edges show visible jagged stair-step aliasing. Lighting, colours and geometry match across the line.'),
 ];
 
-function makeVariant(id, description, pair = null) {
-  return { id, description, references: [], judge: true, pair, selection: selectionAt(RG_CAPTURE_T_S) };
+function makeVariant(id, description, pair = null, engine = undefined) {
+  const variant = { id, description, references: [], judge: true, pair, selection: selectionAt(RG_CAPTURE_T_S) };
+  return engine ? { ...variant, engine } : variant;
+}
+
+// The pair's emitters (PAIR_EMITTERS), added once before both halves render.
+function addPairEmitters(engine) {
+  const material = engine.addMaterial({ color: [1, 0.9, 0.75], roughness: 0.5, emissive: PAIR_EMITTERS.emissive });
+  const mesh = engine.primitiveMesh('sphere', { radius: PAIR_EMITTERS.radius }, 16);
+  for (const position of PAIR_EMITTERS.positions) {
+    engine.addInstance(engine.addNode(null, position, [0, 0, 0, 1], [1, 1, 1]), mesh, material);
+  }
 }
 
 function starter(state, name) {
@@ -69,7 +94,7 @@ function reordered(text, chain) {
   const doc = JSON.parse(text);
   doc.name = chain === 'bloom-first' ? 'Full GI bloom before dof' : 'Full GI dof before bloom';
   const bloom = doc.nodes.find(node => node.id === 'bloom');
-  bloom.params = { ...bloom.params, strength: 0.6, radius: 1 };
+  bloom.params = { ...bloom.params, ...BLOOM };
   doc.nodes.splice(doc.nodes.indexOf(bloom) + 1, 0, structuredClone(DOF));
   const links = chain === 'bloom-first'
     ? [['taa', 'bloom'], ['bloom', 'dof'], ['dof', 'tonemap']]
@@ -84,8 +109,10 @@ function twoTaa(text) {
   const doc = JSON.parse(text);
   doc.name = 'Full GI two TAA instances';
   doc.nodes = doc.nodes.filter(node => node.id !== 'bloom');
+  const forward = doc.nodes.find(node => node.type === 'pass.forward');
+  forward.params = { ...forward.params, msaa: TWO_TAA_ENGINE.msaa };
   doc.nodes.splice(doc.nodes.findIndex(node => node.id === 'tonemap'), 0,
-    { id: 'taaB', type: 'pass.taa', params: { blendBase: 1, blendMin: 1, blendMax: 1 } },
+    { id: 'taaB', type: 'pass.taa', params: { ...TAA_B } },
     { id: 'cmp', type: 'view.compare', params: { mode: 'split', position: 0.5 } });
   doc.links = doc.links.filter(link => !link.from.startsWith('bloom.') && !link.to.startsWith('bloom.'));
   doc.links.push(
@@ -169,10 +196,11 @@ export default {
     makeVariant('default-debug', 'Debug starter on the wired colour chain'),
     makeVariant('bloom-before-dof-pair', 'Full GI with bloom before dof (left) and dof before bloom (right)',
       { left: 'bloom before dof', right: 'default order', order: ['left', 'right'] }),
-    makeVariant('two-taa-split', 'Full GI with two TAA instances compared in a split'),
+    makeVariant('two-taa-split', 'Full GI with two TAA instances compared in a split', null, TWO_TAA_ENGINE),
   ],
-  async build(engine, lib) {
+  async build(engine, lib, variant) {
     await lib.scene.buildRoom(engine);
+    if (variant?.id === 'bloom-before-dof-pair') addPairEmitters(engine);
     return { starters: engine.renderGraphCatalog().starters, assertions: [], edits: [], pair: [] };
   },
   prepareHalf,

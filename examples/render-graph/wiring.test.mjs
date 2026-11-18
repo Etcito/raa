@@ -29,6 +29,11 @@ function engineDouble({ passes = [], nodes = [] } = {}) {
     renderGraphIssues: () => [],
     renderGraphStats() { return { frameIndex: 2, nodes: this.nodes }; },
     passes() { return this.passList; },
+    added: [],
+    addMaterial(desc) { this.added.push(['material', desc]); return 7; },
+    primitiveMesh(kind, params) { this.added.push(['mesh', kind, params]); return 8; },
+    addNode(parent, position) { this.added.push(['node', position]); return 9; },
+    addInstance(node, mesh, material) { this.added.push(['instance', node, mesh, material]); return 10; },
   };
 }
 
@@ -85,12 +90,34 @@ test('bloom-before-dof-pair sends the two reordered documents', async () => {
   await run(engine, 'bloom-before-dof-pair', ['left', 'right']);
   const [left, right] = engine.documents;
   for (const doc of [left, right]) {
-    assert.deepEqual(doc.nodes.find(node => node.id === 'bloom').params, { strength: 0.6, radius: 1 });
+    assert.deepEqual(doc.nodes.find(node => node.id === 'bloom').params, { strength: 0.35, radius: 1 });
     assert.deepEqual(doc.nodes.find(node => node.id === 'dof'), { id: 'dof', type: 'pass.dof', params: { focusDistance: 2, fStop: 0.7, focalLength: 85, maxCoc: 48 } });
   }
   assert.deepEqual(['bloom.color', 'dof.color', 'tonemap.color'].map(to => link(left, to)), ['taa.color', 'bloom.color', 'dof.color']);
   assert.deepEqual(['dof.color', 'bloom.color', 'tonemap.color'].map(to => link(right, to)), ['taa.color', 'dof.color', 'bloom.color']);
   assert.equal(left.links.length, JSON.parse(STARTERS[1].json).links.length + 1);
+});
+
+// The two orders differ only on small bright emitters out of focus (bloom and dof are linear in
+// colour): the pair adds them once, beyond the dof focus distance and inside the capture view.
+test('bloom-before-dof-pair adds bright emitters out of focus at the panel, other modes none', async () => {
+  const engine = engineDouble({ passes: [pass('bloom'), pass('dof')] });
+  await run(engine, 'bloom-before-dof-pair', ['left', 'right']);
+  const instances = engine.added.filter(entry => entry[0] === 'instance');
+  assert.equal(instances.length, wiring.PAIR_EMITTERS.positions.length);
+  const [, material] = engine.added.find(entry => entry[0] === 'material');
+  assert.ok(Math.min(...material.emissive) > 40, 'the emitters are far brighter than the panel (4, 3, 1.5)');
+  const { camera } = variant('bloom-before-dof-pair').selection;
+  const focus = engine.documents.map(docOf)[0].nodes.find(node => node.id === 'dof').params.focusDistance;
+  for (const [, position] of engine.added.filter(entry => entry[0] === 'node')) {
+    const distance = Math.hypot(...position.map((v, i) => v - camera.eye[i]));
+    assert.ok(distance > 3 * focus, `emitter at ${position} is out of focus (${distance.toFixed(1)} m)`);
+  }
+  for (const mode of ['default-full-gi', 'two-taa-split']) {
+    const other = engineDouble({ passes: [pass('taa'), pass('taa#taaB')] });
+    await run(other, mode);
+    assert.deepEqual(other.added, [], `${mode} adds no emitter`);
+  }
 });
 
 test('bloom-before-dof-order follows the passes read after each half', async () => {
@@ -108,7 +135,11 @@ test('two-taa-split sends the taaB and cmp graph', async () => {
   const doc = engine.documents[0];
   assert.ok(!doc.nodes.some(node => node.id === 'bloom'));
   assert.ok(!doc.links.some(entry => /^bloom\./.test(entry.from) || /^bloom\./.test(entry.to)));
-  assert.deepEqual(doc.nodes.find(node => node.id === 'taaB'), { id: 'taaB', type: 'pass.taa', params: { blendBase: 1, blendMin: 1, blendMax: 1 } });
+  assert.deepEqual(doc.nodes.find(node => node.id === 'taaB'), { id: 'taaB', type: 'pass.taa', params: { blendBase: 1, blendMin: 1, blendMax: 1, filterSharpness: 8 } });
+  // Single-sample forward on an msaa 1 engine: msaa 4 would smooth the edges before either TAA.
+  assert.equal(doc.nodes.find(node => node.type === 'pass.forward').params.msaa, 1);
+  assert.deepEqual(variant('two-taa-split').engine, { msaa: 1 });
+  assert.equal(variant('default-full-gi').engine, undefined);
   assert.deepEqual(doc.nodes.find(node => node.id === 'cmp'), { id: 'cmp', type: 'view.compare', params: { mode: 'split', position: 0.5 } });
   assert.deepEqual(['taaB.color', 'cmp.a', 'cmp.b', 'tonemap.color'].map(to => link(doc, to)), ['fog.color', 'taa.color', 'taaB.color', 'cmp.color']);
 });
