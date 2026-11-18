@@ -122,6 +122,38 @@ pub const OVERLAY_SEGMENT_FLOATS: usize = 16;
 /// draws with the camera its view uploaded. One instance per segment (see
 /// [`OverlayLayer::write_instances`]), 6 vertices: a screen-space quad `widthPx` wide,
 /// clipped to the near plane. Colours are linear and encoded when the surface is not sRGB.
+/// The depth attachment the `raa.overlay` pass begins with, for a colour target of
+/// `colour` pixels and scene depth (`raa-pipeline.depth`) of `scene_depth` pixels.
+/// WebGPU needs every attachment of a pass to have the same size: under an internal
+/// render scale the colour target (canvas or view output) can differ from the depth
+/// target, so the pass then uses its own depth of the colour size, cleared to 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayDepth {
+    /// The scene depth (same size): `depthTest` layers are occluded by the scene.
+    Scene,
+    /// The overlay's own depth of this size, cleared to 1 (tested layers draw unoccluded).
+    Own((u32, u32)),
+}
+
+impl OverlayDepth {
+    /// Picks the scene depth when its size equals the colour target's, else an own depth.
+    pub fn select(colour: (u32, u32), scene_depth: (u32, u32)) -> Self {
+        if colour == scene_depth {
+            Self::Scene
+        } else {
+            Self::Own(colour)
+        }
+    }
+
+    /// The size of the depth attachment the pass begins with.
+    pub fn size(self, scene_depth: (u32, u32)) -> (u32, u32) {
+        match self {
+            Self::Scene => scene_depth,
+            Self::Own(size) => size,
+        }
+    }
+}
+
 pub const OVERLAY_WGSL: &str = r#"
 struct Frame { vp: mat4x4<f32>, rest: array<vec4<f32>, 28> }
 @group(0) @binding(0) var<uniform> frame: Frame;

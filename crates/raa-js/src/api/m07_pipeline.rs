@@ -10,7 +10,9 @@
 //! draws the m21 overlay layers 0..7 in order, per viewport with that viewport's camera
 //! (the lit frame uniform its view uploaded), into that view's final colour target only:
 //! the HDR chain, lighting and history buffers never see them. The scene depth is bound
-//! read-only for layers with `depthTest`. No overlay data means no render pass.
+//! read-only for layers with `depthTest`. No overlay data means no render pass. When the
+//! colour target and the scene depth differ in size (internal render scale), the pass
+//! uses its own depth of the colour size, cleared to 1 (`OverlayDepth`).
 //!
 //! Pipeline refusals (`pipeline.*`) and tone mapping refusals (`post.invalid`) are thrown
 //! with their own code; malformed JS arguments throw `api.invalid_argument`.
@@ -23,7 +25,7 @@ use raa_tonemap::{Look, ToneMapping, TonemapControl};
 use raa_web::FrameInput;
 use wasm_bindgen::prelude::*;
 
-use super::m21_views::{OVERLAY_SEGMENT_FLOATS, OVERLAY_WGSL, OverlayBuffers};
+use super::m21_views::{OVERLAY_SEGMENT_FLOATS, OVERLAY_WGSL, OverlayBuffers, OverlayDepth};
 use crate::convert::{INVALID_ARGUMENT, api_error, js, tone_mapper};
 use crate::engine::{Engine, InstallCtx};
 use crate::state::EngineState;
@@ -38,6 +40,7 @@ pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         lit: ctx.lit.handle(),
         buffers,
         pipelines: None,
+        own_depth: None,
     };
     ctx.pipeline
         .try_borrow_mut()
@@ -57,6 +60,9 @@ struct OverlayPass {
     buffers: OverlayBuffers,
     /// Built for the output format: [always on top, depth tested].
     pipelines: Option<(wgpu::TextureFormat, [wgpu::RenderPipeline; 2])>,
+    /// Output-size depth used when the scene depth differs in size from the colour
+    /// target (internal render scale, see [`OverlayDepth`]); created on first need.
+    own_depth: Option<((u32, u32), wgpu::TextureView)>,
 }
 
 impl OverlayPass {
@@ -153,6 +159,35 @@ impl FeaturePass for OverlayPass {
             return Ok(());
         };
         let frame = self.lit.frame_bind_group();
+        let colour = ctx.backbuffer.texture().size();
+        let choice = OverlayDepth::select((colour.width, colour.height), ctx.targets.size());
+        let (depth_view, depth_load) = match choice {
+            OverlayDepth::Scene => (ctx.targets.depth(), wgpu::LoadOp::Load),
+            OverlayDepth::Own(size) => {
+                if self.own_depth.as_ref().is_none_or(|(s, _)| *s != size) {
+                    let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                        label: Some("raa.overlay.depth"),
+                        size: wgpu::Extent3d {
+                            width: size.0,
+                            height: size.1,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: OVERLAY_DEPTH_FORMAT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                    self.own_depth = Some((size, view));
+                }
+                let Some((_, view)) = &self.own_depth else {
+                    return Ok(());
+                };
+                (view, wgpu::LoadOp::Clear(1.0))
+            }
+        };
         // `backbuffer` is the canvas (single view) or this view's output target (split
         // views, composited at its rect afterwards).
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -167,9 +202,9 @@ impl FeaturePass for OverlayPass {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: ctx.targets.depth(),
+                view: depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: depth_load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,

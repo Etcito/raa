@@ -8,8 +8,8 @@ use std::path::Path;
 mod m21_views;
 
 use m21_views::{
-    ViewCamera, ViewRect, ViewsState, backing_size, scaled_backing_size, validate_overlay,
-    validate_viewports,
+    OverlayDepth, ViewCamera, ViewRect, ViewsState, backing_size, scaled_backing_size,
+    validate_overlay, validate_viewports,
 };
 
 fn rect(x: f64, y: f64, width: f64, height: f64) -> ViewRect {
@@ -238,4 +238,17 @@ fn sky_views_share_snapshot_and_precede_lit_preparation() {
                 .unwrap()
     );
     assert!(engine.contains("sky.remove_view(view as u32)?"));
+}
+
+#[test]
+fn overlay_depth_matches_colour_size_below_render_scale_1() {
+    // Measured failure: output 973 x 670, scene depth at scale 0.67 = 652 x 449.
+    let colour = (973, 670);
+    let scene = (652, 449);
+    let choice = OverlayDepth::select(colour, scene);
+    assert_eq!(choice, OverlayDepth::Own(colour));
+    assert_eq!(choice.size(scene), colour);
+    // Scale 1: the scene depth is kept so depth-tested layers stay occluded.
+    assert_eq!(OverlayDepth::select(colour, colour), OverlayDepth::Scene);
+    assert_eq!(OverlayDepth::select(colour, colour).size(colour), colour);
 }
