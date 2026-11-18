@@ -266,11 +266,13 @@ struct HdrGroup {
     group: wgpu::BindGroup,
 }
 
-/// The composite bind group of the latest bound (src, dst) texture pair of the HDR chain.
-/// Rebuilt only when either texture differs and dropped on resize.
+/// The composite bind group of the latest bound (src, dst) texture pair of the HDR chain
+/// and the depth view it was built with. Rebuilt only when one of them differs and dropped
+/// on resize.
 struct BoundGroup {
     src: wgpu::Texture,
     dst: wgpu::Texture,
+    depth: wgpu::TextureView,
     group: wgpu::BindGroup,
 }
 
@@ -475,10 +477,12 @@ impl FeaturePass for ShaftsPass {
         Ok(())
     }
 
-    /// Marches into the half-res target, composites into hdr.dst() and swaps. While the
-    /// chain is bound (contract rg-hdr-chain-binding) the composite reads the bound src
-    /// texture through `BoundGroup`, rebuilt only when the bound (src, dst) pair changes;
-    /// `swap` is a no-op then.
+    /// Marches into the half-res target, composites into hdr.dst() and swaps. The composite
+    /// reads the depth through `Targets::depth_input` with this pass's own entry name. While
+    /// the chain is bound (contract rg-hdr-chain-binding) or the bound depth differs from
+    /// `Targets::depth`, the composite reads the bound src texture through `BoundGroup`,
+    /// rebuilt only when the (src, dst) pair or the depth view changes; `swap` is a no-op
+    /// while the chain is bound.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let Some(chain) = self.chain.as_ref() else {
             return Err(RaaError::Resource(
@@ -487,27 +491,25 @@ impl FeaturePass for ShaftsPass {
         };
         let hdr = ctx.targets.hdr();
         let src = hdr.src_texture();
-        if hdr.is_bound() {
+        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
+        let use_bound = hdr.is_bound() || depth != *ctx.targets.depth();
+        if use_bound {
             let dst = hdr.dst_texture();
             if !self
                 .bound
                 .as_ref()
-                .is_some_and(|b| b.src == *src && b.dst == *dst)
+                .is_some_and(|b| b.src == *src && b.dst == *dst && b.depth == depth)
             {
-                let group = self.group(
-                    ctx.gpu.device(),
-                    ctx.targets.depth(),
-                    &chain.march_view,
-                    hdr.src(),
-                );
+                let group = self.group(ctx.gpu.device(), &depth, &chain.march_view, hdr.src());
                 self.bound = Some(BoundGroup {
                     src: src.clone(),
                     dst: dst.clone(),
+                    depth,
                     group,
                 });
             }
         }
-        let group = if hdr.is_bound() {
+        let group = if use_bound {
             self.bound.as_ref().map(|b| &b.group)
         } else {
             chain
@@ -929,6 +931,90 @@ mod tests {
             drop(mapped);
             let error = block_on(&gpu, scope.pop());
             assert!(error.is_none(), "validation error: {error:?}");
+        }
+
+        /// A separate Depth32Float texture bound as `sunshafts`' `depth` input enters the
+        /// record-time composite group's cache key instead of `Targets::depth`.
+        #[test]
+        fn bound_depth_input_keys_the_record_cache() {
+            use raa_pipeline::{PublishedImage, ResourceTable, SampleKind};
+
+            let name = "bound_depth_input_keys_the_record_cache";
+            let Some(gpu) = software_gpu() else {
+                skip(
+                    name,
+                    "software_gpu returned None; see the software_gpu line above",
+                );
+                return;
+            };
+            let targets = Targets::new(&gpu, (SIZE, SIZE));
+            let pipeline = Pipeline::new(&gpu, FORMAT, false);
+            let layout = pipeline.lighting().opaque_layout().clone();
+            let state = Rc::new(RefCell::new(ShaftsState::default()));
+            let mut pass = ShaftsPass::new(&gpu, &layout, state, NAME.to_owned());
+            pass.resize(&gpu, &targets);
+            let input = gpu
+                .device()
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("test.shafts.depth_input"),
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let resources = ResourceTable::new();
+            resources.bind_input(
+                NAME,
+                "depth",
+                PublishedImage {
+                    view: input.clone(),
+                    desc: ImageDesc {
+                        dim: ImageDim::D2,
+                        format: wgpu::TextureFormat::Depth32Float,
+                        width: SIZE,
+                        height: SIZE,
+                        layers: 1,
+                        mips: 1,
+                        sample: SampleKind::Depth,
+                    },
+                },
+            );
+            let mut encoder = gpu.device().create_command_encoder(&Default::default());
+            let backbuffer = targets.hdr().src().clone();
+            let mut ctx = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size: (SIZE, SIZE),
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: pipeline.lighting(),
+                resources: &resources,
+                backbuffer: &backbuffer,
+                backbuffer_format: FORMAT,
+                surface_is_srgb: false,
+            };
+            pass.record(&mut ctx).unwrap();
+            let bound = pass
+                .bound
+                .as_ref()
+                .expect("the bound depth rebuilds the group");
+            assert!(
+                bound.depth == input,
+                "the record cache key holds the bound view"
+            );
+            assert!(
+                bound.depth != *targets.depth(),
+                "the target depth is not the key"
+            );
         }
     }
 }
