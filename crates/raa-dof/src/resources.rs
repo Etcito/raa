@@ -398,6 +398,76 @@ pub(crate) struct DofHdrGroups {
     pub composite: wgpu::BindGroup,
 }
 
+/// The groups of a bound chain, built for the latest bound (src, dst) textures; `groups`
+/// holds the bound source as `groups.texture`.
+pub(crate) struct DofBoundGroups {
+    pub dst: wgpu::Texture,
+    pub groups: DofHdrGroups,
+}
+
+/// Creates a bind group of `layout` over `entries`.
+fn group(
+    device: &wgpu::Device,
+    label: &str,
+    layout: &wgpu::BindGroupLayout,
+    entries: &[wgpu::BindGroupEntry<'_>],
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries,
+    })
+}
+
+/// Binding 0 of the pass: the `DofParams` uniform.
+fn params_entry(p: &DofPipelines) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding: 0,
+        resource: p.params.as_entire_binding(),
+    }
+}
+
+/// The views a chain group reads besides the chain texture.
+struct ChainViews<'a> {
+    depth: &'a wgpu::TextureView,
+    coc: &'a wgpu::TextureView,
+    near_gather: &'a wgpu::TextureView,
+    far_gather: &'a wgpu::TextureView,
+}
+
+/// The prefilter and composite groups reading `view` (a texture of the HDR chain). Shared by
+/// the A/B pair in `DofTargets::new` and the bound pair in `DofTargets::bind_chain`.
+fn chain_groups(
+    device: &wgpu::Device,
+    p: &DofPipelines,
+    v: &ChainViews<'_>,
+    texture: &wgpu::Texture,
+    view: &wgpu::TextureView,
+) -> DofHdrGroups {
+    DofHdrGroups {
+        texture: texture.clone(),
+        prefilter: group(
+            device,
+            "raa-dof.prefilter",
+            &p.prefilter_layout,
+            &[view_entry(1, view), view_entry(2, v.coc)],
+        ),
+        composite: group(
+            device,
+            "raa-dof.composite",
+            &p.composite_layout,
+            &[
+                params_entry(p),
+                view_entry(1, view),
+                view_entry(2, v.coc),
+                view_entry(4, v.depth),
+                view_entry(5, v.near_gather),
+                view_entry(6, v.far_gather),
+            ],
+        ),
+    }
+}
+
 /// Surface-sized textures, views and bind groups of the pass, recreated on resize.
 pub(crate) struct DofTargets {
     pub sizes: DofSizes,
@@ -424,6 +494,9 @@ pub(crate) struct DofTargets {
     pub gather_group: wgpu::BindGroup,
     /// One entry per texture of the HDR chain (A and B).
     pub hdr: [DofHdrGroups; 2],
+    /// The groups of the bound chain pair, while `HdrChain::bind` is in effect (see
+    /// `bind_chain`). Dropped with these targets on resize.
+    pub bound: Option<DofBoundGroups>,
 }
 
 impl DofTargets {
@@ -444,49 +517,42 @@ impl DofTargets {
         let (near_gather, near_gather_view) = half("raa-dof.near_gather");
         let (far_gather, far_gather_view) = half("raa-dof.far_gather");
 
-        let params = || wgpu::BindGroupEntry {
-            binding: 0,
-            resource: p.params.as_entire_binding(),
-        };
         let focus = || wgpu::BindGroupEntry {
             binding: 2,
             resource: p.focus.as_entire_binding(),
         };
-        let group =
-            |label: &str, layout: &wgpu::BindGroupLayout, entries: &[wgpu::BindGroupEntry<'_>]| {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(label),
-                    layout,
-                    entries,
-                })
-            };
         let depth = targets.depth();
         let autofocus_group = group(
+            device,
             "raa-dof.autofocus",
             &p.autofocus_layout,
-            &[params(), view_entry(1, depth), focus()],
+            &[params_entry(p), view_entry(1, depth), focus()],
         );
         let coc_group = group(
+            device,
             "raa-dof.coc",
             &p.coc_layout,
             &[
-                params(),
+                params_entry(p),
                 view_entry(1, depth),
                 focus(),
                 view_entry(3, &coc_view),
             ],
         );
         let tiles_group = group(
+            device,
             "raa-dof.tiles",
             &p.tiles_layout,
             &[view_entry(4, &coc_view), view_entry(5, &tiles_view)],
         );
         let dilate_group = group(
+            device,
             "raa-dof.dilate",
             &p.dilate_layout,
             &[view_entry(6, &tiles_view), view_entry(7, &dilated_view)],
         );
         let gather_group = group(
+            device,
             "raa-dof.gather",
             &p.gather_layout,
             &[
@@ -496,30 +562,16 @@ impl DofTargets {
                 view_entry(6, &far_prefilter_view),
             ],
         );
-        let hdr_groups = |texture: &wgpu::Texture, view: &wgpu::TextureView| DofHdrGroups {
-            texture: texture.clone(),
-            prefilter: group(
-                "raa-dof.prefilter",
-                &p.prefilter_layout,
-                &[view_entry(1, view), view_entry(2, &coc_view)],
-            ),
-            composite: group(
-                "raa-dof.composite",
-                &p.composite_layout,
-                &[
-                    params(),
-                    view_entry(1, view),
-                    view_entry(2, &coc_view),
-                    view_entry(4, depth),
-                    view_entry(5, &near_gather_view),
-                    view_entry(6, &far_gather_view),
-                ],
-            ),
+        let views = ChainViews {
+            depth,
+            coc: &coc_view,
+            near_gather: &near_gather_view,
+            far_gather: &far_gather_view,
         };
         let hdr = targets.hdr();
         let hdr = [
-            hdr_groups(hdr.src_texture(), hdr.src()),
-            hdr_groups(hdr.dst_texture(), hdr.dst()),
+            chain_groups(device, p, &views, hdr.src_texture(), hdr.src()),
+            chain_groups(device, p, &views, hdr.dst_texture(), hdr.dst()),
         ];
 
         DofTargets {
@@ -544,13 +596,49 @@ impl DofTargets {
             dilate_group,
             gather_group,
             hdr,
+            bound: None,
         }
     }
 
-    /// The groups reading `src` (hdr.src_texture()), or None if the chain was recreated
-    /// since the last resize.
-    pub(crate) fn hdr_groups(&self, src: &wgpu::Texture) -> Option<&DofHdrGroups> {
+    /// The groups reading the chain source: the bound pair's while the chain is `bound`
+    /// (after `bind_chain`), else the A/B entry of `src` (hdr.src_texture()), or None if the
+    /// chain was recreated since the last resize. A bound source never uses an A/B entry.
+    pub(crate) fn hdr_groups(&self, src: &wgpu::Texture, bound: bool) -> Option<&DofHdrGroups> {
+        if bound {
+            return self.bound.as_ref().map(|b| &b.groups);
+        }
         self.hdr.iter().find(|g| g.texture == *src)
+    }
+
+    /// Makes `bound` the groups of the bound pair (`src`, `dst`). They are rebuilt only when
+    /// either texture differs from the cached pair, so a steady binding allocates nothing.
+    pub(crate) fn bind_chain(
+        &mut self,
+        device: &wgpu::Device,
+        p: &DofPipelines,
+        depth: &wgpu::TextureView,
+        src: (&wgpu::Texture, &wgpu::TextureView),
+        dst: &wgpu::Texture,
+    ) {
+        let (src_texture, src_view) = src;
+        let cached = self
+            .bound
+            .as_ref()
+            .is_some_and(|b| b.groups.texture == *src_texture && b.dst == *dst);
+        if cached {
+            return;
+        }
+        let views = ChainViews {
+            depth,
+            coc: &self.coc_view,
+            near_gather: &self.near_gather_view,
+            far_gather: &self.far_gather_view,
+        };
+        let groups = chain_groups(device, p, &views, src_texture, src_view);
+        self.bound = Some(DofBoundGroups {
+            dst: dst.clone(),
+            groups,
+        });
     }
 }
 

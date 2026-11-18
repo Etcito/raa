@@ -10,6 +10,10 @@
 //!
 //! The pass and every handle clone share one state (description and camera). The pass sets
 //! no group-1 resource, so disabling it leaves the HDR chain untouched.
+//!
+//! While the HDR chain is bound (`HdrChain::bind`), the pass reads the bound source and writes
+//! the bound destination through its own groups; `DofFeature::install_instance` names a second
+//! pass `dof#<instance>` whose publications carry that name.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -148,6 +152,8 @@ fn pack_params(
 }
 
 struct DofPass {
+    /// The pipeline entry name: `dof`, or `dof#<instance>` for an instance.
+    name: String,
     state: SharedDof,
     pipelines: DofPipelines,
     targets: Option<DofTargets>,
@@ -218,7 +224,7 @@ fn dispatch(
 
 impl FeaturePass for DofPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -301,7 +307,7 @@ impl FeaturePass for DofPass {
         ];
         for (port, view, format, (w, h)) in taps {
             let desc = ImageDesc::new(ImageDim::D2, format, w, h, 1, 1);
-            ctx.resources.publish(NAME, port, view, desc);
+            ctx.resources.publish(&self.name, port, view, desc);
         }
         Ok(())
     }
@@ -310,13 +316,25 @@ impl FeaturePass for DofPass {
     /// into hdr.dst(), then swap. Without a camera only the CoC (all 0) and the composite
     /// run, over cleared layers.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
-        let Some(t) = self.targets.as_ref() else {
+        let Some(t) = self.targets.as_mut() else {
             return Err(RaaError::Resource(
                 "dof: record ran before a resize created the targets".to_owned(),
             ));
         };
         let hdr = ctx.targets.hdr();
-        let Some(groups) = t.hdr_groups(hdr.src_texture()) else {
+        let bound = hdr.is_bound();
+        if bound {
+            let src = (hdr.src_texture(), hdr.src());
+            t.bind_chain(
+                ctx.gpu.device(),
+                &self.pipelines,
+                ctx.targets.depth(),
+                src,
+                hdr.dst_texture(),
+            );
+        }
+        let t: &DofTargets = t;
+        let Some(groups) = t.hdr_groups(hdr.src_texture(), bound) else {
             return Err(RaaError::Resource(
                 "dof: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
@@ -380,7 +398,7 @@ impl FeaturePass for DofPass {
         );
         hdr.swap();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, full.0, full.1, 1, 1);
-        ctx.resources.publish(NAME, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -398,16 +416,40 @@ impl DofFeature {
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
     ) -> Result<DofHandle, RaaError> {
+        Self::add(gpu, pipeline, NAME)
+    }
+
+    /// Handoff: card 'Wiring 4/5: multi-instance post passes' calls
+    /// `DofFeature::install_instance(gpu, pipeline, instance)` to add a second dof pass named
+    /// `dof#<instance>` beside `dof`. Today it builds the same pipelines as `install`, adds the
+    /// pass with `Pipeline::add` enabled at order 110 with the DOF defaults and no camera, and
+    /// returns a `DofHandle` whose clones drive only that pass. Refusals as `install`, with
+    /// `pipeline.duplicate_pass` naming `dof#<instance>`.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<DofHandle, RaaError> {
+        Self::add(gpu, pipeline, &format!("{NAME}#{instance}"))
+    }
+
+    /// Builds the pass `name` (the shared construction of `install` and `install_instance`).
+    fn add(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        name: &str,
+    ) -> Result<DofHandle, RaaError> {
         let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes().iter().any(|info| info.name == NAME) {
+        if p.passes().iter().any(|info| info.name == name) {
             return Err(refusal(
                 "pipeline.duplicate_pass",
-                "the pass `dof` is already installed",
+                &format!("the pass `{name}` is already installed"),
             ));
         }
         let state = Rc::new(RefCell::new(DofState::new()));
         let values = TUNABLES.map(|t| t.default);
         p.add(Box::new(DofPass {
+            name: name.to_owned(),
             state: state.clone(),
             pipelines: DofPipelines::new(gpu, &constants(&values)),
             targets: None,
