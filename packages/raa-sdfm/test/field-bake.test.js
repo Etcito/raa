@@ -67,6 +67,14 @@ test('bakedMaterialWords and the shared material function', () => {
   assert.equal(forbiddenToken(BAKED_MATERIAL_WGSL), null);
   assert.match(BAKED_MATERIAL_WGSL, /fn material_main\(in: MaterialInput\) -> MaterialOutput/);
   assert.match(BAKED_MATERIAL_WGSL, /raa_perturb_normal\(n, in\.tangent, normalize\(ts\)\)/);
+  // The derivatives of the unwrapped uv are taken before any statement or branch, and every sample takes them.
+  assert.ok(BAKED_MATERIAL_WGSL.indexOf('dpdx(in.uv)') >= 0);
+  assert.ok(BAKED_MATERIAL_WGSL.indexOf('dpdx(in.uv)') < BAKED_MATERIAL_WGSL.indexOf('raa_texture_grad('));
+  assert.ok(BAKED_MATERIAL_WGSL.includes('dpdy(in.uv)'));
+  assert.doesNotMatch(BAKED_MATERIAL_WGSL, /\braa_texture\(/);
+  assert.equal(BAKED_MATERIAL_WGSL.split('raa_texture_grad(').length - 1, 3);
+  const samples = BAKED_MATERIAL_WGSL.split('\n').filter((line) => line.includes('raa_texture_grad('));
+  for (const line of samples) assert.match(line, /in\.uv, duv_dx, duv_dy\)/);
 });
 
 test('fieldBakeWgsl: the interpreter core between the data shim and the UV-space entry points', () => {

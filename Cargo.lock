@@ -821,6 +821,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raa-exposure"
+version = "0.5.0"
+dependencies = [
+ "raa-core",
+ "raa-pipeline",
+ "raa-shader",
+]
+
+[[package]]
 name = "raa-ext-test"
 version = "0.5.0"
 dependencies = [
@@ -967,6 +976,7 @@ dependencies = [
  "raa-csg",
  "raa-deform",
  "raa-dof",
+ "raa-exposure",
  "raa-fog",
  "raa-fur",
  "raa-geom",
@@ -992,6 +1002,7 @@ dependencies = [
  "raa-shader",
  "raa-shadow",
  "raa-shafts",
+ "raa-sharpen",
  "raa-skin",
  "raa-sky",
  "raa-ssr",
@@ -1182,6 +1193,15 @@ dependencies = [
  "raa-pipeline",
  "raa-shader",
  "raa-shadow",
+]
+
+[[package]]
+name = "raa-sharpen"
+version = "0.5.0"
+dependencies = [
+ "raa-core",
+ "raa-pipeline",
+ "raa-shader",
 ]
 
 [[package]]

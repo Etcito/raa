@@ -25,6 +25,9 @@ const NOT_ENGINE = Object.freeze({
   lodOffset: 'RAA has no mesh LOD selection and the game meshes carry one level',
 });
 
+/** The two forms of the S47 `autoExposure` and `sharpening` keys: a boolean, or a plain settings object. */
+const isSettingsForm = (value) => typeof value === 'boolean' || (typeof value === 'object' && value !== null && !Array.isArray(value));
+
 /**
  * Applies `options` to `engine`. `look` says which post passes the current scene look uses
  * (`applyEnvironment` with a post look turns bloom and grading on); an option only turns a pass
@@ -57,6 +60,18 @@ export function applyRenderOptions(engine, options, look = { bloom: true, gradin
       case 'renderScale':
         if (!can('setRenderScale')) { skip(key, 'this @etcito/raa has no setRenderScale; rebuild the engine package'); break; }
         engine.setRenderScale(value);
+        applied.push(key);
+        break;
+      case 'autoExposure':
+        if (!isSettingsForm(value)) { skip(key, 'autoExposure must be a boolean or an AutoExposureSettings object'); break; }
+        if (!can('setAutoExposure')) { skip(key, 'this @etcito/raa has no setAutoExposure; rebuild the engine package'); break; }
+        engine.setAutoExposure(typeof value === 'boolean' ? { enabled: value } : value);
+        applied.push(key);
+        break;
+      case 'sharpening':
+        if (!isSettingsForm(value)) { skip(key, 'sharpening must be a boolean or a SharpeningSettings object'); break; }
+        if (!can('setSharpening')) { skip(key, 'this @etcito/raa has no setSharpening; rebuild the engine package'); break; }
+        engine.setSharpening(typeof value === 'boolean' ? { enabled: value } : value);
         applied.push(key);
         break;
       case 'postBloom':

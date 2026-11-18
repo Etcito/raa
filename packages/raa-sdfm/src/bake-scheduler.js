@@ -102,7 +102,7 @@ export function createBakeScheduler(engine, options) {
         const textures = [];
         try {
           if (full) throw new Error('the texture atlas is full');
-          for (const image of [r.normal, r.color, r.emissive]) if (image !== null) textures.push(engine.addTexture({ width: r.size, height: r.size, data: image }));
+          for (const [image, extra] of [[r.normal, {}], [r.color, { srgb: true }], [r.emissive, {}]]) if (image !== null) textures.push(engine.addTexture({ width: r.size, height: r.size, data: image, ...extra }));
           engine.setMaterialData(part.data, bakedMaterialWords(textures[0], textures[1], textures[2]));
         } catch (e) {
           for (const id of textures) engine.removeTexture(id);

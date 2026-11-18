@@ -355,6 +355,10 @@ let without = LoadContext { booleans: &NoBooleans, ..with_csg }; // subtract nod
 
 Everything above is API v0 and stays valid. Later additions never change it: they are documented in `docs/api/`, one file per milestone, additions only. The first file is `docs/api/m07-meshes-hdr.md` (meshes, the configurable pass pipeline, HDR tone mapping, multisampling). Matching TypeScript declarations live in `packages/raa/types/` and merge into the v0 `Engine` and `EngineOptions` interfaces.
 
+Automatic exposure: the [m33 API](api/m33-auto-exposure.md) and [declarations](../packages/raa/types/m33-auto-exposure.d.ts) add `setAutoExposure`, `autoExposure` and `autoExposureState` (pass `exposure.auto`, off by default).
+Sharpening: the [m34 API](api/m34-sharpening.md) and [declarations](../packages/raa/types/m34-sharpening.d.ts) add `setSharpening` and `sharpening` (pass `sharpen`, off by default).
+Material texture mips: the [m22 API](api/m22-textures.md) `addTexture` takes `mips` (default true) and `srgb` (default false); WGSL `raa_texture_grad` samples the atlas mip chain (`raa_texture` stays level 0).
+
 Rust extension points added after v0:
 
 - `FeaturePass` (raa-pipeline): a pass registered in the `raa.pipeline` pass list with a name, order and enable switch.

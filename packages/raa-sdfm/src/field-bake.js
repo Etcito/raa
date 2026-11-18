@@ -18,7 +18,11 @@
 //   color:    rgb = base colour, sRGB-encoded; w = roughness.
 //   emissive: rgb = e / (1 + e) per channel (0..inf in 8 bits); only uploaded when some texel is not black.
 // The tangent frame moves with the instance and the skin, so a posed or skinned part shades right
-// (raa_perturb_normal(in.normal, in.tangent, ts) in BAKED_MATERIAL_WGSL inverts the bake exactly).
+// (raa_perturb_normal(in.normal, in.tangent, ts) in BAKED_MATERIAL_WGSL inverts the bake exactly). The baked textures are
+// sampled through the atlas mip chain (raa_texture_grad, with the derivatives of in.uv taken at the top of material_main):
+// charts carry BAKE_DILATE_PASSES (8) gutter texels, so level 3 stays inside a chart's gutter and level 4 may mix
+// neighbouring charts slightly (accepted); bake sides are powers of two >= BAKE_MIN_SIZE (32), already multiples of 16,
+// so the 16-texel atlas alignment costs them no capacity and BAKE_ATLAS_BUDGET is unchanged.
 import { SdfmError } from './errors.js';
 import { fieldShadingCore, textHash } from './field-shading.js';
 
@@ -36,11 +40,13 @@ export const BAKE_DILATE_PASSES = 8;
 export const BAKED_MATERIAL_WGSL = /* wgsl */ `
 // sdfb: a field part baked into textures (@etcito/raa-sdfm field-bake.js)
 fn material_main(in: MaterialInput) -> MaterialOutput {
+  let duv_dx = dpdx(in.uv);
+  let duv_dy = dpdy(in.uv);
   var o = raa_default_output(in);
   o.opacity = 1.0;
   let base = raa_material_data_base(in.record);
-  let nt = raa_texture(raa_material_word(base + 1u), in.uv);
-  let ct = raa_texture(raa_material_word(base + 2u), in.uv);
+  let nt = raa_texture_grad(raa_material_word(base + 1u), in.uv, duv_dx, duv_dy);
+  let ct = raa_texture_grad(raa_material_word(base + 2u), in.uv, duv_dx, duv_dy);
   let n = normalize(in.normal);
   let ts = nt.xyz * 2.0 - vec3<f32>(1.0);
   // A baked normal leans at most 60 degrees (z >= 0.5, stored >= 0.75); a texel no chart covered (a sliver below one
@@ -53,7 +59,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   o.metallic = nt.a;
   let eid = raa_material_word(base + 3u);
   if (eid != ${BAKED_NO_TEXTURE}u) {
-    let e = raa_texture(eid, in.uv).rgb;
+    let e = raa_texture_grad(eid, in.uv, duv_dx, duv_dy).rgb;
     o.emissive = e / max(vec3<f32>(1.0) - e, vec3<f32>(1.0 / 255.0));
   }
   return o;

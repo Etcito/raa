@@ -117,6 +117,38 @@ impl OverlayLayer {
 /// Floats per segment in the overlay instance stream (64 bytes).
 pub const OVERLAY_SEGMENT_FLOATS: usize = 16;
 
+/// The depth attachment the `raa.overlay` pass begins with, for a colour target of
+/// `colour` pixels and scene depth (`raa-pipeline.depth`) of `scene_depth` pixels.
+/// WebGPU needs every attachment of a pass to have the same size: under an internal
+/// render scale the colour target (canvas or view output) can differ from the depth
+/// target, so the pass then uses its own depth of the colour size, cleared to 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayDepth {
+    /// The scene depth (same size): `depthTest` layers are occluded by the scene.
+    Scene,
+    /// The overlay's own depth of this size, cleared to 1 (tested layers draw unoccluded).
+    Own((u32, u32)),
+}
+
+impl OverlayDepth {
+    /// Picks the scene depth when its size equals the colour target's, else an own depth.
+    pub fn select(colour: (u32, u32), scene_depth: (u32, u32)) -> Self {
+        if colour == scene_depth {
+            Self::Scene
+        } else {
+            Self::Own(colour)
+        }
+    }
+
+    /// The size of the depth attachment the pass begins with.
+    pub fn size(self, scene_depth: (u32, u32)) -> (u32, u32) {
+        match self {
+            Self::Scene => scene_depth,
+            Self::Own(size) => size,
+        }
+    }
+}
+
 /// The overlay line shader. Group 0 is the lit renderer's 512-byte frame uniform (S10:
 /// view_proj @0, viewport @384, flags @416 whose x is "encode sRGB"), so each viewport
 /// draws with the camera its view uploaded. One instance per segment (see

@@ -366,17 +366,73 @@ fn raa_material_f32(i: u32) -> f32 {
     return bitcast<f32>(raa_material_word(i));
 }
 
-// Material texture `id` (Engine.addTexture) at `uv`, (0, 0) the first texel row's left edge,
-// clamped to [0, 1] like a clamp-to-edge texture and kept half a texel inside the texture's
-// atlas rect, so linear filtering never reads a neighbour. An unknown id gives (0, 0, 0, 0).
-// Level 0 explicitly, so material code may call it in non-uniform control flow.
+// Material atlas mip levels (S48): levels 0..4 of the raa-lit atlas.
+const RAA_ATLAS_MIP_LEVELS: f32 = 5.0;
+
+// Material textures (Engine.addTexture), S48. Rect encoding: binding 5 holds (x, y, w, h) /
+// atlas size per texture id; a negative w marks a texture added with `mips: false`, sampled
+// at level 0 only; the extent is abs(r.zw). An unknown or removed id is all zero and samples
+// (0, 0, 0, 0). uv (0, 0) is the first texel row's left edge, clamped to [0, 1] like a
+// clamp-to-edge texture and kept inside the texture's atlas rect, so filtering never reads
+// a neighbour.
+// Derivative rule: call the WGSL built-ins dpdx and dpdy on the uv once at the top of
+// `material_main`, in uniform control flow, from the unwrapped uv (never `fract(uv)`), then
+// pass them down. raa_texture_grad takes no derivative itself, so it may be called in
+// branches; a caller that cannot take derivatives keeps raa_texture.
+// raa_texture: level 0 explicitly, half a texel inset, callable in non-uniform control flow.
 fn raa_texture(id: u32, uv: vec2<f32>) -> vec4<f32> {
     let r = raa_texture_rects[min(id, arrayLength(&raa_texture_rects) - 1u)];
+    let e = abs(r.zw);
     let half_texel = 0.5 / vec2<f32>(textureDimensions(raa_texture_atlas));
-    let p = r.xy + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * r.zw;
-    let q = clamp(p, r.xy + half_texel, max(r.xy + r.zw - half_texel, r.xy + half_texel));
+    let p = r.xy + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * e;
+    let q = clamp(p, r.xy + half_texel, max(r.xy + e - half_texel, r.xy + half_texel));
     let c = textureSampleLevel(raa_texture_atlas, raa_texture_sampler, q, 0.0);
-    return select(vec4<f32>(0.0), c, r.z > 0.0);
+    return select(vec4<f32>(0.0), c, r.z != 0.0);
+}
+
+// Material texture `id` at `uv` with an explicit lod from the caller's uv derivatives
+// (S48; CPU twins texture_levels, texture_lod, level_inset in raa-lit textures.rs).
+// Handoff: raa_texture_grad samples texture `id` at uv clamped to [0, 1] with
+// lod = clamp(0.5 * log2(rho2), 0, levels - 1) and an inset of 0.5 * exp2(ceil(lod)) / atlas;
+// "raa-sdfm: baked material samples raa_texture_grad; colour bake added with srgb" and
+// "post page: mips-ground scene and its test" call raa_texture_grad(id, uv, duv_dx, duv_dy)
+// from their material WGSL with derivatives taken at the top of `material_main`.
+// Largest footprint stretch the 4 taps of raa_texture_grad cover before the lod rises.
+const RAA_ATLAS_MAX_ANISO: f32 = 4.0;
+
+fn raa_texture_grad(id: u32, uv: vec2<f32>, duv_dx: vec2<f32>, duv_dy: vec2<f32>) -> vec4<f32> {
+    let r = raa_texture_rects[min(id, arrayLength(&raa_texture_rects) - 1u)];
+    let e = abs(r.zw);
+    let atlas = vec2<f32>(textureDimensions(raa_texture_atlas, 0));
+    let size = e * atlas;
+    let levels = select(
+        min(RAA_ATLAS_MIP_LEVELS, 1.0 + floor(log2(max(min(size.x, size.y), 1.0)))),
+        1.0,
+        r.z < 0.0,
+    );
+    let gx = duv_dx * size;
+    let gy = duv_dy * size;
+    // Anisotropic footprint: the lod follows the minor axis (or the major axis / 4 when the
+    // footprint is stretched more than 4:1) and 4 taps spread along the major axis cover the
+    // rest, so a grazing near ground stays at level 0 instead of the major axis' coarse level.
+    let lx = dot(gx, gx);
+    let ly = dot(gy, gy);
+    let major2 = max(lx, ly);
+    let minor2 = min(lx, ly);
+    let rho2 = max(minor2, major2 / (RAA_ATLAS_MAX_ANISO * RAA_ATLAS_MAX_ANISO));
+    let lod = clamp(0.5 * log2(max(rho2, 1e-12)), 0.0, levels - 1.0);
+    let axis = select(duv_dy, duv_dx, lx >= ly) * e;
+    let inset = 0.5 * exp2(ceil(lod)) / atlas;
+    let lo = r.xy + inset;
+    let hi = max(r.xy + e - inset, lo);
+    let p = r.xy + clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * e;
+    var c = vec4<f32>(0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        let t = (f32(i) - 1.5) * 0.25;
+        let q = clamp(p + axis * t, lo, hi);
+        c = c + 0.25 * textureSampleLevel(raa_texture_atlas, raa_texture_sampler, q, lod);
+    }
+    return select(vec4<f32>(0.0), c, r.z != 0.0);
 }
 
 // S11 area lights: shared rectangle form-factor maths and the BRDF/LTC atlas uv helpers.

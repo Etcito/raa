@@ -4,7 +4,7 @@
 // SdfmError with one of the S15 codes (plus S18 `sdfm.rig`). MAMA is reached only through
 // src/mama-bridge.js.
 
-import type { ClusterSection, Engine, MeshDesc, SurfaceBlend } from '@etcito/raa';
+import type { AutoExposureSettings, ClusterSection, Engine, MeshDesc, SurfaceBlend } from '@etcito/raa';
 
 /**
  * Re-exported from `@etcito/raa`: the engine the loader uploads meshes and materials to, and the
@@ -785,6 +785,10 @@ export interface SdfmRenderOptions {
   aoQuality?: number;
   /** Engine.setRenderScale: 0.25..2 times the backing size; the browser up/downsamples the canvas. */
   renderScale?: number;
+  /** Engine.setAutoExposure, where a boolean is `{ enabled }`; an object is passed to it unchanged. */
+  autoExposure?: boolean | AutoExposureSettings;
+  /** Engine.setSharpening, where a boolean is `{ enabled }`; the type is inline, so this file needs no m34 typings. */
+  sharpening?: boolean | { enabled?: boolean; sharpness?: number };
   /** false turns the bloom pass off; true leaves it as the scene look sets it. */
   postBloom?: boolean;
   /** false turns the colour grading pass off; true leaves it as the scene look sets it. */

@@ -1,0 +1,12 @@
+[package]
+name = "raa-sharpen"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Contrast-adaptive sharpening on the HDR chain (pass sharpen)"
+
+[dependencies]
+raa-core = { path = "../raa-core" }
+raa-pipeline = { path = "../raa-pipeline" }
+raa-shader = { path = "../raa-shader" }

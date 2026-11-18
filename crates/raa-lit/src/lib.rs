@@ -32,6 +32,7 @@ mod lod;
 mod material;
 mod material_data;
 mod meshes;
+mod mipgen;
 mod motion_display;
 mod passes;
 mod prep;
@@ -84,6 +85,7 @@ pub use material_data::{
     DataAllocator, MATERIAL_DATA_INITIAL_WORDS, MATERIAL_DATA_RESERVED_WORDS, MaterialDataStats,
 };
 pub use meshes::{LitMeshId, LitMeshInfo};
+pub use mipgen::downsample_rgba8;
 pub use motion_display::install_motion_display;
 pub use prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 pub use raa_core::{MaterialId, MeshId};
@@ -92,8 +94,9 @@ pub use raa_shader::{MaterialFnId, TintMode};
 pub use renderer::{FrameCounts, InstanceFrameStats, LitOptions, LitRenderer};
 pub use select::{IdPrep, SelectCapacity, SelectInput};
 pub use textures::{
-    ATLAS_FORMAT, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker, TEXTURE_RECT_SIZE, TexelData,
-    quantize,
+    ATLAS_ALIGN, ATLAS_FORMAT, ATLAS_MIP_LEVELS, ATLAS_SIZE, AtlasRect, MAX_TEXTURES, ShelfPacker,
+    TEXTURE_RECT_SIZE, TexelData, TextureOptions, level_inset, level_size, quantize,
+    texture_levels, texture_lod,
 };
 
 pub use tiles::{LIGHT_TILES_WGSL, install_local_lights, light_tiles_source};
