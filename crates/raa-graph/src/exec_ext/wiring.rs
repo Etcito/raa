@@ -21,7 +21,7 @@ use std::{cell::RefCell, rc::Rc};
 
 #[allow(dead_code)] // the wiring cards call these; the tests compile the same file for themselves
 #[path = "wiring/plan_fns.rs"]
-mod plan_fns;
+pub(crate) mod plan_fns;
 
 // Re-exported for the wiring cards; `apply` and `histories` call them.
 #[allow(unused_imports)]
