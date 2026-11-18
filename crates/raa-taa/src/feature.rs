@@ -46,17 +46,24 @@ fn pack_params(history_usable: bool) -> [u8; PARAMS_LEN] {
     out
 }
 
+/// The key and groups of a bound chain: the HDR (src, dst) textures, the bound history
+/// view, the resolved depth and motion views and the two parity bind groups.
+type BoundGroups = (
+    wgpu::Texture,
+    wgpu::Texture,
+    Option<wgpu::TextureView>,
+    wgpu::TextureView,
+    wgpu::TextureView,
+    [wgpu::BindGroup; 2],
+);
+
 /// Handoff: `TaaPass` is extended by card 'raa-taa: history input read when bound';
 /// record currently resolves bound HDR views using its own history pair and publishes hdr.src().
 struct TaaPass {
     name: String,
-    /// The bound-chain groups with the HDR textures and the bound history view they embed.
-    bound: Option<(
-        wgpu::Texture,
-        wgpu::Texture,
-        Option<wgpu::TextureView>,
-        [wgpu::BindGroup; 2],
-    )>,
+    /// The bound-chain groups with the HDR textures, the bound history view, the depth and
+    /// motion views they embed.
+    bound: Option<BoundGroups>,
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
     tunables: Rc<Cell<[f64; 6]>>,
@@ -149,6 +156,8 @@ impl FeaturePass for TaaPass {
 
     /// Dispatches the resolve for the HDR source and write parity, swaps and commits. A bound
     /// `history` input supplies the read history (binding 5); the write view stays this pass's.
+    /// The `depth` and `motion` inputs (bindings 3 and 4) come from `Targets::depth_input`
+    /// and `Targets::motion_input`, and rebuilding keys on them too.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let Some(targets) = self.targets.as_ref() else {
             return Err(RaaError::Resource(
@@ -169,17 +178,30 @@ impl FeaturePass for TaaPass {
             .resources
             .input(&self.name, "history")
             .map(|image| image.view);
-        let use_bound = hdr.is_bound() || bound_history.is_some();
+        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
+        let motion = ctx.targets.motion_input(ctx.resources, &self.name);
+        let use_bound = hdr.is_bound()
+            || bound_history.is_some()
+            || depth != *ctx.targets.depth()
+            || motion != *ctx.targets.motion();
         if use_bound
-            && self.bound.as_ref().is_none_or(|(src, dst, history, _)| {
-                src != hdr.src_texture() || dst != hdr.dst_texture() || history != &bound_history
-            })
+            && self
+                .bound
+                .as_ref()
+                .is_none_or(|(src, dst, history, held_depth, held_motion, _)| {
+                    src != hdr.src_texture()
+                        || dst != hdr.dst_texture()
+                        || history != &bound_history
+                        || held_depth != &depth
+                        || held_motion != &motion
+                })
             && let Some(history) = self.history.as_ref()
         {
             let groups = TaaTargets::bound_groups(
                 ctx.gpu,
                 &self.pipelines,
                 ctx.targets,
+                (&depth, &motion),
                 &self.frame,
                 history,
                 bound_history.as_ref(),
@@ -188,13 +210,17 @@ impl FeaturePass for TaaPass {
                 hdr.src_texture().clone(),
                 hdr.dst_texture().clone(),
                 bound_history,
+                depth,
+                motion,
                 groups,
             ));
+        } else if !use_bound {
+            self.bound = None;
         }
         let group = if use_bound {
             self.bound
                 .as_ref()
-                .map(|(_, _, _, groups)| &groups[write_index & 1])
+                .map(|(_, _, _, _, _, groups)| &groups[write_index & 1])
         } else {
             targets.group(hdr.src_texture(), write_index)
         };
@@ -358,6 +384,8 @@ impl TaaHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_core::testing::{skip, software_gpu};
+    use raa_pipeline::{PublishedImage, ResourceTable};
 
     #[test]
     fn pack_params_sets_only_the_history_flag() {
@@ -385,5 +413,141 @@ mod tests {
         assert_eq!(handle.accumulated_frames(), 0);
         assert!(!handle.history_valid());
         assert!(handle.pending_invalidate.get());
+    }
+
+    /// A bound `motion` input enters the `bound` cache key; with no input bound the pass
+    /// falls back to the resized groups. The test needs no submit: it inspects the key the
+    /// pass built and that the unbound record succeeds.
+    #[test]
+    fn bound_motion_input_keys_the_groups_and_unbound_uses_the_resized_groups() {
+        let test = "bound_motion_input_keys_the_groups_and_unbound_uses_the_resized_groups";
+        let Some(gpu) = software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let size = (64, 64);
+        let targets = Targets::new(&gpu, size);
+        let pipelines = TaaPipelines::new(&gpu, &crate::tunables::defaults());
+        let frame = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("taa bound key test frame"),
+            size: TAA_PARAMS_SIZE.max(768),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let history = HistoryPair::new(&gpu, "taa bound key test", HDR_FORMAT, size);
+        let resized = TaaTargets::new(&gpu, &pipelines, &targets, &frame, &history);
+        let mut pass = TaaPass {
+            name: "taa".to_owned(),
+            bound: None,
+            accumulated: Rc::new(Cell::new(0)),
+            pending_invalidate: Rc::new(Cell::new(false)),
+            tunables: Rc::new(Cell::new(crate::tunables::defaults())),
+            generation: Rc::new(Cell::new(0)),
+            built_generation: 0,
+            pipelines,
+            frame,
+            history: Some(history),
+            targets: Some(resized),
+        };
+        let resources = ResourceTable::new();
+        let motion_texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("taa bound motion input"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let motion_view = motion_texture.create_view(&Default::default());
+        resources.bind_input(
+            "taa",
+            "motion",
+            PublishedImage {
+                view: motion_view.clone(),
+                desc: ImageDesc::new(
+                    ImageDim::D2,
+                    wgpu::TextureFormat::Rg16Float,
+                    size.0,
+                    size.1,
+                    1,
+                    1,
+                ),
+            },
+        );
+        let backbuffer_texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("taa bound key test backbuffer"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let backbuffer = backbuffer_texture.create_view(&Default::default());
+        let lighting = LightingResources::new(&gpu);
+        let mut encoder = gpu.device().create_command_encoder(&Default::default());
+        {
+            let mut ctx = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size,
+                frame: 0,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                resources: &resources,
+                backbuffer: &backbuffer,
+                backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
+                surface_is_srgb: false,
+            };
+            pass.record(&mut ctx)
+                .expect("record with a bound motion input");
+        }
+        let (_, _, _, held_depth, held_motion, _) = pass
+            .bound
+            .as_ref()
+            .expect("the bound groups exist after a bound input");
+        assert!(
+            held_motion == &motion_view,
+            "the bound motion view is in the bound key"
+        );
+        assert!(
+            held_depth == targets.depth(),
+            "the unbound depth input is today's target"
+        );
+
+        resources.clear();
+        let mut encoder = gpu.device().create_command_encoder(&Default::default());
+        {
+            let mut ctx = RecordCtx {
+                gpu: &gpu,
+                encoder: &mut encoder,
+                size,
+                frame: 1,
+                time_s: 0.0,
+                targets: &targets,
+                lighting: &lighting,
+                resources: &resources,
+                backbuffer: &backbuffer,
+                backbuffer_format: wgpu::TextureFormat::Rgba8Unorm,
+                surface_is_srgb: false,
+            };
+            pass.record(&mut ctx).expect("record with no bound input");
+        }
+        assert!(
+            pass.bound.is_none(),
+            "no bound input means the resized groups are used"
+        );
     }
 }
