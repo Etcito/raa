@@ -1,3 +1,7 @@
+// 1 / pi: the lit ramp row is an albedo, so its direct term is albedo / pi * radiance, the
+// Lambert term of raa-brdf at n.l = 1 (and of the SDF Modeler Local fields toon), never
+// albedo * radiance, which is pi times brighter and clips a mid-grey surface under a sun of 3.
+const RAA_CEL_FRAC_1_PI: f32 = 0.318309886183791;
 fn raa_cel_linear_to_srgb(c:vec3f)->vec3f {
  return select(1.055*pow(c,vec3f(1.0/2.4))-0.055,c*12.92,c<=vec3f(0.0031308));
 }
@@ -36,5 +40,5 @@ fn raa_slot_direct(s:MaterialOutput,c:ShadeCtx,l:vec3f,radiance:vec3f)->vec3f {
  let spec_edge=mix(0.995,0.72,clamp(s.roughness,0.0,1.0));
  let highlight=smoothstep(spec_edge-soft*0.25,spec_edge+soft*0.25,dot(s.normal,h))*max(nl,0.0);
  color=mix(color,raa_cel_palette(base,radiance,5u),clamp(highlight*control.z,0.0,1.0));
- return raa_srgb_to_linear(color)*radiance;
+ return raa_srgb_to_linear(color)*RAA_CEL_FRAC_1_PI*radiance;
 }
