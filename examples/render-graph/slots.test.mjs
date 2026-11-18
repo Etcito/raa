@@ -7,6 +7,7 @@ import * as parameters from './scenes/parameters.js';
 import * as wiring from './scenes/wiring.js';
 import * as slots from './scenes/slots.js';
 import { validateInventory } from './lib/inventory.js';
+import { stageInventory } from '../../web/common/render-graph-job.mjs';
 
 // The slots scene against an engine double whose catalog holds the repository starter graphs.
 const graph = name => readFileSync(new URL(`../../crates/raa-graph/graphs/${name}.json`, import.meta.url), 'utf8');
@@ -75,6 +76,18 @@ const SLOTS_TWO_AO_DOC = {
     ['vFinal.color', 'grid.t1'], ['grid.color', 'out.color'],
   ].map(([from, to]) => ({ from, to })),
 };
+
+test('the slots stage selects exactly the four slots images, never the wiring rows', () => {
+  const rows = stageInventory([interpreter, views, parameters, wiring, slots], 'slots', validateInventory);
+  assert.deepEqual(rows.map(row => row.filename), [
+    'slots-two-ao-branches-compare-split.png',
+    'slots-forward-ao-from-wide-radius-branch.png',
+    'slots-default-full-gi.png',
+    'slots-default-simple-forward.png',
+  ]);
+  assert.deepEqual(rows.map(row => row.scenario), Array(4).fill('render-graph-slots'));
+  assert.ok(rows.every(row => !row.filename.startsWith('wiring-')));
+});
 
 test('the slots inventory adds four rows after the earlier stages, filenames unique', () => {
   const rows = validateInventory([interpreter, views, parameters, wiring, slots], 'slots');

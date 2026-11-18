@@ -3,6 +3,20 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createPageJob, runCli } from './page-job.mjs';
 
+/**
+ * The rows of the scene delivered at `stage`.
+ * The page's `validateInventory` walks the cumulative stage list, so it returns the rows of every
+ * earlier stage too; a render-graph stage selects, renders and judges only its own scene's images.
+ * `validate` is that page validator, called first so invalid scenes and stages still throw.
+ */
+export function stageInventory(namespaces, stage, validate) {
+  const rows = validate(namespaces, stage);
+  const own = new Set(namespaces
+    .filter((namespace) => namespace?.default?.milestone === stage)
+    .map((namespace) => namespace.default.id));
+  return rows.filter((row) => own.has(row.scenario));
+}
+
 /** The validators of the built page; the page sources are never imported here. */
 async function validators(page) {
   const file = path.join(path.resolve(page), 'lib/inventory.js');
@@ -11,7 +25,10 @@ async function validators(page) {
     || typeof namespace.validateRequiredFacts !== 'function') {
     throw new Error(`${file}: validateInventory and validateRequiredFacts must be exported`);
   }
-  return { validateInventory: namespace.validateInventory, validateRequiredFacts: namespace.validateRequiredFacts };
+  return {
+    validateInventory: (scenes, stage) => stageInventory(scenes, stage, namespace.validateInventory),
+    validateRequiredFacts: namespace.validateRequiredFacts,
+  };
 }
 
 /** The render-graph page takes no measurement: any record is refused. */
