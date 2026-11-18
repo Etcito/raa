@@ -5,10 +5,11 @@ use super::exec_wiring::plan_fns;
 #[cfg(test)]
 use crate as raa_graph;
 use crate::catalog::Catalog;
+use crate::catalog::{FeatureId, ParamBinding, ParamValue};
 use crate::error::{Issue, Severity, Stage};
-use crate::exec::{ExecExtension, FeatureHandles};
-use crate::plan::GraphPlan;
+use crate::exec::{ExecExtension, FeatureHandles, default_values, merge_values, write_values};
 use crate::plan::InputSource;
+use crate::plan::{GraphPlan, PlanNode};
 use raa_core::RaaError;
 use raa_pipeline::{GraphFrame, PrepareCtx, RecordCtx};
 use std::{cell::RefCell, rc::Rc};
@@ -213,6 +214,164 @@ pub(crate) fn view_rebinds(
     bindings
 }
 
+/// Later `pass.ao.gtao` and `pass.shadow.contact` nodes as (node id, type id): the entries holding
+/// `#`, in plan order.
+pub(crate) fn slot_instances(
+    plan: &GraphPlan,
+    entries: &[(String, String)],
+) -> Vec<(String, String)> {
+    plan.nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.type_id.as_str(),
+                "pass.ao.gtao" | "pass.shadow.contact"
+            )
+        })
+        .filter(|node| entry_for(entries, &node.id).is_some_and(|entry| entry.contains('#')))
+        .map(|node| (node.id.clone(), node.type_id.clone()))
+        .collect()
+}
+
+/// The handle of an instance pass `ao.gtao#<id>` or `shadow.contact#<id>`.
+#[derive(Clone)]
+enum SlotInstance {
+    Gtao(raa_gtao::GtaoHandle),
+    Contact(raa_contact::ContactHandle),
+}
+
+impl SlotInstance {
+    fn type_id(&self) -> &'static str {
+        match self {
+            SlotInstance::Gtao(_) => "pass.ao.gtao",
+            SlotInstance::Contact(_) => "pass.shadow.contact",
+        }
+    }
+
+    fn feature(&self) -> FeatureId {
+        match self {
+            SlotInstance::Gtao(_) => FeatureId::Gtao,
+            SlotInstance::Contact(_) => FeatureId::Contact,
+        }
+    }
+
+    fn set_tunable(&self, key: &str, value: f64) -> Result<(), RaaError> {
+        match self {
+            SlotInstance::Gtao(h) => h.set_tunable(key, value),
+            SlotInstance::Contact(h) => h.set_tunable(key, value),
+        }
+    }
+}
+
+fn apply_issue(node: Option<&str>, param: Option<&str>, message: &str) -> Vec<Issue> {
+    vec![Issue {
+        code: "graph.apply",
+        severity: Severity::Error,
+        stage: Stage::Apply,
+        node: node.map(str::to_owned),
+        port: None,
+        param: param.map(str::to_owned),
+        link: None,
+        message: message.to_owned(),
+        fix: "Change the refused value or retry applying the render graph.".to_owned(),
+    }]
+}
+
+fn node_value<'a>(node: &'a PlanNode, key: &str) -> Option<&'a ParamValue> {
+    node.params
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value)
+}
+
+/// The Setting changes and Tunable values of `node` for `feature`.
+#[allow(clippy::type_complexity)]
+fn node_values(
+    catalog: &Catalog,
+    node: &PlanNode,
+    feature: &FeatureId,
+) -> (Vec<(String, ParamValue)>, Vec<(&'static str, f64)>) {
+    let (mut settings, mut tunables) = (Vec::new(), Vec::new());
+    let Some(spec) = catalog.node(&node.type_id) else {
+        return (settings, tunables);
+    };
+    for param in &spec.params {
+        let Some(value) = node_value(node, param.key) else {
+            continue;
+        };
+        match (&param.binding, value) {
+            (ParamBinding::Setting { feature: f, key }, _) if f == feature => {
+                settings.push(((*key).to_owned(), value.clone()))
+            }
+            (ParamBinding::Tunable { feature: f, key }, ParamValue::Number(x)) if f == feature => {
+                tunables.push((*key, *x))
+            }
+            (ParamBinding::Tunable { feature: f, key }, ParamValue::Int(i)) if f == feature => {
+                tunables.push((*key, *i as f64))
+            }
+            _ => {}
+        }
+    }
+    (settings, tunables)
+}
+
+/// Writes each instance node's Setting values merged over the feature defaults (the installed
+/// handle set aside behind a stand-in), then its Tunable values.
+fn write_instances(
+    plan: &GraphPlan,
+    catalog: &Catalog,
+    instances: &[(String, String, SlotInstance)],
+    h: &mut FeatureHandles<'_>,
+) -> Result<(), Vec<Issue>> {
+    for (id, _, instance) in instances {
+        let Some(node) = plan.nodes.iter().find(|node| node.id == *id) else {
+            continue;
+        };
+        let feature = instance.feature();
+        let (settings, tunables) = node_values(catalog, node, &feature);
+        let merged = merge_values(&feature, &default_values(&feature), &settings)
+            .map_err(|(key, message)| apply_issue(Some(id), Some(&key), &message))?;
+        let installed = std::mem::take(&mut *h.handles);
+        match instance {
+            SlotInstance::Gtao(handle) => h.handles.gtao = Some(handle.clone()),
+            SlotInstance::Contact(handle) => h.handles.contact = Some(handle.clone()),
+        }
+        let written = write_values(h, &feature, &merged);
+        *h.handles = installed;
+        written.map_err(|e| apply_issue(Some(id), None, e.message()))?;
+        for (key, value) in tunables {
+            instance
+                .set_tunable(key, value)
+                .map_err(|e| apply_issue(Some(id), Some(key), e.message()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Sets the Tunable values of the first gtao and contact node on the installed handles.
+fn write_installed_tunables(
+    plan: &GraphPlan,
+    catalog: &Catalog,
+    h: &mut FeatureHandles<'_>,
+) -> Result<(), RaaError> {
+    for (type_id, feature) in [
+        ("pass.ao.gtao", FeatureId::Gtao),
+        ("pass.shadow.contact", FeatureId::Contact),
+    ] {
+        let Some(node) = plan.nodes.iter().find(|node| node.type_id == type_id) else {
+            continue;
+        };
+        for (key, value) in node_values(catalog, node, &feature).1 {
+            match (&feature, &h.handles.gtao, &h.handles.contact) {
+                (FeatureId::Gtao, Some(handle), _) => handle.set_tunable(key, value)?,
+                (FeatureId::Contact, _, Some(handle)) => handle.set_tunable(key, value)?,
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// LIFECYCLE: `SlotsExtension::apply` builds `SlotsState` (G-buffer bindings, slot bindings, view
 /// rebinds) and re-adds the `slots` graph frame, removing the previous one. The first
 /// `SlotsExtension::frame` after an apply moves `slots` to the end of the graph frames, so it runs
@@ -238,6 +397,8 @@ pub(crate) struct SlotsExtension {
     catalog: Catalog,
     state: Rc<RefCell<SlotsState>>,
     moved: bool,
+    instances: Vec<(String, String, SlotInstance)>,
+    plan: Option<GraphPlan>,
 }
 
 impl SlotsExtension {
@@ -246,7 +407,66 @@ impl SlotsExtension {
             catalog: Catalog::build(),
             state: Rc::new(RefCell::new(SlotsState::default())),
             moved: false,
+            instances: Vec::new(),
+            plan: None,
         }
+    }
+
+    /// Removes, installs and enables the instance passes of `plan` and writes their values,
+    /// recording in `installed` and `removed` what it changed.
+    #[allow(clippy::type_complexity)]
+    fn commit_instances(
+        &mut self,
+        plan: &GraphPlan,
+        entries: &[(String, String)],
+        h: &mut FeatureHandles<'_>,
+        installed: &mut Vec<String>,
+        removed: &mut Vec<(String, Box<dyn raa_pipeline::FeaturePass>)>,
+    ) -> Result<(), Vec<Issue>> {
+        let kept: Vec<(String, String)> = self
+            .instances
+            .iter()
+            .map(|(id, _, handle)| (id.clone(), handle.type_id().to_owned()))
+            .collect();
+        let (install, keep, remove) =
+            plan_fns::instance_plan(&kept, &slot_instances(plan, entries));
+        for id in &remove {
+            let Some(index) = self.instances.iter().position(|(node, _, _)| node == id) else {
+                continue;
+            };
+            let entry = self.instances[index].1.clone();
+            let pass = h
+                .pipeline
+                .borrow_mut()
+                .remove(&entry)
+                .map_err(|e| apply_issue(Some(id), None, e.message()))?;
+            removed.push((entry, pass));
+            self.instances.remove(index);
+        }
+        for (id, type_id) in &install {
+            let Some(entry) = entry_for(entries, id) else {
+                continue;
+            };
+            let handle = if type_id == "pass.ao.gtao" {
+                raa_gtao::GtaoFeature::install_instance(h.gpu, h.pipeline, id)
+                    .map(SlotInstance::Gtao)
+            } else {
+                raa_contact::ContactFeature::install_instance(h.gpu, h.pipeline, id)
+                    .map(SlotInstance::Contact)
+            }
+            .map_err(|e| apply_issue(Some(id), None, e.message()))?;
+            installed.push(entry.to_owned());
+            self.instances.push((id.clone(), entry.to_owned(), handle));
+        }
+        for (id, _) in &keep {
+            if let Some((_, entry, _)) = self.instances.iter().find(|(node, _, _)| node == id) {
+                h.pipeline
+                    .borrow_mut()
+                    .set_enabled(entry, true)
+                    .map_err(|e| apply_issue(Some(id), None, e.message()))?;
+            }
+        }
+        write_instances(plan, &self.catalog, &self.instances, h)
     }
 }
 
@@ -258,34 +478,48 @@ impl ExecExtension for SlotsExtension {
     fn apply(
         &mut self,
         plan: &GraphPlan,
-        _previous: Option<&GraphPlan>,
+        previous: Option<&GraphPlan>,
         h: &mut FeatureHandles<'_>,
     ) -> Result<(), Vec<Issue>> {
         let entries = plan_fns::node_entries(plan, &self.catalog);
         let gbuffer = gbuffer_bindings(plan, &self.catalog, &entries);
         let slots = slot_bindings(plan, &self.catalog, &entries)?;
         let views = view_rebinds(plan, &self.catalog, &entries);
-        let frame = SlotsFrame {
-            state: self.state.clone(),
-        };
-        let mut pipeline = h.pipeline.borrow_mut();
-        let old = pipeline.remove_graph_frame("slots");
-        if let Err(error) = pipeline.add_graph_frame("slots", Box::new(frame)) {
-            if let Some(old) = old {
-                let _ = pipeline.add_graph_frame("slots", old);
+        let snapshot = self.instances.clone();
+        let (mut installed, mut removed) = (Vec::new(), Vec::new());
+        let mut result = self.commit_instances(plan, &entries, h, &mut installed, &mut removed);
+        if result.is_ok() {
+            let frame = SlotsFrame {
+                state: self.state.clone(),
+            };
+            let mut pipeline = h.pipeline.borrow_mut();
+            let old = pipeline.remove_graph_frame("slots");
+            if let Err(error) = pipeline.add_graph_frame("slots", Box::new(frame)) {
+                if let Some(old) = old {
+                    let _ = pipeline.add_graph_frame("slots", old);
+                }
+                result = Err(apply_issue(None, None, error.message()));
             }
-            return Err(vec![Issue {
-                code: "graph.apply",
-                severity: Severity::Error,
-                stage: Stage::Apply,
-                node: None,
-                port: None,
-                param: None,
-                link: None,
-                message: error.message().to_owned(),
-                fix: "Retry applying the render graph.".to_owned(),
-            }]);
         }
+        if let Err(issues) = result {
+            {
+                let mut pipeline = h.pipeline.borrow_mut();
+                for entry in installed.iter().rev() {
+                    let _ = pipeline.remove(entry);
+                }
+                for (entry, pass) in removed {
+                    if pipeline.add(pass).is_ok() {
+                        let _ = pipeline.set_enabled(&entry, true);
+                    }
+                }
+            }
+            self.instances = snapshot;
+            if let Some(previous) = previous {
+                let _ = write_instances(previous, &self.catalog, &self.instances, h);
+            }
+            return Err(issues);
+        }
+        self.plan = Some(plan.clone());
         let mut state = self.state.borrow_mut();
         state.gbuffer = gbuffer;
         state.slots = slots;
@@ -302,12 +536,34 @@ impl ExecExtension for SlotsExtension {
         }
         *state = SlotsState::default();
         pipeline.remove_graph_frame("slots");
+        for (_, entry, _) in self.instances.drain(..) {
+            let _ = pipeline.remove(&entry);
+        }
+        self.plan = None;
         self.moved = false;
     }
 
+    fn reorder(&mut self, _plan: &GraphPlan, h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
+        let mut pipeline = h.pipeline.borrow_mut();
+        for (_, entry, _) in &self.instances {
+            pipeline.set_enabled(entry, true)?;
+        }
+        Ok(())
+    }
+
     fn frame(&mut self, h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
+        for (_, _, instance) in &self.instances {
+            match (instance, &h.handles.gtao, &h.handles.contact) {
+                (SlotInstance::Gtao(handle), Some(source), _) => handle.copy_camera_from(source),
+                (SlotInstance::Contact(handle), _, Some(source)) => handle.copy_camera_from(source),
+                _ => {}
+            }
+        }
         if self.moved {
             return Ok(());
+        }
+        if let Some(plan) = &self.plan {
+            write_installed_tunables(plan, &self.catalog, h)?;
         }
         let mut pipeline = h.pipeline.borrow_mut();
         let old = pipeline.remove_graph_frame("slots");
@@ -402,6 +658,7 @@ mod tests {
         );
         assert_eq!(slot_bindings(&plan, &catalog, &entries), Ok(Vec::new()));
         assert!(view_rebinds(&plan, &catalog, &entries).is_empty());
+        assert!(slot_instances(&plan, &entries).is_empty());
     }
 
     #[test]
@@ -421,6 +678,10 @@ mod tests {
         assert_eq!(
             slot_bindings(&plan, &catalog, &entries),
             Ok(vec![(7, "ao.gtao#aoWide".to_owned(), "ao".to_owned())])
+        );
+        assert_eq!(
+            slot_instances(&plan, &entries),
+            vec![("aoWide".to_owned(), "pass.ao.gtao".to_owned())]
         );
         assert_eq!(
             view_rebinds(&plan, &catalog, &entries),
