@@ -29,7 +29,7 @@ use self::passes::{AreaShadowPipelines, AreaShadowWork};
 use self::resources::{AreaShadowInputs, AreaShadowResources, needs_reallocation, resource_bytes};
 use self::restir::RestirPipelines;
 use self::restir_resources::{RestirResources, needs_restir_reallocation, restir_resource_bytes};
-use super::{GiPart, GiShared, PartFrame, PartsCtx};
+use super::{GBufferViews, GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::{LitHandle, StochasticMode, table_limit};
 use raa_pipeline::{
@@ -396,6 +396,7 @@ impl FeaturePass for GiAreaShadowPass {
         let lit_frame = self.part.lit.frame_buffer();
         let pyramid = self.part.shared.pyramid_view();
         let sdf = state.sdf.clone();
+        let views = GBufferViews::resolve(ctx.targets, ctx.resources, AREA_SHADOW_PASS);
         let inputs = AreaShadowInputs {
             gi_frame: &frame,
             lit_frame: &lit_frame,
@@ -420,10 +421,10 @@ impl FeaturePass for GiAreaShadowPass {
         {
             let shared = resources.shared_views();
             let group2 = restir
-                .bind_group(ctx.gpu, restir_pipelines, ctx.targets, &inputs, &shared)
+                .bind_group(ctx.gpu, restir_pipelines, &views, &inputs, &shared)
                 .clone();
             let recorded = {
-                let work = resources.work_restir(ctx.gpu, pipelines, ctx.targets, &inputs, limit);
+                let work = resources.work_restir(ctx.gpu, pipelines, &views, &inputs, limit);
                 restir_pipelines.record(ctx.encoder, &group1, &group2, pipelines, &work)
             };
             if recorded {
@@ -434,7 +435,7 @@ impl FeaturePass for GiAreaShadowPass {
         }
         let recorded = {
             let work: AreaShadowWork<'_> =
-                resources.work(ctx.gpu, pipelines, ctx.targets, &inputs, limit);
+                resources.work(ctx.gpu, pipelines, &views, &inputs, limit);
             pipelines.record(ctx.encoder, &group1, &work)
         };
         if recorded {

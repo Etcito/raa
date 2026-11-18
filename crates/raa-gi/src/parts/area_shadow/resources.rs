@@ -7,13 +7,13 @@
 #![allow(dead_code)]
 
 use raa_core::GpuContext;
-use raa_pipeline::Targets;
 use raa_taa::HistoryPair;
 
 use super::cpu;
 use super::passes::{
     AREA_DISPATCH_SIZE, AREA_PARAMS_SIZE, AreaShadowPipelines, AreaShadowWork, SDF_VOLUME_SIZE,
 };
+use crate::parts::GBufferViews;
 
 /// The ray-trace inputs of one frame: the two frame uniforms, the `RaaAreaStochasticGpu` slot
 /// table, the shared clamp sampler, the all-mip depth pyramid `gi.screen` published this frame
@@ -28,7 +28,8 @@ pub(crate) struct AreaShadowInputs<'a> {
 }
 
 /// The inputs one set of cached bind groups was built from, and the groups themselves. `work`
-/// rebuilds them when the parity or any of these buffers and views differs.
+/// rebuilds them when the parity, any of these buffers and views, or the G-buffer `views`
+/// differs.
 struct AreaShadowBindings {
     gi_frame: wgpu::Buffer,
     lit_frame: wgpu::Buffer,
@@ -37,6 +38,7 @@ struct AreaShadowBindings {
     pyramid: Option<wgpu::TextureView>,
     sdf_field: Option<wgpu::TextureView>,
     sdf_uniform: Option<wgpu::Buffer>,
+    views: GBufferViews,
     parity: usize,
     trace: wgpu::BindGroup,
     temporal: Vec<wgpu::BindGroup>,
@@ -365,18 +367,19 @@ impl AreaShadowResources {
 
     /// Builds the bind groups on first use and caches them; rebuilds them after
     /// `invalidate_bindings`, a change of the depth pair's write index (the shared parity of
-    /// every pair) or a changed input buffer or view. The returned `AreaShadowWork` carries the
-    /// trace group, `cpu::groups_for(limit).min(groups)` temporal and horizontal spatial groups,
-    /// `limit.min(8).div_ceil(4)` vertical spatial groups and the viewport.
+    /// every pair) or a changed G-buffer view or input buffer or view. The returned
+    /// `AreaShadowWork` carries the trace group, `cpu::groups_for(limit).min(groups)` temporal
+    /// and horizontal spatial groups, `limit.min(8).div_ceil(4)` vertical spatial groups and the
+    /// viewport.
     pub(crate) fn work<'a>(
         &'a mut self,
         gpu: &GpuContext,
         pipelines: &AreaShadowPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
         limit: u32,
     ) -> AreaShadowWork<'a> {
-        self.refresh(gpu, pipelines, targets, inputs);
+        self.refresh(gpu, pipelines, views, inputs);
         let bindings = self.bindings.as_ref().expect("bindings built by refresh");
         let groups = cpu::groups_for(limit).min(self.groups) as usize;
         let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v.len());
@@ -409,11 +412,11 @@ impl AreaShadowResources {
         &'a mut self,
         gpu: &GpuContext,
         pipelines: &AreaShadowPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
         limit: u32,
     ) -> AreaShadowWork<'a> {
-        self.refresh(gpu, pipelines, targets, inputs);
+        self.refresh(gpu, pipelines, views, inputs);
         let bindings = self.bindings.as_ref().expect("bindings built by refresh");
         let layers = (limit.min(8).div_ceil(4) as usize).min(bindings.spatial_v_broadcast.len());
         AreaShadowWork {
@@ -439,17 +442,18 @@ impl AreaShadowResources {
     }
 
     /// Rebuilds the cached bind groups after `invalidate_bindings`, a parity change or a changed
-    /// input buffer or view.
+    /// G-buffer view or input buffer or view.
     fn refresh(
         &mut self,
         gpu: &GpuContext,
         pipelines: &AreaShadowPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
     ) {
         let parity = self.depth.state().write_index();
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.parity != parity
+                || bindings.views != *views
                 || bindings.gi_frame != *inputs.gi_frame
                 || bindings.lit_frame != *inputs.lit_frame
                 || bindings.table != *inputs.table
@@ -459,7 +463,7 @@ impl AreaShadowResources {
                 || bindings.sdf_uniform.as_ref() != inputs.sdf.map(|sdf| sdf.1)
         });
         if stale {
-            self.bindings = Some(self.build_bindings(gpu, pipelines, targets, inputs, parity));
+            self.bindings = Some(self.build_bindings(gpu, pipelines, views, inputs, parity));
         }
     }
 
@@ -480,7 +484,7 @@ impl AreaShadowResources {
         &self,
         gpu: &GpuContext,
         pipelines: &AreaShadowPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
         parity: usize,
     ) -> AreaShadowBindings {
@@ -494,8 +498,8 @@ impl AreaShadowResources {
             &pipelines.trace_layout,
             &[
                 (0, inputs.gi_frame.as_entire_binding()),
-                (1, texture_resource(targets.depth())),
-                (2, texture_resource(targets.normal())),
+                (1, texture_resource(&views.depth)),
+                (2, texture_resource(&views.normal)),
                 (4, texture_resource(pyramid)),
                 (5, texture_resource(&self.raw_view)),
                 (6, texture_resource(self.depth.write_view())),
@@ -517,7 +521,7 @@ impl AreaShadowResources {
                     &[
                         (0, inputs.lit_frame.as_entire_binding()),
                         (1, texture_resource(self.depth.write_view())),
-                        (2, texture_resource(targets.motion())),
+                        (2, texture_resource(&views.motion)),
                         (3, texture_resource(&self.raw_layers[index])),
                         (4, texture_resource(pair.read_view())),
                         (5, texture_resource(self.depth.read_view())),
@@ -539,7 +543,7 @@ impl AreaShadowResources {
                     &pipelines.spatial_layout,
                     &[
                         (1, texture_resource(self.depth.write_view())),
-                        (2, texture_resource(targets.normal())),
+                        (2, texture_resource(&views.normal)),
                         (3, texture_resource(pair.write_view())),
                         (4, texture_resource(pair.write_view())),
                         (5, texture_resource(&self.raw_layers[index])),
@@ -566,7 +570,7 @@ impl AreaShadowResources {
                     &pipelines.spatial_layout,
                     &[
                         (1, texture_resource(self.depth.write_view())),
-                        (2, texture_resource(targets.normal())),
+                        (2, texture_resource(&views.normal)),
                         (3, texture_resource(&self.raw_layers[first])),
                         (4, texture_resource(&self.raw_layers[second])),
                         (5, texture_resource(&self.mask_layers[layer])),
@@ -586,7 +590,7 @@ impl AreaShadowResources {
                     &pipelines.spatial_layout,
                     &[
                         (1, texture_resource(self.depth.write_view())),
-                        (2, texture_resource(targets.normal())),
+                        (2, texture_resource(&views.normal)),
                         (3, texture_resource(&self.raw_layers[0])),
                         (4, texture_resource(&self.raw_layers[0])),
                         (5, texture_resource(mask)),
@@ -603,6 +607,7 @@ impl AreaShadowResources {
             pyramid: inputs.pyramid.cloned(),
             sdf_field: inputs.sdf.map(|sdf| sdf.0.clone()),
             sdf_uniform: inputs.sdf.map(|sdf| sdf.1.clone()),
+            views: views.clone(),
             parity,
             trace,
             temporal,
@@ -645,7 +650,9 @@ pub(crate) fn needs_reallocation(
 mod tests {
     use super::*;
     use crate::parts::GiShared;
+    use crate::parts::area_shadow::AREA_SHADOW_PASS;
     use raa_core::testing::{block_on, skip};
+    use raa_pipeline::{ResourceTable, Targets};
 
     #[test]
     fn resource_bytes_matches_the_hand_derivation() {
@@ -674,6 +681,7 @@ mod tests {
         let shared = GiShared::new(&gpu);
         let pipelines = AreaShadowPipelines::new(&gpu, &shared.compute_group1_layout());
         let targets = Targets::new(&gpu, (64, 32));
+        let views = GBufferViews::resolve(&targets, &ResourceTable::new(), AREA_SHADOW_PASS);
         let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
         let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
         let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
@@ -692,7 +700,7 @@ mod tests {
         let work = resources.work(
             &gpu,
             &pipelines,
-            &targets,
+            &views,
             &AreaShadowInputs {
                 gi_frame: &gi_frame,
                 lit_frame: &lit_frame,
@@ -729,6 +737,7 @@ mod tests {
         let shared = GiShared::new(&gpu);
         let pipelines = AreaShadowPipelines::new(&gpu, &shared.compute_group1_layout());
         let targets = Targets::new(&gpu, (64, 32));
+        let views = GBufferViews::resolve(&targets, &ResourceTable::new(), AREA_SHADOW_PASS);
         let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
         let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
         let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
@@ -749,14 +758,14 @@ mod tests {
 
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
         let mut resources = AreaShadowResources::new(&gpu, (64, 32), 1);
-        let work = resources.work_restir(&gpu, &pipelines, &targets, &inputs, 8);
+        let work = resources.work_restir(&gpu, &pipelines, &views, &inputs, 8);
         assert_eq!(work.temporal.len(), 1);
         assert_eq!(work.spatial_h.len(), 1);
         assert_eq!(work.spatial_v.len(), 2);
         assert_eq!(work.viewport, (64, 32));
-        let work = resources.work_restir(&gpu, &pipelines, &targets, &inputs, 3);
+        let work = resources.work_restir(&gpu, &pipelines, &views, &inputs, 3);
         assert_eq!(work.spatial_v.len(), 1);
-        let work = resources.work_restir(&gpu, &pipelines, &targets, &inputs, 0);
+        let work = resources.work_restir(&gpu, &pipelines, &views, &inputs, 0);
         assert_eq!(work.spatial_v.len(), 0);
         assert!(
             block_on(scope.pop()).is_none(),
@@ -769,5 +778,75 @@ mod tests {
         let after = resources.shared_views().parity;
         assert_eq!(after, resources.depth.state().write_index());
         assert_ne!(before, after);
+    }
+
+    /// The G-buffer views are part of the cache key: `AreaShadowResources::work` keeps the cached
+    /// trace and temporal groups for equal views and rebuilds them when the `normal` view differs.
+    #[test]
+    fn work_rebuilds_the_cached_groups_when_the_normal_view_changes() {
+        let test = "work_rebuilds_the_cached_groups_when_the_normal_view_changes";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        let pipelines = AreaShadowPipelines::new(&gpu, &shared.compute_group1_layout());
+        let targets = Targets::new(&gpu, (64, 32));
+        let gi_frame = uniform(&gpu, "raa-gi.area-shadow.test.frame", 432);
+        let lit_frame = uniform(&gpu, "raa-gi.area-shadow.test.lit-frame", 768);
+        let table = uniform(&gpu, "raa-gi.area-shadow.test.table", 80);
+        let sampler = gpu.device().create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("raa-gi.area-shadow.test.sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let inputs = AreaShadowInputs {
+            gi_frame: &gi_frame,
+            lit_frame: &lit_frame,
+            table: &table,
+            sampler: &sampler,
+            pyramid: None,
+            sdf: None,
+        };
+        let plain = GBufferViews::resolve(&targets, &ResourceTable::new(), AREA_SHADOW_PASS);
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-gi.area-shadow.test-bound-normal"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let mut bound = plain.clone();
+        bound.normal = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        assert_ne!(bound.normal, plain.normal);
+
+        let mut resources = AreaShadowResources::new(&gpu, (64, 32), 2);
+        let first = {
+            let work = resources.work(&gpu, &pipelines, &plain, &inputs, 3);
+            (work.trace.clone(), work.temporal[0].clone())
+        };
+        let kept = {
+            let work = resources.work(&gpu, &pipelines, &plain, &inputs, 3);
+            (work.trace.clone(), work.temporal[0].clone())
+        };
+        assert_eq!(first, kept);
+        let rebuilt = {
+            let work = resources.work(&gpu, &pipelines, &bound, &inputs, 3);
+            (work.trace.clone(), work.temporal[0].clone())
+        };
+        assert_ne!(first.0, rebuilt.0);
+        assert_ne!(first.1, rebuilt.1);
+        let cached = resources.bindings.as_ref().expect("bindings built above");
+        assert!(cached.views == bound);
+        assert_eq!(cached.views.normal, bound.normal);
+        assert_eq!(cached.views.depth, plain.depth);
     }
 }

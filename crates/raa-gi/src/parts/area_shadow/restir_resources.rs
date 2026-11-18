@@ -4,9 +4,9 @@
 #![allow(dead_code)]
 
 use raa_core::GpuContext;
-use raa_pipeline::Targets;
 use raa_taa::HistoryState;
 
+use crate::parts::GBufferViews;
 use crate::parts::GiShared;
 
 use super::resources::{AreaShadowInputs, AreaSharedViews};
@@ -28,6 +28,7 @@ struct RestirBindings {
     sdf_field: Option<wgpu::TextureView>,
     sdf_uniform: Option<wgpu::Buffer>,
     raw: wgpu::TextureView,
+    views: GBufferViews,
     parity: usize,
     group: wgpu::BindGroup,
 }
@@ -149,19 +150,20 @@ impl RestirResources {
         gpu.queue().write_buffer(&self.params, 0, &bytes);
     }
 
-    /// The cached group-2 bind group, rebuilt when the shared parity, the raw view or any input
-    /// buffer or view differs from the one it was built from.
+    /// The cached group-2 bind group, rebuilt when the shared parity, the raw view, the G-buffer
+    /// views or any input buffer or view differs from the one it was built from.
     pub(crate) fn bind_group(
         &mut self,
         gpu: &GpuContext,
         pipelines: &RestirPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
         shared: &AreaSharedViews<'_>,
     ) -> &wgpu::BindGroup {
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.parity != shared.parity
                 || bindings.raw != *shared.raw
+                || bindings.views != *views
                 || bindings.gi_frame != *inputs.gi_frame
                 || bindings.lit_frame != *inputs.lit_frame
                 || bindings.table != *inputs.table
@@ -170,7 +172,7 @@ impl RestirResources {
                 || bindings.sdf_uniform.as_ref() != inputs.sdf.map(|sdf| sdf.1)
         });
         if stale {
-            let group = self.build_group(gpu, pipelines, targets, inputs, shared);
+            let group = self.build_group(gpu, pipelines, views, inputs, shared);
             self.bindings = Some(RestirBindings {
                 gi_frame: inputs.gi_frame.clone(),
                 lit_frame: inputs.lit_frame.clone(),
@@ -179,6 +181,7 @@ impl RestirResources {
                 sdf_field: inputs.sdf.map(|sdf| sdf.0.clone()),
                 sdf_uniform: inputs.sdf.map(|sdf| sdf.1.clone()),
                 raw: shared.raw.clone(),
+                views: views.clone(),
                 parity: shared.parity,
                 group,
             });
@@ -193,7 +196,7 @@ impl RestirResources {
         &self,
         gpu: &GpuContext,
         pipelines: &RestirPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &AreaShadowInputs<'_>,
         shared: &AreaSharedViews<'_>,
     ) -> wgpu::BindGroup {
@@ -203,22 +206,22 @@ impl RestirResources {
             .unwrap_or((shared.dummy_sdf_field, shared.dummy_sdf_uniform));
         let bindings = [
             (0, inputs.gi_frame.as_entire_binding()),
-            (1, texture_resource(targets.depth())),
-            (2, texture_resource(targets.normal())),
+            (1, texture_resource(&views.depth)),
+            (2, texture_resource(&views.normal)),
             (4, texture_resource(pyramid)),
             (5, texture_resource(shared.raw)),
             (6, texture_resource(shared.depth_write)),
             (8, inputs.table.as_entire_binding()),
             (10, texture_resource(sdf_field)),
             (11, sdf_uniform.as_entire_binding()),
-            (12, texture_resource(targets.motion())),
+            (12, texture_resource(&views.motion)),
             (13, inputs.lit_frame.as_entire_binding()),
             (14, texture_resource(shared.depth_read)),
             (15, self.params.as_entire_binding()),
             (16, self.current.as_entire_binding()),
             (17, self.history.as_entire_binding()),
             (18, texture_resource(&self.atlas_view)),
-            (19, texture_resource(targets.material())),
+            (19, texture_resource(&views.material)),
         ];
         let entries: Vec<wgpu::BindGroupEntry<'_>> = bindings
             .into_iter()
@@ -259,7 +262,9 @@ mod tests {
     use super::super::resources::AreaShadowResources;
     use super::*;
     use crate::parts::GiShared;
+    use crate::parts::area_shadow::AREA_SHADOW_PASS;
     use raa_core::testing::{block_on, skip};
+    use raa_pipeline::{ResourceTable, Targets};
 
     fn uniform(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
         gpu.device().create_buffer(&wgpu::BufferDescriptor {
@@ -296,6 +301,7 @@ mod tests {
         // their views; nothing is dispatched.
         let shared = GiShared::new(&gpu);
         let targets = Targets::new(&gpu, (64, 32));
+        let views = GBufferViews::resolve(&targets, &ResourceTable::new(), AREA_SHADOW_PASS);
         let area = AreaShadowResources::new(&gpu, (64, 32), 1);
         let pipelines = RestirPipelines::new(&gpu, &shared.compute_group1_layout());
         let gi_frame = uniform(&gpu, "raa-gi.area-restir.test.frame", 432);
@@ -319,7 +325,7 @@ mod tests {
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
         let mut resources = RestirResources::new(&gpu, (64, 32));
         resources.write_params(&gpu, 1, &[0, 1, 2, 3, 4, 5, 6, 7], &shared);
-        resources.bind_group(&gpu, &pipelines, &targets, &inputs, &area.shared_views());
+        resources.bind_group(&gpu, &pipelines, &views, &inputs, &area.shared_views());
         assert!(
             block_on(scope.pop()).is_none(),
             "the ReSTIR resources and group-2 bind group create without a validation error"
