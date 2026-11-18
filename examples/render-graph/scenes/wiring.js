@@ -43,7 +43,7 @@ export const inventory = [
   row('wiring-default-full-gi', 'default-full-gi', 'wiring-default-full-gi.png',
     'P5-Q3 Full GI still renders with the wired colour chain',
     [...DEFAULT_FACTS, 'assertion:full-gi-wired'], CHAIN_PRODUCER,
-    'The room is lit by the sun with indirect bounce light: a red tint from the red left wall on the floor and boxes near it, shadowed areas that are dim but not black, sun shadows under the boxes and a reflection on the glossy floor strip; the image is neither black nor washed out and no geometry is missing.'),
+    'The room renders lit by the sun with soft indirect light: shadowed areas that are dim but not black, sun shadows from the boxes and a reflection on the glossy floor strip; the image is neither black nor washed out and no geometry is missing.'),
   row('wiring-default-debug', 'default-debug', 'wiring-default-debug.png',
     'P5-Q7 Debug grid still renders with the wired colour chain',
     [...DEFAULT_FACTS, 'assertion:debug-wired'], CHAIN_PRODUCER,

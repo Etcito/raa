@@ -59,8 +59,11 @@ fn fs(frag: Vertex) -> @location(0) vec4<f32> {
             } else {
                 c = load_b(uv);
             }
+            // The divider's half width scales with the target (1 px up to 480 px wide, 4 px at
+            // 1920), so it survives a view.grid tile that samples one texel in four.
             let width = frag.position.x / max(uv.x, 1e-6);
-            if (abs(frag.position.x - params.position * width) <= 1.0) {
+            let half_width = max(1.0, width / 480.0);
+            if (abs(frag.position.x - params.position * width) <= half_width) {
                 c = vec3<f32>(1.0);
             }
         }

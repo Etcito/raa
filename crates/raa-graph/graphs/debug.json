@@ -214,6 +214,7 @@
       "id": "vAreaMask",
       "type": "view.image",
       "params": {
+        "channels": "r",
         "label": "area shadow mask"
       }
     },

@@ -15,6 +15,10 @@ const DEFAULTS_FACTS = ['snapshot:renderGraphActive', 'snapshot:issues', 'runtim
 const FAMILY_FACTS = ['snapshot:renderGraphActive', 'snapshot:issues', 'runtime:passes', 'runtime:ready', 'assertion:parameter-changed'];
 const PANE_TARGET = [0.4, 1, -0.4];
 const PANE_SPACING_M = 0.25;
+// Each pane also steps sideways (across the view) and up by PANE_FAN_M, so the eight panes fan out
+// like a hand of cards: every colour shows at its own edge and a common core still holds all eight.
+// Without the fan the panes hid exactly behind one another and read as one square (run 15631).
+export const PANE_FAN_M = { side: 0.09, up: 0.05 };
 const PANE_COLOURS = [
   [0.9, 0.2, 0.2], [0.95, 0.5, 0.15], [0.95, 0.85, 0.2], [0.2, 0.8, 0.3],
   [0.2, 0.75, 0.9], [0.2, 0.35, 0.95], [0.6, 0.25, 0.9], [0.85, 0.85, 0.85],
@@ -101,14 +105,17 @@ export const inventory = [defaultsRow, ...PARAMETER_CHANGES.map(familyRow)];
 // The eight transparent panes of the oit row: 1 x 1 m, stacked along the camera's view through
 // PANE_TARGET at PANE_SPACING_M, each turned to face the camera's yaw. Pure geometry, so the
 // variant's subjects and the built scene agree.
-function paneLayout() {
+export function paneLayout() {
   const eye = cameraAt(RG_CAPTURE_T_S).position;
   const toward = PANE_TARGET.map((value, axis) => value - eye[axis]);
   const length = Math.hypot(...toward);
   const yaw = Math.atan2(eye[0], eye[2]);
+  const side = [toward[2] / Math.hypot(toward[0], toward[2]), 0, -toward[0] / Math.hypot(toward[0], toward[2])];
   return PANE_COLOURS.map((color, index) => {
-    const offset = (index - (PANE_COLOURS.length - 1) / 2) * PANE_SPACING_M;
-    const centre = PANE_TARGET.map((value, axis) => value + toward[axis] / length * offset);
+    const step = index - (PANE_COLOURS.length - 1) / 2;
+    const offset = step * PANE_SPACING_M;
+    const centre = PANE_TARGET.map((value, axis) => value + toward[axis] / length * offset
+      + side[axis] * step * PANE_FAN_M.side + (axis === 1 ? step * PANE_FAN_M.up : 0));
     return { name: `oit-pane-${index}`, color, centre, yaw };
   });
 }
