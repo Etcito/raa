@@ -174,7 +174,7 @@ printf '%s\n' "$LIST"
 MISSING=0
 for f in package/package.json package/index.js package/sky-weather.js package/index.d.ts package/README.md \
   package/LICENSE package/pkg/raa_js_bg.wasm package/pkg/raa_js.js; do
-  if ! printf '%s\n' "$LIST" | grep -qx "$f"; then
+  if ! grep -qx "$f" <<<"$LIST"; then  # not a pipe: under pipefail grep -q exits early, printf gets SIGPIPE, a present file reads as missing (project 95 card 8655)
     echo "build-package.sh: $f missing from release/$TGZ_NAME" >&2
     MISSING=1
   fi
