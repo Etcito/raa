@@ -14,7 +14,8 @@ use crate::plan::InputSource;
 use crate::plan::{GraphPlan, PlanHistory, PlanNode, PlanPortRef, PlanResource};
 use raa_core::RaaError;
 use raa_pipeline::{
-    FeaturePass, GraphFrame, ImageDesc, ImageDim, PrepareCtx, RecordCtx, ResourceTable,
+    FeaturePass, GraphFrame, ImageDesc, ImageDim, PrepareCtx, PublishedImage, RecordCtx,
+    ResourceTable,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -22,7 +23,7 @@ use std::{cell::RefCell, rc::Rc};
 #[path = "wiring/plan_fns.rs"]
 mod plan_fns;
 
-// Re-exported for the wiring cards; nothing in this share calls them yet.
+// Re-exported for the wiring cards; `apply` and `histories` call them.
 #[allow(unused_imports)]
 pub use plan_fns::{history_resets, pool_resources};
 
@@ -193,6 +194,92 @@ impl WiringExtension {
         Ok(())
     }
 
+    /// The executor-owned histories of `plan`. A history keeps its images, parity and validity
+    /// when its consumer, producer and format are unchanged; one that `history_resets` restarts
+    /// becomes invalid and its TAA consumer is invalidated once (a history without images is
+    /// invalidated when the frame allocates them).
+    fn histories(
+        &self,
+        plan: &GraphPlan,
+        previous: Option<&GraphPlan>,
+        entries: &[(String, String)],
+        h: &mut FeatureHandles<'_>,
+    ) -> Vec<History> {
+        let resets = history_resets(previous, plan);
+        let mut old = std::mem::take(&mut self.state.borrow_mut().histories);
+        let mut out = Vec::new();
+        for history in &plan.histories {
+            let Some(resource) = plan.resources.iter().find(|r| r.id == history.resource) else {
+                continue;
+            };
+            let consumer = &history.consumer;
+            let (Some(producer_entry), Some(consumer_entry)) = (
+                entry_of(entries, &resource.producer.node),
+                entry_of(entries, &consumer.node),
+            ) else {
+                continue;
+            };
+            let type_of = |id: &str| {
+                plan.nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| self.catalog.node(&n.type_id))
+            };
+            let Some(consumer_spec) = type_of(&consumer.node) else {
+                continue;
+            };
+            let Some(port) = consumer_spec.inputs.iter().find(|i| i.key == consumer.port) else {
+                continue;
+            };
+            let format = type_of(&resource.producer.node)
+                .and_then(|s| s.outputs.iter().find(|o| o.key == resource.producer.port))
+                .and_then(|o| o.format.clone())
+                .map_or(wgpu::TextureFormat::Rgba16Float, |f| {
+                    f.to_wgpu(wgpu::TextureFormat::Rgba16Float)
+                });
+            let taa = if consumer_spec.id == "pass.taa" {
+                self.instances
+                    .iter()
+                    .find_map(|(id, _, handle)| match handle {
+                        InstanceHandle::Taa(t) if *id == consumer.node => Some(t.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| h.handles.taa.clone())
+            } else {
+                None
+            };
+            let producer = (producer_entry, resource.producer.port.clone());
+            let key = format!("{}.{}", consumer.node, consumer.port);
+            let mut next = History {
+                producer,
+                consumer: (consumer_entry, port.key),
+                format,
+                taa,
+                images: Vec::new(),
+                current: 0,
+                valid: false,
+                copied: false,
+                key,
+            };
+            if let Some(i) = old.iter().position(|o| {
+                o.key == next.key && o.producer == next.producer && o.format == next.format
+            }) {
+                let kept = old.swap_remove(i);
+                next.images = kept.images;
+                next.current = kept.current;
+                next.valid = kept.valid;
+            }
+            if resets.contains(&next.key) && !next.images.is_empty() {
+                next.valid = false;
+                if let Some(taa) = &next.taa {
+                    taa.invalidate();
+                }
+            }
+            out.push(next);
+        }
+        out
+    }
+
     /// Restores the instance passes and their values after a refused `commit`: the passes it
     /// installed are removed, the passes it removed are added back, and the previous plan's values
     /// are written again.
@@ -301,6 +388,23 @@ impl ExecExtension for WiringExtension {
                 "The HDR chain exceeds 32 bound views.".into(),
             )]);
         }
+        let refusals = plan_fns::history_refusals(plan, &self.catalog);
+        if !refusals.is_empty() {
+            return Err(refusals
+                .iter()
+                .map(|(node, port)| {
+                    issue(
+                        "graph.history",
+                        Some(node),
+                        Some(port),
+                        format!(
+                            "{node}.{port} needs a history link from pass.taa's history or a chain \
+                             colour output; link it as a history link."
+                        ),
+                    )
+                })
+                .collect());
+        }
         let instances = wanted_instances(plan, &entries);
         let layout = Layout {
             bindings,
@@ -310,7 +414,11 @@ impl ExecExtension for WiringExtension {
         let snapshot = self.instances.clone();
         let mut undo = Undo::default();
         match self.commit(plan, &entries, &instances, layout, h, &mut undo) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let histories = self.histories(plan, previous, &entries, h);
+                self.state.borrow_mut().histories = histories;
+                Ok(())
+            }
             Err(issues) => {
                 self.rollback(snapshot, undo, previous, h);
                 Err(issues)
@@ -738,8 +846,28 @@ struct Undo {
     removed: Vec<(String, Box<dyn FeaturePass>)>,
 }
 
+/// One executor-owned history: two images at frame size, the index `current` written this frame
+/// and the validity of the other one.
+///
+/// LIFECYCLE (history images, contract rg-wiring-frame): created in the frame's first
+/// `before_prepare` of a frame when missing or when the frame size differs, together with the
+/// pool; copied in the producer's `after_record`; bound in the consumer's `before_record`; parity
+/// flipped in `end`; dropped when their history leaves the plan and in `clear`.
+struct History {
+    key: String,
+    producer: (String, String),
+    consumer: (String, &'static str),
+    format: wgpu::TextureFormat,
+    taa: Option<raa_taa::TaaHandle>,
+    images: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    current: usize,
+    valid: bool,
+    copied: bool,
+}
+
 #[derive(Default)]
 struct State {
+    histories: Vec<History>,
     bindings: Vec<Binding>,
     view_inputs: Vec<ViewInput>,
     slot_count: usize,
@@ -762,9 +890,13 @@ impl GraphFrame for WiringFrame {
             return Ok(());
         }
         self.prepared = true;
-        let mut state = self.state.borrow_mut();
+        let mut guard = self.state.borrow_mut();
+        let state = &mut *guard;
         if state.size != ctx.size {
             state.pool.clear();
+            for history in &mut state.histories {
+                history.images.clear();
+            }
             state.size = ctx.size;
         }
         while state.pool.len() < state.slot_count {
@@ -789,6 +921,33 @@ impl GraphFrame for WiringFrame {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             state.pool.push((texture, view));
         }
+        for history in state.histories.iter_mut().filter(|h| h.images.is_empty()) {
+            for _ in 0..2 {
+                let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                    label: Some("raa.wiring.history"),
+                    size: wgpu::Extent3d {
+                        width: ctx.size.0,
+                        height: ctx.size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: history.format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                history.images.push((texture, view));
+            }
+            history.current = 0;
+            history.valid = false;
+            if let Some(taa) = &history.taa {
+                taa.invalidate();
+            }
+        }
         Ok(())
     }
 
@@ -797,6 +956,21 @@ impl GraphFrame for WiringFrame {
         for input in state.view_inputs.iter().filter(|input| input.entry == pass) {
             if let Some(image) = ctx.resources.get(&input.source.0, &input.source.1) {
                 ctx.resources.bind_input(pass, input.port, image);
+            }
+        }
+        for history in state
+            .histories
+            .iter()
+            .filter(|h| h.valid && h.consumer.0 == pass)
+        {
+            if let Some((_, view)) = history.images.get(1 - history.current) {
+                let desc =
+                    ImageDesc::new(ImageDim::D2, history.format, ctx.size.0, ctx.size.1, 1, 1);
+                let image = PublishedImage {
+                    view: view.clone(),
+                    desc,
+                };
+                ctx.resources.bind_input(pass, history.consumer.1, image);
             }
         }
         let Some(binding) = state.bindings.iter().find(|b| b.entry == pass) else {
@@ -843,28 +1017,71 @@ impl GraphFrame for WiringFrame {
     }
 
     fn after_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
-        let state = self.state.borrow();
-        let Some(binding) = state.bindings.iter().find(|b| b.entry == pass) else {
-            return Ok(());
-        };
-        ctx.targets.hdr().unbind();
-        if !binding.tonemap
-            && let Some((_, view)) = binding.dst.and_then(|i| state.pool.get(i))
-        {
-            ctx.resources.publish(
-                pass,
-                "color",
-                view,
-                ImageDesc::new(
-                    ImageDim::D2,
-                    wgpu::TextureFormat::Rgba16Float,
-                    ctx.size.0,
-                    ctx.size.1,
-                    1,
-                    1,
-                ),
+        let mut guard = self.state.borrow_mut();
+        let state = &mut *guard;
+        if let Some(binding) = state.bindings.iter().find(|b| b.entry == pass) {
+            ctx.targets.hdr().unbind();
+            publish_color(pass, binding, &state.pool, ctx);
+        }
+        for history in state.histories.iter_mut().filter(|h| h.producer.0 == pass) {
+            let Some(image) = ctx.resources.get(pass, &history.producer.1) else {
+                continue;
+            };
+            let Some((texture, _)) = history.images.get(history.current) else {
+                continue;
+            };
+            if (image.desc.width, image.desc.height) != ctx.size
+                || image.desc.format != history.format
+            {
+                continue;
+            }
+            ctx.encoder.copy_texture_to_texture(
+                image.view.texture().as_image_copy(),
+                texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: ctx.size.0,
+                    height: ctx.size.1,
+                    depth_or_array_layers: 1,
+                },
             );
+            history.copied = true;
         }
         Ok(())
+    }
+
+    fn end(&mut self, _table: &ResourceTable) {
+        for history in &mut self.state.borrow_mut().histories {
+            if history.copied {
+                history.copied = false;
+                history.valid = true;
+                history.current = 1 - history.current;
+            }
+        }
+    }
+}
+
+/// Republishes (entry, "color") with the pool view the chain pass `pass` wrote.
+fn publish_color(
+    pass: &str,
+    binding: &Binding,
+    pool: &[(wgpu::Texture, wgpu::TextureView)],
+    ctx: &mut RecordCtx<'_>,
+) {
+    if !binding.tonemap
+        && let Some((_, view)) = binding.dst.and_then(|i| pool.get(i))
+    {
+        ctx.resources.publish(
+            pass,
+            "color",
+            view,
+            ImageDesc::new(
+                ImageDim::D2,
+                wgpu::TextureFormat::Rgba16Float,
+                ctx.size.0,
+                ctx.size.1,
+                1,
+                1,
+            ),
+        );
     }
 }

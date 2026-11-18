@@ -260,3 +260,38 @@ pub fn instance_plan(kept: &[(String, String)], wanted: &[(String, String)]) -> 
         .collect();
     (install, keep, remove)
 }
+
+/// Refused history wiring, as (consumer node id, consumer port) in plan node order then input
+/// order: a history link whose producer output is neither `pass.taa`'s `history` nor the `color`
+/// output of `pass.forward` or of an in/out chain type (the executor copies it, so it needs
+/// COPY_SRC), and a plain link into an input whose catalog `history` is true.
+pub fn history_refusals(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for node in &plan.nodes {
+        let spec = catalog.node(&node.type_id);
+        for input in &node.inputs {
+            let raa_graph::plan::InputSource::Link {
+                node: from,
+                port,
+                history,
+            } = &input.source
+            else {
+                continue;
+            };
+            let refused = if *history {
+                !find_node(plan, from).is_some_and(|p| history_source(&p.type_id, port))
+            } else {
+                spec.is_some_and(|s| s.inputs.iter().any(|i| i.key == input.port && i.history))
+            };
+            if refused {
+                out.push((node.id.clone(), input.port.clone()));
+            }
+        }
+    }
+    out
+}
+
+/// Whether output `port` of a node of type `ty` may feed an executor-owned history.
+pub fn history_source(ty: &str, port: &str) -> bool {
+    (ty == "pass.taa" && port == "history") || (port == "color" && chain_type(ty))
+}
