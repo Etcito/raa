@@ -293,7 +293,6 @@ impl ForwardContributor for OpaqueContributor {
         self.plan.clear();
         let msaa = lit.msaa();
         self.msaa = msaa;
-        self.pipeline(lit, ctx, msaa);
         let generation = self
             .buffers
             .try_borrow()
@@ -305,6 +304,11 @@ impl ForwardContributor for OpaqueContributor {
         let planned = self.plan_draws();
         if planned.is_err() {
             self.plan.clear();
+        }
+        // Built for the first frame that draws confetti or snow: a scene without them never
+        // compiles it (raa_core::Lazy says why).
+        if !self.plan.is_empty() {
+            self.pipeline(lit, ctx, msaa);
         }
         planned
     }

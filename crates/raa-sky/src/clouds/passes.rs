@@ -7,7 +7,7 @@
 //! `clouds/mod.rs:579-583`: the half-resolution target in 8x8 workgroups, then a copy of
 //! the result into the view's history for its next march.
 
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 
 use super::super::{MAX_VIEWS, invalid};
 use super::dome::DomeGpu;
@@ -47,9 +47,11 @@ struct DomeGroup {
 }
 
 /// A screen layout (group 2 bindings 0-12) with its pipeline, for one depth sample count.
+/// The pipeline is built on the first screen march of its sample count: the dome march draws
+/// the clouds when it is on, and one view uses one depth sample count (raa_core::Lazy says why).
 struct ScreenPipeline {
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
 }
 
 /// The cloud pipelines with their per-view bind groups.
@@ -229,6 +231,58 @@ fn pipeline(
     )
 }
 
+/// [`pipeline`] built on its first use: `source` is validated now, the module and the pipeline
+/// are created by the first [`Lazy::get`].
+fn lazy_pipeline(
+    gpu: &GpuContext,
+    label: &'static str,
+    source: String,
+    entry_point: &'static str,
+    empty: &wgpu::BindGroupLayout,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&'static str, f64)],
+) -> Result<Lazy<wgpu::ComputePipeline>, RaaError> {
+    raa_shader::Composer::validate(&source)
+        .map_err(|error| RaaError::Gpu(format!("{label} shader: {error}")))?;
+    let constants: Vec<(&'static str, f64)> = constants
+        .iter()
+        .filter(|(name, _)| source.contains(&format!("override {name}:")))
+        .copied()
+        .collect();
+    let (device, empty, layout) = (gpu.device().clone(), empty.clone(), layout.clone());
+    Ok(Lazy::new(move || {
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: &[Some(&empty), Some(&empty), Some(&layout)],
+            immediate_size: 0,
+        });
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some(entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &constants,
+                ..Default::default()
+            },
+            cache: None,
+        })
+    }))
+}
+
+/// The march pipelines of [`march_pipelines`]: the screen ones are built on first use.
+struct MarchPipelines {
+    shadow: wgpu::ComputePipeline,
+    panorama: wgpu::ComputePipeline,
+    screen: Lazy<wgpu::ComputePipeline>,
+    screen_multisampled: Lazy<wgpu::ComputePipeline>,
+    dome: wgpu::ComputePipeline,
+}
+
 /// The shadow, panorama, screen (one and several samples) and dome pipelines: every module
 /// that composes cloud_volume.wgsl, built with its override constants from `tunables`.
 fn march_pipelines(
@@ -236,10 +290,11 @@ fn march_pipelines(
     empty: &wgpu::BindGroupLayout,
     layouts: [&wgpu::BindGroupLayout; 5],
     tunables: &CloudTunables,
-) -> Result<[wgpu::ComputePipeline; 5], RaaError> {
+) -> Result<MarchPipelines, RaaError> {
     let constants = tunables.constants();
     let [shadow, panorama, screen, screen_ms, dome] = layouts;
-    Ok([
+    Ok(MarchPipelines {
+        shadow:
         pipeline(
             gpu,
             "raa-sky.cloud_shadow",
@@ -249,7 +304,7 @@ fn march_pipelines(
             shadow,
             &constants,
         )?,
-        pipeline(
+        panorama: pipeline(
             gpu,
             "raa-sky.cloud_panorama",
             &panorama_module_wgsl(),
@@ -258,25 +313,25 @@ fn march_pipelines(
             panorama,
             &constants,
         )?,
-        pipeline(
+        screen: lazy_pipeline(
             gpu,
             screen_label(false),
-            &screen_module_wgsl(false),
+            screen_module_wgsl(false),
             "raa_cloud_screen_main",
             empty,
             screen,
             &constants,
         )?,
-        pipeline(
+        screen_multisampled: lazy_pipeline(
             gpu,
             screen_label(true),
-            &screen_module_wgsl(true),
+            screen_module_wgsl(true),
             "raa_cloud_screen_main",
             empty,
             screen_ms,
             &constants,
         )?,
-        pipeline(
+        dome: pipeline(
             gpu,
             "raa-sky.cloud_dome",
             &dome_module_wgsl(),
@@ -285,7 +340,7 @@ fn march_pipelines(
             dome,
             &constants,
         )?,
-    ])
+    })
 }
 
 impl CloudPasses {
@@ -295,7 +350,13 @@ impl CloudPasses {
         gpu: &GpuContext,
         tunables: &CloudTunables,
     ) -> Result<(), RaaError> {
-        let [shadow, panorama, screen, screen_multisampled, dome] = march_pipelines(
+        let MarchPipelines {
+            shadow,
+            panorama,
+            screen,
+            screen_multisampled,
+            dome,
+        } = march_pipelines(
             gpu,
             &self.empty,
             [
@@ -348,7 +409,13 @@ impl CloudPasses {
             label: Some("raa-sky.cloud_dome"),
             entries: &[e0, e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, texture(11, D2)],
         });
-        let [shadow, panorama, screen, screen_multisampled, dome] = march_pipelines(
+        let MarchPipelines {
+            shadow,
+            panorama,
+            screen,
+            screen_multisampled,
+            dome,
+        } = march_pipelines(
             gpu,
             &empty,
             [
@@ -632,9 +699,9 @@ impl CloudPasses {
             return Ok(());
         };
         let pipeline = if screen.multisampled {
-            &self.screen_multisampled.pipeline
+            self.screen_multisampled.pipeline.get()
         } else {
-            &self.screen.pipeline
+            self.screen.pipeline.get()
         };
         let texture = current.texture();
         // One march and its copy into the history; a convergence burst repeats the pair, each

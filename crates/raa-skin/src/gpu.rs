@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 
 use crate::SkinMesh;
-use raa_core::{GpuContext, RaaError, wgpu};
+use raa_core::{GpuContext, Lazy, RaaError, wgpu};
 
 pub const SKIN_WGSL: &str = include_str!("skin.wgsl");
 pub const SKIN_EDGES_WGSL: &str = include_str!("skin_edges.wgsl");
@@ -77,22 +77,22 @@ impl SkinVertexInputs {
 }
 
 /// Reusable S18 vertex and edge pipelines. Records into the caller's encoder before draws.
+/// Both pipelines are built on the first skinned draw (raa_core::Lazy says why).
 pub struct SkinVertexKernel {
-    pipeline: wgpu::ComputePipeline,
-    edges: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
+    edges: Lazy<wgpu::ComputePipeline>,
 }
 
 impl SkinVertexKernel {
     pub fn new(gpu: &GpuContext) -> Self {
-        let pipeline = |label: &str, source: &str, entry_point: &str| {
-            let module = gpu
-                .device()
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+        let pipeline = |label: &'static str, source: &'static str, entry_point: &'static str| {
+            let device = gpu.device().clone();
+            Lazy::new(move || {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some(label),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 });
-            gpu.device()
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(label),
                     layout: None,
                     module: &module,
@@ -100,6 +100,7 @@ impl SkinVertexKernel {
                     compilation_options: Default::default(),
                     cache: None,
                 })
+            })
         };
         Self {
             pipeline: pipeline("skin.vertices", SKIN_WGSL, "skin_vertices"),
@@ -132,7 +133,7 @@ impl SkinVertexKernel {
             .collect();
         gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skin.instance"),
-            layout: &self.pipeline.get_bind_group_layout(0),
+            layout: &self.pipeline.get().get_bind_group_layout(0),
             entries: &entries,
         })
     }
@@ -169,7 +170,7 @@ impl SkinVertexKernel {
         ];
         gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skin.instance"),
-            layout: &self.pipeline.get_bind_group_layout(0),
+            layout: &self.pipeline.get().get_bind_group_layout(0),
             entries: &entries,
         })
     }
@@ -195,7 +196,7 @@ impl SkinVertexKernel {
             .collect();
         gpu.device().create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("skin.edges"),
-            layout: &self.edges.get_bind_group_layout(0),
+            layout: &self.edges.get().get_bind_group_layout(0),
             entries: &entries,
         })
     }
@@ -214,7 +215,7 @@ impl SkinVertexKernel {
             label: Some("skin.vertices"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(self.pipeline.get());
         pass.set_bind_group(0, binding, &[]);
         pass.dispatch_workgroups(vertices.div_ceil(64), 1, 1);
     }
@@ -283,7 +284,7 @@ impl SkinVertexKernel {
             label: Some("skin.edges"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.edges);
+        pass.set_pipeline(self.edges.get());
         pass.set_bind_group(0, binding, &[]);
         pass.dispatch_workgroups(edges.div_ceil(64), 1, 1);
     }

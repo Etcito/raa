@@ -19,7 +19,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError, lazy_compute_pipeline};
 use raa_lit::{DrawClass, FLAG_DOUBLE_SIDED, LitHandle, LitRenderer, PipelineSpec};
 use raa_pipeline::{
     FeaturePass, HDR_FORMAT, HdrChain, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx,
@@ -136,8 +136,8 @@ fn depth_state() -> wgpu::DepthStencilState {
 
 /// The pipelines and specs built on one set of [`OitLayouts`].
 struct Pipelines {
-    clear: wgpu::ComputePipeline,
-    resolve: wgpu::RenderPipeline,
+    clear: Lazy<wgpu::ComputePipeline>,
+    resolve: Lazy<wgpu::RenderPipeline>,
     /// Transparent draws, back faces culled.
     culled: PipelineSpec,
     /// Transparent draws of DOUBLE_SIDED materials (no culling).
@@ -151,19 +151,16 @@ impl Pipelines {
             label: Some("raa-oit.clear"),
             source: wgpu::ShaderSource::Wgsl(CLEAR_WGSL.into()),
         });
-        let clear_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raa-oit.clear"),
-            bind_group_layouts: &[Some(&layouts.clear)],
-            immediate_size: 0,
-        });
-        let clear = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raa-oit.clear"),
-            layout: Some(&clear_layout),
-            module: &clear_module,
-            entry_point: Some(CLEAR_ENTRY),
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-            cache: None,
-        });
+        // Clear and resolve are built on the first frame with transparent draws (raa_core::Lazy
+        // says why).
+        let clear = lazy_compute_pipeline(
+            device,
+            "raa-oit.clear",
+            &clear_module,
+            CLEAR_ENTRY,
+            &[Some(&layouts.clear)],
+            &[],
+        );
         let resolve_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-oit.resolve"),
             source: wgpu::ShaderSource::Wgsl(RESOLVE_WGSL.into()),
@@ -173,31 +170,41 @@ impl Pipelines {
             bind_group_layouts: &[Some(&layouts.resolve)],
             immediate_size: 0,
         });
-        let resolve = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("raa-oit.resolve"),
-            layout: Some(&resolve_layout),
-            vertex: wgpu::VertexState {
-                module: &resolve_module,
-                entry_point: Some(RESOLVE_VS_ENTRY),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &resolve_module,
-                entry_point: Some(RESOLVE_FS_ENTRY),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let resolve = {
+            let (device, resolve_module, resolve_layout) = (
+                device.clone(),
+                resolve_module.clone(),
+                resolve_layout.clone(),
+            );
+            Lazy::new(move || {
+                let (resolve_module, resolve_layout) = (&resolve_module, &resolve_layout);
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("raa-oit.resolve"),
+                    layout: Some(resolve_layout),
+                    vertex: wgpu::VertexState {
+                        module: resolve_module,
+                        entry_point: Some(RESOLVE_VS_ENTRY),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: resolve_module,
+                        entry_point: Some(RESOLVE_FS_ENTRY),
+                        compilation_options: wgpu::PipelineCompilationOptions::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+        };
         let culled = PipelineSpec {
             color_targets: Vec::new(),
             depth: Some(depth_state()),
@@ -483,7 +490,7 @@ impl FeaturePass for OitPass {
                     label: Some("raa-oit.clear"),
                     timestamp_writes: None,
                 });
-            pass.set_pipeline(&pipelines.clear);
+            pass.set_pipeline(pipelines.clear.get());
             pass.set_bind_group(0, buffers.clear_bind_group(), &[]);
             let (x, y) = buffers.clear_dispatch();
             pass.dispatch_workgroups(x, y, 1);
@@ -534,7 +541,7 @@ impl FeaturePass for OitPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&pipelines.resolve);
+            pass.set_pipeline(pipelines.resolve.get());
             pass.set_bind_group(0, resolve_group, &[]);
             pass.draw(0..3, 0..1);
         }

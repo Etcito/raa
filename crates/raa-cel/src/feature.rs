@@ -3,7 +3,7 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, Targets,
 };
@@ -152,7 +152,8 @@ struct CelPass {
     owns_env: bool,
     bound_group: Option<(wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
+    /// Built on the first cel frame (raa_core::Lazy says why).
+    pipeline: Lazy<wgpu::RenderPipeline>,
     camera: wgpu::Buffer,
     uniform: wgpu::Buffer,
     bytes: [u8; UNIFORM_LEN],
@@ -164,7 +165,10 @@ impl CelPass {
     fn new(gpu: &GpuContext, state: SharedCel, name: String, owns_env: bool) -> Self {
         let device = gpu.device();
         let layout = create_layout(device);
-        let pipeline = create_pipeline(device, &layout);
+        let pipeline = {
+            let (device, layout) = (device.clone(), layout.clone());
+            Lazy::new(move || create_pipeline(&device, &layout))
+        };
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-cel.camera"),
             size: 128,
@@ -332,7 +336,7 @@ impl FeaturePass for CelPass {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(self.pipeline.get());
         pass.set_bind_group(0, group, &[]);
         pass.draw(0..3, 0..1);
         drop(pass);

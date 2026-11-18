@@ -9,8 +9,8 @@
 
 use std::num::NonZeroU64;
 
-use raa_core::GpuContext;
 use raa_core::wgpu;
+use raa_core::{GpuContext, Lazy};
 use raa_pipeline::{HDR_FORMAT, Targets};
 
 use crate::history::HistoryPair;
@@ -101,7 +101,8 @@ pub(crate) fn taa_layout_entries() -> [wgpu::BindGroupLayoutEntry; 9] {
 /// `RaaTaaParams` uniform, created once at install.
 pub(crate) struct TaaPipelines {
     pub(crate) layout: wgpu::BindGroupLayout,
-    pub(crate) pipeline: wgpu::ComputePipeline,
+    /// Built on the first TAA frame and after each rebuild (raa_core::Lazy says why).
+    pub(crate) pipeline: Lazy<wgpu::ComputePipeline>,
     module: wgpu::ShaderModule,
     pipeline_layout: wgpu::PipelineLayout,
     pub(crate) sampler: wgpu::Sampler,
@@ -128,10 +129,22 @@ fn build_pipeline(
     })
 }
 
+/// [`build_pipeline`] on its first use.
+fn lazy_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    module: &wgpu::ShaderModule,
+    values: &[f64; 6],
+) -> Lazy<wgpu::ComputePipeline> {
+    let (device, layout, module, values) =
+        (device.clone(), layout.clone(), module.clone(), *values);
+    Lazy::new(move || build_pipeline(&device, &layout, &module, &values))
+}
+
 impl TaaPipelines {
     /// Rebuilds `pipeline` alone with the override constants of `values`.
     pub(crate) fn rebuild(&mut self, gpu: &GpuContext, values: &[f64; 6]) {
-        self.pipeline = build_pipeline(gpu.device(), &self.pipeline_layout, &self.module, values);
+        self.pipeline = lazy_pipeline(gpu.device(), &self.pipeline_layout, &self.module, values);
     }
 
     pub(crate) fn new(gpu: &GpuContext, values: &[f64; 6]) -> TaaPipelines {
@@ -146,7 +159,7 @@ impl TaaPipelines {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = build_pipeline(device, &pipeline_layout, &module, values);
+        let pipeline = lazy_pipeline(device, &pipeline_layout, &module, values);
         TaaPipelines {
             layout,
             pipeline,

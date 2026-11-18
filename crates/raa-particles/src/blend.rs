@@ -40,7 +40,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 use raa_lit::{LitHandle, LitRenderer};
 use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, Pipeline, PrepareCtx,
@@ -162,8 +162,9 @@ pub(crate) struct BlendPass {
     /// The group-2 bind group and the buffer generation it was built for; None after a
     /// resize until the next prepare (or before the first one).
     group: Option<(u64, wgpu::BindGroup)>,
-    splash: wgpu::RenderPipeline,
-    sparkles: wgpu::RenderPipeline,
+    /// Built on the first frame with splash (sparkles) draws (raa_core::Lazy says why).
+    splash: Lazy<wgpu::RenderPipeline>,
+    sparkles: Lazy<wgpu::RenderPipeline>,
     /// This frame's splash draws.
     splash_draws: Vec<EmitterDraw>,
     /// This frame's sparkles draws.
@@ -320,12 +321,14 @@ fn build_pipeline(
     module: &wgpu::ShaderModule,
     entry: &str,
     blend: wgpu::BlendState,
-) -> wgpu::RenderPipeline {
+) -> Lazy<wgpu::RenderPipeline> {
     let vs = format!("vs_{entry}");
     let fs = format!("fs_{entry}");
     let label = format!("raa-particles.blend.{entry}");
-    gpu.device()
-        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let (device, layout, module) = (gpu.device().clone(), layout.clone(), module.clone());
+    Lazy::new(move || {
+        let (layout, module) = (&layout, &module);
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some(&label),
             layout: Some(layout),
             vertex: wgpu::VertexState {
@@ -355,6 +358,7 @@ fn build_pipeline(
             multiview_mask: None,
             cache: None,
         })
+    })
 }
 
 impl FeaturePass for BlendPass {
@@ -444,13 +448,13 @@ impl FeaturePass for BlendPass {
             pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
             pass.set_bind_group(2, group, &[]);
             if !self.splash_draws.is_empty() {
-                pass.set_pipeline(&self.splash);
+                pass.set_pipeline(self.splash.get());
                 for d in &self.splash_draws {
                     pass.draw(d.vertices.clone(), d.instances.clone());
                 }
             }
             if !self.sparkle_draws.is_empty() {
-                pass.set_pipeline(&self.sparkles);
+                pass.set_pipeline(self.sparkles.get());
                 for d in &self.sparkle_draws {
                     pass.draw(d.vertices.clone(), d.instances.clone());
                 }

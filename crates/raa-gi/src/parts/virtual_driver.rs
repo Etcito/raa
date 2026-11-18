@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::rc::Rc;
 
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError, lazy_compute_pipeline};
 use raa_lit::{LitHandle, LitRenderer};
 use raa_vg::GI_BASE;
 use raa_vg::culling::{CullPhase, CullWork};
@@ -121,7 +121,8 @@ pub struct VirtualDriver {
     device: wgpu::Device,
     vg: VgHandle,
     lit: LitHandle,
-    pipeline: wgpu::ComputePipeline,
+    /// Built on the first frame with virtual geometry to voxelize (raa_core::Lazy says why).
+    pipeline: Lazy<wgpu::ComputePipeline>,
     group2: wgpu::BindGroupLayout,
     work: RefCell<Option<CullWork>>,
     capacity: Cell<Option<u32>>,
@@ -152,23 +153,18 @@ impl VirtualDriver {
             label: Some("gi.virtual.group2"),
             entries: &virtual_group2_entries(),
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("gi.virtual"),
-            bind_group_layouts: &[None, None, Some(&group2)],
-            immediate_size: 0,
-        });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gi.virtual"),
             source: wgpu::ShaderSource::Wgsl(voxelize_virtual_module_wgsl().into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("gi.virtual"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some("raa_gi_voxelize_virtual"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = lazy_compute_pipeline(
+            &device,
+            "gi.virtual",
+            &module,
+            "raa_gi_voxelize_virtual",
+            &[None, None, Some(&group2)],
+            &[],
+        );
         let white = color_texture(gpu, 1, 1, &[WHITE_TEXEL]).create_view(&Default::default());
         VirtualDriver {
             device,
@@ -382,7 +378,7 @@ impl VoxelDriver for VirtualDriver {
                 label: Some("gi.virtual"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(self.pipeline.get());
             pass.set_bind_group(2, &*group, &[]);
             pass.dispatch_workgroups_indirect(work.args(), CullWork::software_args_offset());
         });

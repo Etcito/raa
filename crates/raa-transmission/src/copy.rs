@@ -11,7 +11,7 @@
 //! recreated by a resize), so the group-1 bind group is not rebuilt every frame.
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 use raa_lit::{DrawClass, LitHandle};
 use raa_pipeline::{
     FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, LightingResources, PrepareCtx, RecordCtx, Targets,
@@ -157,8 +157,9 @@ pub(crate) struct OpaqueCopyPass {
     lit: LitHandle,
     down_layout: wgpu::BindGroupLayout,
     depth_layout: wgpu::BindGroupLayout,
-    down: wgpu::RenderPipeline,
-    depth: wgpu::RenderPipeline,
+    /// Built on the first frame with a transmissive material (raa_core::Lazy says why).
+    down: Lazy<wgpu::RenderPipeline>,
+    depth: Lazy<wgpu::RenderPipeline>,
     sampler: wgpu::Sampler,
     copies: Option<Copies>,
     /// True while the copy views are the lighting resources' opaque copy.
@@ -197,8 +198,12 @@ impl OpaqueCopyPass {
                 texture_type(wgpu::TextureSampleType::Depth),
             )],
         });
-        let down = create_pipeline(device, &module, &down_layout, FS_DOWNSAMPLE, HDR_FORMAT);
-        let depth = create_pipeline(device, &module, &depth_layout, FS_DEPTH, DEPTH_COPY_FORMAT);
+        let lazy = |layout: &wgpu::BindGroupLayout, entry: &'static str, format| {
+            let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+            Lazy::new(move || create_pipeline(&device, &module, &layout, entry, format))
+        };
+        let down = lazy(&down_layout, FS_DOWNSAMPLE, HDR_FORMAT);
+        let depth = lazy(&depth_layout, FS_DEPTH, DEPTH_COPY_FORMAT);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-transmission.copy.linear_clamp"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -431,9 +436,9 @@ impl FeaturePass for OpaqueCopyPass {
             },
         );
         for (target, group) in c.mip_views.iter().skip(1).zip(&c.down_groups) {
-            draw(encoder, target, &self.down, group);
+            draw(encoder, target, self.down.get(), group);
         }
-        draw(encoder, &c.depth_view, &self.depth, &c.depth_group);
+        draw(encoder, &c.depth_view, self.depth.get(), &c.depth_group);
         self.publish_color(ctx);
         Ok(())
     }

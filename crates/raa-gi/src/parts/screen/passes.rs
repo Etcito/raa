@@ -33,7 +33,7 @@
 //! (`ScreenResources` and the `gi.screen` pass), so nothing in this crate calls them yet.
 #![allow(dead_code)]
 
-use raa_core::GpuContext;
+use raa_core::{GpuContext, Lazy};
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use std::num::NonZeroU64;
 
@@ -414,10 +414,10 @@ pub(crate) struct ScreenPipelines {
     pub(crate) atrous_layout: wgpu::BindGroupLayout,
     copy: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
-    trace: [wgpu::ComputePipeline; 2],
-    project: [wgpu::ComputePipeline; 2],
-    filter: wgpu::ComputePipeline,
-    integrate: wgpu::ComputePipeline,
+    trace: [Lazy<wgpu::ComputePipeline>; 2],
+    project: [Lazy<wgpu::ComputePipeline>; 2],
+    filter: Lazy<wgpu::ComputePipeline>,
+    integrate: Lazy<wgpu::ComputePipeline>,
     atrous: wgpu::ComputePipeline,
     /// What the trace, integrate and a-trous pipelines are rebuilt from when a tunable changes.
     tuned: TunedSources,
@@ -446,29 +446,35 @@ fn tuned_pipelines(
     atrous_layout: &wgpu::BindGroupLayout,
     tunables: &GiTunables,
     screen_emissive: bool,
-) -> ([ComputePipeline; 2], ComputePipeline, ComputePipeline) {
+) -> (
+    [Lazy<ComputePipeline>; 2],
+    Lazy<ComputePipeline>,
+    ComputePipeline,
+) {
     let (empty, group1) = (&sources.empty, &sources.group1);
     let mut trace_constants = tunables.constants(TRACE_OVERRIDES);
     trace_constants.push((SCREEN_OVERRIDE, override_value(screen_emissive)));
+    // Trace and integrate are recorded only by the probe mode (`record`); ReSTIR GI and SSGI
+    // record the pyramid and the a-trous passes only, so these build on the first probe frame.
     let trace = PROBE_RAY_OPTIONS.map(|rays| {
-        tuned_compute_pipeline(
+        lazy_compute_pipeline(
             device,
             "raa-gi.screen.trace",
             &sources.trace_module,
             PROBE_TRACE_ENTRY,
-            &[Some(empty), Some(group1), Some(trace_layout)],
+            [empty, group1, trace_layout],
             Some(rays),
-            &trace_constants,
+            trace_constants.clone(),
         )
     });
-    let integrate = tuned_compute_pipeline(
+    let integrate = lazy_compute_pipeline(
         device,
         "raa-gi.screen.integrate",
         &sources.integrate_module,
         PROBE_INTEGRATE_ENTRY,
-        &[Some(empty), Some(group1), Some(integrate_layout)],
+        [empty, group1, integrate_layout],
         None,
-        &tunables.constants(INTEGRATE_OVERRIDES),
+        tunables.constants(INTEGRATE_OVERRIDES),
     );
     let atrous = tuned_compute_pipeline(
         device,
@@ -566,6 +572,32 @@ fn tuned_compute_pipeline(
     })
 }
 
+/// [`tuned_compute_pipeline`] over the layout `groups`, built on its first use ([`Lazy`]).
+fn lazy_compute_pipeline(
+    device: &wgpu::Device,
+    label: &'static str,
+    module: &ShaderModule,
+    entry: &'static str,
+    groups: [&wgpu::BindGroupLayout; 3],
+    probe_rays: Option<u32>,
+    tuned: Vec<(&'static str, f64)>,
+) -> Lazy<ComputePipeline> {
+    let (device, module) = (device.clone(), module.clone());
+    let groups = groups.map(Clone::clone);
+    Lazy::new(move || {
+        let [a, b, c] = &groups;
+        tuned_compute_pipeline(
+            &device,
+            label,
+            &module,
+            entry,
+            &[Some(a), Some(b), Some(c)],
+            probe_rays,
+            &tuned,
+        )
+    })
+}
+
 pub(crate) fn groups_for(n: u32) -> u32 {
     n.div_ceil(WORKGROUP)
 }
@@ -640,22 +672,24 @@ impl ScreenPipelines {
             None,
         );
         let project = PROBE_RAY_OPTIONS.map(|rays| {
-            compute_pipeline(
+            lazy_compute_pipeline(
                 device,
                 "raa-gi.screen.project",
                 &project_module,
                 PROBE_PROJECT_ENTRY,
-                &[Some(&empty), Some(group1), Some(&project_layout)],
+                [&empty, group1, &project_layout],
                 Some(rays),
+                Vec::new(),
             )
         });
-        let filter = compute_pipeline(
+        let filter = lazy_compute_pipeline(
             device,
             "raa-gi.screen.filter",
             &project_module,
             PROBE_FILTER_ENTRY,
-            &[Some(&empty), Some(group1), Some(&filter_layout)],
+            [&empty, group1, &filter_layout],
             None,
+            Vec::new(),
         );
         let tuned = TunedSources {
             empty,
@@ -756,7 +790,7 @@ impl ScreenPipelines {
         pass.set_bind_group(1, group1, &[]);
         self.record_pyramid(&mut pass, work);
 
-        pass.set_pipeline(&self.trace[variant]);
+        pass.set_pipeline(self.trace[variant].get());
         pass.set_bind_group(2, work.trace, &[]);
         pass.dispatch_workgroups(
             groups_for(work.grid.0 * work.probe_rays),
@@ -764,15 +798,15 @@ impl ScreenPipelines {
             1,
         );
 
-        pass.set_pipeline(&self.project[variant]);
+        pass.set_pipeline(self.project[variant].get());
         pass.set_bind_group(2, work.project, &[]);
         dispatch(&mut pass, work.grid.0, work.grid.1);
 
-        pass.set_pipeline(&self.filter);
+        pass.set_pipeline(self.filter.get());
         pass.set_bind_group(2, work.filter, &[]);
         dispatch(&mut pass, work.grid.0, work.grid.1);
 
-        pass.set_pipeline(&self.integrate);
+        pass.set_pipeline(self.integrate.get());
         pass.set_bind_group(2, work.integrate, &[]);
         dispatch(&mut pass, work.viewport.0, work.viewport.1);
         self.record_atrous(&mut pass, work);
@@ -861,7 +895,7 @@ impl ScreenPipelines {
         else {
             return false;
         };
-        pass.set_pipeline(&self.trace[variant]);
+        pass.set_pipeline(self.trace[variant].get());
         pass.set_bind_group(2, trace, &[]);
         pass.dispatch_workgroups(
             groups_for(grid.0 * probe_rays),
@@ -869,11 +903,11 @@ impl ScreenPipelines {
             1,
         );
 
-        pass.set_pipeline(&self.project[variant]);
+        pass.set_pipeline(self.project[variant].get());
         pass.set_bind_group(2, project, &[]);
         dispatch(pass, grid.0, grid.1);
 
-        pass.set_pipeline(&self.filter);
+        pass.set_pipeline(self.filter.get());
         pass.set_bind_group(2, filter, &[]);
         dispatch(pass, grid.0, grid.1);
         true

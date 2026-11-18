@@ -13,7 +13,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
 
 use crate::readback::{AutoExposureState, ExposureTracker, ReadbackSlots};
@@ -213,9 +213,10 @@ struct AutoExposurePass {
     state: SharedState,
     compute_layout: wgpu::BindGroupLayout,
     apply_layout: wgpu::BindGroupLayout,
-    build: wgpu::ComputePipeline,
-    resolve: wgpu::ComputePipeline,
-    apply: wgpu::RenderPipeline,
+    /// The three pipelines are built on the first auto-exposure frame (raa_core::Lazy says why).
+    build: Lazy<wgpu::ComputePipeline>,
+    resolve: Lazy<wgpu::ComputePipeline>,
+    apply: Lazy<wgpu::RenderPipeline>,
     uniform: wgpu::Buffer,
     histogram: wgpu::Buffer,
     result: wgpu::Buffer,
@@ -242,15 +243,20 @@ impl AutoExposurePass {
                 bind_group_layouts: &[Some(&compute_layout)],
                 immediate_size: 0,
             });
-        let build = create_compute_pipeline(
-            device,
-            &compute_pipeline_layout,
-            &compute_module,
-            BUILD_HISTOGRAM,
-        );
-        let resolve =
-            create_compute_pipeline(device, &compute_pipeline_layout, &compute_module, RESOLVE);
-        let apply = create_apply_pipeline(device, &apply_layout);
+        let lazy_compute = |entry: &'static str| {
+            let (device, layout, module) = (
+                device.clone(),
+                compute_pipeline_layout.clone(),
+                compute_module.clone(),
+            );
+            Lazy::new(move || create_compute_pipeline(&device, &layout, &module, entry))
+        };
+        let build = lazy_compute(BUILD_HISTOGRAM);
+        let resolve = lazy_compute(RESOLVE);
+        let apply = {
+            let (device, layout) = (device.clone(), apply_layout.clone());
+            Lazy::new(move || create_apply_pipeline(&device, &layout))
+        };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-exposure.params"),
             size: PARAMS_BYTES,
@@ -379,9 +385,9 @@ impl FeaturePass for AutoExposurePass {
                     timestamp_writes: None,
                 });
             pass.set_bind_group(0, &groups.compute, &[]);
-            pass.set_pipeline(&self.build);
+            pass.set_pipeline(self.build.get());
             pass.dispatch_workgroups(x, y, 1);
-            pass.set_pipeline(&self.resolve);
+            pass.set_pipeline(self.resolve.get());
             pass.dispatch_workgroups(1, 1, 1);
         }
         {
@@ -401,7 +407,7 @@ impl FeaturePass for AutoExposurePass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.apply);
+            pass.set_pipeline(self.apply.get());
             pass.set_bind_group(0, &groups.apply, &[]);
             pass.draw(0..3, 0..1);
         }

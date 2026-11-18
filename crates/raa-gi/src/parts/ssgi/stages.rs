@@ -279,7 +279,7 @@ impl StageImpl for SsgiTraceStage {
                 timestamp_writes: None,
             });
         pass.set_bind_group(1, &group1, &[]);
-        pass.set_pipeline(&pipelines.trace);
+        pass.set_pipeline(pipelines.trace.get());
         pass.set_bind_group(2, &bound.group, &[]);
         dispatch(&mut pass, self.size.unwrap().0, self.size.unwrap().1);
         Ok(true)
@@ -447,7 +447,7 @@ impl StageImpl for SsgiResolveStage {
                 label: Some(SSGI_RESOLVE_ENTRY),
                 timestamp_writes: None,
             });
-        pass.set_pipeline(&pipelines.resolve);
+        pass.set_pipeline(pipelines.resolve.get());
         pass.set_bind_group(0, &bound.group, &[]);
         dispatch(&mut pass, self.size.unwrap().0, self.size.unwrap().1);
         Ok(true)

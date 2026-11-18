@@ -283,7 +283,7 @@ impl FeaturePass for TaaPass {
                     label: Some("raa-taa"),
                     timestamp_writes: None,
                 });
-            pass.set_pipeline(&self.pipelines.pipeline);
+            pass.set_pipeline(self.pipelines.pipeline.get());
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(groups.0, groups.1, 1);
         }

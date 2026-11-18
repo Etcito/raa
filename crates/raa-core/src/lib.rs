@@ -5,6 +5,7 @@ mod error;
 mod gpu;
 pub mod graph;
 mod handle;
+mod lazy;
 mod offscreen;
 #[cfg(target_arch = "wasm32")]
 mod surface;
@@ -19,6 +20,7 @@ pub use graph::{
     ResourceId, TargetDesc, TargetSize,
 };
 pub use handle::{Handle, Pool};
+pub use lazy::{Lazy, lazy_compute_pipeline};
 #[cfg(not(target_arch = "wasm32"))]
 pub use offscreen::OffscreenTarget;
 pub use offscreen::non_empty;

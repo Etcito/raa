@@ -34,7 +34,7 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 use raa_pipeline::{FeaturePass, LightingResources, PrepareCtx, RecordCtx};
 
 use crate::gpu::{
@@ -157,25 +157,31 @@ fn bind_group_layout(gpu: &GpuContext) -> wgpu::BindGroupLayout {
         })
 }
 
-/// The `cs_sim` pipeline on `layout`.
-fn compute_pipeline(gpu: &GpuContext, layout: &wgpu::BindGroupLayout) -> wgpu::ComputePipeline {
-    let device = gpu.device();
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("raa-particles.sim"),
-        source: wgpu::ShaderSource::Wgsl(sim_module_wgsl().into()),
-    });
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("raa-particles.sim"),
-        bind_group_layouts: &[Some(layout)],
-        immediate_size: 0,
-    });
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("raa-particles.sim"),
-        layout: Some(&pipeline_layout),
-        module: &module,
-        entry_point: Some(ENTRY),
-        compilation_options: wgpu::PipelineCompilationOptions::default(),
-        cache: None,
+/// The `cs_sim` pipeline on `layout`, built on the first step of a scene with emitters
+/// (raa_core::Lazy says why).
+fn compute_pipeline(
+    gpu: &GpuContext,
+    layout: &wgpu::BindGroupLayout,
+) -> Lazy<wgpu::ComputePipeline> {
+    let (device, layout) = (gpu.device().clone(), layout.clone());
+    Lazy::new(move || {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-particles.sim"),
+            source: wgpu::ShaderSource::Wgsl(sim_module_wgsl().into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("raa-particles.sim"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("raa-particles.sim"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some(ENTRY),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            cache: None,
+        })
     })
 }
 
@@ -192,7 +198,7 @@ pub(crate) struct SimPass {
     emitters: SharedEmitters,
     buffers: SharedSimBuffers,
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
     slot_emitter: wgpu::Buffer,
     spawns: wgpu::Buffer,
     claims: wgpu::Buffer,
@@ -481,7 +487,7 @@ impl FeaturePass for SimPass {
                 label: Some("raa-particles.sim"),
                 timestamp_writes: None,
             });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(self.pipeline.get());
         for step in 0..u64::from(self.steps) {
             let offset = (step * self.step_stride) as u32;
             pass.set_bind_group(0, &self.bind_group, &[offset]);

@@ -11,7 +11,7 @@
 //! pass's one compute pass; the resources and the part are later shares of this module.
 #![allow(dead_code)]
 
-use raa_core::GpuContext;
+use raa_core::{GpuContext, Lazy, lazy_compute_pipeline};
 use raa_pipeline::AREA_STOCHASTIC_GPU_SIZE;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use raa_taa::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
@@ -259,10 +259,11 @@ pub(crate) struct AreaShadowPipelines {
     pub(crate) trace_layout: wgpu::BindGroupLayout,
     pub(crate) temporal_layout: wgpu::BindGroupLayout,
     pub(crate) spatial_layout: wgpu::BindGroupLayout,
-    trace: wgpu::ComputePipeline,
-    temporal: wgpu::ComputePipeline,
-    spatial_h: wgpu::ComputePipeline,
-    spatial_v: wgpu::ComputePipeline,
+    // Lazy: area shadows record only when a scene has area lights (raa_core::Lazy says why).
+    trace: Lazy<wgpu::ComputePipeline>,
+    temporal: Lazy<wgpu::ComputePipeline>,
+    spatial_h: Lazy<wgpu::ComputePipeline>,
+    spatial_v: Lazy<wgpu::ComputePipeline>,
     temporal_module: wgpu::ShaderModule,
     spatial_module: wgpu::ShaderModule,
     temporal_constants: Vec<(&'static str, f64)>,
@@ -275,9 +276,9 @@ fn temporal_pipeline(
     module: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     constants: &[(&'static str, f64)],
-) -> wgpu::ComputePipeline {
+) -> Lazy<wgpu::ComputePipeline> {
     let label = "raa-gi.area-shadow.temporal";
-    tuned_pipeline(
+    lazy_compute_pipeline(
         device,
         label,
         module,
@@ -293,13 +294,13 @@ fn spatial_pipelines(
     module: &wgpu::ShaderModule,
     layout: &wgpu::BindGroupLayout,
     constants: &[(&'static str, f64)],
-) -> [wgpu::ComputePipeline; 2] {
+) -> [Lazy<wgpu::ComputePipeline>; 2] {
     let groups = [Some(layout)];
     [
         ("raa-gi.area-shadow.spatial-h", AREA_SPATIAL_H_ENTRY),
         ("raa-gi.area-shadow.spatial-v", AREA_SPATIAL_V_ENTRY),
     ]
-    .map(|(label, entry)| tuned_pipeline(device, label, module, entry, &groups, constants))
+    .map(|(label, entry)| lazy_compute_pipeline(device, label, module, entry, &groups, constants))
 }
 
 /// The per-frame bind groups and viewport `AreaShadowPipelines::record` dispatches over: the
@@ -351,7 +352,7 @@ impl AreaShadowPipelines {
         );
         let spatial_module = module(device, "raa-gi.area-shadow.spatial", &spatial_module_wgsl());
 
-        let trace = tuned_pipeline(
+        let trace = lazy_compute_pipeline(
             device,
             "raa-gi.area-shadow.trace",
             &trace_module,
@@ -430,7 +431,7 @@ impl AreaShadowPipelines {
         });
         pass.set_bind_group(1, group1, &[]);
 
-        pass.set_pipeline(&self.trace);
+        pass.set_pipeline(self.trace.get());
         pass.set_bind_group(2, work.trace, &[]);
         dispatch(&mut pass, width, height);
 
@@ -457,19 +458,19 @@ impl AreaShadowPipelines {
         work: &AreaShadowWork<'_>,
     ) {
         let (width, height) = work.viewport;
-        pass.set_pipeline(&self.temporal);
+        pass.set_pipeline(self.temporal.get());
         for group in work.temporal {
             pass.set_bind_group(0, group, &[]);
             dispatch(pass, width, height);
         }
 
-        pass.set_pipeline(&self.spatial_h);
+        pass.set_pipeline(self.spatial_h.get());
         for group in work.spatial_h {
             pass.set_bind_group(0, group, &[]);
             dispatch(pass, width, height);
         }
 
-        pass.set_pipeline(&self.spatial_v);
+        pass.set_pipeline(self.spatial_v.get());
         for group in work.spatial_v {
             pass.set_bind_group(0, group, &[]);
             dispatch(pass, width, height);

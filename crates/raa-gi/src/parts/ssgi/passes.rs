@@ -16,7 +16,7 @@ use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use raa_taa::{REPROJECT_WGSL, TEMPORAL_FRAME_SIZE};
 use wgpu::{BindGroupLayoutEntry, TextureFormat};
 
-use super::super::area_shadow::passes::tuned_pipeline;
+use raa_core::{Lazy, lazy_compute_pipeline};
 use super::super::screen::passes::{
     depth_entry, dispatch, float_entry, layout, module, storage_entry, storage_texture_entry,
     uniform_entry,
@@ -129,7 +129,8 @@ pub(crate) struct SsgiWork<'a> {
 pub(crate) struct SsgiPipelines {
     pub(crate) trace_layout: wgpu::BindGroupLayout,
     pub(crate) resolve_layout: wgpu::BindGroupLayout,
-    pub(crate) trace: wgpu::ComputePipeline,
+    /// Built on the first SSGI frame (raa_core::Lazy says why); so is `resolve`.
+    pub(crate) trace: Lazy<wgpu::ComputePipeline>,
     trace_module: wgpu::ShaderModule,
     empty: wgpu::BindGroupLayout,
     group1: wgpu::BindGroupLayout,
@@ -137,7 +138,7 @@ pub(crate) struct SsgiPipelines {
     emissive_generation: u64,
     /// `GiShared::voxel_buffer` as read by the last `refresh`; bound at trace binding 6.
     pub(crate) voxels: Option<(wgpu::Buffer, u64)>,
-    pub(crate) resolve: wgpu::ComputePipeline,
+    pub(crate) resolve: Lazy<wgpu::ComputePipeline>,
     resolve_module: wgpu::ShaderModule,
     /// The GI tunables the resolve pipeline was built with, refreshed by `refresh`.
     pub(crate) tunables: GiTunables,
@@ -257,10 +258,10 @@ impl SsgiPipelines {
             timestamp_writes: None,
         });
         pass.set_bind_group(1, group1, &[]);
-        pass.set_pipeline(&self.trace);
+        pass.set_pipeline(self.trace.get());
         pass.set_bind_group(2, work.trace, &[]);
         dispatch(&mut pass, width, height);
-        pass.set_pipeline(&self.resolve);
+        pass.set_pipeline(self.resolve.get());
         pass.set_bind_group(0, work.resolve, &[]);
         dispatch(&mut pass, width, height);
         true
@@ -274,8 +275,8 @@ fn trace_pipeline(
     module: &wgpu::ShaderModule,
     groups: [&wgpu::BindGroupLayout; 3],
     ssgi: bool,
-) -> wgpu::ComputePipeline {
-    tuned_pipeline(
+) -> Lazy<wgpu::ComputePipeline> {
+    lazy_compute_pipeline(
         device,
         "raa-gi.ssgi.trace",
         module,
@@ -291,8 +292,8 @@ fn resolve_pipeline(
     module: &wgpu::ShaderModule,
     resolve_layout: &wgpu::BindGroupLayout,
     tunables: &GiTunables,
-) -> wgpu::ComputePipeline {
-    tuned_pipeline(
+) -> Lazy<wgpu::ComputePipeline> {
+    lazy_compute_pipeline(
         device,
         "raa-gi.ssgi.resolve",
         module,

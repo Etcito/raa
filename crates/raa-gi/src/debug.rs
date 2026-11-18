@@ -2,7 +2,7 @@
 //! from `hdr.src` into `hdr.dst`, then the HDR chain swap. Crate-private; the shader module and
 //! its group-2 entries come from `shaders`.
 
-use raa_core::GpuContext;
+use raa_core::{GpuContext, Lazy, lazy_compute_pipeline};
 use raa_pipeline::RecordCtx;
 
 use crate::shaders;
@@ -13,7 +13,8 @@ use crate::shaders;
 /// the gi.history record (order 64, `Pipeline::record_single`), after every pass's prepare, and
 /// creates only a per-frame bind group.
 pub(crate) struct DebugRenderer {
-    pipeline: wgpu::ComputePipeline,
+    /// Built on the first debug-view frame (raa_core::Lazy says why).
+    pipeline: Lazy<wgpu::ComputePipeline>,
     group2_layout: wgpu::BindGroupLayout,
     /// 1 x 1 stand-ins for the screen debug record and the screen output.
     debug_dummy: wgpu::TextureView,
@@ -56,23 +57,18 @@ impl DebugRenderer {
             label: Some("raa-gi.debug"),
             entries: &shaders::debug_group2_entries(),
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("raa-gi.debug"),
-            bind_group_layouts: &[None, Some(group1_layout), Some(&group2_layout)],
-            immediate_size: 0,
-        });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-gi.debug"),
             source: wgpu::ShaderSource::Wgsl(shaders::debug_view_module_wgsl().into()),
         });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("raa-gi.debug"),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some("raa_gi_debug_view"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let pipeline = lazy_compute_pipeline(
+            device,
+            "raa-gi.debug",
+            &module,
+            "raa_gi_debug_view",
+            &[None, Some(group1_layout), Some(&group2_layout)],
+            &[],
+        );
         DebugRenderer {
             pipeline,
             group2_layout,
@@ -150,7 +146,7 @@ impl DebugRenderer {
                 label: Some("raa.gi.debug_view"),
                 timestamp_writes: None,
             });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(self.pipeline.get());
         pass.set_bind_group(1, group1, &[]);
         pass.set_bind_group(2, &bind, &[]);
         pass.dispatch_workgroups(ctx.size.0.div_ceil(8), ctx.size.1.div_ceil(8), 1);

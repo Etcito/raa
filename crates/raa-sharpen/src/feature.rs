@@ -10,7 +10,7 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use raa_core::wgpu;
-use raa_core::{GpuContext, RaaError};
+use raa_core::{GpuContext, Lazy, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, Pipeline, PrepareCtx, RecordCtx, Targets};
 
 use crate::{
@@ -148,7 +148,8 @@ struct TextureGroup {
 struct SharpenPass {
     desc: Rc<RefCell<SharpenDesc>>,
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::RenderPipeline,
+    /// Built on the first sharpened frame (raa_core::Lazy says why).
+    pipeline: Lazy<wgpu::RenderPipeline>,
     uniform: wgpu::Buffer,
     scratch: [u8; PARAMS_SIZE],
     /// One entry per HDR chain texture (A and B, rebuilt by `resize`) and per graph-bound
@@ -162,7 +163,10 @@ impl SharpenPass {
     fn new(gpu: &GpuContext, desc: Rc<RefCell<SharpenDesc>>) -> Self {
         let device = gpu.device();
         let layout = create_layout(device);
-        let pipeline = create_pipeline(device, &layout);
+        let pipeline = {
+            let (device, layout) = (device.clone(), layout.clone());
+            Lazy::new(move || create_pipeline(&device, &layout))
+        };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-sharpen.params"),
             size: PARAMS_BYTES,
@@ -272,7 +276,7 @@ impl FeaturePass for SharpenPass {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(self.pipeline.get());
             pass.set_bind_group(0, &entry.group, &[]);
             pass.draw(0..3, 0..1);
         }
