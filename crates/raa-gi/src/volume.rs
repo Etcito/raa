@@ -33,6 +33,7 @@ use raa_core::GpuContext;
 use raa_math::Vec3;
 
 use crate::clipmap::{self, RebuildRounds, RelightCursor};
+use crate::emissive::{self, EmissiveSources};
 use crate::layouts::{GiFloodGpu, GiLightGpu, GiVolumeParamsGpu, GiVoxelizeGpu, GiWriteGpu};
 use crate::parts::{GiShared, LevelVoxelize, VoxelDriver};
 use crate::settings::{GiQuality, GiSettings};
@@ -122,6 +123,9 @@ pub(crate) struct GiVolume {
     write_layout: wgpu::PipelineLayout,
     /// The tunables generation the light and write pipelines were built with.
     tunables_generation: u64,
+    /// The emissive generation (`GiShared::emissive_generation`) the light pipeline was built
+    /// with.
+    emissive_generation: u64,
     seed_bind: wgpu::BindGroup,
     flood_binds: [wgpu::BindGroup; 2],
     light_binds: Vec<wgpu::BindGroup>,
@@ -199,17 +203,23 @@ fn compute_pipeline(
 
 /// The voxel-light and volume-write pipelines over their layouts. `RAA_GI_RESET_RAYS`,
 /// `RAA_GI_DIRECT_CHANGE` and `RAA_GI_BEHIND` take their values from `tunables` (contract
-/// 'gi-tunables-store').
+/// 'gi-tunables-store'); `RAA_GI_EMISSIVE` is 1 or 0 by `sources.volume` (contract
+/// 'gi-emissive-sources').
 fn build_relight_pipelines(
     device: &wgpu::Device,
     light: &wgpu::PipelineLayout,
     write: &wgpu::PipelineLayout,
     tunables: &GiTunables,
+    sources: EmissiveSources,
 ) -> (wgpu::ComputePipeline, wgpu::ComputePipeline) {
-    let light_constants = tunables.constants(&[
+    let mut light_constants = tunables.constants(&[
         ("RAA_GI_RESET_RAYS", "resetRays"),
         ("RAA_GI_DIRECT_CHANGE", "directChange"),
     ]);
+    light_constants.push((
+        emissive::VOLUME_OVERRIDE,
+        emissive::override_value(sources.volume),
+    ));
     let write_constants = tunables.constants(&[("RAA_GI_BEHIND", "behind")]);
     let light_pipeline = compute_pipeline(
         device,
@@ -261,15 +271,18 @@ fn flood_slot(params: &wgpu::Buffer) -> wgpu::BindingResource<'_> {
 
 impl GiVolume {
     /// Allocates the volume for `quality` (`GI_VOLUME_BYTES`) and builds its pipelines with the
-    /// values of `tunables`. `frame` is the 432-B `GiFrameGpu` buffer; `group1_layout` is the
-    /// compute group 1 layout, taken by the voxel-light pipeline. Every origin starts as `None`.
+    /// values of `tunables` and the emissive sources of `shared`. `frame` is the 432-B
+    /// `GiFrameGpu` buffer; `group1_layout` is the compute group 1 layout, taken by the
+    /// voxel-light pipeline. Every origin starts as `None`.
     pub(crate) fn new(
         gpu: &GpuContext,
         quality: GiQuality,
         frame: &wgpu::Buffer,
         group1_layout: &wgpu::BindGroupLayout,
         tunables: &GiTunables,
+        shared: &GiShared,
     ) -> GiVolume {
+        let emissive_generation = shared.emissive_generation();
         let device = gpu.device();
         let queue = gpu.queue();
         let resolution = quality.resolution;
@@ -395,8 +408,13 @@ impl GiVolume {
             "raa-gi.write",
             &[Some(&empty), Some(&empty), Some(&write_bgl)],
         );
-        let (light_pipeline, write_pipeline) =
-            build_relight_pipelines(device, &light_layout, &write_layout, tunables);
+        let (light_pipeline, write_pipeline) = build_relight_pipelines(
+            device,
+            &light_layout,
+            &write_layout,
+            tunables,
+            shared.emissive_sources(),
+        );
 
         let seed_bind = bind_group(
             device,
@@ -479,6 +497,7 @@ impl GiVolume {
             light_layout,
             write_layout,
             tunables_generation: tunables.generation(),
+            emissive_generation,
             seed_bind,
             flood_binds,
             light_binds,
@@ -496,17 +515,33 @@ impl GiVolume {
         self.tunables_generation
     }
 
-    /// Rebuilds the voxel-light and volume-write pipelines when the published tunables changed
-    /// since they were built (contract 'gi-tunables-store'). The store is cloned only then.
+    /// Rebuilds the voxel-light and volume-write pipelines when the published tunables or
+    /// emissive sources changed since they were built (contracts 'gi-tunables-store' and
+    /// 'gi-emissive-sources'). The store is cloned only then.
     pub(crate) fn sync_tunables(&mut self, gpu: &GpuContext, shared: &GiShared) {
-        if shared.tunables_generation() == self.tunables_generation {
+        let emissive_generation = shared.emissive_generation();
+        if shared.tunables_generation() == self.tunables_generation
+            && emissive_generation == self.emissive_generation
+        {
             return;
         }
         let tunables = shared.tunables();
         let device = gpu.device();
-        (self.light_pipeline, self.write_pipeline) =
-            build_relight_pipelines(device, &self.light_layout, &self.write_layout, &tunables);
+        (self.light_pipeline, self.write_pipeline) = build_relight_pipelines(
+            device,
+            &self.light_layout,
+            &self.write_layout,
+            &tunables,
+            shared.emissive_sources(),
+        );
         self.tunables_generation = tunables.generation();
+        self.emissive_generation = emissive_generation;
+    }
+
+    /// The emissive generation the voxel-light pipeline was built with.
+    #[cfg(test)]
+    pub(crate) fn built_emissive_generation(&self) -> u64 {
+        self.emissive_generation
     }
 
     /// Follows the camera and decides this frame's work (solstice `volume.rs:398-529`,

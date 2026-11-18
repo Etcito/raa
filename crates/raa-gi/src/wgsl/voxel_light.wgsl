@@ -64,6 +64,9 @@ const RAA_GI_RAY_STRIDE: u32 = 16u;
 // light was hidden): stale light then leaves the volume at the voxel's next update.
 override RAA_GI_DIRECT_CHANGE: f32 = 0.05;
 const RAA_GI_DIRECT_FLOOR: f32 = 1.0e-4;
+// The weight of the material emission injected into the voxel radiance: 1 when emissive surfaces
+// feed the volume (`EmissiveSources::volume`), 0 when a graph switches them off for this stage.
+override RAA_GI_EMISSIVE: f32 = 1.0;
 
 // The radiance record keeps 16 spare bits after blue: the update count (bits 0-7), the wrap
 // epoch of the cell (bits 8-13, two bits per axis of floor(world voxel / resolution)) and the
@@ -279,7 +282,7 @@ fn raa_gi_voxel_light(@builtin(global_invocation_id) id: vec3<u32>) {
     // With cosine-weighted rays, irradiance is pi times the mean radiance.
     irradiance += gathered / f32(rays) * RAA_GI_PI;
 
-    let target_radiance = albedo / RAA_GI_PI * irradiance + emissive;
+    let target_radiance = albedo / RAA_GI_PI * irradiance + emissive * RAA_GI_EMISSIVE;
     let previous = raa_gi_decode_radiance(stored);
     let blended = mix(previous, target_radiance, blend.weight);
     let packed = raa_gi_encode_radiance(blended);

@@ -18,6 +18,7 @@ use raa_lit::LitRenderer;
 use raa_pipeline::{LightingResources, Pipeline};
 use raa_vg::{VgHandle, scene::SyncItem};
 
+use crate::emissive::EmissiveSources;
 use crate::membership::Member;
 use crate::settings::{GiQuality, GiSettings};
 use crate::tunables::GiTunables;
@@ -209,6 +210,10 @@ struct SharedFrame {
     quality: GiQuality,
     settings: GiSettings,
     tunables: GiTunables,
+    emissive_sources: EmissiveSources,
+    emissive_generation: u64,
+    voxel_buffer: Option<wgpu::Buffer>,
+    voxel_generation: u64,
 }
 
 impl GiShared {
@@ -237,6 +242,10 @@ impl GiShared {
             quality: GiQuality::default(),
             settings: GiSettings::default(),
             tunables: GiTunables::new(),
+            emissive_sources: EmissiveSources::ALL,
+            emissive_generation: 0,
+            voxel_buffer: None,
+            voxel_generation: 0,
         })))
     }
 
@@ -448,12 +457,65 @@ impl GiShared {
         self.0.borrow_mut().tunables = tunables;
     }
 
-    /// Drops the frame buffer, atlas, history, pyramid and probe-output views and the cached
-    /// compute group; the attached trace scene stays.
+    /// The emissive sources of the GI passes, `EmissiveSources::ALL` from construction. It does
+    /// not allocate.
+    pub fn emissive_sources(&self) -> EmissiveSources {
+        self.0.borrow().emissive_sources
+    }
+
+    /// The generation of the emissive sources: 0 at construction, +1 on every change.
+    pub fn emissive_generation(&self) -> u64 {
+        self.0.borrow().emissive_generation
+    }
+
+    /// Publishes `sources`; the generation advances only when the value differs.
+    pub(crate) fn set_emissive_sources(&self, sources: EmissiveSources) {
+        let mut shared = self.0.borrow_mut();
+        if shared.emissive_sources != sources {
+            shared.emissive_sources = sources;
+            shared.emissive_generation = shared.emissive_generation.wrapping_add(1);
+        }
+    }
+
+    /// Handoff: 'raa-gi: screen probes and ReSTIR GI emissive gate at screen hits' (probe-trace
+    /// and ReSTIR GI main pipelines and bind groups) and 'raa-gi: SSGI emissive gate at screen
+    /// hits' (SSGI trace pipeline and bind group) call `GiShared::voxel_buffer`,
+    /// `GiShared::emissive_sources` and `GiShared::emissive_generation`; 'raa-graph: emissive
+    /// parameter on the GI pass nodes, executor extension and starters' calls
+    /// `GiHandle::set_emissive_sources` (feature.rs), which stores the flags in the core and
+    /// publishes them here. Today this returns the voxel word storage buffer of the current
+    /// `GiVolume` (3 u32 per voxel, word 2 the emissive RGBM) and its generation (+1 on every
+    /// `GiShared::set_voxel_buffer` call), or `None` while GI is inactive. LIFECYCLE:
+    /// `GiHandle::prepare_frame` publishes the voxel buffer with `GiShared::set_voxel_buffer`
+    /// with Some(buffer) right after it creates a GiVolume (next to `GiShared::set_atlas`), and
+    /// `GiShared::clear` (called by prepare_frame when GI turns inactive, and by release) drops
+    /// it together with the atlas; the emissive sources live in GiShared from `GiShared::new`
+    /// for its whole life and are replaced only by `GiHandle::set_emissive_sources`. Every GI
+    /// pass reads them in its `prepare`, which the pipeline runs after
+    /// `GiHandle::prepare_frame`; no pass drops or replaces them.
+    pub fn voxel_buffer(&self) -> Option<(wgpu::Buffer, u64)> {
+        let shared = self.0.borrow();
+        let generation = shared.voxel_generation;
+        shared
+            .voxel_buffer
+            .clone()
+            .map(|buffer| (buffer, generation))
+    }
+
+    /// Publishes the voxel word buffer, or drops it with `None`, advancing its generation.
+    pub(crate) fn set_voxel_buffer(&self, buffer: Option<wgpu::Buffer>) {
+        let mut shared = self.0.borrow_mut();
+        shared.voxel_buffer = buffer;
+        shared.voxel_generation = shared.voxel_generation.wrapping_add(1);
+    }
+
+    /// Drops the frame buffer, atlas, voxel buffer, history, pyramid and probe-output views and
+    /// the cached compute group; the attached trace scene stays.
     pub(crate) fn clear(&self) {
         let mut shared = self.0.borrow_mut();
         shared.frame = None;
         shared.atlas = None;
+        shared.voxel_buffer = None;
         shared.history = None;
         shared.pyramid = None;
         shared.probe_output = None;

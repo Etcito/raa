@@ -7,6 +7,7 @@
 pub mod clipmap;
 pub mod cpu;
 mod debug;
+pub mod emissive;
 pub mod error;
 pub mod feature;
 pub mod forward_driver;
@@ -21,6 +22,8 @@ pub mod vertex_colors;
 mod volume;
 
 pub use stats::GiStats;
+
+pub use emissive::EmissiveSources;
 
 pub use tunables::{GiTunables, tunables};
 

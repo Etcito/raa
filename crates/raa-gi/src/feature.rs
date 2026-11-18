@@ -22,6 +22,7 @@ use raa_vg::scene::{ItemScratch, SyncItem};
 
 use crate::clipmap::{RebuildRounds, RelightCursor};
 use crate::debug::DebugRenderer;
+use crate::emissive::{EmissiveSources, emission_signature};
 use crate::forward_driver::ForwardDriver;
 use crate::layouts::GiFrameGpu;
 use crate::membership::{InstanceGi, MembershipReport, plan_members};
@@ -149,6 +150,11 @@ pub(crate) struct GiCore {
     light_epoch: u32,
     /// Frames left of full relight after a lighting change (`HOT_RELIGHT_FRAMES`).
     hot_relight: u32,
+    /// The emissive sources, published to `shared` by [`GiHandle::set_emissive_sources`].
+    emissive_sources: EmissiveSources,
+    /// The [`emission_signature`] of the members' record emission and the volume flag of the
+    /// latest frame; a change bumps `light_epoch` like a light change.
+    emission_signature: Option<u64>,
     /// The emitted-power proxy of the latest frame ([`lighting_power`]).
     light_power: Option<f32>,
     prepared: GiStats,
@@ -204,6 +210,8 @@ impl GiCore {
             light_signature: None,
             light_epoch: 0,
             hot_relight: 0,
+            emissive_sources: EmissiveSources::ALL,
+            emission_signature: None,
             light_power: None,
             frames_since_rebuild: 0,
             prepared: initial_stats(GiQuality::default()),
@@ -263,6 +271,22 @@ impl GiHandle {
         core.tunables.set(key, value)?;
         core.shared.set_tunables(core.tunables.clone());
         Ok(())
+    }
+
+    /// Stores `sources` in the core and publishes them to `GiShared`; never refuses, and a value
+    /// equal to the stored one changes nothing. The volume relights and rebuilds its voxel-light
+    /// pipeline at the next frame when `sources.volume` changed.
+    pub fn set_emissive_sources(&self, sources: EmissiveSources) {
+        let mut core = self.core.borrow_mut();
+        if core.emissive_sources != sources {
+            core.emissive_sources = sources;
+            core.shared.set_emissive_sources(sources);
+        }
+    }
+
+    /// The stored emissive sources, `EmissiveSources::ALL` from construction.
+    pub fn emissive_sources(&self) -> EmissiveSources {
+        self.core.borrow().emissive_sources
     }
 
     /// Stores the request of `tag`; `None` removes it, so the group takes the default membership.
@@ -475,8 +499,10 @@ impl GiHandle {
                     mapped_at_creation: false,
                 });
                 let layout = core.shared.compute_group1_layout();
-                let volume = GiVolume::new(gpu, quality, &frame, &layout, &core.tunables);
+                let volume =
+                    GiVolume::new(gpu, quality, &frame, &layout, &core.tunables, &core.shared);
                 core.shared.set_atlas(Some(volume.atlas_view()));
+                core.shared.set_voxel_buffer(Some(volume.voxels().clone()));
                 core.shared.set_frame(Some(frame));
                 core.volume = Some(volume);
                 core.allocated_quality = Some(quality);
@@ -530,6 +556,23 @@ impl GiHandle {
             core.hot_relight = HOT_RELIGHT_FRAMES;
         }
         core.light_signature = Some(light_signature);
+        // A changed record emission or a toggled volume source restarts every voxel's average.
+        let emission = emission_signature(
+            core.report.members.iter().map(|member| {
+                source
+                    .material_record(member.item.material)
+                    .map_or([0.0; 3], |record| record.emissive)
+            }),
+            core.emissive_sources.volume,
+        );
+        if core
+            .emission_signature
+            .is_some_and(|previous| previous != emission)
+        {
+            core.light_epoch = core.light_epoch.wrapping_add(1);
+            core.hot_relight = HOT_RELIGHT_FRAMES;
+        }
+        core.emission_signature = Some(emission);
         // A changed scene (an object moved, appeared or left) changes the light paths too: the
         // volume replaces its radiance while it follows.
         if changed {
@@ -1426,5 +1469,39 @@ mod tests {
         assert!(rig.frame(&gpu, 1).active);
         assert_eq!(built(&rig), Some(1));
         assert!(rig.handle.recorded_passes().contains(&"gi.volume"));
+    }
+
+    #[test]
+    fn set_emissive_sources_publishes_rebuilds_and_restarts_the_epoch() {
+        let test = "set_emissive_sources_publishes_rebuilds_and_restarts_the_epoch";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut rig = Rig::new(&gpu);
+        rig.enable_at_64_3();
+        assert_eq!(rig.handle.emissive_sources(), EmissiveSources::ALL);
+        assert!(rig.frame(&gpu, 1).active);
+        let shared = rig.handle.core.borrow().shared.clone();
+        assert!(shared.voxel_buffer().is_some());
+        let epoch = rig.handle.core.borrow().light_epoch;
+        rig.handle.set_emissive_sources(EmissiveSources::ALL);
+        assert_eq!(shared.emissive_generation(), 0);
+        let off = EmissiveSources {
+            volume: false,
+            ..EmissiveSources::ALL
+        };
+        rig.handle.set_emissive_sources(off);
+        assert_eq!(rig.handle.emissive_sources(), off);
+        assert_eq!(shared.emissive_sources(), off);
+        assert_eq!(shared.emissive_generation(), 1);
+        assert!(rig.frame(&gpu, 1).active);
+        let core = rig.handle.core.borrow();
+        let built = core
+            .volume
+            .as_ref()
+            .map(GiVolume::built_emissive_generation);
+        assert_eq!(built, Some(1));
+        assert_ne!(core.light_epoch, epoch);
     }
 }
