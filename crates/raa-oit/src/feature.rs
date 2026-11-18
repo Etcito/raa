@@ -252,6 +252,16 @@ struct Sized {
     pipelines: Pipelines,
     /// None until a resize gave the HDR chain.
     resolve: Option<[ResolveGroup; 2]>,
+    /// Resolve group of the latest bound (src texture, dst texture) pair (contract
+    /// rg-hdr-chain-binding); dropped on every rebuild.
+    bound: Option<BoundGroup>,
+}
+
+/// The resolve group built for a bound HDR chain.
+struct BoundGroup {
+    src: wgpu::Texture,
+    dst: wgpu::Texture,
+    group: wgpu::BindGroup,
 }
 
 /// The `transparent.oit` render pass.
@@ -281,6 +291,7 @@ impl OitPass {
                 buffers,
                 pipelines,
                 resolve: None,
+                bound: None,
             },
         }
     }
@@ -308,6 +319,7 @@ impl OitPass {
         };
         buffers.set_max_fragments(gpu, settings.max_fragments);
         self.sized.resolve = Some(resolve_groups(gpu, &buffers, targets.hdr()));
+        self.sized.bound = None;
         self.sized.buffers = buffers;
         self.applied = settings;
     }
@@ -414,20 +426,52 @@ impl FeaturePass for OitPass {
             .draws(DrawClass::Transparent)
             .iter()
             .any(|d| d.instance_count > 0);
+        let hdr = ctx.targets.hdr();
         if !any {
+            if hdr.is_bound() {
+                // pass-through: the bound dst must still hold the frame
+                let (width, height) = ctx.targets.size();
+                ctx.encoder.copy_texture_to_texture(
+                    hdr.src_texture().as_image_copy(),
+                    hdr.dst_texture().as_image_copy(),
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
             self.publish_color(ctx);
             return Ok(());
+        }
+        if hdr.is_bound() {
+            let stale = self
+                .sized
+                .bound
+                .as_ref()
+                .is_none_or(|b| b.src != *hdr.src_texture() || b.dst != *hdr.dst_texture());
+            if stale {
+                self.sized.bound = Some(BoundGroup {
+                    src: hdr.src_texture().clone(),
+                    dst: hdr.dst_texture().clone(),
+                    group: self.sized.buffers.resolve_bind_group(ctx.gpu, hdr.src()),
+                });
+            }
         }
         let Some(resolve) = self.sized.resolve.as_ref() else {
             return Err(RaaError::Resource(format!(
                 "{NAME}: record ran before a resize created the buffers"
             )));
         };
-        let hdr = ctx.targets.hdr();
-        let Some(resolve_group) = resolve.iter().find(|r| r.texture == *hdr.src_texture()) else {
-            return Err(RaaError::Resource(format!(
-                "{NAME}: the HDR source is not a texture the pass was resized for"
-            )));
+        let resolve_group = if let Some(b) = self.sized.bound.as_ref().filter(|_| hdr.is_bound()) {
+            &b.group
+        } else {
+            let Some(r) = resolve.iter().find(|r| r.texture == *hdr.src_texture()) else {
+                return Err(RaaError::Resource(format!(
+                    "{NAME}: the HDR source is not a texture the pass was resized for"
+                )));
+            };
+            &r.group
         };
         let buffers = &self.sized.buffers;
         let pipelines = &self.sized.pipelines;
@@ -486,7 +530,7 @@ impl FeaturePass for OitPass {
                 multiview_mask: None,
             });
             pass.set_pipeline(&pipelines.resolve);
-            pass.set_bind_group(0, &resolve_group.group, &[]);
+            pass.set_bind_group(0, resolve_group, &[]);
             pass.draw(0..3, 0..1);
         }
         hdr.swap();

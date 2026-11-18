@@ -28,7 +28,9 @@
 //! `record`, only when such a draw exists: copies `hdr.src` into `hdr.dst`, one render pass
 //! on `hdr.dst()` that loads it, draws the splash ranges then the sparkle ranges (vertices
 //! `id*6 .. id*6+6`, instances `slot_base .. slot_base + max_particles`), then swaps the
-//! HDR chain. Without such emitters it records nothing and leaves the chain untouched.
+//! HDR chain. Without such emitters it records nothing and leaves the chain untouched, except
+//! that a bound chain (`HdrChain::is_bound`) gets `hdr.src` copied into `hdr.dst`. Group 2
+//! holds no chain view, so no bound-chain bind group is needed.
 
 #![allow(dead_code)] // consumed by ParticleFeature (particles.blend)
 
@@ -395,6 +397,16 @@ impl FeaturePass for BlendPass {
     /// swaps. Nothing without splash or sparkles emitters.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         if !self.has_draws() {
+            let hdr = ctx.targets.hdr();
+            if hdr.is_bound() {
+                // bound chain: dst stays unwritten otherwise (rg-hdr-chain-binding)
+                let src = hdr.src_texture();
+                ctx.encoder.copy_texture_to_texture(
+                    src.as_image_copy(),
+                    hdr.dst_texture().as_image_copy(),
+                    src.size(),
+                );
+            }
             self.publish_color(ctx);
             return Ok(());
         }

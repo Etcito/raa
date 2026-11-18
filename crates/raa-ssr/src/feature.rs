@@ -177,6 +177,7 @@ fn draw(
 }
 
 struct SsrPass {
+    name: String,
     state: SharedSsr,
     pipelines: SsrPipelines,
     targets: Option<SsrTargets>,
@@ -187,7 +188,7 @@ struct SsrPass {
 
 impl FeaturePass for SsrPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -224,7 +225,8 @@ impl FeaturePass for SsrPass {
             .queue()
             .write_buffer(&self.pipelines.params, 0, &self.bytes);
         let desc = ImageDesc::new(ImageDim::D2, TRACE_FORMAT, t.size.0, t.size.1, 1, 1);
-        ctx.resources.publish(NAME, "trace", &t.trace_view, desc);
+        ctx.resources
+            .publish(&self.name, "trace", &t.trace_view, desc);
         let (w, h) = t.size;
         let hiz = ImageDesc::new(
             ImageDim::D2,
@@ -234,7 +236,7 @@ impl FeaturePass for SsrPass {
             1,
             t.mip_count(),
         );
-        ctx.resources.publish(NAME, "hiz", &t.hiz_view, hiz);
+        ctx.resources.publish(&self.name, "hiz", &t.hiz_view, hiz);
         Ok(())
     }
 
@@ -247,6 +249,8 @@ impl FeaturePass for SsrPass {
             ));
         };
         let p = &self.pipelines;
+        // All sampled HDR views belong to the private mip chain, populated from the
+        // current source below; no bind group embeds an A/B or bound chain view.
         let hdr = ctx.targets.hdr();
         let encoder = &mut *ctx.encoder;
         {
@@ -290,7 +294,7 @@ impl FeaturePass for SsrPass {
         hdr.swap();
         let (w, h) = t.size;
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
-        ctx.resources.publish(NAME, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -309,17 +313,35 @@ impl SsrFeature {
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
     ) -> Result<SsrHandle, RaaError> {
+        Self::install_named(gpu, pipeline, NAME.to_owned())
+    }
+
+    /// Handoff: `SsrFeature::install_instance` is called by card 'Wiring 4/5: multi-instance post passes'; it adds `ssr#<instance>` through `Pipeline::add` and returns an independent `SsrHandle` whose clones control that pass's descriptor and tunables.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<SsrHandle, RaaError> {
+        Self::install_named(gpu, pipeline, format!("{NAME}#{instance}"))
+    }
+
+    fn install_named(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        name: String,
+    ) -> Result<SsrHandle, RaaError> {
         let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes().iter().any(|info| info.name == NAME) {
+        if p.passes().iter().any(|info| info.name == name) {
             return Err(refusal(
                 "pipeline.duplicate_pass",
-                "the pass `ssr` is already installed",
+                &format!("the pass `{name}` is already installed"),
             ));
         }
         let state = Rc::new(RefCell::new(SsrState::new()));
         let defaults = constants(&tunables::defaults());
         let pipelines = SsrPipelines::new(gpu, p.lighting().opaque_layout(), &defaults);
         p.add(Box::new(SsrPass {
+            name,
             state: state.clone(),
             pipelines,
             targets: None,

@@ -196,6 +196,7 @@ struct FogPass {
     written: Option<FogDesc>,
     /// One group per texture of the HDR chain (A and B), built in resize.
     groups: Vec<HdrGroup>,
+    bound_group: Option<HdrGroup>,
 }
 
 impl FogPass {
@@ -242,6 +243,7 @@ impl FeaturePass for FogPass {
 
     /// Rebuilds the private bind group of both HDR chain textures over the new depth.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
+        self.bound_group = None;
         let device = gpu.device();
         let hdr = targets.hdr();
         self.groups = vec![
@@ -269,7 +271,17 @@ impl FeaturePass for FogPass {
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let hdr = ctx.targets.hdr();
         let src = hdr.src_texture();
-        let Some(private) = self.groups.iter().find(|g| g.texture == *src) else {
+        let private = if let Some(group) = self.groups.iter().find(|g| g.texture == *src) {
+            group
+        } else if hdr.is_bound() {
+            if self.bound_group.as_ref().is_none_or(|g| g.texture != *src) {
+                self.bound_group =
+                    Some(self.hdr_group(ctx.gpu.device(), ctx.targets, src, hdr.src()));
+            }
+            self.bound_group
+                .as_ref()
+                .ok_or_else(|| RaaError::Resource("fog: missing bound HDR group".to_owned()))?
+        } else {
             return Err(RaaError::Resource(
                 "fog: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
@@ -357,6 +369,7 @@ impl FogFeature {
             sampler,
             written: None,
             groups: Vec::new(),
+            bound_group: None,
         }))?;
         Ok(FogHandle { state })
     }

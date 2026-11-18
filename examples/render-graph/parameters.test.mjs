@@ -227,3 +227,51 @@ test('no family row adds pass.opaque.copy, which would close a graph.cycle throu
     for (const doc of engine.documents) assert.ok(!doc.nodes.some(node => node.type === 'pass.opaque.copy'), change.family);
   }
 });
+
+// Run 15631: the eight oit panes stood exactly behind one another on the view ray and read as one
+// square. Seen from the capture camera, each pane must step sideways from the previous one while
+// the eight 1 m panes still share a common core (the overlap where maxFragments shows).
+test('the oit panes fan out across the view and keep a common core of all eight', async () => {
+  const { cameraAt } = await import('./lib/scene.js');
+  const { RG_CAPTURE_T_S } = await import('./lib/scene.js');
+  const eye = cameraAt(RG_CAPTURE_T_S).position;
+  const panes = parameters.paneLayout();
+  assert.equal(panes.length, 8);
+  // Direction from the eye to each centre, split into a horizontal angle and an elevation.
+  const angles = panes.map(({ centre }) => {
+    const d = centre.map((value, axis) => value - eye[axis]);
+    return { yaw: Math.atan2(d[0], d[2]), pitch: Math.atan2(d[1], Math.hypot(d[0], d[2])), dist: Math.hypot(...d) };
+  });
+  for (let i = 1; i < angles.length; i++) {
+    const shift = Math.hypot(angles[i].yaw - angles[i - 1].yaw, angles[i].pitch - angles[i - 1].pitch);
+    // At least 0.05 m of the nearer pane's distance: a visible stripe of every colour.
+    assert.ok(shift * Math.min(angles[i].dist, angles[i - 1].dist) > 0.05, `pane ${i} hides behind pane ${i - 1}`);
+  }
+  // The whole fan, in metres at the nearest pane, stays well inside a pane's 1 m width.
+  const nearest = Math.min(...angles.map(a => a.dist));
+  const spreadYaw = Math.max(...angles.map(a => a.yaw)) - Math.min(...angles.map(a => a.yaw));
+  const spreadPitch = Math.max(...angles.map(a => a.pitch)) - Math.min(...angles.map(a => a.pitch));
+  assert.ok(spreadYaw * nearest < 0.8 && spreadPitch * nearest < 0.8, 'the eight panes keep no common core');
+});
+
+test('capping the oit row at 4 fragments visibly changes the common core', () => {
+  const panes = parameters.paneLayout();
+  assert.ok(panes.length >= 6, 'the common core needs at least six panes');
+  const colourKeys = panes.map(({ color }) => color.join(','));
+  assert.equal(new Set(colourKeys).size, panes.length, 'pane colours must all be distinct');
+
+  // raa-oit uses back-face culling for ordinary transparent materials, so each thin box writes
+  // one fragment per pixel in the core (crates/raa-oit/src/feature.rs:204).
+  const fragmentsPerPane = 1;
+  // Pane colours enter the JS API as sRGB and are blended in linear space by the GPU.
+  const srgbToLinear = channel => channel <= 0.04045
+    ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  const fragments = panes.flatMap(({ color, opacity }) =>
+    Array.from({ length: fragmentsPerPane }, () => ({ color: color.map(srgbToLinear), opacity })));
+  const blendFarToNear = source => source.slice().reverse().reduce((dst, { color, opacity }) =>
+    color.map((channel, index) => channel * opacity + dst[index] * (1 - opacity)), [0.5, 0.5, 0.5]);
+  const allFragments = blendFarToNear(fragments);
+  const nearestFour = blendFarToNear(fragments.slice(0, 4));
+  const maxDifference = Math.max(...allFragments.map((channel, index) => Math.abs(channel - nearestFour[index])));
+  assert.ok(maxDifference >= 0.12, `max channel difference ${maxDifference} is below 0.12`);
+});

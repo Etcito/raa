@@ -229,6 +229,8 @@ struct Pipelines {
 
 /// The `bloom` render pass.
 struct BloomPass {
+    /// Pipeline pass name: `bloom`, or `bloom#<instance>` for an instance.
+    name: String,
     state: SharedBloom,
     sample_layout: wgpu::BindGroupLayout,
     composite_layout: wgpu::BindGroupLayout,
@@ -240,6 +242,8 @@ struct BloomPass {
     _dummy: wgpu::Texture,
     dummy_view: wgpu::TextureView,
     chain: Option<Chain>,
+    /// Groups built for the latest bound (src, dst) pair: dst texture and src groups.
+    bound: Option<(wgpu::Texture, HdrGroups)>,
 }
 
 fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
@@ -250,7 +254,7 @@ fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_
 }
 
 impl BloomPass {
-    fn new(gpu: &GpuContext, state: SharedBloom) -> Self {
+    fn new(gpu: &GpuContext, state: SharedBloom, name: String) -> Self {
         let device = gpu.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-bloom.bloom"),
@@ -306,6 +310,7 @@ impl BloomPass {
         });
         let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
         BloomPass {
+            name,
             state,
             sample_layout,
             composite_layout,
@@ -316,6 +321,7 @@ impl BloomPass {
             _dummy: dummy,
             dummy_view,
             chain: None,
+            bound: None,
         }
     }
 
@@ -416,7 +422,7 @@ fn draw(
 
 impl FeaturePass for BloomPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -480,6 +486,7 @@ impl FeaturePass for BloomPass {
             self.hdr_groups(device, hdr.src_texture(), hdr.src(), &views),
             self.hdr_groups(device, hdr.dst_texture(), hdr.dst(), &views),
         ];
+        self.bound = None;
         self.chain = Some(Chain {
             hdr_size,
             sizes,
@@ -507,22 +514,40 @@ impl FeaturePass for BloomPass {
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         if let (Some(view), Some(&(w, h))) = (chain.all_view.as_ref(), chain.sizes.first()) {
             let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, levels as u32);
-            ctx.resources.publish(NAME, "chain", view, desc);
+            ctx.resources.publish(&self.name, "chain", view, desc);
         }
         Ok(())
     }
 
     /// Downsamples hdr.src() through every level, upsamples back to level 0 additively,
     /// composites into hdr.dst() and swaps (one render pass per draw).
+    /// While the chain is bound, the groups come from the one cached bound set, rebuilt
+    /// only when the bound src or dst texture differs.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let hdr = ctx.targets.hdr();
+        if hdr.is_bound() {
+            let (src, dst) = (hdr.src_texture(), hdr.dst_texture());
+            let stale = self
+                .bound
+                .as_ref()
+                .is_none_or(|(d, g)| g.texture != *src || d != dst);
+            if let (true, Some(chain)) = (stale, self.chain.as_ref()) {
+                let groups = self.hdr_groups(ctx.gpu.device(), src, hdr.src(), &chain.views);
+                self.bound = Some((dst.clone(), groups));
+            }
+        }
         let Some(chain) = self.chain.as_ref() else {
             return Err(RaaError::Resource(
                 "bloom: record ran before a resize created the levels".to_owned(),
             ));
         };
-        let hdr = ctx.targets.hdr();
         let src = hdr.src_texture();
-        let Some(groups) = chain.hdr.iter().find(|g| g.texture == *src) else {
+        let bound = self.bound.as_ref().map(|(_, g)| g);
+        let found = match hdr.is_bound() {
+            true => bound.filter(|g| g.texture == *src),
+            false => chain.hdr.iter().find(|g| g.texture == *src),
+        };
+        let Some(groups) = found else {
             return Err(RaaError::Resource(
                 "bloom: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
@@ -542,7 +567,7 @@ impl FeaturePass for BloomPass {
         hdr.swap();
         let (w, h) = chain.hdr_size;
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
-        ctx.resources.publish(NAME, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -561,18 +586,42 @@ impl BloomFeature {
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
     ) -> Result<BloomHandle, RaaError> {
+        Self::add_pass(gpu, pipeline, NAME.to_owned())
+    }
+
+    /// Adds, with `Pipeline::add`, a second bloom pass named `bloom#<instance>` (order
+    /// 120, enabled, BLOOM defaults) with its own state; it publishes its `chain` and
+    /// `color` taps under that name. Refusals as `install` (nothing installed).
+    ///
+    /// Handoff: card 'Wiring 4/5: multi-instance post passes' calls
+    /// `BloomFeature::install_instance` to add the pass `bloom#<instance>`; the returned
+    /// BloomHandle and its clones drive only that pass, removed with
+    /// `Pipeline::remove("bloom#<instance>")`.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<BloomHandle, RaaError> {
+        Self::add_pass(gpu, pipeline, format!("{NAME}#{instance}"))
+    }
+
+    fn add_pass(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        name: String,
+    ) -> Result<BloomHandle, RaaError> {
         let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes().iter().any(|info| info.name == NAME) {
+        if p.passes().iter().any(|info| info.name == name) {
             return Err(refusal(
                 "pipeline.duplicate_pass",
-                "the pass `bloom` is already installed",
+                &format!("the pass `{name}` is already installed"),
             ));
         }
         let state = Rc::new(RefCell::new(BloomState {
             desc: BloomDesc::default(),
             scale: 1.0,
         }));
-        p.add(Box::new(BloomPass::new(gpu, state.clone())))?;
+        p.add(Box::new(BloomPass::new(gpu, state.clone(), name)))?;
         Ok(BloomHandle { state })
     }
 }
@@ -878,7 +927,7 @@ mod tests {
                 desc: BloomDesc::default(),
                 scale: 1.0,
             }));
-            let mut pass = BloomPass::new(&gpu, state);
+            let mut pass = BloomPass::new(&gpu, state, NAME.to_owned());
             let targets = Targets::new(&gpu, (32, 32));
             pass.resize(&gpu, &targets);
             let table = ResourceTable::new();

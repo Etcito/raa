@@ -7,7 +7,9 @@ mod export;
 mod settings;
 mod settings_post;
 
-pub use executor::{GraphExecutor, external_changes, settings_targets};
+pub use executor::{
+    GraphExecutor, adopt_pipeline, external_changes, pipeline_differs, settings_targets,
+};
 pub use export::export_snapshot;
 pub use settings::{
     AppliedDescs, default_values, merge_values, read_values, setting_keys, snapshot_keys,
@@ -99,12 +101,14 @@ pub fn pipeline_instructions(
             planned.push(entry);
         }
     }
-    let enable = installed
-        .iter()
-        .map(|info| (info.name.clone(), planned.contains(&info.name.as_str())))
-        .collect();
+    let mut enable = Vec::new();
+    for info in installed.iter().filter(|info| !info.name.contains('#')) {
+        if !enable.iter().any(|(name, _)| *name == info.name) {
+            enable.push((info.name.clone(), planned.contains(&info.name.as_str())));
+        }
+    }
 
-    let is_pass = |info: &&PassInfo| info.role == PassRole::Pass;
+    let is_pass = |info: &&PassInfo| info.role == PassRole::Pass && !info.name.contains('#');
     let mut order: Vec<&PassInfo> = planned
         .iter()
         .filter_map(|entry| {
@@ -115,7 +119,7 @@ pub fn pipeline_instructions(
         })
         .collect();
     for info in installed.iter().filter(is_pass) {
-        if planned.contains(&info.name.as_str()) {
+        if order.iter().any(|entry| entry.name == info.name) {
             continue;
         }
         let at = order
@@ -144,6 +148,10 @@ pub trait ExecExtension {
     ) -> Result<(), Vec<Issue>>;
     /// Clears what `apply` set.
     fn clear(&mut self, h: &mut FeatureHandles<'_>);
+    /// Restores extension-specific pass order after an external pipeline edit.
+    fn reorder(&mut self, _plan: &GraphPlan, _h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
+        Ok(())
+    }
     /// Runs once per frame while a graph is active.
     fn frame(&mut self, _h: &mut FeatureHandles<'_>) -> Result<(), RaaError> {
         Ok(())

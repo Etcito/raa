@@ -172,3 +172,13 @@ test('final-direct-pair aims the sun at the red wall and adds a light box beside
     assert.ok(!variant(mode).selection.subjects.some(subject => subject.name === 'bounce-box'));
   }
 });
+
+// Run 15631: the area shadow mask holds one area light per channel (raa-gi area_shadow cpu.rs
+// mask texel: channel slot % 4); shown as RGB, the room's one panel light (slot 0, red) left the
+// unused channels at 1 and the tile read as white with cyan blobs. The tile shows the red channel.
+test('the Debug starter shows the area shadow mask red channel as a grey tile', async () => {
+  const { readFileSync } = await import('node:fs');
+  const doc = JSON.parse(readFileSync(new URL('../../crates/raa-graph/graphs/debug.json', import.meta.url), 'utf8'));
+  const node = doc.nodes.find(entry => entry.id === 'vAreaMask');
+  assert.equal(node.params.channels, 'r');
+});

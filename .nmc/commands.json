@@ -1,602 +1,64 @@
 [
   {
-    "name": "p4-gi-build",
-    "command": "bash scripts/build-global-illumination.sh",
-    "timeout_s": 1800
-  },
-  {
-    "name": "p4-gi-volume-check",
-    "command": "node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/volume --stage volume",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-volume-select",
-    "command": "node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/volume --stage volume",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-volume-check"
-    ]
-  },
-  {
-    "name": "p4-gi-volume-clean",
-    "command": "node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/volume --stage volume",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-volume-select"
-    ]
-  },
-  {
-    "name": "p4-gi-volume-render",
-    "command": "node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/volume --stage volume",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-volume-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-volume-fresh",
-    "command": "node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/volume --stage volume",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-volume-render"
-    ]
-  },
-  {
-    "name": "p4-gi-volume-judge",
-    "command": "node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/volume --stage volume --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-volume-render",
-      "p4-gi-volume-fresh"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-check",
-    "command": "node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-select",
-    "command": "node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-lighting-check"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-clean",
-    "command": "node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-lighting-select"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-render",
-    "command": "node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-lighting-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-fresh",
-    "command": "node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-lighting-render"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-judge-local",
-    "command": "node --test web/common/gi-job.test.mjs \"examples/global-illumination/*.test.mjs\"",
-    "timeout_s": 120,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-judge",
-    "command": "node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/lighting --stage lighting --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-lighting-render",
-      "p4-gi-lighting-fresh"
-    ]
-  },
-  {
-    "name": "p4-gi-area-probe-check",
-    "command": "node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-area-probe-select",
-    "command": "node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-area-probe-check"
-    ]
-  },
-  {
-    "name": "p4-gi-area-probe-clean",
-    "command": "node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-area-probe-select"
-    ]
-  },
-  {
-    "name": "p4-gi-area-probe-render",
-    "command": "node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/area-probe --stage lighting",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-area-probe-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-area-ratio-stored",
-    "command": "node scripts/gi-cornell-ratio.mjs --stored lighting --out out/global-illumination/area-probe --reference /refs/cornell-box-reference.png",
-    "timeout_s": 60
-  },
-  {
-    "name": "p4-gi-area-probe-ratio",
-    "command": "node scripts/gi-cornell-ratio.mjs --out out/global-illumination/area-probe --reference /refs/cornell-box-reference.png",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-area-probe-render",
-      "p4-gi-area-ratio-stored"
-    ]
-  },
-  {
-    "name": "p4-gi-lighting-ratio",
-    "command": "node scripts/gi-cornell-ratio.mjs --out out/global-illumination/lighting --reference /refs/cornell-box-reference.png",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-lighting-render"
-    ]
-  },
-  {
-    "name": "p4-taa-lookdev-build",
-    "command": "bash scripts/build-lookdev.sh",
-    "timeout_s": 1800,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-taa-lookdev-check",
-    "command": "env LOOKDEV_DIST=dist/lookdev node --test examples/lookdev/test/m31-taa.test.mjs",
-    "timeout_s": 120,
-    "after": [
-      "p4-taa-lookdev-build"
-    ]
-  },
-  {
-    "name": "p4-taa-lookdev-render",
-    "command": "node scripts/lookdev-capture.mjs --milestone m31 --judge --ref-prefix /refs/",
-    "timeout_s": 1800,
-    "after": [
-      "p4-taa-lookdev-check"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-check",
-    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-select",
-    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-area-restir-check"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-clean",
-    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-area-restir-select"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-render",
-    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-area-restir-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-fresh",
-    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-area-restir-render"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-judge",
-    "command": "env GI_SCENARIO=area-restir node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/area-restir --stage lighting --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-area-restir-render",
-      "p4-gi-area-restir-fresh"
-    ]
-  },
-  {
-    "name": "p4-gi-area-restir-diag",
-    "command": "env GI_SCENARIO=area-restir NMC_GPU_WAIT_S=900 node --input-type=module -e \"const g=await import('./web/common/gpu-job.mjs'),j=await import('./web/common/page-job.mjs'),t=await import('./scripts/trace-first-pixel.mjs'),fs=await import('node:fs');const Q=[.1,.3,.5,.7,.9],L=function(s){console.log('diag: '+s)},O='out/global-illumination/area-restir-diag';const I={selectionId:'diag',attemptId:'diag',buildId:'diag',scenario:process.env.GI_SCENARIO,mode:'restir-still',width:1280,height:720,remainingMs:270000};let R=null,F=null;try{const p=await g.publishGpuPage('dist/global-illumination',{timeoutMs:300000});R=(await g.runGpuPageOp(p.pageRef,'run',I,{timeoutMs:300000,out:O})).result}catch(e){F=String(e);L('job failed: '+F);try{R=JSON.parse(fs.readFileSync(O+'/result.json','utf8')).result}catch(x){}};if(!R){L('FAIL: no result in '+O);process.exit(1)};L('adapter '+JSON.stringify(R.adapter)+' hardware '+R.hardware);const E=R.errors??{};for(const k of['console','page','gpu']){const m=new Map();for(const e of E[k]??[]){const s=String(e).slice(0,1200);m.set(s,(m.get(s)??0)+1)}L(k+' messages: '+(E[k]??[]).length);for(const[s,n]of m)L(k+' x'+n+': '+s)};const im=(R.images??[])[0];let B='no capture';if(im){const b=Buffer.from(im.data,'base64');B=j.blankCapture(b);const d=t.decodePng(b),H=Math.min(d.height,720),px=function(x,y){const o=(y*d.width+x)*d.channels;return d.data[o]+','+d.data[o+1]+','+d.data[o+2]};for(const v of Q)L('colour row '+Math.floor(v*H)+': '+Q.map(function(u){return 'rgb('+px(Math.floor(u*d.width),Math.floor(v*H))+')'}).join(' '));const c=new Set();for(let y=0;y<H;y+=4)for(let x=0;x<d.width;x+=4)c.add(px(x,y));L(c.size+' colours on a 4-px grid')};L('mask: not in the op result');const P=[];if((E.gpu??[]).length)P.push(E.gpu.length+' wgpu errors');if((E.page??[]).length)P.push('page errors');if(B!==null)P.push('blank: '+B);if(F!==null)P.push('job failed');if(P.length){L('FAIL: '+P.join('; '));process.exit(1)}L('ok: no wgpu error, frame not one flat colour')\"",
-    "timeout_s": 1500,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-ssgi-repo-check",
-    "command": "bash scripts/check.sh --quick --no-demos",
-    "timeout_s": 1200
-  },
-  {
-    "name": "p4-gi-ssgi-check",
-    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build",
-      "p4-gi-ssgi-repo-check"
-    ]
-  },
-  {
-    "name": "p4-gi-ssgi-select",
-    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-ssgi-check"
-    ]
-  },
-  {
-    "name": "p4-gi-ssgi-clean",
-    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-ssgi-select"
-    ]
-  },
-  {
-    "name": "p4-gi-ssgi-render",
-    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-ssgi-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-ssgi-fresh",
-    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-ssgi-render"
-    ]
-  },
-  {
-    "name": "p4-gi-ssgi-judge",
-    "command": "env GI_SCENARIO=ssgi node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/ssgi --stage lighting --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-ssgi-render",
-      "p4-gi-ssgi-fresh"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-check",
-    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-select",
-    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-quality-check"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-clean",
-    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-quality-select"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-render",
-    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-quality-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-fresh",
-    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-quality-render"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-judge",
-    "command": "env GI_SCENARIO=gi-quality node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/gi-quality --stage lighting --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-quality-render",
-      "p4-gi-quality-fresh"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-lighting-check",
-    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-lighting-select",
-    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-quality-lighting-check"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-lighting-clean",
-    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-quality-lighting-select"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-lighting-render",
-    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-quality-lighting-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-lighting-fresh",
-    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-quality-lighting-render"
-    ]
-  },
-  {
-    "name": "p4-gi-quality-lighting-judge",
-    "command": "env GI_SCENARIO=lighting node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/quality-lighting --stage lighting --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-quality-lighting-render",
-      "p4-gi-quality-lighting-fresh"
-    ]
-  },
-  {
-    "name": "p4-gi-virtual-check",
-    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs check --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-build"
-    ]
-  },
-  {
-    "name": "p4-gi-virtual-select",
-    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs select --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-virtual-check"
-    ]
-  },
-  {
-    "name": "p4-gi-virtual-clean",
-    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs clean --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-virtual-select"
-    ]
-  },
-  {
-    "name": "p4-gi-virtual-render",
-    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs render --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
-    "timeout_s": 3000,
-    "after": [
-      "p4-gi-virtual-clean"
-    ]
-  },
-  {
-    "name": "p4-gi-virtual-fresh",
-    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs fresh --page dist/global-illumination --out out/global-illumination/virtual --stage virtual",
-    "timeout_s": 60,
-    "after": [
-      "p4-gi-virtual-render"
-    ]
-  },
-  {
-    "name": "p4-gi-virtual-judge",
-    "command": "env GI_SCENARIO=virtual node web/common/gi-job.mjs judge --page dist/global-illumination --out out/global-illumination/virtual --stage virtual --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "p4-gi-virtual-render",
-      "p4-gi-virtual-fresh"
-    ]
-  },
-  {
     "name": "rg-build",
     "command": "bash scripts/build-render-graph.sh",
     "timeout_s": 1800
   },
   {
-    "name": "rg-interpreter-check",
-    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "name": "rg-wiring-check",
+    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/wiring --stage wiring",
     "timeout_s": 60,
     "after": [
       "rg-build"
     ]
   },
   {
-    "name": "rg-interpreter-select",
-    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "name": "rg-wiring-select",
+    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/wiring --stage wiring",
     "timeout_s": 60,
     "after": [
-      "rg-interpreter-check"
+      "rg-wiring-check"
     ]
   },
   {
-    "name": "rg-interpreter-clean",
-    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "name": "rg-wiring-clean",
+    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/wiring --stage wiring",
     "timeout_s": 60,
     "after": [
-      "rg-interpreter-select"
+      "rg-wiring-select"
     ]
   },
   {
-    "name": "rg-interpreter-render",
-    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "name": "rg-wiring-render",
+    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/wiring --stage wiring",
     "timeout_s": 1500,
     "after": [
-      "rg-interpreter-clean"
+      "rg-wiring-clean"
     ]
   },
   {
-    "name": "rg-interpreter-fresh",
-    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/interpreter --stage interpreter",
+    "name": "rg-wiring-fresh",
+    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/wiring --stage wiring",
     "timeout_s": 120,
     "after": [
-      "rg-interpreter-render"
+      "rg-wiring-render"
     ]
   },
   {
-    "name": "rg-interpreter-judge",
-    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/interpreter --stage interpreter --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "rg-interpreter-render",
-      "rg-interpreter-fresh"
-    ]
-  },
-  {
-    "name": "rg-views-check",
-    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/views --stage views",
-    "timeout_s": 60,
+    "name": "rg-wiring-judge-local",
+    "command": "node --test examples/render-graph/parameters.test.mjs examples/render-graph/views.test.mjs examples/render-graph/wiring.test.mjs",
+    "timeout_s": 120,
     "after": [
       "rg-build"
     ]
   },
   {
-    "name": "rg-views-select",
-    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/views --stage views",
-    "timeout_s": 60,
-    "after": [
-      "rg-views-check"
-    ]
-  },
-  {
-    "name": "rg-views-clean",
-    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/views --stage views",
-    "timeout_s": 60,
-    "after": [
-      "rg-views-select"
-    ]
-  },
-  {
-    "name": "rg-views-render",
-    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/views --stage views",
-    "timeout_s": 1500,
-    "after": [
-      "rg-views-clean"
-    ]
-  },
-  {
-    "name": "rg-views-fresh",
-    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/views --stage views",
-    "timeout_s": 120,
-    "after": [
-      "rg-views-render"
-    ]
-  },
-  {
-    "name": "rg-views-judge",
-    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/views --stage views --budget-s 1020",
+    "name": "rg-wiring-judge",
+    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/wiring --stage wiring --budget-s 1020",
     "timeout_s": 1200,
     "after": [
-      "rg-views-render",
-      "rg-views-fresh"
-    ]
-  },
-  {
-    "name": "rg-parameters-check",
-    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/parameters --stage parameters",
-    "timeout_s": 60,
-    "after": [
-      "rg-build"
-    ]
-  },
-  {
-    "name": "rg-parameters-select",
-    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/parameters --stage parameters",
-    "timeout_s": 60,
-    "after": [
-      "rg-parameters-check"
-    ]
-  },
-  {
-    "name": "rg-parameters-clean",
-    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/parameters --stage parameters",
-    "timeout_s": 60,
-    "after": [
-      "rg-parameters-select"
-    ]
-  },
-  {
-    "name": "rg-parameters-render",
-    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/parameters --stage parameters",
-    "timeout_s": 1500,
-    "after": [
-      "rg-parameters-clean"
-    ]
-  },
-  {
-    "name": "rg-parameters-fresh",
-    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/parameters --stage parameters",
-    "timeout_s": 120,
-    "after": [
-      "rg-parameters-render"
-    ]
-  },
-  {
-    "name": "rg-parameters-judge",
-    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/parameters --stage parameters --budget-s 1020",
-    "timeout_s": 1200,
-    "after": [
-      "rg-parameters-render",
-      "rg-parameters-fresh"
+      "rg-wiring-render",
+      "rg-wiring-fresh"
     ]
   },
   {

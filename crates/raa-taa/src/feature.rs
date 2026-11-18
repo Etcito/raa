@@ -46,7 +46,17 @@ fn pack_params(history_usable: bool) -> [u8; PARAMS_LEN] {
     out
 }
 
+/// Handoff: `TaaPass` is extended by card 'raa-taa: history input read when bound';
+/// record currently resolves bound HDR views using its own history pair and publishes hdr.src().
 struct TaaPass {
+    name: String,
+    /// The bound-chain groups with the HDR textures and the bound history view they embed.
+    bound: Option<(
+        wgpu::Texture,
+        wgpu::Texture,
+        Option<wgpu::TextureView>,
+        [wgpu::BindGroup; 2],
+    )>,
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
     tunables: Rc<Cell<[f64; 6]>>,
@@ -70,7 +80,7 @@ impl TaaPass {
 
 impl FeaturePass for TaaPass {
     fn name(&self) -> &str {
-        crate::TAA_PASS_NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -79,6 +89,7 @@ impl FeaturePass for TaaPass {
 
     /// Creates or ensures the history, rebuilds the bind groups and invalidates.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
+        self.bound = None;
         let size = targets.size();
         {
             let history = match self.history.as_mut() {
@@ -131,12 +142,13 @@ impl FeaturePass for TaaPass {
             let (w, h) = history.state().size();
             let desc = ImageDesc::new(ImageDim::D2, history.format(), w, h, 1, 1);
             ctx.resources
-                .publish(NAME, "history", history.write_view(), desc);
+                .publish(&self.name, "history", history.write_view(), desc);
         }
         Ok(())
     }
 
-    /// Dispatches the resolve for the HDR source and write parity, swaps and commits.
+    /// Dispatches the resolve for the HDR source and write parity, swaps and commits. A bound
+    /// `history` input supplies the read history (binding 5); the write view stays this pass's.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let Some(targets) = self.targets.as_ref() else {
             return Err(RaaError::Resource(
@@ -153,7 +165,40 @@ impl FeaturePass for TaaPass {
             ));
         };
         let hdr = ctx.targets.hdr();
-        let Some(group) = targets.group(hdr.src_texture(), write_index) else {
+        let bound_history = ctx
+            .resources
+            .input(&self.name, "history")
+            .map(|image| image.view);
+        let use_bound = hdr.is_bound() || bound_history.is_some();
+        if use_bound
+            && self.bound.as_ref().is_none_or(|(src, dst, history, _)| {
+                src != hdr.src_texture() || dst != hdr.dst_texture() || history != &bound_history
+            })
+            && let Some(history) = self.history.as_ref()
+        {
+            let groups = TaaTargets::bound_groups(
+                ctx.gpu,
+                &self.pipelines,
+                ctx.targets,
+                &self.frame,
+                history,
+                bound_history.as_ref(),
+            );
+            self.bound = Some((
+                hdr.src_texture().clone(),
+                hdr.dst_texture().clone(),
+                bound_history,
+                groups,
+            ));
+        }
+        let group = if use_bound {
+            self.bound
+                .as_ref()
+                .map(|(_, _, _, groups)| &groups[write_index & 1])
+        } else {
+            targets.group(hdr.src_texture(), write_index)
+        };
+        let Some(group) = group else {
             return Err(RaaError::Resource(
                 "taa: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
@@ -177,7 +222,7 @@ impl FeaturePass for TaaPass {
         }
         let (w, h) = targets.size();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
-        ctx.resources.publish(NAME, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -203,14 +248,33 @@ impl TaaFeature {
         pipeline: &Rc<RefCell<Pipeline>>,
         frame: &wgpu::Buffer,
     ) -> Result<TaaHandle, RaaError> {
+        Self::install_named(gpu, pipeline, frame, NAME.to_owned(), false)
+    }
+
+    /// Handoff: `TaaFeature::install_instance` is called by card 'Wiring 4/5: multi-instance post passes';
+    /// it adds an enabled `taa#<instance>` pass and returns a handle with independent
+    /// accumulation, invalidation, tunables, generation and history state.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        frame: &wgpu::Buffer,
+        instance: &str,
+    ) -> Result<TaaHandle, RaaError> {
+        Self::install_named(gpu, pipeline, frame, format!("{NAME}#{instance}"), true)
+    }
+
+    fn install_named(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        frame: &wgpu::Buffer,
+        name: String,
+        enabled: bool,
+    ) -> Result<TaaHandle, RaaError> {
         let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes()
-            .iter()
-            .any(|info| info.name == crate::TAA_PASS_NAME)
-        {
+        if p.passes().iter().any(|info| info.name == name) {
             return Err(refusal(
                 "pipeline.duplicate_pass",
-                "the pass `taa` is already installed",
+                &format!("the pass `{name}` is already installed"),
             ));
         }
         let accumulated = Rc::new(Cell::new(0));
@@ -218,6 +282,8 @@ impl TaaFeature {
         let tunables = Rc::new(Cell::new(crate::tunables::defaults()));
         let generation = Rc::new(Cell::new(0));
         p.add(Box::new(TaaPass {
+            name: name.clone(),
+            bound: None,
             accumulated: accumulated.clone(),
             pending_invalidate: pending_invalidate.clone(),
             tunables: tunables.clone(),
@@ -228,7 +294,9 @@ impl TaaFeature {
             history: None,
             targets: None,
         }))?;
-        p.set_enabled(crate::TAA_PASS_NAME, false)?;
+        if !enabled {
+            p.set_enabled(&name, false)?;
+        }
         Ok(TaaHandle {
             accumulated,
             pending_invalidate,
