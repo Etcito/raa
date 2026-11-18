@@ -148,6 +148,9 @@ fn create_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgp
 /// The `cel` render pass.
 struct CelPass {
     state: SharedCel,
+    name: String,
+    owns_env: bool,
+    bound_group: Option<(wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     camera: wgpu::Buffer,
@@ -158,7 +161,7 @@ struct CelPass {
 }
 
 impl CelPass {
-    fn new(gpu: &GpuContext, state: SharedCel) -> Self {
+    fn new(gpu: &GpuContext, state: SharedCel, name: String, owns_env: bool) -> Self {
         let device = gpu.device();
         let layout = create_layout(device);
         let pipeline = create_pipeline(device, &layout);
@@ -176,6 +179,9 @@ impl CelPass {
         });
         CelPass {
             state,
+            name,
+            owns_env,
+            bound_group: None,
             layout,
             pipeline,
             camera,
@@ -222,11 +228,11 @@ impl CelPass {
 
 impl FeaturePass for CelPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn set_enabled(&mut self, enabled: bool, lighting: &mut raa_pipeline::LightingResources) {
-        if !enabled {
+        if !enabled && self.owns_env {
             lighting.env_mut().cel = [0.0; 4];
         }
     }
@@ -237,6 +243,7 @@ impl FeaturePass for CelPass {
 
     /// Rebuilds the bind group of each texture of the HDR chain.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
+        self.bound_group = None;
         let device = gpu.device();
         let hdr = targets.hdr();
         self.groups = vec![
@@ -263,12 +270,14 @@ impl FeaturePass for CelPass {
             m.write_le_bytes(out);
         }
         ctx.gpu.queue().write_buffer(&self.camera, 0, &bytes);
-        ctx.lighting.env_mut().cel = [
-            u32::from(desc.toon) as f32,
-            desc.softness,
-            desc.specular,
-            0.0,
-        ];
+        if self.owns_env {
+            ctx.lighting.env_mut().cel = [
+                u32::from(desc.toon) as f32,
+                desc.softness,
+                desc.specular,
+                0.0,
+            ];
+        }
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         Ok(())
     }
@@ -277,10 +286,35 @@ impl FeaturePass for CelPass {
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let hdr = ctx.targets.hdr();
         let src = hdr.src_texture();
-        let Some((_, group)) = self.groups.iter().find(|(t, _)| t == src) else {
-            return Err(RaaError::Resource(
-                "cel: the HDR source is not a texture the pass was resized for".to_owned(),
-            ));
+        let group = if hdr.is_bound() {
+            let dst = hdr.dst_texture();
+            if !self
+                .bound_group
+                .as_ref()
+                .is_some_and(|(s, d, _)| s == src && d == dst)
+            {
+                self.bound_group = Some((
+                    src.clone(),
+                    dst.clone(),
+                    self.group(ctx.gpu.device(), hdr.src(), ctx.targets),
+                ));
+            }
+            &self
+                .bound_group
+                .as_ref()
+                .ok_or_else(|| RaaError::Resource("cel: missing bound group".to_owned()))?
+                .2
+        } else {
+            &self
+                .groups
+                .iter()
+                .find(|(t, _)| t == src)
+                .ok_or_else(|| {
+                    RaaError::Resource(
+                        "cel: the HDR source is not a texture the pass was resized for".to_owned(),
+                    )
+                })?
+                .1
         };
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("raa-cel"),
@@ -305,7 +339,7 @@ impl FeaturePass for CelPass {
         hdr.swap();
         let (w, h) = ctx.targets.size();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
-        ctx.resources.publish(NAME, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -324,18 +358,38 @@ impl CelFeature {
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
     ) -> Result<CelHandle, RaaError> {
+        Self::install_named(gpu, pipeline, NAME.to_owned(), true)
+    }
+
+    /// Handoff: `CelFeature::install_instance` serves 'Wiring 4/5: multi-instance post passes':
+    /// it adds `cel.resolve#<instance>` through `Pipeline::add` and returns a handle whose
+    /// clones control only that pass, which never writes `env.cel`.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<CelHandle, RaaError> {
+        Self::install_named(gpu, pipeline, format!("{NAME}#{instance}"), false)
+    }
+
+    fn install_named(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        name: String,
+        owns_env: bool,
+    ) -> Result<CelHandle, RaaError> {
         let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes().iter().any(|info| info.name == NAME) {
+        if p.passes().iter().any(|info| info.name == name) {
             return Err(refusal(
                 "pipeline.duplicate_pass",
-                "the pass `cel.resolve` is already installed",
+                &format!("the pass `{name}` is already installed"),
             ));
         }
         let state = Rc::new(RefCell::new(CelState {
             desc: CelSettings::default(),
             camera: [Mat4::IDENTITY; 2],
         }));
-        p.add(Box::new(CelPass::new(gpu, state.clone())))?;
+        p.add(Box::new(CelPass::new(gpu, state.clone(), name, owns_env)))?;
         Ok(CelHandle { state })
     }
 }
