@@ -131,3 +131,49 @@ test('observe returns the SceneObservation fields', async () => {
   assert.equal(observation.graph, 'Simple forward');
   assert.deepEqual(observation.edits, [{ operation: 'setRenderGraph', accepted: true, error: null }]);
 });
+
+// The graph documents of the wiring stage must be complete for the Rust validator: every colour
+// input of a chain pass is linked (`generic` colour inputs read no default source since M6), and
+// the view nodes each mode shows are present. The engine's acceptance itself is checked by the GPU
+// run; this test checks the documents each mode sends and that the engine accepted them.
+const CHAIN_TYPES = [
+  'pass.gi.history', 'pass.ssr', 'pass.fog', 'pass.sunshafts', 'pass.opaque.copy', 'pass.transparent.oit',
+  'pass.particles.blend', 'pass.taa', 'pass.dof', 'pass.bloom', 'pass.grading', 'pass.cel.resolve', 'pass.tonemap',
+];
+const DEBUG_VIEWS = ['vDepth', 'vNormal', 'vMotion', 'vAo', 'vAreaMask', 'giRawVsDenoised', 'vHistory', 'vFinal', 'grid'];
+const docOf = sent => (typeof sent === 'string' ? JSON.parse(sent) : sent);
+const unlinkedColour = doc => {
+  const linked = new Set(doc.links.map(entry => entry.to));
+  return doc.nodes.filter(node => CHAIN_TYPES.includes(node.type) && !linked.has(`${node.id}.color`)).map(node => node.id);
+};
+const EXPECTED_VIEWS = {
+  'default-simple-forward': [],
+  'default-full-gi': [],
+  'default-debug': DEBUG_VIEWS,
+  'bloom-before-dof-pair': [],
+  'two-taa-split': ['cmp'],
+};
+
+test('every wiring mode sends accepted documents with every colour input linked and its view nodes', async () => {
+  for (const scene of wiring.default.variants) {
+    const engine = engineDouble({ passes: [pass('taa'), pass('taa#taaB'), pass('bloom'), pass('dof')],
+      nodes: DEBUG_VIEWS.map(id => stat(id)).concat([stat('cmp', 'view.compare')]) });
+    const halves = scene.pair ? scene.pair.order : ['single'];
+    const { observation } = await run(engine, scene.id, halves);
+    assert.ok(engine.documents.length > 0, `${scene.id} sends a graph`);
+    assert.ok(observation.edits.every(edit => edit.accepted === true), `${scene.id} accepted: ${JSON.stringify(observation.edits)}`);
+    for (const sent of engine.documents) {
+      const doc = docOf(sent);
+      assert.deepEqual(unlinkedColour(doc), [], `${scene.id}: unlinked colour inputs in ${doc.name}`);
+      const ids = new Set(doc.nodes.map(node => node.id));
+      for (const view of EXPECTED_VIEWS[scene.id]) assert.ok(ids.has(view), `${scene.id}: ${doc.name} has view node ${view}`);
+    }
+  }
+});
+
+test('a wiring document with an unlinked colour input is reported', () => {
+  const doc = docOf(STARTERS[2].json);
+  assert.deepEqual(unlinkedColour(doc), []);
+  const cut = { ...doc, links: doc.links.filter(entry => entry.to !== 'fog.color') };
+  assert.deepEqual(unlinkedColour(cut), ['fog']);
+});

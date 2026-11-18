@@ -190,3 +190,57 @@ fn non_chain_tonemap_source_adds_one_view() {
         *slots.iter().max().unwrap() as usize + 2
     );
 }
+fn plan_nodes(ids: &[(&str, &str)]) -> GraphPlan {
+    GraphPlan {
+        name: "order".into(),
+        nodes: ids
+            .iter()
+            .enumerate()
+            .map(|(index, (id, ty))| PlanNode {
+                id: (*id).into(),
+                type_id: (*ty).into(),
+                type_version: 1,
+                order_index: index as u32,
+                params: vec![],
+                inputs: vec![],
+                compute: None,
+            })
+            .collect(),
+        links: vec![],
+        resources: vec![],
+        histories: vec![],
+        output: PlanPortRef {
+            node: "out".into(),
+            port: "color".into(),
+        },
+    }
+}
+#[test]
+fn view_pass_follows_its_source_pass() {
+    // The view node is first in plan order, but it reads giHistory, so it must follow gi.history.
+    let p = plan_nodes(&[
+        ("view", "view.image"),
+        ("forward", "pass.forward"),
+        ("giHistory", "pass.gi.history"),
+        ("taa", "pass.taa"),
+        ("tonemap", "pass.tonemap"),
+    ]);
+    let entries = [
+        ("view".into(), "view#view".into()),
+        ("forward".into(), "forward".into()),
+        ("giHistory".into(), "gi.history".into()),
+        ("taa".into(), "taa".into()),
+        ("tonemap".into(), "tonemap".into()),
+    ];
+    let installed = info(&["forward", "gi.history", "view#view", "taa", "tonemap"]);
+    let order = plan_fns::link_order(&p, &entries, &installed);
+    assert_eq!(
+        order,
+        names(&["forward", "gi.history", "view#view", "taa", "tonemap"])
+    );
+    let at = order.iter().position(|n| n == "view#view").unwrap();
+    assert_eq!(order[at - 1], "gi.history");
+    for pass in installed.iter().map(|p| p.name.as_str()) {
+        assert_eq!(order.iter().filter(|n| n == &pass).count(), 1, "{pass}");
+    }
+}

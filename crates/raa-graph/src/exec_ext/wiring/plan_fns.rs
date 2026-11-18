@@ -176,18 +176,13 @@ pub fn link_order(
     entries: &[(String, String)],
     installed: &[raa_pipeline::PassInfo],
 ) -> Vec<String> {
-    let tonemap = installed
-        .iter()
-        .position(|p| p.name == "tonemap")
-        .unwrap_or(installed.len());
     let mut result = Vec::new();
     for node in &plan.nodes {
         if let Some((_, entry)) = entries.iter().find(|(id, _)| *id == node.id)
-            && let Some((index, _)) = installed
+            && installed
                 .iter()
-                .enumerate()
-                .find(|(_, p)| p.name == *entry && p.role == raa_pipeline::PassRole::Pass)
-            && !(result.contains(entry) || entry.starts_with("view#") && index > tonemap)
+                .any(|p| p.name == *entry && p.role == raa_pipeline::PassRole::Pass)
+            && !(result.contains(entry) || entry.starts_with("view#"))
         {
             result.push(entry.clone());
         }
