@@ -187,14 +187,15 @@ function addNode(doc, state, id) {
   doc.nodes.splice(output < 0 ? doc.nodes.length : output, 0, { id, type, params });
 }
 
-// The colour links: each colour input that is not generic reads the first defaultSource entry
-// whose node type is in the graph (the fixed wiring of M4). Added and affected colour inputs are
-// rewritten in place, a missing link is appended.
+// The colour links: each colour input reads the first defaultSource entry whose node type is in
+// the graph (the chain order of M4). Since M6 the chain inputs are generic, so nothing links them
+// by default: an added post node is spliced in here, or it stays unlinked (graph.input_missing).
+// Added and affected colour inputs are rewritten in place, a missing link is appended.
 function wireColour(doc, state) {
   const idOfType = new Map(doc.nodes.map(node => [node.type, node.id]));
   for (const node of doc.nodes) {
     const port = catalogNode(state, node.type)?.inputs.find(input => input.key === 'color');
-    if (!port || port.generic) continue;
+    if (!port) continue;
     const source = port.defaultSource.find(entry => idOfType.has(entry.slice(0, entry.lastIndexOf('.'))));
     if (source === undefined) continue;
     const type = source.slice(0, source.lastIndexOf('.'));

@@ -4,9 +4,10 @@
 
 use raa_core::RaaError;
 use raa_graph::Catalog;
+use raa_graph::catalog::{FeatureId, ParamValue};
 use raa_graph::catalog::{GraphFormat, NodeTypeSpec, PortSpec, PortType};
 use raa_graph::error::Issue;
-use raa_graph::exec::pipeline_instructions;
+use raa_graph::exec::{SettingsSnapshot, default_values, pipeline_instructions, settings_targets};
 use raa_graph::format::{GraphDoc, LinkDoc, NodeDoc, PortRef, parse_graph, write_graph};
 use raa_graph::plan::{GraphPlan, plan_from_json};
 use raa_graph::registry;
@@ -287,4 +288,120 @@ fn the_order_from_links_is_accepted_by_the_pipeline_config() {
     assert!(at("bloom") < at("dof"));
     assert!(at("dof") < at("tonemap"));
     assert_eq!(at("tonemap"), names.len() - 1);
+}
+
+/// The Full GI starter with the `pass.dof` nodes `(id, fStop)` added before `tonemap`, spliced
+/// into the colour chain after `taa` in the given order when `wired`.
+fn full_gi_with_dof(dofs: &[(&str, f64)], wired: bool) -> String {
+    let (_, _, json) = registry::STARTERS
+        .iter()
+        .find(|(name, _, _)| *name == "Full GI")
+        .expect("the Full GI starter");
+    let mut doc = parse_graph(json).expect("the starter parses");
+    let at = doc
+        .nodes
+        .iter()
+        .position(|node| node.id == "tonemap")
+        .expect("tonemap");
+    for (offset, (id, f_stop)) in dofs.iter().enumerate() {
+        doc.nodes.insert(
+            at + offset,
+            NodeDoc {
+                id: (*id).to_string(),
+                type_id: "pass.dof".to_string(),
+                version: None,
+                params: vec![(
+                    "fStop".to_string(),
+                    raa_loader::json::JsonValue::Number(*f_stop),
+                )],
+                compute: None,
+            },
+        );
+    }
+    if wired {
+        let into_bloom = doc
+            .links
+            .iter_mut()
+            .find(|link| link.to.node == "bloom" && link.to.port == "color")
+            .expect("bloom.color link");
+        let mut from = into_bloom.from.clone();
+        into_bloom.from = PortRef {
+            node: dofs.last().expect("a dof").0.to_string(),
+            port: "color".to_string(),
+        };
+        for (id, _) in dofs {
+            doc.links.push(LinkDoc {
+                from,
+                to: PortRef {
+                    node: (*id).to_string(),
+                    port: "color".to_string(),
+                },
+                history: false,
+            });
+            from = PortRef {
+                node: (*id).to_string(),
+                port: "color".to_string(),
+            };
+        }
+    }
+    write_graph(&doc)
+}
+
+fn dof_target(plan: &GraphPlan, key: &str) -> ParamValue {
+    let empty = SettingsSnapshot {
+        passes: Vec::new(),
+        order: Vec::new(),
+        values: vec![(FeatureId::Dof, default_values(&FeatureId::Dof))],
+    };
+    let targets = settings_targets(plan, &Catalog::build(), &empty).expect("the targets resolve");
+    targets
+        .values
+        .iter()
+        .find(|(feature, _)| *feature == FeatureId::Dof)
+        .and_then(|(_, values)| values.iter().find(|(k, _)| k == key))
+        .map(|(_, value)| value.clone())
+        .expect("a Dof target")
+}
+
+#[test]
+fn an_unlinked_generic_dof_colour_input_is_refused() {
+    let issues = plan_from_json(&full_gi_with_dof(&[("dof", 0.7)], false))
+        .expect_err("dof.color has no link");
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == "graph.input_missing"
+                && issue.node.as_deref() == Some("dof")
+                && issue.port.as_deref() == Some("color")),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn dof_f_stop_reaches_the_installed_pass_and_a_named_instance() {
+    let plan = plan_from_json(&full_gi_with_dof(&[("dof", 0.7)], true)).expect("the graph plans");
+    assert_eq!(
+        dof_target(&plan, "fStop"),
+        ParamValue::Number(f64::from(0.7f32))
+    );
+
+    let plan = plan_from_json(&full_gi_with_dof(&[("dof", 0.7), ("dofB", 4.0)], true))
+        .expect("two dof instances plan");
+    assert_eq!(
+        dof_target(&plan, "fStop"),
+        ParamValue::Number(f64::from(0.7f32))
+    );
+    let named = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == "dofB")
+        .expect("dofB is executed");
+    assert!(
+        named
+            .params
+            .iter()
+            .any(|(key, value)| key == "fStop" && *value == ParamValue::Number(4.0)),
+        "{:?}",
+        named.params
+    );
 }
