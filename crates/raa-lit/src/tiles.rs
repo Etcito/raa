@@ -10,7 +10,15 @@
 //! `Rc<RefCell<TileInputs>>` and, per viewport before prepare, writes one `FrameGpu`
 //! snapshot (`light_info` = active count, tile columns, rows and `TILE_WORDS`) plus
 //! `LocalLights::write_gpu` records of the registry keyed by stable `LightHandle`.
-//! Per-viewport state is keyed by the prepass depth and reused until a resize.
+//! Per-viewport state is keyed by the depth texture the pass resolved and reused until a
+//! resize or a different bound depth.
+//!
+//! The tiling pass resolves its depth through `Targets::depth_input` at
+//! `crates/raa-pipeline/src/targets.rs:323 Targets::depth_input` with pass `light.tiles`.
+//! That method's Handoff doc comment hands the bound G-buffer depth to card 'raa-lit: light
+//! tiles read depth from the bound input' from 'raa-pipeline: G-buffer input views on
+//! Targets and group-1 slot views on LightingResources'; this card consumes that entry
+//! point and writes no Handoff line of its own.
 //! Handoff: coverage consumes `pub(crate) fn select_tile(candidates: &[(u64, f32)],
 //! out: &mut [u64; 127]) -> (usize, u32)` in `crates/raa-lit/src/tile_selection.rs`,
 //! attached by the test module in `lib.rs`; this compute workgroup uses its dense
@@ -168,7 +176,7 @@ fn array_view(texture: &wgpu::Texture, label: &'static str) -> wgpu::TextureView
 
 /// One viewport's tile texture, overflow counter and compute bind group.
 struct ViewTiles {
-    /// The prepass depth identifying this viewport's targets.
+    /// The depth texture bound to this viewport's tiling.
     depth: wgpu::Texture,
     grid: (u32, u32),
     tile: wgpu::Texture,
@@ -246,12 +254,17 @@ impl LightTiles {
         })
     }
 
-    /// The target's viewport state, allocated only when the depth texture (a new
-    /// viewport or a resize) differs from every retained one.
-    fn view_index(&mut self, gpu: &GpuContext, targets: &Targets) -> usize {
+    /// The bound depth's viewport state, allocated only when its texture (a new
+    /// viewport, a resize or a separately bound depth input) differs from every retained
+    /// one.
+    fn view_index(
+        &mut self,
+        gpu: &GpuContext,
+        targets: &Targets,
+        depth: &wgpu::TextureView,
+    ) -> usize {
         self.clock += 1;
-        let depth = targets.depth_texture();
-        if let Some(index) = self.views.iter().position(|v| v.depth == *depth) {
+        if let Some(index) = self.views.iter().position(|v| v.depth == *depth.texture()) {
             self.views[index].stamp = self.clock;
             return index;
         }
@@ -266,7 +279,7 @@ impl LightTiles {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
         let resources = [
-            (0, wgpu::BindingResource::TextureView(targets.depth())),
+            (0, wgpu::BindingResource::TextureView(depth)),
             (1, self.lights.as_entire_binding()),
             (2, wgpu::BindingResource::TextureView(&storage)),
             (3, counter.as_entire_binding()),
@@ -284,7 +297,7 @@ impl LightTiles {
             self.views.clear();
         }
         self.views.push(ViewTiles {
-            depth: depth.clone(),
+            depth: depth.texture().clone(),
             grid,
             tile,
             fragment,
@@ -298,7 +311,8 @@ impl LightTiles {
     /// Uploads this viewport's frame (always) and lights (only when changed), then
     /// publishes its tile view for forward.
     fn prepare_frame(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
-        let index = self.view_index(ctx.gpu, ctx.targets);
+        let depth = ctx.targets.depth_input(ctx.resources, LIGHT_TILES_NAME);
+        let index = self.view_index(ctx.gpu, ctx.targets, &depth);
         let mut inputs = self.inputs.borrow_mut();
         ctx.gpu.queue().write_buffer(&self.frame, 0, &inputs.frame);
         if inputs.lights_dirty {
@@ -454,23 +468,107 @@ mod tests {
         };
         let mut tiles = LightTiles::new(&gpu, Rc::new(RefCell::new(inputs()))).expect("tiles");
         let first = Targets::new(&gpu, (64, 48));
-        let a = tiles.view_index(&gpu, &first);
+        let first_depth = first.depth().clone();
+        let a = tiles.view_index(&gpu, &first, &first_depth);
         assert_eq!(tiles.views[a].grid, (4, 3));
         assert_eq!(
-            tiles.view_index(&gpu, &first),
+            tiles.view_index(&gpu, &first, &first_depth),
             a,
             "the same depth is reused"
         );
         let resized = Targets::new(&gpu, (32, 16));
-        let b = tiles.view_index(&gpu, &resized);
+        let resized_depth = resized.depth().clone();
+        let b = tiles.view_index(&gpu, &resized, &resized_depth);
         assert_ne!(b, a, "a new depth allocates new per-viewport state");
         assert_eq!(tiles.views[b].grid, (2, 1));
         for _ in 0..MAX_VIEWS {
             let fresh = Targets::new(&gpu, (8, 8));
-            tiles.view_index(&gpu, &fresh);
+            tiles.view_index(&gpu, &fresh, fresh.depth());
             assert!(tiles.views.len() <= MAX_VIEWS, "stale views are disposed");
         }
         assert_eq!(tiles.views.last().map(|v| v.grid), Some((1, 1)));
+    }
+
+    /// The bind group is keyed on the texture behind the resolved depth view: resolving
+    /// twice with the target depth reuses one `ViewTiles`, while a separately bound
+    /// Depth32Float view of the same size adds a second entry keyed on its texture. The
+    /// targets and the bound texture start cleared; the tiling pass reads no depth values
+    /// during prepare, so no mesh pass runs first.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn bound_depth_selects_view_tiles() {
+        use raa_pipeline::{PublishedImage, ResourceTable};
+
+        let test = "bound_depth_selects_view_tiles";
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(test, "software_gpu returned None");
+            return;
+        };
+        let mut tiles = LightTiles::new(&gpu, Rc::new(RefCell::new(inputs()))).expect("tiles");
+        let targets = Targets::new(&gpu, (64, 48));
+        let table = ResourceTable::new();
+        let a = tiles.view_index(
+            &gpu,
+            &targets,
+            &targets.depth_input(&table, LIGHT_TILES_NAME),
+        );
+        assert_eq!(
+            tiles.view_index(
+                &gpu,
+                &targets,
+                &targets.depth_input(&table, LIGHT_TILES_NAME)
+            ),
+            a,
+            "the unbound view resolves to the target depth"
+        );
+        assert_eq!(tiles.views.len(), 1);
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("test.bound_depth"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 48,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let bound = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        table.bind_input(
+            LIGHT_TILES_NAME,
+            "depth",
+            PublishedImage {
+                view: bound.clone(),
+                desc: ImageDesc::new(
+                    ImageDim::D2,
+                    wgpu::TextureFormat::Depth32Float,
+                    64,
+                    48,
+                    1,
+                    1,
+                ),
+            },
+        );
+        let b = tiles.view_index(
+            &gpu,
+            &targets,
+            &targets.depth_input(&table, LIGHT_TILES_NAME),
+        );
+        assert_ne!(b, a, "a separately bound depth adds per-viewport state");
+        assert!(tiles.views[b].depth == *bound.texture());
+        assert_eq!(
+            tiles.view_index(
+                &gpu,
+                &targets,
+                &targets.depth_input(&table, LIGHT_TILES_NAME)
+            ),
+            b,
+            "the bound depth is reused"
+        );
+        assert_eq!(tiles.views.len(), 2);
     }
 
     /// `prepare` publishes the tile array under (`light.tiles`, `lightTiles`) at its grid
