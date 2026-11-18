@@ -167,6 +167,8 @@ fn create_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout) -> wgp
 
 /// The `grading` render pass.
 struct GradingPass {
+    /// Pipeline name: `grading`, or `grading#<instance>` for an instance.
+    name: String,
     state: SharedGrading,
     layout: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
@@ -175,10 +177,12 @@ struct GradingPass {
     bytes: [u8; UNIFORM_LEN],
     /// One (texture, bind group reading it) per texture of the HDR chain (A and B).
     groups: Vec<(wgpu::Texture, wgpu::BindGroup)>,
+    /// The one extra group for the latest bound (src, dst) textures (rebuilt when either differs).
+    bound: Option<(wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
 }
 
 impl GradingPass {
-    fn new(gpu: &GpuContext, state: SharedGrading) -> Self {
+    fn new(gpu: &GpuContext, state: SharedGrading, name: String) -> Self {
         let device = gpu.device();
         let layout = create_layout(device);
         let pipeline = create_pipeline(device, &layout);
@@ -195,6 +199,7 @@ impl GradingPass {
             mapped_at_creation: false,
         });
         GradingPass {
+            name,
             state,
             layout,
             pipeline,
@@ -202,6 +207,7 @@ impl GradingPass {
             uniform,
             bytes: [0; UNIFORM_LEN],
             groups: Vec::new(),
+            bound: None,
         }
     }
 
@@ -229,7 +235,7 @@ impl GradingPass {
 
 impl FeaturePass for GradingPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -244,6 +250,7 @@ impl FeaturePass for GradingPass {
             (hdr.src_texture().clone(), self.group(device, hdr.src())),
             (hdr.dst_texture().clone(), self.group(device, hdr.dst())),
         ];
+        self.bound = None;
     }
 
     /// Writes the params from the handle's description and the viewport aspect (in place).
@@ -261,7 +268,20 @@ impl FeaturePass for GradingPass {
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let hdr = ctx.targets.hdr();
         let src = hdr.src_texture();
-        let Some((_, group)) = self.groups.iter().find(|(t, _)| t == src) else {
+        if hdr.is_bound() {
+            let dst = hdr.dst_texture();
+            let stale = !matches!(&self.bound, Some((s, d, _)) if s == src && d == dst);
+            if stale {
+                let group = self.group(ctx.gpu.device(), hdr.src());
+                self.bound = Some((src.clone(), dst.clone(), group));
+            }
+        }
+        let group = if hdr.is_bound() {
+            self.bound.as_ref().map(|(_, _, g)| g)
+        } else {
+            self.groups.iter().find(|(t, _)| t == src).map(|(_, g)| g)
+        };
+        let Some(group) = group else {
             return Err(RaaError::Resource(
                 "grading: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
@@ -289,7 +309,7 @@ impl FeaturePass for GradingPass {
         hdr.swap();
         let (w, h) = ctx.targets.size();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
-        ctx.resources.publish(NAME, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
     }
 }
@@ -308,18 +328,41 @@ impl GradingFeature {
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
     ) -> Result<GradingHandle, RaaError> {
+        Self::add_pass(gpu, pipeline, NAME.to_owned())
+    }
+
+    /// Handoff: card 'Wiring 4/5: multi-instance post passes' calls
+    /// `GradingFeature::install_instance`; today it adds the pass `grading#<instance>` (order
+    /// 130, enabled, default description and amount 1) with `Pipeline::add`, publishes under that
+    /// name and follows the bound chain like `grading`; the returned `GradingHandle` and its
+    /// clones drive only that pass. Refusals as `GradingFeature::install` (`pipeline.busy`,
+    /// `pipeline.duplicate_pass`). It consumes the bound-chain contract documented on
+    /// `HdrChain::bind` (raa-pipeline targets.rs:139, the card 8579 Handoff line).
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<GradingHandle, RaaError> {
+        Self::add_pass(gpu, pipeline, format!("{NAME}#{instance}"))
+    }
+
+    fn add_pass(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        name: String,
+    ) -> Result<GradingHandle, RaaError> {
         let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes().iter().any(|info| info.name == NAME) {
+        if p.passes().iter().any(|info| info.name == name) {
             return Err(refusal(
                 "pipeline.duplicate_pass",
-                "the pass `grading` is already installed",
+                &format!("the pass `{name}` is already installed"),
             ));
         }
         let state = Rc::new(RefCell::new(GradingState {
             desc: GradingDesc::default(),
             amount: 1.0,
         }));
-        p.add(Box::new(GradingPass::new(gpu, state.clone())))?;
+        p.add(Box::new(GradingPass::new(gpu, state.clone(), name)))?;
         Ok(GradingHandle { state })
     }
 }
@@ -609,7 +652,7 @@ mod tests {
                 desc: GradingDesc::default(),
                 amount: 1.0,
             }));
-            let mut pass = GradingPass::new(&gpu, state);
+            let mut pass = GradingPass::new(&gpu, state, NAME.to_owned());
             pass.resize(&gpu, &targets);
             let mut prepare = PrepareCtx {
                 gpu: &gpu,
