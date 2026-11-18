@@ -386,8 +386,25 @@ impl FeaturePass for OpaqueCopyPass {
     }
 
     /// While installed: copies hdr.src() into mip 0, downsamples each further mip from the
-    /// previous one and writes the prepass depth into `opaque_depth`. No HDR swap.
+    /// previous one and writes the prepass depth into `opaque_depth`. No HDR swap. While the
+    /// chain is bound (contract rg-hdr-chain-binding; see the Handoff on `HdrChain::bind`,
+    /// crates/raa-pipeline/src/targets.rs:132) the whole src texture is also copied into
+    /// the dst texture, and the source needs no resize check.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let bound = ctx.targets.hdr().is_bound();
+        if bound {
+            let hdr = ctx.targets.hdr();
+            let size = hdr.src_texture().size();
+            ctx.encoder.copy_texture_to_texture(
+                hdr.src_texture().as_image_copy(),
+                hdr.dst_texture().as_image_copy(),
+                wgpu::Extent3d {
+                    width: size.width,
+                    height: size.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         if !self.installed {
             self.publish_color(ctx);
             return Ok(());
@@ -398,7 +415,7 @@ impl FeaturePass for OpaqueCopyPass {
             ));
         };
         let src = ctx.targets.hdr().src_texture();
-        if !c.hdr.contains(src) {
+        if !bound && !c.hdr.contains(src) {
             return Err(RaaError::Resource(
                 "opaque.copy: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
