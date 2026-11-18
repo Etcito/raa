@@ -402,6 +402,8 @@ pub(crate) struct DofHdrGroups {
 /// holds the bound source as `groups.texture`.
 pub(crate) struct DofBoundGroups {
     pub dst: wgpu::Texture,
+    /// The depth view the groups were built with (part of the cache key).
+    pub depth: wgpu::TextureView,
     pub groups: DofHdrGroups,
 }
 
@@ -486,6 +488,10 @@ pub(crate) struct DofTargets {
     pub far_prefilter_view: wgpu::TextureView,
     pub near_gather_view: wgpu::TextureView,
     pub far_gather_view: wgpu::TextureView,
+    /// The depth view the depth-reading groups were built with: `Targets::depth_input` of the
+    /// pass when it was built (`Targets::depth` when unbound). `DofPass::prepare` rebuilds the
+    /// targets when the bound input differs.
+    pub depth: wgpu::TextureView,
     pub autofocus_group: wgpu::BindGroup,
     pub coc_group: wgpu::BindGroup,
     pub tiles_group: wgpu::BindGroup,
@@ -500,7 +506,12 @@ pub(crate) struct DofTargets {
 }
 
 impl DofTargets {
-    pub(crate) fn new(gpu: &GpuContext, p: &DofPipelines, targets: &Targets) -> DofTargets {
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        p: &DofPipelines,
+        targets: &Targets,
+        depth: &wgpu::TextureView,
+    ) -> DofTargets {
         let device = gpu.device();
         let sizes = dof_sizes(targets.size());
         let storage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
@@ -521,7 +532,6 @@ impl DofTargets {
             binding: 2,
             resource: p.focus.as_entire_binding(),
         };
-        let depth = targets.depth();
         let autofocus_group = group(
             device,
             "raa-dof.autofocus",
@@ -576,6 +586,7 @@ impl DofTargets {
 
         DofTargets {
             sizes,
+            depth: depth.clone(),
             _coc: coc,
             _tiles: tiles,
             _dilated: dilated,
@@ -610,8 +621,9 @@ impl DofTargets {
         self.hdr.iter().find(|g| g.texture == *src)
     }
 
-    /// Makes `bound` the groups of the bound pair (`src`, `dst`). They are rebuilt only when
-    /// either texture differs from the cached pair, so a steady binding allocates nothing.
+    /// Makes `bound` the groups of the bound pair (`src`, `dst`) with `depth` at binding 4 of
+    /// the composite. They are rebuilt only when the source, the destination or the depth view
+    /// differs from the cached ones, so a steady binding allocates nothing.
     pub(crate) fn bind_chain(
         &mut self,
         device: &wgpu::Device,
@@ -621,10 +633,9 @@ impl DofTargets {
         dst: &wgpu::Texture,
     ) {
         let (src_texture, src_view) = src;
-        let cached = self
-            .bound
-            .as_ref()
-            .is_some_and(|b| b.groups.texture == *src_texture && b.dst == *dst);
+        let cached = self.bound.as_ref().is_some_and(|b| {
+            b.groups.texture == *src_texture && b.dst == *dst && b.depth == *depth
+        });
         if cached {
             return;
         }
@@ -637,6 +648,7 @@ impl DofTargets {
         let groups = chain_groups(device, p, &views, src_texture, src_view);
         self.bound = Some(DofBoundGroups {
             dst: dst.clone(),
+            depth: depth.clone(),
             groups,
         });
     }
@@ -658,5 +670,54 @@ mod tests {
         assert_eq!((s.full, s.tiles, s.half), ((1, 1), (1, 1), (1, 1)));
         assert_eq!(dof_sizes((17, 3)).tiles, (2, 1));
         assert_eq!(dof_sizes((17, 3)).half, (9, 2));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod gpu {
+        use raa_core::testing::{skip, software_gpu};
+        use raa_core::wgpu;
+        use raa_pipeline::Targets;
+
+        use super::super::*;
+        use crate::tunables::{TUNABLES, constants};
+
+        /// Unbound, the groups read `Targets::depth`; a separate Depth32Float view bound as the
+        /// depth input replaces it, and the bound chain pair is keyed on that view.
+        #[test]
+        fn bound_depth_view_is_the_composite_depth_and_part_of_the_chain_key() {
+            let Some(gpu) = software_gpu() else {
+                skip(
+                    "bound_depth_view_is_the_composite_depth_and_part_of_the_chain_key",
+                    "software_gpu returned None; see the software_gpu line above",
+                );
+                return;
+            };
+            let targets = Targets::new(&gpu, (32, 32));
+            let values = TUNABLES.map(|t| t.default);
+            let p = DofPipelines::new(&gpu, &constants(&values));
+            let today = targets.depth().clone();
+            let mut t = DofTargets::new(&gpu, &p, &targets, &today);
+            assert!(t.depth == today, "unbound groups must read targets.depth()");
+            let usage =
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+            let (_bound, bound) = texture(
+                gpu.device(),
+                "test.bound_depth",
+                (32, 32),
+                wgpu::TextureFormat::Depth32Float,
+                usage,
+            );
+            let hdr = targets.hdr();
+            let (src, dst) = (hdr.src_texture(), hdr.dst_texture());
+            t.bind_chain(gpu.device(), &p, &today, (src, hdr.src()), dst);
+            assert!(t.bound.as_ref().is_some_and(|b| b.depth == today));
+            t.bind_chain(gpu.device(), &p, &bound, (src, hdr.src()), dst);
+            assert!(
+                t.bound
+                    .as_ref()
+                    .is_some_and(|b| b.depth == bound && b.depth != today),
+                "a changed depth view must rebuild the bound chain pair"
+            );
+        }
     }
 }

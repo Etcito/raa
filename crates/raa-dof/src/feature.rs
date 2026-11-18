@@ -233,7 +233,12 @@ impl FeaturePass for DofPass {
 
     /// Rebuilds the surface-sized targets and bind groups; the next autofocus frame snaps.
     fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
-        self.targets = Some(DofTargets::new(gpu, &self.pipelines, targets));
+        self.targets = Some(DofTargets::new(
+            gpu,
+            &self.pipelines,
+            targets,
+            targets.depth(),
+        ));
         self.snap = true;
     }
 
@@ -246,6 +251,19 @@ impl FeaturePass for DofPass {
         if generation != self.built_generation {
             self.pipelines.rebuild_gather(ctx.gpu, &constants(&values));
             self.built_generation = generation;
+        }
+        // The depth input of this pass (Targets::depth when unbound). A changed view rebuilds
+        // the targets, whose depth-reading groups are fixed at creation; the snap restarts
+        // autofocus as a resize does.
+        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
+        if self.targets.as_ref().is_some_and(|t| t.depth != depth) {
+            self.targets = Some(DofTargets::new(
+                ctx.gpu,
+                &self.pipelines,
+                ctx.targets,
+                &depth,
+            ));
+            self.snap = true;
         }
         let Some(targets) = self.targets.as_ref() else {
             return Ok(());
@@ -325,10 +343,11 @@ impl FeaturePass for DofPass {
         let bound = hdr.is_bound();
         if bound {
             let src = (hdr.src_texture(), hdr.src());
+            let depth = ctx.targets.depth_input(ctx.resources, &self.name);
             t.bind_chain(
                 ctx.gpu.device(),
                 &self.pipelines,
-                ctx.targets.depth(),
+                &depth,
                 src,
                 hdr.dst_texture(),
             );
@@ -655,7 +674,9 @@ mod tests {
         use raa_core::testing::{skip, software_gpu};
         use raa_core::{FrameGraph, GpuContext, OffscreenTarget, wgpu};
         use raa_math::Mat4;
-        use raa_pipeline::{FeaturePass, Pipeline, RecordCtx};
+        use raa_pipeline::{
+            FeaturePass, ImageDesc, ImageDim, Pipeline, PrepareCtx, PublishedImage, RecordCtx,
+        };
 
         use super::super::*;
 
@@ -677,6 +698,9 @@ mod tests {
             }
             fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
                 let hdr = ctx.targets.hdr();
+                let depth = ctx
+                    .targets
+                    .depth_attachment_input(ctx.resources, self.name());
                 let c = wgpu::Color {
                     r: COLOUR[0],
                     g: COLOUR[1],
@@ -695,7 +719,7 @@ mod tests {
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: ctx.targets.depth(),
+                        view: &depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Store,
@@ -710,6 +734,75 @@ mod tests {
                 hdr.swap();
                 Ok(())
             }
+        }
+
+        /// Binds `depth` (cleared to 1.0, far) as the `depth` input of `dof` in prepare, so dof
+        /// reads it instead of `Targets::depth`. Order 20 runs before dof (110).
+        struct BindDepth(wgpu::TextureView);
+
+        impl FeaturePass for BindDepth {
+            fn name(&self) -> &str {
+                "test.bind"
+            }
+            fn order(&self) -> u32 {
+                20
+            }
+            fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+                let desc = ImageDesc::new(
+                    ImageDim::D2,
+                    wgpu::TextureFormat::Depth32Float,
+                    SIZE,
+                    SIZE,
+                    1,
+                    1,
+                );
+                let image = PublishedImage {
+                    view: self.0.clone(),
+                    desc,
+                };
+                ctx.resources.bind_input("dof", "depth", image);
+                Ok(())
+            }
+            fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+                let clear = wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                };
+                let pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("test.bind"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.0,
+                        depth_ops: Some(clear),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                drop(pass);
+                Ok(())
+            }
+        }
+
+        fn bound_depth(gpu: &GpuContext) -> wgpu::TextureView {
+            gpu.device()
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("test.bound_depth"),
+                    size: wgpu::Extent3d {
+                        width: SIZE,
+                        height: SIZE,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                })
+                .create_view(&wgpu::TextureViewDescriptor::default())
         }
 
         /// Copies hdr.src() into a readback buffer after dof.
@@ -754,7 +847,13 @@ mod tests {
         }
 
         /// Largest |rgb - COLOUR| over every pixel of the HDR chain after `frames` frames.
-        fn run(gpu: &GpuContext, desc: Option<DofDesc>, camera: bool, frames: u32) -> f32 {
+        fn run(
+            gpu: &GpuContext,
+            desc: Option<DofDesc>,
+            camera: bool,
+            frames: u32,
+            bind: bool,
+        ) -> f32 {
             let target = OffscreenTarget::new(gpu, SIZE, SIZE, FORMAT);
             let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, FORMAT, false)));
             let buffer = Rc::new(gpu.device().create_buffer(&wgpu::BufferDescriptor {
@@ -767,6 +866,9 @@ mod tests {
                 let mut p = pipeline.borrow_mut();
                 p.add(Box::new(Setup)).unwrap();
                 p.add(Box::new(Probe(buffer.clone()))).unwrap();
+                if bind {
+                    p.add(Box::new(BindDepth(bound_depth(gpu)))).unwrap();
+                }
             }
             let handle = DofFeature::install(gpu, &pipeline).unwrap();
             if let Some(d) = desc {
@@ -814,20 +916,27 @@ mod tests {
                 return;
             };
             // depth 1 = the far plane (100 m), well behind the 10 m focus: maximum far CoC
-            let e = run(&gpu, None, true, 1);
+            let e = run(&gpu, None, true, 1, false);
             assert!(e < 1e-2, "dof shifted a constant colour by {e}");
+            // a separate Depth32Float view bound as (dof, depth), cleared to far: rebuilt in
+            // prepare, read by the composite, the colour unchanged
+            let e = run(&gpu, None, true, 2, true);
+            assert!(
+                e < 1e-2,
+                "dof with a bound depth shifted a constant colour by {e}"
+            );
             let autofocus = DofDesc {
                 autofocus: Some([0.5, 0.5]),
                 focus_distance_m: 2.0,
                 ..DofDesc::default()
             };
-            let e = run(&gpu, Some(autofocus), true, 2);
+            let e = run(&gpu, Some(autofocus), true, 2, false);
             assert!(
                 e < 1e-2,
                 "dof with autofocus shifted a constant colour by {e}"
             );
             // no camera yet: a copy through the composite with CoC 0
-            let e = run(&gpu, None, false, 1);
+            let e = run(&gpu, None, false, 1, false);
             assert!(
                 e < 1e-3,
                 "dof without a camera shifted a constant colour by {e}"
