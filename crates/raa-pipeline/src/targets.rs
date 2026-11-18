@@ -1,7 +1,7 @@
 //! Surface-sized pipeline targets (S12): depth, normal, material, motion (Rgba16Float: UV
 //! displacement and history reject) and the HDR A/B chain.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 use raa_core::GpuContext;
 
@@ -71,6 +71,20 @@ pub struct HdrChain {
     textures: [Target; 2],
     /// Index (0 = A, 1 = B) of the current destination texture.
     dst: Cell<u8>,
+    /// Registry of views bound since the last `Targets::ensure`.
+    bound_views: [OnceCell<wgpu::TextureView>; BOUND_SLOTS],
+    /// Registry slots of the bound (src, dst) views.
+    bound: Cell<Option<(u8, u8)>>,
+}
+
+/// Number of views one chain can hold bound per frame.
+const BOUND_SLOTS: usize = 32;
+
+/// Slot of a value equal to `wanted`, else the first empty slot, else None.
+fn slot_for<T: PartialEq>(held: &[Option<&T>], wanted: &T) -> Option<usize> {
+    held.iter()
+        .position(|h| *h == Some(wanted))
+        .or_else(|| held.iter().position(Option::is_none))
 }
 
 impl HdrChain {
@@ -81,7 +95,68 @@ impl HdrChain {
                 Target::new(gpu, "raa-pipeline.hdr.b", size, HDR_FORMAT, HDR_USAGE),
             ],
             dst: Cell::new(RESET_DST),
+            bound_views: std::array::from_fn(|_| OnceCell::new()),
+            bound: Cell::new(None),
         }
+    }
+
+    /// Empties the view registry and unbinds.
+    fn clear_bound(&mut self) {
+        for slot in &mut self.bound_views {
+            slot.take();
+        }
+        self.bound.set(None);
+    }
+
+    fn slot_of(&self, view: &wgpu::TextureView) -> Option<u8> {
+        let held: [Option<&wgpu::TextureView>; BOUND_SLOTS] =
+            std::array::from_fn(|i| self.bound_views[i].get());
+        let slot = slot_for(&held, view)?;
+        // A fresh slot is empty, so the set cannot fail.
+        let _ = self.bound_views[slot].set(view.clone());
+        u8::try_from(slot).ok()
+    }
+
+    fn bound_view(&self, pick: impl Fn((u8, u8)) -> u8) -> Option<&wgpu::TextureView> {
+        let slot = pick(self.bound.get()?);
+        self.bound_views.get(usize::from(slot))?.get()
+    }
+
+    /// Binds `src` and `dst` as the chain pair: `src()`, `dst()` and the texture
+    /// methods return them and `swap` does nothing until `unbind` or `reset`. When
+    /// the 32-slot registry has no room the chain stays unbound.
+    ///
+    /// Handoff: the downstream card 'Wiring 3/5: colour-chain graph frame, resource pool
+    /// and order from links' calls `HdrChain::bind`, `HdrChain::unbind` and
+    /// `HdrChain::is_bound` from its `wiring` graph frame (before_record binds,
+    /// after_record unbinds); the fog, oit, transmission, particles, gi, ssr, dof, shafts,
+    /// bloom, grading, cel and taa chain-binding cards ('Chain binding in raa-fog: fog pass
+    /// bind groups for a bound HDR chain', 'Chain binding in raa-oit: transparent.oit
+    /// resolve for a bound HDR chain', 'Chain binding in raa-transmission: opaque.copy
+    /// pass-through for a bound HDR chain', 'Chain binding in raa-particles:
+    /// particles.blend for a bound HDR chain', 'Chain binding in raa-gi: gi.history
+    /// pass-through and debug view for a bound HDR chain', 'raa-ssr: bound HDR chain and
+    /// SsrFeature::install_instance', 'raa-dof: bound HDR chain and
+    /// DofFeature::install_instance', 'raa-shafts: bound HDR chain and
+    /// ShaftsFeature::install_instance', 'raa-bloom: bound HDR chain and
+    /// BloomFeature::install_instance', 'raa-grading: bound HDR chain and
+    /// GradingFeature::install_instance', 'raa-cel: bound HDR chain and
+    /// CelFeature::install_instance', 'raa-taa: bound HDR chain and
+    /// TaaFeature::install_instance') call `HdrChain::is_bound`. Today bind stores the
+    /// views in `HdrChain.bound_views` and the slot pair in `HdrChain.bound`.
+    pub fn bind(&self, src: &wgpu::TextureView, dst: &wgpu::TextureView) {
+        let pair = self.slot_of(src).zip(self.slot_of(dst));
+        self.bound.set(pair);
+    }
+
+    /// Returns to the A/B pair with the destination it had before `bind`.
+    pub fn unbind(&self) {
+        self.bound.set(None);
+    }
+
+    /// True between `bind` and `unbind` (or `reset`).
+    pub fn is_bound(&self) -> bool {
+        self.bound.get().is_some()
     }
 
     fn src_target(&self) -> &Target {
@@ -96,32 +171,39 @@ impl HdrChain {
 
     /// View of the texture the next pass reads.
     pub fn src(&self) -> &wgpu::TextureView {
-        &self.src_target().view
+        self.bound_view(|p| p.0)
+            .unwrap_or_else(|| &self.src_target().view)
     }
 
     /// View of the texture the next pass writes.
     pub fn dst(&self) -> &wgpu::TextureView {
-        &self.dst_target().view
+        self.bound_view(|p| p.1)
+            .unwrap_or_else(|| &self.dst_target().view)
     }
 
     /// Texture the next pass reads.
     pub fn src_texture(&self) -> &wgpu::Texture {
-        &self.src_target().texture
+        self.bound_view(|p| p.0)
+            .map_or_else(|| &self.src_target().texture, |v| v.texture())
     }
 
     /// Texture the next pass writes.
     pub fn dst_texture(&self) -> &wgpu::Texture {
-        &self.dst_target().texture
+        self.bound_view(|p| p.1)
+            .map_or_else(|| &self.dst_target().texture, |v| v.texture())
     }
 
     /// Exchanges source and destination (after a pass wrote `dst()`).
     pub fn swap(&self) {
-        self.dst.set(swapped(self.dst.get()));
+        if !self.is_bound() {
+            self.dst.set(swapped(self.dst.get()));
+        }
     }
 
     /// Makes A the destination (frame start: forward writes A, then after a swap src = A).
     pub fn reset(&self) {
         self.dst.set(RESET_DST);
+        self.unbind();
     }
 }
 
@@ -174,6 +256,7 @@ impl Targets {
     /// size; returns true when it did.
     pub fn ensure(&mut self, gpu: &GpuContext, size: (u32, u32)) -> bool {
         let size = (size.0.max(1), size.1.max(1));
+        self.hdr.clear_bound();
         if size == self.size {
             return false;
         }
@@ -303,5 +386,56 @@ mod tests {
         assert_eq!(cell.get(), 1);
         cell.set(RESET_DST);
         assert_eq!(src_of(cell.get()), 1);
+    }
+
+    #[test]
+    fn slot_for_reuses_then_fills_then_fails() {
+        assert_eq!(slot_for(&[Some(&1), Some(&2), None], &2), Some(1));
+        assert_eq!(slot_for(&[Some(&1), None, None], &5), Some(1));
+        assert_eq!(slot_for(&[Some(&1), Some(&2)], &5), None);
+    }
+
+    fn extra(gpu: &GpuContext) -> wgpu::TextureView {
+        Target::new(gpu, "t", (8, 8), HDR_FORMAT, HDR_USAGE).view
+    }
+
+    #[test]
+    fn bind_unbind_reset_and_registry_limit() {
+        use raa_core::testing::{skip, software_gpu};
+        let name = "bind_unbind_reset_and_registry_limit";
+        let Some(gpu) = software_gpu() else {
+            skip(name, "software_gpu returned None");
+            return;
+        };
+        let mut targets = Targets::new(&gpu, (8, 8));
+        let (a, b) = (extra(&gpu), extra(&gpu));
+        let hdr = targets.hdr();
+        hdr.swap();
+        let (old_src, old_dst) = (hdr.src().clone(), hdr.dst().clone());
+        hdr.bind(&a, &b);
+        assert!(hdr.is_bound());
+        assert!(hdr.src() == &a && hdr.dst() == &b);
+        assert!(hdr.src_texture() == a.texture() && hdr.dst_texture() == b.texture());
+        hdr.swap();
+        assert!(hdr.src() == &a && hdr.dst() == &b);
+        hdr.unbind();
+        assert!(!hdr.is_bound());
+        assert!(hdr.src() == &old_src && hdr.dst() == &old_dst);
+        hdr.bind(&a, &b);
+        hdr.reset();
+        assert!(!hdr.is_bound());
+        assert!(!targets.ensure(&gpu, (8, 8)));
+        let hdr = targets.hdr();
+        let views: Vec<_> = (0..33).map(|_| extra(&gpu)).collect();
+        for v in &views[..32] {
+            hdr.bind(v, v);
+            assert!(hdr.is_bound());
+        }
+        hdr.bind(&views[32], &views[32]);
+        assert!(!hdr.is_bound());
+        assert!(!targets.ensure(&gpu, (8, 8)));
+        let hdr = targets.hdr();
+        hdr.bind(&views[32], &views[32]);
+        assert!(hdr.is_bound() && hdr.src() == &views[32]);
     }
 }
