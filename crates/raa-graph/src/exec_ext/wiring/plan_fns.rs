@@ -3,6 +3,8 @@
 //! compiles twice: in `exec_ext/wiring.rs`, and in the integration tests that include it with
 //! `#[path]`, because build.rs declares executor-extension modules privately.
 
+#[allow(unused_imports)]
+use super::*;
 use super::{GraphPlan, PlanHistory, PlanNode, PlanPortRef, PlanResource};
 
 /// Handoff: `pool_resources` is called by card 'Wiring 3/5: colour-chain graph frame, resource pool
@@ -103,4 +105,133 @@ fn producer_changed(previous: &GraphPlan, next: &GraphPlan, node: &str) -> bool 
 /// The node of `plan` with the id `id`.
 fn find_node<'a>(plan: &'a GraphPlan, id: &str) -> Option<&'a PlanNode> {
     plan.nodes.iter().find(|node| node.id == id)
+}
+
+/// Whether the node writes a pooled chain image.
+/// no handoff: Wiring 1/5: node family wiring (generic colour chain, TAA history input, multi-instance post) and its tests takes nothing from this card.
+pub fn chain_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "pass.forward"
+            | "pass.gi.history"
+            | "pass.ssr"
+            | "pass.fog"
+            | "pass.sunshafts"
+            | "pass.opaque.copy"
+            | "pass.transparent.oit"
+            | "pass.particles.blend"
+            | "pass.taa"
+            | "pass.dof"
+            | "pass.bloom"
+            | "pass.grading"
+            | "pass.cel.resolve"
+    )
+}
+
+/// Colour outputs that belong to the HDR chain.
+pub fn chain_resources(plan: &GraphPlan, _catalog: &raa_graph::Catalog) -> Vec<PlanResource> {
+    plan.resources
+        .iter()
+        .filter(|resource| {
+            resource.producer.port == "color"
+                && plan
+                    .nodes
+                    .iter()
+                    .any(|node| node.id == resource.producer.node && chain_type(&node.type_id))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Pipeline entries driven by executed nodes.
+pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(String, String)> {
+    let mut seen = Vec::new();
+    plan.nodes
+        .iter()
+        .filter_map(|node| {
+            let spec = catalog.node(&node.type_id)?;
+            let entry = if node.type_id.starts_with("view.") {
+                format!("view#{}", node.id)
+            } else {
+                if spec.contributor {
+                    return None;
+                }
+                let pass = spec.pass?;
+                let duplicate = spec.multi_instance && seen.contains(&node.type_id);
+                seen.push(node.type_id.clone());
+                if duplicate {
+                    format!("{pass}#{}", node.id)
+                } else {
+                    pass.to_owned()
+                }
+            };
+            Some((node.id.clone(), entry))
+        })
+        .collect()
+}
+
+/// Pass order from executed nodes, preserving positions of unplanned installed passes.
+pub fn link_order(
+    plan: &GraphPlan,
+    entries: &[(String, String)],
+    installed: &[raa_pipeline::PassInfo],
+) -> Vec<String> {
+    let tonemap = installed
+        .iter()
+        .position(|p| p.name == "tonemap")
+        .unwrap_or(installed.len());
+    let mut result = Vec::new();
+    for node in &plan.nodes {
+        if let Some((_, entry)) = entries.iter().find(|(id, _)| *id == node.id)
+            && let Some((index, _)) = installed
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.name == *entry && p.role == raa_pipeline::PassRole::Pass)
+            && !(result.contains(entry) || entry.starts_with("view#") && index > tonemap)
+        {
+            result.push(entry.clone());
+        }
+    }
+    for (index, pass) in installed
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.role == raa_pipeline::PassRole::Pass)
+    {
+        if result.contains(&pass.name) {
+            continue;
+        }
+        let at = installed[..index]
+            .iter()
+            .rev()
+            .filter(|p| p.role == raa_pipeline::PassRole::Pass)
+            .find_map(|p| result.iter().position(|name| *name == p.name))
+            .map_or(0, |i| i + 1);
+        result.insert(at, pass.name.clone());
+    }
+    result
+}
+
+/// Maximum number of distinct views bound during one frame.
+pub fn bound_view_count(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> usize {
+    let resources = chain_resources(plan, catalog);
+    let slots = pool_resources(&resources);
+    let count = slots.iter().max().map_or(0, |slot| *slot as usize + 1);
+    let extra = plan
+        .nodes
+        .iter()
+        .find(|n| n.type_id == "pass.tonemap")
+        .and_then(|n| n.inputs.iter().find(|i| i.port == "color"))
+        .is_some_and(|input| {
+            let source = match &input.source {
+                raa_graph::plan::InputSource::Link { node, port, .. }
+                | raa_graph::plan::InputSource::Default { node, port } => Some((node, port)),
+                _ => None,
+            };
+            !resources.iter().any(|r| {
+                source.is_some_and(|(node, port)| {
+                    *node == r.producer.node && *port == r.producer.port
+                })
+            })
+        });
+    count + usize::from(extra)
 }

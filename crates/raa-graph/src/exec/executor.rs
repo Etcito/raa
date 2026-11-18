@@ -282,6 +282,9 @@ impl GraphExecutor {
             let observed = h.pipeline.borrow().passes();
             adopt_pipeline(no_graph, applied, &observed);
             reapply_pipeline(&self.catalog, plan, h)?;
+            for extension in &mut self.extensions {
+                extension.reorder(plan, h)?;
+            }
         }
         for feature in &self.scratch {
             let applied_values = values_for(applied, feature);
@@ -483,7 +486,7 @@ fn apply_pipeline(
     h: &FeatureHandles<'_>,
     progress: &mut Progress,
 ) -> Result<(), Vec<Issue>> {
-    let installed = unowned(h.pipeline.borrow().passes());
+    let installed = h.pipeline.borrow().passes();
     let instructions = pipeline_instructions(plan, catalog, &installed);
     progress.pipeline = true;
     let mut pipeline = h.pipeline.borrow_mut();
@@ -590,14 +593,6 @@ fn owned(name: &str) -> bool {
     name.contains('#')
 }
 
-/// The installed entries without the owned ones.
-fn unowned(installed: Vec<PassInfo>) -> Vec<PassInfo> {
-    installed
-        .into_iter()
-        .filter(|info| !owned(&info.name))
-        .collect()
-}
-
 /// The pass order to set: `order`, with each owned pass-role entry of `live` (name, pass role, in
 /// live order) inserted right after the nearest pass-role entry before it, or at the front when none
 /// precedes it. Other entries are never merged, and without an owned entry the result is `order`.
@@ -628,12 +623,34 @@ fn pipeline_moved(applied: &SettingsSnapshot, h: &FeatureHandles<'_>) -> bool {
     {
         return true;
     }
-    let installed = pipeline.passes();
-    !installed
+    pipeline_differs(applied, &pipeline.passes())
+}
+
+/// Compares the graph's base entries with the observed pipeline, ignoring extension entries.
+pub fn pipeline_differs(applied: &SettingsSnapshot, observed: &[PassInfo]) -> bool {
+    applied
+        .passes
         .iter()
-        .filter(|info| info.role == PassRole::Pass && !owned(&info.name))
-        .map(|info| info.name.as_str())
-        .eq(applied.order.iter().map(String::as_str))
+        .filter(|(name, _)| !owned(name))
+        .any(|(name, enabled)| {
+            observed
+                .iter()
+                .find(|info| info.name == *name)
+                .is_none_or(|info| info.enabled != *enabled)
+        })
+        || observed
+            .iter()
+            .filter(|info| !owned(&info.name))
+            .any(|info| !applied.passes.iter().any(|(name, _)| *name == info.name))
+        || !observed
+            .iter()
+            .filter(|info| info.role == PassRole::Pass && !owned(&info.name))
+            .map(|info| info.name.as_str())
+            .eq(applied
+                .order
+                .iter()
+                .filter(|name| !owned(name))
+                .map(String::as_str))
 }
 
 /// Applies the pipeline instructions of `plan` again: each entry's enabled flag, then the order.
@@ -642,7 +659,7 @@ fn reapply_pipeline(
     plan: &GraphPlan,
     h: &FeatureHandles<'_>,
 ) -> Result<(), RaaError> {
-    let installed = unowned(h.pipeline.borrow().passes());
+    let installed = h.pipeline.borrow().passes();
     let instructions = pipeline_instructions(plan, catalog, &installed);
     let mut pipeline = h.pipeline.borrow_mut();
     for (name, enabled) in &instructions.enable {
@@ -654,11 +671,13 @@ fn reapply_pipeline(
 /// Records the observed pipeline in the no-graph snapshot: each entry whose enabled flag differs from
 /// the applied one takes the observed flag, and an order that differs from the applied one is taken
 /// whole.
-fn adopt_pipeline(
+pub fn adopt_pipeline(
     no_graph: &mut SettingsSnapshot,
     applied: &SettingsSnapshot,
     observed: &[PassInfo],
 ) {
+    no_graph.passes.retain(|(name, _)| !owned(name));
+    no_graph.order.retain(|name| !owned(name));
     for info in observed.iter().filter(|info| !owned(&info.name)) {
         let applied_on = applied
             .passes
