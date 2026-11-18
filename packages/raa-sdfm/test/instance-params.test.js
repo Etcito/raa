@@ -9,7 +9,7 @@ const near = (actual, expected, eps = 1e-3) => {
 };
 
 test('INSTANCE_PARAM_SLOTS is the S-layout of the 16 floats', () => {
-  assert.deepEqual(INSTANCE_PARAM_SLOTS, { tint: 0, wind: 4, scale: 5, free: 6 });
+  assert.deepEqual(INSTANCE_PARAM_SLOTS, { tint: 0, wind: 4, scale: 5, seed: 6, width: 7, height: 8, free: 9 });
   assert.ok(Object.isFrozen(INSTANCE_PARAM_SLOTS));
 });
 
@@ -38,13 +38,21 @@ test('wind and scale go to slots 4 and 5', () => {
   assert.deepEqual(Array.from(p.subarray(0, 4)), [0, 0, 0, 0]);
 });
 
-test('free attributes fill 6..15 in byte order and drop the last two', () => {
+test('seed, width and height of an Array on splines cell go to slots 6, 7 and 8', () => {
+  const p = instanceParams({ seed: 12345, width: 3.33, height: 3.63, row: 2 });
+  assert.equal(p[INSTANCE_PARAM_SLOTS.seed], 12345);
+  assert.equal(p[INSTANCE_PARAM_SLOTS.width], Math.fround(3.33));
+  assert.equal(p[INSTANCE_PARAM_SLOTS.height], Math.fround(3.63));
+  assert.equal(p[INSTANCE_PARAM_SLOTS.free], 2, 'row is the first free attribute');
+});
+
+test('free attributes fill 9..15 in byte order and drop the rest', () => {
   const attrs = {};
   for (let i = 0; i < 12; i++) attrs[`k${String(11 - i).padStart(2, '0')}`] = i + 1;
   const p = instanceParams(attrs);
   const keys = Object.keys(attrs).sort();
   assert.equal(keys.length, 12);
-  for (let i = 0; i < 10; i++) assert.equal(p[6 + i], attrs[keys[i]], `slot ${6 + i} = ${keys[i]}`);
+  for (let i = 0; i < 7; i++) assert.equal(p[9 + i], attrs[keys[i]], `slot ${9 + i} = ${keys[i]}`);
   assert.equal(p[4], 0);
   assert.equal(p[5], 0);
 });

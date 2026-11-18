@@ -22,10 +22,19 @@ export function lodDocument(document, level) {
  * Measure each level against the full mesh in Rust, then register the chain in one call.
  * `full` and `levels` are uploaded handles; the descriptions supply the geometry for
  * meshLodError. Engines without the LOD API return []; engine refusals propagate.
+ * A level that simplifies nothing (a box: same geometry, error 0 or not above the previous level)
+ * is left out, since the engine refuses a chain whose errors do not strictly increase; with no
+ * level left the mesh gets no chain and [] is returned (the caller then frees the level meshes).
  */
 export function attachLods(engine, full, fullDesc, levels, levelDescs) {
   if (typeof engine.setMeshLods !== 'function' || typeof engine.meshLodError !== 'function' || levels.length === 0) return [];
   const errors = levelDescs.map((desc) => engine.meshLodError(fullDesc, desc));
-  engine.setMeshLods(full, levels.map((mesh, i) => ({ mesh, error: errors[i] })));
+  const chain = [];
+  let last = 0;
+  for (let i = 0; i < levels.length; i++) {
+    if (Number.isFinite(errors[i]) && errors[i] > last) { chain.push({ mesh: levels[i], error: errors[i] }); last = errors[i]; }
+  }
+  if (chain.length === 0) return [];
+  engine.setMeshLods(full, chain);
   return errors;
 }

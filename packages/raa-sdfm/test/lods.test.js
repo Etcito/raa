@@ -228,3 +228,18 @@ test('lods outside integer 0..3 throws TypeError naming options.lods', () => {
       (error) => error instanceof TypeError && error.message.includes('options.lods'));
   }
 });
+
+test('attachLods leaves out levels that simplify nothing (a box) and skips an empty chain', () => {
+  const calls = [];
+  const engine = { setMeshLods: (mesh, levels) => calls.push({ mesh, levels }) };
+  const errorsOf = (list) => { let i = 0; engine.meshLodError = () => list[i++]; };
+  errorsOf([0, 0]);
+  assert.deepEqual(attachLods(engine, 1, {}, [2, 3], [{}, {}]), []);
+  assert.equal(calls.length, 0);
+  errorsOf([0.2, 0.2]);
+  attachLods(engine, 1, {}, [2, 3], [{}, {}]);
+  assert.deepEqual(calls.pop(), { mesh: 1, levels: [{ mesh: 2, error: 0.2 }] });
+  errorsOf([0, 0.5]);
+  attachLods(engine, 1, {}, [2, 3], [{}, {}]);
+  assert.deepEqual(calls.pop(), { mesh: 1, levels: [{ mesh: 3, error: 0.5 }] });
+});

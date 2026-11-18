@@ -1,7 +1,9 @@
 // Procgen attributes -> the 16 floats of engine.setInstanceParams (InstanceExtra.params). The field shading multiplies the
 // base colour by floats 0..2 when float 3 is set, so per-instance variation never multiplies materials or pipelines.
+// Named slots a shader can rely on: the cell `seed`, `width` and `height` of an Array on splines copy (MAMA array_2s)
+// give the interior rooms behind its windows their variation and size (field-shading.js INTERIOR_WGSL).
 
-export const INSTANCE_PARAM_SLOTS = Object.freeze({ tint: 0, wind: 4, scale: 5, free: 6 });
+export const INSTANCE_PARAM_SLOTS = Object.freeze({ tint: 0, wind: 4, scale: 5, seed: 6, width: 7, height: 8, free: 9 });
 
 const PARAM_COUNT = 16;
 const FREE_COUNT = PARAM_COUNT - INSTANCE_PARAM_SLOTS.free;
@@ -10,7 +12,8 @@ const TINT_KEYS = ['tint.r', 'tint.g', 'tint.b'];
 const srgbToLinear = (c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 
 const isTint = (key) => key.startsWith('tint.');
-const isNamed = (key) => isTint(key) || key === 'wind' || key === 'scale';
+const NAMED = ['wind', 'scale', 'seed', 'width', 'height'];
+const isNamed = (key) => isTint(key) || NAMED.includes(key);
 
 const encoder = new TextEncoder();
 function compareBytes(a, b) {
@@ -23,8 +26,9 @@ function compareBytes(a, b) {
 
 /**
  * The 16 floats of one instance's parameters, or null when `attrs` is absent or has no keys. A missing tint channel is
- * 1 (sRGB converted to linear); `tint.*` present sets float 3 to 1. The other attributes fill the free slots in
- * ascending key byte order and the rest are dropped.
+ * 1 (sRGB converted to linear); `tint.*` present sets float 3 to 1. `wind`, `scale`, `seed`, `width` and `height` go
+ * to their named slots (0 when absent). The other attributes fill the free slots in ascending key byte order and the rest
+ * are dropped.
  *
  * @param {Record<string, number> | null | undefined} attrs
  * @returns {Float32Array | null}
@@ -41,8 +45,7 @@ export function instanceParams(attrs) {
     });
     out[INSTANCE_PARAM_SLOTS.tint + 3] = 1;
   }
-  out[INSTANCE_PARAM_SLOTS.wind] = attrs.wind ?? 0;
-  out[INSTANCE_PARAM_SLOTS.scale] = attrs.scale ?? 0;
+  for (const key of NAMED) out[INSTANCE_PARAM_SLOTS[key]] = attrs[key] ?? 0;
   keys.filter((key) => !isNamed(key)).sort(compareBytes).slice(0, FREE_COUNT)
     .forEach((key, i) => { out[INSTANCE_PARAM_SLOTS.free + i] = attrs[key]; });
   return out;

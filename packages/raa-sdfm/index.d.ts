@@ -615,6 +615,11 @@ export interface SdfmFieldOperandShading {
   toNode: number[];
   /** The material's output when its graph reads no point, normal, mask or player colour: no graph code runs for it. */
   constant?: { color: [number, number, number]; metallic: number; roughness: number; emissive: [number, number, number] };
+  /**
+   * A window pane (MAMA material.output surface 'interior'): a room of `set` behind it; `half` = the pane's half size in
+   * its node space (it faces +z); depth / width / height 0 = the set's depth, the instance cell, the pane.
+   */
+  interior?: { set: string; depth: number; width: number; height: number; glass: number; half: [number, number, number] };
 }
 /**
  * The per-pixel shading of a field part (MAMA field-program.ts PartShading; a saved game mesh part's `shading`, mesh
@@ -628,15 +633,43 @@ export interface SdfmPartShading {
   single: boolean;
   look: { roughness: number; metallic: number };
   deformed?: true;
+  /**
+   * View 'relief' shapes (MAMA ParameshPartShading.relief): the fragment marches its copy's module field from the face to
+   * the recess (parallax). `copies`: per operand its module index (-1: none) and its copy's first operand.
+   */
+  relief?: { depth: number; modules: { program: number[]; rows: number[]; count: number; depth: number; box: number[] }[]; copies: number[] };
 }
+/** The room sets and look of the document's interiors (MAMA doc.interiors) as the field shading reads them. */
+export interface SdfmFieldInteriors {
+  /** Per set id: its room picture count (tiles) and its depth in metres. */
+  sets: Record<string, { tiles: number; depth: number }>;
+  lightsOn?: number;
+  blinds?: number;
+  unlitLevel?: number;
+  /** Scale of the room emission (1). */
+  emissive?: number;
+}
+/** Where a pane's tiles sit in `words`: tile k's full and small texture ids at `at + 3k`, `at + 3k + 1`, its back-wall fraction (f32) at `at + 3k + 2`. */
+export interface SdfmFieldInteriorSlot { operand: number; set: string; at: number; tiles: number }
 /** Field program layout version the interpreter reads. */
 export const FIELD_PROGRAM_VERSION: 1;
-/** Data block layout of a part: version, words before the program, words per operand, flags of word 1. */
-export const FIELD_DATA_VERSION: 1;
+/** Data block layout of a part: version (1 without relief and panes), words before the program, words per operand, flags of word 1. */
+export const FIELD_DATA_VERSION: 2;
 export const FIELD_DATA_HEADER: 20;
 export const FIELD_OPERAND_WORDS: 24;
 export const FIELD_FLAG_SINGLE: 1;
 export const FIELD_FLAG_DEBUG: 2;
+export const FIELD_FLAG_RELIEF: 4;
+/** Words of an interior record before its tile ids; the id of a picture not loaded yet; the relief march's steps. */
+export const INTERIOR_WORDS: 12;
+export const INTERIOR_NO_TEXTURE: 4294967295;
+/** Words per tile of an interior record: full id, small id, back-wall fraction f32. */
+export const INTERIOR_TILE_WORDS: 3;
+export const RELIEF_STEPS: 32;
+export const RELIEF_SPAN: 12;
+export const RELIEF_MODULE_WORDS: 24;
+/** WGSL of `sdff_interior(in, base, i, q, rd)`: the room behind a pane (needs the core and the RAA prelude). */
+export const INTERIOR_WGSL: string;
 /** Checks a part shading record; refusals: `sdfm.schema` naming the first bad field. */
 export function checkPartShading(shading: unknown): SdfmPartShading;
 /**
@@ -647,11 +680,14 @@ export function checkPartShading(shading: unknown): SdfmPartShading;
  * material's `data`. The field normal comes from the rest point ({@link fieldSurfaceAttributes}), the operands' materials
  * (constant values, graphs at the program-space and node-space points, else colours) are mixed by the field's weights. A
  * graph material missing from `materials` wears its operand colour and is listed in `missing`. `single` leaves
- * roughness/metallic to the surface record (`look`); `debug` shows the normal (a data flag, same function).
+ * roughness/metallic to the surface record (`look`); `debug` shows the normal (a data flag, same function). `relief`
+ * marches the field to the recess (parallax); a pane operand (`interior`) shows a room of its set: write the tile ids at
+ * the `interiors` slots once the pictures are loaded (until then the pane shows its glass).
  * Refusals: `sdfm.schema` (record, evaluator), `sdfm.material_unmappable` (a material that cannot be inlined, over 65536 bytes).
  */
 export function fieldPartShading(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
-  options: { field: string; debug?: boolean }): { name: string; wgsl: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[] };
+  options: { field: string; debug?: boolean; interiors?: SdfmFieldInteriors }): { name: string; wgsl: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[];
+    interiors: SdfmFieldInteriorSlot[] };
 /** The vertex streams of a field-shaded mesh: colours = rest position + rest normal z, uvs = rest normal xy, tangents = restTangent. */
 export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32Array):
   { colors: Float32Array; uvs: Float32Array; tangents: Float32Array };
@@ -661,7 +697,8 @@ export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32
  * `raa_material_f32`, which the RAA prelude (fieldPartShading) or the bake shim (field-bake) define.
  */
 export function fieldShadingCore(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
-  options: { field: string; debug?: boolean }): { core: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[] };
+  options: { field: string; debug?: boolean; interiors?: SdfmFieldInteriors }): { core: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[];
+    interiors: SdfmFieldInteriorSlot[] };
 
 /** The one material function every baked part draws with (game render option shading 'baked'). */
 export const BAKED_FUNCTION: 'sdfb.baked';
@@ -810,11 +847,14 @@ export const AO_QUALITY_LEVELS: readonly ({ readonly slices: number; readonly st
 export function applyRenderOptions(engine: Engine, options: SdfmRenderOptions,
   look?: { bloom?: boolean; grading?: boolean }): { applied: string[]; skipped: { key: string; reason: string }[] };
 
-/** The slots of the 16 floats of an instance's parameters (engine.setInstanceParams): tint 0..3, wind 4, scale 5, free 6..15. */
-export const INSTANCE_PARAM_SLOTS: { readonly tint: 0; readonly wind: 4; readonly scale: 5; readonly free: 6 };
+/**
+ * The slots of the 16 floats of an instance's parameters (engine.setInstanceParams): tint 0..3, wind 4, scale 5, the cell
+ * seed 6, width 7 and height 8 (Array on splines copies), free 9..15.
+ */
+export const INSTANCE_PARAM_SLOTS: { readonly tint: 0; readonly wind: 4; readonly scale: 5; readonly seed: 6; readonly width: 7; readonly height: 8; readonly free: 9 };
 /**
  * The 16 floats of one instance's procgen attributes: linear tint rgb (tint.r/g/b, sRGB 0..1; a missing channel is 1)
- * and a flag in float 3 when any tint.* key exists, wind, scale, then the other attributes in ascending key byte order.
+ * and a flag in float 3 when any tint.* key exists, wind, scale, seed, width, height, then the other attributes in ascending key byte order.
  * Null when `attrs` is absent or has no keys.
  */
 export function instanceParams(attrs?: Record<string, number> | null): Float32Array | null;
