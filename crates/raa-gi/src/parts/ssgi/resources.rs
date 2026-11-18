@@ -6,12 +6,12 @@
 #![allow(dead_code, reason = "the SsgiPart card is the first caller")]
 
 use raa_core::GpuContext;
-use raa_pipeline::Targets;
 use raa_taa::HistoryPair;
 
 use super::cpu;
 use super::passes::{SSGI_PARAMS_SIZE, SsgiPipelines, SsgiWork};
 use super::ssgi_bytes;
+use crate::parts::GBufferViews;
 
 /// Format of the raw, history, output and dummy textures.
 const SSGI_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -22,12 +22,16 @@ const RESOLVE_SLOTS: usize = 4;
 /// The 1x1 Rgba16Float texel (0, 0, 0, 1) as little-endian f16 values.
 const DUMMY_TEXEL: [u8; 8] = [0, 0, 0, 0, 0, 0, 0x00, 0x3C];
 
-/// The trace group 2 cached for one `gi_frame` buffer and one previous lit HDR view.
+/// The trace group 2 cached for one `gi_frame` buffer, one previous lit HDR view and one set of
+/// G-buffer views.
 struct TraceBindings {
     gi_frame: wgpu::Buffer,
     history: Option<wgpu::TextureView>,
     /// The voxel-buffer generation binding 6 was built with (None: the dummy).
     voxels: Option<u64>,
+    /// The `depth`, `normal` and `motion` views bindings 1, 2 and the resolve bindings were built
+    /// with.
+    views: GBufferViews,
     group: wgpu::BindGroup,
 }
 
@@ -257,15 +261,15 @@ impl SsgiResources {
     }
 
     /// The trace group 2 and the resolve group 0 of the current pair parity, built on first use.
-    /// The trace group is rebuilt only when `inputs.gi_frame` or `inputs.history` differs from the
-    /// cached one, or the voxel-buffer generation (`SsgiPipelines.voxels`) differs. The resolve groups (at most `RESOLVE_SLOTS`, keyed by the probe view or none
-    /// and the pair's write index) are dropped whenever the trace group is rebuilt or
-    /// `inputs.lit_frame` changes.
+    /// The trace group is rebuilt only when `inputs.gi_frame`, `inputs.history` or `views` differs
+    /// from the cached one, or the voxel-buffer generation (`SsgiPipelines.voxels`) differs. The
+    /// resolve groups (at most `RESOLVE_SLOTS`, keyed by the probe view or none and the pair's
+    /// write index) are dropped whenever the trace group is rebuilt or `inputs.lit_frame` changes.
     pub(crate) fn work<'a>(
         &'a mut self,
         gpu: &GpuContext,
         pipelines: &SsgiPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &SsgiInputs<'_>,
     ) -> SsgiWork<'a> {
         let voxels = pipelines.voxels.as_ref();
@@ -273,6 +277,7 @@ impl SsgiResources {
             cached.gi_frame != *inputs.gi_frame
                 || cached.history.as_ref() != inputs.history
                 || cached.voxels != voxels.map(|v| v.1)
+                || cached.views != *views
         });
         if stale {
             self.trace = None;
@@ -286,14 +291,15 @@ impl SsgiResources {
             gi_frame: inputs.gi_frame.clone(),
             history: inputs.history.cloned(),
             voxels: voxels.map(|v| v.1),
+            views: views.clone(),
             group: group(
                 gpu.device(),
                 "raa-gi.ssgi.trace",
                 &pipelines.trace_layout,
                 &[
                     (0, inputs.gi_frame.as_entire_binding()),
-                    (1, texture_resource(targets.depth())),
-                    (2, texture_resource(targets.normal())),
+                    (1, texture_resource(&views.depth)),
+                    (2, texture_resource(&views.normal)),
                     (
                         3,
                         texture_resource(inputs.history.unwrap_or(&self.history_dummy)),
@@ -327,8 +333,8 @@ impl SsgiResources {
                     &pipelines.resolve_layout,
                     &[
                         (0, inputs.lit_frame.as_entire_binding()),
-                        (1, texture_resource(targets.depth())),
-                        (2, texture_resource(targets.motion())),
+                        (1, texture_resource(&views.depth)),
+                        (2, texture_resource(&views.motion)),
                         (3, texture_resource(&self.raw)),
                         (4, texture_resource(self.history.read_view())),
                         (5, texture_resource(probe.unwrap_or(&self.probe_dummy))),
@@ -383,7 +389,9 @@ fn params_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parts::GiShared;
     use raa_core::testing::skip;
+    use raa_pipeline::Targets;
 
     #[test]
     fn allocated_bytes_matches_ssgi_bytes() {
@@ -397,6 +405,84 @@ mod tests {
         let clamped = SsgiResources::new(&gpu, (0, 0));
         assert_eq!(clamped.viewport(), (1, 1));
         assert_eq!(clamped.allocated_bytes(), 80);
+    }
+
+    /// `work` keeps its cached groups while the `GBufferViews` stay the same and rebuilds them
+    /// when one of the views (here `motion`) differs. The trace group binds `depth` and `normal`,
+    /// so only the cache key carries the `motion` view; the resolve group binds it.
+    #[test]
+    fn work_rebuilds_when_the_gbuffer_views_change() {
+        let test = "work_rebuilds_when_the_gbuffer_views_change";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let shared = GiShared::new(&gpu);
+        let pipelines = SsgiPipelines::new(&gpu, &shared.compute_group1_layout());
+        let mut resources = SsgiResources::new(&gpu, (8, 8));
+        let gi_frame = buffer(
+            &gpu,
+            "raa-gi.ssgi.test.gi-frame",
+            1024,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let lit_frame = buffer(
+            &gpu,
+            "raa-gi.ssgi.test.lit-frame",
+            1024,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+        let inputs = SsgiInputs {
+            gi_frame: &gi_frame,
+            lit_frame: &lit_frame,
+            history: None,
+            probe: None,
+        };
+        let targets = Targets::new(&gpu, (8, 8));
+        let views = GBufferViews {
+            depth: targets.depth().clone(),
+            normal: targets.normal().clone(),
+            material: targets.material().clone(),
+            motion: targets.motion().clone(),
+        };
+        let first = resources
+            .work(&gpu, &pipelines, &views, &inputs)
+            .trace
+            .clone();
+        let first_resolve = resources
+            .work(&gpu, &pipelines, &views, &inputs)
+            .resolve
+            .clone();
+        let same = resources
+            .work(&gpu, &pipelines, &views, &inputs)
+            .trace
+            .clone();
+        assert_eq!(first, same, "the same views must keep the cached groups");
+        let changed = GBufferViews {
+            motion: dummy(&gpu, "raa-gi.ssgi.test.other-motion"),
+            ..views.clone()
+        };
+        let rebuilt = resources
+            .work(&gpu, &pipelines, &changed, &inputs)
+            .trace
+            .clone();
+        assert_ne!(
+            first, rebuilt,
+            "a changed motion must rebuild the trace group"
+        );
+        let rebuilt_resolve = resources
+            .work(&gpu, &pipelines, &changed, &inputs)
+            .resolve
+            .clone();
+        assert_ne!(
+            first_resolve, rebuilt_resolve,
+            "a changed motion must rebuild the resolve group"
+        );
+        let kept = resources
+            .work(&gpu, &pipelines, &changed, &inputs)
+            .trace
+            .clone();
+        assert_eq!(rebuilt, kept, "the new views must stay cached");
     }
 
     #[test]

@@ -24,7 +24,7 @@ use std::rc::Rc;
 
 use self::passes::SsgiPipelines;
 use self::resources::{SsgiInputs, SsgiResources};
-use super::{GiPart, GiShared, PartFrame, PartsCtx};
+use super::{GBufferViews, GiPart, GiShared, PartFrame, PartsCtx};
 use crate::settings::SsgiQuality;
 use crate::tunables::GiTunables;
 use raa_core::{GpuContext, RaaError};
@@ -316,8 +316,9 @@ impl FeaturePass for GiSsgiPass {
             history: history.as_ref(),
             probe: probe.as_ref(),
         };
+        let views = GBufferViews::resolve(ctx.targets, ctx.resources, SSGI_PASS);
         let recorded = {
-            let work = resources.work(ctx.gpu, &state.pipelines, ctx.targets, &inputs);
+            let work = resources.work(ctx.gpu, &state.pipelines, &views, &inputs);
             state.pipelines.record(ctx.encoder, &group1, &work)
         };
         if recorded {
