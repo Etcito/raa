@@ -62,6 +62,10 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
         ctx.gpu,
         &ctx.shared.compute_group1_layout(),
         &ctx.shared.tunables(),
+        (
+            ctx.shared.emissive_sources().screen,
+            ctx.shared.emissive_generation(),
+        ),
     );
     let part = Rc::new(ScreenPart {
         shared: ctx.shared.clone(),
@@ -105,6 +109,8 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
 struct ScreenBindings {
     frame: wgpu::Buffer,
     history: Option<wgpu::TextureView>,
+    /// The voxel-buffer generation binding 6 of the trace group was built with (None: dummy).
+    voxels: Option<u64>,
     pyramid: Vec<wgpu::BindGroup>,
     trace: wgpu::BindGroup,
     project: wgpu::BindGroup,
@@ -121,6 +127,8 @@ struct ScreenBindings {
 pub(crate) struct ScreenInputs<'a> {
     pub(crate) frame: &'a wgpu::Buffer,
     pub(crate) history: Option<&'a wgpu::TextureView>,
+    /// `GiShared::voxel_buffer`: the GI voxel words and their generation, None while GI has none.
+    pub(crate) voxels: Option<&'a (wgpu::Buffer, u64)>,
 }
 
 /// The readback states of the statistics counters.
@@ -193,6 +201,8 @@ pub(crate) struct ScreenResources {
     params: wgpu::Buffer,
     atrous_params: wgpu::Buffer,
     dummy_view: wgpu::TextureView,
+    /// The 16-B zeroed storage buffer binding 6 reads while `GiShared::voxel_buffer` is None.
+    voxel_dummy: wgpu::Buffer,
     bindings: Option<ScreenBindings>,
 }
 
@@ -417,6 +427,12 @@ impl ScreenResources {
             },
         );
         let dummy_view = full_view(&dummy);
+        let voxel_dummy = buffer(
+            gpu,
+            "raa-gi.screen.voxel-dummy",
+            16,
+            wgpu::BufferUsages::STORAGE,
+        );
 
         ScreenResources {
             viewport,
@@ -439,6 +455,7 @@ impl ScreenResources {
             params,
             atrous_params,
             dummy_view,
+            voxel_dummy,
             bindings: None,
         }
     }
@@ -613,12 +630,19 @@ impl ScreenResources {
         parity: usize,
         atrous_passes: u32,
     ) -> ScreenWork<'a> {
-        let ScreenInputs { frame, history } = inputs;
+        let ScreenInputs {
+            frame,
+            history,
+            voxels,
+        } = inputs;
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
-            bindings.frame != *frame || bindings.history.as_ref() != history
+            bindings.frame != *frame
+                || bindings.history.as_ref() != history
+                || bindings.voxels != voxels.map(|v| v.1)
         });
         if stale {
-            self.bindings = Some(self.build_bindings(gpu, pipelines, targets, frame, history));
+            let bindings = self.build_bindings(gpu, pipelines, targets, frame, history, voxels);
+            self.bindings = Some(bindings);
         }
         let bindings = self.bindings.as_ref().expect("bindings built above");
         ScreenWork {
@@ -636,6 +660,14 @@ impl ScreenResources {
         }
     }
 
+    /// The buffer binding 6 reads: the GI voxel words, or the zeroed dummy while there are none.
+    pub(crate) fn voxel_buffer<'a>(
+        &'a self,
+        voxels: Option<&'a (wgpu::Buffer, u64)>,
+    ) -> &'a wgpu::Buffer {
+        voxels.map_or(&self.voxel_dummy, |v| &v.0)
+    }
+
     /// Drops the cached bind groups, so the next `work` builds them again.
     pub(crate) fn invalidate_bindings(&mut self) {
         self.bindings = None;
@@ -648,6 +680,7 @@ impl ScreenResources {
         targets: &Targets,
         frame: &wgpu::Buffer,
         history: Option<&wgpu::TextureView>,
+        voxels: Option<&(wgpu::Buffer, u64)>,
     ) -> ScreenBindings {
         let device = gpu.device();
         let mut pyramid = Vec::with_capacity(self.mip_views.len());
@@ -686,6 +719,7 @@ impl ScreenResources {
                 (3, texture_resource(history_view)),
                 (4, texture_resource(&self.pyramid_view)),
                 (5, texture_resource(&self.atlas_view)),
+                (6, self.voxel_buffer(voxels).as_entire_binding()),
                 (7, self.params.as_entire_binding()),
             ],
         );
@@ -765,6 +799,7 @@ impl ScreenResources {
         ScreenBindings {
             frame: frame.clone(),
             history: cached_history,
+            voxels: voxels.map(|v| v.1),
             pyramid,
             trace,
             project,
@@ -913,9 +948,13 @@ impl GiPart for ScreenPart {
             state.wants = false;
             return;
         }
-        if state.pipelines.tunables_generation() != self.shared.tunables_generation() {
+        let emissive_generation = self.shared.emissive_generation();
+        if state.pipelines.tunables_generation() != self.shared.tunables_generation()
+            || state.pipelines.emissive_generation() != emissive_generation
+        {
             let tunables = self.shared.tunables();
-            state.pipelines.rebuild_tuned(gpu, &tunables);
+            let emissive = (self.shared.emissive_sources().screen, emissive_generation);
+            state.pipelines.rebuild_tuned(gpu, &tunables, emissive);
         }
         let rays = frame.quality.probe_rays;
         if needs_reallocation(state.key, frame.viewport, rays) {
@@ -1139,6 +1178,7 @@ impl FeaturePass for GiScreenPass {
         };
         let passes = settings.spatial_passes.min(ATROUS_MAX_PASSES);
         let history = self.part.shared.history_view();
+        let voxels = self.part.shared.voxel_buffer();
         resources.clear_counters(ctx.encoder);
         let recorded = if *mode == IndirectMode::Restir
             && let (Some(restir_pipelines), Some(restir)) =
@@ -1150,10 +1190,12 @@ impl FeaturePass for GiScreenPass {
                 .clone()
                 .unwrap_or_else(|| resources.dummy_view.clone());
             let pyramid = resources.pyramid_view.clone();
+            let voxel_words = resources.voxel_buffer(voxels.as_ref()).clone();
             let screen_params = resources.params.clone();
             let inputs = RestirGiInputs {
                 frame: &frame,
                 history: &history_view,
+                voxels: &voxel_words,
                 pyramid: &pyramid,
                 screen_params: &screen_params,
                 accumulate: resources.accumulate_views(),
@@ -1166,6 +1208,7 @@ impl FeaturePass for GiScreenPass {
                 ScreenInputs {
                     frame: &frame,
                     history: history.as_ref(),
+                    voxels: voxels.as_ref(),
                 },
                 *parity,
                 passes,
@@ -1192,6 +1235,7 @@ impl FeaturePass for GiScreenPass {
                 ScreenInputs {
                     frame: &frame,
                     history: history.as_ref(),
+                    voxels: voxels.as_ref(),
                 },
                 *parity,
                 passes,

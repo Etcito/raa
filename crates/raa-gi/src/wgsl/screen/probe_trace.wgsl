@@ -82,8 +82,11 @@ fn raa_gi_probe_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             RAA_GI_PROBE_SCREEN_THICKNESS,
         );
         if screen.hit {
-            screen_radiance = raa_gi_screen_hit_radiance(
-                world + normal * 0.03 + direction * screen.t,
+            let hit_point = world + normal * 0.03 + direction * screen.t;
+            screen_radiance = raa_gi_screen_hit_radiance(hit_point);
+            screen_radiance = vec4<f32>(
+                raa_gi_screen_without_emission(screen_radiance.rgb, hit_point),
+                screen_radiance.a,
             );
         }
         if screen.hit && screen.weight >= 1.0 && screen_radiance.a == 1.0 {

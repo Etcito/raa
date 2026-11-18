@@ -73,7 +73,8 @@ fn raa_rgi_initial(pixel: vec2<u32>, s: RaaRgiSurface) -> RaaRgiReservoir {
             RAA_RGI_SCREEN_THICKNESS);
         if screen.hit && screen.weight >= 1.0 {
             let hit = origin + dir * screen.t;
-            let lit = raa_gi_screen_hit_radiance(hit);
+            let hit_lit = raa_gi_screen_hit_radiance(hit);
+            let lit = vec4<f32>(raa_gi_screen_without_emission(hit_lit.rgb, hit), hit_lit.a);
             if lit.a == 1.0 {
                 let size = vec2<i32>(raa_gi_frame.viewport.xy);
                 let hit_pixel = clamp(vec2<i32>(screen.uv * raa_gi_frame.viewport.xy), vec2<i32>(0), size - vec2<i32>(1));

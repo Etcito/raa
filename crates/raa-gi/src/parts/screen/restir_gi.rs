@@ -26,11 +26,13 @@ use super::restir_gi_cpu::{
     RESTIR_GI_BOILING_FACTOR, RESTIR_GI_NORMAL_COS, RESTIR_GI_SPATIAL_RADIUS,
     RESTIR_GI_SPATIAL_SAMPLES,
 };
+use crate::emissive::{SCREEN_OVERRIDE, override_value};
 use crate::parts::GiShared;
 use crate::tunables::GiTunables;
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
+const SCREEN_EMISSION_WGSL: &str = include_str!("../../wgsl/screen/screen_emission.wgsl");
 const RESTIR_CORE_WGSL: &str = include_str!("../../wgsl/area_shadow/restir_core.wgsl");
 const RESTIR_GI_COMMON_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_common.wgsl");
 const RESTIR_GI_MAIN_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_main.wgsl");
@@ -82,11 +84,11 @@ pub const RESTIR_GI_PARAMS_SIZE: u64 = 32;
 pub const RESTIR_GI_RESERVOIR_BYTES: u64 = 32;
 
 /// Stage 1: PRELUDE + CLOUD_SHADOW + GI_VOLUME + DEPTH + probe_common + screen_trace +
-/// restir_core + restir_gi_common + restir_gi_main.
+/// screen_emission + restir_core + restir_gi_common + restir_gi_main.
 pub fn restir_gi_main_module_wgsl() -> String {
     format!(
         "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}\
-         {SCREEN_TRACE_WGSL}{RESTIR_CORE_WGSL}{RESTIR_GI_COMMON_WGSL}{RESTIR_GI_MAIN_WGSL}"
+         {SCREEN_TRACE_WGSL}{SCREEN_EMISSION_WGSL}{RESTIR_CORE_WGSL}{RESTIR_GI_COMMON_WGSL}{RESTIR_GI_MAIN_WGSL}"
     )
 }
 
@@ -109,16 +111,17 @@ pub fn restir_gi_denoise_module_wgsl() -> String {
     )
 }
 
-/// Stage 1 group 2: 0 frame, 1 depth, 2 normal, 3 filterable lit history, 4 pyramid, 7 screen
-/// params, 8 motion, 10 previous final reservoirs (read), 11 the scratch reservoirs
+/// Stage 1 group 2: 0 frame, 1 depth, 2 normal, 3 filterable lit history, 4 pyramid, 6 the GI
+/// voxel words (read), 7 screen params, 8 motion, 10 previous final reservoirs (read), 11 the scratch reservoirs
 /// (read_write), 12 params.
-pub fn main_group2_entries() -> [wgpu::BindGroupLayoutEntry; 10] {
+pub fn main_group2_entries() -> [wgpu::BindGroupLayoutEntry; 11] {
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
         float_entry(2, false),
         float_entry(3, true),
         float_entry(4, false),
+        storage_entry(6, true),
         uniform_entry(7, super::passes::SCREEN_PARAMS_SIZE),
         float_entry(8, false),
         storage_entry(10, true),
@@ -177,6 +180,8 @@ pub(crate) struct RestirGiPipelines {
     spatial: wgpu::ComputePipeline,
     denoise: wgpu::ComputePipeline,
     generation: u64,
+    /// The emissive generation the main pipeline was built with.
+    emissive_generation: u64,
 }
 
 /// A compute pipeline of `module` over [empty, `group1`, `group2`] with the override `constants`.
@@ -250,6 +255,7 @@ impl RestirGiPipelines {
             [&empty, group1],
             [&main_layout, &spatial_layout, &denoise_layout],
             &tunables,
+            shared.emissive_sources().screen,
         );
         RestirGiPipelines {
             empty,
@@ -262,6 +268,7 @@ impl RestirGiPipelines {
             spatial,
             denoise,
             generation: tunables.generation(),
+            emissive_generation: shared.emissive_generation(),
         }
     }
 
@@ -272,6 +279,7 @@ impl RestirGiPipelines {
         shared: [&wgpu::BindGroupLayout; 2],
         group2: [&wgpu::BindGroupLayout; 3],
         tunables: &GiTunables,
+        screen_emissive: bool,
     ) -> [wgpu::ComputePipeline; 3] {
         let stages = [
             (
@@ -292,13 +300,17 @@ impl RestirGiPipelines {
         ];
         std::array::from_fn(|i| {
             let (label, entry, overrides) = stages[i];
+            let mut constants = tunables.constants(overrides);
+            if i == 0 {
+                constants.push((SCREEN_OVERRIDE, override_value(screen_emissive)));
+            }
             tuned_pipeline(
                 device,
                 label,
                 &modules[i],
                 entry,
                 [shared[0], shared[1], group2[i]],
-                &tunables.constants(overrides),
+                &constants,
             )
         })
     }
@@ -306,7 +318,9 @@ impl RestirGiPipelines {
     /// Rebuilds the three pipelines when the generation `shared` publishes differs from the one
     /// they were built with; the read is allocation-free when it does not.
     pub(crate) fn refresh(&mut self, gpu: &GpuContext, shared: &GiShared) {
-        if shared.tunables_generation() == self.generation {
+        if shared.tunables_generation() == self.generation
+            && shared.emissive_generation() == self.emissive_generation
+        {
             return;
         }
         let tunables = shared.tunables();
@@ -320,11 +334,13 @@ impl RestirGiPipelines {
                 &self.denoise_layout,
             ],
             &tunables,
+            shared.emissive_sources().screen,
         );
         self.main = main;
         self.spatial = spatial;
         self.denoise = denoise;
         self.generation = tunables.generation();
+        self.emissive_generation = shared.emissive_generation();
     }
 
     /// Records the three stages in `pass` (group 1 already set) with the groups of `work`.
@@ -355,6 +371,8 @@ pub(crate) struct RestirGiWork<'a> {
 pub(crate) struct RestirGiInputs<'a> {
     pub(crate) frame: &'a wgpu::Buffer,
     pub(crate) history: &'a wgpu::TextureView,
+    /// The GI voxel words, or the screen part's zeroed dummy while GI has none.
+    pub(crate) voxels: &'a wgpu::Buffer,
     pub(crate) pyramid: &'a wgpu::TextureView,
     pub(crate) screen_params: &'a wgpu::Buffer,
     pub(crate) accumulate: AccumulateViews,
@@ -363,6 +381,7 @@ pub(crate) struct RestirGiInputs<'a> {
 struct RestirGiBindings {
     frame: wgpu::Buffer,
     history: wgpu::TextureView,
+    voxels: wgpu::Buffer,
     outputs: wgpu::TextureView,
     main: [wgpu::BindGroup; 2],
     spatial: [wgpu::BindGroup; 2],
@@ -543,6 +562,7 @@ impl RestirGiResources {
         let stale = self.bindings.as_ref().is_none_or(|b| {
             b.frame != *inputs.frame
                 || b.history != *inputs.history
+                || b.voxels != *inputs.voxels
                 || b.outputs != inputs.accumulate.outputs[0]
         });
         if stale {
@@ -592,6 +612,7 @@ impl RestirGiResources {
                     (2, tex(targets.normal())),
                     (3, tex(inputs.history)),
                     (4, tex(inputs.pyramid)),
+                    (6, inputs.voxels.as_entire_binding()),
                     (7, inputs.screen_params.as_entire_binding()),
                     (8, tex(targets.motion())),
                     (10, self.reservoirs[1 - parity].as_entire_binding()),
@@ -640,6 +661,7 @@ impl RestirGiResources {
         RestirGiBindings {
             frame: inputs.frame.clone(),
             history: inputs.history.clone(),
+            voxels: inputs.voxels.clone(),
             outputs: acc.outputs[0].clone(),
             main,
             spatial,

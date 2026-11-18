@@ -37,6 +37,7 @@ use raa_core::GpuContext;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use std::num::NonZeroU64;
 
+use crate::emissive::{SCREEN_OVERRIDE, override_value};
 use crate::tunables::GiTunables;
 
 use wgpu::{
@@ -47,6 +48,7 @@ use wgpu::{
 const DEPTH_PYRAMID_WGSL: &str = include_str!("../../wgsl/screen/depth_pyramid.wgsl");
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
+const SCREEN_EMISSION_WGSL: &str = include_str!("../../wgsl/screen/screen_emission.wgsl");
 const PROBE_TRACE_WGSL: &str = include_str!("../../wgsl/screen/probe_trace.wgsl");
 const PROBE_PROJECT_WGSL: &str = include_str!("../../wgsl/screen/probe_project.wgsl");
 const PROBE_INTEGRATE_WGSL: &str = include_str!("../../wgsl/screen/probe_integrate.wgsl");
@@ -164,7 +166,7 @@ pub fn depth_pyramid_module_wgsl() -> String {
 pub fn probe_trace_module_wgsl() -> String {
     format!(
         "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}\
-         {PROBE_COMMON_WGSL}{SCREEN_TRACE_WGSL}{PROBE_TRACE_WGSL}"
+         {PROBE_COMMON_WGSL}{SCREEN_TRACE_WGSL}{SCREEN_EMISSION_WGSL}{PROBE_TRACE_WGSL}"
     )
 }
 
@@ -299,8 +301,9 @@ pub fn pyramid_reduce_group2_entries() -> [BindGroupLayoutEntry; 2] {
 }
 
 /// Trace group 2: 0 `GiFrameGpu` (432 B), 1 the S12 depth, 2 the S12 normal, 3 the filterable
-/// history, 4 the unfilterable pyramid, 5 the Rgba16Float ray atlas and 7 `GiScreenGpu` (16 B).
-pub fn trace_group2_entries() -> [BindGroupLayoutEntry; 7] {
+/// history, 4 the unfilterable pyramid, 5 the Rgba16Float ray atlas, 6 the GI voxel words (read)
+/// and 7 `GiScreenGpu` (16 B).
+pub fn trace_group2_entries() -> [BindGroupLayoutEntry; 8] {
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
@@ -308,6 +311,7 @@ pub fn trace_group2_entries() -> [BindGroupLayoutEntry; 7] {
         float_entry(3, true),
         float_entry(4, false),
         storage_texture_entry(5, TextureFormat::Rgba16Float),
+        storage_entry(6, true),
         uniform_entry(7, SCREEN_PARAMS_SIZE),
     ]
 }
@@ -419,6 +423,8 @@ pub(crate) struct ScreenPipelines {
     tuned: TunedSources,
     /// The tunables generation the trace, integrate and a-trous pipelines were built with.
     tunables_generation: u64,
+    /// The emissive generation the trace pipelines were built with.
+    emissive_generation: u64,
 }
 
 /// The layouts and modules of the pipelines whose modules declare gi.screen overrides.
@@ -439,9 +445,11 @@ fn tuned_pipelines(
     integrate_layout: &wgpu::BindGroupLayout,
     atrous_layout: &wgpu::BindGroupLayout,
     tunables: &GiTunables,
+    screen_emissive: bool,
 ) -> ([ComputePipeline; 2], ComputePipeline, ComputePipeline) {
     let (empty, group1) = (&sources.empty, &sources.group1);
-    let trace_constants = tunables.constants(TRACE_OVERRIDES);
+    let mut trace_constants = tunables.constants(TRACE_OVERRIDES);
+    trace_constants.push((SCREEN_OVERRIDE, override_value(screen_emissive)));
     let trace = PROBE_RAY_OPTIONS.map(|rays| {
         tuned_compute_pipeline(
             device,
@@ -570,11 +578,14 @@ impl ScreenPipelines {
     /// Builds one shader module per builder and the nine pipelines over the layout [empty group
     /// 0, `group1`, their group-2 layout]; trace and project are built once per
     /// `PROBE_RAY_OPTIONS` entry with `PROBE_RAYS` set to that value.
-    /// The trace, integrate and a-trous pipelines take the gi.screen overrides from `tunables`.
+    /// The trace, integrate and a-trous pipelines take the gi.screen overrides from `tunables`;
+    /// the trace pipelines also take `RAA_GI_SCREEN_EMISSIVE` from `emissive` (the screen flag
+    /// and the emissive generation of `GiShared`).
     pub(crate) fn new(
         gpu: &GpuContext,
         group1: &wgpu::BindGroupLayout,
         tunables: &GiTunables,
+        emissive: (bool, u64),
     ) -> ScreenPipelines {
         let device = gpu.device();
         let empty = layout(device, "raa-gi.screen.empty", &[]);
@@ -660,6 +671,7 @@ impl ScreenPipelines {
             &integrate_layout,
             &atrous_layout,
             tunables,
+            emissive.0,
         );
 
         ScreenPipelines {
@@ -679,6 +691,7 @@ impl ScreenPipelines {
             atrous,
             tuned,
             tunables_generation: tunables.generation(),
+            emissive_generation: emissive.1,
         }
     }
 
@@ -687,9 +700,19 @@ impl ScreenPipelines {
         self.tunables_generation
     }
 
+    /// The emissive generation the trace pipelines were built with.
+    pub(crate) fn emissive_generation(&self) -> u64 {
+        self.emissive_generation
+    }
+
     /// Rebuilds the trace, integrate and a-trous pipelines with the overrides of `tunables`. The
     /// bind group layouts are kept, so the bind groups built over them stay valid.
-    pub(crate) fn rebuild_tuned(&mut self, gpu: &GpuContext, tunables: &GiTunables) {
+    pub(crate) fn rebuild_tuned(
+        &mut self,
+        gpu: &GpuContext,
+        tunables: &GiTunables,
+        emissive: (bool, u64),
+    ) {
         let (trace, integrate, atrous) = tuned_pipelines(
             gpu.device(),
             &self.tuned,
@@ -697,11 +720,13 @@ impl ScreenPipelines {
             &self.integrate_layout,
             &self.atrous_layout,
             tunables,
+            emissive.0,
         );
         self.trace = trace;
         self.integrate = integrate;
         self.atrous = atrous;
         self.tunables_generation = tunables.generation();
+        self.emissive_generation = emissive.1;
     }
 
     /// Records one `raa-gi.screen` compute pass: the pyramid copy of `work.pyramid[0]` over mip
