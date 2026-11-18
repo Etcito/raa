@@ -190,16 +190,19 @@ pub(crate) struct TaaTargets {
     groups: [[wgpu::BindGroup; 2]; 2],
 }
 
+/// Builds the two parity groups. Binding 5 reads `bound_history` when given (the `history`
+/// input of the graph), otherwise the pair's read view; binding 8 is the pair's write view.
 fn build_groups(
     gpu: &GpuContext,
     pipelines: &TaaPipelines,
     targets: &Targets,
     frame: &wgpu::Buffer,
     history: &HistoryPair,
-    read: &wgpu::TextureView,
-    written: &wgpu::TextureView,
+    chain: (&wgpu::TextureView, &wgpu::TextureView),
+    bound_history: Option<&wgpu::TextureView>,
 ) -> [wgpu::BindGroup; 2] {
     let device = gpu.device();
+    let (read, written) = chain;
     let group = |label: &str,
                  read: &wgpu::TextureView,
                  written: &wgpu::TextureView,
@@ -220,7 +223,10 @@ fn build_groups(
                 view_entry(2, read),
                 view_entry(3, targets.depth()),
                 view_entry(4, targets.motion()),
-                view_entry(5, history.view(read_history)),
+                view_entry(
+                    5,
+                    bound_history.unwrap_or_else(|| history.view(read_history)),
+                ),
                 wgpu::BindGroupEntry {
                     binding: 6,
                     resource: wgpu::BindingResource::Sampler(&pipelines.sampler),
@@ -252,8 +258,8 @@ impl TaaTargets {
                 targets,
                 frame,
                 history,
-                hdr.src(),
-                hdr.dst(),
+                (hdr.src(), hdr.dst()),
+                None,
             ),
             build_groups(
                 gpu,
@@ -261,8 +267,8 @@ impl TaaTargets {
                 targets,
                 frame,
                 history,
-                hdr.dst(),
-                hdr.src(),
+                (hdr.dst(), hdr.src()),
+                None,
             ),
         ];
         TaaTargets {
@@ -272,12 +278,15 @@ impl TaaTargets {
         }
     }
 
+    /// The two parity groups for the bound (or unbound) HDR views, reading `bound_history`
+    /// at binding 5 when given.
     pub(crate) fn bound_groups(
         gpu: &GpuContext,
         pipelines: &TaaPipelines,
         targets: &Targets,
         frame: &wgpu::Buffer,
         history: &HistoryPair,
+        bound_history: Option<&wgpu::TextureView>,
     ) -> [wgpu::BindGroup; 2] {
         let hdr = targets.hdr();
         build_groups(
@@ -286,8 +295,8 @@ impl TaaTargets {
             targets,
             frame,
             history,
-            hdr.src(),
-            hdr.dst(),
+            (hdr.src(), hdr.dst()),
+            bound_history,
         )
     }
 

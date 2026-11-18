@@ -50,7 +50,13 @@ fn pack_params(history_usable: bool) -> [u8; PARAMS_LEN] {
 /// record currently resolves bound HDR views using its own history pair and publishes hdr.src().
 struct TaaPass {
     name: String,
-    bound: Option<(wgpu::Texture, wgpu::Texture, [wgpu::BindGroup; 2])>,
+    /// The bound-chain groups with the HDR textures and the bound history view they embed.
+    bound: Option<(
+        wgpu::Texture,
+        wgpu::Texture,
+        Option<wgpu::TextureView>,
+        [wgpu::BindGroup; 2],
+    )>,
     accumulated: Rc<Cell<u32>>,
     pending_invalidate: Rc<Cell<bool>>,
     tunables: Rc<Cell<[f64; 6]>>,
@@ -141,7 +147,8 @@ impl FeaturePass for TaaPass {
         Ok(())
     }
 
-    /// Dispatches the resolve for the HDR source and write parity, swaps and commits.
+    /// Dispatches the resolve for the HDR source and write parity, swaps and commits. A bound
+    /// `history` input supplies the read history (binding 5); the write view stays this pass's.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let Some(targets) = self.targets.as_ref() else {
             return Err(RaaError::Resource(
@@ -158,29 +165,36 @@ impl FeaturePass for TaaPass {
             ));
         };
         let hdr = ctx.targets.hdr();
-        if hdr.is_bound()
-            && self
-                .bound
-                .as_ref()
-                .is_none_or(|(src, dst, _)| src != hdr.src_texture() || dst != hdr.dst_texture())
+        let bound_history = ctx
+            .resources
+            .input(&self.name, "history")
+            .map(|image| image.view);
+        let use_bound = hdr.is_bound() || bound_history.is_some();
+        if use_bound
+            && self.bound.as_ref().is_none_or(|(src, dst, history, _)| {
+                src != hdr.src_texture() || dst != hdr.dst_texture() || history != &bound_history
+            })
             && let Some(history) = self.history.as_ref()
         {
+            let groups = TaaTargets::bound_groups(
+                ctx.gpu,
+                &self.pipelines,
+                ctx.targets,
+                &self.frame,
+                history,
+                bound_history.as_ref(),
+            );
             self.bound = Some((
                 hdr.src_texture().clone(),
                 hdr.dst_texture().clone(),
-                TaaTargets::bound_groups(
-                    ctx.gpu,
-                    &self.pipelines,
-                    ctx.targets,
-                    &self.frame,
-                    history,
-                ),
+                bound_history,
+                groups,
             ));
         }
-        let group = if hdr.is_bound() {
+        let group = if use_bound {
             self.bound
                 .as_ref()
-                .map(|(_, _, groups)| &groups[write_index & 1])
+                .map(|(_, _, _, groups)| &groups[write_index & 1])
         } else {
             targets.group(hdr.src_texture(), write_index)
         };
