@@ -212,5 +212,11 @@
       "p5-mips-render",
       "p5-mips-fresh"
     ]
-  }
+  },
+  {"name":"rg-slots-check","command":"node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/slots --stage slots","timeout_s":60,"after":["rg-build"]},
+  {"name":"rg-slots-select","command":"node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/slots --stage slots","timeout_s":60,"after":["rg-slots-check"]},
+  {"name":"rg-slots-clean","command":"node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/slots --stage slots","timeout_s":60,"after":["rg-slots-select"]},
+  {"name":"rg-slots-render","command":"node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/slots --stage slots","timeout_s":1500,"after":["rg-slots-clean"]},
+  {"name":"rg-slots-fresh","command":"node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/slots --stage slots","timeout_s":120,"after":["rg-slots-render"]},
+  {"name":"rg-slots-judge","command":"node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/slots --stage slots --budget-s 1020","timeout_s":1200,"after":["rg-slots-render","rg-slots-fresh"]}
 ]
