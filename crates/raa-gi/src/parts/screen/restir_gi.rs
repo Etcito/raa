@@ -13,7 +13,6 @@
 //! code; CPU twins in `restir_gi_cpu`.
 
 use raa_core::GpuContext;
-use raa_pipeline::Targets;
 use raa_shader::{CLOUD_SHADOW_WGSL, DEPTH_WGSL, GI_VOLUME_WGSL, PRELUDE_WGSL};
 use wgpu::TextureFormat;
 
@@ -27,6 +26,7 @@ use super::restir_gi_cpu::{
     RESTIR_GI_SPATIAL_SAMPLES,
 };
 use crate::emissive::{SCREEN_OVERRIDE, override_value};
+use crate::parts::GBufferViews;
 use crate::parts::GiShared;
 use crate::tunables::GiTunables;
 
@@ -381,6 +381,7 @@ pub(crate) struct RestirGiInputs<'a> {
 struct RestirGiBindings {
     frame: wgpu::Buffer,
     history: wgpu::TextureView,
+    views: GBufferViews,
     voxels: wgpu::Buffer,
     outputs: wgpu::TextureView,
     main: [wgpu::BindGroup; 2],
@@ -555,18 +556,19 @@ impl RestirGiResources {
         &'a mut self,
         gpu: &GpuContext,
         pipelines: &RestirGiPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &RestirGiInputs<'_>,
         parity: usize,
     ) -> RestirGiWork<'a> {
         let stale = self.bindings.as_ref().is_none_or(|b| {
             b.frame != *inputs.frame
                 || b.history != *inputs.history
+                || b.views != *views
                 || b.voxels != *inputs.voxels
                 || b.outputs != inputs.accumulate.outputs[0]
         });
         if stale {
-            self.bindings = Some(self.build(gpu, pipelines, targets, inputs));
+            self.bindings = Some(self.build(gpu, pipelines, views, inputs));
         }
         let b = self.bindings.as_ref().expect("built above");
         RestirGiWork {
@@ -581,7 +583,7 @@ impl RestirGiResources {
         &self,
         gpu: &GpuContext,
         pipelines: &RestirGiPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: &RestirGiInputs<'_>,
     ) -> RestirGiBindings {
         let device = gpu.device();
@@ -608,13 +610,13 @@ impl RestirGiResources {
                 &pipelines.main_layout,
                 &[
                     (0, inputs.frame.as_entire_binding()),
-                    (1, tex(targets.depth())),
-                    (2, tex(targets.normal())),
+                    (1, tex(&views.depth)),
+                    (2, tex(&views.normal)),
                     (3, tex(inputs.history)),
                     (4, tex(inputs.pyramid)),
                     (6, inputs.voxels.as_entire_binding()),
                     (7, inputs.screen_params.as_entire_binding()),
-                    (8, tex(targets.motion())),
+                    (8, tex(&views.motion)),
                     (10, self.reservoirs[1 - parity].as_entire_binding()),
                     (11, self.scratch.as_entire_binding()),
                     (12, self.params.as_entire_binding()),
@@ -627,8 +629,8 @@ impl RestirGiResources {
                 &pipelines.spatial_layout,
                 &[
                     (0, inputs.frame.as_entire_binding()),
-                    (1, tex(targets.depth())),
-                    (2, tex(targets.normal())),
+                    (1, tex(&views.depth)),
+                    (2, tex(&views.normal)),
                     (11, self.scratch.as_entire_binding()),
                     (12, self.params.as_entire_binding()),
                     (13, tex(&self.raw_view)),
@@ -643,9 +645,9 @@ impl RestirGiResources {
                 &pipelines.denoise_layout,
                 &[
                     (0, inputs.frame.as_entire_binding()),
-                    (1, tex(targets.depth())),
-                    (2, tex(targets.normal())),
-                    (3, tex(targets.motion())),
+                    (1, tex(&views.depth)),
+                    (2, tex(&views.normal)),
+                    (3, tex(&views.motion)),
                     (4, tex(&acc.outputs[1 - parity])),
                     (6, tex(&acc.outputs[parity])),
                     (7, inputs.screen_params.as_entire_binding()),
@@ -661,6 +663,7 @@ impl RestirGiResources {
         RestirGiBindings {
             frame: inputs.frame.clone(),
             history: inputs.history.clone(),
+            views: views.clone(),
             voxels: inputs.voxels.clone(),
             outputs: acc.outputs[0].clone(),
             main,

@@ -15,7 +15,7 @@ use std::rc::Rc;
 use raa_core::{GpuContext, RaaError};
 use raa_ibl::IblHandle;
 use raa_lit::LitRenderer;
-use raa_pipeline::{LightingResources, Pipeline};
+use raa_pipeline::{LightingResources, Pipeline, ResourceTable, Targets};
 use raa_vg::{VgHandle, scene::SyncItem};
 
 use crate::emissive::EmissiveSources;
@@ -23,6 +23,46 @@ use crate::membership::Member;
 use crate::settings::{GiQuality, GiSettings};
 use crate::tunables::GiTunables;
 use crate::vertex_colors::GiVertexColors;
+
+/// The four G-buffer views a GI part binds: the `depth`, `normal`, `material` and `motion`
+/// inputs resolved through `Targets::depth_input`, `normal_input`, `material_input` and
+/// `motion_input` (crates/raa-pipeline/src/targets.rs:323 `Targets::depth_input`); an unbound
+/// input is today's target. A part keeps this in its bind-group staleness key and compares it
+/// with `PartialEq`.
+///
+/// Handoff: card 'raa-gi: SSGI reads the G-buffer from bound inputs' calls
+/// `GBufferViews::resolve(targets: &Targets, resources: &ResourceTable, pass: &str) ->
+/// GBufferViews` (pub(crate), crates/raa-gi/src/parts.rs, reached as
+/// `crate::parts::GBufferViews`) with pass `gi.ssgi`. The state passed: the four views
+/// `GBufferViews { depth: wgpu::TextureView, normal: wgpu::TextureView, material:
+/// wgpu::TextureView, motion: wgpu::TextureView }`, compared with PartialEq for bind-group
+/// staleness.
+/// Handoff: card 'raa-gi: area shadows read the G-buffer from bound inputs' calls the same
+/// `GBufferViews::resolve` with pass `gi.area-shadow` and passes `&GBufferViews` to its
+/// builders.
+#[derive(Clone, PartialEq)]
+pub(crate) struct GBufferViews {
+    pub depth: wgpu::TextureView,
+    pub normal: wgpu::TextureView,
+    pub material: wgpu::TextureView,
+    pub motion: wgpu::TextureView,
+}
+
+impl GBufferViews {
+    /// Resolves the four G-buffer inputs of `pass`; unbound inputs give today's targets.
+    pub(crate) fn resolve(
+        targets: &Targets,
+        resources: &ResourceTable,
+        pass: &str,
+    ) -> GBufferViews {
+        GBufferViews {
+            depth: targets.depth_input(resources, pass),
+            normal: targets.normal_input(resources, pass),
+            material: targets.material_input(resources, pass),
+            motion: targets.motion_input(resources, pass),
+        }
+    }
+}
 
 /// The install context of [`install_parts`]: the frame's GPU objects, the pipeline and lit
 /// renderer, the optional virtual-geometry and image-based-lighting handles, the shared GI frame

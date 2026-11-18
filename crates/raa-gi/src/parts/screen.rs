@@ -22,7 +22,7 @@ use self::passes::{
     ATROUS_MAX_PASSES, ATROUS_SLOT_BYTES, PROBE_BYTES, SCREEN_PARAMS_SIZE, ScreenPipelines,
     ScreenWork, atrous_record, pyramid_sizes,
 };
-use super::{GiPart, GiShared, PartFrame, PartsCtx};
+use super::{GBufferViews, GiPart, GiShared, PartFrame, PartsCtx};
 use raa_core::{GpuContext, RaaError};
 use raa_lit::LitHandle;
 use raa_pipeline::{
@@ -109,6 +109,8 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
 struct ScreenBindings {
     frame: wgpu::Buffer,
     history: Option<wgpu::TextureView>,
+    /// The G-buffer views the cached groups were built from.
+    views: GBufferViews,
     /// The voxel-buffer generation binding 6 of the trace group was built with (None: dummy).
     voxels: Option<u64>,
     pyramid: Vec<wgpu::BindGroup>,
@@ -619,13 +621,13 @@ impl ScreenResources {
     }
 
     /// Builds the group-2 bind groups of contract 'gi-screen-wgsl' on first use and caches them;
-    /// rebuilds them after `invalidate_bindings` or when `frame` or `history` differs from the
-    /// cached one.
+    /// rebuilds them after `invalidate_bindings` or when `frame`, `history`, `voxels` or the
+    /// G-buffer `views` differ from the cached one.
     pub(crate) fn work<'a>(
         &'a mut self,
         gpu: &GpuContext,
         pipelines: &ScreenPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         inputs: ScreenInputs<'_>,
         parity: usize,
         atrous_passes: u32,
@@ -638,10 +640,11 @@ impl ScreenResources {
         let stale = self.bindings.as_ref().is_none_or(|bindings| {
             bindings.frame != *frame
                 || bindings.history.as_ref() != history
+                || bindings.views != *views
                 || bindings.voxels != voxels.map(|v| v.1)
         });
         if stale {
-            let bindings = self.build_bindings(gpu, pipelines, targets, frame, history, voxels);
+            let bindings = self.build_bindings(gpu, pipelines, views, frame, history, voxels);
             self.bindings = Some(bindings);
         }
         let bindings = self.bindings.as_ref().expect("bindings built above");
@@ -677,7 +680,7 @@ impl ScreenResources {
         &self,
         gpu: &GpuContext,
         pipelines: &ScreenPipelines,
-        targets: &Targets,
+        views: &GBufferViews,
         frame: &wgpu::Buffer,
         history: Option<&wgpu::TextureView>,
         voxels: Option<&(wgpu::Buffer, u64)>,
@@ -690,7 +693,7 @@ impl ScreenResources {
                 "raa-gi.screen.pyramid-copy",
                 &pipelines.copy_layout,
                 &[
-                    (0, texture_resource(targets.depth())),
+                    (0, texture_resource(&views.depth)),
                     (2, texture_resource(first)),
                 ],
             ));
@@ -714,8 +717,8 @@ impl ScreenResources {
             &pipelines.trace_layout,
             &[
                 (0, frame.as_entire_binding()),
-                (1, texture_resource(targets.depth())),
-                (2, texture_resource(targets.normal())),
+                (1, texture_resource(&views.depth)),
+                (2, texture_resource(&views.normal)),
                 (3, texture_resource(history_view)),
                 (4, texture_resource(&self.pyramid_view)),
                 (5, texture_resource(&self.atlas_view)),
@@ -729,8 +732,8 @@ impl ScreenResources {
             &pipelines.project_layout,
             &[
                 (0, frame.as_entire_binding()),
-                (1, texture_resource(targets.depth())),
-                (2, texture_resource(targets.normal())),
+                (1, texture_resource(&views.depth)),
+                (2, texture_resource(&views.normal)),
                 (3, texture_resource(&self.atlas_view)),
                 (5, self.probes_raw.as_entire_binding()),
             ],
@@ -748,11 +751,11 @@ impl ScreenResources {
         let integrate = std::array::from_fn(|parity| {
             let mut entries = vec![
                 (0, frame.as_entire_binding()),
-                (1, texture_resource(targets.depth())),
-                (2, texture_resource(targets.normal())),
+                (1, texture_resource(&views.depth)),
+                (2, texture_resource(&views.normal)),
                 (5, self.probes_filtered.as_entire_binding()),
             ];
-            entries.extend(self.accumulate_entries(targets, parity));
+            entries.extend(self.accumulate_entries(views, parity));
             group(
                 device,
                 "raa-gi.screen.integrate",
@@ -777,8 +780,8 @@ impl ScreenResources {
                         &pipelines.atrous_layout,
                         &[
                             (0, frame.as_entire_binding()),
-                            (1, texture_resource(targets.depth())),
-                            (2, texture_resource(targets.normal())),
+                            (1, texture_resource(&views.depth)),
+                            (2, texture_resource(&views.normal)),
                             (15, texture_resource(input)),
                             (16, texture_resource(output)),
                             (17, texture_resource(&self.output_views[parity])),
@@ -799,6 +802,7 @@ impl ScreenResources {
         ScreenBindings {
             frame: frame.clone(),
             history: cached_history,
+            views: views.clone(),
             voxels: voxels.map(|v| v.1),
             pyramid,
             trace,
@@ -824,12 +828,12 @@ impl ScreenResources {
     /// history and moments are written, the other parity's read.
     pub(crate) fn accumulate_entries<'a>(
         &'a self,
-        targets: &'a Targets,
+        views: &'a GBufferViews,
         parity: usize,
     ) -> Vec<(u32, wgpu::BindingResource<'a>)> {
         let parity = parity & 1;
         vec![
-            (3, texture_resource(targets.motion())),
+            (3, texture_resource(&views.motion)),
             (4, texture_resource(&self.output_views[1 - parity])),
             (6, texture_resource(&self.output_views[parity])),
             (7, self.params.as_entire_binding()),
@@ -1179,6 +1183,7 @@ impl FeaturePass for GiScreenPass {
         let passes = settings.spatial_passes.min(ATROUS_MAX_PASSES);
         let history = self.part.shared.history_view();
         let voxels = self.part.shared.voxel_buffer();
+        let views = GBufferViews::resolve(ctx.targets, ctx.resources, "gi.screen");
         resources.clear_counters(ctx.encoder);
         let recorded = if *mode == IndirectMode::Restir
             && let (Some(restir_pipelines), Some(restir)) =
@@ -1200,11 +1205,11 @@ impl FeaturePass for GiScreenPass {
                 screen_params: &screen_params,
                 accumulate: resources.accumulate_views(),
             };
-            let restir_work = restir.work(ctx.gpu, restir_pipelines, ctx.targets, &inputs, *parity);
+            let restir_work = restir.work(ctx.gpu, restir_pipelines, &views, &inputs, *parity);
             let work = resources.work(
                 ctx.gpu,
                 pipelines,
-                ctx.targets,
+                &views,
                 ScreenInputs {
                     frame: &frame,
                     history: history.as_ref(),
@@ -1231,7 +1236,7 @@ impl FeaturePass for GiScreenPass {
             let work = resources.work(
                 ctx.gpu,
                 pipelines,
-                ctx.targets,
+                &views,
                 ScreenInputs {
                     frame: &frame,
                     history: history.as_ref(),
@@ -1260,6 +1265,7 @@ impl FeaturePass for GiScreenPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_pipeline::PublishedImage;
 
     #[test]
     fn resource_bytes_matches_the_hand_derivation() {
@@ -1398,5 +1404,99 @@ mod tests {
             assert_eq!(size, Some(probe_bytes), "{port}");
         }
         assert_eq!(table.buffer_entries().len(), 2);
+    }
+
+    /// Resolves the four G-buffer views from a table: an empty one gives today's targets, a
+    /// bound Depth32Float `depth` input replaces only `depth`, and `ScreenResources::work`
+    /// rebuilds its cached bind groups (its key holds the new depth view).
+    #[test]
+    fn resolve_and_work_follow_the_bound_depth_input() {
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            println!(
+                "SKIP resolve_and_work_follow_the_bound_depth_input: software_gpu returned None"
+            );
+            return;
+        };
+        let targets = Targets::new(&gpu, (8, 8));
+        let empty = ResourceTable::new();
+        let plain = GBufferViews::resolve(&targets, &empty, "gi.screen");
+        assert_eq!(plain.depth, *targets.depth());
+        assert_eq!(plain.normal, *targets.normal());
+        assert_eq!(plain.material, *targets.material());
+        assert_eq!(plain.motion, *targets.motion());
+
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa-gi.test-bound-depth"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let bound_depth = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let table = ResourceTable::new();
+        table.bind_input(
+            "gi.screen",
+            "depth",
+            PublishedImage {
+                view: bound_depth.clone(),
+                desc: ImageDesc::new(ImageDim::D2, wgpu::TextureFormat::Depth32Float, 8, 8, 1, 1),
+            },
+        );
+        let bound = GBufferViews::resolve(&targets, &table, "gi.screen");
+        assert_eq!(bound.depth, bound_depth);
+        assert_eq!(bound.normal, plain.normal);
+        assert_eq!(bound.material, plain.material);
+        assert_eq!(bound.motion, plain.motion);
+
+        let shared = GiShared::new(&gpu);
+        let pipelines = ScreenPipelines::new(
+            &gpu,
+            &shared.compute_group1_layout(),
+            &shared.tunables(),
+            (false, 0),
+        );
+        let mut resources = ScreenResources::new(&gpu, (8, 8), 8);
+        let frame = buffer(&gpu, "raa-gi.test-frame", 768, wgpu::BufferUsages::UNIFORM);
+        let first = {
+            let work = resources.work(
+                &gpu,
+                &pipelines,
+                &plain,
+                ScreenInputs {
+                    frame: &frame,
+                    history: None,
+                    voxels: None,
+                },
+                0,
+                1,
+            );
+            (*work.trace).clone()
+        };
+        let second = {
+            let work = resources.work(
+                &gpu,
+                &pipelines,
+                &bound,
+                ScreenInputs {
+                    frame: &frame,
+                    history: None,
+                    voxels: None,
+                },
+                0,
+                1,
+            );
+            (*work.trace).clone()
+        };
+        assert_ne!(first, second);
+        let cached = resources.bindings.as_ref().expect("bindings built above");
+        assert!(cached.views == bound);
+        assert_eq!(cached.views.depth, bound_depth);
     }
 }
