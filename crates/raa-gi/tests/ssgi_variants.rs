@@ -89,7 +89,13 @@ fn trace_module_validates_with_its_bindings() {
         .iter()
         .map(|entry| entry.binding)
         .collect();
-    assert_eq!(numbers, [0, 1, 2, 3, 5, 8]);
+    assert_eq!(numbers, [0, 1, 2, 3, 5, 6, 8]);
+    assert_eq!(
+        ssgi_trace_module_wgsl()
+            .matches("override RAA_GI_SCREEN_EMISSIVE: f32 = 1.0;")
+            .count(),
+        1
+    );
     assert_eq!(reflection.used(index, 2), numbers);
 
     let group1 = reflection.used(index, 1);

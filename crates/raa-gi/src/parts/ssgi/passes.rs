@@ -1,13 +1,14 @@
 //! Kernels of the `gi.ssgi` pass (contract 'ssgi-trace-wgsl'): the trace module
 //! (`PRELUDE_WGSL`, `CLOUD_SHADOW_WGSL`, `GI_VOLUME_WGSL`, `DEPTH_WGSL`, probe_common.wgsl,
-//! screen_trace.wgsl and wgsl/ssgi/trace.wgsl, in that order), its entry name and its six
-//! group-2 bindings. `SsgiParamsGpu` and the raw storage output live in trace.wgsl. The pipeline
+//! screen_trace.wgsl, screen_emission.wgsl and wgsl/ssgi/trace.wgsl, in that order), its entry
+//! name and its seven group-2 bindings. `SsgiParamsGpu` and the raw storage output live in trace.wgsl. The pipeline
 //! layout is [empty group 0, `GiShared::compute_group1_layout`, `ssgi_trace_group2_entries`];
 //! the entry statically uses group 1 binding 6 only (`raa_linear_clamp`, through
 //! `raa_gi_screen_hit_radiance`).
 // `SsgiPipelines` and `SsgiWork` have no caller until the SsgiResources and SsgiPart shares land.
 #![allow(dead_code)]
 
+use crate::emissive::{SCREEN_OVERRIDE, override_value};
 use crate::parts::GiShared;
 use crate::tunables::GiTunables;
 use raa_core::GpuContext;
@@ -17,12 +18,13 @@ use wgpu::{BindGroupLayoutEntry, TextureFormat};
 
 use super::super::area_shadow::passes::tuned_pipeline;
 use super::super::screen::passes::{
-    compute_pipeline, depth_entry, dispatch, float_entry, layout, module, storage_texture_entry,
+    depth_entry, dispatch, float_entry, layout, module, storage_entry, storage_texture_entry,
     uniform_entry,
 };
 
 const PROBE_COMMON_WGSL: &str = include_str!("../../wgsl/screen/probe_common.wgsl");
 const SCREEN_TRACE_WGSL: &str = include_str!("../../wgsl/screen/screen_trace.wgsl");
+const SCREEN_EMISSION_WGSL: &str = include_str!("../../wgsl/screen/screen_emission.wgsl");
 const SSGI_TRACE_WGSL: &str = include_str!("../../wgsl/ssgi/trace.wgsl");
 const SSGI_RESOLVE_WGSL: &str = include_str!("../../wgsl/ssgi/resolve.wgsl");
 
@@ -46,7 +48,8 @@ pub const SSGI_PARAMS_SIZE: u64 = 32;
 /// `ssgi_trace_module_wgsl` builds the trace module of contract 'ssgi-trace-wgsl', composed as
 /// crates/raa-gi/src/parts/area_shadow/passes.rs `trace_module_wgsl` is: `PRELUDE_WGSL` +
 /// `CLOUD_SHADOW_WGSL` + `GI_VOLUME_WGSL` + `DEPTH_WGSL` + probe_common.wgsl +
-/// screen_trace.wgsl + wgsl/ssgi/trace.wgsl. Its entry `SSGI_TRACE_ENTRY` writes the raw
+/// screen_trace.wgsl + screen_emission.wgsl (contract 'gi-screen-emission-wgsl') +
+/// wgsl/ssgi/trace.wgsl. Its entry `SSGI_TRACE_ENTRY` writes the raw
 /// texel (E_ss rgb, V) of the visibility-bitmask trace per pixel.
 ///
 /// Handoff: card 'raa-gi ssgi: temporal resolve kernel, SsgiPipelines and the compute record'
@@ -56,20 +59,22 @@ pub const SSGI_PARAMS_SIZE: u64 = 32;
 pub fn ssgi_trace_module_wgsl() -> String {
     format!(
         "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}\
-         {PROBE_COMMON_WGSL}{SCREEN_TRACE_WGSL}{SSGI_TRACE_WGSL}"
+         {PROBE_COMMON_WGSL}{SCREEN_TRACE_WGSL}{SCREEN_EMISSION_WGSL}{SSGI_TRACE_WGSL}"
     )
 }
 
 /// Trace group 2, ascending: 0 `GiFrameGpu` (432 B), 1 the S12 depth, 2 the S12 view-space
 /// normal, 3 the previous lit HDR (`GiShared::history_view`, or a 1x1 dummy, filterable), 5 the
-/// Rgba16Float raw output `raa_gi_ssgi_raw` and 8 `raa_gi_ssgi_params` (`SSGI_PARAMS_SIZE`).
-pub fn ssgi_trace_group2_entries() -> [BindGroupLayoutEntry; 6] {
+/// Rgba16Float raw output `raa_gi_ssgi_raw`, 6 the GI voxel words `raa_gi_screen_voxels` (read)
+/// and 8 `raa_gi_ssgi_params` (`SSGI_PARAMS_SIZE`).
+pub fn ssgi_trace_group2_entries() -> [BindGroupLayoutEntry; 7] {
     [
         uniform_entry(0, FRAME_SIZE),
         depth_entry(1),
         float_entry(2, false),
         float_entry(3, true),
         storage_texture_entry(5, TextureFormat::Rgba16Float),
+        storage_entry(6, true),
         uniform_entry(8, SSGI_PARAMS_SIZE),
     ]
 }
@@ -124,6 +129,13 @@ pub(crate) struct SsgiPipelines {
     pub(crate) trace_layout: wgpu::BindGroupLayout,
     pub(crate) resolve_layout: wgpu::BindGroupLayout,
     trace: wgpu::ComputePipeline,
+    trace_module: wgpu::ShaderModule,
+    empty: wgpu::BindGroupLayout,
+    group1: wgpu::BindGroupLayout,
+    /// `GiShared::emissive_generation` the trace pipeline was built with.
+    emissive_generation: u64,
+    /// `GiShared::voxel_buffer` as read by the last `refresh`; bound at trace binding 6.
+    pub(crate) voxels: Option<(wgpu::Buffer, u64)>,
     resolve: wgpu::ComputePipeline,
     resolve_module: wgpu::ShaderModule,
     /// The GI tunables the resolve pipeline was built with, refreshed by `refresh`.
@@ -144,30 +156,42 @@ impl SsgiPipelines {
         );
         let trace_module = module(device, "raa-gi.ssgi.trace", &ssgi_trace_module_wgsl());
         let resolve_module = module(device, "raa-gi.ssgi.resolve", &ssgi_resolve_module_wgsl());
-        let trace = compute_pipeline(
-            device,
-            "raa-gi.ssgi.trace",
-            &trace_module,
-            SSGI_TRACE_ENTRY,
-            &[Some(&empty), Some(group1), Some(&trace_layout)],
-            None,
-        );
+        let trace = trace_pipeline(device, &trace_module, [&empty, group1, &trace_layout], true);
         let tunables = GiTunables::new();
         let resolve = resolve_pipeline(device, &resolve_module, &resolve_layout, &tunables);
         SsgiPipelines {
             trace_layout,
             resolve_layout,
             trace,
+            trace_module,
+            empty,
+            group1: group1.clone(),
+            emissive_generation: 0,
+            voxels: None,
             resolve,
             resolve_module,
             tunables,
         }
     }
 
-    /// When `GiShared::tunables_generation` differs from the cached copy's generation, clones
-    /// `GiShared::tunables` once and rebuilds the resolve pipeline with its constants. Otherwise
-    /// does nothing and allocates nothing.
+    /// Reads `GiShared::voxel_buffer` into `voxels` (Handoff at crates/raa-gi/src/parts.rs
+    /// `GiShared::voxel_buffer`). When `GiShared::emissive_generation` differs from the one the
+    /// trace pipeline was built with, rebuilds it with (`SCREEN_OVERRIDE`,
+    /// `override_value(shared.emissive_sources().ssgi)`). When `GiShared::tunables_generation`
+    /// differs from the cached copy's generation, clones `GiShared::tunables` once and rebuilds
+    /// the resolve pipeline with its constants.
     pub(crate) fn refresh(&mut self, gpu: &GpuContext, shared: &GiShared) {
+        self.voxels = shared.voxel_buffer();
+        let emissive_generation = shared.emissive_generation();
+        if emissive_generation != self.emissive_generation {
+            self.emissive_generation = emissive_generation;
+            self.trace = trace_pipeline(
+                gpu.device(),
+                &self.trace_module,
+                [&self.empty, &self.group1, &self.trace_layout],
+                shared.emissive_sources().ssgi,
+            );
+        }
         if shared.tunables_generation() == self.tunables.generation() {
             return;
         }
@@ -206,6 +230,24 @@ impl SsgiPipelines {
         dispatch(&mut pass, width, height);
         true
     }
+}
+
+/// The trace pipeline over [empty, group 1, trace group 2] with (`SCREEN_OVERRIDE`,
+/// `override_value(ssgi)`).
+fn trace_pipeline(
+    device: &wgpu::Device,
+    module: &wgpu::ShaderModule,
+    groups: [&wgpu::BindGroupLayout; 3],
+    ssgi: bool,
+) -> wgpu::ComputePipeline {
+    tuned_pipeline(
+        device,
+        "raa-gi.ssgi.trace",
+        module,
+        SSGI_TRACE_ENTRY,
+        &[Some(groups[0]), Some(groups[1]), Some(groups[2])],
+        &[(SCREEN_OVERRIDE, override_value(ssgi))],
+    )
 }
 
 /// The resolve pipeline over [`resolve_layout`] with the `SSGI_RESOLVE_OVERRIDES` constants.

@@ -26,6 +26,8 @@ const DUMMY_TEXEL: [u8; 8] = [0, 0, 0, 0, 0, 0, 0x00, 0x3C];
 struct TraceBindings {
     gi_frame: wgpu::Buffer,
     history: Option<wgpu::TextureView>,
+    /// The voxel-buffer generation binding 6 was built with (None: the dummy).
+    voxels: Option<u64>,
     group: wgpu::BindGroup,
 }
 
@@ -74,6 +76,8 @@ pub(crate) struct SsgiResources {
     params: wgpu::Buffer,
     history_dummy: wgpu::TextureView,
     probe_dummy: wgpu::TextureView,
+    /// The 16-B zeroed storage buffer trace binding 6 reads while `GiShared::voxel_buffer` is None.
+    voxel_dummy: wgpu::Buffer,
     lit_frame: Option<wgpu::Buffer>,
     trace: Option<TraceBindings>,
     resolve: Vec<ResolveBindings>,
@@ -185,6 +189,12 @@ impl SsgiResources {
             ),
             history_dummy: dummy(gpu, "raa-gi.ssgi.history-dummy"),
             probe_dummy: dummy(gpu, "raa-gi.ssgi.probe-dummy"),
+            voxel_dummy: buffer(
+                gpu,
+                "raa-gi.ssgi.voxel-dummy",
+                16,
+                wgpu::BufferUsages::STORAGE,
+            ),
             lit_frame: None,
             trace: None,
             resolve: Vec::new(),
@@ -248,7 +258,7 @@ impl SsgiResources {
 
     /// The trace group 2 and the resolve group 0 of the current pair parity, built on first use.
     /// The trace group is rebuilt only when `inputs.gi_frame` or `inputs.history` differs from the
-    /// cached one. The resolve groups (at most `RESOLVE_SLOTS`, keyed by the probe view or none
+    /// cached one, or the voxel-buffer generation (`SsgiPipelines.voxels`) differs. The resolve groups (at most `RESOLVE_SLOTS`, keyed by the probe view or none
     /// and the pair's write index) are dropped whenever the trace group is rebuilt or
     /// `inputs.lit_frame` changes.
     pub(crate) fn work<'a>(
@@ -258,8 +268,11 @@ impl SsgiResources {
         targets: &Targets,
         inputs: &SsgiInputs<'_>,
     ) -> SsgiWork<'a> {
+        let voxels = pipelines.voxels.as_ref();
         let stale = self.trace.as_ref().is_none_or(|cached| {
-            cached.gi_frame != *inputs.gi_frame || cached.history.as_ref() != inputs.history
+            cached.gi_frame != *inputs.gi_frame
+                || cached.history.as_ref() != inputs.history
+                || cached.voxels != voxels.map(|v| v.1)
         });
         if stale {
             self.trace = None;
@@ -272,6 +285,7 @@ impl SsgiResources {
         let trace: &'a TraceBindings = self.trace.get_or_insert_with(|| TraceBindings {
             gi_frame: inputs.gi_frame.clone(),
             history: inputs.history.cloned(),
+            voxels: voxels.map(|v| v.1),
             group: group(
                 gpu.device(),
                 "raa-gi.ssgi.trace",
@@ -285,6 +299,12 @@ impl SsgiResources {
                         texture_resource(inputs.history.unwrap_or(&self.history_dummy)),
                     ),
                     (5, texture_resource(&self.raw)),
+                    (
+                        6,
+                        voxels
+                            .map_or(&self.voxel_dummy, |v| &v.0)
+                            .as_entire_binding(),
+                    ),
                     (8, self.params.as_entire_binding()),
                 ],
             ),

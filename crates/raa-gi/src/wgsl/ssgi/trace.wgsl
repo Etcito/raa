@@ -149,7 +149,8 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
                     let fresh = bits & ~mask;
                     if fresh != 0u {
                         let world = (raa_gi_frame.inv_view * vec4<f32>(q, 1.0)).xyz;
-                        let hit = raa_gi_screen_hit_radiance(world);
+                        let screen_hit = raa_gi_screen_hit_radiance(world);
+                        let hit = vec4<f32>(raa_gi_screen_without_emission(screen_hit.rgb, world), screen_hit.a);
                         let sample_n = normalize(textureLoad(raa_gi_normal, sp, 0).xyz);
                         let facing = dot(sample_n, -delta / len) > 0.0;
                         if facing && hit.a > 0.0 {
