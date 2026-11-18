@@ -266,6 +266,14 @@ struct HdrGroup {
     group: wgpu::BindGroup,
 }
 
+/// The composite bind group of the latest bound (src, dst) texture pair of the HDR chain.
+/// Rebuilt only when either texture differs and dropped on resize.
+struct BoundGroup {
+    src: wgpu::Texture,
+    dst: wgpu::Texture,
+    group: wgpu::BindGroup,
+}
+
 /// The surface-sized resources: the march target and the bind groups over it.
 struct Chain {
     size: (u32, u32),
@@ -278,8 +286,10 @@ struct Chain {
     hdr: [HdrGroup; 2],
 }
 
-/// The `sunshafts` render pass.
+/// The `sunshafts` render pass (or an instance pass `sunshafts#<instance>`).
 struct ShaftsPass {
+    /// Entry name: `sunshafts`, or `sunshafts#<instance>` for an instance pass.
+    name: String,
     state: SharedShafts,
     layout: wgpu::BindGroupLayout,
     lighting_layout: wgpu::BindGroupLayout,
@@ -293,10 +303,16 @@ struct ShaftsPass {
     _dummy: wgpu::Texture,
     dummy_view: wgpu::TextureView,
     chain: Option<Chain>,
+    bound: Option<BoundGroup>,
 }
 
 impl ShaftsPass {
-    fn new(gpu: &GpuContext, lighting_layout: &wgpu::BindGroupLayout, state: SharedShafts) -> Self {
+    fn new(
+        gpu: &GpuContext,
+        lighting_layout: &wgpu::BindGroupLayout,
+        state: SharedShafts,
+        name: String,
+    ) -> Self {
         let device = gpu.device();
         let layout = create_layout(device);
         let tunables = state.borrow().tunables;
@@ -321,6 +337,7 @@ impl ShaftsPass {
         );
         let dummy_view = dummy.create_view(&wgpu::TextureViewDescriptor::default());
         ShaftsPass {
+            name,
             state,
             layout,
             lighting_layout: lighting_layout.clone(),
@@ -333,6 +350,7 @@ impl ShaftsPass {
             _dummy: dummy,
             dummy_view,
             chain: None,
+            bound: None,
         }
     }
 
@@ -399,7 +417,7 @@ fn draw(
 
 impl FeaturePass for ShaftsPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -438,6 +456,7 @@ impl FeaturePass for ShaftsPass {
             march_group,
             hdr: groups,
         });
+        self.bound = None;
     }
 
     /// Packs `ShaftsParams` from the shared state (in place) and uploads it.
@@ -456,7 +475,10 @@ impl FeaturePass for ShaftsPass {
         Ok(())
     }
 
-    /// Marches into the half-res target, composites into hdr.dst() and swaps.
+    /// Marches into the half-res target, composites into hdr.dst() and swaps. While the
+    /// chain is bound (contract rg-hdr-chain-binding) the composite reads the bound src
+    /// texture through `BoundGroup`, rebuilt only when the bound (src, dst) pair changes;
+    /// `swap` is a no-op then.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let Some(chain) = self.chain.as_ref() else {
             return Err(RaaError::Resource(
@@ -465,7 +487,36 @@ impl FeaturePass for ShaftsPass {
         };
         let hdr = ctx.targets.hdr();
         let src = hdr.src_texture();
-        let Some(groups) = chain.hdr.iter().find(|g| g.texture == *src) else {
+        if hdr.is_bound() {
+            let dst = hdr.dst_texture();
+            if !self
+                .bound
+                .as_ref()
+                .is_some_and(|b| b.src == *src && b.dst == *dst)
+            {
+                let group = self.group(
+                    ctx.gpu.device(),
+                    ctx.targets.depth(),
+                    &chain.march_view,
+                    hdr.src(),
+                );
+                self.bound = Some(BoundGroup {
+                    src: src.clone(),
+                    dst: dst.clone(),
+                    group,
+                });
+            }
+        }
+        let group = if hdr.is_bound() {
+            self.bound.as_ref().map(|b| &b.group)
+        } else {
+            chain
+                .hdr
+                .iter()
+                .find(|g| g.texture == *src)
+                .map(|g| &g.group)
+        };
+        let Some(group) = group else {
             return Err(RaaError::Resource(
                 "sunshafts: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
@@ -479,11 +530,11 @@ impl FeaturePass for ShaftsPass {
             &chain.march_group,
             lighting,
         );
-        draw(encoder, hdr.dst(), &self.composite, &groups.group, lighting);
+        draw(encoder, hdr.dst(), &self.composite, group, lighting);
         hdr.swap();
         let (width, height) = ctx.targets.size();
         ctx.resources.publish(
-            NAME,
+            &self.name,
             "color",
             ctx.targets.hdr().src(),
             ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
@@ -506,18 +557,43 @@ impl ShaftsFeature {
         gpu: &GpuContext,
         pipeline: &Rc<RefCell<Pipeline>>,
     ) -> Result<ShaftsHandle, RaaError> {
-        let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
-        if p.passes().iter().any(|info| info.name == NAME) {
-            return Err(refusal(
-                "pipeline.duplicate_pass",
-                "the pass `sunshafts` is already installed",
-            ));
-        }
-        let state = Rc::new(RefCell::new(ShaftsState::default()));
-        let pass = ShaftsPass::new(gpu, p.lighting().opaque_layout(), state.clone());
-        p.add(Box::new(pass))?;
-        Ok(ShaftsHandle { state })
+        install_named(gpu, pipeline, NAME.to_owned())
     }
+
+    /// Handoff: card 'Wiring 4/5: multi-instance post passes' calls `ShaftsFeature::install_instance`
+    /// for each further sunshafts node, passing the node id as `instance`; today it builds the same
+    /// pass as `ShaftsFeature::install` under the name `sunshafts#<instance>`, adds it with
+    /// `Pipeline::add` (order 69, enabled, default descriptor) and returns a `ShaftsHandle` whose
+    /// clones drive only that pass. State passed: the handle and its clones; no other registry.
+    /// Refusals (nothing installed): `pipeline.busy` when the pipeline is borrowed,
+    /// `pipeline.duplicate_pass` when `sunshafts#<instance>` is already installed.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<ShaftsHandle, RaaError> {
+        install_named(gpu, pipeline, format!("{NAME}#{instance}"))
+    }
+}
+
+/// Shared construction of `ShaftsFeature::install` and `ShaftsFeature::install_instance`:
+/// one pass named `name` with its own state.
+fn install_named(
+    gpu: &GpuContext,
+    pipeline: &Rc<RefCell<Pipeline>>,
+    name: String,
+) -> Result<ShaftsHandle, RaaError> {
+    let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
+    if p.passes().iter().any(|info| info.name == name) {
+        return Err(refusal(
+            "pipeline.duplicate_pass",
+            &format!("the pass `{name}` is already installed"),
+        ));
+    }
+    let state = Rc::new(RefCell::new(ShaftsState::default()));
+    let pass = ShaftsPass::new(gpu, p.lighting().opaque_layout(), state.clone(), name);
+    p.add(Box::new(pass))?;
+    Ok(ShaftsHandle { state })
 }
 
 /// Access to the installed sun shafts (clones share one state).
