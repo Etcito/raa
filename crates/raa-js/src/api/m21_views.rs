@@ -117,11 +117,6 @@ impl OverlayLayer {
 /// Floats per segment in the overlay instance stream (64 bytes).
 pub const OVERLAY_SEGMENT_FLOATS: usize = 16;
 
-/// The overlay line shader. Group 0 is the lit renderer's 512-byte frame uniform (S10:
-/// view_proj @0, viewport @384, flags @416 whose x is "encode sRGB"), so each viewport
-/// draws with the camera its view uploaded. One instance per segment (see
-/// [`OverlayLayer::write_instances`]), 6 vertices: a screen-space quad `widthPx` wide,
-/// clipped to the near plane. Colours are linear and encoded when the surface is not sRGB.
 /// The depth attachment the `raa.overlay` pass begins with, for a colour target of
 /// `colour` pixels and scene depth (`raa-pipeline.depth`) of `scene_depth` pixels.
 /// WebGPU needs every attachment of a pass to have the same size: under an internal
@@ -154,6 +149,11 @@ impl OverlayDepth {
     }
 }
 
+/// The overlay line shader. Group 0 is the lit renderer's 512-byte frame uniform (S10:
+/// view_proj @0, viewport @384, flags @416 whose x is "encode sRGB"), so each viewport
+/// draws with the camera its view uploaded. One instance per segment (see
+/// [`OverlayLayer::write_instances`]), 6 vertices: a screen-space quad `widthPx` wide,
+/// clipped to the near plane. Colours are linear and encoded when the surface is not sRGB.
 pub const OVERLAY_WGSL: &str = r#"
 struct Frame { vp: mat4x4<f32>, rest: array<vec4<f32>, 28> }
 @group(0) @binding(0) var<uniform> frame: Frame;
