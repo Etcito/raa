@@ -769,17 +769,26 @@ fn setting_key(param: &ParamSpec, feature: &FeatureId) -> Option<&'static str> {
     }
 }
 
-/// The values the plan's nodes write to `feature`, under the setting key each parameter binds.
+/// The values the plan's nodes write to `feature`, under the setting key each parameter binds. A
+/// multi-instance node after the first node of its type writes nothing: the installed pass takes
+/// the first node's values, and the other nodes write their own instance handles (rule E5).
 fn plan_settings(
     catalog: &Catalog,
     plan: &GraphPlan,
     feature: &FeatureId,
 ) -> Vec<(String, ParamValue)> {
     let mut changes = Vec::new();
-    for node in &plan.nodes {
+    for (index, node) in plan.nodes.iter().enumerate() {
         let Some(spec) = catalog.node(&node.type_id) else {
             continue;
         };
+        if spec.multi_instance
+            && plan.nodes[..index]
+                .iter()
+                .any(|earlier| earlier.type_id == node.type_id)
+        {
+            continue;
+        }
         for (key, value) in &node.params {
             let bound = spec
                 .params

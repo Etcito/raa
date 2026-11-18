@@ -235,3 +235,28 @@ pub fn bound_view_count(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> usize
         });
     count + usize::from(extra)
 }
+
+/// The (install, keep, remove) lists of [`instance_plan`].
+pub type InstancePlan = (Vec<(String, String)>, Vec<(String, String)>, Vec<String>);
+
+/// The instance passes to install, keep and remove, from `kept` (the stored instances) and `wanted`
+/// (the plan's instance nodes), both as (node id, node type id). `install` and `keep` follow
+/// `wanted`; `remove` lists the node ids of the kept entries that `wanted` does not match (rule E4).
+pub fn instance_plan(kept: &[(String, String)], wanted: &[(String, String)]) -> InstancePlan {
+    let install = wanted
+        .iter()
+        .filter(|w| !kept.contains(w))
+        .cloned()
+        .collect();
+    let keep = wanted
+        .iter()
+        .filter(|w| kept.contains(w))
+        .cloned()
+        .collect();
+    let remove = kept
+        .iter()
+        .filter(|k| !wanted.contains(k))
+        .map(|(id, _)| id.clone())
+        .collect();
+    (install, keep, remove)
+}
