@@ -42,8 +42,8 @@
 //     'interior'): the eye ray through the pane is intersected with a room box behind it (closed form, five faces) and
 //     the exit point is projected to the room picture, a pre-projected tile rendered from the interior scene (SDF Modeler
 //     src/app/interiors/interior-bake.ts) and loaded into RAA's material atlas; the tile, a mirror, lights on or off,
-//     blinds and a brightness spread follow a hash of the operand, the room index along the pane and the instance's cell
-//     seed (INSTANCE_PARAM_SLOTS.seed). The room is emitted behind the glass; the glass keeps its own look. Until the
+//     blinds and a brightness spread follow a hash of the operand, the room index along the pane, the pane's rest-space centre and the
+//     instance's cell seed (INSTANCE_PARAM_SLOTS.seed). The room is emitted behind the glass; the glass keeps its own look. Until the
 //     caller patches the tile ids (`interiors` of fieldPartShading) the pane shows its glass only.
 import { SdfmError } from './errors.js';
 import { checkShape, forbiddenToken, tokens } from './map-material.js';
@@ -321,7 +321,19 @@ fn sdff_interior(in: MaterialInput, base: u32, i: u32, q: vec3<f32>, rd: vec3<f3
   let ty = (select(lo.y, hi.y, dn.y > 0.0) - e0.y) / select(dn.y, 1e-6, abs(dn.y) < 1e-6);
   let tz = (lo.z - e0.z) / dn.z;
   let e = e0 + dn * max(min(min(abs(tx), abs(ty)), tz), 0.0);
-  let h = sdff_hash(i * 7919u + u32(k) * 104729u + sdff_hash(u32(max(in.instance_params[1].z, 0.0))));
+  // The pane's centre in rest space tells two copies of one pane apart when they share an operand and an instance (a
+  // building merged into one draw carries no cell seed): q minus the pane-space offset mapped back, on a 0.5 m grid.
+  let c0 = sdff_linear(o + 12u, sdff_linear(base + 8u, vec3<f32>(1.0, 0.0, 0.0)));
+  let c1 = sdff_linear(o + 12u, sdff_linear(base + 8u, vec3<f32>(0.0, 1.0, 0.0)));
+  let c2 = sdff_linear(o + 12u, sdff_linear(base + 8u, vec3<f32>(0.0, 0.0, 1.0)));
+  let det = dot(c0, cross(c1, c2));
+  var cellKey = 0u;
+  if (abs(det) > 1e-12) {
+    let off = pn - vec3<f32>(cx, 0.0, 0.0);
+    let qc = vec3<i32>(round((q - vec3<f32>(dot(cross(c1, c2), off), dot(cross(c2, c0), off), dot(cross(c0, c1), off)) / det) * 2.0));
+    cellKey = sdff_hash(bitcast<u32>(qc.x) ^ sdff_hash(bitcast<u32>(qc.y) ^ sdff_hash(bitcast<u32>(qc.z))));
+  }
+  let h = sdff_hash(i * 7919u + u32(k) * 104729u + (sdff_hash(u32(max(in.instance_params[1].z, 0.0))) ^ cellKey));
   let tile = h % tiles;
   let tw = r + ${INTERIOR_WORDS}u + ${INTERIOR_TILE_WORDS}u * tile;
   // The pre-projection camera: on the room axis, at distance c in front of the opening, the opening filling the
