@@ -152,6 +152,48 @@ fn sdfm_rest_dir(in: MaterialInput, v: vec3f) -> vec3f {
   let bw = cross(n, t) * select(-1.0, 1.0, in.tangent.w >= 0.0);
   return normalize(dot(v, t) * tr + dot(v, bw) * br + dot(v, n) * nr);
 }
+
+// The eye ray into the surface in rest space, EXACT on a face: the rest point q0 is an affine function of the world
+// point on a face (one Paramesh face, one copy), so the screen derivatives give that map on the face's plane (px, py ->
+// qx, qy) and its scale along the normal (the area ratio, a similarity). sdfm_rest_dir rotates by the interpolated mesh
+// frame instead, and that frame turns across a large planar face whose vertices are shared with faces of another
+// orientation (measured on the New Surugadai shop pane, 2026-11-18: its tangent swept from pink to cyan to yellow and
+// its rest normal left the face normal over one 4.2 m pane, so the rooms behind it bent). Where the derivatives
+// straddle two faces (the two screen axes scale differently) or vanish, the frame rotation is kept. Called at the top of
+// material_main (uniform flow).
+fn sdff_rest_ray(in: MaterialInput, q0: vec3f) -> vec3f {
+  let rot = sdfm_rest_dir(in, -in.view_dir);
+  let px = dpdx(in.position);
+  let py = dpdy(in.position);
+  let qx = dpdx(q0);
+  let qy = dpdy(q0);
+  let nw0 = cross(px, py);
+  let nq0 = cross(qx, qy);
+  let aw = length(nw0);
+  let aq = length(nq0);
+  if (!(aw > 1e-14) || !(aq > 1e-14)) { return rot; }
+  let nw = nw0 / aw;
+  let nq = nq0 / aq;
+  // A similarity scales both screen axes alike; a 2x2 quad straddling two faces (a resolve pass) does not.
+  let sx = dot(qx, qx) / max(dot(px, px), 1e-30);
+  let sy = dot(qy, qy) / max(dot(py, py), 1e-30);
+  if (abs(sx - sy) > 0.04 * max(sx, sy)) { return rot; }
+  let w = -in.view_dir;
+  let c = dot(w, nw);
+  let tw = w - c * nw;
+  let g11 = dot(px, px);
+  let g12 = dot(px, py);
+  let g22 = dot(py, py);
+  let det = g11 * g22 - g12 * g12;
+  if (!(det > 1e-28)) { return rot; }
+  let r1 = dot(tw, px);
+  let r2 = dot(tw, py);
+  let a = (r1 * g22 - r2 * g12) / det;
+  let b = (r2 * g11 - r1 * g12) / det;
+  let d = a * qx + b * qy + c * sqrt(aq / aw) * nq;
+  if (!(dot(d, d) > 1e-20)) { return rot; }
+  return normalize(d);
+}
 `;
 
 /** `sdff_normal(in, s)`: the field's normal at the fragment, on the posed surface (needs FIELD_FRAME_WGSL and the field). */
@@ -326,7 +368,7 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
   let program = base + sdff_w(base + 2u);
   let q0 = in.color.xyz;
   // The eye ray in rest space, into the surface (the relief march and the rooms behind panes follow it).
-  let rd = sdfm_rest_dir(in, -in.view_dir);
+  let rd = sdff_rest_ray(in, q0);
   let relief = (flags & ${FIELD_FLAG_RELIEF}u) != 0u;
   // ONE pmf_eval site. Sample 0: the part's field at the face point (THE sample without relief). With relief, the
   // operand there names its copy of a relief module (the relief table); the next samples march that module's field.
