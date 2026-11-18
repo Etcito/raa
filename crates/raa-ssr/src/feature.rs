@@ -20,7 +20,7 @@ use raa_pipeline::{
 };
 
 use crate::desc::SsrDesc;
-use crate::resources::{SsrPipelines, SsrTargets, TRACE_FORMAT};
+use crate::resources::{SsrPipelines, SsrTargets, SsrViewKey, TRACE_FORMAT};
 use crate::shaders::SSR_PARAMS_SIZE;
 use crate::tunables::{self, tunables};
 
@@ -200,7 +200,9 @@ impl FeaturePass for SsrPass {
         self.targets = Some(SsrTargets::new(gpu, &self.pipelines, targets));
     }
 
-    /// Writes `SsrParams` from the handle's description and camera (in place).
+    /// Writes `SsrParams` from the handle's description and camera (in place). The bound
+    /// `depth`, `normal` and `material` inputs key the bind groups, which are rebuilt only
+    /// when one of them differs from the views they were built from.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let (desc, camera, values, generation) = {
             let st = self.state.try_borrow().map_err(|_| state_busy())?;
@@ -211,9 +213,15 @@ impl FeaturePass for SsrPass {
                 .rebuild_trace(ctx.gpu.device(), &constants(&values));
             self.built_generation = generation;
         }
-        let Some(t) = self.targets.as_ref() else {
+        let Some(t) = self.targets.as_mut() else {
             return Ok(());
         };
+        let views = SsrViewKey {
+            depth: ctx.targets.depth_input(ctx.resources, &self.name),
+            normal: ctx.targets.normal_input(ctx.resources, &self.name),
+            material: ctx.targets.material_input(ctx.resources, &self.name),
+        };
+        t.set_views(ctx.gpu.device(), &self.pipelines, views);
         pack_params(
             &mut self.bytes,
             t.size,
@@ -556,6 +564,9 @@ mod tests {
                     b: self.0,
                     a: 1.0,
                 };
+                let depth = ctx
+                    .targets
+                    .depth_attachment_input(ctx.resources, self.name());
                 let pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("test.setup"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -568,7 +579,7 @@ mod tests {
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: ctx.targets.depth(),
+                        view: &depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Store,
