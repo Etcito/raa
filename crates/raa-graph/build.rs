@@ -167,7 +167,7 @@ fn registry_source(
     for file in exec_ext {
         let _ = writeln!(
             s,
-            "#[cfg(raa_graph_exec)]\n#[path = {:?}]\nmod {};\n",
+            "#[cfg(raa_graph_exec)]\n#[path = {:?}]\nmod exec_{};\n",
             path_str(file),
             file.stem
         );
@@ -224,7 +224,7 @@ fn registry_source(
         } else {
             s.push_str("    vec![\n");
             for file in exec_ext {
-                let _ = writeln!(s, "        {}::extension(),", file.stem);
+                let _ = writeln!(s, "        exec_{}::extension(),", file.stem);
             }
             s.push_str("    ]\n");
         }

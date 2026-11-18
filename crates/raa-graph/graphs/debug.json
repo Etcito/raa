@@ -36,7 +36,8 @@
         "localLightShadows": true,
         "voxelFullRelight": true,
         "voxelHistoryMax": 64,
-        "voxelRays": 3
+        "voxelRays": 3,
+        "emissive": true
       }
     },
     {
@@ -68,7 +69,8 @@
         "clampGamma": 3,
         "spatialPasses": 4,
         "restirMCap": 30,
-        "debugView": "none"
+        "debugView": "none",
+        "emissive": true
       }
     },
     {
@@ -90,7 +92,8 @@
       "id": "giSsgi",
       "type": "pass.gi.ssgi",
       "params": {
-        "screenSpaceQuality": "medium"
+        "screenSpaceQuality": "medium",
+        "emissive": true
       }
     },
     {
