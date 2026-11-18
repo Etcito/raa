@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, ResourceTable, Targets};
 
 use crate::{ToneMapping, TonemapControl};
 
@@ -25,7 +25,7 @@ const ENV_SIZE: u64 = 256;
 /// The bind group of the last frame with the textures it was built for.
 struct Bound {
     hdr: wgpu::Texture,
-    depth: wgpu::Texture,
+    depth: wgpu::TextureView,
     group: wgpu::BindGroup,
 }
 
@@ -173,12 +173,17 @@ impl TonemapPass {
         self.pipelines.insert(format, pipeline);
     }
 
-    fn ensure_bind_group(&mut self, gpu: &GpuContext, targets: &Targets) {
+    fn ensure_bind_group(
+        &mut self,
+        gpu: &GpuContext,
+        targets: &Targets,
+        resources: &ResourceTable,
+    ) {
         let hdr = targets.hdr().src_texture();
-        let depth = targets.depth_texture();
+        let depth = targets.depth_input(resources, TONEMAP_NAME);
         if let Some(bound) = &self.bound
             && bound.hdr == *hdr
-            && bound.depth == *depth
+            && bound.depth == depth
         {
             return;
         }
@@ -196,7 +201,7 @@ impl TonemapPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(targets.depth()),
+                    resource: wgpu::BindingResource::TextureView(&depth),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -206,7 +211,7 @@ impl TonemapPass {
         });
         self.bound = Some(Bound {
             hdr: hdr.clone(),
-            depth: depth.clone(),
+            depth,
             group,
         });
     }
@@ -243,7 +248,7 @@ impl FeaturePass for TonemapPass {
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         self.ensure_pipeline(ctx.gpu, ctx.backbuffer_format);
-        self.ensure_bind_group(ctx.gpu, ctx.targets);
+        self.ensure_bind_group(ctx.gpu, ctx.targets, ctx.resources);
         let (Some(pipeline), Some(bound)) = (
             self.pipelines.get(&ctx.backbuffer_format),
             self.bound.as_ref(),
@@ -279,6 +284,67 @@ impl FeaturePass for TonemapPass {
 mod tests {
     use super::*;
     use crate::{Look, ToneMapper};
+
+    #[test]
+    fn depth_input_changes_bind_group_cache_key() {
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip(
+                "depth_input_changes_bind_group_cache_key",
+                "no software adapter",
+            );
+            return;
+        };
+        let pipeline = Pipeline::new(&gpu, wgpu::TextureFormat::Rgba8Unorm, false);
+        let (mut pass, _) = TonemapPass::new(&gpu, &pipeline);
+        let targets = Targets::new(&gpu, (8, 8));
+        let resources = ResourceTable::new();
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("test.tonemap.depth"),
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        pass.ensure_bind_group(&gpu, &targets, &resources);
+        let first = pass.bound.as_ref().unwrap();
+        assert_eq!(first.depth, *targets.depth());
+        let first_group = first.group.clone();
+        resources.bind_input(
+            "tonemap",
+            "depth",
+            raa_pipeline::PublishedImage {
+                view: view.clone(),
+                desc: raa_pipeline::ImageDesc::new(
+                    raa_pipeline::ImageDim::D2,
+                    wgpu::TextureFormat::Depth32Float,
+                    8,
+                    8,
+                    1,
+                    1,
+                ),
+            },
+        );
+        pass.ensure_bind_group(&gpu, &targets, &resources);
+        let bound = pass.bound.as_ref().unwrap();
+        assert_eq!(bound.depth, view);
+        assert_ne!(bound.group, first_group);
+        let bound_group = bound.group.clone();
+        pass.ensure_bind_group(&gpu, &targets, &resources);
+        assert_eq!(pass.bound.as_ref().unwrap().group, bound_group);
+        resources.clear();
+        pass.ensure_bind_group(&gpu, &targets, &resources);
+        let restored = pass.bound.as_ref().unwrap();
+        assert_eq!(restored.depth, *targets.depth());
+        assert_ne!(restored.group, bound_group);
+    }
 
     #[test]
     fn params_bytes_pack_exposure_mapper_look_dither_and_srgb() {
@@ -339,6 +405,7 @@ mod views_tests {
                 *h = (*h + c) * 0.5;
             }
             let [r, g, b] = self.history;
+            let depth = ctx.targets.depth_attachment_input(ctx.resources, "tonemap");
             {
                 let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("test.camera_post"),
@@ -352,7 +419,7 @@ mod views_tests {
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: ctx.targets.depth(),
+                        view: &depth,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(0.5),
                             store: wgpu::StoreOp::Store,

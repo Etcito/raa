@@ -647,7 +647,7 @@ impl FeaturePass for SkyCloudScreenPass {
                 ctx.gpu,
                 ctx.encoder,
                 &frame,
-                ctx.targets.depth(),
+                &ctx.targets.depth_input(ctx.resources, "sky.cloud-screen"),
                 &atmosphere,
             );
         drop(atmosphere);

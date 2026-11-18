@@ -162,7 +162,10 @@ impl FeaturePass for OverlayPass {
         let colour = ctx.backbuffer.texture().size();
         let choice = OverlayDepth::select((colour.width, colour.height), ctx.targets.size());
         let (depth_view, depth_load) = match choice {
-            OverlayDepth::Scene => (ctx.targets.depth(), wgpu::LoadOp::Load),
+            OverlayDepth::Scene => (
+                ctx.targets.depth_attachment_input(ctx.resources, "overlay"),
+                wgpu::LoadOp::Load,
+            ),
             OverlayDepth::Own(size) => {
                 if self.own_depth.as_ref().is_none_or(|(s, _)| *s != size) {
                     let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -185,7 +188,7 @@ impl FeaturePass for OverlayPass {
                 let Some((_, view)) = &self.own_depth else {
                     return Ok(());
                 };
-                (view, wgpu::LoadOp::Clear(1.0))
+                (view.clone(), wgpu::LoadOp::Clear(1.0))
             }
         };
         // `backbuffer` is the canvas (single view) or this view's output target (split
@@ -202,7 +205,7 @@ impl FeaturePass for OverlayPass {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
+                view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: depth_load,
                     store: wgpu::StoreOp::Store,
