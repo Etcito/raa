@@ -190,6 +190,52 @@ pub(crate) struct TaaTargets {
     groups: [[wgpu::BindGroup; 2]; 2],
 }
 
+fn build_groups(
+    gpu: &GpuContext,
+    pipelines: &TaaPipelines,
+    targets: &Targets,
+    frame: &wgpu::Buffer,
+    history: &HistoryPair,
+    read: &wgpu::TextureView,
+    written: &wgpu::TextureView,
+) -> [wgpu::BindGroup; 2] {
+    let device = gpu.device();
+    let group = |label: &str,
+                 read: &wgpu::TextureView,
+                 written: &wgpu::TextureView,
+                 read_history: usize,
+                 write_history: usize| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &pipelines.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: pipelines.params.as_entire_binding(),
+                },
+                view_entry(2, read),
+                view_entry(3, targets.depth()),
+                view_entry(4, targets.motion()),
+                view_entry(5, history.view(read_history)),
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&pipelines.sampler),
+                },
+                view_entry(7, written),
+                view_entry(8, history.view(write_history)),
+            ],
+        })
+    };
+    [
+        group("raa-taa.0", read, written, 1, 0),
+        group("raa-taa.1", read, written, 0, 1),
+    ]
+}
+
 impl TaaTargets {
     pub(crate) fn new(
         gpu: &GpuContext,
@@ -198,53 +244,51 @@ impl TaaTargets {
         frame: &wgpu::Buffer,
         history: &HistoryPair,
     ) -> TaaTargets {
-        let device = gpu.device();
         let hdr = targets.hdr();
-        let group = |label: &str,
-                     read: &wgpu::TextureView,
-                     written: &wgpu::TextureView,
-                     read_history: usize,
-                     write_history: usize| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout: &pipelines.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: frame.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: pipelines.params.as_entire_binding(),
-                    },
-                    view_entry(2, read),
-                    view_entry(3, targets.depth()),
-                    view_entry(4, targets.motion()),
-                    view_entry(5, history.view(read_history)),
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&pipelines.sampler),
-                    },
-                    view_entry(7, written),
-                    view_entry(8, history.view(write_history)),
-                ],
-            })
-        };
         let groups = [
-            [
-                group("raa-taa.src.0", hdr.src(), hdr.dst(), 1, 0),
-                group("raa-taa.src.1", hdr.src(), hdr.dst(), 0, 1),
-            ],
-            [
-                group("raa-taa.dst.0", hdr.dst(), hdr.src(), 1, 0),
-                group("raa-taa.dst.1", hdr.dst(), hdr.src(), 0, 1),
-            ],
+            build_groups(
+                gpu,
+                pipelines,
+                targets,
+                frame,
+                history,
+                hdr.src(),
+                hdr.dst(),
+            ),
+            build_groups(
+                gpu,
+                pipelines,
+                targets,
+                frame,
+                history,
+                hdr.dst(),
+                hdr.src(),
+            ),
         ];
         TaaTargets {
             size: targets.size(),
             read: [hdr.src_texture().clone(), hdr.dst_texture().clone()],
             groups,
         }
+    }
+
+    pub(crate) fn bound_groups(
+        gpu: &GpuContext,
+        pipelines: &TaaPipelines,
+        targets: &Targets,
+        frame: &wgpu::Buffer,
+        history: &HistoryPair,
+    ) -> [wgpu::BindGroup; 2] {
+        let hdr = targets.hdr();
+        build_groups(
+            gpu,
+            pipelines,
+            targets,
+            frame,
+            history,
+            hdr.src(),
+            hdr.dst(),
+        )
     }
 
     /// The group whose read HDR texture equals `src` at parity `write_index & 1`, or None
