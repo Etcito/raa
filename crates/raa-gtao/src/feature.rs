@@ -128,6 +128,9 @@ struct Textures {
     gtao_group: wgpu::BindGroup,
     denoise_h_group: wgpu::BindGroup,
     denoise_v_group: wgpu::BindGroup,
+    /// The depth and normal views the three groups were built from.
+    depth: wgpu::TextureView,
+    normal: wgpu::TextureView,
 }
 
 /// One compute pipeline and its derived group-0 layout.
@@ -168,7 +171,9 @@ fn create_texture(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -189,8 +194,12 @@ fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_>
     }
 }
 
-/// The `ao.gtao` compute pass.
+/// The `ao.gtao` compute pass (and its `ao.gtao#<instance>` clones).
 struct GtaoPass {
+    /// Pipeline entry name: `ao.gtao` or `ao.gtao#<instance>`.
+    name: String,
+    /// An instance pass never touches group 1.
+    instance: bool,
     state: SharedGtao,
     gtao: Kernel,
     denoise_h: Kernel,
@@ -206,6 +215,10 @@ struct GtaoPass {
 
 impl GtaoPass {
     fn new(gpu: &GpuContext, state: SharedGtao) -> Self {
+        Self::named(gpu, state, NAME.to_owned(), false)
+    }
+
+    fn named(gpu: &GpuContext, state: SharedGtao, name: String, instance: bool) -> Self {
         let device = gpu.device();
         let gtao_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("raa-gtao.gtao"),
@@ -222,6 +235,8 @@ impl GtaoPass {
             mapped_at_creation: false,
         });
         GtaoPass {
+            name,
+            instance,
             state,
             gtao: Kernel::new(device, &gtao_module, "gtao"),
             denoise_h: Kernel::new(device, &denoise_module, "denoise_h"),
@@ -233,11 +248,54 @@ impl GtaoPass {
             bound: false,
         }
     }
+
+    /// The three groups over `depth` and `normal` for the textures' raw, blur and out views.
+    fn groups(
+        &self,
+        device: &wgpu::Device,
+        raw_view: &wgpu::TextureView,
+        blur_view: &wgpu::TextureView,
+        out_view: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        normal: &wgpu::TextureView,
+    ) -> (wgpu::BindGroup, wgpu::BindGroup, wgpu::BindGroup) {
+        let gtao_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gtao.gtao"),
+            layout: &self.gtao.layout,
+            entries: &[
+                view_entry(0, depth),
+                view_entry(1, normal),
+                buffer_entry(2, &self.uniform),
+                view_entry(3, raw_view),
+            ],
+        });
+        let denoise_h_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gtao.denoise_h"),
+            layout: &self.denoise_h.layout,
+            entries: &[
+                view_entry(0, raw_view),
+                view_entry(1, depth),
+                view_entry(2, blur_view),
+                buffer_entry(4, &self.uniform),
+            ],
+        });
+        let denoise_v_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("raa-gtao.denoise_v"),
+            layout: &self.denoise_v.layout,
+            entries: &[
+                view_entry(0, blur_view),
+                view_entry(1, depth),
+                view_entry(3, out_view),
+                buffer_entry(4, &self.uniform),
+            ],
+        });
+        (gtao_group, denoise_h_group, denoise_v_group)
+    }
 }
 
 impl FeaturePass for GtaoPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -262,36 +320,14 @@ impl FeaturePass for GtaoPass {
             size,
             wgpu::TextureFormat::Rgba16Float,
         );
-        let gtao_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa-gtao.gtao"),
-            layout: &self.gtao.layout,
-            entries: &[
-                view_entry(0, targets.depth()),
-                view_entry(1, targets.normal()),
-                buffer_entry(2, &self.uniform),
-                view_entry(3, &raw_view),
-            ],
-        });
-        let denoise_h_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa-gtao.denoise_h"),
-            layout: &self.denoise_h.layout,
-            entries: &[
-                view_entry(0, &raw_view),
-                view_entry(1, targets.depth()),
-                view_entry(2, &blur_view),
-                buffer_entry(4, &self.uniform),
-            ],
-        });
-        let denoise_v_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa-gtao.denoise_v"),
-            layout: &self.denoise_v.layout,
-            entries: &[
-                view_entry(0, &blur_view),
-                view_entry(1, targets.depth()),
-                view_entry(3, &out_view),
-                buffer_entry(4, &self.uniform),
-            ],
-        });
+        let (gtao_group, denoise_h_group, denoise_v_group) = self.groups(
+            device,
+            &raw_view,
+            &blur_view,
+            &out_view,
+            targets.depth(),
+            targets.normal(),
+        );
         self.textures = Some(Textures {
             size,
             _raw: raw,
@@ -303,6 +339,8 @@ impl FeaturePass for GtaoPass {
             gtao_group,
             denoise_h_group,
             denoise_v_group,
+            depth: targets.depth().clone(),
+            normal: targets.normal().clone(),
         });
         self.needs_bind = true;
     }
@@ -310,6 +348,9 @@ impl FeaturePass for GtaoPass {
     /// Disabling resets binding 7 to the dummy (AO 1); enabling gives the output back to
     /// the lighting at the next prepare.
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
+        if self.instance {
+            return;
+        }
         if enabled {
             self.needs_bind = true;
         } else {
@@ -323,6 +364,31 @@ impl FeaturePass for GtaoPass {
     /// and, when needed, sets the output view on the lighting.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let st = self.state.try_borrow().map_err(|_| state_busy())?;
+        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
+        let normal = ctx.targets.normal_input(ctx.resources, &self.name);
+        if self
+            .textures
+            .as_ref()
+            .is_some_and(|t| t.depth != depth || t.normal != normal)
+        {
+            let (gtao_group, denoise_h_group, denoise_v_group) = {
+                let t = self.textures.as_ref().unwrap();
+                self.groups(
+                    ctx.gpu.device(),
+                    &t.raw_view,
+                    &t.blur_view,
+                    &t.out_view,
+                    &depth,
+                    &normal,
+                )
+            };
+            let t = self.textures.as_mut().unwrap();
+            t.depth = depth;
+            t.normal = normal;
+            t.gtao_group = gtao_group;
+            t.denoise_h_group = denoise_h_group;
+            t.denoise_v_group = denoise_v_group;
+        }
         if let Some(t) = self.textures.as_ref() {
             let (w, h) = t.size;
             for (port, view, format) in [
@@ -331,15 +397,17 @@ impl FeaturePass for GtaoPass {
                 ("blur", &t.blur_view, wgpu::TextureFormat::R32Float),
             ] {
                 let desc = ImageDesc::new(ImageDim::D2, format, w, h, 1, 1);
-                ctx.resources.publish(NAME, port, view, desc);
+                ctx.resources.publish(&self.name, port, view, desc);
             }
         }
         let (Some(camera), Some(textures)) = (st.camera, self.textures.as_ref()) else {
-            if self.bound {
-                ctx.lighting.clear_ao();
-                self.bound = false;
+            if !self.instance {
+                if self.bound {
+                    ctx.lighting.clear_ao();
+                    self.bound = false;
+                }
+                self.needs_bind = true;
             }
-            self.needs_bind = true;
             return Ok(());
         };
         pack_params(
@@ -351,7 +419,7 @@ impl FeaturePass for GtaoPass {
             ctx.frame,
         );
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
-        if self.needs_bind {
+        if !self.instance && self.needs_bind {
             ctx.lighting.set_ao(textures.out_view.clone());
             self.needs_bind = false;
             self.bound = true;
@@ -425,6 +493,40 @@ impl GtaoFeature {
         p.add(Box::new(GtaoPass::new(gpu, state.clone())))?;
         Ok(GtaoHandle { state })
     }
+
+    /// Handoff: card 'Slots 3/3: gtao and contact instance passes in the slots extension'
+    /// calls `GtaoFeature::install_instance` and `GtaoHandle::copy_camera_from`. Today it
+    /// adds the pass `ao.gtao#<instance>` (order 40) through `GtaoPass::named` with its own
+    /// `GtaoState` (default description and quality, no camera) and adds no `Ao` slot
+    /// provider; the pass publishes `ao`, `raw` and `blur` under that name, reads depth and
+    /// normal through `Targets::depth_input` and `Targets::normal_input` with its own name,
+    /// and never calls `set_ao` or `clear_ao`. `copy_camera_from` copies the source handle's
+    /// camera into this handle's state, ignored when both share one state or on a
+    /// re-entrant borrow.
+    ///
+    /// Refusals (nothing installed): `pipeline.busy` when the pipeline is borrowed,
+    /// `pipeline.duplicate_pass` when `ao.gtao#<instance>` is already installed.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<GtaoHandle, RaaError> {
+        let name = format!("{NAME}#{instance}");
+        let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        if p.passes().iter().any(|info| info.name == name) {
+            return Err(refusal(
+                "pipeline.duplicate_pass",
+                &format!("the pass `{name}` is already installed"),
+            ));
+        }
+        let state = Rc::new(RefCell::new(GtaoState {
+            desc: AoDesc::default(),
+            quality: AoQuality::default(),
+            camera: None,
+        }));
+        p.add(Box::new(GtaoPass::named(gpu, state.clone(), name, true)))?;
+        Ok(GtaoHandle { state })
+    }
 }
 
 /// Access to the installed GTAO (clones share one state).
@@ -485,6 +587,21 @@ impl GtaoHandle {
             .try_borrow()
             .map(|st| st.quality)
             .unwrap_or_default()
+    }
+
+    /// Copies `source`'s camera (None stays None) into this handle's state. Does nothing when
+    /// both handles share one state or on a re-entrant borrow.
+    pub fn copy_camera_from(&self, source: &GtaoHandle) {
+        if Rc::ptr_eq(&self.state, &source.state) {
+            return;
+        }
+        let camera = match source.state.try_borrow() {
+            Ok(st) => st.camera,
+            Err(_) => return,
+        };
+        if let Ok(mut st) = self.state.try_borrow_mut() {
+            st.camera = camera;
+        }
     }
 
     /// The frame's camera (called every frame): `proj` of the scene camera and `inv_proj`
