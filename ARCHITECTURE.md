@@ -6,38 +6,40 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 
 ### Repositories, toolchain, layout
 - Writable: `raa`, `mama`, `sdfm`, merged in the order mama, raa, sdfm; `raa:`, `mama:`, `sdfm:` qualify paths, unqualified paths are RAA's. MAMA owns procedural scene data and the saved mesh format. Solstice (`7e465b599c13da165948ebaa44df824c36c3ae07`) is read-only; adapted files keep the MIT notice and `Copyright (c) 2026 SamG-Coder`. Kong resolves linked packages; host `dist/` and abandoned branches are never inputs. MAMA never imports RAA, nothing under `crates/` names MAMA; `packages/raa-sdfm` is the passage.
-- One owner module per file; an explicit file or narrower directory wins over a glob. A task writes one repository, only its milestone's module files, in one unpushed commit; repairing an earlier owner needs the lead. A `Cargo.lock` refresh for a new crate or dependency, one api path-dependency line in `crates/raa-js/Cargo.toml` and appended `.nmc/commands.json` entries are not ownership changes.
+- One owner module per file; an explicit file or narrower directory wins over a glob. A task writes one repository, only its milestone's module files, in one unpushed commit; repairing an earlier owner needs the lead. A `Cargo.lock` refresh for a new crate or dependency, one api path-dependency line in `crates/raa-js/Cargo.toml`, appended `.nmc/commands.json` entries and the bounded seam edits of S51 are not ownership changes.
 - Workspace: edition 2024, rust-version 1.96.0, version 0.5.0, resolver 2, members `crates/*`, `demos/*`, `tests/*`, `Cargo.lock` committed.
 - Closed dependencies: `wgpu` 30.0.1 (no default features, `wgsl`; `webgpu` on wasm32, `vulkan`, `gl` native), `naga` 30.0.1 (`wgsl-in`, validation), `wasm-bindgen` =0.2.129, `wasm-bindgen-futures` =0.4.79, `js-sys`/`web-sys` =0.3.106, `pollster` 1.0.1. No serde, glam, nalgebra, bytemuck, rayon, rustc-hash, log framework, network service or threads.
 - Every crate builds for host and `wasm32-unknown-unknown`; `[profile.wasm-release]`: opt-level z, LTO, one codegen unit, panic abort, strip. raa-pipeline, raa-shader, raa-lit, raa-mesh, raa-sky, raa-oit, raa-fog, raa-cluster and raa-vg are sibling `path` dependencies.
-- Layout: `crates/<name>/{Cargo.toml, README.md, src/lib.rs, tests/<topic>.rs}`, `demos/<mN-name>/`, `tests/<name>/`, `proofs/`, `scripts/`, `web/`, `tools/`, `packages/raa/` (`@etcito/raa`), `packages/raa-sdfm/`, `examples/{basic,lookdev,sdfm-compare,sky-weather,virtual-geometry}/`.
+- Layout: `crates/<name>/{Cargo.toml, README.md, src/lib.rs, tests/<topic>.rs}`, `demos/<mN-name>/`, `tests/<name>/`, `proofs/`, `scripts/`, `web/`, `tools/`, `packages/raa/` (`@etcito/raa`), `packages/raa-sdfm/`, `examples/{basic,lookdev,sdfm-compare,sky-weather,virtual-geometry,global-illumination,post}/`.
 - Tools: `node` (`${NODE:-node}`), `wasm-bindgen` CLI, `python3` (judge), repository-local TypeScript; no fetching `npx`.
 
 ### Coordinates, units, colour
 - Right-handed, +Y up, camera forward -Z, metres; CCW front faces, outward normals; column-major f32 matrices, column vectors; quaternions `[x, y, z, w]`. Clip depth [0, 1], `Depth32Float`, `Less`, clear 1; the sky draws at depth 1 with `LessEqual`. RAA is standard-Z, solstice reversed-Z: adapted depth code uses the S32 depth helper, never hand-flipped comparisons.
 - Rust and GPU colours are linear; asset and JS colours sRGB unless stated (sky colours and `setLight` linear, S17 lights sRGB). MAMA `ProcLight.color` is linear and gets the adapter's OETF before S17; document lights never do.
 - Kilometres only behind S23's conversion. Latitude degrees north; `north` radians about +Y (north = -Z, east = +X at zero); wind = compass direction FROM, degrees. Cluster error is object-space metres; the LOD threshold is pixels of screen-space error.
+- Exposure values are EV (base-2 stops), a linear multiplier is `2^ev`; luminance is `dot(rgb, (0.2126, 0.7152, 0.0722))` of linear HDR colour.
 
 ### Errors, state, allocation
-- One error type per crate, stable `code()` `<area>.<snake_case>`; lit crates return `raa_core::RaaError`. Refusals are typed, never NaN, panic or skip; a refused setter changes nothing. Sky edits reject atomically with `sky.invalid`, virtualized-geometry edits with `vg.invalid` and a field message; a disposed Engine answers `api.disposed`. S17 light operations are atomic; `setTransforms` keeps entries applied before a failure.
+- One error type per crate, stable `code()` `<area>.<snake_case>`; lit crates return `raa_core::RaaError`. Refusals are typed, never NaN, panic or skip; a refused setter changes nothing. Sky edits reject atomically with `sky.invalid`, virtualized-geometry edits with `vg.invalid` and a field message, post settings with `post.invalid` naming the JS key; a malformed argument is `api.invalid_argument`; a disposed Engine answers `api.disposed`. S17 light operations are atomic; `setTransforms` keeps entries applied before a failure.
 - Shader setters validate with naga synchronously; WebGPU errors arrive asynchronously. No `unwrap`, `expect` or indexing panic on public-data paths.
 - No `static mut`, `thread_local!` or lazy globals in libraries except `raa-alloc-count`'s `#[global_allocator]`; features share `Rc<RefCell<..>>` with their handle. The v0 frame path allocates nothing after warm-up; lit crates reuse scratch.
 - One Engine invocation advances playback once for all views; GPU histories are view-local and commit only for submitted work.
 - `unsafe` needs `// SAFETY: <reason> (test: <test_fn_name>)` above it; the only unsafe code is `unsafe impl GlobalAlloc for CountingAlloc`.
+- Post features (S46-S48) default off; their compute runs in WGSL or Rust, never TypeScript; they add no group-0/1 binding, variant or feature bit; ported maths has a CPU twin tested against hand-derived values.
 
 ### Testing and checks
 - Unit tests in `#[cfg(test)] mod tests`, integration in `crates/<c>/tests/<topic>.rs`, text fixtures only. Native GPU tests use `raa_core::testing::software_gpu()` and print `SKIP <test name>: no software adapter (<reason>)`. Every composed variant is naga-validated.
-- Sky, weather and virtualized geometry use no reference image, pixel metric, output hash or CPU/GPU parity: CPU tests cover their data, parsers, state, layouts and variants; GPU results are judged renders. A card's tests cover its subject, at most three files.
+- Sky, weather, virtualized geometry and post passes use no reference image, pixel metric, output hash or CPU/GPU parity: CPU tests cover data, parsers, state, layouts, maths twins and variants; GPU results are judged renders. A card's tests cover its subject, at most three files.
 - Branch checks: RAA `cargo check`, affected `node --test`, `npm run typecheck:types` when shipped declarations or `packages/raa/index.js` change, `bash scripts/check.sh` at milestone verification; MAMA `npm run typecheck`, `npm run build`, `node scripts/test.mjs --only <selector>`; SDFM `npm run typecheck`, `npm run build`, `npm run guard`, `node scripts/proof/unit.mjs --only <anchored selector> --jobs 1` after `node node_modules/typescript/bin/tsc -p tsconfig.node.json`, and the managed Chrome boot check. Readers of dist, package or WASM have a build predecessor; host work respects `NMC_CPUS` (default 1).
-- rustfmt on changed files; clippy per changed crate `--no-deps -- -D warnings`. Asserted shader, API or binding text changes with its pinning tests (S27, S35).
+- Lint is crate-scoped: `rustfmt --edition 2024 --check <written .rs files>`, `cargo clippy -p <crate> --all-targets --no-deps -- -D warnings` (plus `--lib --target wasm32-unknown-unknown`). Asserted shader, API or binding text changes with its pinning tests (S27, S35).
 
 ### Builds, browser runs, judge, commands
 - `scripts/build-web.sh <crate-dir> [--features <list>]`: `wasm-release`, `wasm-bindgen --target web` into `dist/<dir>/pkg`, copies `<crate-dir>/web/*` and `web/common/*`, writes `sizes.json` (S7). `node web/serve.mjs <dir> [--port N]` serves 127.0.0.1 with `Cache-Control: no-store`.
 - Browser rendering is a page published to managed Windows Chrome on a physical GPU through nomorechat's GPU client; nothing substitutes, a missing client is a visible failure (S22). Credentials are never printed.
 - `hardware = !isFallbackAdapter && none of /swiftshader|llvmpipe|lavapipe|software|basic render/i matches vendor, architecture, device or description`; records name the adapter. `firstFrameMs` = navigation-relative time when `onSubmittedWorkDone` of frame 0 resolves; `cpuMs` = delta around one frame call.
 - Judge: `python3 $NMC_JUDGE_CLIENT <capture.png> --description <text> [--reference <png> ...] --min-score 6`, pass = exit 0, output redacted within 4000 characters. Only lookdev (S14) passes references. Lookdev renders at a fixed time with dt 0; jiggle scenes write `setInstanceExtras` floats 8..11.
-- Captures and binaries are never committed (`scripts/check-no-assets.sh`): `proofs/captures/`, `out/sky-weather/`, `out/sky-weather-editor/`, `out/virtual-geometry/`, `out/virtual-geometry-editor/` are ignored; preset content is generated at page load. Virtualized-geometry captures use one viewport.
-- `.nmc/commands.json`: appended single-program entries `{name, command, timeout_s, cwd?, after?}` validated by `nmc-commands-check`; a run names its ordered selection. Builds, GPU jobs (<= 300 s) and judge chains run programmatically; model cards never run GPU commands, programmatic cards never write code.
+- Captures and binaries are never committed (`scripts/check-no-assets.sh`): `proofs/captures/` and `out/{sky-weather,virtual-geometry,post}{,-editor}/` are ignored; preset content and test textures are generated at page load. Virtualized-geometry captures use one viewport.
+- `.nmc/commands.json`: appended single-program entries `{name, command, timeout_s, cwd?, after?}` validated by `nmc-commands-check`; a run names its ordered selection. Builds, GPU jobs (<= 300 s) and judge chains run programmatically; model cards never run GPU commands, programmatic cards never write code; one GPU card at a time.
 
 ### Values
 | name | value |
@@ -71,12 +73,16 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 | VG_MSAA | virtualized geometry needs msaa 1 |
 | VG_VIEW_SLOTS | 11 slots of 512 B: main 0-1, cascades 2-5, GI 6-10 |
 | VG_HIGH_POLY | displaced icosphere, subdivision 6, 81920 triangles |
+| POST_SETTLE_MAX_FRAMES | 600; a post row draws until `settled` holds on 2 consecutive reads (S49) |
+| POST_UPSCALE_SCALE | 0.67 `setRenderScale` (S49, S50) |
+| ATLAS_MIP_LEVELS | 5 (S48) |
+| ATLAS_ALIGN | 16 texels (S48) |
 
 ### Proofs and scope
-- Proofs: `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]` on `proofs/lib/proof.mjs` (`p2.mjs` for lookdev), <= 5 checks printing `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`; lookdev checks `unit`, `wasm-check`, `api-doc`, `captures`, `judge`. Sky, weather and virtualized geometry add no proof script or threshold. Dogfood notes: `docs/dogfood/mN.md`.
-- Neutrality: `scripts/check.sh` rejects `royal|fiesta|monster|racer` (case-insensitive, comments included) in crates/, demos/, tests/, packages/, examples/ and docs/API.md.
-- The JS API grows through `packages/raa/types/mNN-*.d.ts` and `docs/api/mNN-*.md`; `index.d.ts` and `docs/API.md` stay v0. Virtualized geometry is m29.
-- Not provided: local-light shadows, TAA or scene history, upscaling, GI, precipitation particles, a second distance fog, virtualized skinned, deformed, transparent or fur instances, cluster streaming or paging.
+- Proofs: `node proofs/mN-<name>.mjs [--quick|--full] [--only <regex>]` on `proofs/lib/proof.mjs` (`p2.mjs` for lookdev), <= 5 checks printing `CHECK <label> | measured: <value> | threshold: <threshold> | PASS|FAIL`; lookdev checks `unit`, `wasm-check`, `api-doc`, `captures`, `judge`. Sky, weather, virtualized geometry and post add no proof script or threshold. Dogfood notes: `docs/dogfood/mN.md`.
+- Neutrality: `scripts/check.sh` rejects `royal|fiesta|monster|racer` (case-insensitive, whole words, comments included) in crates/, demos/, tests/, packages/, examples/ and docs/API.md. raa is public: no local path, machine name or private project name.
+- The JS API grows through `packages/raa/types/mNN-*.d.ts` and `docs/api/mNN-*.md`; `index.d.ts` and `docs/API.md` stay v0 apart from index lines and the `addTexture` text. Virtualized geometry is m29, GI m30, TAA m31, automatic exposure m33, sharpening m34.
+- Not provided: local-light shadows, an internal render scale, BC7/BC5 compression, a GPU profiler, precipitation particles, a second distance fog, virtualized skinned, deformed, transparent or fur instances, cluster streaming or paging. TAA (raa-taa) and GI (raa-gi) are described in their crates.
 
 ### Quality bar
 - **Q1** `scripts/check.sh` exits 0. **Q2** shipped .wasm gzip <= WASM_GZIP_MAX. **Q3** `firstFrameMs` <= FIRST_FRAME_MAX_MS, 1000-instance `cpuMsMedian` <= CPU_MS_MEDIAN_MAX on hardware. **Q4** `raa-bench frame-allocs` reports 0 over ALLOC_RUN. **Q5** the 8 primitive kinds at LOW, LOD0, HIGH are closed, satisfy NORMAL_RULE, hash identically and match the reference within SDF_REF_TOL. **Q6** prims v0 round-trips byte-identical; invalid cases are refused. **Q7** supported CSG cases are watertight within CSG_EPS, others refuse. **Q8** raa-ext-test extends RAA without editing other crates; every JS export is documented. **Q9** records name the adapter and state `hardware`. **Q10** every lookdev variant has an S14 record, `nonEmpty` and `hardware` true, no GPU errors. **Q11** judged variants exit 0. **Q15** every toggleable feature has `-on`/`-off` variants and stays valid when disabled.
@@ -84,6 +90,7 @@ This contract governs the linked `raa`, `mama` and `sdfm` repositories. RAA is a
 - **QB1-QB9** (local lights): earlier sun, ambient and material paths unchanged; lights per S11, no local shadows; move, rotate, detach, delete and reattach keep ownership; four bind groups and stage storage limits hold; overflow is reported.
 - **P2-Q1** blue day sky with warm horizon, continuous twilight, dark night with moon phase, stars, Milky Way. **P2-Q2** background, reflections, IBL and fog share the accepted sky state. **P2-Q3** the weather presets differ; wind and evolution move clouds; cloud shadows move and vanish when disabled while CSM and contact stay. **P2-Q4** resize, camera cut, model or weather change and re-enable leave no stale history. **P2-Q5** readable Game time, place and weather controls with units, pause/play, validation, kept across reload. **P2-Q6** invalid edits keep the last valid state. **P2-Q7** shared layouts, stage limits and single attenuation hold in every variant. **P2-Q8** every required image is current and judged >= 6.
 - **P3** (virtualized geometry; command where stated, else judged): **P3-Q1** (command) raa-cluster cuts watertight, error monotonic to the root, finest cut = welded source, output independent of step budget. **P3-Q2** a dense static high-poly field renders virtualized with sky, fog, cascades, local lights and post on it. **P3-Q3** one mesh at several distances without crack or popping, fewer triangles farther away. **P3-Q4** occluders lower drawn clusters with occlusion on, same content. **P3-Q5** casts and receives cascade shadows with forward content. **P3-Q6** skinned, deformed, transparent and fur content stays forward, depth-sorted and lit alike, refusals reported with codes. **P3-Q7** a mesh without clusters shows on forward while baking, then virtualized. **P3-Q8** (command + judge) all vg passes off records and allocates nothing; presets have `-on`/`-off`; debug views are distinguishable. **P3-Q9** (command + judge) SDF Modeler exports valid sections for static meshes; the Game-view setting is labelled, off for old settings, kept across reload; animated parts stay forward silently; required failures are shown. **P3-Q10** (command) every required image current, judged >= 6, pairs carry VG_PAIR_RUN.
+- **P5** (post): **P5-Q1** (command) S46-S48 CPU twins pass, WGSL validates, refusals change nothing. **P5-Q2** auto exposure makes interior and sunlit exterior readable once settled. **P5-Q3** sharpening is crisper at scale 1 and 0.67 without halos. **P5-Q4** atlas mips remove distant moire and sparkle, near field as sharp. **P5-Q5** defaults off keep earlier looks; `-on`/`-off` rows exist. **P5-Q6** the SDF Modeler Game-view post controls are labelled, off, kept across reload and work. **P5-Q7** (command) images current, judged >= 6, pairs carry PAIR_RUN.
 
 ## S1. GPU layouts
 All layouts are little-endian, written with `to_le_bytes`, with no unsafe code. These are the v0 forward renderer layouts (raa-render). The lit renderer extends them in S10 and keeps the Vertex and Instance layouts.
@@ -261,9 +268,9 @@ Little-endian `to_le_bytes`, byte offsets, ranges exclude the upper end, matrix 
 
 **Streams**: 0 = S1 Vertex (24 B, locations 0-1); 1 (40 B) = `uv` @0 (loc 10), `tangent: f32x4` @8 (loc 11, w ±1), `color` @24 (loc 12, linear); defaults (0, 0), `default_tangent(normal)`, white. The lit path replaces the S1 Instance stream with a compacted `u32` scene-instance slot at location 2; `raa_instance(id)` reads binding 7, so draw order never moves records. `RaaInstanceGpu` (128 B): model columns @0-48, inverse-transpose normal columns @64-96 (w 0), `material_index` @112, `tag` @116, `palette_base` @120, 0 @124. Posed variants read a 64 B rest-skin record from vertex slot 3 (position @0, normal @12, tangent @24 loc 11, joints u16x4 @40 loc 13, weights @48 loc 14). Each scene instance (one per sub-mesh of a JS group) owns one slot for bindings 2, 7, 8; the tag selects the group's extras.
 
-**Group 0** (0-7 VERTEX|FRAGMENT, 8 VERTEX; read-only storage): 0 `FrameGpu` (768 B); 1 `array<SurfaceMaterialGpu>` (256 B); 2 `array<InstanceExtraGpu>` (128 B); 3 material atlas, 4 its sampler, 5 atlas rects (16 B (x, y, w, h); id 0 and removed ids zero); 6 `array<u32>` material data (`raa_material_word`, `raa_material_f32`, `raa_material_data_base`; words 0-3 zero); 7 `array<RaaInstanceGpu>`; 8 `array<RaaPreviousInstanceGpu>`.
+**Group 0** (0-7 VERTEX|FRAGMENT, 8 VERTEX; read-only storage): 0 `FrameGpu` (768 B); 1 `array<SurfaceMaterialGpu>` (256 B); 2 `array<InstanceExtraGpu>` (128 B); 3 material atlas (`Rgba8Unorm` 4096², 5 mips once a texture exists, 1 x 1 before; S48), 4 its sampler (linear incl. mipmap, clamp), 5 atlas rects (16 B (x, y, w, h) / 4096; negative w = level 0 only; id 0 and removed ids zero); 6 `array<u32>` material data (`raa_material_word`, `raa_material_f32`, `raa_material_data_base`; words 0-3 zero); 7 `array<RaaInstanceGpu>`; 8 `array<RaaPreviousInstanceGpu>`.
 
-**FrameGpu** (`FRAME_GPU_SIZE` 768): `view_proj` @0, `view` @64, `proj` @128, `inv_proj` @192, `inv_view` @256, `camera_pos` @320 (w time s), `sun_dir` @336 (travel, w angular radius 0.0047), `sun_color` @352, `ambient` @368, `viewport` @384 (w, h, 1/w, 1/h), `clip` @400 (near, far, frame index, dt), `flags: vec4<u32>` @416 (sRGB encode, msaa, feature words z and w), `exposure` @432 (ev, 2^ev, mapper agx 0 / aces 1 / linear 2, look none 0 / punchy 1 / golden 2), 0 @448-512, `previous_view_proj` @512, `unjittered_view_proj` @576, `camera_jitter` @640 (current, previous NDC), `light_info: vec4<u32>` @656 (lights, tile columns, rows, stride 128), `temporal: vec4<u32>` @672 (parity, accumulation, history valid, 0), 0 @688-768. `view`/`proj` are unjittered; jitter is opt-in (Halton 2/3 samples 1-8 minus 0.5, pixels to NDC (2dx/w, -2dy/h)) and zero without a consumer (none enabled). Creation, resize, camera discontinuity and jitter changes invalidate camera history; one render invocation advances one frame for all views, camera history commits per submitted view, partial submission invalidates history.
+**FrameGpu** (`FRAME_GPU_SIZE` 768): `view_proj` @0, `view` @64, `proj` @128, `inv_proj` @192, `inv_view` @256, `camera_pos` @320 (w time s), `sun_dir` @336 (travel, w angular radius 0.0047), `sun_color` @352, `ambient` @368, `viewport` @384 (w, h, 1/w, 1/h), `clip` @400 (near, far, frame index, dt), `flags: vec4<u32>` @416 (sRGB encode, msaa, feature words z and w), `exposure` @432 (ev, 2^ev, mapper agx 0 / aces 1 / linear 2, look none 0 / punchy 1 / golden 2; static, never written by S46), 0 @448-512, `previous_view_proj` @512, `unjittered_view_proj` @576, `camera_jitter` @640 (current, previous NDC), `light_info: vec4<u32>` @656 (lights, tile columns, rows, stride 128), `temporal: vec4<u32>` @672 (parity, accumulation, history valid, 0), 0 @688-768. `view`/`proj` are unjittered; jitter (Halton 2/3 samples 1-8 minus 0.5, pixels to NDC (2dx/w, -2dy/h)) is zero without a consumer. Creation, resize, camera discontinuity and jitter changes invalidate camera history; one render invocation advances one frame for all views, camera history commits per submitted view, partial submission invalidates history.
 
 **Feature ids**: `raa-shader/build.rs` generates `feature_address(id)` and WGSL `raa_feature_enabled(id)`: ids 0-31 flags.z bit id, 32-63 flags.w bit id-32. Assigned: 24 light tiling; 27 virtualized geometry, 28 visibility shading, 36 vg extension (set by raa-vg while active, S32). Reserved only: 25 weather, 26 day/night, 29 GI, 30 volume visibility, 31 TAA, 32 histogram exposure, 33 sharpening, 34 atlas mips, 35 temporal reconstruction, 37 GI extension, 38 post extension.
 
@@ -366,12 +373,14 @@ fn material_vertex(in: VertexMaterialInput) -> VertexMaterialOutput // optional 
 | 85 | particles.blend | pass | raa-particles |
 | 110 | dof | pass | raa-dof |
 | 120 | bloom | pass | raa-bloom |
+| 125 | exposure.auto | pass, off by default | raa-exposure |
 | 130 | grading | pass | raa-grading |
 | 190 | cel.resolve | pass | raa-cel |
+| 195 | sharpen | pass, off by default | raa-sharpen |
 | 200 | tonemap | pass, required | raa-tonemap |
 
-- Contributor orders are positions in the forward MSAA pass after opaque draws. Feature bits follow S10 ids. `pipeline.required_order` also refuses prepass < light.tiles < {ao.gtao, forward} inverted, the S28 sky pairs and the S32 vg pairs.
-- Targets (surface-sized): `depth` Depth32Float single-sample (prepass, RENDER_ATTACHMENT | TEXTURE_BINDING); `normal` Rgba16Float (view normal, roughness); `material` Rgba8Unorm (F0 sRGB, metallic); `motion` Rg16Float (prepass location 2, cleared 0); `hdr` chain A/B (HDR_FORMAT, RENDER_ATTACHMENT | TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC | COPY_DST). `forward` resolves into `hdr.dst()` and swaps; later passes read src, write dst, swap; tonemap reads src.
+- Contributor orders are positions in the forward MSAA pass after opaque draws. Feature bits follow S10 ids. `pipeline.required_order` also refuses prepass < light.tiles < {ao.gtao, forward} inverted, the S28 sky pairs and the S32 vg pairs. `taa` (100), the GI, skin and SDF-trace passes keep their crates' order constants.
+- Targets (surface-sized): `depth` Depth32Float single-sample (prepass, RENDER_ATTACHMENT | TEXTURE_BINDING); `normal` Rgba16Float (view normal, roughness); `material` Rgba8Unorm (F0 sRGB, metallic); `motion` Rg16Float (prepass location 2, cleared 0); `hdr` chain A/B (HDR_FORMAT, RENDER_ATTACHMENT | TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC | COPY_DST). `forward` resolves into `hdr.dst()` and swaps; later passes read src, write dst, swap; tonemap reads src. With m21 viewports each view has its own targets and every pass's `resize` is called per view per frame; a pass compares sizes itself.
 - Disabling calls `set_enabled(false, lighting)`, resetting group-1 resources to dummies. With EnvGpu background mode 0, tonemap writes `background` where depth == 1: an empty scene equals CLEAR_COLOR and `probeNonEmpty` keeps its v0 meaning.
 
 **Motion**: current unjittered NDC minus previous (minus `camera_jitter.zw`) as UV `(dx/2, -dy/2)`. Zero when frame history or the slot's `previous_valid` is invalid, for vertex functions, unsupported deformation, w <= 0 or non-finite values; the sky leaves 0.
@@ -418,31 +427,26 @@ The adapter reads the shared `sdfm.game-asset` v1 file.
 - Fields: format, version 1, game, id, name, category, world, mesher, document, collision, anchors, bounds, hash.
 - Rules: canonical key order, document <= 2 MB, finite numbers, id `^[a-z][a-z0-9]*(\\.[a-z0-9-]+)+$`.
 
-RAA uses only:
-- `document`, meshed by MAMA in workers;
-- `mesher`, passed to MAMA unchanged;
-- `anchors` and `bounds`;
-- `hash`, the cache key: the recomputed sha256 of the UTF-8 bytes of MAMA `serializeDocument(document)` must match.
-
-`collision` is passed through untouched and never used for rendering. MAMA's typed mesher refusals surface as `sdfm.mesher_refused`, with MAMA's message naming the group.
+RAA uses only `document` (meshed by MAMA in workers), `mesher` (passed unchanged), `anchors`, `bounds` and `hash` (cache key: the recomputed sha256 of the UTF-8 bytes of MAMA `serializeDocument(document)` must match). `collision` is passed through, never rendered. MAMA's mesher refusals surface as `sdfm.mesher_refused` with MAMA's message naming the group.
 
 Codes: `sdfm.format`, `sdfm.version`, `sdfm.schema` (JSON pointer), `sdfm.not_finite`, `sdfm.id`, `sdfm.cap_document`, `sdfm.hash_mismatch`, `sdfm.mesher_refused`, `sdfm.material_unmappable`, `sdfm.worker`, `sdfm.disposed`.
 
-**Closed-M3 procedural entrypoints.** Inspected at raa `b38bca9090e0d3d665fd498746d831e4bea07b60`; detailed options and refusals remain in `packages/raa-sdfm/index.d.ts` and its owning implementations. Asset loading above remains unchanged, including the format's hash data and cache validation.
-- Package-root exports include `createSdfmLoader(options: SdfmLoaderOptions): SdfmLoader` and `loadProceduralScene(engine: Engine, loader: SdfmLoader, scene: string | object, options?: ProceduralSceneOptions): Promise<ProceduralSceneHandle>`. Preserve every other existing root export in `packages/raa-sdfm/index.js`.
-- `SdfmLoaderOptions.mama` is an accessor returning `Promise<string | URL | SdfmMamaModule>`; it resolves once per loader. A URL selects workers; an object meshes in-process. Existing worker options, LODs, rigs, clips, material mapping and asset return shapes remain.
-- `ProceduralSceneOptions` carries `resolveAsset?`, `resolveMesh?`, `parent?`, `mode?: 'mesh' | 'trace'` (default mesh), `procgen?`, trace-only `placement?: Vec3` and `mama?: () => Promise<SdfmProceduralMama>`. MAMA parses both text and object input; mesh mode supports both S16 variants, trace mode only sdf-refs. No alternate loader or hierarchy is introduced.
-- `ProceduralSceneHandle` exposes `root`, `instanceCount`, `sourceCount`, `setVisible(visible)`, `stats()`, `runtime(procgen)` and `dispose()`. Existing stats remain `{ instances, meshes, pending }` (mesh implementation may also report `attributed`); no light registry/count is added. Each mesh scene instance keeps its own node under root; trace mode retains the existing shared engine trace slot.
-- `ProceduralSceneRuntime` exposes `step(tick): Promise<{ moved, remeshed, added, removed, ok, issues }>`, `set(values: Record<string, ProceduralRuntimeValue>): void` and `dispose(): void`; `ProceduralRuntimeValue` is `number | boolean | Vec3`. Preserve existing implementation result extensions and instance lifecycle callbacks.
-- Internal module exports are not additional package-root APIs: `src/mama-bridge.js` exports `importMama(base, options = {})`, `importProcedural(base)`, `createBrowserPool(mama, options)`, `meshDocument(mama, document, options)`, `toMamaMaterial(mama, built)` and `toMamaLight(light)`; `src/procedural-runtime.js` exports `createProceduralRuntime(options = {})`; `src/procedural-trace.js` exports `loadProceduralTrace(engine, loader, scene, mama, options)`. MAMA imports stay centralized in the bridge; Rust crates never name or depend on MAMA.
+**Procedural entrypoints** (details in `packages/raa-sdfm/index.d.ts`):
+- Root exports include `createSdfmLoader(options): SdfmLoader` and `loadProceduralScene(engine, loader, scene: string | object, options?): Promise<ProceduralSceneHandle>`, beside the other exports of `index.js`.
+- `SdfmLoaderOptions.mama` returns `Promise<string | URL | SdfmMamaModule>`, resolved once per loader; a URL selects workers, an object meshes in-process.
+- `ProceduralSceneOptions`: `resolveAsset?`, `resolveMesh?`, `parent?`, `mode?: 'mesh' | 'trace'` (default mesh), `procgen?`, trace-only `placement?: Vec3`, `mama?`. Mesh mode supports both S16 variants, trace mode only sdf-refs.
+- `ProceduralSceneHandle`: `root`, `instanceCount`, `sourceCount`, `setVisible(visible)`, `stats()` (`{ instances, meshes, pending }`), `runtime(procgen)`, `dispose()`. Each mesh instance keeps its own node under root; trace mode uses the shared engine trace slot.
+- `ProceduralSceneRuntime`: `step(tick): Promise<{ moved, remeshed, added, removed, ok, issues }>`, `set(values: Record<string, number | boolean | Vec3>)`, `dispose()`.
+- Internal modules: `src/mama-bridge.js` (`importMama`, `importProcedural`, `createBrowserPool`, `meshDocument`, `toMamaMaterial`, `toMamaLight`; the only MAMA import point), `src/procedural-runtime.js` (`createProceduralRuntime`), `src/procedural-trace.js` (`loadProceduralTrace`).
+- `render-options.js` `applyRenderOptions` keys include `renderScale`, `autoExposure` and `sharpening` (S47).
 
-**Light mapping and resource ownership.** `toMamaLight` copies the S16 record into an S17 `LocalLightDesc`: position from `t`, travel direction from normalized `R(r) * S(s) * [0,0,-1]`, with quaternion `[x,y,z,w]`. Range and full area extents stay in metres independent of scale. It preserves kind, intensity, range, shadows and applicable spot angles/area size; an omitted inner angle stays absent. It converts linear RGB to sRGB for the engine boundary exactly as specified in Conventions, without mutating evaluator arrays.
-- `src/mama-light-owner.js`'s internal `createMamaLightOwner(engine, placement = [0,0,0])` gives each loaded scene one private full-evaluator-id-to-handle registry, independent of geometry keys. Both static loaders pass this same owner to their runtime adapters; accessing runtime never duplicates static lights. These are world-space lights: parenting the scene root does not implicitly attach them to an engine instance. Document-owned Game handles are a separate ownership domain.
-- Static optional lights work with `runtime: null` and zero geometry. Trace placement is a copied finite translation added once to copied `t` for every static/runtime snapshot; it never accumulates or changes direction, range or size. Mesh mode uses zero placement.
-- Preparation validates/maps all records before allocation, stages new lights without illumination, and commits after the external scene application succeeds. Surviving ids retain handles, removed ids release them, and replacement never leaves duplicates. Failed light updates restore previous descriptors and release staged additions; failed loads release their own resources without disturbing other published scene handles. Engine refusals propagate unchanged.
-- A complete snapshot resets removed optional `angleDeg`, `innerAngleDeg` and `size` fields explicitly before merging its descriptor. This differs from an ordinary partial S17 update: a removed authored inner angle must not linger. Missing `delta.output` leaves the published set unchanged; a successful complete output with omitted lights or `[]` clears it. Failed evaluation preserves the previous set, including on the first geometry-baseline step.
-- `setVisible` suppresses illumination through intensity zero while retaining authored descriptors/identities; show restores them. Failed light visibility updates restore prior light state. Scene/runtime disposal aborts pending preparation and removes owned lights; pending steps cannot recreate disposed resources. Cleanup is idempotent and does not remove another scene's lights; reload after disposal leaves no stale illumination.
-- Malformed/duplicate records, degenerate direction and invalid placement use `sdfm.scene_format` with useful paths. Resolve/decode/trace-pack failures use `sdfm.scene_resolve`, imports use `sdfm.worker`, disposed owners use `sdfm.disposed`. Transport-valid values outside engine domains or capacity are refused by S17, never silently skipped or clamped. Existing asset, mesher and material errors remain unchanged.
+**Light mapping and ownership.** `toMamaLight` copies an S16 record into an S17 `LocalLightDesc`: position from `t`, travel direction normalized `R(r) * S(s) * [0,0,-1]`; range and area extents stay metres; kind, intensity, range, shadows, angles and size kept, an omitted inner angle stays absent; linear RGB converts to sRGB without mutating evaluator arrays.
+- `src/mama-light-owner.js` `createMamaLightOwner(engine, placement = [0,0,0])` gives each scene one id-to-handle registry shared by static load and runtime (no duplicates). Lights are world-space: parenting the root does not attach them. Document Game handles are a separate domain.
+- Static lights work with `runtime: null` and zero geometry. Trace placement is a copied translation added once to `t`; mesh mode uses zero placement.
+- Records are validated and mapped before allocation; new lights are staged dark and committed after the scene applies. Surviving ids keep handles, removed ids release them; failures restore previous descriptors and release staged additions without disturbing other scenes.
+- A complete snapshot resets removed `angleDeg`, `innerAngleDeg` and `size` before merging. Missing `delta.output` keeps the set; a complete output with no lights clears it; a failed evaluation keeps the previous set.
+- `setVisible` hides through intensity 0 and restores; disposal aborts pending work and removes only owned lights, idempotently.
+- Codes: `sdfm.scene_format` (malformed, duplicate, degenerate direction, invalid placement), `sdfm.scene_resolve`, `sdfm.worker`, `sdfm.disposed`; out-of-domain values are refused by S17, never clamped.
 
 ## S16. Procedural light interchange
 Owners: mama-light-record and mama-light-transport; consumers raa-sdfm-pkg, sdfm-light-authoring.
@@ -666,6 +670,80 @@ Adapted from solstice `src/vg/*` and `shaders/vg/*`, assembled by Rust builders.
 ## S35. Pinning tests of the virtualized-geometry contracts
 raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-shadow `cascade_access.rs`, raa-pipeline `config.rs`, raa-js `{cluster_bake,virtual_geometry}.rs`, `examples/virtual-geometry/*.test.mjs`, `web/common/{page-job,vg-job}.test.mjs`, MAMA and SDFM mesh-clusters and virtual-geometry tests.
 
+## S46. Automatic exposure (raa-exposure, pass `exposure.auto`, JS m33)
+Adapted from solstice `crates/solstice-render/shaders/post/exposure.wgsl:21-83` (adapted files carry `Adapted from solstice@7e465b5 crates/solstice-render/shaders/post/exposure.wgsl, MIT licence, Copyright (c) 2026 SamG-Coder`).
+
+**Constants** (`lib.rs`): `AUTO_EXPOSURE_PASS_NAME` "exposure.auto", `AUTO_EXPOSURE_ORDER` 125, `HISTOGRAM_BINS` 128, `MIN_LOG_LUMINANCE` -8, `LOG_LUMINANCE_RANGE` 18, `SAMPLE_STRIDE` 4, `HISTOGRAM_WORKGROUP` 16, `LUMINANCE_FLOOR` 1e-5, `MIDDLE_GREY` 0.18, `SETTLED_EV` 0.01, `PARAMS_SIZE` 48, `RESULT_SIZE` 16, `READBACK_SLOTS` 3.
+
+**Settings** `AutoExposureDesc` (`Default`, `validate()` in row order, first failure `post.invalid` "`<jsKey>` must be <rule>, got <value>"):
+
+| JS key | default | rule |
+|---|---|---|
+| `enabled` | false | |
+| `compensationEv` | 0.263 (log2 1.2) | finite, -8..=8 |
+| `lowPercent` | 0.2 | finite, 0..=1, < highPercent |
+| `highPercent` | 0.7 | finite, 0..=1 |
+| `speedUp` / `speedDown` | 2.4 / 1.1 1/s | finite, > 0 |
+| `minEv` / `maxEv` | -6 / 6 | finite, minEv <= maxEv |
+
+**Maths** (CPU twin `src/maths.rs`; the WGSL computes the same):
+```
+bin_index(l) = None if l < 1e-5, else Some(u32(clamp((log2(l) + 8) / 18, 0, 1) * 127))
+band_average(hist, low, high): weights each bin by its overlap with [total*low, total*high],
+  log_l = -8 + (i+0.5)/128*18; Some(exp2(sum(log_l*used) / max(sum(used), 1))), None if empty
+adapt(prev, meas, dt, up, down): prev None -> meas or 1; meas None -> prev;
+  else mix(meas, prev, exp(-dt * (meas > prev ? up : down)))
+exposure_from_average(avg, d) = clamp(2^compensation_ev * 0.18 / max(avg, 1e-6), 2^min_ev, 2^max_ev)
+settled(a, b) = abs(b - a) < 0.01
+```
+The pass snaps on its first prepared frame, a real HDR size change, `invalidate()` and any frame gap (disabled or skipped). Zero counted pixels keep the previous average (1.0 without one).
+
+**GPU.** `ExposureParams` (48 B): `dt_s`, `first`, `compensation`, `low_percent`, `high_percent`, `speed_up`, `speed_down`, `min_exposure`, `max_exposure`, `frame` (@0-36). `ExposureState` (16 B, also the readback record): `average_luminance`, `exposure`, `valid`, `frame`. Histogram `array<atomic<u32>, 128>`. `exposure_compute.wgsl`: `build_histogram` (16 x 16, every 4th pixel of `hdr().src()`) and `resolve` (1 thread, clears the histogram); `exposure_apply.wgsl`: `vs_main`, `fs_apply` (`rgb * exposure` into `hdr().dst()`, then swap). The state is copied into an idle slot of three MAP_READ buffers, mapped in the next `prepare`, never waited on; results older than the latest snap are ignored. No group-1 binding, no change to `FrameGpu` or tonemap; `setToneMapping`'s `exposureEv` multiplies after.
+
+**State** `AutoExposureState { exposure_ev, average_luminance, settled, pending }`: disabled -> `{None, None, true, false}`; no result since the snap -> `{None, None, false, true}`; else the latest result, `settled` over the two latest with distinct `frame`.
+
+**JS (m33)**: `setAutoExposure(settings)` merges, validates, sets the pipeline flag and the handle (nothing changes on refusal); `autoExposure()` (`enabled` from the pipeline flag); `autoExposureState(viewport = 0)` -> `{ exposureEv, averageLuminance, settled, pending }`. The average is per view: `ViewPost.exposure` in `m07_pipeline.rs` receives the main desc in `prepare_view`; the flag is global.
+
+## S47. Sharpening (raa-sharpen, pass `sharpen`, JS m34) and raa-sdfm render options
+Kernel adapted from solstice `crates/solstice-render/shaders/post/tonemap.wgsl:95-103` (MIT, attribution as S46); taps are range-compressed because the chain is HDR.
+
+`SHARPEN_PASS_NAME` "sharpen", `SHARPEN_ORDER` 195, `SHARPEN_WEIGHT` 0.2, `COMPRESS_LIMIT` 0.999, `PARAMS_SIZE` 16. `SharpenDesc { enabled, sharpness }` default `{ false, 0.9 }`; sharpness outside [0, 1] -> `post.invalid`.
+```
+compress(c) = max(c, 0) / (1 + max channel); expand(d) = d / (1 - min(max channel, 0.999))
+sharpen_texel: compress centre and N, S, W, E; low/high = min/max of the five
+  amount = sqrt(clamp(min(low, 1 - high) / max(high, 1e-4), 0, 1)); w = -amount * sharpness * 0.2
+  out = clamp((c + (n+s+w+e) * w) / (1 + 4w), low, high) -> (expand(out), centre alpha)
+```
+CPU twin `src/kernel.rs`; `wgsl/sharpen.wgsl` (`vs_main`, `fs_sharpen`; params, HDR texture; clamped `textureLoad` taps). Standard post pass at render resolution, no per-view state, no halo by construction.
+
+**JS (m34)**: `setSharpening({ enabled?, sharpness? })` and `sharpening()`, refusals as m33.
+
+**raa-sdfm** `applyRenderOptions`: `autoExposure?` and `sharpening?` take a boolean (`{ enabled }`) or a settings object; other values or a missing engine method are skipped with a reason; engine refusals throw.
+
+## S48. Material atlas mip chain (raa-lit textures, prelude `raa_texture_grad`, m22 options)
+**Helpers** (`crates/raa-lit/src/textures.rs`, re-exported): `ATLAS_MIP_LEVELS` 5, `ATLAS_ALIGN` 16, `texture_levels(w, h) = min(5, 1 + floor(log2(min(w, h))))`, `level_size` (halve rounding up), `TextureOptions { mips: true, srgb: false }`, `texture_lod(size, duv_dx, duv_dy, levels) = clamp(0.5 * log2(max(rho2, 1e-12)), 0, levels - 1)` (rho2 = max squared texel-space derivative), `level_inset(lod, atlas) = 0.5 * exp2(ceil(lod)) / atlas`.
+
+`src/mipgen.rs` `downsample_rgba8(src, w, h, srgb)`: 2 x 2 box, edge repeated on odd sides, linear `(a+b+c+d+2)/4` or sRGB-correct rgb; each level from the previous. Textures reserve 16-aligned extents (`texture.atlas_full` on reserved size); with `mips` levels 1.. upload at `(x >> k, y >> k)`; the rect record negates w for `mips: false`. Sampler mipmap filter Linear.
+
+**Prelude**: `RAA_ATLAS_MIP_LEVELS = 5.0`; `raa_texture(id, uv)` samples level 0; `raa_texture_grad(id, uv, duv_dx, duv_dy)` computes the lod, insets the uv and calls `textureSampleLevel` (safe in non-uniform flow). Callers take `dpdx`/`dpdy` of the unwrapped uv at the top of `material_main`.
+
+**JS (m22)**: `addTexture({ width, height, data, mips?, srgb? })`; `LitRenderer::add_texture_with(.., options)`. Users: raa-sdfm `field-bake.js`, `bake-scheduler.js` (colour `srgb: true`), sdfm `import-textures.ts`.
+
+## S49. Post preset page `examples/post/` and its job
+Built like `examples/global-illumination/`: `main.js` (`discoverScenes`, `attachPostPage`), `lib/inventory.js` (`validateInventory(namespaces, stage)`, cumulative exposure < sharpen < mips; `validateRequiredFacts`), `lib/runtime.js` (`createPostPageRunner`), `lib/content.js` (generated geometry and `stripes`/`checker` textures), `scenes/{exposure,sharpen,mips}.js`. `scripts/build-post.sh` runs `build-bricks.sh` then `build-page.mjs post --stages exposure,sharpen,mips --shared examples/virtual-geometry/lib/content.js`. `web/common/post-job.mjs` configures `createPageJob` (topic `post`, `keepSameBuildOnly`, store `$NMC_CACHE_DIR/post/<stage>`, out `out/post/<stage>`); `web/common/view-check.mjs` (`boxInView`, `assertSubjectsInView`) checks every variant's framing.
+
+Rows (1280 x 720, below scale 1 drawn into a 1280 x 720 canvas; measured rows carry PAIR_RUN; judge text in each scene's `inventory`): `exposure-room` exposure-interior-on/-off, exposure-exterior-on/-off (`-on` draws until settled, POST_SETTLE_MAX_FRAMES); `sharpen-detail` sharpen-on/-off, upscale-067-sharpen-on/-off (TAA on, scale 0.67 for upscale); `mips-ground` mips-on/-off (`-off` adds textures with `mips: false`). Commands `p5-post-build` and `p5-<stage>-{check,select,clean,render,fresh,judge}`.
+
+## S50. SDF Modeler Game view post controls (sdfm)
+**Settings** `src/core/game-post-settings.ts` (spread into `render-settings.ts`, persisted): `gameAutoExposure`, `gameExposureCompensation` 0.263, `gameExposureMinEv` -6, `gameExposureMaxEv` 6, `gameExposureSpeedUp` 2.4, `gameExposureSpeedDown` 1.1, `gameSharpening`, `gameSharpness` 0.9, `gameTemporalUpscaling` (booleans false). Controls in groups 'Auto exposure' and 'Sharpening' (incl. 'Temporal upscaling (0.67 scale, TAA, sharpening)'), Game view only. Helpers `autoExposureOf`, `sharpeningOf`, `temporalUpscalingPatch`, `effectiveRenderScale(option, s, cel)` = cel ? 1 : upscaling ? 0.67 : option; `src/app/temporal-upscaling.ts` turns on TAA and sharpening once when upscaling turns on.
+
+**Apply** `src/app/paramesh/game-post.ts`: `applyGamePost(engine, s)` (skip reasons), `nextExposureWatch` (draw until 2 settled reads, at most `EXPOSURE_FRAME_WATCH` 600 frames); GameDisplay arms it in `setRenderSettings` and runs `watchExposure()` per frame. `import-textures.ts` samples with `raa_texture_grad` and adds base colour and emissive with `srgb: true`.
+
+**Evidence** `src/core/post-evidence.ts`, `src/node/evidence/topics/post.ts`, scenario `post-app.ts`; game `post-editor`, assets `post.room-opening`, `post.textured-tiles`, out `out/post-editor`; entries `post-exposure-off`, `post-exposure-on`, `post-scale-1`, `post-upscale-on`, `post-texture-far`; commands `p5-editor-*`.
+
+## S51. Post passes beside the render graph
+Seam edits of the post work: `m07_pipeline.rs` (`ViewPost.exposure`, `view_auto_exposure`), raa-lit `add_texture_with`, `index.d.ts` typings, sdfm `render-settings.ts`, `game-display.ts`. When the render graph lands, `exposure.auto` and `sharpen` become nodes `pass.exposure.auto` and `pass.sharpen` (HDR `color` in and out); until then they keep the state their setters gave them.
+
 ## Module ownership
 
 | Module | Files | Consumes |
@@ -739,6 +817,19 @@ raa-cluster, raa-vg, raa-shader `vg_variants.rs`, raa-lit `virtual_set.rs`, raa-
 | sdfm-vg-evidence | `sdfm:src/core/virtual-geometry-evidence.ts`<br>`sdfm:src/core/virtual-geometry-evidence.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/virtual-geometry-app.ts`<br>`sdfm:src/app/gpu-page/virtual-geometry-visibility.ts`<br>`sdfm:src/app/gpu-page/virtual-geometry-controls.test.ts`<br>`sdfm:src/node/evidence/topics/virtual-geometry.ts`<br>`sdfm:src/node/evidence/topics/virtual-geometry.test.ts` | sdfm-vg-export, sdfm-vg-settings, sdfm-game-light-sync, sdfm-sky-weather-settings, sdfm-sky-weather-evidence, sdfm-light-evidence, sdfm-editor-evidence, mama-mesh-clusters, api-m29-bake, api-m29-vg |
 | page-job | `web/common/page-job.mjs`<br>`web/common/page-job.test.mjs`<br>`docs/page-job.md` | p2-managed-transport, sky-weather-page |
 | sdfm-editor-evidence | `sdfm:src/node/evidence/editor-evidence.ts`<br>`sdfm:src/node/evidence/editor-evidence.test.ts` | sdfm-light-evidence |
+| raa-exposure | `crates/raa-exposure/Cargo.toml`<br>`crates/raa-exposure/README.md`<br>`crates/raa-exposure/src/lib.rs`<br>`crates/raa-exposure/src/desc.rs`<br>`crates/raa-exposure/src/maths.rs`<br>`crates/raa-exposure/src/feature.rs`<br>`crates/raa-exposure/src/readback.rs`<br>`crates/raa-exposure/src/shaders.rs`<br>`crates/raa-exposure/src/wgsl/exposure_compute.wgsl`<br>`crates/raa-exposure/src/wgsl/exposure_apply.wgsl`<br>`crates/raa-exposure/tests/maths.rs`<br>`crates/raa-exposure/tests/desc.rs`<br>`crates/raa-exposure/tests/variants.rs` | — |
+| api-m33 | `crates/raa-js/src/api/m33_auto_exposure.rs`<br>`crates/raa-js/tests/auto_exposure.rs`<br>`packages/raa/types/m33-auto-exposure.d.ts`<br>`docs/api/m33-auto-exposure.md` | raa-js, raa-exposure, api-m7 |
+| post-page | `examples/post/index.html`<br>`examples/post/main.js`<br>`examples/post/nmc.gpu.json`<br>`examples/post/lib/inventory.js`<br>`examples/post/lib/runtime.js`<br>`examples/post/lib/content.js`<br>`examples/post/scenes/exposure.js`<br>`examples/post/contract.test.mjs`<br>`examples/post/exposure.test.mjs`<br>`scripts/build-post.sh`<br>`web/common/post-job.mjs`<br>`web/common/post-job.test.mjs`<br>`web/common/view-check.mjs`<br>`web/common/view-check.test.mjs` | page-job, p2-managed-transport, sky-weather-page, vg-page, js-package, api-m33, tooling |
+| raa-sharpen | `crates/raa-sharpen/Cargo.toml`<br>`crates/raa-sharpen/README.md`<br>`crates/raa-sharpen/src/lib.rs`<br>`crates/raa-sharpen/src/desc.rs`<br>`crates/raa-sharpen/src/kernel.rs`<br>`crates/raa-sharpen/src/feature.rs`<br>`crates/raa-sharpen/src/shaders.rs`<br>`crates/raa-sharpen/src/wgsl/sharpen.wgsl`<br>`crates/raa-sharpen/tests/kernel.rs`<br>`crates/raa-sharpen/tests/variants.rs` | — |
+| api-m34 | `crates/raa-js/src/api/m34_sharpening.rs`<br>`crates/raa-js/tests/sharpening.rs`<br>`packages/raa/types/m34-sharpening.d.ts`<br>`docs/api/m34-sharpening.md` | raa-js, raa-sharpen |
+| raa-sdfm-post-options | `packages/raa-sdfm/src/render-options.js`<br>`packages/raa-sdfm/test/render-options.test.js` | api-m33, api-m34, raa-sdfm-clusters |
+| post-sharpen-scenes | `examples/post/scenes/sharpen.js`<br>`examples/post/sharpen.test.mjs` | post-page, api-m34 |
+| raa-atlas-mips | `crates/raa-lit/src/textures.rs`<br>`crates/raa-lit/src/mipgen.rs`<br>`crates/raa-lit/tests/atlas_mips.rs`<br>`crates/raa-lit/tests/gpu_tint_textures.rs`<br>`crates/raa-shader/src/wgsl/prelude.wgsl`<br>`crates/raa-shader/tests/texture_grad.rs`<br>`crates/raa-js/src/api/m22_textures.rs`<br>`crates/raa-js/tests/textures.rs`<br>`docs/api/m22-textures.md`<br>`packages/raa-sdfm/src/field-bake.js`<br>`packages/raa-sdfm/src/bake-scheduler.js`<br>`packages/raa-sdfm/test/field-bake.test.js`<br>`packages/raa-sdfm/test/bake-scheduler.test.js` | raa-lit-vg-seam, raa-shader-vg, raa-js, js-package |
+| post-mips-scenes | `examples/post/scenes/mips.js`<br>`examples/post/mips.test.mjs` | post-page, raa-atlas-mips |
+| sdfm-game-post-settings | `sdfm:src/core/game-post-settings.ts`<br>`sdfm:src/core/game-post-settings.test.ts` | sdfm-sky-weather-settings |
+| sdfm-game-post | `sdfm:src/app/paramesh/game-post.ts`<br>`sdfm:src/app/paramesh/game-post.test.ts`<br>`sdfm:src/app/temporal-upscaling.ts` | sdfm-game-post-settings, raa-sdfm-post-options, api-m33, api-m34, sdfm-game-light-sync |
+| sdfm-import-texture-mips | `sdfm:src/app/paramesh/import-textures.ts`<br>`sdfm:src/core/display/import-textures.test.ts` | raa-atlas-mips |
+| sdfm-post-evidence | `sdfm:src/core/post-evidence.ts`<br>`sdfm:src/core/post-evidence.test.ts`<br>`sdfm:src/app/gpu-page/scenarios/post-app.ts`<br>`sdfm:src/node/evidence/topics/post.ts`<br>`sdfm:src/node/evidence/topics/post.test.ts` | sdfm-game-post, sdfm-game-post-settings, sdfm-import-texture-mips, sdfm-editor-evidence, sdfm-light-evidence, sdfm-game-light-sync |
 
 ## Module: workspace
 Files: `Cargo.toml`, `Cargo.lock`, `.gitignore`.
@@ -2571,3 +2662,42 @@ The S34 editor evidence.
 
 ## Module: sdfm-editor-evidence
 `EditorEvidenceStore`, the shared editor-evidence store.
+
+## Module: raa-exposure
+S46 in `crates/raa-exposure`.
+
+## Module: api-m33
+The m33 API of S46 (`m33_auto_exposure.rs`, `merge_auto_exposure`).
+
+## Module: post-page
+The S49 page, `scenes/exposure.js`, `post-job.mjs`, `view-check.mjs`.
+
+## Module: raa-sharpen
+S47 in `crates/raa-sharpen`.
+
+## Module: api-m34
+The m34 API of S47 (`m34_sharpening.rs`, `merge_sharpening`).
+
+## Module: raa-sdfm-post-options
+The S47 `applyRenderOptions` keys.
+
+## Module: post-sharpen-scenes
+The S49 `sharpen-detail` scene.
+
+## Module: raa-atlas-mips
+S48 textures, mipgen, prelude helpers and m22 options.
+
+## Module: post-mips-scenes
+The S49 `mips-ground` scene.
+
+## Module: sdfm-game-post-settings
+The S50 settings.
+
+## Module: sdfm-game-post
+S50 apply, exposure watch and temporal upscaling.
+
+## Module: sdfm-import-texture-mips
+The S50 imported-texture material.
+
+## Module: sdfm-post-evidence
+The S50 editor evidence.
