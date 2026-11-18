@@ -154,6 +154,36 @@ fn uvec4_bytes(values: &[u32; 4]) -> [u8; 16] {
 /// x intensity 0.3), so a frame without an env reads the flat ambient.
 const DUMMY_ENV_COLOR: [f32; 3] = [0.6 * 0.3, 0.65 * 0.3, 0.75 * 0.3];
 
+/// True when the format's sample type is a filterable float.
+fn filterable_float(format: wgpu::TextureFormat) -> bool {
+    matches!(
+        format.sample_type(None, None),
+        Some(wgpu::TextureSampleType::Float { filterable: true })
+    )
+}
+
+/// True when a texture fits the forward-class group-1 `slot`: sample count 1,
+/// `TEXTURE_BINDING` and the slot's dimension, format and layer count.
+fn slot_texture_fits(slot: u32, texture: &wgpu::Texture) -> bool {
+    let format = texture.format();
+    let layers = texture.depth_or_array_layers();
+    let common = texture.dimension() == wgpu::TextureDimension::D2
+        && texture.sample_count() == 1
+        && texture
+            .usage()
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING);
+    common
+        && match slot {
+            0 => format == wgpu::TextureFormat::Depth32Float,
+            3 => layers == 6 && format == wgpu::TextureFormat::Rgba16Float,
+            7 | 8 | 9 | 14 => layers == 1 && filterable_float(format),
+            10 => format == wgpu::TextureFormat::R32Float,
+            15 => layers == 2 && format == wgpu::TextureFormat::Rgba16Float,
+            20 => format == wgpu::TextureFormat::Rgba16Float && layers >= AREA_SHADOW_MASK_LAYERS,
+            _ => false,
+        }
+}
+
 /// The twelve texture bindings of group 1.
 #[derive(Clone, Debug, PartialEq)]
 struct Views<V> {
@@ -377,6 +407,50 @@ impl<V: Clone + PartialEq> State<V> {
     fn clear_area_shadow(&mut self) {
         self.views.area_shadow_mask = self.dummies.area_shadow_mask.clone();
         self.area_table = [0; AREA_STOCHASTIC_GPU_SIZE];
+    }
+
+    /// The view assigned to the forward-class group-1 `slot`, or None outside the fixed set
+    /// (0, 3, 7, 8, 9, 10, 14, 15, 20).
+    fn slot_view(&self, slot: u32) -> Option<&V> {
+        match slot {
+            0 => Some(&self.views.shadow_map),
+            3 => Some(&self.views.env_specular),
+            7 => Some(&self.views.ao),
+            8 => Some(&self.views.contact),
+            9 => Some(&self.views.opaque_color),
+            10 => Some(&self.views.opaque_depth),
+            14 => Some(&self.views.gi_screen),
+            15 => Some(&self.views.cloud_transmittance),
+            20 => Some(&self.views.area_shadow_mask),
+            _ => None,
+        }
+    }
+
+    fn slot_view_mut(&mut self, slot: u32) -> Option<&mut V> {
+        match slot {
+            0 => Some(&mut self.views.shadow_map),
+            3 => Some(&mut self.views.env_specular),
+            7 => Some(&mut self.views.ao),
+            8 => Some(&mut self.views.contact),
+            9 => Some(&mut self.views.opaque_color),
+            10 => Some(&mut self.views.opaque_depth),
+            14 => Some(&mut self.views.gi_screen),
+            15 => Some(&mut self.views.cloud_transmittance),
+            20 => Some(&mut self.views.area_shadow_mask),
+            _ => None,
+        }
+    }
+
+    /// Assigns only the view of `slot` and marks the bind group dirty; `take_pending` still
+    /// compares the views with the bound ones, so setting the same view again rebuilds
+    /// nothing. Returns false outside the fixed set, leaving the state unchanged.
+    fn set_slot_view(&mut self, slot: u32, view: V) -> bool {
+        let Some(current) = self.slot_view_mut(slot) else {
+            return false;
+        };
+        *current = view;
+        self.pending.bind_group = true;
+        true
     }
 
     /// Returns the pending work and marks everything clean.
@@ -1202,6 +1276,45 @@ impl LightingResources {
         self.state.clear_area_shadow();
     }
 
+    /// Returns a clone of the view assigned to the forward-class group-1 binding `slot`:
+    /// 0 shadow_map, 3 env_specular, 7 ao, 8 contact, 9 opaque_color, 10 opaque_depth,
+    /// 14 gi_screen, 15 cloud_transmittance, 20 area_shadow_mask. Any other number gives
+    /// None. Today the view is the one `State::slot_view` holds; cloning it allocates
+    /// nothing.
+    ///
+    /// Handoff: card 'Slots 2/3: executor extension slots, graph frame binding slot and G-buffer inputs' calls `LightingResources::slot_view(&self, slot: u32) -> Option<wgpu::TextureView>` and `LightingResources::set_slot_view(&mut self, slot: u32, view: wgpu::TextureView) -> Result<(), RaaError>` (crates/raa-pipeline/src/lighting.rs) through `PrepareCtx.lighting` and `Pipeline::lighting_mut`. The state it keeps: its override list, mapping slot (u32) to the saved view (wgpu::TextureView).
+    pub fn slot_view(&self, slot: u32) -> Option<wgpu::TextureView> {
+        self.state.slot_view(slot).cloned()
+    }
+
+    /// Assigns only the view of forward-class group-1 binding `slot`; uniforms, SH, weather
+    /// lanes, GI params and the area table are untouched. The texture must be D2 with
+    /// `TEXTURE_BINDING` and sample count 1, plus the slot's format and layers (see
+    /// `slot_texture_fits`); otherwise this is refused with `core.resource` and nothing
+    /// changes. The bind group is rebuilt at the next `upload` only when the views differ
+    /// from the bound ones.
+    pub fn set_slot_view(&mut self, slot: u32, view: wgpu::TextureView) -> Result<(), RaaError> {
+        {
+            let texture = view.texture();
+            if !slot_texture_fits(slot, texture) {
+                let size = texture.size();
+                return Err(RaaError::Resource(format!(
+                    "group-1 slot {slot} cannot take {:?} {:?} {}x{} with {} layers, sample \
+                     count {} and usage {:?}",
+                    texture.dimension(),
+                    texture.format(),
+                    size.width,
+                    size.height,
+                    texture.depth_or_array_layers(),
+                    texture.sample_count(),
+                    texture.usage()
+                )));
+            }
+        }
+        self.state.set_slot_view(slot, view);
+        Ok(())
+    }
+
     /// The 80-byte `RaaAreaStochasticGpu` uniform (group 1 binding 19), `UNIFORM | COPY_DST`.
     pub fn area_stochastic_buffer(&self) -> &wgpu::Buffer {
         &self.area_table_buffer
@@ -1690,6 +1803,41 @@ mod tests {
         state.env_mut().fog[0] = 0.1;
         assert_ne!(state.take_pending(), Pending::default());
         assert_eq!(state.take_pending(), Pending::default());
+    }
+
+    #[test]
+    fn slot_view_reports_the_fixed_forward_slots() {
+        let mut state = State::new(dummies());
+        let slots = [
+            (0, 100),
+            (3, 103),
+            (7, 107),
+            (8, 108),
+            (9, 109),
+            (10, 110),
+            (14, 114),
+            (15, 115),
+            (20, 120),
+        ];
+        for (slot, view) in slots {
+            assert!(state.set_slot_view(slot, view), "slot {slot}");
+            assert_eq!(state.slot_view(slot), Some(&view), "slot {slot}");
+            assert_eq!(state.take_pending(), ONLY_BIND, "slot {slot}");
+            assert!(state.set_slot_view(slot, view), "slot {slot}");
+            assert_eq!(state.take_pending(), Pending::default(), "slot {slot}");
+        }
+    }
+
+    #[test]
+    fn slot_view_refuses_slots_outside_the_set() {
+        let mut state = State::new(dummies());
+        let before = state.views.clone();
+        for slot in [1, 13, 21] {
+            assert!(!state.set_slot_view(slot, 99), "slot {slot}");
+            assert!(state.slot_view(slot).is_none(), "slot {slot}");
+            assert_eq!(state.views, before, "slot {slot}");
+            assert_eq!(state.take_pending(), Pending::default(), "slot {slot}");
+        }
     }
 
     #[test]

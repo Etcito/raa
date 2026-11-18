@@ -6,6 +6,7 @@ use std::cell::{Cell, OnceCell};
 use raa_core::GpuContext;
 
 use crate::HDR_FORMAT;
+use crate::resource_table::{ImageDim, ResourceTable, SampleKind};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -306,6 +307,112 @@ impl Targets {
         &self.motion.view
     }
 
+    /// Returns the view bound as the `depth` input of `pass` when its description is D2 and
+    /// Depth, else a clone of `depth()`. The view is a `PublishedImage` handle clone, so
+    /// nothing is allocated.
+    ///
+    /// Handoff: card 'raa-gtao: install_instance, copy_camera_from and depth/normal from bound inputs' calls `Targets::depth_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView` and `Targets::normal_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView` (crates/raa-pipeline/src/targets.rs) with pass `ao.gtao` or `ao.gtao#<instance>`. Its test calls `LightingResources::slot_view(&self, slot: u32) -> Option<wgpu::TextureView>` (crates/raa-pipeline/src/lighting.rs) with slot 7.
+    /// Handoff: card 'raa-contact: install_instance, copy_camera_from and depth from the bound input' calls `Targets::depth_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView` with pass `shadow.contact` or `shadow.contact#<instance>`. Its test calls `LightingResources::slot_view` with slot 8.
+    /// Handoff: card 'raa-ssr: depth, normal and material from bound inputs' calls `Targets::depth_input`, `Targets::normal_input`, `Targets::material_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView` and `Targets::depth_attachment_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView`, with pass `ssr` or `ssr#<instance>`.
+    /// Handoff: card 'raa-lit: light tiles read depth from the bound input' calls `Targets::depth_input` with pass `light.tiles`.
+    /// Handoff: card 'raa-taa: depth and motion from bound inputs' calls `Targets::depth_input` and `Targets::motion_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView` with pass `taa` or `taa#<instance>`.
+    /// Handoff: card 'raa-gi: gi.screen and ReSTIR GI read the G-buffer from bound inputs' calls `Targets::depth_input`, `normal_input`, `material_input` and `motion_input` inside `GBufferViews::resolve`, with pass `gi.screen`.
+    /// Handoff: card 'raa-dof: depth from the bound input' calls `Targets::depth_input` and `Targets::depth_attachment_input` with pass `dof` or `dof#<instance>`.
+    /// Handoff: card 'raa-shafts and raa-oit: depth from the bound input' calls `Targets::depth_input` with pass `sunshafts` or `sunshafts#<instance>`, and `Targets::depth_attachment_input` with pass `transparent.oit`.
+    /// Handoff: card 'raa-tonemap, sky clouds and overlay: depth from the bound input' calls `Targets::depth_input` with `tonemap` and `sky.cloud-screen`, and `Targets::depth_attachment_input` with `tonemap` and `overlay`.
+    pub fn depth_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView {
+        self.bound_input(
+            resources,
+            pass,
+            "depth",
+            ImageDim::D2,
+            SampleKind::Depth,
+            self.depth(),
+        )
+    }
+
+    /// Returns the view bound as the `normal` input of `pass` when it is D2 and Float, else
+    /// a clone of `normal()`.
+    pub fn normal_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView {
+        self.bound_input(
+            resources,
+            pass,
+            "normal",
+            ImageDim::D2,
+            SampleKind::Float,
+            self.normal(),
+        )
+    }
+
+    /// Returns the view bound as the `material` input of `pass` when it is D2 and Float, else
+    /// a clone of `material()`.
+    pub fn material_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView {
+        self.bound_input(
+            resources,
+            pass,
+            "material",
+            ImageDim::D2,
+            SampleKind::Float,
+            self.material(),
+        )
+    }
+
+    /// Returns the view bound as the `motion` input of `pass` when it is D2 and Float, else
+    /// a clone of `motion()`.
+    pub fn motion_input(&self, resources: &ResourceTable, pass: &str) -> wgpu::TextureView {
+        self.bound_input(
+            resources,
+            pass,
+            "motion",
+            ImageDim::D2,
+            SampleKind::Float,
+            self.motion(),
+        )
+    }
+
+    /// Returns the view bound as the `depth` input of `pass` when its texture is a D2
+    /// Depth32Float attachment with sample count 1 and the surface size, else a clone of
+    /// `depth()`. Use it for depth-stencil attachments; `depth_input` is for sampled reads.
+    pub fn depth_attachment_input(
+        &self,
+        resources: &ResourceTable,
+        pass: &str,
+    ) -> wgpu::TextureView {
+        let Some(image) = resources.input(pass, "depth") else {
+            return self.depth().clone();
+        };
+        let texture = image.view.texture();
+        let size = texture.size();
+        if texture.dimension() == wgpu::TextureDimension::D2
+            && texture.format() == wgpu::TextureFormat::Depth32Float
+            && texture.sample_count() == 1
+            && texture
+                .usage()
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+            && (size.width, size.height) == self.size()
+        {
+            image.view
+        } else {
+            self.depth().clone()
+        }
+    }
+
+    /// The bound view when its description matches `dim` and `sample`, else `target`.
+    fn bound_input(
+        &self,
+        resources: &ResourceTable,
+        pass: &str,
+        port: &str,
+        dim: ImageDim,
+        sample: SampleKind,
+        target: &wgpu::TextureView,
+    ) -> wgpu::TextureView {
+        match resources.input(pass, port) {
+            Some(image) if image.desc.dim == dim && image.desc.sample == sample => image.view,
+            _ => target.clone(),
+        }
+    }
+
     /// Texture behind `depth()`.
     pub fn depth_texture(&self) -> &wgpu::Texture {
         &self.depth.texture
@@ -335,6 +442,7 @@ impl Targets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource_table::{ImageDesc, PublishedImage};
 
     #[test]
     fn reset_makes_a_the_destination() {
@@ -432,5 +540,116 @@ mod tests {
         let hdr = targets.hdr();
         hdr.bind(&views[32], &views[32]);
         assert!(hdr.is_bound() && hdr.src() == &views[32]);
+    }
+
+    fn input_view(
+        gpu: &GpuContext,
+        format: wgpu::TextureFormat,
+        size: (u32, u32),
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::TextureView {
+        gpu.device()
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("targets input test"),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    }
+
+    fn published(view: &wgpu::TextureView, sample: SampleKind) -> PublishedImage {
+        let texture = view.texture();
+        let size = texture.size();
+        PublishedImage {
+            view: view.clone(),
+            desc: ImageDesc {
+                dim: ImageDim::D2,
+                format: texture.format(),
+                width: size.width,
+                height: size.height,
+                layers: texture.depth_or_array_layers(),
+                mips: texture.mip_level_count(),
+                sample,
+            },
+        }
+    }
+
+    #[test]
+    fn targets_inputs_fall_back_to_the_targets() {
+        use raa_core::testing::{skip, software_gpu};
+        let name = "targets_inputs_fall_back_to_the_targets";
+        let Some(gpu) = software_gpu() else {
+            skip(name, "software_gpu returned None");
+            return;
+        };
+        let targets = Targets::new(&gpu, (8, 8));
+        let table = ResourceTable::new();
+        assert!(targets.depth_input(&table, "ssr") == *targets.depth());
+        assert!(targets.normal_input(&table, "ssr") == *targets.normal());
+        assert!(targets.material_input(&table, "ssr") == *targets.material());
+        assert!(targets.motion_input(&table, "ssr") == *targets.motion());
+
+        let depth = input_view(
+            &gpu,
+            wgpu::TextureFormat::Depth32Float,
+            (4, 4),
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        table.bind_input("ssr", "depth", published(&depth, SampleKind::Depth));
+        assert!(targets.depth_input(&table, "ssr") == depth);
+
+        let hdr = input_view(
+            &gpu,
+            wgpu::TextureFormat::Rgba16Float,
+            (8, 8),
+            wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        table.bind_input("ao.gtao", "depth", published(&hdr, SampleKind::Float));
+        assert!(targets.depth_input(&table, "ao.gtao") == *targets.depth());
+        table.bind_input("ao.gtao", "normal", published(&hdr, SampleKind::Float));
+        assert!(targets.normal_input(&table, "ao.gtao") == hdr);
+    }
+
+    #[test]
+    fn depth_attachment_input_checks_the_texture() {
+        use raa_core::testing::{skip, software_gpu};
+        let name = "depth_attachment_input_checks_the_texture";
+        let Some(gpu) = software_gpu() else {
+            skip(name, "software_gpu returned None");
+            return;
+        };
+        let targets = Targets::new(&gpu, (8, 8));
+        let table = ResourceTable::new();
+        let depth = wgpu::TextureFormat::Depth32Float;
+        assert!(targets.depth_attachment_input(&table, "dof") == *targets.depth());
+
+        let sampled = input_view(&gpu, depth, (8, 8), wgpu::TextureUsages::TEXTURE_BINDING);
+        table.bind_input("dof", "depth", published(&sampled, SampleKind::Depth));
+        assert!(
+            targets.depth_attachment_input(&table, "dof") == *targets.depth(),
+            "no RENDER_ATTACHMENT usage"
+        );
+
+        let attachment =
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
+        let wrong_size = input_view(&gpu, depth, (4, 8), attachment);
+        table.bind_input("dof", "depth", published(&wrong_size, SampleKind::Depth));
+        assert!(
+            targets.depth_attachment_input(&table, "dof") == *targets.depth(),
+            "another size"
+        );
+
+        let fits = input_view(&gpu, depth, (8, 8), attachment);
+        table.bind_input("dof", "depth", published(&fits, SampleKind::Depth));
+        assert!(targets.depth_attachment_input(&table, "dof") == fits);
     }
 }
