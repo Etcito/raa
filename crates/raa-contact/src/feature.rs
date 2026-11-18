@@ -142,10 +142,44 @@ struct Output {
     _texture: wgpu::Texture,
     view: wgpu::TextureView,
     group: wgpu::BindGroup,
+    /// The depth view `group` was built from (the bound input or the target).
+    depth: wgpu::TextureView,
 }
 
-/// The `shadow.contact` compute pass.
+/// The bind group of the pass: bound depth, params uniform and the storage output.
+fn output_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    depth: &wgpu::TextureView,
+    view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa-contact.bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+        ],
+    })
+}
+
+/// The `shadow.contact` compute pass, or one of its instances `shadow.contact#<id>`.
 struct ContactPass {
+    /// Entry name the pass publishes and resolves its depth input under.
+    name: String,
+    /// An instance never writes or clears group-1 binding 8.
+    instance: bool,
     state: SharedContact,
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
@@ -163,6 +197,10 @@ struct ContactPass {
 
 impl ContactPass {
     fn new(gpu: &GpuContext, state: SharedContact) -> Self {
+        Self::named(gpu, state, NAME.to_owned(), false)
+    }
+
+    fn named(gpu: &GpuContext, state: SharedContact, name: String, instance: bool) -> Self {
         let device = gpu.device();
         let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
             binding,
@@ -216,6 +254,8 @@ impl ContactPass {
             mapped_at_creation: false,
         });
         ContactPass {
+            name,
+            instance,
             state,
             pipeline,
             layout,
@@ -260,7 +300,7 @@ fn build_pipeline(
 
 impl FeaturePass for ContactPass {
     fn name(&self) -> &str {
-        NAME
+        &self.name
     }
 
     fn order(&self) -> u32 {
@@ -289,39 +329,24 @@ impl FeaturePass for ContactPass {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa-contact.bind_group"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(targets.depth()),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-            ],
-        });
+        let depth = targets.depth().clone();
+        let group = output_group(device, &self.layout, &self.uniform, &depth, &view);
         self.output = Some(Output {
             size,
             _texture: texture,
             view,
             group,
+            depth,
         });
         self.needs_bind = true;
     }
 
     /// Disabling resets binding 8 to the dummy (visibility 1); enabling gives the output
-    /// back to the lighting at the next prepare.
+    /// back to the lighting at the next prepare. An instance never touches binding 8.
     fn set_enabled(&mut self, enabled: bool, lighting: &mut LightingResources) {
         if enabled {
             self.needs_bind = true;
-        } else {
+        } else if !self.instance {
             lighting.clear_contact();
             self.bound = false;
         }
@@ -336,7 +361,18 @@ impl FeaturePass for ContactPass {
             self.pipeline = build_pipeline(ctx.gpu, &self.pipeline_layout, st.steps);
             self.built_generation = st.tunable_generation;
         }
-        if let Some(o) = self.output.as_ref() {
+        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
+        if let Some(o) = self.output.as_mut() {
+            if o.depth != depth {
+                o.group = output_group(
+                    ctx.gpu.device(),
+                    &self.layout,
+                    &self.uniform,
+                    &depth,
+                    &o.view,
+                );
+                o.depth = depth;
+            }
             let desc = ImageDesc::new(
                 ImageDim::D2,
                 wgpu::TextureFormat::Rgba16Float,
@@ -345,11 +381,11 @@ impl FeaturePass for ContactPass {
                 1,
                 1,
             );
-            ctx.resources.publish(NAME, "contact", &o.view, desc);
-            ctx.resources.publish(NAME, "output", &o.view, desc);
+            ctx.resources.publish(&self.name, "contact", &o.view, desc);
+            ctx.resources.publish(&self.name, "output", &o.view, desc);
         }
         let (Some(camera), Some(output)) = (st.camera, self.output.as_ref()) else {
-            if self.bound {
+            if !self.instance && self.bound {
                 ctx.lighting.clear_contact();
                 self.bound = false;
             }
@@ -360,9 +396,11 @@ impl FeaturePass for ContactPass {
         st.frame = st.frame.wrapping_add(1);
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &self.bytes);
         if self.needs_bind {
-            ctx.lighting.set_contact(output.view.clone());
+            if !self.instance {
+                ctx.lighting.set_contact(output.view.clone());
+                self.bound = true;
+            }
             self.needs_bind = false;
-            self.bound = true;
         }
         Ok(())
     }
@@ -420,6 +458,39 @@ impl ContactFeature {
             tunable_generation: 0,
         }));
         p.add(Box::new(ContactPass::new(gpu, state.clone())))?;
+        Ok(ContactHandle { state })
+    }
+
+    /// Handoff: card 'Slots 3/3: gtao and contact instance passes in the slots extension'
+    /// calls `ContactFeature::install_instance` to add `shadow.contact#<instance>` (order 45)
+    /// with its own `ContactState` (the default description, no camera, frame 0, the default
+    /// steps and generation 0) and gets a `ContactHandle` whose clones share that state;
+    /// `ContactHandle::copy_camera_from` copies the camera of another handle into it. Today
+    /// the instance never calls `LightingResources::set_contact` or `clear_contact`, publishes
+    /// `contact` and `output` under its own name, and samples depth through
+    /// `Targets::depth_input` with that name. Refusals, with nothing installed: `pipeline.busy`
+    /// and `pipeline.duplicate_pass` naming the pass.
+    pub fn install_instance(
+        gpu: &GpuContext,
+        pipeline: &Rc<RefCell<Pipeline>>,
+        instance: &str,
+    ) -> Result<ContactHandle, RaaError> {
+        let mut p = pipeline.try_borrow_mut().map_err(|_| pipeline_busy())?;
+        let name = format!("{NAME}#{instance}");
+        if p.passes().iter().any(|info| info.name == name) {
+            return Err(refusal(
+                "pipeline.duplicate_pass",
+                &format!("the pass `{name}` is already installed"),
+            ));
+        }
+        let state = Rc::new(RefCell::new(ContactState {
+            desc: ContactDesc::default(),
+            camera: None,
+            frame: 0,
+            steps: DEFAULT_STEPS,
+            tunable_generation: 0,
+        }));
+        p.add(Box::new(ContactPass::named(gpu, state.clone(), name, true)))?;
         Ok(ContactHandle { state })
     }
 }
@@ -480,6 +551,20 @@ impl ContactHandle {
                 inv_proj: *inv_proj,
                 sun_view: sun_view_dir(view, sun_dir),
             });
+        }
+    }
+
+    /// Copies `source`'s camera Option (projection, inverse and view-space sun direction)
+    /// into this handle. Does nothing when both share one state or on a re-entrant borrow.
+    pub fn copy_camera_from(&self, source: &ContactHandle) {
+        if Rc::ptr_eq(&self.state, &source.state) {
+            return;
+        }
+        let Ok(camera) = source.state.try_borrow().map(|st| st.camera) else {
+            return;
+        };
+        if let Ok(mut st) = self.state.try_borrow_mut() {
+            st.camera = camera;
         }
     }
 }
