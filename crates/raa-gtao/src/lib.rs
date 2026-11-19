@@ -18,6 +18,7 @@
 //! sets the description and the frame's camera. Until a camera is set, or while the pass is
 //! disabled, the lighting keeps the dummy AO (1).
 
+pub mod blur;
 mod desc;
 mod feature;
 mod shaders;
