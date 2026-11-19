@@ -617,3 +617,164 @@ fn full_gi_stages_renders_frames_without_panic() {
     }
     assert_eq!(recorded.len(), 14, "recorded stages: {recorded:?}");
 }
+
+/// Exercises all six ReSTIR stage recorders on the same submitted-frame harness as Full GI.
+#[test]
+fn restir_stages_render_frames_without_panic() {
+    use raa_core::{FrameGraph, MaterialId, OffscreenTarget};
+    use raa_geom::builtin::DebugCube;
+    use raa_geom::{GeometryProvider, MeshData, ParamValue, Params, Quality};
+    use raa_lit::{
+        AttributedMesh, LitOptions, LitRenderer, LocalLight, LocalLightKind, StochasticMode,
+        StochasticShadowSettings, install_local_lights,
+    };
+    use raa_scene::{RenderList, Scene, Transform};
+    use std::{cell::RefCell, rc::Rc};
+
+    const SIZE: (u32, u32) = (1280, 720);
+    const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    const GRAPH: &str = r#"{"format":"raa.render-graph","version":1,"name":"ReSTIR stage frame test","nodes":[{"id":"prepass","type":"pass.prepass"},{"id":"lightTiles","type":"pass.light.tiles"},{"id":"giVolume","type":"pass.gi.volume"},{"id":"giPyramid","type":"gi.pyramid"},{"id":"giInitial","type":"gi.restir.initial"},{"id":"giTemporal","type":"gi.restir.temporal"},{"id":"giSpatial","type":"gi.restir.spatial"},{"id":"giAccumulate","type":"gi.accumulate"},{"id":"forward","type":"pass.forward"},{"id":"tonemap","type":"pass.tonemap"},{"id":"out","type":"output.display"},{"id":"areaInitial","type":"area.restir.initial"},{"id":"areaTemporal","type":"area.restir.temporal"},{"id":"areaSpatial","type":"area.restir.spatial"},{"id":"areaMask","type":"area.mask"}],"links":[{"from":"prepass.depth","to":"lightTiles.depth"},{"from":"giPyramid.pyramid","to":"giInitial.pyramid"},{"from":"giInitial.reservoirs","to":"giTemporal.initial"},{"from":"giTemporal.reservoirs","to":"giSpatial.reservoirs"},{"from":"giSpatial.irradiance","to":"giAccumulate.irradiance"},{"from":"giAccumulate.output","to":"giAccumulate.history","history":true},{"from":"giAccumulate.meta","to":"giAccumulate.historyMeta","history":true},{"from":"giAccumulate.output","to":"forward.gi"},{"from":"areaInitial.reservoirs","to":"areaTemporal.initial"},{"from":"areaTemporal.reservoirs","to":"areaSpatial.reservoirs"},{"from":"areaSpatial.raw","to":"areaMask.src"},{"from":"areaMask.areaShadow","to":"forward.areaShadow"},{"from":"forward.color","to":"tonemap.color"},{"from":"tonemap.color","to":"out.color"}]}"#;
+    let name = "restir_stages_render_frames_without_panic";
+    let Some(gpu) = raa_core::testing::software_gpu() else {
+        raa_core::testing::skip(name, "no software adapter");
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(raa_pipeline::Pipeline::new(
+        &gpu, SURFACE, false,
+    )));
+    let mut lit = LitRenderer::new(
+        &gpu,
+        &pipeline,
+        LitOptions {
+            max_instances: 16,
+            max_materials: 4,
+            msaa: 1,
+        },
+    )
+    .expect("lit renderer");
+    let mut mesh = MeshData::new();
+    DebugCube
+        .generate(
+            &Params::new().with("half", ParamValue::Scalar(0.5)),
+            Quality::LOD0,
+            &mut mesh,
+        )
+        .expect("debug cube");
+    let asset = lit
+        .upload(&gpu, &AttributedMesh::from_mesh(mesh))
+        .expect("upload cube");
+    let mesh_id = lit.submesh_ids(asset).expect("cube submesh")[0];
+    let mut scene = Scene::with_capacity(1, 1);
+    scene.camera.set_viewport(SIZE.0, SIZE.1);
+    let cube = scene
+        .add_node(None, Transform::IDENTITY)
+        .expect("cube node");
+    scene
+        .add_instance(cube, mesh_id, MaterialId(0))
+        .expect("cube instance");
+    lit.local_lights_mut()
+        .add(LocalLight {
+            kind: LocalLightKind::Area,
+            position: [0.0, 3.0, 0.0],
+            direction: [0.0, -1.0, 0.0],
+            intensity: 6.0,
+            range: 8.0,
+            size: [2.0, 1.0],
+            ..LocalLight::default()
+        })
+        .expect("area light");
+    install_local_lights(&gpu, &pipeline, &mut lit).expect("light tiling installs");
+    let gi = raa_gi::feature::GiFeature::install(&gpu, &pipeline, &mut lit, None, None)
+        .expect("GI feature");
+    let gi_frame = gi.clone();
+    let mut handles = raa_graph::exec::HandleSet {
+        gi: Some(gi),
+        ..Default::default()
+    };
+    let mut executor = raa_graph::exec::GraphExecutor::new();
+    let plan = plan_from_json(GRAPH).expect("ReSTIR graph plans");
+    let applied = {
+        let mut h = raa_graph::exec::FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: Some(&mut lit),
+        };
+        executor.set_plan(plan, None, &mut h)
+    };
+    assert!(applied.ok, "refused: {:?}", applied.issues);
+    let mut graph = FrameGraph::new(SURFACE);
+    raa_pipeline::Pipeline::install(&pipeline, &mut graph);
+    graph.compile().expect("compile pipeline graph");
+    let target = OffscreenTarget::new(&gpu, SIZE.0, SIZE.1, SURFACE);
+    let mut list = RenderList::with_capacity(1);
+    let mut tags = Vec::new();
+    let mut slots = Vec::new();
+    let expected = [
+        ("giInitial", "gi.restir.initial"),
+        ("giTemporal", "gi.restir.temporal"),
+        ("giSpatial", "gi.restir.spatial"),
+        ("areaInitial", "area.restir.initial"),
+        ("areaTemporal", "area.restir.temporal"),
+        ("areaSpatial", "area.restir.spatial"),
+    ];
+    let mut recorded = Vec::new();
+    for frame in 0..3 {
+        {
+            let mut h = raa_graph::exec::FeatureHandles {
+                gpu: &gpu,
+                pipeline: &pipeline,
+                handles: &mut handles,
+                viewports: 1,
+                msaa: 1,
+                lit: Some(&mut lit),
+            };
+            executor.frame(&mut h).expect("executor frame");
+            lit.set_area_stochastic(StochasticShadowSettings {
+                mode: StochasticMode::Restir,
+                ..StochasticShadowSettings::standard()
+            })
+            .expect("ReSTIR area mode");
+        }
+        gi_frame.set_view(&scene.camera, SIZE, 1);
+        gi_frame.set_sun(&scene.light);
+        gi_frame.set_local_light_count(1);
+        let frame_stats = gi_frame.prepare_frame(&gpu, &mut scene, &mut lit);
+        assert!(
+            frame_stats.active,
+            "frame {frame}: GI inactive: {frame_stats:?}"
+        );
+        lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
+            .expect("prepare lit scene");
+        assert!(
+            lit.handle().area_stochastic().active > 0,
+            "area slots not selected: {:?}",
+            lit.handle().area_stochastic()
+        );
+        assert_eq!(lit.handle().area_stochastic().mode, StochasticMode::Restir);
+        let commands = graph
+            .execute(&gpu, target.view(), target.size())
+            .expect("execute frame graph");
+        gpu.queue().submit([commands]);
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll submitted frame");
+        gi_frame.observe_submission(frame + 1, true);
+        let stats = executor.stats();
+        for (node_id, type_id) in expected {
+            let stage = stats
+                .iter()
+                .find(|s| s.node == node_id && s.type_id == type_id);
+            assert!(
+                stage.is_some_and(|s| s.ran),
+                "frame {frame}: {node_id} ({type_id}) not recorded"
+            );
+            if !recorded.contains(&node_id) {
+                recorded.push(node_id);
+            }
+        }
+    }
+    assert_eq!(recorded.len(), 6, "recorded ReSTIR stages: {recorded:?}");
+}
