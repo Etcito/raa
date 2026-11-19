@@ -54,6 +54,9 @@ pub(crate) mod stage_filters;
 #[path = "screen/stage_accumulate.rs"]
 pub(crate) mod stage_accumulate;
 
+#[path = "screen/stage_restir.rs"]
+pub(crate) mod stage_restir;
+
 use self::restir_gi::{RestirGiInputs, RestirGiPipelines, RestirGiResources};
 use crate::settings::{GiSettings, IndirectMode};
 
