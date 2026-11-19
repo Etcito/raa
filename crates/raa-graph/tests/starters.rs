@@ -217,8 +217,14 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
         .iter()
         .map(|&(_, stem, _)| stem)
         .collect();
-    assert_eq!(names, ["Debug", "Full GI", "Simple forward"]);
-    assert_eq!(stems, ["debug", "full-gi", "simple-forward"]);
+    assert_eq!(
+        names,
+        ["Debug", "Full GI", "Full GI stages", "Simple forward"]
+    );
+    assert_eq!(
+        stems,
+        ["debug", "full-gi", "full-gi-stages", "simple-forward"]
+    );
 }
 
 /// P5-Q2: the Simple forward starter is exactly the contracted node list (S50 example, module
