@@ -5,5 +5,7 @@ mod desc;
 mod feature;
 mod shaders;
 
+pub mod filters;
+
 pub use desc::{BloomDesc, MAX_MIPS, MIN_MIP_SIZE, mip_sizes};
 pub use feature::{BloomFeature, BloomHandle};
