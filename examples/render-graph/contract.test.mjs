@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RG_CAPTURE_T_S, ROOM_SUBJECTS, cameraAt, selectionAt } from './lib/scene.js';
 import { validateInventory, validateRequiredFacts } from './lib/inventory.js';
-import { captionText, collectRgFacts, halfFrameTimes } from './lib/runtime.js';
+import { captionText, collectRgFacts, createRgPageRunner, halfFrameTimes } from './lib/runtime.js';
 import * as interpreter from './scenes/interpreter.js';
 
 // Browser-free contract checks of the render-graph page share (contracts rg-room-scene and
@@ -153,4 +153,74 @@ test('every ROOM_SUBJECTS box lies in the RG_CAPTURE_T_S view of the interpreter
     const scene = { ...interpreter, default: { ...interpreter.default, variants } };
     assert.equal(validateInventory([scene], 'interpreter').length, 4, subject.name);
   }
+});
+
+function fakeCanvas() {
+  const context = { drawImage() {}, fillRect() {}, fillText() {}, measureText: text => ({ width: text.length * 8 }) };
+  return { width: 0, height: 0, ownerDocument: { createElement: () => fakeCanvas() },
+    getContext: () => context, toDataURL: () => 'data:image/png;base64,aGVsbG8=' };
+}
+
+function runtimeDouble(isolatedPair, trace) {
+  let id = 0;
+  const engines = [];
+  const load = async () => ({ createEngine: async (canvas, options) => {
+    const identity = ++id, engine = {
+      identity, options, canvas, frameIndex: null, count: 0, disposed: false,
+      resize(width, height) { canvas.width = width; canvas.height = height; },
+      setCamera(pose) { trace.cameras.push([identity, pose]); },
+      render(time) { this.count++; this.frameIndex = Math.round(time / (1000 / 60)); trace.renders.push([identity, time]); },
+      renderGraph() { return { format: 'raa.render-graph', version: 1, name: 'pair', nodes: [], links: [] }; },
+      renderGraphActive() { return true; }, renderGraphIssues() { return []; },
+      renderGraphStats() { return { frameIndex: this.frameIndex, nodes: [] }; },
+      passes() { return [{ name: 'forward', role: 'pass', enabled: true, order: 60, required: true }]; },
+      stats() { return { hardware: false, adapter: {} }; }, dispose() { this.disposed = true; trace.disposed.push(identity); },
+    };
+    engines.push(engine);
+    trace.created.push({ identity, options, canvas });
+    return engine;
+  } });
+  const variant = { id: 'pair', pair: { order: ['left', 'right'] }, selection: { camera: {}, subjects: [] } };
+  const row = { ...ROW, scenario: 'fixture', mode: 'pair', requiredFacts: [] };
+  const entry = { default: { id: 'fixture', milestone: 'interpreter', variants: [variant], isolatedPair,
+    build() { trace.setupBuild++; } },
+    observe(engine) {
+      trace.observed = engine.identity;
+      return facts();
+    }, inventory: [row], factNames: [] };
+  const canvas = fakeCanvas();
+  const runner = createRgPageRunner({ canvas, status: { textContent: '' }, load, scenes: new Map([['fixture', entry]]), lib: {},
+    clock: { now: () => 0, requestFrame: cb => { cb(); return 1; }, cancelFrame() {} } });
+  return { runner, trace, engines, canvas };
+}
+
+test('isolatedPair creates two independent 241-frame engines and routes observation to interpreted half', async () => {
+  const trace = { created: [], renders: [], cameras: [], disposed: [], setupBuild: 0 };
+  const seeds = (_engine, _variant, _state, half) => ({ weatherSeed: 7, weatherChanging: false,
+    timePlaying: false, freshEngine: true, initialRenderCount: 0, source: 'explicit-room-and-fresh-render-sequence' });
+  const { runner, engines } = runtimeDouble({
+    engineOptions: (_variant, _state, half) => half === 'left' ? { pipeline: 'full_gi' } : {},
+    prepare: async (engine, _lib, _variant, _state, half) => { trace.prepared = [...(trace.prepared ?? []), [engine.identity, half]]; },
+    seeds,
+  }, trace);
+  const previousFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = callback => { callback(); return 1; };
+  let result;
+  try {
+    result = await runner.run({ selectionId: 's', attemptId: 'a', buildId: 'b', scenario: 'fixture', mode: 'pair', width: 1280, height: 720, remainingMs: 300000 });
+  } finally {
+    if (previousFrame === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = previousFrame;
+  }
+  assert.equal(engines.length, 3); // page-kit setup handle plus the two measured engines
+  assert.deepEqual(trace.created.slice(1).map(row => row.options), [{ pipeline: 'full_gi' }, {}]);
+  assert.deepEqual(trace.prepared.map(row => row[1]), ['left', 'right']);
+  assert.equal(trace.renders.filter(([identity]) => identity === 2).length, 241);
+  assert.equal(trace.renders.filter(([identity]) => identity === 3).length, 242); // page-kit final observation render
+  assert.equal(trace.observed, 3);
+  assert.equal(result.images[0].data, 'aGVsbG8=');
+  assert.equal(engines[1].disposed, true);
+  assert.equal(engines[2].count, 242); // capture is copied before page-kit observation render
+  runner.dispose();
+  assert.equal(engines[2].disposed, true);
 });

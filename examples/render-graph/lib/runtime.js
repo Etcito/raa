@@ -172,12 +172,58 @@ function composeCapture(copies, pair, caption) {
  * settle's observation and the RG_DT_MS, RG_WARMUP_FRAMES and RG_CAPTURE_T_S constants. Today it
  * returns createPageRunner's runner with topic 'render-graph', collectRgFacts, the inventory
  * validateRequiredFacts, the RG_RUN settle phase and this file's composed-image capture.
+ * Handoff: Build the three frozen comparison scenes calls `createRgPageRunner(options)` in
+ * examples/render-graph/lib/runtime.js to consume `scene.isolatedPair`; today it creates isolated
+ * pipeline engines, records their immutable `state.isolatedHalves` capture facts and routes final
+ * page-kit observation through the interpreted half. Existing page-kit hooks remain local adapters.
  */
 export function createRgPageRunner(options) {
   const canvas = options?.canvas;
   const lib = options?.lib;
   let composed = null;
   let composedContext = null;
+  const owned = new Set();
+  let activeEngine = null;
+  let stableHandle = null;
+  let disposed = false;
+  let generation = 0;
+  let moduleValue = null;
+
+  function proxyFor(engine) {
+    activeEngine = engine;
+    if (stableHandle) return stableHandle;
+    stableHandle = new Proxy({}, {
+      get(_target, key) {
+        if (key === 'then') return undefined;
+        if (key === 'dispose') return (...args) => {
+          const current = activeEngine;
+          if (!current) return;
+          owned.delete(current);
+          return current.dispose.apply(current, args);
+        };
+        const value = activeEngine?.[key];
+        return typeof value === 'function' ? (...args) => value.apply(activeEngine, args) : value;
+      },
+      set(_target, key, value) { activeEngine[key] = value; return true; },
+    });
+    return stableHandle;
+  }
+
+  function disposeOwned(engine) {
+    if (engine && owned.delete(engine)) engine.dispose();
+  }
+
+  const isolatedLoad = async () => {
+    moduleValue = await options.load();
+    return {
+      ...moduleValue,
+      async createEngine(targetCanvas, engineOptions) {
+        const engine = await moduleValue.createEngine(targetCanvas, engineOptions);
+        if (disposed) { engine?.dispose?.(); fail('runner is disposed'); }
+        return proxyFor(engine);
+      },
+    };
+  };
 
   function capture() {
     if (composed === null) fail('no composed image exists for this run');
@@ -188,6 +234,10 @@ export function createRgPageRunner(options) {
   }
 
   async function settle(engine, { budget, scene, variant, state }) {
+    if (scene?.isolatedPair !== undefined) {
+      await settleIsolated(scene, variant, state, budget);
+      return { status: 'ready' };
+    }
     if (typeof scene?.prepareHalf !== 'function') fail('scene.prepareHalf must be a function');
     composed = null;
     composedContext = null;
@@ -238,12 +288,164 @@ export function createRgPageRunner(options) {
     return { status: 'ready' };
   }
 
-  return createPageRunner({
+  async function settleIsolated(scene, variant, state, budget) {
+    const hooks = scene.isolatedPair;
+    if (!hooks || typeof hooks !== 'object' || typeof hooks.engineOptions !== 'function' ||
+        typeof hooks.prepare !== 'function' || typeof hooks.seeds !== 'function') {
+      fail('isolatedPair requires engineOptions, prepare and seeds hooks');
+    }
+    if (variant?.measurement || typeof scene.prepareHalf === 'function' || !variant?.pair?.order ||
+        variant.pair.order.length !== 2 || variant.pair.order[0] !== 'left' || variant.pair.order[1] !== 'right') {
+      fail('unsupported isolatedPair scene or variant hooks');
+    }
+    const runId = ++generation;
+    const module = moduleValue ?? await options.load();
+    const snapshots = [];
+    let previous = null;
+    try {
+      for (const half of ['left', 'right']) {
+        if (disposed || runId !== generation) fail('isolatedPair run was cancelled');
+        if (budget.remainingMs() <= 0) fail('operation deadline expired before isolated engine creation');
+        const opts = hooks.engineOptions(variant, state, half);
+        if (!opts || typeof opts !== 'object' || Array.isArray(opts)) fail(`isolatedPair engineOptions(${half}) is invalid`);
+        const targetCanvas = createCanvas(canvas);
+        targetCanvas.width = CAPTURE_WIDTH;
+        targetCanvas.height = CAPTURE_HEIGHT;
+        const creating = Promise.resolve(module.createEngine(targetCanvas, opts));
+        const measured = await creating;
+        owned.add(measured);
+        if (disposed || runId !== generation) { disposeOwned(measured); fail('isolatedPair run was cancelled'); }
+        if (!measured || typeof measured.render !== 'function' || typeof measured.resize !== 'function' || typeof measured.dispose !== 'function') {
+          fail('isolatedPair createEngine did not resolve a usable Engine');
+        }
+        measured.resize(CAPTURE_WIDTH, CAPTURE_HEIGHT);
+        await hooks.prepare(measured, lib, variant, state, half);
+        if (disposed || runId !== generation) fail('isolatedPair run was cancelled');
+        const times = [], cameraTimes = [];
+        for (let f = 0; f <= RG_WARMUP_FRAMES; f++) {
+          await new Promise((resolve, reject) => {
+            if (typeof globalThis.requestAnimationFrame !== 'function') return reject(new Error('requestAnimationFrame is unavailable'));
+            globalThis.requestAnimationFrame(() => {
+              try {
+                if (disposed || runId !== generation) fail('isolatedPair run was cancelled');
+                if (budget.remainingMs() <= 0) fail(`operation deadline expired before isolated frame ${f}`);
+                applyCamera(measured, f * RG_DT_MS / 1000);
+                measured.render(f * RG_DT_MS);
+                times.push(f * RG_DT_MS);
+                cameraTimes.push(f / 60);
+                resolve();
+              } catch (error) { reject(error); }
+            });
+          });
+        }
+        const image = copyFrame(targetCanvas);
+        const seeds = hooks.seeds(measured, variant, state, half);
+        const graph = measured.renderGraph();
+        const issues = measured.renderGraphIssues();
+        const stats = measured.renderGraphStats();
+        const passes = measured.passes();
+        const active = measured.renderGraphActive();
+        const snapshot = structuredClone({ half, graphFrameIndex: stats.frameIndex, renderTimesMs: times,
+          cameraTimesS: cameraTimes, seeds, graph, active, issues, stats, passes });
+        validateHalf(snapshot);
+        snapshots.push(snapshot);
+        const destination = state.isolatedImages ??= {};
+        destination[half] = image;
+        if (previous) disposeOwned(previous);
+        previous = measured;
+        activeEngine = measured;
+        if (half === 'left') copiesForIsolatedLeft = image;
+      }
+      if (!sameProvenance(snapshots[0].seeds, snapshots[1].seeds) ||
+          snapshots[0].graphFrameIndex !== snapshots[1].graphFrameIndex ||
+          snapshots[0].renderTimesMs.some((time, index) => time !== snapshots[1].renderTimesMs[index]) ||
+          snapshots[0].cameraTimesS.some((time, index) => time !== snapshots[1].cameraTimesS[index])) {
+        fail('isolatedPair halves have mismatched frame or seed provenance');
+      }
+      state.isolatedHalves = Object.freeze(snapshots.map(snapshot => deepFreeze(snapshot)));
+      copiesForIsolatedRight = state.isolatedImages.right;
+      const pair = variant.pair;
+      const result = composeCapture(new Map([['left', copiesForIsolatedLeft], ['right', copiesForIsolatedRight]]), pair, null);
+      composed = result.data; composedContext = result.context;
+      if (previous) owned.add(previous);
+    } catch (error) {
+      for (const engine of [...owned]) disposeOwned(engine);
+      activeEngine = null;
+      throw error;
+    }
+  }
+
+  let copiesForIsolatedLeft = null;
+  let copiesForIsolatedRight = null;
+  function deepFreeze(value) {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      Object.freeze(value);
+      Object.values(value).forEach(deepFreeze);
+    }
+    return value;
+  }
+  function sameProvenance(left, right) {
+    return Object.keys(left).length === Object.keys(right).length &&
+      Object.keys(left).every(key => left[key] === right[key]);
+  }
+  function validateHalf(value) {
+    const { seeds, stats } = value;
+    if (!Number.isSafeInteger(value.graphFrameIndex) || value.graphFrameIndex !== 240 ||
+        stats?.frameIndex !== value.graphFrameIndex || value.renderTimesMs.length !== 241 ||
+        value.cameraTimesS.length !== 241 || value.cameraTimesS.at(-1) !== 4 || !seeds ||
+        !Number.isInteger(seeds.weatherSeed) || seeds.weatherSeed < 0 || seeds.weatherSeed > 0xffffffff ||
+        typeof seeds.weatherChanging !== 'boolean' || typeof seeds.timePlaying !== 'boolean' ||
+        seeds.freshEngine !== true || seeds.initialRenderCount !== 0 || typeof seeds.source !== 'string' || !seeds.source) {
+      fail('isolatedPair produced incomplete or invalid frame and seed evidence');
+    }
+    for (let frame = 0; frame <= 240; frame++) {
+      if (value.renderTimesMs[frame] !== frame * RG_DT_MS || value.cameraTimesS[frame] !== frame / 60) {
+        fail(`isolatedPair frame trace differs at ${frame}`);
+      }
+    }
+  }
+
+  const adaptedScenes = new Map([...options.scenes].map(([key, entry]) => {
+    const source = entry.default;
+    const wrapped = source?.isolatedPair === undefined ? entry : {
+      ...entry,
+      default: {
+        ...source,
+        async build(engine, helpers, variant) {
+          // Isolated setup builds metadata only; room construction belongs to each measured engine.
+          return typeof source.buildMetadata === 'function' ? source.buildMetadata(engine, helpers, variant) : {};
+        },
+      },
+    };
+    return [key, wrapped];
+  }));
+  const runner = createPageRunner({
     ...options,
+    scenes: adaptedScenes,
+    load: async () => {
+      const loaded = await isolatedLoad();
+      return loaded;
+    },
     topic: 'render-graph',
     collectFacts: collectRgFacts,
     validateRequiredFacts,
     settle,
     capture,
   });
+  return {
+    run: async input => {
+      composed = null;
+      composedContext = null;
+      generation++;
+      return runner.run(input);
+    },
+    engine: () => runner.engine(),
+    dispose() {
+      disposed = true;
+      generation++;
+      runner.dispose();
+      for (const engine of [...owned]) disposeOwned(engine);
+      activeEngine = null;
+    },
+  };
 }
