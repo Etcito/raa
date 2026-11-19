@@ -1,8 +1,10 @@
-//! The stages `gi.restir.initial` and `gi.restir.temporal` (contract 'rg-gi-stage-api'; types and
-//! ports of 'rg-gi-stage-types'). The initial stage writes one candidate reservoir per pixel; the
-//! temporal stage merges it with its own previous reservoirs, which it keeps internally in two
-//! buffers written alternately, and publishes the merged reservoirs and their raw irradiance. Both
-//! build their pipelines through [`stage_pipelines`], which wraps the `RestirStagePipelines::new`
+//! The stages `gi.restir.initial`, `gi.restir.temporal` and `gi.restir.spatial` (contract
+//! 'rg-gi-stage-api'; types and ports of 'rg-gi-stage-types'). The initial stage writes one
+//! candidate reservoir per pixel; the temporal stage merges it with its own previous reservoirs,
+//! which it keeps internally in two buffers written alternately, and publishes the merged
+//! reservoirs and their raw irradiance; the spatial stage reuses the reservoirs of its input and
+//! publishes the final reservoirs and the raw irradiance. All three build their pipelines through
+//! [`stage_pipelines`], which wraps the `RestirStagePipelines::new`
 //! of `restir_gi.rs` (`RestirStagePipelines` at restir_gi.rs:404, with its Handoff doc comment at
 //! restir_gi.rs:394), and record its entry points over the group-2 layouts of that file.
 
@@ -41,6 +43,17 @@ const INITIAL_KEYS: &[&str] = &[
 const TEMPORAL_KEYS: &[&str] = &[
     "restirMCap",
     "restirBoilingFactor",
+    "restirNormalCos",
+    "restirJacobianMax",
+    "restirVisibilitySteps",
+    "restirVisibilityDistance",
+];
+
+/// The keys of `gi.restir.spatial`: the three params-uniform tunables, then the three overrides of
+/// the spatial pipeline.
+const SPATIAL_KEYS: &[&str] = &[
+    "restirSpatialSamples",
+    "restirSpatialRadius",
     "restirNormalCos",
     "restirJacobianMax",
     "restirVisibilitySteps",
@@ -440,6 +453,150 @@ impl StageImpl for RestirTemporalStage {
     }
 }
 
+/// The outputs of `gi.restir.spatial` for one viewport: the final reservoirs, the raw irradiance
+/// and the params uniform.
+struct SpatialOutputs {
+    size: (u32, u32),
+    reservoirs: wgpu::Buffer,
+    irradiance: wgpu::TextureView,
+    params: wgpu::Buffer,
+}
+
+impl SpatialOutputs {
+    fn new(gpu: &GpuContext, size: (u32, u32)) -> SpatialOutputs {
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
+        let irradiance = texture(
+            gpu,
+            "raa-gi.stage.restir-spatial.irradiance",
+            size,
+            1,
+            IRRADIANCE_FORMAT,
+            usage,
+        );
+        SpatialOutputs {
+            size,
+            reservoirs: reservoir(gpu, "raa-gi.stage.restir-spatial.reservoirs", size),
+            irradiance: full_view(&irradiance),
+            params: buffer(
+                gpu,
+                "raa-gi.stage.restir-spatial.params",
+                RESTIR_GI_PARAMS_SIZE,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
+        }
+    }
+}
+
+/// The `gi.restir.spatial` stage: the spatial reuse of the reservoirs of its `reservoirs` input,
+/// publishing the final `reservoirs` and the raw `irradiance`.
+#[derive(Default)]
+pub(crate) struct RestirSpatialStage {
+    pipelines: Option<(RestirStagePipelines, u64)>,
+    outputs: Option<SpatialOutputs>,
+    /// The frame counter the spatial sampling pattern reads; the stage counts its prepares.
+    frame: u32,
+}
+
+impl StageImpl for RestirSpatialStage {
+    fn param_keys(&self) -> &'static [&'static str] {
+        SPATIAL_KEYS
+    }
+
+    fn check_value(&self, key: &str, value: f64) -> Result<(), String> {
+        check(key, value)
+    }
+
+    /// Builds the pipelines on first use, reallocates the outputs when the viewport changed,
+    /// writes the params uniform from the stage values (the samples, radius and normal cosine;
+    /// the m_cap is `GiSettings::DEFAULT`), and publishes `reservoirs` and `irradiance`.
+    fn prepare(
+        &mut self,
+        cx: &StageCx<'_>,
+        ctx: &mut PrepareCtx<'_>,
+        published: &mut Vec<(&'static str, ImageDesc)>,
+    ) -> Result<(), RaaError> {
+        stage_pipelines(&mut self.pipelines, ctx.gpu, cx);
+        if self.outputs.as_ref().is_none_or(|out| out.size != ctx.size) {
+            self.outputs = Some(SpatialOutputs::new(ctx.gpu, ctx.size));
+        }
+        let default = RestirGiTuned::DEFAULT;
+        let tuned = RestirGiTuned {
+            spatial_samples: cx.value("restirSpatialSamples", f64::from(default.spatial_samples))
+                as u32,
+            spatial_radius: cx.value("restirSpatialRadius", f64::from(default.spatial_radius))
+                as f32,
+            normal_cos: cx.value("restirNormalCos", f64::from(default.normal_cos)) as f32,
+            ..default
+        };
+        let m_cap = GiSettings::DEFAULT.restir_m_cap;
+        let bytes = params_bytes(self.frame, false, false, m_cap, tuned);
+        if let Some(outputs) = self.outputs.as_ref() {
+            ctx.gpu.queue().write_buffer(&outputs.params, 0, &bytes);
+            let (w, h) = outputs.size;
+            let desc = ImageDesc::new(ImageDim::D2, IRRADIANCE_FORMAT, w, h, 1, 1);
+            ctx.resources.publish_buffer(
+                cx.entry,
+                "reservoirs",
+                &outputs.reservoirs,
+                reservoir_bytes(outputs.size),
+            );
+            ctx.resources
+                .publish(cx.entry, "irradiance", &outputs.irradiance, desc);
+            published.push(("irradiance", desc));
+        }
+        self.frame = self.frame.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Records the spatial entry over the viewport, reading the `reservoirs` input buffer at
+    /// binding 11. False (nothing recorded) without that buffer, the frame buffer, group 1, or the
+    /// built pipelines and outputs.
+    fn record(&mut self, cx: &StageCx<'_>, ctx: &mut RecordCtx<'_>) -> Result<bool, RaaError> {
+        let Some((reservoirs, _)) = cx.buffer(ctx.resources, "reservoirs") else {
+            return Ok(false);
+        };
+        let Some(frame) = cx.shared.frame_buffer() else {
+            return Ok(false);
+        };
+        let Some(group1) = cx.shared.compute_group1(ctx.lighting) else {
+            return Ok(false);
+        };
+        let (Some((pipelines, _)), Some(outputs)) =
+            (self.pipelines.as_ref(), self.outputs.as_ref())
+        else {
+            return Ok(false);
+        };
+        let views = GBufferViews::resolve(ctx.targets, ctx.resources, cx.entry);
+        let bindings = group(
+            ctx.gpu.device(),
+            "raa-gi.stage.restir-spatial",
+            &pipelines.spatial_layout,
+            &[
+                (0, frame.as_entire_binding()),
+                (1, texture_resource(&views.depth)),
+                (2, texture_resource(&views.normal)),
+                (11, reservoirs.as_entire_binding()),
+                (12, outputs.params.as_entire_binding()),
+                (13, texture_resource(&outputs.irradiance)),
+                (15, outputs.reservoirs.as_entire_binding()),
+            ],
+        );
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("raa-gi.stage.restir-spatial"),
+                timestamp_writes: None,
+            });
+        pass.set_bind_group(1, &group1, &[]);
+        pass.set_bind_group(2, &bindings, &[]);
+        pass.set_pipeline(&pipelines.spatial);
+        dispatch(&mut pass, outputs.size.0, outputs.size.1);
+        Ok(true)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -554,6 +711,25 @@ mod tests {
             first, second,
             "consecutive prepares write different buffers"
         );
+    }
+
+    /// No input is bound: prepare publishes the 8x8 reservoirs and the Rgba16Float irradiance.
+    #[test]
+    fn spatial_publishes_reservoirs_and_irradiance() {
+        let test = "spatial_publishes_reservoirs_and_irradiance";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let (handle, mut pass, table) = attached(&gpu, GiStageKind::RestirSpatial);
+        prepare_once(&gpu, pass.as_mut(), &table, 0);
+        let bytes = RESTIR_GI_RESERVOIR_BYTES * 8 * 8;
+        let found = table.buffer("gi.restir.spatial#t", "reservoirs");
+        assert_eq!(found.map(|(_, size)| size), Some(bytes));
+        let desc = ImageDesc::new(ImageDim::D2, IRRADIANCE_FORMAT, 8, 8, 1, 1);
+        assert_eq!(handle.published(), vec![("irradiance", desc)]);
+        let found = table.get("gi.restir.spatial#t", "irradiance");
+        assert_eq!(found.map(|image| image.desc), Some(desc));
     }
 
     #[test]

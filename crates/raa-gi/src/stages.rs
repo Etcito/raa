@@ -21,7 +21,9 @@ use crate::feature::GiHandle;
 use crate::parts::GiShared;
 use crate::parts::screen::stage_accumulate::AccumulateStage;
 use crate::parts::screen::stage_filters::{AtrousStage, ResolveStage};
-use crate::parts::screen::stage_restir::{RestirInitialStage, RestirTemporalStage};
+use crate::parts::screen::stage_restir::{
+    RestirInitialStage, RestirSpatialStage, RestirTemporalStage,
+};
 use crate::parts::screen::stages::{ProbesStage, PyramidStage};
 use crate::{GiTunables, tunables};
 
@@ -210,6 +212,7 @@ pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
         GiStageKind::Resolve => Some(Box::new(ResolveStage::default())),
         GiStageKind::RestirInitial => Some(Box::new(RestirInitialStage::default())),
         GiStageKind::RestirTemporal => Some(Box::new(RestirTemporalStage::default())),
+        GiStageKind::RestirSpatial => Some(Box::new(RestirSpatialStage::default())),
         _ => None,
     }
 }
