@@ -1,11 +1,18 @@
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::{cell::RefCell, future::Future, rc::Rc, task::Context};
+use std::{
+    cell::{Cell, RefCell},
+    future::Future,
+    rc::Rc,
+    task::Context,
+};
 
 use raa_bloom::stages::{BloomStageKind, install_stage};
 use raa_core::testing::{skip, software_gpu};
 use raa_core::{FrameGraph, OffscreenTarget, RaaError, wgpu};
-use raa_pipeline::{FeaturePass, Pipeline, RecordCtx};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, Pipeline, PrepareCtx, PublishedImage, RecordCtx,
+};
 
 const WIDTH: u32 = 32;
 const ROW_BYTES: u32 = WIDTH * 8;
@@ -224,4 +231,164 @@ fn composite_without_a_level_preserves_the_hdr_chain() {
     let error = poll(error_scope.pop());
     assert!(error.is_none(), "validation error: {error:?}");
     assert!(!up.ran());
+}
+
+fn clear(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, value: f64) {
+    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("test.bloom.feed"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: value,
+                    g: value,
+                    b: value,
+                    a: 1.0,
+                }),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    drop(pass);
+}
+
+/// Binds a `base` level (cleared to `value`) and a black `src` level to `bloom.up#u`, and
+/// clears the HDR chain to black, so the composite at strength 1 shows the level alone.
+struct Feed {
+    value: Rc<Cell<f64>>,
+    base: (wgpu::Texture, wgpu::TextureView),
+    src: (wgpu::Texture, wgpu::TextureView),
+}
+
+fn level(gpu: &raa_core::GpuContext, size: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("test.bloom.level"),
+        size: wgpu::Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: raa_pipeline::HDR_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+impl FeaturePass for Feed {
+    fn name(&self) -> &str {
+        "test.feed"
+    }
+    fn order(&self) -> u32 {
+        30
+    }
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        for (port, (texture, view)) in [("base", &self.base), ("src", &self.src)] {
+            let desc = ImageDesc::new(
+                ImageDim::D2,
+                raa_pipeline::HDR_FORMAT,
+                texture.width(),
+                texture.height(),
+                1,
+                1,
+            );
+            ctx.resources.bind_input(
+                "bloom.up#u",
+                port,
+                PublishedImage {
+                    view: view.clone(),
+                    desc,
+                },
+            );
+        }
+        Ok(())
+    }
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        clear(ctx.encoder, &self.base.1, self.value.get());
+        clear(ctx.encoder, &self.src.1, 0.0);
+        let hdr = ctx.targets.hdr();
+        clear(ctx.encoder, hdr.dst(), 0.0);
+        hdr.swap();
+        Ok(())
+    }
+}
+
+/// `prepare` allocates a new level texture every frame: the composite must sample this
+/// frame's level, not the first frame's (a bloom frozen at frame 1 made a two-level and a
+/// five-level chain render the same image).
+#[test]
+fn composite_samples_the_current_frame_level() {
+    let Some(gpu) = software_gpu() else {
+        skip(
+            "composite_samples_the_current_frame_level",
+            "no software adapter",
+        );
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(Pipeline::new(
+        &gpu,
+        wgpu::TextureFormat::Rgba8Unorm,
+        false,
+    )));
+    let value = Rc::new(Cell::new(1.0));
+    pipeline
+        .borrow_mut()
+        .add(Box::new(Feed {
+            value: value.clone(),
+            base: level(&gpu, WIDTH / 2),
+            src: level(&gpu, WIDTH / 4),
+        }))
+        .unwrap();
+    let up = install_stage(&gpu, &pipeline, BloomStageKind::Up, "u").unwrap();
+    up.set_values(&[("strength".into(), 1.0)]).unwrap();
+    up.set_composite(true);
+    let buffer = Rc::new(gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("test.bloom.stage.readback"),
+        size: u64::from(ROW_BYTES * WIDTH),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    }));
+    pipeline
+        .borrow_mut()
+        .add(Box::new(Probe(buffer.clone())))
+        .unwrap();
+    let mut graph = FrameGraph::new(wgpu::TextureFormat::Rgba8Unorm);
+    Pipeline::install(&pipeline, &mut graph);
+    graph.compile().unwrap();
+    let target = OffscreenTarget::new(&gpu, WIDTH, WIDTH, wgpu::TextureFormat::Rgba8Unorm);
+    for frame_value in [1.0_f32, 3.0] {
+        value.set(f64::from(frame_value));
+        let commands = graph.execute(&gpu, target.view(), (WIDTH, WIDTH)).unwrap();
+        gpu.queue().submit([commands]);
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+        let mapped = slice.get_mapped_range().unwrap();
+        for pixel in mapped.chunks_exact(8) {
+            for channel in pixel.chunks_exact(2).take(3) {
+                let seen = half(u16::from_le_bytes([channel[0], channel[1]]));
+                assert!(
+                    (seen - frame_value).abs() < 1e-2,
+                    "frame with level {frame_value}: composite showed {seen}"
+                );
+            }
+        }
+        drop(mapped);
+        buffer.unmap();
+        assert!(up.ran());
+    }
 }

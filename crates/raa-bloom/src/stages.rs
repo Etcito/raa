@@ -174,7 +174,10 @@ struct StagePass {
     uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
     slot: usize,
-    composite_bound: Option<(wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
+    /// Composite bind group, keyed by the HDR src, HDR dst and bloom level textures it binds:
+    /// `prepare` allocates a new level texture each frame, so a key without it would keep
+    /// sampling the first frame's level (a frozen bloom that ignores the chain length).
+    composite_bound: Option<(wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
 }
 
 impl StagePass {
@@ -390,7 +393,9 @@ impl FeaturePass for StagePass {
                 let src_texture = hdr.src_texture().clone();
                 let dst_texture = hdr.dst_texture().clone();
                 let group = match &self.composite_bound {
-                    Some((src, dst, group)) if src == &src_texture && dst == &dst_texture => {
+                    Some((src, dst, level, group))
+                        if src == &src_texture && dst == &dst_texture && level == &texture =>
+                    {
                         group.clone()
                     }
                     _ => {
@@ -409,7 +414,8 @@ impl FeaturePass for StagePass {
                             hdr.src(),
                             &target,
                         );
-                        self.composite_bound = Some((src_texture, dst_texture, group.clone()));
+                        self.composite_bound =
+                            Some((src_texture, dst_texture, texture.clone(), group.clone()));
                         group
                     }
                 };
