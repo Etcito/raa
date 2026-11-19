@@ -163,8 +163,14 @@ pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(Stri
                     | "ssr.composite"
                     | "bloom.down"
                     | "bloom.up"
+                    | "compute.wgsl"
             ) {
-                return Some((node.id.clone(), format!("{}#{}", node.type_id, node.id)));
+                let entry = if node.type_id == "compute.wgsl" {
+                    format!("compute#{}", node.id)
+                } else {
+                    format!("{}#{}", node.type_id, node.id)
+                };
+                return Some((node.id.clone(), entry));
             }
             let spec = catalog.node(&node.type_id)?;
             let entry = if node.type_id.starts_with("view.") {
@@ -219,6 +225,61 @@ pub fn link_order(
             .find_map(|p| result.iter().position(|name| *name == p.name))
             .map_or(0, |i| i + 1);
         result.insert(at, pass.name.clone());
+    }
+    for node in &plan.nodes {
+        if node.type_id != "compute.wgsl" {
+            continue;
+        }
+        let Some((_, entry)) = entries.iter().find(|(id, _)| id == &node.id) else {
+            continue;
+        };
+        let Some(current) = result.iter().position(|name| name == entry) else {
+            continue;
+        };
+        let mut latest_source = None;
+        for input in &node.inputs {
+            if let raa_graph::plan::InputSource::Link {
+                node: source,
+                history: false,
+                ..
+            } = &input.source
+            {
+                let source_name = entries
+                    .iter()
+                    .find(|(id, _)| *id == *source)
+                    .map(|(_, name)| name.as_str())
+                    .or_else(|| {
+                        installed
+                            .iter()
+                            .find(|pass| {
+                                pass.role == raa_pipeline::PassRole::Pass
+                                    && pass
+                                        .name
+                                        .rsplit_once('#')
+                                        .is_some_and(|(_, id)| id == source)
+                            })
+                            .map(|pass| pass.name.as_str())
+                    });
+                if let Some(index) =
+                    source_name.and_then(|name| result.iter().position(|item| item == name))
+                {
+                    latest_source =
+                        Some(latest_source.map_or(index, |latest: usize| latest.max(index)));
+                }
+            }
+        }
+        if let Some(source_index) = latest_source {
+            let destination = source_index + 1;
+            if current != destination {
+                let name = result.remove(current);
+                let destination = if current < destination {
+                    destination - 1
+                } else {
+                    destination
+                };
+                result.insert(destination, name);
+            }
+        }
     }
     result
 }
@@ -304,8 +365,8 @@ pub fn history_refusals(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(
 }
 
 /// Whether output `port` of a node of type `ty` may feed an executor-owned history. GI stage
-/// producers `gi.accumulate.output/meta`, `area.temporal.filtered/depth` and
-/// `ssgi.resolve.accumulated` are accepted as well.
+/// producers `gi.accumulate.output/meta`, `area.temporal.filtered/depth`,
+/// `ssgi.resolve.accumulated` and every compute output are accepted as well.
 pub fn history_source(ty: &str, port: &str) -> bool {
     (ty == "pass.taa" && port == "history")
         || (port == "color" && chain_type(ty))
@@ -317,6 +378,7 @@ pub fn history_source(ty: &str, port: &str) -> bool {
                 | ("area.temporal", "depth")
                 | ("ssgi.resolve", "accumulated")
         )
+        || ty == "compute.wgsl"
 }
 
 #[cfg(test)]

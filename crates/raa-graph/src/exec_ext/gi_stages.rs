@@ -365,6 +365,9 @@ pub(crate) fn stage_entries(plan: &GraphPlan, catalog: &Catalog) -> Vec<(String,
         .iter()
         .filter_map(|n| {
             let kind = GiStageKind::from_type_id(&n.type_id);
+            if n.type_id == "compute.wgsl" {
+                return Some((n.id.clone(), format!("compute#{}", n.id)));
+            }
             let spec = catalog.node(&n.type_id)?;
             let entry = if let Some(kind) = kind {
                 stage_entry(kind, &n.id)
@@ -789,6 +792,22 @@ mod tests {
     }
     fn entry_pairs(p: &GraphPlan, c: &Catalog) -> Vec<(String, String)> {
         stage_entries(p, c)
+    }
+
+    #[test]
+    fn compute_outputs_are_stage_sources() {
+        let p = plan(
+            r#",{"id":"calc","type":"compute.wgsl","inputs":[{"key":"irradiance","type":"image2d"}],"outputs":[{"key":"dst","type":"image2d","format":"rgba16float"}],"math":null,"wgsl":"fn rg_main(p: vec2<u32>) {}"},{"id":"resolve","type":"gi.resolve"}"#,
+            r#",{"from":"pre.normal","to":"calc.irradiance"},{"from":"calc.dst","to":"resolve.irradiance"},{"from":"resolve.gi","to":"forward.gi"}"#,
+        );
+        let entries = stage_entries(&p, &Catalog::build());
+        assert!(entries.contains(&("calc".into(), "compute#calc".into())));
+        assert!(image_bindings(&p, &Catalog::build(), &entries).contains(&(
+            "gi.resolve#resolve".into(),
+            "irradiance",
+            "compute#calc".into(),
+            "dst".into()
+        )));
     }
 
     #[test]

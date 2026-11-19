@@ -1219,7 +1219,9 @@ fn source_of(
     let port = static_port(&input.port)?;
     let node = plan.nodes.iter().find(|candidate| candidate.id == *from)?;
     let spec = catalog.node(&node.type_id)?;
-    let (pass, order, view_display) = if node.type_id.starts_with("view.") {
+    let (pass, order, view_display) = if node.type_id == "compute.wgsl" {
+        (format!("compute#{}", node.id), spec.default_order, false)
+    } else if node.type_id.starts_with("view.") {
         let name = format!("{VIEW_PREFIX}{}", node.id);
         let view = placed.iter().find(|view| view.spec.name == name)?;
         (name, view.spec.order, view.spec.overlay)
@@ -1416,8 +1418,21 @@ mod tests {
     use raa_shader::Composer;
 
     use crate::exec::HandleSet;
+    use crate::plan::plan_from_json;
 
     use super::*;
+
+    #[test]
+    fn compute_image_sources_bind_to_the_compute_pass() {
+        let plan = plan_from_json(r#"{"format":"raa.render-graph","version":1,"name":"compute view","nodes":[{"id":"prepass","type":"pass.prepass"},{"id":"forward","type":"pass.forward"},{"id":"tonemap","type":"pass.tonemap"},{"id":"out","type":"output.display"},{"id":"calc","type":"compute.wgsl","inputs":[{"key":"src","type":"image2d"}],"outputs":[{"key":"dst","type":"image2d","format":"rgba16float"}],"math":null,"wgsl":"fn rg_main(p: vec2<u32>) {}"},{"id":"view","type":"view.image"}],"links":[{"from":"prepass.normal","to":"calc.src"},{"from":"calc.dst","to":"view.src"},{"from":"view.color","to":"tonemap.color"},{"from":"tonemap.color","to":"out.color"}]}"#).unwrap();
+        let placements = placements(&plan, &Catalog::build());
+        assert!(placements[0].bindings.contains(&(
+            "view#view".into(),
+            "src",
+            "compute#calc".into(),
+            "dst".into()
+        )));
+    }
 
     #[test]
     fn every_image_variant_validates() {
