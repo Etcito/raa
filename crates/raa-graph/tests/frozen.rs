@@ -61,6 +61,65 @@ fn frozen_registry_has_three_starters() {
     }
 }
 
+// The device-free selection of the m33 API: the Engine binding itself is wasm32-only, but the
+// unknown/stale decision is plain Rust, so this test includes the file by path instead of adding
+// a dependency from raa-graph to raa-js.
+#[cfg(not(target_arch = "wasm32"))]
+#[path = "../../raa-js/src/api/m33_frozen_render_graph.rs"]
+mod m33;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn frozen_api_selection() {
+    use m33::select_frozen;
+    use raa_graph::format::parse_graph;
+    use raa_graph::validate::canonical_doc;
+
+    let catalog = Catalog::build();
+    let (_, make_plan, source_json) = registry::frozen_all()
+        .into_iter()
+        .find(|(name, _, _)| *name == "simple_forward")
+        .expect("simple_forward must be in the frozen registry");
+
+    let selected = select_frozen("simple_forward", &catalog).expect("the starter selects");
+    assert_eq!(
+        selected.plan,
+        make_plan(),
+        "the selected plan is the literal frozen plan"
+    );
+    let source_doc = parse_graph(source_json).expect("the saved source parses");
+    assert_eq!(
+        selected.doc,
+        canonical_doc(&source_doc, &catalog),
+        "the selected document is the canonical saved source"
+    );
+
+    let unknown = select_frozen("does_not_exist", &catalog).expect_err("an absent name refuses");
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0].code, "graph.frozen_unknown");
+
+    let mut changed = Catalog::build();
+    let node_id = selected.plan.nodes[0].id.clone();
+    let type_id = selected.plan.nodes[0].type_id.clone();
+    let spec = changed
+        .nodes
+        .iter_mut()
+        .find(|spec| spec.id == type_id.as_str())
+        .expect("the plan's type is in the catalog");
+    spec.version += 1;
+    let stale = select_frozen("simple_forward", &changed)
+        .expect_err("a catalog version change refuses the literal");
+    assert_eq!(stale[0].code, "graph.frozen_stale");
+    assert_eq!(stale[0].node.as_deref(), Some(node_id.as_str()));
+
+    let again = select_frozen("simple_forward", &Catalog::build())
+        .expect("the unchanged catalog still selects");
+    assert_eq!(
+        again.plan, selected.plan,
+        "a refused selection never upgrades the literal"
+    );
+}
+
 #[test]
 fn changed_node_version_fails_the_catalog_version_assertion() {
     let catalog = Catalog::build();
