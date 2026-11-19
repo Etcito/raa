@@ -254,6 +254,9 @@ struct SharedFrame {
     emissive_generation: u64,
     voxel_buffer: Option<wgpu::Buffer>,
     voxel_generation: u64,
+    /// Validity of the latest prepared frame's lit history and camera continuity.
+    history_valid: bool,
+    camera_valid: bool,
 }
 
 impl GiShared {
@@ -286,7 +289,28 @@ impl GiShared {
             emissive_generation: 0,
             voxel_buffer: None,
             voxel_generation: 0,
+            history_valid: false,
+            camera_valid: false,
         })))
+    }
+
+    /// True when the latest prepared GI frame's lit history is valid; false before the first frame
+    /// and on an inactive frame.
+    pub fn history_valid(&self) -> bool {
+        self.0.borrow().history_valid
+    }
+
+    /// True when the latest prepared GI frame continues the camera of the previous active frame;
+    /// false before the first frame and on an inactive frame.
+    pub fn camera_valid(&self) -> bool {
+        self.0.borrow().camera_valid
+    }
+
+    /// Publishes the validity of the frame `GiHandle::prepare_frame` prepared.
+    pub(crate) fn set_frame_validity(&self, history_valid: bool, camera_valid: bool) {
+        let mut shared = self.0.borrow_mut();
+        shared.history_valid = history_valid;
+        shared.camera_valid = camera_valid;
     }
 
     /// The optional per-vertex colour streams both voxelizers read (clones share them).
@@ -561,6 +585,8 @@ impl GiShared {
         shared.probe_output = None;
         shared.screen_debug = None;
         shared.group1 = None;
+        shared.history_valid = false;
+        shared.camera_valid = false;
     }
 }
 

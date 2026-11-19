@@ -250,6 +250,11 @@ impl GiHandle {
         self.core.borrow().settings
     }
 
+    /// A clone of the shared frame state (clones share it).
+    pub fn shared(&self) -> GiShared {
+        self.core.borrow().shared.clone()
+    }
+
     /// Applies `patch` to the quality and publishes it. A change takes effect at the next active
     /// frame, which reallocates the volume. A refusal changes nothing.
     pub fn set_quality(&self, patch: GiQualityPatch) -> Result<(), RaaError> {
@@ -523,6 +528,8 @@ impl GiHandle {
         core.history_valid = active && !allocated && copied == Some(core.viewport);
         let camera_valid = active && !allocated && core.last_active_viewport == Some(core.viewport);
         core.last_active_viewport = active.then_some(core.viewport);
+        core.shared
+            .set_frame_validity(core.history_valid, camera_valid);
 
         let settings = core.settings;
         lit.set_frame_feature(29, active);

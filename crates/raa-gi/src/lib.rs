@@ -16,6 +16,7 @@ pub mod membership;
 pub mod parts;
 pub mod settings;
 pub mod shaders;
+pub mod stages;
 pub mod stats;
 mod tunables;
 pub mod vertex_colors;
