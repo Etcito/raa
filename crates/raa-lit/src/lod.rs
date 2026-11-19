@@ -327,9 +327,22 @@ impl Grid {
         Ok(Self { triangles, nodes })
     }
 
-    fn distance(&self, p: Point) -> f64 {
-        let mut best = f64::INFINITY;
-        let mut stack = Vec::with_capacity(64);
+    /// Squared distance from `p` to the surface, exact when it is above `cutoff`. Once a
+    /// triangle within `cutoff` is found the search stops and returns that (smaller) distance:
+    /// `lod_error` keeps a maximum, which such a vertex cannot raise. `hint` is the triangle
+    /// nearest to the previous query; neighbouring vertices usually share it.
+    fn distance(
+        &self,
+        p: Point,
+        cutoff: f64,
+        hint: &mut usize,
+        stack: &mut Vec<(usize, f64)>,
+    ) -> f64 {
+        let mut best = triangle_distance(p, self.triangles[*hint]);
+        if best <= cutoff {
+            return best;
+        }
+        stack.clear();
         stack.push((0usize, box_distance(p, &self.nodes[0])));
         while let Some((index, bound)) = stack.pop() {
             // Every triangle under a box is at least as far as the box.
@@ -339,8 +352,18 @@ impl Grid {
             let node = &self.nodes[index];
             if node.count > 0 {
                 let start = node.start as usize;
-                for triangle in &self.triangles[start..start + node.count as usize] {
-                    best = best.min(triangle_distance(p, *triangle));
+                for (i, triangle) in self.triangles[start..start + node.count as usize]
+                    .iter()
+                    .enumerate()
+                {
+                    let d = triangle_distance(p, *triangle);
+                    if d < best {
+                        best = d;
+                        *hint = start + i;
+                    }
+                }
+                if best <= cutoff {
+                    return best;
                 }
                 continue;
             }
@@ -368,11 +391,12 @@ pub fn lod_error(full: &MeshData, level: &MeshData) -> Result<f32, RaaError> {
     let full_grid = Grid::new(full)?;
     let level_grid = Grid::new(level)?;
     let mut error: f64 = 0.0;
-    for p in &full.positions {
-        error = error.max(level_grid.distance(p.map(f64::from)));
-    }
-    for p in &level.positions {
-        error = error.max(full_grid.distance(p.map(f64::from)));
+    let mut stack = Vec::with_capacity(64);
+    for (from, to) in [(full, &level_grid), (level, &full_grid)] {
+        let mut hint = 0;
+        for p in &from.positions {
+            error = error.max(to.distance(p.map(f64::from), error, &mut hint, &mut stack));
+        }
     }
     Ok(error.sqrt() as f32)
 }
@@ -471,7 +495,7 @@ mod lod_grid_tests {
         };
         let (sparse, dense) = (per_vertex(2048), per_vertex(32768));
         assert!(
-            dense <= 16.0 && dense <= sparse * 2.0,
+            dense <= 3.0 && dense <= sparse * 2.0,
             "triangles tested per vertex: {sparse:.1} at 2048 blades, {dense:.1} at 32768"
         );
     }
