@@ -47,14 +47,12 @@ fn post_stage_graph(ao_radius: Option<f64>) -> String {
     ];
     let links = vec![
         link("aoTrace.raw", "aoBlur.src"),
-        // The card's `aoBlur.ao -> forward.ao` cannot hold: the catalog publishes `ao.blur.ao`
-        // as Rgba16Float and `pass.forward.ao` takes R8Unorm, so the AO branch feeds the bloom
-        // composite colour instead (both Rgba16Float) to stay planned.
-        link("aoBlur.ao", "bloomUp1.color"),
+        link("aoBlur.ao", "forward.ao"),
         link("ssrHiz.hiz", "ssrTrace.hiz"),
         link("ssrTrace.trace", "ssrComposite.trace"),
         link("forward.color", "ssrComposite.color"),
         link("ssrComposite.color", "bloomDown1.src"),
+        link("ssrComposite.color", "bloomUp1.color"),
         link("bloomDown1.level", "bloomDown2.src"),
         link("bloomDown2.level", "bloomUp1.src"),
         link("bloomDown1.level", "bloomUp1.base"),

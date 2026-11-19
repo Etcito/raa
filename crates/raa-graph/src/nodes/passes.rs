@@ -478,7 +478,7 @@ fn forward_inputs() -> Vec<PortSpec> {
             "ao",
             "AO",
             P::Image2d,
-            Some(F::R8Unorm),
+            Some(F::Rgba16Float),
             &["pass.ao.gtao.ao"],
             true,
             Some(7),
@@ -1250,7 +1250,7 @@ fn shadow_gi_types() -> Vec<NodeTypeSpec> {
             40,
             vec![gbuffer_input("depth"), gbuffer_input("normal")],
             vec![
-                image("ao", "AO", F::R8Unorm),
+                image("ao", "AO", F::Rgba16Float),
                 image("raw", "Raw AO", F::R32Float),
                 image("blur", "Blurred AO", F::R32Float),
             ],
@@ -1548,7 +1548,7 @@ fn shadow_gi_types() -> Vec<NodeTypeSpec> {
             45,
             vec![gbuffer_input("depth")],
             vec![
-                image("contact", "Contact", F::R8Unorm),
+                image("contact", "Contact", F::Rgba16Float),
                 image("output", "Output", F::Rgba16Float),
             ],
             vec![
