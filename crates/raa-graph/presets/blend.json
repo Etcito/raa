@@ -1,0 +1,131 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Blend",
+  "nodes": [
+    {
+      "id": "blend",
+      "type": "compute.wgsl",
+      "params": {
+        "factor": 0.5
+      },
+      "inputs": [
+        {
+          "key": "a",
+          "type": "image2d"
+        },
+        {
+          "key": "b",
+          "type": "image2d"
+        }
+      ],
+      "outputs": [
+        {
+          "key": "dst",
+          "type": "image2d",
+          "format": "rgba16float"
+        }
+      ],
+      "math": {
+        "nodes": [
+          {
+            "id": "a",
+            "type": "input",
+            "params": {
+              "key": "a"
+            },
+            "position": [
+              0,
+              0
+            ]
+          },
+          {
+            "id": "b",
+            "type": "input",
+            "params": {
+              "key": "b"
+            },
+            "position": [
+              0,
+              120
+            ]
+          },
+          {
+            "id": "factor",
+            "type": "param",
+            "params": {
+              "name": "factor"
+            },
+            "position": [
+              0,
+              240
+            ]
+          },
+          {
+            "id": "mix",
+            "type": "mix",
+            "position": [
+              240,
+              120
+            ]
+          },
+          {
+            "id": "out",
+            "type": "output",
+            "params": {
+              "key": "dst"
+            },
+            "position": [
+              480,
+              120
+            ]
+          }
+        ],
+        "links": [
+          {
+            "from": {
+              "node": "a",
+              "port": "value"
+            },
+            "to": {
+              "node": "mix",
+              "port": "a"
+            }
+          },
+          {
+            "from": {
+              "node": "b",
+              "port": "value"
+            },
+            "to": {
+              "node": "mix",
+              "port": "b"
+            }
+          },
+          {
+            "from": {
+              "node": "factor",
+              "port": "value"
+            },
+            "to": {
+              "node": "mix",
+              "port": "t"
+            }
+          },
+          {
+            "from": {
+              "node": "mix",
+              "port": "value"
+            },
+            "to": {
+              "node": "out",
+              "port": "value"
+            }
+          }
+        ]
+      },
+      "wgsl": "fn rg_main(p: vec2<u32>) {\n  let q = vec2<i32>(p);\n  let n0_value = textureLoad(rg_in_a, clamp(q + vec2<i32>(0, 0), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_a)) - vec2<i32>(1)), 0);\n  let n1_value = textureLoad(rg_in_b, clamp(q + vec2<i32>(0, 0), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_b)) - vec2<i32>(1)), 0);\n  let n2_value = vec4<f32>(rg_params.factor);\n  let n3_value = mix(n0_value, n1_value, n2_value);\n  textureStore(rg_out_dst, p, n3_value);\n}\n"
+    }
+  ],
+  "links": []
+}
