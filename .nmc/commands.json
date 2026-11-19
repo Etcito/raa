@@ -310,5 +310,54 @@
       "rg-gi-stages-render",
       "rg-gi-stages-fresh"
     ]
+  },
+  {
+    "name": "rg-post-stages-check",
+    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/post-stages --stage post-stages",
+    "timeout_s": 60,
+    "after": [
+      "rg-build"
+    ]
+  },
+  {
+    "name": "rg-post-stages-select",
+    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/post-stages --stage post-stages",
+    "timeout_s": 60,
+    "after": [
+      "rg-post-stages-check"
+    ]
+  },
+  {
+    "name": "rg-post-stages-clean",
+    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/post-stages --stage post-stages",
+    "timeout_s": 60,
+    "after": [
+      "rg-post-stages-select"
+    ]
+  },
+  {
+    "name": "rg-post-stages-render",
+    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/post-stages --stage post-stages",
+    "timeout_s": 1500,
+    "after": [
+      "rg-post-stages-clean"
+    ]
+  },
+  {
+    "name": "rg-post-stages-fresh",
+    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/post-stages --stage post-stages",
+    "timeout_s": 120,
+    "after": [
+      "rg-post-stages-render"
+    ]
+  },
+  {
+    "name": "rg-post-stages-judge",
+    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/post-stages --stage post-stages --budget-s 1020",
+    "timeout_s": 1200,
+    "after": [
+      "rg-post-stages-render",
+      "rg-post-stages-fresh"
+    ]
   }
 ]
