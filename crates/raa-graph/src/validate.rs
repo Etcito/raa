@@ -11,6 +11,15 @@ use crate::catalog::{
 use crate::error::{Issue, Severity, Stage, sort_issues};
 use crate::format::{GraphDoc, LinkDoc, NodeDoc, PortRef};
 
+#[derive(Clone)]
+struct EndPort {
+    ty: PortType,
+    format: Option<GraphFormat>,
+    history: bool,
+    generic: bool,
+    default_source: &'static [&'static str],
+}
+
 /// The per-stage binding limits a graph is validated against (RG_LIMITS).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GraphLimits {
@@ -226,6 +235,9 @@ fn convert_params(
     issues: &mut Vec<Issue>,
 ) -> Vec<(String, ParamValue)> {
     let mut converted = Vec::new();
+    if node.compute.is_some() {
+        return converted;
+    }
     for (key, value) in &node.params {
         let Some(param) = spec.params.iter().find(|param| param.key == key.as_str()) else {
             issues.push(Issue {
@@ -463,7 +475,7 @@ fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
         let at = u32::try_from(index).unwrap_or(u32::MAX);
         let from = link_end(doc, ctx.catalog, &link.from, true, at, issues);
         let to = link_end(doc, ctx.catalog, &link.to, false, at, issues);
-        if let (Some(from), Some(to)) = (from, to)
+        if let (Some(from), Some(to)) = (&from, &to)
             && let Some((problem, fix)) = mismatch(from, to)
         {
             issues.push(Issue {
@@ -481,7 +493,7 @@ fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
                 )
             });
         }
-        if let (Some(_), Some(to)) = (from, to) {
+        if let (Some(_), Some(to)) = (&from, &to) {
             fixed_wiring(doc, link, at, to, issues);
         }
         if let Some(first) = doc.links[..index]
@@ -504,7 +516,7 @@ fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
             });
         }
         if link.history {
-            history_issues(at, link, from, to, issues);
+            history_issues(at, link, from.as_ref(), to.as_ref(), issues);
         }
     }
 }
@@ -514,8 +526,8 @@ fn check_links(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
 fn history_issues(
     at: u32,
     link: &LinkDoc,
-    from: Option<&PortSpec>,
-    to: Option<&PortSpec>,
+    from: Option<&EndPort>,
+    to: Option<&EndPort>,
     issues: &mut Vec<Issue>,
 ) {
     if let Some(to) = to
@@ -555,14 +567,14 @@ fn history_issues(
 /// Resolves one end of link `at` to the port it names (`graph.port_unknown` when the end
 /// names no node, no port key or no port of that side). An end of a node whose type is
 /// unknown resolves to nothing, since `graph.node_type` already reports that node.
-fn link_end<'c>(
+fn link_end(
     doc: &GraphDoc,
-    catalog: &'c Catalog,
+    catalog: &Catalog,
     end: &PortRef,
     outputs: bool,
     at: u32,
     issues: &mut Vec<Issue>,
-) -> Option<&'c PortSpec> {
+) -> Option<EndPort> {
     let side = if outputs { "output" } else { "input" };
     let port_issue = |message: String, fix: String| Issue {
         node: Some(end.node.clone()),
@@ -587,6 +599,34 @@ fn link_end<'c>(
         ));
         return None;
     }
+    if let Some(decl) = node
+        .compute
+        .as_ref()
+        .filter(|_| node.type_id == "compute.wgsl")
+    {
+        let ports = if outputs { &decl.outputs } else { &decl.inputs };
+        let found = ports.iter().find(|port| port.key == end.port);
+        if let Some(port) = found {
+            return Some(EndPort {
+                ty: port.ty.clone(),
+                format: port.format.clone(),
+                history: !outputs,
+                generic: !outputs,
+                default_source: &[],
+            });
+        }
+        issues.push(port_issue(
+            format!(
+                "link {at} names {side} `{}` on node `{}`, which has no such {side}",
+                end.port, end.node
+            ),
+            format!(
+                "Name one of the declared {side} ports of `{}` in link {at}.",
+                node.id
+            ),
+        ));
+        return None;
+    }
     let spec = catalog.node(&node.type_id)?;
     let ports = if outputs { &spec.outputs } else { &spec.inputs };
     let found = ports.iter().find(|port| port.key == end.port);
@@ -603,7 +643,13 @@ fn link_end<'c>(
             ),
         ));
     }
-    found
+    found.map(|port| EndPort {
+        ty: port.ty.clone(),
+        format: port.format.clone(),
+        history: port.history,
+        generic: port.generic,
+        default_source: port.default_source,
+    })
 }
 
 /// The port keys of `ports` for a fix hint, or `none` when the list is empty.
@@ -620,7 +666,7 @@ fn port_keys(ports: &[PortSpec]) -> String {
 
 /// Why output `from` cannot feed input `to` (`graph.link_type`): a different port type, or an
 /// input format the output does not have. Returns the problem and the source of the fix.
-fn mismatch(from: &PortSpec, to: &PortSpec) -> Option<(String, String)> {
+fn mismatch(from: &EndPort, to: &EndPort) -> Option<(String, String)> {
     if from.ty != to.ty {
         return Some((
             format!(
@@ -660,12 +706,12 @@ fn type_name(ty: &PortType) -> &'static str {
 
 /// `graph.fixed_wiring` (amended (d)): a link into an input with `generic` false must come from
 /// the first `default_source` entry the graph holds, since this version fixes the wiring.
-fn fixed_wiring(doc: &GraphDoc, link: &LinkDoc, at: u32, to: &PortSpec, issues: &mut Vec<Issue>) {
+fn fixed_wiring(doc: &GraphDoc, link: &LinkDoc, at: u32, to: &EndPort, issues: &mut Vec<Issue>) {
     let Some(source) = doc.nodes.iter().find(|node| node.id == link.from.node) else {
         return;
     };
     let given = (source.type_id.as_str(), link.from.port.as_str());
-    let expected = first_present_source(doc, to);
+    let expected = first_present_source(doc, to.default_source);
     if to.generic || expected == Some(given) {
         return;
     }
@@ -708,8 +754,11 @@ fn is_linked(doc: &GraphDoc, node: &NodeDoc, port: &str) -> bool {
 
 /// The first `default_source` entry of `port` whose node type a node of the graph has, as its
 /// node type and port key, split at the last `.`. An entry with no `.` is skipped.
-fn first_present_source(doc: &GraphDoc, port: &PortSpec) -> Option<(&'static str, &'static str)> {
-    port.default_source.iter().copied().find_map(|entry| {
+fn first_present_source(
+    doc: &GraphDoc,
+    default_source: &[&'static str],
+) -> Option<(&'static str, &'static str)> {
+    default_source.iter().copied().find_map(|entry| {
         let (node_type, key) = entry.rsplit_once('.')?;
         doc.nodes
             .iter()
@@ -719,11 +768,11 @@ fn first_present_source(doc: &GraphDoc, port: &PortSpec) -> Option<(&'static str
 }
 
 /// The default sources of `port` for a message, or `none`.
-fn sources_text(port: &PortSpec) -> String {
-    if port.default_source.is_empty() {
+fn sources_text(default_source: &[&'static str]) -> String {
+    if default_source.is_empty() {
         "none".to_string()
     } else {
-        port.default_source.join(", ")
+        default_source.join(", ")
     }
 }
 
@@ -731,6 +780,35 @@ fn sources_text(port: &PortSpec) -> String {
 /// are all absent from the graph while `absent_ok` is false.
 fn check_inputs(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
     for node in &doc.nodes {
+        if let Some(decl) = node
+            .compute
+            .as_ref()
+            .filter(|_| node.type_id == "compute.wgsl")
+        {
+            for port in &decl.inputs {
+                if !is_linked(doc, node, &port.key) {
+                    issues.push(Issue {
+                        port: Some(port.key.clone()),
+                        ..node_issue(
+                            node,
+                            "graph.input_missing",
+                            Severity::Error,
+                            format!(
+                                "input `{}.{}` is required, and no link takes it",
+                                node.id, port.key
+                            ),
+                            format!(
+                                "Link an output of type {} into `{}.{}`.",
+                                type_name(&port.ty),
+                                node.id,
+                                port.key
+                            ),
+                        )
+                    });
+                }
+            }
+            continue;
+        }
         let Some(spec) = ctx.catalog.node(&node.type_id) else {
             continue;
         };
@@ -743,12 +821,12 @@ fn check_inputs(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) 
                     "input `{}.{}` is required, and no link takes it",
                     node.id, port.key
                 )
-            } else if !port.absent_ok && first_present_source(doc, port).is_none() {
+            } else if !port.absent_ok && first_present_source(doc, port.default_source).is_none() {
                 format!(
                     "input `{}.{}` has no link, and none of its default sources ({}) is in the graph",
                     node.id,
                     port.key,
-                    sources_text(port)
+                    sources_text(port.default_source)
                 )
             } else {
                 continue;
@@ -831,11 +909,12 @@ fn read_edges(doc: &GraphDoc, catalog: &Catalog) -> Vec<Vec<usize>> {
             .iter()
             .filter(|port| !is_linked(doc, node, port.key))
         {
-            let source = first_present_source(doc, port).and_then(|(node_type, _)| {
-                doc.nodes
-                    .iter()
-                    .position(|known| known.type_id == node_type)
-            });
+            let source =
+                first_present_source(doc, port.default_source).and_then(|(node_type, _)| {
+                    doc.nodes
+                        .iter()
+                        .position(|known| known.type_id == node_type)
+                });
             if let (Some(from), Some(list)) = (source, reads.get_mut(to)) {
                 list.push(from);
             }
@@ -925,6 +1004,54 @@ fn check_budgets(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>)
         let Some(spec) = ctx.catalog.node(&node.type_id) else {
             continue;
         };
+        if let Some(decl) = node
+            .compute
+            .as_ref()
+            .filter(|_| node.type_id == "compute.wgsl")
+        {
+            let budget = [
+                (
+                    "sampled textures",
+                    decl.inputs
+                        .iter()
+                        .filter(|p| matches!(p.ty, PortType::Image2d | PortType::Depth2d))
+                        .count() as u32,
+                    limits.sampled_textures,
+                ),
+                ("samplers", 1, limits.samplers),
+                (
+                    "storage textures",
+                    decl.outputs.len() as u32,
+                    limits.storage_textures,
+                ),
+                (
+                    "storage buffers",
+                    decl.inputs
+                        .iter()
+                        .filter(|p| p.ty == PortType::Buffer)
+                        .count() as u32,
+                    limits.storage_buffers,
+                ),
+                ("uniform buffers", 2, limits.uniform_buffers),
+            ];
+            for (kind, count, limit) in budget {
+                if count > limit {
+                    let problem = format!(
+                        "node `{}` binds {count} {kind} in its compute stage, and the limit is {limit}",
+                        node.id
+                    );
+                    let fix = format!(
+                        "Reduce the {kind} of node `{}` in its compute stage to {limit} or fewer.",
+                        node.id
+                    );
+                    issues.push(Issue {
+                        stage: Stage::Budget,
+                        ..node_issue(node, "graph.budget", Severity::Error, problem, fix)
+                    });
+                }
+            }
+            continue;
+        }
         for budget in &spec.budgets {
             let stage = stage_name(&budget.stage);
             let kinds = [

@@ -288,6 +288,22 @@ fn feed(doc: &GraphDoc, node: &NodeDoc, port: &PortSpec) -> Feed {
         .unwrap_or(Feed::Absent)
 }
 
+fn compute_feed(doc: &GraphDoc, node: &NodeDoc, key: &str) -> Feed {
+    doc.links
+        .iter()
+        .find(|link| link.to.node == node.id && link.to.port == key)
+        .map_or(Feed::Absent, |link| {
+            doc.nodes
+                .iter()
+                .position(|known| known.id == link.from.node)
+                .map_or(Feed::Absent, |from| Feed::Link {
+                    from,
+                    port: link.from.port.clone(),
+                    history: link.history,
+                })
+        })
+}
+
 /// Marks `executed` for every node reached from `stack` through non-history links and default
 /// sources.
 fn reach(feeds: &[Vec<Feed>], executed: &mut [bool], mut stack: Vec<usize>) {
@@ -371,6 +387,14 @@ fn plan_params(
     ctx: &ValidateCtx<'_>,
     issues: &mut Vec<Issue>,
 ) -> Option<Vec<(String, ParamValue)>> {
+    if node.compute.is_some() {
+        return Some(
+            node.params
+                .iter()
+                .filter_map(|(key, value)| infer_compute_param(key, value))
+                .collect(),
+        );
+    }
     let mut given: Vec<(String, ParamValue)> = node
         .params
         .iter()
@@ -417,6 +441,34 @@ fn plan_params(
             })
             .collect(),
     )
+}
+
+fn infer_compute_param(
+    key: &str,
+    value: &raa_loader::json::JsonValue,
+) -> Option<(String, ParamValue)> {
+    use raa_loader::json::JsonValue;
+    let value = match value {
+        JsonValue::Number(number) => ParamValue::Number(*number),
+        JsonValue::Bool(value) => ParamValue::Bool(*value),
+        JsonValue::Array(values) if (2..=4).contains(&values.len()) => {
+            let numbers: Vec<f64> = values
+                .iter()
+                .map(|value| match value {
+                    JsonValue::Number(n) => Some(*n),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            match numbers.as_slice() {
+                [x, y] => ParamValue::Vec2([*x, *y]),
+                [x, y, z] => ParamValue::Vec3([*x, *y, *z]),
+                [x, y, z, w] => ParamValue::Vec4([*x, *y, *z, *w]),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some((key.to_string(), value))
 }
 
 /// The order of the executed nodes: Kahn's algorithm over the non-history links and default
@@ -508,7 +560,7 @@ fn planned_resources(
 ) -> Vec<PlanResource> {
     let mut resources: Vec<PlanResource> = Vec::new();
     for &producer in order {
-        for out in &specs[producer].outputs {
+        for out in output_descriptors(&doc.nodes[producer], specs[producer]) {
             // The order index and history flag of each input that reads this output port.
             let mut uses: Vec<(u32, bool)> = Vec::new();
             for &consumer in order {
@@ -544,7 +596,7 @@ fn planned_resources(
                 id: u32::try_from(resources.len() + 1).unwrap_or(u32::MAX),
                 producer: PlanPortRef {
                     node: doc.nodes[producer].id.clone(),
-                    port: out.key.to_string(),
+                    port: out.key.clone(),
                 },
                 ty: out.ty.clone(),
                 format: out.format.clone(),
@@ -558,6 +610,43 @@ fn planned_resources(
         }
     }
     resources
+}
+
+struct OutputDesc {
+    key: String,
+    ty: PortType,
+    format: Option<GraphFormat>,
+    size: SizeSpec,
+    mips: u32,
+    layers: u32,
+}
+
+fn output_descriptors(node: &NodeDoc, spec: &NodeTypeSpec) -> Vec<OutputDesc> {
+    if let Some(decl) = &node.compute {
+        return decl
+            .outputs
+            .iter()
+            .map(|port| OutputDesc {
+                key: port.key.clone(),
+                ty: port.ty.clone(),
+                format: port.format.clone(),
+                size: port.size.clone().unwrap_or(SizeSpec::Scale(1.0)),
+                mips: 1,
+                layers: 1,
+            })
+            .collect();
+    }
+    spec.outputs
+        .iter()
+        .map(|port| OutputDesc {
+            key: port.key.to_string(),
+            ty: port.ty.clone(),
+            format: port.format.clone(),
+            size: port.size.clone(),
+            mips: port.mips,
+            layers: port.layers,
+        })
+        .collect()
 }
 
 /// Plans the executed nodes of a validated `doc`, pushing a warning for each node left out. When a
@@ -590,6 +679,13 @@ fn plan_nodes(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) ->
         .iter()
         .zip(&specs)
         .map(|(node, spec)| {
+            if let Some(decl) = &node.compute {
+                return decl
+                    .inputs
+                    .iter()
+                    .map(|port| compute_feed(doc, node, &port.key))
+                    .collect();
+            }
             spec.inputs
                 .iter()
                 .map(|port| feed(doc, node, port))
@@ -628,12 +724,27 @@ fn plan_nodes(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) ->
             type_version: spec.version,
             order_index: order_index[v],
             params: plan_params(node, spec, ctx, issues)?,
-            inputs: spec
-                .inputs
-                .iter()
+            inputs: node
+                .compute
+                .as_ref()
+                .map_or_else(
+                    || {
+                        spec.inputs
+                            .iter()
+                            .map(|port| port.key.to_string())
+                            .collect::<Vec<_>>()
+                    },
+                    |decl| {
+                        decl.inputs
+                            .iter()
+                            .map(|port| port.key.clone())
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .into_iter()
                 .zip(&feeds[v])
                 .map(|(port, feed)| PlanInput {
-                    port: port.key.to_string(),
+                    port,
                     source: input_source(doc, feed, &executed),
                 })
                 .collect(),
