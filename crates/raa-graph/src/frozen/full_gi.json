@@ -1,0 +1,304 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Full GI",
+  "nodes": [
+    {
+      "id": "skyAtmosphere",
+      "type": "pass.sky.atmosphere",
+      "params": {
+        "skyViewSteps": 32,
+        "horizonFade": 0.006
+      }
+    },
+    {
+      "id": "skyCloudLighting",
+      "type": "pass.sky.cloud-lighting",
+      "params": {
+        "cloudWeatherTile": 36000,
+        "cloudShapeTile": 7000,
+        "cloudDetailTile": 700,
+        "cloudExtinction": 0.05,
+        "cloudAlbedo": 0.98,
+        "cloudCirrusHeight": 9000,
+        "cloudMaxDistance": 90000,
+        "cloudMaxPath": 40000,
+        "cloudShadowSamples": 16
+      }
+    },
+    {
+      "id": "skyEnv",
+      "type": "pass.sky.env"
+    },
+    {
+      "id": "shadowCsm",
+      "type": "pass.shadow.csm",
+      "params": {
+        "softness": 1,
+        "distance": 60,
+        "resolution": 2048
+      }
+    },
+    {
+      "id": "giVolume",
+      "type": "pass.gi.volume",
+      "params": {
+        "resolution": 96,
+        "levels": 5,
+        "probeRays": 8,
+        "intensity": 1,
+        "environmentDiffuse": 0,
+        "localLightShadows": true,
+        "voxelFullRelight": true,
+        "voxelHistoryMax": 64,
+        "voxelRays": 3,
+        "emissive": true,
+        "behind": 0.5,
+        "resetRays": 8,
+        "directChange": 0.05
+      }
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "aoGtao",
+      "type": "pass.ao.gtao",
+      "params": {
+        "radius": 0.800000011920929,
+        "intensity": 0.6000000238418579,
+        "power": 1,
+        "slices": 4,
+        "steps": 8
+      }
+    },
+    {
+      "id": "giScreen",
+      "type": "pass.gi.screen",
+      "params": {
+        "indirect": "probes",
+        "screenTraces": true,
+        "reflections": true,
+        "historyMax": 128,
+        "historyMin": 1,
+        "clampGamma": 3,
+        "spatialPasses": 4,
+        "restirMCap": 30,
+        "debugView": "none",
+        "emissive": true,
+        "accDepthTolerance": 0.04,
+        "accNormalCos": 0.9,
+        "accMinWeight": 0.05,
+        "accChangeSlack": 0.05,
+        "accChangeMin": 4,
+        "occlusionDirections": 3,
+        "occlusionSteps": 4,
+        "occlusionRadius": 0.9,
+        "atrousSigmaLuminance": 4,
+        "atrousNormalPower": 32,
+        "atrousPlane": 0.01,
+        "probeScreenDistance": 8,
+        "probeScreenSteps": 32,
+        "probeScreenThickness": 0.15,
+        "probeVolumeDistance": 320,
+        "probeVolumeSteps": 40,
+        "probeVolumeHitVoxels": 0.85,
+        "restirJacobianMax": 10,
+        "restirVisibilitySteps": 32,
+        "restirVisibilityDistance": 320,
+        "restirScreenDistance": 8,
+        "restirScreenSteps": 32,
+        "restirScreenThickness": 0.15,
+        "restirVolumeDistance": 320,
+        "restirVolumeSteps": 40,
+        "restirVolumeHitVoxels": 0.85,
+        "screenEdgeFade": 0.08,
+        "restirSpatialSamples": 4,
+        "restirSpatialRadius": 24,
+        "restirBoilingFactor": 20,
+        "restirNormalCos": 0.9
+      }
+    },
+    {
+      "id": "giAreaShadow",
+      "type": "pass.gi.area-shadow",
+      "params": {
+        "tier": "auto",
+        "heroCount": 0,
+        "heroDistance": 25,
+        "fadeDistance": 80,
+        "band": 5,
+        "stochasticCount": 4,
+        "stochasticDistance": 40,
+        "stochasticCells": 4,
+        "stochasticMode": "stratified",
+        "restirDepthTolerance": 0.1,
+        "spatialStride": 2,
+        "normalPower": 8,
+        "temporalAlpha": 0.1,
+        "depthTolerance": 0.05,
+        "restirCandidates": 8,
+        "restirSpatialSamples": 4,
+        "restirSpatialRadius": 30,
+        "restirMCap": 20,
+        "restirBoilingFactor": 8,
+        "restirNormalCos": 0.9
+      }
+    },
+    {
+      "id": "giSsgi",
+      "type": "pass.gi.ssgi",
+      "params": {
+        "screenSpaceQuality": "medium",
+        "emissive": true,
+        "changeSigma": 3,
+        "slicesLow": 2,
+        "slicesMedium": 4,
+        "slicesHigh": 6,
+        "stepsLow": 6,
+        "stepsMedium": 8,
+        "stepsHigh": 12
+      }
+    },
+    {
+      "id": "shadowContact",
+      "type": "pass.shadow.contact",
+      "params": {
+        "distance": 0.3499999940395355,
+        "thickness": 0.05000000074505806,
+        "intensity": 1,
+        "steps": 24
+      }
+    },
+    {
+      "id": "skyCloudScreen",
+      "type": "pass.sky.cloud-screen",
+      "params": {
+        "cloudDomeBelow": 0.05,
+        "cloudDomeLightSamples": 5,
+        "cloudDomeAnimatedFloor": 0.0625,
+        "cloudDomeBurst": 2,
+        "cloudScreenLightSamples": 5,
+        "cloudScreenMovingBlend": 0.12,
+        "cloudScreenPrior": 6,
+        "cloudScreenAnimatedFloor": 0.0625,
+        "cloudScreenBurst": 2
+      }
+    },
+    {
+      "id": "forward",
+      "type": "pass.forward",
+      "params": {
+        "msaa": 4,
+        "mode": "ltc"
+      }
+    },
+    {
+      "id": "skyBackground",
+      "type": "pass.sky.background"
+    },
+    {
+      "id": "giHistory",
+      "type": "pass.gi.history"
+    },
+    {
+      "id": "ssr",
+      "type": "pass.ssr",
+      "params": {
+        "intensity": 1,
+        "maxRoughness": 0.6000000238418579,
+        "thickness": 0.15000000596046448,
+        "maxSteps": 64,
+        "refineSteps": 8,
+        "edgeFade": 0.1
+      }
+    },
+    {
+      "id": "fog",
+      "type": "pass.fog",
+      "params": {
+        "density": 0,
+        "heightFalloff": 0.10000000149011612,
+        "baseHeight": 0,
+        "start": 0,
+        "color": [
+          1,
+          1,
+          1
+        ],
+        "inscatter": 0,
+        "aerialStrength": 0,
+        "aerialDistance": 1000
+      }
+    },
+    {
+      "id": "taa",
+      "type": "pass.taa",
+      "params": {
+        "filterSharpness": 2.3,
+        "clipTolerance": 1.25,
+        "blendBase": 0.06,
+        "blendMotionGain": 0.012,
+        "blendMin": 0.04,
+        "blendMax": 0.3
+      }
+    },
+    {
+      "id": "bloom",
+      "type": "pass.bloom",
+      "params": {
+        "strength": 0.03999999910593033,
+        "radius": 0.8500000238418579
+      }
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap",
+      "params": {
+        "mapper": "agx",
+        "exposureEv": 0,
+        "look": "none",
+        "dither": true
+      }
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
+  ],
+  "links": [
+    {
+      "from": "forward.color",
+      "to": "giHistory.color"
+    },
+    {
+      "from": "giHistory.color",
+      "to": "ssr.color"
+    },
+    {
+      "from": "ssr.color",
+      "to": "fog.color"
+    },
+    {
+      "from": "fog.color",
+      "to": "taa.color"
+    },
+    {
+      "from": "taa.color",
+      "to": "bloom.color"
+    },
+    {
+      "from": "bloom.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "out.color"
+    }
+  ]
+}
