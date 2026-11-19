@@ -25,6 +25,9 @@ mod restir_resources;
 #[path = "area_shadow/stages.rs"]
 pub(crate) mod stages;
 
+#[path = "area_shadow/stage_mask.rs"]
+pub(crate) mod stage_mask;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 

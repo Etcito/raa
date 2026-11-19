@@ -19,6 +19,7 @@ use raa_pipeline::{
 use crate::error::{GI_INVALID, invalid};
 use crate::feature::GiHandle;
 use crate::parts::GiShared;
+use crate::parts::area_shadow::stage_mask::{AreaMaskStage, AreaSpatialStage};
 use crate::parts::area_shadow::stages::{AreaTemporalStage, AreaTraceStage};
 use crate::parts::screen::stage_accumulate::AccumulateStage;
 use crate::parts::screen::stage_filters::{AtrousStage, ResolveStage};
@@ -151,6 +152,9 @@ pub(crate) trait StageImpl {
 
     /// Drops the state that depends on the frame size (`FeaturePass::resize`).
     fn resize(&mut self) {}
+
+    #[cfg(test)]
+    fn force_running_frame_for_test(&mut self, _limit: u32) {}
 }
 
 /// The inputs of one stage's frame: its entry, the shared GI state, the attached lit handle, the
@@ -216,6 +220,8 @@ pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
         GiStageKind::RestirSpatial => Some(Box::new(RestirSpatialStage::default())),
         GiStageKind::AreaTrace => Some(Box::new(AreaTraceStage::default())),
         GiStageKind::AreaTemporal => Some(Box::new(AreaTemporalStage::default())),
+        GiStageKind::AreaSpatial => Some(Box::new(AreaSpatialStage::default())),
+        GiStageKind::AreaMask => Some(Box::new(AreaMaskStage::default())),
         _ => None,
     }
 }
@@ -418,6 +424,14 @@ impl GiStageHandle {
         let mut state = self.state.borrow_mut();
         state.shared = Some(shared);
         state.lit = Some(lit);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_running_frame_for_test(&self, limit: u32) {
+        self.state
+            .borrow_mut()
+            .imp
+            .force_running_frame_for_test(limit);
     }
 
     /// Writes `values` merged over the stored ones. Atomic: every entry is checked first, and a
