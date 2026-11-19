@@ -101,6 +101,7 @@ impl BloomStageHandle {
         s.karis = karis;
         Ok(())
     }
+    /// Handoff: card 'post_stages extension 1/2: install, values, cameras and stats' calls `BloomStageHandle::set_composite` to enable Up compositing; the upstream handoff is stages.rs:131 `install_stage`.
     pub fn set_composite(&self, on: bool) {
         if self.kind == BloomStageKind::Up
             && let Ok(mut s) = self.state.try_borrow_mut()
@@ -169,9 +170,11 @@ struct StagePass {
     state: Rc<RefCell<State>>,
     pipelines: Pipelines,
     layout: wgpu::BindGroupLayout,
+    composite_layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     sampler: wgpu::Sampler,
     slot: usize,
+    composite_bound: Option<(wgpu::Texture, wgpu::Texture, wgpu::BindGroup)>,
 }
 
 impl StagePass {
@@ -183,6 +186,7 @@ impl StagePass {
     ) -> Self {
         let device = gpu.device();
         let (pipelines, layout, _) = Pipelines::new(device);
+        let composite_layout = feature::create_layout(device, "raa-bloom.stage.composite", true);
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-bloom.stage.params"),
             size: UNIFORM_LEN as u64,
@@ -201,9 +205,11 @@ impl StagePass {
             state,
             pipelines,
             layout,
+            composite_layout,
             uniform,
             sampler,
             slot: 0,
+            composite_bound: None,
         }
     }
     fn group(&self, device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
@@ -300,6 +306,15 @@ impl FeaturePass for StagePass {
             bloom.radius,
             bloom.strength,
         );
+        if self.kind == BloomStageKind::Up {
+            write_slot(
+                &mut bytes,
+                crate::feature::COMPOSITE_SLOT,
+                ctx.size,
+                bloom.radius,
+                bloom.strength,
+            );
+        }
         ctx.gpu.queue().write_buffer(&self.uniform, 0, &bytes);
         ctx.resources.publish(&self.name, "level", &view, desc);
         let mut s = self
@@ -314,10 +329,29 @@ impl FeaturePass for StagePass {
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         if self.kind == BloomStageKind::Up {
+            let composite = self
+                .state
+                .try_borrow()
+                .map_err(|_| feature::state_busy())?
+                .composite;
             let (Some(base), Some(src)) = (
                 ctx.resources.input(&self.name, "base"),
                 ctx.resources.input(&self.name, "src"),
             ) else {
+                if composite {
+                    let hdr = ctx.targets.hdr();
+                    let extent = wgpu::Extent3d {
+                        width: ctx.size.0,
+                        height: ctx.size.1,
+                        depth_or_array_layers: 1,
+                    };
+                    ctx.encoder.copy_texture_to_texture(
+                        hdr.src_texture().as_image_copy(),
+                        hdr.dst_texture().as_image_copy(),
+                        extent,
+                    );
+                    hdr.swap();
+                }
                 return Ok(());
             };
             let Some((texture, target, desc)) = self
@@ -351,6 +385,43 @@ impl FeaturePass for StagePass {
             );
             let group = self.group(ctx.gpu.device(), &src.view);
             feature::draw(ctx.encoder, &target, true, &self.pipelines.up, &group);
+            if composite {
+                let hdr = ctx.targets.hdr();
+                let src_texture = hdr.src_texture().clone();
+                let dst_texture = hdr.dst_texture().clone();
+                let group = match &self.composite_bound {
+                    Some((src, dst, group)) if src == &src_texture && dst == &dst_texture => {
+                        group.clone()
+                    }
+                    _ => {
+                        let group = feature::composite_group(
+                            ctx.gpu.device(),
+                            &self.composite_layout,
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                    buffer: &self.uniform,
+                                    offset: (crate::feature::COMPOSITE_SLOT * SLOT_STRIDE) as u64,
+                                    size: NonZeroU64::new(PARAMS_SIZE),
+                                }),
+                            },
+                            &self.sampler,
+                            hdr.src(),
+                            &target,
+                        );
+                        self.composite_bound = Some((src_texture, dst_texture, group.clone()));
+                        group
+                    }
+                };
+                feature::draw(
+                    ctx.encoder,
+                    hdr.dst(),
+                    false,
+                    &self.pipelines.composite,
+                    &group,
+                );
+                hdr.swap();
+            }
             self.state
                 .try_borrow_mut()
                 .map_err(|_| feature::state_busy())?
