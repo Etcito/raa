@@ -8,7 +8,7 @@ use crate::exec::{NodeStats, ResourceStat};
 use crate::plan::{GraphPlan, InputSource, PlanNode};
 use raa_core::RaaError;
 use raa_gi::stages::{GiStageHandle, GiStageKind, install_stage, stage_entry};
-use raa_pipeline::ImageDesc;
+use raa_pipeline::{GraphFrame, ImageDesc, PrepareCtx, RecordCtx, ResourceTable};
 use std::{cell::RefCell, rc::Rc};
 
 /// Shared installed stages and history registry.
@@ -21,6 +21,24 @@ pub(crate) struct GiStagesState {
     pub(crate) histories: Vec<StageHistory>,
     pub(crate) slot_sources: Vec<(u32, String, String)>,
     pub(crate) saved_slots: Vec<(u32, wgpu::TextureView)>,
+}
+
+/// Returns the previous image index when the executor has a usable history pair.
+fn history_binding_index(history: &StageHistory) -> Option<usize> {
+    history_binding_index_for(history.valid, history.images.len(), history.current)
+}
+
+fn history_binding_index_for(valid: bool, image_count: usize, current: usize) -> Option<usize> {
+    (valid && image_count == 2).then_some(1 - current)
+}
+
+/// Commits a copied frame and alternates the history pair.
+fn flip(history: &mut StageHistory) {
+    if history.copied {
+        history.valid = true;
+        history.current = 1 - history.current;
+        history.copied = false;
+    }
 }
 pub(crate) struct StageHistory {
     pub(crate) key: String,
@@ -37,11 +55,13 @@ pub(crate) struct StageHistory {
 pub fn extension() -> Box<dyn ExecExtension> {
     Box::new(GiStagesExtension {
         state: Rc::new(RefCell::new(GiStagesState::default())),
+        frame_added: false,
     })
 }
 
 struct GiStagesExtension {
     state: Rc<RefCell<GiStagesState>>,
+    frame_added: bool,
 }
 
 impl ExecExtension for GiStagesExtension {
@@ -135,13 +155,36 @@ impl ExecExtension for GiStagesExtension {
         state.gi = h.handles.gi.clone();
         let next = state_from_plan(plan, previous, &catalog, installed, state);
         *self.state.borrow_mut() = next;
+        let has_stages = !self.state.borrow().stages.is_empty();
+        let mut pipeline = h.pipeline.borrow_mut();
+        if has_stages && !self.frame_added {
+            pipeline
+                .add_graph_frame(
+                    "gi_stages",
+                    Box::new(GiStagesFrame {
+                        state: self.state.clone(),
+                        restored: false,
+                    }),
+                )
+                .map_err(|error| vec![apply_issue("gi_stages", &error)])?;
+            self.frame_added = true;
+        } else if !has_stages && self.frame_added {
+            pipeline.remove_graph_frame("gi_stages");
+            self.frame_added = false;
+        }
         Ok(())
     }
     fn clear(&mut self, h: &mut FeatureHandles<'_>) {
+        let mut pipeline = h.pipeline.borrow_mut();
         let mut state = self.state.borrow_mut();
-        for (_, entry, _) in state.stages.drain(..) {
-            let _ = h.pipeline.borrow_mut().remove(&entry);
+        for (slot, view) in state.saved_slots.drain(..) {
+            let _ = pipeline.lighting_mut().set_slot_view(slot, view);
         }
+        for (_, entry, _) in state.stages.drain(..) {
+            let _ = pipeline.remove(&entry);
+        }
+        pipeline.remove_graph_frame("gi_stages");
+        self.frame_added = false;
         *state = GiStagesState::default();
     }
     fn stats(&self, out: &mut Vec<NodeStats>) {
@@ -153,6 +196,145 @@ impl ExecExtension for GiStagesExtension {
                     .iter()
                     .map(|(port, desc)| image_stat(port, desc))
                     .collect();
+            }
+        }
+    }
+}
+
+struct GiStagesFrame {
+    state: Rc<RefCell<GiStagesState>>,
+    restored: bool,
+}
+
+impl GraphFrame for GiStagesFrame {
+    fn begin(&mut self, _table: &ResourceTable) {
+        self.restored = false;
+        if let Some(gi) = self.state.borrow().gi.as_ref()
+            && !gi.shared().camera_valid()
+        {
+            let mut state = self.state.borrow_mut();
+            for history in &mut state.histories {
+                history.valid = false;
+            }
+            for (_, _, stage) in &state.stages {
+                if stage.kind().internal_history() {
+                    stage.set_history_valid(false);
+                }
+            }
+        }
+    }
+
+    fn before_prepare(&mut self, pass: &str, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let mut state = self.state.borrow_mut();
+        if !self.restored {
+            self.restored = true;
+            for (slot, view) in state.saved_slots.drain(..) {
+                let _ = ctx.lighting.set_slot_view(slot, view);
+            }
+        }
+        if pass == "forward" {
+            let GiStagesState {
+                slot_sources,
+                saved_slots,
+                ..
+            } = &mut *state;
+            for (slot, source, port) in slot_sources {
+                if let Some(image) = ctx.resources.get(source, port) {
+                    if let Some(view) = ctx.lighting.slot_view(*slot) {
+                        saved_slots.push((*slot, view));
+                    }
+                    ctx.lighting.set_slot_view(*slot, image.view)?;
+                }
+            }
+        }
+        for (consumer, port, source, source_port) in &state.image_bindings {
+            if consumer == pass
+                && let Some(image) = ctx.resources.get(source, source_port)
+            {
+                ctx.resources.bind_input(pass, port, image);
+            }
+        }
+        for history in state.histories.iter().filter(|h| h.consumer.0 == pass) {
+            if let Some(index) = history_binding_index(history)
+                && let Some((_, view)) = history.images.get(index)
+                && let Some(desc) = history.desc
+            {
+                ctx.resources.bind_input(
+                    pass,
+                    history.consumer.1,
+                    raa_pipeline::PublishedImage {
+                        view: view.clone(),
+                        desc,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn after_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let mut state = self.state.borrow_mut();
+        for history in state.histories.iter_mut().filter(|h| h.producer.0 == pass) {
+            let Some(image) = ctx.resources.get(pass, &history.producer.1) else {
+                continue;
+            };
+            if history.images.is_empty() || history.desc != Some(image.desc) {
+                history.images.clear();
+                for _ in 0..2 {
+                    let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                        label: Some("raa.gi_stages.history"),
+                        size: wgpu::Extent3d {
+                            width: image.desc.width,
+                            height: image.desc.height,
+                            depth_or_array_layers: image.desc.layers,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: image.desc.format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_SRC
+                            | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(if image.desc.layers > 1 {
+                            wgpu::TextureViewDimension::D2Array
+                        } else {
+                            wgpu::TextureViewDimension::D2
+                        }),
+                        ..Default::default()
+                    });
+                    history.images.push((texture, view));
+                }
+                history.desc = Some(image.desc);
+                history.current = 0;
+                history.valid = false;
+            }
+            if let Some((texture, _)) = history.images.get(history.current) {
+                ctx.encoder.copy_texture_to_texture(
+                    image.view.texture().as_image_copy(),
+                    texture.as_image_copy(),
+                    wgpu::Extent3d {
+                        width: image.desc.width,
+                        height: image.desc.height,
+                        depth_or_array_layers: image.desc.layers,
+                    },
+                );
+                history.copied = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn end(&mut self, _table: &ResourceTable) {
+        let mut state = self.state.borrow_mut();
+        for history in &mut state.histories {
+            flip(history);
+        }
+        for (_, _, stage) in &state.stages {
+            if stage.kind().internal_history() && stage.ran() {
+                stage.set_history_valid(true);
             }
         }
     }
@@ -724,6 +906,35 @@ mod tests {
     }
 
     #[test]
+    fn history_helpers_flip_only_copied_pairs() {
+        let mut history = StageHistory {
+            key: "x.history".into(),
+            consumer: ("x".into(), "history"),
+            producer: ("x".into(), "output".into()),
+            images: Vec::new(),
+            desc: None,
+            current: 0,
+            valid: false,
+            copied: false,
+        };
+        assert_eq!(history_binding_index(&history), None);
+        flip(&mut history);
+        assert_eq!(
+            (history.valid, history.current, history.copied),
+            (false, 0, false)
+        );
+        history.copied = true;
+        flip(&mut history);
+        assert_eq!(
+            (history.valid, history.current, history.copied),
+            (true, 1, false)
+        );
+        assert_eq!(history_binding_index_for(true, 2, 1), Some(0));
+        assert_eq!(history_binding_index_for(false, 2, 1), None);
+        assert_eq!(history_binding_index_for(true, 0, 1), None);
+    }
+
+    #[test]
     fn missing_gi_refuses_before_stage_install() {
         let name = "missing_gi_refuses_before_stage_install";
         let Some(gpu) = software_gpu() else {
@@ -750,6 +961,7 @@ mod tests {
         );
         let mut extension = GiStagesExtension {
             state: Rc::new(RefCell::new(GiStagesState::default())),
+            frame_added: false,
         };
         let issues = extension.apply(&p, None, &mut feature_handles).unwrap_err();
         assert_eq!(
