@@ -359,5 +359,41 @@
       "rg-post-stages-render",
       "rg-post-stages-fresh"
     ]
+  },
+  {
+    "name": "rg-compute-check",
+    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/compute --stage compute",
+    "timeout_s": 60,
+    "after": ["rg-build"]
+  },
+  {
+    "name": "rg-compute-select",
+    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/compute --stage compute",
+    "timeout_s": 60,
+    "after": ["rg-compute-check"]
+  },
+  {
+    "name": "rg-compute-clean",
+    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/compute --stage compute",
+    "timeout_s": 60,
+    "after": ["rg-compute-select"]
+  },
+  {
+    "name": "rg-compute-render",
+    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/compute --stage compute",
+    "timeout_s": 1500,
+    "after": ["rg-compute-clean"]
+  },
+  {
+    "name": "rg-compute-fresh",
+    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/compute --stage compute",
+    "timeout_s": 120,
+    "after": ["rg-compute-render"]
+  },
+  {
+    "name": "rg-compute-judge",
+    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/compute --stage compute --budget-s 1020",
+    "timeout_s": 1200,
+    "after": ["rg-compute-render", "rg-compute-fresh"]
   }
 ]

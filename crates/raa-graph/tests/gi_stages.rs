@@ -8,6 +8,9 @@ use raa_graph::plan::{
 };
 use raa_pipeline::{PassInfo, PassRole};
 
+// Parallel software-GPU contexts can crash this shared adapter; serialize their lifetimes.
+static GPU_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn full_gi_stages() -> &'static str {
     raa_graph::registry::STARTERS
         .iter()
@@ -413,6 +416,9 @@ fn full_gi_stages_applies_with_stage_passes_only() {
     use raa_graph::exec::{FeatureHandles, GraphExecutor, HandleSet};
     use std::{cell::RefCell, rc::Rc};
     let name = "full_gi_stages_applies_with_stage_passes_only";
+    let _gpu_guard = GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(gpu) = raa_core::testing::software_gpu() else {
         raa_core::testing::skip(name, "no software adapter");
         return;
@@ -478,6 +484,9 @@ fn full_gi_stages_renders_frames_without_panic() {
     const SIZE: (u32, u32) = (1280, 720);
     const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
     let name = "full_gi_stages_renders_frames_without_panic";
+    let _gpu_guard = GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(gpu) = raa_core::testing::software_gpu() else {
         raa_core::testing::skip(name, "no software adapter");
         return;
@@ -635,6 +644,9 @@ fn restir_stages_render_frames_without_panic() {
     const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
     const GRAPH: &str = r#"{"format":"raa.render-graph","version":1,"name":"ReSTIR stage frame test","nodes":[{"id":"prepass","type":"pass.prepass"},{"id":"lightTiles","type":"pass.light.tiles"},{"id":"giVolume","type":"pass.gi.volume"},{"id":"giPyramid","type":"gi.pyramid"},{"id":"giInitial","type":"gi.restir.initial"},{"id":"giTemporal","type":"gi.restir.temporal"},{"id":"giSpatial","type":"gi.restir.spatial"},{"id":"giAccumulate","type":"gi.accumulate"},{"id":"forward","type":"pass.forward"},{"id":"tonemap","type":"pass.tonemap"},{"id":"out","type":"output.display"},{"id":"areaInitial","type":"area.restir.initial"},{"id":"areaTemporal","type":"area.restir.temporal"},{"id":"areaSpatial","type":"area.restir.spatial"},{"id":"areaMask","type":"area.mask"}],"links":[{"from":"prepass.depth","to":"lightTiles.depth"},{"from":"giPyramid.pyramid","to":"giInitial.pyramid"},{"from":"giInitial.reservoirs","to":"giTemporal.initial"},{"from":"giTemporal.reservoirs","to":"giSpatial.reservoirs"},{"from":"giSpatial.irradiance","to":"giAccumulate.irradiance"},{"from":"giAccumulate.output","to":"giAccumulate.history","history":true},{"from":"giAccumulate.meta","to":"giAccumulate.historyMeta","history":true},{"from":"giAccumulate.output","to":"forward.gi"},{"from":"areaInitial.reservoirs","to":"areaTemporal.initial"},{"from":"areaTemporal.reservoirs","to":"areaSpatial.reservoirs"},{"from":"areaSpatial.raw","to":"areaMask.src"},{"from":"areaMask.areaShadow","to":"forward.areaShadow"},{"from":"forward.color","to":"tonemap.color"},{"from":"tonemap.color","to":"out.color"}]}"#;
     let name = "restir_stages_render_frames_without_panic";
+    let _gpu_guard = GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(gpu) = raa_core::testing::software_gpu() else {
         raa_core::testing::skip(name, "no software adapter");
         return;
@@ -840,6 +852,9 @@ fn render_plan_frames(name: &str, plan: GraphPlan, frames: u32) -> Option<Render
 
     const SIZE: (u32, u32) = (640, 360);
     const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let _gpu_guard = GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(gpu) = raa_core::testing::software_gpu() else {
         raa_core::testing::skip(name, "no software adapter");
         return None;
@@ -1191,6 +1206,9 @@ fn forward_slot_reads_stage(
 
     const SIZE: (u32, u32) = (320, 180);
     const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let _gpu_guard = GPU_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(gpu) = raa_core::testing::software_gpu() else {
         raa_core::testing::skip(name, "no software adapter");
         return None;
