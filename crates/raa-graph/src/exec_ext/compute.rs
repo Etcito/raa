@@ -11,6 +11,9 @@ use std::{cell::RefCell, rc::Rc};
 mod pass;
 use crate::plan::{GraphPlan, InputSource, PlanHistory, PlanNode, PlanPortRef, PlanResource};
 use raa_core::RaaError;
+use raa_pipeline::{
+    GraphFrame, ImageDesc, ImageDim, PrepareCtx, PublishedImage, RecordCtx, ResourceTable,
+};
 
 #[allow(dead_code, clippy::duplicate_mod)]
 #[path = "wiring/plan_fns.rs"]
@@ -28,6 +31,30 @@ pub fn extension() -> Box<dyn ExecExtension> {
 #[derive(Default)]
 pub(crate) struct ComputeExtension {
     nodes: Vec<Rc<RefCell<pass::ComputeNodeState>>>,
+    histories: Rc<RefCell<Vec<ComputeHistory>>>,
+    frame_added: bool,
+}
+
+struct ComputeHistory {
+    consumer: String,
+    input: String,
+    producer: String,
+    output: String,
+    images: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    desc: Option<ImageDesc>,
+    current: usize,
+    valid: bool,
+    copied: bool,
+}
+
+impl ComputeHistory {
+    fn flip(&mut self) {
+        if self.copied {
+            self.current = 1 - self.current;
+            self.valid = true;
+            self.copied = false;
+        }
+    }
 }
 
 impl ExecExtension for ComputeExtension {
@@ -165,10 +192,64 @@ impl ExecExtension for ComputeExtension {
             }
         }
         self.nodes = next;
+        let resets = plan_fns::history_resets(_previous, graph);
+        let mut old_histories = std::mem::take(&mut *self.histories.borrow_mut());
+        let mut histories = Vec::new();
+        for (consumer, input, producer, output) in plan::history_inputs(graph) {
+            let key = format!("{consumer}.{input}");
+            let carry = if !resets.contains(&key) {
+                old_histories.iter().position(|old| {
+                    old.consumer == consumer
+                        && old.input == input
+                        && old.producer == producer
+                        && old.output == output
+                })
+            } else {
+                None
+            };
+            histories.push(carry.map_or_else(
+                || ComputeHistory {
+                    consumer,
+                    input,
+                    producer,
+                    output,
+                    images: Vec::new(),
+                    desc: None,
+                    current: 0,
+                    valid: false,
+                    copied: false,
+                },
+                |index| old_histories.remove(index),
+            ));
+        }
+        *self.histories.borrow_mut() = histories;
+        let has_histories = !self.histories.borrow().is_empty();
+        let mut pipeline = handles.pipeline.borrow_mut();
+        if self.frame_added {
+            pipeline.remove_graph_frame("compute");
+            self.frame_added = false;
+        }
+        if has_histories {
+            pipeline
+                .add_graph_frame(
+                    "compute",
+                    Box::new(ComputeHistoryFrame {
+                        histories: self.histories.clone(),
+                        states: self.nodes.clone(),
+                        gi: handles.handles.gi.clone(),
+                        dummy: zero_history(handles.gpu),
+                    }),
+                )
+                .map_err(|error| vec![compute_apply_issue(&error)])?;
+            self.frame_added = true;
+        }
         Ok(())
     }
 
     fn clear(&mut self, handles: &mut FeatureHandles<'_>) {
+        handles.pipeline.borrow_mut().remove_graph_frame("compute");
+        self.frame_added = false;
+        self.histories.borrow_mut().clear();
         for node in self.nodes.drain(..) {
             let _ = handles
                 .pipeline
@@ -189,6 +270,170 @@ impl ExecExtension for ComputeExtension {
             } else {
                 out.push(stats);
             }
+        }
+    }
+}
+
+fn zero_history(gpu: &raa_core::GpuContext) -> PublishedImage {
+    let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("raa.compute.history.zero"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue().write_texture(
+        texture.as_image_copy(),
+        &[0; 8],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(8),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&Default::default());
+    PublishedImage {
+        view,
+        desc: ImageDesc::new(ImageDim::D2, wgpu::TextureFormat::Rgba16Float, 1, 1, 1, 1),
+    }
+}
+
+fn compute_apply_issue(error: &RaaError) -> Issue {
+    Issue {
+        code: "graph.apply",
+        severity: Severity::Error,
+        stage: Stage::Apply,
+        node: None,
+        port: None,
+        param: None,
+        link: None,
+        message: error.to_string(),
+        fix: "Install the compute history frame.".into(),
+    }
+}
+
+struct ComputeHistoryFrame {
+    histories: Rc<RefCell<Vec<ComputeHistory>>>,
+    states: Vec<Rc<RefCell<pass::ComputeNodeState>>>,
+    gi: Option<raa_gi::GiHandle>,
+    dummy: PublishedImage,
+}
+
+impl GraphFrame for ComputeHistoryFrame {
+    fn begin(&mut self, _table: &ResourceTable) {
+        if self
+            .gi
+            .as_ref()
+            .is_some_and(|gi| !gi.shared().camera_valid())
+        {
+            for history in self.histories.borrow_mut().iter_mut() {
+                history.valid = false;
+            }
+        }
+        for state in &self.states {
+            state.borrow_mut().history_pairs_valid = false;
+        }
+    }
+
+    fn before_prepare(&mut self, pass: &str, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let histories = self.histories.borrow();
+        let pairs: Vec<_> = histories.iter().filter(|h| h.consumer == pass).collect();
+        for history in &pairs {
+            if history.valid
+                && history.images.len() == 2
+                && let Some((_, view)) = history.images.get(1 - history.current)
+            {
+                let desc = history.desc.expect("allocated history descriptor");
+                ctx.resources.bind_input(
+                    pass,
+                    &history.input,
+                    PublishedImage {
+                        view: view.clone(),
+                        desc,
+                    },
+                );
+            } else {
+                ctx.resources
+                    .bind_input(pass, &history.input, self.dummy.clone());
+            }
+        }
+        if !pairs.is_empty() {
+            let mut state = self
+                .states
+                .iter()
+                .find(|s| plan::compute_entry(&s.borrow().node) == pass)
+                .map(|s| s.borrow_mut());
+            if let Some(state) = state.as_mut() {
+                state.history_pairs_valid = pairs.iter().all(|h| h.valid && h.images.len() == 2);
+            }
+        }
+        Ok(())
+    }
+
+    fn after_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        for history in self
+            .histories
+            .borrow_mut()
+            .iter_mut()
+            .filter(|h| h.producer == pass)
+        {
+            let Some(image) = ctx.resources.get(pass, &history.output) else {
+                continue;
+            };
+            if history.desc != Some(image.desc) {
+                history.images.clear();
+                for _ in 0..2 {
+                    let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                        label: Some("raa.compute.history"),
+                        size: wgpu::Extent3d {
+                            width: image.desc.width,
+                            height: image.desc.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: image.desc.format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    let view = texture.create_view(&Default::default());
+                    history.images.push((texture, view));
+                }
+                history.desc = Some(image.desc);
+                history.current = 0;
+                history.valid = false;
+            }
+            let (texture, _) = &history.images[history.current];
+            ctx.encoder.copy_texture_to_texture(
+                image.view.texture().as_image_copy(),
+                texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: image.desc.width,
+                    height: image.desc.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            history.copied = true;
+        }
+        Ok(())
+    }
+
+    fn end(&mut self, _table: &ResourceTable) {
+        for history in self.histories.borrow_mut().iter_mut() {
+            history.flip();
         }
     }
 }

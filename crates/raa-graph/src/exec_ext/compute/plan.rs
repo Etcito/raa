@@ -110,6 +110,32 @@ pub fn compute_inputs(plan: &GraphPlan, catalog: &Catalog, node: &PlanNode) -> V
         .collect()
 }
 
+/// History-linked compute inputs, in plan and input declaration order.
+pub fn history_inputs(plan: &GraphPlan) -> Vec<(String, String, String, String)> {
+    plan.nodes
+        .iter()
+        .filter(|node| node.type_id == "compute.wgsl")
+        .flat_map(|consumer| {
+            consumer.inputs.iter().filter_map(move |input| {
+                let InputSource::Link {
+                    node: producer,
+                    port,
+                    history: true,
+                } = &input.source
+                else {
+                    return None;
+                };
+                Some((
+                    consumer.id.clone(),
+                    input.port.clone(),
+                    producer.clone(),
+                    port.clone(),
+                ))
+            })
+        })
+        .collect()
+}
+
 pub fn pack_params(params: &[(String, ParamValue)]) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut offset = 0usize;

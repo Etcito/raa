@@ -33,6 +33,7 @@ pub(super) struct ComputeNodeState {
     pub module: String,
     pub node: String,
     pub ran: bool,
+    pub history_pairs_valid: bool,
     inputs: Vec<plan::ComputeInput>,
     outputs: Vec<Output>,
     pipeline: wgpu::ComputePipeline,
@@ -249,6 +250,7 @@ impl ComputeNodePass {
             module,
             node: node.id.clone(),
             ran: false,
+            history_pairs_valid: false,
             inputs,
             outputs,
             pipeline,
@@ -376,7 +378,8 @@ impl FeaturePass for ComputeNodePass {
                 0,
                 &plan::frame_rows((desc.width, desc.height), ctx.frame, ctx.time_s),
             );
-            let valid = u32::from(!state.inputs.iter().any(|i| i.history));
+            let valid =
+                u32::from(!state.inputs.iter().any(|i| i.history) || state.history_pairs_valid);
             let mut flags = [0u8; 16];
             flags[4..8].copy_from_slice(&valid.to_le_bytes());
             ctx.gpu.queue().write_buffer(&state.frame, 352, &flags);
