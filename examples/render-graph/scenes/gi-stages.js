@@ -65,6 +65,31 @@ const withoutNodes = (doc, ids) => {
   doc.links = doc.links.filter(link => ![...removed].some(id => link.from.startsWith(`${id}.`) || link.to.startsWith(`${id}.`)));
 };
 
+// The noise rows show a stage's per-frame output. Every stage noise is reseeded each frame
+// (ssgi/trace.wgsl interleaved gradient noise shifted by the frame index, the area and probe
+// traces likewise), and the capture comes after RG_CAPTURE_T_S of a still camera, so any
+// temporal accumulator left in the graph converges that noise to a smooth image: pass.taa
+// (blendBase 0.06), gi.accumulate (historyMax 128) and area.temporal (temporalAlpha 0.1).
+// A raw row therefore drops pass.taa (fog feeds bloom) and runs its remaining temporal stage
+// with a one-frame history. Both halves of a pair get the same edit, so only the subject differs.
+const setParam = (doc, id, key, value) => {
+  const node = doc.nodes.find(entry => entry.id === id);
+  if (!node) throw new Error(`render-graph gi-stages: graph ${doc.name} has no node ${id}`);
+  node.params = { ...(node.params ?? {}), [key]: value };
+};
+function raw(doc, { accumulate = false, areaTemporal = false } = {}) {
+  const taa = doc.nodes.find(node => node.type === 'pass.taa');
+  if (taa) {
+    const into = doc.links.find(link => link.to === `${taa.id}.color`)?.from;
+    const out = doc.links.filter(link => link.from === `${taa.id}.color`).map(link => link.to);
+    withoutNodes(doc, [taa.id]);
+    for (const to of out) if (into) doc.links.push({ from: into, to });
+  }
+  if (accumulate) setParam(doc, 'giAccumulate', 'historyMax', 1);
+  if (areaTemporal) setParam(doc, 'areaTemporal', 'temporalAlpha', 1);
+  return doc;
+}
+
 function makeDocuments(state) {
   const stages = JSON.parse(starter(state, FULL_GI_STAGES));
   const passGraph = JSON.parse(starter(state, FULL_GI));
@@ -81,22 +106,28 @@ function makeDocuments(state) {
     { from: 'giAccumulate.output', to: 'giResolve.irradiance' },
   );
   spatial.name = 'Full GI stages spatial skipped';
+  raw(spatial, { accumulate: true });
 
   const two = JSON.parse(starter(state, FULL_GI_STAGES));
   withoutNodes(two, ['giAtrous3', 'giAtrous4']);
   two.links.push({ from: 'giAtrous2.dst', to: 'giResolve.irradiance' });
   two.name = 'Full GI stages two a-trous';
+  raw(two, { accumulate: true });
+  const four = raw(JSON.parse(starter(state, FULL_GI_STAGES)), { accumulate: true });
+  four.name = 'Full GI stages four a-trous';
 
   const area = JSON.parse(starter(state, FULL_GI_STAGES));
   withoutNodes(area, ['areaSpatial']);
   area.links.push({ from: 'areaTemporal.filtered', to: 'areaMask.src' });
   area.name = 'Full GI stages area without spatial';
+  raw(area, { areaTemporal: true });
 
   const ssgi = JSON.parse(starter(state, FULL_GI_STAGES));
   withoutNodes(ssgi, ['ssgiResolve']);
   ssgi.links.push({ from: 'ssgiTrace.raw', to: 'forward.gi' });
   ssgi.name = 'Full GI stages SSGI without resolve';
-  return { stages, passGraph, spatial, two, area, ssgi };
+  raw(ssgi);
+  return { stages, passGraph, spatial, two, four, area, ssgi };
 }
 
 async function prepareHalf(engine, _lib, variant, state, half, { renderFrames }) {
@@ -105,7 +136,7 @@ async function prepareHalf(engine, _lib, variant, state, half, { renderFrames })
   switch (variant.id) {
     case 'full-gi-pair': doc = half === 'left' ? docs.stages : docs.passGraph; break;
     case 'spatial-skipped': doc = docs.spatial; break;
-    case 'atrous-pair': doc = half === 'left' ? docs.two : docs.stages; break;
+    case 'atrous-pair': doc = half === 'left' ? docs.two : docs.four; break;
     case 'area-no-spatial': doc = docs.area; break;
     case 'ssgi-raw': doc = docs.ssgi; break;
     default: throw new Error(`render-graph gi-stages: unknown mode ${variant.id}`);

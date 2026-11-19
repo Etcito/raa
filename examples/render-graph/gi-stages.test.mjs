@@ -146,3 +146,31 @@ test('observe exposes exactly the scene observation keys', async () => {
   const { observation } = await setup(engineDouble(), 'ssgi-raw');
   assert.deepEqual(Object.keys(observation).sort(), ['assertions', 'edits', 'graph', 'issues', 'renderGraphActive']);
 });
+
+test('noise rows run without pass.taa and with one-frame temporal stages; the parity pair keeps the starters', async () => {
+  const lib = { scene: { buildRoom: async () => ({ subjects: [] }) } };
+  const param = (doc, id, key) => doc.nodes.find(node => node.id === id)?.params?.[key];
+  const noTaa = doc => !doc.nodes.some(node => node.type === 'pass.taa') && link(doc, 'fog.color', 'bloom.color') &&
+    !doc.links.some(entry => entry.from.startsWith('taa.') || entry.to.startsWith('taa.'));
+  const docs = {};
+  for (const [mode, halves] of [['spatial-skipped', ['left']], ['atrous-pair', ['left', 'right']],
+    ['area-no-spatial', ['left']], ['ssgi-raw', ['left']]]) {
+    const engine = engineDouble();
+    const state = await giStages.default.build(engine, lib);
+    for (const half of halves) await giStages.default.prepareHalf(engine, lib, variant(mode), state, half, { renderFrames: async () => {} });
+    docs[mode] = engine.documents.map(docOf);
+  }
+  for (const doc of Object.values(docs).flat()) assert.ok(noTaa(doc), doc.name);
+  assert.equal(param(docs['spatial-skipped'][0], 'giAccumulate', 'historyMax'), 1);
+  const [two, four] = docs['atrous-pair'];
+  assert.deepEqual([param(two, 'giAccumulate', 'historyMax'), param(four, 'giAccumulate', 'historyMax')], [1, 1]);
+  assert.equal(four.nodes.filter(node => node.type === 'gi.atrous').length, 4);
+  assert.deepEqual(two.nodes.filter(node => node.id !== 'giAtrous3' && node.id !== 'giAtrous4'),
+    four.nodes.filter(node => node.id !== 'giAtrous3' && node.id !== 'giAtrous4'));
+  assert.equal(param(docs['area-no-spatial'][0], 'areaTemporal', 'temporalAlpha'), 1);
+  assert.equal(param(docs['ssgi-raw'][0], 'ssgiTrace', 'quality'), 'medium');
+  const full = engineDouble();
+  const state = await giStages.default.build(full, lib);
+  for (const half of ['left', 'right']) await giStages.default.prepareHalf(full, lib, variant('full-gi-pair'), state, half, { renderFrames: async () => {} });
+  assert.ok(full.documents.map(docOf).every(doc => doc.nodes.some(node => node.type === 'pass.taa')));
+});
