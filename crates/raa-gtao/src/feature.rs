@@ -26,9 +26,9 @@ const NAME: &str = "ao.gtao";
 /// S12 order of the pass (after `prepass`, before `shadow.contact`).
 const ORDER: u32 = 40;
 /// Workgroup edge of the three entries (8x8).
-const WORKGROUP: u32 = 8;
+pub(crate) const WORKGROUP: u32 = 8;
 /// `PARAMS_SIZE` as an array length.
-const PARAMS_LEN: usize = PARAMS_SIZE as usize;
+pub(crate) const PARAMS_LEN: usize = PARAMS_SIZE as usize;
 /// Byte offsets of the `GtaoParams` fields.
 const OFF_PROJ: usize = 0;
 const OFF_INV_PROJ: usize = 64;
@@ -63,9 +63,9 @@ fn state_busy() -> RaaError {
 
 /// The camera of the frame as the pass needs it.
 #[derive(Copy, Clone, Debug, PartialEq)]
-struct GtaoCamera {
-    proj: Mat4,
-    inv_proj: Mat4,
+pub(crate) struct GtaoCamera {
+    pub(crate) proj: Mat4,
+    pub(crate) inv_proj: Mat4,
 }
 
 /// State shared by the pass and every clone of a `GtaoHandle`.
@@ -86,7 +86,7 @@ fn write_vec4(out: &mut [u8], v: [f32; 4]) {
 
 /// Packs `GtaoParams`: proj @0, inv_proj @64, viewport (w, h, 1/w, 1/h) @128, params
 /// (radius_m, intensity, power, frame) @144, quality (slices, steps, 0, 0) @160.
-fn pack_params(
+pub(crate) fn pack_params(
     out: &mut [u8; PARAMS_LEN],
     camera: &GtaoCamera,
     size: (u32, u32),
@@ -134,13 +134,13 @@ struct Textures {
 }
 
 /// One compute pipeline and its derived group-0 layout.
-struct Kernel {
-    pipeline: wgpu::ComputePipeline,
-    layout: wgpu::BindGroupLayout,
+pub(crate) struct Kernel {
+    pub(crate) pipeline: wgpu::ComputePipeline,
+    pub(crate) layout: wgpu::BindGroupLayout,
 }
 
 impl Kernel {
-    fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str) -> Self {
+    pub(crate) fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str) -> Self {
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
             layout: None,
@@ -154,7 +154,7 @@ impl Kernel {
     }
 }
 
-fn create_texture(
+pub(crate) fn create_texture(
     device: &wgpu::Device,
     label: &str,
     size: (u32, u32),
@@ -180,14 +180,14 @@ fn create_texture(
     (texture, view)
 }
 
-fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+pub(crate) fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::TextureView(view),
     }
 }
 
-fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+pub(crate) fn buffer_entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: buffer.as_entire_binding(),
@@ -220,14 +220,7 @@ impl GtaoPass {
 
     fn named(gpu: &GpuContext, state: SharedGtao, name: String, instance: bool) -> Self {
         let device = gpu.device();
-        let gtao_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raa-gtao.gtao"),
-            source: wgpu::ShaderSource::Wgsl(GTAO_WGSL.into()),
-        });
-        let denoise_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raa-gtao.denoise"),
-            source: wgpu::ShaderSource::Wgsl(DENOISE_WGSL.into()),
-        });
+        let (gtao_module, denoise_module) = create_shader_modules(device);
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-gtao.params"),
             size: PARAMS_SIZE,
@@ -291,6 +284,20 @@ impl GtaoPass {
         });
         (gtao_group, denoise_h_group, denoise_v_group)
     }
+}
+
+pub(crate) fn create_shader_modules(
+    device: &wgpu::Device,
+) -> (wgpu::ShaderModule, wgpu::ShaderModule) {
+    let gtao = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raa-gtao.gtao"),
+        source: wgpu::ShaderSource::Wgsl(GTAO_WGSL.into()),
+    });
+    let denoise = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("raa-gtao.denoise"),
+        source: wgpu::ShaderSource::Wgsl(DENOISE_WGSL.into()),
+    });
+    (gtao, denoise)
 }
 
 impl FeaturePass for GtaoPass {
@@ -602,6 +609,10 @@ impl GtaoHandle {
         if let Ok(mut st) = self.state.try_borrow_mut() {
             st.camera = camera;
         }
+    }
+
+    pub(crate) fn camera(&self) -> Option<GtaoCamera> {
+        self.state.try_borrow().ok().and_then(|state| state.camera)
     }
 
     /// The frame's camera (called every frame): `proj` of the scene camera and `inv_proj`

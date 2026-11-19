@@ -22,6 +22,7 @@ pub mod blur;
 mod desc;
 mod feature;
 mod shaders;
+pub mod stages;
 mod tunables;
 
 pub use desc::{AoDesc, AoQuality};
