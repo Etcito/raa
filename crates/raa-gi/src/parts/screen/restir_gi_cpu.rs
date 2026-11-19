@@ -81,6 +81,18 @@ pub fn initial_weight(p_hat: f32, pdf: f32) -> f32 {
     contribution_weight(p_hat / pdf, p_hat)
 }
 
+/// The temporal M clamp of `raa_rgi_stage1`: `restir_gi_main.wgsl` applies
+/// `raa_restir_clamp_confidence(t.confidence, c.confidence, raa_rgi_params.m_cap)`, whose body in
+/// `restir_core.wgsl` is `max(min(previous, cap * current), 0.0)`: the history's M is clamped to
+/// `m_cap` times the current M and never below zero.
+///
+/// Handoff: raa-gi CPU tests: ReSTIR GI reservoir temporal and spatial updates. The test calls
+/// `temporal_m_clamp(previous_m: f32, current_m: f32, m_cap: f32) -> f32`, exported as
+/// `raa_gi::parts::screen::restir_gi_cpu::temporal_m_clamp`; it passes no state.
+pub fn temporal_m_clamp(previous_m: f32, current_m: f32, m_cap: f32) -> f32 {
+    previous_m.min(m_cap * current_m).max(0.0)
+}
+
 /// One reservoir as the merge sees it: its sample's target at the receiver (already times the
 /// shift Jacobian for a neighbour), its W and its M.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -141,11 +153,16 @@ mod tests {
         let (a, b, c) = (f(a), f(b), f(c));
         let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
         let cross = |x: [f64; 3], y: [f64; 3]| {
-            [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]]
+            [
+                x[1] * y[2] - x[2] * y[1],
+                x[2] * y[0] - x[0] * y[2],
+                x[0] * y[1] - x[1] * y[0],
+            ]
         };
         let len = |x: [f64; 3]| dot(x, x).sqrt();
         let num = dot(a, cross(b, c)).abs();
-        let den = len(a) * len(b) * len(c) + dot(a, b) * len(c) + dot(a, c) * len(b) + dot(b, c) * len(a);
+        let den =
+            len(a) * len(b) * len(c) + dot(a, b) * len(c) + dot(a, c) * len(b) + dot(b, c) * len(a);
         2.0 * num.atan2(den)
     }
 
@@ -187,7 +204,11 @@ mod tests {
             let l = dot(raw, raw).sqrt();
             [raw[0] / l, raw[1] / l, raw[2] / l]
         };
-        let v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+        let v = [
+            n[1] * u[2] - n[2] * u[1],
+            n[2] * u[0] - n[0] * u[2],
+            n[0] * u[1] - n[1] * u[0],
+        ];
         let x_q = [1.1, 0.4, 2.0];
         let x_r = [-0.7, 1.3, 1.6];
         let omega_q = square_solid_angle(x_q, x_s, u, v, 1e-3);
@@ -272,6 +293,10 @@ mod tests {
         // Receiver behind the sample surface (n_s faces away from the receiver).
         assert_eq!(target([0.0; 3], up, [0.0, 0.0, 1.0], up, [1.0; 3]), 0.0);
         // Facing each other at 1 m: luminance of white (1) times cos 1.
-        close(target([0.0; 3], up, [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0; 3]), 1.0, 1e-6);
+        close(
+            target([0.0; 3], up, [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [1.0; 3]),
+            1.0,
+            1e-6,
+        );
     }
 }

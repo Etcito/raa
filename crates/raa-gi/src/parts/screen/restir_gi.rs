@@ -38,6 +38,7 @@ const RESTIR_GI_COMMON_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_co
 const RESTIR_GI_MAIN_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_main.wgsl");
 const RESTIR_GI_SPATIAL_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_spatial.wgsl");
 const RESTIR_GI_DENOISE_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_denoise.wgsl");
+const RESTIR_GI_STAGES_WGSL: &str = include_str!("../../wgsl/screen/restir_gi_stages.wgsl");
 
 /// The (override, tunable key) pairs of restir_gi_common.wgsl, composed into stages 1 and 2.
 const COMMON_OVERRIDES: [(&str, &str); 3] = [
@@ -71,6 +72,10 @@ const DENOISE_OVERRIDES: [(&str, &str); 8] = [
 
 /// Entry of stage 1 (initial sample + temporal reuse).
 pub const RESTIR_GI_MAIN_ENTRY: &str = "raa_gi_restir_gi_main";
+/// Entry of the `gi.restir.initial` stage (the one-candidate initial reservoir).
+pub const RESTIR_GI_INITIAL_ENTRY: &str = "raa_gi_restir_gi_initial";
+/// Entry of the `gi.restir.temporal` stage (initial reservoir + temporal merge).
+pub const RESTIR_GI_TEMPORAL_ENTRY: &str = "raa_gi_restir_gi_temporal";
 /// Entry of stage 2 (spatial reuse + resolve).
 pub const RESTIR_GI_SPATIAL_ENTRY: &str = "raa_gi_restir_gi_spatial";
 /// Entry of stage 3 (denoise).
@@ -90,6 +95,13 @@ pub fn restir_gi_main_module_wgsl() -> String {
         "{PRELUDE_WGSL}{CLOUD_SHADOW_WGSL}{GI_VOLUME_WGSL}{DEPTH_WGSL}{PROBE_COMMON_WGSL}\
          {SCREEN_TRACE_WGSL}{SCREEN_EMISSION_WGSL}{RESTIR_CORE_WGSL}{RESTIR_GI_COMMON_WGSL}{RESTIR_GI_MAIN_WGSL}"
     )
+}
+
+/// Stages 1 split (S58): the stage-1 prefix of [`restir_gi_main_module_wgsl`] plus
+/// restir_gi_stages.wgsl, whose `raa_gi_restir_gi_initial` and `raa_gi_restir_gi_temporal` entry
+/// points reuse the main file's functions.
+pub fn restir_gi_stages_module_wgsl() -> String {
+    format!("{}{RESTIR_GI_STAGES_WGSL}", restir_gi_main_module_wgsl())
 }
 
 /// Stage 2: PRELUDE + CLOUD_SHADOW + GI_VOLUME + DEPTH + probe_common + restir_core +
@@ -128,6 +140,22 @@ pub fn main_group2_entries() -> [wgpu::BindGroupLayoutEntry; 11] {
         storage_entry(11, false),
         uniform_entry(12, RESTIR_GI_PARAMS_SIZE),
     ]
+}
+
+/// Initial stage group 2: the bindings of stage 1 (0 frame, 1 depth, 2 normal, 3 history, 4
+/// pyramid, 6 voxels, 7 screen params, 8 motion, 10 previous reservoirs, 11 the stage-1 scratch,
+/// 12 params) plus 16 the initial reservoirs (read_write, the stage's output).
+pub fn initial_group2_entries() -> [wgpu::BindGroupLayoutEntry; 12] {
+    let [a, b, c, d, e, f, g, h, i, j, k] = main_group2_entries();
+    [a, b, c, d, e, f, g, h, i, j, k, storage_entry(16, false)]
+}
+
+/// Temporal stage group 2: the initial stage's bindings plus 17 the Rgba16Float raw irradiance
+/// (written).
+pub fn temporal_group2_entries() -> [wgpu::BindGroupLayoutEntry; 13] {
+    let [a, b, c, d, e, f, g, h, i, j, k, initial] = initial_group2_entries();
+    let raw = storage_texture_entry(17, TextureFormat::Rgba16Float);
+    [a, b, c, d, e, f, g, h, i, j, k, initial, raw]
 }
 
 /// Stage 2 group 2: 0 frame, 1 depth, 2 normal, 11 the scratch reservoirs, 12 params, 13 the
@@ -355,6 +383,112 @@ impl RestirGiPipelines {
         pass.set_pipeline(&self.denoise);
         pass.set_bind_group(2, work.denoise, &[]);
         dispatch(pass, width, height);
+    }
+}
+
+/// The four stage pipelines of the S58 stage graph and their group-2 layouts, over [empty, the GI
+/// compute group 1, group 2]: `initial` and `temporal` are the two entries of
+/// [`restir_gi_stages_module_wgsl`], `spatial` and `denoise` the existing stage-2 and stage-3
+/// builders.
+///
+/// Handoff: raa-gi stages 6/11: gi.restir.initial and gi.restir.temporal stages.
+/// `RestirStagePipelines` is built by `RestirStagePipelines::new(gpu: &GpuContext, group1:
+/// &wgpu::BindGroupLayout, tunables: &GiTunables, emissive: bool) -> RestirStagePipelines` from
+/// the tunable overrides (initial and temporal: `MAIN_OVERRIDES`; spatial: `COMMON_OVERRIDES`;
+/// denoise: `DENOISE_OVERRIDES`) and the screen emission gate. The related items are
+/// `initial_group2_entries() -> [wgpu::BindGroupLayoutEntry; 12]`, `temporal_group2_entries() ->
+/// [wgpu::BindGroupLayoutEntry; 13]`, `RESTIR_GI_INITIAL_ENTRY` and `RESTIR_GI_TEMPORAL_ENTRY`.
+/// The state it passes is the pub(crate) pipeline fields `initial`, `temporal`, `spatial` and
+/// `denoise` with their group-2 layouts `initial_layout`, `temporal_layout`, `spatial_layout` and
+/// `denoise_layout`; the stage builds the pipelines once and binds its groups over those layouts.
+pub(crate) struct RestirStagePipelines {
+    pub(crate) initial: wgpu::ComputePipeline,
+    pub(crate) temporal: wgpu::ComputePipeline,
+    pub(crate) spatial: wgpu::ComputePipeline,
+    pub(crate) denoise: wgpu::ComputePipeline,
+    pub(crate) initial_layout: wgpu::BindGroupLayout,
+    pub(crate) temporal_layout: wgpu::BindGroupLayout,
+    pub(crate) spatial_layout: wgpu::BindGroupLayout,
+    pub(crate) denoise_layout: wgpu::BindGroupLayout,
+}
+
+impl RestirStagePipelines {
+    /// Builds the two stage entry points of `restir_gi_stages_module_wgsl` and the spatial and
+    /// denoise pipelines over [empty, `group1`, their group-2 layout]; `emissive` is the screen
+    /// emission gate `RestirGiPipelines::new` passes.
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        group1: &wgpu::BindGroupLayout,
+        tunables: &GiTunables,
+        emissive: bool,
+    ) -> RestirStagePipelines {
+        let device = gpu.device();
+        let group2 =
+            |label: &str, entries: &[wgpu::BindGroupLayoutEntry]| layout(device, label, entries);
+        let empty = group2("raa-gi.restir-stages.empty", &[]);
+        let initial_layout = group2("raa-gi.restir-stages.initial", &initial_group2_entries());
+        let temporal_layout = group2("raa-gi.restir-stages.temporal", &temporal_group2_entries());
+        let spatial_layout = group2("raa-gi.restir-stages.spatial", &spatial_group2_entries());
+        let denoise_layout = group2("raa-gi.restir-stages.denoise", &denoise_group2_entries());
+        let stages = module(
+            device,
+            "raa-gi.restir-stages.stages",
+            &restir_gi_stages_module_wgsl(),
+        );
+        let spatial_module = module(
+            device,
+            "raa-gi.restir-stages.spatial",
+            &restir_gi_spatial_module_wgsl(),
+        );
+        let denoise_module = module(
+            device,
+            "raa-gi.restir-stages.denoise",
+            &restir_gi_denoise_module_wgsl(),
+        );
+        let mut initial_constants = tunables.constants(&MAIN_OVERRIDES);
+        initial_constants.push((SCREEN_OVERRIDE, override_value(emissive)));
+        let initial = tuned_pipeline(
+            device,
+            "raa-gi.restir-stages.initial",
+            &stages,
+            RESTIR_GI_INITIAL_ENTRY,
+            [&empty, group1, &initial_layout],
+            &initial_constants,
+        );
+        let temporal = tuned_pipeline(
+            device,
+            "raa-gi.restir-stages.temporal",
+            &stages,
+            RESTIR_GI_TEMPORAL_ENTRY,
+            [&empty, group1, &temporal_layout],
+            &tunables.constants(&MAIN_OVERRIDES),
+        );
+        let spatial = tuned_pipeline(
+            device,
+            "raa-gi.restir-stages.spatial",
+            &spatial_module,
+            RESTIR_GI_SPATIAL_ENTRY,
+            [&empty, group1, &spatial_layout],
+            &tunables.constants(&COMMON_OVERRIDES),
+        );
+        let denoise = tuned_pipeline(
+            device,
+            "raa-gi.restir-stages.denoise",
+            &denoise_module,
+            RESTIR_GI_DENOISE_ENTRY,
+            [&empty, group1, &denoise_layout],
+            &tunables.constants(&DENOISE_OVERRIDES),
+        );
+        RestirStagePipelines {
+            initial,
+            temporal,
+            spatial,
+            denoise,
+            initial_layout,
+            temporal_layout,
+            spatial_layout,
+            denoise_layout,
+        }
     }
 }
 
@@ -689,6 +823,38 @@ mod tests {
                 panic!("{entry}: {}: {}", e.code, e.message);
             }
         }
+    }
+
+    #[test]
+    fn stages_module_validates_and_holds_its_entries() {
+        let source = restir_gi_stages_module_wgsl();
+        for entry in [RESTIR_GI_INITIAL_ENTRY, RESTIR_GI_TEMPORAL_ENTRY] {
+            assert!(source.contains(entry));
+        }
+        if let Err(e) = raa_shader::Composer::validate(&source) {
+            panic!("restir_gi_stages: {}: {}", e.code, e.message);
+        }
+    }
+
+    #[test]
+    fn stage_group2_entries_are_unique_and_hold_the_new_bindings() {
+        let initial = initial_group2_entries();
+        let temporal = temporal_group2_entries();
+        for entries in [&initial[..], &temporal[..]] {
+            let mut numbers: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
+            numbers.sort_unstable();
+            let len = numbers.len();
+            numbers.dedup();
+            assert_eq!(numbers.len(), len, "duplicate group-2 binding");
+        }
+        assert!(initial.iter().any(|entry| entry.binding == 16));
+        assert!(temporal.iter().any(|entry| entry.binding == 16));
+        assert!(temporal.iter().any(|entry| entry.binding == 17));
+    }
+
+    #[test]
+    fn main_module_stays_unchanged() {
+        assert!(!restir_gi_main_module_wgsl().contains(RESTIR_GI_INITIAL_ENTRY));
     }
 
     #[test]
