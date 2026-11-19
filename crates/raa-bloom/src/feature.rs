@@ -32,13 +32,13 @@ const NAME: &str = "bloom";
 const ORDER: u32 = 120;
 /// Byte stride of one draw's `BloomParams` in the uniform buffer (the largest
 /// min_uniform_buffer_offset_alignment WebGPU allows, so a multiple of every device's).
-const SLOT_STRIDE: usize = 256;
+pub(crate) const SLOT_STRIDE: usize = 256;
 /// Draw slots: downsample i at i, upsample into level i at MAX_MIPS + i (i < MAX_MIPS - 1),
 /// composite at the last slot.
-const SLOTS: usize = 2 * MAX_MIPS;
-const COMPOSITE_SLOT: usize = SLOTS - 1;
+pub(crate) const SLOTS: usize = 2 * MAX_MIPS;
+pub(crate) const COMPOSITE_SLOT: usize = SLOTS - 1;
 /// Byte size of the uniform buffer.
-const UNIFORM_LEN: usize = SLOT_STRIDE * SLOTS;
+pub(crate) const UNIFORM_LEN: usize = SLOT_STRIDE * SLOTS;
 
 fn refusal(code: &'static str, message: &str) -> RaaError {
     RaaError::FrameGraph {
@@ -56,7 +56,7 @@ fn pipeline_busy() -> RaaError {
 }
 
 /// `pipeline.busy` for the shared bloom state (only reachable by a re-entrant call).
-fn state_busy() -> RaaError {
+pub(crate) fn state_busy() -> RaaError {
     refusal(
         "pipeline.busy",
         "the bloom state is borrowed (re-entrant call while a frame executes)",
@@ -64,17 +64,23 @@ fn state_busy() -> RaaError {
 }
 
 /// State shared by the pass and every clone of a `BloomHandle`.
-struct BloomState {
-    desc: BloomDesc,
+pub(crate) struct BloomState {
+    pub(crate) desc: BloomDesc,
     /// Multiplies the composite strength (`set_scale`, 1 until set): a player's post
     /// strength over whatever look set the desc.
-    scale: f32,
+    pub(crate) scale: f32,
 }
 
-type SharedBloom = Rc<RefCell<BloomState>>;
+pub(crate) type SharedBloom = Rc<RefCell<BloomState>>;
 
 /// Writes one `BloomParams` (texel_size @0, radius @8, strength @12) at `slot`.
-fn write_slot(out: &mut [u8; UNIFORM_LEN], slot: usize, src: (u32, u32), radius: f32, s: f32) {
+pub(crate) fn write_slot(
+    out: &mut [u8; UNIFORM_LEN],
+    slot: usize,
+    src: (u32, u32),
+    radius: f32,
+    s: f32,
+) {
     let (w, h) = (src.0.max(1) as f32, src.1.max(1) as f32);
     let start = slot * SLOT_STRIDE;
     let Some(dst) = out.get_mut(start..start + PARAMS_SIZE as usize) else {
@@ -128,7 +134,11 @@ fn texture_type() -> wgpu::BindingType {
 }
 
 /// Group-0 layout: params, source, sampler and, for the composite, the bloom level 0.
-fn create_layout(device: &wgpu::Device, label: &str, composite: bool) -> wgpu::BindGroupLayout {
+pub(crate) fn create_layout(
+    device: &wgpu::Device,
+    label: &str,
+    composite: bool,
+) -> wgpu::BindGroupLayout {
     let mut entries = vec![
         layout_entry(
             0,
@@ -220,11 +230,48 @@ struct Chain {
 }
 
 /// The four render pipelines of the pass.
-struct Pipelines {
-    down_first: wgpu::RenderPipeline,
-    down: wgpu::RenderPipeline,
-    up: wgpu::RenderPipeline,
-    composite: wgpu::RenderPipeline,
+pub(crate) struct Pipelines {
+    pub(crate) down_first: wgpu::RenderPipeline,
+    pub(crate) down: wgpu::RenderPipeline,
+    pub(crate) up: wgpu::RenderPipeline,
+    pub(crate) composite: wgpu::RenderPipeline,
+}
+
+impl Pipelines {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+    ) -> (Self, wgpu::BindGroupLayout, wgpu::BindGroupLayout) {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-bloom.bloom"),
+            source: wgpu::ShaderSource::Wgsl(BLOOM_WGSL.into()),
+        });
+        let sample = create_layout(device, "raa-bloom.sample_layout", false);
+        let composite = create_layout(device, "raa-bloom.composite_layout", true);
+        let additive = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        (
+            Self {
+                down_first: create_pipeline(device, &module, &sample, FS_DOWN_FIRST, None),
+                down: create_pipeline(device, &module, &sample, FS_DOWN, None),
+                up: create_pipeline(
+                    device,
+                    &module,
+                    &sample,
+                    FS_UP,
+                    Some(wgpu::BlendState {
+                        color: additive,
+                        alpha: additive,
+                    }),
+                ),
+                composite: create_pipeline(device, &module, &composite, FS_COMPOSITE, None),
+            },
+            sample,
+            composite,
+        )
+    }
 }
 
 /// The `bloom` render pass.
@@ -246,7 +293,7 @@ struct BloomPass {
     bound: Option<(wgpu::Texture, HdrGroups)>,
 }
 
-fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
+pub(crate) fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: wgpu::BindingResource::TextureView(view),
@@ -256,32 +303,7 @@ fn view_entry(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_
 impl BloomPass {
     fn new(gpu: &GpuContext, state: SharedBloom, name: String) -> Self {
         let device = gpu.device();
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("raa-bloom.bloom"),
-            source: wgpu::ShaderSource::Wgsl(BLOOM_WGSL.into()),
-        });
-        let sample_layout = create_layout(device, "raa-bloom.sample_layout", false);
-        let composite_layout = create_layout(device, "raa-bloom.composite_layout", true);
-        let additive = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let pipelines = Pipelines {
-            down_first: create_pipeline(device, &module, &sample_layout, FS_DOWN_FIRST, None),
-            down: create_pipeline(device, &module, &sample_layout, FS_DOWN, None),
-            up: create_pipeline(
-                device,
-                &module,
-                &sample_layout,
-                FS_UP,
-                Some(wgpu::BlendState {
-                    color: additive,
-                    alpha: additive,
-                }),
-            ),
-            composite: create_pipeline(device, &module, &composite_layout, FS_COMPOSITE, None),
-        };
+        let (pipelines, sample_layout, composite_layout) = Pipelines::new(device);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("raa-bloom.linear_clamp"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -365,19 +387,14 @@ impl BloomPass {
         views: &[wgpu::TextureView],
     ) -> HdrGroups {
         let level0 = views.first();
-        let composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("raa-bloom.composite"),
-            layout: &self.composite_layout,
-            entries: &[
-                self.uniform_entry(COMPOSITE_SLOT),
-                view_entry(1, view),
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                view_entry(3, level0.unwrap_or(&self.dummy_view)),
-            ],
-        });
+        let composite = composite_group(
+            device,
+            &self.composite_layout,
+            self.uniform_entry(COMPOSITE_SLOT),
+            &self.sampler,
+            view,
+            level0.unwrap_or(&self.dummy_view),
+        );
         HdrGroups {
             texture: texture.clone(),
             down_first: level0.map(|_| self.sample_group(device, 0, view)),
@@ -387,7 +404,30 @@ impl BloomPass {
 }
 
 /// One fullscreen draw into `target`, cleared first unless `load`.
-fn draw(
+pub(crate) fn composite_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: wgpu::BindGroupEntry<'_>,
+    sampler: &wgpu::Sampler,
+    hdr: &wgpu::TextureView,
+    level: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa-bloom.composite"),
+        layout,
+        entries: &[
+            uniform,
+            view_entry(1, hdr),
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            view_entry(3, level),
+        ],
+    })
+}
+
+pub(crate) fn draw(
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
     load: bool,
