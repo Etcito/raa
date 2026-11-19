@@ -209,9 +209,13 @@ struct GiStagesFrame {
 impl GraphFrame for GiStagesFrame {
     fn begin(&mut self, _table: &ResourceTable) {
         self.restored = false;
-        if let Some(gi) = self.state.borrow().gi.as_ref()
-            && !gi.shared().camera_valid()
-        {
+        let camera_invalid = self
+            .state
+            .borrow()
+            .gi
+            .as_ref()
+            .is_some_and(|gi| !gi.shared().camera_valid());
+        if camera_invalid {
             let mut state = self.state.borrow_mut();
             for history in &mut state.histories {
                 history.valid = false;

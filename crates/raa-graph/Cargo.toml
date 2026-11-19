@@ -35,3 +35,8 @@ raa-gi = { path = "../raa-gi" }
 raa-taa = { path = "../raa-taa" }
 raa-lit = { path = "../raa-lit" }
 raa-sky = { path = "../raa-sky" }
+
+[dev-dependencies]
+raa-geom = { path = "../raa-geom" }
+raa-scene = { path = "../raa-scene" }
+raa-math = { path = "../raa-math" }

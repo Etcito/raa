@@ -462,3 +462,158 @@ fn full_gi_stages_applies_with_stage_passes_only() {
         );
     }
 }
+
+/// Records the page's Full GI stage graph for three submitted frames at the per-half capture
+/// size. The graph has no mesh pass that initializes these stage inputs, so the lit pipeline's
+/// prepass clears depth to 1.0 (far) and clears the HDR/G-buffer targets before any draws.
+#[test]
+fn full_gi_stages_renders_frames_without_panic() {
+    use raa_core::{FrameGraph, MaterialId, OffscreenTarget};
+    use raa_geom::builtin::DebugCube;
+    use raa_geom::{GeometryProvider, MeshData, ParamValue, Params, Quality};
+    use raa_lit::{AttributedMesh, LitOptions, LitRenderer, LocalLight, LocalLightKind};
+    use raa_scene::{RenderList, Scene, Transform};
+    use std::{cell::RefCell, rc::Rc};
+
+    const SIZE: (u32, u32) = (1280, 720);
+    const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let name = "full_gi_stages_renders_frames_without_panic";
+    let Some(gpu) = raa_core::testing::software_gpu() else {
+        raa_core::testing::skip(name, "no software adapter");
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(raa_pipeline::Pipeline::new(
+        &gpu, SURFACE, false,
+    )));
+    let mut lit = LitRenderer::new(
+        &gpu,
+        &pipeline,
+        LitOptions {
+            max_instances: 16,
+            max_materials: 4,
+            msaa: 1,
+        },
+    )
+    .expect("lit renderer");
+    let mut mesh = MeshData::new();
+    DebugCube
+        .generate(
+            &Params::new().with("half", ParamValue::Scalar(0.5)),
+            Quality::LOD0,
+            &mut mesh,
+        )
+        .expect("debug cube");
+    let asset = lit
+        .upload(&gpu, &AttributedMesh::from_mesh(mesh))
+        .expect("upload cube");
+    let mesh_id = lit.submesh_ids(asset).expect("cube submesh")[0];
+    let mut scene = Scene::with_capacity(1, 1);
+    scene.camera.set_viewport(SIZE.0, SIZE.1);
+    let cube_node = scene
+        .add_node(None, Transform::IDENTITY)
+        .expect("cube node");
+    scene
+        .add_instance(cube_node, mesh_id, MaterialId(0))
+        .expect("cube instance");
+    // Scene::default supplies the page's directional sun; install its overhead area light too.
+    lit.local_lights_mut()
+        .add(LocalLight {
+            kind: LocalLightKind::Area,
+            position: [0.0, 3.0, 0.0],
+            direction: [0.0, -1.0, 0.0],
+            intensity: 6.0,
+            range: 8.0,
+            size: [2.0, 1.0],
+            ..LocalLight::default()
+        })
+        .expect("area light");
+    let gi = raa_gi::feature::GiFeature::install(&gpu, &pipeline, &mut lit, None, None)
+        .expect("GI feature");
+    let gi_frame = gi.clone();
+    let mut handles = raa_graph::exec::HandleSet {
+        gi: Some(gi),
+        ..Default::default()
+    };
+    let mut executor = raa_graph::exec::GraphExecutor::new();
+    let applied = {
+        let mut h = raa_graph::exec::FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: Some(&mut lit),
+        };
+        executor.set_plan(starter_plan(), None, &mut h)
+    };
+    assert!(applied.ok, "refused: {:?}", applied.issues);
+    let mut graph = FrameGraph::new(SURFACE);
+    raa_pipeline::Pipeline::install(&pipeline, &mut graph);
+    graph.compile().expect("compile pipeline graph");
+    let target = OffscreenTarget::new(&gpu, SIZE.0, SIZE.1, SURFACE);
+    let mut list = RenderList::with_capacity(1);
+    let mut tags = Vec::new();
+    let mut slots = Vec::new();
+    let mut recorded = Vec::new();
+    for frame in 0..3 {
+        {
+            let mut h = raa_graph::exec::FeatureHandles {
+                gpu: &gpu,
+                pipeline: &pipeline,
+                handles: &mut handles,
+                viewports: 1,
+                msaa: 1,
+                lit: Some(&mut lit),
+            };
+            executor.frame(&mut h).expect("executor frame");
+        }
+        gi_frame.set_view(&scene.camera, SIZE, 1);
+        gi_frame.set_sun(&scene.light);
+        gi_frame.set_local_light_count(1);
+        let gi_stats = gi_frame.prepare_frame(&gpu, &mut scene, &mut lit);
+        assert!(gi_stats.active, "frame {frame}: GI inactive: {gi_stats:?}");
+        lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
+            .expect("prepare lit scene");
+        let commands = graph
+            .execute(&gpu, target.view(), target.size())
+            .expect("execute frame graph");
+        gpu.queue().submit([commands]);
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll submitted frame");
+        gi_frame.observe_submission(frame + 1, true);
+        let stats = executor.stats();
+        for (node_id, type_id) in [
+            ("giPyramid", "gi.pyramid"),
+            ("giProbes", "gi.probes"),
+            ("giAccumulate", "gi.accumulate"),
+            ("giAtrous1", "gi.atrous"),
+            ("giAtrous2", "gi.atrous"),
+            ("giAtrous3", "gi.atrous"),
+            ("giAtrous4", "gi.atrous"),
+            ("giResolve", "gi.resolve"),
+            ("areaTrace", "area.trace"),
+            ("areaTemporal", "area.temporal"),
+            ("areaSpatial", "area.spatial"),
+            ("areaMask", "area.mask"),
+            ("ssgiTrace", "ssgi.trace"),
+            ("ssgiResolve", "ssgi.resolve"),
+        ] {
+            let stage = stats
+                .iter()
+                .find(|s| s.node == node_id && s.type_id == type_id);
+            assert!(
+                stage.is_some(),
+                "frame {frame}: missing stage stats for {node_id} ({type_id})"
+            );
+            assert!(
+                stage.unwrap().ran,
+                "frame {frame}: {node_id} did not record"
+            );
+            if !recorded.contains(&node_id) {
+                recorded.push(node_id);
+            }
+        }
+    }
+    assert_eq!(recorded.len(), 14, "recorded stages: {recorded:?}");
+}
