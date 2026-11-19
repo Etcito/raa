@@ -823,6 +823,8 @@ struct Rendered {
     size: (u32, u32),
     enabled: Vec<String>,
     ran: Vec<String>,
+    /// The stage kinds (catalog type ids) that recorded on the last frame, under any node id.
+    ran_kinds: Vec<String>,
 }
 
 /// Renders `frames` submitted frames of `plan` on the software GPU over a floor and a cube lit
@@ -973,17 +975,19 @@ fn render_plan_frames(name: &str, plan: GraphPlan, frames: u32) -> Option<Render
         .filter(|pass| p.entry_enabled(&pass.name).unwrap_or(false))
         .map(|pass| pass.name)
         .collect();
-    let ran = executor
+    let ran_stats: Vec<_> = executor
         .stats()
         .into_iter()
         .filter(|s| s.ran && raa_gi::stages::GiStageKind::from_type_id(&s.type_id).is_some())
-        .map(|s| s.node)
         .collect();
+    let ran = ran_stats.iter().map(|s| s.node.clone()).collect();
+    let ran_kinds = ran_stats.into_iter().map(|s| s.type_id).collect();
     Some(Rendered {
         pixels: target.read_rgba8(&gpu).expect("read frame"),
         size: SIZE,
         enabled,
         ran,
+        ran_kinds,
     })
 }
 
@@ -1042,6 +1046,28 @@ fn assert_family_has_no_monolithic_pass(image: &Rendered, family: &[&str]) {
     }
 }
 
+/// No pass of stage `kind` is in the plan, installed in the pipeline or recorded, under any node
+/// id: a pipeline entry is `<kind>#<node id>`.
+fn assert_no_pass_of_kind(plan: &GraphPlan, image: &Rendered, kind: &str) {
+    assert!(
+        plan.nodes.iter().all(|n| n.type_id != kind),
+        "the plan holds a {kind} node"
+    );
+    assert!(
+        image
+            .enabled
+            .iter()
+            .all(|e| e.split('#').next() != Some(kind)),
+        "a {kind} pass is installed: {:?}",
+        image.enabled
+    );
+    assert!(
+        image.ran_kinds.iter().all(|k| k != kind),
+        "a {kind} pass recorded: {:?}",
+        image.ran_kinds
+    );
+}
+
 #[test]
 fn area_without_spatial_is_noisier_than_full_chain() {
     let name = "area_without_spatial_is_noisier_than_full_chain";
@@ -1053,7 +1079,8 @@ fn area_without_spatial_is_noisier_than_full_chain() {
         &[("areaTemporal.filtered", "areaMask.src")],
     );
     assert!(plan.nodes.iter().all(|n| n.type_id != "area.spatial"));
-    let variant = render_plan_frames(name, plan, VARIANCE_FRAMES).expect("adapter present");
+    let variant = render_plan_frames(name, plan.clone(), VARIANCE_FRAMES).expect("adapter present");
+    assert_no_pass_of_kind(&plan, &variant, "area.spatial");
     assert_family_has_no_monolithic_pass(&variant, &["gi.area-shadow"]);
     for node in ["areaTrace", "areaTemporal", "areaMask"] {
         assert!(variant.ran.iter().any(|n| n == node), "{node} did not run");
@@ -1066,8 +1093,8 @@ fn area_without_spatial_is_noisier_than_full_chain() {
         "without area.spatial the image must be noisier: {variant_var} vs {full_var}"
     );
     // area.temporal holds (S, U) pairs; read as visibility, S darkens the whole floor (or, in a
-    // bright room, clamps to 1 and shows no shadow). The raw mask is visibility S / U, an
-    // unbiased estimate of the filtered one, so the floor keeps its brightness.
+    // bright room, clamps to 1 and shows no shadow). area.mask converts them to S / U itself, an
+    // unbiased estimate of the filtered visibility, so the floor keeps its brightness.
     let (full_mean, variant_mean) = (floor_mean(&full), floor_mean(&variant));
     eprintln!("area floor mean: full {full_mean} without spatial {variant_mean}");
     assert!(
@@ -1084,7 +1111,8 @@ fn ssgi_without_resolve_is_noisier_than_full_chain() {
     };
     let plan = variant_plan(&["ssgiResolve"], &[("ssgiTrace.raw", "forward.gi")]);
     assert!(plan.nodes.iter().all(|n| n.type_id != "ssgi.resolve"));
-    let variant = render_plan_frames(name, plan, VARIANCE_FRAMES).expect("adapter present");
+    let variant = render_plan_frames(name, plan.clone(), VARIANCE_FRAMES).expect("adapter present");
+    assert_no_pass_of_kind(&plan, &variant, "ssgi.resolve");
     assert_family_has_no_monolithic_pass(&variant, &["gi.ssgi"]);
     assert!(variant.ran.iter().any(|n| n == "ssgiTrace"));
     assert!(!variant.ran.iter().any(|n| n == "ssgiResolve"));

@@ -1,6 +1,8 @@
 //! The `area.spatial` and `area.mask` stages. Both attach through `area_frame` from
 //! `area_shadow/stages.rs:66`; spatial runs the separable denoiser and mask copies its result
-//! while installing the current stochastic slot table for forward shading.
+//! while installing the current stochastic slot table for forward shading. A mask linked straight
+//! to `area.temporal` or `area.trace` (stage value `srcPairs` 1) converts their (S, U) pairs to
+//! visibility S / U itself instead of copying.
 #![allow(dead_code)]
 
 use raa_core::{GpuContext, RaaError};
@@ -356,7 +358,8 @@ impl MaskOutput {
             2,
             wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING,
         );
         let view = texture.create_view(&Default::default());
         Self {
@@ -379,10 +382,172 @@ impl MaskOutput {
     }
 }
 
+/// The key of the `area.mask` stage value that tells it its `src` holds the ratio estimator's
+/// pairs (S, U, S, U) of `area.trace.raw` or `area.temporal.filtered` instead of visibility. The
+/// graph executor writes 1 for a mask linked straight to one of them and 0 otherwise.
+pub(crate) const MASK_PAIRS_KEY: &str = "srcPairs";
+
+/// Converts the (S, U) pairs of two history layers into visibility V = S / U for the four slots
+/// of one mask layer: the vertical half of `spatial.wgsl` without any filtering. Slots at or past
+/// the table limit and texels without weight (`U` zero, sky) write 1.
+const RATIO_MASK_WGSL: &str = "
+struct RatioParams { slot: u32, limit: u32, pad0: u32, pad1: u32 }
+@group(0) @binding(0) var raa_mask_first: texture_2d<f32>;
+@group(0) @binding(1) var raa_mask_second: texture_2d<f32>;
+@group(0) @binding(2) var raa_mask_dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> raa_mask_params: RatioParams;
+
+fn raa_mask_visibility(s: f32, u: f32, slot: u32) -> f32 {
+    if slot >= raa_mask_params.limit || u <= 1e-6 {
+        return 1.0;
+    }
+    return clamp(s / u, 0.0, 1.0);
+}
+
+@compute @workgroup_size(8, 8)
+fn raa_gi_area_mask_ratio(@builtin(global_invocation_id) id: vec3<u32>) {
+    if any(id.xy >= textureDimensions(raa_mask_dst)) {
+        return;
+    }
+    let coord = vec2<i32>(id.xy);
+    let first = textureLoad(raa_mask_first, coord, 0);
+    let second = textureLoad(raa_mask_second, coord, 0);
+    let slot = raa_mask_params.slot;
+    textureStore(raa_mask_dst, coord, vec4<f32>(
+        raa_mask_visibility(first.x, first.y, slot),
+        raa_mask_visibility(first.z, first.w, slot + 1u),
+        raa_mask_visibility(second.x, second.y, slot + 2u),
+        raa_mask_visibility(second.z, second.w, slot + 3u),
+    ));
+}
+";
+
+/// The compute pipeline of the ratio conversion, its two per-layer uniform buffers and the bind
+/// groups of the bound `src`, rebuilt only when the size, the layer count or the view changes.
+struct RatioMask {
+    pipeline: wgpu::ComputePipeline,
+    params: [wgpu::Buffer; 2],
+    binds: Option<RatioBinds>,
+}
+
+/// The bind groups of one bound `src` and what they were built for.
+struct RatioBinds {
+    size: (u32, u32),
+    layers: u32,
+    src: wgpu::TextureView,
+    groups: [wgpu::BindGroup; 2],
+}
+
+impl RatioMask {
+    fn new(gpu: &GpuContext) -> Self {
+        let device = gpu.device();
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("raa-gi.area-mask.ratio"),
+            source: wgpu::ShaderSource::Wgsl(RATIO_MASK_WGSL.into()),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("raa-gi.area-mask.ratio"),
+            layout: None,
+            module: &module,
+            entry_point: Some("raa_gi_area_mask_ratio"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let make = || {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raa-gi.area-mask.ratio.params"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            pipeline,
+            params: [make(), make()],
+            binds: None,
+        }
+    }
+
+    /// Records one dispatch per mask layer; `src` has `layers` pair layers.
+    fn record(
+        &mut self,
+        ctx: &mut RecordCtx<'_>,
+        output: &MaskOutput,
+        src: &raa_pipeline::PublishedImage,
+        limit: u32,
+    ) {
+        let layers = src.desc.layers;
+        let stale = self.binds.as_ref().is_none_or(|binds| {
+            binds.size != output.size || binds.layers != layers || binds.src != src.view
+        });
+        if stale {
+            let layout = self.pipeline.get_bind_group_layout(0);
+            let groups: [wgpu::BindGroup; 2] = std::array::from_fn(|layer| {
+                let first = (layer as u32 * 2).min(layers - 1);
+                let second = (first + 1).min(layers - 1);
+                let a = layer_view(src.view.texture(), first);
+                let b = layer_view(src.view.texture(), second);
+                let dst = layer_view(&output.texture, layer as u32);
+                ctx.gpu
+                    .device()
+                    .create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("raa-gi.area-mask.ratio"),
+                        layout: &layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&a),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&b),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(&dst),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: self.params[layer].as_entire_binding(),
+                            },
+                        ],
+                    })
+            });
+            self.binds = Some(RatioBinds {
+                size: output.size,
+                layers,
+                src: src.view.clone(),
+                groups,
+            });
+        }
+        let Some(RatioBinds { groups, .. }) = &self.binds else {
+            return;
+        };
+        for layer in 0..2u32 {
+            let lanes = [layer * 4, limit, 0, 0];
+            ctx.gpu
+                .queue()
+                .write_buffer(&self.params[layer as usize], 0, &dispatch_bytes(lanes));
+        }
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("raa-gi.area-mask.ratio"),
+                timestamp_writes: None,
+            });
+        pass.set_pipeline(&self.pipeline);
+        for group in groups {
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(output.size.0.div_ceil(8), output.size.1.div_ceil(8), 1);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct AreaMaskStage {
     area: AreaFrameState,
     output: Option<MaskOutput>,
+    ratio: Option<RatioMask>,
     ready: bool,
     #[cfg(test)]
     forced_limit: Option<u32>,
@@ -390,11 +555,15 @@ pub(crate) struct AreaMaskStage {
 
 impl StageImpl for AreaMaskStage {
     fn param_keys(&self) -> &'static [&'static str] {
-        &[]
+        &[MASK_PAIRS_KEY]
     }
 
-    fn check_value(&self, key: &str, _value: f64) -> Result<(), String> {
-        Err(format!("`{key}` is not a parameter of area.mask"))
+    fn check_value(&self, key: &str, value: f64) -> Result<(), String> {
+        if value == 0.0 || value == 1.0 {
+            Ok(())
+        } else {
+            Err(format!("`{key}` is 0 or 1"))
+        }
     }
 
     fn prepare(
@@ -440,6 +609,21 @@ impl StageImpl for AreaMaskStage {
         let Some(src) = ctx.resources.input(cx.entry, "src") else {
             return Ok(false);
         };
+        if cx.value(MASK_PAIRS_KEY, 0.0) > 0.5 {
+            if src.desc.dim != ImageDim::D2Array
+                || src.desc.format != FORMAT
+                || src.desc.width != output.size.0
+                || src.desc.height != output.size.1
+                || src.desc.layers == 0
+            {
+                return Ok(false);
+            }
+            let limit = table_limit(&cx.lit.area_stochastic().table).min(8);
+            self.ratio
+                .get_or_insert_with(|| RatioMask::new(ctx.gpu))
+                .record(ctx, output, &src, limit);
+            return Ok(true);
+        }
         if src.desc.dim != ImageDim::D2Array
             || src.desc.format != FORMAT
             || src.desc.width != output.size.0
