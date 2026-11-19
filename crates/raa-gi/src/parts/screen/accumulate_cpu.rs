@@ -71,7 +71,13 @@ pub fn tap_matches(
 /// The share of the history length the lighting change test keeps (`raa_gi_acc_change_keep`):
 /// z = |mean - history| / (sigma + slack), sigma^2 = max(spatial_var, temporal_var), slack =
 /// CHANGE_SLACK max(|history|, |mean|) + 1e-4; 1 up to z = gamma, 0 from 2 gamma, linear between.
-pub fn change_keep(history: f32, mean: f32, spatial_var: f32, temporal_var: f32, gamma: f32) -> f32 {
+pub fn change_keep(
+    history: f32,
+    mean: f32,
+    spatial_var: f32,
+    temporal_var: f32,
+    gamma: f32,
+) -> f32 {
     let sigma = spatial_var.max(temporal_var).max(0.0).sqrt();
     let slack = CHANGE_SLACK * history.abs().max(mean.abs()) + 1.0e-4;
     let z = (mean - history).abs() / (sigma + slack);
@@ -137,4 +143,26 @@ pub fn atrous_filter(taps: &[(f32, f32, f32)]) -> (f32, f32) {
     let value = taps.iter().map(|t| t.0 * t.2).sum::<f32>() / total;
     let var = taps.iter().map(|t| t.1 * t.2 * t.2).sum::<f32>() / (total * total);
     (value, var)
+}
+
+/// Handoff: raa-gi CPU tests: a-trous step, accumulation blend and resolve of the GI stages.
+/// `atrous_stage_record` packs the stage uniform; `atrous_tap_offsets` and `resolve_compose`
+/// expose its tap coordinates and the resolve composition for integration tests, with no state.
+pub fn atrous_stage_record(step: i32) -> [u8; 16] {
+    let mut record = [0; 16];
+    record[..4].copy_from_slice(&step.max(1).to_le_bytes());
+    record
+}
+
+pub fn atrous_tap_offsets(step: i32) -> [[i32; 2]; 25] {
+    std::array::from_fn(|i| [((i % 5) as i32 - 2) * step, ((i / 5) as i32 - 2) * step])
+}
+
+pub fn resolve_compose(irradiance: [f32; 4], occlusion: Option<[f32; 4]>) -> [f32; 4] {
+    [
+        irradiance[0],
+        irradiance[1],
+        irradiance[2],
+        occlusion.map_or(1.0, |v| v[3]),
+    ]
 }

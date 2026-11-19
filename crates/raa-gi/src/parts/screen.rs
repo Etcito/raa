@@ -48,6 +48,9 @@ pub mod restir_gi_cpu;
 #[path = "screen/stages.rs"]
 pub(crate) mod stages;
 
+#[path = "screen/stage_filters.rs"]
+pub(crate) mod stage_filters;
+
 #[path = "screen/stage_accumulate.rs"]
 pub(crate) mod stage_accumulate;
 
