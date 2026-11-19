@@ -1,0 +1,61 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Simple forward",
+  "nodes": [
+    {
+      "id": "shadowCsm",
+      "type": "pass.shadow.csm"
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "forward",
+      "type": "pass.forward"
+    },
+    {
+      "id": "skyBackground",
+      "type": "pass.sky.background"
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap",
+      "params": {
+        "mapper": "agx",
+        "exposureEv": 0
+      }
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
+  ],
+  "links": [
+    {
+      "from": "prepass.depth",
+      "to": "lightTiles.depth"
+    },
+    {
+      "from": "shadowCsm.shadowMap",
+      "to": "forward.shadowMap"
+    },
+    {
+      "from": "lightTiles.lightTiles",
+      "to": "forward.lightTiles"
+    },
+    {
+      "from": "forward.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "out.color"
+    }
+  ]
+}
