@@ -50,7 +50,19 @@ export async function loadRaa(options = {}) {
   await ready;
   return Object.freeze({
     version: VERSION,
-    createEngine: (canvas, opts) => Engine.create(canvas, opts ?? {}),
+    createEngine: (canvas, opts) => {
+      if (opts?.pipeline === undefined) return Engine.create(canvas, opts ?? {});
+      const { pipeline, ...engineOptions } = opts;
+      return (async () => {
+        const engine = await Engine.create(canvas, engineOptions);
+        const result = engine.setFrozenRenderGraph(pipeline);
+        if (!result.ok) {
+          engine.dispose();
+          throw new Error(result.issues.map(({ code, message }) => `${code}: ${message}`).join('\n'));
+        }
+        return engine;
+      })();
+    },
     bakeClusters: (input) => glue.bakeClusters(input),
     createClusterBake: (input) => clusterBake(input),
     validateClusters: (section) => glue.validateClusters(section),
