@@ -19,6 +19,7 @@ use raa_pipeline::{
 use crate::error::{GI_INVALID, invalid};
 use crate::feature::GiHandle;
 use crate::parts::GiShared;
+use crate::parts::screen::stage_accumulate::AccumulateStage;
 use crate::parts::screen::stages::{ProbesStage, PyramidStage};
 use crate::{GiTunables, tunables};
 
@@ -202,6 +203,7 @@ pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
     match kind {
         GiStageKind::Pyramid => Some(Box::new(PyramidStage::default())),
         GiStageKind::Probes => Some(Box::new(ProbesStage::default())),
+        GiStageKind::Accumulate => Some(Box::new(AccumulateStage::default())),
         _ => None,
     }
 }
