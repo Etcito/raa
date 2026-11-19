@@ -45,13 +45,16 @@ pub mod restir_gi;
 #[path = "screen/restir_gi_cpu.rs"]
 pub mod restir_gi_cpu;
 
+#[path = "screen/stages.rs"]
+pub(crate) mod stages;
+
 use self::restir_gi::{RestirGiInputs, RestirGiPipelines, RestirGiResources};
 use crate::settings::{GiSettings, IndirectMode};
 
 /// Byte offsets of the two `GiFrameGpu` lanes that carry the TAA jitter (sun_direction.w and
 /// sun_color.w, otherwise unused): probe_common.wgsl `raa_gi_view_position` reads them.
-const FRAME_JITTER_X_OFFSET: u64 = 348;
-const FRAME_JITTER_Y_OFFSET: u64 = 364;
+pub(crate) const FRAME_JITTER_X_OFFSET: u64 = 348;
+pub(crate) const FRAME_JITTER_Y_OFFSET: u64 = 364;
 
 /// Handoff: `install` is the body that card 'raa-gi screen: ScreenPart, gi.screen pass and install'
 /// replaces. The generated `install_parts` of `parts.rs` calls it once per GI feature install, in

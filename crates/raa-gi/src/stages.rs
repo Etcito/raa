@@ -19,6 +19,7 @@ use raa_pipeline::{
 use crate::error::{GI_INVALID, invalid};
 use crate::feature::GiHandle;
 use crate::parts::GiShared;
+use crate::parts::screen::stages::{ProbesStage, PyramidStage};
 use crate::{GiTunables, tunables};
 
 /// Handoff: raa-graph exec gi_stages 1/3: device-free plan functions. `GiStageKind` is the anchor:
@@ -198,8 +199,11 @@ impl StageCx<'_> {
 /// (each key's f64 value arrives in `StageCx.values`) and the `StageCx` fields: entry, shared,
 /// lit, values, values_generation, history_valid and buffer_sources.
 pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
-    let _ = kind;
-    None
+    match kind {
+        GiStageKind::Pyramid => Some(Box::new(PyramidStage::default())),
+        GiStageKind::Probes => Some(Box::new(ProbesStage::default())),
+        _ => None,
+    }
 }
 
 /// The state that the pass and its handle share.
@@ -207,7 +211,7 @@ struct StageState {
     kind: GiStageKind,
     entry: String,
     imp: Box<dyn StageImpl>,
-    gi: Option<GiHandle>,
+    shared: Option<GiShared>,
     lit: Option<LitHandle>,
     values: Vec<(String, f64)>,
     values_generation: u64,
@@ -227,13 +231,12 @@ struct StagePass {
 /// The shared GI state and lit handle of an attached stage, or None while the stage must do
 /// nothing: unattached, no frame buffer yet, or an empty viewport.
 fn runnable(state: &StageState, size: (u32, u32)) -> Option<(GiShared, LitHandle)> {
-    let (gi, lit) = (state.gi.as_ref()?, state.lit.as_ref()?);
+    let (shared, lit) = (state.shared.as_ref()?, state.lit.as_ref()?);
     if size.0 == 0 || size.1 == 0 {
         return None;
     }
-    let shared = gi.shared();
     shared.frame_buffer()?;
-    Some((shared, lit.clone()))
+    Some((shared.clone(), lit.clone()))
 }
 
 impl FeaturePass for StagePass {
@@ -350,7 +353,7 @@ pub fn install_stage(
         kind,
         entry: name.clone(),
         imp,
-        gi: None,
+        shared: None,
         lit: None,
         values: Vec::new(),
         values_generation: 0,
@@ -392,8 +395,14 @@ impl GiStageHandle {
 
     /// Attaches the stage to `gi` and `lit`; the pass prepares and records only while attached.
     pub fn attach(&self, gi: &GiHandle, lit: LitHandle) {
+        self.attach_shared(gi.shared(), lit);
+    }
+
+    /// Attaches the stage to the shared GI frame state `shared` and `lit` (what [`attach`] does
+    /// with the handle's shared state); the crate-private entry the tests of the stage kinds use.
+    pub(crate) fn attach_shared(&self, shared: GiShared, lit: LitHandle) {
         let mut state = self.state.borrow_mut();
-        state.gi = Some(gi.clone());
+        state.shared = Some(shared);
         state.lit = Some(lit);
     }
 

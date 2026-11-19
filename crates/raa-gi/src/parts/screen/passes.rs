@@ -819,11 +819,71 @@ impl ScreenPipelines {
         }
         true
     }
+
+    /// Records the pyramid copy over `groups[0]` at `sizes[0]` and the reduce over each later
+    /// group at its size into `pass` (group 1 already set); false and nothing recorded when
+    /// `groups` or `sizes` is empty. The `gi.pyramid` stage records with it.
+    pub(crate) fn record_pyramid_groups(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        groups: &[wgpu::BindGroup],
+        sizes: &[(u32, u32)],
+    ) -> bool {
+        let (Some(first), Some(&(width, height))) = (groups.first(), sizes.first()) else {
+            return false;
+        };
+        pass.set_pipeline(&self.copy);
+        pass.set_bind_group(2, first, &[]);
+        dispatch(pass, width, height);
+        for (bind, &(width, height)) in groups.iter().zip(sizes).skip(1) {
+            pass.set_pipeline(&self.reduce);
+            pass.set_bind_group(2, bind, &[]);
+            dispatch(pass, width, height);
+        }
+        true
+    }
+
+    /// Records the trace, project and filter dispatches of `record` into `pass` (group 1 already
+    /// set); false and nothing recorded when `probe_rays` is not in `PROBE_RAY_OPTIONS`. The
+    /// `gi.probes` stage records with it.
+    pub(crate) fn record_probe_chain(
+        &self,
+        pass: &mut wgpu::ComputePass<'_>,
+        trace: &wgpu::BindGroup,
+        project: &wgpu::BindGroup,
+        filter: &wgpu::BindGroup,
+        probe_rays: u32,
+        grid: (u32, u32),
+    ) -> bool {
+        let Some(variant) = PROBE_RAY_OPTIONS
+            .iter()
+            .position(|&rays| rays == probe_rays)
+        else {
+            return false;
+        };
+        pass.set_pipeline(&self.trace[variant]);
+        pass.set_bind_group(2, trace, &[]);
+        pass.dispatch_workgroups(
+            groups_for(grid.0 * probe_rays),
+            groups_for(grid.1 * probe_rays),
+            1,
+        );
+
+        pass.set_pipeline(&self.project[variant]);
+        pass.set_bind_group(2, project, &[]);
+        dispatch(pass, grid.0, grid.1);
+
+        pass.set_pipeline(&self.filter);
+        pass.set_bind_group(2, filter, &[]);
+        dispatch(pass, grid.0, grid.1);
+        true
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raa_core::testing::skip;
 
     #[test]
     fn pyramid_sizes_reduce_to_one() {
@@ -876,5 +936,39 @@ mod tests {
                 u32::from(index == 4)
             );
         }
+    }
+
+    #[test]
+    fn probe_chain_and_pyramid_groups_refuse_before_recording() {
+        let test = "probe_chain_and_pyramid_groups_refuse_before_recording";
+        let Some(gpu) = crate::parts::serial_software_gpu() else {
+            skip(test, "software_gpu returned None");
+            return;
+        };
+        let device = gpu.device();
+        let group1 = crate::parts::GiShared::new(&gpu).compute_group1_layout();
+        let pipelines = ScreenPipelines::new(&gpu, &group1, &GiTunables::new(), (false, 0));
+        // An empty layout and group: both methods refuse before they bind anything.
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[],
+        });
+        let empty = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[],
+        });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            let chain = pipelines.record_probe_chain(&mut pass, &empty, &empty, &empty, 7, (1, 1));
+            assert!(!chain, "probe_rays 7 is not an option");
+            assert!(!pipelines.record_pyramid_groups(&mut pass, &[], &[]));
+        }
+        drop(encoder.finish());
     }
 }
