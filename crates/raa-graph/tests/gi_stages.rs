@@ -1135,3 +1135,283 @@ fn full_chain_records_no_monolithic_pass() {
         assert!(full.ran.iter().any(|n| n == node), "{node} did not run");
     }
 }
+
+/// A graph frame that records, at `before_record` of `forward`, whether a forward slot's bound
+/// view is the same texture view the named stage published. The binding is applied by the
+/// executor's graph frames in `before_prepare`, so the check runs where the forward pass records.
+struct ForwardSlotProbe {
+    slot: u32,
+    source_entry: String,
+    source_port: &'static str,
+    matched: std::rc::Rc<std::cell::RefCell<Option<bool>>>,
+}
+
+impl raa_pipeline::GraphFrame for ForwardSlotProbe {
+    fn before_record(
+        &mut self,
+        pass: &str,
+        ctx: &mut raa_pipeline::RecordCtx<'_>,
+    ) -> Result<(), raa_core::RaaError> {
+        if pass != "forward" {
+            return Ok(());
+        }
+        let slot = ctx.lighting.slot_view(self.slot);
+        let source = ctx
+            .resources
+            .get(&self.source_entry, self.source_port)
+            .map(|image| image.view);
+        *self.matched.borrow_mut() = Some(matches!(
+            (slot, source),
+            (Some(bound), Some(published)) if bound == published
+        ));
+        Ok(())
+    }
+}
+
+/// Renders three frames of `plan` and reports whether the forward `slot` is bound to the view the
+/// `source_entry`/`source_port` stage published on the last frame. None when there is no adapter.
+fn forward_slot_reads_stage(
+    name: &str,
+    plan: GraphPlan,
+    slot: u32,
+    source_entry: String,
+    source_port: &'static str,
+) -> Option<bool> {
+    use raa_core::{FrameGraph, MaterialId, OffscreenTarget};
+    use raa_geom::builtin::DebugCube;
+    use raa_geom::{GeometryProvider, MeshData, ParamValue, Params, Quality};
+    use raa_lit::{
+        AttributedMesh, LitOptions, LitRenderer, LocalLight, LocalLightKind, StochasticMode,
+        StochasticShadowSettings, install_local_lights,
+    };
+    use raa_math::Vec3;
+    use raa_pipeline::Pipeline;
+    use raa_scene::{RenderList, Scene, Transform};
+    use std::{cell::RefCell, rc::Rc};
+
+    const SIZE: (u32, u32) = (320, 180);
+    const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let Some(gpu) = raa_core::testing::software_gpu() else {
+        raa_core::testing::skip(name, "no software adapter");
+        return None;
+    };
+    let pipeline = Rc::new(RefCell::new(Pipeline::new(&gpu, SURFACE, false)));
+    let mut lit = LitRenderer::new(
+        &gpu,
+        &pipeline,
+        LitOptions {
+            max_instances: 16,
+            max_materials: 4,
+            msaa: 1,
+        },
+    )
+    .expect("lit renderer");
+    let (tonemap_pass, tonemap) = {
+        let p = pipeline.borrow();
+        raa_tonemap::TonemapPass::new(&gpu, &p)
+    };
+    pipeline
+        .borrow_mut()
+        .add(Box::new(tonemap_pass))
+        .expect("tonemap pass");
+    let mut mesh = MeshData::new();
+    DebugCube
+        .generate(
+            &Params::new().with("half", ParamValue::Scalar(0.5)),
+            Quality::LOD0,
+            &mut mesh,
+        )
+        .expect("debug cube");
+    let asset = lit
+        .upload(&gpu, &AttributedMesh::from_mesh(mesh))
+        .expect("upload cube");
+    let mesh_id = lit.submesh_ids(asset).expect("cube submesh")[0];
+    let mut scene = Scene::with_capacity(2, 2);
+    scene.camera.set_viewport(SIZE.0, SIZE.1);
+    scene.camera.eye = Vec3::new(0.0, 2.0, 4.0);
+    for (translation, scale) in [
+        (Vec3::new(0.0, 0.5, 0.0), Vec3::splat(1.0)),
+        (Vec3::new(0.0, -0.05, 0.0), Vec3::new(8.0, 0.1, 8.0)),
+    ] {
+        let node = scene
+            .add_node(
+                None,
+                Transform {
+                    translation,
+                    scale,
+                    ..Transform::IDENTITY
+                },
+            )
+            .expect("node");
+        scene
+            .add_instance(node, mesh_id, MaterialId(0))
+            .expect("instance");
+    }
+    lit.local_lights_mut()
+        .add(LocalLight {
+            kind: LocalLightKind::Area,
+            position: [-2.5, 3.0, 0.0],
+            direction: [0.640_184, -0.768_221, 0.0],
+            intensity: 12.0,
+            range: 10.0,
+            size: [3.0, 3.0],
+            ..LocalLight::default()
+        })
+        .expect("area light");
+    install_local_lights(&gpu, &pipeline, &mut lit).expect("light tiling installs");
+    let gi = raa_gi::feature::GiFeature::install(&gpu, &pipeline, &mut lit, None, None)
+        .expect("GI feature");
+    let gi_frame = gi.clone();
+    let mut handles = raa_graph::exec::HandleSet {
+        gi: Some(gi),
+        tonemap: Some(tonemap),
+        ..Default::default()
+    };
+    let mut executor = raa_graph::exec::GraphExecutor::new();
+    {
+        let mut h = raa_graph::exec::FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: Some(&mut lit),
+        };
+        let applied = executor.set_plan(plan, None, &mut h);
+        assert!(applied.ok, "{name}: refused: {:?}", applied.issues);
+    }
+    let matched = Rc::new(RefCell::new(None));
+    pipeline
+        .borrow_mut()
+        .add_graph_frame(
+            "forward-slot-probe",
+            Box::new(ForwardSlotProbe {
+                slot,
+                source_entry,
+                source_port,
+                matched: matched.clone(),
+            }),
+        )
+        .expect("probe graph frame");
+    let mut graph = FrameGraph::new(SURFACE);
+    Pipeline::install(&pipeline, &mut graph);
+    graph.compile().expect("compile pipeline graph");
+    let target = OffscreenTarget::new(&gpu, SIZE.0, SIZE.1, SURFACE);
+    let mut list = RenderList::with_capacity(2);
+    let (mut tags, mut slots) = (Vec::new(), Vec::new());
+    for frame in 0..3u64 {
+        {
+            let mut h = raa_graph::exec::FeatureHandles {
+                gpu: &gpu,
+                pipeline: &pipeline,
+                handles: &mut handles,
+                viewports: 1,
+                msaa: 1,
+                lit: Some(&mut lit),
+            };
+            executor.frame(&mut h).expect("executor frame");
+            lit.set_area_stochastic(StochasticShadowSettings {
+                mode: StochasticMode::Stratified,
+                ..StochasticShadowSettings::standard()
+            })
+            .expect("stratified area mode");
+        }
+        gi_frame.set_view(&scene.camera, SIZE, 1);
+        gi_frame.set_sun(&scene.light);
+        gi_frame.set_local_light_count(1);
+        gi_frame.prepare_frame(&gpu, &mut scene, &mut lit);
+        lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
+            .expect("prepare lit scene");
+        let commands = graph
+            .execute(&gpu, target.view(), target.size())
+            .expect("execute frame graph");
+        gpu.queue().submit([commands]);
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll submitted frame");
+        gi_frame.observe_submission(frame + 1, true);
+    }
+    *matched.borrow()
+}
+
+#[test]
+fn raw_stage_graphs_bind_their_stage_output_to_forward() {
+    // The scene's edits: remove the denoise stage, link the raw producer to its consumer.
+    let area = variant_plan(
+        &["areaSpatial"],
+        &[("areaTemporal.filtered", "areaMask.src")],
+    );
+    assert!(area.nodes.iter().all(|n| n.type_id != "area.spatial"));
+    let area_entry = raa_gi::stages::stage_entry(raa_gi::stages::GiStageKind::AreaMask, "areaMask");
+    assert_eq!(
+        forward_slot_reads_stage(
+            "raw_stage_graphs_bind_their_stage_output_to_forward",
+            area,
+            20,
+            area_entry,
+            "areaShadow",
+        ),
+        Some(true),
+        "the forward area-shadow slot does not read the area.mask stage output"
+    );
+
+    let ssgi = variant_plan(&["ssgiResolve"], &[("ssgiTrace.raw", "forward.gi")]);
+    assert!(ssgi.nodes.iter().all(|n| n.type_id != "ssgi.resolve"));
+    let ssgi_entry =
+        raa_gi::stages::stage_entry(raa_gi::stages::GiStageKind::SsgiTrace, "ssgiTrace");
+    assert_eq!(
+        forward_slot_reads_stage(
+            "raw_stage_graphs_bind_their_stage_output_to_forward",
+            ssgi,
+            14,
+            ssgi_entry,
+            "raw",
+        ),
+        Some(true),
+        "the forward GI slot does not read the ssgi.trace raw output"
+    );
+}
+
+#[test]
+fn full_gi_stages_keeps_the_spatial_and_resolve_stages() {
+    let full = starter_plan();
+    assert!(
+        full.nodes.iter().any(|n| n.type_id == "area.spatial"),
+        "the complete graph must keep area.spatial"
+    );
+    assert!(
+        full.nodes.iter().any(|n| n.type_id == "ssgi.resolve"),
+        "the complete graph must keep ssgi.resolve"
+    );
+    let spatial = full
+        .nodes
+        .iter()
+        .find(|n| n.type_id == "area.spatial")
+        .expect("area.spatial");
+    assert_eq!(
+        node(&full, "areaMask")
+            .inputs
+            .iter()
+            .find(|i| i.port == "src")
+            .unwrap()
+            .source,
+        InputSource::Link {
+            node: spatial.id.clone(),
+            port: "mask".into(),
+            history: false
+        }
+    );
+    assert_eq!(
+        node(&full, "forward")
+            .inputs
+            .iter()
+            .find(|i| i.port == "gi")
+            .unwrap()
+            .source,
+        InputSource::Link {
+            node: "ssgiResolve".into(),
+            port: "ssgi".into(),
+            history: false
+        }
+    );
+}

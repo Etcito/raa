@@ -1022,6 +1022,78 @@ mod tests {
         assert!(mask_reads_pairs(&plan, &mask_of(&plan).unwrap()));
     }
 
+    /// The device-free half of the raw-row binding: the forward slot sources of the complete
+    /// graph and of the two scene edits (area without spatial, SSGI without resolve) name the
+    /// stage output the raw rows must show, and no removed stage stays in the entries.
+    #[test]
+    fn slot_sources_bind_the_raw_stage_outputs() {
+        use crate::format::{LinkDoc, PortRef, parse_graph, write_graph};
+        let starter = crate::registry::STARTERS
+            .iter()
+            .find(|(_, stem, _)| *stem == "full-gi-stages")
+            .map(|(_, _, json)| *json)
+            .unwrap();
+        let derive = |remove: &[&str], add: &[(&str, &str)]| -> GraphPlan {
+            let mut doc = parse_graph(starter).unwrap();
+            doc.nodes.retain(|n| !remove.contains(&n.id.as_str()));
+            doc.links.retain(|l| {
+                !remove.contains(&l.from.node.as_str()) && !remove.contains(&l.to.node.as_str())
+            });
+            let port = |text: &str| {
+                let (node, port) = text.split_once('.').expect("node.port");
+                PortRef {
+                    node: node.into(),
+                    port: port.into(),
+                }
+            };
+            for (from, to) in add {
+                doc.links.push(LinkDoc {
+                    from: port(from),
+                    to: port(to),
+                    history: false,
+                });
+            }
+            plan_from_json(&write_graph(&doc)).expect("variant plans")
+        };
+        let c = Catalog::build();
+        let slots = |p: &GraphPlan| {
+            let entries = stage_entries(p, &c);
+            (stage_entries(p, &c), slot_sources(p, &c, &entries))
+        };
+
+        // The complete graph keeps both denoisers and feeds forward from them.
+        let (entries, sources) = slots(&plan_from_json(starter).unwrap());
+        assert!(entries.iter().any(|(_, e)| e == "area.spatial#areaSpatial"));
+        assert!(entries.iter().any(|(_, e)| e == "ssgi.resolve#ssgiResolve"));
+        assert!(sources.contains(&(20, "area.mask#areaMask".into(), "areaShadow".into())));
+        assert!(sources.contains(&(14, "ssgi.resolve#ssgiResolve".into(), "ssgi".into())));
+
+        // Area without spatial: the mask (fed by the temporal (S, U) pairs) is the slot source.
+        let area = derive(
+            &["areaSpatial"],
+            &[("areaTemporal.filtered", "areaMask.src")],
+        );
+        assert!(area.nodes.iter().all(|n| n.type_id != "area.spatial"));
+        let (entries, sources) = slots(&area);
+        assert!(
+            entries
+                .iter()
+                .all(|(_, e)| e.split('#').next() != Some("area.spatial"))
+        );
+        assert!(sources.contains(&(20, "area.mask#areaMask".into(), "areaShadow".into())));
+
+        // SSGI without resolve: the trace's raw output is the forward GI slot source.
+        let ssgi = derive(&["ssgiResolve"], &[("ssgiTrace.raw", "forward.gi")]);
+        assert!(ssgi.nodes.iter().all(|n| n.type_id != "ssgi.resolve"));
+        let (entries, sources) = slots(&ssgi);
+        assert!(
+            entries
+                .iter()
+                .all(|(_, e)| e.split('#').next() != Some("ssgi.resolve"))
+        );
+        assert!(sources.contains(&(14, "ssgi.trace#ssgiTrace".into(), "raw".into())));
+    }
+
     #[test]
     fn missing_gi_refuses_before_stage_install() {
         let name = "missing_gi_refuses_before_stage_install";
