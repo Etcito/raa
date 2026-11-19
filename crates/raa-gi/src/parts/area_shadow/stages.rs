@@ -44,12 +44,12 @@ pub(crate) struct AreaFrameState {
 /// The stochastic frame of one prepare: the slot limit (at most 8) and its history groups, the
 /// mode, the light generations, whether they differ from the last prepare, and the frame counter.
 pub(crate) struct AreaFrame {
-    limit: u32,
-    groups: u32,
-    mode: StochasticMode,
-    generations: [u32; MAX_STOCHASTIC_LIGHTS],
-    generations_changed: bool,
-    frame_index: u32,
+    pub(super) limit: u32,
+    pub(super) groups: u32,
+    pub(super) mode: StochasticMode,
+    pub(super) generations: [u32; MAX_STOCHASTIC_LIGHTS],
+    pub(super) generations_changed: bool,
+    pub(super) frame_index: u32,
 }
 
 /// Handoff: raa-gi stages 9/11: area.spatial and area.mask stages. `area_frame(cx, state)` (this
@@ -124,7 +124,7 @@ fn trace_pipeline(
 }
 
 /// A texture of `layers` layers and one mip and sample.
-fn texture(
+pub(super) fn texture(
     gpu: &GpuContext,
     label: &str,
     size: (u32, u32),
@@ -150,12 +150,12 @@ fn texture(
 }
 
 /// The storage and sampled usages of the stage textures.
-fn sampled() -> wgpu::TextureUsages {
+pub(super) fn sampled() -> wgpu::TextureUsages {
     wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING
 }
 
 /// A `UNIFORM | COPY_DST` buffer of `size` bytes, zero until written.
-fn uniform(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
+pub(super) fn uniform(gpu: &GpuContext, label: &str, size: u64) -> wgpu::Buffer {
     gpu.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
@@ -175,7 +175,7 @@ fn layer_view(texture: &wgpu::Texture, layer: u32) -> wgpu::TextureView {
 }
 
 /// A bind group of `layout` from (binding, resource) pairs.
-fn bind_group(
+pub(super) fn bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     bindings: &[(u32, wgpu::BindingResource<'_>)],

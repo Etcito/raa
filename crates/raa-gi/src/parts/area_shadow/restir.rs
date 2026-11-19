@@ -302,6 +302,21 @@ impl RestirPipelines {
         self.constants = constants;
     }
 
+    /// The initial-candidates pipeline (`RESTIR_INITIAL_ENTRY`), recorded alone by `area.restir.initial`.
+    pub(crate) fn initial(&self) -> &wgpu::ComputePipeline {
+        &self.initial
+    }
+
+    /// The temporal-reuse pipeline (`RESTIR_TEMPORAL_ENTRY`), recorded alone by `area.restir.temporal`.
+    pub(crate) fn temporal(&self) -> &wgpu::ComputePipeline {
+        &self.temporal
+    }
+
+    /// The spatial-reuse pipeline (`RESTIR_SPATIAL_ENTRY`), recorded alone by `area.restir.spatial`.
+    pub(crate) fn spatial(&self) -> &wgpu::ComputePipeline {
+        &self.spatial
+    }
+
     /// Records one `raa-gi.area-shadow.restir` compute pass: group 1 and group 2 set once, the
     /// initial, temporal and spatial dispatches over `work.viewport`
     /// (`groups_for(width) x groups_for(height) x 1`), then `denoise.record_denoise`. Returns

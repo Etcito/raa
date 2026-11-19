@@ -20,6 +20,9 @@ use crate::error::{GI_INVALID, invalid};
 use crate::feature::GiHandle;
 use crate::parts::GiShared;
 use crate::parts::area_shadow::stage_mask::{AreaMaskStage, AreaSpatialStage};
+use crate::parts::area_shadow::stage_restir::{
+    AreaRestirInitialStage, AreaRestirSpatialStage, AreaRestirTemporalStage,
+};
 use crate::parts::area_shadow::stages::{AreaTemporalStage, AreaTraceStage};
 use crate::parts::screen::stage_accumulate::AccumulateStage;
 use crate::parts::screen::stage_filters::{AtrousStage, ResolveStage};
@@ -222,6 +225,9 @@ pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
         GiStageKind::AreaTemporal => Some(Box::new(AreaTemporalStage::default())),
         GiStageKind::AreaSpatial => Some(Box::new(AreaSpatialStage::default())),
         GiStageKind::AreaMask => Some(Box::new(AreaMaskStage::default())),
+        GiStageKind::AreaRestirInitial => Some(Box::new(AreaRestirInitialStage::default())),
+        GiStageKind::AreaRestirTemporal => Some(Box::new(AreaRestirTemporalStage::default())),
+        GiStageKind::AreaRestirSpatial => Some(Box::new(AreaRestirSpatialStage::default())),
         _ => None,
     }
 }
