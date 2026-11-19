@@ -43,6 +43,25 @@ fn frozen_plans_match_source_and_current_versions() {
 }
 
 #[test]
+fn frozen_registry_has_three_starters() {
+    let catalog = Catalog::build();
+    let frozen = registry::frozen_all();
+    let names: Vec<_> = frozen.iter().map(|(name, _, _)| *name).collect();
+    assert_eq!(names, ["debug", "full_gi", "simple_forward"]);
+
+    for (name, make_plan, source_json) in frozen {
+        let frozen_plan = make_plan();
+        let source_plan = plan_from_json(source_json)
+            .unwrap_or_else(|issues| panic!("frozen source {name:?} does not plan: {issues:?}"));
+        assert_eq!(
+            frozen_plan, source_plan,
+            "frozen plan {name:?} differs from its saved source"
+        );
+        assert_plan_versions_current(name, &frozen_plan, &catalog);
+    }
+}
+
+#[test]
 fn changed_node_version_fails_the_catalog_version_assertion() {
     let catalog = Catalog::build();
     let (name, make_plan, _) = registry::frozen_all()

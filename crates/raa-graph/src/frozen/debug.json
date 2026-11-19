@@ -1,0 +1,348 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Debug",
+  "nodes": [
+    {
+      "id": "skyAtmosphere",
+      "type": "pass.sky.atmosphere"
+    },
+    {
+      "id": "skyCloudLighting",
+      "type": "pass.sky.cloud-lighting"
+    },
+    {
+      "id": "skyEnv",
+      "type": "pass.sky.env"
+    },
+    {
+      "id": "shadowCsm",
+      "type": "pass.shadow.csm",
+      "params": {
+        "softness": 1,
+        "distance": 60,
+        "resolution": 2048
+      }
+    },
+    {
+      "id": "giVolume",
+      "type": "pass.gi.volume",
+      "params": {
+        "resolution": 96,
+        "levels": 5,
+        "probeRays": 8,
+        "intensity": 1,
+        "environmentDiffuse": 0,
+        "localLightShadows": true,
+        "voxelFullRelight": true,
+        "voxelHistoryMax": 64,
+        "voxelRays": 3,
+        "emissive": true
+      }
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "aoGtao",
+      "type": "pass.ao.gtao",
+      "params": {
+        "radius": 0.800000011920929,
+        "intensity": 0.6000000238418579,
+        "power": 1
+      }
+    },
+    {
+      "id": "giScreen",
+      "type": "pass.gi.screen",
+      "params": {
+        "indirect": "probes",
+        "screenTraces": true,
+        "reflections": true,
+        "historyMax": 128,
+        "historyMin": 1,
+        "clampGamma": 3,
+        "spatialPasses": 4,
+        "restirMCap": 30,
+        "debugView": "none",
+        "emissive": true
+      }
+    },
+    {
+      "id": "giAreaShadow",
+      "type": "pass.gi.area-shadow",
+      "params": {
+        "tier": "auto",
+        "heroCount": 0,
+        "heroDistance": 25,
+        "fadeDistance": 80,
+        "band": 5,
+        "stochasticCount": 4,
+        "stochasticDistance": 40,
+        "stochasticCells": 4,
+        "stochasticMode": "stratified"
+      }
+    },
+    {
+      "id": "giSsgi",
+      "type": "pass.gi.ssgi",
+      "params": {
+        "screenSpaceQuality": "medium",
+        "emissive": true
+      }
+    },
+    {
+      "id": "shadowContact",
+      "type": "pass.shadow.contact",
+      "params": {
+        "distance": 0.3499999940395355,
+        "thickness": 0.05000000074505806,
+        "intensity": 1
+      }
+    },
+    {
+      "id": "skyCloudScreen",
+      "type": "pass.sky.cloud-screen"
+    },
+    {
+      "id": "forward",
+      "type": "pass.forward",
+      "params": {
+        "msaa": 4,
+        "mode": "ltc"
+      }
+    },
+    {
+      "id": "skyBackground",
+      "type": "pass.sky.background"
+    },
+    {
+      "id": "giHistory",
+      "type": "pass.gi.history"
+    },
+    {
+      "id": "ssr",
+      "type": "pass.ssr",
+      "params": {
+        "intensity": 1,
+        "maxRoughness": 0.6000000238418579,
+        "thickness": 0.15000000596046448
+      }
+    },
+    {
+      "id": "fog",
+      "type": "pass.fog",
+      "params": {
+        "density": 0,
+        "heightFalloff": 0.10000000149011612,
+        "baseHeight": 0,
+        "start": 0,
+        "color": [
+          1,
+          1,
+          1
+        ],
+        "inscatter": 0,
+        "aerialStrength": 0,
+        "aerialDistance": 1000
+      }
+    },
+    {
+      "id": "taa",
+      "type": "pass.taa"
+    },
+    {
+      "id": "bloom",
+      "type": "pass.bloom",
+      "params": {
+        "strength": 0.03999999910593033,
+        "radius": 0.8500000238418579
+      }
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap",
+      "params": {
+        "mapper": "agx",
+        "exposureEv": 0,
+        "look": "none",
+        "dither": true
+      }
+    },
+    {
+      "id": "vDepth",
+      "type": "view.image",
+      "params": {
+        "rangeMin": 0.1,
+        "rangeMax": 0.6,
+        "linearizeDepth": true,
+        "label": "depth"
+      }
+    },
+    {
+      "id": "vNormal",
+      "type": "view.image",
+      "params": {
+        "rangeMin": -1,
+        "rangeMax": 1,
+        "label": "normal"
+      }
+    },
+    {
+      "id": "vMotion",
+      "type": "view.image",
+      "params": {
+        "rangeMin": -0.005,
+        "rangeMax": 0.005,
+        "label": "motion"
+      }
+    },
+    {
+      "id": "vAo",
+      "type": "view.image",
+      "params": {
+        "channels": "r",
+        "label": "ao"
+      }
+    },
+    {
+      "id": "vAreaMask",
+      "type": "view.image",
+      "params": {
+        "channels": "r",
+        "label": "area shadow mask"
+      }
+    },
+    {
+      "id": "giRawVsDenoised",
+      "type": "view.compare"
+    },
+    {
+      "id": "vHistory",
+      "type": "view.image",
+      "params": {
+        "channels": "g",
+        "decode": "half2hi",
+        "label": "history length"
+      }
+    },
+    {
+      "id": "vFinal",
+      "type": "view.image",
+      "params": {
+        "label": "final"
+      }
+    },
+    {
+      "id": "grid",
+      "type": "view.grid"
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
+  ],
+  "links": [
+    {
+      "from": "forward.color",
+      "to": "giHistory.color"
+    },
+    {
+      "from": "giHistory.color",
+      "to": "ssr.color"
+    },
+    {
+      "from": "ssr.color",
+      "to": "fog.color"
+    },
+    {
+      "from": "fog.color",
+      "to": "taa.color"
+    },
+    {
+      "from": "taa.color",
+      "to": "bloom.color"
+    },
+    {
+      "from": "bloom.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "vDepth.srcDepth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "vNormal.src"
+    },
+    {
+      "from": "prepass.motion",
+      "to": "vMotion.src"
+    },
+    {
+      "from": "aoGtao.ao",
+      "to": "vAo.src"
+    },
+    {
+      "from": "giAreaShadow.mask",
+      "to": "vAreaMask.srcArray"
+    },
+    {
+      "from": "giScreen.output",
+      "to": "giRawVsDenoised.a"
+    },
+    {
+      "from": "giScreen.display",
+      "to": "giRawVsDenoised.b"
+    },
+    {
+      "from": "giScreen.debug",
+      "to": "vHistory.src"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "vFinal.src"
+    },
+    {
+      "from": "vDepth.color",
+      "to": "grid.t0"
+    },
+    {
+      "from": "vNormal.color",
+      "to": "grid.t1"
+    },
+    {
+      "from": "vMotion.color",
+      "to": "grid.t2"
+    },
+    {
+      "from": "vAo.color",
+      "to": "grid.t3"
+    },
+    {
+      "from": "vAreaMask.color",
+      "to": "grid.t4"
+    },
+    {
+      "from": "giRawVsDenoised.color",
+      "to": "grid.t5"
+    },
+    {
+      "from": "vHistory.color",
+      "to": "grid.t6"
+    },
+    {
+      "from": "vFinal.color",
+      "to": "grid.t7"
+    },
+    {
+      "from": "grid.color",
+      "to": "out.color"
+    }
+  ]
+}
