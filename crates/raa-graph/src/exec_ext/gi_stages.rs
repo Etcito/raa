@@ -1,7 +1,7 @@
 //! Device-free plan mapping for GI stage nodes and the placeholder executor extension.
 #![allow(dead_code)] // The next extension share consumes these plan helpers.
 
-use crate::catalog::{Catalog, NodeTypeSpec, ParamValue, PortType};
+use crate::catalog::{Catalog, NodeTypeSpec, ParamBinding, ParamValue, PortType};
 use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles};
 use crate::exec::{NodeStats, ResourceStat};
@@ -557,11 +557,17 @@ pub(crate) fn slot_sources(
     }
     out
 }
+/// The values of the node's `ParamBinding::Node` parameters, as the stage handle takes them. A
+/// parameter bound elsewhere (the `Setting` AreaShadows keys area.mask carries) is written by the
+/// executor's settings rank, never by the stage, which refuses keys it does not own.
 pub(crate) fn stage_values(node: &PlanNode, spec: &NodeTypeSpec) -> Vec<(String, f64)> {
     node.params
         .iter()
         .filter_map(|(key, value)| {
-            let param = spec.params.iter().find(|p| p.key == key)?;
+            let param = spec
+                .params
+                .iter()
+                .find(|p| p.key == key && matches!(p.binding, ParamBinding::Node))?;
             let number = match value {
                 ParamValue::Bool(v) => f64::from(*v),
                 ParamValue::Int(v) => *v as f64,
@@ -834,6 +840,15 @@ mod tests {
         let values = stage_values(&value_node, bool_spec);
         assert!(values.contains(&("screenTraces".into(), 1.0)));
         assert!(values.contains(&("probeVolumeSteps".into(), 4.0)));
+        // area.mask's AreaShadows parameters are Setting-bound: the stage receives none.
+        let mask_node = PlanNode {
+            params: vec![
+                ("tier".into(), ParamValue::Enum("auto".into())),
+                ("heroCount".into(), ParamValue::Int(0)),
+            ],
+            ..node.clone()
+        };
+        assert!(stage_values(&mask_node, c.node("area.mask").unwrap()).is_empty());
         let base = plan(
             r#",{"id":"pyramid","type":"gi.pyramid"},{"id":"probes","type":"gi.probes"},{"id":"acc","type":"gi.accumulate"},{"id":"atrous","type":"gi.atrous"},{"id":"resolve2","type":"gi.resolve"}"#,
             r#",{"from":"pyramid.pyramid","to":"probes.pyramid"},{"from":"probes.probesFiltered","to":"acc.probes"},{"from":"acc.output","to":"atrous.src"},{"from":"atrous.dst","to":"resolve2.irradiance"},{"from":"resolve2.gi","to":"forward.gi"}"#,

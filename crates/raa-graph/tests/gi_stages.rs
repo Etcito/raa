@@ -337,3 +337,128 @@ fn two_and_four_atrous_stages_form_ordered_chains() {
         );
     }
 }
+
+/// The monolithic GI passes that the stage nodes of Full GI stages replace.
+const MONOLITHIC: [&str; 3] = ["gi.screen", "gi.area-shadow", "gi.ssgi"];
+
+#[test]
+fn full_gi_stages_plans_to_stage_passes_without_monolithic_gi() {
+    let plan = starter_plan();
+    let catalog = Catalog::build();
+    let stages: Vec<_> = plan
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            raa_gi::stages::GiStageKind::from_type_id(&n.type_id)
+                .map(|kind| raa_gi::stages::stage_entry(kind, &n.id))
+        })
+        .collect();
+    for entry in [
+        "gi.pyramid#giPyramid",
+        "gi.probes#giProbes",
+        "gi.accumulate#giAccumulate",
+        "gi.resolve#giResolve",
+        "area.trace#areaTrace",
+        "area.temporal#areaTemporal",
+        "area.spatial#areaSpatial",
+        "area.mask#areaMask",
+        "ssgi.trace#ssgiTrace",
+        "ssgi.resolve#ssgiResolve",
+    ] {
+        assert!(stages.iter().any(|s| s == entry), "missing stage {entry}");
+    }
+    for monolithic in MONOLITHIC {
+        let type_id = format!("pass.{monolithic}");
+        assert!(
+            plan.nodes.iter().all(|n| n.type_id != type_id),
+            "{type_id} is planned"
+        );
+    }
+    // The engine installs the monolithic passes: the plan disables each of them.
+    let installed: Vec<_> = [
+        "prepass",
+        "gi.screen",
+        "gi.area-shadow",
+        "gi.ssgi",
+        "forward",
+    ]
+    .iter()
+    .zip([30, 42, 43, 44, 60])
+    .map(|(name, order)| PassInfo {
+        name: (*name).into(),
+        role: PassRole::Pass,
+        enabled: true,
+        order,
+        required: false,
+    })
+    .collect();
+    let instructions = raa_graph::exec::pipeline_instructions(&plan, &catalog, &installed);
+    for monolithic in MONOLITHIC {
+        assert!(
+            instructions
+                .enable
+                .iter()
+                .any(|(name, on)| name == monolithic && !on),
+            "{monolithic} stays enabled: {:?}",
+            instructions.enable
+        );
+    }
+}
+
+/// The executor applies Full GI stages on an engine with the lit renderer and the GI feature:
+/// every stage installs and takes its values (area.mask's AreaShadows settings go to the
+/// settings rank, not to the stage), and the monolithic GI passes end disabled.
+#[test]
+fn full_gi_stages_applies_with_stage_passes_only() {
+    use raa_graph::exec::{FeatureHandles, GraphExecutor, HandleSet};
+    use std::{cell::RefCell, rc::Rc};
+    let name = "full_gi_stages_applies_with_stage_passes_only";
+    let Some(gpu) = raa_core::testing::software_gpu() else {
+        raa_core::testing::skip(name, "no software adapter");
+        return;
+    };
+    let pipeline = Rc::new(RefCell::new(raa_pipeline::Pipeline::new(
+        &gpu,
+        wgpu::TextureFormat::Rgba8Unorm,
+        false,
+    )));
+    let mut lit = raa_lit::LitRenderer::new(&gpu, &pipeline, raa_lit::LitOptions::default())
+        .expect("lit renderer");
+    let gi = raa_gi::feature::GiFeature::install(&gpu, &pipeline, &mut lit, None, None)
+        .expect("GI feature");
+    let mut handles = HandleSet {
+        gi: Some(gi),
+        ..HandleSet::default()
+    };
+    let mut h = FeatureHandles {
+        gpu: &gpu,
+        pipeline: &pipeline,
+        handles: &mut handles,
+        viewports: 1,
+        msaa: 4,
+        lit: Some(&mut lit),
+    };
+    let mut executor = GraphExecutor::new();
+    let result = executor.set_plan(starter_plan(), None, &mut h);
+    assert!(result.ok, "refused: {:?}", result.issues);
+    let p = pipeline.borrow();
+    let enabled: Vec<String> = p
+        .passes()
+        .into_iter()
+        .filter(|pass| p.entry_enabled(&pass.name).unwrap_or(false))
+        .map(|pass| pass.name)
+        .collect();
+    for entry in [
+        "gi.pyramid#giPyramid",
+        "area.mask#areaMask",
+        "ssgi.resolve#ssgiResolve",
+    ] {
+        assert!(enabled.iter().any(|e| e == entry), "{entry}: {enabled:?}");
+    }
+    for monolithic in MONOLITHIC {
+        assert!(
+            enabled.iter().all(|e| e != monolithic),
+            "{monolithic}: {enabled:?}"
+        );
+    }
+}
