@@ -28,7 +28,7 @@ use crate::tunables::{self, tunables};
 const NAME: &str = "ssr";
 /// S12 order of the pass (after `forward`, before `fog`).
 const ORDER: u32 = 65;
-const PARAMS_LEN: usize = SSR_PARAMS_SIZE as usize;
+pub(crate) const PARAMS_LEN: usize = SSR_PARAMS_SIZE as usize;
 
 fn refusal(code: &'static str, message: &str) -> RaaError {
     RaaError::FrameGraph {
@@ -55,7 +55,7 @@ fn state_busy() -> RaaError {
 
 /// Scene camera of the pass, with the inverses computed by `set_camera`.
 #[derive(Copy, Clone, Debug, PartialEq)]
-struct SsrCamera {
+pub(crate) struct SsrCamera {
     view: Mat4,
     proj: Mat4,
     inv_view: Mat4,
@@ -64,7 +64,7 @@ struct SsrCamera {
 
 impl SsrCamera {
     /// None when either matrix is singular.
-    fn new(view: &Mat4, proj: &Mat4) -> Option<SsrCamera> {
+    pub(crate) fn new(view: &Mat4, proj: &Mat4) -> Option<SsrCamera> {
         Some(SsrCamera {
             view: *view,
             proj: *proj,
@@ -73,7 +73,7 @@ impl SsrCamera {
         })
     }
 
-    const IDENTITY: SsrCamera = SsrCamera {
+    pub(crate) const IDENTITY: SsrCamera = SsrCamera {
         view: Mat4::IDENTITY,
         proj: Mat4::IDENTITY,
         inv_view: Mat4::IDENTITY,
@@ -102,7 +102,7 @@ impl SsrState {
 }
 
 /// The trace module's pipeline constants for `values`.
-fn constants(values: &[f64; 3]) -> [(&'static str, f64); 3] {
+pub(crate) fn constants(values: &[f64; 3]) -> [(&'static str, f64); 3] {
     std::array::from_fn(|i| (tunables::OVERRIDE_NAMES[i], values[i]))
 }
 
@@ -118,7 +118,7 @@ fn put_f32s(out: &mut [u8], at: usize, values: [f32; 4]) {
 /// inv_view @192, viewport @256, params @272 (intensity, max_roughness, thickness_m, Hi-Z
 /// mips), params2 @288 (HDR mips, 0, 0, 0). Without a camera: identity matrices and
 /// intensity 0.
-fn pack_params(
+pub(crate) fn pack_params(
     out: &mut [u8; PARAMS_LEN],
     size: (u32, u32),
     mips: u32,
@@ -145,7 +145,7 @@ fn pack_params(
 }
 
 /// One fullscreen draw into `target` (cleared) with group 0 and an optional group 1.
-fn draw(
+pub(crate) fn draw(
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
@@ -234,7 +234,7 @@ impl FeaturePass for SsrPass {
             .write_buffer(&self.pipelines.params, 0, &self.bytes);
         let desc = ImageDesc::new(ImageDim::D2, TRACE_FORMAT, t.size.0, t.size.1, 1, 1);
         ctx.resources
-            .publish(&self.name, "trace", &t.trace_view, desc);
+            .publish(&self.name, "trace", &t.trace.view, desc);
         let (w, h) = t.size;
         let hiz = ImageDesc::new(
             ImageDim::D2,
@@ -244,7 +244,8 @@ impl FeaturePass for SsrPass {
             1,
             t.mip_count(),
         );
-        ctx.resources.publish(&self.name, "hiz", &t.hiz_view, hiz);
+        ctx.resources
+            .publish(&self.name, "hiz", &t.hiz.full_view, hiz);
         Ok(())
     }
 
@@ -266,7 +267,7 @@ impl FeaturePass for SsrPass {
                 label: Some("raa-ssr.hiz"),
                 timestamp_writes: None,
             });
-            for (k, (level, group)) in t.hiz_levels.iter().zip(&t.hiz_groups).enumerate() {
+            for (k, (level, group)) in t.hiz.levels.iter().zip(&t.hiz.groups).enumerate() {
                 pass.set_pipeline(if k == 0 { &p.hiz_copy } else { &p.hiz_reduce });
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups(level.groups.0, level.groups.1, 1);
@@ -287,9 +288,9 @@ impl FeaturePass for SsrPass {
         let lighting = ctx.lighting.opaque_bind_group();
         draw(
             encoder,
-            &t.trace_view,
+            &t.trace.view,
             &p.trace,
-            &t.trace_group,
+            &t.trace.group,
             Some(lighting),
         );
         draw(
@@ -367,6 +368,9 @@ pub struct SsrHandle {
 }
 
 impl SsrHandle {
+    pub(crate) fn camera(&self) -> Option<SsrCamera> {
+        self.state.try_borrow().ok().and_then(|state| state.camera)
+    }
     /// Replaces the description after `SsrDesc::validate` (`post.invalid`; the stored
     /// description is unchanged on refusal). `pipeline.busy` on a re-entrant call.
     pub fn set(&self, d: SsrDesc) -> Result<(), RaaError> {

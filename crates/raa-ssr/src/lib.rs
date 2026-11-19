@@ -6,6 +6,7 @@ mod feature;
 pub mod hiz;
 mod resources;
 mod shaders;
+pub mod stages;
 mod tunables;
 
 pub use desc::SsrDesc;

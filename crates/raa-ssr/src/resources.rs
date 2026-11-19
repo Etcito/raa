@@ -488,76 +488,65 @@ fn hiz_copy_group(
     })
 }
 
-/// Surface-sized textures, views and bind groups of the pass, recreated on resize.
-pub(crate) struct SsrTargets {
+/// Hi-Z texture and dispatch resources, independently reusable by the `ssr` pass and stages.
+pub(crate) struct HizTargets {
     pub size: (u32, u32),
-    /// Dispatch k writes Hi-Z level k with `hiz_groups[k]` (0 = copy, else reduce).
-    pub hiz_levels: Vec<HizLevel>,
-    pub hiz_groups: Vec<wgpu::BindGroup>,
-    _hiz: wgpu::Texture,
-    /// Full-mip view of the Hi-Z texture, published as the `hiz` tap.
-    pub hiz_view: wgpu::TextureView,
-    _hiz_views: Vec<wgpu::TextureView>,
-    /// `HizParams` of level k at `k * SLOT_STRIDE`.
-    _hiz_params: wgpu::Buffer,
-    /// The G-buffer views the groups below were built from.
-    pub(crate) views: SsrViewKey,
-    /// HDR mip chain; mip 0 is the copy destination of hdr.src().
-    pub hdr_mips: wgpu::Texture,
-    /// Full-mip view of the HDR chain (composite binding 5).
-    hdr_full: wgpu::TextureView,
-    /// Single-mip views: draw k of the downsample renders into `hdr_views[k + 1]` with
-    /// `down_groups[k]` (which reads mip k).
-    pub hdr_views: Vec<wgpu::TextureView>,
-    pub down_groups: Vec<wgpu::BindGroup>,
-    _trace: wgpu::Texture,
-    pub trace_view: wgpu::TextureView,
-    /// Group 0 of fs_trace (`trace_layout`: bindings 0, 1, 2 and 4) and of fs_composite
-    /// (`composite_layout`: the trace view at binding 6).
-    pub trace_group: wgpu::BindGroup,
-    pub composite_group: wgpu::BindGroup,
+    pub levels: Vec<HizLevel>,
+    pub groups: Vec<wgpu::BindGroup>,
+    _texture: wgpu::Texture,
+    pub full_view: wgpu::TextureView,
+    views: Vec<wgpu::TextureView>,
+    params: wgpu::Buffer,
+    depth: wgpu::TextureView,
 }
 
-impl SsrTargets {
-    pub(crate) fn new(gpu: &GpuContext, p: &SsrPipelines, targets: &Targets) -> SsrTargets {
+impl HizTargets {
+    pub(crate) fn new(
+        gpu: &GpuContext,
+        p: &SsrPipelines,
+        size: (u32, u32),
+        depth: &wgpu::TextureView,
+    ) -> Self {
         let device = gpu.device();
-        let size = targets.size();
         let size = (size.0.max(1), size.1.max(1));
-        let mips = hiz::mip_count(size.0, size.1);
         let levels = hiz_levels(size);
-
         let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
-        let hiz_tex = texture(device, "raa-ssr.hiz", size, mips, HIZ_FORMAT, usage);
-        let hiz_views = mip_views(&hiz_tex, "raa-ssr.hiz_level");
-        let hiz_full = hiz_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        let hiz_params = device.create_buffer(&wgpu::BufferDescriptor {
+        let texture = texture(
+            device,
+            "raa-ssr.hiz",
+            size,
+            levels.len() as u32,
+            HIZ_FORMAT,
+            usage,
+        );
+        let views = mip_views(&texture, "raa-ssr.hiz_level");
+        let full_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let params = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-ssr.hiz_params"),
             size: SLOT_STRIDE * levels.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let mut bytes = vec![0u8; (SLOT_STRIDE as usize) * levels.len()];
-        for (k, l) in levels.iter().enumerate() {
-            let at = k * SLOT_STRIDE as usize;
-            for (i, v) in [l.src.0, l.src.1, l.dst.0, l.dst.1].into_iter().enumerate() {
-                bytes[at + 4 * i..at + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        let mut bytes = vec![0; SLOT_STRIDE as usize * levels.len()];
+        for (k, level) in levels.iter().enumerate() {
+            for (i, value) in [level.src.0, level.src.1, level.dst.0, level.dst.1]
+                .into_iter()
+                .enumerate()
+            {
+                bytes[k * SLOT_STRIDE as usize + 4 * i..k * SLOT_STRIDE as usize + 4 * i + 4]
+                    .copy_from_slice(&value.to_le_bytes());
             }
         }
-        gpu.queue().write_buffer(&hiz_params, 0, &bytes);
-        let views = SsrViewKey {
-            depth: targets.depth().clone(),
-            normal: targets.normal().clone(),
-            material: targets.material().clone(),
-        };
-        let hiz_groups = (0..levels.len())
+        gpu.queue().write_buffer(&params, 0, &bytes);
+        let groups = (0..levels.len())
             .map(|k| {
                 if k == 0 {
-                    return hiz_copy_group(device, p, &hiz_params, &views.depth, &hiz_views[0]);
+                    return hiz_copy_group(device, p, &params, depth, &views[0]);
                 }
-                let params = wgpu::BindGroupEntry {
+                let params_entry = wgpu::BindGroupEntry {
                     binding: 0,
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &hiz_params,
+                        buffer: &params,
                         offset: k as u64 * SLOT_STRIDE,
                         size: NonZeroU64::new(HIZ_PARAMS_SIZE),
                     }),
@@ -566,14 +555,123 @@ impl SsrTargets {
                     label: Some("raa-ssr.hiz_reduce"),
                     layout: &p.reduce_layout,
                     entries: &[
-                        params,
-                        view_entry(2, &hiz_views[k - 1]),
-                        view_entry(3, &hiz_views[k]),
+                        params_entry,
+                        view_entry(2, &views[k - 1]),
+                        view_entry(3, &views[k]),
                     ],
                 })
             })
             .collect();
+        Self {
+            size,
+            levels,
+            groups,
+            _texture: texture,
+            full_view,
+            views,
+            params,
+            depth: depth.clone(),
+        }
+    }
 
+    pub(crate) fn set_depth(
+        &mut self,
+        device: &wgpu::Device,
+        p: &SsrPipelines,
+        depth: &wgpu::TextureView,
+    ) {
+        if self.depth == *depth {
+            return;
+        }
+        self.groups[0] = hiz_copy_group(device, p, &self.params, depth, &self.views[0]);
+        self.depth = depth.clone();
+    }
+}
+
+/// Trace texture and group, independent of the pass's HDR mip chain.
+pub(crate) struct TraceTarget {
+    _texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub group: wgpu::BindGroup,
+    views: SsrViewKey,
+    hiz: wgpu::TextureView,
+}
+
+impl TraceTarget {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        p: &SsrPipelines,
+        size: (u32, u32),
+        hiz: &wgpu::TextureView,
+        views: SsrViewKey,
+    ) -> Self {
+        let texture = texture(
+            device,
+            "raa-ssr.trace",
+            size,
+            1,
+            TRACE_FORMAT,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let group = trace_group(device, p, hiz, &views);
+        Self {
+            _texture: texture,
+            view,
+            group,
+            views,
+            hiz: hiz.clone(),
+        }
+    }
+
+    pub(crate) fn set_views(
+        &mut self,
+        device: &wgpu::Device,
+        p: &SsrPipelines,
+        hiz: &wgpu::TextureView,
+        views: SsrViewKey,
+    ) {
+        if self.hiz != *hiz || self.views.depth != views.depth || self.views.normal != views.normal
+        {
+            self.group = trace_group(device, p, hiz, &views);
+        }
+        self.views = views;
+        self.hiz = hiz.clone();
+    }
+}
+
+/// Surface-sized resources of the whole pass, composed from the shared Hi-Z and trace builders.
+pub(crate) struct SsrTargets {
+    pub size: (u32, u32),
+    pub(crate) views: SsrViewKey,
+    pub hiz: HizTargets,
+    /// HDR mip chain; mip 0 is the copy destination of hdr.src().
+    pub hdr_mips: wgpu::Texture,
+    /// Full-mip view of the HDR chain (composite binding 5).
+    hdr_full: wgpu::TextureView,
+    /// Single-mip views: draw k of the downsample renders into `hdr_views[k + 1]` with
+    /// `down_groups[k]` (which reads mip k).
+    pub hdr_views: Vec<wgpu::TextureView>,
+    pub down_groups: Vec<wgpu::BindGroup>,
+    pub trace: TraceTarget,
+    /// Group 0 of fs_trace (`trace_layout`: bindings 0, 1, 2 and 4) and of fs_composite
+    /// (`composite_layout`: the trace view at binding 6).
+    pub composite_group: wgpu::BindGroup,
+}
+
+impl SsrTargets {
+    pub(crate) fn new(gpu: &GpuContext, p: &SsrPipelines, targets: &Targets) -> SsrTargets {
+        let device = gpu.device();
+        let size = targets.size();
+        let size = (size.0.max(1), size.1.max(1));
+        let views = SsrViewKey {
+            depth: targets.depth().clone(),
+            normal: targets.normal().clone(),
+            material: targets.material().clone(),
+        };
+        let hiz = HizTargets::new(gpu, p, size, &views.depth);
+        let trace = TraceTarget::new(device, p, size, &hiz.full_view, views.clone());
+        let mips = hiz.levels.len() as u32;
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST;
@@ -594,36 +692,20 @@ impl SsrTargets {
                 })
             })
             .collect();
-
-        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
-        let trace = texture(device, "raa-ssr.trace", size, 1, TRACE_FORMAT, usage);
-        let trace_view = trace.create_view(&wgpu::TextureViewDescriptor::default());
-        let trace_group = trace_group(device, p, &hiz_full, &views);
-        let composite_group = composite_group(device, p, &hdr_full, &trace_view, &views);
-
+        let composite_group = composite_group(device, p, &hdr_full, &trace.view, &views);
         SsrTargets {
             size,
-            hiz_levels: levels,
-            hiz_groups,
-            _hiz: hiz_tex,
-            hiz_view: hiz_full,
-            _hiz_views: hiz_views,
-            _hiz_params: hiz_params,
             views,
+            hiz,
             hdr_mips,
             hdr_full,
             hdr_views,
             down_groups,
-            _trace: trace,
-            trace_view,
-            trace_group,
+            trace,
             composite_group,
         }
     }
 
-    /// Rebuilds only the groups whose `(depth, normal, material)` input changed: a changed
-    /// depth rebuilds the Hi-Z copy, trace and composite groups, a changed normal the trace
-    /// and composite groups, a changed material the composite group alone.
     pub(crate) fn set_views(&mut self, device: &wgpu::Device, p: &SsrPipelines, views: SsrViewKey) {
         let depth = self.views.depth != views.depth;
         let normal = self.views.normal != views.normal;
@@ -632,27 +714,21 @@ impl SsrTargets {
             return;
         }
         if depth {
-            self.hiz_groups[0] = hiz_copy_group(
-                device,
-                p,
-                &self._hiz_params,
-                &views.depth,
-                &self._hiz_views[0],
-            );
+            self.hiz.set_depth(device, p, &views.depth);
         }
         if depth || normal {
-            self.trace_group = trace_group(device, p, &self.hiz_view, &views);
+            self.trace
+                .set_views(device, p, &self.hiz.full_view, views.clone());
         }
         if depth || normal || material {
             self.composite_group =
-                composite_group(device, p, &self.hdr_full, &self.trace_view, &views);
+                composite_group(device, p, &self.hdr_full, &self.trace.view, &views);
         }
         self.views = views;
     }
 
-    /// Mip count of the Hi-Z pyramid and of the HDR mip chain (both down to 1x1).
     pub(crate) fn mip_count(&self) -> u32 {
-        self.hiz_levels.len() as u32
+        self.hiz.levels.len() as u32
     }
 }
 
