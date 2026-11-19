@@ -102,7 +102,7 @@ impl NodeFamily for AreaStages {
                         true,
                         false,
                         false,
-                        false,
+                        true,
                     )),
                     required(array_port("src", true)),
                 ],
@@ -442,6 +442,20 @@ mod tests {
             assert_eq!(n.pass, None);
             assert!(n.multi_instance);
         }
+        assert!(
+            c.nodes
+                .iter()
+                .filter(|n| n.family == "area_stages")
+                .all(|n| { n.inputs.iter().all(|input| input.generic) })
+        );
+        let linear_depth = c
+            .node("area.spatial")
+            .unwrap()
+            .inputs
+            .iter()
+            .find(|input| input.key == "linearDepth")
+            .unwrap();
+        assert!(linear_depth.generic && linear_depth.required && !linear_depth.absent_ok);
         let history: Vec<_> = c
             .nodes
             .iter()
