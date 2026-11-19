@@ -30,6 +30,7 @@ use crate::parts::screen::stage_restir::{
     RestirInitialStage, RestirSpatialStage, RestirTemporalStage,
 };
 use crate::parts::screen::stages::{ProbesStage, PyramidStage};
+use crate::parts::ssgi::stages::{SsgiResolveStage, SsgiTraceStage};
 use crate::{GiTunables, tunables};
 
 /// Handoff: raa-graph exec gi_stages 1/3: device-free plan functions. `GiStageKind` is the anchor:
@@ -228,7 +229,8 @@ pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
         GiStageKind::AreaRestirInitial => Some(Box::new(AreaRestirInitialStage::default())),
         GiStageKind::AreaRestirTemporal => Some(Box::new(AreaRestirTemporalStage::default())),
         GiStageKind::AreaRestirSpatial => Some(Box::new(AreaRestirSpatialStage::default())),
-        _ => None,
+        GiStageKind::SsgiTrace => Some(Box::new(SsgiTraceStage::default())),
+        GiStageKind::SsgiResolve => Some(Box::new(SsgiResolveStage::default())),
     }
 }
 

@@ -128,7 +128,7 @@ pub(crate) struct SsgiWork<'a> {
 pub(crate) struct SsgiPipelines {
     pub(crate) trace_layout: wgpu::BindGroupLayout,
     pub(crate) resolve_layout: wgpu::BindGroupLayout,
-    trace: wgpu::ComputePipeline,
+    pub(crate) trace: wgpu::ComputePipeline,
     trace_module: wgpu::ShaderModule,
     empty: wgpu::BindGroupLayout,
     group1: wgpu::BindGroupLayout,
@@ -136,7 +136,7 @@ pub(crate) struct SsgiPipelines {
     emissive_generation: u64,
     /// `GiShared::voxel_buffer` as read by the last `refresh`; bound at trace binding 6.
     pub(crate) voxels: Option<(wgpu::Buffer, u64)>,
-    resolve: wgpu::ComputePipeline,
+    pub(crate) resolve: wgpu::ComputePipeline,
     resolve_module: wgpu::ShaderModule,
     /// The GI tunables the resolve pipeline was built with, refreshed by `refresh`.
     pub(crate) tunables: GiTunables,
@@ -158,6 +158,40 @@ impl SsgiPipelines {
         let resolve_module = module(device, "raa-gi.ssgi.resolve", &ssgi_resolve_module_wgsl());
         let trace = trace_pipeline(device, &trace_module, [&empty, group1, &trace_layout], true);
         let tunables = GiTunables::new();
+        let resolve = resolve_pipeline(device, &resolve_module, &resolve_layout, &tunables);
+        SsgiPipelines {
+            trace_layout,
+            resolve_layout,
+            trace,
+            trace_module,
+            empty,
+            group1: group1.clone(),
+            emissive_generation: 0,
+            voxels: None,
+            resolve,
+            resolve_module,
+            tunables,
+        }
+    }
+
+    /// Builds the part pipelines with an explicit tunable store, as used by graph stages.
+    pub(crate) fn new_with_tunables(
+        gpu: &GpuContext,
+        group1: &wgpu::BindGroupLayout,
+        tunables: &GiTunables,
+    ) -> SsgiPipelines {
+        let device = gpu.device();
+        let empty = layout(device, "raa-gi.ssgi.empty", &[]);
+        let trace_layout = layout(device, "raa-gi.ssgi.trace", &ssgi_trace_group2_entries());
+        let resolve_layout = layout(
+            device,
+            "raa-gi.ssgi.resolve",
+            &ssgi_resolve_group0_entries(),
+        );
+        let trace_module = module(device, "raa-gi.ssgi.trace", &ssgi_trace_module_wgsl());
+        let resolve_module = module(device, "raa-gi.ssgi.resolve", &ssgi_resolve_module_wgsl());
+        let trace = trace_pipeline(device, &trace_module, [&empty, group1, &trace_layout], true);
+        let tunables = tunables.clone();
         let resolve = resolve_pipeline(device, &resolve_module, &resolve_layout, &tunables);
         SsgiPipelines {
             trace_layout,
