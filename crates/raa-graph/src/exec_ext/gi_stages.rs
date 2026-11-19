@@ -74,6 +74,9 @@ impl ExecExtension for GiStagesExtension {
         previous: Option<&GraphPlan>,
         h: &mut FeatureHandles<'_>,
     ) -> Result<(), Vec<Issue>> {
+        let catalog = Catalog::build();
+        let ratio_plan = with_ratio_stages(plan, &catalog);
+        let plan = &ratio_plan;
         let nodes = stage_nodes(plan);
         if !nodes.is_empty() && (h.handles.gi.is_none() || h.lit.is_none()) {
             return Err(vec![issue(
@@ -99,7 +102,6 @@ impl ExecExtension for GiStagesExtension {
                 kept.push((entry.clone(), pass, handle.clone()));
             }
         }
-        let catalog = Catalog::build();
         let entries = stage_entries(plan, &catalog);
         let buffers = buffer_sources(plan, &catalog, &entries);
         let mut installed = Vec::new();
@@ -680,6 +682,103 @@ fn image_stat(port: &str, desc: &ImageDesc) -> ResourceStat {
     }
 }
 
+/// The id of the implicit ratio stage `with_ratio_stages` adds in front of area mask `mask`.
+pub(crate) fn ratio_stage_id(mask: &str) -> String {
+    format!("{mask}Ratio")
+}
+
+/// `area.temporal.filtered` and `area.trace.raw` hold the ratio estimator's pairs (S, U, S, U),
+/// not shadow visibility: only the vertical pass of `area.spatial` divides them into V = S / U,
+/// the lanes `area.mask` publishes to forward. A graph that omits `area.spatial` and links one of
+/// them straight into `area.mask.src` would therefore light the area light with S (clamped to 1,
+/// so no shadow at all in a bright room, or near black in a dim one) instead of its raw, noisy
+/// shadow. For such an `area.mask` this adds an implicit `area.spatial` node, `<mask>Ratio`,
+/// between the producer and the mask with `spatialStride` 0: every bilateral tap then reads the
+/// centre texel, so the stage only converts S / U to V and filters nothing. The graph's own nodes,
+/// links and histories are unchanged; a mask fed by `area.spatial` or the ReSTIR stages is left
+/// alone.
+pub(crate) fn with_ratio_stages(plan: &GraphPlan, catalog: &Catalog) -> GraphPlan {
+    let Some(spatial) = catalog.node("area.spatial") else {
+        return plan.clone();
+    };
+    let mut next = plan.clone();
+    for mask in &plan.nodes {
+        if mask.type_id != "area.mask" {
+            continue;
+        }
+        let Some(src) = mask.inputs.iter().find(|i| i.port == "src") else {
+            continue;
+        };
+        let InputSource::Link {
+            node: producer,
+            port,
+            history: false,
+        } = &src.source
+        else {
+            continue;
+        };
+        let Some(producer_node) = plan.nodes.iter().find(|n| n.id == *producer) else {
+            continue;
+        };
+        let depth_port = match (producer_node.type_id.as_str(), port.as_str()) {
+            ("area.temporal", "filtered") => "depth",
+            ("area.trace", "raw") => "linearDepth",
+            _ => continue,
+        };
+        let id = ratio_stage_id(&mask.id);
+        let g_buffer = |key: &str| {
+            producer_node
+                .inputs
+                .iter()
+                .find(|i| i.port == key)
+                .cloned()
+                .into_iter()
+        };
+        let mut inputs: Vec<_> = g_buffer("depth").chain(g_buffer("normal")).collect();
+        inputs.push(crate::plan::PlanInput {
+            port: "linearDepth".into(),
+            source: InputSource::Link {
+                node: producer.clone(),
+                port: depth_port.into(),
+                history: false,
+            },
+        });
+        inputs.push(src.clone());
+        let ratio = PlanNode {
+            id: id.clone(),
+            type_id: "area.spatial".into(),
+            type_version: spatial.version,
+            order_index: mask.order_index,
+            params: spatial
+                .params
+                .iter()
+                .map(|p| {
+                    let value = if p.key == "spatialStride" {
+                        ParamValue::Int(0)
+                    } else {
+                        p.default.clone()
+                    };
+                    (p.key.to_owned(), value)
+                })
+                .collect(),
+            inputs,
+            compute: None,
+        };
+        let Some(at) = next.nodes.iter().position(|n| n.id == mask.id) else {
+            continue;
+        };
+        if let Some(input) = next.nodes[at].inputs.iter_mut().find(|i| i.port == "src") {
+            input.source = InputSource::Link {
+                node: id,
+                port: "mask".into(),
+                history: false,
+            };
+        }
+        next.nodes.insert(at, ratio);
+    }
+    next
+}
+
 pub(crate) fn carried_histories(
     mut old: Vec<StageHistory>,
     plan: &GraphPlan,
@@ -951,6 +1050,81 @@ mod tests {
         assert_eq!(history_binding_index_for(true, 2, 1), Some(0));
         assert_eq!(history_binding_index_for(false, 2, 1), None);
         assert_eq!(history_binding_index_for(true, 0, 1), None);
+    }
+
+    #[test]
+    fn mask_fed_by_ratio_pairs_gets_an_unfiltered_ratio_stage() {
+        use crate::format::{LinkDoc, PortRef, parse_graph, write_graph};
+        let c = Catalog::build();
+        let starter = crate::registry::STARTERS
+            .iter()
+            .find(|(_, stem, _)| *stem == "full-gi-stages")
+            .map(|(_, _, json)| *json)
+            .unwrap();
+        // The complete chain feeds area.mask from area.spatial: nothing is added.
+        let full = plan_from_json(starter).unwrap();
+        assert_eq!(with_ratio_stages(&full, &c), full);
+        // Without area.spatial the mask would read the (S, U) pairs of area.temporal.
+        let mut doc = parse_graph(starter).unwrap();
+        doc.nodes.retain(|n| n.id != "areaSpatial");
+        doc.links
+            .retain(|l| l.from.node != "areaSpatial" && l.to.node != "areaSpatial");
+        doc.links.push(LinkDoc {
+            from: PortRef {
+                node: "areaTemporal".into(),
+                port: "filtered".into(),
+            },
+            to: PortRef {
+                node: "areaMask".into(),
+                port: "src".into(),
+            },
+            history: false,
+        });
+        let plan = plan_from_json(&write_graph(&doc)).unwrap();
+        assert!(plan.nodes.iter().all(|n| n.type_id != "area.spatial"));
+        let rewritten = with_ratio_stages(&plan, &c);
+        assert_eq!(rewritten.nodes.len(), plan.nodes.len() + 1);
+        let ratio = rewritten
+            .nodes
+            .iter()
+            .find(|n| n.id == ratio_stage_id("areaMask"))
+            .expect("ratio stage");
+        assert_eq!(ratio.type_id, "area.spatial");
+        assert!(
+            ratio
+                .params
+                .contains(&("spatialStride".to_owned(), ParamValue::Int(0)))
+        );
+        let source = |node: &PlanNode, port: &str| {
+            node.inputs
+                .iter()
+                .find(|i| i.port == port)
+                .map(|i| i.source.clone())
+        };
+        let link = |node: &str, port: &str| InputSource::Link {
+            node: node.into(),
+            port: port.into(),
+            history: false,
+        };
+        assert_eq!(source(ratio, "src"), Some(link("areaTemporal", "filtered")));
+        assert_eq!(
+            source(ratio, "linearDepth"),
+            Some(link("areaTemporal", "depth"))
+        );
+        let mask = rewritten.nodes.iter().find(|n| n.id == "areaMask").unwrap();
+        assert_eq!(source(mask, "src"), Some(link("areaMaskRatio", "mask")));
+        let entries = stage_entries(&rewritten, &c);
+        assert!(
+            entries
+                .iter()
+                .any(|(id, e)| id == "areaMaskRatio" && e == "area.spatial#areaMaskRatio")
+        );
+        assert!(image_bindings(&rewritten, &c, &entries).contains(&(
+            "area.mask#areaMask".into(),
+            "src",
+            "area.spatial#areaMaskRatio".into(),
+            "mask".into()
+        )));
     }
 
     #[test]

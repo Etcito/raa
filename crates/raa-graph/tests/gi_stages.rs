@@ -778,3 +778,332 @@ fn restir_stages_render_frames_without_panic() {
     }
     assert_eq!(recorded.len(), 6, "recorded ReSTIR stages: {recorded:?}");
 }
+
+/// Post nodes whose features these tests do not install: the colour chain skips them.
+const UNINSTALLED_POST: [&str; 4] = ["ssr", "fog", "taa", "bloom"];
+
+/// Full GI stages with the nodes in `remove` dropped (and every link touching them) and the
+/// links `(from, to)` added: the same edit the gi-stages scene applies to its variants. The
+/// colour chain is cut after gi.history so tonemap reads an installed pass.
+fn variant_plan(remove: &[&str], add: &[(&str, &str)]) -> GraphPlan {
+    use raa_graph::format::{LinkDoc, PortRef, parse_graph, write_graph};
+    let mut doc = parse_graph(full_gi_stages()).expect("Full GI stages parses");
+    let remove: Vec<&str> = remove.iter().chain(&UNINSTALLED_POST).copied().collect();
+    let remove = remove.as_slice();
+    let add: Vec<(&str, &str)> = add
+        .iter()
+        .copied()
+        .chain([("giHistory.color", "tonemap.color")])
+        .collect();
+    doc.nodes.retain(|n| !remove.contains(&n.id.as_str()));
+    doc.links.retain(|l| {
+        !remove.contains(&l.from.node.as_str()) && !remove.contains(&l.to.node.as_str())
+    });
+    let port = |text: &str| {
+        let (node, port) = text.split_once('.').expect("node.port");
+        PortRef {
+            node: node.into(),
+            port: port.into(),
+        }
+    };
+    for (from, to) in add {
+        doc.links.push(LinkDoc {
+            from: port(from),
+            to: port(to),
+            history: false,
+        });
+    }
+    plan_from_json(&write_graph(&doc)).expect("variant plans")
+}
+
+/// What `render_plan_frames` reads back: the tone-mapped frame, the enabled pipeline entries
+/// and the stage nodes that recorded on the last frame.
+struct Rendered {
+    pixels: Vec<u8>,
+    size: (u32, u32),
+    enabled: Vec<String>,
+    ran: Vec<String>,
+}
+
+/// Renders `frames` submitted frames of `plan` on the software GPU over a floor and a cube lit
+/// by the default sun and an overhead area light. None when there is no software adapter.
+fn render_plan_frames(name: &str, plan: GraphPlan, frames: u32) -> Option<Rendered> {
+    use raa_core::{FrameGraph, MaterialId, OffscreenTarget};
+    use raa_geom::builtin::DebugCube;
+    use raa_geom::{GeometryProvider, MeshData, ParamValue, Params, Quality};
+    use raa_lit::{AttributedMesh, LitOptions, LitRenderer, LocalLight, LocalLightKind};
+    use raa_math::Vec3;
+    use raa_scene::{RenderList, Scene, Transform};
+    use std::{cell::RefCell, rc::Rc};
+
+    const SIZE: (u32, u32) = (640, 360);
+    const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+    let Some(gpu) = raa_core::testing::software_gpu() else {
+        raa_core::testing::skip(name, "no software adapter");
+        return None;
+    };
+    let pipeline = Rc::new(RefCell::new(raa_pipeline::Pipeline::new(
+        &gpu, SURFACE, false,
+    )));
+    let mut lit = LitRenderer::new(
+        &gpu,
+        &pipeline,
+        LitOptions {
+            max_instances: 16,
+            max_materials: 4,
+            msaa: 1,
+        },
+    )
+    .expect("lit renderer");
+    let (tonemap_pass, tonemap) = {
+        let p = pipeline.borrow();
+        raa_tonemap::TonemapPass::new(&gpu, &p)
+    };
+    pipeline
+        .borrow_mut()
+        .add(Box::new(tonemap_pass))
+        .expect("tonemap pass");
+    let mut mesh = MeshData::new();
+    DebugCube
+        .generate(
+            &Params::new().with("half", ParamValue::Scalar(0.5)),
+            Quality::LOD0,
+            &mut mesh,
+        )
+        .expect("debug cube");
+    let asset = lit
+        .upload(&gpu, &AttributedMesh::from_mesh(mesh))
+        .expect("upload cube");
+    let mesh_id = lit.submesh_ids(asset).expect("cube submesh")[0];
+    let mut scene = Scene::with_capacity(2, 2);
+    scene.camera.set_viewport(SIZE.0, SIZE.1);
+    scene.camera.eye = Vec3::new(0.0, 4.0, 5.0);
+    // A dim sun keeps the floor from clipping, so the area light's shadow stays in range.
+    scene.light.intensity = 0.05;
+    scene.ambient.intensity = 0.02;
+    for (translation, scale) in [
+        (Vec3::new(0.0, 0.5, 0.0), Vec3::splat(1.0)),
+        (Vec3::new(0.0, -0.05, 0.0), Vec3::new(12.0, 0.1, 12.0)),
+    ] {
+        let node = scene
+            .add_node(
+                None,
+                Transform {
+                    translation,
+                    scale,
+                    ..Transform::IDENTITY
+                },
+            )
+            .expect("node");
+        scene
+            .add_instance(node, mesh_id, MaterialId(0))
+            .expect("instance");
+    }
+    lit.local_lights_mut()
+        .add(LocalLight {
+            kind: LocalLightKind::Area,
+            position: [-2.5, 3.0, 0.0],
+            direction: [0.640_184, -0.768_221, 0.0],
+            intensity: 12.0,
+            range: 10.0,
+            size: [3.0, 3.0],
+            ..LocalLight::default()
+        })
+        .expect("area light");
+    raa_lit::install_local_lights(&gpu, &pipeline, &mut lit).expect("light tiling installs");
+    let gi = raa_gi::feature::GiFeature::install(&gpu, &pipeline, &mut lit, None, None)
+        .expect("GI feature");
+    let gi_frame = gi.clone();
+    let mut handles = raa_graph::exec::HandleSet {
+        gi: Some(gi),
+        tonemap: Some(tonemap),
+        ..Default::default()
+    };
+    let mut executor = raa_graph::exec::GraphExecutor::new();
+    let applied = {
+        let mut h = raa_graph::exec::FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: Some(&mut lit),
+        };
+        executor.set_plan(plan, None, &mut h)
+    };
+    assert!(applied.ok, "refused: {:?}", applied.issues);
+    let mut graph = FrameGraph::new(SURFACE);
+    raa_pipeline::Pipeline::install(&pipeline, &mut graph);
+    graph.compile().expect("compile pipeline graph");
+    let target = OffscreenTarget::new(&gpu, SIZE.0, SIZE.1, SURFACE);
+    let mut list = RenderList::with_capacity(2);
+    let (mut tags, mut slots) = (Vec::new(), Vec::new());
+    for frame in 0..frames {
+        {
+            let mut h = raa_graph::exec::FeatureHandles {
+                gpu: &gpu,
+                pipeline: &pipeline,
+                handles: &mut handles,
+                viewports: 1,
+                msaa: 1,
+                lit: Some(&mut lit),
+            };
+            executor.frame(&mut h).expect("executor frame");
+        }
+        gi_frame.set_view(&scene.camera, SIZE, 1);
+        gi_frame.set_sun(&scene.light);
+        gi_frame.set_local_light_count(1);
+        let stats = gi_frame.prepare_frame(&gpu, &mut scene, &mut lit);
+        assert!(stats.active, "frame {frame}: GI inactive: {stats:?}");
+        lit.prepare(&gpu, &mut scene, &mut list, &mut tags, &mut slots)
+            .expect("prepare lit scene");
+        let commands = graph
+            .execute(&gpu, target.view(), target.size())
+            .expect("execute frame graph");
+        gpu.queue().submit([commands]);
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll submitted frame");
+        gi_frame.observe_submission(u64::from(frame) + 1, true);
+    }
+    let p = pipeline.borrow();
+    let enabled = p
+        .passes()
+        .into_iter()
+        .filter(|pass| p.entry_enabled(&pass.name).unwrap_or(false))
+        .map(|pass| pass.name)
+        .collect();
+    let ran = executor
+        .stats()
+        .into_iter()
+        .filter(|s| s.ran && raa_gi::stages::GiStageKind::from_type_id(&s.type_id).is_some())
+        .map(|s| s.node)
+        .collect();
+    Some(Rendered {
+        pixels: target.read_rgba8(&gpu).expect("read frame"),
+        size: SIZE,
+        enabled,
+        ran,
+    })
+}
+
+/// Variance of the luma left after subtracting each pixel's 3x3 mean over the floor rows: grain and
+/// speckle raise it, while smooth shading contributes the same in every variant.
+fn pixel_variance(image: &Rendered) -> f64 {
+    let (w, h) = (image.size.0 as usize, image.size.1 as usize);
+    let luma = |x: usize, y: usize| {
+        let i = (y * w + x) * 4;
+        let p = &image.pixels;
+        0.2126 * f64::from(p[i]) + 0.7152 * f64::from(p[i + 1]) + 0.0722 * f64::from(p[i + 2])
+    };
+    let (mut sum, mut sum_sq, mut count) = (0.0, 0.0, 0.0);
+    // The floor below the cube: the rows the area shadow and the SSGI bounce land on.
+    for y in h * 11 / 20..h - 1 {
+        for x in 1..w - 1 {
+            let mut mean = 0.0;
+            for dy in 0..3 {
+                for dx in 0..3 {
+                    mean += luma(x + dx - 1, y + dy - 1);
+                }
+            }
+            let d = luma(x, y) - mean / 9.0;
+            sum += d;
+            sum_sq += d * d;
+            count += 1.0;
+        }
+    }
+    sum_sq / count - (sum / count).powi(2)
+}
+
+/// Mean luma over the same floor rows.
+fn floor_mean(image: &Rendered) -> f64 {
+    let (w, h) = (image.size.0 as usize, image.size.1 as usize);
+    let rows = h * 11 / 20..h - 1;
+    let sum: f64 = rows
+        .clone()
+        .flat_map(|y| (1..w - 1).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let p = &image.pixels[(y * w + x) * 4..];
+            0.2126 * f64::from(p[0]) + 0.7152 * f64::from(p[1]) + 0.0722 * f64::from(p[2])
+        })
+        .sum();
+    sum / (rows.len() * (w - 2)) as f64
+}
+
+const VARIANCE_FRAMES: u32 = 6;
+
+fn assert_family_has_no_monolithic_pass(image: &Rendered, family: &[&str]) {
+    for pass in family {
+        assert!(
+            !image.enabled.iter().any(|e| e == pass),
+            "monolithic {pass} is enabled: {:?}",
+            image.enabled
+        );
+    }
+}
+
+#[test]
+fn area_without_spatial_is_noisier_than_full_chain() {
+    let name = "area_without_spatial_is_noisier_than_full_chain";
+    let Some(full) = render_plan_frames(name, variant_plan(&[], &[]), VARIANCE_FRAMES) else {
+        return;
+    };
+    let plan = variant_plan(
+        &["areaSpatial"],
+        &[("areaTemporal.filtered", "areaMask.src")],
+    );
+    assert!(plan.nodes.iter().all(|n| n.type_id != "area.spatial"));
+    let variant = render_plan_frames(name, plan, VARIANCE_FRAMES).expect("adapter present");
+    assert_family_has_no_monolithic_pass(&variant, &["gi.area-shadow"]);
+    for node in ["areaTrace", "areaTemporal", "areaMask"] {
+        assert!(variant.ran.iter().any(|n| n == node), "{node} did not run");
+    }
+    assert!(!variant.ran.iter().any(|n| n == "areaSpatial"));
+    let (full_var, variant_var) = (pixel_variance(&full), pixel_variance(&variant));
+    eprintln!("area variance: full {full_var} without spatial {variant_var}");
+    assert!(
+        variant_var > full_var,
+        "without area.spatial the image must be noisier: {variant_var} vs {full_var}"
+    );
+    // area.temporal holds (S, U) pairs; read as visibility, S darkens the whole floor (or, in a
+    // bright room, clamps to 1 and shows no shadow). The raw mask is visibility S / U, an
+    // unbiased estimate of the filtered one, so the floor keeps its brightness.
+    let (full_mean, variant_mean) = (floor_mean(&full), floor_mean(&variant));
+    eprintln!("area floor mean: full {full_mean} without spatial {variant_mean}");
+    assert!(
+        variant_mean > full_mean / 2.0,
+        "the mask holds S, not visibility: floor mean {variant_mean} vs {full_mean}"
+    );
+}
+
+#[test]
+fn ssgi_without_resolve_is_noisier_than_full_chain() {
+    let name = "ssgi_without_resolve_is_noisier_than_full_chain";
+    let Some(full) = render_plan_frames(name, variant_plan(&[], &[]), VARIANCE_FRAMES) else {
+        return;
+    };
+    let plan = variant_plan(&["ssgiResolve"], &[("ssgiTrace.raw", "forward.gi")]);
+    assert!(plan.nodes.iter().all(|n| n.type_id != "ssgi.resolve"));
+    let variant = render_plan_frames(name, plan, VARIANCE_FRAMES).expect("adapter present");
+    assert_family_has_no_monolithic_pass(&variant, &["gi.ssgi"]);
+    assert!(variant.ran.iter().any(|n| n == "ssgiTrace"));
+    assert!(!variant.ran.iter().any(|n| n == "ssgiResolve"));
+    let (full_var, variant_var) = (pixel_variance(&full), pixel_variance(&variant));
+    eprintln!("ssgi variance: full {full_var} without resolve {variant_var}");
+    assert!(
+        variant_var > full_var,
+        "without ssgi.resolve the image must be noisier: {variant_var} vs {full_var}"
+    );
+}
+
+#[test]
+fn full_chain_records_no_monolithic_pass() {
+    let name = "full_chain_records_no_monolithic_pass";
+    let Some(full) = render_plan_frames(name, variant_plan(&[], &[]), VARIANCE_FRAMES) else {
+        return;
+    };
+    assert_family_has_no_monolithic_pass(&full, &MONOLITHIC);
+    for node in ["areaSpatial", "ssgiResolve"] {
+        assert!(full.ran.iter().any(|n| n == node), "{node} did not run");
+    }
+}
