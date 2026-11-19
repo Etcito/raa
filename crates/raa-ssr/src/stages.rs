@@ -1,4 +1,4 @@
-//! Independently installable SSR Hi-Z and trace stages.
+//! Independently installable SSR Hi-Z, trace and composite stages.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -8,7 +8,9 @@ use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, Pipeline, PrepareCtx, Recor
 use crate::{
     SsrDesc, SsrHandle,
     feature::{PARAMS_LEN, SsrCamera, constants, draw, pack_params},
-    resources::{HizTargets, SsrPipelines, SsrViewKey, TRACE_FORMAT, TraceTarget},
+    resources::{
+        CompositeTargets, HizTargets, SsrPipelines, SsrViewKey, TRACE_FORMAT, TraceTarget,
+    },
     tunables,
 };
 
@@ -16,6 +18,7 @@ use crate::{
 pub enum SsrStageKind {
     Hiz,
     Trace,
+    Composite,
 }
 
 impl SsrStageKind {
@@ -23,12 +26,14 @@ impl SsrStageKind {
         match self {
             Self::Hiz => "ssr.hiz",
             Self::Trace => "ssr.trace",
+            Self::Composite => "ssr.composite",
         }
     }
     pub fn from_type_id(id: &str) -> Option<Self> {
         match id {
             "ssr.hiz" => Some(Self::Hiz),
             "ssr.trace" => Some(Self::Trace),
+            "ssr.composite" => Some(Self::Composite),
             _ => None,
         }
     }
@@ -47,6 +52,7 @@ struct State {
     published: Vec<(&'static str, ImageDesc)>,
 }
 
+/// Handoff: `SsrStageHandle` provides `set_values`, `copy_camera_from`, `ran` and `published` for all three kinds to card 'post_stages extension 1/2: install, values, cameras and stats'. It consumes the earlier `install_stage` handoff at `stages.rs:394 install_stage`.
 #[derive(Clone)]
 pub struct SsrStageHandle {
     kind: SsrStageKind,
@@ -76,6 +82,18 @@ impl SsrStageHandle {
         let mut tun = s.tunables;
         for (key, value) in values {
             match (self.kind, key.as_str()) {
+                (SsrStageKind::Composite, "intensity") => {
+                    desc.intensity = *value as f32;
+                    if !value.is_finite() || !(0.0..=2.0).contains(&desc.intensity) {
+                        return Err(invalid(&format!("invalid value for `{key}`")));
+                    }
+                }
+                (SsrStageKind::Composite, "maxRoughness") => {
+                    desc.max_roughness = *value as f32;
+                    if !value.is_finite() || !(0.0..=1.0).contains(&desc.max_roughness) {
+                        return Err(invalid(&format!("invalid value for `{key}`")));
+                    }
+                }
                 (SsrStageKind::Trace, "maxRoughness") => {
                     desc.max_roughness = *value as f32;
                     if !value.is_finite() || !(0.0..=1.0).contains(&desc.max_roughness) {
@@ -128,6 +146,7 @@ struct StagePass {
     pipelines: SsrPipelines,
     targets: Option<StageTargets>,
     _dummy_hiz: Option<wgpu::Texture>,
+    _dummy_trace: Option<wgpu::Texture>,
     bytes: [u8; PARAMS_LEN],
     built: u64,
 }
@@ -135,6 +154,7 @@ struct StagePass {
 enum StageTargets {
     Hiz(HizTargets),
     Trace(TraceTarget),
+    Composite(CompositeTargets),
 }
 
 impl FeaturePass for StagePass {
@@ -178,6 +198,33 @@ impl FeaturePass for StagePass {
                 self._dummy_hiz = Some(dummy);
                 StageTargets::Trace(target)
             }
+            SsrStageKind::Composite => {
+                let dummy = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                    label: Some("raa-ssr.composite_dummy_trace"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: TRACE_FORMAT,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                let trace = dummy.create_view(&wgpu::TextureViewDescriptor::default());
+                let target = CompositeTargets::new(
+                    gpu.device(),
+                    &self.pipelines,
+                    size,
+                    crate::hiz::mip_count(size.0, size.1),
+                    &trace,
+                    views,
+                );
+                self._dummy_trace = Some(dummy);
+                StageTargets::Composite(target)
+            }
         });
     }
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
@@ -201,6 +248,7 @@ impl FeaturePass for StagePass {
         let size = match t {
             StageTargets::Hiz(x) => x.size,
             StageTargets::Trace(_) => ctx.targets.size(),
+            StageTargets::Composite(x) => x.size,
         };
         let mut mips = match t {
             StageTargets::Hiz(x) => x.levels.len() as u32,
@@ -208,6 +256,7 @@ impl FeaturePass for StagePass {
                 .resources
                 .input(&self.entry, "hiz")
                 .map_or(0, |x| x.desc.mips),
+            StageTargets::Composite(x) => x.hdr_views.len() as u32,
         };
         if let StageTargets::Hiz(h) = t {
             h.set_depth(ctx.gpu.device(), &self.pipelines, &views.depth);
@@ -223,7 +272,13 @@ impl FeaturePass for StagePass {
                         .map(|x| x.create_view(&wgpu::TextureViewDescriptor::default()))
                 });
             if let Some(hiz) = hiz {
-                trace.set_views(ctx.gpu.device(), &self.pipelines, &hiz, views);
+                trace.set_views(ctx.gpu.device(), &self.pipelines, &hiz, views.clone());
+            }
+        }
+        if let StageTargets::Composite(composite) = t {
+            let trace = ctx.resources.input(&self.entry, "trace").map(|x| x.view);
+            if let Some(trace) = trace {
+                composite.set_views(ctx.gpu.device(), &self.pipelines, &trace, views.clone());
             }
         }
         pack_params(&mut self.bytes, size, mips, &desc, camera.as_ref());
@@ -233,8 +288,10 @@ impl FeaturePass for StagePass {
         let (w, h) = size;
         let port = if self.kind == SsrStageKind::Hiz {
             "hiz"
-        } else {
+        } else if self.kind == SsrStageKind::Trace {
             "trace"
+        } else {
+            ""
         };
         let format = if self.kind == SsrStageKind::Hiz {
             wgpu::TextureFormat::R32Float
@@ -248,6 +305,12 @@ impl FeaturePass for StagePass {
         let view = match t {
             StageTargets::Hiz(x) => &x.full_view,
             StageTargets::Trace(x) => &x.view,
+            StageTargets::Composite(_) => {
+                let mut s = self.state.borrow_mut();
+                s.published.clear();
+                s.ran = false;
+                return Ok(());
+            }
         };
         ctx.resources.publish(&self.entry, port, view, desc);
         let mut s = self.state.borrow_mut();
@@ -289,6 +352,39 @@ impl FeaturePass for StagePass {
                     );
                     self.state.borrow_mut().ran = true;
                 }
+            }
+            StageTargets::Composite(t) => {
+                let hdr = ctx.targets.hdr();
+                let extent = wgpu::Extent3d {
+                    width: t.size.0,
+                    height: t.size.1,
+                    depth_or_array_layers: 1,
+                };
+                if ctx.resources.input(&self.entry, "trace").is_some() {
+                    ctx.encoder.copy_texture_to_texture(
+                        hdr.src_texture().as_image_copy(),
+                        t.hdr_mips.as_image_copy(),
+                        extent,
+                    );
+                    for (target, group) in t.hdr_views.iter().skip(1).zip(&t.down_groups) {
+                        draw(ctx.encoder, target, &self.pipelines.downsample, group, None);
+                    }
+                    draw(
+                        ctx.encoder,
+                        hdr.dst(),
+                        &self.pipelines.composite,
+                        &t.composite_group,
+                        Some(ctx.lighting.opaque_bind_group()),
+                    );
+                } else {
+                    ctx.encoder.copy_texture_to_texture(
+                        hdr.src_texture().as_image_copy(),
+                        hdr.dst_texture().as_image_copy(),
+                        extent,
+                    );
+                }
+                hdr.swap();
+                self.state.borrow_mut().ran = true;
             }
         }
         Ok(())
@@ -332,6 +428,7 @@ pub fn install_stage(
         pipelines,
         targets: None,
         _dummy_hiz: None,
+        _dummy_trace: None,
         bytes: [0; PARAMS_LEN],
         built: 0,
     }))?;

@@ -645,33 +645,39 @@ pub(crate) struct SsrTargets {
     pub size: (u32, u32),
     pub(crate) views: SsrViewKey,
     pub hiz: HizTargets,
-    /// HDR mip chain; mip 0 is the copy destination of hdr.src().
-    pub hdr_mips: wgpu::Texture,
-    /// Full-mip view of the HDR chain (composite binding 5).
-    hdr_full: wgpu::TextureView,
-    /// Single-mip views: draw k of the downsample renders into `hdr_views[k + 1]` with
-    /// `down_groups[k]` (which reads mip k).
-    pub hdr_views: Vec<wgpu::TextureView>,
-    pub down_groups: Vec<wgpu::BindGroup>,
+    pub composite: CompositeTargets,
     pub trace: TraceTarget,
-    /// Group 0 of fs_trace (`trace_layout`: bindings 0, 1, 2 and 4) and of fs_composite
-    /// (`composite_layout`: the trace view at binding 6).
-    pub composite_group: wgpu::BindGroup,
 }
 
-impl SsrTargets {
-    pub(crate) fn new(gpu: &GpuContext, p: &SsrPipelines, targets: &Targets) -> SsrTargets {
-        let device = gpu.device();
-        let size = targets.size();
-        let size = (size.0.max(1), size.1.max(1));
-        let views = SsrViewKey {
-            depth: targets.depth().clone(),
-            normal: targets.normal().clone(),
-            material: targets.material().clone(),
-        };
-        let hiz = HizTargets::new(gpu, p, size, &views.depth);
-        let trace = TraceTarget::new(device, p, size, &hiz.full_view, views.clone());
-        let mips = hiz.levels.len() as u32;
+impl std::ops::Deref for SsrTargets {
+    type Target = CompositeTargets;
+
+    fn deref(&self) -> &Self::Target {
+        &self.composite
+    }
+}
+
+/// HDR mip chain and composite group, keyed by its five sampled input views.
+pub(crate) struct CompositeTargets {
+    pub size: (u32, u32),
+    pub hdr_mips: wgpu::Texture,
+    pub hdr_full: wgpu::TextureView,
+    pub hdr_views: Vec<wgpu::TextureView>,
+    pub down_groups: Vec<wgpu::BindGroup>,
+    pub composite_group: wgpu::BindGroup,
+    views: SsrViewKey,
+    trace: wgpu::TextureView,
+}
+
+impl CompositeTargets {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        p: &SsrPipelines,
+        size: (u32, u32),
+        mips: u32,
+        trace: &wgpu::TextureView,
+        views: SsrViewKey,
+    ) -> Self {
         let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_DST;
@@ -692,17 +698,54 @@ impl SsrTargets {
                 })
             })
             .collect();
-        let composite_group = composite_group(device, p, &hdr_full, &trace.view, &views);
-        SsrTargets {
+        let composite_group = composite_group(device, p, &hdr_full, trace, &views);
+        Self {
             size,
-            views,
-            hiz,
             hdr_mips,
             hdr_full,
             hdr_views,
             down_groups,
-            trace,
             composite_group,
+            views,
+            trace: trace.clone(),
+        }
+    }
+
+    pub(crate) fn set_views(
+        &mut self,
+        device: &wgpu::Device,
+        p: &SsrPipelines,
+        trace: &wgpu::TextureView,
+        views: SsrViewKey,
+    ) {
+        if self.trace != *trace || self.views != views {
+            self.composite_group = composite_group(device, p, &self.hdr_full, trace, &views);
+            self.trace = trace.clone();
+            self.views = views;
+        }
+    }
+}
+
+impl SsrTargets {
+    pub(crate) fn new(gpu: &GpuContext, p: &SsrPipelines, targets: &Targets) -> SsrTargets {
+        let device = gpu.device();
+        let size = targets.size();
+        let size = (size.0.max(1), size.1.max(1));
+        let views = SsrViewKey {
+            depth: targets.depth().clone(),
+            normal: targets.normal().clone(),
+            material: targets.material().clone(),
+        };
+        let hiz = HizTargets::new(gpu, p, size, &views.depth);
+        let trace = TraceTarget::new(device, p, size, &hiz.full_view, views.clone());
+        let mips = hiz.levels.len() as u32;
+        let composite = CompositeTargets::new(device, p, size, mips, &trace.view, views.clone());
+        SsrTargets {
+            size,
+            views,
+            hiz,
+            composite,
+            trace,
         }
     }
 
@@ -721,8 +764,8 @@ impl SsrTargets {
                 .set_views(device, p, &self.hiz.full_view, views.clone());
         }
         if depth || normal || material {
-            self.composite_group =
-                composite_group(device, p, &self.hdr_full, &self.trace.view, &views);
+            self.composite
+                .set_views(device, p, &self.trace.view, views.clone());
         }
         self.views = views;
     }
