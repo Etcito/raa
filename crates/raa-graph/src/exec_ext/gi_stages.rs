@@ -4,15 +4,45 @@
 use crate::catalog::{Catalog, NodeTypeSpec, ParamValue, PortType};
 use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles};
+use crate::exec::{NodeStats, ResourceStat};
 use crate::plan::{GraphPlan, InputSource, PlanNode};
-use raa_gi::stages::{GiStageKind, stage_entry};
+use raa_core::RaaError;
+use raa_gi::stages::{GiStageHandle, GiStageKind, install_stage, stage_entry};
+use raa_pipeline::ImageDesc;
+use std::{cell::RefCell, rc::Rc};
+
+/// Shared installed stages and history registry.
+/// Handoff: raa-graph exec gi_stages 3/3: graph frame binding stage inputs, executor-owned histories and forward slots. `GiStagesState` holds the GI handle, plan-ordered stage handles, image bindings, history pairs, forward-slot sources and saved slot views today; the graph frame clones `GiStagesExtension.state` after `state_from_plan` replaces it. The plan helpers are anchored by `stage_nodes` in this file.
+#[derive(Default)]
+pub(crate) struct GiStagesState {
+    pub(crate) gi: Option<raa_gi::GiHandle>,
+    pub(crate) stages: Vec<(String, String, GiStageHandle)>,
+    pub(crate) image_bindings: Vec<(String, &'static str, String, String)>,
+    pub(crate) histories: Vec<StageHistory>,
+    pub(crate) slot_sources: Vec<(u32, String, String)>,
+    pub(crate) saved_slots: Vec<(u32, wgpu::TextureView)>,
+}
+pub(crate) struct StageHistory {
+    pub(crate) key: String,
+    pub(crate) consumer: (String, &'static str),
+    pub(crate) producer: (String, String),
+    pub(crate) images: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    pub(crate) desc: Option<ImageDesc>,
+    pub(crate) current: usize,
+    pub(crate) valid: bool,
+    pub(crate) copied: bool,
+}
 
 /// The extension currently has no device work; `apply` succeeds and `clear` does nothing today.
 pub fn extension() -> Box<dyn ExecExtension> {
-    Box::new(GiStagesExtension)
+    Box::new(GiStagesExtension {
+        state: Rc::new(RefCell::new(GiStagesState::default())),
+    })
 }
 
-struct GiStagesExtension;
+struct GiStagesExtension {
+    state: Rc<RefCell<GiStagesState>>,
+}
 
 impl ExecExtension for GiStagesExtension {
     fn name(&self) -> &'static str {
@@ -20,13 +50,112 @@ impl ExecExtension for GiStagesExtension {
     }
     fn apply(
         &mut self,
-        _: &GraphPlan,
-        _: Option<&GraphPlan>,
-        _: &mut FeatureHandles<'_>,
+        plan: &GraphPlan,
+        previous: Option<&GraphPlan>,
+        h: &mut FeatureHandles<'_>,
     ) -> Result<(), Vec<Issue>> {
+        let nodes = stage_nodes(plan);
+        if !nodes.is_empty() && (h.handles.gi.is_none() || h.lit.is_none()) {
+            return Err(vec![issue(
+                "graph.unavailable",
+                Some(nodes[0].0.clone()),
+                None,
+                "the GI feature or lit renderer is not installed",
+                "Install the GI feature.",
+            )]);
+        }
+        if nodes.is_empty() && self.state.borrow().stages.is_empty() {
+            return Ok(());
+        }
+        let issues = accumulate_issues(plan);
+        if !issues.is_empty() {
+            return Err(issues);
+        }
+        let mut state = std::mem::take(&mut *self.state.borrow_mut());
+        let old_stages = std::mem::take(&mut state.stages);
+        let mut kept = Vec::new();
+        for (_, entry, handle) in &old_stages {
+            if let Ok(pass) = h.pipeline.borrow_mut().remove(entry) {
+                kept.push((entry.clone(), pass, handle.clone()));
+            }
+        }
+        let catalog = Catalog::build();
+        let entries = stage_entries(plan, &catalog);
+        let buffers = buffer_sources(plan, &catalog, &entries);
+        let mut installed = Vec::new();
+        let result: Result<(), Vec<Issue>> = (|| {
+            for (id, kind) in nodes {
+                let name = stage_entry(kind, &id);
+                let handle = if let Some(i) = kept.iter().position(|(entry, _, _)| *entry == name) {
+                    let (_, pass, handle) = kept.swap_remove(i);
+                    h.pipeline
+                        .borrow_mut()
+                        .add(pass)
+                        .map_err(|e| vec![apply_issue(&id, &e)])?;
+                    handle
+                } else {
+                    install_stage(h.gpu, h.pipeline, kind, &id)
+                        .map_err(|e| vec![apply_issue(&id, &e)])?
+                };
+                installed.push((id, name, handle));
+            }
+            let gi = h.handles.gi.as_ref().expect("availability checked");
+            let lit = h.lit.as_ref().expect("availability checked").handle();
+            let changed = restarted(previous, plan);
+            for (id, entry, handle) in &installed {
+                handle.attach(gi, lit.clone());
+                let node = plan
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .expect("stage node exists");
+                let spec = catalog.node(&node.type_id).expect("stage type exists");
+                handle
+                    .set_values(&stage_values(node, spec))
+                    .map_err(|e| vec![apply_issue(id, &e)])?;
+                handle.clear_buffer_sources();
+                for (consumer, port, source, source_port) in &buffers {
+                    if consumer == entry {
+                        handle.set_buffer_source(port, source, source_port);
+                    }
+                }
+                if handle.kind().internal_history() && changed.contains(id) {
+                    handle.set_history_valid(false);
+                }
+            }
+            Ok(())
+        })();
+        if let Err(issues) = result {
+            for (_, entry, _) in &installed {
+                let _ = h.pipeline.borrow_mut().remove(entry);
+            }
+            self.state.borrow_mut().stages.clear();
+            return Err(issues);
+        }
+        state.gi = h.handles.gi.clone();
+        let next = state_from_plan(plan, previous, &catalog, installed, state);
+        *self.state.borrow_mut() = next;
         Ok(())
     }
-    fn clear(&mut self, _: &mut FeatureHandles<'_>) {}
+    fn clear(&mut self, h: &mut FeatureHandles<'_>) {
+        let mut state = self.state.borrow_mut();
+        for (_, entry, _) in state.stages.drain(..) {
+            let _ = h.pipeline.borrow_mut().remove(&entry);
+        }
+        *state = GiStagesState::default();
+    }
+    fn stats(&self, out: &mut Vec<NodeStats>) {
+        for (id, _, handle) in &self.state.borrow().stages {
+            if let Some(stat) = out.iter_mut().find(|stat| stat.node == *id) {
+                stat.ran = handle.ran();
+                stat.resources = handle
+                    .published()
+                    .iter()
+                    .map(|(port, desc)| image_stat(port, desc))
+                    .collect();
+            }
+        }
+    }
 }
 
 /// Handoff: `stage_nodes` supplies stage identities to 'raa-graph exec gi_stages 2/3: install, attach, values, refusals and stats' and 'raa-graph exec gi_stages 3/3: graph frame binding stage inputs, executor-owned histories and forward slots'. It returns the plan-ordered `(node id, GiStageKind)` pairs; this file also provides their entries, bindings, restarts, slots, values and accumulate validation. Upstream `GiStageKind::from_type_id` and `stage_entry` are at `crates/raa-gi/src/stages.rs:41 GiStageKind` and `crates/raa-gi/src/stages.rs:133 stage_entry`.
@@ -304,10 +433,125 @@ pub(crate) fn accumulate_issues(plan: &GraphPlan) -> Vec<Issue> {
         .collect()
 }
 
+fn issue(
+    code: &'static str,
+    node: Option<String>,
+    param: Option<String>,
+    message: &str,
+    fix: &str,
+) -> Issue {
+    Issue {
+        code,
+        severity: Severity::Error,
+        stage: Stage::Apply,
+        node,
+        port: None,
+        param,
+        link: None,
+        message: message.into(),
+        fix: fix.into(),
+    }
+}
+fn apply_issue(node: &str, error: &RaaError) -> Issue {
+    let message = error.to_string();
+    let param = message.split(['`', '\'']).nth(1).map(str::to_owned);
+    issue(
+        "graph.apply",
+        Some(node.to_owned()),
+        param,
+        &message,
+        "Use a value accepted by this GI stage.",
+    )
+}
+fn image_stat(port: &str, desc: &ImageDesc) -> ResourceStat {
+    let aspect = desc
+        .format
+        .has_depth_aspect()
+        .then_some(wgpu::TextureAspect::DepthOnly);
+    let texel = desc.format.block_copy_size(aspect).unwrap_or(0);
+    let bytes = (0..desc.mips)
+        .map(|mip| {
+            u64::from(desc.width.checked_shr(mip).unwrap_or(0).max(1))
+                * u64::from(desc.height.checked_shr(mip).unwrap_or(0).max(1))
+                * u64::from(desc.layers)
+                * u64::from(texel)
+        })
+        .sum();
+    ResourceStat {
+        port: port.to_owned(),
+        width: desc.width,
+        height: desc.height,
+        layers: desc.layers,
+        mips: desc.mips,
+        format: format!("{:?}", desc.format).to_lowercase(),
+        bytes,
+    }
+}
+
+pub(crate) fn carried_histories(
+    mut old: Vec<StageHistory>,
+    plan: &GraphPlan,
+    previous: Option<&GraphPlan>,
+    entries: &[(String, String)],
+) -> Vec<StageHistory> {
+    let restarts = history_restarts(previous, plan);
+    stage_histories(plan, &Catalog::build(), entries)
+        .into_iter()
+        .map(|(entry, port, producer, source_port)| {
+            let consumer = entries
+                .iter()
+                .find(|(_, e)| *e == entry)
+                .map(|(id, _)| id.clone())
+                .unwrap_or_default();
+            let key = format!("{consumer}.{port}");
+            let next_producer = (producer, source_port);
+            if !restarts.contains(&key)
+                && let Some(i) = old.iter().position(|h| h.key == key)
+            {
+                let mut history = old.remove(i);
+                history.producer = next_producer;
+                return history;
+            }
+            StageHistory {
+                key,
+                consumer: (consumer, port),
+                producer: next_producer,
+                images: Vec::new(),
+                desc: None,
+                current: 0,
+                valid: false,
+                copied: false,
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn state_from_plan(
+    plan: &GraphPlan,
+    _previous: Option<&GraphPlan>,
+    catalog: &Catalog,
+    stages: Vec<(String, String, GiStageHandle)>,
+    mut old: GiStagesState,
+) -> GiStagesState {
+    let entries = stage_entries(plan, catalog);
+    old.stages = stages;
+    old.image_bindings = image_bindings(plan, catalog, &entries);
+    old.slot_sources = slot_sources(plan, catalog, &entries);
+    old.histories = carried_histories(
+        std::mem::take(&mut old.histories),
+        plan,
+        _previous,
+        &entries,
+    );
+    old.saved_slots.clear();
+    old
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::plan::plan_from_json;
+    use raa_core::testing::{skip, software_gpu};
 
     fn plan(nodes: &str, links: &str) -> GraphPlan {
         let text = format!(
@@ -439,6 +683,89 @@ mod tests {
         assert_eq!(
             accumulate_issues(&both)[0].port.as_deref(),
             Some("irradiance")
+        );
+    }
+
+    #[test]
+    fn carried_histories_keep_or_restart_state() {
+        let catalog = Catalog::build();
+        let p = plan(
+            r#",{"id":"acc","type":"gi.accumulate"},{"id":"a","type":"gi.atrous"},{"id":"r","type":"gi.resolve"}"#,
+            r#",{"from":"acc.output","to":"acc.history","history":true},{"from":"acc.output","to":"a.src"},{"from":"a.dst","to":"r.irradiance"},{"from":"r.gi","to":"forward.gi"}"#,
+        );
+        let entries = stage_entries(&p, &catalog);
+        let history = StageHistory {
+            key: "acc.history".into(),
+            consumer: ("acc".into(), "history"),
+            producer: ("acc".into(), "output".into()),
+            images: Vec::new(),
+            desc: None,
+            current: 1,
+            valid: true,
+            copied: true,
+        };
+        let kept = carried_histories(vec![history], &p, Some(&p), &entries);
+        assert_eq!((kept[0].current, kept[0].valid), (1, true));
+        let mut changed = p.clone();
+        changed
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "acc")
+            .unwrap()
+            .params
+            .iter_mut()
+            .find(|(key, _)| key == "historyMax")
+            .unwrap()
+            .1 = ParamValue::Int(12);
+        let restarted =
+            carried_histories(kept, &changed, Some(&p), &stage_entries(&changed, &catalog));
+        assert!(restarted[0].images.is_empty());
+        assert!(!restarted[0].valid);
+    }
+
+    #[test]
+    fn missing_gi_refuses_before_stage_install() {
+        let name = "missing_gi_refuses_before_stage_install";
+        let Some(gpu) = software_gpu() else {
+            skip(name, "no software adapter");
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(raa_pipeline::Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        let mut handles = crate::exec::HandleSet::default();
+        let mut feature_handles = FeatureHandles {
+            gpu: &gpu,
+            pipeline: &pipeline,
+            handles: &mut handles,
+            viewports: 1,
+            msaa: 1,
+            lit: None,
+        };
+        let p = plan(
+            r#",{"id":"first","type":"ssgi.trace"}"#,
+            r#",{"from":"first.raw","to":"forward.gi"}"#,
+        );
+        let mut extension = GiStagesExtension {
+            state: Rc::new(RefCell::new(GiStagesState::default())),
+        };
+        let issues = extension.apply(&p, None, &mut feature_handles).unwrap_err();
+        assert_eq!(
+            (issues[0].code, issues[0].stage, issues[0].node.as_deref()),
+            ("graph.unavailable", Stage::Apply, Some("first"))
+        );
+        assert_eq!(
+            issues[0].message,
+            "the GI feature or lit renderer is not installed"
+        );
+        assert!(
+            pipeline
+                .borrow()
+                .passes()
+                .iter()
+                .all(|pass| !pass.name.starts_with("ssgi.trace#"))
         );
     }
 }
