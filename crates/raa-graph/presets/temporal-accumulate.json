@@ -1,0 +1,90 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Temporal accumulate",
+  "nodes": [
+    {
+      "id": "temporalAccumulate",
+      "type": "compute.wgsl",
+      "inputs": [
+        {
+          "key": "src",
+          "type": "image2d"
+        },
+        {
+          "key": "history",
+          "type": "image2d"
+        }
+      ],
+      "outputs": [
+        {
+          "key": "dst",
+          "type": "image2d",
+          "format": "rgba16float"
+        }
+      ],
+      "math": {
+        "nodes": [
+          {
+            "id": "current",
+            "type": "input",
+            "params": {
+              "key": "src"
+            },
+            "position": [
+              0,
+              0
+            ]
+          },
+          {
+            "id": "mix",
+            "type": "temporalMix",
+            "params": {
+              "history": "history",
+              "alpha": 0.1
+            },
+            "position": [
+              240,
+              0
+            ]
+          },
+          {
+            "id": "out",
+            "type": "output",
+            "params": {
+              "key": "dst"
+            },
+            "position": [
+              480,
+              0
+            ]
+          }
+        ],
+        "links": [
+          {
+            "from": {
+              "node": "current",
+              "port": "value"
+            },
+            "to": {
+              "node": "mix",
+              "port": "current"
+            }
+          },
+          {
+            "from": {
+              "node": "mix",
+              "port": "value"
+            },
+            "to": {
+              "node": "out",
+              "port": "value"
+            }
+          }
+        ]
+      },
+      "wgsl": "fn rg_main(p: vec2<u32>) {\n  let q = vec2<i32>(p);\n  let n0_value = textureLoad(rg_in_src, clamp(q + vec2<i32>(0, 0), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_src)) - vec2<i32>(1)), 0);\n  let n1_value = mix(textureLoad(rg_in_history, q, 0), n0_value, select(1.0, 0.1, rg_frame.history_valid != 0u));\n  textureStore(rg_out_dst, p, n1_value);\n}\n"
+    }
+  ],
+  "links": []
+}

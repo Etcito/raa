@@ -1,0 +1,78 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "A-trous step",
+  "nodes": [
+    {
+      "id": "atrousStep",
+      "type": "compute.wgsl",
+      "inputs": [
+        {
+          "key": "src",
+          "type": "image2d"
+        },
+        {
+          "key": "depth",
+          "type": "depth2d"
+        },
+        {
+          "key": "normal",
+          "type": "image2d"
+        }
+      ],
+      "outputs": [
+        {
+          "key": "dst",
+          "type": "image2d",
+          "format": "rgba16float"
+        }
+      ],
+      "math": {
+        "nodes": [
+          {
+            "id": "filter",
+            "type": "atrousWeight",
+            "params": {
+              "color": "src",
+              "depth": "depth",
+              "normal": "normal",
+              "step": 1,
+              "sigmaLuminance": 4,
+              "sigmaDepth": 0.002,
+              "normalPower": 32
+            },
+            "position": [
+              0,
+              0
+            ]
+          },
+          {
+            "id": "out",
+            "type": "output",
+            "params": {
+              "key": "dst"
+            },
+            "position": [
+              280,
+              0
+            ]
+          }
+        ],
+        "links": [
+          {
+            "from": {
+              "node": "filter",
+              "port": "value"
+            },
+            "to": {
+              "node": "out",
+              "port": "value"
+            }
+          }
+        ]
+      },
+      "wgsl": "fn rg_main(p: vec2<u32>) {\n  let q = vec2<i32>(p);\n  var n0_h = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);\n  let n0_c0 = textureLoad(rg_in_src, clamp(q + vec2<i32>(0, 0), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_src)) - vec2<i32>(1)), 0);\n  let n0_z0 = vec4<f32>(textureLoad(rg_in_depth, clamp(q + vec2<i32>(0, 0), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_depth)) - vec2<i32>(1)), 0)).x;\n  let n0_n0 = textureLoad(rg_in_normal, clamp(q + vec2<i32>(0, 0), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_normal)) - vec2<i32>(1)), 0).xyz;\n  var n0_acc = vec4<f32>(0.0);\n  var n0_w = 0.0;\n  for (var n0_y = -2; n0_y <= 2; n0_y++) {\n    for (var n0_x = -2; n0_x <= 2; n0_x++) {\n      let n0_c = textureLoad(rg_in_src, clamp(q + vec2<i32>(n0_x * 1, n0_y * 1), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_src)) - vec2<i32>(1)), 0);\n      let n0_dl = dot(n0_c.rgb - n0_c0.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));\n      let n0_dz = vec4<f32>(textureLoad(rg_in_depth, clamp(q + vec2<i32>(n0_x * 1, n0_y * 1), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_depth)) - vec2<i32>(1)), 0)).x - n0_z0;\n      let n0_nd = max(dot(textureLoad(rg_in_normal, clamp(q + vec2<i32>(n0_x * 1, n0_y * 1), vec2<i32>(0), vec2<i32>(textureDimensions(rg_in_normal)) - vec2<i32>(1)), 0).xyz, n0_n0), 0.0);\n      let n0_k = n0_h[n0_x + 2] * n0_h[n0_y + 2] * exp(-abs(n0_dl) / 4.0) * exp(-abs(n0_dz) / 0.002) * pow(n0_nd, 32.0);\n      n0_acc += n0_k * n0_c;\n      n0_w += n0_k;\n    }\n  }\n  let n0_value = n0_acc / max(n0_w, 0.000001);\n  let n0_weight = n0_w;\n  textureStore(rg_out_dst, p, n0_value);\n}\n"
+    }
+  ],
+  "links": []
+}
