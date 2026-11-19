@@ -286,7 +286,39 @@ pub fn history_refusals(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(
     out
 }
 
-/// Whether output `port` of a node of type `ty` may feed an executor-owned history.
+/// Whether output `port` of a node of type `ty` may feed an executor-owned history. GI stage
+/// producers `gi.accumulate.output/meta`, `area.temporal.filtered/depth` and
+/// `ssgi.resolve.accumulated` are accepted as well.
 pub fn history_source(ty: &str, port: &str) -> bool {
-    (ty == "pass.taa" && port == "history") || (port == "color" && chain_type(ty))
+    (ty == "pass.taa" && port == "history")
+        || (port == "color" && chain_type(ty))
+        || matches!(
+            (ty, port),
+            ("gi.accumulate", "output")
+                | ("gi.accumulate", "meta")
+                | ("area.temporal", "filtered")
+                | ("area.temporal", "depth")
+                | ("ssgi.resolve", "accumulated")
+        )
+}
+
+#[cfg(test)]
+mod stage_history_tests {
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn accepts_only_the_declared_stage_history_producers() {
+        for (ty, port) in [
+            ("gi.accumulate", "output"),
+            ("gi.accumulate", "meta"),
+            ("area.temporal", "filtered"),
+            ("area.temporal", "depth"),
+            ("ssgi.resolve", "accumulated"),
+        ] {
+            assert!(super::history_source(ty, port), "{ty}.{port}");
+        }
+        assert!(!super::history_source("gi.atrous", "dst"));
+        assert!(!super::history_source("gi.accumulate", "filter"));
+    }
 }
