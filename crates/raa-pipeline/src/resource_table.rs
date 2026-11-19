@@ -92,7 +92,7 @@ enum Payload {
 
 struct Slot<T> {
     pass: String,
-    port: &'static str,
+    port: String,
     value: T,
 }
 
@@ -122,7 +122,7 @@ impl<T> Slots<T> {
     }
 
     /// Replaces the value of a live key in place, else reuses the next free slot.
-    fn put(&mut self, pass: &str, port: &'static str, value: T) {
+    fn put(&mut self, pass: &str, port: &str, value: T) {
         let live = self.live;
         if let Some(slot) = self.slots[..live]
             .iter_mut()
@@ -134,12 +134,13 @@ impl<T> Slots<T> {
         if let Some(slot) = self.slots.get_mut(live) {
             slot.pass.clear();
             slot.pass.push_str(pass);
-            slot.port = port;
+            slot.port.clear();
+            slot.port.push_str(port);
             slot.value = value;
         } else {
             self.slots.push(Slot {
                 pass: pass.to_string(),
-                port,
+                port: port.to_string(),
                 value,
             });
         }
@@ -178,13 +179,7 @@ impl ResourceTable {
     }
 
     /// Publishes an image; a second publish under one key replaces the first in place.
-    pub fn publish(
-        &self,
-        pass: &str,
-        port: &'static str,
-        view: &wgpu::TextureView,
-        desc: ImageDesc,
-    ) {
+    pub fn publish(&self, pass: &str, port: &str, view: &wgpu::TextureView, desc: ImageDesc) {
         let image = PublishedImage {
             view: view.clone(),
             desc,
@@ -196,7 +191,7 @@ impl ResourceTable {
     }
 
     /// Publishes a buffer of `size` bytes under the same key space as images.
-    pub fn publish_buffer(&self, pass: &str, port: &'static str, buffer: &wgpu::Buffer, size: u64) {
+    pub fn publish_buffer(&self, pass: &str, port: &str, buffer: &wgpu::Buffer, size: u64) {
         let payload = Payload::Buffer(buffer.clone(), size);
         self.inner.borrow_mut().published.put(pass, port, payload);
     }
@@ -218,7 +213,7 @@ impl ResourceTable {
     }
 
     /// Binds an input image to (pass, port); replaces an earlier binding in place.
-    pub fn bind_input(&self, pass: &str, port: &'static str, image: PublishedImage) {
+    pub fn bind_input(&self, pass: &str, port: &str, image: PublishedImage) {
         self.inner.borrow_mut().inputs.put(pass, port, image);
     }
 
