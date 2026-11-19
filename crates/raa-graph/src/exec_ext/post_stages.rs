@@ -10,7 +10,9 @@ use crate::plan::{GraphPlan, InputSource, PlanNode};
 use raa_bloom::stages::{BloomStageHandle, BloomStageKind};
 use raa_core::{GpuContext, RaaError};
 use raa_gtao::stages::{AoStageHandle, AoStageKind};
-use raa_pipeline::{FeaturePass, ImageDesc, Pipeline};
+use raa_pipeline::{
+    FeaturePass, GraphFrame, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx, ResourceTable,
+};
 use raa_ssr::stages::{SsrStageHandle, SsrStageKind};
 use std::{cell::RefCell, rc::Rc};
 
@@ -74,6 +76,155 @@ impl StageHandle {
             Self::Ssr(handle) => handle.entry(),
             Self::Bloom(handle) => handle.entry(),
         }
+    }
+}
+
+/// The `post_stages` graph frame (contract `rg-post-stage-frame`): binds each stage's inputs from
+/// the resource table before prepare and again before record (so chain colours published during
+/// record reach it), binds the HDR chain for a `bloom.up` composite, publishes that composite as
+/// `(entry, color)`, and republishes a stage's ports under its type id for view nodes.
+struct PostStagesFrame {
+    state: Rc<RefCell<PostStagesState>>,
+    targets: Vec<(String, wgpu::Texture, wgpu::TextureView, (u32, u32))>,
+}
+
+/// Binds `pass`'s inputs whose source the table already holds.
+fn bind_inputs(
+    resources: &ResourceTable,
+    pass: &str,
+    bindings: &[(String, &'static str, String, String)],
+) {
+    for (consumer, port, source, source_port) in bindings {
+        if consumer == pass
+            && let Some(image) = resources.get(source, source_port)
+        {
+            resources.bind_input(pass, port, image);
+        }
+    }
+}
+
+/// The ports a stage published at its last prepare, by entry.
+fn stage_ports(
+    stages: &[(String, String, StageHandle)],
+    entry: &str,
+) -> Vec<(&'static str, ImageDesc)> {
+    stages
+        .iter()
+        .find(|(_, stage_entry, _)| stage_entry == entry)
+        .map(|(_, _, handle)| handle.published())
+        .unwrap_or_default()
+}
+
+impl PostStagesFrame {
+    /// The composite target view of `entry`, created or recreated when its size changed.
+    fn composite_target(
+        &mut self,
+        gpu: &GpuContext,
+        entry: &str,
+        size: (u32, u32),
+    ) -> &wgpu::TextureView {
+        if let Some(index) = self
+            .targets
+            .iter()
+            .position(|(name, _, _, held)| name == entry && *held == size)
+        {
+            return &self.targets[index].2;
+        }
+        self.targets.retain(|(name, _, _, _)| name != entry);
+        let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa.post_stages.composite"),
+            size: wgpu::Extent3d {
+                width: size.0,
+                height: size.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let index = self.targets.len();
+        self.targets.push((entry.to_owned(), texture, view, size));
+        &self.targets[index].2
+    }
+}
+
+impl GraphFrame for PostStagesFrame {
+    fn begin(&mut self, _table: &ResourceTable) {
+        let state = self.state.borrow();
+        self.targets
+            .retain(|(entry, _, _, _)| state.composites.iter().any(|(name, _, _)| name == entry));
+    }
+
+    fn before_prepare(&mut self, pass: &str, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        bind_inputs(ctx.resources, pass, &self.state.borrow().bindings);
+        Ok(())
+    }
+
+    fn before_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let composite = {
+            let state = self.state.borrow();
+            bind_inputs(ctx.resources, pass, &state.bindings);
+            state
+                .composites
+                .iter()
+                .find(|(entry, _, _)| entry == pass)
+                .map(|(_, source, port)| (source.clone(), port.clone()))
+        };
+        let Some((source, port)) = composite else {
+            return Ok(());
+        };
+        let image = ctx.resources.get(&source, &port).ok_or_else(|| {
+            RaaError::Resource(format!(
+                "{pass}: colour source `{source}.{port}` was not published"
+            ))
+        })?;
+        let target = self.composite_target(ctx.gpu, pass, ctx.size).clone();
+        let hdr = ctx.targets.hdr();
+        hdr.bind(&image.view, &target);
+        if !hdr.is_bound() {
+            return Err(RaaError::Resource(format!(
+                "{pass}: unable to bind the HDR chain for `{source}.{port}`"
+            )));
+        }
+        Ok(())
+    }
+
+    fn after_record(&mut self, pass: &str, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        if let Some((_, _, view, (width, height))) =
+            self.targets.iter().find(|(entry, _, _, _)| entry == pass)
+        {
+            ctx.targets.hdr().unbind();
+            ctx.resources.publish(
+                pass,
+                "color",
+                view,
+                ImageDesc::new(
+                    ImageDim::D2,
+                    wgpu::TextureFormat::Rgba16Float,
+                    *width,
+                    *height,
+                    1,
+                    1,
+                ),
+            );
+        }
+        let state = self.state.borrow();
+        if let Some((_, type_id)) = state.aliases.iter().find(|(entry, _)| entry == pass) {
+            for (port, desc) in stage_ports(&state.stages, pass) {
+                if let Some(image) = ctx.resources.get(pass, port) {
+                    ctx.resources.publish(type_id, port, &image.view, desc);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -204,6 +355,23 @@ impl ExecExtension for PostStagesExtension {
             composites: plan::bloom_composites(plan, &entries),
             aliases: plan::view_aliases(plan),
         };
+        let has_stages = !self.state.borrow().stages.is_empty();
+        let mut pipeline = h.pipeline.borrow_mut();
+        if has_stages && !self.frame_added {
+            pipeline
+                .add_graph_frame(
+                    "post_stages",
+                    Box::new(PostStagesFrame {
+                        state: self.state.clone(),
+                        targets: Vec::new(),
+                    }),
+                )
+                .map_err(|error| vec![apply_issue("post_stages", &error)])?;
+            self.frame_added = true;
+        } else if !has_stages && self.frame_added {
+            pipeline.remove_graph_frame("post_stages");
+            self.frame_added = false;
+        }
         Ok(())
     }
 
@@ -232,6 +400,8 @@ impl ExecExtension for PostStagesExtension {
         for (_, entry, _) in stages {
             let _ = h.pipeline.borrow_mut().remove(&entry);
         }
+        h.pipeline.borrow_mut().remove_graph_frame("post_stages");
+        self.frame_added = false;
         *self.state.borrow_mut() = PostStagesState::default();
     }
 
