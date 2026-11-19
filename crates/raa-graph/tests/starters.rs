@@ -219,11 +219,23 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
         .collect();
     assert_eq!(
         names,
-        ["Debug", "Full GI", "Full GI stages", "Simple forward"]
+        [
+            "Custom denoise",
+            "Debug",
+            "Full GI",
+            "Full GI stages",
+            "Simple forward"
+        ]
     );
     assert_eq!(
         stems,
-        ["debug", "full-gi", "full-gi-stages", "simple-forward"]
+        [
+            "custom-denoise",
+            "debug",
+            "full-gi",
+            "full-gi-stages",
+            "simple-forward"
+        ]
     );
 }
 
