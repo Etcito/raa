@@ -19,6 +19,7 @@ use raa_pipeline::{
 use crate::error::{GI_INVALID, invalid};
 use crate::feature::GiHandle;
 use crate::parts::GiShared;
+use crate::parts::area_shadow::stages::{AreaTemporalStage, AreaTraceStage};
 use crate::parts::screen::stage_accumulate::AccumulateStage;
 use crate::parts::screen::stage_filters::{AtrousStage, ResolveStage};
 use crate::parts::screen::stage_restir::{
@@ -213,6 +214,8 @@ pub(crate) fn stage_impl(kind: GiStageKind) -> Option<Box<dyn StageImpl>> {
         GiStageKind::RestirInitial => Some(Box::new(RestirInitialStage::default())),
         GiStageKind::RestirTemporal => Some(Box::new(RestirTemporalStage::default())),
         GiStageKind::RestirSpatial => Some(Box::new(RestirSpatialStage::default())),
+        GiStageKind::AreaTrace => Some(Box::new(AreaTraceStage::default())),
+        GiStageKind::AreaTemporal => Some(Box::new(AreaTemporalStage::default())),
         _ => None,
     }
 }

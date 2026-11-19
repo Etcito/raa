@@ -22,6 +22,9 @@ mod resources;
 #[path = "area_shadow/restir_resources.rs"]
 mod restir_resources;
 
+#[path = "area_shadow/stages.rs"]
+pub(crate) mod stages;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
