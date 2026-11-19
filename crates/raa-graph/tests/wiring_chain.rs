@@ -215,6 +215,31 @@ fn plan_nodes(ids: &[(&str, &str)]) -> GraphPlan {
         },
     }
 }
+
+#[test]
+fn post_stage_types_get_instance_entries() {
+    let plan = plan_nodes(&[
+        ("forward", "pass.forward"),
+        ("aoTrace", "ao.trace"),
+        ("ssrComposite", "ssr.composite"),
+        ("bloomUp", "bloom.up"),
+        ("tonemap", "pass.tonemap"),
+    ]);
+    assert_eq!(
+        plan_fns::node_entries(&plan, &Catalog::build()),
+        [
+            ("forward".into(), "forward".into()),
+            ("aoTrace".into(), "ao.trace#aoTrace".into()),
+            ("ssrComposite".into(), "ssr.composite#ssrComposite".into()),
+            ("bloomUp".into(), "bloom.up#bloomUp".into()),
+            ("tonemap".into(), "tonemap".into()),
+        ]
+    );
+    assert!(plan_fns::chain_type("ssr.composite"));
+    assert!(!plan_fns::chain_type("bloom.up"));
+    assert!(!plan_fns::chain_type("ao.blur"));
+}
+
 #[test]
 fn view_pass_follows_its_source_pass() {
     // The view node is first in plan order, but it reads giHistory, so it must follow gi.history.

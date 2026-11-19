@@ -123,6 +123,7 @@ pub fn chain_type(ty: &str) -> bool {
             | "pass.taa"
             | "pass.dof"
             | "pass.bloom"
+            | "ssr.composite"
             | "pass.grading"
             | "pass.cel.resolve"
     )
@@ -143,12 +144,28 @@ pub fn chain_resources(plan: &GraphPlan, _catalog: &raa_graph::Catalog) -> Vec<P
         .collect()
 }
 
-/// Pipeline entries driven by executed nodes.
+/// Handoff: `node_entries` is used by downstream card 'post_stages plan functions and catalog/plan tests',
+/// whose tests build `entries` with this function; cards 'post_stages extension 1/2: install, values,
+/// cameras and stats' and 'post_stages extension 2/2: graph frame binding inputs, bloom composite chain
+/// and view aliases' read the same entries. Today it returns pipeline entries for executed nodes in
+/// plan order, including instance entries for post-stage nodes even when their type is not in the catalog.
 pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(String, String)> {
     let mut seen = Vec::new();
     plan.nodes
         .iter()
         .filter_map(|node| {
+            if matches!(
+                node.type_id.as_str(),
+                "ao.trace"
+                    | "ao.blur"
+                    | "ssr.hiz"
+                    | "ssr.trace"
+                    | "ssr.composite"
+                    | "bloom.down"
+                    | "bloom.up"
+            ) {
+                return Some((node.id.clone(), format!("{}#{}", node.type_id, node.id)));
+            }
             let spec = catalog.node(&node.type_id)?;
             let entry = if node.type_id.starts_with("view.") {
                 format!("view#{}", node.id)
