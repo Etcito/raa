@@ -20,6 +20,11 @@ const PASSTHROUGH_MATERIAL_VERTEX: &str =
 }
 ";
 
+/// Foliage material parts, assembled by [`Composer::compose_foliage`] only.
+const FOLIAGE_MATERIAL_WGSL: &str = include_str!("wgsl/foliage_material.wgsl");
+/// TRANSPARENT | TRANSMISSIVE draw-class bits (S10), never set on a foliage variant.
+const FOLIAGE_TRANSLUCENT_CLASSES: u32 = 3;
+
 /// FNV-1a 64-bit offset basis and prime.
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
@@ -155,6 +160,69 @@ impl Composer {
             key,
             Some(include_str!("wgsl/pass_foliage_reference.wgsl")),
         )
+    }
+
+    /// Composes the relightable foliage module of `key.pass` ([`PassKind::Prepass`] or
+    /// [`PassKind::Forward`]) for `mode` in the m7-foliage-resources rank (spom 0, pom 1,
+    /// offset 2, shell 3, stochastic 4, differentiable 5). The pass section holds
+    /// `RAA_FOLIAGE_MODE`, the sampling fragments once (group 2 and foliage_parallax.wgsl for
+    /// modes 0, 1, 4 and 5; foliage_offset.wgsl, which declares group 2 itself, for modes 2
+    /// and 3), then the foliage_material.wgsl material part and its `vs_main`/`fs_main`.
+    /// Distilled modes sample the native volume at the source-root position; impostor modes
+    /// shade the hull hit. Forward adds backlit translucency yet stays opaque: the
+    /// TRANSPARENT and TRANSMISSIVE draw-class bits are cleared from the variant flags. Any
+    /// other mode or pass refuses `shader.validate` before a pipeline exists. The result is
+    /// not validated (see [`Composer::validate`]).
+    ///
+    /// Handoff: `Composer::compose_foliage` composes the foliage prepass and forward modules
+    /// for Bind foliage resources in lit pipelines.
+    pub fn compose_foliage(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+        mode: u32,
+    ) -> Result<String, ShaderError> {
+        let entry = match key.pass {
+            PassKind::Prepass => "prepass",
+            PassKind::Forward => "forward",
+            other => {
+                return Err(ShaderError::new(
+                    ShaderError::VALIDATE,
+                    format!("foliage composes the Prepass and Forward passes, not {other:?}"),
+                ));
+            }
+        };
+        let sampling = match mode {
+            0 | 1 | 4 | 5 => [
+                foliage_part("group2"),
+                include_str!("wgsl/foliage_parallax.wgsl"),
+                foliage_part("parallax sample"),
+            ],
+            2 | 3 => [
+                "",
+                include_str!("wgsl/foliage_offset.wgsl"),
+                foliage_part("offset sample"),
+            ],
+            _ => {
+                return Err(ShaderError::new(
+                    ShaderError::VALIDATE,
+                    format!("foliage mode {mode} is not in 0..=5"),
+                ));
+            }
+        };
+        let mut body = format!("const RAA_FOLIAGE_MODE: u32 = {mode}u;\n");
+        for part in sampling
+            .into_iter()
+            .chain([foliage_part("material"), foliage_part(entry)])
+        {
+            body.push_str(part);
+            body.push('\n');
+        }
+        let key = VariantKey {
+            flags: key.flags & !FOLIAGE_TRANSLUCENT_CLASSES,
+            ..*key
+        };
+        self.compose_pass(reg, &key, Some(&body))
     }
 
     fn compose_pass(
@@ -418,6 +486,17 @@ fn unparenthesised_mixes(source: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// The text of the `// raa foliage part: <name>` section of foliage_material.wgsl, up to
+/// the next part marker; empty when the part does not exist.
+fn foliage_part(name: &str) -> &'static str {
+    let marker = format!("// raa foliage part: {name}\n");
+    let start = FOLIAGE_MATERIAL_WGSL
+        .find(&marker)
+        .map_or(FOLIAGE_MATERIAL_WGSL.len(), |i| i + marker.len());
+    let rest = &FOLIAGE_MATERIAL_WGSL[start..];
+    &rest[..rest.find("// raa foliage part: ").unwrap_or(rest.len())]
 }
 
 /// Entry points of `pass`.
