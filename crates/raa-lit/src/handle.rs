@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
 use raa_math::{Aabb, Mat4, Vec3};
+use raa_mesh::AttributedMesh;
 use raa_scene::{InstanceIndex, RenderList, frustum_planes};
 use raa_shader::{
     ComposeOptions, Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError,
@@ -23,6 +24,7 @@ use raa_shader::{
 use crate::area_shadow::MAX_HERO_LIGHTS;
 use crate::area_stochastic::AreaStochasticFrame;
 use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
+use crate::foliage_resources::{FoliageSource, SourceTriangle};
 use crate::frame::FRAME_GPU_SIZE;
 use crate::instance_store::InstanceStore;
 use crate::library::SurfaceLibrary;
@@ -291,6 +293,83 @@ fn check_msaa(msaa: u32) -> Result<(), RaaError> {
             code: "render.invalid_msaa",
             message: format!("msaa must be 1 or 4 samples, got {msaa}"),
         })
+    }
+}
+
+/// Refuses `foliage.invalid` for a non-finite or singular source transform and returns its
+/// inverse-transpose normal matrix (the one [`Mat4::normal_matrix`] gives, checked first so
+/// a singular transform is never silently replaced by the identity).
+fn source_normal_matrix(m: &Mat4, name: &str) -> Result<[[f32; 4]; 3], RaaError> {
+    if !m.cols.iter().flatten().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!("{name} is not finite")));
+    }
+    if m.inverse().is_none() {
+        return Err(foliage_invalid(format!("{name} is singular")));
+    }
+    Ok(m.normal_matrix())
+}
+
+/// Source position `index` transformed into source-root metres.
+fn source_position(source: &AttributedMesh, index: u32, m: &Mat4) -> Result<[f32; 3], RaaError> {
+    let position = source
+        .base
+        .positions
+        .get(index as usize)
+        .copied()
+        .ok_or_else(|| foliage_invalid(format!("source index {index} is out of range")))?;
+    if !position.iter().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!(
+            "source position {index} is not finite"
+        )));
+    }
+    Ok(m.transform_point(Vec3::from_array(position)).to_array())
+}
+
+/// Source shading normal `index` through `normal_matrix` and renormalised.
+fn source_normal(
+    source: &AttributedMesh,
+    index: u32,
+    normal_matrix: [[f32; 4]; 3],
+) -> Result<[f32; 3], RaaError> {
+    let normal = source
+        .base
+        .normals
+        .get(index as usize)
+        .copied()
+        .ok_or_else(|| foliage_invalid(format!("source normal {index} is out of range")))?;
+    if !normal.iter().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!(
+            "source normal {index} is not finite"
+        )));
+    }
+    let v = Vec3::from_array(normal);
+    let t = Vec3::new(
+        normal_matrix[0][0] * v.x + normal_matrix[1][0] * v.y + normal_matrix[2][0] * v.z,
+        normal_matrix[0][1] * v.x + normal_matrix[1][1] * v.y + normal_matrix[2][1] * v.z,
+        normal_matrix[0][2] * v.x + normal_matrix[1][2] * v.y + normal_matrix[2][2] * v.z,
+    );
+    Ok(t.normalize_or_zero().to_array())
+}
+
+/// Source UV `index`, `[0, 0]` when the mesh carries none.
+fn source_uv(source: &AttributedMesh, index: u32) -> Result<[f32; 2], RaaError> {
+    let uv = source
+        .uvs
+        .as_ref()
+        .and_then(|uvs| uvs.get(index as usize))
+        .copied()
+        .unwrap_or([0.0, 0.0]);
+    if !uv.iter().all(|v| v.is_finite()) {
+        return Err(foliage_invalid(format!("source UV {index} is not finite")));
+    }
+    Ok(uv)
+}
+
+/// Refuses `foliage.invalid` with `message`.
+fn foliage_invalid(message: impl Into<String>) -> RaaError {
+    RaaError::FrameGraph {
+        code: "foliage.invalid",
+        message: message.into(),
     }
 }
 
@@ -1494,6 +1573,110 @@ impl LitHandle {
         s.meshes
             .submesh_range(s.select.mesh_binding(mesh).0)
             .unwrap_or((0, 0))
+    }
+
+    /// The immutable source-root triangles of `draws` for `generation`.
+    ///
+    /// Every tuple is `(mesh, material, source_tag, model_to_root, foliage)` in input draw
+    /// order; the triangles of each sub-mesh follow their ascending source index. Source
+    /// positions go to source-root through `model_to_root` and source shading normals
+    /// through its inverse transpose, so they stay independent of proxy geometry. Empty
+    /// draws give no triangles and zero bounds; unknown or removed mesh ids, non-finite or
+    /// singular transforms and malformed triangles give `foliage.invalid`. The retained
+    /// sources live beside the GPU buffers and only an upload, update or removal replaces
+    /// them, so an intervening pass cannot invalidate a snapshot.
+    ///
+    /// Handoff: 'Evaluate unlit source appearance for foliage baking' calls
+    /// [`LitHandle::foliage_source`], which today returns the retained source-root
+    /// triangles, bounds, `root_world` and `generation` of the ordered draw tuples.
+    /// Handoff: 'Publish completed foliage assets in the renderer' calls
+    /// [`LitHandle::foliage_source`] with the ordered mesh/material/tag/transform/foliage
+    /// tuples and receives the same immutable source snapshot for its generation.
+    /// Handoff: 'Expose asynchronous foliage preparation to JavaScript' calls
+    /// [`LitHandle::foliage_source`] after resolving the descriptor's source instance
+    /// handles, keeping its source draw materials separate from the compiled LOD1 material.
+    pub fn foliage_source(
+        &self,
+        draws: &[(MeshId, MaterialId, u32, Mat4, bool)],
+        root_world: Mat4,
+        generation: u32,
+    ) -> Result<FoliageSource, RaaError> {
+        if draws.is_empty() {
+            return Ok(FoliageSource {
+                triangles: Vec::new(),
+                min: [0.0; 3],
+                max: [0.0; 3],
+                root_world,
+                generation,
+            });
+        }
+        source_normal_matrix(&root_world, "root_world")?;
+        let s = self.shared.borrow();
+        let mut triangles = Vec::new();
+        let mut bounds = Aabb::EMPTY;
+        for &(mesh, material, source_tag, model_to_root, foliage) in draws {
+            let normal_matrix = source_normal_matrix(&model_to_root, "model_to_root")?;
+            let (source, first, count) = s
+                .meshes
+                .source(mesh)
+                .ok_or_else(|| foliage_invalid(format!("mesh {} is not uploaded", mesh.0)))?;
+            let start = first as usize;
+            let end = start
+                .checked_add(count as usize)
+                .filter(|&end| end <= source.base.indices.len())
+                .ok_or_else(|| {
+                    foliage_invalid(format!(
+                        "mesh {} range {start}..+{count} leaves its index buffer",
+                        mesh.0
+                    ))
+                })?;
+            let indices = &source.base.indices[start..end];
+            if !indices.len().is_multiple_of(3) {
+                return Err(foliage_invalid(format!(
+                    "mesh {} sub-mesh index count {count} is not a multiple of 3",
+                    mesh.0
+                )));
+            }
+            for triangle in indices.chunks_exact(3) {
+                let index = [triangle[0], triangle[1], triangle[2]];
+                let positions = [
+                    source_position(source, index[0], &model_to_root)?,
+                    source_position(source, index[1], &model_to_root)?,
+                    source_position(source, index[2], &model_to_root)?,
+                ];
+                for position in positions {
+                    bounds.include(Vec3::from_array(position));
+                }
+                triangles.push(SourceTriangle {
+                    positions,
+                    normals: [
+                        source_normal(source, index[0], normal_matrix)?,
+                        source_normal(source, index[1], normal_matrix)?,
+                        source_normal(source, index[2], normal_matrix)?,
+                    ],
+                    uv: [
+                        source_uv(source, index[0])?,
+                        source_uv(source, index[1])?,
+                        source_uv(source, index[2])?,
+                    ],
+                    material: material.0,
+                    source_tag,
+                    foliage,
+                });
+            }
+        }
+        let (min, max) = if triangles.is_empty() {
+            ([0.0; 3], [0.0; 3])
+        } else {
+            (bounds.min.to_array(), bounds.max.to_array())
+        };
+        Ok(FoliageSource {
+            triangles,
+            min,
+            max,
+            root_world,
+            generation,
+        })
     }
 
     /// The buffers of sub-mesh `mesh` with its range and lit mesh vertex count; `None` for
