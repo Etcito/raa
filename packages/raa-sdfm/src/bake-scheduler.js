@@ -86,7 +86,7 @@ export function createBakeScheduler(engine, options) {
       const changed = [];
       const baked = await Promise.all(group.map(async ({ part, size }) => {
         try {
-          return { part, r: await baker.bake({ shading: part.shading, materials: part.materials, field, positions: part.positions,
+          return { part, r: await baker.bake({ shading: part.shading, materials: part.materials, field, pages: part.pages, positions: part.positions,
             normals: part.normals, uvs: part.uvs, tangents: part.tangents, indices: part.indices, size }) };
         } catch (e) {
           if (part.state === 'queued') { fail(part, `bake failed: ${messageOf(e)}`); changed.push(part); }
@@ -150,8 +150,9 @@ export function createBakeScheduler(engine, options) {
      * A part the 'baked' shading draws: its surface material (the shared baked function, a data block naming no texture
      * yet; `look` = roughness/metallic, the shading's by default) and its bake tangents. The renderer draws its mesh
      * (positions, normals, uvs, `tangents`, indices) with `material`, hidden until `state` is 'done'.
+     * `pages`: the document's image page words when its materials sample them (MAMA graphPagesOfDoc; bake `pages`).
      */
-    prepare({ shading, materials, positions, normals, uvs, indices, look = shading?.look, label = '' }) {
+    prepare({ shading, materials, pages, positions, normals, uvs, indices, look = shading?.look, label = '' }) {
       if (disposed) throw new SdfmError('sdfm.disposed', 'the bake scheduler was disposed');
       if (!shading || !Array.isArray(shading.operands)) throw new SdfmError('sdfm.schema', `${label}: a baked part needs its field shading`);
       if (!(uvs instanceof Float32Array) || uvs.length !== positions.length / 3 * 2) throw new SdfmError('sdfm.schema', `${label}: a baked part needs its UV atlas (one uv per vertex)`);
@@ -162,7 +163,7 @@ export function createBakeScheduler(engine, options) {
       const tangents = partTangents(positions, normals, uvs, indices);
       const data = engine.addMaterialData(bakedMaterialWords(BAKED_NO_TEXTURE, BAKED_NO_TEXTURE));
       const material = engine.addSurfaceMaterial({ function: BAKED_FUNCTION, data, roughness: look.roughness, metallic: look.metallic });
-      return { state: 'idle', label, shading, materials, positions, normals, uvs, indices, tangents, data, material, textures: [], size: 0, texels: 0, error: null };
+      return { state: 'idle', label, shading, materials, pages, positions, normals, uvs, indices, tangents, data, material, textures: [], size: 0, texels: 0, error: null };
     },
     /** Queues the idle parts a scene shows; one run bakes them. */
     queue(parts) {

@@ -336,6 +336,13 @@ export interface SdfmCompiledMaterial {
   constants: number[];
   /** MaterialFull field names in declaration order. */
   fields: string[];
+  /**
+   * Indices of the `constants` words that point into the document's image page words (MAMA slots.ts graphPagesOfDoc:
+   * SVG PLUS pages, the Bitmap atlas, surface image pages), relative to those words. A material with pages needs
+   * `pagesBase` (the material data base where the host placed the page words) in {@link mapMaterial} and
+   * {@link fieldPartShading}; absent = none.
+   */
+  pages?: number[];
 }
 
 /**
@@ -351,6 +358,14 @@ export interface SdfmMappedMaterial {
   desc: { function: string; blend: SurfaceBlend; cel?: boolean };
   /** MaterialFull fields with no MaterialOutput counterpart, in declaration order. */
   dropped: string[];
+  /** 'graph' when the graph reads the player colour itself (RAA then skips the tint multiply). */
+  tintMode: 'graph' | 'multiply';
+  /**
+   * A material with `pages` only: its constants (each page word plus `pagesBase`), read as material data words. Add them
+   * (`Engine.addMaterialData`) and set the base as `desc.data`; `functionName` is then a hash of the text, shared by
+   * every material with the same graph structure.
+   */
+  words?: Uint32Array;
 }
 
 /**
@@ -596,7 +611,7 @@ export function validateClusterSection(value: unknown, where: string): ClusterSe
  * record, unknown field, unresolvable constant read, a remaining S11-forbidden token, an
  * identifier starting `raa_`, or more than 65536 bytes).
  */
-export function mapMaterial(material: SdfmCompiledMaterial, options?: { cel?: boolean }): SdfmMappedMaterial;
+export function mapMaterial(material: SdfmCompiledMaterial, options?: { cel?: boolean; pagesBase?: number }): SdfmMappedMaterial;
 
 /** S11 user functions are at most this many bytes. */
 export const MATERIAL_FUNCTION_MAX_BYTES: 65536;
@@ -683,10 +698,14 @@ export function checkPartShading(shading: unknown): SdfmPartShading;
  * roughness/metallic to the surface record (`look`); `debug` shows the normal (a data flag, same function). `relief`
  * marches the field to the recess (parallax); a pane operand (`interior`) shows a room of its set: write the tile ids at
  * the `interiors` slots once the pictures are loaded (until then the pane shows its glass).
- * Refusals: `sdfm.schema` (record, evaluator), `sdfm.material_unmappable` (a material that cannot be inlined, over 65536 bytes).
+ * A material with `pages` reads the document's image page words at `options.pagesBase` (placed once by the host with
+ * Engine.addMaterialData), as Local fields reads them in binding 7; a graph that declares mat_footprint gets it set per
+ * fragment (metres per screen pixel).
+ * Refusals: `sdfm.schema` (record, evaluator), `sdfm.material_unmappable` (a material that cannot be inlined, over 65536
+ * bytes, pages without `pagesBase`).
  */
 export function fieldPartShading(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
-  options: { field: string; debug?: boolean; interiors?: SdfmFieldInteriors }): { name: string; wgsl: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[];
+  options: { field: string; debug?: boolean; interiors?: SdfmFieldInteriors; pagesBase?: number }): { name: string; wgsl: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[];
     interiors: SdfmFieldInteriorSlot[] };
 /** The vertex streams of a field-shaded mesh: colours = rest position + rest normal z, uvs = rest normal xy, tangents = restTangent. */
 export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32Array):
@@ -697,8 +716,8 @@ export function fieldSurfaceAttributes(positions: Float32Array, normals: Float32
  * `raa_material_f32`, which the RAA prelude (fieldPartShading) or the bake shim (field-bake) define.
  */
 export function fieldShadingCore(shading: SdfmPartShading, materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[],
-  options: { field: string; debug?: boolean; interiors?: SdfmFieldInteriors }): { core: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[];
-    interiors: SdfmFieldInteriorSlot[] };
+  options: { field: string; debug?: boolean; interiors?: SdfmFieldInteriors; pagesBase?: number }): { core: string; words: Uint32Array; tintMode: 'graph' | 'multiply'; missing: string[];
+    interiors: SdfmFieldInteriorSlot[]; footprint: boolean };
 
 /** The one material function every baked part draws with (game render option shading 'baked'). */
 export const BAKED_FUNCTION: 'sdfb.baked';
@@ -729,6 +748,8 @@ export interface SdfmBakeInput {
   shading: SdfmPartShading;
   materials: ReadonlyMap<string, SdfmCompiledMaterial> | readonly SdfmCompiledMaterial[];
   field: string;
+  /** The document's image page words when a material has `pages`; the bake places them after the part's words. */
+  pages?: Uint32Array;
   positions: Float32Array;
   normals: Float32Array;
   uvs: Float32Array;
@@ -776,7 +797,7 @@ export interface SdfmBakeStats {
 }
 export interface SdfmBakeScheduler {
   /** Registers the shared baked function once, adds the part's data block and surface material, computes its tangents. */
-  prepare(part: { shading: SdfmPartShading; materials: SdfmBakeInput['materials']; positions: Float32Array; normals: Float32Array;
+  prepare(part: { shading: SdfmPartShading; materials: SdfmBakeInput['materials']; pages?: Uint32Array; positions: Float32Array; normals: Float32Array;
     uvs: Float32Array; indices: Uint32Array; look?: { roughness: number; metallic: number }; label?: string }): SdfmBakedPart;
   /** Queues the idle parts a scene shows; one run (next macrotask) fits and bakes everything queued. */
   queue(parts: readonly SdfmBakedPart[]): void;
