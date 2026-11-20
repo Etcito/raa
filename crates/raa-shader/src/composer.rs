@@ -116,6 +116,32 @@ impl Composer {
         reg: &MaterialFnRegistry,
         key: &VariantKey,
     ) -> Result<String, ShaderError> {
+        self.compose_pass(reg, key, None)
+    }
+
+    /// Composes an unlit billboard bake with diffuse, object normal and opacity targets.
+    /// Call [`Composer::validate`] before creating a pipeline. The pipeline must use depth
+    /// testing and clear its colour targets to zero.
+    ///
+    /// Handoff: `Composer::compose_billboard_bake` composes the shader for Render eight directions into the bake targets.
+    pub fn compose_billboard_bake(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+    ) -> Result<String, ShaderError> {
+        self.compose_pass(
+            reg,
+            key,
+            Some(include_str!("wgsl/pass_billboard_bake.wgsl")),
+        )
+    }
+
+    fn compose_pass(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+        bake: Option<&str>,
+    ) -> Result<String, ShaderError> {
         let entry = reg.get(key.material_fn).ok_or_else(|| {
             ShaderError::new(
                 ShaderError::UNKNOWN_FN,
@@ -164,7 +190,7 @@ impl Composer {
             section(&mut out, &title, &p.wgsl);
         }
         section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
-        if matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
+        if bake.is_none() && matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
             section(&mut out, "depth", DEPTH_WGSL);
             section(&mut out, "vg surface", VG_SURFACE_WGSL);
         }
@@ -172,7 +198,7 @@ impl Composer {
             "const RAA_MSAA: u32 = {}u;\nconst RAA_VARIANT_FLAGS: u32 = {}u;\n\n{}",
             key.msaa,
             key.flags,
-            pass_wgsl(key.pass)
+            bake.unwrap_or_else(|| pass_wgsl(key.pass))
         );
         section(&mut out, &format!("pass {:?}", key.pass), &pass);
         Ok(out)
