@@ -136,6 +136,27 @@ impl Composer {
         )
     }
 
+    /// Composes the unlit foliage reference shader: `vs_main` and `fs_main` evaluate the
+    /// material function and the vertex path, then write the world normal and coverage
+    /// (location 0, Rgba16Float), the standard-Z depth in X and zero YZW (location 1,
+    /// Rgba32Float) and the linear unlit albedo and coverage (location 2, Rgba8Unorm).
+    /// Coverage is the material opacity of the source. The depth attachment is
+    /// Depth32Float with clear 1 and `Less`; every colour target clears to zero.
+    ///
+    /// Handoff: `Composer::compose_foliage_reference` composes this reference module
+    /// (`vs_main` and `fs_main`) for Render reference views and convex-hull bake layers.
+    pub fn compose_foliage_reference(
+        &self,
+        reg: &MaterialFnRegistry,
+        key: &VariantKey,
+    ) -> Result<String, ShaderError> {
+        self.compose_pass(
+            reg,
+            key,
+            Some(include_str!("wgsl/pass_foliage_reference.wgsl")),
+        )
+    }
+
     fn compose_pass(
         &self,
         reg: &MaterialFnRegistry,
