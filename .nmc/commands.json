@@ -395,5 +395,59 @@
     "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/compute --stage compute --budget-s 1020",
     "timeout_s": 1200,
     "after": ["rg-compute-render", "rg-compute-fresh"]
+  },
+  {
+    "name": "rg-frozen-check",
+    "command": "node web/common/render-graph-job.mjs check --page dist/render-graph --out out/render-graph/frozen --stage frozen",
+    "timeout_s": 60,
+    "after": ["rg-build"]
+  },
+  {
+    "name": "rg-frozen-select",
+    "command": "node web/common/render-graph-job.mjs select --page dist/render-graph --out out/render-graph/frozen --stage frozen",
+    "timeout_s": 60,
+    "after": ["rg-frozen-check"]
+  },
+  {
+    "name": "rg-frozen-clean",
+    "command": "node web/common/render-graph-job.mjs clean --page dist/render-graph --out out/render-graph/frozen --stage frozen",
+    "timeout_s": 60,
+    "after": ["rg-frozen-select"]
+  },
+  {
+    "name": "rg-frozen-render",
+    "command": "node web/common/render-graph-job.mjs render --page dist/render-graph --out out/render-graph/frozen --stage frozen",
+    "timeout_s": 1500,
+    "after": ["rg-frozen-clean"]
+  },
+  {
+    "name": "rg-frozen-fresh",
+    "command": "node web/common/render-graph-job.mjs fresh --page dist/render-graph --out out/render-graph/frozen --stage frozen",
+    "timeout_s": 120,
+    "after": ["rg-frozen-render"]
+  },
+  {
+    "name": "rg-frozen-judge",
+    "command": "node web/common/render-graph-job.mjs judge --page dist/render-graph --out out/render-graph/frozen --stage frozen --budget-s 1020",
+    "timeout_s": 1200,
+    "after": ["rg-frozen-render", "rg-frozen-fresh"]
+  },
+  {
+    "name": "rg-frozen-milestone-check",
+    "command": "bash scripts/check.sh",
+    "timeout_s": 3600,
+    "after": ["rg-frozen-judge"]
+  },
+  {
+    "name": "rg-frozen-smoke-page-check",
+    "command": "node --test examples/render-graph/contract.test.mjs",
+    "timeout_s": 30,
+    "after": ["rg-frozen-milestone-check"]
+  },
+  {
+    "name": "rg-frozen-smoke-job-check",
+    "command": "node --test web/common/render-graph-job.test.mjs",
+    "timeout_s": 30,
+    "after": ["rg-frozen-smoke-page-check"]
   }
 ]
