@@ -896,18 +896,20 @@ impl LitShared {
         Ok(count)
     }
 
-    /// Takes the material atlas out for an asynchronous publication (leaving an empty
-    /// placeholder), so no `RefCell` borrow of this state is held across an await.
-    pub(crate) fn take_textures(&mut self, gpu: &GpuContext) -> TextureAtlas {
-        let mut empty = TextureAtlas::new(gpu);
-        std::mem::swap(&mut self.textures, &mut empty);
-        empty
-    }
-
-    /// Puts `atlas` back after a publication and rebuilds group 0 for its (possibly newly
-    /// allocated) texture view.
-    pub(crate) fn restore_textures(&mut self, gpu: &GpuContext, atlas: TextureAtlas) {
-        self.textures = atlas;
+    /// Submits the billboard copies into the installed atlas and updates group 0 before
+    /// returning an owned GPU-completion future. No atlas borrow survives submission.
+    pub(crate) fn submit_billboard_publication(
+        &mut self,
+        gpu: &GpuContext,
+        targets: &mut crate::BillboardTargets,
+    ) -> Result<
+        (
+            crate::billboard_targets::BillboardAtlasImages,
+            impl std::future::Future<Output = Result<(), RaaError>> + 'static + use<>,
+        ),
+        RaaError,
+    > {
+        let publication = targets.submit_publish(gpu, &mut self.textures);
         self.frame_bind_group = create_frame_bind_group(
             gpu,
             &self.frame_layout,
@@ -921,6 +923,7 @@ impl LitShared {
             &self.textures,
             &self.data,
         );
+        publication
     }
 
     /// Mirrors the editor overlay state into the skin draw source (the skin pass builds

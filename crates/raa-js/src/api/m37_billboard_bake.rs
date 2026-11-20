@@ -326,50 +326,6 @@ pub fn ready_for_groups(store: &SharedBakeStore, bake: u32) -> bool {
     store.borrow().is_ready(bake)
 }
 
-/// Owns a value taken out of a shared cell for the duration of an asynchronous operation
-/// and puts it back when dropped, whether the operation succeeded, failed or its future
-/// was cancelled. The cell stays empty during the await, so no `RefCell` borrow is ever
-/// held across it. Dropping the guard is the only restoration path, so an error return
-/// and a cancelled future take the same code as a success.
-#[derive(Debug)]
-pub struct StateGuard<T> {
-    cell: Rc<RefCell<Option<T>>>,
-    state: Option<T>,
-}
-
-impl<T> StateGuard<T> {
-    /// Takes the value out of `cell`; `None` when the cell is already empty.
-    pub fn take(cell: Rc<RefCell<Option<T>>>) -> Option<Self> {
-        let state = cell.borrow_mut().take()?;
-        Some(Self {
-            cell,
-            state: Some(state),
-        })
-    }
-
-    #[allow(dead_code)]
-    pub fn get(&self) -> Option<&T> {
-        self.state.as_ref()
-    }
-
-    pub fn get_mut(&mut self) -> Option<&mut T> {
-        self.state.as_mut()
-    }
-}
-
-impl<T> Drop for StateGuard<T> {
-    fn drop(&mut self) {
-        let Some(state) = self.state.take() else {
-            return;
-        };
-        if let Ok(mut guard) = self.cell.try_borrow_mut()
-            && guard.is_none()
-        {
-            *guard = Some(state);
-        }
-    }
-}
-
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::{frame, install};
 
@@ -463,7 +419,7 @@ mod web {
     }
 
     /// The descriptor fields that need no engine state: validated before the state is
-    /// taken, so a malformed descriptor never mutates the engine.
+    /// borrowed, so a malformed descriptor never mutates the engine.
     struct BakeSpec {
         instances: Vec<u32>,
         root: u32,
@@ -487,7 +443,7 @@ mod web {
         })
     }
 
-    /// Resolves the live handles of a validated [`BakeSpec`] against the taken state. A
+    /// Resolves the live handles of a validated [`BakeSpec`] against the live state. A
     /// stale or unknown handle refuses before any GPU work or mutation.
     fn resolve_request(st: &EngineState, spec: BakeSpec) -> Result<BakeRequest, RaaError> {
         let root_world = root_frame(spec.root, |h| {
@@ -588,67 +544,79 @@ mod web {
         /// (`crates/raa-js/src/api/m36_billboard_groups.rs:188`, handoff at `:170`) and
         /// `select_billboard` (`crates/raa-js/src/billboard_selection.rs:75`).
         #[wasm_bindgen(js_name = bakeBillboard)]
-        pub async fn bake_billboard(&mut self, desc: JsValue) -> Result<JsValue, JsValue> {
-            // Descriptor shape first: a malformed descriptor refuses with
-            // `billboard.invalid` before the engine state is taken or mutated.
-            let spec = parse_spec(&desc).map_err(|e| error_to_js(&e))?;
-            let (gpu, rc) = self.bake_context()?;
-            // The state is owned by the guard across the await; the cell is empty, so no
-            // `RefCell` borrow is held. Dropping the guard (success, error or cancelled
-            // future) restores the state.
-            let mut restore = StateGuard::take(rc).ok_or_else(disposed)?;
-            let st = restore.get_mut().expect("the bake state is present");
-            st.scene.update_world();
-            let request = resolve_request(st, spec).map_err(|e| error_to_js(&e))?;
-            let store = st
-                .features
-                .get::<SharedBakeStore>()
-                .cloned()
-                .ok_or_else(|| {
-                    error_to_js(&invalid("the billboard bake feature is not installed"))
-                })?;
-            let id = store.borrow_mut().begin(request.root);
-            let input = BillboardBakeInput {
-                tags: request.tags,
-                root_world: request.root_world,
-                resolution: request.resolution,
-            };
-            let result = st.lit.bake_billboard(gpu, &mut st.scene, input).await;
-            match result {
-                Ok(result) => {
-                    let bake = BillboardBake::from_result(id, result);
-                    let completion = store.borrow_mut().complete(id, bake);
-                    match completion {
-                        Completion::Published => Ok(bake_value(&bake)),
-                        Completion::Stale(images) => {
-                            for image in images {
-                                let _ = st.lit.remove_texture(gpu, image);
+        pub fn bake_billboard(&self, desc: JsValue) -> js_sys::Promise {
+            // Only this synchronous section borrows Engine. The Promise owns its GPU
+            // handle and state cell; neither Engine nor the state is borrowed at await.
+            let submission = (|| {
+                let spec = parse_spec(&desc).map_err(|e| error_to_js(&e))?;
+                let (gpu, rc) = self.bake_context()?;
+                let mut guard = rc.borrow_mut();
+                let st = guard.as_mut().ok_or_else(disposed)?;
+                st.scene.update_world();
+                let request = resolve_request(st, spec).map_err(|e| error_to_js(&e))?;
+                let store = st
+                    .features
+                    .get::<SharedBakeStore>()
+                    .cloned()
+                    .ok_or_else(|| {
+                        error_to_js(&invalid("the billboard bake feature is not installed"))
+                    })?;
+                let id = store.borrow_mut().begin(request.root);
+                let input = BillboardBakeInput {
+                    tags: request.tags,
+                    root_world: request.root_world,
+                    resolution: request.resolution,
+                };
+                let completion = st.lit.bake_billboard(&gpu, &mut st.scene, input);
+                drop(guard);
+                Ok::<_, JsValue>((gpu, rc, store, id, completion))
+            })();
+            wasm_bindgen_futures::future_to_promise(async move {
+                let (gpu, rc, store, id, completion) = submission?;
+                let result = completion.await;
+                let mut guard = rc.borrow_mut();
+                let Some(st) = guard.as_mut() else {
+                    // dispose may run while GPU work is pending. Its renderer is gone;
+                    // no atlas ids may become selectable in the surviving store.
+                    store.borrow_mut().invalidate();
+                    return Err(disposed());
+                };
+                // Device loss may arrive after the completion callback, before publish.
+                let result = result.and_then(|result| gpu.ensure_live().map(|()| result));
+                match result {
+                    Ok(result) => {
+                        let bake = BillboardBake::from_result(id, result);
+                        let completion = store.borrow_mut().complete(id, bake);
+                        match completion {
+                            Completion::Published => Ok(bake_value(&bake)),
+                            Completion::Stale(images) => {
+                                for image in images {
+                                    let _ = st.lit.remove_texture(&gpu, image);
+                                }
+                                Err(error_to_js(&invalid(
+                                    "the billboard bake was removed before it completed",
+                                )))
                             }
-                            Err(error_to_js(&invalid(
-                                "the billboard bake was removed before it completed",
-                            )))
+                            Completion::Discarded => Err(error_to_js(&invalid(format!(
+                                "billboard bake {id} already finished"
+                            )))),
                         }
-                        Completion::Discarded => Err(error_to_js(&invalid(format!(
-                            "billboard bake {id} already finished"
-                        )))),
+                    }
+                    Err(error) => {
+                        if error.code() == "core.gpu" {
+                            store.borrow_mut().invalidate();
+                        } else {
+                            store.borrow_mut().fail(id, error.to_string());
+                        }
+                        let code = if error.code() == BILLBOARD_INVALID {
+                            BILLBOARD_INVALID
+                        } else {
+                            BILLBOARD_BAKE_FAILED
+                        };
+                        Err(error_to_js(&bake_error(code, error.to_string())))
                     }
                 }
-                Err(error) => {
-                    if error.code() == "core.gpu" {
-                        // Device loss: reject every pending bake and invalidate every
-                        // published handle at once; the device owns the stale images.
-                        store.borrow_mut().invalidate();
-                    } else {
-                        store.borrow_mut().fail(id, error.to_string());
-                    }
-                    let code = if error.code() == BILLBOARD_INVALID {
-                        BILLBOARD_INVALID
-                    } else {
-                        BILLBOARD_BAKE_FAILED
-                    };
-                    Err(error_to_js(&bake_error(code, error.to_string())))
-                }
-            }
+            })
         }
 
         /// Releases the complete bake `id`: dependent groups detach to LOD0 before the

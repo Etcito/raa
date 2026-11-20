@@ -422,8 +422,33 @@ pub struct LitRenderer {
     active_area_stochastic: u32,
 }
 
-/// One submitted draw the billboard bake renders: its sub-mesh, material and the
-/// root-frame instance record plus extras built for this bake.
+// Keeps partial atlas allocations private to the bake until successful completion.
+// Also cleans up if the caller drops the returned future before polling it.
+struct BakePublication {
+    shared: Rc<RefCell<LitShared>>,
+    gpu: GpuContext,
+    images: Option<[u32; 3]>,
+    _targets: BillboardTargets,
+}
+
+impl BakePublication {
+    fn complete(mut self) {
+        self.images = None;
+    }
+}
+
+impl Drop for BakePublication {
+    fn drop(&mut self) {
+        if let Some(images) = self.images.take() {
+            let mut shared = self.shared.borrow_mut();
+            for id in images {
+                shared.remove_texture(&self.gpu, id);
+            }
+        }
+    }
+}
+
+/// One submitted draw: its sub-mesh, material and root-frame instance record.
 struct BakeSource {
     mesh: MeshId,
     material: u32,
@@ -686,8 +711,9 @@ impl LitRenderer {
     /// renders every source draw in LOD0 order and calls
     /// [`BillboardTargets::encode_tile`](crate::BillboardTargets) after that view. After all
     /// views it submits the work, publishes the three atlas images
-    /// ([`BillboardTargets::publish`](crate::BillboardTargets)) and only then releases the
-    /// temporary targets. The scene camera is restored on success and failure; a failed
+    /// ([`BillboardTargets::submit_publish`](crate::BillboardTargets)) and only then releases the
+    /// temporary targets. Submission is synchronous; the returned future owns all GPU
+    /// handles and holds no renderer or scene borrow. The scene camera is untouched; a failed
     /// publication removes its partial atlas allocations. The returned atlas ids stay live
     /// until the caller removes them with [`LitRenderer::remove_texture`].
     ///
@@ -697,24 +723,26 @@ impl LitRenderer {
     /// [`LitRenderer::remove_texture`]. Today the method renders the submitted groups in
     /// the eight orthographic directions, publishes the three atlas images and returns the
     /// common framing and tile layout; a failure leaves no atlas allocation behind.
-    pub async fn bake_billboard(
+    pub fn bake_billboard(
         &mut self,
         gpu: &GpuContext,
         scene: &mut Scene,
         input: BillboardBakeInput,
-    ) -> Result<BillboardBakeResult, RaaError> {
-        let camera = scene.camera;
-        let result = self.bake_billboard_inner(gpu, scene, input).await;
-        scene.camera = camera;
-        result
+    ) -> impl std::future::Future<Output = Result<BillboardBakeResult, RaaError>> + 'static + use<>
+    {
+        let submitted = self.submit_billboard(gpu, scene, input);
+        async move { submitted?.await }
     }
 
-    async fn bake_billboard_inner(
+    fn submit_billboard(
         &mut self,
         gpu: &GpuContext,
         scene: &mut Scene,
         input: BillboardBakeInput,
-    ) -> Result<BillboardBakeResult, RaaError> {
+    ) -> Result<
+        impl std::future::Future<Output = Result<BillboardBakeResult, RaaError>> + 'static + use<>,
+        RaaError,
+    > {
         // Refuse bad input before touching the GPU.
         crate::billboard_layout(input.resolution)?;
         if input.tags.is_empty() {
@@ -958,19 +986,30 @@ impl LitRenderer {
             return Err(e);
         }
 
-        let mut atlas = self.shared.borrow_mut().take_textures(gpu);
-        let published = targets.publish(gpu, &mut atlas).await;
-        self.shared.borrow_mut().restore_textures(gpu, atlas);
-        targets.release();
-        let images = published?;
-        Ok(BillboardBakeResult {
-            diffuse: images.diffuse,
-            normal: images.normal,
-            opacity: images.opacity,
-            center: framing.center,
-            size: framing.size,
-            tiles: images.tiles,
-            extent: images.extent,
+        // The atlas never leaves the renderer while the GPU is pending. Rebuild group 0
+        // immediately if publication allocated it, so normal frames keep their textures.
+        let (images, done) = self
+            .shared
+            .borrow_mut()
+            .submit_billboard_publication(gpu, &mut targets)?;
+        let publication = BakePublication {
+            shared: Rc::clone(&self.shared),
+            gpu: gpu.clone(),
+            images: Some([images.diffuse, images.normal, images.opacity]),
+            _targets: targets,
+        };
+        Ok(async move {
+            done.await?;
+            publication.complete();
+            Ok(BillboardBakeResult {
+                diffuse: images.diffuse,
+                normal: images.normal,
+                opacity: images.opacity,
+                center: framing.center,
+                size: framing.size,
+                tiles: images.tiles,
+                extent: images.extent,
+            })
         })
     }
 
@@ -2090,6 +2129,90 @@ mod tests {
         assert!(lit.clear_mesh_lods(MeshId(0)));
         assert!(!lit.has_mesh_lods(MeshId(0)));
         assert!(!lit.clear_mesh_lods(MeshId(0)));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pending_billboard_bake_leaves_state_and_atlas_available() {
+        use raa_core::testing::{block_on, skip, software_gpu};
+        let Some(gpu) = software_gpu() else {
+            skip(
+                "pending_billboard_bake_leaves_state_and_atlas_available",
+                "no adapter",
+            );
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).unwrap();
+        let mesh = AttributedMesh::from_mesh(crate::billboard_proxy([0.0; 3], [2.0; 2]).unwrap());
+        let uploaded = lit.upload(&gpu, &mesh).unwrap();
+        let mesh = lit.submesh_ids(uploaded).unwrap()[0];
+        let mut scene = Scene::new();
+        scene.camera.eye = Vec3::new(0.0, 0.0, 6.0);
+        let node = scene
+            .add_node(None, raa_scene::Transform::IDENTITY)
+            .unwrap();
+        let instance = scene.add_instance(node, mesh, MaterialId(0)).unwrap();
+        scene.set_instance_tag(instance, 7).unwrap();
+        let state = Rc::new(RefCell::new(Some((lit, scene))));
+        fn owned<F: std::future::Future + 'static>(future: F) -> F {
+            future
+        }
+        let submit = || {
+            let mut state = state.borrow_mut();
+            let (lit, scene) = state.as_mut().unwrap();
+            owned(lit.bake_billboard(
+                &gpu,
+                scene,
+                BillboardBakeInput {
+                    tags: vec![7],
+                    root_world: Mat4::IDENTITY,
+                    resolution: 64,
+                },
+            ))
+        };
+        let pending = submit();
+        let atlas_before = {
+            let mut guard = state.try_borrow_mut().expect("bake holds no state borrow");
+            let (lit, scene) = guard.as_mut().expect("state stays in its cell");
+            let mut list = RenderList::with_capacity(1);
+            let counts = lit
+                .prepare(&gpu, scene, &mut list, &mut Vec::new(), &mut Vec::new())
+                .unwrap();
+            assert_eq!(counts.instances, 1, "the normal LOD0 view still prepares");
+            assert_eq!(lit.shared.borrow().texture_packer().len(), 3);
+            lit.shared.borrow().texture_packer().clone()
+        };
+        let result = block_on(pending).expect("bake completes after other state access");
+        let mut guard = state.borrow_mut();
+        let (lit, _) = guard.as_mut().unwrap();
+        for id in [result.diffuse, result.normal, result.opacity] {
+            assert_eq!(
+                lit.texture_rect(id),
+                atlas_before.rect(id),
+                "atlas stays installed"
+            );
+            lit.remove_texture(&gpu, id).unwrap();
+        }
+        drop(guard);
+        // Cancellation also releases submitted atlas allocations without taking state.
+        drop(submit());
+        assert_eq!(
+            state
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .0
+                .shared
+                .borrow()
+                .texture_packer()
+                .len(),
+            0
+        );
     }
 
     const LIFE_SIZE: (u32, u32) = (640, 360);

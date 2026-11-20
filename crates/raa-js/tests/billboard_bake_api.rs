@@ -24,7 +24,7 @@ use m36::{
 };
 use m37::{
     BILLBOARD_BAKE_FAILED, BILLBOARD_INVALID, BillboardBake, BillboardBakeState,
-    BillboardBakeStore, Completion, RemovalStep, StateGuard, expand_tags, remove_bake, root_frame,
+    BillboardBakeStore, Completion, RemovalStep, expand_tags, remove_bake, root_frame,
     validate_resolution,
 };
 
@@ -373,55 +373,6 @@ fn only_a_ready_bake_produces_proxy_metadata() {
         store.ready(failed).is_none(),
         "a failed bake has no proxy framing"
     );
-}
-
-#[test]
-fn the_state_guard_restores_on_success_error_and_cancellation() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    // Success: the guard drops at the end of its scope.
-    let cell: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(Some("engine".into())));
-    {
-        let guard = StateGuard::take(Rc::clone(&cell)).expect("state taken");
-        assert!(
-            cell.borrow().is_none(),
-            "the cell is empty during the await"
-        );
-        assert_eq!(guard.get().map(String::as_str), Some("engine"));
-    }
-    assert_eq!(cell.borrow().as_deref(), Some("engine"));
-
-    // Error: an early return still drops the guard.
-    fn failing(cell: Rc<RefCell<Option<String>>>) -> Result<(), &'static str> {
-        let _guard = StateGuard::take(cell).expect("state taken");
-        Err("bake failed")
-    }
-    let cell: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(Some("engine".into())));
-    assert_eq!(failing(Rc::clone(&cell)), Err("bake failed"));
-    assert_eq!(cell.borrow().as_deref(), Some("engine"));
-
-    // Cancellation: dropping the future drops the guard without any completion path.
-    let cell: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(Some("engine".into())));
-    let guard = StateGuard::take(Rc::clone(&cell)).expect("state taken");
-    drop(guard);
-    assert_eq!(cell.borrow().as_deref(), Some("engine"));
-
-    // An empty cell is refused, never fabricated.
-    let empty: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    assert!(StateGuard::take(empty).is_none());
-}
-
-#[test]
-fn the_state_guard_never_overwrites_newer_state() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    let cell: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(Some("old".into())));
-    let guard = StateGuard::take(Rc::clone(&cell)).expect("state taken");
-    *cell.borrow_mut() = Some("new".into());
-    drop(guard);
-    assert_eq!(cell.borrow().as_deref(), Some("new"));
 }
 
 #[test]

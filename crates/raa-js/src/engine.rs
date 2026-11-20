@@ -422,21 +422,12 @@ impl Engine {
         f(runtime.gpu(), s).map_err(|e| js_err(&e))
     }
 
-    /// Returns the live GPU context and a clone of the shared state cell. The caller owns
-    /// state acquisition and restoration; it must not hold a `RefCell` borrow across
-    /// `await`. The GPU reference stays tied to `self`; the engine keeps `runtime` and
-    /// `state` private.
-    ///
-    /// Handoff: 'Expose asynchronous billboard baking through safe Engine access' uses this
-    /// helper to reach the GPU and the state for a bake; `EngineState::upload_scratch`
-    /// stays the mesh-upload provider for the prepared primitive mesh.
-    #[allow(dead_code, clippy::type_complexity)]
-    pub(crate) fn bake_context(
-        &self,
-    ) -> Result<(&GpuContext, Rc<RefCell<Option<EngineState>>>), JsValue> {
+    /// Returns owned handles to the live GPU and shared state. Async callers borrow the
+    /// state only for submission and publication, leaving it available between awaits.
+    pub(crate) fn bake_context(&self) -> Result<(GpuContext, Shared), JsValue> {
         let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
         runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
-        Ok((runtime.gpu(), Rc::clone(&self.state)))
+        Ok((runtime.gpu().clone(), Rc::clone(&self.state)))
     }
 
     /// Opens one scene invocation: clear the observation and open the renderer's index.

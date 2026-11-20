@@ -14,7 +14,7 @@
 //! and one Depth32Float attachment are reused for each direction; `encode_tile` copies each
 //! colour attachment into its direction's content rect of a combined image of
 //! `layout.extent` and duplicates the edge texels into the gutters, all with GPU copies.
-//! `publish` copies the three combined images into the atlas with
+//! `submit_publish` copies the three combined images into the atlas with
 //! `TextureAtlas::add_gpu_image`. No texel is generated, read back or uploaded by the CPU.
 
 use std::cell::Cell;
@@ -129,7 +129,7 @@ pub(crate) struct BillboardAttachments<'a> {
     pub depth: &'a wgpu::TextureView,
 }
 
-/// The atlas ids of a successful [`BillboardTargets::publish`] and the layout it was made
+/// The atlas ids of a successful [`BillboardTargets::submit_publish`] and the layout it was made
 /// with; the caller owns the ids and removes them with `TextureAtlas::remove`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BillboardAtlasImages {
@@ -237,7 +237,7 @@ fn submitted_work_done(gpu: &GpuContext) -> WorkDone {
 /// The private offscreen targets of one billboard bake at one resolution (see the module
 /// documentation): per-direction attachments, three combined images and the set of
 /// directions encoded so far. It owns no atlas id: a successful
-/// [`BillboardTargets::publish`] hands its three ids to the caller.
+/// [`BillboardTargets::submit_publish`] hands its three ids to the caller.
 pub struct BillboardTargets {
     layout: BillboardLayout,
     /// None once released.
@@ -283,7 +283,7 @@ impl BillboardTargets {
     ///
     /// Handoff: 'Render eight directions into the bake targets' takes over the GPU bake
     /// through `BillboardTargets::new`, `BillboardTargets::attachments`,
-    /// `BillboardTargets::encode_tile`, `BillboardTargets::publish` and
+    /// `BillboardTargets::encode_tile`, `BillboardTargets::submit_publish` and
     /// `BillboardTargets::release` (contract m6-bake-targets-api). Today they create the
     /// targets, lend the reusable views, copy one rendered direction with its gutters into
     /// the combined images, copy the three images into the atlas with
@@ -421,19 +421,24 @@ impl BillboardTargets {
     }
 
     /// Publishes the three combined images to `atlas` with `TextureAtlas::add_gpu_image`
-    /// (diffuse, normal, opacity), awaits the submitted work and the GPU validation scope,
-    /// and returns their ids with this layout. Refuses `billboard.invalid` when a direction
+    /// (diffuse, normal, opacity), returning their ids and an owned future that awaits
+    /// submitted work and GPU validation. The caller removes these ids if the future
+    /// fails or is cancelled. Refuses `billboard.invalid` when a direction
     /// is not encoded, after a successful publish or after release (nothing changes).
     /// Refuses `billboard.bake_failed` when the three images do not all fit (checked on a
-    /// copy of the packing first, so nothing is reserved), when an add or the GPU fails, or
-    /// when the device is lost: every id this call allocated is removed with
-    /// `TextureAtlas::remove` and no partial result escapes. On success the caller owns the
-    /// three ids.
-    pub(crate) async fn publish(
+    /// copy of the packing first, so nothing is reserved) or an add fails; partial
+    /// allocations are removed. Device loss keeps its `core.gpu` code.
+    pub(crate) fn submit_publish(
         &mut self,
         gpu: &GpuContext,
         atlas: &mut TextureAtlas,
-    ) -> Result<BillboardAtlasImages, RaaError> {
+    ) -> Result<
+        (
+            BillboardAtlasImages,
+            impl Future<Output = Result<(), RaaError>> + 'static + use<>,
+        ),
+        RaaError,
+    > {
         let invalid = |m: String| billboard_error("billboard.invalid", m);
         let failed = |m: String| billboard_error("billboard.bake_failed", m);
         if self.published {
@@ -451,7 +456,7 @@ impl BillboardTargets {
                 "billboard directions {missing:?} are not encoded"
             )));
         }
-        gpu.ensure_live().map_err(|e| failed(e.to_string()))?;
+        gpu.ensure_live()?;
         let extent = self.layout.extent;
         reserve_images(&mut atlas.packer().clone(), extent)?;
         let scope = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
@@ -466,33 +471,59 @@ impl BillboardTargets {
                 }
             }
         }
-        submitted_work_done(gpu).await;
-        if let Some(e) = scope.pop().await {
-            error.get_or_insert(format!("GPU validation: {e}"));
-        }
-        if let Err(e) = gpu.ensure_live() {
-            error.get_or_insert(e.to_string());
-        }
         if let Some(e) = error {
             for &id in &ids {
                 atlas.remove(gpu, id);
             }
             return Err(failed(format!("billboard publication failed: {e}")));
         }
+        // Register and pop synchronously: later frames must stay outside this scope.
+        let done = submitted_work_done(gpu);
+        let validation = scope.pop();
+        let gpu = gpu.clone();
         self.published = true;
-        Ok(BillboardAtlasImages {
+        let images = BillboardAtlasImages {
             diffuse: ids[0],
             normal: ids[1],
             opacity: ids[2],
             tiles: self.layout.tiles,
             extent,
-        })
+        };
+        Ok((images, async move {
+            done.await;
+            let validation_error = validation.await;
+            // Keep core.gpu intact so the API invalidates all bakes on device loss.
+            gpu.ensure_live()?;
+            if let Some(e) = validation_error {
+                return Err(failed(format!(
+                    "billboard publication failed: GPU validation: {e}"
+                )));
+            }
+            Ok(())
+        }))
+    }
+
+    #[cfg(test)]
+    async fn publish(
+        &mut self,
+        gpu: &GpuContext,
+        atlas: &mut TextureAtlas,
+    ) -> Result<BillboardAtlasImages, RaaError> {
+        let (images, done) = self.submit_publish(gpu, atlas)?;
+        if let Err(error) = done.await {
+            for id in [images.diffuse, images.normal, images.opacity] {
+                atlas.remove(gpu, id);
+            }
+            self.published = false;
+            return Err(error);
+        }
+        Ok(images)
     }
 
     /// Destroys the temporary textures; a second call does nothing. Published atlas ids
     /// are never removed. WebGPU and wgpu defer the destruction of a texture used by
     /// submitted work until that work completes, so the copies already submitted finish
-    /// first. After release `encode_tile` and `publish` refuse `billboard.invalid`.
+    /// first. After release `encode_tile` and `submit_publish` refuse `billboard.invalid`.
     pub(crate) fn release(&mut self) {
         if let Some(r) = self.resources.take() {
             r.destroy();
