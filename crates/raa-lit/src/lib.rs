@@ -15,6 +15,7 @@
 
 mod area_shadow;
 mod area_stochastic;
+mod billboard_bake;
 mod billboard_targets;
 mod contributor;
 mod editor;
@@ -65,6 +66,10 @@ pub use area_shadow::{
 pub use area_stochastic::{
     AreaStochasticFrame, StochasticMode, StochasticSelector, StochasticShadowSettings,
     stochastic_weight, table_cells, table_limit, table_slot, write_table,
+};
+pub use billboard_bake::{
+    BILLBOARD_DIRECTIONS, BillboardBakeInput, BillboardBakeResult, BillboardFraming,
+    billboard_camera, billboard_framing, billboard_proxy,
 };
 pub use billboard_targets::{
     BillboardLayout, BillboardTargets, billboard_layout, billboard_tile_rect,

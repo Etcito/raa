@@ -21,31 +21,36 @@ use raa_mesh::AttributedMesh;
 use raa_pipeline::{Pipeline, SubmissionState};
 use raa_scene::{Camera, InstanceIndex, RenderList, Scene, frustum_planes};
 use raa_shader::{
-    Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, SlotProvider,
+    Composer, LIGHT_GPU_SIZE, MAX_LOCAL_LIGHTS, MaterialFnId, MaterialFnRegistry, PassKind,
+    SlotProvider, VariantKey,
 };
 
 use crate::area_shadow::{
     AreaShadowCamera, AreaShadowSettings, AreaShadowTier, HeroSelector, MAX_HERO_LIGHTS,
 };
 use crate::area_stochastic::{AreaStochasticFrame, StochasticSelector, StochasticShadowSettings};
+use crate::billboard_bake::{
+    BillboardBakeInput, BillboardBakeResult, billboard_camera, billboard_framing,
+};
+use crate::billboard_targets::BillboardTargets;
 use crate::contributor::ForwardContributor;
-use crate::extras::InstanceExtra;
+use crate::extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
 use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
 use crate::frame_history::{CameraHistory, FrameHistory, MAX_VIEWS, frame_jitter};
 use crate::handle::{LitHandle, LitShared};
-use crate::instance_store::InstanceStore;
+use crate::instance_store::{InstanceStore, write_instance_record};
 use crate::library::SurfaceLibrary;
 use crate::light_stats::{LocalLightStats, ReadbackCoordinator};
 use crate::local_lights::LocalLights;
 use crate::lod::{LodLevel, LodParams, LodRegistry, MAX_LOD_LEVELS, camera_level};
-use crate::material::{DrawClass, SurfaceMaterial};
+use crate::material::{DrawClass, FLAG_DOUBLE_SIDED, SURFACE_MATERIAL_GPU_SIZE, SurfaceMaterial};
 use crate::material_data::MaterialDataStats;
 use crate::meshes::{LitMeshId, LitMeshInfo};
 use crate::passes::install_passes;
-use crate::prep::MaterialClass;
+use crate::prep::{INSTANCE_GPU_SIZE, MaterialClass};
 use crate::select::SelectInput;
 use crate::skin_views::SkinDraw;
-use crate::textures::{AtlasRect, TexelData, TextureOptions};
+use crate::textures::{ATLAS_FORMAT, AtlasRect, TexelData, TextureOptions};
 use crate::tiles::{
     LIGHT_TILES_NAME, TILING_FEATURE_ID, TileInputs, light_info, publish_local_lights,
 };
@@ -417,6 +422,126 @@ pub struct LitRenderer {
     active_area_stochastic: u32,
 }
 
+/// One submitted draw the billboard bake renders: its sub-mesh, material and the
+/// root-frame instance record plus extras built for this bake.
+struct BakeSource {
+    mesh: MeshId,
+    material: u32,
+    record: [u8; INSTANCE_GPU_SIZE],
+    extra: InstanceExtra,
+}
+
+/// Depth state and format of the bake's own depth attachment.
+const BAKE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+fn bake_error(message: String) -> RaaError {
+    RaaError::FrameGraph {
+        code: "billboard.invalid",
+        message,
+    }
+}
+
+fn bake_shader_error(e: raa_shader::ShaderError) -> RaaError {
+    RaaError::FrameGraph {
+        code: e.code,
+        message: e.message,
+    }
+}
+
+/// A bake colour attachment cleared to zero, stored for the tile copy.
+fn bake_color(view: &wgpu::TextureView) -> Option<wgpu::RenderPassColorAttachment<'_>> {
+    Some(wgpu::RenderPassColorAttachment {
+        view,
+        depth_slice: None,
+        resolve_target: None,
+        ops: wgpu::Operations {
+            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            store: wgpu::StoreOp::Store,
+        },
+    })
+}
+
+/// A vertex/storage buffer over `bytes` (COPY_DST for a single queue write).
+fn bake_buffer(
+    gpu: &GpuContext,
+    label: &str,
+    bytes: &[u8],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
+    let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: bytes.len().max(4) as u64,
+        usage: usage | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    if !bytes.is_empty() {
+        gpu.queue().write_buffer(&buffer, 0, bytes);
+    }
+    buffer
+}
+
+/// The bake's draw pipeline for one (material function, double-sided) pair: the unlit
+/// bake shader of `compose_billboard_bake`, the standard lit group layouts and vertex
+/// buffers, three rgba8unorm colour targets and depth Less.
+fn bake_pipeline(
+    gpu: &GpuContext,
+    module: &wgpu::ShaderModule,
+    frame_layout: &wgpu::BindGroupLayout,
+    lighting_layout: &wgpu::BindGroupLayout,
+    double_sided: bool,
+) -> wgpu::RenderPipeline {
+    let device = gpu.device();
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("raa.lit.billboard_bake.layout"),
+        bind_group_layouts: &[Some(frame_layout), Some(lighting_layout)],
+        immediate_size: 0,
+    });
+    let buffers = crate::handle::bake_vertex_buffer_layouts();
+    let targets = [ATLAS_FORMAT; 3].map(|format| {
+        Some(wgpu::ColorTargetState {
+            format,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("raa.lit.billboard_bake.pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &buffers,
+        },
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: (!double_sided).then_some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: BAKE_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
 impl LitRenderer {
     /// A renderer drawing through `pipeline`: validates `opts` (`render.invalid_msaa`),
     /// creates the group-0 buffers sized from it, installs the default slot providers
@@ -535,6 +660,314 @@ impl LitRenderer {
         self.shared.borrow_mut().meshes.remove(id);
         self.shared.borrow_mut().remove_mesh_colors(id);
         self.submeshes.remove(&id);
+    }
+
+    // ---- billboard bake ----
+
+    /// Bakes the submitted draw groups of `input.tags` into the eight-direction atlas
+    /// images and returns them with the source-root framing.
+    ///
+    /// The source draws are the complete render list entries carrying one of the tags
+    /// (no frustum culling and no on-screen visibility requirement); retained LOD0 meshes
+    /// stay valid off screen because the scene's full sub-mesh is drawn, not a selected LOD.
+    /// Instance models become `root_world^-1 * world`, so positions and the shader's
+    /// object normals share the source-root frame. Every tag must name at least one
+    /// submitted draw and the resolution must be 64, 128, 256 or 512; otherwise the call
+    /// refuses `billboard.invalid` before any GPU work.
+    ///
+    /// The bake uses private uniform, material, extras, instance and id buffers with the
+    /// renderer's own frame layout and atlas bindings, so the active view's camera and
+    /// prepared instance records are untouched. Per direction it creates an orthographic
+    /// [`billboard_camera`], clears diffuse/normal/opacity to zero and depth to one,
+    /// renders every source draw in LOD0 order and calls
+    /// [`BillboardTargets::encode_tile`](crate::BillboardTargets) after that view. After all
+    /// views it submits the work, publishes the three atlas images
+    /// ([`BillboardTargets::publish`](crate::BillboardTargets)) and only then releases the
+    /// temporary targets. The scene camera is restored on success and failure; a failed
+    /// publication removes its partial atlas allocations. The returned atlas ids stay live
+    /// until the caller removes them with [`LitRenderer::remove_texture`].
+    ///
+    /// Handoff: 'Expose asynchronous billboard baking in RAA' calls
+    /// [`LitRenderer::bake_billboard`] with a [`BillboardBakeInput`] and keeps the ids of
+    /// its [`BillboardBakeResult`] until it removes them with
+    /// [`LitRenderer::remove_texture`]. Today the method renders the submitted groups in
+    /// the eight orthographic directions, publishes the three atlas images and returns the
+    /// common framing and tile layout; a failure leaves no atlas allocation behind.
+    pub async fn bake_billboard(
+        &mut self,
+        gpu: &GpuContext,
+        scene: &mut Scene,
+        input: BillboardBakeInput,
+    ) -> Result<BillboardBakeResult, RaaError> {
+        let camera = scene.camera;
+        let result = self.bake_billboard_inner(gpu, scene, input).await;
+        scene.camera = camera;
+        result
+    }
+
+    async fn bake_billboard_inner(
+        &mut self,
+        gpu: &GpuContext,
+        scene: &mut Scene,
+        input: BillboardBakeInput,
+    ) -> Result<BillboardBakeResult, RaaError> {
+        // Refuse bad input before touching the GPU.
+        crate::billboard_layout(input.resolution)?;
+        if input.tags.is_empty() {
+            return Err(bake_error(
+                "a billboard bake needs at least one submitted draw tag".into(),
+            ));
+        }
+        let root_inverse = input.root_world.inverse().ok_or_else(|| {
+            bake_error("the billboard source-root frame is not invertible".into())
+        })?;
+        let mut requested: Vec<u32> = Vec::with_capacity(input.tags.len());
+        for &tag in &input.tags {
+            if !requested.contains(&tag) {
+                requested.push(tag);
+            }
+        }
+
+        scene.update_world();
+        let mut list = RenderList::with_capacity(scene.instance_count());
+        let mut item_tags = Vec::with_capacity(scene.instance_count());
+        let mut item_slots = Vec::with_capacity(scene.instance_count());
+        scene.build_render_list_slots(&mut list, &mut item_tags, &mut item_slots);
+        let handle = self.handle();
+
+        let mut sources: Vec<BakeSource> = Vec::new();
+        let mut bounds = Aabb::EMPTY;
+        let mut material_count = 1u32;
+        let mut seen = vec![false; requested.len()];
+        for (i, item) in list.items.iter().enumerate() {
+            let tag = item_tags[i];
+            let Some(group) = requested.iter().position(|&t| t == tag) else {
+                continue;
+            };
+            seen[group] = true;
+            let model = root_inverse * item.world;
+            let mut record = [0u8; INSTANCE_GPU_SIZE];
+            write_instance_record(&mut record, &model, item.material.0, tag, 0);
+            let extra = self.extras.get(&tag).copied().unwrap_or_default();
+            let item_bounds = handle
+                .mesh_bounds(item.mesh)
+                .map(|b| b.transform(&model))
+                .unwrap_or_else(|| {
+                    let p = model.transform_point(Vec3::ZERO);
+                    Aabb { min: p, max: p }
+                });
+            bounds = bounds.union(&item_bounds);
+            material_count = material_count.max(item.material.0.saturating_add(1));
+            sources.push(BakeSource {
+                mesh: item.mesh,
+                material: item.material.0,
+                record,
+                extra,
+            });
+        }
+        for (i, &tag) in requested.iter().enumerate() {
+            if !seen[i] {
+                return Err(bake_error(format!(
+                    "billboard tag {tag} has no submitted draw"
+                )));
+            }
+        }
+        if sources.is_empty() {
+            return Err(bake_error("the billboard bake has no source draws".into()));
+        }
+        let framing = billboard_framing(&bounds)
+            .ok_or_else(|| bake_error("the billboard source bounds are empty".into()))?;
+
+        // Material records and their draw class, in the bake's own buffer.
+        let mut material_bytes =
+            Vec::with_capacity(material_count as usize * SURFACE_MATERIAL_GPU_SIZE);
+        let mut material_classes = Vec::with_capacity(material_count as usize);
+        {
+            let materials = self.materials();
+            for id in 0..material_count {
+                let record = materials.get(MaterialId(id)).cloned().unwrap_or_default();
+                material_classes.push((
+                    MaterialClass::of(&record).material_fn,
+                    record.flags & FLAG_DOUBLE_SIDED != 0,
+                ));
+                record.write_gpu(&mut material_bytes);
+            }
+        }
+
+        let frame_layout = handle.frame_layout();
+        let lighting_layout = handle.lighting_layout();
+        let mut pipelines: HashMap<(u32, bool), wgpu::RenderPipeline> = HashMap::new();
+        for &(fn_id, double_sided) in &material_classes {
+            if pipelines.contains_key(&(fn_id.0, double_sided)) {
+                continue;
+            }
+            let key = VariantKey {
+                material_fn: fn_id,
+                pass: PassKind::Prepass,
+                msaa: 1,
+                flags: if double_sided { FLAG_DOUBLE_SIDED } else { 0 },
+            };
+            let wgsl = {
+                let composer = self.composer();
+                let fns = self.fns();
+                composer.compose_billboard_bake(&fns, &key)
+            }
+            .map_err(bake_shader_error)?;
+            Composer::validate(&wgsl).map_err(bake_shader_error)?;
+            let module = gpu
+                .device()
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("raa.lit.billboard_bake"),
+                    source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+                });
+            let pipeline =
+                bake_pipeline(gpu, &module, &frame_layout, &lighting_layout, double_sided);
+            pipelines.insert((fn_id.0, double_sided), pipeline);
+        }
+
+        let mut targets = BillboardTargets::new(gpu, input.resolution)?;
+        let mut instance_bytes = Vec::with_capacity(sources.len() * INSTANCE_GPU_SIZE);
+        let mut extra_bytes = Vec::with_capacity(sources.len() * INSTANCE_EXTRA_GPU_SIZE);
+        let mut id_bytes = Vec::with_capacity(sources.len() * 4);
+        for (i, src) in sources.iter().enumerate() {
+            instance_bytes.extend_from_slice(&src.record);
+            let mut extra = Vec::with_capacity(INSTANCE_EXTRA_GPU_SIZE);
+            src.extra.write_gpu(&mut extra);
+            extra_bytes.extend_from_slice(&extra);
+            id_bytes.extend_from_slice(&(i as u32).to_le_bytes());
+        }
+        let previous_bytes = vec![0u8; sources.len() * 64];
+        let frame_buffer = bake_buffer(
+            gpu,
+            "raa.lit.billboard.frame",
+            &[0u8; FRAME_GPU_SIZE],
+            wgpu::BufferUsages::UNIFORM,
+        );
+        let material_buffer = bake_buffer(
+            gpu,
+            "raa.lit.billboard.materials",
+            &material_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let extras_buffer = bake_buffer(
+            gpu,
+            "raa.lit.billboard.extras",
+            &extra_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let instances_buffer = bake_buffer(
+            gpu,
+            "raa.lit.billboard.instances",
+            &instance_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let previous_buffer = bake_buffer(
+            gpu,
+            "raa.lit.billboard.previous",
+            &previous_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let ids_buffer = bake_buffer(
+            gpu,
+            "raa.lit.billboard.ids",
+            &id_bytes,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let frame_bind = handle.bake_frame_bind_group(
+            gpu,
+            [
+                &frame_buffer,
+                &material_buffer,
+                &extras_buffer,
+                &instances_buffer,
+                &previous_buffer,
+            ],
+        );
+        let lighting = {
+            let pipeline = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
+            pipeline.lighting().bind_group().clone()
+        };
+
+        let render = (|| -> Result<(), RaaError> {
+            let mut encoder =
+                gpu.device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("raa.lit.billboard_bake"),
+                    });
+            for direction in 0..crate::billboard_bake::BILLBOARD_DIRECTIONS as u8 {
+                let camera = billboard_camera(framing, direction)?;
+                let mut frame_scene = Scene::new();
+                frame_scene.camera = camera;
+                frame_scene.light = scene.light;
+                frame_scene.ambient = scene.ambient;
+                let mut frame_bytes = [0u8; FRAME_GPU_SIZE];
+                write_frame_gpu(
+                    &mut frame_bytes,
+                    &frame_scene,
+                    &FrameParams {
+                        viewport: (input.resolution, input.resolution),
+                        msaa: 1,
+                        ..FrameParams::default()
+                    },
+                )?;
+                gpu.queue().write_buffer(&frame_buffer, 0, &frame_bytes);
+                {
+                    let a = targets.attachments();
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("raa.lit.billboard_bake.render"),
+                        color_attachments: &[
+                            bake_color(a.diffuse),
+                            bake_color(a.normal),
+                            bake_color(a.opacity),
+                        ],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: a.depth,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_bind_group(0, &frame_bind, &[]);
+                    pass.set_bind_group(1, &lighting, &[]);
+                    for (i, src) in sources.iter().enumerate() {
+                        let (fn_id, double_sided) = material_classes[src.material as usize];
+                        let pipeline = pipelines
+                            .get(&(fn_id.0, double_sided))
+                            .expect("every material class built its pipeline");
+                        pass.set_pipeline(pipeline);
+                        let count = handle.bake_bind_mesh(&mut pass, src.mesh, &ids_buffer)?;
+                        pass.draw_indexed(0..count, 0, i as u32..i as u32 + 1);
+                    }
+                }
+                targets.encode_tile(&mut encoder, direction)?;
+            }
+            gpu.queue().submit([encoder.finish()]);
+            Ok(())
+        })();
+        if let Err(e) = render {
+            targets.release();
+            return Err(e);
+        }
+
+        let mut atlas = self.shared.borrow_mut().take_textures(gpu);
+        let published = targets.publish(gpu, &mut atlas).await;
+        self.shared.borrow_mut().restore_textures(gpu, atlas);
+        targets.release();
+        let images = published?;
+        Ok(BillboardBakeResult {
+            diffuse: images.diffuse,
+            normal: images.normal,
+            opacity: images.opacity,
+            center: framing.center,
+            size: framing.size,
+            tiles: images.tiles,
+            extent: images.extent,
+        })
     }
 
     /// Records the sub-mesh ids of `id` for the per-frame bounds sync.

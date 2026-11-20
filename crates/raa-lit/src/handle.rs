@@ -13,7 +13,7 @@ use std::num::NonZeroU64;
 use std::rc::Rc;
 
 use raa_core::{GpuContext, MaterialId, MeshId, RaaError};
-use raa_math::{Mat4, Vec3};
+use raa_math::{Aabb, Mat4, Vec3};
 use raa_scene::{InstanceIndex, RenderList, frustum_planes};
 use raa_shader::{
     ComposeOptions, Composer, MaterialFnId, MaterialFnRegistry, PassKind, ShaderError,
@@ -157,6 +157,12 @@ fn vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 3] {
             attributes: &STREAM1_ATTRIBUTES,
         }),
     ]
+}
+
+/// The vertex buffers of a billboard bake draw: stream 0, the bake's own instance id
+/// stream (step Instance) and stream 1, matching the standard lit vertex layouts.
+pub(crate) fn bake_vertex_buffer_layouts() -> Vec<Option<wgpu::VertexBufferLayout<'static>>> {
+    vertex_buffer_layouts().to_vec()
 }
 
 /// The vertex buffers of posed variants: stream 0 (rest), the id stream, stream 1
@@ -847,6 +853,74 @@ impl LitShared {
     /// Whether posed draws can bind the palette this frame.
     pub(crate) fn palette_ready(&self) -> bool {
         self.palette_group.is_some()
+    }
+
+    /// The local-space bounds of sub-mesh `mesh`, `None` when the id is not uploaded or
+    /// has no bounds. Read by the billboard bake to frame every submitted draw.
+    pub(crate) fn mesh_bounds(&self, mesh: MeshId) -> Option<Aabb> {
+        let sub = self.meshes.submesh(mesh)?;
+        self.meshes.info(sub.lit).map(|info| info.bounds)
+    }
+
+    /// A group 0 over `buffers` (frame, materials, extras, instance records, previous
+    /// records) with this renderer's frame layout, texture atlas and material data, so a
+    /// bake renders with isolated uniform/instance state but the existing atlas bindings.
+    pub(crate) fn bake_frame_bind_group(
+        &self,
+        gpu: &GpuContext,
+        buffers: [&wgpu::Buffer; 5],
+    ) -> wgpu::BindGroup {
+        create_frame_bind_group(gpu, &self.frame_layout, buffers, &self.textures, &self.data)
+    }
+
+    /// Binds `ids` (the bake's own compacted instance id stream) and sub-mesh `mesh` into
+    /// `pass`, returning its index count. The bake never touches the prepared camera ids.
+    pub(crate) fn bake_bind_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        ids: &wgpu::Buffer,
+    ) -> Result<u32, RaaError> {
+        let (g, first, count) = self.meshes.resolve(mesh)?;
+        pass.set_vertex_buffer(STREAM0_SLOT, g.stream0.slice(..));
+        pass.set_vertex_buffer(INSTANCE_SLOT, ids.slice(..));
+        pass.set_vertex_buffer(STREAM1_SLOT, g.stream1.slice(..));
+        let start = u64::from(first) * 4;
+        let end = start + u64::from(count) * 4;
+        let indices = if count == 0 {
+            g.index.slice(..)
+        } else {
+            g.index.slice(start..end)
+        };
+        pass.set_index_buffer(indices, wgpu::IndexFormat::Uint32);
+        Ok(count)
+    }
+
+    /// Takes the material atlas out for an asynchronous publication (leaving an empty
+    /// placeholder), so no `RefCell` borrow of this state is held across an await.
+    pub(crate) fn take_textures(&mut self, gpu: &GpuContext) -> TextureAtlas {
+        let mut empty = TextureAtlas::new(gpu);
+        std::mem::swap(&mut self.textures, &mut empty);
+        empty
+    }
+
+    /// Puts `atlas` back after a publication and rebuilds group 0 for its (possibly newly
+    /// allocated) texture view.
+    pub(crate) fn restore_textures(&mut self, gpu: &GpuContext, atlas: TextureAtlas) {
+        self.textures = atlas;
+        self.frame_bind_group = create_frame_bind_group(
+            gpu,
+            &self.frame_layout,
+            [
+                &self.frame_buffer,
+                &self.material_buffer,
+                &self.extras_buffer,
+                &self.instance_storage,
+                &self.previous_storage,
+            ],
+            &self.textures,
+            &self.data,
+        );
     }
 
     /// Mirrors the editor overlay state into the skin draw source (the skin pass builds
@@ -1554,6 +1628,36 @@ impl LitHandle {
     /// `array<vec4<f32>>` rects, and the material data words.
     pub fn frame_layout(&self) -> wgpu::BindGroupLayout {
         self.shared.borrow().frame_layout.clone()
+    }
+
+    /// The group-1 lighting layout of the lit pipelines (the bake binds the pipeline's
+    /// lighting resources to it).
+    pub(crate) fn lighting_layout(&self) -> wgpu::BindGroupLayout {
+        self.shared.borrow().lighting_layout.clone()
+    }
+
+    /// A group 0 over the bake's own buffers and this renderer's atlas bindings.
+    pub(crate) fn bake_frame_bind_group(
+        &self,
+        gpu: &GpuContext,
+        buffers: [&wgpu::Buffer; 5],
+    ) -> wgpu::BindGroup {
+        self.shared.borrow().bake_frame_bind_group(gpu, buffers)
+    }
+
+    /// Binds sub-mesh `mesh` and the bake's id stream into `pass`; returns its index count.
+    pub(crate) fn bake_bind_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        ids: &wgpu::Buffer,
+    ) -> Result<u32, RaaError> {
+        self.shared.borrow().bake_bind_mesh(pass, mesh, ids)
+    }
+
+    /// The local-space bounds of sub-mesh `mesh` (used by the billboard bake framing).
+    pub(crate) fn mesh_bounds(&self, mesh: MeshId) -> Option<Aabb> {
+        self.shared.borrow().mesh_bounds(mesh)
     }
 
     /// A clone of the renderer's S10 `FrameGpu` uniform buffer: `FRAME_GPU_SIZE` (768) bytes,
