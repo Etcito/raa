@@ -15,6 +15,7 @@
 
 mod area_shadow;
 mod area_stochastic;
+mod billboard_targets;
 mod contributor;
 mod editor;
 pub use editor::WireframeMode;
@@ -64,6 +65,9 @@ pub use area_shadow::{
 pub use area_stochastic::{
     AreaStochasticFrame, StochasticMode, StochasticSelector, StochasticShadowSettings,
     stochastic_weight, table_cells, table_limit, table_slot, write_table,
+};
+pub use billboard_targets::{
+    BillboardLayout, BillboardTargets, billboard_layout, billboard_tile_rect,
 };
 pub use contributor::ForwardContributor;
 pub use extras::{INSTANCE_EXTRA_GPU_SIZE, InstanceExtra};
