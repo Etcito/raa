@@ -668,8 +668,12 @@ impl LitRenderer {
     /// images and returns them with the source-root framing.
     ///
     /// The source draws are the complete render list entries carrying one of the tags
-    /// (no frustum culling and no on-screen visibility requirement); retained LOD0 meshes
-    /// stay valid off screen because the scene's full sub-mesh is drawn, not a selected LOD.
+    /// (no frustum culling and no on-screen visibility requirement). They are enumerated
+    /// with [`Scene::build_all_render_list_slots`], so retained instances hidden in the
+    /// active view (including those hidden with
+    /// [`Scene::set_instance_visible(false)`](Scene::set_instance_visible)) still
+    /// contribute; the bake never changes visibility. Retained LOD0 meshes stay valid off
+    /// screen because the scene's full sub-mesh is drawn, not a selected LOD.
     /// Instance models become `root_world^-1 * world`, so positions and the shader's
     /// object normals share the source-root frame. Every tag must name at least one
     /// submitted draw and the resolution must be 64, 128, 256 or 512; otherwise the call
@@ -732,7 +736,7 @@ impl LitRenderer {
         let mut list = RenderList::with_capacity(scene.instance_count());
         let mut item_tags = Vec::with_capacity(scene.instance_count());
         let mut item_slots = Vec::with_capacity(scene.instance_count());
-        scene.build_render_list_slots(&mut list, &mut item_tags, &mut item_slots);
+        scene.build_all_render_list_slots(&mut list, &mut item_tags, &mut item_slots);
         let handle = self.handle();
 
         let mut sources: Vec<BakeSource> = Vec::new();

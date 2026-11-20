@@ -17,7 +17,7 @@ use raa_lit::{
 };
 use raa_math::{Aabb, Mat4, Quat, Vec3};
 use raa_pipeline::Pipeline;
-use raa_scene::{Scene, Transform};
+use raa_scene::{RenderList, Scene, Transform};
 
 const SURFACE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
@@ -27,6 +27,10 @@ fn close(a: f32, b: f32) -> bool {
 
 fn close_vec(a: Vec3, b: Vec3) -> bool {
     close(a.x, b.x) && close(a.y, b.y) && close(a.z, b.z)
+}
+
+fn close_vec3(a: [f32; 3], b: [f32; 3]) -> bool {
+    close(a[0], b[0]) && close(a[1], b[1]) && close(a[2], b[2])
 }
 
 #[test]
@@ -154,9 +158,9 @@ fn proxy_is_one_quad_in_rust() {
     );
 }
 
-fn cube() -> AttributedMesh {
+fn cube(half: f32) -> AttributedMesh {
     let mut mesh = MeshData::new();
-    let params = Params::new().with("half", ParamValue::Scalar(0.5));
+    let params = Params::new().with("half", ParamValue::Scalar(half));
     DebugCube
         .generate(&params, Quality::LOD0, &mut mesh)
         .expect("debug cube");
@@ -181,23 +185,41 @@ fn bake_publishes_and_releases_the_three_images() {
                 ..LitOptions::default()
             },
         )?;
-        let id = lit.upload(gpu, &cube())?;
-        let mesh = lit.submesh_ids(id).expect("sub-meshes")[0];
-        let mut scene = Scene::with_capacity(1, 1);
-        let node = scene
+        let small = lit.upload(gpu, &cube(0.5))?;
+        let small_mesh = lit.submesh_ids(small).expect("sub-meshes")[0];
+        let large = lit.upload(gpu, &cube(1.0))?;
+        let large_mesh = lit.submesh_ids(large).expect("sub-meshes")[0];
+        let mut scene = Scene::with_capacity(1, 2);
+        let visible_node = scene
             .add_node(
                 None,
                 Transform::from_trs(Vec3::ZERO, Quat::IDENTITY, Vec3::ONE),
             )
             .expect("node");
-        let instance = scene
-            .add_instance(node, mesh, MaterialId(0))
-            .expect("instance");
-        scene.set_instance_tag(instance, 7).expect("tag");
+        let hidden_node = scene
+            .add_node(
+                None,
+                Transform::from_trs(Vec3::new(10.0, 0.0, 0.0), Quat::IDENTITY, Vec3::ONE),
+            )
+            .expect("node");
+        let visible = scene
+            .add_instance(visible_node, small_mesh, MaterialId(0))
+            .expect("visible instance");
+        let hidden = scene
+            .add_instance(hidden_node, large_mesh, MaterialId(0))
+            .expect("hidden instance");
+        scene.set_instance_tag(visible, 7).expect("tag");
+        scene.set_instance_tag(hidden, 7).expect("tag");
+        // The retained source is hidden but still submitted: the production selection
+        // path must pick it up through build_all_render_list_slots.
+        scene.set_instance_visible(hidden, false).expect("hide");
+        scene.update_world();
         // The active view never sees the source: the bake must not need it on screen.
         scene.camera.eye = Vec3::new(100.0, 100.0, 100.0);
         let before = scene.camera;
 
+        // Hand-derived bounds of both source draws in the root frame:
+        // small cube half 0.5 at the origin and large cube half 1 at x 10.
         let result = block_on(lit.bake_billboard(
             gpu,
             &mut scene,
@@ -208,6 +230,14 @@ fn bake_publishes_and_releases_the_three_images() {
             },
         ))?;
         assert_eq!(scene.camera, before, "the scene camera is restored");
+        assert!(close_vec3(result.center, [5.25, 0.0, 0.0]));
+        assert!(close(result.size[0], 11.5));
+        assert_eq!(result.size[0], result.size[1]);
+        // The visible-only view is unchanged: the hidden draw stays out of it.
+        let mut visible_list = RenderList::with_capacity(2);
+        scene.build_render_list(&mut visible_list);
+        assert_eq!(visible_list.items.len(), 1);
+        assert_eq!(visible_list.items[0].mesh, small_mesh);
         let layout = billboard_layout(64).unwrap();
         assert_eq!(result.tiles, layout.tiles);
         assert_eq!(result.extent, layout.extent);
@@ -219,6 +249,34 @@ fn bake_publishes_and_releases_the_three_images() {
             assert!(lit.texture_rect(id).is_some(), "id {id} is published");
             assert!(lit.remove_texture(gpu, id)?);
             assert!(lit.texture_rect(id).is_none(), "id {id} is removed");
+        }
+
+        // Every submitted source hidden: both retained draws still bake, so the common
+        // bounds stay the union derived above.
+        scene.set_instance_visible(visible, false).expect("hide");
+        scene.update_world();
+        let all_hidden = block_on(lit.bake_billboard(
+            gpu,
+            &mut scene,
+            BillboardBakeInput {
+                tags: vec![7],
+                root_world: Mat4::IDENTITY,
+                resolution: 64,
+            },
+        ))?;
+        assert_eq!(scene.camera, before, "the scene camera is restored");
+        assert!(close_vec3(all_hidden.center, [5.25, 0.0, 0.0]));
+        assert!(close(all_hidden.size[0], 11.5));
+        assert!(close(all_hidden.size[1], 11.5));
+        assert_eq!(all_hidden.tiles, layout.tiles);
+        assert_eq!(all_hidden.extent, layout.extent);
+        scene.build_render_list(&mut visible_list);
+        assert!(
+            visible_list.items.is_empty(),
+            "the active view still hides both"
+        );
+        for id in [all_hidden.diffuse, all_hidden.normal, all_hidden.opacity] {
+            assert!(lit.remove_texture(gpu, id)?);
         }
 
         // Empty, missing and invalid inputs refuse before any GPU work.
