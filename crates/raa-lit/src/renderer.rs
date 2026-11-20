@@ -522,19 +522,50 @@ impl LitRenderer {
         id: LitMeshId,
         m: &AttributedMesh,
     ) -> Result<(), RaaError> {
+        let before = self.submesh_list(id);
         self.shared.borrow_mut().meshes.update(gpu, id, m)?;
         self.shared
             .borrow_mut()
             .set_mesh_colors(id, m.colors.is_some());
         self.refresh_submeshes(id);
+        let after = self.submesh_list(id);
+        let freed: Vec<MeshId> = before.into_iter().filter(|m| !after.contains(m)).collect();
+        self.forget_lods(&freed);
         Ok(())
     }
 
-    /// Frees mesh `id` and its sub-mesh ids (reused lowest first). Unknown ids are ignored.
+    /// Frees mesh `id` and its sub-mesh ids (reused lowest first), with every detail chain
+    /// that names one of them ([`LodRegistry::forget`]). Unknown ids are ignored.
     pub fn remove(&mut self, id: LitMeshId) {
+        let freed = self.submesh_list(id);
         self.shared.borrow_mut().meshes.remove(id);
         self.shared.borrow_mut().remove_mesh_colors(id);
         self.submeshes.remove(&id);
+        self.forget_lods(&freed);
+    }
+
+    /// The sub-mesh ids of `id` (empty when unknown).
+    fn submesh_list(&self, id: LitMeshId) -> Vec<MeshId> {
+        self.submesh_ids(id)
+            .map(|ids| ids.to_vec())
+            .unwrap_or_default()
+    }
+
+    /// Drops the detail chains that name a freed sub-mesh id; the selected levels are
+    /// recomputed, as after [`clear_mesh_lods`](Self::clear_mesh_lods).
+    fn forget_lods(&mut self, freed: &[MeshId]) {
+        if freed.is_empty() {
+            return;
+        }
+        let mut s = self.shared.borrow_mut();
+        let mut dropped = false;
+        for &mesh in freed {
+            dropped |= s.lods.forget(mesh);
+        }
+        if dropped {
+            s.levels.fill(NO_CAMERA_LEVEL);
+            s.shadow_levels.fill(NO_CAMERA_LEVEL);
+        }
     }
 
     /// Records the sub-mesh ids of `id` for the per-frame bounds sync.
@@ -1653,6 +1684,47 @@ mod tests {
         assert!(lit.clear_mesh_lods(MeshId(0)));
         assert!(!lit.has_mesh_lods(MeshId(0)));
         assert!(!lit.clear_mesh_lods(MeshId(0)));
+    }
+
+    /// The sub-mesh ids of a removed mesh are reused by the next upload: the detail chain
+    /// of the removed mesh, or a chain drawing it as a level, must not survive on them
+    /// (Game view, 2026-11-20: `render.unknown_mesh: mesh 6 is not uploaded`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn removing_a_mesh_drops_the_detail_chains_that_name_it() {
+        use raa_geom::GeometryProvider;
+        let Some(gpu) = raa_core::testing::software_gpu() else {
+            raa_core::testing::skip("removing_a_mesh_drops_lods", "no adapter");
+            return;
+        };
+        let pipeline = Rc::new(RefCell::new(Pipeline::new(
+            &gpu,
+            wgpu::TextureFormat::Rgba8Unorm,
+            false,
+        )));
+        let mut lit = LitRenderer::new(&gpu, &pipeline, LitOptions::default()).unwrap();
+        let cube = || {
+            let mut mesh = raa_geom::MeshData::new();
+            let params = raa_geom::Params::new().with("half", raa_geom::ParamValue::Scalar(0.5));
+            raa_geom::builtin::DebugCube
+                .generate(&params, raa_geom::Quality::LOD0, &mut mesh)
+                .unwrap();
+            AttributedMesh::from_mesh(mesh)
+        };
+        let first = |lit: &LitRenderer, id| lit.submesh_ids(id).unwrap()[0];
+        let full = lit.upload(&gpu, &cube()).unwrap();
+        let level = lit.upload(&gpu, &cube()).unwrap();
+        let (full_sub, level_sub) = (first(&lit, full), first(&lit, level));
+        let chain = |mesh| [LodLevel { mesh, error: 1.0 }];
+        lit.set_mesh_lods(full_sub, &chain(level_sub)).unwrap();
+        lit.remove(full);
+        let next = lit.upload(&gpu, &cube()).unwrap();
+        assert_eq!(first(&lit, next), full_sub, "the freed id is reused");
+        assert!(!lit.has_mesh_lods(full_sub));
+        // A removed level takes the chain that draws it with it.
+        lit.set_mesh_lods(full_sub, &chain(level_sub)).unwrap();
+        lit.remove(level);
+        assert!(!lit.has_mesh_lods(full_sub));
     }
 
     const LIFE_SIZE: (u32, u32) = (640, 360);

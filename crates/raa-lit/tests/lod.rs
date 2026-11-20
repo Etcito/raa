@@ -193,3 +193,25 @@ fn flat_face_and_distant_grid_queries() {
         assert!((lod_error(&face, &moved).unwrap() - offset).abs() < 1e-4);
     }
 }
+
+#[test]
+fn forget_drops_the_chains_that_name_a_freed_mesh() {
+    let level = |id, error| LodLevel {
+        mesh: MeshId(id),
+        error,
+    };
+    let mut registry = LodRegistry::new();
+    registry
+        .set(MeshId(0), &[level(1, 1.0), level(2, 2.0)])
+        .unwrap();
+    registry.set(MeshId(5), &[level(6, 1.0)]).unwrap();
+    // A freed full mesh: its chain goes, the other chain stays.
+    assert!(registry.forget(MeshId(0)));
+    assert!(registry.chain(MeshId(0)).is_none());
+    assert!(!registry.is_level(MeshId(1)));
+    assert!(registry.chain(MeshId(5)).is_some());
+    // A freed level: the chain that draws it goes too.
+    assert!(registry.forget(MeshId(6)));
+    assert!(registry.chain(MeshId(5)).is_none());
+    assert!(!registry.forget(MeshId(7)));
+}

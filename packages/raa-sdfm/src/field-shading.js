@@ -46,7 +46,7 @@
 //     instance's cell seed (INSTANCE_PARAM_SLOTS.seed). The room is emitted behind the glass; the glass keeps its own look. Until the
 //     caller patches the tile ids (`interiors` of fieldPartShading) the pane shows its glass only.
 import { SdfmError } from './errors.js';
-import { checkShape, forbiddenToken, tokens } from './map-material.js';
+import { FOOTPRINT_WGSL, checkShape, declaresFootprint, forbiddenToken, materialPages, pagesBaseOf, textHash, tokens, wordReads } from './map-material.js';
 
 /**
  * The fixed axis of the rest tangent cross(axis, n): (1, 2, 3) / sqrt(14), parallel to no axis-aligned or 45-degree
@@ -234,17 +234,24 @@ fn sdff_rows_transposed(i: u32, g: vec3<f32>) -> vec3<f32> {
   return sdff_v3(i) * g.x + sdff_v3(i + 4u) * g.y + sdff_v3(i + 8u) * g.z;
 }
 
+// The rest-space shading normal sdff_material leaves when a graph bent it (bump or authored normal, sdff_bent), else the
+// caller keeps its field normal; sdff_label_n is the normal of the last label read (program space).
+var<private> sdff_bent: bool = false;
+var<private> sdff_rest_n: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
+var<private> sdff_label_n: vec3<f32> = vec3<f32>(0.0, 0.0, 1.0);
+
 // Local fields' evalLabel for field operand i of the block at base: its constant values, its material graph at p and
 // its node-space point, else its colour. table, count and p are read once by sdff_material, shared by both labels; the
 // colour is read only when the operand has no graph or its graph fails, the node point only when a graph uses pn.
-fn sdff_label(base: u32, table: u32, count: u32, i: u32, p: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
+// np = the field normal in program space (the frame of p), which a graph's bump or authored normal bends (sdff_label_n).
+fn sdff_label(base: u32, table: u32, count: u32, i: u32, p: vec3<f32>, n: vec3<f32>, np: vec3<f32>) -> SdfmMaterialFull {
+  sdff_label_n = np;
   if (i >= count) { return SdfmMaterialFull(vec3<f32>(0.5), 0.0, 0.5, vec3<f32>(0.0), 0.0); }
   let o = base + table + ${FIELD_OPERAND_WORDS}u * i;
   let mode = sdff_w(o + 3u);
   if (mode == ${MODE.constant}u) { return SdfmMaterialFull(sdff_v3(o), pmf_f(o + 6u), pmf_f(o + 7u), sdff_v3(o + 8u), 0.0); }
   if (mode == ${MODE.graph}u) {
-    let m = sdff_graph(sdff_w(o + 4u), base + sdff_w(o + 5u), p, __SDFF_NODE_POINT__, n);
-    if (m.ok) { return m.m; }
+__SDFF_GRAPH_CALL__
   }
   return SdfmMaterialFull(sdff_v3(o), 0.0, 0.5, vec3<f32>(0.0), 0.0);
 }
@@ -256,16 +263,25 @@ fn sdff_mix(a: SdfmMaterialFull, b: SdfmMaterialFull, t: f32) -> SdfmMaterialFul
 
 // The material of the field at rest point q: the heaviest operand of the sample s, mixed with the second by the field's
 // weight (both through ONE sdff_label site); the second label is read only when it differs and its weight is above 0.
+// A graph's bump or authored normal bends the label normals (mixed like the materials): sdff_bent and sdff_rest_n.
 fn sdff_material(base: u32, s: PmfSample, q: vec3<f32>, n: vec3<f32>) -> SdfmMaterialFull {
   let p = sdff_affine(base + 8u, q);
   let table = sdff_w(base + 3u);
   let count = sdff_w(base + 4u);
   let labels = select(1u, 2u, s.lb != s.la && s.t > 0.0);
+  sdff_bent = false;
+  let gl = length(s.g);
+  let field = gl > 0.0 && gl < 3.0e38;
+  // The frame of p is a similarity of the rest frame: a normal maps by its linear part, and back by its transpose.
+  let np = select(vec3<f32>(0.0, 0.0, 1.0), normalize(sdff_rows_linear(base + 8u, s.g / max(gl, 1e-30))), field);
+  var nm = np;
   var m = SdfmMaterialFull(vec3<f32>(0.0), 0.0, 0.0, vec3<f32>(0.0), 0.0);
   for (var k = 0u; k < labels; k = k + 1u) {
-    let label = sdff_label(base, table, count, select(s.lb, s.la, k == 0u), p, n);
-    if (k == 0u) { m = label; } else { m = sdff_mix(m, label, s.t); }
+    let label = sdff_label(base, table, count, select(s.lb, s.la, k == 0u), p, n, np);
+    if (k == 0u) { m = label; nm = sdff_label_n; } else { m = sdff_mix(m, label, s.t); nm = mix(nm, sdff_label_n, s.t); }
   }
+  sdff_bent = sdff_bent && field && dot(nm, nm) > 1e-20;
+  if (sdff_bent) { sdff_rest_n = normalize(sdff_rows_transposed(base + 8u, normalize(nm))); }
   return m;
 }
 `;
@@ -490,7 +506,8 @@ fn material_main(in: MaterialInput) -> MaterialOutput {
     o.emissive = o.normal * 0.5 + vec3<f32>(0.5);
     return o;
   }
-  let m = sdff_material(base, s, q, o.normal);
+__SDFF_FOOTPRINT__  let m = sdff_material(base, s, q, o.normal);
+  if (sdff_bent) { o.normal = sdfm_posed_normal(in, sdff_rest_n); }
   o.base_color = m.base_color;
   o.emissive = m.emissive;
   if (in.instance_params[0].w > 0.5) { o.base_color = o.base_color * in.instance_params[0].xyz; }
@@ -512,22 +529,12 @@ const CONSTANT_READ = /extra_words\s*\[\s*b\s*\+\s*(\d+)u?\s*\]/g;
 const finite = (a, n) => Array.isArray(a) && a.length === n && a.every(Number.isFinite);
 
 /**
- * `text` with every `extra_words[i]` (MAMA's binding-7 constant reads, `b` the graph's constant base and indices
- * derived from it, such as a ramp's stop offsets) read from the material data words instead: `sdff_w(i)`. The graph's
- * constants sit at its operand's constant offset in the part's block, which the interpreter passes as `b`.
+ * `text` with every `extra_words[i]` (MAMA's binding-7 reads: the graph's constants at `b` and indices derived from it,
+ * such as a ramp's stop offsets, and the image pages its constants point to) read from the material data words instead:
+ * `sdff_w(i)`. The graph's constants sit at its operand's constant offset in the part's block, which the interpreter
+ * passes as `b`; the pages sit in the host's page block (options.pagesBase).
  */
-function dataReads(text) {
-  let out = '', at = 0;
-  for (const m of text.matchAll(/\bextra_words\s*\[/g)) {
-    if (m.index < at) continue;
-    let depth = 1, i = m.index + m[0].length;
-    for (; i < text.length && depth > 0; i++) depth += text[i] === '[' ? 1 : text[i] === ']' ? -1 : 0;
-    if (depth > 0) break;
-    out += `${text.slice(at, m.index)}sdff_w(${dataReads(text.slice(m.index + m[0].length, i - 1))})`;
-    at = i;
-  }
-  return out + text.slice(at);
-}
+const dataReads = (text) => wordReads(text, 'sdff_w');
 
 /** Checks a PartShading record; returns it, or throws `sdfm.schema` naming the first bad field. */
 export function checkPartShading(s) {
@@ -581,16 +588,7 @@ export function checkPartShading(s) {
  *   emissive?: number }} FieldInteriors
  */
 
-/** 16 hex digits of two independent 32-bit passes (FNV-1a, a rotating odd multiply) over the UTF-16 units of `text` (a name, not a security hash). */
-export function textHash(text) {
-  let a = 0x811c9dc5, b = 0x9e3779b9;
-  for (let i = 0; i < text.length; i++) {
-    const c = text.charCodeAt(i);
-    a = Math.imul(a ^ c, 0x01000193) >>> 0;
-    b = Math.imul(((b ^ c) << 13) | ((b ^ c) >>> 19), 0x5bd1e995) >>> 0;
-  }
-  return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
-}
+export { textHash };
 
 /**
  * The per-pixel shading of a field part: ONE interpreter material function (fixed text; parts whose operand graphs
@@ -607,18 +605,24 @@ export function textHash(text) {
  * then the pane shows its glass.
  * The per-instance tint is read from MaterialInput.instance_params[0] (INSTANCE_PARAM_SLOTS.tint): when its w is above
  * 0.5, the base colour is multiplied by its xyz.
+ * A material with `pages` (it samples image pages: SVG PLUS drawings, bitmaps, surface images; MAMA graphPagesOfDoc)
+ * reads them where Local fields reads binding 7: the host places the document's page words once
+ * (Engine.addMaterialData) and passes their base as `options.pagesBase`; each `pages` word of the material's constants is
+ * written into `words` plus that base. When a graph declares mat_footprint the function sets it per fragment (metres
+ * per screen pixel, as the viewport does) before the graphs run.
  *
  * @param {object} shading PartShading (MAMA field-program.ts)
  * @param {ReadonlyMap<string, object> | readonly object[]} materials SdfmCompiledMaterial by name, or a list of them
- * @param {{ field: string, debug?: boolean, interiors?: FieldInteriors }} options `field`: MAMA FIELD_PROGRAM_WGSL (the evaluator, pmf_eval)
+ * @param {{ field: string, debug?: boolean, interiors?: FieldInteriors, pagesBase?: number }} options `field`: MAMA FIELD_PROGRAM_WGSL (the evaluator, pmf_eval)
  * @returns {{ name: string, wgsl: string, words: Uint32Array, tintMode: 'graph' | 'multiply', missing: string[],
  *   interiors: { operand: number, set: string, at: number, tiles: number }[] }}
  * @throws {SdfmError} `sdfm.schema` for a malformed record or evaluator; `sdfm.material_unmappable` for a material that
- *   cannot be inlined, a forbidden token, or more than MATERIAL_FUNCTION_MAX_BYTES bytes
+ *   cannot be inlined, a forbidden token, more than MATERIAL_FUNCTION_MAX_BYTES bytes, or pages without options.pagesBase
  */
 export function fieldPartShading(shading, materials, options) {
-  const { core, words, tintMode, missing, interiors } = fieldShadingCore(shading, materials, options);
-  const wgsl = [core, FIELD_FRAME_WGSL, FIELD_NORMAL_WGSL, INTERIOR_WGSL, INTERPRETER_MAIN_WGSL].join('\n');
+  const { core, words, tintMode, missing, interiors, footprint } = fieldShadingCore(shading, materials, options);
+  const main = INTERPRETER_MAIN_WGSL.replace('__SDFF_FOOTPRINT__', footprint ? '  mat_footprint = sdfm_footprint(in);\n' : '');
+  const wgsl = [core, FIELD_FRAME_WGSL, FIELD_NORMAL_WGSL, INTERIOR_WGSL, ...(footprint ? [FOOTPRINT_WGSL] : []), main].join('\n');
   const fail = (what) => { throw new SdfmError('sdfm.material_unmappable', what); };
   const forbidden = forbiddenToken(wgsl);
   if (forbidden) fail(`'${forbidden}' is forbidden in a material function (S11)`);
@@ -637,9 +641,9 @@ export function fieldPartShading(shading, materials, options) {
  *
  * @param {object} shading PartShading (MAMA field-program.ts)
  * @param {ReadonlyMap<string, object> | readonly object[]} materials SdfmCompiledMaterial by name, or a list of them
- * @param {{ field: string, debug?: boolean, interiors?: FieldInteriors }} options
+ * @param {{ field: string, debug?: boolean, interiors?: FieldInteriors, pagesBase?: number }} options (pagesBase: see fieldPartShading)
  * @returns {{ core: string, words: Uint32Array, tintMode: 'graph' | 'multiply', missing: string[],
- *   interiors: { operand: number, set: string, at: number, tiles: number }[] }}
+ *   interiors: { operand: number, set: string, at: number, tiles: number }[], footprint: boolean }} `footprint`: a graph declares mat_footprint (the caller sets it)
  */
 export function fieldShadingCore(shading, materials, options) {
   checkPartShading(shading);
@@ -676,15 +680,47 @@ export function fieldShadingCore(shading, materials, options) {
       const raa = toks.find((t) => /^raa_/.test(t));
       if (raa) fail(`material '${name}': '${raa}' (identifiers starting with raa_ are reserved)`);
     }
-    graphOf.set(name, { body, constants: m.constants });
+    const pages = materialPages(m, (what) => fail(`material '${name}': ${what}`));
+    // The graph's shading normal (MAMA graphShadingNormal: its bump, its authored normal), part of its key.
+    let normal = null;
+    if (m.normal !== undefined) {
+      if (typeof m.normal !== 'string' || !/\bfn\s+mat_graph_normal\s*\(/.test(m.normal)) fail(`material '${name}': 'normal' does not define mat_graph_normal`);
+      normal = structs(dataReads(m.normal)).trim();
+      const toks = tokens(normal);
+      if (toks.includes('extra_words')) fail(`material '${name}': 'extra_words' is not read as extra_words[...]`);
+      const raa = toks.find((t) => /^raa_/.test(t));
+      if (raa) fail(`material '${name}': '${raa}' (identifiers starting with raa_ are reserved)`);
+    }
+    graphOf.set(name, { body: normal === null ? body : `${body}\n// normal\n${normal}`, code: body, normal, constants: m.constants, pages });
   }
+  // Graphs that sample image pages: their pointer words are relocated to the host's page block (options.pagesBase).
+  const pagesBase = [...graphOf].some(([, g]) => g.pages.length > 0)
+    ? pagesBaseOf(options, (what) => fail(`material '${[...graphOf].find(([, g]) => g.pages.length > 0)[0]}': ${what}`)) : 0;
   // One function per distinct body, in text order: the same graphs give the same function text whatever the part.
   const bodies = [...new Set([...graphOf.values()].map((g) => g.body))].sort();
   // A graph that never mentions its node-space point pn needs no program -> node transform: sdff_label then passes p
   // and skips the 12 material words and the 3x3 multiply per label, per fragment (the text stays part-independent).
   const nodePoint = bodies.some((body) => tokens(body).includes('pn')) ? 'sdff_affine(o + 12u, p)' : 'p';
-  const graphs = bodies.map((body, k) => [
-    `fn sdfm_graph_${k}(b: u32, p: vec3<f32>, pn: vec3<f32>, n: vec3<f32>, mk: SdfmMatMasks) -> SdfmMaterialFull {`, body, '}'].join('\n'));
+  const parts = new Map([...graphOf.values()].map((g) => [g.body, g]));
+  const graphs = bodies.map((key, k) => {
+    const g = parts.get(key);
+    return [`fn sdfm_graph_${k}(b: u32, p: vec3<f32>, pn: vec3<f32>, n: vec3<f32>, mk: SdfmMatMasks) -> SdfmMaterialFull {`, g.code, '}',
+      ...(g.normal === null ? [] : [g.normal.replace(/\bmat_hfn\b/g, `sdfm_hfn_${k}`).replace(/\bmat_graph_normal\b/g, `sdfm_normal_${k}`)]),
+    ].join('\n');
+  });
+  const bent = bodies.map((key, k) => [key, k]).filter(([key]) => parts.get(key).normal !== null).map(([, k]) => k);
+  // The label normal: a graph without one keeps np; an authored normal is what its body left in mat_out_normal.
+  const authored = helpers.has('mat_authored_prelude');
+  const graphCall = bent.length === 0
+    ? `    let m = sdff_graph(sdff_w(o + 4u), base + sdff_w(o + 5u), p, ${nodePoint}, n);
+    if (m.ok) { return m.m; }`
+    : `${authored ? '    mat_authored_reset();\n' : ''}    let pn = ${nodePoint};
+    let m = sdff_graph(sdff_w(o + 4u), base + sdff_w(o + 5u), p, pn, n);
+    if (m.ok) {
+      let j = ${nodePoint === 'p' ? 'mat3x3<f32>(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)' : 'transpose(mat3x3<f32>(sdff_v3(o + 12u), sdff_v3(o + 16u), sdff_v3(o + 20u)))'};
+      sdff_label_n = sdff_graph_normal(sdff_w(o + 4u), base + sdff_w(o + 5u), p, pn, j, np, ${authored ? 'mat_out_normal' : 'vec3<f32>(0.0, 0.0, 1.0)'});
+      return m.m;
+    }`;
   const masks = 'SdfmMatMasks(0.5, 1.0, 1.0, 0.0, 1.0)';
   const dispatch = `struct SdffGraph { ok: bool, m: SdfmMaterialFull }
 
@@ -696,7 +732,15 @@ ${bodies.map((_, k) => `    case ${k}u: { out = SdffGraph(true, sdfm_graph_${k}(
   }
 ` : ''}  return out;
 }
-`;
+${bent.length ? `
+fn sdff_graph_normal(k: u32, b: u32, p: vec3<f32>, pn: vec3<f32>, j: mat3x3<f32>, n: vec3<f32>, tn: vec3<f32>) -> vec3<f32> {
+  switch k {
+${bent.map((k) => `    case ${k}u: { sdff_bent = true; return sdfm_normal_${k}(b, p, pn, j, n, tn); }`).join('\n')}
+    default: { }
+  }
+  return n;
+}
+` : ''}`;
   const core = [
     `// sdff: the SDF shading interpreter, ${bodies.length} material graphs (@etcito/raa-sdfm field-shading.js)`,
     `struct SdfmMaterialFull { ${MATERIAL_FULL_FIELDS.map((x) => `${x}: ${x === 'base_color' || x === 'emissive' ? 'vec3<f32>' : 'f32'}`).join(', ')} }`,
@@ -705,9 +749,13 @@ ${bodies.map((_, k) => `    case ${k}u: { out = SdffGraph(true, sdfm_graph_${k}(
     ...graphs,
     dispatch,
     field.trim(),
-    INTERPRETER_CORE_WGSL.replace('__SDFF_NODE_POINT__', nodePoint),
+    INTERPRETER_CORE_WGSL.replace('__SDFF_GRAPH_CALL__', graphCall),
   ].join('\n');
-  return { core, ...fieldShadingWords(shading, graphOf, bodies, options.debug === true, options.interiors), tintMode, missing };
+  const { words, interiors } = fieldShadingWords(shading, graphOf, bodies, options.debug === true, options.interiors);
+  // The pointer words of each graph's image pages, relocated to the host's page block.
+  for (const g of graphOf.values()) for (const i of g.pages) words[g.at + i] = (words[g.at + i] + pagesBase) >>> 0;
+  const footprint = declaresFootprint([...helpers.values()]);
+  return { core, words, interiors, tintMode, missing, footprint };
 }
 
 /** The data block of a part (FIELD_DATA_* layout) and where its panes' tile ids sit. */
@@ -716,7 +764,7 @@ function fieldShadingWords(shading, graphOf, bodies, debug, interiorsDef) {
   const programAt = FIELD_DATA_HEADER, table = programAt + program.length;
   const constantsAt = new Map();
   let size = table + FIELD_OPERAND_WORDS * ops.length;
-  for (const [name, g] of graphOf) { constantsAt.set(name, size); size += g.constants.length; }
+  for (const [name, g] of graphOf) { constantsAt.set(name, size); g.at = size; size += g.constants.length; }
   // Interior records after the constants: a pane of an unknown set gets a record with no tile (glass only).
   const look = { ...INTERIOR_DEFAULTS, ...Object.fromEntries(Object.entries(interiorsDef ?? {}).filter(([k, v]) => k !== 'sets' && Number.isFinite(v))) };
   const records = [];

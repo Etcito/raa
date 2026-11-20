@@ -243,8 +243,10 @@ fn sdfb_srgb(c: vec3<f32>) -> vec3<f32> {
   if (dot(t, t) < 1e-20) { t = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9); t = t - n * dot(n, t); }
   t = normalize(t);
   let b = cross(n, t) * select(-1.0, 1.0, f.tangent.w >= 0.0);
-  let ts = vec3<f32>(dot(g, t), dot(g, b), dot(g, n));
   let m = sdff_material(base, s, f.rest, g);
+  // A graph's bump or authored normal bends the baked normal (the per-pixel shading's rule).
+  if (sdff_bent) { g = sdff_rest_n; }
+  let ts = vec3<f32>(dot(g, t), dot(g, b), dot(g, n));
   var metallic = m.metallic;
   var roughness = m.roughness;
   if (sdfb_look.single > 0.5) { metallic = sdfb_look.metallic; roughness = sdfb_look.roughness; }
@@ -377,15 +379,25 @@ export function createFieldBaker(device) {
      * Bakes one part. `mesh` is the part in its rest (mesh) space: positions, normals, the atlas uvs, triangle indices
      * (all sub-meshes of the part, which share one atlas) and `tangents` (partTangents; drawn with the same array).
      * `shading` and `materials` are what fieldPartShading takes; `field` is MAMA's FIELD_PROGRAM_WGSL.
+     * `pages`: the document's image page words (MAMA graphPagesOfDoc) when a material samples them; they follow the part's
+     * words in the bake's buffer (fieldPartShading's options.pagesBase).
      * @returns {Promise<{ size: number, normal: Uint8Array, color: Uint8Array, emissive: Uint8Array | null, missing: string[], pipeline: string }>}
      */
-    async bake({ shading, materials, field, positions, normals, uvs, tangents, indices, size }) {
+    async bake({ shading, materials, field, pages, positions, normals, uvs, tangents, indices, size }) {
       if (!Number.isInteger(size) || size < 16 || size > 4096) throw new SdfmError('sdfm.schema', `bake: size ${size} is not an integer in 16..4096`);
       const nv = positions.length / 3;
       if (normals.length !== nv * 3 || uvs.length !== nv * 2 || tangents.length !== nv * 4 || indices.length % 3 !== 0 || indices.length === 0) {
         throw new SdfmError('sdfm.schema', `bake: ${nv} positions, ${normals.length / 3} normals, ${uvs.length / 2} uvs, ${tangents.length / 4} tangents, ${indices.length} indices`);
       }
-      const { core, words, missing } = fieldShadingCore(shading, materials, { field });
+      let { core, words, missing } = fieldShadingCore(shading, materials, { field, ...(pages?.length ? { pagesBase: 0 } : {}) });
+      if (pages?.length) {
+        // The part block is the same size whatever the page base: the pages go right after it.
+        const at = words.length;
+        ({ core, words, missing } = fieldShadingCore(shading, materials, { field, pagesBase: at }));
+        const all = new Uint32Array(at + pages.length);
+        all.set(words); all.set(pages, at);
+        words = all;
+      }
       const wgsl = fieldBakeWgsl(core);
       const [pipeline, flat] = await Promise.all([bakePipeline(wgsl), dilatePipeline()]);
       const vertices = new Float32Array(nv * VERTEX_FLOATS);
