@@ -87,6 +87,17 @@ impl LodRegistry {
     pub fn chain(&self, full: MeshId) -> Option<&[LodLevel]> {
         self.chains.get(&full).map(Vec::as_slice)
     }
+    /// Drops every chain that names `mesh`, as its full mesh or as one of its levels, and
+    /// tells whether one was dropped. Called for each freed sub-mesh id: ids are reused
+    /// lowest first, so a chain left on a freed id would hand the next uploaded mesh the
+    /// removed mesh's levels, and draws of it fail with `render.unknown_mesh` once those
+    /// levels are freed too.
+    pub fn forget(&mut self, mesh: MeshId) -> bool {
+        let before = self.chains.len();
+        self.chains
+            .retain(|&full, chain| full != mesh && !chain[1..].iter().any(|l| l.mesh == mesh));
+        self.chains.len() != before
+    }
     pub fn is_level(&self, mesh: MeshId) -> bool {
         self.chains
             .values()
