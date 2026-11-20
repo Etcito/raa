@@ -566,6 +566,12 @@ pub(crate) fn prepare_view(
             post.shafts
                 .set_sun(light.direction, light.color.map(|c| c * light.intensity));
         }
+        // M6 group preparation: after this viewport's camera is installed and before its
+        // lit.prepare.
+        super::m36_billboard_groups::prepare_billboard_groups(
+            st,
+            u8::try_from(index).unwrap_or(u8::MAX),
+        )?;
         // Consume the viewport's one-shot discontinuity mark before staging its camera.
         let discontinuity = st.scene_invocation.prepare(index);
         if discontinuity
