@@ -424,7 +424,7 @@ pub(crate) fn fail_billboard_record(
 }
 
 #[cfg(target_arch = "wasm32")]
-pub(crate) use web::{frame, install, prepare_billboard_groups};
+pub(crate) use web::{detach_bake_groups, frame, install, prepare_billboard_groups};
 
 #[cfg(target_arch = "wasm32")]
 mod web {
@@ -605,6 +605,12 @@ mod web {
             features,
             ..
         } = st;
+        // Ready bake ids published by "Expose asynchronous billboard baking in RAA"; a
+        // pending, failed or removed bake is absent and forces LOD0.
+        let ready_ids = features
+            .get::<crate::api::m37_billboard_bake::SharedBakeStore>()
+            .map(|store| store.borrow().ready_ids())
+            .unwrap_or_default();
         let Some(registry) = features.get_mut::<BillboardGroupRegistry>() else {
             return Ok(());
         };
@@ -623,9 +629,7 @@ mod web {
                         proxy_world: resources.proxy_world,
                         bounds: resources.bounds,
                     };
-                    // The resolved-bake store is attached by "Expose asynchronous
-                    // billboard baking in RAA"; until then every bake is unresolved.
-                    let ready = false;
+                    let ready = ready_ids.contains(&record.config.bake);
                     match prepare_billboard_record(record, view, &recipe, ready) {
                         Ok(prepared) => {
                             apply_level(scene, instances, record, prepared.level);
@@ -644,6 +648,32 @@ mod web {
             }
         }
         Ok(())
+    }
+
+    /// Detaches every group that draws `bake` to LOD0 before its atlas images are freed:
+    /// the status becomes fresh (level 0, not ready, no error), every per-view level drops
+    /// to LOD0 and the live LOD0 instances become visible again. Groups of another bake and
+    /// caller visibility records are untouched.
+    pub(crate) fn detach_bake_groups(st: &mut EngineState, bake: u32) {
+        let EngineState {
+            scene,
+            instances,
+            features,
+            ..
+        } = st;
+        let Some(registry) = features.get_mut::<BillboardGroupRegistry>() else {
+            return;
+        };
+        for record in registry.groups.values_mut() {
+            if record.config.bake != bake {
+                continue;
+            }
+            record.status = BillboardGroupStatus::default();
+            for state in record.views.values_mut() {
+                state.level = 0;
+            }
+            apply_level(scene, instances, record, 0);
+        }
     }
 
     impl EngineState {
