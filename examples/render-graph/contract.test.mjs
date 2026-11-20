@@ -155,13 +155,18 @@ test('every ROOM_SUBJECTS box lies in the RG_CAPTURE_T_S view of the interpreter
   }
 });
 
-function fakeCanvas() {
-  const context = { drawImage() {}, fillRect() {}, fillText() {}, measureText: text => ({ width: text.length * 8 }) };
-  return { width: 0, height: 0, ownerDocument: { createElement: () => fakeCanvas() },
+function fakeCanvas(trace = null) {
+  const context = {
+    drawImage(...args) { trace?.push({ op: 'drawImage', args }); },
+    fillRect(...args) { trace?.push({ op: 'fillRect', args, fillStyle: context.fillStyle }); },
+    fillText(...args) { trace?.push({ op: 'fillText', args, fillStyle: context.fillStyle, font: context.font }); },
+    measureText: text => ({ width: text.length * 8 }),
+  };
+  return { width: 0, height: 0, ownerDocument: { createElement: () => fakeCanvas(trace) },
     getContext: () => context, toDataURL: () => 'data:image/png;base64,aGVsbG8=' };
 }
 
-function runtimeDouble(isolatedPair, trace) {
+function runtimeDouble(isolatedPair, trace, graph = { format: 'raa.render-graph', version: 1, name: 'pair', nodes: [], links: [] }) {
   let id = 0;
   const engines = [];
   const load = async () => ({ createEngine: async (canvas, options) => {
@@ -170,7 +175,7 @@ function runtimeDouble(isolatedPair, trace) {
       resize(width, height) { canvas.width = width; canvas.height = height; },
       setCamera(pose) { trace.cameras.push([identity, pose]); },
       render(time) { this.count++; this.frameIndex = Math.round(time / (1000 / 60)); trace.renders.push([identity, time]); },
-      renderGraph() { return { format: 'raa.render-graph', version: 1, name: 'pair', nodes: [], links: [] }; },
+      renderGraph() { return graph; },
       renderGraphActive() { return true; }, renderGraphIssues() { return []; },
       renderGraphStats() { return { frameIndex: this.frameIndex, nodes: [] }; },
       passes() { return [{ name: 'forward', role: 'pass', enabled: true, order: 60, required: true }]; },
@@ -180,7 +185,7 @@ function runtimeDouble(isolatedPair, trace) {
     trace.created.push({ identity, options, canvas });
     return engine;
   } });
-  const variant = { id: 'pair', pair: { order: ['left', 'right'] }, selection: { camera: {}, subjects: [] } };
+  const variant = { id: 'pair', pair: { order: ['left', 'right'], left: 'frozen', right: 'interpreted' }, selection: { camera: {}, subjects: [] } };
   const row = { ...ROW, scenario: 'fixture', mode: 'pair', requiredFacts: [] };
   const entry = { default: { id: 'fixture', milestone: 'interpreter', variants: [variant], isolatedPair,
     build() { trace.setupBuild++; } },
@@ -188,7 +193,7 @@ function runtimeDouble(isolatedPair, trace) {
       trace.observed = engine.identity;
       return facts();
     }, inventory: [row], factNames: [] };
-  const canvas = fakeCanvas();
+  const canvas = fakeCanvas(trace.canvasOps ??= []);
   const runner = createRgPageRunner({ canvas, status: { textContent: '' }, load, scenes: new Map([['fixture', entry]]), lib: {},
     clock: { now: () => 0, requestFrame: cb => { cb(); return 1; }, cancelFrame() {} } });
   return { runner, trace, engines, canvas };
@@ -223,4 +228,72 @@ test('isolatedPair creates two independent 241-frame engines and routes observat
   assert.equal(engines[2].count, 242); // capture is copied before page-kit observation render
   runner.dispose();
   assert.equal(engines[2].disposed, true);
+});
+
+test('Debug pair annotations restore all tile labels below headers inside both halves', async () => {
+  const labels = ['depth', 'normal', 'motion', 'ao', 'area shadow mask', 'giRawVsDenoised', 'history length', 'final'];
+  const nodes = labels.map((label, index) => ({ id: `tile${index}`, type: 'view.image', params: { label } }));
+  nodes.push({ id: 'grid', type: 'view.grid', params: { labels: true, columns: 4 } });
+  const graph = { format: 'raa.render-graph', version: 1, name: 'Debug', nodes,
+    links: labels.map((_, index) => ({ from: `tile${index}.color`, to: `grid.t${index}` })) };
+  const trace = { created: [], renders: [], cameras: [], disposed: [], setupBuild: 0 };
+  const seeds = () => ({ weatherSeed: 7, weatherChanging: false, timePlaying: false,
+    freshEngine: true, initialRenderCount: 0, source: 'explicit-room-and-fresh-render-sequence' });
+  const { runner } = runtimeDouble({
+    engineOptions: (_variant, _state, half) => half === 'left' ? { pipeline: 'debug' } : {},
+    prepare: async () => {}, seeds,
+  }, trace, graph);
+  const previousFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = callback => { callback(); return 1; };
+  try {
+    await runner.run({ selectionId: 's', attemptId: 'a', buildId: 'b', scenario: 'fixture', mode: 'pair', width: 1280, height: 720, remainingMs: 300000 });
+  } finally {
+    if (previousFrame === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = previousFrame;
+    runner.dispose();
+  }
+
+  const ops = trace.canvasOps;
+  const labelOps = ops.filter(op => op.op === 'fillText' && labels.some(label => op.args[0] === (label === 'ao' ? 'ambient occlusion' : label)));
+  const expected = [...labels, ...labels].map(label => label === 'ao' ? 'ambient occlusion' : label);
+  assert.deepEqual(labelOps.map(op => op.args[0]), expected);
+  const lastImage = ops.reduce((last, op, index) => op.op === 'drawImage' && op.args.length === 3 ? index : last, -1);
+  const lastHeader = ops.findLastIndex(op => op.op === 'fillText' && ['frozen', 'interpreted'].includes(op.args[0]));
+  assert.ok(lastImage < lastHeader && lastHeader < ops.indexOf(labelOps[0]));
+  const boxOps = ops.filter(op => op.op === 'fillRect' && op.fillStyle === '#000000' && op.args[3] === 18);
+  assert.equal(boxOps.length, 16);
+  for (let half = 0; half < 2; half++) {
+    for (let tile = 0; tile < 8; tile++) {
+      const box = boxOps[half * 8 + tile].args;
+      const x = half * 1280 + (tile % 4) * 320;
+      const y = Math.max(28, Math.floor(tile / 4) * 360);
+      assert.equal(box[0], x);
+      assert.equal(box[1], y);
+      assert.ok(box[2] <= 320 && box[3] === 18);
+      assert.ok(box[0] + box[2] <= x + 320 && box[1] + box[3] <= y + 360);
+    }
+  }
+  const finalAnnotation = Math.max(...labelOps.map((_, index) => ops.indexOf(labelOps[index])));
+  assert.equal(ops.slice(finalAnnotation + 1).some(op => ['drawImage', 'fillRect', 'fillText'].includes(op.op)), false);
+});
+
+test('non-grid pair composition keeps its image blits and title band without annotations', async () => {
+  const trace = { created: [], renders: [], cameras: [], disposed: [], setupBuild: 0 };
+  const { runner } = runtimeDouble({
+    engineOptions: () => ({}), prepare: async () => {},
+    seeds: () => ({ weatherSeed: 7, weatherChanging: false, timePlaying: false,
+      freshEngine: true, initialRenderCount: 0, source: 'explicit-room-and-fresh-render-sequence' }),
+  }, trace);
+  const previousFrame = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = callback => { callback(); return 1; };
+  try {
+    await runner.run({ selectionId: 's', attemptId: 'a', buildId: 'b', scenario: 'fixture', mode: 'pair', width: 1280, height: 720, remainingMs: 300000 });
+  } finally {
+    if (previousFrame === undefined) delete globalThis.requestAnimationFrame;
+    else globalThis.requestAnimationFrame = previousFrame;
+    runner.dispose();
+  }
+  assert.equal(trace.canvasOps.filter(op => op.op === 'drawImage' && op.args.length === 3).length, 2);
+  assert.equal(trace.canvasOps.filter(op => op.op === 'fillRect').length, 2); // output background and title band
+  assert.deepEqual(trace.canvasOps.filter(op => op.op === 'fillText').map(op => op.args[0]), ['frozen', 'interpreted']);
 });

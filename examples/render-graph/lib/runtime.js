@@ -119,9 +119,42 @@ function copyFrame(source) {
   return output;
 }
 
+function debugGridLabels(graph) {
+  if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.links)) return null;
+  const grid = graph.nodes.find(node => node.type === 'view.grid' && node.params?.labels !== false);
+  if (!grid) return null;
+  const nodes = new Map(graph.nodes.map(node => [node.id, node]));
+  const ordered = [];
+  for (let index = 0; index < 8; index++) {
+    const link = graph.links.find(item => item.to === `${grid.id}.t${index}`);
+    const source = link && nodes.get(link.from.slice(0, link.from.lastIndexOf('.')));
+    const label = source?.params?.label;
+    if (typeof label !== 'string' || !label.trim()) return null;
+    ordered.push(label === 'ao' ? 'ambient occlusion' : label);
+  }
+  return ordered;
+}
+
+function annotateDebugGrid(context, offset, labels) {
+  if (!labels) return;
+  context.font = '12px monospace';
+  context.textBaseline = 'top';
+  for (let index = 0; index < labels.length; index++) {
+    const column = index % 4, row = Math.floor(index / 4);
+    const x = offset + column * 320;
+    const y = Math.max(LABEL_BAND, row * 360);
+    const width = Math.min(320, Math.ceil(measure(context, labels[index])) + 8);
+    const height = 18;
+    context.fillStyle = '#000000';
+    context.fillRect(x, y, width, height);
+    context.fillStyle = '#ffffff';
+    context.fillText(labels[index], x + 4, y + 2, 312);
+  }
+}
+
 // The single 1280x720 image, or the 2560x720 pair (left at x 0, right at x 1280) with its labels,
 // plus the optional caption strip; returns the base64 PNG and its 2D context.
-function composeCapture(copies, pair, caption) {
+function composeCapture(copies, pair, caption, graphs = new Map()) {
   const first = copies.get(pair ? 'left' : 'single');
   if (!first) fail(pair ? 'the RG_RUN did not copy the left half' : 'the RG_RUN did not copy the single half');
   const second = pair ? copies.get('right') : null;
@@ -150,6 +183,8 @@ function composeCapture(copies, pair, caption) {
     context.fillText(String(pair.left), PADDING, LABEL_BAND / 2);
     context.fillText(String(pair.right), CAPTURE_WIDTH + PADDING, LABEL_BAND / 2);
   }
+  annotateDebugGrid(context, 0, debugGridLabels(graphs.get(pair ? 'left' : 'single')));
+  if (second) annotateDebugGrid(context, CAPTURE_WIDTH, debugGridLabels(graphs.get('right')));
   if (captionHeight > 0) {
     context.fillStyle = FOREGROUND;
     context.textBaseline = 'top';
@@ -245,6 +280,7 @@ export function createRgPageRunner(options) {
     if (pair && !Array.isArray(pair.order)) fail('variant.pair.order must list the halves');
     const halves = pair ? pair.order : ['single'];
     const copies = new Map();
+    const graphs = new Map();
     let timeMs = 0;
 
     // The render and whatever runs after it share one animation frame callback (the frame-240 copy).
@@ -276,13 +312,16 @@ export function createRgPageRunner(options) {
           applyCamera(engine, frameTimeSeconds(f));
           engine.render(timeMs);
           timeMs += RG_DT_MS;
-          if (f === RG_WARMUP_FRAMES) copies.set(half, copyFrame(canvas));
+          if (f === RG_WARMUP_FRAMES) {
+            copies.set(half, copyFrame(canvas));
+            graphs.set(half, engine.renderGraph?.());
+          }
         });
       }
     }
 
     const caption = typeof scene.caption === 'function' ? scene.caption(engine, state, variant) : null;
-    const result = composeCapture(copies, pair, typeof caption === 'string' ? caption : null);
+    const result = composeCapture(copies, pair, typeof caption === 'string' ? caption : null, graphs);
     composed = result.data;
     composedContext = result.context;
     return { status: 'ready' };
@@ -365,7 +404,8 @@ export function createRgPageRunner(options) {
       state.isolatedHalves = Object.freeze(snapshots.map(snapshot => deepFreeze(snapshot)));
       copiesForIsolatedRight = state.isolatedImages.right;
       const pair = variant.pair;
-      const result = composeCapture(new Map([['left', copiesForIsolatedLeft], ['right', copiesForIsolatedRight]]), pair, null);
+      const result = composeCapture(new Map([['left', copiesForIsolatedLeft], ['right', copiesForIsolatedRight]]), pair, null,
+        new Map(snapshots.map(snapshot => [snapshot.half, snapshot.graph])));
       composed = result.data; composedContext = result.context;
       if (previous) owned.add(previous);
     } catch (error) {
