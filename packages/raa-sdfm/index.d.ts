@@ -343,6 +343,12 @@ export interface SdfmCompiledMaterial {
    * {@link fieldPartShading}; absent = none.
    */
   pages?: number[];
+  /**
+   * The graph's shading normal (MAMA graphShadingNormal: its bump and its authored normal map), WGSL defining
+   * `mat_graph_normal(b, p, pn, j, n, tn) -> vec3f` (and `mat_hfn` for a bump); its words follow the graph's own constants
+   * in `constants`. {@link fieldPartShading} and the bake shade with it; absent = the field normal.
+   */
+  normal?: string;
 }
 
 /**

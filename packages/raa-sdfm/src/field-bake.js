@@ -243,8 +243,10 @@ fn sdfb_srgb(c: vec3<f32>) -> vec3<f32> {
   if (dot(t, t) < 1e-20) { t = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(n.x) > 0.9); t = t - n * dot(n, t); }
   t = normalize(t);
   let b = cross(n, t) * select(-1.0, 1.0, f.tangent.w >= 0.0);
-  let ts = vec3<f32>(dot(g, t), dot(g, b), dot(g, n));
   let m = sdff_material(base, s, f.rest, g);
+  // A graph's bump or authored normal bends the baked normal (the per-pixel shading's rule).
+  if (sdff_bent) { g = sdff_rest_n; }
+  let ts = vec3<f32>(dot(g, t), dot(g, b), dot(g, n));
   var metallic = m.metallic;
   var roughness = m.roughness;
   if (sdfb_look.single > 0.5) { metallic = sdfb_look.metallic; roughness = sdfb_look.roughness; }
