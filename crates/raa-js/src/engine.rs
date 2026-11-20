@@ -105,7 +105,7 @@ impl EngineState {
 
     /// Uploads `scratch` as an attributed mesh (one sub-mesh, S10 default attributes) and
     /// returns its new v0 mesh handle. The scratch buffer keeps its capacity.
-    fn upload_scratch(&mut self, gpu: &GpuContext) -> Result<u32, RaaError> {
+    pub(crate) fn upload_scratch(&mut self, gpu: &GpuContext) -> Result<u32, RaaError> {
         let mesh = AttributedMesh::from_mesh(std::mem::take(&mut self.scratch));
         let uploaded = self.lit.upload(gpu, &mesh);
         let lit = match uploaded {
@@ -420,6 +420,23 @@ impl Engine {
         let mut guard = self.state.borrow_mut();
         let s = guard.as_mut().ok_or_else(disposed)?;
         f(runtime.gpu(), s).map_err(|e| js_err(&e))
+    }
+
+    /// Returns the live GPU context and a clone of the shared state cell. The caller owns
+    /// state acquisition and restoration; it must not hold a `RefCell` borrow across
+    /// `await`. The GPU reference stays tied to `self`; the engine keeps `runtime` and
+    /// `state` private.
+    ///
+    /// Handoff: 'Expose asynchronous billboard baking through safe Engine access' uses this
+    /// helper to reach the GPU and the state for a bake; `EngineState::upload_scratch`
+    /// stays the mesh-upload provider for the prepared primitive mesh.
+    #[allow(dead_code, clippy::type_complexity)]
+    pub(crate) fn bake_context(
+        &self,
+    ) -> Result<(&GpuContext, Rc<RefCell<Option<EngineState>>>), JsValue> {
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        runtime.gpu().ensure_live().map_err(|e| js_err(&e))?;
+        Ok((runtime.gpu(), Rc::clone(&self.state)))
     }
 
     /// Opens one scene invocation: clear the observation and open the renderer's index.
