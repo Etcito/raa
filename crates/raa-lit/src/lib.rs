@@ -21,6 +21,7 @@ mod contributor;
 mod editor;
 pub use editor::WireframeMode;
 mod extras;
+pub mod foliage_resources;
 mod frame;
 mod frame_history;
 mod handle;
