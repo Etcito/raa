@@ -611,3 +611,162 @@ fn view_order_is_bijective_and_shell_ranges_exclude_other_shells() {
         );
     }
 }
+
+fn reflected_scene() -> MeshTraceScene {
+    let mut scene = MeshTraceScene::default();
+    let front = [[3.0, -6.0, -6.0], [3.0, 6.0, -6.0], [3.0, 0.0, 6.0]];
+    let back = [[-3.0, -6.0, -6.0], [-3.0, 6.0, -6.0], [-3.0, 0.0, 6.0]];
+    update_geometry(&mut scene, &[triangle(1, &front), triangle(2, &back)]);
+    scene
+}
+
+fn reflected_scheduler() -> SphericalScheduler {
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        grid: SphericalGridConfig {
+            angular_resolution: 8,
+            ..grid_config()
+        },
+        max_cells: 8,
+        ..config()
+    })
+    .unwrap();
+    scheduler.set_view_priority([1., 0., 0.], 0.8);
+    scheduler
+}
+
+const REFLECTED_RECEIVER: ReflectedReceiver = ReflectedReceiver {
+    position: [-3.0, 0.1, 0.02],
+    normal: [1.0, 0.0, 0.0],
+    priority: 1,
+};
+
+fn advance_reflected(
+    scheduler: &mut SphericalScheduler,
+    scene: &MeshTraceScene,
+    origin: [f32; 3],
+    frames: usize,
+) {
+    for _ in 0..frames {
+        scheduler.update(scene, origin, 1);
+        assert!(scheduler.stats().cells <= 8);
+        assert!(scheduler.stats().last_cell_queries <= 768);
+        let jobs = scheduler.take_jobs(FaceBudget { near: 1, far: 4 });
+        assert!(jobs.iter().filter(|job| job.key.shell == 0).count() <= 1);
+        assert!(jobs.iter().filter(|job| job.key.shell != 0).count() <= 4);
+        for job in jobs {
+            assert!(scheduler.complete(job));
+        }
+    }
+}
+
+#[test]
+fn reflected_priority_reuses_the_pool_and_restores_primary_coverage_when_cleared() {
+    let scene = reflected_scene();
+    let origin = [0.0; 3];
+    let mut scheduler = reflected_scheduler();
+    advance_reflected(&mut scheduler, &scene, origin, 20);
+    let primary: BTreeMap<_, _> = scheduler.cells().map(|p| (p.key, p.epoch)).collect();
+    let receiver_key = scheduler
+        .grid()
+        .key_at(REFLECTED_RECEIVER.position)
+        .unwrap();
+    assert!(scheduler.progress(receiver_key).is_none());
+    assert_eq!(scheduler.stats().ready_cells, 8);
+    let epoch = scheduler.stats().origin_epoch;
+    assert!(scheduler.set_reflected_receivers(
+        epoch,
+        scene.geometry.revision,
+        &[REFLECTED_RECEIVER],
+    ));
+    advance_reflected(&mut scheduler, &scene, origin, 20);
+    assert_eq!(scheduler.stats().ready_cells, 8);
+    assert_eq!(scheduler.stats().reflected_ready_cells, 2);
+    assert!(scheduler.progress(receiver_key).unwrap().is_ready());
+    assert_eq!(
+        scheduler
+            .cells()
+            .filter(|p| primary.get(&p.key) == Some(&p.epoch))
+            .count(),
+        6
+    );
+    scheduler.clear_reflected_receivers();
+    advance_reflected(&mut scheduler, &scene, origin, 20);
+    assert_eq!(scheduler.stats().reflected_cells, 0);
+    assert_eq!(scheduler.stats().ready_cells, 8);
+    assert_eq!(
+        scheduler.cells().map(|p| p.key).collect::<Vec<_>>(),
+        primary.into_keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn reflected_priority_keeps_progress_while_walking_and_rejects_stale_feedback() {
+    let mut scene = reflected_scene();
+    let mut scheduler = reflected_scheduler();
+    scheduler.update(&scene, [0.0; 3], 1);
+    let mut last_epoch = scheduler.stats().origin_epoch;
+    let mut stale_job = None;
+    let mut groups_with_progress = BTreeSet::new();
+    for frame in 0..80 {
+        let origin = [0.0, frame as f32 * 0.02, 0.0];
+        scheduler.update(&scene, origin, 1);
+        let epoch = scheduler.stats().origin_epoch;
+        if epoch != last_epoch {
+            assert!(!scheduler.set_reflected_receivers(
+                last_epoch,
+                scene.geometry.revision,
+                &[REFLECTED_RECEIVER]
+            ));
+            assert!(!scheduler.complete(stale_job.take().unwrap()));
+        }
+        assert!(scheduler.set_reflected_receivers(
+            epoch,
+            scene.geometry.revision,
+            &[REFLECTED_RECEIVER]
+        ));
+        advance_reflected(&mut scheduler, &scene, origin, 1);
+        if scheduler.stats().reflected_ready_cells > 0 {
+            groups_with_progress.insert(epoch);
+        }
+        if stale_job.is_none() {
+            stale_job = scheduler.take_jobs(FaceBudget { near: 0, far: 1 }).pop();
+        }
+        last_epoch = epoch;
+    }
+    assert!(groups_with_progress.len() >= 5, "{groups_with_progress:?}");
+    let geometry_revision = scene.geometry.revision;
+    update_geometry(&mut scene, &[triangle(1, &facing_x(3.0))]);
+    scheduler.update(&scene, [0.0, 1.58, 0.0], 1);
+    assert!(!scheduler.set_reflected_receivers(
+        last_epoch,
+        geometry_revision,
+        &[REFLECTED_RECEIVER]
+    ));
+    assert_eq!(scheduler.stats().reflected_cells, 0);
+}
+
+#[test]
+fn reflected_wrong_side_and_empty_space_do_not_displace_primary() {
+    let scene = reflected_scene();
+    let mut scheduler = reflected_scheduler();
+    let origin = [0.0; 3];
+    advance_reflected(&mut scheduler, &scene, origin, 20);
+    let before: Vec<_> = scheduler.cells().copied().collect();
+    assert!(scheduler.set_reflected_receivers(
+        scheduler.stats().origin_epoch,
+        scene.geometry.revision,
+        &[
+            ReflectedReceiver {
+                normal: [-1.0, 0.0, 0.0],
+                ..REFLECTED_RECEIVER
+            },
+            ReflectedReceiver {
+                position: [0.0, 0.0, -7.0],
+                ..REFLECTED_RECEIVER
+            },
+        ],
+    ));
+    advance_reflected(&mut scheduler, &scene, origin, 4);
+    assert_eq!(scheduler.stats().reflected_cells, 0);
+    assert_eq!(scheduler.cells().copied().collect::<Vec<_>>(), before);
+}

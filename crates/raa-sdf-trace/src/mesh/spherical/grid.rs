@@ -157,6 +157,10 @@ impl SphericalGrid {
             .partition_point(|&edge| f64::from(edge) <= radius)
             - 1;
         let shell = (i as u16).min(self.shell_count() - 1);
+        Some(self.column_at(p, shell))
+    }
+
+    fn column_at(&self, p: [f64; 3], shell: u16) -> CellKey {
         let [x, y, z] = p.map(f64::abs);
         let face = if x >= y && x >= z {
             if p[0] >= 0.0 {
@@ -186,12 +190,39 @@ impl SphericalGrid {
             };
             (((coord + 1.0) * f64::from(count) * 0.5) as u16).min(count - 1)
         };
-        Some(CellKey {
+        CellKey {
             shell,
             face,
             x: index(u),
             y: index(v),
-        })
+        }
+    }
+
+    /// Enumerate the lookup's immediate angular and radial support, including seams.
+    pub(super) fn lookup_ring(&self, key: CellKey) -> Vec<(CellKey, u32)> {
+        let mut neighbors = Vec::with_capacity(27);
+        let n = f64::from(self.angular_resolution());
+        let [axis, u, v] = key.face.frame();
+        for shell in key.shell.saturating_sub(1)..=(key.shell + 1).min(self.shell_count() - 1) {
+            for dx in -1i16..=1 {
+                for dy in -1i16..=1 {
+                    let a = 2.0 * (f64::from(key.x) + f64::from(dx) + 0.5) / n - 1.0;
+                    let b = 2.0 * (f64::from(key.y) + f64::from(dy) + 0.5) / n - 1.0;
+                    let ray = std::array::from_fn(|i| axis[i] + a * u[i] + b * v[i]);
+                    let neighbor = self.column_at(ray, shell);
+                    let distance = u32::from(
+                        dx.unsigned_abs() + dy.unsigned_abs() + shell.abs_diff(key.shell),
+                    );
+                    let weight = 4 - distance;
+                    if let Some((_, best)) = neighbors.iter_mut().find(|(k, _)| *k == neighbor) {
+                        *best = u32::max(*best, weight);
+                    } else {
+                        neighbors.push((neighbor, weight));
+                    }
+                }
+            }
+        }
+        neighbors
     }
 
     pub fn center(&self, key: CellKey) -> Option<[f32; 3]> {

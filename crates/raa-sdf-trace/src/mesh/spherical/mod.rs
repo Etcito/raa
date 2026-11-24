@@ -2,6 +2,7 @@
 
 mod grid;
 mod lighting;
+mod reflected;
 mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,9 +12,10 @@ use raa_core::RaaError;
 
 pub use grid::{CellKey, CubeFace, RadialShell, SphericalGrid, SphericalGridConfig};
 pub use lighting::{SKY_LIGHT_ID, SUN_LIGHT_ID, SphericalLight};
+pub use reflected::{MAX_REFLECTED_RECEIVERS, ReflectedReceiver};
 
 use super::{MeshTraceScene, geometry::Bounds};
-use grid::{dot, sub};
+use grid::{Surface, dot, sub};
 use lighting::{FaceLighting, light_changes, light_hash};
 use view::ViewOrder;
 
@@ -95,6 +97,8 @@ pub struct SchedulerStats {
     pub in_flight_faces: u32,
     pub pending_faces: u32,
     pub origin_epoch: u64,
+    pub reflected_cells: u32,
+    pub reflected_ready_cells: u32,
     pub light_revision: u64,
     pub last_cell_queries: u32,
     /// Resident cells with lighting metadata from all six current faces.
@@ -111,6 +115,44 @@ struct Entry {
 }
 
 impl Entry {
+    fn take_jobs(
+        &mut self,
+        budget: &mut FaceBudget,
+        near_shells: u16,
+        serial: &mut u64,
+        jobs: &mut Vec<FaceJob>,
+    ) {
+        let p = &mut self.progress;
+        let budget = if p.key.shell < near_shells {
+            &mut budget.near
+        } else {
+            &mut budget.far
+        };
+        for face in CubeFace::ALL {
+            let bit = 1 << face as u8;
+            if *budget == 0 {
+                break;
+            }
+            if (p.ready_faces | p.in_flight_faces) & bit != 0 {
+                continue;
+            }
+            *budget -= 1;
+            p.in_flight_faces |= bit;
+            *serial += 1;
+            self.tickets[face as usize] = *serial;
+            jobs.push(FaceJob {
+                key: p.key,
+                slot: p.slot,
+                epoch: p.epoch,
+                face,
+                center: p.center,
+                surface_position: p.surface_position,
+                normal: p.normal,
+                ticket: *serial,
+            });
+        }
+    }
+
     fn reset_faces(&mut self, serial: &mut u64) {
         *serial += 1;
         self.progress.epoch = *serial;
@@ -148,6 +190,10 @@ pub struct SphericalScheduler {
     cells: BTreeMap<CellKey, Entry>,
     view_order: Option<ViewOrder>,
     resident_order: BTreeMap<u32, CellKey>,
+    reflected_cells: BTreeSet<CellKey>,
+    reflected_candidates: Vec<reflected::Candidate>,
+    reflected_cursor: usize,
+    reflected_face_turn: bool,
     free: BTreeSet<u32>,
     released: BTreeSet<u32>,
     serial: u64,
@@ -182,6 +228,10 @@ impl SphericalScheduler {
             cells: BTreeMap::new(),
             view_order: None,
             resident_order: BTreeMap::new(),
+            reflected_cells: BTreeSet::new(),
+            reflected_candidates: Vec::new(),
+            reflected_cursor: 0,
+            reflected_face_turn: false,
             free: (0..config.max_cells).collect(),
             released: BTreeSet::new(),
             serial: 0,
@@ -210,10 +260,39 @@ impl SphericalScheduler {
         self.resident_order = self
             .cells
             .keys()
+            .filter(|key| !self.reflected_cells.contains(key))
             .map(|&key| (order.rank(&self.grid, key), key))
             .collect();
         self.view_order = Some(order);
         self.restart_scan();
+    }
+
+    /// Replace reflected receiver demand from a current primary-grid snapshot.
+    /// Keep sending supported receivers to preserve their resident face work.
+    /// Delayed feedback from a retired origin or geometry revision is ignored.
+    pub fn set_reflected_receivers(
+        &mut self,
+        origin_epoch: u64,
+        geometry_revision: u64,
+        receivers: &[ReflectedReceiver],
+    ) -> bool {
+        if self.origin_epoch != origin_epoch
+            || self
+                .revisions
+                .is_none_or(|revision| revision.0 != geometry_revision)
+        {
+            return false;
+        }
+        self.reflected_candidates = reflected::candidates(&self.grid, receivers);
+        self.reflected_cursor = 0;
+        true
+    }
+
+    /// Return the reflected allocation allowance to primary discovery.
+    pub fn clear_reflected_receivers(&mut self) {
+        self.reflected_candidates.clear();
+        self.reflected_cursor = 0;
+        self.reflected_face_turn = false;
     }
 
     pub fn grid(&self) -> &SphericalGrid {
@@ -293,12 +372,14 @@ impl SphericalScheduler {
             self.origin_epoch += 1;
             let reprojected = self
                 .cells()
+                .filter(|cell| !self.reflected_cells.contains(&cell.key))
                 .filter_map(|cell| self.grid.key_at(cell.surface_position))
                 .collect();
             self.restart();
             self.reprojected = reprojected;
         } else if let Some((old_geometry, old_material, old_light)) = self.revisions {
             if old_geometry != revisions.0 {
+                self.clear_reflected_receivers();
                 if old_geometry.wrapping_add(1) == revisions.0 {
                     changed |= self.invalidate_geometry(&geometry.dirty_bounds);
                 } else {
@@ -330,6 +411,7 @@ impl SphericalScheduler {
             }
         }
         self.revisions = Some(revisions);
+        changed |= self.update_reflected(scene);
         if geometry.count() == 0 {
             self.discovery.start = self.discovery.end;
             self.reprojected.clear();
@@ -374,74 +456,134 @@ impl SphericalScheduler {
             else {
                 continue;
             };
-            if self.free.is_empty() {
-                let (&rank, &displaced) =
-                    self.resident_order.last_key_value().expect("resident slot");
-                self.release(displaced);
-                // If an edit frees capacity later, rediscover this still-overlapping cell.
-                self.discovery.start = self.discovery.start.min(rank);
-            }
-            let slot = self.free.pop_first().expect("free or released slot");
-            self.serial += 1;
-            self.cells.insert(
-                key,
-                Entry {
-                    progress: CellProgress {
-                        key,
-                        slot,
-                        epoch: self.serial,
-                        center: self.grid.center(key).expect("valid cell key"),
-                        surface_position: surface.position,
-                        normal: surface.normal,
-                        ready_faces: 0,
-                        in_flight_faces: 0,
-                        light_hash: 0,
-                    },
-                    tickets: [0; 6],
-                    lighting: FaceLighting::default(),
-                },
-            );
+            self.allocate(key, surface);
             self.resident_order.insert(rank, key);
             changed = true;
         }
         changed
     }
 
+    fn update_reflected(&mut self, scene: &MeshTraceScene) -> bool {
+        if self.reflected_cells.is_empty() && self.reflected_candidates.is_empty() {
+            return false;
+        }
+        let candidates: BTreeSet<_> = self
+            .reflected_candidates
+            .iter()
+            .map(|candidate| candidate.key)
+            .collect();
+        let released: Vec<_> = self
+            .reflected_cells
+            .iter()
+            .copied()
+            .filter(|key| !candidates.contains(key))
+            .collect();
+        let mut changed = !released.is_empty();
+        for key in released {
+            self.release(key);
+            self.discovery.start = 0;
+        }
+        let geometry = &scene.geometry;
+        let quota = self.config.max_cells as usize / 4;
+        let limit = self.config.cell_queries_per_update / 4;
+        while self.reflected_cells.len() < quota && self.last_cell_queries < limit {
+            let Some(&candidate) = self.reflected_candidates.get(self.reflected_cursor) else {
+                break;
+            };
+            self.reflected_cursor += 1;
+            self.last_cell_queries += 1;
+            let key = candidate.key;
+            if self.cells.contains_key(&key) {
+                continue;
+            }
+            let cell = self.grid.cell(key);
+            let Some(surface) = geometry.find_triangle(cell.min, cell.max, |tri| {
+                cell.intersect(tri)
+                    .filter(|surface| candidate.supports(*surface))
+            }) else {
+                continue;
+            };
+            self.allocate(key, surface);
+            self.reflected_cells.insert(key);
+            changed = true;
+        }
+        changed
+    }
+
+    fn allocate(&mut self, key: CellKey, surface: Surface) {
+        if self.free.is_empty() {
+            let (&rank, &displaced) = self.resident_order.last_key_value().expect("resident slot");
+            self.release(displaced);
+            // If an edit frees capacity later, rediscover this still-overlapping cell.
+            self.discovery.start = self.discovery.start.min(rank);
+        }
+        let slot = self.free.pop_first().expect("free or released slot");
+        self.serial += 1;
+        self.cells.insert(
+            key,
+            Entry {
+                progress: CellProgress {
+                    key,
+                    slot,
+                    epoch: self.serial,
+                    center: self.grid.center(key).expect("valid cell key"),
+                    surface_position: surface.position,
+                    normal: surface.normal,
+                    ready_faces: 0,
+                    in_flight_faces: 0,
+                    light_hash: 0,
+                },
+                tickets: [0; 6],
+                lighting: FaceLighting::default(),
+            },
+        );
+    }
+
     /// Emit each band's independent face budget in view and radial priority order.
     /// Finish each batch with complete or cancel before asking for another attempt.
     pub fn take_jobs(&mut self, mut budget: FaceBudget) -> Vec<FaceJob> {
         let mut jobs = Vec::new();
-        for key in self.resident_order.values() {
-            let entry = self.cells.get_mut(key).expect("resident cell");
-            let p = &mut entry.progress;
-            let budget = if p.key.shell < self.config.near_shells {
-                &mut budget.near
-            } else {
-                &mut budget.far
-            };
-            for face in CubeFace::ALL {
-                let bit = 1 << face as u8;
-                if *budget == 0 {
-                    break;
-                }
-                if (p.ready_faces | p.in_flight_faces) & bit != 0 {
-                    continue;
-                }
-                *budget -= 1;
-                p.in_flight_faces |= bit;
-                self.serial += 1;
-                entry.tickets[face as usize] = self.serial;
-                jobs.push(FaceJob {
-                    key: p.key,
-                    slot: p.slot,
-                    epoch: p.epoch,
-                    face,
-                    center: p.center,
-                    surface_position: p.surface_position,
-                    normal: p.normal,
-                    ticket: self.serial,
-                });
+        let reserve = |count| match count {
+            0 => 0,
+            1 => u32::from(self.reflected_face_turn),
+            _ => (count / 4).max(1),
+        };
+        let allowance = FaceBudget {
+            near: reserve(budget.near),
+            far: reserve(budget.far),
+        };
+        self.reflected_face_turn = !self.reflected_face_turn && !self.reflected_cells.is_empty();
+        let mut reflected = allowance;
+        for candidate in &self.reflected_candidates {
+            if self.reflected_cells.contains(&candidate.key) {
+                self.cells
+                    .get_mut(&candidate.key)
+                    .expect("reflected cell")
+                    .take_jobs(
+                        &mut reflected,
+                        self.config.near_shells,
+                        &mut self.serial,
+                        &mut jobs,
+                    );
             }
+        }
+        budget.near -= allowance.near - reflected.near;
+        budget.far -= allowance.far - reflected.far;
+        for key in self.resident_order.values() {
+            self.cells.get_mut(key).expect("resident cell").take_jobs(
+                &mut budget,
+                self.config.near_shells,
+                &mut self.serial,
+                &mut jobs,
+            );
+        }
+        for key in &self.reflected_cells {
+            self.cells.get_mut(key).expect("reflected cell").take_jobs(
+                &mut budget,
+                self.config.near_shells,
+                &mut self.serial,
+                &mut jobs,
+            );
         }
         jobs
     }
@@ -501,6 +643,12 @@ impl SphericalScheduler {
         let mut stats = SchedulerStats {
             cells: self.cells.len() as u32,
             origin_epoch: self.origin_epoch,
+            reflected_cells: self.reflected_cells.len() as u32,
+            reflected_ready_cells: self
+                .reflected_cells
+                .iter()
+                .filter(|key| self.cells[*key].progress.is_ready())
+                .count() as u32,
             light_revision: self.revisions.map_or(0, |(_, _, light)| light),
             last_cell_queries: self.last_cell_queries,
             light_invalidated_cells: self.light_invalidated_cells,
@@ -539,6 +687,8 @@ impl SphericalScheduler {
             self.released.insert(entry.progress.slot);
         }
         self.resident_order.clear();
+        self.reflected_cells.clear();
+        self.clear_reflected_receivers();
         self.reprojected.clear();
         self.restart_scan();
     }
@@ -551,7 +701,9 @@ impl SphericalScheduler {
 
     fn release(&mut self, key: CellKey) {
         let entry = self.cells.remove(&key).expect("resident cell");
-        self.resident_order.remove(&self.priority_rank(key));
+        if !self.reflected_cells.remove(&key) {
+            self.resident_order.remove(&self.priority_rank(key));
+        }
         self.free.insert(entry.progress.slot);
         self.released.insert(entry.progress.slot);
     }
