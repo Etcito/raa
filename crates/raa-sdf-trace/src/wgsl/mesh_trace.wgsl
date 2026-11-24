@@ -536,8 +536,13 @@ fn visible_in_history(pixel: vec2<i32>, dims: vec2<u32>) -> bool {
 }
 
 fn screen_status(screen: vec4<f32>, receiver: vec2<i32>, dims: vec2<u32>) -> u32 {
-    if screen.w < -1.5 { return OFFSCREEN; }
-    if screen.w != 1.0 { return SCREEN_MISS; }
+    if options[3].w != 0u {
+        // The graph SSR trace keeps the cone mip in alpha and clears misses to zero.
+        if all(screen.xyz == vec3<f32>(0.0)) { return SCREEN_MISS; }
+    } else {
+        if screen.w < -1.5 { return OFFSCREEN; }
+        if screen.w != 1.0 { return SCREEN_MISS; }
+    }
     if !on_screen(screen.xy) { return OFFSCREEN; }
     let hit = pixel_at(screen.xy, dims);
     if textureLoad(depth, hit, 0) >= 1.0 { return SCREEN_MISS; }

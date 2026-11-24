@@ -9,27 +9,35 @@ use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
     DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME, MeshInput,
     MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial, MeshTraceSettings, PanelSampling,
-    PathMode, REFERENCE_SPP, SphericalGiHandle,
+    PathMode, SphericalGiHandle,
 };
 use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use wasm_bindgen::prelude::*;
 
 use crate::{
     convert::{INVALID_ARGUMENT, api_error, js},
-    engine::Engine,
+    engine::{Engine, InstallCtx},
     state::{EngineState, MeshSources},
 };
 
 struct Confidence(raa_ssr::SsrHandle);
 
-pub(crate) fn shared_handle(
+pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) {
+    if ctx.features.get::<MeshTraceHandle>().is_none() {
+        ctx.features.insert(MeshTraceHandle::default());
+    }
+}
+
+fn shared_handle(
     st: &mut EngineState,
     pipeline: &mut raa_pipeline::Pipeline,
 ) -> Result<MeshTraceHandle, RaaError> {
-    if let Some(handle) = st.features.get::<MeshTraceHandle>() {
-        return Ok(handle.clone());
-    }
-    let handle = MeshTraceFeature::install(pipeline)?;
+    let handle = st
+        .features
+        .get::<MeshTraceHandle>()
+        .cloned()
+        .unwrap_or_default();
+    MeshTraceFeature::install_legacy(pipeline, handle.clone())?;
     st.features.insert(handle.clone());
     Ok(handle)
 }
@@ -38,7 +46,10 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
     let Some(handle) = st.features.get::<MeshTraceHandle>() else {
         return Ok(());
     };
-    let settings = handle.borrow().settings;
+    let scene = handle.borrow();
+    let active = scene.active();
+    let settings = scene.settings;
+    drop(scene);
     let mut spherical = false;
     if let Some(gi) = st.features.get::<SphericalGiHandle>() {
         let mut gi = gi.borrow_mut();
@@ -71,7 +82,7 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
             }
         }
     }
-    if !settings.active() && !spherical {
+    if !active && !spherical {
         return Ok(());
     }
     let lit = st.lit.handle();
@@ -87,12 +98,13 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
         }
     }
 
-    let Some(sources) = st.features.get::<MeshSources>() else {
-        return Ok(());
-    };
+    let sources = st.features.get::<MeshSources>();
     let mut parts = BTreeMap::new();
     for (handle, mesh) in st.meshes.iter() {
-        let (Some(source), Some(ids)) = (sources.get(handle), st.lit.submesh_ids(mesh.lit)) else {
+        let (Some(source), Some(ids)) = (
+            sources.and_then(|sources| sources.get(handle)),
+            st.lit.submesh_ids(mesh.lit),
+        ) else {
             continue;
         };
         for (&id, &(first, count)) in ids.iter().zip(&source.submeshes) {
@@ -193,8 +205,14 @@ impl Engine {
                 LightingOutput::Bounce(depth) => depth,
                 _ => 0,
             };
-            let depth = integer(&options, "lightingDepth", previous_depth, MAX_LIGHTING_DEPTH)?;
-            let lighting_output = match js::optional_string(&options, "lightingOutput")?.as_deref() {
+            let depth = integer(
+                &options,
+                "lightingDepth",
+                previous_depth,
+                MAX_LIGHTING_DEPTH,
+            )?;
+            let lighting_output = match js::optional_string(&options, "lightingOutput")?.as_deref()
+            {
                 None if matches!(previous.lighting_output, LightingOutput::Bounce(_)) => {
                     LightingOutput::Bounce(depth)
                 }
@@ -203,7 +221,12 @@ impl Engine {
                 Some("direct") => LightingOutput::Direct,
                 Some("indirect") => LightingOutput::Indirect,
                 Some("bounce") => LightingOutput::Bounce(depth),
-                Some(_) => return Err(api_error("trace.invalid_settings", "unknown lightingOutput")),
+                Some(_) => {
+                    return Err(api_error(
+                        "trace.invalid_settings",
+                        "unknown lightingOutput",
+                    ));
+                }
             };
             let settings = MeshTraceSettings {
                 lighting_output,
@@ -232,7 +255,9 @@ impl Engine {
                     Some("stable") => PanelSampling::Stable,
                     Some("single") => PanelSampling::Single,
                     Some("independent") => PanelSampling::Independent,
-                    Some(_) => return Err(api_error("trace.invalid_settings", "unknown panelSampling")),
+                    Some(_) => {
+                        return Err(api_error("trace.invalid_settings", "unknown panelSampling"));
+                    }
                 },
                 path_mode: match js::optional_string(&options, "pathMode")?.as_deref() {
                     None => previous.path_mode,
@@ -255,14 +280,9 @@ impl Engine {
                 ));
             }
             let hybrid = !settings.reference && settings.active();
-            let mut pipeline = st.pipeline.borrow_mut();
-            let handle = if let Some(handle) = existing {
-                handle
-            } else {
-                let handle = MeshTraceFeature::install(&mut pipeline)?;
-                st.features.insert(handle.clone());
-                handle
-            };
+            let pipeline = st.pipeline.clone();
+            let mut pipeline = pipeline.borrow_mut();
+            let handle = shared_handle(st, &mut pipeline)?;
             if hybrid && st.features.get::<Confidence>().is_none() {
                 let confidence = raa_ssr::SsrFeature::install_confidence(gpu, &mut pipeline)?;
                 st.features.insert(Confidence(confidence));
@@ -292,7 +312,7 @@ impl Engine {
             let handle = if let Some(handle) = st.features.get::<MeshTraceHandle>().cloned() {
                 handle
             } else {
-                let handle = MeshTraceFeature::install(&mut st.pipeline.borrow_mut())?;
+                let handle = MeshTraceHandle::default();
                 st.features.insert(handle.clone());
                 handle
             };
@@ -302,12 +322,16 @@ impl Engine {
 
     /// The latest completed GPU counter sample, or null until one is available.
     #[wasm_bindgen(js_name = meshTracingStats)]
-    pub fn mesh_tracing_stats(&self) -> Result<JsValue, JsValue> {
+    pub fn mesh_tracing_stats(&self, node: Option<String>) -> Result<JsValue, JsValue> {
         self.with_state(|_, st| {
             let Some(handle) = st.features.get::<MeshTraceHandle>() else {
                 return Ok(JsValue::NULL);
             };
-            let Some(stats) = handle.borrow_mut().stats() else {
+            let stats = match node {
+                Some(node) => handle.borrow().graph_stats(&node),
+                None => handle.borrow_mut().stats(),
+            };
+            let Some(stats) = stats else {
                 return Ok(JsValue::NULL);
             };
             let result = Object::new();
@@ -348,14 +372,7 @@ impl Engine {
                 ),
                 ("reflectionBounces", f64::from(controls.reflection_bounces)),
                 ("pathBounces", f64::from(controls.path_bounces)),
-                (
-                    "referenceSpp",
-                    if controls.reference {
-                        f64::from(REFERENCE_SPP)
-                    } else {
-                        0.0
-                    },
-                ),
+                ("referenceSpp", f64::from(stats.reference_spp)),
                 (
                     "hybridLobeSpp",
                     if !controls.reference && controls.path_mode != PathMode::Off {

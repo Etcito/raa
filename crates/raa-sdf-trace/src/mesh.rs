@@ -1,20 +1,20 @@
 //! Hybrid mesh reflections and an explicit full-frame path-traced reference.
 
 mod geometry;
-pub mod spherical;
 mod hybrid;
 mod pass;
+pub mod spherical;
 mod spherical_gpu;
 pub use geometry::MeshInput;
 use hybrid::PathCapture;
 pub use hybrid::PathMode;
-pub use pass::{MESH_TRACE_NAME, MeshTraceFeature, MeshTraceHandle};
+pub use pass::{GraphMeshTrace, MESH_TRACE_NAME, MeshTraceFeature, MeshTraceHandle};
 pub use spherical_gpu::{
     SPHERICAL_GI_NAME, SphericalGiDebug, SphericalGiFeature, SphericalGiHandle, SphericalGiProbe,
     SphericalGiSettings, SphericalGiStats,
 };
 
-use std::sync::mpsc::Receiver;
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::mpsc::Receiver};
 
 use raa_core::RaaError;
 use wgpu::Buffer;
@@ -114,7 +114,9 @@ impl MeshTraceSettings {
         {
             return Err(RaaError::FrameGraph {
                 code: "trace.invalid_settings",
-                message: format!("lightingDepth requires the path reference and a depth in 0..={MAX_LIGHTING_DEPTH}"),
+                message: format!(
+                    "lightingDepth requires the path reference and a depth in 0..={MAX_LIGHTING_DEPTH}"
+                ),
             });
         }
         if !(0.0..=1.0).contains(&self.confidence_threshold)
@@ -147,6 +149,7 @@ pub struct MeshTraceStats {
     pub frame: u64,
     pub size: (u32, u32),
     pub settings: MeshTraceSettings,
+    pub reference_spp: u32,
     pub counts: [u32; COUNTER_COUNT],
 }
 
@@ -158,13 +161,13 @@ pub struct MeshTraceScene {
     geometry: Geometry,
     gpu_geometry: Option<pass::GeometryBuffers>,
     spherical_active: bool,
+    graph_reports: BTreeMap<String, Rc<RefCell<TraceReport>>>,
     materials: Vec<MeshTraceMaterial>,
     material_bytes: Vec<u8>,
     material_revision: u64,
     frame: Option<Buffer>,
     sky_diffuse: f32,
-    latest: Option<MeshTraceStats>,
-    pending: Option<Receiver<Option<MeshTraceStats>>>,
+    report: TraceReport,
     epoch: u64,
 }
 
@@ -177,7 +180,7 @@ impl MeshTraceScene {
     pub fn set_path_model(&mut self, bytes: &[u8]) -> Result<(), RaaError> {
         self.path.load(bytes)?;
         self.epoch = self.epoch.wrapping_add(1);
-        self.latest = None;
+        self.report.latest = None;
         Ok(())
     }
 
@@ -198,7 +201,7 @@ impl MeshTraceScene {
             self.settings = settings;
             self.release_gpu_geometry_if_idle();
             self.epoch = self.epoch.wrapping_add(1);
-            self.latest = None;
+            self.report.latest = None;
         }
     }
 
@@ -207,8 +210,13 @@ impl MeshTraceScene {
         self.release_gpu_geometry_if_idle();
     }
 
+    /// Whether a legacy or graph trace needs scene geometry this frame.
+    pub fn active(&self) -> bool {
+        self.settings.active() || !self.graph_reports.is_empty()
+    }
+
     fn release_gpu_geometry_if_idle(&mut self) {
-        if !self.spherical_active && !self.settings.active() {
+        if !self.spherical_active && !self.active() {
             self.gpu_geometry = None;
         }
     }
@@ -256,22 +264,45 @@ impl MeshTraceScene {
     }
 
     pub fn stats(&mut self) -> Option<MeshTraceStats> {
-        self.poll();
-        self.latest
+        self.report.poll(self.settings);
+        self.report.latest
     }
 
-    fn poll(&mut self) {
-        if let Some(pending) = &self.pending {
-            match pending.try_recv() {
-                Ok(Some(report)) => {
-                    if report.settings == self.settings {
-                        self.latest = Some(report);
-                    }
-                    self.pending = None;
-                }
-                Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+    pub fn graph_stats(&self, node: &str) -> Option<MeshTraceStats> {
+        let mut report = self
+            .graph_reports
+            .iter()
+            .find(|(entry, _)| entry.rsplit_once('#').is_some_and(|(_, id)| id == node))?
+            .1
+            .borrow_mut();
+        report.poll_pending();
+        report.latest
+    }
+}
+
+#[derive(Default)]
+struct TraceReport {
+    latest: Option<MeshTraceStats>,
+    pending: Option<Receiver<Option<MeshTraceStats>>>,
+}
+
+impl TraceReport {
+    fn poll(&mut self, settings: MeshTraceSettings) {
+        self.poll_pending();
+        self.latest = self.latest.filter(|stats| stats.settings == settings);
+    }
+
+    fn poll_pending(&mut self) {
+        let Some(pending) = &self.pending else {
+            return;
+        };
+        match pending.try_recv() {
+            Ok(Some(report)) => {
+                self.latest = Some(report);
+                self.pending = None;
             }
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
     }
 }

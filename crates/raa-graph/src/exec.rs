@@ -40,6 +40,7 @@ pub struct HandleSet {
     pub bloom: Option<raa_bloom::BloomHandle>,
     pub oit: Option<raa_oit::OitHandle>,
     pub ssr: Option<raa_ssr::SsrHandle>,
+    pub mesh_trace: Option<raa_sdf_trace::mesh::MeshTraceHandle>,
     pub fog: Option<raa_fog::FogHandle>,
     pub shafts: Option<raa_shafts::ShaftsHandle>,
     pub dof: Option<raa_dof::DofHandle>,

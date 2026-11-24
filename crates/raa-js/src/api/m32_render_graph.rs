@@ -147,6 +147,7 @@ pub(crate) mod web {
     /// Installs the render graph state. It runs last in `install_all`, so every feature handle
     /// the executor wants already exists.
     pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
+        crate::mesh_trace::install_for_graph(ctx);
         ctx.features.insert(RenderGraphState {
             executor: GraphExecutor::new(),
             catalog: Catalog::build(),
@@ -199,6 +200,7 @@ pub(crate) mod web {
             bloom: st.features.get::<BloomHandle>().cloned(),
             oit: st.features.get::<OitHandle>().cloned(),
             ssr: st.features.get::<SsrHandle>().cloned(),
+            mesh_trace: st.features.get::<raa_sdf_trace::mesh::MeshTraceHandle>().cloned(),
             fog: st.features.get::<FogHandle>().cloned(),
             shafts: st.features.get::<ShaftsHandle>().cloned(),
             dof: st.features.get::<DofHandle>().cloned(),

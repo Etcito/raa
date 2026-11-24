@@ -346,7 +346,11 @@ impl ExecExtension for WiringExtension {
                         | InputSource::Default { node, port } => Some((node, port)),
                         InputSource::Absent => None,
                     });
-            if node.type_id != "pass.forward"
+            let source_free = matches!(
+                node.type_id.as_str(),
+                "pass.forward" | "mesh.fitted-specular"
+            );
+            if !source_free
                 && node.type_id != "pass.tonemap"
                 && !resources.iter().any(|r| {
                     source.is_some_and(|(id, port)| {
@@ -378,7 +382,7 @@ impl ExecExtension for WiringExtension {
                 entry: entry.clone(),
                 source,
                 dst,
-                forward: node.type_id == "pass.forward",
+                source_free,
                 tonemap: node.type_id == "pass.tonemap",
                 resolve_display: node.type_id == "pass.taa",
                 display_post: matches!(node.type_id.as_str(), "pass.bloom" | "pass.grading"),
@@ -766,7 +770,12 @@ fn view_inputs(
             else {
                 continue;
             };
-            if !instances.iter().any(|(id, _)| id == source) {
+            if !instances.iter().any(|(id, _)| id == source)
+                && !plan
+                    .nodes
+                    .iter()
+                    .any(|n| n.id == *source && plan_fns::mesh_trace_type(&n.type_id))
+            {
                 continue;
             }
             let key = spec
@@ -838,7 +847,7 @@ struct Binding {
     entry: String,
     source: Option<(String, String)>,
     dst: Option<usize>,
-    forward: bool,
+    source_free: bool,
     tonemap: bool,
     resolve_display: bool,
     display_post: bool,
@@ -1043,7 +1052,7 @@ impl GraphFrame for WiringFrame {
             .source
             .as_ref()
             .and_then(|(entry, port)| ctx.resources.get(entry, port));
-        let src = if binding.forward {
+        let src = if binding.source_free {
             dst
         } else {
             source.as_ref().map(|image| &image.view)

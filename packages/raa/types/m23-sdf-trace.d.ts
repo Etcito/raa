@@ -74,8 +74,8 @@ export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
 export interface Engine {
   /** Merges settings. Threshold 0–1, mirror bounces 1–6, reference path bounces 0–6. */
   setMeshTracing(options: MeshTracingSettings): void;
-  /** Counts actual half-resolution GPU samples from the latest completed tracing frame. */
-  meshTracingStats(): MeshTracingStats | null;
+  /** Latest completed GPU counters for a mesh graph node, or for legacy tracing when omitted. */
+  meshTracingStats(nodeId?: string): MeshTracingStats | null;
   /** Loads a specular model in validated 12→8→3 little-endian FP32 tensor order. */
   setMeshPathModel(weights: Uint8Array): void;
   /** Reads the renderer's tight, little-endian linear RGBA16F scene color. */

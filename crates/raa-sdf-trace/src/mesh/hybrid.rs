@@ -125,6 +125,7 @@ impl HybridGpu {
         state: &mut PathState,
         mode: PathMode,
         size: (u32, u32),
+        capture_enabled: bool,
     ) {
         use wgpu::BufferUsages as U;
         let device = gpu.device();
@@ -136,7 +137,7 @@ impl HybridGpu {
             self.uploaded = Some(state.revision);
         }
         let capture_bytes = u64::from(size.0) * u64::from(size.1) * PIXEL_BYTES;
-        let request = state.capture.as_mut();
+        let request = state.capture.as_mut().filter(|_| capture_enabled);
         let seed = request.as_ref().map_or(frame as u32, |req| req.seed);
         let sample_buffer = request
             .as_ref()

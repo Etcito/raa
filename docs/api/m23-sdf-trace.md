@@ -32,3 +32,32 @@ format, version, limit, reference and numeric errors. See `raa-sdf-trace` for th
 format and supported shapes. Version 2 adds scalar sampled leaves; see
 [the version 2 format](trace-program-v2.md). Producers must refuse unsupported geometry
 with a named error instead of silently omitting it. Legacy v1 placeholders remain readable.
+
+## Mesh tracing in a render graph
+
+Mesh trace stages share the engine's current opaque triangle BVH, material library, local lights,
+environment and available GI. Add `pass.gi.volume` when the reflection path should sample the
+scene's voxel GI. The stages run on a single viewport.
+
+- `mesh.reflection` applies geometry reflections to materials marked `traceMirror`. Connect the
+  prepass `depth`, `normal` and `motion`, `ssr.hiz.hiz`, `ssr.trace.trace` as `screenTrace`, and the
+  original forward HDR as `screenColor`. Connect the ordinary SSR composite to `color` to preserve
+  SSR on other surfaces. Stable screen hits above `confidenceThreshold` can bypass BVH traversal.
+  `reflectionBounces` controls the mirror budget.
+- `mesh.reference` replaces its linked HDR `color` with a full-resolution path-traced image. Set
+  `reflectionBounces`, `pathBounces`, `samples` and `seed` to control sampling.
+  `lightingOutput` selects `combined`, `direct`, `indirect`, or `bounce`. With `bounce`,
+  `lightingDepth` counts continuations from the camera hit, including mirror continuations.
+  Use the same seed, sample count and bounce budgets to compare depth slices.
+- `mesh.fitted-specular` uses the same screen inputs as `mesh.reflection` and supplies a complete
+  path-assisted HDR image. Call `setMeshPathModel` with the validated fitted weights before
+  applying the graph. The fit estimates the specular lobe on eligible non-refresh pixels and
+  uses the traced path on refresh pixels.
+
+Each stage publishes full-size `color` for the HDR chain and linear `radiance` for inspection.
+`radiance` is half size for the reflection and fitted stages and full size for the reference.
+Connect the desired stage's `color` to the downstream tone mapper or HDR effect. The graph
+[reflection fixture](../../crates/raa-graph/tests/fixtures/geometry-reflections.json) shows a
+complete SSR and geometry-reflection route. `meshTracingStats(nodeId)` reports completed GPU
+counters for a graph instance. Graph settings are per instance. Detaching the graph returns
+control to the existing `setMeshTracing` settings.

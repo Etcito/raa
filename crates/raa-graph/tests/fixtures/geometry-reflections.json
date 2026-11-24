@@ -1,0 +1,35 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Geometry reflections and SSR",
+  "nodes": [
+    { "id": "prepass", "type": "pass.prepass" },
+    { "id": "lightTiles", "type": "pass.light.tiles" },
+    { "id": "volume", "type": "pass.gi.volume" },
+    { "id": "forward", "type": "pass.forward" },
+    { "id": "skyBackground", "type": "pass.sky.background" },
+    { "id": "hiz", "type": "ssr.hiz" },
+    { "id": "screen", "type": "ssr.trace" },
+    { "id": "ssr", "type": "ssr.composite" },
+    { "id": "mirrors", "type": "mesh.reflection" },
+    { "id": "tonemap", "type": "pass.tonemap" },
+    { "id": "out", "type": "output.display" }
+  ],
+  "links": [
+    { "from": "prepass.depth", "to": "lightTiles.depth" },
+    { "from": "lightTiles.lightTiles", "to": "forward.lightTiles" },
+    { "from": "prepass.depth", "to": "hiz.depth" },
+    { "from": "hiz.hiz", "to": "screen.hiz" },
+    { "from": "forward.color", "to": "ssr.color" },
+    { "from": "screen.trace", "to": "ssr.trace" },
+    { "from": "prepass.depth", "to": "mirrors.depth" },
+    { "from": "prepass.normal", "to": "mirrors.normal" },
+    { "from": "prepass.motion", "to": "mirrors.motion" },
+    { "from": "screen.trace", "to": "mirrors.screenTrace" },
+    { "from": "hiz.hiz", "to": "mirrors.hiz" },
+    { "from": "forward.color", "to": "mirrors.screenColor" },
+    { "from": "ssr.color", "to": "mirrors.color" },
+    { "from": "mirrors.color", "to": "tonemap.color" },
+    { "from": "tonemap.color", "to": "out.color" }
+  ]
+}

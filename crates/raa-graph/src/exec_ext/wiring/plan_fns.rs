@@ -107,27 +107,32 @@ fn find_node<'a>(plan: &'a GraphPlan, id: &str) -> Option<&'a PlanNode> {
     plan.nodes.iter().find(|node| node.id == id)
 }
 
+pub fn mesh_trace_type(ty: &str) -> bool {
+    matches!(ty, "mesh.reflection" | "mesh.reference" | "mesh.fitted-specular")
+}
+
 /// Whether the node writes a pooled chain image.
 /// no handoff: Wiring 1/5: node family wiring (generic colour chain, TAA history input, multi-instance post) and its tests takes nothing from this card.
 pub fn chain_type(ty: &str) -> bool {
-    matches!(
-        ty,
-        "pass.forward"
-            | "pass.gi.history"
-            | "pass.ssr"
-            | "pass.fog"
-            | "pass.sunshafts"
-            | "pass.opaque.copy"
-            | "pass.transparent.oit"
-            | "pass.particles.blend"
-            | "pass.taa"
-            | "pass.dof"
-            | "pass.bloom"
-            | "ssr.composite"
-            | "ssr.replace"
-            | "pass.grading"
-            | "pass.cel.resolve"
-    )
+    mesh_trace_type(ty)
+        || matches!(
+            ty,
+            "pass.forward"
+                | "pass.gi.history"
+                | "pass.ssr"
+                | "pass.fog"
+                | "pass.sunshafts"
+                | "pass.opaque.copy"
+                | "pass.transparent.oit"
+                | "pass.particles.blend"
+                | "pass.taa"
+                | "pass.dof"
+                | "pass.bloom"
+                | "ssr.composite"
+                | "ssr.replace"
+                | "pass.grading"
+                | "pass.cel.resolve"
+        )
 }
 
 /// Colour outputs that belong to the HDR chain.
@@ -155,19 +160,21 @@ pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(Stri
     plan.nodes
         .iter()
         .filter_map(|node| {
-            if matches!(
-                node.type_id.as_str(),
-                "ao.trace"
-                    | "ao.blur"
-                    | "ssr.hiz"
-                    | "ssr.trace"
-                    | "ssr.composite"
-                    | "ssr.incident"
-                    | "ssr.replace"
-                    | "bloom.down"
-                    | "bloom.up"
-                    | "compute.wgsl"
-            ) {
+            if mesh_trace_type(&node.type_id)
+                || matches!(
+                    node.type_id.as_str(),
+                    "ao.trace"
+                        | "ao.blur"
+                        | "ssr.hiz"
+                        | "ssr.trace"
+                        | "ssr.composite"
+                        | "ssr.incident"
+                        | "ssr.replace"
+                        | "bloom.down"
+                        | "bloom.up"
+                        | "compute.wgsl"
+                )
+            {
                 let entry = if node.type_id == "compute.wgsl" {
                     format!("compute#{}", node.id)
                 } else {

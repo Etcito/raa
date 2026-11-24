@@ -7,7 +7,8 @@ use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, Recor
 
 use super::geometry::TRIANGLE_BYTES;
 use super::{
-    COUNTER_COUNT, MeshTraceScene, MeshTraceStats, PathMode, REFERENCE_SPP, hybrid::HybridGpu,
+    COUNTER_COUNT, MeshTraceScene, MeshTraceSettings, MeshTraceStats, PathMode, REFERENCE_SPP,
+    TraceReport, hybrid::HybridGpu,
 };
 use crate::wgsl::mesh_trace_module;
 
@@ -24,27 +25,89 @@ pub struct MeshTraceFeature;
 impl MeshTraceFeature {
     pub fn install(pipeline: &mut Pipeline) -> Result<MeshTraceHandle, RaaError> {
         let state = MeshTraceHandle::default();
-        pipeline.add(Box::new(MeshTracePass {
-            state: state.clone(),
-            gpu: None,
-            hybrid: None,
-            targets: None,
-        }))?;
-        pipeline.set_enabled(MESH_TRACE_NAME, false)?;
+        Self::install_legacy(pipeline, state.clone())?;
         Ok(state)
+    }
+
+    /// Install the legacy pass on the same scene used by graph passes and spherical GI.
+    pub fn install_legacy(pipeline: &mut Pipeline, state: MeshTraceHandle) -> Result<(), RaaError> {
+        if pipeline.entry_enabled(MESH_TRACE_NAME).is_none() {
+            pipeline.add(Box::new(MeshTracePass::new(
+                MESH_TRACE_NAME.into(),
+                state,
+                None,
+            )))?;
+            pipeline.set_enabled(MESH_TRACE_NAME, false)?;
+        }
+        Ok(())
+    }
+
+    pub fn install_graph(
+        pipeline: &mut Pipeline,
+        entry: String,
+        state: MeshTraceHandle,
+        options: GraphMeshTrace,
+    ) -> Result<(), RaaError> {
+        options.settings.validate()?;
+        let reports = Rc::new(RefCell::new(TraceReport::default()));
+        let mut pass = MeshTracePass::new(entry.clone(), state.clone(), Some(options));
+        pass.graph_report = Some(reports.clone());
+        pipeline.add(Box::new(pass))?;
+        state.borrow_mut().graph_reports.insert(entry, reports);
+        Ok(())
     }
 }
 
+/// Per-instance graph options. Graph traces share scene buffers and model weights.
+#[derive(Clone, Copy)]
+pub struct GraphMeshTrace {
+    pub settings: MeshTraceSettings,
+    pub reference_sample: (u32, u32),
+}
+
 struct MeshTracePass {
+    entry: String,
+    graph: Option<GraphMeshTrace>,
+    graph_report: Option<Rc<RefCell<TraceReport>>>,
     state: MeshTraceHandle,
     gpu: Option<Pipelines>,
     hybrid: Option<HybridGpu>,
     targets: Option<Images>,
 }
 
+impl MeshTracePass {
+    fn new(entry: String, state: MeshTraceHandle, graph: Option<GraphMeshTrace>) -> Self {
+        Self {
+            entry,
+            graph,
+            graph_report: None,
+            state,
+            gpu: None,
+            hybrid: None,
+            targets: None,
+        }
+    }
+}
+
+impl Drop for MeshTracePass {
+    fn drop(&mut self) {
+        if let Some(report) = &self.graph_report {
+            let mut scene = self.state.borrow_mut();
+            if scene
+                .graph_reports
+                .get(&self.entry)
+                .is_some_and(|active| Rc::ptr_eq(active, report))
+            {
+                scene.graph_reports.remove(&self.entry);
+                scene.release_gpu_geometry_if_idle();
+            }
+        }
+    }
+}
+
 impl FeaturePass for MeshTracePass {
     fn name(&self) -> &str {
-        MESH_TRACE_NAME
+        &self.entry
     }
     fn order(&self) -> u32 {
         ORDER
@@ -52,11 +115,11 @@ impl FeaturePass for MeshTracePass {
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut scene = self.state.borrow_mut();
-        let settings = scene.settings;
+        let graph = self.graph;
+        let settings = graph.map_or(scene.settings, |options| options.settings);
         if !settings.active() {
             return Ok(());
         }
-        scene.poll();
         let [nodes, triangles, materials] = scene.geometry_buffers(ctx.gpu);
         let Some(frame) = scene.frame.as_ref() else {
             return Ok(());
@@ -68,23 +131,52 @@ impl FeaturePass for MeshTracePass {
             .as_ref()
             .is_none_or(|images| images.size != ctx.size)
         {
-            self.targets = Some(Images::new(device, ctx.size));
+            self.targets = Some(Images::new(
+                device,
+                ctx.size,
+                graph.is_some() && settings.reference,
+            ));
         }
         let images = self.targets.as_mut().expect("mesh ray targets");
-        let screen = ctx.resources.get(CONFIDENCE, "trace");
-        let hiz = ctx.resources.get(CONFIDENCE, "hiz");
-        if !settings.reference && (screen.is_none() || hiz.is_none()) {
+        let input = |port| ctx.resources.input(&self.entry, port);
+        let screen = if graph.is_some() {
+            input("screenTrace")
+        } else {
+            ctx.resources.get(CONFIDENCE, "trace")
+        };
+        let hiz = if graph.is_some() {
+            input("hiz")
+        } else {
+            ctx.resources.get(CONFIDENCE, "hiz")
+        };
+        let source = if graph.is_some() {
+            input("screenColor")
+        } else {
+            ctx.resources.get("forward", "color")
+        };
+        if !settings.reference && (screen.is_none() || hiz.is_none() || source.is_none()) {
             return Err(RaaError::FrameGraph {
                 code: "trace.forward_order",
-                message: "hybrid reflections need the current confidence pass before trace.mesh"
-                    .into(),
+                message: format!(
+                    "{} requires current screen trace, Hi-Z, and source HDR",
+                    self.entry
+                ),
             });
         }
-        let source = ctx.resources.get("forward", "color");
-        if source.is_none() && !settings.reference {
+        let depth = ctx.targets.depth_input(ctx.resources, &self.entry);
+        let normal = ctx.targets.normal_input(ctx.resources, &self.entry);
+        let motion = ctx.targets.motion_input(ctx.resources, &self.entry);
+        if graph.is_some()
+            && !settings.reference
+            && [&screen, &hiz, &source].into_iter().any(|image| {
+                image
+                    .as_ref()
+                    .is_some_and(|image| (image.desc.width, image.desc.height) != ctx.size)
+            })
+        {
             return Err(RaaError::FrameGraph {
-                code: "trace.forward_order",
-                message: "hybrid reflections need forward HDR before trace.mesh".into(),
+                code: "trace.input_extent",
+                message: format!("{} requires scene-sized inputs", self.entry),
             });
         }
         let history_valid = images.previous.is_some_and(|(index, epoch)| {
@@ -95,7 +187,10 @@ impl FeaturePass for MeshTracePass {
         } else {
             settings.path_mode
         };
-        let reference_sample = scene.reference_sample.filter(|_| settings.reference);
+        let reference_sample = graph
+            .map(|options| options.reference_sample)
+            .or(scene.reference_sample)
+            .filter(|_| settings.reference);
         let (reference_seed, reference_spp) =
             reference_sample.unwrap_or((ctx.frame as u32, REFERENCE_SPP));
         let filtered = ctx.targets.hdr();
@@ -115,7 +210,7 @@ impl FeaturePass for MeshTracePass {
             settings.panel_sampling as u32,
             settings.lighting_output.code(),
             u32::from(reference_sample.is_some()),
-            0,
+            u32::from(graph.is_some()),
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -130,9 +225,9 @@ impl FeaturePass for MeshTracePass {
                 buffer_entry(3, &triangles),
                 buffer_entry(4, &materials),
                 buffer_entry(5, &gpu.counters),
-                image_entry(6, ctx.targets.depth()),
-                image_entry(7, ctx.targets.normal()),
-                image_entry(8, ctx.targets.motion()),
+                image_entry(6, &depth),
+                image_entry(7, &normal),
+                image_entry(8, &motion),
                 image_entry(
                     9,
                     screen
@@ -142,7 +237,9 @@ impl FeaturePass for MeshTracePass {
                 image_entry(10, &images.previous_depth),
                 image_entry(
                     11,
-                    source.as_ref().map_or(filtered.src(), |image| &image.view),
+                    source
+                        .as_ref()
+                        .map_or(&images.previous_depth, |image| &image.view),
                 ),
                 image_entry(12, &images.radiance),
                 buffer_entry(13, ctx.lighting.local_lights_buffer()),
@@ -173,6 +270,7 @@ impl FeaturePass for MeshTracePass {
                     &mut scene.path,
                     path_mode,
                     images.trace_size,
+                    graph.is_none(),
                 );
         } else {
             let mut pass = ctx
@@ -193,52 +291,71 @@ impl FeaturePass for MeshTracePass {
             );
             images.previous = Some((ctx.frame, scene.epoch));
         }
-        let composite_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("trace.mesh.resolve"),
-            layout: &gpu.composite.get_bind_group_layout(0),
-            entries: &[
-                image_entry(0, filtered.src()),
-                image_entry(1, &images.radiance),
-                image_entry(2, ctx.targets.motion()),
-                buffer_entry(3, &gpu.options),
-                image_entry(4, &images.terminal_samples),
-                image_entry(5, &images.terminal_surfaces),
-                image_entry(6, &images.terminal_weights),
-            ],
-        });
-        {
-            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("trace.mesh.resolve"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: filtered.dst(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&gpu.composite);
-            pass.set_bind_group(0, &composite_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
         ctx.resources.publish(
-            MESH_TRACE_NAME,
+            &self.entry,
             "radiance",
             &images.radiance,
             ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
         );
-        filtered.swap();
-        ctx.resources.publish(
-            MESH_TRACE_NAME,
-            "color",
-            filtered.src(),
-            ImageDesc::new(ImageDim::D2, HDR_FORMAT, ctx.size.0, ctx.size.1, 1, 1),
-        );
-
-        if scene.pending.is_none() {
+        // An unlinked graph color output has no assigned HDR destination.
+        if graph.is_none() || filtered.is_bound() {
+            if graph.is_some() && settings.reference {
+                ctx.encoder.copy_texture_to_texture(
+                    images.radiance.texture().as_image_copy(),
+                    filtered.dst_texture().as_image_copy(),
+                    extent(ctx.size),
+                );
+            } else {
+                let composite_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("trace.mesh.resolve"),
+                    layout: &gpu.composite.get_bind_group_layout(0),
+                    entries: &[
+                        image_entry(
+                            0,
+                            source
+                                .as_ref()
+                                .filter(|_| graph.is_some() && path_mode != PathMode::Off)
+                                .map_or(filtered.src(), |image| &image.view),
+                        ),
+                        image_entry(1, &images.radiance),
+                        image_entry(2, &motion),
+                        buffer_entry(3, &gpu.options),
+                        image_entry(4, &images.terminal_samples),
+                        image_entry(5, &images.terminal_surfaces),
+                        image_entry(6, &images.terminal_weights),
+                    ],
+                });
+                {
+                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("trace.mesh.resolve"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: filtered.dst(),
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&gpu.composite);
+                    pass.set_bind_group(0, &composite_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            }
+            filtered.swap();
+            ctx.resources.publish(
+                &self.entry,
+                "color",
+                filtered.src(),
+                ImageDesc::new(ImageDim::D2, HDR_FORMAT, ctx.size.0, ctx.size.1, 1, 1),
+            );
+        }
+        let mut graph_report = self.graph_report.as_ref().map(|report| report.borrow_mut());
+        let report = graph_report.as_deref_mut().unwrap_or(&mut scene.report);
+        report.poll(settings);
+        if report.pending.is_none() {
             let (send, receive) = sync_channel(1);
             ctx.encoder
                 .copy_buffer_to_buffer(&gpu.counters, 0, &gpu.readback, 0, COUNTER_BYTES);
@@ -262,13 +379,14 @@ impl FeaturePass for MeshTracePass {
                             frame,
                             size: (width, height),
                             settings,
+                            reference_spp: if settings.reference { reference_spp } else { 0 },
                             counts,
                         })
                     });
                     let _ = send.send(report);
                 },
             );
-            scene.pending = Some(receive);
+            report.pending = Some(receive);
         }
         Ok(())
     }
@@ -315,8 +433,14 @@ fn image(
 }
 
 impl Images {
-    fn new(device: &wgpu::Device, size: (u32, u32)) -> Self {
-        let trace_size = (size.0.div_ceil(2), size.1.div_ceil(2));
+    fn new(device: &wgpu::Device, size: (u32, u32), full_resolution: bool) -> Self {
+        let trace_size = if full_resolution {
+            size
+        } else {
+            (size.0.div_ceil(2), size.1.div_ceil(2))
+        };
+        let terminal_size = if full_resolution { (1, 1) } else { trace_size };
+        let history_size = if full_resolution { (1, 1) } else { size };
         Self {
             size,
             trace_size,
@@ -331,28 +455,28 @@ impl Images {
             terminal_samples: image(
                 device,
                 "trace.mesh.terminal_samples",
-                trace_size,
+                terminal_size,
                 HDR_FORMAT,
                 wgpu::TextureUsages::STORAGE_BINDING,
             ),
             terminal_surfaces: image(
                 device,
                 "trace.mesh.terminal_surfaces",
-                trace_size,
+                terminal_size,
                 wgpu::TextureFormat::Rgba32Uint,
                 wgpu::TextureUsages::STORAGE_BINDING,
             ),
             terminal_weights: image(
                 device,
                 "trace.mesh.terminal_weights",
-                trace_size,
+                terminal_size,
                 HDR_FORMAT,
                 wgpu::TextureUsages::STORAGE_BINDING,
             ),
             previous_depth: image(
                 device,
                 "trace.mesh.previous_depth",
-                size,
+                history_size,
                 wgpu::TextureFormat::R32Float,
                 wgpu::TextureUsages::COPY_DST,
             ),
