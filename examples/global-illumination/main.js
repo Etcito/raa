@@ -1,4 +1,5 @@
 import { createGalleryAoControls } from './lib/gallery-ao.js';
+import { captureGalleryPath, measureGalleryPath } from './lib/gallery-path-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
@@ -133,6 +134,14 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       runner = null;
       return captureAreaPilot({ target, canvas, raa: lib.raa }, input?.args ?? input);
     });
+    for (const [op, action] of [['gallery-path-capture', captureGalleryPath], ['gallery-path-measure', measureGalleryPath]]) {
+      target.nmcGpu.ops[op] = input => exclusively(() => {
+        stopInteractive();
+        runner?.dispose();
+        runner = null;
+        return action({ target, canvas, raa: lib.raa }, input?.args ?? input);
+      });
+    }
     const pickerScenes = new Map(scenes);
     pickerScenes.set(interactiveInterior.default.id, interactiveInterior);
     const entries = [interactiveInterior, ...scenes.values()];
@@ -186,6 +195,11 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 if (option.value === undefined) {
                   input.type = 'checkbox';
                   input.checked = state?.enabled?.[option.id] ?? option.enabled;
+                  const unavailable = option.unavailable?.(state);
+                  if (unavailable) {
+                    input.disabled = true;
+                    label.title = unavailable;
+                  }
                   label.append(input, option.label);
                 } else {
                   input.type = 'number';

@@ -24,7 +24,7 @@ struct Light {
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
 @group(0) @binding(3) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(4) var<storage, read> materials: array<Material>;
-@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>, 12>;
+@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>, 20>;
 @group(0) @binding(6) var depth: texture_depth_2d;
 @group(0) @binding(7) var normals: texture_2d<f32>;
 @group(0) @binding(8) var motion: texture_2d<f32>;
@@ -247,11 +247,15 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material)
 }
 
 fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) -> vec3<f32> {
+    return trace_path_steps(initial, mirrors, path, options[0].z, seed);
+}
+
+fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
     var ray = initial;
     var throughput = vec3<f32>(1.0);
     var sum = vec3<f32>(0.0);
     var mirror_steps = mirrors;
-    var path_steps = options[0].z;
+    var path_steps = bounces;
     for (var step = 0u; step < 13u; step++) {
         let hit = closest(ray, frame.clip.y, false);
         if hit.object == MISS {

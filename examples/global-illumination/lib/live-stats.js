@@ -109,7 +109,10 @@ export function createLiveStats(container) {
     }
     const tracing = optional(() => engine.meshTracingStats());
     if (tracing?.referencePixels) {
-      lines.push(`Path-traced reference · ${number(tracing.referencePixels)} samples · ${tracing.pathBounces} path bounces`);
+      lines.push(`Path-traced reference · ${number(tracing.referencePixels)} pixels × ${tracing.referenceSpp} spp · ${tracing.pathBounces} path bounces`);
+    } else if (tracing?.hybridLobeSpp) {
+      lines.push(`Hybrid path · model ${number(tracing.modelPixels)} · traced refresh ${number(tracing.refreshPixels)} · mirror screen ${number(tracing.acceptedScreen)}`);
+      lines.push(`Diffuse evidence missing ${number(tracing.diffuseMissingPixels)} · diffuse rays ${number(tracing.diffuseRays)} · specular rays ${number(tracing.specularRays)}`);
     } else if (tracing?.eligible) {
       const share = 100 * tracing.traced / tracing.eligible;
       lines.push(`Hybrid reflections · GPU traced ${tracing.traced}/${tracing.eligible} (${number(share, 1)}%) · screen accepted ${tracing.acceptedScreen}`);

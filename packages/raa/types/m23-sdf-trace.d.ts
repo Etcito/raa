@@ -32,6 +32,7 @@ export interface MeshTracingSettings {
   confidenceThreshold?: number;
   reflectionBounces?: number;
   pathBounces?: number;
+  pathMode?: 'off' | 'short' | 'traced' | 'learned';
 }
 
 export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
@@ -51,6 +52,16 @@ export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
   mirrorRays: number;
   pathRays: number;
   referencePixels: number;
+  modelPixels: number;
+  refreshPixels: number;
+  diffuseMissingPixels: number;
+  diffuseRays: number;
+  specularRays: number;
+  pathForegroundPixels: number;
+  modelRejectedPixels: number;
+  primaryBvhPixels: number;
+  referenceSpp: number;
+  hybridLobeSpp: number;
 }
 
 export interface Engine {
@@ -58,4 +69,8 @@ export interface Engine {
   setMeshTracing(options: MeshTracingSettings): void;
   /** Counts actual half-resolution GPU samples from the latest completed tracing frame. */
   meshTracingStats(): MeshTracingStats | null;
+  /** Loads a specular model in validated 12→8→3 little-endian FP32 tensor order. */
+  setMeshPathModel(weights: Uint8Array): void;
+  /** Captures one fixed-seed specular RGB sample and guides from short or traced mode. */
+  captureMeshPathSample(nowMs: number, seed: number): Promise<{ size: [number, number]; data: Uint8Array }>;
 }

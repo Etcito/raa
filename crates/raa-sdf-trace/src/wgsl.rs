@@ -79,6 +79,12 @@ pub fn mesh_trace_module() -> String {
     format!("{RAY_INTERVAL_WGSL}{gi}{mesh}")
 }
 
+pub fn mesh_hybrid_module() -> String {
+    let mut source = mesh_trace_module();
+    source.push_str(include_str!("wgsl/mesh_hybrid.wgsl"));
+    source
+}
+
 const TRACE_WGSL: &str = include_str!("wgsl/trace_wgsl.wgsl");
 
 /// Frozen internal volume ABI v1, shared by resource card 7118, scheduler 7119 and duel 7129.

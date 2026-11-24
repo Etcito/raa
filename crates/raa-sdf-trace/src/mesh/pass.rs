@@ -5,12 +5,14 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc::sync_channel};
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, RecordCtx};
 
-use super::{MeshTraceScene, MeshTraceStats};
+use super::{
+    COUNTER_COUNT, MeshTraceScene, MeshTraceStats, PathMode, REFERENCE_SPP, hybrid::HybridGpu,
+};
 use crate::wgsl::mesh_trace_module;
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
 const ORDER: u32 = 66;
-const COUNTER_BYTES: u64 = 48;
+const COUNTER_BYTES: u64 = (COUNTER_COUNT * 4) as u64;
 const CONFIDENCE: &str = "ssr.confidence";
 const COMPOSITE_WGSL: &str = include_str!("../wgsl/mesh_composite.wgsl");
 
@@ -24,6 +26,7 @@ impl MeshTraceFeature {
         pipeline.add(Box::new(MeshTracePass {
             state: state.clone(),
             gpu: None,
+            hybrid: None,
             targets: None,
         }))?;
         pipeline.set_enabled(MESH_TRACE_NAME, false)?;
@@ -34,6 +37,7 @@ impl MeshTraceFeature {
 struct MeshTracePass {
     state: MeshTraceHandle,
     gpu: Option<Pipelines>,
+    hybrid: Option<HybridGpu>,
     targets: Option<Images>,
 }
 
@@ -93,6 +97,11 @@ impl FeaturePass for MeshTracePass {
         let history_valid = images.previous.is_some_and(|(index, epoch)| {
             index.checked_add(1) == Some(ctx.frame) && scene.epoch == epoch
         });
+        let path_mode = if settings.reference {
+            PathMode::Off
+        } else {
+            settings.path_mode
+        };
         let filtered = ctx.targets.hdr();
         let params = [
             scene.geometry.count(),
@@ -102,9 +111,9 @@ impl FeaturePass for MeshTracePass {
             settings.confidence_threshold.to_bits(),
             u32::from(settings.reflections),
             u32::from(history_valid),
-            4,
+            REFERENCE_SPP,
             scene.sky_diffuse.to_bits(),
-            0,
+            path_mode as u32,
             0,
             0,
         ];
@@ -148,7 +157,19 @@ impl FeaturePass for MeshTracePass {
         });
         ctx.encoder.clear_buffer(&gpu.counters, 0, None);
         let (width, height) = images.trace_size;
-        {
+        if path_mode != PathMode::Off {
+            self.hybrid
+                .get_or_insert_with(|| HybridGpu::new(device, &gpu.compute_layout))
+                .record(
+                    ctx.gpu,
+                    ctx.encoder,
+                    ctx.frame,
+                    &group,
+                    &mut scene.path,
+                    path_mode,
+                    images.trace_size,
+                );
+        } else {
             let mut pass = ctx
                 .encoder
                 .begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -342,7 +363,7 @@ impl DataBuffer {
     }
 }
 
-fn buffer(
+pub(super) fn buffer(
     device: &wgpu::Device,
     label: &'static str,
     size: u64,
@@ -356,7 +377,7 @@ fn buffer(
     })
 }
 
-fn buffer_entry(binding: u32, value: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+pub(super) fn buffer_entry(binding: u32, value: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
     wgpu::BindGroupEntry {
         binding,
         resource: value.as_entire_binding(),

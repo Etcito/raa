@@ -1,7 +1,7 @@
 @group(0) @binding(0) var raster: texture_2d<f32>;
 @group(0) @binding(1) var radiance: texture_2d<f32>;
 @group(0) @binding(2) var motion: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> options: array<vec4<u32>, 2>;
+@group(0) @binding(3) var<uniform> options: array<vec4<u32>, 3>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
@@ -15,7 +15,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let trace_size = vec2<f32>(textureDimensions(radiance));
     let uv = frag.xy / vec2<f32>(textureDimensions(raster));
     let traced = textureLoad(radiance, vec2<i32>(uv * trace_size), 0);
-    if options[0].w != 0u { return vec4<f32>(traced.rgb, 1.0); }
+    if options[0].w != 0u || options[2].y != 0u { return vec4<f32>(traced.rgb, 1.0); }
     let base = textureLoad(raster, pixel, 0);
     if traced.a == 0.0 || textureLoad(motion, pixel, 0).w < 0.5 { return base; }
     return vec4<f32>(mix(base.rgb, traced.rgb, 0.92), base.a);

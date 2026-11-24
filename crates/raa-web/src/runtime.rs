@@ -272,7 +272,9 @@ impl WebRuntime {
             target.revision < real.target.revision
                 || (target.revision == real.target.revision && target < real.target)
         }) {
-            return Err(RaaError::Unsupported("real frame target moves backward".into()));
+            return Err(RaaError::Unsupported(
+                "real frame target moves backward".into(),
+            ));
         }
         self.update(now_ms)?;
         let (width, height) = self.surface.size();
@@ -312,7 +314,8 @@ impl WebRuntime {
     /// Last completed real submission usable as a prediction source for this target.
     pub fn prediction_source(&mut self, target: PresentTarget) -> Option<u64> {
         self.promote_real();
-        self.ready_real.as_ref()
+        self.ready_real
+            .as_ref()
             .filter(|real| target != real.target && target.includes(real.target))
             .map(|real| real.frame)
     }
@@ -666,6 +669,12 @@ pub async fn read_capture_texture(
     );
     gpu.queue().submit([encoder.finish()]);
     read_rows(&buffer, row as usize, pitch as usize, height).await
+}
+
+/// Reads an already submitted, mappable capture buffer.
+pub async fn read_capture_buffer(buffer: &wgpu::Buffer) -> Result<Vec<u8>, RaaError> {
+    let bytes = buffer.size() as usize;
+    read_rows(buffer, bytes, bytes, 1).await
 }
 
 async fn read_rows(

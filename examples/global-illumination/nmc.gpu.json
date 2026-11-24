@@ -1,4 +1,10 @@
 {
   "page": "index.html",
-  "ops": ["run", "baseline", "area-pilot"]
+  "ops": [
+    "run",
+    "baseline",
+    "area-pilot",
+    "gallery-path-capture",
+    "gallery-path-measure"
+  ]
 }

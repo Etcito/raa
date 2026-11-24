@@ -8,9 +8,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [chromeArg, pageArg, outputArg] = process.argv.slice(2);
-if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output>');
+const [chromeArg, pageArg, outputArg, op = 'area-pilot'] = process.argv.slice(2);
+const capture = op === 'area-pilot' || op === 'gallery-path-capture';
+const gallery = op.startsWith('gallery-path-');
+if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
+    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -18,7 +21,7 @@ const receipt = JSON.parse(receiptBytes);
 if (receipt.status !== 'ready' || !receipt.buildId) throw new Error('A ready GI build is required');
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm' };
-const served = new Set(receipt.files);
+const served = new Set([...receipt.files, 'build.json']);
 const server = createServer(async (request, response) => {
   const name = new URL(request.url, 'http://127.0.0.1').pathname.slice(1) || 'index.html';
   if (request.method !== 'GET' || !served.has(name) || name.split('/').some(part => !part || part === '..' || part.includes('\\'))) {
@@ -103,7 +106,7 @@ try {
   await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
   let ready;
   for (let attempt = 0; attempt < 100; attempt++) {
-    ready = await evalPage("typeof window.nmcGpu?.ops?.['area-pilot'] === 'function'");
+    ready = await evalPage(`typeof window.nmcGpu?.ops?.[${JSON.stringify(op)}] === 'function'`);
     if (ready || browserErrors.length) break;
     await delay(100);
   }
@@ -127,9 +130,10 @@ try {
     throw new Error(`Expected native RTX 3090 WebGPU, got ${JSON.stringify(webgpu)}`);
   }
   console.log(`Windows ${version.Browser}: ${renderer}; WebGPU ${JSON.stringify(webgpu)}`);
-  const capture = await evalPage(`(async () => {
-    const result = await window.nmcGpu.ops['area-pilot'](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000 })});
-    const files = await Promise.all(result.files.map(async ({ name, blob }) => {
+  const result = await evalPage(`(async () => {
+    const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000 })});
+    const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
+      if (base64) return { name, base64 };
       const bytes = new Uint8Array(await blob.arrayBuffer());
       const chunks = [];
       for (let i = 0; i < bytes.length; i += 16384) chunks.push(String.fromCharCode(...bytes.subarray(i, i + 16384)));
@@ -137,27 +141,42 @@ try {
     }));
     return { json: result.json, files };
   })()`, 300000);
-  const data = capture.json;
-  const adapter = data.facts?.adapter;
-  if (!data.facts?.hardware || !/Windows/.test(data.facts.browser) ||
-      adapter?.isFallbackAdapter !== false || !/3090|2204/i.test(adapter.device) || data.buildId !== receipt.buildId) {
-    throw new Error(`Area WebGPU adapter or build provenance mismatch: ${JSON.stringify(data.facts)}`);
+  const data = result.json;
+  const facts = gallery ? data.source?.facts : data.facts;
+  const adapter = facts?.adapter;
+  if (!facts?.hardware || !/Windows/.test(facts.browser) ||
+      adapter?.isFallbackAdapter !== false || !/3090|2204/i.test(adapter.device) || (gallery ? data.source.buildId : data.buildId) !== receipt.buildId) {
+    throw new Error(`WebGPU adapter or build provenance mismatch: ${JSON.stringify(facts)}`);
   }
   await mkdir(path.dirname(output), { recursive: true });
   await mkdir(output);
-  const files = new Map(capture.files.map(file => [file.name, Buffer.from(file.base64, 'base64')]));
-  for (const frame of data.frames) {
-    for (const record of [frame.input, frame.reference, ...Object.values(frame.native)]) {
-      const bytes = files.get(record.file);
-      if (!/^[a-z0-9-]+\.bin$/.test(record.file) || !bytes ||
-          bytes.length !== record.byteLength || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
-        throw new Error(`Capture length or hash mismatch: ${record.file}`);
+  const files = new Map(result.files.map(file => [file.name, Buffer.from(file.base64, 'base64')]));
+  if (capture) {
+    for (const frame of data.frames) {
+      const records = gallery ? Object.values(frame.signals).flatMap(signal => [signal.input, signal.reference])
+        : [frame.input, frame.reference, ...Object.values(frame.native)];
+      for (const record of records) {
+        const bytes = files.get(record.file);
+        if (!/^[a-z0-9-]+\.bin$/.test(record.file) || !bytes ||
+            bytes.length !== record.byteLength || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+          throw new Error(`Capture length or hash mismatch: ${record.file}`);
+        }
+        await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
       }
-      await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
+    }
+  } else {
+    for (const row of data.cases) {
+      const bytes = files.get(row.file);
+      if (!/^[a-z0-9-]+\.png$/.test(row.file) || !bytes?.length) throw new Error(`Missing measurement image ${row.file}`);
+      row.sha256 = createHash('sha256').update(bytes).digest('hex');
+      await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
     }
   }
-  const source = { revision: receipt.inputs.revision, receiptSha256: createHash('sha256').update(receiptBytes).digest('hex') };
-  const manifest = path.join(output, 'manifest.json');
+  const source = {
+    ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
+    receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
+  };
+  const manifest = path.join(output, capture ? 'manifest.json' : 'measurement.json');
   await writeFile(manifest, JSON.stringify({ ...data, source, windows: { browser: version.Browser, renderer, device: nvidia, webgpu } }, null, 2) + '\n', { flag: 'wx' });
   console.log(manifest);
 } catch (error) {

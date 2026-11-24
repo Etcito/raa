@@ -91,6 +91,23 @@ fn mesh_trace_shaders_validate() {
 }
 
 #[test]
+fn hybrid_path_has_a_distinct_entry_and_model_bind_group() {
+    let module = validate(&raa_sdf_trace::wgsl::mesh_hybrid_module());
+    assert!(
+        module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == "trace_hybrid_path" && entry.workgroup_size == [8, 8, 1])
+    );
+    let reference = validate(&raa_sdf_trace::wgsl::mesh_trace_module());
+    assert!(reference.global_variables.iter().all(|(_, var)| {
+        var.binding
+            .as_ref()
+            .is_none_or(|binding| binding.group == 0)
+    }));
+}
+
+#[test]
 fn shared_evaluator_is_a_composable_snippet() {
     for forbidden in ["@compute", "@vertex", "@fragment"] {
         assert!(!PROGRAM_EVAL_WGSL.contains(forbidden), "{forbidden}");

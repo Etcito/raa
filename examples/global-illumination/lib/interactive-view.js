@@ -165,9 +165,15 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
       engine.resize(canvas.width, canvas.height);
       const state = await scene.build(engine, lib, variant);
       if (signal.aborted) return;
+      await scene.prepare?.(engine, state);
+      if (signal.aborted) return;
       engine.setCamera(camera);
       if (aa !== 'preset') engine.setPassEnabled('taa', aa === 'taa' || aa === 'combined');
-      for (const [id, enabled] of Object.entries(previous?.options ?? {})) scene.setOption(engine, state, id, enabled);
+      for (const [id, enabled] of Object.entries(previous?.options ?? {})) {
+        if (!scene.options?.find(option => option.id === id)?.unavailable?.(state)) {
+          scene.setOption(engine, state, id, enabled);
+        }
+      }
       controls = attachCamera({ target, canvas, engine, camera, signal, pose: previous?.pose });
 
       let appliedExposure;

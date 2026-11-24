@@ -8,7 +8,7 @@ use raa_lit::{DrawClass, FLAG_TRACE_MIRROR, FLAG_UNLIT, SurfaceModel};
 use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
     MAX_BOUNCES, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial,
-    MeshTraceSettings,
+    MeshTraceSettings, PathMode, REFERENCE_SPP,
 };
 use wasm_bindgen::prelude::*;
 
@@ -29,7 +29,7 @@ pub(crate) fn prepare(st: &EngineState) -> Result<(), RaaError> {
         return Ok(());
     }
     let lit = st.lit.handle();
-    if settings.reflections && !settings.reference {
+    if !settings.reference {
         let mut jitter = Mat4::IDENTITY;
         let [x, y] = lit.camera_jitter_ndc();
         jitter.cols[3] = [x, y, 0.0, 1.0];
@@ -153,9 +153,27 @@ impl Engine {
                     previous.reflection_bounces,
                 )?,
                 path_bounces: integer(&options, "pathBounces", previous.path_bounces)?,
+                path_mode: match js::optional_string(&options, "pathMode")?.as_deref() {
+                    None => previous.path_mode,
+                    Some("off") => PathMode::Off,
+                    Some("short") => PathMode::Short,
+                    Some("traced") => PathMode::Traced,
+                    Some("learned") => PathMode::Learned,
+                    Some(_) => return Err(api_error("trace.invalid_settings", "unknown pathMode")),
+                },
             }
             .validate()?;
-            let hybrid = settings.reflections && !settings.reference;
+            if settings.path_mode == PathMode::Learned
+                && !existing
+                    .as_ref()
+                    .is_some_and(|handle| handle.borrow().path_model_ready())
+            {
+                return Err(api_error(
+                    "trace.path_model_missing",
+                    "load a specular fit before enabling learned path tracing",
+                ));
+            }
+            let hybrid = !settings.reference && settings.active();
             let mut pipeline = st.pipeline.borrow_mut();
             let handle = if let Some(handle) = existing {
                 handle
@@ -174,6 +192,21 @@ impl Engine {
             pipeline.set_enabled(MESH_TRACE_NAME, settings.active())?;
             handle.borrow_mut().configure(settings);
             Ok(())
+        })
+    }
+
+    /// Loads a previously validated 12→8→3 specular fit in exporter tensor order.
+    #[wasm_bindgen(js_name = setMeshPathModel)]
+    pub fn set_mesh_path_model(&self, weights: &[u8]) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            let handle = if let Some(handle) = st.features.get::<MeshTraceHandle>().cloned() {
+                handle
+            } else {
+                let handle = MeshTraceFeature::install(&mut st.pipeline.borrow_mut())?;
+                st.features.insert(handle.clone());
+                handle
+            };
+            handle.borrow_mut().set_path_model(weights)
         })
     }
 
@@ -201,6 +234,14 @@ impl Engine {
                 "mirrorRays",
                 "pathRays",
                 "referencePixels",
+                "modelPixels",
+                "refreshPixels",
+                "diffuseMissingPixels",
+                "diffuseRays",
+                "specularRays",
+                "pathForegroundPixels",
+                "modelRejectedPixels",
+                "primaryBvhPixels",
             ];
             for (name, value) in names.into_iter().zip(stats.counts) {
                 Reflect::set(&result, &name.into(), &f64::from(value).into())
@@ -217,6 +258,22 @@ impl Engine {
                 ),
                 ("reflectionBounces", f64::from(controls.reflection_bounces)),
                 ("pathBounces", f64::from(controls.path_bounces)),
+                (
+                    "referenceSpp",
+                    if controls.reference {
+                        f64::from(REFERENCE_SPP)
+                    } else {
+                        0.0
+                    },
+                ),
+                (
+                    "hybridLobeSpp",
+                    if !controls.reference && controls.path_mode != PathMode::Off {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ),
             ] {
                 Reflect::set(&result, &name.into(), &value.into()).expect("fresh object");
             }

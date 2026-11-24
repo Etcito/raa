@@ -1,8 +1,11 @@
 //! Hybrid mesh reflections and an explicit full-frame path-traced reference.
 
 mod geometry;
+mod hybrid;
 mod pass;
 pub use geometry::MeshInput;
+use hybrid::PathCapture;
+pub use hybrid::PathMode;
 pub use pass::{MESH_TRACE_NAME, MeshTraceFeature, MeshTraceHandle};
 
 use std::sync::mpsc::Receiver;
@@ -13,6 +16,8 @@ use wgpu::Buffer;
 use self::geometry::Geometry;
 
 pub const MAX_BOUNCES: u32 = 6;
+pub const REFERENCE_SPP: u32 = 4;
+const COUNTER_COUNT: usize = 20;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshTraceSettings {
@@ -21,6 +26,7 @@ pub struct MeshTraceSettings {
     pub confidence_threshold: f32,
     pub reflection_bounces: u32,
     pub path_bounces: u32,
+    pub path_mode: PathMode,
 }
 
 impl Default for MeshTraceSettings {
@@ -31,13 +37,14 @@ impl Default for MeshTraceSettings {
             confidence_threshold: 0.55,
             reflection_bounces: 2,
             path_bounces: 2,
+            path_mode: PathMode::Off,
         }
     }
 }
 
 impl MeshTraceSettings {
     pub fn active(self) -> bool {
-        self.reflections || self.reference
+        self.reflections || self.reference || self.path_mode != PathMode::Off
     }
 
     pub fn validate(self) -> Result<Self, RaaError> {
@@ -71,12 +78,13 @@ pub struct MeshTraceStats {
     pub frame: u64,
     pub size: (u32, u32),
     pub settings: MeshTraceSettings,
-    pub counts: [u32; 12],
+    pub counts: [u32; COUNTER_COUNT],
 }
 
 #[derive(Default)]
 pub struct MeshTraceScene {
     pub settings: MeshTraceSettings,
+    path: hybrid::PathState,
     geometry: Geometry,
     materials: Vec<MeshTraceMaterial>,
     material_bytes: Vec<u8>,
@@ -89,6 +97,25 @@ pub struct MeshTraceScene {
 }
 
 impl MeshTraceScene {
+    pub fn set_path_model(&mut self, bytes: &[u8]) -> Result<(), RaaError> {
+        self.path.load(bytes)?;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.latest = None;
+        Ok(())
+    }
+
+    pub fn path_model_ready(&self) -> bool {
+        self.path.weights.is_some()
+    }
+
+    pub fn begin_path_capture(&mut self, seed: u32) {
+        self.path.capture = Some(PathCapture { seed, result: None });
+    }
+
+    pub fn end_path_capture(&mut self) -> Option<((u32, u32), Buffer)> {
+        self.path.capture.take()?.result
+    }
+
     pub fn configure(&mut self, settings: MeshTraceSettings) {
         if settings != self.settings {
             self.settings = settings;

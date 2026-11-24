@@ -1,5 +1,7 @@
 import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js';
 
+import { loadGalleryFit } from './gallery-path-model.js';
+
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
 const skylightWidth = 2;
@@ -15,6 +17,8 @@ const options = [
   { id: 'geometry-reflections', label: 'Hybrid geometry reflections', enabled: false },
   { id: 'reflection-bounces', label: 'Reflection bounces', value: 2, min: 1, max: 6, step: 1 },
   { id: 'reflection-confidence', label: 'Screen confidence threshold', value: 0.55, min: 0, max: 1, step: 0.01 },
+  { id: 'model-assisted-path', label: 'Model-assisted path tracing', enabled: false,
+    unavailable: state => state?.pathModelError },
   { id: 'path-reference', label: 'Path-traced reference', enabled: false },
   { id: 'path-bounces', label: 'Reference path bounces', value: 2, min: 0, max: 6, step: 1 },
   { id: 'ssr', label: 'SSR on other surfaces', enabled: true },
@@ -85,9 +89,10 @@ function setTracing(engine, state, update = {}) {
   const values = { ...state.enabled, ...state.values, ...update };
   const reflections = values['geometry-reflections'];
   const reference = values['path-reference'];
-  if (reflections || reference) assertForwardOrder(engine);
+  const pathMode = values['model-assisted-path'] ? 'learned' : 'off';
+  if (reflections || reference || pathMode === 'learned') assertForwardOrder(engine);
   engine.setMeshTracing({
-    reflections, reference,
+    reflections, reference, pathMode,
     reflectionBounces: values['reflection-bounces'],
     confidenceThreshold: values['reflection-confidence'],
     pathBounces: values['path-bounces'],
@@ -208,6 +213,17 @@ function build(engine, _lib, selected = variant) {
   return state;
 }
 
+async function prepare(engine, state) {
+  try {
+    const model = await loadGalleryFit();
+    if (model) engine.setMeshPathModel(model.bytes);
+    else state.pathModelError = 'This build has no fitted Windows gallery model.';
+  } catch (error) {
+    state.pathModelError = error.message;
+  }
+  if (state.pathModelError) state.status = state.pathModelError;
+}
+
 function setOption(engine, state, id, enabled) {
   if (Object.hasOwn(state.values, id)) {
     const option = options.find(option => option.id === id);
@@ -225,6 +241,7 @@ function setOption(engine, state, id, enabled) {
     throw new TypeError(`Invalid interactive interior option: ${id}`);
   }
   if (state.enabled[id] === enabled) return;
+  if (id === 'model-assisted-path' && enabled && state.pathModelError) throw new Error(state.pathModelError);
   switch (id) {
     case 'gi':
       setGi(engine, enabled, state.enabled['screen-gi'], state.screenSpaceQuality);
@@ -239,6 +256,7 @@ function setOption(engine, state, id, enabled) {
       }
       break;
     case 'geometry-reflections':
+    case 'model-assisted-path':
     case 'path-reference':
       setTracing(engine, state, { [id]: enabled });
       break;
@@ -282,6 +300,7 @@ export const interactiveInterior = {
     variants: [performanceVariant, variant],
     options,
     build,
+    prepare,
     frame,
     setOption,
   },

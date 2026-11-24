@@ -968,6 +968,71 @@ impl Engine {
         Ok(output.into())
     }
 
+    /// Captures one specular sample from the short or traced hybrid path estimator.
+    #[wasm_bindgen(js_name = captureMeshPathSample)]
+    pub async fn capture_mesh_path_sample(
+        &mut self,
+        now_ms: f64,
+        seed: u32,
+    ) -> Result<JsValue, JsValue> {
+        use raa_sdf_trace::mesh::{MeshTraceHandle, PathMode};
+
+        if !now_ms.is_finite() {
+            return Err(js_err(&invalid("invalid path capture time".into())));
+        }
+        let handle = self.with_state(|gpu, st| {
+            if !gpu.summary().is_hardware() {
+                return Err(RaaError::Unsupported(
+                    "path capture requires hardware WebGPU".into(),
+                ));
+            }
+            let handle = st
+                .features
+                .get::<MeshTraceHandle>()
+                .cloned()
+                .ok_or_else(|| invalid("path capture requires mesh tracing".into()))?;
+            let settings = handle.borrow().settings;
+            if settings.reference
+                || !matches!(settings.path_mode, PathMode::Short | PathMode::Traced)
+            {
+                return Err(invalid(
+                    "path capture requires short or traced hybrid mode".into(),
+                ));
+            }
+            handle.borrow_mut().begin_path_capture(seed);
+            Ok(handle)
+        })?;
+        let rendered = self.render_frame(now_ms, None);
+        let result = handle.borrow_mut().end_path_capture();
+        rendered.map_err(|e| js_err(&e))?;
+        self.with_state(|_, st| {
+            let pipeline = st.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
+            let submission = pipeline.scene_submission();
+            if submission.record_failed
+                || submission.submitted_mask != 1
+                || submission.pending_mask != 0
+            {
+                return Err(invalid(
+                    "path capture requires one submitted primary view".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        let ((width, height), buffer) =
+            result.ok_or_else(|| js_err(&invalid("missing path capture output".into())))?;
+        let bytes = raa_web::read_capture_buffer(&buffer)
+            .await
+            .map_err(|e| js_err(&e))?;
+        let output = Object::new();
+        set(&output, "size", &number_array(&[width, height]));
+        set(
+            &output,
+            "data",
+            &js_sys::Uint8Array::from(bytes.as_slice()).into(),
+        );
+        Ok(output.into())
+    }
+
     /// Selects camera jitter independently of TAA. Null uses the default TAA-driven policy.
     #[wasm_bindgen(js_name = setCameraJitter)]
     pub fn set_camera_jitter(&mut self, enabled: Option<bool>) -> Result<(), JsValue> {
