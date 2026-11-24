@@ -800,7 +800,8 @@ fn node_json(node: &NodeTypeSpec, available: bool) -> JsonValue {
                 if node.family == "neural" && param.key == "model"
                     && let JsonValue::Object(fields) = &mut value
                 {
-                    fields.push(("asset".into(), JsonValue::String("neural-model".into())));
+                    let asset = if node.id == "neural.frame-generation" { "generated-frame-model" } else { "neural-model" };
+                    fields.push(("asset".into(), JsonValue::String(asset.into())));
                 }
                 value
             }).collect()),
@@ -809,7 +810,7 @@ fn node_json(node: &NodeTypeSpec, available: bool) -> JsonValue {
     let capability = match node.id {
         "neural.area-reconstruction" | "neural.super-resolution" => "experimental-learned",
         "neural.reflection-reconstruction" => "experimental-operator",
-        "neural.frame-generation" => "experimental-analytic",
+        "neural.frame-generation" => "experimental-learned",
         _ => return JsonValue::Object(fields),
     };
     fields.push(("capability".into(), JsonValue::String(capability.into())));

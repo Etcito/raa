@@ -27,6 +27,8 @@ pub(crate) struct RenderGraphState {
     pub(crate) area_model: Option<String>,
     models: std::collections::BTreeMap<String, raa_graph::learned::AreaPilotPackage>,
     real_models: std::collections::BTreeMap<String, raa_graph::exec::RealModelPackage>,
+    generated_models: std::collections::BTreeMap<String, std::rc::Rc<crate::prediction_model::GeneratedModel>>,
+    presentation_epoch: u64,
     selected_real_model: Option<(String, raa_graph::exec::RealModelPackage)>,
     /// The issues of the latest `setRenderGraph` that did not throw: a parse refusal, the executor's
     /// `SetResult.issues`, or empty after `null`.
@@ -157,6 +159,8 @@ pub(crate) mod web {
             area_model: None,
             models: Default::default(),
             real_models: Default::default(),
+            generated_models: Default::default(),
+            presentation_epoch: 0,
             selected_real_model: None,
             last_set_issues: Vec::new(),
         });
@@ -234,6 +238,23 @@ pub(crate) mod web {
 
     #[wasm_bindgen]
     impl Engine {
+        /// Register the fitted frame-generation package referenced by a graph's model parameter.
+        #[wasm_bindgen(js_name = registerGeneratedFrameModel)]
+        pub fn register_generated_frame_model(&self, id: String, manifest: String, weights: Vec<u8>) -> Result<(), JsValue> {
+            self.with_state(|gpu, st| {
+                if id.is_empty() || id.len() > 64 || !gpu.summary().is_hardware() {
+                    return Err(api_error(INVALID_ARGUMENT, "expected a model ID of 1 to 64 bytes on hardware WebGPU"));
+                }
+                let state = st.features.require_mut::<RenderGraphState>("render graph")?;
+                if state.generated_models.contains_key(&id) {
+                    return Err(api_error(INVALID_ARGUMENT, "generated frame model ID is already registered"));
+                }
+                let model = crate::prediction_model::GeneratedModel::new(gpu, &manifest, &weights)?;
+                state.generated_models.insert(id, std::rc::Rc::new(model));
+                Ok(())
+            })
+        }
+
         /// Validate an explicit, versioned experimental model without changing the live graph.
         #[wasm_bindgen(js_name = registerNeuralModel)]
         pub fn register_neural_model(&self, id: String, manifest: String, weights: Vec<u8>) -> Result<(), JsValue> {
@@ -327,13 +348,25 @@ pub(crate) mod web {
         }
     }
 
+    pub(crate) struct CameraGraph {
+        pub epoch: u64,
+        pub model: Option<(String, std::rc::Rc<crate::prediction_model::GeneratedModel>)>,
+    }
+
     impl Engine {
-        pub(crate) fn camera_graph_selected(st: &EngineState) -> bool {
-            graph_state(st).ok().is_some_and(|graph| {
-                graph.explicit_scene_size.is_none() && graph.executor.active_plan().is_some_and(|plan| {
-                    plan.nodes.iter().any(|node| node.type_id == "neural.frame-generation")
-                })
-            })
+        pub(crate) fn camera_graph_selection(st: &EngineState) -> Option<CameraGraph> {
+            let graph = graph_state(st).ok()?;
+            if graph.explicit_scene_size.is_some() { return None; }
+            let node = graph.executor.active_plan()?.nodes.iter().find(|node| node.type_id == "neural.frame-generation")?;
+            let id = node.params.iter().find_map(|(key, value)| match value {
+                ParamValue::String(id) if key == "model" && !id.is_empty() => Some(id),
+                _ => None,
+            });
+            let model = match id {
+                Some(id) => Some((id.clone(), graph.generated_models.get(id)?.clone())),
+                None => None,
+            };
+            Some(CameraGraph { epoch: graph.presentation_epoch, model })
         }
     }
 
@@ -433,6 +466,19 @@ pub(crate) mod web {
 
     pub(crate) type SelectedRealModel = (String, raa_graph::exec::RealModelPackage);
 
+    pub(crate) fn validate_generated_graph(st: &EngineState, doc: &GraphDoc) -> Result<(), SetResult> {
+        let id = doc.nodes.iter().filter(|node| node.type_id == "neural.frame-generation")
+            .find_map(|node| node.params.iter().find_map(|(key, value)| match value {
+                JsonValue::String(id) if key == "model" && !id.is_empty() => Some(id),
+                _ => None,
+            }));
+        if let Some(id) = id && !graph_state(st).is_ok_and(|graph| graph.generated_models.contains_key(id)) {
+            return Err(refusal("graph.generated_model_package", "the frame-generation model ID is not registered",
+                "Register a compatible generated-frame package, or clear the model ID for analytic reprojection."));
+        }
+        Ok(())
+    }
+
     pub(crate) fn graph_model(
         st: &EngineState, doc: &GraphDoc, size: (u32, u32),
     ) -> Result<Option<(SelectedRealModel, raa_graph::exec::RealModelSelection)>, SetResult> {
@@ -493,6 +539,7 @@ pub(crate) mod web {
                 rebuilt: 0,
             },
             GraphArgument::Document(doc) => {
+                if let Err(result) = validate_generated_graph(st, &doc) { return Ok(result); }
                 let (selected, real_model) = match graph_model(st, &doc, scene_size) {
                     Ok(Some((selected, model))) => (Some(selected), Some(model)),
                     Ok(None) => (None, None),
@@ -530,6 +577,7 @@ pub(crate) mod web {
             .features
             .require_mut::<RenderGraphState>("render graph")?;
         if result.ok {
+            state.presentation_epoch = state.presentation_epoch.wrapping_add(1);
             if state.explicit_scene_size != scene_size {
                 st.pipeline.borrow_mut().set_scene_size(scene_size);
                 st.scene_invocation.discontinuity_all();

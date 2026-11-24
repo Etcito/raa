@@ -377,8 +377,11 @@ pub struct Engine {
     runtime: Option<WebRuntime>,
     prediction_warp: Option<crate::prediction_warp::PredictionWarp>,
     prediction_real: Option<(u64, raa_tonemap::TonemapSource)>,
-    prediction_camera: Option<(u64, u64, raa_scene::Camera)>,
+    prediction_camera: Option<(u64, u64, u64, raa_scene::Camera)>,
     camera_prediction: Option<crate::prediction_camera::CameraPrediction>,
+    camera_submission: Option<CameraSubmission>,
+    camera_recorded: u64,
+    camera_presented: u64,
     prediction_source_tick: Option<u64>,
     learned_prediction: Option<crate::prediction_model::GeneratedModel>,
     browser_prediction: Option<crate::prediction_browser::BrowserPrediction>,
@@ -784,6 +787,9 @@ impl Engine {
             prediction_real: None,
             prediction_camera: None,
             camera_prediction: None,
+            camera_submission: None,
+            camera_recorded: 0,
+            camera_presented: 0,
             prediction_source_tick: None,
             learned_prediction: None,
             browser_prediction: None,
@@ -817,6 +823,8 @@ impl Engine {
     pub fn reset_presentation(&mut self) -> Result<(), JsValue> {
         self.runtime()?.clear_retained_frames();
         self.prediction_real = None;
+        self.prediction_camera = None;
+        self.camera_submission = None;
         Ok(())
     }
 
@@ -842,7 +850,7 @@ impl Engine {
     /// Prewarm the graph-selected optical presentation prototype on the engine's device.
     #[wasm_bindgen(js_name = prepareCameraPrediction)]
     pub fn prepare_camera_prediction(&mut self) -> Result<bool, JsValue> {
-        let declared = self.with_state(|_, st| Ok(Self::camera_graph_selected(st)))?;
+        let declared = self.with_state(|_, st| Ok(Self::camera_graph_selection(st).is_some()))?;
         if !declared || !self.prepare_prediction()? { return Ok(false); }
         if self.camera_prediction.is_none() {
             self.camera_prediction = Some(crate::prediction_camera::CameraPrediction::new(self.runtime()?.gpu()));
@@ -861,16 +869,16 @@ impl Engine {
             return Ok(false);
         }
         let Some((id, source)) = &self.prediction_real else { return Ok(false); };
-        let Some((camera_id, revision, old_camera)) = self.prediction_camera else { return Ok(false); };
+        let Some((camera_id, revision, source_epoch, old_camera)) = self.prediction_camera else { return Ok(false); };
         if *id != camera_id || *id as f64 != source_id || revision != target.revision { return Ok(false); }
         let Some(camera_stage) = &self.camera_prediction else { return Ok(false); };
         let Some(browser) = &mut self.browser_prediction else { return Ok(false); };
-        let (camera, tone, env) = {
+        let (camera, tone, env, selection) = {
             let guard = self.state.borrow();
             let st = guard.as_ref().ok_or_else(disposed)?;
-            if !Self::camera_graph_selected(st) { return Ok(false); }
+            let Some(selection) = Self::camera_graph_selection(st).filter(|g| g.epoch == source_epoch) else { return Ok(false); };
             let pipeline = st.pipeline.try_borrow().map_err(|_| js_err(&pipeline_busy()))?;
-            (st.scene.camera, st.tonemap.get(), pipeline.lighting().env().clone())
+            (st.scene.camera, st.tonemap.get(), pipeline.lighting().env().clone(), selection)
         };
         let Some(warp) = crate::prediction_camera::CameraWarp::new(old_camera, camera) else { return Ok(false); };
         let width = self.viewport.0;
@@ -878,10 +886,40 @@ impl Engine {
         if source.hdr.width() != width || source.hdr.height() != height
             || source.depth.width() != width || source.depth.height() != height
         { return Ok(false); }
-        self.runtime.as_mut().ok_or_else(disposed)?.record_checked_prediction(
-            key, *id, deadline_ms, measured_cost_ms,
-            |gpu, output| camera_stage.record(gpu, source, warp, output, browser, tone, &env),
-        ).map_err(|e| js_err(&e))
+        let learned = selection.model.as_ref().zip(self.prediction_source_tick.and_then(|tick| target.tick.checked_sub(tick)))
+            .map(|((_, model), age)| (model.as_ref(), age));
+        let mut dispatched = false;
+        let admitted = self.runtime.as_mut().ok_or_else(disposed)?.record_checked_prediction(
+            key.clone(), *id, deadline_ms, measured_cost_ms,
+            |gpu, output| {
+                let (commands, check, ran) = camera_stage.record(gpu, source, warp, output, browser, tone, &env, learned)?;
+                dispatched = ran;
+                Ok((commands, check))
+            },
+        ).map_err(|e| js_err(&e))?;
+        if admitted {
+            self.camera_recorded += u64::from(dispatched);
+            self.camera_submission = Some(CameraSubmission {
+                id: *id, epoch: selection.epoch, key, presented: false,
+                weights_sha256: learned.filter(|_| dispatched).map(|(model, _)| model.digest.clone()),
+            });
+        }
+        Ok(admitted)
+    }
+
+    /// Diagnostics for the graph-selected camera decoder. Counters track actual learned work.
+    #[wasm_bindgen(js_name = generatedFrameModelStats)]
+    pub fn generated_frame_model_stats(&self) -> Result<JsValue, JsValue> {
+        let graph = self.with_state(|_, st| Ok(Self::camera_graph_selection(st)))?;
+        let result = js_sys::Object::new();
+        let field = |name: &str, value: JsValue| js_sys::Reflect::set(&result, &name.into(), &value);
+        let model = graph.as_ref().and_then(|graph| graph.model.as_ref());
+        field("model", model.map_or(JsValue::NULL, |(id, _)| id.as_str().into()))?;
+        field("weightsSha256", model.map_or(JsValue::NULL, |(_, model)| model.digest.as_str().into()))?;
+        field("recorded", (self.camera_recorded as f64).into())?;
+        field("dispatches", (2.0 * self.camera_recorded as f64).into())?;
+        field("presented", (self.camera_presented as f64).into())?;
+        Ok(result.into())
     }
 
     /// Release the opt-in presentation renderer and invalidate its retained images.
@@ -1070,12 +1108,13 @@ impl Engine {
         let source = capture.and_then(|control| control.take_source_capture());
         if let Ok(id) = result {
             let camera = self.state.borrow().as_ref().and_then(|state| {
-                (state.lit.handle().camera_jitter_ndc() == [0.0; 2]).then_some(state.scene.camera)
+                (state.lit.handle().camera_jitter_ndc() == [0.0; 2])
+                    .then(|| (state.scene.camera, Self::camera_graph_selection(state).map(|graph| graph.epoch)))
             });
             self.prediction_real = source.filter(|_| camera.is_some()).map(|source| (id, source));
             self.prediction_source_tick = self.prediction_real.as_ref().map(|_| target.tick);
             self.prediction_camera = camera.filter(|_| self.prediction_real.is_some())
-                .map(|camera| (id, target.revision, camera));
+                .and_then(|(camera, epoch)| Some((id, target.revision, epoch?, camera)));
         }
         result.map(|id| Some(id as f64)).map_err(|e| js_err(&e))
     }
@@ -1085,14 +1124,27 @@ impl Engine {
     #[wasm_bindgen(js_name = presentReady)]
     pub fn present_ready(&mut self, snapshot: JsValue) -> Result<JsValue, JsValue> {
         let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
-        let key = prediction_key(&snapshot, target);
+        let mut key = prediction_key(&snapshot, target);
+        if let Some(camera) = self.camera_submission.as_ref().filter(|c| Some(&c.key) == key.as_ref()) {
+            let current = self.with_state(|_, st| Ok(Self::camera_graph_selection(st).is_some_and(|g| g.epoch == camera.epoch)))?;
+            if !current { key = None; }
+        }
         let selection = self.runtime()?.present_ready(target, key.as_ref()).map_err(|e| js_err(&e))?;
         let Some((id, predicted)) = selection else {
             return Ok(JsValue::UNDEFINED);
         };
+        let learned = predicted && self.camera_submission.as_mut().is_some_and(|camera| {
+            if camera.id != id || Some(&camera.key) != key.as_ref() || camera.weights_sha256.is_none() { return false; }
+            if !camera.presented {
+                camera.presented = true;
+                self.camera_presented += 1;
+            }
+            true
+        });
         let result = js_sys::Object::new();
         js_sys::Reflect::set(&result, &"realFrameId".into(), &JsValue::from_f64(id as f64))?;
         js_sys::Reflect::set(&result, &"predicted".into(), &JsValue::from_bool(predicted))?;
+        js_sys::Reflect::set(&result, &"learned".into(), &JsValue::from_bool(learned))?;
         Ok(result.into())
     }
 
@@ -1862,4 +1914,10 @@ impl Engine {
             Ok(JsValue::from(out))
         })
     }
+}struct CameraSubmission {
+    id: u64,
+    epoch: u64,
+    key: PredictionKey,
+    weights_sha256: Option<String>,
+    presented: bool,
 }

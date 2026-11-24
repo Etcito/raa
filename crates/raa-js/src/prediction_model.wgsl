@@ -20,10 +20,10 @@ fn generated_stem(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= size) { return; }
     let p = vec2<i32>(id.xy);
     let warp = textureLoad(warp_image, p, 0);
-    let fresh = textureLoad(fresh_image, p, 0);
+    let fresh = textureLoad(fresh_image, min(p, vec2<i32>(textureDimensions(fresh_image)) - 1), 0);
     let motion = textureLoad(motion_image, p, 0);
     let depth = textureLoad(depth_image, p, 0).x;
-    let changed = textureLoad(lighting_image, p, 0).x;
+    let changed = textureLoad(lighting_image, min(p, vec2<i32>(textureDimensions(lighting_image)) - 1), 0).x;
     let vw = warp.a > 0.5;
     let vf = fresh.a > 0.5;
     let w = log_color(select(vec3<f32>(0.0), warp.rgb, vw));
@@ -45,7 +45,7 @@ fn generated_residual(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= size) { return; }
     let p = vec2<i32>(id.xy);
     let existing = textureLoad(baseline, p, 0);
-    if textureLoad(warp_image, p, 0).a <= 0.5 || textureLoad(fresh_image, p, 0).a > 0.5 {
+    if textureLoad(warp_image, p, 0).a <= 0.5 || textureLoad(fresh_image, min(p, vec2<i32>(textureDimensions(fresh_image)) - 1), 0).a > 0.5 {
         textureStore(output_image, p, existing);
         return;
     }

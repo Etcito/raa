@@ -238,7 +238,7 @@ export interface RenderGraphCatalogParam {
   /** The inspector group label. */
   group: string;
   kind: RenderGraphParamKind;
-  asset?: 'neural-model';
+  asset?: 'neural-model' | 'generated-frame-model';
   default: RenderGraphParamValue;
   /** The lower bound, or null when the code states none (`unstatedRange`). */
   min: number | null;

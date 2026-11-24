@@ -444,6 +444,10 @@ export interface Engine {
   /** Opt in to an experimental fitted cutoff-guided residual. */
   setGeneratedFrameModel(manifest: string, weights: Uint8Array): { kind: string; weightsSha256: string };
   clearGeneratedFrameModel(): void;
+  /** Register a package for a graph's frame-generation node by immutable ID. */
+  registerGeneratedFrameModel(id: string, manifest: string, weights: Uint8Array): void;
+  /** Counters for the graph-selected learned camera decoder. */
+  generatedFrameModelStats(): { model: string | null; weightsSha256: string | null; recorded: number; dispatches: number; presented: number };
   /** Prewarms analytic camera reprojection for the selected frame-generation graph node. */
   prepareCameraPrediction(): boolean;
   /** True only when a static, fully covered same-eye target was admitted before the deadline. */
@@ -462,7 +466,7 @@ export interface Engine {
   produceReal(nowMs: number, snapshot: { revision: number; target: { tick: number; phase: number } }): number | undefined;
   /** Select a completed image. Compose the current HUD after selection. */
   presentReady(snapshot: { revision: number; target: { tick: number; phase: number } }):
-    { realFrameId: number; predicted: boolean } | undefined;
+    { realFrameId: number; predicted: boolean; learned: boolean } | undefined;
 
   /**
    * Frame statistics, the adapter and the hardware flag.

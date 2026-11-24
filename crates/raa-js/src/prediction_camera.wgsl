@@ -10,13 +10,15 @@ struct OpticalWarp {
 @group(0) @binding(3) var output_hdr: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(4) var output_depth: texture_storage_2d<r32float, write>;
 @group(0) @binding(5) var<storage, read_write> incomplete: atomic<u32>;
+@group(0) @binding(6) var output_motion: texture_storage_2d<rgba32float, write>;
 
 @compute @workgroup_size(8, 8)
 fn reproject_optics(@builtin(global_invocation_id) id: vec3<u32>) {
     let extent = textureDimensions(output_hdr);
     if any(id.xy >= extent) { return; }
     let dims = vec2<f32>(extent);
-    let ndc = (vec2<f32>(id.xy) + 0.5) / dims * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
+    let target_uv = (vec2<f32>(id.xy) + 0.5) / dims;
+    let ndc = target_uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0);
     let mapped = optical.target_to_source * vec4<f32>(ndc, 0.5, 1.0);
     let old_ndc = mapped.xy / mapped.w;
     let uv = old_ndc * vec2<f32>(0.5, -0.5) + 0.5;
@@ -48,5 +50,6 @@ fn reproject_optics(@builtin(global_invocation_id) id: vec3<u32>) {
     let now = optical.source_to_target * vec4<f32>(old_ndc, z, 1.0);
     let target_depth = select(clamp(now.z / now.w, 0.0, 1.0), 1.0, z >= 1.0);
     textureStore(output_hdr, vec2<i32>(id.xy), vec4<f32>(rgb / total, 1.0));
+    textureStore(output_motion, vec2<i32>(id.xy), vec4<f32>(target_uv - uv, 0.0, z));
     textureStore(output_depth, vec2<i32>(id.xy), vec4<f32>(target_depth, 0.0, 0.0, 0.0));
 }
