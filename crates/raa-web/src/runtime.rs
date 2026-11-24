@@ -383,10 +383,12 @@ impl WebRuntime {
     ) -> Result<Option<(u64, bool)>, RaaError> {
         self.gpu.ensure_live()?;
         self.promote_real();
-        let candidate = self
-            .prediction
-            .as_ref()
-            .filter(|p| self.performance.now() <= p.deadline_ms && p.ready.load(Ordering::Acquire));
+        let now = self.performance.now();
+        let candidate = self.prediction.as_ref().filter(|prediction| {
+            !prediction.retired
+                && now <= prediction.deadline_ms
+                && prediction.ready.load(Ordering::Acquire)
+        });
         let real = self.ready_real.as_ref();
         let (id, texture, predicted) = match select(
             target,
