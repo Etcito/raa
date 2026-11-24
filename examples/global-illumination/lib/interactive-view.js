@@ -164,6 +164,8 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
       engine.setCamera(camera);
       controls = attachCamera({ target, canvas, engine, camera, signal });
 
+      let appliedExposure;
+      if (display.exposureEv !== undefined) engine.setAutoExposure({ enabled: false });
       let sceneReady = !scene.ready;
       let firstTime;
       let previousTime;
@@ -193,6 +195,10 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
           firstTime ??= timestamp;
           const dt = previousTime === undefined ? 0 : Math.min((timestamp - previousTime) / 1000, 0.05);
           const timeMs = variantTimeMs(variant) + timestamp - firstTime;
+          if (display.exposureEv !== appliedExposure) {
+            engine.setToneMapping({ exposureEv: display.exposureEv });
+            appliedExposure = display.exposureEv;
+          }
           controls.update(dt);
           scene.frame?.(engine, timeMs, variant, state, frameOptions);
           engine.render(timeMs);

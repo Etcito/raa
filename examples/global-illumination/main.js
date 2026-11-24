@@ -56,6 +56,12 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
   discover = discoverScenes, load = loadRaa, createRunner = createGiPageRunner }) {
   const lifetime = new AbortController();
   const display = { width: 1280, height: 720, maxFps: 0 };
+  const doc = target.document;
+  const exposure = doc.getElementById?.('exposure');
+  const sizing = doc.getElementById?.('sizing');
+  const fullscreen = doc.getElementById?.('fullscreen');
+  const syncNativeSize = () => canvas.style?.setProperty('--native-width', (canvas.width / (target.devicePixelRatio || 1)) + 'px');
+  if (exposure) display.exposureEv = Number(exposure.value);
   const stats = statsContainer && createLiveStats(statsContainer);
   let runner = null;
   let interactive = null;
@@ -156,7 +162,10 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           status.textContent = `Preparing ${scene.id}/${variant.id}`;
           interactive = createInteractiveView({
             target, canvas, lib, scene, variant, settings: display,
-            onFrame: stats?.update.bind(stats),
+            onFrame(engine, time, width, height) {
+              syncNativeSize();
+              stats?.update(engine, time, width, height);
+            },
             onReady(state) {
               runButton.textContent = 'Reset camera';
               for (const option of scene.options ?? []) {
@@ -203,6 +212,18 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     fillVariants();
     for (const control of controls) control.disabled = false;
     const options = { signal: lifetime.signal };
+    syncNativeSize();
+    sizing?.addEventListener('change', () => { canvas.parentElement.dataset.sizing = sizing.value; }, options);
+    fullscreen?.addEventListener('click', async () => {
+      try {
+        await canvas.requestFullscreen();
+        canvas.focus();
+      } catch (error) { status.textContent = message(error); }
+    }, options);
+    exposure?.addEventListener('input', () => {
+      display.exposureEv = Number(exposure.value);
+      doc.getElementById('exposure-value').textContent = display.exposureEv.toFixed(1) + ' EV';
+    }, options);
     resolutionPicker?.addEventListener('change', () => {
       [display.width, display.height] = resolutionPicker.value.split('x').map(Number);
     }, options);
