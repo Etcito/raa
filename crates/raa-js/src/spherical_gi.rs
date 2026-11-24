@@ -3,11 +3,26 @@
 use js_sys::{Array, Object, Reflect};
 use raa_core::RaaError;
 use raa_sdf_trace::mesh::{
-    SPHERICAL_GI_NAME, SphericalGiDebug, SphericalGiFeature, SphericalGiHandle, SphericalGiSettings,
+    MeshTraceHandle, SPHERICAL_GI_NAME, SphericalGiDebug, SphericalGiFeature, SphericalGiHandle,
+    SphericalGiSettings,
 };
 use wasm_bindgen::{JsCast, prelude::*};
 
-use crate::{convert::api_error, engine::Engine, mesh_trace, state::EngineState};
+use crate::{
+    convert::api_error,
+    engine::{Engine, InstallCtx},
+    state::EngineState,
+};
+
+pub(crate) fn install_for_graph(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
+    let mesh = ctx
+        .features
+        .require_mut::<MeshTraceHandle>("mesh trace")?
+        .clone();
+    let handle = SphericalGiFeature::install(&mut ctx.pipeline.borrow_mut(), mesh)?;
+    ctx.features.insert(handle);
+    Ok(())
+}
 
 const OPTIONS: [&str; 7] = [
     "enabled",
@@ -153,40 +168,22 @@ fn settings_object(settings: SphericalGiSettings) -> JsValue {
 }
 
 fn settings(state: &EngineState) -> SphericalGiSettings {
-    state.features.get::<SphericalGiHandle>().map_or_else(
-        || {
-            state
-                .features
-                .get::<SphericalGiSettings>()
-                .copied()
-                .unwrap_or_default()
-        },
-        |handle| handle.borrow().settings,
-    )
+    state
+        .features
+        .get::<SphericalGiHandle>()
+        .map(|handle| handle.borrow().settings)
+        .unwrap_or_default()
 }
 
 #[wasm_bindgen]
 impl Engine {
-    /// Merges spherical settings and installs the GPU feature on first enable.
+    /// Merges spherical settings. The pass allocates GPU capture resources on first use.
     #[wasm_bindgen(js_name = setSphericalGi)]
     pub fn set_spherical_gi(&self, options: JsValue) -> Result<(), JsValue> {
         self.with_state(|_, st| {
             let settings = read_patch(options, settings(st))?;
-            let existing = st.features.get::<SphericalGiHandle>().cloned();
-            if existing.is_none() && !settings.enabled {
-                st.features.insert(settings);
-                return Ok(());
-            }
-            let pipeline = st.pipeline.clone();
-            let mut pipeline = pipeline.borrow_mut();
-            let handle = if let Some(handle) = existing {
-                handle
-            } else {
-                let trace = mesh_trace::shared_handle(st, &mut pipeline)?;
-                let handle = SphericalGiFeature::install(&mut pipeline, trace)?;
-                st.features.insert(handle.clone());
-                handle
-            };
+            let handle = st.features.require_mut::<SphericalGiHandle>("spherical GI")?;
+            let mut pipeline = st.pipeline.borrow_mut();
             let enabled = settings.enabled;
             handle.borrow_mut().configure(settings)?;
             pipeline.set_enabled(SPHERICAL_GI_NAME, enabled)?;

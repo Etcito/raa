@@ -257,7 +257,7 @@ export interface Engine {
   /** The latest published counters, a fresh {@link GiStats}. */
   giStats(): GiStats;
   /**
-   * Merges a spherical grid patch and installs the optional primary-view capture pass on first enable.
+   * Merges a spherical grid patch. The primary-view pass allocates GPU resources on first use.
    * Grid changes discard earlier captures. Debug changes preserve the capture cache.
    */
   setSphericalGi(patch: Partial<SphericalGiSettings>): void;
