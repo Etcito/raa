@@ -34,7 +34,7 @@ export async function loadGalleryNeural(engine) {
       || manifest.weightsSha256 !== await digest(weights)) throw new Error('Invalid trained gallery upscaling package');
   const id = 'gallery-temporal';
   engine.registerNeuralModel(id, text, weights);
-  return { id, graph: await graphFile.json() };
+  return { id, graph: await graphFile.json(), manifest };
 }
 
 function requireSelection(result) {

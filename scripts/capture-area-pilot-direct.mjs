@@ -18,8 +18,8 @@ const predictionDataset = op === 'prediction' && comparison === 'dataset';
 const predictionLearned = op === 'prediction' && comparison === 'learned';
 const liveSpherical = spherical && comparison === 'live';
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence] [baseline|fixed|live|train|test|both|reflection|dataset|learned]');
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-reflection-model'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model] [baseline|fixed|live|train|test|both|reflection|dataset|learned]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -161,7 +161,7 @@ try {
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
   }
-  if ((spherical || sequence || predictionDataset || predictionLearned) && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  if ((spherical || sequence || predictionDataset || predictionLearned || op === 'gallery-reflection-model') && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const windows = { browser: version.Browser, renderer, device: nvidia, webgpu };
   if (liveSpherical) {
     await mkdir(path.dirname(output), { recursive: true });
@@ -241,7 +241,7 @@ try {
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
     };
     const manifest = path.join(output, op === 'prediction' && !predictionDataset ? (predictionLearned ? 'learned-prediction.json' : 'prediction.json') : capture || sequence || predictionDataset ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
-      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : 'measurement.json');
+      : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);
   }

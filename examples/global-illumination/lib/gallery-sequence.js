@@ -1,5 +1,6 @@
 import { interactiveInterior } from './interactive-interior.js';
 import { digest } from './gallery-path-model.js';
+import { loadGalleryNeural } from './gallery-neural.js';
 import { reflectionGraph, reflectionInputs, reflectionTeacher } from './gallery-reflection-teacher.js';
 
 const scene = interactiveInterior.default;
@@ -296,4 +297,54 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
     } : 'hit guides only' },
     reactiveSource: 'authored current panel revision for visible surfaces and conservative mirror coverage on moving-actor frames',
     sequences }, files };
+}
+
+export async function verifyGalleryReflection({ target, canvas, raa }, { buildId } = {}) {
+  if (!/Windows.+Chrome\//.test(target.navigator.userAgent) || !buildId) throw new Error('Windows Chrome build required');
+  const student = await create(target, raa, canvas, sceneSize, false, false, { ...await reflectionGraph() });
+  const { engine, facts } = student;
+  try {
+    const model = await loadGalleryNeural(engine);
+    if (!model.manifest.trainedHeads.includes('reflection')) throw new Error('Gallery reflection fit required');
+    const frame = tape(false)[0];
+    student.apply(frame);
+    engine.setCameraJitter(false);
+    const [w, h] = sceneSize;
+    const cases = [];
+    for (const selected of [false, true, false]) {
+      const graph = structuredClone(model.graph);
+      if (selected) graph.nodes.find(node => node.type === 'neural.reflection-reconstruction').params = { model: model.id };
+      const result = engine.setRenderGraphSelection(graph);
+      if (!result.ok) throw new Error(`Reflection A/B graph: ${JSON.stringify(result.issues)}`);
+      const timing = engine.renderInstrumented(frame.timeMs);
+      await engine.submittedWorkDone();
+      const taps = await engine.captureTrainingTaps(timing.frameIndex);
+      const raw = floats(taps.reflectionIncident, w * h * 4, false);
+      const resolved = floats(taps.reflectionReconstruction, w * h * 4, false);
+      const meta = floats(taps.reflectionMeta, w * h * 4, false);
+      let eligible = 0, changed = 0, masked = 0, alphaIdentical = true, maxDelta = 0;
+      for (let p = 0; p < w * h; p++) {
+        const lane = p * 4;
+        const active = meta[lane] === 1 && meta[lane + 1] === 1 && raw[lane + 3] > 0;
+        if (active) eligible++;
+        else masked++;
+        alphaIdentical &&= raw[lane + 3] === resolved[lane + 3];
+        let delta = 0;
+        for (let c = 0; c < 3; c++) delta = Math.max(delta, Math.abs(raw[lane + c] - resolved[lane + c]));
+        if (delta > 0 && !active) throw new Error(`Reflection model changed masked pixel ${p}`);
+        if (delta > 0) changed++;
+        maxDelta = Math.max(delta, maxDelta);
+      }
+      const stats = engine.neuralReconstructionStats();
+      if (!(eligible > 100 && masked > 100 && alphaIdentical
+          && (selected ? changed > 0 && stats?.ran.reflection && stats.dispatches > 0
+            && stats.weightsSha256 === model.manifest.weightsSha256 && stats.realFrame === timing.frameIndex
+            : changed === 0 && stats === null))) throw new Error(`Reflection A/B proof failed: ${JSON.stringify({ selected, eligible, changed, masked, alphaIdentical, stats, timing })}`);
+      cases.push({ selected, eligible, changed, masked, alphaIdentical, maxDelta, frameId: timing.frameIndex, stats });
+    }
+    return { json: { source: { buildId, facts }, size: sceneSize, pose: frame.camera, timeMs: frame.timeMs,
+      eligible: 'typed screen class 1, hitMeta.valid 1 and positive incident confidence', cases }, files: [] };
+  } finally {
+    engine.dispose();
+  }
 }

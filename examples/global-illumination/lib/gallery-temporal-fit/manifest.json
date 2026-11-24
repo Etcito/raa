@@ -4,10 +4,10 @@
   "kind": "windows-capture-fit",
   "seed": 0,
   "weights": "weights.fp32le",
-  "weightsSha256": "fafb15f373fabc5a4ebeb365112761d847c0cff0bcf618849326cc8430c2189e",
+  "weightsSha256": "df4c0ace93bf32c6b137b63fabb59d989abd3a1b27ce24165b24a37060a0fb9b",
   "weightsByteLength": 6560,
   "golden": "golden.json",
-  "goldenSha256": "373c669f2f375d3914692197595dbfaeef342637a8ba5dd002a82a278834532e",
+  "goldenSha256": "14e7ec1f21b9c1118fcc5344bbe01c68ae1da5658a9d4b3d6b3b3be801026c9c",
   "tensorLayout": "NHWC",
   "precision": "fp32",
   "tensorAlignment": 16,
@@ -163,7 +163,8 @@
   ],
   "trainedHeads": [
     "display",
-    "area"
+    "area",
+    "reflection"
   ],
   "cadence": "successfully submitted real frame per view",
   "colorDomain": "nonnegative scene-linear HDR at fixed exposure 1",
@@ -284,7 +285,84 @@
       "main-16",
       "main-17",
       "main-18"
-    ]
+    ],
+    "reflectionFit": {
+      "capture": {
+        "sha256": "600dc88125dc71a45bc15eb7ad0272e9c274673b2f81f37a468e814d70d82e8d",
+        "source": {
+          "buildId": "207c3c0e-5378-482a-87ab-4c1121b09d07",
+          "facts": {
+            "hardware": true,
+            "adapter": {
+              "vendor": "",
+              "architecture": "",
+              "device": "NVIDIA GeForce RTX 3090",
+              "description": "",
+              "isFallbackAdapter": false
+            },
+            "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+            "devicePixelRatio": 1
+          },
+          "revision": "8381760f0fd0210d8a4277c13284130fbd348625",
+          "receiptSha256": "7c1dafd48b924256e096f75098898e03f74247acbf81e1d235ed653a0d68ba07"
+        },
+        "signal": {
+          "channels": [
+            "radianceR",
+            "radianceG",
+            "radianceB",
+            "valid",
+            "class",
+            "age"
+          ],
+          "supplier": "typed SSR incident and hitMeta from the same real submission",
+          "target": "accepted screen hits conditioned on independent path HDR and matching screen cone",
+          "eligibility": "class 1 with geometric validity and positive screen confidence",
+          "misses": "zero-filled and masked; BVH and volume fallback outside this capture"
+        }
+      },
+      "train": [
+        {
+          "id": "gallery-overfit",
+          "groupId": "open-skylight-warm-event",
+          "frameIds": [
+            "gallery-overfit-00",
+            "gallery-overfit-01",
+            "gallery-overfit-02",
+            "gallery-overfit-03",
+            "gallery-overfit-04",
+            "gallery-overfit-05",
+            "gallery-overfit-06",
+            "gallery-overfit-07",
+            "gallery-overfit-08",
+            "gallery-overfit-09",
+            "gallery-overfit-10",
+            "gallery-overfit-11"
+          ]
+        }
+      ],
+      "heldOut": [
+        {
+          "id": "gallery-heldout",
+          "groupId": "sealed-skylight-cool-event",
+          "frameIds": [
+            "gallery-heldout-00",
+            "gallery-heldout-01",
+            "gallery-heldout-02",
+            "gallery-heldout-03",
+            "gallery-heldout-04",
+            "gallery-heldout-05",
+            "gallery-heldout-06",
+            "gallery-heldout-07",
+            "gallery-heldout-08",
+            "gallery-heldout-09",
+            "gallery-heldout-10",
+            "gallery-heldout-11"
+          ]
+        }
+      ],
+      "basePackageSha256": "b77586f2b33c2bf1d314a61e44dab637a872d5f97a347c3e002f73c0983934b4"
+    }
   },
-  "packageSha256": "b77586f2b33c2bf1d314a61e44dab637a872d5f97a347c3e002f73c0983934b4"
+  "packageSha256": "3f621c93622b69fa0847b259598eba9de5b8c89ca39743d76c8cc6d534f1589c"
 }

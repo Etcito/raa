@@ -58,6 +58,11 @@ impl Engine {
                 ("reflectionTrace", "ssr.trace#ssrTrace", "trace"),
                 ("reflectionMeta", "ssr.trace#ssrTrace", "hitMeta"),
                 ("reflectionIncident", "ssr.incident#incident", "incident"),
+                (
+                    "reflectionReconstruction",
+                    "neural.reflection-reconstruction#reflectionModel",
+                    "incident",
+                ),
             ];
             for (name, producer, port) in reflection {
                 if let Some(image) = resources.get(producer, port) {
