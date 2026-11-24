@@ -114,8 +114,8 @@ export async function build(engine, lib, variant) {
 const yawSign = frame => (Math.floor((frame + 10) / 20) % 2 === 0 ? 1 : -1);
 
 // Called by the page runner before every render: only the moving row sways the camera.
-export function frame(engine, timeMs, variant, state) {
-  if (!variant.motion) return;
+export function frame(engine, timeMs, variant, state, { interactiveCamera = false } = {}) {
+  if (!variant.motion || interactiveCamera) return;
   engine.orbit(yawSign(state.frame) * YAW_STEP, 0, 1);
   state.frame += 1;
 }

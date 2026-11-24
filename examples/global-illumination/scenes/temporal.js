@@ -91,8 +91,8 @@ const yawSign = frame => (Math.floor((frame + 10) / 20) % 2 === 0 ? 1 : -1);
 const sphereX = frame => 1.0 + 3.5 * (1 - Math.abs(((frame / 120) % 2) - 1));
 
 // Called by the page runner before every render: one orbit step (not a camera cut) and the sphere's new place.
-export function frame(engine, timeMs, variant, state) {
-  engine.orbit(yawSign(state.frame) * YAW_STEP, 0, 1);
+export function frame(engine, timeMs, variant, state, { interactiveCamera = false } = {}) {
+  if (!interactiveCamera) engine.orbit(yawSign(state.frame) * YAW_STEP, 0, 1);
   const x = sphereX(state.frame);
   engine.setTransforms(new Uint32Array([state.sphereNode]), new Float32Array([x, SPHERE_RADIUS, SPHERE_Z, 0, 0, 0, 1, 1, 1, 1]));
   state.frame += 1;

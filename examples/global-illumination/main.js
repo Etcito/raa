@@ -2,6 +2,7 @@ import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
 import * as content from './lib/content.js';
 import { validateInventory } from './lib/inventory.js';
 import { captureAreaPilot, createGiPageRunner } from './lib/runtime.js';
+import { createInteractiveView } from './lib/interactive-view.js';
 import { runNeuralBaseline } from './lib/neural-baseline-runner.js';
 
 const stages = ['volume', 'lighting', 'virtual'];
@@ -10,7 +11,6 @@ const message = error => {
   const text = error?.message ?? String(error);
   return error?.code && !text.startsWith(`${error.code}:`) ? `${error.code}: ${text}` : text;
 };
-const id = () => globalThis.crypto.randomUUID();
 // The staged package is the only engine source; the import stays dynamic so node can
 // import this page module for discovery metadata without the built brick present.
 const loadRaa = async () => (await import('./raa/index.js')).loadRaa();
@@ -48,12 +48,13 @@ export async function discoverScenes({ fetchIndex = () => fetch('./scenes.json')
   return new Map(namespaces.map(namespace => [namespace.default.id, namespace]));
 }
 
-// No GPU work starts at module import. The managed operation and the picker share the
-// resident runner; window.nmcGpu is created by the shared helper only once run exists.
+// The picker and managed operations take turns owning the canvas.
 export async function attachGiPage({ target, canvas, status, scenePicker, variantPicker, runButton,
   baselineButton, baselineDownload,
   discover = discoverScenes, load = loadRaa, createRunner = createGiPageRunner }) {
+  const lifetime = new AbortController();
   let runner = null;
+  let interactive = null;
   let busy = false;
   let downloadUrl = null;
   status.textContent = 'pending: discovering built scenes';
@@ -63,6 +64,23 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     const newRunner = () => createRunner({ canvas, status, load, scenes, lib });
     runner = newRunner();
     const controls = [scenePicker, variantPicker, runButton, baselineButton].filter(Boolean);
+    function stopInteractive() {
+      const current = interactive;
+      interactive = null;
+      runButton.textContent = 'Start interactive view';
+      current?.stop();
+    }
+
+    target.addEventListener('pagehide', event => {
+      stopInteractive();
+      runner?.dispose();
+      runner = null;
+      if (downloadUrl !== null) target.URL.revokeObjectURL(downloadUrl);
+      downloadUrl = null;
+      if (baselineDownload) baselineDownload.hidden = true;
+      if (!event.persisted) lifetime.abort();
+    }, { signal: lifetime.signal });
+
     async function exclusively(work) {
       if (busy) throw new Error('A run is already in progress');
       busy = true;
@@ -75,10 +93,12 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       }
     }
     const run = input => exclusively(() => {
+      stopInteractive();
       runner ??= newRunner();
       return runner.run(input);
     });
     const baseline = input => exclusively(() => {
+      stopInteractive();
       runner?.dispose();
       runner = null;
       return runNeuralBaseline({ target, canvas, status, raa: lib.raa }, input?.args ?? input);
@@ -93,6 +113,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       }
     };
     target.nmcGpu.ops['area-pilot'] = input => exclusively(() => {
+      stopInteractive();
       runner?.dispose();
       runner = null;
       return captureAreaPilot({ target, canvas, raa: lib.raa }, input?.args ?? input);
@@ -115,16 +136,32 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
         variantPicker.appendChild(option);
       }
     }
-    async function runPicked() {
-      if (busy || variantPicker.value === '') return;
+    async function showPicked() {
+      if (busy || !variantPicker.value) return;
+      const scene = scenes.get(scenePicker.value).default;
+      const variant = scene.variants.find(candidate => candidate.id === variantPicker.value);
       try {
-        await run({
-          selectionId: id(), attemptId: id(), buildId: id(),
-          scenario: scenePicker.value, mode: variantPicker.value,
-          width: 1280, height: 720, remainingMs: 300000,
+        await exclusively(() => {
+          stopInteractive();
+          runner?.dispose();
+          runner = null;
+          status.textContent = `Preparing ${scene.id}/${variant.id}`;
+          interactive = createInteractiveView({
+            target, canvas, lib, scene, variant,
+            onReady(state) {
+              runButton.textContent = 'Reset camera';
+              status.textContent = `Interactive: ${scene.id}/${variant.id}${state?.status ? ` ${state.status}` : ''}`;
+            },
+            onError(error) {
+              stopInteractive();
+              status.textContent = `failed: ${message(error)}`;
+            },
+          });
+          canvas.focus({ preventScroll: true });
+          return interactive.ready;
         });
       } catch (error) {
-        // The runner already published `failed: <message>`; keep the originating text.
+        stopInteractive();
         status.textContent = `failed: ${message(error)}`;
       }
     }
@@ -143,18 +180,22 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       } catch (error) {
         status.textContent = `failed: ${message(error)}`;
       }
-    });
+    }, { signal: lifetime.signal });
     scenePicker.value = entries[0].default.id;
     fillVariants();
     for (const control of controls) control.disabled = false;
-    scenePicker.addEventListener('change', () => { fillVariants(); runPicked(); });
-    variantPicker.addEventListener('change', runPicked);
-    runButton.addEventListener('click', runPicked);
-    target.addEventListener('pagehide', () => {
-      runner?.dispose();
-      if (downloadUrl !== null) target.URL.revokeObjectURL(downloadUrl);
-    }, { once: true });
-    status.textContent = 'pending: choose a scene and variant to prepare the GPU';
+    const options = { signal: lifetime.signal };
+    scenePicker.addEventListener('change', () => { fillVariants(); showPicked(); }, options);
+    variantPicker.addEventListener('change', showPicked, options);
+    runButton.addEventListener('click', () => {
+      if (interactive) {
+        interactive.reset();
+        canvas.focus({ preventScroll: true });
+      } else {
+        showPicked();
+      }
+    }, options);
+    status.textContent = 'Choose a scene or start the interactive view.';
     return runner;
   } catch (error) {
     status.textContent = `failed: ${message(error)}`;
