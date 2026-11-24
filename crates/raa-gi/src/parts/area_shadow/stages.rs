@@ -15,8 +15,8 @@ use raa_pipeline::{
 
 use super::cpu;
 use super::passes::{
-    AREA_DISPATCH_SIZE, AREA_PARAMS_SIZE, AREA_TRACE_ENTRY, AreaShadowPipelines, AreaShadowWork,
-    SDF_VOLUME_SIZE, trace_module_wgsl, tuned_pipeline,
+    AREA_ANTI_LAG, AREA_DISPATCH_SIZE, AREA_PARAMS_SIZE, AREA_TRACE_ENTRY, AreaShadowPipelines,
+    AreaShadowWork, SDF_VOLUME_SIZE, trace_module_wgsl, tuned_pipeline,
 };
 use crate::parts::GBufferViews;
 use crate::parts::screen::passes::{dispatch, layout, module};
@@ -505,24 +505,25 @@ struct TemporalKey {
 }
 
 /// The frame of the latest temporal prepare that published: the slot limit, its history groups,
-/// and whether the light generations changed.
+/// and the slot generations for the samples recorded this frame.
 #[derive(Clone, Copy)]
 struct TemporalFrame {
     limit: u32,
     groups: u32,
-    changed: bool,
+    generations: [u32; MAX_STOCHASTIC_LIGHTS],
 }
 
 /// `area.temporal`: reprojects the history pair and blends the raw visibility into `filtered`.
 /// `prepare` allocates and publishes `filtered` and `depth`. `record` binds one layer of `raw`,
 /// `history` and `filtered` per history group, writes each group's dispatch record (usable only
 /// when both histories are bound, the history has the layer, the camera is valid and the light
-/// generations did not change), records the temporal dispatches of `record_denoise`, then copies
+/// generation of that slot did not change), records the temporal dispatches of `record_denoise`, then copies
 /// the bound `linearDepth` into `depth`.
 #[derive(Default)]
 pub(crate) struct AreaTemporalStage {
     area: AreaFrameState,
     frame: Option<TemporalFrame>,
+    submitted_generations: Option<[u32; MAX_STOCHASTIC_LIGHTS]>,
     pipelines: Option<(AreaShadowPipelines, u64)>,
     outputs: Option<TemporalOutputs>,
     binds: Option<(TemporalKey, Vec<wgpu::BindGroup>)>,
@@ -530,12 +531,17 @@ pub(crate) struct AreaTemporalStage {
 
 impl StageImpl for AreaTemporalStage {
     fn param_keys(&self) -> &'static [&'static str] {
-        &["temporalAlpha", "depthTolerance"]
+        &["temporalAlpha", "depthTolerance", "antiLag"]
     }
 
-    /// The two keys are the tunables of `raa_gi::tunables()` (binding keys of pass.gi.area-shadow).
+    /// Validate the staged temporal controls against the GI tunable catalog.
     fn check_value(&self, key: &str, value: f64) -> Result<(), String> {
-        validate_tunable(tunables(), key, value).map(|_| ())
+        let specs = if key == AREA_ANTI_LAG.key {
+            std::slice::from_ref(&AREA_ANTI_LAG)
+        } else {
+            tunables()
+        };
+        validate_tunable(specs, key, value).map(|_| ())
     }
 
     /// Allocates `filtered` and `depth` for the viewport and the layer count, and publishes them.
@@ -575,7 +581,7 @@ impl StageImpl for AreaTemporalStage {
         self.frame = Some(TemporalFrame {
             limit: frame.limit,
             groups: frame.groups,
-            changed: frame.generations_changed,
+            generations: frame.generations,
         });
         Ok(())
     }
@@ -600,10 +606,10 @@ impl StageImpl for AreaTemporalStage {
         }
         let history = ctx.resources.input(cx.entry, "history");
         let depth_history = ctx.resources.input(cx.entry, "depthHistory");
-        let camera = cx.shared.camera_valid();
+        let previous = self.submitted_generations;
+        let camera = cx.shared.camera_valid() && previous.is_some();
         let usable = |group: u32| {
             camera
-                && !frame.changed
                 && history
                     .as_ref()
                     .is_some_and(|image| image.desc.layers > group)
@@ -620,12 +626,14 @@ impl StageImpl for AreaTemporalStage {
             .take(frame.groups as usize)
         {
             let group = group as u32;
-            let lanes = [
-                group,
-                u32::from(usable(group)),
-                pairs(frame.groups, group),
-                frame.limit,
-            ];
+            let mut flags = u32::from(usable(group));
+            if let Some(generations) = previous {
+                flags |= cpu::slot_rejection_bits(&generations, &frame.generations, group as usize);
+            }
+            if cx.value(AREA_ANTI_LAG.key, AREA_ANTI_LAG.default) != 0.0 {
+                flags |= 8;
+            }
+            let lanes = [group, flags, pairs(frame.groups, group), frame.limit];
             ctx.gpu
                 .queue()
                 .write_buffer(buffer, 0, &dispatch_bytes(lanes));
@@ -711,6 +719,10 @@ impl StageImpl for AreaTemporalStage {
             },
         );
         Ok(true)
+    }
+
+    fn set_history_valid(&mut self, valid: bool) {
+        self.submitted_generations = self.frame.filter(|_| valid).map(|frame| frame.generations);
     }
 }
 

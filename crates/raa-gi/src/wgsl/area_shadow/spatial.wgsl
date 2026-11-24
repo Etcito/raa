@@ -2,7 +2,7 @@
 // separable 7-tap bilateral filter in the pattern of crates/raa-gtao/src/wgsl/denoise.wgsl:23-56
 // (Gaussian times a depth term, normalised weights, horizontal then vertical) extended with a
 // normal term and a 2-pixel stride. `raa_gi_area_spatial_h` filters the reprojected history
-// along x into the raw layers, and `raa_gi_area_spatial_v` filters those along y and writes the
+// along x into scratch, and `raa_gi_area_spatial_v` filters that along y and writes the
 // ratio estimator V = clamp(S / U, 0, 1) into the mask.
 //
 // This is RAA's own code; it adapts no solstice source. It serves the ratio estimator of
@@ -77,7 +77,7 @@ fn raa_area_ratio_visibility(s: f32, u: f32) -> f32 {
 
 // The filtered value of `src` at `coord` along `axis` (x or y): seven taps
 // `RAA_AREA_SPATIAL_STRIDE` pixels apart, each clamped to the image, a sky tap weighs 0, and
-// the weights are normalised. A sky centre copies `src` unfiltered.
+// each tap uses the same weight for both channels of each slot. A sky centre copies `src`.
 fn raa_area_bilateral(src: texture_2d<f32>, coord: vec2<i32>, axis: vec2<i32>) -> vec4<f32> {
     let center = textureLoad(src, coord, 0);
     let center_depth = textureLoad(raa_area_current_depth, coord, 0).r;
@@ -110,10 +110,10 @@ fn raa_area_bilateral(src: texture_2d<f32>, coord: vec2<i32>, axis: vec2<i32>) -
 }
 
 // The horizontal half: filter the reprojected history along x into the raw layers. Bindings:
-// src = the history pair group's write view, src_b = the same view, dst = raw layer g.
+// src = the history pair group's write view, src_b = the same view, dst = scratch layer g.
 @compute @workgroup_size(8, 8)
 fn raa_gi_area_spatial_h(@builtin(global_invocation_id) id: vec3<u32>) {
-    let size = vec2<u32>(textureDimensions(raa_area_current_depth));
+    let size = textureDimensions(raa_area_dst);
     if any(id.xy >= size) {
         return;
     }
@@ -127,11 +127,11 @@ fn raa_gi_area_spatial_h(@builtin(global_invocation_id) id: vec3<u32>) {
 
 // The vertical half and the ratio estimator: filter `src` along y, and `src_b` when the frame
 // has two history groups, then write V for the four slots of this mask layer. Bindings:
-// src = raw layer 2l, src_b = raw layer 2l + 1 (raw layer 2l again with one group), dst = mask
+// src = scratch layer 2l, src_b = scratch layer 2l + 1 (the first again with one group), dst = mask
 // layer l. Slots past the limit and sky pixels write 1.
 @compute @workgroup_size(8, 8)
 fn raa_gi_area_spatial_v(@builtin(global_invocation_id) id: vec3<u32>) {
-    let size = vec2<u32>(textureDimensions(raa_area_current_depth));
+    let size = textureDimensions(raa_area_dst);
     if any(id.xy >= size) {
         return;
     }

@@ -82,7 +82,7 @@ impl NodeFamily for AreaStages {
                     array_port("filtered", false),
                     output("depth", T::Image2d, F::R32Float, 1),
                 ],
-                &["temporalAlpha", "depthTolerance"],
+                &["temporalAlpha", "depthTolerance", "antiLag"],
                 5,
                 1,
                 2,
@@ -259,9 +259,15 @@ fn stage_param(pass: &str, key: &'static str) -> ParamSpec {
         ("pass.gi.area-shadow", "restirNormalCos") => "areaRestirNormalCos",
         _ => key,
     };
-    let spec = find_tunable(raa_gi::tunables(), binding_key).expect("stage tunable spec");
+    let anti_lag = &raa_gi::parts::area_shadow::passes::AREA_ANTI_LAG;
+    let spec = if key == anti_lag.key {
+        anti_lag
+    } else {
+        find_tunable(raa_gi::tunables(), binding_key).expect("stage tunable spec")
+    };
     let (group, label) = match key {
         "temporalAlpha" => ("Area shadow temporal", "Temporal alpha"),
+        "antiLag" => ("Area shadow temporal", "Anti-lag"),
         "depthTolerance" => ("Area shadow temporal", "Depth tolerance"),
         "spatialStride" => ("Area shadow spatial", "Spatial stride"),
         "normalPower" => ("Area shadow spatial", "Normal power"),

@@ -53,13 +53,13 @@ pub const AREA_SHADOW_PASS: &str = "gi.area-shadow";
 pub const AREA_SHADOW_ORDER: u32 = 43;
 
 /// The GPU bytes of one `AreaShadowResources` of `viewport` and history `groups`
-/// (`resources::resource_bytes`): `66_355_349` for 1280x720 and 2 groups.
+/// (`resources::resource_bytes`): `81_100_949` for 1280x720 and 2 groups.
 pub fn area_shadow_bytes(viewport: (u32, u32), groups: u32) -> u64 {
     resource_bytes(viewport, groups)
 }
 
 /// The GPU bytes of the ReSTIR ultra tier at `viewport`: one `AreaShadowResources` of 1 history
-/// group plus one `RestirResources` (`restir_resource_bytes`): `81_297_621` for 1280x720.
+/// group plus one `RestirResources` (`restir_resource_bytes`): `88_670_421` for 1280x720.
 pub fn area_restir_bytes(viewport: (u32, u32)) -> u64 {
     resource_bytes(viewport, 1) + restir_resource_bytes(viewport)
 }
@@ -496,12 +496,12 @@ mod tests {
 
     #[test]
     fn area_shadow_bytes_matches_the_hand_derivation() {
-        assert_eq!(area_shadow_bytes((1280, 720), 2), 66_355_349);
+        assert_eq!(area_shadow_bytes((1280, 720), 2), 81_100_949);
     }
 
     #[test]
     fn area_restir_bytes_matches_the_contract() {
-        assert_eq!(area_restir_bytes((1280, 720)), 81_297_621);
+        assert_eq!(area_restir_bytes((1280, 720)), 88_670_421);
         assert_eq!(area_restir_bytes((320, 180)), 5_265_621);
     }
 }

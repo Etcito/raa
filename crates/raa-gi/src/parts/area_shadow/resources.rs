@@ -173,6 +173,7 @@ pub(crate) struct AreaShadowResources {
     groups: u32,
     raw_view: wgpu::TextureView,
     raw_layers: Vec<wgpu::TextureView>,
+    scratch: Vec<wgpu::TextureView>,
     histories: Vec<HistoryPair>,
     depth: HistoryPair,
     mask_view: wgpu::TextureView,
@@ -201,11 +202,24 @@ impl AreaShadowResources {
             groups.max(2),
             wgpu::TextureDimension::D2,
             wgpu::TextureFormat::Rgba16Float,
-            textured,
+            textured | wgpu::TextureUsages::COPY_SRC,
         );
         let raw_view = full_view(&raw);
         let raw_layers = (0..groups.max(2))
             .map(|layer| layer_view(&raw, layer))
+            .collect();
+
+        let scratch = texture(
+            gpu,
+            "raa-gi.area-shadow.spatial-scratch",
+            viewport,
+            groups,
+            wgpu::TextureDimension::D2,
+            wgpu::TextureFormat::Rgba16Float,
+            textured,
+        );
+        let scratch = (0..groups)
+            .map(|layer| layer_view(&scratch, layer))
             .collect();
 
         let histories = (0..groups)
@@ -282,6 +296,7 @@ impl AreaShadowResources {
             groups,
             raw_view,
             raw_layers,
+            scratch,
             histories,
             depth,
             mask_view,
@@ -546,17 +561,13 @@ impl AreaShadowResources {
                         (2, texture_resource(&views.normal)),
                         (3, texture_resource(pair.write_view())),
                         (4, texture_resource(pair.write_view())),
-                        (5, texture_resource(&self.raw_layers[index])),
+                        (5, texture_resource(&self.scratch[index])),
                         (7, self.dispatch[index].as_entire_binding()),
                     ],
                 )
             })
             .collect();
-        let spatial_v = (0..self
-            .raw_layers
-            .len()
-            .div_ceil(2)
-            .min(self.mask_layers.len()))
+        let spatial_v = (0..self.scratch.len().div_ceil(2).min(self.mask_layers.len()))
             .map(|layer| {
                 let first = layer * 2;
                 let second = if first + 1 < self.groups as usize {
@@ -571,8 +582,8 @@ impl AreaShadowResources {
                     &[
                         (1, texture_resource(self.depth.write_view())),
                         (2, texture_resource(&views.normal)),
-                        (3, texture_resource(&self.raw_layers[first])),
-                        (4, texture_resource(&self.raw_layers[second])),
+                        (3, texture_resource(&self.scratch[first])),
+                        (4, texture_resource(&self.scratch[second])),
                         (5, texture_resource(&self.mask_layers[layer])),
                         (7, self.dispatch[layer].as_entire_binding()),
                     ],
@@ -591,8 +602,8 @@ impl AreaShadowResources {
                     &[
                         (1, texture_resource(self.depth.write_view())),
                         (2, texture_resource(&views.normal)),
-                        (3, texture_resource(&self.raw_layers[0])),
-                        (4, texture_resource(&self.raw_layers[0])),
+                        (3, texture_resource(&self.scratch[0])),
+                        (4, texture_resource(&self.scratch[0])),
                         (5, texture_resource(mask)),
                         (7, self.dispatch[layer].as_entire_binding()),
                     ],
@@ -619,16 +630,16 @@ impl AreaShadowResources {
 }
 
 /// The GPU bytes of one `AreaShadowResources` of `viewport` and `groups`: the raw array at 8 B
-/// per texel and max(2, groups) layers, the history pairs at 16 B per texel and group, the
+/// per texel and max(2, groups) layers, spatial scratch at 8 B and history at 16 B per group, the
 /// R32Float depth pair at 8 B, the two-layer mask at 16 B, the 16-B params, the four 16-B
 /// dispatch buffers, the 4-B pyramid dummy, the 1-B SDF dummy and the 64-B SDF uniform. For
-/// 1280x720 with 2 groups it is 66,355,349.
+/// 1280x720 with 2 groups it is 81,100,949.
 pub(crate) fn resource_bytes(viewport: (u32, u32), groups: u32) -> u64 {
     let width = u64::from(viewport.0.max(1));
     let height = u64::from(viewport.1.max(1));
     let groups = u64::from(groups.clamp(1, 4));
     let texels = width * height;
-    texels * (8 * groups.max(2) + 16 * groups + 8 + 16)
+    texels * (8 * groups.max(2) + 24 * groups + 8 + 16)
         + AREA_PARAMS_SIZE
         + 4 * AREA_DISPATCH_SIZE
         + 4
@@ -656,9 +667,9 @@ mod tests {
 
     #[test]
     fn resource_bytes_matches_the_hand_derivation() {
-        assert_eq!(resource_bytes((1280, 720), 2), 66_355_349);
-        assert_eq!(resource_bytes((0, 0), 0), 16 + 16 + 8 + 16 + 149);
-        assert_eq!(resource_bytes((0, 0), 0), 205);
+        assert_eq!(resource_bytes((1280, 720), 2), 81_100_949);
+        assert_eq!(resource_bytes((0, 0), 0), 16 + 24 + 8 + 16 + 149);
+        assert_eq!(resource_bytes((0, 0), 0), 213);
     }
 
     #[test]

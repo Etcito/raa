@@ -252,10 +252,10 @@ fn raa_area_ray_visibility(world: vec3<f32>, normal: vec3<f32>, point: vec3<f32>
 }
 
 // One invocation per viewport pixel: fill one stratum sample per mid-tier slot and write the
-// history groups of the slots the limit covers. Layers past `groups_for(limit)` stay untouched.
+// packed (wV, w) samples directly to the published trace array before denoising.
 @compute @workgroup_size(8, 8)
 fn raa_gi_area_trace(@builtin(global_invocation_id) id: vec3<u32>) {
-    let viewport = vec2<u32>(raa_gi_frame.viewport.xy);
+    let viewport = textureDimensions(raa_area_raw_out);
     if any(id.xy >= viewport) {
         return;
     }
@@ -303,7 +303,7 @@ fn raa_gi_area_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    for (var g = 0u; g < groups; g = g + 1u) {
+    for (var g = 0u; g < min(groups, textureNumLayers(raa_area_raw_out)); g = g + 1u) {
         let first = weights[2u * g];
         let second = weights[2u * g + 1u];
         textureStore(

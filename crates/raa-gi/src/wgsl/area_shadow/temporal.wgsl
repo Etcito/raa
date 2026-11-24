@@ -18,7 +18,7 @@
 
 // The per-frame dispatch record (16 B), contract 'area-shadow-denoise-wgsl': `index` is the
 // history group or mask layer its bind group covers (g for the history pair, l for the mask),
-// `usable` the history validity, `pairs` the history group count (1 or 2) and `limit` the
+// `usable` packs validity, two slot rejection bits, and the anti-lag flag, `pairs` the history group count (1 or 2) and `limit` the
 // mid-tier slot limit.
 struct AreaDispatchGpu {
     index: u32,
@@ -37,19 +37,43 @@ struct AreaDispatchGpu {
 @group(0) @binding(7) var<uniform> raa_area_dispatch: AreaDispatchGpu;
 @group(0) @binding(8) var raa_area_linear: sampler;
 
-// Blend weight of a usable history sample, `cpu::TEMPORAL_ALPHA` (0.1).
+// Current sample weight of the legacy blend, `cpu::TEMPORAL_ALPHA` (0.1).
 override RAA_AREA_TEMPORAL_ALPHA: f32 = 0.1;
 
 // Relative depth tolerance of the reprojected history test, `cpu::DEPTH_TOLERANCE` (0.05).
 override RAA_AREA_DEPTH_TOLERANCE: f32 = 0.05;
 
-// One channel's reprojected history blended towards the current sample, or the current value
-// when the history is not usable.
-fn raa_area_temporal_blend(history: f32, current: f32, usable: bool) -> f32 {
-    if usable {
-        return history + (current - history) * RAA_AREA_TEMPORAL_ALPHA;
+// Use the same current weight for the numerator and denominator of each slot.
+fn raa_area_blend_pair(
+    history: vec2<f32>, current: vec2<f32>, evidence: vec2<f32>, usable: bool, anti_lag: bool,
+) -> vec2<f32> {
+    if !usable {
+        return current;
     }
-    return current;
+    var alpha = RAA_AREA_TEMPORAL_ALPHA;
+    if anti_lag && evidence.y > 1e-6 && history.y > 1e-6 {
+        let disagreement = abs(evidence.x / evidence.y - history.x / history.y);
+        alpha = mix(alpha, 1.0, smoothstep(0.15, 0.6, disagreement));
+    }
+    return history + (current - history) * alpha;
+}
+
+// Pool current ray evidence only on the receiver surface. In particular this gate
+// sees visibility changes on stationary receivers whose own motion is zero.
+fn raa_area_current_evidence(pixel: vec2<i32>, size: vec2<u32>, depth: f32) -> vec4<f32> {
+    var evidence = vec4<f32>(0.0);
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let tap = pixel + vec2<i32>(x, y);
+            if all(tap >= vec2<i32>(0)) && all(tap < vec2<i32>(size)) {
+                let tap_depth = textureLoad(raa_area_current_depth, tap, 0).r;
+                if raa_area_depth_consistent(tap_depth, depth) {
+                    evidence += textureLoad(raa_area_raw, tap, 0);
+                }
+            }
+        }
+    }
+    return evidence;
 }
 
 // Whether a reprojected linear depth agrees with the current one: the previous depth must be
@@ -63,7 +87,7 @@ fn raa_area_depth_consistent(previous: f32, current: f32) -> bool {
 // zeros.
 @compute @workgroup_size(8, 8)
 fn raa_gi_area_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
-    let size = vec2<u32>(raa_area_frame.viewport.xy);
+    let size = textureDimensions(raa_area_history_out);
     if any(id.xy >= size) {
         return;
     }
@@ -71,6 +95,11 @@ fn raa_gi_area_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
     let depth = textureLoad(raa_area_current_depth, pixel, 0).r;
     if depth <= 0.0 {
         textureStore(raa_area_history_out, pixel, vec4<f32>(0.0));
+        return;
+    }
+    let raw = textureLoad(raa_area_raw, pixel, 0);
+    if (raa_area_dispatch.usable & 1u) == 0u || RAA_AREA_TEMPORAL_ALPHA == 1.0 {
+        textureStore(raa_area_history_out, pixel, raw);
         return;
     }
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) * raa_area_frame.viewport.zw;
@@ -85,20 +114,21 @@ fn raa_gi_area_temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         ),
         0,
     ).r;
-    let usable = raa_area_dispatch.usable != 0u
-        && raa_area_frame.temporal.z != 0u
+    let usable = raa_area_frame.temporal.z != 0u
         && reprojected.z > 0.5
         && raa_area_depth_consistent(previous, depth);
     let history = textureSampleLevel(raa_area_history, raa_area_linear, reprojected.xy, 0.0);
-    let raw = textureLoad(raa_area_raw, pixel, 0);
+    let anti_lag = (raa_area_dispatch.usable & 8u) != 0u;
+    var evidence = raw;
+    if usable && anti_lag {
+        evidence = raa_area_current_evidence(pixel, size, depth);
+    }
     textureStore(
         raa_area_history_out,
         pixel,
         vec4<f32>(
-            raa_area_temporal_blend(history.x, raw.x, usable),
-            raa_area_temporal_blend(history.y, raw.y, usable),
-            raa_area_temporal_blend(history.z, raw.z, usable),
-            raa_area_temporal_blend(history.w, raw.w, usable),
+            raa_area_blend_pair(history.xy, raw.xy, evidence.xy, usable && (raa_area_dispatch.usable & 2u) == 0u, anti_lag),
+            raa_area_blend_pair(history.zw, raw.zw, evidence.zw, usable && (raa_area_dispatch.usable & 4u) == 0u, anti_lag),
         ),
     );
 }

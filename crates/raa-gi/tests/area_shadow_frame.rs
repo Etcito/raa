@@ -34,7 +34,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use raa_core::testing::{block_on, skip, software_gpu};
-use raa_core::{FrameGraph, GpuContext, OffscreenTarget};
+use raa_core::{FrameGraph, GpuContext, GpuOptions, OffscreenTarget};
 use raa_gi::parts::area_shadow::{
     AREA_SHADOW_ORDER, AREA_SHADOW_PASS, area_restir_bytes, area_shadow_bytes,
 };
@@ -122,6 +122,21 @@ struct Rig {
     stats: Option<GiStats>,
 }
 
+fn add_area_light(lit: &mut LitRenderer, x: f32) {
+    lit.local_lights_mut()
+        .add(LocalLight {
+            kind: LocalLightKind::Area,
+            position: [x, 3.0, 0.0],
+            direction: [0.0, -1.0, 0.0],
+            color: [1.0, 1.0, 1.0],
+            intensity: 4.0,
+            range: 10.0,
+            size: [1.0, 1.0],
+            ..LocalLight::default()
+        })
+        .expect("area light");
+}
+
 impl Rig {
     fn new(gpu: &GpuContext, gi_enabled: bool) -> Rig {
         let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, SURFACE, false)));
@@ -156,19 +171,7 @@ impl Rig {
             scene.add_instance(node, submesh, white).expect("instance");
         }
 
-        // The only light: one white area light above the box, emitting straight down.
-        lit.local_lights_mut()
-            .add(LocalLight {
-                kind: LocalLightKind::Area,
-                position: [0.0, 3.0, 0.0],
-                direction: [0.0, -1.0, 0.0],
-                color: [1.0, 1.0, 1.0],
-                intensity: 4.0,
-                range: 10.0,
-                size: [1.0, 1.0],
-                ..LocalLight::default()
-            })
-            .expect("area light");
+        add_area_light(&mut lit, 0.0);
 
         let mut camera = Camera {
             eye: Vec3::new(0.0, 2.5, 5.0),
@@ -382,4 +385,96 @@ fn restir_mode_publishes_the_mask_and_allocates_its_resources() {
     );
     let error = block_on(errors.pop());
     assert!(error.is_none(), "GPU validation error: {error:?}");
+}
+
+#[test]
+#[cfg_attr(not(target_os = "windows"), ignore = "Windows GPU regression")]
+fn stratified_trace_tap_keeps_weighted_pairs_for_one_four_and_eight_lights() {
+    let gpu = block_on(GpuContext::headless(&GpuOptions {
+        allow_software: false,
+        ..GpuOptions::default()
+    }))
+    .expect("Windows hardware GPU");
+    let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut rig = Rig::new(&gpu, true);
+    let mut lights = 1;
+    for count in [1, 4, 8] {
+        while lights < count {
+            add_area_light(&mut rig.lit, 0.12 * lights as f32);
+            lights += 1;
+        }
+        rig.lit
+            .set_area_stochastic(StochasticShadowSettings {
+                count,
+                ..StochasticShadowSettings::standard()
+            })
+            .expect("stratified slot budget");
+        rig.frame(&gpu);
+
+        let pipeline = rig.pipeline.borrow();
+        let raw = pipeline
+            .resources()
+            .get(AREA_SHADOW_PASS, "raw")
+            .expect("raw tap");
+        let (width, height) = SIZE;
+        let row = (width * 8).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let layers = count.div_ceil(2);
+        let staging = gpu.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("area-shadow.raw-test"),
+            size: u64::from(row * height * layers),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device().create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            raw.view.texture().as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: layers,
+            },
+        );
+        gpu.queue().submit([encoder.finish()]);
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| result.expect("map raw pairs"));
+        gpu.device()
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll raw pairs");
+        let data = staging.slice(..).get_mapped_range().expect("mapped pairs");
+        for slot in 0..count {
+            let mut covered = false;
+            let mut umbra = false;
+            for y in 0..height {
+                for x in 0..width {
+                    let offset = ((slot / 2 * height + y) * row + x * 8 + slot % 2 * 4) as usize;
+                    // Nonnegative binary16 values have the same order as their unsigned bits.
+                    let visible = u16::from_le_bytes([data[offset], data[offset + 1]]);
+                    let weight = u16::from_le_bytes([data[offset + 2], data[offset + 3]]);
+                    assert!(
+                        visible <= weight && weight < 0x7c00,
+                        "invalid pair in slot {slot}"
+                    );
+                    covered |= weight != 0;
+                    umbra |= weight != 0 && visible == 0;
+                }
+            }
+            assert!(covered, "no receiver for slot {slot} at limit {count}");
+            if count == 1 {
+                assert!(umbra, "the blocker left no zero-visibility samples");
+            }
+        }
+    }
+    assert!(
+        block_on(errors.pop()).is_none(),
+        "area-shadow validation error"
+    );
 }

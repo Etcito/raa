@@ -32,6 +32,17 @@ const AREA_TRACE_WGSL: &str = include_str!("../../wgsl/area_shadow/trace.wgsl");
 const AREA_TEMPORAL_WGSL: &str = include_str!("../../wgsl/area_shadow/temporal.wgsl");
 const AREA_SPATIAL_WGSL: &str = include_str!("../../wgsl/area_shadow/spatial.wgsl");
 
+/// Staged temporal filter switch. The bundled pass retains its legacy temporal blend.
+pub const AREA_ANTI_LAG: raa_pipeline::TunableSpec = raa_pipeline::TunableSpec {
+    key: "antiLag",
+    default: 1.0,
+    min: Some(0.0),
+    max: Some(1.0),
+    integer: true,
+    rebuild: "none",
+    source: "crates/raa-gi/src/wgsl/area_shadow/temporal.wgsl",
+};
+
 /// The (override, GI tunable key) pairs of temporal.wgsl.
 pub(crate) const AREA_TEMPORAL_OVERRIDES: &[(&str, &str)] = &[
     ("RAA_AREA_TEMPORAL_ALPHA", "temporalAlpha"),

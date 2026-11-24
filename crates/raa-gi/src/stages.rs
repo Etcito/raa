@@ -120,11 +120,13 @@ impl GiStageKind {
         }
     }
 
-    /// True for the two kinds that keep their own reservoir history.
+    /// True for stages that keep reservoir history or metadata for executor-owned history.
     pub fn internal_history(self) -> bool {
         matches!(
             self,
-            GiStageKind::RestirTemporal | GiStageKind::AreaRestirTemporal
+            GiStageKind::RestirTemporal
+                | GiStageKind::AreaTemporal
+                | GiStageKind::AreaRestirTemporal
         )
     }
 }
@@ -156,6 +158,9 @@ pub(crate) trait StageImpl {
 
     /// Drops the state that depends on the frame size (`FeaturePass::resize`).
     fn resize(&mut self) {}
+
+    /// Updates metadata when the graph commits history or invalidates it.
+    fn set_history_valid(&mut self, _valid: bool) {}
 
     #[cfg(test)]
     fn force_running_frame_for_test(&mut self, _limit: u32) {}
@@ -479,6 +484,7 @@ impl GiStageHandle {
         let mut state = self.state.borrow_mut();
         if state.kind.internal_history() {
             state.history_valid = valid;
+            state.imp.set_history_valid(valid);
         }
     }
 
@@ -535,7 +541,11 @@ mod tests {
             .collect();
         assert_eq!(
             history,
-            [GiStageKind::RestirTemporal, GiStageKind::AreaRestirTemporal]
+            [
+                GiStageKind::RestirTemporal,
+                GiStageKind::AreaTemporal,
+                GiStageKind::AreaRestirTemporal
+            ]
         );
     }
 

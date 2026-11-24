@@ -119,6 +119,13 @@ pub fn sample_weight(
     cos_surface * cos_light / (r * r).max(1e-4)
 }
 
+/// Rejection bits in the temporal dispatch for the two occupants of a packed layer.
+pub fn slot_rejection_bits(previous: &[u32; 8], current: &[u32; 8], group: usize) -> u32 {
+    let first = group * 2;
+    (u32::from(previous[first] != current[first]) << 1)
+        | (u32::from(previous[first + 1] != current[first + 1]) << 2)
+}
+
 /// Blends a reprojected history value towards the current one, or takes the current value when
 /// the history is not usable.
 pub fn temporal_blend(history: f32, current: f32, usable: bool) -> f32 {
