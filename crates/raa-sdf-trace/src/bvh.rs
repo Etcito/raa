@@ -66,11 +66,17 @@ pub fn instance_bounds(program: &TraceProgram, index: usize) -> ([f32; 3], [f32;
 pub fn build(program: &TraceProgram) -> Bvh {
     let count = program.instances.len();
     let bounds: Vec<_> = (0..count).map(|i| instance_bounds(program, i)).collect();
+    build_bounds(&bounds)
+}
+
+/// Builds the same conservative BVH over caller-supplied primitive bounds.
+pub(crate) fn build_bounds(bounds: &[([f32; 3], [f32; 3])]) -> Bvh {
+    let count = bounds.len();
     let mut bvh = Bvh {
         nodes: vec![Node::default()],
         order: (0..count as u32).collect(),
     };
-    split(&mut bvh, &bounds, 0, count, 0, 0);
+    split(&mut bvh, bounds, 0, count, 0, 0);
     bvh
 }
 

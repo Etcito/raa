@@ -14,6 +14,8 @@ pub(crate) mod feature_map;
 pub(crate) mod state;
 
 mod trace;
+#[cfg(target_arch = "wasm32")]
+mod mesh_trace;
 
 #[cfg(target_arch = "wasm32")]
 mod engine;

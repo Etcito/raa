@@ -1,4 +1,5 @@
 import { createGalleryAoControls } from './lib/gallery-ao.js';
+import { createGalleryAoControls } from './lib/gallery-ao.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
@@ -65,6 +66,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
   const syncNativeSize = () => canvas.style?.setProperty('--native-width', (canvas.width / (target.devicePixelRatio || 1)) + 'px');
   if (exposure) display.exposureEv = Number(exposure.value);
   const stats = statsContainer && createLiveStats(statsContainer);
+  const galleryAo = createGalleryAoControls();
   const galleryAo = createGalleryAoControls();
   let runner = null;
   let interactive = null;
@@ -153,14 +155,17 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
         variantPicker.appendChild(option);
       }
     }
+    const optionValue = input => input.type === 'checkbox' ? input.checked
+      : input.validity.valid && Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : Number(input.defaultValue);
     async function showPicked(keepView = false) {
       if (busy || !variantPicker.value) return;
       const previous = keepView === true && interactive ? {
         pose: interactive.cameraPose(),
-        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('input[data-option]') ?? [], box => [box.dataset.option, box.checked])),
+        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('input[data-option]') ?? [], input => [input.dataset.option, optionValue(input)])),
       } : undefined;
       const scene = pickerScenes.get(scenePicker.value).default;
       const variant = scene.variants.find(candidate => candidate.id === variantPicker.value);
+      const showAo = scene === interactiveInterior.default && optionsContainer;
       const showAo = scene === interactiveInterior.default && optionsContainer;
       try {
         await exclusively(() => {
@@ -172,6 +177,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
             target, canvas, lib, scene, variant, settings: display, previous,
             onFrame(engine, time, width, height) {
               if (showAo) galleryAo.apply(engine);
+              if (showAo) galleryAo.apply(engine);
               syncNativeSize();
               stats?.update(engine, time, width, height);
             },
@@ -179,14 +185,32 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
               runButton.textContent = 'Reset camera';
               for (const option of scene.options ?? []) {
                 const label = target.document.createElement('label');
-                const checkbox = target.document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.dataset.option = option.id;
-                checkbox.checked = state?.enabled?.[option.id] ?? option.enabled;
-                checkbox.addEventListener('change', () => interactive?.setOption(option.id, checkbox.checked));
-                label.append(checkbox, option.label);
+                const input = target.document.createElement('input');
+                input.dataset.option = option.id;
+                if (option.value === undefined) {
+                  input.type = 'checkbox';
+                  input.checked = state?.enabled?.[option.id] ?? option.enabled;
+                  label.append(input, option.label);
+                } else {
+                  input.type = 'number';
+                  input.min = option.min;
+                  input.max = option.max;
+                  input.step = option.step;
+                  input.defaultValue = state?.values?.[option.id] ?? option.value;
+                  input.value = input.defaultValue;
+                  label.append(option.label, input);
+                }
+                input.addEventListener('change', () => {
+                  const value = optionValue(input);
+                  if (input.type !== 'checkbox') {
+                    input.defaultValue = value;
+                    input.value = value;
+                  }
+                  interactive?.setOption(option.id, value);
+                });
                 optionsContainer?.append(label);
               }
+              if (showAo) galleryAo.mount(optionsContainer);
               if (showAo) galleryAo.mount(optionsContainer);
               status.textContent = `Interactive: ${scene.id}/${variant.id}${state?.status ? ` ${state.status}` : ''}`;
             },

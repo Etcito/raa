@@ -195,6 +195,7 @@ const RAA_FLAG_NO_SHADOW: u32 = 16u;
 const RAA_FLAG_VERTEX_FN: u32 = 32u;
 const RAA_FLAG_UNLIT: u32 = 64u;
 const RAA_FLAG_CEL: u32 = 128u;
+const RAA_FLAG_TRACE_MIRROR: u32 = 256u;
 
 // Vertex stream 0 (S1 Vertex, 24 B).
 struct RaaVertex0 {

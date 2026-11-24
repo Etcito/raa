@@ -82,6 +82,17 @@ fn generated_variants_parse_and_validate() {
 }
 
 #[test]
+fn mesh_trace_shaders_validate() {
+    let trace = validate(concat!(
+        include_str!("../src/wgsl/ray_interval.wgsl"),
+        include_str!("../src/wgsl/mesh_trace.wgsl")
+    ));
+    assert_eq!(trace.entry_points[0].workgroup_size, [8, 8, 1]);
+    let output = validate(include_str!("../src/wgsl/mesh_composite.wgsl"));
+    assert_eq!(output.entry_points.len(), 2);
+}
+
+#[test]
 fn shared_evaluator_is_a_composable_snippet() {
     for forbidden in ["@compute", "@vertex", "@fragment"] {
         assert!(!PROGRAM_EVAL_WGSL.contains(forbidden), "{forbidden}");

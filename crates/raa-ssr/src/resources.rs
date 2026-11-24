@@ -403,6 +403,17 @@ impl SsrPipelines {
 }
 
 impl SsrPipelines {
+    pub(crate) fn confidence_pipeline(&self, device: &wgpu::Device) -> wgpu::RenderPipeline {
+        render(
+            device,
+            &self.trace_module,
+            &[Some(&self.trace_layout), Some(&self.lighting)],
+            "fs_confidence",
+            &[TRACE_FORMAT],
+            &[],
+        )
+    }
+
     /// Rebuilds `trace` and `composite` (the pipelines of the trace module) with `constants`.
     pub(crate) fn rebuild_trace(&mut self, device: &wgpu::Device, constants: &[(&str, f64)]) {
         let layouts = [&self.trace_layout, &self.composite_layout, &self.lighting];
@@ -604,7 +615,9 @@ impl HizTargets {
         let device = gpu.device();
         let size = (size.0.max(1), size.1.max(1));
         let levels = hiz_levels(size);
-        let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        let usage = wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
         let texture = texture(
             device,
             "raa-ssr.hiz",

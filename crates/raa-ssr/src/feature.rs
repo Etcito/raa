@@ -20,7 +20,9 @@ use raa_pipeline::{
 };
 
 use crate::desc::SsrDesc;
-use crate::resources::{SsrPipelines, SsrTargets, SsrViewKey, TRACE_FORMAT};
+use crate::resources::{
+    HizTargets, SsrPipelines, SsrTargets, SsrViewKey, TRACE_FORMAT, TraceTarget,
+};
 use crate::shaders::SSR_PARAMS_SIZE;
 use crate::tunables::{self, tunables};
 
@@ -275,17 +277,7 @@ impl FeaturePass for SsrPass {
         // current source below; no bind group embeds an A/B or bound chain view.
         let hdr = ctx.targets.hdr();
         let encoder = &mut *ctx.encoder;
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("raa-ssr.hiz"),
-                timestamp_writes: None,
-            });
-            for (k, (level, group)) in t.hiz.levels.iter().zip(&t.hiz.groups).enumerate() {
-                pass.set_pipeline(if k == 0 { &p.hiz_copy } else { &p.hiz_reduce });
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(level.groups.0, level.groups.1, 1);
-            }
-        }
+        record_hiz(encoder, p, &t.hiz);
         encoder.copy_texture_to_texture(
             hdr.src_texture().as_image_copy(),
             t.hdr_mips.as_image_copy(),
@@ -321,10 +313,143 @@ impl FeaturePass for SsrPass {
     }
 }
 
+/// Probe scheduled ahead of the optional SSR compositor. It publishes current
+/// confidence and depth after recording, with no writes to the HDR chain.
+pub const CONFIDENCE_NAME: &str = "ssr.confidence";
+
+struct ConfidencePass {
+    state: SharedSsr,
+    pipelines: SsrPipelines,
+    probe: wgpu::RenderPipeline,
+    targets: Option<(HizTargets, TraceTarget)>,
+}
+
+impl FeaturePass for ConfidencePass {
+    fn name(&self) -> &str {
+        CONFIDENCE_NAME
+    }
+    fn order(&self) -> u32 {
+        ORDER - 1
+    }
+
+    fn resize(&mut self, gpu: &GpuContext, targets: &Targets) {
+        let views = SsrViewKey {
+            depth: targets.depth().clone(),
+            normal: targets.normal().clone(),
+            material: targets.material().clone(),
+        };
+        let hiz = HizTargets::new(gpu, &self.pipelines, targets.size(), &views.depth);
+        let trace = TraceTarget::new(
+            gpu.device(),
+            &self.pipelines,
+            targets.size(),
+            &hiz.full_view,
+            views,
+        );
+        self.targets = Some((hiz, trace));
+    }
+
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        let Some((hiz, trace)) = &mut self.targets else {
+            return Ok(());
+        };
+        let views = SsrViewKey {
+            depth: ctx.targets.depth_input(ctx.resources, CONFIDENCE_NAME),
+            normal: ctx.targets.normal_input(ctx.resources, CONFIDENCE_NAME),
+            material: ctx.targets.material_input(ctx.resources, CONFIDENCE_NAME),
+        };
+        hiz.set_depth(ctx.gpu.device(), &self.pipelines, &views.depth);
+        trace.set_views(ctx.gpu.device(), &self.pipelines, &hiz.full_view, views);
+        let state = self.state.borrow();
+        let mut bytes = [0u8; PARAMS_LEN];
+        pack_params(
+            &mut bytes,
+            ctx.targets.size(),
+            hiz.full_view.texture().mip_level_count(),
+            &state.desc,
+            state.camera.as_ref(),
+        );
+        ctx.gpu
+            .queue()
+            .write_buffer(&self.pipelines.params, 0, &bytes);
+        Ok(())
+    }
+
+    fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let Some((hiz, trace)) = &self.targets else {
+            return Ok(());
+        };
+        record_hiz(ctx.encoder, &self.pipelines, hiz);
+        draw(
+            ctx.encoder,
+            &trace.view,
+            &self.probe,
+            &trace.group,
+            Some(ctx.lighting.opaque_bind_group()),
+        );
+        let (w, h) = ctx.size;
+        let shape = |format, mips| ImageDesc::new(ImageDim::D2, format, w, h, 1, mips);
+        ctx.resources.publish(
+            CONFIDENCE_NAME,
+            "trace",
+            &trace.view,
+            shape(TRACE_FORMAT, 1),
+        );
+        ctx.resources.publish(
+            CONFIDENCE_NAME,
+            "hiz",
+            &hiz.full_view,
+            shape(
+                wgpu::TextureFormat::R32Float,
+                hiz.full_view.texture().mip_level_count(),
+            ),
+        );
+        Ok(())
+    }
+}
+
+fn record_hiz(encoder: &mut wgpu::CommandEncoder, pipelines: &SsrPipelines, hiz: &HizTargets) {
+    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some("raa-ssr.hiz"),
+        timestamp_writes: None,
+    });
+    for (k, (level, group)) in hiz.levels.iter().zip(&hiz.groups).enumerate() {
+        pass.set_pipeline(if k == 0 {
+            &pipelines.hiz_copy
+        } else {
+            &pipelines.hiz_reduce
+        });
+        pass.set_bind_group(0, group, &[]);
+        pass.dispatch_workgroups(level.groups.0, level.groups.1, 1);
+    }
+}
+
 /// Installs screen-space reflections on a pipeline.
 pub struct SsrFeature;
 
 impl SsrFeature {
+    /// Installs the depth-only reflection confidence producer.
+    pub fn install_confidence(
+        gpu: &GpuContext,
+        pipeline: &mut Pipeline,
+    ) -> Result<SsrHandle, RaaError> {
+        let state = Rc::new(RefCell::new(SsrState::new()));
+        state.borrow_mut().desc.max_roughness = 1.0;
+        let pipelines = SsrPipelines::new(
+            gpu,
+            pipeline.lighting().opaque_layout(),
+            &constants(&tunables::defaults()),
+        );
+        let probe = pipelines.confidence_pipeline(gpu.device());
+        pipeline.add(Box::new(ConfidencePass {
+            state: state.clone(),
+            pipelines,
+            probe,
+            targets: None,
+        }))?;
+        Ok(SsrHandle { state })
+    }
+
     /// Builds the Hi-Z, downsample, trace and composite pipelines (with the pipeline's
     /// lighting layout at group 1) and adds the FeaturePass `ssr` (order 65) to `pipeline`
     /// with the SSR defaults and no camera.

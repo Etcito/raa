@@ -154,7 +154,7 @@ struct RaaPrepassTargets {
     @location(0) normal: vec4<f32>,
     // S12 `material` (Rgba8Unorm): F0 rgb sRGB-encoded, metallic.
     @location(1) material: vec4<f32>,
-    // S12 `motion` (Rgba16Float): signed UV displacement xy, history reject z, w 0.
+    // S12 `motion` (Rgba16Float): signed UV displacement xy, history reject z, mirror mask w.
     @location(2) motion: vec4<f32>,
 }
 
@@ -175,5 +175,6 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> RaaPrep
     out.normal = vec4<f32>(n, clamp(s.roughness, 0.0, 1.0));
     out.material = vec4<f32>(raa_pass_encode_srgb(raa_pass_f0(s)), clamp(s.metallic, 0.0, 1.0));
     out.motion = raa_pass_motion(v);
+    out.motion.w = select(0.0, 1.0, (in.record.header.z & RAA_FLAG_TRACE_MIRROR) != 0u);
     return out;
 }

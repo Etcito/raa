@@ -25,6 +25,9 @@ pub const FLAG_UNLIT: u32 = 64;
 /// The value written for an infinite `attenuation_distance`.
 const INFINITE_DISTANCE: f32 = 1e30;
 
+/// Ideal mirror in the mesh tracer. Marks the raster receiver footprint.
+pub const FLAG_TRACE_MIRROR: u32 = 256;
+
 /// How a surface is shaded.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceModel {

@@ -291,6 +291,9 @@ impl Engine {
             if optional_bool(&desc, "cel", false)? {
                 m.flags |= raa_cel::FLAG_CEL;
             }
+            if optional_bool(&desc, "traceMirror", false)? {
+                m.flags |= raa_lit::FLAG_TRACE_MIRROR;
+            }
             let len = st.lit.materials().len();
             if len >= st.max_materials as usize {
                 return Err(api_error(
@@ -320,6 +323,9 @@ impl Engine {
             }
             if optional_bool(&desc, "cel", false)? {
                 m.flags |= raa_cel::FLAG_CEL;
+            }
+            if optional_bool(&desc, "traceMirror", false)? {
+                m.flags |= raa_lit::FLAG_TRACE_MIRROR;
             }
             st.lit.materials_mut().set(target, m)
         })

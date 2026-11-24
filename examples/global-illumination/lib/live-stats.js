@@ -107,6 +107,13 @@ export function createLiveStats(container) {
         lines.push(details.join('  ·  '));
       }
     }
+    const tracing = optional(() => engine.meshTracingStats());
+    if (tracing?.referencePixels) {
+      lines.push(`Path-traced reference · ${number(tracing.referencePixels)} samples · ${tracing.pathBounces} path bounces`);
+    } else if (tracing?.eligible) {
+      const share = 100 * tracing.traced / tracing.eligible;
+      lines.push(`Hybrid reflections · GPU traced ${tracing.traced}/${tracing.eligible} (${number(share, 1)}%) · screen accepted ${tracing.acceptedScreen}`);
+    }
     lines.push(...gpuTimingLines(optional(() => engine.passGpuTimings())));
     const images = passLines(optional(() => engine.passImageExtents()), width, height);
     if (images.length) lines.push('Internal pass textures', ...images);

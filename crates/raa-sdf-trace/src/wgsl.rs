@@ -63,12 +63,14 @@ pub fn trace_module(program: &TraceProgram) -> String {
 
 fn trace_shader(program: &TraceProgram, traversal: &str) -> String {
     format!(
-        "{PROGRAM_EVAL_WGSL}{TRACE_FRAME_WGSL}\nconst TRACE_COUNT: u32 = {}u;\n{TRACE_WGSL}{traversal}",
+        "{PROGRAM_EVAL_WGSL}{TRACE_FRAME_WGSL}\nconst TRACE_COUNT: u32 = {}u;\n{RAY_INTERVAL_WGSL}{TRACE_WGSL}{traversal}",
         program.instances.len()
     )
 }
 
 const TRACE_FALLBACK_WGSL: &str = include_str!("wgsl/trace_fallback_wgsl.wgsl");
+
+pub(crate) const RAY_INTERVAL_WGSL: &str = include_str!("wgsl/ray_interval.wgsl");
 
 const TRACE_WGSL: &str = include_str!("wgsl/trace_wgsl.wgsl");
 

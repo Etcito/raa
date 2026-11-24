@@ -36,6 +36,8 @@ export type SurfaceBlend = 'opaque' | 'transparent' | 'transmissive';
  * except `emissive`, which is linear and may exceed 1 (HDR, feeds bloom). Lengths are metres.
  */
 export interface SurfaceMaterialDesc {
+  /** Enables ideal mirror rays for this opaque material in hybrid/reference tracing. */
+  traceMirror?: boolean;
   /** Opt into the cel Direct provider (flag 128); effective when cel and toon are enabled. Default false. */
   cel?: boolean;
   /** Use base + emissive directly, bypassing lighting (flag 64). Default false; takes precedence over cel. */

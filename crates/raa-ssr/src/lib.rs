@@ -10,5 +10,5 @@ pub mod stages;
 mod tunables;
 
 pub use desc::SsrDesc;
-pub use feature::{SsrFeature, SsrHandle};
+pub use feature::{CONFIDENCE_NAME, SsrFeature, SsrHandle};
 pub use tunables::tunables;

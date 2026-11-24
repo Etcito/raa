@@ -6,15 +6,18 @@ const skylightWidth = 2;
 const shellThickness = 0.8;
 const mirrorCenter = [0.45, 1.5, -7.86];
 const mirrorSize = [4.25, 2.25];
-const mirrorPlane = [0, 0, 1, -mirrorCenter[2]];
 const entryExhibit = [2.15, 1.28, -1.15];
 const options = [
   { id: 'gi', label: 'Global illumination', enabled: true },
   { id: 'screen-gi', label: 'Screen-space GI detail', enabled: true },
   { id: 'area-lights', label: 'Area lights', enabled: true },
   { id: 'moving-objects', label: 'Moving objects', enabled: true },
-  { id: 'geometry-reflections', label: 'Geometry reflections', enabled: false },
-  { id: 'ssr', label: 'Screen-space reflections', enabled: true },
+  { id: 'geometry-reflections', label: 'Hybrid geometry reflections', enabled: false },
+  { id: 'reflection-bounces', label: 'Reflection bounces', value: 2, min: 1, max: 6, step: 1 },
+  { id: 'reflection-confidence', label: 'Screen confidence threshold', value: 0.55, min: 0, max: 1, step: 0.01 },
+  { id: 'path-reference', label: 'Path-traced reference', enabled: false },
+  { id: 'path-bounces', label: 'Reference path bounces', value: 2, min: 0, max: 6, step: 1 },
+  { id: 'ssr', label: 'SSR on other surfaces', enabled: true },
   { id: 'dof', label: 'Depth of field', enabled: true },
   { id: 'bloom', label: 'Bloom', enabled: true },
 ];
@@ -65,11 +68,7 @@ function fixtureSurface(color, enabled) {
   };
 }
 
-function setMirror(engine, instance, enabled) {
-  if (!enabled) {
-    engine.setPlanarReflection(null);
-    return;
-  }
+function assertForwardOrder(engine) {
   const passes = engine.passes().filter(pass => pass.enabled).map(pass => pass.name);
   const forward = passes.indexOf('forward');
   if (forward < 0
@@ -80,7 +79,19 @@ function setMirror(engine, instance, enabled) {
       || ['ssr', 'taa', 'tonemap'].some(pass => passes.includes(pass) && passes.indexOf(pass) <= forward)) {
     throw new Error('Geometry reflections require sun shadows, depth and light tiles before forward, with post effects afterward.');
   }
-  engine.setPlanarReflection(instance, mirrorPlane);
+}
+
+function setTracing(engine, state, update = {}) {
+  const values = { ...state.enabled, ...state.values, ...update };
+  const reflections = values['geometry-reflections'];
+  const reference = values['path-reference'];
+  if (reflections || reference) assertForwardOrder(engine);
+  engine.setMeshTracing({
+    reflections, reference,
+    reflectionBounces: values['reflection-bounces'],
+    confidenceThreshold: values['reflection-confidence'],
+    pathBounces: values['path-bounces'],
+  });
 }
 
 function build(engine, _lib, selected = variant) {
@@ -88,7 +99,10 @@ function build(engine, _lib, selected = variant) {
   const skylightBlocked = selected.skylightBlocked === true;
   const state = {
     skylightBlocked,
-    enabled: Object.fromEntries(options.map(option => [option.id, selected.effects?.[option.id] ?? option.enabled])),
+    enabled: Object.fromEntries(options.filter(option => option.value === undefined)
+      .map(option => [option.id, selected.effects?.[option.id] ?? option.enabled])),
+    values: Object.fromEntries(options.filter(option => option.value !== undefined)
+      .map(option => [option.id, selected.effects?.[option.id] ?? option.value])),
     screenSpaceQuality: selected.screenSpaceQuality,
     fixtures: [],
     motionTime: 0,
@@ -151,10 +165,20 @@ function build(engine, _lib, selected = variant) {
   }
   // The base stays visible when the capture is off. Its roughness keeps SSR
   // below its cutoff on this surface while SSR can still affect the polished floor.
-  const mirrorSurface = material([0.22, 0.28, 0.33], 0.42, 0.72);
-  state.mirror = instance(withSurface(panel(width, height), mirrorSurface), mirrorCenter).id;
-  engine.setInstanceGlobalIllumination(state.mirror, false);
-  if (state.enabled['geometry-reflections']) setMirror(engine, state.mirror, true);
+  const mirrorSurface = engine.addSurfaceMaterial({
+    color: [0.22, 0.28, 0.33], roughness: 0.42, metallic: 0.72, traceMirror: true,
+  });
+  const mirrorMesh = withSurface(panel(width, height), mirrorSurface);
+  const rearMirror = instance(mirrorMesh, mirrorCenter).id;
+  engine.setInstanceGlobalIllumination(rearMirror, false);
+
+  // The entrance mirror faces the rear mirror and gives reflected rays a
+  // second real surface to bounce from.
+  const entryMirrorCenter = [0.55, 1.55, -0.07];
+  solid([entryMirrorCenter[0], entryMirrorCenter[1], -0.025], [1.96, 0.93, 0.025], copper);
+  const frontMirror = instance(withSurface(panel(3.8, 1.74), mirrorSurface), entryMirrorCenter);
+  engine.setTransform(frontMirror.node, entryMirrorCenter, [0, 1, 0, 0], unitScale);
+  engine.setInstanceGlobalIllumination(frontMirror.id, false);
 
   for (const fixture of fixtures) {
     const { position, size, color } = fixture;
@@ -180,10 +204,23 @@ function build(engine, _lib, selected = variant) {
   });
   solid([entryExhibit[0], 0.42, entryExhibit[2]], [0.46, 0.42, 0.38], dark);
   state.entryNode = instance(withSurface(sphere(0.32, 32), glaze), entryExhibit).node;
+  if (state.enabled['geometry-reflections'] || state.enabled['path-reference']) setTracing(engine, state);
   return state;
 }
 
 function setOption(engine, state, id, enabled) {
+  if (Object.hasOwn(state.values, id)) {
+    const option = options.find(option => option.id === id);
+    if (!Number.isFinite(enabled) || enabled < option.min || enabled > option.max
+        || (option.step === 1 && !Number.isInteger(enabled))) {
+      throw new TypeError(`Invalid interactive interior value for ${id}`);
+    }
+    if (state.values[id] !== enabled) {
+      setTracing(engine, state, { [id]: enabled });
+      state.values[id] = enabled;
+    }
+    return;
+  }
   if (!Object.hasOwn(state.enabled, id) || typeof enabled !== 'boolean') {
     throw new TypeError(`Invalid interactive interior option: ${id}`);
   }
@@ -202,7 +239,8 @@ function setOption(engine, state, id, enabled) {
       }
       break;
     case 'geometry-reflections':
-      setMirror(engine, state.mirror, enabled);
+    case 'path-reference':
+      setTracing(engine, state, { [id]: enabled });
       break;
     case 'ssr':
     case 'dof':

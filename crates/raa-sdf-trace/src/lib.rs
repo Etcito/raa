@@ -6,6 +6,7 @@
 
 pub mod bvh;
 pub mod cpu;
+pub mod mesh;
 pub mod pass;
 mod program;
 mod sampled;

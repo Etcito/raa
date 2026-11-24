@@ -148,7 +148,7 @@ struct TraceOutput {
     @location(1) metadata: vec4<f32>,
 }
 
-fn trace_hit(in: VsOut) -> TraceOutput {
+fn trace_hit(in: VsOut, probe: bool) -> TraceOutput {
     let px = vec2<i32>(in.position.xy);
     let d = textureLoad(depth_tex, px, 0);
     let nr = textureLoad(normal_tex, px, 0);
@@ -222,7 +222,11 @@ fn trace_hit(in: VsOut) -> TraceOutput {
         t = t_exit + CELL_EPS;
     }
     if (t_hit < 0.0) {
-        return TraceOutput(vec4<f32>(0.0), vec4<f32>(0.0));
+        let end = o + dir * t_max;
+        let leaves_screen = t >= t_max && (any(end.xy <= vec2<f32>(0.01))
+            || any(end.xy >= ssr.viewport.xy - vec2<f32>(0.01)) || end.z <= 0.00001);
+        let status = select(0.0, select(-1.0, -2.0, leaves_screen), probe);
+        return TraceOutput(vec4<f32>(0.0, 0.0, 0.0, status), vec4<f32>(0.0));
     }
     // Binary refinement of the crossing against the full-res depth (Hi-Z mip 0).
     var lo = t_prev;
@@ -256,19 +260,25 @@ fn trace_hit(in: VsOut) -> TraceOutput {
     let footprint = 2.0 * hi * tan(cone);
     let distance_m = distance(p, view_pos(hit_uv, hit.z));
     return TraceOutput(
-        vec4<f32>(hit_uv, confidence, log2(max(footprint, 1.0))),
+        vec4<f32>(hit_uv, confidence, select(log2(max(footprint, 1.0)), 1.0, probe)),
         vec4<f32>(SOURCE_SCREEN, 1.0, distance_m, 0.0),
     );
 }
 
 @fragment
 fn fs_trace(in: VsOut) -> @location(0) vec4<f32> {
-    return trace_hit(in).hit;
+    return trace_hit(in, false).hit;
+}
+
+// Probe alpha: 1 hit, -1 miss, -2 outside the screen or across the near plane.
+@fragment
+fn fs_confidence(in: VsOut) -> @location(0) vec4<f32> {
+    return trace_hit(in, true).hit;
 }
 
 @fragment
 fn fs_hit(in: VsOut) -> TraceOutput {
-    return trace_hit(in);
+    return trace_hit(in, false);
 }
 
 // Piecewise sRGB EOTF (the material target stores F0 sRGB-encoded).
