@@ -2,7 +2,7 @@ import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js'
 
 import { loadGalleryFit } from './gallery-path-model.js';
 import { lightingOptions } from './gallery-lighting.js';
-import { applySpherical, isSphericalOption, sphericalOptions } from './gallery-spherical.js';
+import { applySpherical, isSphericalOption, sphericalOptions, usesVolumeGrid } from './gallery-spherical.js';
 import { loadGalleryNeural, neuralOption } from './gallery-neural.js';
 
 const identity = [0, 0, 0, 1];
@@ -62,7 +62,7 @@ function setGi(engine, state, update = {}) {
   // including when GI is disabled for a direct-light comparison.
   engine.setEnvironmentLighting({ diffuse: enabled ? 0.65 : 0, specular: 0 });
   engine.setGlobalIllumination({
-    enabled,
+    enabled: usesVolumeGrid(settings),
     screenSpace: enabled && settings['screen-gi'],
     screenSpaceQuality: state.screenSpaceQuality,
     indirect: settings['indirect-solver'],
@@ -100,7 +100,9 @@ function setTracing(engine, state, update = {}) {
   const reference = values['path-reference'];
   const pathMode = values['model-assisted-path'] ? 'learned' : 'off';
   const requested = values['lighting-view'];
-  const lightingOutput = !reference && requested === 'bounce' ? 'combined' : requested;
+  const fittedLobe = requested === 'diffuse-indirect' || requested === 'rough-specular';
+  const available = requested === 'bounce' ? reference : !fittedLobe || (!reference && pathMode === 'learned');
+  const lightingOutput = available ? requested : 'combined';
   const isolated = lightingOutput !== 'combined';
   const raster = !reference && pathMode === 'off';
   const reflections = values['geometry-reflections'] && !(raster && isolated);
@@ -246,6 +248,7 @@ function build(engine, _lib, selected = variant) {
   });
   solid([entryExhibit[0], 0.42, entryExhibit[2]], [0.46, 0.42, 0.38], dark);
   state.entryNode = instance(withSurface(sphere(0.32, 32), glaze), entryExhibit).node;
+  state.entrySurface = glaze;
   if (state.enabled['geometry-reflections'] || state.enabled['path-reference']
       || state.values['lighting-view'] !== 'combined') {
     state.values['lighting-view'] = setTracing(engine, state);
@@ -276,11 +279,13 @@ function setOption(engine, state, id, enabled) {
       ? option.choices.some(([value]) => value === enabled)
       : Number.isFinite(enabled) && enabled >= option.min && enabled <= option.max
         && (option.step !== 1 || Number.isInteger(enabled));
-    if (!valid || (id === 'lighting-view' && enabled === 'bounce' && !state.enabled['path-reference'])) {
+    const fittedLobe = id === 'lighting-view' && ['diffuse-indirect', 'rough-specular'].includes(enabled);
+    if (!valid || (id === 'lighting-view' && enabled === 'bounce' && !state.enabled['path-reference'])
+        || (fittedLobe && (!state.enabled['model-assisted-path'] || state.enabled['path-reference']))) {
       throw new TypeError(`Invalid interactive interior value for ${id}`);
     }
     if (state.values[id] !== enabled) {
-      if (id === 'indirect-solver') setGi(engine, state, { [id]: enabled });
+      if (id === 'indirect-solver' || id === 'gi-grid') setGi(engine, state, { [id]: enabled });
       else if (isSphericalOption(id)) applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
       else if (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce') {
         setTracing(engine, state, { [id]: enabled });
@@ -310,7 +315,7 @@ function setOption(engine, state, id, enabled) {
     case 'path-reference':
       state.values['lighting-view'] = setTracing(engine, state, { [id]: enabled });
       if (id !== 'geometry-reflections') {
-        applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
+        setGi(engine, state, { [id]: enabled });
       }
       break;
     case 'ssr':
