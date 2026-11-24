@@ -112,6 +112,7 @@ function setTracing(engine, state, update = {}) {
     lightingDepth: values['bounce-depth'],
     reflectionBounces: values['reflection-bounces'],
     confidenceThreshold: values['reflection-confidence'],
+    ...(state.secondaryCache && { indirectGrid: values['spherical-mirror-cache'] }),
     pathBounces: values['path-bounces'],
   });
   if (isolated !== state.isolated) {
@@ -125,9 +126,12 @@ function setTracing(engine, state, update = {}) {
 
 function build(engine, _lib, selected = variant) {
   const room = volumeRoom();
+  const meshReflection = engine.renderGraphCatalog?.().nodes.find(node => node.id === 'mesh.reflection');
+  const secondaryCache = meshReflection?.params.some(param => ['inheritGi', 'indirectGrid'].includes(param.key)) ?? false;
   const skylightBlocked = selected.skylightBlocked === true;
   const state = {
     skylightBlocked,
+    secondaryCache,
     enabled: Object.fromEntries(options.filter(option => option.value === undefined)
       .map(option => [option.id, selected.effects?.[option.id] ?? option.enabled])),
     values: Object.fromEntries(options.filter(option => option.value !== undefined)

@@ -11,7 +11,7 @@ export const sphericalOptions = [
   { id: 'spherical-mirror-cache', label: 'Secondary-hit cache', value: 'auto', choices: [
     ['auto', 'Automatic'], ['off', 'Off'],
   ] },
-  { id: 'spherical-mirror-lighting', label: 'Secondary-hit lighting groups', value: '7', choices: [
+  { id: 'spherical-mirror-lighting', label: 'Spherical lighting groups', value: '7', choices: [
     ['7', 'All'], ['1', 'Sky'], ['2', 'Sun'], ['4', 'Local / other'], ['0', 'None'],
   ] },
   { id: 'spherical-debug', label: 'Spherical debug overlay', value: 'off', choices: [
@@ -46,10 +46,7 @@ export function applySpherical(engine, state, settings) {
       exponentialPower: settings['spherical-exponent'],
       clipStart: settings['spherical-clip-start'],
       zMax: settings['spherical-z-max'],
-      ...(state.secondaryCache && {
-        mirrorCache: settings['spherical-mirror-cache'],
-        mirrorChannelMask: Number(settings['spherical-mirror-lighting']),
-      }),
+      channelMask: Number(settings['spherical-mirror-lighting']),
       debug: settings['spherical-debug'],
     });
   } else if (state.sphericalActive) {

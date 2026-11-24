@@ -9,7 +9,7 @@ const miss = 0xffffffff;
 function roughTap(sample, check) {
   const { roughEvidence: evidence, size } = sample;
   check(evidence?.size.join() === size.join() && evidence.data instanceof Uint8Array
-    && evidence.data.byteLength === size[0] * size[1] * bytesPerRoughHit,
+    && evidence.frame === sample.frame && evidence.data.byteLength === size[0] * size[1] * bytesPerRoughHit,
   'Missing fixed-seed rough secondary evidence', { id: sample.id, size });
   return new DataView(evidence.data.buffer, evidence.data.byteOffset, evidence.data.byteLength);
 }
@@ -64,6 +64,7 @@ export async function measureLearnedSecondary({ engine, state, set, settle, capt
   engine.setMeshPathModel(model.bytes);
   set('model-assisted-path', true);
   const configure = settings => engine.setSphericalGi(settings);
+  const policy = indirectGrid => engine.setMeshTracing({ indirectGrid });
   const cases = [];
   const byGrid = {};
   const fit = async (id, grid) => {
@@ -80,7 +81,10 @@ export async function measureLearnedSecondary({ engine, state, set, settle, capt
     const combined = await fit(`learned-${grid}-combined`, grid);
     for (const lobe of lobes) {
       set('lighting-view', lobe);
-      if (grid === 'spherical') configure({ mirrorCache: 'auto', mirrorChannelMask: 7, debug: 'off' });
+      if (grid === 'spherical') {
+        policy('auto');
+        configure({ channelMask: 7, debug: 'off' });
+      }
       const active = await fit(`learned-${grid}-${lobe}`, grid);
       const compared = compare(active.rgb, combined.rgb);
       check(compared.changedPixels > 20, `Learned ${grid} isolation did not change HDR`, { lobe, compared });
@@ -90,19 +94,20 @@ export async function measureLearnedSecondary({ engine, state, set, settle, capt
         continue;
       }
 
-      configure({ mirrorCache: 'off' });
+      policy('off');
       const bypass = await fit(`learned-${grid}-${lobe}-off`, grid);
-      configure({ mirrorCache: 'auto', mirrorChannelMask: 0 });
+      policy('auto');
+      configure({ channelMask: 0 });
       const zero = await fit(`learned-${grid}-${lobe}-groups-off`, grid);
       const groups = [];
       for (const [name, mask] of steps) {
-        configure({ mirrorChannelMask: mask });
+        configure({ channelMask: mask });
         const isolated = await fit(`learned-${grid}-${lobe}-${name}`, grid);
         const response = compare(isolated.rgb, zero.rgb);
         check(response.changedPixels > 0 && response.rmse > 0, `Learned ${lobe} has no ${name} cache response`, response);
         groups.push({ name, ...response });
       }
-      configure({ mirrorChannelMask: 7 });
+      configure({ channelMask: 7 });
       const physical = compare(active.rgb, bypass.rgb);
       const volume = compare(active.rgb, byGrid.volume[lobe].rgb);
       check(physical.changedPixels > 10 && volume.changedPixels > 10,
