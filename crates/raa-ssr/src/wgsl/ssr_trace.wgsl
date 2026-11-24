@@ -1,9 +1,7 @@
-// SSR trace and composite (S12 `ssr`, order 65). fs_trace marches the reflected view ray of
-// each glossy pixel in screen space through the Hi-Z min pyramid of ssr_hiz.wgsl (64 steps
-// that ascend and descend mips, then 8 binary refinement steps against mip 0); fs_composite
-// samples the HDR mip chain at the hit, by roughness and cone footprint, and swaps the IBL
-// specular it covers for it. No PRELUDE: group 0 is private, group 1 declares only the
-// lighting bindings it reads, verbatim from raa-shader's prelude.
+// SSR stages (order 65). Trace the reflected ray through the Hi-Z pyramid, sample current HDR
+// at the hit and cone mip, then replace the forward IBL specular. The legacy composite runs the
+// last two steps together. Group 0 is private. Group 1 declares the lighting bindings used here,
+// verbatim from raa-shader's prelude.
 
 struct SsrParams {
     // view -> clip of the scene camera (clip z in [0, 1], 1 = far)
@@ -140,14 +138,23 @@ fn ray_t_max(o: vec3<f32>, d: vec3<f32>) -> f32 {
 
 // Full res (Rgba16Float): hit uv, confidence, cone mip; 0 where no reflection is traced
 // (background, roughness > max_roughness, no hit within MAX_STEPS).
-@fragment
-fn fs_trace(in: VsOut) -> @location(0) vec4<f32> {
+// Metadata lanes are source class, validity, metric distance, and real-frame age.
+const SOURCE_SCREEN: f32 = 1.0;
+const SOURCE_VOLUME: f32 = 2.0;
+const SOURCE_SKY: f32 = 3.0;
+
+struct TraceOutput {
+    @location(0) hit: vec4<f32>,
+    @location(1) metadata: vec4<f32>,
+}
+
+fn trace_hit(in: VsOut) -> TraceOutput {
     let px = vec2<i32>(in.position.xy);
     let d = textureLoad(depth_tex, px, 0);
     let nr = textureLoad(normal_tex, px, 0);
     let roughness = clamp(nr.w, 0.0, 1.0);
     if (d >= 1.0 || roughness > ssr.params.y) {
-        return vec4<f32>(0.0);
+        return TraceOutput(vec4<f32>(0.0), vec4<f32>(0.0));
     }
     let p = view_pos(in.position.xy * ssr.viewport.zw, d);
     let r = reflect(normalize(p), normalize(nr.xyz));
@@ -162,7 +169,7 @@ fn fs_trace(in: VsOut) -> @location(0) vec4<f32> {
     let len_xy = length(delta.xy);
     if (len_xy < 1e-3) {
         // Along the view direction: the ray never leaves its pixel.
-        return vec4<f32>(0.0);
+        return TraceOutput(vec4<f32>(0.0), vec4<f32>(0.0));
     }
     // t is the distance along the screen, in pixels.
     let dir = delta / len_xy;
@@ -215,7 +222,7 @@ fn fs_trace(in: VsOut) -> @location(0) vec4<f32> {
         t = t_exit + CELL_EPS;
     }
     if (t_hit < 0.0) {
-        return vec4<f32>(0.0);
+        return TraceOutput(vec4<f32>(0.0), vec4<f32>(0.0));
     }
     // Binary refinement of the crossing against the full-res depth (Hi-Z mip 0).
     var lo = t_prev;
@@ -247,7 +254,21 @@ fn fs_trace(in: VsOut) -> @location(0) vec4<f32> {
     let alpha = roughness * roughness;
     let cone = min(2.0 * atan(0.6436 * alpha), 1.4);
     let footprint = 2.0 * hi * tan(cone);
-    return vec4<f32>(hit_uv, confidence, log2(max(footprint, 1.0)));
+    let distance_m = distance(p, view_pos(hit_uv, hit.z));
+    return TraceOutput(
+        vec4<f32>(hit_uv, confidence, log2(max(footprint, 1.0))),
+        vec4<f32>(SOURCE_SCREEN, 1.0, distance_m, 0.0),
+    );
+}
+
+@fragment
+fn fs_trace(in: VsOut) -> @location(0) vec4<f32> {
+    return trace_hit(in).hit;
+}
+
+@fragment
+fn fs_hit(in: VsOut) -> TraceOutput {
+    return trace_hit(in);
 }
 
 // Piecewise sRGB EOTF (the material target stores F0 sRGB-encoded).
@@ -292,59 +313,80 @@ fn env_specular(r: vec3<f32>, roughness: f32, f0: vec3<f32>, n_dot_v: f32, px: v
     return mix(sky_specular(r, roughness, f0, n_dot_v), gi, clamp(raa_env_sh.gi.x, 0.0, 1.0));
 }
 
-// Full res, into hdr.dst(): hdr + (ssr - env_specular) x F(F0) x confidence x intensity, so
-// the reflection replaces the specular the forward ambient added. With RAA_GI_FLAG_REFLECTIONS
-// set (S39), a glossy pixel blends the screen reflection over a GI volume trace (open sky on a
-// miss).
+// Incident screen radiance in scene-linear HDR, before material response.
+fn screen_incident(px: vec2<i32>) -> vec4<f32> {
+    let trace = textureLoad(trace_tex, px, 0);
+    if (trace.z <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
+    return vec4<f32>(textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb, trace.z);
+}
+
 @fragment
-fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
+fn fs_incident(in: VsOut) -> @location(0) vec4<f32> {
+    return screen_incident(vec2<i32>(in.position.xy));
+}
+
+struct Replacement {
+    @location(0) color: vec4<f32>,
+    @location(1) fallback: vec4<f32>,
+    @location(2) metadata: vec4<f32>,
+}
+
+fn replace_environment(in: VsOut, screen: vec4<f32>) -> Replacement {
     let px = vec2<i32>(in.position.xy);
     let hdr = textureLoad(hdr_mips, px, 0);
-    let trace = textureLoad(trace_tex, px, 0);
-    if ((raa_gi_volume_params.flags & RAA_GI_FLAG_REFLECTIONS) == 0u) {
-        let weight = trace.z * ssr.params.x;
-        if (weight <= 0.0) {
-            return hdr;
-        }
-        let nr = textureLoad(normal_tex, px, 0);
-        let n = normalize(nr.xyz);
-        let roughness = clamp(nr.w, 0.0, 1.0);
-        let f0 = srgb_to_linear(textureLoad(material_tex, px, 0).rgb);
-        let p = view_pos(in.position.xy * ssr.viewport.zw, textureLoad(depth_tex, px, 0));
-        let v = normalize(-p);
-        let n_dot_v = saturate(dot(n, v));
-        let r = (ssr.inv_view * vec4<f32>(reflect(-v, n), 0.0)).xyz;
-        let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
-        let reflected = textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb;
-        let env = env_specular(r, roughness, f0, n_dot_v, px);
-        let rgb = hdr.rgb + (reflected - env) * fresnel_schlick(f0, n_dot_v) * weight;
-        return vec4<f32>(max(rgb, vec3<f32>(0.0)), hdr.a);
+    var result = Replacement(hdr, vec4<f32>(0.0), vec4<f32>(0.0));
+    let use_volume = (raa_gi_volume_params.flags & RAA_GI_FLAG_REFLECTIONS) != 0u;
+    var weight = screen.a * ssr.params.x;
+    if (!use_volume && weight <= 0.0) {
+        return result;
     }
     let nr = textureLoad(normal_tex, px, 0);
     let roughness = clamp(nr.w, 0.0, 1.0);
     let depth = textureLoad(depth_tex, px, 0);
-    if (roughness > ssr.params.y || depth >= 1.0) {
-        return hdr;
+    if (use_volume && (roughness > ssr.params.y || depth >= 1.0)) {
+        return result;
     }
     let n = normalize(nr.xyz);
     let f0 = srgb_to_linear(textureLoad(material_tex, px, 0).rgb);
     let p = view_pos(in.position.xy * ssr.viewport.zw, depth);
     let v = normalize(-p);
     let n_dot_v = saturate(dot(n, v));
-    let p_w = (ssr.inv_view * vec4<f32>(p, 1.0)).xyz;
-    let n_w = (ssr.inv_view * vec4<f32>(n, 0.0)).xyz;
     let r = (ssr.inv_view * vec4<f32>(reflect(-v, n), 0.0)).xyz;
     let env = env_specular(r, roughness, f0, n_dot_v, px);
-    let v0 = raa_gi_finest_voxel();
-    let hit = raa_gi_trace(p_w + n_w * 1.5 * v0, r, v0, 160.0, 48u, 0.5);
-    let fallback = select(sky_specular(r, roughness, f0, n_dot_v), hit.radiance, hit.hit);
-    let confidence = trace.z;
-    var reflected = fallback;
-    if (confidence > 0.0) {
-        let lod = clamp(trace.w, 0.0, max(ssr.params2.x - 1.0, 0.0));
-        reflected = textureSampleLevel(hdr_mips, hdr_samp, trace.xy, lod).rgb;
+    var reflected = screen.rgb;
+    if (use_volume) {
+        let p_w = (ssr.inv_view * vec4<f32>(p, 1.0)).xyz;
+        let n_w = (ssr.inv_view * vec4<f32>(n, 0.0)).xyz;
+        let v0 = raa_gi_finest_voxel();
+        let origin_offset = n_w * 1.5 * v0;
+        let hit = raa_gi_trace(p_w + origin_offset, r, v0, 160.0, 48u, 0.5);
+        // Keep the legacy split-sum sky term on a miss. Its distance is undefined (zero).
+        let fallback = select(sky_specular(r, roughness, f0, n_dot_v), hit.radiance, hit.hit);
+        result.fallback = vec4<f32>(fallback, 1.0 - screen.a);
+        if (hit.hit) {
+            // The volume interface has no real-frame timestamp.
+            result.metadata = vec4<f32>(SOURCE_VOLUME, 1.0, length(origin_offset + r * hit.t), -1.0);
+        } else if (raa_env_sh.info.w >= 0.5) {
+            result.metadata = vec4<f32>(SOURCE_SKY, 1.0, 0.0, 0.0);
+        }
+        reflected = mix(fallback, select(fallback, reflected, screen.a > 0.0), screen.a);
+        weight = ssr.params.x;
     }
-    let spec = mix(fallback, reflected, confidence);
-    let rgb = hdr.rgb + (spec - env) * fresnel_schlick(f0, n_dot_v) * ssr.params.x;
-    return vec4<f32>(max(rgb, vec3<f32>(0.0)), hdr.a);
+    let rgb = hdr.rgb + (reflected - env) * fresnel_schlick(f0, n_dot_v) * weight;
+    result.color = vec4<f32>(max(rgb, vec3<f32>(0.0)), hdr.a);
+    return result;
+}
+
+@fragment
+fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
+    return replace_environment(in, screen_incident(vec2<i32>(in.position.xy))).color;
+}
+
+// Binding 6 is incident RGB and confidence for this entry, and raw hit data for fs_incident.
+@fragment
+fn fs_replace(in: VsOut) -> Replacement {
+    return replace_environment(in, textureLoad(trace_tex, vec2<i32>(in.position.xy), 0));
 }

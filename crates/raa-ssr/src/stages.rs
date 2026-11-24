@@ -1,4 +1,20 @@
-//! Independently installable SSR Hi-Z, trace and composite stages.
+//! Independently installable SSR stages. Connect Hi-Z to trace, trace and current HDR to
+//! incident, and incident plus the same HDR to replacement. The legacy composite shares the
+//! shader's incident sampling and replacement functions.
+//!
+//! Diagnostic layout v1, in texture channel order:
+//! - `trace`: hit UV, screen confidence, cone mip (RGBA16F).
+//! - `incident`: unweighted scene-linear screen RGB and screen confidence (RGBA32F).
+//! - `fallback`: scene-linear volume RGB or the legacy split-sum sky term, and its fraction
+//!   of the reflection blend before global intensity (RGBA16F).
+//! - `hitMeta` and `fallbackMeta`: source class, geometric/source validity, distance in
+//!   metres from the receiver, age in real frames (RGBA32F). Classes are 0 (none), 1 (screen),
+//!   2 (volume) and 3 (sky). Zero distance denotes an invalid result or sky. Screen uses
+//!   current HDR (age 0), sky is frame-independent (age 0), and volume age is unavailable
+//!   (-1). A geometric hit can have zero confidence at a screen edge or on a backface.
+//!
+//! Screen coverage is limited to on-screen geometry. Offscreen geometry is reachable only
+//! when the existing volume fallback is enabled and represents that geometry.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -7,9 +23,10 @@ use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, Pipeline, PrepareCtx, Recor
 
 use crate::{
     SsrDesc, SsrHandle,
-    feature::{PARAMS_LEN, SsrCamera, constants, draw, pack_params},
+    feature::{PARAMS_LEN, SsrCamera, constants, draw, draw_targets, pack_params},
     resources::{
         CompositeTargets, HizTargets, SsrPipelines, SsrViewKey, TRACE_FORMAT, TraceTarget,
+        diagnostic_view, replace_group,
     },
     tunables,
 };
@@ -19,6 +36,8 @@ pub enum SsrStageKind {
     Hiz,
     Trace,
     Composite,
+    Incident,
+    Replace,
 }
 
 impl SsrStageKind {
@@ -27,6 +46,8 @@ impl SsrStageKind {
             Self::Hiz => "ssr.hiz",
             Self::Trace => "ssr.trace",
             Self::Composite => "ssr.composite",
+            Self::Incident => "ssr.incident",
+            Self::Replace => "ssr.replace",
         }
     }
     pub fn from_type_id(id: &str) -> Option<Self> {
@@ -34,6 +55,8 @@ impl SsrStageKind {
             "ssr.hiz" => Some(Self::Hiz),
             "ssr.trace" => Some(Self::Trace),
             "ssr.composite" => Some(Self::Composite),
+            "ssr.incident" => Some(Self::Incident),
+            "ssr.replace" => Some(Self::Replace),
             _ => None,
         }
     }
@@ -52,7 +75,7 @@ struct State {
     published: Vec<(&'static str, ImageDesc)>,
 }
 
-/// Handoff: `SsrStageHandle` provides `set_values`, `copy_camera_from`, `ran` and `published` for all three kinds to card 'post_stages extension 1/2: install, values, cameras and stats'. It consumes the earlier `install_stage` handoff at `stages.rs:394 install_stage`.
+/// Settings and publication status for one SSR stage instance.
 #[derive(Clone)]
 pub struct SsrStageHandle {
     kind: SsrStageKind,
@@ -82,13 +105,13 @@ impl SsrStageHandle {
         let mut tun = s.tunables;
         for (key, value) in values {
             match (self.kind, key.as_str()) {
-                (SsrStageKind::Composite, "intensity") => {
+                (SsrStageKind::Composite | SsrStageKind::Replace, "intensity") => {
                     desc.intensity = *value as f32;
                     if !value.is_finite() || !(0.0..=2.0).contains(&desc.intensity) {
                         return Err(invalid(&format!("invalid value for `{key}`")));
                     }
                 }
-                (SsrStageKind::Composite, "maxRoughness") => {
+                (SsrStageKind::Composite | SsrStageKind::Replace, "maxRoughness") => {
                     desc.max_roughness = *value as f32;
                     if !value.is_finite() || !(0.0..=1.0).contains(&desc.max_roughness) {
                         return Err(invalid(&format!("invalid value for `{key}`")));
@@ -153,8 +176,14 @@ struct StagePass {
 
 enum StageTargets {
     Hiz(HizTargets),
-    Trace(TraceTarget),
+    Trace(TraceTarget, wgpu::TextureView),
     Composite(CompositeTargets),
+    Incident(CompositeTargets, wgpu::TextureView),
+    Replace {
+        views: SsrViewKey,
+        fallback: wgpu::TextureView,
+        metadata: wgpu::TextureView,
+    },
 }
 
 impl FeaturePass for StagePass {
@@ -196,9 +225,15 @@ impl FeaturePass for StagePass {
                 let target =
                     TraceTarget::new(gpu.device(), &self.pipelines, size, &dummy_view, views);
                 self._dummy_hiz = Some(dummy);
-                StageTargets::Trace(target)
+                let metadata = diagnostic_view(
+                    gpu.device(),
+                    "raa-ssr.hit_meta",
+                    size,
+                    wgpu::TextureFormat::Rgba32Float,
+                );
+                StageTargets::Trace(target, metadata)
             }
-            SsrStageKind::Composite => {
+            SsrStageKind::Composite | SsrStageKind::Incident => {
                 let dummy = gpu.device().create_texture(&wgpu::TextureDescriptor {
                     label: Some("raa-ssr.composite_dummy_trace"),
                     size: wgpu::Extent3d {
@@ -223,8 +258,30 @@ impl FeaturePass for StagePass {
                     views,
                 );
                 self._dummy_trace = Some(dummy);
-                StageTargets::Composite(target)
+                if self.kind == SsrStageKind::Incident {
+                    StageTargets::Incident(
+                        target,
+                        diagnostic_view(
+                            gpu.device(),
+                            "raa-ssr.incident",
+                            size,
+                            wgpu::TextureFormat::Rgba32Float,
+                        ),
+                    )
+                } else {
+                    StageTargets::Composite(target)
+                }
             }
+            SsrStageKind::Replace => StageTargets::Replace {
+                views,
+                fallback: diagnostic_view(gpu.device(), "raa-ssr.fallback", size, TRACE_FORMAT),
+                metadata: diagnostic_view(
+                    gpu.device(),
+                    "raa-ssr.fallback_meta",
+                    size,
+                    wgpu::TextureFormat::Rgba32Float,
+                ),
+            },
         });
     }
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
@@ -247,21 +304,22 @@ impl FeaturePass for StagePass {
         };
         let size = match t {
             StageTargets::Hiz(x) => x.size,
-            StageTargets::Trace(_) => ctx.targets.size(),
-            StageTargets::Composite(x) => x.size,
+            StageTargets::Trace(..) | StageTargets::Replace { .. } => ctx.targets.size(),
+            StageTargets::Composite(x) | StageTargets::Incident(x, _) => x.size,
         };
-        let mut mips = match t {
+        let mips = match t {
             StageTargets::Hiz(x) => x.levels.len() as u32,
-            StageTargets::Trace(_) => ctx
+            StageTargets::Trace(..) => ctx
                 .resources
                 .input(&self.entry, "hiz")
                 .map_or(0, |x| x.desc.mips),
-            StageTargets::Composite(x) => x.hdr_views.len() as u32,
+            StageTargets::Composite(x) | StageTargets::Incident(x, _) => x.hdr_views.len() as u32,
+            StageTargets::Replace { .. } => 1,
         };
         if let StageTargets::Hiz(h) = t {
             h.set_depth(ctx.gpu.device(), &self.pipelines, &views.depth);
         }
-        if let StageTargets::Trace(trace) = t {
+        if let StageTargets::Trace(trace, _) = t {
             let hiz = ctx
                 .resources
                 .input(&self.entry, "hiz")
@@ -275,46 +333,50 @@ impl FeaturePass for StagePass {
                 trace.set_views(ctx.gpu.device(), &self.pipelines, &hiz, views.clone());
             }
         }
-        if let StageTargets::Composite(composite) = t {
+        if let StageTargets::Composite(composite) | StageTargets::Incident(composite, _) = t {
             let trace = ctx.resources.input(&self.entry, "trace").map(|x| x.view);
             if let Some(trace) = trace {
                 composite.set_views(ctx.gpu.device(), &self.pipelines, &trace, views.clone());
             }
         }
+        if let StageTargets::Replace { views: current, .. } = t {
+            *current = views;
+        }
         pack_params(&mut self.bytes, size, mips, &desc, camera.as_ref());
         ctx.gpu
             .queue()
             .write_buffer(&self.pipelines.params, 0, &self.bytes);
-        let (w, h) = size;
-        let port = if self.kind == SsrStageKind::Hiz {
-            "hiz"
-        } else if self.kind == SsrStageKind::Trace {
-            "trace"
-        } else {
-            ""
-        };
-        let format = if self.kind == SsrStageKind::Hiz {
-            wgpu::TextureFormat::R32Float
-        } else {
-            TRACE_FORMAT
-        };
-        if self.kind == SsrStageKind::Trace {
-            mips = 1;
-        }
-        let desc = ImageDesc::new(ImageDim::D2, format, w, h, 1, mips);
-        let view = match t {
-            StageTargets::Hiz(x) => &x.full_view,
-            StageTargets::Trace(x) => &x.view,
-            StageTargets::Composite(_) => {
-                let mut s = self.state.borrow_mut();
-                s.published.clear();
-                s.ran = false;
-                return Ok(());
-            }
-        };
-        ctx.resources.publish(&self.entry, port, view, desc);
         let mut s = self.state.borrow_mut();
-        s.published = vec![(port, desc)];
+        s.published.clear();
+        let mut publish = |port, view, format, mips| {
+            let desc = ImageDesc::new(ImageDim::D2, format, size.0, size.1, 1, mips);
+            ctx.resources.publish(&self.entry, port, view, desc);
+            s.published.push((port, desc));
+        };
+        match t {
+            StageTargets::Hiz(x) => {
+                publish("hiz", &x.full_view, wgpu::TextureFormat::R32Float, mips)
+            }
+            StageTargets::Trace(x, metadata) => {
+                publish("trace", &x.view, TRACE_FORMAT, 1);
+                publish("hitMeta", metadata, wgpu::TextureFormat::Rgba32Float, 1);
+            }
+            StageTargets::Incident(_, x) => {
+                publish("incident", x, wgpu::TextureFormat::Rgba32Float, 1);
+            }
+            StageTargets::Replace {
+                fallback, metadata, ..
+            } => {
+                publish("fallback", fallback, TRACE_FORMAT, 1);
+                publish(
+                    "fallbackMeta",
+                    metadata,
+                    wgpu::TextureFormat::Rgba32Float,
+                    1,
+                );
+            }
+            StageTargets::Composite(_) => {}
+        }
         s.ran = false;
         Ok(())
     }
@@ -341,17 +403,80 @@ impl FeaturePass for StagePass {
                 }
                 self.state.borrow_mut().ran = true;
             }
-            StageTargets::Trace(t) => {
+            StageTargets::Trace(t, metadata) => {
                 if ctx.resources.input(&self.entry, "hiz").is_some() {
-                    draw(
+                    draw_targets(
                         ctx.encoder,
-                        &t.view,
-                        &self.pipelines.trace,
+                        [&t.view, metadata],
+                        &self.pipelines.hit,
                         &t.group,
                         Some(ctx.lighting.opaque_bind_group()),
                     );
                     self.state.borrow_mut().ran = true;
+                } else {
+                    for view in [&t.view, metadata] {
+                        clear(ctx.encoder, view);
+                    }
                 }
+            }
+            StageTargets::Incident(t, incident) => {
+                let color = ctx.resources.input(&self.entry, "color");
+                if let Some(color) = color
+                    .filter(|image| {
+                        (image.desc.width, image.desc.height) == t.size
+                            && image
+                                .view
+                                .texture()
+                                .usage()
+                                .contains(wgpu::TextureUsages::COPY_SRC)
+                    })
+                    .filter(|_| ctx.resources.input(&self.entry, "trace").is_some())
+                {
+                    build_hdr_mips(ctx.encoder, color.view.texture(), t, &self.pipelines);
+                    draw(
+                        ctx.encoder,
+                        incident,
+                        &self.pipelines.incident,
+                        &t.composite_group,
+                        None,
+                    );
+                    self.state.borrow_mut().ran = true;
+                } else {
+                    clear(ctx.encoder, incident);
+                }
+            }
+            StageTargets::Replace {
+                views,
+                fallback,
+                metadata,
+            } => {
+                let hdr = ctx.targets.hdr();
+                if let Some(incident) = ctx.resources.input(&self.entry, "incident") {
+                    let group = replace_group(
+                        ctx.gpu.device(),
+                        &self.pipelines,
+                        hdr.src(),
+                        &incident.view,
+                        views,
+                    );
+                    draw_targets(
+                        ctx.encoder,
+                        [hdr.dst(), fallback, metadata],
+                        &self.pipelines.replace,
+                        &group,
+                        Some(ctx.lighting.opaque_bind_group()),
+                    );
+                } else {
+                    ctx.encoder.copy_texture_to_texture(
+                        hdr.src_texture().as_image_copy(),
+                        hdr.dst_texture().as_image_copy(),
+                        hdr.dst_texture().size(),
+                    );
+                    clear(ctx.encoder, fallback);
+                    clear(ctx.encoder, metadata);
+                }
+                hdr.swap();
+                self.state.borrow_mut().ran = true;
             }
             StageTargets::Composite(t) => {
                 let hdr = ctx.targets.hdr();
@@ -361,14 +486,7 @@ impl FeaturePass for StagePass {
                     depth_or_array_layers: 1,
                 };
                 if ctx.resources.input(&self.entry, "trace").is_some() {
-                    ctx.encoder.copy_texture_to_texture(
-                        hdr.src_texture().as_image_copy(),
-                        t.hdr_mips.as_image_copy(),
-                        extent,
-                    );
-                    for (target, group) in t.hdr_views.iter().skip(1).zip(&t.down_groups) {
-                        draw(ctx.encoder, target, &self.pipelines.downsample, group, None);
-                    }
+                    build_hdr_mips(ctx.encoder, hdr.src_texture(), t, &self.pipelines);
                     draw(
                         ctx.encoder,
                         hdr.dst(),
@@ -391,7 +509,39 @@ impl FeaturePass for StagePass {
     }
 }
 
-/// Handoff: card 'raa-ssr stage passes 2/2: ssr.composite' extends `install_stage` with the Composite kind; today this installs Hiz or Trace through `Pipeline::add` at order 65.
+fn clear(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("raa-ssr.clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+}
+
+fn build_hdr_mips(
+    encoder: &mut wgpu::CommandEncoder,
+    color: &wgpu::Texture,
+    targets: &CompositeTargets,
+    pipelines: &SsrPipelines,
+) {
+    encoder.copy_texture_to_texture(
+        color.as_image_copy(),
+        targets.hdr_mips.as_image_copy(),
+        targets.hdr_mips.size(),
+    );
+    for (target, group) in targets.hdr_views.iter().skip(1).zip(&targets.down_groups) {
+        draw(encoder, target, &pipelines.downsample, group, None);
+    }
+}
+
+/// Install an independently wired SSR stage with its own settings and render targets.
 pub fn install_stage(
     gpu: &GpuContext,
     pipeline: &Rc<RefCell<Pipeline>>,

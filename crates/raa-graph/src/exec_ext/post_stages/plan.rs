@@ -22,12 +22,14 @@ pub fn stage_nodes(plan: &GraphPlan) -> Vec<(String, String, String)> {
         .collect()
 }
 
-pub const POST_STAGE_TYPES: [&str; 7] = [
+pub const POST_STAGE_TYPES: [&str; 9] = [
     "ao.trace",
     "ao.blur",
     "ssr.hiz",
     "ssr.trace",
     "ssr.composite",
+    "ssr.incident",
+    "ssr.replace",
     "bloom.down",
     "bloom.up",
 ];
@@ -120,8 +122,10 @@ pub fn stage_bindings(
             let Some(input) = node.inputs.iter().find(|input| input.port == port_spec.key) else {
                 continue;
             };
-            if (node.type_id == "ssr.composite" || node.type_id == "bloom.up")
-                && input.port == "color"
+            if matches!(
+                node.type_id.as_str(),
+                "ssr.composite" | "ssr.replace" | "bloom.up"
+            ) && input.port == "color"
             {
                 continue;
             }

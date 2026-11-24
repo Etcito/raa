@@ -61,6 +61,8 @@ fn stage_types() {
             "ssr.hiz",
             "ssr.trace",
             "ssr.composite",
+            "ssr.incident",
+            "ssr.replace",
             "bloom.down",
             "bloom.up"
         ]
@@ -96,7 +98,7 @@ fn stage_types() {
             Category::Post,
             65,
             vec!["depth", "normal", "hiz"],
-            vec!["trace"],
+            vec!["trace", "hitMeta"],
         ),
         (
             "ssr.composite",
@@ -105,6 +107,22 @@ fn stage_types() {
             65,
             vec!["color", "depth", "normal", "material", "trace"],
             vec!["color"],
+        ),
+        (
+            "ssr.incident",
+            "ssr_stages",
+            Category::Post,
+            65,
+            vec!["color", "trace"],
+            vec!["incident"],
+        ),
+        (
+            "ssr.replace",
+            "ssr_stages",
+            Category::Post,
+            65,
+            vec!["color", "depth", "normal", "material", "incident"],
+            vec!["color", "fallback", "fallbackMeta"],
         ),
         (
             "bloom.down",
@@ -216,7 +234,7 @@ fn stage_types() {
                     ),
                     "{id}.material"
                 ),
-                "src" | "base" | "hiz" | "trace" | "color" if input.required => {
+                "src" | "base" | "hiz" | "trace" | "incident" | "color" if input.required => {
                     assert!(
                         !input.absent_ok && input.default_source.is_empty(),
                         "{id}.{}",
@@ -393,6 +411,53 @@ fn ssr_stage_chain_plans() {
         "hiz".into()
     )));
     assert!(!bindings.iter().any(|(_, port, _, _)| *port == "color"));
+}
+
+#[test]
+fn ssr_source_separation_plan_binds_color_and_incident() {
+    let mut nodes = base_nodes();
+    nodes.extend([
+        node("hiz", "ssr.hiz"),
+        node("hit", "ssr.trace"),
+        node("incident", "ssr.incident"),
+        node("replace", "ssr.replace"),
+    ]);
+    let mut links = base_links();
+    links.retain(|l| l != &link("forward.color", "tonemap.color"));
+    links.extend([
+        link("hiz.hiz", "hit.hiz"),
+        link("hit.trace", "incident.trace"),
+        link("forward.color", "incident.color"),
+        link("forward.color", "replace.color"),
+        link("incident.incident", "replace.incident"),
+        link("replace.color", "tonemap.color"),
+    ]);
+    let plan = planned(&graph(nodes, links));
+    let catalog = Catalog::build();
+    let entries = plan_fns::node_entries(&plan, &catalog);
+    let bindings = stage_bindings(&plan, &catalog, &entries);
+    for (consumer, port, producer, output) in [
+        ("ssr.incident#incident", "color", "forward", "color"),
+        ("ssr.incident#incident", "trace", "ssr.trace#hit", "trace"),
+        (
+            "ssr.replace#replace",
+            "incident",
+            "ssr.incident#incident",
+            "incident",
+        ),
+    ] {
+        assert!(bindings.contains(&(consumer.into(), port, producer.into(), output.into())));
+    }
+    assert!(
+        !bindings
+            .iter()
+            .any(|(entry, port, _, _)| entry == "ssr.replace#replace" && *port == "color")
+    );
+    assert!(
+        plan_fns::chain_resources(&plan, &catalog)
+            .iter()
+            .any(|r| r.producer.node == "replace")
+    );
 }
 
 #[test]

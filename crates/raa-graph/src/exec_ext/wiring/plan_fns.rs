@@ -124,6 +124,7 @@ pub fn chain_type(ty: &str) -> bool {
             | "pass.dof"
             | "pass.bloom"
             | "ssr.composite"
+            | "ssr.replace"
             | "pass.grading"
             | "pass.cel.resolve"
     )
@@ -161,6 +162,8 @@ pub fn node_entries(plan: &GraphPlan, catalog: &raa_graph::Catalog) -> Vec<(Stri
                     | "ssr.hiz"
                     | "ssr.trace"
                     | "ssr.composite"
+                    | "ssr.incident"
+                    | "ssr.replace"
                     | "bloom.down"
                     | "bloom.up"
                     | "compute.wgsl"

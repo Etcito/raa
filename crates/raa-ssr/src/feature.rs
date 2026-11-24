@@ -152,17 +152,30 @@ pub(crate) fn draw(
     group0: &wgpu::BindGroup,
     group1: Option<&wgpu::BindGroup>,
 ) {
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("raa-ssr"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: target,
+    draw_targets(encoder, [target], pipeline, group0, group1);
+}
+
+pub(crate) fn draw_targets<const N: usize>(
+    encoder: &mut wgpu::CommandEncoder,
+    targets: [&wgpu::TextureView; N],
+    pipeline: &wgpu::RenderPipeline,
+    group0: &wgpu::BindGroup,
+    group1: Option<&wgpu::BindGroup>,
+) {
+    let attachments = targets.map(|view| {
+        Some(wgpu::RenderPassColorAttachment {
+            view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 store: wgpu::StoreOp::Store,
             },
-        })],
+        })
+    });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("raa-ssr"),
+        color_attachments: &attachments,
         depth_stencil_attachment: None,
         timestamp_writes: None,
         occlusion_query_set: None,

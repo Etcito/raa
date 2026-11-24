@@ -145,12 +145,15 @@ fn ssr_trace_module_validates() {
 }
 
 #[test]
-fn trace_vertex_and_two_fragment_entries() {
+fn trace_vertex_and_fragment_entries() {
     let entries = entry_points(shaders::SSR_TRACE_WGSL);
     let expected = [
         ("@vertex", shaders::VS_FULLSCREEN),
         ("@fragment", shaders::FS_TRACE),
         ("@fragment", shaders::FS_COMPOSITE),
+        ("@fragment", "fs_hit"),
+        ("@fragment", "fs_incident"),
+        ("@fragment", "fs_replace"),
     ];
     for e in expected {
         assert!(entries.contains(&e), "missing {e:?} in {entries:?}");
@@ -193,13 +196,15 @@ fn trace_group_one_lines_occur_verbatim_in_prelude() {
 #[test]
 fn flag_clear_path_keeps_the_early_return() {
     let body: Vec<&str> = code_lines(shaders::SSR_TRACE_WGSL)
-        .skip_while(|l| !l.starts_with("fn fs_composite("))
+        .skip_while(|l| !l.starts_with("fn replace_environment("))
         .take_while(|l| !l.starts_with("@"))
         .collect();
     assert!(body.iter().any(|l| l.contains("RAA_GI_FLAG_REFLECTIONS")));
-    let i = body.iter().position(|l| *l == "if (weight <= 0.0) {");
+    let i = body
+        .iter()
+        .position(|l| *l == "if (!use_volume && weight <= 0.0) {");
     let next = i.and_then(|i| body.get(i + 1));
-    assert_eq!(next, Some(&"return hdr;"), "{body:?}");
+    assert_eq!(next, Some(&"return result;"), "{body:?}");
     assert!(
         body.iter()
             .any(|l| l.contains("raa_gi_trace(") && l.contains(", 160.0, 48u, 0.5)")),
@@ -220,7 +225,7 @@ fn composite_subtracts_the_gi_occluded_specular() {
     assert!(env.iter().any(|l| l.contains("raa_env_sh.gi.x")), "{env:?}");
     let composite: Vec<&str> = lines
         .iter()
-        .skip_while(|l| !l.starts_with("fn fs_composite("))
+        .skip_while(|l| !l.starts_with("fn replace_environment("))
         .copied()
         .collect();
     assert!(

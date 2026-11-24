@@ -60,6 +60,22 @@ impl NodeFamily for SsrStages {
             .unwrap()
             .mips;
 
+        let image = |key, label, format| image_out(key, label, format, SizeSpec::Scale(1.0), 1);
+        let color = || required_in("color", "Color", GraphFormat::Rgba16Float);
+        let trace = || required_in("trace", "Trace", GraphFormat::Rgba16Float);
+        let incident = || {
+            required_in(
+                "incident",
+                "Incident RGB and confidence",
+                GraphFormat::Rgba32Float,
+            )
+        };
+        let replacement_params = || {
+            vec![
+                copied("intensity", f64::from(desc.intensity)),
+                copied("maxRoughness", f64::from(desc.max_roughness)),
+            ]
+        };
         vec![
             post_stage(
                 "ssr.hiz",
@@ -89,13 +105,18 @@ impl NodeFamily for SsrStages {
                     gbuffer_in("normal"),
                     required_in("hiz", "Hi-Z pyramid", GraphFormat::R32Float),
                 ],
-                vec![image_out(
-                    "trace",
-                    "Trace",
-                    GraphFormat::Rgba16Float,
-                    SizeSpec::Scale(1.0),
-                    1,
-                )],
+                vec![
+                    image(
+                        "trace",
+                        "Hit UV, confidence, cone mip",
+                        GraphFormat::Rgba16Float,
+                    ),
+                    image(
+                        "hitMeta",
+                        "Screen source, validity, distance, age",
+                        GraphFormat::Rgba32Float,
+                    ),
+                ],
                 vec![
                     copied("maxRoughness", f64::from(desc.max_roughness)),
                     copied("thickness", f64::from(desc.thickness_m)),
@@ -117,11 +138,11 @@ impl NodeFamily for SsrStages {
                 "SSR composite",
                 65,
                 vec![
-                    required_in("color", "Color", GraphFormat::Rgba16Float),
+                    color(),
                     gbuffer_in("depth"),
                     gbuffer_in("normal"),
                     gbuffer_in("material"),
-                    required_in("trace", "Trace", GraphFormat::Rgba16Float),
+                    trace(),
                 ],
                 vec![image_out(
                     "color",
@@ -130,10 +151,51 @@ impl NodeFamily for SsrStages {
                     SizeSpec::Scale(1.0),
                     1,
                 )],
+                replacement_params(),
+                vec![fragment_budget(16)],
+            ),
+            post_stage(
+                "ssr.incident",
+                "ssr_stages",
+                Category::Post,
+                "SSR incident radiance",
+                65,
+                vec![color(), trace()],
+                vec![image(
+                    "incident",
+                    "Incident RGB and confidence",
+                    GraphFormat::Rgba32Float,
+                )],
+                vec![],
+                vec![stage_budget(ShaderStage::Fragment, 5, 1, 0, 0, 1)],
+            ),
+            post_stage(
+                "ssr.replace",
+                "ssr_stages",
+                Category::Post,
+                "SSR environment replacement",
+                65,
                 vec![
-                    copied("intensity", f64::from(desc.intensity)),
-                    copied("maxRoughness", f64::from(desc.max_roughness)),
+                    color(),
+                    gbuffer_in("depth"),
+                    gbuffer_in("normal"),
+                    gbuffer_in("material"),
+                    incident(),
                 ],
+                vec![
+                    image("color", "Color", GraphFormat::Rgba16Float),
+                    image(
+                        "fallback",
+                        "Fallback RGB and blend weight",
+                        GraphFormat::Rgba16Float,
+                    ),
+                    image(
+                        "fallbackMeta",
+                        "Fallback source, validity, distance, age",
+                        GraphFormat::Rgba32Float,
+                    ),
+                ],
+                replacement_params(),
                 vec![fragment_budget(16)],
             ),
         ]
@@ -151,7 +213,13 @@ mod tests {
         let catalog = Catalog::build();
         let pass = catalog.node("pass.ssr").unwrap();
         let limits = GraphLimits::CORE;
-        for id in ["ssr.hiz", "ssr.trace", "ssr.composite"] {
+        for id in [
+            "ssr.hiz",
+            "ssr.trace",
+            "ssr.composite",
+            "ssr.incident",
+            "ssr.replace",
+        ] {
             let node = catalog.node(id).unwrap();
             assert_eq!(node.family, "ssr_stages");
             assert_eq!(node.category, Category::Post);

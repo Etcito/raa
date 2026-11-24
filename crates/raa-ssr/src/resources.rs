@@ -141,7 +141,7 @@ fn render(
     module: &wgpu::ShaderModule,
     layouts: &[Option<&wgpu::BindGroupLayout>],
     entry: &str,
-    format: wgpu::TextureFormat,
+    formats: &[wgpu::TextureFormat],
     constants: &[(&str, f64)],
 ) -> wgpu::RenderPipeline {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -171,11 +171,16 @@ fn render(
                 constants,
                 ..Default::default()
             },
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets: &formats
+                .iter()
+                .map(|&format| {
+                    Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
+                })
+                .collect::<Vec<_>>(),
         }),
         multiview_mask: None,
         cache: None,
@@ -227,6 +232,10 @@ pub(crate) struct SsrPipelines {
     pub downsample: wgpu::RenderPipeline,
     /// Layout [group 0 = `trace_layout`, group 1 = the lighting layout] (fs_trace).
     pub trace: wgpu::RenderPipeline,
+    pub hit: wgpu::RenderPipeline,
+    pub incident: wgpu::RenderPipeline,
+    pub replace: wgpu::RenderPipeline,
+    replace_layout: wgpu::BindGroupLayout,
     /// Layout [group 0 = `composite_layout`, group 1 = the lighting layout] (fs_composite).
     pub composite: wgpu::RenderPipeline,
     copy_layout: wgpu::BindGroupLayout,
@@ -320,7 +329,19 @@ impl SsrPipelines {
                 entry(7, fs, FILTERING),
             ],
         );
-        let (trace, composite) = trace_pipelines(
+        let replace_layout = layout(
+            device,
+            "raa-ssr.replace",
+            &[
+                entry(0, fs, uniform_type(SSR_PARAMS_SIZE)),
+                entry(1, fs, texture_type(wgpu::TextureSampleType::Depth)),
+                entry(2, fs, texture_type(FLOAT)),
+                entry(3, fs, texture_type(FLOAT)),
+                entry(5, fs, texture_type(FLOAT)),
+                entry(6, fs, texture_type(UNFILTERABLE)),
+            ],
+        );
+        let (trace, hit, composite) = trace_pipelines(
             device,
             &trace_module,
             [&trace_layout, &composite_layout, lighting],
@@ -334,9 +355,27 @@ impl SsrPipelines {
                 &hiz_module,
                 &[Some(&down_layout)],
                 FS_DOWNSAMPLE,
-                HDR_FORMAT,
+                &[HDR_FORMAT],
                 &[],
             ),
+            hit,
+            incident: render(
+                device,
+                &trace_module,
+                &[Some(&composite_layout)],
+                "fs_incident",
+                &[wgpu::TextureFormat::Rgba32Float],
+                &[],
+            ),
+            replace: render(
+                device,
+                &trace_module,
+                &[Some(&replace_layout), Some(lighting)],
+                "fs_replace",
+                &[HDR_FORMAT, HDR_FORMAT, wgpu::TextureFormat::Rgba32Float],
+                &[],
+            ),
+            replace_layout,
             trace,
             composite,
             trace_module,
@@ -367,9 +406,9 @@ impl SsrPipelines {
     /// Rebuilds `trace` and `composite` (the pipelines of the trace module) with `constants`.
     pub(crate) fn rebuild_trace(&mut self, device: &wgpu::Device, constants: &[(&str, f64)]) {
         let layouts = [&self.trace_layout, &self.composite_layout, &self.lighting];
-        let (trace, composite) = trace_pipelines(device, &self.trace_module, layouts, constants);
+        let (trace, hit, _) = trace_pipelines(device, &self.trace_module, layouts, constants);
         self.trace = trace;
-        self.composite = composite;
+        self.hit = hit;
     }
 }
 
@@ -379,7 +418,11 @@ fn trace_pipelines(
     module: &wgpu::ShaderModule,
     layouts: [&wgpu::BindGroupLayout; 3],
     constants: &[(&str, f64)],
-) -> (wgpu::RenderPipeline, wgpu::RenderPipeline) {
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+    wgpu::RenderPipeline,
+) {
     let [trace, composite, lighting] = layouts;
     (
         render(
@@ -387,7 +430,15 @@ fn trace_pipelines(
             module,
             &[Some(trace), Some(lighting)],
             FS_TRACE,
-            TRACE_FORMAT,
+            &[TRACE_FORMAT],
+            constants,
+        ),
+        render(
+            device,
+            module,
+            &[Some(trace), Some(lighting)],
+            "fs_hit",
+            &[TRACE_FORMAT, wgpu::TextureFormat::Rgba32Float],
             constants,
         ),
         render(
@@ -395,8 +446,8 @@ fn trace_pipelines(
             module,
             &[Some(composite), Some(lighting)],
             FS_COMPOSITE,
-            HDR_FORMAT,
-            constants,
+            &[HDR_FORMAT],
+            &[],
         ),
     )
 }
@@ -408,6 +459,49 @@ pub(crate) struct SsrViewKey {
     pub depth: wgpu::TextureView,
     pub normal: wgpu::TextureView,
     pub material: wgpu::TextureView,
+}
+
+pub(crate) fn replace_group(
+    device: &wgpu::Device,
+    p: &SsrPipelines,
+    hdr: &wgpu::TextureView,
+    incident: &wgpu::TextureView,
+    views: &SsrViewKey,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("raa-ssr.replace"),
+        layout: &p.replace_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: p.params.as_entire_binding(),
+            },
+            view_entry(1, &views.depth),
+            view_entry(2, &views.normal),
+            view_entry(3, &views.material),
+            view_entry(5, hdr),
+            view_entry(6, incident),
+        ],
+    })
+}
+
+pub(crate) fn diagnostic_view(
+    device: &wgpu::Device,
+    label: &str,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+) -> wgpu::TextureView {
+    texture(
+        device,
+        label,
+        size,
+        1,
+        format,
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+    )
+    .create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 /// Bind group 0 of `fs_trace`: params, depth, normal and the full Hi-Z view.
@@ -611,7 +705,9 @@ impl TraceTarget {
             size,
             1,
             TRACE_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let group = trace_group(device, p, hiz, &views);

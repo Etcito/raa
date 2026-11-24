@@ -80,6 +80,29 @@ fn ssr_graph() -> String {
     graph(nodes, links)
 }
 
+/// The same scene with the incident image exposed before environment replacement.
+fn split_ssr_graph() -> String {
+    let mut nodes = base_nodes();
+    nodes.extend([
+        node("ssrHiz", "ssr.hiz"),
+        node("ssrTrace", "ssr.trace"),
+        node("ssrIncident", "ssr.incident"),
+        node("ssrReplace", "ssr.replace"),
+    ]);
+    graph(
+        nodes,
+        vec![
+            link("ssrHiz.hiz", "ssrTrace.hiz"),
+            link("ssrTrace.trace", "ssrIncident.trace"),
+            link("forward.color", "ssrIncident.color"),
+            link("forward.color", "ssrReplace.color"),
+            link("ssrIncident.incident", "ssrReplace.incident"),
+            link("ssrReplace.color", "tonemap.color"),
+            link("tonemap.color", "out.color"),
+        ],
+    )
+}
+
 /// The N = 5 bloom graph of `tests/post_stages.rs` test (3): five down levels and four up levels.
 fn bloom_graph(levels: usize) -> String {
     let mut nodes = base_nodes();
@@ -275,6 +298,13 @@ fn post_stage_graphs_render_frames_without_panic() {
     }
     if let Some(ran) = render_plan_frames(name, &ssr_graph(), 3) {
         assert_ran(name, &ran, &["ssrHiz", "ssrTrace", "ssrComposite"]);
+    }
+    if let Some(ran) = render_plan_frames(name, &split_ssr_graph(), 3) {
+        assert_ran(
+            name,
+            &ran,
+            &["ssrHiz", "ssrTrace", "ssrIncident", "ssrReplace"],
+        );
     }
     if let Some(ran) = render_plan_frames(name, &bloom_graph(5), 3) {
         assert_ran(
