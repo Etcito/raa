@@ -35,6 +35,7 @@ raa-tonemap = { path = "../raa-tonemap" }
 raa-oit = { path = "../raa-oit" }
 raa-vg = { path = "../raa-vg" }
 raa-gi = { path = "../raa-gi" }
+raa-sdf-trace = { path = "../raa-sdf-trace" }
 raa-taa = { path = "../raa-taa" }
 raa-lit = { path = "../raa-lit" }
 raa-sky = { path = "../raa-sky" }

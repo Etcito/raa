@@ -25,19 +25,22 @@ use crate::catalog::{Catalog, FeatureId, ParamBinding, ParamSpec, ParamValue, Re
 use crate::error::{Issue, Severity, Stage};
 use crate::format::GraphDoc;
 use crate::plan::{GraphPlan, plan_from_doc};
+use crate::runtime_lighting::{ISOLATION, SPHERICAL, SPHERICAL_TYPE};
 use crate::validate::{ValidateCtx, canonical_doc};
 
 /// The pipeline entry that the contributors follow, and the entry that `output.display` follows.
 const HOST_ENTRY: &str = "forward";
 const LAST_CHAIN_ENTRY: &str = "tonemap";
 
-/// The features in S53 rank order. The pipeline (rank 0) is applied apart from them.
-const RANK: [FeatureId; 18] = [
+/// The features in S53 rank order. The pipeline is applied apart from them.
+const RANK: [FeatureId; 20] = [
     FeatureId::Tonemap,
     FeatureId::Shadow,
     FeatureId::Vg,
     FeatureId::GiQuality,
     FeatureId::Gi,
+    SPHERICAL,
+    ISOLATION,
     FeatureId::AreaShadows,
     FeatureId::AreaShading,
     FeatureId::Gtao,
@@ -365,6 +368,7 @@ impl GraphExecutor {
             "setAreaLightShadows",
             "setGlobalIllumination",
             "setGiQuality",
+            "setSphericalGi",
         ]
     }
 
@@ -514,6 +518,21 @@ pub fn settings_targets(
         .collect();
     let pipeline = pipeline_instructions(plan, catalog, &installed);
 
+    if let Some(node) = plan.nodes.iter().find(|node| node.type_id == SPHERICAL_TYPE)
+        && values_for(current, &SPHERICAL).is_none()
+    {
+        return Err(vec![Issue {
+            code: "graph.unavailable",
+            severity: Severity::Error,
+            stage: Stage::Apply,
+            node: Some(node.id.clone()),
+            port: None,
+            param: None,
+            link: None,
+            message: "The spherical GI feature is unavailable in this engine.".into(),
+            fix: "Install the spherical GI feature before applying this graph.".into(),
+        }]);
+    }
     let mut values = Vec::with_capacity(current.values.len());
     for (feature, base) in &current.values {
         let mut changes = plan_settings(catalog, plan, feature);
@@ -945,6 +964,7 @@ fn presence(plan: &GraphPlan, feature: &FeatureId) -> Vec<(String, ParamValue)> 
             flag("enabled", has("pass.gi.volume")),
             flag("screenSpace", has("pass.gi.ssgi")),
         ],
+        &SPHERICAL => vec![flag("enabled", has(SPHERICAL_TYPE))],
         _ => Vec::new(),
     }
 }

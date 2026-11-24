@@ -1,0 +1,26 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Spherical GI",
+  "nodes": [
+    { "id": "shadowCsm", "type": "pass.shadow.csm" },
+    { "id": "prepass", "type": "pass.prepass" },
+    { "id": "lightTiles", "type": "pass.light.tiles" },
+    { "id": "ao", "type": "pass.ao.gtao", "params": { "indirectDiffuse": true } },
+    { "id": "spherical", "type": "pass.gi.spherical", "params": { "sphereSubdivision": 3, "zMax": 12, "channelMask": 7 } },
+    { "id": "forward", "type": "pass.forward", "params": { "lightingOutput": "indirect" } },
+    { "id": "tonemap", "type": "pass.tonemap" },
+    { "id": "out", "type": "output.display" }
+  ],
+  "links": [
+    { "from": "prepass.depth", "to": "lightTiles.depth" },
+    { "from": "prepass.depth", "to": "ao.depth" },
+    { "from": "prepass.normal", "to": "ao.normal" },
+    { "from": "shadowCsm.shadowMap", "to": "forward.shadowMap" },
+    { "from": "lightTiles.lightTiles", "to": "forward.lightTiles" },
+    { "from": "ao.ao", "to": "forward.ao" },
+    { "from": "spherical.lookup", "to": "forward.sphericalLookup" },
+    { "from": "forward.color", "to": "tonemap.color" },
+    { "from": "tonemap.color", "to": "out.color" }
+  ]
+}

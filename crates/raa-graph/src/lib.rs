@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod error;
 pub mod format;
 pub mod plan;
+mod runtime_lighting;
 pub mod validate;
 
 #[rustfmt::skip] // the file lands with the executor cards

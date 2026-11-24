@@ -73,6 +73,7 @@
         "radius": 0.800000011920929,
         "intensity": 0.6000000238418579,
         "power": 1,
+        "indirectDiffuse": false,
         "slices": 4,
         "steps": 8
       }
@@ -195,7 +196,8 @@
       "type": "pass.forward",
       "params": {
         "msaa": 4,
-        "mode": "ltc"
+        "mode": "ltc",
+        "lightingOutput": "combined"
       }
     },
     {

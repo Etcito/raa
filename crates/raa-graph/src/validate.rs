@@ -1043,6 +1043,7 @@ fn check_availability(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Is
 /// type in document order (S51).
 fn family_hooks(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) {
     for family in crate::registry::families_all() {
+        family.validate_graph(doc, issues);
         for node in &doc.nodes {
             if let Some(spec) = ctx.catalog.node(&node.type_id) {
                 family.validate_node(node, spec, ctx, issues);

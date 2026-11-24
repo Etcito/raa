@@ -65,11 +65,11 @@ fn frozen_area_shadow_signals_match_editable_plans() {
 }
 
 #[test]
-fn frozen_registry_has_three_starters() {
+fn frozen_registry_has_the_shipped_graphs() {
     let catalog = Catalog::build();
     let frozen = registry::frozen_all();
     let names: Vec<_> = frozen.iter().map(|(name, _, _)| *name).collect();
-    assert_eq!(names, ["debug", "full_gi", "simple_forward"]);
+    assert_eq!(names, ["debug", "full_gi", "simple_forward", "spherical_gi"]);
 
     for (name, make_plan, source_json) in frozen {
         let frozen_plan = make_plan();

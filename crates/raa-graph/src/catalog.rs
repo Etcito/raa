@@ -535,6 +535,7 @@ pub trait NodeFamily {
     fn name(&self) -> &'static str;
     fn node_types(&self) -> Vec<NodeTypeSpec>;
     fn extend_types(&self, _types: &mut Vec<NodeTypeSpec>) {}
+    fn validate_graph(&self, _doc: &crate::format::GraphDoc, _issues: &mut Vec<crate::error::Issue>) {}
     fn validate_node(
         &self,
         _node: &crate::format::NodeDoc,

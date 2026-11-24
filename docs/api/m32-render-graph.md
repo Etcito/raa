@@ -104,8 +104,29 @@ frame.
 `setPassEnabled`, `setPassOrder`, `setToneMapping`, `setShadows`, `setAo`, `setContactShadows`,
 `setBloom`, `setTransparency`, `setSsr`, `setDof`, `setFog`, `setSunShafts`, `setGrading`,
 `applyEnvironment`, `setCel`, `setVirtualGeometry`, `setAreaLightShading`,
-`setAreaLightShadows`, `setGlobalIllumination`, `setGiQuality`. It returns that list whether or
+`setAreaLightShadows`, `setGlobalIllumination`, `setGiQuality`, `setSphericalGi`. It returns that list whether or
 not a graph is set.
+
+## Runtime lighting
+
+- `pass.gi.spherical` runs the existing camera-centred capture pass on the shared mesh BVH.
+  Its `lookup` buffer feeds `pass.forward.sphericalLookup` through the forward lighting
+  bind group. This link accepts the engine's spherical lookup only and resolves by default
+  when the spherical node is present. The lookup has no compute or history tap. Capture
+  uses the primary view and the scene's geometry and lights.
+- The spherical node exposes `sphereSubdivision`, `exponentialPower`, `clipStart`, `zMax`,
+  `channelMask` and the `debug` views from `setSphericalGi`. Node presence enables capture.
+  Set `zMax` above `clipStart`. The `spherical_gi` frozen graph uses the same pass and handles.
+- `pass.gi.volume.volumeAtlas` feeds `pass.gi.screen.volumeAtlas`. Set the screen node's
+  `indirect` to `probes` or `restir` and use its `debugView` for volume and screen diagnostics.
+  Both modes publish `pass.gi.screen.gi` for `pass.forward.gi`. Spherical GI can coexist with
+  the existing volume and screen passes. Forward shading blends the spherical result with
+  its existing diffuse fallback according to spherical coverage.
+- `pass.ao.gtao` owns `radius`, `intensity`, `power`, `slices`, `steps` and
+  `indirectDiffuse`. The last setting uses the same diffuse AO shader control as `setAo`.
+- `pass.forward.lightingOutput` selects `combined`, `direct` or `indirect` in the raster
+  shader. Use the mesh reference node's `lightingOutput` and `lightingDepth` for an exact
+  bounce, since the forward pass has no per-bounce signal.
 
 ## Document format
 

@@ -161,9 +161,9 @@ fn stats_json_null_frame_and_two_nodes() {
 }
 
 #[test]
-fn owned_setters_are_the_twenty_in_order() {
+fn owned_setters_are_in_api_order() {
     let names = owned_setters();
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 21);
     assert_eq!(
         names,
         [
@@ -187,8 +187,9 @@ fn owned_setters_are_the_twenty_in_order() {
             "setAreaLightShadows",
             "setGlobalIllumination",
             "setGiQuality",
+            "setSphericalGi",
         ]
     );
     assert_eq!(names.first().copied(), Some("setPassEnabled"));
-    assert_eq!(names.last().copied(), Some("setGiQuality"));
+    assert_eq!(names.last().copied(), Some("setSphericalGi"));
 }

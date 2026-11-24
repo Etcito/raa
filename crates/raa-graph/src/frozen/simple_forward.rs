@@ -69,6 +69,10 @@ pub fn plan() -> crate::plan::GraphPlan {
                         "mode".to_string(),
                         crate::catalog::ParamValue::Enum("ltc".to_string()),
                     ),
+                    (
+                        "lightingOutput".to_string(),
+                        crate::catalog::ParamValue::Enum("combined".to_string()),
+                    ),
                 ],
                 inputs: vec![
                     crate::plan::PlanInput {
@@ -117,6 +121,10 @@ pub fn plan() -> crate::plan::GraphPlan {
                     },
                     crate::plan::PlanInput {
                         port: "opaqueDepth".to_string(),
+                        source: crate::plan::InputSource::Absent,
+                    },
+                    crate::plan::PlanInput {
+                        port: "sphericalLookup".to_string(),
                         source: crate::plan::InputSource::Absent,
                     },
                 ],

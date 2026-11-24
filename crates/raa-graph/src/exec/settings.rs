@@ -18,6 +18,11 @@ use raa_grading::{GradingDesc, GradingHandle};
 use raa_gtao::{AoDesc, GtaoHandle};
 use raa_lit::{AreaShadowSettings, AreaShadowTier, StochasticMode, StochasticShadowSettings};
 use raa_oit::{OitHandle, OitSettings};
+use raa_sdf_trace::mesh::{LightingOutput, SphericalGiSettings};
+use raa_shader::{
+    RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_DIFFUSE_AO_FEATURE, RAA_INDIRECT_ONLY_FEATURE,
+    RAA_SPHERICAL_GI_FEATURE,
+};
 use raa_shadow::{ShadowDesc, ShadowHandle};
 use raa_shafts::{ShaftsDesc, ShaftsHandle};
 use raa_ssr::{SsrDesc, SsrHandle};
@@ -30,6 +35,7 @@ use super::settings_post::{
     set_bloom, set_cel, set_dof, set_fog, set_grading, set_oit, set_shafts, set_ssr,
 };
 use crate::catalog::{FeatureId, ParamValue};
+use crate::runtime_lighting::{ISOLATION, SPHERICAL, SPHERICAL_KEYS, spherical_get, spherical_set};
 
 /// The `FrameGpu` feature id that selects the diffuse form factor for area lights: the
 /// `formFactor` mode. `crates/raa-js/src/api/m28_lights.rs:230` declares it as
@@ -48,6 +54,11 @@ const LOOKS: [(&str, Look); 3] = [
     ("golden", Look::Golden),
 ];
 const SHADING: [(&str, bool); 2] = [("ltc", false), ("formFactor", true)];
+const LIGHTING: [(&str, LightingOutput); 3] = [
+    ("combined", LightingOutput::Combined),
+    ("direct", LightingOutput::Direct),
+    ("indirect", LightingOutput::Indirect),
+];
 
 /// The Setting keys of `feature` in catalog key order: the members of its setter's input
 /// interface. Empty for a feature without Setting keys.
@@ -94,7 +105,9 @@ pub fn setting_keys(feature: &FeatureId) -> &'static [&'static str] {
             "stochasticMode",
         ],
         FeatureId::AreaShading => &["mode"],
-        FeatureId::Gtao => &["radius", "intensity", "power"],
+        &SPHERICAL => &SPHERICAL_KEYS[..SPHERICAL_KEYS.len() - 1],
+        &ISOLATION => &["lightingOutput"],
+        FeatureId::Gtao => &["radius", "intensity", "power", "indirectDiffuse"],
         FeatureId::Contact => &["distance", "thickness", "intensity"],
         FeatureId::Ssr => &["intensity", "maxRoughness", "thickness"],
         FeatureId::Fog => &[
@@ -184,6 +197,7 @@ pub fn snapshot_keys(feature: &FeatureId) -> &'static [&'static str] {
             "enabled",
             "screenSpace",
         ],
+        &SPHERICAL => SPHERICAL_KEYS,
         other => setting_keys(other),
     }
 }
@@ -300,7 +314,9 @@ enum Desc {
     Gi(GiSettings),
     AreaShadows((AreaShadowSettings, StochasticShadowSettings)),
     AreaShading(bool),
-    Gtao(AoDesc),
+    Gtao(AoDesc, bool),
+    Spherical(SphericalGiSettings),
+    Isolation(LightingOutput),
     Contact(ContactDesc),
     Ssr(SsrDesc),
     Fog(FogDesc),
@@ -325,7 +341,9 @@ fn default_desc(feature: &FeatureId) -> Option<Desc> {
             StochasticShadowSettings::standard(),
         )),
         FeatureId::AreaShading => Desc::AreaShading(false),
-        FeatureId::Gtao => Desc::Gtao(AoDesc::default()),
+        FeatureId::Gtao => Desc::Gtao(AoDesc::default(), false),
+        &SPHERICAL => Desc::Spherical(SphericalGiSettings::default()),
+        &ISOLATION => Desc::Isolation(LightingOutput::Combined),
         FeatureId::Contact => Desc::Contact(ContactDesc::default()),
         FeatureId::Ssr => Desc::Ssr(SsrDesc::default()),
         FeatureId::Fog => Desc::Fog(FogDesc::default()),
@@ -349,7 +367,9 @@ fn desc_of(applied: &AppliedDescs, feature: &FeatureId) -> Option<Desc> {
         FeatureId::Gi => Desc::Gi(applied.gi?),
         FeatureId::AreaShadows => Desc::AreaShadows(applied.area_shadows?),
         FeatureId::AreaShading => Desc::AreaShading(applied.area_shading?),
-        FeatureId::Gtao => Desc::Gtao(applied.gtao?),
+        FeatureId::Gtao => Desc::Gtao(applied.gtao?, applied.gtao_indirect),
+        &SPHERICAL => Desc::Spherical(applied.spherical?),
+        &ISOLATION => Desc::Isolation(applied.isolation?),
         FeatureId::Contact => Desc::Contact(applied.contact?),
         FeatureId::Ssr => Desc::Ssr(applied.ssr?),
         FeatureId::Fog => Desc::Fog(applied.fog?),
@@ -373,7 +393,14 @@ fn desc_get(desc: &Desc, key: &str) -> Option<ParamValue> {
         Desc::Gi(d) => get_gi(d, key),
         Desc::AreaShadows(d) => get_area_shadows(d, key),
         Desc::AreaShading(on) => get_area_shading(*on, key),
-        Desc::Gtao(d) => get_gtao(d, key),
+        Desc::Gtao(_, indirect) if key == "indirectDiffuse" => Some(ParamValue::Bool(*indirect)),
+        Desc::Gtao(d, _) => get_gtao(d, key),
+        Desc::Spherical(d) => spherical_get(*d, key),
+        Desc::Isolation(mode) if key == "lightingOutput" => LIGHTING
+            .iter()
+            .find(|(_, value)| value == mode)
+            .map(|(name, _)| ParamValue::Enum((*name).into())),
+        Desc::Isolation(_) => None,
         Desc::Contact(d) => get_contact(d, key),
         Desc::Ssr(d) => get_ssr(d, key),
         Desc::Fog(d) => get_fog(d, key),
@@ -397,7 +424,17 @@ fn desc_set(desc: &mut Desc, key: &str, value: &ParamValue) -> Result<(), String
         Desc::Gi(d) => set_gi(d, key, value),
         Desc::AreaShadows(d) => set_area_shadows(d, key, value),
         Desc::AreaShading(on) => set_area_shading(on, key, value),
-        Desc::Gtao(d) => set_gtao(d, key, value),
+        Desc::Gtao(_, indirect) if key == "indirectDiffuse" => {
+            *indirect = flag(key, value)?;
+            Ok(())
+        }
+        Desc::Gtao(d, _) => set_gtao(d, key, value),
+        Desc::Spherical(d) => spherical_set(d, key, value),
+        Desc::Isolation(mode) if key == "lightingOutput" => {
+            *mode = choice(key, value, |text| lookup(&LIGHTING, text))?;
+            Ok(())
+        }
+        Desc::Isolation(_) => Err(unknown(key)),
         Desc::Contact(d) => set_contact(d, key, value),
         Desc::Ssr(d) => set_ssr(d, key, value),
         Desc::Fog(d) => set_fog(d, key, value),
@@ -424,7 +461,9 @@ fn desc_check(desc: &Desc) -> Result<(), RaaError> {
             s.validate().map(|_| ())
         }
         Desc::AreaShading(_) => Ok(()),
-        Desc::Gtao(d) => d.validate(),
+        Desc::Gtao(d, _) => d.validate(),
+        Desc::Spherical(d) => d.validate().map(|_| ()),
+        Desc::Isolation(_) => Ok(()),
         Desc::Contact(d) => d.validate(),
         Desc::Ssr(d) => d.validate(),
         Desc::Fog(d) => d.validate(),
@@ -463,7 +502,29 @@ fn desc_apply(h: &mut FeatureHandles<'_>, desc: &Desc) -> Result<(), RaaError> {
             }
             Ok(())
         }
-        Desc::Gtao(d) => if_installed(h.handles.gtao.as_ref(), |g| g.set(*d)),
+        Desc::Gtao(d, indirect) => {
+            if_installed(h.handles.gtao.as_ref(), |g| g.set(*d))?;
+            if let Some(lit) = h.lit.as_deref_mut() {
+                lit.set_frame_feature(RAA_INDIRECT_DIFFUSE_AO_FEATURE, *indirect);
+            }
+            Ok(())
+        }
+        Desc::Spherical(d) => {
+            if_installed(h.handles.spherical.as_ref(), |gi| {
+                gi.borrow_mut().configure(*d)
+            })?;
+            if let Some(lit) = h.lit.as_deref_mut() {
+                lit.set_frame_feature(RAA_SPHERICAL_GI_FEATURE, d.enabled);
+            }
+            Ok(())
+        }
+        Desc::Isolation(mode) => {
+            if let Some(lit) = h.lit.as_deref_mut() {
+                lit.set_frame_feature(RAA_DIRECT_ONLY_FEATURE, *mode == LightingOutput::Direct);
+                lit.set_frame_feature(RAA_INDIRECT_ONLY_FEATURE, *mode == LightingOutput::Indirect);
+            }
+            Ok(())
+        }
         Desc::Contact(d) => if_installed(h.handles.contact.as_ref(), |c| c.set(*d)),
         Desc::Ssr(d) => if_installed(h.handles.ssr.as_ref(), |s| s.set(*d)),
         Desc::Fog(d) => if_installed(h.handles.fog.as_ref(), |f| f.set(*d)),
@@ -547,6 +608,9 @@ pub struct AppliedDescs {
     pub area_shadows: Option<(AreaShadowSettings, StochasticShadowSettings)>,
     pub area_shading: Option<bool>,
     pub gtao: Option<AoDesc>,
+    gtao_indirect: bool,
+    spherical: Option<SphericalGiSettings>,
+    isolation: Option<LightingOutput>,
     pub contact: Option<ContactDesc>,
     pub ssr: Option<SsrDesc>,
     pub fog: Option<FogDesc>,
@@ -576,6 +640,20 @@ impl AppliedDescs {
                 .as_deref()
                 .map(|lit| lit.frame_feature(AREA_FORM_FACTOR_FEATURE_ID)),
             gtao: h.handles.gtao.as_ref().map(GtaoHandle::get),
+            gtao_indirect: h
+                .lit
+                .as_deref()
+                .is_some_and(|lit| lit.frame_feature(RAA_INDIRECT_DIFFUSE_AO_FEATURE)),
+            spherical: h.handles.spherical.as_ref().map(|gi| gi.borrow().settings),
+            isolation: h.lit.as_deref().map(|lit| {
+                if lit.frame_feature(RAA_DIRECT_ONLY_FEATURE) {
+                    LightingOutput::Direct
+                } else if lit.frame_feature(RAA_INDIRECT_ONLY_FEATURE) {
+                    LightingOutput::Indirect
+                } else {
+                    LightingOutput::Combined
+                }
+            }),
             contact: h.handles.contact.as_ref().map(ContactHandle::get),
             ssr: h.handles.ssr.as_ref().map(SsrHandle::get),
             fog: h.handles.fog.as_ref().map(FogHandle::get),
@@ -607,13 +685,19 @@ impl AppliedDescs {
         if self.gi != live.gi {
             out.push(FeatureId::Gi);
         }
+        if self.spherical != live.spherical {
+            out.push(SPHERICAL);
+        }
+        if self.isolation != live.isolation {
+            out.push(ISOLATION);
+        }
         if self.area_shadows != live.area_shadows {
             out.push(FeatureId::AreaShadows);
         }
         if self.area_shading != live.area_shading {
             out.push(FeatureId::AreaShading);
         }
-        if self.gtao != live.gtao {
+        if self.gtao != live.gtao || self.gtao_indirect != live.gtao_indirect {
             out.push(FeatureId::Gtao);
         }
         if self.contact != live.contact {
@@ -974,6 +1058,7 @@ mod tests {
                 pair("radius", ParamValue::Number(0.8f32 as f64)),
                 pair("intensity", ParamValue::Number(0.6f32 as f64)),
                 pair("power", ParamValue::Number(1.0)),
+                pair("indirectDiffuse", ParamValue::Bool(false)),
             ]
         );
     }

@@ -9,7 +9,7 @@
 export interface EngineOptions {
   /**
    * Name of a frozen render-graph pipeline to install after the engine is created, for example
-   * `simple_forward`, `full_gi` or `debug` (S60). The wrapper removes this key before calling the
+   * `simple_forward`, `full_gi`, `debug` or `spherical_gi` (S60). The wrapper removes this key before calling the
    * Engine constructor, then calls {@link Engine.setFrozenRenderGraph}; a refusal disposes the new
    * engine and rejects the promise with the issue codes. Absent = no pipeline, and the promise
    * keeps today's behaviour.

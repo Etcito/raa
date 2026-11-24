@@ -466,9 +466,9 @@ fn node_ids_are_lower_camel_case_and_the_colour_chain_runs_forward_to_out() {
 }
 
 #[test]
-fn owned_setters_has_the_twenty_s54_setters_starting_with_set_pass_enabled() {
+fn owned_setters_start_with_set_pass_enabled() {
     let setters = GraphExecutor::owned_setters();
-    assert_eq!(setters.len(), 20);
+    assert_eq!(setters.len(), 21);
     assert_eq!(setters.first().copied(), Some("setPassEnabled"));
 }
 

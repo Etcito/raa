@@ -19,7 +19,7 @@ interface Engine {
 A frozen pipeline is a starter graph written as Rust literals: `crates/raa-graph/src/frozen/`
 holds one module `<name>.rs` (with `pub fn plan() -> GraphPlan`) and the committed source
 `<name>.json` (`SOURCE_JSON`). The `raa-graph` build registers all of them in `frozen_all()`.
-The three starters are `simple_forward`, `full_gi` and `debug`; `renderGraphCatalog().frozen`
+The shipped graphs are `simple_forward`, `full_gi`, `debug` and `spherical_gi`; `renderGraphCatalog().frozen`
 lists the names this engine knows.
 
 The plan is applied **as written**. The method does not replan the frozen execution: it reads the
