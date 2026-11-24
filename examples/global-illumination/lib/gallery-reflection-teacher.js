@@ -12,7 +12,7 @@ export async function reflectionGraph() {
   return graph;
 }
 
-export function reflectionInputs(incident, meta, trace) {
+export function reflectionInputs(incident, meta, trace, minimum = 25) {
   const pixels = incident.length / 4;
   const input = new Float32Array(pixels * 6);
   let accepted = 0;
@@ -24,7 +24,7 @@ export function reflectionInputs(incident, meta, trace) {
       accepted++;
     }
   }
-  if (accepted < 25) throw new Error(`Only ${accepted} accepted SSR screen hits`);
+  if (accepted < minimum) throw new Error(`Only ${accepted} accepted SSR screen hits`);
   return { input, trace, accepted };
 }
 
@@ -69,8 +69,9 @@ function coneLevels(hdr, sceneSize, displaySize, jitter) {
 }
 
 export function reflectionTeacher(guides, independentBatches, sceneSize, displaySize, jitter, tolerance) {
-  const chains = independentBatches.map(hdr => coneLevels(hdr, sceneSize, displaySize, jitter));
   const target = new Float32Array(guides.trace.length / 4 * 3);
+  if (guides.accepted === 0) return { target, logRmse: null, linearRmse: null, tolerance, accepted: 0 };
+  const chains = independentBatches.map(hdr => coneLevels(hdr, sceneSize, displaySize, jitter));
   let logError = 0, linearError = 0;
   for (let p = 0; p < target.length / 3; p++) {
     if (guides.input[p * 6 + 3] !== 1) continue;

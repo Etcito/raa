@@ -2,11 +2,11 @@
 // camera curve, moving geometry, light events and reference seed range.
 const replays = {
   'joint-train-a':       ['train',       false, 16, 5, 11, 0.18, -0.42, -0.96,  0.22, 0.22, 0.77],
-  'joint-train-b':       ['train',       true,  18, 7, 12, 1.20,  0.71, -0.25, -0.41, 1.60, 0.41],
+  'joint-train-b':       ['train',       true,  18, 7, 12, 1.20,  0.71, -0.95, -0.41, 1.60, 0.41],
   'joint-train-c':       ['train',       false, 16, 6, 10, -0.4, 0.38, -0.80,  0.62, 0.91, 1.33],
-  'joint-development':   ['development', true,  19, 8, 13, 0.86, -0.77, 0.21,  0.33, 1.49, 0.36],
-  'joint-final-a':       ['test',        true,  22, 6, 15, 1.35, -0.61, 0.54, -0.26, 0.19, 1.51],
-  'joint-final-b':       ['test',        false, 21, 9, 16, -0.5, 0.48, -0.13, -0.72, 1.67, 0.18],
+  'joint-development':   ['development', true,  19, 8, 13, 0.86, -0.77, -1.24,  0.33, 1.49, 0.36],
+  'joint-final-a':       ['test',        true,  22, 6, 15, 1.35, -0.61, -1.60, -0.26, 0.19, 1.51],
+  'joint-final-b':       ['test',        false, 21, 9, 16, -0.5, 0.48, -0.75, -0.72, 1.67, 0.18],
 };
 
 export function jointTrajectory(id) {

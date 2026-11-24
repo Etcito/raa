@@ -270,7 +270,7 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
         if (reflection) {
           const [w, h] = sceneSize;
           const incident = floats(taps.reflectionIncident, w * h * 4, false);
-          const guides = reflectionInputs(incident, meta, signals.reflectionHit);
+          const guides = reflectionInputs(incident, meta, signals.reflectionHit, joint ? 0 : undefined);
           counts.reflectionAccepted = guides.accepted;
           reflectionGuides.push(guides);
           planes.reflection = await save(files, frameKey, 'reflection', sceneSize, guides.input);
@@ -286,7 +286,8 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
       if (!frames.some(frame => frame.counts.moved > 300 && frame.counts.historyValid > 100
           && frame.counts.disocclusion > 20)
           || ((!reflection || joint) && !frames.some(frame => frame.counts.reflectionOffscreen > 20))
-          || !frames.some(frame => frame.event && frame.counts.reactive > 100)) {
+          || !frames.some(frame => frame.event && frame.counts.reactive > 100)
+          || (joint && frames.filter(frame => frame.counts.reflectionAccepted > 100).length < 4)) {
         throw new Error(`${id} is missing an effective motion, disocclusion, offscreen reflection or lighting event`);
       }
       if (raster) {
@@ -406,3 +407,5 @@ export async function verifyGalleryReflection({ target, canvas, raa }, { buildId
     engine.dispose();
   }
 }
+
+export { create as createGalleryReplay, floats as decodeGalleryTap, warmSequence as warmGalleryReplay };
