@@ -6,6 +6,7 @@
     "area-pilot",
     "gallery-path-capture",
     "gallery-path-measure",
-    "gallery-path-diffuse"
+    "gallery-path-diffuse",
+    "gallery-panel-noise"
   ]
 }

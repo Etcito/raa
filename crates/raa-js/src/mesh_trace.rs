@@ -9,7 +9,7 @@ use raa_math::Mat4;
 use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use raa_sdf_trace::mesh::{
     DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle,
-    MeshTraceMaterial, MeshTraceSettings, PathMode, REFERENCE_SPP,
+    MeshTraceMaterial, MeshTraceSettings, PanelSampling, PathMode, REFERENCE_SPP,
 };
 use wasm_bindgen::prelude::*;
 
@@ -181,6 +181,13 @@ impl Engine {
                     Some(_) => {
                         return Err(api_error("trace.invalid_settings", "unknown diffuseOutput"));
                     }
+                },
+                panel_sampling: match js::optional_string(&options, "panelSampling")?.as_deref() {
+                    None => previous.panel_sampling,
+                    Some("stable") => PanelSampling::Stable,
+                    Some("single") => PanelSampling::Single,
+                    Some("independent") => PanelSampling::Independent,
+                    Some(_) => return Err(api_error("trace.invalid_settings", "unknown panelSampling")),
                 },
                 path_mode: match js::optional_string(&options, "pathMode")?.as_deref() {
                     None => previous.path_mode,

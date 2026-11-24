@@ -1033,12 +1033,13 @@ impl Engine {
         Ok(output.into())
     }
 
-    /// Reads linear RGBA16F from the mesh trace composite or the ordinary forward pass.
+    /// Reads linear RGBA16F from the mesh trace output or the ordinary forward pass.
     #[wasm_bindgen(js_name = captureMeshLighting)]
     pub async fn capture_mesh_lighting(
         &mut self,
         now_ms: f64,
         traced: bool,
+        raw: Option<bool>,
     ) -> Result<JsValue, JsValue> {
         if !now_ms.is_finite() {
             return Err(js_err(&invalid(
@@ -1063,14 +1064,21 @@ impl Engine {
                     "mesh lighting capture requires one submitted primary view".into(),
                 ));
             }
-            let producer = if traced { "trace.mesh" } else { "forward" };
+            let (producer, port) = match (traced, raw.unwrap_or(false)) {
+                (true, true) => ("trace.mesh", "radiance"),
+                (true, false) => ("trace.mesh", "color"),
+                (false, false) => ("forward", "color"),
+                (false, true) => {
+                    return Err(invalid("raw mesh lighting capture requires tracing".into()));
+                }
+            };
             pipeline
                 .resources()
-                .get(producer, "color")
+                .get(producer, port)
                 .map(|image| image.view.texture().clone())
                 .ok_or_else(|| {
                     invalid(format!(
-                        "missing mesh lighting capture tap {producer}.color"
+                        "missing mesh lighting capture tap {producer}.{port}"
                     ))
                 })
         })?;

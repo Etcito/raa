@@ -32,6 +32,8 @@ export interface MeshTracingSettings {
   confidenceThreshold?: number;
   reflectionBounces?: number;
   pathBounces?: number;
+  /** Single-draw and independent 128-draw controls are intended for comparisons. */
+  panelSampling?: 'stable' | 'single' | 'independent';
   diffuseOutput?: 'off' | 'direct' | 'direct-and-indirect';
   /** Selects the lighting contribution for the forward or full-frame mesh output. Default combined. */
   lightingOutput?: 'combined' | 'direct' | 'indirect' | 'bounce';
@@ -77,7 +79,7 @@ export interface Engine {
   /** Loads a specular model in validated 12→8→3 little-endian FP32 tensor order. */
   setMeshPathModel(weights: Uint8Array): void;
   /** Reads the renderer's tight, little-endian linear RGBA16F scene color. */
-  captureMeshLighting(nowMs: number, traced: boolean): Promise<{ size: [number, number]; data: Uint8Array }>;
+  captureMeshLighting(nowMs: number, traced: boolean, raw?: boolean): Promise<{ size: [number, number]; data: Uint8Array }>;
   /** Captures one fixed-seed specular RGB sample and guides from short or traced mode. */
   captureMeshPathSample(nowMs: number, seed: number): Promise<{ size: [number, number]; data: Uint8Array }>;
 }

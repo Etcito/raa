@@ -168,6 +168,71 @@ fn direct_brdf(mat: Material, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, diffuse_
     return bsdf(mat, n, v, l);
 }
 
+// Area-normalized integration of the actual emitter geometry, BRDF and
+// visibility. The same integrand is used by the live and offline samplers.
+fn panel_sample(light: Light, p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                mat: Material, axes: mat3x3<f32>, uv: vec2<f32>, diffuse_only: bool) -> vec3<f32> {
+    let delta = light.position_range.xyz + axes * vec3<f32>(uv.x * light.width, uv.y * light.height, 0.0) - p;
+    let distance_squared = dot(delta, delta);
+    let distance = sqrt(distance_squared);
+    if distance >= light.position_range.w { return vec3<f32>(0.0); }
+    let l = delta / max(distance, EPS);
+    let nl = dot(n, l);
+    let emitter_cosine = dot(axes[2], -l);
+    if nl <= 0.0 || dot(ng, l) <= 0.0 || emitter_cosine <= 0.0
+        || closest(Ray(p + ng * (2.0 * EPS), l), distance - 2.0 * EPS, true).object != MISS {
+        return vec3<f32>(0.0);
+    }
+    let ratio = distance / light.position_range.w;
+    let ratio_squared = ratio * ratio;
+    let window = 1.0 - ratio_squared * ratio_squared;
+    // Packed RGB is intensity. The inverse uniform-area PDF cancels the
+    // conversion from intensity to radiance, including the small-area floor.
+    let area = light.width * light.height;
+    let weight = (area / max(area, 1e-8)) * emitter_cosine * window * window / max(distance_squared, 0.04);
+    return direct_brdf(mat, n, v, l, diffuse_only) * (nl * weight * light.radiance.rgb);
+}
+
+const PANEL_NODES = array<f32, 3>(-0.3872983346, 0.0, 0.3872983346);
+const PANEL_WEIGHTS = array<f32, 3>(5.0 / 18.0, 4.0 / 9.0, 5.0 / 18.0);
+
+fn direct_panel(light: Light, p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                mat: Material, seed: ptr<function, u32>, light_index: u32, diffuse_only: bool) -> vec3<f32> {
+    // Advance the path RNG by the same two words as the single-sample
+    // estimator, so changing this integral does not scramble later bounces.
+    let uv = vec2<f32>(random(seed), random(seed)) - 0.5;
+    let travel = light.direction_outer.xyz;
+    if dot(p - light.position_range.xyz, travel) <= 0.0 { return vec3<f32>(0.0); }
+    let axes = basis(travel);
+    let sampler = options[3].x;
+    if sampler == 1u || options[0].w != 0u {
+        return panel_sample(light, p, ng, n, v, mat, axes, uv, diffuse_only);
+    }
+
+    var sum = vec3<f32>(0.0);
+    if sampler == 2u {
+        // Diagnostic-only teacher. Two successive frames give independent seed
+        // sets even when the camera and all geometry are held fixed.
+        var reference_seed = *seed ^ (options[2].w * 277803737u) ^ (light_index * 1597334677u);
+        for (var i = 0u; i < 128u; i++) {
+            let q = vec2<f32>(random(&reference_seed), random(&reference_seed)) - 0.5;
+            sum += panel_sample(light, p, ng, n, v, mat, axes, q, diffuse_only);
+        }
+        return sum / 128.0;
+    }
+
+    // Tensor-product Gauss–Legendre quadrature on the emitter. Locations and
+    // weights depend on the light frame, never on pixel identity or frame time.
+    for (var y = 0u; y < 3u; y++) {
+        for (var x = 0u; x < 3u; x++) {
+            let q = vec2<f32>(PANEL_NODES[x], PANEL_NODES[y]);
+            let rgb = panel_sample(light, p, ng, n, v, mat, axes, q, diffuse_only);
+            sum += (PANEL_WEIGHTS[x] * PANEL_WEIGHTS[y]) * rgb;
+        }
+    }
+    return sum;
+}
+
 fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
                   seed: ptr<function, u32>, diffuse_only: bool) -> vec3<f32> {
     let origin = p + ng * (2.0 * EPS);
@@ -182,13 +247,11 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
         let light = lights[i];
         if !any(light.radiance.rgb > vec3<f32>(0.0)) { continue; }
         let travel = light.direction_outer.xyz;
-        var position = light.position_range.xyz;
-        let area = light.kind == 3u;
-        if area {
-            let uv = vec2<f32>(random(seed) - 0.5, random(seed) - 0.5);
-            position += basis(travel) * vec3<f32>(uv.x * light.width, uv.y * light.height, 0.0);
+        if light.kind == 3u {
+            direct += direct_panel(light, p, ng, n, v, mat, seed, i, diffuse_only);
+            continue;
         }
-        let delta = position - p;
+        let delta = light.position_range.xyz - p;
         var distance = length(delta);
         var l = delta / max(distance, EPS);
         var weight = 1.0;
@@ -199,12 +262,6 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
             if distance >= light.position_range.w { continue; }
             let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
             weight = window * window / max(distance * distance, 0.04);
-            if area {
-                // Packed RGB is total intensity. Radiance is intensity / area,
-                // while the uniform-area sample has PDF 1 / area.
-                let area_size = light.width * light.height;
-                weight *= (area_size / max(area_size, 1e-8)) * saturate(dot(travel, -l));
-            }
             if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(travel, -l)); }
         }
         let nl = saturate(dot(n, l));

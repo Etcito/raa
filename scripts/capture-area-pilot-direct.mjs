@@ -10,10 +10,10 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const [chromeArg, pageArg, outputArg, op = 'area-pilot', comparison = 'fixed'] = process.argv.slice(2);
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
-const gallery = op.startsWith('gallery-path-');
+const gallery = op.startsWith('gallery-');
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure|gallery-path-diffuse] [baseline|fixed]');
+    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise] [baseline|fixed]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -164,6 +164,17 @@ try {
         await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
       }
     }
+  } else if (op === 'gallery-panel-noise') {
+    for (const { planes } of data.frames) {
+      for (const plane of Object.values(planes)) {
+        const bytes = files.get(plane.file);
+        if (!/^pan-[0-9]+-[a-z]+\.bin$/.test(plane.file) || !bytes ||
+            bytes.length !== plane.byteLength || createHash('sha256').update(bytes).digest('hex') !== plane.sha256) {
+          throw new Error(`Panel plane length or hash mismatch: ${plane.file}`);
+        }
+        await writeFile(path.join(output, plane.file), bytes, { flag: 'wx' });
+      }
+    }
   } else if (op === 'gallery-path-measure') {
     for (const row of data.cases) {
       const bytes = files.get(row.file);
@@ -176,7 +187,8 @@ try {
     ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
     receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
   };
-  const manifest = path.join(output, capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json' : 'measurement.json');
+  const manifest = path.join(output, capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
+    : op === 'gallery-panel-noise' ? 'panel-noise.json' : 'measurement.json');
   await writeFile(manifest, JSON.stringify({ ...data, source, windows: { browser: version.Browser, renderer, device: nvidia, webgpu } }, null, 2) + '\n', { flag: 'wx' });
   console.log(manifest);
 } catch (error) {

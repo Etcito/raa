@@ -51,6 +51,15 @@ impl LightingOutput {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum PanelSampling {
+    #[default]
+    Stable,
+    Single,
+    Independent,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshTraceSettings {
     pub reflections: bool,
@@ -60,6 +69,7 @@ pub struct MeshTraceSettings {
     pub path_bounces: u32,
     pub path_mode: PathMode,
     pub diffuse_output: DiffuseOutput,
+    pub panel_sampling: PanelSampling,
     pub lighting_output: LightingOutput,
 }
 
@@ -73,6 +83,7 @@ impl Default for MeshTraceSettings {
             path_bounces: 2,
             path_mode: PathMode::Off,
             diffuse_output: DiffuseOutput::Off,
+            panel_sampling: PanelSampling::Stable,
             lighting_output: LightingOutput::Combined,
         }
     }

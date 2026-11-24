@@ -323,3 +323,164 @@ export async function measureGalleryDiffuse(context, { buildId, requireFixed = t
     space: 'linear-scene-rgb-from-rgba16f', regions: REGIONS, requireFixed, cases,
   }, files: [] };
 }
+
+const PANEL_ROI = [132, 67, 206, 100];
+const PANEL_ESTIMATORS = ['single', 'stable', 'referenceA', 'referenceB'];
+
+function reflectionCrop(sample) {
+  const [width, height] = sample.size;
+  if (width !== 320 || height !== 180 || sample.data.byteLength !== width * height * 8) {
+    throw new Error('Expected half-resolution linear RGBA16F mesh reflection samples');
+  }
+  const [x0, y0, x1, y1] = PANEL_ROI;
+  const result = new Float32Array((x1 - x0) * (y1 - y0) * 4);
+  const view = new DataView(sample.data.buffer, sample.data.byteOffset, sample.data.byteLength);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const src = (y * width + x) * 8, dst = ((y - y0) * (x1 - x0) + x - x0) * 4;
+      for (let c = 0; c < 4; c++) result[dst + c] = half(view, src + c * 2);
+    }
+  }
+  return result;
+}
+
+function panelContribution(on, off) {
+  return on.map((value, i) => i % 4 === 3 ? Number(value === 1 && off[i] === 1) : value - off[i]);
+}
+
+function panelErrors(frames) {
+  const rowWidth = PANEL_ROI[2] - PANEL_ROI[0];
+  const rms = (squares, count) => Math.sqrt(squares / count);
+  const reports = {};
+  for (const name of ['single', 'stable']) {
+    let spatial = 0, fine = 0, temporal = 0, referenceBatch = 0;
+    let pixels = 0, edges = 0, pairs = 0;
+    const energy = [0, 0, 0], referenceEnergy = [0, 0, 0];
+    let previous;
+    for (const frame of frames) {
+      const { referenceA: a, referenceB: b } = frame;
+      const estimate = frame[name], residual = new Float32Array(a.length);
+      for (let i = 0; i < a.length; i += 4) {
+        if (a[i + 3] !== 1 || b[i + 3] !== 1 || estimate[i + 3] !== 1) continue;
+        residual[i + 3] = 1;
+        pixels++;
+        for (let c = 0; c < 3; c++) {
+          const j = i + c, target = (a[j] + b[j]) / 2;
+          residual[j] = estimate[j] - target;
+          spatial += residual[j] ** 2;
+          referenceBatch += (a[j] - b[j]) ** 2;
+          energy[c] += estimate[j];
+          referenceEnergy[c] += target;
+        }
+      }
+      for (let i = 0; i < residual.length; i += 4) {
+        if (residual[i + 3] !== 1) continue;
+        if (previous?.[i + 3] === 1) {
+          pairs++;
+          for (let c = 0; c < 3; c++) temporal += (residual[i + c] - previous[i + c]) ** 2;
+        }
+        const right = (i / 4) % rowWidth < rowWidth - 1 ? i + 4 : -4;
+        for (const next of [right, i + rowWidth * 4]) {
+          if (residual[next + 3] !== 1) continue;
+          edges++;
+          for (let c = 0; c < 3; c++) fine += (residual[i + c] - residual[next + c]) ** 2;
+        }
+      }
+      previous = residual;
+    }
+    if (!pixels || !edges || !pairs || referenceEnergy.some(value => value <= 0)) {
+      throw new Error('Missing reflected direct panel signal');
+    }
+    reports[name] = {
+      pixels, edges, pairs, spatialRmse: rms(spatial, 3 * pixels), fineSpatialRmse: rms(fine, 3 * edges),
+      temporalRmse: rms(temporal, 3 * pairs), referenceBatchRmse: rms(referenceBatch, 3 * pixels),
+      meanRgb: energy.map(value => value / pixels), referenceMeanRgb: referenceEnergy.map(value => value / pixels),
+    };
+  }
+  return reports;
+}
+
+export async function measureGalleryPanelNoise(context, { buildId, requireFixed = true } = {}) {
+  const { engine, source, state, setPose } = await create(context, buildId, 640, 360);
+  const files = [], frames = [], samples = [];
+  try {
+    engine.setLight({ ...volumeRoom().sun, intensity: 0 });
+    engine.setPassEnabled('ao.gtao', false);
+    const configure = panelSampling => {
+      engine.setMeshTracing({
+        reflections: true, reference: false, pathMode: 'off', diffuseOutput: 'off',
+        reflectionBounces: 2, confidenceThreshold: 1, panelSampling,
+      });
+    };
+    const render = async panelSampling => {
+      configure(panelSampling);
+      return reflectionCrop(await engine.captureMeshLighting(TIME, true, true));
+    };
+    const camera = CAMERAS[0];
+    for (let i = 0; i < 9; i++) {
+      const shift = (i - 4) * 0.022;
+      const pose = {
+        eye: [camera.eye[0] + shift, ...camera.eye.slice(1)],
+        target: [camera.target[0] + shift, ...camera.target.slice(1)],
+      };
+      setPose(pose);
+      // Change the light intensity alone. Keep emissive mesh color, geometry,
+      // sky and all other shading fixed so the linear difference is direct panel light.
+      for (const light of state.fixtures) engine.updateLight(light.light, { intensity: 0 });
+      const off = await render('single');
+      for (const light of state.fixtures) engine.updateLight(light.light, { intensity: light.intensity });
+      const data = {};
+      const planes = {};
+      for (const name of PANEL_ESTIMATORS) {
+        const sampler = name.startsWith('reference') ? 'independent' : name;
+        data[name] = panelContribution(await render(sampler), off);
+        const stats = engine.meshTracingStats();
+        if (!stats?.traced || stats.acceptedScreen !== 0 || stats.eligible !== stats.traced) {
+          throw new Error('Panel comparison needs actual mirror-traced pixels without screen reuse');
+        }
+        const [x0, y0, x1, y1] = PANEL_ROI;
+        planes[name] = await plane(files, `pan-${i}-${name.toLowerCase()}.bin`, [y1 - y0, x1 - x0, 4], data[name]);
+      }
+      frames.push({ pose, planes });
+      samples.push(data);
+    }
+    const errors = panelErrors(samples);
+    const { stable, single } = errors;
+    if (requireFixed && (
+      stable.referenceBatchRmse >= single.spatialRmse * 0.25
+      || stable.spatialRmse >= single.spatialRmse * 0.65
+      || stable.fineSpatialRmse >= single.fineSpatialRmse * 0.65
+      || stable.temporalRmse >= single.temporalRmse * 0.7
+      || stable.meanRgb.some((value, c) => Math.abs(value / stable.referenceMeanRgb[c] - 1) > 0.05)
+    )) throw new Error(`Panel reflection stability regression: ${JSON.stringify(errors)}`);
+    setPose(camera);
+    const gpuTimings = {};
+    for (const mode of ['single', 'stable']) {
+      configure(mode);
+      for (let i = 0; i < 6; i++) {
+        engine.render(TIME);
+        await engine.submittedWorkDone();
+        engine.passGpuTimings();
+      }
+      const timings = new Map();
+      for (let i = 0; i < 48 && timings.size < 16; i++) {
+        engine.render(TIME);
+        await engine.submittedWorkDone();
+        const sample = engine.passGpuTimings();
+        if (sample.status === 'unavailable') throw new Error(`GPU timestamps unavailable: ${sample.reason}`);
+        const pass = sample.passes?.find(stage => stage.pass === 'trace.mesh');
+        if (pass?.ms != null) timings.set(sample.frame, pass.ms);
+      }
+      if (timings.size < 16) throw new Error(`Missing mesh pass timestamps for ${mode}`);
+      gpuTimings[mode] = [...timings].map(([frame, ms]) => ({ frame, ms }));
+    }
+    return { json: {
+      source, size: [640, 360], reflectionSize: [320, 180], roi: PANEL_ROI, requireFixed, ...layout,
+      case: 'static gallery with laterally moving camera and geometry-traced rear mirror',
+      signal: 'linear scene RGB, panel intensities on minus off; alpha marks mirror coverage',
+      referenceSamplesPerPanel: [128, 128], frames, errors, gpuTimings,
+    }, files };
+  } finally {
+    engine.dispose();
+  }
+}

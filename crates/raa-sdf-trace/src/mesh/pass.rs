@@ -117,7 +117,7 @@ impl FeaturePass for MeshTracePass {
             path_mode as u32,
             settings.diffuse_output as u32,
             ctx.frame as u32,
-            0, // Reserved for the direct-light sampler.
+            settings.panel_sampling as u32,
             settings.lighting_output.code(),
             0,
             0,
@@ -223,6 +223,12 @@ impl FeaturePass for MeshTracePass {
             pass.set_bind_group(0, &composite_group, &[]);
             pass.draw(0..3, 0..1);
         }
+        ctx.resources.publish(
+            MESH_TRACE_NAME,
+            "radiance",
+            &images.radiance,
+            ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1),
+        );
         filtered.swap();
         ctx.resources.publish(
             MESH_TRACE_NAME,
@@ -316,7 +322,7 @@ impl Images {
                 "trace.mesh.radiance",
                 trace_size,
                 HDR_FORMAT,
-                wgpu::TextureUsages::STORAGE_BINDING,
+                wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
             ),
             previous_depth: image(
                 device,
