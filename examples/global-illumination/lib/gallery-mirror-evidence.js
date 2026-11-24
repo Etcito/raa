@@ -63,11 +63,15 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     engine.setAutoExposure({ enabled: false });
     engine.setToneMapping({ exposureEv: 0 });
 
+    async function render() {
+      checkTime();
+      engine.render(timeMs);
+      await engine.submittedWorkDone();
+    }
+
     async function settle(grid) {
       for (let i = 0; i < 160; i++) {
-        checkTime();
-        engine.render(timeMs);
-        await engine.submittedWorkDone();
+        await render();
         const volume = engine.giStats();
         const spherical = engine.sphericalGiStats();
         if (i >= 7 && !volume.pendingRebuild && (grid === 'volume' ||
@@ -142,7 +146,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     let sharp, learned, reference;
     try {
       if (priorityOnly) {
-        const priority = await measureMirrorPriority({ engine, set, settle, capture, camera: preset.selection.camera,
+        const priority = await measureMirrorPriority({ engine, set, settle, capture, render, camera: preset.selection.camera,
           check: requireEvidence, compare });
         return { json: { ...manifest, priority }, files };
       }

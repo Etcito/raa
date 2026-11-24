@@ -1,4 +1,4 @@
-export async function measureMirrorPriority({ engine, set, settle, capture, check, compare, camera }) {
+export async function measureMirrorPriority({ engine, set, settle, capture, render, check, compare, camera }) {
   const results = [];
   const snapshot = async id => {
     const sample = await capture(id, true, true);
@@ -34,24 +34,38 @@ export async function measureMirrorPriority({ engine, set, settle, capture, chec
       && row.measured.firstHitHits === a.measured.firstHitHits), 'Priority changed true first geometry intersections', results.map(row => row.measured));
     const translate = dx => ({ ...camera, eye: [camera.eye[0] + dx, ...camera.eye.slice(1)],
       target: [camera.target[0] + dx, ...camera.target.slice(1)] });
-    set('gi-grid', 'volume');
-    engine.setMeshTracing({ mirrorPriority: 'on' });
-    set('gi-grid', 'spherical');
-    await settle('spherical');
-    const motionBase = await snapshot('priority-motion-home');
-    engine.setCamera(translate(0.12));
-    const small = await snapshot('priority-motion-small');
-    check(small.cache.originEpoch === motionBase.cache.originEpoch, 'Small camera movement recentered priority state', small.cache);
-    engine.setCamera(translate(1.35));
-    const recenter = await snapshot('priority-motion-recenter-first');
-    check(recenter.cache.originEpoch > small.cache.originEpoch
-      && recenter.cache.readyFaces < small.cache.readyFaces, 'Camera recenter mixed incompatible old and new faces', { small, recenter });
-    await settle('spherical');
-    const warmed = await snapshot('priority-motion-recenter-ready');
-    check(warmed.cache.originEpoch === recenter.cache.originEpoch && warmed.cache.readyCells > 0,
-      'Recentered priority cache did not settle', warmed.cache);
+    const motion = [];
+    for (const policy of ['measure', 'on']) {
+      set('gi-grid', 'volume');
+      engine.setCamera(camera);
+      engine.setMeshTracing({ mirrorPriority: policy });
+      set('gi-grid', 'spherical');
+      await settle('spherical');
+      const home = await snapshot(`priority-motion-${policy}-home`);
+      const walk = [];
+      for (let step = 1; step <= 32; step++) {
+        engine.setCamera(translate(0.02 * step));
+        if (step % 4 === 0) walk.push({ step, ...await snapshot(`priority-motion-${policy}-step-${step}`) });
+        else await render();
+      }
+      const last = walk.at(-1);
+      check(walk.every(sample => sample.cache.originEpoch === home.cache.originEpoch),
+        'Sub-threshold camera movement recentered priority state', walk.map(row => row.cache.originEpoch));
+      engine.setCamera(translate(1.35));
+      const recenter = await snapshot(`priority-motion-${policy}-recenter-first`);
+      check(recenter.cache.originEpoch > last.cache.originEpoch && recenter.cache.readyFaces < last.cache.readyFaces,
+        'Camera recenter mixed incompatible old and new faces', { last, recenter });
+      await settle('spherical');
+      const warmed = await snapshot(`priority-motion-${policy}-recenter-ready`);
+      check(warmed.cache.originEpoch === recenter.cache.originEpoch && warmed.cache.readyCells > 0,
+        'Recentered priority cache did not settle', warmed.cache);
+      motion.push({ policy, home, walk, recenter, warmed });
+    }
+    const matchingMotionHits = motion[0].walk.every((sample, i) => sample.firstHitHash === motion[1].walk[i].firstHitHash
+      && sample.firstHitHits === motion[1].walk[i].firstHitHits);
+    check(matchingMotionHits, 'Priority changed first geometry intersections at matching motion poses');
     return { cap: 128, reservedLimit: 32, fixed: results.map(({ policy, measured }) => ({ policy, ...measured })),
-      primaryHdr: compare(a.forward.rgb, b.forward.rgb), motion: { small, recenter, warmed } };
+      primaryHdr: compare(a.forward.rgb, b.forward.rgb), motion, matchingMotionHits };
   } finally {
     engine.setMeshTracing({ mirrorPriority: 'off' });
     engine.setCamera(camera);
