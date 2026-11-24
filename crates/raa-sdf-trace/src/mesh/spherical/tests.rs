@@ -540,3 +540,74 @@ fn pending_light_metadata_is_conservative_and_stale_readback_is_rejected() {
     assert!(scheduler.record_face_lighting(retried, None, &[SKY_LIGHT_ID]));
     assert!(!scheduler.record_face_lighting(retried, None, &[20]));
 }
+
+#[test]
+fn rotating_view_admits_visible_geometry_without_resetting_retained_faces() {
+    let mut scene = MeshTraceScene::default();
+    let visible = [[-0.1, -0.1, -5.0], [0.1, -0.1, -5.0], [0.0, 0.1, -5.0]];
+    update_geometry(
+        &mut scene,
+        &[
+            triangle(1, &facing_x(1.5)),
+            triangle(2, &facing_x(-1.5)),
+            triangle(3, &visible),
+        ],
+    );
+    let mut scheduler = SphericalScheduler::new(SphericalSchedulerConfig {
+        max_cells: 2,
+        cell_queries_per_update: 3,
+        ..config()
+    })
+    .unwrap();
+    scheduler.update(&scene, [0.0; 3], 0);
+    capture_light_metadata(&mut scheduler, |_| vec![]);
+    let retained = key(0, CubeFace::PosX);
+    let offscreen = key(0, CubeFace::NegX);
+    let visible = key(2, CubeFace::NegZ);
+    let original = *scheduler.progress(retained).unwrap();
+    let anchor_epoch = scheduler.stats().origin_epoch;
+    let released = scheduler.progress(offscreen).unwrap().slot;
+    assert!(scheduler.progress(visible).is_none());
+
+    scheduler.set_view_priority([0.0, 0.0, -1.0], 0.87);
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert_eq!(scheduler.stats().last_cell_queries, 3);
+    assert_eq!(scheduler.stats().origin_epoch, anchor_epoch);
+    assert_eq!(scheduler.progress(retained), Some(&original));
+    assert!(scheduler.progress(offscreen).is_none());
+    assert!(scheduler.take_released_slots().contains(&released));
+    let new_face = scheduler.take_jobs(FaceBudget { near: 0, far: 1 })[0];
+    assert_eq!(new_face.key, visible);
+
+    scheduler.set_view_priority([0.01, 0.0, -1.0], 0.87);
+    scheduler.update(&scene, [0.0; 3], 0);
+    assert_eq!(scheduler.progress(retained), Some(&original));
+    assert!(scheduler.is_current(new_face));
+}
+
+#[test]
+fn view_order_is_bijective_and_shell_ranges_exclude_other_shells() {
+    for (forward, cos) in [
+        ([1.0, 0.0, 0.0], 0.99),
+        ([1.0, 1.0, 0.0], 0.75),
+        ([-0.1, 1.0, 0.2], 0.0),
+    ] {
+        let grid = SphericalGrid::new(SphericalGridConfig {
+            angular_resolution: 5,
+            ..grid_config()
+        })
+        .unwrap();
+        let order = ViewOrder::new(&grid, None, forward, cos).unwrap();
+        let total = grid.cells_per_shell() * u32::from(grid.shell_count());
+        for rank in 0..total {
+            assert_eq!(order.rank(&grid, order.key(&grid, rank)), rank);
+        }
+        let ranks: Vec<_> = order.shell_ranges(1..2).into_iter().flatten().collect();
+        assert_eq!(ranks.len() as u32, grid.cells_per_shell());
+        assert!(
+            ranks
+                .into_iter()
+                .all(|rank| order.key(&grid, rank).shell == 1)
+        );
+    }
+}

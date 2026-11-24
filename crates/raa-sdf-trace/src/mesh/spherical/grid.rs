@@ -210,6 +210,28 @@ impl SphericalGrid {
         }))
     }
 
+    /// Angular cap enclosing a column. A convex cone cut by the cube face is
+    /// enclosed once its four corner rays lie inside a cap below a hemisphere.
+    pub(super) fn column_cap(&self, key: CellKey) -> ([f64; 3], f64) {
+        let step = 2.0 / f64::from(self.angular_resolution());
+        let center_u = (f64::from(key.x) + 0.5) * step - 1.0;
+        let center_v = (f64::from(key.y) + 0.5) * step - 1.0;
+        let [axis, axis_u, axis_v] = key.face.frame();
+        let ray = |u: f64, v: f64| {
+            let ray = std::array::from_fn(|i| axis[i] + axis_u[i] * u + axis_v[i] * v);
+            let length = dot(ray, ray).sqrt();
+            ray.map(|value| value / length)
+        };
+        let center = ray(center_u, center_v);
+        let mut cos = 1.0_f64;
+        for du in [-0.5 * step, 0.5 * step] {
+            for dv in [-0.5 * step, 0.5 * step] {
+                cos = cos.min(dot(center, ray(center_u + du, center_v + dv)));
+            }
+        }
+        (center, cos)
+    }
+
     pub(super) fn cells_per_shell(&self) -> u32 {
         6 * u32::from(self.angular_resolution()).pow(2)
     }

@@ -2,6 +2,7 @@
 
 mod grid;
 mod lighting;
+mod view;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -14,6 +15,7 @@ pub use lighting::{SKY_LIGHT_ID, SUN_LIGHT_ID, SphericalLight};
 use super::{MeshTraceScene, geometry::Bounds};
 use grid::{dot, sub};
 use lighting::{FaceLighting, light_changes, light_hash};
+use view::ViewOrder;
 
 pub const ALL_FACES: u8 = 0b11_1111;
 
@@ -121,7 +123,20 @@ impl Entry {
 
 struct DirtyScan {
     bounds: Bounds,
-    keys: Range<u32>,
+    keys: [Range<u32>; 2],
+}
+
+impl DirtyScan {
+    fn first(&self) -> Option<u32> {
+        self.keys
+            .iter()
+            .find(|range| !range.is_empty())
+            .map(|range| range.start)
+    }
+
+    fn next(&mut self) -> Option<u32> {
+        self.keys.iter_mut().find_map(Iterator::next)
+    }
 }
 
 /// The scheduler owns slot IDs and validity. Consumers must use the grid's anchored
@@ -131,6 +146,8 @@ pub struct SphericalScheduler {
     config: SphericalSchedulerConfig,
     grid: SphericalGrid,
     cells: BTreeMap<CellKey, Entry>,
+    view_order: Option<ViewOrder>,
+    resident_order: BTreeMap<u32, CellKey>,
     free: BTreeSet<u32>,
     released: BTreeSet<u32>,
     serial: u64,
@@ -163,6 +180,8 @@ impl SphericalScheduler {
             config,
             grid,
             cells: BTreeMap::new(),
+            view_order: None,
+            resident_order: BTreeMap::new(),
             free: (0..config.max_cells).collect(),
             released: BTreeSet::new(),
             serial: 0,
@@ -177,6 +196,24 @@ impl SphericalScheduler {
             pending_dirty: None,
             last_cell_queries: 0,
         })
+    }
+
+    /// Prioritize columns that can enter the primary view. The cosine is for
+    /// the half-angle of a cone enclosing the view frustum, such as the diagonal FOV.
+    /// A change to the view order preserves the anchor and existing face epochs.
+    pub fn set_view_priority(&mut self, forward: [f32; 3], half_fov_cos: f32) {
+        let Some(order) =
+            ViewOrder::new(&self.grid, self.view_order.as_ref(), forward, half_fov_cos)
+        else {
+            return;
+        };
+        self.resident_order = self
+            .cells
+            .keys()
+            .map(|&key| (order.rank(&self.grid, key), key))
+            .collect();
+        self.view_order = Some(order);
+        self.restart_scan();
     }
 
     pub fn grid(&self) -> &SphericalGrid {
@@ -324,8 +361,8 @@ impl SphericalScheduler {
             };
             prefer_dirty = !prefer_dirty;
             self.last_cell_queries += 1;
-            if self.cells.contains_key(&key) || !self.before_capacity_cutoff(self.grid.ordinal(key))
-            {
+            let rank = self.priority_rank(key);
+            if self.cells.contains_key(&key) || !self.before_capacity_cutoff(rank) {
                 continue;
             }
             let cell = self.grid.cell(key);
@@ -338,10 +375,11 @@ impl SphericalScheduler {
                 continue;
             };
             if self.free.is_empty() {
-                let farthest = *self.cells.last_key_value().expect("resident slot").0;
-                self.release(farthest);
+                let (&rank, &displaced) =
+                    self.resident_order.last_key_value().expect("resident slot");
+                self.release(displaced);
                 // If an edit frees capacity later, rediscover this still-overlapping cell.
-                self.discovery.start = self.discovery.start.min(self.grid.ordinal(farthest));
+                self.discovery.start = self.discovery.start.min(rank);
             }
             let slot = self.free.pop_first().expect("free or released slot");
             self.serial += 1;
@@ -363,16 +401,18 @@ impl SphericalScheduler {
                     lighting: FaceLighting::default(),
                 },
             );
+            self.resident_order.insert(rank, key);
             changed = true;
         }
         changed
     }
 
-    /// Emit up to each band's independent face budget, in increasing shell order.
+    /// Emit each band's independent face budget in view and radial priority order.
     /// Finish each batch with complete or cancel before asking for another attempt.
     pub fn take_jobs(&mut self, mut budget: FaceBudget) -> Vec<FaceJob> {
         let mut jobs = Vec::new();
-        for entry in self.cells.values_mut() {
+        for key in self.resident_order.values() {
+            let entry = self.cells.get_mut(key).expect("resident cell");
             let p = &mut entry.progress;
             let budget = if p.key.shell < self.config.near_shells {
                 &mut budget.near
@@ -498,14 +538,20 @@ impl SphericalScheduler {
             self.free.insert(entry.progress.slot);
             self.released.insert(entry.progress.slot);
         }
-        self.discovery = 0..u32::from(self.grid.shell_count()) * self.grid.cells_per_shell();
+        self.resident_order.clear();
         self.reprojected.clear();
+        self.restart_scan();
+    }
+
+    fn restart_scan(&mut self) {
+        self.discovery = 0..u32::from(self.grid.shell_count()) * self.grid.cells_per_shell();
         self.dirty = None;
         self.pending_dirty = None;
     }
 
     fn release(&mut self, key: CellKey) {
         let entry = self.cells.remove(&key).expect("resident cell");
+        self.resident_order.remove(&self.priority_rank(key));
         self.free.insert(entry.progress.slot);
         self.released.insert(entry.progress.slot);
     }
@@ -537,12 +583,25 @@ impl SphericalScheduler {
         !keys.is_empty()
     }
 
-    fn before_capacity_cutoff(&self, index: u32) -> bool {
+    fn priority_rank(&self, key: CellKey) -> u32 {
+        self.view_order.as_ref().map_or_else(
+            || self.grid.ordinal(key),
+            |order| order.rank(&self.grid, key),
+        )
+    }
+
+    fn priority_key(&self, rank: u32) -> CellKey {
+        self.view_order
+            .as_ref()
+            .map_or_else(|| self.grid.key(rank), |order| order.key(&self.grid, rank))
+    }
+
+    fn before_capacity_cutoff(&self, rank: u32) -> bool {
         !self.free.is_empty()
             || self
-                .cells
+                .resident_order
                 .last_key_value()
-                .is_some_and(|(&key, _)| index < self.grid.ordinal(key))
+                .is_some_and(|(&worst, _)| rank < worst)
     }
 
     fn next_discovery(&mut self) -> Option<(CellKey, Option<Bounds>)> {
@@ -551,26 +610,21 @@ impl SphericalScheduler {
         }
         self.discovery
             .next()
-            .map(|index| (self.grid.key(index), None))
+            .map(|rank| (self.priority_key(rank), None))
     }
 
     fn next_dirty(&mut self) -> Option<(CellKey, Option<Bounds>)> {
         loop {
-            if let Some(scan) = &self.dirty
-                && !scan.keys.is_empty()
-                && self.before_capacity_cutoff(scan.keys.start)
-            {
-                let scan = self.dirty.as_mut().expect("active scan");
-                return scan
-                    .keys
-                    .next()
-                    .map(|index| (self.grid.key(index), Some(scan.bounds)));
+            if let Some(rank) = self.dirty.as_ref().and_then(DirtyScan::first) {
+                if self.before_capacity_cutoff(rank) {
+                    let scan = self.dirty.as_mut().expect("active scan");
+                    let rank = scan.next().expect("pending scan rank");
+                    let bounds = scan.bounds;
+                    return Some((self.priority_key(rank), Some(bounds)));
+                }
+                self.discovery.start = self.discovery.start.min(rank);
             }
-            if let Some(scan) = self.dirty.take()
-                && !scan.keys.is_empty()
-            {
-                self.discovery.start = self.discovery.start.min(scan.keys.start);
-            }
+            self.dirty = None;
             let bounds = self.pending_dirty.take()?;
             let (min_radius, max_radius) = bounds.radial_range(self.grid.origin());
             let shells = 0..self.grid.shell_count();
@@ -580,11 +634,15 @@ impl SphericalScheduler {
             let end = shells.rev().find(|&i| {
                 f64::from(self.grid.radial_shell(i).expect("valid shell").inner) <= max_radius
             })? + 1;
-            let n = self.grid.cells_per_shell();
-            self.dirty = Some(DirtyScan {
-                bounds,
-                keys: u32::from(first) * n..u32::from(end) * n,
-            });
+            let shells = u32::from(first)..u32::from(end);
+            let keys = self.view_order.as_ref().map_or_else(
+                || {
+                    let columns = self.grid.cells_per_shell();
+                    [shells.start * columns..shells.end * columns, 0..0]
+                },
+                |order| order.shell_ranges(shells.clone()),
+            );
+            self.dirty = Some(DirtyScan { bounds, keys });
         }
     }
 }
