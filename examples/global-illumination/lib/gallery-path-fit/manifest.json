@@ -1,0 +1,104 @@
+{
+  "format": "raa.optional-head-cpu-fit/1",
+  "signal": "indirect-specular",
+  "captureSource": {
+    "kind": "windows-render",
+    "buildId": "572c8282-67ef-4700-959a-96778353b048",
+    "fixture": "gallery-mesh-specular/1",
+    "facts": {
+      "hardware": true,
+      "adapter": {
+        "vendor": "",
+        "architecture": "",
+        "device": "NVIDIA GeForce RTX 3090",
+        "description": "",
+        "isFallbackAdapter": false
+      },
+      "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+      "devicePixelRatio": 1
+    },
+    "revision": "f05a3466757bbd200bbe747461a8ff0a72c831c1",
+    "receiptSha256": "56069160e3dfb82a6d8214d8182f0df6b2f881d55eae269155ed81d58eaa1555"
+  },
+  "captureSha256": "8e1bd419b451b86e7335d7ea9f8a3c962adc1962cb0af65ae22a48befd5a92f4",
+  "inputChannels": [
+    "red",
+    "green",
+    "blue",
+    "normalX",
+    "normalY",
+    "normalZ",
+    "metricDepth",
+    "roughness",
+    "sourceValid",
+    "sourceConfidence",
+    "confidenceValid",
+    "freshlyTraced"
+  ],
+  "outputChannels": [
+    "red",
+    "green",
+    "blue"
+  ],
+  "layout": "HWC",
+  "dtype": "f32le",
+  "normalizationScales": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    0.125,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "hiddenChannels": 8,
+  "hiddenActivation": "relu",
+  "outputActivation": "softplus",
+  "backgroundValue": 0.0,
+  "weights": {
+    "file": "weights.fp32le",
+    "byteLength": 524,
+    "sha256": "dd41b02d73a99cc0c3e58c4189b9927a53dd65368b5892c8f2ee0d1f8a259335",
+    "tensors": [
+      {
+        "name": "hidden.weight",
+        "offset": 0,
+        "shape": [
+          8,
+          12
+        ],
+        "sha256": "d4832720381b2c07cdcc2846922a0c71929cbdb6e7eaa907a35ef2f9d5e6683a"
+      },
+      {
+        "name": "hidden.bias",
+        "offset": 384,
+        "shape": [
+          8
+        ],
+        "sha256": "b46b189705a6c34a1d0736c984083c1ffa8d7e33e2be39f6ddfd166f8ccfcbb8"
+      },
+      {
+        "name": "output.weight",
+        "offset": 416,
+        "shape": [
+          3,
+          8
+        ],
+        "sha256": "ee8d3093bb9eff6c2563de73ab3d0ff2626ae6693b1f2fcb38e63bcce2400724"
+      },
+      {
+        "name": "output.bias",
+        "offset": 512,
+        "shape": [
+          3
+        ],
+        "sha256": "b1e29d9361bfa06faeee25ddfa1d0ea3121608ba21b121d2dbcf87e659ae6e3f"
+      }
+    ]
+  }
+}
