@@ -22,6 +22,9 @@ pub use vg::VG_SURFACE_WGSL;
 /// S10 structs and bindings of groups 0-1, S11 material structs, flag constants,
 /// `raa_default_output` and the tint helper. Self-contained: no slot definitions or calls.
 pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.wgsl"));
+
+/// Shared cubemap face orientation for spherical GI capture and interpolation.
+pub const SPHERICAL_CUBE_WGSL: &str = include_str!("wgsl/spherical_cube.wgsl");
 /// Standalone S10 weather declarations, neutral defaults and directional radiance boundary.
 /// Already included once in [`PRELUDE_WGSL`]. Cloud shadow composition consumes these
 /// bindings; standalone directional consumers can include this source without the prelude.

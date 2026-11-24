@@ -202,7 +202,7 @@ struct Views<V> {
 }
 
 /// Which group-1 binding set a bind group is built over: the pre-P4 base set (S38), the
-/// full set 0..=20, or the full set without the opaque copy 9 and 10 (S44).
+/// full set 0..=21, or the full set without the opaque copy 9 and 10 (S44).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GroupSet {
     Base,
@@ -567,10 +567,10 @@ fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
-/// The full S44 group-1 binding set, ascending: 0..=20. Bindings 14, 17 and 18 are the GI
+/// The full S44 group-1 binding set, ascending: 0..=21. Bindings 14, 17 and 18 are the GI
 /// screen texture, the volume atlas and the 96 B volume params; 19 and 20 are the 80 B area
 /// stochastic table and the two-layer area shadow mask.
-fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 21] {
+fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 22] {
     use wgpu::TextureSampleType as S;
     use wgpu::TextureViewDimension as D;
     let filterable = S::Float { filterable: true };
@@ -597,13 +597,23 @@ fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 21] {
             visibility: fragment,
             ..texture_entry(20, filterable, D::D2Array)
         },
+        21 => wgpu::BindGroupLayoutEntry {
+            binding: 21,
+            visibility: fragment,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(16),
+            },
+            count: None,
+        },
         index if index < 14 => base[index],
         index => base[index - 1],
     })
 }
 
 /// The S44 opaque group-1 binding set: the full set without 9 and 10 (the opaque colour and
-/// depth), ascending: 0..=8 and 11..=20. Each entry is the full set's entry with its number.
+/// depth), ascending: 0..=8 and 11..=21. Each entry is the full set's entry with its number.
 fn opaque_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
     layout_entries()
         .into_iter()
@@ -891,6 +901,9 @@ pub struct LightingResources {
     weather_buffer: wgpu::Buffer,
     gi_params_buffer: wgpu::Buffer,
     area_table_buffer: wgpu::Buffer,
+    spherical_dummy: wgpu::Buffer,
+    spherical_gi: Option<wgpu::Buffer>,
+    spherical_dirty: bool,
     state: State<wgpu::TextureView>,
 }
 
@@ -938,6 +951,12 @@ impl LightingResources {
             label: Some("raa-pipeline.lighting.opaque"),
             entries: &opaque_layout_entries(),
         });
+        let spherical_dummy = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raa-pipeline.dummy.spherical_gi"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let uniforms = [
             &shadow_buffer,
             &sh_buffer,
@@ -946,6 +965,7 @@ impl LightingResources {
             &weather_buffer,
             &gi_params_buffer,
             &area_table_buffer,
+            &spherical_dummy,
         ];
         let samplers = [&shadow_cmp, &linear_clamp];
         let bind_group = build_bind_group(
@@ -988,6 +1008,9 @@ impl LightingResources {
             weather_buffer,
             gi_params_buffer,
             area_table_buffer,
+            spherical_dummy,
+            spherical_gi: None,
+            spherical_dirty: false,
             state,
         }
     }
@@ -1013,7 +1036,7 @@ impl LightingResources {
         &self.base_bind_group
     }
 
-    /// The S44 opaque group-1 layout: the full set 0..=20 without the opaque colour and depth
+    /// The S44 opaque group-1 layout: the full set 0..=21 without the opaque colour and depth
     /// (9 and 10), with 10 sampled textures, 2 samplers and 7 uniforms. Consumers: vg.gbuffer,
     /// vg.shade, raa-ssr (fs_trace and fs_composite) and raa-shafts, which never read 9 or 10.
     ///
@@ -1330,6 +1353,24 @@ impl LightingResources {
         &self.linear_clamp
     }
 
+    /// Publishes the spherical GI lookup and irradiance buffer, or restores the zero dummy.
+    pub fn set_spherical_gi(&mut self, buffer: Option<wgpu::Buffer>) {
+        if self.spherical_gi != buffer {
+            self.spherical_gi = buffer;
+            self.spherical_dirty = true;
+        }
+    }
+
+    /// The environment diffuse signal published for this view, when an environment is ready.
+    pub fn environment_diffuse_sh(&self) -> Option<&[[f32; 4]; 9]> {
+        (self.state.sh_info[3] >= 0.5).then_some(&self.state.sh)
+    }
+
+    /// The packed light records selected for this view.
+    pub fn local_lights_bytes(&self) -> &[u8] {
+        &self.state.local_lights
+    }
+
     /// The 16384-byte local-lights uniform (group 1 binding 12).
     pub fn local_lights_buffer(&self) -> &wgpu::Buffer {
         &self.light_buffer
@@ -1407,7 +1448,7 @@ impl LightingResources {
             gpu.queue()
                 .write_buffer(&self.area_table_buffer, 0, &self.state.area_table);
         }
-        if pending.bind_group {
+        if pending.bind_group | std::mem::take(&mut self.spherical_dirty) {
             let uniforms = [
                 &self.shadow_buffer,
                 &self.sh_buffer,
@@ -1416,6 +1457,7 @@ impl LightingResources {
                 &self.weather_buffer,
                 &self.gi_params_buffer,
                 &self.area_table_buffer,
+                self.spherical_gi.as_ref().unwrap_or(&self.spherical_dummy),
             ];
             let samplers = [&self.shadow_cmp, &self.linear_clamp];
             self.bind_group = build_bind_group(
@@ -1455,7 +1497,7 @@ fn build_bind_group(
     layout: &wgpu::BindGroupLayout,
     views: &Views<wgpu::TextureView>,
     [shadow_cmp, linear_clamp]: [&wgpu::Sampler; 2],
-    [shadow, sh, env, lights, weather, gi_params, area]: [&wgpu::Buffer; 7],
+    [shadow, sh, env, lights, weather, gi_params, area, spherical]: [&wgpu::Buffer; 8],
     set: GroupSet,
 ) -> wgpu::BindGroup {
     use wgpu::BindingResource as R;
@@ -1483,6 +1525,7 @@ fn build_bind_group(
         resources.push((18, gi_params.as_entire_binding()));
         resources.push((19, area.as_entire_binding()));
         resources.push((20, R::TextureView(&views.area_shadow_mask)));
+        resources.push((21, spherical.as_entire_binding()));
         resources.sort_by_key(|(binding, _)| *binding);
     }
     if set == GroupSet::Opaque {
@@ -1566,7 +1609,7 @@ mod tests {
         let entries = layout_entries();
         assert_eq!(LOCAL_LIGHTS_SIZE, 16384);
         let bindings: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=20).collect::<Vec<u32>>(), "full S44 set");
+        assert_eq!(bindings, (0..=21).collect::<Vec<u32>>(), "full S44 set");
         for entry in &entries {
             assert_eq!(entry.count, None);
             assert_eq!(
@@ -1579,13 +1622,16 @@ mod tests {
                 "binding {}",
                 entry.binding
             );
-            assert!(!matches!(
-                entry.ty,
-                wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { .. },
-                    ..
-                }
-            ));
+            assert_eq!(
+                matches!(
+                    entry.ty,
+                    wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        ..
+                    }
+                ),
+                entry.binding == 21,
+            );
         }
         assert_eq!(
             entries[12].ty,
@@ -2087,8 +2133,8 @@ mod tests {
         assert_eq!(base, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16]);
         let full = layout_entries();
         let bindings: Vec<u32> = full.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=20).collect::<Vec<u32>>());
-        for binding in [14, 17, 18, 19, 20] {
+        assert_eq!(bindings, (0..=21).collect::<Vec<u32>>());
+        for binding in [14, 17, 18, 19, 20, 21] {
             let entry = full.iter().find(|entry| entry.binding == binding);
             let visibility = entry.map(|entry| entry.visibility);
             assert_eq!(
@@ -2115,7 +2161,7 @@ mod tests {
         let full = layout_entries();
         let opaque = opaque_layout_entries();
         let bindings: Vec<u32> = opaque.iter().map(|entry| entry.binding).collect();
-        assert_eq!(bindings, (0..=8).chain(11..=20).collect::<Vec<u32>>());
+        assert_eq!(bindings, (0..=8).chain(11..=21).collect::<Vec<u32>>());
         for entry in &opaque {
             let same = full.iter().find(|other| other.binding == entry.binding);
             assert_eq!(Some(entry), same, "binding {}", entry.binding);

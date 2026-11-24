@@ -4,10 +4,15 @@ mod geometry;
 pub mod spherical;
 mod hybrid;
 mod pass;
+mod spherical_gpu;
 pub use geometry::MeshInput;
 use hybrid::PathCapture;
 pub use hybrid::PathMode;
 pub use pass::{MESH_TRACE_NAME, MeshTraceFeature, MeshTraceHandle};
+pub use spherical_gpu::{
+    SPHERICAL_GI_NAME, SphericalGiDebug, SphericalGiFeature, SphericalGiHandle, SphericalGiProbe,
+    SphericalGiSettings, SphericalGiStats,
+};
 
 use std::sync::mpsc::Receiver;
 
@@ -150,6 +155,8 @@ pub struct MeshTraceScene {
     pub settings: MeshTraceSettings,
     path: hybrid::PathState,
     geometry: Geometry,
+    gpu_geometry: Option<pass::GeometryBuffers>,
+    spherical_active: bool,
     materials: Vec<MeshTraceMaterial>,
     material_bytes: Vec<u8>,
     material_revision: u64,
@@ -183,9 +190,32 @@ impl MeshTraceScene {
     pub fn configure(&mut self, settings: MeshTraceSettings) {
         if settings != self.settings {
             self.settings = settings;
+            self.release_gpu_geometry_if_idle();
             self.epoch = self.epoch.wrapping_add(1);
             self.latest = None;
         }
+    }
+
+    fn set_spherical_active(&mut self, active: bool) {
+        self.spherical_active = active;
+        self.release_gpu_geometry_if_idle();
+    }
+
+    fn release_gpu_geometry_if_idle(&mut self) {
+        if !self.spherical_active && !self.settings.active() {
+            self.gpu_geometry = None;
+        }
+    }
+
+    fn geometry_buffers(&mut self, gpu: &raa_core::GpuContext) -> [Buffer; 3] {
+        self.gpu_geometry
+            .get_or_insert_with(|| pass::GeometryBuffers::new(gpu.device()))
+            .upload(
+                gpu,
+                &self.geometry,
+                self.material_revision,
+                &self.material_bytes,
+            )
     }
 
     pub fn update(

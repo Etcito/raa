@@ -93,7 +93,8 @@ fn raa_layered_ambient_gi_irradiance(frag: vec4<f32>) -> vec3<f32> {
 // info.x, GI irradiance / pi, EnvSh.gi.x), as raa-ibl (S45).
 fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if raa_env_sh.info.w < 0.5 {
-        return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
+        let fallback = raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
+        return raa_spherical_blend_diffuse(fallback, s, c);
     }
     let n = s.normal;
     let v = c.view_dir;
@@ -131,5 +132,6 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let incoming_c = mix(raa_ibl_specular(r_c, cr) * raa_env_sh.info.x, gi_specular, w_gi);
     let coat = k * incoming_c * (RAA_LAYERED_AMBIENT_CLEARCOAT_F0 * dfg_c.x + dfg_c.y)
         * raa_specular_occlusion(n_dot_v_c, c.ao, cr);
-    return ((diffuse + specular) * scale + sheen) * atten + coat;
+    let base_diffuse = raa_spherical_blend_diffuse(diffuse, s, c);
+    return ((base_diffuse + specular) * scale + sheen) * atten + coat;
 }

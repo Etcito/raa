@@ -120,16 +120,27 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @locati
     if !capture {
         ao = raa_slot_ao(in.frag_coord);
     }
-    let c = raa_pass_shade_ctx(s, in, ao, shadow);
+    var c = raa_pass_shade_ctx(s, in, ao, shadow);
+    let unlit = raa_pass_unlit(in.record);
+    var spherical_debug = vec4<f32>(0.0);
+    if !capture && !unlit && raa_feature_enabled(RAA_SPHERICAL_GI_FEATURE)
+        && !raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        let spherical = raa_spherical_evaluate(c.position, s.normal);
+        spherical_debug = spherical.debug;
+        c.spherical_diffuse = spherical.diffuse;
+    }
     let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
             raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
     let ambient = raa_slot_ambient(s, c);
     var indirect = vec3<f32>(0.0);
     if !capture {
         indirect = raa_slot_indirect(s, c);
+        if c.spherical_diffuse.w > 0.0 {
+            indirect *= 1.0 - c.spherical_diffuse.w;
+        }
     }
     let local = raa_local_lighting(s, c);
-    let unlit = raa_pass_unlit(in.record);
+    if spherical_debug.a > 0.0 { return spherical_debug; }
     if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
         return vec4<f32>(select(s.emissive + direct + local, s.base_color + s.emissive, unlit), 1.0);
     }

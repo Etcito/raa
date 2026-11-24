@@ -35,7 +35,8 @@ fn raa_ibl_gi_irradiance(frag: vec4<f32>) -> vec3<f32> {
 // lighting interiors with the unshadowed sky.
 fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     if raa_env_sh.info.w < 0.5 {
-        return raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
+        let fallback = raa_frame.ambient.rgb * s.base_color * (1.0 - 0.5 * s.metallic) * c.ao;
+        return raa_spherical_blend_diffuse(fallback, s, c);
     }
     let n = s.normal;
     let v = c.view_dir;
@@ -55,5 +56,5 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
         raa_ibl_gi_irradiance(c.frag) / RAA_IBL_PI, w_gi);
     let specular = incoming * (f0 * dfg.x + vec3<f32>(dfg.y)) * energy
         * raa_specular_occlusion(c.n_dot_v, c.ao, roughness);
-    return diffuse + specular;
+    return raa_spherical_blend_diffuse(diffuse, s, c) + specular;
 }

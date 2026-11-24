@@ -5,10 +5,10 @@ use std::{cell::RefCell, rc::Rc, sync::mpsc::sync_channel};
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, RecordCtx};
 
+use super::geometry::TRIANGLE_BYTES;
 use super::{
     COUNTER_COUNT, MeshTraceScene, MeshTraceStats, PathMode, REFERENCE_SPP, hybrid::HybridGpu,
 };
-use super::geometry::TRIANGLE_BYTES;
 use crate::wgsl::mesh_trace_module;
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
@@ -57,6 +57,7 @@ impl FeaturePass for MeshTracePass {
             return Ok(());
         }
         scene.poll();
+        let [nodes, triangles, materials] = scene.geometry_buffers(ctx.gpu);
         let Some(frame) = scene.frame.as_ref() else {
             return Ok(());
         };
@@ -86,15 +87,6 @@ impl FeaturePass for MeshTracePass {
                 message: "hybrid reflections need forward HDR before trace.mesh".into(),
             });
         }
-        gpu.triangles.upload(
-            ctx.gpu,
-            scene.geometry.revision,
-            &scene.geometry.triangle_bytes,
-        );
-        gpu.nodes
-            .upload(ctx.gpu, scene.geometry.revision, &scene.geometry.node_bytes);
-        gpu.materials
-            .upload(ctx.gpu, scene.material_revision, &scene.material_bytes);
         let history_valid = images.previous.is_some_and(|(index, epoch)| {
             index.checked_add(1) == Some(ctx.frame) && scene.epoch == epoch
         });
@@ -131,9 +123,9 @@ impl FeaturePass for MeshTracePass {
             entries: &[
                 buffer_entry(0, frame),
                 buffer_entry(1, &gpu.options),
-                buffer_entry(2, &gpu.nodes.buffer),
-                buffer_entry(3, &gpu.triangles.buffer),
-                buffer_entry(4, &gpu.materials.buffer),
+                buffer_entry(2, &nodes),
+                buffer_entry(3, &triangles),
+                buffer_entry(4, &materials),
                 buffer_entry(5, &gpu.counters),
                 image_entry(6, ctx.targets.depth()),
                 image_entry(7, ctx.targets.normal()),
@@ -406,6 +398,42 @@ impl DataBuffer {
     }
 }
 
+pub(super) struct GeometryBuffers {
+    nodes: DataBuffer,
+    triangles: DataBuffer,
+    materials: DataBuffer,
+}
+
+impl GeometryBuffers {
+    pub(super) fn new(device: &wgpu::Device) -> Self {
+        Self {
+            nodes: DataBuffer::new(device, "trace.mesh.nodes", 32),
+            triangles: DataBuffer::new(device, "trace.mesh.triangles", TRIANGLE_BYTES),
+            materials: DataBuffer::new(device, "trace.mesh.materials", 48),
+        }
+    }
+
+    pub(super) fn upload(
+        &mut self,
+        gpu: &GpuContext,
+        geometry: &super::Geometry,
+        material_revision: u64,
+        material_bytes: &[u8],
+    ) -> [wgpu::Buffer; 3] {
+        self.nodes
+            .upload(gpu, geometry.revision, &geometry.node_bytes);
+        self.triangles
+            .upload(gpu, geometry.revision, &geometry.triangle_bytes);
+        self.materials
+            .upload(gpu, material_revision, material_bytes);
+        [
+            self.nodes.buffer.clone(),
+            self.triangles.buffer.clone(),
+            self.materials.buffer.clone(),
+        ]
+    }
+}
+
 pub(super) fn buffer(
     device: &wgpu::Device,
     label: &'static str,
@@ -441,9 +469,6 @@ struct Pipelines {
     options: wgpu::Buffer,
     counters: wgpu::Buffer,
     readback: wgpu::Buffer,
-    nodes: DataBuffer,
-    triangles: DataBuffer,
-    materials: DataBuffer,
 }
 
 impl Pipelines {
@@ -567,9 +592,6 @@ impl Pipelines {
                 COUNTER_BYTES,
                 wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             ),
-            nodes: DataBuffer::new(device, "trace.mesh.nodes", 32),
-            triangles: DataBuffer::new(device, "trace.mesh.triangles", TRIANGLE_BYTES),
-            materials: DataBuffer::new(device, "trace.mesh.materials", 48),
         }
     }
 }

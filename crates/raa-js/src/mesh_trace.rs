@@ -6,11 +6,12 @@ use js_sys::{Object, Reflect};
 use raa_core::RaaError;
 use raa_lit::{DrawClass, FLAG_TRACE_MIRROR, FLAG_UNLIT, SurfaceModel};
 use raa_math::Mat4;
-use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use raa_sdf_trace::mesh::{
-    DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle,
-    MeshTraceMaterial, MeshTraceSettings, PanelSampling, PathMode, REFERENCE_SPP,
+    DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME, MeshInput,
+    MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial, MeshTraceSettings, PanelSampling,
+    PathMode, REFERENCE_SPP, SphericalGiHandle,
 };
+use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use wasm_bindgen::prelude::*;
 
 use crate::{
@@ -21,16 +22,48 @@ use crate::{
 
 struct Confidence(raa_ssr::SsrHandle);
 
-pub(crate) fn prepare(st: &EngineState) -> Result<(), RaaError> {
+pub(crate) fn shared_handle(
+    st: &mut EngineState,
+    pipeline: &mut raa_pipeline::Pipeline,
+) -> Result<MeshTraceHandle, RaaError> {
+    if let Some(handle) = st.features.get::<MeshTraceHandle>() {
+        return Ok(handle.clone());
+    }
+    let handle = MeshTraceFeature::install(pipeline)?;
+    st.features.insert(handle.clone());
+    Ok(handle)
+}
+
+pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
     let Some(handle) = st.features.get::<MeshTraceHandle>() else {
         return Ok(());
     };
     let settings = handle.borrow().settings;
-    if !settings.active() {
+    let mut spherical = false;
+    if let Some(gi) = st.features.get::<SphericalGiHandle>() {
+        let mut gi = gi.borrow_mut();
+        if gi.active() {
+            spherical = view == 0;
+            let sun = st.scene.light;
+            let ambient = st.scene.ambient;
+            let [dx, dy, dz] = sun.direction.to_array();
+            let [r, g, b] = sun.color.map(|c| c * sun.intensity);
+            let [ar, ag, ab] = ambient.color.map(|c| c * ambient.intensity);
+            gi.set_view(
+                view,
+                st.scene.camera.eye.to_array(),
+                [dx, dy, dz, r, g, b, ar, ag, ab, st.scene.camera.far],
+            );
+            if spherical {
+                gi.set_light_ids(st.lit.local_lights().world_lights().map(|(_, id, _)| id));
+            }
+        }
+    }
+    if !settings.active() && !spherical {
         return Ok(());
     }
     let lit = st.lit.handle();
-    if !settings.reference {
+    if settings.active() && !settings.reference {
         let mut jitter = Mat4::IDENTITY;
         let [x, y] = lit.camera_jitter_ndc();
         jitter.cols[3] = [x, y, 0.0, 1.0];

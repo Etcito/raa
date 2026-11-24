@@ -559,7 +559,7 @@ pub(crate) fn prepare_view(
             &mut st.tags,
             &mut st.slots,
         )?;
-        crate::mesh_trace::prepare(st)
+        crate::mesh_trace::prepare(st, index)
     })();
     st.scene.camera = original;
     result

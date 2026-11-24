@@ -244,42 +244,61 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
 
 fn sun_and_lights_at_hit(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
                         seed: ptr<function, u32>, diffuse_only: bool, reflected: bool) -> vec3<f32> {
+    let sun = mesh_sun_at_hit(p, ng, n, v, mat, diffuse_only);
+    return mesh_lights_at_hit(p, ng, n, v, mat, seed, diffuse_only, reflected, sun);
+}
+
+fn mesh_sun_at_hit(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                   mat: Material, diffuse_only: bool) -> vec3<f32> {
     let origin = p + ng * (2.0 * EPS);
-    var direct = vec3<f32>(0.0);
     let sun = -frame.sun_dir.xyz;
     let nl = saturate(dot(n, sun));
     if nl > 0.0 && dot(ng, sun) > 0.0 && any(frame.sun_color.rgb > vec3<f32>(0.0))
         && closest(Ray(origin, sun), frame.clip.y, true).object == MISS {
-        direct += direct_brdf(mat, n, v, sun, diffuse_only) * (nl * frame.sun_color.rgb);
+        return direct_brdf(mat, n, v, sun, diffuse_only) * (nl * frame.sun_color.rgb);
     }
+    return vec3<f32>(0.0);
+}
+
+fn mesh_lights_at_hit(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
+                      seed: ptr<function, u32>, diffuse_only: bool, reflected: bool,
+                      initial: vec3<f32>) -> vec3<f32> {
+    let origin = p + ng * (2.0 * EPS);
+    var direct = initial;
     for (var i = 0u; i < min(256u, frame.light_info.x); i++) {
-        let light = lights[i];
-        if !any(light.radiance.rgb > vec3<f32>(0.0)) { continue; }
-        let travel = light.direction_outer.xyz;
-        if light.kind == 3u {
-            direct += direct_panel(light, p, ng, n, v, mat, seed, i, diffuse_only, reflected);
-            continue;
-        }
-        let delta = light.position_range.xyz - p;
-        var distance = length(delta);
-        var l = delta / max(distance, EPS);
-        var weight = 1.0;
-        if light.kind == 2u {
-            l = -travel;
-            distance = frame.clip.y;
-        } else {
-            if distance >= light.position_range.w { continue; }
-            let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
-            weight = window * window / max(distance * distance, 0.04);
-            if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(travel, -l)); }
-        }
-        let nl = saturate(dot(n, l));
-        if nl > 0.0 && dot(ng, l) > 0.0 && weight > 0.0
-            && closest(Ray(origin, l), distance - 2.0 * EPS, true).object == MISS {
-            direct += direct_brdf(mat, n, v, l, diffuse_only) * (nl * weight * light.radiance.rgb);
-        }
+        direct += mesh_local_at_hit(i, origin, p, ng, n, v, mat, seed, diffuse_only, reflected);
     }
     return direct;
+}
+
+fn mesh_local_at_hit(i: u32, origin: vec3<f32>, p: vec3<f32>, ng: vec3<f32>,
+                     n: vec3<f32>, v: vec3<f32>, mat: Material, seed: ptr<function, u32>,
+                     diffuse_only: bool, reflected: bool) -> vec3<f32> {
+    let light = lights[i];
+    if !any(light.radiance.rgb > vec3<f32>(0.0)) { return vec3<f32>(0.0); }
+    let travel = light.direction_outer.xyz;
+    if light.kind == 3u {
+        return direct_panel(light, p, ng, n, v, mat, seed, i, diffuse_only, reflected);
+    }
+    let delta = light.position_range.xyz - p;
+    var distance = length(delta);
+    var l = delta / max(distance, EPS);
+    var weight = 1.0;
+    if light.kind == 2u {
+        l = -travel;
+        distance = frame.clip.y;
+    } else {
+        if distance >= light.position_range.w { return vec3<f32>(0.0); }
+        let window = saturate(1.0 - pow(distance / light.position_range.w, 4.0));
+        weight = window * window / max(distance * distance, 0.04);
+        if light.kind == 1u { weight *= smoothstep(light.direction_outer.w, light.inner, dot(travel, -l)); }
+    }
+    let nl = saturate(dot(n, l));
+    if nl > 0.0 && dot(ng, l) > 0.0 && weight > 0.0
+        && closest(Ray(origin, l), distance - 2.0 * EPS, true).object == MISS {
+        return direct_brdf(mat, n, v, l, diffuse_only) * (nl * weight * light.radiance.rgb);
+    }
+    return vec3<f32>(0.0);
 }
 
 // Read the current radiance on the visible side of the exact mesh hit, as the

@@ -308,6 +308,13 @@ struct ShadeCtx {
     ao: f32,
     shadow: f32,
     f0: vec3<f32>,
+    spherical_diffuse: vec4<f32>,
+}
+
+fn raa_spherical_blend_diffuse(legacy: vec3<f32>, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
+    if c.spherical_diffuse.w <= 0.0 { return legacy; }
+    let spherical = c.spherical_diffuse.rgb * s.base_color * (1.0 - clamp(s.metallic, 0.0, 1.0)) * s.ao;
+    return mix(legacy, spherical, c.spherical_diffuse.w);
 }
 
 fn raa_default_output(in: MaterialInput) -> MaterialOutput {
