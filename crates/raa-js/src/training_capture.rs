@@ -15,7 +15,11 @@ fn invalid(reason: &str) -> RaaError {
 impl Engine {
     /// Reads the already submitted real frame. This method does not advance renderer history.
     #[wasm_bindgen(js_name = captureTrainingTaps)]
-    pub async fn capture_training_taps(&mut self, frame_id: f64) -> Result<JsValue, JsValue> {
+    pub async fn capture_training_taps(
+        &mut self,
+        frame_id: f64,
+        include_composite: Option<bool>,
+    ) -> Result<JsValue, JsValue> {
         let runtime = self.capture_runtime()?;
         if runtime.stats().frames.checked_sub(1).map(|id| id as f64) != Some(frame_id) {
             return Err(raa_web::error_to_js(&invalid(
@@ -68,6 +72,12 @@ impl Engine {
                 if let Some(image) = resources.get(producer, port) {
                     textures.push((name, image.view.texture().clone()));
                 }
+            }
+            if include_composite.unwrap_or(false) {
+                let image = resources
+                    .get("ssr.replace#replace", "color")
+                    .ok_or_else(|| invalid("missing scene-linear SSR composite tap"))?;
+                textures.push(("compositeHdr", image.view.texture().clone()));
             }
             let size = targets.size();
             if textures

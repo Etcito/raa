@@ -225,8 +225,11 @@ fn trace_hit(in: VsOut, probe: bool) -> TraceOutput {
         let end = o + dir * t_max;
         let leaves_screen = t >= t_max && (any(end.xy <= vec2<f32>(0.01))
             || any(end.xy >= ssr.viewport.xy - vec2<f32>(0.01)) || end.z <= 0.00001);
-        let status = select(0.0, select(-1.0, -2.0, leaves_screen), probe);
-        return TraceOutput(vec4<f32>(0.0, 0.0, 0.0, status), vec4<f32>(0.0));
+        let status = select(-1.0, -2.0, leaves_screen);
+        // The distance lane has no metric distance when validity is zero.
+        // Keep off-screen misses identifiable in an offline typed trace tap.
+        let missing = vec4<f32>(0.0, 0.0, status, 0.0);
+        return TraceOutput(vec4<f32>(0.0, 0.0, 0.0, select(0.0, status, probe)), missing);
     }
     // Binary refinement of the crossing against the full-res depth (Hi-Z mip 0).
     var lo = t_prev;
