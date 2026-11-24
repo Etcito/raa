@@ -35,6 +35,7 @@ mod meshes;
 mod mipgen;
 mod motion_display;
 mod passes;
+mod planar_reflection;
 mod prep;
 mod previous_instances;
 mod renderer;
@@ -87,6 +88,7 @@ pub use material_data::{
 pub use meshes::{LitMeshId, LitMeshInfo};
 pub use mipgen::downsample_rgba8;
 pub use motion_display::install_motion_display;
+pub use planar_reflection::PlanarReflection;
 pub use prep::{INSTANCE_GPU_SIZE, LitDraw, MaterialClass};
 pub use raa_core::{MaterialId, MeshId};
 pub use raa_mesh::{AttributedMesh, SubMesh};

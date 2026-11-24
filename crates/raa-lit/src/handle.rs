@@ -37,7 +37,7 @@ use crate::slots::default_slot_providers;
 use crate::textures::{TEXTURE_RECT_SIZE, TexelData, TextureAtlas, TextureOptions};
 
 /// Stride of S10 vertex stream 0 (S1 Vertex: position, normal).
-const STREAM0_STRIDE: u64 = 24;
+pub(crate) const STREAM0_STRIDE: u64 = 24;
 /// Stride of S10 vertex stream 1 (uv, tangent, colour).
 const STREAM1_STRIDE: u64 = 40;
 
@@ -411,6 +411,8 @@ pub(crate) struct LitShared {
     /// Compacted u32 instance ids, 9 sections of `max_instances` (camera + 4 cascades +
     /// 4 hero layers).
     pub(crate) id_buffer: wgpu::Buffer,
+    pub(crate) planar_reflection: Option<crate::PlanarReflection>,
+    pub(crate) planar_view: Option<crate::planar_reflection::PlanarView>,
     /// `FrameGpu`, `FRAME_GPU_SIZE` bytes.
     frame_buffer: wgpu::Buffer,
     /// `SurfaceMaterialGpu` array, `max_materials` x 256 B.
@@ -452,7 +454,7 @@ pub(crate) struct LitShared {
     /// Material data words, group-0 binding 6.
     data: MaterialData,
     frame_layout: wgpu::BindGroupLayout,
-    frame_bind_group: wgpu::BindGroup,
+    pub(crate) frame_bind_group: wgpu::BindGroup,
     /// The group-1 layout of `raa_pipeline::LightingResources`.
     lighting_layout: wgpu::BindGroupLayout,
     /// The S44 opaque group-1 layout: the full set without the opaque colour and depth (9, 10).
@@ -601,6 +603,8 @@ impl LitShared {
             data,
             frame_layout,
             frame_bind_group,
+            planar_reflection: None,
+            planar_view: None,
             lighting_layout: lighting_layout.clone(),
             opaque_lighting_layout: opaque_lighting_layout.clone(),
             pipelines: RefCell::new(PipelineCache::new()),
@@ -757,6 +761,22 @@ impl LitShared {
     /// Forgets the colour stream of lit mesh `id`.
     pub(crate) fn remove_mesh_colors(&mut self, id: LitMeshId) {
         self.mesh_colors.remove(&id);
+    }
+
+    pub(crate) fn camera_group(&self, gpu: &GpuContext, frame: &wgpu::Buffer) -> wgpu::BindGroup {
+        create_frame_bind_group(
+            gpu,
+            &self.frame_layout,
+            [
+                frame,
+                &self.material_buffer,
+                &self.extras_buffer,
+                &self.instance_storage,
+                &self.previous_storage,
+            ],
+            &self.textures,
+            &self.data,
+        )
     }
 
     /// Writes the frame's `FrameGpu`, the changed instance and extras pages, the compacted
@@ -1386,8 +1406,19 @@ impl LitHandle {
         pass: &mut wgpu::RenderPass<'_>,
         mesh: MeshId,
     ) -> Result<u32, RaaError> {
+        self.bind_selected_mesh(pass, mesh, None)
+    }
+
+    pub(crate) fn bind_selected_mesh(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: MeshId,
+        capture: Option<&crate::planar_reflection::PlanarView>,
+    ) -> Result<u32, RaaError> {
         let s = self.shared.borrow();
-        let (mesh, tag) = s.select.mesh_binding(mesh);
+        let (selection, ids) =
+            capture.map_or((&s.select, &s.id_buffer), |view| (&view.select, &view.ids));
+        let (mesh, tag) = selection.mesh_binding(mesh);
         let (g, first, count) = s.meshes.resolve(mesh)?;
         let posed = s.posed_binding(tag);
         s.bound_skin.set(posed.is_some());
@@ -1397,7 +1428,7 @@ impl LitHandle {
             pass.set_vertex_buffer(SKIN_SLOT, skin.slice(..));
             pass.set_bind_group(crate::skin_draw::PALETTE_GROUP, palette, &[]);
         }
-        pass.set_vertex_buffer(INSTANCE_SLOT, s.id_buffer.slice(..));
+        pass.set_vertex_buffer(INSTANCE_SLOT, ids.slice(..));
         pass.set_vertex_buffer(STREAM1_SLOT, g.stream1.slice(..));
         let start = u64::from(first) * 4;
         let end = start + u64::from(count) * 4;
@@ -1453,6 +1484,13 @@ impl LitHandle {
     /// The compacted u32 instance id stream (4 B per id, camera section first).
     pub fn id_buffer(&self) -> wgpu::Buffer {
         self.shared.borrow().id_buffer.clone()
+    }
+
+    pub(crate) fn planar_view(&self) -> Option<Ref<'_, crate::planar_reflection::PlanarView>> {
+        Ref::filter_map(self.shared.borrow(), |s| {
+            s.planar_view.as_ref().filter(|view| view.ready())
+        })
+        .ok()
     }
 
     /// The persistent slot of `instance` (its scene index) while that slot is below the

@@ -1272,6 +1272,32 @@ impl Engine {
         })
     }
 
+    /// Sets the opaque planar mirror receiver and its oriented world-space plane.
+    /// A null receiver clears the capture.
+    #[wasm_bindgen(js_name = setPlanarReflection)]
+    pub fn set_planar_reflection(
+        &mut self,
+        instance: Option<u32>,
+        plane: JsValue,
+    ) -> Result<(), JsValue> {
+        self.with_state(|_, st| {
+            let reflection = if let Some(instance) = instance {
+                if st.instances.get_ref(instance)?.stale {
+                    return Err(api_error(
+                        "scene.stale_instance",
+                        "the mirror receiver's node was removed",
+                    ));
+                }
+                let plane = js::floats::<4>("plane", &plane)?;
+                Some(raa_lit::PlanarReflection::new(instance, plane)?)
+            } else {
+                None
+            };
+            st.lit.set_planar_reflection(reflection);
+            Ok(())
+        })
+    }
+
     /// Loads a prims v0 asset at `segments` (LOD0 when absent) with the 8 S3 kinds and
     /// the CSG resolver. Registers its materials and its meshes (baked into asset space)
     /// and returns `{id, name, triangles, budget, meshes, materials, anchors}`: `meshes`

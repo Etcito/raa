@@ -466,7 +466,7 @@ pub(crate) mod js {
     }
 
     /// Reads exactly `N` finite numbers from an Array or a Float32Array.
-    fn floats<const N: usize>(key: &str, v: &JsValue) -> Result<[f32; N], RaaError> {
+    pub(crate) fn floats<const N: usize>(key: &str, v: &JsValue) -> Result<[f32; N], RaaError> {
         let mut out = [0.0f32; N];
         if let Some(fa) = v.dyn_ref::<Float32Array>() {
             if fa.length() as usize != N {

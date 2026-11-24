@@ -21,6 +21,7 @@ const RAA_IBL_PI: f32 = 3.14159265;
 // The GI screen irradiance E at the fragment (`raa_gi_screen`, binding 14, read with the
 // pixel clamped to its size) x the GI intensity; the 1x1 dummy is black while GI is inactive.
 fn raa_ibl_gi_irradiance(frag: vec4<f32>) -> vec3<f32> {
+    if raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) { return vec3<f32>(0.0); }
     let size = vec2<i32>(textureDimensions(raa_gi_screen));
     let pixel = clamp(vec2<i32>(frag.xy), vec2<i32>(0), size - vec2<i32>(1));
     return textureLoad(raa_gi_screen, pixel, 0).rgb * raa_gi_volume_params.intensity;
@@ -46,7 +47,10 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let diffuse = raa_ibl_irradiance(n) * s.base_color * (1.0 - metallic) * energy
         * raa_ibl_multi_bounce_ao(c.ao, s.base_color) * raa_env_sh.info.y;
     let r = raa_ibl_dominant_dir(n, reflect(-v, n), roughness);
-    let w_gi = clamp(raa_env_sh.gi.x, 0.0, 1.0);
+    var w_gi = 0.0;
+    if !raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
+        w_gi = clamp(raa_env_sh.gi.x, 0.0, 1.0);
+    }
     let incoming = mix(raa_ibl_specular(r, roughness) * raa_env_sh.info.x,
         raa_ibl_gi_irradiance(c.frag) / RAA_IBL_PI, w_gi);
     let specular = incoming * (f0 * dfg.x + vec3<f32>(dfg.y)) * energy

@@ -370,6 +370,15 @@ export interface Engine {
   setVisible(id: number, visible: boolean): void;
 
   /**
+   * Captures the scene's opaque meshes for one planar mirror. The receiver is
+   * an undeformed opaque mesh with a face on the given world-space plane
+   * `nx*x + ny*y + nz*z + d = 0`. The normal points toward the reflecting side.
+   * Pass null to clear the mirror. The receiver keeps its original material.
+   */
+  setPlanarReflection(instance: number, plane: [number, number, number, number] | Float32Array): void;
+  setPlanarReflection(instance: null): void;
+
+  /**
    * Sets the camera.
    * @throws RaaError `api.invalid_argument` (fovYDeg outside (0, 180), near <= 0,
    *   far <= near, eye equal to target).

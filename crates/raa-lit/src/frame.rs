@@ -2,7 +2,7 @@
 
 use raa_core::RaaError;
 use raa_math::Mat4;
-use raa_scene::Scene;
+use raa_scene::{Camera, Scene};
 
 pub use raa_shader::FRAME_GPU_SIZE;
 
@@ -135,9 +135,17 @@ pub fn write_frame_gpu(
     scene: &Scene,
     p: &FrameParams,
 ) -> Result<(), RaaError> {
-    let cam = &scene.camera;
+    write_camera_frame_gpu(out, scene, p, scene.camera, scene.camera.projection())
+}
+
+pub(crate) fn write_camera_frame_gpu(
+    out: &mut [u8; FRAME_GPU_SIZE],
+    scene: &Scene,
+    p: &FrameParams,
+    cam: Camera,
+    proj: Mat4,
+) -> Result<(), RaaError> {
     let view = cam.view();
-    let proj = cam.projection();
     let jittered_proj = jittered_projection(proj, p.camera_jitter_ndc);
     let (Some(inv_view), Some(inv_proj)) = (view.inverse(), jittered_proj.inverse()) else {
         return Err(RaaError::FrameGraph {

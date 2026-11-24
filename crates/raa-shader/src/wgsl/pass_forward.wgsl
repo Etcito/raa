@@ -114,14 +114,23 @@ fn raa_pass_shade_ctx(s: MaterialOutput, in: MaterialInput, ao: f32, shadow: f32
 fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
     let in = raa_pass_material_input(v, front_facing);
     let s = raa_pass_material(in, v.instance_index);
-    let shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
-    let ao = raa_slot_ao(in.frag_coord);
+    var shadow = 1.0;
+    var ao = 1.0;
+    let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
+    if !capture {
+        shadow = raa_slot_shadow(in.position, in.normal, in.frag_coord);
+        ao = raa_slot_ao(in.frag_coord);
+    }
     let c = raa_pass_shade_ctx(s, in, ao, shadow);
+    var indirect = vec3<f32>(0.0);
+    if !capture {
+        indirect = raa_slot_indirect(s, c);
+    }
     let lit = s.emissive
         + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
             raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)
         + raa_slot_ambient(s, c)
-        + raa_slot_indirect(s, c)
+        + indirect
         + raa_local_lighting(s, c);
     let color = select(lit, s.base_color + s.emissive, raa_pass_unlit(in.record));
     return vec4<f32>(color, 1.0);

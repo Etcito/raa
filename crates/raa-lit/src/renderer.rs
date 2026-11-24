@@ -1009,10 +1009,19 @@ impl LitRenderer {
         &self.virtual_set
     }
 
+    /// Configures the lit forward pass's optional planar mirror receiver.
+    pub fn set_planar_reflection(&mut self, reflection: Option<crate::PlanarReflection>) {
+        let mut shared = self.shared.borrow_mut();
+        shared.planar_reflection = reflection;
+        if reflection.is_none() {
+            shared.planar_view = None;
+        }
+    }
+
     /// Sets logical `FrameGpu` feature `id` (S10) for every later `prepare`, after its own
-    /// tiling bit. Id 24 (tiling, owned by `prepare`) and ids >= 64 (no address) are ignored.
+    /// tiling bit. Ignores reserved ids 24 (tiling) and 40 (planar capture) and ids >= 64.
     pub fn set_frame_feature(&mut self, id: u32, on: bool) {
-        if id == TILING_FEATURE_ID || id >= 64 {
+        if matches!(id, TILING_FEATURE_ID | crate::planar_reflection::CAPTURE_FEATURE) || id >= 64 {
             return;
         }
         let bit = 1u64 << id;
@@ -1297,6 +1306,32 @@ impl LitRenderer {
             level_mesh: &level_mesh,
         };
         s.select.prepare_camera(&input, &skinned)?;
+        // This selection starts from the whole scene list, independently of the
+        // main camera's visible slots and LODs.
+        let planar_reflection = s.planar_reflection;
+        let planar_view = if let Some(reflection) = planar_reflection {
+            let mut view = s
+                .planar_view
+                .take()
+                .unwrap_or_else(|| crate::planar_reflection::PlanarView::new(gpu, self.opts));
+            let capture = |i: usize| {
+                tags[i] != reflection.instance
+                    && !s.lods.is_level(list.items[i].mesh)
+                    && self
+                        .material_classes
+                        .get(list.items[i].material.0 as usize)
+                        .is_some_and(|material| material.class != DrawClass::Transparent)
+            };
+            let capture_input = SelectInput {
+                selected: &capture,
+                level_mesh: &|_, mesh| mesh,
+                ..input
+            };
+            view.select_scene(&input, &capture_input, &skinned, reflection, scene.camera)?;
+            Some(view)
+        } else {
+            None
+        };
 
         let mut stats = InstanceFrameStats {
             instances: scene.instance_count() as u32,
@@ -1418,6 +1453,10 @@ impl LitRenderer {
         s.item_slots.clone_from(slots);
 
         s.upload(gpu, &self.frame_bytes);
+        if let Some(mut view) = planar_view {
+            view.upload(gpu, s, scene, params, &self.frame_bytes)?;
+            s.planar_view = Some(view);
+        }
         stats.uploaded_bytes = s.store.last_uploaded_bytes();
         s.stats = stats;
         Ok(counts)

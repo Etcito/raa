@@ -141,6 +141,7 @@ fn raa_area_stochastic_visibility(index: u32, frag: vec4<f32>) -> vec2<f32> {
 // The caller passes the packed uniform index (not a stable CPU handle) to visibility.
 fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     let light = raa_local_lights[index];
+    let capture = raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE);
     var direction = -light.direction_cos_outer.xyz;
     var distance = 0.0;
     var falloff = 1.0;
@@ -180,13 +181,16 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
         let w_cone = clamp(light.cos_inner, 0.0, 1.0);
         let layer = i32(round(light.direction_cos_outer.w));
         var hero = vec2<f32>(1.0, 0.0);
-        if layer >= 4 && w_cone < 1.0 && raa_shadow.params.w > 0.5
+        if !capture && layer >= 4 && w_cone < 1.0 && raa_shadow.params.w > 0.5
             && layer < i32(textureNumLayers(raa_shadow_map)) {
             hero = raa_area_hero_visibility(light, layer, c.position, s.normal, c.frag);
         }
-        let stochastic = raa_area_stochastic_visibility(index, c.frag);
+        var stochastic = vec2<f32>(1.0, 0.0);
+        if !capture {
+            stochastic = raa_area_stochastic_visibility(index, c.frag);
+        }
         var v_cone = 1.0;
-        if (w_cone > 0.0 || hero.y < 1.0) && stochastic.y < 1.0 {
+        if !capture && (w_cone > 0.0 || hero.y < 1.0) && stochastic.y < 1.0 {
             v_cone = clamp(raa_slot_local_visibility(index, c.position, s.normal,
                 direction, distance), 0.0, 1.0);
         }
@@ -205,8 +209,11 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
     }
     // Point, spot and directional only.
     if dot(s.normal, direction) <= 0.0 || falloff <= 0.0 { return vec3<f32>(0.0); }
-    let visibility = clamp(raa_slot_local_visibility(index, c.position, s.normal,
-        direction, distance), 0.0, 1.0);
+    var visibility = 1.0;
+    if !capture {
+        visibility = clamp(raa_slot_local_visibility(index, c.position, s.normal,
+            direction, distance), 0.0, 1.0);
+    }
     let radiance = light.color_inv_range_sq.rgb * (falloff * visibility);
     if !any(radiance > vec3<f32>(0.0)) { return vec3<f32>(0.0); }
     return raa_slot_direct(s, c, direction, radiance);
@@ -225,6 +232,12 @@ fn raa_local_contribution(index: u32, s: MaterialOutput, c: ShadeCtx) -> vec3<f3
 fn raa_local_lighting(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     var result = vec3<f32>(0.0);
     if raa_frame.light_info.x == 0u { return result; }
+    if raa_feature_enabled(RAA_PLANAR_CAPTURE_FEATURE) {
+        for (var index = 0u; index < min(raa_frame.light_info.x, MAX_LOCAL_LIGHTS); index += 1u) {
+            result += raa_local_contribution(index, s, c);
+        }
+        return result;
+    }
     let tile = vec2<i32>(floor(c.frag.xy / f32(TILE_SIZE)));
     let count = min(textureLoad(raa_light_tiles, tile, 0, 0).x, TILE_MAX_LIGHTS);
     for (var word = 1u; word <= count; word += 1u) {

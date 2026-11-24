@@ -30,6 +30,7 @@ use raa_shader::{PassKind, VariantKey};
 
 use crate::handle::{LitHandle, PipelineSpec};
 use crate::material::{DrawClass, FLAG_DOUBLE_SIDED};
+use crate::planar_reflection::{PlanarTargets, PlanarView};
 use crate::renderer::{Contributors, pipeline_busy};
 
 /// Name of the prepass in the pipeline (S12).
@@ -137,6 +138,12 @@ impl Specs {
     }
 }
 
+#[derive(Clone, Copy)]
+enum DrawSource<'a> {
+    Camera(u32),
+    Reflection(&'a PlanarView),
+}
+
 /// Draws every Opaque and Fur draw of `lit` into `pass` (groups 0 and 1 bound by the
 /// caller): per draw the `kind` variant of its material function at `msaa` samples, its
 /// sub-mesh ([`LitHandle::bind_mesh`]) and its instances
@@ -148,15 +155,25 @@ fn draw_lit(
     kind: PassKind,
     msaa: u32,
     specs: &Specs,
-    extra_flags: u32,
+    source: DrawSource<'_>,
 ) -> Result<(), RaaError> {
+    let (capture, extra_flags) = match source {
+        DrawSource::Camera(flags) => (None, flags),
+        DrawSource::Reflection(view) => (Some(view), 0),
+    };
     for class in DRAWN_CLASSES {
-        let draws = lit.camera_draws(class);
-        for d in draws.iter() {
+        let camera_draws;
+        let draws = if let Some(view) = capture {
+            view.select.draws(class)
+        } else {
+            camera_draws = lit.camera_draws(class);
+            &camera_draws
+        };
+        for d in draws {
             if d.instance_count == 0 {
                 continue;
             }
-            let count = lit.bind_mesh(pass, d.mesh)?;
+            let count = lit.bind_selected_mesh(pass, d.mesh, capture)?;
             if count == 0 {
                 continue;
             }
@@ -167,10 +184,10 @@ fn draw_lit(
                 msaa,
                 flags: flags | lit.material_variant_flags(d.material) | extra_flags,
             };
-            let pipeline = lit.pipeline_for_draw(gpu, d.mesh, key, specs.get(flags))?;
+            let pipeline = lit.pipeline_for(gpu, key, specs.get(flags))?;
             pass.set_pipeline(&pipeline);
             let instances = d.first_instance..d.first_instance.saturating_add(d.instance_count);
-            if kind == PassKind::Forward {
+            if kind == PassKind::Forward && capture.is_none() {
                 lit.draw_surface_instances(pass, 0..count, instances);
             } else {
                 pass.draw_indexed(0..count, 0, instances);
@@ -290,7 +307,7 @@ impl FeaturePass for Prepass {
             PassKind::Prepass,
             1,
             &self.specs,
-            extra_flags,
+            DrawSource::Camera(extra_flags),
         )
     }
 }
@@ -337,6 +354,7 @@ struct ForwardPass {
     specs: Specs,
     /// Created by `resize` (before the first prepare and on every size change).
     targets: Option<ForwardTargets>,
+    reflection: Option<PlanarTargets>,
 }
 
 impl ForwardPass {
@@ -347,7 +365,40 @@ impl ForwardPass {
             msaa,
             specs: Specs::new(vec![color_target(HDR_FORMAT)]),
             targets: None,
+            reflection: None,
         }
+    }
+
+    fn record_reflection(
+        &mut self,
+        ctx: &mut RecordCtx<'_>,
+        view: &PlanarView,
+    ) -> Result<(), RaaError> {
+        if self
+            .reflection
+            .as_ref()
+            .is_none_or(|targets| targets.size != ctx.size)
+        {
+            self.reflection = Some(PlanarTargets::new(ctx.gpu, ctx.size, self.msaa));
+        }
+        let targets = self.reflection.as_ref().expect("reflection targets");
+        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("raa.lit.planar.capture"),
+            color_attachments: &[cleared(&targets.color, wgpu::Color::TRANSPARENT)],
+            depth_stencil_attachment: Some(cleared_depth(&targets.depth, wgpu::StoreOp::Discard)),
+            ..Default::default()
+        });
+        pass.set_bind_group(0, view.frame_group(), &[]);
+        pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        draw_lit(
+            ctx.gpu,
+            &mut pass,
+            &self.lit,
+            PassKind::Forward,
+            1,
+            &self.specs,
+            DrawSource::Reflection(view),
+        )
     }
 }
 
@@ -395,6 +446,11 @@ impl FeaturePass for ForwardPass {
     }
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let lit = self.lit.clone();
+        let reflection = lit.planar_view();
+        if let Some(view) = reflection.as_deref() {
+            self.record_reflection(ctx, view)?;
+        }
         let Some(own) = self.targets.as_ref() else {
             return Err(RaaError::Resource(format!(
                 "{FORWARD_NAME}: record ran before resize created its targets"
@@ -443,8 +499,14 @@ impl FeaturePass for ForwardPass {
                 PassKind::Forward,
                 self.msaa,
                 &self.specs,
-                0,
+                DrawSource::Camera(0),
             )?;
+            if let (Some(view), Some(targets)) = (reflection.as_deref(), self.reflection.as_ref()) {
+                targets.composite(ctx.gpu, &mut pass, &self.lit, view);
+                pass.set_bind_group(0, &frame, &[]);
+                pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+            }
+            drop(reflection);
             let slots = self
                 .contributors
                 .try_borrow()

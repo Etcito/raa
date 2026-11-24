@@ -202,6 +202,9 @@ struct RaaVertex0 {
     @location(1) normal: vec3<f32>,
 }
 
+// The reflected camera has its own geometry and depth, with no main-view screen inputs.
+const RAA_PLANAR_CAPTURE_FEATURE: u32 = 40u;
+
 // One instance as the lit passes use it: the S1 instance record's matrices, its material
 // index and its skin palette base, read by the stable slot in the compacted id stream.
 struct RaaInstance {
