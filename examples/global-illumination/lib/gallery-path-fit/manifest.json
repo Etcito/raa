@@ -3,8 +3,8 @@
   "signal": "indirect-specular",
   "captureSource": {
     "kind": "windows-render",
-    "buildId": "572c8282-67ef-4700-959a-96778353b048",
-    "fixture": "gallery-mesh-specular/1",
+    "buildId": "adee9ebd-6cb8-43ca-9fd8-8567f3846f8d",
+    "fixture": "gallery-mesh-specular/2",
     "facts": {
       "hardware": true,
       "adapter": {
@@ -17,10 +17,10 @@
       "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
       "devicePixelRatio": 1
     },
-    "revision": "f05a3466757bbd200bbe747461a8ff0a72c831c1",
-    "receiptSha256": "56069160e3dfb82a6d8214d8182f0df6b2f881d55eae269155ed81d58eaa1555"
+    "revision": "dcca0a3ca93859cad9ca15dc7842932c34d1ce90",
+    "receiptSha256": "93c2af3bd5fc5d1381488d4be5b09958af0834b3659646e887c587daa78842cf"
   },
-  "captureSha256": "8e1bd419b451b86e7335d7ea9f8a3c962adc1962cb0af65ae22a48befd5a92f4",
+  "captureSha256": "82aa37ea55e21384bc5877e442e347ecf67c5abb524cc2f3da4bfbb2f0fb81df",
   "inputChannels": [
     "red",
     "green",
@@ -63,7 +63,7 @@
   "weights": {
     "file": "weights.fp32le",
     "byteLength": 524,
-    "sha256": "dd41b02d73a99cc0c3e58c4189b9927a53dd65368b5892c8f2ee0d1f8a259335",
+    "sha256": "75644752899576b63f429d46567848cddb7287dd65a5c84a4a828a2f0554005a",
     "tensors": [
       {
         "name": "hidden.weight",
@@ -72,7 +72,7 @@
           8,
           12
         ],
-        "sha256": "d4832720381b2c07cdcc2846922a0c71929cbdb6e7eaa907a35ef2f9d5e6683a"
+        "sha256": "efcc251e6258cf6f4e264927952312c4bf7e43ed0d13360037bf36761d311d36"
       },
       {
         "name": "hidden.bias",
@@ -80,7 +80,7 @@
         "shape": [
           8
         ],
-        "sha256": "b46b189705a6c34a1d0736c984083c1ffa8d7e33e2be39f6ddfd166f8ccfcbb8"
+        "sha256": "a6738c055ca65e9888ba78ad38b7c1e51a93a9d5dc2793511c509ba7b85cc26d"
       },
       {
         "name": "output.weight",
@@ -89,7 +89,7 @@
           3,
           8
         ],
-        "sha256": "ee8d3093bb9eff6c2563de73ab3d0ff2626ae6693b1f2fcb38e63bcce2400724"
+        "sha256": "85c591d1440829beabcb61ee21702c2cb29557b89d34d656f654886a6fd5c970"
       },
       {
         "name": "output.bias",
@@ -97,7 +97,7 @@
         "shape": [
           3
         ],
-        "sha256": "b1e29d9361bfa06faeee25ddfa1d0ea3121608ba21b121d2dbcf87e659ae6e3f"
+        "sha256": "c508d6c0267fec6f33c05f055880a829dd0a765b9b25ff1d001c9508b6f7986e"
       }
     ]
   }

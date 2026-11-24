@@ -249,6 +249,11 @@ function verifyDiffuseCases(cases) {
       }
     }
   }
+  const warmPanel = get('material', 'raster-rgb').warmPanel;
+  const darkPanel = get('material', 'raster-rgb', false).warmPanel;
+  if (warmPanel[0] <= warmPanel[2] || warmPanel.some((value, c) => value - darkPanel[c] < 0.25)) {
+    throw new Error('The warm panel lost its colored emission response');
+  }
   for (const name of ['redWall', 'greenWall', 'panelLitFloor']) {
     const raster = get('material', 'raster-diffuse')[name];
     const learned = get('material', 'learned-direct')[name];
@@ -256,7 +261,7 @@ function verifyDiffuseCases(cases) {
     for (let c = 0; c < 3; c++) {
       // Raster form-factor clipping and traced visibility differ at occluder edges.
       if (Math.abs(learned[c] - reference[c]) > Math.max(0.001, 0.12 * reference[c])
-          || Math.abs(learned[c] - raster[c]) > Math.max(0.003, 0.28 * raster[c])) {
+          || Math.abs(learned[c] - raster[c]) > Math.max(0.003, 0.17 * raster[c])) {
         throw new Error(`${name}: panel diffuse RGB mismatch ${JSON.stringify({ raster, learned, reference })}`);
       }
     }
@@ -280,7 +285,7 @@ export async function measureGalleryDiffuse(context, { buildId, requireFixed = t
       engine.setMeshPathModel(model.bytes);
       setPose(CAMERAS[0]);
       engine.setLight({ ...volumeRoom().sun, intensity: 0 });
-      engine.setPassEnabled('gtao', false);
+      engine.setPassEnabled('ao.gtao', false);
       const modes = [
         ['raster-rgb', 'off', false, 'off'],
         ['raster-diffuse', 'off', false, 'off'],
@@ -291,7 +296,7 @@ export async function measureGalleryDiffuse(context, { buildId, requireFixed = t
       ];
       for (const [mode, pathMode, reference, diffuseOutput] of modes) {
         engine.setAreaLightShading({ mode: mode === 'raster-rgb' ? 'ltc' : 'formFactor' });
-        engine.setMeshTracing({ pathMode, reference, diffuseOutput, reflections: false, pathBounces: 2 });
+        engine.setMeshTracing({ pathMode, reference, diffuseOutput, reflections: reference, pathBounces: 2 });
         for (const panels of [true, false]) {
           scene.setOption(engine, state, 'area-lights', panels);
           const sums = Object.fromEntries(Object.keys(REGIONS).map(name => [name, [0, 0, 0]]));
