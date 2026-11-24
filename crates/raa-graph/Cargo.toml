@@ -13,6 +13,8 @@ name = "raa_graph"
 raa-loader = { path = "../raa-loader" }
 
 [dependencies]
+serde_json = "1"
+sha2 = "0.10"
 raa-core = { workspace = true }
 raa-loader = { workspace = true }
 wgpu = { workspace = true }

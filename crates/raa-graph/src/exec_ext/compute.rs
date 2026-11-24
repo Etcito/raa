@@ -9,6 +9,7 @@ use raa_loader::json::JsonValue;
 use std::{cell::RefCell, rc::Rc};
 #[path = "compute/pass.rs"]
 mod pass;
+pub use pass::learned;
 use crate::plan::{GraphPlan, InputSource, PlanHistory, PlanNode, PlanPortRef, PlanResource};
 use raa_core::RaaError;
 use raa_pipeline::{

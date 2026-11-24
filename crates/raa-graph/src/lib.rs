@@ -13,7 +13,13 @@ pub mod exec;
 
 pub mod registry {
     include!(concat!(env!("OUT_DIR"), "/registry.rs"));
+
+    #[cfg(raa_graph_exec)]
+    pub use exec_compute::learned;
 }
+
+#[cfg(raa_graph_exec)]
+pub use registry::learned;
 
 pub use catalog::Catalog;
 pub use error::Issue;

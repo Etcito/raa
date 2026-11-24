@@ -55,3 +55,6 @@ fn compute_pass_is_installed_and_removed() {
             .any(|p| p.name == "compute#calc")
     );
 }
+
+#[path = "compute_pass/area_pilot.rs"]
+mod area_pilot;

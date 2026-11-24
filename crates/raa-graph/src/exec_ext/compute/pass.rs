@@ -10,6 +10,17 @@ use raa_pipeline::{
 };
 use std::{cell::RefCell, rc::Rc};
 
+#[path = "learned/mod.rs"]
+pub mod learned;
+
+fn storage_binding(buffer: &wgpu::Buffer, size: u64) -> wgpu::BindingResource<'_> {
+    wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+        buffer,
+        offset: 0,
+        size: wgpu::BufferSize::new(size),
+    })
+}
+
 const FRAME_PACK: &str = r#"
 @group(0) @binding(0) var<uniform> lit: array<vec4<u32>, 48>;
 @group(0) @binding(1) var<storage, read_write> frame: array<vec4<u32>, 23>;
@@ -483,7 +494,7 @@ impl FeaturePass for ComputeNodePass {
                 .iter()
                 .map(|b| match b {
                     Binding::Image(view) => wgpu::BindingResource::TextureView(view),
-                    Binding::Buffer(buffer, _) => buffer.as_entire_binding(),
+                    Binding::Buffer(buffer, size) => storage_binding(buffer, *size),
                 })
                 .collect();
             let group = group(ctx.gpu.device(), &state.input_layout, &resources);

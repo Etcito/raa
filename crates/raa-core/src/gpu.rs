@@ -190,6 +190,16 @@ impl GpuContext {
         self.device.limits()
     }
 
+    /// Check the capabilities of both the adapter and the already-created device.
+    /// A device can expose less than its adapter, for example when booted with default limits.
+    pub fn check_compute_limits(
+        &self,
+        check: impl Fn(&wgpu::Limits) -> Result<(), RaaError>,
+    ) -> Result<(), RaaError> {
+        check(&self.adapter.limits())?;
+        check(&self.device.limits())
+    }
+
     async fn from_adapter(
         adapter: wgpu::Adapter,
         req: &DeviceRequest,

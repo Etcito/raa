@@ -191,3 +191,83 @@ fn declaration_rules_report_ports_and_parameters() {
     assert_eq!(issue.param.as_deref(), Some("bad-Key"));
     assert!(issue.fix.contains("bad-Key"));
 }
+
+#[test]
+fn area_pilot_rejects_invalid_extents_and_constrained_devices() {
+    use raa_graph::learned::AreaPilotRect;
+    let core = wgpu::Limits::default();
+    let rect = AreaPilotRect::full(960, 540);
+    let memory = rect.check_limits(&core).unwrap();
+    assert_eq!(
+        (memory.io, memory.hidden, memory.weights),
+        (24_883_200, 33_177_600, 5036)
+    );
+    for constrained in [
+        wgpu::Limits {
+            max_texture_dimension_2d: 959,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_storage_buffer_binding_size: memory.hidden - 1,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_buffer_size: memory.hidden - 1,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_compute_workgroups_per_dimension: 119,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_compute_invocations_per_workgroup: 63,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_compute_workgroup_size_y: 7,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_storage_buffers_per_shader_stage: 3,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_bindings_per_bind_group: 4,
+            ..core.clone()
+        },
+        wgpu::Limits {
+            max_uniform_buffer_binding_size: 23,
+            ..core.clone()
+        },
+    ] {
+        assert!(rect.check_limits(&constrained).is_err());
+    }
+    for invalid in [
+        AreaPilotRect::full(0, 1),
+        AreaPilotRect {
+            origin: [959, 0],
+            ..rect
+        },
+        AreaPilotRect {
+            origin: [u32::MAX, 1],
+            ..rect
+        },
+    ] {
+        assert!(invalid.check_limits(&core).is_err());
+    }
+}
+
+#[test]
+fn area_pilot_checks_frozen_package_before_gpu_allocation() {
+    use raa_core::testing::block_on;
+    use raa_graph::learned::{AreaPilotPackage, MANIFEST, WEIGHTS};
+    let load = |manifest: String, blob: Vec<u8>| {
+        block_on(AreaPilotPackage::load(async { Ok((manifest, blob)) }))
+    };
+    assert!(load(MANIFEST.to_owned(), WEIGHTS.to_vec()).is_ok());
+    let mut changed = WEIGHTS.to_vec();
+    changed[123] ^= 1;
+    assert!(load(MANIFEST.to_owned(), changed).is_err());
+    assert!(load(MANIFEST.replace("FP32", "FP16"), WEIGHTS.to_vec()).is_err());
+    assert!(load(MANIFEST.to_owned(), WEIGHTS[..WEIGHTS.len() - 1].to_vec()).is_err());
+}

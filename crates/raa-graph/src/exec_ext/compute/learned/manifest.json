@@ -1,0 +1,212 @@
+{
+  "operatorAbi": "raa.area-inference/1",
+  "signalSchema": "raa.area-pair-guides/1",
+  "dtype": "FP32",
+  "layout": "NHWC",
+  "byteOrder": "little-endian",
+  "alignment": 16,
+  "workgroup": [
+    8,
+    8,
+    1
+  ],
+  "channels": [
+    "currentS",
+    "currentU",
+    "acceptedPreviousS",
+    "acceptedPreviousU",
+    "viewNormalX",
+    "viewNormalY",
+    "viewNormalZ",
+    "metricDepth",
+    "unjitteredMotionUVX",
+    "unjitteredMotionUVY",
+    "historyValid",
+    "lightChange"
+  ],
+  "normalizationScales": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    0.125,
+    8,
+    8,
+    1,
+    1
+  ],
+  "supportedScales": [
+    1
+  ],
+  "rayBudgets": [
+    1
+  ],
+  "exposureRange": [
+    1,
+    1
+  ],
+  "requiredGuides": [
+    "viewNormal",
+    "metricDepth",
+    "unjitteredMotionUV",
+    "historyValid",
+    "lightChange"
+  ],
+  "cadence": "real-frame",
+  "outputs": [
+    "spatialSoftmax[9]",
+    "maskedHistoryGate",
+    "confidence",
+    "visibility"
+  ],
+  "tolerance": {
+    "absolute": 1e-05,
+    "relative": 1e-05
+  },
+  "tensors": [
+    {
+      "name": "stem.weight",
+      "dtype": "FP32",
+      "shape": [
+        16,
+        12
+      ],
+      "offset": 0,
+      "byteLength": 768,
+      "sha256": "2f06fa670e0cb0c33acab9c8236c49c8e11ba4784503897328515b7485eaa309"
+    },
+    {
+      "name": "stem.bias",
+      "dtype": "FP32",
+      "shape": [
+        16
+      ],
+      "offset": 768,
+      "byteLength": 64,
+      "sha256": "57cd9ee8dfb22cf9dcc32c01f16f63c36d4c6d440da88fcb147c5ffed6d8682d"
+    },
+    {
+      "name": "depthwise1.weight",
+      "dtype": "FP32",
+      "shape": [
+        16,
+        3,
+        3
+      ],
+      "offset": 832,
+      "byteLength": 576,
+      "sha256": "de5491f501bf4a35a3ce3fe183b1939ad15da91fde9fba86230d3078af302e23"
+    },
+    {
+      "name": "depthwise1.bias",
+      "dtype": "FP32",
+      "shape": [
+        16
+      ],
+      "offset": 1408,
+      "byteLength": 64,
+      "sha256": "f001677e1c0bfe85c6ec1c97c445a88badb9c6356875cd8ea56055db5ac4035d"
+    },
+    {
+      "name": "pointwise1.weight",
+      "dtype": "FP32",
+      "shape": [
+        16,
+        16
+      ],
+      "offset": 1472,
+      "byteLength": 1024,
+      "sha256": "716e46219bb4b7e3e0921294b9ea45760769f5a1df9ba22113596b1a1c7fdfd6"
+    },
+    {
+      "name": "pointwise1.bias",
+      "dtype": "FP32",
+      "shape": [
+        16
+      ],
+      "offset": 2496,
+      "byteLength": 64,
+      "sha256": "02b493aacba2571d0c99ef73952af3b3b40ac6dea5e5b7ddae95d502fdae4db3"
+    },
+    {
+      "name": "depthwise2.weight",
+      "dtype": "FP32",
+      "shape": [
+        16,
+        3,
+        3
+      ],
+      "offset": 2560,
+      "byteLength": 576,
+      "sha256": "fb9791aaf6c3d7efb1e322f9e3f16057b1599a9a504977c7144a137d117c46c6"
+    },
+    {
+      "name": "depthwise2.bias",
+      "dtype": "FP32",
+      "shape": [
+        16
+      ],
+      "offset": 3136,
+      "byteLength": 64,
+      "sha256": "5d3582548025fd1ba00c0837a6bcb2b69da3eb848b7bc048b7b07d626acc4b86"
+    },
+    {
+      "name": "pointwise2.weight",
+      "dtype": "FP32",
+      "shape": [
+        16,
+        16
+      ],
+      "offset": 3200,
+      "byteLength": 1024,
+      "sha256": "ec6c4770b0db9539fe49006219273261c87ccf507d70b876dd3631576ecceb8c"
+    },
+    {
+      "name": "pointwise2.bias",
+      "dtype": "FP32",
+      "shape": [
+        16
+      ],
+      "offset": 4224,
+      "byteLength": 64,
+      "sha256": "7de8fa5ea710f1f75ada0cf2cf8648a75ebd96389cfeaf3e9b5f850cbfb89755"
+    },
+    {
+      "name": "head.weight",
+      "dtype": "FP32",
+      "shape": [
+        11,
+        16
+      ],
+      "offset": 4288,
+      "byteLength": 704,
+      "sha256": "cba3e00d3c3f3cf277049d3503cfcfd1943b9e06fb7ba052f5689490c1b9f8bb"
+    },
+    {
+      "name": "head.bias",
+      "dtype": "FP32",
+      "shape": [
+        11
+      ],
+      "offset": 4992,
+      "byteLength": 44,
+      "sha256": "e663773c5d2183abcf0ba12b24af5e7d95817bd836d606be84881616750089ba"
+    }
+  ],
+  "weightsSha256": "9cd34a30789d241f65bf178005e27f02abc830d08fc9ce548411ff11f9910ee0",
+  "golden": {
+    "file": "golden.json",
+    "sha256": "394ea706b6f0d4db587655b35941482c6f3ef1d95ff576c4d6f73261ea081fd6",
+    "cases": [
+      "single",
+      "odd-offset",
+      "rejected",
+      "high-hdr",
+      "zero-denominator"
+    ]
+  },
+  "packageSha256": "6dc3217b42bf81851810d2fcfda3a269cdacb5a6b4074393c3358ad7978fcfc6"
+}
