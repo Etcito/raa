@@ -415,6 +415,8 @@ pub(crate) struct LitShared {
     pub(crate) planar_view: Option<crate::planar_reflection::PlanarView>,
     /// `FrameGpu`, `FRAME_GPU_SIZE` bytes.
     frame_buffer: wgpu::Buffer,
+    /// Forward preview uniform while a lighting contribution is selected.
+    pub(crate) lighting_view_frame: Option<wgpu::Buffer>,
     /// `SurfaceMaterialGpu` array, `max_materials` x 256 B.
     material_buffer: wgpu::Buffer,
     /// Persistent S1 instance records, group-0 binding 7.
@@ -583,6 +585,7 @@ impl LitShared {
             composer,
             id_buffer,
             frame_buffer,
+            lighting_view_frame: None,
             material_buffer,
             instance_storage,
             previous_storage,
@@ -1630,6 +1633,12 @@ impl LitHandle {
     /// each frame rather than keeping it.
     pub fn frame_bind_group(&self) -> wgpu::BindGroup {
         self.shared.borrow().frame_bind_group.clone()
+    }
+
+    pub(crate) fn lighting_view_group(&self, gpu: &GpuContext) -> Option<wgpu::BindGroup> {
+        let shared = self.shared.borrow();
+        let frame = shared.lighting_view_frame.as_ref()?;
+        Some(shared.camera_group(gpu, frame))
     }
 
     /// The render pipeline of shader variant `key` with the fixed-function state `spec`:

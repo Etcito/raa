@@ -355,6 +355,7 @@ struct ForwardPass {
     /// Created by `resize` (before the first prepare and on every size change).
     targets: Option<ForwardTargets>,
     reflection: Option<PlanarTargets>,
+    combined_lighting: Option<wgpu::TextureView>,
 }
 
 impl ForwardPass {
@@ -366,6 +367,7 @@ impl ForwardPass {
             specs: Specs::new(vec![color_target(HDR_FORMAT)]),
             targets: None,
             reflection: None,
+            combined_lighting: None,
         }
     }
 
@@ -400,6 +402,69 @@ impl ForwardPass {
             DrawSource::Reflection(view),
         )
     }
+
+    fn record_camera(
+        &self,
+        ctx: &mut RecordCtx<'_>,
+        own: &ForwardTargets,
+        destination: &wgpu::TextureView,
+        frame: &wgpu::BindGroup,
+        reflection: Option<&PlanarView>,
+    ) -> Result<(), RaaError> {
+        let clear = wgpu::LoadOp::Clear(background_clear(ctx.lighting.env().background));
+        let color = match &own.color {
+            Some(samples) => wgpu::RenderPassColorAttachment {
+                view: samples,
+                depth_slice: None,
+                resolve_target: Some(destination),
+                ops: wgpu::Operations {
+                    load: clear,
+                    store: wgpu::StoreOp::Discard,
+                },
+            },
+            None => wgpu::RenderPassColorAttachment {
+                view: destination,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: clear,
+                    store: wgpu::StoreOp::Store,
+                },
+            },
+        };
+        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("raa.lit.forward"),
+            color_attachments: &[Some(color)],
+            depth_stencil_attachment: Some(cleared_depth(&own.depth, wgpu::StoreOp::Discard)),
+            ..Default::default()
+        });
+        pass.set_bind_group(0, frame, &[]);
+        pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        draw_lit(
+            ctx.gpu,
+            &mut pass,
+            &self.lit,
+            PassKind::Forward,
+            self.msaa,
+            &self.specs,
+            DrawSource::Camera(0),
+        )?;
+        if let (Some(view), Some(targets)) = (reflection, self.reflection.as_ref()) {
+            targets.composite(ctx.gpu, &mut pass, &self.lit, view);
+            pass.set_bind_group(0, frame, &[]);
+            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        }
+        let slots = self
+            .contributors
+            .try_borrow()
+            .map_err(|_| pipeline_busy())?;
+        for slot in slots.iter().filter(|s| s.enabled.get()) {
+            slot.contributor.record(&mut pass, &self.lit)?;
+            // Later contributors see the full lighting group even after sky bound its own.
+            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
+        }
+        Ok(())
+    }
 }
 
 /// The display-referred background rgb of `EnvGpu` as the HDR clear colour (alpha 1).
@@ -431,6 +496,7 @@ impl FeaturePass for ForwardPass {
             .then(|| attachment(gpu, "raa.lit.forward.color", size, HDR_FORMAT, self.msaa));
         let depth = attachment(gpu, "raa.lit.forward.depth", size, DEPTH_FORMAT, self.msaa);
         self.targets = Some(ForwardTargets { color, depth });
+        self.combined_lighting = None;
     }
 
     /// Prepares the enabled contributors in order.
@@ -457,71 +523,40 @@ impl FeaturePass for ForwardPass {
             )));
         };
         let hdr = ctx.targets.hdr();
-        let clear = wgpu::LoadOp::Clear(background_clear(ctx.lighting.env().background));
-        // MSAA: draw into the multisampled colour, resolve into hdr.dst() and drop the
-        // samples; 1 sample: draw into hdr.dst() directly.
-        let color = match &own.color {
-            Some(samples) => wgpu::RenderPassColorAttachment {
-                view: samples,
-                depth_slice: None,
-                resolve_target: Some(hdr.dst()),
-                ops: wgpu::Operations {
-                    load: clear,
-                    store: wgpu::StoreOp::Discard,
-                },
-            },
-            None => wgpu::RenderPassColorAttachment {
-                view: hdr.dst(),
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: clear,
-                    store: wgpu::StoreOp::Store,
-                },
-            },
-        };
-        let frame = self.lit.frame_bind_group();
-        {
-            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("raa.lit.forward"),
-                color_attachments: &[Some(color)],
-                depth_stencil_attachment: Some(cleared_depth(&own.depth, wgpu::StoreOp::Discard)),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_bind_group(0, &frame, &[]);
-            pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
-            draw_lit(
-                ctx.gpu,
-                &mut pass,
-                &self.lit,
-                PassKind::Forward,
-                self.msaa,
-                &self.specs,
-                DrawSource::Camera(0),
-            )?;
-            if let (Some(view), Some(targets)) = (reflection.as_deref(), self.reflection.as_ref()) {
-                targets.composite(ctx.gpu, &mut pass, &self.lit, view);
-                pass.set_bind_group(0, &frame, &[]);
-                pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
-            }
-            drop(reflection);
-            let slots = self
-                .contributors
-                .try_borrow()
-                .map_err(|_| pipeline_busy())?;
-            for slot in slots.iter().filter(|s| s.enabled.get()) {
-                slot.contributor.record(&mut pass, &self.lit)?;
-                // A fullscreen contributor may have replaced group 1 with the opaque set;
-                // later contributors (fur.shells) see the full group again.
-                pass.set_bind_group(1, ctx.lighting.bind_group(), &[]);
-            }
-        }
-        hdr.swap();
-        // S55 `color`: the chain view this pass wrote, published after the swap.
         let (width, height) = ctx.targets.size();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, width, height, 1, 1);
+        let frame = self.lit.frame_bind_group();
+        if let Some(preview) = self.lit.lighting_view_group(ctx.gpu) {
+            if self.combined_lighting.is_none() {
+                let combined = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+                    label: Some("raa.lit.forward.combined-lighting"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: HDR_FORMAT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                self.combined_lighting = Some(combined.create_view(&Default::default()));
+            }
+            let combined = self
+                .combined_lighting
+                .as_ref()
+                .expect("combined lighting target");
+            self.record_camera(ctx, own, combined, &frame, reflection.as_deref())?;
+            ctx.resources
+                .publish(FORWARD_NAME, "combined-lighting", combined, desc);
+            self.record_camera(ctx, own, hdr.dst(), &preview, None)?;
+        } else {
+            self.combined_lighting = None;
+            self.record_camera(ctx, own, hdr.dst(), &frame, reflection.as_deref())?;
+        }
+        hdr.swap();
         ctx.resources
             .publish(FORWARD_NAME, "color", hdr.src(), desc);
         Ok(())

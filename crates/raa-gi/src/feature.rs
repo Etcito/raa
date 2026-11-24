@@ -972,8 +972,8 @@ impl FeaturePass for GiVolumePass {
     }
 }
 
-/// Copies the lit HDR of this frame (`hdr.src` after forward) into the history texture, which is
-/// recreated on a size change, and publishes its view for the next frame's screen traces.
+/// Copies the full lighting of this frame into the history used by the next screen traces.
+/// The forward pass publishes a separate source while displaying an isolated contribution.
 fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
     let (width, height) = ctx.size;
     let current = core
@@ -1006,9 +1006,15 @@ fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
         height,
         depth_or_array_layers: 1,
     };
+    let combined = ctx.resources.get("forward", "combined-lighting");
+    let source = combined
+        .as_ref()
+        .map_or(ctx.targets.hdr().src_texture(), |image| {
+            image.view.texture()
+        });
     ctx.encoder.copy_texture_to_texture(
         wgpu::TexelCopyTextureInfo {
-            texture: ctx.targets.hdr().src_texture(),
+            texture: source,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,

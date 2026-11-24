@@ -30,7 +30,7 @@ use crate::area_shadow::{
 use crate::area_stochastic::{AreaStochasticFrame, StochasticSelector, StochasticShadowSettings};
 use crate::contributor::ForwardContributor;
 use crate::extras::InstanceExtra;
-use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_gpu};
+use crate::frame::{FRAME_GPU_SIZE, FrameParams, write_frame_flags, write_frame_gpu};
 use crate::frame_history::{CameraHistory, FrameHistory, MAX_VIEWS, frame_jitter};
 use crate::handle::{LitHandle, LitShared};
 use crate::instance_store::InstanceStore;
@@ -1021,7 +1021,11 @@ impl LitRenderer {
     /// Sets logical `FrameGpu` feature `id` (S10) for every later `prepare`, after its own
     /// tiling bit. Ignores reserved ids 24 (tiling) and 40 (planar capture) and ids >= 64.
     pub fn set_frame_feature(&mut self, id: u32, on: bool) {
-        if matches!(id, TILING_FEATURE_ID | crate::planar_reflection::CAPTURE_FEATURE) || id >= 64 {
+        if matches!(
+            id,
+            TILING_FEATURE_ID | crate::planar_reflection::CAPTURE_FEATURE
+        ) || id >= 64
+        {
             return;
         }
         let bit = 1u64 << id;
@@ -1382,9 +1386,15 @@ impl LitRenderer {
             tile_stride,
             ..FrameParams::default()
         };
+        use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
         params.set_feature(TILING_FEATURE_ID, tiling);
+        let mut lighting_view = None;
         for id in (0..64u32).filter(|&id| self.frame_features & (1u64 << id) != 0) {
-            params.set_feature(id, true);
+            if matches!(id, RAA_DIRECT_ONLY_FEATURE | RAA_INDIRECT_ONLY_FEATURE) {
+                lighting_view = Some(id);
+            } else {
+                params.set_feature(id, true);
+            }
         }
         write_frame_gpu(&mut self.frame_bytes, scene, &params)?;
         // Publish the order-35 pass inputs before it prepares: the same frame snapshot,
@@ -1456,6 +1466,22 @@ impl LitRenderer {
         if let Some(mut view) = planar_view {
             view.upload(gpu, s, scene, params, &self.frame_bytes)?;
             s.planar_view = Some(view);
+        }
+        if let Some(feature) = lighting_view {
+            let buffer = s.lighting_view_frame.get_or_insert_with(|| {
+                gpu.device().create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("raa.lit.forward.lighting-view.frame"),
+                    size: FRAME_GPU_SIZE as u64,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+            let mut preview = self.frame_bytes;
+            params.set_feature(feature, true);
+            write_frame_flags(&mut preview, &params);
+            gpu.queue().write_buffer(buffer, 0, &preview);
+        } else {
+            s.lighting_view_frame = None;
         }
         stats.uploaded_bytes = s.store.last_uploaded_bytes();
         s.stats = stats;

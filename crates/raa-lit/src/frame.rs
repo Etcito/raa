@@ -174,15 +174,7 @@ pub(crate) fn write_camera_frame_gpu(
         &mut out[400..416],
         &[cam.near, cam.far, p.frame_index as f32, p.dt_s],
     );
-    put_u32s(
-        &mut out[416..432],
-        &[
-            u32::from(p.encode_srgb),
-            p.msaa,
-            p.feature_bits,
-            p.feature_bits_hi,
-        ],
-    );
+    write_frame_flags(out, p);
     put_f32s(&mut out[432..448], &EXPOSURE_DEFAULT);
     out[448..512].fill(0);
     p.previous_view_proj.write_le_bytes(&mut out[512..576]);
@@ -206,6 +198,18 @@ pub(crate) fn write_camera_frame_gpu(
     );
     out[688..FRAME_GPU_SIZE].fill(0);
     Ok(())
+}
+
+pub(crate) fn write_frame_flags(out: &mut [u8; FRAME_GPU_SIZE], p: &FrameParams) {
+    put_u32s(
+        &mut out[416..432],
+        &[
+            u32::from(p.encode_srgb),
+            p.msaa,
+            p.feature_bits,
+            p.feature_bits_hi,
+        ],
+    );
 }
 
 #[cfg(test)]
