@@ -88,7 +88,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       const { data, size, roughEvidence } = reference
         ? await engine.captureTrainingReference(timeMs, evidenceSeed, 1)
         : await engine.captureMeshLighting(timeMs, traced, raw, evidenceSeed);
-      const expected = raw && !reference ? extent.map(value => value / 2) : extent;
+      const expected = raw ? extent.map(value => value / 2) : extent;
       requireEvidence(size.join() === expected.join(), 'Capture extent changed', { id, size, expected });
       const frame = engine.stats().frames - 1;
       let trace = engine.meshTracingStats();
@@ -139,20 +139,20 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       baselineFacts, residency, comparison, captures, coverage };
     if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
     let phase = priorityOnly ? 'priority experiment' : 'forced BVH';
+    let sharp, learned, reference;
     try {
       if (priorityOnly) {
         const priority = await measureMirrorPriority({ engine, set, settle, capture, camera: preset.selection.camera,
           check: requireEvidence, compare });
         return { json: { ...manifest, priority }, files };
       }
-      const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare, settle,
+      sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare, settle,
         defaultConfidence: initial['reflection-confidence'] });
       if (sharpOnly) return { json: { ...manifest, sharp, sharpOnly }, files };
       phase = 'learned';
-      const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
+      learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
         check: requireEvidence, compare });
       phase = 'reference';
-      let reference;
       if (!baseline) {
         set('model-assisted-path', false);
         // Keep the cache resident while asking the independent reference to render.
@@ -193,7 +193,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
         'The isolated mirror did not reflect into empty space', miss.trace);
       return { json: { ...manifest, sharp, learned, reference, missCamera, miss: miss.trace }, files };
     } catch (error) {
-      return { json: { ...manifest, failure: { phase, message: error?.message ?? String(error) } }, files };
+      return { json: { ...manifest, sharp, learned, reference, failure: { phase, message: error?.message ?? String(error) } }, files };
     }
   } finally {
     engine.dispose();
