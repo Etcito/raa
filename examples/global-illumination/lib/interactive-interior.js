@@ -6,6 +6,9 @@ const options = [
   { id: 'gi', label: 'Global illumination', enabled: true },
   { id: 'area-lights', label: 'Area lights', enabled: true },
   { id: 'moving-objects', label: 'Moving objects', enabled: true },
+  { id: 'ssr', label: 'Screen-space reflections', enabled: true },
+  { id: 'dof', label: 'Depth of field', enabled: true },
+  { id: 'bloom', label: 'Bloom', enabled: true },
 ];
 const variant = {
   id: 'live',
@@ -124,6 +127,11 @@ function setOption(engine, state, id, enabled) {
         engine.updateLight(light, { intensity: enabled ? intensity : 0 });
         engine.setSurfaceMaterial(surface, fixtureSurface(color, enabled));
       }
+      break;
+    case 'ssr':
+    case 'dof':
+    case 'bloom':
+      engine.setPassEnabled(id, enabled);
       break;
     case 'moving-objects':
       state.previousTime = undefined;
