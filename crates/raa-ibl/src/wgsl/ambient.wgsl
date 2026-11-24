@@ -8,14 +8,6 @@ fn raa_ibl_multi_bounce_ao(ao: f32, albedo: vec3<f32>) -> vec3<f32> {
     return max(vec3<f32>(ao), ((ao * a + b) * ao + c) * ao);
 }
 
-// Dominant direction of the GGX specular lobe (Lagarde and de Rousiers 2014): the
-// reflection vector bent towards the normal as the roughness grows.
-fn raa_ibl_dominant_dir(n: vec3<f32>, r: vec3<f32>, roughness: f32) -> vec3<f32> {
-    let a = roughness * roughness;
-    let f = (1.0 - a) * (sqrt(1.0 - a) + a);
-    return normalize(mix(n, r, f));
-}
-
 const RAA_IBL_PI: f32 = 3.14159265;
 
 // The GI screen irradiance E at the fragment (`raa_gi_screen`, binding 14, read with the
@@ -54,7 +46,6 @@ fn raa_slot_ambient(s: MaterialOutput, c: ShadeCtx) -> vec3<f32> {
     }
     let incoming = mix(raa_ibl_specular(r, roughness) * raa_env_sh.info.x,
         raa_ibl_gi_irradiance(c.frag) / RAA_IBL_PI, w_gi);
-    let specular = incoming * (f0 * dfg.x + vec3<f32>(dfg.y)) * energy
-        * raa_specular_occlusion(c.n_dot_v, c.ao, roughness);
+    let specular = incoming * raa_ibl_specular_response(f0, dfg, c.n_dot_v, c.ao, roughness);
     return raa_spherical_blend_diffuse(diffuse, s, c) + specular;
 }

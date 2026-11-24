@@ -5,6 +5,8 @@ use std::{env, fs, path::PathBuf};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/wgsl/prelude.wgsl");
+    println!("cargo:rerun-if-changed=src/wgsl/near_mirror.wgsl");
+    println!("cargo:rerun-if-changed=src/wgsl/ibl_specular_response.wgsl");
     println!("cargo:rerun-if-changed=src/wgsl/weather_lighting.wgsl");
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let constants = [
@@ -52,12 +54,15 @@ fn raa_feature_enabled(id: u32) -> bool {{\n\
     )
     .unwrap();
     let prelude = fs::read_to_string("src/wgsl/prelude.wgsl").expect("read prelude");
+    let mirror = fs::read_to_string("src/wgsl/near_mirror.wgsl").expect("read near-mirror policy");
+    let specular =
+        fs::read_to_string("src/wgsl/ibl_specular_response.wgsl").expect("read IBL response");
     let weather =
         fs::read_to_string("src/wgsl/weather_lighting.wgsl").expect("read weather lighting");
     fs::write(out.join("gpu_constants.rs"), rust).expect("write Rust constants");
     fs::write(
         out.join("prelude.wgsl"),
-        format!("{prelude}\n{weather}\n{wgsl}"),
+        format!("{prelude}\n{weather}\n{mirror}\n{specular}\n{wgsl}"),
     )
     .expect("write prelude");
 }

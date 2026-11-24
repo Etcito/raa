@@ -67,6 +67,10 @@ pub const GI_VOLUME_WGSL: &str = include_str!("wgsl/gi_volume.wgsl");
 /// Prepass entry points: `vs_main` and `fs_main` writing the S12 `normal` (location 0:
 /// view-space normal xyz, roughness) and `material` (location 1: F0 rgb sRGB-encoded,
 /// metallic) targets.
+pub const IBL_SPECULAR_RESPONSE_WGSL: &str = include_str!("wgsl/ibl_specular_response.wgsl");
+
+pub const NEAR_MIRROR_WGSL: &str = include_str!("wgsl/near_mirror.wgsl");
+
 pub const PASS_PREPASS_WGSL: &str = include_str!("wgsl/pass_prepass.wgsl");
 /// Forward entry points: `vs_main` and `fs_main` writing the S11 final colour to the HDR
 /// target (location 0).

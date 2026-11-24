@@ -204,6 +204,17 @@ const RAA_FLAG_UNLIT: u32 = 64u;
 const RAA_FLAG_CEL: u32 = 128u;
 const RAA_FLAG_TRACE_MIRROR: u32 = 256u;
 
+fn raa_reflection_class(s: MaterialOutput, record: SurfaceMaterialGpu) -> f32 {
+    let flags = record.header.z;
+    if (flags & RAA_FLAG_TRACE_MIRROR) != 0u { return 1.0; }
+    let non_pbr = RAA_FLAG_UNLIT | RAA_FLAG_TRANSPARENT | RAA_FLAG_TRANSMISSIVE | RAA_FLAG_FUR | RAA_FLAG_CEL;
+    // Stock SSR reads these values back in the exact G-buffer formats.
+    let metallic = round(clamp(s.metallic, 0.0, 1.0) * 255.0) / 255.0;
+    let roughness = quantizeToF16(clamp(s.roughness, 0.0, 1.0));
+    return select(0.0, 2.0, record.header.x != RAA_MODEL_FLAT
+        && (flags & non_pbr) == 0u && raa_near_mirror(metallic, roughness));
+}
+
 // Vertex stream 0 (S1 Vertex, 24 B).
 struct RaaVertex0 {
     @location(0) position: vec3<f32>,

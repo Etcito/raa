@@ -1378,6 +1378,16 @@ impl LightingResources {
             .map_or(&self.spherical_dummy, |(_, faces)| faces)
     }
 
+    /// The active prefiltered environment's SH and reflection controls.
+    pub fn environment_sh_buffer(&self) -> &wgpu::Buffer {
+        &self.sh_buffer
+    }
+
+    /// The active split-sum BRDF/LTC texture.
+    pub fn brdf_lut_view(&self) -> &wgpu::TextureView {
+        &self.state.views.brdf_lut
+    }
+
     /// The environment diffuse signal published for this view, when an environment is ready.
     pub fn environment_diffuse_sh(&self) -> Option<&[[f32; 4]; 9]> {
         (self.state.sh_info[3] >= 0.5).then_some(&self.state.sh)

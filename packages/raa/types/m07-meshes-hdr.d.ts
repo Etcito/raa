@@ -44,6 +44,9 @@ export interface MeshDesc {
    * Uint8Array is sRGB rgba8 (rgb converted to linear, alpha / 255). Default (1, 1, 1, 1).
    */
   colors?: Float32Array | Uint8Array;
+  /** Whether the vertex colour stream carries mesh-ray albedo (default true).
+   * Set false when a material function uses that stream for other attributes. */
+  traceVertexColors?: boolean;
   /** 3m vertex indices, triangle list. Required. */
   indices: Uint32Array;
   /** Sub-meshes; absent or null = one sub-mesh over all indices with no material. */

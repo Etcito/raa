@@ -121,7 +121,7 @@ impl NodeFamily for MeshTrace {
                         if fitted { 8 } else { 5 },
                         4 + u32::from(fitted),
                     ),
-                    stage_budget(ShaderStage::Fragment, 6, 0, 0, 0, 1),
+                    stage_budget(ShaderStage::Fragment, 13, 1, 0, 0, 4),
                 ],
             )
         };
@@ -139,9 +139,15 @@ impl NodeFamily for MeshTrace {
             ],
         ));
         let mut reflection_inputs = screen_inputs();
+        let mut material = gbuffer_in("material");
+        material.absent_ok = true;
+        // Explicit wiring enables the physical resolve with a matched G-buffer.
+        material.default_source = &[];
+        material.label = "Material for PBR near-mirrors";
+        reflection_inputs.push(material);
         reflection_inputs.push(required_in(
             "color",
-            "Base HDR with ordinary SSR",
+            "Base scene HDR",
             GraphFormat::Rgba16Float,
         ));
         vec![

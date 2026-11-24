@@ -120,7 +120,7 @@ impl EngineState {
             lit,
             origin: MeshOrigin::V0,
         });
-        self.retain_mesh_source(handle, &mesh);
+        self.retain_mesh_source(handle, &mesh, true);
         self.scratch = mesh.base;
         Ok(handle)
     }

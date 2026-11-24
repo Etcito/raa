@@ -87,7 +87,11 @@ fn generated_variants_parse_and_validate() {
 fn mesh_trace_shaders_validate() {
     let trace = validate(&mesh_trace_module());
     assert_eq!(trace.entry_points[0].workgroup_size, [8, 8, 1]);
-    let output = validate(include_str!("../src/wgsl/mesh_composite.wgsl"));
+    let output = validate(&format!(
+        "{}{}",
+        raa_shader::IBL_SPECULAR_RESPONSE_WGSL,
+        include_str!("../src/wgsl/mesh_composite.wgsl")
+    ));
     assert_eq!(output.entry_points.len(), 2);
 }
 
@@ -207,9 +211,10 @@ fn mesh_grid_is_applied_after_measuring_and_shading_the_same_first_hit() {
         .split_once("struct MeshSphericalDirectionalTexel")
         .unwrap()
         .0;
-    assert!(
-        screen.find("if status == ACCEPTED").unwrap() < screen.find("trace_path_lobe(ray").unwrap()
-    );
+    let screen_accept = screen.find("if status == ACCEPTED").unwrap();
+    let first_reflection = screen.find("let first_hit = closest(ray").unwrap();
+    let trace_hit = screen.find("trace_path_from_hit(ray, first_hit").unwrap();
+    assert!(screen_accept < first_reflection && first_reflection < trace_hit);
     let rough = after("fn hybrid_specular")
         .split_once("fn hybrid_diffuse")
         .unwrap()

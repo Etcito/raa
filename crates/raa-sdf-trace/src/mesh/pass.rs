@@ -3,7 +3,7 @@
 use std::{cell::RefCell, rc::Rc, sync::mpsc::sync_channel};
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, RecordCtx};
+use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, PrepareCtx, RecordCtx};
 
 use super::geometry::TRIANGLE_BYTES;
 use super::{
@@ -21,6 +21,7 @@ const RECEIVER_BYTES: usize = 8 * 4;
 const RECEIVER_COUNT: usize = COUNTER_COUNT - 1;
 const MESH_MIRROR_MEASURE: u32 = 4;
 const MESH_MIRROR_FEEDBACK: u32 = 8;
+const MESH_PHYSICAL_MIRROR: u32 = 16;
 const FEEDBACK_BYTES: u64 = COUNTER_BYTES + (MAX_REFLECTED_RECEIVERS * RECEIVER_BYTES) as u64;
 const CONFIDENCE: &str = "ssr.confidence";
 const COMPOSITE_WGSL: &str = include_str!("../wgsl/mesh_composite.wgsl");
@@ -151,6 +152,20 @@ impl FeaturePass for MeshTracePass {
         ORDER
     }
 
+    fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        if self.graph.is_none() {
+            let scene = self.state.borrow();
+            if scene.settings.reflections && !scene.settings.reference
+                && scene.settings.path_mode == PathMode::Off {
+                if let Some(frame) = &scene.frame {
+                    // The stock SSR pass owns all other lobes.
+                    ctx.resources.publish_buffer(MESH_TRACE_NAME, "nearMirror", frame, frame.size());
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut scene = self.state.borrow_mut();
         let graph = self.graph;
@@ -219,6 +234,8 @@ impl FeaturePass for MeshTracePass {
         let depth = ctx.targets.depth_input(ctx.resources, &self.entry);
         let normal = ctx.targets.normal_input(ctx.resources, &self.entry);
         let motion = ctx.targets.motion_input(ctx.resources, &self.entry);
+        let physical_mirrors = graph.is_none() || input("material").is_some();
+        let material = ctx.targets.material_input(ctx.resources, &self.entry);
         if graph.is_some()
             && !settings.reference
             && [&screen, &hiz, &source].into_iter().any(|image| {
@@ -284,7 +301,8 @@ impl FeaturePass for MeshTracePass {
             (u32::from(graph.is_some()) * MESH_GRAPH_SCREEN)
                 | (u32::from(grid_enabled && grids.volume) * MESH_VOLUME_GI)
                 | (u32::from(mirror_priority != MirrorPriority::Off) * MESH_MIRROR_MEASURE)
-                | (u32::from(reflected_snapshot.is_some()) * MESH_MIRROR_FEEDBACK),
+                | (u32::from(reflected_snapshot.is_some()) * MESH_MIRROR_FEEDBACK)
+                | (u32::from(physical_mirrors) * MESH_PHYSICAL_MIRROR),
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -402,6 +420,28 @@ impl FeaturePass for MeshTracePass {
                         image_entry(4, &images.terminal_samples),
                         image_entry(5, &images.terminal_surfaces),
                         image_entry(6, &images.terminal_weights),
+                        image_entry(7, &depth),
+                        image_entry(8, &normal),
+                        image_entry(9, &material),
+                        buffer_entry(10, &frame),
+                    ],
+                });
+                let ao = ctx.lighting.slot_view(7).expect("lighting AO slot");
+                let gi = ctx.lighting.slot_view(14).expect("lighting GI slot");
+                let environment_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("trace.mesh.environment"),
+                    layout: &gpu.composite.get_bind_group_layout(1),
+                    entries: &[
+                        image_entry(0, ctx.lighting.env_specular_view()),
+                        buffer_entry(1, ctx.lighting.environment_sh_buffer()),
+                        image_entry(2, ctx.lighting.brdf_lut_view()),
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(ctx.lighting.linear_clamp()),
+                        },
+                        image_entry(4, &ao),
+                        image_entry(5, &gi),
+                        buffer_entry(6, ctx.lighting.gi_volume_params_buffer()),
                     ],
                 });
                 {
@@ -420,6 +460,7 @@ impl FeaturePass for MeshTracePass {
                     });
                     pass.set_pipeline(&gpu.composite);
                     pass.set_bind_group(0, &composite_group, &[]);
+                    pass.set_bind_group(1, &environment_group, &[]);
                     pass.draw(0..3, 0..1);
                 }
             }
@@ -813,7 +854,9 @@ impl Pipelines {
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("trace.mesh.resolve"),
-            source: wgpu::ShaderSource::Wgsl(COMPOSITE_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{}{}", raa_shader::IBL_SPECULAR_RESPONSE_WGSL, COMPOSITE_WGSL).into(),
+            ),
         });
         let composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("trace.mesh.resolve"),

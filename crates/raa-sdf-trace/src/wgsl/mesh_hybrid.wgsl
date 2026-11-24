@@ -182,7 +182,7 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     let lighting_output = options[3].y;
     // Mirror screen evidence uses the same confidence/disocclusion checks as
     // ordinary hybrid reflections, before any BVH query or network work.
-    if z < 1.0 && textureLoad(motion, pixel, 0).w > 0.5 {
+    if z < 1.0 && textureLoad(motion, pixel, 0).w == 1.0 {
         if hybrid.capture == 1u || diffuse_output != 0u || lighting_output == 1u || lighting_output >= 16u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;

@@ -134,7 +134,7 @@ pub(crate) struct MeshSources {
 
 impl MeshSources {
     /// Stores or replaces the bake inputs of `handle`; only the used geometry is kept.
-    pub(crate) fn retain(&mut self, handle: u32, mesh: &AttributedMesh) {
+    pub(crate) fn retain(&mut self, handle: u32, mesh: &AttributedMesh, trace_vertex_colors: bool) {
         let submeshes = if mesh.submeshes.is_empty() {
             vec![(
                 0,
@@ -152,7 +152,7 @@ impl MeshSources {
                 mesh: mesh.base.clone(),
                 uvs: mesh.uvs.clone(),
                 submeshes,
-                colors: mesh.colors.clone(),
+                colors: mesh.colors.as_ref().filter(|_| trace_vertex_colors).cloned(),
             },
         );
     }
@@ -783,9 +783,14 @@ impl EngineState {
     /// Retains the CPU bake inputs of JS mesh `handle` while the m29 feature is installed,
     /// then clears the handle's cluster store entry (so an update drops its clusters and
     /// cancels its bake). Without a [`MeshSources`] value this does nothing.
-    pub(crate) fn retain_mesh_source(&mut self, handle: u32, mesh: &AttributedMesh) {
+    pub(crate) fn retain_mesh_source(
+        &mut self,
+        handle: u32,
+        mesh: &AttributedMesh,
+        trace_vertex_colors: bool,
+    ) {
         if let Some(sources) = self.features.get_mut::<MeshSources>() {
-            sources.retain(handle, mesh);
+            sources.retain(handle, mesh, trace_vertex_colors);
         } else {
             return;
         }
@@ -1556,7 +1561,7 @@ mod tests {
     fn mesh_source_keeps_the_submesh_ranges_and_only_the_used_vertices() {
         let mesh = attributed(8, &[0, 1, 2, 3, 4, 5], &[(0, 3), (3, 3)], false);
         let mut sources = MeshSources::default();
-        sources.retain(7, &mesh);
+        sources.retain(7, &mesh, true);
         let source = sources.get(7).expect("retained");
         assert_eq!(source.submeshes, [(0, 3), (3, 3)]);
         assert!(source.colors.is_none());
@@ -1572,7 +1577,7 @@ mod tests {
     #[test]
     fn mesh_source_defaults_to_one_range_and_tracks_colors_replacement_and_forgetting() {
         let mut sources = MeshSources::default();
-        sources.retain(9, &attributed(4, &[0, 1, 2, 0, 2, 3], &[], false));
+        sources.retain(9, &attributed(4, &[0, 1, 2, 0, 2, 3], &[], false), true);
         let source = sources.get(9).unwrap();
         assert_eq!(source.submeshes, [(0, 6)]);
         assert!(source.colors.is_none());
@@ -1582,9 +1587,14 @@ mod tests {
         assert_eq!(inputs[0].mesh.positions.len(), 4);
 
         let mesh = attributed(3, &[0, 1, 2], &[(0, 3)], true);
-        sources.retain(9, &mesh);
+        sources.retain(9, &mesh, true);
         let source = sources.get(9).unwrap();
         assert_eq!(source.colors.as_deref(), mesh.colors.as_deref());
+
+        sources.retain(9, &mesh, false);
+        let source = sources.get(9).unwrap();
+        assert!(source.colors.is_none());
+        assert_eq!(source.mesh.positions, mesh.base.positions);
         assert_eq!(source.submeshes, [(0, 3)]);
         assert_eq!(source.cluster_inputs().unwrap().len(), 1);
 

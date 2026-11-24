@@ -37,6 +37,25 @@ fn spherical_lookup_has_typed_fixed_wiring_and_runs_before_forward() {
         input.port == "sphericalLookup"
             && matches!(&input.source, InputSource::Link { node, port, .. } if node == "spherical" && port == "lookup")
     }));
+    let mirrors = plan.nodes.iter().find(|node| node.id == "meshReflection").unwrap();
+    let tonemap = plan.nodes.iter().find(|node| node.id == "tonemap").unwrap();
+    assert!(consumer.order_index < mirrors.order_index && mirrors.order_index < tonemap.order_index);
+    for (input, producer, output) in [
+        ("sphericalLookup", "spherical", "lookup"),
+        ("material", "prepass", "material"),
+        ("screenTrace", "mirrorScreen", "trace"),
+        ("screenColor", "forward", "color"),
+        ("color", "forward", "color"),
+    ] {
+        assert!(mirrors.inputs.iter().any(|port| {
+            port.port == input
+                && matches!(&port.source, InputSource::Link { node, port, .. } if node == producer && port == output)
+        }));
+    }
+    assert!(tonemap.inputs.iter().any(|port| {
+        port.port == "color"
+            && matches!(&port.source, InputSource::Link { node, port, .. } if node == "meshReflection" && port == "color")
+    }));
     assert_eq!(raa_graph::frozen_plan("spherical_gi"), Some(plan));
 }
 

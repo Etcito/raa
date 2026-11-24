@@ -40,7 +40,11 @@ pub(crate) const SSR_TRACE_WGSL: &str = include_str!("wgsl/ssr_trace.wgsl");
 
 /// The trace module source: [`SSR_TRACE_WGSL`] + `raa_shader::GI_VOLUME_WGSL` (S39 fallback).
 pub(crate) fn ssr_trace_module_wgsl() -> String {
-    format!("{SSR_TRACE_WGSL}{}", raa_shader::GI_VOLUME_WGSL)
+    format!(
+        "{SSR_TRACE_WGSL}{}{}",
+        raa_shader::GI_VOLUME_WGSL,
+        raa_shader::NEAR_MIRROR_WGSL,
+    )
 }
 
 /// Full res into an Rgba16Float target: hit uv, confidence, cone mip (0 when no reflection).

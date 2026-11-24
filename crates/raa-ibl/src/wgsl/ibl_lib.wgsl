@@ -30,8 +30,3 @@ fn raa_ibl_dfg(n_dot_v: f32, roughness: f32) -> vec2<f32> {
     let uv = raa_brdf_lut_uv(n_dot_v, roughness);
     return textureSampleLevel(raa_brdf_lut, raa_linear_clamp, uv, 0.0).rg;
 }
-
-// Specular occlusion from ambient occlusion (Lagarde and de Rousiers 2014).
-fn raa_specular_occlusion(n_dot_v: f32, ao: f32, roughness: f32) -> f32 {
-    return saturate(pow(max(n_dot_v + ao, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + ao);
-}

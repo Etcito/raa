@@ -9,7 +9,7 @@ struct RaaVgGbufferTargets {
     @location(0) normal: vec4<f32>,
     // S12 `material` (Rgba8Unorm): F0 rgb sRGB-encoded, metallic.
     @location(1) material: vec4<f32>,
-    // S12 `motion` (Rgba16Float): signed UV displacement xy, z 0 (history always usable).
+    // S12 `motion` (Rgba16Float): UV displacement xy, history valid in z, reflection class in w.
     @location(2) motion: vec4<f32>,
     // The resolve output's standard-Z depth.
     @builtin(frag_depth) frag_depth: f32,
@@ -56,7 +56,7 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> RaaVgGbufferTargets {
     var out: RaaVgGbufferTargets;
     out.normal = vec4<f32>(n, clamp(s.roughness, 0.0, 1.0));
     out.material = vec4<f32>(raa_pass_encode_srgb(raa_pass_f0(s)), clamp(s.metallic, 0.0, 1.0));
-    out.motion = vec4<f32>(raa_vg_surface.motion, 0.0, 0.0);
+    out.motion = vec4<f32>(raa_vg_surface.motion, 0.0, raa_reflection_class(s, in.record));
     out.frag_depth = raa_vg_surface.depth;
     if (!raa_vg_surface.covered) {
         discard;

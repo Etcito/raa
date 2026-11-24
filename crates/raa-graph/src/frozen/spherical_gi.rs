@@ -475,10 +475,177 @@ pub fn plan() -> crate::plan::GraphPlan {
                 compute: None,
             },
             crate::plan::PlanNode {
+                id: "mirrorHiz".to_string(),
+                type_id: "ssr.hiz".to_string(),
+                type_version: 1,
+                order_index: 13,
+                params: vec![],
+                inputs: vec![crate::plan::PlanInput {
+                    port: "depth".to_string(),
+                    source: crate::plan::InputSource::Link {
+                        node: "prepass".to_string(),
+                        port: "depth".to_string(),
+                        history: false,
+                    },
+                }],
+                compute: None,
+            },
+            crate::plan::PlanNode {
+                id: "mirrorScreen".to_string(),
+                type_id: "ssr.trace".to_string(),
+                type_version: 1,
+                order_index: 14,
+                params: vec![
+                    (
+                        "maxRoughness".to_string(),
+                        crate::catalog::ParamValue::Number(1.0),
+                    ),
+                    (
+                        "thickness".to_string(),
+                        crate::catalog::ParamValue::Number(0.15000000596046448),
+                    ),
+                    ("maxSteps".to_string(), crate::catalog::ParamValue::Int(64)),
+                    (
+                        "refineSteps".to_string(),
+                        crate::catalog::ParamValue::Int(8),
+                    ),
+                    (
+                        "edgeFade".to_string(),
+                        crate::catalog::ParamValue::Number(0.1),
+                    ),
+                ],
+                inputs: vec![
+                    crate::plan::PlanInput {
+                        port: "depth".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "depth".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "normal".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "normal".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "hiz".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "mirrorHiz".to_string(),
+                            port: "hiz".to_string(),
+                            history: false,
+                        },
+                    },
+                ],
+                compute: None,
+            },
+            crate::plan::PlanNode {
+                id: "meshReflection".to_string(),
+                type_id: "mesh.reflection".to_string(),
+                type_version: 1,
+                order_index: 15,
+                params: vec![
+                    (
+                        "confidenceThreshold".to_string(),
+                        crate::catalog::ParamValue::Number(0.550000011920929),
+                    ),
+                    (
+                        "reflectionBounces".to_string(),
+                        crate::catalog::ParamValue::Int(2),
+                    ),
+                    (
+                        "inheritGi".to_string(),
+                        crate::catalog::ParamValue::Bool(true),
+                    ),
+                ],
+                inputs: vec![
+                    crate::plan::PlanInput {
+                        port: "depth".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "depth".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "normal".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "normal".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "motion".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "motion".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "screenTrace".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "mirrorScreen".to_string(),
+                            port: "trace".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "hiz".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "mirrorHiz".to_string(),
+                            port: "hiz".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "screenColor".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "forward".to_string(),
+                            port: "color".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "sphericalLookup".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "spherical".to_string(),
+                            port: "lookup".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "volumeAtlas".to_string(),
+                        source: crate::plan::InputSource::Absent,
+                    },
+                    crate::plan::PlanInput {
+                        port: "material".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "material".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "color".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "forward".to_string(),
+                            port: "color".to_string(),
+                            history: false,
+                        },
+                    },
+                ],
+                compute: None,
+            },
+            crate::plan::PlanNode {
                 id: "tonemap".to_string(),
                 type_id: "pass.tonemap".to_string(),
                 type_version: 1,
-                order_index: 13,
+                order_index: 16,
                 params: vec![
                     (
                         "mapper".to_string(),
@@ -498,7 +665,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                     crate::plan::PlanInput {
                         port: "color".to_string(),
                         source: crate::plan::InputSource::Link {
-                            node: "forward".to_string(),
+                            node: "meshReflection".to_string(),
                             port: "color".to_string(),
                             history: false,
                         },
@@ -517,7 +684,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "out".to_string(),
                 type_id: "output.display".to_string(),
                 type_version: 1,
-                order_index: 14,
+                order_index: 17,
                 params: vec![],
                 inputs: vec![crate::plan::PlanInput {
                     port: "color".to_string(),
@@ -610,7 +777,7 @@ pub fn plan() -> crate::plan::GraphPlan {
             },
             crate::plan::PlanLink {
                 from: crate::plan::PlanPortRef {
-                    node: "forward".to_string(),
+                    node: "meshReflection".to_string(),
                     port: "color".to_string(),
                 },
                 to: crate::plan::PlanPortRef {
@@ -707,6 +874,149 @@ pub fn plan() -> crate::plan::GraphPlan {
                 },
                 history: false,
             },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "depth".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "mirrorHiz".to_string(),
+                    port: "depth".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "depth".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "mirrorScreen".to_string(),
+                    port: "depth".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "normal".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "mirrorScreen".to_string(),
+                    port: "normal".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "mirrorHiz".to_string(),
+                    port: "hiz".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "mirrorScreen".to_string(),
+                    port: "hiz".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "depth".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "depth".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "normal".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "normal".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "material".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "material".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "motion".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "motion".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "mirrorScreen".to_string(),
+                    port: "trace".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "screenTrace".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "mirrorHiz".to_string(),
+                    port: "hiz".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "hiz".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "forward".to_string(),
+                    port: "color".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "screenColor".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "forward".to_string(),
+                    port: "color".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "color".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "spherical".to_string(),
+                    port: "lookup".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "sphericalLookup".to_string(),
+                },
+                history: false,
+            },
         ],
         resources: vec![
             crate::plan::PlanResource {
@@ -772,7 +1082,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 5,
-                last_use: 13,
+                last_use: 16,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -787,11 +1097,26 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 5,
-                last_use: 8,
+                last_use: 15,
                 history: false,
             },
             crate::plan::PlanResource {
                 id: 6,
+                producer: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "material".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2d,
+                format: Some(crate::catalog::GraphFormat::Rgba8Unorm),
+                size: crate::catalog::SizeSpec::Scale(1.0),
+                mips: 1,
+                layers: 1,
+                first_use: 5,
+                last_use: 15,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 7,
                 producer: crate::plan::PlanPortRef {
                     node: "prepass".to_string(),
                     port: "motion".to_string(),
@@ -802,11 +1127,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 5,
-                last_use: 8,
+                last_use: 15,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 7,
+                id: 8,
                 producer: crate::plan::PlanPortRef {
                     node: "lightTiles".to_string(),
                     port: "lightTiles".to_string(),
@@ -821,7 +1146,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 8,
+                id: 9,
                 producer: crate::plan::PlanPortRef {
                     node: "ao".to_string(),
                     port: "ao".to_string(),
@@ -836,7 +1161,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 9,
+                id: 10,
                 producer: crate::plan::PlanPortRef {
                     node: "areaShadow".to_string(),
                     port: "areaShadow".to_string(),
@@ -851,7 +1176,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 10,
+                id: 11,
                 producer: crate::plan::PlanPortRef {
                     node: "spherical".to_string(),
                     port: "lookup".to_string(),
@@ -862,11 +1187,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 10,
-                last_use: 11,
+                last_use: 15,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 11,
+                id: 12,
                 producer: crate::plan::PlanPortRef {
                     node: "forward".to_string(),
                     port: "color".to_string(),
@@ -877,11 +1202,56 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 11,
-                last_use: 13,
+                last_use: 15,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 12,
+                id: 13,
+                producer: crate::plan::PlanPortRef {
+                    node: "mirrorHiz".to_string(),
+                    port: "hiz".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2d,
+                format: Some(crate::catalog::GraphFormat::R32Float),
+                size: crate::catalog::SizeSpec::Scale(1.0),
+                mips: 14,
+                layers: 1,
+                first_use: 13,
+                last_use: 15,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 14,
+                producer: crate::plan::PlanPortRef {
+                    node: "mirrorScreen".to_string(),
+                    port: "trace".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2d,
+                format: Some(crate::catalog::GraphFormat::Rgba16Float),
+                size: crate::catalog::SizeSpec::Scale(1.0),
+                mips: 1,
+                layers: 1,
+                first_use: 14,
+                last_use: 15,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 15,
+                producer: crate::plan::PlanPortRef {
+                    node: "meshReflection".to_string(),
+                    port: "color".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2d,
+                format: Some(crate::catalog::GraphFormat::Rgba16Float),
+                size: crate::catalog::SizeSpec::Scale(1.0),
+                mips: 1,
+                layers: 1,
+                first_use: 15,
+                last_use: 16,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 16,
                 producer: crate::plan::PlanPortRef {
                     node: "tonemap".to_string(),
                     port: "color".to_string(),
@@ -891,8 +1261,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 13,
-                last_use: 14,
+                first_use: 16,
+                last_use: 17,
                 history: false,
             },
         ],

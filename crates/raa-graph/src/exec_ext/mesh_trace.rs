@@ -145,6 +145,9 @@ impl ExecExtension for MeshTrace {
                 .iter()
                 .filter(|input| input.port != "color" && !mesh_grid_port(&input.port))
             {
+                if input.port == "material" && matches!(input.source, InputSource::Absent) {
+                    continue;
+                }
                 let (InputSource::Link {
                     node: producer,
                     port,

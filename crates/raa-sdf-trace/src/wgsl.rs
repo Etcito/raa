@@ -87,6 +87,7 @@ pub fn mesh_trace_module() -> String {
 
 fn mesh_trace_with_rough_grid(rough_grid: &str) -> String {
     let gi = raa_shader::GI_VOLUME_WGSL;
+    let mirror = raa_shader::NEAR_MIRROR_WGSL;
     let cube = raa_shader::SPHERICAL_CUBE_WGSL;
     let spherical = raa_shader::SPHERICAL_GI_WGSL;
     let mesh = include_str!("wgsl/mesh_trace.wgsl");
@@ -95,7 +96,7 @@ fn mesh_trace_with_rough_grid(rough_grid: &str) -> String {
          @group(0) @binding({MESH_SPHERICAL_BINDING}) var<storage, read> raa_spherical_data: array<vec4<u32>>;\n\
          const MESH_GRAPH_SCREEN: u32 = {MESH_GRAPH_SCREEN}u;\n\
          const MESH_VOLUME_GI: u32 = {MESH_VOLUME_GI}u;\n\
-         {spherical}{mesh}\n{rough_grid}"
+         {spherical}{mirror}{mesh}\n{rough_grid}"
     )
 }
 

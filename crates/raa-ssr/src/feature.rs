@@ -273,6 +273,14 @@ impl FeaturePass for SsrPass {
             ));
         };
         let p = &self.pipelines;
+        // Set this only when the engine-owned mesh resolve participates in this frame.
+        // Graph SSR nodes keep the routing selected by their own links.
+        let mesh_reflections = ctx.resources.buffer("trace.mesh", "nearMirror").is_some();
+        ctx.gpu.queue().write_buffer(
+            &p.params,
+            296,
+            &(if mesh_reflections { 1.0f32 } else { 0.0 }).to_le_bytes(),
+        );
         // All sampled HDR views belong to the private mip chain, populated from the
         // current source below; no bind group embeds an A/B or bound chain view.
         let hdr = ctx.targets.hdr();

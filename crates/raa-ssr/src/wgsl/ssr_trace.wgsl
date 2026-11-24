@@ -16,7 +16,7 @@ struct SsrParams {
     viewport: vec4<f32>,
     // intensity, max_roughness, thickness_m, Hi-Z mip count
     params: vec4<f32>,
-    // HDR mip-chain mip count, additional rays, 0, 0
+    // HDR mip-chain mip count, additional rays, stock mesh reflection owns near-mirrors, 0
     params2: vec4<f32>,
 }
 
@@ -438,6 +438,11 @@ fn replace_environment(in: VsOut, screen: vec4<f32>) -> Replacement {
 
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(in.position.xy);
+    if ssr.params2.z > 0.0 && raa_near_mirror(textureLoad(material_tex, pixel, 0).w,
+        textureLoad(normal_tex, pixel, 0).w) {
+        return textureLoad(hdr_mips, pixel, 0);
+    }
     return replace_environment(in, screen_incident(vec2<i32>(in.position.xy))).color;
 }
 

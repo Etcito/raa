@@ -221,6 +221,7 @@ impl Engine {
             let mesh = mesh_desc(st, &desc)?;
             let skin = js::skin_desc(&desc)?.to_skin(&mesh)?;
             let edges = mesh_edges(&desc, &mesh)?;
+            let trace_vertex_colors = js::optional_bool(&desc, "traceVertexColors")?.unwrap_or(true);
             let lit = st.lit.upload(gpu, &mesh)?;
             if let Some(edges) = edges {
                 st.lit.handle().set_mesh_edges(lit, &mesh, &edges);
@@ -230,7 +231,7 @@ impl Engine {
                 lit,
                 origin: MeshOrigin::M07,
             });
-            st.retain_mesh_source(handle, &mesh);
+            st.retain_mesh_source(handle, &mesh, trace_vertex_colors);
             Ok(handle)
         })
     }
@@ -245,8 +246,9 @@ impl Engine {
             let mesh = mesh_desc(st, &desc)?;
             let skin = js::skin_desc(&desc)?.to_skin(&mesh)?;
             let edges = mesh_edges(&desc, &mesh)?;
+            let trace_vertex_colors = js::optional_bool(&desc, "traceVertexColors")?.unwrap_or(true);
             st.lit.update(gpu, entry.lit, &mesh)?;
-            st.retain_mesh_source(id, &mesh);
+            st.retain_mesh_source(id, &mesh, trace_vertex_colors);
             if let Some(edges) = edges {
                 st.lit.handle().set_mesh_edges(entry.lit, &mesh, &edges);
             }

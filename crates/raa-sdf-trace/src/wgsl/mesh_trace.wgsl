@@ -85,6 +85,7 @@ const REFLECTED_RECEIVER_BASE: u32 = 32u;
 const REFLECTED_RECEIVER_WORDS: u32 = 8u;
 const MESH_MIRROR_MEASURE: u32 = 4u;
 const MESH_MIRROR_FEEDBACK: u32 = 8u;
+const MESH_PHYSICAL_MIRROR: u32 = 16u;
 
 struct HybridRoughGrid {
     rgb: vec3<f32>, // secondary specular outgoing radiance
@@ -550,6 +551,21 @@ fn trace_path_from_hit(initial: Ray, first_hit: Hit, mirrors: u32, path: bool, b
         let oriented = select(-ns, ns, dot(ns, ng) >= 0.0);
         let n = select(ng, oriented, dot(oriented, -ray.direction) > 0.001);
         if isolate_diffuse && (mat.flags.x & 3u) != 0u { return vec3<f32>(0.0); }
+        if !path && (options[3].w & MESH_PHYSICAL_MIRROR) != 0u
+            && (mat.flags.x & 3u) == 0u && mirror_steps > 0u
+            && raa_near_mirror(mat.emission_metallic.w, mat.base_roughness.w) {
+            let reflected_direction = reflect(ray.direction, n);
+            let direction = select(reflect(ray.direction, ng), reflected_direction, dot(reflected_direction, ng) > 0.0);
+            let f0 = mix(vec3<f32>(0.04), clamp(mat.base_roughness.rgb, vec3<f32>(0.0), vec3<f32>(1.0)),
+                clamp(mat.emission_metallic.w, 0.0, 1.0));
+            let grazing = pow(1.0 - clamp(dot(n, -ray.direction), 0.0, 1.0), 5.0);
+            throughput *= mix(f0, vec3<f32>(1.0), grazing);
+            atomicAdd(&counters[MIRROR_RAYS], 1u);
+            ray = Ray(p + ng * (2.0 * EPS), direction);
+            mirror_steps--;
+            reflected = true;
+            continue;
+        }
         if (mat.flags.x & 1u) != 0u && mirror_steps > 0u {
             atomicAdd(&counters[MIRROR_RAYS], 1u);
             ray = Ray(p + ng * (2.0 * EPS), reflect(ray.direction, ng));
@@ -684,7 +700,10 @@ fn screen_status(screen: vec4<f32>, receiver: vec2<i32>, dims: vec2<u32>) -> u32
     if !on_screen(screen.xy) { return OFFSCREEN; }
     let hit = pixel_at(screen.xy, dims);
     if textureLoad(depth, hit, 0) >= 1.0 { return SCREEN_MISS; }
-    if textureLoad(motion, hit, 0).w > 0.5 { return NESTED_MIRROR; }
+    let reflection_class = textureLoad(motion, hit, 0).w;
+    if reflection_class == 1.0 || (reflection_class == 2.0 && (options[3].w & MESH_PHYSICAL_MIRROR) != 0u) {
+        return NESTED_MIRROR;
+    }
     if !visible_in_history(receiver, dims) || !visible_in_history(hit, dims) { return DISOCCLUSION; }
     if screen.z <= 0.0 || screen.z < bitcast<f32>(options[1].x) { return LOW_CONFIDENCE; }
     return ACCEPTED;
@@ -731,7 +750,8 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
     }
-    if z >= 1.0 || mirror_pixel < 0.5 {
+    if z >= 1.0 || mirror_pixel < 0.5
+        || (mirror_pixel > 1.5 && (options[3].w & MESH_PHYSICAL_MIRROR) == 0u) {
         textureStore(radiance, sample_pixel, vec4<f32>(0.0));
         textureStore(terminal_samples, sample_pixel, vec4<f32>(0.0));
         return;
@@ -742,7 +762,7 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&counters[status], 1u);
     if status == ACCEPTED {
         let value = textureLoad(screen_radiance, pixel_at(screen.xy, dims), 0);
-        textureStore(radiance, sample_pixel, vec4<f32>(value.rgb, 1.0));
+        textureStore(radiance, sample_pixel, vec4<f32>(value.rgb, mirror_pixel));
         textureStore(terminal_samples, sample_pixel, vec4<f32>(0.0));
         return;
     }
@@ -756,7 +776,15 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = Ray(p + normal * (2.0 * EPS), reflect(normalize(p - origin), normal));
     atomicAdd(&counters[MIRROR_RAYS], 1u);
     var terminal: TerminalDiffuse;
-    let value = trace_path_lobe(ray, options[0].y - 1u, false, 0u, &seed, 0u, 0u, &terminal);
-    textureStore(radiance, sample_pixel, vec4<f32>(value, 1.0));
+    let first_hit = closest(ray, frame.clip.y, false);
+    record_mesh_first_hit(first_hit, ray);
+    if mirror_pixel > 1.5 && first_hit.object == MISS {
+        textureStore(radiance, sample_pixel, vec4<f32>(0.0));
+        textureStore(terminal_samples, sample_pixel, vec4<f32>(0.0));
+        return;
+    }
+    let value = trace_path_from_hit(ray, first_hit, options[0].y - 1u, false, 0u,
+        &seed, 0u, 0u, MISS, &terminal);
+    textureStore(radiance, sample_pixel, vec4<f32>(value, mirror_pixel));
     store_terminal(sample_pixel, terminal);
 }

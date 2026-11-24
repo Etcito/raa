@@ -72,6 +72,21 @@
       "type": "pass.sky.background"
     },
     {
+      "id": "mirrorHiz",
+      "type": "ssr.hiz"
+    },
+    {
+      "id": "mirrorScreen",
+      "type": "ssr.trace",
+      "params": {
+        "maxRoughness": 1
+      }
+    },
+    {
+      "id": "meshReflection",
+      "type": "mesh.reflection"
+    },
+    {
       "id": "tonemap",
       "type": "pass.tonemap"
     },
@@ -110,7 +125,7 @@
       "to": "forward.sphericalLookup"
     },
     {
-      "from": "forward.color",
+      "from": "meshReflection.color",
       "to": "tonemap.color"
     },
     {
@@ -144,6 +159,58 @@
     {
       "from": "areaShadow.areaShadow",
       "to": "forward.areaShadow"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "mirrorHiz.depth"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "mirrorScreen.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "mirrorScreen.normal"
+    },
+    {
+      "from": "mirrorHiz.hiz",
+      "to": "mirrorScreen.hiz"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "meshReflection.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "meshReflection.normal"
+    },
+    {
+      "from": "prepass.material",
+      "to": "meshReflection.material"
+    },
+    {
+      "from": "prepass.motion",
+      "to": "meshReflection.motion"
+    },
+    {
+      "from": "mirrorScreen.trace",
+      "to": "meshReflection.screenTrace"
+    },
+    {
+      "from": "mirrorHiz.hiz",
+      "to": "meshReflection.hiz"
+    },
+    {
+      "from": "forward.color",
+      "to": "meshReflection.screenColor"
+    },
+    {
+      "from": "forward.color",
+      "to": "meshReflection.color"
+    },
+    {
+      "from": "spherical.lookup",
+      "to": "meshReflection.sphericalLookup"
     }
   ]
 }
