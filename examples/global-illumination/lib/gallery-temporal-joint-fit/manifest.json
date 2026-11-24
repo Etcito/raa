@@ -1,0 +1,1139 @@
+{
+  "format": "raa.real-frame-model/1",
+  "modelId": "real-frame-v1",
+  "kind": "windows-capture-fit",
+  "seed": 0,
+  "weights": "weights.fp32le",
+  "weightsSha256": "d6b8d801d2d414110527265a5c88bad468235ba8e6bcb7a6427f274fb5cc3e6d",
+  "weightsByteLength": 6560,
+  "golden": "golden.json",
+  "goldenSha256": "16350a22d92b4b895745f7ceeb7f5cb99a75b636eeb3a6076ed87810503e6bfc",
+  "tensorLayout": "NHWC",
+  "precision": "fp32",
+  "tensorAlignment": 16,
+  "tensors": [
+    {
+      "name": "stem.weight",
+      "shape": [
+        12,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 0,
+      "byteLength": 576
+    },
+    {
+      "name": "stem.bias",
+      "shape": [
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 576,
+      "byteLength": 48
+    },
+    {
+      "name": "spatial.weight",
+      "shape": [
+        12,
+        3,
+        3
+      ],
+      "dtype": "f32le",
+      "offset": 624,
+      "byteLength": 432
+    },
+    {
+      "name": "spatial.bias",
+      "shape": [
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 1056,
+      "byteLength": 48
+    },
+    {
+      "name": "mix.weight",
+      "shape": [
+        12,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 1104,
+      "byteLength": 576
+    },
+    {
+      "name": "mix.bias",
+      "shape": [
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 1680,
+      "byteLength": 48
+    },
+    {
+      "name": "area.weight",
+      "shape": [
+        9,
+        26
+      ],
+      "dtype": "f32le",
+      "offset": 1728,
+      "byteLength": 936
+    },
+    {
+      "name": "area.bias",
+      "shape": [
+        9
+      ],
+      "dtype": "f32le",
+      "offset": 2672,
+      "byteLength": 36
+    },
+    {
+      "name": "recurrent.weight",
+      "shape": [
+        24,
+        33
+      ],
+      "dtype": "f32le",
+      "offset": 2720,
+      "byteLength": 3168
+    },
+    {
+      "name": "recurrent.bias",
+      "shape": [
+        24
+      ],
+      "dtype": "f32le",
+      "offset": 5888,
+      "byteLength": 96
+    },
+    {
+      "name": "reflection.weight",
+      "shape": [
+        3,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 5984,
+      "byteLength": 144
+    },
+    {
+      "name": "reflection.bias",
+      "shape": [
+        3
+      ],
+      "dtype": "f32le",
+      "offset": 6128,
+      "byteLength": 12
+    },
+    {
+      "name": "sr.weight",
+      "shape": [
+        8,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 6144,
+      "byteLength": 384
+    },
+    {
+      "name": "sr.bias",
+      "shape": [
+        8
+      ],
+      "dtype": "f32le",
+      "offset": 6528,
+      "byteLength": 32
+    }
+  ],
+  "guideChannels": [
+    "normalX",
+    "normalY",
+    "normalZ",
+    "logDepthOver8",
+    "roughness",
+    "motionU",
+    "motionV",
+    "historyValid",
+    "reactive",
+    "jitterX",
+    "jitterY",
+    "geometryValid"
+  ],
+  "trainedHeads": [
+    "display",
+    "area",
+    "reflection"
+  ],
+  "cadence": "successfully submitted real frame per view",
+  "colorDomain": "nonnegative scene-linear HDR at fixed exposure 1",
+  "shippingQualification": "unverified",
+  "provenance": {
+    "basePackageSha256": "3f621c93622b69fa0847b259598eba9de5b8c89ca39743d76c8cc6d534f1589c",
+    "baseWeightsSha256": "df4c0ace93bf32c6b137b63fabb59d989abd3a1b27ce24165b24a37060a0fb9b",
+    "fitAndSelectionSplits": {
+      "train": {
+        "groupIds": [
+          "joint-train-a",
+          "joint-train-b",
+          "joint-train-c"
+        ],
+        "replayHashes": [
+          "24473e0e18879c79fe065082b0592c507f957c59a04a09b5ae531758cbbcdf9c",
+          "5db310a430ae7d8be08ddc20d70c2c88242444cc9a6d1d18b749f5607acb0f64",
+          "e0112b0e418be8b60e57cff7299173d286c647294884a53ba6ab0a96265f0a2e"
+        ],
+        "frameIds": [
+          "joint-train-a-00",
+          "joint-train-a-01",
+          "joint-train-a-02",
+          "joint-train-a-03",
+          "joint-train-a-04",
+          "joint-train-a-05",
+          "joint-train-a-06",
+          "joint-train-a-07",
+          "joint-train-a-08",
+          "joint-train-a-09",
+          "joint-train-a-10",
+          "joint-train-a-11",
+          "joint-train-a-12",
+          "joint-train-a-13",
+          "joint-train-a-14",
+          "joint-train-a-15",
+          "joint-train-b-00",
+          "joint-train-b-01",
+          "joint-train-b-02",
+          "joint-train-b-03",
+          "joint-train-b-04",
+          "joint-train-b-05",
+          "joint-train-b-06",
+          "joint-train-b-07",
+          "joint-train-b-08",
+          "joint-train-b-09",
+          "joint-train-b-10",
+          "joint-train-b-11",
+          "joint-train-b-12",
+          "joint-train-b-13",
+          "joint-train-b-14",
+          "joint-train-b-15",
+          "joint-train-b-16",
+          "joint-train-b-17",
+          "joint-train-c-00",
+          "joint-train-c-01",
+          "joint-train-c-02",
+          "joint-train-c-03",
+          "joint-train-c-04",
+          "joint-train-c-05",
+          "joint-train-c-06",
+          "joint-train-c-07",
+          "joint-train-c-08",
+          "joint-train-c-09",
+          "joint-train-c-10",
+          "joint-train-c-11",
+          "joint-train-c-12",
+          "joint-train-c-13",
+          "joint-train-c-14",
+          "joint-train-c-15"
+        ],
+        "fingerprints": [
+          [
+            "03404eda6c2f6d8d906bfdbed8111b08a94e28a378e212815403893a5abe69b4",
+            "5fbb265b8c533533be1bb9e0fa4a9edd212b7c94f92914c65cf5941137951bef",
+            "b7406907c7a4bd8c42fc23a8d37874fa6412048655efd452d366cfccd154306c"
+          ],
+          [
+            "093b85cca94327885cbadef5fbc9a500fd346d197cae404db874d206ba144de1",
+            "1207deb5f916bb0b843628236b407d236ab940df04c362236429d5dc4c4d1d44",
+            "175bd601edf18723cae528df9c5f9ca4bbf3a2aacdd59af3ce98b51fb7009e15"
+          ],
+          [
+            "147c227ecb9a7d721ea4742858d462d507bbd9cc573e44c76dedec13dff8e20b",
+            "873d86bd49ecc0ba35764c3147cbb82caf5b79d8f5b131c98981e8b1857f0554",
+            "7a7156d292a536f676fb44858f509f3d634bb3b8b298c0ce18a117758a6d10d4"
+          ],
+          [
+            "21f9e7774164e32f0e6a6116335a0d0ef80a271471db394c3ae95b179923033b",
+            "bf679ee2c9c157dd8572c2ea5c592c1431f63afa00b4f7e512d821739a5871e8",
+            "22db5e2a8ad0a89aa21a7d7f466cb6d0ba7ebc8e0c5f5bf4a95b1004d24a98c8"
+          ],
+          [
+            "2287ba9dff86119e05516acec390dbc01fa7678cb14d681fc57dd972009a9f81",
+            "fea025be54b7c646ee4d6bfb9b5ed0e7194e8f261d183bdd78fe63e4bd023b10",
+            "0ced150ce1d7daf649062597e8cceb22d6eddf5ea5b73213f57a66d0d6a5b83e"
+          ],
+          [
+            "22c95fbc7fba2c97e482a3edbfab15176ea21d7c542fff61b0324f02887715ab",
+            "6c471e1c3b2fa4d6cbd31c47d45b34b45ff6746dbdadb4c81ab64091a1434a90",
+            "a1598e3fbda6a4d732374d3afe4c510c0b1a6a97abf8c559705f886db6646880"
+          ],
+          [
+            "26e39cfd875f392a15aa6d0dea5f07c376a0edae29f4735a1764841ac779e3e4",
+            "979a80a10de1e67ac690e0138cebbbda976d133cd8550ae37660296b116d1e98",
+            "21d4dacded2af42075248314c8ed0f32a376082d499ade608d5a566bfdcbe3a9"
+          ],
+          [
+            "2aee77f52e29ee39199ee2a0efbb4a9897d683fa0ca7755a913c95450b8cc631",
+            "064dc2809a0d1342c09525c1a84acbb96ddb0584b358b05200fcbef9504edc6e",
+            "508b1c98daaafc409902e1c85ca202296925dcc67bcf373638f680fb52e36d38"
+          ],
+          [
+            "302b836526cda6c86a4bf57d7d2bbd1bdf1bdcd0b9cfd8fa7b5ef1941c2d00ff",
+            "56c3eafe0fbdfaa920360ff6679c85142e51aa0d84807cbf88590db503d06ed5",
+            "d24e7268fd81f5276d702e05e490d341baad338d9fb4a5c541116e0ccf5a715f"
+          ],
+          [
+            "3ccad12fd93197f46877ee5b85fad19d5648771807cbd5b1bb15b69bce3af638",
+            "f29b38b525473b083a0b404f0c3061ca40deab6625415fc9453b9c49a457341e",
+            "ae2895303ff741a943b7238c9602bd40e8ec64c36136b0e68fb1e332623f7d6d"
+          ],
+          [
+            "474b383340d5cf5a441deae56d4a45248367998be56e9676ad4c2abf0b695192",
+            "63718f2e077dff315f60d1f64c347ae87aa28319b772a6ef0bfcd6dafa82db1b",
+            "82ef004e15f6064e03b8215f6b676f05456ed4f140a323be72ae279a31dfd697"
+          ],
+          [
+            "4ab5afba2d2b12db99560ffde082c9e0311b43c155a0d25c370b57abf08b9e72",
+            "d5ea30b9bba92068f90d070ecf910d475f0a805088848fc84821df174411710e",
+            "811082eff236da1772b9a3141248f0c6c4a2919b530d417de4c1cb8d36177f9b"
+          ],
+          [
+            "6376f0c464694db3b35cd09cf255b2b7ed813bc98c35a506c827745f303a349e",
+            "5dacc600406dc8d45f9b0d8b7faa5471a49414dce712a7688ea44089af3bbcbe",
+            "d15b3ec7f5f2d3b27997a5ca1d4b02c9945100d51badbb60a3059f8c205727b5"
+          ],
+          [
+            "7eef4feebc5872762fe952bf961632b2589f45f6ad18a6f3c3a71ac9d9aa28e3",
+            "a3ad368311efa9e14804c6f5d819b67d9b4cb2c77bb4bc55a71499f5280e1101",
+            "549d8aad09998dc6775b4ff47e7e5aec423eb26a48895b9dc0644f8f3015b3a9"
+          ],
+          [
+            "851b9422799752fb4b328ab5556bfb50006407a097533677537b1e931c18dd45",
+            "45c661e278948473373c68b080c8d0d8b5b02a5cf3d174b2ff34042e210734e7",
+            "d765eef69fe2903c8713a59d318f38aa9e35725f7aa6862a874b40dc60ee9ded"
+          ],
+          [
+            "88a417d25f96f6b846e5d5a1734ea0ef0739da232c65b638a7a720185972d75a",
+            "fdbba95527c4f8904ab5ed65aa498cda9f03bce326c4ebba6355d52d98fca2bd",
+            "f7808581b052f3da3202825708ccdc81521937f3d54caf2b42b7cfb5a8f8e0ed"
+          ],
+          [
+            "912e7d5ffa8937aff88c0d7a9b92466c3d4a75ae495c6ca8ef99cfa6de94251d",
+            "edd4f78504365e089f04c6aa13cae5573434caac3da1837ad0ad6b27a7e2360e",
+            "a20185472fb6460a8146a7c40531392a5ed46655a22471f3a0881e18f43d4458"
+          ],
+          [
+            "96f2701394914207585693b5479055e25bd1948247f2631c9a1e5ae4de645ab4",
+            "fd88ebe65ce68ba12f453d83ba65c1480a88bd7559533e8c52ce59154e7eb947",
+            "527fab5822692d729ee08874c0fa34dc72ab15181cd14b5fbd6d3734dae587e3"
+          ],
+          [
+            "977ebbba2151080768a49cc37533063f2a694619745ada39969fa049d923c842",
+            "2eeba914e480cf2ba3f74902d0acbc366955853071860396bd72a84025d995f1",
+            "b4cdff67c75db50f83cdc2bf4f0ee4724183234ac355af127f64ebc64865e547"
+          ],
+          [
+            "9d9ceeab5d2cdd22051338e450d486ee9db9422c6902253df89b52ccff8db92d",
+            "005a9bdeb9c715b312377456ddeb0b6dcc18571c8515ed1e2d90f27bfa3a3ff4",
+            "e966a0e457704e445b97806c5244bcad7423a57da4193cc1a542682a283a5758"
+          ],
+          [
+            "9ed878568020afcd44dfd2b8633615d5e0e708cf4a1564ccde21289fc5ead974",
+            "6331fdd496c3e4d93812ddacd11d4a044bb504132b906a052eb72f19789689cc",
+            "593060cce425ad330db2b0797035a94af6e9ac6da9ae7e64fcf6cc60e16de836"
+          ],
+          [
+            "9f8938eb1058aa01e23dca2d53d127d5e44f4d2ae4c8a311f2f5265eb903e099",
+            "de20221bd512fe8cd0840380012dfa4048186be889fc8100f151fb0a104709b1",
+            "91ab49f7c398bf837f05f8bfb28df621004774ab642b1ed806abf14963fde61b"
+          ],
+          [
+            "a8dbf4f6b98a22f0f895f93f6a51b124d0f2ca46b2da2845482dae8e22643cca",
+            "31413a1f86f372ea43743b2ea7af05a53ae8bb1b57d6511ed1c2bcb9539dc57a",
+            "99d316dad0545a2b1323bbfeaec9cfcb31defbca097817fff35db065d29cea6b"
+          ],
+          [
+            "a9608ef4c22444fbfab8200d9056f47b83808e369318c1dabdba0591be820bbe",
+            "caa2d90b6d22122f4307e8cb47c76cffd0c3fc39a36e7cb95a9c748c6f966353",
+            "582d30c554e108f06b8af6abc8302bbfd84a48312d20c10e7d83d709b5fce7d3"
+          ],
+          [
+            "ac0bf4239c5cf6eecdcae3284fd703b80b4020bc671c0312a09d5b5438793693",
+            "fff551f298791c4dcd441677229149a948045524ce6bde085cbc54f25309e27f",
+            "414afedc30faac61c02fd67ff1df12b65565ee76971f5c8c5e6cf8c4977f3552"
+          ],
+          [
+            "ad119992ab2b59b26204669b8ea3128b4660a3a54da79c9ea4f92b20a3a49745",
+            "86bfd83428c9f0f0bc86047e39f0179ec4f76d4a768a373101b2a94892202589",
+            "591537e072a292f0c9284b513b6890abe91c0faac7c81eca4a7ed391c157597e"
+          ],
+          [
+            "afac3d9c022465b583c6871d7263fe947331eee0b5d443d334e7d7abf9cf1a0f",
+            "0bc2976a9edfc4acd82f244dfa36efff54abf2049b880ee708e8445607c7cd55",
+            "c3510ac333e84da7f0023e1204b5b90a2cf880dbf83b07f263835d0e09a5d74c"
+          ],
+          [
+            "b0833b6c0f0dfb4c55f7e0cdfab896c425f11025581358c1415e1b6e1f0230b3",
+            "6ea71b0ccb99859eb5096a5ba71152cbfce2ad669de5ee2ac4dbb4594e3ac849",
+            "c084474d37fda5249e8763d5f6d28fe49cc8cc32d85e3876ea416d0b453ed80a"
+          ],
+          [
+            "b192ac2c6fcc5dd41ff08ace4045b7eaf36c2e8652a0b1d023dbcf48c0ced3d0",
+            "341e2292359302e8801322089619b61f3115f91db46389786b92ad802beb953a",
+            "d56206a288e9a5a12bd50ae729c6bb9b288dcbe3eebff09ea5855f2bf061d3ad"
+          ],
+          [
+            "b7c6b251b9313e5897ded929e42ea3b3e3c7855811fb2a750be0a09fbfaeb4e7",
+            "059d3d96d350df9d0b0d70d1b23c0b2085a0a0668ac9e7f7736d7b8112c788f9",
+            "6f04fc1600d8a54b721e38ca0044baadc1f5985be08c61dcd259de07f7b1a5bc"
+          ],
+          [
+            "b92151af70d38822d02649bf4645b29adc4bdac2f1d6ceb8746a35015cf4b72c",
+            "0a8644d9926310f993765114f838e7dec46d3b6da2686ff9db7f93c10582123b",
+            "028856fe9bb5befb9fcd954747f88f0dc7e6299d54e5004983b710efe696dde4"
+          ],
+          [
+            "bd18c8a01106b16765b5ffac43e0e37d8d069bb672062e7cc5316511932c6990",
+            "7b7088a3756de77901c7ebbf820191a2a99bc3366f466d946222a84bd79a82da",
+            "d3898c8af21fb94097e52bb4f19e27db6fa6ae765d89344b3ebd6950854d9e43"
+          ],
+          [
+            "bfe405f9701222c3295223e14101d148f0120b50ef184e07be1cf726b9d82f91",
+            "0af6b2fd678e2fc39ccec6d700d734b9ce847bef784a8a3a605bae8f2c48c581",
+            "39340d056bbcbac698ca5036e6b92036b14bf639dcedd9c89362a83b1a3d128c"
+          ],
+          [
+            "c03a06497622f6e8aba6b6c3b63b8dba3074e9b5dd837482e70a61609f5202ca",
+            "653c85dd39af350eae3086b0b84dc1db579fc0cb4df820f57f9050acecb83760",
+            "c6cd0eac5d9e1cf907a641c7681fdc8bbbfe83ccc4f6c06f1496231b4a73e872"
+          ],
+          [
+            "c7c57566871d53a10a8df16eab664f2e1046d11a552b1ddaa99f769fc4869768",
+            "0d29610ee7078d080096a0490b1b11905c02415eeccc7b8723c9de74dd93bde2",
+            "66b3aff3518b297ff5cb35a3775765bfc91b44cbff4f555d0fddabf95616df15"
+          ],
+          [
+            "c7c8bbb5efb38324b1f7e9e1331ea4f8d1ac4125974c368a35d09f0b955ae316",
+            "d04c38ac99eec8d660a1ee67b9a3ba8c6bd74a2b838113de9521807669ca45a8",
+            "92318ae2e241518e84e8f69418e5de0caa23b8764bc3d14580ffbc4f19e43e8d"
+          ],
+          [
+            "ce269b7eced883ac6411bfac11ad0734b831288ee6e0813e9451a9136ef5ba80",
+            "b026fb0220cb76635b046d3cad063681e3ac74e1ec004a563eb9905958e73cc8",
+            "1312e336a9dcca58e6338d668e9711b3130e62461a3150a0faa71e601105e06a"
+          ],
+          [
+            "d189ebb9312b79e651ac7e0d5b1a1665e8c0bae318265b8b48d2d9ed671aa214",
+            "b788c397b55556d90013e50d68d969443d0fbecd4c5f8f4104becab4c6709979",
+            "62bd0d9f2077b9c0dba8d3ad29fc321c38eef11f0fbbdaf8d30577fcd1e97190"
+          ],
+          [
+            "d1ca12fd5dff762ad22ba1ebd2fa075d233865fa6689b23746f2784cce7acce0",
+            "31a41e3d21a6a219efb78de04a2ecf0ea45a5c62da6920fade90f6bda7005223",
+            "62db163741bc7ef00bb0b8be4c1cc728188dcd4fcec247acc8cb945b7fe7e62c"
+          ],
+          [
+            "d55315d7749f7dd1c423792ec977c91e3513505d45e6091cdca3c34dfc0a1545",
+            "8905c982641bcf47c102b94c686dc80f2e3ce3e8de3f361d15eca1ed2b1526c3",
+            "172cc6fad994cdb2fc92e5cd58081214043d86ca2977569551583eea30c765ad"
+          ],
+          [
+            "d71d518cd17253938331bacd85c571f8eabc16efb229d6a0f942a07548f42af6",
+            "1cd130bba050b319831376ae951170d454923fa8a1ffece0d8a70c9cf0ba9303",
+            "788481ec1c4ebf092c147641d28e674d481fb924180e8bfef3c111fbf588063c"
+          ],
+          [
+            "dcc853dfc0c5210878dec28876f5379ba3fa1bf0e71201b94462636797f7ebcb",
+            "968c3ee4ee9486aa6ed99cee403b9e12469d55c8eafdcd7ef7f316899567f07e",
+            "d17159b5d1ad615bc8f34bb8064b9de0d4332cd44bb7c429d532879324548ff5"
+          ],
+          [
+            "e0ac492b5d218214066d64736c0c9a15652450391c69ae884d6d09bfc4070d95",
+            "d3bea4c477e9260ed358b69340445d9340da4081d25e3dbd664663956c7141c5",
+            "011ce84cd0ec4cdea4bb0f522ed35c22ce0b394870ac8c58bec3f15d44023f4c"
+          ],
+          [
+            "e3445a2073d86969d4bd6d456e38d218aeb51b6a4444c3bc4db54469ab0c9ce2",
+            "b4a8f6b4368988626c6561c410c11d2c91b0559ba3359114652552337aafba6a",
+            "0108b4a9c2b7462d4284d998dd05894eb002843cfddd73345dcbea6feeeb80db"
+          ],
+          [
+            "e4c8fe8b2ffe1d9dd12a0c2b3865f9121201dcb3e79677f3309597fe99cef9e4",
+            "4b4950f38cf9304dc389cd8dcd878a17536089dda2751b19069180d412bb5681",
+            "b46c99b407a48b2f11daf8e0f8c67a689d5a602c507456c91aa9cbdbc2b9d700"
+          ],
+          [
+            "ef879cfa4f63a40dec8dc82fc88da62643619a02056201c18b0b987e74b11b9c",
+            "33f9579f5a7ca2edcbbdb93b69b03cbe2995863939f9d0c3e4a4ad2608b9f18b",
+            "ec27dfd3a04dedfeee5311114a7b2b31f67e1a3627ff1a6753c73697569112ea"
+          ],
+          [
+            "f483ea3f2d374a872d48ac4b7575572309f8b8f95de4663d452e1490d4bbd787",
+            "26f9ac9d94d6d0f3e9801b466c3d78ef585c66a7e651c9229d3b22a593eca80b",
+            "4bc7df79023abbe1534fc28f2124e2db338b40c2e1cd3f134ff4908a8692d0b3"
+          ],
+          [
+            "f7a56ee968621e2496e94ac38fc73413534980ff6fcab96b0f88c189c9d91fe6",
+            "c80fdb3686204fed61cbf8ace65cdb4087c411119c4f00aafe8701722922e751",
+            "9dd5b4437e6a5ef0cb8f65ee44df9b8d731296f3bd8a9edd1be8827762d8589f"
+          ],
+          [
+            "fae5d25193cd93bcf1f6bd9a9126eaf2b55288b00fe3c66ed9e95e082c16d518",
+            "8a5adfcbedcc2be770feebe8c6134485497fc706cd57c9d06c977e19e63f0d2a",
+            "3941637cb3260339fc881522edd664c752a03dacfee748338d3fa82c38a3031e"
+          ],
+          [
+            "fd8a97836891b304fc55fd202f6772cb95ff8949ce86d57b06def6c017343383",
+            "e3ca09e56c9ef94543114ad50513b3ef682e86aef0b368a7b81ff5b5df6e6190",
+            "2a076036d559af6a870be091ddb5984629bbd7bb3d478555404ee0991daba725"
+          ]
+        ]
+      },
+      "development": {
+        "groupIds": [
+          "joint-development"
+        ],
+        "replayHashes": [
+          "9c3afa657c84e298404b92fc2bd1c1dbb30e4ef93a4b3ba69c463dc0890a57f7"
+        ],
+        "frameIds": [
+          "joint-development-00",
+          "joint-development-01",
+          "joint-development-02",
+          "joint-development-03",
+          "joint-development-04",
+          "joint-development-05",
+          "joint-development-06",
+          "joint-development-07",
+          "joint-development-08",
+          "joint-development-09",
+          "joint-development-10",
+          "joint-development-11",
+          "joint-development-12",
+          "joint-development-13",
+          "joint-development-14",
+          "joint-development-15",
+          "joint-development-16",
+          "joint-development-17",
+          "joint-development-18"
+        ],
+        "fingerprints": [
+          [
+            "058b04bd15499baad44fe9abb9869c141c47aac9eda7f4ab0dc645536b49de43",
+            "cafa7565b31515f568c8fe00bcd3712b249bf398157e94337f9e99926c81ce3b",
+            "b90ba5acf9649f225ab7d498a3ce5c71567c92647f5f53261ac682f903fbbb0b"
+          ],
+          [
+            "2b022b4b65d2e749c7d3d8705574561f5b0bbc495ff693f6f2b1ab0aa0514227",
+            "04c26e6d92958e04ef4774b79d11127efab2c7f92aa80f3d4c06b1ff3ea74065",
+            "4b727f7405e8140c6d6e35d2831af3baf97c6565b73c305a843c2580394ceabe"
+          ],
+          [
+            "2f37e5198f504d72761979a0c2c3aa44aa6ee987c598872ae6a15ef42d5451f2",
+            "01e6e6fe88b43020a0e91bc20fc1304a52576a55099304ae11b7cfe378fee2d8",
+            "f7ed719f3f8deae53affbd7b1d372c78745386495a94b54f6ecd5cbd5c295f39"
+          ],
+          [
+            "30b52dbfee0886b1ec6164327df012ac2bb1eace98834e6c6706050f7c2aff93",
+            "a9b3f58515e212711d5e1e8d705ed0a73578f2a205b050408c7827d62810eeab",
+            "3404951ad9c69106c5b46ba43d9efa78166fc2f2b6617673b9aef2ea1204c563"
+          ],
+          [
+            "32e4dbefbc91fdba0989dbd7e55bb9317e5fec475d6c640caa3a22e0f8d85416",
+            "7fe1f5e655c15e0f7eca7a48199154807867e956b06e83e244d4f3753b91ecb3",
+            "947ac0cceb739b776e74f5ced937696b4bfb0ac9965c498705d70098809ed34d"
+          ],
+          [
+            "4f565a9c3a51d167db71e207e088d2b1a584814ad201b6d266c3c2cd144db17c",
+            "87c3e2765f0790bc58e513232f4f60c90ccd86d3a10f952d9bfe9d70e1ecc8e2",
+            "7aea2df05a0fcb034c1a3a8b0dfc0b3eceb8d245edf01605468ebab6960f48be"
+          ],
+          [
+            "5b6362f955b05c5392ceb3d80c367af49a38d300f3f04adb94a66534acc9c341",
+            "94e4a942671d4f4ccdd01a32be49c487c6f9665a2acecbcd6f2e2b56f226d8d3",
+            "6ef444f8aa85641322e2b5c4db8003d61498c94f27db9b2f1a23d05645d3a6f0"
+          ],
+          [
+            "63c1bbd6ae3da22f38da5810e1e873cb12f4cac830b61e05e8043bc7f195bb86",
+            "618787891e6b98244f15922911e5b9b41d5a61ed4ba10b4d0ae025ed7ee51fb3",
+            "620396a9f7a0156ca272c903f70963ec92154a1449f4e57e20ac9b5168f11075"
+          ],
+          [
+            "6ff104fe32375be34a74b65dcdf2240a281bc01580216427e4b54581e0a67a09",
+            "09fc53c0f1443084902b37bea0b0be5ce4ec722a08d82fa25805651c6a3f8cc6",
+            "6eb164394e0af0e25fdd60e8e05192d80607297d1b88e6e0bf80f156f6785d3a"
+          ],
+          [
+            "7405e5a8709db30f46a71a5930b6491c2c02f15dd178e39e312b4034550a1723",
+            "db42801f9741bbe2b52d940539aedb56c4650043779adc4e4ccce05aeb37819c",
+            "9eff75fdfb2edcd6bf6dd846090db3a14db6fcc52fb4e199a23da5fcc67825bc"
+          ],
+          [
+            "7ea0212cf07b21a340770cce44f05fe0ee2baa7348f3007752561b0d63ff434a",
+            "ccb5177d5958016bfeee6761564783118b75e46df75f5f43fc2dc120dae15238",
+            "fae7985d6c36b4fa70e16de6c47fda709e377a2790d9448d751c3d06b55f55d5"
+          ],
+          [
+            "7f821afb78b0dae06037c701fd8c78dbf19082f348ba361e2ee875f8c4f4b2d2",
+            "e5ad923c90f26eae985763473fbb9d21d1edd63a69728714a9ef166d71443ced",
+            "5985eafcba24f7695521b76b5445f2f40ff0e3a5366b23e9dda906d3e4c28c01"
+          ],
+          [
+            "8459acef476a4b8ab0de20ca690d82ed1efd1c77fd33df45da5a58f28acbb468",
+            "4349a961a672a193868fa5830a7c2acc0f4abe473e543dee02933e2a0743c616",
+            "f31b871b88cd0972a6fdcc49d81d0d187114d62afd220d201ecbc1996bea0ae4"
+          ],
+          [
+            "8e135aecb15e8b9d29102ea3f257411704c05d9df93f816a036a4ad171828ecc",
+            "01b9e3b050de918389e774e0e98a1e31f5ece6296a657d5ee12339e4ab8503aa",
+            "e5c513a005ba212c0d927d1c78e6b4d1683aa9736163f784a02e709828794937"
+          ],
+          [
+            "9356c27ef51c607bd92360d22aa14e1d2cd0cc402d1b347bfe91a158632dc19d",
+            "7256bc6c54b5399274916f8635fe1f7afcf32401e9fac0229e26c0c67b8b371a",
+            "cf666dc798abed3fdb3a4d140694c82cdaf7a1df78619127d8ff7665b232bb55"
+          ],
+          [
+            "abc62c4686dafbce1366bad2d4b0568f475c224066155ea1257339b39477d4ea",
+            "a79ed09614f153bdeaae0f6848d807412dcb4da7da91e0d03214718cc6e7f469",
+            "4696a04a40ccd92ec1c7cce88ebea7fc97e027379e6234196447ff7b032e6a30"
+          ],
+          [
+            "b1364e5ad9c3077d26d99bcf3e03e2ebbc1225c0ca2a40a3014ab1add74d761a",
+            "7f76e5f78f6376f6d35c1207de7122b61b7c3562a5349f80115804ebb3935c99",
+            "87490b726ba6f2ff25c31c7c9c26302cd0c584c771d1cb10f8743bc7f2ace909"
+          ],
+          [
+            "dc91d3d478261c161d48fb0b747d373fe0af54b3a5814c28e4f4f80cb725e043",
+            "2d7cdd314d44382daf0601b14d6f49495ae2424a2b4e969d4ca444edcaab00f4",
+            "9426e7e5f152e7943fbe3f98fc42ecadba93a3db53b92eecc6485640bea3745d"
+          ],
+          [
+            "f56377d6cd70834ece6797e2e7bef20fa8e031f4e17080a41a73b17ebb1c27a8",
+            "36121ee92ae21c03b274a3f78aee261c3a306578ddc0bf9a22fb4bca11a74349",
+            "74565316a04bbc2d7b53ed739d74b3500fdaacd2e32781934aa2afc56a96b533"
+          ]
+        ]
+      },
+      "upstream0": {
+        "groupIds": [
+          "open-skylight-warm-event",
+          "open-skylight-warm-event"
+        ],
+        "frameIds": [
+          "gallery-overfit-00",
+          "gallery-overfit-01",
+          "gallery-overfit-02",
+          "gallery-overfit-03",
+          "gallery-overfit-04",
+          "gallery-overfit-05",
+          "gallery-overfit-06",
+          "gallery-overfit-07",
+          "gallery-overfit-08",
+          "gallery-overfit-09",
+          "gallery-overfit-10",
+          "gallery-overfit-11",
+          "gallery-overfit-00",
+          "gallery-overfit-01",
+          "gallery-overfit-02",
+          "gallery-overfit-03",
+          "gallery-overfit-04",
+          "gallery-overfit-05",
+          "gallery-overfit-06",
+          "gallery-overfit-07",
+          "gallery-overfit-08",
+          "gallery-overfit-09",
+          "gallery-overfit-10",
+          "gallery-overfit-11"
+        ],
+        "fingerprints": [
+          [
+            "ea32a6312b97ff51a71cf0bda2630fa4d6922548e1ca217315b23e30e3d8e6a6",
+            "35470afbf4d6ac56a433bc88a63b3c33e6c71e2b6b358e762f1a0b4d686d45ef",
+            "c8cd8a15b5781ad1b2419ae74a30694911b9a210708c863a3399b669c91a3a9a"
+          ],
+          [
+            "38158db0fb97a16edbeb9414f1edaf851e3c868f674f768e875b8a3b627ce416",
+            "2bf2a3b83ca25a2e4063dc9d16ff181fd1706bf1396b79aecda8e83a3af303c6",
+            "d2a8a8d04402a89d93291c6912d1ab8bf7abef24b7703de6c4848d7565093354"
+          ],
+          [
+            "cb542b5c5688b943fb7ae4173c7ccd32fdbf4833504c68d6dc47e4b5ef525b6c",
+            "aa1c29b40f6246ddaa6d4df67facbf2c184b68724831bad2ce243067d1e48762",
+            "cc268918f5c7cf7f0a9ea9049bf703f546759fd782377dbebf4c5025a66a8851"
+          ],
+          [
+            "9b79f9ebec2beb9722ea551d33990ba98381041562f30a4eebd59ed56f362fee",
+            "18c8280e37759f4ca239d9a7c4c829a5db9cb0a53450c65e988192f9e58122b5",
+            "35e51ff902f622393ec68571827bb9f95d4293fddd9c392d1c3749a51a6d4eb9"
+          ],
+          [
+            "32099024b4a5858df8901ece6b7d96a0e1612ae6f0fe88761a8cdb86fca94259",
+            "4116598b4747eb9a985e66505e292357e6b6af3ee06e5ae63f9db81141e276d5",
+            "933fc6439263eed71bfed694571e7e8884d5083431e403c0d87ef0e5db6c177c"
+          ],
+          [
+            "dc755fc8eb05c40adcb39345dd9e9145a22317eb5a20756ad735c2f36d6fa454",
+            "052d1baea2fc4f7c8510378336b5deae98b5cee3934b7d69c62459bc4efa2251",
+            "8a45b0a9410ac353b1dbc71164b8f4abec1ad277483f17fcc21a564761a3b4e5"
+          ],
+          [
+            "1a6020b3cca77e4386dbe1881b5db55c82c99f051f911bee9da0148b930f2dc5",
+            "955d4a85b641d246dace665198bc6749bc2b890ca195868c9d2bf8890b69c396",
+            "93d9b2680a4435b88464245e8b5fc0fc7df8acbcf9302f2253aabfac619cdfc6"
+          ],
+          [
+            "1cca63259e792a07b7399298e5441a0c4f402f1def6166816c0f7913723329e4",
+            "9e756362232c43fd79cb4c8fb06d1cbf3e084fcbbb590ae7e1e6dccd1fe6dea7",
+            "9f25bf8a51297780e6b4b401e1b1b029926f15ec1955da112ae95e5e119a8a1b"
+          ],
+          [
+            "851f5de21d8daa859836cd0f9b8830371eee1d2381c93cc1435e8b5a9af52bbc",
+            "fec1b98ee8a31e7b2e73e0df7bd8b0d3e5e2547b3c425a015fb5f23177f88865",
+            "c412c1aa34a6d708927cbebca35a3927f20c29f12ed7110bae7715ead024cfbd"
+          ],
+          [
+            "733439db72642bbdcb631b08240f0aa69477e4ff1dfa8818082a6826003f53e5",
+            "002e743e0272894eedb0b316b13d8a3024aff4f22b254a9d8f8f21fd7114a716",
+            "3608b8b880d60d601ae6bee07b723696985dbd3c710cc40f74ca79fdec30067b"
+          ],
+          [
+            "6ab90276138b239d2e7aadb7f4cad276be7932d8aaf1402f7512a081c2aacaf1",
+            "8df8d85c5a7c1b814d296ced456432341a9a15c4228f65da09aa3e7109e7b1c4",
+            "875f550fdff672de5124abcfb81ff6ca69358b8931d9701beaf09adcc7444cdc"
+          ],
+          [
+            "3d15a6161cc3aa9ce632fe5b83f3fd83395501067e314190eee22a7bef18fe40",
+            "fb73d5e5c8200942fabb49b9317383711224c842360cebde46fe38e3b08b15ba",
+            "aa9e6a92edf9b57c9c3bba85d0a7feb6a7ef62cec5900068ceb640daf6b7f33f"
+          ]
+        ]
+      }
+    },
+    "trainGroupIds": [
+      "joint-train-a",
+      "joint-train-b",
+      "joint-train-c"
+    ],
+    "trainFrameIds": [
+      "joint-train-a-00",
+      "joint-train-a-01",
+      "joint-train-a-02",
+      "joint-train-a-03",
+      "joint-train-a-04",
+      "joint-train-a-05",
+      "joint-train-a-06",
+      "joint-train-a-07",
+      "joint-train-a-08",
+      "joint-train-a-09",
+      "joint-train-a-10",
+      "joint-train-a-11",
+      "joint-train-a-12",
+      "joint-train-a-13",
+      "joint-train-a-14",
+      "joint-train-a-15",
+      "joint-train-b-00",
+      "joint-train-b-01",
+      "joint-train-b-02",
+      "joint-train-b-03",
+      "joint-train-b-04",
+      "joint-train-b-05",
+      "joint-train-b-06",
+      "joint-train-b-07",
+      "joint-train-b-08",
+      "joint-train-b-09",
+      "joint-train-b-10",
+      "joint-train-b-11",
+      "joint-train-b-12",
+      "joint-train-b-13",
+      "joint-train-b-14",
+      "joint-train-b-15",
+      "joint-train-b-16",
+      "joint-train-b-17",
+      "joint-train-c-00",
+      "joint-train-c-01",
+      "joint-train-c-02",
+      "joint-train-c-03",
+      "joint-train-c-04",
+      "joint-train-c-05",
+      "joint-train-c-06",
+      "joint-train-c-07",
+      "joint-train-c-08",
+      "joint-train-c-09",
+      "joint-train-c-10",
+      "joint-train-c-11",
+      "joint-train-c-12",
+      "joint-train-c-13",
+      "joint-train-c-14",
+      "joint-train-c-15"
+    ],
+    "trainFingerprints": [
+      [
+        "03404eda6c2f6d8d906bfdbed8111b08a94e28a378e212815403893a5abe69b4",
+        "5fbb265b8c533533be1bb9e0fa4a9edd212b7c94f92914c65cf5941137951bef",
+        "b7406907c7a4bd8c42fc23a8d37874fa6412048655efd452d366cfccd154306c"
+      ],
+      [
+        "093b85cca94327885cbadef5fbc9a500fd346d197cae404db874d206ba144de1",
+        "1207deb5f916bb0b843628236b407d236ab940df04c362236429d5dc4c4d1d44",
+        "175bd601edf18723cae528df9c5f9ca4bbf3a2aacdd59af3ce98b51fb7009e15"
+      ],
+      [
+        "147c227ecb9a7d721ea4742858d462d507bbd9cc573e44c76dedec13dff8e20b",
+        "873d86bd49ecc0ba35764c3147cbb82caf5b79d8f5b131c98981e8b1857f0554",
+        "7a7156d292a536f676fb44858f509f3d634bb3b8b298c0ce18a117758a6d10d4"
+      ],
+      [
+        "21f9e7774164e32f0e6a6116335a0d0ef80a271471db394c3ae95b179923033b",
+        "bf679ee2c9c157dd8572c2ea5c592c1431f63afa00b4f7e512d821739a5871e8",
+        "22db5e2a8ad0a89aa21a7d7f466cb6d0ba7ebc8e0c5f5bf4a95b1004d24a98c8"
+      ],
+      [
+        "2287ba9dff86119e05516acec390dbc01fa7678cb14d681fc57dd972009a9f81",
+        "fea025be54b7c646ee4d6bfb9b5ed0e7194e8f261d183bdd78fe63e4bd023b10",
+        "0ced150ce1d7daf649062597e8cceb22d6eddf5ea5b73213f57a66d0d6a5b83e"
+      ],
+      [
+        "22c95fbc7fba2c97e482a3edbfab15176ea21d7c542fff61b0324f02887715ab",
+        "6c471e1c3b2fa4d6cbd31c47d45b34b45ff6746dbdadb4c81ab64091a1434a90",
+        "a1598e3fbda6a4d732374d3afe4c510c0b1a6a97abf8c559705f886db6646880"
+      ],
+      [
+        "26e39cfd875f392a15aa6d0dea5f07c376a0edae29f4735a1764841ac779e3e4",
+        "979a80a10de1e67ac690e0138cebbbda976d133cd8550ae37660296b116d1e98",
+        "21d4dacded2af42075248314c8ed0f32a376082d499ade608d5a566bfdcbe3a9"
+      ],
+      [
+        "2aee77f52e29ee39199ee2a0efbb4a9897d683fa0ca7755a913c95450b8cc631",
+        "064dc2809a0d1342c09525c1a84acbb96ddb0584b358b05200fcbef9504edc6e",
+        "508b1c98daaafc409902e1c85ca202296925dcc67bcf373638f680fb52e36d38"
+      ],
+      [
+        "302b836526cda6c86a4bf57d7d2bbd1bdf1bdcd0b9cfd8fa7b5ef1941c2d00ff",
+        "56c3eafe0fbdfaa920360ff6679c85142e51aa0d84807cbf88590db503d06ed5",
+        "d24e7268fd81f5276d702e05e490d341baad338d9fb4a5c541116e0ccf5a715f"
+      ],
+      [
+        "3ccad12fd93197f46877ee5b85fad19d5648771807cbd5b1bb15b69bce3af638",
+        "f29b38b525473b083a0b404f0c3061ca40deab6625415fc9453b9c49a457341e",
+        "ae2895303ff741a943b7238c9602bd40e8ec64c36136b0e68fb1e332623f7d6d"
+      ],
+      [
+        "474b383340d5cf5a441deae56d4a45248367998be56e9676ad4c2abf0b695192",
+        "63718f2e077dff315f60d1f64c347ae87aa28319b772a6ef0bfcd6dafa82db1b",
+        "82ef004e15f6064e03b8215f6b676f05456ed4f140a323be72ae279a31dfd697"
+      ],
+      [
+        "4ab5afba2d2b12db99560ffde082c9e0311b43c155a0d25c370b57abf08b9e72",
+        "d5ea30b9bba92068f90d070ecf910d475f0a805088848fc84821df174411710e",
+        "811082eff236da1772b9a3141248f0c6c4a2919b530d417de4c1cb8d36177f9b"
+      ],
+      [
+        "6376f0c464694db3b35cd09cf255b2b7ed813bc98c35a506c827745f303a349e",
+        "5dacc600406dc8d45f9b0d8b7faa5471a49414dce712a7688ea44089af3bbcbe",
+        "d15b3ec7f5f2d3b27997a5ca1d4b02c9945100d51badbb60a3059f8c205727b5"
+      ],
+      [
+        "7eef4feebc5872762fe952bf961632b2589f45f6ad18a6f3c3a71ac9d9aa28e3",
+        "a3ad368311efa9e14804c6f5d819b67d9b4cb2c77bb4bc55a71499f5280e1101",
+        "549d8aad09998dc6775b4ff47e7e5aec423eb26a48895b9dc0644f8f3015b3a9"
+      ],
+      [
+        "851b9422799752fb4b328ab5556bfb50006407a097533677537b1e931c18dd45",
+        "45c661e278948473373c68b080c8d0d8b5b02a5cf3d174b2ff34042e210734e7",
+        "d765eef69fe2903c8713a59d318f38aa9e35725f7aa6862a874b40dc60ee9ded"
+      ],
+      [
+        "88a417d25f96f6b846e5d5a1734ea0ef0739da232c65b638a7a720185972d75a",
+        "fdbba95527c4f8904ab5ed65aa498cda9f03bce326c4ebba6355d52d98fca2bd",
+        "f7808581b052f3da3202825708ccdc81521937f3d54caf2b42b7cfb5a8f8e0ed"
+      ],
+      [
+        "912e7d5ffa8937aff88c0d7a9b92466c3d4a75ae495c6ca8ef99cfa6de94251d",
+        "edd4f78504365e089f04c6aa13cae5573434caac3da1837ad0ad6b27a7e2360e",
+        "a20185472fb6460a8146a7c40531392a5ed46655a22471f3a0881e18f43d4458"
+      ],
+      [
+        "96f2701394914207585693b5479055e25bd1948247f2631c9a1e5ae4de645ab4",
+        "fd88ebe65ce68ba12f453d83ba65c1480a88bd7559533e8c52ce59154e7eb947",
+        "527fab5822692d729ee08874c0fa34dc72ab15181cd14b5fbd6d3734dae587e3"
+      ],
+      [
+        "977ebbba2151080768a49cc37533063f2a694619745ada39969fa049d923c842",
+        "2eeba914e480cf2ba3f74902d0acbc366955853071860396bd72a84025d995f1",
+        "b4cdff67c75db50f83cdc2bf4f0ee4724183234ac355af127f64ebc64865e547"
+      ],
+      [
+        "9d9ceeab5d2cdd22051338e450d486ee9db9422c6902253df89b52ccff8db92d",
+        "005a9bdeb9c715b312377456ddeb0b6dcc18571c8515ed1e2d90f27bfa3a3ff4",
+        "e966a0e457704e445b97806c5244bcad7423a57da4193cc1a542682a283a5758"
+      ],
+      [
+        "9ed878568020afcd44dfd2b8633615d5e0e708cf4a1564ccde21289fc5ead974",
+        "6331fdd496c3e4d93812ddacd11d4a044bb504132b906a052eb72f19789689cc",
+        "593060cce425ad330db2b0797035a94af6e9ac6da9ae7e64fcf6cc60e16de836"
+      ],
+      [
+        "9f8938eb1058aa01e23dca2d53d127d5e44f4d2ae4c8a311f2f5265eb903e099",
+        "de20221bd512fe8cd0840380012dfa4048186be889fc8100f151fb0a104709b1",
+        "91ab49f7c398bf837f05f8bfb28df621004774ab642b1ed806abf14963fde61b"
+      ],
+      [
+        "a8dbf4f6b98a22f0f895f93f6a51b124d0f2ca46b2da2845482dae8e22643cca",
+        "31413a1f86f372ea43743b2ea7af05a53ae8bb1b57d6511ed1c2bcb9539dc57a",
+        "99d316dad0545a2b1323bbfeaec9cfcb31defbca097817fff35db065d29cea6b"
+      ],
+      [
+        "a9608ef4c22444fbfab8200d9056f47b83808e369318c1dabdba0591be820bbe",
+        "caa2d90b6d22122f4307e8cb47c76cffd0c3fc39a36e7cb95a9c748c6f966353",
+        "582d30c554e108f06b8af6abc8302bbfd84a48312d20c10e7d83d709b5fce7d3"
+      ],
+      [
+        "ac0bf4239c5cf6eecdcae3284fd703b80b4020bc671c0312a09d5b5438793693",
+        "fff551f298791c4dcd441677229149a948045524ce6bde085cbc54f25309e27f",
+        "414afedc30faac61c02fd67ff1df12b65565ee76971f5c8c5e6cf8c4977f3552"
+      ],
+      [
+        "ad119992ab2b59b26204669b8ea3128b4660a3a54da79c9ea4f92b20a3a49745",
+        "86bfd83428c9f0f0bc86047e39f0179ec4f76d4a768a373101b2a94892202589",
+        "591537e072a292f0c9284b513b6890abe91c0faac7c81eca4a7ed391c157597e"
+      ],
+      [
+        "afac3d9c022465b583c6871d7263fe947331eee0b5d443d334e7d7abf9cf1a0f",
+        "0bc2976a9edfc4acd82f244dfa36efff54abf2049b880ee708e8445607c7cd55",
+        "c3510ac333e84da7f0023e1204b5b90a2cf880dbf83b07f263835d0e09a5d74c"
+      ],
+      [
+        "b0833b6c0f0dfb4c55f7e0cdfab896c425f11025581358c1415e1b6e1f0230b3",
+        "6ea71b0ccb99859eb5096a5ba71152cbfce2ad669de5ee2ac4dbb4594e3ac849",
+        "c084474d37fda5249e8763d5f6d28fe49cc8cc32d85e3876ea416d0b453ed80a"
+      ],
+      [
+        "b192ac2c6fcc5dd41ff08ace4045b7eaf36c2e8652a0b1d023dbcf48c0ced3d0",
+        "341e2292359302e8801322089619b61f3115f91db46389786b92ad802beb953a",
+        "d56206a288e9a5a12bd50ae729c6bb9b288dcbe3eebff09ea5855f2bf061d3ad"
+      ],
+      [
+        "b7c6b251b9313e5897ded929e42ea3b3e3c7855811fb2a750be0a09fbfaeb4e7",
+        "059d3d96d350df9d0b0d70d1b23c0b2085a0a0668ac9e7f7736d7b8112c788f9",
+        "6f04fc1600d8a54b721e38ca0044baadc1f5985be08c61dcd259de07f7b1a5bc"
+      ],
+      [
+        "b92151af70d38822d02649bf4645b29adc4bdac2f1d6ceb8746a35015cf4b72c",
+        "0a8644d9926310f993765114f838e7dec46d3b6da2686ff9db7f93c10582123b",
+        "028856fe9bb5befb9fcd954747f88f0dc7e6299d54e5004983b710efe696dde4"
+      ],
+      [
+        "bd18c8a01106b16765b5ffac43e0e37d8d069bb672062e7cc5316511932c6990",
+        "7b7088a3756de77901c7ebbf820191a2a99bc3366f466d946222a84bd79a82da",
+        "d3898c8af21fb94097e52bb4f19e27db6fa6ae765d89344b3ebd6950854d9e43"
+      ],
+      [
+        "bfe405f9701222c3295223e14101d148f0120b50ef184e07be1cf726b9d82f91",
+        "0af6b2fd678e2fc39ccec6d700d734b9ce847bef784a8a3a605bae8f2c48c581",
+        "39340d056bbcbac698ca5036e6b92036b14bf639dcedd9c89362a83b1a3d128c"
+      ],
+      [
+        "c03a06497622f6e8aba6b6c3b63b8dba3074e9b5dd837482e70a61609f5202ca",
+        "653c85dd39af350eae3086b0b84dc1db579fc0cb4df820f57f9050acecb83760",
+        "c6cd0eac5d9e1cf907a641c7681fdc8bbbfe83ccc4f6c06f1496231b4a73e872"
+      ],
+      [
+        "c7c57566871d53a10a8df16eab664f2e1046d11a552b1ddaa99f769fc4869768",
+        "0d29610ee7078d080096a0490b1b11905c02415eeccc7b8723c9de74dd93bde2",
+        "66b3aff3518b297ff5cb35a3775765bfc91b44cbff4f555d0fddabf95616df15"
+      ],
+      [
+        "c7c8bbb5efb38324b1f7e9e1331ea4f8d1ac4125974c368a35d09f0b955ae316",
+        "d04c38ac99eec8d660a1ee67b9a3ba8c6bd74a2b838113de9521807669ca45a8",
+        "92318ae2e241518e84e8f69418e5de0caa23b8764bc3d14580ffbc4f19e43e8d"
+      ],
+      [
+        "ce269b7eced883ac6411bfac11ad0734b831288ee6e0813e9451a9136ef5ba80",
+        "b026fb0220cb76635b046d3cad063681e3ac74e1ec004a563eb9905958e73cc8",
+        "1312e336a9dcca58e6338d668e9711b3130e62461a3150a0faa71e601105e06a"
+      ],
+      [
+        "d189ebb9312b79e651ac7e0d5b1a1665e8c0bae318265b8b48d2d9ed671aa214",
+        "b788c397b55556d90013e50d68d969443d0fbecd4c5f8f4104becab4c6709979",
+        "62bd0d9f2077b9c0dba8d3ad29fc321c38eef11f0fbbdaf8d30577fcd1e97190"
+      ],
+      [
+        "d1ca12fd5dff762ad22ba1ebd2fa075d233865fa6689b23746f2784cce7acce0",
+        "31a41e3d21a6a219efb78de04a2ecf0ea45a5c62da6920fade90f6bda7005223",
+        "62db163741bc7ef00bb0b8be4c1cc728188dcd4fcec247acc8cb945b7fe7e62c"
+      ],
+      [
+        "d55315d7749f7dd1c423792ec977c91e3513505d45e6091cdca3c34dfc0a1545",
+        "8905c982641bcf47c102b94c686dc80f2e3ce3e8de3f361d15eca1ed2b1526c3",
+        "172cc6fad994cdb2fc92e5cd58081214043d86ca2977569551583eea30c765ad"
+      ],
+      [
+        "d71d518cd17253938331bacd85c571f8eabc16efb229d6a0f942a07548f42af6",
+        "1cd130bba050b319831376ae951170d454923fa8a1ffece0d8a70c9cf0ba9303",
+        "788481ec1c4ebf092c147641d28e674d481fb924180e8bfef3c111fbf588063c"
+      ],
+      [
+        "dcc853dfc0c5210878dec28876f5379ba3fa1bf0e71201b94462636797f7ebcb",
+        "968c3ee4ee9486aa6ed99cee403b9e12469d55c8eafdcd7ef7f316899567f07e",
+        "d17159b5d1ad615bc8f34bb8064b9de0d4332cd44bb7c429d532879324548ff5"
+      ],
+      [
+        "e0ac492b5d218214066d64736c0c9a15652450391c69ae884d6d09bfc4070d95",
+        "d3bea4c477e9260ed358b69340445d9340da4081d25e3dbd664663956c7141c5",
+        "011ce84cd0ec4cdea4bb0f522ed35c22ce0b394870ac8c58bec3f15d44023f4c"
+      ],
+      [
+        "e3445a2073d86969d4bd6d456e38d218aeb51b6a4444c3bc4db54469ab0c9ce2",
+        "b4a8f6b4368988626c6561c410c11d2c91b0559ba3359114652552337aafba6a",
+        "0108b4a9c2b7462d4284d998dd05894eb002843cfddd73345dcbea6feeeb80db"
+      ],
+      [
+        "e4c8fe8b2ffe1d9dd12a0c2b3865f9121201dcb3e79677f3309597fe99cef9e4",
+        "4b4950f38cf9304dc389cd8dcd878a17536089dda2751b19069180d412bb5681",
+        "b46c99b407a48b2f11daf8e0f8c67a689d5a602c507456c91aa9cbdbc2b9d700"
+      ],
+      [
+        "ef879cfa4f63a40dec8dc82fc88da62643619a02056201c18b0b987e74b11b9c",
+        "33f9579f5a7ca2edcbbdb93b69b03cbe2995863939f9d0c3e4a4ad2608b9f18b",
+        "ec27dfd3a04dedfeee5311114a7b2b31f67e1a3627ff1a6753c73697569112ea"
+      ],
+      [
+        "f483ea3f2d374a872d48ac4b7575572309f8b8f95de4663d452e1490d4bbd787",
+        "26f9ac9d94d6d0f3e9801b466c3d78ef585c66a7e651c9229d3b22a593eca80b",
+        "4bc7df79023abbe1534fc28f2124e2db338b40c2e1cd3f134ff4908a8692d0b3"
+      ],
+      [
+        "f7a56ee968621e2496e94ac38fc73413534980ff6fcab96b0f88c189c9d91fe6",
+        "c80fdb3686204fed61cbf8ace65cdb4087c411119c4f00aafe8701722922e751",
+        "9dd5b4437e6a5ef0cb8f65ee44df9b8d731296f3bd8a9edd1be8827762d8589f"
+      ],
+      [
+        "fae5d25193cd93bcf1f6bd9a9126eaf2b55288b00fe3c66ed9e95e082c16d518",
+        "8a5adfcbedcc2be770feebe8c6134485497fc706cd57c9d06c977e19e63f0d2a",
+        "3941637cb3260339fc881522edd664c752a03dacfee748338d3fa82c38a3031e"
+      ],
+      [
+        "fd8a97836891b304fc55fd202f6772cb95ff8949ce86d57b06def6c017343383",
+        "e3ca09e56c9ef94543114ad50513b3ef682e86aef0b368a7b81ff5b5df6e6190",
+        "2a076036d559af6a870be091ddb5984629bbd7bb3d478555404ee0991daba725"
+      ]
+    ],
+    "trainCaptures": [
+      {
+        "sha256": "def07619bd9a9c9a9d14bb433845ce26dbb9a71ef8b31ed9b5ec4a4a074f79f5",
+        "source": {
+          "buildId": "8f452849-8447-4688-897d-9af04f978a3a",
+          "facts": {
+            "hardware": true,
+            "adapter": {
+              "vendor": "",
+              "architecture": "",
+              "device": "NVIDIA GeForce RTX 3090",
+              "description": "",
+              "isFallbackAdapter": false
+            },
+            "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            "devicePixelRatio": 1
+          },
+          "revision": "948dc6d9779c7e5964134d88fc3c7aded13bfa9e",
+          "receiptSha256": "e3fda2bd59d1b692951b8c0d0eb473a3fafbf090cb0f984bff6ad3ea3eba650b",
+          "url": "http://127.0.0.1:62937/"
+        }
+      },
+      {
+        "sha256": "09af01c7c90a7706b405c7d1fa24d5aa29cd2eb30c4ff961662daddf11eb847f",
+        "source": {
+          "buildId": "8f452849-8447-4688-897d-9af04f978a3a",
+          "facts": {
+            "hardware": true,
+            "adapter": {
+              "vendor": "",
+              "architecture": "",
+              "device": "NVIDIA GeForce RTX 3090",
+              "description": "",
+              "isFallbackAdapter": false
+            },
+            "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            "devicePixelRatio": 1
+          },
+          "revision": "948dc6d9779c7e5964134d88fc3c7aded13bfa9e",
+          "receiptSha256": "e3fda2bd59d1b692951b8c0d0eb473a3fafbf090cb0f984bff6ad3ea3eba650b",
+          "url": "http://127.0.0.1:53398/"
+        }
+      },
+      {
+        "sha256": "352eb5e48aeab8b58f80069912b4b710c2228d960757e64e32884aa771f1a97d",
+        "source": {
+          "buildId": "8f452849-8447-4688-897d-9af04f978a3a",
+          "facts": {
+            "hardware": true,
+            "adapter": {
+              "vendor": "",
+              "architecture": "",
+              "device": "NVIDIA GeForce RTX 3090",
+              "description": "",
+              "isFallbackAdapter": false
+            },
+            "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            "devicePixelRatio": 1
+          },
+          "revision": "948dc6d9779c7e5964134d88fc3c7aded13bfa9e",
+          "receiptSha256": "e3fda2bd59d1b692951b8c0d0eb473a3fafbf090cb0f984bff6ad3ea3eba650b",
+          "url": "http://127.0.0.1:59752/"
+        }
+      }
+    ],
+    "developmentCaptures": [
+      {
+        "sha256": "76546abd6b9fe8e21dff01c5dae476d03a42684f1e3cf74d88fa8548320f4f11",
+        "source": {
+          "buildId": "8f452849-8447-4688-897d-9af04f978a3a",
+          "facts": {
+            "hardware": true,
+            "adapter": {
+              "vendor": "",
+              "architecture": "",
+              "device": "NVIDIA GeForce RTX 3090",
+              "description": "",
+              "isFallbackAdapter": false
+            },
+            "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.0.0 Safari/537.36",
+            "devicePixelRatio": 1
+          },
+          "revision": "948dc6d9779c7e5964134d88fc3c7aded13bfa9e",
+          "receiptSha256": "e3fda2bd59d1b692951b8c0d0eb473a3fafbf090cb0f984bff6ad3ea3eba650b",
+          "url": "http://127.0.0.1:65479/"
+        }
+      }
+    ],
+    "areaPilot": {
+      "sha256": "10bb17ad439e04e8a82942b877018745ed51f4b3cbc791db5610173d2a7f72ad",
+      "source": {
+        "revision": "c835fc8c43e2a82430126f37e105743e171a0682",
+        "receiptSha256": "8c9b9fc8b066ffad02b9cb237bb5495adbe6d94aadcdee19ccbfa5f165301eac"
+      },
+      "fixture": "cornell-stratified-v1"
+    },
+    "areaTrainFrameIds": [
+      "main-0",
+      "main-14",
+      "main-15",
+      "main-16",
+      "main-17",
+      "main-18"
+    ],
+    "selectedStep": 120,
+    "decisionSplit": "development",
+    "finalHoldoutUsed": false,
+    "displayInitialization": "bilinear",
+    "pathAuxiliaryWeight": 0.0,
+    "learningRate": 0.001,
+    "unroll": 6,
+    "steps": 120,
+    "validationInterval": 20,
+    "lossProfile": "matched-raster-log-display-edge-energy-warped-change-area-reflection-v2",
+    "sourceRouting": "forward HDR and raw incident for recurrence; same-frame SSR composite for display"
+  },
+  "packageSha256": "1d2d02260fe464129a754aa78f9398bb4b166ba3e261eaa434f65f0f7897b3f3"
+}
