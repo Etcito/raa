@@ -28,6 +28,47 @@ def read_f32(root, record, count):
     return values
 
 
+def gather_pairs(raw, previous):
+    neighbors = F.unfold(F.pad(raw[:, :2], (1, 1, 1, 1), mode="replicate"), 3)
+    neighbors = neighbors.reshape(raw.shape[0], 2, 9, *raw.shape[2:])
+    return torch.cat((neighbors, previous.unsqueeze(2)), dim=2)
+
+
+def pair_ratios(pairs):
+    weight = pairs[:, 1]
+    supported = weight > 0
+    ratios = pairs[:, 0] / torch.where(supported, weight, 1.0)
+    return ratios, weight, supported
+
+
+def stable_visibility(logits, pairs):
+    ratios, weight, supported = pair_ratios(pairs)
+    # Cancel the common (1 - history) factor from numerator and denominator.
+    # The remaining previous/current multiplier is h/(1-h) = exp(gate_logit).
+    log_mix = torch.cat((logits[:, :9].log_softmax(dim=1), logits[:, 9:10]), dim=1)
+    log_mass = log_mix + torch.where(supported, weight, 1.0).log()
+    log_mass = log_mass.masked_fill(~supported, -torch.inf)
+    nonempty = supported.any(dim=1, keepdim=True)
+    # Avoid an all-minus-infinity softmax on the zero-denominator branch.
+    normalized = torch.where(nonempty, log_mass, 0.0).softmax(dim=1)
+    visibility = (normalized * ratios).sum(dim=1)
+    return torch.where(nonempty.squeeze(1), visibility, 1.0)
+
+
+def oracle(raw, ref):
+    previous = torch.where(raw[:, 10:11] == 1, raw[:, 2:4], 0.0)
+    ratios, _, supported = pair_ratios(gather_pairs(raw, previous))
+    nonempty = supported.any(dim=1)
+    low = torch.where(nonempty, ratios.masked_fill(~supported, torch.inf).amin(dim=1), 1.0)
+    high = torch.where(nonempty, ratios.masked_fill(~supported, -torch.inf).amax(dim=1), 1.0)
+    # Every nonnegative mixture lies in this interval; independent per-pixel taps
+    # may choose any value in it, including limits of the softmax/sigmoid.
+    error = ref.clamp(min=low, max=high) - ref
+    return dict(oracleMse=error.square().mean().item(),
+                outsideOracleIntervalPixels=(error != 0).sum().item(),
+                emptySupportPixels=(~nonempty).sum().item())
+
+
 class Pilot(nn.Module):
     def __init__(self, manifest, blob):
         super().__init__()
@@ -46,24 +87,19 @@ class Pilot(nn.Module):
                     param.copy_(torch.tensor(values).reshape(param.shape))
             self.layers.append(layer)
 
-    def forward(self, raw):
+    def forward(self, raw, *, training_visibility=False):
         valid = raw[:, 10:11] == 1
         previous = torch.where(valid, raw[:, 2:4], 0.0)
         x = torch.cat((raw[:, :2], previous, raw[:, 4:]), dim=1) * self.scales
         for layer in self.layers[:-1]:
             x = layer(x).relu()
         logits = self.layers[-1](x)
+        visibility = stable_visibility(logits, gather_pairs(raw, previous))
+        if training_visibility:
+            return visibility
         spatial = logits[:, :9].softmax(dim=1)
         history = torch.where(valid, logits[:, 9:10].sigmoid(), 0.0)
-        neighbors = F.unfold(F.pad(raw[:, :2], (1, 1, 1, 1), mode="replicate"), 3)
-        neighbors = neighbors.reshape(raw.shape[0], 2, 9, *raw.shape[2:])
-        current = (neighbors * spatial.unsqueeze(1)).sum(dim=2)
-        pair = torch.lerp(current, previous, history)
-        denominator = pair[:, 1:2]
-        positive = denominator > 0
-        ratio = pair[:, :1] / torch.where(positive, denominator, 1.0)
-        visibility = torch.where(positive, ratio, 1.0)
-        return torch.cat((spatial, history, logits[:, 10:11].sigmoid(), visibility), dim=1)
+        return torch.cat((spatial, history, logits[:, 10:11].sigmoid(), visibility.unsqueeze(1)), dim=1)
 
     def export(self, manifest):
         blob = bytearray()
@@ -113,21 +149,43 @@ def train(capture, output, steps, learning_rate):
     model = Pilot(manifest, (ABI / "weights.fp32le").read_bytes())
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    def loss(raw, ref):
-        return (model(raw)[:, 11] - ref).square().mean()
+    @torch.no_grad()
+    def inference_losses():
+        losses = [(model(raw)[:, 11] - ref).square().mean().item() for _, _, raw, ref in frames]
+        if not all(map(math.isfinite, losses)):
+            raise ValueError("non-finite FP32 inference loss")
+        return losses
 
-    with torch.no_grad():
-        initial = sum(loss(raw, ref).item() for _, _, raw, ref in frames) / len(frames)
-    for _ in range(steps):
-        optimizer.zero_grad()
-        for _, _, raw, ref in frames:
-            (loss(raw, ref) / len(frames)).backward()
+    initial_losses = inference_losses()
+    initial = sum(initial_losses) / len(frames)
+    best_loss, best_step = initial, 0
+    best_weights = {name: value.clone() for name, value in model.state_dict().items()}
+    max_grad_norm, clipped_steps = 0.0, 0
+    for step in range(1, steps + 1):
+        optimizer.zero_grad(set_to_none=True)
+        for identity, _, raw, ref in frames:
+            loss = (model(raw, training_visibility=True) - ref).square().mean() / len(frames)
+            if not loss.isfinite():
+                raise ValueError(f"non-finite training loss at step {step}, frame {identity}")
+            loss.backward()
+        try:
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True).item()
+        except RuntimeError as error:
+            raise ValueError(f"non-finite gradient at step {step}") from error
+        max_grad_norm = max(max_grad_norm, grad_norm)
+        clipped_steps += grad_norm > 1.0
         optimizer.step()
+        if step % 25 == 0 or step == steps:
+            score = sum(inference_losses()) / len(frames)
+            if score < best_loss:
+                best_loss, best_step = score, step
+                best_weights = {name: value.clone() for name, value in model.state_dict().items()}
+    model.load_state_dict(best_weights)
 
     checks = []
     errors = []
     with torch.no_grad():
-        for identity, seeds, raw, ref in frames:
+        for (identity, seeds, raw, ref), initial_mse in zip(frames, initial_losses):
             result = model(raw)
             delta = result[:, 11] - ref
             width, height = raw.shape[3], raw.shape[2]
@@ -135,13 +193,19 @@ def train(capture, output, steps, learning_rate):
                                extent=[width, height],
                                input=raw.permute(0, 2, 3, 1).flatten().tolist(),
                                output=result.permute(0, 2, 3, 1).flatten().tolist()))
-            errors.append(dict(id=identity, referenceSeeds=seeds, mse=delta.square().mean().item(),
-                               maxAbsoluteError=delta.abs().max().item()))
+            bound = oracle(raw, ref)
+            mse = delta.square().mean().item()
+            if mse < bound["oracleMse"] - 1e-6:
+                raise ValueError(f"renderer-equivalent fit escaped the mixture bound on {identity}")
+            errors.append(dict(id=identity, referenceSeeds=seeds, initialMse=initial_mse, mse=mse,
+                               maxAbsoluteError=delta.abs().max().item(), **bound,
+                               gapMse=mse - bound["oracleMse"]))
     blob = model.export(manifest)
     report = dict(captureSha256=sha(capture_bytes), initializationSha256=initial_hash,
                   steps=steps, learningRate=learning_rate, torchVersion=torch.__version__,
-                  initialLoss=initial, finalLoss=sum(e["mse"] for e in errors) / len(errors),
-                  frames=errors)
+                  initialLoss=initial, finalLoss=best_loss, bestStep=best_step,
+                  oracleLoss=sum(e["oracleMse"] for e in errors) / len(errors),
+                  maxGradientNorm=max_grad_norm, clippedSteps=clipped_steps, frames=errors)
     files = {"manifest.json": json.dumps(manifest, indent=2) + "\n",
              "trainer-vectors.json": json.dumps(checks, allow_nan=False) + "\n",
              "training-report.json": json.dumps(report, indent=2, allow_nan=False) + "\n"}
