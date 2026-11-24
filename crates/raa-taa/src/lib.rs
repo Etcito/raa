@@ -22,3 +22,6 @@ pub use tunables::tunables;
 pub const TAA_PASS_NAME: &str = "taa";
 /// S12 order of the pass (after `particles.blend`, before `dof`).
 pub const TAA_ORDER: u32 = 100;
+
+/// An already resolved HDR destination supplied by a validated real-frame graph extension.
+pub const NEURAL_COLOR_INPUT: &str = "neuralResolvedColor";

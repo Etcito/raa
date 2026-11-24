@@ -51,13 +51,13 @@ pub(super) fn refused(issue: Issue) -> SetResult {
     }
 }
 
-struct AreaRoute {
-    trace: String,
-    mask: String,
+pub(super) struct AreaRoute {
+    pub(super) trace: String,
+    pub(super) mask: String,
 }
 
 impl AreaRoute {
-    fn from_plan(plan: &GraphPlan) -> Option<Self> {
+    pub(super) fn from_plan(plan: &GraphPlan) -> Option<Self> {
         fn producer<'a>(
             plan: &'a GraphPlan,
             node: &PlanNode,

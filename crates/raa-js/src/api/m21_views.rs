@@ -689,7 +689,8 @@ mod web {
                 let rects = rects_from_js(&rects)?;
                 let graph = crate::api::m32_render_graph::web::graph_state(st)?;
                 if rects != [ViewRect::FULL]
-                    && (graph.explicit_scene_size.is_some() || graph.area_model.is_some())
+                    && (graph.explicit_scene_size.is_some() || graph.area_model.is_some()
+                        || graph.executor.real_model_stats().is_some())
                 {
                     return Err(api_error(
                         "graph.multi_view",

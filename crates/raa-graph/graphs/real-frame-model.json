@@ -1,0 +1,155 @@
+{
+  "format": "raa.render-graph",
+  "version": 1,
+  "name": "Real-frame neural reconstruction",
+  "nodes": [
+    {
+      "id": "skin",
+      "type": "pass.skin"
+    },
+    {
+      "id": "prepass",
+      "type": "pass.prepass"
+    },
+    {
+      "id": "lightTiles",
+      "type": "pass.light.tiles"
+    },
+    {
+      "id": "volume",
+      "type": "pass.gi.volume"
+    },
+    {
+      "id": "pyramid",
+      "type": "gi.pyramid"
+    },
+    {
+      "id": "trace",
+      "type": "area.trace"
+    },
+    {
+      "id": "mask",
+      "type": "area.mask",
+      "params": {
+        "tier": "auto",
+        "heroCount": 0,
+        "stochasticCount": 4,
+        "stochasticCells": 4,
+        "stochasticMode": "stratified"
+      }
+    },
+    {
+      "id": "forward",
+      "type": "pass.forward",
+      "params": {
+        "mode": "ltc"
+      }
+    },
+    {
+      "id": "hiz",
+      "type": "ssr.hiz"
+    },
+    {
+      "id": "ssrTrace",
+      "type": "ssr.trace"
+    },
+    {
+      "id": "incident",
+      "type": "ssr.incident"
+    },
+    {
+      "id": "replace",
+      "type": "ssr.replace"
+    },
+    {
+      "id": "resolve",
+      "type": "pass.taa"
+    },
+    {
+      "id": "tonemap",
+      "type": "pass.tonemap"
+    },
+    {
+      "id": "out",
+      "type": "output.display"
+    }
+  ],
+  "links": [
+    {
+      "from": "pyramid.pyramid",
+      "to": "trace.pyramid"
+    },
+    {
+      "from": "trace.raw",
+      "to": "mask.src"
+    },
+    {
+      "from": "mask.areaShadow",
+      "to": "forward.areaShadow"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "hiz.depth"
+    },
+    {
+      "from": "hiz.hiz",
+      "to": "ssrTrace.hiz"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "ssrTrace.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "ssrTrace.normal"
+    },
+    {
+      "from": "forward.color",
+      "to": "incident.color"
+    },
+    {
+      "from": "ssrTrace.trace",
+      "to": "incident.trace"
+    },
+    {
+      "from": "forward.color",
+      "to": "replace.color"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "replace.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "replace.normal"
+    },
+    {
+      "from": "prepass.material",
+      "to": "replace.material"
+    },
+    {
+      "from": "incident.incident",
+      "to": "replace.incident"
+    },
+    {
+      "from": "replace.color",
+      "to": "resolve.color"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "resolve.depth"
+    },
+    {
+      "from": "prepass.motion",
+      "to": "resolve.motion"
+    },
+    {
+      "from": "resolve.color",
+      "to": "tonemap.color"
+    },
+    {
+      "from": "tonemap.color",
+      "to": "out.color"
+    }
+  ]
+}

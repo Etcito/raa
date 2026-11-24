@@ -332,6 +332,12 @@ export interface Engine {
   setRenderGraph(graph: RenderGraphDoc | string | null): RenderGraphResult;
   /** Validates an FP32 area-pilot package and registers it under a unique per-engine name. */
   registerAreaRenderModel(name: string, manifest: string, weights: Uint8Array): void;
+  /** Registers a verified FP32 ABI and weight hash. Model qualification remains experimental. */
+  registerNeuralModel(id: string, manifest: string, weights: Uint8Array): void;
+  /** Selects independent real-frame heads on an explicit graph, or restores its analytic path. */
+  setNeuralReconstruction(options: NeuralModelSelection | null): void;
+  neuralReconstructionStats(): NeuralModelStats | null;
+
   /**
    * Selects an editable graph, a frozen graph (pass null as graph), or the engine default.
    * Optional scene dimensions must be supplied together. A refused selection keeps the
@@ -367,4 +373,28 @@ export interface Engine {
    * `setAreaLightShadows`, `setGlobalIllumination`, `setGiQuality`.
    */
   renderGraphOwnedSetters(): string[];
+}
+
+export interface NeuralModelHeads {
+  area: boolean;
+  reflection: boolean;
+  sr: boolean;
+}
+
+export interface NeuralModelSelection extends Partial<NeuralModelHeads> {
+  model: string;
+}
+
+export interface NeuralModelStats {
+  model: string;
+  kind: string;
+  weightsSha256: string;
+  selected: NeuralModelHeads;
+  ran: NeuralModelHeads;
+  realFrame: number | null;
+  sceneSize: [number, number];
+  displaySize: [number, number];
+  gpuBytes: number;
+  dispatches: number;
+  historyFrames: number;
 }

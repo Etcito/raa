@@ -31,6 +31,21 @@ fn main() {
         .validate(&module)
         .unwrap_or_else(|error| panic!("{path}: {error:?}"));
     }
+    let reproject = "../raa-taa/src/wgsl/reproject.wgsl";
+    let model = "src/exec/real_model.wgsl";
+    for path in [reproject, model] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    let source = fs::read_to_string(reproject).expect("read temporal reprojection")
+        + &fs::read_to_string(model).expect("read real-frame model WGSL");
+    let module = naga::front::wgsl::parse_str(&source)
+        .unwrap_or_else(|error| panic!("{model}: {}", error.emit_to_string(&source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{model}: {error:?}"));
     println!("cargo:rerun-if-changed=build.rs");
     for dir in RUST_DIRS.iter().chain(JSON_DIRS.iter()) {
         println!("cargo:rerun-if-changed={dir}");

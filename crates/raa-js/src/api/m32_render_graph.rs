@@ -26,6 +26,8 @@ pub(crate) struct RenderGraphState {
     pub(crate) frozen_name: Option<String>,
     pub(crate) area_model: Option<String>,
     models: std::collections::BTreeMap<String, raa_graph::learned::AreaPilotPackage>,
+    real_models: std::collections::BTreeMap<String, raa_graph::exec::RealModelPackage>,
+    selected_real_model: Option<(String, raa_graph::exec::RealModelPackage)>,
     /// The issues of the latest `setRenderGraph` that did not throw: a parse refusal, the executor's
     /// `SetResult.issues`, or empty after `null`.
     pub(crate) last_set_issues: Vec<Issue>,
@@ -152,6 +154,8 @@ pub(crate) mod web {
             frozen_name: None,
             area_model: None,
             models: Default::default(),
+            real_models: Default::default(),
+            selected_real_model: None,
             last_set_issues: Vec::new(),
         });
         Ok(())
@@ -222,6 +226,100 @@ pub(crate) mod web {
             lit: Some(lit),
         };
         Ok(f(executor, catalog, &mut handles, viewports))
+    }
+
+    #[wasm_bindgen]
+    impl Engine {
+        /// Validate an explicit, versioned experimental model without changing the live graph.
+        #[wasm_bindgen(js_name = registerNeuralModel)]
+        pub fn register_neural_model(&self, id: String, manifest: String, weights: Vec<u8>) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                if id.is_empty() || id.len() > 64 {
+                    return Err(api_error(INVALID_ARGUMENT, "expected a model ID of 1 to 64 bytes"));
+                }
+                let model = raa_graph::exec::RealModelPackage::validate(&manifest, weights)?;
+                let state = st.features.require_mut::<RenderGraphState>("render graph")?;
+                if state.real_models.contains_key(&id) {
+                    return Err(api_error(INVALID_ARGUMENT, "neural model ID is already registered"));
+                }
+                state.real_models.insert(id, model);
+                Ok(())
+            })
+        }
+
+        /// Switch independent real-frame heads atomically; null restores the graph's defaults.
+        #[wasm_bindgen(js_name = setNeuralReconstruction)]
+        pub fn set_neural_reconstruction(&self, options: JsValue) -> Result<(), JsValue> {
+            use raa_graph::exec::{RealModelHeads, RealModelSelection};
+            self.with_state(|gpu, st| {
+                check_pipeline_available(st)?;
+                let selection = if options.is_null() {
+                    None
+                } else {
+                    if !options.is_object() || js_sys::Array::is_array(&options) {
+                        return Err(api_error(INVALID_ARGUMENT, "expected neural reconstruction options or null"));
+                    }
+                    let field = |key: &str| js_sys::Reflect::get(&options, &JsValue::from_str(key))
+                        .map_err(|_| api_error(INVALID_ARGUMENT, format!("cannot read neural option {key}")));
+                    let boolean = |key: &str| {
+                        let value = field(key)?;
+                        if value.is_undefined() { return Ok(false); }
+                        value.as_bool().ok_or_else(|| api_error(INVALID_ARGUMENT, format!("{key} must be boolean")))
+                    };
+                    let heads = RealModelHeads {
+                        area: boolean("area")?, reflection: boolean("reflection")?, sr: boolean("sr")?,
+                    };
+                    if !heads.any() {
+                        return Err(api_error(INVALID_ARGUMENT, "select one or more neural heads, or use null"));
+                    }
+                    let id = field("model")?.as_string().ok_or_else(|| api_error(INVALID_ARGUMENT, "expected a registered model ID"))?;
+                    if st.features.get::<ViewsState>().is_some_and(|v| v.viewports() != [ViewRect::FULL]) {
+                        return Err(api_error("graph.multi_view", "real-frame reconstruction requires a full-canvas view"));
+                    }
+                    let graph = st.features.require_mut::<RenderGraphState>("render graph")?;
+                    let model = graph.real_models.get(&id).cloned()
+                        .ok_or_else(|| api_error("graph.neural_package", "unknown real-frame model"))?;
+                    let size = graph.explicit_scene_size.unwrap_or(self.viewport);
+                    Some((id, model, heads, size))
+                };
+                let candidate = selection.as_ref().map(|(_, package, heads, size)| RealModelSelection {
+                    package: package.clone(), heads: *heads, scene_size: *size,
+                });
+                with_handles(st, gpu, |executor, _, h, _| executor.select_real_model(h, candidate))??;
+                st.features.require_mut::<RenderGraphState>("render graph")?.selected_real_model =
+                    selection.map(|(id, model, _, _)| (id, model));
+                Ok(())
+            })
+        }
+
+        /// Diagnostics for the last submitted real frame, with explicit selected and executed heads.
+        #[wasm_bindgen(js_name = neuralReconstructionStats)]
+        pub fn neural_reconstruction_stats(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let graph = st.features.require_mut::<RenderGraphState>("render graph")?;
+                let Some((selected, stats)) = graph.executor.real_model_stats() else { return Ok(JsValue::NULL); };
+                let (id, package) = graph.selected_real_model.as_ref().expect("active model registration");
+                let heads = |h: raa_graph::exec::RealModelHeads| JsonValue::Object(vec![
+                    ("area".into(), JsonValue::Bool(h.area)),
+                    ("reflection".into(), JsonValue::Bool(h.reflection)),
+                    ("sr".into(), JsonValue::Bool(h.sr)),
+                ]);
+                let size = |(x, y)| JsonValue::Array(vec![JsonValue::Number(f64::from(x)), JsonValue::Number(f64::from(y))]);
+                Ok(json_to_js(&JsonValue::Object(vec![
+                    ("model".into(), JsonValue::String(id.clone())),
+                    ("weightsSha256".into(), JsonValue::String(package.digest().to_owned())),
+                    ("kind".into(), JsonValue::String(package.kind().to_owned())),
+                    ("selected".into(), heads(selected)),
+                    ("ran".into(), heads(stats.ran)),
+                    ("realFrame".into(), stats.submitted_frame.map_or(JsonValue::Null, |i| JsonValue::Number(i as f64))),
+                    ("sceneSize".into(), size(stats.scene_size)),
+                    ("displaySize".into(), size(stats.display_size)),
+                    ("gpuBytes".into(), JsonValue::Number(stats.bytes as f64)),
+                    ("dispatches".into(), JsonValue::Number(f64::from(stats.dispatches))),
+                    ("historyFrames".into(), JsonValue::Number(f64::from(stats.history_frames))),
+                ])))
+            })
+        }
     }
 
     /// The viewport count of `ViewsState`, or 1 without it.
@@ -378,6 +476,7 @@ pub(crate) mod web {
             }
             state.frozen_name = frozen_name;
             state.area_model = area_model;
+            state.selected_real_model = None;
         }
         state.last_set_issues = result.issues;
         Ok(json_to_js(&json))

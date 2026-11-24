@@ -201,6 +201,24 @@ impl FeaturePass for TaaPass {
         }
         let write_index = history.state().write_index();
         let written_history = history.write_view().clone();
+        if let Some(resolved) = ctx.resources.input(&self.name, crate::NEURAL_COLOR_INPUT)
+            && resolved.view.texture() == hdr.dst_texture()
+            && resolved.view.texture().usage().contains(wgpu::TextureUsages::COPY_SRC)
+            && (resolved.desc.width, resolved.desc.height) == output_size
+        {
+            let (width, height) = output_size;
+            ctx.encoder.copy_texture_to_texture(
+                resolved.view.texture().as_image_copy(),
+                history.texture(write_index).as_image_copy(),
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            hdr.swap();
+            self.recorded = true;
+            ctx.resources.publish(&self.name, "color", &resolved.view, resolved.desc);
+            ctx.resources.publish(&self.name, "history", &written_history, resolved.desc);
+            return Ok(());
+        }
+
         let bound_history = ctx
             .resources
             .input(&self.name, "history")

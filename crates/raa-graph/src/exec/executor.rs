@@ -8,6 +8,11 @@ mod area_model;
 
 pub use area_model::AreaGraphModel;
 use area_model::{AreaModelFrame, SharedAreaFrame};
+#[path = "real_model.rs"]
+mod real_model;
+pub use real_model::{RealModelHeads, RealModelPackage, RealModelSelection, RealModelStats};
+use real_model::{RealModelFrame, SharedRealFrame};
+
 use raa_core::RaaError;
 use raa_pipeline::{PassInfo, PassRole, Pipeline};
 use std::{cell::RefCell, rc::Rc};
@@ -68,6 +73,7 @@ pub struct GraphExecutor {
     frame: Option<u64>,
     last_issues: Vec<Issue>,
     area_model: Option<Rc<RefCell<AreaModelFrame>>>,
+    real_model: Option<Rc<RefCell<RealModelFrame>>>,
 }
 
 impl Default for GraphExecutor {
@@ -92,6 +98,7 @@ impl GraphExecutor {
             frame: None,
             last_issues: Vec::new(),
             area_model: None,
+            real_model: None,
         }
     }
 
@@ -182,6 +189,7 @@ impl GraphExecutor {
             return area_model::refused(area_model::issue("graph.model_device", error.to_string()));
         }
         let result = self.activate(plan, doc, h);
+        if result.ok { self.clear_real_model(h); }
         match (result.ok, candidate, &self.area_model) {
             (true, Some(candidate), Some(active)) => {
                 std::mem::swap(&mut *active.borrow_mut(), &mut *candidate.borrow_mut());
@@ -194,6 +202,49 @@ impl GraphExecutor {
             _ => {}
         }
         result
+    }
+
+    /// Select a validated model on the active editable or frozen graph.
+    pub fn select_real_model(&mut self, h: &mut FeatureHandles<'_>, selection: Option<RealModelSelection>) -> Result<(), RaaError> {
+        const FRAME: &str = "neural.real-frame";
+        let Some(selection) = selection else {
+            self.clear_real_model(h);
+            return Ok(());
+        };
+        let Some(plan) = self.plan.as_ref() else { return Err(RaaError::FrameGraph {
+            code: "graph.neural_route",
+            message: "select an explicit render graph before enabling real-frame reconstruction".into(),
+        }); };
+        if selection.heads.area && self.area_model.is_some() {
+            return Err(RaaError::FrameGraph {
+                code: "graph.neural_route",
+                message: "choose one area reconstruction operator".into(),
+            });
+        }
+        let candidate = RealModelFrame::prepare(selection, plan, h)?;
+        if let Some(active) = &self.real_model {
+            *active.borrow_mut() = candidate;
+        } else {
+            let frame = Rc::new(RefCell::new(candidate));
+            h.pipeline.borrow_mut().add_graph_frame(FRAME, Box::new(SharedRealFrame(frame.clone())))?;
+            self.real_model = Some(frame);
+        }
+        if let Some(taa) = &h.handles.taa { taa.invalidate(); }
+        Ok(())
+    }
+
+    pub fn real_model_stats(&self) -> Option<(RealModelHeads, RealModelStats)> {
+        self.real_model.as_ref().map(|frame| {
+            let frame = frame.borrow();
+            (frame.heads(), frame.stats())
+        })
+    }
+
+    fn clear_real_model(&mut self, h: &mut FeatureHandles<'_>) {
+        if self.real_model.take().is_some() {
+            h.pipeline.borrow_mut().remove_graph_frame("neural.real-frame");
+            if let Some(taa) = &h.handles.taa { taa.invalidate(); }
+        }
     }
 
     fn clear_area_model(&mut self, h: &mut FeatureHandles<'_>) {
@@ -213,6 +264,7 @@ impl GraphExecutor {
             restore(no_graph, h)?;
         }
         self.clear_area_model(h);
+        self.clear_real_model(h);
         self.no_graph = None;
         self.doc = None;
         self.plan = None;

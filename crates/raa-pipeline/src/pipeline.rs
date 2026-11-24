@@ -1192,18 +1192,19 @@ impl Pipeline {
             None
         };
         for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
-            for (_, frame) in &mut self.graph_frames {
-                frame.before_record(&entry.name, &mut record)?;
-            }
+            // Time the actual GPU work of this boundary, including attached graph stages.
             if let Some(capture) = &capture {
                 capture.begin_pass(record.encoder);
             }
-            entry.pass.record(&mut record)?;
-            if let Some(capture) = &mut capture {
-                capture.end_pass(record.encoder, &entry.name);
+            for (_, frame) in &mut self.graph_frames {
+                frame.before_record(&entry.name, &mut record)?;
             }
+            entry.pass.record(&mut record)?;
             for (_, frame) in &mut self.graph_frames {
                 frame.after_record(&entry.name, &mut record)?;
+            }
+            if let Some(capture) = &mut capture {
+                capture.end_pass(record.encoder, &entry.name);
             }
         }
         for (_, frame) in &mut self.graph_frames {
