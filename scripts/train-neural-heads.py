@@ -34,8 +34,16 @@ class SplitGroup:
 def read_capture(path, signal, read):
     data = path.read_bytes()
     manifest = json.loads(data)
-    if manifest["format"] != signal:
+    native_reflection = (signal == "raa.reflection-teacher/1"
+                         and manifest["format"] == "raa.gallery-temporal-sequence/1")
+    if manifest["format"] != signal and not native_reflection:
         raise ValueError(f"expected {signal}")
+    if native_reflection:
+        reflection = manifest.get("optionalHeads", {}).get("reflection", {})
+        if (not isinstance(reflection, dict)
+                or reflection.get("supplier") != "typed SSR incident and hitMeta from the same real submission"
+                or reflection.get("eligibility") != "class 1 with geometric validity and positive screen confidence"):
+            raise ValueError("reflection capture must declare its typed, supported screen estimator")
     require_windows(manifest)
     if manifest.get("rowOrder", "top-down") != "top-down" or manifest.get("exposure", 1) != 1:
         raise ValueError("expected top-down scene-linear unit-exposure planes")
@@ -53,8 +61,17 @@ def read_capture(path, signal, read):
             raise ValueError(f"invalid split or repeated sequence {identity}")
         set_ids.add(identity)
         frames = []
-        for frame in sequence["frames"]:
-            sample = read(path.parent, frame)
+        for index, frame in enumerate(sequence["frames"]):
+            if native_reflection:
+                clock = frame["frameId"]
+                if index and not frame.get("reset") and (
+                        clock != previous_clock + 1 or frame["viewId"] != previous_view
+                        or not frame["timeMs"] > previous_time):
+                    raise ValueError("reflection recurrence requires consecutive real frames or an explicit reset")
+                previous_clock, previous_view, previous_time = clock, frame["viewId"], frame["timeMs"]
+                sample = read(path.parent, frame, native_screen=True)
+            else:
+                sample = read(path.parent, frame)
             if sample.id in frame_ids:
                 raise ValueError(f"repeated training frame {sample.id}")
             frame_ids.add(sample.id)
@@ -67,10 +84,13 @@ def read_capture(path, signal, read):
         captured.append(SplitGroup(identity, group, split, frames))
     if {group.split for group in captured} != {"train", "held-out"}:
         raise ValueError("require disjoint train and held-out captures")
-    return captured, {"sha256": real.sha(data), "source": manifest.get("source", manifest.get("facts"))}
+    capture = {"sha256": real.sha(data), "source": manifest.get("source", manifest.get("facts"))}
+    if native_reflection:
+        capture["signal"] = manifest["optionalHeads"]["reflection"]
+    return captured, capture
 
 
-def reflection_example(root, frame):
+def reflection_example(root, frame, native_screen=False):
     p = frame["planes"]
     beauty = read_plane(root, p["hdr"], (3,))
     size = beauty.shape[-2:]
@@ -94,17 +114,28 @@ def reflection_example(root, frame):
     require_range(raw[:, 4:5], "reflection source class", 0, 4)
     teacher = frame["teacher"]
     batches = teacher.get("seedBatches", teacher.get("seeds"))
-    seed_set = set(frame["inputSeeds"])
-    if not seed_set or not isinstance(batches, list) or len(batches) != 2:
-        raise ValueError("reflection capture needs independent input and two teacher seeds")
+    input_seeds = frame["inputSeeds"]
+    valid_seed = lambda value: type(value) is int and 0 <= value <= 2**32 - 1
+    if (any(not valid_seed(seed) for seed in input_seeds)
+            or (not input_seeds and not native_screen)
+            or not isinstance(batches, list) or len(batches) != 2
+            or len(batches[0]) != len(batches[1])):
+        raise ValueError("reflection capture needs independent input and two balanced teacher batches")
+    seed_set = set(input_seeds)
     for batch in batches:
-        if (not batch or any(type(seed) is not int or not 0 <= seed <= 2**32 - 1 for seed in batch)
+        if (not batch or any(not valid_seed(seed) for seed in batch)
                 or len(batch) != len(set(batch)) or seed_set.intersection(batch)):
             raise ValueError("overlapping or invalid reflection teacher seeds")
         seed_set.update(batch)
-    if ("logRmse" in teacher and "tolerance" in teacher
-            and not 0 <= teacher["logRmse"] <= teacher["tolerance"]):
+    convergence = teacher.get("reflection", teacher)
+    if not 0 <= convergence["logRmse"] <= convergence["tolerance"]:
         raise ValueError("independent reflection teacher batches did not converge")
+    support = raw[:, 3:4] > 0.5
+    if not support.any() or (native_screen and (
+            not (raw[:, 4:5][support] == 1).all()
+            or int(support.sum()) != convergence["accepted"]
+            or (target * (~support)).abs().max() != 0)):
+        raise ValueError("reflection teacher validity differs from the screen support")
     initial = real.Frame(beauty, normal, depth, motion, g[:, 8:9], g[:, 7:8],
                          jitter, size, frame.get("reset", False), reflection=raw)
     return Example(frame_id(frame), initial, target, p["reflectionTarget"]["sha256"],

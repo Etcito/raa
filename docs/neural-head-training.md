@@ -79,3 +79,20 @@ on the entire frame and on the head's active pixels. Train and held-out
 groups are disjoint. The trainers score held-out data after saving the
 weights. The package remains experimental pending matched-cost quality and
 physical input-to-correct-scene-photon measurements.
+
+### First generated-frame diagnostic
+
+The corrected Windows Chrome RTX 3090 capture at `5db9c2d` supplied two
+training trajectories and two held-out trajectories with independent target
+rendering. Two 250-step CPU fits produced identical weights, manifest,
+golden vectors and reports. The training objective moved from 0.001155 to
+0.000235. CPU reload and trusted-fresh error were both zero.
+
+| Held-out path | Analytic linear HDR RMSE | Learned linear HDR RMSE | Analytic log MAE | Learned log MAE |
+|---|---:|---:|---:|---:|
+| Short left | 0.001898 | 0.001708 | 0.000274 | 0.000383 |
+| Wide left | 0.001698 | 0.001646 | 0.000250 | 0.000373 |
+
+Each path has one eligible target packet. These measurements qualify a
+deterministic pilot only. The held-out log-error regression and pending
+physical latency gate keep the default analytic path and experimental gating.

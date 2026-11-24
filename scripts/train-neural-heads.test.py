@@ -3,6 +3,7 @@
 import copy
 from pathlib import Path
 import runpy
+import struct
 import tempfile
 import unittest
 
@@ -76,6 +77,36 @@ class HeadTests(unittest.TestCase):
         self.assertEqual(float(result["output"][:, :, 0, 1].detach().sum()), 0)
         self.assertTrue(bool(result["learnable"][0, 0, 0, 2]))
         self.assertTrue(bool((result["output"][:, :, 0, 2] > 1).all()))
+
+    def test_reflection_surface_and_independent_teacher_are_validated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            planes = {}
+            for name, values in {
+                "hdr": [0.2, 0.3, 0.4],
+                "guide": [0, 0, 1, 0.08, 0.5, 0, 0, 0, 0, 0, 0, 1],
+                "reflection": [0.2, 0.3, 0.4, 1, 1, 0],
+                "reflectionTarget": [0.21, 0.31, 0.41],
+                "depth": [1],
+                "motion": [0, 0, 0],
+            }.items():
+                blob = struct.pack(f"<{len(values)}f", *values)
+                file = name + ".bin"
+                (root / file).write_bytes(blob)
+                planes[name] = {"file": file, "shape": [1, 1, len(values)], "dtype": "f32le",
+                                "byteLength": len(blob), "sha256": generated.sha(blob)}
+            frame = {"id": "fixture", "planes": planes, "inputSeeds": [],
+                     "teacher": {"seeds": [[23], [37]],
+                                 "reflection": {"logRmse": 0.01, "tolerance": 0.03, "accepted": 1}}}
+            actual = TRAIN["reflection_example"](root, frame, native_screen=True)
+            self.assertEqual(actual.id, "fixture")
+            frame["teacher"]["seeds"][1] = [23]
+            with self.assertRaisesRegex(ValueError, "overlapping"):
+                TRAIN["reflection_example"](root, frame, native_screen=True)
+            frame["teacher"]["seeds"][1] = [37]
+            frame["teacher"]["reflection"]["accepted"] = 0
+            with self.assertRaisesRegex(ValueError, "screen support"):
+                TRAIN["reflection_example"](root, frame, native_screen=True)
 
     def test_seeded_package_preserves_model_and_flags(self):
         with tempfile.TemporaryDirectory() as directory:
