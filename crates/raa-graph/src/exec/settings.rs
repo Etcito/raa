@@ -1095,7 +1095,10 @@ mod tests {
 
     #[test]
     fn changes_apply_over_the_base_values() {
-        let base = [pair("radius", ParamValue::Number(2.0))];
+        let base = [
+            pair("radius", ParamValue::Number(2.0)),
+            pair("indirectDiffuse", ParamValue::Bool(true)),
+        ];
         let changes = [pair("power", ParamValue::Number(3.0))];
         assert_eq!(
             merge_values(&FeatureId::Gtao, &base, &changes),
@@ -1103,6 +1106,7 @@ mod tests {
                 pair("radius", ParamValue::Number(2.0)),
                 pair("intensity", ParamValue::Number(0.6f32 as f64)),
                 pair("power", ParamValue::Number(3.0)),
+                pair("indirectDiffuse", ParamValue::Bool(true)),
             ])
         );
     }

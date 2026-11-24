@@ -3,6 +3,7 @@
   "version": 1,
   "name": "Spherical GI",
   "nodes": [
+    { "id": "skin", "type": "pass.skin" },
     { "id": "shadowCsm", "type": "pass.shadow.csm" },
     { "id": "prepass", "type": "pass.prepass" },
     { "id": "lightTiles", "type": "pass.light.tiles" },

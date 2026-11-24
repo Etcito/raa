@@ -10,10 +10,19 @@ pub fn plan() -> crate::plan::GraphPlan {
         name: "Spherical GI".to_string(),
         nodes: vec![
             crate::plan::PlanNode {
+                id: "skin".to_string(),
+                type_id: "pass.skin".to_string(),
+                type_version: 1,
+                order_index: 0,
+                params: vec![],
+                inputs: vec![],
+                compute: None,
+            },
+            crate::plan::PlanNode {
                 id: "shadowCsm".to_string(),
                 type_id: "pass.shadow.csm".to_string(),
                 type_version: 1,
-                order_index: 0,
+                order_index: 1,
                 params: vec![
                     (
                         "softness".to_string(),
@@ -35,7 +44,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "prepass".to_string(),
                 type_id: "pass.prepass".to_string(),
                 type_version: 1,
-                order_index: 1,
+                order_index: 2,
                 params: vec![],
                 inputs: vec![],
                 compute: None,
@@ -44,7 +53,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "lightTiles".to_string(),
                 type_id: "pass.light.tiles".to_string(),
                 type_version: 1,
-                order_index: 2,
+                order_index: 3,
                 params: vec![],
                 inputs: vec![crate::plan::PlanInput {
                     port: "depth".to_string(),
@@ -60,7 +69,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "ao".to_string(),
                 type_id: "pass.ao.gtao".to_string(),
                 type_version: 1,
-                order_index: 3,
+                order_index: 4,
                 params: vec![
                     (
                         "radius".to_string(),
@@ -102,7 +111,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "spherical".to_string(),
                 type_id: "pass.gi.spherical".to_string(),
                 type_version: 1,
-                order_index: 4,
+                order_index: 5,
                 params: vec![
                     (
                         "sphereSubdivision".to_string(),
@@ -133,7 +142,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "forward".to_string(),
                 type_id: "pass.forward".to_string(),
                 type_version: 1,
-                order_index: 5,
+                order_index: 6,
                 params: vec![
                     ("msaa".to_string(), crate::catalog::ParamValue::Int(4)),
                     (
@@ -213,7 +222,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "tonemap".to_string(),
                 type_id: "pass.tonemap".to_string(),
                 type_version: 1,
-                order_index: 6,
+                order_index: 7,
                 params: vec![
                     (
                         "mapper".to_string(),
@@ -252,7 +261,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "out".to_string(),
                 type_id: "output.display".to_string(),
                 type_version: 1,
-                order_index: 7,
+                order_index: 8,
                 params: vec![],
                 inputs: vec![crate::plan::PlanInput {
                     port: "color".to_string(),
@@ -378,8 +387,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::FromParam("resolution"),
                 mips: 1,
                 layers: 4,
-                first_use: 0,
-                last_use: 5,
+                first_use: 1,
+                last_use: 6,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -393,8 +402,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 1,
-                last_use: 6,
+                first_use: 2,
+                last_use: 7,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -408,8 +417,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 1,
-                last_use: 3,
+                first_use: 2,
+                last_use: 4,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -423,8 +432,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(0.0625),
                 mips: 1,
                 layers: 128,
-                first_use: 2,
-                last_use: 5,
+                first_use: 3,
+                last_use: 6,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -438,8 +447,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 3,
-                last_use: 5,
+                first_use: 4,
+                last_use: 6,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -453,8 +462,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 4,
-                last_use: 5,
+                first_use: 5,
+                last_use: 6,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -468,8 +477,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 5,
-                last_use: 6,
+                first_use: 6,
+                last_use: 7,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -483,8 +492,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 6,
-                last_use: 7,
+                first_use: 7,
+                last_use: 8,
                 history: false,
             },
         ],

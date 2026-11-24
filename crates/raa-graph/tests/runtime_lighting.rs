@@ -95,13 +95,14 @@ fn volume_probes_and_restir_keep_the_same_forward_resource_link() {
             .iter()
             .find(|node| node.id == "giScreen")
             .unwrap();
-        assert!(
-            screen
-                .inputs
-                .iter()
-                .any(|input| input.port == "volumeAtlas")
-        );
+        assert!(screen.inputs.iter().any(|input| {
+            input.port == "volumeAtlas"
+                && matches!(&input.source, InputSource::Default { node, port } if node == "giVolume" && port == "volumeAtlas")
+        }));
         let forward = plan.nodes.iter().find(|node| node.id == "forward").unwrap();
-        assert!(forward.inputs.iter().any(|input| input.port == "gi"));
+        assert!(forward.inputs.iter().any(|input| {
+            input.port == "gi"
+                && matches!(&input.source, InputSource::Default { node, port } if node == "giScreen" && port == "gi")
+        }));
     }
 }
