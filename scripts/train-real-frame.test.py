@@ -144,6 +144,11 @@ class RealFrameTests(unittest.TestCase):
                                "ran": {"area": True, "reflection": True, "sr": True}}}
         verify = TRAIN["verify_replay_frame"]
         verify(record, sample, "joint", "frozen")
+        sr_reflection = {**record, "arm": "sr-reflection", "dispatch": {
+            **record["dispatch"], "ran": {**record["dispatch"]["ran"], "area": False}}}
+        verify(sr_reflection, sample, "sr-reflection", "frozen")
+        with self.assertRaisesRegex(ValueError, "requested heads"):
+            verify({**record, "arm": "sr-reflection"}, sample, "sr-reflection", "frozen")
         with self.assertRaisesRegex(ValueError, "teacher clock"):
             verify({**record, "timeMs": 1021}, sample, "joint", "frozen")
         with self.assertRaisesRegex(ValueError, "jitter"):

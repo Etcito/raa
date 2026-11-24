@@ -809,13 +809,16 @@ def verify_replay_frame(record, sample, arm, weights):
         if dispatch is not None:
             raise ValueError(f"analytic replay used a learned dispatch at {sample.id}")
     elif (not dispatch or dispatch["weightsSha256"] != weights or dispatch["realFrame"] != record["frameId"]
-          or not all(dispatch["ran"].get(head) is True for head in ("area", "reflection", "sr"))):
-        raise ValueError(f"joint replay did not run all heads of the frozen checkpoint at {sample.id}")
+          or dispatch["ran"].get("area") is not (arm == "joint")
+          or not all(dispatch["ran"].get(head) is True for head in ("reflection", "sr"))):
+        raise ValueError(f"resolved replay did not run the requested heads of the frozen checkpoint at {sample.id}")
 
 
 def read_resolved(paths, final, weights, label):
     by_id = {seq.id: seq for seq in final}
-    planes = {f"windows/{label}": {}, f"windows/analytic-{label}-build": {}}
+    names = {"joint": f"windows/{label}", "sr-reflection": f"windows/sr-reflection-{label}",
+             "analytic": f"windows/analytic-{label}-build"}
+    planes = {name: {} for name in names.values()}
     receipts = []
     for path in paths:
         raw = path.read_bytes()
@@ -833,9 +836,9 @@ def read_resolved(paths, final, weights, label):
         for seq in data["sequences"]:
             teacher = by_id.get(seq["id"])
             arm = seq["arm"]
-            if teacher is None or arm not in ("analytic", "joint"):
+            if teacher is None or arm not in names:
                 raise ValueError("resolved replay arm or trajectory has no final teacher")
-            name = f"windows/{label}" if arm == "joint" else f"windows/analytic-{label}-build"
+            name = names[arm]
             first = teacher.samples[0].frame
             if (teacher.id in planes[name] or seq["replaySha256"] != teacher.replay
                     or seq["groupId"] != teacher.group or seq["split"] not in ("test", "held-out")
