@@ -8,9 +8,9 @@
 // previous_view_proj by `raa_gi_screen_hit_radiance` of screen_trace.wgsl.
 //
 // Per slice, `mask` holds every occluded sector (a farther sample never lights a sector a nearer
-// one hides) and `lit` only the sectors a facing sample with available radiance claimed
-// (`cpu::lit_mask`). Only `lit` leaves the probe term: V = mean(1 - popcount(lit) / 32), so a
-// sector hidden by a back face or a sample without radiance keeps the probe irradiance.
+// one hides). A facing sample with available radiance replaces a fraction of each newly
+// covered sector, weighted by angular support and distance. The same fraction multiplies
+// its radiance and removes probe coverage. The remaining fraction keeps the probe irradiance.
 //
 // Group-2 binding registry (binding number to resource): 0 raa_gi_frame, 1 raa_gi_depth,
 // 2 raa_gi_normal, 3 raa_gi_history, 5 raa_gi_ssgi_raw, 8 raa_gi_ssgi_params. Bindings 4 and 7
@@ -28,7 +28,7 @@ struct SsgiParamsGpu {
     pad: u32,
 }
 
-// The raw trace: E_ss rgb, V a.
+// The raw trace: screen irradiance RGB and remaining probe weight in alpha.
 @group(2) @binding(5) var raa_gi_ssgi_raw: texture_storage_2d<rgba16float, write>;
 @group(2) @binding(8) var<uniform> raa_gi_ssgi_params: SsgiParamsGpu;
 
@@ -73,7 +73,8 @@ fn raa_gi_ssgi_sample_bits(
     side: f32,
     gamma: f32,
 ) -> u32 {
-    let back = delta - view * thickness;
+    // Bound the angular footprint of the estimated back face near the receiver.
+    let back = delta - view * min(thickness, 0.5 * length(delta));
     let u_front = raa_gi_ssgi_sector_u(raa_gi_ssgi_view_angle(delta, view, side), gamma);
     let u_back = raa_gi_ssgi_sector_u(raa_gi_ssgi_view_angle(back, view, side), gamma);
     return raa_gi_ssgi_update_sectors(min(u_front, u_back), max(u_front, u_back));
@@ -122,9 +123,10 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
         let nv = dot(n, v);
         let no = dot(n, omega);
         var mask = 0u;
-        var lit = 0u;
+        var covered = 0.0;
         var sum = vec3<f32>(0.0);
-        if sqrt(nv * nv + no * no) >= 1e-4 {
+        let projected_normal = length(vec2<f32>(nv, no));
+        if projected_normal >= 1e-4 {
             let gamma = atan2(no, nv);
             for (var k = 0u; k < 2u; k = k + 1u) {
                 let side = select(-1.0, 1.0, k == 0u);
@@ -145,6 +147,13 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
                     if len < 1e-5 || len > radius_m {
                         continue;
                     }
+                    let direction = delta / len;
+                    let receiver_cos = dot(n, direction);
+                    // The visible surface must itself lie above the receiver horizon.
+                    // Its estimated thickness cannot turn a coplanar pixel into a light source.
+                    if receiver_cos <= 0.02 {
+                        continue;
+                    }
                     let bits = raa_gi_ssgi_sample_bits(delta, v, thickness_m, side, gamma);
                     let fresh = bits & ~mask;
                     if fresh != 0u {
@@ -152,11 +161,15 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
                         let screen_hit = raa_gi_screen_hit_radiance(world);
                         let hit = vec4<f32>(raa_gi_screen_without_emission(screen_hit.rgb, world), screen_hit.a);
                         let sample_n = normalize(textureLoad(raa_gi_normal, sp, 0).xyz);
-                        let facing = dot(sample_n, -delta / len) > 0.0;
-                        if facing && hit.a > 0.0 {
-                            let share = f32(countOneBits(fresh)) / f32(RAA_GI_SSGI_SECTORS);
+                        let emitter_cos = dot(sample_n, -direction);
+                        if emitter_cos > 0.0 && hit.a > 0.0 {
+                            let receiver = smoothstep(0.02, 0.25, receiver_cos);
+                            let emitter = smoothstep(0.0, 0.25, emitter_cos);
+                            let distance = 1.0 - smoothstep(0.5, 1.0, len / radius_m);
+                            let share = f32(countOneBits(fresh)) / f32(RAA_GI_SSGI_SECTORS)
+                                * receiver * emitter * distance * projected_normal;
                             sum += hit.rgb * share;
-                            lit |= fresh;
+                            covered += share;
                         }
                     }
                     mask |= bits;
@@ -164,7 +177,7 @@ fn raa_gi_ssgi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
             }
         }
         total += sum;
-        open += 1.0 - f32(countOneBits(lit)) / f32(RAA_GI_SSGI_SECTORS);
+        open += 1.0 - clamp(covered, 0.0, 1.0);
     }
     let e_ss = RAA_GI_SSGI_PI * total / f32(slices);
     textureStore(raa_gi_ssgi_raw, pixel, vec4<f32>(e_ss, open / f32(slices)));

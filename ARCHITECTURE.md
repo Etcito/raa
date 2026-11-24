@@ -637,7 +637,7 @@ Twins in `crates/raa-gi/src/layouts.rs`. `GiFrameGpu` 432 B: matrices view_proj,
 
 ## S39. GI screen probes, slots and reflection fallback
 - `gi.screen` (42): depth pyramid (`GiShared::pyramid_view`), one probe per 16 px tile, P x P rays through the previous frame then the volume, SH9 probes, integrated into Rgba16Float (rgb irradiance, a occlusion; `probe_output_view`); history needs a valid, on-screen, unrejected motion neighbourhood.
-- `gi.ssgi` (44, `screenSpace`): visibility-bitmask indirect diffuse (32 sectors, 2 m, 0.5 m thickness), temporally accumulated, output (E_ss + V x E_probe, min(V, a)); off allocates nothing. Binding 14 is the last part screen output.
+- `gi.ssgi` (44, `screenSpace`): visibility-bitmask indirect diffuse (32 sectors, 2 m, reconstructed thickness at most 0.5 m), temporally accumulated. Screen coverage weights the probe replacement, with output `(E_ss + V x E_probe, probe.a)`. Off allocates nothing. Binding 14 is the last part screen output.
 - Slots `gi`: Indirect = (1 - metallic) x base / pi x g.rgb x intensity x s.ao; Ao = min(GTAO, g.a); LocalVisibility = volume (cone for area) visibility. The part also sets IBL diffuse scale and GI specular (S45).
 - SSR with flag 2 falls back to a volume trace on a screen miss.
 

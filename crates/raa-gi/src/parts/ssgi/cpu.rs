@@ -17,8 +17,8 @@ pub const SECTORS: u32 = 32;
 /// they belong to the volume and the probes.
 pub const RADIUS_METRES: f32 = 2.0;
 
-/// The assumed depth in metres of every screen sample: `sample_bits` places the back face of a
-/// sample this far behind it, along the view.
+/// Maximum reconstructed thickness of a sample in metres. Near the receiver, the trace
+/// further bounds the estimated thickness by half the sample distance.
 pub const THICKNESS_METRES: f32 = 0.5;
 
 /// Maps an angle `theta` from the view vector, measured against the projected-normal angle `gamma`,
@@ -43,12 +43,12 @@ pub fn update_sectors(min_u: f32, max_u: f32) -> u32 {
 }
 
 /// The sectors one sample occludes in one slice. `delta` is the sample's view position minus the
-/// pixel's and `back = delta - view x thickness` is its back face. Each face gives an angle from
+/// pixel's and `back = delta - view x min(thickness, length(delta) / 2)` is its back face. Each face gives an angle from
 /// `view`, `side x acos(clamp(dot(normalize(p), view), -1, 1))`, and a sector coordinate through
 /// [`sector_u`]; the mask is the sectors between the two ([`update_sectors`]). A sample at the
 /// pixel has no direction and gives 0.
 pub fn sample_bits(delta: [f32; 3], view: [f32; 3], thickness: f32, side: f32, gamma: f32) -> u32 {
-    let back = sub_scaled(delta, view, thickness);
+    let back = sub_scaled(delta, view, thickness.min(0.5 * dot(delta, delta).sqrt()));
     let u_front = sector_u(view_angle(delta, view, side), gamma);
     let u_back = sector_u(view_angle(back, view, side), gamma);
     update_sectors(u_front.min(u_back), u_front.max(u_back))
@@ -107,14 +107,13 @@ pub fn resolve(slices: &[([f32; 3], u32)]) -> ([f32; 3], f32) {
     (sum.map(|total| PI * (total / count)), open / count)
 }
 
-/// Composes the screen-space term with the probe term. `screen` is `(E_ss rgb, V)` and `probe` is
-/// the probe irradiance with its alpha. It returns `(E_ss + V x probe.rgb, min(V, probe.a))`:
-/// screen space replaces the probe and volume irradiance in the sectors it found occluded, so that
-/// part is never added twice. An open surface (`E_ss` 0, `V` 1) keeps the probe irradiance exactly.
+/// Composes screen irradiance with the part of the probe that still has weight `V`.
+/// The probe's ambient occlusion is independent of the split between the irradiance sources.
 pub fn compose(screen: [f32; 4], probe: [f32; 4]) -> [f32; 4] {
     let [er, eg, eb, v] = screen;
     let [pr, pg, pb, pa] = probe;
-    [er + v * pr, eg + v * pg, eb + v * pb, v.min(pa)]
+    let v = v.clamp(0.0, 1.0);
+    [er + v * pr, eg + v * pg, eb + v * pb, pa]
 }
 
 /// The weight the new frame takes in the history blend of a pixel whose reprojected history is

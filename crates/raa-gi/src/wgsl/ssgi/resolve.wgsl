@@ -1,7 +1,7 @@
 // P4 M8 screen-space indirect diffuse: the temporal resolve of `gi.ssgi`. It filters the raw
-// trace with a depth-aware cross, accumulates it in a raa-taa history pair reprojected through
+// trace with a depth- and normal-aware cross, accumulates it in a raa-taa history pair reprojected through
 // the S12 motion target (gated by FrameGpu temporal.z), and writes the composite with the probe
-// irradiance, `cpu::compose`: (E_ss + V x E_probe, min(V, probe a)). Composed after
+// irradiance, `cpu::compose`: (E_ss + V x E_probe, probe a). Composed after
 // raa_taa::REPROJECT_WGSL (RaaTemporalFrame, raa_temporal_surface_uv). RAA's own code.
 //
 // The history blends at 0.1 while it agrees with this frame; a history further than
@@ -30,6 +30,7 @@ struct SsgiParamsGpu {
 @group(0) @binding(6) var raa_ssgi_history_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(7) var raa_ssgi_output: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(8) var<uniform> raa_ssgi_params: SsgiParamsGpu;
+@group(0) @binding(9) var raa_ssgi_normal: texture_2d<f32>;
 
 // The width of the change test in standard deviations of the filtered taps (`cpu::CHANGE_SIGMA`).
 override RAA_SSGI_CHANGE_SIGMA: f32 = 3.0;
@@ -72,6 +73,7 @@ fn raa_gi_ssgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let centre_z = raa_ssgi_view_depth(p, depth, size);
+    let normal = normalize(textureLoad(raa_ssgi_normal, p, 0).xyz);
     let last = vec2<i32>(size_u) - vec2<i32>(1);
     var sum = textureLoad(raa_ssgi_raw, p, 0);
     var weight = 1.0;
@@ -87,7 +89,8 @@ fn raa_gi_ssgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var i = 0u; i < 4u; i = i + 1u) {
         let q = clamp(p + taps[i], vec2<i32>(0), last);
         let dq = textureLoad(raa_ssgi_depth, q, 0);
-        if dq < 1.0 && abs(raa_ssgi_view_depth(q, dq, size) - centre_z) <= 0.05 * centre_z {
+        if dq < 1.0 && abs(raa_ssgi_view_depth(q, dq, size) - centre_z) <= 0.05 * centre_z
+            && dot(normal, normalize(textureLoad(raa_ssgi_normal, q, 0).xyz)) > 0.8 {
             let tap = textureLoad(raa_ssgi_raw, q, 0);
             sum = sum + tap;
             weight = weight + 1.0;
@@ -113,6 +116,9 @@ fn raa_gi_ssgi_resolve(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     textureStore(raa_ssgi_history_out, p, acc);
-    let probe = textureLoad(raa_ssgi_probe, p, 0);
-    textureStore(raa_ssgi_output, p, vec4<f32>(acc.rgb + acc.a * probe.rgb, min(acc.a, probe.a)));
+    // The probe can be a 1x1 dummy (0, 0, 0, 1) in a standalone graph stage.
+    let probe_pixel = min(p, vec2<i32>(textureDimensions(raa_ssgi_probe)) - vec2<i32>(1));
+    let probe = textureLoad(raa_ssgi_probe, probe_pixel, 0);
+    // Coverage picks the irradiance source. Ambient occlusion comes from the probe's alpha.
+    textureStore(raa_ssgi_output, p, vec4<f32>(acc.rgb + clamp(acc.a, 0.0, 1.0) * probe.rgb, probe.a));
 }

@@ -108,6 +108,23 @@ fn sample_bits_matches_the_fixture() {
     }
 }
 
+#[test]
+fn estimated_back_face_is_bounded_for_a_near_sample() {
+    // A sample 0.1 m away can extend only 0.05 m behind its visible face.
+    // With gamma = pi/4, its angular interval runs from u = 0.85355 to 0.97434.
+    // This spans four sectors from 27, rather than extending to the final sector.
+    assert_eq!(
+        sample_bits(
+            [0.1, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            0.5,
+            1.0,
+            std::f32::consts::FRAC_PI_4,
+        ),
+        0x7800_0000
+    );
+}
+
 /// Checks `accumulate` against its doc comment: `new = bits & !mask` lights only when `facing`,
 /// as `radiance x popcount(new) / 32`, and the mask becomes `mask | bits`.
 #[test]
@@ -160,7 +177,7 @@ fn resolve_matches_the_fixture() {
     }
 }
 
-/// Checks `compose` against its doc comment, `(E_ss + V x probe.rgb, min(V, probe.a))`. The open
+/// Checks `compose` against its doc comment, `(E_ss + V x probe.rgb, probe.a)`. The open
 /// surface case (E_ss 0, V 1) keeps the probe exactly, so the screen term is never added twice.
 #[test]
 fn compose_keeps_the_probe_on_an_open_surface_and_matches_the_fixture() {

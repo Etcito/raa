@@ -1,3 +1,4 @@
+import { createGalleryAoControls } from './lib/gallery-ao.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
@@ -64,6 +65,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
   const syncNativeSize = () => canvas.style?.setProperty('--native-width', (canvas.width / (target.devicePixelRatio || 1)) + 'px');
   if (exposure) display.exposureEv = Number(exposure.value);
   const stats = statsContainer && createLiveStats(statsContainer);
+  const galleryAo = createGalleryAoControls();
   let runner = null;
   let interactive = null;
   let busy = false;
@@ -155,10 +157,11 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       if (busy || !variantPicker.value) return;
       const previous = keepView === true && interactive ? {
         pose: interactive.cameraPose(),
-        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('input') ?? [], box => [box.dataset.option, box.checked])),
+        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('input[data-option]') ?? [], box => [box.dataset.option, box.checked])),
       } : undefined;
       const scene = pickerScenes.get(scenePicker.value).default;
       const variant = scene.variants.find(candidate => candidate.id === variantPicker.value);
+      const showAo = scene === interactiveInterior.default && optionsContainer;
       try {
         await exclusively(() => {
           stopInteractive();
@@ -168,6 +171,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           interactive = createInteractiveView({
             target, canvas, lib, scene, variant, settings: display, previous,
             onFrame(engine, time, width, height) {
+              if (showAo) galleryAo.apply(engine);
               syncNativeSize();
               stats?.update(engine, time, width, height);
             },
@@ -183,6 +187,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 label.append(checkbox, option.label);
                 optionsContainer?.append(label);
               }
+              if (showAo) galleryAo.mount(optionsContainer);
               status.textContent = `Interactive: ${scene.id}/${variant.id}${state?.status ? ` ${state.status}` : ''}`;
             },
             onError(error) {

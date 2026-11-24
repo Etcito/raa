@@ -137,7 +137,7 @@ fn resolve_module_validates_with_its_bindings() {
         .iter()
         .map(|entry| entry.binding)
         .collect();
-    assert_eq!(numbers, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(numbers, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
     assert_eq!(reflection.used(index, 0), numbers);
     assert_eq!(reflection.storage_textures(index), 2);
     assert!(reflection.used(index, 1).is_empty());

@@ -32,9 +32,9 @@ fn change_alpha_keeps_history_within_noise_and_rejects_large_changes() {
 #[test]
 fn compose_adds_probe_irradiance_through_screen_visibility() {
     // E_ss = 0.2 and V = 0.5, so each output channel is 0.2 + 0.5 * 0.4 = 0.4.
-    // Alpha is min(V, probe alpha) = min(0.5, 0.8) = 0.5.
+    // Switching the irradiance source leaves the probe's 0.8 AO intact.
     assert_eq!(
         compose([0.2, 0.2, 0.2, 0.5], [0.4, 0.4, 0.4, 0.8]),
-        [0.4, 0.4, 0.4, 0.5]
+        [0.4, 0.4, 0.4, 0.8]
     );
 }

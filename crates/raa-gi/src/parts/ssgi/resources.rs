@@ -341,6 +341,7 @@ impl SsgiResources {
                         (6, texture_resource(self.history.write_view())),
                         (7, texture_resource(&self.output)),
                         (8, self.params.as_entire_binding()),
+                        (9, texture_resource(&views.normal)),
                     ],
                 );
                 self.resolve.push(ResolveBindings {

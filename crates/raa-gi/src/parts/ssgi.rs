@@ -7,10 +7,9 @@
 //! (`crates/raa-gtao/src/wgsl/gtao.wgsl` lines 126-158). The method is original to this
 //! repository: solstice has no SSGI to port.
 //!
-//! No double counting: `cpu::accumulate` lights only the sectors a sample opens for the first time,
-//! and `cpu::compose` sets the composite `E_ss + V x E_probe` with alpha `min(V, probe a)`. Screen
-//! space replaces the probe and volume irradiance in the sectors it found occluded, so that
-//! irradiance is never added a second time.
+//! Each newly covered sector replaces a fraction of the probe irradiance according to the
+//! screen sample's angular and distance support. `cpu::compose` mixes the irradiance sources
+//! with `E_ss + V x E_probe` and forwards the probe's ambient occlusion unchanged.
 //!
 //! This root holds the pass name, its order, the byte budget and the part `ssgi` with its pass
 //! `gi.ssgi` (`install`, `SsgiPart`, `GiSsgiPass`). The CPU twins live in `cpu`, the kernels and

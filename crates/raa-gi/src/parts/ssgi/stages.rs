@@ -426,6 +426,7 @@ impl StageImpl for SsgiResolveStage {
                     (6, wgpu::BindingResource::TextureView(accumulated)),
                     (7, wgpu::BindingResource::TextureView(ssgi)),
                     (8, params.as_entire_binding()),
+                    (9, wgpu::BindingResource::TextureView(&views.normal)),
                 ],
             );
             self.bound = Some(ResolveBound {

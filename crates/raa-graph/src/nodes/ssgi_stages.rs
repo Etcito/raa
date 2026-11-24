@@ -49,7 +49,7 @@ impl NodeFamily for SsgiStages {
                 ],
                 vec![output("ssgi"), output("accumulated")],
                 &["changeSigma"],
-                5,
+                6,
                 0,
                 2,
             ),

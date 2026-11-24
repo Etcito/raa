@@ -92,8 +92,8 @@ pub fn ssgi_resolve_module_wgsl() -> String {
 /// Resolve group 0, ascending: 0 `RaaTemporalFrame` (768 B, `LitHandle::frame_buffer`), 1 the
 /// S12 depth, 2 the S12 motion, 3 the raw trace, 4 the history read, 5 the probe output (or a
 /// 1x1 (0, 0, 0, 1) dummy), 6 the Rgba16Float history write, 7 the Rgba16Float SSGI output and
-/// 8 `SsgiParamsGpu` (`SSGI_PARAMS_SIZE`).
-pub fn ssgi_resolve_group0_entries() -> [BindGroupLayoutEntry; 9] {
+/// 8 `SsgiParamsGpu` (`SSGI_PARAMS_SIZE`), and 9 the S12 normal.
+pub fn ssgi_resolve_group0_entries() -> [BindGroupLayoutEntry; 10] {
     [
         uniform_entry(0, TEMPORAL_FRAME_SIZE),
         depth_entry(1),
@@ -104,6 +104,7 @@ pub fn ssgi_resolve_group0_entries() -> [BindGroupLayoutEntry; 9] {
         storage_texture_entry(6, TextureFormat::Rgba16Float),
         storage_texture_entry(7, TextureFormat::Rgba16Float),
         uniform_entry(8, SSGI_PARAMS_SIZE),
+        float_entry(9, false),
     ]
 }
 

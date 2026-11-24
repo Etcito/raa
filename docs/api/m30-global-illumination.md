@@ -73,7 +73,8 @@ order 44, after `gi.area-shadow` (43) and before `shadow.contact` (45). Its swit
 `setPassEnabled('gi.ssgi', on)`. It records only while GI is active and `screenSpace` is true.
 
 - It adds the near-field bounce and contact detail of the 2 m around each pixel, traced with a
-  visibility bitmask. What it finds replaces the probe irradiance there; it never adds to it.
+  visibility bitmask. A screen sample replaces probe irradiance in proportion to its coverage and
+  confidence. The composite keeps the ambient occlusion from the probe result.
 - `screenSpaceQuality` sets the horizon slices and steps per side of that trace. `medium` is the
   default, the GTAO default of 4 slices x 8 steps.
 - With `screenSpace` false the frame is unchanged: the pass does not record, and the output is
