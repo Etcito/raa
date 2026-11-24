@@ -50,6 +50,25 @@ pub struct ComputePortDecl {
     pub ty: PortType,
     pub format: Option<GraphFormat>,
     pub size: Option<SizeSpec>,
+    /// Explicit output extent, mutually exclusive with legacy size.
+    pub extent: Option<ComputeExtent>,
+}
+
+/// Basis of a compute output extent. Parent names a current-frame image input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtentBasis {
+    Display,
+    Scene,
+    Parent(String),
+}
+
+/// An explicit rational scale, rounded up independently on both axes.
+/// Fixed compute outputs continue to use `size: {width,height}`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComputeExtent {
+    pub basis: ExtentBasis,
+    pub numerator: u32,
+    pub denominator: std::num::NonZeroU32,
 }
 
 /// One link between two ports.
@@ -351,8 +370,8 @@ fn parse_node(value: &JsonValue, index: usize, issues: &mut Vec<Issue>) -> Optio
     };
     let compute = if type_id == COMPUTE_TYPE {
         Some(ComputeDecl {
-            inputs: parse_ports(inputs, &pointer(&at, "inputs"), issues),
-            outputs: parse_ports(outputs, &pointer(&at, "outputs"), issues),
+            inputs: parse_ports(inputs, &pointer(&at, "inputs"), false, issues),
+            outputs: parse_ports(outputs, &pointer(&at, "outputs"), true, issues),
             math: match math {
                 Some(value) => value.clone(),
                 None => {
@@ -414,6 +433,7 @@ fn parse_wgsl(value: Option<&JsonValue>, at: &str, issues: &mut Vec<Issue>) -> S
 fn parse_ports(
     value: Option<&JsonValue>,
     at: &str,
+    output: bool,
     issues: &mut Vec<Issue>,
 ) -> Vec<ComputePortDecl> {
     let mut ports = Vec::new();
@@ -431,13 +451,14 @@ fn parse_ports(
             schema(issues, &at, "compute port must be a JSON object");
             continue;
         };
-        let (mut key, mut ty, mut format, mut size) = (None, None, None, None);
+        let (mut key, mut ty, mut format, mut size, mut extent) = (None, None, None, None, None);
         for (name, value) in fields {
             match name.as_str() {
                 "key" => key = Some(value),
                 "type" => ty = Some(value),
                 "format" => format = Some(value),
                 "size" => size = Some(value),
+                "extent" if output => extent = Some(value),
                 _ => schema(issues, &pointer(&at, name), "unknown compute port key"),
             }
         }
@@ -484,6 +505,14 @@ fn parse_ports(
                 None
             }
         };
+        if size.is_some() && extent.is_some() {
+            schema(
+                issues,
+                &at,
+                "compute ports may declare either size or extent",
+            );
+        }
+        let extent = extent.and_then(|value| parse_extent(value, &pointer(&at, "extent"), issues));
         let size = match size {
             None => None,
             Some(value) => parse_size(value, &pointer(&at, "size"), issues),
@@ -493,9 +522,47 @@ fn parse_ports(
             ty,
             format,
             size,
+            extent,
         });
     }
     ports
+}
+
+fn parse_extent(value: &JsonValue, at: &str, issues: &mut Vec<Issue>) -> Option<ComputeExtent> {
+    fn decode(value: &JsonValue) -> Option<ComputeExtent> {
+        let JsonValue::Object(fields) = value else {
+            return None;
+        };
+        let field = |key| fields.iter().find(|(name, _)| name == key).map(|(_, v)| v);
+        let number = |key| match field(key)? {
+            JsonValue::Number(n) if n.fract() == 0.0 && *n >= 1.0 && *n <= f64::from(u32::MAX) => {
+                Some(*n as u32)
+            }
+            _ => None,
+        };
+        let basis = match (field("basis")?, field("input"), fields.len()) {
+            (JsonValue::String(s), None, 3) if s == "display" => ExtentBasis::Display,
+            (JsonValue::String(s), None, 3) if s == "scene" => ExtentBasis::Scene,
+            (JsonValue::String(s), Some(JsonValue::String(input)), 4) if s == "parent" => {
+                ExtentBasis::Parent(input.clone())
+            }
+            _ => return None,
+        };
+        Some(ComputeExtent {
+            basis,
+            numerator: number("numerator")?,
+            denominator: std::num::NonZeroU32::new(number("denominator")?)?,
+        })
+    }
+    let extent = decode(value);
+    if extent.is_none() {
+        schema(
+            issues,
+            at,
+            "extent requires a display, scene or parent basis and positive integer numerator and denominator. Parent also requires an input key",
+        );
+    }
+    extent
 }
 
 fn parse_size(value: &JsonValue, at: &str, issues: &mut Vec<Issue>) -> Option<SizeSpec> {
@@ -663,6 +730,28 @@ fn port_value(port: &ComputePortDecl) -> JsonValue {
     }
     if let Some(size) = &port.size {
         fields.push(("size".to_string(), size_value(size)));
+    }
+    if let Some(extent) = &port.extent {
+        let (basis, input) = match &extent.basis {
+            ExtentBasis::Display => ("display", None),
+            ExtentBasis::Scene => ("scene", None),
+            ExtentBasis::Parent(input) => ("parent", Some(input)),
+        };
+        let mut value = vec![
+            ("basis".into(), JsonValue::String(basis.into())),
+            (
+                "numerator".into(),
+                JsonValue::Number(f64::from(extent.numerator)),
+            ),
+            (
+                "denominator".into(),
+                JsonValue::Number(f64::from(extent.denominator.get())),
+            ),
+        ];
+        if let Some(input) = input {
+            value.push(("input".into(), JsonValue::String(input.clone())));
+        }
+        fields.push(("extent".into(), JsonValue::Object(value)));
     }
     JsonValue::Object(fields)
 }

@@ -4,7 +4,7 @@ use crate as raa_graph;
 use crate::catalog::{Catalog, GraphFormat, ParamValue, PortType, SizeSpec};
 use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles, NodeStats, ResourceStat};
-use crate::format::{ComputeDecl, NodeDoc};
+use crate::format::{ComputeDecl, ExtentBasis, NodeDoc};
 use raa_loader::json::JsonValue;
 use std::{cell::RefCell, rc::Rc};
 #[path = "compute/pass.rs"]
@@ -90,6 +90,36 @@ impl ExecExtension for ComputeExtension {
             let Some(compute) = &node.compute else {
                 continue;
             };
+            for output in &compute.outputs {
+                let Some(extent) = &output.extent else {
+                    continue;
+                };
+                let valid_basis = match &extent.basis {
+                    ExtentBasis::Parent(key) => {
+                        compute.inputs.iter().any(|input| {
+                            input.key == *key
+                                && matches!(input.ty, PortType::Image2d | PortType::Depth2d)
+                        }) && node.inputs.iter().any(|input| {
+                            input.port == *key
+                                && matches!(input.source, InputSource::Link { history: false, .. })
+                        })
+                    }
+                    ExtentBasis::Display | ExtentBasis::Scene => true,
+                };
+                if extent.numerator == 0 || output.size.is_some() || !valid_basis {
+                    return Err(vec![Issue {
+                        code: "graph.apply",
+                        severity: Severity::Error,
+                        stage: Stage::Apply,
+                        node: Some(node.id.clone()),
+                        port: Some(output.key.clone()),
+                        param: None,
+                        link: None,
+                        message: "Invalid compute output extent".into(),
+                        fix: "Use a positive scale, omit legacy size and link a current-frame image input when using the parent basis.".into(),
+                    }]);
+                }
+            }
             let params = node
                 .params
                 .iter()

@@ -203,9 +203,48 @@ impl HdrChain {
     }
 }
 
+/// A pixel rectangle expressed as an origin and a nonzero extent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActiveRect {
+    pub origin: (u32, u32),
+    pub size: (u32, u32),
+}
+
+impl ActiveRect {
+    /// Maps a texel center from this active rect into the destination active rect.
+    pub fn map_texel(self, texel: (u32, u32), destination: Self) -> Option<(u32, u32)> {
+        fn axis(pixel: u32, start: u32, size: u32, dst: u32, dst_size: u32) -> Option<u32> {
+            let local = pixel.checked_sub(start)?;
+            if local >= size || dst_size == 0 {
+                return None;
+            }
+            let scaled =
+                (2 * u128::from(local) + 1) * u128::from(dst_size) / (2 * u128::from(size));
+            dst.checked_add(scaled as u32)
+        }
+        Some((
+            axis(
+                texel.0,
+                self.origin.0,
+                self.size.0,
+                destination.origin.0,
+                destination.size.0,
+            )?,
+            axis(
+                texel.1,
+                self.origin.1,
+                self.size.1,
+                destination.origin.1,
+                destination.size.1,
+            )?,
+        ))
+    }
+}
+
 /// Surface-sized pipeline targets (S12 formats and usages), recreated when the size changes.
 pub struct Targets {
     size: (u32, u32),
+    display: ActiveRect,
     depth: Target,
     normal: Target,
     material: Target,
@@ -221,6 +260,10 @@ impl Targets {
         let size = (size.0.max(1), size.1.max(1));
         Targets {
             size,
+            display: ActiveRect {
+                origin: (0, 0),
+                size,
+            },
             depth: Target::new(gpu, "raa-pipeline.depth", size, DEPTH_FORMAT, GBUFFER_USAGE),
             normal: Target::new(
                 gpu,
@@ -284,6 +327,23 @@ impl Targets {
     /// Current size in pixels (width, height).
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Display rect of the view in the backbuffer.
+    pub fn display_rect(&self) -> ActiveRect {
+        self.display
+    }
+
+    /// Scene targets are local textures, with their active rect starting at zero.
+    pub fn scene_rect(&self) -> ActiveRect {
+        ActiveRect {
+            origin: (0, 0),
+            size: self.size,
+        }
+    }
+
+    pub(crate) fn set_display_rect(&mut self, rect: ActiveRect) {
+        self.display = rect;
     }
 
     /// Depth32Float single-sample depth written by the prepass.

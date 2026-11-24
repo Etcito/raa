@@ -29,7 +29,7 @@ pub use pipeline::{Pipeline, PipelineConfig, SubmissionState};
 pub use resource_table::{
     ImageDesc, ImageDim, PublishedImage, ResourceTable, SampleKind, sample_kind_for,
 };
-pub use targets::{HdrChain, Targets};
+pub use targets::{ActiveRect, HdrChain, Targets};
 pub use tunable::{TunableSpec, find_tunable, validate_tunable};
 
 /// Format of the HDR chain, the opaque copy, bloom and the env cube (HDR_FORMAT).

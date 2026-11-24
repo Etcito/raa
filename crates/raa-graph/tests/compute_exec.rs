@@ -118,3 +118,45 @@ fn compute_node_inputs_and_source_entries_follow_the_plan() {
     assert_eq!(plan::COMPUTE_ORDER, 46);
     assert_eq!(GraphFormat::Rgba16Float.name(), "rgba16float");
 }
+
+#[test]
+fn explicit_extent_ceil_preserves_a_single_texel_and_legacy_scale_floors() {
+    use raa_graph::format::{ComputeExtent, ExtentBasis};
+
+    let mut extent = ComputeExtent {
+        basis: ExtentBasis::Scene,
+        numerator: 1,
+        denominator: 2.try_into().unwrap(),
+    };
+    let resolve = |extent: &ComputeExtent, scene, display| {
+        plan::resolve_output_size(None, Some(extent), scene, display, |key| {
+            (key == "input").then_some(scene)
+        })
+    };
+    assert_eq!(
+        resolve(&extent, (1279, 719), (1919, 1079)),
+        Some((640, 360))
+    );
+    assert_eq!(resolve(&extent, (1, 1), (1, 1)), Some((1, 1)));
+    extent.basis = ExtentBasis::Display;
+    assert_eq!(
+        resolve(&extent, (1279, 719), (1919, 1079)),
+        Some((960, 540))
+    );
+    extent.basis = ExtentBasis::Parent("input".into());
+    assert_eq!(
+        resolve(&extent, (1279, 719), (1919, 1079)),
+        Some((640, 360))
+    );
+    extent.basis = ExtentBasis::Parent("missing".into());
+    assert_eq!(resolve(&extent, (1279, 719), (1919, 1079)), None);
+    assert_eq!(
+        output_size(Some(&SizeSpec::Scale(0.5)), (1279, 719)),
+        (639, 359)
+    );
+    assert_eq!(
+        plan::dispatch_size([Some((1919, 719)), Some((1279, 1079))]),
+        Some((1279, 719))
+    );
+    assert_eq!(plan::dispatch_size([Some((1, 1)), None]), None);
+}

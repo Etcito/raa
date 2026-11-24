@@ -171,6 +171,43 @@ pub fn output_size(size: Option<&SizeSpec>, surface: (u32, u32)) -> (u32, u32) {
     }
 }
 
+/// Resolves a compute output against this frame's actual basis dimensions.
+pub fn resolve_output_size(
+    size: Option<&SizeSpec>,
+    extent: Option<&raa_graph::format::ComputeExtent>,
+    scene: (u32, u32),
+    display: (u32, u32),
+    parent: impl FnOnce(&str) -> Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    use raa_graph::format::ExtentBasis;
+    let Some(extent) = extent else {
+        return Some(output_size(size, scene));
+    };
+    let basis = match &extent.basis {
+        ExtentBasis::Display => display,
+        ExtentBasis::Scene => scene,
+        ExtentBasis::Parent(key) => parent(key)?,
+    };
+    let scale = |axis| {
+        (u64::from(axis) * u64::from(extent.numerator))
+            .div_ceil(u64::from(extent.denominator.get()))
+            .min(u64::from(u32::MAX)) as u32
+    };
+    Some((scale(basis.0), scale(basis.1)))
+}
+
+/// All bound storage outputs must cover the shared invocation grid.
+pub fn dispatch_size(outputs: impl IntoIterator<Item = Option<(u32, u32)>>) -> Option<(u32, u32)> {
+    let mut outputs = outputs.into_iter();
+    let first = outputs.next()??;
+    outputs
+        .try_fold(first, |(w, h), size| {
+            let (width, height) = size?;
+            Some((w.min(width), h.min(height)))
+        })
+        .filter(|&(w, h)| w != 0 && h != 0)
+}
+
 pub fn frame_rows(size: (u32, u32), frame: u64, time_s: f32) -> [u8; 32] {
     let mut bytes = [0; 32];
     for (offset, value) in [(0, size.0.to_le_bytes()), (4, size.1.to_le_bytes())] {

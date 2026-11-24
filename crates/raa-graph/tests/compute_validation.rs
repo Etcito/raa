@@ -43,6 +43,7 @@ fn output(key: &str, ty: PortType, format: Option<GraphFormat>) -> ComputePortDe
         ty,
         format,
         size: None,
+        extent: None,
     }
 }
 

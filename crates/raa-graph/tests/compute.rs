@@ -43,6 +43,7 @@ fn image_input(key: &str) -> ComputePortDecl {
         ty: PortType::Image2d,
         format: None,
         size: None,
+        extent: None,
     }
 }
 
@@ -52,6 +53,7 @@ fn depth_input(key: &str) -> ComputePortDecl {
         ty: PortType::Depth2d,
         format: None,
         size: None,
+        extent: None,
     }
 }
 
@@ -61,6 +63,7 @@ fn image_output(key: &str, format: GraphFormat) -> ComputePortDecl {
         ty: PortType::Image2d,
         format: Some(format),
         size: None,
+        extent: None,
     }
 }
 

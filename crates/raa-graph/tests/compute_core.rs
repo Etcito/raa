@@ -41,6 +41,7 @@ fn port(key: &str, ty: PortType, format: Option<GraphFormat>) -> ComputePortDecl
         ty,
         format,
         size: None,
+        extent: None,
     }
 }
 

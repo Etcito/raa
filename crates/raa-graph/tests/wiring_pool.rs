@@ -27,6 +27,7 @@ fn resource(id: u32, first_use: u32, last_use: u32) -> PlanResource {
         size: SizeSpec::Scale(1.0),
         mips: 1,
         layers: 1,
+        contract: None,
         first_use,
         last_use,
         history: false,
@@ -142,4 +143,53 @@ fn a_removed_history_link_has_nothing_to_restart() {
     let previous = full_gi_with_history();
     let next = full_gi_without_history();
     assert!(history_resets(Some(&previous), &next).is_empty());
+}
+
+#[test]
+fn active_rect_texel_centers_preserve_identity_and_odd_extent_corners() {
+    use raa_pipeline::ActiveRect;
+
+    let display = ActiveRect {
+        origin: (11, 17),
+        size: (1919, 1079),
+    };
+    let scene = ActiveRect {
+        origin: (3, 5),
+        size: (1279, 719),
+    };
+    let trace = ActiveRect {
+        origin: (7, 9),
+        size: (640, 360),
+    };
+    let one = ActiveRect {
+        origin: (2, 4),
+        size: (1, 1),
+    };
+    let corners = |rect: ActiveRect| {
+        let (x, y) = rect.origin;
+        let (w, h) = rect.size;
+        [
+            (x, y),
+            (x + w - 1, y),
+            (x, y + h - 1),
+            (x + w - 1, y + h - 1),
+        ]
+    };
+    for rect in [display, scene, trace, one] {
+        for corner in corners(rect) {
+            assert_eq!(rect.map_texel(corner, rect), Some(corner));
+        }
+    }
+    for (source, destination) in [
+        (display, scene),
+        (scene, trace),
+        (display, trace),
+        (display, one),
+    ] {
+        for (from, to) in corners(source).into_iter().zip(corners(destination)) {
+            assert_eq!(source.map_texel(from, destination), Some(to));
+        }
+    }
+    assert_eq!(display.map_texel((10, 17), scene), None);
+    assert_eq!(display.map_texel((1930, 17), scene), None);
 }

@@ -3,8 +3,11 @@
 //! before_record, record and after_record run per pass, followed by graph frame end.
 
 use super::{GraphFormat, PlanNode, PortType, SizeSpec, plan};
+use crate::format::{ComputeExtent, ExtentBasis};
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx, Targets};
+use raa_pipeline::{
+    FeaturePass, ImageDesc, ImageDim, PrepareCtx, RecordCtx, ResourceTable, Targets,
+};
 use std::{cell::RefCell, rc::Rc};
 
 const FRAME_PACK: &str = r#"
@@ -26,6 +29,7 @@ struct Output {
     key: String,
     format: GraphFormat,
     size: Option<SizeSpec>,
+    extent: Option<ComputeExtent>,
     image: Option<(wgpu::Texture, wgpu::TextureView, ImageDesc)>,
 }
 
@@ -186,6 +190,7 @@ impl ComputeNodePass {
                     key: o.key.clone(),
                     format: o.format.clone()?,
                     size: o.size.clone(),
+                    extent: o.extent.clone(),
                     image: None,
                 })
             })
@@ -279,8 +284,102 @@ impl ComputeNodeState {
         if let Some(compute) = &node.compute {
             for (output, declaration) in self.outputs.iter_mut().zip(&compute.outputs) {
                 output.size = declaration.size.clone();
+                output.extent = declaration.extent.clone();
             }
         }
+    }
+    fn has_parent_extent(&self) -> bool {
+        self.outputs.iter().any(|output| {
+            matches!(
+                output.extent.as_ref().map(|e| &e.basis),
+                Some(ExtentBasis::Parent(_))
+            )
+        })
+    }
+
+    fn prepare_outputs(
+        &mut self,
+        gpu: &GpuContext,
+        resources: &ResourceTable,
+        entry: &str,
+        scene: (u32, u32),
+        display: (u32, u32),
+    ) -> Result<(), RaaError> {
+        let surface = self.surface;
+        let limit = gpu.device().limits().max_texture_dimension_2d;
+        for output in &mut self.outputs {
+            let size = plan::resolve_output_size(
+                output.size.as_ref(),
+                output.extent.as_ref(),
+                scene,
+                display,
+                |key| {
+                    let source = self
+                        .inputs
+                        .iter()
+                        .find(|input| input.key == key)?
+                        .source
+                        .as_ref()?;
+                    let image = resources
+                        .input(entry, key)
+                        .or_else(|| resources.get(&source.0, &source.1))?;
+                    Some((image.desc.width, image.desc.height))
+                },
+            );
+            let Some(size) = size.filter(|&(w, h)| w != 0 && h != 0) else {
+                if output.image.take().is_some() {
+                    self.output_group = None;
+                }
+                continue;
+            };
+            if size.0 > limit || size.1 > limit {
+                return Err(RaaError::Resource(format!(
+                    "{}.{} extent {}×{} exceeds the device limit {limit}",
+                    entry, output.key, size.0, size.1
+                )));
+            }
+            if output
+                .image
+                .as_ref()
+                .is_none_or(|(_, _, d)| (d.width, d.height) != size)
+            {
+                let format = output.format.to_wgpu(surface);
+                let texture = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    size: wgpu::Extent3d {
+                        width: size.0,
+                        height: size.1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&Default::default());
+                output.image = Some((
+                    texture,
+                    view,
+                    ImageDesc::new(ImageDim::D2, format, size.0, size.1, 1, 1),
+                ));
+                self.output_group = None;
+            }
+            if let Some((_, view, desc)) = &output.image {
+                resources.publish(entry, &output.key, view, *desc);
+            }
+        }
+        Ok(())
+    }
+
+    fn dispatch_size(&self) -> Option<(u32, u32)> {
+        plan::dispatch_size(self.outputs.iter().map(|output| {
+            let (texture, _, _) = output.image.as_ref()?;
+            Some((texture.width(), texture.height()))
+        }))
     }
     pub fn stats(&self) -> super::NodeStats {
         let resources = self
@@ -326,73 +425,33 @@ impl FeaturePass for ComputeNodePass {
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         state.ran = false;
-        let surface = state.surface;
-        let mut changed = false;
-        for output in &mut state.outputs {
-            let size = plan::output_size(output.size.as_ref(), ctx.size);
-            if size.0 == 0 || size.1 == 0 {
-                output.image = None;
-                changed = true;
-                continue;
-            }
-            if output
-                .image
-                .as_ref()
-                .is_none_or(|(_, _, d)| (d.width, d.height) != size)
-            {
-                let format = output.format.to_wgpu(surface);
-                let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
-                    label: None,
-                    size: wgpu::Extent3d {
-                        width: size.0,
-                        height: size.1,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format,
-                    usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
-                    view_formats: &[],
-                });
-                let view = texture.create_view(&Default::default());
-                output.image = Some((
-                    texture,
-                    view,
-                    ImageDesc::new(ImageDim::D2, format, size.0, size.1, 1, 1),
-                ));
-                changed = true;
-            }
-            if let Some((_, view, desc)) = &output.image {
-                ctx.resources.publish(&self.entry, &output.key, view, *desc);
-            }
+        if state.has_parent_extent() {
+            // Some producers publish only after recording. Resolve the live input then.
+            return Ok(());
         }
-        if changed {
-            state.output_group = None;
-        }
-        if let Some((_, _, desc)) = state.outputs.first().and_then(|o| o.image.as_ref()) {
-            ctx.gpu.queue().write_buffer(
-                &state.frame,
-                0,
-                &plan::frame_rows((desc.width, desc.height), ctx.frame, ctx.time_s),
-            );
-            let valid =
-                u32::from(!state.inputs.iter().any(|i| i.history) || state.history_pairs_valid);
-            let mut flags = [0u8; 16];
-            flags[4..8].copy_from_slice(&valid.to_le_bytes());
-            ctx.gpu.queue().write_buffer(&state.frame, 352, &flags);
-        }
-        Ok(())
+        state.prepare_outputs(
+            ctx.gpu,
+            ctx.resources,
+            &self.entry,
+            ctx.size,
+            ctx.targets.display_rect().size,
+        )
     }
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.state.borrow_mut();
         state.ran = false;
-        let Some((_, _, desc)) = state.outputs.first().and_then(|o| o.image.as_ref()) else {
+        if state.has_parent_extent() {
+            state.prepare_outputs(
+                ctx.gpu,
+                ctx.resources,
+                &self.entry,
+                ctx.size,
+                ctx.targets.display_rect().size,
+            )?;
+        }
+        let Some(size) = state.dispatch_size() else {
             return Ok(());
         };
-        let size = (desc.width, desc.height);
         let bindings: Option<Vec<_>> = state
             .inputs
             .iter()
@@ -445,6 +504,15 @@ impl FeaturePass for ComputeNodePass {
             };
             state.output_group = Some(group(ctx.gpu.device(), &state.output_layout, &resources));
         }
+        ctx.gpu.queue().write_buffer(
+            &state.frame,
+            0,
+            &plan::frame_rows(size, ctx.frame, ctx.time_s),
+        );
+        let valid = u32::from(!state.inputs.iter().any(|i| i.history) || state.history_pairs_valid);
+        let mut flags = [0u8; 16];
+        flags[4..8].copy_from_slice(&valid.to_le_bytes());
+        ctx.gpu.queue().write_buffer(&state.frame, 352, &flags);
         {
             let mut pass = ctx
                 .encoder

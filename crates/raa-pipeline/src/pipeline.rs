@@ -599,6 +599,7 @@ pub struct Pipeline {
     lighting: LightingResources,
     /// Created at the first prepare, recreated when the size changes.
     targets: Option<Targets>,
+    scene_size: Option<(u32, u32)>,
     /// Bumped each time the targets are (re)created; passes resized for an older generation
     /// get `resize` before their next prepare.
     targets_generation: u64,
@@ -629,6 +630,7 @@ impl Pipeline {
             config: PipelineConfig::new(),
             lighting: LightingResources::new(gpu),
             targets: None,
+            scene_size: None,
             targets_generation: 0,
             surface_format,
             surface_is_srgb,
@@ -837,9 +839,21 @@ impl Pipeline {
         }));
     }
 
+    /// Sets the single-view scene extent. With `None`, scene and display use the frame size.
+    pub fn set_scene_size(&mut self, size: Option<(u32, u32)>) {
+        self.scene_size = size.map(|(w, h)| (w.max(1), h.max(1)));
+    }
+
     fn prepare_frame(&mut self, ctx: &PrepareContext<'_>) -> Result<(), RaaError> {
         if self.view_rects.is_empty() {
-            self.prepare_single(ctx)?;
+            self.prepare_single(
+                ctx,
+                self.scene_size.unwrap_or(ctx.size),
+                crate::ActiveRect {
+                    origin: (0, 0),
+                    size: ctx.size,
+                },
+            )?;
         }
         Ok(())
     }
@@ -863,7 +877,7 @@ impl Pipeline {
     ) -> Result<(), RaaError> {
         if this.borrow().view_rects.is_empty() {
             let mut pipeline = this.borrow_mut();
-            if pipeline.graph_frames.is_empty() {
+            if pipeline.graph_frames.is_empty() && pipeline.scene_size.is_none() {
                 pipeline.record_single(ctx, false)?;
             } else {
                 pipeline.record_display_target(ctx)?;
@@ -931,11 +945,18 @@ impl Pipeline {
             p.view_prepare = prepare;
             let result = uploaded
                 .and_then(|()| {
-                    p.prepare_single(&PrepareContext {
-                        gpu: ctx.gpu,
+                    p.prepare_single(
+                        &PrepareContext {
+                            gpu: ctx.gpu,
+                            size,
+                            frame: ctx.frame,
+                        },
                         size,
-                        frame: ctx.frame,
-                    })
+                        crate::ActiveRect {
+                            origin: (rect[0], rect[1]),
+                            size,
+                        },
+                    )
                 })
                 .and_then(|()| {
                     let format = ctx.format(BACKBUFFER);
@@ -967,20 +988,26 @@ impl Pipeline {
         Ok(())
     }
 
-    fn prepare_single(&mut self, ctx: &PrepareContext<'_>) -> Result<(), RaaError> {
+    fn prepare_single(
+        &mut self,
+        ctx: &PrepareContext<'_>,
+        scene_size: (u32, u32),
+        display: crate::ActiveRect,
+    ) -> Result<(), RaaError> {
         let gpu = ctx.gpu;
         let targets = match &mut self.targets {
             Some(targets) => {
-                if targets.ensure(gpu, ctx.size) {
+                if targets.ensure(gpu, scene_size) {
                     self.targets_generation += 1;
                 }
-                &*targets
+                targets
             }
             None => {
                 self.targets_generation += 1;
-                &*self.targets.insert(Targets::new(gpu, ctx.size))
+                self.targets.insert(Targets::new(gpu, scene_size))
             }
         };
+        targets.set_display_rect(display);
         targets.hdr().reset();
         self.resources.clear();
         for (_, frame) in &mut self.graph_frames {
@@ -991,7 +1018,7 @@ impl Pipeline {
         let generation = self.targets_generation;
         let mut prepare = PrepareCtx {
             gpu,
-            size: ctx.size,
+            size: scene_size,
             frame: ctx.frame,
             time_s: self.clock.time_s,
             dt_s: self.clock.dt_s,
@@ -1033,7 +1060,7 @@ impl Pipeline {
         let targets = self.targets.as_ref().ok_or_else(missing)?;
         let source = targets.output().ok_or_else(missing)?;
         let output = self.output.as_ref().ok_or_else(missing)?;
-        let (width, height) = targets.size();
+        let (width, height) = targets.display_rect().size;
         output.record(
             ctx.gpu,
             ctx.encoder,

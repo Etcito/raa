@@ -147,6 +147,7 @@ fn valid_document_returns_the_expected_fields() {
                     ty: PortType::Image2d,
                     format: Some(GraphFormat::Rgba16Float),
                     size: None,
+                    extent: None,
                 }],
                 outputs: vec![ComputePortDecl {
                     key: "dst".to_string(),
@@ -156,6 +157,7 @@ fn valid_document_returns_the_expected_fields() {
                         width: 640,
                         height: 360,
                     }),
+                    extent: None,
                 }],
                 math: JsonValue::Object(vec![("nodes".to_string(), JsonValue::Array(Vec::new()),)]),
                 wgsl: "fn rg_main() {}".to_string(),
