@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import childProcess from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 /**
@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from 'node:util';
  * @property {string} revision
  * @property {string} preparationId Builder-owned preparation UUID.
  * @property {Array<{repository:string, revision:string, preparationId:string}>} dependencies
- * @property {Array<{path:string, text:string}>} sources RAA-root-relative input text.
+ * @property {Array<{path:string, text:string}>} sources RAA-root-relative input text or binary fingerprint.
  * @property {{rustc:string, wasmBindgen:string, node:string}} toolchain
  * @property {string} commandsText
  * @property {string} criteriaText
@@ -26,9 +26,16 @@ function lexical(value) {
     && !value.split('/').includes('..'), `unsafe path: ${value}`);
 }
 
+function localPath(value) {
+  if (process.platform !== 'win32') return lexical(value);
+  ensure(typeof value === 'string' && value.trim() !== '' && !value.includes('\0')
+    && !value.split(/[\\/]/).includes('..'), `unsafe path: ${value}`);
+}
+
 function inspect(file) {
+  file = path.resolve(file);
   let cursor = path.parse(file).root;
-  const parts = file.slice(cursor.length).split('/').filter(Boolean);
+  const parts = file.slice(cursor.length).split(path.sep).filter(Boolean);
   for (const [index, part] of parts.entries()) {
     cursor = path.join(cursor, part);
     let stat;
@@ -44,7 +51,7 @@ function inspect(file) {
 
 /** Resolve a name without creating anything; missing output directories are allowed. */
 export function containedPath(root, relativePath) {
-  lexical(root);
+  localPath(root);
   lexical(relativePath);
   ensure(!path.posix.isAbsolute(relativePath) && !path.win32.isAbsolute(relativePath)
     && relativePath.split('/').every(part => part !== '' && part !== '.'),
@@ -58,17 +65,23 @@ export function containedPath(root, relativePath) {
 }
 
 function recordPath(file) {
-  lexical(file);
+  localPath(file);
   const absolute = path.resolve(file);
   return containedPath(path.dirname(absolute), path.basename(absolute));
 }
 
-function readText(file) {
+function readBytes(file) {
   file = recordPath(file);
   ensure(fs.statSync(file).isFile(), `not a regular file: ${file}`);
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(fd)); }
+  try { return fs.readFileSync(fd); }
   finally { fs.closeSync(fd); }
+}
+
+function readText(file) {
+  const bytes = readBytes(file);
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); }
+  catch (cause) { throw new Error(`decode UTF-8 ${file}: ${cause.message}`, { cause }); }
 }
 
 /** @returns {unknown} */
@@ -122,7 +135,7 @@ function run(root, program, args) {
 function git(root, ...args) { return run(root, 'git', args); }
 
 function revisionAt(root) {
-  ensure(git(root, 'rev-parse', '--show-toplevel') === root, `not a repository root: ${root}`);
+  ensure(path.relative(root, git(root, 'rev-parse', '--show-toplevel')) === '', `not a repository root: ${root}`);
   const revision = git(root, 'rev-parse', '--verify', 'HEAD');
   ensure(/^[0-9a-f]{40,64}$/.test(revision), `invalid revision: ${root}`);
   return revision;
@@ -170,7 +183,7 @@ function receiptPage(receipt) {
 
 function linkedPreparations(root, sources) {
   const metadata = JSON.parse(run(root, 'cargo', ['metadata', '--no-deps', '--locked', '--format-version', '1']));
-  ensure(metadata.workspace_root === root, `wrong Cargo workspace: ${metadata.workspace_root}`);
+  ensure(path.relative(root, metadata.workspace_root) === '', `wrong Cargo workspace: ${metadata.workspace_root}`);
   const targets = metadata.packages.flatMap(pkg => pkg.dependencies.map(dep => dep.path).filter(Boolean));
   for (const source of sources.filter(source => path.basename(source.path) === 'package.json')) {
     const manifest = JSON.parse(source.text);
@@ -179,7 +192,7 @@ function linkedPreparations(root, sources) {
         if (typeof specifier !== 'string' || !specifier.startsWith('file:')) continue;
         const target = path.resolve(root, path.dirname(source.path), specifier.slice(5));
         const link = path.join(root, path.dirname(source.path), 'node_modules', name);
-        ensure(fs.realpathSync(link) === target, `wrong linked package: ${link}`);
+        ensure(path.relative(target, fs.realpathSync(link)) === '', `wrong linked package: ${link}`);
         targets.push(target);
       }
     }
@@ -187,8 +200,9 @@ function linkedPreparations(root, sources) {
   const dependencies = new Map();
   for (const target of targets) {
     inspect(target);
-    if (target === root || target.startsWith(`${root}/`)) continue;
-    const owner = git(target, 'rev-parse', '--show-toplevel');
+    const relative = path.relative(root, target);
+    if (!path.isAbsolute(relative) && relative.split(path.sep)[0] !== '..') continue;
+    const owner = path.resolve(git(target, 'rev-parse', '--show-toplevel'));
     ensure(path.dirname(owner) === path.dirname(root), `dependency outside isolated siblings: ${owner}`);
     if (dependencies.has(owner)) continue;
     const revision = revisionAt(owner);
@@ -224,7 +238,13 @@ export function captureInputs(root, preparationId, page = 'sky-weather') {
   ensure(typeof page === 'string' && PAGE_NAME.test(page), 'invalid page name');
   root = path.dirname(containedPath(root, 'Cargo.toml'));
   const revision = revisionAt(root);
-  const sources = inputFiles(root, page).map(name => ({ path: name, text: readText(containedPath(root, name)) }));
+  const sources = inputFiles(root, page).map(name => {
+    const file = containedPath(root, name);
+    const text = name.endsWith('.fp32le')
+      ? `sha256:${createHash('sha256').update(readBytes(file)).digest('hex')}`
+      : readText(file);
+    return { path: name, text };
+  });
   const dependencies = linkedPreparations(root, sources);
   const criteria = pageCriteria(sources, page);
   return {
