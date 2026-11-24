@@ -305,15 +305,14 @@ impl Targets {
 
     /// Display-space target for tone mapping and overlays; absent on the direct path.
     pub(crate) fn ensure_output(&mut self, gpu: &GpuContext, format: wgpu::TextureFormat) {
-        if self
-            .output
-            .as_ref()
-            .is_none_or(|t| t.texture.format() != format)
-        {
+        if self.output.as_ref().is_none_or(|t| {
+            t.texture.format() != format
+                || (t.texture.width(), t.texture.height()) != self.display.size
+        }) {
             self.output = Some(Target::new(
                 gpu,
                 "raa.views.output",
-                self.size,
+                self.display.size,
                 format,
                 GBUFFER_USAGE,
             ));

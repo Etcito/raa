@@ -1,4 +1,4 @@
-// Temporal anti-aliasing at render resolution 1:1. Each frame's camera jitter makes every
+// Temporal anti-aliasing and analytic temporal super-resolution. Each frame's camera jitter makes every
 // pixel sample a different point; reprojecting and accumulating those samples gives both
 // anti-aliasing and a stable image over time. The module is `REPROJECT_WGSL` followed by
 // this source (contract 'taa-bindings').
@@ -119,11 +119,20 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let uv = (vec2<f32>(id.xy) + vec2<f32>(0.5)) / vec2<f32>(output_size);
-    let scene_size = vec2<i32>(raa_taa_frame.viewport.xy);
-
-    // The scene pixel nearest this output pixel, removing the jitter applied this frame.
-    let scene_position = uv * raa_taa_frame.viewport.xy;
-    let nearest = clamp(vec2<i32>(floor(scene_position)), vec2<i32>(0), scene_size - vec2<i32>(1));
+    let scene_size = vec2<i32>(textureDimensions(raa_taa_scene));
+    let scene_extent = vec2<f32>(scene_size);
+    let display_extent = vec2<f32>(output_size);
+    let scaled = any(vec2<u32>(scene_size) != output_size);
+    let scene_position = uv * scene_extent;
+    let jitter_pixels = raa_taa_frame.camera_jitter.xy * 0.5 * scene_extent * vec2<f32>(1.0, -1.0);
+    let raster_position = scene_position + jitter_pixels;
+    // Keep the native TAA footprint. At scaled extents centre the footprint on the
+    // raster position, because each raster sample represents its centre minus jitter.
+    let nearest = clamp(
+        vec2<i32>(floor(select(scene_position, raster_position, scaled))),
+        vec2<i32>(0),
+        scene_size - vec2<i32>(1),
+    );
 
     // Gather the 3x3 neighbourhood. Track the closest depth (standard-Z: the far plane is
     // 1.0), so that edges reproject with the foreground's motion, and the variance, which
@@ -132,15 +141,27 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
     var second_moment = vec3<f32>(0.0);
     var filtered = vec3<f32>(0.0);
     var filter_total = 0.0;
-    var closest_depth = 1.0;
+    var closest_depth = select(1.0, textureLoad(raa_taa_depth, nearest, 0), scaled);
     var closest_pixel = nearest;
-    let jitter_pixels =
-        raa_taa_frame.camera_jitter.xy * 0.5 * raa_taa_frame.viewport.xy * vec2<f32>(1.0, -1.0);
     for (var dy = -1; dy <= 1; dy++) {
         for (var dx = -1; dx <= 1; dx++) {
             let p = clamp(nearest + vec2<i32>(dx, dy), vec2<i32>(0), scene_size - vec2<i32>(1));
             let color = compress(textureLoad(raa_taa_scene, p, 0).rgb);
-            let ycocg = to_ycocg(color);
+            // At scaled extents measure the clipping distribution around the display
+            // pixel, using the jitter-corrected scene footprint of each display neighbour.
+            let display_neighbor = clamp(
+                vec2<i32>(id.xy) + vec2<i32>(dx, dy),
+                vec2<i32>(0),
+                vec2<i32>(output_size) - vec2<i32>(1),
+            );
+            var clip_color = color;
+            if scaled {
+                let clip_position = (vec2<f32>(display_neighbor) + vec2<f32>(0.5)) * scene_extent
+                    / display_extent + jitter_pixels;
+                let clip_pixel = clamp(vec2<i32>(floor(clip_position)), vec2<i32>(0), scene_size - vec2<i32>(1));
+                clip_color = compress(textureLoad(raa_taa_scene, clip_pixel, 0).rgb);
+            }
+            let ycocg = to_ycocg(clip_color);
             mean += ycocg;
             second_moment += ycocg * ycocg;
 
@@ -199,11 +220,11 @@ fn cs_taa(@builtin(global_invocation_id) id: vec3<u32>) {
         let extents = max((high - low) * 0.5, vec3<f32>(1.0e-4));
         let ratio = (y - center_box) / extents;
         let largest = max(abs(ratio.x), max(abs(ratio.y), abs(ratio.z)));
-        let clipped = select(y, center_box + (y - center_box) / largest, largest > 1.0);
+        let clipped = select(y, center_box + (y - center_box) / max(largest, 1.0), largest > 1.0);
 
         // More weight on the current frame when the scene is moving, since resampled
-        // history gets softer with distance. The render ratio is 1 (no upscaling).
-        let moved = length((previous_uv - uv) * raa_taa_frame.viewport.xy);
+        // history gets softer with distance on the accumulation grid.
+        let moved = length((previous_uv - uv) * display_extent);
         let blend = clamp(RAA_TAA_BLEND_BASE + moved * RAA_TAA_BLEND_MOTION_GAIN, RAA_TAA_BLEND_MIN, RAA_TAA_BLEND_MAX);
         result = mix(from_ycocg(clipped), current, blend);
     }

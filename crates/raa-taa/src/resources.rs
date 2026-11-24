@@ -183,7 +183,6 @@ impl TaaPipelines {
 /// params buffers; `TaaTargets::group` returns the group whose read HDR texture equals `src`
 /// at parity `write_index & 1`, or None after the chain was recreated.
 pub(crate) struct TaaTargets {
-    size: (u32, u32),
     /// The read HDR texture of each orientation (0 = source, 1 = destination).
     read: [wgpu::Texture; 2],
     /// `[orientation][parity]`.
@@ -275,7 +274,6 @@ impl TaaTargets {
             ),
         ];
         TaaTargets {
-            size: targets.size(),
             read: [hdr.src_texture().clone(), hdr.dst_texture().clone()],
             groups,
         }
@@ -313,11 +311,6 @@ impl TaaTargets {
     ) -> Option<&wgpu::BindGroup> {
         let orientation = self.read.iter().position(|texture| texture == src)?;
         Some(&self.groups[orientation][write_index & 1])
-    }
-
-    /// The surface size the groups were built at.
-    pub(crate) fn size(&self) -> (u32, u32) {
-        self.size
     }
 }
 

@@ -50,6 +50,10 @@ mod software_gpu_frame {
 
     impl Rig {
         fn new(gpu: &GpuContext) -> Rig {
+            Self::with_msaa(gpu, 1)
+        }
+
+        fn with_msaa(gpu: &GpuContext, msaa: u32) -> Rig {
             let pipeline = Rc::new(RefCell::new(Pipeline::new(gpu, SURFACE, false)));
             let mut lit = LitRenderer::new(
                 gpu,
@@ -57,7 +61,7 @@ mod software_gpu_frame {
                 LitOptions {
                     max_instances: 16384,
                     max_materials: 256,
-                    msaa: 1,
+                    msaa,
                 },
             )
             .expect("lit renderer");
@@ -216,5 +220,88 @@ mod software_gpu_frame {
 
         let error = block_on(errors.pop());
         assert!(error.is_none(), "GPU validation error: {error:?}");
+    }
+
+    struct BindDisplay(wgpu::TextureView);
+
+    impl raa_pipeline::GraphFrame for BindDisplay {
+        fn before_record(
+            &mut self,
+            pass: &str,
+            ctx: &mut raa_pipeline::RecordCtx<'_>,
+        ) -> Result<(), raa_core::RaaError> {
+            if pass == "taa" {
+                assert_eq!(ctx.targets.depth().texture().sample_count(), 1);
+                assert_eq!(ctx.targets.motion().texture().sample_count(), 1);
+                let hdr = ctx.targets.hdr();
+                hdr.bind(hdr.src(), &self.0);
+            }
+            Ok(())
+        }
+
+        fn after_record(
+            &mut self,
+            pass: &str,
+            ctx: &mut raa_pipeline::RecordCtx<'_>,
+        ) -> Result<(), raa_core::RaaError> {
+            if pass == "taa" {
+                ctx.targets.hdr().unbind();
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn scaled_taa_reads_single_sample_guides_with_both_forward_msaa_modes() {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        let gpu = block_on(GpuContext::headless(&raa_core::GpuOptions {
+            allow_software: false,
+            ..Default::default()
+        }))
+        .expect("Windows hardware GPU");
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        for samples in [1, 4] {
+            let mut rig = Rig::with_msaa(&gpu, samples);
+            rig.set_enabled(true);
+            rig.scene.camera.set_viewport(SMALL.0, SMALL.1);
+            let resolved = gpu.device().create_texture(&wgpu::TextureDescriptor {
+                label: Some("display-sized TAA test output"),
+                size: wgpu::Extent3d {
+                    width: SIZE.0,
+                    height: SIZE.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: raa_pipeline::HDR_FORMAT,
+                usage: wgpu::TextureUsages::STORAGE_BINDING,
+                view_formats: &[],
+            });
+            {
+                let mut pipeline = rig.pipeline.borrow_mut();
+                pipeline.set_scene_size(Some(SMALL));
+                pipeline
+                    .add_graph_frame(
+                        "bind-display",
+                        Box::new(BindDisplay(resolved.create_view(&Default::default()))),
+                    )
+                    .expect("bind display output");
+            }
+            rig.frame(&gpu);
+            rig.frame(&gpu);
+            assert_eq!(rig.taa.accumulated_frames(), 2);
+            let pipeline = rig.pipeline.borrow();
+            for slot in ["color", "history"] {
+                let image = pipeline
+                    .resources()
+                    .get("taa", slot)
+                    .expect("published output");
+                assert_eq!((image.desc.width, image.desc.height), SIZE);
+            }
+        }
+        assert!(block_on(errors.pop()).is_none());
     }
 }

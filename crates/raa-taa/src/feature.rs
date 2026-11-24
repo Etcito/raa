@@ -2,8 +2,7 @@
 //!
 //! The pass creates its [`HistoryPair`] and [`TaaTargets`] in `resize` (every resize
 //! invalidates the history), writes `RaaTaaParams`, resolves `hdr.src()` into `hdr.dst()` and
-//! the history write view, then swaps. History advances on submission. The pass is
-//! installed disabled, and
+//! the history write view, then swaps. History advances on submission. It is installed disabled; the pass and
 //! every handle clone share a `Cell<u32>` frame count and a `Cell<bool>` pending invalidate.
 
 use std::cell::{Cell, RefCell};
@@ -162,27 +161,51 @@ impl FeaturePass for TaaPass {
     /// The `depth` and `motion` inputs (bindings 3 and 4) come from `Targets::depth_input`
     /// and `Targets::motion_input`, and rebuilding keys on them too.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
-        let Some(targets) = self.targets.as_ref() else {
+        if self.targets.is_none() {
             return Err(RaaError::Resource(
                 "taa: record ran before a resize created the targets".to_owned(),
             ));
-        };
-        let Some(write_index) = self
-            .history
-            .as_ref()
-            .map(|history| history.state().write_index())
-        else {
-            return Err(RaaError::Resource(
-                "taa: record ran before a resize created the targets".to_owned(),
-            ));
-        };
+        }
         let hdr = ctx.targets.hdr();
+        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
+        let motion = ctx.targets.motion_input(ctx.resources, &self.name);
+        let source_size = (hdr.src_texture().width(), hdr.src_texture().height());
+        if [&depth, &motion].iter().any(|guide| {
+            let texture = guide.texture();
+            (texture.width(), texture.height()) != source_size || texture.sample_count() != 1
+        }) {
+            return Err(RaaError::Resource(
+                "taa: depth and motion must be single-sample guides on the HDR source grid"
+                    .to_owned(),
+            ));
+        }
+        let output_size = (hdr.dst_texture().width(), hdr.dst_texture().height());
+        let history = self.history.as_mut().ok_or_else(|| {
+            RaaError::Resource("taa: record ran before a resize created history".to_owned())
+        })?;
+        if history.ensure(ctx.gpu, output_size) {
+            self.bound = None;
+            if !hdr.is_bound() {
+                self.targets = Some(TaaTargets::new(
+                    ctx.gpu,
+                    &self.pipelines,
+                    ctx.targets,
+                    &self.frame,
+                    history,
+                ));
+            }
+            self.accumulated.set(0);
+            ctx.gpu
+                .queue()
+                .write_buffer(&self.pipelines.params, 0, &pack_params(false));
+        }
+        let write_index = history.state().write_index();
+        let written_history = history.write_view().clone();
         let bound_history = ctx
             .resources
             .input(&self.name, "history")
+            .filter(|image| (image.desc.width, image.desc.height) == output_size)
             .map(|image| image.view);
-        let depth = ctx.targets.depth_input(ctx.resources, &self.name);
-        let motion = ctx.targets.motion_input(ctx.resources, &self.name);
         let use_bound = hdr.is_bound()
             || bound_history.is_some()
             || depth != *ctx.targets.depth()
@@ -225,14 +248,16 @@ impl FeaturePass for TaaPass {
                 .as_ref()
                 .map(|(_, _, _, _, _, groups)| &groups[write_index & 1])
         } else {
-            targets.group(hdr.src_texture(), write_index)
+            self.targets
+                .as_ref()
+                .and_then(|targets| targets.group(hdr.src_texture(), write_index))
         };
         let Some(group) = group else {
             return Err(RaaError::Resource(
                 "taa: the HDR source is not a texture the pass was resized for".to_owned(),
             ));
         };
-        let groups = dispatch_size(targets.size());
+        let groups = dispatch_size(output_size);
         {
             let mut pass = ctx
                 .encoder
@@ -244,11 +269,14 @@ impl FeaturePass for TaaPass {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(groups.0, groups.1, 1);
         }
+        let color = hdr.dst().clone();
         hdr.swap();
         self.recorded = true;
-        let (w, h) = targets.size();
+        let (w, h) = output_size;
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
-        ctx.resources.publish(&self.name, "color", hdr.src(), desc);
+        ctx.resources.publish(&self.name, "color", &color, desc);
+        ctx.resources
+            .publish(&self.name, "history", &written_history, desc);
         Ok(())
     }
     fn submitted(&mut self) {

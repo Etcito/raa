@@ -1,9 +1,8 @@
-//! Temporal anti-aliasing and reusable temporal histories.
+//! Temporal anti-aliasing, analytic super-resolution and reusable temporal histories.
 //!
-//! The TAA resolve accumulates at render resolution 1:1 and reuses its view-local history
-//! across frames; the `taa` pass and its shaders arrive in later shares. The
-//! [`HistoryState`] and [`HistoryPair`] ping-pong are also reused by the M6 shadow-mask and
-//! M7 reservoir histories.
+//! The resolve reads single-sample guides on the HDR source grid. A larger graph-bound
+//! HDR destination makes the resolve and its history display-sized. Scene-space post
+//! passes must precede the resolve for a display-sized HDR chain.
 
 mod feature;
 mod history;

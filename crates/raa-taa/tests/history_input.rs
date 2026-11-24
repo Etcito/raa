@@ -153,12 +153,15 @@ impl Rig {
         }
     }
 
+    fn record(&mut self, gpu: &GpuContext) -> wgpu::CommandBuffer {
+        self.graph
+            .execute(gpu, self.output.view(), self.output.size())
+            .expect("frame")
+    }
+
     /// Records and submits one frame; the result is not read back.
     fn frame(&mut self, gpu: &GpuContext) {
-        let commands = self
-            .graph
-            .execute(gpu, self.output.view(), self.output.size())
-            .expect("frame");
+        let commands = self.record(gpu);
         gpu.queue().submit([commands]);
         self.graph.notify_submitted();
         gpu.device()
@@ -236,4 +239,39 @@ fn without_a_bound_history_input_the_pass_keeps_rendering() {
 
     let error = block_on(errors.pop());
     assert!(error.is_none(), "GPU validation error: {error:?}");
+}
+
+#[test]
+fn discarded_frame_preserves_history_and_retry_advances_once() {
+    if !cfg!(target_os = "windows") {
+        return;
+    }
+    let gpu = block_on(GpuContext::headless(&raa_core::GpuOptions {
+        allow_software: false,
+        ..Default::default()
+    }))
+    .expect("Windows hardware GPU");
+    let mut rig = Rig::new(&gpu, None);
+    rig.frame(&gpu);
+    let pending = rig.record(&gpu);
+    let written = rig
+        .pipeline
+        .borrow()
+        .resources()
+        .get("taa", "history")
+        .unwrap()
+        .view;
+    drop(pending);
+    assert_eq!(rig.taa.accumulated_frames(), 1);
+    rig.frame(&gpu);
+    let retried = rig
+        .pipeline
+        .borrow()
+        .resources()
+        .get("taa", "history")
+        .unwrap()
+        .view;
+    assert_eq!(written, retried, "retry writes the same uncommitted target");
+    rig.graph.notify_submitted();
+    assert_eq!(rig.taa.accumulated_frames(), 2);
 }

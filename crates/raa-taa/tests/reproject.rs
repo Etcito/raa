@@ -137,12 +137,13 @@ mod reject_flag {
         gpu: &GpuContext,
         format: wgpu::TextureFormat,
         usage: wgpu::TextureUsages,
+        size: (u32, u32),
     ) -> wgpu::Texture {
         gpu.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("reject_flag"),
             size: wgpu::Extent3d {
-                width: SIZE,
-                height: SIZE,
+                width: size.0,
+                height: size.1,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -155,12 +156,16 @@ mod reject_flag {
     }
 
     /// An Rgba16Float texture filled by `texel(x, y)`.
-    fn hdr_input(gpu: &GpuContext, texel: impl Fn(u32, u32) -> [f32; 4]) -> wgpu::Texture {
+    fn hdr_input(
+        gpu: &GpuContext,
+        size: (u32, u32),
+        texel: impl Fn(u32, u32) -> [f32; 4],
+    ) -> wgpu::Texture {
         let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
-        let tex = texture(gpu, HDR, usage);
-        let mut bytes = Vec::with_capacity((SIZE * SIZE * 8) as usize);
-        for y in 0..SIZE {
-            for x in 0..SIZE {
+        let tex = texture(gpu, HDR, usage, size);
+        let mut bytes = Vec::with_capacity((size.0 * size.1 * 8) as usize);
+        for y in 0..size.1 {
+            for x in 0..size.0 {
                 for c in texel(x, y) {
                     bytes.extend_from_slice(&f16_bits(c).to_le_bytes());
                 }
@@ -171,12 +176,12 @@ mod reject_flag {
             &bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(SIZE * 8),
-                rows_per_image: Some(SIZE),
+                bytes_per_row: Some(size.0 * 8),
+                rows_per_image: Some(size.1),
             },
             wgpu::Extent3d {
-                width: SIZE,
-                height: SIZE,
+                width: size.0,
+                height: size.1,
                 depth_or_array_layers: 1,
             },
         );
@@ -184,9 +189,9 @@ mod reject_flag {
     }
 
     /// A Depth32Float texture cleared to 0.5: every pixel is geometry, none is sky.
-    fn depth_input(gpu: &GpuContext) -> wgpu::Texture {
+    fn depth_input(gpu: &GpuContext, size: (u32, u32)) -> wgpu::Texture {
         let usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT;
-        let tex = texture(gpu, wgpu::TextureFormat::Depth32Float, usage);
+        let tex = texture(gpu, wgpu::TextureFormat::Depth32Float, usage, size);
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = gpu.device().create_command_encoder(&Default::default());
         drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -208,15 +213,15 @@ mod reject_flag {
         tex
     }
 
-    /// The 768-byte frame: viewport 8 x 8, no jitter, temporal = (0, accumulation 1, camera
+    /// The 768-byte frame: scene viewport, no jitter, temporal = (0, accumulation 1, camera
     /// history 1, 0). Matrices stay zero: no pixel takes the sky path.
-    fn frame_bytes() -> Vec<u8> {
+    fn frame_bytes(size: (u32, u32)) -> Vec<u8> {
         let mut bytes = vec![0u8; TEMPORAL_FRAME_SIZE as usize];
         let viewport = [
-            SIZE as f32,
-            SIZE as f32,
-            1.0 / SIZE as f32,
-            1.0 / SIZE as f32,
+            size.0 as f32,
+            size.1 as f32,
+            1.0 / size.0 as f32,
+            1.0 / size.1 as f32,
         ];
         for (i, v) in viewport.iter().enumerate() {
             bytes[384 + 4 * i..388 + 4 * i].copy_from_slice(&v.to_le_bytes());
@@ -238,14 +243,14 @@ mod reject_flag {
         buffer
     }
 
-    /// Reads an 8 x 8 Rgba16Float texture back as f32 texels.
+    /// Reads an Rgba16Float texture back as f32 texels.
     fn read(gpu: &GpuContext, tex: &wgpu::Texture) -> Vec<[f32; 4]> {
-        let row = (SIZE * 8) as usize;
+        let row = (tex.width() * 8) as usize;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
         let padded = row.div_ceil(align) * align;
         let buffer = gpu.device().create_buffer(&wgpu::BufferDescriptor {
             label: Some("reject_flag.readback"),
-            size: (padded * SIZE as usize) as u64,
+            size: (padded * tex.height() as usize) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -257,12 +262,12 @@ mod reject_flag {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(padded as u32),
-                    rows_per_image: Some(SIZE),
+                    rows_per_image: Some(tex.height()),
                 },
             },
             wgpu::Extent3d {
-                width: SIZE,
-                height: SIZE,
+                width: tex.width(),
+                height: tex.height(),
                 depth_or_array_layers: 1,
             },
         );
@@ -290,7 +295,13 @@ mod reject_flag {
     /// outside the neighbourhood, so a blend visibly pulls the result), motion xy 0 with
     /// reject flag `reject`, and `RaaTaaParams.history_usable` = `history_usable`. Returns the
     /// output texels.
-    fn resolve(gpu: &GpuContext, reject: f32, history_usable: u32) -> Vec<[f32; 4]> {
+    fn resolve(
+        gpu: &GpuContext,
+        reject: f32,
+        history_usable: u32,
+        scene_size: (u32, u32),
+        size: (u32, u32),
+    ) -> Vec<[f32; 4]> {
         let device = gpu.device();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("reject_flag"),
@@ -304,20 +315,25 @@ mod reject_flag {
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
-        let scene = hdr_input(gpu, |x, _| {
+        let scene = hdr_input(gpu, scene_size, |x, _| {
             if x % 2 == 0 {
                 [1.0, 0.0, 0.0, 1.0]
             } else {
                 [0.0, 0.0, 1.0, 1.0]
             }
         });
-        let motion = hdr_input(gpu, |_, _| [0.0, 0.0, reject, 0.0]);
-        let history = hdr_input(gpu, |_, _| [0.0, 1.0, 0.0, 1.0]);
-        let depth = depth_input(gpu);
+        let motion = hdr_input(gpu, scene_size, |_, _| [0.0, 0.0, reject, 0.0]);
+        let history = hdr_input(gpu, size, |_, _| [0.0, 1.0, 0.0, 1.0]);
+        let depth = depth_input(gpu, scene_size);
         let storage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC;
-        let output = texture(gpu, HDR, storage);
-        let history_out = texture(gpu, HDR, storage);
-        let frame = uniform(gpu, &frame_bytes());
+        let output = texture(gpu, HDR, storage, size);
+        let history_out = texture(gpu, HDR, storage, size);
+        let mut frame = frame_bytes(scene_size);
+        if size != scene_size {
+            frame[640..644].copy_from_slice(&0.075f32.to_le_bytes());
+            frame[644..648].copy_from_slice(&(-0.05f32).to_le_bytes());
+        }
+        let frame = uniform(gpu, &frame);
         let mut params = [0u8; 16];
         params[..4].copy_from_slice(&history_usable.to_le_bytes());
         let params = uniform(gpu, &params);
@@ -364,7 +380,7 @@ mod reject_flag {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
             pass.set_pipeline(&pipeline);
             pass.set_bind_group(0, &group, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
+            pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
         }
         gpu.queue().submit([encoder.finish()]);
         read(gpu, &output)
@@ -378,9 +394,9 @@ mod reject_flag {
             return;
         };
         let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
-        let current_only = resolve(&gpu, 0.0, 0)[PROBE];
-        let rejected = resolve(&gpu, 1.0, 1)[PROBE];
-        let blended = resolve(&gpu, 0.0, 1)[PROBE];
+        let current_only = resolve(&gpu, 0.0, 0, (SIZE, SIZE), (SIZE, SIZE))[PROBE];
+        let rejected = resolve(&gpu, 1.0, 1, (SIZE, SIZE), (SIZE, SIZE))[PROBE];
+        let blended = resolve(&gpu, 0.0, 1, (SIZE, SIZE), (SIZE, SIZE))[PROBE];
         let error = block_on(errors.pop());
         assert!(error.is_none(), "validation error: {error:?}");
         assert_eq!(
@@ -391,5 +407,35 @@ mod reject_flag {
             (blended[1] - current_only[1]).abs() > 1.0e-3,
             "without the flag the green history is blended in: blended {blended:?}, current {current_only:?}"
         );
+    }
+    #[test]
+    fn scaled_temporal_resolve_covers_the_display_and_honors_motion_rejection() {
+        if !cfg!(target_os = "windows") {
+            return;
+        }
+        let gpu = block_on(GpuContext::headless(&raa_core::GpuOptions {
+            allow_software: false,
+            ..Default::default()
+        }))
+        .expect("Windows hardware GPU");
+        let errors = gpu.device().push_error_scope(wgpu::ErrorFilter::Validation);
+        for (source, size) in [((8, 8), (16, 16)), ((9, 9), (12, 12)), ((8, 7), (13, 9))] {
+            let current = resolve(&gpu, 0.0, 0, source, size);
+            let rejected = resolve(&gpu, 1.0, 1, source, size);
+            let blended = resolve(&gpu, 0.0, 1, source, size);
+            assert_eq!(rejected, current, "{size:?} reject keeps the current image");
+            assert!(
+                current.iter().all(|p| p[3] == 1.0),
+                "{size:?} covers all display texels"
+            );
+            assert!(
+                current
+                    .iter()
+                    .zip(blended)
+                    .any(|(a, b)| (a[1] - b[1]).abs() > 1e-3),
+                "{size:?} accepts valid history"
+            );
+        }
+        assert!(block_on(errors.pop()).is_none());
     }
 }

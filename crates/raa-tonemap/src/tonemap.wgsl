@@ -2,7 +2,7 @@
 // WGSL ports of src/curves.rs; keep the constants in step with it.
 
 struct TonemapParams {
-    // x = 2^ev, y = ev
+    // x = 2^ev, y = ev, zw = output extent
     exposure: vec4<f32>,
     // x = mapper (0 agx, 1 aces, 2 linear), y = look (0 none, 1 punchy, 2 golden),
     // z = dither on, w = surface is *Srgb (the hardware encodes)
@@ -142,16 +142,44 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
     return out;
 }
 
+fn sample_hdr(px: vec2<i32>, uv: vec2<f32>, output_size: vec2<f32>) -> vec3<f32> {
+    let source_size = vec2<i32>(textureDimensions(hdr_src));
+    if all(vec2<f32>(source_size) == output_size) {
+        return textureLoad(hdr_src, px, 0).rgb;
+    }
+    // Spatial fallback when the graph sends scene-sized HDR to the display transform.
+    let position = uv * vec2<f32>(source_size) - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(position));
+    let f = fract(position);
+    let lo = clamp(base, vec2<i32>(0), source_size - vec2<i32>(1));
+    let hi = clamp(base + vec2<i32>(1), vec2<i32>(0), source_size - vec2<i32>(1));
+    let a = mix(
+        textureLoad(hdr_src, lo, 0).rgb,
+        textureLoad(hdr_src, vec2<i32>(hi.x, lo.y), 0).rgb,
+        f.x,
+    );
+    let b = mix(
+        textureLoad(hdr_src, vec2<i32>(lo.x, hi.y), 0).rgb,
+        textureLoad(hdr_src, hi, 0).rgb,
+        f.x,
+    );
+    return mix(a, b, f.y);
+}
+
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let px = vec2<i32>(frag.xy);
     // S12 background rule: no geometry and a constant background -> unchanged.
-    let depth = textureLoad(depth_tex, px, 0).x;
+    let output_size = params.exposure.zw;
+    let uv = frag.xy / output_size;
+    let depth_size = vec2<i32>(textureDimensions(depth_tex));
+    let depth_px = clamp(vec2<i32>(uv * vec2<f32>(depth_size)), vec2<i32>(0), depth_size - vec2<i32>(1));
+    let depth = textureLoad(depth_tex, depth_px, 0).x;
     if (depth >= 1.0 && env.sky_params.z < 0.5) {
         return vec4<f32>(env.background.rgb, 1.0);
     }
 
-    let hdr = max(textureLoad(hdr_src, px, 0).rgb, vec3<f32>(0.0)) * params.exposure.x;
+    let hdr = max(sample_hdr(px, uv, output_size), vec3<f32>(0.0)) * params.exposure.x;
     var color: vec3<f32>;
     if (params.flags.x == 0u) {
         color = tm_agx(hdr, params.flags.y);

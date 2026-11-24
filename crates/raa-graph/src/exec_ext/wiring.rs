@@ -250,10 +250,17 @@ impl WiringExtension {
             };
             let producer = (producer_entry, resource.producer.port.clone());
             let key = format!("{}.{}", consumer.node, consumer.port);
+            let display = self
+                .state
+                .borrow()
+                .bindings
+                .iter()
+                .any(|binding| binding.entry == producer.0 && binding.resolve_display);
             let mut next = History {
                 producer,
                 consumer: (consumer_entry, port.key),
                 format,
+                display,
                 taa,
                 images: Vec::new(),
                 current: 0,
@@ -373,8 +380,11 @@ impl ExecExtension for WiringExtension {
                 dst,
                 forward: node.type_id == "pass.forward",
                 tonemap: node.type_id == "pass.tonemap",
+                resolve_display: node.type_id == "pass.taa",
+                display_post: matches!(node.type_id.as_str(), "pass.bloom" | "pass.grading"),
             });
         }
+        resolve_display_branches(&mut bindings);
         if plan_fns::bound_view_count(plan, &self.catalog) > 32 {
             let node = plan
                 .nodes
@@ -830,6 +840,37 @@ struct Binding {
     dst: Option<usize>,
     forward: bool,
     tonemap: bool,
+    resolve_display: bool,
+    display_post: bool,
+}
+
+/// Fullscreen post passes that can use a display-sized HDR input inherit its extent.
+/// Scene-space passes require the entire incoming branch to stay on the scene grid.
+fn resolve_display_branches(bindings: &mut [Binding]) {
+    let parent = |binding: &Binding| {
+        let (entry, _) = binding.source.as_ref()?;
+        bindings.iter().position(|b| b.entry == *entry)
+    };
+    let root = |mut index: usize| {
+        for _ in 0..bindings.len() {
+            let binding = &bindings[index];
+            if !binding.display_post {
+                return binding.resolve_display.then_some(index);
+            }
+            index = parent(binding)?;
+        }
+        None
+    };
+    let roots: Vec<_> = (0..bindings.len()).map(root).collect();
+    let mut blocked = vec![false; bindings.len()];
+    for binding in bindings.iter().filter(|b| !b.tonemap && !b.display_post) {
+        if let Some(index) = parent(binding).and_then(|i| roots[i]) {
+            blocked[index] = true;
+        }
+    }
+    for (binding, root) in bindings.iter_mut().zip(roots) {
+        binding.resolve_display = root.is_some_and(|i| !blocked[i]);
+    }
 }
 
 /// The colour bindings, view inputs and slot count that a successful `apply` installs.
@@ -858,6 +899,7 @@ struct History {
     producer: (String, String),
     consumer: (String, &'static str),
     format: wgpu::TextureFormat,
+    display: bool,
     taa: Option<raa_taa::TaaHandle>,
     images: Vec<(wgpu::Texture, wgpu::TextureView)>,
     current: usize,
@@ -873,6 +915,8 @@ struct State {
     slot_count: usize,
     size: (u32, u32),
     pool: Vec<(wgpu::Texture, wgpu::TextureView)>,
+    display_pool: Vec<Option<wgpu::TextureView>>,
+    display_size: (u32, u32),
 }
 
 struct WiringFrame {
@@ -895,42 +939,51 @@ impl GraphFrame for WiringFrame {
         self.prepared = true;
         let mut guard = self.state.borrow_mut();
         let state = &mut *guard;
+        let display_size = ctx.targets.display_rect().size;
         if state.size != ctx.size {
             state.pool.clear();
-            for history in &mut state.histories {
-                history.images.clear();
-            }
             state.size = ctx.size;
         }
+        if state.display_size != display_size {
+            state.display_pool.clear();
+            state.display_size = display_size;
+        }
+        if display_size != ctx.size {
+            state.display_pool.resize(state.slot_count, None);
+            for binding in state.bindings.iter().filter(|b| b.resolve_display) {
+                if let Some(i) = binding.dst {
+                    state.display_pool[i].get_or_insert_with(|| {
+                        make_color_texture(ctx.gpu, display_size)
+                            .create_view(&wgpu::TextureViewDescriptor::default())
+                    });
+                }
+            }
+        }
         while state.pool.len() < state.slot_count {
-            let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
-                label: Some("raa.wiring.pool"),
-                size: wgpu::Extent3d {
-                    width: ctx.size.0,
-                    height: ctx.size.1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::STORAGE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
+            let texture = make_color_texture(ctx.gpu, ctx.size);
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             state.pool.push((texture, view));
         }
-        for history in state.histories.iter_mut().filter(|h| h.images.is_empty()) {
+        for history in &mut state.histories {
+            let size = if history.display {
+                display_size
+            } else {
+                ctx.size
+            };
+            if history
+                .images
+                .first()
+                .is_some_and(|(texture, _)| (texture.width(), texture.height()) == size)
+            {
+                continue;
+            }
+            history.images.clear();
             for _ in 0..2 {
                 let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
                     label: Some("raa.wiring.history"),
                     size: wgpu::Extent3d {
-                        width: ctx.size.0,
-                        height: ctx.size.1,
+                        width: size.0,
+                        height: size.1,
                         depth_or_array_layers: 1,
                     },
                     mip_level_count: 1,
@@ -966,9 +1019,15 @@ impl GraphFrame for WiringFrame {
             .iter()
             .filter(|h| h.valid && h.consumer.0 == pass)
         {
-            if let Some((_, view)) = history.images.get(1 - history.current) {
-                let desc =
-                    ImageDesc::new(ImageDim::D2, history.format, ctx.size.0, ctx.size.1, 1, 1);
+            if let Some((texture, view)) = history.images.get(1 - history.current) {
+                let desc = ImageDesc::new(
+                    ImageDim::D2,
+                    history.format,
+                    texture.width(),
+                    texture.height(),
+                    1,
+                    1,
+                );
                 let image = PublishedImage {
                     view: view.clone(),
                     desc,
@@ -979,10 +1038,7 @@ impl GraphFrame for WiringFrame {
         let Some(binding) = state.bindings.iter().find(|b| b.entry == pass) else {
             return Ok(());
         };
-        let dst = binding
-            .dst
-            .and_then(|i| state.pool.get(i))
-            .map(|(_, view)| view);
+        let dst = chain_destination(binding, &state, ctx.targets.display_rect().size != ctx.size);
         let source = binding
             .source
             .as_ref()
@@ -1024,7 +1080,7 @@ impl GraphFrame for WiringFrame {
         let state = &mut *guard;
         if let Some(binding) = state.bindings.iter().find(|b| b.entry == pass) {
             ctx.targets.hdr().unbind();
-            publish_color(pass, binding, &state.pool, ctx);
+            publish_color(pass, binding, state, ctx);
         }
         for history in state.histories.iter_mut().filter(|h| h.producer.0 == pass) {
             let Some(image) = ctx.resources.get(pass, &history.producer.1) else {
@@ -1033,7 +1089,7 @@ impl GraphFrame for WiringFrame {
             let Some((texture, _)) = history.images.get(history.current) else {
                 continue;
             };
-            if (image.desc.width, image.desc.height) != ctx.size
+            if (image.desc.width, image.desc.height) != (texture.width(), texture.height())
                 || image.desc.format != history.format
             {
                 continue;
@@ -1042,8 +1098,8 @@ impl GraphFrame for WiringFrame {
                 image.view.texture().as_image_copy(),
                 texture.as_image_copy(),
                 wgpu::Extent3d {
-                    width: ctx.size.0,
-                    height: ctx.size.1,
+                    width: texture.width(),
+                    height: texture.height(),
                     depth_or_array_layers: 1,
                 },
             );
@@ -1073,15 +1129,45 @@ impl GraphFrame for WiringFrame {
     }
 }
 
-/// Republishes (entry, "color") with the pool view the chain pass `pass` wrote.
-fn publish_color(
-    pass: &str,
+fn make_color_texture(gpu: &raa_core::GpuContext, size: (u32, u32)) -> wgpu::Texture {
+    gpu.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("raa.wiring.pool"),
+        size: wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn chain_destination<'a>(
     binding: &Binding,
-    pool: &[(wgpu::Texture, wgpu::TextureView)],
-    ctx: &mut RecordCtx<'_>,
-) {
+    state: &'a State,
+    scaled: bool,
+) -> Option<&'a wgpu::TextureView> {
+    let i = binding.dst?;
+    if binding.resolve_display && scaled {
+        state.display_pool.get(i)?.as_ref()
+    } else {
+        state.pool.get(i).map(|(_, view)| view)
+    }
+}
+
+/// Republishes (entry, "color") with the pool view the chain pass `pass` wrote.
+fn publish_color(pass: &str, binding: &Binding, state: &State, ctx: &mut RecordCtx<'_>) {
     if !binding.tonemap
-        && let Some((_, view)) = binding.dst.and_then(|i| pool.get(i))
+        && let Some(view) =
+            chain_destination(binding, state, ctx.targets.display_rect().size != ctx.size)
     {
         ctx.resources.publish(
             pass,
@@ -1090,8 +1176,8 @@ fn publish_color(
             ImageDesc::new(
                 ImageDim::D2,
                 wgpu::TextureFormat::Rgba16Float,
-                ctx.size.0,
-                ctx.size.1,
+                view.texture().width(),
+                view.texture().height(),
                 1,
                 1,
             ),

@@ -81,7 +81,9 @@ fn raa_temporal_sky_uv(
 ) -> vec3<f32> {
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let view_h = inv_proj * vec4<f32>(ndc + camera_jitter.xy, 1.0, 1.0);
-    let dir = (inv_view * vec4<f32>(view_h.xyz / view_h.w, 0.0)).xyz;
+    // The direction needs no homogeneous divide, including when the far plane
+    // is at infinity and the unprojected point already has w = 0.
+    let dir = (inv_view * vec4<f32>(view_h.xyz, 0.0)).xyz;
     let clip = previous_view_proj * vec4<f32>(dir, 0.0);
     if (clip.w <= 0.0) {
         return vec3<f32>(uv, 0.0);

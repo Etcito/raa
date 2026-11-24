@@ -43,13 +43,17 @@ pub struct TonemapPass {
     bound: Option<Bound>,
 }
 
-fn params_bytes(settings: &ToneMapping, surface_is_srgb: bool) -> [u8; PARAMS_SIZE] {
+fn params_bytes(
+    settings: &ToneMapping,
+    surface_is_srgb: bool,
+    output_size: (u32, u32),
+) -> [u8; PARAMS_SIZE] {
     let mut out = [0u8; PARAMS_SIZE];
     let words = [
         settings.exposure_scale().to_bits(),
         settings.exposure_ev.to_bits(),
-        0,
-        0,
+        (output_size.0 as f32).to_bits(),
+        (output_size.1 as f32).to_bits(),
         settings.mapper.gpu_index(),
         settings.look.gpu_index(),
         u32::from(settings.dither),
@@ -236,17 +240,22 @@ impl FeaturePass for TonemapPass {
 
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
         let queue = ctx.gpu.queue();
-        let settings = self.control.get();
-        queue.write_buffer(
-            &self.params,
-            0,
-            &params_bytes(&settings, self.surface_is_srgb),
-        );
         queue.write_buffer(&self.env, 0, &ctx.lighting.env().to_bytes());
         Ok(())
     }
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
+        let output = ctx.backbuffer.texture();
+        let settings = self.control.get();
+        ctx.gpu.queue().write_buffer(
+            &self.params,
+            0,
+            &params_bytes(
+                &settings,
+                self.surface_is_srgb,
+                (output.width(), output.height()),
+            ),
+        );
         self.ensure_pipeline(ctx.gpu, ctx.backbuffer_format);
         self.ensure_bind_group(ctx.gpu, ctx.targets, ctx.resources);
         let (Some(pipeline), Some(bound)) = (
@@ -354,11 +363,13 @@ mod tests {
             look: Look::Golden,
             dither: false,
         };
-        let b = params_bytes(&s, true);
+        let b = params_bytes(&s, true, (137, 89));
         let word =
             |i: usize| u32::from_le_bytes([b[4 * i], b[4 * i + 1], b[4 * i + 2], b[4 * i + 3]]);
         assert_eq!(f32::from_bits(word(0)), 4.0);
         assert_eq!(f32::from_bits(word(1)), 2.0);
+        assert_eq!(f32::from_bits(word(2)), 137.0);
+        assert_eq!(f32::from_bits(word(3)), 89.0);
         assert_eq!([word(4), word(5), word(6), word(7)], [1, 2, 0, 1]);
     }
 }

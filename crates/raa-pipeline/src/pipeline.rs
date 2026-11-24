@@ -1045,8 +1045,10 @@ impl Pipeline {
         display: crate::ActiveRect,
     ) -> Result<(), RaaError> {
         let gpu = ctx.gpu;
+        // Display-sized passes validate their own extents. A display-only resize keeps
+        // scene-grid histories when the scene extent and view origin stay the same.
         if self.targets.as_ref().is_some_and(|targets| {
-            targets.size() != scene_size || targets.display_rect() != display
+            targets.size() != scene_size || targets.display_rect().origin != display.origin
         }) {
             self.invalidate_current_history();
         }
@@ -1140,7 +1142,7 @@ impl Pipeline {
         // Tonemap and the overlays write the backbuffer, which nothing can sample: while graph
         // frames run they write the display target, published here for later readers.
         if local && !self.graph_frames.is_empty() {
-            let (width, height) = targets.size();
+            let (width, height) = targets.display_rect().size;
             let desc = ImageDesc::new(ImageDim::D2, backbuffer_format, width, height, 1, 1);
             let view = targets.output().ok_or_else(|| {
                 RaaError::Resource(format!("{PASS_NAME}: the display target was not created"))
