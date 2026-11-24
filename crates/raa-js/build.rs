@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
 fn main() {
+    validate_prediction_shaders();
     println!("cargo:rerun-if-changed=src/api");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo::rustc-check-cfg=cfg(raa_js_engine)");
@@ -31,6 +32,27 @@ fn main() {
     }
     write(&out.join("api_registry.rs"), &registry);
     write(&out.join("api_files.txt"), &list);
+}
+
+fn validate_prediction_shaders() {
+    let reproject = "../raa-taa/src/wgsl/reproject.wgsl";
+    let warp = "src/prediction_warp.wgsl";
+    let refresh = "src/prediction_refresh.wgsl";
+    for path in [reproject, warp, refresh] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    let read = |path| fs::read_to_string(path).expect("read prediction shader");
+    let warp = format!("{}\n{}", read(reproject), read(warp));
+    for source in [warp, read(refresh)] {
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("validate prediction WGSL");
+    }
 }
 
 fn write(path: &Path, text: &str) {

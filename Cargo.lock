@@ -1033,6 +1033,7 @@ name = "raa-js"
 version = "0.5.0"
 dependencies = [
  "js-sys",
+ "naga",
  "raa-bloom",
  "raa-brdf",
  "raa-cel",

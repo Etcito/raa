@@ -2,7 +2,7 @@
 //! linear tone mapping, the sRGB OETF and dither. This module holds the settings and
 //! their shared control; [`curves`] holds CPU ports of the curves the shader runs.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use raa_core::RaaError;
@@ -102,10 +102,26 @@ impl ToneMapping {
     }
 }
 
+/// Immutable GPU inputs captured in the real frame's command buffer.
+#[derive(Debug)]
+pub struct TonemapSource {
+    pub hdr: wgpu::Texture,
+    pub depth: wgpu::Texture,
+}
+
+#[derive(Debug, Default)]
+pub(crate) enum SourceCapture {
+    #[default]
+    Off,
+    Requested,
+    Recorded(TonemapSource),
+}
+
 /// Shared handle on the settings the `tonemap` pass reads each frame.
 #[derive(Clone, Debug, Default)]
 pub struct TonemapControl {
     settings: Rc<Cell<ToneMapping>>,
+    pub(crate) source: Rc<RefCell<SourceCapture>>,
 }
 
 impl TonemapControl {
@@ -114,7 +130,21 @@ impl TonemapControl {
         settings.validate()?;
         Ok(TonemapControl {
             settings: Rc::new(Cell::new(settings)),
+            source: Default::default(),
         })
+    }
+
+    /// Capture the next eligible native-size real image before tone mapping.
+    pub fn request_source_capture(&self) {
+        *self.source.borrow_mut() = SourceCapture::Requested;
+    }
+
+    /// Retrieve the capture, or cancel an unfulfilled request.
+    pub fn take_source_capture(&self) -> Option<TonemapSource> {
+        match self.source.take() {
+            SourceCapture::Recorded(source) => Some(source),
+            _ => None,
+        }
     }
 
     /// Current settings.

@@ -58,6 +58,9 @@ raa-sharpen = { path = "../raa-sharpen" }
 raa-deform = { path = "../raa-deform" }
 raa-sdf-trace = { path = "../raa-sdf-trace" }
 
+[build-dependencies]
+naga = { workspace = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }

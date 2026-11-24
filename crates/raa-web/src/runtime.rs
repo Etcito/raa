@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use raa_core::{
     AdapterSummary, CanvasSurface, DeviceRequest, FrameGraph, GpuContext, GpuOptions, RaaError,
@@ -71,12 +71,16 @@ struct RetainedReal {
     ready: Arc<AtomicBool>,
 }
 
+const PREDICTION_PENDING: u8 = 0;
+const PREDICTION_USABLE: u8 = 1;
+const PREDICTION_REJECTED: u8 = 2;
+
 struct RetainedPrediction {
     retired: bool,
     key: PredictionKey,
     source_id: u64,
     texture: wgpu::Texture,
-    ready: Arc<AtomicBool>,
+    status: Arc<AtomicU8>,
     deadline_ms: f64,
 }
 
@@ -332,28 +336,10 @@ impl WebRuntime {
         texture: wgpu::Texture,
         commands: wgpu::CommandBuffer,
     ) -> Result<bool, RaaError> {
-        self.gpu.ensure_live()?;
-        self.promote_real();
-        let now = self.performance.now();
-        let (width, height) = self.surface.size();
-        if self.pending_real.is_some()
-            || self
-                .prediction
-                .as_ref()
-                .is_some_and(|p| !p.ready.load(Ordering::Acquire))
-            || !(0.0..=now).contains(&key.cutoff_ms)
-            || !deadline_ms.is_finite()
-            || !measured_cost_ms.is_finite()
-            || measured_cost_ms <= 0.0
-            || now + measured_cost_ms >= deadline_ms
-            || !self.ready_real.as_ref().is_some_and(|source| {
-                source.frame == source_id
-                    && source.target != key.target
-                    && key.target.includes(source.target)
-            })
-            || texture.width() != width
-            || texture.height() != height
-            || texture.depth_or_array_layers() != 1
+        if !self.admit_prediction(&key, source_id, deadline_ms, measured_cost_ms)? {
+            return Ok(false);
+        }
+        if texture.size() != self.presentation_extent()
             || texture.dimension() != wgpu::TextureDimension::D2
             || texture.sample_count() != 1
             || texture.format() != self.surface.format()
@@ -361,21 +347,140 @@ impl WebRuntime {
         {
             return Ok(false);
         }
-        let ready = Arc::new(AtomicBool::new(false));
-        let completed = Arc::clone(&ready);
+        self.enqueue_prediction(key, source_id, deadline_ms, texture, commands, None);
+        Ok(true)
+    }
+
+    /// Record bounded prediction work only after admission. A four-byte map-read
+    /// buffer must contain zero for a complete image. Pending or failed validation
+    /// leaves the real-frame fallback available.
+    pub fn record_checked_prediction(
+        &mut self,
+        key: PredictionKey,
+        source_id: u64,
+        deadline_ms: f64,
+        measured_cost_ms: f64,
+        record: impl FnOnce(
+            &GpuContext,
+            &wgpu::Texture,
+        ) -> Result<(wgpu::CommandBuffer, wgpu::Buffer), RaaError>,
+    ) -> Result<bool, RaaError> {
+        if !self.admit_prediction(&key, source_id, deadline_ms, measured_cost_ms)? {
+            return Ok(false);
+        }
+        let texture = self.gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("raa prediction display"),
+            size: self.presentation_extent(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface.format(),
+            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let (commands, validation) = record(&self.gpu, &texture)?;
+        if validation.size() != 4 || !validation.usage().contains(wgpu::BufferUsages::MAP_READ) {
+            return Err(RaaError::Unsupported(
+                "prediction validation requires a four-byte MAP_READ buffer".into(),
+            ));
+        }
+        if self.performance.now() + measured_cost_ms >= deadline_ms {
+            return Ok(false);
+        }
+        self.enqueue_prediction(
+            key,
+            source_id,
+            deadline_ms,
+            texture,
+            commands,
+            Some(validation),
+        );
+        Ok(true)
+    }
+
+    fn presentation_extent(&self) -> wgpu::Extent3d {
+        let (width, height) = self.surface.size();
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        }
+    }
+
+    fn admit_prediction(
+        &mut self,
+        key: &PredictionKey,
+        source_id: u64,
+        deadline_ms: f64,
+        measured_cost_ms: f64,
+    ) -> Result<bool, RaaError> {
+        self.gpu.ensure_live()?;
+        self.promote_real();
+        let now = self.performance.now();
+        Ok(self.pending_real.is_none()
+            && self
+                .prediction
+                .as_ref()
+                .is_none_or(|p| p.status.load(Ordering::Acquire) != PREDICTION_PENDING)
+            && (0.0..=now).contains(&key.cutoff_ms)
+            && deadline_ms.is_finite()
+            && measured_cost_ms.is_finite()
+            && measured_cost_ms > 0.0
+            && now + measured_cost_ms < deadline_ms
+            && self.ready_real.as_ref().is_some_and(|source| {
+                source.frame == source_id
+                    && source.target != key.target
+                    && key.target.includes(source.target)
+            }))
+    }
+
+    fn enqueue_prediction(
+        &mut self,
+        key: PredictionKey,
+        source_id: u64,
+        deadline_ms: f64,
+        texture: wgpu::Texture,
+        commands: wgpu::CommandBuffer,
+        validation: Option<wgpu::Buffer>,
+    ) {
+        let status = Arc::new(AtomicU8::new(PREDICTION_PENDING));
+        let completed = Arc::clone(&status);
         self.gpu.queue().submit([commands]);
-        self.gpu
-            .queue()
-            .on_submitted_work_done(move || completed.store(true, Ordering::Release));
+        if let Some(buffer) = validation {
+            let readback = buffer.clone();
+            buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    let usable = result.is_ok() && {
+                        let usable = readback
+                            .slice(..)
+                            .get_mapped_range()
+                            .is_ok_and(|bytes| *bytes == [0; 4]);
+                        readback.unmap();
+                        usable
+                    };
+                    completed.store(
+                        if usable {
+                            PREDICTION_USABLE
+                        } else {
+                            PREDICTION_REJECTED
+                        },
+                        Ordering::Release,
+                    );
+                });
+        } else {
+            self.gpu.queue().on_submitted_work_done(move || {
+                completed.store(PREDICTION_USABLE, Ordering::Release)
+            });
+        }
         self.prediction = Some(RetainedPrediction {
             retired: false,
             key,
             source_id,
             texture,
-            ready,
+            status,
             deadline_ms,
         });
-        Ok(true)
     }
 
     /// Select without waiting for the queue. Presentation never executes the graph.
@@ -391,7 +496,7 @@ impl WebRuntime {
         let candidate = self.prediction.as_ref().filter(|prediction| {
             !prediction.retired
                 && now <= prediction.deadline_ms
-                && prediction.ready.load(Ordering::Acquire)
+                && prediction.status.load(Ordering::Acquire) == PREDICTION_USABLE
         });
         let real = self.ready_real.as_ref();
         let (id, texture, predicted) = match select(

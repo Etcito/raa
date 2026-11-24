@@ -94,16 +94,25 @@ compose it once from current host state at the display opportunity. Reset presen
 and graph, model, or view changes. Resize and normal rendering retire retained images
 automatically. A missing selection leaves the previous canvas image in place.
 
-The native renderer extension must retain linear HDR and primary geometry guides for the returned
-real source ID. It owns target-geometry reprojection, selective refresh, inference, and the display
-transform. It may submit one resolved image through the Rust `Engine::submit_prediction` path
-after it has measured headroom. The deadline passed there must cover prediction cost, the
-presentation copy, and the next real cutoff. Selection checks the cutoff snapshot again and
-prefers a completed real image for the target. Presentation submits only a texture copy, so it
-does not advance the scene clock or graph history.
+A native Rust extension sharing the engine's WebGPU device can opt in with
+`Engine::prepare_prediction_warp` before producing split real frames. The real tonemap pass
+copies native HDR and depth into immutable textures in the original submission. To submit a
+target, the extension supplies unjittered motion from that exact real frame, target depth,
+lighting influence, a depth tolerance and a maximum refresh pixel count. The warp uses
+nearest source HDR with a depth check. Missing correspondence, invalid HDR, and changed
+lighting enter a GPU work list. The extension supplies the target-only shading pipeline.
+RAA dispatches up to the configured capacity and resolves only the requested pixels.
+An overflow, missing sample, or failed readback disqualifies the entire prediction.
+`PREDICTION_REFRESH_WGSL` declares the work-list layout and index helpers.
 
-The existing FP32 area-light package is an area-filter ABI. No compatible predictive manifest,
-live-trained weights, or renderer extension producing target HDR is supplied here. The shipped
-browser API therefore uses the retained-real fallback. Predictive activation still requires the
-ticket 10 target capture format and ticket 12 cutoff snapshot to agree with the decoder's
-versioned signal schema and golden vectors.
+The extension applies the display transform to the resolved HDR. A future predictive decoder
+can refine that HDR before the transform through the same interface. Presentation checks the
+cutoff snapshot again and prefers a completed real image for the target. The deadline must
+cover recording, warp, refresh, readback and the presentation copy while preserving the next
+real cutoff. None of these passes execute the real scene graph or advance its histories.
+
+The browser host still needs a producer for cutoff-time target guides, sparse target shading,
+and the display and HUD integration. The existing FP32 weight package uses the area-light ABI.
+No compatible predictive manifest, live-trained weights or live decoder are available here.
+Native Windows evidence must measure the real capture copies, warp, refresh, validation and
+presentation, including a flash and the late-real recovery case.

@@ -265,7 +265,7 @@ impl Targets {
                 origin: (0, 0),
                 size,
             },
-            depth: Target::new(gpu, "raa-pipeline.depth", size, DEPTH_FORMAT, GBUFFER_USAGE),
+            depth: Target::new(gpu, "raa-pipeline.depth", size, DEPTH_FORMAT, CAPTURE_GUIDE_USAGE),
             normal: Target::new(
                 gpu,
                 "raa-pipeline.normal",

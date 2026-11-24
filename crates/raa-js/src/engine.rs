@@ -375,6 +375,8 @@ fn retire_sky_views(st: &EngineState) -> Result<(), RaaError> {
 #[wasm_bindgen(js_name = Engine)]
 pub struct Engine {
     runtime: Option<WebRuntime>,
+    prediction_warp: Option<crate::prediction_warp::PredictionWarp>,
+    prediction_real: Option<(u64, raa_tonemap::TonemapSource)>,
     state: Shared,
     pub(crate) viewport: (u32, u32),
 }
@@ -398,6 +400,7 @@ impl Engine {
         if self.viewport != size {
             self.runtime()?.resize(size.0, size.1);
             self.viewport = size;
+            self.prediction_real = None;
         } else {
             self.runtime()?;
         }
@@ -447,6 +450,48 @@ impl Engine {
             .map_err(|e| js_err(&e))
     }
 
+    /// Prepare the analytic pipeline ahead of the display deadline on this device.
+    pub fn prepare_prediction_warp(&mut self) -> Result<&GpuContext, JsValue> {
+        if self.prediction_warp.is_none() {
+            let warp = crate::prediction_warp::PredictionWarp::new(self.runtime()?.gpu());
+            self.prediction_warp = Some(warp);
+        }
+        Ok(self.runtime()?.gpu())
+    }
+
+    /// Backward-warp the retained real source and shade the bounded repair list.
+    /// Inputs and the stateless renderer must come from the same device and source
+    /// frame / target snapshot pair. Presentation revalidates the snapshot.
+    pub fn submit_warped_prediction(
+        &mut self,
+        snapshot: &JsValue,
+        source_id: u64,
+        deadline_ms: f64,
+        measured_cost_ms: f64,
+        guides: crate::PredictionGuides<'_>,
+        renderer: &mut impl crate::PredictionRenderer,
+    ) -> Result<bool, JsValue> {
+        let target = present_target(snapshot).map_err(|e| js_err(&e))?;
+        let Some(key) = prediction_key(snapshot, target) else {
+            return Ok(false);
+        };
+        let runtime = self.runtime.as_mut().ok_or_else(disposed)?;
+        let Some(warp) = self.prediction_warp.as_ref() else {
+            return Ok(false);
+        };
+        let Some((captured_id, source)) = &self.prediction_real else {
+            return Ok(false);
+        };
+        if *captured_id != source_id {
+            return Ok(false);
+        }
+        runtime
+            .record_checked_prediction(key, source_id, deadline_ms, measured_cost_ms, |gpu, output| {
+                warp.record(gpu, source, guides, output, renderer)
+            })
+            .map_err(|e| js_err(&e))
+    }
+
     /// Opens one scene invocation: clear the observation and open the renderer's index.
     fn begin_scene_invocation(&mut self) -> Result<(), RaaError> {
         let runtime = self.runtime.as_ref().ok_or_else(disposed_error)?;
@@ -466,6 +511,7 @@ impl Engine {
         now_ms: f64,
         timing: Option<&mut FrameTiming>,
     ) -> Result<(), RaaError> {
+        self.prediction_real = None;
         self.begin_scene_invocation()?;
         let result = self
             .runtime
@@ -721,6 +767,8 @@ impl Engine {
             .map_err(|e| js_err(&e))?;
         Ok(Engine {
             runtime: Some(runtime),
+            prediction_warp: None,
+            prediction_real: None,
             state,
             viewport,
         })
@@ -750,6 +798,7 @@ impl Engine {
     #[wasm_bindgen(js_name = resetPresentation)]
     pub fn reset_presentation(&mut self) -> Result<(), JsValue> {
         self.runtime()?.clear_retained_frames();
+        self.prediction_real = None;
         Ok(())
     }
 
@@ -764,9 +813,33 @@ impl Engine {
             return Ok(None);
         }
         self.begin_scene_invocation().map_err(|e| js_err(&e))?;
-        let result = self.runtime.as_mut().ok_or_else(disposed_error)
+        let capture = self.prediction_warp.as_ref().and_then(|_| {
+            let state = self.state.borrow();
+            let state = state.as_ref()?;
+            let single = state.features.get::<api::ViewsState>().is_none_or(|views| {
+                matches!(views.viewports(), [rect]
+                    if (rect.x, rect.y, rect.width, rect.height) == (0.0, 0.0, 1.0, 1.0))
+            });
+            single.then(|| state.tonemap.clone())
+        });
+        if let Some(control) = &capture {
+            control.request_source_capture();
+        }
+        let result = self
+            .runtime
+            .as_mut()
+            .ok_or_else(disposed_error)
             .and_then(|runtime| runtime.produce_real(now_ms, target));
         self.finish_scene_invocation(result.is_ok());
+        let source = capture.and_then(|control| control.take_source_capture());
+        if let Ok(id) = result {
+            let clean = self
+                .state
+                .borrow()
+                .as_ref()
+                .is_some_and(|state| state.lit.handle().camera_jitter_ndc() == [0.0; 2]);
+            self.prediction_real = source.filter(|_| clean).map(|source| (id, source));
+        }
         result.map(|id| Some(id as f64)).map_err(|e| js_err(&e))
     }
 
@@ -1125,6 +1198,8 @@ impl Engine {
 
     /// Releases the GPU objects and the scene; every later call throws `api.disposed`.
     pub fn dispose(&mut self) {
+        self.prediction_real = None;
+        self.prediction_warp = None;
         self.runtime = None;
         self.state.borrow_mut().take();
     }

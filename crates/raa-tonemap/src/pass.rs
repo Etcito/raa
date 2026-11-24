@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use raa_core::{GpuContext, RaaError};
 use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, ResourceTable, Targets};
 
-use crate::{ToneMapping, TonemapControl};
+use crate::{SourceCapture, ToneMapping, TonemapControl, TonemapSource};
 
 /// WGSL of the display transform (vertex `vs_main`, fragment `fs_main`; group 0: params,
 /// hdr source, depth, EnvGpu).
@@ -221,6 +221,42 @@ impl TonemapPass {
     }
 }
 
+fn capture_source(ctx: &mut RecordCtx<'_>, bound: &Bound) -> Option<TonemapSource> {
+    use wgpu::{TextureFormat as F, TextureUsages as U};
+    let depth = bound.depth.texture();
+    let size = ctx.backbuffer.texture().size();
+    for (texture, format) in [(&bound.hdr, F::Rgba16Float), (depth, F::Depth32Float)] {
+        if texture.size() != size
+            || texture.dimension() != wgpu::TextureDimension::D2
+            || texture.format() != format
+            || texture.sample_count() != 1
+            || texture.mip_level_count() != 1
+            || !texture.usage().contains(U::COPY_SRC)
+        {
+            return None;
+        }
+    }
+    let mut copy = |source: &wgpu::Texture, label| {
+        let texture = ctx.gpu.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: source.format(),
+            usage: U::COPY_DST | U::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        ctx.encoder
+            .copy_texture_to_texture(source.as_image_copy(), texture.as_image_copy(), size);
+        texture
+    };
+    Some(TonemapSource {
+        hdr: copy(&bound.hdr, "raa prediction real HDR"),
+        depth: copy(depth, "raa prediction real depth"),
+    })
+}
+
 impl FeaturePass for TonemapPass {
     fn name(&self) -> &str {
         TONEMAP_NAME
@@ -266,6 +302,10 @@ impl FeaturePass for TonemapPass {
                 "tonemap: pipeline or bind group missing at record".to_owned(),
             ));
         };
+        let requested = matches!(*self.control.source.borrow(), SourceCapture::Requested);
+        if requested && let Some(source) = capture_source(ctx, bound) {
+            *self.control.source.borrow_mut() = SourceCapture::Recorded(source);
+        }
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("raa.tonemap"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
