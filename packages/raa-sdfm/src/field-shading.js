@@ -113,7 +113,7 @@ const MODE = { colour: 0, constant: 1, graph: 2 };
 export const FIELD_FRAME_WGSL = /* wgsl */ `
 const SDFM_TANGENT_AXIS = vec3f(${REST_TANGENT_AXIS.map((v) => Math.fround(v).toPrecision(9)).join(', ')});
 
-fn sdfm_posed_normal(in: MaterialInput, g: vec3f) -> vec3f {
+fn sdfm_pose_normal(in: MaterialInput, g: vec3f, validate_field: bool) -> vec3f {
   let n = normalize(in.normal);
   if (dot(g, g) == 0.0) { return n; }
   let nr0 = vec3f(in.uv, in.color.w);
@@ -129,10 +129,16 @@ fn sdfm_posed_normal(in: MaterialInput, g: vec3f) -> vec3f {
   let t = normalize(tw);
   let bw = cross(n, t) * select(-1.0, 1.0, in.tangent.w >= 0.0);
   var m = normalize(dot(g, tr) * t + dot(g, br) * bw + dot(g, nr) * n);
+  // A field gradient can belong to another surface on a thin wall or a coarse mesh. Test it before facing it to the view.
+  if (validate_field && !(dot(m, n) >= 0.5)) { return n; }
   // At the silhouette the SDF normal of a facet the camera sees can lean past the view: keep it visible (no dark rim).
   let d = dot(m, in.view_dir);
   if (d < 0.02 && dot(n, in.view_dir) > 0.0) { m = normalize(m + in.view_dir * (0.02 - d)); }
   return m;
+}
+
+fn sdfm_posed_normal(in: MaterialInput, g: vec3f) -> vec3f {
+  return sdfm_pose_normal(in, g, false);
 }
 
 // The inverse: a world (posed) direction v re-expressed in the rest frame, the space of the field. A rotation only: with
@@ -202,8 +208,8 @@ fn sdff_normal(in: MaterialInput, s: PmfSample) -> vec3f {
   let mesh = normalize(in.normal);
   let len = length(s.g);
   if (!(len > 0.0) || len > 3.0e38) { return mesh; }
-  let m = sdfm_posed_normal(in, s.g / len);
-  // A field normal past 60 degrees from the mesh's (a thin wall, a coarse approximation) keeps the mesh normal.
+  let m = sdfm_pose_normal(in, s.g / len, true);
+  // Keep the corrected normal within 60 degrees of the mesh at the silhouette too.
   return select(mesh, m, dot(m, mesh) >= 0.5);
 }
 `;

@@ -182,6 +182,15 @@ test('the interpreter text holds no S11-forbidden token and stays under the RAA 
   assert.ok(bytes < MATERIAL_FUNCTION_MAX_BYTES, `${bytes} bytes`);
 });
 
+test('field gradients are checked against the mesh before the silhouette correction', () => {
+  const { wgsl } = fieldPartShading(shading(), [], { field: FIELD });
+  const guard = wgsl.indexOf('if (validate_field && !(dot(m, n) >= 0.5)) { return n; }');
+  const facing = wgsl.indexOf('let d = dot(m, in.view_dir);');
+  assert.ok(guard >= 0 && guard < facing, 'a reversed field gradient must fall back before it can face the camera');
+  assert.match(wgsl, /sdfm_pose_normal\(in, s\.g \/ len, true\)/);
+  assert.match(wgsl, /fn sdfm_posed_normal[^{}]+\{\s*return sdfm_pose_normal\(in, g, false\);/);
+});
+
 test('the rest frame is linear in the rest normal and the WGSL axis is REST_TANGENT_AXIS', () => {
   const n = [0.6, 0, 0.8];
   const [ax, ay, az] = REST_TANGENT_AXIS;
