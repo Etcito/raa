@@ -1033,6 +1033,65 @@ impl Engine {
         Ok(output.into())
     }
 
+    /// Reads linear RGBA16F from the mesh trace composite or the ordinary forward pass.
+    #[wasm_bindgen(js_name = captureMeshLighting)]
+    pub async fn capture_mesh_lighting(
+        &mut self,
+        now_ms: f64,
+        traced: bool,
+    ) -> Result<JsValue, JsValue> {
+        if !now_ms.is_finite() {
+            return Err(js_err(&invalid(
+                "invalid mesh lighting capture time".into(),
+            )));
+        }
+        self.render_frame(now_ms, None)
+            .map_err(|error| js_err(&error))?;
+        let texture = self.with_state(|gpu, st| {
+            if !gpu.summary().is_hardware() {
+                return Err(RaaError::Unsupported(
+                    "mesh lighting capture requires hardware WebGPU".into(),
+                ));
+            }
+            let pipeline = st.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
+            let submission = pipeline.scene_submission();
+            if submission.record_failed
+                || submission.submitted_mask != 1
+                || submission.pending_mask != 0
+            {
+                return Err(invalid(
+                    "mesh lighting capture requires one submitted primary view".into(),
+                ));
+            }
+            let producer = if traced { "trace.mesh" } else { "forward" };
+            pipeline
+                .resources()
+                .get(producer, "color")
+                .map(|image| image.view.texture().clone())
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "missing mesh lighting capture tap {producer}.color"
+                    ))
+                })
+        })?;
+        let runtime = self.runtime.as_ref().ok_or_else(disposed)?;
+        let bytes = raa_web::read_capture_texture(runtime.gpu(), &texture)
+            .await
+            .map_err(|error| js_err(&error))?;
+        let output = Object::new();
+        set(
+            &output,
+            "size",
+            &number_array(&[texture.width(), texture.height()]),
+        );
+        set(
+            &output,
+            "data",
+            &js_sys::Uint8Array::from(bytes.as_slice()).into(),
+        );
+        Ok(output.into())
+    }
+
     /// Selects camera jitter independently of TAA. Null uses the default TAA-driven policy.
     #[wasm_bindgen(js_name = setCameraJitter)]
     pub fn set_camera_jitter(&mut self, enabled: Option<bool>) -> Result<(), JsValue> {

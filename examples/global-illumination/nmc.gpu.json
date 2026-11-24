@@ -5,6 +5,7 @@
     "baseline",
     "area-pilot",
     "gallery-path-capture",
-    "gallery-path-measure"
+    "gallery-path-measure",
+    "gallery-path-diffuse"
   ]
 }

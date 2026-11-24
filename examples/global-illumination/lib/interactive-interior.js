@@ -149,6 +149,20 @@ function build(engine, _lib, selected = variant) {
     ...room.room,
     opening: skylightBlocked ? 0 : skylightWidth,
   }, shellThickness);
+  // The physical regression can author the same wall colors through the
+  // supported vertex stream, without changing the gallery's normal materials.
+  if (selected.vertexWallColors) {
+    const white = material([1, 1, 1]);
+    const colors = new Float32Array(shell.positions.length / 3 * 4).fill(1);
+    const linear = value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+    for (const [surface, color] of [[3, room.colors.red], [4, room.colors.green]]) {
+      const { first, count } = shell.subMeshes[surface];
+      const rgba = [...color.map(linear), 1];
+      for (let i = first; i < first + count; i++) colors.set(rgba, shell.indices[i] * 4);
+      surfaces[surface] = white;
+    }
+    shell.colors = colors;
+  }
   instance({
     ...shell,
     subMeshes: shell.subMeshes.map((part, index) => ({ ...part, material: surfaces[index] })),

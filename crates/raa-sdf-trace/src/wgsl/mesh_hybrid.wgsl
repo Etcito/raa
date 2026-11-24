@@ -107,10 +107,11 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     let far = world_at(uv, 1.0);
     let ray = Ray(origin, normalize(far - origin));
     var spec_seed = hybrid_seed(id.xy, 0u);
+    let diffuse_output = options[2].z;
     // Mirror screen evidence uses the same confidence/disocclusion checks as
     // ordinary hybrid reflections, before any BVH query or network work.
     if z < 1.0 && textureLoad(motion, pixel, 0).w > 0.5 {
-        if hybrid.capture != 0u {
+        if hybrid.capture != 0u || diffuse_output != 0u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
@@ -131,12 +132,20 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&counters[PRIMARY_BVH_PIXELS], 1u);
     let hit = closest(ray, frame.clip.y, false);
     if hit.object == MISS {
+        if diffuse_output != 0u {
+            textureStore(radiance, sample_pixel, vec4<f32>(0.0));
+            return;
+        }
         textureStore(radiance, sample_pixel, vec4<f32>(textureSampleLevel(sky, raa_linear_clamp, ray.direction, 0).rgb, 1.0));
         return;
     }
     let tri = triangles[hit.object];
     let mat = materials[tri.a.material];
     if (mat.flags.x & 3u) != 0u {
+        if diffuse_output != 0u {
+            textureStore(radiance, sample_pixel, vec4<f32>(0.0));
+            return;
+        }
         textureStore(radiance, sample_pixel, vec4<f32>(trace_path_steps(ray, options[0].y, true, 2u, &spec_seed), 1.0));
         return;
     }
@@ -180,6 +189,11 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&counters[DIFFUSE_MISSING_PIXELS], 1u);
     let indirect_diffuse = hybrid_diffuse(p, ng, n, mat, &diffuse_seed);
     var direct_seed = hybrid_seed(id.xy, 0x217c6407u);
-    let direct = sun_and_lights(p, ng, n, v, mat, &direct_seed);
+    let direct = sun_and_lights(p, ng, n, v, mat, &direct_seed, diffuse_output != 0u);
+    if diffuse_output != 0u {
+        let rgb = direct + select(vec3<f32>(0.0), indirect_diffuse, diffuse_output == 2u);
+        textureStore(radiance, sample_pixel, vec4<f32>(rgb, 1.0));
+        return;
+    }
     textureStore(radiance, sample_pixel, vec4<f32>(mat.emission_metallic.rgb + direct + indirect_diffuse + spec, 1.0));
 }

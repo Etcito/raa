@@ -153,15 +153,20 @@ fn bsdf(mat: Material, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>) -> vec3<f32> {
         * ggx_distribution(a, nh) * ggx_visibility(a, nv, nl);
 }
 
+fn direct_brdf(mat: Material, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, diffuse_only: bool) -> vec3<f32> {
+    if diffuse_only { return diffuse(mat) / PI; }
+    return bsdf(mat, n, v, l);
+}
+
 fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
-                  seed: ptr<function, u32>) -> vec3<f32> {
+                  seed: ptr<function, u32>, diffuse_only: bool) -> vec3<f32> {
     let origin = p + ng * (2.0 * EPS);
     var direct = vec3<f32>(0.0);
     let sun = -frame.sun_dir.xyz;
     let nl = saturate(dot(n, sun));
     if nl > 0.0 && dot(ng, sun) > 0.0 && any(frame.sun_color.rgb > vec3<f32>(0.0))
         && closest(Ray(origin, sun), frame.clip.y, true).object == MISS {
-        direct += bsdf(mat, n, v, sun) * (nl * frame.sun_color.rgb);
+        direct += direct_brdf(mat, n, v, sun, diffuse_only) * (nl * frame.sun_color.rgb);
     }
     for (var i = 0u; i < min(256u, frame.light_info.x); i++) {
         let light = lights[i];
@@ -190,7 +195,7 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
         let nl = saturate(dot(n, l));
         if nl > 0.0 && dot(ng, l) > 0.0 && weight > 0.0
             && closest(Ray(origin, l), distance - 2.0 * EPS, true).object == MISS {
-            direct += bsdf(mat, n, v, l) * (nl * weight * light.radiance.rgb);
+            direct += direct_brdf(mat, n, v, l, diffuse_only) * (nl * weight * light.radiance.rgb);
         }
     }
     return direct;
@@ -251,14 +256,23 @@ fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) 
 }
 
 fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
+    return trace_path_lobe(initial, mirrors, path, bounces, seed, 0u);
+}
+
+// A diagnostic can isolate the diffuse BRDF at the primary surface while
+// retaining the independent reference sampler and complete secondary transport.
+fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
+                   seed: ptr<function, u32>, diffuse_output: u32) -> vec3<f32> {
     var ray = initial;
     var throughput = vec3<f32>(1.0);
     var sum = vec3<f32>(0.0);
     var mirror_steps = mirrors;
     var path_steps = bounces;
     for (var step = 0u; step < 13u; step++) {
+        let isolate_diffuse = step == 0u && diffuse_output != 0u;
         let hit = closest(ray, frame.clip.y, false);
         if hit.object == MISS {
+            if isolate_diffuse { return vec3<f32>(0.0); }
             return sum + throughput * textureSampleLevel(sky, raa_linear_clamp, ray.direction, 0).rgb;
         }
         if !path && step == 0u { atomicAdd(&counters[GEOMETRY_HIT], 1u); }
@@ -271,6 +285,7 @@ fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: 
             + tri.b.normal * hit.bary.x + tri.c.normal * hit.bary.y);
         let oriented = select(-ns, ns, dot(ns, ng) >= 0.0);
         let n = select(ng, oriented, dot(oriented, -ray.direction) > 0.001);
+        if isolate_diffuse && (mat.flags.x & 3u) != 0u { return vec3<f32>(0.0); }
         if (mat.flags.x & 1u) != 0u && mirror_steps > 0u {
             atomicAdd(&counters[MIRROR_RAYS], 1u);
             ray = Ray(p + ng * (2.0 * EPS), reflect(ray.direction, ng));
@@ -278,9 +293,10 @@ fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: 
             mirror_steps--;
             continue;
         }
-        sum += throughput * mat.emission_metallic.rgb;
+        if !isolate_diffuse { sum += throughput * mat.emission_metallic.rgb; }
         if (mat.flags.x & 2u) != 0u { return sum + throughput * mat.base_roughness.rgb; }
-        sum += throughput * sun_and_lights(p, ng, n, -ray.direction, mat, seed);
+        sum += throughput * sun_and_lights(p, ng, n, -ray.direction, mat, seed, isolate_diffuse);
+        if isolate_diffuse && diffuse_output == 1u { break; }
         if !path {
             sum += throughput * terminal_diffuse_gi(p, ng, n, mat);
             break;
@@ -306,7 +322,7 @@ fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: 
         let nh = saturate(dot(n, half_vector));
         let pdf_spec = ggx_distribution(a, nh) * nh / max(4.0 * dot(v, half_vector), 1e-5);
         let pdf = mix(nl / PI, pdf_spec, chance);
-        throughput *= bsdf(mat, n, v, out_dir) * (nl / max(pdf, 1e-5));
+        throughput *= direct_brdf(mat, n, v, out_dir, isolate_diffuse) * (nl / max(pdf, 1e-5));
         ray = Ray(p + ng * (2.0 * EPS), normalize(out_dir));
         atomicAdd(&counters[PATH_RAYS], 1u);
         path_steps--;
@@ -381,12 +397,14 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     if options[0].w != 0u {
         atomicAdd(&counters[REFERENCE_PIXELS], 1u);
         var value = vec3<f32>(0.0);
+        let diffuse_output = options[2].z;
+        if diffuse_output != 0u { seed ^= options[2].w * 277803737u; }
         let mirrors = select(0u, options[0].y, options[1].y != 0u);
         for (var i = 0u; i < options[1].w; i++) {
             let subpixel = (vec2<f32>(random(&seed), random(&seed)) - 0.5) / vec2<f32>(size);
             let origin = world_at(uv + subpixel, 0.0);
             let far = world_at(uv + subpixel, 1.0);
-            value += trace_path(Ray(origin, normalize(far - origin)), mirrors, true, &seed);
+            value += trace_path_lobe(Ray(origin, normalize(far - origin)), mirrors, true, options[0].z, &seed, diffuse_output);
         }
         textureStore(radiance, sample_pixel, vec4<f32>(value / f32(options[1].w), 1.0));
         return;

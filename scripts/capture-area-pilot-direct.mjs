@@ -8,12 +8,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [chromeArg, pageArg, outputArg, op = 'area-pilot'] = process.argv.slice(2);
+const [chromeArg, pageArg, outputArg, op = 'area-pilot', comparison = 'fixed'] = process.argv.slice(2);
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-path-');
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure]');
+    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure|gallery-path-diffuse] [baseline|fixed]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -131,7 +131,7 @@ try {
   }
   console.log(`Windows ${version.Browser}: ${renderer}; WebGPU ${JSON.stringify(webgpu)}`);
   const result = await evalPage(`(async () => {
-    const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000 })});
+    const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({ buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline' })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
       if (base64) return { name, base64 };
       const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -164,7 +164,7 @@ try {
         await writeFile(path.join(output, record.file), bytes, { flag: 'wx' });
       }
     }
-  } else {
+  } else if (op === 'gallery-path-measure') {
     for (const row of data.cases) {
       const bytes = files.get(row.file);
       if (!/^[a-z0-9-]+\.png$/.test(row.file) || !bytes?.length) throw new Error(`Missing measurement image ${row.file}`);
@@ -176,7 +176,7 @@ try {
     ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
     receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
   };
-  const manifest = path.join(output, capture ? 'manifest.json' : 'measurement.json');
+  const manifest = path.join(output, capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json' : 'measurement.json');
   await writeFile(manifest, JSON.stringify({ ...data, source, windows: { browser: version.Browser, renderer, device: nvidia, webgpu } }, null, 2) + '\n', { flag: 'wx' });
   console.log(manifest);
 } catch (error) {

@@ -114,8 +114,8 @@ impl FeaturePass for MeshTracePass {
             REFERENCE_SPP,
             scene.sky_diffuse.to_bits(),
             path_mode as u32,
-            0,
-            0,
+            settings.diffuse_output as u32,
+            ctx.frame as u32,
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();

@@ -7,8 +7,8 @@ use raa_core::RaaError;
 use raa_lit::{DrawClass, FLAG_TRACE_MIRROR, FLAG_UNLIT, SurfaceModel};
 use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
-    MAX_BOUNCES, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial,
-    MeshTraceSettings, PathMode, REFERENCE_SPP,
+    DiffuseOutput, MAX_BOUNCES, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle,
+    MeshTraceMaterial, MeshTraceSettings, PathMode, REFERENCE_SPP,
 };
 use wasm_bindgen::prelude::*;
 
@@ -153,6 +153,15 @@ impl Engine {
                     previous.reflection_bounces,
                 )?,
                 path_bounces: integer(&options, "pathBounces", previous.path_bounces)?,
+                diffuse_output: match js::optional_string(&options, "diffuseOutput")?.as_deref() {
+                    None => previous.diffuse_output,
+                    Some("off") => DiffuseOutput::Off,
+                    Some("direct") => DiffuseOutput::Direct,
+                    Some("direct-and-indirect") => DiffuseOutput::DirectAndIndirect,
+                    Some(_) => {
+                        return Err(api_error("trace.invalid_settings", "unknown diffuseOutput"));
+                    }
+                },
                 path_mode: match js::optional_string(&options, "pathMode")?.as_deref() {
                     None => previous.path_mode,
                     Some("off") => PathMode::Off,

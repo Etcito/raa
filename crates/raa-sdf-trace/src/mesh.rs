@@ -19,6 +19,15 @@ pub const MAX_BOUNCES: u32 = 6;
 pub const REFERENCE_SPP: u32 = 4;
 const COUNTER_COUNT: usize = 20;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum DiffuseOutput {
+    #[default]
+    Off,
+    Direct,
+    DirectAndIndirect,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshTraceSettings {
     pub reflections: bool,
@@ -27,6 +36,7 @@ pub struct MeshTraceSettings {
     pub reflection_bounces: u32,
     pub path_bounces: u32,
     pub path_mode: PathMode,
+    pub diffuse_output: DiffuseOutput,
 }
 
 impl Default for MeshTraceSettings {
@@ -38,6 +48,7 @@ impl Default for MeshTraceSettings {
             reflection_bounces: 2,
             path_bounces: 2,
             path_mode: PathMode::Off,
+            diffuse_output: DiffuseOutput::Off,
         }
     }
 }

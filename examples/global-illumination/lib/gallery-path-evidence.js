@@ -1,4 +1,5 @@
 import { setCanvasSize } from '../../../web/common/page-runner.js';
+import { volumeRoom } from './content.js';
 import { interactiveInterior } from './interactive-interior.js';
 import { PATH_FIXTURE, digest, loadGalleryFit } from './gallery-path-model.js';
 
@@ -12,7 +13,7 @@ const CAMERAS = [
 const HOLDOUT = { id: 'right-aisle', eye: [1.1, 1.6, -1.45], target: [0, 1.4, -6.3] };
 const layout = { exposure: 1, rowOrder: 'top-down', byteOrder: 'little-endian', jitter: [0, 0] };
 
-async function create({ target, canvas, raa }, buildId, width, height) {
+async function create({ target, canvas, raa }, buildId, width, height, { vertexWallColors = false } = {}) {
   if (!/Windows.+Chrome\//.test(target.navigator.userAgent) || typeof buildId !== 'string' || !buildId) {
     throw new Error('Gallery path evidence requires a pinned Windows Chrome build');
   }
@@ -22,8 +23,8 @@ async function create({ target, canvas, raa }, buildId, width, height) {
     const { hardware, adapter } = engine.stats();
     if (!hardware || adapter?.isFallbackAdapter !== false) throw new Error('Expected hardware WebGPU adapter');
     const preset = scene.variants.find(variant => variant.id === 'performance');
-    scene.build(engine, { raa }, {
-      ...preset,
+    const state = scene.build(engine, { raa }, {
+      ...preset, vertexWallColors,
       effects: { ...preset.effects, gi: false, ssr: false, dof: false, bloom: false, 'moving-objects': false },
     });
     engine.setPassEnabled('taa', false);
@@ -32,7 +33,7 @@ async function create({ target, canvas, raa }, buildId, width, height) {
     engine.setToneMapping({ exposureEv: 0 });
     const facts = { hardware, adapter, browser: target.navigator.userAgent, devicePixelRatio: target.devicePixelRatio };
     const source = { kind: 'windows-render', buildId, fixture: PATH_FIXTURE, facts };
-    return { engine, source, setPose({ eye, target }) { engine.setCamera({ ...preset.selection.camera, eye, target }); } };
+    return { engine, source, state, setPose({ eye, target }) { engine.setCamera({ ...preset.selection.camera, eye, target }); } };
   } catch (error) {
     engine.dispose();
     throw error;
@@ -200,4 +201,120 @@ export async function measureGalleryPath(context, { buildId, width = 640, height
   } finally {
     engine.dispose();
   }
+}
+
+const REGIONS = {
+  redWall: [28, 115, 88, 152], greenWall: [548, 108, 610, 148],
+  panelLitFloor: [252, 307, 302, 340], warmPanel: [72, 12, 155, 28],
+};
+
+function half(view, offset) {
+  const bits = view.getUint16(offset, true);
+  const sign = (bits & 0x8000) ? -1 : 1;
+  const exp = (bits >> 10) & 31;
+  const fraction = bits & 1023;
+  if (exp === 31) throw new Error('Non-finite linear diffuse pixel');
+  return sign * (exp ? (1024 + fraction) * 2 ** (exp - 25) : fraction * 2 ** -24);
+}
+
+function accumulateRegions(sums, sample, width, height) {
+  if (sample.size[0] !== width || sample.size[1] !== height || sample.data.byteLength !== width * height * 8) {
+    throw new Error('Diffuse capture extent or RGBA16F byte length differs');
+  }
+  const view = new DataView(sample.data.buffer, sample.data.byteOffset, sample.data.byteLength);
+  for (const [name, [x0, y0, x1, y1]] of Object.entries(REGIONS)) {
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        for (let c = 0; c < 3; c++) sums[name][c] += half(view, (y * width + x) * 8 + c * 2);
+      }
+    }
+  }
+}
+
+function verifyDiffuseCases(cases) {
+  const get = (color, mode, panels = true) => cases.find(c => c.color === color && c.mode === mode && c.panels === panels).regions;
+  for (const mode of ['raster-diffuse', 'learned-direct', 'reference-direct', 'learned-diffuse', 'reference-diffuse']) {
+    const material = get('material', mode), vertex = get('vertex', mode);
+    for (const [region, dominant] of [['redWall', 0], ['greenWall', 1]]) {
+      const a = material[region], b = vertex[region];
+      if (a[dominant] < 0.004 || b[dominant] < 0.004
+          || b[dominant] < 1.6 * Math.max(...b.filter((_, c) => c !== dominant))
+          || a.some((value, c) => Math.abs(value - b[c]) > Math.max(0.0002, 0.035 * value))) {
+        throw new Error(`${mode}/${region}: vertex-tinted diffuse disagrees with material diffuse ${JSON.stringify({ a, b })}`);
+      }
+      if (mode.endsWith('direct') || mode === 'raster-diffuse') {
+        if (get('vertex', mode, false)[region].some(value => Math.abs(value) > 0.0001)) {
+          throw new Error(`${mode}/${region}: disabled panels still shade the wall`);
+        }
+      }
+    }
+  }
+  for (const name of ['redWall', 'greenWall', 'panelLitFloor']) {
+    const raster = get('material', 'raster-diffuse')[name];
+    const learned = get('material', 'learned-direct')[name];
+    const reference = get('material', 'reference-direct')[name];
+    for (let c = 0; c < 3; c++) {
+      // Raster form-factor clipping and traced visibility differ at occluder edges.
+      if (Math.abs(learned[c] - reference[c]) > Math.max(0.001, 0.12 * reference[c])
+          || Math.abs(learned[c] - raster[c]) > Math.max(0.003, 0.28 * raster[c])) {
+        throw new Error(`${name}: panel diffuse RGB mismatch ${JSON.stringify({ raster, learned, reference })}`);
+      }
+    }
+  }
+}
+
+export async function measureGalleryDiffuse(context, { buildId, requireFixed = true } = {}) {
+  const width = 640, height = 360, samples = 8;
+  const cases = [];
+  let captureSource;
+  let modelSha256;
+  for (const color of ['material', 'vertex']) {
+    const { engine, source, state, setPose } = await create(context, buildId, width, height, {
+      vertexWallColors: color === 'vertex',
+    });
+    captureSource = source;
+    try {
+      const model = await loadGalleryFit();
+      if (!model) throw new Error('Expected fitted gallery weights for diffuse regression');
+      modelSha256 = model.fit.weights.sha256;
+      engine.setMeshPathModel(model.bytes);
+      setPose(CAMERAS[0]);
+      engine.setLight({ ...volumeRoom().sun, intensity: 0 });
+      engine.setPassEnabled('gtao', false);
+      const modes = [
+        ['raster-rgb', 'off', false, 'off'],
+        ['raster-diffuse', 'off', false, 'off'],
+        ['learned-direct', 'learned', false, 'direct'],
+        ['reference-direct', 'off', true, 'direct'],
+        ['learned-diffuse', 'learned', false, 'direct-and-indirect'],
+        ['reference-diffuse', 'off', true, 'direct-and-indirect'],
+      ];
+      for (const [mode, pathMode, reference, diffuseOutput] of modes) {
+        engine.setAreaLightShading({ mode: mode === 'raster-rgb' ? 'ltc' : 'formFactor' });
+        engine.setMeshTracing({ pathMode, reference, diffuseOutput, reflections: false, pathBounces: 2 });
+        for (const panels of [true, false]) {
+          scene.setOption(engine, state, 'area-lights', panels);
+          const sums = Object.fromEntries(Object.keys(REGIONS).map(name => [name, [0, 0, 0]]));
+          for (let i = 0; i < samples; i++) {
+            accumulateRegions(sums, await engine.captureMeshLighting(TIME, pathMode !== 'off' || reference), width, height);
+          }
+          const regions = Object.fromEntries(Object.entries(sums).map(([name, sum]) => {
+            const [x0, y0, x1, y1] = REGIONS[name];
+            return [name, sum.map(value => value / (samples * (x1 - x0) * (y1 - y0)))];
+          }));
+          const stats = engine.meshTracingStats();
+          if (pathMode === 'learned' && (!stats?.modelPixels || stats.referencePixels)) throw new Error('No model path ran');
+          if (reference && (!stats?.referencePixels || stats.modelPixels)) throw new Error('Reference used the model');
+          cases.push({ color, mode, panels, regions, stats });
+        }
+      }
+    } finally {
+      engine.dispose();
+    }
+  }
+  if (requireFixed) verifyDiffuseCases(cases);
+  return { json: {
+    source: captureSource, modelSha256, size: [width, height], camera: CAMERAS[0], samples, ...layout,
+    space: 'linear-scene-rgb-from-rgba16f', regions: REGIONS, requireFixed, cases,
+  }, files: [] };
 }

@@ -1,5 +1,5 @@
 import { createGalleryAoControls } from './lib/gallery-ao.js';
-import { captureGalleryPath, measureGalleryPath } from './lib/gallery-path-evidence.js';
+import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPath } from './lib/gallery-path-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
@@ -134,7 +134,8 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       runner = null;
       return captureAreaPilot({ target, canvas, raa: lib.raa }, input?.args ?? input);
     });
-    for (const [op, action] of [['gallery-path-capture', captureGalleryPath], ['gallery-path-measure', measureGalleryPath]]) {
+    for (const [op, action] of [['gallery-path-capture', captureGalleryPath],
+      ['gallery-path-measure', measureGalleryPath], ['gallery-path-diffuse', measureGalleryDiffuse]]) {
       target.nmcGpu.ops[op] = input => exclusively(() => {
         stopInteractive();
         runner?.dispose();
