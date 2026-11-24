@@ -186,10 +186,14 @@ fn raa_gi_trace_screen(
     if dot(raa_gi_world_normal(pixel), direction) >= 0.0 {
         return raa_gi_screen_miss();
     }
+    // The DDA parameter is affine after projection. Undo the perspective divide to
+    // recover the world-space ray distance used to reproject the hit into lit history.
+    let w1 = raa_gi_screen_view_distance(origin + direction * distance);
+    let world_t = t * w0 / mix(w1, w0, t);
     let edge = min(min(position.x, 1.0 - position.x), min(position.y, 1.0 - position.y));
     return RaaGiScreenHit(
         true,
-        t * distance,
+        world_t * distance,
         position.xy,
         smoothstep(0.0, RAA_GI_SCREEN_EDGE_FADE, edge),
     );
