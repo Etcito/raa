@@ -9,7 +9,7 @@ import {
 
 const size = [160, 90];
 const pixels = size[0] * size[1];
-const budgetSteps = { reflection: [1, 2, 4, 8, 12, 16, 24], area: [2, 3, 5, 9, 16] };
+const budgetSteps = { reflection: [1, 2, 4, 8, 12, 16, 24], area: [2, 3, 5, 6, 7, 8, 9, 16] };
 const timedPasses = {
   reflection: ['ssr.hiz#hiz', 'ssr.trace#ssrTrace', 'ssr.incident#incident', 'ssr.replace#replace'],
   area: ['area.trace#trace', 'area.mask#mask', 'forward', 'ssr.replace#replace'],
