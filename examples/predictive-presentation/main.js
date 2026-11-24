@@ -179,14 +179,16 @@ async function run({ buildId, trajectory, model } = {}) {
     const missed = present(target);
     require(missed?.realFrameId === source && !missed.predicted, 'A missed deadline did not present the causal real image');
     const needed = guides.holes + guides.lightPixels;
-    require(submit(target, needed - 1), 'Budget-overflow fixture did not submit');
-    let admitted = false;
-    for (let attempt = 0; attempt < 100 && !admitted; attempt++) {
-      await opportunity();
-      require(!present(target)?.predicted, 'An incomplete repair reached the display');
-      admitted = submit(target, needed);
+    async function checkOverflow() {
+      require(submit(target, needed - 1), 'Budget-overflow fixture did not submit');
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await opportunity();
+        require(!present(target)?.predicted, 'An incomplete repair reached the display');
+        if (submit(target, needed)) return;
+      }
+      throw new Error('Valid prediction was not admitted after overflow fallback');
     }
-    require(admitted, 'Valid prediction was not admitted after overflow fallback');
+    await checkOverflow();
     const predicted = await waitFor(target, frame => frame.predicted);
     require(engine.stats().frames === 1, 'Prediction advanced real history');
     require(predicted.hud === `Tick ${target.target.tick} · prediction`, 'Prediction HUD did not use the current snapshot');
@@ -196,7 +198,7 @@ async function run({ buildId, trajectory, model } = {}) {
       const registration = engine.setGeneratedFrameModel(model.manifest, model.weights);
       require(registration.weightsSha256 === model.digest && registration.kind === 'windows-capture-fit',
         'Generated model receipt mismatch');
-      require(submit(target, needed), 'Learned prediction was refused');
+      await checkOverflow();
       const learned = await waitFor(target, frame => frame.predicted);
       let warpedChanged = 0, freshPreserved = 0, maxDisplayDelta = 0;
       for (let p = 0; p < width * height; p++) {
@@ -217,7 +219,7 @@ async function run({ buildId, trajectory, model } = {}) {
       const disabled = await waitFor(target, frame => frame.predicted);
       require(disabled.pixels.every((value, i) => value === predicted.pixels[i]), 'Analytic prediction changed after disabling the model');
       learnedProof = { ...registration, warpedChanged, freshPreserved, maxDisplayDelta,
-        analyticRestored: true, generatedAdvancedRealHistory: false };
+        analyticRestored: true, incompleteRepairBypassed: true, generatedAdvancedRealHistory: false };
     }
 
     // Render the same target only after selecting prediction. These pixels cannot feed the candidate.
