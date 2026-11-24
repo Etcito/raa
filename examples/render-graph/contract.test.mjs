@@ -4,6 +4,11 @@ import { RG_CAPTURE_T_S, ROOM_SUBJECTS, cameraAt, selectionAt } from './lib/scen
 import { validateInventory, validateRequiredFacts } from './lib/inventory.js';
 import { captionText, collectRgFacts, createRgPageRunner, halfFrameTimes } from './lib/runtime.js';
 import * as interpreter from './scenes/interpreter.js';
+import { runNeuralBaseline } from '../global-illumination/lib/neural-baseline-runner.js';
+import { BASELINE_EVENTS, BASELINE_FRAMES, BASELINE_WARMUP_FRAMES } from '../global-illumination/lib/neural-baseline.js';
+import { browserFrameFeedback } from '../../web/common/browser-frame-feedback.js';
+import { attachGiPage } from '../global-illumination/main.js';
+import { analyze } from '../../scripts/neural-baseline-latency.mjs';
 
 // Browser-free contract checks of the render-graph page share (contracts rg-room-scene and
 // rg-page-facts): the RG_CAMERA_PATH formula, the room subjects in the capture view, the
@@ -296,4 +301,247 @@ test('non-grid pair composition keeps its image blits and title band without ann
   assert.equal(trace.canvasOps.filter(op => op.op === 'drawImage' && op.args.length === 3).length, 2);
   assert.equal(trace.canvasOps.filter(op => op.op === 'fillRect').length, 2); // output background and title band
   assert.deepEqual(trace.canvasOps.filter(op => op.op === 'fillText').map(op => op.args[0]), ['frozen', 'interpreted']);
+});
+
+function baselineRuntime(beforeFrame = () => {}) {
+  let time = 0;
+  let keyboard = null;
+  const timeOrigin = 1795470000000;
+  const status = { textContent: '' };
+  const engines = [];
+  const canvas = {
+    style: {},
+    focus() {},
+    getBoundingClientRect: () => ({ toJSON: () => ({ x: 0, y: 0, width: canvas.width, height: canvas.height }) }),
+    addEventListener(name, listener) { assert.equal(name, 'keydown'); keyboard = listener; },
+    removeEventListener(name, listener) { if (listener === keyboard) keyboard = null; },
+  };
+  const target = {
+    performance: { timeOrigin, now: () => time += 0.05 },
+    document: { visibilityState: 'visible' },
+    navigator: { userAgent: 'test browser' },
+    devicePixelRatio: 1,
+    requestAnimationFrame(callback) {
+      return setImmediate(() => {
+        time += 16;
+        beforeFrame(engines.at(-1), overrides => keyboard?.({
+          code: 'Space', timeStamp: time - 1, isTrusted: true, preventDefault() {}, ...overrides,
+        }));
+        callback(time);
+      });
+    },
+    cancelAnimationFrame: clearImmediate,
+    setTimeout,
+    clearTimeout,
+  };
+  const raa = { async createEngine() {
+    const engine = {
+      mutations: [], renders: [], light: null, blocker: null, disposed: false,
+      setSky() {}, setWeather() {}, setEnvironmentLighting() {}, setAmbient() {}, setLight() {},
+      setToneMapping() {}, setGlobalIllumination() {}, setAreaLightShadows() {}, setGiQuality() {},
+      setTimeOfDay() {}, setAutoExposure() {}, setPassEnabled() {}, setRenderScale() {},
+      addMaterial: () => 1,
+      addLight(light) { assert.equal(this.light, null); this.light = light; return 4; },
+      addNode() { return ++this.nodes; },
+      nodes: 0,
+      addMesh: mesh => mesh.positions.length,
+      addMeshInstance(_node, mesh) { return mesh; },
+      setInstanceGlobalIllumination() {},
+      setCamera(pose) { this.mutations.push(['camera', pose]); },
+      setTransform(node, position) {
+        assert.equal(node, this.nodes);
+        this.mutations.push(['blocker', position]);
+      },
+      updateLight(handle, change) {
+        assert.equal(handle, 4);
+        this.mutations.push(['light', change.intensity]);
+      },
+      giStats: () => ({ active: true, pendingRebuild: false }),
+      areaLightShadows: () => ({
+        tier: 'auto', activeHeroes: 0, activeStochastic: 1, stochasticCells: 4, stochasticMode: 'stratified',
+      }),
+      lightStats: () => ({ activeLights: 1 }),
+      passes: () => [{ name: 'gi.area-shadow', enabled: true }],
+      stats: () => ({ hardware: true, adapter: { vendor: 'test' } }),
+      render(nowMs) { this.renders.push(nowMs); },
+      renderInstrumented(nowMs, ctx) {
+        const frameIndex = this.renders.length;
+        this.render(nowMs);
+        return {
+          ...ctx, nowMs, timeOriginMs: timeOrigin, frameIndex, error: null,
+          renderStartMs: target.performance.now(), acquireStartMs: target.performance.now(),
+          acquireEndMs: target.performance.now(), submitStartMs: target.performance.now(),
+          submitEndMs: target.performance.now(), presentSelectedMs: target.performance.now(),
+          presentReturnedMs: target.performance.now(),
+        };
+      },
+      dispose() { this.disposed = true; },
+    };
+    engines.push(engine);
+    return engine;
+  } };
+  return { target, canvas, raa, status, engines, hasKeyListener: () => keyboard !== null };
+}
+
+test('neural baseline replays identical blocker, flash and edge events on fresh engines', async () => {
+  const harness = baselineRuntime();
+  const trials = await runNeuralBaseline(harness, { captureId: 'playback', loadClass: 'idle' });
+  assert.deepEqual(trials.map(trial => trial.trialId), ['playback:1', 'playback:2']);
+  assert.deepEqual(harness.engines[0].mutations, harness.engines[1].mutations);
+  assert.deepEqual(harness.engines[0].renders, harness.engines[1].renders);
+  for (const engine of harness.engines) {
+    assert.equal(engine.light.kind, 'area');
+    assert.deepEqual(engine.light.size, [1.05, 1.30]);
+    assert.equal(engine.renders.length, BASELINE_WARMUP_FRAMES + BASELINE_FRAMES);
+    assert.equal(engine.disposed, true);
+    const [initialCamera, blocker, flashOn, flashOff, edgeCamera, restoredCamera] = engine.mutations;
+    assert.deepEqual(blocker, ['blocker', [0.85, 0, 0]]);
+    assert.deepEqual(flashOn, ['light', engine.light.intensity * 2]);
+    assert.deepEqual(flashOff, ['light', engine.light.intensity]);
+    assert.notDeepEqual(edgeCamera, initialCamera);
+    assert.deepEqual(restoredCamera, initialCamera);
+  }
+  for (const trial of trials) {
+    assert.equal(trial.status, 'complete');
+    assert.deepEqual(trial.missingEventIds, []);
+    assert.deepEqual(trial.facts.features, { denoise: false, upscale: false, predict: false });
+    assert.equal(trial.facts.areaShadows.stochasticMode, 'stratified');
+    assert.equal(trial.frames.length, BASELINE_FRAMES);
+    assert.deepEqual(trial.events.map(event => [event.eventId, event.presentId]),
+      BASELINE_EVENTS.map(event => [event.eventId, String(event.frame)]));
+    assert.ok(trial.events.every(event => event.trigger === 'scripted'));
+    assert.ok(trial.frames.every(frame => frame.frameIndex === BASELINE_WARMUP_FRAMES + frame.fixtureFrame));
+  }
+});
+
+test('neural baseline binds trusted key timing to the first affected frame', async () => {
+  const keyFrames = [1, 19, 37, 55, 73];
+  const keyTimes = [];
+  const harness = baselineRuntime((engine, key) => {
+    const frame = engine.renders.length - BASELINE_WARMUP_FRAMES;
+    if (frame === 0) {
+      key({ isTrusted: false });
+      key({ repeat: true });
+      key({ code: 'Escape' });
+    }
+    if (keyFrames.includes(frame)) {
+      const eventMs = harness.target.performance.now() - 0.5;
+      keyTimes.push(eventMs);
+      key({ timeStamp: eventMs });
+      key(); // The pending key already owns this frame.
+    }
+  });
+  const [trial] = await runNeuralBaseline(harness, { captureId: 'keys', mode: 'keyboard', loadClass: 'gpu-load' });
+  assert.equal(trial.status, 'complete');
+  assert.equal(trial.loadClass, 'gpu-load');
+  assert.equal(harness.hasKeyListener(), false);
+  assert.deepEqual(trial.missingEventIds, []);
+  assert.deepEqual(trial.events.map(event => event.eventMs), keyTimes);
+  assert.deepEqual(trial.frames.map(frame => frame.fixtureFrame), keyFrames);
+  const [summary] = analyze([trial]).loadClasses;
+  assert.equal(summary.keyboardEventCount, keyFrames.length);
+  assert.equal(summary.keyToSubmitMs.count, keyFrames.length);
+  assert.equal(summary.keyToBrowserPresentationMs[0].latencyMs.count, keyFrames.length);
+  assert.equal(summary.screenRefresh, 'unavailable');
+  for (const [index, event] of trial.events.entries()) {
+    const frame = trial.frames[index];
+    assert.deepEqual([event.eventId, event.viewId, event.trialId, event.presentId],
+      [frame.eventId, frame.viewId, frame.trialId, frame.presentId]);
+    assert.equal(event.trigger, 'keyboard');
+    assert.equal(event.keyCode, 'Space');
+    assert.equal(frame.eventMs, event.eventMs);
+    assert.equal(frame.acceptedMs, event.acceptedMs);
+    assert.ok(event.eventMs <= event.acceptedMs && event.acceptedMs <= event.appliedMs);
+    assert.ok(event.appliedMs <= frame.inputCutoffMs && frame.inputCutoffMs <= frame.submitStartMs);
+    assert.deepEqual(event.presentation, [{
+      source: 'next-animation-frame', kind: 'estimate', atMs: frame.nextCallbackStartMs,
+      eventId: event.eventId, timeOriginMs: trial.timeOriginMs, viewId: frame.viewId,
+      trialId: frame.trialId, presentId: frame.presentId,
+    }]);
+  }
+});
+
+test('browser presentation feedback is scoped to the affected callback and avoids unconfirmed paint matches', () => {
+  const frame = { previousRenderEndMs: 90, callbackStartMs: 110, presentReturnedMs: 115, nextCallbackStartMs: 126 };
+  const event = { trigger: 'keyboard', eventMs: 99, acceptedMs: 102 };
+  const key = { entryType: 'event', name: 'keydown', startTime: 99, processingStart: 100, processingEnd: 103,
+    duration: 16, presentationTime: 116 };
+  const draw = { entryType: 'long-animation-frame', renderStart: 109, styleAndLayoutStart: 120,
+    paintTime: 121, presentationTime: 125 };
+  const later = { ...draw, renderStart: 123, presentationTime: 180 };
+  const result = browserFrameFeedback(frame, event, [key, draw, later]);
+  assert.equal(result.documentKey.presentationMs, 116);
+  assert.deepEqual(result.presentation, [
+    { source: 'long-animation-frame', kind: 'browser-feedback', atMs: 125 },
+    { source: 'next-animation-frame', kind: 'estimate', atMs: 126 },
+  ]);
+  const onlyLater = browserFrameFeedback(frame, event, [key, later]);
+  assert.equal(onlyLater.documentFrame, null);
+  assert.deepEqual(onlyLater.presentation, [result.presentation[1]]);
+  assert.deepEqual(browserFrameFeedback({ ...frame, presentReturnedMs: null }, event, [key, draw]).presentation, []);
+});
+
+test('neural baseline preserves a key accepted before the trial times out without a frame', async () => {
+  let expire;
+  const harness = baselineRuntime((engine, key) => {
+    if (engine.renders.length === BASELINE_WARMUP_FRAMES) {
+      key();
+      expire();
+    }
+  });
+  harness.target.setTimeout = callback => { expire = callback; return 1; };
+  harness.target.clearTimeout = () => {};
+  const [trial] = await runNeuralBaseline(harness, { captureId: 'miss', mode: 'keyboard' });
+  assert.equal(trial.status, 'timed-out');
+  assert.equal(trial.frames.length, 0);
+  assert.equal(trial.events.length, 1);
+  assert.equal(trial.events[0].eventId, 'blocker-step');
+  assert.equal(trial.events[0].presentId, null);
+  assert.equal(trial.events[0].appliedMs, null);
+  assert.deepEqual(trial.events[0].presentation, []);
+  assert.deepEqual(trial.missingEventIds, BASELINE_EVENTS.slice(1).map(event => event.eventId));
+  assert.equal(harness.hasKeyListener(), false);
+  assert.equal(harness.engines[0].disposed, true);
+});
+
+test('the GI page exposes baseline replay through its managed operation', async () => {
+  const harness = baselineRuntime();
+  const { target, canvas, status } = harness;
+  target.document.createElement = () => ({});
+  target.addEventListener = () => {};
+  const control = () => ({ addEventListener() {}, appendChild() {}, replaceChildren() {} });
+  const scenePicker = control();
+  const variantPicker = control();
+  const runButton = control();
+  let runnerCount = 0;
+  let disposed = 0;
+  const formerWindow = globalThis.window;
+  try {
+    globalThis.window = target;
+    await attachGiPage({
+      target, canvas, status, scenePicker, variantPicker, runButton,
+      load: async () => harness.raa,
+      discover: async () => new Map([['gi', {
+        default: { id: 'gi', title: 'GI', variants: [{ id: 'still' }] },
+        inventory: [{ mode: 'still' }],
+      }]]),
+      createRunner() {
+        runnerCount++;
+        return { run: input => input, dispose() { disposed++; } };
+      },
+    });
+    const baseline = target.nmcGpu.ops.baseline({ args: { captureId: 'managed', repeat: 1, loadClass: 'idle' } });
+    await assert.rejects(target.nmcGpu.ops.run({ scenario: 'gi' }), /run is already in progress/);
+    const result = await baseline;
+    assert.deepEqual(result.files, []);
+    assert.equal(result.json[0].trialId, 'managed:1');
+    assert.equal(result.json[0].status, 'complete');
+    assert.equal(disposed, 1);
+    assert.equal(runButton.disabled, false);
+    assert.deepEqual(await target.nmcGpu.ops.run({ scenario: 'gi' }), { scenario: 'gi' });
+    assert.equal(runnerCount, 2);
+  } finally {
+    if (formerWindow === undefined) delete globalThis.window;
+    else globalThis.window = formerWindow;
+  }
 });

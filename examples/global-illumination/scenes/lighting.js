@@ -472,7 +472,7 @@ const CORNELL_CENTRE = [2.78, 2.744, 2.796];
 const CORNELL_ALBEDO = { white: [0.886, 0.699, 0.666], red: [0.570, 0.043, 0.044], green: [0.105, 0.378, 0.076] };
 // Linear light colour and radiance ratio 18.4 : 11.0 : 2.75; the intensity is radiance x area (1.30 x 1.05 m).
 const CORNELL_LIGHT_COLOUR = [1, 0.598, 0.149];
-const CORNELL_LIGHT_INTENSITY = 18.4 * 1.365;
+export const CORNELL_LIGHT_INTENSITY = 18.4 * 1.365;
 export const CORNELL_LIGHT_X = 2.78, CORNELL_LIGHT_Z = 2.795;
 // The rectangle basis of a downward light puts size[0] along -z and size[1] along x, so [1.05, 1.30]
 // gives the specified 1.30 m along x and 1.05 m along z.
@@ -544,12 +544,11 @@ export function cornellBox(engine, variant, state) {
   const white = material(CORNELL_ALBEDO.white);
   const red = material(CORNELL_ALBEDO.red);
   const green = material(CORNELL_ALBEDO.green);
-  const whiteParts = [
-    quad(CORNELL.floor, CORNELL_CENTRE), quad(CORNELL.ceiling, CORNELL_CENTRE), quad(CORNELL.back, CORNELL_CENTRE),
-    block(CORNELL.shortTop, 1.65), block(CORNELL.tallTop, 3.30),
-    ...slabsOf('white'),
-  ];
-  engine.addLight({
+  const shortBlock = block(CORNELL.shortTop, 1.65);
+  const whiteParts = [quad(CORNELL.floor, CORNELL_CENTRE), quad(CORNELL.ceiling, CORNELL_CENTRE), quad(CORNELL.back, CORNELL_CENTRE)];
+  if (!variant.movingBlocker) whiteParts.push(shortBlock);
+  whiteParts.push(block(CORNELL.tallTop, 3.30), ...slabsOf('white'));
+  const areaLight = engine.addLight({
     kind: 'area', position: [CORNELL_LIGHT_X, CORNELL_LIGHT_Y, CORNELL_LIGHT_Z], direction: [0, -1, 0],
     color: CORNELL_LIGHT_COLOUR.map(srgbOf), intensity: CORNELL_LIGHT_INTENSITY, range: 30, size: CORNELL_LIGHT_SIZE,
   });
@@ -569,6 +568,14 @@ export function cornellBox(engine, variant, state) {
     { name: 'cornell-red-backing', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, joinMeshes(slabsOf('red')), red)) },
     { name: 'cornell-green-backing', instance: engine.addMeshInstance(nodeAt(engine), meshWith(engine, joinMeshes(slabsOf('green')), green)) },
   );
+  if (variant.movingBlocker) {
+    state.areaLight = areaLight;
+    state.blockNode = nodeAt(engine);
+    state.instances.push({
+      name: 'cornell-short-block',
+      instance: engine.addMeshInstance(state.blockNode, meshWith(engine, shortBlock, white)),
+    });
+  }
 }
 
 // The linear-HDR probe rows: the same Cornell box, then linear tone mapping without dither at a quarter of the

@@ -1,4 +1,4 @@
 {
   "page": "index.html",
-  "ops": ["run"]
+  "ops": ["run", "baseline"]
 }

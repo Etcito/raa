@@ -1,0 +1,9 @@
+# Neural rendering baseline
+
+Build the global-illumination page with `bash scripts/build-global-illumination.sh` in the Kong environment. Open the staged page in Chrome on the PC and display under test. Select **Measure keyboard latency** and press Space each time the status asks for the next event. Keep the canvas focused. Select **Download latency data** after the trial finishes.
+
+The managed GPU operation is `baseline` on `dist/global-illumination`. It defaults to two fresh scripted trials. Each runs a 240-frame warm-up, then renders 96 frames with identical simulation times and event IDs. The existing 2×2 stratified area shadow and analytic emitter remain active at native resolution, with fixed exposure and the proposed denoiser, upscaler and predictor off. Scripted input is excluded from key latency distributions.
+
+The operation accepts `mode` (`scripted` or `keyboard`), `captureId`, `repeat`, `width`, `height`, `remainingMs`, and the operator-supplied `loadClass`, `refreshHz` and `powerMode`. Use a different load class label for each test condition. The harness reports observed animation-frame intervals separately from the configured refresh rate. Each accepted keyboard input keeps its browser event timestamp and is joined to the attempt that first applied the event by view, trial and present ID. An accepted input that reaches no attempt keeps a null present ID.
+
+Run `node scripts/neural-baseline-latency.mjs neural-baseline.json` to summarize by load class. GPU submission and canvas handoff timestamps come from CPU-side observations. When available, a matching Long Animation Frame entry supplies the browser's document presentation timestamp. The next animation callback is an estimate of a rendering opportunity. Event Timing entries are reported separately for matched keys and can be absent on fast events. The page cannot confirm that the affected WebGPU canvas frame appeared at a particular display refresh.

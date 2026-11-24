@@ -2,6 +2,7 @@ import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
 import * as content from './lib/content.js';
 import { validateInventory } from './lib/inventory.js';
 import { createGiPageRunner } from './lib/runtime.js';
+import { runNeuralBaseline } from './lib/neural-baseline-runner.js';
 
 const stages = ['volume', 'lighting', 'virtual'];
 const name = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
@@ -50,15 +51,47 @@ export async function discoverScenes({ fetchIndex = () => fetch('./scenes.json')
 // No GPU work starts at module import. The managed operation and the picker share the
 // resident runner; window.nmcGpu is created by the shared helper only once run exists.
 export async function attachGiPage({ target, canvas, status, scenePicker, variantPicker, runButton,
+  baselineButton, baselineDownload,
   discover = discoverScenes, load = loadRaa, createRunner = createGiPageRunner }) {
   let runner = null;
   let busy = false;
+  let downloadUrl = null;
   status.textContent = 'pending: discovering built scenes';
   try {
     const scenes = await discover();
     const lib = createLib(await load());
-    runner = createRunner({ canvas, status, load, scenes, lib });
-    registerNmcGpu({ run: runner.run });
+    const newRunner = () => createRunner({ canvas, status, load, scenes, lib });
+    runner = newRunner();
+    const controls = [scenePicker, variantPicker, runButton, baselineButton].filter(Boolean);
+    async function exclusively(work) {
+      if (busy) throw new Error('A run is already in progress');
+      busy = true;
+      for (const control of controls) control.disabled = true;
+      try {
+        return await work();
+      } finally {
+        busy = false;
+        for (const control of controls) control.disabled = false;
+      }
+    }
+    const run = input => exclusively(() => {
+      runner ??= newRunner();
+      return runner.run(input);
+    });
+    const baseline = input => exclusively(() => {
+      runner?.dispose();
+      runner = null;
+      return runNeuralBaseline({ target, canvas, status, raa: lib.raa }, input?.args ?? input);
+    });
+    registerNmcGpu({ run });
+    target.nmcGpu.ops.baseline = async input => {
+      try {
+        return { json: await baseline(input), files: [] };
+      } catch (error) {
+        if (!busy) status.textContent = `failed: ${message(error)}`;
+        throw error;
+      }
+    };
     const entries = [...scenes.values()];
     for (const namespace of entries) {
       const option = target.document.createElement('option');
@@ -79,9 +112,8 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     }
     async function runPicked() {
       if (busy || variantPicker.value === '') return;
-      busy = true; scenePicker.disabled = true; variantPicker.disabled = true; runButton.disabled = true;
       try {
-        await runner.run({
+        await run({
           selectionId: id(), attemptId: id(), buildId: id(),
           scenario: scenePicker.value, mode: variantPicker.value,
           width: 1280, height: 720, remainingMs: 300000,
@@ -89,17 +121,34 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       } catch (error) {
         // The runner already published `failed: <message>`; keep the originating text.
         status.textContent = `failed: ${message(error)}`;
-      } finally {
-        busy = false; scenePicker.disabled = false; variantPicker.disabled = false; runButton.disabled = false;
       }
     }
+    baselineButton?.addEventListener('click', async () => {
+      if (busy) return;
+      if (downloadUrl !== null) {
+        target.URL.revokeObjectURL(downloadUrl);
+        downloadUrl = null;
+      }
+      baselineDownload.hidden = true;
+      try {
+        const trials = await baseline({ mode: 'keyboard' });
+        downloadUrl = target.URL.createObjectURL(new Blob([JSON.stringify(trials, null, 2)], { type: 'application/json' }));
+        baselineDownload.href = downloadUrl;
+        baselineDownload.hidden = false;
+      } catch (error) {
+        status.textContent = `failed: ${message(error)}`;
+      }
+    });
     scenePicker.value = entries[0].default.id;
     fillVariants();
-    scenePicker.disabled = false; variantPicker.disabled = false; runButton.disabled = false;
+    for (const control of controls) control.disabled = false;
     scenePicker.addEventListener('change', () => { fillVariants(); runPicked(); });
     variantPicker.addEventListener('change', runPicked);
     runButton.addEventListener('click', runPicked);
-    target.addEventListener('pagehide', () => runner.dispose(), { once: true });
+    target.addEventListener('pagehide', () => {
+      runner?.dispose();
+      if (downloadUrl !== null) target.URL.revokeObjectURL(downloadUrl);
+    }, { once: true });
     status.textContent = 'pending: choose a scene and variant to prepare the GPU';
     return runner;
   } catch (error) {
@@ -112,5 +161,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   // The rejection stays visible: the status element shows it and the promise is not caught.
   attachGiPage({ target: window, canvas: document.getElementById('c'), status: document.getElementById('status'),
     scenePicker: document.getElementById('scene'), variantPicker: document.getElementById('variant'),
-    runButton: document.getElementById('run') });
+    runButton: document.getElementById('run'), baselineButton: document.getElementById('baseline'),
+    baselineDownload: document.getElementById('baseline-download') });
 }
