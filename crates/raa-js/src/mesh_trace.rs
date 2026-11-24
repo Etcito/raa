@@ -49,10 +49,22 @@ pub(crate) fn prepare(st: &EngineState, view: usize) -> Result<(), RaaError> {
             let [dx, dy, dz] = sun.direction.to_array();
             let [r, g, b] = sun.color.map(|c| c * sun.intensity);
             let [ar, ag, ab] = ambient.color.map(|c| c * ambient.intensity);
+            let camera = st.scene.camera;
+            let forward = (camera.target - camera.eye).normalize_or_zero().to_array();
+            // Use the diagonal half-angle so corners of a perspective viewport
+            // qualify alongside its horizontal and vertical edges.
+            let half_fov_cos = if camera.ortho_height.is_none() {
+                let slope = (camera.fov_y_rad * 0.5).tan() * camera.aspect.hypot(1.0);
+                1.0 / slope.hypot(1.0)
+            } else {
+                0.0
+            };
             gi.set_view(
                 view,
-                st.scene.camera.eye.to_array(),
-                [dx, dy, dz, r, g, b, ar, ag, ab, st.scene.camera.far],
+                camera.eye.to_array(),
+                forward,
+                half_fov_cos,
+                [dx, dy, dz, r, g, b, ar, ag, ab, camera.far],
             );
             if spherical {
                 gi.set_light_ids(st.lit.local_lights().world_lights().map(|(_, id, _)| id));

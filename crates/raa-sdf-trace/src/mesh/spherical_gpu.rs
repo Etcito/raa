@@ -112,6 +112,8 @@ pub struct SphericalGiProbe {
 struct View {
     index: usize,
     origin: [f32; 3],
+    forward: [f32; 3],
+    half_fov_cos: f32,
     light: [f32; 10],
 }
 
@@ -175,10 +177,19 @@ impl SphericalGiState {
     }
 
     /// The bridge supplies the effective view after scene and light updates.
-    pub fn set_view(&mut self, index: usize, origin: [f32; 3], light: [f32; 10]) {
+    pub fn set_view(
+        &mut self,
+        index: usize,
+        origin: [f32; 3],
+        forward: [f32; 3],
+        half_fov_cos: f32,
+        light: [f32; 10],
+    ) {
         self.view = Some(View {
             index,
             origin,
+            forward,
+            half_fov_cos,
             light,
         });
     }
@@ -351,6 +362,7 @@ impl FeaturePass for SphericalPass {
                 )
                 .filter_map(|(&id, record)| SphericalLight::from_packed(id, record)),
         );
+        scheduler.set_view_priority(view.forward, view.half_fov_cos);
         scheduler.update_with_lights(&mesh, view.origin, light_revision, local_lights);
         gpu.waiting_lights
             .retain(|sample| captured_face_current(scheduler, sample.job));
