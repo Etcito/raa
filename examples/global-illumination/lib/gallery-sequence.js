@@ -133,7 +133,7 @@ function realSignals(taps, frame, previous) {
     depth[p] = metric;
     motion.set([du, dv, reject], p * 3);
     masks.set([disocclusion, outside, offscreen, valid && frame.event !== null], lane);
-    guide.set([...(valid ? normal.subarray(lane, lane + 3) : [0, 0, 0]), Math.log1p(metric / 8),
+    guide.set([...(valid ? normal.subarray(lane, lane + 3) : [0, 0, 0]), Math.log1p(metric) / 8,
       valid ? normal[lane + 3] : 0, du, dv, accepted, reactive, ...jitterPx, valid], p * 12);
     counts.geometric += Number(valid);
     counts.historyValid += Number(accepted);

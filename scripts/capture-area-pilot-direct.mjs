@@ -14,10 +14,11 @@ const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
 const spherical = op === 'gallery-spherical';
 const sequence = op === 'gallery-sequence';
+const predictionDataset = op === 'prediction' && comparison === 'dataset';
 const liveSpherical = spherical && comparison === 'live';
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence] [baseline|fixed|live|train|test|both]');
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence] [baseline|fixed|live|train|test|both|dataset]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -144,7 +145,7 @@ try {
   const result = liveSpherical ? null : await evalPage(`(async () => {
     const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
-      ...(sequence && { split: comparison === 'fixed' ? 'both' : comparison }),
+      ...(sequence && { split: comparison === 'fixed' ? 'both' : comparison }), ...(predictionDataset && { dataset: true }),
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
       if (base64) return { name, base64 };
@@ -159,7 +160,7 @@ try {
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
     ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
   }
-  if ((spherical || sequence) && browserErrors.length) throw new Error(browserErrors.join('\n'));
+  if ((spherical || sequence || predictionDataset) && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const windows = { browser: version.Browser, renderer, device: nvidia, webgpu };
   if (liveSpherical) {
     await mkdir(path.dirname(output), { recursive: true });
@@ -210,7 +211,7 @@ try {
         row.sha256 = createHash('sha256').update(bytes).digest('hex');
         await writeFile(path.join(output, row.file), bytes, { flag: 'wx' });
       }
-    } else if (sequence) {
+    } else if (sequence || predictionDataset) {
       for (const clip of data.sequences) {
         for (const frame of clip.frames) {
           for (const record of Object.values(frame.planes)) {
@@ -238,7 +239,7 @@ try {
       ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
     };
-    const manifest = path.join(output, op === 'prediction' ? 'prediction.json' : capture || sequence ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
+    const manifest = path.join(output, op === 'prediction' && !predictionDataset ? 'prediction.json' : capture || sequence || predictionDataset ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
       : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);

@@ -22,7 +22,7 @@ node node_modules/typescript/bin/tsc --module nodenext --target es2022 --noCheck
 cp "$EGE_WASM" "$OUT/ege.wasm"
 cp "$ENGINE/examples/core/scenes/falling.scene.json" "$OUT/scene.json"
 cp "$ENGINE/examples/core/scenes/demo.schema.json" "$OUT/schema.json"
-cp examples/predictive-presentation/{index.html,main.js,nmc.gpu.json} "$OUT/"
+cp examples/predictive-presentation/{index.html,main.js,nmc.gpu.json,training.js} "$OUT/"
 node --input-type=module - "$OUT" "$(git rev-parse HEAD)" "$(git -C "$ENGINE" rev-parse HEAD)" <<'JS'
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';

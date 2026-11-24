@@ -1,6 +1,7 @@
 import init, { Engine } from './raa/raa.js';
 import { loadEngine } from './ege/loader.js';
 import { RollbackBinding } from './ege/rollback.js';
+import { predictionInputs, predictionLabel, predictionPlanes } from './training.js';
 
 const canvas = document.querySelector('canvas');
 const hud = document.querySelector('output');
@@ -19,7 +20,6 @@ const nextX = 27;
 const actorWidth = 12;
 const actorHeight = 12;
 const bandTop = 18;
-const actorX = snapshot => snapshot.inputs.inputIds[0] === 'first-0' ? firstX : nextX;
 
 function require(condition, message) {
   if (!condition) throw new Error(message);
@@ -37,12 +37,13 @@ function targetGuides(from, to) {
     for (let x = 0; x < width; x++) {
       const pixel = y * width + x;
       const row = y >= bandTop && y < bandTop + actorHeight;
-      const visible = row && x >= to && x < to + actorWidth;
-      const oldActor = row && x >= from && x < from + actorWidth;
+      const center = x + 0.5;
+      const visible = row && center >= to && center < to + actorWidth;
+      const oldActor = row && center >= from && center < from + actorWidth;
       const hole = oldActor && !visible;
       // Independent target change inside the actor. The fixture supplies this sample
       // even though its geometric correspondence is valid.
-      const lighting = visible && x === to;
+      const lighting = visible && center < to + 1;
       depth[pixel] = ((visible ? 4 : 5) - 0.02 - 1) / 8;
       motion[4 * pixel] = visible ? (to - from) / width : 0;
       motion[4 * pixel + 3] = depth[pixel];
@@ -65,7 +66,7 @@ const asset = async name => {
 };
 
 let running = false;
-async function run({ buildId } = {}) {
+async function run({ buildId, trajectory } = {}) {
   if (running) throw new Error('Prediction fixture is already running');
   require(/Windows/.test(navigator.userAgent), 'Prediction verification requires Windows Chrome');
   running = true;
@@ -80,11 +81,14 @@ async function run({ buildId } = {}) {
     const { simulation } = new RollbackBinding(simEngine, world, {
       playerCount: 2, peers: [{ peer: 0, players: [0] }, { peer: 1, players: [1] }],
     });
-    function snapshot(event, discontinuities = []) {
+    let cutoffMs;
+    function snapshot(event, discontinuities = [], prepare) {
       const tick = simEngine.tick(world);
       const receivedAtMs = performance.now();
       simulation.stepCodes([0, 0]);
-      return simulation.capturePrediction(1, performance.now(), [0, 1].map(player => ({
+      prepare?.();
+      cutoffMs = performance.now();
+      return simulation.capturePrediction(1, cutoffMs, [0, 1].map(player => ({
         player, tick, id: `${event}-${player}`, code: 0, receivedAtMs,
       })), { lights: [], discontinuities });
     }
@@ -108,7 +112,21 @@ async function run({ buildId } = {}) {
     };
     create([3, 3, 0.04], base);
     const strip = create([1 / height, actorHeight / height, 0.04], actor);
-    const block = create([(actorWidth - 1) / height, actorHeight / height, 0.04], actor);
+    function gradientBlock(stops) {
+      const hw = (actorWidth - 1) / (2 * height), hh = actorHeight / (2 * height);
+      const node = engine.addNode(null);
+      const material = engine.addMaterial({ color: [1, 1, 1], model: 'flat' });
+      const mesh = engine.addMesh({
+        positions: new Float32Array([-hw, -hh, 0.02, hw, -hh, 0.02, hw, hh, 0.02, -hw, hh, 0.02]),
+        normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+        indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+        colors: new Float32Array([...stops[0], 1, ...stops[1], 1, ...stops[1], 1, ...stops[0], 1]),
+      });
+      engine.addInstance(node, mesh, material);
+      return { node, material };
+    }
+    const block = trajectory ? gradientBlock(trajectory.stops)
+      : create([(actorWidth - 1) / height, actorHeight / height, 0.04], actor);
     function move(x) {
       engine.setTransform(strip.node, [(x + 0.5 - width / 2) / height, 0, 1], rotation, unit);
       engine.setTransform(block.node, [(x + (actorWidth + 1) / 2 - width / 2) / height, 0, 1], rotation, unit);
@@ -138,13 +156,21 @@ async function run({ buildId } = {}) {
       throw new Error(`Expected frame was never selected at tick ${target.target.tick}: ${hud.textContent}`);
     }
     const first = snapshot('first');
-    move(actorX(first));
+    const from = trajectory?.from ?? firstX, to = trajectory?.to ?? nextX;
+    move(from);
     const source = engine.produceReal(performance.now(), first);
     require(source !== undefined, 'First real frame did not submit');
     const start = await waitFor(first, frame => frame.realFrameId === source);
-    const target = snapshot('move');
+    const sourceTaps = trajectory && await engine.captureTrainingTaps(source);
+    const sourceAvailableMs = performance.now();
+    let guides, inputs, guidesAvailableMs;
+    const target = snapshot('move', [], () => {
+      guides = targetGuides(from, to);
+      if (trajectory) inputs = predictionInputs(sourceTaps, guides, width, height);
+      guidesAvailableMs = performance.now();
+    });
+    const targetCutoffMs = cutoffMs;
     require(target.inputs.confirmedMask.every(Boolean), 'Target snapshot must contain cutoff input receipts');
-    const guides = targetGuides(actorX(first), actorX(target));
     const submit = (snapshot, limit) => engine.submitPrediction(snapshot, source, performance.now() + 1500,
       20, 0.0005, limit, guides.depth, guides.motion, guides.changed, guides.repair);
     require(!engine.submitPrediction(target, source, performance.now() - 1, 20, 0.0005,
@@ -166,11 +192,13 @@ async function run({ buildId } = {}) {
     require(predicted.hud === `Tick ${target.target.tick} · prediction`, 'Prediction HUD did not use the current snapshot');
 
     // Render the same target only after selecting prediction. These pixels cannot feed the candidate.
-    move(actorX(target));
+    const targetRenderStartedMs = performance.now();
+    move(to);
     engine.setMaterial(strip.material, { color: [0, 0, 0], emissive: stripe, model: 'flat' });
     const targetReal = engine.produceReal(performance.now(), target);
     require(targetReal !== undefined, 'Target real frame did not submit');
     const reference = await waitFor(target, frame => !frame.predicted && frame.realFrameId === targetReal);
+    const label = trajectory && predictionLabel(await engine.captureTrainingTaps(targetReal));
     let maximumError = 0;
     let movingPixels = 0;
     let worstPixel = 0;
@@ -184,7 +212,9 @@ async function run({ buildId } = {}) {
     }
     require(movingPixels >= guides.holes * 2, `Fixture did not move visibly: ${movingPixels}`);
     const rgba = frame => Array.from(frame.pixels.slice(worstPixel * 4, worstPixel * 4 + 4));
-    require(maximumError <= 3, `Predicted pixels differ from the full target: max ${maximumError} at ${worstPixel % width},${Math.floor(worstPixel / width)}. Predicted ${rgba(predicted)}; real ${rgba(reference)}; source ${rgba(start)}`);
+    if (!trajectory) {
+      require(maximumError <= 3, `Predicted pixels differ from the full target: max ${maximumError} at ${worstPixel % width},${Math.floor(worstPixel / width)}. Predicted ${rgba(predicted)}; real ${rgba(reference)}; source ${rgba(start)}`);
+    }
 
     const eventTick = simEngine.tick(world);
     const flashTarget = snapshot('flash', [{ kind: 'light-change', tick: eventTick }]);
@@ -202,10 +232,18 @@ async function run({ buildId } = {}) {
       'The real flash did not reach the display');
     require(flashed.hud === `Tick ${flashTarget.target.tick} · real`, 'Flash HUD did not use the current snapshot');
     status.textContent = 'Prediction fixture passed';
+    const files = [];
+    const packet = trajectory && {
+      id: trajectory.id, sourceRealFrameId: source, sourceAgeRealFrames: targetReal - source,
+      sourceAvailableMs, guidesAvailableMs, cutoffMs: targetCutoffMs, targetRenderStartedMs,
+      targetRealFrameId: targetReal, sourceSnapshot: first, acceptedTarget: target,
+      sourcePositionPx: from, targetPositionPx: to, actorStops: trajectory.stops,
+      planes: await predictionPlanes(files, trajectory.id, { ...inputs, label }, width, height),
+    };
     return { json: { buildId, facts: { adapter, hardware, browser: navigator.userAgent },
       size: [width, height], sourceFrameId: source, targetReal, flashReal, maximumError, movingPixels, holes: guides.holes,
       refreshedLightingPixels: guides.lightPixels, predictionHud: predicted.hud, flashHud: hud.textContent,
-      realSubmissions: engine.stats().frames }, files: [] };
+      realSubmissions: engine.stats().frames, ...(packet && { packet }) }, files };
   } catch (error) {
     status.textContent = error.message;
     throw error;
@@ -216,5 +254,32 @@ async function run({ buildId } = {}) {
   }
 }
 
-window.nmcGpu = { ops: { prediction: input => run(input?.args ?? input) } };
+async function captureDataset({ buildId }) {
+  const schedule = [
+    { id: 'short-right', split: 'train', from: 16, to: 21.375, stops: [[0.12, 0.02, 0.07], [0.82, 0.22, 0.03]] },
+    { id: 'wide-right', split: 'train', from: 20.125, to: 29.5, stops: [[0.08, 0.45, 0.24], [0.49, 0.04, 0.08]] },
+    { id: 'short-left', split: 'test', from: 38.25, to: 31, stops: [[0.55, 0.14, 0.02], [0.02, 0.21, 0.47]] },
+    { id: 'wide-left', split: 'test', from: 42, to: 32.375, stops: [[0.06, 0.18, 0.45], [0.42, 0.06, 0.62]] },
+  ];
+  const sequences = [], files = [];
+  let facts;
+  for (const trajectory of schedule) {
+    const result = await run({ buildId, trajectory });
+    const { packet, ...proof } = result.json;
+    facts = proof.facts;
+    require(packet.sourceAvailableMs <= packet.cutoffMs && packet.guidesAvailableMs <= packet.cutoffMs
+      && packet.cutoffMs <= packet.targetRenderStartedMs, 'Predictive evidence crossed its input cutoff');
+    sequences.push({ id: trajectory.id, split: trajectory.split, groupId: trajectory.id, frames: [packet], proof });
+    files.push(...result.files);
+  }
+  return { json: { format: 'raa.generated-frame-capture/1', buildId, facts, size: [width, height],
+    target: 'separate fully shaded linear HDR submission after the accepted cutoff',
+    warp: 'causal fixture warp from retained HDR and admitted geometry; comparison against actual GPU presentation is in proof',
+    sequences }, files };
+}
+
+window.nmcGpu = { ops: { prediction: input => {
+  const args = input?.args ?? input;
+  return args?.dataset ? captureDataset(args) : run(args);
+} } };
 button.addEventListener('click', () => run().catch(console.error));

@@ -7,7 +7,7 @@
   "weightsSha256": "fafb15f373fabc5a4ebeb365112761d847c0cff0bcf618849326cc8430c2189e",
   "weightsByteLength": 6560,
   "golden": "golden.json",
-  "goldenSha256": "aaae5f7c8c9afa97161349c76d77da2de2ad5294f0293bccd0d2fbb642ddb959",
+  "goldenSha256": "373c669f2f375d3914692197595dbfaeef342637a8ba5dd002a82a278834532e",
   "tensorLayout": "NHWC",
   "precision": "fp32",
   "tensorAlignment": 16,
@@ -286,5 +286,5 @@
       "main-18"
     ]
   },
-  "packageSha256": "90b59655e96fae36ea5a3e39b4278855e8159a7ee8d5de9c76a5f1acfefcb180"
+  "packageSha256": "b77586f2b33c2bf1d314a61e44dab637a872d5f97a347c3e002f73c0983934b4"
 }
