@@ -12,7 +12,7 @@
 //! the HDR chain, lighting and history buffers never see them. The scene depth is bound
 //! read-only for layers with `depthTest`. No overlay data means no render pass. When the
 //! colour target and the scene depth differ in size (internal render scale), the pass
-//! uses its own depth of the colour size, cleared to 1 (`OverlayDepth`).
+//! resolves scene depth to the colour size before drawing depth-tested layers.
 //!
 //! Pipeline refusals (`pipeline.*`) and tone mapping refusals (`post.invalid`) are thrown
 //! with their own code; malformed JS arguments throw `api.invalid_argument`.
@@ -25,7 +25,9 @@ use raa_tonemap::{Look, ToneMapping, TonemapControl};
 use raa_web::FrameInput;
 use wasm_bindgen::prelude::*;
 
-use super::m21_views::{OVERLAY_SEGMENT_FLOATS, OVERLAY_WGSL, OverlayBuffers, OverlayDepth};
+use super::m21_views::{
+    OVERLAY_DEPTH_RESOLVE_WGSL, OVERLAY_SEGMENT_FLOATS, OVERLAY_WGSL, OverlayBuffers, OverlayDepth,
+};
 use crate::convert::{INVALID_ARGUMENT, api_error, js, tone_mapper};
 use crate::engine::{Engine, InstallCtx};
 use crate::state::EngineState;
@@ -41,6 +43,7 @@ pub(crate) fn install(ctx: &mut InstallCtx<'_>) -> Result<(), RaaError> {
         buffers,
         pipelines: None,
         own_depth: None,
+        depth_resolve: None,
     };
     ctx.pipeline
         .try_borrow_mut()
@@ -63,6 +66,80 @@ struct OverlayPass {
     /// Output-size depth used when the scene depth differs in size from the colour
     /// target (internal render scale, see [`OverlayDepth`]); created on first need.
     own_depth: Option<((u32, u32), wgpu::TextureView)>,
+    depth_resolve: Option<wgpu::RenderPipeline>,
+}
+
+fn build_overlay_depth_resolve(device: &wgpu::Device) -> wgpu::RenderPipeline {
+    let label = Some("raa.overlay.resolve-depth");
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label,
+        source: wgpu::ShaderSource::Wgsl(OVERLAY_DEPTH_RESOLVE_WGSL.into()),
+    });
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label,
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_depth"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        primitive: Default::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: OVERLAY_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Always),
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_depth"),
+            compilation_options: Default::default(),
+            targets: &[],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn resolve_overlay_depth(
+    ctx: &mut RecordCtx<'_>,
+    pipeline: &wgpu::RenderPipeline,
+    destination: &wgpu::TextureView,
+) {
+    let source = ctx.targets.depth_input(ctx.resources, "overlay");
+    let label = Some("raa.overlay.resolve-depth");
+    let group = ctx
+        .gpu
+        .device()
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&source),
+            }],
+        });
+    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label,
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: destination,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &group, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 impl OverlayPass {
@@ -188,7 +265,19 @@ impl FeaturePass for OverlayPass {
                 let Some((_, view)) = &self.own_depth else {
                     return Ok(());
                 };
-                (view.clone(), wgpu::LoadOp::Clear(1.0))
+                let tested = layers
+                    .iter()
+                    .any(|l| l.depth_test && l.segments > 0 && l.buffer.is_some());
+                let load = if tested {
+                    let pipeline = self
+                        .depth_resolve
+                        .get_or_insert_with(|| build_overlay_depth_resolve(ctx.gpu.device()));
+                    resolve_overlay_depth(ctx, pipeline, view);
+                    wgpu::LoadOp::Load
+                } else {
+                    wgpu::LoadOp::Clear(1.0)
+                };
+                (view.clone(), load)
             }
         };
         // `backbuffer` is the canvas (single view) or this view's output target (split

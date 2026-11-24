@@ -121,14 +121,38 @@ pub const OVERLAY_SEGMENT_FLOATS: usize = 16;
 /// `colour` pixels and scene depth (`raa-pipeline.depth`) of `scene_depth` pixels.
 /// WebGPU needs every attachment of a pass to have the same size: under an internal
 /// render scale the colour target (canvas or view output) can differ from the depth
-/// target, so the pass then uses its own depth of the colour size, cleared to 1.
+/// target, so the pass resolves scene depth into its own attachment of the colour size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayDepth {
     /// The scene depth (same size): `depthTest` layers are occluded by the scene.
     Scene,
-    /// The overlay's own depth of this size, cleared to 1 (tested layers draw unoccluded).
+    /// The overlay's own depth of this size, populated from the scene for tested layers.
     Own((u32, u32)),
 }
+
+/// Resamples the depth texel covering each output pixel center. Point sampling preserves
+/// scene depth at silhouettes and keeps the original projection for overlay depth tests.
+pub const OVERLAY_DEPTH_RESOLVE_WGSL: &str = r#"
+@group(0) @binding(0) var scene_depth: texture_depth_2d;
+
+struct DepthVertex {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_depth(@builtin(vertex_index) vertex: u32) -> DepthVertex {
+    let p = vec2<f32>(f32((vertex << 1u) & 2u), f32(vertex & 2u));
+    return DepthVertex(vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0), vec2<f32>(p.x, 1.0 - p.y));
+}
+
+@fragment
+fn fs_depth(input: DepthVertex) -> @builtin(frag_depth) f32 {
+    let size = textureDimensions(scene_depth);
+    let pixel = min(vec2<u32>(input.uv * vec2<f32>(size)), size - vec2<u32>(1u));
+    return textureLoad(scene_depth, vec2<i32>(pixel), 0);
+}
+"#;
 
 impl OverlayDepth {
     /// Picks the scene depth when its size equals the colour target's, else an own depth.
@@ -852,18 +876,23 @@ mod overlay_tests {
 
     #[test]
     fn overlay_wgsl_validates_with_naga() {
-        let module = naga::front::wgsl::parse_str(OVERLAY_WGSL).expect("overlay WGSL parses");
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .expect("overlay WGSL validates");
-        for entry in ["vs_line", "fs_line"] {
-            assert!(
-                module.entry_points.iter().any(|e| e.name == entry),
-                "entry point {entry}"
-            );
+        for (source, entries) in [
+            (OVERLAY_WGSL, ["vs_line", "fs_line"]),
+            (OVERLAY_DEPTH_RESOLVE_WGSL, ["vs_depth", "fs_depth"]),
+        ] {
+            let module = naga::front::wgsl::parse_str(source).expect("overlay WGSL parses");
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("overlay WGSL validates");
+            for entry in entries {
+                assert!(
+                    module.entry_points.iter().any(|e| e.name == entry),
+                    "entry point {entry}"
+                );
+            }
         }
     }
 
