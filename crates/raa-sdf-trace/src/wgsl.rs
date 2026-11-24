@@ -72,15 +72,35 @@ const TRACE_FALLBACK_WGSL: &str = include_str!("wgsl/trace_fallback_wgsl.wgsl");
 
 const RAY_INTERVAL_WGSL: &str = include_str!("wgsl/ray_interval.wgsl");
 
-/// World-space mesh intersections and the shared current GI clipmap gather.
+// Slots 21–24 belong to the spherical cache producer in the composed capture shader.
+pub(crate) const MESH_SPHERICAL_BINDING: u32 = 25;
+pub(crate) const MESH_GRAPH_SCREEN: u32 = 1;
+pub(crate) const MESH_VOLUME_GI: u32 = 2;
+
+/// World-space mesh intersections and the shared live GI lookups.
 pub fn mesh_trace_module() -> String {
+    mesh_trace_with_rough_grid(
+        "fn hybrid_grid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
+                                 mat: Material) -> HybridRoughGrid { return HybridRoughGrid(); }",
+    )
+}
+
+fn mesh_trace_with_rough_grid(rough_grid: &str) -> String {
     let gi = raa_shader::GI_VOLUME_WGSL;
+    let cube = raa_shader::SPHERICAL_CUBE_WGSL;
+    let spherical = raa_shader::SPHERICAL_GI_WGSL;
     let mesh = include_str!("wgsl/mesh_trace.wgsl");
-    format!("{RAY_INTERVAL_WGSL}{gi}{mesh}")
+    format!(
+        "{RAY_INTERVAL_WGSL}{gi}{cube}\n\
+         @group(0) @binding({MESH_SPHERICAL_BINDING}) var<storage, read> raa_spherical_data: array<vec4<u32>>;\n\
+         const MESH_GRAPH_SCREEN: u32 = {MESH_GRAPH_SCREEN}u;\n\
+         const MESH_VOLUME_GI: u32 = {MESH_VOLUME_GI}u;\n\
+         {spherical}{mesh}\n{rough_grid}"
+    )
 }
 
 pub fn mesh_hybrid_module() -> String {
-    let source = mesh_trace_module();
+    let source = mesh_trace_with_rough_grid(include_str!("wgsl/mesh_hybrid_specular_grid.wgsl"));
     let (word, bit) = raa_shader::feature_address(raa_shader::RAA_INDIRECT_DIFFUSE_AO_FEATURE)
         .expect("indirect diffuse AO has a frame feature address");
     let hybrid = include_str!("wgsl/mesh_hybrid.wgsl");

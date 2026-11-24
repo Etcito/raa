@@ -25,7 +25,7 @@ pub const MAX_BOUNCES: u32 = 6;
 /// A complete reference path can use both the diffuse/specular and mirror budgets.
 pub const MAX_LIGHTING_DEPTH: u32 = 2 * MAX_BOUNCES;
 pub const REFERENCE_SPP: u32 = 4;
-const COUNTER_COUNT: usize = 20;
+const COUNTER_COUNT: usize = 29;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -42,6 +42,9 @@ pub enum LightingOutput {
     Combined,
     Direct,
     Indirect,
+    IndirectDiffuse,
+    IndirectSpecular,
+    RoughGrid,
     Bounce(u32),
 }
 
@@ -53,6 +56,9 @@ impl LightingOutput {
             Self::Direct => 1,
             Self::Indirect => 2,
             Self::Bounce(depth) => 3 + depth,
+            Self::IndirectDiffuse => 16,
+            Self::IndirectSpecular => 17,
+            Self::RoughGrid => 18,
         }
     }
 }
@@ -109,6 +115,18 @@ impl MeshTraceSettings {
                 message: "diffuseOutput diagnostics require combined lightingOutput".into(),
             });
         }
+        if matches!(
+            self.lighting_output,
+            LightingOutput::IndirectDiffuse
+                | LightingOutput::IndirectSpecular
+                | LightingOutput::RoughGrid
+        ) && (self.reference || self.path_mode != PathMode::Learned)
+        {
+            return Err(RaaError::FrameGraph {
+                code: "trace.invalid_settings",
+                message: "these lightingOutput views require the fitted path".into(),
+            });
+        }
         if let LightingOutput::Bounce(depth) = self.lighting_output
             && (!self.reference || depth > MAX_LIGHTING_DEPTH)
         {
@@ -153,9 +171,20 @@ pub struct MeshTraceStats {
     pub counts: [u32; COUNTER_COUNT],
 }
 
+/// Live GI route for the legacy mesh tracing pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MeshIndirectGrid {
+    #[default]
+    Auto,
+    Off,
+    Volume,
+    Spherical,
+}
+
 #[derive(Default)]
 pub struct MeshTraceScene {
     pub settings: MeshTraceSettings,
+    pub indirect_grid: MeshIndirectGrid,
     reference_sample: Option<(u32, u32)>,
     path: hybrid::PathState,
     geometry: Geometry,
@@ -189,10 +218,22 @@ impl MeshTraceScene {
     }
 
     pub fn begin_path_capture(&mut self, seed: u32) {
-        self.path.capture = Some(PathCapture { seed, result: None });
+        self.path.capture = Some(PathCapture::training(seed));
     }
 
     pub fn end_path_capture(&mut self) -> Option<((u32, u32), Buffer)> {
+        self.path
+            .capture
+            .take()?
+            .result
+            .map(|(_, size, buffer)| (size, buffer))
+    }
+
+    pub fn begin_rough_evidence(&mut self, seed: u32) {
+        self.path.capture = Some(PathCapture::rough_evidence(seed));
+    }
+
+    pub fn end_rough_evidence(&mut self) -> Option<(u64, (u32, u32), Buffer)> {
         self.path.capture.take()?.result
     }
 

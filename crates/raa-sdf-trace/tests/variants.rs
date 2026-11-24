@@ -64,14 +64,15 @@ fn check(program: &TraceProgram) {
 }
 
 fn validate(source: &str) -> naga::Module {
+    validate_with(source, naga::valid::Capabilities::empty())
+}
+
+fn validate_with(source: &str, capabilities: naga::valid::Capabilities) -> naga::Module {
     let module =
         naga::front::wgsl::parse_str(source).unwrap_or_else(|e| panic!("parse: {}", e.message()));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|e| panic!("validate: {e:?}"));
+    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("validate: {e:?}"));
     module
 }
 
@@ -92,7 +93,10 @@ fn mesh_trace_shaders_validate() {
 
 #[test]
 fn hybrid_path_has_a_distinct_entry_and_model_bind_group() {
-    let module = validate(&raa_sdf_trace::wgsl::mesh_hybrid_module());
+    let module = validate_with(
+        &raa_sdf_trace::wgsl::mesh_hybrid_module(),
+        naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32,
+    );
     assert!(
         module
             .entry_points
@@ -105,6 +109,122 @@ fn hybrid_path_has_a_distinct_entry_and_model_bind_group() {
             .as_ref()
             .is_none_or(|binding| binding.group == 0)
     }));
+}
+
+#[test]
+fn mesh_grid_shaders_reuse_forward_lookup_and_keep_directional_faces_private() {
+    let mesh = mesh_trace_module();
+    let hybrid = raa_sdf_trace::wgsl::mesh_hybrid_module();
+    for source in [&mesh, &hybrid] {
+        assert_eq!(source.matches(raa_shader::SPHERICAL_GI_WGSL).count(), 1);
+        assert!(source.contains("raa_spherical_evaluate_at(p, n, cell).diffuse"));
+        let module = validate_with(source, naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32);
+        let (_, lookup) = module
+            .global_variables
+            .iter()
+            .find(|(_, variable)| variable.name.as_deref() == Some("raa_spherical_data"))
+            .unwrap();
+        assert_eq!(
+            lookup.binding,
+            Some(naga::ResourceBinding {
+                group: 0,
+                binding: 25
+            })
+        );
+        assert_eq!(
+            lookup.space,
+            naga::AddressSpace::Storage {
+                access: naga::StorageAccess::LOAD
+            }
+        );
+    }
+    assert!(!mesh.contains("mesh_spherical_faces"));
+    let module = validate_with(
+        &hybrid,
+        naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32,
+    );
+    let (_, faces) = module
+        .global_variables
+        .iter()
+        .find(|(_, variable)| variable.name.as_deref() == Some("mesh_spherical_faces"))
+        .unwrap();
+    assert_eq!(
+        faces.binding,
+        Some(naga::ResourceBinding {
+            group: 1,
+            binding: 4
+        })
+    );
+    assert_eq!(
+        faces.space,
+        naga::AddressSpace::Storage {
+            access: naga::StorageAccess::LOAD
+        }
+    );
+}
+
+#[test]
+fn mesh_grid_is_applied_after_measuring_and_shading_the_same_first_hit() {
+    let source = raa_sdf_trace::wgsl::mesh_hybrid_module();
+    let after = |text: &str| source.split_once(text).unwrap().1;
+    let live_path = after("fn trace_live_indirect_path");
+    let first = live_path
+        .find("closest(initial, frame.clip.y, false)")
+        .unwrap();
+    let resume = live_path
+        .find("trace_path_from_hit(initial, first_hit")
+        .unwrap();
+    assert!(first < resume);
+
+    let path = after("fn trace_path_from_hit")
+        .split_once("fn world_at")
+        .unwrap()
+        .0;
+    let step = |text| path.find(text).unwrap();
+    assert!(step("var hit = first_hit") < step("record_mesh_first_hit(hit, ray)"));
+    assert!(step("record_mesh_first_hit(hit, ray)") < step("if hit.object == MISS"));
+    assert!(step("sum += throughput * direct") < step("mesh_spherical_diffuse(p, n, mat)"));
+    assert!(step("sum += throughput * direct") < step("mesh_cached_diffuse(p, ng, n, mat)"));
+    assert!(
+        step("sum += throughput * direct")
+            < step("hybrid_grid_specular(p, ng, n, -ray.direction, mat)")
+    );
+    assert!(path.contains(
+        "sum += throughput * (cached_diffuse.rgb + cached_specular.rgb * cached_specular.trust)"
+    ));
+    assert!(path.contains("(*terminal).weight *= throughput * (1.0 - spherical.w)"));
+    let screen = after("fn trace_mesh")
+        .split_once("struct MeshSphericalDirectionalTexel")
+        .unwrap()
+        .0;
+    assert!(
+        screen.find("if status == ACCEPTED").unwrap() < screen.find("trace_path_lobe(ray").unwrap()
+    );
+    let rough = after("fn hybrid_specular")
+        .split_once("fn hybrid_diffuse")
+        .unwrap()
+        .0;
+    assert!(
+        rough.find("let hit = closest(ray").unwrap()
+            < rough.find("record_mesh_first_hit(hit, ray)").unwrap()
+    );
+    assert!(
+        rough.find("trace_path_steps_from_hit(ray, hit").unwrap()
+            < rough.find("grid = hybrid_grid_specular(p1").unwrap()
+    );
+    assert!(rough.contains("HybridSpecularPath(base, p1, hit.object, grid)"));
+
+    let reference = after("fn trace_path_lobe")
+        .split_once("fn trace_path_from_hit")
+        .unwrap()
+        .0;
+    assert!(reference.contains("diffuse_output, lighting_output, MISS, terminal"));
+    let lookup = after("fn mesh_cached_diffuse")
+        .split_once("fn terminal_surface_key")
+        .unwrap()
+        .0;
+    assert!(lookup.contains("if volume.depth == 0u"));
+    assert!(lookup.contains("mix(volume.incident * volume.weight, spherical.rgb, spherical.w)"));
 }
 
 #[test]

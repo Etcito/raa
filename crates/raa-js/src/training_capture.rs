@@ -125,7 +125,7 @@ impl Engine {
         handle
             .borrow_mut()
             .set_reference_sample(Some((seed, samples)));
-        let result = self.capture_mesh_lighting(time_ms, true, Some(true)).await;
+        let result = self.capture_mesh_lighting(time_ms, true, Some(true), None).await;
         handle.borrow_mut().set_reference_sample(None);
         result
     }

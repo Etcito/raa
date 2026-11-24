@@ -7,10 +7,10 @@ use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, Recor
 
 use super::geometry::TRIANGLE_BYTES;
 use super::{
-    COUNTER_COUNT, MeshTraceScene, MeshTraceSettings, MeshTraceStats, PathMode, REFERENCE_SPP,
-    TraceReport, hybrid::HybridGpu,
+    COUNTER_COUNT, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats, PathMode,
+    REFERENCE_SPP, TraceReport, hybrid::HybridGpu,
 };
-use crate::wgsl::mesh_trace_module;
+use crate::wgsl::{MESH_GRAPH_SCREEN, MESH_SPHERICAL_BINDING, MESH_VOLUME_GI, mesh_trace_module};
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
 const ORDER: u32 = 66;
@@ -35,6 +35,10 @@ impl MeshTraceFeature {
             MESH_TRACE_NAME.into(),
             state,
             None,
+            IndirectGrids {
+                spherical: true,
+                volume: true,
+            },
         )))?;
         pipeline.set_enabled(MESH_TRACE_NAME, false)?;
         Ok(())
@@ -46,9 +50,25 @@ impl MeshTraceFeature {
         state: MeshTraceHandle,
         options: GraphMeshTrace,
     ) -> Result<(), RaaError> {
+        Self::install_graph_with_indirect(pipeline, entry, state, options, false, true)
+    }
+
+    /// Install a mesh stage with the live GI resources selected by its caller.
+    pub fn install_graph_with_indirect(
+        pipeline: &mut Pipeline,
+        entry: String,
+        state: MeshTraceHandle,
+        options: GraphMeshTrace,
+        use_spherical_lookup: bool,
+        use_volume_atlas: bool,
+    ) -> Result<(), RaaError> {
         options.settings.validate()?;
+        let grids = IndirectGrids {
+            spherical: use_spherical_lookup,
+            volume: use_volume_atlas,
+        };
         let reports = Rc::new(RefCell::new(TraceReport::default()));
-        let mut pass = MeshTracePass::new(entry.clone(), state.clone(), Some(options));
+        let mut pass = MeshTracePass::new(entry.clone(), state.clone(), Some(options), grids);
         pass.graph_report = Some(reports.clone());
         pipeline.add(Box::new(pass))?;
         state.borrow_mut().graph_reports.insert(entry, reports);
@@ -63,9 +83,16 @@ pub struct GraphMeshTrace {
     pub reference_sample: (u32, u32),
 }
 
+#[derive(Clone, Copy)]
+struct IndirectGrids {
+    spherical: bool,
+    volume: bool,
+}
+
 struct MeshTracePass {
     entry: String,
     graph: Option<GraphMeshTrace>,
+    grids: IndirectGrids,
     graph_report: Option<Rc<RefCell<TraceReport>>>,
     state: MeshTraceHandle,
     gpu: Option<Pipelines>,
@@ -74,10 +101,16 @@ struct MeshTracePass {
 }
 
 impl MeshTracePass {
-    fn new(entry: String, state: MeshTraceHandle, graph: Option<GraphMeshTrace>) -> Self {
+    fn new(
+        entry: String,
+        state: MeshTraceHandle,
+        graph: Option<GraphMeshTrace>,
+        grids: IndirectGrids,
+    ) -> Self {
         Self {
             entry,
             graph,
+            grids,
             graph_report: None,
             state,
             gpu: None,
@@ -115,6 +148,15 @@ impl FeaturePass for MeshTracePass {
         let mut scene = self.state.borrow_mut();
         let graph = self.graph;
         let settings = graph.map_or(scene.settings, |options| options.settings);
+        let grids = if graph.is_some() {
+            self.grids
+        } else {
+            let route = scene.indirect_grid;
+            IndirectGrids {
+                spherical: matches!(route, MeshIndirectGrid::Auto | MeshIndirectGrid::Spherical),
+                volume: matches!(route, MeshIndirectGrid::Auto | MeshIndirectGrid::Volume),
+            }
+        };
         if !settings.active() {
             return Ok(());
         }
@@ -197,6 +239,9 @@ impl FeaturePass for MeshTracePass {
             .filter(|_| settings.reference);
         let (reference_seed, reference_spp) =
             reference_sample.unwrap_or((ctx.frame as u32, REFERENCE_SPP));
+        let grid_enabled =
+            !settings.reference && (path_mode == PathMode::Off || path_mode == PathMode::Learned);
+        let spherical_routed = grid_enabled && grids.spherical;
         let filtered = ctx.targets.hdr();
         let params = [
             scene.geometry.count(),
@@ -214,7 +259,8 @@ impl FeaturePass for MeshTracePass {
             settings.panel_sampling as u32,
             settings.lighting_output.code(),
             u32::from(reference_sample.is_some()),
-            u32::from(graph.is_some()),
+            (u32::from(graph.is_some()) * MESH_GRAPH_SCREEN)
+                | (u32::from(grid_enabled && grids.volume) * MESH_VOLUME_GI),
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -257,6 +303,10 @@ impl FeaturePass for MeshTracePass {
                 image_entry(18, &images.terminal_samples),
                 image_entry(19, &images.terminal_surfaces),
                 image_entry(20, &images.terminal_weights),
+                buffer_entry(
+                    MESH_SPHERICAL_BINDING,
+                    ctx.lighting.spherical_gi_buffer(spherical_routed),
+                ),
             ],
         });
         ctx.encoder.clear_buffer(&gpu.counters, 0, None);
@@ -271,6 +321,7 @@ impl FeaturePass for MeshTracePass {
                     ctx.frame,
                     &group,
                     &ao,
+                    ctx.lighting.spherical_gi_faces_buffer(spherical_routed),
                     &mut scene.path,
                     path_mode,
                     images.trace_size,
@@ -659,6 +710,7 @@ impl Pipelines {
                 entry(18, storage_image(HDR_FORMAT)),
                 entry(19, storage_image(wgpu::TextureFormat::Rgba32Uint)),
                 entry(20, storage_image(HDR_FORMAT)),
+                entry(MESH_SPHERICAL_BINDING, read),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {

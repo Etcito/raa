@@ -25,6 +25,10 @@ pub const PRELUDE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/prelude.w
 
 /// Shared cubemap face orientation for spherical GI capture and interpolation.
 pub const SPHERICAL_CUBE_WGSL: &str = include_str!("wgsl/spherical_cube.wgsl");
+
+/// Shared world-space spherical GI lookup. Compose with [`SPHERICAL_CUBE_WGSL`]
+/// and declare `raa_spherical_data: array<vec4<u32>>` as read-only storage.
+pub const SPHERICAL_GI_WGSL: &str = include_str!("wgsl/spherical_gi.wgsl");
 /// Standalone S10 weather declarations, neutral defaults and directional radiance boundary.
 /// Already included once in [`PRELUDE_WGSL`]. Cloud shadow composition consumes these
 /// bindings; standalone directional consumers can include this source without the prelude.

@@ -27,7 +27,7 @@ struct Light {
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
 @group(0) @binding(3) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(4) var<storage, read> materials: array<Material>;
-@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>, 20>;
+@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>, 29>;
 @group(0) @binding(6) var depth: texture_depth_2d;
 @group(0) @binding(7) var normals: texture_2d<f32>;
 @group(0) @binding(8) var motion: texture_2d<f32>;
@@ -69,6 +69,21 @@ const GEOMETRY_HIT: u32 = 8u;
 const MIRROR_RAYS: u32 = 9u;
 const PATH_RAYS: u32 = 10u;
 const REFERENCE_PIXELS: u32 = 11u;
+const FIRST_HIT_RAYS: u32 = 20u;
+const FIRST_HIT_HITS: u32 = 21u;
+const FIRST_HIT_HASH: u32 = 22u;
+const SPHERICAL_DIFFUSE_HITS: u32 = 23u;
+const VOLUME_DIFFUSE_HITS: u32 = 24u;
+const ROUGH_VOLUME_ACCEPTED: u32 = 25u;
+const ROUGH_SPHERICAL_ACCEPTED: u32 = 26u;
+const SPHERICAL_DIFFUSE_OFFSCREEN_IN_GRID: u32 = 27u;
+const SPHERICAL_DIFFUSE_OFFSCREEN_SUPPORTED: u32 = 28u;
+
+struct HybridRoughGrid {
+    rgb: vec3<f32>, // secondary specular outgoing radiance
+    trust: f32,
+    source: u32, // volume = 1, spherical = 2
+}
 
 fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
     var result = Hit(limit, MISS, vec2<f32>(0.0));
@@ -109,6 +124,17 @@ fn closest(ray: Ray, limit: f32, any_hit: bool) -> Hit {
         }
     }
     return result;
+}
+
+// Digest actual triangle and world position before any cached shading can run.
+fn record_mesh_first_hit(hit: Hit, ray: Ray) {
+    atomicAdd(&counters[FIRST_HIT_RAYS], 1u);
+    if hit.object == MISS { return; }
+    let p = bitcast<vec3<u32>>(ray.origin + ray.direction * hit.t);
+    let key = raa_spherical_hash(hit.object ^ raa_spherical_hash(p.x)
+        ^ raa_spherical_hash(p.y ^ 0x9e3779b9u) ^ raa_spherical_hash(p.z ^ 0x85ebca6bu));
+    atomicAdd(&counters[FIRST_HIT_HITS], 1u);
+    atomicAdd(&counters[FIRST_HIT_HASH], key);
 }
 
 fn random(seed: ptr<function, u32>) -> f32 {
@@ -327,14 +353,19 @@ struct TerminalDiffuse {
     depth: u32,
 }
 
+fn mesh_volume_available(p: vec3<f32>) -> bool {
+    let params = raa_gi_volume_params;
+    return (options[3].w & MESH_VOLUME_GI) != 0u && (params.flags & GI_VOLUME_VALID) != 0u
+        && raa_gi_level_at(p, 0u) < params.level_count;
+}
+
 fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
                        material: u32, depth: u32) -> TerminalDiffuse {
-    let params = raa_gi_volume_params;
-    let weight = diffuse(mat) * params.intensity;
-    if (params.flags & GI_VOLUME_VALID) == 0u || !any(weight > vec3<f32>(0.0))
-        || raa_gi_level_at(p, 0u) >= params.level_count {
+    let weight = diffuse(mat) * raa_gi_volume_params.intensity;
+    if !mesh_volume_available(p) || !any(weight > vec3<f32>(0.0)) {
         return TerminalDiffuse();
     }
+    atomicAdd(&counters[VOLUME_DIFFUSE_HITS], 1u);
     let origin = p + ng * (2.0 * EPS);
     let surface_basis = basis(n);
     let sky_scale = bitcast<f32>(options[2].x);
@@ -366,6 +397,35 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
     return TerminalDiffuse(incident / f32(SAMPLES), weight, p, ng, material, depth);
 }
 
+fn mesh_spherical_diffuse(p: vec3<f32>, n: vec3<f32>, mat: Material) -> vec4<f32> {
+    // Match forward: the lookup has already divided irradiance by pi. Its
+    // support and the selected light groups come from the shared evaluator.
+    let weight = mat.base_roughness.rgb * (1.0 - clamp(mat.emission_metallic.w, 0.0, 1.0));
+    if !any(weight > vec3<f32>(0.0)) { return vec4<f32>(0.0); }
+    let cell = raa_spherical_coordinate(p);
+    if cell.desc.x == 0u { return vec4<f32>(0.0); }
+    let sample = raa_spherical_evaluate_at(p, n, cell).diffuse;
+    let clip = frame.view_proj * vec4<f32>(p, 1.0);
+    let offscreen = clip.w <= 0.0 || any(abs(clip.xy) > vec2<f32>(clip.w))
+        || clip.z < 0.0 || clip.z > clip.w;
+    if offscreen { atomicAdd(&counters[SPHERICAL_DIFFUSE_OFFSCREEN_IN_GRID], 1u); }
+    if sample.w > 0.0 {
+        atomicAdd(&counters[SPHERICAL_DIFFUSE_HITS], 1u);
+        if offscreen { atomicAdd(&counters[SPHERICAL_DIFFUSE_OFFSCREEN_SUPPORTED], 1u); }
+    }
+    return vec4<f32>(sample.rgb * weight, sample.w);
+}
+
+// Cache-weighted diffuse and support at a real secondary hit. The uncovered
+// fraction uses the live volume when routed, otherwise the old path continuation.
+fn mesh_cached_diffuse(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material) -> vec4<f32> {
+    let spherical = mesh_spherical_diffuse(p, n, mat);
+    if spherical.w >= 1.0 { return spherical; }
+    let volume = terminal_diffuse_gi(p, ng, n, mat, 0u, 1u);
+    if volume.depth == 0u { return vec4<f32>(spherical.rgb * spherical.w, spherical.w); }
+    return vec4<f32>(mix(volume.incident * volume.weight, spherical.rgb, spherical.w), 1.0);
+}
+
 // Encode an octahedral normal and the material ID in the guide word. Materials
 // outside the guide range still get their own unfiltered terminal lighting.
 fn terminal_surface_key(normal: vec3<f32>, material: u32) -> u32 {
@@ -389,8 +449,23 @@ fn store_terminal(p: vec2<i32>, terminal: TerminalDiffuse) {
 }
 
 fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
+    let first_hit = closest(initial, frame.clip.y, false);
+    return trace_path_steps_from_hit(initial, first_hit, mirrors, path, bounces, seed);
+}
+
+// Keep the fitted model's first-hit input on the independent trace path.
+fn trace_path_steps_from_hit(initial: Ray, first_hit: Hit, mirrors: u32, path: bool,
+                             bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
     var terminal: TerminalDiffuse;
-    return trace_path_lobe(initial, mirrors, path, bounces, seed, 0u, 0u, &terminal);
+    return trace_path_from_hit(initial, first_hit, mirrors, path, bounces, seed, 0u, 0u, MISS, &terminal);
+}
+
+fn trace_live_indirect_path(initial: Ray, mirrors: u32, bounces: u32,
+                            seed: ptr<function, u32>, secondary_step: u32) -> vec3<f32> {
+    let first_hit = closest(initial, frame.clip.y, false);
+    var terminal: TerminalDiffuse;
+    return trace_path_from_hit(initial, first_hit, mirrors, true, bounces, seed, 0u, 0u,
+        secondary_step, &terminal);
 }
 
 // Depth counts transport continuations from the camera hit, including mirrors.
@@ -409,6 +484,15 @@ fn select_lighting_depth(output: u32, depth: u32) -> bool {
 fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
                    seed: ptr<function, u32>, diffuse_output: u32, lighting_output: u32,
                    terminal: ptr<function, TerminalDiffuse>) -> vec3<f32> {
+    let first_hit = closest(initial, frame.clip.y, false);
+    if !path { record_mesh_first_hit(first_hit, initial); }
+    return trace_path_from_hit(initial, first_hit, mirrors, path, bounces, seed,
+        diffuse_output, lighting_output, MISS, terminal);
+}
+
+fn trace_path_from_hit(initial: Ray, first_hit: Hit, mirrors: u32, path: bool, bounces: u32,
+                        seed: ptr<function, u32>, diffuse_output: u32, lighting_output: u32,
+                        secondary_step: u32, terminal: ptr<function, TerminalDiffuse>) -> vec3<f32> {
     var ray = initial;
     var throughput = vec3<f32>(1.0);
     var sum = vec3<f32>(0.0);
@@ -420,7 +504,9 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
     for (var step = 0u; step < 13u; step++) {
         let isolate_diffuse = step == 0u && diffuse_output != 0u;
         let include_light = select_lighting_depth(lighting_output, step);
-        let hit = closest(ray, frame.clip.y, false);
+        var hit = first_hit;
+        if step > 0u { hit = closest(ray, frame.clip.y, false); }
+        if step == secondary_step { record_mesh_first_hit(hit, ray); }
         if hit.object == MISS {
             if isolate_diffuse { return vec3<f32>(0.0); }
             if !include_light { return sum; }
@@ -456,10 +542,27 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
         if include_light { sum += throughput * direct; }
         if isolate_diffuse && diffuse_output == 1u { break; }
         if !path {
-            *terminal = terminal_diffuse_gi(p, ng, n, mat, tri.a.material, step + 1u);
-            (*terminal).weight *= throughput;
-            sum += (*terminal).incident * (*terminal).weight;
+            let spherical = mesh_spherical_diffuse(p, n, mat);
+            sum += throughput * spherical.rgb * spherical.w;
+            // Spherical interpolation has its own support filter. Only the
+            // uncovered volume contribution uses the terminal image filter.
+            if spherical.w < 1.0 {
+                *terminal = terminal_diffuse_gi(p, ng, n, mat, tri.a.material, step + 1u);
+                (*terminal).weight *= throughput * (1.0 - spherical.w);
+                sum += (*terminal).incident * (*terminal).weight;
+            }
             break;
+        }
+        var cached_diffuse = vec4<f32>(0.0);
+        var cached_specular: HybridRoughGrid;
+        if step == secondary_step {
+            cached_diffuse = mesh_cached_diffuse(p, ng, n, mat);
+            cached_specular = hybrid_grid_specular(p, ng, n, -ray.direction, mat);
+            sum += throughput * (cached_diffuse.rgb + cached_specular.rgb * cached_specular.trust);
+            if cached_specular.trust > 0.0 {
+                if cached_specular.source == 1u { atomicAdd(&counters[ROUGH_VOLUME_ACCEPTED], 1u); }
+                if cached_specular.source == 2u { atomicAdd(&counters[ROUGH_SPHERICAL_ACCEPTED], 1u); }
+            }
         }
         if path_steps == 0u { break; }
 
@@ -482,7 +585,15 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
         let nh = saturate(dot(n, half_vector));
         let pdf_spec = ggx_distribution(a, nh) * nh / max(4.0 * dot(v, half_vector), 1e-5);
         let pdf = mix(nl / PI, pdf_spec, chance);
-        throughput *= direct_brdf(mat, n, v, out_dir, isolate_diffuse) * (nl / max(pdf, 1e-5));
+        var brdf = direct_brdf(mat, n, v, out_dir, isolate_diffuse);
+        if cached_diffuse.w > 0.0 || cached_specular.trust > 0.0 {
+            let diffuse_brdf = diffuse(mat) / PI;
+            let specular_brdf = max(brdf - diffuse_brdf, vec3<f32>(0.0));
+            brdf = (1.0 - cached_diffuse.w) * diffuse_brdf
+                + (1.0 - cached_specular.trust) * specular_brdf;
+            if !any(brdf > vec3<f32>(0.0)) { break; }
+        }
+        throughput *= brdf * (nl / max(pdf, 1e-5));
         ray = Ray(p + ng * (2.0 * EPS), normalize(out_dir));
         atomicAdd(&counters[PATH_RAYS], 1u);
         path_steps--;
@@ -536,7 +647,7 @@ fn visible_in_history(pixel: vec2<i32>, dims: vec2<u32>) -> bool {
 }
 
 fn screen_status(screen: vec4<f32>, receiver: vec2<i32>, dims: vec2<u32>) -> u32 {
-    if options[3].w != 0u {
+    if (options[3].w & MESH_GRAPH_SCREEN) != 0u {
         // The graph SSR trace keeps the cone mip in alpha and clears misses to zero.
         if all(screen.xyz == vec3<f32>(0.0)) { return SCREEN_MISS; }
     } else {

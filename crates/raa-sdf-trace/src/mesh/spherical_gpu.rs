@@ -370,7 +370,8 @@ impl FeaturePass for SphericalPass {
             gpu.ready_at[slot as usize] = None;
         }
         gpu.update_lookup(ctx.gpu, scheduler, settings, ctx.frame as u32);
-        ctx.lighting.set_spherical_gi(Some(gpu.lookup.clone()));
+        ctx.lighting
+            .set_spherical_gi(Some((gpu.lookup.clone(), gpu.faces.clone())));
         self.staged = Staged {
             jobs: scheduler.take_jobs(settings.budget),
             light_ids,
@@ -987,9 +988,8 @@ fn decode_face_lights(
 
 fn spherical_module() -> String {
     format!(
-        "{}\n{}\n{}",
+        "{}\n{}",
         crate::wgsl::mesh_trace_module(),
-        raa_shader::SPHERICAL_CUBE_WGSL,
         include_str!("../wgsl/mesh_spherical_gi.wgsl"),
     )
 }

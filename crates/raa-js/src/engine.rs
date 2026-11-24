@@ -1403,14 +1403,35 @@ impl Engine {
         now_ms: f64,
         traced: bool,
         raw: Option<bool>,
+        evidence_seed: Option<f64>,
     ) -> Result<JsValue, JsValue> {
         if !now_ms.is_finite() {
             return Err(js_err(&invalid(
                 "invalid mesh lighting capture time".into(),
             )));
         }
-        self.render_frame(now_ms, None)
-            .map_err(|error| js_err(&error))?;
+        let evidence_handle = evidence_seed.map(|seed| {
+            use raa_sdf_trace::mesh::{MeshTraceHandle, PathMode};
+            if !traced || !(0.0..=f64::from(u32::MAX)).contains(&seed) || seed.fract() != 0.0 {
+                return Err(js_err(&invalid("rough evidence requires tracing and an unsigned 32-bit seed".into())));
+            }
+            self.with_state(|gpu, st| {
+                let handle = st.features.get::<MeshTraceHandle>().cloned()
+                    .ok_or_else(|| invalid("rough evidence requires a fitted mesh trace".into()))?;
+                let settings = handle.borrow().settings;
+                if !gpu.summary().is_hardware() || settings.reference || settings.path_mode != PathMode::Learned {
+                    return Err(invalid("rough evidence requires the fitted mesh trace on hardware WebGPU".into()));
+                }
+                handle.borrow_mut().begin_rough_evidence(seed as u32);
+                Ok(handle)
+            })
+        }).transpose()?;
+        let rendered = self.render_frame(now_ms, None);
+        let evidence = evidence_handle.as_ref().and_then(|handle| handle.borrow_mut().end_rough_evidence());
+        rendered.map_err(|error| js_err(&error))?;
+        if evidence_handle.is_some() && evidence.is_none() {
+            return Err(js_err(&invalid("no rough evidence was recorded at this extent".into())));
+        }
         let (texture, combined) = self.with_state(|gpu, st| {
             if !gpu.summary().is_hardware() {
                 return Err(RaaError::Unsupported(
@@ -1472,6 +1493,14 @@ impl Engine {
                 "combinedData",
                 &js_sys::Uint8Array::from(bytes.as_slice()).into(),
             );
+        }
+        if let Some((frame, (width, height), buffer)) = evidence {
+            let bytes = raa_web::read_capture_buffer(&buffer).await.map_err(|error| js_err(&error))?;
+            let rough = Object::new();
+            set(&rough, "frame", &JsValue::from_f64(frame as f64));
+            set(&rough, "size", &number_array(&[width, height]));
+            set(&rough, "data", &js_sys::Uint8Array::from(bytes.as_slice()).into());
+            set(&output, "roughEvidence", &rough.into());
         }
         Ok(output.into())
     }

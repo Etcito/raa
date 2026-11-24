@@ -91,7 +91,8 @@ fn spherical_capture(@builtin(global_invocation_id) id: vec3<u32>) {
             atomicMin(&spherical_hit_min[axis], ordered);
             atomicMax(&spherical_hit_max[axis], ordered);
         }
-        hit_normal = vec2<u32>(pack2x16float(n.xy), pack2x16float(vec2<f32>(n.z, 0.0)));
+        hit_normal = vec2<u32>(pack2x16float(n.xy),
+            pack2x16float(vec2<f32>(n.z, f32((material.flags.x & 1u) != 0u))));
         other_rgb = material.emission_metallic.rgb;
         if (material.flags.x & 2u) != 0u {
             other_rgb += material.base_roughness.rgb;

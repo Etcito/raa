@@ -2,7 +2,7 @@
 struct HybridOptions { mode: u32, seed: u32, capture: u32, samples: u32 }
 @group(1) @binding(0) var<uniform> hybrid: HybridOptions;
 @group(1) @binding(1) var<storage, read> path_head: array<f32, 131>;
-@group(1) @binding(2) var<storage, read_write> path_capture: array<f32>;
+@group(1) @binding(2) var<storage, read_write> path_capture: array<u32>;
 @group(1) @binding(3) var diffuse_ao: texture_2d<f32>;
 
 const PATH_MODEL_PIXELS: u32 = 12u;
@@ -20,8 +20,15 @@ fn hybrid_seed(pixel: vec2<u32>, stream: u32) -> u32 {
     return seed;
 }
 
+struct HybridSpecularPath {
+    base: vec3<f32>,
+    first_position: vec3<f32>,
+    first_triangle: u32,
+    grid: HybridRoughGrid,
+};
+
 fn hybrid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
-                   mat: Material, steps: u32, seed: ptr<function, u32>) -> vec3<f32> {
+                   mat: Material, steps: u32, use_grid: bool, seed: ptr<function, u32>) -> HybridSpecularPath {
     let a = max(mat.base_roughness.w * mat.base_roughness.w, 0.01);
     let angle = random(seed) * (2.0 * PI);
     let xi = min(random(seed), 0.99999);
@@ -31,14 +38,36 @@ fn hybrid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
     let l = reflect(-v, h);
     let nl = dot(n, l);
     let vh = dot(v, h);
-    if nl <= 0.0 || vh <= 0.0 || dot(ng, l) <= 0.0 { return vec3<f32>(0.0); }
+    if nl <= 0.0 || vh <= 0.0 || dot(ng, l) <= 0.0 { return HybridSpecularPath(vec3<f32>(0.0), vec3<f32>(0.0), MISS, HybridRoughGrid()); }
     let nv = max(dot(n, v), 0.001);
     // Cancel GGX D against the sampled half-vector PDF.
     let weight = fresnel(mat, vh) * ggx_visibility(a, nv, nl) * (4.0 * nl * vh / max(nh, 1e-5));
     atomicAdd(&counters[PATH_RAYS], 1u);
     atomicAdd(&counters[SPECULAR_RAYS], 1u);
-    return weight * trace_path_steps(Ray(p + ng * (2.0 * EPS), normalize(l)),
-        options[0].y, true, steps, seed);
+    let ray = Ray(p + ng * (2.0 * EPS), normalize(l));
+    let hit = closest(ray, frame.clip.y, false);
+    if hybrid.mode == 3u && hybrid.capture != 1u { record_mesh_first_hit(hit, ray); }
+    // The fitted input uses the material-weighted first bounce captured by its
+    // trainer. The grid reads the same exact hit after that estimate.
+    let base = weight * trace_path_steps_from_hit(ray, hit, options[0].y, true, steps, seed);
+    if hit.object == MISS {
+        return HybridSpecularPath(base, vec3<f32>(0.0), MISS, HybridRoughGrid());
+    }
+    let p1 = ray.origin + ray.direction * hit.t;
+    var grid: HybridRoughGrid;
+    if use_grid {
+        let tri = triangles[hit.object];
+        let mat1 = hit_material(tri, hit.bary);
+        let face = normalize(cross(tri.b.position - tri.a.position, tri.c.position - tri.a.position));
+        let ng1 = select(-face, face, dot(face, ray.direction) < 0.0);
+        let interp = normalize(tri.a.normal * (1.0 - hit.bary.x - hit.bary.y)
+            + tri.b.normal * hit.bary.x + tri.c.normal * hit.bary.y);
+        let facing = select(-interp, interp, dot(interp, ng1) >= 0.0);
+        let n1 = select(ng1, facing, dot(facing, -ray.direction) > 0.001);
+        grid = hybrid_grid_specular(p1, ng1, n1, -ray.direction, mat1);
+        grid.rgb *= weight;
+    }
+    return HybridSpecularPath(base, p1, hit.object, grid);
 }
 
 fn hybrid_diffuse(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
@@ -51,8 +80,11 @@ fn hybrid_diffuse(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
     if dot(ng, l) <= 0.0 { return vec3<f32>(0.0); }
     atomicAdd(&counters[PATH_RAYS], 1u);
     atomicAdd(&counters[DIFFUSE_RAYS], 1u);
-    return weight * trace_path_steps(Ray(p + ng * (2.0 * EPS), normalize(l)),
-        options[0].y, true, 1u, seed);
+    let ray = Ray(p + ng * (2.0 * EPS), normalize(l));
+    if hybrid.mode == 3u {
+        return weight * trace_live_indirect_path(ray, options[0].y, 1u, seed, 0u);
+    }
+    return weight * trace_path_steps(ray, options[0].y, true, 1u, seed);
 }
 
 fn predict_specular(raw: vec3<f32>, normal: vec3<f32>, z: f32, roughness: f32) -> vec3<f32> {
@@ -81,16 +113,35 @@ fn predict_specular(raw: vec3<f32>, normal: vec3<f32>, z: f32, roughness: f32) -
 }
 
 fn write_hybrid_capture(index: u32, rgb: vec3<f32>, n: vec3<f32>, z: f32, roughness: f32) {
-    if hybrid.capture == 0u { return; }
+    if hybrid.capture != 1u { return; }
     let base = index * 8u;
-    path_capture[base] = rgb.x;
-    path_capture[base + 1u] = rgb.y;
-    path_capture[base + 2u] = rgb.z;
-    path_capture[base + 3u] = n.x;
-    path_capture[base + 4u] = n.y;
-    path_capture[base + 5u] = n.z;
-    path_capture[base + 6u] = z;
-    path_capture[base + 7u] = roughness;
+    path_capture[base] = bitcast<u32>(rgb.x);
+    path_capture[base + 1u] = bitcast<u32>(rgb.y);
+    path_capture[base + 2u] = bitcast<u32>(rgb.z);
+    path_capture[base + 3u] = bitcast<u32>(n.x);
+    path_capture[base + 4u] = bitcast<u32>(n.y);
+    path_capture[base + 5u] = bitcast<u32>(n.z);
+    path_capture[base + 6u] = bitcast<u32>(z);
+    path_capture[base + 7u] = bitcast<u32>(roughness);
+}
+
+// Evidence mode uses the same path capture buffer as training. The renderer
+// continues to produce the real fitted image with the explicitly pinned seed.
+fn write_rough_evidence(index: u32, sample: HybridSpecularPath) {
+    if hybrid.capture != 2u { return; }
+    let base = index * 12u;
+    path_capture[base] = bitcast<u32>(sample.first_position.x);
+    path_capture[base + 1u] = bitcast<u32>(sample.first_position.y);
+    path_capture[base + 2u] = bitcast<u32>(sample.first_position.z);
+    path_capture[base + 3u] = sample.first_triangle;
+    path_capture[base + 4u] = bitcast<u32>(sample.base.x);
+    path_capture[base + 5u] = bitcast<u32>(sample.base.y);
+    path_capture[base + 6u] = bitcast<u32>(sample.base.z);
+    path_capture[base + 7u] = bitcast<u32>(sample.grid.trust);
+    path_capture[base + 8u] = bitcast<u32>(sample.grid.rgb.x * sample.grid.trust);
+    path_capture[base + 9u] = bitcast<u32>(sample.grid.rgb.y * sample.grid.trust);
+    path_capture[base + 10u] = bitcast<u32>(sample.grid.rgb.z * sample.grid.trust);
+    path_capture[base + 11u] = sample.grid.source;
 }
 
 // Reuse raster GTAO only when the raster and ray hits describe the same surface.
@@ -117,6 +168,8 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     let sample_pixel = vec2<i32>(id.xy);
     let index = id.y * size.x + id.x;
     write_hybrid_capture(index, vec3<f32>(0.0), vec3<f32>(0.0), 0.0, 0.0);
+    write_rough_evidence(index,
+        HybridSpecularPath(vec3<f32>(0.0), vec3<f32>(0.0), MISS, HybridRoughGrid()));
     let uv = uv_at(sample_pixel, size);
     let dims = textureDimensions(depth);
     let pixel = pixel_at(uv, dims);
@@ -130,7 +183,7 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     // Mirror screen evidence uses the same confidence/disocclusion checks as
     // ordinary hybrid reflections, before any BVH query or network work.
     if z < 1.0 && textureLoad(motion, pixel, 0).w > 0.5 {
-        if hybrid.capture != 0u || diffuse_output != 0u || lighting_output == 1u {
+        if hybrid.capture == 1u || diffuse_output != 0u || lighting_output == 1u || lighting_output >= 16u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
@@ -145,13 +198,19 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         atomicAdd(&counters[TRACED], 1u);
         atomicAdd(&counters[PRIMARY_BVH_PIXELS], 1u);
-        textureStore(radiance, sample_pixel, vec4<f32>(trace_path_steps(ray, options[0].y, true, 2u, &spec_seed), 1.0));
+        var value: vec3<f32>;
+        if hybrid.mode == 3u {
+            value = trace_live_indirect_path(ray, options[0].y, 2u, &spec_seed, 1u);
+        } else {
+            value = trace_path_steps(ray, options[0].y, true, 2u, &spec_seed);
+        }
+        textureStore(radiance, sample_pixel, vec4<f32>(value, 1.0));
         return;
     }
     atomicAdd(&counters[PRIMARY_BVH_PIXELS], 1u);
     let hit = closest(ray, frame.clip.y, false);
     if hit.object == MISS {
-        if diffuse_output != 0u || lighting_output == 2u {
+        if diffuse_output != 0u || lighting_output == 2u || lighting_output >= 16u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
@@ -163,11 +222,17 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     if (mat.flags.x & 3u) != 0u {
         var depth = 0u;
         if (mat.flags.x & 1u) != 0u { depth = 1u; }
-        if diffuse_output != 0u || !select_lighting_depth(lighting_output, depth) {
+        if diffuse_output != 0u || lighting_output >= 16u || !select_lighting_depth(lighting_output, depth) {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
-        textureStore(radiance, sample_pixel, vec4<f32>(trace_path_steps(ray, options[0].y, true, 2u, &spec_seed), 1.0));
+        var value: vec3<f32>;
+        if hybrid.mode == 3u && (mat.flags.x & 1u) != 0u {
+            value = trace_live_indirect_path(ray, options[0].y, 2u, &spec_seed, 1u);
+        } else {
+            value = trace_path_steps(ray, options[0].y, true, 2u, &spec_seed);
+        }
+        textureStore(radiance, sample_pixel, vec4<f32>(value, 1.0));
         return;
     }
     let p = ray.origin + ray.direction * hit.t;
@@ -183,12 +248,26 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     let roughness = clamp(mat.base_roughness.w, 0.0, 1.0);
     let refresh = hybrid.mode == 2u || (hybrid.mode == 3u && ((id.x + 2u * id.y + hybrid.seed) & 3u) == 0u);
     let steps = select(0u, 1u, refresh);
+    let try_grid = hybrid.mode == 3u && !refresh && hybrid.capture != 1u
+        && roughness >= ROUGH_GRID_MIN_ROUGHNESS;
     var spec = vec3<f32>(0.0);
+    var grid_tail = vec3<f32>(0.0);
+    var grid_trust = 0.0;
     for (var i = 0u; i < hybrid.samples; i++) {
-        spec += hybrid_specular(p, ng, n, v, mat, steps, &spec_seed);
+        let sample = hybrid_specular(p, ng, n, v, mat, steps, try_grid, &spec_seed);
+        spec += sample.base;
+        if sample.grid.trust > 0.0 {
+            grid_tail += sample.grid.rgb * sample.grid.trust;
+            grid_trust += sample.grid.trust;
+            let counter = select(ROUGH_VOLUME_ACCEPTED, ROUGH_SPHERICAL_ACCEPTED, sample.grid.source == 2u);
+            atomicAdd(&counters[counter], 1u);
+        }
+        if i == 0u { write_rough_evidence(index, sample); }
     }
     spec /= f32(hybrid.samples);
-    if hybrid.capture != 0u {
+    grid_tail /= f32(hybrid.samples);
+    grid_trust /= f32(hybrid.samples);
+    if hybrid.capture == 1u {
         write_hybrid_capture(index, spec, view_n, abs(pos.z), roughness);
         textureStore(radiance, sample_pixel, vec4<f32>(0.0));
         return;
@@ -198,15 +277,18 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     if hybrid.mode == 3u && !refresh {
         let predicted = predict_specular(spec, view_n, abs(pos.z), roughness);
         if all(predicted >= vec3<f32>(0.0)) && all(predicted <= vec3<f32>(65504.0)) {
-            spec = predicted;
+            // Interpolate the two estimates of the remainder. The secondary
+            // direct term is evaluated once and is already part of the raw source.
+            spec = select(predicted, mix(predicted, spec, grid_trust) + grid_tail, grid_trust > 0.0);
             atomicAdd(&counters[PATH_MODEL_PIXELS], 1u);
         } else {
+            spec += grid_tail;
             atomicAdd(&counters[PATH_MODEL_REJECTED], 1u);
         }
     }
     var diffuse_seed = hybrid_seed(id.xy, 0x93ed12a3u);
-    // The screen mirror gate says nothing about incident diffuse. There is no
-    // confidence-qualified current diffuse input in this mode; trace this lobe.
+    // Incident diffuse starts with its existing real ray. A routed cache may
+    // estimate the tail only after that ray reaches a secondary surface.
     atomicAdd(&counters[DIFFUSE_MISSING_PIXELS], 1u);
     let indirect_diffuse = hybrid_diffuse(p, ng, n, mat, &diffuse_seed)
         * hybrid_diffuse_ao(pixel, dims, z, pos.z, view_n);
@@ -220,5 +302,8 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     var value = mat.emission_metallic.rgb + direct + indirect_diffuse + spec;
     if lighting_output == 1u { value = mat.emission_metallic.rgb + direct; }
     if lighting_output == 2u { value = indirect_diffuse + spec; }
+    if lighting_output == 16u { value = indirect_diffuse; }
+    if lighting_output == 17u { value = spec; }
+    if lighting_output == 18u { value = grid_tail; }
     textureStore(radiance, sample_pixel, vec4<f32>(value, 1.0));
 }

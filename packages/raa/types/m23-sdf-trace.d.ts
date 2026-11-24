@@ -36,10 +36,12 @@ export interface MeshTracingSettings {
   panelSampling?: 'stable' | 'single' | 'independent';
   diffuseOutput?: 'off' | 'direct' | 'direct-and-indirect';
   /** Selects the lighting contribution for the forward or full-frame mesh output. Default combined. */
-  lightingOutput?: 'combined' | 'direct' | 'indirect' | 'bounce';
+  lightingOutput?: 'combined' | 'direct' | 'indirect' | 'bounce' | 'diffuse-indirect' | 'rough-specular' | 'rough-grid';
   /** With lightingOutput 'bounce' and reference enabled, selects an exact depth from 0 to 12. */
   lightingDepth?: number;
   pathMode?: 'off' | 'short' | 'traced' | 'learned';
+  /** Live GI for secondary-hit shading in geometry reflections and learned tracing. Default auto. */
+  indirectGrid?: 'auto' | 'off' | 'volume' | 'spherical';
 }
 
 export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
@@ -67,6 +69,17 @@ export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
   pathForegroundPixels: number;
   modelRejectedPixels: number;
   primaryBvhPixels: number;
+  /** First real secondary rays and hits, before shading from a selected GI cache. */
+  firstHitRays: number;
+  firstHitHits: number;
+  /** Order-independent digest of the dense triangle and world hit for a fixed scene and seed. */
+  firstHitHash: number;
+  sphericalDiffuseHits: number;
+  volumeDiffuseHits: number;
+  sphericalSpecularHits: number;
+  volumeSpecularHits: number;
+  sphericalDiffuseOffscreenInGrid: number;
+  sphericalDiffuseOffscreenSupported: number;
   referenceSpp: number;
   hybridLobeSpp: number;
 }
@@ -79,11 +92,16 @@ export interface Engine {
   /** Loads a specular model in validated 12→8→3 little-endian FP32 tensor order. */
   setMeshPathModel(weights: Uint8Array): void;
   /** Reads the renderer's tight, little-endian linear RGBA16F scene color. */
-  captureMeshLighting(nowMs: number, traced: boolean, raw?: boolean): Promise<{
+  captureMeshLighting(nowMs: number, traced: boolean, raw?: boolean, evidenceSeed?: number): Promise<{
     size: [number, number];
     data: Uint8Array;
     /** The same-frame combined radiance while capturing an isolated forward view. */
     combinedData?: Uint8Array;
+    /** Fixed-seed 48-byte records from this submitted fitted trace.
+     * Each little-endian record contains world XYZ f32, first BVH triangle u32
+     * (0xffffffff for a miss), first-bounce RGB f32, grid trust f32,
+     * accepted grid-tail RGB f32 and source u32 (0 none, 1 Volume, 2 Spherical). */
+    roughEvidence?: { frame: number; size: [number, number]; data: Uint8Array };
   }>;
   /** Captures one fixed-seed specular RGB sample and guides from short or traced mode. */
   captureMeshPathSample(nowMs: number, seed: number): Promise<{ size: [number, number]; data: Uint8Array }>;

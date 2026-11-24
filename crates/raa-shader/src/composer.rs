@@ -166,7 +166,12 @@ impl Composer {
         section(&mut out, "local lighting", LOCAL_LIGHTING_WGSL);
         if key.pass == PassKind::Forward {
             section(&mut out, "spherical cube", crate::SPHERICAL_CUBE_WGSL);
-            section(&mut out, "spherical GI", include_str!("wgsl/spherical_gi.wgsl"));
+            section(
+                &mut out,
+                "spherical GI binding",
+                "@group(1) @binding(21) var<storage, read> raa_spherical_data: array<vec4<u32>>;",
+            );
+            section(&mut out, "spherical GI", crate::SPHERICAL_GI_WGSL);
         }
         if matches!(key.pass, PassKind::VgGbuffer | PassKind::VgShade) {
             section(&mut out, "depth", DEPTH_WGSL);

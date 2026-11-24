@@ -902,7 +902,7 @@ pub struct LightingResources {
     gi_params_buffer: wgpu::Buffer,
     area_table_buffer: wgpu::Buffer,
     spherical_dummy: wgpu::Buffer,
-    spherical_gi: Option<wgpu::Buffer>,
+    spherical_gi: Option<(wgpu::Buffer, wgpu::Buffer)>,
     spherical_dirty: bool,
     state: State<wgpu::TextureView>,
 }
@@ -953,7 +953,7 @@ impl LightingResources {
         });
         let spherical_dummy = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("raa-pipeline.dummy.spherical_gi"),
-            size: 16,
+            size: 48,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
@@ -1353,12 +1353,29 @@ impl LightingResources {
         &self.linear_clamp
     }
 
-    /// Publishes the spherical GI lookup and irradiance buffer, or restores the zero dummy.
-    pub fn set_spherical_gi(&mut self, buffer: Option<wgpu::Buffer>) {
-        if self.spherical_gi != buffer {
-            self.spherical_gi = buffer;
+    /// Publishes the lookup and faces from the same spherical cache for this view.
+    pub fn set_spherical_gi(&mut self, buffers: Option<(wgpu::Buffer, wgpu::Buffer)>) {
+        if self.spherical_gi != buffers {
+            self.spherical_gi = buffers;
             self.spherical_dirty = true;
         }
+    }
+
+    /// The same per-view spherical lookup used by forward, or the zero header
+    /// for an unrouted consumer or an unavailable cache.
+    pub fn spherical_gi_buffer(&self, routed: bool) -> &wgpu::Buffer {
+        self.spherical_gi
+            .as_ref()
+            .filter(|_| routed)
+            .map_or(&self.spherical_dummy, |(lookup, _)| lookup)
+    }
+
+    /// Captured directional radiance for the same cache, or one zero texel.
+    pub fn spherical_gi_faces_buffer(&self, routed: bool) -> &wgpu::Buffer {
+        self.spherical_gi
+            .as_ref()
+            .filter(|_| routed)
+            .map_or(&self.spherical_dummy, |(_, faces)| faces)
     }
 
     /// The environment diffuse signal published for this view, when an environment is ready.
@@ -1469,7 +1486,9 @@ impl LightingResources {
                 &self.weather_buffer,
                 &self.gi_params_buffer,
                 &self.area_table_buffer,
-                self.spherical_gi.as_ref().unwrap_or(&self.spherical_dummy),
+                self.spherical_gi
+                    .as_ref()
+                    .map_or(&self.spherical_dummy, |(lookup, _)| lookup),
             ];
             let samplers = [&self.shadow_cmp, &self.linear_clamp];
             self.bind_group = build_bind_group(

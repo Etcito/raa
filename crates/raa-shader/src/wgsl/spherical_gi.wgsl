@@ -1,6 +1,6 @@
 // A CPU-authored sparse lookup and GPU-projected radiance share one read-only
 // buffer at shading time. Slots become visible only after six submitted faces.
-@group(1) @binding(21) var<storage, read> raa_spherical_data: array<vec4<u32>>;
+// The enclosing shader declares raa_spherical_data at its own read-only binding.
 
 const RAA_SPHERICAL_TABLE: u32 = 68u;
 const RAA_SPHERICAL_EMPTY: u32 = 0xffffffffu;
@@ -59,21 +59,23 @@ fn raa_spherical_incident(entry: u32, mask: u32, channels: u32) -> vec3<f32> {
     return rgb;
 }
 
-struct RaaSphericalResult {
-    diffuse: vec4<f32>,
-    debug: vec4<f32>,
+struct RaaSphericalCoordinate {
+    desc: vec4<u32>,
+    shell: u32,
+    bounds: vec3<f32>,
+    face: u32,
+    angular: vec2<f32>,
+    radius: f32,
 }
 
-fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult {
-    // The 16-byte zero dummy also exits here, before indexing the full layout.
+fn raa_spherical_coordinate(p: vec3<f32>) -> RaaSphericalCoordinate {
     let anchor = bitcast<vec4<f32>>(raa_spherical_data[0]);
-    if anchor.w == 0.0 { return RaaSphericalResult(); }
+    if anchor.w == 0.0 { return RaaSphericalCoordinate(); }
     let desc = raa_spherical_data[1];
     let config = bitcast<vec2<f32>>(raa_spherical_data[2].xy);
-    let channels = raa_spherical_data[2].w;
     let delta = p - anchor.xyz;
     let radius = length(delta);
-    if radius <= 0.0 || radius < config.x || radius > config.y { return RaaSphericalResult(); }
+    if radius <= 0.0 || radius < config.x || radius > config.y { return RaaSphericalCoordinate(); }
     var first = 0u;
     var last = desc.y - 1u;
     while first < last {
@@ -89,6 +91,34 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
     let face_uv = raa_spherical_face_uv(delta);
     let face = u32(face_uv.z);
     let angular = (face_uv.xy + 1.0) * (0.5 * f32(desc.x));
+    return RaaSphericalCoordinate(desc, shell, shell_bounds, face, angular, radius);
+}
+
+struct RaaSphericalNeighbors {
+    entries: array<u32, 8>,
+    weights: array<f32, 8>,
+    count: u32,
+    total: f32,
+}
+
+struct RaaSphericalResult {
+    diffuse: vec4<f32>,
+    debug: vec4<f32>,
+}
+
+fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult {
+    return raa_spherical_evaluate_at(p, normal, raa_spherical_coordinate(p));
+}
+
+fn raa_spherical_evaluate_at(p: vec3<f32>, normal: vec3<f32>,
+                             cell: RaaSphericalCoordinate) -> RaaSphericalResult {
+    if cell.desc.x == 0u { return RaaSphericalResult(); }
+    let desc = cell.desc;
+    let shell = cell.shell;
+    let shell_bounds = cell.bounds;
+    let face = cell.face;
+    let angular = cell.angular;
+    let radius = cell.radius;
     if desc.w != 0u {
         let ij = min(vec2<i32>(i32(desc.x) - 1), vec2<i32>(floor(angular)));
         let entry = raa_spherical_find(raa_spherical_key(shell, face, ij, desc.x), desc.z);
@@ -116,6 +146,29 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
         return RaaSphericalResult(vec4<f32>(0.0), vec4<f32>(rgb, 1.0));
     }
 
+    let neighbors = raa_spherical_neighbors(p, normal, cell);
+    if neighbors.count < 2u { return RaaSphericalResult(); }
+    let channels = raa_spherical_data[2].w;
+    var sum = vec3<f32>(0.0);
+    for (var i = 0u; i < neighbors.count; i++) {
+        sum += neighbors.weights[i] * raa_spherical_incident(neighbors.entries[i], desc.z, channels);
+    }
+    let blend = smoothstep(0.0, 0.15, neighbors.total);
+    let intensity = bitcast<f32>(raa_spherical_data[0].w);
+    return RaaSphericalResult(vec4<f32>(intensity * sum / neighbors.total, blend), vec4<f32>(0.0));
+}
+
+// Reuse exactly the forward lookup's current, ready, normal-compatible cells.
+// Consumers choose how to evaluate each entry's projected or directional data.
+fn raa_spherical_neighbors(p: vec3<f32>, normal: vec3<f32>,
+                           cell: RaaSphericalCoordinate) -> RaaSphericalNeighbors {
+    if cell.desc.x == 0u { return RaaSphericalNeighbors(); }
+    let desc = cell.desc;
+    let shell = cell.shell;
+    let shell_bounds = cell.bounds;
+    let radius = cell.radius;
+    let face = cell.face;
+    let angular = cell.angular;
     var shell0 = shell;
     if radius < shell_bounds.y && shell > 0u { shell0 -= 1u; }
     let shell1 = min(shell0 + 1u, desc.y - 1u);
@@ -125,10 +178,7 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
     let pixel = angular - 0.5;
     let ij = vec2<i32>(floor(pixel));
     let f = fract(pixel);
-    var count = 0u;
-    var entries: array<u32, 8>;
-    var total = 0.0;
-    var sum = vec3<f32>(0.0);
+    var result: RaaSphericalNeighbors;
     for (var i = 0u; i < select(8u, 4u, shell0 == shell1); i++) {
         let corner = vec3<bool>((i & 1u) != 0u, (i & 2u) != 0u, (i & 4u) != 0u);
         let coord = ij + select(vec2<i32>(0), vec2<i32>(1), corner.xy);
@@ -137,19 +187,19 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
         let support = raa_spherical_supported(entry, p, normal);
         if support <= 0.0 { continue; }
         var seen = false;
-        for (var j = 0u; j < count; j++) { seen = seen || entries[j] == entry; }
+        for (var j = 0u; j < result.count; j++) { seen = seen || result.entries[j] == entry; }
         if seen { continue; }
         let w = select(vec3<f32>(1.0) - vec3<f32>(f, depth), vec3<f32>(f, depth), corner);
         let weight = support * max(w.x * w.y * w.z, 0.01);
-        sum += weight * raa_spherical_incident(entry, desc.z, channels);
-        total += weight;
-        entries[count] = entry;
-        count += 1u;
+        result.entries[result.count] = entry;
+        result.weights[result.count] = weight;
+        result.total += weight;
+        result.count += 1u;
     }
 
     // Near cell boundaries, a sparse surface may occupy only one of the
     // trilinear corners. Search the immediate ring for the remaining support.
-    if count == 1u {
+    if result.count == 1u {
         let center = vec2<i32>(floor(angular));
         let lo = max(i32(shell) - 1, 0);
         let hi = min(i32(shell) + 1, i32(desc.y) - 1);
@@ -160,7 +210,7 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
                 for (var x = -1; x <= 1; x++) {
                     let key = raa_spherical_key(u32(ri), face, center + vec2<i32>(x, y), desc.x);
                     let entry = raa_spherical_find(key, desc.z);
-                    if entry == entries[0] { continue; }
+                    if entry == result.entries[0] { continue; }
                     let support = raa_spherical_supported(entry, p, normal);
                     if support > best_support {
                         best = entry;
@@ -171,12 +221,11 @@ fn raa_spherical_evaluate(p: vec3<f32>, normal: vec3<f32>) -> RaaSphericalResult
         }
         if best_support > 0.0 {
             let weight = 0.15 * best_support;
-            sum += weight * raa_spherical_incident(best, desc.z, channels);
-            total += weight;
-            count += 1u;
+            result.entries[result.count] = best;
+            result.weights[result.count] = weight;
+            result.total += weight;
+            result.count += 1u;
         }
     }
-    if count < 2u { return RaaSphericalResult(); }
-    let blend = smoothstep(0.0, 0.15, total);
-    return RaaSphericalResult(vec4<f32>(anchor.w * sum / total, blend), vec4<f32>(0.0));
+    return result;
 }

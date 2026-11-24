@@ -5,7 +5,8 @@ use crate::wgsl::mesh_hybrid_module;
 
 const LABEL: &str = "trace.mesh.hybrid_path";
 const WEIGHT_BYTES: usize = 131 * 4;
-const PIXEL_BYTES: u64 = 8 * 4;
+const TRAINING_PIXEL_BYTES: u64 = 8 * 4;
+const ROUGH_EVIDENCE_PIXEL_BYTES: u64 = 12 * 4;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -19,8 +20,23 @@ pub enum PathMode {
 
 #[derive(Clone)]
 pub(super) struct PathCapture {
-    pub seed: u32,
-    pub result: Option<((u32, u32), wgpu::Buffer)>,
+    seed: u32,
+    evidence: bool,
+    pub(super) result: Option<(u64, (u32, u32), wgpu::Buffer)>,
+}
+
+impl PathCapture {
+    pub(super) fn training(seed: u32) -> Self {
+        Self { seed, evidence: false, result: None }
+    }
+
+    pub(super) fn rough_evidence(seed: u32) -> Self {
+        Self { seed, evidence: true, result: None }
+    }
+
+    fn byte_stride(&self) -> u64 {
+        if self.evidence { ROUGH_EVIDENCE_PIXEL_BYTES } else { TRAINING_PIXEL_BYTES }
+    }
 }
 
 #[derive(Default)]
@@ -86,6 +102,7 @@ impl HybridGpu {
                     },
                     count: None,
                 },
+                binding(4, B::Storage { read_only: true }),
             ],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -122,6 +139,7 @@ impl HybridGpu {
         frame: u64,
         scene: &wgpu::BindGroup,
         ao: &wgpu::TextureView,
+        spherical_faces: &wgpu::Buffer,
         state: &mut PathState,
         mode: PathMode,
         size: (u32, u32),
@@ -136,13 +154,17 @@ impl HybridGpu {
             }
             self.uploaded = Some(state.revision);
         }
-        let capture_bytes = u64::from(size.0) * u64::from(size.1) * PIXEL_BYTES;
         let request = state.capture.as_mut().filter(|_| capture_enabled);
         let seed = request.as_ref().map_or(frame as u32, |req| req.seed);
-        let sample_buffer = request
-            .as_ref()
+        let capture_bytes = request.as_ref().map_or(0, |req|
+            u64::from(size.0) * u64::from(size.1) * req.byte_stride());
+        let limit = device.limits();
+        let request = request.filter(|_| capture_bytes <= limit.max_buffer_size
+            && capture_bytes <= u64::from(limit.max_storage_buffer_binding_size));
+        let sample_buffer = request.as_ref()
             .map(|_| buffer(device, LABEL, capture_bytes, U::STORAGE | U::COPY_SRC));
-        let params = [mode as u32, seed, u32::from(request.is_some()), 1];
+        let capture_mode = request.as_ref().map_or(0, |req| if req.evidence { 2 } else { 1 });
+        let params = [mode as u32, seed, capture_mode, 1];
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
         queue.write_buffer(&self.options, 0, &bytes);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -153,6 +175,7 @@ impl HybridGpu {
                 buffer_entry(1, &self.weights),
                 buffer_entry(2, sample_buffer.as_ref().unwrap_or(&self.dummy)),
                 image_entry(3, ao),
+                buffer_entry(4, spherical_faces),
             ],
         });
         {
@@ -168,7 +191,7 @@ impl HybridGpu {
         if let (Some(request), Some(sample_buffer)) = (request, sample_buffer) {
             let readback = buffer(device, LABEL, capture_bytes, U::MAP_READ | U::COPY_DST);
             encoder.copy_buffer_to_buffer(&sample_buffer, 0, &readback, 0, capture_bytes);
-            request.result = Some((size, readback));
+            request.result = Some((frame, size, readback));
         }
     }
 }

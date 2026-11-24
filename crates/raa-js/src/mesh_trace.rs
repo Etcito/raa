@@ -7,9 +7,9 @@ use raa_core::RaaError;
 use raa_lit::{DrawClass, FLAG_TRACE_MIRROR, FLAG_UNLIT, SurfaceModel};
 use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
-    DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME, MeshInput,
-    MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial, MeshTraceSettings, PanelSampling,
-    PathMode, SphericalGiHandle,
+    DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME,
+    MeshIndirectGrid, MeshInput, MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial,
+    MeshTraceSettings, PanelSampling, PathMode, SphericalGiHandle,
 };
 use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use wasm_bindgen::prelude::*;
@@ -222,6 +222,9 @@ impl Engine {
                 Some("combined") => LightingOutput::Combined,
                 Some("direct") => LightingOutput::Direct,
                 Some("indirect") => LightingOutput::Indirect,
+                Some("diffuse-indirect") => LightingOutput::IndirectDiffuse,
+                Some("rough-specular") => LightingOutput::IndirectSpecular,
+                Some("rough-grid") => LightingOutput::RoughGrid,
                 Some("bounce") => LightingOutput::Bounce(depth),
                 Some(_) => {
                     return Err(api_error(
@@ -281,6 +284,16 @@ impl Engine {
                     "load a specular fit before enabling learned path tracing",
                 ));
             }
+            let grid = match js::optional_string(&options, "indirectGrid")?.as_deref() {
+                None => existing
+                    .as_ref()
+                    .map_or(MeshIndirectGrid::Auto, |h| h.borrow().indirect_grid),
+                Some("auto") => MeshIndirectGrid::Auto,
+                Some("off") => MeshIndirectGrid::Off,
+                Some("volume") => MeshIndirectGrid::Volume,
+                Some("spherical") => MeshIndirectGrid::Spherical,
+                Some(_) => return Err(api_error("trace.invalid_settings", "unknown indirectGrid")),
+            };
             let hybrid = !settings.reference && settings.active();
             let pipeline = st.pipeline.clone();
             let mut pipeline = pipeline.borrow_mut();
@@ -293,7 +306,9 @@ impl Engine {
                 pipeline.set_enabled(raa_ssr::CONFIDENCE_NAME, hybrid)?;
             }
             pipeline.set_enabled(MESH_TRACE_NAME, settings.active())?;
-            handle.borrow_mut().configure(settings);
+            let mut trace = handle.borrow_mut();
+            trace.configure(settings);
+            trace.indirect_grid = grid;
             let raster = !settings.reference && settings.path_mode == PathMode::Off;
             st.lit.set_frame_feature(
                 RAA_DIRECT_ONLY_FEATURE,
@@ -358,6 +373,15 @@ impl Engine {
                 "pathForegroundPixels",
                 "modelRejectedPixels",
                 "primaryBvhPixels",
+                "firstHitRays",
+                "firstHitHits",
+                "firstHitHash",
+                "sphericalDiffuseHits",
+                "volumeDiffuseHits",
+                "volumeSpecularHits",
+                "sphericalSpecularHits",
+                "sphericalDiffuseOffscreenInGrid",
+                "sphericalDiffuseOffscreenSupported",
             ];
             for (name, value) in names.into_iter().zip(stats.counts) {
                 Reflect::set(&result, &name.into(), &f64::from(value).into())
