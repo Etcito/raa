@@ -4,6 +4,7 @@ import { syncSphericalControls } from './lib/gallery-spherical.js';
 import { captureGallerySequence, verifyGalleryReflection } from './lib/gallery-sequence.js';
 import { applyGalleryNeural, syncNeuralControl } from './lib/gallery-neural.js';
 import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPanelNoise, measureGalleryPath, measureGallerySpherical } from './lib/gallery-path-evidence.js';
+import { measureGalleryMirror } from './lib/gallery-mirror-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
@@ -141,7 +142,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     for (const [op, action] of [['gallery-path-capture', captureGalleryPath],
       ['gallery-path-measure', measureGalleryPath], ['gallery-path-diffuse', measureGalleryDiffuse],
       ['gallery-panel-noise', measureGalleryPanelNoise], ['gallery-spherical', measureGallerySpherical],
-      ['gallery-sequence', captureGallerySequence], ['gallery-reflection-model', verifyGalleryReflection]]) {
+      ['gallery-sequence', captureGallerySequence], ['gallery-mirror', measureGalleryMirror], ['gallery-reflection-model', verifyGalleryReflection]]) {
       target.nmcGpu.ops[op] = input => exclusively(() => {
         stopInteractive();
         runner?.dispose();

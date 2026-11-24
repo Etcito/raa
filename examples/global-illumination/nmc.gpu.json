@@ -9,6 +9,7 @@
     "gallery-path-diffuse",
     "gallery-panel-noise",
     "gallery-spherical",
-    "gallery-sequence"
+    "gallery-sequence",
+    "gallery-mirror"
   ]
 }
