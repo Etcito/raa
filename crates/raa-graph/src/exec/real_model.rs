@@ -144,6 +144,11 @@ impl RealModelPackage {
         &self.trained_heads
     }
 
+    pub fn supports_heads(&self, heads: RealModelHeads) -> bool {
+        [(heads.area, "area"), (heads.reflection, "reflection"), (heads.sr, "display")]
+            .into_iter().all(|(selected, name)| !selected || self.trained_heads.iter().any(|head| head == name))
+    }
+
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -562,6 +567,11 @@ impl RealModelFrame {
         let Some(incident) = incident else {
             return;
         };
+        let Some(meta) = self.reflection.as_ref()
+            .and_then(|route| ctx.resources.get(&route.trace, "hitMeta"))
+            .filter(|image| matches_size(&image.view, ctx.size)) else {
+            return;
+        };
         let t = self.resources.as_ref().expect("encoded tensors");
         let k = &self.kernels;
         let output = t.reflection.as_ref().expect("selected reflection");
@@ -571,6 +581,7 @@ impl RealModelFrame {
                 b(0, &k.late_params),
                 b(1, &k.weights),
                 v(12, &incident.view),
+                v(13, &meta.view),
                 b(14, &t.state[self.history.write_index()]),
                 v(15, output),
             ],
@@ -1052,6 +1063,7 @@ impl Kernels {
                         (0, uniform),
                         (1, read),
                         (12, image),
+                        (13, image),
                         (14, write),
                         (15, storage(Format::Rgba32Float, D::D2)),
                     ],

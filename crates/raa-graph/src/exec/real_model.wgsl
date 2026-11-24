@@ -36,7 +36,6 @@ struct State {
 @group(0) @binding(15) var incident_out: texture_storage_2d<rgba32float, write>;
 @group(0) @binding(16) var<storage, read_write> coefficients: array<array<f32, 8>>;
 @group(0) @binding(17) var display_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(18) var<storage, read_write> guide_capture: array<array<f32, 12>>;
 
 const STEM_W: u32 = 0u;
 const STEM_B: u32 = 144u;
@@ -85,24 +84,22 @@ fn history_sample(q: vec2<f32>) -> array<f32, 12> {
     }
     return result;
 }
-fn pack(p: vec2<i32>) -> array<f32, 12> {
-    let g = textureLoad(normal, p, 0);
-    let mv = textureLoad(motion, p, 0);
-    let z = view_depth(p, textureLoad(depth, p, 0));
+fn pack_guide(
+    p: vec2<i32>, g: vec4<f32>, mv: vec4<f32>, z: f32, jit: vec4<f32>,
+    history_valid: bool, reactive: f32,
+) -> array<f32, 12> {
     let n = g.xyz;
     let valid = z > 0.0 && dot(n, n) > 0.25;
-    let jit = jitter_px();
     let q = vec2<f32>(p) - mv.xy * vec2<f32>(control.scene) + jit.zw - jit.xy;
     var accepted = false;
     var warped: array<f32, 12>;
-    if valid && control.history_valid != 0u && frame.temporal.z != 0u && mv.z < 0.5
+    if valid && history_valid && mv.z < 0.5
         && all(q >= vec2<f32>(-0.5)) && all(q < vec2<f32>(control.scene) - 0.5) {
         let prior = previous[index(vec2<i32>(floor(q + 0.5)))].geometry;
         accepted = prior.w > 0.0 && abs(prior.w - z) <= max(0.02, 0.025 * z)
             && dot(prior.xyz, n) >= 0.8;
-        if accepted && control.reactive == 0u { warped = history_sample(q); }
+        if accepted && reactive < 1.0 { warped = history_sample(q); }
     }
-    let reactive = f32(control.reactive);
     let i = index(p);
     guides[i].warped = warped;
     guides[i].geometry = select(vec4<f32>(0.0), vec4<f32>(n, z), valid);
@@ -124,13 +121,11 @@ fn stem_at(i: u32, input: array<f32, 12>) {
 fn encode_stem(@builtin(global_invocation_id) id: vec3<u32>) {
     if !inside(id.xy) { return; }
     let p = vec2<i32>(id.xy);
-    stem_at(index(p), pack(p));
-}
-@compute @workgroup_size(8, 8)
-fn capture_guides(@builtin(global_invocation_id) id: vec3<u32>) {
-    if !inside(id.xy) { return; }
-    let p = vec2<i32>(id.xy);
-    guide_capture[index(p)] = pack(p);
+    let g = textureLoad(normal, p, 0);
+    let mv = textureLoad(motion, p, 0);
+    let z = view_depth(p, textureLoad(depth, p, 0));
+    let live_history = control.history_valid != 0u && frame.temporal.z != 0u;
+    stem_at(index(p), pack_guide(p, g, mv, z, jitter_px(), live_history, f32(control.reactive)));
 }
 @compute @workgroup_size(8, 8)
 fn encode_spatial(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -229,7 +224,8 @@ fn recurrent(@builtin(global_invocation_id) id: vec3<u32>) {
     let rgb = select(vec3<f32>(0.0), r.rgb, reflection_valid);
     let late = array<f32, 9>(saturating_log(color.x), saturating_log(color.y),
         saturating_log(color.z), saturating_log(rgb.x), saturating_log(rgb.y),
-        saturating_log(rgb.z), f32(reflection_valid), hit_info.x / 4.0, clamp(hit_info.w, 0.0, 32.0) / 32.0);
+        saturating_log(rgb.z), f32(reflection_valid), select(0.0, hit_info.x / 4.0, reflection_valid),
+        select(0.0, clamp(hit_info.w, 0.0, 32.0) / 32.0, reflection_valid));
     next[i].geometry = g.geometry;
     for (var c = 0u; c < 12u; c++) {
         let candidate = tanh(recur_dot(c, g, late));
@@ -244,17 +240,24 @@ fn project(hidden: array<f32, 12>, start: u32, bias: u32, row: u32) -> f32 {
     }
     return sum;
 }
+fn reflection_residual(original: vec3<f32>, hidden: array<f32, 12>) -> vec3<f32> {
+    var result: vec3<f32>;
+    for (var c = 0u; c < 3u; c++) {
+        result[c] = max(0.0, exp(saturating_log(original[c])
+            + 0.5 * tanh(project(hidden, REFLECTION_W, REFLECTION_B, c))) - 1.0);
+    }
+    return result;
+}
 @compute @workgroup_size(8, 8)
 fn reconstruct_reflection(@builtin(global_invocation_id) id: vec3<u32>) {
     if !inside(id.xy) { return; }
     let p = vec2<i32>(id.xy);
     let original = textureLoad(incident, p, 0);
     var value = original;
-    if original.a > 0.0 {
-        let h = next[index(p)].hidden;
-        for (var c = 0u; c < 3u; c++) {
-            value[c] = max(0.0, exp(saturating_log(original[c])
-                + 0.5 * tanh(project(h, REFLECTION_W, REFLECTION_B, c))) - 1.0);
+    if control.has_hit_meta != 0u && original.a > 0.0 {
+        let hit = textureLoad(hit_meta, p, 0);
+        if hit.x == 1.0 && hit.y > 0.5 {
+            value = vec4<f32>(reflection_residual(original.rgb, next[index(p)].hidden), original.a);
         }
     }
     textureStore(incident_out, p, value);

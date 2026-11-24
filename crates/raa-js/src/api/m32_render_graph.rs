@@ -304,6 +304,9 @@ pub(crate) mod web {
                     let graph = st.features.require_mut::<RenderGraphState>("render graph")?;
                     let model = graph.real_models.get(&id).cloned()
                         .ok_or_else(|| api_error("graph.neural_package", "unknown real-frame model"))?;
+                    if !model.supports_heads(heads) {
+                        return Err(api_error("graph.neural_package", "the package has no trained weights for a selected head"));
+                    }
                     let size = graph.explicit_scene_size.unwrap_or(self.viewport);
                     Some((id, model, heads, size))
                 };
@@ -504,6 +507,9 @@ pub(crate) mod web {
         let Some(name) = name else { return Ok(None); };
         let graph = graph_state(st).map_err(|_| issue("render graph state is missing"))?;
         let package = graph.real_models.get(name).cloned().ok_or_else(|| issue("a named neural package is not registered"))?;
+        if !package.supports_heads(heads) {
+            return Err(issue("the package has no trained weights for a selected head"));
+        }
         if st.features.get::<ViewsState>().is_some_and(|v| v.viewports() != [ViewRect::FULL]) {
             return Err(issue("real-frame model selection requires a full-canvas viewport"));
         }

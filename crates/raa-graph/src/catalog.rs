@@ -808,9 +808,8 @@ fn node_json(node: &NodeTypeSpec, available: bool) -> JsonValue {
         ),
     ];
     let capability = match node.id {
-        "neural.area-reconstruction" | "neural.super-resolution" => "experimental-learned",
-        "neural.reflection-reconstruction" => "experimental-operator",
-        "neural.frame-generation" => "experimental-learned",
+        "neural.area-reconstruction" | "neural.super-resolution"
+        | "neural.reflection-reconstruction" | "neural.frame-generation" => "experimental-learned",
         _ => return JsonValue::Object(fields),
     };
     fields.push(("capability".into(), JsonValue::String(capability.into())));

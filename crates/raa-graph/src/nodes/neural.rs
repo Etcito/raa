@@ -79,7 +79,7 @@ impl NodeFamily for Neural {
             "neural.reflection-reconstruction",
             "neural",
             Category::Post,
-            "Reflection ray reconstruction (operator only)",
+            "Reflection ray reconstruction (experimental)",
             65,
             vec![incident],
             vec![reconstructed],
@@ -87,7 +87,7 @@ impl NodeFamily for Neural {
             vec![stage_budget(ShaderStage::Compute, 3, 0, 1, 4, 2)],
         );
         reflection.multi_instance = false;
-        reflection.description = "Experimental screen-hit incident-radiance operator. The current fitted package has no trained reflection head. The empty model ID passes native incident radiance through.";
+        reflection.description = "Experimental fitted reconstruction for accepted screen hits. A selected package must identify a trained reflection head. The empty model ID uses native incident radiance.";
 
         let mut color = required_in("color", "Current real HDR", GraphFormat::Rgba16Float);
         color.generic = true;
