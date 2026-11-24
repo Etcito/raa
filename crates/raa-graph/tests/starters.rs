@@ -220,6 +220,12 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
             ("debug", "Debug"),
             ("full-gi", "Full GI"),
             ("full-gi-stages", "Full GI stages"),
+            ("pre-spherical-gi", "Pre-spherical GI"),
+            (
+                "pre-spherical-gi-fitted",
+                "Pre-spherical GI with fitted specular"
+            ),
+            ("pre-spherical-gi-mirrors", "Pre-spherical GI with mirrors"),
             ("real-frame-model", "Real-frame neural reconstruction"),
             ("simple-forward", "Simple forward"),
             ("spherical-gi", "Spherical GI"),
@@ -228,12 +234,150 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
 }
 
 #[test]
-fn spherical_gi_starter_uses_the_frozen_preset_source() {
-    let (_, _, source) = registry::frozen_all()
-        .into_iter()
-        .find(|(name, _, _)| *name == "spherical_gi")
-        .expect("Spherical GI is frozen");
-    assert_eq!(starter("spherical-gi"), source);
+fn gi_starters_use_the_frozen_preset_sources() {
+    let catalog = registry::frozen_all();
+    for (file, preset) in [
+        ("spherical-gi", "spherical_gi"),
+        ("pre-spherical-gi", "pre_spherical_gi"),
+    ] {
+        let (_, _, source) = catalog
+            .iter()
+            .find(|(name, _, _)| *name == preset)
+            .expect("the GI starter is also frozen");
+        assert_eq!(starter(file), *source);
+    }
+}
+
+#[test]
+fn pre_spherical_gi_restores_quality_and_keeps_mesh_paths_opt_in() {
+    use raa_graph::plan::{InputSource, PlanNode};
+    use raa_loader::json::JsonValue;
+
+    let base = parse_graph(starter("pre-spherical-gi")).unwrap();
+    let baseline = with_ctx(|ctx| plan_from_doc(&base, ctx)).unwrap().0;
+    let node = |id: &str| baseline.nodes.iter().find(|node| node.id == id).unwrap();
+    for (id, key, value) in [
+        ("giVolume", "resolution", ParamValue::Int(64)),
+        ("giVolume", "levels", ParamValue::Int(3)),
+        ("giVolume", "probeRays", ParamValue::Int(8)),
+        ("giVolume", "localLightShadows", ParamValue::Bool(true)),
+        ("giScreen", "indirect", ParamValue::Enum("probes".into())),
+        ("giScreen", "historyMax", ParamValue::Int(16)),
+        (
+            "giSsgi",
+            "screenSpaceQuality",
+            ParamValue::Enum("medium".into()),
+        ),
+        ("aoGtao", "indirectDiffuse", ParamValue::Bool(true)),
+        ("forward", "mode", ParamValue::Enum("ltc".into())),
+        (
+            "forward",
+            "lightingOutput",
+            ParamValue::Enum("combined".into()),
+        ),
+        ("giAreaShadow", "tier", ParamValue::Enum("hero".into())),
+        ("giAreaShadow", "heroCount", ParamValue::Int(2)),
+        (
+            "ssr",
+            "maxRoughness",
+            ParamValue::Number(f64::from(0.35_f32)),
+        ),
+        ("ssr", "intensity", ParamValue::Number(f64::from(0.65_f32))),
+    ] {
+        assert!(node(id).params.contains(&(key.into(), value)), "{id}.{key}");
+    }
+    for id in [
+        "skyAtmosphere",
+        "skyCloudLighting",
+        "skyEnv",
+        "skyBackground",
+        "dof",
+        "bloom",
+        "opaqueCopy",
+        "transparentOit",
+        "overlay",
+    ] {
+        assert!(node(id).order_index < node("out").order_index);
+    }
+    assert!(!baseline.nodes.iter().any(|node| {
+        node.type_id.starts_with("mesh.")
+            || node.type_id.starts_with("neural.")
+            || matches!(node.type_id.as_str(), "pass.gi.spherical" | "pass.taa")
+    }));
+    let input = |node: &PlanNode, port: &str| {
+        node.inputs
+            .iter()
+            .find(|input| input.port == port)
+            .unwrap()
+            .source
+            .clone()
+    };
+    for (producer, output, port) in [
+        ("giAreaShadow", "areaShadow", "areaShadow"),
+        ("shadowCsm", "shadowMap", "shadowMap"),
+        ("giScreen", "gi", "gi"),
+    ] {
+        assert_eq!(
+            input(node("forward"), port),
+            InputSource::Link {
+                node: producer.into(),
+                port: output.into(),
+                history: false,
+            }
+        );
+        assert!(node(producer).order_index < node("forward").order_index);
+    }
+    assert_eq!(input(node("forward"), "opaqueColor"), InputSource::Absent);
+    assert_eq!(
+        input(node("transparentOit"), "opaqueColor"),
+        InputSource::Default {
+            node: "opaqueCopy".into(),
+            port: "opaqueColor".into(),
+        }
+    );
+
+    for (name, ty) in [
+        ("pre-spherical-gi-mirrors", "mesh.reflection"),
+        ("pre-spherical-gi-fitted", "mesh.fitted-specular"),
+    ] {
+        let opt_in = parse_graph(starter(name)).unwrap();
+        for node in &base.nodes {
+            if node.id == "ssr" && ty == "mesh.fitted-specular" {
+                continue;
+            }
+            assert!(opt_in.nodes.contains(node), "{name} changed {}", node.id);
+        }
+        let trace = opt_in.nodes.iter().find(|node| node.type_id == ty).unwrap();
+        assert!(
+            trace
+                .params
+                .contains(&("confidenceThreshold".into(), JsonValue::Number(0.55)))
+        );
+        let plan = with_ctx(|ctx| plan_from_doc(&opt_in, ctx)).unwrap().0;
+        let find = |id: &str| plan.nodes.iter().find(|node| node.id == id).unwrap();
+        assert_eq!(
+            input(find("meshTrace"), "volumeAtlas"),
+            InputSource::Link {
+                node: "giVolume".into(),
+                port: "volumeAtlas".into(),
+                history: false,
+            }
+        );
+        assert_eq!(
+            input(find("meshTrace"), "sphericalLookup"),
+            InputSource::Absent
+        );
+        assert_eq!(
+            input(find("fog"), "color"),
+            InputSource::Link {
+                node: "meshTrace".into(),
+                port: "color".into(),
+                history: false,
+            }
+        );
+        assert!(find("mirrorScreen").order_index < find("meshTrace").order_index);
+        assert!(find("meshTrace").order_index < find("fog").order_index);
+    }
 }
 
 /// P5-Q2: the Simple forward starter is exactly the contracted node list (S50 example, module

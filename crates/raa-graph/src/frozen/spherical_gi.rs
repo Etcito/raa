@@ -181,10 +181,119 @@ pub fn plan() -> crate::plan::GraphPlan {
                 compute: None,
             },
             crate::plan::PlanNode {
+                id: "areaShadow".to_string(),
+                type_id: "pass.gi.area-shadow".to_string(),
+                type_version: 1,
+                order_index: 8,
+                params: vec![
+                    (
+                        "tier".to_string(),
+                        crate::catalog::ParamValue::Enum("hero".to_string()),
+                    ),
+                    ("heroCount".to_string(), crate::catalog::ParamValue::Int(2)),
+                    (
+                        "heroDistance".to_string(),
+                        crate::catalog::ParamValue::Number(25.0),
+                    ),
+                    (
+                        "fadeDistance".to_string(),
+                        crate::catalog::ParamValue::Number(80.0),
+                    ),
+                    ("band".to_string(), crate::catalog::ParamValue::Number(5.0)),
+                    (
+                        "stochasticCount".to_string(),
+                        crate::catalog::ParamValue::Int(4),
+                    ),
+                    (
+                        "stochasticDistance".to_string(),
+                        crate::catalog::ParamValue::Number(40.0),
+                    ),
+                    (
+                        "stochasticCells".to_string(),
+                        crate::catalog::ParamValue::Int(4),
+                    ),
+                    (
+                        "stochasticMode".to_string(),
+                        crate::catalog::ParamValue::Enum("stratified".to_string()),
+                    ),
+                    (
+                        "restirDepthTolerance".to_string(),
+                        crate::catalog::ParamValue::Number(0.1),
+                    ),
+                    (
+                        "spatialStride".to_string(),
+                        crate::catalog::ParamValue::Int(2),
+                    ),
+                    (
+                        "normalPower".to_string(),
+                        crate::catalog::ParamValue::Int(8),
+                    ),
+                    (
+                        "temporalAlpha".to_string(),
+                        crate::catalog::ParamValue::Number(0.1),
+                    ),
+                    (
+                        "depthTolerance".to_string(),
+                        crate::catalog::ParamValue::Number(0.05),
+                    ),
+                    (
+                        "restirCandidates".to_string(),
+                        crate::catalog::ParamValue::Int(8),
+                    ),
+                    (
+                        "restirSpatialSamples".to_string(),
+                        crate::catalog::ParamValue::Int(4),
+                    ),
+                    (
+                        "restirSpatialRadius".to_string(),
+                        crate::catalog::ParamValue::Number(30.0),
+                    ),
+                    (
+                        "restirMCap".to_string(),
+                        crate::catalog::ParamValue::Number(20.0),
+                    ),
+                    (
+                        "restirBoilingFactor".to_string(),
+                        crate::catalog::ParamValue::Number(8.0),
+                    ),
+                    (
+                        "restirNormalCos".to_string(),
+                        crate::catalog::ParamValue::Number(0.9),
+                    ),
+                ],
+                inputs: vec![
+                    crate::plan::PlanInput {
+                        port: "depth".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "depth".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "normal".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "normal".to_string(),
+                            history: false,
+                        },
+                    },
+                    crate::plan::PlanInput {
+                        port: "motion".to_string(),
+                        source: crate::plan::InputSource::Link {
+                            node: "prepass".to_string(),
+                            port: "motion".to_string(),
+                            history: false,
+                        },
+                    },
+                ],
+                compute: None,
+            },
+            crate::plan::PlanNode {
                 id: "skyCloudScreen".to_string(),
                 type_id: "pass.sky.cloud-screen".to_string(),
                 type_version: 1,
-                order_index: 8,
+                order_index: 9,
                 params: vec![
                     (
                         "cloudDomeBelow".to_string(),
@@ -237,7 +346,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "spherical".to_string(),
                 type_id: "pass.gi.spherical".to_string(),
                 type_version: 1,
-                order_index: 9,
+                order_index: 10,
                 params: vec![
                     (
                         "sphereSubdivision".to_string(),
@@ -268,7 +377,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "forward".to_string(),
                 type_id: "pass.forward".to_string(),
                 type_version: 1,
-                order_index: 10,
+                order_index: 11,
                 params: vec![
                     ("msaa".to_string(), crate::catalog::ParamValue::Int(4)),
                     (
@@ -323,7 +432,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                     },
                     crate::plan::PlanInput {
                         port: "areaShadow".to_string(),
-                        source: crate::plan::InputSource::Absent,
+                        source: crate::plan::InputSource::Link {
+                            node: "areaShadow".to_string(),
+                            port: "areaShadow".to_string(),
+                            history: false,
+                        },
                     },
                     crate::plan::PlanInput {
                         port: "cloudTransmittance".to_string(),
@@ -356,7 +469,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "skyBackground".to_string(),
                 type_id: "pass.sky.background".to_string(),
                 type_version: 1,
-                order_index: 11,
+                order_index: 12,
                 params: vec![],
                 inputs: vec![],
                 compute: None,
@@ -365,7 +478,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "tonemap".to_string(),
                 type_id: "pass.tonemap".to_string(),
                 type_version: 1,
-                order_index: 12,
+                order_index: 13,
                 params: vec![
                     (
                         "mapper".to_string(),
@@ -404,7 +517,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "out".to_string(),
                 type_id: "output.display".to_string(),
                 type_version: 1,
-                order_index: 13,
+                order_index: 14,
                 params: vec![],
                 inputs: vec![crate::plan::PlanInput {
                     port: "color".to_string(),
@@ -550,6 +663,50 @@ pub fn plan() -> crate::plan::GraphPlan {
                 },
                 history: false,
             },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "depth".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "areaShadow".to_string(),
+                    port: "depth".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "normal".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "areaShadow".to_string(),
+                    port: "normal".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "motion".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "areaShadow".to_string(),
+                    port: "motion".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "areaShadow".to_string(),
+                    port: "areaShadow".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "forward".to_string(),
+                    port: "areaShadow".to_string(),
+                },
+                history: false,
+            },
         ],
         resources: vec![
             crate::plan::PlanResource {
@@ -567,7 +724,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 2,
                 first_use: 1,
-                last_use: 10,
+                last_use: 11,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -585,7 +742,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 6,
                 layers: 1,
                 first_use: 2,
-                last_use: 10,
+                last_use: 11,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -600,7 +757,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 4,
                 first_use: 4,
-                last_use: 10,
+                last_use: 11,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -615,7 +772,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 5,
-                last_use: 12,
+                last_use: 13,
                 history: false,
             },
             crate::plan::PlanResource {
@@ -630,11 +787,26 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 5,
-                last_use: 7,
+                last_use: 8,
                 history: false,
             },
             crate::plan::PlanResource {
                 id: 6,
+                producer: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "motion".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2d,
+                format: Some(crate::catalog::GraphFormat::Rg16Float),
+                size: crate::catalog::SizeSpec::Scale(1.0),
+                mips: 1,
+                layers: 1,
+                first_use: 5,
+                last_use: 8,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 7,
                 producer: crate::plan::PlanPortRef {
                     node: "lightTiles".to_string(),
                     port: "lightTiles".to_string(),
@@ -645,11 +817,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 128,
                 first_use: 6,
-                last_use: 10,
+                last_use: 11,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 7,
+                id: 8,
                 producer: crate::plan::PlanPortRef {
                     node: "ao".to_string(),
                     port: "ao".to_string(),
@@ -660,11 +832,26 @@ pub fn plan() -> crate::plan::GraphPlan {
                 mips: 1,
                 layers: 1,
                 first_use: 7,
-                last_use: 10,
+                last_use: 11,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 8,
+                id: 9,
+                producer: crate::plan::PlanPortRef {
+                    node: "areaShadow".to_string(),
+                    port: "areaShadow".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2dArray,
+                format: Some(crate::catalog::GraphFormat::Rgba16Float),
+                size: crate::catalog::SizeSpec::Scale(1.0),
+                mips: 1,
+                layers: 2,
+                first_use: 8,
+                last_use: 11,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 10,
                 producer: crate::plan::PlanPortRef {
                     node: "spherical".to_string(),
                     port: "lookup".to_string(),
@@ -674,12 +861,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 9,
-                last_use: 10,
+                first_use: 10,
+                last_use: 11,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 9,
+                id: 11,
                 producer: crate::plan::PlanPortRef {
                     node: "forward".to_string(),
                     port: "color".to_string(),
@@ -689,12 +876,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 10,
-                last_use: 12,
+                first_use: 11,
+                last_use: 13,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 10,
+                id: 12,
                 producer: crate::plan::PlanPortRef {
                     node: "tonemap".to_string(),
                     port: "color".to_string(),
@@ -704,8 +891,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 12,
-                last_use: 13,
+                first_use: 13,
+                last_use: 14,
                 history: false,
             },
         ],

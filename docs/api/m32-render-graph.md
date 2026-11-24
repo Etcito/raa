@@ -283,11 +283,35 @@ Pass `json` (or the parsed object) to `setRenderGraph` to install a starter.
 | Debug | A grid of render taps including depth, normals, AO, area shadow, GI and final color. |
 | Full GI | Volume and screen irradiance, area-light shadows, screen-space GI, contact shadows, fog and TAA. |
 | Full GI stages | Explicit probe, accumulation, filtering, area shadow and screen-space GI stages. |
+| Pre-spherical GI | Historical Quality raster preset with volume probes, medium screen GI, GTAO, hero LTC area shadows, SSR, depth of field and bloom. Frozen name `pre_spherical_gi`. |
+| Pre-spherical GI with mirrors | Editable opt-in to the geometry mirror stage on the Quality raster chain. |
+| Pre-spherical GI with fitted specular | Editable opt-in to the fitted mesh path with the gallery's trained weights. |
 | Real-frame neural reconstruction | Area, SSR incident radiance, temporal resolve and frame-generation routing. Empty model IDs keep native or analytic processing. Frame generation also needs a compatible presentation host and opt-in. |
 | Simple forward | Shadow cascades, prepass, light tiles, forward shading, sky background and AgX tone mapping. |
 
 `presets` lists the compute-node presets and `frozen` the names of the frozen pipelines for the
 same installation.
+
+The Pre-spherical GI source follows the live Quality settings exported from the
+interactive gallery at `a387c83`. The gallery used 4× MSAA for Quality.
+SDF Modeler supplies the engine sample count, camera, sky, environment gains and
+scene lights. To reproduce the gallery lighting on its scene, use the original
+day/clear sky with environment diffuse 0.65 and environment specular 0.
+
+Quality defaults to probes, with ReSTIR available on the editable screen GI node.
+The historical Performance variant used 1× MSAA, retained probe GI and bloom, and
+disabled screen GI detail, ordinary SSR and depth of field. Geometry mirrors,
+the fitted path, the path-traced reference and TAA were off by default in both
+variants. The mirror starter preserves ordinary SSR for other surfaces and adds
+a separate confidence trace for marked mirrors. The fitted starter replaces the
+HDR path at the same stage and requires `setMeshPathModel` before applying
+outside hosts that load the fitted package automatically.
+
+Both Pre-spherical GI and Spherical GI configure two hero area lights. Their
+projected visibility comes from the hero layers of the CSM atlas and the existing
+LTC shader. Pre-spherical GI also supplies the volume-backed screen area mask.
+Spherical GI keeps its spherical indirect cache and uses the hero maps without
+enabling volume GI.
 
 ### Experimental neural routing
 

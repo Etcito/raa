@@ -1,7 +1,7 @@
 //! Discovery of the render graph extension files: lists `src/nodes/*.rs`,
 //! `src/exec_ext/*.rs`, `src/frozen/*.rs`, `graphs/*.json` and `presets/*.json`, each
 //! sorted by file stem in C-locale (byte) order, and writes `$OUT_DIR/registry.rs`.
-//! The Spherical GI starter shares its source with the frozen preset.
+//! The two GI starters share their sources with their frozen presets.
 //!
 //! A missing directory registers nothing. The JSON files are read at build time for
 //! their string `name`; a file that does not parse or has no such name fails the build.
@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
-use raa_loader::json::{JsonValue, parse};
+use raa_loader::json::{JsonValue, parse, write_pretty};
 
 /// The extension directories, by crate-relative path.
 const RUST_DIRS: [&str; 3] = ["src/nodes", "src/exec_ext", "src/frozen"];
@@ -65,18 +65,21 @@ fn main() {
     let nodes = rust_files(&manifest, RUST_DIRS[0]);
     let exec_ext = rust_files(&manifest, RUST_DIRS[1]);
     let frozen = rust_files(&manifest, RUST_DIRS[2]);
+    let pre_spherical = manifest.join("src/frozen/pre_spherical_gi.json");
     let mut starters = json_files(&manifest, JSON_DIRS[0]);
+    starters.push(json_file(&pre_spherical, "pre-spherical-gi"));
     starters.push(json_file(
         &manifest.join("src/frozen/spherical_gi.json"),
         "spherical-gi",
     ));
-    starters.sort_by(|a, b| a.stem.cmp(&b.stem));
     let presets = json_files(&manifest, JSON_DIRS[1]);
     // The directory stamps catch added and removed files; these catch a changed `name`.
     for file in starters.iter().chain(presets.iter()) {
         println!("cargo:rerun-if-changed={}", file.path.display());
     }
 
+    starters.extend(pre_spherical_opt_ins(&pre_spherical, &out));
+    starters.sort_by(|a, b| a.stem.cmp(&b.stem));
     let source = registry_source(&nodes, &exec_ext, &frozen, has_exec, &starters, &presets);
     let target = out.join("registry.rs");
     if let Err(e) = fs::write(&target, source) {
@@ -187,6 +190,77 @@ fn json_file(path: &Path, stem: &str) -> JsonFile {
         path: absolute(path, &path.display().to_string()),
         name: label,
     }
+}
+
+/// The two opt-ins use the same raster settings and replace the indicated HDR link.
+fn pre_spherical_opt_ins(base: &Path, out: &Path) -> [JsonFile; 2] {
+    let text = fs::read_to_string(base).expect("read the Pre-spherical GI source");
+    [
+        ("pre-spherical-gi-mirrors", "Pre-spherical GI with mirrors", "mesh.reflection"),
+        ("pre-spherical-gi-fitted", "Pre-spherical GI with fitted specular", "mesh.fitted-specular"),
+    ].map(|(stem, name, trace)| {
+        let mut graph = parse(&text).expect("parse the Pre-spherical GI source");
+        *object_field(&mut graph, "name") = JsonValue::String(name.into());
+        let JsonValue::Array(nodes) = object_field(&mut graph, "nodes") else {
+            panic!("expected the Pre-spherical GI nodes");
+        };
+        if trace == "mesh.fitted-specular" {
+            nodes.retain_mut(|node| *object_field(node, "id") != JsonValue::String("ssr".into()));
+        }
+        nodes.extend([
+            parse(r#"{"id":"mirrorHiz","type":"ssr.hiz"}"#).unwrap(),
+            parse(r#"{"id":"mirrorScreen","type":"ssr.trace","params":{"maxRoughness":1}}"#).unwrap(),
+            parse(&format!(
+                r#"{{"id":"meshTrace","type":"{trace}","params":{{"confidenceThreshold":0.55,"reflectionBounces":2}}}}"#
+            )).unwrap(),
+        ]);
+        let JsonValue::Array(links) = object_field(&mut graph, "links") else {
+            panic!("expected the Pre-spherical GI links");
+        };
+        links.retain_mut(|link| {
+            let to = object_field(link, "to");
+            *to != JsonValue::String("fog.color".into())
+                && (trace == "mesh.reflection" || *to != JsonValue::String("ssr.color".into()))
+        });
+        let mut routes = vec![
+            ("prepass.depth", "mirrorHiz.depth"),
+            ("prepass.depth", "mirrorScreen.depth"),
+            ("prepass.normal", "mirrorScreen.normal"),
+            ("mirrorHiz.hiz", "mirrorScreen.hiz"),
+            ("prepass.depth", "meshTrace.depth"),
+            ("prepass.normal", "meshTrace.normal"),
+            ("prepass.motion", "meshTrace.motion"),
+            ("mirrorScreen.trace", "meshTrace.screenTrace"),
+            ("mirrorHiz.hiz", "meshTrace.hiz"),
+            ("giHistory.color", "meshTrace.screenColor"),
+            ("giVolume.volumeAtlas", "meshTrace.volumeAtlas"),
+            ("meshTrace.color", "fog.color"),
+        ];
+        if trace == "mesh.reflection" {
+            routes.push(("ssr.color", "meshTrace.color"));
+        }
+        links.extend(routes.into_iter().map(|(from, to)| JsonValue::Object(vec![
+            ("from".into(), JsonValue::String(from.into())),
+            ("to".into(), JsonValue::String(to.into())),
+        ])));
+        let mut generated = String::new();
+        write_pretty(&graph, &mut generated);
+        generated.push('\n');
+        let path = out.join(format!("{stem}.json"));
+        fs::write(&path, generated).expect("write the Pre-spherical GI opt-in starter");
+        json_file(&path, stem)
+    })
+}
+
+fn object_field<'a>(object: &'a mut JsonValue, field: &str) -> &'a mut JsonValue {
+    let JsonValue::Object(fields) = object else {
+        panic!("expected an object with field {field}");
+    };
+    fields
+        .iter_mut()
+        .find(|(key, _)| key == field)
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| panic!("missing {field} in the Pre-spherical GI source"))
 }
 
 /// The absolute path of `path`, named by `rel` when canonicalisation fails.

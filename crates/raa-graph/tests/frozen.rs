@@ -71,7 +71,13 @@ fn frozen_registry_has_the_shipped_graphs() {
     let names: Vec<_> = frozen.iter().map(|(name, _, _)| *name).collect();
     assert_eq!(
         names,
-        ["debug", "full_gi", "simple_forward", "spherical_gi"]
+        [
+            "debug",
+            "full_gi",
+            "pre_spherical_gi",
+            "simple_forward",
+            "spherical_gi"
+        ]
     );
 
     for (name, make_plan, source_json) in frozen {
@@ -167,6 +173,7 @@ fn changed_node_version_fails_the_catalog_version_assertion() {
 
 #[test]
 fn spherical_preset_keeps_physical_sky_and_ltc_direct_lighting() {
+    use raa_graph::catalog::ParamValue;
     use raa_graph::format::parse_graph;
     use raa_graph::plan::InputSource;
     use raa_loader::json::JsonValue;
@@ -203,6 +210,8 @@ fn spherical_preset_keeps_physical_sky_and_ltc_direct_lighting() {
             "cloudTransmittance",
         ),
         ("lightTiles", "lightTiles", "lightTiles"),
+        ("shadowCsm", "shadowMap", "shadowMap"),
+        ("areaShadow", "areaShadow", "areaShadow"),
         ("spherical", "lookup", "sphericalLookup"),
     ] {
         let feed = forward
@@ -220,6 +229,25 @@ fn spherical_preset_keeps_physical_sky_and_ltc_direct_lighting() {
         );
         assert!(order(producer) < order("forward"));
     }
+    let area = plan
+        .nodes
+        .iter()
+        .find(|node| node.id == "areaShadow")
+        .unwrap();
+    assert!(
+        area.params
+            .contains(&("tier".into(), ParamValue::Enum("hero".into())))
+    );
+    assert!(
+        area.params
+            .contains(&("heroCount".into(), ParamValue::Int(2)))
+    );
+    assert!(
+        !plan
+            .nodes
+            .iter()
+            .any(|node| node.type_id == "pass.gi.volume")
+    );
     // These physical sky passes hand resources to the contributor through the shared sky feature.
     assert!(order("skyAtmosphere") < order("skyCloudLighting"));
     assert!(order("skyCloudLighting") < order("skyEnv"));

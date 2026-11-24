@@ -519,12 +519,14 @@ fn forward_inputs() -> Vec<PortSpec> {
             true,
             Some(15),
         ),
+        // Opaque copy runs after forward. Transparency reads its same-frame copy;
+        // forward only reads these slots when a graph explicitly supplies a source.
         input(
             "opaqueColor",
             "Opaque color",
             P::Image2d,
             Some(F::Rgba16Float),
-            &["pass.opaque.copy.opaqueColor"],
+            &[],
             true,
             Some(9),
         ),
@@ -533,7 +535,7 @@ fn forward_inputs() -> Vec<PortSpec> {
             "Opaque depth",
             P::Image2d,
             Some(F::R32Float),
-            &["pass.opaque.copy.opaqueDepth"],
+            &[],
             true,
             Some(10),
         ),
@@ -2612,8 +2614,27 @@ fn post_types() -> Vec<NodeTypeSpec> {
             "Line overlay drawn onto the tone-mapped output; a side-effect node.",
             "overlay",
             220,
-            vec![color_input(220)],
-            vec![color_output()],
+            vec![PortSpec {
+                required: true,
+                ..input(
+                    "color",
+                    "Display color",
+                    P::Image2d,
+                    Some(F::Surface),
+                    &["pass.tonemap.color"],
+                    false,
+                    None,
+                )
+            }],
+            vec![output(
+                "color",
+                "Display color",
+                P::Image2d,
+                Some(F::Surface),
+                SizeSpec::Scale(1.0),
+                1,
+                1,
+            )],
             Vec::new(),
             // The lit frame group 0 that the overlay lines bind (raa-js/src/api/m07_pipeline.rs:65).
             vec![

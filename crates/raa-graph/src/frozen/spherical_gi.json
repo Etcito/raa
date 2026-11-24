@@ -39,6 +39,14 @@
       }
     },
     {
+      "id": "areaShadow",
+      "type": "pass.gi.area-shadow",
+      "params": {
+        "tier": "hero",
+        "heroCount": 2
+      }
+    },
+    {
       "id": "spherical",
       "type": "pass.gi.spherical",
       "params": {
@@ -120,6 +128,22 @@
     {
       "from": "skyEnv.envSpecular",
       "to": "forward.envSpecular"
+    },
+    {
+      "from": "prepass.depth",
+      "to": "areaShadow.depth"
+    },
+    {
+      "from": "prepass.normal",
+      "to": "areaShadow.normal"
+    },
+    {
+      "from": "prepass.motion",
+      "to": "areaShadow.motion"
+    },
+    {
+      "from": "areaShadow.areaShadow",
+      "to": "forward.areaShadow"
     }
   ]
 }
