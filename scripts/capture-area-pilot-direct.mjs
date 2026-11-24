@@ -20,11 +20,13 @@ const predictionDataset = op === 'prediction' && comparison === 'dataset';
 const predictionLearned = op === 'prediction' && comparison === 'learned';
 const liveSpherical = spherical && comparison === 'live';
 const liveMirror = mirror && comparison === 'live';
-const live = liveSpherical || liveMirror;
+const liveMirrorUi = mirror && comparison === 'live-ui';
+const uiOnly = liveSpherical || liveMirrorUi;
+const live = uiOnly || liveMirror;
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || flags.some(flag => flag !== '--headful')
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-reflection-model', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|train|test|both|reflection|dataset|learned|coverage|sharp|priority] [--headful]');
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|live-ui|train|test|both|reflection|dataset|learned|coverage|sharp|priority] [--headful]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -149,7 +151,7 @@ try {
     throw new Error(`Expected native RTX 3090 WebGPU, got ${JSON.stringify(webgpu)}`);
   }
   console.log(`Windows ${version.Browser}: ${renderer}; WebGPU ${JSON.stringify(webgpu)}`);
-  const result = liveSpherical ? null : await evalPage(`(async () => {
+  const result = uiOnly ? null : await evalPage(`(async () => {
     const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
       ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
@@ -164,7 +166,7 @@ try {
     }));
     return { json: result.json, files };
   })()`, 300000);
-  const mirrorUi = mirror && !['coverage', 'sharp', 'priority'].includes(comparison) && !result.json.coverage?.zeroCoverage && !result.json.failure ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
+  const mirrorUi = mirror && !['coverage', 'sharp', 'priority'].includes(comparison) && !result?.json.coverage?.zeroCoverage && !result?.json.failure ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
   const mirrorScreenshot = mirrorUi && await send('Page.captureScreenshot', { format: 'png' });
   const ui = mirrorUi ?? (spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null);
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
@@ -175,9 +177,14 @@ try {
   if (headful && /HeadlessChrome/.test(userAgent)) throw new Error('Expected a windowed Windows Chrome session');
   const windows = { browser: version.Browser, mode: headful ? 'windowed' : 'headless',
     userAgent, renderer, device: nvidia, webgpu };
-  if (liveSpherical) {
+  if (uiOnly) {
     await mkdir(path.dirname(output), { recursive: true });
     await mkdir(output);
+    if (mirrorScreenshot) {
+      const screenshot = Buffer.from(mirrorScreenshot.data, 'base64');
+      await writeFile(path.join(output, 'mirror-ui.png'), screenshot, { flag: 'wx' });
+      ui.screenshot = { file: 'mirror-ui.png', sha256: createHash('sha256').update(screenshot).digest('hex') };
+    }
     const manifest = path.join(output, 'live-ui.json');
     await writeFile(manifest, JSON.stringify({ revision: receipt.inputs.revision, buildId: receipt.buildId,
       url, windows, ui }, null, 2) + '\n', { flag: 'wx' });
