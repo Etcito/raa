@@ -30,7 +30,7 @@ export async function loadGalleryNeural(engine) {
   const text = await manifestFile.text(), manifest = JSON.parse(text);
   const weights = new Uint8Array(await weightsFile.arrayBuffer());
   if (manifest.format !== 'raa.real-frame-model/1' || manifest.kind !== 'windows-capture-fit'
-      || !manifest.trainedHeads?.includes('sr') || manifest.weightsByteLength !== weights.byteLength
+      || !manifest.trainedHeads?.includes('display') || manifest.weightsByteLength !== weights.byteLength
       || manifest.weightsSha256 !== await digest(weights)) throw new Error('Invalid trained gallery upscaling package');
   const id = 'gallery-temporal';
   engine.registerNeuralModel(id, text, weights);
