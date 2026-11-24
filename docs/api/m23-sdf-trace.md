@@ -72,6 +72,21 @@ The grid estimates remaining indirect lighting at the world-space surface reache
 the existing ray. Geometry reflections keep their first-ray screen-confidence policy and
 BVH hit, and the reached surface's direct shading follows its existing path.
 
+The fitted rough lobe convolves directional cache radiance with four GGX
+samples at the reached surface. It applies the secondary material's Fresnel
+and visibility there, followed by the original ray's throughput. The
+spherical path reads the six-face HDR pool and honors the selected lighting
+groups. The Volume path traces directions in the existing clipmap.
+
+The existing 524-byte FP32 fit keeps its frozen input contract. The fit
+used two 128×72 indoor views and valid roughness values from 0.25 to 0.78.
+Its inputs were freshly traced first-bounce estimates. Grid estimates stay
+outside the model input. With a fixed seed, `captureMeshLighting` can return
+the exact first BVH triangle and world position, original pre-grid RGB,
+and accepted grid RGB from the same fitted frame. Refresh pixels retain
+their existing additional traced bounce. Use the isolated `direct` view
+to compare direct lighting on matching captures.
+
 Each stage publishes full-size `color` for the HDR chain and linear `radiance` for inspection.
 `radiance` is half size for the reflection and fitted stages and full size for the reference.
 Connect the desired stage's `color` to the downstream tone mapper or HDR effect. The graph

@@ -107,7 +107,7 @@ export interface Engine {
     combinedData?: Uint8Array;
     /** Fixed-seed 48-byte records from this submitted fitted trace.
      * Each little-endian record contains world XYZ f32, first BVH triangle u32
-     * (0xffffffff for a miss), first-bounce RGB f32, grid trust f32,
+     * (0xffffffff for a miss), original pre-grid specular RGB f32, grid trust f32,
      * accepted grid-tail RGB f32 and source u32 (0 none, 1 Volume, 2 Spherical). */
     roughEvidence?: { frame: number; size: [number, number]; data: Uint8Array };
   }>;
