@@ -43,6 +43,7 @@
     <label>Canvas size<select id="sizing"><option value="native">1:1 pixels</option><option value="fit">Fit to panel</option></select></label>
     <button id="fullscreen" type="button">Fullscreen</button>
     <label>Exposure <output id="exposure-value" for="exposure">0.0 EV</output><input id="exposure" type="range" min="-6" max="6" step="0.1" value="0" aria-label="Manual exposure in EV"></label>
+    <label>Anti-aliasing<select id="aa"><option value="preset">Scene default</option><option value="off">Off</option><option value="taa">TAA</option><option value="msaa">MSAA 4×</option><option value="combined">MSAA 4× + TAA</option></select></label>
     <label>Max FPS<select id="max-fps"><option value="0">Display rate</option><option>24</option><option>30</option><option>60</option><option>90</option><option>120</option></select></label>
     <button id="run" type="button" disabled>Start interactive view</button>
     <button id="baseline" type="button" disabled>Measure keyboard latency</button>

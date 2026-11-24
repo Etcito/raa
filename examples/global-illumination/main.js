@@ -58,6 +58,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
   const display = { width: 1280, height: 720, maxFps: 0 };
   const doc = target.document;
   const exposure = doc.getElementById?.('exposure');
+  const antiAliasing = doc.getElementById?.('aa');
   const sizing = doc.getElementById?.('sizing');
   const fullscreen = doc.getElementById?.('fullscreen');
   const syncNativeSize = () => canvas.style?.setProperty('--native-width', (canvas.width / (target.devicePixelRatio || 1)) + 'px');
@@ -73,7 +74,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     const lib = createLib(await load());
     const newRunner = () => createRunner({ canvas, status, load, scenes, lib });
     runner = newRunner();
-    const controls = [scenePicker, variantPicker, runButton, baselineButton].filter(Boolean);
+    const controls = [scenePicker, variantPicker, runButton, baselineButton, antiAliasing].filter(Boolean);
     function stopInteractive() {
       const current = interactive;
       interactive = null;
@@ -150,8 +151,12 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
         variantPicker.appendChild(option);
       }
     }
-    async function showPicked() {
+    async function showPicked(keepView = false) {
       if (busy || !variantPicker.value) return;
+      const previous = keepView === true && interactive ? {
+        pose: interactive.cameraPose(),
+        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('input') ?? [], box => [box.dataset.option, box.checked])),
+      } : undefined;
       const scene = pickerScenes.get(scenePicker.value).default;
       const variant = scene.variants.find(candidate => candidate.id === variantPicker.value);
       try {
@@ -161,7 +166,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           runner = null;
           status.textContent = `Preparing ${scene.id}/${variant.id}`;
           interactive = createInteractiveView({
-            target, canvas, lib, scene, variant, settings: display,
+            target, canvas, lib, scene, variant, settings: display, previous,
             onFrame(engine, time, width, height) {
               syncNativeSize();
               stats?.update(engine, time, width, height);
@@ -172,6 +177,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 const label = target.document.createElement('label');
                 const checkbox = target.document.createElement('input');
                 checkbox.type = 'checkbox';
+                checkbox.dataset.option = option.id;
                 checkbox.checked = state?.enabled?.[option.id] ?? option.enabled;
                 checkbox.addEventListener('change', () => interactive?.setOption(option.id, checkbox.checked));
                 label.append(checkbox, option.label);
@@ -213,6 +219,10 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     for (const control of controls) control.disabled = false;
     const options = { signal: lifetime.signal };
     syncNativeSize();
+    antiAliasing?.addEventListener('change', () => {
+      display.antiAliasing = antiAliasing.value;
+      if (interactive) showPicked(true);
+    }, options);
     sizing?.addEventListener('change', () => { canvas.parentElement.dataset.sizing = sizing.value; }, options);
     fullscreen?.addEventListener('click', async () => {
       try {

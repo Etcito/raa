@@ -7,19 +7,19 @@ const movement = new Map([
   ['d', [1, 0]], ['arrowright', [1, 0]],
 ]);
 
-function attachCamera({ target, canvas, engine, camera, signal }) {
+function attachCamera({ target, canvas, engine, camera, signal, pose }) {
   const offset = (camera.position ?? camera.eye).map((coordinate, axis) => coordinate - camera.target[axis]);
   const homeDistance = Math.hypot(...offset);
   const homeYaw = Math.atan2(offset[0], offset[2]);
   const homePitch = Math.asin(offset[1] / homeDistance);
-  const pivot = new Float32Array(camera.target);
+  const pivot = new Float32Array(pose?.pivot ?? camera.target);
   const held = new Map();
   const options = { signal };
-  let distance = homeDistance;
-  let yaw = homeYaw;
-  let pitch = homePitch;
+  let distance = pose?.distance ?? homeDistance;
+  let yaw = pose?.yaw ?? homeYaw;
+  let pitch = pose?.pitch ?? homePitch;
   let drag = null;
-  let changed = false;
+  let changed = !!pose;
   let restore = false;
 
   function clearInput() {
@@ -93,6 +93,7 @@ function attachCamera({ target, canvas, engine, camera, signal }) {
 
   return {
     reset,
+    snapshot: () => ({ pivot: Array.from(pivot), distance, yaw, pitch }),
     update(dt) {
       if (restore) {
         engine.setCamera(camera);
@@ -122,7 +123,7 @@ function attachCamera({ target, canvas, engine, camera, signal }) {
   };
 }
 
-export function createInteractiveView({ target, canvas, lib, scene, variant, onReady, onError, settings, onFrame }) {
+export function createInteractiveView({ target, canvas, lib, scene, variant, onReady, onError, settings, onFrame, previous }) {
   const lifetime = new AbortController();
   const { signal } = lifetime;
   const camera = variant.selection.camera;
@@ -156,13 +157,18 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
   async function start() {
     try {
       setCanvasSize(canvas, display.width, display.height);
-      engine = await lib.raa.createEngine(canvas, { ...scene.engine, ...variant.engine });
+      const engineOptions = { ...scene.engine, ...variant.engine };
+      const aa = display.antiAliasing ?? 'preset';
+      if (aa !== 'preset') engineOptions.msaa = aa === 'msaa' || aa === 'combined' ? 4 : 1;
+      engine = await lib.raa.createEngine(canvas, engineOptions);
       if (signal.aborted) return;
       engine.resize(canvas.width, canvas.height);
       const state = await scene.build(engine, lib, variant);
       if (signal.aborted) return;
       engine.setCamera(camera);
-      controls = attachCamera({ target, canvas, engine, camera, signal });
+      if (aa !== 'preset') engine.setPassEnabled('taa', aa === 'taa' || aa === 'combined');
+      for (const [id, enabled] of Object.entries(previous?.options ?? {})) scene.setOption(engine, state, id, enabled);
+      controls = attachCamera({ target, canvas, engine, camera, signal, pose: previous?.pose });
 
       let appliedExposure;
       if (display.exposureEv !== undefined) engine.setAutoExposure({ enabled: false });
@@ -235,5 +241,5 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
   const ready = start().catch(error => {
     if (!signal.aborted) fail(error);
   });
-  return { stop, ready, reset: () => controls?.reset(), setOption: (id, enabled) => pendingOptions.set(id, enabled) };
+  return { stop, ready, cameraPose: () => controls?.snapshot(), reset: () => controls?.reset(), setOption: (id, enabled) => pendingOptions.set(id, enabled) };
 }
