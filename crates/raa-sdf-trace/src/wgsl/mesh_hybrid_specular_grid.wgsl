@@ -144,7 +144,7 @@ fn hybrid_grid_specular(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
     }
     let coord = raa_spherical_coordinate(p);
     let neighbors = raa_spherical_neighbors(p, n, coord);
-    if coord.desc.w == 0u && neighbors.count >= 2u {
+    if neighbors.count >= 2u {
         let sphere = rough_grid_convolve(p, ng, n, v, mat, neighbors, true);
         if sphere.trust > 0.0 { return sphere; }
     }
