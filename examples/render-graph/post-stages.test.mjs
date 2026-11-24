@@ -132,3 +132,78 @@ test('observe returns the standard scene observation shape', async () => {
   const result = await run(engineDouble(), 'default');
   assert.deepEqual(Object.keys(result.observation).sort(), ['assertions', 'edits', 'graph', 'issues', 'renderGraphActive']);
 });
+
+test('reflection coverage fixture distinguishes flash lag, screen misses, and volume recovery', async () => {
+  const { reflectionFrames, reflectionSamples, previousLitSample, reflectionSourceMetrics, reflectionGraph, reflectionPorts, reflectionPreview } =
+    await import('./scenes/reflection-coverage.js');
+  const graph = reflectionGraph(STARTER_TEXT);
+  assert.ok(graph.links.some(link => link.from === reflectionPorts.incident && link.to === 'ssrReplace.incident'));
+  assert.ok(Object.values(reflectionPorts).every(port => graph.nodes.some(node => node.id === port.split('.')[0])));
+  const preview = reflectionPreview(STARTER_TEXT, 'fallbackMeta', 'r');
+  assert.equal(preview.nodes.find(node => node.id === 'showPostStage').params.rangeMax, 3);
+  assert.deepEqual(reflectionFrames.map(frame => frame.flash), [0, 80, 0, 0, 0, 0, 0]);
+  assert.equal(reflectionFrames[4].actorX, reflectionFrames[5].actorX);
+  assert.equal(reflectionFrames[6].actorX, reflectionFrames[0].actorX);
+
+  const black = [0, 0, 0], actor = [2, 2, 2];
+  const record = {
+    hitMeta: [1, 1, 3, 0], incident: [...actor, 1],
+    fallbackMeta: [3, 1, 0, 0], fallback: [1, 1, 1, 0],
+    references: { currentHdr: actor, volume: black, sky: black },
+  };
+  const samples = [
+    ...reflectionSamples(record),
+    ...reflectionSamples({
+      ...record, hitMeta: [1, 1, 3, 0], incident: [...actor, 0],
+      fallbackMeta: [2, 1, 3, -1], fallback: [...actor, 1],
+      references: { currentHdr: black, volume: actor, sky: black },
+    }),
+    previousLitSample([1, 1, 1, 0.75], 2, black, 'after-event'),
+    previousLitSample([0, 0, 0, 1], 2, actor, 'flash-on'),
+  ];
+  const metrics = reflectionSourceMetrics(samples);
+  const current = metrics.find(row => row.source === 'currentHdr');
+  assert.deepEqual(current.ageCounts, { 0: 1 });
+  assert.equal(current.coverage, 0.5);
+  assert.equal(current.radianceBias, 0);
+  const volume = metrics.find(row => row.source === 'volume');
+  assert.deepEqual(volume.ageCounts, { unknown: 1 });
+  assert.equal(volume.coverage, 0.5);
+  assert.equal(volume.radianceBias, 0);
+  const stale = metrics.find(row => row.source === 'previousLit');
+  assert.deepEqual(stale.ageCounts, { 2: 1 });
+  assert.equal(stale.coverage, 0.5);
+  assert.equal(stale.meanWeight, 0.125);
+  assert.equal(stale.radianceBias, -0.5);
+  assert.equal(stale.falseEnergy, 1);
+  assert.equal(stale.trailingEnergy, 1);
+});
+
+test('reflection capture runs each event on its own real frame before the next scene edit', async () => {
+  const { reflectionFrames, reflectionPorts, runReflectionCoverage } =
+    await import('./scenes/reflection-coverage.js');
+  const frames = [];
+  let x, intensity, rendered = 0;
+  const engine = {
+    setSky() {}, setLight() {}, setAmbient() {}, addLight() {}, addMaterial() {},
+    addNode() {}, primitiveMesh() {}, addInstance() {}, addMesh() {}, addMeshInstance() {},
+    setCamera() {}, setGlobalIllumination() {},
+    setRenderGraph: () => ({ ok: true }),
+    setTransform(_node, position) { [x] = position; },
+    updateLight(_light, patch) { intensity = patch.intensity; },
+    giStats: () => ({ statsFrameIndex: rendered, litHistoryAge: 1 }),
+  };
+  await runReflectionCoverage(engine, STARTER_TEXT, {
+    settle: async () => { rendered = 20; },
+    renderFrame: async () => { rendered++; },
+    capture: async frame => {
+      assert.equal(frame.statsFrameIndex, 21 + frames.length);
+      assert.equal(frame.litHistoryAge, 1);
+      assert.equal(frame.ports, reflectionPorts);
+      assert.equal(frame.actorX, x);
+      assert.equal(frame.flash, intensity);
+      frames.push(frame.id);
+    },
+  });
+  assert.deepEqual(frames, reflectionFrames.map(frame => frame.id));
+});

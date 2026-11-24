@@ -56,7 +56,7 @@ const withoutNodes = (doc, ids) => {
 const nodeOf = (doc, type) => doc.nodes.find(node => node.type === type);
 const link = (doc, from, to) => doc.links.some(item => item.from === from && item.to === to);
 
-function showInView(doc, source, channels, label) {
+export function showInView(doc, source, channels, label) {
   const out = doc.nodes.find(node => node.type === 'output.display');
   const view = { id: 'showPostStage', type: 'view.image', params: { channels, label } };
   const outIndex = doc.nodes.indexOf(out);
