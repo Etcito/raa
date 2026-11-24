@@ -9,7 +9,7 @@ use raa_math::Mat4;
 use raa_sdf_trace::mesh::{
     DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME,
     MeshIndirectGrid, MeshInput, MeshTraceFeature, MeshTraceHandle, MeshTraceMaterial,
-    MeshTraceSettings, PanelSampling, PathMode, SphericalGiHandle,
+    MeshTraceSettings, MirrorPriority, PanelSampling, PathMode, SphericalGiHandle,
 };
 use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use wasm_bindgen::prelude::*;
@@ -294,6 +294,21 @@ impl Engine {
                 Some("spherical") => MeshIndirectGrid::Spherical,
                 Some(_) => return Err(api_error("trace.invalid_settings", "unknown indirectGrid")),
             };
+            let mirror_priority = match js::optional_string(&options, "mirrorPriority")?.as_deref()
+            {
+                None => existing
+                    .as_ref()
+                    .map_or(MirrorPriority::Off, |h| h.borrow().mirror_priority()),
+                Some("off") => MirrorPriority::Off,
+                Some("measure") => MirrorPriority::Measure,
+                Some("on") => MirrorPriority::On,
+                Some(_) => {
+                    return Err(api_error(
+                        "trace.invalid_settings",
+                        "unknown mirrorPriority",
+                    ));
+                }
+            };
             let hybrid = !settings.reference && settings.active();
             let pipeline = st.pipeline.clone();
             let mut pipeline = pipeline.borrow_mut();
@@ -309,6 +324,7 @@ impl Engine {
             let mut trace = handle.borrow_mut();
             trace.configure(settings);
             trace.indirect_grid = grid;
+            trace.set_mirror_priority(mirror_priority);
             let raster = !settings.reference && settings.path_mode == PathMode::Off;
             st.lit.set_frame_feature(
                 RAA_DIRECT_ONLY_FEATURE,
@@ -382,11 +398,21 @@ impl Engine {
                 "sphericalSpecularHits",
                 "sphericalDiffuseOffscreenInGrid",
                 "sphericalDiffuseOffscreenSupported",
+                "sphericalPrimaryInGrid",
+                "sphericalPrimarySupported",
+                "reflectedReceiverCandidates",
             ];
             for (name, value) in names.into_iter().zip(stats.counts) {
                 Reflect::set(&result, &name.into(), &f64::from(value).into())
                     .expect("fresh object");
             }
+            let mirror_priority = match stats.mirror_priority {
+                MirrorPriority::Off => "off",
+                MirrorPriority::Measure => "measure",
+                MirrorPriority::On => "on",
+            };
+            Reflect::set(&result, &"mirrorPriority".into(), &mirror_priority.into())
+                .expect("fresh object");
             let controls = stats.settings;
             for (name, value) in [
                 ("frame", stats.frame as f64),

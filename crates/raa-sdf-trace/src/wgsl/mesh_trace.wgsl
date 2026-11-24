@@ -27,7 +27,7 @@ struct Light {
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
 @group(0) @binding(3) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(4) var<storage, read> materials: array<Material>;
-@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>, 29>;
+@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(6) var depth: texture_depth_2d;
 @group(0) @binding(7) var normals: texture_2d<f32>;
 @group(0) @binding(8) var motion: texture_2d<f32>;
@@ -78,6 +78,13 @@ const ROUGH_VOLUME_ACCEPTED: u32 = 25u;
 const ROUGH_SPHERICAL_ACCEPTED: u32 = 26u;
 const SPHERICAL_DIFFUSE_OFFSCREEN_IN_GRID: u32 = 27u;
 const SPHERICAL_DIFFUSE_OFFSCREEN_SUPPORTED: u32 = 28u;
+const SPHERICAL_PRIMARY_IN_GRID: u32 = 29u;
+const SPHERICAL_PRIMARY_SUPPORTED: u32 = 30u;
+const REFLECTED_RECEIVER_COUNT: u32 = 31u;
+const REFLECTED_RECEIVER_BASE: u32 = 32u;
+const REFLECTED_RECEIVER_WORDS: u32 = 8u;
+const MESH_MIRROR_MEASURE: u32 = 4u;
+const MESH_MIRROR_FEEDBACK: u32 = 8u;
 
 struct HybridRoughGrid {
     rgb: vec3<f32>, // secondary specular outgoing radiance
@@ -397,6 +404,23 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
     return TerminalDiffuse(incident / f32(SAMPLES), weight, p, ng, material, depth);
 }
 
+// Keep already-supported receivers in the feedback so their captures survive.
+fn record_reflected_receiver(p: vec3<f32>, n: vec3<f32>) {
+    if (options[3].w & MESH_MIRROR_FEEDBACK) == 0u { return; }
+    let bits = bitcast<vec3<u32>>(p);
+    let hash = raa_spherical_hash(bits.x ^ raa_spherical_hash(bits.y) ^ raa_spherical_hash(bits.z));
+    if (hash & 1u) == 0u { return; }
+    let index = atomicAdd(&counters[REFLECTED_RECEIVER_COUNT], 1u);
+    let maximum = (arrayLength(&counters) - REFLECTED_RECEIVER_BASE) / REFLECTED_RECEIVER_WORDS;
+    if index >= maximum { return; }
+    let base = REFLECTED_RECEIVER_BASE + index * REFLECTED_RECEIVER_WORDS;
+    let normal = bitcast<vec3<u32>>(n);
+    for (var axis = 0u; axis < 3u; axis++) {
+        atomicStore(&counters[base + axis], bits[axis]);
+        atomicStore(&counters[base + 3u + axis], normal[axis]);
+    }
+}
+
 fn mesh_spherical_diffuse(p: vec3<f32>, n: vec3<f32>, mat: Material) -> vec4<f32> {
     // Match forward: the lookup has already divided irradiance by pi. Its
     // support and the selected light groups come from the shared evaluator.
@@ -408,7 +432,10 @@ fn mesh_spherical_diffuse(p: vec3<f32>, n: vec3<f32>, mat: Material) -> vec4<f32
     let clip = frame.view_proj * vec4<f32>(p, 1.0);
     let offscreen = clip.w <= 0.0 || any(abs(clip.xy) > vec2<f32>(clip.w))
         || clip.z < 0.0 || clip.z > clip.w;
-    if offscreen { atomicAdd(&counters[SPHERICAL_DIFFUSE_OFFSCREEN_IN_GRID], 1u); }
+    if offscreen {
+        atomicAdd(&counters[SPHERICAL_DIFFUSE_OFFSCREEN_IN_GRID], 1u);
+        record_reflected_receiver(p, n);
+    }
     if sample.w > 0.0 {
         atomicAdd(&counters[SPHERICAL_DIFFUSE_HITS], 1u);
         if offscreen { atomicAdd(&counters[SPHERICAL_DIFFUSE_OFFSCREEN_SUPPORTED], 1u); }
@@ -691,7 +718,20 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     let dims = textureDimensions(depth);
     let pixel = pixel_at(uv, dims);
     let z = textureLoad(depth, pixel, 0);
-    if z >= 1.0 || textureLoad(motion, pixel, 0).w < 0.5 {
+    let mirror_pixel = textureLoad(motion, pixel, 0).w;
+    if (options[3].w & MESH_MIRROR_MEASURE) != 0u && z < 1.0 && mirror_pixel < 0.5 {
+        let p = world_at(uv_at(pixel, dims), z);
+        let cell = raa_spherical_coordinate(p);
+        let normal_view = textureLoad(normals, pixel, 0).xyz;
+        if cell.desc.x != 0u && dot(normal_view, normal_view) > 0.0 {
+            let n = normalize((frame.inv_view * vec4<f32>(normal_view, 0.0)).xyz);
+            atomicAdd(&counters[SPHERICAL_PRIMARY_IN_GRID], 1u);
+            if raa_spherical_neighbors(p, n, cell).count >= 2u {
+                atomicAdd(&counters[SPHERICAL_PRIMARY_SUPPORTED], 1u);
+            }
+        }
+    }
+    if z >= 1.0 || mirror_pixel < 0.5 {
         textureStore(radiance, sample_pixel, vec4<f32>(0.0));
         textureStore(terminal_samples, sample_pixel, vec4<f32>(0.0));
         return;

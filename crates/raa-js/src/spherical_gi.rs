@@ -182,7 +182,9 @@ impl Engine {
     pub fn set_spherical_gi(&self, options: JsValue) -> Result<(), JsValue> {
         self.with_state(|_, st| {
             let settings = read_patch(options, settings(st))?;
-            let handle = st.features.require_mut::<SphericalGiHandle>("spherical GI")?;
+            let handle = st
+                .features
+                .require_mut::<SphericalGiHandle>("spherical GI")?;
             let mut pipeline = st.pipeline.borrow_mut();
             let enabled = settings.enabled;
             handle.borrow_mut().configure(settings)?;
@@ -222,6 +224,11 @@ impl Engine {
                 ("inFlightFaces", scheduler.in_flight_faces as f64),
                 ("pendingFaces", scheduler.pending_faces as f64),
                 ("originEpoch", scheduler.origin_epoch as f64),
+                ("reflectedCells", scheduler.reflected_cells as f64),
+                (
+                    "reflectedReadyCells",
+                    scheduler.reflected_ready_cells as f64,
+                ),
                 ("lastCellQueries", scheduler.last_cell_queries as f64),
                 (
                     "lightingMetadataReadyCells",

@@ -7,14 +7,21 @@ use raa_pipeline::{FeaturePass, HDR_FORMAT, ImageDesc, ImageDim, Pipeline, Recor
 
 use super::geometry::TRIANGLE_BYTES;
 use super::{
-    COUNTER_COUNT, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats, PathMode,
-    REFERENCE_SPP, TraceReport, hybrid::HybridGpu,
+    COUNTER_COUNT, MeshIndirectGrid, MeshTraceScene, MeshTraceSettings, MeshTraceStats,
+    MirrorPriority, PathMode, REFERENCE_SPP, ReflectedFeedback, TraceReport,
+    hybrid::HybridGpu,
+    spherical::{MAX_REFLECTED_RECEIVERS, ReflectedReceiver},
 };
 use crate::wgsl::{MESH_GRAPH_SCREEN, MESH_SPHERICAL_BINDING, MESH_VOLUME_GI, mesh_trace_module};
 
 pub const MESH_TRACE_NAME: &str = "trace.mesh";
 const ORDER: u32 = 66;
 const COUNTER_BYTES: u64 = (COUNTER_COUNT * 4) as u64;
+const RECEIVER_BYTES: usize = 8 * 4;
+const RECEIVER_COUNT: usize = COUNTER_COUNT - 1;
+const MESH_MIRROR_MEASURE: u32 = 4;
+const MESH_MIRROR_FEEDBACK: u32 = 8;
+const FEEDBACK_BYTES: u64 = COUNTER_BYTES + (MAX_REFLECTED_RECEIVERS * RECEIVER_BYTES) as u64;
 const CONFIDENCE: &str = "ssr.confidence";
 const COMPOSITE_WGSL: &str = include_str!("../wgsl/mesh_composite.wgsl");
 
@@ -242,6 +249,21 @@ impl FeaturePass for MeshTracePass {
         let grid_enabled =
             !settings.reference && (path_mode == PathMode::Off || path_mode == PathMode::Learned);
         let spherical_routed = grid_enabled && grids.spherical;
+        let mirror_priority = if graph.is_none() && spherical_routed {
+            scene.active_mirror_priority()
+        } else {
+            MirrorPriority::Off
+        };
+        let reflected_snapshot = scene.reflected_snapshot.filter(|snapshot| {
+            mirror_priority == MirrorPriority::On
+                && snapshot.configuration == scene.mirror_priority_configuration
+        });
+        let counters = if reflected_snapshot.is_some() {
+            gpu.feedback
+                .get_or_insert_with(|| CounterBuffers::new(device, FEEDBACK_BYTES))
+        } else {
+            &gpu.counters
+        };
         let filtered = ctx.targets.hdr();
         let params = [
             scene.geometry.count(),
@@ -260,7 +282,9 @@ impl FeaturePass for MeshTracePass {
             settings.lighting_output.code(),
             u32::from(reference_sample.is_some()),
             (u32::from(graph.is_some()) * MESH_GRAPH_SCREEN)
-                | (u32::from(grid_enabled && grids.volume) * MESH_VOLUME_GI),
+                | (u32::from(grid_enabled && grids.volume) * MESH_VOLUME_GI)
+                | (u32::from(mirror_priority != MirrorPriority::Off) * MESH_MIRROR_MEASURE)
+                | (u32::from(reflected_snapshot.is_some()) * MESH_MIRROR_FEEDBACK),
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -274,7 +298,7 @@ impl FeaturePass for MeshTracePass {
                 buffer_entry(2, &nodes),
                 buffer_entry(3, &triangles),
                 buffer_entry(4, &materials),
-                buffer_entry(5, &gpu.counters),
+                buffer_entry(5, &counters.storage),
                 image_entry(6, &depth),
                 image_entry(7, &normal),
                 image_entry(8, &motion),
@@ -309,7 +333,7 @@ impl FeaturePass for MeshTracePass {
                 ),
             ],
         });
-        ctx.encoder.clear_buffer(&gpu.counters, 0, None);
+        ctx.encoder.clear_buffer(&counters.storage, 0, None);
         let (width, height) = images.trace_size;
         if path_mode != PathMode::Off {
             let ao = ctx.lighting.slot_view(7).expect("lighting AO slot");
@@ -412,31 +436,66 @@ impl FeaturePass for MeshTracePass {
         report.poll(settings);
         if report.pending.is_none() {
             let (send, receive) = sync_channel(1);
+            let size = if reflected_snapshot.is_some() {
+                FEEDBACK_BYTES
+            } else {
+                COUNTER_BYTES
+            };
             ctx.encoder
-                .copy_buffer_to_buffer(&gpu.counters, 0, &gpu.readback, 0, COUNTER_BYTES);
-            let readback = gpu.readback.clone();
+                .copy_buffer_to_buffer(&counters.storage, 0, &counters.readback, 0, size);
+            let readback = counters.readback.clone();
             let frame = ctx.frame;
             ctx.encoder.map_buffer_on_submit(
-                &gpu.readback,
+                &counters.readback,
                 wgpu::MapMode::Read,
                 ..,
                 move |loaded| {
                     let report = loaded.ok().and_then(|()| {
-                        let counts = readback.get_mapped_range(..).ok().map(|bytes| {
-                            std::array::from_fn(|i| {
+                        let sample = readback.get_mapped_range(..).ok().map(|bytes| {
+                            let counts = std::array::from_fn(|i| {
                                 u32::from_le_bytes(
                                     bytes[i * 4..i * 4 + 4].try_into().expect("one counter"),
                                 )
-                            })
+                            });
+                            let reflected_feedback = reflected_snapshot.map(|snapshot| {
+                                let receivers = bytes[COUNTER_BYTES as usize..]
+                                    .chunks_exact(RECEIVER_BYTES)
+                                    .take(
+                                        (counts[RECEIVER_COUNT] as usize)
+                                            .min(MAX_REFLECTED_RECEIVERS),
+                                    )
+                                    .map(|bytes| {
+                                        let lane = |i: usize| {
+                                            f32::from_le_bytes(
+                                                bytes[i * 4..i * 4 + 4]
+                                                    .try_into()
+                                                    .expect("one channel"),
+                                            )
+                                        };
+                                        ReflectedReceiver {
+                                            position: std::array::from_fn(lane),
+                                            normal: std::array::from_fn(|i| lane(i + 3)),
+                                            priority: 1,
+                                        }
+                                    })
+                                    .collect();
+                                ReflectedFeedback {
+                                    snapshot,
+                                    receivers,
+                                }
+                            });
+                            let stats = MeshTraceStats {
+                                frame,
+                                size: (width, height),
+                                settings,
+                                reference_spp: if settings.reference { reference_spp } else { 0 },
+                                mirror_priority,
+                                counts,
+                            };
+                            (stats, reflected_feedback)
                         });
                         readback.unmap();
-                        counts.map(|counts| MeshTraceStats {
-                            frame,
-                            size: (width, height),
-                            settings,
-                            reference_spp: if settings.reference { reference_spp } else { 0 },
-                            counts,
-                        })
+                        sample
                     });
                     let _ = send.send(report);
                 },
@@ -649,8 +708,34 @@ struct Pipelines {
     trace: wgpu::ComputePipeline,
     composite: wgpu::RenderPipeline,
     options: wgpu::Buffer,
-    counters: wgpu::Buffer,
+    counters: CounterBuffers,
+    feedback: Option<CounterBuffers>,
+}
+
+struct CounterBuffers {
+    storage: wgpu::Buffer,
     readback: wgpu::Buffer,
+}
+
+impl CounterBuffers {
+    fn new(device: &wgpu::Device, size: u64) -> Self {
+        Self {
+            storage: buffer(
+                device,
+                "trace.mesh.counters",
+                size,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            ),
+            readback: buffer(
+                device,
+                "trace.mesh.readback",
+                size,
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            ),
+        }
+    }
 }
 
 impl Pipelines {
@@ -761,20 +846,8 @@ impl Pipelines {
                 64,
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             ),
-            counters: buffer(
-                device,
-                "trace.mesh.counters",
-                COUNTER_BYTES,
-                wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-            ),
-            readback: buffer(
-                device,
-                "trace.mesh.readback",
-                COUNTER_BYTES,
-                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            ),
+            counters: CounterBuffers::new(device, COUNTER_BYTES),
+            feedback: None,
         }
     }
 }

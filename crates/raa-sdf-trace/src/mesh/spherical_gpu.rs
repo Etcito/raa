@@ -15,6 +15,7 @@ use super::spherical::{
     ALL_FACES, CellKey, FaceBudget, FaceJob, RadialShell, SKY_LIGHT_ID, SUN_LIGHT_ID,
     SchedulerStats, SphericalLight, SphericalScheduler, SphericalSchedulerConfig,
 };
+use super::{MirrorPriority, ReflectedSnapshot};
 
 pub const SPHERICAL_GI_NAME: &str = "gi.spherical";
 const ORDER: u32 = 58;
@@ -337,7 +338,7 @@ impl FeaturePass for SphericalPass {
             ctx.lighting.set_spherical_gi(None);
             return Ok(());
         };
-        let mesh = self.mesh.borrow();
+        let mut mesh = self.mesh.borrow_mut();
         let light_revision = light_revision(ctx.lighting, view.light, mesh.sky_diffuse);
         let capacity = settings.scheduler.max_cells;
         if self.gpu.as_ref().is_none_or(|gpu| gpu.capacity != capacity) {
@@ -363,7 +364,29 @@ impl FeaturePass for SphericalPass {
                 .filter_map(|(&id, record)| SphericalLight::from_packed(id, record)),
         );
         scheduler.set_view_priority(view.forward, view.half_fov_cos);
+        let mirror_priority = mesh.active_mirror_priority() == MirrorPriority::On;
+        if mirror_priority {
+            mesh.report.poll_pending();
+            if let Some(feedback) = mesh.report.reflected_feedback.take().filter(|feedback| {
+                feedback.snapshot.grid_revision == grid_revision
+                    && feedback.snapshot.configuration == mesh.mirror_priority_configuration
+            }) {
+                scheduler.set_reflected_receivers(
+                    feedback.snapshot.origin_epoch,
+                    feedback.snapshot.geometry_revision,
+                    &feedback.receivers,
+                );
+            }
+        } else {
+            scheduler.clear_reflected_receivers();
+        }
         scheduler.update_with_lights(&mesh, view.origin, light_revision, local_lights);
+        mesh.reflected_snapshot = mirror_priority.then(|| ReflectedSnapshot {
+            grid_revision,
+            origin_epoch: scheduler.stats().origin_epoch,
+            geometry_revision: mesh.geometry.revision,
+            configuration: mesh.mirror_priority_configuration,
+        });
         gpu.waiting_lights
             .retain(|sample| captured_face_current(scheduler, sample.job));
         for slot in scheduler.take_released_slots() {

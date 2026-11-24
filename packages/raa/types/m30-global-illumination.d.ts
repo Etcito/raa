@@ -324,6 +324,9 @@ export interface SphericalGiStats {
   inFlightFaces: number;
   pendingFaces: number;
   originEpoch: number;
+  /** Resident slots allocated by the opt-in reflected receiver priority. */
+  reflectedCells: number;
+  reflectedReadyCells: number;
   lastCellQueries: number;
   /** Cells with observed contributing-light metadata for every face. */
   lightingMetadataReadyCells: number;

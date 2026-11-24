@@ -42,6 +42,8 @@ export interface MeshTracingSettings {
   pathMode?: 'off' | 'short' | 'traced' | 'learned';
   /** Live GI for secondary-hit shading in geometry reflections and learned tracing. Default auto. */
   indirectGrid?: 'auto' | 'off' | 'volume' | 'spherical';
+  /** Experimental legacy sharp-mirror residency. 'measure' reports coverage without reserving slots. Default off. */
+  mirrorPriority?: 'off' | 'measure' | 'on';
 }
 
 export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
@@ -80,6 +82,12 @@ export interface MeshTracingStats extends Required<Pick<MeshTracingSettings,
   volumeSpecularHits: number;
   sphericalDiffuseOffscreenInGrid: number;
   sphericalDiffuseOffscreenSupported: number;
+  /** Current physical spherical support on non-mirror G-buffer pixels at trace resolution. */
+  sphericalPrimaryInGrid: number;
+  sphericalPrimarySupported: number;
+  /** Offscreen hash-sampled receivers before the readback cap. */
+  reflectedReceiverCandidates: number;
+  mirrorPriority: NonNullable<MeshTracingSettings['mirrorPriority']>;
   referenceSpp: number;
   hybridLobeSpp: number;
 }

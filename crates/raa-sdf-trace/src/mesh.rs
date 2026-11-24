@@ -25,7 +25,7 @@ pub const MAX_BOUNCES: u32 = 6;
 /// A complete reference path can use both the diffuse/specular and mirror budgets.
 pub const MAX_LIGHTING_DEPTH: u32 = 2 * MAX_BOUNCES;
 pub const REFERENCE_SPP: u32 = 4;
-const COUNTER_COUNT: usize = 29;
+const COUNTER_COUNT: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]
@@ -162,12 +162,36 @@ pub struct MeshTraceMaterial {
     pub unlit: bool,
 }
 
+/// Opt-in legacy sharp-mirror residency experiment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MirrorPriority {
+    #[default]
+    Off = 0,
+    Measure = 1,
+    On = 3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReflectedSnapshot {
+    grid_revision: u64,
+    origin_epoch: u64,
+    geometry_revision: u64,
+    configuration: u64,
+}
+
+struct ReflectedFeedback {
+    snapshot: ReflectedSnapshot,
+    receivers: Vec<spherical::ReflectedReceiver>,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct MeshTraceStats {
     pub frame: u64,
     pub size: (u32, u32),
     pub settings: MeshTraceSettings,
     pub reference_spp: u32,
+    pub mirror_priority: MirrorPriority,
     pub counts: [u32; COUNTER_COUNT],
 }
 
@@ -185,6 +209,9 @@ pub enum MeshIndirectGrid {
 pub struct MeshTraceScene {
     pub settings: MeshTraceSettings,
     pub indirect_grid: MeshIndirectGrid,
+    mirror_priority: MirrorPriority,
+    mirror_priority_configuration: u64,
+    reflected_snapshot: Option<ReflectedSnapshot>,
     reference_sample: Option<(u32, u32)>,
     path: hybrid::PathState,
     geometry: Geometry,
@@ -235,6 +262,35 @@ impl MeshTraceScene {
 
     pub fn end_rough_evidence(&mut self) -> Option<(u64, (u32, u32), Buffer)> {
         self.path.capture.take()?.result
+    }
+
+    pub fn mirror_priority(&self) -> MirrorPriority {
+        self.mirror_priority
+    }
+
+    pub fn set_mirror_priority(&mut self, mode: MirrorPriority) {
+        if mode != self.mirror_priority {
+            self.mirror_priority = mode;
+            self.mirror_priority_configuration = self.mirror_priority_configuration.wrapping_add(1);
+            self.report.latest = None;
+            self.report.reflected_feedback = None;
+        }
+    }
+
+    fn active_mirror_priority(&self) -> MirrorPriority {
+        if self.settings.reflections
+            && !self.settings.reference
+            && self.settings.path_mode == PathMode::Off
+            && matches!(
+                self.indirect_grid,
+                MeshIndirectGrid::Auto | MeshIndirectGrid::Spherical
+            )
+            && self.spherical_active
+        {
+            self.mirror_priority
+        } else {
+            MirrorPriority::Off
+        }
     }
 
     pub fn configure(&mut self, settings: MeshTraceSettings) {
@@ -306,7 +362,9 @@ impl MeshTraceScene {
 
     pub fn stats(&mut self) -> Option<MeshTraceStats> {
         self.report.poll(self.settings);
-        self.report.latest
+        self.report
+            .latest
+            .filter(|stats| stats.mirror_priority == self.active_mirror_priority())
     }
 
     pub fn graph_stats(&self, node: &str) -> Option<MeshTraceStats> {
@@ -324,7 +382,8 @@ impl MeshTraceScene {
 #[derive(Default)]
 struct TraceReport {
     latest: Option<MeshTraceStats>,
-    pending: Option<Receiver<Option<MeshTraceStats>>>,
+    pending: Option<Receiver<Option<(MeshTraceStats, Option<ReflectedFeedback>)>>>,
+    reflected_feedback: Option<ReflectedFeedback>,
 }
 
 impl TraceReport {
@@ -338,8 +397,9 @@ impl TraceReport {
             return;
         };
         match pending.try_recv() {
-            Ok(Some(report)) => {
+            Ok(Some((report, feedback))) => {
                 self.latest = Some(report);
+                self.reflected_feedback = feedback;
                 self.pending = None;
             }
             Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => self.pending = None,
