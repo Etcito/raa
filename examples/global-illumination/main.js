@@ -172,7 +172,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 const label = target.document.createElement('label');
                 const checkbox = target.document.createElement('input');
                 checkbox.type = 'checkbox';
-                checkbox.checked = option.enabled;
+                checkbox.checked = state?.enabled?.[option.id] ?? option.enabled;
                 checkbox.addEventListener('change', () => interactive?.setOption(option.id, checkbox.checked));
                 label.append(checkbox, option.label);
                 optionsContainer?.append(label);

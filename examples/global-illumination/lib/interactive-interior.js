@@ -4,6 +4,7 @@ const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
 const options = [
   { id: 'gi', label: 'Global illumination', enabled: true },
+  { id: 'screen-gi', label: 'Screen-space GI detail', enabled: true },
   { id: 'area-lights', label: 'Area lights', enabled: true },
   { id: 'moving-objects', label: 'Moving objects', enabled: true },
   { id: 'ssr', label: 'Screen-space reflections', enabled: true },
@@ -23,7 +24,8 @@ const variant = {
 const performanceVariant = {
   ...variant,
   id: 'performance',
-  title: 'Performance · 1× sampling, low screen GI',
+  title: 'Performance · probe GI, 1× sampling',
+  effects: { 'screen-gi': false, dof: false, ssr: false },
   engine: { msaa: 1 },
   screenSpaceQuality: 'low',
 };
@@ -33,10 +35,10 @@ const fixtures = [
   { position: [1.45, 2.62, -5.65], size: [0.8, 1.7], color: [0.59, 0.79, 1], intensity: 23 },
 ];
 
-function setGi(engine, enabled, screenSpaceQuality) {
+function setGi(engine, enabled, screenDetail, screenSpaceQuality) {
   engine.setGlobalIllumination({
     enabled,
-    screenSpace: enabled,
+    screenSpace: enabled && screenDetail,
     screenSpaceQuality,
     reflections: enabled,
     localLightShadows: true,
@@ -56,7 +58,7 @@ function fixtureSurface(color, enabled) {
 function build(engine, _lib, selected = variant) {
   const room = volumeRoom();
   const state = {
-    enabled: Object.fromEntries(options.map(option => [option.id, option.enabled])),
+    enabled: Object.fromEntries(options.map(option => [option.id, selected.effects?.[option.id] ?? option.enabled])),
     screenSpaceQuality: selected.screenSpaceQuality,
     fixtures: [],
     motionTime: 0,
@@ -71,7 +73,8 @@ function build(engine, _lib, selected = variant) {
   engine.setAreaLightShading({ mode: 'ltc' });
   engine.setAreaLightShadows({ tier: 'hero', heroCount: fixtures.length });
   engine.setSsr({ intensity: 0.65, maxRoughness: 0.35 });
-  setGi(engine, state.enabled.gi, state.screenSpaceQuality);
+  for (const pass of ['dof', 'ssr', 'bloom']) engine.setPassEnabled(pass, state.enabled[pass]);
+  setGi(engine, state.enabled.gi, state.enabled['screen-gi'], state.screenSpaceQuality);
 
   const material = (color, roughness = 0.78, metallic = 0) =>
     engine.addSurfaceMaterial({ color, roughness, metallic });
@@ -132,7 +135,10 @@ function setOption(engine, state, id, enabled) {
   if (state.enabled[id] === enabled) return;
   switch (id) {
     case 'gi':
-      setGi(engine, enabled, state.screenSpaceQuality);
+      setGi(engine, enabled, state.enabled['screen-gi'], state.screenSpaceQuality);
+      break;
+    case 'screen-gi':
+      setGi(engine, state.enabled.gi, enabled, state.screenSpaceQuality);
       break;
     case 'area-lights':
       for (const { light, intensity, surface, color } of state.fixtures) {
