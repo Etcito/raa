@@ -49,6 +49,9 @@ struct RaaGiVolumeParams {
 }
 @group(0) @binding(16) var raa_gi_volume: texture_3d<f32>;
 @group(0) @binding(17) var<uniform> raa_gi_volume_params: RaaGiVolumeParams;
+@group(0) @binding(18) var terminal_samples: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(19) var terminal_surfaces: texture_storage_2d<rgba32uint, write>;
+@group(0) @binding(20) var terminal_weights: texture_storage_2d<rgba16float, write>;
 const GI_VOLUME_VALID: u32 = 1u;
 
 const PI: f32 = 3.14159265;
@@ -296,12 +299,22 @@ fn cached_surface_radiance(p: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 // Estimate incident diffuse at the actual mesh hit from the current world clipmap.
 // The cosine-weighted mean is irradiance / pi, so use the same diffuse weight
 // as the direct BRDF. Only distinct hits supply cached outgoing radiance.
-fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material) -> vec3<f32> {
+struct TerminalDiffuse {
+    incident: vec3<f32>,
+    weight: vec3<f32>,
+    position: vec3<f32>,
+    normal: vec3<f32>,
+    material: u32,
+    depth: u32,
+}
+
+fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material,
+                       material: u32, depth: u32) -> TerminalDiffuse {
     let params = raa_gi_volume_params;
     let weight = diffuse(mat) * params.intensity;
     if (params.flags & GI_VOLUME_VALID) == 0u || !any(weight > vec3<f32>(0.0))
         || raa_gi_level_at(p, 0u) >= params.level_count {
-        return vec3<f32>(0.0);
+        return TerminalDiffuse();
     }
     let origin = p + ng * (2.0 * EPS);
     let surface_basis = basis(n);
@@ -310,12 +323,12 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material)
     // Use an equal-area stratified disk and a continuous world-space rotation.
     // A fixed low-count fan gives nearby hits the same visibility error. Rotating
     // by position breaks up that alignment without frame or pixel keyed noise.
-    const SAMPLES: u32 = 64u;
+    const SAMPLES: u32 = 32u;
     let rotation = fract(dot(p, vec3<f32>(0.73, 1.13, 0.97)));
     var incident = vec3<f32>(0.0);
     for (var i = 0u; i < SAMPLES; i++) {
         let u = (f32(i) + 0.5) / f32(SAMPLES);
-        let azimuth = f32(reverseBits(i) >> 26u) / f32(SAMPLES);
+        let azimuth = f32(reverseBits(i) >> 27u) / f32(SAMPLES);
         let phi = 2.0 * PI * (azimuth + rotation);
         let direction = surface_basis * vec3<f32>(sqrt(u) * cos(phi), sqrt(u) * sin(phi), sqrt(1.0 - u));
         if dot(ng, direction) <= 0.0 { continue; }
@@ -331,15 +344,34 @@ fn terminal_diffuse_gi(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, mat: Material)
         let facing = select(-normal, normal, dot(normal, direction) < 0.0);
         incident += cached_surface_radiance(origin + direction * hit.t, facing);
     }
-    return weight * (incident / f32(SAMPLES));
+    return TerminalDiffuse(incident / f32(SAMPLES), weight, p, ng, material, depth);
 }
 
-fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) -> vec3<f32> {
-    return trace_path_steps(initial, mirrors, path, options[0].z, seed);
+// Encode an octahedral normal and the material ID in the guide word. Materials
+// outside the guide range still get their own unfiltered terminal lighting.
+fn terminal_surface_key(normal: vec3<f32>, material: u32) -> u32 {
+    var oct = normal.xy / dot(abs(normal), vec3<f32>(1.0));
+    if normal.z < 0.0 {
+        let signs = select(vec2<f32>(-1.0), vec2<f32>(1.0), oct >= vec2<f32>(0.0));
+        oct = (vec2<f32>(1.0) - abs(oct.yx)) * signs;
+    }
+    return (material << 16u) | (pack4x8snorm(vec4<f32>(oct, 0.0, 0.0)) & 0xffffu);
+}
+
+fn store_terminal(p: vec2<i32>, terminal: TerminalDiffuse) {
+    if terminal.depth == 0u || terminal.material > 0xffffu {
+        textureStore(terminal_samples, p, vec4<f32>(0.0));
+        return;
+    }
+    textureStore(terminal_samples, p, vec4<f32>(terminal.incident, f32(terminal.depth)));
+    textureStore(terminal_weights, p, vec4<f32>(terminal.weight, 0.0));
+    textureStore(terminal_surfaces, p, vec4<u32>(bitcast<vec3<u32>>(terminal.position),
+        terminal_surface_key(terminal.normal, terminal.material)));
 }
 
 fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
-    return trace_path_lobe(initial, mirrors, path, bounces, seed, 0u, 0u);
+    var terminal: TerminalDiffuse;
+    return trace_path_lobe(initial, mirrors, path, bounces, seed, 0u, 0u, &terminal);
 }
 
 // Depth counts transport continuations from the camera hit, including mirrors.
@@ -356,7 +388,8 @@ fn select_lighting_depth(output: u32, depth: u32) -> bool {
 // A diagnostic can isolate the diffuse BRDF at the primary surface while
 // retaining the independent reference sampler and complete secondary transport.
 fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
-                   seed: ptr<function, u32>, diffuse_output: u32, lighting_output: u32) -> vec3<f32> {
+                   seed: ptr<function, u32>, diffuse_output: u32, lighting_output: u32,
+                   terminal: ptr<function, TerminalDiffuse>) -> vec3<f32> {
     var ray = initial;
     var throughput = vec3<f32>(1.0);
     var sum = vec3<f32>(0.0);
@@ -404,7 +437,9 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
         if include_light { sum += throughput * direct; }
         if isolate_diffuse && diffuse_output == 1u { break; }
         if !path {
-            sum += throughput * terminal_diffuse_gi(p, ng, n, mat);
+            *terminal = terminal_diffuse_gi(p, ng, n, mat, tri.a.material, step + 1u);
+            (*terminal).weight *= throughput;
+            sum += (*terminal).incident * (*terminal).weight;
             break;
         }
         if path_steps == 0u { break; }
@@ -503,6 +538,7 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     if options[0].w != 0u {
         atomicAdd(&counters[REFERENCE_PIXELS], 1u);
         var value = vec3<f32>(0.0);
+        var terminal: TerminalDiffuse;
         let diffuse_output = options[2].z;
         if diffuse_output != 0u { seed ^= options[2].w * 277803737u; }
         let mirrors = select(0u, options[0].y, options[1].y != 0u);
@@ -511,7 +547,7 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
             let origin = world_at(uv + subpixel, 0.0);
             let far = world_at(uv + subpixel, 1.0);
             value += trace_path_lobe(Ray(origin, normalize(far - origin)), mirrors, true,
-                options[0].z, &seed, diffuse_output, options[3].y);
+                options[0].z, &seed, diffuse_output, options[3].y, &terminal);
         }
         textureStore(radiance, sample_pixel, vec4<f32>(value / f32(options[1].w), 1.0));
         return;
@@ -522,6 +558,7 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     let z = textureLoad(depth, pixel, 0);
     if z >= 1.0 || textureLoad(motion, pixel, 0).w < 0.5 {
         textureStore(radiance, sample_pixel, vec4<f32>(0.0));
+        textureStore(terminal_samples, sample_pixel, vec4<f32>(0.0));
         return;
     }
     atomicAdd(&counters[ELIGIBLE], 1u);
@@ -531,6 +568,7 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     if status == ACCEPTED {
         let value = textureLoad(screen_radiance, pixel_at(screen.xy, dims), 0);
         textureStore(radiance, sample_pixel, vec4<f32>(value.rgb, 1.0));
+        textureStore(terminal_samples, sample_pixel, vec4<f32>(0.0));
         return;
     }
 
@@ -542,6 +580,8 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
     let normal = normalize((frame.inv_view * vec4<f32>(textureLoad(normals, pixel, 0).xyz, 0.0)).xyz);
     let ray = Ray(p + normal * (2.0 * EPS), reflect(normalize(p - origin), normal));
     atomicAdd(&counters[MIRROR_RAYS], 1u);
-    let value = trace_path(ray, options[0].y - 1u, false, &seed);
+    var terminal: TerminalDiffuse;
+    let value = trace_path_lobe(ray, options[0].y - 1u, false, 0u, &seed, 0u, 0u, &terminal);
     textureStore(radiance, sample_pixel, vec4<f32>(value, 1.0));
+    store_terminal(sample_pixel, terminal);
 }

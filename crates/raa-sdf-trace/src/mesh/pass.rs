@@ -158,6 +158,9 @@ impl FeaturePass for MeshTracePass {
                 },
                 image_entry(16, ctx.lighting.gi_volume_view()),
                 buffer_entry(17, ctx.lighting.gi_volume_params_buffer()),
+                image_entry(18, &images.terminal_samples),
+                image_entry(19, &images.terminal_surfaces),
+                image_entry(20, &images.terminal_weights),
             ],
         });
         ctx.encoder.clear_buffer(&gpu.counters, 0, None);
@@ -203,6 +206,9 @@ impl FeaturePass for MeshTracePass {
                 image_entry(1, &images.radiance),
                 image_entry(2, ctx.targets.motion()),
                 buffer_entry(3, &gpu.options),
+                image_entry(4, &images.terminal_samples),
+                image_entry(5, &images.terminal_surfaces),
+                image_entry(6, &images.terminal_weights),
             ],
         });
         {
@@ -277,6 +283,9 @@ struct Images {
     size: (u32, u32),
     trace_size: (u32, u32),
     radiance: wgpu::TextureView,
+    terminal_samples: wgpu::TextureView,
+    terminal_surfaces: wgpu::TextureView,
+    terminal_weights: wgpu::TextureView,
     previous_depth: wgpu::TextureView,
     previous: Option<(u64, u64)>,
 }
@@ -323,6 +332,27 @@ impl Images {
                 trace_size,
                 HDR_FORMAT,
                 wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            ),
+            terminal_samples: image(
+                device,
+                "trace.mesh.terminal_samples",
+                trace_size,
+                HDR_FORMAT,
+                wgpu::TextureUsages::STORAGE_BINDING,
+            ),
+            terminal_surfaces: image(
+                device,
+                "trace.mesh.terminal_surfaces",
+                trace_size,
+                wgpu::TextureFormat::Rgba32Uint,
+                wgpu::TextureUsages::STORAGE_BINDING,
+            ),
+            terminal_weights: image(
+                device,
+                "trace.mesh.terminal_weights",
+                trace_size,
+                HDR_FORMAT,
+                wgpu::TextureUsages::STORAGE_BINDING,
             ),
             previous_depth: image(
                 device,
@@ -441,6 +471,11 @@ impl Pipelines {
         use wgpu::{BufferBindingType as B, TextureSampleType as T, TextureViewDimension as D};
         let read = buf(B::Storage { read_only: true });
         let unfiltered = tex(T::Float { filterable: false }, D::D2);
+        let storage_image = |format| wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::WriteOnly,
+            format,
+            view_dimension: D::D2,
+        };
         let compute_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some(MESH_TRACE_NAME),
             entries: &[
@@ -456,14 +491,7 @@ impl Pipelines {
                 entry(9, unfiltered),
                 entry(10, unfiltered),
                 entry(11, unfiltered),
-                entry(
-                    12,
-                    wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: HDR_FORMAT,
-                        view_dimension: D::D2,
-                    },
-                ),
+                entry(12, storage_image(HDR_FORMAT)),
                 entry(13, buf(B::Uniform)),
                 entry(14, tex(T::Float { filterable: true }, D::Cube)),
                 entry(
@@ -472,6 +500,9 @@ impl Pipelines {
                 ),
                 entry(16, tex(T::Float { filterable: true }, D::D3)),
                 entry(17, buf(B::Uniform)),
+                entry(18, storage_image(HDR_FORMAT)),
+                entry(19, storage_image(wgpu::TextureFormat::Rgba32Uint)),
+                entry(20, storage_image(HDR_FORMAT)),
             ],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
