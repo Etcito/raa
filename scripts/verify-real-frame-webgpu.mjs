@@ -1,7 +1,7 @@
 // Stage with Node, then run the staged page with capture-area-pilot-direct.mjs --prediction on Windows.
 const files = [
   'index.html', 'verify-real-frame-webgpu.mjs', 'reproject.wgsl', 'real_model.wgsl',
-  'manifest.json', 'golden.json', 'weights.fp32le',
+  'manifest.json', 'golden.json', 'weights.fp32le', 'prediction_model.wgsl',
 ];
 
 async function stage() {
@@ -18,7 +18,8 @@ async function stage() {
     [fileURLToPath(import.meta.url), files[1]],
     [join(root, 'crates/raa-taa/src/wgsl/reproject.wgsl'), files[2]],
     [join(root, 'crates/raa-graph/src/exec/real_model.wgsl'), files[3]],
-    ...files.slice(4).map(name => [join(weights, name), name]),
+    ...files.slice(4, 7).map(name => [join(weights, name), name]),
+    [join(root, 'crates/raa-js/src/prediction_model.wgsl'), files[7]],
   ];
   await Promise.all(staged.map(([src, name]) => copyFile(src, join(out, name))));
   await writeFile(join(out, files[0]), '<!doctype html><meta charset=utf-8><title>Real-frame WebGPU golden</title><script type=module src="./verify-real-frame-webgpu.mjs"></script>');
@@ -77,6 +78,114 @@ const asset = async name => {
 const sha256 = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
   .map(byte => byte.toString(16).padStart(2, '0')).join('');
 
+async function verifyGenerated(adapter, manifest, golden, weightBytes, buildId) {
+  const source = await asset('prediction_model.wgsl').then(r => r.text());
+  const device = await adapter.requestDevice();
+  device.pushErrorScope('validation');
+  const module = device.createShaderModule({ code: source.replaceAll('rgba16float', 'rgba32float') });
+  const messages = (await module.getCompilationInfo()).messages.filter(({ type }) => type === 'error');
+  if (messages.length) throw new Error(messages.map(({ message }) => message).join('\n'));
+  const float = { texture: { sampleType: 'unfilterable-float' } };
+  const read = { buffer: { type: 'read-only-storage' } };
+  const write = { buffer: { type: 'storage' } };
+  async function pipeline(entryPoint, bindings) {
+    const entries = Object.entries(bindings).map(([binding, entry]) => ({
+      binding: Number(binding), visibility: GPUShaderStage.COMPUTE, ...entry,
+    }));
+    const group = device.createBindGroupLayout({ entries });
+    return device.createComputePipelineAsync({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [group] }),
+      compute: { module, entryPoint },
+    });
+  }
+  const [stem, residual] = await Promise.all([
+    pipeline('generated_stem', { 0: read, 1: write, 2: float, 3: float, 4: float, 5: float,
+      6: { texture: { sampleType: 'uint' } }, 7: { buffer: { type: 'uniform' } } }),
+    pipeline('generated_residual', { 0: read, 1: write, 2: float, 3: float, 8: float,
+      9: { storageTexture: { format: 'rgba32float' } } }),
+  ]);
+  const B = GPUBufferUsage, T = GPUTextureUsage;
+  function buffer(size, usage, data) {
+    const result = device.createBuffer({ size, usage: usage | (data ? B.COPY_DST : 0) });
+    if (data) device.queue.writeBuffer(result, 0, data);
+    return result;
+  }
+  const weights = buffer(weightBytes.byteLength, B.STORAGE, weightBytes);
+  const vectors = [];
+  for (const { id, inputs: input, outputs, sourceAgeRealFrames } of golden.vectors) {
+    const [height, width] = input.warp.shape;
+    const count = height * width;
+    function texture(format, channels, values) {
+      const size = [width, height];
+      const texture = device.createTexture({ format, size,
+        usage: values ? T.TEXTURE_BINDING | T.COPY_DST : T.STORAGE_BINDING | T.COPY_SRC });
+      if (values) device.queue.writeTexture({ texture }, values, { bytesPerRow: width * channels * 4 }, size);
+      return texture;
+    }
+    const warp = texture('rgba32float', 4, new Float32Array(input.warp.data));
+    const fresh = texture('rgba32float', 4, new Float32Array(input.fresh.data));
+    const depth = texture('r32float', 1, new Float32Array(input.targetDepth.data));
+    const motion = texture('rgba32float', 4, new Float32Array(input.motion.data));
+    const lighting = texture('r32uint', 1, new Uint32Array(input.lightingChanged.data));
+    const base = new Float32Array(4 * count);
+    for (let i = 0; i < base.length; i += 4) {
+      const color = input.warp.data[i + 3] > 0.5 ? input.warp.data : input.fresh.data;
+      base.set(color.slice(i, i + 4), i);
+    }
+    const baseline = texture('rgba32float', 4, base);
+    const output = texture('rgba32float', 4);
+    const features = buffer(count * 48, B.STORAGE);
+    const age = buffer(4, B.UNIFORM, new Float32Array([Math.min(8, sourceAgeRealFrames) / 8]));
+    const bytesPerRow = Math.ceil(width * 16 / 256) * 256;
+    const mapped = buffer(bytesPerRow * height, B.COPY_DST | B.MAP_READ);
+    const encoder = device.createCommandEncoder();
+    function run(pipeline, bindings) {
+      const entries = Object.entries(bindings).map(([binding, object]) => ({
+        binding: Number(binding), resource: object instanceof GPUBuffer ? { buffer: object } : object.createView(),
+      }));
+      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, group);
+      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+      pass.end();
+    }
+    run(stem, { 0: weights, 1: features, 2: warp, 3: fresh, 4: depth, 5: motion, 6: lighting, 7: age });
+    run(residual, { 0: weights, 1: features, 2: warp, 3: fresh, 8: baseline, 9: output });
+    encoder.copyTextureToBuffer({ texture: output }, { buffer: mapped, bytesPerRow }, [width, height]);
+    device.queue.submit([encoder.finish()]);
+    await mapped.mapAsync(GPUMapMode.READ);
+    const results = new Float32Array(mapped.getMappedRange());
+    let maxAbs = 0, outOfTolerance = 0, freshExact = true, invalidExact = true;
+    for (let i = 0; i < count; i++) {
+      const index = Math.floor(i / width) * bytesPerRow / 4 + (i % width) * 4;
+      for (let c = 0; c < 3; c++) {
+        const actual = results[index + c];
+        const expected = outputs.output.data[i * 3 + c];
+        const delta = Math.abs(actual - expected);
+        maxAbs = Math.max(maxAbs, delta);
+        if (!Number.isFinite(delta) || delta > golden.f32Absolute + golden.f32Relative * Math.abs(expected)) outOfTolerance++;
+        if (input.fresh.data[i * 4 + 3] > 0.5 && actual !== input.fresh.data[i * 4 + c]) freshExact = false;
+        if (!outputs.coverage.data[i] && actual !== 0) invalidExact = false;
+      }
+    }
+    mapped.unmap();
+    vectors.push({ id, checked: count * 3, maxAbs, outOfTolerance, freshExact, invalidExact });
+  }
+  const error = await device.popErrorScope();
+  device.destroy();
+  if (error) throw error;
+  const failures = vectors.filter(v => v.outOfTolerance || !v.freshExact || !v.invalidExact);
+  return resultFor(adapter, manifest, golden, buildId, vectors, failures);
+}
+
+function resultFor(adapter, manifest, golden, buildId, vectors, failures) {
+  const { vendor, device, description, isFallbackAdapter } = adapter.info;
+  return { json: { buildId, facts: { browser: navigator.userAgent, hardware: !isFallbackAdapter,
+    adapter: { vendor, device, description, isFallbackAdapter } },
+  weightsSha256: manifest.weightsSha256, format: golden.format, parityPassed: failures.length === 0, failures, vectors }, files: [] };
+}
+
 async function verify({ buildId }) {
   if (!/Windows/.test(navigator.userAgent)) throw new Error('Use native Windows Chrome WebGPU');
   const [adapter, manifest, goldenBytes, weightBytes, frameShader, modelShader] = await Promise.all([
@@ -91,6 +200,7 @@ async function verify({ buildId }) {
   if (await sha256(weightBytes) !== manifest.weightsSha256 || await sha256(goldenBytes) !== manifest.goldenSha256)
     throw new Error('Weight or golden hash differs from manifest');
   const golden = JSON.parse(new TextDecoder().decode(goldenBytes));
+  if (manifest.format === 'raa.generated-frame-model/1') return verifyGenerated(adapter, manifest, golden, weightBytes, buildId);
   if (golden.format !== 'raa.real-frame-golden/1') throw new Error('Unknown golden format');
   const device = await adapter.requestDevice();
   device.pushErrorScope('validation');
@@ -245,10 +355,7 @@ async function verify({ buildId }) {
   device.destroy();
   const failures = vectors.flatMap(({ id, tensors }) => Object.entries(tensors)
     .filter(([, result]) => result.outOfTolerance).map(([tensor, result]) => ({ id, tensor, ...result })));
-  const { vendor, device: adapterDevice, description, isFallbackAdapter } = adapter.info;
-  return { json: { buildId, facts: { browser: navigator.userAgent, hardware: !isFallbackAdapter,
-    adapter: { vendor, device: adapterDevice, description, isFallbackAdapter } },
-  weightsSha256: manifest.weightsSha256, format: golden.format, parityPassed: failures.length === 0, failures, vectors }, files: [] };
+  return resultFor(adapter, manifest, golden, buildId, vectors, failures);
 }
 
 if (typeof window === 'undefined') await stage();
