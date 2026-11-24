@@ -186,5 +186,5 @@ export const interactiveInterior = {
     frame,
     setOption,
   },
-  inventory: [{ mode: variant.id }],
+  inventory: [performanceVariant, variant].map(({ id }) => ({ mode: id })),
 };
