@@ -111,8 +111,10 @@ cutoff snapshot again and prefers a completed real image for the target. The dea
 cover recording, warp, refresh, readback and the presentation copy while preserving the next
 real cutoff. None of these passes execute the real scene graph or advance its histories.
 
-The browser host still needs a producer for cutoff-time target guides, sparse target shading,
-and the display and HUD integration. The existing FP32 weight package uses the area-light ABI.
-No compatible predictive manifest, live-trained weights or live decoder are available here.
-Native Windows evidence must measure the real capture copies, warp, refresh, validation and
-presentation, including a flash and the late-real recovery case.
+The opt-in browser bridge accepts cutoff-time guides and repair HDR as typed arrays. It uses
+the existing tone mapper and leaves the host HUD outside the scene texture. The
+[predictive presentation fixture](../../examples/predictive-presentation/README.md) supplies
+analytic guides for a moving rectangle and a changing emissive strip. General game guide
+production and a GPU-resident browser input path are still needed. The existing FP32 weight
+package uses the area-light ABI. A predictive manifest, live-trained weights and live decoder
+are still outstanding.

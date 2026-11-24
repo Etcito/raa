@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use raa_core::{GpuContext, RaaError};
-use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, ResourceTable, Targets};
+use raa_pipeline::{FeaturePass, Pipeline, PrepareCtx, RecordCtx, Targets};
 
 use crate::{SourceCapture, ToneMapping, TonemapControl, TonemapSource};
 
@@ -180,13 +180,12 @@ impl TonemapPass {
     fn ensure_bind_group(
         &mut self,
         gpu: &GpuContext,
-        targets: &Targets,
-        resources: &ResourceTable,
+        hdr: &wgpu::TextureView,
+        depth: wgpu::TextureView,
     ) {
-        let hdr = targets.hdr().src_texture();
-        let depth = targets.depth_input(resources, TONEMAP_NAME);
+        let hdr_texture = hdr.texture();
         if let Some(bound) = &self.bound
-            && bound.hdr == *hdr
+            && bound.hdr == *hdr_texture
             && bound.depth == depth
         {
             return;
@@ -201,7 +200,7 @@ impl TonemapPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(targets.hdr().src()),
+                    resource: wgpu::BindingResource::TextureView(hdr),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -214,11 +213,72 @@ impl TonemapPass {
             ],
         });
         self.bound = Some(Bound {
-            hdr: hdr.clone(),
+            hdr: hdr_texture.clone(),
             depth,
             group,
         });
     }
+}
+
+impl TonemapPass {
+    /// Apply the existing display transform to presentation-only HDR and target depth.
+    pub fn record_external(
+        &mut self,
+        gpu: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        hdr: &wgpu::TextureView,
+        depth: wgpu::TextureView,
+        env: &raa_pipeline::EnvGpu,
+        output: &wgpu::TextureView,
+    ) {
+        let size = output.texture().size();
+        let format = output.texture().format();
+        gpu.queue().write_buffer(&self.env, 0, &env.to_bytes());
+        gpu.queue().write_buffer(
+            &self.params,
+            0,
+            &params_bytes(
+                &self.control.get(),
+                format.is_srgb(),
+                (size.width, size.height),
+            ),
+        );
+        self.ensure_pipeline(gpu, format);
+        self.ensure_bind_group(gpu, hdr, depth);
+        draw(
+            encoder,
+            output,
+            &self.pipelines[&format],
+            self.bound.as_ref().expect("tonemap binding"),
+        );
+    }
+}
+
+fn draw(
+    encoder: &mut wgpu::CommandEncoder,
+    output: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bound: &Bound,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("raa.tonemap"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: output,
+            resolve_target: None,
+            depth_slice: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, &bound.group, &[]);
+    pass.draw(0..3, 0..1);
 }
 
 fn capture_source(ctx: &mut RecordCtx<'_>, bound: &Bound) -> Option<TonemapSource> {
@@ -293,7 +353,11 @@ impl FeaturePass for TonemapPass {
             ),
         );
         self.ensure_pipeline(ctx.gpu, ctx.backbuffer_format);
-        self.ensure_bind_group(ctx.gpu, ctx.targets, ctx.resources);
+        self.ensure_bind_group(
+            ctx.gpu,
+            ctx.targets.hdr().src(),
+            ctx.targets.depth_input(ctx.resources, TONEMAP_NAME),
+        );
         let (Some(pipeline), Some(bound)) = (
             self.pipelines.get(&ctx.backbuffer_format),
             self.bound.as_ref(),
@@ -306,25 +370,7 @@ impl FeaturePass for TonemapPass {
         if requested && let Some(source) = capture_source(ctx, bound) {
             *self.control.source.borrow_mut() = SourceCapture::Recorded(source);
         }
-        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("raa.tonemap"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: ctx.backbuffer,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &bound.group, &[]);
-        pass.draw(0..3, 0..1);
+        draw(ctx.encoder, ctx.backbuffer, pipeline, bound);
         Ok(())
     }
 }
@@ -333,6 +379,7 @@ impl FeaturePass for TonemapPass {
 mod tests {
     use super::*;
     use crate::{Look, ToneMapper};
+    use raa_pipeline::ResourceTable;
 
     #[test]
     fn depth_input_changes_bind_group_cache_key() {
@@ -362,7 +409,11 @@ mod tests {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        pass.ensure_bind_group(&gpu, &targets, &resources);
+        pass.ensure_bind_group(
+            &gpu,
+            targets.hdr().src(),
+            targets.depth_input(&resources, TONEMAP_NAME),
+        );
         let first = pass.bound.as_ref().unwrap();
         assert_eq!(first.depth, *targets.depth());
         let first_group = first.group.clone();
@@ -381,15 +432,27 @@ mod tests {
                 ),
             },
         );
-        pass.ensure_bind_group(&gpu, &targets, &resources);
+        pass.ensure_bind_group(
+            &gpu,
+            targets.hdr().src(),
+            targets.depth_input(&resources, TONEMAP_NAME),
+        );
         let bound = pass.bound.as_ref().unwrap();
         assert_eq!(bound.depth, view);
         assert_ne!(bound.group, first_group);
         let bound_group = bound.group.clone();
-        pass.ensure_bind_group(&gpu, &targets, &resources);
+        pass.ensure_bind_group(
+            &gpu,
+            targets.hdr().src(),
+            targets.depth_input(&resources, TONEMAP_NAME),
+        );
         assert_eq!(pass.bound.as_ref().unwrap().group, bound_group);
         resources.clear();
-        pass.ensure_bind_group(&gpu, &targets, &resources);
+        pass.ensure_bind_group(
+            &gpu,
+            targets.hdr().src(),
+            targets.depth_input(&resources, TONEMAP_NAME),
+        );
         let restored = pass.bound.as_ref().unwrap();
         assert_eq!(restored.depth, *targets.depth());
         assert_ne!(restored.group, bound_group);
@@ -420,6 +483,7 @@ mod views_tests {
     use crate::ToneMapper;
     use raa_core::testing::{skip, software_gpu};
     use raa_core::{FrameGraph, OffscreenTarget};
+    use raa_pipeline::ResourceTable;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 

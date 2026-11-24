@@ -106,6 +106,7 @@ pub struct WebRuntime {
     /// then). wgpu requires the `on_submitted_work_done` callback to be `Send`, which rules
     /// out `Rc<Cell<Option<f64>>>`; an `Arc<AtomicU64>` is the Send equivalent without unsafe.
     first_frame_bits: Arc<AtomicU64>,
+    present_blitter: Option<wgpu::util::TextureBlitter>,
     pending_real: Option<RetainedReal>,
     ready_real: Option<RetainedReal>,
     prediction: Option<RetainedPrediction>,
@@ -163,6 +164,7 @@ impl WebRuntime {
             cpu_ms: CpuRing::new(opts.stats_window),
             scratch: RefCell::new(Vec::with_capacity(opts.stats_window)),
             first_frame_bits: Arc::new(AtomicU64::new(FIRST_FRAME_UNSET)),
+            present_blitter: None,
             pending_real: None,
             ready_real: None,
             prediction: None,
@@ -235,6 +237,26 @@ impl WebRuntime {
 
     pub fn supports_split_presentation(&self) -> bool {
         self.surface.supports_copy_dst()
+            || matches!(
+                self.surface.format(),
+                wgpu::TextureFormat::Bgra8Unorm
+                    | wgpu::TextureFormat::Bgra8UnormSrgb
+                    | wgpu::TextureFormat::Rgba8Unorm
+                    | wgpu::TextureFormat::Rgba8UnormSrgb
+            )
+    }
+
+    /// Warm the fallback path on surfaces which cannot be copy destinations.
+    pub fn prepare_split_presentation(&mut self) {
+        if self.supports_split_presentation()
+            && !self.surface.supports_copy_dst()
+            && self.present_blitter.is_none()
+        {
+            self.present_blitter = Some(wgpu::util::TextureBlitter::new(
+                self.gpu.device(),
+                self.surface.format(),
+            ));
+        }
     }
 
     /// Produce a real frame without acquiring a drawable. Bound the backlog to one
@@ -280,6 +302,7 @@ impl WebRuntime {
                 "real frame target moves backward".into(),
             ));
         }
+        self.prepare_split_presentation();
         self.update(now_ms)?;
         let (width, height) = self.surface.size();
         let texture = self.gpu.device().create_texture(&wgpu::TextureDescriptor {
@@ -293,7 +316,9 @@ impl WebRuntime {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.surface.format(),
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -343,7 +368,13 @@ impl WebRuntime {
             || texture.dimension() != wgpu::TextureDimension::D2
             || texture.sample_count() != 1
             || texture.format() != self.surface.format()
-            || !texture.usage().contains(wgpu::TextureUsages::COPY_SRC)
+            || !texture
+                .usage()
+                .contains(if self.surface.supports_copy_dst() {
+                    wgpu::TextureUsages::COPY_SRC
+                } else {
+                    wgpu::TextureUsages::TEXTURE_BINDING
+                })
         {
             return Ok(false);
         }
@@ -375,7 +406,9 @@ impl WebRuntime {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.surface.format(),
-            usage: wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let (commands, validation) = record(&self.gpu, &texture)?;
@@ -522,11 +555,20 @@ impl WebRuntime {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("raa-present-real"),
                 });
-        encoder.copy_texture_to_texture(
-            texture.as_image_copy(),
-            frame.texture().as_image_copy(),
-            texture.size(),
-        );
+        if let Some(blitter) = &self.present_blitter {
+            blitter.copy(
+                self.gpu.device(),
+                &mut encoder,
+                &texture.create_view(&wgpu::TextureViewDescriptor::default()),
+                &frame.view,
+            );
+        } else {
+            encoder.copy_texture_to_texture(
+                texture.as_image_copy(),
+                frame.texture().as_image_copy(),
+                texture.size(),
+            );
+        }
         self.gpu.queue().submit([encoder.finish()]);
         frame.present();
         Ok(Some((id, predicted)))

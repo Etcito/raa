@@ -377,6 +377,7 @@ pub struct Engine {
     runtime: Option<WebRuntime>,
     prediction_warp: Option<crate::prediction_warp::PredictionWarp>,
     prediction_real: Option<(u64, raa_tonemap::TonemapSource)>,
+    browser_prediction: Option<crate::prediction_browser::BrowserPrediction>,
     state: Shared,
     pub(crate) viewport: (u32, u32),
 }
@@ -486,9 +487,13 @@ impl Engine {
             return Ok(false);
         }
         runtime
-            .record_checked_prediction(key, source_id, deadline_ms, measured_cost_ms, |gpu, output| {
-                warp.record(gpu, source, guides, output, renderer)
-            })
+            .record_checked_prediction(
+                key,
+                source_id,
+                deadline_ms,
+                measured_cost_ms,
+                |gpu, output| warp.record(gpu, source, guides, output, renderer),
+            )
             .map_err(|e| js_err(&e))
     }
 
@@ -769,6 +774,7 @@ impl Engine {
             runtime: Some(runtime),
             prediction_warp: None,
             prediction_real: None,
+            browser_prediction: None,
             state,
             viewport,
         })
@@ -800,6 +806,142 @@ impl Engine {
         self.runtime()?.clear_retained_frames();
         self.prediction_real = None;
         Ok(())
+    }
+
+    /// Warm the opt-in browser prediction path. Source capture starts with the next split real frame.
+    #[wasm_bindgen(js_name = preparePrediction)]
+    pub fn prepare_prediction(&mut self) -> Result<bool, JsValue> {
+        if !self.supports_split_presentation()? {
+            return Ok(false);
+        }
+        if self.browser_prediction.is_none() {
+            self.runtime()?.prepare_split_presentation();
+            self.prepare_prediction_warp()?;
+            self.browser_prediction = Some(self.with_state(|gpu, state| {
+                let pipeline = state.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
+                Ok(crate::prediction_browser::BrowserPrediction::new(
+                    gpu, &pipeline,
+                ))
+            })?);
+        }
+        Ok(true)
+    }
+
+    /// Submit target guides on the native display grid. Repair HDR alpha is one
+    /// only for valid cutoff-time samples. Returns false on an admission refusal.
+    #[wasm_bindgen(js_name = submitPrediction)]
+    pub fn submit_browser_prediction(
+        &mut self,
+        snapshot: JsValue,
+        source_id: f64,
+        deadline_ms: f64,
+        measured_cost_ms: f64,
+        depth_tolerance: f32,
+        refresh_limit: u32,
+        depth: js_sys::Float32Array,
+        motion: js_sys::Float32Array,
+        lighting: js_sys::Uint32Array,
+        samples: js_sys::Float32Array,
+    ) -> Result<bool, JsValue> {
+        let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
+        let Some(key) = prediction_key(&snapshot, target) else {
+            return Ok(false);
+        };
+        let Some((id, source)) = &self.prediction_real else {
+            return Ok(false);
+        };
+        if *id as f64 != source_id {
+            return Ok(false);
+        }
+        let (Some(browser), Some(warp)) = (&mut self.browser_prediction, &self.prediction_warp)
+        else {
+            return Ok(false);
+        };
+        let count = u64::from(self.viewport.0) * u64::from(self.viewport.1);
+        if u64::from(depth.length()) != count
+            || u64::from(lighting.length()) != count
+            || u64::from(motion.length()) != count * 4
+            || u64::from(samples.length()) != count * 4
+            || !(0.0..1.0).contains(&depth_tolerance)
+            || u64::from(refresh_limit) > count
+        {
+            return Ok(false);
+        }
+        let (tone, env) = {
+            let guard = self.state.borrow();
+            let state = guard.as_ref().ok_or_else(disposed)?;
+            let pipeline = state
+                .pipeline
+                .try_borrow()
+                .map_err(|_| js_err(&pipeline_busy()))?;
+            (state.tonemap.get(), pipeline.lighting().env().clone())
+        };
+        self.runtime
+            .as_mut()
+            .ok_or_else(disposed)?
+            .record_checked_prediction(key, *id, deadline_ms, measured_cost_ms, |gpu, output| {
+                use crate::prediction_browser::upload;
+                use wgpu::TextureFormat as F;
+                let size = output.size();
+                let float_bytes = |array: js_sys::Float32Array| {
+                    array
+                        .to_vec()
+                        .into_iter()
+                        .flat_map(f32::to_le_bytes)
+                        .collect::<Vec<_>>()
+                };
+                let depth = upload(
+                    gpu,
+                    size,
+                    "target depth",
+                    F::R32Float,
+                    1,
+                    &float_bytes(depth),
+                );
+                let motion = upload(
+                    gpu,
+                    size,
+                    "target motion",
+                    F::Rgba32Float,
+                    4,
+                    &float_bytes(motion),
+                );
+                let lighting = upload(
+                    gpu,
+                    size,
+                    "target light changes",
+                    F::R32Uint,
+                    1,
+                    &lighting
+                        .to_vec()
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
+                        .collect::<Vec<_>>(),
+                );
+                let samples = upload(
+                    gpu,
+                    size,
+                    "target repair HDR",
+                    F::Rgba32Float,
+                    4,
+                    &float_bytes(samples),
+                );
+                let mut renderer = browser.frame(tone, env, &depth, &samples)?;
+                warp.record(
+                    gpu,
+                    source,
+                    crate::PredictionGuides {
+                        target_depth: &depth,
+                        target_motion: &motion,
+                        lighting_changed: &lighting,
+                        depth_tolerance,
+                        refresh_limit,
+                    },
+                    output,
+                    &mut renderer,
+                )
+            })
+            .map_err(|e| js_err(&e))
     }
 
     /// Opt-in split production. Returns no ID while a real image is pending.
@@ -1200,6 +1342,7 @@ impl Engine {
     pub fn dispose(&mut self) {
         self.prediction_real = None;
         self.prediction_warp = None;
+        self.browser_prediction = None;
         self.runtime = None;
         self.state.borrow_mut().take();
     }

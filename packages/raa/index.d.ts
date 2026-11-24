@@ -439,6 +439,13 @@ export interface Engine {
    * @throws RaaError `api.disposed` or `api.invalid_argument` for invalid context or time.
    */
   renderInstrumented(nowMs: number, context: FrameTraceContext): FrameTrace;
+  /** Warm this device's optional native-resolution prediction passes. */
+  preparePrediction(): boolean;
+  /** Submit cutoff-time target depth, RGBA32F motion, lighting mask and RGBA32F repair HDR. */
+  submitPrediction(snapshot: { revision: number; target: { tick: number; phase: number } },
+    sourceId: number, deadlineMs: number, measuredCostMs: number, depthTolerance: number,
+    refreshLimit: number, depth: Float32Array, motion: Float32Array, lighting: Uint32Array,
+    repairHdr: Float32Array): boolean;
   supportsSplitPresentation(): boolean;
   /** Retire retained images after a cut or graph/model change. */
   resetPresentation(): void;

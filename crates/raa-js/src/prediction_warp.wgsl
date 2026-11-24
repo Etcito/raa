@@ -19,7 +19,7 @@ struct RefreshWork {
 @group(0) @binding(1) var source_hdr: texture_2d<f32>;
 @group(0) @binding(2) var source_depth: texture_depth_2d;
 @group(0) @binding(3) var target_motion: texture_2d<f32>;
-@group(0) @binding(4) var target_depth: texture_depth_2d;
+@group(0) @binding(4) var target_depth: texture_2d<f32>;
 @group(0) @binding(5) var lighting_changed: texture_2d<u32>;
 @group(0) @binding(6) var warped: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(7) var<storage, read_write> work: RefreshWork;
@@ -38,7 +38,7 @@ fn warp(@builtin(global_invocation_id) id: vec3<u32>) {
     let motion = textureLoad(target_motion, p, 0);
     let uv = (vec2<f32>(id.xy) + 0.5) / vec2<f32>(size);
     let previous = raa_temporal_surface_uv(uv, motion);
-    let depth = textureLoad(target_depth, p, 0);
+    let depth = textureLoad(target_depth, p, 0).x;
     if previous.z == 1.0 && depth >= 0.0 && depth <= 1.0 && motion.w >= 0.0 && motion.w <= 1.0
         && textureLoad(lighting_changed, p, 0).x == 0u {
         let source = vec2<i32>(previous.xy * vec2<f32>(size));

@@ -8,19 +8,20 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-const [chromeArg, pageArg, outputArg, op = 'area-pilot', comparison = 'fixed'] = process.argv.slice(2);
+const [chromeArg, pageArg, outputArg, mode = 'area-pilot', comparison = 'fixed'] = process.argv.slice(2);
+const op = mode === '--prediction' ? 'prediction' : mode;
 const capture = op === 'area-pilot' || op === 'gallery-path-capture';
 const gallery = op.startsWith('gallery-');
 const spherical = op === 'gallery-spherical';
 const liveSpherical = spherical && comparison === 'live';
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
-    || !['area-pilot', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built GI page> <new output> [gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical] [baseline|fixed|live]');
+    || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical'].includes(op)) {
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical] [baseline|fixed|live]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
 const receipt = JSON.parse(receiptBytes);
-if (receipt.status !== 'ready' || !receipt.buildId) throw new Error('A ready GI build is required');
+if (receipt.status !== 'ready' || !receipt.buildId) throw new Error('A ready page build is required');
 
 const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.json': 'application/json', '.wasm': 'application/wasm' };
 const served = new Set([...receipt.files, 'build.json']);
@@ -119,7 +120,7 @@ try {
     if (ready || browserErrors.length) break;
     await delay(100);
   }
-  if (!ready) throw new Error(`GI capture page did not initialize: ${browserErrors.join('; ')}`);
+  if (!ready) throw new Error(`Capture page did not initialize: ${browserErrors.join('; ')}`);
   const { gpu } = await call('SystemInfo.getInfo');
   const renderer = gpu.auxAttributes?.glRenderer ?? '';
   const nvidia = gpu.devices.find(device => device.vendorId === 0x10de && /RTX 3090/i.test(device.deviceString));
@@ -216,7 +217,7 @@ try {
       ...(gallery ? data.source : {}), revision: receipt.inputs.revision,
       receiptSha256: createHash('sha256').update(receiptBytes).digest('hex'),
     };
-    const manifest = path.join(output, capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
+    const manifest = path.join(output, op === 'prediction' ? 'prediction.json' : capture ? 'manifest.json' : op === 'gallery-path-diffuse' ? 'diffuse.json'
       : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);

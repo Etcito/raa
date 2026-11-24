@@ -12,6 +12,7 @@ const INCOMPLETE_OFFSET: u64 = 16;
 /// Same-device textures for a single clean, unjittered native-size view. The provider
 /// must mark uncertain correspondence, unsupported shading and deformation for repair.
 pub struct PredictionGuides<'a> {
+    /// R32Float standard-Z from the unjittered target geometry.
     pub target_depth: &'a wgpu::Texture,
     /// RGBA32Float. UV displacement XY, rejection Z, expected source depth W.
     pub target_motion: &'a wgpu::Texture,
@@ -102,7 +103,7 @@ impl PredictionWarp {
                     (1, sampled(float)),
                     (2, sampled(T::Depth)),
                     (3, sampled(float)),
-                    (4, sampled(T::Depth)),
+                    (4, sampled(float)),
                     (5, sampled(T::Uint)),
                     (6, storage_texture()),
                     (7, work),
@@ -139,7 +140,7 @@ impl PredictionWarp {
         for (texture, format) in [
             (&source.hdr, F::Rgba16Float),
             (&source.depth, F::Depth32Float),
-            (guides.target_depth, F::Depth32Float),
+            (guides.target_depth, F::R32Float),
             (guides.target_motion, F::Rgba32Float),
             (guides.lighting_changed, F::R32Uint),
         ] {

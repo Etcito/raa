@@ -38,12 +38,14 @@ fn validate_prediction_shaders() {
     let reproject = "../raa-taa/src/wgsl/reproject.wgsl";
     let warp = "src/prediction_warp.wgsl";
     let refresh = "src/prediction_refresh.wgsl";
-    for path in [reproject, warp, refresh] {
+    let browser = "src/prediction_browser.wgsl";
+    for path in [reproject, warp, refresh, browser] {
         println!("cargo:rerun-if-changed={path}");
     }
     let read = |path| fs::read_to_string(path).expect("read prediction shader");
     let warp = format!("{}\n{}", read(reproject), read(warp));
-    for source in [warp, read(refresh)] {
+    let browser = format!("{}\n{}", read(refresh), read(browser));
+    for source in [warp, browser] {
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
         naga::valid::Validator::new(
