@@ -224,12 +224,14 @@ async function verify({ buildId }) {
     const layout = device.createPipelineLayout({ bindGroupLayouts: [group] });
     return device.createComputePipelineAsync({ label: entryPoint, layout, compute: { module, entryPoint } });
   }
-  const [encode, spatial, area, recurrent, reflection, head, sr, inspect] = await Promise.all([
+  const [encode, spatial, area, recurrent, reflection, fused, admitted, head, sr, inspect] = await Promise.all([
     kernel('encode_golden', { 0: uniform, 1: read, 2: uniform, 4: image, 5: image, 6: read, 7: storage, 8: storage, 18: image, 19: storage }),
     kernel('encode_spatial', { 0: uniform, 1: read, 7: storage, 8: storage }),
     kernel('reconstruct_area', { 0: uniform, 1: read, 7: storage, 9: array, 10: arrayOutput }),
     kernel('recurrent', { 0: uniform, 1: read, 7: storage, 11: image, 12: image, 13: image, 14: storage }),
     kernel('reflection_golden', { 0: uniform, 1: read, 12: image, 14: storage, 15: output }),
+    kernel('recurrent_reflection', { 0: uniform, 1: read, 7: storage, 11: image, 12: image, 13: image, 14: storage, 15: output }),
+    kernel('reconstruct_reflection', { 0: uniform, 1: read, 12: image, 13: image, 14: storage, 15: output }),
     kernel('sr_head', { 0: uniform, 1: read, 14: storage, 16: storage }),
     kernel('resolve_display', { 0: uniform, 2: uniform, 11: image, 16: storage, 17: output }),
     kernel('inspect_golden', { 0: uniform, 7: storage, 19: storage }),
@@ -265,12 +267,14 @@ async function verify({ buildId }) {
       c === 0 ? from('depth')[i] : c === 1 ? Number(!reset) * from('historyValid')[i] : c === 2 ? from('reactive')[i] : 0)));
     const incident = texture(sourceSize, grid(count, 4, (i, c) => from('reflection')[i * 6 + c]));
     const meta = texture(sourceSize, grid(count, 4, (i, c) => [from('reflection')[i * 6 + 4], from('reflection')[i * 6 + 3], 0, from('reflection')[i * 6 + 5]][c]));
-    const pairs = texture(sourceSize, grid(count, 4, (i, c) => c < 2 ? from('areaPairs')[i * 2 + c] : 0), '2d-array');
+    const pairs = texture(sourceSize, grid(count, 4, (i, c) => from('areaPairs')[i * 2 + c % 2]), '2d-array');
     const areaOut = texture(sourceSize, null, '2d-array'), reflOut = texture(sourceSize), srOut = texture(displaySize);
+    const fusedOut = texture(sourceSize), admittedOut = texture(sourceSize);
     const guides = buffer(count * 128, B.STORAGE), stem = buffer(count * 48, B.STORAGE);
     const next = buffer(count * 64, B.STORAGE | B.COPY_SRC), coeff = buffer(count * 32, B.STORAGE | B.COPY_SRC);
     const diag = buffer(count * 104, B.STORAGE | B.COPY_SRC);
-    const control = buffer(32, B.UNIFORM, new Uint32Array([width, height, 0, 0, 1, 1, 1, 0]));
+    const fusedNext = buffer(count * 64, B.STORAGE | B.COPY_SRC);
+    const control = buffer(32, B.UNIFORM, new Uint32Array([width, height, 0, 0, 1, 1, 3, 0]));
     const frameWords = new Float32Array(192);
     frameWords.set([jitterPx[0] * 2 / width, jitterPx[1] * -2 / height,
       previousJitter[0] * 2 / width, previousJitter[1] * -2 / height], 160);
@@ -292,6 +296,8 @@ async function verify({ buildId }) {
     run(area, { 0: control, 1: weights, 7: guides, 9: pairs, 10: areaOut });
     run(recurrent, { 0: control, 1: weights, 7: guides, 11: hdr, 12: incident, 13: meta, 14: next });
     run(reflection, { 0: control, 1: weights, 12: incident, 14: next, 15: reflOut });
+    run(admitted, { 0: control, 1: weights, 12: incident, 13: meta, 14: next, 15: admittedOut });
+    run(fused, { 0: control, 1: weights, 7: guides, 11: hdr, 12: incident, 13: meta, 14: fusedNext, 15: fusedOut });
     run(head, { 0: control, 1: weights, 14: next, 16: coeff });
     run(sr, { 0: control, 2: camera, 11: hdr, 16: coeff, 17: srOut }, displaySize);
     run(inspect, { 0: control, 7: guides, 19: diag });
@@ -307,9 +313,10 @@ async function verify({ buildId }) {
       return { mapped };
     }
     const copies = [copyBuffer(diag), copyBuffer(next), copyBuffer(coeff),
-      copy(areaOut, sourceSize), copy(reflOut, sourceSize), copy(srOut, displaySize)];
+      copy(areaOut, sourceSize), copy(reflOut, sourceSize), copy(srOut, displaySize),
+      copyBuffer(fusedNext), copy(fusedOut, sourceSize), copy(admittedOut, sourceSize)];
     device.queue.submit([encoder.finish()]);
-    const [guide, state, coefficients, areaPairs, reflect, display] = await Promise.all(copies.map(async ({ mapped, stride, width }) => {
+    const [guide, state, coefficients, areaPairs, reflect, display, fusedState, fusedRgb, admittedRgb] = await Promise.all(copies.map(async ({ mapped, stride, width }) => {
       await mapped.mapAsync(GPUMapMode.READ);
       const data = new Float32Array(mapped.getMappedRange()).slice();
       mapped.unmap();
@@ -345,6 +352,26 @@ async function verify({ buildId }) {
       });
       tensors[name] = { maxAbs, checked: expected.length, outOfTolerance, ...(firstFailure && { firstFailure }) };
     }
+    const compare = (channels, actual, expected) => {
+      let maxAbs = 0, outOfTolerance = 0;
+      for (let p = 0; p < count; p++) {
+        for (let c = 0; c < channels; c++) {
+          const a = actual(p, c, channels), b = expected(p, c, channels);
+          maxAbs = Math.max(maxAbs, Math.abs(a - b));
+          outOfTolerance += Number(!Number.isFinite(a) || !Number.isFinite(b) || a !== b);
+        }
+      }
+      return { maxAbs, checked: count * channels, outOfTolerance };
+    };
+    tensors.areaPackedSlots = compare(2, areaPairs, (p, c) => areaPairs(p, c + 2));
+    tensors.fusedState = compare(16, fusedState, state);
+    tensors.fusedReflection = compare(4, fusedRgb, admittedRgb);
+    tensors.screenAdmission = compare(4, fusedRgb, (p, c) => {
+      const src = from('reflection');
+      const accepted = src[p * 6 + 3] > 0 && src[p * 6 + 4] === 1;
+      return accepted && c < 3 ? reflect(p, c) : src[p * 6 + c];
+    });
+    fusedNext.destroy();
     vectors.push({ id, tensors });
     prior.destroy();
     prior = next;
