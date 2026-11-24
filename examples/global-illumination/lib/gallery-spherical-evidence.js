@@ -55,6 +55,7 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
       await frame();
       const sample = live();
       if (i >= 7 && sample.readyCells >= minCells && sample.pendingFaces === 0 && sample.inFlightFaces === 0
+          && sample.lastCellQueries === 0
           && sample.lightingMetadataReadyCells === sample.readyCells) return sample;
     }
     check(false, 'occupied gallery grid did not become ready', stats());
@@ -208,7 +209,6 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
   'adding a light over the open floor did not schedule its captures', beforeLightChange);
   for (const [id, change] of [
     ['local-light-edited', () => engine.updateLight(local, { intensity: 4 })],
-    ['local-light-moved', () => engine.updateLight(local, { position: [0.25, 0.35, -2.8] })],
     ['local-light-removed', () => engine.removeLight(local)],
   ]) {
     change();
@@ -230,6 +230,19 @@ export async function runGallerySpherical({ engine, source, state, scene, setPos
   const cubeX = camera.eye[0] + 48;
   const cubeNode = engine.addNode(null, [cubeX, 1.25, -2.1], [0, 0, 0, 1], [1, 1, 1]);
   const cubeInstance = engine.addMeshInstance(cubeNode, cube);
+  // The distant reference cube supplies occupied cells outside the lamp's influence.
+  const referenceNode = engine.addNode(null, [cubeX + 5.5, 1.25, -9], [0, 0, 0, 1], [1, 1, 1]);
+  const referenceInstance = engine.addMeshInstance(referenceNode, cube);
+  const isolatedLight = engine.addLight({ kind: 'point', position: [cubeX, 1.8, -1.7], range: 0.8, intensity: 10 });
+  const beforeMove = record('isolated-light-ready', await warm(2));
+  engine.updateLight(isolatedLight, { position: [cubeX + 0.12, 1.8, -1.7] });
+  const afterMove = record('local-light-moved', await warm(2));
+  const movedFaces = afterMove.lightInvalidatedFaces - beforeMove.lightInvalidatedFaces;
+  check(movedFaces > 0 && movedFaces < beforeMove.readyFaces && afterMove.capturedFaces > beforeMove.capturedFaces,
+    'local light movement did not preserve the unaffected captures', { beforeMove, afterMove });
+  engine.removeLight(isolatedLight);
+  engine.removeInstance(referenceInstance);
+  engine.removeNode(referenceNode);
   const beforeGeometry = record('isolated-geometry', await warm(1));
   const isolatedProbe = await readProbe();
   check(isolatedProbe.faceValidMisses.some(count => count > 0), 'isolated geometry did not retain valid sky misses', isolatedProbe);
