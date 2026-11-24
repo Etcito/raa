@@ -1,6 +1,7 @@
 import { setCanvasSize } from '../../../web/common/page-runner.js';
 import { interactiveInterior } from './interactive-interior.js';
 import { panel } from './content.js';
+import { measureMirrorPriority } from './gallery-mirror-priority-evidence.js';
 import { inspectMirrorCoverage, measureLearnedSecondary, measureSharpSecondary } from './gallery-secondary-evidence.js';
 import { digest } from './gallery-path-model.js';
 
@@ -41,7 +42,7 @@ function compare(a, b, accept = () => true) {
 }
 
 export async function measureGalleryMirror({ target, canvas, raa }, {
-  buildId, remainingMs = 280000, baseline = false, coverageOnly = false, sharpOnly = false,
+  buildId, remainingMs = 280000, baseline = false, coverageOnly = false, sharpOnly = false, priorityOnly = false,
 } = {}) {
   requireEvidence(/Windows.+Chrome\//.test(target.navigator.userAgent) && buildId, 'Pinned Windows Chrome build required');
   const deadline = target.performance.now() + remainingMs;
@@ -137,8 +138,13 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       timeMs, preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
       baselineFacts, residency, comparison, captures, coverage };
     if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
-    let phase = 'forced BVH';
+    let phase = priorityOnly ? 'priority experiment' : 'forced BVH';
     try {
+      if (priorityOnly) {
+        const priority = await measureMirrorPriority({ engine, set, settle, capture, camera: preset.selection.camera,
+          check: requireEvidence, compare });
+        return { json: { ...manifest, priority }, files };
+      }
       const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare, settle,
         defaultConfidence: initial['reflection-confidence'] });
       if (sharpOnly) return { json: { ...manifest, sharp, sharpOnly }, files };

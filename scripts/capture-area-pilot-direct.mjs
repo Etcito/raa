@@ -22,7 +22,7 @@ const liveMirror = mirror && comparison === 'live';
 const live = liveSpherical || liveMirror;
 if (process.platform !== 'win32' || !chromeArg || !pageArg || !outputArg
     || !['area-pilot', 'prediction', 'gallery-path-capture', 'gallery-path-measure', 'gallery-path-diffuse', 'gallery-panel-noise', 'gallery-spherical', 'gallery-sequence', 'gallery-reflection-model', 'gallery-mirror'].includes(op)) {
-  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|train|test|both|reflection|dataset|learned|coverage|sharp]');
+  throw new Error('Usage on Windows: node scripts/capture-area-pilot-direct.mjs <chrome.exe> <built page> <new output> [--prediction|gallery-path-capture|gallery-path-measure|gallery-path-diffuse|gallery-panel-noise|gallery-spherical|gallery-sequence|gallery-reflection-model|gallery-mirror] [baseline|fixed|live|train|test|both|reflection|dataset|learned|coverage|sharp|priority]');
 }
 const chrome = path.resolve(chromeArg), page = path.resolve(pageArg), output = path.resolve(outputArg);
 const receiptBytes = await readFile(path.join(page, 'build.json'));
@@ -149,7 +149,7 @@ try {
   const result = liveSpherical ? null : await evalPage(`(async () => {
     const result = await window.nmcGpu.ops[${JSON.stringify(op)}](${JSON.stringify({
       buildId: receipt.buildId, remainingMs: 280000, requireFixed: comparison !== 'baseline',
-      ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp' }),
+      ...(mirror && { baseline: comparison === 'baseline', coverageOnly: comparison === 'coverage', sharpOnly: comparison === 'sharp', priorityOnly: comparison === 'priority' }),
       ...(sequence && { split: ['fixed', 'reflection'].includes(comparison) ? 'both' : comparison, reflection: comparison === 'reflection' }), ...(predictionDataset && { dataset: true }), ...(predictionLearned && { learned: true }),
     })});
     const files = await Promise.all(result.files.map(async ({ name, blob, base64 }) => {
@@ -161,7 +161,7 @@ try {
     }));
     return { json: result.json, files };
   })()`, 300000);
-  const mirrorUi = mirror && !['coverage', 'sharp'].includes(comparison) && !result.json.coverage?.zeroCoverage && !result.json.failure ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
+  const mirrorUi = mirror && !['coverage', 'sharp', 'priority'].includes(comparison) && !result.json.coverage?.zeroCoverage && !result.json.failure ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
   const mirrorScreenshot = mirrorUi && await send('Page.captureScreenshot', { format: 'png' });
   const ui = mirrorUi ?? (spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null);
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
