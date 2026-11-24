@@ -70,7 +70,7 @@ fn spherical_radius_and_private_buffer_are_validated_before_apply() {
         issue.code == "graph.fixed_wiring"
             && issue
                 .message
-                .contains("private to the forward lighting bind group")
+                .contains("requires a dedicated lighting binding")
     }));
 }
 

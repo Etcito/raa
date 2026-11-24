@@ -1,10 +1,12 @@
 //! Live mesh BVH render stages.
 
 use super::ao_stages::{gbuffer_in, image_out, node_param, post_stage, required_in, stage_budget};
+use super::runtime_lighting::spherical_lookup_input;
 use crate::catalog::{
-    Category, GraphFormat, NodeFamily, NodeTypeSpec, ParamKind, ParamSpec, ParamValue, ShaderStage,
-    SizeSpec,
+    Category, GraphFormat, NodeFamily, NodeTypeSpec, ParamKind, ParamSpec, ParamValue, PortType,
+    ShaderStage, SizeSpec,
 };
+use crate::mesh_indirect::{INHERIT_GI, VOLUME_PORT, VOLUME_SOURCE};
 use raa_sdf_trace::mesh::{MAX_BOUNCES, MAX_LIGHTING_DEPTH, MeshTraceSettings, REFERENCE_SPP};
 
 pub fn family() -> Box<dyn NodeFamily> {
@@ -40,6 +42,8 @@ impl NodeFamily for MeshTrace {
                     "Unreflected scene HDR",
                     GraphFormat::Rgba16Float,
                 ),
+                spherical_lookup_input(),
+                volume_atlas_input(),
             ]
         };
         let reflection_bounces = || {
@@ -66,6 +70,18 @@ impl NodeFamily for MeshTrace {
                     "MeshTraceSettings",
                 ),
                 reflection_bounces(),
+                node_param(
+                    INHERIT_GI,
+                    "Inherit unlinked GI grids",
+                    "Mesh trace",
+                    ParamKind::Bool,
+                    ParamValue::Bool(true),
+                    None,
+                    None,
+                    None,
+                    "",
+                    "Mesh reflection grid routing",
+                ),
             ]
         };
         let outputs = |scale| {
@@ -102,13 +118,26 @@ impl NodeFamily for MeshTrace {
                         8 + u32::from(fitted),
                         1,
                         4,
-                        if fitted { 6 } else { 4 },
+                        if fitted { 8 } else { 5 },
                         4 + u32::from(fitted),
                     ),
                     stage_budget(ShaderStage::Fragment, 6, 0, 0, 0, 1),
                 ],
             )
         };
+        let mut fitted_params = screen_params();
+        fitted_params.push(choice(
+            "lightingOutput",
+            "Lighting output",
+            &[
+                "combined",
+                "direct",
+                "indirect",
+                "diffuse-indirect",
+                "rough-specular",
+                "rough-grid",
+            ],
+        ));
         let mut reflection_inputs = screen_inputs();
         reflection_inputs.push(required_in(
             "color",
@@ -162,12 +191,26 @@ impl NodeFamily for MeshTrace {
                 "mesh.fitted-specular",
                 "Fitted specular path pilot",
                 screen_inputs(),
-                screen_params(),
+                fitted_params,
                 0.5,
                 true,
             ),
         ]
     }
+}
+
+fn volume_atlas_input() -> crate::catalog::PortSpec {
+    let mut port = required_in(
+        VOLUME_PORT,
+        "Volume irradiance atlas",
+        GraphFormat::Rgba16Float,
+    );
+    port.ty = PortType::Image3d;
+    port.default_source = VOLUME_SOURCE;
+    port.required = false;
+    port.absent_ok = true;
+    port.generic = false;
+    port
 }
 
 fn int(key: &'static str, label: &'static str, default: u32, min: u32, max: u32) -> ParamSpec {

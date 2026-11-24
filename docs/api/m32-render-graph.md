@@ -111,8 +111,9 @@ not a graph is set.
 
 - `pass.gi.spherical` runs the existing camera-centred capture pass on the shared mesh BVH.
   Its `lookup` buffer feeds `pass.forward.sphericalLookup` through the forward lighting
-  bind group. This link accepts the engine's spherical lookup only and resolves by default
-  when the spherical node is present. The lookup has no compute or history tap. Capture
+  bind group. Mesh reflection and fitted specular also accept the lookup through their
+  fixed `sphericalLookup` inputs. Forward resolves its own input by default when the
+  spherical node is present. The lookup has no generic compute or history tap. Capture
   uses the primary view and the scene's geometry and lights.
 - The spherical node exposes `sphereSubdivision`, `exponentialPower`, `clipStart`, `zMax`,
   `channelMask` and the `debug` views from `setSphericalGi`. Node presence enables capture.

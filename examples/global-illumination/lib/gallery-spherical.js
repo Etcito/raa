@@ -28,17 +28,17 @@ function available(settings, state) {
   return settings.gi && !settings['path-reference'] && (!settings['model-assisted-path'] || state.secondaryCache);
 }
 
-function sphericalEnabled(settings) {
-  return available(settings) && settings['gi-grid'] === 'spherical';
+function sphericalEnabled(settings, state) {
+  return available(settings, state) && settings['gi-grid'] === 'spherical';
 }
 
-export function usesVolumeGrid(settings) {
+export function usesVolumeGrid(settings, state) {
   // Keep the raster coverage fallback. The fitted path selects one actual grid.
-  return settings.gi && !(settings['model-assisted-path'] && sphericalEnabled(settings));
+  return settings.gi && !(settings['model-assisted-path'] && sphericalEnabled(settings, state));
 }
 
 export function applySpherical(engine, state, settings) {
-  const enabled = sphericalEnabled(settings);
+  const enabled = sphericalEnabled(settings, state);
   if (enabled) {
     engine.setSphericalGi({
       enabled,

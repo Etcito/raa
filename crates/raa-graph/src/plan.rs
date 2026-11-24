@@ -7,6 +7,7 @@ use crate::catalog::{
 };
 use crate::error::{Issue, Severity, Stage, sort_issues};
 use crate::format::{ComputePortDecl, GraphDoc, NodeDoc, PortRef, parse_graph};
+use crate::mesh_indirect::input_defaults;
 use crate::validate::{GraphLimits, ValidateCtx, validate};
 
 /// A graph after planning: ordered nodes, links, resources and the displayed output.
@@ -294,7 +295,7 @@ fn feed(doc: &GraphDoc, node: &NodeDoc, port: &PortSpec) -> Feed {
             None => Feed::Absent,
         };
     }
-    port.default_source
+    input_defaults(doc, node, port)
         .iter()
         .copied()
         .find_map(|entry| {

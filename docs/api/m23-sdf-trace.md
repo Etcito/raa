@@ -36,8 +36,7 @@ with a named error instead of silently omitting it. Legacy v1 placeholders remai
 ## Mesh tracing in a render graph
 
 Mesh trace stages share the engine's current opaque triangle BVH, material library, local lights,
-environment and available GI. Add `pass.gi.volume` when the reflection path should sample the
-scene's voxel GI. The stages run on a single viewport.
+environment and available GI. The stages run on a single viewport.
 
 - `mesh.reflection` applies geometry reflections to materials marked `traceMirror`. Connect the
   prepass `depth`, `normal` and `motion`, `ssr.hiz.hiz`, `ssr.trace.trace` as `screenTrace`, and the
@@ -52,7 +51,26 @@ scene's voxel GI. The stages run on a single viewport.
 - `mesh.fitted-specular` uses the same screen inputs as `mesh.reflection` and supplies a complete
   path-assisted HDR image. Call `setMeshPathModel` with the validated fitted weights before
   applying the graph. The fit estimates the specular lobe on eligible non-refresh pixels and
-  uses the traced path on refresh pixels.
+  uses the traced path on refresh pixels. Its `lightingOutput` can show direct,
+  indirect diffuse, rough specular, or the rough-grid term in isolation.
+
+Both `mesh.reflection` and `mesh.fitted-specular` accept two optional, current-frame grid
+inputs. Connect `pass.gi.spherical.lookup` to `sphericalLookup` for the live spherical
+lookup buffer, or connect `pass.gi.volume.volumeAtlas` to `volumeAtlas` for the voxel
+atlas. These inputs accept their named producers and enforce execution order. With both
+selected, spherical coverage is used first and the volume can fill uncovered regions.
+
+An authored link on either input selects only the linked grids for that mesh node. With
+neither input linked, `inheritGi` defaults to true and takes the spherical and volume
+producers present in the graph. Set `inheritGi: false` to keep both inputs disconnected
+when removing the last explicit link. Forward shading keeps its separate grid inputs,
+so this setting can preserve a forward-only spherical setup. Existing frozen plans
+without either input retain their volume-only path. Freeze again to capture the new
+routing. The reference integrator has no grid inputs.
+
+The grid estimates remaining indirect lighting at the world-space surface reached by
+the existing ray. Geometry reflections keep their first-ray screen-confidence policy and
+BVH hit, and the reached surface's direct shading follows its existing path.
 
 Each stage publishes full-size `color` for the HDR chain and linear `radiance` for inspection.
 `radiance` is half size for the reflection and fitted stages and full size for the reference.

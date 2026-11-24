@@ -871,17 +871,18 @@ fn check_inputs(doc: &GraphDoc, ctx: &ValidateCtx<'_>, issues: &mut Vec<Issue>) 
             if is_linked(doc, node, port.key) {
                 continue;
             }
+            let defaults = crate::mesh_indirect::input_defaults(doc, node, port);
             let problem = if port.required {
                 format!(
                     "input `{}.{}` is required, and no link takes it",
                     node.id, port.key
                 )
-            } else if !port.absent_ok && first_present_source(doc, port.default_source).is_none() {
+            } else if !port.absent_ok && first_present_source(doc, defaults).is_none() {
                 format!(
                     "input `{}.{}` has no link, and none of its default sources ({}) is in the graph",
                     node.id,
                     port.key,
-                    sources_text(port.default_source)
+                    sources_text(defaults)
                 )
             } else {
                 continue;
@@ -965,11 +966,12 @@ fn read_edges(doc: &GraphDoc, catalog: &Catalog) -> Vec<Vec<usize>> {
             .filter(|port| !is_linked(doc, node, port.key))
         {
             let source =
-                first_present_source(doc, port.default_source).and_then(|(node_type, _)| {
-                    doc.nodes
-                        .iter()
-                        .position(|known| known.type_id == node_type)
-                });
+                first_present_source(doc, crate::mesh_indirect::input_defaults(doc, node, port))
+                    .and_then(|(node_type, _)| {
+                        doc.nodes
+                            .iter()
+                            .position(|known| known.type_id == node_type)
+                    });
             if let (Some(from), Some(list)) = (source, reads.get_mut(to)) {
                 list.push(from);
             }

@@ -3,8 +3,12 @@
 use crate::catalog::{Catalog, ParamValue};
 use crate::error::{Issue, Severity, Stage};
 use crate::exec::{ExecExtension, FeatureHandles, NodeStats, ResourceStat};
+use crate::mesh_indirect::{
+    SPHERICAL_INPUT, SPHERICAL_OUTPUT, VOLUME_PORT, VOLUME_TYPE, mesh_grid_consumer, mesh_grid_port,
+};
 use crate::plan::{GraphPlan, InputSource, PlanNode};
 use crate::registry::exec_wiring::plan_fns::{mesh_trace_type, node_entries};
+use crate::runtime_lighting::SPHERICAL_TYPE;
 use raa_core::RaaError;
 use raa_pipeline::{GraphFrame, ImageDesc, RecordCtx};
 use raa_sdf_trace::mesh::{
@@ -135,7 +139,12 @@ impl ExecExtension for MeshTrace {
             let target = entry(&node.id)
                 .expect("mesh trace node has a pipeline entry")
                 .clone();
-            for input in node.inputs.iter().filter(|input| input.port != "color") {
+            let grids = indirect_grids(plan, node)?;
+            for input in node
+                .inputs
+                .iter()
+                .filter(|input| input.port != "color" && !mesh_grid_port(&input.port))
+            {
                 let (InputSource::Link {
                     node: producer,
                     port,
@@ -168,14 +177,21 @@ impl ExecExtension for MeshTrace {
                     output: port.clone(),
                 });
             }
-            prepared.push((node, target, options));
+            prepared.push((node, target, options, grids));
         }
 
         self.clear(h);
         let mut pipeline = h.pipeline.borrow_mut();
-        for (node, entry, options) in prepared {
-            MeshTraceFeature::install_graph(&mut pipeline, entry.clone(), scene.clone(), options)
-                .map_err(|error| {
+        for (node, entry, options, grids) in prepared {
+            MeshTraceFeature::install_graph_with_indirect(
+                &mut pipeline,
+                entry.clone(),
+                scene.clone(),
+                options,
+                grids.spherical,
+                grids.volume,
+            )
+            .map_err(|error| {
                 issue(
                     node,
                     "graph.mesh_install",
@@ -232,6 +248,60 @@ impl ExecExtension for MeshTrace {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct IndirectGrids {
+    spherical: bool,
+    volume: bool,
+}
+
+fn indirect_grids(plan: &GraphPlan, node: &PlanNode) -> Result<IndirectGrids, Vec<Issue>> {
+    if !mesh_grid_consumer(&node.type_id) {
+        // The reference follows its existing integrator and has no graph grid controls.
+        return Ok(IndirectGrids {
+            spherical: false,
+            volume: true,
+        });
+    }
+    let source_before = |id: Option<&str>, ty: &str| {
+        plan.nodes.iter().any(|source| {
+            id.is_none_or(|id| source.id == id)
+                && source.type_id == ty
+                && source.order_index < node.order_index
+        })
+    };
+    let connected = |input: &str, output: &str, ty: &str| {
+        let Some(input) = node.inputs.iter().find(|candidate| candidate.port == input) else {
+            return Ok(false);
+        };
+        match &input.source {
+            InputSource::Absent => Ok(false),
+            InputSource::Link {
+                node,
+                port,
+                history: false,
+            }
+            | InputSource::Default { node, port }
+                if port == output && source_before(Some(node), ty) =>
+            {
+                Ok(true)
+            }
+            _ => Err(issue(
+                node,
+                "graph.mesh_grid",
+                "A mesh grid input has no matching producer before the trace.",
+                "Connect the input to its grid producer and regenerate any frozen graph.",
+            )),
+        }
+    };
+    // Frozen literals created before these optional inputs used the live volume pass only.
+    let legacy = !node.inputs.iter().any(|input| mesh_grid_port(&input.port));
+    Ok(IndirectGrids {
+        spherical: connected(SPHERICAL_INPUT, SPHERICAL_OUTPUT, SPHERICAL_TYPE)?,
+        volume: connected(VOLUME_PORT, VOLUME_PORT, VOLUME_TYPE)?
+            || legacy && source_before(None, VOLUME_TYPE),
+    })
+}
+
 fn options(node: &PlanNode) -> GraphMeshTrace {
     let value = |key| {
         node.params
@@ -265,6 +335,9 @@ fn options(node: &PlanNode) -> GraphMeshTrace {
         lighting_output: match choice("lightingOutput") {
             "direct" => LightingOutput::Direct,
             "indirect" => LightingOutput::Indirect,
+            "diffuse-indirect" => LightingOutput::IndirectDiffuse,
+            "rough-specular" => LightingOutput::IndirectSpecular,
+            "rough-grid" => LightingOutput::RoughGrid,
             "bounce" => LightingOutput::Bounce(int("lightingDepth", 0)),
             _ => LightingOutput::Combined,
         },
@@ -296,4 +369,41 @@ fn issue(node: &PlanNode, code: &'static str, message: &str, fix: &str) -> Vec<I
         message: message.into(),
         fix: fix.into(),
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_mesh_literals_keep_volume_and_invalid_grid_producers_are_refused() {
+        let fixture = include_str!("../../tests/fixtures/geometry-reflections.json");
+        let plan = crate::plan_from_json(fixture).unwrap();
+        let mut mesh = plan
+            .nodes
+            .iter()
+            .find(|node| node.id == "mirrors")
+            .unwrap()
+            .clone();
+        mesh.inputs.retain(|input| !mesh_grid_port(&input.port));
+        assert_eq!(
+            indirect_grids(&plan, &mesh).unwrap(),
+            IndirectGrids {
+                spherical: false,
+                volume: true,
+            }
+        );
+
+        mesh.inputs.push(crate::plan::PlanInput {
+            port: SPHERICAL_INPUT.into(),
+            source: InputSource::Link {
+                node: "volume".into(),
+                port: SPHERICAL_OUTPUT.into(),
+                history: false,
+            },
+        });
+        let issues = indirect_grids(&plan, &mesh).unwrap_err();
+        assert_eq!(issues[0].code, "graph.mesh_grid");
+        assert_eq!(issues[0].node.as_deref(), Some("mirrors"));
+    }
 }

@@ -62,7 +62,7 @@ function setGi(engine, state, update = {}) {
   // including when GI is disabled for a direct-light comparison.
   engine.setEnvironmentLighting({ diffuse: enabled ? 0.65 : 0, specular: 0 });
   engine.setGlobalIllumination({
-    enabled: usesVolumeGrid(settings),
+    enabled: usesVolumeGrid(settings, state),
     screenSpace: enabled && settings['screen-gi'],
     screenSpaceQuality: state.screenSpaceQuality,
     indirect: settings['indirect-solver'],

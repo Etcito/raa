@@ -524,6 +524,48 @@ mod tests {
     use super::*;
     use raa_graph::plan::PlanInput;
 
+    #[test]
+    fn serializes_both_mesh_grid_routes() {
+        use serde_json::{Value, json};
+
+        for kind in ["mesh.reflection", "mesh.fitted-specular"] {
+            let fixture = include_str!("../../tests/fixtures/geometry-reflections.json");
+            let mut doc: Value = serde_json::from_str(fixture).unwrap();
+            let nodes = doc["nodes"].as_array_mut().unwrap();
+            nodes.push(json!({ "id": "sphere", "type": "pass.gi.spherical" }));
+            nodes
+                .iter_mut()
+                .find(|node| node["id"] == "mirrors")
+                .unwrap()["type"] = json!(kind);
+            let links = doc["links"].as_array_mut().unwrap();
+            if kind == "mesh.fitted-specular" {
+                links.retain(|link| link["to"] != "mirrors.color");
+            }
+            links.push(json!({ "from": "sphere.lookup", "to": "mirrors.sphericalLookup" }));
+            links.push(json!({ "from": "volume.volumeAtlas", "to": "mirrors.volumeAtlas" }));
+
+            let plan = raa_graph::plan_from_json(&doc.to_string()).unwrap();
+            let code = print_plan_module(&plan, "mesh_grids", "mesh_grids.json");
+            let mesh = code
+                .split_once(&format!("type_id: \"{kind}\""))
+                .unwrap()
+                .1
+                .split_once("compute: None")
+                .unwrap()
+                .0;
+            for (input, from, output) in [
+                ("sphericalLookup", "sphere", "lookup"),
+                ("volumeAtlas", "volume", "volumeAtlas"),
+            ] {
+                let grid = mesh.split_once(&format!("port: \"{input}\"")).unwrap().1;
+                let link = grid.split_once("history: false").unwrap().0;
+                assert!(link.contains("InputSource::Link"));
+                assert!(link.contains(&format!("node: \"{from}\"")));
+                assert!(link.contains(&format!("port: \"{output}\"")));
+            }
+        }
+    }
+
     fn port(node: &str, key: &str) -> PlanPortRef {
         PlanPortRef {
             node: node.to_string(),

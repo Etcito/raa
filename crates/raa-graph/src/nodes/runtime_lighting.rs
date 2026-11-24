@@ -8,13 +8,14 @@ use crate::catalog::{
 };
 use crate::error::{Issue, Severity, Stage};
 use crate::format::{GraphDoc, NodeDoc};
+use crate::mesh_indirect::{
+    SPHERICAL_INPUT, SPHERICAL_OUTPUT, SPHERICAL_SOURCE, mesh_grid_consumer,
+};
 use crate::validate::ValidateCtx;
 
 use crate::runtime_lighting::{ISOLATION, SPHERICAL, SPHERICAL_TYPE, spherical_get, spherical_set};
 
-const LOOKUP: &str = "lookup";
 const FORWARD: &str = "pass.forward";
-const FORWARD_LOOKUP: &str = "sphericalLookup";
 const DEBUG_OPTIONS: &[&str] = &["off", "boundaries", "occupancy", "age", "light-hash"];
 
 pub fn family() -> Box<dyn NodeFamily> {
@@ -93,7 +94,7 @@ impl NodeFamily for RuntimeLighting {
             side_effect: false,
             required_in_graph: false,
             inputs: vec![],
-            outputs: vec![lookup_port(LOOKUP, &[], false)],
+            outputs: vec![lookup_port(SPHERICAL_OUTPUT, &[], false)],
             params: params
                 .into_iter()
                 .map(|(key, label, kind, range, options, rebuild)| {
@@ -135,11 +136,7 @@ impl NodeFamily for RuntimeLighting {
 
     fn extend_types(&self, types: &mut Vec<NodeTypeSpec>) {
         if let Some(forward) = types.iter_mut().find(|node| node.id == FORWARD) {
-            forward.inputs.push(lookup_port(
-                FORWARD_LOOKUP,
-                &["pass.gi.spherical.lookup"],
-                true,
-            ));
+            forward.inputs.push(spherical_lookup_input());
             forward.params.push(setting(
                 ISOLATION,
                 "lightingOutput",
@@ -231,6 +228,10 @@ fn setting(
     }
 }
 
+pub(crate) fn spherical_lookup_input() -> PortSpec {
+    lookup_port(SPHERICAL_INPUT, SPHERICAL_SOURCE, true)
+}
+
 fn lookup_port(
     key: &'static str,
     default_source: &'static [&'static str],
@@ -253,15 +254,20 @@ fn lookup_port(
     }
 }
 
-/// The buffer is published directly by the spherical pass to the shared lighting bind group.
+/// Only shader stages with a dedicated spherical binding can read this buffer.
 fn validate_links(doc: &GraphDoc, issues: &mut Vec<Issue>) {
     for (index, link) in doc.links.iter().enumerate() {
         let source = doc.nodes.iter().find(|node| node.id == link.from.node);
-        if link.from.port != LOOKUP || !source.is_some_and(|node| node.type_id == SPHERICAL_TYPE) {
+        if link.from.port != SPHERICAL_OUTPUT
+            || !source.is_some_and(|node| node.type_id == SPHERICAL_TYPE)
+        {
             continue;
         }
         let target = doc.nodes.iter().find(|node| node.id == link.to.node);
-        if link.to.port == FORWARD_LOOKUP && target.is_some_and(|node| node.type_id == FORWARD) {
+        if link.to.port == SPHERICAL_INPUT
+            && target
+                .is_some_and(|node| node.type_id == FORWARD || mesh_grid_consumer(&node.type_id))
+        {
             continue;
         }
         issues.push(Issue {
@@ -272,9 +278,8 @@ fn validate_links(doc: &GraphDoc, issues: &mut Vec<Issue>) {
             port: Some(link.to.port.clone()),
             param: None,
             link: Some(index as u32),
-            message: "The spherical lookup buffer is private to the forward lighting bind group."
-                .into(),
-            fix: "Connect lookup to the forward node's sphericalLookup input.".into(),
+            message: "The spherical lookup buffer requires a dedicated lighting binding.".into(),
+            fix: "Connect lookup to sphericalLookup on forward, mesh.reflection or mesh.fitted-specular.".into(),
         });
     }
 }

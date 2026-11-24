@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod error;
 pub mod format;
+mod mesh_indirect;
 pub mod plan;
 mod runtime_lighting;
 pub mod validate;
