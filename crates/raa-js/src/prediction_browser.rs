@@ -3,6 +3,8 @@ use raa_pipeline::{EnvGpu, Pipeline};
 use raa_tonemap::{ToneMapping, TonemapControl, TonemapPass};
 
 use crate::{PredictionRefresh, PredictionRenderer};
+use crate::prediction_model::{GeneratedInputs, GeneratedModel};
+use crate::prediction_warp::PredictionResolve;
 
 pub(crate) const REFRESH_SHADER: &str = include_str!("prediction_browser.wgsl");
 
@@ -95,6 +97,7 @@ impl BrowserPrediction {
         env: EnvGpu,
         depth: &'a wgpu::Texture,
         samples: &'a wgpu::Texture,
+        learned: Option<(&'a GeneratedModel, u64)>,
     ) -> Result<impl PredictionRenderer + 'a, RaaError> {
         self.settings.set(settings)?;
         Ok(BrowserFrame {
@@ -102,6 +105,7 @@ impl BrowserPrediction {
             env,
             depth,
             samples,
+            learned,
         })
     }
 }
@@ -111,6 +115,7 @@ struct BrowserFrame<'a> {
     env: EnvGpu,
     depth: &'a wgpu::Texture,
     samples: &'a wgpu::Texture,
+    learned: Option<(&'a GeneratedModel, u64)>,
 }
 
 impl PredictionRenderer for BrowserFrame<'_> {
@@ -141,6 +146,16 @@ impl PredictionRenderer for BrowserFrame<'_> {
             ],
         });
         Ok((pipeline.clone(), vec![group]))
+    }
+
+    fn refine(
+        &mut self, gpu: &GpuContext, encoder: &mut wgpu::CommandEncoder, inputs: PredictionResolve<'_>,
+    ) -> Option<wgpu::TextureView> {
+        let (model, source_age) = self.learned?;
+        model.record(gpu, encoder, GeneratedInputs {
+            warped: inputs.warped, refreshed: inputs.refreshed, resolved: inputs.resolved,
+            depth: inputs.depth, motion: inputs.motion, lighting: inputs.lighting, source_age,
+        })
     }
 
     fn display(

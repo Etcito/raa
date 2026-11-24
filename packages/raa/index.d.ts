@@ -441,6 +441,9 @@ export interface Engine {
   renderInstrumented(nowMs: number, context: FrameTraceContext): FrameTrace;
   /** Warm this device's optional native-resolution prediction passes. */
   preparePrediction(): boolean;
+  /** Opt in to an experimental fitted cutoff-guided residual. */
+  setGeneratedFrameModel(manifest: string, weights: Uint8Array): { kind: string; weightsSha256: string };
+  clearGeneratedFrameModel(): void;
   /** Prewarms analytic camera reprojection for the selected frame-generation graph node. */
   prepareCameraPrediction(): boolean;
   /** True only when a static, fully covered same-eye target was admitted before the deadline. */

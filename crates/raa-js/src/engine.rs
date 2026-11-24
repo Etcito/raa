@@ -379,6 +379,8 @@ pub struct Engine {
     prediction_real: Option<(u64, raa_tonemap::TonemapSource)>,
     prediction_camera: Option<(u64, u64, raa_scene::Camera)>,
     camera_prediction: Option<crate::prediction_camera::CameraPrediction>,
+    prediction_source_tick: Option<u64>,
+    learned_prediction: Option<crate::prediction_model::GeneratedModel>,
     browser_prediction: Option<crate::prediction_browser::BrowserPrediction>,
     state: Shared,
     pub(crate) viewport: (u32, u32),
@@ -782,6 +784,8 @@ impl Engine {
             prediction_real: None,
             prediction_camera: None,
             camera_prediction: None,
+            prediction_source_tick: None,
+            learned_prediction: None,
             browser_prediction: None,
             state,
             viewport,
@@ -888,7 +892,30 @@ impl Engine {
         self.browser_prediction = None;
         self.prediction_camera = None;
         self.camera_prediction = None;
+        self.learned_prediction = None;
         Ok(())
+    }
+
+    /// Set the optional fitted residual for cutoff-guided warp and repair.
+    #[wasm_bindgen(js_name = setGeneratedFrameModel)]
+    pub fn set_generated_frame_model(
+        &mut self, manifest: String, weights: js_sys::Uint8Array,
+    ) -> Result<JsValue, JsValue> {
+        if !self.runtime()?.gpu().summary().is_hardware() || weights.length() != 1984 {
+            return Err(js_err(&invalid("generated model requires hardware WebGPU and the FP32 package".into())));
+        }
+        let model = crate::prediction_model::GeneratedModel::new(self.runtime()?.gpu(), &manifest, &weights.to_vec())
+            .map_err(|error| js_err(&error))?;
+        let result = js_sys::Object::new();
+        js_sys::Reflect::set(&result, &"weightsSha256".into(), &model.digest.as_str().into())?;
+        js_sys::Reflect::set(&result, &"kind".into(), &model.kind.as_str().into())?;
+        self.learned_prediction = Some(model);
+        Ok(result.into())
+    }
+
+    #[wasm_bindgen(js_name = clearGeneratedFrameModel)]
+    pub fn clear_generated_frame_model(&mut self) {
+        self.learned_prediction = None;
     }
 
     /// Submit target guides on the native display grid. Repair HDR alpha is one
@@ -921,6 +948,9 @@ impl Engine {
         else {
             return Ok(false);
         };
+        let learned = self.learned_prediction.as_ref().zip(
+            self.prediction_source_tick.and_then(|tick| target.tick.checked_sub(tick)),
+        );
         let count = u64::from(self.viewport.0) * u64::from(self.viewport.1);
         if u64::from(depth.length()) != count
             || u64::from(lighting.length()) != count
@@ -990,7 +1020,7 @@ impl Engine {
                     4,
                     &float_bytes(samples),
                 );
-                let mut renderer = browser.frame(tone, env, &depth, &samples)?;
+                let mut renderer = browser.frame(tone, env, &depth, &samples, learned)?;
                 warp.record(
                     gpu,
                     source,
@@ -1043,6 +1073,7 @@ impl Engine {
                 (state.lit.handle().camera_jitter_ndc() == [0.0; 2]).then_some(state.scene.camera)
             });
             self.prediction_real = source.filter(|_| camera.is_some()).map(|source| (id, source));
+            self.prediction_source_tick = self.prediction_real.as_ref().map(|_| target.tick);
             self.prediction_camera = camera.filter(|_| self.prediction_real.is_some())
                 .map(|camera| (id, target.revision, camera));
         }

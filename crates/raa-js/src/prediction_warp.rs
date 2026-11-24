@@ -31,6 +31,16 @@ pub struct PredictionRefresh<'a> {
     pub capacity: u32,
 }
 
+/// Same-device analytic inputs available to an optional presentation decoder.
+pub struct PredictionResolve<'a> {
+    pub warped: &'a wgpu::TextureView,
+    pub refreshed: &'a wgpu::TextureView,
+    pub resolved: &'a wgpu::TextureView,
+    pub depth: &'a wgpu::TextureView,
+    pub motion: &'a wgpu::TextureView,
+    pub lighting: &'a wgpu::TextureView,
+}
+
 /// A renderer-owned, stateless target shading and display provider.
 pub trait PredictionRenderer {
     /// Bind the provider's shading kernel to the work list and target HDR. The warp
@@ -40,6 +50,16 @@ pub trait PredictionRenderer {
         gpu: &GpuContext,
         target: PredictionRefresh<'_>,
     ) -> Result<(wgpu::ComputePipeline, Vec<wgpu::BindGroup>), RaaError>;
+
+    /// Pick a refined HDR or use the analytic resolve. This cannot change admission.
+    fn refine(
+        &mut self,
+        _gpu: &GpuContext,
+        _encoder: &mut wgpu::CommandEncoder,
+        _inputs: PredictionResolve<'_>,
+    ) -> Option<wgpu::TextureView> {
+        None
+    }
 
     /// Apply the active display transform to resolved linear HDR. Optional inference
     /// also belongs here, with this HDR and the provider's target guides.
@@ -296,7 +316,11 @@ impl PredictionWarp {
                 (10, R::TextureView(&resolved)),
             ],
         );
-        renderer.display(gpu, &mut encoder, &resolved, &view(output))?;
+        let refined = renderer.refine(gpu, &mut encoder, PredictionResolve {
+            warped: &warped, refreshed: &refreshed, resolved: &resolved,
+            depth: &depth, motion: &motion, lighting: &change,
+        });
+        renderer.display(gpu, &mut encoder, refined.as_ref().unwrap_or(&resolved), &view(output))?;
         encoder.copy_buffer_to_buffer(&work, INCOMPLETE_OFFSET, &validation, 0, 4);
         Ok((encoder.finish(), validation))
     }
