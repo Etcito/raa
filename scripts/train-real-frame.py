@@ -568,7 +568,7 @@ def joint_loss(sample, result, previous_display, previous_reflection, target_mix
         reflection = masked_mean(charbonnier(residual) + 0.16 * relative, active)
         change = reflection_residual_change(frame, residual, previous_reflection, result["historyValid"])
         if change is not None:
-            reflection = reflection + 0.30 * masked_mean(charbonnier(change[0]), change[1])
+            reflection = reflection + 0.70 * masked_mean(charbonnier(change[0]), change[1])
         total = total + 0.60 * reflection
         ref_state = (residual, frame.reflection[:, 3:5], frame.jitter)
     return total, delta, ref_state
@@ -674,7 +674,9 @@ def development_score(report, reference):
     psnr = f"{reference}Psnr"
     ratios = [10 ** ((raw[psnr] - row[psnr]) / 20)]
     terms = [(f"{reference}HdrRmse", 1.0), (f"{reference}WarpedLogChangeMae", 1.25),
-             ("reflectionHdrRmse", 1.0), ("reflectionLogMae", 1.0), ("areaVisibilityRmse", 0.5)]
+             (f"{reference}EventLogMae", 0.25), ("reflectionHdrRmse", 1.0),
+             ("reflectionLogMae", 1.0), ("reflectionWarpedLogChangeMae", 1.0),
+             ("areaVisibilityRmse", 0.5)]
     weights = [1.0]
     for key, weight in terms:
         if key in raw and raw[key] > 0:
@@ -765,7 +767,7 @@ def fit_joint(options):
         "displayInitialization": options.display_init, "pathAuxiliaryWeight": options.path_weight,
         "learningRate": options.learning_rate, "unroll": options.unroll, "steps": options.steps,
         "validationInterval": options.validate_every,
-        "lossProfile": "matched-raster-log-display-edge-energy-warped-change-area-reflection-v1",
+        "lossProfile": "matched-raster-log-display-edge-energy-warped-change-area-reflection-v2",
         "sourceRouting": "forward HDR and raw incident for recurrence; same-frame SSR composite for display",
     }
     manifest, reloaded = write_package(root, selected_model, kind="windows-capture-fit", seed=options.seed,
