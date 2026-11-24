@@ -28,3 +28,63 @@ The two files are tightly packed little-endian FP32. Input occupies the whole ac
 With CPU PyTorch available, run `python scripts/train-area-pilot.py capture.json fit` to create a new output directory. Training starts from the byte-exact synthetic initialization and minimizes equally weighted per-frame visibility MSE. The confidence output has no separate training target in this experiment. The report freezes the capture manifest SHA-256, initialization hash, frame IDs, reference seeds, optimizer settings, initial and final loss, and per-frame error. The export retains the synthetic fixture metadata for ABI checks and writes the fitted model's trainer vectors separately.
 
 On Windows set `RAA_PILOT_FIT_DIR` to that output directory and run `cargo test -p raa-graph --test compute_pass fitted_capture_matches_trainer -- --ignored --nocapture`. This reloads the weight package, dispatches the pilot on a hardware adapter and checks every output lane against the trainer output. Its log reports maximum absolute error and the number of lanes outside tolerance for every frame.
+
+### Fixed six-frame numerical stability experiment
+
+The legacy run at learning rate 0.003 first produced non-finite gradients at
+step 400 on `main-16`. Its per-frame loss was finite. One pixel at (31, 44)
+had blended S of zero and positive U of `2.25609e-43`. Differentiating the
+quotient overflowed FP32 before the gradients reached the convolution layers.
+A training-only fix exposed a related forward failure in the old reduction.
+The best checkpoint appeared to beat the mixture bound because 76 outputs
+rounded to the visibility-one fallback outside their valid mixture intervals.
+
+The trainer and shader now normalize the log masses of supported pairs before
+reducing their visibility. A spatial mass includes the spatial log-softmax and
+log U. The previous mass includes log U and the raw gate logit after cancelling
+the common current-frame factor. True empty support resolves to one. Adam
+checks the gradient norm and clips it at one. The measured maximum norm was
+0.08452, so clipping never fired. Checkpoint scoring and export use the
+shader's ordered FP32 fused multiply-adds from the bias for each convolution.
+The ordinary PyTorch convolution reference exceeded the existing tolerance on
+19 lanes at the blocker step. The fused reference passed with the same weights
+and tolerance.
+
+The fixed capture manifest SHA-256 is
+`10bb17ad439e04e8a82942b877018745ed51f4b3cbc791db5610173d2a7f72ad`.
+The original capture, replay and fitted packages are retained under `out/`.
+From the worktree root, the final run used CPU PyTorch 2.15.0+cpu:
+
+```sh
+python -B scripts/train-area-pilot.test.py
+python scripts/train-area-pilot.py out/area-pilot-win/manifest.json out/area-pilot-stable-fma-3000 --steps 3000
+```
+
+The best FP32 checkpoint was step 2975 of 3000 at learning rate 0.003.
+The fitted MSE is 27.6% below the embedded initialization and 15.5% below
+the earlier 500-step fit. The oracle lets each pixel independently choose
+any visibility between the minimum and maximum S/U of its positive-weight
+3×3 taps and accepted previous pair. Its error is the squared distance from
+the teacher to that interval. Empty support contributes the error at one.
+This bound gives the best possible mixture with those inputs and unrestricted
+per-pixel coefficients. It accounts for 92.5% of the fitted MSE on this set.
+
+| Frame | Initial MSE | Fitted MSE | Oracle MSE | Fit minus oracle |
+| --- | ---: | ---: | ---: | ---: |
+| main-0 | 0.024148 | 0.019153 | 0.016764 | 0.002389 |
+| main-14 | 0.021960 | 0.016300 | 0.014616 | 0.001684 |
+| main-15 | 0.023145 | 0.017793 | 0.016449 | 0.001344 |
+| main-16 | 0.037295 | 0.026952 | 0.025989 | 0.000963 |
+| main-17 | 0.040729 | 0.028614 | 0.026757 | 0.001857 |
+| main-18 | 0.037351 | 0.024952 | 0.023162 | 0.001790 |
+| Mean | 0.030771 | 0.022294 | 0.020623 | 0.001671 |
+
+The final vectors stayed within their oracle intervals to `1e-6`. Windows
+wgpu/Vulkan replay on the non-fallback RTX 3090 (driver 595.79) passed all
+229,320 fitted output lanes at the existing tolerance. Maximum absolute
+difference was `3.58e-7`. The five embedded golden cases also passed with
+maximum absolute difference `1.19e-7`. The full report is
+`out/area-pilot-stable-fma-3000/training-report.json` and the fitted parity
+log is `out/area-pilot-stable-fma-parity.log`. This experiment measured
+fixed-set accuracy and numerical parity. The revised shader's cost and
+held-out quality remain unmeasured.
