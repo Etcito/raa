@@ -137,50 +137,58 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       timeMs, preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
       baselineFacts, residency, comparison, captures, coverage };
     if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
-    const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare,
-      defaultConfidence: initial['reflection-confidence'] });
-    if (sharpOnly) return { json: { ...manifest, sharp, sharpOnly }, files };
-    const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
-      check: requireEvidence, compare });
-    let reference;
-    if (!baseline) {
-      set('model-assisted-path', false);
-      // Keep the cache resident while asking the independent reference to render.
-      engine.setMeshTracing({ reference: true, pathMode: 'off', reflections: true, lightingOutput: 'combined',
-        pathBounces: 2, reflectionBounces: 2 });
-      const attached = await capture('reference-cache-resident', true, true, 73030, true);
-      requireEvidence(attached.grid.enabled && attached.cache?.readyCells > 0,
-        'Reference exclusion requires a populated spherical cache', attached.cache);
-      engine.setSphericalGi({ enabled: false });
-      const detached = await capture('reference-cache-released', true, true, 73030, true);
-      const neutral = compare(attached.rgb, detached.rgb);
-      requireEvidence(neutral.peak === 0 && [attached, detached].every(sample =>
-        sample.trace.referencePixels > 0 && sample.trace.modelPixels === 0 && !sample.roughEvidence
-        && ['sphericalDiffuseHits', 'sphericalSpecularHits', 'volumeDiffuseHits', 'volumeSpecularHits']
-          .every(key => sample.trace[key] === 0)),
-      'Independent reference output moved when the resident spherical cache was released', { neutral, attached: attached.trace, detached: detached.trace });
-      reference = { seed: 73030, residentCells: attached.cache.readyCells, ...neutral };
-      engine.setMeshTracing({ reference: false, pathMode: 'off' });
-    }
+    let phase = 'forced BVH';
+    try {
+      const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare,
+        defaultConfidence: initial['reflection-confidence'] });
+      if (sharpOnly) return { json: { ...manifest, sharp, sharpOnly }, files };
+      phase = 'learned';
+      const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
+        check: requireEvidence, compare });
+      phase = 'reference';
+      let reference;
+      if (!baseline) {
+        set('model-assisted-path', false);
+        // Keep the cache resident while asking the independent reference to render.
+        engine.setMeshTracing({ reference: true, pathMode: 'off', reflections: true, lightingOutput: 'combined',
+          pathBounces: 2, reflectionBounces: 2 });
+        const attached = await capture('reference-cache-resident', true, true, 73030, true);
+        requireEvidence(attached.grid.enabled && attached.cache?.readyCells > 0,
+          'Reference exclusion requires a populated spherical cache', attached.cache);
+        engine.setSphericalGi({ enabled: false });
+        const detached = await capture('reference-cache-released', true, true, 73030, true);
+        const neutral = compare(attached.rgb, detached.rgb);
+        requireEvidence(neutral.peak === 0 && [attached, detached].every(sample =>
+          sample.trace.referencePixels > 0 && sample.trace.modelPixels === 0 && !sample.roughEvidence
+          && ['sphericalDiffuseHits', 'sphericalSpecularHits', 'volumeDiffuseHits', 'volumeSpecularHits']
+            .every(key => sample.trace[key] === 0)),
+        'Independent reference output moved when the resident spherical cache was released', { neutral, attached: attached.trace, detached: detached.trace });
+        reference = { seed: 73030, residentCells: attached.cache.readyCells, ...neutral };
+        engine.setMeshTracing({ reference: false, pathMode: 'off' });
+      }
 
-    // The home mirror is enclosed and all its first rays hit geometry. Give the
-    // miss control an isolated mirror that reflects into empty space.
-    set('gi-grid', 'volume');
-    const missCamera = { ...preset.selection.camera, eye: [64, 2, 0], target: [64, 2, -4] };
-    const surface = engine.addSurfaceMaterial({
-      color: [0.22, 0.28, 0.33], roughness: 0.42, metallic: 0.72, traceMirror: true,
-    });
-    const node = engine.addNode(null, [64, 2, -4], [0, 0, 0, 1], [1, 1, 1]);
-    const mesh = panel(3, 2);
-    engine.addMeshInstance(node, engine.addMesh({
-      ...mesh, subMeshes: [{ first: 0, count: mesh.indices.length, material: surface }],
-    }));
-    engine.setCamera(missCamera);
-    await settle('volume');
-    const miss = await capture('isolated-mirror-sky-miss', true, true);
-    requireEvidence(miss.trace.traced > 100 && miss.trace.geometryHit === 0,
-      'The isolated mirror did not reflect into empty space', miss.trace);
-    return { json: { ...manifest, sharp, learned, reference, missCamera, miss: miss.trace }, files };
+      phase = 'isolated miss';
+      // The home mirror is enclosed and all its first rays hit geometry. Give the
+      // miss control an isolated mirror that reflects into empty space.
+      set('gi-grid', 'volume');
+      const missCamera = { ...preset.selection.camera, eye: [64, 2, 0], target: [64, 2, -4] };
+      const surface = engine.addSurfaceMaterial({
+        color: [0.22, 0.28, 0.33], roughness: 0.42, metallic: 0.72, traceMirror: true,
+      });
+      const node = engine.addNode(null, [64, 2, -4], [0, 0, 0, 1], [1, 1, 1]);
+      const mesh = panel(3, 2);
+      engine.addMeshInstance(node, engine.addMesh({
+        ...mesh, subMeshes: [{ first: 0, count: mesh.indices.length, material: surface }],
+      }));
+      engine.setCamera(missCamera);
+      await settle('volume');
+      const miss = await capture('isolated-mirror-sky-miss', true, true);
+      requireEvidence(miss.trace.traced > 100 && miss.trace.geometryHit === 0,
+        'The isolated mirror did not reflect into empty space', miss.trace);
+      return { json: { ...manifest, sharp, learned, reference, missCamera, miss: miss.trace }, files };
+    } catch (error) {
+      return { json: { ...manifest, failure: { phase, message: error?.message ?? String(error) } }, files };
+    }
   } finally {
     engine.dispose();
   }

@@ -180,6 +180,8 @@ export async function measureLearnedSecondary({ engine, state, set, settle, capt
       const compared = compare(active.rgb, combined.rgb);
       check(compared.changedPixels > 20, `Learned ${grid} isolation did not change HDR`, { lobe, compared });
       if (grid === 'volume') {
+        const key = lobe === 'diffuse-indirect' ? 'volumeDiffuseHits' : 'volumeSpecularHits';
+        check(active.trace[key] > 0, `Learned Volume ${lobe} had no actual accepted grid work`, active.trace);
         byGrid[grid][lobe] = active;
         cases.push({ grid, lobe, combined: compared, stats: active.trace });
         continue;
@@ -200,6 +202,9 @@ export async function measureLearnedSecondary({ engine, state, set, settle, capt
       }
       configure({ channelMask: 7 });
       sameFirstRay(active, bypass, check);
+      const key = lobe === 'diffuse-indirect' ? 'sphericalDiffuseHits' : 'sphericalSpecularHits';
+      check(active.trace[key] > 0 && bypass.trace[key] === 0, `Learned ${lobe} did not isolate accepted grid work`,
+        { active: active.trace, bypass: bypass.trace });
       const physical = compare(active.rgb, bypass.rgb);
       const volume = compare(active.rgb, byGrid.volume[lobe].rgb);
       check(physical.changedPixels > 10 && volume.changedPixels > 10,

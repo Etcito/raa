@@ -159,7 +159,7 @@ try {
     }));
     return { json: result.json, files };
   })()`, 300000);
-  const mirrorUi = mirror && !['coverage', 'sharp'].includes(comparison) && !result.json.coverage?.zeroCoverage ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
+  const mirrorUi = mirror && !['coverage', 'sharp'].includes(comparison) && !result.json.coverage?.zeroCoverage && !result.json.failure ? await evalPage(`import('/lib/gallery-mirror-evidence.js').then(module => module.verifyGalleryMirrorUi({ fitted: ${comparison !== 'baseline'} }))`, 120000) : null;
   const mirrorScreenshot = mirrorUi && await send('Page.captureScreenshot', { format: 'png' });
   const ui = mirrorUi ?? (spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null);
   if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
@@ -253,6 +253,10 @@ try {
       : op === 'gallery-panel-noise' ? 'panel-noise.json' : spherical ? 'spherical.json' : mirror ? 'mirror.json' : op === 'gallery-reflection-model' ? 'reflection-model.json' : 'measurement.json');
     await writeFile(manifest, JSON.stringify({ ...data, source, windows, ...(ui && { ui }) }, null, 2) + '\n', { flag: 'wx' });
     console.log(manifest);
+    if (mirror && data.failure) {
+      console.error(`Mirror validation failed in ${data.failure.phase}: ${data.failure.message}`);
+      process.exitCode = 1;
+    }
     if (mirror && data.coverage?.zeroCoverage) {
       console.error(`Default spherical mirror cache coverage gate: ${JSON.stringify(data.coverage)}`);
       process.exitCode = 1;
