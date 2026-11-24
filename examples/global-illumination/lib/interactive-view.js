@@ -122,11 +122,13 @@ function attachCamera({ target, canvas, engine, camera, signal }) {
   };
 }
 
-export function createInteractiveView({ target, canvas, lib, scene, variant, onReady, onError }) {
+export function createInteractiveView({ target, canvas, lib, scene, variant, onReady, onError, settings, onFrame }) {
   const lifetime = new AbortController();
   const { signal } = lifetime;
   const camera = variant.selection.camera;
   const frameOptions = { interactiveCamera: true };
+  const display = settings ?? { width: 1280, height: 720, maxFps: 0 };
+  const pendingOptions = new Map();
   let request = null;
   let engine;
   let controls;
@@ -153,7 +155,7 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
 
   async function start() {
     try {
-      setCanvasSize(canvas, 1280, 720);
+      setCanvasSize(canvas, display.width, display.height);
       engine = await lib.raa.createEngine(canvas, { ...scene.engine, ...variant.engine });
       if (signal.aborted) return;
       engine.resize(canvas.width, canvas.height);
@@ -165,9 +167,29 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
       let sceneReady = !scene.ready;
       let firstTime;
       let previousTime;
+      let nextDue = 0;
+      let previousCap;
+
       async function frame(timestamp) {
         request = null;
         try {
+          const cap = display.maxFps;
+          if (cap !== previousCap) nextDue = timestamp;
+          previousCap = cap;
+          if (cap && timestamp + 0.1 < nextDue) {
+            request = target.requestAnimationFrame(frame);
+            return;
+          }
+          if (cap) {
+            const period = 1000 / cap;
+            nextDue += Math.max(1, Math.floor((timestamp + 0.1 - nextDue) / period) + 1) * period;
+          }
+          if (canvas.width !== display.width || canvas.height !== display.height) {
+            setCanvasSize(canvas, display.width, display.height);
+            engine.resize(display.width, display.height);
+          }
+          for (const [id, enabled] of pendingOptions) scene.setOption(engine, state, id, enabled);
+          pendingOptions.clear();
           firstTime ??= timestamp;
           const dt = previousTime === undefined ? 0 : Math.min((timestamp - previousTime) / 1000, 0.05);
           const timeMs = variantTimeMs(variant) + timestamp - firstTime;
@@ -179,7 +201,10 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
           if (previousTime === undefined) onReady(state);
           previousTime = timestamp;
           await engine.submittedWorkDone();
-          if (!signal.aborted) request = target.requestAnimationFrame(frame);
+          if (!signal.aborted) {
+            onFrame?.(engine, target.performance.now(), canvas.width, canvas.height);
+            request = target.requestAnimationFrame(frame);
+          }
         } catch (error) {
           if (!signal.aborted) fail(error);
         }
@@ -194,5 +219,5 @@ export function createInteractiveView({ target, canvas, lib, scene, variant, onR
   const ready = start().catch(error => {
     if (!signal.aborted) fail(error);
   });
-  return { stop, ready, reset: () => controls?.reset() };
+  return { stop, ready, reset: () => controls?.reset(), setOption: (id, enabled) => pendingOptions.set(id, enabled) };
 }

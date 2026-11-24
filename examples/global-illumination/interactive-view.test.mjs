@@ -159,3 +159,28 @@ test('a pending GPU frame prevents further submissions and cannot restart a stop
   await submitted;
   assert.equal(pending.size, 0);
 });
+
+test('live settings resize the existing engine and cap completed frame cadence', async () => {
+  const { options, tick, calls } = fixture();
+  const completions = [];
+  options.target.performance = { now: () => 42 };
+  options.settings = { width: 960, height: 540, maxFps: 30 };
+  options.onFrame = (_, time, w, h) => completions.push([time, w, h]);
+  options.scene.setOption = (_, state, id, enabled) => calls.push(['option', id, enabled]);
+  const view = createInteractiveView(options);
+  await view.ready;
+  await tick(100);
+  options.settings.width = 640;
+  options.settings.height = 360;
+  view.setOption('motion', false);
+  await tick(116);
+  assert.deepEqual(completions, [[42, 960, 540]]);
+  await tick(134);
+  assert.deepEqual(completions.at(-1), [42, 640, 360]);
+  assert.deepEqual(calls.filter(call => call[0] === 'resize'), [['resize', 960, 540], ['resize', 640, 360]]);
+  assert.deepEqual(calls.filter(call => call[0] === 'option'), [['option', 'motion', false]]);
+  options.settings.maxFps = 0;
+  await tick(150);
+  assert.equal(completions.length, 3);
+  view.stop();
+});

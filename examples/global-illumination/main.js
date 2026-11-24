@@ -1,3 +1,5 @@
+import { createLiveStats } from './lib/live-stats.js';
+import { interactiveInterior } from './lib/interactive-interior.js';
 import { registerNmcGpu } from '../../web/common/nmc-gpu.js';
 import * as content from './lib/content.js';
 import { validateInventory } from './lib/inventory.js';
@@ -50,9 +52,11 @@ export async function discoverScenes({ fetchIndex = () => fetch('./scenes.json')
 
 // The picker and managed operations take turns owning the canvas.
 export async function attachGiPage({ target, canvas, status, scenePicker, variantPicker, runButton,
-  baselineButton, baselineDownload,
+  baselineButton, baselineDownload, resolutionPicker, fpsPicker, statsContainer, optionsContainer,
   discover = discoverScenes, load = loadRaa, createRunner = createGiPageRunner }) {
   const lifetime = new AbortController();
+  const display = { width: 1280, height: 720, maxFps: 0 };
+  const stats = statsContainer && createLiveStats(statsContainer);
   let runner = null;
   let interactive = null;
   let busy = false;
@@ -69,6 +73,8 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       interactive = null;
       runButton.textContent = 'Start interactive view';
       current?.stop();
+      stats?.reset();
+      optionsContainer?.replaceChildren();
     }
 
     target.addEventListener('pagehide', event => {
@@ -118,7 +124,9 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       runner = null;
       return captureAreaPilot({ target, canvas, raa: lib.raa }, input?.args ?? input);
     });
-    const entries = [...scenes.values()];
+    const pickerScenes = new Map(scenes);
+    pickerScenes.set(interactiveInterior.default.id, interactiveInterior);
+    const entries = [interactiveInterior, ...scenes.values()];
     for (const namespace of entries) {
       const option = target.document.createElement('option');
       option.value = namespace.default.id;
@@ -126,7 +134,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
       scenePicker.appendChild(option);
     }
     function fillVariants() {
-      const namespace = scenes.get(scenePicker.value);
+      const namespace = pickerScenes.get(scenePicker.value);
       variantPicker.replaceChildren();
       for (const variant of namespace.default.variants) {
         if (!namespace.inventory.some(row => row.mode === variant.id)) continue;
@@ -138,7 +146,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     }
     async function showPicked() {
       if (busy || !variantPicker.value) return;
-      const scene = scenes.get(scenePicker.value).default;
+      const scene = pickerScenes.get(scenePicker.value).default;
       const variant = scene.variants.find(candidate => candidate.id === variantPicker.value);
       try {
         await exclusively(() => {
@@ -147,9 +155,19 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           runner = null;
           status.textContent = `Preparing ${scene.id}/${variant.id}`;
           interactive = createInteractiveView({
-            target, canvas, lib, scene, variant,
+            target, canvas, lib, scene, variant, settings: display,
+            onFrame: stats?.update.bind(stats),
             onReady(state) {
               runButton.textContent = 'Reset camera';
+              for (const option of scene.options ?? []) {
+                const label = target.document.createElement('label');
+                const checkbox = target.document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = option.enabled;
+                checkbox.addEventListener('change', () => interactive?.setOption(option.id, checkbox.checked));
+                label.append(checkbox, option.label);
+                optionsContainer?.append(label);
+              }
               status.textContent = `Interactive: ${scene.id}/${variant.id}${state?.status ? ` ${state.status}` : ''}`;
             },
             onError(error) {
@@ -185,6 +203,10 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
     fillVariants();
     for (const control of controls) control.disabled = false;
     const options = { signal: lifetime.signal };
+    resolutionPicker?.addEventListener('change', () => {
+      [display.width, display.height] = resolutionPicker.value.split('x').map(Number);
+    }, options);
+    fpsPicker?.addEventListener('change', () => { display.maxFps = Number(fpsPicker.value); }, options);
     scenePicker.addEventListener('change', () => { fillVariants(); showPicked(); }, options);
     variantPicker.addEventListener('change', showPicked, options);
     runButton.addEventListener('click', () => {
@@ -208,5 +230,7 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   attachGiPage({ target: window, canvas: document.getElementById('c'), status: document.getElementById('status'),
     scenePicker: document.getElementById('scene'), variantPicker: document.getElementById('variant'),
     runButton: document.getElementById('run'), baselineButton: document.getElementById('baseline'),
+    resolutionPicker: document.getElementById('resolution'), fpsPicker: document.getElementById('max-fps'),
+    statsContainer: document.getElementById('live-stats'), optionsContainer: document.getElementById('scene-options'),
     baselineDownload: document.getElementById('baseline-download') });
 }
