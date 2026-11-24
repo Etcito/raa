@@ -215,20 +215,27 @@ def display_reactivity(frame):
     return at(frame.reactive, (x + 0.5).floor(), (y + 0.5).floor())
 
 
-def temporal_error(frame, current, target, previous, valid):
-    if frame.reset or previous is None or previous[0].shape != current.shape:
-        return current.new_zeros(())
+def display_residual_change(frame, residual, prior, valid):
+    if frame.reset or prior is None or prior.shape != residual.shape:
+        return None
     height, width = frame.output_size
     x, y, _, _ = display_coordinates(frame.hdr.shape[-2:], frame.output_size, frame.jitter)
     near_x, near_y = (x + 0.5).floor(), (y + 0.5).floor()
     motion = at(frame.motion, near_x, near_y)
-    mask = at(valid, near_x, near_y)
     dx, dy = grid(frame.output_size)
-    px = dx - motion[0, 0] * width
-    py = dy - motion[0, 1] * height
+    px, py = dx - motion[0, 0] * width, dy - motion[0, 1] * height
+    mask = at(valid, near_x, near_y)
     mask = mask & (px >= -0.5) & (px < width - 0.5) & (py >= -0.5) & (py < height - 0.5)
-    previous_error = sample_bilinear(previous[0].log1p() - previous[1].log1p(), px, py)
-    return masked_mean(charbonnier(current.log1p() - target.log1p() - previous_error), mask)
+    return residual - sample_bilinear(prior, px, py), mask
+
+
+
+def temporal_error(frame, current, target, previous, valid):
+    prior = None if previous is None else previous[0].log1p() - previous[1].log1p()
+    change = display_residual_change(frame, current.log1p() - target.log1p(), prior, valid)
+    if change is None:
+        return current.new_zeros(())
+    return masked_mean(charbonnier(change[0]), change[1])
 
 
 def losses(sample, result, previous):
@@ -514,20 +521,6 @@ def paired_partition(paths, accepted):
     return sequences, captures
 
 
-def display_residual_change(frame, residual, prior, valid):
-    if frame.reset or prior is None or prior.shape != residual.shape:
-        return None
-    height, width = frame.output_size
-    x, y, _, _ = display_coordinates(frame.hdr.shape[-2:], frame.output_size, frame.jitter)
-    near_x, near_y = (x + 0.5).floor(), (y + 0.5).floor()
-    motion = at(frame.motion, near_x, near_y)
-    dx, dy = grid(frame.output_size)
-    px, py = dx - motion[0, 0] * width, dy - motion[0, 1] * height
-    mask = at(valid, near_x, near_y)
-    mask = mask & (px >= -0.5) & (px < width - 0.5) & (py >= -0.5) & (py < height - 0.5)
-    return residual - sample_bilinear(prior, px, py), mask
-
-
 def reflection_residual_change(frame, residual, prior, valid):
     if frame.reset or prior is None or prior[0].shape != residual.shape:
         return None
@@ -659,6 +652,22 @@ def joint_metrics(models, sequences):
     }
 
 
+
+@torch.no_grad()
+def auxiliary_area_metrics(candidate, existing, records):
+    candidate_errors = area_diagnostic(candidate, records)
+    existing_errors = area_diagnostic(existing, records)
+    rows = []
+    for (identity, frame, target), (_, model_error), (_, existing_error) in zip(
+            records, candidate_errors, existing_errors, strict=True):
+        pairs = frame.area_pairs
+        raw = visibility_ratio(pairs[:, :1], pairs[:, 1:2])
+        rows.append({"id": identity, "candidateRmse": float(model_error.sqrt()),
+                     "existingRmse": float(existing_error.sqrt()),
+                     "rawRmse": float(area_loss(raw, target, pairs).sqrt())})
+    return {"split": "training", "mean": mean_rows([{k: v for k, v in row.items() if k != "id"}
+                                                     for row in rows]), "frames": rows}
+
 def development_score(report, reference):
     scores = report["mean"]
     row, raw = scores["candidate"], scores["bilinear/raw"]
@@ -754,7 +763,8 @@ def fit_joint(options):
         "selectedStep": selected_step,
         "decisionSplit": "development", "finalHoldoutUsed": False,
         "displayInitialization": options.display_init, "pathAuxiliaryWeight": options.path_weight,
-        "learningRate": options.learning_rate, "unroll": options.unroll, "validatedSteps": options.steps,
+        "learningRate": options.learning_rate, "unroll": options.unroll, "steps": options.steps,
+        "validationInterval": options.validate_every,
         "lossProfile": "matched-raster-log-display-edge-energy-warped-change-area-reflection-v1",
         "sourceRouting": "forward HDR and raw incident for recurrence; same-frame SSR composite for display",
     }
@@ -773,6 +783,7 @@ def fit_joint(options):
         "selectedStep": selected_step, "selectionScore": score, "provenance": provenance,
         "training": training_metrics, "development": report, "checkpoints": trace,
         "parameterMaxAbsChange": parameter_shift,
+        "auxiliaryArea": auxiliary_area_metrics(reloaded, existing, auxiliary) if auxiliary else None,
     }
     (root / "joint-fit-report.json").write_bytes(json_bytes(exports))
     return exports
