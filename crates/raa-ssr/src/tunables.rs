@@ -13,7 +13,7 @@ static TUNABLES: [TunableSpec; 3] = [
         max: None,
         integer: true,
         rebuild: "pipeline",
-        source: "crates/raa-ssr/src/wgsl/ssr_trace.wgsl:62",
+        source: "crates/raa-ssr/src/wgsl/ssr_trace.wgsl:60",
     },
     TunableSpec {
         key: "refineSteps",
@@ -22,7 +22,7 @@ static TUNABLES: [TunableSpec; 3] = [
         max: None,
         integer: true,
         rebuild: "pipeline",
-        source: "crates/raa-ssr/src/wgsl/ssr_trace.wgsl:63",
+        source: "crates/raa-ssr/src/wgsl/ssr_trace.wgsl:61",
     },
     TunableSpec {
         key: "edgeFade",
@@ -31,7 +31,7 @@ static TUNABLES: [TunableSpec; 3] = [
         max: None,
         integer: false,
         rebuild: "pipeline",
-        source: "crates/raa-ssr/src/wgsl/ssr_trace.wgsl:65",
+        source: "crates/raa-ssr/src/wgsl/ssr_trace.wgsl:63",
     },
 ];
 

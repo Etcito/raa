@@ -150,9 +150,11 @@ fn trace_vertex_and_fragment_entries() {
     let expected = [
         ("@vertex", shaders::VS_FULLSCREEN),
         ("@fragment", shaders::FS_TRACE),
+        ("@fragment", "fs_confidence"),
         ("@fragment", shaders::FS_COMPOSITE),
         ("@fragment", "fs_hit"),
         ("@fragment", "fs_incident"),
+        ("@fragment", "fs_incident_multiray"),
         ("@fragment", "fs_replace"),
     ];
     for e in expected {
