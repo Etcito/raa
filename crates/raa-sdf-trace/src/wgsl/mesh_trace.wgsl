@@ -197,7 +197,8 @@ const PANEL_NODES = array<f32, 3>(-0.3872983346, 0.0, 0.3872983346);
 const PANEL_WEIGHTS = array<f32, 3>(5.0 / 18.0, 4.0 / 9.0, 5.0 / 18.0);
 
 fn direct_panel(light: Light, p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>,
-                mat: Material, seed: ptr<function, u32>, light_index: u32, diffuse_only: bool) -> vec3<f32> {
+                mat: Material, seed: ptr<function, u32>, light_index: u32, diffuse_only: bool,
+                reflected: bool) -> vec3<f32> {
     // Advance the path RNG by the same two words as the single-sample
     // estimator, so changing this integral does not scramble later bounces.
     let uv = vec2<f32>(random(seed), random(seed)) - 0.5;
@@ -205,7 +206,7 @@ fn direct_panel(light: Light, p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3
     if dot(p - light.position_range.xyz, travel) <= 0.0 { return vec3<f32>(0.0); }
     let axes = basis(travel);
     let sampler = options[3].x;
-    if sampler == 1u || options[0].w != 0u {
+    if sampler == 1u || options[0].w != 0u || (sampler == 0u && !reflected) {
         return panel_sample(light, p, ng, n, v, mat, axes, uv, diffuse_only);
     }
 
@@ -235,6 +236,11 @@ fn direct_panel(light: Light, p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3
 
 fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
                   seed: ptr<function, u32>, diffuse_only: bool) -> vec3<f32> {
+    return sun_and_lights_at_hit(p, ng, n, v, mat, seed, diffuse_only, false);
+}
+
+fn sun_and_lights_at_hit(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: Material,
+                        seed: ptr<function, u32>, diffuse_only: bool, reflected: bool) -> vec3<f32> {
     let origin = p + ng * (2.0 * EPS);
     var direct = vec3<f32>(0.0);
     let sun = -frame.sun_dir.xyz;
@@ -248,7 +254,7 @@ fn sun_and_lights(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>, v: vec3<f32>, mat: 
         if !any(light.radiance.rgb > vec3<f32>(0.0)) { continue; }
         let travel = light.direction_outer.xyz;
         if light.kind == 3u {
-            direct += direct_panel(light, p, ng, n, v, mat, seed, i, diffuse_only);
+            direct += direct_panel(light, p, ng, n, v, mat, seed, i, diffuse_only, reflected);
             continue;
         }
         let delta = light.position_range.xyz - p;
@@ -356,6 +362,9 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
     var sum = vec3<f32>(0.0);
     var mirror_steps = mirrors;
     var path_steps = bounces;
+    // The reflection-only pass starts after the raster mirror hit. A full
+    // path marks the first shade reached through a real mirror continuation.
+    var reflected = !path;
     for (var step = 0u; step < 13u; step++) {
         let isolate_diffuse = step == 0u && diffuse_output != 0u;
         let include_light = select_lighting_depth(lighting_output, step);
@@ -381,6 +390,7 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
             ray = Ray(p + ng * (2.0 * EPS), reflect(ray.direction, ng));
             throughput *= 0.92;
             mirror_steps--;
+            reflected = true;
             continue;
         }
         if !isolate_diffuse && include_light { sum += throughput * mat.emission_metallic.rgb; }
@@ -389,7 +399,8 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
             return sum;
         }
         // Even an excluded depth advances the same random stream as Combined.
-        let direct = sun_and_lights(p, ng, n, -ray.direction, mat, seed, isolate_diffuse);
+        let direct = sun_and_lights_at_hit(p, ng, n, -ray.direction, mat, seed, isolate_diffuse, reflected);
+        reflected = false;
         if include_light { sum += throughput * direct; }
         if isolate_diffuse && diffuse_output == 1u { break; }
         if !path {
