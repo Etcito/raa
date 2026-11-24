@@ -3,7 +3,7 @@ import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js'
 import { loadGalleryFit } from './gallery-path-model.js';
 import { lightingOptions } from './gallery-lighting.js';
 import { applySpherical, isSphericalOption, sphericalOptions, usesVolumeGrid } from './gallery-spherical.js';
-import { loadGalleryNeural, neuralOption } from './gallery-neural.js';
+import { loadGalleryNeural, neuralModelOption, neuralOption } from './gallery-neural.js';
 
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
@@ -27,6 +27,7 @@ const options = [
   ...lightingOptions,
   ...sphericalOptions,
   neuralOption,
+  neuralModelOption,
   { id: 'ssr', label: 'SSR on other surfaces', enabled: true },
   { id: 'dof', label: 'Depth of field', enabled: true },
   { id: 'bloom', label: 'Bloom', enabled: true },
@@ -271,7 +272,7 @@ async function prepare(engine, state) {
   }
   if (state.pathModelError) state.status = state.pathModelError;
   try {
-    state.neuralModel = await loadGalleryNeural(engine);
+    state.neuralModels = await loadGalleryNeural(engine, { includeJoint: true });
   } catch (error) {
     state.neuralError = error.message;
   }
@@ -295,7 +296,7 @@ function setOption(engine, state, id, enabled) {
       }
       else if (id === 'spherical-mirror-cache') setTracing(engine, state, { [id]: enabled });
       else if (isSphericalOption(id)) applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
-      else if (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce') {
+      else if (id !== neuralModelOption.id && (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce')) {
         setTracing(engine, state, { [id]: enabled });
       }
       state.values[id] = enabled;

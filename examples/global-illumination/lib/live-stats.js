@@ -117,6 +117,8 @@ export function createLiveStats(container) {
     const neural = engine.neuralReconstructionStats?.();
     if (neural?.ran?.sr) {
       lines.push(`Neural upscaling · ${extent(...neural.sceneSize)} → ${extent(...neural.displaySize)} · frame ${number(neural.realFrame)}`);
+      const heads = ['SR', neural.ran.reflection && 'reflections', neural.ran.area && 'area lighting'].filter(Boolean);
+      lines.push('Neural model · ' + neural.model + ' · ' + neural.weightsSha256.slice(0, 12) + ' · ' + heads.join(' + '));
     }
     const tracing = optional(() => engine.meshTracingStats());
     if (tracing?.referencePixels) {

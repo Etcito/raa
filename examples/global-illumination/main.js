@@ -4,7 +4,7 @@ import { syncSphericalControls } from './lib/gallery-spherical.js';
 import { captureGallerySequence, captureGallerySrReplay, verifyGalleryReflection } from './lib/gallery-sequence.js';
 import { measureGalleryRayBudget } from './lib/gallery-ray-budget.js';
 import { measureGallerySrTiming } from './lib/gallery-sr-timing.js';
-import { applyGalleryNeural, syncNeuralControl } from './lib/gallery-neural.js';
+import { applyGalleryNeural, syncNeuralControls } from './lib/gallery-neural.js';
 import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPanelNoise, measureGalleryPath, measureGallerySpherical } from './lib/gallery-path-evidence.js';
 import { measureGalleryMirror } from './lib/gallery-mirror-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
@@ -257,7 +257,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 syncLighting = state => {
                   syncNotice(state);
                   syncSphericalControls(optionControls, state);
-                  syncNeuralControl(optionControls.get('neural-upscaling'), state);
+                  syncNeuralControls(optionControls.get('neural-upscaling'), optionControls.get('neural-model'), state);
                 };
                 syncLighting(state);
                 galleryAo.mount(optionsContainer);
