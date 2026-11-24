@@ -1,4 +1,5 @@
 import { createGalleryAoControls } from './lib/gallery-ao.js';
+import { mountLightingNotice } from './lib/gallery-lighting.js';
 import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPath } from './lib/gallery-path-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
@@ -163,17 +164,22 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
         variantPicker.appendChild(option);
       }
     }
-    const optionValue = input => input.type === 'checkbox' ? input.checked
-      : input.validity.valid && Number.isFinite(input.valueAsNumber) ? input.valueAsNumber : Number(input.defaultValue);
+    const optionValue = input => {
+      if (input.type === 'checkbox') return input.checked;
+      if (input.type === 'select-one') return input.value;
+      return input.validity.valid && Number.isFinite(input.valueAsNumber)
+        ? input.valueAsNumber : Number(input.defaultValue);
+    };
     async function showPicked(keepView = false) {
       if (busy || !variantPicker.value) return;
       const previous = keepView === true && interactive ? {
         pose: interactive.cameraPose(),
-        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('input[data-option]') ?? [], input => [input.dataset.option, optionValue(input)])),
+        options: Object.fromEntries(Array.from(optionsContainer?.querySelectorAll('[data-option]') ?? [], input => [input.dataset.option, optionValue(input)])),
       } : undefined;
       const scene = pickerScenes.get(scenePicker.value).default;
       const variant = scene.variants.find(candidate => candidate.id === variantPicker.value);
-      const showAo = scene === interactiveInterior.default && optionsContainer;
+      const galleryOptions = scene === interactiveInterior.default && optionsContainer;
+      let syncLighting;
       try {
         await exclusively(() => {
           stopInteractive();
@@ -183,7 +189,8 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           interactive = createInteractiveView({
             target, canvas, lib, scene, variant, settings: display, previous,
             beforeFrame(engine, state) {
-              if (showAo) galleryAo.apply(engine, state?.enabled?.['path-reference'] === true);
+              if (galleryOptions) galleryAo.apply(engine, state?.enabled?.['path-reference'] === true);
+              syncLighting?.(state);
             },
             onFrame(engine, time, width, height) {
               syncNativeSize();
@@ -191,11 +198,22 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
             },
             onReady(state) {
               runButton.textContent = 'Reset camera';
+              const optionControls = new Map();
               for (const option of scene.options ?? []) {
                 const label = target.document.createElement('label');
-                const input = target.document.createElement('input');
+                const input = target.document.createElement(option.choices ? 'select' : 'input');
                 input.dataset.option = option.id;
-                if (option.value === undefined) {
+                optionControls.set(option.id, input);
+                if (option.choices) {
+                  for (const [value, text] of option.choices) {
+                    const choice = target.document.createElement('option');
+                    choice.value = value;
+                    choice.textContent = text;
+                    input.append(choice);
+                  }
+                  input.value = state?.values?.[option.id] ?? option.value;
+                  label.append(option.label, input);
+                } else if (option.value === undefined) {
                   input.type = 'checkbox';
                   input.checked = state?.enabled?.[option.id] ?? option.enabled;
                   const unavailable = option.unavailable?.(state);
@@ -215,7 +233,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 }
                 input.addEventListener('change', () => {
                   const value = optionValue(input);
-                  if (input.type !== 'checkbox') {
+                  if (input.type === 'number') {
                     input.defaultValue = value;
                     input.value = value;
                   }
@@ -223,7 +241,11 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 });
                 optionsContainer?.append(label);
               }
-              if (showAo) galleryAo.mount(optionsContainer);
+              if (galleryOptions) {
+                syncLighting = mountLightingNotice(optionsContainer, optionControls);
+                syncLighting(state);
+                galleryAo.mount(optionsContainer);
+              }
               status.textContent = `Interactive: ${scene.id}/${variant.id}${state?.status ? ` ${state.status}` : ''}`;
             },
             onError(error) {

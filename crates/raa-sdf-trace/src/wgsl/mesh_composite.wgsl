@@ -1,7 +1,7 @@
 @group(0) @binding(0) var raster: texture_2d<f32>;
 @group(0) @binding(1) var radiance: texture_2d<f32>;
 @group(0) @binding(2) var motion: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> options: array<vec4<u32>, 3>;
+@group(0) @binding(3) var<uniform> options: array<vec4<u32>, 4>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {

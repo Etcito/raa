@@ -16,6 +16,8 @@ use wgpu::Buffer;
 use self::geometry::Geometry;
 
 pub const MAX_BOUNCES: u32 = 6;
+/// A complete reference path can use both the diffuse/specular and mirror budgets.
+pub const MAX_LIGHTING_DEPTH: u32 = 2 * MAX_BOUNCES;
 pub const REFERENCE_SPP: u32 = 4;
 const COUNTER_COUNT: usize = 20;
 
@@ -28,6 +30,27 @@ pub enum DiffuseOutput {
     DirectAndIndirect,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LightingOutput {
+    #[default]
+    Combined,
+    Direct,
+    Indirect,
+    Bounce(u32),
+}
+
+impl LightingOutput {
+    /// Shared with select_lighting_depth in mesh_trace.wgsl.
+    fn code(self) -> u32 {
+        match self {
+            Self::Combined => 0,
+            Self::Direct => 1,
+            Self::Indirect => 2,
+            Self::Bounce(depth) => 3 + depth,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshTraceSettings {
     pub reflections: bool,
@@ -37,6 +60,7 @@ pub struct MeshTraceSettings {
     pub path_bounces: u32,
     pub path_mode: PathMode,
     pub diffuse_output: DiffuseOutput,
+    pub lighting_output: LightingOutput,
 }
 
 impl Default for MeshTraceSettings {
@@ -49,6 +73,7 @@ impl Default for MeshTraceSettings {
             path_bounces: 2,
             path_mode: PathMode::Off,
             diffuse_output: DiffuseOutput::Off,
+            lighting_output: LightingOutput::Combined,
         }
     }
 }
@@ -59,6 +84,22 @@ impl MeshTraceSettings {
     }
 
     pub fn validate(self) -> Result<Self, RaaError> {
+        if self.diffuse_output != DiffuseOutput::Off
+            && self.lighting_output != LightingOutput::Combined
+        {
+            return Err(RaaError::FrameGraph {
+                code: "trace.invalid_settings",
+                message: "diffuseOutput diagnostics require combined lightingOutput".into(),
+            });
+        }
+        if let LightingOutput::Bounce(depth) = self.lighting_output
+            && (!self.reference || depth > MAX_LIGHTING_DEPTH)
+        {
+            return Err(RaaError::FrameGraph {
+                code: "trace.invalid_settings",
+                message: format!("lightingDepth requires the path reference and a depth in 0..={MAX_LIGHTING_DEPTH}"),
+            });
+        }
         if !(0.0..=1.0).contains(&self.confidence_threshold)
             || !(1..=MAX_BOUNCES).contains(&self.reflection_bounces)
             || self.path_bounces > MAX_BOUNCES

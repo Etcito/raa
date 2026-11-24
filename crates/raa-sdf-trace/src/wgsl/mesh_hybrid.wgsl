@@ -126,10 +126,11 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     let ray = Ray(origin, normalize(far - origin));
     var spec_seed = hybrid_seed(id.xy, 0u);
     let diffuse_output = options[2].z;
+    let lighting_output = options[3].y;
     // Mirror screen evidence uses the same confidence/disocclusion checks as
     // ordinary hybrid reflections, before any BVH query or network work.
     if z < 1.0 && textureLoad(motion, pixel, 0).w > 0.5 {
-        if hybrid.capture != 0u || diffuse_output != 0u {
+        if hybrid.capture != 0u || diffuse_output != 0u || lighting_output == 1u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
@@ -150,7 +151,7 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     atomicAdd(&counters[PRIMARY_BVH_PIXELS], 1u);
     let hit = closest(ray, frame.clip.y, false);
     if hit.object == MISS {
-        if diffuse_output != 0u {
+        if diffuse_output != 0u || lighting_output == 2u {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
@@ -160,7 +161,9 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
     let tri = triangles[hit.object];
     let mat = hit_material(tri, hit.bary);
     if (mat.flags.x & 3u) != 0u {
-        if diffuse_output != 0u {
+        var depth = 0u;
+        if (mat.flags.x & 1u) != 0u { depth = 1u; }
+        if diffuse_output != 0u || !select_lighting_depth(lighting_output, depth) {
             textureStore(radiance, sample_pixel, vec4<f32>(0.0));
             return;
         }
@@ -214,5 +217,8 @@ fn trace_hybrid_path(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(radiance, sample_pixel, vec4<f32>(rgb, 1.0));
         return;
     }
-    textureStore(radiance, sample_pixel, vec4<f32>(mat.emission_metallic.rgb + direct + indirect_diffuse + spec, 1.0));
+    var value = mat.emission_metallic.rgb + direct + indirect_diffuse + spec;
+    if lighting_output == 1u { value = mat.emission_metallic.rgb + direct; }
+    if lighting_output == 2u { value = indirect_diffuse + spec; }
+    textureStore(radiance, sample_pixel, vec4<f32>(value, 1.0));
 }

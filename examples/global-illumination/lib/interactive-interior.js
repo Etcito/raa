@@ -1,6 +1,7 @@
 import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js';
 
 import { loadGalleryFit } from './gallery-path-model.js';
+import { lightingOptions } from './gallery-lighting.js';
 
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
@@ -21,6 +22,7 @@ const options = [
     unavailable: state => state?.pathModelError },
   { id: 'path-reference', label: 'Path-traced reference', enabled: false },
   { id: 'path-bounces', label: 'Reference path bounces', value: 2, min: 0, max: 6, step: 1 },
+  ...lightingOptions,
   { id: 'ssr', label: 'SSR on other surfaces', enabled: true },
   { id: 'dof', label: 'Depth of field', enabled: true },
   { id: 'bloom', label: 'Bloom', enabled: true },
@@ -49,14 +51,17 @@ const fixtures = [
   { position: [1.45, 2.62, -5.65], size: [0.8, 1.7], color: [0.59, 0.79, 1], intensity: 23 },
 ];
 
-function setGi(engine, enabled, screenDetail, screenSpaceQuality) {
+function setGi(engine, state, update = {}) {
+  const settings = { ...state.enabled, ...state.values, ...update };
+  const enabled = settings.gi;
   // The GI rays sample the authored sky. Keep the unoccluded IBL fill off,
   // including when GI is disabled for a direct-light comparison.
   engine.setEnvironmentLighting({ diffuse: enabled ? 0.65 : 0, specular: 0 });
   engine.setGlobalIllumination({
     enabled,
-    screenSpace: enabled && screenDetail,
-    screenSpaceQuality,
+    screenSpace: enabled && settings['screen-gi'],
+    screenSpaceQuality: state.screenSpaceQuality,
+    indirect: settings['indirect-solver'],
     reflections: enabled,
     localLightShadows: true,
     environmentDiffuse: 0,
@@ -87,16 +92,28 @@ function assertForwardOrder(engine) {
 
 function setTracing(engine, state, update = {}) {
   const values = { ...state.enabled, ...state.values, ...update };
-  const reflections = values['geometry-reflections'];
   const reference = values['path-reference'];
   const pathMode = values['model-assisted-path'] ? 'learned' : 'off';
+  const requested = values['lighting-view'];
+  const lightingOutput = !reference && requested === 'bounce' ? 'combined' : requested;
+  const isolated = lightingOutput !== 'combined';
+  const raster = !reference && pathMode === 'off';
+  const reflections = values['geometry-reflections'] && !(raster && isolated);
   if (reflections || reference || pathMode === 'learned') assertForwardOrder(engine);
   engine.setMeshTracing({
-    reflections, reference, pathMode,
+    reflections, reference, pathMode, lightingOutput,
+    lightingDepth: values['bounce-depth'],
     reflectionBounces: values['reflection-bounces'],
     confidenceThreshold: values['reflection-confidence'],
     pathBounces: values['path-bounces'],
   });
+  if (isolated !== state.isolated) {
+    for (const pass of ['ssr', 'dof', 'bloom']) engine.setPassEnabled(pass, !isolated && values[pass]);
+    if (isolated) state.taaEnabled = engine.passes().find(pass => pass.name === 'taa')?.enabled;
+    if (state.taaEnabled !== undefined) engine.setPassEnabled('taa', !isolated && state.taaEnabled);
+    state.isolated = isolated;
+  }
+  return lightingOutput;
 }
 
 function build(engine, _lib, selected = variant) {
@@ -109,6 +126,7 @@ function build(engine, _lib, selected = variant) {
     values: Object.fromEntries(options.filter(option => option.value !== undefined)
       .map(option => [option.id, selected.effects?.[option.id] ?? option.value])),
     screenSpaceQuality: selected.screenSpaceQuality,
+    isolated: false,
     fixtures: [],
     motionTime: 0,
     previousTime: undefined,
@@ -124,7 +142,7 @@ function build(engine, _lib, selected = variant) {
   engine.setAreaLightShadows({ tier: 'hero', heroCount: fixtures.length });
   engine.setSsr({ intensity: 0.65, maxRoughness: 0.35 });
   for (const pass of ['dof', 'ssr', 'bloom']) engine.setPassEnabled(pass, state.enabled[pass]);
-  setGi(engine, state.enabled.gi, state.enabled['screen-gi'], state.screenSpaceQuality);
+  setGi(engine, state);
 
   const material = (color, roughness = 0.78, metallic = 0) =>
     engine.addSurfaceMaterial({ color, roughness, metallic });
@@ -223,7 +241,10 @@ function build(engine, _lib, selected = variant) {
   });
   solid([entryExhibit[0], 0.42, entryExhibit[2]], [0.46, 0.42, 0.38], dark);
   state.entryNode = instance(withSurface(sphere(0.32, 32), glaze), entryExhibit).node;
-  if (state.enabled['geometry-reflections'] || state.enabled['path-reference']) setTracing(engine, state);
+  if (state.enabled['geometry-reflections'] || state.enabled['path-reference']
+      || state.values['lighting-view'] !== 'combined') {
+    state.values['lighting-view'] = setTracing(engine, state);
+  }
   return state;
 }
 
@@ -241,12 +262,18 @@ async function prepare(engine, state) {
 function setOption(engine, state, id, enabled) {
   if (Object.hasOwn(state.values, id)) {
     const option = options.find(option => option.id === id);
-    if (!Number.isFinite(enabled) || enabled < option.min || enabled > option.max
-        || (option.step === 1 && !Number.isInteger(enabled))) {
+    const valid = option.choices
+      ? option.choices.some(([value]) => value === enabled)
+      : Number.isFinite(enabled) && enabled >= option.min && enabled <= option.max
+        && (option.step !== 1 || Number.isInteger(enabled));
+    if (!valid || (id === 'lighting-view' && enabled === 'bounce' && !state.enabled['path-reference'])) {
       throw new TypeError(`Invalid interactive interior value for ${id}`);
     }
     if (state.values[id] !== enabled) {
-      setTracing(engine, state, { [id]: enabled });
+      if (id === 'indirect-solver') setGi(engine, state, { [id]: enabled });
+      else if (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce') {
+        setTracing(engine, state, { [id]: enabled });
+      }
       state.values[id] = enabled;
     }
     return;
@@ -258,10 +285,8 @@ function setOption(engine, state, id, enabled) {
   if (id === 'model-assisted-path' && enabled && state.pathModelError) throw new Error(state.pathModelError);
   switch (id) {
     case 'gi':
-      setGi(engine, enabled, state.enabled['screen-gi'], state.screenSpaceQuality);
-      break;
     case 'screen-gi':
-      setGi(engine, state.enabled.gi, enabled, state.screenSpaceQuality);
+      setGi(engine, state, { [id]: enabled });
       break;
     case 'area-lights':
       for (const { light, intensity, surface, color } of state.fixtures) {
@@ -272,12 +297,12 @@ function setOption(engine, state, id, enabled) {
     case 'geometry-reflections':
     case 'model-assisted-path':
     case 'path-reference':
-      setTracing(engine, state, { [id]: enabled });
+      state.values['lighting-view'] = setTracing(engine, state, { [id]: enabled });
       break;
     case 'ssr':
     case 'dof':
     case 'bloom':
-      engine.setPassEnabled(id, enabled);
+      engine.setPassEnabled(id, enabled && !state.isolated);
       break;
     case 'moving-objects':
       state.previousTime = undefined;

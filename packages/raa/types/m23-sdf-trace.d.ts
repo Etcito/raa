@@ -33,6 +33,10 @@ export interface MeshTracingSettings {
   reflectionBounces?: number;
   pathBounces?: number;
   diffuseOutput?: 'off' | 'direct' | 'direct-and-indirect';
+  /** Selects the lighting contribution for the forward or full-frame mesh output. Default combined. */
+  lightingOutput?: 'combined' | 'direct' | 'indirect' | 'bounce';
+  /** With lightingOutput 'bounce' and reference enabled, selects an exact depth from 0 to 12. */
+  lightingDepth?: number;
   pathMode?: 'off' | 'short' | 'traced' | 'learned';
 }
 

@@ -23,7 +23,7 @@ struct Light {
     inner: f32, kind: u32, width: f32, height: f32,
 }
 @group(0) @binding(0) var<uniform> frame: Frame;
-@group(0) @binding(1) var<uniform> options: array<vec4<u32>, 3>;
+@group(0) @binding(1) var<uniform> options: array<vec4<u32>, 4>;
 @group(0) @binding(2) var<storage, read> nodes: array<TraceNode>;
 @group(0) @binding(3) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(4) var<storage, read> materials: array<Material>;
@@ -271,13 +271,24 @@ fn trace_path(initial: Ray, mirrors: u32, path: bool, seed: ptr<function, u32>) 
 }
 
 fn trace_path_steps(initial: Ray, mirrors: u32, path: bool, bounces: u32, seed: ptr<function, u32>) -> vec3<f32> {
-    return trace_path_lobe(initial, mirrors, path, bounces, seed, 0u);
+    return trace_path_lobe(initial, mirrors, path, bounces, seed, 0u, 0u);
+}
+
+// Depth counts transport continuations from the camera hit, including mirrors.
+// Shadow and visibility queries do not extend a path.
+fn select_lighting_depth(output: u32, depth: u32) -> bool {
+    switch output {
+        case 0u: { return true; }
+        case 1u: { return depth == 0u; }
+        case 2u: { return depth > 0u; }
+        default: { return depth == output - 3u; }
+    }
 }
 
 // A diagnostic can isolate the diffuse BRDF at the primary surface while
 // retaining the independent reference sampler and complete secondary transport.
 fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
-                   seed: ptr<function, u32>, diffuse_output: u32) -> vec3<f32> {
+                   seed: ptr<function, u32>, diffuse_output: u32, lighting_output: u32) -> vec3<f32> {
     var ray = initial;
     var throughput = vec3<f32>(1.0);
     var sum = vec3<f32>(0.0);
@@ -285,9 +296,11 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
     var path_steps = bounces;
     for (var step = 0u; step < 13u; step++) {
         let isolate_diffuse = step == 0u && diffuse_output != 0u;
+        let include_light = select_lighting_depth(lighting_output, step);
         let hit = closest(ray, frame.clip.y, false);
         if hit.object == MISS {
             if isolate_diffuse { return vec3<f32>(0.0); }
+            if !include_light { return sum; }
             return sum + throughput * textureSampleLevel(sky, raa_linear_clamp, ray.direction, 0).rgb;
         }
         if !path && step == 0u { atomicAdd(&counters[GEOMETRY_HIT], 1u); }
@@ -308,9 +321,14 @@ fn trace_path_lobe(initial: Ray, mirrors: u32, path: bool, bounces: u32,
             mirror_steps--;
             continue;
         }
-        if !isolate_diffuse { sum += throughput * mat.emission_metallic.rgb; }
-        if (mat.flags.x & 2u) != 0u { return sum + throughput * mat.base_roughness.rgb; }
-        sum += throughput * sun_and_lights(p, ng, n, -ray.direction, mat, seed, isolate_diffuse);
+        if !isolate_diffuse && include_light { sum += throughput * mat.emission_metallic.rgb; }
+        if (mat.flags.x & 2u) != 0u {
+            if include_light { sum += throughput * mat.base_roughness.rgb; }
+            return sum;
+        }
+        // Even an excluded depth advances the same random stream as Combined.
+        let direct = sun_and_lights(p, ng, n, -ray.direction, mat, seed, isolate_diffuse);
+        if include_light { sum += throughput * direct; }
         if isolate_diffuse && diffuse_output == 1u { break; }
         if !path {
             sum += throughput * terminal_diffuse_gi(p, ng, n, mat);
@@ -419,7 +437,8 @@ fn trace_mesh(@builtin(global_invocation_id) id: vec3<u32>) {
             let subpixel = (vec2<f32>(random(&seed), random(&seed)) - 0.5) / vec2<f32>(size);
             let origin = world_at(uv + subpixel, 0.0);
             let far = world_at(uv + subpixel, 1.0);
-            value += trace_path_lobe(Ray(origin, normalize(far - origin)), mirrors, true, options[0].z, &seed, diffuse_output);
+            value += trace_path_lobe(Ray(origin, normalize(far - origin)), mirrors, true,
+                options[0].z, &seed, diffuse_output, options[3].y);
         }
         textureStore(radiance, sample_pixel, vec4<f32>(value / f32(options[1].w), 1.0));
         return;

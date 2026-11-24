@@ -6,8 +6,9 @@ use js_sys::{Object, Reflect};
 use raa_core::RaaError;
 use raa_lit::{DrawClass, FLAG_TRACE_MIRROR, FLAG_UNLIT, SurfaceModel};
 use raa_math::Mat4;
+use raa_shader::{RAA_DIRECT_ONLY_FEATURE, RAA_INDIRECT_ONLY_FEATURE};
 use raa_sdf_trace::mesh::{
-    DiffuseOutput, MAX_BOUNCES, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle,
+    DiffuseOutput, LightingOutput, MAX_BOUNCES, MAX_LIGHTING_DEPTH, MESH_TRACE_NAME, MeshInput, MeshTraceFeature, MeshTraceHandle,
     MeshTraceMaterial, MeshTraceSettings, PathMode, REFERENCE_SPP,
 };
 use wasm_bindgen::prelude::*;
@@ -106,14 +107,14 @@ pub(crate) fn prepare(st: &EngineState) -> Result<(), RaaError> {
         .update(&inputs, &materials, lit.frame_buffer(), sky_diffuse)
 }
 
-fn integer(desc: &JsValue, key: &str, previous: u32) -> Result<u32, RaaError> {
+fn integer(desc: &JsValue, key: &str, previous: u32, max: u32) -> Result<u32, RaaError> {
     let Some(raw) = js::optional_f64(desc, key)? else {
         return Ok(previous);
     };
-    if raw.fract() != 0.0 || !(0.0..=f64::from(MAX_BOUNCES)).contains(&raw) {
+    if raw.fract() != 0.0 || !(0.0..=f64::from(max)).contains(&raw) {
         return Err(api_error(
             "trace.invalid_settings",
-            format!("{key} must be a whole number from 0 to {MAX_BOUNCES}"),
+            format!("{key} must be a whole number from 0 to {max}"),
         ));
     }
     Ok(raw as u32)
@@ -143,7 +144,24 @@ impl Engine {
                     "confidenceThreshold must be in [0, 1]",
                 ));
             }
+            let previous_depth = match previous.lighting_output {
+                LightingOutput::Bounce(depth) => depth,
+                _ => 0,
+            };
+            let depth = integer(&options, "lightingDepth", previous_depth, MAX_LIGHTING_DEPTH)?;
+            let lighting_output = match js::optional_string(&options, "lightingOutput")?.as_deref() {
+                None if matches!(previous.lighting_output, LightingOutput::Bounce(_)) => {
+                    LightingOutput::Bounce(depth)
+                }
+                None => previous.lighting_output,
+                Some("combined") => LightingOutput::Combined,
+                Some("direct") => LightingOutput::Direct,
+                Some("indirect") => LightingOutput::Indirect,
+                Some("bounce") => LightingOutput::Bounce(depth),
+                Some(_) => return Err(api_error("trace.invalid_settings", "unknown lightingOutput")),
+            };
             let settings = MeshTraceSettings {
+                lighting_output,
                 reflections: js::optional_bool(&options, "reflections")?
                     .unwrap_or(previous.reflections),
                 reference: js::optional_bool(&options, "reference")?.unwrap_or(previous.reference),
@@ -152,8 +170,9 @@ impl Engine {
                     &options,
                     "reflectionBounces",
                     previous.reflection_bounces,
+                    MAX_BOUNCES,
                 )?,
-                path_bounces: integer(&options, "pathBounces", previous.path_bounces)?,
+                path_bounces: integer(&options, "pathBounces", previous.path_bounces, MAX_BOUNCES)?,
                 diffuse_output: match js::optional_string(&options, "diffuseOutput")?.as_deref() {
                     None => previous.diffuse_output,
                     Some("off") => DiffuseOutput::Off,
@@ -201,6 +220,15 @@ impl Engine {
             }
             pipeline.set_enabled(MESH_TRACE_NAME, settings.active())?;
             handle.borrow_mut().configure(settings);
+            let raster = !settings.reference && settings.path_mode == PathMode::Off;
+            st.lit.set_frame_feature(
+                RAA_DIRECT_ONLY_FEATURE,
+                raster && lighting_output == LightingOutput::Direct,
+            );
+            st.lit.set_frame_feature(
+                RAA_INDIRECT_ONLY_FEATURE,
+                raster && lighting_output == LightingOutput::Indirect,
+            );
             Ok(())
         })
     }

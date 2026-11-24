@@ -128,7 +128,15 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @locati
     if !capture {
         indirect = raa_slot_indirect(s, c);
     }
-    let lit = s.emissive + direct + ambient + indirect + raa_local_lighting(s, c);
-    let color = select(lit, s.base_color + s.emissive, raa_pass_unlit(in.record));
+    let local = raa_local_lighting(s, c);
+    let unlit = raa_pass_unlit(in.record);
+    if raa_feature_enabled(RAA_DIRECT_ONLY_FEATURE) {
+        return vec4<f32>(select(s.emissive + direct + local, s.base_color + s.emissive, unlit), 1.0);
+    }
+    if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE) {
+        return vec4<f32>(select(ambient + indirect, vec3<f32>(0.0), unlit), 1.0);
+    }
+    let lit = s.emissive + direct + ambient + indirect + local;
+    let color = select(lit, s.base_color + s.emissive, unlit);
     return vec4<f32>(color, 1.0);
 }

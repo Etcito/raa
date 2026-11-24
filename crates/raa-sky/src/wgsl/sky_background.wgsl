@@ -48,6 +48,7 @@ fn raa_sky_bg_world_dir(frag: vec4<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: RaaSkyBackgroundVaryings) -> @location(0) vec4<f32> {
+    if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
     let dir = raa_sky_bg_world_dir(in.clip);
     let c = raa_sky_radiance(
         dir,

@@ -117,6 +117,10 @@ impl FeaturePass for MeshTracePass {
             path_mode as u32,
             settings.diffuse_output as u32,
             ctx.frame as u32,
+            0, // Reserved for the direct-light sampler.
+            settings.lighting_output.code(),
+            0,
+            0,
         ];
         let queue = ctx.gpu.queue();
         let bytes: Vec<_> = params.into_iter().flat_map(u32::to_le_bytes).collect();
@@ -509,7 +513,7 @@ impl Pipelines {
             options: buffer(
                 device,
                 "trace.mesh.options",
-                48,
+                64,
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             ),
             counters: buffer(

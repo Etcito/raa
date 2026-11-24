@@ -220,6 +220,7 @@ fn raa_physical_sky_bg_world_dir(frag: vec4<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: RaaPhysicalSkyBackgroundVaryings) -> @location(0) vec4<f32> {
+    if raa_feature_enabled(RAA_INDIRECT_ONLY_FEATURE) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
     let dir = raa_physical_sky_bg_world_dir(in.clip);
     let uv = in.clip.xy * raa_frame.viewport.zw;
     let c = raa_physical_sky_radiance_screen(dir, uv, raa_env);
