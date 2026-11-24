@@ -121,16 +121,14 @@ fn fs_main(v: RaaVaryings, @builtin(front_facing) front_facing: bool) -> @locati
         ao = raa_slot_ao(in.frag_coord);
     }
     let c = raa_pass_shade_ctx(s, in, ao, shadow);
+    let direct = raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
+            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow);
+    let ambient = raa_slot_ambient(s, c);
     var indirect = vec3<f32>(0.0);
     if !capture {
         indirect = raa_slot_indirect(s, c);
     }
-    let lit = s.emissive
-        + raa_slot_direct(s, c, -raa_frame.sun_dir.xyz,
-            raa_directional_radiance(raa_frame.sun_color.rgb) * shadow)
-        + raa_slot_ambient(s, c)
-        + indirect
-        + raa_local_lighting(s, c);
+    let lit = s.emissive + direct + ambient + indirect + raa_local_lighting(s, c);
     let color = select(lit, s.base_color + s.emissive, raa_pass_unlit(in.record));
     return vec4<f32>(color, 1.0);
 }
