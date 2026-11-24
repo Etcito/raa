@@ -1,5 +1,4 @@
-//! The starter graphs (`crates/raa-graph/graphs/*.json`, registered by `build.rs` as
-//! `registry::STARTERS`): every starter is canonical text that parses, validates and plans with no
+//! The starter graphs registered by `build.rs` as `registry::STARTERS`: every starter is canonical text that parses, validates and plans with no
 //! warning; Full GI's plan order of the passes it shares with the pinned GI order is fixed; and Full
 //! GI is the no-graph export of an engine configured that way.
 
@@ -223,8 +222,18 @@ fn starters_are_named_from_their_files_in_file_stem_order() {
             ("full-gi-stages", "Full GI stages"),
             ("real-frame-model", "Real-frame neural reconstruction"),
             ("simple-forward", "Simple forward"),
+            ("spherical-gi", "Spherical GI"),
         ]
     );
+}
+
+#[test]
+fn spherical_gi_starter_uses_the_frozen_preset_source() {
+    let (_, _, source) = registry::frozen_all()
+        .into_iter()
+        .find(|(name, _, _)| *name == "spherical_gi")
+        .expect("Spherical GI is frozen");
+    assert_eq!(starter("spherical-gi"), source);
 }
 
 /// P5-Q2: the Simple forward starter is exactly the contracted node list (S50 example, module

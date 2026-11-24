@@ -1,6 +1,7 @@
 //! Discovery of the render graph extension files: lists `src/nodes/*.rs`,
 //! `src/exec_ext/*.rs`, `src/frozen/*.rs`, `graphs/*.json` and `presets/*.json`, each
 //! sorted by file stem in C-locale (byte) order, and writes `$OUT_DIR/registry.rs`.
+//! The Spherical GI starter shares its source with the frozen preset.
 //!
 //! A missing directory registers nothing. The JSON files are read at build time for
 //! their string `name`; a file that does not parse or has no such name fails the build.
@@ -64,7 +65,12 @@ fn main() {
     let nodes = rust_files(&manifest, RUST_DIRS[0]);
     let exec_ext = rust_files(&manifest, RUST_DIRS[1]);
     let frozen = rust_files(&manifest, RUST_DIRS[2]);
-    let starters = json_files(&manifest, JSON_DIRS[0]);
+    let mut starters = json_files(&manifest, JSON_DIRS[0]);
+    starters.push(json_file(
+        &manifest.join("src/frozen/spherical_gi.json"),
+        "spherical-gi",
+    ));
+    starters.sort_by(|a, b| a.stem.cmp(&b.stem));
     let presets = json_files(&manifest, JSON_DIRS[1]);
     // The directory stamps catch added and removed files; these catch a changed `name`.
     for file in starters.iter().chain(presets.iter()) {
@@ -141,33 +147,46 @@ fn json_files(manifest: &Path, rel: &str) -> Vec<JsonFile> {
             Some(stem) => stem.to_string(),
             None => panic!("raa-graph build.rs: non UTF-8 file name in {rel}"),
         };
-        let name = format!("{rel}/{stem}.json");
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) => panic!("raa-graph build.rs: cannot read {name}: {e}"),
-        };
-        let value = match parse(&text) {
-            Ok(value) => value,
-            Err(e) => panic!("raa-graph build.rs: {name} is not JSON: {e}"),
-        };
-        let JsonValue::Object(fields) = value else {
-            panic!("raa-graph build.rs: {name} is not a JSON object");
-        };
-        let Some(JsonValue::String(label)) = fields
-            .iter()
-            .find(|(key, _)| key == "name")
-            .map(|(_, value)| value)
-        else {
-            panic!("raa-graph build.rs: {name} has no string `name`");
-        };
-        files.push(JsonFile {
-            stem,
-            path: absolute(&path, &name),
-            name: label.clone(),
-        });
+        files.push(json_file(&path, &stem));
     }
     files.sort_by(|a, b| a.stem.cmp(&b.stem));
     files
+}
+
+fn json_file(path: &Path, stem: &str) -> JsonFile {
+    let text = fs::read_to_string(path).unwrap_or_else(|error| {
+        panic!(
+            "raa-graph build.rs: cannot read {}: {error}",
+            path.display()
+        )
+    });
+    let value = parse(&text).unwrap_or_else(|error| {
+        panic!(
+            "raa-graph build.rs: {} is not JSON: {error}",
+            path.display()
+        )
+    });
+    let JsonValue::Object(fields) = value else {
+        panic!(
+            "raa-graph build.rs: {} is not a JSON object",
+            path.display()
+        );
+    };
+    let Some(JsonValue::String(label)) = fields
+        .into_iter()
+        .find(|(key, _)| key == "name")
+        .map(|(_, value)| value)
+    else {
+        panic!(
+            "raa-graph build.rs: {} has no string `name`",
+            path.display()
+        );
+    };
+    JsonFile {
+        stem: stem.to_owned(),
+        path: absolute(path, &path.display().to_string()),
+        name: label,
+    }
 }
 
 /// The absolute path of `path`, named by `rel` when canonicalisation fails.
