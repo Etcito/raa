@@ -364,6 +364,9 @@ struct ComputeHistoryFrame {
 
 impl GraphFrame for ComputeHistoryFrame {
     fn begin(&mut self, _table: &ResourceTable) {
+        for history in self.histories.borrow_mut().iter_mut() {
+            history.copied = false;
+        }
         if self
             .gi
             .as_ref()
@@ -462,7 +465,14 @@ impl GraphFrame for ComputeHistoryFrame {
         Ok(())
     }
 
-    fn end(&mut self, _table: &ResourceTable) {
+    fn invalidate_history(&mut self) {
+        for history in self.histories.borrow_mut().iter_mut() {
+            history.valid = false;
+            history.copied = false;
+        }
+    }
+
+    fn submitted(&mut self) {
         for history in self.histories.borrow_mut().iter_mut() {
             history.flip();
         }

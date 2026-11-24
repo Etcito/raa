@@ -219,6 +219,9 @@ struct GiStagesFrame {
 
 impl GraphFrame for GiStagesFrame {
     fn begin(&mut self, _table: &ResourceTable) {
+        for history in &mut self.state.borrow_mut().histories {
+            history.copied = false;
+        }
         self.restored = false;
         let camera_invalid = self
             .state
@@ -342,7 +345,18 @@ impl GraphFrame for GiStagesFrame {
         Ok(())
     }
 
-    fn end(&mut self, _table: &ResourceTable) {
+    fn invalidate_history(&mut self) {
+        let mut state = self.state.borrow_mut();
+        for history in &mut state.histories {
+            history.valid = false;
+            history.copied = false;
+        }
+        for (_, _, stage) in &state.stages {
+            stage.set_history_valid(false);
+        }
+    }
+
+    fn submitted(&mut self) {
         let mut state = self.state.borrow_mut();
         for history in &mut state.histories {
             flip(history);

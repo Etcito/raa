@@ -109,6 +109,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             })?;
         pipeline.add(Box::new(GiSsgiPass {
             part: Rc::clone(&part),
+            recorded: false,
         }))?;
     }
     ctx.add_part(part);
@@ -242,6 +243,7 @@ impl GiPart for SsgiPart {
 /// over the frame's buffers, the previous lit HDR and the probe output of gi.screen.
 struct GiSsgiPass {
     part: Rc<SsgiPart>,
+    recorded: bool,
 }
 
 impl FeaturePass for GiSsgiPass {
@@ -272,6 +274,7 @@ impl FeaturePass for GiSsgiPass {
     /// Publishes the taps `ssgi`, `raw`, `history` and `output` (docs/render-graph/taps.md) while
     /// the part is active with its pass enabled and the resources exist.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        self.recorded = false;
         let state = self.part.state.borrow();
         if !(state.active && state.pass_enabled) {
             return Ok(());
@@ -293,7 +296,7 @@ impl FeaturePass for GiSsgiPass {
     }
 
     /// Records `raa-gi.ssgi` while the part is active with resources and the frame buffer and
-    /// group 1 exist. A recorded pass commits the history pair.
+    /// group 1 exist.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut guard = self.part.state.borrow_mut();
         let state = &mut *guard;
@@ -319,14 +322,19 @@ impl FeaturePass for GiSsgiPass {
             probe: probe.as_ref(),
         };
         let views = GBufferViews::resolve(ctx.targets, ctx.resources, SSGI_PASS);
-        let recorded = {
+        self.recorded = {
             let work = resources.work(ctx.gpu, &state.pipelines, &views, &inputs);
             state.pipelines.record(ctx.encoder, &group1, &work)
         };
-        if recorded {
+        Ok(())
+    }
+
+    fn submitted(&mut self) {
+        if std::mem::take(&mut self.recorded)
+            && let Some(resources) = self.part.state.borrow_mut().resources.as_mut()
+        {
             resources.commit();
         }
-        Ok(())
     }
 }
 
@@ -367,7 +375,10 @@ mod tests {
             }),
             shared,
         });
-        let mut pass = GiSsgiPass { part };
+        let mut pass = GiSsgiPass {
+            part,
+            recorded: false,
+        };
         let targets = Targets::new(&gpu, (8, 8));
         let table = ResourceTable::new();
         let mut lighting = LightingResources::new(&gpu);

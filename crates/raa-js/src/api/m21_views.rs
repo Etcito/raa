@@ -686,7 +686,14 @@ mod web {
         pub fn set_viewports(&mut self, rects: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| {
                 let rects = rects_from_js(&rects)?;
-                views(st)?.set_viewports(&rects)
+                let previous = views(st)?.viewports().to_vec();
+                views(st)?.set_viewports(&rects)?;
+                for index in 0..4 {
+                    if previous.get(index) != rects.get(index) {
+                        st.scene_invocation.discontinuity(index);
+                    }
+                }
+                Ok(())
             })
         }
 
@@ -697,7 +704,9 @@ mod web {
             self.with_state(|_, st| {
                 views(st)?.check_index(index)?;
                 let c = camera_from_js(&cam)?;
+                let previous = views(st)?.camera(index as usize).copied();
                 if views(st)?.set_camera(index, c)? == 0 {
+                    let before = st.scene.camera;
                     let sc = &mut st.scene.camera;
                     sc.eye = Vec3::from_array(c.eye);
                     sc.target = Vec3::from_array(c.target);
@@ -706,6 +715,23 @@ mod web {
                     sc.ortho_height = None;
                     sc.near = c.near;
                     sc.far = c.far;
+                    if sc.is_cut_from(&before) {
+                        st.scene_invocation.discontinuity(0);
+                    }
+                } else {
+                    let as_camera = |c: ViewCamera| raa_scene::Camera {
+                        eye: Vec3::from_array(c.eye),
+                        target: Vec3::from_array(c.target),
+                        up: Vec3::Y,
+                        fov_y_rad: c.fov_y_deg.to_radians(),
+                        near: c.near,
+                        far: c.far,
+                        ortho_height: None,
+                        ..st.scene.camera
+                    };
+                    if previous.is_none_or(|before| as_camera(c).is_cut_from(&as_camera(before))) {
+                        st.scene_invocation.discontinuity(index as usize);
+                    }
                 }
                 Ok(())
             })

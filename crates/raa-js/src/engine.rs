@@ -265,7 +265,6 @@ impl WebApp for EngineApp {
             features,
             scene_invocation: SceneInvocation::default(),
             sky_invocation_id: 0,
-            view_cameras: [None; 4],
             max_materials: o.max_materials,
             meshes: HandleMap::new("mesh"),
             skins: Vec::new(),
@@ -314,7 +313,7 @@ impl WebApp for EngineApp {
         prepare_sky_view(s, 0, size)?;
         crate::trace::prepare_view(s, 0, input.size)?;
         // Viewport 0 of the invocation; split views select their slot in the callback.
-        let discontinuity = s.scene_invocation.prepare(0);
+        let discontinuity = s.scene_invocation.is_discontinuous(0);
         s.lit.prepare_scene_view(0, discontinuity);
         let c = s
             .lit
@@ -344,11 +343,7 @@ fn prepare_sky_view(st: &EngineState, index: usize, size: (u32, u32)) -> Result<
         .features
         .get::<api::ViewsState>()
         .and_then(|v| v.camera(index));
-    let signature = own.map(|c| {
-        let mut signature = [0.0; 9];
-        signature[..3].copy_from_slice(&c.eye);
-        signature[3..6].copy_from_slice(&c.target);
-        signature[6..].copy_from_slice(&[c.fov_y_deg.to_radians(), c.near, c.far]);
+    if let Some(c) = own {
         camera.eye = Vec3::from_array(c.eye);
         camera.target = Vec3::from_array(c.target);
         camera.up = Vec3::Y;
@@ -356,15 +351,13 @@ fn prepare_sky_view(st: &EngineState, index: usize, size: (u32, u32)) -> Result<
         camera.near = c.near;
         camera.far = c.far;
         camera.ortho_height = None;
-        signature
-    });
-    let cut = st.scene_invocation.is_discontinuous(index)
-        || st.view_cameras[index].is_some_and(|previous| Some(previous) != signature);
+    }
+    let cut = st.scene_invocation.is_discontinuous(index);
     camera.set_viewport(size.0, size.1);
     sky.set_view(index as u32, &camera, !cut)
 }
 
-fn retire_sky_views(st: &mut EngineState) -> Result<(), RaaError> {
+fn retire_sky_views(st: &EngineState) -> Result<(), RaaError> {
     let count = st
         .features
         .get::<api::ViewsState>()
@@ -372,7 +365,6 @@ fn retire_sky_views(st: &mut EngineState) -> Result<(), RaaError> {
     if let Some(sky) = st.features.get::<raa_sky::SkyHandle>() {
         for view in count..4 {
             sky.remove_view(view as u32)?;
-            st.view_cameras[view] = None;
         }
     }
     Ok(())
@@ -460,14 +452,19 @@ impl Engine {
     fn finish_scene_invocation(&mut self, runtime_ok: bool) {
         let mut guard = self.state.borrow_mut();
         let Some(s) = guard.as_mut() else { return };
-        let submission = s
+        let (submission, suspended) = s
             .pipeline
             .try_borrow()
-            .map(|p| p.scene_submission())
+            .map(|p| (p.scene_submission(), p.suspended_views()))
             .unwrap_or_default();
         let (acknowledge, complete) = s.scene_invocation.finish(runtime_ok, submission);
         for view in (0..4).filter(|v| acknowledge & (1 << v) != 0) {
             s.lit.submitted_scene_view(view);
+        }
+        if complete && (runtime_ok || acknowledge != 0) {
+            for view in (0..4).filter(|v| suspended & (1 << v) != 0) {
+                s.lit.suspend_scene_view(view);
+            }
         }
         s.lit.finish_scene_frame(complete);
         if let Some(sky) = s.features.get::<raa_sky::SkyHandle>() {
@@ -716,6 +713,15 @@ impl Engine {
         };
         self.finish_scene_invocation(result.is_ok());
         result
+    }
+
+    /// Selects camera jitter independently of TAA. Null uses the default TAA-driven policy.
+    #[wasm_bindgen(js_name = setCameraJitter)]
+    pub fn set_camera_jitter(&mut self, enabled: Option<bool>) -> Result<(), JsValue> {
+        self.with_state(|_, s| {
+            s.lit.set_camera_jitter(enabled);
+            Ok(())
+        })
     }
 
     /// Releases the GPU objects and the scene; every later call throws `api.disposed`.

@@ -160,6 +160,7 @@ impl Rig {
             .execute(gpu, self.output.view(), self.output.size())
             .expect("frame");
         gpu.queue().submit([commands]);
+        self.graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");

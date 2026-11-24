@@ -415,7 +415,6 @@ struct ViewPost {
     bloom: raa_bloom::BloomHandle,
     grading: raa_grading::GradingHandle,
     cel: raa_cel::CelHandle,
-    taa: raa_taa::TaaHandle,
     exposure: raa_exposure::AutoExposureHandle,
 }
 #[derive(Default)]
@@ -469,9 +468,9 @@ fn configure_views(
             bloom: raa_bloom::BloomFeature::install(gpu, &temp)?,
             grading: raa_grading::GradingFeature::install(gpu, &temp)?,
             cel: raa_cel::CelFeature::install(gpu, &temp)?,
-            taa: raa_taa::TaaFeature::install(gpu, &temp, &frame)?,
             exposure: raa_exposure::AutoExposureFeature::install(gpu, &temp)?,
         };
+        raa_taa::TaaFeature::install(gpu, &temp, &frame)?;
         p.set_view_passes(posts.0.len(), &mut temp.borrow_mut());
         posts.0.push(post);
     }
@@ -501,21 +500,6 @@ pub(crate) fn prepare_view(
         .get::<ViewsState>()
         .and_then(|v| v.camera(index))
         .copied();
-    // An m21 viewport camera is static until `setViewportCamera` rewrites it, so a change
-    // is a camera cut there; viewport 0 cuts are marked by `setCamera`/`setOrbit`.
-    if index < 4 {
-        let signature = own_camera.map(|c| {
-            let mut s = [0.0; 9];
-            s[..3].copy_from_slice(&c.eye);
-            s[3..6].copy_from_slice(&c.target);
-            s[6..].copy_from_slice(&[c.fov_y_deg.to_radians(), c.near, c.far]);
-            s
-        });
-        if st.view_cameras[index].is_some_and(|previous| Some(previous) != signature) {
-            st.scene_invocation.discontinuity(index);
-        }
-        st.view_cameras[index] = signature;
-    }
     if let Some(camera) = own_camera {
         let cam = &mut st.scene.camera;
         cam.eye = raa_math::Vec3::from_array(camera.eye);
@@ -566,13 +550,7 @@ pub(crate) fn prepare_view(
             post.shafts
                 .set_sun(light.direction, light.color.map(|c| c * light.intensity));
         }
-        // Consume the viewport's one-shot discontinuity mark before staging its camera.
-        let discontinuity = st.scene_invocation.prepare(index);
-        if discontinuity
-            && let Some(post) = st.features.get::<ViewPosts>().and_then(|p| p.0.get(index))
-        {
-            post.taa.invalidate();
-        }
+        let discontinuity = st.scene_invocation.is_discontinuous(index);
         st.lit.prepare_scene_view(index, discontinuity);
         st.lit.prepare(
             gpu,

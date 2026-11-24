@@ -155,6 +155,7 @@ fn instances_install_and_resolve_bound_chains_independently() {
             .execute(&gpu, output.view(), output.size())
             .expect("frame");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
     }
     gpu.device()
         .poll(wgpu::PollType::wait_indefinitely())

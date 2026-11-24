@@ -171,3 +171,35 @@ fn instance_plan_installs_keeps_and_removes_by_id_and_type() {
     assert_eq!(keep, [pair("taaB", "pass.taa")]);
     assert_eq!(remove, ["bloomB".to_owned()]);
 }
+
+#[test]
+fn multi_instance_history_graph_is_refused_for_multiple_viewports() {
+    use raa_graph::{
+        error::Severity,
+        validate::{GraphLimits, ValidateCtx, validate},
+    };
+
+    let doc = two_taa();
+    let catalog = Catalog::build();
+    let ctx = ValidateCtx {
+        catalog: &catalog,
+        limits: GraphLimits::CORE,
+        installed: &|_| true,
+        viewports: 2,
+        engine_options: &[],
+    };
+    let issues = validate(&doc, &ctx);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.code == "graph.multi_view" && issue.severity == Severity::Error)
+    );
+    let single = validate(
+        &doc,
+        &ValidateCtx {
+            viewports: 1,
+            ..ctx
+        },
+    );
+    assert!(single.iter().all(|issue| issue.code != "graph.multi_view"));
+}

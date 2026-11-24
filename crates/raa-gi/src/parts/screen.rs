@@ -87,6 +87,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             resources: None,
             key: None,
             parity: 0,
+            submitted_parity: 0,
             active: false,
             pass_enabled: true,
             output_valid: false,
@@ -110,6 +111,7 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             })?;
         pipeline.add(Box::new(GiScreenPass {
             part: Rc::clone(&part),
+            recorded: false,
         }))?;
     }
     ctx.add_part(part);
@@ -920,6 +922,7 @@ struct ScreenState {
     resources: Option<ScreenResources>,
     key: Option<((u32, u32), u32)>,
     parity: usize,
+    submitted_parity: usize,
     active: bool,
     pass_enabled: bool,
     output_valid: bool,
@@ -945,7 +948,7 @@ impl GiPart for ScreenPart {
     }
 
     /// Allocates `ScreenResources` on an active frame when the (viewport, probe_rays) key
-    /// changed, flips the output parity, writes the `GiScreenGpu` params and records whether the
+    /// changed, selects the write parity, writes the `GiScreenGpu` params and records whether the
     /// part is active and wants the history. The history is usable only when this part's other
     /// parity holds the previous frame and the camera is continuous (`camera_valid`), whether or
     /// not screen traces copy the lit HDR.
@@ -978,7 +981,7 @@ impl GiPart for ScreenPart {
             state.key = Some(((width.max(1), height.max(1)), rays));
             state.output_valid = false;
         }
-        state.parity ^= 1;
+        state.parity = 1 - state.submitted_parity;
         state.settings = frame.settings;
         let history_valid = state.output_valid && frame.camera_valid;
         if let Some(resources) = &state.resources {
@@ -1008,12 +1011,11 @@ impl GiPart for ScreenPart {
                 state.restir = Some(RestirGiResources::new(gpu, viewport));
                 state.restir_valid = false;
             }
-            state.restir_frame = state.restir_frame.wrapping_add(1);
             let usable = state.restir_valid && frame.camera_valid;
             if let Some(restir) = &state.restir {
                 restir.write_params(
                     gpu,
-                    state.restir_frame,
+                    state.restir_frame.wrapping_add(1),
                     usable,
                     frame.settings.screen_traces && frame.history_valid,
                     frame.settings.restir_m_cap,
@@ -1101,6 +1103,7 @@ impl GiPart for ScreenPart {
 /// [`ScreenPart`].
 struct GiScreenPass {
     part: Rc<ScreenPart>,
+    recorded: bool,
 }
 
 impl FeaturePass for GiScreenPass {
@@ -1140,6 +1143,7 @@ impl FeaturePass for GiScreenPass {
     /// Writes this frame's TAA jitter (known once the lit renderer prepared the frame) into the
     /// two spare lanes of the GI frame record, after `GiHandle::prepare_frame` wrote the record.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        self.recorded = false;
         let state = self.part.state.borrow();
         if !state.active || !state.pass_enabled {
             return Ok(());
@@ -1162,7 +1166,7 @@ impl FeaturePass for GiScreenPass {
 
     /// Drops the published views first. Then records the `raa-gi.screen` pass when the part is
     /// active, enabled and has resources; when it recorded, publishes the pyramid, the screen
-    /// output and the debug record of this frame and marks the history valid.
+    /// output and the debug record of this frame.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         self.part.shared.set_pyramid(None);
         self.part.shared.set_probe_output(None);
@@ -1175,12 +1179,10 @@ impl FeaturePass for GiScreenPass {
             pipelines,
             resources,
             parity,
-            output_valid,
             mode,
             settings,
             restir_pipelines,
             restir,
-            restir_valid,
             ..
         } = &mut *state;
         let Some(resources) = resources.as_mut() else {
@@ -1241,7 +1243,6 @@ impl FeaturePass for GiScreenPass {
             if recorded {
                 restir_pipelines.record(&mut pass, &restir_work);
                 pipelines.record_atrous(&mut pass, &work);
-                *restir_valid = true;
             }
             recorded
         } else {
@@ -1261,7 +1262,7 @@ impl FeaturePass for GiScreenPass {
         };
         if recorded {
             resources.copy_counters(ctx.encoder);
-            *output_valid = true;
+            self.recorded = true;
             self.part.shared.set_pyramid(Some(resources.pyramid_view()));
             self.part
                 .shared
@@ -1271,6 +1272,19 @@ impl FeaturePass for GiScreenPass {
                 .set_screen_debug(Some(resources.debug_view()));
         }
         Ok(())
+    }
+
+    fn submitted(&mut self) {
+        if !std::mem::take(&mut self.recorded) {
+            return;
+        }
+        let mut state = self.part.state.borrow_mut();
+        state.submitted_parity = state.parity;
+        state.output_valid = true;
+        if state.mode == IndirectMode::Restir {
+            state.restir_valid = true;
+            state.restir_frame = state.restir_frame.wrapping_add(1);
+        }
     }
 }
 

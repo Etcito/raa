@@ -40,6 +40,12 @@ pub trait FeaturePass {
         Ok(())
     }
 
+    /// Commits staged writes after the view's command buffer is submitted.
+    fn submitted(&mut self) {}
+
+    /// Invalidates retained history after a view discontinuity.
+    fn invalidate_history(&mut self) {}
+
     /// Records the pass's commands into `ctx.encoder`.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError>;
 }

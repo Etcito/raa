@@ -574,13 +574,12 @@ impl ViewSubmission {
     }
 
     /// The current encoder was submitted: the view it holds moves from pending to submitted.
-    fn intermediate_submitted(&mut self) {
-        let Some(view) = self.last_recorded.take() else {
-            return;
-        };
+    fn intermediate_submitted(&mut self) -> Option<usize> {
+        let view = self.last_recorded.take()?;
         let bit = view_bit(view);
         self.state.pending_mask &= !bit;
         self.state.submitted_mask |= bit;
+        Some(view)
     }
 
     /// A recording error means the final encoder is never submitted: pending becomes invalid.
@@ -688,10 +687,61 @@ impl Pipeline {
         self.submission.state()
     }
 
+    fn notify_view_submitted(&mut self) {
+        let Some(view) = self.submission.intermediate_submitted() else {
+            return;
+        };
+        let banked = !self.view_rects.is_empty();
+        if banked {
+            self.swap_view_passes(view);
+        }
+        for entry in self.config.passes.iter_mut().filter(|e| e.enabled) {
+            entry.pass.submitted();
+        }
+        if self.view_rects.len() <= 1 {
+            for (_, frame) in &mut self.graph_frames {
+                frame.submitted();
+            }
+        }
+        if banked {
+            self.swap_view_passes(view);
+        }
+    }
+
+    /// Invalidates retained history in the pass bank currently being prepared.
+    pub fn invalidate_current_history(&mut self) {
+        for entry in &mut self.config.passes {
+            entry.pass.invalidate_history();
+        }
+        for (_, frame) in &mut self.graph_frames {
+            frame.invalidate_history();
+        }
+    }
+
+    /// View slots suspended by the current layout, including zero-area rectangles.
+    pub fn suspended_views(&self) -> u8 {
+        if self.view_rects.is_empty() {
+            return 0b1110;
+        }
+        let mut suspended = 0b1111;
+        for (index, rect) in self.view_rects.iter().enumerate() {
+            if rect[2] != 0 && rect[3] != 0 {
+                suspended &= !view_bit(index);
+            }
+        }
+        suspended
+    }
+
     /// Configure ordered pixel rectangles. Empty retains the legacy single-view path.
     /// Zero-area rectangles are retained as slots but skipped when rendering.
     pub fn set_view_rects(&mut self, rects: &[[u32; 4]]) {
+        if self.view_rects != rects {
+            for (_, frame) in &mut self.graph_frames {
+                frame.invalidate_history();
+            }
+        }
         if self.view_rects.is_empty() != rects.is_empty() {
+            self.invalidate_current_history();
             self.targets = None;
             for entry in &mut self.config.passes {
                 entry.sized_for = 0;
@@ -917,7 +967,7 @@ impl Pipeline {
                 let previous = std::mem::replace(ctx.encoder, next);
                 ctx.gpu.queue().submit([previous.finish()]);
                 // Only a view whose commands went into that submission counts as submitted.
-                this.borrow_mut().submission.intermediate_submitted();
+                this.borrow_mut().notify_view_submitted();
             }
             let size = (rect[2], rect[3]);
             let mut prepare = {
@@ -995,6 +1045,11 @@ impl Pipeline {
         display: crate::ActiveRect,
     ) -> Result<(), RaaError> {
         let gpu = ctx.gpu;
+        if self.targets.as_ref().is_some_and(|targets| {
+            targets.size() != scene_size || targets.display_rect() != display
+        }) {
+            self.invalidate_current_history();
+        }
         let targets = match &mut self.targets {
             Some(targets) => {
                 if targets.ensure(gpu, scene_size) {
@@ -1011,6 +1066,9 @@ impl Pipeline {
         targets.hdr().reset();
         self.resources.clear();
         for (_, frame) in &mut self.graph_frames {
+            if self.view_rects.len() > 1 {
+                frame.invalidate_history();
+            }
             frame.begin(&self.resources);
         }
         self.lighting.upload(gpu);
@@ -1148,11 +1206,18 @@ impl RenderPass for PipelinePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext<'_>) -> Result<(), RaaError> {
-        self.pipeline()?.prepare_frame(ctx)
+        let mut pipeline = self.pipeline()?;
+        pipeline.submission.last_recorded = None;
+        pipeline.submission.state.pending_mask = 0;
+        pipeline.prepare_frame(ctx)
     }
 
     fn record(&mut self, ctx: &mut RecordContext<'_>) -> Result<(), RaaError> {
         Pipeline::record_views(&self.pipeline, ctx)
+    }
+
+    fn submitted(&mut self) {
+        self.pipeline.borrow_mut().notify_view_submitted();
     }
 }
 

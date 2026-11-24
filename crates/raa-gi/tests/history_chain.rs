@@ -158,6 +158,7 @@ fn gi_history_runs_on_a_bound_chain_with_and_without_debug_view() {
                 .execute(&gpu, backbuffer.view(), SIZE)
                 .expect("execute");
             gpu.queue().submit([commands]);
+            graph.notify_submitted();
             gpu.device()
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("device poll");

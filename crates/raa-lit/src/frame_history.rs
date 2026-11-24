@@ -1,16 +1,4 @@
-//! Per-viewport camera history and S10 Halton jitter state (RAA-FRAME); four slots are
-//! reused per invocation and `finish(false)` invalidates all. Jitter is zero without a
-//! consumer.
-//!
-//! Handoff: `crates/raa-lit/src/frame_history.rs` exports `pub(crate) fn
-//! FrameHistory::prepare(&mut self, view: usize, view_proj: Mat4, unjittered_view_proj:
-//! Mat4, size: (u32, u32), jitter_consumer: bool, discontinuity: bool) -> CameraHistory`.
-//! The renderer share owns one `FrameHistory` in `LitRenderer`, calls it from
-//! `begin_scene_frame`/`prepare_scene_view`/`submitted_scene_view`/`finish_scene_frame` with
-//! viewport indices 0..3 and `M2-SUBMISSION-OBSERVATIONS` masks, builds `view_proj` with
-//! `frame_jitter` from the same file and passes the record as `FrameParams`
-//! `previous_view_proj`, `camera_jitter_ndc`, `previous_jitter_ndc` and `history_valid`.
-#![allow(dead_code)] // Staged before the renderer share lands; see Handoff.
+//! Per-view camera transforms and Halton jitter for the last submitted scene frame.
 use raa_math::Mat4;
 
 pub(crate) const MAX_VIEWS: usize = 4;
@@ -21,6 +9,7 @@ pub(crate) struct CameraHistory {
     pub current_jitter: [f32; 2],
     pub previous_jitter: [f32; 2],
     pub history_valid: bool,
+    pub jitter_mode_changed: bool,
     pub frame_index: u64,
 }
 
@@ -68,7 +57,7 @@ impl FrameHistory {
         discontinuity: bool,
     ) -> CameraHistory {
         let jitter = frame_jitter(self.frame_index, size, jitter_consumer);
-        let slot = &mut self.slots[view % MAX_VIEWS];
+        let slot = &mut self.slots[view];
         let valid = !discontinuity
             && slot
                 .committed
@@ -79,6 +68,7 @@ impl FrameHistory {
             current_jitter: jitter,
             previous_jitter: jitter,
             history_valid: false,
+            jitter_mode_changed: slot.committed.is_some_and(|c| c.3 != jitter_consumer),
             frame_index: self.frame_index,
         };
         if let Some(Pending(proj, previous_jitter, _, _)) = slot.committed.filter(|_| valid) {
@@ -92,23 +82,20 @@ impl FrameHistory {
 
     /// Commits only `view`; other views keep their last submitted history.
     pub(crate) fn submitted(&mut self, view: usize) {
-        let slot = &mut self.slots[view % MAX_VIEWS];
-        slot.committed = slot.pending.take();
-    }
-
-    /// Drops pending state; an incomplete invocation invalidates history before next `begin`.
-    pub(crate) fn finish(&mut self, complete: bool) {
-        if complete {
-            for slot in &mut self.slots {
-                slot.pending = None;
-            }
-        } else {
-            self.invalidate();
+        let slot = &mut self.slots[view];
+        if let Some(pending) = slot.pending.take() {
+            slot.committed = Some(pending);
         }
     }
 
-    pub(crate) fn invalidate(&mut self) {
-        self.slots = [ViewSlot::default(); MAX_VIEWS];
+    pub(crate) fn finish(&mut self) {
+        for slot in &mut self.slots {
+            slot.pending = None;
+        }
+    }
+
+    pub(crate) fn suspend(&mut self, view: usize) {
+        self.slots[view] = ViewSlot::default();
     }
 }
 
@@ -166,7 +153,6 @@ mod tests {
         i: u64,
         p: (usize, Mat4, (u32, u32), bool, bool),
         ok: bool,
-        done: bool,
     ) -> CameraHistory {
         let (v, m, sz, c, d) = p;
         h.begin(i);
@@ -174,7 +160,7 @@ mod tests {
         if ok {
             h.submitted(v);
         }
-        h.finish(done);
+        h.finish();
         r
     }
 
@@ -214,21 +200,36 @@ mod tests {
     }
 
     #[test]
-    fn history_invalidates_on_initial_resize_mode_and_partial_frames() {
+    fn history_invalidates_on_initial_resize_jitter_change_cut_and_suspension() {
         let mut h = FrameHistory::new();
         let m = Mat4::IDENTITY;
-        let mut f =
-            |i, sz, c, d, done| cycle(&mut h, i, (0, m, sz, c, d), true, done).history_valid;
-        assert!(!f(0, S, false, false, true));
-        assert!(f(1, S, false, false, true));
-        assert!(!f(2, (1024, 768), false, false, true));
-        assert!(f(3, (1024, 768), false, false, true));
-        assert!(!f(4, (1024, 768), true, false, true));
-        assert!(f(5, (1024, 768), true, false, true));
-        assert!(!f(6, (1024, 768), true, true, true));
-        assert!(f(7, (1024, 768), true, false, true));
-        f(8, (1024, 768), true, false, false);
-        assert!(!f(9, (1024, 768), true, false, true));
+        let mut f = |i, sz, c, d| cycle(&mut h, i, (0, m, sz, c, d), true).history_valid;
+        assert!(!f(0, S, false, false));
+        assert!(f(1, S, false, false));
+        assert!(!f(2, (1024, 768), false, false));
+        assert!(f(3, (1024, 768), false, false));
+        assert!(!f(4, (1024, 768), true, false));
+        assert!(f(5, (1024, 768), true, false));
+        assert!(!f(6, (1024, 768), true, true));
+        assert!(f(7, (1024, 768), true, false));
+        h.suspend(0);
+        assert!(!cycle(&mut h, 9, (0, m, (1024, 768), true, false), true).history_valid);
+    }
+
+    #[test]
+    fn aborted_retry_reads_last_submitted_transform_and_reuses_jitter() {
+        let mut history = FrameHistory::new();
+        let submitted = shift(1.0);
+        let aborted = shift(2.0);
+        let retry = shift(3.0);
+        cycle(&mut history, 0, (0, submitted, S, true, false), true);
+        history.submitted(0);
+        let pending = cycle(&mut history, 1, (0, aborted, S, true, false), false);
+        let accepted = cycle(&mut history, 1, (0, retry, S, true, false), true);
+        assert_eq!(pending.current_jitter, accepted.current_jitter);
+        assert_eq!(accepted.previous_view_proj, submitted);
+        let next = history.prepare(0, submitted, submitted, S, true, false);
+        assert_eq!(next.previous_view_proj, retry);
     }
 
     #[test]
@@ -241,7 +242,7 @@ mod tests {
         assert_eq!(a.previous_view_proj, jit(u0, a.current_jitter));
         assert_eq!(a.previous_jitter, a.current_jitter);
         h.submitted(0);
-        h.finish(true);
+        h.finish();
         h.begin(1);
         let b = h.prepare(0, jit(u1, frame_jitter(1, S, true)), u1, S, true, false);
         assert!(b.history_valid && b.unjittered_view_proj == u1);
@@ -261,12 +262,12 @@ mod tests {
         assert!(!h.prepare(1, b0, b0, t, false, false).history_valid);
         h.submitted(0);
         h.submitted(1);
-        h.finish(true);
+        h.finish();
         h.begin(1);
         h.prepare(0, a1, a1, S, false, false);
         h.prepare(1, b1, b1, t, false, false);
         h.submitted(0);
-        h.finish(true);
+        h.finish();
         h.begin(2);
         assert_eq!(h.prepare(0, a2, a2, S, false, false).previous_view_proj, a1);
         assert_eq!(h.prepare(1, b2, b2, t, false, false).previous_view_proj, b0);
@@ -276,7 +277,7 @@ mod tests {
     fn jitter_is_zero_without_a_consumer() {
         let mut h = FrameHistory::new();
         let p = (0, Mat4::IDENTITY, S, false, false);
-        let a = cycle(&mut h, 0, p, true, true);
+        let a = cycle(&mut h, 0, p, true);
         assert_eq!([a.current_jitter, a.previous_jitter], [[0.0; 2]; 2]);
     }
 }

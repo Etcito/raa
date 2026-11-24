@@ -102,6 +102,8 @@ pub(crate) fn install(ctx: &mut PartsCtx<'_>) -> Result<(), RaaError> {
             })?;
         pipeline.add(Box::new(GiAreaShadowPass {
             part: Rc::clone(&part),
+            recorded_generations: None,
+            staged_generations: [0; MAX_STOCHASTIC_LIGHTS],
         }))?;
     }
     ctx.add_part(part);
@@ -241,6 +243,8 @@ fn publish_taps(
 /// trace, temporal and spatial dispatches of one [`AreaShadowPart`].
 struct GiAreaShadowPass {
     part: Rc<AreaShadowPart>,
+    staged_generations: [u32; MAX_STOCHASTIC_LIGHTS],
+    recorded_generations: Option<[u32; MAX_STOCHASTIC_LIGHTS]>,
 }
 
 impl FeaturePass for GiAreaShadowPass {
@@ -274,7 +278,9 @@ impl FeaturePass for GiAreaShadowPass {
     /// invalidates changed history groups, writes the params, fetches the optional SDF inputs and
     /// publishes the mask and slot table.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        self.recorded_generations = None;
         let frame = self.part.lit.area_stochastic();
+        self.staged_generations = frame.generations;
         let limit = table_limit(&frame.table).min(8);
         let mut state = self.part.state.borrow_mut();
         state.recordable = false;
@@ -355,10 +361,9 @@ impl FeaturePass for GiAreaShadowPass {
             if *generations != frame.generations {
                 resources.invalidate_group(0);
             }
-            *generations = frame.generations;
-            *frame_index = frame_index.wrapping_add(1);
-            resources.write_params(ctx.gpu, *frame_index, limit);
-            restir.write_params(ctx.gpu, *frame_index, &remap, &self.part.shared);
+            let next_frame = frame_index.wrapping_add(1);
+            resources.write_params(ctx.gpu, next_frame, limit);
+            restir.write_params(ctx.gpu, next_frame, &remap, &self.part.shared);
             *sdf_slot = sdf;
             ctx.lighting
                 .set_area_shadow(resources.mask_view(), &frame.table)?;
@@ -375,11 +380,8 @@ impl FeaturePass for GiAreaShadowPass {
             {
                 resources.invalidate_group(group);
             }
-            generations[first] = frame.generations[first];
-            generations[second] = frame.generations[second];
         }
-        *frame_index = frame_index.wrapping_add(1);
-        resources.write_params(ctx.gpu, *frame_index, limit);
+        resources.write_params(ctx.gpu, frame_index.wrapping_add(1), limit);
         *sdf_slot = sdf;
         ctx.lighting
             .set_area_shadow(resources.mask_view(), &frame.table)?;
@@ -389,8 +391,7 @@ impl FeaturePass for GiAreaShadowPass {
         Ok(())
     }
 
-    /// Records the `raa-gi.area-shadow` pass over the prepared inputs and commits the histories
-    /// when the pipelines recorded it.
+    /// Records the `raa-gi.area-shadow` pass over the prepared inputs.
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
         let mut state = self.part.state.borrow_mut();
         if !state.recordable {
@@ -437,8 +438,7 @@ impl FeaturePass for GiAreaShadowPass {
                 restir_pipelines.record(ctx.encoder, &group1, &group2, pipelines, &work)
             };
             if recorded {
-                resources.commit();
-                restir.commit();
+                self.recorded_generations = Some(self.staged_generations);
             }
             return Ok(());
         }
@@ -448,9 +448,24 @@ impl FeaturePass for GiAreaShadowPass {
             pipelines.record(ctx.encoder, &group1, &work)
         };
         if recorded {
-            resources.commit();
+            self.recorded_generations = Some(self.staged_generations);
         }
         Ok(())
+    }
+
+    fn submitted(&mut self) {
+        let Some(generations) = self.recorded_generations.take() else {
+            return;
+        };
+        let mut state = self.part.state.borrow_mut();
+        if let Some(resources) = state.resources.as_mut() {
+            resources.commit();
+        }
+        if let Some(restir) = state.restir.as_mut() {
+            restir.commit();
+        }
+        state.generations = generations;
+        state.frame_index = state.frame_index.wrapping_add(1);
     }
 }
 

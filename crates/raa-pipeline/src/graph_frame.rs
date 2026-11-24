@@ -26,6 +26,12 @@ pub trait GraphFrame {
         Ok(())
     }
 
+    /// Commits staged writes after the view's command buffer is submitted.
+    fn submitted(&mut self) {}
+
+    /// Invalidates retained history after a view discontinuity.
+    fn invalidate_history(&mut self) {}
+
     /// Called once per frame after the last enabled pass's record.
     fn end(&mut self, _table: &ResourceTable) {}
 }

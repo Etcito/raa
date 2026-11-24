@@ -425,6 +425,7 @@ fn views_back_wall_corner_and_box_face_receive_red_indirect_light() {
             .execute(&gpu, backbuffer.view(), SIZE)
             .expect("execute");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");

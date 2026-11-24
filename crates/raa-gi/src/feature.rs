@@ -117,13 +117,15 @@ pub(crate) struct GiCore {
     ibl: Option<IblHandle>,
     local_light_count: u32,
     history_valid: bool,
-    /// The viewport of the previous prepared frame when it was active; `None` after an inactive
+    /// The viewport of the previous submitted frame when it was active; `None` after an inactive
     /// frame, a reallocation or a camera cut.
     last_active_viewport: Option<(u32, u32)>,
     /// The copy of the previous lit HDR (HDR_FORMAT, surface-sized) and its view, present while
     /// a part wants the history (S38 `gi.history`).
     history: Option<(wgpu::Texture, wgpu::TextureView)>,
-    /// The size of the history copy recorded by the latest frame; the next prepare takes it.
+    /// Separate write target while passes still read the previous submission.
+    history_write: Option<(wgpu::Texture, wgpu::TextureView)>,
+    /// The size of the staged copy, consumed only on submission.
     history_copied: Option<(u32, u32)>,
     /// Frames prepared so far; 0 before the first frame.
     frame_index: u64,
@@ -195,6 +197,7 @@ impl GiCore {
             history_valid: false,
             last_active_viewport: None,
             history: None,
+            history_write: None,
             history_copied: None,
             frame_index: 0,
             shared,
@@ -524,10 +527,18 @@ impl GiHandle {
             core.allocated_quality = None;
         }
 
-        let copied = core.history_copied.take();
-        core.history_valid = active && !allocated && copied == Some(core.viewport);
         let camera_valid = active && !allocated && core.last_active_viewport == Some(core.viewport);
-        core.last_active_viewport = active.then_some(core.viewport);
+        core.history_valid = camera_valid
+            && core
+                .history
+                .as_ref()
+                .is_some_and(|(texture, _)| (texture.width(), texture.height()) == core.viewport);
+        core.shared.set_history(
+            core.history
+                .as_ref()
+                .filter(|_| core.history_valid)
+                .map(|(_, view)| view.clone()),
+        );
         core.shared
             .set_frame_validity(core.history_valid, camera_valid);
 
@@ -655,9 +666,12 @@ impl GiHandle {
             let volume = core.volume.as_ref().map_or(0, GiVolume::allocated_bytes);
             let drivers: u64 = core.drivers.iter().map(|d| d.allocated_bytes()).sum();
             let parts: u64 = core.parts.iter().map(|p| p.allocated_bytes()).sum();
-            let history = core.history.as_ref().map_or(0, |(texture, _)| {
-                u64::from(texture.width()) * u64::from(texture.height()) * 8
-            });
+            let history = core
+                .history
+                .iter()
+                .chain(&core.history_write)
+                .map(|(texture, _)| u64::from(texture.width()) * u64::from(texture.height()) * 8)
+                .sum::<u64>();
             volume + GiFrameGpu::SIZE as u64 + drivers + parts + history
         } else {
             0
@@ -765,6 +779,7 @@ fn lighting_signature(
 fn release_resources(core: &mut GiCore) {
     core.volume = None;
     core.history = None;
+    core.history_write = None;
     core.history_copied = None;
     core.shared.set_history(None);
     for driver in &core.drivers {
@@ -905,7 +920,7 @@ impl FeaturePass for GiVolumePass {
 fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
     let (width, height) = ctx.size;
     let current = core
-        .history
+        .history_write
         .as_ref()
         .is_some_and(|(texture, _)| (texture.width(), texture.height()) == (width, height));
     if !current {
@@ -924,9 +939,9 @@ fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        core.history = Some((texture, view));
+        core.history_write = Some((texture, view));
     }
-    let Some((history, view)) = core.history.as_ref() else {
+    let Some((history, _)) = core.history_write.as_ref() else {
         return;
     };
     let extent = wgpu::Extent3d {
@@ -949,7 +964,6 @@ fn copy_history(core: &mut GiCore, ctx: &mut RecordCtx<'_>) {
         },
         extent,
     );
-    core.shared.set_history(Some(view.clone()));
     core.history_copied = Some((width, height));
 }
 
@@ -968,6 +982,24 @@ impl FeaturePass for GiHistoryPass {
 
     fn order(&self) -> u32 {
         HISTORY_ORDER
+    }
+
+    fn prepare(&mut self, _ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        self.core.borrow_mut().history_copied = None;
+        Ok(())
+    }
+
+    fn submitted(&mut self) {
+        let mut core = self.core.borrow_mut();
+        let core = &mut *core;
+        if core.history_copied.take().is_some() {
+            std::mem::swap(&mut core.history, &mut core.history_write);
+        }
+        core.last_active_viewport = core
+            .shared
+            .frame_buffer()
+            .is_some()
+            .then_some(core.viewport);
     }
 
     fn record(&mut self, ctx: &mut RecordCtx<'_>) -> Result<(), RaaError> {
@@ -990,7 +1022,7 @@ impl FeaturePass for GiHistoryPass {
         let hdr = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, size.0, size.1, 1, 1);
         ctx.resources
             .publish(HISTORY_PASS, "color", ctx.targets.hdr().src(), hdr);
-        if let Some((texture, view)) = self.core.borrow().history.as_ref() {
+        if let Some((texture, view)) = self.core.borrow().history_write.as_ref() {
             let (w, h) = (texture.width(), texture.height());
             let desc = ImageDesc::new(ImageDim::D2, raa_pipeline::HDR_FORMAT, w, h, 1, 1);
             ctx.resources.publish(HISTORY_PASS, "history", view, desc);
@@ -1011,6 +1043,7 @@ impl GiHistoryPass {
                 core.recorded.push(HISTORY_PASS);
             } else {
                 core.history = None;
+                core.history_write = None;
                 core.shared.set_history(None);
             }
         }
@@ -1265,6 +1298,7 @@ mod tests {
                 .execute(gpu, self.backbuffer.view(), SIZE)
                 .expect("execute");
             gpu.queue().submit([commands]);
+            self.graph.notify_submitted();
             gpu.device()
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("device poll");

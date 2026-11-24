@@ -2,7 +2,8 @@
 //!
 //! The pass creates its [`HistoryPair`] and [`TaaTargets`] in `resize` (every resize
 //! invalidates the history), writes `RaaTaaParams`, resolves `hdr.src()` into `hdr.dst()` and
-//! the history write view, then swaps and commits. It is installed disabled; the pass and
+//! the history write view, then swaps. History advances on submission. The pass is
+//! installed disabled, and
 //! every handle clone share a `Cell<u32>` frame count and a `Cell<bool>` pending invalidate.
 
 use std::cell::{Cell, RefCell};
@@ -72,6 +73,7 @@ struct TaaPass {
     pipelines: TaaPipelines,
     frame: wgpu::Buffer,
     history: Option<HistoryPair>,
+    recorded: bool,
     targets: Option<TaaTargets>,
 }
 
@@ -128,6 +130,7 @@ impl FeaturePass for TaaPass {
 
     /// Applies a pending invalidate, then writes `RaaTaaParams` from the history validity.
     fn prepare(&mut self, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
+        self.recorded = false;
         if self.generation.get() != self.built_generation {
             self.built_generation = self.generation.get();
             self.pipelines.rebuild(ctx.gpu, &self.tunables.get());
@@ -154,7 +157,7 @@ impl FeaturePass for TaaPass {
         Ok(())
     }
 
-    /// Dispatches the resolve for the HDR source and write parity, swaps and commits. A bound
+    /// Dispatches the resolve for the HDR source and write parity, then swaps HDR. A bound
     /// `history` input supplies the read history (binding 5); the write view stays this pass's.
     /// The `depth` and `motion` inputs (bindings 3 and 4) come from `Targets::depth_input`
     /// and `Targets::motion_input`, and rebuilding keys on them too.
@@ -242,14 +245,24 @@ impl FeaturePass for TaaPass {
             pass.dispatch_workgroups(groups.0, groups.1, 1);
         }
         hdr.swap();
-        if let Some(history) = self.history.as_mut() {
-            history.state_mut().commit();
-            self.accumulated.set(history.state().accumulated_frames());
-        }
+        self.recorded = true;
         let (w, h) = targets.size();
         let desc = ImageDesc::new(ImageDim::D2, HDR_FORMAT, w, h, 1, 1);
         ctx.resources.publish(&self.name, "color", hdr.src(), desc);
         Ok(())
+    }
+    fn submitted(&mut self) {
+        if std::mem::take(&mut self.recorded)
+            && let Some(history) = self.history.as_mut()
+        {
+            history.state_mut().commit();
+            self.accumulated.set(history.state().accumulated_frames());
+        }
+    }
+
+    fn invalidate_history(&mut self) {
+        self.recorded = false;
+        self.invalidate();
     }
 }
 
@@ -318,6 +331,7 @@ impl TaaFeature {
             pipelines: TaaPipelines::new(gpu, &tunables.get()),
             frame: frame.clone(),
             history: None,
+            recorded: false,
             targets: None,
         }))?;
         if !enabled {
@@ -362,13 +376,13 @@ impl TaaHandle {
         Ok(())
     }
 
-    /// Frames the pass recorded since its last invalidation (0 at install, after a resize,
+    /// Frames the pass submitted since its last invalidation (0 at install, after a resize,
     /// after disabling and after `invalidate`).
     pub fn accumulated_frames(&self) -> u32 {
         self.accumulated.get()
     }
 
-    /// True when at least one frame was recorded since the last invalidation.
+    /// True when at least one frame was submitted since the last invalidation.
     pub fn history_valid(&self) -> bool {
         self.accumulated.get() > 0
     }
@@ -447,6 +461,7 @@ mod tests {
             pipelines,
             frame,
             history: Some(history),
+            recorded: false,
             targets: Some(resized),
         };
         let resources = ResourceTable::new();

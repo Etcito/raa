@@ -121,6 +121,7 @@ fn custom_denoise_renders_frames_without_panic() {
             .execute(&gpu, target.view(), target.size())
             .expect("execute frame graph");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll submitted frame");
@@ -226,6 +227,7 @@ fn explicit_compute_extents_dispatch_through_the_last_texel() {
         let target = OffscreenTarget::new(&gpu, display.0, display.1, format);
         let commands = graph.execute(&gpu, target.view(), display).unwrap();
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         let pipeline = pipeline.borrow();
         let targets = pipeline.targets().unwrap();
         assert_eq!(targets.scene_rect().size, scene);

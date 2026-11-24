@@ -266,6 +266,7 @@ impl WebRuntime {
             timing.submit_end_ms = Some(self.performance.now());
             timing.frame_index = Some(self.frame);
         }
+        self.graph.notify_submitted();
         if self.frame == 0 {
             let first = Arc::clone(&self.first_frame_bits);
             self.gpu.queue().on_submitted_work_done(move || {

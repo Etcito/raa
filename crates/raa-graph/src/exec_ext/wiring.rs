@@ -852,7 +852,7 @@ struct Undo {
 /// LIFECYCLE (history images, contract rg-wiring-frame): created in the frame's first
 /// `before_prepare` of a frame when missing or when the frame size differs, together with the
 /// pool; copied in the producer's `after_record`; bound in the consumer's `before_record`; parity
-/// flipped in `end`; dropped when their history leaves the plan and in `clear`.
+/// flipped in `submitted`; dropped when their history leaves the plan and in `clear`.
 struct History {
     key: String,
     producer: (String, String),
@@ -883,6 +883,9 @@ struct WiringFrame {
 impl GraphFrame for WiringFrame {
     fn begin(&mut self, _table: &ResourceTable) {
         self.prepared = false;
+        for history in &mut self.state.borrow_mut().histories {
+            history.copied = false;
+        }
     }
 
     fn before_prepare(&mut self, _pass: &str, ctx: &mut PrepareCtx<'_>) -> Result<(), RaaError> {
@@ -1049,7 +1052,17 @@ impl GraphFrame for WiringFrame {
         Ok(())
     }
 
-    fn end(&mut self, _table: &ResourceTable) {
+    fn invalidate_history(&mut self) {
+        for history in &mut self.state.borrow_mut().histories {
+            history.valid = false;
+            history.copied = false;
+            if let Some(taa) = &history.taa {
+                taa.invalidate();
+            }
+        }
+    }
+
+    fn submitted(&mut self) {
         for history in &mut self.state.borrow_mut().histories {
             if history.copied {
                 history.copied = false;

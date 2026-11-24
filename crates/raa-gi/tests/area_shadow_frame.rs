@@ -236,6 +236,7 @@ impl Rig {
             .execute(gpu, self.backbuffer.view(), SIZE)
             .expect("execute");
         gpu.queue().submit([commands]);
+        self.graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");

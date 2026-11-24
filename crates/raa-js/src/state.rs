@@ -29,7 +29,7 @@ use crate::feature_map::FeatureMap;
 pub(crate) const DEFAULT_MATERIAL: MaterialId = MaterialId(0);
 
 /// One scene-frame index per Engine invocation (all viewports share it) and the one-shot
-/// resize/camera-cut marks its prepares consume.
+/// resize/camera-cut marks cleared by submission.
 #[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct SceneInvocation {
     index: u64,
@@ -51,21 +51,17 @@ impl SceneInvocation {
     pub(crate) fn is_discontinuous(&self, view: usize) -> bool {
         self.discontinuity & view_bit(view) != 0
     }
-    pub(crate) fn prepare(&mut self, view: usize) -> bool {
-        let bit = view_bit(view);
-        let dropped = self.discontinuity & bit != 0;
-        self.discontinuity &= !bit;
-        dropped
-    }
     /// `(views to acknowledge, history complete)`: nothing submitted keeps history and
-    /// index; anything submitted advances once; partial or failed drops history.
+    /// index; anything submitted advances once. The flag reports a complete invocation.
     pub(crate) fn finish(&mut self, runtime_ok: bool, s: SubmissionState) -> (u8, bool) {
         if !self.open {
             return (0, true);
         }
-        let acknowledge = s.submitted_mask | if runtime_ok { s.pending_mask } else { 0 };
+        let acknowledge = s.submitted_mask;
         let skipped = (s.submitted_mask | s.pending_mask) == 0 && !s.record_failed;
-        let complete = skipped || (runtime_ok && !s.record_failed);
+        let complete = skipped
+            || (!s.record_failed && s.pending_mask == 0 && (runtime_ok || acknowledge != 0));
+        self.discontinuity &= !acknowledge;
         if acknowledge != 0 {
             self.index = self.index.saturating_add(1);
         }
@@ -730,9 +726,6 @@ pub(crate) struct EngineState {
     /// submitted invocation (M2-FRAME-LIFECYCLE handoff in `engine.rs`).
     pub scene_invocation: SceneInvocation,
     pub sky_invocation_id: u64,
-    /// Last effective camera (eye3, target3, fov, near, far) of each viewport that has its
-    /// own m21 camera: a change is a camera discontinuity for that viewport.
-    pub view_cameras: [Option<[f32; 9]>; 4],
     pub max_materials: u32,
     pub meshes: HandleMap<MeshEntry>,
     /// The S18 skin of every mesh uploaded with joints and weights, keyed by lit mesh.

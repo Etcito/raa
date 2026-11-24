@@ -121,6 +121,7 @@ mod software_gpu_frame {
                 .execute(gpu, self.backbuffer.view(), self.backbuffer.size())
                 .expect("execute");
             gpu.queue().submit([commands]);
+            self.graph.notify_submitted();
             gpu.device()
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("device poll");

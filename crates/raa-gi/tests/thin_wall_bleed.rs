@@ -458,6 +458,7 @@ fn render(gpu: &GpuContext, gi_enabled: bool, light_y: f32) -> Vec<[f32; 4]> {
             .execute(gpu, backbuffer.view(), SIZE)
             .expect("execute");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");

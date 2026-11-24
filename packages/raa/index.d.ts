@@ -364,6 +364,8 @@ export interface Engine {
    *   far <= near, eye equal to target).
    */
   setCamera(desc: CameraDesc): void;
+  /** Override camera jitter independently of TAA. Pass null to follow TAA enablement. */
+  setCameraJitter(enabled: boolean | null): void;
 
   /**
    * Rotates the orbit camera and zooms it.

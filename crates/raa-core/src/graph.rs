@@ -96,6 +96,9 @@ pub trait RenderPass {
     /// Records the pass's commands into `ctx.encoder`.
     fn record(&mut self, ctx: &mut RecordContext<'_>) -> Result<(), RaaError>;
 
+    /// Called after the command buffer containing this pass has been submitted.
+    fn submitted(&mut self) {}
+
     /// Called on the pass's first frame and whenever the size changes, after Surface-sized
     /// targets are recreated. Default: nothing.
     fn resize(&mut self, _gpu: &GpuContext, _size: (u32, u32)) {}
@@ -233,6 +236,7 @@ pub struct FrameGraph {
     passes: Vec<PassSlot>,
     next_pass: u32,
     compiled: bool,
+    awaiting_submission: bool,
     /// Compile scratch, indexed by resource id: written by an earlier pass.
     written: Vec<bool>,
     size: Option<(u32, u32)>,
@@ -248,6 +252,7 @@ impl FrameGraph {
             passes: Vec::new(),
             next_pass: 0,
             compiled: false,
+            awaiting_submission: false,
             written: Vec::new(),
             size: None,
             frame: 0,
@@ -386,12 +391,14 @@ impl FrameGraph {
     /// targets are (re)created and passes resized on the first frame and on a size change (zero
     /// sizes clamp to 1); then every pass prepares, then every pass records in order into one
     /// encoder. Gives `framegraph.not_compiled` when the graph is not compiled.
+    /// Call [`Self::notify_submitted`] immediately after submitting the returned buffer.
     pub fn execute(
         &mut self,
         gpu: &GpuContext,
         backbuffer: &wgpu::TextureView,
         size: (u32, u32),
     ) -> Result<wgpu::CommandBuffer, RaaError> {
+        self.awaiting_submission = false;
         if !self.compiled {
             return Err(graph_error(
                 "framegraph.not_compiled",
@@ -439,8 +446,20 @@ impl FrameGraph {
             };
             slot.pass.record(&mut ctx)?;
         }
+        self.awaiting_submission = true;
         self.frame = self.frame.wrapping_add(1);
         Ok(encoder.finish())
+    }
+
+    /// Acknowledges submission of the latest successful execution. Call immediately after
+    /// submitting its command buffer. Discarded command buffers must not be acknowledged.
+    pub fn notify_submitted(&mut self) {
+        if !std::mem::take(&mut self.awaiting_submission) {
+            return;
+        }
+        for slot in &mut self.passes {
+            slot.pass.submitted();
+        }
     }
 
     fn position_of(

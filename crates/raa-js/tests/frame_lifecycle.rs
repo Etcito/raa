@@ -27,10 +27,7 @@ fn observed(submitted: u8, pending: u8, record_failed: bool) -> SubmissionState 
 fn once_per_invocation_advancement_and_skipped_rendering() {
     let mut invocation = SceneInvocation::default();
     assert_eq!(invocation.begin(), 0);
-    for view in [0, 1, 0, 2, 3] {
-        invocation.prepare(view);
-    }
-    let end = invocation.finish(true, observed(0b0111, 0b1000, false));
+    let end = invocation.finish(true, observed(0b1111, 0, false));
     assert_eq!(end, (0b1111, true), "every really submitted view");
     assert_eq!(invocation.begin(), 1, "one advance per invocation");
     // The runtime failed before recording: no scene frame, so keep index and history.
@@ -46,26 +43,27 @@ fn once_per_invocation_advancement_and_skipped_rendering() {
 fn multi_view_failure_acknowledges_only_submitted_views() {
     let mut invocation = SceneInvocation::default();
     invocation.begin();
-    invocation.prepare(0);
-    invocation.prepare(1);
     let end = invocation.finish(false, observed(0b0001, 0b0010, true));
     assert_eq!(end, (0b0001, false), "view 1 never reached a submit");
     assert_eq!(invocation.begin(), 1, "the submitted image advances once");
 }
 
 #[test]
-fn discontinuity_marks_are_one_shot_per_view() {
+fn discontinuity_marks_survive_abort_and_clear_per_submitted_view() {
     let mut invocation = SceneInvocation::default();
     invocation.begin();
     invocation.discontinuity_all();
-    assert!(invocation.prepare(0) && invocation.prepare(1));
-    assert!(!invocation.prepare(0) && !invocation.prepare(1));
-    invocation.discontinuity_all();
-    invocation.prepare(0);
+    assert!(invocation.is_discontinuous(0) && invocation.is_discontinuous(1));
+    invocation.finish(false, observed(0, 0, true));
+    invocation.begin();
+    assert!(invocation.is_discontinuous(0) && invocation.is_discontinuous(1));
     invocation.finish(true, observed(0b0001, 0, false));
     invocation.begin();
-    assert!(!invocation.prepare(0));
-    assert!(invocation.prepare(2), "unprepared views keep their mark");
+    assert!(!invocation.is_discontinuous(0));
+    assert!(
+        invocation.is_discontinuous(1),
+        "unsubmitted views keep their mark"
+    );
 }
 
 /// The public renderer and pipeline wired as the Engine wires them, on a software GPU.
@@ -117,6 +115,7 @@ fn software_gpu_public_renderer_pipeline_tracks_only_submitted_views() {
         graph.compile()?;
         let commands = graph.execute(gpu, target.view(), target.size())?;
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         Ok(())
     }
 
@@ -205,7 +204,7 @@ fn software_gpu_public_renderer_pipeline_tracks_only_submitted_views() {
     }
 
     // Invocation 0: view 0 is submitted intermediately, view 1 is skipped (zero area) and
-    // view 2 is recorded into the final encoder, pending the runtime's own submit.
+    // view 2 is recorded into the final encoder and then submitted.
     pipeline
         .borrow_mut()
         .set_view_rects(&[[0, 0, 32, 16], [0, 0, 0, 16], [32, 0, 32, 16]]);
@@ -224,10 +223,10 @@ fn software_gpu_public_renderer_pipeline_tracks_only_submitted_views() {
             first.pending_mask,
             first.record_failed
         ),
-        (0b001, 0b100, false),
+        (0b101, 0, false),
         "view 1 was skipped and never submitted"
     );
-    let acknowledged = first.submitted_mask | first.pending_mask;
+    let acknowledged = first.submitted_mask;
     for view in (0..4).filter(|v| acknowledged & (1 << v) != 0) {
         lit.borrow_mut().submitted_scene_view(view);
     }
@@ -304,8 +303,6 @@ fn sky_inspection_does_not_consume_lit_discontinuity() {
     let mut invocation = SceneInvocation::default();
     invocation.discontinuity(2);
     assert!(invocation.is_discontinuous(2));
-    assert!(invocation.is_discontinuous(2));
     assert!(!invocation.is_discontinuous(1));
-    assert!(invocation.prepare(2));
-    assert!(!invocation.is_discontinuous(2));
+    assert!(invocation.is_discontinuous(2));
 }

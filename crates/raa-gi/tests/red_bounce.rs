@@ -259,6 +259,7 @@ fn floor_beside_a_sunlit_red_wall_receives_red_indirect_light() {
             .execute(&gpu, backbuffer.view(), SIZE)
             .expect("execute");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("device poll");

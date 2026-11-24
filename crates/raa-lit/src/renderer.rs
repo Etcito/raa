@@ -253,6 +253,7 @@ struct SceneLifecycle {
     frame_index: u64,
     open: bool,
     selected: Option<(usize, bool)>,
+    implicit: bool,
     current_view: usize,
     slots: [Vec<u32>; MAX_VIEWS],
     acknowledged: u8,
@@ -266,6 +267,7 @@ impl SceneLifecycle {
             frame_index: 0,
             open: false,
             selected: None,
+            implicit: false,
             current_view: 0,
             slots: std::array::from_fn(|_| Vec::new()),
             acknowledged: 0,
@@ -275,7 +277,7 @@ impl SceneLifecycle {
 
     fn begin(&mut self, index: u64) {
         if self.open {
-            self.history.invalidate();
+            self.history.finish();
             self.commit_pending = true;
         }
         self.history.begin(index);
@@ -315,23 +317,31 @@ impl SceneLifecycle {
         if !self.open {
             return;
         }
-        let view = view % MAX_VIEWS;
+        if view >= MAX_VIEWS || self.acknowledged & (1 << view) != 0 {
+            return;
+        }
         self.history.submitted(view);
         self.acknowledged |= 1 << view;
     }
 
-    fn finish(&mut self, complete: bool) {
+    fn finish(&mut self) {
         if !self.open {
             return;
         }
-        self.history.finish(complete);
+        self.history.finish();
         self.open = false;
+        self.implicit = false;
         self.selected = None;
         self.commit_pending = true;
-        self.frame_index = self.frame_index.saturating_add(1);
+        if self.acknowledged != 0 {
+            self.frame_index = self.frame_index.saturating_add(1);
+        }
     }
 
     fn flush(&mut self, store: &mut InstanceStore) {
+        if !self.commit_pending {
+            return;
+        }
         for view in 0..MAX_VIEWS {
             if self.acknowledged & (1 << view) != 0 {
                 for &slot in &self.slots[view] {
@@ -340,10 +350,8 @@ impl SceneLifecycle {
             }
         }
         self.acknowledged = 0;
-        if self.commit_pending {
-            store.finish_previous_frame();
-            self.commit_pending = false;
-        }
+        store.finish_previous_frame();
+        self.commit_pending = false;
         for slots in &mut self.slots {
             slots.clear();
         }
@@ -367,6 +375,7 @@ pub struct LitRenderer {
     frame_bytes: [u8; FRAME_GPU_SIZE],
     /// Per-viewport camera history and the open scene invocation (RAA-FRAME).
     scene_frame: SceneLifecycle,
+    camera_jitter: Option<bool>,
     /// The renderer-owned S17 local-light registry (M2-LOCAL-STATE).
     ///
     /// Handoff: `LitRenderer::local_lights_mut(&mut self) -> &mut LocalLights` in
@@ -463,6 +472,7 @@ impl LitRenderer {
             material_classes: Vec::with_capacity(opts.max_materials as usize),
             frame_bytes: [0; FRAME_GPU_SIZE],
             scene_frame: SceneLifecycle::new(),
+            camera_jitter: None,
             local_lights: LocalLights::new(),
             tile_inputs,
             readback,
@@ -1027,7 +1037,8 @@ impl LitRenderer {
 
     /// Selects viewport 0..3 for the next `prepare`; `discontinuity` drops its history.
     pub fn prepare_scene_view(&mut self, view: usize, discontinuity: bool) {
-        self.scene_frame.selected = Some((view % MAX_VIEWS, discontinuity));
+        assert!(view < MAX_VIEWS, "viewport index must fit the history bank");
+        self.scene_frame.selected = Some((view, discontinuity));
     }
 
     /// Acknowledges a really submitted view (never a mere prepare); only these commit.
@@ -1035,8 +1046,19 @@ impl LitRenderer {
         self.scene_frame.submitted(view);
     }
 
-    /// Closes the invocation; `complete` false invalidates camera history before the next
-    /// begin and commits only the acknowledged instances. The pipeline's submission
+    /// Overrides the legacy TAA-driven jitter policy. `None` uses the pipeline's TAA setting.
+    pub fn set_camera_jitter(&mut self, enabled: Option<bool>) {
+        self.camera_jitter = enabled;
+    }
+
+    /// Drops the camera history for a viewport absent from the rendered layout.
+    pub fn suspend_scene_view(&mut self, view: usize) {
+        if view < MAX_VIEWS {
+            self.scene_frame.history.suspend(view);
+        }
+    }
+
+    /// Closes the invocation and commits its acknowledged instances. The pipeline's submission
     /// observation is captured here and the bounded overflow pool resolves it (with the
     /// GPU the map needs) at the next `prepare`.
     pub fn finish_scene_frame(&mut self, complete: bool) {
@@ -1049,7 +1071,7 @@ impl LitRenderer {
             .try_borrow()
             .map(|p| p.scene_submission())
             .unwrap_or_default();
-        self.scene_frame.finish(complete);
+        self.scene_frame.finish();
         if let Ok(mut guard) = self.shared.try_borrow_mut() {
             self.scene_frame.flush(&mut guard.store);
         }
@@ -1066,6 +1088,9 @@ impl LitRenderer {
     /// Refusals (nothing written): `render.too_many_instances`, `render.too_many_materials`,
     /// `render.unknown_mesh`, `material.unknown_id`, `material.blend_unavailable` (a
     /// material's class has no handler), `render.invalid_camera`, `pipeline.busy`.
+    ///
+    /// Direct callers acknowledge the submitted FrameGraph command buffer with
+    /// `FrameGraph::notify_submitted` before preparing another scene frame.
     pub fn prepare(
         &mut self,
         gpu: &GpuContext,
@@ -1077,10 +1102,23 @@ impl LitRenderer {
         if let Some(rgb) = self.pending_background {
             self.set_background(rgb);
         }
+        if self.scene_frame.implicit {
+            let selected = self.scene_frame.selected.take();
+            let observation = self
+                .pipeline
+                .try_borrow()
+                .map_err(|_| pipeline_busy())?
+                .scene_submission();
+            if observation.submitted_mask & 1 != 0 {
+                self.submitted_scene_view(0);
+            }
+            self.finish_scene_frame(observation.submitted_mask & 1 != 0);
+            self.scene_frame.selected = selected;
+        }
         if let Some((index, observation, submitted)) = self.pending_resolve.take() {
             ReadbackCoordinator::resolve(&self.readback, gpu, index, observation, submitted);
         }
-        let (viewport, encode_srgb, tiling, consumer) = {
+        let (viewport, encode_srgb, tiling, taa_enabled) = {
             let p = self.pipeline.try_borrow().map_err(|_| pipeline_busy())?;
             (
                 p.targets().map_or((1, 1), |t| t.size()),
@@ -1089,17 +1127,28 @@ impl LitRenderer {
                 jitter_consumer(p.entry_enabled(TAA_PASS_NAME)),
             )
         };
-        // Direct native callers keep the bounded single-view lifecycle: one invocation per
-        // prepare, its only viewport is view 0 and it is submitted by returning Ok.
-        let single_view = !self.scene_frame.open;
-        if single_view {
-            let index = self.scene_frame.frame_index;
-            self.scene_frame.begin(index);
+        if !self.scene_frame.open {
+            self.pipeline
+                .try_borrow_mut()
+                .map_err(|_| pipeline_busy())?
+                .begin_scene_submission();
+            let selected = self.scene_frame.selected;
+            self.scene_frame.begin(self.scene_frame.frame_index);
+            self.scene_frame.selected = selected;
+            self.scene_frame.implicit = true;
         }
-        let camera = self.scene_frame.prepare(scene, viewport, consumer);
+        let jitter = self.camera_jitter.unwrap_or(taa_enabled);
+        let discontinuity = self.scene_frame.selected.is_some_and(|(_, cut)| cut);
+        let camera = self.scene_frame.prepare(scene, viewport, jitter);
+        if discontinuity || camera.jitter_mode_changed {
+            self.pipeline
+                .try_borrow_mut()
+                .map_err(|_| pipeline_busy())?
+                .invalidate_current_history();
+        }
         let mut guard = self.shared.try_borrow_mut().map_err(|_| pipeline_busy())?;
         let s: &mut LitShared = &mut guard;
-        s.temporal_consumer = consumer;
+        s.temporal_consumer = taa_enabled || jitter;
         s.camera_jitter = camera.current_jitter;
         // Commit the previous invocation before this one stages its records.
         self.scene_frame.flush(&mut s.store);
@@ -1290,7 +1339,7 @@ impl LitRenderer {
             previous_jitter_ndc: camera.previous_jitter,
             previous_view_proj: camera.previous_view_proj,
             history_valid: camera.history_valid,
-            accumulation_enabled: consumer,
+            accumulation_enabled: taa_enabled,
             frame_parity: (camera.frame_index & 1) as u32,
             active_lights,
             tile_columns,
@@ -1371,18 +1420,6 @@ impl LitRenderer {
         s.upload(gpu, &self.frame_bytes);
         stats.uploaded_bytes = s.store.last_uploaded_bytes();
         s.stats = stats;
-        if single_view {
-            let index = self.scene_frame.frame_index;
-            self.scene_frame.submitted(0);
-            self.scene_frame.finish(true);
-            self.scene_frame.flush(&mut s.store);
-            // The caller submits this frame after prepare; the next prepare resolves it.
-            let observation = SubmissionState {
-                submitted_mask: 1,
-                ..SubmissionState::default()
-            };
-            self.pending_resolve = Some((index, observation, true));
-        }
         Ok(counts)
     }
 }
@@ -1779,8 +1816,8 @@ mod tests {
             history
         }
 
-        fn finish(&mut self, complete: bool) {
-            self.lifecycle.finish(complete);
+        fn finish(&mut self) {
+            self.lifecycle.finish();
             self.lifecycle.flush(&mut self.store);
         }
     }
@@ -1806,7 +1843,7 @@ mod tests {
         frame.lifecycle.begin(0);
         frame.prepare(&a, 0, false);
         frame.lifecycle.submitted(0);
-        frame.finish(true);
+        frame.finish();
         let frozen = frame.store.previous_bytes().to_vec();
         assert_eq!(
             (previous_valid(&frozen, 0), previous_valid(&frozen, 1)),
@@ -1823,7 +1860,7 @@ mod tests {
         assert!(!view1.history_valid && view1.frame_index == 1);
         assert_eq!(frame.store.previous_bytes(), frozen.as_slice());
         frame.lifecycle.submitted(1);
-        frame.finish(true);
+        frame.finish();
         assert_eq!(frame.store.previous_bytes(), frozen.as_slice());
     }
 
@@ -1838,7 +1875,7 @@ mod tests {
             frame.prepare(&scene, 0, false);
             assert_eq!(previous_tx(frame.store.previous_bytes(), 0), committed);
             frame.lifecycle.submitted(0);
-            frame.finish(true);
+            frame.finish();
         }
         assert_eq!(previous_tx(frame.store.previous_bytes(), 0), 4.0);
     }

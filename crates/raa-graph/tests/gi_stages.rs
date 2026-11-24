@@ -699,6 +699,7 @@ fn full_gi_stages_renders_frames_without_panic() {
             .execute(&gpu, target.view(), target.size())
             .expect("execute frame graph");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll submitted frame");
@@ -913,6 +914,7 @@ fn restir_stages_render_frames_without_panic() {
             .execute(&gpu, target.view(), target.size())
             .expect("execute frame graph");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll submitted frame");
@@ -1125,6 +1127,7 @@ fn render_plan_frames(name: &str, plan: GraphPlan, frames: u32) -> Option<Render
             .execute(&gpu, target.view(), target.size())
             .expect("execute frame graph");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll submitted frame");
@@ -1491,6 +1494,7 @@ fn forward_slot_reads_stage(
             .execute(&gpu, target.view(), target.size())
             .expect("execute frame graph");
         gpu.queue().submit([commands]);
+        graph.notify_submitted();
         gpu.device()
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll submitted frame");
