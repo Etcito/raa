@@ -85,6 +85,11 @@ class Frame:
     reset: bool = False
     area_pairs: torch.Tensor | None = None
     reflection: torch.Tensor | None = None
+    display_hdr: torch.Tensor | None = None
+
+    @property
+    def display_source(self):
+        return self.hdr if self.display_hdr is None else self.display_hdr
 
 
 @dataclass
@@ -176,7 +181,7 @@ class RealFrame(nn.Module):
         output = {
             "encoded": encoded, "warped": gated, "historyGate": gate, "historyValid": valid,
             "state": state, "coefficients": coefficients, "reflection": reflection,
-            "display": decode_display(frame.hdr, coefficients, frame.output_size, frame.jitter),
+            "display": decode_display(frame.display_source, coefficients, frame.output_size, frame.jitter),
         }
         if frame.area_pairs is not None:
             area = self.reconstruct_area(encoded, gated, frame.area_pairs)

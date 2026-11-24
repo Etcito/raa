@@ -79,6 +79,60 @@ class RealFrameTests(unittest.TestCase):
         self.assertAlmostEqual(perfect_ssim, 1.0)
         self.assertLess(changed_ssim, perfect_ssim)
 
+    def test_joint_display_uses_composite_without_changing_late_forward_features(self):
+        depth = torch.ones((1, 1, 2, 3))
+        normals = torch.cat((0 * depth, 0 * depth, depth, 0 * depth), dim=1)
+        hdr = depth.expand(1, 3, 2, 3)
+        frame = Frame(hdr, normals, depth, torch.zeros_like(hdr), 0 * depth, depth, (0, 0), (3, 5))
+        composite = dataclasses.replace(frame, display_hdr=2 * hdr)
+        model = seeded(0)
+        before, _ = model(frame)
+        after, _ = model(composite)
+        torch.testing.assert_close(before["state"], after["state"])
+        torch.testing.assert_close(before["reflection"], after["reflection"])
+        self.assertTrue(bool((after["display"] > before["display"]).all()))
+        torch.testing.assert_close(TRAIN["spatial_baseline"](composite),
+                                   2 * TRAIN["spatial_baseline"](frame))
+
+    def test_joint_display_loss_has_finite_gradient_at_black(self):
+        hdr = torch.zeros((1, 3, 2, 3), requires_grad=True)
+        TRAIN["fixed_display"](hdr).sum().backward()
+        self.assertTrue(bool(hdr.grad.isfinite().all()))
+        self.assertTrue(bool((hdr.grad > 0).all()))
+
+    def test_final_split_rejects_renamed_replays_and_duplicate_planes(self):
+        split = {"groupIds": ["dev"], "replayHashes": ["same tape"],
+                 "frameIds": ["dev-0"], "fingerprints": [("a", "b", "c")]}
+        heldout = {"groupIds": ["final"], "replayHashes": ["same tape"],
+                   "frameIds": ["final-0"], "fingerprints": [("z", "y", "x")]}
+        with self.assertRaisesRegex(ValueError, "replayHashes"):
+            TRAIN["require_separate"](split, heldout)
+        heldout["replayHashes"] = ["new tape"]
+        TRAIN["require_separate"](split, heldout)
+        heldout["fingerprints"] = [["a", "b", "c"]]
+        with self.assertRaisesRegex(ValueError, "fingerprints"):
+            TRAIN["require_separate"](split, heldout)
+
+    def test_reflection_change_excludes_invalid_transition_and_reactive_resets(self):
+        shape = (1, 4)
+        motion = torch.zeros((1, 3, *shape))
+        reactive = torch.tensor([[[[0.0, 0.0, 1.0, 0.0]]]])
+        reflect = torch.zeros((1, 6, *shape))
+        reflect[:, 3:5] = 1
+        previous = reflect[:, 3:5].clone()
+        previous[:, 0, 0, 1] = 0
+        previous[:, 1, 0, 3] = 2
+        valid = torch.ones((1, 1, *shape), dtype=torch.bool)
+        residual = torch.ones((1, 3, *shape))
+        frame = Frame(residual, None, None, motion, reactive, None, (0, 0), shape,
+                      reflection=reflect)
+        old = (torch.zeros_like(residual), previous, (0.0, 0.0))
+        delta, keep = TRAIN["reflection_residual_change"](frame, residual, old, valid)
+        torch.testing.assert_close(delta, residual)
+        self.assertEqual(keep.flatten().tolist(), [True, False, False, False])
+        self.assertIsNone(TRAIN["reflection_residual_change"](
+            dataclasses.replace(frame, reset=True), residual, old, valid))
+
     def test_loader_rejects_torn_planes_and_non_windows_reports(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
