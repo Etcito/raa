@@ -575,3 +575,6 @@ impl EngineState {
         prepare_view(self, gpu, index, size)
     }
 }
+
+#[path = "m07_pipeline/pass_resolutions.rs"]
+mod pass_resolutions;
