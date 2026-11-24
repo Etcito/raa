@@ -232,7 +232,7 @@ try {
     } else if (spherical || mirror) {
       for (const record of data.captures) {
         const bytes = files.get(record.file);
-        if (!/^[a-z0-9-]+\.(?:rgba16f|u32le)$/.test(record.file) || !bytes || bytes.length !== record.byteLength
+        if (!/^[a-z0-9-]+\.(?:rgba16f|u32le|bin)$/.test(record.file) || !bytes || bytes.length !== record.byteLength
             || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
           throw new Error(`Physical capture length or hash mismatch: ${record.file}`);
         }

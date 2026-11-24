@@ -82,10 +82,12 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       return { file, byteLength: data.byteLength, sha256: await digest(data) };
     }
 
-    async function capture(id, traced, raw = false, evidenceSeed) {
+    async function capture(id, traced, raw = false, evidenceSeed, reference = false) {
       checkTime();
-      const { data, size, roughEvidence } = await engine.captureMeshLighting(timeMs, traced, raw, evidenceSeed);
-      const expected = raw ? extent.map(value => value / 2) : extent;
+      const { data, size, roughEvidence } = reference
+        ? await engine.captureTrainingReference(timeMs, evidenceSeed, 1)
+        : await engine.captureMeshLighting(timeMs, traced, raw, evidenceSeed);
+      const expected = raw && !reference ? extent.map(value => value / 2) : extent;
       requireEvidence(size.join() === expected.join(), 'Capture extent changed', { id, size, expected });
       const frame = engine.stats().frames - 1;
       let trace = engine.meshTracingStats();
@@ -98,7 +100,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
         cache: engine.sphericalGiStats(), grid: engine.sphericalGi() };
       captures.push(entry);
       if (roughEvidence) captures.push({ id: id + '-rough-hits', size: roughEvidence.size,
-        ...await save(id + '-rough-hits', roughEvidence.data, 'u32le') });
+        stride: 48, dtype: 'f32le/u32le', ...await save(id + '-rough-hits', roughEvidence.data, 'bin') });
       return { ...entry, rgb: rgbPlane(data, size), roughEvidence };
     }
 
@@ -129,7 +131,24 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     const comparison = compare(sphere.rgb, volume.rgb);
     const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
       check: requireEvidence, compare });
-    if (!baseline) set('model-assisted-path', false);
+    let reference;
+    if (!baseline) {
+      set('model-assisted-path', false);
+      // Keep the cache resident while asking the independent reference to render.
+      engine.setMeshTracing({ reference: true, pathMode: 'off', reflections: true, lightingOutput: 'combined',
+        pathBounces: 2, reflectionBounces: 2 });
+      const attached = await capture('reference-cache-resident', true, true, 73030, true);
+      requireEvidence(attached.grid.enabled && attached.cache?.readyCells > 0,
+        'Reference exclusion requires a populated spherical cache', attached.cache);
+      engine.setSphericalGi({ enabled: false });
+      const detached = await capture('reference-cache-released', true, true, 73030, true);
+      const neutral = compare(attached.rgb, detached.rgb);
+      requireEvidence(neutral.peak === 0 && [attached, detached].every(sample =>
+        sample.trace.referencePixels > 0 && sample.trace.modelPixels === 0 && !sample.roughEvidence),
+      'Independent reference output moved when the resident spherical cache was released', { neutral, attached: attached.trace, detached: detached.trace });
+      reference = { seed: 73030, residentCells: attached.cache.readyCells, ...neutral };
+      engine.setMeshTracing({ reference: false, pathMode: 'off' });
+    }
 
     // The home mirror is enclosed and all its first rays hit geometry. Give the
     // miss control an isolated mirror that reflects into empty space.
@@ -152,7 +171,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     return { json: {
       source: { kind: 'windows-render', buildId, facts }, size: extent, camera: preset.selection.camera, timeMs,
       preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
-      baselineFacts, residency, comparison, learned, missCamera, miss: miss.trace, captures,
+      baselineFacts, residency, comparison, learned, reference, missCamera, miss: miss.trace, captures,
     }, files };
   } finally {
     engine.dispose();
