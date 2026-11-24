@@ -82,7 +82,7 @@ export function inspectMirrorCoverage(cold, warm, residency, check) {
     zeroCoverage: stats.sphericalDiffuseHits === 0 || (inGrid > 0 && supported === 0) };
 }
 
-export async function measureSharpSecondary({ engine, capture, check, compare, defaultConfidence }) {
+export async function measureSharpSecondary({ engine, capture, check, compare, settle, defaultConfidence }) {
   // Keep the confidence pass's inputs and raise only its threshold during
   // this bracket. All eligible rays must actually take the BVH route.
   const policy = indirectGrid => engine.setMeshTracing({ indirectGrid, confidenceThreshold: 1 });
@@ -121,6 +121,11 @@ export async function measureSharpSecondary({ engine, capture, check, compare, d
       responses.push({ name, ...response });
     }
     groups(7);
+    policy('spherical');
+    // Avoid the separate temporally updated volume feedback in the exact
+    // physical/overlay comparison. The earlier Auto test retains fallback.
+    engine.setGlobalIllumination({ enabled: false, screenSpace: false });
+    await settle('spherical');
     const physical = await capture('sharp-bvh-debug-off', true, true);
     const forward = await capture('sharp-bvh-overlay-off', false);
     engine.setSphericalGi({ debug: 'occupancy' });
@@ -128,7 +133,9 @@ export async function measureSharpSecondary({ engine, capture, check, compare, d
     const overlay = await capture('sharp-bvh-overlay-occupancy', false);
     sameFirstRay(physical, debug, check);
     const sceneLinear = compare(physical.rgb, debug.rgb), presentation = compare(forward.rgb, overlay.rgb);
-    check(sceneLinear.peak === 0 && presentation.changedPixels > 0,
+    check(physical.trace.sphericalDiffuseHits > 0 && physical.trace.volumeDiffuseHits === 0
+      && physical.trace.sphericalDiffuseHits === debug.trace.sphericalDiffuseHits
+      && sceneLinear.peak === 0 && presentation.changedPixels > 0,
       'Debug overlay changed physical reflected lighting or was invisible', { sceneLinear, presentation });
     return { active: active.trace, bypass: bypass.trace, volume: volume.trace, effect, volumeEffect,
       groups: responses, debug: { sceneLinear, presentation } };

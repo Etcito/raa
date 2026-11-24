@@ -139,7 +139,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     if (coverageOnly || coverage?.zeroCoverage) return { json: { ...manifest, coverageOnly }, files };
     let phase = 'forced BVH';
     try {
-      const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare,
+      const sharp = baseline ? null : await measureSharpSecondary({ engine, capture, check: requireEvidence, compare, settle,
         defaultConfidence: initial['reflection-confidence'] });
       if (sharpOnly) return { json: { ...manifest, sharp, sharpOnly }, files };
       phase = 'learned';

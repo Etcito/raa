@@ -291,6 +291,7 @@ function setOption(engine, state, id, enabled) {
     }
     if (state.values[id] !== enabled) {
       if (id === 'indirect-solver' || id === 'gi-grid') setGi(engine, state, { [id]: enabled });
+      else if (id === 'spherical-mirror-cache') setTracing(engine, state, { [id]: enabled });
       else if (isSphericalOption(id)) applySpherical(engine, state, { ...state.enabled, ...state.values, [id]: enabled });
       else if (id !== 'bounce-depth' || state.values['lighting-view'] === 'bounce') {
         setTracing(engine, state, { [id]: enabled });
