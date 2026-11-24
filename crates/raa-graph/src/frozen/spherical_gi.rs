@@ -10,10 +10,83 @@ pub fn plan() -> crate::plan::GraphPlan {
         name: "Spherical GI".to_string(),
         nodes: vec![
             crate::plan::PlanNode {
+                id: "skyAtmosphere".to_string(),
+                type_id: "pass.sky.atmosphere".to_string(),
+                type_version: 1,
+                order_index: 0,
+                params: vec![
+                    (
+                        "skyViewSteps".to_string(),
+                        crate::catalog::ParamValue::Int(32),
+                    ),
+                    (
+                        "horizonFade".to_string(),
+                        crate::catalog::ParamValue::Number(0.006),
+                    ),
+                ],
+                inputs: vec![],
+                compute: None,
+            },
+            crate::plan::PlanNode {
+                id: "skyCloudLighting".to_string(),
+                type_id: "pass.sky.cloud-lighting".to_string(),
+                type_version: 1,
+                order_index: 1,
+                params: vec![
+                    (
+                        "cloudWeatherTile".to_string(),
+                        crate::catalog::ParamValue::Number(36000.0),
+                    ),
+                    (
+                        "cloudShapeTile".to_string(),
+                        crate::catalog::ParamValue::Number(7000.0),
+                    ),
+                    (
+                        "cloudDetailTile".to_string(),
+                        crate::catalog::ParamValue::Number(700.0),
+                    ),
+                    (
+                        "cloudExtinction".to_string(),
+                        crate::catalog::ParamValue::Number(0.05),
+                    ),
+                    (
+                        "cloudAlbedo".to_string(),
+                        crate::catalog::ParamValue::Number(0.98),
+                    ),
+                    (
+                        "cloudCirrusHeight".to_string(),
+                        crate::catalog::ParamValue::Number(9000.0),
+                    ),
+                    (
+                        "cloudMaxDistance".to_string(),
+                        crate::catalog::ParamValue::Number(90000.0),
+                    ),
+                    (
+                        "cloudMaxPath".to_string(),
+                        crate::catalog::ParamValue::Number(40000.0),
+                    ),
+                    (
+                        "cloudShadowSamples".to_string(),
+                        crate::catalog::ParamValue::Int(16),
+                    ),
+                ],
+                inputs: vec![],
+                compute: None,
+            },
+            crate::plan::PlanNode {
+                id: "skyEnv".to_string(),
+                type_id: "pass.sky.env".to_string(),
+                type_version: 1,
+                order_index: 2,
+                params: vec![],
+                inputs: vec![],
+                compute: None,
+            },
+            crate::plan::PlanNode {
                 id: "skin".to_string(),
                 type_id: "pass.skin".to_string(),
                 type_version: 1,
-                order_index: 0,
+                order_index: 3,
                 params: vec![],
                 inputs: vec![],
                 compute: None,
@@ -22,7 +95,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "shadowCsm".to_string(),
                 type_id: "pass.shadow.csm".to_string(),
                 type_version: 1,
-                order_index: 1,
+                order_index: 4,
                 params: vec![
                     (
                         "softness".to_string(),
@@ -44,7 +117,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "prepass".to_string(),
                 type_id: "pass.prepass".to_string(),
                 type_version: 1,
-                order_index: 2,
+                order_index: 5,
                 params: vec![],
                 inputs: vec![],
                 compute: None,
@@ -53,7 +126,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "lightTiles".to_string(),
                 type_id: "pass.light.tiles".to_string(),
                 type_version: 1,
-                order_index: 3,
+                order_index: 6,
                 params: vec![],
                 inputs: vec![crate::plan::PlanInput {
                     port: "depth".to_string(),
@@ -69,7 +142,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "ao".to_string(),
                 type_id: "pass.ao.gtao".to_string(),
                 type_version: 1,
-                order_index: 4,
+                order_index: 7,
                 params: vec![
                     (
                         "radius".to_string(),
@@ -108,10 +181,63 @@ pub fn plan() -> crate::plan::GraphPlan {
                 compute: None,
             },
             crate::plan::PlanNode {
+                id: "skyCloudScreen".to_string(),
+                type_id: "pass.sky.cloud-screen".to_string(),
+                type_version: 1,
+                order_index: 8,
+                params: vec![
+                    (
+                        "cloudDomeBelow".to_string(),
+                        crate::catalog::ParamValue::Number(0.05),
+                    ),
+                    (
+                        "cloudDomeLightSamples".to_string(),
+                        crate::catalog::ParamValue::Int(5),
+                    ),
+                    (
+                        "cloudDomeAnimatedFloor".to_string(),
+                        crate::catalog::ParamValue::Number(0.0625),
+                    ),
+                    (
+                        "cloudDomeBurst".to_string(),
+                        crate::catalog::ParamValue::Int(2),
+                    ),
+                    (
+                        "cloudScreenLightSamples".to_string(),
+                        crate::catalog::ParamValue::Int(5),
+                    ),
+                    (
+                        "cloudScreenMovingBlend".to_string(),
+                        crate::catalog::ParamValue::Number(0.12),
+                    ),
+                    (
+                        "cloudScreenPrior".to_string(),
+                        crate::catalog::ParamValue::Number(6.0),
+                    ),
+                    (
+                        "cloudScreenAnimatedFloor".to_string(),
+                        crate::catalog::ParamValue::Number(0.0625),
+                    ),
+                    (
+                        "cloudScreenBurst".to_string(),
+                        crate::catalog::ParamValue::Int(2),
+                    ),
+                ],
+                inputs: vec![crate::plan::PlanInput {
+                    port: "depth".to_string(),
+                    source: crate::plan::InputSource::Link {
+                        node: "prepass".to_string(),
+                        port: "depth".to_string(),
+                        history: false,
+                    },
+                }],
+                compute: None,
+            },
+            crate::plan::PlanNode {
                 id: "spherical".to_string(),
                 type_id: "pass.gi.spherical".to_string(),
                 type_version: 1,
-                order_index: 5,
+                order_index: 9,
                 params: vec![
                     (
                         "sphereSubdivision".to_string(),
@@ -142,7 +268,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "forward".to_string(),
                 type_id: "pass.forward".to_string(),
                 type_version: 1,
-                order_index: 6,
+                order_index: 10,
                 params: vec![
                     ("msaa".to_string(), crate::catalog::ParamValue::Int(4)),
                     (
@@ -151,7 +277,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                     ),
                     (
                         "lightingOutput".to_string(),
-                        crate::catalog::ParamValue::Enum("indirect".to_string()),
+                        crate::catalog::ParamValue::Enum("combined".to_string()),
                     ),
                 ],
                 inputs: vec![
@@ -173,7 +299,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                     },
                     crate::plan::PlanInput {
                         port: "envSpecular".to_string(),
-                        source: crate::plan::InputSource::Absent,
+                        source: crate::plan::InputSource::Link {
+                            node: "skyEnv".to_string(),
+                            port: "envSpecular".to_string(),
+                            history: false,
+                        },
                     },
                     crate::plan::PlanInput {
                         port: "ao".to_string(),
@@ -197,7 +327,11 @@ pub fn plan() -> crate::plan::GraphPlan {
                     },
                     crate::plan::PlanInput {
                         port: "cloudTransmittance".to_string(),
-                        source: crate::plan::InputSource::Absent,
+                        source: crate::plan::InputSource::Link {
+                            node: "skyCloudLighting".to_string(),
+                            port: "cloudTransmittance".to_string(),
+                            history: false,
+                        },
                     },
                     crate::plan::PlanInput {
                         port: "opaqueColor".to_string(),
@@ -219,10 +353,19 @@ pub fn plan() -> crate::plan::GraphPlan {
                 compute: None,
             },
             crate::plan::PlanNode {
+                id: "skyBackground".to_string(),
+                type_id: "pass.sky.background".to_string(),
+                type_version: 1,
+                order_index: 11,
+                params: vec![],
+                inputs: vec![],
+                compute: None,
+            },
+            crate::plan::PlanNode {
                 id: "tonemap".to_string(),
                 type_id: "pass.tonemap".to_string(),
                 type_version: 1,
-                order_index: 7,
+                order_index: 12,
                 params: vec![
                     (
                         "mapper".to_string(),
@@ -261,7 +404,7 @@ pub fn plan() -> crate::plan::GraphPlan {
                 id: "out".to_string(),
                 type_id: "output.display".to_string(),
                 type_version: 1,
-                order_index: 8,
+                order_index: 13,
                 params: vec![],
                 inputs: vec![crate::plan::PlanInput {
                     port: "color".to_string(),
@@ -374,10 +517,79 @@ pub fn plan() -> crate::plan::GraphPlan {
                 },
                 history: false,
             },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "prepass".to_string(),
+                    port: "depth".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "skyCloudScreen".to_string(),
+                    port: "depth".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "skyCloudLighting".to_string(),
+                    port: "cloudTransmittance".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "forward".to_string(),
+                    port: "cloudTransmittance".to_string(),
+                },
+                history: false,
+            },
+            crate::plan::PlanLink {
+                from: crate::plan::PlanPortRef {
+                    node: "skyEnv".to_string(),
+                    port: "envSpecular".to_string(),
+                },
+                to: crate::plan::PlanPortRef {
+                    node: "forward".to_string(),
+                    port: "envSpecular".to_string(),
+                },
+                history: false,
+            },
         ],
         resources: vec![
             crate::plan::PlanResource {
                 id: 1,
+                producer: crate::plan::PlanPortRef {
+                    node: "skyCloudLighting".to_string(),
+                    port: "cloudTransmittance".to_string(),
+                },
+                ty: crate::catalog::PortType::Image2dArray,
+                format: Some(crate::catalog::GraphFormat::Rgba16Float),
+                size: crate::catalog::SizeSpec::Fixed {
+                    width: 256,
+                    height: 256,
+                },
+                mips: 1,
+                layers: 2,
+                first_use: 1,
+                last_use: 10,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 2,
+                producer: crate::plan::PlanPortRef {
+                    node: "skyEnv".to_string(),
+                    port: "envSpecular".to_string(),
+                },
+                ty: crate::catalog::PortType::ImageCube,
+                format: Some(crate::catalog::GraphFormat::Rgba16Float),
+                size: crate::catalog::SizeSpec::Fixed {
+                    width: 256,
+                    height: 256,
+                },
+                mips: 6,
+                layers: 1,
+                first_use: 2,
+                last_use: 10,
+                history: false,
+            },
+            crate::plan::PlanResource {
+                id: 3,
                 producer: crate::plan::PlanPortRef {
                     node: "shadowCsm".to_string(),
                     port: "shadowMap".to_string(),
@@ -387,12 +599,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::FromParam("resolution"),
                 mips: 1,
                 layers: 4,
-                first_use: 1,
-                last_use: 6,
+                first_use: 4,
+                last_use: 10,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 2,
+                id: 4,
                 producer: crate::plan::PlanPortRef {
                     node: "prepass".to_string(),
                     port: "depth".to_string(),
@@ -402,12 +614,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 2,
-                last_use: 7,
+                first_use: 5,
+                last_use: 12,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 3,
+                id: 5,
                 producer: crate::plan::PlanPortRef {
                     node: "prepass".to_string(),
                     port: "normal".to_string(),
@@ -417,12 +629,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 2,
-                last_use: 4,
+                first_use: 5,
+                last_use: 7,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 4,
+                id: 6,
                 producer: crate::plan::PlanPortRef {
                     node: "lightTiles".to_string(),
                     port: "lightTiles".to_string(),
@@ -432,12 +644,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(0.0625),
                 mips: 1,
                 layers: 128,
-                first_use: 3,
-                last_use: 6,
+                first_use: 6,
+                last_use: 10,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 5,
+                id: 7,
                 producer: crate::plan::PlanPortRef {
                     node: "ao".to_string(),
                     port: "ao".to_string(),
@@ -447,12 +659,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 4,
-                last_use: 6,
+                first_use: 7,
+                last_use: 10,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 6,
+                id: 8,
                 producer: crate::plan::PlanPortRef {
                     node: "spherical".to_string(),
                     port: "lookup".to_string(),
@@ -462,12 +674,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 5,
-                last_use: 6,
+                first_use: 9,
+                last_use: 10,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 7,
+                id: 9,
                 producer: crate::plan::PlanPortRef {
                     node: "forward".to_string(),
                     port: "color".to_string(),
@@ -477,12 +689,12 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 6,
-                last_use: 7,
+                first_use: 10,
+                last_use: 12,
                 history: false,
             },
             crate::plan::PlanResource {
-                id: 8,
+                id: 10,
                 producer: crate::plan::PlanPortRef {
                     node: "tonemap".to_string(),
                     port: "color".to_string(),
@@ -492,8 +704,8 @@ pub fn plan() -> crate::plan::GraphPlan {
                 size: crate::catalog::SizeSpec::Scale(1.0),
                 mips: 1,
                 layers: 1,
-                first_use: 7,
-                last_use: 8,
+                first_use: 12,
+                last_use: 13,
                 history: false,
             },
         ],

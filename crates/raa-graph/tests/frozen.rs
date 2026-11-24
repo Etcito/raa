@@ -69,7 +69,10 @@ fn frozen_registry_has_the_shipped_graphs() {
     let catalog = Catalog::build();
     let frozen = registry::frozen_all();
     let names: Vec<_> = frozen.iter().map(|(name, _, _)| *name).collect();
-    assert_eq!(names, ["debug", "full_gi", "simple_forward", "spherical_gi"]);
+    assert_eq!(
+        names,
+        ["debug", "full_gi", "simple_forward", "spherical_gi"]
+    );
 
     for (name, make_plan, source_json) in frozen {
         let frozen_plan = make_plan();
@@ -160,4 +163,68 @@ fn changed_node_version_fails_the_catalog_version_assertion() {
         assertion.is_err(),
         "the catalog version assertion must reject an artificially changed frozen node version"
     );
+}
+
+#[test]
+fn spherical_preset_keeps_physical_sky_and_ltc_direct_lighting() {
+    use raa_graph::format::parse_graph;
+    use raa_graph::plan::InputSource;
+    use raa_loader::json::JsonValue;
+
+    let (_, freeze, source) = registry::frozen_all()
+        .into_iter()
+        .find(|(name, _, _)| *name == "spherical_gi")
+        .expect("spherical preset is registered");
+    let doc = parse_graph(source).unwrap();
+    let authored_forward = doc.nodes.iter().find(|node| node.id == "forward").unwrap();
+    for (key, value) in [("mode", "ltc"), ("lightingOutput", "combined")] {
+        assert!(
+            authored_forward
+                .params
+                .contains(&(key.into(), JsonValue::String(value.into())))
+        );
+    }
+
+    let plan = freeze();
+    assert_eq!(plan, plan_from_json(source).unwrap());
+    let order = |id: &str| {
+        plan.nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+            .order_index
+    };
+    let forward = plan.nodes.iter().find(|node| node.id == "forward").unwrap();
+    for (producer, output, input) in [
+        ("skyEnv", "envSpecular", "envSpecular"),
+        (
+            "skyCloudLighting",
+            "cloudTransmittance",
+            "cloudTransmittance",
+        ),
+        ("lightTiles", "lightTiles", "lightTiles"),
+        ("spherical", "lookup", "sphericalLookup"),
+    ] {
+        let feed = forward
+            .inputs
+            .iter()
+            .find(|feed| feed.port == input)
+            .unwrap();
+        assert_eq!(
+            feed.source,
+            InputSource::Link {
+                node: producer.into(),
+                port: output.into(),
+                history: false,
+            }
+        );
+        assert!(order(producer) < order("forward"));
+    }
+    // These physical sky passes hand resources to the contributor through the shared sky feature.
+    assert!(order("skyAtmosphere") < order("skyCloudLighting"));
+    assert!(order("skyCloudLighting") < order("skyEnv"));
+    assert!(order("prepass") < order("skyCloudScreen"));
+    assert!(order("skyCloudScreen") < order("forward"));
+    assert!(order("forward") < order("skyBackground"));
+    assert!(order("skyBackground") < order("tonemap"));
 }
