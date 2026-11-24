@@ -2,6 +2,7 @@ export const lightingOptions = [
   { id: 'lighting-view', label: 'Lighting', value: 'combined', choices: [
     ['combined', 'Combined'], ['direct', 'Direct only'], ['indirect', 'Indirect only'], ['bounce', 'Exact bounce depth'],
     ['diffuse-indirect', 'Learned indirect diffuse'], ['rough-specular', 'Learned rough reflections'],
+    ['rough-grid', 'Learned rough cache contribution'],
   ] },
   { id: 'bounce-depth', label: 'Ray bounce depth', value: 1, min: 0, max: 12, step: 1 },
   { id: 'indirect-solver', label: 'Volume indirect solver', value: 'probes', choices: [
@@ -21,7 +22,7 @@ export function mountLightingNotice(container, controls) {
   const solver = controls.get('indirect-solver');
   for (const control of [view, depth, solver]) control.setAttribute('aria-describedby', notice.id);
   const exact = [...view.options].find(option => option.value === 'bounce');
-  const fitted = [...view.options].filter(option => ['diffuse-indirect', 'rough-specular'].includes(option.value));
+  const fitted = [...view.options].filter(option => ['diffuse-indirect', 'rough-specular', 'rough-grid'].includes(option.value));
 
   let previous;
   return state => {

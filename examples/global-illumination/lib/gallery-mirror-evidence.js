@@ -1,6 +1,7 @@
 import { setCanvasSize } from '../../../web/common/page-runner.js';
 import { interactiveInterior } from './interactive-interior.js';
 import { panel } from './content.js';
+import { measureLearnedSecondary } from './gallery-secondary-evidence.js';
 import { digest } from './gallery-path-model.js';
 
 const scene = interactiveInterior.default;
@@ -81,9 +82,9 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       return { file, byteLength: data.byteLength, sha256: await digest(data) };
     }
 
-    async function capture(id, traced, raw = false) {
+    async function capture(id, traced, raw = false, evidenceSeed) {
       checkTime();
-      const { data, size } = await engine.captureMeshLighting(timeMs, traced, raw);
+      const { data, size, roughEvidence } = await engine.captureMeshLighting(timeMs, traced, raw, evidenceSeed);
       const expected = raw ? extent.map(value => value / 2) : extent;
       requireEvidence(size.join() === expected.join(), 'Capture extent changed', { id, size, expected });
       const frame = engine.stats().frames - 1;
@@ -96,7 +97,9 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
       const entry = { id, frame, size, ...await save(id, data, 'rgba16f'), trace: traced ? trace : null,
         cache: engine.sphericalGiStats(), grid: engine.sphericalGi() };
       captures.push(entry);
-      return { ...entry, rgb: rgbPlane(data, size) };
+      if (roughEvidence) captures.push({ id: id + '-rough-hits', size: roughEvidence.size,
+        ...await save(id + '-rough-hits', roughEvidence.data, 'u32le') });
+      return { ...entry, rgb: rgbPlane(data, size), roughEvidence };
     }
 
     requireEvidence(initial['reflection-bounces'] === 2 && initial['gi-grid'] === 'volume'
@@ -124,6 +127,9 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     const residency = await settle('spherical');
     const sphere = await capture('spherical-default-mirror', true);
     const comparison = compare(sphere.rgb, volume.rgb);
+    const learned = baseline ? null : await measureLearnedSecondary({ engine, state, set, settle, capture,
+      check: requireEvidence, compare });
+    if (!baseline) set('model-assisted-path', false);
 
     // The home mirror is enclosed and all its first rays hit geometry. Give the
     // miss control an isolated mirror that reflects into empty space.
@@ -146,7 +152,7 @@ export async function measureGalleryMirror({ target, canvas, raa }, {
     return { json: {
       source: { kind: 'windows-render', buildId, facts }, size: extent, camera: preset.selection.camera, timeMs,
       preset: preset.id, initial, baseline, layout: 'linear-scene RGBA16F little-endian top-down',
-      baselineFacts, residency, comparison, missCamera, miss: miss.trace, captures,
+      baselineFacts, residency, comparison, learned, missCamera, miss: miss.trace, captures,
     }, files };
   } finally {
     engine.dispose();

@@ -100,7 +100,7 @@ function setTracing(engine, state, update = {}) {
   const reference = values['path-reference'];
   const pathMode = values['model-assisted-path'] ? 'learned' : 'off';
   const requested = values['lighting-view'];
-  const fittedLobe = requested === 'diffuse-indirect' || requested === 'rough-specular';
+  const fittedLobe = ['diffuse-indirect', 'rough-specular', 'rough-grid'].includes(requested);
   const available = requested === 'bounce' ? reference : !fittedLobe || (!reference && pathMode === 'learned');
   const lightingOutput = available ? requested : 'combined';
   const isolated = lightingOutput !== 'combined';
@@ -163,7 +163,9 @@ function build(engine, _lib, selected = variant) {
   const solid = (position, half, surface) => instance(withSurface(box([0, 0, 0], half), surface), position);
 
   const plaster = material(room.colors.white);
-  const floor = material([0.55, 0.52, 0.48], 0.28);
+  const floorColor = [0.55, 0.52, 0.48];
+  const floor = material(floorColor, 0.28);
+  state.setEvidenceFloorRoughness = roughness => engine.setSurfaceMaterial(floor, { color: floorColor, roughness });
   const wood = material([0.37, 0.23, 0.13]);
   const dark = material([0.12, 0.15, 0.19]);
   const ceramic = material([0.88, 0.81, 0.68], 0.25);
@@ -248,7 +250,6 @@ function build(engine, _lib, selected = variant) {
   });
   solid([entryExhibit[0], 0.42, entryExhibit[2]], [0.46, 0.42, 0.38], dark);
   state.entryNode = instance(withSurface(sphere(0.32, 32), glaze), entryExhibit).node;
-  state.entrySurface = glaze;
   if (state.enabled['geometry-reflections'] || state.enabled['path-reference']
       || state.values['lighting-view'] !== 'combined') {
     state.values['lighting-view'] = setTracing(engine, state);
@@ -279,7 +280,7 @@ function setOption(engine, state, id, enabled) {
       ? option.choices.some(([value]) => value === enabled)
       : Number.isFinite(enabled) && enabled >= option.min && enabled <= option.max
         && (option.step !== 1 || Number.isInteger(enabled));
-    const fittedLobe = id === 'lighting-view' && ['diffuse-indirect', 'rough-specular'].includes(enabled);
+    const fittedLobe = id === 'lighting-view' && ['diffuse-indirect', 'rough-specular', 'rough-grid'].includes(enabled);
     if (!valid || (id === 'lighting-view' && enabled === 'bounce' && !state.enabled['path-reference'])
         || (fittedLobe && (!state.enabled['model-assisted-path'] || state.enabled['path-reference']))) {
       throw new TypeError(`Invalid interactive interior value for ${id}`);
