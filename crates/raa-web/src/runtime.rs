@@ -2,7 +2,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use raa_core::{
@@ -75,12 +76,71 @@ const PREDICTION_PENDING: u8 = 0;
 const PREDICTION_USABLE: u8 = 1;
 const PREDICTION_REJECTED: u8 = 2;
 
+/// CPU clock timestamps for one submission attempt and its asynchronous validation.
+#[derive(Clone, Copy, Debug)]
+pub struct PredictionTiming {
+    pub cutoff_ms: f64,
+    pub deadline_ms: f64,
+    pub reserve_ms: f64,
+    pub checked_ms: f64,
+    pub recorded_ms: Option<f64>,
+    pub submitted_ms: Option<f64>,
+    pub status: &'static str,
+}
+
+pub struct PredictionCompletion {
+    status: AtomicU8,
+    ready_at: AtomicU64,
+    waiters: Mutex<Vec<Waker>>,
+}
+
+impl PredictionCompletion {
+    fn new() -> Self {
+        Self {
+            status: AtomicU8::new(PREDICTION_PENDING),
+            ready_at: AtomicU64::new(FIRST_FRAME_UNSET),
+            waiters: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn complete(&self, status: u8) {
+        if let Some(performance) = web_sys::window().and_then(|window| window.performance()) {
+            self.ready_at.store(performance.now().to_bits(), Ordering::Relaxed);
+        }
+        self.status.store(status, Ordering::Release);
+        let waiters = std::mem::take(&mut *self.waiters.lock().expect("prediction completion waiters"));
+        for waiter in waiters { waiter.wake(); }
+    }
+
+    fn status(&self) -> u8 { self.status.load(Ordering::Acquire) }
+
+    pub fn validated_ms(&self) -> Option<f64> {
+        let bits = self.ready_at.load(Ordering::Acquire);
+        (bits != FIRST_FRAME_UNSET).then_some(f64::from_bits(bits))
+    }
+
+    pub async fn usable(&self) -> bool {
+        std::future::poll_fn(|cx| {
+            let mut waiters = self.waiters.lock().expect("prediction completion waiters");
+            match self.status() {
+                PREDICTION_PENDING => {
+                    if !waiters.iter().any(|waiter| waiter.will_wake(cx.waker())) {
+                        waiters.push(cx.waker().clone());
+                    }
+                    Poll::Pending
+                }
+                status => Poll::Ready(status == PREDICTION_USABLE),
+            }
+        }).await
+    }
+}
+
 struct RetainedPrediction {
     retired: bool,
     key: PredictionKey,
     source_id: u64,
     texture: wgpu::Texture,
-    status: Arc<AtomicU8>,
+    completion: Arc<PredictionCompletion>,
     deadline_ms: f64,
 }
 
@@ -110,6 +170,7 @@ pub struct WebRuntime {
     pending_real: Option<RetainedReal>,
     ready_real: Option<RetainedReal>,
     prediction: Option<RetainedPrediction>,
+    prediction_timing: Option<PredictionTiming>,
 }
 
 impl WebRuntime {
@@ -168,6 +229,7 @@ impl WebRuntime {
             pending_real: None,
             ready_real: None,
             prediction: None,
+            prediction_timing: None,
         })
     }
 
@@ -396,9 +458,18 @@ impl WebRuntime {
             &wgpu::Texture,
         ) -> Result<(wgpu::CommandBuffer, wgpu::Buffer), RaaError>,
     ) -> Result<bool, RaaError> {
-        if !self.admit_prediction(&key, source_id, deadline_ms, measured_cost_ms)? {
-            return Ok(false);
-        }
+        let status = self.prediction_admission(&key, source_id, deadline_ms, measured_cost_ms)?;
+        let mut timing = PredictionTiming {
+            cutoff_ms: key.cutoff_ms,
+            deadline_ms,
+            reserve_ms: measured_cost_ms,
+            checked_ms: self.performance.now(),
+            recorded_ms: None,
+            submitted_ms: None,
+            status,
+        };
+        self.prediction_timing = Some(timing);
+        if status != "eligible" { return Ok(false); }
         let texture = self.gpu.device().create_texture(&wgpu::TextureDescriptor {
             label: Some("raa prediction display"),
             size: self.presentation_extent(),
@@ -417,7 +488,11 @@ impl WebRuntime {
                 "prediction validation requires a four-byte MAP_READ buffer".into(),
             ));
         }
-        if self.performance.now() + measured_cost_ms >= deadline_ms {
+        let recorded = self.performance.now();
+        timing.recorded_ms = Some(recorded);
+        if recorded + measured_cost_ms >= deadline_ms {
+            timing.status = "budget-after-record";
+            self.prediction_timing = Some(timing);
             return Ok(false);
         }
         self.enqueue_prediction(
@@ -428,6 +503,9 @@ impl WebRuntime {
             commands,
             Some(validation),
         );
+        timing.submitted_ms = Some(self.performance.now());
+        timing.status = "submitted";
+        self.prediction_timing = Some(timing);
         Ok(true)
     }
 
@@ -441,30 +519,41 @@ impl WebRuntime {
     }
 
     fn admit_prediction(
-        &mut self,
-        key: &PredictionKey,
-        source_id: u64,
-        deadline_ms: f64,
-        measured_cost_ms: f64,
+        &mut self, key: &PredictionKey, source_id: u64, deadline_ms: f64, measured_cost_ms: f64,
     ) -> Result<bool, RaaError> {
+        Ok(self.prediction_admission(key, source_id, deadline_ms, measured_cost_ms)? == "eligible")
+    }
+
+    fn prediction_admission(
+        &mut self, key: &PredictionKey, source_id: u64, deadline_ms: f64, measured_cost_ms: f64,
+    ) -> Result<&'static str, RaaError> {
         self.gpu.ensure_live()?;
         self.promote_real();
         let now = self.performance.now();
-        Ok(self.pending_real.is_none()
-            && self
-                .prediction
-                .as_ref()
-                .is_none_or(|p| p.status.load(Ordering::Acquire) != PREDICTION_PENDING)
-            && (0.0..=now).contains(&key.cutoff_ms)
-            && deadline_ms.is_finite()
-            && measured_cost_ms.is_finite()
-            && measured_cost_ms > 0.0
-            && now + measured_cost_ms < deadline_ms
-            && self.ready_real.as_ref().is_some_and(|source| {
-                source.frame == source_id
-                    && source.target != key.target
-                    && key.target.includes(source.target)
-            }))
+        if self.pending_real.is_some() { return Ok("pending-real"); }
+        if self.prediction.as_ref().is_some_and(|p| p.completion.status() == PREDICTION_PENDING) {
+            return Ok("pending-prediction");
+        }
+        if !(0.0..=now).contains(&key.cutoff_ms) || !deadline_ms.is_finite()
+            || !measured_cost_ms.is_finite() || measured_cost_ms <= 0.0
+        { return Ok("invalid-clock"); }
+        if now + measured_cost_ms >= deadline_ms { return Ok("budget-before-record"); }
+        if !self.ready_real.as_ref().is_some_and(|source| {
+            source.frame == source_id && source.target != key.target && key.target.includes(source.target)
+        }) { return Ok("source-mismatch"); }
+        Ok("eligible")
+    }
+
+    pub fn prediction_completion(&self, key: &PredictionKey) -> Option<Arc<PredictionCompletion>> {
+        self.prediction.as_ref().filter(|p| !p.retired && &p.key == key).map(|p| Arc::clone(&p.completion))
+    }
+
+    pub fn prediction_timing(&self) -> Option<(PredictionTiming, Option<f64>)> {
+        let timing = self.prediction_timing?;
+        let validated_ms = self.prediction.as_ref()
+            .filter(|p| timing.status == "submitted" && p.key.cutoff_ms == timing.cutoff_ms)
+            .and_then(|p| p.completion.validated_ms());
+        Some((timing, validated_ms))
     }
 
     fn enqueue_prediction(
@@ -476,8 +565,8 @@ impl WebRuntime {
         commands: wgpu::CommandBuffer,
         validation: Option<wgpu::Buffer>,
     ) {
-        let status = Arc::new(AtomicU8::new(PREDICTION_PENDING));
-        let completed = Arc::clone(&status);
+        let completion = Arc::new(PredictionCompletion::new());
+        let completed = Arc::clone(&completion);
         self.gpu.queue().submit([commands]);
         if let Some(buffer) = validation {
             let readback = buffer.clone();
@@ -492,18 +581,11 @@ impl WebRuntime {
                         readback.unmap();
                         usable
                     };
-                    completed.store(
-                        if usable {
-                            PREDICTION_USABLE
-                        } else {
-                            PREDICTION_REJECTED
-                        },
-                        Ordering::Release,
-                    );
+                    completed.complete(if usable { PREDICTION_USABLE } else { PREDICTION_REJECTED });
                 });
         } else {
             self.gpu.queue().on_submitted_work_done(move || {
-                completed.store(PREDICTION_USABLE, Ordering::Release)
+                completed.complete(PREDICTION_USABLE)
             });
         }
         self.prediction = Some(RetainedPrediction {
@@ -511,7 +593,7 @@ impl WebRuntime {
             key,
             source_id,
             texture,
-            status,
+            completion,
             deadline_ms,
         });
     }
@@ -529,7 +611,7 @@ impl WebRuntime {
         let candidate = self.prediction.as_ref().filter(|prediction| {
             !prediction.retired
                 && now <= prediction.deadline_ms
-                && prediction.status.load(Ordering::Acquire) == PREDICTION_USABLE
+                && prediction.completion.status() == PREDICTION_USABLE
         });
         let real = self.ready_real.as_ref();
         let (id, texture, predicted) = match select(

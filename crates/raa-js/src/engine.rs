@@ -850,11 +850,14 @@ impl Engine {
     /// Prewarm the graph-selected optical presentation prototype on the engine's device.
     #[wasm_bindgen(js_name = prepareCameraPrediction)]
     pub fn prepare_camera_prediction(&mut self) -> Result<bool, JsValue> {
-        let declared = self.with_state(|_, st| Ok(Self::camera_graph_selection(st).is_some()))?;
-        if !declared || !self.prepare_prediction()? { return Ok(false); }
-        if self.camera_prediction.is_none() {
-            self.camera_prediction = Some(crate::prediction_camera::CameraPrediction::new(self.runtime()?.gpu()));
-        }
+        let Some(selection) = self.with_state(|_, st| Ok(Self::camera_graph_selection(st)))? else {
+            return Ok(false);
+        };
+        if !self.prepare_prediction()? { return Ok(false); }
+        let size = wgpu::Extent3d { width: self.viewport.0, height: self.viewport.1, depth_or_array_layers: 1 };
+        let gpu = self.runtime.as_ref().ok_or_else(disposed)?.gpu();
+        let camera = self.camera_prediction.get_or_insert_with(|| crate::prediction_camera::CameraPrediction::new(gpu));
+        camera.prepare_extent(gpu, size, selection.model.is_some());
         Ok(true)
     }
 
@@ -871,7 +874,7 @@ impl Engine {
         let Some((id, source)) = &self.prediction_real else { return Ok(false); };
         let Some((camera_id, revision, source_epoch, old_camera)) = self.prediction_camera else { return Ok(false); };
         if *id != camera_id || *id as f64 != source_id || revision != target.revision { return Ok(false); }
-        let Some(camera_stage) = &self.camera_prediction else { return Ok(false); };
+        let Some(camera_stage) = &mut self.camera_prediction else { return Ok(false); };
         let Some(browser) = &mut self.browser_prediction else { return Ok(false); };
         let (camera, tone, env, selection) = {
             let guard = self.state.borrow();
@@ -905,6 +908,37 @@ impl Engine {
             });
         }
         Ok(admitted)
+    }
+
+    /// Resolves after validation of this exact candidate. Presentation still applies the deadline and source checks.
+    #[wasm_bindgen(js_name = cameraPredictionReady)]
+    pub fn camera_prediction_ready(&self, snapshot: JsValue) -> Result<js_sys::Promise, JsValue> {
+        let target = present_target(&snapshot).map_err(|e| js_err(&e))?;
+        let completion = prediction_key(&snapshot, target).and_then(|key| {
+            self.runtime.as_ref()?.prediction_completion(&key)
+        });
+        Ok(wasm_bindgen_futures::future_to_promise(async move {
+            let usable = match completion { Some(completion) => completion.usable().await, None => false };
+            Ok(JsValue::from_bool(usable))
+        }))
+    }
+
+    /// CPU timestamps for the most recent checked prediction on this engine.
+    #[wasm_bindgen(js_name = cameraPredictionTiming)]
+    pub fn camera_prediction_timing(&self) -> JsValue {
+        let Some((timing, validated)) = self.runtime.as_ref().and_then(WebRuntime::prediction_timing) else {
+            return JsValue::NULL;
+        };
+        let result = js_sys::Object::new();
+        for (key, value) in [
+            ("cutoffMs", timing.cutoff_ms.into()), ("deadlineMs", timing.deadline_ms.into()),
+            ("reserveMs", timing.reserve_ms.into()), ("checkedMs", timing.checked_ms.into()),
+            ("recordedMs", timing.recorded_ms.map_or(JsValue::NULL, JsValue::from_f64)),
+            ("submittedMs", timing.submitted_ms.map_or(JsValue::NULL, JsValue::from_f64)),
+            ("validatedMs", validated.map_or(JsValue::NULL, JsValue::from_f64)),
+            ("status", timing.status.into()),
+        ] { set(&result, key, &value); }
+        result.into()
     }
 
     /// Diagnostics for the graph-selected camera decoder. Counters track actual learned work.
@@ -1943,7 +1977,9 @@ impl Engine {
             Ok(JsValue::from(out))
         })
     }
-}struct CameraSubmission {
+}
+
+struct CameraSubmission {
     id: u64,
     epoch: u64,
     key: PredictionKey,

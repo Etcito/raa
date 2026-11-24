@@ -41,21 +41,39 @@ fn validate_prediction_shaders() {
     let browser = "src/prediction_browser.wgsl";
     let camera = "src/prediction_camera.wgsl";
     let model = "src/prediction_model.wgsl";
-    for path in [reproject, warp, refresh, browser, camera, model] {
+    let camera_model = "src/prediction_camera_model.wgsl";
+    for path in [
+        reproject,
+        warp,
+        refresh,
+        browser,
+        camera,
+        model,
+        camera_model,
+    ] {
         println!("cargo:rerun-if-changed={path}");
     }
     let read = |path| fs::read_to_string(path).expect("read prediction shader");
     let warp = format!("{}\n{}", read(reproject), read(warp));
     let browser = format!("{}\n{}", read(refresh), read(browser));
-    for source in [warp, browser, read(camera), read(model)] {
+    let fused = format!(
+        "{}\n{}\n{}",
+        read(camera),
+        read(model).replace("@group(0)", "@group(1)"),
+        read(camera_model),
+    );
+    for (source, caps) in [
+        (warp, naga::valid::Capabilities::empty()),
+        (browser, naga::valid::Capabilities::empty()),
+        (read(camera), naga::valid::Capabilities::empty()),
+        (read(model), naga::valid::Capabilities::empty()),
+        (fused, naga::valid::Capabilities::SHADER_FLOAT16_IN_FLOAT32),
+    ] {
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|error| panic!("{}", error.emit_to_string(&source)));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        )
-        .validate(&module)
-        .expect("validate prediction WGSL");
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), caps)
+            .validate(&module)
+            .expect("validate prediction WGSL");
     }
 }
 

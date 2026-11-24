@@ -452,6 +452,11 @@ export interface Engine {
   prepareCameraPrediction(): boolean;
   /** True only when a static, fully covered same-eye target was admitted before the deadline. */
   submitCameraPrediction(snapshot: unknown, sourceId: number, deadlineMs: number, measuredCostMs: number): boolean;
+  /** Asynchronously observes the exact candidate’s validation. The deadline still applies at presentation. */
+  cameraPredictionReady(snapshot: unknown): Promise<boolean>;
+  /** CPU-clock trace of the latest checked prediction. Durations are not GPU timestamps. */
+  cameraPredictionTiming(): { cutoffMs: number; deadlineMs: number; reserveMs: number; checkedMs: number;
+    recordedMs: number | null; submittedMs: number | null; validatedMs: number | null; status: string } | null;
   disablePrediction(): void;
 
   /** Submit cutoff-time target depth, RGBA32F motion, lighting mask and RGBA32F repair HDR. */

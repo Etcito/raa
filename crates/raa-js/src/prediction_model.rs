@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wgpu::util::DeviceExt;
 
-const WGSL: &str = include_str!("prediction_model.wgsl");
+pub(crate) const WGSL: &str = include_str!("prediction_model.wgsl");
 const WEIGHT_BYTES: usize = 1984;
 const CHANNELS: [&str; 14] = [
     "logWarpR",
@@ -198,6 +198,10 @@ impl GeneratedModel {
             digest,
             kind: kind.to_owned(),
         })
+    }
+
+    pub(crate) fn weights(&self) -> &wgpu::Buffer {
+        &self.weights
     }
 
     pub(crate) fn record(
