@@ -32,8 +32,9 @@ class Sample:
     analytic: torch.Tensor | None
     fingerprint: tuple
     raster_target: torch.Tensor | None = None
-    event: bool = False
+    event: str | None = None
     disocclusion: torch.Tensor | None = None
+    time_ms: float | None = None
 
 
 @dataclass
@@ -154,8 +155,8 @@ def load_capture(path, accepted=None):
             frame = Frame(hdr, normal_roughness, depth, motion, reactive, history_valid,
                           jitter, target.shape[-2:], reset, areas, reflections, composite)
             samples.append(Sample(identity, frame, target, area_target, reflection_target,
-                                  analytic, fingerprint, raster, bool(record.get("event")),
-                                  masks[:, :1] > 0.5 if masks is not None else None))
+                                  analytic, fingerprint, raster, record.get("event"),
+                                  masks[:, :1] > 0.5 if masks is not None else None, stamp))
         if len(samples) < 2:
             raise ValueError(f"sequence {seq_id} needs at least two real frames")
         sequences.append(Sequence(seq_id, group, split, samples, sequence.get("replaySha256")))
@@ -581,7 +582,8 @@ def mean_rows(rows):
 
 
 @torch.no_grad()
-def joint_metrics(models, sequences):
+def joint_metrics(models, sequences, resolved=None):
+    resolved = {} if resolved is None else resolved
     all_sequences = []
     for sequence in sequences:
         histories = dict.fromkeys(models)
@@ -596,6 +598,8 @@ def joint_metrics(models, sequences):
             raw_area = visibility_ratio(f.area_pairs[:, :1], f.area_pairs[:, 1:2]) if f.area_pairs is not None else None
             predictions["bilinear/raw"] = {"display": spatial_baseline(f), "areaVisibility": raw_area,
                                             "reflection": f.reflection[:, :3] if f.reflection is not None else None}
+            for name, replay in resolved.items():
+                predictions[name] = {"display": replay[sequence.id][sample.id]}
             frame_metrics = {}
             for name, result in predictions.items():
                 row = {}
@@ -622,7 +626,7 @@ def joint_metrics(models, sequences):
                         mask = at(sample.disocclusion, (x + 0.5).floor(), (y + 0.5).floor())
                         row[f"{label}DisocclusionLogMae"] = float(masked_mean(delta.abs(), mask))
                 active = (f.reflection[:, 3:4] > 0.5) if sample.reflection_target is not None else None
-                if active is not None and active.any():
+                if active is not None and active.any() and "reflection" in result:
                     reflect = result["reflection"]
                     delta = reflect.log1p() - sample.reflection_target.log1p()
                     row["reflectionLogMae"] = float(masked_mean(delta.abs(), active))
@@ -633,7 +637,7 @@ def joint_metrics(models, sequences):
                     reflection_errors[name] = (delta, f.reflection[:, 3:5], f.jitter)
                 else:
                     reflection_errors.pop(name, None)
-                if sample.area_target is not None:
+                if sample.area_target is not None and "areaVisibility" in result:
                     pairs, area = f.area_pairs, result["areaVisibility"]
                     active = pairs[:, 1:2] > 1e-8
                     penumbra = active & (sample.area_target > 0.02) & (sample.area_target < 0.98)
@@ -646,7 +650,7 @@ def joint_metrics(models, sequences):
         all_sequences.append({"id": sequence.id, "groupId": sequence.group, "mean": means, "frames": rows})
     return {
         "mean": {name: mean_rows([seq["mean"][name] for seq in all_sequences])
-                 for name in (*models, "bilinear/raw")},
+                 for name in (*models, "bilinear/raw", *resolved)},
         "sequences": all_sequences,
     }
 
@@ -790,6 +794,71 @@ def fit_joint(options):
     return exports
 
 
+def verify_replay_frame(record, sample, arm, weights):
+    if (record.get("id") != sample.id or record.get("arm") != arm
+            or record.get("timeMs") != sample.time_ms or record.get("event") != sample.event):
+        raise ValueError(f"resolved replay frame differs from the teacher clock at {sample.id}")
+    height, width = sample.frame.hdr.shape[-2:]
+    x, y = sample.frame.jitter
+    got = record.get("jitterNdc", [])
+    expected = (2 * x / width, -2 * y / height)
+    if len(got) != 2 or not all(math.isclose(a, b, abs_tol=1e-6) for a, b in zip(got, expected)):
+        raise ValueError(f"resolved replay jitter differs from the teacher tape at {sample.id}")
+    dispatch = record.get("dispatch")
+    if arm == "analytic":
+        if dispatch is not None:
+            raise ValueError(f"analytic replay used a learned dispatch at {sample.id}")
+    elif (not dispatch or dispatch["weightsSha256"] != weights or dispatch["realFrame"] != record["frameId"]
+          or not all(dispatch["ran"].get(head) is True for head in ("area", "reflection", "sr"))):
+        raise ValueError(f"joint replay did not run all heads of the frozen checkpoint at {sample.id}")
+
+
+def read_resolved(paths, final, weights, label):
+    by_id = {seq.id: seq for seq in final}
+    planes = {f"windows/{label}": {}, f"windows/analytic-{label}-build": {}}
+    receipts = []
+    for path in paths:
+        raw = path.read_bytes()
+        data = json.loads(raw)
+        require_windows(data)
+        source, gpu = data["source"], data.get("windows", {}).get("webgpu", {})
+        rtx_3090 = "3090" in gpu.get("description", "") or gpu.get("device") == "0x2204"
+        if (data["format"] != "raa.gallery-sr-resolved-replay/1" or data["weightsSha256"] != weights
+                or data.get("colorSpace") != "scene-linear" or data.get("exposure") != 1
+                or data.get("rowOrder") != "top-down" or "HeadlessChrome" in source["facts"]["browser"]
+                or gpu.get("isFallbackAdapter") is not False or not rtx_3090
+                or not source.get("revision") or not source.get("receiptSha256")):
+            raise ValueError(f"expected a pinned windowed Windows RTX 3090 replay of {label}")
+        receipts.append({"sha256": sha(raw), "source": source})
+        for seq in data["sequences"]:
+            teacher = by_id.get(seq["id"])
+            arm = seq["arm"]
+            if teacher is None or arm not in ("analytic", "joint"):
+                raise ValueError("resolved replay arm or trajectory has no final teacher")
+            name = f"windows/{label}" if arm == "joint" else f"windows/analytic-{label}-build"
+            first = teacher.samples[0].frame
+            if (teacher.id in planes[name] or seq["replaySha256"] != teacher.replay
+                    or seq["groupId"] != teacher.group or seq["split"] not in ("test", "held-out")
+                    or tuple(reversed(seq["sceneSize"])) != first.hdr.shape[-2:]
+                    or tuple(reversed(seq["displaySize"])) != first.output_size
+                    or len(seq["frames"]) != len(teacher.samples)):
+                raise ValueError(f"resolved replay trajectory differs from {teacher.id}")
+            frames, last_frame_id = {}, None
+            for record, sample in zip(seq["frames"], teacher.samples, strict=True):
+                verify_replay_frame(record, sample, arm, weights)
+                frame_id = record["frameId"]
+                if type(frame_id) is not int or frame_id < 0 or (last_frame_id is not None and frame_id != last_frame_id + 1):
+                    raise ValueError(f"resolved replay real-frame clock has a gap at {sample.id}")
+                last_frame_id = frame_id
+                frame = read_plane(path.parent, record["planes"]["resolved"], (3,), sample.frame.output_size)
+                require_range(frame, "resolved scene HDR", 0.0)
+                frames[sample.id] = frame
+            planes[name][teacher.id] = frames
+    if any(set(sequences) != set(by_id) for sequences in planes.values()):
+        raise ValueError(f"resolved {label} replay is missing one or more final trajectories or arms")
+    return planes, receipts
+
+
 def compare_joint(options):
     configure_cpu()
     candidate, model = checkpoint(options.candidate)
@@ -804,16 +873,25 @@ def compare_joint(options):
     for package in (candidate, baseline):
         for used in checkpoint_identity(package):
             require_separate(used, identity)
+    resolved, replay_receipts = {}, {}
+    if bool(options.resolved_candidate) != bool(options.resolved_existing):
+        raise ValueError("supply both candidate and existing native replays for a composed comparison")
+    if options.resolved_candidate:
+        for label, paths, manifest in (("candidate", options.resolved_candidate, candidate),
+                                       ("existing", options.resolved_existing, baseline)):
+            planes, reader = read_resolved(paths, final, manifest["weightsSha256"], label)
+            resolved.update(planes)
+            replay_receipts[label] = reader
     result = {
         "format": "raa.joint-real-frame-held-out/1", "selectionUsedFinal": False,
         "candidateWeightsSha256": candidate["weightsSha256"], "candidatePackageSha256": candidate["packageSha256"],
         "existingWeightsSha256": baseline["weightsSha256"], "existingPackageSha256": baseline["packageSha256"],
-        "heldOut": receipts, "heldOutIdentity": identity,
+        "heldOut": receipts, "heldOutIdentity": identity, "nativeComposedWindows": replay_receipts,
         "displayTransform": "fixed unit exposure Reinhard then sRGB",
         "temporal": "MAE of current log reconstruction residual minus the motion-warped previous residual",
         "aggregation": "within-trajectory mean over eligible frames, then equal mean over trajectories",
         "shippingQualification": "unverified",
-        **joint_metrics({"candidate": model, "existing": existing}, final),
+        **joint_metrics({"candidate": model, "existing": existing}, final, resolved),
     }
     with options.output.open("xb") as file:
         file.write(json_bytes(result))
@@ -856,6 +934,8 @@ def main():
     compare.add_argument("--final", nargs="+", type=Path, required=True)
     compare.add_argument("--candidate", type=Path, required=True)
     compare.add_argument("--base", type=Path, required=True)
+    compare.add_argument("--resolved-candidate", nargs="+", type=Path)
+    compare.add_argument("--resolved-existing", nargs="+", type=Path)
     options = app.parse_args()
     if options.action == "fit-joint":
         if (min(options.steps, options.validate_every) < 1 or options.unroll < 2

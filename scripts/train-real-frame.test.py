@@ -133,6 +133,24 @@ class RealFrameTests(unittest.TestCase):
         self.assertIsNone(TRAIN["reflection_residual_change"](
             dataclasses.replace(frame, reset=True), residual, old, valid))
 
+    def test_native_replay_uses_exact_clock_jitter_and_frozen_dispatch(self):
+        hdr = torch.zeros((1, 3, 3, 4))
+        frame = Frame(hdr, None, None, None, None, None, (0.25, -0.375), (6, 8))
+        sample = TRAIN["Sample"]("final-01", frame, None, None, None, None, (),
+                                 event="warm-step", time_ms=1020)
+        record = {"id": sample.id, "arm": "joint", "frameId": 17, "timeMs": sample.time_ms,
+                  "event": sample.event, "jitterNdc": [0.125, 0.25],
+                  "dispatch": {"weightsSha256": "frozen", "realFrame": 17,
+                               "ran": {"area": True, "reflection": True, "sr": True}}}
+        verify = TRAIN["verify_replay_frame"]
+        verify(record, sample, "joint", "frozen")
+        with self.assertRaisesRegex(ValueError, "teacher clock"):
+            verify({**record, "timeMs": 1021}, sample, "joint", "frozen")
+        with self.assertRaisesRegex(ValueError, "jitter"):
+            verify({**record, "jitterNdc": [0, 0]}, sample, "joint", "frozen")
+        with self.assertRaisesRegex(ValueError, "frozen checkpoint"):
+            verify(record, sample, "joint", "other")
+
     def test_loader_rejects_torn_planes_and_non_windows_reports(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp)
