@@ -1,0 +1,290 @@
+{
+  "format": "raa.real-frame-model/1",
+  "modelId": "real-frame-v1",
+  "kind": "windows-capture-fit",
+  "seed": 0,
+  "weights": "weights.fp32le",
+  "weightsSha256": "fafb15f373fabc5a4ebeb365112761d847c0cff0bcf618849326cc8430c2189e",
+  "weightsByteLength": 6560,
+  "golden": "golden.json",
+  "goldenSha256": "aaae5f7c8c9afa97161349c76d77da2de2ad5294f0293bccd0d2fbb642ddb959",
+  "tensorLayout": "NHWC",
+  "precision": "fp32",
+  "tensorAlignment": 16,
+  "tensors": [
+    {
+      "name": "stem.weight",
+      "shape": [
+        12,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 0,
+      "byteLength": 576
+    },
+    {
+      "name": "stem.bias",
+      "shape": [
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 576,
+      "byteLength": 48
+    },
+    {
+      "name": "spatial.weight",
+      "shape": [
+        12,
+        3,
+        3
+      ],
+      "dtype": "f32le",
+      "offset": 624,
+      "byteLength": 432
+    },
+    {
+      "name": "spatial.bias",
+      "shape": [
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 1056,
+      "byteLength": 48
+    },
+    {
+      "name": "mix.weight",
+      "shape": [
+        12,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 1104,
+      "byteLength": 576
+    },
+    {
+      "name": "mix.bias",
+      "shape": [
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 1680,
+      "byteLength": 48
+    },
+    {
+      "name": "area.weight",
+      "shape": [
+        9,
+        26
+      ],
+      "dtype": "f32le",
+      "offset": 1728,
+      "byteLength": 936
+    },
+    {
+      "name": "area.bias",
+      "shape": [
+        9
+      ],
+      "dtype": "f32le",
+      "offset": 2672,
+      "byteLength": 36
+    },
+    {
+      "name": "recurrent.weight",
+      "shape": [
+        24,
+        33
+      ],
+      "dtype": "f32le",
+      "offset": 2720,
+      "byteLength": 3168
+    },
+    {
+      "name": "recurrent.bias",
+      "shape": [
+        24
+      ],
+      "dtype": "f32le",
+      "offset": 5888,
+      "byteLength": 96
+    },
+    {
+      "name": "reflection.weight",
+      "shape": [
+        3,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 5984,
+      "byteLength": 144
+    },
+    {
+      "name": "reflection.bias",
+      "shape": [
+        3
+      ],
+      "dtype": "f32le",
+      "offset": 6128,
+      "byteLength": 12
+    },
+    {
+      "name": "sr.weight",
+      "shape": [
+        8,
+        12
+      ],
+      "dtype": "f32le",
+      "offset": 6144,
+      "byteLength": 384
+    },
+    {
+      "name": "sr.bias",
+      "shape": [
+        8
+      ],
+      "dtype": "f32le",
+      "offset": 6528,
+      "byteLength": 32
+    }
+  ],
+  "guideChannels": [
+    "normalX",
+    "normalY",
+    "normalZ",
+    "logDepthOver8",
+    "roughness",
+    "motionU",
+    "motionV",
+    "historyValid",
+    "reactive",
+    "jitterX",
+    "jitterY",
+    "geometryValid"
+  ],
+  "trainedHeads": [
+    "display",
+    "area"
+  ],
+  "cadence": "successfully submitted real frame per view",
+  "colorDomain": "nonnegative scene-linear HDR at fixed exposure 1",
+  "shippingQualification": "unverified",
+  "provenance": {
+    "gallery": {
+      "sha256": "80fb0aba181cc1dd06cf7119d2523195b554ecf619d1d2e6d1ac0a0f946c8f3e",
+      "source": {
+        "buildId": "00b8ca33-243d-458c-935c-0d84b337fceb",
+        "facts": {
+          "hardware": true,
+          "adapter": {
+            "vendor": "",
+            "architecture": "",
+            "device": "NVIDIA GeForce RTX 3090",
+            "description": "",
+            "isFallbackAdapter": false
+          },
+          "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/158.0.0.0 Safari/537.36",
+          "devicePixelRatio": 1
+        },
+        "revision": "96ebd554e6f3259da7217d7457aea033fad06d7b",
+        "receiptSha256": "a885b0656a72bcc39622a5d7b9275a34d381e84c73742d45c76159233d5a9f0b"
+      }
+    },
+    "areaPilot": {
+      "sha256": "10bb17ad439e04e8a82942b877018745ed51f4b3cbc791db5610173d2a7f72ad",
+      "source": {
+        "revision": "c835fc8c43e2a82430126f37e105743e171a0682",
+        "receiptSha256": "8c9b9fc8b066ffad02b9cb237bb5495adbe6d94aadcdee19ccbfa5f165301eac"
+      },
+      "fixture": "cornell-stratified-v1"
+    },
+    "trainFrameIds": [
+      "gallery-overfit-00",
+      "gallery-overfit-01",
+      "gallery-overfit-02",
+      "gallery-overfit-03",
+      "gallery-overfit-04",
+      "gallery-overfit-05",
+      "gallery-overfit-06",
+      "gallery-overfit-07",
+      "gallery-overfit-08",
+      "gallery-overfit-09",
+      "gallery-overfit-10",
+      "gallery-overfit-11"
+    ],
+    "heldOutFrameIds": [],
+    "trainGroupIds": [
+      "open-skylight-warm-event"
+    ],
+    "trainFingerprints": [
+      [
+        "ea32a6312b97ff51a71cf0bda2630fa4d6922548e1ca217315b23e30e3d8e6a6",
+        "35470afbf4d6ac56a433bc88a63b3c33e6c71e2b6b358e762f1a0b4d686d45ef",
+        "c8cd8a15b5781ad1b2419ae74a30694911b9a210708c863a3399b669c91a3a9a"
+      ],
+      [
+        "38158db0fb97a16edbeb9414f1edaf851e3c868f674f768e875b8a3b627ce416",
+        "2bf2a3b83ca25a2e4063dc9d16ff181fd1706bf1396b79aecda8e83a3af303c6",
+        "d2a8a8d04402a89d93291c6912d1ab8bf7abef24b7703de6c4848d7565093354"
+      ],
+      [
+        "cb542b5c5688b943fb7ae4173c7ccd32fdbf4833504c68d6dc47e4b5ef525b6c",
+        "aa1c29b40f6246ddaa6d4df67facbf2c184b68724831bad2ce243067d1e48762",
+        "cc268918f5c7cf7f0a9ea9049bf703f546759fd782377dbebf4c5025a66a8851"
+      ],
+      [
+        "9b79f9ebec2beb9722ea551d33990ba98381041562f30a4eebd59ed56f362fee",
+        "18c8280e37759f4ca239d9a7c4c829a5db9cb0a53450c65e988192f9e58122b5",
+        "35e51ff902f622393ec68571827bb9f95d4293fddd9c392d1c3749a51a6d4eb9"
+      ],
+      [
+        "32099024b4a5858df8901ece6b7d96a0e1612ae6f0fe88761a8cdb86fca94259",
+        "4116598b4747eb9a985e66505e292357e6b6af3ee06e5ae63f9db81141e276d5",
+        "933fc6439263eed71bfed694571e7e8884d5083431e403c0d87ef0e5db6c177c"
+      ],
+      [
+        "dc755fc8eb05c40adcb39345dd9e9145a22317eb5a20756ad735c2f36d6fa454",
+        "052d1baea2fc4f7c8510378336b5deae98b5cee3934b7d69c62459bc4efa2251",
+        "8a45b0a9410ac353b1dbc71164b8f4abec1ad277483f17fcc21a564761a3b4e5"
+      ],
+      [
+        "1a6020b3cca77e4386dbe1881b5db55c82c99f051f911bee9da0148b930f2dc5",
+        "955d4a85b641d246dace665198bc6749bc2b890ca195868c9d2bf8890b69c396",
+        "93d9b2680a4435b88464245e8b5fc0fc7df8acbcf9302f2253aabfac619cdfc6"
+      ],
+      [
+        "1cca63259e792a07b7399298e5441a0c4f402f1def6166816c0f7913723329e4",
+        "9e756362232c43fd79cb4c8fb06d1cbf3e084fcbbb590ae7e1e6dccd1fe6dea7",
+        "9f25bf8a51297780e6b4b401e1b1b029926f15ec1955da112ae95e5e119a8a1b"
+      ],
+      [
+        "851f5de21d8daa859836cd0f9b8830371eee1d2381c93cc1435e8b5a9af52bbc",
+        "fec1b98ee8a31e7b2e73e0df7bd8b0d3e5e2547b3c425a015fb5f23177f88865",
+        "c412c1aa34a6d708927cbebca35a3927f20c29f12ed7110bae7715ead024cfbd"
+      ],
+      [
+        "733439db72642bbdcb631b08240f0aa69477e4ff1dfa8818082a6826003f53e5",
+        "002e743e0272894eedb0b316b13d8a3024aff4f22b254a9d8f8f21fd7114a716",
+        "3608b8b880d60d601ae6bee07b723696985dbd3c710cc40f74ca79fdec30067b"
+      ],
+      [
+        "6ab90276138b239d2e7aadb7f4cad276be7932d8aaf1402f7512a081c2aacaf1",
+        "8df8d85c5a7c1b814d296ced456432341a9a15c4228f65da09aa3e7109e7b1c4",
+        "875f550fdff672de5124abcfb81ff6ca69358b8931d9701beaf09adcc7444cdc"
+      ],
+      [
+        "3d15a6161cc3aa9ce632fe5b83f3fd83395501067e314190eee22a7bef18fe40",
+        "fb73d5e5c8200942fabb49b9317383711224c842360cebde46fe38e3b08b15ba",
+        "aa9e6a92edf9b57c9c3bba85d0a7feb6a7ef62cec5900068ceb640daf6b7f33f"
+      ]
+    ],
+    "areaTrainFrameIds": [
+      "main-0",
+      "main-14",
+      "main-15",
+      "main-16",
+      "main-17",
+      "main-18"
+    ]
+  },
+  "packageSha256": "90b59655e96fae36ea5a3e39b4278855e8159a7ee8d5de9c76a5f1acfefcb180"
+}

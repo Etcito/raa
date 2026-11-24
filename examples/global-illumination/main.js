@@ -2,6 +2,7 @@ import { createGalleryAoControls } from './lib/gallery-ao.js';
 import { mountLightingNotice } from './lib/gallery-lighting.js';
 import { syncSphericalControls } from './lib/gallery-spherical.js';
 import { captureGallerySequence } from './lib/gallery-sequence.js';
+import { applyGalleryNeural, syncNeuralControl } from './lib/gallery-neural.js';
 import { captureGalleryPath, measureGalleryDiffuse, measureGalleryPanelNoise, measureGalleryPath, measureGallerySpherical } from './lib/gallery-path-evidence.js';
 import { createLiveStats } from './lib/live-stats.js';
 import { interactiveInterior } from './lib/interactive-interior.js';
@@ -193,7 +194,10 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
           interactive = createInteractiveView({
             target, canvas, lib, scene, variant, settings: display, previous,
             beforeFrame(engine, state) {
-              if (galleryOptions) galleryAo.apply(engine, state?.enabled?.['path-reference'] === true);
+              if (galleryOptions) {
+                applyGalleryNeural(engine, state, canvas.width, canvas.height);
+                galleryAo.apply(engine, state?.enabled?.['path-reference'] === true);
+              }
               syncLighting?.(state);
             },
             onFrame(engine, time, width, height) {
@@ -250,6 +254,7 @@ export async function attachGiPage({ target, canvas, status, scenePicker, varian
                 syncLighting = state => {
                   syncNotice(state);
                   syncSphericalControls(optionControls, state);
+                  syncNeuralControl(optionControls.get('neural-upscaling'), state);
                 };
                 syncLighting(state);
                 galleryAo.mount(optionsContainer);

@@ -42,7 +42,11 @@ echo "== scripts/build-bricks.sh"
 bash "$ROOT/scripts/build-bricks.sh"
 
 echo "== $OUT"
+neural_graph=()
+if [ -f crates/raa-graph/graphs/real-frame-model.json ]; then
+  neural_graph=(--shared crates/raa-graph/graphs/real-frame-model.json)
+fi
 "$NODE" "$ROOT/scripts/build-page.mjs" global-illumination --stages volume,lighting,virtual \
-  --shared examples/virtual-geometry/lib/content.js --shared examples/trace-first-pixel/scene.js
+  --shared examples/virtual-geometry/lib/content.js --shared examples/trace-first-pixel/scene.js "${neural_graph[@]}"
 
 echo "build-global-illumination.sh: ok ($OUT/scenes.json, $OUT/build.json)"

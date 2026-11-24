@@ -156,6 +156,9 @@ try {
     return { json: result.json, files };
   })()`, 300000);
   const ui = spherical ? await evalPage(`import('/lib/gallery-spherical-evidence.js').then(module => module.verifyGallerySphericalUi())`, 120000) : null;
+  if (spherical && receipt.files.includes('lib/gallery-temporal-fit/manifest.json')) {
+    ui.neural = await evalPage(`import('/lib/gallery-neural.js').then(module => module.verifyGalleryNeuralUi())`, 60000);
+  }
   if ((spherical || sequence) && browserErrors.length) throw new Error(browserErrors.join('\n'));
   const windows = { browser: version.Browser, renderer, device: nvidia, webgpu };
   if (liveSpherical) {

@@ -114,6 +114,10 @@ export function createLiveStats(container) {
       lines.push(`Spherical lighting · tracked cells ${number(spherical.lightingMetadataReadyCells)} · invalidated faces ${number(spherical.lightInvalidatedFaces)}`);
       lines.push(`Spherical GPU memory ${number(spherical.gpuBytes / (1024 * 1024), 2)} MiB · origin epoch ${number(spherical.originEpoch)}`);
     }
+    const neural = engine.neuralReconstructionStats?.();
+    if (neural?.ran?.sr) {
+      lines.push(`Neural upscaling · ${extent(...neural.sceneSize)} → ${extent(...neural.displaySize)} · frame ${number(neural.realFrame)}`);
+    }
     const tracing = optional(() => engine.meshTracingStats());
     if (tracing?.referencePixels) {
       lines.push(`Path-traced reference · ${number(tracing.referencePixels)} pixels × ${tracing.referenceSpp} spp · ${tracing.pathBounces} path bounces`);

@@ -261,7 +261,7 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
   return { json: { format: 'raa.gallery-temporal-sequence/1', source: { buildId, facts },
     guideChannels, maskChannels, rowOrder: 'top-down', colorSpace: 'scene-linear', exposure: 1,
     target: 'current real frame HDR from independent full mesh path tracing at the exact pose and time',
-    reference: { spp, pathBounces: 2, reflectionBounces: 2, jitter: [0, 0], seedBatches: 2 },
+    reference: { samplesPerDispatch: spp, pathBounces: 2, reflectionBounces: 2, jitter: [0, 0], seedBatches: 2 },
     optionalHeads: { area: 'separate area pilot', reflection: 'hit guides only, no incident RGB supervision' },
     reactiveSource: 'authored current panel revision for visible surfaces and conservative mirror coverage on moving-actor frames',
     sequences }, files };

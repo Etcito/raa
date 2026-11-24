@@ -3,6 +3,7 @@ import { box, enclosedRoomShell, panel, sphere, volumeRoom } from './content.js'
 import { loadGalleryFit } from './gallery-path-model.js';
 import { lightingOptions } from './gallery-lighting.js';
 import { applySpherical, isSphericalOption, sphericalOptions } from './gallery-spherical.js';
+import { loadGalleryNeural, neuralOption } from './gallery-neural.js';
 
 const identity = [0, 0, 0, 1];
 const unitScale = [1, 1, 1];
@@ -25,6 +26,7 @@ const options = [
   { id: 'path-bounces', label: 'Reference path bounces', value: 2, min: 0, max: 6, step: 1 },
   ...lightingOptions,
   ...sphericalOptions,
+  neuralOption,
   { id: 'ssr', label: 'SSR on other surfaces', enabled: true },
   { id: 'dof', label: 'Depth of field', enabled: true },
   { id: 'bloom', label: 'Bloom', enabled: true },
@@ -260,6 +262,11 @@ async function prepare(engine, state) {
     state.pathModelError = error.message;
   }
   if (state.pathModelError) state.status = state.pathModelError;
+  try {
+    state.neuralModel = await loadGalleryNeural(engine);
+  } catch (error) {
+    state.neuralError = error.message;
+  }
 }
 
 function setOption(engine, state, id, enabled) {
