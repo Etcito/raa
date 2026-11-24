@@ -119,5 +119,8 @@ existing renderer paths.
 The learned generated-frame dispatch used the fitted `5db9c2d` package in
 the Windows A/B fixture at `246c570`. It changed 2,831 warped pixels while
 preserving all 132 fresh repairs and the real-frame history count. Turning
-the model off restored the analytic image byte for byte. This result covers
-the target-guide prediction route. The camera-only route remains analytic.
+the model off restored the analytic image byte for byte. The held-out quality
+figures cover the target-guide actor-motion profile. A later graph integration
+also permits the fitted residual on compatible camera-only predictions. That
+profile has its own input distribution and requires separate quality and
+latency qualification.
