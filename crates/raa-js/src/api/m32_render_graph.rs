@@ -22,6 +22,9 @@ use raa_loader::json::JsonValue;
 pub(crate) struct RenderGraphState {
     pub(crate) executor: GraphExecutor,
     pub(crate) catalog: Catalog,
+    pub(crate) explicit_scene_size: Option<(u32, u32)>,
+    pub(crate) frozen_name: Option<String>,
+    models: std::collections::BTreeMap<String, raa_graph::learned::AreaPilotPackage>,
     /// The issues of the latest `setRenderGraph` that did not throw: a parse refusal, the executor's
     /// `SetResult.issues`, or empty after `null`.
     pub(crate) last_set_issues: Vec<Issue>,
@@ -110,6 +113,7 @@ pub(crate) use web::{frame, install};
 pub(crate) mod web {
     use super::*;
     use crate::api::ViewsState;
+    use crate::api::m21_views::ViewRect;
     use crate::convert::{INVALID_ARGUMENT, api_error};
     use crate::engine::{Engine, InstallCtx};
     use crate::feature_map::FEATURE_MISSING;
@@ -143,6 +147,9 @@ pub(crate) mod web {
         ctx.features.insert(RenderGraphState {
             executor: GraphExecutor::new(),
             catalog: Catalog::build(),
+            explicit_scene_size: None,
+            frozen_name: None,
+            models: Default::default(),
             last_set_issues: Vec::new(),
         });
         Ok(())
@@ -216,7 +223,7 @@ pub(crate) mod web {
     }
 
     /// The viewport count of `ViewsState`, or 1 without it.
-    fn viewport_count(st: &EngineState) -> u32 {
+    pub(crate) fn viewport_count(st: &EngineState) -> u32 {
         st.features.get::<ViewsState>().map_or(1, |views| {
             u32::try_from(views.viewports().len()).unwrap_or(u32::MAX)
         })
@@ -241,7 +248,7 @@ pub(crate) mod web {
     }
 
     /// The render graph state of the FeatureMap, read-only; `api.feature_missing` when absent.
-    fn graph_state(st: &EngineState) -> Result<&RenderGraphState, RaaError> {
+    pub(crate) fn graph_state(st: &EngineState) -> Result<&RenderGraphState, RaaError> {
         st.features.get::<RenderGraphState>().ok_or_else(|| {
             api_error(
                 FEATURE_MISSING,
@@ -315,8 +322,8 @@ pub(crate) mod web {
         gpu: &GpuContext,
         st: &mut EngineState,
         graph: &JsValue,
-    ) -> Result<JsValue, RaaError> {
-        let result = match graph_argument(graph)? {
+    ) -> Result<SetResult, RaaError> {
+        Ok(match graph_argument(graph)? {
             GraphArgument::Clear => {
                 with_handles(st, gpu, |executor, _, h, _| executor.clear_graph(h))??;
                 SetResult {
@@ -346,12 +353,56 @@ pub(crate) mod web {
                     executor.set_graph(doc, &ctx, h)
                 })?
             }
-        };
+        })
+    }
+
+    pub(crate) fn finish_selection(
+        st: &mut EngineState,
+        result: SetResult,
+        scene_size: Option<(u32, u32)>,
+        frozen_name: Option<String>,
+    ) -> Result<JsValue, RaaError> {
         let json = result_to_json(&result);
-        st.features
-            .require_mut::<RenderGraphState>("render graph")?
-            .last_set_issues = result.issues;
+        let state = st
+            .features
+            .require_mut::<RenderGraphState>("render graph")?;
+        if result.ok {
+            if state.explicit_scene_size != scene_size {
+                st.pipeline.borrow_mut().set_scene_size(scene_size);
+                st.scene_invocation.discontinuity_all();
+                state.explicit_scene_size = scene_size;
+            }
+            state.frozen_name = frozen_name;
+        }
+        state.last_set_issues = result.issues;
         Ok(json_to_js(&json))
+    }
+
+    pub(crate) fn check_pipeline_available(st: &EngineState) -> Result<(), RaaError> {
+        st.pipeline.try_borrow_mut().map(|_| ()).map_err(|_| {
+            api_error(
+                "pipeline.busy",
+                "the pipeline is borrowed while a frame executes",
+            )
+        })
+    }
+
+    fn refusal(code: &'static str, message: &str, fix: &str) -> SetResult {
+        SetResult {
+            ok: false,
+            rebuilt: 0,
+            issues: vec![Issue {
+                code,
+                severity: Severity::Error,
+                stage: Stage::Structure,
+                node: None,
+                port: None,
+                param: None,
+                link: None,
+                message: message.into(),
+                fix: fix.into(),
+            }],
+        }
     }
 
     #[wasm_bindgen(js_class = Engine)]
@@ -376,7 +427,108 @@ pub(crate) mod web {
         /// nothing; any other value throws `api.invalid_argument`.
         #[wasm_bindgen(js_name = setRenderGraph)]
         pub fn set_render_graph(&mut self, graph: JsValue) -> Result<JsValue, JsValue> {
-            self.with_state(|gpu, st| apply_render_graph(gpu, st, &graph))
+            self.with_state(|gpu, st| {
+                check_pipeline_available(st)?;
+                let result = apply_render_graph(gpu, st, &graph)?;
+                finish_selection(st, result, None, None)
+            })
+        }
+
+        /// Register immutable FP32 area-pilot bytes after validating the package ABI and hashes.
+        #[wasm_bindgen(js_name = registerAreaRenderModel)]
+        pub fn register_area_render_model(
+            &mut self,
+            name: String,
+            manifest: String,
+            weights: Vec<u8>,
+        ) -> Result<(), JsValue> {
+            self.with_state(|_, st| {
+                let state = st
+                    .features
+                    .require_mut::<RenderGraphState>("render graph")?;
+                if name.trim().is_empty() || state.models.contains_key(&name) {
+                    return Err(api_error(
+                        INVALID_ARGUMENT,
+                        "render model name is empty or already registered",
+                    ));
+                }
+                let package = raa_graph::learned::AreaPilotPackage::validate(&manifest, weights)?;
+                state.models.insert(name, package);
+                Ok(())
+            })
+        }
+
+        /// Select an editable or frozen graph and its optional fixed scene extent in one call.
+        /// The canvas and legacy resize continue to determine the display extent.
+        #[wasm_bindgen(js_name = setRenderGraphSelection)]
+        pub fn set_render_graph_selection(
+            &mut self,
+            graph: JsValue,
+            frozen: Option<String>,
+            scene_width: Option<f64>,
+            scene_height: Option<f64>,
+            area_model: Option<String>,
+        ) -> Result<JsValue, JsValue> {
+            self.with_state(|gpu, st| {
+                let limit = gpu.device().limits().max_texture_dimension_2d;
+                let dimension = |n: f64| n.fract() == 0.0 && n >= 1.0 && n <= f64::from(limit);
+                let size = match (scene_width, scene_height) {
+                    (None, None) => None,
+                    (Some(w), Some(h)) if dimension(w) && dimension(h) => Some((w as u32, h as u32)),
+                    _ => return Err(api_error(INVALID_ARGUMENT, "scene extent needs two positive integer dimensions within device limits")),
+                };
+                let clear = graph.is_null() || graph.is_undefined();
+                if frozen.is_some() && !clear || frozen.is_none() && clear && size.is_some() {
+                    return Err(api_error(INVALID_ARGUMENT, "specify one graph when selecting a frozen graph or an explicit scene extent"));
+                }
+                let result = if let Some(model) = area_model {
+                    if graph_state(st)?.models.contains_key(&model) {
+                        refusal("graph.model_unavailable", "this build has no graph consumer for the area model",
+                            "Select the graph without an area model.")
+                    } else {
+                        refusal("graph.model_unknown", "the selected area model is not registered",
+                            "Register the model package on this engine before selecting it.")
+                    }
+                } else if (frozen.is_some() || !clear) && viewport_count(st) > 1 {
+                    refusal("graph.multi_view", "render graph selection drives one view",
+                        "Turn off the extra viewports before selecting a graph.")
+                } else if size.is_some() && st.features.get::<ViewsState>().is_some_and(|v| v.viewports() != [ViewRect::FULL]) {
+                    refusal("graph.multi_view", "explicit scene extent requires a full-canvas viewport",
+                        "Restore the full-canvas viewport before selecting an explicit scene extent.")
+                } else if size.is_some() && st.features.get::<ViewsState>().is_some_and(|v| v.render_scale() != 1.0) {
+                    refusal("graph.scale_conflict", "explicit scene extent requires legacy render scale 1",
+                        "Set legacy render scale to 1 before selecting an explicit scene extent.")
+                } else {
+                    check_pipeline_available(st)?;
+                    match &frozen {
+                        Some(name) => super::super::m33_frozen_render_graph::web::apply_frozen(name, gpu, st)?,
+                        None => apply_render_graph(gpu, st, &graph)?,
+                    }
+                };
+                finish_selection(st, result, size, frozen)
+            })
+        }
+
+        /// Metadata for the accepted selection. Refused requests leave it unchanged.
+        #[wasm_bindgen(js_name = renderGraphSelection)]
+        pub fn render_graph_selection(&self) -> Result<JsValue, JsValue> {
+            self.with_state(|_, st| {
+                let state = graph_state(st)?;
+                let frozen = state
+                    .frozen_name
+                    .clone()
+                    .map_or(JsonValue::Null, JsonValue::String);
+                let size = state.explicit_scene_size.map_or(JsonValue::Null, |(w, h)| {
+                    JsonValue::Array(vec![
+                        JsonValue::Number(f64::from(w)),
+                        JsonValue::Number(f64::from(h)),
+                    ])
+                });
+                Ok(json_to_js(&JsonValue::Object(vec![
+                    ("frozen".into(), frozen),
+                    ("sceneSize".into(), size),
+                ])))
+            })
         }
 
         /// The active graph's canonical document, or with no graph the export of today's

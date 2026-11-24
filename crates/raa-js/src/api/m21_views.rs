@@ -549,6 +549,7 @@ pub(crate) use web::{OverlayBuffers, frame, install};
 #[cfg(target_arch = "wasm32")]
 mod web {
     use super::*;
+    use crate::convert::api_error;
     use crate::convert::js;
     use crate::engine::{Engine, InstallCtx};
     use crate::state::EngineState;
@@ -686,6 +687,16 @@ mod web {
         pub fn set_viewports(&mut self, rects: JsValue) -> Result<(), JsValue> {
             self.with_state(|_, st| {
                 let rects = rects_from_js(&rects)?;
+                if rects != [ViewRect::FULL]
+                    && crate::api::m32_render_graph::web::graph_state(st)?
+                        .explicit_scene_size
+                        .is_some()
+                {
+                    return Err(api_error(
+                        "graph.multi_view",
+                        "explicit scene extent requires a full-canvas viewport",
+                    ));
+                }
                 let previous = views(st)?.viewports().to_vec();
                 views(st)?.set_viewports(&rects)?;
                 for index in 0..4 {
@@ -759,6 +770,19 @@ mod web {
         #[wasm_bindgen(js_name = setRenderScale)]
         pub fn set_render_scale(&mut self, scale: f64) -> Result<(), JsValue> {
             let size = self.with_state(|_, st| {
+                if crate::api::m32_render_graph::web::graph_state(st)?
+                    .explicit_scene_size
+                    .is_some()
+                {
+                    return if scale == 1.0 {
+                        Ok(None)
+                    } else {
+                        Err(api_error(
+                            "graph.scale_conflict",
+                            "clear the explicit scene extent before setting render scale",
+                        ))
+                    };
+                }
                 let v = views(st)?;
                 let previous = v.render_scale();
                 v.set_render_scale(scale)?;

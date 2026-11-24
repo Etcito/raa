@@ -306,6 +306,12 @@ export interface RenderGraphCatalog {
   frozen: string[];
 }
 
+/** Metadata of the graph and extent last accepted by the engine. */
+export interface RenderGraphSelectionState {
+  frozen: string | null;
+  sceneSize: [width: number, height: number] | null;
+}
+
 /**
  * The render-graph part of the Engine (S54). Every method throws `api.disposed` on a disposed
  * Engine. `setRenderGraph` never throws for an invalid graph: it returns `ok: false` with the
@@ -323,6 +329,21 @@ export interface Engine {
    * `api.disposed` after dispose.
    */
   setRenderGraph(graph: RenderGraphDoc | string | null): RenderGraphResult;
+  /** Validates an FP32 area-pilot package and registers it under a unique per-engine name. */
+  registerAreaRenderModel(name: string, manifest: string, weights: Uint8Array): void;
+  /**
+   * Selects an editable graph, a frozen graph (pass null as graph), or the engine default.
+   * Optional scene dimensions must be supplied together. A refused selection keeps the
+   * previous graph and extent. Package selection requires a graph consumer for that ABI.
+   */
+  setRenderGraphSelection(
+    graph: RenderGraphDoc | string | null,
+    frozen?: string,
+    sceneWidth?: number,
+    sceneHeight?: number,
+    areaModel?: string,
+  ): RenderGraphResult;
+  renderGraphSelection(): RenderGraphSelectionState;
   /**
    * The active document, canonical (S50), with its parameters as given. With no graph, the
    * export of today's configuration: one node per enabled pass and contributor in execution

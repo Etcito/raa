@@ -104,9 +104,9 @@ pub(crate) use web::{frame, install};
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web {
     use super::*;
-    use crate::api::m32_render_graph::RenderGraphState;
-    use crate::api::m32_render_graph::result_to_json;
-    use crate::api::m32_render_graph::web::{json_to_js, with_handles};
+    use crate::api::m32_render_graph::web::{
+        check_pipeline_available, finish_selection, with_handles,
+    };
     use crate::convert::{INVALID_ARGUMENT, api_error};
     use crate::engine::{Engine, InstallCtx};
     use crate::state::EngineState;
@@ -133,12 +133,12 @@ pub(crate) mod web {
 
     /// Selects and applies `name`; a refused selection leaves the previous graph and the executor's
     /// last issues unchanged until the returned `RenderGraphResult` replaces `last_set_issues`.
-    fn apply_frozen(
+    pub(crate) fn apply_frozen(
         name: &str,
         gpu: &GpuContext,
         st: &mut EngineState,
-    ) -> Result<JsValue, RaaError> {
-        let result = with_handles(
+    ) -> Result<SetResult, RaaError> {
+        with_handles(
             st,
             gpu,
             |executor, catalog, handles, _| match select_frozen(name, catalog) {
@@ -149,12 +149,7 @@ pub(crate) mod web {
                 },
                 Ok(selection) => executor.set_plan(selection.plan, Some(selection.doc), handles),
             },
-        )?;
-        let json = result_to_json(&result);
-        st.features
-            .require_mut::<RenderGraphState>("render graph")?
-            .last_set_issues = result.issues;
-        Ok(json_to_js(&json))
+        )
     }
 
     #[wasm_bindgen(js_class = Engine)]
@@ -172,7 +167,9 @@ pub(crate) mod web {
                         "setFrozenRenderGraph takes a frozen pipeline name",
                     )
                 })?;
-                apply_frozen(&name, gpu, st)
+                check_pipeline_available(st)?;
+                let result = apply_frozen(&name, gpu, st)?;
+                finish_selection(st, result, None, Some(name))
             })
         }
     }

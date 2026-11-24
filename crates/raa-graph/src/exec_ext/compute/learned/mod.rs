@@ -39,8 +39,13 @@ impl AreaPilotPackage {
         fetch: impl Future<Output = Result<(String, Vec<u8>), RaaError>>,
     ) -> Result<Self, RaaError> {
         let (manifest, weights) = fetch.await?;
+        Self::validate(&manifest, weights)
+    }
+
+    /// Validate bytes already loaded by a host without allocating GPU resources.
+    pub fn validate(manifest: &str, weights: Vec<u8>) -> Result<Self, RaaError> {
         let mut actual: Value =
-            serde_json::from_str(&manifest).map_err(|e| refuse(&e.to_string()))?;
+            serde_json::from_str(manifest).map_err(|e| refuse(&e.to_string()))?;
         let baseline: Value = serde_json::from_str(MANIFEST).expect("embedded ABI manifest");
         let golden = include_bytes!("golden.json");
         if weights.len() != WEIGHTS.len() || actual["weightsSha256"] != hash(&weights) {
