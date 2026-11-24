@@ -69,6 +69,28 @@ def oracle(raw, ref):
                 emptySupportPixels=(~nonempty).sum().item())
 
 
+def renderer_layer(layer, x):
+    # The shader walks taps/channels from the bias with one FP32 FMA per term.
+    # Accumulate in FP64 momentarily, then round to FP32 at each fused operation.
+    def fma(a, b, c):
+        return (a.double() + b.double() * c.double()).float()
+
+    weight = layer.weight
+    result = layer.bias.view(1, -1, 1, 1)
+    if layer.kernel_size == (1, 1):
+        for channel in range(weight.shape[1]):
+            result = fma(result, weight[:, channel, 0, 0].view(1, -1, 1, 1),
+                         x[:, channel:channel + 1])
+    else:
+        height, width = x.shape[-2:]
+        x = F.pad(x, (1, 1, 1, 1), mode="replicate")
+        for y in range(3):
+            for col in range(3):
+                result = fma(result, weight[:, 0, y, col].view(1, -1, 1, 1),
+                             x[:, :, y:y + height, col:col + width])
+    return result
+
+
 class Pilot(nn.Module):
     def __init__(self, manifest, blob):
         super().__init__()
@@ -92,8 +114,9 @@ class Pilot(nn.Module):
         previous = torch.where(valid, raw[:, 2:4], 0.0)
         x = torch.cat((raw[:, :2], previous, raw[:, 4:]), dim=1) * self.scales
         for layer in self.layers[:-1]:
-            x = layer(x).relu()
-        logits = self.layers[-1](x)
+            x = (layer(x) if training_visibility else renderer_layer(layer, x)).relu()
+        head = self.layers[-1]
+        logits = head(x) if training_visibility else renderer_layer(head, x)
         visibility = stable_visibility(logits, gather_pairs(raw, previous))
         if training_visibility:
             return visibility

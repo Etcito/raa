@@ -38,6 +38,14 @@ class AreaPilotTrainingTest(unittest.TestCase):
         torch.testing.assert_close(pilot.stable_visibility(logits, pairs),
                                    mixed[:, 0] / mixed[:, 1], atol=1e-6, rtol=1e-6)
 
+    def test_renderer_layer_rounds_once_per_fused_operation(self):
+        layer = torch.nn.Conv2d(1, 1, 1)
+        with torch.no_grad():
+            layer.weight.fill_(1 + 2 ** -23)
+            layer.bias.fill_(-1)
+            value = pilot.renderer_layer(layer, torch.tensor([[[[1 - 2 ** -23]]]]))
+        self.assertEqual(value.item(), -(2 ** -46))
+
     def test_oracle_excludes_rejected_history(self):
         raw = torch.zeros(1, 12, 1, 1)
         raw[:, 1] = 1.0

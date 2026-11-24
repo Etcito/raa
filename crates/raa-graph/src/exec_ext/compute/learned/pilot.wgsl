@@ -23,7 +23,7 @@ fn tap(p: vec2<u32>, k: u32) -> u32 {
 fn dense(pixel: u32, channel: u32, weight: u32, bias: u32) -> f32 {
     var sum = weights[bias + channel];
     for (var i = 0u; i < 16u; i++) {
-        sum += weights[weight + channel * 16u + i] * input[pixel * 16u + i];
+        sum = fma(weights[weight + channel * 16u + i], input[pixel * 16u + i], sum);
     }
     return sum;
 }
@@ -36,7 +36,7 @@ fn depthwise(p: vec2<u32>, weight: u32, bias: u32) {
     for (var c = 0u; c < 16u; c++) {
         var sum = weights[bias + c];
         for (var k = 0u; k < 9u; k++) {
-            sum += weights[weight + c * 9u + k] * input[neighbors[k] + c];
+            sum = fma(weights[weight + c * 9u + k], input[neighbors[k] + c], sum);
         }
         output[pixel + c] = max(0.0, sum);
     }
@@ -64,7 +64,7 @@ fn stem(@builtin(global_invocation_id) id: vec3<u32>) {
     for (var c = 0u; c < 16u; c++) {
         var sum = weights[192u + c];
         for (var i = 0u; i < 12u; i++) {
-            sum += weights[c * 12u + i] * lanes[i];
+            sum = fma(weights[c * 12u + i], lanes[i], sum);
         }
         output[pixel * 16u + c] = max(0.0, sum);
     }
