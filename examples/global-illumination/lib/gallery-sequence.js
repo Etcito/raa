@@ -301,7 +301,7 @@ export async function captureGallerySequence({ target, canvas, raa }, { buildId,
 
 export async function verifyGalleryReflection({ target, canvas, raa }, { buildId } = {}) {
   if (!/Windows.+Chrome\//.test(target.navigator.userAgent) || !buildId) throw new Error('Windows Chrome build required');
-  const student = await create(target, raa, canvas, sceneSize, false, false, { ...await reflectionGraph() });
+  const student = await create(target, raa, canvas, sceneSize, false, false, await reflectionGraph());
   const { engine, facts } = student;
   try {
     const model = await loadGalleryNeural(engine);
@@ -311,13 +311,26 @@ export async function verifyGalleryReflection({ target, canvas, raa }, { buildId
     engine.setCameraJitter(false);
     const [w, h] = sceneSize;
     const cases = [];
-    for (const selected of [false, true, false]) {
+    for (const [index, selected] of [false, true, false].entries()) {
       const graph = structuredClone(model.graph);
       if (selected) graph.nodes.find(node => node.type === 'neural.reflection-reconstruction').params = { model: model.id };
       const result = engine.setRenderGraphSelection(graph);
       if (!result.ok) throw new Error(`Reflection A/B graph: ${JSON.stringify(result.issues)}`);
-      const timing = engine.renderInstrumented(frame.timeMs);
-      await engine.submittedWorkDone();
+      const samples = new Map();
+      let timing;
+      for (let i = 0; i < 48 && samples.size < 8; i++) {
+        timing = engine.renderInstrumented(frame.timeMs, { viewId: 'primary', trialId: 'reflection-model',
+          presentId: `reflection-${index}-${i}`, inputCutoffMs: target.performance.now() });
+        if (timing.error || !Number.isInteger(timing.frameIndex)) throw new Error(`Reflection frame failed: ${JSON.stringify(timing.error)}`);
+        await engine.submittedWorkDone();
+        const gpu = engine.passGpuTimings();
+        if (gpu.status === 'unavailable') throw new Error(`Reflection GPU timestamps unavailable: ${gpu.reason}`);
+        if (i >= 6 && gpu.frame > timing.frameIndex - 5) {
+          const ms = gpu.passes?.find(pass => pass.pass === 'ssr.replace#replace')?.ms;
+          if (Number.isFinite(ms)) samples.set(gpu.frame, ms);
+        }
+      }
+      if (samples.size < 8) throw new Error('Insufficient warmed reflection GPU samples');
       const taps = await engine.captureTrainingTaps(timing.frameIndex);
       const raw = floats(taps.reflectionIncident, w * h * 4, false);
       const resolved = floats(taps.reflectionReconstruction, w * h * 4, false);
@@ -340,7 +353,8 @@ export async function verifyGalleryReflection({ target, canvas, raa }, { buildId
           && (selected ? changed > 0 && stats?.ran.reflection && stats.dispatches > 0
             && stats.weightsSha256 === model.manifest.weightsSha256 && stats.realFrame === timing.frameIndex
             : changed === 0 && stats === null))) throw new Error(`Reflection A/B proof failed: ${JSON.stringify({ selected, eligible, changed, masked, alphaIdentical, stats, timing })}`);
-      cases.push({ selected, eligible, changed, masked, alphaIdentical, maxDelta, frameId: timing.frameIndex, stats });
+      cases.push({ selected, eligible, changed, masked, alphaIdentical, maxDelta, frameId: timing.frameIndex, stats,
+        gpuTimings: [...samples].map(([frame, ms]) => ({ frame, pass: 'ssr.replace#replace', ms })) });
     }
     return { json: { source: { buildId, facts }, size: sceneSize, pose: frame.camera, timeMs: frame.timeMs,
       eligible: 'typed screen class 1, hitMeta.valid 1 and positive incident confidence', cases }, files: [] };
